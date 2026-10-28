@@ -31,6 +31,11 @@ test-support = []
 
 [dev-dependencies]
 proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+[[test]]
+name = "job_ledger"
+path = "tests/job_ledger.rs"
+
 [[test]]
 name = "id"
 path = "tests/id.rs"
@@ -86,6 +91,10 @@ path = "tests/adversarial.rs"
 [[test]]
 name = "resolution_cause"
 path = "tests/resolution_cause.rs"
+
+[[test]]
+name = "mail_delivery_trust"
+path = "tests/mail_delivery_trust.rs"
 
 [[bin]]
 name = "append-child"

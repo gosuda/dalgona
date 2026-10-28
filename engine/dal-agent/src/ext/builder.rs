@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use dal_core::ext::{BeforeRequest, BeforeTurn, ExportId, ExportKind, OpId, RuleFile, TurnEnd};
 use dal_core::{
-    Claimant, CommandSpec, InputEvent, InputVerdict, Name, Origin, RegistrationError,
-    RequestParams, RuleRecord, ServiceSet, SessionEnd, SessionStart, Settled, Site, SkillRecord,
-    ToolCallEvent, ToolCallVerdict, ToolResultEvent, Visibility, valid_version,
+    Claimant, CommandSpec, InputEvent, InputVerdict, Name, Origin, RegistrationError, ReplaceClaim,
+    ReplaceKind, RequestParams, RuleRecord, ServiceSet, SessionEnd, SessionStart, Settled, Site,
+    SkillRecord, ToolCallEvent, ToolCallVerdict, ToolResultEvent, Visibility, valid_version,
 };
 
 use super::docs::{self, DocRecord};
@@ -78,6 +78,10 @@ pub struct ExtensionBuilder {
     commands: Vec<(CommandSpec, Arc<dyn CommandHandler>)>,
     skills: Vec<SkillRecord>,
     rules: Vec<RuleRecord>,
+    /// Explicit per-record replacement claims, in registration order. Only
+    /// a user-origin extension may carry them; the settlement refuses every
+    /// other claimer.
+    replace_claims: Vec<ReplaceClaim>,
     session_setups: Vec<Arc<dyn super::SessionSetup>>,
     rule_files: Vec<RuleFile>,
     prompt_sections: Vec<PromptSection>,
@@ -136,6 +140,7 @@ impl ExtensionBuilder {
             commands: Vec::new(),
             skills: Vec::new(),
             rules: Vec::new(),
+            replace_claims: Vec::new(),
             prompt_sections: Vec::new(),
             session_setups: Vec::new(),
             rule_files: Vec::new(),
@@ -247,9 +252,43 @@ impl ExtensionBuilder {
         self.skills.push(skill);
         self
     }
+    /// Registers one skill record that explicitly replaces the record of
+    /// the same name registered by the bundled extension `owner`.
+    ///
+    /// The owner is validated by the settlement, never implied: a claim on
+    /// a record the named bundled extension does not register, on a
+    /// built-in or user owner, from a non-user extension, or on a record
+    /// another plugin already replaced refuses the whole load.
+    #[must_use]
+    pub fn skill_replacing(mut self, skill: SkillRecord, owner: Name) -> Self {
+        self.replace_claims.push(ReplaceClaim {
+            kind: ReplaceKind::Skill,
+            record: skill.name.clone(),
+            owner,
+        });
+        self.skills.push(skill);
+        self
+    }
     /// Registers one rule record.
     #[must_use]
     pub fn rule(mut self, rule: RuleRecord) -> Self {
+        self.rules.push(rule);
+        self
+    }
+    /// Registers one rule record that explicitly replaces the record of the
+    /// same name registered by the bundled extension `owner`.
+    ///
+    /// The replacement moves the one rule record and nothing else: the
+    /// replacing extension keeps its own plain user identity and inherits no
+    /// service request, tool, prompt section, status kind, or grant from the
+    /// owner.
+    #[must_use]
+    pub fn rule_replacing(mut self, rule: RuleRecord, owner: Name) -> Self {
+        self.replace_claims.push(ReplaceClaim {
+            kind: ReplaceKind::Rule,
+            record: rule.name.clone(),
+            owner,
+        });
         self.rules.push(rule);
         self
     }
@@ -502,6 +541,7 @@ impl ExtensionBuilder {
             commands: self.commands,
             skills: self.skills,
             rules: self.rules,
+            replace_claims: self.replace_claims.into_boxed_slice(),
             session_setup: self.session_setups.into_iter().next(),
             rule_files: self.rule_files,
             prompt_sections: self.prompt_sections,
@@ -650,6 +690,7 @@ pub struct Extension {
     pub(super) commands: Vec<(CommandSpec, Arc<dyn CommandHandler>)>,
     pub(super) skills: Vec<SkillRecord>,
     pub(super) rules: Vec<RuleRecord>,
+    pub(super) replace_claims: Box<[ReplaceClaim]>,
     pub(super) session_setup: Option<Arc<dyn super::SessionSetup>>,
     pub(super) rule_files: Vec<RuleFile>,
     pub(super) prompt_sections: Vec<PromptSection>,
@@ -736,6 +777,12 @@ impl Extension {
     #[must_use]
     pub fn rules(&self) -> &[RuleRecord] {
         &self.rules
+    }
+    /// Borrows the explicit per-record replacement claims this extension
+    /// declared, in registration order.
+    #[must_use]
+    pub fn replace_claims(&self) -> &[ReplaceClaim] {
+        &self.replace_claims
     }
     /// Borrows the extension's fallible session setup, when registered.
     #[must_use]

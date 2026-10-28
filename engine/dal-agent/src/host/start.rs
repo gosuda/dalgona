@@ -68,12 +68,7 @@ impl Host {
         let login_site = dal_provider::LoginSite::new(
             product.data_root.join("auth.json"),
             product.data_root.join("cache"),
-            dal_provider::user_agent(
-                env!("CARGO_PKG_VERSION"),
-                std::env::consts::OS,
-                "",
-                std::env::consts::ARCH,
-            ),
+            &provider_identity(),
             &snapshot,
         )
         .map_err(HostError::Provider)?;
@@ -82,12 +77,19 @@ impl Host {
         // The set exists before attach so the site clones the same grant cache
         // handle; there is exactly one allocation.
         let login_site = login_site.with_provider_set(&providers);
+        // The census workers the snapshot coordinator spawns are tracked
+        // by this owner and drained by host shutdown.
+        let snapshot_tasks = crate::session::tasks::SessionTasks::new();
         let shared = Arc::new(HostShared {
             config: std::sync::RwLock::new(config),
             env: Arc::new(env),
             product_name: product.name,
             data_root: product.data_root,
             admission: Admission::new(Limits::default(), fd_soft_limit()),
+            snapshots: crate::proc::SnapshotCoordinator::host(
+                Limits::default().processes,
+                snapshot_tasks,
+            ),
             interpreters: Arc::new(crate::admission::Interpreters::new()),
             providers,
             commands,
@@ -215,6 +217,19 @@ mod tests {
     }
 }
 
+/// The host platform the provider crate renders its `User-Agent` and its
+/// Cloud Code Assist project discovery from. The process edge captures it
+/// here, once per use site, so the library never reads the platform itself;
+/// the provider set and the login site therefore see the same values.
+fn provider_identity() -> ProviderIdentity {
+    ProviderIdentity {
+        version: env!("CARGO_PKG_VERSION").into(),
+        os: std::env::consts::OS.into(),
+        os_version: String::new().into(),
+        arch: std::env::consts::ARCH.into(),
+    }
+}
+
 /// Builds the provider set from the typed provider configuration.
 ///
 /// `snapshot` is the host's captured environment, built once in
@@ -229,15 +244,9 @@ fn provider_set(
         ProviderConfig::from_config(config).map_err(|error| HostError::Config {
             message: error.to_string().into(),
         })?;
-    let identity = ProviderIdentity {
-        version: env!("CARGO_PKG_VERSION").into(),
-        os: std::env::consts::OS.into(),
-        os_version: String::new().into(),
-        arch: std::env::consts::ARCH.into(),
-    };
     ProviderSet::new(
         &provider_config,
-        identity,
+        provider_identity(),
         snapshot,
         data_root,
         &data_root.join("cache"),

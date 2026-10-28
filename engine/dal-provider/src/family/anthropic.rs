@@ -44,6 +44,7 @@ use sonic_rs::{JsonValueTrait, LazyValue};
 use crate::{
     claude_fingerprint,
     error::ProviderError,
+    family::schema::{self, ToolSchemas},
     sse::SseEvent,
     stream::{ReplayPayload, StopReason, StreamEvent, ToolArgs, ToolCall},
     stream_budget::StreamBudget,
@@ -61,7 +62,9 @@ pub(crate) const MESSAGES_PATH: &str = "v1/messages";
 /// The `anthropic-version` header value.
 pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// The `max_tokens` ceiling, and the value when `max_output` is unknown.
+/// The default `max_tokens` ceiling of a request that asks for no cap, and the
+/// value when `max_output` is unknown as well. An explicit cap is held only to
+/// the catalog ceiling.
 pub(crate) const MAX_TOKENS_CAP: u32 = 32_000;
 
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
@@ -77,6 +80,27 @@ pub(crate) enum AnthropicAuth<'a> {
     /// A named provider with `auth = "bearer"`:
     /// `authorization: Bearer <key>`.
     Bearer(&'a str),
+    /// An OAuth sign-in of a provider that is not Claude and speaks the
+    /// Anthropic wire (Kimi Code): `authorization: Bearer <access_token>`,
+    /// the vendor's own `User-Agent`, and the vendor's client-identity
+    /// headers, verbatim. It carries none of Claude's fingerprint: no Claude
+    /// Code beta, no Claude Code system identity, no `x-app`, no tool-name
+    /// prefix ([`AnthropicAuth::is_oauth`] is false for it).
+    ClientBearer {
+        /// The current access token.
+        access_token: &'a str,
+        /// The `User-Agent` the vendor's client sends.
+        user_agent: &'a str,
+        /// The vendor's client-identity headers.
+        headers: &'a [(&'static str, String)],
+    },
+    /// A Cloudflare AI Gateway key on the Anthropic wire:
+    /// `cf-aig-authorization: Bearer <key>`, never `authorization` or
+    /// `x-api-key` — the gateway rejects both for its own routes.
+    GatewayKey {
+        /// The gateway key.
+        key: &'a str,
+    },
     /// A Claude OAuth sign-in: `authorization: Bearer <access_token>` plus
     /// the Claude Code fingerprint.
     ClaudeOAuth {
@@ -99,6 +123,12 @@ impl fmt::Debug for AnthropicAuth<'_> {
         match self {
             Self::ApiKey(_) => f.write_str("ApiKey(<redacted>)"),
             Self::Bearer(_) => f.write_str("Bearer(<redacted>)"),
+            Self::GatewayKey { .. } => f.write_str("GatewayKey(<redacted>)"),
+            Self::ClientBearer { user_agent, .. } => f
+                .debug_struct("ClientBearer")
+                .field("access_token", &"<redacted>")
+                .field("user_agent", user_agent)
+                .finish_non_exhaustive(),
             Self::ClaudeOAuth { version, .. } => f
                 .debug_struct("ClaudeOAuth")
                 .field("access_token", &"<redacted>")
@@ -112,7 +142,9 @@ impl fmt::Debug for AnthropicAuth<'_> {
 ///
 /// `thinking`, `effort`, and `temperature` come from
 /// [`crate::thinking::plan`] with [`crate::thinking::RequestLimits::max_tokens`]
-/// set to [`base_max_tokens`]; the temperature is already dropped there
+/// set to [`base_max_tokens`] and [`crate::thinking::RequestLimits::max_output`]
+/// set to [`output_ceiling`], both fed the request's
+/// `params.max_output_tokens`; the temperature is already dropped there
 /// unless the model allows it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AnthropicRequest<'a> {
@@ -177,7 +209,10 @@ impl fmt::Debug for AnthropicWire {
             .headers
             .iter()
             .map(|(name, value)| {
-                let secret = matches!(*name, "x-api-key" | "authorization");
+                let secret = matches!(
+                    *name,
+                    "x-api-key" | "authorization" | "cf-aig-authorization"
+                );
                 (*name, if secret { "<redacted>" } else { value.as_str() })
             })
             .collect();
@@ -191,11 +226,28 @@ impl fmt::Debug for AnthropicWire {
     }
 }
 
-/// The body's `max_tokens` without thinking: `min(max_output, 32000)`, or
-/// 32000 when `max_output` is unknown.
+/// The most `max_tokens` a request may carry: the caller's requested cap held
+/// to the catalog ceiling, the catalog ceiling alone, the requested cap alone
+/// when the catalog is silent, and [`MAX_TOKENS_CAP`] when neither is known.
 #[must_use]
-pub(crate) fn base_max_tokens(max_output: Option<u32>) -> u32 {
-    max_output.map_or(MAX_TOKENS_CAP, |cap| cap.min(MAX_TOKENS_CAP))
+pub(crate) fn output_ceiling(max_output: Option<u32>, requested: Option<u32>) -> u32 {
+    match (requested, max_output) {
+        (Some(ask), Some(cap)) => ask.min(cap),
+        (Some(ask), None) => ask,
+        (None, Some(cap)) => cap,
+        (None, None) => MAX_TOKENS_CAP,
+    }
+}
+
+/// The body's `max_tokens` without thinking: the requested cap held to the
+/// catalog ceiling, or, when the caller asked for none, `min(max_output,
+/// 32000)` (32000 when `max_output` is unknown).
+#[must_use]
+pub(crate) fn base_max_tokens(max_output: Option<u32>, requested: Option<u32>) -> u32 {
+    match requested {
+        Some(_) => output_ceiling(max_output, requested),
+        None => output_ceiling(max_output, None).min(MAX_TOKENS_CAP),
+    }
 }
 
 /// Lowers one request to its headers and body.
@@ -208,6 +260,28 @@ pub(crate) fn base_max_tokens(max_output: Option<u32>) -> u32 {
 pub(crate) fn build(
     input: &AnthropicRequest<'_>,
     auth: AnthropicAuth<'_>,
+) -> Result<AnthropicWire, ProviderError> {
+    build_with_tool_schemas(input, auth, ToolSchemas::Verbatim)
+}
+
+/// Lowers one request to its headers and body, spelling tool schemas with
+/// the flavor `schemas`.
+///
+/// `Verbatim` sends every `parameters` text byte for byte; any other flavor
+/// lowers through the shared [`schema`] subset, so one wire (B.AI's
+/// Anthropic wire) can repair union-root schemas while every other
+/// Anthropic wire keeps the verbatim bytes.
+///
+/// # Errors
+///
+/// [`ProviderError::InvalidRequest`] when a content part is still a stored
+/// blob (the caller inlines blobs before lowering), when a tool schema the
+/// flavor cannot lower names its tool and limit, or the body cannot be
+/// serialized.
+pub(crate) fn build_with_tool_schemas(
+    input: &AnthropicRequest<'_>,
+    auth: AnthropicAuth<'_>,
+    schemas: ToolSchemas,
 ) -> Result<AnthropicWire, ProviderError> {
     let oauth = auth.is_oauth();
     let request = input.request;
@@ -237,6 +311,18 @@ pub(crate) fn build(
     match auth {
         AnthropicAuth::ApiKey(key) => headers.push(("x-api-key", key.to_owned())),
         AnthropicAuth::Bearer(key) => headers.push(("authorization", format!("Bearer {key}"))),
+        AnthropicAuth::GatewayKey { key } => {
+            headers.push(("cf-aig-authorization", format!("Bearer {key}")));
+        }
+        AnthropicAuth::ClientBearer {
+            access_token,
+            user_agent: client_agent,
+            headers: client_headers,
+        } => {
+            headers.push(("authorization", format!("Bearer {access_token}")));
+            headers.extend(client_headers.iter().cloned());
+            user_agent = Some(client_agent.to_owned());
+        }
         AnthropicAuth::ClaudeOAuth {
             access_token,
             version,
@@ -253,14 +339,14 @@ pub(crate) fn build(
     }
 
     let system = system_blocks(&request.system, oauth);
-    let tools = tools(request, oauth);
+    let tools = tools(request, oauth, schemas)?;
     let prefix = prefix_fingerprint(&system, &tools);
     let trust = Replay::new(&prefix, &tools);
     let body = Body {
         model,
         max_tokens: match input.thinking {
             AnthropicThinking::Enabled { max_tokens, .. } => max_tokens,
-            _ => base_max_tokens(input.max_output),
+            _ => base_max_tokens(input.max_output, request.params.max_output_tokens),
         },
         stream: !input.summarize,
         system,
@@ -368,7 +454,7 @@ struct SystemBlock<'a> {
 struct Tool<'a> {
     name: Cow<'a, str>,
     description: &'a str,
-    input_schema: &'a RawJson,
+    input_schema: Cow<'a, RawJson>,
     #[serde(skip_serializing_if = "is_false")]
     defer_loading: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -504,13 +590,17 @@ fn system_blocks(system: &str, oauth: bool) -> Vec<SystemBlock<'_>> {
 /// the cache breakpoint sits on the last of them; when any tool is deferred
 /// the native search server tool follows them, then the deferred tools, which
 /// never carry a breakpoint (the API rejects `defer_loading` with one).
-fn tools(request: &ModelRequest, oauth: bool) -> Vec<WireTool<'_>> {
+fn tools(
+    request: &ModelRequest,
+    oauth: bool,
+    schemas: ToolSchemas,
+) -> Result<Vec<WireTool<'_>>, ProviderError> {
     let (deferred, resident): (Vec<&ModelToolSpec>, Vec<&ModelToolSpec>) =
         request.tools.iter().partition(|tool| tool.defer_loading);
     let mut tools: Vec<WireTool<'_>> = resident
         .into_iter()
-        .map(|tool| WireTool::Client(client_tool(tool, oauth)))
-        .collect();
+        .map(|tool| client_tool(tool, oauth, schemas).map(WireTool::Client))
+        .collect::<Result<Vec<_>, _>>()?;
     if let Some(WireTool::Client(last)) = tools.last_mut() {
         last.cache_control = Some(CacheControl::Ephemeral);
     }
@@ -519,20 +609,30 @@ fn tools(request: &ModelRequest, oauth: bool) -> Vec<WireTool<'_>> {
         tools.extend(
             deferred
                 .into_iter()
-                .map(|tool| WireTool::Client(client_tool(tool, oauth))),
+                .map(|tool| client_tool(tool, oauth, schemas).map(WireTool::Client))
+                .collect::<Result<Vec<_>, _>>()?,
         );
     }
-    tools
+    Ok(tools)
 }
 
-fn client_tool(tool: &ModelToolSpec, oauth: bool) -> Tool<'_> {
-    Tool {
+fn client_tool(
+    tool: &ModelToolSpec,
+    oauth: bool,
+    schemas: ToolSchemas,
+) -> Result<Tool<'_>, ProviderError> {
+    let input_schema = schema::lower(&tool.name, &tool.parameters, schemas).map_err(|error| {
+        ProviderError::InvalidRequest {
+            message: error.to_string(),
+        }
+    })?;
+    Ok(Tool {
         name: wire_tool_name(&tool.name, oauth),
         description: &tool.description,
-        input_schema: &tool.parameters,
+        input_schema,
         defer_loading: tool.defer_loading,
         cache_control: None,
-    }
+    })
 }
 
 fn wire_tool_name(name: &str, oauth: bool) -> Cow<'_, str> {

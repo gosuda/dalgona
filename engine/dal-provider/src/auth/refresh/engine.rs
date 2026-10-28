@@ -46,6 +46,9 @@ use crate::{
             AuthStore, Credential, EnvSnapshot, OAuthCredential, SecretString, codex_identity,
             oauth_expires_at, oauth_issued_at,
         },
+        device::xai_expires_at,
+        kimi::{ClientIdentity, ClientIdentitySource},
+        meta,
         oauth::{truncate_message, unix_now},
     },
     error::ProviderError,
@@ -81,6 +84,11 @@ pub struct Refresher {
     /// shares its cache. A committed GitLab Duo refresh drops the old and
     /// new tokens' grants through it; no other hook touches it.
     gitlab_grants: Option<Arc<DirectAccessCache>>,
+    /// The source of the Kimi client identity the Kimi Code refresh carries.
+    /// Set once by [`Refresher::with_client_identity`]; `None` until the
+    /// provider set shares its source, and a Kimi Code refresh without one is
+    /// refused before any request: it never goes out unnamed.
+    client_identity: Option<Arc<ClientIdentitySource>>,
 }
 
 impl std::fmt::Debug for Refresher {
@@ -117,16 +125,17 @@ impl RefreshSlot {
 
 /// The client id a sign-in of `oauth` uses under `env`: the row's override
 /// variable when the snapshot holds a nonblank value (trimmed), else the
-/// row's own id. The login side resolves the identical value, so a token
-/// issued to a configured application is refreshed as that application.
-pub(crate) fn effective_client_id(oauth: &OAuthSpec, env: &EnvSnapshot) -> Box<str> {
+/// row's own id; `None` for a row whose vendor registers no client. The
+/// login side resolves the identical value, so a token issued to a
+/// configured application is refreshed as that application.
+pub(crate) fn effective_client_id(oauth: &OAuthSpec, env: &EnvSnapshot) -> Option<Box<str>> {
     oauth
         .client_id_env
         .and_then(|name| env.get(name))
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(oauth.client_id)
-        .into()
+        .or(oauth.client_id)
+        .map(Into::into)
 }
 
 /// An owned advisory lock on `auth.json.lock`.
@@ -165,37 +174,86 @@ impl Drop for LockFile {
     }
 }
 
-/// How a refresh request body is encoded on the wire.
+/// How a refresh request is sent: a JSON or form grant at the token
+/// endpoint, or Meta's key mint, which sends no grant at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BodyEncoding {
     Json,
     Form,
+    /// The Muse Code key mint: the identity token is the bearer, the body is
+    /// an empty JSON object, and the answer is a new API key rather than a
+    /// token response. There is no `grant_type` and no client id.
+    Mint,
 }
 
 impl BodyEncoding {
-    /// The encoding the hook's token endpoint takes. No wildcard: a new hook
-    /// must choose.
-    fn of(hook: Hook) -> Self {
+    /// The encoding the hook's token endpoint takes for a refresh; `None` for
+    /// a hook that never refreshes (a durable API key, or a Devin token with
+    /// no refresh grant). No wildcard: a new hook must choose.
+    fn of(hook: Hook) -> Option<Self> {
         match hook {
-            Hook::ClaudeCode | Hook::CodexAccount => Self::Json,
-            Hook::WorkOsDevice | Hook::GitLabDuo => Self::Form,
+            Hook::ClaudeCode | Hook::CodexAccount | Hook::CursorPoll => Some(Self::Json),
+            Hook::WorkOsDevice
+            | Hook::GitLabDuo
+            | Hook::RadiusGateway
+            | Hook::GoogleCloudCodeAssist
+            | Hook::GoogleAntigravity
+            | Hook::XaiDevice
+            | Hook::KimiCodeDevice => Some(Self::Form),
+            Hook::MetaMuse => Some(Self::Mint),
+            Hook::OpenRouterKey | Hook::DevinCliToken => None,
         }
     }
 
-    fn body(self, client_id: &str, refresh_token: &str) -> Result<Vec<u8>, sonic_rs::Error> {
+    /// The refresh body. A form body carries the row's client secret, when it
+    /// registers one, between the client id and the refresh token, as the
+    /// reference's declarative refresh orders it; no row with a JSON refresh
+    /// registers a secret.
+    fn body(self, client: ClientAuth<'_>, refresh_token: &str) -> Result<Vec<u8>, sonic_rs::Error> {
         match self {
+            // The mint request builds its own body.
+            Self::Mint => Ok(Vec::new()),
             Self::Json => sonic_rs::to_vec(&RefreshBody {
                 grant_type: "refresh_token",
-                client_id,
+                client_id: client.id,
                 refresh_token,
             }),
-            Self::Form => Ok(url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("grant_type", "refresh_token")
-                .append_pair("client_id", client_id)
-                .append_pair("refresh_token", refresh_token)
-                .finish()
-                .into_bytes()),
+            Self::Form => {
+                let mut form = url::form_urlencoded::Serializer::new(String::new());
+                form.append_pair("grant_type", "refresh_token")
+                    .append_pair("client_id", client.id);
+                if let Some(secret) = client.secret {
+                    form.append_pair("client_secret", secret);
+                }
+                form.append_pair("refresh_token", refresh_token);
+                Ok(form.finish().into_bytes())
+            }
         }
+    }
+}
+
+/// The OAuth client a refresh authenticates as: the row's effective id and,
+/// for an installed-application client, its registered secret.
+#[derive(Clone, Copy)]
+struct ClientAuth<'a> {
+    id: &'a str,
+    secret: Option<&'a str>,
+}
+
+/// How a refresh request names itself: the host's `User-Agent`, or, for a
+/// sign-in that names the vendor's client (Kimi Code), the client's own
+/// `User-Agent` and identity headers in its place.
+#[derive(Clone, Copy)]
+struct Naming<'a> {
+    user_agent: &'a str,
+    identity: Option<&'a ClientIdentity>,
+}
+
+impl<'a> Naming<'a> {
+    /// The `User-Agent` the request sends.
+    fn agent(self) -> &'a str {
+        self.identity
+            .map_or(self.user_agent, ClientIdentity::user_agent)
     }
 }
 
@@ -318,10 +376,19 @@ impl Refresher {
             commit_gate: Arc::new(Mutex::new(())),
             session_base: None,
             gitlab_grants: None,
+            client_identity: None,
             slots: PROVIDERS
                 .iter()
                 .filter_map(|def| {
-                    let client_id = effective_client_id(def.oauth.as_ref()?, env);
+                    let oauth = def.oauth.as_ref()?;
+                    // A row that never refreshes (`OpenRouter`'s durable key,
+                    // Devin's token) has nothing to refresh, and a refreshing
+                    // row sends its client id; a row with neither gets no
+                    // slot.
+                    if !oauth.hook.refreshes() {
+                        return None;
+                    }
+                    let client_id = effective_client_id(oauth, env)?;
                     Some((def.id, RefreshSlot::new(client_id)))
                 })
                 .collect(),
@@ -345,6 +412,16 @@ impl Refresher {
     #[must_use]
     pub(crate) fn with_gitlab_grants(mut self, grants: Arc<DirectAccessCache>) -> Self {
         self.gitlab_grants = Some(grants);
+        self
+    }
+
+    /// Shares the provider set's Kimi client-identity source with this
+    /// refresher. The Kimi Code refresh names itself with the identity the
+    /// source derives (its `User-Agent` and `X-Msh-*` headers), the same one
+    /// every request of the set sends.
+    #[must_use]
+    pub(crate) fn with_client_identity(mut self, source: Arc<ClientIdentitySource>) -> Self {
+        self.client_identity = Some(source);
         self
     }
 
@@ -376,8 +453,19 @@ impl Refresher {
     /// refresh instead of receiving the old error. The HTTP exchange remains
     /// bounded by [`OAUTH_TIMEOUT`].
     ///
-    /// A `GitLab Duo` or Factory Droid refresh sends a form body; the others
-    /// send JSON. After the exchange a Droid refresh checks the fresh access
+    /// A `GitLab Duo`, Factory Droid, Radius, xAI, Kimi Code, or Cloud Code
+    /// Assist refresh sends a form body (the Cloud Code Assist one carries the
+    /// row's registered client secret and keeps the stored Google Cloud
+    /// project; the Kimi Code one names the Kimi client identity and fails
+    /// at once for a `401` or `403`); the others send JSON. A Meta refresh
+    /// is a new key mint with the stored identity token as the bearer, not a
+    /// grant: it stores the new key with the same identity token and a
+    /// 24-hour expiry only after the mint answered a key, and a refused mint
+    /// leaves `auth.json` as it was. A Cursor answer is read by the family's own decoder: a
+    /// `200` that names `shouldLogout` ends the sign-in with
+    /// [`ProviderError::SignInExpired`] and stores nothing. A row with no
+    /// refresh grant (Devin) gets [`ProviderError::SignInExpired`] without a
+    /// request. After the exchange a Droid refresh checks the fresh access
     /// token against the Factory session endpoint before it commits. That
     /// check is advisory: a failed answer is logged and the tokens are still
     /// committed. [`Refresher::shutdown`] cancels it under the commit gate,
@@ -417,14 +505,33 @@ impl Refresher {
         if reason == RefreshReason::Expiring && !held.expiring(unix_now()) {
             return Ok(Credential::OAuth(held.clone()));
         }
-        let (Some(oauth), Some(url), Some(slot)) = (
+        let (Some(oauth), Some(url), Some(slot), Some(encoding)) = (
             provider.oauth,
             self.endpoints.url(provider),
             self.slot(provider),
+            provider
+                .oauth
+                .and_then(|oauth| BodyEncoding::of(oauth.hook)),
         ) else {
             return Err(ProviderError::SignInExpired {
                 provider: provider.id.to_owned(),
             });
+        };
+        // A refresh that names the client carries the identity the provider
+        // set gave this refresher; without one it is refused before any
+        // request or lock, never sent unnamed.
+        let client_identity = if oauth.hook.sends_client_identity() {
+            let Some(source) = &self.client_identity else {
+                return Err(ProviderError::AuthWrite {
+                    reason: format!(
+                        "{} refresh needs the client identity; this refresher was given none",
+                        provider.id
+                    ),
+                });
+            };
+            Some(source.get().await?)
+        } else {
+            None
         };
         let key = slot.key.lock().await;
         let mut in_flight = slot.in_flight.lock().await;
@@ -485,7 +592,6 @@ impl Refresher {
         let url = url.clone();
         let id = provider.id;
         let client_id = slot.client_id.clone();
-        let encoding = BodyEncoding::of(oauth.hook);
         let session_check = (oauth.hook == Hook::WorkOsDevice).then(|| SessionCheck {
             family: provider.family,
             base: self
@@ -500,6 +606,7 @@ impl Refresher {
         let commit_gate = (oauth.hook == Hook::WorkOsDevice).then(|| Arc::clone(&self.commit_gate));
         let gitlab_grants = self.gitlab_grants.clone();
         let invalidate_gitlab = oauth.hook == Hook::GitLabDuo;
+        let client_secret = oauth.client_secret;
         #[expect(
             clippy::disallowed_methods,
             reason = "the refresh task is stored in the per-key slot and must persist a rotated token after caller cancellation"
@@ -510,10 +617,16 @@ impl Refresher {
             }
             let fresh = Self::exchange(
                 &client,
-                &user_agent,
+                Naming {
+                    user_agent: &user_agent,
+                    identity: client_identity.as_deref(),
+                },
                 &url,
                 provider,
-                &client_id,
+                ClientAuth {
+                    id: &client_id,
+                    secret: client_secret,
+                },
                 encoding,
                 &stored,
             )
@@ -620,16 +733,16 @@ impl Refresher {
     /// Sends the refresh request, retrying once after [`RETRY_DELAY`] on a
     /// transient failure.
     async fn exchange(
-        client: &reqwest::Client,
-        user_agent: &str,
+        http_client: &reqwest::Client,
+        naming: Naming<'_>,
         url: &Url,
         provider: &ProviderDef,
-        client_id: &str,
+        client_auth: ClientAuth<'_>,
         encoding: BodyEncoding,
         stored: &OAuthCredential,
     ) -> Result<OAuthCredential, ProviderError> {
         let body = encoding
-            .body(client_id, stored.refresh_token.expose())
+            .body(client_auth, stored.refresh_token.expose())
             .map_err(|_| ProviderError::Transport {
                 family: provider.family,
                 reason: String::from("could not encode the token refresh request"),
@@ -637,8 +750,8 @@ impl Refresher {
         let mut retried = false;
         loop {
             let attempt = Self::attempt(
-                client,
-                user_agent,
+                http_client,
+                naming,
                 url,
                 provider,
                 stored,
@@ -663,7 +776,7 @@ impl Refresher {
     /// One refresh request and the classification of its outcome.
     async fn attempt(
         client: &reqwest::Client,
-        user_agent: &str,
+        naming: Naming<'_>,
         url: &Url,
         provider: &ProviderDef,
         stored: &OAuthCredential,
@@ -671,25 +784,93 @@ impl Refresher {
         body: Vec<u8>,
     ) -> Result<OAuthCredential, Failure> {
         let family = provider.family;
-        let mut request = client.post(url.clone()).body(body);
-        if encoding == BodyEncoding::Form {
-            request = request.header(CONTENT_TYPE, "application/x-www-form-urlencoded");
+        let mut request = match encoding {
+            BodyEncoding::Mint => meta::request(client, url, stored.refresh_token.expose()),
+            BodyEncoding::Json => client.post(url.clone()).body(body),
+            BodyEncoding::Form => client
+                .post(url.clone())
+                .body(body)
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded"),
+        };
+        // A request that names the client sends the client's identity
+        // headers (and its `User-Agent`, through `naming`).
+        if let Some(identity) = naming.identity {
+            for (name, value) in identity.headers() {
+                request = request.header(*name, value.as_str());
+            }
         }
         let exchange = Exchange::Json {
             total: OAUTH_TIMEOUT,
         };
-        let response = send(family, request, user_agent, exchange, tokio::time::sleep)
-            .await
-            .map_err(Failure::from_http)?;
+        let response = send(
+            family,
+            request,
+            naming.agent(),
+            exchange,
+            tokio::time::sleep,
+        )
+        .await
+        .map_err(Failure::from_http)?;
         let status = response.status();
         let bytes = read_body(family, response)
             .await
             .map_err(Failure::from_http)?;
+        if encoding == BodyEncoding::Mint {
+            return minted(provider, status.as_u16(), &bytes, stored);
+        }
         if status.is_success() {
-            fresh_credential(provider, stored, &bytes, unix_now()).map_err(Failure::Final)
+            let fresh = if provider
+                .oauth
+                .is_some_and(|oauth| oauth.hook == Hook::CursorPoll)
+            {
+                crate::family::cursor::auth::refreshed(provider.id, stored, &bytes, unix_now())
+            } else {
+                fresh_credential(provider, stored, &bytes, unix_now())
+            };
+            fresh.map_err(Failure::Final)
         } else {
             Err(rejection(provider, status.as_u16(), &bytes, stored))
         }
+    }
+}
+
+/// The outcome of one key mint: the new credential, a dead session (the
+/// stored identity token no longer names one), or a refusal that is worth
+/// the single retry when the status says the mint may recover. Every message
+/// is redacted of the identity token and of the key being replaced.
+fn minted(
+    provider: &ProviderDef,
+    status: u16,
+    body: &[u8],
+    stored: &OAuthCredential,
+) -> Result<OAuthCredential, Failure> {
+    match meta::outcome(
+        provider.family,
+        status,
+        body,
+        &[stored.refresh_token.expose(), stored.access_token.expose()],
+    ) {
+        meta::Outcome::Key(key) => Ok(meta::credential(
+            key,
+            stored.refresh_token.clone(),
+            unix_now(),
+        )),
+        meta::Outcome::SessionExpired => Err(Failure::Final(ProviderError::SignInExpired {
+            provider: provider.id.to_owned(),
+        })),
+        meta::Outcome::Refused(error) => Err(
+            if matches!(
+                &error,
+                ProviderError::Status {
+                    status: 408 | 429 | 500..=599,
+                    ..
+                }
+            ) {
+                Failure::Transient(error)
+            } else {
+                Failure::Final(error)
+            },
+        ),
     }
 }
 
@@ -760,8 +941,10 @@ struct TokenResponse {
 }
 
 /// The new credential from a successful token response. A response without
-/// a refresh token or ID token keeps the stored one; the Codex account id
-/// follows the ID token when it names one. The lifetime counts from the
+/// a refresh token or ID token keeps the stored one (Google never rotates its
+/// refresh token); the Codex account id follows the ID token when it names
+/// one, and a Cloud Code Assist sign-in keeps its stored Google Cloud
+/// project. The lifetime counts from the
 /// response's `created_at` when it carries an integer one, else from `now`;
 /// `expires_in` absent falls back to the access-token JWT `exp` claim, then
 /// to no expiry.
@@ -781,8 +964,29 @@ pub(crate) fn fresh_credential(
     if tokens.access_token.expose().is_empty() {
         return Err(invalid("the access token is empty"));
     }
+    let hook = provider.oauth.map(|oauth| oauth.hook);
+    // A Kimi Code answer always rotates: it names a refresh token and a
+    // positive lifetime, or it is not a token answer.
+    if hook == Some(Hook::KimiCodeDevice)
+        && (tokens
+            .refresh_token
+            .as_ref()
+            .is_none_or(|token| token.expose().is_empty())
+            || !matches!(tokens.expires_in, Some(seconds) if seconds > 0))
+    {
+        return Err(invalid("the answer names no refresh token or no lifetime"));
+    }
     let issued_at = oauth_issued_at(tokens.created_at.as_ref(), now);
-    let expires_at = oauth_expires_at(issued_at, tokens.expires_in, tokens.access_token.expose());
+    // An xAI answer without a lifetime lives one hour, whatever its JWT
+    // claims; a lifetime that is not positive is no token answer.
+    let expires_at = if hook == Some(Hook::XaiDevice) {
+        Some(
+            xai_expires_at(issued_at, tokens.expires_in)
+                .ok_or_else(|| invalid("the lifetime is not positive"))?,
+        )
+    } else {
+        oauth_expires_at(issued_at, tokens.expires_in, tokens.access_token.expose())
+    };
     let refresh_token = tokens
         .refresh_token
         .filter(|token| !token.expose().is_empty())
@@ -810,6 +1014,9 @@ pub(crate) fn fresh_credential(
         expires_at,
         id_token,
         account_id,
+        // The project is minted once, at sign-in, and Google's refresh answer
+        // never names it: the stored one is kept exactly as it was.
+        project_id: stored.project_id.clone(),
     })
 }
 
@@ -829,7 +1036,12 @@ fn rejection(
             .flatten()
             .any(|code| PERMANENT_CODES.contains(&code))
     });
-    if (400..500).contains(&status) && permanent {
+    // The Kimi Code token endpoint answers 401 or 403 for a dead credential.
+    let unauthorized = matches!(status, 401 | 403)
+        && provider
+            .oauth
+            .is_some_and(|oauth| oauth.hook == Hook::KimiCodeDevice);
+    if ((400..500).contains(&status) && permanent) || unauthorized {
         return Failure::Final(ProviderError::SignInExpired {
             provider: provider.id.to_owned(),
         });

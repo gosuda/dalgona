@@ -23,11 +23,11 @@ use allocative::Allocative;
 use starlark::{
     collections::SmallMap,
     environment::{Methods, MethodsBuilder, Module},
-    eval::Evaluator,
+    eval::{Arguments, Evaluator, ParametersSpec, ParametersSpecParam},
     starlark_module, starlark_simple_value,
     values::{
-        NoSerialize, ProvidesStaticType, StarlarkValue, Value, ValueLike, float::UnpackFloat,
-        list::UnpackList,
+        FrozenValue, NoSerialize, ProvidesStaticType, StarlarkValue, Value, ValueLike,
+        float::UnpackFloat, list::UnpackList,
     },
 };
 
@@ -127,6 +127,27 @@ impl<'v> StarlarkValue<'v> for DalNamespace {
 starlark::methods_static!(DAL_METHODS = dal_methods);
 
 use crate::error::api_error;
+
+/// Refuses a half-declared record replacement at the declaring call.
+///
+/// `replace` and `battery` are one declaration: `replace = True` takes the
+/// record of a bundled extension the script names, and the owner is never
+/// implied. `battery` alone is no declaration, and `replace = False` keeps
+/// today's refusal of a clashing record, so it takes no owner either. Both
+/// refusals name both keywords. The keywords themselves are typed by the
+/// call signature: a written `None` is a value of the wrong type, not an
+/// omission, so it never reaches this check.
+fn check_replacement(call: &str, replace: bool, battery: Option<&str>) -> starlark::Result<()> {
+    match (replace, battery) {
+        (true, Some(_)) | (false, None) => Ok(()),
+        (true, None) => Err(api_error(format!(
+            "{call}: replace = True needs the owner, battery = \"<bundled extension>\""
+        ))),
+        (false, Some(_)) => Err(api_error(format!(
+            "{call}: battery needs replace = True; the two keywords come as a pair"
+        ))),
+    }
+}
 
 /// Decodes a `default =` argument into the transport form.
 fn default_value(
@@ -455,49 +476,91 @@ fn dal_methods(builder: &mut MethodsBuilder) {
         })
     }
 
-    /// `dal.skill(description, path, letter2image=False)`.
+    /// `dal.skill(description, path, letter2image=False, replace=False,
+    /// battery=<owner>)`.
+    ///
+    /// `replace = True, battery = "<bundled extension>"` takes the one
+    /// record of that name from the named bundled extension; the pair is
+    /// inseparable and the owner is never implied. No flag, or
+    /// `replace = False`, keeps the refusal of a clashing record.
     fn skill<'v>(
         #[starlark(this)] _this: &DalNamespace,
         #[starlark(require = named)] description: String,
         #[starlark(require = named)] path: String,
         #[starlark(require = named)] letter2image: Option<bool>,
+        #[starlark(require = named)] replace: Option<bool>,
+        #[starlark(require = named)] battery: Option<String>,
     ) -> starlark::Result<SkillValue> {
+        let replace = replace.unwrap_or(false);
+        check_replacement("skill", replace, battery.as_deref())?;
         Ok(SkillValue {
             description,
             path,
             letter2image: letter2image.unwrap_or(false),
+            replace,
+            battery,
         })
     }
 
     /// `dal.rule(text, pattern=None, judge=None, always_apply=False,
-    /// scope=None, interrupt_mode=None, repeat_mode=None, repeat_gap=None)`;
-    /// a rule needs a pattern unless it always applies.
+    /// scope=None, interrupt_mode=None, repeat_mode=None, repeat_gap=None,
+    /// replace=False, battery=<owner>)`; a rule needs a pattern unless it
+    /// always applies, and `replace` with `battery` is the same strict pair
+    /// as on `dal.skill`.
     fn rule<'v>(
         #[starlark(this)] _this: &DalNamespace,
-        #[starlark(require = named)] pattern: Option<String>,
-        #[starlark(require = named)] text: String,
-        #[starlark(require = named)] judge: Option<Value<'v>>,
-        #[starlark(require = named)] always_apply: Option<bool>,
-        #[starlark(require = named)] scope: Option<UnpackList<String>>,
-        #[starlark(require = named)] interrupt_mode: Option<String>,
-        #[starlark(require = named)] repeat_mode: Option<String>,
-        #[starlark(require = named)] repeat_gap: Option<u32>,
+        eval: &mut Evaluator<'v, '_, '_>,
+        args: &Arguments<'v, '_>,
     ) -> starlark::Result<RuleValue<'v>> {
-        let always_apply = always_apply.unwrap_or(false);
-        if pattern.is_none() && !always_apply {
-            return Err(api_error(
-                "rule: give a pattern, or set always_apply = True",
-            ));
-        }
-        Ok(RuleValueGen {
-            pattern,
-            text,
-            judge: judge.unwrap_or_else(Value::new_none),
-            always_apply,
-            scope: scope.map(|scope| scope.items),
-            interrupt_mode,
-            repeat_mode,
-            repeat_gap,
+        static RULE_PARAMETERS: OnceLock<ParametersSpec<FrozenValue>> = OnceLock::new();
+        let parameters = RULE_PARAMETERS.get_or_init(|| {
+            ParametersSpec::new_named_only(
+                "rule",
+                [
+                    ("pattern", ParametersSpecParam::Optional),
+                    ("text", ParametersSpecParam::Required),
+                    ("judge", ParametersSpecParam::Optional),
+                    ("always_apply", ParametersSpecParam::Optional),
+                    ("scope", ParametersSpecParam::Optional),
+                    ("interrupt_mode", ParametersSpecParam::Optional),
+                    ("repeat_mode", ParametersSpecParam::Optional),
+                    ("repeat_gap", ParametersSpecParam::Optional),
+                    ("replace", ParametersSpecParam::Optional),
+                    ("battery", ParametersSpecParam::Optional),
+                ],
+            )
+        });
+        parameters.parser(args, eval, |parser, _eval| {
+            let pattern = parser.next_opt::<String>()?;
+            let text = parser.next::<String>()?;
+            let judge = parser.next_opt::<Value<'v>>()?;
+            let always_apply = parser.next_opt::<bool>()?;
+            let scope = parser.next_opt::<UnpackList<String>>()?;
+            let interrupt_mode = parser.next_opt::<String>()?;
+            let repeat_mode = parser.next_opt::<String>()?;
+            let repeat_gap = parser.next_opt::<u32>()?;
+            let replace = parser.next_opt::<bool>()?;
+            let battery = parser.next_opt::<String>()?;
+            let always_apply = always_apply.unwrap_or(false);
+            if pattern.is_none() && !always_apply {
+                return Err(api_error(
+                    "rule: give a pattern, or set always_apply = True",
+                ));
+            }
+            let replace = replace.unwrap_or(false);
+            check_replacement("rule", replace, battery.as_deref())?;
+            Ok(RuleValueGen {
+                pattern,
+                text,
+                judge: judge.unwrap_or_else(Value::new_none),
+                always_apply,
+                scope: scope.map(|scope| scope.items),
+                interrupt_mode,
+                repeat_mode,
+                repeat_gap,
+                replace,
+                battery,
+            })
         })
     }
 

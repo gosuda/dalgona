@@ -160,10 +160,8 @@ pub struct Approved {
     prefix: Box<[OsString]>,
     roots: Box<[PathBuf]>,
     job: Option<JobId>,
-    permits: Option<(
-        tokio::sync::OwnedSemaphorePermit,
-        crate::admission::FdPermit,
-    )>,
+    /// The process capacity the spawn door moves into the child's lease.
+    admission: Option<crate::admission::ProcessAdmission>,
     _seal: Seal,
 }
 
@@ -182,27 +180,20 @@ impl Approved {
             prefix,
             roots,
             job,
-            permits: None,
+            admission: None,
             _seal: Seal,
         }
     }
 
-    pub(crate) fn with_permits(
-        mut self,
-        permit: tokio::sync::OwnedSemaphorePermit,
-        fds: crate::admission::FdPermit,
-    ) -> Self {
-        self.permits = Some((permit, fds));
+    /// Attaches the admitted process capacity this approval spawns with.
+    pub(crate) fn with_admission(mut self, admission: crate::admission::ProcessAdmission) -> Self {
+        self.admission = Some(admission);
         self
     }
 
-    pub(crate) fn take_permits(
-        &mut self,
-    ) -> Option<(
-        tokio::sync::OwnedSemaphorePermit,
-        crate::admission::FdPermit,
-    )> {
-        self.permits.take()
+    /// Moves the admitted process capacity out for the spawn door.
+    pub(crate) fn take_admission(&mut self) -> Option<crate::admission::ProcessAdmission> {
+        self.admission.take()
     }
 
     /// Borrows the call this proof authorizes.
@@ -534,8 +525,9 @@ impl ToolCx<'_> {
     /// Mints a test context over `services` with a fail-closed stub runtime.
     ///
     /// Authorization denies, spawning denies, schemes resolve nothing; the
-    /// workspace points at the platform temp dir, which the stub never
-    /// writes. Foreign test batteries drive tools through this context.
+    /// workspace is a dedicated per-process child of the platform temp dir,
+    /// which the stub never writes. Foreign test batteries drive tools
+    /// through this context.
     #[must_use]
     pub fn for_test(services: Arc<dyn Services>) -> ToolCx<'static> {
         let caller = Caller::new(
@@ -840,37 +832,52 @@ impl ToolCxRuntime for ForTestRuntime {
     }
 }
 
-/// Builds the test workspace root from the platform temp dir.
+/// Builds a dedicated, per-process test workspace under the platform temp dir.
+///
+/// Index builds walk the whole workspace, so the tests must not run with the
+/// shared temp dir as their root. The directory is resolved once per process
+/// and reused by every call.
 ///
 /// The path is absolute by construction on every supported platform; the
 /// dead arm only satisfies the type system and never runs.
+#[expect(
+    clippy::panic,
+    reason = "a test helper with no error channel reports a broken workspace by failing the test"
+)]
 fn test_workspace() -> Workspace {
-    let dir = std::env::temp_dir();
-    #[cfg(unix)]
-    let dir = if dir.is_absolute() {
-        dir
-    } else {
-        PathBuf::from("/").join(dir)
-    };
-    #[cfg(windows)]
-    let dir = if dir.is_absolute() {
-        dir
-    } else {
-        PathBuf::from(r"C:\").join(dir)
-    };
-    match Workspace::new(dir) {
-        Ok(workspace) => workspace,
-        Err(_) => loop {
-            std::thread::park();
-        },
-    }
+    static WORKSPACE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let dir = WORKSPACE_DIR
+        .get_or_init(|| {
+            let dir =
+                std::env::temp_dir().join(format!("dal-tool-workspace-{}", std::process::id()));
+            #[cfg(unix)]
+            let dir = if dir.is_absolute() {
+                dir
+            } else {
+                PathBuf::from("/").join(dir)
+            };
+            #[cfg(windows)]
+            let dir = if dir.is_absolute() {
+                dir
+            } else {
+                PathBuf::from(r"C:\").join(dir)
+            };
+            std::fs::create_dir_all(&dir).unwrap_or_else(|error| {
+                panic!("test workspace {} is unwritable: {error}", dir.display())
+            });
+            dir
+        })
+        .clone();
+    Workspace::new(dir.clone())
+        .unwrap_or_else(|error| panic!("test workspace {} is rejected: {error}", dir.display()))
 }
 
 #[cfg(test)]
 mod approval_tests {
     use super::Approved;
-    use crate::admission::{Admission, Limits};
+    use crate::admission::{Admission, Limits, ProcessAdmission};
     use crate::error::{AdmissionLimit, ToolError};
+    use crate::jobs::ProcessSlots;
     use dal_core::CallId;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
@@ -885,18 +892,32 @@ mod approval_tests {
             128,
         );
         let cancel = CancellationToken::new();
-        let permit = admission.acquire_process(&cancel).await?;
-        let fds = admission.charge_fds(1, &cancel).await?;
+        let slots = ProcessSlots::new(1, 1);
+        let admitted = ProcessAdmission {
+            process: admission
+                .acquire_process(&cancel, admission.begin())
+                .await?,
+            fds: admission.charge_fds(1, &cancel, admission.begin()).await?,
+            slot: slots.claim_for_test(),
+        };
         let approved = Approved::new(CallId::new("call"), None, Box::new([]), Box::new([]), None)
-            .with_permits(permit, fds);
+            .with_admission(admitted);
         assert!(matches!(
-            admission.acquire_process(&cancel).await,
+            admission.acquire_process(&cancel, admission.begin()).await,
             Err(ToolError::Admission {
                 limit: AdmissionLimit::Processes
             })
         ));
+        assert_eq!(slots.live(), 1, "the approval still holds its session slot");
         drop(approved);
-        let next = admission.acquire_process(&cancel).await?;
+        assert_eq!(
+            slots.live(),
+            0,
+            "dropping the approval frees the session slot"
+        );
+        let next = admission
+            .acquire_process(&cancel, admission.begin())
+            .await?;
         drop(next);
         Ok(())
     }

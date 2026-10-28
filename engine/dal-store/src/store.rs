@@ -4,20 +4,21 @@
 //! Its first turn reservation, user entry, or private-effect receipt makes it durable.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use dal_core::{
-    BlobId, BranchMode, EntryId, EntryView, Gen, Header, ListQuery, Page, Product, Record,
+    BlobId, BranchMode, EntryId, EntryView, Gen, Header, JobId, ListQuery, Page, Product, Record,
     SessionId, SessionInfo, Workspace,
 };
 
 use crate::{
     blob::{self, PendingBlob},
     error::{BlobError, OpenReport, StoreError},
+    job_ledger::{JobLedger, JobLedgerError, JobLedgerRecovery},
     journal::{self, Faults, Journal as FileJournal, Receipt},
     layout::SessionPaths,
     lock::{self, LockGuard},
@@ -366,6 +367,30 @@ impl Store {
     #[must_use]
     pub fn session_jobs_dir(&self, id: SessionId) -> PathBuf {
         self.paths(id).jobs()
+    }
+
+    /// Opens the session's durable job ledger, replaying earlier reports.
+    ///
+    /// Read-only: a missing ledger replays as empty and no file or directory
+    /// is created. The path always derives from
+    /// [`Store::session_jobs_dir`]; there is no arbitrary-path constructor.
+    /// The returned [`JobLedger`] owns the session's one exclusive append.
+    ///
+    /// # Errors
+    /// Returns [`JobLedgerError::Io`] when the ledger cannot be read, and
+    /// [`JobLedgerError::Corrupt`] when its durable prefix breaks the
+    /// ledger's replay rules.
+    pub async fn job_ledger(
+        &self,
+        session: SessionId,
+        delivered: &HashSet<JobId>,
+    ) -> Result<(JobLedger, JobLedgerRecovery), JobLedgerError> {
+        JobLedger::open(
+            self.session_jobs_dir(session),
+            self.inner.data_root.clone(),
+            delivered,
+        )
+        .await
     }
 
     /// Reads one digest from a file-backed session without acquiring its lock.
@@ -738,6 +763,11 @@ impl AppendIndex {
     fn observe(&mut self, record: &Record) {
         match record {
             Record::Leaf { to, .. } => self.leaf = *to,
+            // A delivery materializes the user entry it names, so it moves the
+            // leaf exactly as the validator and the fold do. Without this arm
+            // the next append parents on the pre-delivery leaf and the durable
+            // delivery falls off the served leaf path.
+            Record::MailDelivered { entry, .. } => self.leaf = Some(*entry),
             _ => {
                 if let Some(entry) = record.entry() {
                     self.leaf = Some(entry.id);

@@ -1,4 +1,9 @@
 //! Typed model judgments, per-session gate resolution, and bounded ledgering.
+//!
+//! Only an eval cell may ask: every entry is gated on the declaration
+//! that requested `judge.ask` or `judge.batch`, and the phase table
+//! refuses those operations to plugin handlers, commands, and models.
+mod cell;
 mod config;
 mod format;
 mod machine;
@@ -6,6 +11,7 @@ mod record;
 #[cfg(test)]
 mod tests;
 mod types;
+pub use cell::CellJudge;
 pub use config::{GateSetting, JudgeConfig};
 pub use format::{SYSTEM_LINE, parse_answers, render_envelope};
 pub use machine::{Judge, JudgeOpen};

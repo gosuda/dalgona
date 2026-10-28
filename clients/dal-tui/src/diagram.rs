@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 pub mod cli;
 pub mod dot;
@@ -208,7 +208,7 @@ fn fenced_source(text: &str) -> Option<(DiagramKind, &str)> {
 const SOURCE_CAP: usize = 16 * 1_024;
 const ART_CELL_CAP: usize = 65_536;
 const CACHE_CAP: usize = 32;
-const MAX_RENDER_WORKERS: usize = 2;
+const WORKER_QUEUE_CAP: usize = 8;
 
 /// Renders a diagram source within a cell-width cap.
 #[must_use]
@@ -285,26 +285,41 @@ pub fn fallback_card(kind: DiagramKind, reason: &str) -> String {
 
 /// In-process LRU over kind, blake3 digest, and width bucket.
 ///
-/// The cache owns its background render workers. Dropping it stops every
-/// running renderer and joins its worker, so no render outlives the cache.
-#[derive(Debug, Default)]
+/// The cache owns one background worker with a bounded queue. Dropping it
+/// stops the running renderer and joins the worker, so no render outlives it.
+#[derive(Debug)]
 pub struct RenderCache {
     path: Option<OsString>,
     fonts: FontSnapshot,
-    state: Arc<Mutex<RenderCacheState>>,
+    shared: Arc<WorkerShared>,
     stop: Arc<AtomicBool>,
 }
 
 type RenderKey = (DiagramKind, [u8; 32], usize);
+
+#[derive(Debug)]
+struct WorkerShared {
+    state: Mutex<RenderCacheState>,
+    available: Condvar,
+}
+
+#[derive(Debug)]
+struct RenderTask {
+    key: RenderKey,
+    kind: DiagramKind,
+    source: Vec<u8>,
+    width_cells: usize,
+}
 
 #[derive(Debug, Default)]
 struct RenderCacheState {
     entries: HashMap<RenderKey, DiagramOutcome>,
     order: VecDeque<RenderKey>,
     pending: HashSet<RenderKey>,
-    /// Spawned render workers, joined when the cache drops so no render
-    /// outlives its session. Finished workers are reaped on each spawn.
-    workers: Vec<std::thread::JoinHandle<()>>,
+    /// At most `WORKER_QUEUE_CAP` tasks waiting for the single worker.
+    queue: VecDeque<RenderTask>,
+    /// The one worker thread, joined when the cache drops.
+    worker: Option<std::thread::JoinHandle<()>>,
     /// Set when the cache drops: no new work is scheduled.
     closed: bool,
     renders: usize,
@@ -332,6 +347,12 @@ impl RenderCacheState {
     }
 }
 
+impl Default for RenderCache {
+    fn default() -> Self {
+        Self::with_fonts(None, FontSnapshot::default())
+    }
+}
+
 impl RenderCache {
     /// Creates a cache bound to the process edge's PATH and font snapshots.
     #[must_use]
@@ -339,7 +360,10 @@ impl RenderCache {
         Self {
             path,
             fonts,
-            state: Arc::default(),
+            shared: Arc::new(WorkerShared {
+                state: Mutex::default(),
+                available: Condvar::new(),
+            }),
             stop: Arc::default(),
         }
     }
@@ -355,6 +379,7 @@ impl RenderCache {
         let key = cache_key(kind, source, width_cells);
         {
             let mut state = self
+                .shared
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -365,6 +390,7 @@ impl RenderCache {
         }
         let outcome = render_diagram(kind, source, width_cells, self.path.as_deref(), &self.fonts);
         let mut state = self
+            .shared
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -381,77 +407,47 @@ impl RenderCache {
         source: &[u8],
         width_cells: usize,
     ) -> Option<DiagramOutcome> {
-        if !matches!(kind, DiagramKind::D2 | DiagramKind::Nomnoml) {
-            return Some(self.get_or_render(kind, source, width_cells));
+        if strip_one_bom(source).len() > SOURCE_CAP {
+            return Some(fallback("too large"));
         }
         let key = cache_key(kind, source, width_cells);
-        {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(outcome) = state.cached(&key) {
-                return Some(outcome);
-            }
-            if state.closed {
-                return Some(fallback("renderer closed"));
-            }
-            if state.pending.contains(&key) || state.pending.len() >= MAX_RENDER_WORKERS {
-                return None;
-            }
-            state.pending.insert(key);
-            state.renders += 1;
+        let shared = &self.shared;
+        let mut state = shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(outcome) = state.cached(&key) {
+            return Some(outcome);
         }
-        let shared = Arc::clone(&self.state);
+        if state.closed {
+            return Some(fallback("renderer closed"));
+        }
+        if state.pending.contains(&key) || state.queue.len() >= WORKER_QUEUE_CAP {
+            return None;
+        }
         let path = self.path.clone();
         let fonts = self.fonts.clone();
-        let source = source.to_vec();
         let stop = Arc::clone(&self.stop);
-        if let Ok(worker) = std::thread::Builder::new()
-            .name("dal-tui-diagram".to_owned())
-            .spawn(move || {
-                let outcome =
-                    render_until(kind, &source, width_cells, path.as_deref(), &fonts, &stop);
-                let mut state = shared
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.pending.remove(&key);
-                if state.closed {
-                    return;
-                }
-                state.insert(key, outcome);
-                state.generation = state.generation.saturating_add(1);
-            })
-        {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut index = 0;
-            while index < state.workers.len() {
-                if state.workers[index].is_finished() {
-                    let _ = state.workers.swap_remove(index).join();
-                } else {
-                    index += 1;
-                }
-            }
-            state.workers.push(worker);
-        } else {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.pending.remove(&key);
-            state.renders = state.renders.saturating_sub(1);
+        if state.worker.is_none() && spawn_worker(&mut state, shared, path, fonts, stop).is_err() {
             return Some(fallback("renderer worker unavailable"));
         }
+        state.pending.insert(key);
+        state.renders += 1;
+        state.queue.push_back(RenderTask {
+            key,
+            kind,
+            source: source.to_vec(),
+            width_cells,
+        });
+        shared.available.notify_one();
         None
     }
 
     /// Returns the number of renders performed or queued.
     #[must_use]
     pub fn renders(&self) -> usize {
-        self.state
+        self.shared
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .renders
@@ -460,31 +456,126 @@ impl RenderCache {
     /// Returns the number of completed background renders.
     #[must_use]
     pub(crate) fn generation(&self) -> u64 {
-        self.state
+        self.shared
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .generation
     }
+
+    /// Waits until a render lands past `after`, or `timeout` elapses.
+    ///
+    /// Returns whether the generation advanced. The wait is woken by the
+    /// worker when it records a render, so callers observe the event
+    /// instead of polling a wall-clock budget.
+    #[cfg(test)]
+    pub(crate) fn wait_for_generation(&self, after: u64, timeout: std::time::Duration) -> bool {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let deadline = std::time::Instant::now() + timeout;
+        while state.generation <= after {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            state = self
+                .shared
+                .available
+                .wait_timeout(state, left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
 }
 
 impl Drop for RenderCache {
-    /// Stops new scheduling, signals every running renderer to stop, and
-    /// joins every render worker, so the drop waits only for the renderer
-    /// processes to be killed.
+    /// Stops new scheduling, signals the running renderer to stop, and joins
+    /// the worker, so the drop waits only for the renderer to be killed.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        let workers = {
-            let mut state = self
+        let shared = &self.shared;
+        let worker = {
+            let mut state = shared
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.closed = true;
-            std::mem::take(&mut state.workers)
+            state.queue.clear();
+            shared.available.notify_all();
+            state.worker.take()
         };
-        for worker in workers {
+        if let Some(worker) = worker {
             let _ = worker.join();
         }
     }
+}
+
+fn spawn_worker(
+    state: &mut RenderCacheState,
+    shared: &Arc<WorkerShared>,
+    path: Option<OsString>,
+    fonts: FontSnapshot,
+    stop: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    let shared = Arc::clone(shared);
+    let worker = std::thread::Builder::new()
+        .name("dal-tui-diagram".to_owned())
+        .spawn(move || run_worker(&shared, path.as_deref(), &fonts, &stop))?;
+    state.worker = Some(worker);
+    Ok(())
+}
+
+fn run_worker(
+    shared: &Arc<WorkerShared>,
+    path: Option<&OsStr>,
+    fonts: &FontSnapshot,
+    stop: &AtomicBool,
+) {
+    loop {
+        let task = {
+            let mut state = shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            loop {
+                if let Some(task) = state.queue.pop_front() {
+                    break task;
+                }
+                if state.closed {
+                    return;
+                }
+                state = shared
+                    .available
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        };
+        let outcome = task_outcome(task.kind, || {
+            render_until(task.kind, &task.source, task.width_cells, path, fonts, stop)
+        });
+        let mut state = shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.pending.remove(&task.key);
+        if state.closed {
+            continue;
+        }
+        state.insert(task.key, outcome);
+        state.generation = state.generation.saturating_add(1);
+        // Wake anyone waiting for a landed render. The worker loop itself
+        // also waits on this condvar, so the extra wake is harmless.
+        shared.available.notify_all();
+    }
+}
+
+fn task_outcome(kind: DiagramKind, render: impl FnOnce() -> DiagramOutcome) -> DiagramOutcome {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(render))
+        .unwrap_or_else(|_| fallback(format!("invalid {}", kind.label())))
 }
 
 fn cache_key(kind: DiagramKind, source: &[u8], width_cells: usize) -> RenderKey {
@@ -771,14 +862,14 @@ mod tests {
                 .get_or_schedule(DiagramKind::D2, b"a -> b", 40)
                 .is_none()
         );
-        assert_eq!(
+        assert!(
             cache
+                .shared
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .workers
-                .len(),
-            1,
+                .worker
+                .is_some(),
             "the worker handle is tracked so drop can join it"
         );
     }
@@ -787,6 +878,7 @@ mod tests {
     fn a_closed_cache_schedules_nothing_new() {
         let cache = RenderCache::default();
         cache
+            .shared
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -795,5 +887,231 @@ mod tests {
             cache.get_or_schedule(DiagramKind::D2, b"a -> b", 40),
             Some(DiagramOutcome::Fallback { reason }) if reason.as_ref() == "renderer closed"
         ));
+    }
+
+    #[test]
+    fn oversized_source_starts_no_renderer_and_valid_queue_completes() {
+        use std::time::{Duration, Instant};
+
+        let cache = RenderCache::default();
+        let over = vec![b'x'; super::SOURCE_CAP + 1];
+        let bom_over = [b"\xef\xbb\xbf".as_slice(), over.as_slice()].concat();
+        for source in [&over, &bom_over] {
+            assert!(matches!(
+                cache.get_or_schedule(DiagramKind::Mermaid, source, 80),
+                Some(DiagramOutcome::Fallback { reason }) if reason.as_ref() == "too large"
+            ));
+        }
+        {
+            let state = cache
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                state.worker.is_none(),
+                "an oversized source must not start the renderer"
+            );
+            assert!(
+                state.pending.is_empty() && state.queue.is_empty(),
+                "an oversized source must not occupy the worker queue"
+            );
+            assert_eq!(
+                state.renders, 0,
+                "an oversized source must not consume render work"
+            );
+        }
+
+        let mut bom_exact = vec![0xEF, 0xBB, 0xBF];
+        bom_exact.extend(vec![b'x'; super::SOURCE_CAP]);
+        assert!(
+            cache
+                .get_or_schedule(DiagramKind::Mermaid, &bom_exact, 80)
+                .is_none(),
+            "a BOM plus the exact body cap stays schedulable"
+        );
+        {
+            let state = cache
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(
+                state.renders, 1,
+                "only the schedulable boundary body was admitted"
+            );
+            assert!(
+                state.worker.is_some(),
+                "the boundary body starts the renderer"
+            );
+        }
+
+        assert!(
+            cache
+                .get_or_schedule(DiagramKind::Mermaid, b"graph TD; A-->B", 80)
+                .is_none(),
+            "a valid source still queues after oversized rejections"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let boundary = cache.get_or_schedule(DiagramKind::Mermaid, &bom_exact, 80);
+            let valid = cache.get_or_schedule(DiagramKind::Mermaid, b"graph TD; A-->B", 80);
+            if let (Some(boundary), Some(valid)) = (boundary, valid) {
+                assert!(
+                    !matches!(&boundary, DiagramOutcome::Fallback { reason } if reason.as_ref() == "too large"),
+                    "the exact body cap must render, not trip the source cap: {boundary:?}"
+                );
+                let DiagramOutcome::Art(art) = valid else {
+                    panic!("the valid queued source must complete to art: {valid:?}");
+                };
+                let rendered = art
+                    .rows
+                    .iter()
+                    .flatten()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>();
+                assert!(
+                    rendered.contains('A') && rendered.contains('B'),
+                    "valid art lost its node labels: {rendered}"
+                );
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "queued boundary and valid renders did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn task_panic_becomes_invalid_kind_and_the_next_render_succeeds() {
+        let panicked = super::task_outcome(DiagramKind::D2, || panic!("injected renderer panic"));
+        assert!(matches!(
+            panicked,
+            DiagramOutcome::Fallback { reason } if reason.as_ref() == "invalid d2"
+        ));
+        let next = super::task_outcome(DiagramKind::Mermaid, || {
+            super::render_diagram(
+                DiagramKind::Mermaid,
+                b"graph TD; A-->B",
+                80,
+                None,
+                &super::FontSnapshot::default(),
+            )
+        });
+        let DiagramOutcome::Art(art) = next else {
+            panic!("the render after a task panic must succeed");
+        };
+        let rendered = art
+            .rows
+            .iter()
+            .flatten()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+        assert!(rendered.contains('A') && rendered.contains('B'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_work_runs_on_one_worker_and_retries_after_a_slot_frees() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let tools = tempfile::tempdir().expect("temporary tool directory");
+        let d2 = tools.path().join("d2");
+        std::fs::write(
+            &d2,
+            b"#!/bin/sh\n: > \"${0%/*}/started\"\n/bin/cat >/dev/null\nwhile [ ! -f \"${0%/*}/release\" ]; do /bin/sleep 0.02; done\nexit 1\n",
+        )
+        .expect("fake d2 tool");
+        let mut permissions = std::fs::metadata(&d2)
+            .expect("fake tool metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&d2, permissions).expect("executable fake tool");
+        let cache = RenderCache::with_fonts(
+            Some(tools.path().as_os_str().to_owned()),
+            super::FontSnapshot::default(),
+        );
+        let settings = DiagramSettings { enabled: true };
+        let first = "```d2\nfirst -> node\n```";
+        assert!(matches!(
+            wire_block(&settings, &cache, first, 80),
+            Some((_, WiredBlock::Pending { .. }))
+        ));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !tools.path().join("started").exists() {
+            assert!(Instant::now() < deadline, "the renderer never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mermaid = "```mermaid\ngraph TD; A-->B\n```";
+        let dot = "```dot\ndigraph { a -> b }\n```";
+        for block in [mermaid, dot] {
+            assert!(
+                matches!(
+                    wire_block(&settings, &cache, block, 80),
+                    Some((_, WiredBlock::Pending { .. }))
+                ),
+                "every diagram kind waits for the worker: {block}"
+            );
+        }
+        for index in 0..7 {
+            let block = format!("```d2\nnode{index} -> next\n```");
+            assert!(matches!(
+                wire_block(&settings, &cache, &block, 80),
+                Some((_, WiredBlock::Pending { .. }))
+            ));
+        }
+        let overflow = "```d2\noverflow -> next\n```";
+        assert!(matches!(
+            wire_block(&settings, &cache, overflow, 80),
+            Some((_, WiredBlock::Pending { .. }))
+        ));
+        assert_eq!(cache.generation(), 0, "the first task holds the worker");
+        std::fs::write(tools.path().join("release"), b"").expect("release the queued renderer");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut mermaid_art = false;
+        let mut dot_art = false;
+        let mut overflow_finished = false;
+        while !(mermaid_art && dot_art && overflow_finished) {
+            assert!(Instant::now() < deadline, "queued renders did not finish");
+            for (block, is_art) in [(mermaid, &mut mermaid_art), (dot, &mut dot_art)] {
+                if *is_art {
+                    continue;
+                }
+                match wire_block(&settings, &cache, block, 80) {
+                    Some((_, WiredBlock::Art(art))) => {
+                        let rendered = art
+                            .rows
+                            .iter()
+                            .flatten()
+                            .map(|cell| cell.text.as_str())
+                            .collect::<String>();
+                        if block == dot {
+                            assert_eq!(rendered, "a -> b");
+                        } else {
+                            assert!(
+                                rendered.contains('A') && rendered.contains('B'),
+                                "mermaid output lost its node labels: {rendered}"
+                            );
+                        }
+                        *is_art = true;
+                    }
+                    Some((_, WiredBlock::Pending { .. })) => {}
+                    other => panic!("unexpected queued art result: {other:?}"),
+                }
+            }
+            match wire_block(&settings, &cache, overflow, 80) {
+                Some((_, WiredBlock::Fallback { reason, .. })) => {
+                    assert_eq!(&*reason, "invalid d2");
+                    overflow_finished = true;
+                }
+                Some((_, WiredBlock::Pending { .. })) => {}
+                other => panic!("unexpected overflow result: {other:?}"),
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }

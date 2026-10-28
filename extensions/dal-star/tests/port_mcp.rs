@@ -185,8 +185,18 @@ async fn read_http_message(stream: &mut TcpStream) -> std::io::Result<String> {
 }
 
 async fn serve_fixture(listener: TcpListener, reply: FixtureReply) -> std::io::Result<()> {
-    let (mut socket, _) = listener.accept().await?;
-    let body = read_http_message(&mut socket).await?;
+    // A client may open a connection and close it, or send a head with no
+    // body, before the one request this fixture answers. Such a probe is not
+    // a protocol error: keep accepting until a real JSON-RPC request arrives,
+    // so the fixture never dies on a warm-up connection.
+    let (mut socket, body) = loop {
+        let (mut socket, _) = listener.accept().await?;
+        if let Ok(body) = read_http_message(&mut socket).await
+            && !body.trim().is_empty()
+        {
+            break (socket, body);
+        }
+    };
     let request = sonic_rs::from_str::<Value>(&body)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let id = request

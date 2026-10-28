@@ -576,18 +576,34 @@ impl Shards {
     /// Moves a file journal to the shard pinned by `session` and returns its
     /// actor-facing handle. `blob_dir` is `<session>/blobs`, which holds digest files.
     ///
+    /// Admission and the worker's registration receipt share one deadline of
+    /// [`ENQUEUE_WAIT`], taken before the request is queued. An abandoned
+    /// registration (deadline, error, or a dropped future) is released exactly
+    /// once: the worker drops the journal unregistered, or the reply guard
+    /// retires the slot it already registered.
+    ///
     /// # Errors
-    /// Returns [`JournalError::ShardClosed`] if that worker has stopped.
+    /// Returns [`JournalError::ShardClosed`] if that worker has stopped, and
+    /// [`JournalError::Io`] with a timed-out `admit` or `register` operation
+    /// when the shard queue or its stalled worker does not answer within the
+    /// deadline.
     pub(crate) async fn attach(
         &self,
         session: SessionId,
         journal: Journal,
         blob_dir: Option<PathBuf>,
     ) -> Result<Lane, JournalError> {
+        let deadline = tokio::time::Instant::now() + ENQUEUE_WAIT;
+        #[cfg(unix)]
+        let journal = {
+            let mut journal = journal;
+            journal.park();
+            journal
+        };
         let queue = Arc::clone(&self.shards[pin(session)].queue);
         let (done, reply) = oneshot::channel();
-        tokio::time::timeout(
-            ENQUEUE_WAIT,
+        tokio::time::timeout_at(
+            deadline,
             queue.enqueue(Job::Register {
                 journal,
                 blob_dir,
@@ -602,16 +618,14 @@ impl Shards {
             receiver: Some(reply),
         };
         let response = match registration.receiver.as_mut() {
-            // The register receipt has no deadline: a dead or convoyed
-            // worker parks the attach in silence, so report long waits.
-            Some(receiver) => loop {
-                if let Ok(response) =
-                    tokio::time::timeout(std::time::Duration::from_secs(30), &mut *receiver).await
-                {
-                    break response;
-                }
-                tracing::warn!(target: "dalgon.store", session = %session, "lane register outstanding");
-            },
+            // One bounded wait on the same deadline as admission: the worker
+            // may be wedged in OS I/O and cannot be interrupted, so the caller
+            // stops waiting and the guard releases the abandoned registration
+            // when this future returns. `timeout_at` polls the receipt before
+            // its delay, so an acknowledgement ready at the deadline still wins.
+            Some(receiver) => tokio::time::timeout_at(deadline, &mut *receiver)
+                .await
+                .map_err(|_| register_timeout(session))?,
             None => return Err(journal_closed(session)),
         };
         registration.receiver = None;
@@ -1031,7 +1045,14 @@ fn journalize(
             .append_unsynced(&batch)
             .map_err(StoreError::from)
             .and_then(|receipt| match journal.stage_sync(receipt) {
-                Ok(staged) => Ok(staged),
+                Ok(staged) => {
+                    // The sync duplicate now owns durability for this batch;
+                    // release the worker's idle descriptor while retaining
+                    // the session lock and lane ordering.
+                    #[cfg(unix)]
+                    journal.park();
+                    Ok(staged)
+                }
                 Err(failure) => {
                     // The sync never left the worker: roll the batch back
                     // exactly as `Journal::append` would have on a failed sync.
@@ -1145,6 +1166,20 @@ fn journal_closed(session: SessionId) -> JournalError {
     JournalError::ShardClosed { session }
 }
 
+fn register_timeout(session: SessionId) -> JournalError {
+    JournalError::Io {
+        op: "register",
+        path: PathBuf::from(format!("shard-queue/{session}")),
+        source: std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "journal shard worker did not acknowledge registration within the {ENQUEUE_WAIT:?} operation budget; the journal was not attached"
+            ),
+        )
+        .into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1162,7 +1197,10 @@ mod tests {
     use dal_core::{Entry, EntryId, EntryKind, JournalPart, Record, SessionId};
     use tokio::task::yield_now;
 
-    use super::{AppendCall, Job, Lane, PendingBlob, QUEUE_CAPACITY, SHARD_COUNT, Shards, pin};
+    use super::{
+        AppendCall, ENQUEUE_WAIT, Job, Lane, PendingBlob, QUEUE_CAPACITY, SETTLE_REPORT,
+        SHARD_COUNT, Shards, pin,
+    };
     use crate::{
         blob::INLINE_LIMIT,
         error::{BlobError, JournalError, StoreError},
@@ -1340,6 +1378,188 @@ mod tests {
             .await
             .expect("register replacement journal");
         assert_eq!(lane.slot, 0);
+        lane.close().await.unwrap();
+        assert_eq!(fs::read(temp.file(0)).unwrap(), [] as [u8; 0]);
+    }
+
+    /// Bound on every worker handshake the registration fixtures wait for, the
+    /// same value as `HANDSHAKE_TIMEOUT` in `tests/kill.rs`. A wedged handshake
+    /// fails with context instead of parking the suite. The release senders are
+    /// locals declared after `shards`, so on unwind they drop first: a held
+    /// worker is freed before `Shards::drop` joins it.
+    const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    fn handshake(receiver: &std_mpsc::Receiver<()>, what: &str) {
+        if let Err(error) = receiver.recv_timeout(HANDSHAKE_TIMEOUT) {
+            panic!("{what}: no signal within {HANDSHAKE_TIMEOUT:?} ({error})");
+        }
+    }
+
+    /// A real worker thread is held, so under the paused clock the only thing
+    /// that can end the registration is its own bound. The outer wait is the
+    /// existing admission bound plus one report interval of margin: a bounded
+    /// attach finishes inside it; one that keeps re-arming report waits makes the
+    /// outer wait elapse, which is the failure.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_registration_reports_a_typed_timeout_and_the_late_worker_releases_it_once() {
+        let temp = TempDir::new();
+        let shards = Shards::start().expect("start shards");
+        let session = session_on(0);
+        let queue = Arc::clone(&shards.shards[pin(session)].queue);
+        let (first_started, first_started_rx) = std_mpsc::channel();
+        let (first_release, first_release_rx) = std_mpsc::channel();
+        queue.push_control(Job::Hold(Box::new(move || {
+            let _ = first_started.send(());
+            let _ = first_release_rx.recv();
+        })));
+        handshake(
+            &first_started_rx,
+            "the shard worker never entered its first hold",
+        );
+
+        let mut attach =
+            Box::pin(shards.attach(session, journal(&temp.file(0), &Faults::default()), None));
+        std::future::poll_fn(|context| match attach.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => panic!("worker is held before registering"),
+        })
+        .await;
+        // Admission finished inside that first poll (the queue is empty), so
+        // the wait left pending is the registration receipt and a timeout
+        // below cannot be the admission one.
+        assert_eq!(queue.request_count(), 1);
+
+        let error = tokio::time::timeout(ENQUEUE_WAIT + SETTLE_REPORT, &mut attach)
+            .await
+            .expect("a stalled registration must end at its own bound, not re-arm report waits")
+            .expect_err("a held worker cannot acknowledge the registration");
+        match &error {
+            JournalError::Io {
+                op: "register",
+                path,
+                source,
+            } => {
+                assert_eq!(source.kind(), std::io::ErrorKind::TimedOut);
+                assert_eq!(path, &PathBuf::from(format!("shard-queue/{session}")));
+            }
+            other => panic!("expected a typed register timeout, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains(&format!("{ENQUEUE_WAIT:?}")),
+            "the error names the budget it spent: {error}"
+        );
+        // The finished call already released its reply guard on return; drop
+        // the future too so nothing borrowed outlives the assertions below.
+        drop(attach);
+        // The abandoned request keeps its queue slot until the worker pops it,
+        // so abandoning a registration never widens the shard's capacity, and
+        // the journal it carried was never written.
+        assert_eq!(queue.request_count(), 1);
+        assert_eq!(fs::read(temp.file(0)).unwrap(), [] as [u8; 0]);
+
+        // The worker is a real thread: a paused clock would auto-advance
+        // whenever the runtime idles and time out healthy calls below.
+        tokio::time::resume();
+        let (second_started, second_started_rx) = std_mpsc::channel();
+        let (second_release, second_release_rx) = std_mpsc::channel();
+        queue.push_control(Job::Hold(Box::new(move || {
+            let _ = second_started.send(());
+            let _ = second_release_rx.recv();
+        })));
+        let _ = first_release.send(());
+        // FIFO: the worker reaches the second hold only after it popped the
+        // abandoned Register, found its reply closed, and dropped that journal
+        // without registering it.
+        handshake(
+            &second_started_rx,
+            "the shard worker never reached the second hold after the abandoned Register",
+        );
+        assert_eq!(queue.request_count(), 0);
+        let _ = second_release.send(());
+
+        // The slot the abandoned registration touched is recycled once...
+        let mut reused = attached(&shards, session, &temp.file(1), &Faults::default()).await;
+        assert_eq!((reused.slot, reused.generation), (0, 1));
+        // ...and only once: a double release would hand slot 0 out again.
+        let mut fresh = attached(&shards, session_on(0), &temp.file(2), &Faults::default()).await;
+        assert_eq!((fresh.slot, fresh.generation), (1, 0));
+
+        // A delayed retire for the abandoned generation (what the guard pushes
+        // when a reply landed unconsumed) must not retire the registration
+        // that now owns the recycled slot.
+        let (stale_done, stale_ack) = tokio::sync::oneshot::channel();
+        queue.push_control(Job::Retire {
+            slot: 0,
+            generation: 0,
+            done: Some(stale_done),
+            hold: None,
+        });
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, stale_ack)
+            .await
+            .expect("the shard worker never ran the stale retire")
+            .expect("the shard worker dropped the stale retire acknowledgement");
+
+        reused
+            .append(b"reused\n".to_vec(), Vec::new())
+            .await
+            .unwrap();
+        fresh.append(b"fresh\n".to_vec(), Vec::new()).await.unwrap();
+        reused.close().await.unwrap();
+        fresh.close().await.unwrap();
+        assert_eq!(fs::read(temp.file(0)).unwrap(), [] as [u8; 0]);
+        assert_eq!(fs::read(temp.file(1)).unwrap(), b"reused\n");
+        assert_eq!(fs::read(temp.file(2)).unwrap(), b"fresh\n");
+    }
+
+    /// Both the delivered reply and an elapsed deadline are visible at the one
+    /// poll: `tokio::time::timeout` polls the wrapped future before its delay,
+    /// so the acknowledgement wins and the caller gets the lane.
+    #[tokio::test(start_paused = true)]
+    async fn registration_acknowledged_before_its_deadline_polls_is_a_success() {
+        let temp = TempDir::new();
+        let shards = Shards::start().expect("start shards");
+        let session = session_on(0);
+        let queue = Arc::clone(&shards.shards[pin(session)].queue);
+        let (first_started, first_started_rx) = std_mpsc::channel();
+        let (first_release, first_release_rx) = std_mpsc::channel();
+        queue.push_control(Job::Hold(Box::new(move || {
+            let _ = first_started.send(());
+            let _ = first_release_rx.recv();
+        })));
+        handshake(
+            &first_started_rx,
+            "the shard worker never entered its first hold",
+        );
+
+        let mut attach =
+            Box::pin(shards.attach(session, journal(&temp.file(0), &Faults::default()), None));
+        std::future::poll_fn(|context| match attach.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => panic!("worker is held before registering"),
+        })
+        .await;
+        assert_eq!(queue.request_count(), 1);
+
+        let (second_started, second_started_rx) = std_mpsc::channel();
+        let (second_release, second_release_rx) = std_mpsc::channel();
+        queue.push_control(Job::Hold(Box::new(move || {
+            let _ = second_started.send(());
+            let _ = second_release_rx.recv();
+        })));
+        let _ = first_release.send(());
+        // The worker registered the journal and delivered the reply before it
+        // reached the second hold. Only now move past every bound the call has.
+        handshake(
+            &second_started_rx,
+            "the shard worker never registered the journal and reached the second hold",
+        );
+        tokio::time::advance(ENQUEUE_WAIT + SETTLE_REPORT).await;
+
+        let mut lane = attach
+            .await
+            .expect("an acknowledged registration succeeds even when polled past its bound");
+        assert_eq!((lane.slot, lane.generation), (0, 0));
+        let _ = second_release.send(());
         lane.close().await.unwrap();
         assert_eq!(fs::read(temp.file(0)).unwrap(), [] as [u8; 0]);
     }

@@ -15,7 +15,7 @@ Private tool effects also require saved receipts. In a saved session, the first 
 
 Cancelling queued work does not release its identity. Later turns keep their allocated IDs. When a session reopens, unused reservations remain consumed. dal does not restore queued text. Submit it again if you still want to run it. A reservation alone does not create a completed turn.
 
-Reservation records use journal format 2. All other record kinds retain format 1, so one journal can contain both versions. Existing journals remain readable and are not rewritten. Once a format-2 reservation is written, a build that reads only format 1 cannot open that journal. Use a build that supports both formats.
+Reservation records use journal format 2, and mail delivery records use journal format 3. All other record kinds retain format 1, so one journal can contain several versions. Existing journals remain readable and are not rewritten. Once a record of a newer format is written, a build that does not read that format reports the newer format and does not open the journal. Use a build that supports formats 1 to 3.
 
 Multi-record batches still lack atomic framing against process crashes. An interrupted batch is not guaranteed to roll back cleanly on reopen.
 

@@ -20,8 +20,8 @@ use dal_core::ext::{
     Consumer, ExportId, ExportKind, OpId, OpSet, Phase, ReadView, ToolData, ViewNode,
 };
 use dal_core::{
-    CallId, DenyReason, ModelRequest, Name, Origin, RawJson, ScopeSpec, ServiceSet, SessionId,
-    TurnId,
+    AgentsOp, AgentsReply, CallId, DenyReason, MailMode, ModelRequest, Name, Origin, RawJson,
+    Receipt, ScopeSpec, ServiceSet, SessionId, TurnId,
 };
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -39,6 +39,7 @@ use crate::ext::script::{
     OpRecord, OpRequest, OpValue, Parent, ScopeId, ScriptCx, ScriptHost, Submit, TaskId,
 };
 use crate::ext::{BoxFuture, Caller, CallerKind};
+use crate::host::HostShared;
 use crate::session::backend::Backend;
 use crate::session::continuation::ContinuationOwner;
 use crate::session::tasks::ScopeTable;
@@ -85,8 +86,15 @@ type ScopedResult = (TaskId, OpId, OpOutcome, usize);
 pub(crate) struct SessionScriptHost {
     /// The owning session.
     session: SessionId,
-    /// The session data-plane the nested calls run through.
-    backend: Arc<Backend>,
+    /// The session data-plane the nested calls run through. A relay has no
+    /// backend and therefore cannot journal or fabricate session services.
+    backend: Option<Arc<Backend>>,
+    /// The task owner used by relay invocations without a session backend.
+    tasks: crate::session::tasks::SessionTasks,
+    /// Shared host state used for model pricing.
+    shared: Arc<HostShared>,
+    /// Relay services, when this host is attached to a relay.
+    relay_services: Option<Arc<dyn crate::ext::Services>>,
     /// The host-wide interpreter worker pool.
     interpreters: Arc<Interpreters>,
     /// The latest capture, or the session-start capture before one exists.
@@ -107,7 +115,7 @@ pub(crate) struct SessionScriptHost {
     observers: StdMutex<HashMap<InvocationId, Vec<ObserverError>>>,
     /// The host-wide retained-result budget.
     host_bytes: Arc<AtomicUsize>,
-    /// The session runtime that owns spawned model work.
+    /// The session runtime handle `abandon_inner` submits owned cleanup on.
     runtime: tokio::runtime::Handle,
     /// The nested-call id counter.
     next_call: AtomicU64,
@@ -147,6 +155,50 @@ impl SessionScriptHost {
         host
     }
 
+    /// Builds a script host for a relay stream. It has real invocation and
+    /// scope ownership, but no session backend or journal.
+    pub(crate) fn for_relay(
+        session: SessionId,
+        shared: &Arc<HostShared>,
+        interpreters: Arc<Interpreters>,
+        generation: Arc<Generation>,
+        tasks: crate::session::tasks::SessionTasks,
+        services: Arc<dyn crate::ext::Services>,
+    ) -> Arc<Self> {
+        let catalog = generation.catalog().clone();
+        #[expect(
+            clippy::expect_used,
+            reason = "the empty authority set can never exceed the capture ceiling"
+        )]
+        let empty = EvalEnvironment::capture(generation.id, OpSet::EMPTY, None, [0; 32])
+            .expect("empty authority set captures");
+        let host = Arc::new(Self {
+            session,
+            backend: None,
+            tasks,
+            shared: Arc::clone(shared),
+            relay_services: Some(services),
+            interpreters,
+            captured: StdRwLock::new(Captured {
+                env: Arc::new(empty),
+                generation,
+                turn: None,
+                turn_cancel: None,
+            }),
+            catalog,
+            tables: StdMutex::new(HashMap::new()),
+            owners: StdMutex::new(HashMap::new()),
+            runners: Mutex::new(HashMap::new()),
+            observers: StdMutex::new(HashMap::new()),
+            host_bytes: Arc::new(AtomicUsize::new(0)),
+            runtime: tokio::runtime::Handle::current(),
+            next_call: AtomicU64::new(1),
+            host_cell: OnceLock::new(),
+        });
+        host.bind();
+        host
+    }
+
     /// Builds the host for one session against the session-start generation.
     pub(crate) fn new(
         session: SessionId,
@@ -167,9 +219,14 @@ impl SessionScriptHost {
             turn: None,
             turn_cancel: None,
         };
+        let tasks = backend.tasks().clone();
+        let shared = Arc::clone(&backend.host_state().shared);
         Self {
             session,
-            backend,
+            backend: Some(backend),
+            tasks,
+            shared,
+            relay_services: None,
             interpreters,
             captured: StdRwLock::new(captured),
             catalog,
@@ -278,6 +335,13 @@ impl SessionScriptHost {
         self.host_cell.get().and_then(Weak::upgrade)
     }
 
+    /// Returns the service plane available to this script host.
+    fn plane_services(&self) -> Option<Arc<dyn crate::ext::Services>> {
+        self.relay_services
+            .clone()
+            .or_else(|| self.backend.as_ref().and_then(|backend| backend.services()))
+    }
+
     /// Mints one nested-call identity.
     fn mint_call(&self) -> CallId {
         let n = self.next_call.fetch_add(1, Ordering::Relaxed);
@@ -352,7 +416,7 @@ impl SessionScriptHost {
         entry: Entry,
     ) -> Result<Arc<Invocation>, HostTerminal> {
         let captured = self.snapshot();
-        let cont_owner = ContinuationOwner::new(self.backend.tasks().clone());
+        let cont_owner = ContinuationOwner::new(self.tasks.clone());
         let parts = match parent {
             Parent::Of(inv) => match entry {
                 Entry::Eval { .. } => return Err(HostTerminal::NestedEval),
@@ -365,6 +429,13 @@ impl SessionScriptHost {
                     if !missing.is_empty() {
                         return Err(HostTerminal::IncompleteScope { missing });
                     }
+                    let deadline = match phase {
+                        Phase::Hook(_) => {
+                            Instant::now()
+                                + Duration::from_millis(crate::ext::hooks::HOOK_DEADLINE_MS)
+                        }
+                        _ => Instant::now() + SCRIPT_WALL,
+                    };
                     InvocationParts {
                         parent: Some(Arc::clone(inv)),
                         session: self.session,
@@ -374,7 +445,7 @@ impl SessionScriptHost {
                         export: Some(id),
                         phase,
                         consumer: None,
-                        deadline: Instant::now() + SCRIPT_WALL,
+                        deadline,
                         ceiling: uses.clone(),
                         declared: uses.clone(),
                         cutoff: inv.cutoff(),
@@ -417,7 +488,13 @@ impl SessionScriptHost {
                     export,
                     phase,
                     consumer: None,
-                    deadline: Instant::now() + SCRIPT_WALL,
+                    deadline: match phase {
+                        Phase::Hook(_) => {
+                            Instant::now()
+                                + Duration::from_millis(crate::ext::hooks::HOOK_DEADLINE_MS)
+                        }
+                        _ => Instant::now() + SCRIPT_WALL,
+                    },
                     ceiling: ceiling.clone(),
                     declared: ceiling,
                     cutoff: captured.env.cutoff(),
@@ -451,7 +528,7 @@ impl SessionScriptHost {
             .tables
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let shared = Arc::clone(&self.backend.host_state().shared);
+        let shared = Arc::clone(&self.shared);
         let price: crate::ext::scope::PriceFn =
             Arc::new(move |route| crate::ext::synthetic::price_of(&shared, route));
         tables.insert(
@@ -566,7 +643,14 @@ impl SessionScriptHost {
             shared: None,
             attached: None,
         };
-        let outcome = crate::session::dispatch::direct_call_seeded(&self.backend, seed).await;
+        let outcome = match &self.backend {
+            Some(backend) => crate::session::dispatch::direct_call_seeded(backend, seed).await,
+            None => crate::ext::ToolOutcome::Err(crate::error::ToolError::Denied(
+                DenyReason::Unavailable {
+                    what: "services outside a session".into(),
+                },
+            )),
+        };
         let scope = if inv.cancel().is_cancelled() {
             CancelScope::Root
         } else {
@@ -594,7 +678,7 @@ impl SessionScriptHost {
             let outcome = unavailable(&call, &op, "operation is not a service call");
             return (op, outcome, 0);
         };
-        let Some(services) = self.backend.services() else {
+        let Some(services) = self.plane_services() else {
             let outcome = unavailable(&call, &op, "session services are not ready");
             return (op, outcome, 0);
         };
@@ -756,31 +840,39 @@ impl SessionScriptHost {
         let caller = inv.caller().clone();
         let script = Arc::clone(self);
         let runtime_cancel = cancel.clone();
-        // The model op runs on the session runtime rather than the calling
-        // interpreter thread, so a scope task never stalls the turn driver
-        // while the Starlark evaluator blocks on this call.
-        let output = self.runtime.spawn(async move {
-            let inference = if is_infer {
-                runtime
-                    .infer(&caller, request, script, runtime_cancel)
-                    .await?
-            } else {
-                let stream = runtime
-                    .script_forward(&caller, request, &private_tools, runtime_cancel)
-                    .await?;
-                crate::ext::synthetic::collect(stream)
-                    .await
-                    .map_err(|error| ServiceError::failed(None, error.to_string()))?
-            };
-            let encoded = sonic_rs::to_string(&inference)
-                .map_err(|error| ServiceError::failed(None, error.to_string()))?;
-            RawJson::parse(&encoded).map_err(|error| ServiceError::failed(None, error.to_string()))
-        });
-        let output = async {
-            match output.await {
-                Ok(value) => value,
-                Err(error) => Err(ServiceError::failed(None, error.to_string())),
-            }
+        // The nested inference is this operation's own future, never a
+        // spawned task: whoever owns this operation (the scope executor
+        // `JoinSet`, or the issuing call) owns the model work and every
+        // member handle it opens. The select below drops the inference on
+        // either cancel, and an aborted executor task drops it too. It
+        // polls under the lineage of its task, which `pump` re-enters. A
+        // model panic becomes a typed service failure.
+        let inference = async {
+            let ran = crate::session::contain::contained(async {
+                let inference = if is_infer {
+                    runtime
+                        .infer(&caller, request, script, runtime_cancel)
+                        .await?
+                } else {
+                    let stream = runtime
+                        .script_forward(&caller, request, &private_tools, runtime_cancel)
+                        .await?;
+                    crate::ext::synthetic::collect(stream)
+                        .await
+                        .map_err(|error| ServiceError::failed(None, error.to_string()))?
+                };
+                let encoded = sonic_rs::to_string(&inference)
+                    .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+                RawJson::parse(&encoded)
+                    .map_err(|error| ServiceError::failed(None, error.to_string()))
+            })
+            .await;
+            ran.unwrap_or_else(|text| {
+                Err(ServiceError::failed(
+                    None,
+                    format!("model operation panicked: {text}"),
+                ))
+            })
         };
         let value = tokio::select! {
             biased;
@@ -790,7 +882,7 @@ impl SessionScriptHost {
             () = cancel.cancelled() => {
                 return (op.clone(), owner_cancelled(&call, &op), 0);
             }
-            value = output => value,
+            value = inference => value,
         };
         let value = match value {
             Ok(value) => value,
@@ -843,14 +935,23 @@ impl SessionScriptHost {
         };
         let mut runners = self.runners.lock().await;
         let runner = runners.entry(inv.id()).or_default();
+        // A JoinSet spawn starts without the caller's task-local lineage, so
+        // capture the ambient synthetic chain here and re-enter it inside:
+        // `run_op` (and its nested model inference) must see the parent chain.
+        let pump_lineage = crate::ext::synthetic::lineage();
         for ((task, req, cutoff, cancel), call) in issued.into_iter().zip(calls) {
             runner.pending.lock().await.insert(task);
             let this = Arc::clone(self);
             let inv = Arc::clone(inv);
-            runner.inflight.lock().await.spawn(async move {
-                let (op, outcome, bytes) = this.run_op(&inv, req, cutoff, call, cancel).await;
-                (task, op, outcome, bytes)
-            });
+            let lineage = pump_lineage.clone();
+            runner
+                .inflight
+                .lock()
+                .await
+                .spawn(crate::ext::synthetic::enter(lineage, async move {
+                    let (op, outcome, bytes) = this.run_op(&inv, req, cutoff, call, cancel).await;
+                    (task, op, outcome, bytes)
+                }));
         }
     }
 
@@ -1089,6 +1190,45 @@ impl SessionScriptHost {
             outstanding,
             observer_errors: observer.into(),
         }
+    }
+
+    /// Synchronously abandons an invocation whose owner dropped it before
+    /// the finish future completed, such as a hook that ran out of its
+    /// deadline.
+    ///
+    /// Cancellation and terminalization land before anything async: the
+    /// invocation token cancels first, then every invocation-owned scope and
+    /// task settles terminal-cancelled under the table lock, so no new
+    /// effect can start and no late executor result can republish; a root
+    /// then closes the effect gate. Only after those synchronous steps does
+    /// the bounded [`Self::finish_inner`] drain submit through the
+    /// invocation owner's existing `SessionTasks::spawn_cleanup`, so the
+    /// owner joins it at shutdown. A closed owner drops that submission
+    /// synchronously with cancelled semantics, which is safe because the
+    /// steps above already terminalized the invocation. Nothing here blocks,
+    /// spawns unowned work, or needs a runtime context: the handle is the
+    /// one captured at construction.
+    fn abandon_inner(&self, inv: &Arc<Invocation>) {
+        inv.cancel().cancel();
+        {
+            let mut tables = self
+                .tables
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(table) = tables.get_mut(&inv.id()) {
+                table.terminalize();
+            }
+        }
+        if inv.parent().is_none() {
+            inv.gate().close();
+        }
+        let Some(this) = self.me() else {
+            return;
+        };
+        let tracked = Arc::clone(inv);
+        self.tasks.spawn_cleanup(&self.runtime, async move {
+            this.finish_inner(&tracked).await;
+        });
     }
 }
 
@@ -1430,6 +1570,110 @@ impl ScriptHost for SessionScriptHost {
 
     fn observe_failed(&self, inv: &Arc<Invocation>, error: ObserverError) {
         self.record_observer(inv, error);
+    }
+
+    fn abandon(&self, inv: &Arc<Invocation>) {
+        self.abandon_inner(inv);
+    }
+
+    fn task_probe(
+        &self,
+        inv: &Arc<Invocation>,
+        task: TaskId,
+    ) -> Option<crate::ext::script::TaskProbe> {
+        let tables = self
+            .tables
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tables.get(&inv.id()).and_then(|table| table.probe(task))
+    }
+
+    fn send_member(
+        &self,
+        inv: &Arc<Invocation>,
+        task: TaskId,
+        text: &str,
+        mode: MailMode,
+    ) -> BoxFuture<'static, Result<Receipt, HostTerminal>> {
+        let target = {
+            let tables = self
+                .tables
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            tables.get(&inv.id()).and_then(|table| table.member(task))
+        };
+        let Some(target) = target else {
+            return Box::pin(async {
+                Err(HostTerminal::Denied {
+                    reason: DenyReason::Unavailable {
+                        what: "a running member session".into(),
+                    },
+                })
+            });
+        };
+        let Some(services) = self.plane_services() else {
+            return Box::pin(async {
+                Err(HostTerminal::Denied {
+                    reason: DenyReason::Unavailable {
+                        what: "member sessions outside a session".into(),
+                    },
+                })
+            });
+        };
+        let caller = inv.caller().clone();
+        let text = text.to_owned().into_boxed_str();
+        Box::pin(async move {
+            match services
+                .agents(
+                    &caller,
+                    AgentsOp::Send {
+                        to: target,
+                        text,
+                        mode,
+                        reply_to: None,
+                    },
+                )
+                .await
+            {
+                Ok(AgentsReply::Delivered(receipt)) => Ok(receipt),
+                Ok(_) => Err(HostTerminal::Denied {
+                    reason: DenyReason::Unavailable {
+                        what: "member mailbox gave no receipt".into(),
+                    },
+                }),
+                Err(error) => Err(match error {
+                    ServiceError::Denied(reason) => HostTerminal::Denied { reason },
+                    ServiceError::Cancelled => HostTerminal::Cancelled,
+                    _ => HostTerminal::Denied {
+                        reason: DenyReason::Unavailable {
+                            what: "member mailbox is unavailable".into(),
+                        },
+                    },
+                }),
+            }
+        })
+    }
+
+    fn close_member(&self, inv: &Arc<Invocation>, task: TaskId) -> BoxFuture<'static, ()> {
+        let target = {
+            let tables = self
+                .tables
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            tables.get(&inv.id()).and_then(|table| table.member(task))
+        };
+        let Some(target) = target else {
+            return Box::pin(async {});
+        };
+        let Some(services) = self.plane_services() else {
+            return Box::pin(async {});
+        };
+        let caller = inv.caller().clone();
+        Box::pin(async move {
+            let _ = services
+                .agents(&caller, AgentsOp::Cancel { id: target })
+                .await;
+        })
     }
 }
 

@@ -13,12 +13,12 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     auth::{
         credential::{self, Credential, EnvSnapshot},
+        kimi::ClientIdentitySource,
         refresh::{Refresher, TokenEndpoints},
     },
     catalog::ResolvedModel,
     error::ProviderError,
     family::{
-        azure,
         bedrock::auth::{AwsCredentialResolver, SHARED_RESOLVE_TIMEOUT, expired},
         copilot::IdentityCache,
         gitlab::{DirectAccessCache, workflow::WorkflowSessions},
@@ -77,6 +77,7 @@ pub(super) struct ProviderSetInner {
     pub(super) data_dir: PathBuf,
     pub(super) cache_dir: PathBuf,
     pub(super) env: EnvSnapshot,
+    pub(super) vertex_adc: Arc<crate::family::google::adc::Resolver>,
     pub(super) clients: HashMap<Box<str>, http::LazyClient>,
     pub(super) providers: HashMap<Box<str>, ProviderSlot>,
     pub(super) ws: WsSessions,
@@ -95,6 +96,10 @@ pub(super) struct ProviderSetInner {
     /// engine holds the same instance, so sign-in rotation invalidates the
     /// grants every live turn reads. There is no second cache.
     pub(super) gitlab_grants: Arc<DirectAccessCache>,
+    /// The one Kimi client identity of this set, derived on first use and
+    /// shared by the refresher and every request, so a Kimi Code session
+    /// sends one device id. Building the set reads and writes nothing.
+    pub(super) client_identity: Arc<ClientIdentitySource>,
     /// The live GitLab workflow sockets of this set, keyed by session and
     /// provider; a turn takes its row, drives it, and returns it only while
     /// a tool action is pending.
@@ -148,9 +153,11 @@ impl ProviderSet {
     ///
     /// # Errors
     /// Returns the URL admission or usage-endpoint error for invalid provider
-    /// configuration, or names the provider whose defaulted Azure-shaped entry
-    /// names an invalid `AZURE_OPENAI_RESOURCE_NAME`. The auth file is loaded
-    /// only when a credential is resolved.
+    /// configuration. Environment-shaped endpoints are never resolved here:
+    /// an Azure-routed entry renders its endpoint lazily at the bind,
+    /// discovery, and request boundaries, so an unconfigured Azure entry
+    /// can neither fail the set nor redirect another provider. The auth
+    /// file is loaded only when a credential is resolved.
     pub fn new(
         config: &ProviderConfig,
         identity: ProviderIdentity,
@@ -231,11 +238,10 @@ impl ProviderSet {
         endpoints: TokenEndpoints,
     ) -> Result<Self, ProviderError> {
         let user_agent = identity.user_agent().into_boxed_str();
-        // One shared effective endpoint per entry, resolved before any slot,
-        // client, or kept configuration is built from it: the catalog and
-        // inference paths both read the prepared entries, so no second copy
-        // can go stale.
-        let config = with_azure_endpoints(config, &env)?;
+        // Entries keep the configuration's own bases: an environment-shaped
+        // endpoint (Azure) renders from the captured snapshot at the bind,
+        // discovery, and request boundaries, never here, so startup admits
+        // the configuration without touching the environment.
         let (clients, providers, usage) =
             Self::build_provider_slots(&config.providers, &user_agent)?;
 
@@ -244,6 +250,13 @@ impl ProviderSet {
         // live proxy turns read. The sibling login module reaches it only
         // through `ProviderSet::gitlab_grants`, never through these fields.
         let gitlab_grants: Arc<DirectAccessCache> = Arc::default();
+        // One client-identity source for the whole set: the refresher and
+        // the request path share it, so they send one device id.
+        let client_identity = Arc::new(ClientIdentitySource::new(
+            identity.clone(),
+            env.clone(),
+            data_dir.to_path_buf(),
+        ));
         let refresher = Arc::new(
             Refresher::new(
                 user_agent.clone(),
@@ -251,7 +264,8 @@ impl ProviderSet {
                 endpoints,
                 &env,
             )
-            .with_gitlab_grants(Arc::clone(&gitlab_grants)),
+            .with_gitlab_grants(Arc::clone(&gitlab_grants))
+            .with_client_identity(Arc::clone(&client_identity)),
         );
         // The Bedrock chain resolves over the captured environment with its
         // own HTTP client: the crate's shared per-origin client must never
@@ -263,6 +277,10 @@ impl ProviderSet {
             env.clone(),
             http::build_resolver_client(),
             AwsCredentialResolver::home_dir_from_env(&env),
+        ));
+        let vertex_adc = Arc::new(crate::family::google::adc::Resolver::new(
+            env.clone(),
+            http::build_resolver_client(),
         ));
         // The Gemini CLI child runs headless under a caller-created TOML
         // deny-all policy. The file is published once here through the
@@ -288,17 +306,19 @@ impl ProviderSet {
         };
         Ok(Self {
             inner: Arc::new(ProviderSetInner {
-                config,
+                config: config.clone(),
                 identity,
                 user_agent,
                 data_dir: data_dir.to_path_buf(),
                 cache_dir: cache_dir.to_path_buf(),
                 env,
+                vertex_adc,
                 clients,
                 providers,
                 ws: WsSessions::new(),
                 notices: Mutex::new(HashMap::new()),
                 refresher,
+                client_identity,
                 usage,
                 scripted,
                 copilot_identities: IdentityCache::default(),
@@ -377,9 +397,16 @@ impl ProviderSet {
     /// Non-Bedrock rows reuse the credential-resolution presence rule: any
     /// resolved credential (including an explicit credential-less row) is
     /// ready, and only [`ProviderError::NoCredentials`] reads as `false`.
-    /// Vertex rows also count a captured pre-minted bearer token, and Droid
-    /// and Antigravity rows count only a stored OAuth login, because those
-    /// adapters refuse an API key.
+    /// Vertex rows follow the shared `vertex_readiness` row in request
+    /// precedence order: an Express API key needs no route, a stored sign-in
+    /// or captured bearer needs the project/location route, and the ADC
+    /// source counts a strictly validated local ADC file or an already
+    /// acquired token, surfacing a broken selected ADC file as its typed
+    /// file error. Droid, Antigravity, and Cloud Code Assist rows count only
+    /// a stored OAuth login, because those adapters refuse an API key; the two
+    /// Google rows also need the Google Cloud project their request names (the
+    /// sign-in's stored project, or for Antigravity an explicit `project`
+    /// setting), so a project-less login reads as not ready.
     /// Bedrock rows count the stored `auth.json` key and the captured
     /// `AWS_BEARER_TOKEN_BEDROCK` bearer first, then consult the set-owned
     /// ambient AWS credential-source probe. Nothing refreshes, spawns a
@@ -512,17 +539,29 @@ impl ProviderSet {
             return Err(ProviderError::Cancelled);
         }
         if entry.family == Family::GoogleVertex {
-            // A Vertex row is ready when it holds a stored/env credential of
-            // the usual kind, or a pre-minted bearer token in the captured
-            // environment (gcloud's `print-access-token` workflow).
-            let keyed = credential::resolve(entry, store, &self.inner.env).is_ok();
-            return Ok(keyed || super::request::vertex_env_token(&self.inner.env).is_some());
+            // A Vertex row follows the request's source precedence: the
+            // Express key needs no route, a stored sign-in needs the route,
+            // then a captured bearer, and the ADC source last. The ADC probe
+            // counts a strictly validated local ADC file or an acquired
+            // token, surfaces a broken selected file as its typed error, and
+            // never touches the network or ambient metadata.
+            return vertex_readiness(
+                entry,
+                store,
+                &self.inner.env,
+                &self.inner.vertex_adc,
+                cancel,
+            )
+            .await;
         }
         if accepts_only_oauth(entry.family) {
             // The request adapter signs in with a stored OAuth login and
-            // refuses an API key, so a key alone is not a usable source.
+            // refuses an API key, so a key alone is not a usable source. A
+            // Cloud Code Assist sign-in is ready only with the Google Cloud
+            // project its request names: without one no request can be built,
+            // so a project-less sign-in reads as not ready, never as ready.
             return match credential::resolve(entry, store, &self.inner.env) {
-                Ok(Credential::OAuth(_)) => Ok(true),
+                Ok(Credential::OAuth(oauth)) => Ok(sign_in_ready(entry, &oauth)),
                 Ok(Credential::ApiKey { .. } | Credential::None)
                 | Err(ProviderError::NoCredentials { .. }) => Ok(false),
                 Err(error) => Err(error),
@@ -683,13 +722,16 @@ impl ProviderSet {
             &refresh_cancel,
         )
         .await?;
+        let user_agent =
+            catalog_user_agent(&slot.entry, &self.inner.identity, &self.inner.user_agent);
         let fetch = crate::catalog::ModelFetch {
             client: slot.client.get(),
             provider: &slot.entry,
             credential: &credential,
             cache_dir: &self.inner.cache_dir,
-            user_agent: &self.inner.user_agent,
+            user_agent: &user_agent,
             version: &self.inner.identity.version,
+            env: &self.inner.env,
         };
         let loaded = crate::catalog::load_models(&fetch, tokio::time::sleep).await;
         drop(permit);
@@ -738,36 +780,42 @@ impl ProviderSet {
     }
 }
 
-/// Resolves the effective endpoint of every Azure-shaped entry whose table
-/// named no `base_url`: the captured `AZURE_OPENAI_BASE_URL`, else the
-/// canonical endpoint of the validated `AZURE_OPENAI_RESOURCE_NAME`, else the
-/// row default the entry already carries. An explicit table URL always wins,
-/// even when it equals the row default, so an invalid resource name the entry
-/// never needs is never validated and can neither override the URL nor fail
-/// the set. A blank variable names nothing. Entries without the Azure shape
-/// are untouched, whatever the Azure variables hold.
-///
-/// The configuration stays pure: the environment here is the host's captured
-/// snapshot, never ambient process state.
-///
-/// # Errors
-///
-/// [`ProviderError::InvalidRequest`] naming the provider when a defaulted
-/// Azure-shaped entry names a resource that is not one DNS label.
-fn with_azure_endpoints(
-    config: &ProviderConfig,
+/// The one Vertex readiness row, shared by [`ProviderSet::credential_source_available`]
+/// and [`ProviderSet::provider_readiness`], in request precedence order: an
+/// Express API key is ready with no route at all, a stored sign-in is ready
+/// with the complete project/location route, a captured bearer is ready
+/// with the route, and only then does the ADC source speak. The ADC probe
+/// counts a usable local source, a strictly validated ADC file or an
+/// already acquired token, and surfaces a broken selected ADC file as its
+/// typed error instead of a verdict. Side-effect-free: no request, refresh,
+/// or cache write, and never an ambient metadata read.
+async fn vertex_readiness(
+    entry: &ProviderEntry,
+    store: &credential::AuthStore,
     env: &EnvSnapshot,
-) -> Result<ProviderConfig, ProviderError> {
-    let mut prepared = config.clone();
-    for entry in &mut prepared.providers {
-        if !entry.settings.base_url_defaulted || !super::request::is_azure_entry(entry) {
-            continue;
-        }
-        if let Some(base) = azure::base_url_from_env(&entry.id, env)? {
-            entry.base_url = base.into();
-        }
+    adc: &crate::family::google::adc::Resolver,
+    cancel: &CancellationToken,
+) -> Result<bool, ProviderError> {
+    if cancel.is_cancelled() {
+        return Err(ProviderError::Cancelled);
     }
-    Ok(prepared)
+    let route_ready = |entry: &ProviderEntry| {
+        let (project, location, _) = super::request::resolve_vertex_env(entry, env);
+        project.is_some() && location.is_some()
+    };
+    match credential::resolve(entry, store, env) {
+        Ok(Credential::ApiKey { .. }) => return Ok(true),
+        Ok(Credential::OAuth(_)) => return Ok(route_ready(entry)),
+        Err(ProviderError::NoCredentials { .. }) | Ok(Credential::None) => {}
+        Err(error) => return Err(error),
+    }
+    if !route_ready(entry) {
+        return Ok(false);
+    }
+    if super::request::vertex_env_token(env).is_some() {
+        return Ok(true);
+    }
+    adc.readiness(cancel).await
 }
 
 impl std::fmt::Debug for ProviderSet {
@@ -826,9 +874,50 @@ pub(super) const fn authenticates_ambiently(family: Family) -> bool {
 }
 
 /// Whether a family's adapter accepts only a stored OAuth login and refuses
-/// an API key: Droid (`droid::require_bearer`) and Antigravity.
+/// an API key: Droid (`droid::require_bearer`), Antigravity, and Cloud Code
+/// Assist.
 pub(super) const fn accepts_only_oauth(family: Family) -> bool {
-    matches!(family, Family::Droid | Family::GoogleAntigravity)
+    matches!(
+        family,
+        Family::Droid | Family::GoogleAntigravity | Family::GoogleCloudCodeAssist
+    )
+}
+
+/// Whether one stored OAuth sign-in can serve its row. The two Cloud Code
+/// Assist rows ask for more than the sign-in: the Google Cloud project their
+/// request names ([`ProviderEntry::cloud_code_project`], the one rule the
+/// adapter and the catalog also use, so readiness cannot drift from the
+/// route). A sign-in whose request could not be built is not ready.
+fn sign_in_ready(entry: &ProviderEntry, oauth: &credential::OAuthCredential) -> bool {
+    match entry.family {
+        Family::GoogleCloudCodeAssist | Family::GoogleAntigravity => {
+            entry.cloud_code_project(oauth).is_some()
+        }
+        _ => true,
+    }
+}
+
+/// The `User-Agent` one provider's model-list request sends. The two Cloud
+/// Code Assist surfaces identify as their pinned clients, exactly as their
+/// request adapters do (the Gemini CLI identity carries the host platform
+/// from the set's [`ProviderIdentity`]); every other provider keeps the
+/// set's own value.
+pub(super) fn catalog_user_agent<'a>(
+    entry: &ProviderEntry,
+    identity: &ProviderIdentity,
+    default: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    use crate::family::google::{antigravity, cloud_code};
+    match entry.family {
+        Family::GoogleCloudCodeAssist => std::borrow::Cow::Owned(cloud_code::user_agent(
+            cloud_code::DISCOVERY_MODEL,
+            identity,
+        )),
+        Family::GoogleAntigravity => {
+            std::borrow::Cow::Owned(antigravity::user_agent(antigravity::CLIENT_VERSION))
+        }
+        _ => std::borrow::Cow::Borrowed(default),
+    }
 }
 
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -851,4 +940,265 @@ fn origin_key(base: &str, family: dal_core::Family) -> Result<Box<str>, Provider
             reason: String::from("provider base URL has no port"),
         })?;
     Ok(format!("{}://{host}:{port}", url.scheme()).into_boxed_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{AuthStyle, Origins, ProviderSettings, Transport};
+
+    /// One Vertex entry: `key_env` when the row is keyed, project/location
+    /// settings when the row carries a route.
+    fn vertex_entry(
+        key_env: Option<&str>,
+        project: Option<&str>,
+        location: Option<&str>,
+    ) -> ProviderEntry {
+        ProviderEntry {
+            id: "google-vertex".into(),
+            def: crate::find("google-vertex"),
+            family: Family::GoogleVertex,
+            base_url: String::from("https://aiplatform.googleapis.com").into_boxed_str(),
+            transport: Transport::Https,
+            key_env: key_env.map(Into::into),
+            auth: AuthStyle::Bearer,
+            max_concurrent_requests: 1,
+            origins: Origins::default(),
+            settings: ProviderSettings {
+                project: project.map(Into::into),
+                location: location.map(Into::into),
+                ..ProviderSettings::default()
+            },
+        }
+    }
+
+    fn readiness_store() -> credential::AuthStore {
+        let path = std::env::temp_dir().join(format!(
+            "dal-vertex-readiness-{}-auth.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        credential::AuthStore::load(path).expect("an absent auth store loads empty")
+    }
+
+    #[tokio::test]
+    async fn vertex_express_key_is_ready_without_project_or_location() {
+        let env = EnvSnapshot::test(&[("TEST_VERTEX_KEY", "key")]);
+        let entry = vertex_entry(Some("TEST_VERTEX_KEY"), None, None);
+        let adc = crate::family::google::adc::Resolver::new(env.clone(), reqwest::Client::new());
+        assert!(
+            vertex_readiness(
+                &entry,
+                &readiness_store(),
+                &env,
+                &adc,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+            "an Express key needs no route"
+        );
+    }
+
+    #[tokio::test]
+    async fn vertex_bearer_sources_needs_the_route() {
+        // A captured bearer with no route is not ready, never an error.
+        let bearer = EnvSnapshot::test(&[("GOOGLE_CLOUD_ACCESS_TOKEN", "token")]);
+        let entry = vertex_entry(None, None, None);
+        let adc = crate::family::google::adc::Resolver::new(bearer.clone(), reqwest::Client::new());
+        assert!(
+            !vertex_readiness(
+                &entry,
+                &readiness_store(),
+                &bearer,
+                &adc,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap()
+        );
+        // The same bearer with a complete route is ready without touching
+        // files or metadata.
+        let routed = vertex_entry(None, Some("project"), Some("location"));
+        assert!(
+            vertex_readiness(
+                &routed,
+                &readiness_store(),
+                &bearer,
+                &adc,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap()
+        );
+        // No source at all, complete route: the ADC probe answers false
+        // because nothing was acquired and metadata is never probed.
+        let empty = EnvSnapshot::test(&[]);
+        let adc = crate::family::google::adc::Resolver::new(empty.clone(), reqwest::Client::new());
+        assert!(
+            !vertex_readiness(
+                &routed,
+                &readiness_store(),
+                &empty,
+                &adc,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    /// Higher-priority sources out-rank a broken selected ADC file, so the
+    /// probe never runs and the broken file cannot even error: a resolved
+    /// Express API key is ready with no route at all, and a captured bearer
+    /// is ready with the route, while the same bearer without the route is
+    /// not ready. The Vertex row legally stores no OAuth member, so no
+    /// stored-sign-in fixture exists here; the OAuth arm of `vertex_readiness`
+    /// stays total for the rows that legally hold one.
+    #[tokio::test]
+    async fn vertex_higher_priority_sources_outrank_a_broken_adc_source() {
+        let path = std::env::temp_dir().join(format!(
+            "dal-vertex-readiness-{}-broken.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            br#"{"type":"authorized_user","refresh_token":"only"}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        // A resolved Express API key needs no route and never reaches the
+        // ADC probe: ready even though the selected ADC file is broken.
+        let keyed_env = EnvSnapshot::test(&[
+            ("TEST_VERTEX_KEY", "express-key"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", path.to_str().unwrap()),
+        ]);
+        let keyed = vertex_entry(Some("TEST_VERTEX_KEY"), None, None);
+        let adc =
+            crate::family::google::adc::Resolver::new(keyed_env.clone(), reqwest::Client::new());
+        assert!(
+            vertex_readiness(
+                &keyed,
+                &readiness_store(),
+                &keyed_env,
+                &adc,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap()
+        );
+        // A captured bearer with the complete route outranks the broken file.
+        let bearer_env = EnvSnapshot::test(&[
+            ("GOOGLE_APPLICATION_CREDENTIALS", path.to_str().unwrap()),
+            ("GOOGLE_CLOUD_ACCESS_TOKEN", "captured-bearer"),
+        ]);
+        let routed = vertex_entry(None, Some("project"), Some("location"));
+        let unrouted = vertex_entry(None, None, None);
+        let adc =
+            crate::family::google::adc::Resolver::new(bearer_env.clone(), reqwest::Client::new());
+        assert!(
+            vertex_readiness(
+                &routed,
+                &readiness_store(),
+                &bearer_env,
+                &adc,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap()
+        );
+        // The same bearer without the route is not ready, never an error.
+        assert!(
+            !vertex_readiness(
+                &unrouted,
+                &readiness_store(),
+                &bearer_env,
+                &adc,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A strictly validated local ADC file is a usable source: ready before
+    /// any token has been minted, with no HTTP at all (both endpoints are
+    /// discard ports, so any contact would fail the check).
+    #[tokio::test]
+    async fn vertex_readiness_counts_a_valid_adc_file_before_any_mint() {
+        let path = std::env::temp_dir().join(format!(
+            "dal-vertex-readiness-{}-valid.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            br#"{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r"}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let env = EnvSnapshot::test(&[("GOOGLE_APPLICATION_CREDENTIALS", path.to_str().unwrap())]);
+        let entry = vertex_entry(None, Some("project"), Some("location"));
+        let adc = crate::family::google::adc::Resolver::new(env.clone(), reqwest::Client::new())
+            .with_endpoints(
+                "http://[::1]:9/token".to_string(),
+                "http://[::1]:9/metadata".to_string(),
+            );
+        assert!(
+            vertex_readiness(
+                &entry,
+                &readiness_store(),
+                &env,
+                &adc,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+            "a validated ADC file is a usable local source before any mint"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn vertex_readiness_surfaces_a_broken_adc_file() {
+        let path = std::env::temp_dir().join(format!(
+            "dal-vertex-readiness-{}-broken.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            br#"{"type":"authorized_user","refresh_token":"only"}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let env = EnvSnapshot::test(&[("GOOGLE_APPLICATION_CREDENTIALS", path.to_str().unwrap())]);
+        let entry = vertex_entry(None, Some("project"), Some("location"));
+        let adc = crate::family::google::adc::Resolver::new(env.clone(), reqwest::Client::new());
+        let error = vertex_readiness(
+            &entry,
+            &readiness_store(),
+            &env,
+            &adc,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, ProviderError::AuthFileInvalid { .. }),
+            "a broken selected ADC file is a typed error, not a verdict: {error:?}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
 }

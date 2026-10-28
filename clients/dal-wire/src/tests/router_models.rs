@@ -236,26 +236,8 @@ fn unlisted_spellings_are_model_not_found() {
 
 #[test]
 fn every_family_prefix_round_trips_through_the_wire_id() {
-    const FAMILIES: [Family; 16] = [
-        Family::Chat,
-        Family::Responses,
-        Family::Codex,
-        Family::Anthropic,
-        Family::Bedrock,
-        Family::Cursor,
-        Family::Devin,
-        Family::Droid,
-        Family::GitLab,
-        Family::GoogleGenerativeAi,
-        Family::GoogleVertex,
-        Family::GoogleGeminiCli,
-        Family::GoogleAntigravity,
-        Family::Mistral,
-        Family::Ollama,
-        Family::PiMessages,
-    ];
     let options = options(&[]);
-    for route in FAMILIES {
+    for route in Family::ALL {
         let native = "native/model";
         let expected = api_without_provider(route, native);
         let id = route_id(&expected);

@@ -22,10 +22,15 @@ impl Limits {
     ///
     /// # Errors
     ///
-    /// Returns the vendor error when a cap is rejected.
-    pub(crate) fn apply(&self, evaluator: &mut Evaluator<'_, '_, '_>) -> starlark::Result<()> {
-        let heap = usize::try_from(self.heap_bytes).unwrap_or(usize::MAX);
-        let depth = usize::try_from(self.stack_depth).unwrap_or(usize::MAX);
+    /// Returns the vendor error when a cap is rejected, or a typed error when a
+    /// budget does not fit this platform's `usize`. An unrepresentable budget is
+    /// refused, never widened to unbounded.
+    pub fn apply(&self, evaluator: &mut Evaluator<'_, '_, '_>) -> starlark::Result<()> {
+        let heap = usize::try_from(self.heap_bytes)
+            .map_err(|_| starlark::Error::new_other(BudgetTooWide(self.heap_bytes)))?;
+        let stack = u64::from(self.stack_depth);
+        let depth =
+            usize::try_from(stack).map_err(|_| starlark::Error::new_other(BudgetTooWide(stack)))?;
         evaluator.set_max_tick_count(self.ticks)?;
         evaluator.set_max_heap_size(heap)?;
         evaluator.set_max_callstack_size(depth)?;
@@ -53,6 +58,55 @@ pub const CELL_LIMITS: Limits = Limits {
     heap_bytes: 33_554_432,
     stack_depth: 100,
 };
+
+#[derive(Debug, thiserror::Error)]
+#[error("plugin budget {0} does not fit this platform's address space")]
+struct BudgetTooWide(u64);
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LimitKeys {
+    pub(crate) ticks: &'static str,
+    pub(crate) heap: &'static str,
+}
+
+pub(crate) const LOAD_KEYS: LimitKeys = LimitKeys {
+    ticks: "limits.plugins.load_ticks",
+    heap: "limits.plugins.load_heap_bytes",
+};
+
+pub(crate) const HANDLER_KEYS: LimitKeys = LimitKeys {
+    ticks: "limits.plugins.handler_ticks",
+    heap: "limits.plugins.handler_heap_bytes",
+};
+
+pub(crate) const CELL_KEYS: LimitKeys = LimitKeys {
+    ticks: "limits.plugins.cell_ticks",
+    heap: "limits.plugins.cell_heap_bytes",
+};
+
+const STACK_KEY: &str = "limits.plugins.stack_depth";
+
+pub(crate) fn name_exceeded_limit(error: &starlark::Error, keys: LimitKeys) -> String {
+    let key = match error.kind() {
+        starlark::ErrorKind::StackOverflow(_) => Some(STACK_KEY),
+        starlark::ErrorKind::Other(source) => {
+            let message = source.to_string();
+            message
+                .starts_with("Execution duration limit of ")
+                .then_some(keys.ticks)
+                .or_else(|| {
+                    message
+                        .starts_with("Heap memory limit of ")
+                        .then_some(keys.heap)
+                })
+        }
+        _ => None,
+    };
+    match key {
+        Some(key) => format!("{error}; raise {key} to allow more"),
+        None => error.to_string(),
+    }
+}
 
 /// Hard cap: transport value nesting depth.
 pub const MAX_VALUE_DEPTH: usize = 64;

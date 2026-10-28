@@ -96,6 +96,21 @@ pub fn generate(args: &GenArgs) -> Result<String, Vec<GenError>> {
         .map(|spec| (spec.name.as_str(), spec))
         .collect();
     let mut pages = read_manual(args, &mut errors);
+    if listed.contains_key("license") && matches!(args.scheme, Scheme::Dal) {
+        if pages.contains_key("license") {
+            errors.push(GenError::new(
+                args.dir.join("license.md"),
+                0,
+                format!(
+                    "{prefix}: {}: the license page comes from the checkout root \
+                     LICENSE.md; delete the manual-tree copy.",
+                    args.dir.join("license.md").display()
+                ),
+            ));
+        } else if let Some(text) = read_text(&license_source(args), prefix, &mut errors) {
+            pages.insert("license".to_owned(), text);
+        }
+    }
     let manual_pages: BTreeSet<_> = pages.keys().cloned().collect();
     if let Some(examples) = &args.examples {
         pages.extend(assemble_examples(args, examples, &listed, &mut errors));
@@ -746,6 +761,26 @@ fn longest_backticks(text: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Returns the checkout root license path for the manual directory.
+fn license_source(args: &GenArgs) -> PathBuf {
+    args.dir
+        .parent()
+        .unwrap_or(Path::new(""))
+        .join("LICENSE.md")
+}
+
+/// Returns the file a page's text is validated against.
+///
+/// Tree pages live beside the `pages` list. The dal manual's `license` page
+/// is sourced from the checkout root `LICENSE.md`, so its budget checks and
+/// link scans read that file.
+fn page_source(args: &GenArgs, page: &str) -> PathBuf {
+    if matches!(args.scheme, Scheme::Dal) && page == "license" {
+        return license_source(args);
+    }
+    page_path(args, page)
+}
+
 fn page_path(args: &GenArgs, page: &str) -> PathBuf {
     if let Some(name) = page.strip_prefix("examples/") {
         args.examples
@@ -758,7 +793,7 @@ fn page_path(args: &GenArgs, page: &str) -> PathBuf {
 }
 
 fn check_page(args: &GenArgs, spec: &PageSpec, text: &str, errors: &mut Vec<GenError>) {
-    let path = page_path(args, &spec.name);
+    let path = page_source(args, &spec.name);
     let prefix = args.scheme.prefix();
     let lines = text.lines().count();
     if text.len() > 49_152 {
@@ -816,7 +851,7 @@ fn check_links(args: &GenArgs, pages: &BTreeMap<String, String>, errors: &mut Ve
     }
     for page in pages.keys() {
         if !page.starts_with("examples/") {
-            files.insert(args.dir.join(format!("{page}.md")));
+            files.insert(page_source(args, page));
         }
     }
     for path in files {

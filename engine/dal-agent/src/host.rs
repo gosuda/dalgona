@@ -296,6 +296,10 @@ pub(crate) struct HostShared {
     pub(crate) data_root: PathBuf,
     /// The bounded admission gates.
     pub(crate) admission: Admission,
+    /// The cancellation-snapshot coordinator: coalesces concurrent
+    /// pre-signal descendant censuses into one global `/proc` walk per
+    /// admission batch. Sized from the same process bound as `admission`.
+    pub(crate) snapshots: Arc<crate::proc::SnapshotCoordinator>,
     /// The host-wide interpreter worker pool.
     pub(crate) interpreters: Arc<crate::admission::Interpreters>,
     /// The host's providers.

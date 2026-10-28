@@ -138,6 +138,25 @@ pub enum ProviderError {
         /// The second advertised tool, by internal name.
         second: String,
     },
+    /// A static endpoint template needed a captured variable the snapshot
+    /// does not hold, or holds blank. Raised locally; no request is sent and
+    /// no empty value is ever substituted.
+    MissingEnvVariable {
+        /// The provider id the request named.
+        provider: Box<str>,
+        /// The captured variable the template reads.
+        variable: &'static str,
+    },
+    /// A captured variable's value violates the syntactic shape the static
+    /// template gives its slot. Raised locally; no request is sent.
+    MalformedEnvVariable {
+        /// The provider id the request named.
+        provider: Box<str>,
+        /// The captured variable the template reads.
+        variable: &'static str,
+        /// The expected shape, "one DNS label" or "one path segment".
+        expected: &'static str,
+    },
     /// Remote compaction returned no compaction item or block.
     CompactionMissing {
         /// The provider API family of the compaction request.
@@ -308,6 +327,18 @@ impl ProviderError {
                 path.display()
             )),
             Self::Limit(reason) => Some(reason.fix()),
+            Self::MissingEnvVariable { provider, variable } => Some(format!(
+                "provider {provider} needs {variable}; set it or give \
+                 providers.{provider}.base_url explicitly"
+            )),
+            Self::MalformedEnvVariable {
+                provider,
+                variable,
+                expected,
+            } => Some(format!(
+                "Give a value that is {expected}, or give providers.{provider}.base_url \
+                 explicitly; {variable} keeps the shape the provider names."
+            )),
             _ => None,
         }
     }
@@ -482,6 +513,16 @@ impl fmt::Display for ProviderError {
             ),
             Self::Script(error) => write!(f, "{error}"),
             Self::Synthetic(failure) => write!(f, "{failure}"),
+            Self::MissingEnvVariable { provider, variable } => write!(
+                f,
+                "provider {provider} needs {variable}; set it or give \
+                 providers.{provider}.base_url explicitly"
+            ),
+            Self::MalformedEnvVariable {
+                provider,
+                variable,
+                expected,
+            } => write!(f, "provider {provider}: {variable} is not {expected}"),
         }
     }
 }
@@ -564,6 +605,8 @@ impl From<ProviderError> for InferFailure {
             | E::UsageCheck { .. }
             | E::UnresolvedBlob { .. }
             | E::ToolNameCollision { .. }
+            | E::MissingEnvVariable { .. }
+            | E::MalformedEnvVariable { .. }
             | E::Script(_) => Self::Fatal { message, fix },
         }
     }

@@ -3,7 +3,10 @@
 //! Resolution order is fixed: aliases expand once, `dalgon/` ids take the
 //! harness route, `<provider>/<id>` looks up that provider's rows, and bare
 //! ids search every row. Unlisted ids on a typed-source provider fall back to
-//! family defaults without fabricated limits.
+//! family defaults without fabricated limits. A row that serves several
+//! wires is the one exception: an id no wire selects stays listed but
+//! refuses typed ([`ResolveError::UnboundModel`]) instead of falling back,
+//! and the resolved family is the selected wire's, not the row's.
 
 use dal_core::{Family, ModelRoute, ThinkingLevel};
 
@@ -11,8 +14,14 @@ use super::compiled_temperature;
 use super::{Catalog, CatalogEntry, CatalogSource, Listing, ResolvedModel, ToolSupport};
 use crate::{
     error::ResolveError,
-    family::gitlab::{ProxyRoute, proxy_route},
-    provider::{OPENAI, ProviderEntry},
+    family::{
+        chat::Dialect,
+        gitlab::{ProxyRoute, proxy_route},
+    },
+    provider::{
+        OPENAI, Origin, ProviderEntry,
+        wire::{self, ModelIdAlias, WireBase},
+    },
     thinking::ThinkingSupport,
 };
 
@@ -122,6 +131,9 @@ pub fn resolve_route(
 /// The provider is looked up by id before anything else; the native id is
 /// never alias-expanded or searched across providers, and a provider that
 /// serves another family than the route is refused rather than reinterpreted.
+/// On a row that serves several wires the selected wire's family stands in
+/// for the row's, and an id no wire selects refuses typed
+/// ([`ResolveError::UnboundModel`]) even though the row may still list it.
 fn resolve_provider_route(
     catalog: &Catalog,
     family: Family,
@@ -139,7 +151,14 @@ fn resolve_provider_route(
             model: model.to_owned(),
         });
     };
-    if entry.family != family {
+    let bound = wire::wire_for(entry, model);
+    if entry.def.is_some_and(|def| !def.wires.is_empty()) && bound.is_none() {
+        return Err(ResolveError::UnboundModel {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+        });
+    }
+    if bound.map_or(entry.family, |bound| bound.family) != family {
         return Err(ResolveError::ProviderFamilyMismatch {
             provider: provider.to_owned(),
             model: model.to_owned(),
@@ -268,15 +287,53 @@ fn resolve_qualified(
     if id.is_empty() {
         return Err(unknown_model(reference));
     }
+    let bound = wire::wire_for(provider, id);
+    // A row serving several wires binds only ids a wire selects: the id
+    // stays listed in the catalog, but selection refuses typed and the
+    // row's default family never substitutes.
+    if provider.def.is_some_and(|def| !def.wires.is_empty()) && bound.is_none() {
+        return Err(ResolveError::UnboundModel {
+            provider: provider.id.to_string(),
+            model: id.to_owned(),
+        });
+    }
+    // An explicit `api` narrows the row to its configured family instead of
+    // sitting decorative beside per-model wires.
+    if let Some(bound) = bound
+        && provider.origins.api == Origin::Explicit
+        && bound.family != provider.family
+    {
+        return Err(ResolveError::ProviderFamilyMismatch {
+            provider: provider.id.to_string(),
+            model: id.to_owned(),
+        });
+    }
+    // An explicit `base_url` is authoritative: a fixed-endpoint wire refuses
+    // typed rather than silently replacing the configured host. A suffix
+    // wire still applies; it carries a path fact, not a host. The BAI
+    // Anthropic wire is the one exception: the pinned `bai.ts` derives
+    // Anthropic from the explicit gateway base by stripping one trailing
+    // `/v1` (Chat/Responses keep the base verbatim) and the request wire
+    // re-adds `/v1/messages`, so the same operator host serves all three
+    // wires and the explicit base wins over the bare-host default.
+    if let Some(bound) = bound
+        && matches!(bound.base, WireBase::Override(_))
+        && provider.origins.base == Origin::Explicit
+        && !(&*provider.id == "bai" && bound.family == Family::Anthropic)
+    {
+        return Err(ResolveError::FixedWireBase {
+            provider: provider.id.to_string(),
+            model: id.to_owned(),
+        });
+    }
+    let family = bound.map_or(provider.family, |bound| bound.family);
+    let alias = provider
+        .def
+        .map_or(ModelIdAlias::None, |def| def.model_id_alias);
     let listed = listing_candidates(id)
         .into_iter()
         .flatten()
-        .find_map(|candidate| {
-            catalog
-                .entries
-                .iter()
-                .find(|entry| entry.provider == provider.id && entry.id.as_ref() == candidate)
-        });
+        .find_map(|candidate| listed_row(&catalog.entries, provider, candidate, alias));
     let mut entry = if let Some(entry) = listed {
         let mut entry = entry.clone();
         entry.id = id.into();
@@ -289,9 +346,9 @@ fn resolve_qualified(
         }
         typed_entry(catalog, provider, id)
     };
-    bind_family_capabilities(&mut entry, provider.family);
+    bind_family_capabilities(&mut entry, family);
     let route = ModelRoute::Api {
-        family: provider.family,
+        family,
         model: id.into(),
         provider: Some(provider.id.clone()),
     };
@@ -302,35 +359,88 @@ fn resolve_qualified(
     })
 }
 
+/// The catalog row one listing candidate names on this provider: the exact
+/// spelling first, then — when the row aliases ids — the row whose id
+/// differs only at dot/hyphen positions. Alias lookup never leaves the
+/// provider's own rows, so a twin owned by another provider is never bound.
+fn listed_row<'a>(
+    rows: &'a [CatalogEntry],
+    provider: &ProviderEntry,
+    candidate: &str,
+    alias: ModelIdAlias,
+) -> Option<&'a CatalogEntry> {
+    rows.iter()
+        .find(|entry| entry.provider == provider.id && entry.id.as_ref() == candidate)
+        .or_else(|| alias_row(rows, provider, candidate, alias))
+}
+
+/// The row whose id is the dot/hyphen twin of `candidate`, when the row
+/// aliases ids. The exact spelling always wins above, so a row listing both
+/// spellings is never shadowed by its own twin.
+fn alias_row<'a>(
+    rows: &'a [CatalogEntry],
+    provider: &ProviderEntry,
+    candidate: &str,
+    alias: ModelIdAlias,
+) -> Option<&'a CatalogEntry> {
+    if alias != ModelIdAlias::DotHyphen {
+        return None;
+    }
+    rows.iter().find(|entry| {
+        entry.provider == provider.id
+            && entry.id.as_ref() != candidate
+            && dot_hyphen_twin(entry.id.as_ref(), candidate)
+    })
+}
+
+/// Whether `a` and `b` are the same id up to dot/hyphen positions. The rule
+/// is owned by the wire table ([`wire::dot_hyphen_twin`]) so selection and
+/// listing agree; the queried id is never rewritten.
+fn dot_hyphen_twin(a: &str, b: &str) -> bool {
+    wire::dot_hyphen_twin(a, b)
+}
+
+/// Resolves a reference to the catalog rows a price lookup may consult.
+///
+/// Selection needs one winner, but pricing does not: an id several providers
+/// list is ambiguous for resolution yet still has a rate on each listed row.
+/// The list holds the resolved row when one exists, else every bare-search
+/// match in catalog order — the same rows [`resolve`] already enumerates, so
+/// alias expansion, listing candidates, hidden rows, and the configured-
+/// provider check stay owned here instead of being re-derived by callers.
+///
+/// Returns entries as `(provider/id, live row price)` pairs; pricing
+/// precedence (configured, live, compiled) is the caller's.
+#[must_use]
+pub fn price_candidates(
+    catalog: &Catalog,
+    aliases: &[(Box<str>, Box<str>)],
+    reference: &str,
+) -> Vec<(String, Option<dal_core::ModelPrice>)> {
+    let reference = expand_alias(aliases, reference);
+    if let Ok(resolved) = resolve_expanded(catalog, reference, None) {
+        return vec![(
+            format!("{}/{}", resolved.provider, resolved.entry.id),
+            resolved.entry.price.clone(),
+        )];
+    }
+    bare_matches(catalog, reference, None)
+        .into_iter()
+        .map(|entry| {
+            (
+                format!("{}/{}", entry.provider, entry.id),
+                entry.price.clone(),
+            )
+        })
+        .collect()
+}
+
 fn resolve_bare(
     catalog: &Catalog,
     id: &str,
     family: Option<Family>,
 ) -> Result<ResolvedModel, ResolveError> {
-    let serves_family = |entry: &CatalogEntry| {
-        family.is_none_or(|family| {
-            catalog
-                .providers
-                .iter()
-                .any(|(provider, _)| provider.id == entry.provider && provider.family == family)
-        })
-    };
-    let mut matches: Vec<&CatalogEntry> = Vec::new();
-    for candidate in listing_candidates(id).into_iter().flatten() {
-        for entry in &catalog.entries {
-            if entry.id.as_ref() == candidate
-                && serves_family(entry)
-                && !matches
-                    .iter()
-                    .any(|matched| matched.provider == entry.provider)
-            {
-                matches.push(entry);
-            }
-        }
-        if !matches.is_empty() {
-            break;
-        }
-    }
+    let matches = bare_matches(catalog, id, family);
     match matches.as_slice() {
         [] => Err(unknown_model(id)),
         [entry] => {
@@ -356,6 +466,50 @@ fn resolve_bare(
     }
 }
 
+/// The bare-search match set: every catalog row a listing candidate names on
+/// a configured provider, deduplicated per provider, in catalog order. An
+/// empty family accepts the row's own family; a named family also accepts a
+/// row bound to that family's wire unless an explicit `api` narrowed it.
+fn bare_matches<'a>(
+    catalog: &'a Catalog,
+    id: &str,
+    family: Option<Family>,
+) -> Vec<&'a CatalogEntry> {
+    let serves_family = |entry: &CatalogEntry| {
+        catalog.providers.iter().any(|(provider, _)| {
+            provider.id == entry.provider
+                && family.is_none_or(|family| {
+                    provider.family == family
+                        // A wire family also serves the bare search, so an
+                        // id bound to another family's wire is reachable
+                        // unqualified — unless the user's explicit `api`
+                        // narrowed the row to its configured family.
+                        || (provider.origins.api != Origin::Explicit
+                            && provider.def.is_some_and(|def| {
+                                def.wires.iter().any(|bound| bound.family == family)
+                            }))
+                })
+        })
+    };
+    let mut matches: Vec<&CatalogEntry> = Vec::new();
+    for candidate in listing_candidates(id).into_iter().flatten() {
+        for entry in &catalog.entries {
+            if entry.id.as_ref() == candidate
+                && serves_family(entry)
+                && !matches
+                    .iter()
+                    .any(|matched| matched.provider == entry.provider)
+            {
+                matches.push(entry);
+            }
+        }
+        if !matches.is_empty() {
+            break;
+        }
+    }
+    matches
+}
+
 pub(crate) fn typed_entry(catalog: &Catalog, provider: &ProviderEntry, id: &str) -> CatalogEntry {
     if let Some(row) = capability_row(&catalog.entries, provider, id) {
         let mut entry = row.clone();
@@ -372,11 +526,11 @@ pub(crate) fn capability_row<'a>(
     provider: &ProviderEntry,
     id: &str,
 ) -> Option<&'a CatalogEntry> {
+    let alias = provider
+        .def
+        .map_or(ModelIdAlias::None, |def| def.model_id_alias);
     for candidate in model_candidates(id).into_iter().flatten() {
-        if let Some(row) = rows
-            .iter()
-            .find(|entry| entry.provider == provider.id && entry.id.as_ref() == candidate)
-        {
+        if let Some(row) = listed_row(rows, provider, candidate, alias) {
             return Some(row);
         }
         if is_openai_family(provider.family)
@@ -444,7 +598,7 @@ pub(crate) fn default_entry(provider: &ProviderEntry, id: &str) -> CatalogEntry 
         supports_reasoning_summaries: false,
         temperature_allowed: compiled_temperature(provider.id.as_ref(), id),
         display_supported: false,
-        tool_support: entry_tool_support(provider.family),
+        tool_support: entry_tool_support(provider, id),
         custom_grammar: false,
         premium_multiplier: None,
         price: None,
@@ -452,10 +606,19 @@ pub(crate) fn default_entry(provider: &ProviderEntry, id: &str) -> CatalogEntry 
 }
 
 fn entry_thinking(provider: &ProviderEntry, id: &str) -> ThinkingSupport {
-    if provider.family == Family::GitLab {
+    // The wire the id binds decides the contract: a Chat-family row serving
+    // an Anthropic-wire id needs the Anthropic default, and the chat dialect
+    // hook applies only to Chat wires.
+    let family = wire::wire_for(provider, id).map_or(provider.family, |bound| bound.family);
+    if family == Family::GitLab {
         return gitlab_thinking(id);
     }
-    default_thinking(provider.family)
+    if family == Family::Chat
+        && let Some(support) = Dialect::thinking_support(&provider.id, id)
+    {
+        return support;
+    }
+    default_thinking(family)
 }
 
 /// Thinking support for one GitLab model id, matching the proxy route the
@@ -483,7 +646,12 @@ fn gitlab_thinking(id: &str) -> ThinkingSupport {
     }
 }
 
-fn entry_tool_support(family: Family) -> ToolSupport {
+fn entry_tool_support(provider: &ProviderEntry, id: &str) -> ToolSupport {
+    let family = wire::wire_for(provider, id).map_or(provider.family, |bound| bound.family);
+    entry_tool_support_for_family(family)
+}
+
+fn entry_tool_support_for_family(family: Family) -> ToolSupport {
     if family == Family::GoogleGeminiCli {
         return ToolSupport::None;
     }
@@ -525,6 +693,7 @@ fn default_thinking(family: Family) -> ThinkingSupport {
         | Family::GoogleGenerativeAi
         | Family::GoogleVertex
         | Family::GoogleGeminiCli
+        | Family::GoogleCloudCodeAssist
         | Family::GoogleAntigravity
         | Family::Ollama
         | Family::PiMessages => ThinkingSupport::OpenAi {

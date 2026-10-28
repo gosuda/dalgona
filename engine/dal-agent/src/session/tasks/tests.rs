@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use dal_core::ext::{NativeOp, OpId};
 use dal_core::{
-    Budget, CallId, ContextItem, ModelPrice, ModelRequest, ModelRoute, ModelToolSpec, OnError,
-    Purpose, RawJson, RequestParams, ScopeSpec, ScopeSpecError, Stop, StreamEvent, Usage,
+    Budget, CallId, ContextItem, HandleStatus, ModelPrice, ModelRequest, ModelRoute, ModelToolSpec,
+    OnError, Purpose, RawJson, RequestParams, ScopeSpec, ScopeSpecError, ScopeUsage, Stop,
+    StreamEvent, Usage,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1277,4 +1278,293 @@ async fn session_tasks_stop_cancels_tracked_work() {
     assert_eq!(tasks.tracked(), 1);
     tasks.stop().await;
     assert_eq!(tasks.tracked(), 0, "stop drains the tracker");
+}
+
+/// Records when the executor drops one held work future.
+struct DropFlag(Arc<AtomicUsize>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn child_owner_runs_held_work_and_parent_stop_joins_it() {
+    let runtime = tokio::runtime::Handle::current();
+    let parent = SessionTasks::new();
+    let child = SessionTasks::child(&parent, &runtime);
+    assert_eq!(
+        parent.tracked(),
+        1,
+        "exactly one parent-tracked drain watcher is admitted"
+    );
+    let started = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    child.spawn({
+        let started = Arc::clone(&started);
+        let dropped = Arc::clone(&dropped);
+        async move {
+            let _guard = DropFlag(dropped);
+            started.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        1,
+        "a fresh child is not cancelled on creation: its held work runs"
+    );
+    assert_eq!(child.tracked(), 1);
+    parent.stop().await;
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "parent stop joins the held child task before returning"
+    );
+    assert_eq!(child.tracked(), 0, "the child drained inside parent stop");
+    assert_eq!(
+        parent.tracked(),
+        0,
+        "the drain watcher joined before return"
+    );
+}
+
+#[tokio::test]
+async fn stop_returns_only_after_joined_work_and_refuses_late_registration() {
+    let tasks = SessionTasks::new();
+    let started = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    tasks.spawn({
+        let started = Arc::clone(&started);
+        let dropped = Arc::clone(&dropped);
+        async move {
+            let _guard = DropFlag(dropped);
+            started.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    tasks.stop().await;
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "stop joins the held work"
+    );
+    assert_eq!(tasks.tracked(), 0);
+    // Registration after stop returned is refused: nothing starts, nothing
+    // detaches, and the tracker stays empty.
+    let late = Arc::new(AtomicUsize::new(0));
+    tasks.spawn({
+        let late = Arc::clone(&late);
+        async move {
+            late.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(late.load(Ordering::SeqCst), 0, "late work never starts");
+    assert_eq!(tasks.tracked(), 0);
+    // Every clone of the owner shares the closed admission gate.
+    let clone = tasks.clone();
+    let cloned = Arc::new(AtomicUsize::new(0));
+    clone.spawn({
+        let cloned = Arc::clone(&cloned);
+        async move {
+            cloned.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(cloned.load(Ordering::SeqCst), 0, "clone work never starts");
+    assert_eq!(tasks.tracked(), 0);
+    // Stop stays idempotent after the drain.
+    tasks.stop().await;
+    assert_eq!(tasks.tracked(), 0);
+}
+
+#[tokio::test]
+async fn admission_closes_before_an_interleaved_stop_returns() {
+    // Controlled single-thread interleaving: the current-thread executor
+    // runs the spawned stop to its first await (the tracker wait) at the
+    // explicit yield, so the raced registration observes the closed gate
+    // deterministically instead of racing a real scheduler.
+    let tasks = SessionTasks::new();
+    let started = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    tasks.spawn({
+        let started = Arc::clone(&started);
+        let dropped = Arc::clone(&dropped);
+        async move {
+            let _guard = DropFlag(dropped);
+            started.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    let owner = tasks.clone();
+    let mut stop_set = tokio::task::JoinSet::new();
+    stop_set.spawn(async move { owner.stop().await });
+    tokio::task::yield_now().await;
+    let raced = Arc::new(AtomicUsize::new(0));
+    tasks.spawn({
+        let raced = Arc::clone(&raced);
+        async move {
+            raced.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        raced.load(Ordering::SeqCst),
+        0,
+        "registration cannot start once the gate closed"
+    );
+    stop_set
+        .join_next()
+        .await
+        .expect("stop joins")
+        .expect("stop joins");
+    assert_eq!(raced.load(Ordering::SeqCst), 0);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1, "the held task joined");
+    assert_eq!(tasks.tracked(), 0, "nothing stays registered after stop");
+}
+
+#[tokio::test]
+async fn child_of_a_closed_owner_admits_nothing() {
+    let runtime = tokio::runtime::Handle::current();
+    let parent = SessionTasks::new();
+    parent.stop().await;
+    let child = SessionTasks::child(&parent, &runtime);
+    assert_eq!(
+        parent.tracked(),
+        0,
+        "no drain watcher is admitted behind a closed parent gate"
+    );
+    let started = Arc::new(AtomicUsize::new(0));
+    child.spawn({
+        let started = Arc::clone(&started);
+        async move {
+            started.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        0,
+        "a closed child drops work instead of detaching it"
+    );
+    assert_eq!(child.tracked(), 0);
+    child.stop().await;
+    assert_eq!(child.tracked(), 0);
+}
+
+#[test]
+fn terminalize_latches_cancelled_once_and_keeps_recorded_usage() {
+    let mut table = table();
+    let scope = open(&mut table, 1);
+    let Ok(Submit::Queued(running)) = table.submit(scope, model_req(), None) else {
+        panic!("the model request queues");
+    };
+    let held = queued(&mut table, scope);
+    let task_token = table
+        .runnable()
+        .into_iter()
+        .find(|(t, _, _, _)| *t == running)
+        .map(|(_, _, _, token)| token)
+        .expect("the issued task token");
+    assert_eq!(
+        table.probe(held).expect("held").status,
+        HandleStatus::Pending
+    );
+    assert_eq!(
+        table.probe(running).expect("running").status,
+        HandleStatus::Running
+    );
+    table
+        .complete(running, infer_outcome(&table, running, 5), 0)
+        .expect("the outcome records");
+    let charged = table.probe(running).expect("running").usage;
+    assert!(charged.requests >= 1, "the measured response charged once");
+    let late = queued(&mut table, scope);
+
+    table.terminalize();
+
+    assert!(
+        task_token.is_cancelled(),
+        "the executor-held future unblocks at its cancel point"
+    );
+    assert_eq!(
+        table.probe(held).expect("held").status,
+        HandleStatus::Cancelled
+    );
+    assert_eq!(
+        table.probe(late).expect("late").status,
+        HandleStatus::Cancelled
+    );
+    assert_eq!(
+        table.probe(held).expect("held").usage,
+        ScopeUsage::default(),
+        "terminalize fabricates no usage for unfinished members"
+    );
+    let settled = table.probe(running).expect("running");
+    assert_eq!(
+        settled.status,
+        HandleStatus::Done,
+        "a completed task keeps its recorded outcome"
+    );
+    assert_eq!(settled.usage, charged, "recorded usage stays unchanged");
+
+    assert!(
+        matches!(
+            table.submit(scope, tool_req(), None),
+            Ok(Submit::Refused(ScopeSpecError::Cancelled))
+        ),
+        "a terminalized scope refuses new submissions"
+    );
+    assert!(
+        table.runnable().is_empty(),
+        "no work issues after terminalize"
+    );
+    assert_eq!(
+        table.next_deadline(),
+        None,
+        "no deadline survives terminalize"
+    );
+
+    // Late arrivals absorb: the first terminal stands, nothing double-fires.
+    table
+        .complete(held, ok_outcome(&table, held), 0)
+        .expect("a late arrival absorbs");
+    let outcome = table.deliver(held).expect("the terminal outcome records");
+    assert!(
+        matches!(outcome, OpOutcome::Terminal(HostTerminal::Cancelled)),
+        "unfinished members settle terminal-cancelled: {outcome:?}"
+    );
+    let replay = table.deliver(held).expect("delivery is idempotent");
+    assert!(
+        matches!(replay, OpOutcome::Terminal(HostTerminal::Cancelled)),
+        "repeated waits replay one terminal: {replay:?}"
+    );
+    let after = table.probe(held).expect("held");
+    assert_eq!(after.status, HandleStatus::Cancelled);
+    assert_eq!(
+        after.usage,
+        ScopeUsage::default(),
+        "usage never arrives twice"
+    );
+
+    // Terminalize is idempotent.
+    table.terminalize();
+    assert_eq!(
+        table.probe(held).expect("held").status,
+        HandleStatus::Cancelled
+    );
+    let (complete, unfinished) = table.cleanup();
+    assert!(complete, "every member settled terminal or done");
+    assert!(unfinished.is_empty(), "{unfinished:?}");
 }

@@ -21,9 +21,10 @@ use dal_core::{
     JournalPart, ModelRoute, Origin, Output, Reply, View, Workspace,
 };
 use host::driver_host;
+pub(super) use host::{PersistDefault, persist_default, persist_for};
 
 use crate::error::{AgentError, ValidationError};
-use crate::ext::command::CommandCx;
+use crate::ext::command::{CommandCx, SaveError};
 use crate::ext::{Caller, CallerKind};
 use crate::session::actor::TurnWork;
 use crate::session::contain::contained;
@@ -57,22 +58,87 @@ async fn execute(
         }
         Command::Cancel { scope } => match scope {
             CancelScope::Job(id) => {
-                cancel_job(deps, id).await;
+                cancel_job(deps, id).await?;
                 Ok(Reply::Done(Output::Nothing))
             }
             CancelScope::Turn(_) => Err(invalid("this cancel scope runs in the actor.")),
         },
         Command::Export { path, format } => export(deps, path, format).await,
-        Command::SetScopedModels(ids) => {
-            *scoped = if ids.is_empty() { None } else { Some(ids) };
-            deps.shared.set_scoped(scoped.clone());
-            Ok(Reply::Done(Output::Nothing))
-        }
+        Command::SetScopedModels(ids) => Ok(set_scoped_models(deps, scoped, ids).await),
         Command::Fork(entry) => branch(deps, Some(entry), by).await,
         Command::Clone => branch(deps, None, by).await,
         Command::ReloadPlugins => run_handler(deps, scoped.as_deref(), route, "reload", "").await,
         _ => Err(invalid("this command runs in the actor.")),
     }
+}
+
+/// Scopes this session to `ids`, then saves the list as the user's
+/// `scoped_models` default (an empty list clears both).
+///
+/// The session changes first, so a save that fails still leaves the session
+/// scoped; the reply then says it did not persist and why, and never claims
+/// the list was saved.
+async fn set_scoped_models(
+    deps: &DriverDeps,
+    scoped: &mut Option<Vec<Box<str>>>,
+    ids: Vec<Box<str>>,
+) -> Reply {
+    let count = ids.len();
+    *scoped = (!ids.is_empty()).then(|| ids.clone());
+    deps.shared.set_scoped(scoped.clone());
+    let saved = persist_default(&deps.host, PersistDefault::ScopedModels(ids)).await;
+    Reply::Done(Output::Text(scoped_models_outcome(count, saved).into()))
+}
+
+/// The line a client shows after `/scoped-models` for `count` ids.
+fn scoped_models_outcome(count: usize, saved: Result<(), SaveError>) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    match (saved, count) {
+        (Ok(()), 0) => "Scoped models cleared. /model lists every model.".to_owned(),
+        (Ok(()), _) => {
+            format!("{count} scoped model{plural} saved. /model now lists only these.")
+        }
+        (Err(error), 0) => format!(
+            "Scoped models cleared for this session. It did not persist: {}.",
+            save_failure(&error)
+        ),
+        (Err(error), _) => format!(
+            "{count} scoped model{plural} set for this session. It did not persist: {}.",
+            save_failure(&error)
+        ),
+    }
+}
+
+/// The reason a save failed, without the typed prefix `SaveError` displays.
+fn save_failure(error: &SaveError) -> String {
+    match error {
+        SaveError::Failed { message } | SaveError::Rejected { message } => message.to_string(),
+        SaveError::SessionClosed { .. } => error.to_string(),
+    }
+}
+
+/// The user-facing label for one default-save kind submitted as a command.
+pub(super) fn persist_label(persist: &PersistDefault) -> &'static str {
+    match persist {
+        PersistDefault::Model(_) => "Model",
+        PersistDefault::Thinking(_) => "Thinking",
+        PersistDefault::Approval(_) => "Approval",
+        PersistDefault::Mode(_) => "Mode",
+        PersistDefault::ScopedModels(_) => "Scoped models",
+    }
+}
+
+/// The reply text when a command applied to the session but its default
+/// save failed: the session change stays visible, the cause is exact, and
+/// the remedy names the next step. The text must read as one sentence
+/// because extension hosts surface it verbatim as the `SaveError::Failed`
+/// message after their own "It did not persist:" lead-in, so it carries no
+/// trailing period.
+pub(super) fn default_save_warning(label: &str, error: &SaveError) -> String {
+    format!(
+        "{label} saved for this session, but the default save failed: {}; fix the cause and set it again",
+        save_failure(error)
+    )
 }
 
 /// Builds an invalid client error with product text.
@@ -153,10 +219,21 @@ async fn run_handler(
     result
 }
 
-/// Cancels one background job without failing a missing row.
-async fn cancel_job(deps: &DriverDeps, id: JobId) {
+/// Cancels one background job and flushes its terminal `End` before ack.
+///
+/// Unknown or already-ended rows stay [`AgentError::Invalid`]; a live
+/// cancellation whose `End` did not reach disk surfaces as
+/// [`AgentError::PersistenceFailed`] with the buffered lines retained for
+/// the next flush.
+async fn cancel_job(deps: &DriverDeps, id: JobId) -> Result<(), AgentError> {
     let mut table = deps.jobs.lock().await;
-    let _ = table.cancel(id);
+    table.cancel(id)?;
+    table
+        .flush()
+        .await
+        .map_err(|error| AgentError::PersistenceFailed {
+            message: format!("job ledger write failed: {error}").into(),
+        })
 }
 
 const EXPORT_PATH_DENIED: &str = "export paths outside the workspace require a built-in command";

@@ -33,6 +33,9 @@ pub enum AdmissionLimit {
     Processes,
     /// The file-descriptor budget.
     Fds,
+    /// The per-session child-process cap and the queue of calls waiting
+    /// for one of its slots.
+    SessionProcesses,
 }
 
 impl AdmissionLimit {
@@ -43,6 +46,7 @@ impl AdmissionLimit {
             Self::Streams => "streams",
             Self::Processes => "processes",
             Self::Fds => "fds",
+            Self::SessionProcesses => "session processes",
         }
     }
 }
@@ -571,6 +575,13 @@ pub enum ToolError {
         /// The exhausted resource.
         limit: AdmissionLimit,
     },
+    /// The bounded queue of calls waiting for `limit` was full, so the call
+    /// was refused before it waited. No wait happened and none expired.
+    #[error("admission queue full: no place is free to wait for a {limit} slot.")]
+    AdmissionQueueFull {
+        /// The resource whose waiting queue is full.
+        limit: AdmissionLimit,
+    },
     /// The process could not start.
     #[error("cannot start {}: {source}", .path.display())]
     Spawn {
@@ -654,11 +665,23 @@ mod tests {
     }
 
     #[test]
-    fn agent_errors_render_product_text() {
+    fn error_variants_reached() {
         let id = RequestId::new_v7();
         let session = SessionId::new_v7();
         let job = JobId::new_v7();
+        let blob = BlobId::from_bytes(b"stored");
         let cases = [
+            (
+                AgentError::WrongTurn {
+                    expected: Expect::Idle.into(),
+                    actual: ActualTurn::Turn {
+                        turn: turn(1),
+                        phase: TurnPhase::Running,
+                    },
+                },
+                "turn mismatch: expected no running turn, found turn 1 (running). Nothing changed."
+                    .to_owned(),
+            ),
             (
                 AgentError::AlreadyResolved {
                     id,
@@ -671,8 +694,25 @@ mod tests {
                 "steer queue is full (16) for turn 1; wait for the next step or cancel.".to_owned(),
             ),
             (
+                AgentError::PersistenceFailed {
+                    message: "journal write failed: io error".into(),
+                },
+                "journal write failed: io error".to_owned(),
+            ),
+            (
                 AgentError::SessionClosed { id: session },
                 format!("session {session} is closed."),
+            ),
+            (
+                AgentError::BlobNotFound {
+                    id: blob,
+                    session,
+                },
+                format!("blob {blob} was not found in session {session}."),
+            ),
+            (
+                AgentError::SessionGone { session },
+                format!("session {session} was deleted."),
             ),
             (
                 ValidationError::compacting().into(),
@@ -803,7 +843,7 @@ mod tests {
         ));
         assert_eq!(
             version.to_string(),
-            "session file /s/journal.jsonl uses journal format 9; this dalgon reads format 1. Update dalgon to open it."
+            "session file /s/journal.jsonl uses journal format 9; this dalgon reads formats 1 to 3. Update dalgon to open it."
         );
     }
 

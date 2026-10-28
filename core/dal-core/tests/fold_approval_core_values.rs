@@ -151,15 +151,15 @@ fn name_rejects_malformed_identifiers() {
 }
 
 #[test]
-fn service_vocabulary_has_exactly_12_members_in_stable_order() {
+fn service_vocabulary_has_exactly_13_members_in_stable_order() {
     let order: Vec<&str> = Service::ALL.into_iter().map(Service::as_str).collect();
     assert_eq!(
         order,
         vec![
             "fs.read", "fs.write", "net", "run", "env", "ask", "mcp", "agents", "jobs", "turn",
-            "sidecar", "infer",
+            "sidecar", "infer", "judge",
         ],
-        "the 12-service vocabulary and its order are closed"
+        "the 13-service vocabulary and its order are closed"
     );
     for service in Service::ALL {
         assert_eq!(

@@ -1792,6 +1792,18 @@ mod tests {
     }
 
     mod wired {
+        /// Waits for one background render to land, under a generous deadline.
+        ///
+        /// A full-suite run shares the machine with every other test binary, so
+        /// the renderer's scheduling delay is unbounded in wall time. The wait
+        /// stays bounded so a renderer that never lands still fails the test.
+        fn wait_for_render(cache: &RenderCache, generation: u64) {
+            assert!(
+                cache.wait_for_generation(generation, std::time::Duration::from_secs(120)),
+                "background renderer did not finish"
+            );
+        }
+
         use super::super::{MarkdownStream, markdown_wired_rows};
         use crate::diagram::{DiagramSettings, RenderCache};
         use crate::render::RenderRow;
@@ -1852,6 +1864,9 @@ mod tests {
             // must agree with it, and the wired body must match the bytes
             // `fence_body` slices for expansion.
             let text = "before\n```mermaid\ngraph TD; A-->B\r\n```\r\n";
+            let generation = cache.generation();
+            let _ = markdown_wired_rows(text, 40, 40, WidthMode::Narrow, Some((&settings, &cache)));
+            wait_for_render(&cache, generation);
             let wired =
                 markdown_wired_rows(text, 40, 40, WidthMode::Narrow, Some((&settings, &cache)));
             let texts = texts(&wired);
@@ -1969,12 +1984,7 @@ mod tests {
             // worker lands: the next frame rides the cache generation roll.
             assert!(stream.committed_rows.iter().any(|row| row.pending_diagram));
             let generation = cache.generation();
-            for _ in 0..200 {
-                if cache.generation() > generation {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+            wait_for_render(&cache, generation);
             assert!(
                 cache.generation() > generation,
                 "background renderer did not finish"
@@ -2031,6 +2041,7 @@ mod tests {
         /// Length and address of each committed prose row's text buffer. A
         /// row that was cloned owns a new buffer, so an address that moved
         /// names bytes the stream copied again.
+        #[cfg(unix)]
         fn prose_buffers(stream: &MarkdownStream) -> Vec<(usize, *const u8)> {
             stream
                 .committed_rows
@@ -2041,6 +2052,7 @@ mod tests {
         }
 
         /// The bytes of `before`'s rows that `after` holds in new buffers.
+        #[cfg(unix)]
         fn recopied_bytes(before: &[(usize, *const u8)], after: &[(usize, *const u8)]) -> usize {
             before
                 .iter()
@@ -2085,16 +2097,7 @@ mod tests {
             let before = prose_buffers(&stream);
             assert_eq!(before.len(), 2002);
 
-            for _ in 0..500 {
-                if cache.generation() > generation {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            assert!(
-                cache.generation() > generation,
-                "background renderer did not finish"
-            );
+            wait_for_render(&cache, generation);
             let rows = stream.rows(&text, 40, 40, WidthMode::Narrow, usize::MAX, wire);
             assert!(!rows.iter().any(|row| row.pending_diagram));
             assert_eq!(
@@ -2132,22 +2135,25 @@ mod tests {
                 let (settings, cache) = enabled();
                 for end in (0..=text.len()).filter(|end| text.is_char_boundary(*end)) {
                     let prefix = &text[..end];
-                    let mut stream = MarkdownStream::default();
-                    let streamed = stream.rows(
-                        prefix,
-                        40,
-                        40,
-                        WidthMode::Narrow,
-                        usize::MAX,
-                        Some((&settings, &cache)),
-                    );
-                    let whole = markdown_wired_rows(
-                        prefix,
-                        40,
-                        40,
-                        WidthMode::Narrow,
-                        Some((&settings, &cache)),
-                    );
+                    let wire = Some((&settings, &cache));
+                    let mut stable = None;
+                    // The cache may gain a render between these two reads at
+                    // any point, and a full-suite run stretches that window.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    while std::time::Instant::now() < deadline {
+                        let generation = cache.generation();
+                        let mut stream = MarkdownStream::default();
+                        let streamed =
+                            stream.rows(prefix, 40, 40, WidthMode::Narrow, usize::MAX, wire);
+                        let whole = markdown_wired_rows(prefix, 40, 40, WidthMode::Narrow, wire);
+                        if cache.generation() == generation {
+                            stable = Some((streamed, whole));
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    let (streamed, whole) =
+                        stable.expect("diagram cache generation did not stabilize");
                     assert_eq!(streamed, whole, "prefix {prefix:?}");
                 }
             }

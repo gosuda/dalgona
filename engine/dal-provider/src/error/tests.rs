@@ -8,26 +8,6 @@ use crate::{
 };
 use dal_core::InferFailure;
 
-/// Every provider API family, in declaration order.
-const ALL_FAMILIES: [Family; 16] = [
-    Family::Chat,
-    Family::Responses,
-    Family::Codex,
-    Family::Anthropic,
-    Family::Bedrock,
-    Family::Cursor,
-    Family::Devin,
-    Family::Droid,
-    Family::GitLab,
-    Family::GoogleGenerativeAi,
-    Family::GoogleVertex,
-    Family::GoogleGeminiCli,
-    Family::GoogleAntigravity,
-    Family::Mistral,
-    Family::Ollama,
-    Family::PiMessages,
-];
-
 /// The longest prefix of the first line of `message` that is at most 300
 /// bytes and ends on a character boundary, built one character at a time.
 fn first_bounded_line(message: &str) -> String {
@@ -40,408 +20,6 @@ fn first_bounded_line(message: &str) -> String {
         kept.push(ch);
     }
     kept
-}
-
-#[expect(
-    clippy::too_many_lines,
-    reason = "one row per public error variant pins its exact display text and fix"
-)]
-#[test]
-fn error_display_texts() {
-    let cases: &[(ProviderError, &str, Option<&str>)] = &[
-        (
-            ProviderError::Transport {
-                family: Family::Chat,
-                reason: String::from("connection refused"),
-            },
-            "openai request failed: connection refused",
-            None,
-        ),
-        (
-            ProviderError::Status {
-                family: Family::Responses,
-                status: 429,
-                message: String::from("slow down"),
-            },
-            "openai error 429: slow down",
-            None,
-        ),
-        (
-            ProviderError::InvalidRequest {
-                message: String::from("bad tool"),
-            },
-            "invalid request: bad tool",
-            None,
-        ),
-        (
-            ProviderError::InvalidThinkingLevel {
-                spelling: String::from("Ultra"),
-            },
-            "unknown thinking level \"Ultra\"; use one of off, minimal, low, medium, high, xhigh, max.",
-            None,
-        ),
-        (
-            ProviderError::RateLimited {
-                message: String::from("try later"),
-                retry_after: Some(Duration::from_secs(3)),
-            },
-            "rate limited: try later",
-            None,
-        ),
-        (
-            ProviderError::RetryAfterTooLong {
-                seconds: 120,
-                message: String::from("busy"),
-            },
-            "rate limited for 120 s, which is over the 60 s wait limit: busy",
-            None,
-        ),
-        (
-            ProviderError::Quota {
-                message: String::from("no credit"),
-            },
-            "quota exhausted: no credit",
-            None,
-        ),
-        (ProviderError::Overloaded, "server overloaded.", None),
-        (
-            ProviderError::AuthRejected {
-                provider: String::from("anthropic"),
-            },
-            "anthropic rejected the API key.",
-            Some("Run dalgon login anthropic."),
-        ),
-        (
-            ProviderError::SignInExpired {
-                provider: String::from("openai-codex"),
-            },
-            "openai-codex sign-in expired: the refresh token was rejected.",
-            Some("Run dalgon login openai-codex."),
-        ),
-        (
-            ProviderError::NoCredentials {
-                provider: String::from("openai"),
-            },
-            "openai has no credentials: auth.json has no entry for it",
-            Some("Run dalgon login openai."),
-        ),
-        (
-            ProviderError::StreamCut,
-            "stream cut off before completion.",
-            None,
-        ),
-        (
-            ProviderError::WsClosed { code: None },
-            "websocket closed by server before response.completed.",
-            None,
-        ),
-        (
-            ProviderError::Protocol {
-                family: Family::Codex,
-                detail: String::from("binary WebSocket frame"),
-            },
-            "codex sent an invalid stream: binary WebSocket frame",
-            None,
-        ),
-        (
-            ProviderError::Limit(LimitError::SseLine),
-            "SSE line exceeds 1 MiB.",
-            Some("Retry the request, or ask for a smaller reply."),
-        ),
-        (
-            ProviderError::Limit(LimitError::SseEvent),
-            "SSE event exceeds 8 MiB.",
-            Some("Retry the request, or ask for a smaller reply."),
-        ),
-        (
-            ProviderError::Limit(LimitError::WsMessage),
-            "WebSocket message exceeds 16 MiB.",
-            Some("Retry the request, or ask for a smaller reply."),
-        ),
-        (
-            ProviderError::Limit(LimitError::Body),
-            "response body exceeds 16 MiB.",
-            Some("Retry the request, or ask for a smaller reply."),
-        ),
-        (
-            ProviderError::Limit(LimitError::Payload { limit: 1024 }),
-            "response body exceeds its 1024 byte limit.",
-            Some("Retry the request, or ask for a smaller reply."),
-        ),
-        (
-            ProviderError::Limit(LimitError::StreamBytes),
-            "provider stream exceeds 128 MiB of event data.",
-            Some("Retry the request, or split the task into smaller steps."),
-        ),
-        (
-            ProviderError::Limit(LimitError::StreamEvents),
-            "provider stream exceeds 65536 events.",
-            Some("Retry the request, or split the task into smaller steps."),
-        ),
-        (
-            ProviderError::Limit(LimitError::StreamItems),
-            "provider stream exceeds 16384 retained items.",
-            Some("Retry the request, or split the task into smaller steps."),
-        ),
-        (
-            ProviderError::PlainHttp {
-                host: String::from("example.com"),
-            },
-            "refusing plain http for non-loopback host example.com.",
-            None,
-        ),
-        (
-            ProviderError::CompactionMissing {
-                family: Family::Codex,
-                noun: "item",
-            },
-            "codex compaction returned no compaction item.",
-            None,
-        ),
-        (
-            ProviderError::CompactionMissing {
-                family: Family::Anthropic,
-                noun: "block",
-            },
-            "anthropic compaction returned no compaction block.",
-            None,
-        ),
-        (
-            ProviderError::CompactionForeign {
-                bound_family: Family::Anthropic,
-                bound_model: String::from("claude-sonnet-5"),
-                family: Family::Responses,
-                model: String::from("gpt-5.6-luna"),
-            },
-            "the compacted history belongs to anthropic/claude-sonnet-5; this request uses openai/gpt-5.6-luna.",
-            None,
-        ),
-        (
-            ProviderError::UsageLimit {
-                model: String::from(LUNA_RESERVE_MODEL),
-                message: String::from("try tomorrow"),
-            },
-            "Luna Reserve usage limit reached: try tomorrow",
-            Some(
-                "Wait for the limit to reset, or add credits at https://chatgpt.com/codex/settings/usage?credits_modal=true.",
-            ),
-        ),
-        (
-            ProviderError::UsageNotIncluded {
-                message: String::from("plan"),
-            },
-            "this ChatGPT plan does not include Codex usage: plan",
-            Some(
-                "Upgrade the ChatGPT plan at https://chatgpt.com/explore/plus, or run dalgon login openai-codex with another account.",
-            ),
-        ),
-        (
-            ProviderError::ReserveUnavailable {
-                status: 404,
-                message: String::from("no such model"),
-            },
-            "Luna Reserve is not available for this account: no such model",
-            Some(
-                "Luna Reserve opens only when the included usage of your ChatGPT plan runs out. Switch to another model to continue.",
-            ),
-        ),
-        (
-            ProviderError::UnknownModel {
-                reference: String::from("openai/gpt-reserve"),
-            },
-            "unknown model openai/gpt-reserve",
-            Some("Run dalgon models to list the models."),
-        ),
-        (
-            ProviderError::AmbiguousModel {
-                id: String::from("gpt-5.6-luna"),
-                candidates: String::from("p1/gpt-5.6-luna, p2/gpt-5.6-luna"),
-            },
-            "model id gpt-5.6-luna matches several providers: p1/gpt-5.6-luna, p2/gpt-5.6-luna",
-            Some("Use p1/gpt-5.6-luna."),
-        ),
-        (
-            ProviderError::AuthFilePerms {
-                path: PathBuf::from("/data/auth.json"),
-            },
-            "auth.json has group or other permissions",
-            Some("Run chmod 600 /data/auth.json."),
-        ),
-        (
-            ProviderError::AuthFileSymlink {
-                path: PathBuf::from("/data/auth.json"),
-            },
-            "auth.json is a symbolic link; dalgon does not follow it",
-            Some("Replace /data/auth.json with a regular file."),
-        ),
-        (
-            ProviderError::AuthFileInvalid {
-                path: PathBuf::from("/data/auth.json"),
-                message: String::from("trailing bytes"),
-            },
-            "auth.json is not valid: trailing bytes",
-            Some("Fix or delete /data/auth.json, then run dalgon login."),
-        ),
-        (
-            ProviderError::AuthWrite {
-                reason: String::from("disk full"),
-            },
-            "could not write auth.json: disk full",
-            None,
-        ),
-        (
-            ProviderError::CallbackBind {
-                port: 7437,
-                reason: String::from("address in use"),
-            },
-            "could not listen on 127.0.0.1:7437: address in use",
-            None,
-        ),
-        (
-            ProviderError::StateMismatch,
-            "sign-in failed: the OAuth state does not match.",
-            None,
-        ),
-        (
-            ProviderError::LoginTimeout,
-            "sign-in timed out after 15 minutes.",
-            None,
-        ),
-        (
-            ProviderError::TokenExchange {
-                status: 400,
-                message: String::from("bad code"),
-            },
-            "sign-in failed: the token endpoint returned 400: bad code",
-            None,
-        ),
-        (
-            ProviderError::DeviceCode {
-                status: 500,
-                message: String::from("boom"),
-            },
-            "sign-in failed: the device code endpoint returned 500: boom",
-            None,
-        ),
-        (
-            ProviderError::NoAccountId,
-            "sign-in failed: the ID token has no chatgpt_account_id.",
-            None,
-        ),
-        (ProviderError::LoginCancelled, "sign-in cancelled.", None),
-        (
-            ProviderError::Cancelled,
-            "provider operation cancelled.",
-            None,
-        ),
-        (
-            ProviderError::LoginInput {
-                reason: String::from("the API key is empty."),
-            },
-            "sign-in failed: the API key is empty.",
-            None,
-        ),
-        (
-            ProviderError::ToolNameCollision {
-                wire: String::from("read_file"),
-                first: String::from("fs.read"),
-                second: String::from("fs_read"),
-            },
-            "tools fs.read and fs_read both map to the provider tool name read_file; no request was sent.",
-            None,
-        ),
-        (
-            ProviderError::UsageCheck {
-                reason: UsageCheckReason::Timeout,
-            },
-            "usage failed: no reply within 15 s",
-            None,
-        ),
-        (
-            ProviderError::UsageCheck {
-                reason: UsageCheckReason::NotJsonObject,
-            },
-            "usage failed: the body is not a JSON object",
-            None,
-        ),
-        (
-            ProviderError::UsageCheck {
-                reason: UsageCheckReason::Status {
-                    status: 401,
-                    message: String::from("denied"),
-                },
-            },
-            "usage failed: 401 denied",
-            None,
-        ),
-        (
-            ProviderError::ContextOverflow {
-                family: Family::Responses,
-                code: String::from("context_length_exceeded"),
-                message: String::from("input exceeds the window\ndetail"),
-            },
-            "openai context window exceeded (context_length_exceeded): input exceeds the window",
-            None,
-        ),
-        (
-            ProviderError::RunLost {
-                family: Family::Chat,
-                reason: RunLostReason::ServerClosed,
-            },
-            "openai run lost: the server ended the run before its final response",
-            None,
-        ),
-        (
-            ProviderError::RunLost {
-                family: Family::Chat,
-                reason: RunLostReason::Transport(String::from("reset")),
-            },
-            "openai run lost: transport failure: reset",
-            None,
-        ),
-        (
-            ProviderError::RunLost {
-                family: Family::Chat,
-                reason: RunLostReason::ResultsMismatch,
-            },
-            "openai run lost: the tool results are not exactly the pending tool calls",
-            None,
-        ),
-        (
-            ProviderError::RunLost {
-                family: Family::Anthropic,
-                reason: RunLostReason::Protocol(String::from("bad frame")),
-            },
-            "anthropic run lost: invalid stream: bad frame",
-            None,
-        ),
-        (
-            ProviderError::RunLost {
-                family: Family::Codex,
-                reason: RunLostReason::BufferExceeded,
-            },
-            "codex run lost: a buffer bound was exceeded",
-            None,
-        ),
-        (
-            ProviderError::RunLost {
-                family: Family::Chat,
-                reason: RunLostReason::Authority("web_fetch".into()),
-            },
-            "openai run lost: the server acted beyond the host's authority: web_fetch",
-            None,
-        ),
-    ];
-    let mut wrong = Vec::new();
-    for (error, display, fix) in cases {
-        let (text, next) = (error.to_string(), error.fix());
-        if text != *display || next.as_deref() != *fix {
-            wrong.push(format!(
-                "{error:?}: expected {display:?} / {fix:?}, got {text:?} / {next:?}"
-            ));
-        }
-    }
-    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 #[test]
@@ -933,9 +511,29 @@ fn resolve_error_texts_and_fixes() {
 }
 
 #[test]
+fn unbound_and_fixed_wire_models_keep_their_resolution_fixes() {
+    let unknown_provider = ResolveError::UnknownProvider {
+        provider: String::from("acme-proxy"),
+        model: String::from("gpt-5"),
+    };
+    let unbound = ResolveError::UnboundModel {
+        provider: String::from("acme-proxy"),
+        model: String::from("gpt-5"),
+    };
+    assert_eq!(unbound.fix(), unknown_provider.fix());
+    assert!(unbound.fix().is_some());
+    let fixed = ResolveError::FixedWireBase {
+        provider: String::from("bai"),
+        model: String::from("claude-opus-5"),
+    };
+    assert!(fixed.fix().is_some());
+    assert_ne!(fixed.fix(), unknown_provider.fix());
+}
+
+#[test]
 fn only_http_413_folds_to_a_request_size_overflow_in_every_family() {
     let statuses = (0..=700).chain([u16::MAX - 1, u16::MAX]);
-    for family in ALL_FAMILIES {
+    for family in Family::ALL {
         for status in statuses.clone() {
             let error = ProviderError::Status {
                 family,
@@ -1057,7 +655,7 @@ fn every_capped_renderer_cuts_hostile_messages_to_one_bounded_line() {
 #[test]
 fn every_family_label_is_distinct_and_matches_its_wire_name() {
     let mut seen = BTreeMap::new();
-    for family in ALL_FAMILIES {
+    for family in Family::ALL {
         let label = family_label(family);
         assert!(
             !label.is_empty() && label.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
@@ -1078,7 +676,7 @@ fn every_family_label_is_distinct_and_matches_its_wire_name() {
         };
         assert_eq!(label, expected, "{family:?} has wire name {wire}");
     }
-    assert_eq!(seen.len(), ALL_FAMILIES.len() - 1);
+    assert_eq!(seen.len(), Family::ALL.len() - 1);
 }
 
 #[test]
@@ -1172,6 +770,15 @@ fn every_variant() -> Vec<ProviderError> {
             first: detail(),
             second: detail(),
         },
+        ProviderError::MissingEnvVariable {
+            provider: detail().into_boxed_str(),
+            variable: "CLOUDFLARE_ACCOUNT_ID",
+        },
+        ProviderError::MalformedEnvVariable {
+            provider: detail().into_boxed_str(),
+            variable: "CLOUDFLARE_GATEWAY_ID",
+            expected: "one path segment",
+        },
         ProviderError::CompactionMissing {
             family,
             noun: "item",
@@ -1242,7 +849,7 @@ fn the_fold_retries_exactly_five_variants_and_keeps_every_fix() {
             .map(mem::discriminant)
             .collect::<std::collections::HashSet<_>>()
             .len(),
-        43,
+        45,
         "every variant appears exactly once"
     );
     for error in variants {

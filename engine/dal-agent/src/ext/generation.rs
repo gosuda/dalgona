@@ -47,9 +47,10 @@ use crate::ext::script::Evidence;
 use catalog::Catalog;
 
 pub(crate) use tables::{
-    CommandEntry, CommandTable, CompactorTable, NamedEntry, SchemeTable, ToolEntry, ToolTable,
+    ClaimTables, CommandEntry, CommandTable, CompactorTable, NamedEntry, SchemeTable, ToolEntry,
+    ToolTable,
 };
-pub(crate) use validate::ValidatedExtensions;
+pub(crate) use validate::{ValidatedExtensions, canonical_order, claimant_of};
 
 /// Monotonic counter backing [`Generation::build`]'s fresh identifier.
 ///

@@ -87,7 +87,13 @@ pub(crate) async fn model_ready(
                 dal_provider::ResolveError::UnknownModel { .. }
                 | dal_provider::ResolveError::AmbiguousModel { .. }
                 | dal_provider::ResolveError::UnknownProvider { .. }
-                | dal_provider::ResolveError::ProviderFamilyMismatch { .. },
+                | dal_provider::ResolveError::ProviderFamilyMismatch { .. }
+                // A multi-wire row serves no wire for the model, or the
+                // route's fixed-endpoint wire conflicts with the table's
+                // own `base_url`: both are typed selection refusals, never
+                // a routable state, so readiness reports no route.
+                | dal_provider::ResolveError::UnboundModel { .. }
+                | dal_provider::ResolveError::FixedWireBase { .. },
             ) => return Ok(None),
             Err(error) => return Err(ServiceError::failed(None, error.to_string())),
         };

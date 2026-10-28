@@ -48,6 +48,7 @@ fn assistant_kind(
     EntryKind::Assistant {
         api,
         model: model.id().into(),
+        provider: model.provider().map(Into::into),
         route: Some(AssistantRoute::from(model)),
         content,
         usage,
@@ -244,6 +245,7 @@ impl Session {
         effects.push(Effect::Compact {
             turn: Some(turn),
             first_kept: self.compaction_cut_point(),
+            focus: None,
         });
         true
     }

@@ -2,6 +2,7 @@ use std::{error::Error, sync::Arc};
 
 use dal_core::{ModelToolSpec, Purpose, ReplaySource, RequestParams, ThinkingLevel};
 use futures::executor::block_on;
+use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 use super::*;
 use crate::sse::{decode_stream, encode};
@@ -498,6 +499,10 @@ fn responses_and_codex_bodies_map_mapped_tool_names_for_advertisements_and_histo
             &request,
             WireThinking::OpenAi { effort: None },
             false,
+            BodyPolicy {
+                output_cap: OutputCap::Honor { ceiling: None },
+                tool_schemas: ToolSchemas::Verbatim,
+            },
         )?)?;
         assert_eq!(
             body.matches(r#""name":"deploy_web-x_list_41588e56""#)
@@ -515,10 +520,26 @@ fn body_is_byte_exact_and_replays_only_to_the_bound_route() -> TestResult {
     let high = WireThinking::OpenAi {
         effort: Some("high"),
     };
-    let body = request_body(&request, high, true)?;
+    let body = request_body(
+        &request,
+        high,
+        true,
+        BodyPolicy {
+            output_cap: OutputCap::Honor { ceiling: None },
+            tool_schemas: ToolSchemas::Verbatim,
+        },
+    )?;
     assert_eq!(String::from_utf8(body)?, EXPECTED_BODY);
     assert_eq!(
-        request_body(&request, high, true)?,
+        request_body(
+            &request,
+            high,
+            true,
+            BodyPolicy {
+                output_cap: OutputCap::Honor { ceiling: None },
+                tool_schemas: ToolSchemas::Verbatim,
+            },
+        )?,
         EXPECTED_BODY.as_bytes()
     );
 
@@ -531,7 +552,15 @@ fn body_is_byte_exact_and_replays_only_to_the_bound_route() -> TestResult {
         source.family = family;
         source.model = model.into();
         foreign.context = Arc::from(context);
-        let body = String::from_utf8(request_body(&foreign, high, true)?)?;
+        let body = String::from_utf8(request_body(
+            &foreign,
+            high,
+            true,
+            BodyPolicy {
+                output_cap: OutputCap::Honor { ceiling: None },
+                tool_schemas: ToolSchemas::Verbatim,
+            },
+        )?)?;
         assert!(
             !body.contains("rs_1"),
             "replayed to a foreign route: {body}"
@@ -547,7 +576,15 @@ fn body_ignores_text_tool_and_message_replay() -> TestResult {
         effort: Some("high"),
     };
     let mut laden = request()?;
-    let plain = request_body(&laden, high, true)?;
+    let plain = request_body(
+        &laden,
+        high,
+        true,
+        BodyPolicy {
+            output_cap: OutputCap::Honor { ceiling: None },
+            tool_schemas: ToolSchemas::Verbatim,
+        },
+    )?;
     let mut context = laden.context.to_vec();
     let ContextItem::Assistant { parts, replay, .. } = &mut context[1] else {
         return Err("fixture assistant item is missing".into());
@@ -562,7 +599,18 @@ fn body_ignores_text_tool_and_message_replay() -> TestResult {
     };
     *replay = Some(RawJson::parse(r#"{"foreign":"payload"}"#)?);
     laden.context = Arc::from(context);
-    assert_eq!(request_body(&laden, high, true)?, plain);
+    assert_eq!(
+        request_body(
+            &laden,
+            high,
+            true,
+            BodyPolicy {
+                output_cap: OutputCap::Honor { ceiling: None },
+                tool_schemas: ToolSchemas::Verbatim,
+            },
+        )?,
+        plain
+    );
     Ok(())
 }
 
@@ -575,6 +623,10 @@ fn off_sends_effort_none_only_when_supported() -> TestResult {
             effort: Some("none"),
         },
         true,
+        BodyPolicy {
+            output_cap: OutputCap::Honor { ceiling: None },
+            tool_schemas: ToolSchemas::Verbatim,
+        },
     )?)?;
     assert!(
         none.contains(r#""parallel_tool_calls":true,"reasoning":{"effort":"none"},"store":false"#)
@@ -583,6 +635,10 @@ fn off_sends_effort_none_only_when_supported() -> TestResult {
         &request,
         WireThinking::OpenAi { effort: None },
         true,
+        BodyPolicy {
+            output_cap: OutputCap::Honor { ceiling: None },
+            tool_schemas: ToolSchemas::Verbatim,
+        },
     )?)?;
     assert!(omitted.contains(r#""parallel_tool_calls":true,"store":false"#));
     assert!(!omitted.contains("reasoning\":"));
@@ -599,10 +655,116 @@ fn body_without_tools_keeps_empty_tool_members() -> TestResult {
         &request,
         WireThinking::OpenAi { effort: None },
         false,
+        BodyPolicy {
+            output_cap: OutputCap::Honor { ceiling: None },
+            tool_schemas: ToolSchemas::Verbatim,
+        },
     )?)?;
     assert!(body.contains(r#""tools":[],"tool_choice":"auto","parallel_tool_calls":true"#));
     assert!(!body.contains("prompt_cache_key"));
     assert!(!body.contains("previous_response_id"));
+    Ok(())
+}
+
+/// The request of [`request`] routed through `family`, asking for `cap` as
+/// its output ceiling.
+fn capped_request(family: Family, cap: Option<u32>) -> Result<ModelRequest, Box<dyn Error>> {
+    let mut request = request()?;
+    request.model = ModelRoute::Api {
+        family,
+        model: "gpt-5".into(),
+        provider: None,
+    };
+    request.params.max_output_tokens = cap;
+    Ok(request)
+}
+
+/// The `max_output_tokens` member of a serialized body, read back as a number.
+fn output_cap(body: &[u8]) -> Result<Option<u64>, Box<dyn Error>> {
+    let body: sonic_rs::Value = sonic_rs::from_slice(body)?;
+    Ok(body
+        .get("max_output_tokens")
+        .and_then(sonic_rs::JsonValueTrait::as_u64))
+}
+
+/// The body a plain `openai_responses` host receives for `request`.
+fn plain_host_body(request: &ModelRequest) -> Result<Vec<u8>, Box<dyn Error>> {
+    let credential = Credential::None;
+    let built = wire(&ResponsesRequest {
+        request,
+        thinking: WireThinking::OpenAi {
+            effort: Some("high"),
+        },
+        reasoning_summary: false,
+        max_output: None,
+        auth: AuthStyle::None,
+        credential: &credential,
+        session_id: SessionId::new_v7(),
+        user_agent: "dalgon/test",
+        tool_schemas: ToolSchemas::Verbatim,
+    })?;
+    Ok(built.body)
+}
+
+#[test]
+fn a_requested_output_cap_is_the_max_output_tokens_of_a_plain_responses_host() -> TestResult {
+    for cap in [1_024_u32, 4_096, 128_000] {
+        let request = capped_request(Family::Responses, Some(cap))?;
+        let body = plain_host_body(&request)?;
+        assert_eq!(output_cap(&body)?, Some(u64::from(cap)), "HTTPS body");
+        // The WebSocket `response.create` frame is cut from the same body,
+        // so the cap must survive that cut too.
+        let frame = crate::family::codex::websocket_frame(&body)?;
+        assert_eq!(output_cap(&frame)?, Some(u64::from(cap)), "WebSocket frame");
+    }
+    // Without a requested cap the member stays out: the host applies its own
+    // default rather than a catalog value the caller never asked for.
+    let uncapped = capped_request(Family::Responses, None)?;
+    assert_eq!(output_cap(&plain_host_body(&uncapped)?)?, None);
+    Ok(())
+}
+
+#[test]
+fn the_codex_backend_never_receives_a_requested_output_cap() -> TestResult {
+    use crate::{
+        auth::credential::{OAuthCredential, SecretString},
+        family::codex::{self, CodexRequest},
+    };
+
+    // The Codex backend rejects a caller-supplied output cap (omp pin
+    // `openai-codex-responses.ts:1589-1596`), so a requested cap must not
+    // change a byte of what Codex receives, over HTTPS or WebSocket.
+    let credential = OAuthCredential {
+        access_token: SecretString::from("test-access"),
+        refresh_token: SecretString::from("test-refresh"),
+        expires_at: None,
+        id_token: None,
+        account_id: Some(String::from("acct-7f3a9c")),
+        project_id: None,
+    };
+    let high = WireThinking::OpenAi {
+        effort: Some("high"),
+    };
+    let codex_body = |cap: Option<u32>| -> Result<Vec<u8>, Box<dyn Error>> {
+        let request = capped_request(Family::Codex, cap)?;
+        Ok(codex::build(&CodexRequest {
+            request: &request,
+            thinking: high,
+            reasoning_summaries: false,
+            credential: &credential,
+            session_id: SessionId::new_v7(),
+            user_agent: "dalgon/test",
+        })?
+        .body)
+    };
+    let uncapped = codex_body(None)?;
+    for cap in [1_024_u32, 4_096, 128_000] {
+        let capped = codex_body(Some(cap))?;
+        assert_eq!(output_cap(&capped)?, None, "Codex body for {cap}");
+        assert_eq!(capped, uncapped, "Codex body for {cap}");
+        let frame = codex::websocket_frame(&capped)?;
+        assert_eq!(output_cap(&frame)?, None, "Codex frame for {cap}");
+    }
     Ok(())
 }
 
@@ -662,7 +824,15 @@ fn before_turn_text_follows_its_user_message_in_the_body() -> TestResult {
     let high = WireThinking::OpenAi {
         effort: Some("high"),
     };
-    let body = String::from_utf8(request_body(&request, high, true)?)?;
+    let body = String::from_utf8(request_body(
+        &request,
+        high,
+        true,
+        BodyPolicy {
+            output_cap: OutputCap::Honor { ceiling: None },
+            tool_schemas: ToolSchemas::Verbatim,
+        },
+    )?)?;
     assert!(
         body.contains(concat!(
             r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]},"#,
@@ -783,4 +953,301 @@ fn an_unnumbered_event_does_not_forgive_a_later_decrease() {
         ),
         "{results:?}"
     );
+}
+
+/// A schema nested `levels` deep in `anyOf`: the depth-limit refusal probe.
+fn nested_any_of(levels: usize) -> String {
+    let mut schema = String::from(r#"{"type":"string"}"#);
+    for _ in 0..levels {
+        schema = format!(r#"{{"anyOf":[{schema}]}}"#);
+    }
+    schema
+}
+
+/// The union-root schema the B.AI Responses policy probes repair: one branch
+/// carries `properties`, `choice`, and an out-of-`u64` `minimum`; the other
+/// carries a nested `branch` union.
+fn bai_union_schema() -> &'static str {
+    r#"{"optional":true,"anyOf":[{"type":"object","properties":{"properties":{"type":"string","default":{"properties":"data"}},"choice":{"anyOf":[{"type":"string","const":"a"},{"type":"string","const":"b"}]},"big":{"type":"integer","minimum":18446744073709551617}},"required":["properties"]},{"type":"object","properties":{"branch":{"type":"object","anyOf":[{"properties":{"x":{"type":"string"}}},{"properties":{"y":{"type":"integer"}}}]}}}]}"#
+}
+
+/// A request carrying the union-root schema as its single tool.
+fn bai_union_request() -> Result<ModelRequest, Box<dyn Error>> {
+    let mut request = request()?;
+    request.tools = Arc::from([ModelToolSpec {
+        name: "bai_tool".into(),
+        description: "B.AI tool.".into(),
+        parameters: RawJson::parse(bai_union_schema())?,
+        grammar: None,
+        defer_loading: false,
+    }]);
+    Ok(request)
+}
+
+/// The lowered parameters of the union-root request with the raw body text
+/// the out-of-`u64` `minimum` assertion needs.
+fn repaired_union_parameters(
+    request: &ModelRequest,
+) -> Result<(String, sonic_rs::Value), Box<dyn Error>> {
+    let text = String::from_utf8(request_body(
+        request,
+        WireThinking::OpenAi { effort: None },
+        false,
+        BodyPolicy {
+            output_cap: OutputCap::Honor { ceiling: None },
+            tool_schemas: ToolSchemas::OpenAiCompat,
+        },
+    )?)?;
+    // The past-`u64` minimum cannot survive a parsed round trip, so its exact
+    // digits stay a text assertion; everything else is JSON semantics.
+    assert!(text.contains(r#""minimum":18446744073709551617"#), "{text}");
+    let body: sonic_rs::Value = sonic_rs::from_slice(text.as_bytes())?;
+    let parameters = body
+        .get("tools")
+        .and_then(sonic_rs::Value::as_array)
+        .and_then(|tools| tools.first())
+        .and_then(|tool| tool.get("parameters"));
+    let Some(parameters) = parameters.cloned() else {
+        return Err("lowered body has no tools[0].parameters".into());
+    };
+    Ok((text, parameters))
+}
+
+/// The member of the lowered union-root parameters stored under `key`.
+fn lowered_member<'a>(parameters: &'a sonic_rs::Value, key: &str) -> Option<&'a sonic_rs::Value> {
+    parameters
+        .get("properties")
+        .and_then(|members| members.get(key))
+}
+
+#[test]
+fn bai_responses_schema_policy_merges_the_union_root() -> TestResult {
+    let request = bai_union_request()?;
+    let (text, parameters) = repaired_union_parameters(&request)?;
+    assert_eq!(
+        parameters
+            .get("type")
+            .and_then(sonic_rs::JsonValueTrait::as_str),
+        Some("object"),
+        "{text}"
+    );
+    assert!(parameters.get("optional").is_none(), "{text}");
+    let Some(properties) = parameters
+        .get("properties")
+        .and_then(sonic_rs::Value::as_object)
+    else {
+        return Err("lowered parameters have no properties object".into());
+    };
+    let mut names: Vec<&str> = properties.iter().map(|(name, _)| name).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["big", "branch", "choice", "properties"], "{text}");
+    // Only the first union branch required `properties`, so the merged root
+    // requires nothing: the merge keeps branch-common names only.
+    assert!(parameters.get("required").is_none(), "{text}");
+    Ok(())
+}
+
+#[test]
+fn bai_responses_schema_policy_lowers_scalar_members() -> TestResult {
+    let request = bai_union_request()?;
+    let (text, parameters) = repaired_union_parameters(&request)?;
+    let Some(choice) = lowered_member(&parameters, "choice") else {
+        return Err("lowered parameters lost the choice member".into());
+    };
+    assert_eq!(
+        choice
+            .get("type")
+            .and_then(sonic_rs::JsonValueTrait::as_str),
+        Some("string"),
+        "{text}"
+    );
+    let union: Vec<&str> = choice
+        .get("enum")
+        .and_then(sonic_rs::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(sonic_rs::JsonValueTrait::as_str)
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(union, ["a", "b"], "{text}");
+    let Some(big) = lowered_member(&parameters, "big") else {
+        return Err("lowered parameters lost the big member".into());
+    };
+    assert_eq!(
+        big.get("type").and_then(sonic_rs::JsonValueTrait::as_str),
+        Some("integer"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn bai_responses_schema_policy_keeps_branch_variants_and_data_default() -> TestResult {
+    let request = bai_union_request()?;
+    let (text, parameters) = repaired_union_parameters(&request)?;
+    let branches: Vec<&sonic_rs::Value> = lowered_member(&parameters, "branch")
+        .and_then(|branch| branch.get("anyOf"))
+        .and_then(sonic_rs::Value::as_array)
+        .map(|branches| branches.iter().collect())
+        .unwrap_or_default();
+    assert_eq!(branches.len(), 2, "{text}");
+    assert_eq!(
+        branches[0]
+            .get("type")
+            .and_then(sonic_rs::JsonValueTrait::as_str),
+        Some("object"),
+        "{text}"
+    );
+    assert_eq!(
+        branches[1]
+            .get("type")
+            .and_then(sonic_rs::JsonValueTrait::as_str),
+        Some("object"),
+        "{text}"
+    );
+    assert!(
+        branches[0]
+            .get("properties")
+            .and_then(|members| members.get("x"))
+            .is_some(),
+        "{text}"
+    );
+    assert!(
+        branches[1]
+            .get("properties")
+            .and_then(|members| members.get("y"))
+            .is_some(),
+        "{text}"
+    );
+    assert_eq!(
+        lowered_member(&parameters, "properties")
+            .and_then(|member| member.get("default"))
+            .and_then(|default| default.get("properties"))
+            .and_then(sonic_rs::JsonValueTrait::as_str),
+        Some("data"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn bai_responses_schema_policy_verbatim_keeps_schema_bytes() -> TestResult {
+    let request = bai_union_request()?;
+    let untouched = String::from_utf8(request_body(
+        &request,
+        WireThinking::OpenAi { effort: None },
+        false,
+        BodyPolicy {
+            output_cap: OutputCap::Honor { ceiling: None },
+            tool_schemas: ToolSchemas::Verbatim,
+        },
+    )?)?;
+    assert!(untouched.contains(bai_union_schema()), "{untouched}");
+    Ok(())
+}
+
+#[test]
+fn bai_responses_schema_policy_refuses_nonobject_and_too_deep_roots() -> TestResult {
+    let mut request = request()?;
+    request.tools = Arc::from([ModelToolSpec {
+        name: "invalid_root".into(),
+        description: "Invalid.".into(),
+        parameters: RawJson::parse(r#"{"type":"string"}"#)?,
+        grammar: None,
+        defer_loading: false,
+    }]);
+    let error = request_body(
+        &request,
+        WireThinking::OpenAi { effort: None },
+        false,
+        BodyPolicy {
+            output_cap: OutputCap::Honor { ceiling: None },
+            tool_schemas: ToolSchemas::OpenAiCompat,
+        },
+    )
+    .expect_err("a non-object Responses tool schema is invalid");
+    assert!(matches!(
+        error,
+        ProviderError::InvalidRequest { message }
+            if message.contains("tool `invalid_root`")
+                && message.contains("root schema must have type")
+    ));
+
+    let deep = nested_any_of(140);
+    request.tools = Arc::from([ModelToolSpec {
+        name: "deep_root".into(),
+        description: "Deep.".into(),
+        parameters: RawJson::parse(&deep)?,
+        grammar: None,
+        defer_loading: false,
+    }]);
+    let error = request_body(
+        &request,
+        WireThinking::OpenAi { effort: None },
+        false,
+        BodyPolicy {
+            output_cap: OutputCap::Honor { ceiling: None },
+            tool_schemas: ToolSchemas::OpenAiCompat,
+        },
+    )
+    .expect_err("a schema past the shared depth limit is invalid");
+    assert!(matches!(
+        error,
+        ProviderError::InvalidRequest { message }
+            if message.contains("tool `deep_root`")
+                && message.contains("128")
+    ));
+    Ok(())
+}
+
+#[test]
+fn cf_aig_gateway_key_rides_its_own_header() -> TestResult {
+    use crate::auth::credential::{OAuthCredential, SecretString};
+
+    let request = request()?;
+    let credential = Credential::ApiKey {
+        key: SecretString::from("gateway-key"),
+    };
+    let built = wire(&ResponsesRequest {
+        request: &request,
+        thinking: WireThinking::OpenAi { effort: None },
+        reasoning_summary: false,
+        max_output: None,
+        auth: AuthStyle::CfAigAuthorization,
+        credential: &credential,
+        session_id: SessionId::new_v7(),
+        user_agent: "dalgon/test",
+        tool_schemas: ToolSchemas::Verbatim,
+    })?;
+    assert_eq!(
+        built.auth_header,
+        Some(("cf-aig-authorization", String::from("Bearer gateway-key")))
+    );
+
+    let oauth = Credential::OAuth(OAuthCredential {
+        access_token: SecretString::from("test-access"),
+        refresh_token: SecretString::from("test-refresh"),
+        expires_at: None,
+        id_token: None,
+        account_id: None,
+        project_id: None,
+    });
+    let denied = wire(&ResponsesRequest {
+        request: &request,
+        thinking: WireThinking::OpenAi { effort: None },
+        reasoning_summary: false,
+        max_output: None,
+        auth: AuthStyle::CfAigAuthorization,
+        credential: &oauth,
+        session_id: SessionId::new_v7(),
+        user_agent: "dalgon/test",
+        tool_schemas: ToolSchemas::Verbatim,
+    });
+    assert!(
+        matches!(denied, Err(ProviderError::InvalidRequest { .. })),
+        "an OAuth credential must not ride the gateway header"
+    );
+    Ok(())
 }

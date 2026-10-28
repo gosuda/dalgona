@@ -75,13 +75,12 @@ fn test_mcp_caller(inject: ServiceSet) -> Caller {
     .with_test_digest()
 }
 
-fn open_store(dir: &tempfile::TempDir, timeout: Duration) -> (Arc<GrantStore>, Arc<Broker>) {
+fn open_store(dir: &tempfile::TempDir) -> (Arc<GrantStore>, Arc<Broker>) {
     let broker = Arc::new(Broker::new());
     let store = Arc::new(
         GrantStore::with_runtime_scoped(
             dir.path().to_path_buf(),
             dir.path().to_path_buf(),
-            timeout,
             broker.clone(),
         )
         .expect("store"),
@@ -103,7 +102,7 @@ fn answer_and_release(broker: &Broker, id: dal_core::RequestId, answer: Answer, 
 #[tokio::test]
 async fn grant_misses_coalesce_and_revoke_invalidates_late_answer() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let inject = ServiceSet::from_names(["fs.read", "run"]).expect("inject");
     let caller_a = test_caller(inject);
     let caller_b = test_caller(inject);
@@ -134,7 +133,7 @@ async fn grant_misses_coalesce_and_revoke_invalidates_late_answer() {
 #[tokio::test]
 async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let inject = ServiceSet::from_names(["fs.read", "run"]).expect("inject");
     let caller = test_caller(inject);
     let cancel = CancellationToken::new();
@@ -170,7 +169,6 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
         GrantStore::with_runtime_scoped(
             dir.path().to_path_buf(),
             dir.path().to_path_buf(),
-            Duration::from_secs(30),
             broker.clone(),
         )
         .expect("reopen"),
@@ -208,7 +206,6 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
     let fresh = GrantStore::with_runtime_scoped(
         fresh_dir.path().to_path_buf(),
         fresh_dir.path().to_path_buf(),
-        Duration::from_secs(30),
         broker.clone(),
     )
     .expect("fresh");
@@ -229,10 +226,10 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
     assert_eq!(broker.open_requests().len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn grant_denials_are_distinct() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let inject = ServiceSet::from_names(["run"]).expect("inject");
     let caller = test_caller(inject);
     let cancel = CancellationToken::new();
@@ -253,12 +250,30 @@ async fn grant_denials_are_distinct() {
             _ => panic!("unexpected probe"),
         }
     }
-    let (quick, _) = open_store(&dir, Duration::from_millis(50));
-    let slow = quick.ensure(&caller, Service::Run, &cancel).await;
+    let (slow, timed_out) = futures::join!(store.ensure(&caller, Service::Run, &cancel), async {
+        let id = loop {
+            if let Some(req) = broker.open_requests().into_iter().next() {
+                break req.id;
+            }
+            tokio::task::yield_now().await;
+        };
+        tokio::time::advance(Duration::from_secs(120)).await;
+        id
+    });
     assert!(matches!(
         slow,
         Err(ServiceError::Denied(DenyReason::NotGranted))
     ));
+    // The actor's sweep claims the expired question and journals it; the
+    // local timer only finalizes the waiter, so nothing stays open after both.
+    let expired = broker
+        .expire_one(timed_out, tokio::time::Instant::now(), false)
+        .expect("the sweep claims the timed-out question");
+    broker.release(&expired);
+    assert!(
+        broker.open_requests().is_empty(),
+        "no open request survives the timeout"
+    );
 }
 
 #[tokio::test]
@@ -342,7 +357,7 @@ async fn facade_malformed_file_fails_without_writing() {
 #[tokio::test]
 async fn mcp_grants_persist_for_exact_declared_set_and_reask_after_change() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let caller = test_mcp_caller(ServiceSet::from_names(["mcp"]).expect("inject"));
     let cancel = CancellationToken::new();
     let (approved, ()) = futures::join!(
@@ -415,7 +430,7 @@ async fn mcp_grants_persist_for_exact_declared_set_and_reask_after_change() {
 #[tokio::test]
 async fn mcp_grant_misses_coalesce_and_publish_request_updates() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let inject = ServiceSet::from_names(["mcp"]).expect("inject");
     let caller_a = test_mcp_caller(inject);
     let caller_b = test_mcp_caller(inject);
@@ -493,7 +508,7 @@ fn command_caller(ext: &str, inject: ServiceSet) -> Caller {
 #[tokio::test]
 async fn a_turnless_caller_asks_once_and_rides_the_stored_answer() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let inject = ServiceSet::from_names(["sidecar", "turn"]).expect("inject");
     let cancel = CancellationToken::new();
     let command = command_caller("orchestration", inject);
@@ -534,7 +549,7 @@ async fn a_turnless_caller_asks_once_and_rides_the_stored_answer() {
 #[tokio::test]
 async fn a_turnless_question_survives_turn_ends_and_declines_fail_closed() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let inject = ServiceSet::from_names(["net"]).expect("inject");
     let cancel = CancellationToken::new();
     let command = command_caller("focus", inject);
@@ -564,7 +579,7 @@ async fn a_turnless_question_survives_turn_ends_and_declines_fail_closed() {
 #[tokio::test]
 async fn a_question_with_no_answerer_attached_is_denied_without_a_request() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let attached = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let probe = Arc::clone(&attached);
     store.set_answerer(Arc::new(move || {
@@ -613,13 +628,8 @@ async fn an_approval_before_the_data_root_exists_is_stored() {
     let data = dir.path().join("fresh").join("data");
     let broker = Arc::new(Broker::new());
     let store = Arc::new(
-        GrantStore::with_runtime_scoped(
-            data.clone(),
-            data.clone(),
-            Duration::from_secs(30),
-            broker.clone(),
-        )
-        .expect("a missing grants file loads empty"),
+        GrantStore::with_runtime_scoped(data.clone(), data.clone(), broker.clone())
+            .expect("a missing grants file loads empty"),
     );
     let inject = ServiceSet::from_names(["sidecar"]).expect("inject");
     let cancel = CancellationToken::new();
@@ -656,7 +666,7 @@ async fn an_approval_before_the_data_root_exists_is_stored() {
 #[tokio::test]
 async fn a_code_change_or_workspace_change_cannot_reuse_a_persistent_grant() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let inject = ServiceSet::from_names(["net"]).expect("inject");
     let caller = test_caller(inject);
     let cancel = CancellationToken::new();
@@ -688,7 +698,6 @@ async fn a_code_change_or_workspace_change_cannot_reuse_a_persistent_grant() {
     let moved_workspace = GrantStore::with_runtime_scoped(
         dir.path().to_path_buf(),
         dir.path().join("different-workspace"),
-        Duration::from_secs(30),
         broker,
     )
     .expect("second workspace");
@@ -912,7 +921,7 @@ async fn persistent_approvals_last_ninety_days_and_a_future_stamp_never_counts()
 #[tokio::test]
 async fn the_front_gates_answer_before_any_question_is_asked() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let cancel = CancellationToken::new();
     let bound = Duration::from_secs(3);
 
@@ -954,7 +963,7 @@ async fn the_front_gates_answer_before_any_question_is_asked() {
 #[tokio::test]
 async fn a_caller_without_a_verified_code_identity_is_denied_without_a_question() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let cancel = CancellationToken::new();
     let inject = ServiceSet::from_names(["net"]).expect("inject");
     for digest in [
@@ -1005,7 +1014,7 @@ async fn legacy_and_expired_rows_do_not_authorize_calls() {
 
     let legacy = "[[grant]]\next = \"focus\"\norigin = \"user\"\nservices = [\"net\"]\nby = \"tui\"\napproved_at = \"2026-01-01T00:00:00Z\"\n";
     std::fs::write(dir.path().join("grants.toml"), legacy).expect("legacy file");
-    let (store, _) = open_store(&dir, Duration::from_secs(30));
+    let (store, _) = open_store(&dir);
     store.set_answerer(Arc::new(|| false));
     let denied = store
         .ensure(
@@ -1027,7 +1036,7 @@ async fn legacy_and_expired_rows_do_not_authorize_calls() {
 #[tokio::test]
 async fn unverified_identity_and_undeclared_service_fail_closed_without_a_request() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let cancel = CancellationToken::new();
     let inject = ServiceSet::from_names(["run"]).expect("inject");
     let bare = || {
@@ -1122,7 +1131,7 @@ fn waiting(store: &GrantStore) -> usize {
 #[tokio::test]
 async fn a_dropped_opener_does_not_strand_later_callers_behind_its_question() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let caller = test_caller(ServiceSet::from_names(["run"]).expect("inject"));
     let cancel = CancellationToken::new();
 
@@ -1154,7 +1163,7 @@ async fn a_dropped_opener_does_not_strand_later_callers_behind_its_question() {
 #[tokio::test]
 async fn a_dropped_mcp_opener_does_not_strand_later_callers_behind_its_question() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let caller = test_mcp_caller(ServiceSet::from_names(["mcp"]).expect("inject"));
     let cancel = CancellationToken::new();
 
@@ -1191,7 +1200,7 @@ async fn a_dropped_mcp_opener_does_not_strand_later_callers_behind_its_question(
 )]
 async fn a_dropped_waiter_does_not_replay_a_stale_denial_to_later_callers() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let inject = ServiceSet::from_names(["run"]).expect("inject");
     let spawn_ask = |caller: Caller| {
         let store = Arc::clone(&store);
@@ -1247,7 +1256,7 @@ async fn a_dropped_waiter_does_not_replay_a_stale_denial_to_later_callers() {
 #[tokio::test]
 async fn an_approval_cannot_restore_a_grant_revoked_while_it_was_pending() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let admin = GrantStore::new(dir.path().to_path_buf());
     let other = key("other", Origin::User, &[Service::FsRead]);
     admin
@@ -1281,7 +1290,7 @@ async fn an_approval_cannot_restore_a_grant_revoked_while_it_was_pending() {
 #[tokio::test]
 async fn an_mcp_approval_for_an_extension_with_no_capabilities_keeps_the_file_loadable() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let caller = test_mcp_caller(ServiceSet::EMPTY);
     let cancel = CancellationToken::new();
 
@@ -1324,7 +1333,7 @@ async fn an_mcp_approval_for_an_extension_with_no_capabilities_keeps_the_file_lo
 #[tokio::test]
 async fn revoke_invalidates_a_late_mcp_answer_like_a_plain_one() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let inject = ServiceSet::from_names(["mcp"]).expect("inject");
     let caller_a = test_mcp_caller(inject);
     let caller_b = test_mcp_caller(inject);
@@ -1416,9 +1425,72 @@ async fn grant_rejects_a_key_that_cannot_authorize_and_names_the_fix() {
 }
 
 #[tokio::test]
+async fn nested_eval_approval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (store, broker) = open_store(&dir);
+    let inject = ServiceSet::from_names(["run"]).expect("inject");
+    let cancel = CancellationToken::new();
+    let turn = Some(TurnId::new(std::num::NonZeroU64::MIN));
+    let cell = Caller::new(
+        "focus".parse::<Name>().expect("name"),
+        Origin::User,
+        inject,
+        std::num::NonZeroU32::MIN,
+        CallerKind::Cell { approved: true },
+        turn,
+    )
+    .with_test_digest();
+    // The approved cell eval starts with its own approval as its grant: no
+    // broker question opens for the cell itself.
+    let granted = store
+        .ensure(&cell, Service::Run, &cancel)
+        .await
+        .expect("an approved cell needs no second question");
+    assert!(!granted.persistent(), "nothing is stored for a cell");
+    assert_eq!(
+        broker.open_requests().len(),
+        0,
+        "the cell approval opens nothing"
+    );
+    // A nested tool call made while that cell runs is a different caller:
+    // it must open exactly one broker approval, and a decline there must
+    // return into the cell as a denial rather than stalling the cell.
+    let nested = Caller::new(
+        "focus".parse::<Name>().expect("name"),
+        Origin::User,
+        inject,
+        std::num::NonZeroU32::MIN,
+        CallerKind::Tool,
+        turn,
+    )
+    .with_test_digest();
+    let (outcome, ()) = futures::join!(store.ensure(&nested, Service::Run, &cancel), async {
+        let open = wait_open(&broker, 1).await;
+        assert_eq!(open.len(), 1, "the nested ask opens inside the cell eval");
+        answer_and_release(&broker, open[0].id, Answer::Decline, tui());
+    });
+    assert!(
+        matches!(outcome, Err(ServiceError::Declined)),
+        "the declined nested approval denies into the running cell: {outcome:?}"
+    );
+    assert_eq!(
+        broker.open_requests().len(),
+        0,
+        "the nested denial settles its question"
+    );
+    // The cell itself still rides its own approval after the nested denial.
+    let again = store
+        .ensure(&cell, Service::Run, &cancel)
+        .await
+        .expect("the cell keeps its own grant after a nested denial");
+    assert!(!again.persistent());
+    assert_eq!(broker.open_requests().len(), 0);
+}
+
+#[tokio::test]
 async fn only_an_approved_cell_rides_its_own_approval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let (store, broker) = open_store(&dir);
     let inject = ServiceSet::from_names(["run"]).expect("inject");
     let cancel = CancellationToken::new();
     let cell = |approved: bool| {

@@ -196,6 +196,7 @@ impl Surface {
             | Family::GoogleGenerativeAi
             | Family::GoogleVertex
             | Family::GoogleGeminiCli
+            | Family::GoogleCloudCodeAssist
             | Family::GoogleAntigravity
             | Family::Mistral
             | Family::Ollama
@@ -607,7 +608,8 @@ pub(crate) struct CopilotRequest<'a> {
     pub(crate) request: &'a ModelRequest,
     /// The composed thinking plan for the route's family.
     pub(crate) thinking: &'a ThinkingPlan,
-    /// The model's output ceiling, when the catalog knows it (Anthropic).
+    /// The model's output ceiling, when the catalog knows it (Anthropic and
+    /// Responses).
     pub(crate) max_output: Option<u32>,
     /// Whether the model supports the adaptive thinking display hint (Anthropic).
     pub(crate) display_supported: bool,
@@ -692,15 +694,25 @@ fn bearer(key: &CopilotKey) -> (&'static str, String) {
 
 fn chat_parts(input: &CopilotRequest<'_>) -> Result<Parts, ProviderError> {
     let request = repair_pairing(input.request);
-    let body =
-        chat::request_body(&request, input.thinking).map_err(|error| invalid(error.to_string()))?;
+    let body = chat::request_body(&request, input.thinking, chat::Dialect::STANDARD)
+        .map_err(|error| invalid(error.to_string()))?;
     Ok((vec![bearer(input.key)], body, None))
 }
 
 fn responses_parts(input: &CopilotRequest<'_>) -> Result<Parts, ProviderError> {
     let paired = repair_pairing(input.request);
     let request = without_native_history(&paired);
-    let body = responses::request_body(&request, input.thinking.wire, input.reasoning_summary)?;
+    let body = responses::request_body(
+        &request,
+        input.thinking.wire,
+        input.reasoning_summary,
+        responses::BodyPolicy {
+            output_cap: responses::OutputCap::Honor {
+                ceiling: input.max_output,
+            },
+            tool_schemas: crate::family::schema::ToolSchemas::Verbatim,
+        },
+    )?;
     Ok((vec![bearer(input.key)], body, None))
 }
 
@@ -2043,21 +2055,9 @@ mod tests {
         ] {
             assert_eq!(surface_for_model(model), surface, "{model}");
         }
-        for family in [
-            Family::Codex,
-            Family::Bedrock,
-            Family::Cursor,
-            Family::Devin,
-            Family::Droid,
-            Family::GitLab,
-            Family::GoogleGenerativeAi,
-            Family::GoogleVertex,
-            Family::GoogleGeminiCli,
-            Family::GoogleAntigravity,
-            Family::Mistral,
-            Family::Ollama,
-            Family::PiMessages,
-        ] {
+        for family in Family::ALL.into_iter().filter(|family| {
+            !matches!(family, Family::Chat | Family::Responses | Family::Anthropic)
+        }) {
             assert_eq!(Surface::of_family(family), None, "{family:?}");
         }
         for surface in [Surface::Chat, Surface::Responses, Surface::Anthropic] {

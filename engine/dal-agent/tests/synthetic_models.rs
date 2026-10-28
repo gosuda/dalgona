@@ -218,7 +218,7 @@ impl Handler {
         ));
     }
 
-    async fn agent(&self, cx: &ModelCx<'_>) {
+    fn agent(&self, cx: &ModelCx<'_>) {
         let spec = ScopeSpec {
             limit: 1,
             on_error: OnError::Settle,
@@ -235,9 +235,9 @@ impl Handler {
             tools: None,
             workspace: None,
         };
-        let handle = scope.agent(start).expect("agent handle admitted");
-        let result = handle.result().await;
-        self.log.push(format!("agent {:?}", result.err()));
+        // Outside a session the refusal is immediate: no handle, nothing to await.
+        let refused = scope.agent(start);
+        self.log.push(format!("agent {:?}", refused.err()));
     }
 
     async fn scoped_infer(&self, cx: &ModelCx<'_>) {
@@ -319,7 +319,7 @@ impl ModelHandler for Handler {
                     Ok(done_stream())
                 }
                 Mode::Agent => {
-                    self.agent(&cx).await;
+                    self.agent(&cx);
                     Ok(done_stream())
                 }
                 Mode::Nested(target) => {

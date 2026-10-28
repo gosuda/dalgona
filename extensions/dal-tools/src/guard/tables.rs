@@ -51,7 +51,8 @@ const OCAML: Table = Table {
         "match_case",
         "while_expression",
         "for_expression",
-        "when_expression",
+        // was `when_expression` (renamed to `guard` in the pinned tree-sitter-ocaml grammar)
+        "guard",
     ],
     nesting: &[
         "if_expression",
@@ -94,11 +95,12 @@ const TYPESCRIPT: Table = Table {
     ],
     decisions: &[
         "if_statement",
-        "conditional_expression",
+        // was `conditional_expression` (named `ternary_expression` in the pinned JS/TS grammars)
+        "ternary_expression",
         "switch_case",
         "for_statement",
         "for_in_statement",
-        "for_of_statement",
+        // no `for_of_statement`: the pinned JS/TS grammars parse for-of as `for_in_statement`
         "while_statement",
         "do_statement",
         "catch_clause",
@@ -108,11 +110,11 @@ const TYPESCRIPT: Table = Table {
         "switch_statement",
         "for_statement",
         "for_in_statement",
-        "for_of_statement",
         "while_statement",
         "do_statement",
         "catch_clause",
-        "conditional_expression",
+        // was `conditional_expression` (named `ternary_expression` in the pinned JS/TS grammars)
+        "ternary_expression",
     ],
     folded: &["arrow_function", "function_expression"],
     flat: &[],
@@ -202,7 +204,8 @@ const C: Table = Table {
         "do_statement",
         "conditional_expression",
     ],
-    folded: &["lambda_expression"],
+    // no folded-function kind: C has no closures (was `lambda_expression`)
+    folded: &[],
     flat: &["goto_statement"],
     else_parents: &["else_clause"],
     bool_node: "binary_expression",

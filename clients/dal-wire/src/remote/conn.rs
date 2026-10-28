@@ -1007,7 +1007,7 @@ mod tests {
             if read == 0 {
                 return Ok(None);
             }
-            sonic_rs::from_str(&line)
+            crate::json::parse_value_lossless(&line)
                 .map(Some)
                 .map_err(std::io::Error::other)
         }

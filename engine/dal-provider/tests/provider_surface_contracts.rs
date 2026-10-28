@@ -226,10 +226,17 @@ fn vendor_families_are_named_by_their_first_row() {
 }
 
 #[test]
-fn key_only_gateway_rows_carry_no_oauth() {
-    for id in ["radius", "openrouter"] {
-        let def = find(id).expect("gateway row registered");
-        assert!(def.key.is_some(), "{id} takes a key");
-        assert!(def.oauth.is_none(), "{id} must stay key-only");
-    }
+fn gateway_rows_carry_key_and_oauth_contracts() {
+    let radius = find("radius").expect("radius row registered");
+    assert!(radius.key.is_some(), "radius keeps its API-key method");
+    let radius_oauth = radius.oauth.expect("radius offers OAuth");
+    assert_eq!(radius_oauth.client_id, Some("pi-gateway"));
+
+    let openrouter = find("openrouter").expect("openrouter row registered");
+    assert!(
+        openrouter.key.is_some(),
+        "openrouter keeps its API-key method"
+    );
+    let openrouter_oauth = openrouter.oauth.expect("openrouter offers OAuth");
+    assert_eq!(openrouter_oauth.client_id, None);
 }

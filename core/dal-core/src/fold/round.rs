@@ -272,6 +272,7 @@ impl Session {
             effects.push(Effect::Compact {
                 turn: Some(turn),
                 first_kept: self.compaction_cut_point(),
+                focus: None,
             });
             return;
         }
@@ -407,6 +408,7 @@ impl Session {
             EntryKind::Assistant {
                 api: family,
                 model: model.id().into(),
+                provider: model.provider().map(Into::into),
                 route: Some(AssistantRoute::from(model)),
                 content: partial.content,
                 usage: partial.usage,

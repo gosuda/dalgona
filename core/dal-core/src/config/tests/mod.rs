@@ -12,6 +12,7 @@ mod limits;
 mod prices;
 mod rules;
 mod sandbox;
+mod scoped_models;
 mod tui;
 
 const DATA_ROOT: &str = "/home/test/dalgon";

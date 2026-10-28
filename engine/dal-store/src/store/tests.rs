@@ -100,6 +100,7 @@ fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test-model".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content,
             usage: usage(),

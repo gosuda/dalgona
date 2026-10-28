@@ -59,10 +59,10 @@ use dal_core::{
     Usage,
 };
 use dal_provider::{
-    AuthStore, AuthStyle, CatalogEntry, Credential, EnvSnapshot, EventStream, Listing, NoticeSink,
-    OAuthCredential, Provider, ProviderConfig, ProviderEntry, ProviderError, ProviderIdentity,
-    ProviderSet, ProviderSettings, ReplayPayload, ResolvedModel, SecretString, StopReason,
-    StreamEvent, ThinkingSupport, ToolArgs, ToolCall, ToolSupport, Transport,
+    AuthStore, CatalogEntry, Credential, EnvSnapshot, EventStream, Listing, NoticeSink,
+    OAuthCredential, Provider, ProviderConfig, ProviderError, ProviderIdentity, ProviderSet,
+    ReplayPayload, ResolvedModel, SecretString, StopReason, StreamEvent, ThinkingSupport, ToolArgs,
+    ToolCall, ToolSupport,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -207,6 +207,7 @@ fn seed_oauth(dir: &Path) {
                 expires_at: None,
                 id_token: None,
                 account_id: None,
+                project_id: None,
             }),
         )
         .expect("synthetic oauth credential stores");
@@ -323,27 +324,20 @@ impl Harness {
                 .await
                 .expect("replay server starts");
         let dir = temp_dir(case);
-        let config = ProviderConfig {
-            default_model: None,
-            thinking: ThinkingLevel::Medium,
-            aliases: Vec::new(),
-            request_max_retries: retries,
-            stream_max_retries: retries,
-            providers: vec![ProviderEntry {
-                id: DIRECT_PROVIDER.into(),
-                def: None,
-                family: Family::GoogleGenerativeAi,
-                base_url: format!("{}/v1beta", server.base_url()).into(),
-                transport: Transport::Https,
-                key_env: Some(KEY_ENV.into()),
-                auth: AuthStyle::XApiKey,
-                max_concurrent_requests: 4,
-                settings: ProviderSettings::default(),
-            }],
-            scripted: None,
-        };
+        let base = format!("{}/v1beta", server.base_url());
+        let table = format!(
+            "[providers.{DIRECT_PROVIDER}]\napi = 'google-generative-ai'\nbase_url = '{base}'\nkey_env = '{KEY_ENV}'\nauth = 'x-api-key'\n"
+        );
+        let config = Config::load(ConfigProduct::Dalgon, &dir, "", Some(&table))
+            .expect("provider table parses");
+        let mut providers = ProviderConfig::from_config(&config).expect("providers decode");
+        providers.request_max_retries = retries;
+        providers.stream_max_retries = retries;
+        providers
+            .providers
+            .retain(|provider| &*provider.id == DIRECT_PROVIDER);
         let set = ProviderSet::new(
-            &config,
+            &providers,
             identity(),
             EnvSnapshot::test(&[(KEY_ENV, KEY_VALUE)]),
             &dir,

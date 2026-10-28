@@ -317,7 +317,8 @@ pub(crate) struct RoutePolicy<'a> {
     pub(crate) gemini_medium: bool,
     /// Whether the route locks its upstream from the first turn on.
     pub(crate) routing_locked: bool,
-    /// The model's output ceiling, for the Anthropic `max_tokens`.
+    /// The model's output ceiling: the Anthropic `max_tokens` bound and the
+    /// hard cap of a requested Responses output cap.
     pub(crate) max_output: Option<u32>,
 }
 
@@ -719,7 +720,8 @@ fn lower_completions(input: &DroidRequest<'_>) -> Result<Lowered, ProviderError>
         notices: Vec::new(),
     };
     let derived = derived_request(input, Family::Chat);
-    let body = chat::request_body(&derived, &plan).map_err(|error| invalid(error.to_string()))?;
+    let body = chat::request_body(&derived, &plan, chat::Dialect::LEGACY_TOKENS)
+        .map_err(|error| invalid(error.to_string()))?;
     let toggle = enable_thinking.map(|on| {
         (
             "chat_template_args",
@@ -750,10 +752,24 @@ fn dialect(
 
 fn lower_responses(input: &DroidRequest<'_>) -> Result<Lowered, ProviderError> {
     let derived = derived_request(input, Family::Responses);
+    // Native Droid sends no output cap on `gpt-*` Responses requests (the
+    // pinned native traffic, and `omit-max-output-tokens` for `gpt-*` in the
+    // pinned compat rules) and sends `max_output_tokens` on `grok-*`.
+    let cap = if derived.model.id().starts_with("gpt-") {
+        responses::OutputCap::Omit
+    } else {
+        responses::OutputCap::Honor {
+            ceiling: input.policy.max_output,
+        }
+    };
     let mut body = responses::request_body(
         &derived,
         input.thinking.wire,
         input.policy.reasoning_summary,
+        responses::BodyPolicy {
+            output_cap: cap,
+            tool_schemas: crate::family::schema::ToolSchemas::Verbatim,
+        },
     )?;
     // The proxy declares every Responses tool non-strict and the shared
     // encoder writes no `strict` member, so the field is spliced into each

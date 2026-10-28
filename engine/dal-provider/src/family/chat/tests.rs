@@ -1,5 +1,6 @@
 use dal_core::{CallId, ModelToolSpec, Purpose, ReplaySource, RequestParams, ThinkingLevel};
 use futures::executor::block_on;
+use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 use super::*;
 use crate::sse::decode_stream;
@@ -56,8 +57,12 @@ fn request(tools: Vec<ModelToolSpec>, context: Vec<ContextItem>) -> ModelRequest
     }
 }
 
+fn body_with(request: &ModelRequest, thinking: &ThinkingPlan, dialect: Dialect) -> String {
+    String::from_utf8(request_body(request, thinking, dialect).unwrap()).unwrap()
+}
+
 fn body_text(request: &ModelRequest, thinking: &ThinkingPlan) -> String {
-    String::from_utf8(request_body(request, thinking).unwrap()).unwrap()
+    body_with(request, thinking, Dialect::STANDARD)
 }
 
 #[test]
@@ -175,7 +180,7 @@ fn request_body_rejects_what_chat_cannot_carry() {
         }],
     );
     assert_eq!(
-        request_body(&blob, &plan(None, None)),
+        request_body(&blob, &plan(None, None), Dialect::STANDARD),
         Err(ChatBodyError::UnresolvedBlob { blob_id })
     );
 
@@ -186,7 +191,7 @@ fn request_body_rejects_what_chat_cannot_carry() {
         provider: None,
     };
     assert_eq!(
-        request_body(&other, &plan(None, None)),
+        request_body(&other, &plan(None, None), Dialect::STANDARD),
         Err(ChatBodyError::NotChat {
             route: "gpt-6-astra".into()
         })
@@ -200,9 +205,321 @@ fn request_body_rejects_what_chat_cannot_carry() {
         ..plan(None, None)
     };
     assert_eq!(
-        request_body(&request(Vec::new(), Vec::new()), &anthropic),
+        request_body(
+            &request(Vec::new(), Vec::new()),
+            &anthropic,
+            Dialect::STANDARD
+        ),
         Err(ChatBodyError::ForeignThinking)
     );
+}
+
+fn capped_request(cap: Option<u32>) -> ModelRequest {
+    let mut request = request(
+        Vec::new(),
+        vec![ContextItem::User {
+            parts: vec![text("hi")],
+        }],
+    );
+    request.params.max_output_tokens = cap;
+    request
+}
+
+#[test]
+fn a_requested_cap_is_written_in_the_member_the_dialect_names() {
+    let deepseek_row = Dialect::of("custom", "https://api.deepseek.com/v1", "any-model");
+    for (dialect, member, other) in [
+        (
+            Dialect::STANDARD,
+            r#""max_completion_tokens":2048"#,
+            r#""max_tokens""#,
+        ),
+        (
+            Dialect::LEGACY_TOKENS,
+            r#""max_tokens":2048"#,
+            r#""max_completion_tokens""#,
+        ),
+        (
+            Dialect::of("cerebras", "", "gpt-oss-120b"),
+            r#""max_completion_tokens":2048"#,
+            r#""max_tokens""#,
+        ),
+        (
+            Dialect::of("moonshot", "", "kimi-k3"),
+            r#""max_tokens":2048"#,
+            r#""max_completion_tokens""#,
+        ),
+        (
+            deepseek_row,
+            r#""max_tokens":2048"#,
+            r#""max_completion_tokens""#,
+        ),
+    ] {
+        let body = body_with(&capped_request(Some(2048)), &plan(None, None), dialect);
+        assert!(body.contains(member), "{body}");
+        assert!(!body.contains(other), "{body}");
+        // A request that asks for no cap writes neither member.
+        let body = body_with(&capped_request(None), &plan(None, None), dialect);
+        assert!(!body.contains("max_completion_tokens"), "{body}");
+        assert!(!body.contains("max_tokens"), "{body}");
+    }
+}
+
+#[test]
+fn cerebras_sends_no_stream_options_and_the_reference_body_keeps_them() {
+    let request = capped_request(None);
+    let cerebras = Dialect::of("cerebras", "", "gpt-oss-120b");
+    let body = body_with(&request, &plan(None, None), cerebras);
+    assert!(!body.contains("stream_options"), "{body}");
+    let body = body_with(&request, &plan(None, None), Dialect::STANDARD);
+    assert!(
+        body.contains(r#""stream_options":{"include_usage":true}"#),
+        "{body}"
+    );
+}
+
+fn off_plan() -> ThinkingPlan {
+    ThinkingPlan {
+        level: ThinkingLevel::Off,
+        ..plan(Some("none"), None)
+    }
+}
+
+#[test]
+fn the_dialect_spells_the_thinking_plan_in_its_own_members() {
+    let request = capped_request(None);
+    let on = plan(Some("high"), None);
+    let silent = plan(None, None);
+    let toggle = Dialect::of("xiaomi-token-plan-cn", "", "mimo-v2.6-pro");
+    let always_on = Dialect::of("xiaomi-token-plan-cn", "", "mimo-v2.5-pro");
+
+    // A toggle writes the switch and no effort; off is `disabled`, and a plan
+    // that sends nothing writes nothing.
+    let body = body_with(&request, &on, toggle);
+    assert!(body.contains(r#""thinking":{"type":"enabled"}"#), "{body}");
+    assert!(!body.contains("reasoning_effort"), "{body}");
+    let body = body_with(&request, &off_plan(), toggle);
+    assert!(body.contains(r#""thinking":{"type":"disabled"}"#), "{body}");
+    assert!(!body.contains("reasoning_effort"), "{body}");
+    let body = body_with(&request, &silent, toggle);
+    assert!(!body.contains("thinking"), "{body}");
+
+    // An always-on model writes the switch with its effort, and never
+    // `disabled` or `none`, whatever the plan says at off.
+    let body = body_with(&request, &on, always_on);
+    assert!(
+        body.contains(r#""reasoning_effort":"high","thinking":{"type":"enabled"}"#),
+        "{body}"
+    );
+    for plan in [off_plan(), silent] {
+        let body = body_with(&request, &plan, always_on);
+        assert!(!body.contains("thinking"), "{body}");
+        assert!(!body.contains("reasoning_effort"), "{body}");
+    }
+
+    // The reference dialect keeps the effort and no switch.
+    let body = body_with(&request, &on, Dialect::STANDARD);
+    assert!(body.contains(r#""reasoning_effort":"high""#), "{body}");
+    assert!(!body.contains("thinking"), "{body}");
+}
+
+fn thought(value: &str) -> AssistantPart {
+    AssistantPart::Thinking {
+        text: value.into(),
+        replay: None,
+    }
+}
+
+fn said(value: &str) -> AssistantPart {
+    AssistantPart::Text {
+        text: value.into(),
+        replay: None,
+    }
+}
+
+fn called(id: &str) -> AssistantPart {
+    AssistantPart::ToolCall {
+        call: CallId::new(id),
+        name: "read".into(),
+        args: raw("{}"),
+        replay: None,
+    }
+}
+
+fn assistant_of(source: ReplaySource, parts: Vec<AssistantPart>) -> ContextItem {
+    ContextItem::Assistant {
+        source,
+        replay: None,
+        parts,
+    }
+}
+
+fn result_of(id: &str) -> ContextItem {
+    ContextItem::ToolResult {
+        call: CallId::new(id),
+        name: "read".into(),
+        is_error: false,
+        parts: vec![text("ok")],
+    }
+}
+
+/// Five assistant messages: the model's own tool turn with reasoning, its own
+/// tool turn without any, another model's tool turn with reasoning, its own
+/// plain answer, and its own answer with reasoning.
+fn reasoning_history() -> Vec<ContextItem> {
+    let other = ReplaySource {
+        family: Family::Chat,
+        model: "another-model".into(),
+    };
+    vec![
+        ContextItem::User {
+            parts: vec![text("go")],
+        },
+        assistant_of(replay_source(), vec![thought("Weigh it."), called("c1")]),
+        result_of("c1"),
+        assistant_of(replay_source(), vec![called("c2")]),
+        result_of("c2"),
+        assistant_of(other, vec![thought("Foreign."), called("c3")]),
+        result_of("c3"),
+        assistant_of(replay_source(), vec![said("Plain.")]),
+        assistant_of(replay_source(), vec![thought("Then this."), said("Last.")]),
+    ]
+}
+
+/// The `reasoning_content` member of each assistant message, in order.
+fn replayed(dialect: Dialect) -> Vec<Option<String>> {
+    let body = body_with(
+        &request(Vec::new(), reasoning_history()),
+        &plan(None, None),
+        dialect,
+    );
+    let body: sonic_rs::Value = sonic_rs::from_str(&body).unwrap();
+    body.get("messages")
+        .and_then(|messages| messages.as_array())
+        .unwrap()
+        .iter()
+        .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("assistant"))
+        .map(|message| {
+            message
+                .get("reasoning_content")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn reasoning_travels_back_as_the_dialect_says_and_foreign_reasoning_never_does() {
+    let own = |value: &str| Some(value.to_owned());
+    assert_eq!(replayed(Dialect::STANDARD), [None, None, None, None, None]);
+    // Own reasoning where it exists, and an empty member on a tool turn
+    // without any (own or another model's); a plain answer carries none.
+    let on_calls = [own("Weigh it."), own(""), own(""), None, own("Then this.")];
+    assert_eq!(replayed(Dialect::of("moonshot", "", "kimi-k3")), on_calls);
+    assert_eq!(
+        replayed(Dialect::of("xiaomi", "", "mimo-v2.6-flash")),
+        on_calls
+    );
+    assert_eq!(
+        replayed(Dialect::of("xiaomi-token-plan-cn", "", "mimo-v2.5")),
+        on_calls
+    );
+    // Own reasoning only where it exists, no invented member.
+    assert_eq!(
+        replayed(Dialect::of("moonshot", "", "kimi-k2.6")),
+        [own("Weigh it."), None, None, None, own("Then this.")]
+    );
+}
+
+#[test]
+fn an_unlisted_mimo_id_and_an_unlisted_host_keep_the_reference_dialect() {
+    assert_eq!(
+        Dialect::of("xiaomi", "", "mimo-v3-flash"),
+        Dialect::STANDARD
+    );
+    assert_eq!(
+        Dialect::of("openai", "https://api.openai.com/v1", "gpt-6-astra"),
+        Dialect::STANDARD
+    );
+}
+
+fn schema_request(parameters: &str) -> ModelRequest {
+    request(
+        vec![ModelToolSpec {
+            name: "read".into(),
+            description: "Reads.".into(),
+            parameters: raw(parameters),
+            grammar: None,
+            defer_loading: false,
+        }],
+        Vec::new(),
+    )
+}
+
+#[test]
+fn moonshot_lowers_the_schema_and_keeps_every_number_and_data_name() {
+    let moonshot = Dialect::of("moonshot", "", "kimi-k3");
+    let schema = r#"{"type":"object","title":"T","properties":{"format":{"type":"string","format":"date"},"n":{"type":"integer","minimum":18446744073709551617,"maximum":1e3},"d":{"default":{"format":"raw"}}}}"#;
+    let body = body_with(&schema_request(schema), &plan(None, None), moonshot);
+    assert!(!body.contains(r#""title""#), "{body}");
+    assert!(!body.contains(r#""date""#), "{body}");
+    // The property named `format` stays, without its own `format` keyword.
+    assert!(body.contains(r#""format":{"type":"string"}"#), "{body}");
+    // Numbers keep their exact text, and `default` data is not a schema.
+    assert!(body.contains("18446744073709551617"), "{body}");
+    assert!(body.contains("1e3"), "{body}");
+    assert!(body.contains(r#""default":{"format":"raw"}"#), "{body}");
+    // The reference dialect sends the schema untouched.
+    let body = body_with(
+        &schema_request(schema),
+        &plan(None, None),
+        Dialect::STANDARD,
+    );
+    assert!(body.contains(schema), "{body}");
+}
+
+#[test]
+fn moonshot_schemas_with_nothing_to_strip_keep_their_bytes() {
+    let moonshot = Dialect::of("moonshot", "", "kimi-k3");
+    let body = body_with(
+        &schema_request(r#"{"type": "object"}"#),
+        &plan(None, None),
+        moonshot,
+    );
+    assert!(
+        body.contains(r#""parameters":{"type": "object"}"#),
+        "{body}"
+    );
+}
+
+fn nested_any_of(levels: usize) -> String {
+    let mut schema = String::from(r#"{"type":"string"}"#);
+    for _ in 0..levels {
+        schema = format!(r#"{{"anyOf":[{schema}]}}"#);
+    }
+    schema
+}
+
+#[test]
+fn a_moonshot_schema_nested_past_the_limit_fails_naming_the_tool() {
+    let moonshot = Dialect::of("moonshot", "", "kimi-k3");
+    let deep = nested_any_of(70);
+    let error = request_body(&schema_request(&deep), &plan(None, None), moonshot).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ChatBodyError::Encode { message }
+                if message.contains("tool `read`") && message.contains("128")
+        ),
+        "{error:?}"
+    );
+    // Within the limit with nothing to strip, the text is sent as it came,
+    // and the reference dialect never refuses depth.
+    let shallow = nested_any_of(30);
+    let body = body_with(&schema_request(&shallow), &plan(None, None), moonshot);
+    assert!(body.contains(&shallow), "{body}");
+    let body = body_with(&schema_request(&deep), &plan(None, None), Dialect::STANDARD);
+    assert!(body.contains(&deep), "{body}");
 }
 
 fn sse(datas: &[&str]) -> String {
@@ -825,4 +1142,449 @@ fn reasoning_beyond_the_completion_count_leaves_zero_output_and_cache_writes_sur
     let plain = r#"{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":7}}"#;
     let usage = usage_of(&sse(&[plain, "[DONE]"]));
     assert_eq!((usage.output_tokens, usage.reasoning_tokens), (7, None));
+}
+
+fn plain_tool() -> ModelToolSpec {
+    ModelToolSpec {
+        name: "read".into(),
+        description: "Reads.".into(),
+        parameters: raw(r#"{"type":"object"}"#),
+        grammar: None,
+        defer_loading: false,
+    }
+}
+
+#[test]
+fn zai_rows_spell_thinking_alongside_the_effort_and_the_tool_stream() {
+    let request = request(vec![plain_tool()], Vec::new());
+    let glm53 = Dialect::of(
+        "zai",
+        "https://api.z.ai/api/coding/paas/v4",
+        "glm-5.3-flash",
+    );
+    let body = body_with(&request, &plan(Some("high"), None), glm53);
+    assert!(
+        body.contains(r#""thinking":{"type":"enabled","clear_thinking":false}"#),
+        "{body}"
+    );
+    assert!(body.contains(r#""reasoning_effort":"high""#), "{body}");
+    assert!(body.contains(r#""tool_stream":true"#), "{body}");
+    assert!(body.contains(r#""strict":false"#), "{body}");
+    assert!(!body.contains("prompt_cache_key"), "{body}");
+
+    // glm-5.3* cannot be switched off: the off plan still spells enabled and
+    // never an effort.
+    let body = body_with(&request, &off_plan(), glm53);
+    assert!(
+        body.contains(r#""thinking":{"type":"enabled","clear_thinking":false}"#),
+        "{body}"
+    );
+    assert!(!body.contains("reasoning_effort"), "{body}");
+
+    // glm-5.2* toggles and spells the effort only beside the enabled switch.
+    let glm52 = Dialect::of("zai", "", "glm-5.2");
+    let body = body_with(&request, &plan(Some("high"), None), glm52);
+    assert!(
+        body.contains(r#""thinking":{"type":"enabled","clear_thinking":false}"#),
+        "{body}"
+    );
+    assert!(body.contains(r#""reasoning_effort":"high""#), "{body}");
+    let body = body_with(&request, &off_plan(), glm52);
+    assert!(body.contains(r#""thinking":{"type":"disabled"}"#), "{body}");
+    assert!(!body.contains("reasoning_effort"), "{body}");
+
+    // glm-4.7 toggles without ever spelling an effort.
+    let glm47 = Dialect::of("zai-coding-cn", "", "glm-4.7");
+    let body = body_with(&request, &plan(Some("high"), None), glm47);
+    assert!(
+        body.contains(r#""thinking":{"type":"enabled","clear_thinking":false}"#),
+        "{body}"
+    );
+    assert!(!body.contains("reasoning_effort"), "{body}");
+    let body = body_with(&request, &off_plan(), glm47);
+    assert!(body.contains(r#""thinking":{"type":"disabled"}"#), "{body}");
+}
+
+#[test]
+fn alibaba_rows_toggle_the_member_their_series_publishes() {
+    let request = request(vec![plain_tool()], Vec::new());
+
+    // The qwen rows toggle `enable_thinking` and never an effort member.
+    let qwen = Dialect::of(
+        "alibaba-token-plan",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        "qwen3.8-max",
+    );
+    let body = body_with(&request, &plan(Some("high"), None), qwen);
+    assert!(body.contains(r#""enable_thinking":true"#), "{body}");
+    assert!(!body.contains("reasoning_effort"), "{body}");
+    assert!(!body.contains(r#""thinking""#), "{body}");
+    let body = body_with(&request, &off_plan(), qwen);
+    assert!(body.contains(r#""enable_thinking":false"#), "{body}");
+
+    // The deepseek- and kimi-format rows toggle `thinking` without an effort.
+    let deepseek = Dialect::of("alibaba-token-plan", "", "deepseek-v4-pro");
+    let body = body_with(&request, &plan(Some("high"), None), deepseek);
+    assert!(body.contains(r#""thinking":{"type":"enabled"}"#), "{body}");
+    assert!(!body.contains("reasoning_effort"), "{body}");
+    let body = body_with(&request, &off_plan(), deepseek);
+    assert!(body.contains(r#""thinking":{"type":"disabled"}"#), "{body}");
+
+    // The glm and MiniMax rows have no switch at any level.
+    let glm = Dialect::of("alibaba-token-plan", "", "glm-5");
+    let body = body_with(&request, &plan(Some("high"), None), glm);
+    assert!(!body.contains(r#""thinking""#), "{body}");
+    assert!(!body.contains("reasoning_effort"), "{body}");
+    assert!(!body.contains("enable_thinking"), "{body}");
+}
+
+#[test]
+fn the_s8_rows_cap_write_strict_and_cache_exactly_like_their_source() {
+    let capped = capped_request(Some(1024));
+
+    // Bai caps with the reference member and carries no cache key.
+    let bai = Dialect::of("bai", "https://api.b.ai/v1", "qwen3.8-max");
+    let body = body_with(&capped, &plan(Some("high"), None), bai);
+    assert!(body.contains(r#""max_completion_tokens":1024"#), "{body}");
+    assert!(!body.contains(r#""max_tokens""#), "{body}");
+    assert!(!body.contains("prompt_cache_key"), "{body}");
+
+    // The Cloudflare rows cap with `max_tokens` and send no thinking member
+    // even for a reasoning plan.
+    let gateway = Dialect::of(
+        "cloudflare-ai-gateway",
+        "https://gateway.ai.cloudflare.com/v1/account/gateway",
+        "workers-ai/@cf/zai-org/glm-5.3",
+    );
+    let body = body_with(&capped, &plan(Some("high"), None), gateway);
+    assert!(body.contains(r#""max_tokens":1024"#), "{body}");
+    assert!(!body.contains("max_completion_tokens"), "{body}");
+    assert!(!body.contains(r#""thinking""#), "{body}");
+    assert!(!body.contains("reasoning_effort"), "{body}");
+
+    // OpenCode's kimi toggle never spells an effort.
+    let kimi = Dialect::of("opencode", "https://opencode.ai/zen/v1", "kimi-k2.6");
+    let body = body_with(&capped, &plan(Some("high"), None), kimi);
+    assert!(body.contains(r#""thinking":{"type":"enabled"}"#), "{body}");
+    assert!(!body.contains("reasoning_effort"), "{body}");
+    assert!(body.contains(r#""max_tokens":1024"#), "{body}");
+}
+
+#[test]
+fn bai_rows_rewrite_the_schema_and_strict_while_unknown_hosts_stay_verbatim() {
+    let schema = r#"{"optional":true,"anyOf":[{"type":"object","properties":{"a":{"type":"string","default":1.50}},"required":["a"]},{"type":"object","properties":{"b":{"type":"integer"}}}]}"#;
+    let body = body_with(
+        &schema_request(schema),
+        &plan(None, None),
+        Dialect::of("bai", "", "qwen3.8-max"),
+    );
+    // The root union merged into one object schema: both properties, the
+    // branch-common `required` (none), the `optional` keyword gone, and every
+    // number's exact text.
+    assert!(body.contains("1.50"), "{body}");
+    assert!(!body.contains("optional"), "{body}");
+    let parsed: sonic_rs::Value = sonic_rs::from_str(&body).unwrap();
+    let params = parsed
+        .get("tools")
+        .and_then(|tools| tools.as_array())
+        .unwrap()[0]
+        .get("function")
+        .and_then(|function| function.get("parameters"))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        params.get("type").and_then(|value| value.as_str()),
+        Some("object")
+    );
+    assert!(
+        params
+            .get("properties")
+            .and_then(|properties| properties.get("a"))
+            .is_some()
+    );
+    assert!(
+        params
+            .get("properties")
+            .and_then(|properties| properties.get("b"))
+            .is_some()
+    );
+    assert!(params.get("required").is_none());
+    assert!(body.contains(r#""strict":false"#), "{body}");
+
+    // The reference dialect sends the schema byte for byte.
+    let body = body_with(
+        &schema_request(schema),
+        &plan(None, None),
+        Dialect::STANDARD,
+    );
+    assert!(body.contains(schema), "{body}");
+}
+
+#[test]
+fn a_union_root_with_conflicting_properties_forks_them_in_a_combiner() {
+    let schema = r#"{"oneOf":[{"type":"object","properties":{"a":{"type":"string"},"c":{"type":"integer"}},"required":["a","c"]},{"type":"object","properties":{"a":{"type":"number"}},"required":["a"]}]}"#;
+    let body = body_with(
+        &schema_request(schema),
+        &plan(None, None),
+        Dialect::of("opencode", "", "glm-5.3"),
+    );
+    // `a` conflicts, so the merge forks it; `c` stays; the required names are
+    // the branch-common ones.
+    let parsed: sonic_rs::Value = sonic_rs::from_str(&body).unwrap();
+    let params = parsed
+        .get("tools")
+        .and_then(|tools| tools.as_array())
+        .unwrap()[0]
+        .get("function")
+        .and_then(|function| function.get("parameters"))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        params.get("type").and_then(|value| value.as_str()),
+        Some("object")
+    );
+    let branches = params
+        .get("properties")
+        .and_then(|properties| properties.get("a"))
+        .and_then(|field| field.get("anyOf"))
+        .and_then(|members| members.as_array())
+        .unwrap();
+    assert_eq!(branches.len(), 2);
+    assert!(
+        params
+            .get("properties")
+            .and_then(|properties| properties.get("c"))
+            .is_some()
+    );
+    let required = params
+        .get("required")
+        .and_then(|value| value.as_array())
+        .unwrap();
+    assert_eq!(required.len(), 1);
+    assert_eq!(required[0].as_str(), Some("a"));
+}
+
+#[test]
+fn an_openai_compat_schema_nested_past_the_limit_fails_naming_the_tool() {
+    let deep = nested_any_of(140);
+    let error = request_body(
+        &schema_request(&deep),
+        &plan(None, None),
+        Dialect::of("bai", "", "glm-5.3"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ChatBodyError::Encode { message }
+                if message.contains("tool `read`") && message.contains("128")
+        ),
+        "{error:?}"
+    );
+}
+
+/// The `reasoning_content` member of each assistant message when the
+/// conversation was written by `model` itself.
+fn replayed_by(provider: &str, model: &str) -> Vec<Option<String>> {
+    let own = ReplaySource {
+        family: Family::Chat,
+        model: model.into(),
+    };
+    let other = ReplaySource {
+        family: Family::Chat,
+        model: "another-model".into(),
+    };
+    let history = vec![
+        ContextItem::User {
+            parts: vec![text("go")],
+        },
+        assistant_of(own.clone(), vec![thought("Weigh it."), called("c1")]),
+        result_of("c1"),
+        assistant_of(own.clone(), vec![called("c2")]),
+        result_of("c2"),
+        assistant_of(other, vec![thought("Foreign."), called("c3")]),
+        result_of("c3"),
+        assistant_of(own.clone(), vec![said("Plain.")]),
+        assistant_of(own, vec![thought("Then this."), said("Last.")]),
+    ];
+    let mut request = request(Vec::new(), history);
+    request.model = ModelRoute::Api {
+        family: Family::Chat,
+        model: model.into(),
+        provider: None,
+    };
+    let body = body_with(
+        &request,
+        &plan(None, None),
+        Dialect::of(provider, "", model),
+    );
+    let body: sonic_rs::Value = sonic_rs::from_str(&body).unwrap();
+    body.get("messages")
+        .and_then(|messages| messages.as_array())
+        .unwrap()
+        .iter()
+        .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("assistant"))
+        .map(|message| {
+            message
+                .get("reasoning_content")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn deepseek_format_rows_carry_reasoning_content_on_every_assistant_message() {
+    let filled = [
+        Some("Weigh it.".to_owned()),
+        Some(String::new()),
+        Some(String::new()),
+        Some(String::new()),
+        Some("Then this.".to_owned()),
+    ];
+    assert_eq!(replayed_by("alibaba-token-plan", "deepseek-v4-pro"), filled);
+    assert_eq!(replayed_by("opencode-go", "deepseek-v4.1-flash"), filled);
+    assert_eq!(replayed_by("opencode", "deepseek-v4-pro"), filled);
+
+    // The kimi toggle row and the no-switch rows replay nothing.
+    let dropped = [None, None, None, None, None];
+    assert_eq!(replayed_by("opencode", "kimi-k2.6"), dropped);
+    assert_eq!(replayed_by("zai", "glm-5.3-flash"), dropped);
+}
+
+/// The `(accepted, none_supported)` ladder a row publishes.
+fn ladder_of(provider: &str, model: &str) -> (Vec<ThinkingLevel>, bool) {
+    match Dialect::thinking_support(provider, model) {
+        Some(crate::thinking::ThinkingSupport::OpenAi {
+            accepted,
+            none_supported,
+        }) => (accepted, none_supported),
+        other => panic!("unexpected ladder for {provider}/{model}: {other:?}"),
+    }
+}
+
+#[test]
+fn the_s8_ladders_come_from_the_same_table_as_the_request_members() {
+    use ThinkingLevel::{High, Low, Max, Medium, Minimal, Xhigh};
+    let every_on_level = vec![Minimal, Low, Medium, High, Xhigh, Max];
+
+    // The Z.AI always-on rows cannot be switched off.
+    assert_eq!(
+        ladder_of("zai", "glm-5.3-flash"),
+        (every_on_level.clone(), false)
+    );
+    assert_eq!(ladder_of("zai", "glm-5.2"), (every_on_level.clone(), true));
+    assert_eq!(
+        ladder_of("zai-coding-cn", "glm-4.6v"),
+        (every_on_level.clone(), true)
+    );
+    assert_eq!(ladder_of("zai", "glm-9"), (every_on_level.clone(), true));
+
+    // The toggle rows of the token plan and the Go lane.
+    assert_eq!(
+        ladder_of("alibaba-token-plan", "qwen3.8-max"),
+        (every_on_level.clone(), true)
+    );
+    assert_eq!(
+        ladder_of("alibaba-token-plan", "deepseek-v3.2"),
+        (every_on_level.clone(), true)
+    );
+    assert_eq!(
+        ladder_of("opencode-go", "deepseek-v4-pro"),
+        (every_on_level.clone(), true)
+    );
+    assert_eq!(
+        ladder_of(
+            "cloudflare-workers-ai",
+            "@cf/deepseek-ai/deepseek-v4-pro-0813"
+        ),
+        (every_on_level.clone(), true)
+    );
+
+    // The rows without a switch publish no on level at all.
+    assert_eq!(ladder_of("bai", "qwen3.8-max"), (Vec::new(), false));
+    assert_eq!(
+        ladder_of("alibaba-token-plan", "glm-5"),
+        (Vec::new(), false)
+    );
+    assert_eq!(
+        ladder_of("opencode", "deepseek-v4-pro"),
+        (Vec::new(), false)
+    );
+    assert_eq!(
+        ladder_of("cloudflare-ai-gateway", "workers-ai/@cf/zai-org/glm-5.3"),
+        (Vec::new(), false)
+    );
+}
+
+#[test]
+fn bai_lowering_keeps_literal_zero() {
+    let dialect = Dialect::of("bai", "", "qwen3.8-max");
+    let params_of = |schema: &str| {
+        let body = body_with(&schema_request(schema), &plan(None, None), dialect);
+        let parsed: sonic_rs::Value = sonic_rs::from_str(&body).unwrap();
+        parsed
+            .get("tools")
+            .and_then(|tools| tools.as_array())
+            .unwrap()[0]
+            .get("function")
+            .and_then(|function| function.get("parameters"))
+            .unwrap()
+            .clone()
+    };
+    // `default: 0` stays, with `optional` forcing the rewrite path.
+    // `false` and `""` cover the other falsy defaults a truthy check drops.
+    let params = params_of(
+        r#"{"optional":true,"type":"object","properties":{"count":{"type":"integer","default":0},"flag":{"type":"boolean","default":false},"name":{"type":"string","default":""}}}"#,
+    );
+    assert_eq!(
+        params
+            .get("properties")
+            .and_then(|properties| properties.get("count"))
+            .and_then(|count| count.get("default"))
+            .and_then(sonic_rs::JsonValueTrait::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        params
+            .get("properties")
+            .and_then(|properties| properties.get("flag"))
+            .and_then(|flag| flag.get("default"))
+            .and_then(sonic_rs::JsonValueTrait::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        params
+            .get("properties")
+            .and_then(|properties| properties.get("name"))
+            .and_then(|field| field.get("default"))
+            .and_then(|value| value.as_str()),
+        Some("")
+    );
+    // `minimum: 0` stays, with `optional` forcing the rewrite path.
+    let params = params_of(
+        r#"{"optional":true,"type":"object","properties":{"n":{"type":"integer","minimum":0}}}"#,
+    );
+    assert_eq!(
+        params
+            .get("properties")
+            .and_then(|properties| properties.get("n"))
+            .and_then(|field| field.get("minimum"))
+            .and_then(sonic_rs::JsonValueTrait::as_u64),
+        Some(0)
+    );
+    // An all-`const` union with 0 collapses to a typed enum keeping both values.
+    let params = params_of(
+        r#"{"type":"object","properties":{"v":{"anyOf":[{"type":"integer","const":0},{"type":"integer","const":1}]}}}"#,
+    );
+    let values = params
+        .get("properties")
+        .and_then(|properties| properties.get("v"))
+        .and_then(|field| field.get("enum"))
+        .and_then(|members| members.as_array())
+        .unwrap()
+        .iter()
+        .map(|value| value.as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![0, 1]);
 }

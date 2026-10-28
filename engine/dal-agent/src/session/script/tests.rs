@@ -24,7 +24,7 @@ use crate::ext::script::{
 use crate::ext::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome};
 use crate::ext::{
     BoxFuture, Caller, EventStream, ModelCx, ModelCxRuntime, ModelError, ModelRecord, PrivateTool,
-    Scope, ScopeError,
+    Scope, ScopeError, Services,
 };
 use crate::host::Host;
 use crate::session::backend::Backend;
@@ -165,7 +165,7 @@ struct Fixture {
     data: std::path::PathBuf,
     session: SessionId,
     backend: Arc<Backend>,
-    _services: Arc<crate::ext::services::SessionServices>,
+    services: Arc<crate::ext::services::SessionServices>,
     interpreters: Arc<Interpreters>,
     generation: Arc<Generation>,
     runs: Arc<AtomicUsize>,
@@ -347,7 +347,6 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
         crate::ext::grants::GrantStore::with_runtime_scoped(
             data_root.clone(),
             data_root.clone(),
-            Duration::from_secs(30),
             Arc::clone(&broker),
         )
         .expect("grants"),
@@ -371,6 +370,7 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
     ));
     let services = Arc::new(crate::ext::services::SessionServices::new(
         crate::ext::services::SessionServicesDeps {
+            judge: None,
             grants,
             broker: Arc::clone(&broker),
             backend: Arc::clone(&backend) as Arc<dyn crate::ext::services::SessionBackend>,
@@ -398,7 +398,7 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
         data: data_root,
         session,
         backend,
-        _services: services,
+        services,
         interpreters,
         generation,
         runs,
@@ -1472,4 +1472,173 @@ async fn closed_session_releases_its_backend_and_services() {
     })
     .await
     .expect("closed session must release both sides of its service boundary");
+}
+
+/// A scripted judge backend behind the real services layer: `ask` answers
+/// `true`, `ask_batch` answers per-question parity so order is observable,
+/// and both record what crossed the backend seam.
+struct ScriptedJudge {
+    asks: std::sync::Mutex<Vec<String>>,
+    batches: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+impl crate::ext::services::JudgeTransport for ScriptedJudge {
+    fn ask(
+        &self,
+        _auth: dal_core::ext::JudgeAuth,
+        question: String,
+    ) -> crate::ext::services::ServiceFuture<'_, bool> {
+        self.asks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(question);
+        Box::pin(async move { Ok(true) })
+    }
+
+    fn ask_batch(
+        &self,
+        _auth: dal_core::ext::JudgeAuth,
+        questions: Vec<String>,
+    ) -> crate::ext::services::ServiceFuture<'_, Vec<bool>> {
+        self.batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(questions.clone());
+        Box::pin(async move {
+            Ok(questions
+                .into_iter()
+                .enumerate()
+                .map(|(index, _)| index % 2 == 0)
+                .collect())
+        })
+    }
+}
+
+fn scripted_judge() -> Arc<ScriptedJudge> {
+    Arc::new(ScriptedJudge {
+        asks: std::sync::Mutex::new(Vec::new()),
+        batches: std::sync::Mutex::new(Vec::new()),
+    })
+}
+
+/// `judge.ask` reaches the registered backend through the real dispatch and
+/// services layers: removing the arm turns the verdict into a failure.
+#[tokio::test]
+async fn judge_ask_returns_the_backend_verdict_through_the_real_services() {
+    let fx = fixture(Duration::ZERO).await;
+    let judge = scripted_judge();
+    fx.services
+        .set_judge_transport(Arc::clone(&judge) as Arc<dyn crate::ext::services::JudgeTransport>);
+    let host = captured(&fx, &["judge.ask"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::JudgeAsk),
+        r#"{"question":"is this safe?"}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("judge.ask routes to the judge backend: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("judge.ask answers raw JSON: {value:?}");
+    };
+    assert_eq!(
+        raw.as_str(),
+        "true",
+        "the backend verdict reaches the script"
+    );
+    assert_eq!(
+        *judge
+            .asks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        vec![String::from("is this safe?")],
+        "the question crosses the arm verbatim"
+    );
+}
+
+/// `judge.batch` returns one verdict per question in submission order:
+/// removing the arm loses the per-question replies.
+#[tokio::test]
+async fn judge_batch_returns_one_verdict_per_question_in_order() {
+    let fx = fixture(Duration::ZERO).await;
+    let judge = scripted_judge();
+    fx.services
+        .set_judge_transport(Arc::clone(&judge) as Arc<dyn crate::ext::services::JudgeTransport>);
+    let host = captured(&fx, &["judge.batch"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::JudgeBatch),
+        r#"{"questions":["first?","second?","third?"]}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("judge.batch routes to the judge backend: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("judge.batch answers raw JSON: {value:?}");
+    };
+    assert_eq!(
+        raw.as_str(),
+        "[true,false,true]",
+        "one verdict per question reaches the script in order"
+    );
+    assert_eq!(
+        *judge
+            .batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        vec![vec![
+            String::from("first?"),
+            String::from("second?"),
+            String::from("third?"),
+        ]],
+        "the batch crosses the arm verbatim"
+    );
+}
+
+/// An empty `judge.batch` answers `[]` without touching the judge backend:
+/// removing the short-circuit would call the backend for no questions.
+#[tokio::test]
+async fn an_empty_judge_batch_answers_empty_without_calling_the_judge() {
+    let fx = fixture(Duration::ZERO).await;
+    let judge = scripted_judge();
+    fx.services
+        .set_judge_transport(Arc::clone(&judge) as Arc<dyn crate::ext::services::JudgeTransport>);
+    let host = captured(&fx, &["judge.batch"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::JudgeBatch),
+        r#"{"questions":[]}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("an empty judge.batch still answers: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("an empty judge.batch answers raw JSON: {value:?}");
+    };
+    assert_eq!(raw.as_str(), "[]", "an empty batch answers an empty list");
+    assert!(
+        judge
+            .asks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "no single question may reach the judge"
+    );
+    assert!(
+        judge
+            .batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "no batch may reach the judge"
+    );
 }

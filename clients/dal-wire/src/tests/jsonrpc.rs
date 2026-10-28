@@ -70,6 +70,29 @@ fn malformed_json_has_a_parse_error() {
 }
 
 #[test]
+fn trailing_frames_are_refused_and_big_params_keep_exact_digits() {
+    let error = decode_jsonrpc(
+        r#"{"jsonrpc":"2.0","id":7,"method":"x"} {"jsonrpc":"2.0","id":8,"method":"y"}"#,
+    )
+    .expect_err("a concatenated frame is refused");
+    assert_eq!(error.code, -32700);
+    assert!(error.message.starts_with("frame is not valid JSON:"));
+
+    let message = decode_jsonrpc(
+        r#"{"jsonrpc":"2.0","id":7,"method":"x","params":{"n":18446744073709551617}}"#,
+    )
+    .expect("a big integer is a valid param");
+    let Message::Request { params, .. } = message else {
+        panic!("request frame must decode as a request");
+    };
+    let number = params
+        .get("n")
+        .and_then(JsonValueTrait::as_raw_number)
+        .expect("the param keeps its number type");
+    assert_eq!(number.as_str(), "18446744073709551617");
+}
+
+#[test]
 fn result_encoding_uses_a_standard_json_rpc_envelope() {
     let message = Message::Result {
         id: Id::Integer(1),

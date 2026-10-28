@@ -15,14 +15,16 @@ use futures::{StreamExt, stream};
 use super::{
     CatalogEntry, CatalogFetch, CatalogSource, ModelFetch,
     cache::{CacheError, read_cache_async, write_cache_async},
+    cursor,
     decode::{
-        apply_ollama_show, decode_anthropic_page, decode_codex_models, decode_copilot_models,
-        decode_devin_models, decode_gemini_page, decode_mistral_models, decode_ollama_models,
-        decode_openai_models, decode_radius_models,
+        apply_ollama_show, decode_anthropic_page, decode_antigravity_models,
+        decode_cloud_code_quota, decode_codex_models, decode_copilot_models, decode_devin_models,
+        decode_gemini_page, decode_mistral_models, decode_ollama_models, decode_openai_models,
+        decode_radius_models,
     },
 };
 use crate::{
-    auth::credential::Credential,
+    auth::credential::{Credential, OAuthCredential},
     error::ProviderError,
     family::{
         copilot::{
@@ -33,14 +35,14 @@ use crate::{
             PATH_DISCOVERY,
             request::{UNARY_HEADERS, discovery_body},
         },
-        google::gemini::API_KEY_HEADER,
+        google::{antigravity, cloud_code, gemini::API_KEY_HEADER},
         ollama::{
             Deployment, OllamaShow, SHOW_PATH, TAGS_PATH, decode_show, show_body, trim_api_suffix,
         },
         pi_messages::CONFIG_PATH as PI_MESSAGES_CONFIG_PATH,
     },
     http::{self, Exchange, NON_STREAM_TOTAL_TIMEOUT},
-    provider::ProviderEntry,
+    provider::{ProviderEntry, wire},
 };
 
 /// Fetches provider rows, atomically updates `models.json`, and falls back to
@@ -57,6 +59,19 @@ where
     S: Fn(Duration) -> D,
     D: Future<Output = ()>,
 {
+    if fetch.provider.family == Family::Bedrock {
+        // Typed-only by contract: the references ship generated model tables
+        // and perform no live discovery (ListFoundationModels is a different
+        // endpoint and surface). No fetch, no cache write, no live_error; a
+        // Typed source also keeps every inference-profile id resolvable.
+        return CatalogFetch {
+            entries: Vec::new(),
+            source: CatalogSource::Typed,
+            live_error: None,
+            cache_error: None,
+            provider: fetch.provider.id.clone(),
+        };
+    }
     let cache_path = fetch.cache_dir.join("models.json");
     match fetch_live(fetch, &sleep).await {
         Ok(rows) => {
@@ -125,7 +140,11 @@ where
     }
     match fetch.provider.family {
         Family::Chat | Family::Responses => {
-            let url = http::endpoint(fetch.provider.family, &fetch.provider.base_url, "models")?;
+            // Discovery reads the row's own base — template materialized
+            // from the captured environment when it has one — and live
+            // metadata can never redirect it.
+            let base = wire::base(fetch.provider, None, fetch.env)?;
+            let url = http::endpoint(fetch.provider.family, &base, "models")?;
             let headers = fetch
                 .provider
                 .shape()
@@ -146,11 +165,11 @@ where
             decode_codex_models(fetch.provider, &body)
         }
         Family::Bedrock => Err(ProviderError::InvalidRequest {
-            message: String::from("the bedrock family has no catalog discovery yet"),
+            message: String::from(
+                "the bedrock catalog is typed-only: the references list no live discovery",
+            ),
         }),
-        Family::Cursor => Err(ProviderError::InvalidRequest {
-            message: String::from("the cursor family has no catalog discovery yet"),
-        }),
+        Family::Cursor => fetch_cursor(fetch, sleep).await,
         Family::Devin => fetch_devin(fetch, sleep).await,
         Family::Droid => Err(ProviderError::InvalidRequest {
             message: String::from("the droid family has no catalog discovery yet"),
@@ -171,17 +190,147 @@ where
                  list, so model ids resolve as typed rows",
             ),
         }),
-        Family::GoogleAntigravity => Err(ProviderError::InvalidRequest {
-            message: String::from(
-                "dal does not list google-antigravity models: the Cloud Code Assist roster \
-                 needs a Google OAuth sign-in dal does not provide, so model ids resolve as \
-                 typed rows",
-            ),
-        }),
+        Family::GoogleCloudCodeAssist => fetch_cloud_code_assist(fetch, sleep).await,
+        Family::GoogleAntigravity => fetch_antigravity(fetch, sleep).await,
         Family::Mistral => fetch_mistral(fetch, sleep).await,
         Family::Ollama => fetch_ollama(fetch, sleep).await,
         Family::PiMessages => fetch_pi_messages(fetch, sleep).await,
     }
+}
+
+/// The Cloud Code Assist model-quota path, relative to the configured base.
+const CLOUD_CODE_QUOTA_PATH: &str = "v1internal:retrieveUserQuota";
+
+/// The Antigravity roster path, relative to each candidate endpoint.
+const ANTIGRAVITY_MODELS_PATH: &str = "v1internal:fetchAvailableModels";
+
+/// The `retrieveUserQuota` request body: the stored project and nothing else.
+#[derive(serde::Serialize)]
+struct QuotaRequest<'a> {
+    project: &'a str,
+}
+
+/// The OAuth sign-in a Cloud Code Assist model list needs. An API key is not
+/// one, and a missing or blank sign-in sends no request, so the caller falls
+/// back to the cache or typed ids.
+fn cloud_code_oauth<'a>(fetch: &'a ModelFetch<'_>) -> Result<&'a OAuthCredential, ProviderError> {
+    match fetch.credential {
+        Credential::OAuth(oauth) if !oauth.access_token.expose().trim().is_empty() => Ok(oauth),
+        Credential::OAuth(_) | Credential::None => Err(ProviderError::NoCredentials {
+            provider: fetch.provider.id.to_string(),
+        }),
+        Credential::ApiKey { .. } => Err(ProviderError::InvalidRequest {
+            message: format!(
+                "{} needs an OAuth sign-in, not an API key",
+                fetch.provider.id
+            ),
+        }),
+    }
+}
+
+/// Lists the models of one Cloud Code Assist account, a `POST` to
+/// `<base>/v1internal:retrieveUserQuota` with the sign-in's own project and
+/// bearer token under the pinned Gemini CLI identity, the ids decoded from the
+/// quota buckets. The configured base is the only endpoint.
+///
+/// The project is the one the sign-in stored ([`ProviderEntry::cloud_code_project`]);
+/// a sign-in without one is refused before any request, never replaced by a
+/// project discovered or guessed here.
+async fn fetch_cloud_code_assist<S, D>(
+    fetch: &ModelFetch<'_>,
+    sleep: &S,
+) -> Result<Vec<CatalogEntry>, ProviderError>
+where
+    S: Fn(Duration) -> D,
+    D: Future<Output = ()>,
+{
+    let oauth = cloud_code_oauth(fetch)?;
+    let provider = fetch.provider;
+    let Some(project) = provider.cloud_code_project(oauth) else {
+        return Err(ProviderError::InvalidRequest {
+            message: format!(
+                "{id} has no Google Cloud project for this sign-in; run dalgon login {id} again.",
+                id = provider.id
+            ),
+        });
+    };
+    let body = sonic_rs::to_vec(&QuotaRequest { project }).map_err(|error| {
+        ProviderError::InvalidRequest {
+            message: format!("Cloud Code Assist quota body encoding failed: {error}"),
+        }
+    })?;
+    let url = http::endpoint(provider.family, &provider.base_url, CLOUD_CODE_QUOTA_PATH)?;
+    let headers = vec![
+        (
+            String::from("authorization"),
+            format!("Bearer {}", oauth.access_token.expose()),
+        ),
+        (
+            String::from("content-type"),
+            String::from("application/json"),
+        ),
+        (
+            String::from("client-metadata"),
+            String::from(cloud_code::CLIENT_METADATA),
+        ),
+    ];
+    let reply = post_json(fetch, url, headers, body, sleep).await?;
+    decode_cloud_code_quota(provider, &reply)
+}
+
+/// Lists the models of one Antigravity account: `POST
+/// <endpoint>/v1internal:fetchAvailableModels` with an empty object under the
+/// pinned Antigravity identity, trying the request path's own endpoint order
+/// ([`antigravity::endpoints`]) and answering with the first roster that
+/// decodes. Every endpoint failing returns the last failure.
+async fn fetch_antigravity<S, D>(
+    fetch: &ModelFetch<'_>,
+    sleep: &S,
+) -> Result<Vec<CatalogEntry>, ProviderError>
+where
+    S: Fn(Duration) -> D,
+    D: Future<Output = ()>,
+{
+    let oauth = cloud_code_oauth(fetch)?;
+    let configured = fetch.provider.base_url.trim();
+    let endpoints = antigravity::endpoints((!configured.is_empty()).then_some(configured));
+    let headers = vec![
+        (
+            String::from("authorization"),
+            format!("Bearer {}", oauth.access_token.expose()),
+        ),
+        (
+            String::from("content-type"),
+            String::from("application/json"),
+        ),
+    ];
+    let mut failure = None;
+    for endpoint in &endpoints {
+        match antigravity_roster(fetch, endpoint, headers.clone(), sleep).await {
+            Ok(rows) => return Ok(rows),
+            Err(error) => failure = Some(error),
+        }
+    }
+    Err(failure.unwrap_or_else(|| ProviderError::Transport {
+        family: Family::GoogleAntigravity,
+        reason: String::from("no Antigravity endpoint answered the model list"),
+    }))
+}
+
+/// One Antigravity roster request against one endpoint.
+async fn antigravity_roster<S, D>(
+    fetch: &ModelFetch<'_>,
+    endpoint: &str,
+    headers: Vec<(String, String)>,
+    sleep: &S,
+) -> Result<Vec<CatalogEntry>, ProviderError>
+where
+    S: Fn(Duration) -> D,
+    D: Future<Output = ()>,
+{
+    let url = http::endpoint(fetch.provider.family, endpoint, ANTIGRAVITY_MODELS_PATH)?;
+    let reply = post_json(fetch, url, headers, b"{}".to_vec(), sleep).await?;
+    decode_antigravity_models(fetch.provider, &reply)
 }
 
 async fn fetch_anthropic<S, D>(
@@ -240,21 +389,149 @@ where
     S: Fn(Duration) -> D,
     D: Future<Output = ()>,
 {
-    let Credential::ApiKey { key } = fetch.credential else {
-        return Err(ProviderError::NoCredentials {
-            provider: fetch.provider.id.to_string(),
-        });
+    // The credential is the API key, or an OAuth sign-in's access token
+    // presented as the session token (the reference `toAuth` spells
+    // `apiKey: access`); the GetUserJwt ladder stays the only exchange. A
+    // blank session token can never be usable, so it is refused before any
+    // request, like the direct Gemini and Cursor bearer checks.
+    let token = match fetch.credential {
+        Credential::ApiKey { key } if !key.expose().trim().is_empty() => key.expose(),
+        Credential::ApiKey { .. } | Credential::None => {
+            return Err(ProviderError::NoCredentials {
+                provider: fetch.provider.id.to_string(),
+            });
+        }
+        Credential::OAuth(oauth) => oauth.access_token.expose(),
     };
     let url = http::endpoint(Family::Devin, &fetch.provider.base_url, PATH_DISCOVERY)?;
-    let body = post_body(
-        fetch,
-        url,
-        unary_headers(),
-        discovery_body(key.expose()),
-        sleep,
-    )
-    .await?;
+    let body = post_body(fetch, url, unary_headers(), discovery_body(token), sleep).await?;
     decode_devin_models(fetch.provider, &body)
+}
+
+/// Joins Cursor's two account-scoped model-list RPCs under one deadline.
+async fn fetch_cursor<S, D>(
+    fetch: &ModelFetch<'_>,
+    sleep: &S,
+) -> Result<Vec<CatalogEntry>, ProviderError>
+where
+    S: Fn(Duration) -> D,
+    D: Future<Output = ()>,
+{
+    fetch_cursor_under(
+        fetch,
+        sleep,
+        cursor::JOIN_DEADLINE,
+        cursor::AVAILABLE_MODELS_BUDGET,
+    )
+    .await
+}
+
+/// `fetch_cursor` under explicit deadlines; the pinned constants are the
+/// production call, and tests shrink them to keep the cancel proof fast.
+pub(crate) async fn fetch_cursor_under<S, D>(
+    fetch: &ModelFetch<'_>,
+    sleep: &S,
+    join_deadline: Duration,
+    available_budget: Duration,
+) -> Result<Vec<CatalogEntry>, ProviderError>
+where
+    S: Fn(Duration) -> D,
+    D: Future<Output = ()>,
+{
+    let headers = cursor_headers(fetch)?;
+    let usable_url = http::endpoint(
+        Family::Cursor,
+        &fetch.provider.base_url,
+        cursor::USABLE_PATH,
+    )?;
+    let available_url = http::endpoint(
+        Family::Cursor,
+        &fetch.provider.base_url,
+        cursor::AVAILABLE_PATH,
+    )?;
+    let bytes = |total| Exchange::Bytes {
+        accept: "*/*",
+        total,
+    };
+    // One deadline over the whole join: expiry cancels every in-flight RPC.
+    let join = futures::future::join(
+        post_exchange(
+            fetch,
+            usable_url,
+            headers.clone(),
+            cursor::usable_request(),
+            bytes(Some(NON_STREAM_TOTAL_TIMEOUT)),
+            sleep,
+        ),
+        post_exchange(
+            fetch,
+            available_url,
+            headers,
+            cursor::available_request(),
+            bytes(Some(available_budget)),
+            sleep,
+        ),
+    );
+    let Ok((usable, available)) = tokio::time::timeout(join_deadline, join).await else {
+        return Err(ProviderError::Transport {
+            family: Family::Cursor,
+            reason: String::from(
+                "the cursor catalog join deadline elapsed before every model RPC answered",
+            ),
+        });
+    };
+    let (usable, usable_error) = match usable {
+        Ok(bytes) => (Some(bytes), None),
+        Err(error) => (None, Some(error)),
+    };
+    let (available, available_error) = match available {
+        Ok(bytes) => (Some(bytes), None),
+        Err(error) => (None, Some(error)),
+    };
+    // Only a decoded model list is authoritative: the rich list alone never
+    // blanks the catalog. The fallback protocol error is built inside the
+    // decoder, only when neither list decoded.
+    cursor::decode_cursor_models(
+        fetch.provider,
+        usable.as_deref(),
+        available.as_deref(),
+        usable_error.or(available_error),
+    )
+}
+
+/// The Cursor catalog unary headers: the pinned client identity over the
+/// bearer credential (API key or OAuth access token). The token never
+/// reaches a log: errors are typed with an empty message.
+fn cursor_headers(fetch: &ModelFetch<'_>) -> Result<Vec<(String, String)>, ProviderError> {
+    let bearer = match fetch.credential {
+        Credential::ApiKey { key } if !key.expose().trim().is_empty() => key.expose().to_owned(),
+        Credential::ApiKey { .. } | Credential::None => {
+            return Err(ProviderError::NoCredentials {
+                provider: fetch.provider.id.to_string(),
+            });
+        }
+        Credential::OAuth(oauth) => oauth.access_token.expose().to_owned(),
+    };
+    Ok(vec![
+        (
+            String::from("content-type"),
+            String::from("application/proto"),
+        ),
+        (String::from("authorization"), format!("Bearer {bearer}")),
+        (
+            String::from("x-cursor-client-type"),
+            String::from(crate::family::cursor::CLIENT_TYPE),
+        ),
+        (
+            String::from("x-cursor-client-version"),
+            String::from(crate::family::cursor::CLIENT_VERSION),
+        ),
+        (String::from("x-ghost-mode"), String::from("true")),
+        (
+            String::from("connect-protocol-version"),
+            String::from(crate::family::cursor::PROTOCOL_VERSION),
+        ),
+    ])
 }
 
 /// How many `api/show` probes one refresh keeps in flight.

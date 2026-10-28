@@ -602,6 +602,7 @@ mod tests {
                 ext: ext.into(),
                 state,
                 text: text.map(Into::into),
+                payload: None,
             }),
         }
     }
@@ -685,26 +686,31 @@ mod tests {
                 ext: "a".into(),
                 state: ExtState::Busy,
                 text: None,
+                payload: None,
             },
             ExtStatus {
                 ext: "b".into(),
                 state: ExtState::Busy,
                 text: None,
+                payload: None,
             },
             ExtStatus {
                 ext: "c".into(),
                 state: ExtState::Busy,
                 text: None,
+                payload: None,
             },
             ExtStatus {
                 ext: "d".into(),
                 state: ExtState::Busy,
                 text: None,
+                payload: None,
             },
             ExtStatus {
                 ext: "e".into(),
                 state: ExtState::Quiet,
                 text: Some("idle".into()),
+                payload: None,
             },
         ]);
         assert_eq!(

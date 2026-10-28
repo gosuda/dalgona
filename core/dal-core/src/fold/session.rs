@@ -2,13 +2,24 @@ use crate::journal::AssistantRoute;
 
 use super::helpers::entry_weight;
 use super::replay::{Replay, contradiction};
-use super::types::{ManualCompletion, QuestionRef, QueuedInput, Tree, TurnFlags, TurnTotals};
+use super::types::{
+    ManualCompletion, PendingMail, QuestionRef, QueuedInput, Tree, TurnFlags, TurnTotals,
+};
 use super::{
     ApprovalMode, BTreeSet, CallId, CompactionReason, DecodeError, Effect, Emit, EntryId,
-    EntryKind, Event, Family, GateSeed, Gen, JobId, JobKind, JobOutcome, Limits, ModelRoute, Name,
-    NonZeroU64, Phase, RawJson, Record, Rejection, ReplayError, Request, RequestId, RequestParams,
-    Settings, TurnId,
+    EntryKind, Event, Family, GateSeed, Gen, JobId, JobKind, JobOutcome, Limits, MailMode,
+    ModelRoute, Name, NonZeroU64, Phase, RawJson, Record, Rejection, ReplayError, Request,
+    RequestId, RequestParams, Settings, TurnId,
 };
+
+/// Maximum waiting `NextTurn` messages one recipient session may hold.
+///
+/// One number owns mailbox capacity everywhere: the fold rejects a
+/// journal line that would push waiting mail past it, the actor cites
+/// the same bound for its pre-write receipt, and the store validator
+/// enforces it on journals at rest. Delivered rows are history, not
+/// pending state, and never count against the bound.
+pub const MAILBOX_WAITING_LIMIT: usize = 100;
 
 /// The complete, replayable state of one session.
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +39,14 @@ pub struct Session {
     pub(super) allow_always: BTreeSet<Name>,
     pub(super) promoted: BTreeSet<Name>,
     pub(super) queued_inputs: Vec<QueuedInput>,
+    /// Waiting `NextTurn` mail in journal order. The fold's single pending
+    /// mail state: derived from journaled mail rows and drained only by a
+    /// `MailDelivered` record that materializes its input entry and
+    /// consumes the positions in the same journal line.
+    pub(super) pending_mail: Vec<PendingMail>,
+    /// How many mail rows this journal holds, so the next buffered mail
+    /// mints the following position.
+    pub(super) mail_rows: u64,
     pub(super) open_questions: Vec<(RequestId, QuestionRef)>,
     pub(super) live_jobs: Vec<(JobId, Option<JobKind>)>,
     pub(super) ended_jobs: Vec<(JobId, JobOutcome)>,
@@ -64,12 +83,16 @@ pub struct Session {
     pub(super) private_terminals: Vec<super::private::PrivateTerminal>,
 }
 
-fn response_model(route: Option<AssistantRoute>, model: &str) -> Option<ModelRoute> {
+fn response_model(
+    route: Option<AssistantRoute>,
+    model: &str,
+    provider: Option<&str>,
+) -> Option<ModelRoute> {
     Some(match route? {
         AssistantRoute::Api(family) => ModelRoute::Api {
             family,
             model: model.into(),
-            provider: None,
+            provider: provider.map(Into::into),
         },
         AssistantRoute::Synthetic => ModelRoute::Synthetic { id: model.into() },
         AssistantRoute::Harness => ModelRoute::Harness { id: model.into() },
@@ -127,8 +150,14 @@ impl Session {
         let mut cursor = self.tree.leaf;
         while let Some(id) = cursor {
             let entry = self.tree.entries.get(&id)?;
-            if let EntryKind::Assistant { route, model, .. } = &entry.kind {
-                return response_model(*route, model);
+            if let EntryKind::Assistant {
+                route,
+                model,
+                provider,
+                ..
+            } = &entry.kind
+            {
+                return response_model(*route, model, provider.as_deref());
             }
             cursor = entry.parent;
         }
@@ -168,13 +197,14 @@ impl Session {
                 EntryKind::Assistant {
                     route,
                     model,
+                    provider,
                     usage,
                     ..
-                } => Some((route.as_ref(), model, usage)),
+                } => Some((route.as_ref(), model, provider.as_deref(), usage)),
                 _ => None,
             })
-            .and_then(|(route, model, usage)| {
-                let model = response_model(route.copied(), model)?;
+            .and_then(|(route, model, provider, usage)| {
+                let model = response_model(route.copied(), model, provider)?;
                 Some((model, usage.input_tokens, compactions))
             });
         self.compactions = compactions;
@@ -299,6 +329,37 @@ impl Session {
         let moved = self.settings.approval != recorded;
         self.settings.approval = recorded;
         moved
+    }
+
+    /// Records one buffered mail row the journal just accepted.
+    ///
+    /// The actor appends `Record::Mail` outside the fold, so the live fold
+    /// learns the row through this pure transition while a replay learns it
+    /// from the record; both must agree, so `position` must be exactly the
+    /// next mail position. `NextTurn` rows addressed to this session join
+    /// [`Session::pending_mails`] until a turn start delivers them.
+    ///
+    /// # Errors
+    /// Returns [`Rejection::Invalid`] when `position` does not follow the
+    /// journal, which would fork live state from replay.
+    pub fn note_buffered_mail(
+        &mut self,
+        position: EntryId,
+        mail: &crate::ext::Mail,
+    ) -> Result<(), Rejection> {
+        if Some(position) != self.next_mail_position() {
+            return Err(Rejection::Invalid {
+                reason: "buffered mail position does not follow the journal".into(),
+            });
+        }
+        self.mail_rows = position.get();
+        if mail.mode == MailMode::NextTurn && self.id.is_some_and(|id| mail.to == id) {
+            self.pending_mail.push(PendingMail {
+                position,
+                text: mail.text.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Borrows the current lifecycle phase.

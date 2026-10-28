@@ -10,8 +10,8 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use dal_core::ext::{Consumer, ExportId, OpId, OpSet, Phase, ReadView};
-use dal_core::{GenerationId, ScopeSpec, SessionId};
+use dal_core::ext::{Consumer, ExportId, MailMode, OpId, OpSet, Phase, ReadView, Receipt};
+use dal_core::{DenyReason, GenerationId, HandleStatus, ScopeSpec, ScopeUsage, SessionId};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -534,6 +534,23 @@ pub enum Entry {
 /// Settled task outcomes of one collection, in submission order.
 pub type Collected = Box<[(TaskId, OpOutcome)]>;
 
+/// A non-consuming snapshot of one scope task.
+///
+/// The host derives this from the task's actual scheduler record. It is
+/// deliberately not a Starlark-facing synthetic value: status, usage, member
+/// identity, and failure are all retained from the operation that settled.
+#[derive(Clone, Debug)]
+pub struct TaskProbe {
+    /// The scheduler status.
+    pub status: HandleStatus,
+    /// Usage charged by the scope ledger for this task.
+    pub usage: ScopeUsage,
+    /// The member session started by this task, when this is an agent start.
+    pub member: Option<SessionId>,
+    /// The typed failure, when the task has failed or been cancelled.
+    pub error: Option<OpFailure>,
+}
+
 /// The host side of the script bridge.
 pub trait ScriptHost: Send + Sync + 'static {
     /// Mints an invocation; the only minting door.
@@ -576,6 +593,57 @@ pub trait ScriptHost: Send + Sync + 'static {
 
     /// Cancels owned scopes and reports cleanup.
     fn finish(&self, inv: &Arc<Invocation>) -> BoxFuture<'static, Cleanup>;
+    /// Abandons an invocation whose owner dropped it before finishing.
+    ///
+    /// This is the synchronous cancellation boundary for a dropped invoke
+    /// future, such as a hook that ran out of its deadline. It must cancel
+    /// the invocation token, terminalize every invocation-owned scope and
+    /// task under the host's owner lock so no further effect can start, and
+    /// hand the bounded cleanup drain to the invocation's existing task
+    /// owner. It must not spawn unowned work, block, or wait: when the owner
+    /// is already gone the synchronous steps above still land. Every
+    /// [`ScriptHost`] implementation must provide it; there is no default,
+    /// so a host cannot silently leak a dropped invocation.
+    fn abandon(&self, inv: &Arc<Invocation>);
+
+    /// Reads the current host-owned task state without settling it.
+    ///
+    /// The default is fail-closed for test hosts that do not retain a scope
+    /// table; production session hosts override it with the real task record.
+    fn task_probe(&self, inv: &Arc<Invocation>, task: TaskId) -> Option<TaskProbe> {
+        let _ = (inv, task);
+        None
+    }
+
+    /// Sends one message to a member started by a scope task.
+    ///
+    /// This is a host-owned mailbox operation, not a generic network escape.
+    /// Hosts without a session deny it with the typed unavailable reason.
+    fn send_member(
+        &self,
+        inv: &Arc<Invocation>,
+        task: TaskId,
+        text: &str,
+        mode: MailMode,
+    ) -> BoxFuture<'static, Result<Receipt, HostTerminal>> {
+        let _ = (inv, task, text, mode);
+        Box::pin(async {
+            Err(HostTerminal::Denied {
+                reason: DenyReason::Unavailable {
+                    what: "member sessions outside a session".into(),
+                },
+            })
+        })
+    }
+
+    /// Closes the member owned by a scope task after explicit task cancel.
+    ///
+    /// This one-shot close is owned by the invocation; it is not a detached
+    /// polling reaper. Hosts without member sessions leave it unchanged.
+    fn close_member(&self, inv: &Arc<Invocation>, task: TaskId) -> BoxFuture<'static, ()> {
+        let _ = (inv, task);
+        Box::pin(async {})
+    }
 
     /// Records one observer-hook failure against the invocation's root.
     ///

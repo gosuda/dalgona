@@ -4,6 +4,8 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+mod google_login;
+mod native_login;
 mod oauth_login;
 mod server;
 
@@ -13,8 +15,19 @@ use tokio_util::sync::CancellationToken;
 use super::{LoginIo, LoginSite, Method, login, login_providers, sign_out, stored_credentials};
 use crate::{
     AuthStore, Credential, CredentialKind, EnvSnapshot, LoginEndpoints, OAuthCredential,
-    ProviderError, SecretString,
+    ProviderError, ProviderIdentity, SecretString,
 };
+
+/// The host platform every test site captures: fixed, so a request that
+/// names it is deterministic.
+fn test_identity() -> ProviderIdentity {
+    ProviderIdentity {
+        version: "0.0.0-test".into(),
+        os: "linux".into(),
+        os_version: String::new().into(),
+        arch: "x86_64".into(),
+    }
+}
 
 struct TestDir(PathBuf);
 
@@ -35,7 +48,7 @@ impl TestDir {
         LoginSite::new(
             self.0.join("auth.json"),
             self.0.join("cache"),
-            "dal/test",
+            &test_identity(),
             &EnvSnapshot::default(),
         )
         .expect("production endpoints")
@@ -199,6 +212,7 @@ fn oauth(expires_at: Option<i64>) -> Credential {
         expires_at,
         id_token: None,
         account_id: None,
+        project_id: None,
     })
 }
 

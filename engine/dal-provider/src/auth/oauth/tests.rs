@@ -1,6 +1,6 @@
 use super::{
-    LoginEndpoints, LoginFlow, LoginProgress, PASTE_HINT, callback_code, parse_pasted_code,
-    pkce_challenge,
+    LoginEndpoints, LoginFlow, LoginProgress, PASTE_HINT, Surface, antigravity, authorize_url,
+    callback_code, google_code_form, parse_pasted_code, pkce_challenge, project_surface,
 };
 use crate::{AuthStore, Credential, EnvSnapshot, OAuthCredential, ProviderError, SecretString};
 use dal_core::Family;
@@ -135,46 +135,133 @@ async fn mock_redirect(
     Some((base, server, target))
 }
 
-async fn mock_device_poll_redirect()
--> Option<(Url, tokio::task::JoinSet<Option<Vec<Vec<u8>>>>, TcpListener)> {
-    let target = TcpListener::bind("127.0.0.1:0").await.ok()?;
+/// The Codex device issuer and its redirect deny-target, both on `[::1]`.
+///
+/// The mock serves exactly two connections, and any connection that sends
+/// no complete request ends it and drops the listener. On the shared
+/// `127.0.0.1` namespace a foreign loopback prober can take one of those
+/// accepts, so the sign-in client's own request then meets a closed port
+/// (`Connection refused`) instead of the scripted `307`. The issuer and the
+/// deny-target therefore listen on the IPv6 loopback, which the
+/// `LoginEndpoints::loopback` seam admits; the registered callback ports the
+/// tests occupy or free stay on `127.0.0.1`, exactly as production binds
+/// them. The mock task ends with the two served requests, or with a
+/// description of the connection it could not serve (the raw bytes it read,
+/// lossily decoded); the callers join it before asserting the flow result,
+/// so a stray connection names what it sent instead of leaving a bare
+/// refusal.
+async fn mock_device_poll_redirect() -> Option<(
+    Url,
+    tokio::task::JoinSet<Result<Vec<Vec<u8>>, String>>,
+    TcpListener,
+)> {
+    let target = TcpListener::bind("[::1]:0").await.ok()?;
     let target_address = target.local_addr().ok()?;
-    let listener = TcpListener::bind("127.0.0.1:0").await.ok()?;
+    let listener = TcpListener::bind("[::1]:0").await.ok()?;
     let address = listener.local_addr().ok()?;
     let base = Url::parse(&format!("http://{address}")).ok()?;
     let location = format!("http://{target_address}/redirected");
     let mut server = tokio::task::JoinSet::new();
     server.spawn(async move {
             let (start_request, start_stream) = {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    return None;
-                };
-                let request = read_test_request(&mut stream).await?;
+                let (mut stream, peer) = listener
+                    .accept()
+                    .await
+                    .map_err(|error| format!("user-code accept failed: {error}"))?;
+                let request = read_device_request(&mut stream, "user-code", peer).await?;
                 let body = r#"{"device_auth_id":"device","usercode":"ABCD","interval":"1"}"#;
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
                 );
-                stream.write_all(response.as_bytes()).await.ok()?;
-                stream.write_all(body.as_bytes()).await.ok()?;
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .map_err(|error| format!("user-code reply failed: {error}"))?;
+                stream
+                    .write_all(body.as_bytes())
+                    .await
+                    .map_err(|error| format!("user-code reply failed: {error}"))?;
                 (request, stream)
             };
             drop(start_stream);
             let (poll_request, poll_stream) = {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    return None;
-                };
-                let request = read_test_request(&mut stream).await?;
+                let (mut stream, peer) = listener
+                    .accept()
+                    .await
+                    .map_err(|error| format!("poll accept failed: {error}"))?;
+                let request = read_device_request(&mut stream, "poll", peer).await?;
                 let response = format!(
                     "HTTP/1.1 307 Temporary Redirect\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
                 );
-                stream.write_all(response.as_bytes()).await.ok()?;
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .map_err(|error| format!("poll reply failed: {error}"))?;
                 (request, stream)
             };
             drop(poll_stream);
-            Some(vec![start_request, poll_request])
+            Ok(vec![start_request, poll_request])
         });
     Some((base, server, target))
+}
+
+/// Reads one complete request for the device mock's `step`, bounded to two
+/// seconds and 16 KiB. A connection that closes, stalls, or overflows first
+/// is described by its peer and the bytes it sent, so the test names it.
+async fn read_device_request(
+    stream: &mut TcpStream,
+    step: &str,
+    peer: std::net::SocketAddr,
+) -> Result<Vec<u8>, String> {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let read = tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await;
+        let count = match read {
+            Ok(Ok(count)) if count > 0 && request.len() + count <= 16 * 1024 => count,
+            outcome => {
+                return Err(format!(
+                    "the {step} connection from {peer} ended before a complete request ({outcome:?}); it sent {:?}",
+                    String::from_utf8_lossy(&request)
+                ));
+            }
+        };
+        request.extend_from_slice(&chunk[..count]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let content_length = String::from_utf8_lossy(&request[..header_end])
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        if request.len() >= header_end + 4 + content_length {
+            return Ok(request);
+        }
+    }
+}
+
+/// Joins the device mock within `wait`: the served requests, or the
+/// description of what went wrong (including a mock still waiting for a
+/// connection that never came).
+async fn device_mock_outcome(
+    server: &mut tokio::task::JoinSet<Result<Vec<Vec<u8>>, String>>,
+    wait: Duration,
+) -> Result<Vec<Vec<u8>>, String> {
+    match tokio::time::timeout(wait, server.join_next()).await {
+        Ok(Some(Ok(outcome))) => outcome,
+        Ok(Some(Err(error))) => Err(format!("the device mock task failed: {error}")),
+        Ok(None) => Err(String::from("the device mock task is missing")),
+        Err(_) => Err(String::from(
+            "the device mock is still waiting for a connection",
+        )),
+    }
 }
 async fn occupied_callback_port() -> Option<(TcpListener, u16)> {
     let listener = TcpListener::bind("127.0.0.1:0").await.ok()?;
@@ -214,7 +301,11 @@ fn pkce_rfc7636_vector() {
 
 #[test]
 fn pasted_state_mismatch_is_typed() {
-    let result = parse_pasted_code("code123#wrong-state", "right-state", Family::Anthropic);
+    let result = parse_pasted_code(
+        "code123#wrong-state",
+        Some("right-state"),
+        Family::Anthropic,
+    );
     assert!(matches!(result, Err(crate::ProviderError::StateMismatch)));
 }
 
@@ -223,7 +314,7 @@ fn pasted_redirect_and_query_are_accepted() {
     assert_eq!(
         parse_pasted_code(
             "http://localhost/callback?code=code123&state=state",
-            "state",
+            Some("state"),
             Family::Anthropic
         )
         .ok()
@@ -231,7 +322,7 @@ fn pasted_redirect_and_query_are_accepted() {
         Some("code123")
     );
     assert_eq!(
-        parse_pasted_code("code123", "state", Family::Anthropic)
+        parse_pasted_code("code123", Some("state"), Family::Anthropic)
             .ok()
             .as_deref(),
         Some("code123")
@@ -244,7 +335,7 @@ fn pasted_redirect_and_query_are_accepted() {
 
 #[test]
 fn a_pasted_result_needs_a_matching_state_and_a_code_in_every_form() {
-    let parse = |input: &str| parse_pasted_code(input, "right-state", Family::Anthropic);
+    let parse = |input: &str| parse_pasted_code(input, Some("right-state"), Family::Anthropic);
     for (input, code) in [
         ("code123#right-state", "code123"),
         (
@@ -463,8 +554,9 @@ async fn callback_state_mismatch_is_typed() {
     callback.spawn(callback_code(
         listener,
         "/callback",
-        "expected-state",
+        Some("expected-state"),
         Family::Anthropic,
+        false,
     ));
     let connection = TcpStream::connect(("127.0.0.1", port)).await;
     assert!(connection.is_ok());
@@ -744,6 +836,7 @@ async fn codex_logout_revokes_refresh_token_and_removes_entry() {
         expires_at: Some(100),
         id_token: Some(String::from("id-token")),
         account_id: Some(String::from("account")),
+        project_id: None,
     });
     assert!(store.set("openai-codex", credential).is_ok());
     assert!(store.store().is_ok());
@@ -914,6 +1007,7 @@ async fn oauth_revoke_redirect_does_not_forward_refresh_token() {
         expires_at: Some(100),
         id_token: Some(String::from("id-token")),
         account_id: Some(String::from("account")),
+        project_id: None,
     });
     assert!(store.set("openai-codex", credential).is_ok());
     assert!(store.store().is_ok());
@@ -983,21 +1077,19 @@ async fn device_poll_redirect_does_not_forward_user_code() {
         }
     };
     let result = flow.run(&progress, &CancellationToken::new()).await;
+    let outcome = device_mock_outcome(&mut server, Duration::from_secs(3)).await;
     assert!(
         matches!(result, Err(ProviderError::DeviceCode { status: 307, .. })),
-        "expected DeviceCode {{ status: 307, .. }}, got: {result:?}"
+        "expected DeviceCode {{ status: 307, .. }}, got: {result:?}; the device mock saw: {outcome:?}"
     );
     drop(flow);
     drop(blocker);
     assert!(store.credential("openai-codex").is_none());
     assert!(!dir.auth_path().exists());
 
-    let server_result = tokio::time::timeout(Duration::from_secs(3), server.join_next()).await;
-    assert!(server_result.is_ok());
-    let Some(Some(Ok(Some(requests)))) = server_result.ok() else {
-        return;
-    };
+    let requests = outcome.unwrap_or_else(|reason| panic!("the device mock failed: {reason}"));
     assert_eq!(requests.len(), 2);
+    assert_device_requests(&requests);
     let poll_request_bytes = requests.into_iter().nth(1);
     assert!(poll_request_bytes.is_some());
     let Some(poll_request_bytes) = poll_request_bytes else {
@@ -1075,12 +1167,13 @@ async fn explicit_device_auth_shows_code_without_opening_browser_on_free_callbac
         flow.run(&progress, &CancellationToken::new()),
     )
     .await;
+    let outcome = device_mock_outcome(&mut server, Duration::from_secs(15)).await;
     assert!(
         matches!(
             result,
             Ok(Err(ProviderError::DeviceCode { status: 307, .. }))
         ),
-        "expected Ok(Err(DeviceCode {{ status: 307, .. }})), got: {result:?}"
+        "expected Ok(Err(DeviceCode {{ status: 307, .. }})), got: {result:?}; the device mock saw: {outcome:?}"
     );
     assert!(
         shown_code
@@ -1090,14 +1183,31 @@ async fn explicit_device_auth_shows_code_without_opening_browser_on_free_callbac
     assert!(opened_url.lock().is_ok_and(|url| url.is_none()));
     drop(flow);
 
-    let server_result = tokio::time::timeout(Duration::from_secs(15), server.join_next()).await;
-    assert!(server_result.is_ok());
-    let Some(Ok(Some(requests))) = server_result.ok().flatten() else {
-        return;
-    };
+    let requests = outcome.unwrap_or_else(|reason| panic!("the device mock failed: {reason}"));
     assert_eq!(requests.len(), 2);
+    assert_device_requests(&requests);
     let redirected = tokio::time::timeout(Duration::from_millis(50), target.accept()).await;
     assert!(redirected.is_err());
+}
+
+/// Both requests the device mock served came from the sign-in client: the
+/// user-code request, then the token poll, in that order.
+fn assert_device_requests(requests: &[Vec<u8>]) {
+    for (request, line) in requests.iter().zip([
+        "POST /api/accounts/deviceauth/usercode HTTP/1.1\r\n",
+        "POST /api/accounts/deviceauth/token HTTP/1.1\r\n",
+    ]) {
+        assert!(
+            request.starts_with(line.as_bytes()),
+            "expected {line:?}, served {:?}",
+            String::from_utf8_lossy(
+                request
+                    .split(|byte| *byte == b'\n')
+                    .next()
+                    .unwrap_or_default()
+            )
+        );
+    }
 }
 
 #[test]
@@ -1529,8 +1639,8 @@ fn is_form(request: &Seen) -> bool {
 fn pinned_client_id(provider: &str) -> &'static str {
     crate::find(provider)
         .and_then(|def| def.oauth)
-        .map(|oauth| oauth.client_id)
-        .expect("provider with OAuth")
+        .and_then(|oauth| oauth.client_id)
+        .expect("provider with OAuth client id")
 }
 
 /// Stores one API key, so the file exists before a failing login, and returns
@@ -1942,7 +2052,13 @@ fn effective_client_ids_follow_the_captured_environment() {
         let endpoints =
             LoginEndpoints::production(&EnvSnapshot::test(entries)).expect("production endpoints");
         let def = crate::find(provider).expect("table row");
-        endpoints.row(def).expect("OAuth row").client_id.to_string()
+        endpoints
+            .row(def)
+            .expect("OAuth row")
+            .client_id
+            .as_deref()
+            .expect("test provider has client id")
+            .to_owned()
     };
     assert_eq!(client(&[], "gitlab-duo"), pinned_client_id("gitlab-duo"));
     assert_eq!(
@@ -2521,6 +2637,7 @@ async fn gitlab_revoke_is_a_form_with_the_effective_client_and_never_blocks_logo
                     expires_at: Some(100),
                     id_token: None,
                     account_id: None,
+                    project_id: None,
                 }),
             )
             .expect("seed credential");
@@ -2539,5 +2656,197 @@ async fn gitlab_revoke_is_a_form_with_the_effective_client_and_never_blocks_logo
         assert_eq!(field(&form, "client_id"), Some(expected));
         assert!(store.credential("gitlab-duo").is_none());
         assert!(!dir.auth_path().exists(), "the last entry removes the file");
+    }
+}
+
+#[test]
+fn the_google_code_form_carries_the_secret_and_no_verifier_in_the_reference_order() {
+    let form = google_code_form(
+        "client",
+        "sec ret",
+        "co+de",
+        "http://127.0.0.1:8085/oauth2callback",
+    );
+    assert_eq!(
+        form,
+        "grant_type=authorization_code&client_id=client&client_secret=sec+ret&code=co%2Bde\
+         &redirect_uri=http%3A%2F%2F127.0.0.1%3A8085%2Foauth2callback"
+    );
+    assert!(!form.contains("code_verifier"));
+}
+
+#[test]
+fn the_google_authorize_url_orders_its_parameters_like_the_reference_and_sends_no_pkce() {
+    for id in ["google-cloud-code-assist", "google-antigravity"] {
+        let def = crate::find(id).expect("table row");
+        let oauth = def.oauth.expect("an OAuth row");
+        let endpoint = Url::parse(oauth.authorize_url).expect("the authorize endpoint parses");
+        let url = authorize_url(
+            def.family,
+            &oauth,
+            oauth.client_id,
+            &endpoint,
+            "http://127.0.0.1:8085/oauth2callback",
+            "never-sent-challenge",
+            "state-1",
+        )
+        .expect("the authorize URL builds");
+        assert_eq!(url.host_str(), Some("accounts.google.com"), "{id}");
+        assert_eq!(url.path(), "/o/oauth2/v2/auth", "{id}");
+        let names: Vec<String> = url
+            .query_pairs()
+            .map(|(name, _)| name.into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "client_id",
+                "response_type",
+                "redirect_uri",
+                "scope",
+                "state",
+                "access_type",
+                "prompt"
+            ],
+            "{id}"
+        );
+        let pairs: std::collections::HashMap<String, String> = url
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect();
+        assert_eq!(
+            pairs["client_id"],
+            oauth.client_id.expect("a client id"),
+            "{id}"
+        );
+        assert_eq!(pairs["response_type"], "code", "{id}");
+        assert_eq!(
+            pairs["redirect_uri"], "http://127.0.0.1:8085/oauth2callback",
+            "{id}"
+        );
+        assert_eq!(pairs["scope"], oauth.scopes.join(" "), "{id}");
+        assert_eq!(pairs["state"], "state-1", "{id}");
+        assert_eq!(pairs["access_type"], "offline", "{id}");
+        assert_eq!(pairs["prompt"], "consent", "{id}");
+        let text = url.as_str();
+        assert!(
+            !text.contains("never-sent-challenge") && !text.contains("code_challenge"),
+            "{id}"
+        );
+        assert!(
+            text.contains("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform+"),
+            "{id}: {text}"
+        );
+    }
+}
+
+#[test]
+fn the_project_surface_belongs_to_the_cloud_code_hooks_only() {
+    for def in crate::PROVIDERS {
+        let Some(oauth) = def.oauth else { continue };
+        assert_eq!(
+            project_surface(oauth.hook).is_some(),
+            oauth.hook.binds_project(),
+            "{}",
+            def.id
+        );
+    }
+    assert_eq!(
+        project_surface(crate::Hook::GoogleCloudCodeAssist),
+        Some(Surface::GeminiCli)
+    );
+    assert_eq!(
+        project_surface(crate::Hook::GoogleAntigravity),
+        Some(Surface::Antigravity {
+            client_version: antigravity::CLIENT_VERSION
+        })
+    );
+}
+
+#[test]
+fn production_and_loopback_rows_place_the_cloud_code_endpoints_apart() {
+    let env = EnvSnapshot::test(&[("GOOGLE_CLOUD_PROJECT", "captured-project")]);
+    let production = LoginEndpoints::production(&env).expect("production endpoints");
+    assert_eq!(
+        production.env().get("GOOGLE_CLOUD_PROJECT"),
+        Some("captured-project"),
+        "the endpoint set keeps the captured environment for the project discovery"
+    );
+    let row = |endpoints: &LoginEndpoints, provider: &str| {
+        endpoints
+            .row(crate::find(provider).expect("table row"))
+            .expect("OAuth row")
+            .clone()
+    };
+    for (id, base) in [
+        (
+            "google-cloud-code-assist",
+            "https://cloudcode-pa.googleapis.com/",
+        ),
+        (
+            "google-antigravity",
+            "https://daily-cloudcode-pa.googleapis.com/",
+        ),
+    ] {
+        let google = row(&production, id);
+        assert_eq!(
+            google.authorize.as_str(),
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "{id}"
+        );
+        assert_eq!(
+            google.token.as_str(),
+            "https://oauth2.googleapis.com/token",
+            "{id}"
+        );
+        assert_eq!(
+            google.project_base.as_ref().map(Url::as_str),
+            Some(base),
+            "{id}"
+        );
+        assert!(
+            google.revoke.is_none()
+                && google.device.is_none()
+                && google.models_base.is_none()
+                && google.session_base.is_none()
+                && google.poll.is_none(),
+            "{id}: no other endpoint"
+        );
+    }
+    for id in [
+        "anthropic",
+        "openai-codex",
+        "factory-droid",
+        "gitlab-duo",
+        "cursor",
+        "devin",
+    ] {
+        let other = row(&production, id);
+        assert!(
+            other.project_base.is_none(),
+            "{id} discovers no Google project"
+        );
+    }
+
+    let loopback = LoginEndpoints::loopback("http://127.0.0.1:9", &env).expect("loopback");
+    for (id, prefix) in [
+        ("google-cloud-code-assist", "/cloud-code-assist"),
+        ("google-antigravity", "/antigravity"),
+    ] {
+        let google = row(&loopback, id);
+        assert_eq!(google.token.path(), format!("{prefix}/token"), "{id}");
+        assert_eq!(
+            google.authorize.path(),
+            format!("{prefix}/o/oauth2/v2/auth"),
+            "{id}"
+        );
+        assert_eq!(
+            google
+                .project_base
+                .as_ref()
+                .map(|url| url.path().to_owned()),
+            Some(prefix.to_owned()),
+            "{id}"
+        );
     }
 }

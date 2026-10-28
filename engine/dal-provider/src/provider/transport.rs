@@ -163,15 +163,19 @@ pub(crate) fn decode_response(
             | Family::Cursor
             | Family::GitLab
             | Family::GoogleGeminiCli => dedicated_decoder(family),
-            Family::GoogleGenerativeAi | Family::GoogleVertex | Family::GoogleAntigravity => {
-                Box::pin(decode_google_events(
-                    family,
-                    provider,
-                    model,
-                    events,
-                    response_id,
-                ))
-            }
+            // The signed-in Cloud Code Assist family streams the same
+            // `GenerateContent` events as the other Google surfaces; only the
+            // local Gemini CLI subprocess (above) hands this function nothing.
+            Family::GoogleGenerativeAi
+            | Family::GoogleVertex
+            | Family::GoogleCloudCodeAssist
+            | Family::GoogleAntigravity => Box::pin(decode_google_events(
+                family,
+                provider,
+                model,
+                events,
+                response_id,
+            )),
             Family::Mistral => Box::pin(family::mistral::decode_events(
                 events,
                 family::mistral::MistralDecoder::new(provider, model),

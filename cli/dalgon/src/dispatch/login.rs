@@ -6,7 +6,7 @@ use std::{
 };
 
 use dal_agent::login::LoginOutcome;
-use dal_agent::{Host, HostError, Product};
+use dal_agent::{Env, Host, HostError, Product};
 use dal_provider::{
     CredentialKind, LoginIo, LoginProgress, Method, ProviderDef, ProviderError, StoredCredential,
     find,
@@ -132,11 +132,14 @@ pub(super) async fn start_auth_host(
         .map_err(|error| provider_error("login", &error, &auth_path))?;
     let host = super::start_host(
         product,
-        &startup.config,
-        startup.vars,
-        startup.cwd,
-        startup.helper,
+        startup.config,
+        Env {
+            vars: startup.vars,
+            cwd: startup.cwd,
+            sandbox_helper: startup.helper,
+        },
         &startup.data_root,
+        &startup.config_path,
     )
     .await?;
     #[cfg(feature = "test-support")]
@@ -394,11 +397,11 @@ async fn login_oauth(
     let (paste, paste_receiver) = oneshot::channel();
     let (io, events) = LoginIo::channel(Some(paste_receiver), cancel.clone());
     let mut signals = edge::ShutdownSignals::register();
-    let outcome = super::drive(
+    let outcome = Box::pin(super::drive(
         &cancel,
         &mut signals,
         run_with_paste(&host, def.id, method, io, events, paste),
-    )
+    ))
     .await;
     shutdown_auth_host(host).await;
     match outcome {

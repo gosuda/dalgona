@@ -23,13 +23,13 @@ pub(super) fn workspace(shared: &HostShared) -> Result<Workspace, dal_core::Work
     Workspace::new(shared.env.cwd.clone())
 }
 
-pub(super) struct RelayServices {
+pub(crate) struct RelayServices {
     deps: RequestDeps,
     cancel: tokio_util::sync::CancellationToken,
 }
 
 impl RelayServices {
-    pub(super) fn new(deps: RequestDeps) -> Self {
+    pub(crate) fn new(deps: RequestDeps) -> Self {
         Self {
             deps,
             cancel: tokio_util::sync::CancellationToken::new(),
@@ -45,10 +45,12 @@ fn unavailable<T: Send + 'static>() -> ServiceFuture<'static, T> {
     })
 }
 
+pub(crate) const MEMBER_SESSIONS_OUTSIDE: &str = "member sessions outside a session";
+
 fn no_members<T: Send + 'static>() -> ServiceFuture<'static, T> {
     Box::pin(async {
         Err(ServiceError::Denied(DenyReason::Unavailable {
-            what: "member sessions outside a session".into(),
+            what: MEMBER_SESSIONS_OUTSIDE.into(),
         }))
     })
 }
@@ -177,6 +179,16 @@ impl Services for RelayServices {
     fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
         unavailable()
     }
+
+    fn judge_ask(&self, _who: &Caller, _question: String) -> ServiceFuture<'_, bool> {
+        unavailable()
+    }
+
+    fn judge_batch(&self, _who: &Caller, _questions: Vec<String>) -> ServiceFuture<'_, Vec<bool>> {
+        unavailable()
+    }
+
+    fn set_judge_transport(&self, _backend: Arc<dyn crate::ext::services::JudgeTransport>) {}
 
     fn notify(&self, _who: &Caller, _notice: Notice) {}
 

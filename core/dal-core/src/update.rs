@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::{BlobId, CallId, ClientId, Gen, JobId, RequestId, Seq, TurnId};
 use crate::model::{Stop, StreamChannel};
-use crate::raw::{RawJson, Tagged};
+use crate::raw::{RawJson, RawJsonError, Tagged};
 use crate::request::{Answer, Request};
 use crate::view::{SettingsView, TreeDelta, UsageView};
 
@@ -257,19 +257,30 @@ struct ExtStatusFields {
     state: Box<str>,
     #[serde(default)]
     text: Option<Box<str>>,
+    #[serde(default, deserialize_with = "decode_present")]
+    payload: Option<RawJson>,
 }
 
 fn decode_ext_status<E: serde::de::Error>(raw: &str) -> Result<UpdateKind, E> {
     let fields: ExtStatusFields = sonic_rs::from_str(raw).map_err(serde::de::Error::custom)?;
+    // The state is matched before any payload conversion: a status written
+    // by a future producer stays `Unknown` whatever payload it attached,
+    // while known states keep the bounded-strict payload contract.
     let state = match fields.state.as_ref() {
         "busy" => ExtState::Busy,
         "quiet" => ExtState::Quiet,
         _ => return Ok(UpdateKind::Unknown),
     };
+    let payload = fields
+        .payload
+        .map(StatusPayload::try_from)
+        .transpose()
+        .map_err(serde::de::Error::custom)?;
     Ok(UpdateKind::ExtStatus(ExtStatus {
         ext: fields.ext,
         state,
         text: fields.text,
+        payload,
     }))
 }
 
@@ -460,6 +471,15 @@ pub struct ExtStatus {
     /// The status text, when the extension supplies one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<Box<str>>,
+    /// The structured status payload, when the extension supplies one. An
+    /// explicit JSON `null` is itself a valid payload and stays `Some`,
+    /// distinct from an absent member.
+    #[serde(
+        default,
+        deserialize_with = "decode_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub payload: Option<StatusPayload>,
 }
 
 impl std::fmt::Display for ExtStatus {
@@ -477,6 +497,104 @@ impl ExtStatus {
     #[must_use]
     pub const fn is_quiet(&self) -> bool {
         matches!(self.state, ExtState::Quiet)
+    }
+}
+
+/// The serialized byte cap for one structured status payload.
+pub const STATUS_PAYLOAD_LIMIT: usize = 4096;
+
+/// Why a structured status payload was rejected.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum StatusPayloadError {
+    /// The text is not exactly one JSON value.
+    #[error("invalid status payload: {0}")]
+    Invalid(#[from] RawJsonError),
+    /// The serialized payload exceeds the status byte cap.
+    #[error("status payload is {0} bytes; the cap is 4096")]
+    TooLarge(usize),
+}
+
+/// One bounded structured status payload: exactly one JSON value of at most
+/// [`STATUS_PAYLOAD_LIMIT`] serialized bytes, kept verbatim like
+/// [`RawJson`]. Construction and deserialization both enforce the bound, so
+/// an oversized or malformed payload cannot enter a status update.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct StatusPayload(RawJson);
+
+impl StatusPayload {
+    /// Validates the text as one JSON value within the byte cap and retains
+    /// it verbatim.
+    ///
+    /// # Errors
+    /// Returns [`StatusPayloadError`] when the text is not exactly one JSON
+    /// value or exceeds [`STATUS_PAYLOAD_LIMIT`].
+    pub fn parse(value: &str) -> Result<Self, StatusPayloadError> {
+        Self::try_from(RawJson::parse(value)?)
+    }
+
+    /// Borrows the raw JSON text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Borrows the validated raw JSON value.
+    #[must_use]
+    pub const fn raw(&self) -> &RawJson {
+        &self.0
+    }
+}
+
+impl TryFrom<RawJson> for StatusPayload {
+    type Error = StatusPayloadError;
+
+    fn try_from(raw: RawJson) -> Result<Self, Self::Error> {
+        // `raw` is already one validated JSON value; only the cap remains.
+        let len = raw.as_str().len();
+        if len > STATUS_PAYLOAD_LIMIT {
+            return Err(StatusPayloadError::TooLarge(len));
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl Serialize for StatusPayload {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for StatusPayload {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = RawJson::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Decodes one optional member: an absent member defaults to [`None`], while
+/// an explicit JSON `null` is itself a present value and decodes to
+/// [`Some`]. Serde's derived `Option` handling collapses `null` into the
+/// absent case, losing the supplied value.
+fn decode_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for StatusPayload {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "StatusPayload".into()
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::Schema::from(true)
     }
 }
 
@@ -621,11 +739,13 @@ mod tests {
         assert_eq!(status.state, ExtState::Busy);
         assert_eq!(status.text.as_deref(), Some("indexing"));
         assert!(!status.is_quiet());
+        assert!(status.payload.is_none());
 
         let quiet = UpdateKind::ExtStatus(super::ExtStatus {
             ext: "focus".into(),
             state: ExtState::Quiet,
             text: None,
+            payload: None,
         });
         let text = sonic_rs::to_string(&quiet)?;
         assert_eq!(
@@ -637,6 +757,175 @@ mod tests {
             r#"{"gen":1,"seq":6,"kind":{"type":"ext_status","ext":"focus","state":"dozing"}}"#;
         let unknown: Update = sonic_rs::from_str(bad)?;
         assert!(matches!(unknown.kind, UpdateKind::Unknown));
+        Ok(())
+    }
+
+    #[test]
+    fn ext_status_carries_a_payload_and_round_trips_it() -> TestResult {
+        let payload = super::StatusPayload::parse(r#"{"state":"running"}"#)?;
+        let busy = UpdateKind::ExtStatus(super::ExtStatus {
+            ext: "focus".into(),
+            state: ExtState::Busy,
+            text: Some("running".into()),
+            payload: Some(payload),
+        });
+        let text = sonic_rs::to_string(&busy)?;
+        assert_eq!(
+            text,
+            r#"{"type":"ext_status","ext":"focus","state":"busy","text":"running","payload":{"state":"running"}}"#
+        );
+        let update: Update = sonic_rs::from_str(&format!(r#"{{"gen":1,"seq":7,"kind":{text}}}"#))?;
+        assert_eq!(update.kind, busy);
+        Ok(())
+    }
+
+    #[test]
+    fn an_oversized_payload_member_is_refused_at_decode() {
+        let member = "x".repeat(super::STATUS_PAYLOAD_LIMIT + 8);
+        let wire = format!(
+            r#"{{"gen":1,"seq":8,"kind":{{"type":"ext_status","ext":"focus","state":"busy","payload":{{"x":"{member}"}}}}}}"#
+        );
+        assert!(sonic_rs::from_str::<Update>(&wire).is_err());
+    }
+
+    #[test]
+    fn an_unknown_state_ignores_oversized_but_valid_payloads() -> TestResult {
+        let member = "x".repeat(super::STATUS_PAYLOAD_LIMIT + 8);
+        let wire = format!(
+            r#"{{"gen":1,"seq":13,"kind":{{"type":"ext_status","ext":"focus","state":"hatching","payload":{{"x":"{member}"}}}}}}"#
+        );
+        let update: Update = sonic_rs::from_str(&wire)?;
+        assert!(
+            matches!(update.kind, UpdateKind::Unknown),
+            "a future status state stays Unknown whatever payload a newer producer attached"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unknown_state_ignores_any_valid_payload_shape() -> TestResult {
+        for payload in ["7", "null", "[1,2,3]", r#""tag""#] {
+            let wire = format!(
+                r#"{{"gen":1,"seq":15,"kind":{{"type":"ext_status","ext":"focus","state":"hatching","payload":{payload}}}}}"#
+            );
+            let update: Update = sonic_rs::from_str(&wire)?;
+            assert!(matches!(update.kind, UpdateKind::Unknown), "{payload}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_quiet_oversized_payload_member_is_still_refused_at_decode() {
+        let member = "x".repeat(super::STATUS_PAYLOAD_LIMIT + 8);
+        let wire = format!(
+            r#"{{"gen":1,"seq":14,"kind":{{"type":"ext_status","ext":"focus","state":"quiet","payload":{{"x":"{member}"}}}}}}"#
+        );
+        assert!(sonic_rs::from_str::<Update>(&wire).is_err());
+    }
+
+    #[test]
+    fn a_payload_at_the_cap_decodes_on_the_update_path() -> TestResult {
+        let fit = format!(r#""{}""#, "x".repeat(super::STATUS_PAYLOAD_LIMIT - 2));
+        let wire = format!(
+            r#"{{"gen":1,"seq":16,"kind":{{"type":"ext_status","ext":"focus","state":"busy","payload":{fit}}}}}"#
+        );
+        let update: Update = sonic_rs::from_str(&wire)?;
+        let UpdateKind::ExtStatus(status) = &update.kind else {
+            panic!("expected ext_status, got {:?}", update.kind);
+        };
+        assert_eq!(
+            status.payload.as_ref().map(super::StatusPayload::as_str),
+            Some(fit.as_str()),
+            "the whole cap-sized value stays verbatim"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_status_payload_enforces_the_byte_cap_and_json_validity() -> TestResult {
+        let fit = format!(r#""{}""#, "x".repeat(super::STATUS_PAYLOAD_LIMIT - 2));
+        assert_eq!(
+            super::StatusPayload::parse(&fit)?.as_str().len(),
+            super::STATUS_PAYLOAD_LIMIT
+        );
+        let over = format!(r#""{}""#, "x".repeat(super::STATUS_PAYLOAD_LIMIT - 1));
+        assert!(matches!(
+            super::StatusPayload::parse(&over),
+            Err(super::StatusPayloadError::TooLarge(_))
+        ));
+        assert!(matches!(
+            super::StatusPayload::parse("{\"a\":"),
+            Err(super::StatusPayloadError::Invalid(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn an_explicit_null_payload_stays_some_and_distinct_from_an_absent_member() -> TestResult {
+        let explicit: Update = sonic_rs::from_str(
+            r#"{"gen":1,"seq":10,"kind":{"type":"ext_status","ext":"focus","state":"quiet","payload":null}}"#,
+        )?;
+        let UpdateKind::ExtStatus(status) = &explicit.kind else {
+            panic!("expected ext_status, got {:?}", explicit.kind);
+        };
+        assert_eq!(
+            status.payload,
+            Some(super::StatusPayload::parse("null")?),
+            "an explicit JSON null is a valid bounded payload, not an absent member"
+        );
+        let kind_wire = sonic_rs::to_string(&explicit.kind)?;
+        assert_eq!(
+            kind_wire,
+            r#"{"type":"ext_status","ext":"focus","state":"quiet","payload":null}"#
+        );
+        let replayed: Update =
+            sonic_rs::from_str(&format!(r#"{{"gen":1,"seq":10,"kind":{kind_wire}}}"#))?;
+        assert_eq!(replayed, explicit);
+
+        let absent: Update = sonic_rs::from_str(
+            r#"{"gen":1,"seq":11,"kind":{"type":"ext_status","ext":"focus","state":"quiet"}}"#,
+        )?;
+        let UpdateKind::ExtStatus(absent_status) = &absent.kind else {
+            panic!("expected ext_status, got {:?}", absent.kind);
+        };
+        assert!(absent_status.payload.is_none());
+        assert_eq!(
+            sonic_rs::to_string(&absent.kind)?,
+            r#"{"type":"ext_status","ext":"focus","state":"quiet"}"#,
+            "an absent member stays None and stays off the wire"
+        );
+
+        let direct: super::ExtStatus =
+            sonic_rs::from_str(r#"{"ext":"focus","state":"busy","payload":null}"#)?;
+        assert_eq!(direct.payload, Some(super::StatusPayload::parse("null")?));
+        let direct_absent: super::ExtStatus =
+            sonic_rs::from_str(r#"{"ext":"focus","state":"busy"}"#)?;
+        assert!(direct_absent.payload.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_non_null_payloads_decode_verbatim_and_round_trip() -> TestResult {
+        for value in [r#""indexing""#, "7", "[1,null,2]", r#"{"b": 2, "a":1}"#] {
+            let member = format!(r#""payload":{value}"#);
+            let wire = format!(
+                r#"{{"gen":1,"seq":12,"kind":{{"type":"ext_status","ext":"focus","state":"busy",{member}}}}}"#
+            );
+            let update: Update = sonic_rs::from_str(&wire)?;
+            let UpdateKind::ExtStatus(status) = &update.kind else {
+                panic!("expected ext_status, got {:?}", update.kind);
+            };
+            assert_eq!(
+                status.payload.as_ref().map(super::StatusPayload::as_str),
+                Some(value),
+                "{value}"
+            );
+            assert_eq!(
+                sonic_rs::to_string(&update.kind)?,
+                format!(r#"{{"type":"ext_status","ext":"focus","state":"busy",{member}}}"#),
+                "{value}"
+            );
+        }
         Ok(())
     }
 
@@ -657,6 +946,42 @@ mod tests {
             r#"{"gen":1,"seq":2,"kind":{"type":"future_kind","payload":{"value":7}}}"#,
         )?;
         assert!(matches!(unknown.kind, UpdateKind::Unknown));
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_update_variant_ignored() -> TestResult {
+        // Update receivers stay lenient: unknown kinds and future fields
+        // decode through fallbacks without error.
+        let known: Update = sonic_rs::from_str(
+            r#"{"gen":1,"seq":1,"kind":{"type":"turn_started","turn":1,"cause":"user","futureKindField":true},"futureUpdateField":{"unused":true}}"#,
+        )?;
+        assert!(matches!(
+            known.kind,
+            UpdateKind::TurnStarted {
+                turn: _,
+                cause: TurnCause::User
+            }
+        ));
+        let unknown: Update = sonic_rs::from_str(
+            r#"{"gen":1,"seq":2,"kind":{"type":"future_kind","payload":{"value":7}}}"#,
+        )?;
+        assert!(
+            matches!(unknown.kind, UpdateKind::Unknown),
+            "a future update kind stays Unknown, got {:?}",
+            unknown.kind
+        );
+
+        // Commands stay strictly versioned: a future command variant is
+        // rejected, not silently accepted.
+        let err =
+            sonic_rs::from_str::<crate::Command>(r#"{"type":"future_kind","payload":{"value":7}}"#)
+                .expect_err("a future command variant must be rejected");
+        assert!(
+            err.to_string()
+                .contains("unknown `type` variant `future_kind`"),
+            "unexpected command error: {err}"
+        );
         Ok(())
     }
 

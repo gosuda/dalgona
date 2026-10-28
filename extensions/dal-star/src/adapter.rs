@@ -19,7 +19,7 @@ use dal_agent::ext::script::{OpOutcome, OpRequest, OpValue, ScriptCx, Submit};
 use dal_agent::ext::{PrivateTool, Tool};
 use dal_core::{
     ModelRequest, ModelRoute, RawJson,
-    ext::{NativeOp, OpId},
+    ext::{JUDGE_DENIED, NativeOp, OpId},
 };
 use starlark::any::ProvidesStaticType;
 use starlark::collections::SmallMap;
@@ -101,6 +101,7 @@ impl<'v> StarlarkValue<'v> for OpAdapter {
     ) -> starlark::Result<Value<'v>> {
         let _ = me;
         self.check_frame(eval)?;
+        self.check_judge(eval)?;
         let bound = self.bind_args(args, eval.heap())?;
         let (request, model_route) = self.request(&bound)?;
         if let Some(shared) = &self.scheduled {
@@ -129,6 +130,30 @@ impl OpAdapter {
             )));
         }
         Ok(())
+    }
+
+    /// Denies cell judge entries whose invocation did not inject the judge.
+    ///
+    /// The denial carries the judge text before any host dispatch, so a
+    /// scripted or permissive host can never widen a cell that declared no
+    /// judge operation; the host still enforces the same inject and the
+    /// grant on the real path.
+    fn check_judge(&self, eval: &Evaluator<'_, '_, '_>) -> starlark::Result<()> {
+        let judge = matches!(
+            self.op,
+            OpId::Native(NativeOp::JudgeAsk | NativeOp::JudgeBatch)
+        );
+        if !judge {
+            return Ok(());
+        }
+        let Some(frame) = frame_of(eval) else {
+            return Err(api_error(format!("{}: {JUDGE_DENIED}", self.op)));
+        };
+        if frame.inv.allows(&self.op) {
+            Ok(())
+        } else {
+            Err(api_error(format!("{}: {JUDGE_DENIED}", self.op)))
+        }
     }
 
     /// Encodes `Arguments` into one transport object.
@@ -643,7 +668,22 @@ pub(crate) fn adapter_of(value: Value<'_>) -> Option<&OpAdapter> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use dal_agent::ext::BoxFuture;
+    use dal_agent::ext::generation::catalog::Catalog;
+    use dal_agent::ext::script::{
+        CancelTarget, Cleanup, Collect, Collected, Entry, FailureCode, HostTerminal, Invocation,
+        OpFailure, OpOutcome, OpRequest, Parent, ScopeId, ScriptHost, Submit,
+    };
+    use dal_core::ext::{JUDGE_DENIED, NativeOp, OpId, OpSet, Phase};
+    use dal_core::{ReadView, ScopeSpec};
+    use starlark::environment::Module;
+    use starlark::eval::Evaluator;
+
     use super::OpAdapter;
+    use crate::context::Frame;
     use crate::value::Value;
 
     #[test]
@@ -768,5 +808,207 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    /// A [`ScriptHost`] that answers every seam with an explicit typed error.
+    ///
+    /// The prescreen under test runs before any host dispatch, so reaching
+    /// the host would mean the prescreen failed open; each seam reports that
+    /// with a terminal or failure value instead of panicking.
+    struct JudgeStubHost {
+        catalog: Catalog,
+    }
+
+    impl ScriptHost for JudgeStubHost {
+        fn begin(
+            &self,
+            _parent: Parent<'_>,
+            _entry: Entry,
+        ) -> Result<Arc<Invocation>, HostTerminal> {
+            Err(HostTerminal::LimitExceeded {
+                what: "judge prescreen tests never mint invocations",
+            })
+        }
+
+        fn call(&self, _inv: &Arc<Invocation>, _req: OpRequest) -> BoxFuture<'static, OpOutcome> {
+            Box::pin(async {
+                OpOutcome::Terminal(HostTerminal::LimitExceeded {
+                    what: "judge prescreen tests never reach the host",
+                })
+            })
+        }
+
+        fn open_scope(
+            &self,
+            _inv: &Arc<Invocation>,
+            _spec: ScopeSpec,
+        ) -> Result<ScopeId, HostTerminal> {
+            Err(HostTerminal::LimitExceeded {
+                what: "judge prescreen tests never open scopes",
+            })
+        }
+
+        fn submit(&self, _inv: &Arc<Invocation>, _scope: ScopeId, _req: OpRequest) -> Submit {
+            Submit::Terminal(HostTerminal::LimitExceeded {
+                what: "judge prescreen tests never submit tasks",
+            })
+        }
+
+        fn collect(
+            &self,
+            _inv: &Arc<Invocation>,
+            _which: Collect,
+        ) -> BoxFuture<'static, Result<Collected, HostTerminal>> {
+            Box::pin(async {
+                Err(HostTerminal::LimitExceeded {
+                    what: "judge prescreen tests never collect tasks",
+                })
+            })
+        }
+
+        fn cancel(&self, _inv: &Arc<Invocation>, _target: CancelTarget) {}
+
+        fn adopt(&self, _inv: &Arc<Invocation>, _reference: &str) -> Result<ReadView, OpFailure> {
+            Err(OpFailure {
+                code: FailureCode::Unavailable,
+                message: "judge prescreen tests never adopt observations".into(),
+                details: None,
+            })
+        }
+
+        fn catalog(&self) -> &Catalog {
+            &self.catalog
+        }
+
+        fn finish(&self, _inv: &Arc<Invocation>) -> BoxFuture<'static, Cleanup> {
+            Box::pin(async {
+                Cleanup {
+                    complete: true,
+                    ..Default::default()
+                }
+            })
+        }
+
+        fn abandon(&self, _inv: &Arc<Invocation>) {}
+    }
+
+    /// One adapter plus the frame its evaluator would carry.
+    struct JudgeRig {
+        /// Owns the runtime the adapter and frame handles borrow.
+        #[expect(dead_code, reason = "the rig owns the runtime its handles borrow")]
+        runtime: tokio::runtime::Runtime,
+        adapter: OpAdapter,
+        frame: Frame,
+    }
+
+    /// Builds an adapter for `op` under an invocation declared over `ceiling`.
+    fn judge_rig(ceiling: OpSet, op: OpId) -> JudgeRig {
+        let invocation = Invocation::for_test(ceiling, Phase::Eval, Duration::from_secs(60))
+            .expect("the test invocation mints");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the test runtime builds");
+        let host: Arc<dyn ScriptHost> = Arc::new(JudgeStubHost {
+            catalog: Catalog::for_test(&[]),
+        });
+        let frame = Frame {
+            inv: Arc::clone(&invocation),
+            host: Arc::clone(&host),
+            loaded: None,
+            script: None,
+            runtime: runtime.handle().clone(),
+        };
+        let adapter = OpAdapter {
+            inv: invocation.id(),
+            op,
+            invocation: Arc::clone(&invocation),
+            host: Arc::clone(&host),
+            scheduled: None,
+            loaded: None,
+            script: None,
+            runtime: runtime.handle().clone(),
+        };
+        JudgeRig {
+            runtime,
+            adapter,
+            frame,
+        }
+    }
+
+    /// Runs `check_judge` with the invocation frame installed, the cell path.
+    fn check_judge_with_frame(ceiling: OpSet, op: OpId) -> Result<(), String> {
+        let rig = judge_rig(ceiling, op);
+        Module::with_temp_heap(|module| {
+            let mut evaluator = Evaluator::new(&module);
+            evaluator.extra = Some(&rig.frame);
+            rig.adapter
+                .check_judge(&evaluator)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    /// Runs `check_judge` with no frame installed.
+    fn check_judge_without_frame(ceiling: OpSet, op: OpId) -> Result<(), String> {
+        let rig = judge_rig(ceiling, op);
+        Module::with_temp_heap(|module| {
+            let evaluator = Evaluator::new(&module);
+            rig.adapter
+                .check_judge(&evaluator)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    #[test]
+    fn judge_prescreen_passes_cell_that_injects_judge() {
+        for native in [NativeOp::JudgeAsk, NativeOp::JudgeBatch] {
+            let ceiling =
+                OpSet::parse(["judge.ask", "judge.batch"]).expect("the judge inject parses");
+            let outcome = check_judge_with_frame(ceiling, OpId::Native(native));
+            assert!(
+                outcome.is_ok(),
+                "{}: a cell that injects the judge must pass the prescreen, got {outcome:?}",
+                OpId::Native(native),
+            );
+        }
+    }
+
+    #[test]
+    fn judge_prescreen_refuses_cell_without_judge_inject() {
+        for native in [NativeOp::JudgeAsk, NativeOp::JudgeBatch] {
+            let expected = format!("{}: {JUDGE_DENIED}", OpId::Native(native));
+            let without_judge = OpSet::parse(["tools.read"]).expect("the narrowed inject parses");
+            let error = check_judge_with_frame(without_judge, OpId::Native(native))
+                .expect_err("a cell without the judge inject must be refused");
+            assert!(
+                error.contains(&expected),
+                "the refusal must carry the exact denial, want {expected:?} in {error:?}",
+            );
+            let with_judge =
+                OpSet::parse(["judge.ask", "judge.batch"]).expect("the judge inject parses");
+            let missing = check_judge_without_frame(with_judge, OpId::Native(native))
+                .expect_err("a judge call with no live invocation must be refused");
+            assert!(
+                missing.contains(&expected),
+                "the frameless refusal must carry the exact denial, want {expected:?} in {missing:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn judge_prescreen_ignores_non_judge_operations() {
+        // `invoke` serves every facade, so the prescreen scopes itself: only
+        // the two judge cells consult the inject. Any other operation takes
+        // the early `Ok` return, even with no frame and no judge inject.
+        let outcome = check_judge_without_frame(OpSet::EMPTY, OpId::Native(NativeOp::ToolsRead));
+        assert!(
+            outcome.is_ok(),
+            "a non-judge operation must pass without a frame, got {outcome:?}",
+        );
+        let framed = check_judge_with_frame(OpSet::EMPTY, OpId::Native(NativeOp::ToolsRead));
+        assert!(
+            framed.is_ok(),
+            "a non-judge operation must pass without the judge inject, got {framed:?}",
+        );
     }
 }

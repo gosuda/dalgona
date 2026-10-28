@@ -42,13 +42,10 @@
 //!
 //! * `family/mod.rs`: `pub(crate) mod azure;` (and `copilot`, which reuses
 //!   [`rewrite_model`] and [`repair_pairing`]).
-//! * Config: a named provider with `api = "openai_responses"` (id `azure`) and
-//!   `api = "openai_chat"` (id `azure-chat`), `auth = "api-key"` (the
-//!   `AuthStyle::ApiKey`, header `api-key`), plus the keys `api_version` and a
-//!   `deployments` table in `PROVIDER_KEYS`. Azure is a named-provider shape,
-//!   not a built-in preset row (the preset predicate in `def/presets.rs` forbids
-//!   rows whose "wire, or required headers depend on the model, the account, or
-//!   the credential").
+//! * Config: the built-in `azure-openai-responses` row (plus any named Chat
+//!   or Responses provider a host shapes with `auth = "api-key"`, the
+//!   `AuthStyle::ApiKey`, header `api-key`), with the keys `api_version` and
+//!   a `deployments` table in `PROVIDER_KEYS`.
 //! * `provider/request.rs::stream_attempt`: an Azure entry (a Chat or Responses
 //!   row with the `api-key` style or Azure settings) routes to [`build`] via
 //!   `azure_parts`, then `wire.endpoint()` / `wire.into_request(client, url)`;
@@ -62,9 +59,11 @@
 //!   `AZURE_OPENAI_API_VERSION` / `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`. A model
 //!   id that holds a dot must be a quoted TOML key
 //!   (`"gpt-5.5" = "prod-gpt55"`), or TOML reads it as a table path. When an
-//!   Azure-shaped entry's table omits `base_url`, provider preparation calls
-//!   [`base_url_from_env`], which supplies `AZURE_OPENAI_BASE_URL` or the
-//!   `AZURE_OPENAI_RESOURCE_NAME` default; an explicit table URL always wins.
+//!   Azure-shaped entry's table omits `base_url`, the wire table's Azure
+//!   endpoint part supplies the captured `AZURE_OPENAI_BASE_URL`, else the
+//!   `AZURE_OPENAI_RESOURCE_NAME` default from [`base_url_for_resource`],
+//!   at the bind, discovery, and request boundary; an explicit table URL
+//!   always wins and never reaches the template.
 //!
 //! # Remaining join: Responses remote compaction (dispatch owner)
 //!
@@ -117,11 +116,13 @@ const API_VERSION_ENV: &str = "AZURE_OPENAI_API_VERSION";
 /// The environment variable that maps model ids to deployment names.
 const DEPLOYMENT_MAP_ENV: &str = "AZURE_OPENAI_DEPLOYMENT_NAME_MAP";
 
-/// The environment variable that names the endpoint base URL.
-const BASE_URL_ENV: &str = "AZURE_OPENAI_BASE_URL";
+/// The environment variable that names the endpoint base URL. Read by the
+/// wire table's Azure endpoint part, never here directly.
+pub(crate) const BASE_URL_ENV: &str = "AZURE_OPENAI_BASE_URL";
 
-/// The environment variable that names the `Azure` `OpenAI` resource.
-const RESOURCE_NAME_ENV: &str = "AZURE_OPENAI_RESOURCE_NAME";
+/// The environment variable that names the `Azure` `OpenAI` resource. Read
+/// by the wire table's Azure endpoint part, never here directly.
+pub(crate) const RESOURCE_NAME_ENV: &str = "AZURE_OPENAI_RESOURCE_NAME";
 
 /// The model-id prefix whose Azure Chat rows reject reasoning beside tools.
 const ASTRA_PREFIX: &str = "gpt-6-astra";
@@ -256,41 +257,6 @@ impl AzureSettings {
             deployments: base.deployments.merged(self.deployments),
         }
     }
-}
-
-/// The base URL the environment names, for a provider whose `base_url` is
-/// omitted: `AZURE_OPENAI_BASE_URL`, else the default URL of
-/// `AZURE_OPENAI_RESOURCE_NAME`. `None` when neither is set. Called once per
-/// entry during provider preparation; an entry with an explicit table URL
-/// never reaches this function, so an unused invalid resource name can
-/// neither override that URL nor fail the set.
-///
-/// # Errors
-///
-/// [`ProviderError::InvalidRequest`] naming `provider` when the resource name
-/// is not one DNS label.
-pub(crate) fn base_url_from_env(
-    provider: &str,
-    env: &EnvSnapshot,
-) -> Result<Option<String>, ProviderError> {
-    let set = |name: &str| {
-        env.get(name)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    };
-    if let Some(base) = set(BASE_URL_ENV) {
-        return Ok(Some(base.to_owned()));
-    }
-    set(RESOURCE_NAME_ENV)
-        .map(|resource| {
-            base_url_for_resource(resource).map_err(|error| match error {
-                ProviderError::InvalidRequest { message } => ProviderError::InvalidRequest {
-                    message: format!("provider {provider}: {RESOURCE_NAME_ENV}: {message}"),
-                },
-                other => other,
-            })
-        })
-        .transpose()
 }
 
 /// Cuts `text` to `limit` characters, marking the cut.
@@ -466,6 +432,9 @@ pub(crate) struct AzureRequest<'a> {
     pub(crate) thinking: &'a ThinkingPlan,
     /// Whether the resolved model supports reasoning summaries (Responses).
     pub(crate) reasoning_summary: bool,
+    /// The catalog row's output ceiling, the hard cap of a requested output
+    /// cap (Responses).
+    pub(crate) max_output: Option<u32>,
     /// The configured provider id, for credential errors.
     pub(crate) provider: &'a str,
     /// The configured base URL.
@@ -567,7 +536,17 @@ pub(crate) fn build(input: &AzureRequest<'_>) -> Result<AzureWire, ProviderError
     let thinking = azure_thinking(&request, input.thinking);
     let (body, base_url, path) = match family {
         Family::Responses => {
-            let body = responses::request_body(&request, thinking.wire, input.reasoning_summary)?;
+            let body = responses::request_body(
+                &request,
+                thinking.wire,
+                input.reasoning_summary,
+                responses::BodyPolicy {
+                    output_cap: responses::OutputCap::Honor {
+                        ceiling: input.max_output,
+                    },
+                    tool_schemas: crate::family::schema::ToolSchemas::Verbatim,
+                },
+            )?;
             let version = encode(version.unwrap_or(RESPONSES_API_VERSION));
             let path = format!("{}?api-version={version}", responses::PATH);
             (body, responses_base(input.base_url)?, path)
@@ -578,7 +557,7 @@ pub(crate) fn build(input: &AzureRequest<'_>) -> Result<AzureWire, ProviderError
                 deployment,
                 version.unwrap_or(CHAT_API_VERSION),
             )?;
-            let body = chat::request_body(&request, &thinking)
+            let body = chat::request_body(&request, &thinking, chat::Dialect::STANDARD)
                 .map_err(|error| invalid(error.to_string()))?;
             (body, base_url, path)
         }
@@ -594,6 +573,7 @@ pub(crate) fn build(input: &AzureRequest<'_>) -> Result<AzureWire, ProviderError
         | Family::GoogleGenerativeAi
         | Family::GoogleVertex
         | Family::GoogleGeminiCli
+        | Family::GoogleCloudCodeAssist
         | Family::GoogleAntigravity
         | Family::Mistral
         | Family::Ollama
@@ -752,23 +732,13 @@ mod tests {
 
     const RESOURCE_BASE: &str = "https://res.openai.azure.com/openai/v1";
 
-    /// Every `Family` variant Azure does not serve.
-    const NON_AZURE_FAMILIES: [Family; 14] = [
-        Family::Codex,
-        Family::Anthropic,
-        Family::Bedrock,
-        Family::Cursor,
-        Family::Devin,
-        Family::Droid,
-        Family::GitLab,
-        Family::GoogleGenerativeAi,
-        Family::GoogleVertex,
-        Family::GoogleGeminiCli,
-        Family::GoogleAntigravity,
-        Family::Mistral,
-        Family::Ollama,
-        Family::PiMessages,
-    ];
+    /// Every `Family` variant Azure does not serve: all but Chat and
+    /// Responses, so a new family joins the refusal proof by itself.
+    fn non_azure_families() -> impl Iterator<Item = Family> {
+        Family::ALL
+            .into_iter()
+            .filter(|family| !matches!(family, Family::Chat | Family::Responses))
+    }
 
     fn request(family: Family, model: &str, context: Vec<ContextItem>) -> ModelRequest {
         ModelRequest {
@@ -824,6 +794,7 @@ mod tests {
             request,
             thinking: &plan(),
             reasoning_summary: false,
+            max_output: None,
             provider: "azure",
             base_url,
             settings,
@@ -1010,6 +981,7 @@ mod tests {
             expires_at: None,
             id_token: None,
             account_id: None,
+            project_id: None,
         });
         let error = lower(&request, RESOURCE_BASE, &settings, &oauth).unwrap_err();
         assert!(
@@ -1025,7 +997,7 @@ mod tests {
 
     #[test]
     fn every_family_but_chat_and_responses_is_refused() {
-        for family in NON_AZURE_FAMILIES {
+        for family in non_azure_families() {
             let request = request(family, "m", vec![user("hi")]);
             let error = lower(
                 &request,
@@ -1425,34 +1397,6 @@ mod tests {
         assert_eq!(
             AzureSettings::from_env(&EnvSnapshot::test(&[])),
             AzureSettings::default()
-        );
-    }
-
-    #[test]
-    fn the_environment_names_a_base_url_or_a_resource() {
-        let none = EnvSnapshot::test(&[(BASE_URL_ENV, "  ")]);
-        assert_eq!(base_url_from_env("azure", &none).unwrap(), None);
-        let resource = EnvSnapshot::test(&[(RESOURCE_NAME_ENV, "my-res")]);
-        assert_eq!(
-            base_url_from_env("azure", &resource).unwrap().as_deref(),
-            Some("https://my-res.openai.azure.com/openai/v1")
-        );
-        let both = EnvSnapshot::test(&[
-            (RESOURCE_NAME_ENV, "my-res"),
-            (BASE_URL_ENV, " https://gw.example.com/azure "),
-        ]);
-        assert_eq!(
-            base_url_from_env("azure", &both).unwrap().as_deref(),
-            Some("https://gw.example.com/azure")
-        );
-        let bad = EnvSnapshot::test(&[(RESOURCE_NAME_ENV, "evil.example/x")]);
-        let error = base_url_from_env("azure", &bad).unwrap_err();
-        assert!(
-            matches!(&error, ProviderError::InvalidRequest { message }
-                if message.contains("azure")
-                    && message.contains(RESOURCE_NAME_ENV)
-                    && message.contains("evil.example/x")),
-            "{error:?}"
         );
     }
 

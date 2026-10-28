@@ -550,7 +550,9 @@ fn default_for(question: &Question) -> Answer {
     }
 }
 
-/// The request deadline for a fold-minted question.
+/// The request deadline for a question kind. Grant prompts wait this long
+/// whether the grant store opens them or the fold mints them; the generic
+/// `[ask]` timeout never applies to them.
 pub(crate) fn default_timeout(question: &Question) -> Duration {
     match question {
         Question::Approval { .. } => Duration::from_secs(300),

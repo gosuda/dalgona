@@ -23,7 +23,7 @@ Dalgona reuses dal through the public extension interface and turns on batteries
 
 Binaries are `dalgon` (aliases `dal`, `dl`) and `dalgona` (alias `dg`). A plugin that loads in dalgon loads in dalgona.
 
-Everything extends dal through one door. The door is one public interface. Plugins, other programs, and dalgona's batteries use it, and so does dal's own terminal.
+Everything extends dal through one public interface. Plugins, other programs, and dalgona's batteries use it, and so does dal's own terminal.
 
 In process, the Host and Agent seam carries one snapshot, one change stream, one command path, one request and answer pair, and one blob read. In plain words, a client reads the session state, follows its updates, sends a command, answers a request from the agent, and fetches stored data. A `Host` owns the live sessions. An `Agent` is a handle to one session.
 

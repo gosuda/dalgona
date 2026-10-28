@@ -20,6 +20,7 @@ use super::metadata;
 use super::profile;
 use super::sso;
 use super::{AwsCredentialResolver, AwsResolveOptions, BedrockAuth};
+use crate::provider::{Origin, Origins};
 use crate::{
     AuthStore, AuthStyle, EnvSnapshot, ProviderEntry, ProviderError, ProviderSettings, Transport,
 };
@@ -106,6 +107,14 @@ fn entry(id: &str) -> ProviderEntry {
         auth: AuthStyle::Bearer,
         max_concurrent_requests: 1,
         settings: ProviderSettings::default(),
+        // A named entry always names `api` and `base_url`, and this one names
+        // `auth` too: the decode of its `[providers.<id>]` table would record
+        // every origin explicit, never a row default.
+        origins: Origins {
+            api: Origin::Explicit,
+            base: Origin::Explicit,
+            auth: Origin::Explicit,
+        },
     }
 }
 

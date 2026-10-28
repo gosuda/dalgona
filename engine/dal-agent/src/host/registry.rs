@@ -724,6 +724,9 @@ impl Host {
         // descendant swept by its owner's close. Ids are unique, so a swept
         // member cannot double-report.
         session_teardowns.stop().await;
+        // The snapshot coordinator's census workers are host-tracked; they
+        // cannot strand once every session (and waiter owner) is closed.
+        self.state.shared.snapshots.shutdown().await;
         let live: HashSet<SessionId> = self.table_ids().into_iter().collect();
         let sessions_closed = ids.iter().filter(|id| !live.contains(id)).count();
         // Provider shutdown joins its internally bounded refresh tasks. Do not
@@ -1223,6 +1226,22 @@ impl Host {
             mode,
         ));
         shared.restore_fold(&fold);
+        // The user's saved `/scoped-models` choice seeds every session a
+        // person opens, from the live config a save updates, so a session
+        // opened after a save and the next process both start scoped. A child
+        // session is model-driven, with no picker to undo a scope, so it
+        // inherits none.
+        if !resolved.child {
+            let saved_scope = self
+                .state
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .scoped_models()
+                .to_vec();
+            shared.set_scoped((!saved_scope.is_empty()).then_some(saved_scope));
+        }
         if let Some(policy) = &policy {
             if let Some(tools) = &policy.tools {
                 shared.restrict_tools(tools);
@@ -1237,12 +1256,8 @@ impl Host {
         let jobs_table = if resolved.ephemeral {
             crate::jobs::JobTable::new()
         } else {
-            let jobs_dir = crate::session::commands::host::session_jobs_dir(
-                &self.state,
-                &resolved.workspace,
-                resolved.id,
-            );
-            crate::jobs::JobTable::open(jobs_dir, fold.delivered_jobs())
+            let store = self.store_for(&resolved.workspace);
+            crate::jobs::JobTable::open(&store, resolved.id, fold.delivered_jobs())
                 .await
                 .map_err(|error| HostError::Io {
                     path: self.state.shared.data_root.clone(),
@@ -1339,6 +1354,7 @@ impl Host {
         }));
         let turn_control = Arc::clone(&ports.control);
         let services = Arc::new(SessionServices::new(SessionServicesDeps {
+            judge: None,
             grants: extensions.grants,
             broker: Arc::clone(&broker),
             backend: backend.clone(),
@@ -1409,14 +1425,6 @@ impl Host {
             GrantStore::with_runtime_scoped(
                 self.state.shared.data_root.clone(),
                 workspace.to_path_buf(),
-                ask_timeout(
-                    &self
-                        .state
-                        .shared
-                        .config
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner),
-                ),
                 Arc::clone(broker),
             )
             .map_err(|error| HostError::Config {
@@ -2628,5 +2636,49 @@ mod tests {
             entered_count - completed,
             "the end hook cut off at the shared deadline was cancelled"
         );
+    }
+
+    /// A relay whose provider refuses to open returns an error and leaves
+    /// no task parked on the host teardown owner.
+    #[tokio::test]
+    async fn a_failed_relay_open_leaves_no_host_task_behind() {
+        let extension = ExtensionBuilder::new("relay_leak", "0.1.0", ServiceSet::EMPTY)
+            .expect("extension builder")
+            .build()
+            .expect("extension");
+        let rig = shutdown_rig(extension, 0).await;
+        let route = rig.host.default_route().await.expect("default route");
+        let request = dal_core::ModelRequest {
+            purpose: dal_core::Purpose::Turn,
+            model: route.clone(),
+            system: "".into(),
+            tools: Arc::from(Vec::new()),
+            context: Arc::from(vec![dal_core::ContextItem::User {
+                parts: vec![dal_core::Part::Text { text: "hi".into() }],
+            }]),
+            params: dal_core::RequestParams::default(),
+            cache_key: None,
+        };
+        let mut first = rig
+            .host
+            .relay(ClientId::new("router"), route.clone(), request.clone())
+            .await
+            .expect("the one scripted step opens");
+        while first.next().await.is_some() {}
+        drop(first);
+        let baseline = rig.host.state.session_teardowns.tracked();
+        for _ in 0..3 {
+            let refused = rig
+                .host
+                .relay(ClientId::new("router"), route.clone(), request.clone())
+                .await;
+            assert!(refused.is_err(), "the exhausted script refuses the open");
+        }
+        assert_eq!(
+            rig.host.state.session_teardowns.tracked(),
+            baseline,
+            "a refused relay open must not park a drain watcher on the host"
+        );
+        let _ = rig.host.shutdown(Duration::from_secs(1)).await;
     }
 }

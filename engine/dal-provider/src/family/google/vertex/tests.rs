@@ -66,6 +66,7 @@ fn bearer_build_targets_the_project_path() {
             location: "us-central1",
         },
         image_input: true,
+        endpoint: VertexEndpoint::Regional,
     })
     .unwrap();
     assert_eq!(
@@ -100,6 +101,7 @@ fn express_build_targets_the_publishers_path_with_global_fallback() {
             explicit_location: false,
         },
         image_input: true,
+        endpoint: VertexEndpoint::Regional,
     })
     .unwrap();
     assert_eq!(
@@ -133,6 +135,7 @@ fn explicit_and_global_express_locations_do_not_fall_back() {
                 explicit_location: explicit,
             },
             image_input: true,
+            endpoint: VertexEndpoint::Regional,
         })
         .unwrap();
         assert!(wire.fallback.is_none(), "{location:?}");
@@ -165,6 +168,7 @@ fn hostile_ids_are_refused_before_the_wire() {
             thinking: &thinking,
             auth,
             image_input: true,
+            endpoint: VertexEndpoint::Regional,
         })
         .unwrap_err();
         assert!(
@@ -187,6 +191,7 @@ fn hostile_ids_are_refused_before_the_wire() {
             location: "us-central1",
         },
         image_input: true,
+        endpoint: VertexEndpoint::Regional,
     })
     .unwrap_err();
     assert!(
@@ -213,6 +218,7 @@ fn location_and_project_delimiters_never_reach_the_host_or_path() {
             thinking: &thinking,
             auth,
             image_input: true,
+            endpoint: VertexEndpoint::Regional,
         })
     };
     // Each value would turn the interpolated text into a sibling host, userinfo,
@@ -277,4 +283,53 @@ fn location_and_project_delimiters_never_reach_the_host_or_path() {
             wire.path
         );
     }
+}
+
+/// The typed endpoint-authority unit case: a configured provider base is
+/// the endpoint authority (no regional override is allocated, and the path
+/// still carries the captured project and location), while a defaulted row
+/// keeps the regional location host.
+#[test]
+fn configured_provider_base_is_the_endpoint_authority() {
+    let request = request();
+    let thinking = plan();
+    let configured = build(&VertexRequest {
+        request: &request,
+        thinking: &thinking,
+        auth: VertexAuth::Bearer {
+            access_token: "token",
+            project: "proj-1",
+            location: "us-central1",
+        },
+        image_input: false,
+        endpoint: VertexEndpoint::ConfiguredProviderBase,
+    })
+    .unwrap();
+    assert_eq!(configured.base_override, None);
+    assert_eq!(
+        configured.path,
+        "v1/projects/proj-1/locations/us-central1/publishers/google/models/gemini-3-pro:streamGenerateContent?alt=sse"
+    );
+    assert_eq!(
+        configured.headers,
+        vec![("authorization", String::from("Bearer token"))]
+    );
+    assert!(configured.fallback.is_none());
+    let defaulted = build(&VertexRequest {
+        request: &request,
+        thinking: &thinking,
+        auth: VertexAuth::Bearer {
+            access_token: "token",
+            project: "proj-1",
+            location: "us-central1",
+        },
+        image_input: false,
+        endpoint: VertexEndpoint::Regional,
+    })
+    .unwrap();
+    assert_eq!(
+        defaulted.base_override.as_deref(),
+        Some("https://us-central1-aiplatform.googleapis.com"),
+    );
+    assert!(defaulted.fallback.is_none());
 }

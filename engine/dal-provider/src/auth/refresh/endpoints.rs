@@ -15,7 +15,9 @@ pub enum RefreshReason {
     Rejected,
 }
 
-/// The token endpoint URL of each OAuth provider in the table, and the Factory
+/// The token endpoint URL of each refreshing OAuth provider in the table (a
+/// row whose hook never refreshes, `OpenRouter` or Devin, has none), and the
+/// Factory
 /// API base the refresh of the `WorkOS` sign-in checks the new session
 /// against. A test endpoint set moves both together, as the sign-in's
 /// [`LoginEndpoints`](crate::LoginEndpoints) do.
@@ -26,8 +28,8 @@ pub struct TokenEndpoints {
 }
 
 impl TokenEndpoints {
-    /// The production endpoints: each OAuth row's `token_url`, and the row's
-    /// own API base for the session check.
+    /// The production endpoints: each refreshing OAuth row's `token_url`, and
+    /// the row's own API base for the session check.
     ///
     /// # Panics
     ///
@@ -41,7 +43,7 @@ impl TokenEndpoints {
         let urls = PROVIDERS
             .iter()
             .filter_map(|def| {
-                let oauth = def.oauth?;
+                let oauth = def.oauth.filter(|oauth| oauth.hook.refreshes())?;
                 let url = Url::parse(oauth.token_url).expect("the row's token URL parses");
                 Some((def.id, url))
             })
@@ -59,8 +61,13 @@ impl TokenEndpoints {
 
     /// Endpoints under other bases, for tests and replay servers: each
     /// sign-in's endpoint moves to `<base>/<path of its production token
-    /// URL>`, taking one base per sign-in, in Claude, Codex, `WorkOS`, GitLab
-    /// order. The `WorkOS` sign-in's session check goes to its base too.
+    /// URL`, taking one base per refreshing sign-in, in Claude, Codex,
+    /// `WorkOS`, GitLab, Radius order. The `WorkOS` sign-in's session check
+    /// goes to its base too. Any other refreshing sign-in (Cursor, the two
+    /// Cloud Code Assist rows, xAI, Meta, Kimi Code) gets no endpoint here,
+    /// so it never reaches a production host from a test set;
+    /// [`TokenEndpoints::with_base`] places it. Meta's endpoint is the key
+    /// mint.
     ///
     /// # Errors
     ///
@@ -72,6 +79,7 @@ impl TokenEndpoints {
         codex_base: &str,
         workos_base: &str,
         gitlab_base: &str,
+        radius_base: &str,
     ) -> Result<Self, ProviderError> {
         let mut urls = Vec::new();
         let mut sessions: Vec<(&'static str, Box<str>)> = Vec::new();
@@ -82,21 +90,42 @@ impl TokenEndpoints {
                 Hook::CodexAccount => codex_base,
                 Hook::WorkOsDevice => workos_base,
                 Hook::GitLabDuo => gitlab_base,
+                Hook::RadiusGateway => radius_base,
+                Hook::OpenRouterKey
+                | Hook::DevinCliToken
+                | Hook::CursorPoll
+                | Hook::GoogleCloudCodeAssist
+                | Hook::GoogleAntigravity
+                | Hook::XaiDevice
+                | Hook::MetaMuse
+                | Hook::KimiCodeDevice => continue,
             };
-            let path = Url::parse(oauth.token_url)
-                .map_err(|error| ProviderError::Transport {
-                    family: def.family,
-                    reason: error.to_string(),
-                })?
-                .path()
-                .trim_start_matches('/')
-                .to_owned();
-            urls.push((def.id, endpoint(def.family, base, &path)?));
+            urls.push((def.id, relocated(def, oauth.token_url, base)?));
             if oauth.hook == Hook::WorkOsDevice {
                 sessions.push((def.id, Box::from(base.trim_end_matches('/'))));
             }
         }
         Ok(Self { urls, sessions })
+    }
+
+    /// Moves the token endpoint of `provider`, a refreshing OAuth row, to
+    /// `<base>/<path of its production token URL>`, replacing any endpoint
+    /// the set already holds for it. The other rows keep theirs.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::AuthWrite`] when `provider` has no refreshing OAuth
+    /// sign-in, and every [`endpoint`] failure for `base`.
+    pub fn with_base(mut self, provider: &ProviderDef, base: &str) -> Result<Self, ProviderError> {
+        let Some(oauth) = provider.oauth.filter(|oauth| oauth.hook.refreshes()) else {
+            return Err(ProviderError::AuthWrite {
+                reason: format!("{} has no refreshing OAuth sign-in", provider.id),
+            });
+        };
+        let url = relocated(provider, oauth.token_url, base)?;
+        self.urls.retain(|(id, _)| *id != provider.id);
+        self.urls.push((provider.id, url));
+        Ok(self)
     }
 
     /// The token endpoint of `provider`; `None` when it has no OAuth sign-in.
@@ -117,4 +146,17 @@ impl TokenEndpoints {
             .find(|(id, _)| *id == provider.id)
             .map(|(_, base)| &**base)
     }
+}
+
+/// `production`'s path under `base`, for `def`'s family.
+fn relocated(def: &ProviderDef, production: &str, base: &str) -> Result<Url, ProviderError> {
+    let path = Url::parse(production)
+        .map_err(|error| ProviderError::Transport {
+            family: def.family,
+            reason: error.to_string(),
+        })?
+        .path()
+        .trim_start_matches('/')
+        .to_owned();
+    endpoint(def.family, base, &path)
 }

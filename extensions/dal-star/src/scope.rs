@@ -22,7 +22,7 @@ use dal_agent::ext::script::{
     OpOutcome, ScopeId, ScriptCx, ScriptHost, TaskId,
 };
 use dal_core::{
-    ModelRoute, ScopeSpec,
+    HandleStatus, MailMode, ModelRoute, ScopeSpec,
     ext::{NativeOp, OpId},
 };
 use starlark::any::ProvidesStaticType;
@@ -122,6 +122,7 @@ impl<'v> StarlarkValue<'v> for ScopeValue {
         let group = match attribute {
             "tools" => FacadeGroup::Tools,
             "models" => FacadeGroup::Models,
+            "agent" | "agents" => FacadeGroup::Agents,
             "net" => FacadeGroup::Net,
             _ => return None,
         };
@@ -191,11 +192,16 @@ impl ScopeValue {
         &self,
         eval: &Evaluator<'v, '_, '_>,
         request: Value<'v>,
+        forward: bool,
     ) -> starlark::Result<Value<'v>> {
         check_frame(eval, self.inv, "scope.infer")?;
         let adapter = OpAdapter {
             inv: self.inv,
-            op: OpId::Native(NativeOp::ModelsInfer),
+            op: OpId::Native(if forward {
+                NativeOp::ModelsForward
+            } else {
+                NativeOp::ModelsInfer
+            }),
             invocation: Arc::clone(&self.invocation),
             host: Arc::clone(&self.host),
             scheduled: Some(Arc::clone(&self.shared)),
@@ -215,15 +221,20 @@ impl ScopeValue {
         self.shared.seal();
         let host = Arc::clone(&self.host);
         let invocation = Arc::clone(&self.invocation);
+        let cancel = invocation.cancel().clone();
         let collect = Collect::Seal(self.shared.id);
         let task = self
             .runtime
             .spawn(async move { host.collect(&invocation, collect).await });
-        let collected = self
-            .runtime
-            .block_on(task)
-            .map_err(|error| collect_join_failure(&error))?
-            .map_err(terminal_error)?;
+        let collected = self.runtime.block_on(async {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => Err(terminal_error(HostTerminal::Cancelled)),
+                joined = task => joined
+                    .map_err(|error| collect_join_failure(&error))
+                    .and_then(|result| result.map_err(terminal_error)),
+            }
+        })?;
         Ok(collected.into_vec())
     }
 }
@@ -244,15 +255,20 @@ fn collect_join_failure(error: &tokio::task::JoinError) -> starlark::Error {
 #[starlark_module]
 fn scope_methods(builder: &mut MethodsBuilder) {
     /// Schedules one typed model inference through this scope.
+    ///
+    /// `forward = True` enters the real model-forward path. It is not a
+    /// marker: the scheduled operation is `models.forward`, so private-tool
+    /// capture and the handler's at-most-once guard remain authoritative.
     fn infer<'v>(
         #[starlark(this)] this: Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
         request: Value<'v>,
+        #[starlark(require = named)] forward: Option<bool>,
     ) -> starlark::Result<Value<'v>> {
         let Some(scope) = scope_of(this) else {
             return Err(api_error("scope.infer: receiver is not a scope"));
         };
-        scope.infer(eval, request)
+        scope.infer(eval, request, forward.unwrap_or(false))
     }
 
     /// Seals the scope, awaits every task, and returns the successful values
@@ -395,21 +411,38 @@ impl TaskValue {
         check_frame(eval, self.inv, what)?;
         let host = Arc::clone(&self.host);
         let invocation = Arc::clone(&self.invocation);
+        let cancel = invocation.cancel().clone();
         let collect = Collect::Task(self.task);
         let task = self
             .runtime
             .spawn(async move { host.collect(&invocation, collect).await });
-        let collected = self
-            .runtime
-            .block_on(task)
-            .map_err(|error| collect_join_failure(&error))?
-            .map_err(terminal_error)?;
+        let collected = self.runtime.block_on(async {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => Err(terminal_error(HostTerminal::Cancelled)),
+                joined = task => joined
+                    .map_err(|error| collect_join_failure(&error))
+                    .and_then(|result| result.map_err(terminal_error)),
+            }
+        })?;
         collected
             .into_vec()
             .into_iter()
             .next()
             .map(|(_, outcome)| outcome)
             .ok_or_else(|| api_error(format!("{what}: the host returned no outcome")))
+    }
+
+    /// Returns a non-consuming task probe owned by this invocation.
+    fn probe(
+        &self,
+        eval: &Evaluator<'_, '_, '_>,
+        what: &str,
+    ) -> starlark::Result<dal_agent::ext::script::TaskProbe> {
+        check_frame(eval, self.inv, what)?;
+        self.host
+            .task_probe(&self.invocation, self.task)
+            .ok_or_else(|| api_error(format!("{what}: the host no longer tracks this task")))
     }
 }
 
@@ -432,6 +465,105 @@ fn task_methods(builder: &mut MethodsBuilder) {
             .remove(&task.task);
         let outcome = crate::adapter::wrap_model_outcome(outcome, model_route)?;
         project_outcome(outcome, &task.invocation, eval.heap())
+    }
+
+    /// Returns the host-minted task identity.
+    fn id<'v>(
+        #[starlark(this)] this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        let Some(task) = task_of(this) else {
+            return Err(api_error("task.id: receiver is not a task"));
+        };
+        task.probe(eval, "task.id")?;
+        Ok(eval.heap().alloc(task.task.get().get()))
+    }
+
+    /// Returns the actual scheduler status.
+    fn status<'v>(
+        #[starlark(this)] this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        let Some(task) = task_of(this) else {
+            return Err(api_error("task.status: receiver is not a task"));
+        };
+        let status = task.probe(eval, "task.status")?.status;
+        let name = match status {
+            HandleStatus::Pending => "pending",
+            HandleStatus::Running => "running",
+            HandleStatus::Done => "done",
+            HandleStatus::Failed => "failed",
+            HandleStatus::Cancelled => "cancelled",
+            _ => return Err(api_error("task.status: unsupported handle status")),
+        };
+        Ok(eval.heap().alloc(name))
+    }
+
+    /// Returns the settled result without raising an expected task failure.
+    fn result<'v>(
+        #[starlark(this)] this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        let Some(task) = task_of(this) else {
+            return Err(api_error("task.result: receiver is not a task"));
+        };
+        let outcome = task.collect_one(eval, "task.result")?;
+        let model_route = task
+            .shared
+            .model_routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&task.task);
+        let outcome = crate::adapter::wrap_model_outcome(outcome, model_route)?;
+        settled_outcome(outcome, &task.invocation, eval.heap())
+    }
+
+    /// Returns the recorded typed failure, or None while the task is live.
+    fn error<'v>(
+        #[starlark(this)] this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        let Some(task) = task_of(this) else {
+            return Err(api_error("task.error: receiver is not a task"));
+        };
+        let Some(error) = task.probe(eval, "task.error")?.error else {
+            return Ok(Value::new_none());
+        };
+        crate::record::Record::alloc(
+            eval.heap(),
+            vec![
+                ("code".into(), eval.heap().alloc(error.code.as_str())),
+                ("message".into(), eval.heap().alloc(error.message.as_ref())),
+            ],
+        )
+    }
+
+    /// Returns the actual scope usage charged to this task.
+    fn usage<'v>(
+        #[starlark(this)] this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        let Some(task) = task_of(this) else {
+            return Err(api_error("task.usage: receiver is not a task"));
+        };
+        let usage = task.probe(eval, "task.usage")?.usage;
+        crate::record::Record::alloc(
+            eval.heap(),
+            vec![
+                ("requests".into(), eval.heap().alloc(usage.requests)),
+                ("input_tokens".into(), eval.heap().alloc(usage.input_tokens)),
+                (
+                    "output_tokens".into(),
+                    eval.heap().alloc(usage.output_tokens),
+                ),
+                (
+                    "cost_usd".into(),
+                    usage
+                        .cost_usd
+                        .map_or(Value::new_none(), |cost| eval.heap().alloc(cost)),
+                ),
+            ],
+        )
     }
 
     /// Delivers the task's `Result` for deliberate recovery.
@@ -464,7 +596,45 @@ fn task_methods(builder: &mut MethodsBuilder) {
         check_frame(eval, task.inv, "task.cancel")?;
         task.host
             .cancel(&task.invocation, CancelTarget::Task(task.task));
+        let host = Arc::clone(&task.host);
+        let invocation = Arc::clone(&task.invocation);
+        task.runtime
+            .block_on(host.close_member(&invocation, task.task));
         Ok(Value::new_none())
+    }
+
+    /// Sends one real mailbox message to the member owned by this task.
+    fn send<'v>(
+        #[starlark(this)] this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+        text: &str,
+        mode: &str,
+    ) -> starlark::Result<Value<'v>> {
+        let Some(task) = task_of(this) else {
+            return Err(api_error("task.send: receiver is not a task"));
+        };
+        check_frame(eval, task.inv, "task.send")?;
+        let mode = match mode {
+            "aside" => MailMode::Aside,
+            "steer" => MailMode::Steer,
+            "next_turn" => MailMode::NextTurn,
+            other => return Err(api_error(format!("task.send: unknown mode `{other}`"))),
+        };
+        let host = Arc::clone(&task.host);
+        let invocation = Arc::clone(&task.invocation);
+        let receipt = task
+            .runtime
+            .block_on(host.send_member(&invocation, task.task, text, mode))
+            .map_err(terminal_error)?;
+        let name = match receipt {
+            dal_core::ext::Receipt::Delivered => "delivered",
+            dal_core::ext::Receipt::Woken => "woken",
+            dal_core::ext::Receipt::Buffered => "buffered",
+            dal_core::ext::Receipt::Full => "full",
+            dal_core::ext::Receipt::Gone => "gone",
+            _ => return Err(api_error("task.send: unsupported receipt")),
+        };
+        Ok(eval.heap().alloc(name))
     }
 }
 

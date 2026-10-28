@@ -40,6 +40,14 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::auth::credential::EnvSnapshot;
 
+mod bai_wire;
+mod cloud_code_assist;
+mod compatible_chat_quirks;
+mod compatible_static;
+mod definition_authority;
+mod response_output_caps;
+mod wire_offline_anthropic;
+
 type TestResult = Result<(), Box<dyn Error>>;
 
 struct TestDir(PathBuf);
@@ -172,6 +180,7 @@ fn entry(
         key_env: key_env.map(Into::into),
         auth: AuthStyle::Bearer,
         max_concurrent_requests,
+        origins: Origins::default(),
         settings: ProviderSettings::default(),
     }
 }
@@ -340,6 +349,23 @@ fn request_body(captured: &[u8]) -> &[u8] {
     &captured[head_end + 4..]
 }
 
+/// The expired Codex sign-in the refresh flow starts from: old tokens, an
+/// id token, and an account binding, stored under the row's own id.
+fn store_expired_codex_sign_in(dir: &TestDir) -> Result<(), Box<dyn Error>> {
+    let credential = OAuthCredential {
+        access_token: crate::auth::credential::SecretString::from("old-access"),
+        refresh_token: crate::auth::credential::SecretString::from("old-refresh"),
+        expires_at: None,
+        id_token: Some(String::from("old-id-token")),
+        account_id: Some(String::from("acct-1")),
+        project_id: None,
+    };
+    let mut auth = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
+    auth.set("openai-codex", Credential::OAuth(credential))?;
+    auth.store()?;
+    Ok(())
+}
+
 fn stored_oauth(dir: &TestDir, id: &str, access: &str) -> Result<(), Box<dyn Error>> {
     let mut auth = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
     auth.set(
@@ -350,6 +376,7 @@ fn stored_oauth(dir: &TestDir, id: &str, access: &str) -> Result<(), Box<dyn Err
             expires_at: None,
             id_token: None,
             account_id: None,
+            project_id: None,
         }),
     )?;
     auth.store()?;
@@ -510,6 +537,7 @@ fn tool_reply(family: Family, wire: &str) -> String {
         | Family::GoogleGenerativeAi
         | Family::GoogleVertex
         | Family::GoogleGeminiCli
+        | Family::GoogleCloudCodeAssist
         | Family::GoogleAntigravity
         | Family::Mistral
         | Family::Ollama
@@ -637,6 +665,7 @@ async fn mapped_tool_names_round_trip_through_all_http_families() -> TestResult 
         expires_at: None,
         id_token: Some(String::from("codex-id-token")),
         account_id: Some(String::from("acct-1")),
+        project_id: None,
     };
     let mut auth = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
     auth.set("openai-codex", Credential::OAuth(credential))?;
@@ -646,6 +675,7 @@ async fn mapped_tool_names_round_trip_through_all_http_families() -> TestResult 
         "http://127.0.0.1:1/codex",
         "http://127.0.0.1:1/workos",
         "http://127.0.0.1:1/gitlab",
+        "http://127.0.0.1:1/radius",
     )?;
     let set = ProviderSet::build(
         &config(mapped_entries(&servers), 0),
@@ -1065,16 +1095,7 @@ async fn codex_401_refreshes_then_retries_with_the_stored_new_credential() -> Te
     )
     .await?;
 
-    let credential = OAuthCredential {
-        access_token: crate::auth::credential::SecretString::from("old-access"),
-        refresh_token: crate::auth::credential::SecretString::from("old-refresh"),
-        expires_at: None,
-        id_token: Some(String::from("old-id-token")),
-        account_id: Some(String::from("acct-1")),
-    };
-    let mut auth = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
-    auth.set("openai-codex", Credential::OAuth(credential))?;
-    auth.store()?;
+    store_expired_codex_sign_in(&dir)?;
 
     let codex_entry = entry(
         "openai-codex",
@@ -1090,6 +1111,7 @@ async fn codex_401_refreshes_then_retries_with_the_stored_new_credential() -> Te
         &token_base,
         "http://127.0.0.1:1/workos",
         "http://127.0.0.1:1/gitlab",
+        "http://127.0.0.1:1/radius",
     )?;
     let set = ProviderSet::build(
         &config,
@@ -1318,6 +1340,7 @@ async fn credential_failures_redact_every_oauth_secret_including_account_id() {
         expires_at: None,
         id_token: Some(String::from("tok-id")),
         account_id: Some(String::from("acct-secret")),
+        project_id: None,
     });
     for body in [
         r#"{"error":{"code":"echo-acct-secret","message":"tok-access acct-secret"}}"#,
@@ -1359,6 +1382,7 @@ async fn credential_failures_redact_an_account_id_taken_from_the_id_token() {
             base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, claims)
         )),
         account_id: None,
+        project_id: None,
     });
     let response = reqwest::Response::from(
         hyper::http::Response::builder()
@@ -1652,7 +1676,12 @@ async fn a_signed_in_preset_key_outranks_the_environment_and_takes_no_oauth() ->
     let site = LoginSite::new(
         dir.path().join("auth.json"),
         dir.path().join("cache"),
-        "dal/test",
+        &ProviderIdentity {
+            version: "0.0.0-test".into(),
+            os: "linux".into(),
+            os_version: String::new().into(),
+            arch: "x86_64".into(),
+        },
         &EnvSnapshot::test(&[]),
     )?;
     let signed_in = login("deepseek", Method::ApiKey, login_io, &site).await?;
@@ -1680,6 +1709,7 @@ async fn a_signed_in_preset_key_outranks_the_environment_and_takes_no_oauth() ->
         expires_at: None,
         id_token: None,
         account_id: None,
+        project_id: None,
     });
     assert!(matches!(
         store.set("deepseek", oauth),
@@ -1820,6 +1850,7 @@ fn stored_login(access: &str) -> Credential {
         expires_at: None,
         id_token: None,
         account_id: Some(String::from("acct-1")),
+        project_id: None,
     })
 }
 
@@ -1834,6 +1865,7 @@ fn stored_workos_login(access: &str) -> Credential {
         expires_at: None,
         id_token: None,
         account_id: None,
+        project_id: None,
     })
 }
 
@@ -1956,7 +1988,14 @@ fn anthropic_wire_refuses_styles_it_has_no_header_for_whatever_secret_is_held() 
     let api_key = api_key_credential("anthropic-key");
     let oauth = stored_login("stored-access");
     let build = |style: AuthStyle, held: &Credential| {
-        super::request::build_anthropic_wire(&request, &catalog, style, &thinking, held, false)
+        super::request::build_anthropic_wire(
+            &request,
+            &catalog,
+            style,
+            &thinking,
+            held,
+            super::request::WireOptions::turn(),
+        )
     };
 
     // The wire has no `api-key` header form, and `none` sends no credential.
@@ -2003,10 +2042,12 @@ fn responses_wire_refuses_secrets_it_cannot_carry_and_keeps_keyless_https() {
             request: &request,
             thinking: WireThinking::OpenAi { effort: None },
             reasoning_summary: false,
+            max_output: None,
             auth: style,
             credential: held,
             session_id: SessionId::new_v7(),
             user_agent: "dalgon/test",
+            tool_schemas: crate::family::schema::ToolSchemas::Verbatim,
         })
     };
 
@@ -2053,29 +2094,11 @@ fn responses_wire_refuses_secrets_it_cannot_carry_and_keeps_keyless_https() {
 #[test]
 fn family_labels_are_non_empty_and_stable_for_every_variant() {
     // Every Family variant resolves through family_label; the only shared
-    // label is the documented Chat|Responses "openai" pair. The exhaustive
-    // match below breaks when a new variant joins, forcing this list and
-    // error.rs to move together.
-    let families = [
-        Family::Chat,
-        Family::Responses,
-        Family::Codex,
-        Family::Anthropic,
-        Family::Bedrock,
-        Family::Cursor,
-        Family::Devin,
-        Family::Droid,
-        Family::GitLab,
-        Family::GoogleGenerativeAi,
-        Family::GoogleVertex,
-        Family::GoogleGeminiCli,
-        Family::GoogleAntigravity,
-        Family::Mistral,
-        Family::Ollama,
-        Family::PiMessages,
-    ];
+    // label is the documented Chat|Responses "openai" pair. The loop reads
+    // the source's own variant list and the exhaustive match below breaks
+    // when a new variant joins, forcing it and error.rs to move together.
     let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for family in families {
+    for family in Family::ALL {
         let label = crate::error::family_label(family);
         assert!(!label.is_empty(), "{family:?} has an empty label");
         assert!(
@@ -2096,6 +2119,7 @@ fn family_labels_are_non_empty_and_stable_for_every_variant() {
             Family::GoogleGenerativeAi => "google-generative-ai",
             Family::GoogleVertex => "google-vertex",
             Family::GoogleGeminiCli => "google-gemini-cli",
+            Family::GoogleCloudCodeAssist => "google-cloud-code-assist",
             Family::GoogleAntigravity => "google-antigravity",
             Family::Mistral => "mistral",
             Family::Ollama => "ollama",
@@ -2111,7 +2135,6 @@ fn family_labels_are_non_empty_and_stable_for_every_variant() {
             assert_eq!(*count, 1, "label {label:?} must be unique");
         }
     }
-    assert_eq!(seen.len(), 15, "sixteen variants share fifteen labels");
 }
 fn devin_discovery_reply(uid: &str, router: bool) -> Vec<u8> {
     GetCliModelConfigsResponse {
@@ -3099,6 +3122,7 @@ fn antigravity_failover_context() -> super::request::StreamContext {
         family: Family::GoogleAntigravity,
         provider: "google-antigravity".into(),
         base_url: "".into(),
+        wire: None,
         auth: AuthStyle::None,
         model: model.into(),
         entry: resolved("google-antigravity", Family::GoogleAntigravity, model).entry,
@@ -4198,6 +4222,7 @@ async fn azure_chat_uses_deployment_and_api_version() -> TestResult {
         Transport::Https,
     );
     azure_entry.auth = AuthStyle::ApiKey;
+    azure_entry.origins.base = Origin::Explicit;
     azure_entry.settings.api_version = Some("2025-01-01-preview".into());
     azure_entry
         .settings
@@ -4264,29 +4289,6 @@ fn model_list_reply() -> Reply {
     }
 }
 
-/// Asserts that provider `id` carries `expected` where each request path reads
-/// its base URL: the slot that serves catalog and inference, and the
-/// configuration the set keeps. One prepared endpoint, no second copy.
-fn assert_prepared_base(set: &ProviderSet, id: &str, expected: &str) {
-    let slot = &set
-        .inner
-        .providers
-        .get(id)
-        .unwrap_or_else(|| panic!("{id} is configured"))
-        .entry
-        .base_url;
-    let kept = &set
-        .inner
-        .config
-        .providers
-        .iter()
-        .find(|entry| &*entry.id == id)
-        .unwrap_or_else(|| panic!("{id} is configured"))
-        .base_url;
-    assert_eq!(&**slot, expected, "{id}: the serving slot's base URL");
-    assert_eq!(&**kept, expected, "{id}: the kept configuration's base URL");
-}
-
 /// Opens one text turn on the `openai` Responses route and checks its text.
 async fn azure_hello(set: &ProviderSet) -> TestResult {
     let provider = set.provider(resolved("openai", Family::Responses, "gpt-azure"))?;
@@ -4325,7 +4327,10 @@ async fn azure_environment_base_url_serves_catalog_and_turn_when_base_url_is_omi
     )
     .await?;
     // The base URL variable outranks the resource variable, so a resource
-    // name nothing needs is never validated; padding is trimmed.
+    // name nothing needs is never validated; padding is trimmed. The
+    // endpoint renders lazily at discovery and request time: the set keeps
+    // the row's own base, and the captured requests below prove where each
+    // call actually went.
     let padded = format!("  {base}  ");
     let set = preset_set(
         &dir,
@@ -4336,9 +4341,6 @@ async fn azure_environment_base_url_serves_catalog_and_turn_when_base_url_is_omi
             ("AZURE_OPENAI_RESOURCE_NAME", "evil.example/x"),
         ],
     )?;
-    // Checked before any request: a set that kept the row default would send
-    // the key to the default host.
-    assert_prepared_base(&set, "openai", &base);
 
     let listed = set.load_models("openai").await?;
     assert_eq!(
@@ -4365,10 +4367,13 @@ async fn azure_environment_base_url_serves_catalog_and_turn_when_base_url_is_omi
     Ok(())
 }
 
+/// The resource name derives the canonical endpoint at the lazy boundary:
+/// a blank base URL variable is unset, and the padded resource name is
+/// trimmed. The set itself keeps the row's own base; the render below is
+/// what discovery and requests read.
 #[tokio::test]
 async fn azure_resource_name_derives_the_endpoint_when_base_url_is_omitted() -> TestResult {
     let dir = TestDir::new()?;
-    let derived = "https://my-res.openai.azure.com/openai/v1";
     // A blank base URL variable is unset; the padded resource name is trimmed.
     let set = preset_set(
         &dir,
@@ -4379,37 +4384,113 @@ async fn azure_resource_name_derives_the_endpoint_when_base_url_is_omitted() -> 
             ("AZURE_OPENAI_RESOURCE_NAME", " my-res "),
         ],
     )?;
-    assert_prepared_base(&set, "openai", derived);
-    let provider = set.provider(resolved("openai", Family::Responses, "gpt-azure"))?;
-    let Provider::Responses(http) = &provider else {
-        return Err(io::Error::other("the openai row binds the Responses variant").into());
-    };
-    assert_eq!(&*http.entry.base_url, derived);
+    let slot = &set
+        .inner
+        .providers
+        .get("openai")
+        .expect("openai is configured")
+        .entry;
+    let derived =
+        crate::provider::wire::base(slot, None, &set.inner.env).expect("the resource name renders");
+    assert_eq!(
+        &*derived, "https://my-res.openai.azure.com/openai/v1",
+        "the lazy render, not the kept base"
+    );
     Ok(())
 }
 
+/// A silent Azure environment refuses typed at the lazy boundary instead of
+/// sending the key to the stored base: the refusal names both variables and
+/// reaches the caller before any connection attempt.
+#[tokio::test]
+async fn azure_silent_environment_refuses_typed_before_any_request() -> TestResult {
+    let dir = TestDir::new()?;
+    let (_base, mut server_task) = server("/v1", vec![stream_reply(responses_reply())]).await?;
+    let set = preset_set(&dir, &azure_row(""), &[AZURE_KEY])?;
+    let provider = set.provider(resolved("openai", Family::Responses, "gpt-azure"))?;
+    let error = provider
+        .open(
+            SessionId::new_v7(),
+            &request(
+                Family::Responses,
+                "gpt-azure",
+                vec![user_text("Say hello.")],
+            ),
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("a silent environment refuses");
+    match &error {
+        ProviderError::MissingEnvVariable { provider, variable } => {
+            assert_eq!(provider.as_ref(), "openai");
+            assert_eq!(
+                *variable,
+                "AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME"
+            );
+        }
+        other => return Err(io::Error::other(format!("untyped refusal: {other:?}")).into()),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+            .await
+            .is_err(),
+        "refusal sent nothing"
+    );
+    server_task.abort_all();
+    Ok(())
+}
+
+/// A malformed resource name refuses typed at the lazy boundary instead of
+/// failing the whole set at startup: the set builds, and each listed name
+/// refuses its own request with the offending variable named.
 #[tokio::test]
 async fn azure_invalid_resource_name_refuses_an_entry_with_an_omitted_base_url() -> TestResult {
     let dir = TestDir::new()?;
     for bad in ["evil.example/x", "a.b", "-x", "x-", "x@evil.com"] {
-        let built = preset_set(
+        let (_base, mut server_task) = server("/v1", vec![stream_reply(responses_reply())]).await?;
+        let set = preset_set(
             &dir,
             &azure_row(""),
             &[AZURE_KEY, ("AZURE_OPENAI_RESOURCE_NAME", bad)],
-        );
-        let Err(error) = built else {
-            return Err(io::Error::other(format!("resource {bad:?} was accepted")).into());
-        };
-        let Some(ProviderError::InvalidRequest { message }) = error.downcast_ref::<ProviderError>()
-        else {
-            return Err(io::Error::other(format!("{bad:?} failed untyped: {error}")).into());
-        };
+        )?;
+        let provider = set.provider(resolved("openai", Family::Responses, "gpt-azure"))?;
+        let error = provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Responses,
+                    "gpt-azure",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a malformed resource name refuses");
+        match &error {
+            ProviderError::MalformedEnvVariable {
+                provider,
+                variable,
+                expected,
+            } => {
+                assert_eq!(provider.as_ref(), "openai");
+                assert_eq!(*variable, "AZURE_OPENAI_RESOURCE_NAME");
+                assert_eq!(*expected, "one DNS label");
+            }
+            other => {
+                return Err(io::Error::other(format!("{bad:?} failed untyped: {other:?}")).into());
+            }
+        }
         assert!(
-            message.contains("openai")
-                && message.contains("AZURE_OPENAI_RESOURCE_NAME")
-                && message.contains(bad),
-            "{bad:?}: {message}"
+            tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+                .await
+                .is_err(),
+            "{bad:?} sent a request before refusing"
         );
+        server_task.abort_all();
     }
     Ok(())
 }
@@ -4432,7 +4513,9 @@ async fn azure_explicit_base_url_beats_the_environment_and_its_invalid_resource(
             ("AZURE_OPENAI_RESOURCE_NAME", "evil.example/x"),
         ],
     )?;
-    assert_prepared_base(&set, "openai", &explicit);
+    // The user's URL is authoritative: the decoy endpoint and the invalid
+    // resource name it never needs can neither override the URL (discovery
+    // and the turn both reach the explicit base below) nor fail the set.
 
     let listed = set.load_models("openai").await?;
     assert_eq!(
@@ -4476,7 +4559,16 @@ async fn azure_environment_never_replaces_an_explicit_default_or_a_non_azure_row
     // Naming the row's own default is still naming a URL: it wins, because
     // omission is what the table said, not what the value equals.
     let configured = preset_set(&dir, &azure_row(&format!("base_url = '{default}'\n")), &env)?;
-    assert_prepared_base(&configured, "openai", default);
+    assert_eq!(
+        &*configured
+            .inner
+            .providers
+            .get("openai")
+            .expect("openai is configured")
+            .entry
+            .base_url,
+        default
+    );
 
     // A named Azure-shaped provider names its own base URL and keeps it.
     let named = preset_set(
@@ -4488,10 +4580,20 @@ async fn azure_environment_never_replaces_an_explicit_default_or_a_non_azure_row
         ),
         &env,
     )?;
-    assert_prepared_base(&named, "azure-named", "https://named.example.com/openai/v1");
+    assert_eq!(
+        &*named
+            .inner
+            .providers
+            .get("azure-named")
+            .expect("azure-named is configured")
+            .entry
+            .base_url,
+        "https://named.example.com/openai/v1"
+    );
 
     // A row without the Azure shape never takes an Azure variable, and an
-    // invalid resource name no Azure entry needs refuses nothing.
+    // invalid resource name no Azure entry needs refuses nothing: the set
+    // builds and keeps the row default.
     let plain = preset_set(
         &dir,
         "",
@@ -4501,9 +4603,20 @@ async fn azure_environment_never_replaces_an_explicit_default_or_a_non_azure_row
             ("AZURE_OPENAI_RESOURCE_NAME", "evil.example/x"),
         ],
     )?;
-    assert_prepared_base(&plain, "openai", default);
+    assert_eq!(
+        &*plain
+            .inner
+            .providers
+            .get("openai")
+            .expect("openai is configured")
+            .entry
+            .base_url,
+        default
+    );
 
-    // Blank variables name nothing: the Azure-shaped row keeps its default.
+    // Blank variables name nothing, so the Azure-shaped row refuses typed
+    // at its request instead of keeping a default it cannot serve.
+    let (_base, mut server_task) = server("/v1", vec![stream_reply(responses_reply())]).await?;
     let blank = preset_set(
         &dir,
         &azure_row(""),
@@ -4513,7 +4626,33 @@ async fn azure_environment_never_replaces_an_explicit_default_or_a_non_azure_row
             ("AZURE_OPENAI_RESOURCE_NAME", "\t"),
         ],
     )?;
-    assert_prepared_base(&blank, "openai", default);
+    let provider = blank.provider(resolved("openai", Family::Responses, "gpt-azure"))?;
+    assert!(
+        matches!(
+            provider
+                .open(
+                    SessionId::new_v7(),
+                    &request(
+                        Family::Responses,
+                        "gpt-azure",
+                        vec![user_text("Say hello.")],
+                    ),
+                    &[],
+                    notice_sink(),
+                    &CancellationToken::new(),
+                )
+                .await,
+            Err(ProviderError::MissingEnvVariable { .. })
+        ),
+        "blank variables refuse typed"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+            .await
+            .is_err(),
+        "refusal sent nothing"
+    );
+    server_task.abort_all();
     Ok(())
 }
 
@@ -5709,28 +5848,201 @@ async fn a_plain_responses_entry_still_compacts_remotely() -> TestResult {
 async fn google_vertex_binds_without_a_key_and_reads_the_captured_bearer_token() -> TestResult {
     // Without a key or stored sign-in the Vertex row binds credential-less:
     // each attempt reads the pre-minted bearer token from the captured
-    // environment. The adapter always overrides the base with its location
-    // host, so a loopback cannot serve the success path; a route refusal
-    // proves the token was accepted, and the typed credential refusal
-    // proves a missing token still fails closed.
+    // environment. The real lowering runs end to end: the exact
+    // `vertex::build` wire the attempt sends (captured project, location,
+    // and bearer) goes over loopback the way the failover points its
+    // endpoints, and the server captures the actual `Authorization: Bearer`
+    // header and the project/location model path before the stream decodes.
+    // Through the attempt path a missing route is still refused before
+    // anything is sent, and a routed row whose hard GAC source is missing
+    // still fails closed with its typed file error.
     let dir = TestDir::new()?;
     let (base, mut server_task) = server("", vec![stream_reply(google_reply())]).await?;
-    let cases = [
-        (
-            EnvSnapshot::test(&[("GOOGLE_CLOUD_ACCESS_TOKEN", "ya29-env")]),
-            true,
+
+    // The owned rejecting proxy: every Google production host is pinned to
+    // this loopback listener, which records the connection and refuses
+    // CONNECT, so a wrong endpoint is a controlled local refusal and never a
+    // vendor contact.
+    let (proxy_log, proxy_client, mut proxy_tasks) = refusing_google_proxy().await?;
+
+    // The credential-less row: an explicit configured loopback base (the
+    // entry names its own base, `origins.base == Explicit`), the captured
+    // project/location route, and the captured bearer.
+    let mut routed = entry(
+        "google-vertex",
+        Family::GoogleVertex,
+        base.clone(),
+        None,
+        1,
+        Transport::Https,
+    );
+    routed.settings.project = Some("vertex-proj".into());
+    routed.settings.location = Some("us-west1".into());
+    routed.origins.base = Origin::Explicit;
+    let env_with_token = EnvSnapshot::test(&[("GOOGLE_CLOUD_ACCESS_TOKEN", "ya29-env")]);
+    let mut set = ProviderSet::new(
+        &config(vec![routed], 0),
+        identity(),
+        env_with_token,
+        dir.path(),
+        dir.path(),
+    )?;
+    // The existing set-owned slot client is the injection seam: the fresh
+    // set is still uniquely owned, so the real egress client is replaced by
+    // the proxy-carrying one before any provider handle exists.
+    {
+        let inner = Arc::get_mut(&mut set.inner).expect("the fresh set is uniquely owned");
+        let slot = inner
+            .providers
+            .get_mut("google-vertex")
+            .expect("vertex slot");
+        slot.client = proxy_client.into();
+    }
+    let provider = set.provider(resolved("google-vertex", Family::GoogleVertex, "v-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::GoogleVertex,
+                    "v-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello")),
+        "{events:?}"
+    );
+
+    // The configured base went direct to the SSE server with the real
+    // authorization header and the project/location model path.
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(
+        head.starts_with(
+            "post /v1/projects/vertex-proj/locations/us-west1/publishers/google/models/v-test:streamgeneratecontent?alt=sse ",
         ),
-        (EnvSnapshot::test(&[]), false),
+        "{head}"
+    );
+    assert!(head.contains("authorization: bearer ya29-env"), "{head}");
+
+    // The Google production hosts never left the process: the rejecting
+    // proxy saw no connection at all, so the request could only have gone
+    // direct to the configured loopback base.
+    let proxy_seen = proxy_log.lock().await;
+    assert!(
+        proxy_seen.is_empty(),
+        "the rejecting proxy must see no contact: {proxy_seen:?}"
+    );
+    drop(proxy_seen);
+
+    // Through the real attempt path: a captured bearer without the route is
+    // refused before any request, and a routed row whose hard GAC source is
+    // missing fails closed with its typed file error. Neither contacts the
+    // server.
+    vertex_refusals_never_reach_their_explicit_endpoint(&dir).await?;
+    server_task.abort_all();
+    proxy_tasks.abort_all();
+    while proxy_tasks.join_next().await.is_some() {}
+    Ok(())
+}
+
+/// The owned rejecting proxy for the Google production hosts: a loopback
+/// listener that records every connection and refuses it with `403`, so a
+/// wrong endpoint is a controlled local refusal and never a vendor
+/// contact. Returns what the proxy saw, the egress client routed through
+/// it, and the proxy task set the caller joins at cleanup.
+async fn refusing_google_proxy() -> io::Result<(
+    Arc<tokio::sync::Mutex<Vec<String>>>,
+    reqwest::Client,
+    tokio::task::JoinSet<()>,
+)> {
+    let proxy_listener = TcpListener::bind("[::1]:0").await?;
+    let proxy_port = proxy_listener.local_addr()?.port();
+    let proxy_log: Arc<tokio::sync::Mutex<Vec<String>>> = Arc::default();
+    let proxy_sink = Arc::clone(&proxy_log);
+    let mut proxy_tasks = tokio::task::JoinSet::new();
+    proxy_tasks.spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = proxy_listener.accept().await else {
+                return;
+            };
+            let mut head = vec![0_u8; 1024];
+            let count = stream.read(&mut head).await.unwrap_or(0);
+            proxy_sink
+                .lock()
+                .await
+                .push(String::from_utf8_lossy(&head[..count]).into_owned());
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    let proxy_uri = format!("http://[::1]:{proxy_port}");
+    let google_production_host = |host: &str| {
+        host == "aiplatform.googleapis.com"
+            || host.ends_with("-aiplatform.googleapis.com")
+            || host.ends_with(".rep.googleapis.com")
+    };
+    let proxy_client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::custom(move |url| {
+            google_production_host(url.host_str().unwrap_or_default()).then(|| proxy_uri.clone())
+        }))
+        .build()
+        .map_err(io::Error::other)?;
+    Ok((proxy_log, proxy_client, proxy_tasks))
+}
+
+/// The attempt-path refusals of a credential-less Vertex row: a captured
+/// bearer without the route refuses typed before any request, and a routed
+/// row whose hard GAC source is missing fails closed with its typed file
+/// error. Both rows bind an explicit loopback endpoint, reserved but never
+/// contacted — the accept timeout on its listener proves zero TCP contact.
+async fn vertex_refusals_never_reach_their_explicit_endpoint(dir: &TestDir) -> TestResult {
+    let missing_gac = dir.path().join("absent-gac.json");
+    let refused = TcpListener::bind("[::1]:0").await?;
+    let refused_base = format!("http://{}", refused.local_addr()?);
+    let mut unrouted = entry(
+        "google-vertex",
+        Family::GoogleVertex,
+        refused_base.clone(),
+        None,
+        1,
+        Transport::Https,
+    );
+    unrouted.origins.base = Origin::Explicit;
+    let mut routed = entry(
+        "google-vertex",
+        Family::GoogleVertex,
+        refused_base,
+        None,
+        1,
+        Transport::Https,
+    );
+    routed.settings.project = Some("vertex-proj".into());
+    routed.settings.location = Some("us-west1".into());
+    routed.origins.base = Origin::Explicit;
+    let bearer_env = EnvSnapshot::test(&[("GOOGLE_CLOUD_ACCESS_TOKEN", "ya29-env")]);
+    let missing_env = EnvSnapshot::test(&[(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        missing_gac.to_str().unwrap(),
+    )]);
+    let cases = [
+        (bearer_env, unrouted, "route"),
+        (missing_env, routed, "file"),
     ];
-    for (env, holds_token) in cases {
-        let vertex_entry = entry(
-            "google-vertex",
-            Family::GoogleVertex,
-            base.clone(),
-            None,
-            1,
-            Transport::Https,
-        );
+    for (env, vertex_entry, expected) in cases {
         let set = ProviderSet::new(
             &config(vec![vertex_entry], 0),
             identity(),
@@ -5753,24 +6065,23 @@ async fn google_vertex_binds_without_a_key_and_reads_the_captured_bearer_token()
             )
             .await?;
         let events = collect(stream).await;
-        if holds_token {
-            assert!(
+        match expected {
+            "route" => assert!(
                 matches!(&events, Err(ProviderError::InvalidRequest { .. })),
                 "{events:?}"
-            );
-        } else {
-            assert!(
-                matches!(&events, Err(ProviderError::NoCredentials { .. })),
+            ),
+            _ => assert!(
+                matches!(&events, Err(ProviderError::AuthFileInvalid { .. })),
                 "{events:?}"
-            );
+            ),
         }
     }
     assert!(
-        tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+        tokio::time::timeout(Duration::from_millis(100), refused.accept())
             .await
-            .is_err()
+            .is_err(),
+        "refused Vertex requests must not contact the configured endpoint"
     );
-    server_task.abort_all();
     Ok(())
 }
 
@@ -5780,37 +6091,56 @@ async fn oauth_only_families_are_ready_only_with_a_stored_oauth_sign_in() -> Tes
     // captured environment must not read as a usable credential source.
     // `auth.json` only holds members for built-in rows: the OAuth login sits
     // under an OAuth row, the keys under a key row.
+    // An Antigravity request also needs the Google Cloud project it names:
+    // the stored sign-in carries none in these fixtures, so the explicit
+    // `project` setting supplies it, and without one the row is not ready.
     let cases = [
         (
             "factory-droid",
             Family::GoogleAntigravity,
             Some(stored_workos_login("ya29-test")),
+            Some("cca-proj"),
             true,
+        ),
+        (
+            "factory-droid",
+            Family::GoogleAntigravity,
+            Some(stored_workos_login("ya29-test")),
+            None,
+            false,
         ),
         (
             "factory-droid",
             Family::Droid,
             Some(stored_workos_login("workos-test")),
+            None,
             true,
         ),
-        ("factory-droid", Family::Droid, None, false),
+        ("factory-droid", Family::Droid, None, None, false),
         (
             "groq",
             Family::GoogleAntigravity,
             Some(api_key_credential("stored-key")),
+            Some("cca-proj"),
             false,
         ),
-        ("groq", Family::GoogleAntigravity, None, false),
+        (
+            "groq",
+            Family::GoogleAntigravity,
+            None,
+            Some("cca-proj"),
+            false,
+        ),
     ];
     let cancel = CancellationToken::new();
-    for (id, family, stored, ready) in cases {
+    for (id, family, stored, project, ready) in cases {
         let dir = TestDir::new()?;
         if let Some(credential) = stored {
             let mut store = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
             store.set(id, credential)?;
             store.store()?;
         }
-        let oauth_only = entry(
+        let mut oauth_only = entry(
             id,
             family,
             String::from("https://api.example.com"),
@@ -5818,6 +6148,7 @@ async fn oauth_only_families_are_ready_only_with_a_stored_oauth_sign_in() -> Tes
             1,
             Transport::Https,
         );
+        oauth_only.settings.project = project.map(Into::into);
         let set = ProviderSet::new(
             &config(vec![oauth_only], 0),
             identity(),
@@ -6115,6 +6446,383 @@ async fn bedrock_without_any_source_is_a_clean_miss() -> TestResult {
     Ok(())
 }
 
+/// Decodes provider settings from inline TOML, the way the host merges a
+/// user file.
+fn parse_providers(input: &str) -> Result<ProviderConfig, Box<dyn Error>> {
+    let config = Config::load(
+        ConfigProduct::Dalgon,
+        Path::new("/tmp/dal-provider-set-test"),
+        "",
+        Some(input),
+    )?;
+    ProviderConfig::from_config(&config).map_err(Into::into)
+}
+
+#[test]
+fn bedrock_defaulted_endpoint_follows_the_captured_region_across_host_shapes() {
+    // Routing semantics, not spelling: a rewrite is compared by the URL
+    // parts routing and host selection consume (scheme, host, path), never
+    // by the serialization's incidental root-URL trailing slash.
+    let follows = |base: &str, region: &str, host: &str| {
+        let moved = crate::family::bedrock::endpoint_for_defaulted_base(base, region);
+        let moved = url::Url::parse(moved.as_ref()).expect("the rewritten base parses");
+        let expected = url::Url::parse(host).expect("the expected base parses");
+        assert_eq!(moved.scheme(), expected.scheme(), "{host}");
+        assert_eq!(moved.host_str(), expected.host_str(), "{host}");
+        assert_eq!(moved.path(), expected.path(), "{host}");
+    };
+    // A base the region already names, a host outside the grammar, and an
+    // unusable region stay verbatim: the unchanged path borrows its input
+    // and never allocates (the borrow/own split is the caller's contract).
+    let verbatim = |base: &str, region: &str| {
+        assert!(
+            matches!(
+                crate::family::bedrock::endpoint_for_defaulted_base(base, region),
+                std::borrow::Cow::Borrowed(borrowed) if borrowed == base
+            ),
+            "{base}"
+        );
+    };
+    follows(
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "eu-west-1",
+        "https://bedrock-runtime.eu-west-1.amazonaws.com",
+    );
+    assert!(matches!(
+        crate::family::bedrock::endpoint_for_defaulted_base(
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "eu-west-1",
+        ),
+        std::borrow::Cow::Owned(_)
+    ));
+    verbatim(
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "us-east-1",
+    );
+    verbatim("https://bedrock.vpc.example.local", "eu-west-1");
+    verbatim(
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "EU_West1",
+    );
+    // Every parsed suffix shape survives the label swap.
+    follows(
+        "https://bedrock-runtime-fips.us-east-1.amazonaws.com",
+        "eu-west-1",
+        "https://bedrock-runtime-fips.eu-west-1.amazonaws.com",
+    );
+    follows(
+        "https://bedrock-runtime.us-east-1.amazonaws.com.cn",
+        "eu-west-1",
+        "https://bedrock-runtime.eu-west-1.amazonaws.com.cn",
+    );
+    follows(
+        "https://bedrock-runtime.us-east-1.api.aws",
+        "eu-west-1",
+        "https://bedrock-runtime.eu-west-1.api.aws",
+    );
+}
+
+#[tokio::test]
+async fn bedrock_readiness_counts_the_entry_key_env_token() -> TestResult {
+    let dir = TestDir::new()?;
+    let mut keyed = bedrock_override_entry();
+    keyed.key_env = Some("TEST_BEDROCK_TOKEN".into());
+    let set = bedrock_override_set(
+        &dir,
+        vec![
+            keyed,
+            entry(
+                "openai",
+                Family::Responses,
+                String::from("https://api.openai.com/v1"),
+                None,
+                2,
+                Transport::Https,
+            ),
+        ],
+        bedrock_env(&[("TEST_BEDROCK_TOKEN", "entry-scoped-secret")]),
+    )?;
+    let cancel = CancellationToken::new();
+    assert!(
+        set.credential_source_available("groq", &cancel).await?,
+        "the entry-named variable is a bearer source of its own"
+    );
+    assert!(
+        !set.credential_source_available("openai", &cancel).await?,
+        "a keyless row is a clean miss, not an error"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bedrock_zero_config_entry_reads_the_ambient_chain() -> TestResult {
+    let dir = TestDir::new()?;
+    let parsed = parse_providers("[providers.amazon-bedrock]\n")?;
+    let ambient = ProviderSet::new(
+        &parsed,
+        identity(),
+        bedrock_env(&[
+            ("AWS_ACCESS_KEY_ID", "ambient-key"),
+            ("AWS_SECRET_ACCESS_KEY", "ambient-secret"),
+        ]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let cancel = CancellationToken::new();
+    assert!(
+        ambient
+            .credential_source_available("amazon-bedrock", &cancel)
+            .await?,
+        "static AWS environment keys are a ready source with zero configuration"
+    );
+    let quiet_dir = TestDir::new()?;
+    let quiet = ProviderSet::new(
+        &parsed,
+        identity(),
+        bedrock_env(&[]),
+        quiet_dir.path(),
+        quiet_dir.path(),
+    )?;
+    assert!(
+        !quiet
+            .credential_source_available("amazon-bedrock", &cancel)
+            .await?,
+        "no ambient source is a clean miss, not an error"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bedrock_key_env_token_rides_authorization_header_unsigned() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server) = bytes_server(vec![BytesReply {
+        status: 200,
+        content_type: "application/vnd.amazon.eventstream",
+        body: bedrock_text_turn(),
+    }])
+    .await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "amazon-bedrock",
+                Family::Bedrock,
+                base,
+                Some("TEST_BEDROCK_TOKEN"),
+                2,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        // Only the entry-named variable: no ambient bearer, no AWS keys.
+        bedrock_env(&[("TEST_BEDROCK_TOKEN", "entry-scoped-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(bedrock_resolved("amazon-bedrock", "anthropic.claude-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Bedrock,
+                    "anthropic.claude-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.contains("authorization: bearer entry-scoped-secret"));
+    assert!(!head.contains("x-amz-date:"), "the bearer bypasses SigV4");
+    Ok(())
+}
+
+#[tokio::test]
+async fn bedrock_entry_key_env_token_outranks_the_ambient_bearer() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server) = bytes_server(vec![BytesReply {
+        status: 200,
+        content_type: "application/vnd.amazon.eventstream",
+        body: bedrock_text_turn(),
+    }])
+    .await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "amazon-bedrock",
+                Family::Bedrock,
+                base,
+                Some("TEST_BEDROCK_TOKEN"),
+                2,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        // Both bearer variables present: the entry-scoped one is the more
+        // specific source and must win.
+        bedrock_env(&[
+            ("TEST_BEDROCK_TOKEN", "entry-scoped-secret"),
+            ("AWS_BEARER_TOKEN_BEDROCK", "ambient-secret"),
+        ]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(bedrock_resolved("amazon-bedrock", "anthropic.claude-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Bedrock,
+                    "anthropic.claude-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.contains("authorization: bearer entry-scoped-secret"));
+    assert!(!head.contains("ambient-secret"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bedrock_stored_key_outranks_the_entry_key_env_token() -> TestResult {
+    let dir = TestDir::new()?;
+    let mut store = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
+    store.set("amazon-bedrock", api_key_credential("stored-secret"))?;
+    store.store()?;
+    let (base, mut server) = bytes_server(vec![BytesReply {
+        status: 200,
+        content_type: "application/vnd.amazon.eventstream",
+        body: bedrock_text_turn(),
+    }])
+    .await?;
+    let mut amazon_entry = entry(
+        "amazon-bedrock",
+        Family::Bedrock,
+        base,
+        Some("TEST_BEDROCK_TOKEN"),
+        2,
+        Transport::Https,
+    );
+    amazon_entry.origins.base = Origin::Explicit;
+    let set = ProviderSet::new(
+        &config(vec![amazon_entry], 0),
+        identity(),
+        bedrock_env(&[("TEST_BEDROCK_TOKEN", "entry-scoped-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(bedrock_resolved("amazon-bedrock", "anthropic.claude-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Bedrock,
+                    "anthropic.claude-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.contains("authorization: bearer stored-secret"));
+    assert!(!head.contains("entry-scoped-secret"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bedrock_signs_the_captured_region_against_a_custom_base() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server) = bytes_server(vec![BytesReply {
+        status: 200,
+        content_type: "application/vnd.amazon.eventstream",
+        body: bedrock_text_turn(),
+    }])
+    .await?;
+    let mut vpc_entry = entry(
+        "bedrock-vpc",
+        Family::Bedrock,
+        base,
+        None,
+        2,
+        Transport::Https,
+    );
+    vpc_entry.origins.base = Origin::Explicit;
+    let set = ProviderSet::new(
+        &config(vec![vpc_entry], 0),
+        identity(),
+        // Static keys and a captured region: the entry names its own base
+        // (`origins.base == Explicit`, the explicit-provenance case of
+        // request-base selection), so the request reaches the custom base
+        // verbatim and signs the captured region's scope.
+        bedrock_env(&[
+            ("AWS_ACCESS_KEY_ID", "test-key"),
+            ("AWS_SECRET_ACCESS_KEY", "test-secret"),
+            ("AWS_REGION", "eu-west-1"),
+        ]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(bedrock_resolved("bedrock-vpc", "anthropic.claude-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Bedrock,
+                    "anthropic.claude-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.starts_with("post /model/anthropic.claude-test/converse-stream "));
+    assert!(
+        head.contains("host: 127.0.0.1:"),
+        "an explicit base is kept verbatim"
+    );
+    assert!(head.contains("authorization: aws4-hmac-sha256"));
+    assert!(
+        head.contains("/eu-west-1/bedrock/aws4_request"),
+        "the captured region owns the signing scope: {head}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn precancelled_readiness_is_cancelled_never_false() -> TestResult {
     let dir = TestDir::new()?;
@@ -6338,6 +7046,7 @@ async fn dispatch_verify_oauth_signin_and_optional_auth_admission() -> TestResul
             Transport::Https,
         );
         row.auth = AuthStyle::Bearer;
+        row.settings.project = Some("cca-proj".into());
         let set = ProviderSet::new(
             &config(vec![row.clone()], 0),
             identity(),
@@ -6953,4 +7662,645 @@ fn only_an_eight_digit_suffix_makes_a_dated_alias_of_a_listed_row() {
     ] {
         assert!(!inherits(near_miss), "{near_miss} inherited the listed row");
     }
+}
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the scenario is one serialized OAuth 401 flood"
+)]
+async fn sixty_four_concurrent_401s_send_one_token_request() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = TestDir::new()?;
+    store_expired_codex_sign_in(&dir)?;
+    let codex_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let codex_base = format!("http://{}/backend-api/codex", codex_listener.local_addr()?);
+    let token_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let token_base = format!("http://{}/codex", token_listener.local_addr()?);
+    let codex_old = Arc::new(AtomicUsize::new(0));
+    let codex_new = Arc::new(AtomicUsize::new(0));
+    let token_hits = Arc::new(AtomicUsize::new(0));
+    let unauthorized = || Reply {
+        status: 401,
+        content_type: "application/json",
+        body: String::from(r#"{"error":{"type":"invalid_token","message":"expired"}}"#)
+            .into_bytes(),
+    };
+    let codex_old_task = Arc::clone(&codex_old);
+    let codex_new_task = Arc::clone(&codex_new);
+    let mut codex_task = tokio::task::JoinSet::new();
+    codex_task.spawn(async move {
+        loop {
+            let (mut socket, _) = codex_listener.accept().await.expect("codex accept");
+            let request = read_request(&mut socket).await.expect("codex request");
+            let root_probe = request.starts_with(b"GET / ")
+                || request.starts_with(b"HEAD / ")
+                || (!request.starts_with(b"POST ") && !request.starts_with(b"GET "));
+            if root_probe {
+                let refused = "HTTP/1.1 404 Test\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                socket
+                    .write_all(refused.as_bytes())
+                    .await
+                    .expect("refuse probe");
+                continue;
+            }
+            let head = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            if head.contains("authorization: bearer new-access") {
+                codex_new_task.fetch_add(1, Ordering::SeqCst);
+                write_reply(&mut socket, stream_reply(responses_reply()))
+                    .await
+                    .expect("codex success");
+            } else {
+                codex_old_task.fetch_add(1, Ordering::SeqCst);
+                write_reply(&mut socket, unauthorized())
+                    .await
+                    .expect("codex 401");
+            }
+        }
+    });
+    let token_hits_task = Arc::clone(&token_hits);
+    let mut token_task = tokio::task::JoinSet::new();
+    token_task.spawn(async move {
+        loop {
+            let (mut socket, _) = token_listener.accept().await.expect("token accept");
+            let request = read_request(&mut socket).await.expect("token request");
+            let root_probe = request.starts_with(b"GET / ")
+                || request.starts_with(b"HEAD / ")
+                || (!request.starts_with(b"POST ") && !request.starts_with(b"GET "));
+            if root_probe {
+                let refused =
+                    "HTTP/1.1 404 Test\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                socket
+                    .write_all(refused.as_bytes())
+                    .await
+                    .expect("refuse probe");
+                continue;
+            }
+            token_hits_task.fetch_add(1, Ordering::SeqCst);
+            write_reply(
+                &mut socket,
+                Reply {
+                    status: 200,
+                    content_type: "application/json",
+                    body: String::from(
+                        r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
+                    )
+                    .into_bytes(),
+                },
+            )
+            .await
+            .expect("token success");
+        }
+    });
+    let codex_entry = entry(
+        "openai-codex",
+        Family::Codex,
+        codex_base,
+        None,
+        64,
+        Transport::Https,
+    );
+    let endpoints = crate::auth::refresh::TokenEndpoints::with_bases(
+        "http://127.0.0.1:1/anthropic",
+        &token_base,
+        "http://127.0.0.1:1/workos",
+        "http://127.0.0.1:1/gitlab",
+        "http://127.0.0.1:1/radius",
+    )?;
+    let set = Arc::new(ProviderSet::build(
+        &config(vec![codex_entry], 0),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+        endpoints,
+    )?);
+    let barrier = Arc::new(tokio::sync::Barrier::new(64));
+    let mut opens = tokio::task::JoinSet::new();
+    for _ in 0..64 {
+        let set = Arc::clone(&set);
+        let barrier = Arc::clone(&barrier);
+        opens.spawn(async move {
+            barrier.wait().await;
+            let provider =
+                set.provider(resolved("openai-codex", Family::Codex, "gpt-codex-test"))?;
+            let req = request(Family::Codex, "gpt-codex-test", vec![user_text("continue")]);
+            let stream = provider
+                .open(
+                    SessionId::new_v7(),
+                    &req,
+                    &[],
+                    notice_sink(),
+                    &CancellationToken::new(),
+                )
+                .await?;
+            let events: Vec<StreamEvent> = collect(stream).await?;
+            if !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Stop { .. }))
+            {
+                return Err(io::Error::other("codex turn did not stop").into());
+            }
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        });
+    }
+    while let Some(outcome) = tokio::time::timeout(Duration::from_secs(30), opens.join_next())
+        .await
+        .expect("concurrent opens complete")
+    {
+        outcome
+            .expect("task joins")
+            .map_err(|error| -> Box<dyn Error> { error.to_string().into() })?;
+    }
+    codex_task.abort_all();
+    token_task.abort_all();
+    while codex_task.join_next().await.is_some() {}
+    while token_task.join_next().await.is_some() {}
+    assert_eq!(
+        codex_old.load(Ordering::SeqCst),
+        64,
+        "every concurrent caller first 401s with the stale token"
+    );
+    assert_eq!(
+        codex_new.load(Ordering::SeqCst),
+        64,
+        "every concurrent retry carries the refreshed token"
+    );
+    assert_eq!(
+        token_hits.load(Ordering::SeqCst),
+        1,
+        "64 concurrent 401s share one Rejected refresh"
+    );
+    let stored = crate::auth::credential::AuthStore::load(dir.path().join("auth.json"))?;
+    let Some(Credential::OAuth(stored)) = stored.credential("openai-codex") else {
+        return Err(io::Error::other("refreshed OAuth credential was not stored").into());
+    };
+    assert_eq!(stored.access_token.expose(), "new-access");
+    assert_eq!(stored.refresh_token.expose(), "new-refresh");
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_file_before_the_lock_prevents_any_token_request() -> TestResult {
+    let dir = TestDir::new()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs();
+    let now = i64::try_from(now).expect("unix seconds fit i64");
+    let stale = OAuthCredential {
+        access_token: SecretString::from("old-access"),
+        refresh_token: SecretString::from("old-refresh"),
+        expires_at: Some(now + 10),
+        id_token: Some(String::from("old-id-token")),
+        account_id: Some(String::from("acct-1")),
+        project_id: None,
+    };
+    let mut auth = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
+    auth.set("openai-codex", Credential::OAuth(stale))?;
+    auth.store()?;
+    let (codex_base, mut codex_server) =
+        server("/backend-api/codex", vec![stream_reply(responses_reply())]).await?;
+    let (token_base, mut token_server) = server("/codex", Vec::new()).await?;
+    let codex_entry = entry(
+        "openai-codex",
+        Family::Codex,
+        codex_base,
+        None,
+        1,
+        Transport::Https,
+    );
+    let endpoints = crate::auth::refresh::TokenEndpoints::with_bases(
+        "http://127.0.0.1:1/anthropic",
+        &token_base,
+        "http://127.0.0.1:1/workos",
+        "http://127.0.0.1:1/gitlab",
+        "http://127.0.0.1:1/radius",
+    )?;
+    let set = ProviderSet::build(
+        &config(vec![codex_entry], 0),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+        endpoints,
+    )?;
+    // Bind the stale credential first, so the caller holds old-access while a
+    // competing writer stores the fresh token before the refresh lock is
+    // acquired. The guarded reload must then use the reloaded file and send
+    // no token request.
+    let provider = set.provider(resolved("openai-codex", Family::Codex, "gpt-codex-test"))?;
+    let external =
+        dal_store::open_private_lock(&dir.path().join("auth.json.lock")).expect("open lock");
+    external.try_lock().expect("external lock");
+    let req = request(Family::Codex, "gpt-codex-test", vec![user_text("continue")]);
+    let cancel = CancellationToken::new();
+    let opened = provider.open(SessionId::new_v7(), &req, &[], notice_sink(), &cancel);
+    let writer = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let fresh = OAuthCredential {
+            access_token: SecretString::from("new-access"),
+            refresh_token: SecretString::from("new-refresh"),
+            expires_at: Some(now + 3600),
+            id_token: Some(String::from("old-id-token")),
+            account_id: Some(String::from("acct-1")),
+            project_id: None,
+        };
+        let mut auth = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
+        auth.set("openai-codex", Credential::OAuth(fresh))?;
+        auth.store()?;
+        drop(external);
+        TestResult::Ok(())
+    };
+    let (opened, writer_outcome) = tokio::join!(opened, writer);
+    writer_outcome?;
+    let events = collect(opened?).await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Stop { .. }))
+    );
+    let codex_requests = codex_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert_eq!(codex_requests.len(), 1);
+    assert!(
+        String::from_utf8_lossy(&codex_requests[0])
+            .to_ascii_lowercase()
+            .contains("authorization: bearer new-access")
+    );
+    let token_requests = token_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert!(
+        token_requests.is_empty(),
+        "a fresh file sends no refresh request"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the scenario is one serialized OAuth failure walk"
+)]
+async fn permanent_refresh_failure_is_sign_in_expired_and_transient_retries_once() -> TestResult {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs();
+    let now = i64::try_from(now).expect("unix seconds fit i64");
+    let seed = |dir: &TestDir| -> TestResult {
+        let credential = OAuthCredential {
+            access_token: SecretString::from("old-access"),
+            refresh_token: SecretString::from("old-refresh"),
+            expires_at: Some(now + 10),
+            id_token: Some(String::from("old-id-token")),
+            account_id: Some(String::from("acct-1")),
+            project_id: None,
+        };
+        let mut auth = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
+        auth.set("openai-codex", Credential::OAuth(credential))?;
+        auth.store()?;
+        Ok(())
+    };
+    let dir = TestDir::new()?;
+    seed(&dir)?;
+    let (codex_base, mut codex_server) = server("/backend-api/codex", Vec::new()).await?;
+    let (token_base, mut token_server) = server(
+        "/codex",
+        vec![Reply {
+            status: 400,
+            content_type: "application/json",
+            body: String::from(r#"{"error":"invalid_grant"}"#).into_bytes(),
+        }],
+    )
+    .await?;
+    let endpoints = crate::auth::refresh::TokenEndpoints::with_bases(
+        "http://127.0.0.1:1/anthropic",
+        &token_base,
+        "http://127.0.0.1:1/workos",
+        "http://127.0.0.1:1/gitlab",
+        "http://127.0.0.1:1/radius",
+    )?;
+    let set = ProviderSet::build(
+        &config(
+            vec![entry(
+                "openai-codex",
+                Family::Codex,
+                codex_base,
+                None,
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+        endpoints,
+    )?;
+    let provider = set.provider(resolved("openai-codex", Family::Codex, "gpt-codex-test"))?;
+    let error = provider
+        .open(
+            SessionId::new_v7(),
+            &request(Family::Codex, "gpt-codex-test", vec![user_text("continue")]),
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("a rejected refresh token fails before any turn");
+    assert_eq!(
+        error.to_string(),
+        "openai-codex sign-in expired: the refresh token was rejected."
+    );
+    assert_eq!(
+        error.fix(),
+        Some(String::from("Run dalgon login openai-codex."))
+    );
+    let token_requests = token_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert_eq!(token_requests.len(), 1);
+    let codex_requests = codex_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert!(codex_requests.is_empty(), "{codex_requests:?}");
+    let stored = crate::auth::credential::AuthStore::load(dir.path().join("auth.json"))?;
+    let Some(Credential::OAuth(stored)) = stored.credential("openai-codex") else {
+        return Err(io::Error::other("auth.json is missing").into());
+    };
+    assert_eq!(stored.access_token.expose(), "old-access");
+    let dir = TestDir::new()?;
+    seed(&dir)?;
+    let (codex_base, mut codex_server) =
+        server("/backend-api/codex", vec![stream_reply(responses_reply())]).await?;
+    let (token_base, mut token_server) = server(
+        "/codex",
+        vec![
+            Reply {
+                status: 503,
+                content_type: "application/json",
+                body: String::from(r#"{"error":"temporarily_unavailable"}"#).into_bytes(),
+            },
+            Reply {
+                status: 200,
+                content_type: "application/json",
+                body: String::from(
+                    r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
+                )
+                .into_bytes(),
+            },
+        ],
+    )
+    .await?;
+    let endpoints = crate::auth::refresh::TokenEndpoints::with_bases(
+        "http://127.0.0.1:1/anthropic",
+        &token_base,
+        "http://127.0.0.1:1/workos",
+        "http://127.0.0.1:1/gitlab",
+        "http://127.0.0.1:1/radius",
+    )?;
+    let set = ProviderSet::build(
+        &config(
+            vec![entry(
+                "openai-codex",
+                Family::Codex,
+                codex_base,
+                None,
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+        endpoints,
+    )?;
+    let started = std::time::Instant::now();
+    let provider = set.provider(resolved("openai-codex", Family::Codex, "gpt-codex-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(Family::Codex, "gpt-codex-test", vec![user_text("continue")]),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Stop { .. }))
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "a transient refresh sleeps 1 s before its single retry"
+    );
+    let token_requests = token_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert_eq!(token_requests.len(), 2);
+    let codex_requests = codex_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert_eq!(codex_requests.len(), 1);
+    assert!(
+        String::from_utf8_lossy(&codex_requests[0])
+            .to_ascii_lowercase()
+            .contains("authorization: bearer new-access")
+    );
+    let stored = crate::auth::credential::AuthStore::load(dir.path().join("auth.json"))?;
+    let Some(Credential::OAuth(stored)) = stored.credential("openai-codex") else {
+        return Err(io::Error::other("refreshed OAuth credential was not stored").into());
+    };
+    assert_eq!(stored.access_token.expose(), "new-access");
+    assert_eq!(stored.refresh_token.expose(), "new-refresh");
+    Ok(())
+}
+
+#[tokio::test]
+async fn codex_second_401_after_a_refresh_is_sign_in_expired() -> TestResult {
+    let dir = TestDir::new()?;
+    let (codex_base, mut codex_server) = server(
+        "/backend-api/codex",
+        vec![
+            Reply {
+                status: 401,
+                content_type: "application/json",
+                body: String::from(r#"{"error":{"type":"invalid_token","message":"expired"}}"#)
+                    .into_bytes(),
+            },
+            Reply {
+                status: 401,
+                content_type: "application/json",
+                body: String::from(r#"{"error":{"type":"invalid_token","message":"expired"}}"#)
+                    .into_bytes(),
+            },
+        ],
+    )
+    .await?;
+    let (token_base, mut token_server) = server(
+        "/codex",
+        vec![Reply {
+            status: 200,
+            content_type: "application/json",
+            body: String::from(
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
+            )
+            .into_bytes(),
+        }],
+    )
+    .await?;
+    store_expired_codex_sign_in(&dir)?;
+    let endpoints = crate::auth::refresh::TokenEndpoints::with_bases(
+        "http://127.0.0.1:1/anthropic",
+        &token_base,
+        "http://127.0.0.1:1/workos",
+        "http://127.0.0.1:1/gitlab",
+        "http://127.0.0.1:1/radius",
+    )?;
+    let set = ProviderSet::build(
+        &config(
+            vec![entry(
+                "openai-codex",
+                Family::Codex,
+                codex_base,
+                None,
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+        endpoints,
+    )?;
+    let provider = set.provider(resolved("openai-codex", Family::Codex, "gpt-codex-test"))?;
+    let stream = provider
+        .open(
+            SessionId::new_v7(),
+            &request(Family::Codex, "gpt-codex-test", vec![user_text("continue")]),
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await?;
+    let error = collect(stream)
+        .await
+        .expect_err("a refreshed token that still 401s is expired");
+    assert_eq!(
+        error.to_string(),
+        "openai-codex sign-in expired: the refresh token was rejected."
+    );
+    assert_eq!(
+        error.fix(),
+        Some(String::from("Run dalgon login openai-codex."))
+    );
+    let codex_requests = codex_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert_eq!(codex_requests.len(), 2);
+    assert!(
+        String::from_utf8_lossy(&codex_requests[0])
+            .to_ascii_lowercase()
+            .contains("authorization: bearer old-access")
+    );
+    assert!(
+        String::from_utf8_lossy(&codex_requests[1])
+            .to_ascii_lowercase()
+            .contains("authorization: bearer new-access")
+    );
+    let token_requests = token_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert_eq!(token_requests.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_api_key_401_is_typed_and_sends_no_refresh() -> TestResult {
+    let dir = TestDir::new()?;
+    let (anthropic_base, mut anthropic_server) = server(
+        "/anthropic",
+        vec![Reply {
+            status: 401,
+            content_type: "application/json",
+            body: String::from(r#"{"error":{"message":"bad key"}}"#).into_bytes(),
+        }],
+    )
+    .await?;
+    let (token_base, mut token_server) = server("/claude", Vec::new()).await?;
+    let mut anthropic_entry = entry(
+        "anthropic",
+        Family::Anthropic,
+        anthropic_base,
+        Some("ANTHROPIC_TEST_KEY"),
+        1,
+        Transport::Https,
+    );
+    anthropic_entry.auth = AuthStyle::XApiKey;
+    let endpoints = crate::auth::refresh::TokenEndpoints::with_bases(
+        &token_base,
+        "http://127.0.0.1:1/codex",
+        "http://127.0.0.1:1/workos",
+        "http://127.0.0.1:1/gitlab",
+        "http://127.0.0.1:1/radius",
+    )?;
+    let set = ProviderSet::build(
+        &config(vec![anthropic_entry], 0),
+        identity(),
+        EnvSnapshot::test(&[("ANTHROPIC_TEST_KEY", "anthropic-secret")]),
+        dir.path(),
+        dir.path(),
+        endpoints,
+    )?;
+    let mut resolved_model = resolved("anthropic", Family::Anthropic, "claude-test");
+    resolved_model.entry.thinking = ThinkingSupport::UnknownAdaptive;
+    let provider = set.provider(resolved_model)?;
+    let stream = provider
+        .open(
+            SessionId::new_v7(),
+            &request(Family::Anthropic, "claude-test", vec![user_text("hello")]),
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await?;
+    let error = collect(stream).await.expect_err("an API-key 401 is final");
+    assert_eq!(error.to_string(), "anthropic rejected the API key.");
+    assert_eq!(
+        error.fix(),
+        Some(String::from("Run dalgon login anthropic."))
+    );
+    let anthropic_requests = anthropic_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert_eq!(anthropic_requests.len(), 1);
+    let token_requests = token_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert!(
+        token_requests.is_empty(),
+        "an API-key 401 sends no refresh request"
+    );
+    Ok(())
 }

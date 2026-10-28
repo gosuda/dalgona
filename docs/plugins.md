@@ -307,7 +307,55 @@ The handler reads `ctx.config.read_only`. An unknown key, a wrong type, or an in
 
 ## Add skills, rules, and prompt text
 
-`dal.skill(description, path)` publishes a skill. The path is relative to the plugin directory, so dal reads `skills/review/SKILL.md` when the plugin loads. `letter2image = True` turns on letter handling for the skill. The [system prompt](prompt.md) page describes letter handling. Skills collide by name. The first claimant wins. An ambiguous short name refuses to resolve.
+`dal.skill(description, path)` publishes a skill. The path is relative to the plugin directory, so dal reads `skills/review/SKILL.md` when the plugin loads. `letter2image = True` turns on letter handling for the skill. The [system prompt](prompt.md) page describes letter handling. Skills collide by name. A clashing record is not published. An ambiguous short name refuses to resolve. A clash without an explicit replacement is refused.
+
+A user plugin can take over one bundled skill or rule by naming it explicitly. The mechanism is shared in dal; in dalgona the bundled owners include `skills` and `quality`. Only `skill` and `rule` records are replaceable. The extension name itself is never replaceable.
+
+`dal.skill(..., replace = True, battery = "<bundled extension>")` and `dal.rule(..., replace = True, battery = "<bundled extension>")` carry the claim as one inseparable pair. Omitting the pair, or writing `replace = False`, keeps the default refusal of a clashing record. `replace` is a boolean and `battery` is a string; an explicit `None` for either is a wrong-type refusal at the declaring call, not an omission. Writing `battery` without `replace = True`, or `replace = True` without `battery`, is a strict input refusal at the call that names both keywords.
+
+The owner is never implied and must name the bundled extension exactly. A name no bundled extension ships, a bundled extension that does not register the record, a built-in extension, or a user plugin each refuses the load. Naming the wrong bundled extension refuses even when another bundled extension registers the record. A record another user plugin already replaced refuses as well. A plugin named like a battery stays rejected even with the pair.
+
+A replacement moves one record and nothing else. The replacing extension keeps its own plain user identity and inherits no extension name, service request, tool, prompt section, status kind, or grant from the owner.
+
+A skill that replaces the bundled `find-anything` skill owned by `skills`:
+
+```starlark
+load("@dal/v1", "dal")
+
+plugin = dal.plugin(
+    name = "mine",
+    version = "0.1.0",
+    skills = {
+        "find-anything": dal.skill(
+            description = "Mine replaces the bundled finder.",
+            path = "skills/find-anything/SKILL.md",
+            replace = True,
+            battery = "skills",
+        ),
+    },
+)
+```
+
+A rule that replaces the bundled `fabricated-unavailable-tool-call` rule owned by `quality`:
+
+```starlark
+load("@dal/v1", "dal")
+
+plugin = dal.plugin(
+    name = "mine",
+    version = "0.1.0",
+    rules = {
+        "fabricated-unavailable-tool-call": dal.rule(
+            pattern = "\\bfoo\\b",
+            text = "Mine replaces the bundled detector.",
+            replace = True,
+            battery = "quality",
+        ),
+    },
+)
+```
+
+Reload rebuilds the declared owners. Removing the claim and renaming or deleting the user record restores the bundled original. Keeping the colliding record without the claim refuses the reload and the previous plugin set stays live.
 
 `dal.rule(text, pattern, judge, always_apply, scope, interrupt_mode, repeat_mode, repeat_gap)` publishes a rule. Every argument is a keyword. Only `text` is required. A rule with a `pattern` watches the model's output. The `pattern` is a regular expression. On a match, dal tells the model the `text`. A rule with `always_apply = True` and no `pattern` applies every turn. A rule needs a pattern unless it always applies. A rule with neither fails at the call. `judge` is optional instruction text for judged rules.
 

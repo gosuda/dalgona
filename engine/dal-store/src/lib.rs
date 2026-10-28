@@ -2,6 +2,7 @@
 
 mod blob;
 mod error;
+mod job_ledger;
 mod journal;
 mod layout;
 mod list;
@@ -16,6 +17,7 @@ pub use error::{
     AbortedTurn, BlobError, INTERRUPTED_CALL, JournalError, MISSING_ON_BRANCH, NO_EARLIER_SESSION,
     NOT_RUN_CALL, OpenReport, StoreError, TornTail,
 };
+pub use job_ledger::{JobLedger, JobLedgerEntry, JobLedgerError, JobLedgerRecovery};
 pub use journal::Receipt;
 pub use layout::Locator;
 pub use private::{

@@ -1,5 +1,7 @@
 use super::helpers::entry_token_weight;
-use super::types::{MAX_INTERRUPTS, ManualCompletion, QueuedInput, Tree, TurnFlags, TurnTotals};
+use super::types::{
+    MAX_INTERRUPTS, ManualCompletion, PendingMail, QueuedInput, Tree, TurnFlags, TurnTotals,
+};
 use super::{
     ApprovalMode, BTreeSet, CallId, CompactionReason, EntryId, EntryKind, Family, Limits, Mode,
     ModelRoute, NonZeroU64, Part, Phase, Policy, RawJson, RequestParams, Session, Settings,
@@ -32,6 +34,20 @@ impl Session {
             .iter()
             .filter(|item| matches!(item, QueuedInput::Steer(_)))
             .count()
+    }
+
+    /// Returns the number of waiting `NextTurn` mail rows the fold still
+    /// owes a turn; the recipient's live mailbox capacity bound.
+    #[must_use]
+    pub fn pending_mails(&self) -> usize {
+        self.pending_mail.len()
+    }
+
+    /// The position the next buffered mail row takes, or none once the
+    /// position space is exhausted.
+    #[must_use]
+    pub fn next_mail_position(&self) -> Option<EntryId> {
+        NonZeroU64::new(self.mail_rows.checked_add(1)?).map(EntryId::new)
     }
 
     /// Returns the number of queued follow-up turns.
@@ -264,6 +280,11 @@ impl Session {
         Some((turn, source))
     }
 
+    /// Drains every waiting `NextTurn` mail row in journal order.
+    pub(super) fn take_pending_mail(&mut self) -> Vec<PendingMail> {
+        std::mem::take(&mut self.pending_mail)
+    }
+
     pub(super) fn empty() -> Self {
         Self {
             phase: Phase::Idle,
@@ -290,6 +311,8 @@ impl Session {
             allow_always: BTreeSet::new(),
             promoted: BTreeSet::new(),
             queued_inputs: Vec::new(),
+            pending_mail: Vec::new(),
+            mail_rows: 0,
             open_questions: Vec::new(),
             live_jobs: Vec::new(),
             ended_jobs: Vec::new(),

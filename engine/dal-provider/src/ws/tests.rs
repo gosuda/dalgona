@@ -100,10 +100,12 @@ fn responses_wire(
             effort: Some("high"),
         },
         reasoning_summary: false,
+        max_output: None,
         auth,
         credential: &credential,
         session_id,
         user_agent: "dalgon/test (Linux test; x86_64)",
+        tool_schemas: crate::family::schema::ToolSchemas::Verbatim,
     })
     .expect("Responses request has a valid route and credential")
 }
@@ -633,6 +635,17 @@ fn assert_responses_handshake(request: &Request, auth: AuthStyle) {
             assert!(headers.get("x-api-key").is_none());
             assert!(headers.get("api-key").is_none());
         }
+        AuthStyle::CfAigAuthorization => {
+            assert_eq!(
+                headers
+                    .get("cf-aig-authorization")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer responses-test-key")
+            );
+            assert!(headers.get("authorization").is_none());
+            assert!(headers.get("x-api-key").is_none());
+            assert!(headers.get("api-key").is_none());
+        }
     }
     for name in [
         "chatgpt-account-id",
@@ -679,7 +692,11 @@ async fn serve_responses_reuse(
 
 #[tokio::test]
 async fn responses_api_key_handshake_frame_and_reuse() -> Result<(), Box<dyn Error>> {
-    for auth in [AuthStyle::Bearer, AuthStyle::XApiKey] {
+    for auth in [
+        AuthStyle::Bearer,
+        AuthStyle::XApiKey,
+        AuthStyle::CfAigAuthorization,
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let base = format!("http://{}/v1", listener.local_addr()?);
         let session = SessionId::new_v7();

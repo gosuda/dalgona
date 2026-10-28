@@ -222,6 +222,41 @@ fn named_provider_requires_a_key_environment_name() {
 }
 
 #[test]
+fn builtin_bedrock_entry_needs_no_key_env_and_defaults_the_runtime_base() {
+    let config = parse("[providers.amazon-bedrock]\n")
+        .expect("the built-in Bedrock row resolves without any key material");
+    let bedrock = entry(&config, "amazon-bedrock");
+    assert_eq!(bedrock.family, Family::Bedrock);
+    assert_eq!(bedrock.auth, AuthStyle::Bearer);
+    assert!(
+        bedrock.key_env.is_none(),
+        "the ambient AWS chain is the credential source, so no dummy key_env is required"
+    );
+    assert_eq!(bedrock.origins.base, Origin::RowDefault);
+    assert_eq!(
+        &*bedrock.base_url,
+        "https://bedrock-runtime.us-east-1.amazonaws.com"
+    );
+}
+
+#[test]
+fn named_bedrock_entry_resolves_the_ambient_aws_chain_without_a_key_env() {
+    // The reference signs in to the shared AWS credential chain without
+    // storing any key material, so a bedrock entry needs no key_env.
+    let config = parse(
+        "[providers.bedrock-eu]\napi = 'bedrock'\nbase_url = 'https://bedrock-runtime.eu-west-1.amazonaws.com'\n",
+    )
+    .expect("the ambient AWS chain is a credential source of its own");
+    let row = entry(&config, "bedrock-eu");
+    assert_eq!(row.family, Family::Bedrock);
+    assert_eq!(row.auth, AuthStyle::Bearer);
+    assert!(
+        row.key_env.is_none(),
+        "an ambient-only entry names no key_env"
+    );
+}
+
+#[test]
 fn dal_provider_id_is_reserved_before_named_fields_are_decoded() {
     let error = parse("[providers.dal]\n").unwrap_err();
     assert_eq!(error.to_string(), "providers.dal: the name is reserved.");
@@ -301,18 +336,24 @@ fn empty_default_model_is_rejected() {
 #[test]
 fn builtin_provider_settings_default_to_empty() {
     let config = parse("").expect("empty config uses defaults");
-    // Empty tables carry nothing but the omission record: every built-in row
-    // names no `base_url`, so preparation may resolve one from the captured
+    // Empty tables decode to default settings, and every built-in row names
+    // no `base_url`, `api`, or `auth` of its own, so every origin records a
+    // row default: preparation may resolve one from the captured
     // environment.
-    let expected = ProviderSettings {
-        base_url_defaulted: true,
-        ..ProviderSettings::default()
-    };
     assert!(
         config
             .providers
             .iter()
-            .all(|provider| provider.settings == expected)
+            .all(|provider| provider.settings == ProviderSettings::default())
+    );
+    assert!(
+        config.providers.iter().all(|provider| provider.origins
+            == Origins {
+                api: Origin::RowDefault,
+                base: Origin::RowDefault,
+                auth: Origin::RowDefault,
+            }),
+        "an omitted key is a row default on every built-in row"
     );
 }
 
@@ -325,19 +366,80 @@ fn base_url_provenance_records_omission_not_equality() {
     .expect("an explicit default URL is valid");
     // Explicitly configuring the default still wins: only omission is
     // recorded, never equality with the row default.
-    assert!(!entry(&config, "openai").settings.base_url_defaulted);
+    assert_eq!(entry(&config, "openai").origins.base, Origin::Explicit);
     assert_eq!(&*entry(&config, "openai").base_url, openai_default);
 
     let config = parse("[providers.openai]\napi_version = '2025-01-01'\n")
         .expect("a settings-only table is valid");
-    assert!(entry(&config, "openai").settings.base_url_defaulted);
+    assert_eq!(entry(&config, "openai").origins.base, Origin::RowDefault);
 
     let config = parse(concat!(
         "[providers.zenmux]\napi = 'openai_chat'\n",
         "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",
     ))
     .expect("a named provider is valid");
-    assert!(!entry(&config, "zenmux").settings.base_url_defaulted);
+    assert_eq!(entry(&config, "zenmux").origins.base, Origin::Explicit);
+}
+
+#[test]
+fn origin_records_follow_each_key_presence_independently() {
+    // One explicit key marks exactly its own origin.
+    let config = parse("[providers.openai]\napi = 'openai_responses'\n")
+        .expect("an api-only table is valid");
+    let openai = entry(&config, "openai");
+    assert_eq!(openai.family, Family::Responses, "the explicit api applies");
+    assert_eq!(openai.origins.api, Origin::Explicit);
+    assert_eq!(openai.origins.base, Origin::RowDefault);
+    assert_eq!(openai.origins.auth, Origin::RowDefault);
+
+    let config =
+        parse("[providers.openai]\nauth = 'bearer'\n").expect("an auth-only table is valid");
+    let openai = entry(&config, "openai");
+    assert_eq!(openai.origins.api, Origin::RowDefault);
+    assert_eq!(openai.origins.base, Origin::RowDefault);
+    assert_eq!(openai.origins.auth, Origin::Explicit);
+
+    let config = parse("[providers.openai]\nbase_url = 'https://proxy.example.test/v1'\n")
+        .expect("a base-only table is valid");
+    let openai = entry(&config, "openai");
+    assert_eq!(openai.origins.api, Origin::RowDefault);
+    assert_eq!(openai.origins.base, Origin::Explicit);
+    assert_eq!(openai.origins.auth, Origin::RowDefault);
+
+    // A named provider always names `api` and `base_url`; `auth` per presence.
+    let config = parse(concat!(
+        "[providers.zenmux]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\nauth = 'bearer'\n",
+    ))
+    .expect("a named provider with auth is valid");
+    let zenmux = entry(&config, "zenmux");
+    assert_eq!(
+        zenmux.origins,
+        Origins {
+            api: Origin::Explicit,
+            base: Origin::Explicit,
+            auth: Origin::Explicit,
+        }
+    );
+}
+
+#[test]
+fn cf_aig_authorization_parses_as_an_explicit_auth() {
+    let config = parse("[providers.openai]\nauth = 'cf-aig-authorization'\n")
+        .expect("the gateway token parses");
+    let openai = entry(&config, "openai");
+    assert_eq!(openai.auth, AuthStyle::CfAigAuthorization);
+    assert_eq!(openai.origins.auth, Origin::Explicit);
+
+    let config = parse(concat!(
+        "[providers.zenmux]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",
+        "auth = 'cf-aig-authorization'\n",
+    ))
+    .expect("a named gateway entry parses");
+    let zenmux = entry(&config, "zenmux");
+    assert_eq!(zenmux.auth, AuthStyle::CfAigAuthorization);
+    assert_eq!(zenmux.origins.auth, Origin::Explicit);
 }
 
 #[test]
@@ -352,10 +454,12 @@ fn named_provider_settings_decode_from_their_own_table() {
     ))
     .expect("a named provider keeps its settings");
     let zenmux = entry(&config, "zenmux");
+    assert_eq!(zenmux.origins.api, Origin::Explicit);
+    assert_eq!(zenmux.origins.base, Origin::Explicit);
+    assert_eq!(zenmux.origins.auth, Origin::RowDefault);
     assert_eq!(
         zenmux.settings,
         ProviderSettings {
-            base_url_defaulted: false,
             api_version: Some("2025-01-01".into()),
             deployments: [("gpt-chat".into(), "prod-gpt".into())].into(),
             region: Some("us-west-2".into()),
@@ -454,7 +558,7 @@ fn auth_accepts_api_key_and_none_and_rejects_everything_else() {
     .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "providers.zenmux.auth must be bearer, x-api-key, api-key, or none"
+        "providers.zenmux.auth must be bearer, x-api-key, api-key, cf-aig-authorization, or none"
     );
 }
 
@@ -480,6 +584,104 @@ fn gemini_cli_named_providers_authenticate_nothing() {
         error.to_string(),
         "providers.local-gemini.auth must be none for api google-gemini-cli"
     );
+}
+
+#[test]
+fn the_native_cloud_code_assist_row_signs_in_and_never_claims_the_local_gemini_cli() {
+    // The signed-in row is its own family under its own id; the old id is no
+    // built-in row, so a table named `google-gemini-cli` stays a user entry.
+    assert!(find("google-gemini-cli").is_none());
+    let row = find("google-cloud-code-assist").expect("the native row is built in");
+    assert_eq!(row.family, Family::GoogleCloudCodeAssist);
+    assert!(row.key.is_none(), "the row takes no API key");
+    assert!(row.oauth.is_some(), "the row signs in with OAuth");
+
+    let config = parse("").expect("defaults decode");
+    let native = entry(&config, "google-cloud-code-assist");
+    assert_eq!(native.family, Family::GoogleCloudCodeAssist);
+    assert_eq!(native.auth, AuthStyle::Bearer);
+    assert_eq!(&*native.base_url, row.base_url);
+    assert!(native.def.is_some_and(|def| def.oauth.is_some()));
+    assert!(native.key_env.is_none());
+
+    // The row takes its own spelling and nothing that names the subprocess.
+    let config = parse("[providers.google-cloud-code-assist]\napi = 'google-cloud-code-assist'\n")
+        .expect("the row accepts its own api");
+    assert_eq!(
+        entry(&config, "google-cloud-code-assist").family,
+        Family::GoogleCloudCodeAssist
+    );
+    let error =
+        parse("[providers.google-cloud-code-assist]\napi = 'google-gemini-cli'\nauth = 'none'\n")
+            .expect_refused("the subprocess cannot be named through the native id");
+    assert_eq!(
+        error.to_string(),
+        "providers.google-cloud-code-assist.api conflicts with its fixed family"
+    );
+
+    // The row signs in with OAuth: `none` and every other style name a
+    // credential it could never use, so they are refused rather than ignored.
+    for auth in ["none", "x-api-key", "api-key"] {
+        let error = parse(&format!(
+            "[providers.google-cloud-code-assist]\nauth = '{auth}'\n"
+        ))
+        .expect_refused("the OAuth-only row takes only its bearer");
+        assert_eq!(
+            error.to_string(),
+            "providers.google-cloud-code-assist.auth must be bearer for api google-cloud-code-assist",
+            "auth = {auth}"
+        );
+    }
+    let config = parse("[providers.google-cloud-code-assist]\nauth = 'bearer'\n")
+        .expect("an explicit bearer is the default");
+    assert_eq!(
+        entry(&config, "google-cloud-code-assist").auth,
+        AuthStyle::Bearer
+    );
+
+    // A user table under the old id with no `api` has nothing to decode: the
+    // old id never became a built-in alias for the native row.
+    let error = parse("[providers.google-gemini-cli]\nbase_url = 'https://example.test'\n")
+        .expect_refused("an old-id table still needs its own api");
+    assert!(matches!(
+        &error,
+        ProviderConfigError::MissingKey { name, key } if &**name == "google-gemini-cli" && *key == "api"
+    ));
+
+    // A user entry that names the old api stays the credential-less
+    // subprocess, whatever the native row is.
+    let config = parse(concat!(
+        "[providers.google-gemini-cli]\napi = 'google-gemini-cli'\n",
+        "base_url = 'https://example.test'\nkey_env = 'UNUSED'\n",
+    ))
+    .expect("a user entry may keep the old id and api");
+    let local = entry(&config, "google-gemini-cli");
+    assert_eq!(local.family, Family::GoogleGeminiCli);
+    assert_eq!(local.auth, AuthStyle::None);
+    assert!(local.def.is_none());
+}
+
+#[test]
+fn an_entry_pointed_at_the_native_family_takes_a_bearer_default_and_keeps_its_family() {
+    let config = parse("[providers.groq]\napi = 'google-cloud-code-assist'\n")
+        .expect("a preset may be pointed at the native family");
+    assert_eq!(entry(&config, "groq").family, Family::GoogleCloudCodeAssist);
+    assert_eq!(entry(&config, "groq").auth, AuthStyle::Bearer);
+    let error = parse("[providers.groq]\napi = 'google-cloud-code-assist'\nauth = 'none'\n")
+        .expect_refused("the native family cannot be made credential-less");
+    assert_eq!(
+        error.to_string(),
+        "providers.groq.auth must be bearer for api google-cloud-code-assist"
+    );
+    let config = parse(concat!(
+        "[providers.my-cca]\napi = 'google-cloud-code-assist'\n",
+        "base_url = 'https://example.test'\nkey_env = 'MY_CCA_KEY'\n",
+    ))
+    .expect("a named entry may use the native family");
+    let named = entry(&config, "my-cca");
+    assert_eq!(named.family, Family::GoogleCloudCodeAssist);
+    assert_eq!(named.auth, AuthStyle::Bearer);
+    assert_eq!(&*named.base_url, "https://example.test");
 }
 
 #[test]
@@ -687,7 +889,7 @@ impl ExpectRefused for Result<ProviderConfig, ProviderConfigError> {
 }
 
 /// Every `api` spelling `parse_api` accepts.
-const API_SPELLINGS: [&str; 15] = [
+const API_SPELLINGS: [&str; 16] = [
     "openai_chat",
     "openai_responses",
     "anthropic",
@@ -699,6 +901,7 @@ const API_SPELLINGS: [&str; 15] = [
     "google-generative-ai",
     "google-vertex",
     "google-gemini-cli",
+    "google-cloud-code-assist",
     "google-antigravity",
     "mistral",
     "ollama",
@@ -802,7 +1005,8 @@ fn a_builtin_row_honors_every_connection_override_of_its_own_table() {
     assert_eq!(openai.transport, Transport::Websocket);
     assert_eq!(&*openai.base_url, "https://proxy.example.test/v1");
     assert_eq!(openai.max_concurrent_requests, 9);
-    assert!(!openai.settings.base_url_defaulted);
+    assert_eq!(openai.origins.base, Origin::Explicit);
+    assert_eq!(openai.origins.auth, Origin::Explicit);
     assert_eq!(entry(&config, "openai-codex").transport, Transport::Https);
     let groq = entry(&config, "groq");
     assert_eq!(groq.auth, AuthStyle::None);
@@ -824,7 +1028,7 @@ fn a_builtin_row_refuses_a_bad_connection_override_under_its_own_name() {
         ),
         (
             "[providers.openai]\nauth = 'basic'\n",
-            "providers.openai.auth must be bearer, x-api-key, api-key, or none",
+            "providers.openai.auth must be bearer, x-api-key, api-key, cf-aig-authorization, or none",
         ),
         (
             "[providers.openai]\nunknown = 1\n",
@@ -928,7 +1132,9 @@ fn an_auth_value_is_matched_exactly_without_case_folding_or_trimming() {
             let error = parse(&input).expect_refused(&format!("a respelled auth {auth:?} on {id}"));
             assert_eq!(
                 error.to_string(),
-                format!("providers.{id}.auth must be bearer, x-api-key, api-key, or none"),
+                format!(
+                    "providers.{id}.auth must be bearer, x-api-key, api-key, cf-aig-authorization, or none"
+                ),
                 "{auth:?}"
             );
         }
@@ -990,6 +1196,8 @@ fn a_native_row_accepts_only_its_own_api_spelling() {
         ("radius", "pi-messages"),
         ("google", "google-generative-ai"),
         ("google-vertex", "google-vertex"),
+        ("google-cloud-code-assist", "google-cloud-code-assist"),
+        ("google-antigravity", "google-antigravity"),
     ] {
         let row = find(id).expect("a native row");
         let config = parse(&format!("[providers.{id}]\napi = '{own}'\n"))

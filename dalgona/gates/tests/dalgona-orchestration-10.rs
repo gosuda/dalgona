@@ -63,6 +63,27 @@
 //!   floor and exits half a second later) across 25 parent sessions. All 200
 //!   end `done` in the durable ledger and each job id reaches exactly one
 //!   wake report; peak overlap is derived and logged, never asserted at 200.
+//!
+//! Two more tests share this target and are not stress-gated: they run in the
+//! functional lane and separate the two public causes of a
+//! `Delivery::Resync`, each over a real host and a real session with a
+//! synthetic `ModelHandler` that streams a controllable number of `TextDelta`
+//! events:
+//!
+//! - `stale_cursor_after_count_eviction_resyncs_first_then_recovers_contiguously`:
+//!   retained-window eviction. A live observer that the test drains in
+//!   lockstep with the model never lags, so only the replay window can be
+//!   exceeded. A cursor read from the view before a turn that published
+//!   exactly the window's worth of updates still resumes with every update;
+//!   one more update makes the same kind of cursor stale, and the
+//!   subscription must then open with exactly one `Resync` at the head and
+//!   nothing else before live delivery.
+//! - `queue_overflow_with_retained_ring_resyncs_once_then_ends_and_resumes_from_ring`:
+//!   live queue overflow. A subscription that is held undrained across a turn
+//!   that publishes up to, then past, the queue bound must deliver
+//!   everything through the bound, then exactly one `Resync` and an orderly
+//!   end, while a new subscription at the same cursor still replays every
+//!   update from the ring.
 #![expect(
     clippy::disallowed_methods,
     reason = "gate reads its opt-in flags and scratch dirs from the environment"
@@ -77,6 +98,8 @@ use dal_core::{
     Caps, ContextItem, ModelId, ModelRequest, Part, RawJson, ServiceSet, ThinkingLevel, Usage,
 };
 use dal_provider::{ProviderError, StopReason, StreamEvent, ToolArgs, ToolCall};
+
+use futures::StreamExt as _;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -668,6 +691,11 @@ fn cancel_child_response(context: &[ContextItem]) -> Result<EventStream, dal_cor
 /// One fast-batch call: `sleep 1` past the foreground floor, then the
 /// normative half-second tail. Count-based across 200 rounds; wake notices
 /// landing mid-turn never re-route it.
+///
+/// Every command ends with a standalone `echo ok`, so the success line the
+/// ledger check requires is a whole output line that the unique token (whose
+/// `tok-` prefix itself spells `ok`) can never supply. The two shapes still
+/// differ, so adjacent calls stay dissimilar for the loop guard.
 fn fast_response(context: &[ContextItem]) -> Result<EventStream, dal_core::RawJsonError> {
     let done = tool_results(context, "exec").len();
     if done >= FAST_PER_SESSION {
@@ -675,7 +703,7 @@ fn fast_response(context: &[ContextItem]) -> Result<EventStream, dal_core::RawJs
     }
     let command = if done.is_multiple_of(2) {
         format!(
-            "sleep {FAST_SLEEP_S}; sleep {FAST_TAIL_S}; echo ok tok-{}",
+            "sleep {FAST_SLEEP_S}; sleep {FAST_TAIL_S}; echo tok-{}; echo ok",
             unique_token()
         )
     } else {
@@ -1093,6 +1121,25 @@ async fn run_scenario(
     // close killed them, not that they never started.
     let held = await_held_census(&reports).await?;
     close_sessions_and_prove_held_gone(&host, &agents, held).await?;
+    for (record, agent) in records.iter().zip(&agents) {
+        let session = agent.session().to_string();
+        let ends = wait_for_ledger_ends(data, &session, HELD_PER_SESSION).await?;
+        let started = (0..HELD_PER_SESSION)
+            .map(|k| {
+                record.settled_call(&format!("e{k}")).and_then(|settled| {
+                    detached_id(&settled.text).ok_or_else(|| {
+                        format!("session {session} held job e{k} had no detached id").into()
+                    })
+                })
+            })
+            .collect::<support::TestResult<BTreeSet<_>>>()?;
+        let ended = ends.into_iter().map(|end| end.id).collect::<BTreeSet<_>>();
+        assert_eq!(
+            ended, started,
+            "session {} did not end each started held job exactly once",
+            record.index
+        );
+    }
     let report = host.shutdown(Duration::from_secs(10)).await;
     assert_eq!(
         report.tasks_remaining, 0,
@@ -1218,9 +1265,20 @@ async fn start_jobs_host(
     workspace: &Path,
     user: &str,
 ) -> support::TestResult<dal_agent::Host> {
+    start_host_with(data, workspace, user, jobs_extension()?).await
+}
+
+/// Starts one host on the real clock with `extension` added to the assembled
+/// product.
+async fn start_host_with(
+    data: &Path,
+    workspace: &Path,
+    user: &str,
+    extension: dal_agent::ext::Extension,
+) -> support::TestResult<dal_agent::Host> {
     support::grant_bundled_extensions(data, workspace, user, GATE_CLIENT).await?;
     let mut product = support::build_product(data.to_path_buf(), Some(user))?;
-    product.extensions.push(jobs_extension()?);
+    product.extensions.push(extension);
     let env = dal_agent::Env {
         vars: std::collections::BTreeMap::default(),
         cwd: workspace.to_path_buf(),
@@ -1967,6 +2025,14 @@ async fn drive_fast(index: usize, agent: &dal_agent::Agent) -> support::TestResu
     Ok(record)
 }
 
+/// Whether the ledger output text carries the fast command's final success
+/// output: a whole line that is exactly `ok`. A substring test cannot tell
+/// that line from the unique token, because `tok-<uuid>` already contains
+/// `ok`.
+fn has_standalone_ok_line(text: &str) -> bool {
+    text.lines().any(|line| line.trim() == "ok")
+}
+
 /// Checks every fast session and the batch as a whole: 200 distinct
 /// detached jobs, all `done` in the durable ledgers, each delivered by
 /// exactly one wake report. Peak overlap is logged, not asserted.
@@ -2022,8 +2088,12 @@ async fn check_fast_sessions(
     for session in session_ids {
         let ends = wait_for_ledger_ends(data, session, FAST_PER_SESSION).await?;
         for end in &ends {
-            if end.state != "exited" || end.code != Some(0) || !end.text.contains("ok") {
-                return Err(format!("session {session} job {} is not a clean done", end.id).into());
+            if end.state != "exited" || end.code != Some(0) || !has_standalone_ok_line(&end.text) {
+                return Err(format!(
+                    "session {session} job {} is not a clean done: exit state {:?}, code {:?}, output {:?}",
+                    end.id, end.state, end.code, end.text
+                )
+                .into());
             }
         }
     }
@@ -2089,4 +2159,666 @@ async fn wait_for_fast_delivery(data: &Path, session_ids: &[String]) -> support:
     .await;
     waited.map_err(|_| "fast jobs were not all delivered exactly once".to_string())?;
     Ok(())
+}
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// A session cursor as a public client holds it: the generation and the last
+/// sequence it has seen, exactly the pair `Agent::view` reports.
+type Cursor = (dal_core::Gen, dal_core::Seq);
+
+/// The synthetic model of the two resync tests.
+const RESYNC_MODEL: &str = "resync-gate/deltas";
+/// The prompt of one delta flood: `flood text deltas <n> per chunk <k>`.
+const FLOOD_TAG: &str = "flood text deltas ";
+const FLOOD_CHUNK_TAG: &str = " per chunk ";
+/// Text deltas the model streams between two confirmations of the test. The
+/// stream parks after every chunk until the test has received the whole
+/// chunk on its always-drained observer, so the observer's queue never holds
+/// more than one chunk and cannot be the subscriber that overflows.
+const FLOOD_CHUNK: usize = 256;
+/// Updates a top-level session's replay window retains: the engine documents
+/// `RingCaps::TOP_LEVEL` as 4096 updates or 1 MiB. The count is the case
+/// size; the byte side is a measured guard, never an assumption: every
+/// window case asserts its flood's serialized total stays below
+/// `REPLAY_WINDOW_BYTES`, so only the count eviction can explain the
+/// `N + 1` resync.
+const REPLAY_WINDOW_UPDATES: usize = 4_096;
+/// The companion byte cap of the replay window above. Used only to prove a
+/// flood stayed under it, never as a resync oracle.
+const REPLAY_WINDOW_BYTES: usize = 1 << 20;
+/// Deliveries a live subscriber's queue holds before it sheds. The N/N+1
+/// cases below prove this bound behaviorally (N undrained updates fit, N+1
+/// sheds), so the number is a case size, not an oracle import.
+const LIVE_QUEUE_UPDATES: usize = 1_024;
+const _: () = assert!(FLOOD_CHUNK * 2 < LIVE_QUEUE_UPDATES);
+const _: () = assert!(2 * LIVE_QUEUE_UPDATES < REPLAY_WINDOW_UPDATES);
+
+/// The newest flood prompt of the context: the delta count and the chunk
+/// size, or `None` for any other request.
+fn flood_request(context: &[ContextItem]) -> Option<(usize, usize)> {
+    let item = context
+        .iter()
+        .rev()
+        .find(|item| matches!(item, ContextItem::User { .. }))?;
+    let text = item_text(item);
+    let rest = &text[text.find(FLOOD_TAG)? + FLOOD_TAG.len()..];
+    let (total, rest) = rest.split_once(FLOOD_CHUNK_TAG)?;
+    let chunk: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let chunk: usize = chunk.parse().ok()?;
+    (chunk > 0).then_some((total.trim().parse().ok()?, chunk))
+}
+
+/// One response of `total` one-character `TextDelta` events, then a clean
+/// end. After every `chunk` deltas, and while more remain, the stream parks
+/// until the test grants one permit: the controllable, event-gated stream.
+fn gated_delta_stream(
+    total: usize,
+    chunk: usize,
+    gate: Arc<tokio::sync::Semaphore>,
+) -> EventStream {
+    let deltas = futures::stream::unfold(0_usize, move |sent| {
+        let gate = Arc::clone(&gate);
+        async move {
+            if sent == total {
+                return None;
+            }
+            if sent > 0
+                && sent.is_multiple_of(chunk)
+                && let Ok(permit) = gate.acquire().await
+            {
+                permit.forget();
+            }
+            Some((
+                Ok::<StreamEvent, ProviderError>(StreamEvent::TextDelta {
+                    text: "d".to_owned(),
+                }),
+                sent + 1,
+            ))
+        }
+    });
+    let close = futures::stream::iter([
+        Ok(StreamEvent::ToolCallsDone { calls: Vec::new() }),
+        Ok(StreamEvent::Usage { usage: usage() }),
+        Ok(StreamEvent::Stop {
+            reason: StopReason::EndTurn,
+        }),
+    ]);
+    EventStream::new(deltas.chain(close), || {})
+}
+
+/// The synthetic model that streams the flood a prompt asks for and answers
+/// every other request with one short text.
+struct DeltaModel {
+    gate: Arc<tokio::sync::Semaphore>,
+}
+
+impl ModelHandler for DeltaModel {
+    fn run<'a>(
+        &'a self,
+        request: ModelRequest,
+        _cx: ModelCx<'a>,
+    ) -> BoxFuture<'a, Result<EventStream, ModelError>> {
+        Box::pin(async move {
+            Ok(match flood_request(request.context.as_ref()) {
+                Some((total, chunk)) => gated_delta_stream(total, chunk, Arc::clone(&self.gate)),
+                None => text_stream("noted"),
+            })
+        })
+    }
+}
+
+/// The synthetic-model extension of the resync tests.
+fn resync_extension(
+    gate: Arc<tokio::sync::Semaphore>,
+) -> Result<dal_agent::ext::Extension, dal_core::RegistrationError> {
+    let record = ModelRecord {
+        id: ModelId::parse(RESYNC_MODEL)?,
+        caps: Caps {
+            context_window: Some(200_000),
+            thinking: Box::new([ThinkingLevel::Off]),
+            tool_use: true,
+            image_input: false,
+            custom_grammar: false,
+        },
+        handler: Arc::new(DeltaModel { gate }),
+        export: None,
+    };
+    ExtensionBuilder::new("resync-deltas", "0.1.0", ServiceSet::default())?
+        .model(record)
+        .build()
+}
+
+/// One real host with the delta model, its scratch tree, and the gate its
+/// model parks on.
+struct ResyncFixture {
+    _root: TestRoot,
+    workspace: PathBuf,
+    gate: Arc<tokio::sync::Semaphore>,
+    host: dal_agent::Host,
+}
+
+impl ResyncFixture {
+    async fn start(label: &str) -> support::TestResult<Self> {
+        let (root, data, workspace, _reports) = scratch_tree(label)?;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let user =
+            format!("model = \"{RESYNC_MODEL}\"\napproval = \"all\"\n\n[judge]\ngate = \"off\"\n");
+        let host = start_host_with(
+            &data,
+            &workspace,
+            &user,
+            resync_extension(Arc::clone(&gate))?,
+        )
+        .await?;
+        Ok(Self {
+            _root: root,
+            workspace,
+            gate,
+            host,
+        })
+    }
+
+    async fn open(&self) -> support::TestResult<dal_agent::Agent> {
+        open_session(&self.host, &self.workspace).await
+    }
+
+    /// Releases a model parked at a chunk boundary, shuts the host down on
+    /// every path, then reports `outcome` before the shutdown verdict.
+    async fn finish(self, outcome: support::TestResult<()>) -> support::TestResult<()> {
+        self.gate.add_permits(REPLAY_WINDOW_UPDATES);
+        let report = self.host.shutdown(Duration::from_secs(10)).await;
+        outcome?;
+        if report.tasks_remaining != 0 {
+            return Err("tasks outlived the resync host shutdown".into());
+        }
+        Ok(())
+    }
+}
+
+/// The cursor a client reads from the view of an idle session.
+fn view_cursor(agent: &dal_agent::Agent) -> support::TestResult<Cursor> {
+    let view = agent.view(dal_core::PageReq::default())?;
+    Ok((view.r#gen, view.seq))
+}
+
+fn is_delta(update: &dal_core::Update) -> bool {
+    matches!(update.kind, dal_core::UpdateKind::Delta { .. })
+}
+
+/// Every delivery that is ready now, and whether the stream then ended
+/// (`true`) or is merely quiet and still live (`false`).
+fn drain_ready(subscription: &mut dal_agent::Subscription) -> (Vec<dal_agent::Delivery>, bool) {
+    let mut deliveries = Vec::new();
+    loop {
+        match pump(subscription) {
+            Pump::Delivery(delivery) => deliveries.push(delivery),
+            Pump::Empty => return (deliveries, false),
+            Pump::Ended => return (deliveries, true),
+        }
+    }
+}
+
+/// One finished flood turn as the always-drained observer saw it.
+struct Flood {
+    /// The cursor the view reported before the prompt.
+    cursor: Cursor,
+    /// The cursor the view reported after the turn settled.
+    head: Cursor,
+    /// Every update published after `cursor`, in order.
+    updates: Vec<Arc<dal_core::Update>>,
+    /// The measured serialized length of every update above, via the same
+    /// `sonic_rs::to_vec` the replay ring sizes entries with. The window
+    /// cases assert this total stays below the byte cap, so only the
+    /// update-count eviction can explain an `N + 1` resync.
+    bytes: usize,
+}
+
+/// Runs one flood turn of `deltas` text deltas on `agent` and records every
+/// update it published after the cursor the view reported just before.
+///
+/// `observer` is a live subscription of the same session that this function
+/// drains in lockstep with the model: it grants the model one permit after
+/// each full chunk, so the observer is never behind by more than a chunk.
+/// The fixture guards below fail with a fixture message, never as a product
+/// verdict, when the turn did not publish a contiguous run ending at the
+/// view's head or when a delta did not map to one update.
+async fn run_flood(
+    agent: &dal_agent::Agent,
+    gate: &tokio::sync::Semaphore,
+    observer: &mut dal_agent::Subscription,
+    deltas: usize,
+) -> support::TestResult<Flood> {
+    let cursor = view_cursor(agent)?;
+    submit_prompt(
+        agent,
+        format!("{FLOOD_TAG}{deltas}{FLOOD_CHUNK_TAG}{FLOOD_CHUNK}"),
+    )
+    .await?;
+    let mut updates: Vec<Arc<dal_core::Update>> = Vec::new();
+    let mut seen_deltas = 0_usize;
+    let drained = tokio::time::timeout(HANG_GUARD, async {
+        loop {
+            match observer.next().await {
+                Some(dal_agent::Delivery::Update(update)) => {
+                    let ended = matches!(update.kind, dal_core::UpdateKind::TurnEnded { .. });
+                    if is_delta(&update) {
+                        seen_deltas += 1;
+                        if seen_deltas.is_multiple_of(FLOOD_CHUNK) && seen_deltas < deltas {
+                            gate.add_permits(1);
+                        }
+                    }
+                    updates.push(update);
+                    if ended {
+                        return Ok::<(), BoxError>(());
+                    }
+                }
+                Some(dal_agent::Delivery::Resync { .. }) => {
+                    return Err(
+                        "the always-drained observer was resynchronised: the fixture \
+                         fell behind, not the product"
+                            .into(),
+                    );
+                }
+                None => return Err("the observer stream ended before the turn did".into()),
+            }
+        }
+    })
+    .await;
+    drained.map_err(|_| format!("the {deltas}-delta flood turn never ended"))??;
+    // The actor has swept its mailbox once the status poll returns, so no
+    // update of the turn can still be in flight when the view is read.
+    agent.poll_status().await?;
+    loop {
+        match pump(observer) {
+            Pump::Delivery(dal_agent::Delivery::Update(update)) => updates.push(update),
+            Pump::Delivery(dal_agent::Delivery::Resync { .. }) => {
+                return Err("the observer was resynchronised after the turn".into());
+            }
+            Pump::Empty => break,
+            Pump::Ended => return Err("the observer ended after the turn".into()),
+        }
+    }
+    let head = view_cursor(agent)?;
+    if head.0 != cursor.0 {
+        return Err("the session generation changed during a flood turn".into());
+    }
+    let published = u64::try_from(updates.len())?;
+    if head.1.get() != cursor.1.get() + published {
+        return Err(format!(
+            "the view moved from seq {} to {} but the observer received {published} updates",
+            cursor.1.get(),
+            head.1.get()
+        )
+        .into());
+    }
+    for (update, want) in updates.iter().zip(cursor.1.get() + 1..) {
+        if update.r#gen != cursor.0 || update.seq.get() != want {
+            return Err(format!(
+                "the observer received seq {} where {want} was next: the stream is not contiguous",
+                update.seq.get()
+            )
+            .into());
+        }
+    }
+    if seen_deltas != deltas {
+        return Err(format!(
+            "{deltas} text deltas became {seen_deltas} delta updates: the flood no longer maps \
+             one delta to one update"
+        )
+        .into());
+    }
+    let mut bytes = 0_usize;
+    for update in &updates {
+        let len = sonic_rs::to_vec(&**update)
+            .map_err(|error| format!("a published update does not serialise: {error}"))?
+            .len();
+        bytes += len;
+    }
+    Ok(Flood {
+        cursor,
+        head,
+        updates,
+        bytes,
+    })
+}
+
+/// How many updates one flood turn publishes besides its text deltas. The
+/// first turn of a session is a warm-up and discarded; the next two must
+/// agree, or the window position of a case could not be set exactly.
+async fn flood_overhead(
+    agent: &dal_agent::Agent,
+    gate: &tokio::sync::Semaphore,
+    observer: &mut dal_agent::Subscription,
+) -> support::TestResult<usize> {
+    run_flood(agent, gate, observer, 1).await?;
+    let first = run_flood(agent, gate, observer, 1).await?.updates.len() - 1;
+    let second = run_flood(agent, gate, observer, 1).await?.updates.len() - 1;
+    if first != second {
+        return Err(format!(
+            "a flood turn publishes {first} then {second} updates besides its deltas: the case \
+             sizes cannot be set exactly"
+        )
+        .into());
+    }
+    Ok(first)
+}
+
+/// Requires `deliveries` to be exactly the updates the flood published, in
+/// order and equal in content.
+fn expect_exact_updates(
+    label: &str,
+    flood: &Flood,
+    deliveries: &[dal_agent::Delivery],
+) -> support::TestResult<()> {
+    if deliveries.len() != flood.updates.len() {
+        return Err(format!(
+            "{label}: {} deliveries for {} published updates; first {:?}, last {:?}",
+            deliveries.len(),
+            flood.updates.len(),
+            deliveries.first(),
+            deliveries.last()
+        )
+        .into());
+    }
+    for (index, (delivery, published)) in deliveries.iter().zip(&flood.updates).enumerate() {
+        let dal_agent::Delivery::Update(update) = delivery else {
+            return Err(
+                format!("{label}: delivery {index} is {delivery:?}, not {published:?}").into(),
+            );
+        };
+        if **update != **published {
+            return Err(format!(
+                "{label}: delivery {index} is {update:?}, published was {published:?}"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Requires `deliveries` to be exactly one `Resync` at the head the flood
+/// left, with no update before it.
+fn expect_single_resync_at_head(
+    label: &str,
+    flood: &Flood,
+    deliveries: &[dal_agent::Delivery],
+) -> support::TestResult<()> {
+    let [dal_agent::Delivery::Resync { generation, seq }] = deliveries else {
+        return Err(format!(
+            "{label}: a cursor {} updates behind the head must open with exactly one Resync and \
+             nothing else, got {} deliveries, first {:?}",
+            flood.updates.len(),
+            deliveries.len(),
+            deliveries.first()
+        )
+        .into());
+    };
+    if *generation != flood.head.0 || *seq != flood.head.1 {
+        return Err(format!(
+            "{label}: the Resync names ({generation:?}, {seq:?}), the view's head is {:?}",
+            flood.head
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Recovers a client after a count-eviction `Resync` the way the public
+/// contract directs: refetch the view, resubscribe at its cursor, follow a
+/// real turn contiguously.
+async fn recover_after_resync(
+    label: &str,
+    agent: &dal_agent::Agent,
+    gate: &tokio::sync::Semaphore,
+    observer: &mut dal_agent::Subscription,
+    stale: &Flood,
+) -> support::TestResult<()> {
+    let view = agent.view(dal_core::PageReq::default())?;
+    let resumed_at = (view.r#gen, view.seq);
+    if resumed_at != stale.head {
+        return Err(format!(
+            "{label}: the recovery view is at {resumed_at:?}, the Resync named {:?}",
+            stale.head
+        )
+        .into());
+    }
+    if !matches!(view.turn, dal_core::TurnState::Idle) {
+        return Err(format!("{label}: the recovery view is not idle: {:?}", view.turn).into());
+    }
+    let mut follower = agent.subscribe_listen(Some(resumed_at))?;
+    let (backlog, ended) = drain_ready(&mut follower);
+    if ended || !backlog.is_empty() {
+        return Err(format!(
+            "{label}: resubscribing at the recovered head must start live and quiet, got {} \
+             deliveries, ended {ended}",
+            backlog.len()
+        )
+        .into());
+    }
+    let follow = run_flood(agent, gate, observer, 3).await?;
+    if follow.cursor != resumed_at {
+        return Err(format!(
+            "{label}: the follow-up turn started at {:?}, not at the recovered head {resumed_at:?}",
+            follow.cursor
+        )
+        .into());
+    }
+    let (delivered, ended) = drain_ready(&mut follower);
+    if ended {
+        return Err(format!("{label}: the recovered subscription ended").into());
+    }
+    expect_exact_updates(label, &follow, &delivered)
+}
+
+/// Retained-window eviction, with no lagging subscriber anywhere: the live
+/// observer receives every update contiguously throughout.
+async fn replay_window_scenario(fixture: &ResyncFixture) -> support::TestResult<()> {
+    let agent = fixture.open().await?;
+    let mut observer = agent.subscribe_listen(None)?;
+    let overhead = flood_overhead(&agent, &fixture.gate, &mut observer).await?;
+    for (label, updates) in [
+        ("N-1", REPLAY_WINDOW_UPDATES - 1),
+        ("N", REPLAY_WINDOW_UPDATES),
+        ("N+1", REPLAY_WINDOW_UPDATES + 1),
+    ] {
+        let deltas = updates.checked_sub(overhead).ok_or_else(|| {
+            format!("{label}: the turn overhead {overhead} exceeds the case size {updates}")
+        })?;
+        let flood = run_flood(&agent, &fixture.gate, &mut observer, deltas).await?;
+        if flood.updates.len() != updates {
+            return Err(format!(
+                "{label}: the turn published {} updates after its cursor, not the {updates} the \
+                 case needs",
+                flood.updates.len()
+            )
+            .into());
+        }
+        if flood.bytes >= REPLAY_WINDOW_BYTES {
+            return Err(format!(
+                "{label}: the flood serialised to {} bytes, at or above the {REPLAY_WINDOW_BYTES} \
+                 byte cap, so the byte eviction could explain a resync instead of the count",
+                flood.bytes
+            )
+            .into());
+        }
+        let mut resumed = agent.subscribe_listen(Some(flood.cursor))?;
+        let (deliveries, ended) = drain_ready(&mut resumed);
+        if ended {
+            return Err(format!("{label}: the resumed subscription ended").into());
+        }
+        if updates <= REPLAY_WINDOW_UPDATES {
+            // The cursor is still inside the retained window: every update
+            // after it comes back, none lost, none replaced by a Resync.
+            expect_exact_updates(label, &flood, &deliveries)?;
+        } else {
+            expect_single_resync_at_head(label, &flood, &deliveries)?;
+            recover_after_resync(label, &agent, &fixture.gate, &mut observer, &flood).await?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn stale_cursor_after_count_eviction_resyncs_first_then_recovers_contiguously()
+-> support::TestResult<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let fixture = ResyncFixture::start("dalgona-resync-window").await?;
+        let outcome = replay_window_scenario(&fixture).await;
+        fixture.finish(outcome).await
+    })
+}
+
+/// Requires the drain of a subscription that was held undrained across a
+/// flood past the queue bound: the updates that were queued before the
+/// overflow, exactly one `Resync` after them, then the end of the stream.
+fn expect_overflow_resync(
+    label: &str,
+    flood: &Flood,
+    deliveries: &[dal_agent::Delivery],
+    ended: bool,
+) -> support::TestResult<()> {
+    if !ended {
+        return Err(
+            format!("{label}: the overflowed subscription did not end after its Resync").into(),
+        );
+    }
+    let Some((dal_agent::Delivery::Resync { generation, seq }, queued)) = deliveries.split_last()
+    else {
+        return Err(format!(
+            "{label}: an overflowed queue ended with no final Resync; deliveries {}, last {:?}",
+            deliveries.len(),
+            deliveries.last()
+        )
+        .into());
+    };
+    let mut last_seq = None;
+    for delivery in queued {
+        let dal_agent::Delivery::Update(update) = delivery else {
+            return Err(format!("{label}: a second Resync before the end: {delivery:?}").into());
+        };
+        let index = update
+            .seq
+            .get()
+            .checked_sub(flood.cursor.1.get() + 1)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .filter(|offset| last_seq.is_none_or(|last| *offset > last));
+        let Some(index) = index else {
+            return Err(format!(
+                "{label}: queued update seq {} is not strictly after the cursor and the update \
+                 before it",
+                update.seq.get()
+            )
+            .into());
+        };
+        if flood.updates.get(index).map(|published| &**published) != Some(&**update) {
+            return Err(format!(
+                "{label}: queued update seq {} is not what the session published",
+                update.seq.get()
+            )
+            .into());
+        }
+        last_seq = Some(index);
+    }
+    if queued.len() >= flood.updates.len() {
+        return Err(format!(
+            "{label}: nothing was shed ({} queued of {} published) yet a Resync arrived",
+            queued.len(),
+            flood.updates.len()
+        )
+        .into());
+    }
+    let after_queued = last_seq.is_none_or(|last| {
+        usize::try_from(seq.get().saturating_sub(flood.cursor.1.get() + 1))
+            .is_ok_and(|offset| offset > last)
+    });
+    if *generation != flood.cursor.0 || !after_queued || *seq > flood.head.1 {
+        return Err(format!(
+            "{label}: the Resync ({generation:?}, {seq:?}) is not after the queued updates and \
+             within the head {:?}",
+            flood.head
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Live queue overflow, with the replay ring far inside its window: a held
+/// subscription is shed by its own queue bound while the ring keeps every
+/// update.
+async fn live_queue_scenario(fixture: &ResyncFixture) -> support::TestResult<()> {
+    let agent = fixture.open().await?;
+    let mut observer = agent.subscribe_listen(None)?;
+    let overhead = flood_overhead(&agent, &fixture.gate, &mut observer).await?;
+    for (label, updates) in [
+        ("N-1", LIVE_QUEUE_UPDATES - 1),
+        ("N", LIVE_QUEUE_UPDATES),
+        ("N+1", LIVE_QUEUE_UPDATES + 1),
+        ("2N", 2 * LIVE_QUEUE_UPDATES),
+    ] {
+        let deltas = updates.checked_sub(overhead).ok_or_else(|| {
+            format!("{label}: the turn overhead {overhead} exceeds the case size {updates}")
+        })?;
+        let cursor = view_cursor(&agent)?;
+        let mut held = agent.subscribe_listen(Some(cursor))?;
+        let (preface, ended) = drain_ready(&mut held);
+        if ended || !preface.is_empty() {
+            return Err(format!(
+                "{label}: a subscription at the view's cursor must start live and quiet, got {} \
+                 deliveries, ended {ended}",
+                preface.len()
+            )
+            .into());
+        }
+        // The turn runs while `held` is never drained; only the observer is.
+        let flood = run_flood(&agent, &fixture.gate, &mut observer, deltas).await?;
+        if flood.cursor != cursor || flood.updates.len() != updates {
+            return Err(format!(
+                "{label}: the turn published {} updates from {:?}, not the {updates} from \
+                 {cursor:?} the case needs",
+                flood.updates.len(),
+                flood.cursor
+            )
+            .into());
+        }
+        let (deliveries, ended) = drain_ready(&mut held);
+        if updates <= LIVE_QUEUE_UPDATES {
+            if ended {
+                return Err(format!(
+                    "{label}: {updates} undrained updates fit the queue, yet the subscription ended"
+                )
+                .into());
+            }
+            expect_exact_updates(label, &flood, &deliveries)?;
+        } else {
+            expect_overflow_resync(label, &flood, &deliveries, ended)?;
+        }
+        // Overflow is the queue's loss, never the ring's: a new subscription
+        // at the same cursor still replays every update, with no Resync.
+        // It is drained at once, before anything else can publish into a
+        // backlog longer than the queue bound.
+        let mut replay = agent.subscribe_listen(Some(cursor))?;
+        let (replayed, ended) = drain_ready(&mut replay);
+        if ended {
+            return Err(format!("{label}: the ring replay ended").into());
+        }
+        expect_exact_updates(label, &flood, &replayed)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn queue_overflow_with_retained_ring_resyncs_once_then_ends_and_resumes_from_ring()
+-> support::TestResult<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let fixture = ResyncFixture::start("dalgona-resync-queue").await?;
+        let outcome = live_queue_scenario(&fixture).await;
+        fixture.finish(outcome).await
+    })
 }

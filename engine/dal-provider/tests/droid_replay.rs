@@ -25,13 +25,13 @@ mod replay_server;
 use std::sync::Arc;
 
 use dal_core::{
-    ContextItem, Family, ModelRequest, ModelRoute, Part, Purpose, RequestParams, ThinkingLevel,
+    Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute, Part, Purpose,
+    RequestParams, ThinkingLevel,
 };
 use dal_provider::{
-    AuthStore, AuthStyle, CatalogEntry, Credential, EnvSnapshot, Listing, NoticeSink,
-    OAuthCredential, ProviderConfig, ProviderEntry, ProviderIdentity, ProviderSet,
-    ProviderSettings, ResolvedModel, SecretString, StopReason, StreamEvent, ThinkingSupport,
-    ToolSupport, Transport,
+    AuthStore, CatalogEntry, Credential, EnvSnapshot, Listing, NoticeSink, OAuthCredential,
+    ProviderConfig, ProviderIdentity, ProviderSet, ResolvedModel, SecretString, StopReason,
+    StreamEvent, ThinkingSupport, ToolSupport,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -83,6 +83,7 @@ fn seed_auth(dir: &std::path::Path) {
                 expires_at: None,
                 id_token: None,
                 account_id: None,
+                project_id: None,
             }),
         )
         .expect("fake droid credential stores");
@@ -104,25 +105,21 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
 }
 
 fn config(base: &str) -> ProviderConfig {
-    ProviderConfig {
-        default_model: None,
-        thinking: ThinkingLevel::Medium,
-        aliases: Vec::new(),
-        request_max_retries: 0,
-        stream_max_retries: 0,
-        providers: vec![ProviderEntry {
-            id: "factory-droid".into(),
-            def: None,
-            family: Family::Droid,
-            base_url: base.into(),
-            transport: Transport::Https,
-            key_env: None,
-            auth: AuthStyle::Bearer,
-            max_concurrent_requests: 4,
-            settings: ProviderSettings::default(),
-        }],
-        scripted: None,
-    }
+    let table = format!("[providers.factory-droid]\nbase_url = \"{base}\"\n");
+    let core = Config::load(
+        ConfigProduct::Dalgon,
+        std::path::Path::new("/tmp/dal-provider-droid-replay"),
+        "",
+        Some(&table),
+    )
+    .expect("provider table parses");
+    let mut decoded = ProviderConfig::from_config(&core).expect("providers decode");
+    decoded.request_max_retries = 0;
+    decoded.stream_max_retries = 0;
+    decoded
+        .providers
+        .retain(|provider| &*provider.id == "factory-droid");
+    decoded
 }
 
 fn request() -> ModelRequest {

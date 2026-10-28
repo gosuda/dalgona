@@ -179,6 +179,8 @@ pub struct Config {
     pub(super) model: Option<Box<str>>,
     pub(super) thinking: crate::model::ThinkingLevel,
     pub(super) approval: ApprovalMode,
+    /// The ordered `provider/id` models `/model` lists; empty lists every model.
+    pub(super) scoped_models: Vec<Box<str>>,
     pub(super) screen: Screen,
     pub(super) tui: TuiConfig,
     pub(super) theme: Box<str>,

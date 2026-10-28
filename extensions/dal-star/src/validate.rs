@@ -19,8 +19,8 @@ use std::sync::Arc;
 use dal_core::ext::{ExportId, ExportKind, OpId, OpSet, Phase, RuleFile};
 use dal_core::ext::{Scope, decode_skill_mcp};
 use dal_core::{
-    Caps, CommandSpec, HookEvent, ModelId, Name, Origin, RawJson, RuleRecord, ServiceSet, Site,
-    SkillRecord,
+    Caps, CommandSpec, HookEvent, ModelId, Name, Origin, RawJson, ReplaceClaim, ReplaceKind,
+    RuleRecord, ServiceSet, Site, SkillRecord,
 };
 use starlark::values::{OwnedFrozenValue, Value, ValueLike};
 
@@ -62,6 +62,10 @@ pub(crate) struct LoadedPlugin {
     pub(crate) skills: Box<[SkillRecord]>,
     /// Rule declarations ready for the rules owner.
     pub(crate) rules: Box<[RuleRecord]>,
+    /// The explicit replacement claims, one per skill or rule record that
+    /// declared `replace = True, battery = ...`; the settlement binds each
+    /// to its named bundled owner.
+    pub(crate) replace_claims: Box<[ReplaceClaim]>,
     /// Direct `rules/*.md` source files retained in plugin-relative path order.
     pub(crate) rule_files: Box<[RuleFile]>,
     /// Scripted model routes keyed by local name.
@@ -77,6 +81,17 @@ pub(crate) struct LoadedPlugin {
     pub(crate) plugin: OwnedFrozenValue,
     /// The per-handler evaluation budget.
     pub(crate) limits: Limits,
+}
+
+impl LoadedPlugin {
+    /// The bundled owner this plugin names for replacing one record, or
+    /// [`None`] when the record registers plainly.
+    pub(crate) fn claim_for(&self, kind: ReplaceKind, record: &Name) -> Option<&Name> {
+        self.replace_claims
+            .iter()
+            .find(|claim| claim.kind == kind && claim.record == *record)
+            .map(|claim| &claim.owner)
+    }
 }
 
 /// One reachable export entry: a tool or a scripted model route.
@@ -242,8 +257,8 @@ pub(crate) fn validate(
     let exports = validate_tools(&site, &declared, &descriptor.tools)?;
     let commands = validate_commands(&site, &declared, &descriptor.commands)?;
     let hooks = validate_hooks(&site, &declared, &descriptor.hooks)?;
-    let skills = validate_skills(&site, &descriptor.skills, files)?;
-    let rules = validate_rules(&site, &descriptor.rules)?;
+    let (skills, skill_claims) = validate_skills(&site, &descriptor.skills, files)?;
+    let (rules, rule_claims) = validate_rules(&site, &descriptor.rules)?;
     let models = validate_models(&site, &declared, &descriptor.models)?;
 
     // Every operation a declaration may issue contributes its service to the
@@ -294,6 +309,7 @@ pub(crate) fn validate(
         hooks: hooks.into_boxed_slice(),
         skills: skills.into_boxed_slice(),
         rules: rules.into_boxed_slice(),
+        replace_claims: skill_claims.into_iter().chain(rule_claims).collect(),
         rule_files,
         models: models.into_boxed_slice(),
         prompt: descriptor.prompt.clone().map(String::into_boxed_str),
@@ -462,8 +478,9 @@ fn validate_skills(
     site: &Site,
     skills: &starlark::collections::SmallMap<String, Value<'_>>,
     files: &std::collections::BTreeMap<PathBuf, Vec<u8>>,
-) -> Result<Vec<SkillRecord>, LoadError> {
+) -> Result<(Vec<SkillRecord>, Vec<ReplaceClaim>), LoadError> {
     let mut validated = Vec::new();
+    let mut claims = Vec::new();
     for (local, skill_value) in skills {
         let local = check_local(site, "skill", local)?;
         let skill =
@@ -471,6 +488,19 @@ fn validate_skills(
                 path: site.path.clone(),
                 message: format!("skill `{local}` is not a dal.skill(...) descriptor").into(),
             })?;
+        if let Some(owner) = replacement_owner(
+            site,
+            "skill",
+            &local,
+            skill.replace,
+            skill.battery.as_deref(),
+        )? {
+            claims.push(ReplaceClaim {
+                kind: ReplaceKind::Skill,
+                record: local.clone(),
+                owner,
+            });
+        }
         let body = read_asset(site, files, "skill", local.as_str(), &skill.path)?;
         let plugin_dir = site.path.parent().unwrap_or_else(|| Path::new(""));
         let mcp = decode_skill_mcp(&plugin_dir.join(&skill.path), &body)?;
@@ -483,20 +513,60 @@ fn validate_skills(
         });
     }
     validated.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(validated)
+    Ok((validated, claims))
+}
+
+/// The bundled owner one skill or rule descriptor names for its explicit
+/// replacement, or [`None`] when it declares no replacement.
+///
+/// The SDK constructor already refuses a half-declared pair at the call.
+/// This match stays exhaustive over the pair so a descriptor can never reach
+/// the settlement with an unbound claim, and the owner is parsed here so a
+/// malformed name fails at the declaring plugin, not at the settlement.
+fn replacement_owner(
+    site: &Site,
+    kind: &str,
+    local: &Name,
+    replace: bool,
+    battery: Option<&str>,
+) -> Result<Option<Name>, LoadError> {
+    let invalid = |message: String| LoadError::InvalidPlugin {
+        path: site.path.clone(),
+        message: format!("{kind} `{local}`: {message}").into(),
+    };
+    match (replace, battery) {
+        (false, None) => Ok(None),
+        (true, Some(owner)) => Name::parse(owner)
+            .map(Some)
+            .map_err(|_| invalid(format!("battery {owner:?} is not a valid extension name"))),
+        (true, None) => Err(invalid(
+            "replace = True needs battery = \"<bundled extension>\"".to_owned(),
+        )),
+        (false, Some(_)) => Err(invalid("battery needs replace = True".to_owned())),
+    }
 }
 
 fn validate_rules(
     site: &Site,
     rules: &starlark::collections::SmallMap<String, Value<'_>>,
-) -> Result<Vec<RuleRecord>, LoadError> {
+) -> Result<(Vec<RuleRecord>, Vec<ReplaceClaim>), LoadError> {
     let mut validated = Vec::new();
+    let mut claims = Vec::new();
     for (local, rule_value) in rules {
         let local = check_local(site, "rule", local)?;
         let rule = RuleValue::from_value(*rule_value).ok_or_else(|| LoadError::InvalidPlugin {
             path: site.path.clone(),
             message: format!("rule `{local}` is not a dal.rule(...) descriptor").into(),
         })?;
+        if let Some(owner) =
+            replacement_owner(site, "rule", &local, rule.replace, rule.battery.as_deref())?
+        {
+            claims.push(ReplaceClaim {
+                kind: ReplaceKind::Rule,
+                record: local.clone(),
+                owner,
+            });
+        }
         let judge = judge_text(site, local.as_str(), rule.judge)?;
         let invalid = |message: String| LoadError::InvalidPlugin {
             path: site.path.clone(),
@@ -550,7 +620,7 @@ fn validate_rules(
         });
     }
     validated.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(validated)
+    Ok((validated, claims))
 }
 
 /// The reason given for an empty scope or an unknown scope token.
@@ -633,6 +703,16 @@ fn validate_models(
         })?;
         let caps = decode_model_caps(&model_site, local.as_str(), model.caps)?;
         let uses = parse_uses(&model_site, "model", local.as_str(), &model.uses)?;
+        if let Some(op) = uses.iter().find(|op| !Phase::Model.permits(op)) {
+            return Err(LoadError::Uses {
+                path: model_site.path.clone(),
+                line: model_site.line,
+                col: model_site.col,
+                id: op.to_string().into(),
+                message: format!("model `{local}` may not request it; only an eval cell may")
+                    .into(),
+            });
+        }
         validated.push(ModelDecl {
             id: ExportId {
                 plugin: declared.clone(),

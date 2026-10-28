@@ -1873,6 +1873,7 @@ mod tests {
             kind: dal_core::EntryKind::Assistant {
                 api: dal_core::Family::Chat,
                 model: "model".into(),
+                provider: None,
                 content: vec![dal_core::Block::Reasoning {
                     text: text.into(),
                     replay: dal_core::RawJson::null(),

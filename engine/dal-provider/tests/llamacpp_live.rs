@@ -39,13 +39,12 @@
 use std::sync::Arc;
 
 use dal_core::{
-    ContextItem, ModelRequest, ModelRoute, ModelToolSpec, Part, Purpose, RawJson, RequestParams,
-    SessionId, ThinkingLevel,
+    Config, ConfigProduct, ContextItem, ModelRequest, ModelRoute, ModelToolSpec, Part, Purpose,
+    RawJson, RequestParams, SessionId, ThinkingLevel,
 };
 use dal_provider::{
-    AuthStyle, EnvSnapshot, NoticeSink, Provider, ProviderConfig, ProviderEntry, ProviderIdentity,
-    ProviderSet, ProviderSettings, ResolvedModel, StopReason, StreamEvent, ToolArgs, ToolCall,
-    Transport, find,
+    EnvSnapshot, NoticeSink, Provider, ProviderConfig, ProviderEntry, ProviderIdentity,
+    ProviderSet, ResolvedModel, StopReason, StreamEvent, ToolArgs, ToolCall,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -83,18 +82,22 @@ fn identity() -> ProviderIdentity {
 /// the row keeps its bearer default, and a keyless local server takes the
 /// documented `auth = "none"` override.
 fn llamacpp_entry(url: &str) -> ProviderEntry {
-    let def = find("llamacpp").expect("builtin llamacpp row");
-    ProviderEntry {
-        id: def.id.into(),
-        def: Some(def),
-        family: def.family,
-        base_url: url.into(),
-        transport: Transport::Https,
-        key_env: None,
-        auth: AuthStyle::None,
-        max_concurrent_requests: 1,
-        settings: ProviderSettings::default(),
-    }
+    let table = format!(
+        "[providers.llamacpp]\nbase_url = \"{url}\"\nauth = \"none\"\nmax_concurrent_requests = 1\n"
+    );
+    let core = Config::load(
+        ConfigProduct::Dalgon,
+        std::path::Path::new("/tmp/dal-provider-llamacpp-live"),
+        "",
+        Some(&table),
+    )
+    .expect("provider table parses");
+    ProviderConfig::from_config(&core)
+        .expect("providers decode")
+        .providers
+        .into_iter()
+        .find(|provider| &*provider.id == "llamacpp")
+        .expect("llamacpp decoded")
 }
 
 fn live_set(case: &str) -> (ProviderSet, std::path::PathBuf) {

@@ -300,7 +300,10 @@ pub enum JobsOp {
         /// The most reports to take.
         limit: u16,
     },
-    /// Commits taken reports as delivered; a committed report never returns.
+    /// Commits taken reports as delivered in this session; a committed
+    /// report never returns here. Reports are taken only after their ledger
+    /// record is durable, and across a reopen a committed report replays
+    /// unless the input that consumed it was journaled.
     Commit {
         /// The reports to commit.
         ids: Vec<JobId>,

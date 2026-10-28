@@ -41,6 +41,16 @@ use pty::{PtyProcess, dalgon_command, dalgon_command_with_fixture, shell_quote, 
 use sonic_rs::{JsonValueTrait, Value};
 use support::TestDir;
 
+/// One bounded step of this gate: a real server, a real PTY, and a real
+/// websocket proxy share the machine with every other test binary, so a step
+/// that finishes in a second alone can queue behind a full suite. The bound
+/// stays finite so a wedged step still fails.
+const GATE_STEP: Duration = Duration::from_secs(30);
+
+/// The bound for the one step that waits for a whole remote turn to replay
+/// after the socket drop.
+const GATE_BOUND: Duration = Duration::from_secs(90);
+
 #[test]
 fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error + Send + Sync>> {
     let server_home = TestDir::new()?;
@@ -57,7 +67,7 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
         .stdout(Stdio::from(std::fs::File::create(&serve_stdout)?))
         .stderr(Stdio::from(std::fs::File::create(&serve_log)?));
     let mut server = ServeChild::spawn(server_command.spawn()?);
-    let port = wait_for_listen_port(&mut server, &serve_stdout, Duration::from_secs(10))?;
+    let port = wait_for_listen_port(&mut server, &serve_stdout, GATE_STEP)?;
 
     let proxy = TcpProxy::start(SocketAddr::from(([127, 0, 0, 1], port)))?;
     let mut client_command = dalgon_command(client_home.path(), &["client provider is bypassed"])?;
@@ -73,32 +83,23 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     let mut terminal = PtyProcess::spawn(&mut client_command, 100, 30)?;
     if let Err(error) = terminal.wait_for(
         dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(),
-        Duration::from_secs(10),
+        GATE_STEP,
     ) {
         let log = std::fs::read_to_string(&serve_log).unwrap_or_default();
         return Err(format!("{error}\nserve stderr:\n{log}").into());
     }
     terminal.collect_for(Duration::from_millis(5))?;
     terminal.write(b"start the remote turn\r")?;
-    terminal.wait_for_screen_text(
-        dal_tui::copy::ids::DIALOG_ACTIONS_SHORT,
-        Duration::from_secs(15),
-    )?;
+    terminal.wait_for_screen_text(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT, GATE_STEP)?;
 
     terminal.write(b"y")?;
-    wait_for_path(&marker, Duration::from_secs(10), "by the remote turn")?;
-    terminal.wait_for(
-        dal_tui::copy::ids::STATE_WORKING.as_bytes(),
-        Duration::from_secs(10),
-    )?;
-    let last_observed_before_drop = proxy.wait_for_server_update(0, Duration::from_secs(10))?;
+    wait_for_path(&marker, GATE_STEP, "by the remote turn")?;
+    terminal.wait_for(dal_tui::copy::ids::STATE_WORKING.as_bytes(), GATE_STEP)?;
+    let last_observed_before_drop = proxy.wait_for_server_update(0, GATE_STEP)?;
     proxy.drop_connection()?;
-    proxy.wait_for_connections(2, Duration::from_secs(15))?;
-    terminal.wait_for(
-        b"remote session continued after socket drop",
-        Duration::from_secs(30),
-    )?;
-    terminal.wait_for_count(b"enter send", 2, Duration::from_secs(15))?;
+    proxy.wait_for_connections(2, GATE_STEP)?;
+    terminal.wait_for(b"remote session continued after socket drop", GATE_BOUND)?;
+    terminal.wait_for_count(b"enter send", 2, GATE_STEP)?;
     let cursors = proxy.subscription_cursors();
     assert!(
         cursors.len() >= 2,
@@ -111,7 +112,7 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     assert_eq!(resumed_cursor.0, last_observed_before_drop.0);
 
     terminal.write(b"\x04")?;
-    let status = terminal.wait_for_exit(Duration::from_secs(10))?;
+    let status = terminal.wait_for_exit(GATE_STEP)?;
     assert!(status.success(), "remote TUI exited with {status}");
     assert!(
         server

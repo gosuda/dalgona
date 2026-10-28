@@ -1633,6 +1633,25 @@ mod tests {
         assert_eq!(cache.renders(), 0);
 
         let cache = RenderCache::default();
+        let generation = cache.generation();
+        let _ = dialog.rendered_rows(
+            80,
+            20,
+            crate::WidthMode::Narrow,
+            DiagramSettings { enabled: true },
+            &cache,
+            true,
+        );
+        for _ in 0..200 {
+            if cache.generation() > generation {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            cache.generation() > generation,
+            "background renderer did not finish"
+        );
         let on = dialog.rendered_rows(
             80,
             20,

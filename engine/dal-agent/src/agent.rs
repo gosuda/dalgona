@@ -25,10 +25,13 @@ pub struct Agent {
 /// One update delivery or a cursor that requires the client to resynchronize.
 #[derive(Clone, Debug)]
 pub enum Delivery {
-    /// A session update. Durable updates follow their journal receipt;
-    /// transient updates such as extension status are not replayed.
+    /// A published session update. Durable updates follow their journal receipt;
+    /// the live replay window can also retain updates with no journal record.
     Update(Arc<dal_core::Update>),
-    /// The client cursor fell outside the retained replay suffix.
+    /// The subscription cannot continue without resynchronizing: either the
+    /// cursor fell outside the retained replay suffix, or the live queue
+    /// overflowed. Queue overflow ends the stream after this delivery;
+    /// refetch state with `view` and resubscribe at the head.
     Resync {
         /// The current session generation.
         generation: dal_core::Gen,

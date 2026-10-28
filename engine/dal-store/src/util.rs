@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::{error::StoreError, private};
 
+#[cfg(unix)]
 pub(crate) const MODE_FILE: u32 = 0o600;
 /// Permission mode used by private journal, lock, cache, and sidecar files.
 ///

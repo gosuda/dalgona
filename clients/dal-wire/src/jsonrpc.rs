@@ -108,7 +108,7 @@ impl JsonRpcError {
 ///
 /// Returns [`JsonRpcError`] when the frame is not valid JSON or is not a JSON-RPC 2.0 message.
 pub fn decode_jsonrpc(frame: &str) -> Result<Message, JsonRpcError> {
-    let root = sonic_rs::from_str::<Value>(frame).map_err(|error| JsonRpcError {
+    let root = crate::json::parse_value_lossless(frame).map_err(|error| JsonRpcError {
         id: Id::Null,
         code: -32700,
         message: format!("frame is not valid JSON: {error}"),

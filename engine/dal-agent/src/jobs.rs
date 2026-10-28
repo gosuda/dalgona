@@ -2,25 +2,28 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
     path::PathBuf,
+    sync::Arc,
 };
 
 use dal_core::{
     JobCounts, JobEndEvent, JobEnds, JobId, JobLines, JobOutcome, JobReport, JobStateView,
-    JobStatus, JobsError, Name, Timestamp,
+    JobStatus, JobsError, Name, SessionId, Timestamp,
 };
+use dal_store::{JobLedger, JobLedgerEntry, JobLedgerError, Store};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-mod ledger;
+#[cfg(test)]
+mod ledger_recovery_tests;
 mod lines;
 mod ops;
 mod reap;
+mod slots;
 
-pub(crate) use ledger::LedgerError;
 pub(crate) use ops::{JobsCtx, run_jobs_op};
 pub(crate) use reap::reap_detached;
+pub(crate) use slots::{ProcessSlots, SlotGuard};
 
-use ledger::{Ledger, Line};
 use lines::LineRing;
 
 use crate::error::{AgentError, ToolError, ValidationError};
@@ -134,10 +137,16 @@ const END_LOG_LIMIT: usize = 256;
 pub(crate) const REPORT_TEXT_LIMIT: usize = 1 << 20;
 
 /// One ended top-level report and whether a wake has claimed it.
+///
+/// A persistent report becomes `durable` only after its `End` append is
+/// acknowledged. `take` offers only durable reports. Recovery suppresses an
+/// id only after matching wake input is durably materialized; a wake attempt
+/// alone does not suppress it.
 #[derive(Debug)]
 struct PendingReport {
     report: JobReport,
     taken: bool,
+    durable: bool,
 }
 
 /// One session-owned table tracking queued, running, and finished jobs.
@@ -152,10 +161,15 @@ pub(crate) struct JobTable {
     end_seq: u64,
     reports: VecDeque<PendingReport>,
     held: HashSet<JobId>,
-    ledger: Ledger,
-    jobs_dir: Option<PathBuf>,
-    outbox: Vec<Line>,
+    /// The Store-owned durable ledger; `None` is a memory-only table that
+    /// persists nothing.
+    ledger: Option<JobLedger>,
+    outbox: Vec<JobLedgerEntry>,
     changed: watch::Sender<u64>,
+    /// The session's cap on live child processes and the bounded FIFO of
+    /// calls waiting for a slot. It counts guards held by real children, so
+    /// coordinator-owned rows (`spawn_owned`) never count against it.
+    slots: Arc<ProcessSlots>,
 }
 
 impl Default for JobTable {
@@ -169,10 +183,10 @@ impl Default for JobTable {
             end_seq: 0,
             reports: VecDeque::new(),
             held: HashSet::new(),
-            ledger: Ledger::default(),
-            jobs_dir: None,
+            ledger: None,
             outbox: Vec::new(),
             changed: watch::channel(0).0,
+            slots: ProcessSlots::new(SESSION_CHILD_LIMIT, JOB_QUEUE_LIMIT),
         }
     }
 }
@@ -183,21 +197,28 @@ impl JobTable {
         Self::default()
     }
 
-    /// Opens the table over the session's durable ledger.
+    /// Opens the table over the session's Store-owned durable ledger.
     ///
-    /// Ended top-level reports no journaled wake delivered come back ready to
-    /// take; `delivered` is the fold's set of ids journaled by wake records.
+    /// The ledger path and the job-log directory both derive from
+    /// [`Store::session_jobs_dir`]; the Store performs every ledger read and
+    /// write.
+    ///
+    /// `delivered` contains caller-supplied IDs for matching wake input that was
+    /// durably materialized. A journaled wake record alone does not suppress a
+    /// report on replay.
     ///
     /// # Errors
     /// Returns the ledger error when the file cannot be read or is corrupt.
     pub(crate) async fn open(
-        dir: PathBuf,
+        store: &Store,
+        session: SessionId,
         delivered: &HashSet<JobId>,
-    ) -> Result<Self, LedgerError> {
-        let (ledger, recovered) = Ledger::open(dir.clone(), delivered).await?;
+    ) -> Result<Self, JobLedgerError> {
+        let (ledger, recovered) = store.job_ledger(session, delivered).await?;
+        let dir = store.session_jobs_dir(session);
         let job_log = |id: &JobId| dir.join(format!("{id:?}.log"));
         let mut table = Self {
-            ledger,
+            ledger: Some(ledger),
             held: recovered.held,
             ..Self::default()
         };
@@ -245,18 +266,26 @@ impl JobTable {
             .map(|report| PendingReport {
                 report,
                 taken: false,
+                durable: true,
             })
             .collect();
-        table.jobs_dir = Some(dir);
         Ok(table)
     }
 
     /// Writes the buffered ledger lines; call right after any settlement.
     ///
+    /// A memory-only table has no ledger: nothing is written, the buffered
+    /// lines are discarded, and its reports are durable at once.
+    ///
     /// # Errors
     /// Returns the ledger error; the lines stay buffered for the next flush.
-    pub(crate) async fn flush(&mut self) -> Result<(), LedgerError> {
-        self.ledger.write(&self.outbox).await?;
+    pub(crate) async fn flush(&mut self) -> Result<(), JobLedgerError> {
+        if let Some(ledger) = &mut self.ledger {
+            ledger.append(&self.outbox).await?;
+        }
+        for pending in &mut self.reports {
+            pending.durable = true;
+        }
         self.outbox.clear();
         Ok(())
     }
@@ -264,6 +293,14 @@ impl JobTable {
     /// Subscribes to table changes: settlements and new output lines.
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
+    }
+
+    /// Returns the session's process-slot ledger.
+    ///
+    /// Callers clone the `Arc`, release the table lock, and only then wait on
+    /// the ledger, so a queued call never holds the table.
+    pub(crate) fn process_slots(&self) -> Arc<ProcessSlots> {
+        Arc::clone(&self.slots)
     }
 
     fn bump(&self) {
@@ -283,7 +320,7 @@ impl JobTable {
         id: JobId,
         outcome: JobOutcome,
         tail: Box<[u8]>,
-    ) -> Result<Option<FinishedJob>, LedgerError> {
+    ) -> Result<Option<FinishedJob>, JobLedgerError> {
         let finished = self.settle_once(id, outcome, tail);
         self.flush().await.map(|()| finished)
     }
@@ -498,10 +535,16 @@ impl JobTable {
                     .into_owned()
                     .into_boxed_str(),
             };
-            self.outbox.push(Ledger::end(&report));
+            // Memory-only tables (`JobTable::new`, `ledger: None`) persist
+            // nothing, so the report is durable at once and `take` without
+            // `flush` keeps working. Ledger-backed tables gate on `flush`
+            // success instead.
+            let durable = self.ledger.is_none();
+            self.outbox.push(JobLedger::end(&report));
             self.reports.push_back(PendingReport {
                 report,
                 taken: false,
+                durable,
             });
         }
         self.bump();
@@ -564,7 +607,7 @@ impl JobTable {
     /// # Errors
     /// Returns the ledger error; the cancellations stay recorded and the
     /// lines stay buffered for the next flush.
-    pub(crate) async fn cancel_all(&mut self) -> Result<(), LedgerError> {
+    pub(crate) async fn cancel_all(&mut self) -> Result<(), JobLedgerError> {
         let live: Vec<JobId> = self
             .jobs
             .iter()
@@ -665,11 +708,15 @@ impl JobTable {
         })
     }
 
-    /// Takes up to `limit` ended top-level reports no wake has claimed.
+    /// Takes up to `limit` durable ended top-level reports no wake has claimed.
+    ///
+    /// Reports whose `End` line has not yet flushed stay hidden until the
+    /// retry makes them durable. `wait`/`find`/`ends_after` still serve the
+    /// buffered settlement locally; only offering through `take` is gated.
     pub(crate) fn take(&mut self, limit: usize) -> Vec<JobReport> {
         self.reports
             .iter_mut()
-            .filter(|pending| !pending.taken)
+            .filter(|pending| !pending.taken && pending.durable)
             .take(limit)
             .map(|pending| {
                 pending.taken = true;
@@ -715,14 +762,16 @@ impl JobTable {
         &mut self,
         id: JobId,
         held: bool,
-    ) -> Result<Vec<JobId>, LedgerError> {
+    ) -> Result<Vec<JobId>, JobLedgerError> {
         if self.held.contains(&id) != held {
-            let line = if held {
-                Ledger::hold(id)
-            } else {
-                Ledger::unhold(id)
-            };
-            self.ledger.write(&[line]).await?;
+            if let Some(ledger) = &mut self.ledger {
+                let entry = if held {
+                    JobLedger::hold(id)
+                } else {
+                    JobLedger::unhold(id)
+                };
+                ledger.append(&[entry]).await?;
+            }
             if held {
                 self.held.insert(id);
             } else {
@@ -884,6 +933,51 @@ fn invalid_transition() -> ToolError {
 mod tests {
     use super::*;
 
+    /// One real [`Store`] over a temporary data root and one stable session
+    /// id. Every open of the rig reads the jobs directory the Store derives
+    /// for that session, so a reopen sees exactly what an earlier table
+    /// wrote and nothing is addressed by an arbitrary path.
+    pub(super) struct StoreRig {
+        _root: tempfile::TempDir,
+        store: Store,
+        session: SessionId,
+    }
+
+    impl StoreRig {
+        pub(super) fn new() -> Self {
+            let root = tempfile::tempdir().expect("temporary store data root");
+            let store = Store::new(
+                root.path().join("data"),
+                dal_core::Workspace::new(root.path().join("workspace"))
+                    .expect("absolute workspace path"),
+                dal_core::Product::Dal,
+            );
+            Self {
+                _root: root,
+                store,
+                session: SessionId::new_v7(),
+            }
+        }
+
+        /// The session `jobs/` directory the Store derives.
+        pub(super) fn jobs_dir(&self) -> PathBuf {
+            self.store.session_jobs_dir(self.session)
+        }
+
+        /// The job log path of `label` below the session `jobs/` directory.
+        pub(super) fn log(&self, label: &str) -> PathBuf {
+            self.jobs_dir().join(format!("{label}.log"))
+        }
+
+        /// Opens a table over this session's Store-owned ledger.
+        pub(super) async fn open(
+            &self,
+            delivered: &HashSet<JobId>,
+        ) -> Result<JobTable, JobLedgerError> {
+            JobTable::open(&self.store, self.session, delivered).await
+        }
+    }
+
     fn record(cancel: CancellationToken) -> JobRecord {
         JobRecord::new(
             JobId::new_v7(),
@@ -891,6 +985,103 @@ mod tests {
             PathBuf::from("/session/jobs/call.log"),
             cancel,
         )
+    }
+
+    fn wake_turn(value: u64) -> dal_core::TurnId {
+        use std::num::NonZeroU64;
+        dal_core::TurnId::new(NonZeroU64::new(value).unwrap())
+    }
+
+    fn wake_entry(value: u64) -> dal_core::EntryId {
+        use std::num::NonZeroU64;
+        dal_core::EntryId::new(NonZeroU64::new(value).unwrap())
+    }
+
+    fn wake_stamp() -> jiff::Timestamp {
+        jiff::Timestamp::UNIX_EPOCH
+    }
+
+    fn wake_turn_start(turn: u64) -> dal_core::Record {
+        dal_core::Record::TurnStart {
+            at: wake_stamp(),
+            turn: wake_turn(turn),
+        }
+    }
+
+    fn wake_turn_end(turn: u64) -> dal_core::Record {
+        dal_core::Record::TurnEnd {
+            at: wake_stamp(),
+            turn: wake_turn(turn),
+            stop: dal_core::TurnEndStop::Done,
+            usage: None,
+            changes: Vec::new(),
+        }
+    }
+
+    fn wake_user(entry: u64, parent: Option<dal_core::EntryId>) -> dal_core::Record {
+        dal_core::Record::User(dal_core::Entry {
+            id: wake_entry(entry),
+            parent,
+            at: wake_stamp(),
+            kind: dal_core::EntryKind::User {
+                parts: vec![dal_core::JournalPart::Text {
+                    text: "question".into(),
+                }],
+            },
+        })
+    }
+
+    fn wake_attempt(turn: u64, count: u32, jobs: Vec<JobId>) -> dal_core::Record {
+        dal_core::Record::WakeAttempt {
+            at: wake_stamp(),
+            turn: wake_turn(turn),
+            count,
+            jobs,
+        }
+    }
+
+    fn replay_delivered(journal: Vec<dal_core::Record>) -> HashSet<JobId> {
+        dal_core::Session::replay_declared(journal)
+            .expect("replay wake journal")
+            .delivered_jobs()
+            .clone()
+    }
+
+    async fn persist_one_owned(label: &str) -> (StoreRig, JobId) {
+        let rig = StoreRig::new();
+        let mut jobs = rig.open(&HashSet::new()).await.expect("open ledger");
+        let id = JobId::new_v7();
+        let owner = Name::test();
+        jobs.spawn_owned(
+            JobRecord::new(id, label, rig.log(label), CancellationToken::new())
+                .owned_by(owner.clone()),
+        )
+        .expect("reserve owner job");
+        jobs.settle_owned(&owner, id, JobOutcome::Exited { code: 0 }, label)
+            .expect("settle owner job");
+        jobs.flush().await.expect("persist ended report");
+        drop(jobs);
+        (rig, id)
+    }
+
+    async fn persist_two_owned() -> (StoreRig, JobId, JobId) {
+        let rig = StoreRig::new();
+        let mut jobs = rig.open(&HashSet::new()).await.expect("open ledger");
+        let owner = Name::test();
+        let first = JobId::new_v7();
+        let second = JobId::new_v7();
+        for (id, label) in [(first, "first"), (second, "second")] {
+            jobs.spawn_owned(
+                JobRecord::new(id, label, rig.log(label), CancellationToken::new())
+                    .owned_by(owner.clone()),
+            )
+            .expect("reserve owner job");
+            jobs.settle_owned(&owner, id, JobOutcome::Exited { code: 0 }, label)
+                .expect("settle owner job");
+        }
+        jobs.flush().await.expect("persist ended reports");
+        drop(jobs);
+        (rig, first, second)
     }
 
     #[test]
@@ -1215,22 +1406,16 @@ mod tests {
         assert_eq!(jobs.wait(id), Some(JobOutcome::Exited { code: 3 }));
         Ok(())
     }
+
     #[tokio::test]
     async fn report_release_replays_and_committed_wake_ids_do_not() {
-        let root = tempfile::tempdir().expect("temporary job report ledger");
-        let mut jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
-            .await
-            .expect("open ledger");
+        let rig = StoreRig::new();
+        let mut jobs = rig.open(&HashSet::new()).await.expect("open ledger");
         let id = JobId::new_v7();
         let owner = Name::test();
         jobs.spawn_owned(
-            JobRecord::new(
-                id,
-                "run",
-                root.path().join("run.log"),
-                CancellationToken::new(),
-            )
-            .owned_by(owner.clone()),
+            JobRecord::new(id, "run", rig.log("run"), CancellationToken::new())
+                .owned_by(owner.clone()),
         )
         .expect("reserve owner job");
         jobs.settle_owned(&owner, id, JobOutcome::Exited { code: 0 }, "report")
@@ -1240,15 +1425,29 @@ mod tests {
         assert_eq!(jobs.release(&[id]), vec![id]);
         drop(jobs);
 
-        let mut jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
+        let mut jobs = rig
+            .open(&HashSet::new())
             .await
             .expect("reopen released report");
         assert_eq!(jobs.take(1)[0].id, id);
         assert_eq!(jobs.commit(&[id]), vec![id]);
         drop(jobs);
 
-        let delivered = HashSet::from([id]);
-        let mut jobs = JobTable::open(root.path().to_path_buf(), &delivered)
+        let delivered = replay_delivered(vec![
+            wake_turn_start(1),
+            wake_user(1, None),
+            wake_attempt(2, 1, vec![id]),
+            wake_turn_end(1),
+            wake_turn_start(2),
+            wake_user(2, Some(wake_entry(1))),
+        ]);
+        assert_eq!(
+            &delivered,
+            &HashSet::from([id]),
+            "materialized wake input must deliver exactly its report"
+        );
+        let mut jobs = rig
+            .open(&delivered)
             .await
             .expect("reopen after journaled wake");
         assert_eq!(jobs.take(1), []);
@@ -1256,15 +1455,13 @@ mod tests {
 
     #[tokio::test]
     async fn settle_durably_writes_the_report_before_returning() {
-        let root = tempfile::tempdir().expect("temporary job report ledger");
-        let mut jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
-            .await
-            .expect("open ledger");
+        let rig = StoreRig::new();
+        let mut jobs = rig.open(&HashSet::new()).await.expect("open ledger");
         let id = JobId::new_v7();
         jobs.reserve(JobRecord::new(
             id,
             "export",
-            root.path().join("export.log"),
+            rig.log("export"),
             CancellationToken::new(),
         ))
         .expect("reserve command job");
@@ -1280,13 +1477,227 @@ mod tests {
 
         // No caller flushed after the settle: if the End line had stayed
         // buffered, reopening would replay nothing.
-        let mut jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
-            .await
-            .expect("reopen ledger");
+        let mut jobs = rig.open(&HashSet::new()).await.expect("reopen ledger");
         assert_eq!(
             jobs.take(1)[0].id,
             id,
             "the settled report is durable without a second flush"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_wake_attempt_keeps_report_pending() {
+        let (rig, id) = persist_one_owned("run").await;
+        let delivered = replay_delivered(vec![wake_attempt(1, 1, vec![id])]);
+        assert!(
+            delivered.is_empty(),
+            "queued wake attempt without input must not deliver"
+        );
+        let mut reopened = rig
+            .open(&delivered)
+            .await
+            .expect("reopen after queued wake");
+        assert_eq!(
+            reopened
+                .take(1)
+                .iter()
+                .map(|report| report.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "queued wake attempt must leave the report recoverable"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_start_only_prefix_keeps_report_pending() {
+        let (rig, id) = persist_one_owned("run").await;
+        let delivered = replay_delivered(vec![wake_attempt(1, 1, vec![id]), wake_turn_start(1)]);
+        assert!(
+            delivered.is_empty(),
+            "turn start without wake input must not deliver"
+        );
+        let mut reopened = rig
+            .open(&delivered)
+            .await
+            .expect("reopen after turn-start-only prefix");
+        assert_eq!(
+            reopened
+                .take(1)
+                .iter()
+                .map(|report| report.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "turn-start-only prefix must leave the report recoverable"
+        );
+    }
+
+    #[tokio::test]
+    async fn unrelated_turn_input_keeps_queued_report_pending() {
+        let (rig, id) = persist_one_owned("run").await;
+        let delivered = replay_delivered(vec![
+            wake_turn_start(1),
+            wake_user(1, None),
+            wake_attempt(2, 1, vec![id]),
+        ]);
+        assert!(
+            delivered.is_empty(),
+            "unrelated turn input must not deliver the queued wake job"
+        );
+        let mut reopened = rig
+            .open(&delivered)
+            .await
+            .expect("reopen after unrelated input with queued wake");
+        assert_eq!(
+            reopened
+                .take(1)
+                .iter()
+                .map(|report| report.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "unrelated turn input must leave the report recoverable"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialized_first_wake_input_suppresses_only_its_report() {
+        let (rig, first, second) = persist_two_owned().await;
+        let delivered = replay_delivered(vec![
+            wake_turn_start(1),
+            wake_user(1, None),
+            wake_attempt(2, 1, vec![first]),
+            wake_attempt(3, 2, vec![second]),
+            wake_turn_end(1),
+            wake_turn_start(2),
+            wake_user(2, Some(wake_entry(1))),
+        ]);
+        assert_eq!(
+            &delivered,
+            &HashSet::from([first]),
+            "only the materialized wake input delivers"
+        );
+        assert!(
+            !delivered.contains(&second),
+            "the still-queued second wake must not deliver"
+        );
+
+        let mut reopened = rig
+            .open(&delivered)
+            .await
+            .expect("reopen after first wake input");
+        let taken = reopened.take(10);
+        assert_eq!(
+            taken.len(),
+            1,
+            "exactly the still-queued report stays recoverable"
+        );
+        assert_eq!(
+            taken[0].id, second,
+            "materialized input suppresses only its exact report id"
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_take_reply_replays_both_reports_with_identity_unless_wake_materialized() {
+        // Adverse JobTable-level proof (not a public Services/real-Agent run):
+        // a Take batch whose reply never reaches commit/release is lost on
+        // crash; reopen must replay the same whole reports exactly once, and
+        // only a durably materialized wake id may suppress its own report.
+        let rig = StoreRig::new();
+        let mut jobs = rig.open(&HashSet::new()).await.expect("open ledger");
+        let owner = Name::test();
+        let first = JobId::new_v7();
+        let second = JobId::new_v7();
+        for (id, label, text, outcome) in [
+            (
+                first,
+                "alpha-first",
+                "alpha-first-body",
+                JobOutcome::Exited { code: 0 },
+            ),
+            (
+                second,
+                "beta-second",
+                "beta-second-body with extra detail",
+                JobOutcome::Exited { code: 3 },
+            ),
+        ] {
+            jobs.spawn_owned(
+                JobRecord::new(id, label, rig.log(label), CancellationToken::new())
+                    .owned_by(owner.clone()),
+            )
+            .expect("reserve owner job");
+            jobs.settle_owned(&owner, id, outcome, text)
+                .expect("settle owner job");
+        }
+        jobs.flush().await.expect("persist ended reports");
+        let expected_first = JobReport {
+            id: first,
+            label: "alpha-first".into(),
+            outcome: JobOutcome::Exited { code: 0 },
+            text: "alpha-first-body".into(),
+        };
+        let expected_second = JobReport {
+            id: second,
+            label: "beta-second".into(),
+            outcome: JobOutcome::Exited { code: 3 },
+            text: "beta-second-body with extra detail".into(),
+        };
+
+        // The consumer claims both reports, then its reply is lost: no
+        // commit, no release, just a crash before any wake is journaled.
+        let claimed = jobs.take(10);
+        assert_eq!(
+            claimed,
+            vec![expected_first.clone(), expected_second.clone()],
+            "take must offer both whole reports once, in settle order"
+        );
+        drop(jobs);
+
+        // Unmaterialized reports recover with identity, exactly once per batch.
+        let mut reopened = rig
+            .open(&HashSet::new())
+            .await
+            .expect("reopen after lost take reply");
+        let replayed = reopened.take(10);
+        assert_eq!(
+            replayed,
+            vec![expected_first.clone(), expected_second.clone()],
+            "lost take reply must replay the same whole reports, not ids alone"
+        );
+        assert_eq!(
+            reopened.take(10),
+            Vec::<JobReport>::new(),
+            "a replayed batch offers each report exactly once until released"
+        );
+        drop(reopened);
+
+        // Only the durably materialized wake id is suppressed on reopen.
+        let delivered = replay_delivered(vec![
+            wake_turn_start(1),
+            wake_user(1, None),
+            wake_attempt(2, 1, vec![first]),
+            wake_turn_end(1),
+            wake_turn_start(2),
+            wake_user(2, Some(wake_entry(1))),
+        ]);
+        assert_eq!(
+            &delivered,
+            &HashSet::from([first]),
+            "materialized wake input must deliver exactly its report"
+        );
+        let mut suppressed = rig
+            .open(&delivered)
+            .await
+            .expect("reopen after first wake materialized");
+        assert_eq!(
+            suppressed.take(10),
+            vec![expected_second.clone()],
+            "materialized input suppresses only its exact whole report"
+        );
+        assert_eq!(
+            suppressed.take(10),
+            Vec::<JobReport>::new(),
+            "the surviving report still offers exactly once"
         );
     }
 
@@ -1321,5 +1732,437 @@ mod tests {
             Err(JobsError::AlreadyEnded { id: ended }) if ended == id
         ));
         assert_eq!(jobs.ends_after(None).events.len(), 1);
+    }
+
+    /// Attacks on durable-before-visible job reports.
+    ///
+    /// A report may be offered to a wake only once its `End` line is on
+    /// disk. Every outage below is a real filesystem failure: a regular file
+    /// takes the place of the session `jobs/` directory, so the ledger
+    /// append cannot create its parent. The directory is the one the real
+    /// [`Store`] derives for a stable session id. Nothing is mocked, and
+    /// nothing outside the test-owned temporary root is touched.
+    mod unflushed_report_visibility {
+        use std::{collections::HashSet, fs, path::PathBuf, sync::Arc};
+
+        use dal_core::{JobId, JobOutcome, JobReport, JobsOp, JobsReply, Name, RawJson};
+        use dal_store::JobLedgerError;
+        use tokio::sync::Mutex;
+        use tokio_util::sync::CancellationToken;
+
+        use super::super::{JobRecord, JobTable, JobsCtx, run_jobs_op};
+        use super::{
+            StoreRig, replay_delivered, wake_attempt, wake_entry, wake_turn_end, wake_turn_start,
+            wake_user,
+        };
+
+        /// The Store-derived session `jobs/` directory path of one
+        /// [`StoreRig`], which the test can block for real.
+        struct Outage {
+            rig: StoreRig,
+            dir: PathBuf,
+        }
+
+        impl Outage {
+            fn new() -> Self {
+                let rig = StoreRig::new();
+                let dir = rig.jobs_dir();
+                Self { rig, dir }
+            }
+
+            fn aside(&self) -> PathBuf {
+                self.dir.with_file_name("jobs.aside")
+            }
+
+            /// Occupies the ledger directory path with a regular file. A live
+            /// directory is moved aside intact so `unblock` restores it. The
+            /// session directory above the path is created when absent: the
+            /// Store creates nothing before its first append.
+            fn block(&self) {
+                if self.dir.exists() {
+                    fs::rename(&self.dir, self.aside())
+                        .expect("move the live jobs directory aside");
+                }
+                let session_dir = self
+                    .dir
+                    .parent()
+                    .expect("the jobs directory has a session directory");
+                fs::create_dir_all(session_dir).expect("create the session directory");
+                fs::write(&self.dir, b"occupied").expect("occupy the jobs directory path");
+            }
+
+            fn unblock(&self) {
+                fs::remove_file(&self.dir).expect("free the jobs directory path");
+                if self.aside().exists() {
+                    fs::rename(self.aside(), &self.dir).expect("restore the live jobs directory");
+                }
+            }
+
+            async fn open(&self) -> JobTable {
+                self.reopen(&HashSet::new()).await
+            }
+
+            async fn reopen(&self, delivered: &HashSet<JobId>) -> JobTable {
+                self.rig
+                    .open(delivered)
+                    .await
+                    .expect("open the job table over the session ledger")
+            }
+
+            /// Counts every line on disk under the ledger directory.
+            fn ledger_lines(&self) -> usize {
+                fs::read_dir(&self.dir)
+                    .expect("read the ledger directory")
+                    .map(|entry| {
+                        fs::read_to_string(entry.expect("ledger entry").path())
+                            .expect("read the ledger file")
+                            .lines()
+                            .count()
+                    })
+                    .sum()
+            }
+        }
+
+        fn report(id: JobId, label: &str, outcome: JobOutcome, text: &str) -> JobReport {
+            JobReport {
+                id,
+                label: label.into(),
+                outcome,
+                text: text.into(),
+            }
+        }
+
+        fn spawn_owned_row(jobs: &mut JobTable, outage: &Outage, label: &str) -> JobId {
+            let id = JobId::new_v7();
+            jobs.spawn_owned(
+                JobRecord::new(
+                    id,
+                    label,
+                    outage.dir.join(format!("{label}.log")),
+                    CancellationToken::new(),
+                )
+                .owned_by(Name::test()),
+            )
+            .expect("reserve owner job");
+            id
+        }
+
+        /// Settles one owner row and returns the report the table must keep.
+        fn end_owned(jobs: &mut JobTable, outage: &Outage, label: &str, text: &str) -> JobReport {
+            let id = spawn_owned_row(jobs, outage, label);
+            let outcome = JobOutcome::Exited { code: 0 };
+            jobs.settle_owned(&Name::test(), id, outcome.clone(), text)
+                .expect("settle owner job");
+            report(id, label, outcome, text)
+        }
+
+        fn assert_io_failure<T: std::fmt::Debug>(result: &Result<T, JobLedgerError>) {
+            assert!(
+                matches!(result, Err(JobLedgerError::Io { .. })),
+                "the blocked jobs directory must fail the append with an I/O error: {result:?}"
+            );
+        }
+
+        /// The delivered set a journaled and materialized wake over `jobs`
+        /// leaves in the replayed journal.
+        fn delivered_by_wake(jobs: &[JobId]) -> HashSet<JobId> {
+            if jobs.is_empty() {
+                return HashSet::new();
+            }
+            replay_delivered(vec![
+                wake_turn_start(1),
+                wake_user(1, None),
+                wake_attempt(2, 1, jobs.to_vec()),
+                wake_turn_end(1),
+                wake_turn_start(2),
+                wake_user(2, Some(wake_entry(1))),
+            ])
+        }
+
+        async fn jobs_op(table: &Arc<Mutex<JobTable>>, outage: &Outage, op: JobsOp) -> JobsReply {
+            run_jobs_op(
+                JobsCtx {
+                    table: Arc::clone(table),
+                    owner: Name::test(),
+                    jobs_dir: outage.dir.clone(),
+                    cancel: CancellationToken::new(),
+                },
+                op,
+            )
+            .await
+        }
+
+        async fn spawn_job(table: &Arc<Mutex<JobTable>>, outage: &Outage) -> JobId {
+            let reply = jobs_op(
+                table,
+                outage,
+                JobsOp::Spawn {
+                    name: Name::test(),
+                    payload: RawJson::null(),
+                    parent: None,
+                },
+            )
+            .await;
+            let JobsReply::Spawned { id } = reply else {
+                panic!("spawn must reserve an owner row: {reply:?}");
+            };
+            id
+        }
+
+        #[tokio::test]
+        async fn failed_flush_report_is_hidden_from_take_until_the_retry_is_durable() {
+            let outage = Outage::new();
+            let mut jobs = outage.open().await;
+            let ended = end_owned(&mut jobs, &outage, "run", "report");
+            outage.block();
+            assert_io_failure(&jobs.flush().await);
+
+            let offered = jobs.take(10);
+            assert!(
+                offered.is_empty(),
+                "a report whose End line failed to reach disk was offered for delivery: {offered:?}"
+            );
+
+            outage.unblock();
+            jobs.flush().await.expect("retry flush after the outage");
+            assert_eq!(
+                jobs.take(10),
+                vec![ended],
+                "the retried flush makes the same report, with its identity, takeable"
+            );
+        }
+
+        #[tokio::test]
+        async fn cancelled_report_is_hidden_from_take_until_a_flush_makes_it_durable() {
+            let outage = Outage::new();
+            let mut jobs = outage.open().await;
+            let id = spawn_owned_row(&mut jobs, &outage, "cancelled");
+            jobs.cancel(id).expect("cancel the owner row");
+            assert!(
+                !outage.dir.exists(),
+                "no flush ran, so nothing may be on disk yet"
+            );
+
+            let offered = jobs.take(10);
+            assert!(
+                offered.is_empty(),
+                "a cancel that never reached disk was offered for delivery: {offered:?}"
+            );
+
+            jobs.flush().await.expect("flush the cancelled report");
+            assert_eq!(
+                jobs.take(10),
+                vec![report(id, "cancelled", JobOutcome::Cancelled, "")],
+                "the flushed cancel is takeable with its identity"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_durable_report_does_not_vouch_for_one_whose_flush_failed() {
+            let outage = Outage::new();
+            let mut jobs = outage.open().await;
+            let durable = end_owned(&mut jobs, &outage, "durable", "kept");
+            jobs.flush()
+                .await
+                .expect("the first report becomes durable");
+            let failed = end_owned(&mut jobs, &outage, "failed", "pending");
+            outage.block();
+            assert_io_failure(&jobs.flush().await);
+
+            let claimed: Vec<JobId> = jobs.take(10).iter().map(|offered| offered.id).collect();
+            assert!(
+                !claimed.contains(&failed.id),
+                "the report whose flush failed was offered next to a durable one: {claimed:?}"
+            );
+            jobs.release(&claimed);
+
+            outage.unblock();
+            jobs.flush().await.expect("retry flush after the outage");
+            assert_eq!(
+                jobs.take(10),
+                vec![durable, failed],
+                "both reports keep their identity and settle order after the retry"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_wake_never_consumes_a_report_the_ledger_cannot_reproduce() {
+            let outage = Outage::new();
+            let mut jobs = outage.open().await;
+            let ended = end_owned(&mut jobs, &outage, "run", "report");
+            outage.block();
+            assert_io_failure(&jobs.flush().await);
+
+            // The orchestrator claims whatever `take` offers and journals a
+            // wake over it.
+            let claimed: Vec<JobId> = jobs.take(10).iter().map(|offered| offered.id).collect();
+            let delivered = delivered_by_wake(&claimed);
+
+            // The process dies before the outage ends and before any retry.
+            drop(jobs);
+            outage.unblock();
+            let reopened = outage.reopen(&delivered).await;
+            for id in &delivered {
+                assert!(
+                    reopened.find(*id).is_some(),
+                    "a wake consumed {ended:?} but its End line never reached disk: \
+                     the completion is lost for good"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn unavailable_settle_reply_leaks_no_report_through_take() {
+            let outage = Outage::new();
+            let table = Arc::new(Mutex::new(outage.open().await));
+            let id = spawn_job(&table, &outage).await;
+            outage.block();
+
+            let settled = jobs_op(
+                &table,
+                &outage,
+                JobsOp::Settle {
+                    id,
+                    outcome: JobOutcome::Exited { code: 0 },
+                    text: "report".into(),
+                },
+            )
+            .await;
+            assert!(
+                matches!(settled, JobsReply::Unavailable { .. }),
+                "the blocked ledger must fail the settle flush: {settled:?}"
+            );
+
+            let taken = jobs_op(&table, &outage, JobsOp::Take { limit: 10 }).await;
+            assert_eq!(
+                taken,
+                JobsReply::Taken(Vec::new()),
+                "an Unavailable settle left a report that Take offers as deliverable"
+            );
+        }
+
+        #[tokio::test]
+        async fn unavailable_cancel_reply_leaks_no_report_through_take() {
+            let outage = Outage::new();
+            let table = Arc::new(Mutex::new(outage.open().await));
+            let id = spawn_job(&table, &outage).await;
+            outage.block();
+
+            let cancelled = jobs_op(&table, &outage, JobsOp::Cancel { id }).await;
+            assert!(
+                matches!(cancelled, JobsReply::Unavailable { .. }),
+                "the blocked ledger must fail the cancel flush: {cancelled:?}"
+            );
+
+            let taken = jobs_op(&table, &outage, JobsOp::Take { limit: 10 }).await;
+            assert_eq!(
+                taken,
+                JobsReply::Taken(Vec::new()),
+                "an Unavailable cancel left a report that Take offers as deliverable"
+            );
+        }
+
+        #[tokio::test]
+        async fn retried_flush_writes_the_failed_report_exactly_once_with_its_identity() {
+            let outage = Outage::new();
+            let mut jobs = outage.open().await;
+            let ended = end_owned(&mut jobs, &outage, "run", "report text");
+            outage.block();
+            assert_io_failure(&jobs.flush().await);
+            assert_io_failure(&jobs.flush().await);
+
+            outage.unblock();
+            jobs.flush().await.expect("retry flush after the outage");
+            jobs.flush()
+                .await
+                .expect("a flush with a drained outbox writes nothing");
+            drop(jobs);
+
+            assert_eq!(
+                outage.ledger_lines(),
+                1,
+                "two failed flushes and two good ones wrote one End line"
+            );
+            let mut reopened = outage.open().await;
+            assert_eq!(
+                reopened.take(10),
+                vec![ended],
+                "the reopened ledger offers the same id, label, outcome and text"
+            );
+        }
+
+        #[tokio::test]
+        async fn failed_flushes_keep_every_buffered_report_in_settle_order() {
+            let outage = Outage::new();
+            let mut jobs = outage.open().await;
+            let first = end_owned(&mut jobs, &outage, "first", "one");
+            outage.block();
+            assert_io_failure(&jobs.flush().await);
+            let second = end_owned(&mut jobs, &outage, "second", "two");
+            assert_io_failure(&jobs.flush().await);
+
+            outage.unblock();
+            jobs.flush().await.expect("retry flush after the outage");
+            let third = end_owned(&mut jobs, &outage, "third", "three");
+            jobs.flush()
+                .await
+                .expect("a later flush appends after the retried lines");
+            drop(jobs);
+
+            assert_eq!(outage.ledger_lines(), 3, "one End line per ended job");
+            let mut reopened = outage.open().await;
+            assert_eq!(
+                reopened.take(10),
+                vec![first, second, third],
+                "every report keeps its identity, once, in settle order"
+            );
+        }
+
+        #[tokio::test]
+        async fn settle_durably_failure_keeps_the_outcome_and_the_retry_persists_it_once() {
+            let outage = Outage::new();
+            let mut jobs = outage.open().await;
+            let id = JobId::new_v7();
+            jobs.reserve(JobRecord::new(
+                id,
+                "export",
+                outage.dir.join("export.log"),
+                CancellationToken::new(),
+            ))
+            .expect("reserve command job");
+            jobs.mark_running(id).expect("start command job");
+            outage.block();
+
+            let settled = jobs
+                .settle_durably(
+                    id,
+                    JobOutcome::Exited { code: 0 },
+                    Box::from(&b"report"[..]),
+                )
+                .await;
+            assert_io_failure(&settled);
+            assert_eq!(
+                jobs.wait(id),
+                Some(JobOutcome::Exited { code: 0 }),
+                "the failed durable settle must keep the recorded outcome"
+            );
+
+            outage.unblock();
+            jobs.flush().await.expect("retry flush after the outage");
+            drop(jobs);
+
+            assert_eq!(outage.ledger_lines(), 1, "the retry wrote one End line");
+            let mut reopened = outage.open().await;
+            assert_eq!(
+                reopened.take(10),
+                vec![report(
+                    id,
+                    "export",
+                    JobOutcome::Exited { code: 0 },
+                    "report"
+                )],
+                "the retried settle keeps the job identity across reopen"
+            );
+        }
     }
 }

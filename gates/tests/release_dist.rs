@@ -6,9 +6,9 @@
 )]
 mod support;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
-    fs, io,
+    fmt, fs, io,
     path::Path,
     process::Command,
 };
@@ -19,6 +19,60 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 #[derive(Deserialize)]
 struct DistManifest {
     artifacts: BTreeMap<String, sonic_rs::Value>,
+}
+
+/// The `dist plan --output-format=json` fields the layout gate reads. A plan
+/// for one announcement tag lists the one release that tag selects.
+#[derive(Deserialize)]
+struct TaggedPlan {
+    announcement_tag: String,
+    announcement_tag_is_implicit: bool,
+    releases: Vec<PlanRelease>,
+    artifacts: BTreeMap<String, PlanArtifact>,
+}
+
+#[derive(Deserialize)]
+struct PlanRelease {
+    app_name: String,
+    app_version: String,
+    artifacts: Vec<String>,
+    hosting: PlanHosting,
+}
+
+#[derive(Deserialize)]
+struct PlanHosting {
+    github: PlanGithub,
+}
+
+#[derive(Deserialize)]
+struct PlanGithub {
+    artifact_download_path: String,
+}
+
+#[derive(Deserialize)]
+struct PlanArtifact {
+    kind: String,
+    #[serde(default)]
+    target_triples: Vec<String>,
+    checksum: Option<String>,
+    #[serde(default)]
+    assets: Vec<PlanAsset>,
+    install_hint: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PlanAsset {
+    path: String,
+    kind: String,
+}
+
+/// What one product's tagged plan must say: the tag naming the Cargo
+/// version, and the binaries Cargo builds for the product.
+struct ExpectedRelease {
+    product: &'static str,
+    version: String,
+    tag: String,
+    binaries: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -208,41 +262,283 @@ fn load_plan(workspace: &Path) -> Result<Plan, Box<dyn Error>> {
 
 /// Reads the checked-in `dist plan` output recorded with cargo-dist 0.32.0:
 /// `dist plan --output-format=json > gates/tests/fixtures/dist-plan.json`.
-/// Tests assert against this file so the layout gate is red without the
-/// binary; a missing file is an error, never a skip.
+/// The binstall URL gate expands the product manifests against this fixed
+/// input. The plan-layout gate does not read it: `release_dist_plan_validity`
+/// runs the real planner for each product's tag. A missing file is an error,
+/// never a skip.
 fn fixture_plan() -> Result<DistManifest, Box<dyn Error>> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dist-plan.json");
     Ok(sonic_rs::from_str(&fs::read_to_string(path)?)?)
 }
 
-fn assert_manifest_artifacts(product: &str, manifest: &DistManifest) {
-    let artifacts = &manifest.artifacts;
-    let mut archives = Vec::new();
+/// The archive `dist` plans for one product and target: a zip on Windows,
+/// a tar.xz elsewhere.
+fn archive_name(product: &str, target: &str) -> String {
+    let extension = if target.ends_with("windows-msvc") {
+        "zip"
+    } else {
+        "tar.xz"
+    };
+    format!("{product}-{target}.{extension}")
+}
+
+/// Every artifact name a plan for `product`'s tag lists, and no other: the
+/// six target archives with their checksums, both installers, the unified
+/// checksum, and the source archive with its checksum.
+fn expected_plan_artifacts(product: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::from([
+        "sha256.sum".to_owned(),
+        "source.tar.gz".to_owned(),
+        "source.tar.gz.sha256".to_owned(),
+        format!("{product}-installer.sh"),
+        format!("{product}-installer.ps1"),
+    ]);
     for target in TARGETS {
-        let extension = if target.ends_with("windows-msvc") {
-            "zip"
-        } else {
-            "tar.xz"
-        };
-        let archive = format!("{product}-{target}.{extension}");
-        assert!(artifacts.contains_key(&archive), "missing {archive}");
-        assert!(
-            artifacts.contains_key(&format!("{archive}.sha256")),
-            "missing checksum for {archive}"
-        );
-        archives.push(archive);
+        let archive = archive_name(product, target);
+        names.insert(format!("{archive}.sha256"));
+        names.insert(archive);
     }
-    assert!(artifacts.contains_key(&format!("{product}-installer.sh")));
-    assert!(artifacts.contains_key(&format!("{product}-installer.ps1")));
-    // `dist-manifest.json` is written by `dist build`/`host`, not `dist plan`; assert the source archive instead.
-    assert!(
-        artifacts.keys().any(|name| {
-            !archives.contains(name)
-                && !name.ends_with(".sha256")
-                && (name.ends_with(".tar.gz") || name.ends_with(".tar.xz"))
-        }),
-        "the source archive is absent from {product}'s plan"
-    );
+    names
+}
+
+/// The executable suffix `dist` gives binaries shipped for one target.
+fn executable_suffix(target: &str) -> &'static str {
+    if target.ends_with("windows-msvc") {
+        ".exe"
+    } else {
+        ""
+    }
+}
+
+/// A tagged plan that lacks the topology its release requires.
+#[derive(Debug)]
+struct PlanMismatch(String);
+
+impl fmt::Display for PlanMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Error for PlanMismatch {}
+
+fn ensure(condition: bool, message: impl FnOnce() -> String) -> Result<(), PlanMismatch> {
+    if condition {
+        Ok(())
+    } else {
+        Err(PlanMismatch(message()))
+    }
+}
+
+fn planned_artifact<'plan>(
+    plan: &'plan TaggedPlan,
+    name: &str,
+) -> Result<&'plan PlanArtifact, PlanMismatch> {
+    plan.artifacts
+        .get(name)
+        .ok_or_else(|| PlanMismatch(format!("the plan lists no artifact {name}")))
+}
+
+/// Reads the expectation for `product` from Cargo: the tag that names its
+/// version and the binaries it builds.
+fn expected_release(
+    workspace: &Path,
+    product: &'static str,
+) -> Result<ExpectedRelease, Box<dyn Error>> {
+    let package = cargo_package(workspace, product)?;
+    let binaries = package
+        .targets
+        .iter()
+        .filter(|target| target.kind.iter().any(|kind| kind == "bin"))
+        .map(|target| target.name.clone())
+        .collect();
+    Ok(ExpectedRelease {
+        product,
+        tag: format!("{product}-v{}", package.version),
+        version: package.version,
+        binaries,
+    })
+}
+
+/// Checks the release a tagged plan selects: the explicit announcement tag,
+/// exactly one release for the product at its Cargo version, the download
+/// path under that tag, and a release artifact list that is the plan's whole
+/// artifact table.
+fn check_plan_release(expected: &ExpectedRelease, plan: &TaggedPlan) -> Result<(), PlanMismatch> {
+    let tag = expected.tag.as_str();
+    ensure(plan.announcement_tag == tag, || {
+        format!("the plan announces {}, not {tag}", plan.announcement_tag)
+    })?;
+    ensure(!plan.announcement_tag_is_implicit, || {
+        format!("{tag} was inferred, not selected by the explicit tag")
+    })?;
+    let [release] = plan.releases.as_slice() else {
+        return Err(PlanMismatch(format!(
+            "{tag} must select exactly one release, not {}",
+            plan.releases.len()
+        )));
+    };
+    ensure(
+        release.app_name == expected.product && release.app_version == expected.version,
+        || {
+            format!(
+                "{tag} selects {} {}, not {} {}",
+                release.app_name, release.app_version, expected.product, expected.version
+            )
+        },
+    )?;
+    let download = format!("/releases/download/{tag}");
+    ensure(
+        release
+            .hosting
+            .github
+            .artifact_download_path
+            .ends_with(&download),
+        || {
+            format!(
+                "{tag} downloads from {}, not under {download}",
+                release.hosting.github.artifact_download_path
+            )
+        },
+    )?;
+    let listed: BTreeSet<&str> = release.artifacts.iter().map(String::as_str).collect();
+    let planned: BTreeSet<&str> = plan.artifacts.keys().map(String::as_str).collect();
+    ensure(
+        listed == planned && release.artifacts.len() == planned.len(),
+        || format!("the release of {tag} lists artifacts other than the plan's table"),
+    )
+}
+
+/// Checks that the plan's artifact table is exactly the product's set, so no
+/// artifact of the other product, and no stray file, rides along.
+fn check_plan_artifact_set(
+    expected: &ExpectedRelease,
+    plan: &TaggedPlan,
+) -> Result<(), PlanMismatch> {
+    let wanted = expected_plan_artifacts(expected.product);
+    let actual: BTreeSet<String> = plan.artifacts.keys().cloned().collect();
+    ensure(actual == wanted, || {
+        format!(
+            "{} plans the wrong artifacts: missing {:?}, unexpected {:?}",
+            expected.tag,
+            wanted.difference(&actual).collect::<Vec<_>>(),
+            actual.difference(&wanted).collect::<Vec<_>>()
+        )
+    })
+}
+
+/// Checks one target archive's contents: exactly the product's executables,
+/// plus the README, license, changelog, and manual directory.
+fn check_archive_assets(
+    expected: &ExpectedRelease,
+    archive: &str,
+    target: &str,
+    artifact: &PlanArtifact,
+) -> Result<(), PlanMismatch> {
+    let suffix = executable_suffix(target);
+    let wanted: BTreeSet<String> = expected
+        .binaries
+        .iter()
+        .map(|binary| format!("{binary}{suffix}"))
+        .collect();
+    let shipped: BTreeSet<String> = artifact
+        .assets
+        .iter()
+        .filter(|asset| asset.kind == "executable")
+        .map(|asset| asset.path.clone())
+        .collect();
+    ensure(shipped == wanted, || {
+        format!("{archive} ships executables {shipped:?}, not {wanted:?}")
+    })?;
+    for document in ["README.md", "LICENSE.md", "CHANGELOG.md", "man"] {
+        ensure(
+            artifact
+                .assets
+                .iter()
+                .any(|asset| asset.path == document && asset.kind != "executable"),
+            || format!("{archive} omits {document}"),
+        )?;
+    }
+    Ok(())
+}
+
+/// Checks the six target archives: each is one target's executable archive
+/// with a checksum artifact that names it, and holds the product's files.
+fn check_plan_archives(expected: &ExpectedRelease, plan: &TaggedPlan) -> Result<(), PlanMismatch> {
+    for target in TARGETS {
+        let name = archive_name(expected.product, target);
+        let checksum_name = format!("{name}.sha256");
+        let archive = planned_artifact(plan, &name)?;
+        ensure(archive.kind == "executable-zip", || {
+            format!("{name} has kind {}, not executable-zip", archive.kind)
+        })?;
+        ensure(archive.target_triples == [target], || {
+            format!("{name} targets {:?}, not {target}", archive.target_triples)
+        })?;
+        ensure(
+            archive.checksum.as_deref() == Some(checksum_name.as_str()),
+            || format!("{name} names checksum {:?}", archive.checksum),
+        )?;
+        let checksum = planned_artifact(plan, &checksum_name)?;
+        ensure(
+            checksum.kind == "checksum" && checksum.target_triples == [target],
+            || format!("{checksum_name} is not the {target} checksum"),
+        )?;
+        check_archive_assets(expected, &name, target, archive)?;
+    }
+    Ok(())
+}
+
+/// Checks the installers, unified checksum, and source archive: each has its
+/// kind, and each installer's hint downloads from the tag's release.
+fn check_plan_support_artifacts(
+    expected: &ExpectedRelease,
+    plan: &TaggedPlan,
+) -> Result<(), PlanMismatch> {
+    let tag = expected.tag.as_str();
+    for installer in [
+        format!("{}-installer.sh", expected.product),
+        format!("{}-installer.ps1", expected.product),
+    ] {
+        let artifact = planned_artifact(plan, &installer)?;
+        ensure(artifact.kind == "installer", || {
+            format!("{installer} has kind {}, not installer", artifact.kind)
+        })?;
+        let hint = artifact.install_hint.as_deref().unwrap_or_default();
+        ensure(
+            hint.contains(&format!("/releases/download/{tag}/{installer}")),
+            || format!("{installer} does not install from the {tag} release: {hint}"),
+        )?;
+    }
+    ensure(
+        planned_artifact(plan, "sha256.sum")?.kind == "unified-checksum",
+        || "sha256.sum is not the unified checksum".to_owned(),
+    )?;
+    let source = planned_artifact(plan, "source.tar.gz")?;
+    ensure(
+        source.kind == "source-tarball"
+            && source.checksum.as_deref() == Some("source.tar.gz.sha256"),
+        || {
+            format!(
+                "source.tar.gz is not a source archive with its checksum: {}",
+                source.kind
+            )
+        },
+    )?;
+    ensure(
+        planned_artifact(plan, "source.tar.gz.sha256")?.kind == "checksum",
+        || "source.tar.gz.sha256 is not a checksum".to_owned(),
+    )
+}
+
+/// Checks that `plan` is the whole release plan of the tag `expected` names:
+/// the release it selects, its exact artifact set, the six target archives,
+/// and the installers and source archive.
+fn check_plan_topology(expected: &ExpectedRelease, plan: &TaggedPlan) -> Result<(), PlanMismatch> {
+    check_plan_release(expected, plan)?;
+    check_plan_artifact_set(expected, plan)?;
+    check_plan_archives(expected, plan)?;
+    check_plan_support_artifacts(expected, plan)
 }
 
 #[expect(
@@ -382,21 +678,68 @@ fn collect_regular_files(
     Ok(())
 }
 
+/// Runs the real `dist plan` for the tag naming `product`'s Cargo version and
+/// parses the plan it prints, with the expectation that tag implies.
+fn tagged_plan(
+    workspace: &Path,
+    product: &'static str,
+) -> Result<(ExpectedRelease, TaggedPlan), Box<dyn Error>> {
+    let expected = expected_release(workspace, product)?;
+    let (planned, plan) = plan_for_tag(workspace, &expected.tag)?;
+    if !planned {
+        return Err(io::Error::other(format!(
+            "{} names the Cargo version and must plan: {plan:?}",
+            expected.tag
+        ))
+        .into());
+    }
+    // Decode through JSON text, as the wire client does: `sonic_rs::from_value`
+    // rejects some serde shapes, and the plan is already parsed once.
+    let text = sonic_rs::to_string(&plan)?;
+    Ok((expected, sonic_rs::from_str(&text)?))
+}
+
+/// The release plan of each product, from the real `dist plan` for the tag
+/// naming that product's Cargo version: it selects exactly that product's
+/// release, with the six target archives and checksums, both installers, the
+/// unified checksum, and the source archive. The same attack from the other
+/// side: each plan fails the other product's expectation, and a live plan
+/// missing an archive, or the source archive, fails the layout gate.
 #[test]
 fn release_dist_plan_validity() -> Result<(), Box<dyn Error>> {
-    let manifest = fixture_plan()?;
-    assert_manifest_artifacts("dalgon", &manifest);
-    assert_manifest_artifacts("dalgona", &manifest);
-    let mut broken = fixture_plan()?;
-    broken
-        .artifacts
-        .remove("dalgon-x86_64-unknown-linux-gnu.tar.xz");
-    let red = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        assert_manifest_artifacts("dalgon", &broken);
-    }));
+    if !dist_ready()? {
+        return Err(
+            io::Error::other("cargo-dist is required for release_dist_plan_validity").into(),
+        );
+    }
+    let workspace = support::repo_root();
+    let (dal_expected, dal_plan) = tagged_plan(&workspace, "dalgon")?;
+    let (dalgona_expected, dalgona_plan) = tagged_plan(&workspace, "dalgona")?;
+    check_plan_topology(&dal_expected, &dal_plan)?;
+    check_plan_topology(&dalgona_expected, &dalgona_plan)?;
+
     assert!(
-        red.is_err(),
-        "a manifest missing an archive must fail the layout gate"
+        check_plan_topology(&dalgona_expected, &dal_plan).is_err(),
+        "the dalgon tag's plan must not satisfy the dalgona release"
+    );
+    assert!(
+        check_plan_topology(&dal_expected, &dalgona_plan).is_err(),
+        "the dalgona tag's plan must not satisfy the dalgon release"
+    );
+
+    let mut missing_archive = dal_plan;
+    missing_archive
+        .artifacts
+        .remove(&archive_name("dalgon", "x86_64-unknown-linux-gnu"));
+    assert!(
+        check_plan_topology(&dal_expected, &missing_archive).is_err(),
+        "a plan missing an archive must fail the layout gate"
+    );
+    let mut missing_source = dalgona_plan;
+    missing_source.artifacts.remove("source.tar.gz");
+    assert!(
+        check_plan_topology(&dalgona_expected, &missing_source).is_err(),
+        "a plan without the source archive must fail the layout gate"
     );
     Ok(())
 }
@@ -420,7 +763,8 @@ fn release_binstall_url_expansion() -> Result<(), Box<dyn Error>> {
 
 /// Runs the real `dist plan` for one announcement tag and returns its exit
 /// success with the parsed JSON stdout: the plan on success, the diagnostic
-/// on failure.
+/// on failure. The planner reads the workspace only: it runs without
+/// `GH_TOKEN` or `GITHUB_TOKEN`, so it never authenticates against a host.
 #[expect(
     clippy::disallowed_methods,
     reason = "the dist gate runs the real cargo-dist plan against announcement tags"
@@ -429,6 +773,8 @@ fn plan_for_tag(workspace: &Path, tag: &str) -> Result<(bool, sonic_rs::Value), 
     let output = Command::new("dist")
         .args(["plan", "--output-format=json"])
         .arg(format!("--tag={tag}"))
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
         .current_dir(workspace)
         .output()?;
     Ok((

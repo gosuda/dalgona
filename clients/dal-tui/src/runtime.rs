@@ -2129,11 +2129,8 @@ impl Surfaces {
     /// Sends each requested copy to the terminal clipboard (OSC 52) and
     /// reports the outcome in a notice.
     fn write_copies(&mut self, io: &dyn TermIo) {
-        use base64::Engine as _;
-
         for text in std::mem::take(&mut self.session.pending_copies) {
-            let payload = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-            match io.write(format!("\x1b]52;c;{payload}\x07").as_bytes()) {
+            match crate::term::write_clipboard(io, &text) {
                 Ok(()) => {
                     let count = text.chars().count();
                     let notice = crate::copy::render(
@@ -8637,7 +8634,10 @@ mod loop_tests {
             fn size(&self) -> std::io::Result<(u16, u16)> {
                 Ok((80, 24))
             }
-            fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
+            fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+                if !bytes.starts_with(b"\x1b]52;c;") {
+                    return Ok(());
+                }
                 let index = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
                 if index > self.fail_after {
                     return Err(std::io::Error::new(
@@ -8677,7 +8677,185 @@ mod loop_tests {
             rig.surfaces.live.notices()[1].text,
             crate::copy::ids::COPY_FAILED
         );
-        assert_eq!(io.writes.load(Ordering::SeqCst), 2);
+        assert!(
+            rig.surfaces.session.pending_copies.is_empty(),
+            "every queued copy is drained, refused or not"
+        );
+    }
+
+    /// Records each write; refuses the write at a 0-based index when `refuse` says so.
+    struct RefuseWhen {
+        calls: std::sync::Mutex<Vec<Vec<u8>>>,
+        refuse: fn(usize, &[u8]) -> bool,
+    }
+
+    impl TermIo for RefuseWhen {
+        fn enable_raw(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn disable_raw(&self) {}
+        fn size(&self) -> std::io::Result<(u16, u16)> {
+            Ok((80, 24))
+        }
+        fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+            let mut calls = self.calls.lock().expect("calls");
+            let index = calls.len();
+            calls.push(bytes.to_vec());
+            if (self.refuse)(index, bytes) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the terminal refused the write",
+                ));
+            }
+            Ok(())
+        }
+        fn read(&self, _timeout: std::time::Duration) -> std::io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn raise_tstp(&self) {}
+    }
+
+    fn accept_all(_index: usize, _bytes: &[u8]) -> bool {
+        false
+    }
+
+    fn copy_through(text: &str, refuse: fn(usize, &[u8]) -> bool) -> (Vec<Vec<u8>>, Rig) {
+        let mut rig = Rig::new();
+        rig.surfaces.session.pending_copies = vec![text.into()];
+        let io = RefuseWhen {
+            calls: std::sync::Mutex::new(Vec::new()),
+            refuse,
+        };
+        rig.surfaces.write_copies(&io);
+        let calls = io.calls.lock().expect("calls").clone();
+        (calls, rig)
+    }
+
+    fn last_notice_is_error(rig: &Rig) {
+        let notices = rig.surfaces.live.notices();
+        let notice = notices.last().expect("a notice");
+        assert_eq!(notice.role, crate::theme::Role::Error);
+        assert_eq!(notice.text, crate::copy::ids::COPY_FAILED);
+    }
+
+    #[test]
+    fn a_short_clipboard_copy_is_string_terminated_with_no_bel() {
+        let (calls, rig) = copy_through("first", accept_all);
+        assert!(calls.iter().all(|bytes| bytes.len() <= 4096));
+        assert!(calls.iter().all(|bytes| !bytes.contains(&0x07)));
+        assert_eq!(calls.concat(), b"\x1b]52;c;Zmlyc3Q=\x1b\\".to_vec());
+        assert_eq!(
+            rig.surfaces.session.pending_copies,
+            [],
+            "queued copies are drained"
+        );
+    }
+
+    #[test]
+    fn a_long_clipboard_copy_is_split_into_bounded_writes_that_decode_exactly() {
+        use base64::Engine as _;
+
+        let text = "héllo wörld ✓ ".repeat(700);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+        let (calls, rig) = copy_through(&text, accept_all);
+
+        assert!(calls.iter().all(|bytes| bytes.len() <= 4096));
+        assert!(calls.iter().all(|bytes| !bytes.contains(&0x07)));
+
+        let joined = calls.concat();
+        let header = b"\x1b]52;c;";
+        assert!(joined.starts_with(header));
+        assert!(joined.ends_with(b"\x1b\\"));
+        assert_eq!(
+            joined.windows(2).filter(|pair| *pair == b"\x1b\\").count(),
+            1,
+            "the string terminator appears only at the end"
+        );
+        let body = &joined[header.len()..joined.len() - 2];
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .expect("valid base64"),
+            text.as_bytes()
+        );
+
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices[0].role, crate::theme::Role::Dim);
+        assert!(
+            !notices[0].text.contains(&encoded[..32]),
+            "the notice carries no payload: {}",
+            notices[0].text
+        );
+        assert_eq!(
+            rig.surfaces.session.pending_copies,
+            [],
+            "queued copies are drained"
+        );
+    }
+
+    #[test]
+    fn a_refused_clipboard_short_copy_is_closed_once_and_reports_an_error() {
+        let (calls, rig) = copy_through("first", |index, _| index == 0);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].as_slice(), b"\x1b\\");
+        last_notice_is_error(&rig);
+        assert_eq!(
+            rig.surfaces.session.pending_copies,
+            [],
+            "queued copies are drained"
+        );
+    }
+
+    #[test]
+    fn a_refused_clipboard_header_is_closed_once_and_reports_an_error() {
+        let (calls, rig) = copy_through(&"a".repeat(6200), |index, _| index == 0);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].as_slice(), b"\x1b]52;c;");
+        assert_eq!(calls[1].as_slice(), b"\x1b\\");
+        last_notice_is_error(&rig);
+        assert_eq!(
+            rig.surfaces.session.pending_copies,
+            [],
+            "queued copies are drained"
+        );
+    }
+
+    #[test]
+    fn a_refused_clipboard_payload_chunk_is_closed_and_nothing_further_is_sent() {
+        let (calls, rig) = copy_through(&"a".repeat(6200), |index, _| index == 1);
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].as_slice(), b"\x1b]52;c;");
+        assert_ne!(calls[1].as_slice(), b"\x1b\\");
+        assert_eq!(calls[2].as_slice(), b"\x1b\\");
+        last_notice_is_error(&rig);
+        assert_eq!(
+            rig.surfaces.session.pending_copies,
+            [],
+            "queued copies are drained"
+        );
+    }
+
+    #[test]
+    fn a_refused_clipboard_terminator_is_not_retried() {
+        let (calls, rig) = copy_through(&"a".repeat(6200), |_, bytes| bytes == b"\x1b\\");
+        let terminators = calls
+            .iter()
+            .filter(|bytes| bytes.as_slice() == b"\x1b\\")
+            .count();
+        assert_eq!(terminators, 1, "a refused terminator is not retried");
+        assert_eq!(calls.last().map(Vec::as_slice), Some(&b"\x1b\\"[..]));
+        last_notice_is_error(&rig);
+        assert_eq!(
+            rig.surfaces.session.pending_copies,
+            [],
+            "queued copies are drained"
+        );
+    }
+
+    #[test]
+    fn an_empty_clipboard_copy_writes_only_header_and_terminator() {
+        let (calls, _rig) = copy_through("", accept_all);
+        assert_eq!(calls.concat(), b"\x1b]52;c;\x1b\\".to_vec());
     }
 
     /// A real host over a temporary store, started on `handle`'s runtime: no

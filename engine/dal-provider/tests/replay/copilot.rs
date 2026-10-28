@@ -15,13 +15,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dal_core::{
-    ContextItem, Family, ModelRequest, ModelRoute, Part, Purpose, RequestParams, ThinkingLevel,
-    Usage,
+    Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute, Part, Purpose,
+    RequestParams, ThinkingLevel, Usage,
 };
 use dal_provider::{
-    AuthStyle, CatalogEntry, Effort, EnvSnapshot, Listing, NoticeSink, ProviderConfig,
-    ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ProviderSettings, ResolvedModel,
-    StopReason, StreamEvent, ThinkingSupport, ToolSupport, Transport,
+    CatalogEntry, Effort, EnvSnapshot, Listing, NoticeSink, ProviderConfig, ProviderError,
+    ProviderIdentity, ProviderSet, ResolvedModel, StopReason, StreamEvent, ThinkingSupport,
+    ToolSupport,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -88,26 +88,35 @@ fn anthropic_entry() -> CatalogEntry {
     }
 }
 
-fn config(id: &str, base: &str, family: Family) -> ProviderConfig {
-    ProviderConfig {
-        default_model: None,
-        thinking: ThinkingLevel::Medium,
-        aliases: Vec::new(),
-        request_max_retries: 0,
-        stream_max_retries: 0,
-        providers: vec![ProviderEntry {
-            id: id.into(),
-            def: None,
-            family,
-            base_url: base.into(),
-            transport: Transport::Https,
-            key_env: Some(KEY_ENV.into()),
-            auth: AuthStyle::Bearer,
-            max_concurrent_requests: 4,
-            settings: ProviderSettings::default(),
-        }],
-        scripted: None,
-    }
+fn config(dir: &std::path::Path, id: &str, base: &str, family: Family) -> ProviderConfig {
+    // The Copilot entry decodes from the effective TOML through the public
+    // `ProviderConfig::from_config` route: the loopback base and the bearer
+    // style stay explicit, and the `api` names the surface family from the
+    // accepted keys (`openai_chat`, `anthropic`), never a display guess. The
+    // row-default base would render the captured environment, so the
+    // loopback form is what keeps a silent environment from reaching out.
+    let api = match family {
+        Family::Chat => "openai_chat",
+        Family::Anthropic => "anthropic",
+        _ => panic!("copilot replay covers the Chat and Anthropic families only"),
+    };
+    let table = format!(
+        "[retry]\nrequest_max_retries = 0\nstream_max_retries = 0\n\
+         [providers.\"{id}\"]\napi = \"{api}\"\nbase_url = \"{base}\"\n\
+         key_env = \"{KEY_ENV}\"\nauth = \"bearer\"\n"
+    );
+    let host = Config::load(ConfigProduct::Dalgon, dir, "", Some(&table))
+        .expect("replay provider table parses");
+    let mut config = ProviderConfig::from_config(&host).expect("replay providers decode");
+    config
+        .providers
+        .retain(|candidate| candidate.id.as_ref() == id);
+    assert_eq!(
+        config.providers.len(),
+        1,
+        "replay decodes exactly the {id} entry"
+    );
+    config
 }
 
 fn chat_request() -> ModelRequest {
@@ -218,7 +227,7 @@ async fn drive(
         .expect("replay server starts");
     let dir = temp_dir(tag);
     let set = ProviderSet::new(
-        &config(id, &server.base_url(), family),
+        &config(&dir, id, &server.base_url(), family),
         identity(),
         EnvSnapshot::test(&[(KEY_ENV, KEY_VALUE)]),
         &dir,

@@ -6,10 +6,11 @@ use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dal_agent::ext::{ExtensionBuilder, StatusCx, StatusPoll, StatusSnapshot};
+use dal_agent::ext::{ExtensionBuilder, StatusCx, StatusPoll, StatusSample, StatusSnapshot};
 use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription};
 use dal_core::{
-    ClientId, Config, ConfigProduct, ExtState, ExtStatus, ServiceSet, UpdateKind, Workspace,
+    ClientId, Config, ConfigProduct, ExtState, ExtStatus, ServiceSet, StatusPayload, UpdateKind,
+    Workspace,
 };
 
 struct Controlled {
@@ -38,7 +39,7 @@ impl StatusPoll for Controlled {
     }
 }
 
-async fn open(poll: &Arc<Controlled>) -> (tempfile::TempDir, Host, Agent) {
+async fn open<P: StatusPoll + 'static>(poll: &Arc<P>) -> (tempfile::TempDir, Host, Agent) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("data");
     let workspace_dir = tmp.path().join("w");
@@ -97,6 +98,46 @@ fn status(state: ExtState, text: &str) -> ExtStatus {
         ext: "focus".into(),
         state,
         text: Some(text.into()),
+        payload: None,
+    }
+}
+
+/// A poll whose `sample` carries a bounded payload alongside its snapshot.
+#[derive(Default)]
+struct Structured {
+    busy: Mutex<bool>,
+}
+
+impl Structured {
+    fn set_busy(&self) {
+        *self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+    }
+}
+
+impl StatusPoll for Structured {
+    fn snapshot(&self, _cx: &StatusCx) -> StatusSnapshot {
+        let busy = *self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        StatusSnapshot {
+            quiet: !busy,
+            text: busy.then(|| "working".into()),
+        }
+    }
+
+    fn sample(&self, cx: &StatusCx) -> StatusSample {
+        let busy = *self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        StatusSample {
+            snapshot: self.snapshot(cx),
+            payload: busy.then(|| StatusPayload::parse(r#"{"state":"running"}"#).expect("payload")),
+        }
     }
 }
 
@@ -136,9 +177,37 @@ async fn ext_status_publishes_changes_once_and_tracks_quiet() {
                 ext: "focus".into(),
                 state: ExtState::Quiet,
                 text: None,
+                payload: None,
             },
         ]
     );
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn ext_status_carries_a_structured_payload_to_poll_and_subscribers() {
+    let poll = Arc::new(Structured::default());
+    let (_tmp, host, agent) = open(&poll).await;
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+    assert_eq!(
+        agent.poll_status().await.expect("poll"),
+        [] as [ExtStatus; 0]
+    );
+
+    poll.set_busy();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let expected = ExtStatus {
+        ext: "focus".into(),
+        state: ExtState::Busy,
+        text: Some("working".into()),
+        payload: Some(StatusPayload::parse(r#"{"state":"running"}"#).expect("payload")),
+    };
+    assert_eq!(
+        agent.poll_status().await.expect("poll"),
+        vec![expected.clone()]
+    );
+    assert!(!agent.is_quiet().await.expect("quiet predicate"));
+    assert_eq!(drain(&mut subscription).await, vec![expected]);
     host.shutdown(Duration::from_secs(1)).await;
 }
 
@@ -160,6 +229,7 @@ async fn poll_status_reads_a_fresh_state_without_waiting_for_the_tick() {
             ext: "focus".into(),
             state: ExtState::Busy,
             text: None,
+            payload: None,
         }]
     );
     assert!(!agent.is_quiet().await.expect("quiet predicate"));

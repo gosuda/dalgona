@@ -11,7 +11,7 @@ use crate::command::{CancelScope, Command, Expect, Output, Rejection, Reply};
 use crate::config::{ApprovalMode, Mode};
 use crate::content::Part;
 use crate::ext::{
-    GateSeed, HookEvent, HookOutcome, HookVerdict, Name, StreamVerdict, ToolCallVerdict,
+    GateSeed, HookEvent, HookOutcome, HookVerdict, MailMode, Name, StreamVerdict, ToolCallVerdict,
 };
 use crate::id::{CallId, ClientId, EntryId, Gen, JobId, RequestId, TurnId};
 use crate::journal::{
@@ -43,7 +43,7 @@ mod views;
 
 pub use ext::LeafExt;
 pub use private::{PrivateConflict, PrivateFact, PrivateTerminal};
-pub use session::{DeclaredFold, Session};
+pub use session::{DeclaredFold, MAILBOX_WAITING_LIMIT, Session};
 pub use types::{
     CompactLimits, CompactionExtRecord, CompactionReason, CompactionSummary, Effect, Emit, Event,
     Limits, ModelRequestPlan, PartialResponse, PendingCall, Phase, ReplayError, ResolveError,

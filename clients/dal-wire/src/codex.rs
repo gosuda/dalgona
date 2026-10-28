@@ -122,7 +122,7 @@ struct Ctx {
 impl Ctx {
     /// Handles one frame; returns a handler future for concurrent requests.
     async fn on_frame(&self, line: &str) -> Option<futures::future::BoxFuture<'static, ()>> {
-        let value: Value = match sonic_rs::from_str(line) {
+        let value: Value = match crate::json::parse_value_lossless(line) {
             Ok(value) => value,
             Err(error) => {
                 let message = format!("frame is not valid JSON: {error}");

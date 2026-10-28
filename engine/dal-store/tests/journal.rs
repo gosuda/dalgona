@@ -286,6 +286,7 @@ fn assistant_line_of(line_len: usize) -> Record {
             kind: EntryKind::Assistant {
                 api: dal_core::Family::Chat,
                 model: "test-model".into(),
+                provider: None,
                 route: Some(dal_core::AssistantRoute::Api(dal_core::Family::Chat)),
                 content: vec![dal_core::Block::Text {
                     text: text.into(),
@@ -325,6 +326,7 @@ fn premium_assistant(id: u64, input_tokens: u64, premium: Option<f64>) -> Record
         kind: EntryKind::Assistant {
             api: dal_core::Family::Chat,
             model: "test-model".into(),
+            provider: None,
             route: Some(dal_core::AssistantRoute::Api(dal_core::Family::Chat)),
             content: vec![dal_core::Block::Text {
                 text: "ok".into(),

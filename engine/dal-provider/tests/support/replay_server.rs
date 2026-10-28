@@ -77,9 +77,11 @@ const MAX_MESSAGE: usize = 16 << 20;
 /// Fixture header value that matches any present value.
 const REDACTED: &str = "<redacted>";
 /// Headers whose received values never appear in mismatch text.
-const SECRET_HEADERS: [&str; 5] = [
+const SECRET_HEADERS: [&str; 7] = [
     "authorization",
     "x-api-key",
+    "api-key",
+    "cf-aig-authorization",
     "chatgpt-account-id",
     "cookie",
     "set-cookie",

@@ -4,11 +4,23 @@ This page lists the user-visible changes in each version. The `/changelog` comma
 
 ## Unreleased
 
+- An eval cell can now ask the session judge one question (`judge.ask`) or up to 32 at once (`judge.batch`). The cell may request `judge.ask` or `judge.batch` only when that operation is in its `uses` and in `eval.uses`, and every eval cell receives the `judge` and `judge_batch` globals. See [tools](tools.md#the-eval-tool).
+- Only an eval cell that declares `judge.ask` or `judge.batch` can ask the session judge; plugin handlers, commands, and models are refused at declaration.
+- The `/login` provider picker puts an exact provider id first when the filter matches one: typing `openai` and pressing Enter starts the OpenAI sign-in, not a longer id like `azure-openai-responses` that only contains the text.
+- A scoped model id offered by several providers is priced for admission from each listed row instead of failing as unpriced: the configured price for a `provider/id` key wins, then the live catalog price, then the compiled table. A route that names its provider also prices through its `provider/model` spelling.
+- Provider definitions supply per-family auth, dialect, and request schema from one source, and scoped models are gated through config limits.
+- Products declare typed startup settings, and the settings picker confirms them: an edit rewrites `dal.toml` atomically with owner-only permissions, preserves your comments and formatting, and is refused when invalid. A saved next-start value shows beside the running value when they differ, and a remote connection refuses product setting edits. See [Settings in dal.toml](config.md#tables-with-their-own-keys).
+- `dalgon dev run` evaluates a scenario with the invoking product's configuration kind, defaults, and extensions instead of a fixed one.
+- A URI scheme resolver runs with the identity of the extension that registered the scheme, so it queries records through its own capability-scoped services. See [Plugins](plugins.md).
+- Breaking Rust API: `ProductFactory` gains `config_product` and `settings`, and `Reply::Choose` gains `thinking_levels`. Callers that construct either value must provide the new fields, and pattern matches must handle them or use `..`.
+- A user plugin can replace one bundled skill or rule with `replace = True` and `battery = "<bundled extension>"`: for example the `find-anything` skill owned by `skills`, or the `fabricated-unavailable-tool-call` rule owned by `quality`. Without the pair a name clash is still refused; the replacement moves only that record and inherits no service, tool, or grant. Removing the claim restores the bundled record on reload. See [Plugins](plugins.md#add-skills-rules-and-prompt-text).
+- `[limits.plugins]` Starlark budgets take positive integers and report the key to raise: a real load, handler, or eval-cell breach names `raise limits.plugins.<key> to allow more`, while a user `fail()` that repeats the vendor wording gains no such remedy. See [Settings in dal.toml](config.md#tables-with-their-own-keys).
 - A reopened session shows the model, thinking level, approval mode, execution mode, and name its journal recorded. Before, it showed the defaults of the host that opened it. A session that never chose a model still follows the configured default and names no model. Changing another setting no longer makes the default look selected. See [sessions](sessions.md).
 - API model routes can name their provider. A route that does, such as a row picked in the model picker, resolves exactly that provider. It never resolves another provider or a synthetic model that lists the same id. It fails with a typed error when the provider is unavailable. Routes without a provider resolve as before.
 - `models/list` rows add `route` and `reference`. The remote model picker selects by route for the session only and scopes by provider. Servers without them keep the older selection by name. The protocol version is still 1.
 - Fix remote API-key sign-in outcome reporting. See [remote sign-in](commands.md#remote-sign-in).
 - Persist turn identities before acknowledging queued work. Cancelling a queued turn no longer invalidates later journal entries. Restarting a session cannot reuse its reserved identity. Queued text is not restored.
+- Delivered mailbox messages use journal format 3. A build that reads only formats 1 and 2 reports a newer journal format instead of a damaged journal. Existing journals need no conversion.
 - New turn-ID reservations use journal format 2. Other records retain format 1. Existing journals need no conversion. A reader must support format 2 after a reservation is written. See [durable turn identities](sessions.md#durable-turn-identities).
 - Rust code that uses `dal-tools` can call `patch::styles::tier` again, also in constant expressions. It returns the prompt-intensity tier of an edit style.
 - Reject unsupported Unicode duration units with a configuration error instead of panicking.
@@ -31,6 +43,8 @@ This page lists the user-visible changes in each version. The `/changelog` comma
   - Resuming after such a failure closes both the old session and the opened replacement session.
   - A turn that ends cancelled still shows the inline cancellation line. Any other end shows no line. Fullscreen never shows the inline line.
   - On quit, an earlier terminal error still wins over a later failure to show the cancellation line.
+- Recover completed background-job reports after failed writes or interrupted appends without duplicating them. Report cancellation persistence failures instead of success.
+- Stop nested inference when a hook times out or its owning turn is cancelled.
 
 ## 0.1.0 (2026-09-26; no tag, build from source)
 

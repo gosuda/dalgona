@@ -17,7 +17,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 
 use dal_core::{
     Answer, ClientId, DenyReason, Name, Origin, Question, Service, ServiceSet, Timestamp,
@@ -27,7 +26,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::Broker;
-use crate::broker::Settled;
+use crate::broker::{Settled, default_timeout};
 use crate::error::ServiceError;
 
 use super::Caller;
@@ -222,7 +221,6 @@ struct McpGrantKey {
 pub struct GrantStore {
     data_dir: PathBuf,
     workspace: PathBuf,
-    ask_timeout: Duration,
     broker: Option<Arc<Broker>>,
     inner: Mutex<Inner>,
     persist_lock: tokio::sync::Mutex<()>,
@@ -265,9 +263,6 @@ pub enum GrantStoreError {
     Store(#[from] dal_store::StoreError),
 }
 
-/// Ask timeout for administration handles, which never ask.
-const ADMIN_ASK_TIMEOUT: Duration = Duration::from_secs(120);
-
 impl GrantStore {
     /// Opens an administration handle over `data_root`. Loading is lazy
     /// so construction never fails: every operation re-reads
@@ -275,7 +270,7 @@ impl GrantStore {
     /// operation writes when the file cannot be loaded.
     #[must_use]
     pub fn new(data_root: PathBuf) -> Self {
-        Self::empty(data_root.clone(), data_root, ADMIN_ASK_TIMEOUT, None)
+        Self::empty(data_root.clone(), data_root, None)
     }
 
     /// Installs the session's status publisher for client-facing requests.
@@ -350,25 +345,18 @@ impl GrantStore {
     pub(crate) fn with_runtime_scoped(
         data_dir: PathBuf,
         workspace: PathBuf,
-        ask_timeout: Duration,
         broker: Arc<Broker>,
     ) -> Result<Self, GrantStoreError> {
         let persistent = load(&data_dir)?;
-        let store = Self::empty(data_dir, workspace, ask_timeout, Some(broker));
+        let store = Self::empty(data_dir, workspace, Some(broker));
         store.lock().persistent = persistent;
         Ok(store)
     }
 
-    fn empty(
-        data_dir: PathBuf,
-        workspace: PathBuf,
-        ask_timeout: Duration,
-        broker: Option<Arc<Broker>>,
-    ) -> Self {
+    fn empty(data_dir: PathBuf, workspace: PathBuf, broker: Option<Arc<Broker>>) -> Self {
         Self {
             data_dir,
             workspace,
-            ask_timeout,
             broker,
             request_update: Mutex::new(None),
             request_open: Mutex::new(None),
@@ -414,7 +402,7 @@ impl GrantStore {
     }
 
     /// Denies one MCP reservation without prompting: headless runs,
-    /// cancellation, and the ask timeout all settle the same way.
+    /// cancellation, and the grant timeout all settle the same way.
     async fn deny_mcp(&self, key: &McpGrantKey, reservation: &Arc<Notify>) -> GrantOutcome {
         self.finalize_mcp(
             key,
@@ -511,7 +499,8 @@ impl GrantStore {
             name: who.ext.as_str().into(),
             origin: origin.into(),
         };
-        let deadline = Instant::now() + self.ask_timeout;
+        let grant_timeout = default_timeout(&question);
+        let deadline = Instant::now() + grant_timeout;
         let Some(broker) = self.broker.as_ref() else {
             return Err(ServiceError::failed(None, "grant store has no broker"));
         };
@@ -526,7 +515,7 @@ impl GrantStore {
         tokio::select! {
             biased;
             () = cancel.cancelled() => self.deny_mcp(&key, &notify).await,
-            () = tokio::time::sleep(self.ask_timeout) => self.deny_mcp(&key, &notify).await,
+            () = tokio::time::sleep(grant_timeout) => self.deny_mcp(&key, &notify).await,
             () = notify.notified() => self.take_mcp(&key),
             Settled { answer, by, .. } = answer => {
                 let (outcome, mut row) = Self::decide(&key.key, &answer, by.clone());
@@ -595,7 +584,7 @@ impl GrantStore {
         // A question needs a front end that can answer it. With none
         // attached (print mode, listen-only clients) nobody can approve, so
         // the reservation resolves as denied now instead of holding the
-        // caller for the whole ask timeout. A caller without a turn (a slash
+        // caller for the whole grant timeout. A caller without a turn (a slash
         // command) asks like any other: its request just has no turn to end
         // with, so only an answer, the deadline, or session cancel settles it.
         if !self.answerer_attached() {
@@ -626,7 +615,8 @@ impl GrantStore {
             name: who.ext.as_str().into(),
             origin: origin.into(),
         };
-        let deadline = Instant::now() + self.ask_timeout;
+        let grant_timeout = default_timeout(&question);
+        let deadline = Instant::now() + grant_timeout;
         let Some(broker) = self.broker.as_ref() else {
             return Err(ServiceError::failed(None, "grant store has no broker"));
         };
@@ -644,7 +634,7 @@ impl GrantStore {
             () = cancel.cancelled() => {
                 self.finalize(&key, service, Err(ServiceError::Denied(DenyReason::NotGranted)), None, &notify).await
             }
-            () = tokio::time::sleep(self.ask_timeout) => {
+            () = tokio::time::sleep(grant_timeout) => {
                 self.finalize(&key, service, Err(ServiceError::Denied(DenyReason::NotGranted)), None, &notify).await
             }
             () = notify.notified() => self.take(&key),

@@ -2,15 +2,15 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use dal_core::{
-    Answer, Choice, Notice, Owner, Part, Preview, Question, Request, RequestId, ResolutionCause,
-    SessionId, Stop, StreamChannel, TurnId, UpdateKind,
+    Answer, Choice, Notice, Owner, Part, Preview, Question, RawJson, Request, RequestId,
+    ResolutionCause, SessionId, Stop, StreamChannel, TurnId, UpdateKind,
 };
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::a2a::{TaskEvent, TaskState, transition};
 use crate::serve::a2a::card_base;
 use crate::serve::a2a::error::{Fail, VERSION_TEXT, version_ok};
-use crate::serve::a2a::events::{apply, failed_task_json, frame, step, task_json};
+use crate::serve::a2a::events::{apply, failed_task_json, frame, status_json, step, task_json};
 use crate::serve::a2a::parts::{APPROVAL_HINT, DATA_HINT, answer_for, prompt_parts, question_text};
 use crate::serve::a2a::table::{
     A2aState, Framing, MAX_CONTEXTS, MAX_TASKS, TASK_LIMIT_TEXT, TaskKey, TaskRec,
@@ -619,4 +619,30 @@ fn submit_failure_renders_a_failed_task() {
     );
     let id = task.get("id").and_then(|id| id.as_str()).expect("task id");
     assert_eq!(TaskKey::parse(id), None);
+}
+
+#[test]
+fn input_required_parts_keep_raw_answer_values_exact() {
+    let task_key = key(7);
+    let mut task = TaskRec::started(task_key, String::new());
+    let mut asked = request(select(), task_key.turn);
+    asked.default = Answer::Value(
+        RawJson::parse(r#"{"n":18446744073709551617}"#).expect("default answer json"),
+    );
+    let ask = step(task_key.turn, None, &UpdateKind::RequestOpened(asked)).expect("ask");
+    apply(&mut task, ask);
+    assert_eq!(task.state, TaskState::InputRequired);
+
+    let rendered = status_json(&task);
+    let data = rendered
+        .pointer(&sonic_rs::pointer!["message", "parts", 1, "data"])
+        .unwrap_or_else(|| panic!("the input-required question data part is missing: {rendered}"));
+    let digits = data
+        .pointer(&sonic_rs::pointer!["default", "value", "n"])
+        .and_then(JsonValueTrait::as_raw_number);
+    assert_eq!(
+        digits.as_ref().map(sonic_rs::RawNumber::as_str),
+        Some("18446744073709551617"),
+        "the raw default must keep its exact digits, not a magic object or float: {data}"
+    );
 }

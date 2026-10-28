@@ -106,6 +106,7 @@ fn nonzero_exit(profile: &str, status: ExitStatus) -> ProviderError {
 /// quotes are literal; double quotes escape only `$`, `` ` ``, `"`, `\`.
 /// A trailing backslash with no next character stays literal. Empty quotes
 /// yield one empty token.
+#[cfg(any(not(windows), test))]
 pub(crate) fn tokenize_posix(cmd: &str) -> Result<Vec<Box<str>>, ProviderError> {
     #[derive(Eq, PartialEq)]
     enum Mode {

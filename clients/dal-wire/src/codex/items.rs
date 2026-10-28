@@ -99,7 +99,7 @@ impl TurnStream {
                 }
             }
             UpdateKind::ToolStarted { call, tool, args } => {
-                let arguments = sonic_rs::from_str::<Value>(args.as_str())
+                let arguments = crate::json::parse_value_lossless(args.as_str())
                     .unwrap_or_else(|_| Value::from(args.as_str()));
                 let item = tool_item(call.as_str(), tool, &arguments, "inProgress", None);
                 self.calls

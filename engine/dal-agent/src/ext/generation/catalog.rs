@@ -84,7 +84,9 @@ const fn host_backed(op: NativeOp) -> bool {
         | NativeOp::EnvRead
         | NativeOp::StateRead
         | NativeOp::StateWrite
-        | NativeOp::StateDelete => true,
+        | NativeOp::StateDelete
+        | NativeOp::JudgeAsk
+        | NativeOp::JudgeBatch => true,
         NativeOp::ToolsRead
         | NativeOp::ToolsSearch
         | NativeOp::ToolsPatch
@@ -133,7 +135,7 @@ pub(crate) struct ModelRouteEntry {
 /// The immutable operation catalog of one generation.
 #[derive(Clone)]
 pub struct Catalog {
-    native: [OpSpec; 28],
+    native: [OpSpec; NativeOp::ALL.len()],
     exports: BTreeMap<ExportId, (ExportSpec, Name)>,
     model_routes: BTreeMap<Box<str>, ModelRouteEntry>,
     model_exports: BTreeMap<ExportId, ModelExport>,

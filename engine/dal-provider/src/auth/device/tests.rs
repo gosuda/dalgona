@@ -182,8 +182,10 @@ fn device_urls(base: &Url) -> DeviceUrls {
         poll: base
             .join("/user_management/authenticate")
             .expect("poll url"),
-        page: base.join("/device").expect("page url"),
-        redirect_uri: "",
+        page: Some(base.join("/device").expect("page url")),
+        redirect_uri: None,
+        scope: None,
+        headers: Vec::new(),
     }
 }
 
@@ -321,6 +323,9 @@ async fn workos_slow_down_backs_off_then_completes() {
         Ok(DeviceOutcome::Tokens(_)) => {}
         Ok(DeviceOutcome::Grant(_)) => {
             panic!("slow_down must retry, delivered Grant after {elapsed:?}")
+        }
+        Ok(DeviceOutcome::Identity(_)) => {
+            panic!("slow_down must retry, delivered Identity after {elapsed:?}")
         }
         Err(err) => panic!("slow_down must retry, not fail after {elapsed:?}: {err:?}"),
     }
@@ -1016,11 +1021,396 @@ async fn workos_show_code_falls_back_through_page() {
         );
 
         let expected_url = if expected == "page" {
-            urls.page.as_str().to_owned()
+            urls.page
+                .as_ref()
+                .expect("test device fixture has a page")
+                .as_str()
+                .to_owned()
         } else {
             expected.to_owned()
         };
         let events = events.lock().expect("progress lock");
         assert_eq!(shown_code(&events).0, expected_url);
     }
+}
+
+/// The pinned xAI start answer: an `https` page pair, a positive lifetime,
+/// and a two-second interval.
+const XAI_START: &str = r#"{"device_code":"xai-device-1","user_code":"XAI-CODE","verification_uri":"https://auth.x.ai/device","verification_uri_complete":"https://auth.x.ai/device?code=XAI-CODE","interval":2,"expires_in":600}"#;
+/// An xAI token answer that names no lifetime: the pinned hour applies.
+const XAI_TOKENS_WITHOUT_LIFETIME: &str =
+    r#"{"access_token":"xai-access-1","refresh_token":"xai-refresh-1"}"#;
+
+#[tokio::test]
+async fn xai_device_flow_names_the_referrer_and_defaults_to_one_hour() {
+    let (base, requests) =
+        serve_script(vec![(200, XAI_START), (200, XAI_TOKENS_WITHOUT_LIFETIME)]).await;
+    let urls = device_urls(&base);
+    let client = Client::new();
+    let http = OAuthHttp {
+        client: &client,
+        user_agent: "dalgon/test",
+    };
+    let (events, progress) = progress_sink();
+    let before = unix_now();
+
+    let outcome = run(
+        &http,
+        Family::Responses,
+        Hook::XaiDevice,
+        "xai-public-client",
+        &urls,
+        Instant::now() + Duration::from_secs(30),
+        &progress,
+        &CancellationToken::new(),
+    )
+    .await;
+
+    let credential = match &outcome {
+        Ok(DeviceOutcome::Tokens(credential)) => credential,
+        Ok(DeviceOutcome::Grant(_)) => {
+            panic!("the xAI poll must deliver tokens directly: got Grant")
+        }
+        Ok(DeviceOutcome::Identity(_)) => {
+            panic!("the xAI poll must deliver tokens directly: got Identity")
+        }
+        Err(err) => {
+            panic!("the xAI poll must deliver tokens directly: got error {err:?}")
+        }
+    };
+    assert_eq!(credential.access_token.expose(), "xai-access-1");
+    assert_eq!(credential.refresh_token.expose(), "xai-refresh-1");
+    // No `expires_in` in the answer: the pinned hour counts from now.
+    assert!(
+        credential
+            .expires_at
+            .is_some_and(|at| at >= before + 3600 && at <= unix_now() + 3600),
+        "a lifetime-less xAI token lives one hour"
+    );
+
+    let captured = requests.lock().expect("requests lock");
+    assert_eq!(captured.len(), 2);
+    let (start_head, start_body) = request_parts(&captured[0]);
+    assert!(start_head.contains("application/x-www-form-urlencoded"));
+    assert!(
+        start_body.contains("referrer=pi"),
+        "the xAI start names the pinned referrer: {start_body}"
+    );
+    assert!(start_body.contains("client_id=xai-public-client"));
+    assert!(
+        !start_body.contains("scope="),
+        "the row registers no scopes"
+    );
+    let (_, poll_body) = request_parts(&captured[1]);
+    assert!(poll_body.contains("device_code=xai-device-1"));
+
+    // The complete `https` page is shown.
+    let events = events.lock().expect("progress lock");
+    assert_eq!(
+        shown_code(&events),
+        (
+            String::from("https://auth.x.ai/device?code=XAI-CODE"),
+            String::from("XAI-CODE"),
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_xai_start_without_an_https_page_or_a_lifetime_is_unusable() {
+    for (label, start) in [
+        (
+            "plain http page",
+            r#"{"device_code":"d","user_code":"u","verification_uri":"http://auth.x.ai/device","interval":1,"expires_in":600}"#,
+        ),
+        (
+            "zero lifetime",
+            r#"{"device_code":"d","user_code":"u","verification_uri":"https://auth.x.ai/device","interval":1,"expires_in":0}"#,
+        ),
+    ] {
+        let (base, requests) = serve_script(vec![(200, start)]).await;
+        let urls = device_urls(&base);
+        let client = Client::new();
+        let http = OAuthHttp {
+            client: &client,
+            user_agent: "dalgon/test",
+        };
+        let (_, progress) = progress_sink();
+
+        let outcome = run(
+            &http,
+            Family::Responses,
+            Hook::XaiDevice,
+            "xai-public-client",
+            &urls,
+            Instant::now() + Duration::from_secs(30),
+            &progress,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        let failure = match &outcome {
+            Ok(DeviceOutcome::Tokens(_)) => String::from("Tokens"),
+            Ok(DeviceOutcome::Grant(_)) => String::from("Grant"),
+            Ok(DeviceOutcome::Identity(_)) => String::from("Identity"),
+            Err(err) => format!("error {err:?}"),
+        };
+        assert!(
+            matches!(
+                &outcome,
+                Err(ProviderError::DeviceCode { message, .. }) if message.contains("invalid device-code response")
+            ),
+            "{label} must end the sign-in before any poll: got {failure}"
+        );
+        assert_eq!(
+            requests.lock().expect("requests lock").len(),
+            1,
+            "{label} must not reach the poll endpoint"
+        );
+    }
+}
+
+#[tokio::test]
+async fn meta_device_flow_returns_the_identity_token() {
+    let start = r#"{"device_code":"meta-device-1","user_code":"META-CODE","verification_uri_complete":"https://www.meta.com/device?code=META-CODE","interval":2}"#;
+    let (base, requests) = serve_script(vec![
+        (200, start),
+        (200, r#"{"access_token":"meta-identity-1"}"#),
+    ])
+    .await;
+    let urls = device_urls(&base);
+    let client = Client::new();
+    let http = OAuthHttp {
+        client: &client,
+        user_agent: "dalgon/test",
+    };
+    let (events, progress) = progress_sink();
+
+    let outcome = run(
+        &http,
+        Family::Responses,
+        Hook::MetaMuse,
+        "meta-public-client",
+        &urls,
+        Instant::now() + Duration::from_secs(30),
+        &progress,
+        &CancellationToken::new(),
+    )
+    .await;
+
+    let identity_token = match &outcome {
+        Ok(DeviceOutcome::Identity(identity_token)) => identity_token,
+        Ok(DeviceOutcome::Tokens(_)) => {
+            panic!("the Meta poll must return the identity token: got Tokens")
+        }
+        Ok(DeviceOutcome::Grant(_)) => {
+            panic!("the Meta poll must return the identity token: got Grant")
+        }
+        Err(err) => {
+            panic!("the Meta poll must return the identity token: got error {err:?}")
+        }
+    };
+    assert_eq!(identity_token.expose(), "meta-identity-1");
+    // No request ever carries the identity token in its URL or body twice.
+    let captured = requests.lock().expect("requests lock");
+    assert_eq!(captured.len(), 2);
+    for request in captured.iter() {
+        let text = String::from_utf8_lossy(request);
+        assert!(
+            !text.contains("meta-identity-1"),
+            "the poll leaks the token"
+        );
+    }
+    let (start_head, start_body) = request_parts(&captured[0]);
+    assert!(start_head.contains("application/x-www-form-urlencoded"));
+    assert!(start_body.contains("client_id=meta-public-client"));
+    let events = events.lock().expect("progress lock");
+    assert_eq!(
+        shown_code(&events),
+        (
+            String::from("https://www.meta.com/device?code=META-CODE"),
+            String::from("META-CODE"),
+        )
+    );
+}
+
+#[tokio::test]
+async fn kimi_device_flow_shows_the_complete_page_and_completes_with_a_lifetime() {
+    let start = r#"{"device_code":"kimi-device-1","user_code":"KIMI-CODE","verification_uri":"https://auth.kimi.com/device","verification_uri_complete":"https://auth.kimi.com/device?code=KIMI-CODE","interval":2}"#;
+    let (base, requests) = serve_script(vec![
+        (200, start),
+        (
+            200,
+            r#"{"access_token":"kimi-access-1","refresh_token":"kimi-refresh-1","expires_in":600}"#,
+        ),
+    ])
+    .await;
+    let urls = device_urls(&base);
+    let client = Client::new();
+    let http = OAuthHttp {
+        client: &client,
+        user_agent: "dalgon/test",
+    };
+    let (events, progress) = progress_sink();
+    let before = unix_now();
+
+    let outcome = run(
+        &http,
+        Family::Anthropic,
+        Hook::KimiCodeDevice,
+        "kimi-public-client",
+        &urls,
+        Instant::now() + Duration::from_secs(30),
+        &progress,
+        &CancellationToken::new(),
+    )
+    .await;
+
+    let credential = match &outcome {
+        Ok(DeviceOutcome::Tokens(credential)) => credential,
+        Ok(DeviceOutcome::Grant(_)) => {
+            panic!("the Kimi poll must deliver tokens directly: got Grant")
+        }
+        Ok(DeviceOutcome::Identity(_)) => {
+            panic!("the Kimi poll must deliver tokens directly: got Identity")
+        }
+        Err(err) => {
+            panic!("the Kimi poll must deliver tokens directly: got error {err:?}")
+        }
+    };
+    assert_eq!(credential.access_token.expose(), "kimi-access-1");
+    assert_eq!(credential.refresh_token.expose(), "kimi-refresh-1");
+    assert!(
+        credential
+            .expires_at
+            .is_some_and(|at| at >= before + 600 && at <= unix_now() + 600),
+        "the answer's own lifetime is stored"
+    );
+    let events = events.lock().expect("progress lock");
+    assert_eq!(
+        shown_code(&events),
+        (
+            String::from("https://auth.kimi.com/device?code=KIMI-CODE"),
+            String::from("KIMI-CODE"),
+        )
+    );
+    assert_eq!(
+        requests.lock().expect("requests lock").len(),
+        2,
+        "one start plus the poll that answered tokens"
+    );
+}
+
+#[tokio::test]
+async fn a_kimi_token_answer_needs_a_refresh_token_and_a_positive_lifetime() {
+    for (label, answer) in [
+        (
+            "no refresh token",
+            r#"{"access_token":"kimi-access-1","expires_in":600}"#,
+        ),
+        (
+            "zero lifetime",
+            r#"{"access_token":"kimi-access-1","refresh_token":"kimi-refresh-1","expires_in":0}"#,
+        ),
+        (
+            "no lifetime",
+            r#"{"access_token":"kimi-access-1","refresh_token":"kimi-refresh-1"}"#,
+        ),
+    ] {
+        let start = r#"{"device_code":"kimi-device-1","user_code":"KIMI-CODE","verification_uri":"https://auth.kimi.com/device","verification_uri_complete":"https://auth.kimi.com/device?code=KIMI-CODE","interval":1}"#;
+        let (base, requests) = serve_script(vec![(200, start), (200, answer)]).await;
+        let urls = device_urls(&base);
+        let client = Client::new();
+        let http = OAuthHttp {
+            client: &client,
+            user_agent: "dalgon/test",
+        };
+        let (_, progress) = progress_sink();
+
+        let outcome = run(
+            &http,
+            Family::Anthropic,
+            Hook::KimiCodeDevice,
+            "kimi-public-client",
+            &urls,
+            Instant::now() + Duration::from_secs(30),
+            &progress,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        let failure = match &outcome {
+            Ok(DeviceOutcome::Tokens(_)) => String::from("Tokens"),
+            Ok(DeviceOutcome::Grant(_)) => String::from("Grant"),
+            Ok(DeviceOutcome::Identity(_)) => String::from("Identity"),
+            Err(err) => format!("error {err:?}"),
+        };
+        assert!(
+            matches!(
+                &outcome,
+                Err(ProviderError::TokenExchange { message, .. }) if message.contains("invalid token response")
+            ),
+            "{label} must not become a credential: got {failure}"
+        );
+        assert_eq!(
+            requests.lock().expect("requests lock").len(),
+            2,
+            "{label}: the sign-in stops after the refused answer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_kimi_server_error_ends_the_sign_in_before_the_body_is_read() {
+    let start = r#"{"device_code":"kimi-device-1","user_code":"KIMI-CODE","verification_uri":"https://auth.kimi.com/device","verification_uri_complete":"https://auth.kimi.com/device?code=KIMI-CODE","interval":1}"#;
+    let (base, requests) = serve_script(vec![
+        (200, start),
+        (
+            500,
+            r#"{"error":"temporarily_unavailable","error_description":"device kimi-device-1"}"#,
+        ),
+    ])
+    .await;
+    let urls = device_urls(&base);
+    let client = Client::new();
+    let http = OAuthHttp {
+        client: &client,
+        user_agent: "dalgon/test",
+    };
+    let (_, progress) = progress_sink();
+
+    let outcome = run(
+        &http,
+        Family::Anthropic,
+        Hook::KimiCodeDevice,
+        "kimi-public-client",
+        &urls,
+        Instant::now() + Duration::from_secs(30),
+        &progress,
+        &CancellationToken::new(),
+    )
+    .await;
+
+    match &outcome {
+        Err(ProviderError::DeviceCode { status, message }) => {
+            assert_eq!(*status, 500);
+            assert!(
+                !message.contains("kimi-device-1"),
+                "the device code never enters the error: {message}"
+            );
+            assert!(message.contains("500"), "{message} names the status");
+        }
+        Ok(DeviceOutcome::Tokens(_)) => {
+            panic!("a Kimi 5xx poll must end the sign-in: got Tokens")
+        }
+        Ok(DeviceOutcome::Grant(_)) => {
+            panic!("a Kimi 5xx poll must end the sign-in: got Grant")
+        }
+        Ok(DeviceOutcome::Identity(_)) => {
+            panic!("a Kimi 5xx poll must end the sign-in: got Identity")
+        }
+        Err(err) => {
+            panic!("a Kimi 5xx poll must end the sign-in: got error {err:?}")
+        }
+    }
+    assert_eq!(requests.lock().expect("requests lock").len(), 2);
 }

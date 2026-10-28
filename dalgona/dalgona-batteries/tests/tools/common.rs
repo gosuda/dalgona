@@ -2,12 +2,11 @@
 
 //! A scripted `Services` host for driving one battery tool through its public extension.
 
-#![expect(clippy::expect_used, reason = "test assertions abort on failure")]
-
 use std::collections::{HashMap, VecDeque};
 use std::error::Error as StdError;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use dal_agent::error::ServiceError;
 use dal_agent::ext::services::ServiceFuture;
@@ -290,6 +289,17 @@ impl Services for Host {
     }
 }
 
+/// The directory every `run_tool` call resolves relative paths against.
+///
+/// Fixtures that the tools must read live here, not in the platform temp dir.
+pub(crate) fn tool_workspace() -> std::path::PathBuf {
+    let services: Arc<dyn Services> = Host::answering([]);
+    ToolCx::for_test(services)
+        .workspace()
+        .as_path()
+        .to_path_buf()
+}
+
 /// Runs the tool `name` of `extension` once against `host` and renders its outcome as text.
 pub(crate) async fn run_tool(
     extension: &Extension,
@@ -343,7 +353,7 @@ async fn live_fetch(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| ServiceError::failed(None, error.to_string()))?;
-    let mut outgoing = client.request(method, target).body(req.body);
+    let mut outgoing = client.request(method, &target).body(req.body);
     for (name, value) in req.headers {
         outgoing = outgoing.header(name.as_ref(), value.as_ref());
     }
@@ -384,64 +394,266 @@ impl Received {
     }
 }
 
-/// Accepts one HTTP connection on `listener`, records the request, and
-/// answers `status` with `body` as `content_type`.
+/// The user agent prefix every battery request carries on the wire. The
+/// production tools stamp it on each request, so a listener attributes its
+/// requests by this mark before trusting one.
+const CLIENT_MARK: &str = "dalgona-web/";
+
+/// The one foreign connector this host is known to add: a recurring sweep
+/// sending exactly this request to every 127.0.0.0/8 listener (captured
+/// live: `GET / HTTP/1.1` with `User-Agent: Go-http-client/1.1`,
+/// `Connection: close`, `Accept-Encoding: gzip`). Only this exact signature
+/// is skipped; every other unexpected connection fails the test that sees
+/// it, with its bounded request context.
+const SCANNER_REQUEST_LINE: &str = "GET / HTTP/1.1";
+const SCANNER_USER_AGENT: &str = "Go-http-client/1.1";
+
+/// How long one connection may take to deliver its request head or body.
+/// The fixture client writes at once, with a wide margin for a loaded host;
+/// a connection that stalls this long is an unexpected one.
+const STRANGER_WINDOW: Duration = Duration::from_secs(2);
+
+/// The most bytes of one head the fixture reads before calling it
+/// malformed, and the most bytes of context a failure message carries.
+const HEAD_CAP: usize = 16 * 1024;
+const CONTEXT_BYTES: usize = 512;
+
+/// One parsed request head.
+struct Head {
+    request_line: String,
+    method: String,
+    target: String,
+    headers: Vec<(String, String)>,
+    content_length: usize,
+}
+
+impl Head {
+    /// The first header with a case-insensitive name match.
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.as_str()))
+    }
+
+    /// Whether the request carries the battery's own user agent.
+    fn is_from_the_fixture_client(&self) -> bool {
+        self.header("User-Agent")
+            .is_some_and(|agent| agent.starts_with(CLIENT_MARK))
+    }
+
+    /// Whether the request is exactly the known scanner sweep, byte for
+    /// byte on its request line and user agent.
+    fn is_the_known_scanner(&self) -> bool {
+        self.request_line == SCANNER_REQUEST_LINE
+            && self.header("User-Agent") == Some(SCANNER_USER_AGENT)
+    }
+}
+
+/// Splits one raw request head into its request line and header fields.
+fn parse_head(raw: &[u8]) -> Option<Head> {
+    let head = String::from_utf8_lossy(raw);
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next()?.to_owned();
+    let mut parts = request_line.split(' ');
+    let method = parts.next()?.to_owned();
+    let target = parts.next()?.to_owned();
+    let headers: Vec<(String, String)> = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
+        .collect();
+    let content_length = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    Some(Head {
+        request_line,
+        method,
+        target,
+        headers,
+        content_length,
+    })
+}
+
+/// The bounded context of one connection: at most [`CONTEXT_BYTES`] of its
+/// head, escaped for a failure message.
+fn context(raw: &[u8]) -> String {
+    let end = raw.len().min(CONTEXT_BYTES);
+    String::from_utf8_lossy(&raw[..end])
+        .escape_default()
+        .to_string()
+}
+
+/// Reads one request head, ending at the blank line, within
+/// [`STRANGER_WINDOW`] and [`HEAD_CAP`]. A connection that stalls, closes,
+/// or outgrows the window yields `None`.
+async fn read_head(stream: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let deadline = tokio::time::Instant::now() + STRANGER_WINDOW;
+    while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+            Ok(Ok(read)) if read > 0 => read,
+            _ => return None,
+        };
+        raw.extend_from_slice(&chunk[..read]);
+        if raw.len() > HEAD_CAP {
+            return None;
+        }
+    }
+    Some(raw)
+}
+
+/// Reads the body bytes beyond the head until `content_length` is met,
+/// within [`STRANGER_WINDOW`] like [`read_head`].
+async fn read_body_tail(
+    stream: &mut tokio::net::TcpStream,
+    content_length: usize,
+    raw: &[u8],
+) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let head_end = raw.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+    let mut request_body = raw[head_end..].to_vec();
+    let mut chunk = [0u8; 4096];
+    let deadline = tokio::time::Instant::now() + STRANGER_WINDOW;
+    while request_body.len() < content_length {
+        let read = match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+            Ok(Ok(read)) if read > 0 => read,
+            _ => return None,
+        };
+        request_body.extend_from_slice(&chunk[..read]);
+    }
+    Some(request_body)
+}
+
+/// Accepts connections until one carries a fixture-client request, records
+/// that request, and answers `status` with `body` as `content_type`. Only
+/// the known scanner sweep is skipped; a connection that sends nothing, a
+/// malformed head, or any request that is neither the sweep nor the tool's
+/// returns an error carrying its bounded context. The wait ends when
+/// `client` settles unserved, which returns an error, never a hang.
 pub(crate) async fn serve(
     listener: &tokio::net::TcpListener,
     status: u16,
     content_type: &str,
     body: &[u8],
-) -> Received {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let (mut stream, _) = listener.accept().await.expect("accept a connection");
-    let mut raw = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let head_end = loop {
-        if let Some(position) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-            break position + 4;
+    client: &mut tokio::task::JoinSet<Result<String, String>>,
+) -> Result<Received, Box<dyn StdError>> {
+    tokio::select! {
+        served = next_client_request(listener, status, content_type, body) => match served {
+            Ok(received) => Ok(received),
+            Err(error) => {
+                client.abort_all();
+                while client.join_next().await.is_some() {}
+                Err(error)
+            }
+        },
+        settled = client.join_next() => match settled {
+            Some(Ok(Ok(text))) => Err(std::io::Error::other(format!(
+                "the search settled without its request reaching the listener: {text}"
+            ))
+            .into()),
+            Some(Ok(Err(error))) => Err(std::io::Error::other(format!(
+                "the search settled without its request reaching the listener: the tool failed: {error}"
+            ))
+            .into()),
+            Some(Err(join)) => Err(std::io::Error::other(format!(
+                "the search settled without its request reaching the listener: the tool task failed: {join}"
+            ))
+            .into()),
+            None => Err(std::io::Error::other(
+                "the search settled without its request reaching the listener: the tool task vanished",
+            )
+            .into()),
+        },
+    }
+}
+
+/// Serves one connection at a time until a fixture-client request appears.
+/// A connection that is neither the known scanner sweep nor the tool's
+/// request returns an error carrying its bounded context to the test that
+/// owns the listener.
+async fn next_client_request(
+    listener: &tokio::net::TcpListener,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> Result<Received, Box<dyn StdError>> {
+    use tokio::io::AsyncWriteExt;
+    loop {
+        let (mut stream, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                return Err(std::io::Error::other(format!("accept a connection: {error}")).into());
+            }
+        };
+        let Some(raw) = read_head(&mut stream).await else {
+            return Err(std::io::Error::other(format!(
+                "unexpected connection from {peer}: no head within the window"
+            ))
+            .into());
+        };
+        let Some(head) = parse_head(&raw) else {
+            return Err(std::io::Error::other(format!(
+                "unexpected connection from {peer}: {}",
+                context(&raw)
+            ))
+            .into());
+        };
+        if head.is_the_known_scanner() {
+            continue;
         }
-        let read = stream.read(&mut chunk).await.expect("read the request");
-        assert!(read > 0, "the client closed before sending a request head");
-        raw.extend_from_slice(&chunk[..read]);
+        if !head.is_from_the_fixture_client() {
+            return Err(std::io::Error::other(format!(
+                "unexpected connection from {peer}: {}",
+                context(&raw)
+            ))
+            .into());
+        }
+        let Some(request_body) = read_body_tail(&mut stream, head.content_length, &raw).await
+        else {
+            return Err(std::io::Error::other(format!(
+                "unexpected connection from {peer}: body missing within the window"
+            ))
+            .into());
+        };
+        let reply = format!(
+            "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        if let Err(error) = stream.write_all(reply.as_bytes()).await {
+            return Err(std::io::Error::other(format!("write the head: {error}")).into());
+        }
+        if let Err(error) = stream.write_all(body).await {
+            return Err(std::io::Error::other(format!("write the body: {error}")).into());
+        }
+        if let Err(error) = stream.shutdown().await {
+            return Err(std::io::Error::other(format!("close the connection: {error}")).into());
+        }
+        return Ok(Received {
+            method: head.method,
+            target: head.target,
+            headers: head.headers,
+            body: request_body,
+        });
+    }
+}
+
+/// Watches `listener` for `window` and returns the bounded context of the
+/// first connection that arrives, whatever it says, or `None` once the
+/// window closes untouched. The denial listener binds `::1`, which no
+/// ambient sweep visits, so any connection at all is an intrusion the test
+/// must name.
+pub(crate) async fn first_connection(
+    listener: &tokio::net::TcpListener,
+    window: Duration,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + window;
+    let accepted = tokio::time::timeout_at(deadline, listener.accept()).await;
+    let Ok(Ok((mut stream, peer))) = accepted else {
+        return None;
     };
-    let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
-    let mut lines = head.split("\r\n");
-    let request_line = lines.next().unwrap_or_default();
-    let mut parts = request_line.split(' ');
-    let method = parts.next().unwrap_or_default().to_owned();
-    let target = parts.next().unwrap_or_default().to_owned();
-    let headers: Vec<(String, String)> = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
-        .collect();
-    let length = headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let mut request_body = raw[head_end..].to_vec();
-    while request_body.len() < length {
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .expect("read the request body");
-        assert!(read > 0, "the client closed before sending its body");
-        request_body.extend_from_slice(&chunk[..read]);
-    }
-    let reply = format!(
-        "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-        body.len()
-    );
-    stream
-        .write_all(reply.as_bytes())
-        .await
-        .expect("write the head");
-    stream.write_all(body).await.expect("write the body");
-    stream.shutdown().await.expect("close the connection");
-    Received {
-        method,
-        target,
-        headers,
-        body: request_body,
-    }
+    let raw = read_head(&mut stream).await.unwrap_or_default();
+    Some(format!("{peer} {}", context(&raw)))
 }

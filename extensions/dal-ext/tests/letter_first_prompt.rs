@@ -1223,7 +1223,7 @@ async fn letter_unsupported_version_row_fails_closed_without_a_duplicate() -> Ou
     let notes = prompt(&resumed, &mut subscription, "again").await?;
     assert!(
         letter_notices(&notes).contains(
-            &"letter: skill letters were not persisted: letter record '1' failed validation."
+            &"letter: skill letters were not persisted: letter record '1' with version 2 failed validation."
         ),
         "the invalid row fails the hook with its cause: {notes:?}"
     );
@@ -1236,6 +1236,83 @@ async fn letter_unsupported_version_row_fails_closed_without_a_duplicate() -> Ou
         delivery_markers(&rig)?,
         1,
         "the failed turn delivers nothing"
+    );
+
+    let _report = host.shutdown(GRACE).await;
+    Ok(())
+}
+
+/// An out-of-range `letter` row (id `21`) is retained byte-exact in the real
+/// journal and never fails the hook: resolution continues past it.
+///
+/// The orphan is a full-schema row (version 1, valid geometry) whose id falls
+/// outside the admitted `1..=20` window, so both `stored_letters` and the
+/// numeric `LetterResolver::read` arm must skip it without failing or
+/// deleting it. The test snapshots the appended journal line bytes, resumes,
+/// and asserts the same bytes survive while the valid rows still resolve.
+#[tokio::test]
+async fn letter_out_of_range_orphan_is_retained_and_resolution_continues() -> Outcome<()> {
+    let rig = Rig::new("orphan-21")?;
+    let host = rig.start(&[ALPHA, BETA], VISION_MODEL).await?;
+    let agent = rig.open(&host, "orphan-21").await?;
+    let session = agent.session();
+    let mut subscription = agent.subscribe(None)?;
+    prompt(&agent, &mut subscription, "seed").await?;
+    assert_eq!(
+        ids(&rig.letter_records()?),
+        vec![Some(1), Some(2)],
+        "premise: the opening persisted two valid rows"
+    );
+    drop(subscription);
+    drop(agent);
+    host.close(session).await?;
+    let _report = host.shutdown(GRACE).await;
+
+    // Plant the orphan the way a foreign writer could: a full-schema row with
+    // an id outside the admitted window. The host is shut down, so no actor
+    // owns the file.
+    let mut orphan = rig.letter_records()?.remove(0);
+    orphan.id = "21".into();
+    assert_eq!(
+        orphan.validated(),
+        None,
+        "premise: id 21 is outside the admitted 1..=20 window"
+    );
+    let orphan_encoded = dal_core::encode(&Record::Ext {
+        at: Timestamp::now(),
+        ext: "letter".into(),
+        kind: "letter".into(),
+        body: RawJson::parse(&sonic_rs::to_string(&orphan)?)?,
+    })?;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(rig.journal_of(session)?)?
+        .write_all(&orphan_encoded)?;
+    let orphan_text = std::str::from_utf8(&orphan_encoded)?;
+    assert!(
+        std::fs::read_to_string(&rig.journal_of(session)?)?.contains(orphan_text),
+        "premise: the orphan row reached the journal"
+    );
+
+    let host = rig.start(&[ALPHA, BETA], VISION_MODEL).await?;
+    let resumed = rig.resume(&host, session, "orphan-21-resume").await?;
+    let mut subscription = resumed.subscribe(None)?;
+    let notes = prompt(&resumed, &mut subscription, "again").await?;
+    assert!(
+        !letter_notices(&notes)
+            .iter()
+            .any(|text| text.contains("failed validation")),
+        "the orphan never fails the hook: {notes:?}"
+    );
+    let after = std::fs::read_to_string(&rig.journal_of(session)?)?;
+    assert!(
+        after.contains(orphan_text),
+        "the orphan row survives resolution byte-exact"
+    );
+    assert_eq!(
+        ids(&rig.letter_records()?),
+        vec![Some(1), Some(2), None],
+        "no duplicate id is appended; the orphan is preserved alongside the valid rows"
     );
 
     let _report = host.shutdown(GRACE).await;

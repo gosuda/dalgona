@@ -527,6 +527,7 @@ mod tests {
                 kind: EntryKind::Assistant {
                     api: Family::Responses,
                     model: "test-model".into(),
+                    provider: None,
                     content: vec![Block::Text {
                         text: "short".into(),
                         replay: None,

@@ -35,14 +35,14 @@ use std::{
 };
 
 use dal_core::{
-    AssistantPart, CallId, ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec, Part,
-    Purpose, RawJson, ReplaySource, RequestParams, SessionId, ThinkingLevel, Usage,
+    AssistantPart, CallId, Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute,
+    ModelToolSpec, Part, Purpose, RawJson, ReplaySource, RequestParams, SessionId, ThinkingLevel,
+    Usage,
 };
 use dal_provider::{
     AuthStyle, CatalogEntry, CompactOutcome, Effort, EnvSnapshot, EventStream, Listing, NoticeSink,
-    Provider, ProviderConfig, ProviderEntry, ProviderError, ProviderIdentity, ProviderSet,
-    ProviderSettings, ResolvedModel, StopReason, StreamEvent, ThinkingSupport, ToolArgs, ToolCall,
-    ToolSupport, Transport,
+    Provider, ProviderConfig, ProviderError, ProviderIdentity, ProviderSet, ResolvedModel,
+    StopReason, StreamEvent, ThinkingSupport, ToolArgs, ToolCall, ToolSupport,
 };
 use hyper::{
     Request, Response,
@@ -217,7 +217,7 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
 }
 
 fn build_set(
-    base: String,
+    base: &str,
     dir: &std::path::Path,
     provider_id: &str,
     key_env: Option<&str>,
@@ -236,25 +236,40 @@ fn build_set(
         )
         .expect("auth store perms");
     }
-    let config = ProviderConfig {
-        default_model: None,
-        thinking: ThinkingLevel::Off,
-        aliases: Vec::new(),
-        request_max_retries,
-        stream_max_retries,
-        providers: vec![ProviderEntry {
-            id: provider_id.into(),
-            def: None,
-            family: Family::Anthropic,
-            base_url: base.into_boxed_str(),
-            transport: Transport::Https,
-            key_env: key_env.map(Into::into),
-            auth,
-            max_concurrent_requests: 4,
-            settings: ProviderSettings::default(),
-        }],
-        scripted: None,
+    // The connection defaults decode from the effective TOML through the
+    // public `ProviderConfig::from_config` route: the loopback base and the
+    // caller-chosen auth stay explicit, a named id keeps its required `api`,
+    // and only the truly omitted `key_env` (the OAuth row) stays a row
+    // default. The `[models]` thinking and `[retry]` budgets pin the literal
+    // values the constructor used to carry.
+    let auth_name = match auth {
+        AuthStyle::Bearer => "bearer",
+        AuthStyle::XApiKey => "x-api-key",
+        AuthStyle::ApiKey => "api-key",
+        AuthStyle::CfAigAuthorization => "cf-aig-authorization",
+        AuthStyle::None => "none",
     };
+    let mut table = format!(
+        "[models]\nthinking = \"off\"\n[retry]\nrequest_max_retries = {request_max_retries}\n\
+         stream_max_retries = {stream_max_retries}\n[providers.\"{provider_id}\"]\n\
+         api = \"anthropic\"\nbase_url = \"{base}\"\nauth = \"{auth_name}\"\n"
+    );
+    if let Some(key_env) = key_env {
+        table.push_str("key_env = \"");
+        table.push_str(key_env);
+        table.push_str("\"\n");
+    }
+    let host = Config::load(ConfigProduct::Dalgon, dir, "", Some(&table))
+        .expect("replay provider table parses");
+    let mut config = ProviderConfig::from_config(&host).expect("replay providers decode");
+    config
+        .providers
+        .retain(|candidate| candidate.id.as_ref() == provider_id);
+    assert_eq!(
+        config.providers.len(),
+        1,
+        "replay decodes exactly the {provider_id} entry"
+    );
     ProviderSet::new(&config, identity(), EnvSnapshot::test(env), dir, dir)
         .expect("provider set builds")
 }
@@ -274,7 +289,7 @@ impl Harness {
         let base = server.base_url();
         let dir = temp_dir(case_name(&case));
         let set = build_set(
-            base,
+            &base,
             &dir,
             "anthropic-test",
             Some(KEY_ENV),
@@ -295,7 +310,7 @@ impl Harness {
         let base = server.base_url();
         let dir = temp_dir(case_name(&case));
         let set = build_set(
-            base,
+            &base,
             &dir,
             "anthropic",
             None,
@@ -1149,7 +1164,17 @@ async fn capture_turn(
 ) -> (Vec<StreamEvent>, Recorded) {
     let (base, recorded) = serve_capture().await;
     let dir = temp_dir(provider_id);
-    let set = build_set(base, &dir, provider_id, key_env, auth, env, auth_json, 0, 0);
+    let set = build_set(
+        &base,
+        &dir,
+        provider_id,
+        key_env,
+        auth,
+        env,
+        auth_json,
+        0,
+        0,
+    );
     let provider = set
         .provider(ResolvedModel {
             provider: provider_id.into(),

@@ -11,14 +11,19 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
+
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
 
 use dal_core::TurnSequence;
 use dal_core::{
-    DecodeError, EntryId, Gen, Header, JobEvent, JobId, Record, TurnEndStop, TurnId, Usage, decode,
+    DecodeError, EntryId, Gen, Header, JobEvent, JobId, MAILBOX_WAITING_LIMIT, MailMode, Record,
+    SessionId, TurnEndStop, TurnId, Usage, decode,
 };
 
 use crate::error::{AbortedTurn, JournalError, OpenReport, TornTail};
@@ -163,12 +168,24 @@ enum Health {
     Damaged,
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
 /// One open journal file. Neither `Clone` nor `Sync`; one writer per file.
 #[derive(Debug)]
 pub(crate) struct Journal {
-    file: File,
+    /// The writable descriptor is leased only while this journal is being
+    /// inspected or appended. The session lock remains owned by the caller
+    /// for the journal's whole lifetime.
+    file: Option<File>,
     path: PathBuf,
     end: u64,
+    #[cfg(unix)]
+    identity: FileIdentity,
     health: Health,
     faults: Faults,
     /// Last successfully written but not yet staged batch, test support only.
@@ -187,10 +204,18 @@ impl Journal {
     pub(crate) fn create(path: &Path, lines: &[u8], faults: &Faults) -> Result<Self, JournalError> {
         let file = crate::private::create_new(path, crate::util::FileMode::Mode0600)
             .map_err(|source| jio("create", path, source))?;
+        #[cfg(unix)]
+        let metadata = file
+            .metadata()
+            .map_err(|source| jio("create", path, source))?;
+        #[cfg(unix)]
+        let identity = file_identity(&metadata);
         let mut journal = Self {
-            file,
+            file: Some(file),
             path: path.to_path_buf(),
             end: 0,
+            #[cfg(unix)]
+            identity,
             health: Health::Healthy,
             faults: faults.clone(),
             #[cfg(any(test, feature = "test-support"))]
@@ -217,20 +242,23 @@ impl Journal {
     pub(crate) fn open(path: &Path, faults: &Faults) -> Result<Opened, OpenFailure> {
         let file = crate::private::open_private_file_read_write(path)
             .map_err(|source| OpenFailure::Journal(jio("open", path, source)))?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| OpenFailure::Journal(jio("open", path, source)))?;
+        #[cfg(unix)]
+        let identity = file_identity(&metadata);
         let mut journal = Self {
-            file,
+            file: Some(file),
             path: path.to_path_buf(),
             end: 0,
+            #[cfg(unix)]
+            identity,
             health: Health::Healthy,
             faults: faults.clone(),
             #[cfg(any(test, feature = "test-support"))]
             last_unsynced: None,
         };
-        let file_len = journal
-            .file
-            .metadata()
-            .map_err(|source| OpenFailure::Journal(jio("read", path, source)))?
-            .len();
+        let file_len = metadata.len();
         let buffer_len = usize::try_from(file_len)
             .unwrap_or(usize::MAX)
             .min(SCAN_BUFFER);
@@ -238,8 +266,15 @@ impl Journal {
         let rollback = rollback_offset(path, file_len)?;
         let scan_end = rollback.unwrap_or(file_len);
         let mut records = Vec::new();
+        let file = journal.file.as_mut().ok_or_else(|| {
+            OpenFailure::Journal(jio(
+                "read",
+                path,
+                io::Error::other("journal descriptor is parked during scan"),
+            ))
+        })?;
         let (complete_end, validator) = scan_complete_prefix(
-            &mut journal.file,
+            file,
             path,
             scan_end,
             &mut stream_buffer,
@@ -332,6 +367,7 @@ impl Journal {
         {
             self.faults = armed;
         }
+        self.ensure_open()?;
         let offset = self.end;
         match self.write_bytes(lines) {
             Ok(()) => {
@@ -399,8 +435,14 @@ impl Journal {
                 io::Error::other("injected sync failure"),
             ));
         }
-        self.file
-            .try_clone()
+        let file = self.file.as_ref().ok_or_else(|| {
+            jio(
+                "sync",
+                &self.path,
+                io::Error::other("journal descriptor is parked before staged sync"),
+            )
+        })?;
+        file.try_clone()
             .map(|file| (file, self.path.clone(), receipt))
             .map_err(|source| jio("sync", &self.path, source))
     }
@@ -438,9 +480,53 @@ impl Journal {
                 io::Error::other("injected sync failure"),
             ));
         }
-        self.file
-            .sync_all()
+        let file = self.file.as_ref().ok_or_else(|| {
+            jio(
+                "sync",
+                &self.path,
+                io::Error::other("journal descriptor is parked before direct sync"),
+            )
+        })?;
+        file.sync_all()
             .map_err(|source| jio("sync", &self.path, source))
+    }
+
+    /// Releases the idle journal descriptor without releasing the session lock.
+    ///
+    /// The reopen validates the descriptor's identity and tracked length before
+    /// appends resume. Unix-only: Windows retains its validated, secured handle
+    /// for the journal's whole life and never parks it.
+    #[cfg(unix)]
+    pub(crate) fn park(&mut self) {
+        drop(self.file.take());
+    }
+
+    /// Reopens the exact journal path while the caller still owns its lock.
+    fn ensure_open(&mut self) -> Result<(), JournalError> {
+        if self.file.is_none() {
+            let file = crate::private::open_private_file_read_write(&self.path)
+                .map_err(|source| jio("open", &self.path, source))?;
+            let metadata = file
+                .metadata()
+                .map_err(|source| jio("open", &self.path, source))?;
+            if metadata.len() != self.end {
+                return Err(jio(
+                    "open",
+                    &self.path,
+                    io::Error::other("journal length changed while descriptor was parked"),
+                ));
+            }
+            #[cfg(unix)]
+            if file_identity(&metadata) != self.identity {
+                return Err(jio(
+                    "open",
+                    &self.path,
+                    io::Error::other("journal file identity changed while descriptor was parked"),
+                ));
+            }
+            self.file = Some(file);
+        }
+        Ok(())
     }
 
     /// The tracked end offset: the next batch starts here.
@@ -456,23 +542,34 @@ impl Journal {
     }
 
     fn truncate_back(&mut self, offset: u64) -> Result<(), JournalError> {
-        self.file
-            .set_len(offset)
+        self.ensure_open()?;
+        let file = self.file.as_mut().ok_or_else(|| {
+            jio(
+                "truncate",
+                &self.path,
+                io::Error::other("journal descriptor is parked after reopen"),
+            )
+        })?;
+        file.set_len(offset)
             .map_err(|source| jio("truncate", &self.path, source))?;
-        self.file
-            .sync_all()
+        file.sync_all()
             .map_err(|source| jio("sync", &self.path, source))
     }
 
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), JournalError> {
-        self.file
-            .seek(SeekFrom::Start(self.end))
+        let Some(file) = self.file.as_mut() else {
+            return Err(jio(
+                "write",
+                &self.path,
+                io::Error::other("journal descriptor is parked before write"),
+            ));
+        };
+        file.seek(SeekFrom::Start(self.end))
             .map_err(|source| jio("write", &self.path, source))?;
         match self.faults.write_after_bytes {
             Some(limit) => {
                 let cut = limit.min(bytes.len());
-                self.file
-                    .write_all(&bytes[..cut])
+                file.write_all(&bytes[..cut])
                     .map_err(|source| jio("write", &self.path, source))?;
                 if cut < bytes.len() {
                     return Err(jio(
@@ -482,8 +579,7 @@ impl Journal {
                     ));
                 }
             }
-            None => self
-                .file
+            None => file
                 .write_all(bytes)
                 .map_err(|source| jio("write", &self.path, source))?,
         }
@@ -521,6 +617,16 @@ fn jio(op: &'static str, path: &Path, source: io::Error) -> JournalError {
     }
 }
 
+#[cfg(unix)]
+fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
 fn header_of(records: &[(u64, Record)]) -> Result<Header, OpenFailure> {
     match records.first() {
         Some((_, Record::Session(header))) => Ok(header.clone()),
@@ -552,8 +658,15 @@ fn repair_torn_tail(
     }
     let tail_bytes = file_len - tail_start;
     let kept_at = path.with_file_name(format!("torn-{tail_start}.jsonl"));
+    let Some(journal_file) = journal.file.as_mut() else {
+        return Err(jio(
+            "quarantine",
+            path,
+            io::Error::other("journal descriptor is parked during torn-tail repair"),
+        ));
+    };
     write_side_file(
-        &mut journal.file,
+        journal_file,
         &kept_at,
         tail_start,
         tail_bytes,
@@ -561,12 +674,10 @@ fn repair_torn_tail(
         path,
         faults,
     )?;
-    journal
-        .file
+    journal_file
         .set_len(tail_start)
         .map_err(|source| jio("truncate", path, source))?;
-    journal
-        .file
+    journal_file
         .sync_all()
         .map_err(|source| jio("sync", path, source))?;
     Ok(Some(TornTail {
@@ -822,6 +933,16 @@ pub(crate) struct Validator {
     ended_grants: HashSet<JobId>,
     boot_count: u64,
     last_boot_gen: u64,
+    /// The session this journal belongs to, from its one header record.
+    session_id: Option<SessionId>,
+    /// The count of mailbox rows so far; each row's 1-based ordinal is its
+    /// delivery position.
+    mail_rows: u64,
+    /// The waiting delivery positions and the buffered texts a delivery must
+    /// match. Bounded by [`MAILBOX_WAITING_LIMIT`]: the map never holds more
+    /// entries than the fold contract allows, and each text is one shared
+    /// reference, not a per-batch copy.
+    pending_mail: HashMap<EntryId, Arc<str>>,
 }
 
 /// Batch-local structural additions, committed only after durable append.
@@ -839,6 +960,9 @@ pub(crate) struct ValidationDelta {
     ended_grants: HashSet<JobId>,
     boot_count: u64,
     last_boot_gen: u64,
+    session_id: Option<SessionId>,
+    mail_rows: u64,
+    pending_mail: HashMap<EntryId, Arc<str>>,
 }
 
 impl Validator {
@@ -857,6 +981,9 @@ impl Validator {
             ended_grants: HashSet::new(),
             boot_count: 0,
             last_boot_gen: 0,
+            session_id: None,
+            mail_rows: 0,
+            pending_mail: HashMap::new(),
         }
     }
 
@@ -885,6 +1012,9 @@ impl Validator {
             ended_grants: HashSet::new(),
             boot_count: self.boot_count,
             last_boot_gen: self.last_boot_gen,
+            session_id: self.session_id,
+            mail_rows: self.mail_rows,
+            pending_mail: self.pending_mail.clone(),
         }
     }
 
@@ -911,6 +1041,9 @@ impl Validator {
         self.ended_grants.extend(delta.ended_grants);
         self.boot_count = delta.boot_count;
         self.last_boot_gen = delta.last_boot_gen;
+        self.session_id = delta.session_id;
+        self.mail_rows = delta.mail_rows;
+        self.pending_mail = delta.pending_mail;
     }
 
     /// Applies one record to batch-local state.
@@ -1029,9 +1162,104 @@ impl Validator {
                 }
             }
             Record::Boot { r#gen, .. } => Self::stage_boot(delta, r#gen.get(), offset)?,
+            Record::Session(header) => delta.session_id = Some(header.id),
+            Record::Mail(_) | Record::MailDelivered { .. } => {
+                self.stage_mail(delta, record, offset)?;
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    fn stage_mail(
+        &self,
+        delta: &mut ValidationDelta,
+        record: &Record,
+        offset: u64,
+    ) -> Result<(), OpenFailure> {
+        match record {
+            Record::Mail(mail) => {
+                let position = delta
+                    .mail_rows
+                    .checked_add(1)
+                    .and_then(core::num::NonZeroU64::new)
+                    .map(EntryId::new);
+                let Some(position) = position else {
+                    return Err(damaged(offset, "mail position space is exhausted"));
+                };
+                delta.mail_rows = position.get();
+                // The fold joins a row into its waiting set only when the
+                // row asks for next-turn delivery and names this session;
+                // every row still counts toward the position ordinal.
+                if mail.mode == MailMode::NextTurn
+                    && delta.session_id.is_some_and(|id| mail.to == id)
+                {
+                    if delta.pending_mail.len() >= MAILBOX_WAITING_LIMIT {
+                        return Err(damaged(
+                            offset,
+                            format!(
+                                "mailbox waiting capacity {MAILBOX_WAITING_LIMIT} is exhausted"
+                            ),
+                        ));
+                    }
+                    delta
+                        .pending_mail
+                        .insert(position, Arc::from(mail.text.as_ref()));
+                }
+                Ok(())
+            }
+            Record::MailDelivered {
+                at,
+                entry,
+                turn,
+                mails,
+            } => {
+                if delta.open_turn != Some(*turn) {
+                    return Err(damaged(
+                        offset,
+                        format!("mail delivery for turn {turn} but it is not open"),
+                    ));
+                }
+                // A delivery exists to consume waiting rows. An empty list
+                // would materialize the delivered entry while consuming
+                // nothing, so a later turn would deliver the same mail
+                // again; production never writes one, and data at rest must
+                // not be able to forge it.
+                if mails.is_empty() {
+                    return Err(damaged(offset, "mail delivery consumes no waiting mail"));
+                }
+                // The whole delivery validates before anything advances:
+                // each position must be waiting exactly once with the text
+                // the buffered row carries, so a failed record never
+                // advances the accepted entry state or consumes a row.
+                for mail in mails {
+                    let Some(text) = delta.pending_mail.remove(&mail.position) else {
+                        return Err(damaged(
+                            offset,
+                            format!("mail {} was delivered but was never waiting", mail.position),
+                        ));
+                    };
+                    if *text != *mail.text {
+                        return Err(damaged(
+                            offset,
+                            format!("mail {} was delivered with different text", mail.position),
+                        ));
+                    }
+                }
+                // The delivery materializes a fresh tree entry parented on
+                // the leaf: stage it like any entry so duplicate detection,
+                // later entry ids, and crash repair stay exact.
+                let derived = dal_core::Entry {
+                    id: *entry,
+                    parent: delta.leaf,
+                    at: *at,
+                    kind: dal_core::EntryKind::User { parts: Vec::new() },
+                };
+                self.stage_entry(delta, &derived, offset)?;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn stage_boot(
@@ -1774,7 +2002,7 @@ fn tool_result(
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
+        fs::{self, OpenOptions},
         num::NonZeroU64,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
@@ -1903,6 +2131,7 @@ mod tests {
             kind: EntryKind::Assistant {
                 api: dal_core::Family::Chat,
                 model: "test-model".into(),
+                provider: None,
                 route: Some(dal_core::AssistantRoute::Api(dal_core::Family::Chat)),
                 content,
                 usage: usage_premium(input_tokens, premium_requests),
@@ -1973,7 +2202,7 @@ mod tests {
     fn unknown_version_with_torn_tail_preserves_file_and_existing_sidefile() {
         let directory = TestDirectory::new();
         let mut prefix = encode_records(&[session_record()]);
-        prefix.extend_from_slice(b"{\"v\":3,\"type\":\"future\"}\n");
+        prefix.extend_from_slice(b"{\"v\":4,\"type\":\"future\"}\n");
         let tail = b"unfinished";
         let mut original = prefix.clone();
         original.extend_from_slice(tail);
@@ -1986,7 +2215,7 @@ mod tests {
 
         assert!(matches!(
             Journal::open(&path, &Faults::default()),
-            Err(OpenFailure::UnknownVersion(3))
+            Err(OpenFailure::UnknownVersion(4))
         ));
         assert_eq!(fs::read(&path).expect("read journal"), original);
         assert_eq!(
@@ -2889,6 +3118,67 @@ mod tests {
                     if reason.as_ref() == "turn usage premium is invalid"
             ),
             "a negative premium contributor is damaged, never a known total"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parked_journal_reopens_for_append_without_changing_bytes() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("journal.jsonl");
+        let prefix = encode_records(&[session_record(), boot_record(1)]);
+        let mut journal =
+            Journal::create(&path, &prefix, &Faults::default()).expect("create journal");
+        let first = encode_records(&[user_record(1, None)]);
+        journal.append(&first).expect("first append");
+        journal.park();
+        assert!(journal.file.is_none(), "park releases only the data handle");
+        let second = encode_records(&[user_record(2, Some(entry_id(1)))]);
+        journal
+            .append(&second)
+            .expect("append reopens parked journal");
+        let mut expected = prefix;
+        expected.extend_from_slice(&first);
+        expected.extend_from_slice(&second);
+        assert_eq!(
+            fs::read(&path).expect("read journal"),
+            expected,
+            "reopening a parked journal appends at the tracked end"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parked_journal_rejects_replaced_or_truncated_path() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("journal.jsonl");
+        let prefix = encode_records(&[session_record(), boot_record(1)]);
+        let mut journal =
+            Journal::create(&path, &prefix, &Faults::default()).expect("create journal");
+        let first = encode_records(&[user_record(1, None)]);
+        journal.append(&first).expect("first append");
+        journal.park();
+
+        let replacement = directory.0.join("replacement.jsonl");
+        fs::rename(&path, &replacement).expect("move original journal");
+        let mut replacement_bytes = prefix.clone();
+        replacement_bytes.extend_from_slice(&first);
+        fs::write(&path, replacement_bytes).expect("write replacement journal");
+        assert!(
+            journal.append(&first).is_err(),
+            "a replaced journal path must fail closed"
+        );
+
+        fs::rename(&replacement, &path).expect("restore original journal");
+        journal.park();
+        fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .expect("truncate journal");
+        assert!(
+            journal.append(&first).is_err(),
+            "a truncated journal path must fail closed"
         );
     }
 

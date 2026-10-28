@@ -15,13 +15,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dal_core::{
-    ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec, Part, Purpose, RawJson,
-    RequestParams, ThinkingLevel, Usage,
+    Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec, Part,
+    Purpose, RawJson, RequestParams, ThinkingLevel, Usage,
 };
 use dal_provider::{
-    AuthStyle, CatalogEntry, EnvSnapshot, Listing, NoticeSink, ProviderConfig, ProviderEntry,
-    ProviderError, ProviderIdentity, ProviderSet, ProviderSettings, ResolvedModel, StopReason,
-    StreamEvent, ThinkingSupport, ToolArgs, ToolCall, ToolSupport, Transport,
+    CatalogEntry, EnvSnapshot, Listing, NoticeSink, ProviderConfig, ProviderError,
+    ProviderIdentity, ProviderSet, ResolvedModel, StopReason, StreamEvent, ThinkingSupport,
+    ToolArgs, ToolCall, ToolSupport,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -63,26 +63,35 @@ fn entry() -> CatalogEntry {
     }
 }
 
-fn config(base: &str, family: Family) -> ProviderConfig {
-    ProviderConfig {
-        default_model: None,
-        thinking: ThinkingLevel::Medium,
-        aliases: Vec::new(),
-        request_max_retries: 0,
-        stream_max_retries: 0,
-        providers: vec![ProviderEntry {
-            id: "azure-test".into(),
-            def: None,
-            family,
-            base_url: base.into(),
-            transport: Transport::Https,
-            key_env: Some(KEY_ENV.into()),
-            auth: AuthStyle::ApiKey,
-            max_concurrent_requests: 4,
-            settings: ProviderSettings::default(),
-        }],
-        scripted: None,
-    }
+fn config(dir: &std::path::Path, base: &str, family: Family) -> ProviderConfig {
+    // The named Azure entry decodes from the effective TOML through the
+    // public `ProviderConfig::from_config` route: the loopback base and the
+    // Azure `api-key` style stay explicit, so no captured environment can
+    // redirect the turn at a public endpoint. The default `api_version` and
+    // empty deployments stay omitted, keeping the per-surface defaults the
+    // fixtures pin.
+    let api = match family {
+        Family::Chat => "openai_chat",
+        Family::Responses => "openai_responses",
+        _ => panic!("azure replay covers the Chat and Responses families only"),
+    };
+    let table = format!(
+        "[retry]\nrequest_max_retries = 0\nstream_max_retries = 0\n\
+         [providers.azure-test]\napi = \"{api}\"\nbase_url = \"{base}\"\n\
+         key_env = \"{KEY_ENV}\"\nauth = \"api-key\"\n"
+    );
+    let host = Config::load(ConfigProduct::Dalgon, dir, "", Some(&table))
+        .expect("replay provider table parses");
+    let mut config = ProviderConfig::from_config(&host).expect("replay providers decode");
+    config
+        .providers
+        .retain(|candidate| candidate.id.as_ref() == "azure-test");
+    assert_eq!(
+        config.providers.len(),
+        1,
+        "replay decodes exactly the azure-test entry"
+    );
+    config
 }
 
 fn resolved(family: Family) -> ResolvedModel {
@@ -156,7 +165,7 @@ async fn drive(case: &str, family: Family, tag: &str) -> Driven {
         .expect("replay server starts");
     let dir = temp_dir(tag);
     let set = ProviderSet::new(
-        &config(&server.base_url(), family),
+        &config(&dir, &server.base_url(), family),
         identity(),
         EnvSnapshot::test(&[(KEY_ENV, KEY_VALUE)]),
         &dir,

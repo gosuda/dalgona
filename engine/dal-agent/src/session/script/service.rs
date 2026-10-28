@@ -62,6 +62,8 @@ pub(super) fn wired(op: NativeOp) -> bool {
         | NativeOp::TurnWake
         | NativeOp::TurnIsIdle
         | NativeOp::McpCall
+        | NativeOp::JudgeAsk
+        | NativeOp::JudgeBatch
         | NativeOp::StateRead
         | NativeOp::StateWrite
         | NativeOp::StateDelete => true,
@@ -338,6 +340,32 @@ pub(super) async fn call(
                     .map_err(CallError::Service)?,
             )
         }
+        NativeOp::JudgeAsk => {
+            let args: JudgeAskArgs = decode(args)?;
+            if args.question.is_empty() {
+                return Err(CallError::Args(
+                    "judge.ask: question must not be empty".into(),
+                ));
+            }
+            encode(
+                &services
+                    .judge_ask(who, String::from(args.question))
+                    .await
+                    .map_err(CallError::Service)?,
+            )
+        }
+        NativeOp::JudgeBatch => {
+            let args: JudgeBatchArgs = decode(args)?;
+            if args.questions.is_empty() {
+                return encode(&Vec::<bool>::new()).map(CallOutput::Json);
+            }
+            encode(
+                &services
+                    .judge_batch(who, args.questions.into_iter().map(String::from).collect())
+                    .await
+                    .map_err(CallError::Service)?,
+            )
+        }
         other => Err(CallError::Args(
             format!("operation {other} has no service dispatch")
                 .as_str()
@@ -597,4 +625,16 @@ struct McpCallArgs {
     server: Box<str>,
     tool: Box<str>,
     arguments: RawJson,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JudgeAskArgs {
+    question: Box<str>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JudgeBatchArgs {
+    questions: Vec<Box<str>>,
 }

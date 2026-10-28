@@ -145,6 +145,25 @@ pub enum ResolveError {
         /// The provider-native model id the route names.
         model: String,
     },
+    /// A multi-wire provider serves no wire for the model id. The row default
+    /// never substitutes: an unbound id never gains a wire, from live catalog
+    /// data or otherwise.
+    UnboundModel {
+        /// The provider id the route names.
+        provider: String,
+        /// The provider-native model id the route names.
+        model: String,
+    },
+    /// The route's model is served by a wire that fixes its own endpoint,
+    /// while the provider's own table names an explicit `base_url`. The
+    /// explicit base is authoritative: the fixed-endpoint wire never
+    /// silently replaces it.
+    FixedWireBase {
+        /// The provider id the route names.
+        provider: String,
+        /// The provider-native model id the route names.
+        model: String,
+    },
 }
 
 impl ResolveError {
@@ -159,9 +178,14 @@ impl ResolveError {
                 let first = candidates.split(", ").next().unwrap_or_default();
                 Some(format!("Use {first}."))
             }
-            Self::UnknownProvider { .. } | Self::ProviderFamilyMismatch { .. } => Some(
-                String::from("Configure that provider or pick another model with /model."),
-            ),
+            Self::UnknownProvider { .. }
+            | Self::ProviderFamilyMismatch { .. }
+            | Self::UnboundModel { .. } => Some(String::from(
+                "Configure that provider or pick another model with /model.",
+            )),
+            Self::FixedWireBase { provider, .. } => Some(format!(
+                "Remove providers.{provider}.base_url or pick another model."
+            )),
             Self::NoDefault => None,
         }
     }
@@ -182,6 +206,12 @@ impl fmt::Display for ResolveError {
                 f,
                 "provider {provider} does not serve the API family of model {model}"
             ),
+            Self::UnboundModel { provider, model } => {
+                write!(f, "provider {provider} serves no wire for model {model}")
+            }
+            Self::FixedWireBase { provider, model } => {
+                write!(f, "provider {provider} fixes the endpoint of model {model}")
+            }
         }
     }
 }

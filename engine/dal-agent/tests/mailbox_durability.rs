@@ -43,9 +43,9 @@ use dal_agent::ext::{
 };
 use dal_agent::{Agent, Delivery, Env, Host, Product, ServiceError, SessionRef, Subscription};
 use dal_core::{
-    AgentsOp, AgentsReply, CallId, ClientId, Command, Config, ConfigProduct, Expect, MailMode,
-    ModelInfo, Name, Part, RawJson, Receipt, Record, Service, ServiceSet, ToolClass, ToolSpec,
-    UpdateKind, Visibility, Workspace,
+    AgentsOp, AgentsReply, CallId, ClientId, Command, Config, ConfigProduct, Expect,
+    MAILBOX_WAITING_LIMIT, MailMode, ModelInfo, Name, Part, RawJson, Receipt, Record, Service,
+    ServiceSet, ToolClass, ToolSpec, UpdateKind, Visibility, Workspace,
 };
 use tokio::sync::Notify;
 
@@ -734,9 +734,6 @@ async fn a_missing_recipient_keeps_the_gone_contract() -> TestResult {
     );
     Ok(())
 }
-
-/// Messages the recipient accepts before its mailbox is full.
-const MAILBOX_WAITING_LIMIT: usize = 100;
 
 /// Live-steer saturation bound: the loop stops at the first real `Full`
 /// receipt, and the bound plus the saturated gate hang-guards a future that

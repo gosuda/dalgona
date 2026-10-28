@@ -109,7 +109,7 @@ Assistant entries carry one `model` identifier. Their optional `route` member id
 
 The route describes the existing `model` identifier. Its API family is independent of the entry's top-level `api` member, which describes the provider wire format. New responses include `route`. An absent member means the route is unknown, not that it is an API route. The decoder rejects `null`, unknown route kinds, and model identifiers that do not fit the declared synthetic or harness kind.
 
-`protocol/schema` includes this optional, non-null member. Protocol version 1 and the format-1 encoding of assistant entries remain unchanged. Turn-ID reservations use journal format 2. See [durable turn identities](sessions.md#durable-turn-identities).
+`protocol/schema` includes this optional, non-null member. Protocol version 1 and the format-1 encoding of assistant entries remain unchanged. Turn-ID reservations use journal format 2 and mail deliveries use journal format 3. See [durable turn identities](sessions.md#durable-turn-identities).
 
 ## Next
 

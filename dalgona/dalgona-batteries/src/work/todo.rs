@@ -251,11 +251,16 @@ pub(crate) fn fold(records: &[Box<RawJson>]) -> Vec<TodoItem> {
 }
 
 /// Folds borrowed current-leaf record bodies, replacing the accumulator with
-/// each decodable whole-list body and skipping malformed bodies.
+/// each body that decodes as a whole list and satisfies the written-list
+/// contract, and skipping malformed bodies. The same [`validate`] that gates
+/// every append runs here, so the fold's item and byte caps are the ones the
+/// status payload's encode bound relies on.
 pub(crate) fn fold_bodies<'a>(bodies: impl Iterator<Item = &'a RawJson>) -> Vec<TodoItem> {
     let mut items = Vec::new();
     for body in bodies {
-        if let Ok(record) = body.decode_as::<TodoRecord>() {
+        if let Ok(record) = body.decode_as::<TodoRecord>()
+            && validate(&record.list).is_ok()
+        {
             items = record.list;
         }
     }
@@ -447,6 +452,63 @@ mod tests {
         ];
 
         assert_eq!(fold(&records), vec![item("kept", TodoState::Pending)]);
+        Ok(())
+    }
+
+    #[test]
+    fn todo_fold_skips_over_cap_record_and_keeps_the_last_valid_list()
+    -> Result<(), Box<dyn StdError>> {
+        let kept = vec![item("kept", TodoState::Pending)];
+        let over_cap = (0..=MAX_ITEMS)
+            .map(|index| item(&format!("extra-{index}"), TodoState::Pending))
+            .collect::<Vec<_>>();
+        let records = [record(kept.clone())?, record(over_cap)?];
+
+        assert_eq!(fold(&records), kept);
+        Ok(())
+    }
+
+    #[test]
+    fn todo_fold_skips_oversized_subject_record_and_keeps_the_last_valid_list()
+    -> Result<(), Box<dyn StdError>> {
+        let kept = vec![item("kept", TodoState::Pending)];
+        let oversized = vec![
+            item(
+                &format!("{}!", "x".repeat(MAX_SUBJECT_BYTES)),
+                TodoState::Pending,
+            ),
+            item("tail", TodoState::Pending),
+        ];
+        let records = [record(kept.clone())?, record(oversized)?];
+
+        assert_eq!(fold(&records), kept);
+        Ok(())
+    }
+
+    #[test]
+    fn todo_fold_skips_double_in_progress_record_and_keeps_the_last_valid_list()
+    -> Result<(), Box<dyn StdError>> {
+        let kept = vec![item("kept", TodoState::Pending)];
+        let records = [
+            record(kept.clone())?,
+            record(vec![
+                item("first", TodoState::InProgress),
+                item("second", TodoState::InProgress),
+            ])?,
+        ];
+
+        assert_eq!(fold(&records), kept);
+        Ok(())
+    }
+
+    #[test]
+    fn todo_fold_accepts_the_legal_cap_list() -> Result<(), Box<dyn StdError>> {
+        let legal = (0..MAX_ITEMS)
+            .map(|index| item(&format!("task-{index}"), TodoState::Pending))
+            .collect::<Vec<_>>();
+        let records = [record(legal.clone())?];
+
+        assert_eq!(fold(&records), legal);
         Ok(())
     }
 

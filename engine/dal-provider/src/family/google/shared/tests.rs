@@ -1928,6 +1928,7 @@ async fn loopback_vertex_bearer_targets_the_project_path() {
             location: "us-central1",
         },
         image_input: true,
+        endpoint: vertex::VertexEndpoint::Regional,
     })
     .unwrap();
     wire.base_override = None;
@@ -2001,6 +2002,7 @@ async fn loopback_vertex_express_falls_back_from_regional_to_global() {
             explicit_location: false,
         },
         image_input: true,
+        endpoint: vertex::VertexEndpoint::Regional,
     })
     .unwrap();
     assert!(wire.fallback.is_some());

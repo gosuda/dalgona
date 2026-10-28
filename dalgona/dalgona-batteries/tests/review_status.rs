@@ -533,6 +533,7 @@ impl HeldReview {
                 ext: "review".into(),
                 state: ExtState::Busy,
                 text: Some(RUNNING_PAYLOAD.into()),
+                payload: None,
             },
             "a held review round is work in flight: busy, carrying its payload"
         );
@@ -589,6 +590,7 @@ impl HeldReview {
             ext: "review".into(),
             state: ExtState::Quiet,
             text: None,
+            payload: None,
         };
         tokio::time::timeout(WAIT, async {
             while self.review_updates.last() != Some(&quiet) {
@@ -603,6 +605,7 @@ impl HeldReview {
                     ext: "review".into(),
                     state: ExtState::Busy,
                     text: Some(RUNNING_PAYLOAD.into()),
+                    payload: None,
                 }),
             "the update stream carried the busy row: {:?}",
             self.review_updates

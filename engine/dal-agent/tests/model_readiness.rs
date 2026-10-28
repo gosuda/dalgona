@@ -532,25 +532,29 @@ async fn closing_session_drops_an_in_flight_readiness_request() {
         host.close(agent.session()),
     )
     .await;
-    let dropped = tokio::time::timeout(std::time::Duration::from_secs(1), server.join_next()).await;
-    let dropped_before_release = if let Ok(result) = dropped {
-        result
-            .expect("catalog server task")
-            .expect("catalog server")
+    // The verdict is read before any cleanup signal is armed: releasing the
+    // held request first would let the server task report a release instead of
+    // the dropped connection, which makes the outcome a race.
+    let observed = if let Ok(result) =
+        tokio::time::timeout(std::time::Duration::from_secs(30), server.join_next()).await
+    {
+        Some(
+            result
+                .expect("catalog server task")
+                .expect("catalog server"),
+        )
     } else {
         let _ = release.send(());
-        server
-            .join_next()
-            .await
-            .expect("catalog server task")
-            .expect("release held catalog")
+        let _ = server.join_next().await;
+        None
     };
     host.shutdown(std::time::Duration::from_secs(1)).await;
     closed
         .expect("session close finishes")
         .expect("session closes");
-    assert!(
-        dropped_before_release,
+    assert_eq!(
+        observed,
+        Some(true),
         "the readiness request outlived its closed session"
     );
 }

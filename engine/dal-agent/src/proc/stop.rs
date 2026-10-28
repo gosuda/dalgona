@@ -12,6 +12,8 @@ use dal_core::JobOutcome;
 
 use crate::error::ToolError;
 
+#[cfg(target_os = "linux")]
+use super::snapshot::ParentGraph;
 use super::{ProcStatus, StopReason};
 
 /// Maps a reaped exit status to a terminal process status.
@@ -103,19 +105,26 @@ pub(super) fn sweep_process_group(leader_pid: u32) {
     }
 }
 
-/// Walks Linux `/proc` for the live descendants of a leader pid.
+/// Builds one global parent-to-children map from a full `/proc` census.
 ///
-/// The ppid chain is only intact while the lineage still lives: a detached
-/// (`setsid`) descendant reparents to init the instant its bridge dies, so
-/// callers must snapshot before signaling if they need the detached set.
+/// Reading every pid's `stat` is the expensive part of a descendant scan;
+/// batching several simultaneous stop requests reuses one walk for a
+/// whole admission batch while each caller still receives only its own
+/// reachable subtree. A census that cannot be opened is a typed error:
+/// the pre-signal stop path must never read a lost census as an empty
+/// descendant set. Individual `stat` reads keep their skip semantics; a
+/// pid that vanishes mid-walk is simply absent.
 #[cfg(target_os = "linux")]
-pub(super) fn proc_descendants(leader_pid: u32) -> Vec<u32> {
-    use std::collections::{HashMap, HashSet};
+pub(super) fn proc_parent_graph() -> Result<ParentGraph, ToolError> {
+    use std::collections::HashMap;
 
-    let mut parents: HashMap<u32, u32> = HashMap::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let entries = std::fs::read_dir("/proc").map_err(|source| {
+        ToolError::Failed(Box::new(io::Error::new(
+            source.kind(),
+            format!("the /proc census could not be opened: {source}"),
+        )))
+    })?;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
@@ -140,23 +149,47 @@ pub(super) fn proc_descendants(leader_pid: u32) -> Vec<u32> {
         let Ok(parent_pid) = ppid_text.parse::<u32>() else {
             continue;
         };
-        parents.insert(pid, parent_pid);
+        children.entry(parent_pid).or_default().push(pid);
     }
+    Ok(children)
+}
 
-    let mut doomed: HashSet<u32> = HashSet::new();
-    let mut changed = true;
-    doomed.insert(leader_pid);
-    while changed {
-        changed = false;
-        for (pid, ppid) in &parents {
-            if doomed.contains(ppid) && !doomed.contains(pid) {
-                doomed.insert(*pid);
-                changed = true;
+/// Walks `graph` for the live descendants of `leader_pid`.
+///
+/// Non-consuming, so one shared graph serves a whole batch; the visited
+/// set matches the previous single-caller BFS with the leader excluded,
+/// unordered like the previous `HashSet` collect.
+#[cfg(target_os = "linux")]
+pub(super) fn graph_reach(graph: &ParentGraph, leader_pid: u32) -> Vec<u32> {
+    use std::collections::{HashSet, VecDeque};
+
+    let mut doomed = HashSet::new();
+    let mut pending = VecDeque::from([leader_pid]);
+    while let Some(parent_pid) = pending.pop_front() {
+        let Some(descendants) = graph.get(&parent_pid) else {
+            continue;
+        };
+        for pid in descendants {
+            if doomed.insert(*pid) {
+                pending.push_back(*pid);
             }
         }
     }
-    doomed.remove(&leader_pid);
     doomed.into_iter().collect()
+}
+
+/// Walks Linux `/proc` for the live descendants of a leader pid.
+///
+/// The ppid chain is only intact while the lineage still lives: a detached
+/// (`setsid`) descendant reparents to init the instant its bridge dies, so
+/// callers must snapshot before signaling if they need the detached set.
+/// Best-effort legacy shape for the post-exit sweeps: a lost census reads
+/// as no descendants, exactly as before the split. The pre-signal stop
+/// path never comes through here; it consumes the typed census error.
+#[cfg(target_os = "linux")]
+pub(super) fn proc_descendants(leader_pid: u32) -> Vec<u32> {
+    let graph = proc_parent_graph().unwrap_or_default();
+    graph_reach(&graph, leader_pid)
 }
 
 /// Sweeps Linux `/proc` for descendants of recorded leader pids.

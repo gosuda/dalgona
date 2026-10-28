@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Todo lists and plan review as one session-scoped extension.
 
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use crate::text::{byte_prefix, normalize_ws};
@@ -8,14 +11,14 @@ use dal_agent::error::{SchemeError, ServiceError};
 use dal_agent::ext::{
     ArgError, BoxFuture, Caller, CommandCx, CommandHandler, Doc, Extension, ExtensionBuilder, Hook,
     HookCx, HookError, ObserveHook, RawValue, SchemeCx, SchemeResolver, Services, StatusCx,
-    StatusPoll, StatusSnapshot, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput,
+    StatusPoll, StatusSample, StatusSnapshot, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput,
 };
 use dal_core::ext::{
     BeforeTurn, SessionEnd, SessionStart, ToolCallEvent, ToolCallVerdict, Visibility,
 };
 use dal_core::{
     CommandName, CommandSpec, ModelInfo, Name, Origin, Output, RawJson, RegistrationError, Reply,
-    ServiceSet, ToolClass, ToolSpec, Workspace,
+    STATUS_PAYLOAD_LIMIT, ServiceSet, StatusPayload, ToolClass, ToolSpec, Workspace,
 };
 
 mod plan;
@@ -317,6 +320,19 @@ impl StatusPoll for PlanStatus {
         let items = todo::fold_bodies(bodies);
         status_snapshot(self.state.phase(cx.session), &items)
     }
+
+    fn sample(&self, cx: &StatusCx) -> StatusSample {
+        let phase = self.state.phase(cx.session);
+        let bodies = cx
+            .records(todo::TODO_KIND)
+            .iter()
+            .map(|record| &record.body);
+        let items = todo::fold_bodies(bodies);
+        StatusSample {
+            snapshot: status_snapshot(phase, &items),
+            payload: status_payload(phase, &items),
+        }
+    }
 }
 
 fn status_snapshot(phase: plan::Phase, items: &[TodoItem]) -> StatusSnapshot {
@@ -324,6 +340,239 @@ fn status_snapshot(phase: plan::Phase, items: &[TodoItem]) -> StatusSnapshot {
         quiet: status_quiet(phase),
         text: status_line(phase, items).map(String::into_boxed_str),
     }
+}
+
+/// Suffix marking a status copy of a subject shortened to fit the payload
+/// bound; the journal keeps the verbatim subject.
+const STATUS_TRUNCATION_SUFFIX: &str = "[...] status truncated";
+
+/// Wire spelling of a plan phase inside the structured status payload.
+fn plan_state_wire(phase: plan::Phase) -> &'static str {
+    match phase {
+        plan::Phase::Off => "off",
+        plan::Phase::Planning => "planning",
+        plan::Phase::Awaiting => "awaiting",
+    }
+}
+
+#[derive(serde::Serialize)]
+struct StatusPayloadBody<'a> {
+    plan_mode: bool,
+    plan_state: &'static str,
+    todos: Vec<StatusTodoCopy<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct StatusTodoCopy<'a> {
+    subject: Cow<'a, str>,
+    state: &'a todo::TodoState,
+}
+
+struct CountingWriter<'a> {
+    bytes: &'a Cell<usize>,
+}
+
+impl Write for CountingWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let count = self
+            .bytes
+            .get()
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("serialized status size overflow"))?;
+        self.bytes.set(count);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+type StatusWriter<'a> = sonic_rs::writer::BufferedWriter<CountingWriter<'a>>;
+
+fn serialized_status_bytes<T: ?Sized + serde::Serialize>(
+    writer: &mut StatusWriter<'_>,
+    bytes: &Cell<usize>,
+    value: &T,
+) -> Result<usize, sonic_rs::Error> {
+    bytes.set(0);
+    sonic_rs::to_writer(writer, value)?;
+    Ok(bytes.get())
+}
+
+fn status_todo_bytes(
+    subject: &str,
+    state: &todo::TodoState,
+    writer: &mut StatusWriter<'_>,
+    bytes: &Cell<usize>,
+) -> Result<usize, sonic_rs::Error> {
+    serialized_status_bytes(
+        writer,
+        bytes,
+        &StatusTodoCopy {
+            subject: Cow::Borrowed(subject),
+            state,
+        },
+    )
+}
+
+fn status_todo_cut_bytes(
+    prefix: &str,
+    state: &todo::TodoState,
+    suffix_bytes: usize,
+    writer: &mut StatusWriter<'_>,
+    bytes: &Cell<usize>,
+) -> Result<usize, sonic_rs::Error> {
+    let prefix_bytes = status_todo_bytes(prefix, state, writer, bytes)?;
+    Ok(prefix_bytes + suffix_bytes - 2)
+}
+fn fitting_cut(
+    subject: &str,
+    state: &todo::TodoState,
+    target: usize,
+    suffix_bytes: usize,
+    writer: &mut StatusWriter<'_>,
+    bytes: &Cell<usize>,
+) -> Option<(usize, usize)> {
+    let boundaries: Vec<usize> = subject
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain([subject.len()])
+        .collect();
+    let mut low = 0usize;
+    let mut high = boundaries.len();
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        let candidate = status_todo_cut_bytes(
+            &subject[..boundaries[middle]],
+            state,
+            suffix_bytes,
+            writer,
+            bytes,
+        )
+        .ok()?;
+        if candidate <= target {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    let start = boundaries[low];
+    let selected =
+        status_todo_cut_bytes(&subject[..start], state, suffix_bytes, writer, bytes).ok()?;
+    Some((start, selected))
+}
+
+/// Builds the structured status payload from the same fold output as the
+/// human line. Presence mirrors [`status_line`]: `None` exactly when the
+/// human line is `None`, so a quiet session without a list stays at the wire
+/// baseline.
+///
+/// Measurement uses the production serializer with a counting writer, so
+/// escaping remains identical to the final payload without creating
+/// intermediate JSON strings. Each shortened subject uses a binary search over
+/// its UTF-8 character boundaries; only the selected shortened copies are
+/// allocated. All items remain in list order with their original states, and
+/// the journal subjects are never modified. Non-empty caller slices are
+/// revalidated so malformed raw input returns `None` instead of panicking.
+pub(crate) fn status_payload(
+    phase: plan::Phase,
+    items: &[todo::TodoItem],
+) -> Option<StatusPayload> {
+    if !items.is_empty() && todo::validate(items).is_err() {
+        return None;
+    }
+    status_line(phase, items)?;
+
+    let measured_bytes = Cell::new(0);
+    let mut writer = sonic_rs::writer::BufferedWriter::new(CountingWriter {
+        bytes: &measured_bytes,
+    });
+    let empty_body = serialized_status_bytes(
+        &mut writer,
+        &measured_bytes,
+        &StatusPayloadBody {
+            plan_mode: phase != plan::Phase::Off,
+            plan_state: plan_state_wire(phase),
+            todos: Vec::new(),
+        },
+    )
+    .ok()?;
+    let suffix_bytes =
+        serialized_status_bytes(&mut writer, &measured_bytes, STATUS_TRUNCATION_SUFFIX).ok()?;
+
+    let sizes: Vec<usize> = items
+        .iter()
+        .map(|item| status_todo_bytes(&item.subject, &item.state, &mut writer, &measured_bytes))
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let array_separators = items.len().saturating_sub(1);
+    let available = STATUS_PAYLOAD_LIMIT.saturating_sub(empty_body + array_separators);
+    let mut over = sizes.iter().sum::<usize>().saturating_sub(available);
+
+    let mut cuts: Vec<(usize, String)> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if over == 0 {
+            break;
+        }
+
+        let verbatim = sizes[index];
+        let floor =
+            status_todo_cut_bytes("", &item.state, suffix_bytes, &mut writer, &measured_bytes)
+                .ok()?;
+        let reclaim = verbatim.saturating_sub(floor);
+        if reclaim == 0 {
+            continue;
+        }
+
+        let target = verbatim - over.min(reclaim);
+        let subject = item.subject.as_str();
+        let (start, selected_size) = fitting_cut(
+            subject,
+            &item.state,
+            target,
+            suffix_bytes,
+            &mut writer,
+            &measured_bytes,
+        )?;
+        over = over.saturating_sub(verbatim - selected_size);
+
+        let mut shortened = String::with_capacity(start + STATUS_TRUNCATION_SUFFIX.len());
+        shortened.push_str(&subject[..start]);
+        shortened.push_str(STATUS_TRUNCATION_SUFFIX);
+        cuts.push((index, shortened));
+    }
+
+    if over != 0 {
+        return None;
+    }
+
+    let mut cut = 0usize;
+    let todos: Vec<StatusTodoCopy<'_>> = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let subject = if cut < cuts.len() && cuts[cut].0 == index {
+                let subject = cuts[cut].1.as_str();
+                cut += 1;
+                Cow::Borrowed(subject)
+            } else {
+                Cow::Borrowed(item.subject.as_str())
+            };
+            StatusTodoCopy {
+                subject,
+                state: &item.state,
+            }
+        })
+        .collect();
+
+    let text = sonic_rs::to_string(&StatusPayloadBody {
+        plan_mode: phase != plan::Phase::Off,
+        plan_state: plan_state_wire(phase),
+        todos,
+    })
+    .ok()?;
+    StatusPayload::parse(&text).ok()
 }
 
 struct SessionOpen {
@@ -616,6 +865,21 @@ mod tests {
         }
     }
 
+    fn assert_status_subject(actual: &str, original: &str) {
+        if let Some(prefix) = actual.strip_suffix(STATUS_TRUNCATION_SUFFIX) {
+            assert!(
+                original.starts_with(prefix),
+                "shortened subject must retain an original prefix"
+            );
+            assert!(
+                prefix.len() < original.len(),
+                "a truncation marker must shorten the original subject"
+            );
+        } else {
+            assert_eq!(actual, original, "unmarked subjects stay verbatim");
+        }
+    }
+
     #[test]
     fn plan_status_text_is_one_human_line() {
         let items = [
@@ -669,8 +933,204 @@ mod tests {
         assert!(text.ends_with("界…"));
     }
 
+    #[test]
+    fn plan_status_payload_shape_and_member_order() {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ShapeTodo {
+            subject: String,
+            state: TodoState,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ShapePayload {
+            plan_mode: bool,
+            plan_state: String,
+            todos: Vec<ShapeTodo>,
+        }
+        let items = [
+            item("one", TodoState::InProgress),
+            item("two", TodoState::Done),
+        ];
+        let Some(payload) = status_payload(plan::Phase::Planning, &items) else {
+            panic!("planning with todos carries a payload");
+        };
+
+        let decoded: ShapePayload = sonic_rs::from_str(payload.as_str())
+            .unwrap_or_else(|error| panic!("payload decodes into the exact shape: {error}"));
+        assert!(decoded.plan_mode);
+        assert_eq!(decoded.plan_state, "planning");
+        let subjects: Vec<&str> = decoded
+            .todos
+            .iter()
+            .map(|todo| todo.subject.as_str())
+            .collect();
+        assert_eq!(subjects, ["one", "two"]);
+        assert_eq!(decoded.todos[0].state, TodoState::InProgress);
+        assert_eq!(decoded.todos[1].state, TodoState::Done);
+
+        let Some(off) = status_payload(plan::Phase::Off, &items) else {
+            panic!("off with todos carries a payload");
+        };
+        let off: ShapePayload = sonic_rs::from_str(off.as_str())
+            .unwrap_or_else(|error| panic!("off payload decodes: {error}"));
+        assert!(!off.plan_mode);
+        assert_eq!(off.plan_state, "off");
+    }
+
+    #[test]
+    fn plan_status_payload_quiet_and_baseline() {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AwaitTodo {
+            subject: String,
+            state: TodoState,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AwaitPayload {
+            plan_mode: bool,
+            plan_state: String,
+            todos: Vec<AwaitTodo>,
+        }
+        assert!(status_payload(plan::Phase::Off, &[]).is_none());
+        let items = [item("a", TodoState::Pending)];
+        assert_eq!(
+            status_payload(plan::Phase::Off, &items).is_some(),
+            status_snapshot(plan::Phase::Off, &items).text.is_some(),
+            "payload presence mirrors the human line"
+        );
+        let Some(awaiting) = status_payload(plan::Phase::Awaiting, &items) else {
+            panic!("awaiting carries a payload");
+        };
+
+        let decoded: AwaitPayload = sonic_rs::from_str(awaiting.as_str())
+            .unwrap_or_else(|error| panic!("awaiting payload decodes: {error}"));
+        assert!(decoded.plan_mode);
+        assert_eq!(decoded.plan_state, "awaiting");
+        assert_eq!(decoded.todos.len(), 1);
+        assert_eq!(decoded.todos[0].subject, "a");
+        assert_eq!(decoded.todos[0].state, TodoState::Pending);
+    }
+
+    #[test]
+    fn plan_status_payload_shortens_in_list_order() {
+        #[derive(serde::Deserialize)]
+        struct OrderTodo {
+            subject: String,
+            state: TodoState,
+        }
+        #[derive(serde::Deserialize)]
+        struct OrderPayload {
+            todos: Vec<OrderTodo>,
+        }
+        // Legal write-shape fixture: 26 items at the 200-byte subject cap
+        // with quote-heavy text, whose escaping pushes the verbatim body far
+        // past the 4096-byte cap.
+        let items: Vec<TodoItem> = (0..todo::MAX_ITEMS)
+            .map(|index| {
+                let mut subject = "\"".repeat(todo::MAX_SUBJECT_BYTES - 1);
+                subject.push(char::from(b"abcdefghijklmnopqrstuvwxyz"[index]));
+                item(&subject, TodoState::Pending)
+            })
+            .collect();
+        let Some(payload) = status_payload(plan::Phase::Planning, &items) else {
+            panic!("payload fits after list-order shortening");
+        };
+        assert!(payload.as_str().len() <= STATUS_PAYLOAD_LIMIT);
+        let decoded: OrderPayload = sonic_rs::from_str(payload.as_str())
+            .unwrap_or_else(|error| panic!("payload decodes after shortening: {error}"));
+        assert_eq!(decoded.todos.len(), todo::MAX_ITEMS);
+        let mut marked_ended = false;
+        for (index, todo) in decoded.todos.iter().enumerate() {
+            assert_eq!(
+                todo.state, items[index].state,
+                "shortening preserves every item's state"
+            );
+            assert_status_subject(&todo.subject, &items[index].subject);
+            if todo.subject.ends_with(STATUS_TRUNCATION_SUFFIX) {
+                assert!(
+                    !marked_ended,
+                    "shortened copies form a prefix in list order"
+                );
+            } else {
+                marked_ended = true;
+            }
+        }
+        assert!(
+            decoded
+                .todos
+                .iter()
+                .any(|todo| todo.subject.ends_with(STATUS_TRUNCATION_SUFFIX)),
+            "the budget forced at least one shortened copy"
+        );
+    }
+
+    #[test]
+    fn plan_status_payload_json_valid_after_multibyte_cuts() {
+        #[derive(serde::Deserialize)]
+        struct CutTodo {
+            subject: String,
+            state: TodoState,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct CutPayload {
+            plan_mode: bool,
+            plan_state: String,
+            todos: Vec<CutTodo>,
+        }
+        // Escaped quotes, multibyte CJK, and a control-bearing subject at
+        // the 200-byte cap, 26 items total, so budget cuts land inside
+        // escape and multibyte runs.
+        let quoted_cjk = format!("{}{}", "\"".repeat(50), "\u{754c}".repeat(50));
+        let controls = "x\n".repeat(100);
+        let cjk = format!("{}{}", "\u{754c}".repeat(66), "aa");
+        let items: Vec<TodoItem> = (0..todo::MAX_ITEMS)
+            .map(|index| match index {
+                0 => item(&quoted_cjk, TodoState::InProgress),
+                1 => item(&controls, TodoState::Pending),
+                _ => item(&cjk, TodoState::Pending),
+            })
+            .collect();
+        let Some(payload) = status_payload(plan::Phase::Awaiting, &items) else {
+            panic!("payload fits after multibyte shortening");
+        };
+        assert!(payload.as_str().len() <= STATUS_PAYLOAD_LIMIT);
+
+        let decoded: CutPayload = sonic_rs::from_str(payload.as_str())
+            .unwrap_or_else(|error| panic!("payload is valid JSON after cuts: {error}"));
+        assert!(decoded.plan_mode);
+        assert_eq!(decoded.plan_state, "awaiting");
+        assert_eq!(decoded.todos.len(), todo::MAX_ITEMS);
+        for (index, todo) in decoded.todos.iter().enumerate() {
+            assert_eq!(
+                todo.state, items[index].state,
+                "multibyte shortening preserves every item's state"
+            );
+            assert_status_subject(&todo.subject, &items[index].subject);
+        }
+        assert!(
+            decoded
+                .todos
+                .iter()
+                .any(|todo| todo.subject.ends_with(STATUS_TRUNCATION_SUFFIX))
+        );
+    }
+
     #[tokio::test]
     async fn plan_status_bound() -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(serde::Deserialize)]
+        struct BoundTodo {
+            subject: String,
+            state: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct BoundPayload {
+            plan_mode: bool,
+            plan_state: String,
+            todos: Vec<BoundTodo>,
+        }
         let host = support::ScriptedWorkHost::open();
         let subject = format!("{}{}", "\"".repeat(50), "界".repeat(50));
         let encoded_subject = sonic_rs::to_string(&subject)?;
@@ -691,12 +1151,33 @@ mod tests {
         let record_before = host.services.all_bodies(todo::TODO_KIND);
         assert_eq!(record_before.len(), 1);
 
-        let (quiet, status) = host.status();
-        assert!(quiet);
-        let status = status.unwrap_or_default();
-        assert_eq!(status, "0/26 done");
-        assert!(!status.contains(['{', '}', '"']));
+        let sample = host.sample();
+        assert!(sample.snapshot.quiet);
+        assert_eq!(sample.snapshot.text.as_deref(), Some("0/26 done"));
+        let Some(payload) = sample.payload else {
+            panic!("the bounded status carries a structured payload");
+        };
+        assert!(payload.as_str().len() <= STATUS_PAYLOAD_LIMIT);
+        let decoded: BoundPayload = sonic_rs::from_str(payload.as_str())?;
+        assert!(!decoded.plan_mode);
+        assert_eq!(decoded.plan_state, "off");
+        assert_eq!(decoded.todos.len(), todo::MAX_ITEMS);
+        for todo in &decoded.todos {
+            assert_eq!(todo.state, "pending", "all folded states reach the payload");
+        }
+        for todo in &decoded.todos {
+            assert_status_subject(&todo.subject, &subject);
+        }
+        assert!(
+            decoded
+                .todos
+                .iter()
+                .any(|todo| todo.subject.ends_with(STATUS_TRUNCATION_SUFFIX))
+        );
 
+        // Replay read: sampling consumed nothing, and a fresh tool read
+        // still returns the full verbatim render.
+        assert_eq!(host.todos_command("").await?, expected_render);
         assert!(record_before[0].contains(&encoded_subject));
         assert_eq!(host.services.all_bodies(todo::TODO_KIND), record_before);
         Ok(())

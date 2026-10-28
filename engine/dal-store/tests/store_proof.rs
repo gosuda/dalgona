@@ -8,15 +8,19 @@
 
 #![expect(clippy::expect_used, reason = "integration tests fail loudly")]
 #![expect(clippy::panic, reason = "integration tests fail loudly")]
-#![expect(clippy::disallowed_methods, reason = "integration tests fail loudly")]
+#![cfg_attr(
+    unix,
+    expect(clippy::disallowed_methods, reason = "integration tests fail loudly")
+)]
 
 mod support;
 
+use std::{fs, io::Write, num::NonZeroU64, path::Path};
+
+#[cfg(unix)]
 use std::{
-    fs,
-    io::{BufRead, BufReader, Read, Write},
-    num::NonZeroU64,
-    path::{Path, PathBuf},
+    io::{BufRead, BufReader, Read},
+    path::PathBuf,
     process::{Command, Stdio},
 };
 

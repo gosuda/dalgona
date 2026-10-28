@@ -43,6 +43,7 @@ fn wire_with_context(
             expires_at: None,
             id_token: None,
             account_id: Some(String::from("acct-7f3a9c")),
+            project_id: None,
         },
     )
 }
@@ -286,6 +287,7 @@ async fn codex_https_redacts_an_account_id_taken_from_the_id_token() -> Result<(
             expires_at: None,
             id_token: Some(format!("h.{}.s", URL_SAFE_NO_PAD.encode(claims))),
             account_id: None,
+            project_id: None,
         },
     );
     let failure = failure_for(

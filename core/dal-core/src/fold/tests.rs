@@ -166,6 +166,8 @@ fn same_replayed_state(live: &Session, records: &[Record]) {
     assert_eq!(replayed.projected_bytes, live.projected_bytes);
     assert_eq!(replayed.rule_facts, live.rule_facts);
     assert_eq!(replayed.turn_totals, live.turn_totals);
+    assert_eq!(replayed.mail_rows, live.mail_rows);
+    assert_eq!(replayed.pending_mail, live.pending_mail);
 }
 
 fn one_read_round(session: &mut Session, turn: TurnId, call: &str, tokens: u64) -> Vec<Effect> {
@@ -1809,6 +1811,98 @@ fn replay_retains_rule_facts_across_leaf_switches() {
 }
 
 #[test]
+fn moving_to_the_current_leaf_answers_with_data_and_journals_nothing() {
+    let seed = [user_question(1, None), user_question(2, Some(entry(1)))];
+    let mut session = Session::replay_declared(seed.iter().cloned()).unwrap();
+    assert_eq!(session.leaf_entry(), Some(entry(2)));
+    let mut journal = seed.to_vec();
+
+    // A move to another entry keeps the existing move success.
+    let out = send(
+        &mut session,
+        Event::Command {
+            cmd: Command::MoveLeaf(entry(1)),
+            by: client(),
+        },
+    )
+    .unwrap();
+    append_emitted(&out, &mut journal);
+    assert_eq!(
+        journal.last(),
+        Some(&Record::Leaf {
+            at: stamp(),
+            to: Some(entry(1)),
+        })
+    );
+    assert!(out.iter().any(|effect| matches!(
+        effect,
+        Effect::Emit(emit) if emit.updates.iter().any(|update| matches!(
+            update,
+            UpdateKind::Tree(TreeDelta { leaf: Some(to), .. }) if *to == entry(1)
+        ))
+    )));
+    assert_eq!(
+        out.last(),
+        Some(&Effect::Reply(Ok(Reply::Done(Output::Text(
+            "Moved to the selected point. The next message continues from there.".into(),
+        )))))
+    );
+    assert_eq!(session.leaf_entry(), Some(entry(1)));
+
+    // Picking the current leaf answers with data text and appends nothing:
+    // no Leaf record, no tree update, no entry-sequence move.
+    let before = session.clone();
+    let out = send(
+        &mut session,
+        Event::Command {
+            cmd: Command::MoveLeaf(entry(1)),
+            by: client(),
+        },
+    )
+    .unwrap();
+    assert!(
+        out.iter().any(|effect| matches!(
+            effect,
+            Effect::Reply(Ok(Reply::Done(Output::Text(text))))
+                if &**text == "Already at this point."
+        )),
+        "the current-leaf pick answers with data text: {out:?}"
+    );
+    assert!(
+        out.iter().all(|effect| !matches!(effect, Effect::Emit(_))),
+        "the current-leaf pick journals or publishes: {out:?}"
+    );
+    assert_eq!(session, before, "the current-leaf pick moved the session");
+
+    // An unknown pick refuses without mutation.
+    let refused = send(
+        &mut session,
+        Event::Command {
+            cmd: Command::MoveLeaf(entry(9)),
+            by: client(),
+        },
+    );
+    assert!(
+        matches!(&refused, Err(Rejection::Invalid { .. })),
+        "an unknown pick must refuse: {refused:?}"
+    );
+    assert_eq!(session, before, "the refused pick moved the session");
+
+    // The fold still moves after both, and the journal replays it.
+    let out = send(
+        &mut session,
+        Event::Command {
+            cmd: Command::MoveLeaf(entry(2)),
+            by: client(),
+        },
+    )
+    .unwrap();
+    assert_eq!(session.leaf_entry(), Some(entry(2)));
+    append_emitted(&out, &mut journal);
+    same_replayed_state(&session, &journal);
+}
+
+#[test]
 fn extension_rows_follow_their_explicit_reminder_anchors() {
     let user = Entry {
         id: entry(1),
@@ -1939,6 +2033,7 @@ fn context_measurement_tracks_selected_model_and_family() {
             kind: EntryKind::Assistant {
                 api: Family::Chat,
                 model: "test-model".into(),
+                provider: None,
                 route: Some(AssistantRoute::Api(Family::Chat)),
                 content: Vec::new(),
                 usage: usage(5500),
@@ -1999,6 +2094,7 @@ fn replay_repairs_aborted_turn() {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: vec![Block::ToolCall {
                 id: call.clone(),
@@ -2076,6 +2172,7 @@ fn replay_declared_keeps_the_open_turn_unrepaired() {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: vec![Block::ToolCall {
                 id: call.clone(),
@@ -2190,6 +2287,7 @@ fn assistant_record(entry_id: u64, calls: &[&str]) -> Record {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: calls
                 .iter()
@@ -2885,6 +2983,7 @@ fn projection_matches_replay_after_branch_selection() {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test-model".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: Vec::new(),
             usage: usage(90_000),
@@ -3140,6 +3239,7 @@ fn projection_tracks_latest_compaction_on_selected_branch() {
             kind: EntryKind::Assistant {
                 api: Family::Chat,
                 model: "test-model".into(),
+                provider: None,
                 route: Some(AssistantRoute::Api(Family::Chat)),
                 content: Vec::new(),
                 usage: usage(90_000),
@@ -3502,18 +3602,22 @@ fn queued_wakes_keep_unique_turns_and_replay_their_count() {
     let opened = send(&mut session, guard(first_turn)).unwrap();
     append_emitted(&opened, &mut journal);
 
-    for text in ["first wake", "second wake"] {
+    let jobs = [JobId::new_v7(), JobId::new_v7()];
+    for (text, job) in ["first wake", "second wake"].into_iter().zip(jobs) {
         let out = send(
             &mut session,
             Event::Wake {
                 text: text.into(),
                 sources: Box::new([]),
-                jobs: Box::new([]),
+                jobs: Box::new([job]),
             },
         )
         .unwrap();
         append_emitted(&out, &mut journal);
     }
+    assert!(session.delivered_jobs().is_empty());
+    let replayed = Session::replay_declared(journal.clone()).unwrap();
+    assert!(replayed.delivered_jobs().is_empty());
     let ended = stream_result(&mut session, first_turn, inference(Stop::EndTurn, &[], 10));
     append_emitted(&ended, &mut journal);
     let boundary = send(&mut session, Event::Boundary { turn: first_turn }).unwrap();
@@ -3555,7 +3659,96 @@ fn queued_wakes_keep_unique_turns_and_replay_their_count() {
     assert_eq!(starts, vec![id(1), id(2)]);
     assert_eq!(session.next_turn, Some(id(4)));
     assert_eq!(session.wake_run(), 2);
+    assert_eq!(
+        session.delivered_jobs(),
+        &std::collections::HashSet::from([jobs[0]])
+    );
     same_replayed_state(&session, &journal);
+}
+
+#[test]
+fn wake_attempt_without_start_keeps_its_job_pending() {
+    let job = JobId::parse("01890f47-36b0-7cc4-8000-000000000004").unwrap();
+    let records = [Record::WakeAttempt {
+        at: stamp(),
+        turn: id(1),
+        count: 1,
+        jobs: vec![job],
+    }];
+    let declared = Session::replay_declared(records).unwrap();
+    assert!(declared.delivered_jobs().is_empty());
+}
+
+#[test]
+fn wake_turn_start_without_input_keeps_its_job_pending() {
+    let job = JobId::parse("01890f47-36b0-7cc4-8000-000000000005").unwrap();
+    let records = [
+        Record::WakeAttempt {
+            at: stamp(),
+            turn: id(1),
+            count: 1,
+            jobs: vec![job],
+        },
+        turn_start_record(1),
+    ];
+    let declared = Session::replay_declared(records).unwrap();
+    assert!(declared.delivered_jobs().is_empty());
+}
+
+#[test]
+fn other_turn_input_does_not_deliver_queued_wake_job() {
+    let job = JobId::parse("01890f47-36b0-7cc4-8000-000000000006").unwrap();
+    let records = [
+        turn_start_record(1),
+        user_question(1, None),
+        Record::WakeAttempt {
+            at: stamp(),
+            turn: id(2),
+            count: 1,
+            jobs: vec![job],
+        },
+    ];
+    let declared = Session::replay_declared(records).unwrap();
+    assert!(declared.delivered_jobs().is_empty());
+}
+
+#[test]
+fn queued_wakes_deliver_one_turn_at_a_time_across_replay() {
+    let first = JobId::parse("01890f47-36b0-7cc4-8000-000000000007").unwrap();
+    let second = JobId::parse("01890f47-36b0-7cc4-8000-000000000008").unwrap();
+    let first_input = vec![
+        turn_start_record(1),
+        user_question(1, None),
+        Record::WakeAttempt {
+            at: stamp(),
+            turn: id(2),
+            count: 1,
+            jobs: vec![first],
+        },
+        Record::WakeAttempt {
+            at: stamp(),
+            turn: id(3),
+            count: 2,
+            jobs: vec![second],
+        },
+        turn_end_record(1),
+        turn_start_record(2),
+        user_question(2, Some(entry(1))),
+    ];
+    let declared = Session::replay_declared(first_input.clone()).unwrap();
+    assert_eq!(
+        declared.delivered_jobs(),
+        &std::collections::HashSet::from([first])
+    );
+    let mut both_inputs = first_input;
+    both_inputs.push(turn_end_record(2));
+    both_inputs.push(turn_start_record(3));
+    both_inputs.push(user_question(3, Some(entry(2))));
+    let declared = Session::replay_declared(both_inputs).unwrap();
+    assert_eq!(
+        declared.delivered_jobs(),
+        &std::collections::HashSet::from([first, second])
+    );
 }
 
 #[test]
@@ -4645,6 +4838,7 @@ fn route_assistant(
         kind: EntryKind::Assistant {
             api,
             model: model.into(),
+            provider: None,
             route,
             content: Vec::new(),
             usage: usage(tokens),
@@ -4898,6 +5092,7 @@ fn partial_assistant_measurement_matches_across_reopen() {
         EntryKind::Assistant {
             api: Family::Chat,
             model: "test-model".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: vec![Block::Text {
                 text: "partial answer".into(),
@@ -6581,4 +6776,1100 @@ fn leaf_switch_keeps_the_full_provider_route() {
     let journal = decode_journal(&journal);
     let rebuilt = Session::replay_declared(journal.iter().cloned()).expect("journal replays");
     assert_eq!(rebuilt.requested_model(), Some(&scoped));
+}
+
+// ---- pending mailbox fold ----
+
+/// A declared session whose header names `session_id`, so mail rows can
+/// address it.
+fn mail_header_session(session_id: crate::id::SessionId) -> Session {
+    Session::replay_declared([Record::Session(crate::journal::Header {
+        id: session_id,
+        at: stamp(),
+        workspace: workspace_root(),
+        product: crate::journal::Product::Dal,
+        from: None,
+    })])
+    .unwrap()
+}
+
+/// Notes one buffered mail row through the live transition and returns the
+/// position it took.
+fn note_mail(
+    session: &mut Session,
+    to: crate::id::SessionId,
+    mode: MailMode,
+    text: &str,
+) -> EntryId {
+    let position = session.next_mail_position().unwrap();
+    session
+        .note_buffered_mail(
+            position,
+            &crate::ext::Mail {
+                from: crate::id::SessionId::new_v7(),
+                to,
+                mode,
+                text: text.into(),
+                reply_to: None,
+            },
+        )
+        .unwrap();
+    position
+}
+
+/// One journaled mail row addressed to `to`.
+fn mail_row(to: crate::id::SessionId, mode: MailMode, text: &str) -> Record {
+    Record::Mail(crate::Mail {
+        at: stamp(),
+        from: crate::id::SessionId::new_v7(),
+        to,
+        mode,
+        text: text.into(),
+        reply_to: None,
+    })
+}
+
+/// A plain opening-style user entry with one text part.
+fn plain_user(id: u64, text: &str) -> Record {
+    Record::User(Entry {
+        id: entry(id),
+        parent: None,
+        at: stamp(),
+        kind: EntryKind::User {
+            parts: vec![JournalPart::Text { text: text.into() }],
+        },
+    })
+}
+
+fn delivered(position: u64, text: &str) -> crate::journal::DeliveredMail {
+    crate::journal::DeliveredMail {
+        position: entry(position),
+        text: text.into(),
+    }
+}
+
+#[test]
+fn buffered_next_turn_mail_joins_pending_and_keeps_positions() {
+    let session_id = crate::id::SessionId::parse("01890f47-36b0-7cc4-8000-000000000001").unwrap();
+    let mut session = mail_header_session(session_id);
+    let aside = note_mail(&mut session, session_id, MailMode::Aside, "aside");
+    let first = note_mail(&mut session, session_id, MailMode::NextTurn, "one");
+    let second = note_mail(&mut session, session_id, MailMode::NextTurn, "two");
+    let foreign = note_mail(
+        &mut session,
+        crate::id::SessionId::new_v7(),
+        MailMode::NextTurn,
+        "foreign",
+    );
+    // Positions count every mail row, exactly what `recv` cursors name.
+    assert_eq!(
+        (aside.get(), first.get(), second.get(), foreign.get()),
+        (1, 2, 3, 4)
+    );
+    // Only this session's waiting `NextTurn` rows are pending: an `Aside`
+    // is immediate and a foreign recipient is never this fold's mail.
+    assert_eq!(session.pending_mails(), 2);
+    assert_eq!(session.next_mail_position().unwrap().get(), 5);
+}
+
+#[test]
+fn turn_start_delivers_pending_mail_in_one_record() {
+    let session_id = crate::id::SessionId::parse("01890f47-36b0-7cc4-8000-000000000001").unwrap();
+    let mut session = mail_header_session(session_id);
+    let one = note_mail(&mut session, session_id, MailMode::NextTurn, "one");
+    let two = note_mail(&mut session, session_id, MailMode::NextTurn, "two");
+    assert_eq!(session.pending_mails(), 2);
+
+    let opened = send(&mut session, prompt("question")).unwrap();
+    let turn = match session.phase() {
+        Phase::Opening { turn, .. } => *turn,
+        phase => panic!("prompt did not open a turn: {phase:?}"),
+    };
+    let out = send(&mut session, guard(turn)).unwrap();
+    let emit = out
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Emit(emit) => Some(emit),
+            _ => None,
+        })
+        .expect("the guard emits its batch");
+    // One record carries the whole delivery: the turn start, the opening
+    // input, and the delivery. A crash between input and ack cannot exist
+    // because no second record exists to lose.
+    assert_eq!(emit.records.len(), 3);
+    assert!(matches!(emit.records[0], Record::TurnStart { .. }));
+    let opening_id = match &emit.records[1] {
+        Record::User(entry) => entry.id,
+        other => panic!("expected the opening entry, got {other:?}"),
+    };
+    let (ack_turn, delivery_id, mails) = match &emit.records[2] {
+        Record::MailDelivered {
+            turn, entry, mails, ..
+        } => (*turn, *entry, mails),
+        other => panic!("expected the delivery record, got {other:?}"),
+    };
+    assert_eq!(ack_turn, turn);
+    assert_eq!(delivery_id.get(), opening_id.get() + 1, "fresh entry id");
+    assert_eq!(mails.len(), 2);
+    assert_eq!((mails[0].position, mails[1].position), (one, two));
+    assert_eq!(
+        (mails[0].text.as_ref(), mails[1].text.as_ref()),
+        ("one", "two")
+    );
+    // The batch materializes actual entries: the opening user entry and
+    // the delivery entry parented on it, carrying the texts in FIFO order.
+    let opening = session
+        .tree
+        .entries
+        .get(&opening_id)
+        .expect("the opening entry is materialized");
+    assert_eq!(opening.parent, None);
+    let EntryKind::User { parts } = &opening.kind else {
+        panic!("the opening entry holds user parts");
+    };
+    assert_eq!(parts.len(), 1);
+    assert!(matches!(&parts[0], JournalPart::Text { text } if text.as_ref() == "question"));
+    let delivery = session
+        .tree
+        .entries
+        .get(&delivery_id)
+        .expect("the delivery entry is materialized");
+    assert_eq!(delivery.parent, Some(opening_id));
+    let EntryKind::User { parts } = &delivery.kind else {
+        panic!("the delivery entry holds user parts");
+    };
+    assert!(matches!(&parts[0], JournalPart::Text { text } if text.as_ref() == "one"));
+    assert!(matches!(&parts[1], JournalPart::Text { text } if text.as_ref() == "two"));
+    assert_eq!(
+        session.pending_mails(),
+        0,
+        "delivery drains the pending state"
+    );
+
+    // The journal declares the durable fold: the reserved turn, the mail
+    // rows, the opening user entry, and the delivery entry parented on it.
+    // A running turn's request-in-flight stage is actor state the journal
+    // does not record, so a mid-turn replay is proven on the durable state
+    // those records carry; once the turn completes, both sides of the same
+    // journal derive the identical full public state.
+    let mut journal = vec![
+        Record::Session(crate::journal::Header {
+            id: session_id,
+            at: stamp(),
+            workspace: workspace_root(),
+            product: crate::journal::Product::Dal,
+            from: None,
+        }),
+        mail_row(session_id, MailMode::NextTurn, "one"),
+        mail_row(session_id, MailMode::NextTurn, "two"),
+    ];
+    append_emitted(&opened, &mut journal);
+    append_emitted(&out, &mut journal);
+    let replayed = Session::replay_declared(journal.iter().cloned()).unwrap();
+    assert_eq!(replayed.mail_rows, session.mail_rows);
+    assert_eq!(
+        replayed.next_mail_position(),
+        session.next_mail_position(),
+        "delivered positions stay consumed; the next row continues the count",
+    );
+    assert_eq!(replayed.pending_mail, session.pending_mail);
+    assert_eq!(
+        replayed.next_entry, session.next_entry,
+        "no entry id is reused after a replay",
+    );
+    assert_eq!(replayed.next_turn, session.next_turn);
+    assert_eq!(replayed.tree, session.tree);
+
+    let streamed = stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    append_emitted(&streamed, &mut journal);
+    let ended = send(&mut session, Event::Boundary { turn }).expect("the turn ends");
+    append_emitted(&ended, &mut journal);
+    same_replayed_state(&session, &journal);
+}
+
+#[test]
+fn delivery_record_is_whole_under_every_valid_prefix() {
+    // The crash cut the store cannot prevent: a crash that persists only a
+    // prefix of a batch trusts that prefix line by line (scan_prefix bounds
+    // by the rollback marker when one exists, else by the file length), so
+    // the delivery must survive every record boundary, not just the happy
+    // path. Each boundary prefix replays; across all of them a mail
+    // position is either waiting or materialized exactly once, never both
+    // and never lost; the retry path after the cut is the ordinary live
+    // delivery covered by `turn_start_delivers_pending_mail_in_one_record`.
+    let session_id = crate::id::SessionId::parse("01890f47-36b0-7cc4-8000-000000000001").unwrap();
+    let header = crate::journal::Header {
+        id: session_id,
+        at: stamp(),
+        workspace: workspace_root(),
+        product: crate::journal::Product::Dal,
+        from: None,
+    };
+    let journal = [
+        Record::Session(header),
+        mail_row(session_id, MailMode::NextTurn, "one"),
+        mail_row(session_id, MailMode::NextTurn, "two"),
+        Record::TurnReserved {
+            at: stamp(),
+            turn: id(1),
+        },
+        Record::TurnStart {
+            at: stamp(),
+            turn: id(1),
+        },
+        plain_user(1, "question"),
+        Record::MailDelivered {
+            at: stamp(),
+            turn: id(1),
+            entry: entry(2),
+            mails: vec![delivered(1, "one"), delivered(2, "two")],
+        },
+    ];
+    let expected_pending = [0, 1, 2, 2, 2, 2, 0];
+    for end in 1..=journal.len() {
+        let declared = Session::replay_declared(journal[..end].iter().cloned())
+            .unwrap_or_else(|error| panic!("prefix {end} replays: {error}"));
+        assert_eq!(
+            declared.pending_mails(),
+            expected_pending[end - 1],
+            "prefix {end}"
+        );
+        if end == journal.len() {
+            // Exactly one delivery entry, parented on the opening entry,
+            // carrying the texts in FIFO order.
+            let delivered_entry = declared
+                .tree
+                .entries
+                .get(&entry(2))
+                .expect("the delivery entry is materialized");
+            assert_eq!(delivered_entry.parent, Some(entry(1)));
+            let EntryKind::User { parts } = &delivered_entry.kind else {
+                panic!("the delivery entry holds user parts");
+            };
+            assert_eq!(parts.len(), 2);
+            assert!(matches!(&parts[0], JournalPart::Text { text } if text.as_ref() == "one"));
+            assert!(matches!(&parts[1], JournalPart::Text { text } if text.as_ref() == "two"));
+        } else {
+            assert!(
+                !declared.tree.entries.contains_key(&entry(2)),
+                "prefix {end} materializes no delivery entry"
+            );
+        }
+    }
+
+    // A second record naming a delivered position is a contradiction, so
+    // no replay or retro path can materialize the same mail twice.
+    let duplicated =
+        Session::replay_declared(journal.iter().cloned().chain([Record::MailDelivered {
+            at: stamp(),
+            turn: id(1),
+            entry: entry(3),
+            mails: vec![delivered(1, "one")],
+        }]));
+    assert!(
+        duplicated.is_err(),
+        "a delivered position is never waiting again"
+    );
+}
+
+#[test]
+fn replay_rejects_delivery_records_that_name_unknown_things() {
+    let session_id = crate::id::SessionId::parse("01890f47-36b0-7cc4-8000-000000000001").unwrap();
+    let header = crate::journal::Header {
+        id: session_id,
+        at: stamp(),
+        workspace: workspace_root(),
+        product: crate::journal::Product::Dal,
+        from: None,
+    };
+    let base = [
+        Record::Session(header),
+        mail_row(session_id, MailMode::NextTurn, "waiting"),
+        Record::TurnReserved {
+            at: stamp(),
+            turn: id(1),
+        },
+        Record::TurnStart {
+            at: stamp(),
+            turn: id(1),
+        },
+        plain_user(1, "question"),
+    ];
+    let delivery = |entry_id: EntryId, position: EntryId, turn: TurnId| Record::MailDelivered {
+        at: stamp(),
+        turn,
+        entry: entry_id,
+        mails: vec![delivered(position.get(), "waiting")],
+    };
+    // A position nothing waits under, and a delivery reusing a tree
+    // entry, are contradictions rather than silent gaps or overwrites.
+    assert!(
+        Session::replay_declared(
+            base.iter()
+                .cloned()
+                .chain([delivery(entry(2), entry(9), id(1))])
+        )
+        .is_err()
+    );
+    assert!(
+        Session::replay_declared(
+            base.iter()
+                .cloned()
+                .chain([delivery(entry(1), entry(1), id(1))])
+        )
+        .is_err()
+    );
+    assert!(
+        Session::replay_declared(
+            base.iter()
+                .cloned()
+                .chain([delivery(entry(2), entry(1), id(2))])
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn legacy_journal_mail_stays_pending_without_acks() {
+    let session_id = crate::id::SessionId::parse("01890f47-36b0-7cc4-8000-000000000001").unwrap();
+    let header = crate::journal::Header {
+        id: session_id,
+        at: stamp(),
+        workspace: workspace_root(),
+        product: crate::journal::Product::Dal,
+        from: None,
+    };
+    // A journal written before the record existed replays every `NextTurn`
+    // row addressed here as still waiting: no invented delivery, so the
+    // bound stays conservative and the next turn start delivers for real.
+    let replayed = Session::replay_declared([
+        Record::Session(header),
+        mail_row(session_id, MailMode::NextTurn, "old-one"),
+        mail_row(
+            crate::id::SessionId::new_v7(),
+            MailMode::NextTurn,
+            "foreign",
+        ),
+        mail_row(session_id, MailMode::Aside, "old-aside"),
+        mail_row(session_id, MailMode::NextTurn, "old-two"),
+    ])
+    .unwrap();
+    assert_eq!(replayed.mail_rows, 4);
+    assert_eq!(replayed.pending_mails(), 2);
+}
+
+#[test]
+fn delivery_frees_capacity_without_erasing_retained_rows() {
+    let session_id = crate::id::SessionId::parse("01890f47-36b0-7cc4-8000-000000000001").unwrap();
+    let mut session = mail_header_session(session_id);
+    // The texts the live fold actually owns: delivery acks are checked
+    // byte for byte against the waiting row each position consumed, so
+    // the replayed rows must be these originals, not lookalikes.
+    let waiting: Vec<String> = (0..100).map(|index| format!("waiting-{index}")).collect();
+    for text in &waiting {
+        note_mail(&mut session, session_id, MailMode::NextTurn, text);
+    }
+    // The recipient bound is the fold's pending count, not the retained
+    // row count: the actor refuses sends at this count and accepts below.
+    assert_eq!(session.pending_mails(), 100);
+
+    send(&mut session, prompt("question")).unwrap();
+    let turn = match session.phase() {
+        Phase::Opening { turn, .. } => *turn,
+        phase => panic!("prompt did not open a turn: {phase:?}"),
+    };
+    let out = send(&mut session, guard(turn)).unwrap();
+    assert_eq!(
+        session.pending_mails(),
+        0,
+        "delivery drains the pending state"
+    );
+
+    // The 100 rows stay retained in the journal; only the fold's pending
+    // view drained, so capacity is freed without any erasure, and replay
+    // agrees through the delivery record.
+    let mut journal = vec![Record::Session(crate::journal::Header {
+        id: session_id,
+        at: stamp(),
+        workspace: workspace_root(),
+        product: crate::journal::Product::Dal,
+        from: None,
+    })];
+    for text in &waiting {
+        journal.push(mail_row(session_id, MailMode::NextTurn, text));
+    }
+    append_emitted(&out, &mut journal);
+    let replayed = Session::replay_declared(journal).unwrap();
+    assert_eq!(replayed.mail_rows, 100);
+    assert_eq!(replayed.pending_mails(), 0);
+    assert_eq!(replayed.pending_mail, session.pending_mail);
+    assert_eq!(replayed.tree, session.tree);
+}
+
+#[test]
+fn prompt_expect_idle_mismatch() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let before = session.clone();
+    let mut out = vec![Effect::Reply(Ok(Reply::Done(Output::Nothing)))];
+    let old_out = out.clone();
+    let result = session.step(
+        Event::Command {
+            cmd: Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: "late".into(),
+                }],
+            },
+            by: client(),
+        },
+        stamp(),
+        &mut out,
+    );
+    let Err(Rejection::WrongTurn { expected, actual }) = result else {
+        panic!("an Idle prompt into a running turn must be WrongTurn: {result:?}");
+    };
+    assert_eq!(expected, Expect::Idle);
+    assert_eq!(actual, TurnState::Running { turn });
+    assert_eq!(session, before, "a refused prompt changes nothing");
+    assert_eq!(out, old_out, "a refused prompt emits nothing");
+}
+
+#[test]
+fn prompt_after_turn_mismatch() {
+    let mut session = session();
+    let first = begin(&mut session);
+    send(
+        &mut session,
+        Event::Cancel {
+            scope: CancelScope::Turn(first),
+            partial: None,
+        },
+    )
+    .unwrap();
+    let second = begin(&mut session);
+    send(
+        &mut session,
+        Event::Cancel {
+            scope: CancelScope::Turn(second),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(matches!(session.phase(), Phase::Idle));
+    assert_eq!(session.last_turn, second.get());
+    let before = session.clone();
+    let mut out = vec![Effect::Reply(Ok(Reply::Done(Output::Nothing)))];
+    let old_out = out.clone();
+    let result = session.step(
+        Event::Command {
+            cmd: Command::Prompt {
+                expect: Expect::After(first),
+                content: vec![Part::Text {
+                    text: "stale".into(),
+                }],
+            },
+            by: client(),
+        },
+        stamp(),
+        &mut out,
+    );
+    let Err(Rejection::WrongTurn { expected, actual }) = result else {
+        panic!("a stale After(1) prompt after turn 2 must be WrongTurn: {result:?}");
+    };
+    assert_eq!(expected, Expect::After(first));
+    assert_eq!(
+        actual,
+        TurnState::Idle,
+        "after turn 2 ends the control cell reports the ended (idle) state"
+    );
+    assert_eq!(session, before);
+    assert_eq!(out, old_out);
+}
+
+#[test]
+fn steer_idle_wrong_turn() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    send(
+        &mut session,
+        Event::Cancel {
+            scope: CancelScope::Turn(turn),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(matches!(session.phase(), Phase::Idle));
+    let before = session.clone();
+    let result = send(
+        &mut session,
+        Event::Steer {
+            turn,
+            text: "late".into(),
+        },
+    );
+    let Err(Rejection::WrongTurn { expected, actual }) = result else {
+        panic!("a steer for the just-ended turn must be WrongTurn: {result:?}");
+    };
+    assert_eq!(expected, Expect::After(turn));
+    assert_eq!(actual, TurnState::Idle);
+    assert_eq!(session, before, "a refused steer journals nothing");
+}
+
+fn user_entry_text(entry: &Entry) -> Option<String> {
+    let EntryKind::User { parts } = &entry.kind else {
+        return None;
+    };
+    let mut text = String::new();
+    for part in parts {
+        let JournalPart::Text { text: piece } = part else {
+            continue;
+        };
+        text.push_str(piece);
+    }
+    Some(text)
+}
+
+fn emitted_user_texts(out: &[Effect]) -> Vec<String> {
+    let mut texts = Vec::new();
+    for effect in out {
+        let Effect::Emit(emit) = effect else { continue };
+        for record in &emit.records {
+            let Record::User(entry) = record else {
+                continue;
+            };
+            if let Some(text) = user_entry_text(entry) {
+                texts.push(text);
+            }
+        }
+    }
+    texts
+}
+
+#[test]
+fn two_steers_in_order() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    send(
+        &mut session,
+        Event::Steer {
+            turn,
+            text: "A".into(),
+        },
+    )
+    .unwrap();
+    send(
+        &mut session,
+        Event::Steer {
+            turn,
+            text: "B".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(session.steers_queued(), 2);
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    let first = send(&mut session, Event::Boundary { turn }).unwrap();
+    assert_eq!(session.steers_queued(), 1);
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    let second = send(&mut session, Event::Boundary { turn }).unwrap();
+    assert_eq!(session.steers_queued(), 0);
+    let mut texts = emitted_user_texts(&first);
+    texts.extend(emitted_user_texts(&second));
+    assert_eq!(
+        texts,
+        ["A".to_string(), "B".to_string()],
+        "the two steers journal in order at their boundaries"
+    );
+}
+
+#[test]
+fn steer_keeps_turn_open() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    send(
+        &mut session,
+        Event::Command {
+            cmd: Command::Steer {
+                turn,
+                content: vec![Part::Text {
+                    text: "continue".into(),
+                }],
+            },
+            by: client(),
+        },
+    )
+    .unwrap();
+    let boundary = send(&mut session, Event::Boundary { turn }).unwrap();
+    assert!(
+        boundary
+            .iter()
+            .any(|effect| matches!(effect, Effect::Infer(_)))
+    );
+    assert!(
+        !boundary
+            .iter()
+            .any(|effect| matches!(effect, Effect::Stop { .. })),
+        "the steered turn must not stop at the first boundary"
+    );
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    let close = send(&mut session, Event::Boundary { turn }).unwrap();
+    let emit = close
+        .iter()
+        .find_map(|effect| {
+            if let Effect::Emit(emit) = effect {
+                Some(emit)
+            } else {
+                None
+            }
+        })
+        .expect("the closing boundary emits the turn end");
+    assert!(emit.updates.iter().any(|update| matches!(
+        update,
+        UpdateKind::TurnEnded { turn: ended, stop: Stop::EndTurn } if *ended == turn
+    )));
+    assert!(matches!(
+        emit.records.last(),
+        Some(Record::TurnEnd {
+            stop: TurnEndStop::Done,
+            ..
+        })
+    ));
+    assert!(close.iter().any(|effect| matches!(
+        effect,
+        Effect::Stop { turn: stopped, stop: Stop::EndTurn, .. } if *stopped == turn
+    )));
+}
+
+#[test]
+fn followup_starts_next_turn() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let queued = send(&mut session, follow_up(turn, "next")).unwrap();
+    assert_eq!(queued_turn(&queued), id(2));
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    send(&mut session, Event::Boundary { turn }).unwrap();
+    let next = match session.phase() {
+        Phase::Settling {
+            follow_up: Some((next, _)),
+            ..
+        } => *next,
+        phase => panic!("the queued follow-up must settle behind turn 1: {phase:?}"),
+    };
+    assert_eq!(next, id(2));
+    let out = send(&mut session, guard(next)).unwrap();
+    let mut saw_turn_start = false;
+    let mut saw_user_next = false;
+    for effect in &out {
+        if let Effect::Emit(emit) = effect {
+            saw_turn_start |= emit.records.iter().any(|record| {
+                matches!(
+                    record,
+                    Record::TurnStart { turn: started, .. } if *started == next
+                )
+            });
+            saw_user_next |= emit.records.iter().any(|record| match record {
+                Record::User(entry) => matches!(&entry.kind, EntryKind::User { parts } if parts.iter().any(|part| matches!(part, JournalPart::Text { text } if text.as_ref() == "next"))),
+                _ => false,
+            });
+        }
+    }
+    assert!(saw_turn_start, "turn 2 opens with its own TurnStart");
+    assert!(
+        saw_user_next,
+        "turn 2 starts with the follow-up queued as its User entry"
+    );
+    assert!(matches!(
+        session.phase(),
+        Phase::Running { turn: active, .. } if *active == next
+    ));
+}
+
+#[test]
+fn cancel_resolves_approval() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    send(
+        &mut session,
+        Event::RequestStarted {
+            turn,
+            model: route(),
+            family: Family::Chat,
+        },
+    )
+    .unwrap();
+    let approval = open_request(
+        Some(turn),
+        Question::Approval {
+            tool: "edit_file".into(),
+            preview: crate::request::Preview {
+                title: "edit".into(),
+                body: "change".into(),
+                digest: None,
+            },
+            grant: None,
+            call: None,
+        },
+    );
+    send(
+        &mut session,
+        Event::RequestOpened {
+            request: approval.clone(),
+        },
+    )
+    .unwrap();
+    let out = send(
+        &mut session,
+        Event::Cancel {
+            scope: CancelScope::Turn(turn),
+            partial: None,
+        },
+    )
+    .unwrap();
+    let mut records = Vec::new();
+    let mut updates = Vec::new();
+    for effect in &out {
+        if let Effect::Emit(emit) = effect {
+            records.extend(emit.records.iter().cloned());
+            updates.extend(emit.updates.iter().cloned());
+        }
+    }
+    let resolved = records.iter().find_map(|record| match record {
+        Record::Resolved {
+            request,
+            answer,
+            by,
+            cause,
+            ..
+        } if *request == approval.id => Some((answer.clone(), by.clone(), *cause)),
+        _ => None,
+    });
+    assert_eq!(
+        resolved,
+        Some((
+            Answer::Cancel,
+            ClientId::new("core"),
+            Some(crate::update::ResolutionCause::Cancelled)
+        )),
+        "cancel resolves the open approval as Cancel by core"
+    );
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        UpdateKind::RequestResolved { id, answer: Answer::Cancel, .. } if *id == approval.id
+    )));
+    assert!(matches!(
+        records.last(),
+        Some(Record::TurnEnd {
+            stop: TurnEndStop::Cancelled,
+            ..
+        })
+    ));
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        UpdateKind::TurnEnded { turn: ended, stop: Stop::Cancelled } if *ended == turn
+    )));
+    assert_eq!(session.open_questions, Vec::new());
+}
+
+#[test]
+fn cancel_during_retry_wait() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let waiting = send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Retryable {
+                hint: None,
+                message: "transient".into(),
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        !waiting
+            .iter()
+            .any(|effect| matches!(effect, Effect::Infer(_))),
+        "a retryable failure waits: no resend until the retry event"
+    );
+    let out = send(
+        &mut session,
+        Event::Cancel {
+            scope: CancelScope::Turn(turn),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(out.iter().any(|effect| matches!(
+        effect,
+        Effect::Stop { turn: stopped, stop: Stop::Cancelled, .. } if *stopped == turn
+    )));
+    let emit = out
+        .iter()
+        .find_map(|effect| {
+            if let Effect::Emit(emit) = effect {
+                Some(emit)
+            } else {
+                None
+            }
+        })
+        .expect("cancel journals the cancelled end");
+    assert!(emit.updates.iter().any(|update| matches!(
+        update,
+        UpdateKind::TurnEnded { turn: ended, stop: Stop::Cancelled } if *ended == turn
+    )));
+    let late = send(
+        &mut session,
+        Event::StreamRetry {
+            turn,
+            reminder: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        !late.iter().any(|effect| matches!(effect, Effect::Infer(_))),
+        "no resend after the turn ends cancelled"
+    );
+    assert_eq!(late, [] as [Effect; 0]);
+}
+
+#[test]
+fn compact_job_rejects_prompt() {
+    let mut session = session();
+    send(&mut session, limits(1)).unwrap();
+    let turn = begin(&mut session);
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    send(&mut session, Event::Boundary { turn }).unwrap();
+    assert!(matches!(session.phase(), Phase::Idle));
+    send(
+        &mut session,
+        Event::Command {
+            cmd: Command::Compact { focus: None },
+            by: client(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(session.phase(), Phase::Compacting { .. }));
+    let job = JobId::parse("01890f47-36b0-7cc4-8000-000000000099").unwrap();
+    send(
+        &mut session,
+        Event::JobStarted {
+            job,
+            kind: JobKind::Compaction,
+        },
+    )
+    .unwrap();
+    assert!(matches!(session.phase(), Phase::Compacting { job: Some(active) } if *active == job));
+    let Err(Rejection::Compacting) = send(&mut session, prompt("blocked")) else {
+        panic!("a prompt during manual compaction must be rejected as Compacting");
+    };
+    send(
+        &mut session,
+        Event::Cancel {
+            scope: CancelScope::Job(job),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(session.phase(), Phase::Compacting { .. }),
+        "the job cancel signal stays with the actor; the fold keeps compacting"
+    );
+    let failed = send(
+        &mut session,
+        Event::CompactionSettled {
+            turn: None,
+            outcome: Err("cancelled".into()),
+        },
+    )
+    .unwrap();
+    assert!(failed.iter().any(|effect| matches!(effect, Effect::Emit(emit) if emit.updates.iter().any(|update| matches!(update, UpdateKind::Notice(notice) if notice.kind.as_ref() == "compact.manual_failed")))));
+    send(
+        &mut session,
+        Event::JobSettled {
+            job,
+            outcome: JobOutcome::Exited { code: 0 },
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(session.phase(), Phase::Idle),
+        "settling the compact job returns the session to idle"
+    );
+}
+
+#[test]
+fn length_fails_tool_calls() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let out = stream_result(
+        &mut session,
+        turn,
+        inference(
+            Stop::Length,
+            &[("left", "edit_file"), ("right", "read_file")],
+            20,
+        ),
+    );
+    let mut records = Vec::new();
+    for effect in &out {
+        if let Effect::Emit(emit) = effect {
+            records.extend(emit.records.iter().cloned());
+        }
+    }
+    let mut failures: Vec<(String, Box<str>)> = Vec::new();
+    for record in &records {
+        let Record::ToolResult(entry) = record else {
+            continue;
+        };
+        let EntryKind::ToolResult {
+            call,
+            name,
+            parts,
+            error,
+            ..
+        } = &entry.kind
+        else {
+            continue;
+        };
+        assert!(error, "a length-truncated call journals an error result");
+        let Some(JournalPart::Text { text }) = parts.first() else {
+            panic!("truncated result carries text: {parts:?}")
+        };
+        assert_eq!(
+            text.as_ref(),
+            truncated_args(name).as_ref(),
+            "call {call} gets its exact truncated text"
+        );
+        failures.push((call.as_str().to_string(), text.clone()));
+    }
+    assert_eq!(failures.len(), 2, "both length-stopped calls fail");
+    assert_eq!(failures[0].0, "left");
+    assert_eq!(failures[1].0, "right");
+    assert!(
+        !out.iter()
+            .any(|effect| matches!(effect, Effect::Dispatch { .. })),
+        "neither truncated call runs"
+    );
+    assert!(
+        out.iter().any(|effect| matches!(effect, Effect::Infer(_))),
+        "the next request carries the two failure results"
+    );
+}
+
+#[test]
+fn set_model_resets_attempts() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    send(&mut session, Event::Boundary { turn }).unwrap();
+    assert!(matches!(session.phase(), Phase::Idle));
+    assert!(
+        session.measured_context_tokens().is_some(),
+        "precondition: M1 measured"
+    );
+    let next_route = ModelRoute::Api {
+        family: Family::Chat,
+        model: "other-model".into(),
+        provider: None,
+    };
+    send(
+        &mut session,
+        Event::Command {
+            cmd: Command::SetModel {
+                model: next_route.clone(),
+                save: crate::Save::SessionOnly,
+            },
+            by: client(),
+        },
+    )
+    .unwrap();
+    assert_eq!(session.requested_model(), Some(&next_route));
+    assert_eq!(
+        session.measured_context_tokens(),
+        None,
+        "SetModel drops the stale same-model measurement so the new lifecycle starts fresh"
+    );
+    let turn = begin(&mut session);
+    send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: next_route.clone(),
+            family: Family::Chat,
+            result: Ok(inference(Stop::EndTurn, &[], 7)),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        session
+            .last_usage
+            .as_ref()
+            .map(|(model, tokens, _)| (model.clone(), *tokens)),
+        Some((next_route, 7)),
+        "the M2 failure-turn measurement starts at its own first attempt"
+    );
+}
+
+#[test]
+fn not_shrunk_tries_next() {
+    let mut session = session();
+    send(&mut session, limits(1)).unwrap();
+    let turn = begin(&mut session);
+    let _ = one_read_round(&mut session, turn, "first", 90_000);
+    assert!(
+        matches!(
+            session.phase(),
+            Phase::Running { turn: active, stage: TurnStage::Compacting { .. }, .. }
+            if *active == turn
+        ),
+        "precondition: threshold compaction is pending: {:?}",
+        session.phase()
+    );
+    let before = session.compactions();
+    let out = send(
+        &mut session,
+        Event::CompactionSettled {
+            turn: Some(turn),
+            outcome: Ok(compact_summary(90_000, 95_000)),
+        },
+    )
+    .unwrap();
+    let emit = out
+        .iter()
+        .find_map(|effect| {
+            if let Effect::Emit(emit) = effect {
+                Some(emit)
+            } else {
+                None
+            }
+        })
+        .expect("a non-shrinking result still emits its rejection");
+    assert!(emit.updates.iter().any(|update| matches!(
+        update,
+        UpdateKind::Notice(notice)
+            if notice.kind.as_ref() == "compaction_ended"
+                && notice.text.as_ref()
+                    == "Compaction rejected: the summary did not shrink the context (90000 to 95000 tokens). The old context is kept."
+    )));
+    assert!(
+        !emit
+            .records
+            .iter()
+            .any(|record| matches!(record, Record::Compaction(_))),
+        "a non-shrinking result appends no entry"
+    );
+    assert_eq!(
+        session.compactions(),
+        before,
+        "the counter only moves on a shrink"
+    );
+    assert!(
+        out.iter().any(|effect| matches!(effect, Effect::Infer(_))),
+        "the turn tries the next compactor attempt as a fresh request"
+    );
 }

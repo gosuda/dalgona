@@ -27,9 +27,11 @@ use tokio::sync::Semaphore;
 use tokio_util::task::AbortOnDropHandle;
 
 use super::CARRIED_PREFIX;
+use super::HISTORY_HEADER;
 use super::compact::{BlobStore, HistoryCompactor, ImageHost, PartsSink};
 use super::pipeline::{
-    Budget, Commit, Drawn, Engine, ImageProfile, KnownLetter, Limits, Request, Slot, SourceReader,
+    Budget, Commit, Decline, Drawn, Engine, ImageProfile, KnownLetter, Limits, Request, Slot,
+    SourceReader,
 };
 use super::records::{LetterRecord, journal_input, text_blobs};
 use super::selection::LetterVisibility;
@@ -1960,7 +1962,7 @@ async fn dropped_run_stops_worker_at_next_boundary() {
     let render = limits();
     #[expect(
         clippy::disallowed_methods,
-        reason = "test owns the spawned run and aborts its handle"
+        reason = "test owns the spawned run and awaits its handle"
     )]
     let task = AbortOnDropHandle::new(tokio::spawn({
         let gate = Arc::clone(&gate);
@@ -1984,4 +1986,224 @@ async fn dropped_run_stops_worker_at_next_boundary() {
         "the dropped run reads no further spans after its checkpoint"
     );
     drop(permit);
+}
+
+#[tokio::test]
+async fn cache_prefix_stability() {
+    let session = SessionId::new_v7();
+    let entries = covered();
+    let run_once = |ordinal: u32, session: SessionId| {
+        let (pieces, source) = pieces(&entries);
+        let request = Request::new(
+            session,
+            &entries,
+            (entry(1), entry(2)),
+            ordinal,
+            budget(u64::MAX / 4, 0.7),
+            pieces,
+            Arc::new(source),
+        )
+        .with_carried("S".into());
+        (request, profile(1000))
+    };
+    let (first_request, first_profile) = run_once(1, session);
+    let (result, first) = run(limits(), first_profile, first_request).await;
+    assert!(result.expect("first compaction succeeds").is_some());
+    let first = first.expect("first draw");
+    let (second_request, second_profile) = run_once(1, session);
+    let (result, second) = run(limits(), second_profile, second_request).await;
+    assert!(result.expect("restart succeeds").is_some());
+    let second = second.expect("restart draw");
+    assert_eq!(
+        first.slots, second.slots,
+        "restart keeps byte-equal message parts"
+    );
+    assert_eq!(first.parts_tokens, second.parts_tokens);
+    assert_eq!(
+        first
+            .letters
+            .iter()
+            .map(|letter| letter.png.clone())
+            .collect::<Vec<_>>(),
+        second
+            .letters
+            .iter()
+            .map(|letter| letter.png.clone())
+            .collect::<Vec<_>>(),
+        "restart keeps byte-equal image bytes"
+    );
+    let fork_session = SessionId::new_v7();
+    let (fork_request, fork_profile) = run_once(1, fork_session);
+    let (result, forked) = run(limits(), fork_profile, fork_request).await;
+    assert!(result.expect("fork succeeds").is_some());
+    let forked = forked.expect("fork draw");
+    assert_eq!(
+        first.slots, forked.slots,
+        "fork keeps the same compacted bytes"
+    );
+    let head = match &first.slots[0] {
+        Slot::Text(text) => text.to_string(),
+        Slot::Image(_) => panic!("the first slot is the fixed header text"),
+    };
+    assert_eq!(head, HISTORY_HEADER);
+    let carried = match &first.slots[1] {
+        Slot::Text(text) => text.to_string(),
+        Slot::Image(_) => panic!("the second slot carries the earlier summary"),
+    };
+    assert_eq!(carried, format!("{CARRIED_PREFIX}S"));
+    let labels: Vec<String> = first
+        .slots
+        .iter()
+        .filter_map(|slot| match slot {
+            Slot::Text(text) if text.starts_with("letter://history/") => Some(text.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        first
+            .letters
+            .iter()
+            .map(|letter| format!("letter://{}", letter.record.id()))
+            .collect::<Vec<_>>()
+    );
+    let index = match first.slots.last().expect("index is last") {
+        Slot::Text(text) => text.to_string(),
+        Slot::Image(_) => panic!("the final slot is the index text"),
+    };
+    assert!(
+        index.contains("history images"),
+        "the final index names the image set"
+    );
+    let second_index = match second.slots.last().expect("index is last") {
+        Slot::Text(text) => text.to_string(),
+        Slot::Image(_) => panic!("the final slot is the index text"),
+    };
+    assert_eq!(
+        index, second_index,
+        "the final index is byte-equal across restart"
+    );
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the refusal ladder walks every decline in one fixture"
+)]
+async fn compactor_refusals() {
+    let standard = Limits::standard();
+    assert_eq!(standard.render, Duration::from_secs(30));
+    assert_eq!(standard.chain, Duration::from_secs(120));
+    assert_eq!(standard.png_bytes, 3_000_000);
+    assert_eq!(standard.savings, 0.9);
+    assert_eq!(
+        Decline::NoImageProfile.to_string(),
+        "history: the model does not read images."
+    );
+    assert_eq!(
+        Decline::NothingToDraw.to_string(),
+        "history: no new history to draw."
+    );
+    assert_eq!(
+        Decline::Unprofitable { cost: 10, text: 5 }.to_string(),
+        "history: the images would cost 10 tokens for 5 tokens of text."
+    );
+    assert_eq!(
+        Decline::NoTokenRoom { stay: 1, window: 2 }.to_string(),
+        "history: no room for history images: 1 of 2 tokens stay after compaction."
+    );
+    assert_eq!(
+        Decline::NoSlot { carried: 3, max: 5 }.to_string(),
+        "history: no room for history images: the request already carries 3 of 5 images."
+    );
+    assert_eq!(
+        Decline::PngBudget {
+            need: 2000,
+            limit: 1000
+        }
+        .to_string(),
+        "history: the images need 2000 bytes; the limit is 1000."
+    );
+    assert_eq!(
+        Decline::RenderTimeout { millis: 30_000 }.to_string(),
+        "history: drawing history images timed out after 30000 ms."
+    );
+    assert_eq!(
+        Decline::ChainTimeout { secs: 120 }.to_string(),
+        "history: compaction timed out after 120 s; falling back to text summary."
+    );
+    let entries = covered();
+    let (no_profile_pieces, no_profile_source) = pieces(&entries);
+    let no_profile = Request::new(
+        SessionId::new_v7(),
+        &entries,
+        (entry(1), entry(2)),
+        1,
+        budget(u64::MAX / 4, 0.7),
+        no_profile_pieces,
+        Arc::new(no_profile_source),
+    );
+    let engine = engine(limits());
+    let sink = Arc::new(Recorder::default());
+    let missing = engine
+        .run(
+            no_profile,
+            ImageProfile {
+                cols: 17,
+                rows: 1,
+                cell_w: 8,
+                cell_h: 16,
+                max_images: 0,
+                image_tokens: TOKENS,
+            },
+            Arc::clone(&sink) as Arc<dyn Commit>,
+        )
+        .await;
+    assert_eq!(
+        refusal_text(&missing),
+        "history: no room for history images: the request already carries 0 of 0 images."
+    );
+    let one_turn = vec![user(1, true, "hello"), user(2, false, "world")];
+    let (thin_pieces, thin_source) = pieces(&one_turn);
+    let thin = Request::new(
+        SessionId::new_v7(),
+        &one_turn,
+        (entry(1), entry(2)),
+        1,
+        budget(u64::MAX / 4, 0.7),
+        thin_pieces,
+        Arc::new(thin_source),
+    );
+    let (thin_result, thin_drawn) = run(limits(), profile(10), thin).await;
+    assert_eq!(
+        refusal_text(&thin_result),
+        "history: no new history to draw."
+    );
+    assert!(thin_drawn.is_none());
+    let mut tiny = limits();
+    tiny.png_bytes = 1;
+    let (tiny_result, tiny_drawn) = run(
+        tiny,
+        profile(1000),
+        request(&entries, budget(u64::MAX / 4, 0.7)),
+    )
+    .await;
+    assert!(is_refusal(&tiny_result));
+    assert!(tiny_drawn.is_none());
+    let tiny_text = refusal_text(&tiny_result);
+    assert!(
+        tiny_text.starts_with("history: the images need "),
+        "png-budget refusal names the need: {tiny_text}"
+    );
+    assert!(
+        tiny_text.ends_with(" bytes; the limit is 1."),
+        "png-budget refusal pins the 1-byte limit: {tiny_text}"
+    );
+    let need: usize = tiny_text
+        .strip_prefix("history: the images need ")
+        .and_then(|rest| rest.strip_suffix(" bytes; the limit is 1."))
+        .expect("png-budget shape")
+        .parse()
+        .expect("need parses as bytes");
+    assert!(need > 1, "the first image does not fit the 1-byte budget");
 }

@@ -1,7 +1,7 @@
 //! Bounded replay window of published session updates.
 //!
 //! The session actor owns one [`ReplayRing`] per session and pushes every
-//! update after its journal receipt. The ring keeps the newest gap-free
+//! published update. The ring keeps the newest gap-free
 //! sequence suffix of the current generation within an update-count cap
 //! and a byte cap, where bytes are the update's sonic-rs JSON length. The
 //! newest update always stays, even when it alone exceeds the byte cap.

@@ -3,11 +3,18 @@
 //!
 //! [`request_body`] lowers one [`ModelRequest`] and its composed
 //! [`ThinkingPlan`] to the exact `POST <base>/chat/completions` body. The
-//! members appear in one fixed order, tools keep registration order and never
-//! carry `strict`, and two builds of the same request are equal byte for byte.
+//! members appear in one fixed order, tools keep registration order and carry
+//! `strict: false` when the dialect says so, otherwise omitted, and two builds
+//! of the same request are equal byte for byte.
 //! Tool schemas and tool-call arguments are written from their [`RawJson`]
-//! text, never re-encoded. Tool names, advertised and historical, are written
-//! as provider wire names ([`crate::tool_names`]).
+//! text, never re-encoded; only a [`Dialect`] with its own schema subset
+//! (Moonshot) lowers a schema first. Tool names, advertised and historical,
+//! are written as provider wire names ([`crate::tool_names`]).
+//!
+//! The host-specific facts (the output cap member, the stream options, the
+//! thinking members, the reasoning replay, the schema subset) are the typed
+//! [`Dialect`] of the provider row and model; [`Dialect::STANDARD`] is the
+//! reference body.
 //!
 //! [`ChatDecoder`] turns the data of each SSE event into neutral
 //! [`StreamEvent`]s with the grammar of [`crate::stream`]: deltas, then one
@@ -27,7 +34,8 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use dal_core::{
-    AssistantPart, BlobId, ContextItem, Family, ModelRequest, ModelRoute, Part, RawJson, Usage,
+    AssistantPart, BlobId, ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec, Part,
+    RawJson, Usage,
 };
 use futures::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -42,6 +50,12 @@ use crate::{
     thinking::{ThinkingPlan, WireThinking},
     tool_names::{WIRE_NAME_MAX, wire_name},
 };
+
+mod dialect;
+
+use crate::family::schema::{self, ToolSchemas};
+pub(crate) use dialect::Dialect;
+use dialect::{PromptCacheKey, ReasoningReplay, StreamUsage, Switch, ToolStream};
 
 /// The endpoint path of the family, relative to the provider base URL.
 pub(crate) const ENDPOINT_PATH: &str = "chat/completions";
@@ -100,9 +114,20 @@ struct Body<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     parallel_tool_calls: Option<bool>,
     stream: bool,
-    stream_options: StreamOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<Switch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    tool_stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,6 +152,8 @@ enum Message<'a> {
         content: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<WireCall<'a>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
     },
     Tool {
         tool_call_id: &'a str,
@@ -171,21 +198,31 @@ struct WireTool<'a> {
 struct WireToolFunction<'a> {
     name: Cow<'a, str>,
     description: &'a str,
-    parameters: &'a RawJson,
+    parameters: Cow<'a, RawJson>,
+    /// The strict-sampling flag these rows' sources write as plain `false`;
+    /// `true` never occurs because dal tools carry no strict-sampling request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
 }
 
 /// Lowers `request` to the JSON body of `POST <base>/chat/completions`.
 ///
 /// `thinking` is the plan composed from `request.params`, the hooks, and the
-/// model row; its effort becomes `reasoning_effort` and its temperature
-/// `temperature`, each omitted when the plan has none. `request.cache_key`
-/// becomes `prompt_cache_key`. The system text is a leading system message
-/// unless empty. User messages carry text and `image_url` parts; assistant
-/// messages carry their text parts joined by LF as `content` (`null` without
-/// text) and their calls as `tool_calls` with the raw argument text; reasoning
-/// parts are never sent, and an assistant message with neither text nor calls
-/// is omitted. A tool result becomes one `tool` message with its text parts
-/// joined by LF; the images of a run of consecutive tool results follow in one
+/// model row; its effort becomes `reasoning_effort` (or the `thinking` switch
+/// or `enable_thinking` of a dialect that has one) and its temperature
+/// `temperature`, each omitted when the plan has none.
+/// `request.params.max_output_tokens` becomes the cap
+/// member the `dialect` names, and a request without one writes none.
+/// `request.cache_key` becomes `prompt_cache_key` unless the dialect omits
+/// the member; tools carry `strict: false` and `tool_stream` when the dialect
+/// says so. The system text is a
+/// leading system message unless empty. User messages carry text and
+/// `image_url` parts; assistant messages carry their text parts joined by LF
+/// as `content` (`null` without text) and their calls as `tool_calls` with the
+/// raw argument text; reasoning parts travel as `reasoning_content` only as
+/// the dialect says ([`Dialect`]), and an assistant message with neither text
+/// nor calls is omitted. A tool result becomes one `tool` message with its
+/// text parts joined by LF; the images of a run of consecutive tool results follow in one
 /// user message, each call's images after the text part
 /// `Images from tool call <call_id>.`. Without tools, `tools`, `tool_choice`,
 /// and `parallel_tool_calls` are omitted.
@@ -195,10 +232,12 @@ struct WireToolFunction<'a> {
 /// [`ChatBodyError::NotChat`] for a route other than an `openai_chat` API
 /// route, [`ChatBodyError::UnresolvedBlob`] for a blob part,
 /// [`ChatBodyError::ForeignThinking`] for an Anthropic thinking fragment, and
-/// [`ChatBodyError::Encode`] when the writer fails.
+/// [`ChatBodyError::Encode`] when the writer fails or a tool schema cannot be
+/// lowered to the dialect's subset.
 pub(crate) fn request_body(
     request: &ModelRequest,
     thinking: &ThinkingPlan,
+    dialect: Dialect,
 ) -> Result<Vec<u8>, ChatBodyError> {
     let ModelRoute::Api {
         family: Family::Chat,
@@ -213,41 +252,80 @@ pub(crate) fn request_body(
     let WireThinking::OpenAi { effort } = thinking.wire else {
         return Err(ChatBodyError::ForeignThinking);
     };
+    let lowered = dialect.thinking.lower(effort, thinking.level);
+    let (max_completion_tokens, max_tokens) =
+        dialect.output_cap.lower(request.params.max_output_tokens);
     let has_tools = !request.tools.is_empty();
-    let tools = has_tools.then(|| {
-        request
-            .tools
-            .iter()
-            .map(|tool| WireTool {
-                kind: "function",
-                function: WireToolFunction {
-                    name: wire_name(&tool.name, WIRE_NAME_MAX),
-                    description: &tool.description,
-                    parameters: &tool.parameters,
-                },
-            })
-            .collect()
-    });
+    let tools = has_tools
+        .then(|| {
+            request
+                .tools
+                .iter()
+                .map(|tool| wire_tool(tool, dialect.schemas, dialect.strict_tools.then_some(false)))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     let body = Body {
         model,
-        messages: messages(request)?,
+        messages: messages(request, model, dialect.replay)?,
         tools,
         tool_choice: has_tools.then_some("auto"),
         parallel_tool_calls: has_tools.then_some(true),
         stream: true,
-        stream_options: StreamOptions {
-            include_usage: true,
-        },
-        reasoning_effort: effort,
+        stream_options: matches!(dialect.stream_usage, StreamUsage::Requested).then_some(
+            StreamOptions {
+                include_usage: true,
+            },
+        ),
+        max_completion_tokens,
+        max_tokens,
+        reasoning_effort: lowered.effort,
+        thinking: lowered.thinking,
+        enable_thinking: lowered.enable_thinking,
+        tool_stream: has_tools && matches!(dialect.tool_stream, ToolStream::Sent),
         temperature: thinking.temperature,
-        prompt_cache_key: request.cache_key.as_deref(),
+        prompt_cache_key: matches!(dialect.prompt_cache, PromptCacheKey::Sent)
+            .then_some(request.cache_key.as_deref())
+            .flatten(),
     };
     sonic_rs::to_vec(&body).map_err(|error| ChatBodyError::Encode {
         message: error.to_string(),
     })
 }
 
-fn messages(request: &ModelRequest) -> Result<Vec<Message<'_>>, ChatBodyError> {
+fn wire_tool(
+    tool: &ModelToolSpec,
+    schemas: ToolSchemas,
+    strict: Option<bool>,
+) -> Result<WireTool<'_>, ChatBodyError> {
+    Ok(WireTool {
+        kind: "function",
+        function: WireToolFunction {
+            name: wire_name(&tool.name, WIRE_NAME_MAX),
+            description: &tool.description,
+            parameters: schema::lower(&tool.name, &tool.parameters, schemas).map_err(|error| {
+                ChatBodyError::Encode {
+                    message: error.to_string(),
+                }
+            })?,
+            strict,
+        },
+    })
+}
+
+/// Who wrote an assistant message of the history: this Chat model, or
+/// another model or family, whose reasoning never travels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Author {
+    Own,
+    Other,
+}
+
+fn messages<'a>(
+    request: &'a ModelRequest,
+    model: &str,
+    replay: ReasoningReplay,
+) -> Result<Vec<Message<'a>>, ChatBodyError> {
     let mut messages = Vec::with_capacity(request.context.len() + 1);
     if !request.system.is_empty() {
         messages.push(Message::System {
@@ -264,10 +342,13 @@ fn messages(request: &ModelRequest) -> Result<Vec<Message<'_>>, ChatBodyError> {
             ContextItem::User { parts } => messages.push(Message::User {
                 content: parts.iter().map(content_part).collect::<Result<_, _>>()?,
             }),
-            ContextItem::Assistant {
-                source: _, parts, ..
-            } => {
-                if let Some(message) = assistant(parts) {
+            ContextItem::Assistant { source, parts, .. } => {
+                let author = if source.family == Family::Chat && *source.model == *model {
+                    Author::Own
+                } else {
+                    Author::Other
+                };
+                if let Some(message) = assistant(parts, replay, author) {
                     messages.push(message);
                 }
             }
@@ -325,13 +406,25 @@ fn content_part(part: &Part) -> Result<ContentPart<'_>, ChatBodyError> {
     }
 }
 
-fn assistant(parts: &[AssistantPart]) -> Option<Message<'_>> {
+fn assistant(
+    parts: &[AssistantPart],
+    replay: ReasoningReplay,
+    author: Author,
+) -> Option<Message<'_>> {
     let mut texts: Vec<&str> = Vec::new();
+    let mut reasoning: Vec<&str> = Vec::new();
     let mut tool_calls = Vec::new();
     for part in parts {
         match part {
             AssistantPart::Text { text, .. } => texts.push(text),
-            AssistantPart::Thinking { .. } => {}
+            AssistantPart::Thinking { text, .. } => {
+                if author == Author::Own
+                    && replay != ReasoningReplay::Dropped
+                    && !text.trim().is_empty()
+                {
+                    reasoning.push(text);
+                }
+            }
             AssistantPart::ToolCall {
                 call, name, args, ..
             } => tool_calls.push(WireCall {
@@ -347,9 +440,11 @@ fn assistant(parts: &[AssistantPart]) -> Option<Message<'_>> {
     if texts.is_empty() && tool_calls.is_empty() {
         return None;
     }
+    let reasoning_content = replay.content(&reasoning, &tool_calls);
     Some(Message::Assistant {
         content: (!texts.is_empty()).then(|| texts.join("\n")),
         tool_calls,
+        reasoning_content,
     })
 }
 

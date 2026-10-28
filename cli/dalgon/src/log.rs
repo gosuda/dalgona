@@ -437,6 +437,13 @@ fn open_rotated(log_path: &Path) -> Result<File, LogError> {
 }
 
 /// Restricts the log file to its owner on systems with file modes.
+#[cfg_attr(
+    not(unix),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the Unix implementation can fail and shares this call signature"
+    )
+)]
 fn restrict_to_owner(log_path: &Path, file: &File) -> Result<(), LogError> {
     #[cfg(unix)]
     {

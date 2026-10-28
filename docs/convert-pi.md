@@ -79,7 +79,7 @@ The tool name moves from `name` to its key in `tools`. The schema moves from `pa
 | `ctx.modelRegistry` nested model call | `ctx.models.infer` with `models.infer` in `uses`, or a child session through `ctx.agents.start` and `ctx.agents.wait` | subagent, handoff (child sessions) |
 | `pi.registerFlag`, `registerShortcut` settings | `config = dal.schema(...)` on the plugin and a `[plugin.<name>]` table in `dal.toml`; the handler reads `ctx.config` | permission-gate, mcp |
 | `pi.events` plugin bus | does not port; a handler cannot call another plugin's tool | (not-port table) |
-| stdio MCP servers | `ctx.mcp.call` with `mcp.call` in `uses`, where dal has an MCP client (dalgona ships one); an external bridge program elsewhere | mcp |
+| stdio MCP servers | `ctx.mcp.call` with `mcp.call` in `uses`, where a client is composed into the host; pure dal bundles none, so the call fails closed, and dalgona ships the MCP battery. An external bridge program covers the rest | mcp |
 | project `.pi/extensions` | never loads; plugins come from the data root only | (not-port table) |
 | TypeScript or npm at run time | an external program through `ctx.tools.exec`, or a port of the logic | (not-port table) |
 | `resources_discover` dynamic skills | `skills = {"<name>": dal.skill(description = ..., path = "skills/<name>/SKILL.md")}`, fixed at load; no dynamic discovery | skill-pack |

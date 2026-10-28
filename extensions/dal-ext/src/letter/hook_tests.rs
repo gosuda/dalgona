@@ -555,7 +555,7 @@ async fn well_formed_but_invalid_version_fails_before_any_write() {
     assert_eq!(
         result,
         Err(HookError::Failed {
-            message: "letter record '1' failed validation".into(),
+            message: "letter record '1' with version 2 failed validation".into(),
         }),
         "the invalid row fails closed with the resolver's validation text"
     );
@@ -564,7 +564,7 @@ async fn well_formed_but_invalid_version_fails_before_any_write() {
         tap.notices(),
         [(
             "letter".to_owned(),
-            "letter: skill letters were not persisted: letter record '1' failed validation."
+            "letter: skill letters were not persisted: letter record '1' with version 2 failed validation."
                 .to_owned()
         )]
     );
@@ -587,13 +587,55 @@ async fn invalid_row_beside_valid_rows_appends_nothing() {
     assert_eq!(
         result,
         Err(HookError::Failed {
-            message: "letter record '2' failed validation".into(),
+            message: "letter record '2' with version 2 failed validation".into(),
         })
     );
     assert_eq!(
         tap.ops(),
         [],
         "the valid row is kept and no duplicate id is appended"
+    );
+}
+
+/// An out-of-range id outside `1..=20` never fails the hook: resolution
+/// continues past it to the admitted rows.
+///
+/// The orphan exercises the `stored_letters` skip path (well-formed bodies
+/// outside the admitted bounds are skipped) and, by sharing `validated`, the
+/// numeric `LetterResolver::read` skip-and-continue arm. Byte-exact retention
+/// in the real journal is proven by the integration
+/// `letter_out_of_range_orphan_is_retained_and_resolution_continues`; this
+/// seam has no delete path, so comparing its seed would prove nothing.
+#[tokio::test]
+async fn out_of_range_id_never_fails_and_resolution_continues_past_it() {
+    let registry = registry(&TWO);
+    let assembly = drawn(&registry);
+    let valid = row(&assembly.chunks[0]);
+    let mut orphan_record = record_of(&assembly.chunks[0]);
+    orphan_record.id = "21".into();
+    let orphan = sonic_rs::to_string(&orphan_record).expect("orphan serializes");
+    assert_eq!(
+        orphan_record.validated(),
+        None,
+        "premise: id 21 is outside the admitted 1..=20 window"
+    );
+    let tap = Tap {
+        stored: vec![orphan, valid],
+        ..Tap::default()
+    }
+    .shared();
+    let verdict = run(&tap, registry)
+        .await
+        .expect("an orphan id never fails the hook");
+    assert_eq!(
+        delivered_images(&verdict),
+        2,
+        "the admitted images still resolve past the orphan row"
+    );
+    assert_eq!(
+        tap.ops(),
+        [Op::Blob, Op::Blob, record_op("2")],
+        "only the missing admitted tail is written; the orphan is skipped"
     );
 }
 

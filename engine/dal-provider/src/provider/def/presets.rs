@@ -10,6 +10,7 @@
 
 use dal_core::Family;
 
+use super::super::wire::ModelIdAlias;
 use super::{FamilyPolicy, KeySpec, ProviderDef};
 use crate::provider::{AuthStyle, Shape, Transport};
 
@@ -32,6 +33,10 @@ const fn key_row(
         key: Some(KeySpec { style, env }),
         oauth: None,
         shape: Shape::of_family(family),
+        base_template: &[],
+        wires: &[],
+        session_header: None,
+        model_id_alias: ModelIdAlias::None,
     }
 }
 
@@ -117,6 +122,17 @@ pub(super) const PRESETS: &[ProviderDef] = &[
         "https://api.aimlapi.com/v1",
         &["AIMLAPI_API_KEY"],
     ),
+    // The Alibaba Cloud Model Studio token plan: one OpenAI-compatible
+    // endpoint hosting the plan's model catalog. `QWEN_TOKEN_PLAN_API_KEY`
+    // belongs to the `qwen-token-plan` rows on the same origin; this row
+    // reads its own variable, and one key for both is the documented
+    // explicit `key_env` opt-in.
+    chat(
+        "alibaba-token-plan",
+        "Alibaba Token Plan",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        &["ALIBABA_TOKEN_PLAN_API_KEY"],
+    ),
     chat(
         "ant-ling",
         "Ant Ling",
@@ -128,6 +144,12 @@ pub(super) const PRESETS: &[ProviderDef] = &[
         "Baseten",
         "https://inference.baseten.co/v1",
         &["BASETEN_API_KEY"],
+    ),
+    chat(
+        "cerebras",
+        "Cerebras",
+        "https://api.cerebras.ai/v1",
+        &["CEREBRAS_API_KEY"],
     ),
     chat(
         "charm-hyper",
@@ -195,12 +217,6 @@ pub(super) const PRESETS: &[ProviderDef] = &[
         "http://127.0.0.1:8080/v1",
         &["LLAMA_CPP_API_KEY"],
     ),
-    responses(
-        "meta",
-        "Meta Model API",
-        "https://api.meta.ai/v1",
-        &["MODEL_API_KEY", "META_API_KEY"],
-    ),
     anthropic_bearer(
         "minimax",
         "MiniMax",
@@ -240,6 +256,16 @@ pub(super) const PRESETS: &[ProviderDef] = &[
         "Moonshot (Kimi API)",
         "https://api.moonshot.ai/v1",
         &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+    ),
+    // The mainland endpoint of Moonshot. `MOONSHOT_API_KEY` belongs to the
+    // `moonshot` row on another origin, and a key never reaches a second
+    // origin by default: this row reads its own variable, and an account that
+    // keeps one key for both sets `providers.moonshotai-cn.key_env`.
+    chat(
+        "moonshotai-cn",
+        "Moonshot AI CN",
+        "https://api.moonshot.cn/v1",
+        &["MOONSHOTAI_CN_API_KEY"],
     ),
     chat(
         "nanogpt",
@@ -388,7 +414,12 @@ pub(super) const PRESETS: &[ProviderDef] = &[
         "https://pass.wafer.ai/v1",
         &["WAFER_SERVERLESS_API_KEY"],
     ),
-    responses("xai", "xAI API", "https://api.x.ai/v1", &["XAI_API_KEY"]),
+    chat(
+        "xiaomi",
+        "Xiaomi",
+        "https://api.xiaomimimo.com/v1",
+        &["XIAOMI_API_KEY"],
+    ),
     chat(
         "xiaomi-token-plan-ams",
         "Xiaomi Token Plan (Europe)",
@@ -412,6 +443,26 @@ pub(super) const PRESETS: &[ProviderDef] = &[
         "Yolo-Auto",
         "https://yolo-auto.com/v1",
         &["YOLO_AUTO_API_KEY"],
+    ),
+    // Z.AI: the GLM coding-plan endpoint. The vendor also publishes an
+    // Anthropic-protocol route for the same plan; the pinned primary
+    // contract is the OpenAI-compatible one, so the preset stays a Chat
+    // row and an explicit `api` override is the opt-in path.
+    chat(
+        "zai",
+        "Z.AI",
+        "https://api.z.ai/api/coding/paas/v4",
+        &["ZAI_API_KEY"],
+    ),
+    // The mainland host of the same plan. `ZAI_API_KEY` belongs to the
+    // `zai` row on another origin and `ZHIPU_API_KEY` to `zhipu-coding-plan`
+    // on this host's URL but a different id; this row reads its own
+    // variable, and reuse is the explicit `key_env` opt-in.
+    chat(
+        "zai-coding-cn",
+        "Z.AI Coding CN",
+        "https://open.bigmodel.cn/api/coding/paas/v4",
+        &["ZAI_CODING_CN_API_KEY"],
     ),
     chat(
         "zhipu-coding-plan",

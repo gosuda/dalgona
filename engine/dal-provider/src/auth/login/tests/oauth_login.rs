@@ -11,7 +11,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{mpsc, oneshot},
-    time::timeout,
+    time::{Instant, sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -69,8 +69,8 @@ fn json(body: impl Into<String>) -> Reply {
 fn client_id(provider: &str) -> &'static str {
     find(provider)
         .and_then(|def| def.oauth.as_ref())
-        .map(|oauth| oauth.client_id)
-        .expect("provider with OAuth")
+        .and_then(|oauth| oauth.client_id)
+        .expect("provider with OAuth client id")
 }
 
 struct Fixture {
@@ -79,16 +79,37 @@ struct Fixture {
     seeded: Vec<u8>,
 }
 
+/// A fresh test directory with `auth.json` seeded by one unrelated provider
+/// key, and the exact bytes of that seed for the untouched assertions.
+async fn seeded_dir() -> (TestDir, Vec<u8>) {
+    let dir = TestDir::new();
+    store_api_key(dir.0.join("auth.json"), "openai", String::from("sk-seed"))
+        .await
+        .expect("seed auth.json");
+    let seeded = fs::read(dir.0.join("auth.json")).expect("read seeded auth.json");
+    (dir, seeded)
+}
+
 impl Fixture {
     async fn new(handler: impl Fn(&Request) -> Reply + Send + Sync + 'static) -> Self {
-        let dir = TestDir::new();
-        store_api_key(dir.0.join("auth.json"), "openai", String::from("sk-seed"))
-            .await
-            .expect("seed auth.json");
-        let seeded = fs::read(dir.0.join("auth.json")).expect("read seeded auth.json");
+        let (dir, seeded) = seeded_dir().await;
         Self {
             dir,
             server: Server::start(handler).await.expect("start the test server"),
+            seeded,
+        }
+    }
+
+    /// The same fixture with its issuer server on the IPv6 loopback: the
+    /// sign-in client must reach every vendor endpoint over `::1` while the
+    /// registered callback stays on its IPv4 host and port.
+    async fn new_v6(handler: impl Fn(&Request) -> Reply + Send + Sync + 'static) -> Self {
+        let (dir, seeded) = seeded_dir().await;
+        Self {
+            dir,
+            server: Server::start_v6(handler)
+                .await
+                .expect("start the test server"),
             seeded,
         }
     }
@@ -148,15 +169,25 @@ async fn authorization_event(events: &mut mpsc::Receiver<LoginProgress>) -> Auth
 }
 
 async fn visit(redirect_uri: &str, query: &str) -> String {
+    let path = Url::parse(redirect_uri)
+        .expect("redirect uri")
+        .path()
+        .to_owned();
+    visit_path(redirect_uri, &path, query).await
+}
+
+/// Sends one GET to the callback port of `redirect_uri`, at `path` instead of
+/// the registered one, and returns the whole raw reply. The probes that
+/// triage the strict callback before (and after) the code visit use this to
+/// aim at paths the listener must refuse.
+async fn visit_path(redirect_uri: &str, path: &str, query: &str) -> String {
     let redirect = Url::parse(redirect_uri).expect("redirect uri");
     let port = redirect.port().expect("callback port");
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("connect to the callback listener");
-    let request = format!(
-        "GET {}?{query} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n",
-        redirect.path()
-    );
+    let request =
+        format!("GET {path}?{query} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -535,7 +566,7 @@ async fn device_login_waits_through_pending_polls_then_stores_the_exchanged_cred
         find("openai-codex")
             .and_then(|def| def.oauth.as_ref())
             .and_then(|oauth| oauth.device.as_ref())
-            .map(|device| device.redirect_uri)
+            .and_then(|device| device.redirect_uri)
     );
 }
 
@@ -718,4 +749,398 @@ async fn a_full_progress_channel_stops_a_claude_login_before_it_asks_for_input()
     assert!(fixture.server.requests().is_empty());
     fixture.assert_untouched();
     drop(events);
+}
+
+#[tokio::test]
+async fn radius_browser_login_exchanges_and_persists_oauth_credentials() {
+    let fixture = Fixture::new(|request| match request.path() {
+        "/radius/v1/oauth" => {
+            let host = request.header("host").expect("loopback host");
+            json(format!(
+                r#"{{"authorizationEndpoint":"http://{host}/authorize"}}"#
+            ))
+        }
+        "/radius/v1/oauth/token" => json(
+            r#"{"access_token":"radius-access","refresh_token":"radius-refresh","expires_in":3600}"#,
+        ),
+        _ => Reply::Json(404, String::from("{}")),
+    })
+    .await;
+    let site = fixture.site();
+    let cancel = CancellationToken::new();
+    let (io, mut events) = LoginIo::channel(None, cancel.clone());
+    let driver = async {
+        if let Ok(Some(LoginProgress::OpenUrl { url })) =
+            timeout(Duration::from_millis(500), events.recv()).await
+        {
+            let auth = authorization(&url);
+            assert!(url.contains("response_type=code"));
+            assert!(url.contains("client_id=pi-gateway"));
+            assert!(url.contains("handoff=url"));
+            let reply = visit(
+                &auth.redirect_uri,
+                &format!("code=radius-code&state={}", auth.state),
+            )
+            .await;
+            assert!(reply.starts_with("HTTP/1.1 200"), "callback reply: {reply}");
+        }
+    };
+    let (result, ()) = drive("radius", Method::Browser, io, &site, driver).await;
+    let credential = result.expect("Radius browser login");
+    assert!(matches!(
+        credential,
+        Credential::OAuth(OAuthCredential { .. })
+    ));
+    assert!(matches!(
+        fixture.stored("radius"),
+        Some(Credential::OAuth(OAuthCredential { .. }))
+    ));
+}
+
+#[tokio::test]
+async fn openrouter_browser_login_exchanges_and_persists_an_api_key() {
+    let fixture = Fixture::new(|request| match request.path() {
+        "/openrouter/api/v1/auth/keys" => json(r#"{"key":"openrouter-durable-key"}"#),
+        _ => Reply::Json(404, String::from("{}")),
+    })
+    .await;
+    let site = fixture.site();
+    let cancel = CancellationToken::new();
+    let (io, mut events) = LoginIo::channel(None, cancel.clone());
+    let driver = async {
+        if let Ok(Some(LoginProgress::OpenUrl { url })) =
+            timeout(Duration::from_millis(500), events.recv()).await
+        {
+            let authorization = Url::parse(&url).expect("OpenRouter authorization URL");
+            let callback = authorization
+                .query_pairs()
+                .find_map(|(key, value)| (key == "callback_url").then(|| value.into_owned()))
+                .expect("callback_url");
+            let challenge = authorization
+                .query_pairs()
+                .find_map(|(key, value)| (key == "code_challenge").then(|| value.into_owned()))
+                .expect("code_challenge");
+            assert!(
+                authorization
+                    .query_pairs()
+                    .all(|(key, _)| key != "client_id")
+            );
+            assert!(authorization.query_pairs().all(|(key, _)| key != "state"));
+            assert_eq!(challenge.len(), 43);
+            let reply = visit(&callback, "code=openrouter-code").await;
+            assert!(reply.starts_with("HTTP/1.1 200"), "callback reply: {reply}");
+        }
+    };
+    let (result, ()) = drive("openrouter", Method::Browser, io, &site, driver).await;
+    assert_eq!(
+        result.expect("OpenRouter browser login"),
+        Credential::ApiKey {
+            key: SecretString::from("openrouter-durable-key")
+        }
+    );
+    assert_eq!(
+        fixture.stored("openrouter"),
+        Some(Credential::ApiKey {
+            key: SecretString::from("openrouter-durable-key")
+        })
+    );
+}
+
+#[tokio::test]
+async fn cancelling_radius_browser_login_before_callback_writes_nothing() {
+    let fixture = Fixture::new(|request| {
+        if request.path() == "/radius/v1/oauth" {
+            let host = request.header("host").expect("loopback host");
+            json(format!(
+                r#"{{"authorizationEndpoint":"http://{host}/authorize"}}"#
+            ))
+        } else {
+            Reply::Hold
+        }
+    })
+    .await;
+    let site = fixture.site();
+    let cancel = CancellationToken::new();
+    let (io, mut events) = LoginIo::channel(None, cancel.clone());
+    let driver = async {
+        let _ = timeout(Duration::from_millis(500), events.recv()).await;
+        cancel.cancel();
+    };
+    let (result, ()) = drive("radius", Method::Browser, io, &site, driver).await;
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    fixture.assert_untouched();
+}
+
+#[tokio::test]
+async fn cancelling_openrouter_browser_login_before_callback_writes_nothing() {
+    let fixture = Fixture::new(|_| Reply::Hold).await;
+    let site = fixture.site();
+    let cancel = CancellationToken::new();
+    let (io, mut events) = LoginIo::channel(None, cancel.clone());
+    let driver = async {
+        let _ = timeout(Duration::from_millis(500), events.recv()).await;
+        cancel.cancel();
+    };
+    let (result, ()) = drive("openrouter", Method::Browser, io, &site, driver).await;
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    fixture.assert_untouched();
+}
+
+#[tokio::test]
+async fn radius_device_login_polls_and_persists_oauth_credentials() {
+    let fixture = Fixture::new(|request| match request.path() {
+        "/radius/v1/oauth/device" => json(
+            r#"{"device_code":"radius-device","user_code":"RADIUS-1234","verification_uri":"https://radius.pi.dev/device","expires_in":300,"interval":1}"#,
+        ),
+        "/radius/v1/oauth/token" => json(
+            r#"{"access_token":"radius-device-access","refresh_token":"radius-device-refresh","expires_in":3600}"#,
+        ),
+        _ => Reply::Json(404, String::from("{}")),
+    })
+    .await;
+    let site = fixture.site();
+    let cancel = CancellationToken::new();
+    let (io, mut events) = LoginIo::channel(None, cancel.clone());
+    let driver = async {
+        let event = timeout(Duration::from_millis(500), events.recv())
+            .await
+            .expect("device progress")
+            .expect("device login remains active");
+        assert!(matches!(event, LoginProgress::ShowCode { .. }));
+    };
+    let (result, ()) = drive("radius", Method::Device, io, &site, driver).await;
+    let credential = result.expect("Radius device login");
+    assert!(matches!(
+        credential,
+        Credential::OAuth(OAuthCredential { .. })
+    ));
+    assert!(matches!(
+        fixture.stored("radius"),
+        Some(Credential::OAuth(OAuthCredential { .. }))
+    ));
+}
+
+const RADIUS_DISCOVERY: &str = "/radius/v1/oauth";
+const RADIUS_TOKEN: &str = "/radius/v1/oauth/token";
+const OPENROUTER_KEYS: &str = "/openrouter/api/v1/auth/keys";
+
+fn radius_discovery(request: &Request) -> Reply {
+    let host = request.header("host").expect("loopback host");
+    json(format!(
+        r#"{{"authorizationEndpoint":"http://{host}/authorize"}}"#
+    ))
+}
+
+fn radius_held_exchange_server() -> impl Fn(&Request) -> Reply + Send + Sync + 'static {
+    |request| match request.path() {
+        RADIUS_DISCOVERY => radius_discovery(request),
+        RADIUS_TOKEN => Reply::Hold,
+        _ => Reply::Json(404, String::from("{}")),
+    }
+}
+
+fn radius_completing_server() -> impl Fn(&Request) -> Reply + Send + Sync + 'static {
+    |request| match request.path() {
+        RADIUS_DISCOVERY => radius_discovery(request),
+        RADIUS_TOKEN => json(
+            r#"{"access_token":"radius-access","refresh_token":"radius-refresh","expires_in":3600}"#,
+        ),
+        _ => Reply::Json(404, String::from("{}")),
+    }
+}
+
+fn openrouter_held_exchange_server() -> impl Fn(&Request) -> Reply + Send + Sync + 'static {
+    |request| match request.path() {
+        OPENROUTER_KEYS => Reply::Hold,
+        _ => Reply::Json(404, String::from("{}")),
+    }
+}
+
+/// Polls until nothing accepts the callback port of `redirect_uri` anymore:
+/// an aborted callback listener closes its socket, so connects start failing.
+/// The abort lands asynchronously, hence the bounded retry on a monotonic
+/// deadline instead of one connect.
+async fn assert_callback_port_released(redirect_uri: &str) {
+    let redirect = Url::parse(redirect_uri).expect("redirect uri");
+    let port = redirect.port().expect("callback port");
+    let deadline = Instant::now() + GUARD;
+    while TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the callback listener never released port {port}"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The strict Radius callback triages every visitor: a stray path draws `404`
+/// and a codeless visit to the registered path draws `400` while the listener
+/// stays up for the real code, whose visit draws `200`. While the one code
+/// exchange pends on a held token endpoint, repeats of the same callback draw
+/// `409 Conflict` instead of a second exchange, a stale state draws `400`,
+/// and a stray path `404`. Cancelling then aborts the listener, releases its
+/// port, and leaves `auth.json` byte identical.
+#[tokio::test]
+async fn duplicate_radius_callbacks_conflict_while_the_exchange_pends_and_cancel_releases_the_port()
+{
+    let mut fixture = Fixture::new_v6(radius_held_exchange_server()).await;
+    let site = fixture.site();
+    let cancel = CancellationToken::new();
+    let (io, mut events) = LoginIo::channel(None, cancel.clone());
+    let server = &mut fixture.server;
+    let driver = async {
+        let auth = authorization_event(&mut events).await;
+        assert!(auth.redirect_uri.starts_with("http://127.0.0.1:"));
+        assert!(auth.redirect_uri.ends_with("/oauth/callback"));
+
+        let stray = visit_path(&auth.redirect_uri, "/elsewhere", "code=sneaky&state=stale").await;
+        assert!(
+            stray.starts_with("HTTP/1.1 404"),
+            "stray path reply: {stray}"
+        );
+        let codeless = visit(&auth.redirect_uri, &format!("state={}", auth.state)).await;
+        assert!(
+            codeless.starts_with("HTTP/1.1 400"),
+            "codeless reply: {codeless}"
+        );
+        let valid = visit(
+            &auth.redirect_uri,
+            &format!("code=radius-code&state={}", auth.state),
+        )
+        .await;
+        assert!(valid.starts_with("HTTP/1.1 200"), "valid reply: {valid}");
+
+        server.next_request_to(RADIUS_TOKEN).await;
+        let repeat = format!("code=radius-code&state={}", auth.state);
+        let first = visit(&auth.redirect_uri, &repeat).await;
+        assert!(
+            first.starts_with("HTTP/1.1 409"),
+            "first repeat reply: {first}"
+        );
+        let second = visit(&auth.redirect_uri, &repeat).await;
+        assert!(
+            second.starts_with("HTTP/1.1 409"),
+            "second repeat reply: {second}"
+        );
+        let stale = visit(&auth.redirect_uri, "code=radius-code&state=forged").await;
+        assert!(
+            stale.starts_with("HTTP/1.1 400"),
+            "stale repeat reply: {stale}"
+        );
+        let stray_repeat = visit_path(&auth.redirect_uri, "/elsewhere", "code=radius-code").await;
+        assert!(
+            stray_repeat.starts_with("HTTP/1.1 404"),
+            "stray repeat reply: {stray_repeat}"
+        );
+
+        cancel.cancel();
+        auth
+    };
+    let (result, auth) = drive("radius", Method::Browser, io, &site, driver).await;
+
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    assert_eq!(
+        fixture.server.requests_to(RADIUS_TOKEN).len(),
+        1,
+        "the held exchange never repeats"
+    );
+    assert!(fixture.stored("radius").is_none());
+    fixture.assert_untouched();
+    assert_callback_port_released(&auth.redirect_uri).await;
+}
+
+/// A callback whose state does not match this attempt is refused with `400`
+/// on the wire and fails the whole sign-in with `StateMismatch` before any
+/// exchange or store write.
+#[tokio::test]
+async fn a_radius_callback_with_a_mismatched_state_answers_400_and_fails_the_login() {
+    let fixture = Fixture::new_v6(radius_completing_server()).await;
+    let site = fixture.site();
+    let (io, mut events) = LoginIo::channel(None, CancellationToken::new());
+    let driver = async {
+        let auth = authorization_event(&mut events).await;
+        let reply = visit(&auth.redirect_uri, "code=radius-code&state=forged").await;
+        assert!(
+            reply.starts_with("HTTP/1.1 400"),
+            "state refusal reply: {reply}"
+        );
+    };
+    let (result, ()) = drive("radius", Method::Browser, io, &site, driver).await;
+
+    assert!(matches!(result, Err(ProviderError::StateMismatch)));
+    assert!(fixture.server.requests_to(RADIUS_TOKEN).is_empty());
+    assert!(fixture.stored("radius").is_none());
+    fixture.assert_untouched();
+}
+
+/// `OpenRouter` echoes no state, so the unguessable per-attempt path is the
+/// only thing that identifies the attempt: repeats on that path conflict with
+/// `409` while the one key exchange pends, any other path draws `404`, and
+/// cancelling releases the ephemeral port with nothing stored.
+#[tokio::test]
+async fn duplicate_openrouter_callbacks_conflict_while_the_exchange_pends_and_cancel_releases_the_port()
+ {
+    let mut fixture = Fixture::new_v6(openrouter_held_exchange_server()).await;
+    let site = fixture.site();
+    let cancel = CancellationToken::new();
+    let (io, mut events) = LoginIo::channel(None, cancel.clone());
+    let server = &mut fixture.server;
+    let driver = async {
+        let url = match next_event(&mut events).await {
+            LoginProgress::OpenUrl { url } => url,
+            other => panic!("expected the authorization URL, got {other:?}"),
+        };
+        let authorization = Url::parse(&url).expect("OpenRouter authorization URL");
+        assert!(authorization.query_pairs().all(|(key, _)| key != "state"));
+        let callback = authorization
+            .query_pairs()
+            .find_map(|(key, value)| (key == "callback_url").then(|| value.into_owned()))
+            .expect("callback_url");
+        assert!(callback.starts_with("http://127.0.0.1:"));
+        assert!(callback.contains("/oauth/callback/"));
+
+        let stray = visit_path(&callback, "/oauth/callback/not-this-attempt", "code=sneaky").await;
+        assert!(
+            stray.starts_with("HTTP/1.1 404"),
+            "stray path reply: {stray}"
+        );
+        let valid = visit(&callback, "code=openrouter-code").await;
+        assert!(valid.starts_with("HTTP/1.1 200"), "valid reply: {valid}");
+
+        server.next_request_to(OPENROUTER_KEYS).await;
+        let first = visit(&callback, "code=openrouter-code").await;
+        assert!(
+            first.starts_with("HTTP/1.1 409"),
+            "first repeat reply: {first}"
+        );
+        let second = visit(&callback, "code=openrouter-code").await;
+        assert!(
+            second.starts_with("HTTP/1.1 409"),
+            "second repeat reply: {second}"
+        );
+        let stray_repeat = visit_path(
+            &callback,
+            "/oauth/callback/not-this-attempt",
+            "code=openrouter-code",
+        )
+        .await;
+        assert!(
+            stray_repeat.starts_with("HTTP/1.1 404"),
+            "stray repeat reply: {stray_repeat}"
+        );
+
+        cancel.cancel();
+        callback
+    };
+    let (result, callback) = drive("openrouter", Method::Browser, io, &site, driver).await;
+
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    assert_eq!(
+        fixture.server.requests_to(OPENROUTER_KEYS).len(),
+        1,
+        "the held exchange never repeats"
+    );
+    assert!(fixture.stored("openrouter").is_none());
+    fixture.assert_untouched();
+    assert_callback_port_released(&callback).await;
 }

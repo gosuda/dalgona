@@ -403,6 +403,7 @@ fn check_family_wire_names() {
         (Family::GoogleGenerativeAi, "google-generative-ai"),
         (Family::GoogleVertex, "google-vertex"),
         (Family::GoogleGeminiCli, "google-gemini-cli"),
+        (Family::GoogleCloudCodeAssist, "google-cloud-code-assist"),
         (Family::GoogleAntigravity, "google-antigravity"),
         (Family::Mistral, "mistral"),
         (Family::Ollama, "ollama"),
@@ -529,6 +530,40 @@ fn api_route_empty_model_decodes_with_journal_holding_nonempty_rule() {
             model: "".into(),
             provider: None
         }
+    );
+}
+
+// The local Gemini CLI subprocess and native Cloud Code Assist are separate
+// families: every route prefix finds its own family, and a stored route reads
+// back as the family that wrote it, never as the other.
+#[test]
+fn gemini_cli_and_cloud_code_assist_families_never_read_as_each_other() {
+    for family in Family::ALL {
+        assert_eq!(
+            Family::from_route_prefix(family.route_prefix()),
+            Some(family),
+            "{family:?}"
+        );
+    }
+    assert_eq!(
+        Family::from_route_prefix("google-gemini-cli"),
+        Some(Family::GoogleGeminiCli)
+    );
+    assert_eq!(
+        Family::from_route_prefix("google-cloud-code-assist"),
+        Some(Family::GoogleCloudCodeAssist)
+    );
+    let route = |family| ModelRoute::Api {
+        family,
+        model: "gemini-3-pro".into(),
+        provider: None,
+    };
+    let local = route(Family::GoogleGeminiCli);
+    let native = route(Family::GoogleCloudCodeAssist);
+    assert!(!local.same_model(&native));
+    assert_ne!(
+        local.family_qualified_reference(),
+        native.family_qualified_reference()
     );
 }
 

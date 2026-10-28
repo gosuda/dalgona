@@ -150,9 +150,15 @@ fn phase_table_is_closed() -> TestResult {
     for op in NativeOp::ALL.map(OpId::Native).into_iter().chain([export]) {
         let name = op.to_string();
         let forward = name == "models.forward";
-        assert!(Phase::Model.permits(&op), "{name}");
+        let judge = matches!(name.as_str(), "judge.ask" | "judge.batch");
+        assert_eq!(Phase::Model.permits(&op), !judge, "{name}");
         for phase in [Phase::Tool, Phase::Command, Phase::Eval] {
-            assert_eq!(phase.permits(&op), !forward, "{phase:?} {name}");
+            let expected = if judge {
+                matches!(phase, Phase::Eval)
+            } else {
+                !forward
+            };
+            assert_eq!(phase.permits(&op), expected, "{phase:?} {name}");
         }
         for event in observers {
             let allowed = state.contains(&name.as_str());

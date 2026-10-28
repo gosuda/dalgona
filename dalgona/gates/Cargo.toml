@@ -11,26 +11,40 @@ autoexamples = false
 autobenches = false
 autotests = false
 
+[features]
+default = []
+test-support = ["dalgon/test-support"]
+
 [dependencies]
 dalgon = { workspace = true, features = ["tui"] }
 dalgona = { path = "../dalgona" }
 dal-agent.workspace = true
 dal-core.workspace = true
 sonic-rs.workspace = true
+dal-wire.workspace = true
 uuid = { version = "=1.28.0", features = ["v7"] }
+tokio = { workspace = true, features = ["io-util", "net", "process", "rt", "sync", "time"] }
 
 [dev-dependencies]
 dalgona-batteries = { path = "../dalgona-batteries" }
 dal-provider.workspace = true
 dal-tui.workspace = true
-dal-wire.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "test-util", "time"] }
 proptest = "=1.12.0"
 toml.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true }
+rustix = { workspace = true, features = ["pty", "termios"] }
+
+[target.'cfg(windows)'.dependencies]
+conpty-oxide.workspace = true
+process-wrap.workspace = true
+
+[[bin]]
+name = "dalgona-pty-host"
+path = "src/bin/pty-host.rs"
+required-features = ["test-support"]
 
 [[test]]
 name = "dalgona-workspace-graph"

@@ -5,19 +5,22 @@ use super::wire::{
 };
 use super::wire_entries::{
     AllowAlwaysWire, ApprovalWire, ArchiveWire, AssistantWire, BeforeRequestMutWire, BootWire,
-    BranchSummaryWire, CompactionWire, ExtWire, GrantGivenWire, InferredWire, JobWire, LabelWire,
-    LeafWire, MailRecordWire, ModeValueWire, ModeWire, ModelRouteWire, ModelWire, NameWire,
-    PrivateEndWire, PrivateLoopWire, PrivateStartWire, ReminderWire, ResolutionCauseWire,
-    ResolvedWire, RouteWire, RuleFiredWire, ScopedGrantEndedWire, ScopedGrantWire, SessionWire,
-    SourceWire, ThinkingWire, ToolPromotedWire, ToolResultWire, ToolStartWire, TurnEndWire,
-    TurnStartWire, UserWire, WakeAttemptWire,
+    BranchSummaryWire, CompactionWire, DeliveredMailWire, ExtWire, GrantGivenWire, InferredWire,
+    JobWire, LabelWire, LeafWire, MailDeliveredWire, MailRecordWire, ModeValueWire, ModeWire,
+    ModelRouteWire, ModelWire, NameWire, PrivateEndWire, PrivateLoopWire, PrivateStartWire,
+    ReminderWire, ResolutionCauseWire, ResolvedWire, RouteWire, RuleFiredWire,
+    ScopedGrantEndedWire, ScopedGrantWire, SessionWire, SourceWire, ThinkingWire, ToolPromotedWire,
+    ToolResultWire, ToolStartWire, TurnEndWire, TurnStartWire, UserWire, WakeAttemptWire,
 };
 use std::io;
 
-use super::{EncodeError, Entry, EntryKind, JobEvent, ModelRoute, Record, RouteError};
+use super::{
+    AssistantRoute, EncodeError, Entry, EntryKind, JobEvent, ModelRoute, Record, RouteError,
+};
 
 /// Writes one compact line with the format version first, followed by the
-/// record's declared member order and one LF. Reservations require format 2.
+/// record's declared member order and one LF. [`Record::format`] picks the
+/// version.
 ///
 /// # Errors
 /// Returns [`EncodeError::Json`] when a member fails to serialize,
@@ -49,12 +52,7 @@ pub(crate) fn encoded_len(record: &Record) -> Result<usize, EncodeError> {
 }
 
 fn write_line(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
-    let prefix = if matches!(record, Record::TurnReserved { .. }) {
-        b"{\"v\":2,".as_slice()
-    } else {
-        b"{\"v\":1,".as_slice()
-    };
-    out.write_all(prefix).map_err(|e| io_to_json_error(&e))?;
+    write!(out, "{{\"v\":{},", record.format()).map_err(|e| io_to_json_error(&e))?;
     let dropped = {
         let mut adapter = BodyWithoutOpeningBrace::new(out);
         encode_body(record, &mut adapter)?;
@@ -187,7 +185,8 @@ fn encode_body(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeErr
         | Record::Resolved { .. }
         | Record::BeforeRequestMut { .. }
         | Record::ToolPromoted { .. }
-        | Record::WakeAttempt { .. } => encode_control(record, out),
+        | Record::WakeAttempt { .. }
+        | Record::MailDelivered { .. } => encode_control(record, out),
         Record::AllowAlways { .. }
         | Record::GrantGiven { .. }
         | Record::ScopedGrant { .. }
@@ -232,6 +231,7 @@ fn encode_assistant_entry(entry: &Entry, out: &mut dyn io::Write) -> Result<(), 
     let EntryKind::Assistant {
         api,
         model,
+        provider,
         content,
         usage,
         stop,
@@ -243,6 +243,22 @@ fn encode_assistant_entry(entry: &Entry, out: &mut dyn io::Write) -> Result<(), 
     };
     if model.is_empty() {
         return Err(EncodeError::EmptyModel);
+    }
+    if let Some(provider) = provider {
+        if provider.is_empty() {
+            return Err(EncodeError::EmptyProvider);
+        }
+        if matches!(
+            route,
+            Some(AssistantRoute::Synthetic | AssistantRoute::Harness)
+        ) {
+            return Err(EncodeError::Json {
+                message: format!(
+                    "member `provider` `{provider}` cannot appear with synthetic or harness route"
+                )
+                .into(),
+            });
+        }
     }
     if let Some(route) = route {
         route.check_id(model).map_err(EncodeError::InvalidRoute)?;
@@ -258,6 +274,7 @@ fn encode_assistant_entry(entry: &Entry, out: &mut dyn io::Write) -> Result<(), 
             at: TsWire(&entry.at),
             api: *api,
             model: model.as_ref(),
+            provider: provider.as_deref(),
             content: AssistantBlocksWire(content),
             usage: UsageWire::new(usage)?,
             stop: AssistantStopWire(stop),
@@ -572,8 +589,38 @@ fn encode_control(record: &Record, out: &mut dyn io::Write) -> Result<(), Encode
         Record::BeforeRequestMut { .. } => encode_request_mut(record, out),
         Record::ToolPromoted { .. } => encode_tool_promoted(record, out),
         Record::WakeAttempt { .. } => encode_wake_attempt(record, out),
+        Record::MailDelivered { .. } => encode_mail_delivered(record, out),
         _ => unreachable!("the encode_body index routes only encode_control kinds here"),
     }
+}
+
+fn encode_mail_delivered(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let Record::MailDelivered {
+        at,
+        turn,
+        entry,
+        mails,
+    } = record
+    else {
+        return Err(EncodeError::MismatchedKind);
+    };
+    let mails: Vec<DeliveredMailWire> = mails
+        .iter()
+        .map(|mail| DeliveredMailWire {
+            position: mail.position,
+            text: mail.text.as_ref(),
+        })
+        .collect();
+    encode_json(
+        &MailDeliveredWire {
+            r#type: "mail_delivered",
+            at: TsWire(at),
+            turn: *turn,
+            entry: *entry,
+            mails: &mails,
+        },
+        out,
+    )
 }
 
 fn encode_resolved(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {

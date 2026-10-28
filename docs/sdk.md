@@ -36,7 +36,19 @@ Subscribe before submitting a prompt. Handle a rejected submission, a closed sub
 
 ## Store extension state
 
-In saved sessions, file-backed extensions use the session sidecar service for small private values. Sidecars are unavailable in ephemeral sessions, including the example above. Names must contain 1 to 64 bytes of lowercase ASCII letters, digits, `.`, `_`, or `-`. They must start with a letter or digit. Sidecar files stay inside the owning extension's session directory. Writes are atomic.
+In saved sessions, file-backed extensions use the session sidecar service for small private values. Sidecars are unavailable in ephemeral sessions, including the example above. Names must contain 1 to 64 bytes of lowercase ASCII letters, digits, `.`, `_`, or `-`. They must start with a letter or digit. Sidecar files stay inside the owning extension's session directory. Writes are atomic. The `judge` service lets a cell ask the session judge a question.
+
+## Exchange waiting mail between sessions
+
+The shared agents service carries mailbox messages for dal and composed dalgona. There is one mechanism, not one per product.
+
+Declare only the agents operations the caller needs. The host mints the caller identity and grants that service. A caller uses the capability-scoped services handle. It never writes the journal directly.
+
+A recipient holds at most 100 waiting `NextTurn` messages. Delivered messages stay as history and do not count toward that bound. The next eligible user turn consumes waiting messages and writes them as turn input in one durable journal record. A new message can queue after that delivery.
+
+Reads use a cursor and leave history in place. Reopening the session revalidates the delivery record. A full mailbox refuses with `Full` and writes no journal row. A missing or finished recipient answers `Gone`. A finished child has no promise of delivery.
+
+Name the mode with `MailMode::NextTurn` and read the answer from `Receipt` (`Buffered`, `Full`, `Gone`). The bound is `MAILBOX_WAITING_LIMIT`.
 
 ## Next
 

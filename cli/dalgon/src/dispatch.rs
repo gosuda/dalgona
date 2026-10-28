@@ -11,8 +11,6 @@ use dal_agent::{Env, GrantStore, Host, Product};
 use dal_core::{ClientId, Config, Name, Origin};
 use tokio_util::sync::CancellationToken;
 
-type VarsMap = std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>;
-
 use crate::cli;
 use crate::edge;
 use crate::exit;
@@ -29,6 +27,8 @@ mod wires;
 #[cfg(feature = "tui")]
 pub(crate) use interactive::interactive;
 
+#[cfg(all(feature = "test-support", any(unix, windows)))]
+pub use wires::{RawWireStreams, raw_wire_streams};
 pub(crate) use wires::{acp, app_server, rpc};
 mod dev;
 
@@ -167,7 +167,7 @@ pub(crate) async fn serve(
         port: args.port,
         token_file: args.token_file,
     };
-    let host = match Host::start(
+    let host = match start_host(
         product,
         config,
         Env {
@@ -175,13 +175,14 @@ pub(crate) async fn serve(
             cwd,
             sandbox_helper: helper,
         },
+        &data_root,
+        &config_path,
     )
     .await
     {
         Ok(host) => host,
-        Err(error) => return host_exit(&error, &data_root),
+        Err(code) => return code,
     };
-    host.set_config_path(config_path);
     let stop = CancellationToken::new();
     let mut signals = edge::ShutdownSignals::register();
     let snapshot = edge::terminal_snapshot();
@@ -430,27 +431,24 @@ pub(crate) async fn rules(args: cli::RulesArgs, startup: Startup, product: Produ
     }
 }
 
-/// Starts the host or renders its startup failure.
+/// Starts the host over the user's startup configuration, or renders its
+/// startup failure.
+///
+/// The host learns the user's `dal.toml` here, so every default a command
+/// saves (`/model`, `/mode`, `/thinking`, `/scoped-models`) lands in the
+/// same file whichever front end started the process.
 pub(crate) async fn start_host(
     product: Product,
-    config: &Config,
-    vars: VarsMap,
-    cwd: std::path::PathBuf,
-    helper: Option<std::path::PathBuf>,
+    config: Config,
+    env: Env,
     data_root: &std::path::Path,
+    config_path: &std::path::Path,
 ) -> Result<Host, ExitCode> {
-    match Host::start(
-        product,
-        config.clone(),
-        Env {
-            vars,
-            cwd,
-            sandbox_helper: helper,
-        },
-    )
-    .await
-    {
-        Ok(host) => Ok(host),
+    match Host::start(product, config, env).await {
+        Ok(host) => {
+            host.set_config_path(config_path.to_path_buf());
+            Ok(host)
+        }
         Err(error) => Err(host_exit(&error, data_root)),
     }
 }

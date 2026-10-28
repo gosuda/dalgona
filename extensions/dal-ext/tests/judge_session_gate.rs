@@ -14,6 +14,8 @@
 //!   "<model>"`; a failing session route means `no credentials for the
 //!   judge role`.
 //! - `gate = "on"` with a ready explicit model still opens (control).
+//! - `[rules].judge = "off"` with judged rules in the set surfaces the counted
+//!   inert note once per session; with no judged rules it surfaces none.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
@@ -25,6 +27,7 @@ use dal_agent::ext::{
     BoxFuture, EventStream, ExtensionBuilder, ModelCx, ModelError, ModelHandler, ModelRecord,
 };
 use dal_agent::{Delivery, Env, Host, Product, SessionRef, Subscription};
+use dal_core::ext::{Name, RuleRecord};
 use dal_core::{
     Caps, ClientId, Command, Config, ConfigProduct, Expect, ModelId, ModelRequest, Part,
     ServiceSet, Stop, ThinkingLevel, UpdateKind, Workspace,
@@ -49,22 +52,53 @@ fn auto_unknown_notice() -> String {
 const ON_WITHOUT_CREDENTIALS: &str = "judge unavailable: no credentials for the judge role";
 
 /// Deterministic single-reply model; also serves session-model readiness.
+///
+/// Each request is logged with its one-based request index before a reply is
+/// served, so a failure message can name every request the session made. An
+/// exhausted reply queue fails the provider stream instead of panicking: a
+/// panicking handler dies inside a host task, where the test only sees a
+/// timeout, while a failed stream reaches the test as a `turn.failed`
+/// notice carrying the queued run log.
 struct CapturingReplies {
     replies: Arc<Mutex<VecDeque<String>>>,
+    runs: RunLog,
 }
 
 impl ModelHandler for CapturingReplies {
     fn run<'a>(
         &'a self,
-        _request: ModelRequest,
+        request: ModelRequest,
         _cx: ModelCx<'a>,
     ) -> BoxFuture<'a, Result<EventStream, ModelError>> {
+        let index = {
+            let mut runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
+            let index = runs.len() + 1;
+            runs.push(format!(
+                "request={} purpose={:?} context_items={}",
+                index,
+                request.purpose,
+                request.context.len()
+            ));
+            index
+        };
         let text = self
             .replies
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .pop_front()
-            .expect("the test queues one reply per turn");
+            .pop_front();
+        let Some(text) = text else {
+            return Box::pin(async move {
+                Ok(EventStream::new(
+                    futures::stream::iter(vec![Err(ProviderError::InvalidRequest {
+                        message: format!(
+                            "fixture reply queue exhausted at request {index}; the session \
+                             made more model requests than the test queued replies"
+                        ),
+                    })]),
+                    || {},
+                ))
+            });
+        };
         Box::pin(async move {
             let events: Vec<Result<StreamEvent, ProviderError>> = vec![
                 Ok(StreamEvent::TextDelta { text }),
@@ -89,7 +123,19 @@ impl ModelHandler for CapturingReplies {
     }
 }
 
-struct Scratch(PathBuf);
+/// One entry per model request in a test, in the order the fixture served them.
+type RunLog = Arc<Mutex<Vec<String>>>;
+
+struct Scratch(PathBuf, RunLog);
+
+/// A copy of the run log so far, for attaching to a failure.
+fn run_log(scratch: &Scratch) -> Vec<String> {
+    scratch
+        .1
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
 
 impl Scratch {
     fn new(tag: &str) -> Self {
@@ -102,7 +148,7 @@ impl Scratch {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("scratch directory");
-        Self(dir)
+        Self(dir, RunLog::default())
     }
 }
 
@@ -112,7 +158,34 @@ impl Drop for Scratch {
     }
 }
 
-fn extensions(replies: Arc<Mutex<VecDeque<String>>>) -> Outcome<Vec<dal_agent::ext::Extension>> {
+/// A judged rule registered by an extension record, the only route a judged
+/// rule takes: a `judge:` line in a rule file is an unknown key and parses to
+/// a plain rule. The pattern matches neither fixture reply, so this rule proves
+/// only the once-per-session notice. Matched judged-off behavior is not covered
+/// here.
+fn judged_record(name: &str) -> RuleRecord {
+    RuleRecord {
+        name: Name::parse(name).expect("valid judged rule name"),
+        patterns: vec!["qjudge-never".into()],
+        text: "Stop that.".into(),
+        judge: Some("Is this relevant?".into()),
+        scope: None,
+        globs: None,
+        agents: None,
+        mode: None,
+        repeat_mode: None,
+        repeat_gap: None,
+        always_apply: false,
+        report: false,
+        enabled: true,
+    }
+}
+
+fn extensions(
+    replies: Arc<Mutex<VecDeque<String>>>,
+    runs: RunLog,
+    judged: &[&str],
+) -> Outcome<Vec<dal_agent::ext::Extension>> {
     let pick_edit_style =
         Arc::new(|_route: &dal_core::ModelRoute| dal_ext::ttsr::readers::EditStyle::Replace);
     let ttsr = dal_ext::ttsr::extension(dal_ext::ttsr::TtsrDeps {
@@ -129,17 +202,36 @@ fn extensions(replies: Arc<Mutex<VecDeque<String>>>) -> Outcome<Vec<dal_agent::e
                 image_input: false,
                 custom_grammar: false,
             },
-            handler: Arc::new(CapturingReplies { replies }),
+            handler: Arc::new(CapturingReplies { replies, runs }),
             export: None,
         })
         .build()?;
-    Ok(vec![ttsr, model])
+    let mut extensions = vec![ttsr, model];
+    if !judged.is_empty() {
+        let mut rules = ExtensionBuilder::new("judged-rules", "0.1.0", ServiceSet::default())?;
+        for name in judged {
+            rules = rules.rule(judged_record(name));
+        }
+        extensions.push(rules.build()?);
+    }
+    Ok(extensions)
 }
 
 async fn start_host(
     scratch: &Scratch,
     config_toml: &str,
     replies: Vec<String>,
+) -> Outcome<(Host, Workspace, PathBuf)> {
+    start_host_judged(scratch, config_toml, replies, &[]).await
+}
+
+/// Starts a host whose extensions also register one judged rule record per
+/// name.
+async fn start_host_judged(
+    scratch: &Scratch,
+    config_toml: &str,
+    replies: Vec<String>,
+    judged: &[&str],
 ) -> Outcome<(Host, Workspace, PathBuf)> {
     let data = scratch.0.join("data");
     let workspace_dir = scratch.0.join("workspace");
@@ -150,7 +242,11 @@ async fn start_host(
         name: "dal",
         data_root: data.clone(),
         defaults: "",
-        extensions: extensions(Arc::new(Mutex::new(replies.into())))?,
+        extensions: extensions(
+            Arc::new(Mutex::new(replies.into())),
+            Arc::clone(&scratch.1),
+            judged,
+        )?,
         bundled: Vec::new(),
     };
     let env = Env {
@@ -362,6 +458,11 @@ async fn collect_all_notices(subscription: &mut Subscription) -> Outcome<Vec<(St
             return Err("subscription closed mid-turn".into());
         };
         match &update.kind {
+            UpdateKind::Notice(notice)
+                if matches!(notice.kind.as_ref(), "driver.failed" | "turn.failed") =>
+            {
+                return Err(format!("turn failed: {}", notice.text).into());
+            }
             UpdateKind::Notice(notice) => {
                 notices.push((notice.kind.to_string(), notice.text.to_string()));
             }
@@ -417,6 +518,138 @@ async fn auto_off_without_judged_rules_emits_no_rules_notice() -> Outcome<()> {
             .collect::<Vec<_>>()
             .is_empty(),
         "no rules auto-off notice without judged rules: {notices:?}"
+    );
+    let _ = host.shutdown(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+/// Writes one user rule file into the scratch data root's `rules` directory.
+fn write_user_rule(data: &std::path::Path, name: &str, front: &str) -> Outcome<()> {
+    let directory = data.join("rules");
+    std::fs::create_dir_all(&directory)?;
+    std::fs::write(
+        directory.join(format!("{name}.md")),
+        format!("---\n{front}---\nBody.\n"),
+    )?;
+    Ok(())
+}
+
+/// `[rules].judge = "off"` with two judged extension records in the set
+/// surfaces the counted inert note once per session.
+///
+/// The note is a session-open notice, so the first turn's batch must already
+/// carry it; that assertion runs before the second prompt is submitted, so
+/// the missing-notice failure can never be masked by later fixture trouble.
+/// The second turn then proves the note does not repeat per turn. The judged
+/// patterns match neither reply: this rule proves only the notice. Matched
+/// judged-off behavior is not covered here.
+///
+/// Failure messages attach the journal text and the per-request run log so a
+/// stray extra model request (a rules interrupt reminder would journal a
+/// `rule_fired`/reminder record) is diagnosable from the failure alone.
+#[tokio::test]
+async fn explicit_off_with_judged_rules_surfaces_inert_count_once_per_session() -> Outcome<()> {
+    let scratch = Scratch::new("off-inert");
+    let data = scratch.0.join("data");
+    write_user_rule(&data, "plain", "condition: z\n")?;
+    let config = "model = \"fixture/end\"\n[rules]\njudge = \"off\"\n[judge]\ngate = \"off\"\n";
+    let replies = vec!["x marks the spot".to_owned(), "second turn".to_owned()];
+    let (host, workspace, data) =
+        start_host_judged(&scratch, config, replies, &["judged-a", "judged-b"]).await?;
+    let evidence = |error: Box<dyn std::error::Error + Send + Sync>| {
+        format!(
+            "{error}; model runs so far: {:?}; journal: {}",
+            run_log(&scratch),
+            journal_text(&data).unwrap_or_else(|error| format!("journal unreadable: {error}"))
+        )
+    };
+    let agent = host
+        .open(
+            SessionRef::New {
+                workspace,
+                name: None,
+            },
+            ClientId::new("judge-gate-off-inert"),
+        )
+        .await?;
+    let mut subscription = agent.subscribe(None)?;
+    agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "hello".into(),
+            }],
+        })
+        .await?;
+    let first = collect_all_notices(&mut subscription)
+        .await
+        .map_err(evidence)?;
+    let inert: Vec<&(String, String)> = first
+        .iter()
+        .filter(|(_, text)| text.contains("inert"))
+        .collect();
+    assert_eq!(
+        inert.len(),
+        1,
+        "explicit off surfaces the judged-rule notice at session open: {first:?}"
+    );
+    assert!(
+        inert[0].1.contains('2'),
+        "the single notice carries the judged-rule count: {first:?}"
+    );
+    agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "again".into(),
+            }],
+        })
+        .await?;
+    let second = collect_all_notices(&mut subscription)
+        .await
+        .map_err(evidence)?;
+    assert!(
+        !second.iter().any(|(_, text)| text.contains("inert")),
+        "the inert note is once per session, not per turn: {second:?}"
+    );
+    let _ = host.shutdown(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_off_without_judged_rules_surfaces_no_inert_notice() -> Outcome<()> {
+    let scratch = Scratch::new("off-no-judged");
+    write_user_rule(&scratch.0.join("data"), "plain", "condition: z\n")?;
+    let config = "model = \"fixture/end\"\n[rules]\njudge = \"off\"\n[judge]\ngate = \"off\"\n";
+    let (host, workspace, _data) = start_host(&scratch, config, vec!["all set".to_owned()]).await?;
+    let agent = host
+        .open(
+            SessionRef::New {
+                workspace,
+                name: None,
+            },
+            ClientId::new("judge-gate-off-no-judged"),
+        )
+        .await?;
+    let mut subscription = agent.subscribe(None)?;
+    agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "hello".into(),
+            }],
+        })
+        .await?;
+    let notices = collect_all_notices(&mut subscription).await?;
+    assert!(
+        notices.iter().all(|(_, text)| !text.contains("inert")),
+        "no judged rules means no inert notice: {notices:?}"
+    );
+    assert!(
+        notices
+            .iter()
+            .all(|(kind, _)| !matches!(kind.as_str(), "rules" | "judge")),
+        "no judged rules means no rules or judge notice: {notices:?}"
     );
     let _ = host.shutdown(Duration::from_secs(1)).await;
     Ok(())

@@ -1,11 +1,14 @@
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
 use dal_agent::SessionRef;
+use dal_agent::ext::{ExtensionBuilder, StatusCx, StatusPoll, StatusSample, StatusSnapshot};
 use dal_core::{
-    Chooser, Command, Family, Gen, ModelRequest, ModelRoute, PageReq, Purpose, Reply,
-    RequestParams, Seq, SessionId, ThinkingLevel, View, Workspace,
+    CancelScope, Chooser, ClientId, Command, Expect, ExtState, ExtStatus, Family, Gen,
+    ModelRequest, ModelRoute, PageReq, Part, Purpose, Reply, RequestParams, Seq, SessionId,
+    StatusPayload, ThinkingLevel, UpdateKind, View, Workspace,
 };
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -14,7 +17,8 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::error::WireError;
 use crate::remote::{
-    RemoteAgent, RemoteDelivery, RemoteEndpoint, RemoteHost, RemoteModel, backoff,
+    RemoteAgent, RemoteDelivery, RemoteEndpoint, RemoteHost, RemoteModel, RemoteSubscription,
+    backoff,
 };
 
 const SESSION: &str = "018f0f62-3b00-7000-8000-000000000001";
@@ -1117,6 +1121,459 @@ async fn remote_thinking_command_wire_roundtrip() {
         .await
         .expect("view after rejected submit");
     assert_eq!(unchanged_view.settings.thinking, chosen_level);
+
+    endpoint.server.abort_all();
+}
+
+/// One scripted status sample the test swaps in between sweeps.
+#[derive(Clone)]
+struct ScriptedStatus {
+    quiet: bool,
+    text: Option<String>,
+    payload: Option<String>,
+}
+
+/// A [`StatusPoll`] whose samples come from [`ScriptedStatus`]; the host
+/// turns each sweep's sample into one ext-status update.
+struct ScriptedPoll {
+    sample: Mutex<ScriptedStatus>,
+}
+
+impl ScriptedPoll {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            sample: Mutex::new(ScriptedStatus {
+                quiet: true,
+                text: None,
+                payload: None,
+            }),
+        })
+    }
+
+    fn set(&self, sample: ScriptedStatus) {
+        *self
+            .sample
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = sample;
+    }
+}
+
+impl ScriptedPoll {
+    /// Copies the scripted sample out of the lock.
+    fn held(&self) -> ScriptedStatus {
+        self.sample
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl StatusPoll for ScriptedPoll {
+    fn snapshot(&self, _cx: &StatusCx) -> StatusSnapshot {
+        let held = self.held();
+        StatusSnapshot {
+            quiet: held.quiet,
+            text: held.text.map(Into::into),
+        }
+    }
+
+    fn sample(&self, _cx: &StatusCx) -> StatusSample {
+        let held = self.held();
+        StatusSample {
+            snapshot: StatusSnapshot {
+                quiet: held.quiet,
+                text: held.text.map(Into::into),
+            },
+            payload: held
+                .payload
+                .map(|text| StatusPayload::parse(&text).expect("scripted payload is one value")),
+        }
+    }
+}
+
+/// Starts a rig whose `focus` extension reports the scripted status.
+async fn status_rig(poll: &Arc<ScriptedPoll>) -> super::support::Rig {
+    use dal_core::ServiceSet;
+    let extension = ExtensionBuilder::new("focus", "0.1.0", ServiceSet::EMPTY)
+        .expect("extension name")
+        .status_kind("focus", Arc::clone(poll) as Arc<dyn StatusPoll>)
+        .build()
+        .expect("status extension builds");
+    super::support::rig_with_extensions(&[], "", vec![extension]).await
+}
+
+/// A real polled session on a real Host, mirrored to a remote client over a
+/// real loopback socket and already subscribed after the current head.
+///
+/// Fields drop in declaration order: the subscription releases first and the
+/// rig's host goes last, matching the order the tests' locals unwound in.
+/// The test keeps the actions, the oracles, and the endpoint shutdown.
+struct StatusLoopback {
+    subscription: RemoteSubscription,
+    _agent: RemoteAgent,
+    endpoint: LocalEndpoint,
+    local: dal_agent::Agent,
+    _rig: super::support::Rig,
+}
+
+impl StatusLoopback {
+    /// Opens the polled session locally, resumes it through a real local
+    /// endpoint, and subscribes the remote client.
+    async fn start(poll: &Arc<ScriptedPoll>) -> Self {
+        let rig = status_rig(poll).await;
+        let local = rig
+            .host
+            .open(
+                SessionRef::New {
+                    workspace: rig.core_workspace(),
+                    name: None,
+                },
+                ClientId::new("status-probe"),
+            )
+            .await
+            .expect("open the polled session");
+        let session = local.session().to_string();
+        let endpoint = LocalEndpoint::start(rig.host.clone()).await;
+        let agent = remote_resumed(endpoint.socket.clone(), &rig, &session).await;
+        let subscription = agent.subscribe(None).await.expect("subscribe");
+        Self {
+            subscription,
+            _agent: agent,
+            endpoint,
+            local,
+            _rig: rig,
+        }
+    }
+}
+
+/// Reads the next ext-status delivery from a real remote subscription,
+/// skipping any other update kinds.
+async fn next_remote_ext_status(subscription: &mut RemoteSubscription) -> ExtStatus {
+    loop {
+        let delivery = tokio::time::timeout(Duration::from_secs(10), subscription.next())
+            .await
+            .expect("a status update arrives in time")
+            .expect("the remote subscription delivers");
+        let RemoteDelivery::Update(update) = delivery else {
+            panic!("a status loopback must not resync");
+        };
+        if let UpdateKind::ExtStatus(status) = &update.kind {
+            return status.clone();
+        }
+    }
+}
+
+/// A real Host and a real remote client carry an extension status's human
+/// text and structured payload across the loopback losslessly: the
+/// same-context poll returns both, a payload-only change re-publishes
+/// through the status dedup, a quiet status with a payload is not mistaken
+/// for the baseline, and the old payloadless quiet frame still decodes.
+#[tokio::test]
+async fn remote_subscription_carries_status_text_and_payload_losslessly() {
+    let poll = ScriptedPoll::new();
+    let mut probe = StatusLoopback::start(&poll).await;
+
+    // One busy sweep: the same-context poll returns the human text plus the
+    // validated payload verbatim.
+    poll.set(ScriptedStatus {
+        quiet: false,
+        text: Some("indexing".to_owned()),
+        payload: Some(r#"{"records":3,"unit":"files"}"#.to_owned()),
+    });
+    let rows = probe.local.poll_status().await.expect("status sweep");
+    let [row] = rows.as_slice() else {
+        panic!("one published status, got {rows:?}");
+    };
+    assert_eq!(row.ext.as_ref(), "focus");
+    assert_eq!(row.state, ExtState::Busy);
+    assert_eq!(row.text.as_deref(), Some("indexing"));
+    assert_eq!(
+        row.payload.as_ref().map(StatusPayload::as_str),
+        Some(r#"{"records":3,"unit":"files"}"#)
+    );
+
+    // The remote subscription receives the same status with both members,
+    // and the payload is the polled object, not a spelling of it.
+    let status = next_remote_ext_status(&mut probe.subscription).await;
+    assert_eq!(status.ext.as_ref(), "focus");
+    assert_eq!(status.state, ExtState::Busy);
+    assert_eq!(
+        status.text.as_deref(),
+        Some("indexing"),
+        "the human text is unchanged"
+    );
+    let Some(carried) = status.payload.as_ref() else {
+        panic!("the payload survives the wire");
+    };
+    let value: Value = sonic_rs::from_str(carried.as_str()).expect("the payload is one value");
+    assert_eq!(
+        value.get("records").and_then(JsonValueTrait::as_u64),
+        Some(3),
+        "the carried payload is the polled object: {value}"
+    );
+    assert_eq!(
+        value.get("unit").and_then(JsonValueTrait::as_str),
+        Some("files")
+    );
+
+    // Status dedup compares payloads: a payload-only change is a change,
+    // not a repeat to be swallowed by a text-and-state filter.
+    poll.set(ScriptedStatus {
+        quiet: false,
+        text: Some("indexing".to_owned()),
+        payload: Some(r#"{"records":4,"unit":"files"}"#.to_owned()),
+    });
+    let rows = probe.local.poll_status().await.expect("second sweep");
+    let [row] = rows.as_slice() else {
+        panic!("one published status, got {rows:?}");
+    };
+    assert_eq!(
+        row.payload.as_ref().map(StatusPayload::as_str),
+        Some(r#"{"records":4,"unit":"files"}"#)
+    );
+    let status = next_remote_ext_status(&mut probe.subscription).await;
+    let Some(carried) = status.payload.as_ref() else {
+        panic!("the new payload survives the wire");
+    };
+    let value: Value = sonic_rs::from_str(carried.as_str()).expect("the payload is one value");
+    assert_eq!(
+        value.get("records").and_then(JsonValueTrait::as_u64),
+        Some(4),
+        "the dedup must not miss the payload change: {value}"
+    );
+
+    // A quiet status that still carries a payload is not the baseline and
+    // must reach the remote client.
+    poll.set(ScriptedStatus {
+        quiet: true,
+        text: None,
+        payload: Some(r#"{"drained":true}"#.to_owned()),
+    });
+    let rows = probe.local.poll_status().await.expect("quiet sweep");
+    let [row] = rows.as_slice() else {
+        panic!("one published status, got {rows:?}");
+    };
+    assert_eq!(row.state, ExtState::Quiet);
+    assert_eq!(
+        row.payload.as_ref().map(StatusPayload::as_str),
+        Some(r#"{"drained":true}"#)
+    );
+    let status = next_remote_ext_status(&mut probe.subscription).await;
+    assert!(status.is_quiet(), "the quiet state stays legitimate");
+    assert_eq!(status.text.as_deref(), None);
+    assert_eq!(
+        status.payload.as_ref().map(StatusPayload::as_str),
+        Some(r#"{"drained":true}"#),
+        "the quiet payload is not dropped by the baseline filter"
+    );
+
+    // The plain quiet reset is the old frame shape: no text and no payload
+    // member at all, decoding exactly as it did before payloads existed.
+    poll.set(ScriptedStatus {
+        quiet: true,
+        text: None,
+        payload: None,
+    });
+    probe.local.poll_status().await.expect("reset sweep");
+    let status = next_remote_ext_status(&mut probe.subscription).await;
+    assert_eq!(status.ext.as_ref(), "focus");
+    assert!(status.is_quiet());
+    assert_eq!(status.text.as_deref(), None);
+    assert!(
+        status.payload.is_none(),
+        "an old frame without a payload member decodes to none: {status:?}"
+    );
+
+    probe.endpoint.server.abort_all();
+}
+
+/// An explicit JSON `null` payload is one legitimate [`StatusPayload`]
+/// value, and a payload moving from an object to `null` is a change the
+/// status dedup must publish. The frozen core fix maps the wire member
+/// `null` to `Some(StatusPayload(RawJson::null()))`
+/// (`dal-core/src/update.rs`), so the remote client receives the null
+/// payload instead of an erased "no payload".
+#[tokio::test]
+async fn remote_subscription_keeps_an_explicit_null_payload() {
+    let poll = ScriptedPoll::new();
+    let mut probe = StatusLoopback::start(&poll).await;
+
+    // First the object: the non-null side of the transition.
+    poll.set(ScriptedStatus {
+        quiet: false,
+        text: Some("indexing".to_owned()),
+        payload: Some(r#"{"count":1}"#.to_owned()),
+    });
+    probe.local.poll_status().await.expect("status sweep");
+    let status = next_remote_ext_status(&mut probe.subscription).await;
+    assert_eq!(status.ext.as_ref(), "focus");
+    assert_eq!(status.state, ExtState::Busy);
+    assert_eq!(status.text.as_deref(), Some("indexing"));
+    assert_eq!(
+        status.payload.as_ref().map(StatusPayload::as_str),
+        Some(r#"{"count":1}"#)
+    );
+
+    // Then the explicit null: a payload-only change to `null` must reach
+    // the remote client as a payload, not as its absence.
+    poll.set(ScriptedStatus {
+        quiet: false,
+        text: Some("indexing".to_owned()),
+        payload: Some("null".to_owned()),
+    });
+    let rows = probe.local.poll_status().await.expect("null sweep");
+    let [row] = rows.as_slice() else {
+        panic!("one published status, got {rows:?}");
+    };
+    assert_eq!(
+        row.payload.as_ref().map(StatusPayload::as_str),
+        Some("null")
+    );
+
+    let status = next_remote_ext_status(&mut probe.subscription).await;
+    assert_eq!(status.text.as_deref(), Some("indexing"));
+    assert_eq!(
+        status.payload.as_ref().map(StatusPayload::as_str),
+        Some("null"),
+        "an explicit null payload must survive the wire as a payload"
+    );
+
+    probe.endpoint.server.abort_all();
+}
+
+/// A payload may name integers outside `i64`/`u64`, and the remote client
+/// must receive the exact numeric text.
+///
+/// RED baseline, held on purpose: this documents the general RAW
+/// update-notification decode gap, not a status-only one. The connection
+/// reader parses each frame into a `sonic_rs::Value` DOM
+/// (`remote/conn.rs`), which coerces such integers to `f64`, and
+/// `remote/decode.rs::decode` re-serializes that DOM before the typed
+/// decode — so the polled `{"count":18446744073709551617}` arrives spelled
+/// `1.8446744073709552e+19`: a different number. Every raw-carried member
+/// (`StatusPayload` here, `tool_started` `args` equally) shares the seam.
+/// The fix is one owner handing the typed decoders raw text — a
+/// `RawJson` envelope for the `update` member, decoded once — reported to
+/// the coordinator before any production write.
+#[tokio::test]
+async fn remote_subscription_keeps_a_large_integer_payload_exact() {
+    // Reads the carried integer through serde, with no float conversion.
+    #[derive(serde::Deserialize)]
+    struct Count {
+        count: i128,
+    }
+
+    let poll = ScriptedPoll::new();
+    let mut probe = StatusLoopback::start(&poll).await;
+
+    poll.set(ScriptedStatus {
+        quiet: false,
+        text: Some("indexing".to_owned()),
+        payload: Some(r#"{"count":18446744073709551617}"#.to_owned()),
+    });
+    let rows = probe.local.poll_status().await.expect("status sweep");
+    let [row] = rows.as_slice() else {
+        panic!("one published status, got {rows:?}");
+    };
+    assert_eq!(
+        row.payload.as_ref().map(StatusPayload::as_str),
+        Some(r#"{"count":18446744073709551617}"#)
+    );
+
+    let status = next_remote_ext_status(&mut probe.subscription).await;
+    assert_eq!(status.ext.as_ref(), "focus");
+    assert_eq!(status.state, ExtState::Busy);
+    assert_eq!(status.text.as_deref(), Some("indexing"));
+    let carried = status
+        .payload
+        .as_ref()
+        .expect("the payload survives the wire");
+
+    // Semantic exactness through serde, with no float conversion on the
+    // way in: the carried text must still name the exact integer.
+    let Count { count } = sonic_rs::from_str::<Count>(carried.as_str())
+        .expect("the carried payload text is the exact integer, not a float spelling");
+    assert_eq!(count, 18_446_744_073_709_551_617i128);
+
+    probe.endpoint.server.abort_all();
+}
+
+/// Builds one replay step whose tool call carries a big integer in its
+/// parsed args, byte for byte as written.
+fn bigint_tool_step(call: &str, name: &str) -> String {
+    format!(
+        r#"{{"kind":"events","events":[{{"type":"tool_call_started","id":"{call}","name":"{name}"}},{{"type":"tool_calls_done","calls":[{{"id":"{call}","name":"{name}","args":{{"kind":"parsed","value":{{"n":18446744073709551617}}}}}}]}},{{"type":"usage","usage":{{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}}}},{{"type":"stop","reason":"tool_use"}}]}}"#
+    )
+}
+
+/// The remote subscription exposes each tool call's arguments as
+/// [`dal_core::RawJson`], and those arguments are opaque bytes the wire
+/// must not re-spell: a real turn whose model call carries a big integer
+/// must reach the remote client with the exact numeric text.
+///
+/// RED baseline, held on purpose: the same Value-DOM seams as the status
+/// payload (server `to_value`, client frame reader) re-spell the args into
+/// `1.8446744073709552e+19` before the typed decode.
+#[tokio::test]
+async fn remote_subscription_keeps_tool_args_exact() {
+    let rig = super::support::rig_with(&[bigint_tool_step("c1", "gate")], "").await;
+    let local = rig
+        .host
+        .open(
+            SessionRef::New {
+                workspace: rig.core_workspace(),
+                name: None,
+            },
+            ClientId::new("args-probe"),
+        )
+        .await
+        .expect("open the driven session");
+    let session = local.session().to_string();
+    let mut endpoint = LocalEndpoint::start(rig.host.clone()).await;
+    let agent = remote_resumed(endpoint.socket.clone(), &rig, &session).await;
+    let mut subscription = agent.subscribe(None).await.expect("subscribe");
+    agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "call the gate tool".into(),
+            }],
+        })
+        .await
+        .expect("submit the prompt");
+
+    let mut turn = None;
+    let args = loop {
+        let delivery = tokio::time::timeout(Duration::from_secs(10), subscription.next())
+            .await
+            .expect("the turn reaches its tool call in time")
+            .expect("the remote subscription delivers");
+        let RemoteDelivery::Update(update) = delivery else {
+            panic!("a driven turn must not resync");
+        };
+        match &update.kind {
+            UpdateKind::TurnStarted { turn: started, .. } => turn = Some(*started),
+            UpdateKind::ToolStarted { tool, args, .. } => {
+                assert_eq!(tool.as_ref(), "gate");
+                break args.clone();
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(
+        args.as_str(),
+        r#"{"n":18446744073709551617}"#,
+        "the tool args must keep the exact integer text"
+    );
+
+    // Settle the paused turn so the rig shuts down cleanly.
+    let turn = turn.expect("the turn started before its tool call");
+    agent
+        .submit(Command::Cancel {
+            scope: CancelScope::Turn(turn),
+        })
+        .await
+        .expect("cancel the paused turn");
 
     endpoint.server.abort_all();
 }

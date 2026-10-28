@@ -297,12 +297,16 @@ impl Driver {
                 dal_core::Effect::Dispatch { turn, units } => {
                     self.dispatch(turn, units, &batch).await;
                 }
-                dal_core::Effect::Compact { turn, first_kept } => {
+                dal_core::Effect::Compact {
+                    turn,
+                    first_kept,
+                    focus,
+                } => {
                     if let Some(turn) = turn {
                         self.bind_turn_step_cap(turn);
                         self.adopt_opening(turn, &mut opening, batch.model.as_ref());
                     }
-                    self.compact(turn, first_kept).await;
+                    self.compact(turn, first_kept, focus).await;
                 }
                 dal_core::Effect::Command { cmd, by } => {
                     let route = self.last_model.clone().map(|(route, _)| route);
@@ -355,6 +359,7 @@ impl Driver {
             Arc::clone(&self.deps.host.shared.interpreters),
             generation,
         );
+        self.deps.backend.set_hook_script(&script);
         script.attach(None)
     }
 
@@ -1952,7 +1957,12 @@ impl Driver {
     }
 
     /// Runs the registered compactor chain over the current leaf entries.
-    async fn compact(&mut self, turn: Option<TurnId>, first_kept: Option<dal_core::EntryId>) {
+    async fn compact(
+        &mut self,
+        turn: Option<TurnId>,
+        first_kept: Option<dal_core::EntryId>,
+        focus: Option<Box<str>>,
+    ) {
         let view = self.deps.shared.snapshot(SnapshotArgs {
             generation: self.deps.generation,
             id: self.deps.session,
@@ -2012,6 +2022,7 @@ impl Driver {
                         route,
                         image_profile,
                         window,
+                        focus,
                     },
                     Err(error) => {
                         return self
@@ -2145,7 +2156,7 @@ impl Driver {
                 caller: &caller,
                 model: compacted.route.clone(),
                 session: self.deps.session,
-                instructions: "",
+                instructions: compacted.instructions(),
                 covered: compacted.covered,
                 span: compacted.span,
                 first_kept: compacted.first_kept,
@@ -2296,6 +2307,15 @@ struct CompactedSpan<'a> {
     route: ModelRoute,
     image_profile: Option<dal_provider::ImageProfile>,
     window: Option<u64>,
+    focus: Option<Box<str>>,
+}
+
+impl CompactedSpan<'_> {
+    /// Manual `/compact` focus text for the compactor input; empty for
+    /// automatic runs.
+    fn instructions(&self) -> &str {
+        self.focus.as_deref().unwrap_or("")
+    }
 }
 
 /// Builds a full-leaf page request.
@@ -3205,5 +3225,128 @@ mod tests {
         assert_eq!(second.mode(), dal_core::Mode::Normal);
         assert_ne!(second.mode(), host_default);
         assert_eq!(first.mode(), host_default);
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the fixture builds the full record chain in one walk"
+    )]
+    fn compact_focus_reaches_compactor() {
+        // Fold stores manual `/compact` focus in `Effect::Compact`.
+        let entry = |value: u64| {
+            dal_core::EntryId::new(std::num::NonZeroU64::new(value).expect("entry id is nonzero"))
+        };
+        let user = |value: u64, parent: Option<dal_core::EntryId>| {
+            dal_core::Record::User(dal_core::Entry {
+                id: entry(value),
+                parent,
+                at: jiff::Timestamp::UNIX_EPOCH,
+                kind: dal_core::EntryKind::User {
+                    parts: vec![dal_core::JournalPart::Text {
+                        text: "x".repeat(2_000).into(),
+                    }],
+                },
+            })
+        };
+        let records = vec![
+            user(1, None),
+            user(2, Some(entry(1))),
+            user(3, Some(entry(2))),
+        ];
+        let (mut session, _) = dal_core::Session::replay(records, jiff::Timestamp::UNIX_EPOCH)
+            .expect("replay seeded history");
+        let mut effects = Vec::new();
+        session
+            .step(
+                dal_core::Event::Limits {
+                    window: 100_000,
+                    max_steps: 0,
+                    compact: dal_core::CompactLimits {
+                        threshold: 0.85,
+                        min_tokens: 1,
+                        keep_tokens: 20_000,
+                        enabled: true,
+                        compactor_available: true,
+                    },
+                },
+                jiff::Timestamp::UNIX_EPOCH,
+                &mut effects,
+            )
+            .expect("limits apply");
+        let mut effects = Vec::new();
+        session
+            .step(
+                dal_core::Event::Command {
+                    cmd: dal_core::Command::Compact {
+                        focus: Some("auth flow".into()),
+                    },
+                    by: dal_core::ClientId::new("tui"),
+                },
+                jiff::Timestamp::UNIX_EPOCH,
+                &mut effects,
+            )
+            .expect("manual compact starts");
+        let focus = effects.iter().find_map(|effect| match effect {
+            dal_core::Effect::Compact { focus, .. } => Some(focus.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            focus.flatten().as_deref(),
+            Some("auth flow"),
+            "fold must carry manual focus in Effect::Compact, got {effects:?}"
+        );
+
+        // Driver threads the stored focus into the compactor input; automatic
+        // runs stay empty.
+        let covered: Vec<crate::ext::compact::CoveredEntry> = Vec::new();
+        let span_with = CompactedSpan {
+            turn: None,
+            covered: &covered,
+            replaced_tokens: 0,
+            span: (entry(1), entry(1)),
+            first_kept: None,
+            total: 0,
+            measured: None,
+            retained: RetainedImages::default(),
+            carried: None,
+            route: ModelRoute::Api {
+                family: Family::Chat,
+                model: "test-model".into(),
+                provider: None,
+            },
+            image_profile: None,
+            window: None,
+            focus: Some("auth flow".into()),
+        };
+        assert_eq!(
+            span_with.instructions(),
+            "auth flow",
+            "manual focus must reach CompactInput.instructions"
+        );
+        let span_auto = CompactedSpan {
+            turn: None,
+            covered: &covered,
+            replaced_tokens: 0,
+            span: (entry(1), entry(1)),
+            first_kept: None,
+            total: 0,
+            measured: None,
+            retained: RetainedImages::default(),
+            carried: None,
+            route: ModelRoute::Api {
+                family: Family::Chat,
+                model: "test-model".into(),
+                provider: None,
+            },
+            image_profile: None,
+            window: None,
+            focus: None,
+        };
+        assert_eq!(
+            span_auto.instructions(),
+            "",
+            "automatic runs carry no focus"
+        );
     }
 }

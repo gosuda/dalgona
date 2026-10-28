@@ -126,6 +126,7 @@ fn rpc_status_updates_coalesce_before_write() {
                 ext: "focus".into(),
                 state: ExtState::Busy,
                 text: Some(format!("busy-{number}").into()),
+                payload: None,
             }),
         }));
     }
@@ -261,6 +262,7 @@ fn acp_status_mappings() {
             ext: "focus".into(),
             state: ExtState::Busy,
             text: Some("indexing".into()),
+            payload: None,
         }),
     };
     let session = SessionId::new_v7();
@@ -287,6 +289,7 @@ fn a2a_scenario() {
         ext: "focus".into(),
         state: ExtState::Busy,
         text: Some("indexing".into()),
+        payload: None,
     });
     let next = step(task_key.turn, None, &update).expect("a2a keeps ext_status");
     let emitted = apply(&mut task, next);

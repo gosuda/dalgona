@@ -38,7 +38,9 @@
 //! The provider registry exposes Cursor through its HTTP-backed provider
 //! path. [`decode::open_run`] owns one bidirectional Connect `Run` exchange;
 //! [`lower::build_run`] prepares its opening request and [`decode::Session`]
-//! handles streamed messages, tool events, and replies.
+//! handles streamed messages, tool events, and replies. [`auth`] holds the
+//! sign-in steps the built-in `cursor` row's OAuth hook dispatches to: the
+//! deep-control poll grant and the refresh answer.
 //!
 //! # Durable-assistant-entry binding
 //!
@@ -108,6 +110,7 @@ pub(crate) const PROTOCOL_VERSION: &str = "1";
 /// How often the client sends a heartbeat while a run is open.
 pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
+pub(crate) mod auth;
 pub(crate) mod decode;
 pub(crate) mod frame;
 pub(crate) mod lower;

@@ -326,6 +326,7 @@ pub fn draw_frame(
     let size = terminal
         .size()
         .map_err(|error| TuiError::Terminal(error.to_string()))?;
+    render::pre_resolve_frame_diagrams(view, size.width, diagram_settings, &diagram_cache);
     for entry in &view.entries.items {
         let rows = render::entry_rows(
             entry,

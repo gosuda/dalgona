@@ -14,6 +14,7 @@ use dal_core::{
 };
 use dal_provider::EventStream;
 
+use super::super::prompt::{PromptOrder, PromptSection};
 use super::super::scheme::{Doc, SchemeCx, SchemeResolver};
 use super::super::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome};
 use super::super::{
@@ -1122,4 +1123,75 @@ fn compaction_chain_runs_every_primary_before_any_fallback() {
             "{name} resolves to its compactor after regrouping"
         );
     }
+}
+#[test]
+fn load_order_independence() {
+    // Filesystem iteration order never leaks into the settled generation:
+    // User extensions settle by name, so reversed inputs build the same
+    // extension order, prompt-section order, and tool bytes. A sort that
+    // kept input order would put zzz first for the reversed input and
+    // fail the equality pins.
+    let named = |name: &str| {
+        ext(name, Origin::User)
+            .tool(stub_tool(&format!("{name}_tool")), Visibility::Model)
+            .prompt_section(PromptSection::static_text(
+                PromptOrder::Identity,
+                format!("id-{name}").into(),
+            ))
+            .build()
+            .expect("valid extension")
+    };
+    let first = Generation::build(
+        ValidatedExtensions::validate(vec![named("aaa"), named("zzz")], None).expect("validates"),
+    );
+    let second = Generation::build(
+        ValidatedExtensions::validate(vec![named("zzz"), named("aaa")], None).expect("validates"),
+    );
+    let extension_order = |generation: &Generation| {
+        generation
+            .extensions
+            .iter()
+            .map(|extension| extension.name().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        extension_order(&first),
+        vec!["aaa".to_owned(), "zzz".to_owned()],
+        "user extensions settle by name"
+    );
+    assert_eq!(
+        extension_order(&second),
+        extension_order(&first),
+        "reversed input builds the same extension order"
+    );
+    let section_orders = |generation: &Generation| {
+        generation
+            .prompt_sections
+            .iter()
+            .map(|(_, section)| section.order())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        section_orders(&second),
+        section_orders(&first),
+        "reversed input builds the same prompt-section order"
+    );
+    let tool_order = |generation: &Generation| {
+        generation
+            .tools
+            .entries()
+            .iter()
+            .map(|entry| entry.name.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        tool_order(&first),
+        vec!["aaa_tool".to_owned(), "zzz_tool".to_owned()],
+        "tools settle in canonical order"
+    );
+    assert_eq!(
+        tool_order(&second),
+        tool_order(&first),
+        "reversed input builds the same tool order"
+    );
 }

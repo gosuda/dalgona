@@ -13,6 +13,8 @@ pub(super) struct UserEntryFields {
 pub(super) struct AssistantEntryFields {
     pub(super) api: Family,
     pub(super) model: Box<str>,
+    #[serde(default, deserialize_with = "assistant_provider_field")]
+    pub(super) provider: Option<Box<str>>,
     pub(super) content: Vec<Block>,
     pub(super) usage: Usage,
     pub(super) stop: AssistantStop,
@@ -43,6 +45,24 @@ where
         return Err(serde::de::Error::custom("member `replay` must not be null"));
     }
     Ok(Some(replay))
+}
+
+/// Reads the optional assistant provider. Absence means legacy unattributed;
+/// a present member must be a non-empty string. `null`, an empty id, or a
+/// non-string is malformed provenance, not unknown, matching the journal
+/// decoder's `provider_id_member`.
+fn assistant_provider_field<'de, D>(deserializer: D) -> Result<Option<Box<str>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let provider = Box::<str>::deserialize(deserializer)
+        .map_err(|error| serde::de::Error::custom(format!("member `provider`: {error}")))?;
+    if provider.is_empty() {
+        return Err(serde::de::Error::custom(
+            "member `provider` must not be empty",
+        ));
+    }
+    Ok(Some(provider))
 }
 
 #[derive(Deserialize)]
@@ -138,9 +158,20 @@ impl<'de> Deserialize<'de> for EntryKind {
                         .check_id(&wire.model)
                         .map_err(|error| serde::de::Error::custom(error.to_string()))?;
                 }
+                if wire.provider.is_some()
+                    && matches!(
+                        wire.route,
+                        Some(AssistantRoute::Synthetic | AssistantRoute::Harness)
+                    )
+                {
+                    return Err(serde::de::Error::custom(
+                        "member `provider` cannot appear with a synthetic or harness route",
+                    ));
+                }
                 Ok(Self::Assistant {
                     api: wire.api,
                     model: wire.model,
+                    provider: wire.provider,
                     content: wire.content,
                     usage: wire.usage,
                     stop: wire.stop,
@@ -342,4 +373,17 @@ pub struct Mail {
     pub text: Box<str>,
     /// An opaque cursor naming the message this answers.
     pub reply_to: Option<Box<str>>,
+}
+
+/// One delivered mail inside a `MailDelivered` record: the consumed mail
+/// row position plus the text the delivery entry carries into the turn
+/// input.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DeliveredMail {
+    /// The mail row's 1-based position among the journal's mail rows; the
+    /// same position a `recv` cursor names.
+    pub position: EntryId,
+    /// The message text the delivery entry carries.
+    pub text: Box<str>,
 }

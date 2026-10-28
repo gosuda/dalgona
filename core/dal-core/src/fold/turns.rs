@@ -90,21 +90,7 @@ impl Session {
                     .push(UpdateKind::Settings(self.settings_view()));
                 effects.push(Effect::Reply(Ok(Reply::Done(Output::Nothing))));
             }
-            Command::MoveLeaf(id) => {
-                self.restore_branch_state(Some(id))
-                    .map_err(|error| Rejection::Invalid {
-                        reason: error.to_string().into(),
-                    })?;
-                emit.records.push(Record::Leaf {
-                    at: now,
-                    to: Some(id),
-                });
-                emit.updates.push(UpdateKind::Tree(TreeDelta {
-                    added: Vec::new(),
-                    leaf: Some(id),
-                }));
-                effects.push(Effect::Reply(Ok(Reply::Done(Output::Nothing))));
-            }
+            Command::MoveLeaf(id) => self.move_leaf(id, now, emit, effects)?,
             Command::Compact { focus } => self.manual_compact(focus, emit, effects),
             command @ (Command::Fork(_)
             | Command::Clone
@@ -114,6 +100,37 @@ impl Session {
             | Command::ReloadPlugins) => {
                 effects.push(Effect::Command { cmd: command, by });
             }
+        }
+        Ok(())
+    }
+
+    fn move_leaf(
+        &mut self,
+        id: EntryId,
+        now: jiff::Timestamp,
+        emit: &mut Emit,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Rejection> {
+        if self.tree.leaf == Some(id) {
+            effects.push(Effect::Reply(Ok(Reply::Done(Output::Text(
+                "Already at this point.".into(),
+            )))));
+        } else {
+            self.restore_branch_state(Some(id))
+                .map_err(|error| Rejection::Invalid {
+                    reason: error.to_string().into(),
+                })?;
+            emit.records.push(Record::Leaf {
+                at: now,
+                to: Some(id),
+            });
+            emit.updates.push(UpdateKind::Tree(TreeDelta {
+                added: Vec::new(),
+                leaf: Some(id),
+            }));
+            effects.push(Effect::Reply(Ok(Reply::Done(Output::Text(
+                "Moved to the selected point. The next message continues from there.".into(),
+            )))));
         }
         Ok(())
     }
@@ -176,6 +193,7 @@ impl Session {
         effects.push(Effect::Compact {
             turn: None,
             first_kept: self.compaction_cut_point(),
+            focus: self.pending_manual_focus.clone(),
         });
         effects.push(Effect::Reply(Ok(Reply::Done(Output::Nothing))));
     }
@@ -192,7 +210,7 @@ impl Session {
         if matches!(&self.phase, Phase::Compacting { .. }) {
             return Err(Rejection::BusyTurn);
         }
-        let delivered = jobs.to_vec();
+        let attempted = jobs.to_vec();
         let source = TurnSource::Wake {
             sources,
             jobs,
@@ -205,9 +223,8 @@ impl Session {
             at: now,
             turn,
             count: self.wake_run,
-            jobs: delivered.clone(),
+            jobs: attempted,
         });
-        self.delivered_jobs.extend(delivered);
         if matches!(&self.phase, Phase::Idle) {
             let entry = self.allocate_entry_id()?;
             self.phase = Phase::Opening {
@@ -352,10 +369,10 @@ impl Session {
             return Ok(());
         };
         self.turn_totals.reset();
-        let (content, cause) = match source {
-            TurnSource::Prompt { content, .. } => (content, TurnCause::User),
-            TurnSource::Wake { content, .. } => (content, TurnCause::Wake),
-            TurnSource::FollowUp { content, .. } => (content, TurnCause::FollowUp),
+        let (content, cause, wake_jobs) = match source {
+            TurnSource::Prompt { content, .. } => (content, TurnCause::User, None),
+            TurnSource::Wake { content, jobs, .. } => (content, TurnCause::Wake, Some(jobs)),
+            TurnSource::FollowUp { content, .. } => (content, TurnCause::FollowUp, None),
         };
         if cause != TurnCause::Wake
             && self
@@ -375,6 +392,39 @@ impl Session {
         let mut added = vec![self.tree.append(entry_record.clone())];
         emit.records.push(Record::TurnStart { at: now, turn });
         emit.records.push(Record::User(entry_record));
+        if let Some(jobs) = wake_jobs {
+            self.delivered_jobs.extend(jobs.iter().copied());
+        }
+        let delivered = self.take_pending_mail();
+        if !delivered.is_empty() {
+            // The buffered `NextTurn` rows become real turn input through
+            // one record: `MailDelivered` materializes the delivery entry
+            // and consumes the positions in the same journal line, so a
+            // crash can neither split input from ack nor duplicate a
+            // delivery.
+            let parts = delivered
+                .iter()
+                .map(|mail| {
+                    part_to_journal(&Part::Text {
+                        text: mail.text.clone(),
+                    })
+                })
+                .collect();
+            let mail_entry = self.entry(now, EntryKind::User { parts })?;
+            added.push(self.tree.append(mail_entry.clone()));
+            emit.records.push(Record::MailDelivered {
+                at: now,
+                turn,
+                entry: mail_entry.id,
+                mails: delivered
+                    .into_iter()
+                    .map(|mail| crate::journal::DeliveredMail {
+                        position: mail.position,
+                        text: mail.text,
+                    })
+                    .collect(),
+            });
+        }
         if let Some(text) = add.filter(|text| !text.is_empty()) {
             let kind = EntryKind::Reminder {
                 source: BEFORE_TURN_SOURCE.into(),

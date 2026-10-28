@@ -582,6 +582,10 @@ async fn staged_mode_bits(
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unused_async,
+    reason = "Windows destinations inherit parent ACLs so there is no mode to read; async keeps the Unix await call-site uniform"
+)]
 async fn staged_mode_bits(
     _file: &StagedFileOwned,
     _target_abs: &Path,
@@ -601,6 +605,10 @@ async fn stamp_saved_mode(handle: &tokio::fs::File, bits: Option<u32>) -> std::i
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unused_async,
+    reason = "Windows destinations inherit parent ACLs so there is no mode to stamp; async keeps the Unix await call-site uniform"
+)]
 async fn stamp_saved_mode(_handle: &tokio::fs::File, _bits: Option<u32>) -> std::io::Result<()> {
     Ok(())
 }
@@ -829,7 +837,9 @@ pub(super) fn nonce_u128() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroU64, path::PathBuf, process::Command, sync::Arc, time::Duration};
+    #[cfg(unix)]
+    use std::process::Command;
+    use std::{num::NonZeroU64, path::PathBuf, sync::Arc, time::Duration};
 
     use dal_agent::ext::BoxFuture;
     use dal_core::{CallId, GenerationId, SessionId, TurnId};

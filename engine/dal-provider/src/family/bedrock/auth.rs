@@ -433,9 +433,13 @@ impl AwsCredentialResolver {
     }
 
     /// The bearer token for `provider`, when one exists: the stored
-    /// `auth.json` API key, else `AWS_BEARER_TOKEN_BEDROCK`. An empty value
-    /// counts as unset. The request-level bearer option stays caller-side:
-    /// no secret config field exists, and this resolver adds none.
+    /// `auth.json` API key, then the entry's own `key_env` variable, then
+    /// `AWS_BEARER_TOKEN_BEDROCK`. The entry-scoped variable outranks the
+    /// global ambient one: the reference reads its stored credential before
+    /// the ambient bearer, and a `key_env` names this entry's credential the
+    /// way it does for every other family. An empty value counts as unset.
+    /// The request-level bearer option stays caller-side: no secret config
+    /// field exists, and this resolver adds none.
     #[must_use]
     pub(crate) fn resolve_bearer_token(
         &self,
@@ -446,6 +450,11 @@ impl AwsCredentialResolver {
             && !key.expose().is_empty()
         {
             return Some(key);
+        }
+        if let Some(name) = provider.key_env.as_deref()
+            && let Some(token) = self.env.get(name).filter(|token| !token.is_empty())
+        {
+            return Some(SecretString::from(token));
         }
         self.env
             .get(BEARER_TOKEN_ENV)

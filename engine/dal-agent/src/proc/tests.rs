@@ -9,7 +9,7 @@ use std::{os::unix::fs::PermissionsExt as _, path::Path};
 
 #[cfg(unix)]
 use super::{COMPLETION_TAIL_BYTES, PREVIEW_BYTES, tail_preview};
-use super::{Launcher, SpawnOpts, spawn_process};
+use super::{Launcher, ProcessLease, SpawnOpts, spawn_process};
 use super::{MAX_STDOUT_PREFIX_BYTES, ProcStatus, StopReason};
 use crate::error::{DenyReason, ToolError};
 use crate::ext::tool::Approved;
@@ -113,8 +113,7 @@ async fn spawn_approved(
         &temp.path().join("jobs"),
         &child_env(),
         &Launcher::Direct,
-        test_permit().await,
-        None,
+        ProcessLease::for_test(test_permit().await, None),
     )
 }
 
@@ -428,8 +427,7 @@ async fn child_environment_is_exactly_snapshot_then_overrides_then_the_bounded_v
         &temp.path().join("jobs"),
         &snapshot,
         &Launcher::Direct,
-        test_permit().await,
-        None,
+        ProcessLease::for_test(test_permit().await, None),
     )
     .expect("spawn env");
     let result = proc
@@ -595,8 +593,7 @@ async fn run_with_call_id(
         &temp.path().join("jobs"),
         &child_env(),
         &Launcher::Direct,
-        test_permit().await,
-        None,
+        ProcessLease::for_test(test_permit().await, None),
     )
     .unwrap_or_else(|error| panic!("call id still spawns: {error}"));
     proc.wait(&CancellationToken::new()).await
@@ -889,8 +886,7 @@ async fn approved_scope_allows_matching_call_digest_and_roots() {
         &temp.path().join("jobs"),
         &[],
         &Launcher::Direct,
-        test_permit().await,
-        None,
+        ProcessLease::for_test(test_permit().await, None),
     )
     .expect("in-scope spawn starts");
     let cancel = CancellationToken::new();
@@ -927,8 +923,7 @@ async fn spawn_keeps_the_requested_stdout_prefix_and_flags_only_real_overflow() 
             &temp.path().join("jobs"),
             &[],
             &Launcher::Direct,
-            test_permit().await,
-            None,
+            ProcessLease::for_test(test_permit().await, None),
         )
         .expect("spawn with a prefix limit starts");
         results.push(proc.wait(&CancellationToken::new()).await.expect("wait"));
@@ -959,8 +954,7 @@ async fn approved_scope_denies_digest_mismatch_without_spawning() {
         &temp.path().join("jobs"),
         &[],
         &Launcher::Direct,
-        test_permit().await,
-        None,
+        ProcessLease::for_test(test_permit().await, None),
     );
     assert!(denied_out_of_scope(&result));
     assert!(
@@ -992,8 +986,7 @@ async fn approved_scope_denies_foreign_call_without_spawning() {
         &temp.path().join("jobs"),
         &[],
         &Launcher::Direct,
-        test_permit().await,
-        None,
+        ProcessLease::for_test(test_permit().await, None),
     );
     assert!(denied_out_of_scope(&result));
     assert!(
@@ -1024,8 +1017,7 @@ async fn approved_scope_denies_cwd_outside_roots_without_spawning() {
         &temp.path().join("jobs"),
         &[],
         &Launcher::Direct,
-        test_permit().await,
-        None,
+        ProcessLease::for_test(test_permit().await, None),
     );
     assert!(denied_out_of_scope(&result));
     assert!(
@@ -1110,8 +1102,7 @@ async fn spawn_rejects_empty_argv_before_prefix_and_approval() {
         &temp.path().join("jobs"),
         &[],
         &Launcher::Direct,
-        test_permit().await,
-        None,
+        ProcessLease::for_test(test_permit().await, None),
     );
     let Err(ToolError::Spawn { path, source }) = &result else {
         panic!("empty argv must fail as Spawn before approval, got {result:?}");
@@ -1148,8 +1139,7 @@ async fn spawn_rejects_oversized_prefix_before_approval() {
         &temp.path().join("jobs"),
         &[],
         &Launcher::Direct,
-        test_permit().await,
-        None,
+        ProcessLease::for_test(test_permit().await, None),
     );
     let Err(ToolError::Failed(error)) = &result else {
         panic!("an oversized prefix must fail before approval, got {result:?}");
@@ -1182,11 +1172,11 @@ async fn spawn_refusal_releases_process_and_fd_permits() {
     );
     let cancel = CancellationToken::new();
     let permit = admission
-        .acquire_process(&cancel)
+        .acquire_process(&cancel, admission.begin())
         .await
         .expect("process slot");
     let fd_permit = admission
-        .charge_fds(super::PROCESS_FD_COST, &cancel)
+        .charge_fds(super::PROCESS_FD_COST, &cancel, admission.begin())
         .await
         .expect("fd budget");
     let approved = approved_for(
@@ -1209,16 +1199,15 @@ async fn spawn_refusal_releases_process_and_fd_permits() {
         &temp.path().join("jobs"),
         &[],
         &Launcher::Direct,
-        permit,
-        Some(fd_permit),
+        ProcessLease::for_test(permit, Some(fd_permit)),
     );
     assert!(matches!(result, Err(ToolError::Failed(_))));
     let _process = admission
-        .acquire_process(&cancel)
+        .acquire_process(&cancel, admission.begin())
         .await
         .expect("refusal releases the process slot");
     let _fds = admission
-        .charge_fds(super::PROCESS_FD_COST, &cancel)
+        .charge_fds(super::PROCESS_FD_COST, &cancel, admission.begin())
         .await
         .expect("refusal releases the fd budget");
     assert!(!temp.path().join("jobs").exists());

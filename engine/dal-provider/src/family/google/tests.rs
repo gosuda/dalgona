@@ -125,6 +125,7 @@ fn every_surface_puts_its_own_sentinel_policy_on_the_wire() {
             thinking: &thinking,
             auth,
             image_input: true,
+            endpoint: vertex::VertexEndpoint::Regional,
         })
         .unwrap();
         call_signatures(&wire.body)

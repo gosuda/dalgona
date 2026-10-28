@@ -50,3 +50,56 @@ fn disabling_ask_lets_a_user_plugin_take_the_name() -> support::TestResult<()> {
     );
     Ok(())
 }
+
+#[test]
+fn disabled_ask_is_not_reported_as_shadowed() -> support::TestResult<()> {
+    let root = support::repo_root();
+    let scratch = support::Scratch::new("disabled-shadow-ask-quiet")?;
+    let data_home = scratch.path().join("xdg-data");
+    let config_home = scratch.path().join("xdg-config");
+    let data_root = data_home.join("dalgona");
+    fs::create_dir_all(data_root.join("plugins/ask"))?;
+    fs::copy(
+        root.join("dalgona/gates/tests/fixtures/plugins/ask/plugin.star"),
+        data_root.join("plugins/ask/plugin.star"),
+    )?;
+    let config_dir = config_home.join("dalgona");
+    fs::create_dir_all(&config_dir)?;
+    fs::write(
+        config_dir.join("dal.toml"),
+        "disabled_batteries = [\"ask\"]\nplugins = [\"ask\"]\n",
+    )?;
+    let output = support::run_command(
+        Command::new(support::dalgona_binary()?)
+            .args(["plugin", "list"])
+            .env("XDG_DATA_HOME", &data_home)
+            .env("XDG_CONFIG_HOME", &config_home),
+    )?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout)?;
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stdout.lines().any(|line| line.starts_with("ask (user):")),
+        "the user plugin loads: {stdout}"
+    );
+    assert!(
+        !stdout
+            .lines()
+            .any(|line| line.starts_with("ask (bundled):")),
+        "the disabled battery stays absent: {stdout}"
+    );
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(
+        !combined.to_lowercase().contains("shadow"),
+        "a disabled battery draws no shadow notice: {combined}"
+    );
+    assert!(
+        !combined.contains("replaces"),
+        "a disabled battery draws no replaces notice: {combined}"
+    );
+    Ok(())
+}

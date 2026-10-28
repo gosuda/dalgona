@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dal_core::SkillRecord;
-use dal_core::ext::{McpBlock, McpDeclaration, McpEndpoint, McpLaunch, McpServerDecl};
+use dal_core::ext::{
+    JUDGE_DENIED, McpBlock, McpDeclaration, McpEndpoint, McpLaunch, McpServerDecl,
+};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, ApprovalMode, Budget, CallId, ClientId, DenyReason, EntryId,
     Gen, Inference, JobId, JobsOp, JobsReply, JournalPart, Mode, ModelRequest, ModelRoute, Name,
@@ -35,7 +37,7 @@ use crate::error::ServiceError;
 use crate::ext::Doc;
 use crate::ext::generation::{Generation, ValidatedExtensions};
 use crate::ext::grants::GrantStore;
-use crate::ext::tool::{Approved, ToolCxRuntime};
+use crate::ext::tool::{Approved, Tool, ToolCxRuntime};
 use crate::ext::{Extension, ExtensionBuilder};
 use crate::ext::{Scope, ScopeError};
 use crate::proc::Proc;
@@ -442,7 +444,6 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
         GrantStore::with_runtime_scoped(
             temp.path().to_path_buf(),
             temp.path().to_path_buf(),
-            Duration::from_secs(120),
             Arc::clone(&broker),
         )
         .unwrap(),
@@ -465,6 +466,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
     let overlay = Arc::new(crate::ext::overlay::Overlay::default());
     let turn_token = CancellationToken::new();
     let services = Arc::new(SessionServices::new(SessionServicesDeps {
+        judge: None,
         grants,
         broker: Arc::clone(&broker),
         backend: Arc::<FakeBackend>::clone(&backend),
@@ -2458,6 +2460,16 @@ async fn uninjected_calls(
         Service::Infer => {
             vec![refused_at_once(services.authorize_script_infer(who, fx.cancel.clone())).await]
         }
+        Service::Judge => {
+            vec![
+                refused_at_once(services.judge_ask(who, String::from("safe?")))
+                    .await
+                    .map(|_| ()),
+                refused_at_once(services.judge_batch(who, vec![String::from("safe?")]))
+                    .await
+                    .map(|_| ()),
+            ]
+        }
         other => panic!("service {other} has no injection gate under test"),
     }
 }
@@ -2480,10 +2492,21 @@ async fn each_gated_service_refuses_a_caller_that_lacks_its_own_injection() {
         let verdicts = uninjected_calls(&fx, &who, missing).await;
         assert!(!verdicts.is_empty(), "{missing}: no method was exercised");
         for verdict in verdicts {
-            assert!(
-                matches!(verdict, Err(ServiceError::Denied(DenyReason::NotInjected))),
-                "{missing}: an uninjected call is denied for its own slot, got {verdict:?}"
-            );
+            if missing == Service::Judge {
+                assert!(
+                    matches!(
+                        verdict,
+                        Err(ServiceError::Failed { ref message, .. })
+                        if message.as_ref() == JUDGE_DENIED
+                    ),
+                    "{missing}: an uninjected call carries the judge denial, got {verdict:?}"
+                );
+            } else {
+                assert!(
+                    matches!(verdict, Err(ServiceError::Denied(DenyReason::NotInjected))),
+                    "{missing}: an uninjected call is denied for its own slot, got {verdict:?}"
+                );
+            }
         }
         assert_eq!(
             open_count(&fx.broker),
@@ -3154,6 +3177,246 @@ async fn infer_forwards_caller_continuation() {
         recorded.continuation().is_none(),
         "services must not invent a continuation when caller has none"
     );
+}
+
+#[tokio::test]
+async fn parallel_asks_block_independently() {
+    let fx = fixture(Duration::from_secs(30));
+    let first = {
+        let services = Arc::clone(&fx.services);
+        spawn(async move {
+            let who = caller("focus", &["ask"], Some(turn()));
+            services
+                .ask(
+                    &who,
+                    Question::Text {
+                        prompt: "first?".into(),
+                        placeholder: None,
+                    },
+                )
+                .await
+        })
+    };
+    await_open(&fx.broker).await;
+    let second = {
+        let services = Arc::clone(&fx.services);
+        spawn(async move {
+            let who = caller("focus", &["ask"], Some(turn()));
+            services
+                .ask(
+                    &who,
+                    Question::Text {
+                        prompt: "second?".into(),
+                        placeholder: None,
+                    },
+                )
+                .await
+        })
+    };
+    await_second_open(&fx.broker).await;
+    assert_eq!(open_count(&fx.broker), 2, "both asks stay open together");
+    let open = fx.broker.open_requests();
+    assert_eq!(open.len(), 2, "two broker slots are open");
+    let first_text = match &open[0].question {
+        Question::Text { prompt, .. } => prompt.to_string(),
+        other => panic!("oldest open is the first ask: {other:?}"),
+    };
+    let second_text = match &open[1].question {
+        Question::Text { prompt, .. } => prompt.to_string(),
+        other => panic!("newest open is the second ask: {other:?}"),
+    };
+    assert_eq!(first_text, "first?", "View.open lists the oldest first");
+    assert_eq!(second_text, "second?", "the second ask is newest");
+    let second_id = open[1].id;
+    let first_id = open[0].id;
+    let resolved = fx
+        .broker
+        .answer(
+            second_id,
+            Answer::Value(RawJson::parse("\"second\"").unwrap()),
+            ClientId::new("test-front-end"),
+        )
+        .expect("the second answer wins its slot");
+    fx.broker.release(&resolved);
+    let second_answer = second.join().await.expect("the second ask resolves");
+    assert_eq!(
+        second_answer,
+        Some(Answer::Value(RawJson::parse("\"second\"").unwrap())),
+        "the second-first answer reaches only its waiter"
+    );
+    let still_open = fx.broker.open_requests();
+    assert_eq!(
+        still_open.len(),
+        1,
+        "the first ask stays blocked after the second resolves"
+    );
+    assert_eq!(
+        still_open[0].id, first_id,
+        "the surviving open request is the first ask"
+    );
+    assert!(
+        fx.broker
+            .answer(second_id, Answer::Decline, ClientId::new("late"))
+            .is_err(),
+        "a settled slot rejects a late answer"
+    );
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(
+        first
+            .join()
+            .await
+            .expect("the first ask resolves")
+            .is_none(),
+        "the first ask resolves only after its own answer"
+    );
+    assert_eq!(open_count(&fx.broker), 0, "both slots settle");
+}
+
+struct OtherStub {
+    name: Name,
+    spec: Arc<dal_core::ToolSpec>,
+}
+
+impl crate::ext::tool::Tool for OtherStub {
+    fn name(&self) -> &Name {
+        &self.name
+    }
+    fn spec(&self, _model: &dal_core::ModelInfo) -> Arc<dal_core::ToolSpec> {
+        Arc::clone(&self.spec)
+    }
+    fn classify(
+        &self,
+        _args: &crate::ext::tool::RawValue,
+        _ws: &Workspace,
+    ) -> Result<dal_core::ToolClass, crate::ext::tool::ArgError> {
+        Ok(dal_core::ToolClass::Other)
+    }
+    fn run<'a>(
+        &'a self,
+        _call: crate::ext::tool::ToolCall,
+        cx: crate::ext::tool::ToolCx<'a>,
+    ) -> crate::ext::BoxFuture<'a, crate::ext::tool::ToolOutcome> {
+        Box::pin(async move {
+            let who = cx.caller().clone();
+            let workspace = cx.workspace().as_path().to_path_buf();
+            let request = run_request(&["git", "status"], workspace);
+            match cx.services().run(&who, request).await {
+                Ok(_) => crate::ext::tool::ToolOutcome::Ok(Box::new(
+                    crate::ext::ToolOutput::from_text("other reached run"),
+                )),
+                Err(crate::error::ServiceError::Failed { .. }) => {
+                    crate::ext::tool::ToolOutcome::Ok(Box::new(crate::ext::ToolOutput::from_text(
+                        "other reached run",
+                    )))
+                }
+                Err(error) => {
+                    crate::ext::tool::ToolOutcome::Err(crate::error::ToolError::Message {
+                        message: format!("nested run failed: {error}").into(),
+                    })
+                }
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn other_tool_run_service() {
+    let fx = fixture(Duration::from_secs(30));
+    let workspace = fx.temp.path().to_path_buf();
+    fx.rt
+        .decisions
+        .lock()
+        .unwrap()
+        .push_back(dal_core::Decision::Ask { grant: None });
+    fx.rt
+        .script
+        .lock()
+        .unwrap()
+        .extend([AuthorizeScript::AskThenApprove {
+            prefix: vec![OsString::from("git")],
+            roots: vec![workspace.clone()],
+        }]);
+    let outer_caller = Caller::new(
+        "focus".parse::<Name>().unwrap(),
+        Origin::User,
+        ServiceSet::from_names(["run"]).unwrap(),
+        std::num::NonZeroU32::MIN,
+        CallerKind::Tool,
+        Some(turn()),
+    )
+    .with_test_digest();
+    let tool = OtherStub {
+        name: "other".parse::<Name>().unwrap(),
+        spec: Arc::new(dal_core::ToolSpec {
+            name: "other".parse::<Name>().unwrap(),
+            description: "other-class stub".into(),
+            parameters: RawJson::parse(r#"{"type":"object"}"#).unwrap(),
+            grammar: None,
+        }),
+    };
+    assert!(
+        matches!(
+            tool.classify(
+                &RawJson::parse("{}").unwrap(),
+                &Workspace::new(fx.temp.path().to_path_buf()).unwrap()
+            ),
+            Ok(dal_core::ToolClass::Other)
+        ),
+        "the stub stays Other so the outer call rides no exec ladder"
+    );
+    let env = Arc::new(crate::Env {
+        vars: std::collections::BTreeMap::new(),
+        cwd: workspace.clone(),
+        sandbox_helper: None,
+    });
+    let cx = crate::ext::tool::ToolCx::new(
+        outer_caller,
+        CallId::new("outer-1"),
+        SessionId::new_v7(),
+        Some(turn()),
+        Arc::clone(&fx.services) as Arc<dyn crate::ext::Services>,
+        Arc::clone(&fx.rt) as Arc<dyn crate::ext::tool::ToolCxRuntime>,
+        crate::ext::tool::CallSnapshot {
+            generation: dal_core::GenerationId::new(std::num::NonZeroU64::MIN),
+            cutoff: None,
+            env,
+        },
+    );
+    let call = crate::ext::tool::ToolCall::new("outer-1", RawJson::parse("{}").unwrap());
+    let broker = Arc::clone(&fx.broker);
+    let outer = spawn(async move { tool.run(call, cx).await });
+    await_open(&broker).await;
+    answer_next(&broker, Answer::Approve);
+    await_open(&broker).await;
+    answer_next(&broker, Answer::Approve);
+    let text = match outer.join().await {
+        crate::ext::tool::ToolOutcome::Ok(output) => output.to_string(),
+        crate::ext::tool::ToolOutcome::Err(error) => {
+            panic!("the nested run reaches its spawn door: {error}")
+        }
+        crate::ext::tool::ToolOutcome::Interrupted => panic!("the outer stub is never cancelled"),
+        crate::ext::tool::ToolOutcome::Detached(_) => panic!("the outer stub never detaches"),
+    };
+    assert_eq!(
+        text, "other reached run",
+        "the Other stub returns after its nested run"
+    );
+    assert_eq!(
+        *fx.rt.ladder_asks.lock().unwrap(),
+        1,
+        "exactly one run-ladder authorization fires, none for the outer Other tool"
+    );
+    assert_eq!(
+        fx.rt.previews.lock().unwrap().len(),
+        1,
+        "only the nested run mints a preview"
+    );
+    assert_eq!(
+        fx.rt.spawns.lock().unwrap().len(),
+        1,
+        "the nested run reaches the spawn door once"
+    );
+    assert_eq!(open_count(&fx.broker), 0, "no broker question is left open");
 }
 
 #[tokio::test]

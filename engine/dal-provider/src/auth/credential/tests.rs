@@ -52,9 +52,10 @@ fn write_file(path: &Path, text: &str, _mode: u32) {
 }
 
 fn entry(id: &str, key_env: Option<&str>) -> ProviderEntry {
+    let def = crate::find(id);
     ProviderEntry {
         id: Box::from(id),
-        def: crate::find(id),
+        def,
         family: Family::Chat,
         base_url: Box::from("https://example.test"),
         transport: Transport::Https,
@@ -62,6 +63,14 @@ fn entry(id: &str, key_env: Option<&str>) -> ProviderEntry {
         auth: AuthStyle::Bearer,
         max_concurrent_requests: 4,
         settings: ProviderSettings::default(),
+        origins: match def {
+            Some(_) => crate::provider::Origins::default(),
+            None => crate::provider::Origins {
+                api: crate::provider::Origin::Explicit,
+                base: crate::provider::Origin::Explicit,
+                auth: crate::provider::Origin::RowDefault,
+            },
+        },
     }
 }
 
@@ -88,6 +97,7 @@ fn codex_oauth(expires_at: Option<i64>) -> Credential {
             r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct"}}"#,
         )),
         account_id: Some(String::from("acct")),
+        project_id: None,
     })
 }
 
@@ -419,6 +429,7 @@ fn set_rejects_kinds_the_member_cannot_hold() {
         expires_at: None,
         id_token: None,
         account_id: None,
+        project_id: None,
     });
     assert!(matches!(
         store.set(OPENAI_CODEX, bare.clone()),
@@ -438,6 +449,7 @@ fn set_rejects_kinds_the_member_cannot_hold() {
         expires_at: None,
         id_token: None,
         account_id: Some(String::from("acct")),
+        project_id: None,
     });
     let id_token_only = Credential::OAuth(OAuthCredential {
         access_token: SecretString::from("a"),
@@ -445,6 +457,7 @@ fn set_rejects_kinds_the_member_cannot_hold() {
         expires_at: None,
         id_token: Some(String::from("id")),
         account_id: None,
+        project_id: None,
     });
     let key = Credential::ApiKey {
         key: SecretString::from("sk-droid"),
@@ -510,6 +523,7 @@ fn expiring_flips_exactly_at_the_proactive_window_edge() {
         expires_at,
         id_token: None,
         account_id: None,
+        project_id: None,
     };
     let now = 1_000_000;
     let window = crate::PROACTIVE_WINDOW_SECS;
@@ -570,6 +584,7 @@ fn a_blank_stored_account_id_defers_to_the_id_token_claim() {
         expires_at: None,
         id_token,
         account_id: account_id.map(String::from),
+        project_id: None,
     };
     let claim = jwt(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-claim"}}"#);
     let blank_claim = jwt(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"  "}}"#);
@@ -663,8 +678,10 @@ fn issuance_counts_from_created_at_only_when_it_is_an_integer() {
 }
 
 /// Files written by the serializer before the member map replaced the three
-/// fixed fields, one per entry shape and two with several members.
-const FIXTURES: [(&str, &str); 8] = [
+/// fixed fields, one per entry shape and two with several members, then the
+/// Cloud Code Assist members that carry a project (one with an expiry, two
+/// together with none).
+const FIXTURES: [(&str, &str); 10] = [
     (
         "openai_api_key",
         include_str!("fixtures/openai_api_key.json"),
@@ -693,6 +710,14 @@ const FIXTURES: [(&str, &str); 8] = [
     (
         "api_keys_and_codex",
         include_str!("fixtures/api_keys_and_codex.json"),
+    ),
+    (
+        "google_cloud_code_assist_oauth",
+        include_str!("fixtures/google_cloud_code_assist_oauth.json"),
+    ),
+    (
+        "google_members",
+        include_str!("fixtures/google_members.json"),
     ),
 ];
 
@@ -759,4 +784,158 @@ fn an_unknown_or_repeated_member_is_refused_at_load() {
     }
     let unknown = load_error(r#"{"zenmux":{"kind":"api_key","key":"k"}}"#).to_string();
     assert!(unknown.contains("unknown field `zenmux`"), "{unknown}");
+}
+
+const CLOUD_CODE_ASSIST: &str = "google-cloud-code-assist";
+const ANTIGRAVITY: &str = "google-antigravity";
+
+/// A Cloud Code Assist sign-in as the login stores it: plain tokens and the
+/// project discovery named.
+fn cloud_code_oauth(project_id: Option<&str>) -> Credential {
+    Credential::OAuth(OAuthCredential {
+        access_token: SecretString::from("ya29.access"),
+        refresh_token: SecretString::from("1//refresh"),
+        expires_at: Some(1_789_000_000),
+        id_token: None,
+        account_id: None,
+        project_id: project_id.map(String::from),
+    })
+}
+
+#[test]
+fn a_cloud_code_sign_in_stores_its_project_and_reopens_with_it() {
+    let dir = TestDir::new("cloud-code-project");
+    let mut store = AuthStore::empty(dir.auth());
+    for (id, project) in [
+        (CLOUD_CODE_ASSIST, "gemini-project"),
+        (ANTIGRAVITY, "ag-project"),
+    ] {
+        store
+            .set(id, cloud_code_oauth(Some(project)))
+            .unwrap_or_else(|error| panic!("{id} takes a project: {error}"));
+    }
+    store.store().expect("store writes");
+    let text = fs::read_to_string(dir.auth()).expect("read back");
+    assert!(text.contains(r#""project_id":"gemini-project""#), "{text}");
+    assert!(text.contains(r#""project_id":"ag-project""#), "{text}");
+    let reloaded = AuthStore::load(dir.auth()).expect("reload");
+    assert_eq!(
+        reloaded.credential(CLOUD_CODE_ASSIST),
+        Some(cloud_code_oauth(Some("gemini-project")))
+    );
+    assert_eq!(
+        reloaded.credential(ANTIGRAVITY),
+        Some(cloud_code_oauth(Some("ag-project")))
+    );
+    let written = fs::read_to_string(dir.auth()).expect("read back again");
+    reloaded.store().expect("store again");
+    assert_eq!(fs::read_to_string(dir.auth()).expect("read"), written);
+}
+
+#[test]
+fn the_project_binds_to_the_cloud_code_rows_only() {
+    let mut store = AuthStore::empty("unused/auth.json");
+    // A Cloud Code Assist row stores a credential only after discovery named
+    // its project: none, a blank one, or a Codex-shaped one are refused.
+    let codex = codex_oauth(None);
+    for refused in [
+        cloud_code_oauth(None),
+        cloud_code_oauth(Some("")),
+        cloud_code_oauth(Some("  \t")),
+        codex,
+        Credential::ApiKey {
+            key: SecretString::from("sk-none"),
+        },
+    ] {
+        for id in [CLOUD_CODE_ASSIST, ANTIGRAVITY] {
+            assert!(
+                matches!(
+                    store.set(id, refused.clone()),
+                    Err(ProviderError::AuthWrite { .. })
+                ),
+                "{id}: {refused:?}"
+            );
+            assert_eq!(store.credential(id), None, "{id}");
+        }
+    }
+    // Every other OAuth row refuses a project, whatever the tokens say.
+    for id in [
+        OPENAI_CODEX,
+        ANTHROPIC,
+        FACTORY_DROID,
+        "gitlab-duo",
+        "radius",
+        "cursor",
+        "devin",
+    ] {
+        assert!(
+            matches!(
+                store.set(id, cloud_code_oauth(Some("not-a-project-row"))),
+                Err(ProviderError::AuthWrite { .. })
+            ),
+            "{id}"
+        );
+        assert_eq!(store.credential(id), None, "{id}");
+    }
+    // The plain sign-in the other rows store carries none and still fits.
+    for id in [
+        ANTHROPIC,
+        FACTORY_DROID,
+        "gitlab-duo",
+        "radius",
+        "cursor",
+        "devin",
+    ] {
+        store
+            .set(id, cloud_code_oauth(None))
+            .unwrap_or_else(|error| panic!("{id} takes a plain sign-in: {error}"));
+    }
+}
+
+#[test]
+fn a_stored_cloud_code_member_without_a_usable_project_is_refused_at_load() {
+    for text in [
+        r#"{"google-cloud-code-assist":{"kind":"oauth","access_token":"SECRET-A","refresh_token":"SECRET-B"}}"#,
+        r#"{"google-cloud-code-assist":{"kind":"oauth","access_token":"SECRET-C","refresh_token":"SECRET-D","project_id":""}}"#,
+        r#"{"google-antigravity":{"kind":"oauth","access_token":"SECRET-E","refresh_token":"SECRET-F","project_id":"   "}}"#,
+        r#"{"google-antigravity":{"kind":"oauth","access_token":"SECRET-G","refresh_token":"SECRET-H","project_id":null}}"#,
+        r#"{"google-antigravity":{"kind":"api_key","key":"SECRET-I"}}"#,
+        r#"{"anthropic":{"kind":"oauth","access_token":"SECRET-J","refresh_token":"SECRET-K","project_id":"p"}}"#,
+        r#"{"openai-codex":{"kind":"oauth","access_token":"SECRET-L","refresh_token":"SECRET-M","id_token":"i","account_id":"a","project_id":"p"}}"#,
+    ] {
+        let error = load_error(text);
+        assert!(
+            matches!(error, ProviderError::AuthFileInvalid { .. }),
+            "{text}: {error:?}"
+        );
+        let shown = error.to_string();
+        assert!(!shown.contains("SECRET"), "{shown}");
+    }
+}
+
+#[test]
+fn members_stored_before_the_project_existed_still_read_and_write_back_unchanged() {
+    // The pre-existing fixtures carry no `project_id`; they must read as
+    // projectless credentials and write back without growing the member.
+    for (name, text) in FIXTURES.iter().take(8) {
+        let dir = TestDir::new(name);
+        write_file(&dir.auth(), text, 0o600);
+        let store = AuthStore::load(dir.auth()).unwrap_or_else(|error| panic!("{name}: {error}"));
+        for status in store.status() {
+            if let Some(Credential::OAuth(oauth)) = store.credential(&status.provider) {
+                assert_eq!(oauth.project_id, None, "{name}: {}", status.provider);
+            }
+        }
+        assert!(!text.contains("project_id"), "{name}");
+    }
+}
+
+#[test]
+fn debug_prints_the_project_and_redacts_the_tokens() {
+    let shown = format!("{:?}", cloud_code_oauth(Some("visible-project")));
+    assert!(shown.contains("visible-project"), "{shown}");
+    assert!(
+        !shown.contains("ya29.access") && !shown.contains("1//refresh"),
+        "{shown}"
+    );
 }

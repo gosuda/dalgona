@@ -35,10 +35,9 @@ use dal_core::{
     RawJson, RequestParams, SessionId, ThinkingLevel,
 };
 use dal_provider::{
-    AuthStyle, CatalogEntry, EnvSnapshot, EventStream, HostToolResult, Listing, ProviderConfig,
-    ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ProviderSettings, ResolvedModel,
-    StopReason, StreamEvent, ThinkingSupport, ToolSupport, Transport,
-    build_client_http2_prior_knowledge,
+    CatalogEntry, EnvSnapshot, EventStream, HostToolResult, Listing, ProviderConfig, ProviderError,
+    ProviderIdentity, ProviderSet, ResolvedModel, StopReason, StreamEvent, ThinkingSupport,
+    ToolSupport, build_client_http2_prior_knowledge,
 };
 use hyper::{
     Method, Request, Response, StatusCode, Version,
@@ -596,26 +595,17 @@ impl Drop for CursorH2 {
 /// One Cursor provider on `base_url`, with the HTTP/2 prior-knowledge client
 /// installed before any provider handle exists.
 fn cursor_set(max_concurrent: u32, base_url: &str, dir: &Path) -> ProviderSet {
-    let entry = ProviderEntry {
-        id: PROVIDER.into(),
-        def: None,
-        family: Family::Cursor,
-        base_url: base_url.into(),
-        transport: Transport::Https,
-        key_env: Some("CURSOR_H2_KEY".into()),
-        auth: AuthStyle::Bearer,
-        max_concurrent_requests: max_concurrent,
-        settings: ProviderSettings::default(),
-    };
-    let config = ProviderConfig {
-        default_model: None,
-        thinking: ThinkingLevel::Medium,
-        aliases: Vec::new(),
-        request_max_retries: 0,
-        stream_max_retries: 0,
-        providers: vec![entry],
-        scripted: None,
-    };
+    let table = format!(
+        "[providers.{PROVIDER}]\napi = \"cursor\"\nbase_url = \"{base_url}\"\nkey_env = \"CURSOR_H2_KEY\"\nauth = \"bearer\"\nmax_concurrent_requests = {max_concurrent}\n"
+    );
+    let config =
+        Config::load(ConfigProduct::Dalgon, dir, "", Some(&table)).expect("provider table parses");
+    let mut providers = ProviderConfig::from_config(&config).expect("providers decode");
+    providers.request_max_retries = 0;
+    providers.stream_max_retries = 0;
+    providers
+        .providers
+        .retain(|provider| &*provider.id == PROVIDER);
     let identity = ProviderIdentity {
         version: "test".into(),
         os: "linux".into(),
@@ -624,7 +614,7 @@ fn cursor_set(max_concurrent: u32, base_url: &str, dir: &Path) -> ProviderSet {
     };
     let env = EnvSnapshot::test(&[("CURSOR_H2_KEY", SECRET)]);
     let mut set =
-        ProviderSet::new(&config, identity, env, dir, dir).expect("the provider set builds");
+        ProviderSet::new(&providers, identity, env, dir, dir).expect("the provider set builds");
     set.set_test_client(PROVIDER, build_client_http2_prior_knowledge())
         .expect("the loopback HTTP/2 client installs");
     set

@@ -76,12 +76,7 @@ pub(crate) fn to_value<T>(value: &T) -> Result<Value, ErrorObject>
 where
     T: serde::Serialize,
 {
-    let text = sonic_rs::to_string(value).map_err(|error| ErrorObject {
-        code: -32603,
-        message: format!("internal error: {error}"),
-        data: Some(hint_value()),
-    })?;
-    sonic_rs::from_str::<Value>(&text).map_err(|error| ErrorObject {
+    crate::json::encode_value_lossless(value).map_err(|error| ErrorObject {
         code: -32603,
         message: format!("internal error: {error}"),
         data: Some(hint_value()),

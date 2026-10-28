@@ -596,15 +596,24 @@ pub(crate) fn build_proxy(input: &DuoProxyRequest<'_>) -> Result<DuoProxyWire, P
             )
         }
         ProxyRoute::Responses => {
-            let body =
-                responses::request_body(&derived, input.thinking.wire, input.reasoning_summary)?;
+            let body = responses::request_body(
+                &derived,
+                input.thinking.wire,
+                input.reasoning_summary,
+                responses::BodyPolicy {
+                    output_cap: responses::OutputCap::Honor {
+                        ceiling: input.max_output,
+                    },
+                    tool_schemas: crate::family::schema::ToolSchemas::Verbatim,
+                },
+            )?;
             (body, Vec::new(), None, None)
         }
         ProxyRoute::Completions => {
             let WireThinking::OpenAi { .. } = input.thinking.wire else {
                 return Err(foreign_thinking());
             };
-            let body = chat::request_body(&derived, input.thinking)
+            let body = chat::request_body(&derived, input.thinking, chat::Dialect::STANDARD)
                 .map_err(|error| invalid(error.to_string()))?;
             (body, Vec::new(), None, None)
         }

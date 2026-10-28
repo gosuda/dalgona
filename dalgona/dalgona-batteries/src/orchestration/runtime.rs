@@ -50,6 +50,10 @@ use super::{JobsView, OrchestrationConfig, StopKind};
 /// Maximum number of list-and-cancel passes during descendant shutdown.
 pub(crate) const CANCEL_SWEEP_PASS_LIMIT: usize = 64;
 
+/// The slice of the close grace an in-flight wake may keep for its reply.
+/// The settle that restores or commits the wake's load needs the rest.
+const WAKE_CLOSE_WAIT: Duration = Duration::from_secs(2);
+
 /// The work battery's open-todo summary document.
 const TODO_TERMINAL: &str = "todo://terminal";
 /// Name the jobs service records one workflow run under.
@@ -111,6 +115,8 @@ pub(crate) struct Runtime {
 
 struct Owner {
     sender: mpsc::Sender<Message>,
+    services: Arc<dyn Services>,
+    caller: Caller,
     snapshot: Arc<Mutex<StatusGate>>,
     _run: tokio_util::task::AbortOnDropHandle<()>,
     /// The deepest this session's mailbox ever filled, sampled at the real
@@ -211,8 +217,83 @@ enum Message {
     },
     Close {
         deadline: TokioInstant,
+        report_deadline: TokioInstant,
         reply: oneshot::Sender<()>,
     },
+}
+
+/// One delivery wake in flight. The owner keeps the whole commit/rollback
+/// load here, so a close that outlives the call still settles the wake
+/// exactly once: the task carries only clones of the turn arguments and
+/// returns the classified result.
+struct PendingWake {
+    /// The composed wake: sources requeued and reports re-held when the
+    /// wake never starts a turn.
+    ready: Vec<super::arbiter::Ready>,
+    job_ids: Vec<JobId>,
+    checkpoint: GoalCheckpoint,
+    carries_goal: bool,
+    monitor_only: bool,
+    monitor_batches: usize,
+    /// Identity of the supervised child in the owner's wake `JoinSet`. The
+    /// call's opening runs this battery's `before_turn` hook, which only
+    /// the owner loop answers, so nothing on the loop's side may await the
+    /// call. An outer owner abort drops the owner's `JoinSet` inside the
+    /// owner future's teardown, which aborts the child there; the load
+    /// itself never detaches the wake the way a raw `JoinHandle` would. A
+    /// drop only requests the abort (the task lands on its next
+    /// scheduling), so close still joins the actual reply below; no
+    /// joined-on-drop is claimed.
+    handle: tokio::task::AbortHandle,
+}
+
+/// The classified turn-service result of one delivery wake.
+enum WakeOutcome {
+    /// The fold accepted the wake and its turn opened.
+    Woken,
+    /// The turn service answered without waking (no wake turn started).
+    NotWoken,
+    /// The fold refused the wake at the typed twenty-wake cutoff.
+    WakeLimit,
+    /// The wake failed with a service error.
+    Failed(ServiceError),
+}
+
+/// Awaits the in-flight wake child in the owner's supervised `JoinSet`,
+/// leaving the owner loop free to answer the hooks the call itself raises.
+/// The loop borrows the slot instead of the load, so the settled load stays
+/// owned by the loop and a settle can never queue behind a full mailbox.
+/// Completions for any other task id are stale and never publish: the poll
+/// keeps waiting for the current wake.
+async fn wake_task_result(
+    wake: Option<&PendingWake>,
+    tasks: &mut tokio::task::JoinSet<WakeOutcome>,
+) -> Result<WakeOutcome, tokio::task::JoinError> {
+    loop {
+        match tasks.join_next_with_id().await {
+            Some(Ok((id, outcome))) => {
+                if wake.is_some_and(|pending| pending.handle.id() == id) {
+                    return Ok(outcome);
+                }
+            }
+            Some(Err(join)) => {
+                if wake.is_some_and(|pending| pending.handle.id() == join.id()) {
+                    return Err(join);
+                }
+            }
+            None => std::future::pending::<()>().await,
+        }
+    }
+}
+
+/// Classifies the turn service's answer to one delivery wake.
+fn classify_wake(delivered: Result<dal_core::TurnOpReply, ServiceError>) -> WakeOutcome {
+    match delivered {
+        Ok(dal_core::TurnOpReply::Woken) => WakeOutcome::Woken,
+        Ok(_) => WakeOutcome::NotWoken,
+        Err(ServiceError::Denied(dal_core::DenyReason::WakeLimit)) => WakeOutcome::WakeLimit,
+        Err(error) => WakeOutcome::Failed(error),
+    }
 }
 
 #[derive(Deserialize)]
@@ -286,6 +367,19 @@ struct SessionState {
     /// The grant for the services the delivery poll uses was refused; the
     /// poll stays off until a prompt, command, or tool call.
     delivery_refused: bool,
+    /// The delivery wake in flight, if one has left and not settled yet.
+    /// The poll issues no second wake while one is in flight: the ready
+    /// reports it carried are already out of `held`, and a second call
+    /// would double-account them. The owner settles it from here, so close
+    /// settles it within its own deadline when a usable completion lands;
+    /// otherwise the load is left owned until teardown and reported.
+    wake: Option<PendingWake>,
+    /// The supervised wake child, owned by this loop. The set holds at most
+    /// the one wake `PendingWake` names by `AbortHandle` id; its drop aborts
+    /// a still-running child when the owner itself is aborted, and both the
+    /// live arm and close join through it, so no wake task outlives the
+    /// owner and stale completions never publish.
+    wake_tasks: tokio::task::JoinSet<WakeOutcome>,
     /// Job reports a delivered wake carried whose acknowledgement the host
     /// has not confirmed. A wake that reached the session is never repeated;
     /// each tick retries only this acknowledgement.
@@ -507,6 +601,43 @@ impl Runtime {
         }
     }
 
+    /// Installs the child report tool for a child session. Split from `open`
+    /// so the session setup stays under the function-length cap; the call
+    /// order is unchanged.
+    async fn install_session_report_tool(
+        &self,
+        parent: Option<SessionId>,
+        caller: &Caller,
+        services: &Arc<dyn Services>,
+    ) -> Result<(), HookError> {
+        if parent.is_some() && self.config.agents.enabled {
+            let report_tool =
+                super::tools::report_tool(self).map_err(|error| failed(&error.to_string()))?;
+            services
+                .add_session_tools(caller, vec![report_tool])
+                .await
+                .map_err(|error| failed(&error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Tracks the child report cell for a child session. Split from `open`
+    /// so the session setup stays under the function-length cap; the call
+    /// order is unchanged.
+    fn track_open_report(
+        &self,
+        session: SessionId,
+        parent: Option<SessionId>,
+        report: &ReportCell,
+    ) {
+        if parent.is_some() {
+            self.reports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session, report.clone());
+        }
+    }
+
     async fn open(&self, start: SessionStart, cx: HookCx) -> Result<(), HookError> {
         let session = cx.session;
         let parent = cx.parent;
@@ -519,22 +650,13 @@ impl Runtime {
             services.as_ref(),
         )
         .await;
-        if parent.is_some() && self.config.agents.enabled {
-            let report_tool =
-                super::tools::report_tool(self).map_err(|error| failed(&error.to_string()))?;
-            services
-                .add_session_tools(&caller, vec![report_tool])
-                .await
-                .map_err(|error| failed(&error.to_string()))?;
-        }
+        self.install_session_report_tool(parent, &caller, &services)
+            .await?;
         let report = ReportCell::default();
-        if parent.is_some() {
-            self.reports
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(session, report.clone());
-        }
+        self.track_open_report(session, parent, &report);
         let (sender, receiver) = mpsc::channel(super::constants::BATTERY_MAILBOX);
+        let owner_services = Arc::clone(&services);
+        let owner_caller = caller.clone();
         let snapshot = Arc::new(Mutex::new(StatusGate::new()));
         #[cfg(test)]
         let mailbox_pressure = Arc::new(MailboxPressure::default());
@@ -573,6 +695,8 @@ impl Runtime {
             goal_timer: None,
             goal_grant: None,
             delivery_refused: false,
+            wake: None,
+            wake_tasks: tokio::task::JoinSet::new(),
             unconfirmed_jobs: Vec::new(),
             last_delivery_error: None,
             last_monitor_error: None,
@@ -596,6 +720,8 @@ impl Runtime {
                 session,
                 Owner {
                     sender,
+                    services: owner_services,
+                    caller: owner_caller,
                     snapshot,
                     _run: run,
                     #[cfg(test)]
@@ -607,15 +733,78 @@ impl Runtime {
     }
 
     async fn close(&self, session: SessionId, _end: SessionEnd) {
-        if let Some(sender) = self.sender(session) {
-            let (reply, response) = oneshot::channel();
-            let deadline = TokioInstant::now() + Duration::from_secs(4);
-            if sender
-                .send(Message::Close { deadline, reply })
-                .await
-                .is_ok()
-            {
-                let _ = response.await;
+        let target = self.owners.lock().ok().and_then(|owners| {
+            owners.get(&session).map(|owner| {
+                (
+                    owner.sender.clone(),
+                    Arc::clone(&owner.services),
+                    owner.caller.clone(),
+                )
+            })
+        });
+        if let Some((sender, services, caller)) = target {
+            let start = TokioInstant::now();
+            let total = Duration::from_secs(4);
+            let reserve = WAKE_CLOSE_WAIT
+                .checked_div(4)
+                .unwrap_or(Duration::from_millis(500));
+            let windows = total
+                .checked_sub(reserve)
+                .and_then(|report| report.checked_sub(reserve).map(|drain| (drain, report)));
+            if windows.is_none() {
+                services.notify(
+                    &caller,
+                    Notice {
+                        turn: None,
+                        kind: "orchestration.cancel".into(),
+                        text: "the session close budget is smaller than its reserved settlement windows; its wake outcome is unknown and retention may not have run."
+                            .into(),
+                    },
+                );
+            }
+            if let Some((drain_window, report_window)) = windows {
+                let drain = start + drain_window;
+                let report_deadline = start + report_window;
+                let backstop = start + total;
+                let (reply, response) = oneshot::channel();
+                let enqueued = matches!(
+                    timeout_at(
+                        drain,
+                        sender.send(Message::Close {
+                            deadline: drain,
+                            report_deadline,
+                            reply,
+                        }),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                );
+                if enqueued {
+                    // The owner settles under `drain` and retains under
+                    // `report_deadline`; this only backstops a wedged owner.
+                    let replied = matches!(timeout_at(backstop, response).await, Ok(Ok(())));
+                    if !replied {
+                        services.notify(
+                            &caller,
+                            Notice {
+                                turn: None,
+                                kind: "orchestration.cancel".into(),
+                                text: "the session close timed out waiting for the owner; its wake outcome is unknown and child sessions may still be running."
+                                    .into(),
+                            },
+                        );
+                    }
+                } else {
+                    services.notify(
+                        &caller,
+                        Notice {
+                            turn: None,
+                            kind: "orchestration.cancel".into(),
+                            text: "the session close could not reach the owner within the close bound; its wake outcome is unknown and retention may not have run."
+                                .into(),
+                        },
+                    );
+                }
             }
         }
         if let Ok(mut owners) = self.owners.lock() {
@@ -693,8 +882,45 @@ impl SessionState {
                 _ = ticker.tick() => {
                     self.tick().await;
                 }
+                settled = wake_task_result(self.wake.as_ref(), &mut self.wake_tasks), if self.wake.is_some() => {
+                    self.settle_wake(settled).await;
+                }
             }
         }
+    }
+
+    /// Answers one tool-call message: records the `ask` continuation and the
+    /// toolless-streak reset, then runs the call. Split from
+    /// `handle_message` so the dispatch stays under the function-length cap;
+    /// the caller still publishes status and answers the waiter.
+    async fn answer_tool_call(&mut self, event: ToolCallEvent) -> ToolCallVerdict {
+        if event.tool.as_str() == "ask" {
+            self.open_asks.insert(event.call.clone());
+        }
+        self.turn_tool_called = true;
+        self.tool_call(event).await
+    }
+
+    /// Finishes one turn: clears the loop guard, records user-cancel and
+    /// provider-error transitions, and latches the stop state. Split from
+    /// `handle_message` so the dispatch stays under the function-length
+    /// cap; the call order is unchanged.
+    async fn finish_turn(&mut self, event: &TurnEnd, reply: oneshot::Sender<()>) {
+        if self.config.loop_guard.enabled {
+            clear_pending_attempts(&mut self.guard);
+        }
+        if event.stop == dal_core::Stop::Cancelled && !self.guard_cancel {
+            self.arbiter.on_user_cancel();
+        }
+        if event.stop == dal_core::Stop::Failed && !event.overflowed {
+            self.block_goal_on_provider_error().await;
+        }
+        self.last_stop = stop_kind(event.stop);
+        self.last_turn_overflowed = event.overflowed;
+        self.guard_cancel = false;
+        self.turn_active = false;
+        self.publish_status();
+        let _ = reply.send(());
     }
 
     async fn handle_message(&mut self, message: Message) -> bool {
@@ -714,11 +940,7 @@ impl SessionState {
             }
             Message::BeforeTurn(reply) => self.before_turn(reply),
             Message::ToolCall(event, reply) => {
-                if event.tool.as_str() == "ask" {
-                    self.open_asks.insert(event.call.clone());
-                }
-                self.turn_tool_called = true;
-                let verdict = self.tool_call(event).await;
+                let verdict = self.answer_tool_call(event).await;
                 self.publish_status();
                 let _ = reply.send(verdict);
             }
@@ -747,21 +969,7 @@ impl SessionState {
                 let _ = reply.send(());
             }
             Message::TurnEnd(event, reply) => {
-                if self.config.loop_guard.enabled {
-                    clear_pending_attempts(&mut self.guard);
-                }
-                if event.stop == dal_core::Stop::Cancelled && !self.guard_cancel {
-                    self.arbiter.on_user_cancel();
-                }
-                if event.stop == dal_core::Stop::Failed && !event.overflowed {
-                    self.block_goal_on_provider_error().await;
-                }
-                self.last_stop = stop_kind(event.stop);
-                self.last_turn_overflowed = event.overflowed;
-                self.guard_cancel = false;
-                self.turn_active = false;
-                self.publish_status();
-                let _ = reply.send(());
+                self.finish_turn(&event, reply).await;
             }
             Message::Settled(event, reply) => {
                 let result = self.settled(event).await;
@@ -794,8 +1002,12 @@ impl SessionState {
                 };
                 let _ = reply.send(result);
             }
-            Message::Close { deadline, reply } => {
-                self.close(deadline).await;
+            Message::Close {
+                deadline,
+                report_deadline,
+                reply,
+            } => {
+                self.close(deadline, report_deadline).await;
                 let _ = reply.send(());
                 return true;
             }
@@ -840,7 +1052,7 @@ impl SessionState {
         if self.arbiter.mode() != super::ControllerMode::Run {
             return Ok(());
         }
-        if self.delivery_refused || !self.open_asks.is_empty() {
+        if self.delivery_refused || self.wake.is_some() || !self.open_asks.is_empty() {
             return Ok(());
         }
         if !self.idle_for_delivery().await? {
@@ -908,37 +1120,287 @@ impl SessionState {
             }
         };
         let sources = sources.into_iter().map(Into::into).collect();
-        let delivered = self
-            .services
-            .turn(
-                &self.caller,
-                TurnOp::Wake {
-                    text: text.into_boxed_str(),
-                    sources,
-                    job_ids: job_ids.clone(),
-                },
-            )
-            .await;
-        match delivered {
-            Ok(dal_core::TurnOpReply::Woken) => {
+        // The call runs off-loop because its opening asks this loop to
+        // answer the `before_turn` hook; the settle lands through the
+        // loop's wake arm. The child carries only the call's own arguments;
+        // the owner keeps the whole commit/rollback load and supervises the
+        // child in its wake `JoinSet`, so no raw spawn handle escapes.
+        let services = Arc::clone(&self.services);
+        let caller = self.caller.clone();
+        let call = TurnOp::Wake {
+            text: text.into_boxed_str(),
+            sources,
+            job_ids: job_ids.clone(),
+        };
+        let handle = self
+            .wake_tasks
+            .spawn(async move { classify_wake(services.turn(&caller, call).await) });
+        self.wake = Some(PendingWake {
+            ready,
+            job_ids,
+            checkpoint,
+            carries_goal,
+            monitor_only,
+            monitor_batches,
+            handle,
+        });
+        Ok(())
+    }
+
+    /// Settles the in-flight wake once its task lands. The task returns
+    /// only the classified result; the load it settles has been waiting in
+    /// `wake`, so the application below runs exactly once.
+    async fn settle_wake(&mut self, settled: Result<WakeOutcome, tokio::task::JoinError>) {
+        let Some(pending) = self.wake.take() else {
+            return;
+        };
+        let outcome = match settled {
+            Ok(outcome) => outcome,
+            Err(join) => self.classify_lost_wake(join).await,
+        };
+        self.apply_wake_outcome(pending, outcome).await;
+        self.publish_status();
+    }
+
+    /// Classifies a wake whose task ended without a reply. The host's idle
+    /// answer is the existing contract for whether the wake reached the
+    /// session: a busy host accepted it, so the delivery commits; an idle
+    /// host never saw it, so the join failure is reported and the delivery
+    /// abandons. A lost reply is never read as silence: a blind re-release
+    /// would deliver the same reports twice.
+    async fn classify_lost_wake(&self, lost: tokio::task::JoinError) -> WakeOutcome {
+        match self.services.turn(&self.caller, TurnOp::IsIdle).await {
+            Ok(dal_core::TurnOpReply::Idle(false)) => WakeOutcome::Woken,
+            Ok(_) => WakeOutcome::Failed(ServiceError::failed(
+                None,
+                format!("the delivery wake ended without a reply: {lost}"),
+            )),
+            Err(error) => WakeOutcome::Failed(error),
+        }
+    }
+
+    /// Close-only acceptance probe: a failed probe is unknown, never a
+    /// release. `None` means the outcome stayed unknown; only an actual
+    /// `Idle(false)` answer reconciles an accepted wake as `Woken`. Any
+    /// other answered probe keeps the normal lost-reply mapping so the
+    /// inherited idle-after-abort contract is unchanged.
+    async fn classify_lost_wake_at_close(
+        &self,
+        lost: tokio::task::JoinError,
+    ) -> Option<WakeOutcome> {
+        match self.services.turn(&self.caller, TurnOp::IsIdle).await {
+            Ok(dal_core::TurnOpReply::Idle(false)) => Some(WakeOutcome::Woken),
+            Ok(_) => Some(WakeOutcome::Failed(ServiceError::failed(
+                None,
+                format!("the delivery wake ended without a reply: {lost}"),
+            ))),
+            Err(_) => None,
+        }
+    }
+
+    /// Close-only stale-completion probe with the same unknown-on-failure
+    /// contract as the close-only lost probe above.
+    async fn classify_stale_wake_at_close(&self, pending: &PendingWake) -> Option<WakeOutcome> {
+        match self.services.turn(&self.caller, TurnOp::IsIdle).await {
+            Ok(dal_core::TurnOpReply::Idle(false)) => Some(WakeOutcome::Woken),
+            Ok(_) => Some(WakeOutcome::Failed(ServiceError::failed(
+                None,
+                format!(
+                    "the delivery wake ended without a reply: stale wake completion for {:?}",
+                    pending.handle.id()
+                ),
+            ))),
+            Err(_) => None,
+        }
+    }
+
+    /// Resolves the in-flight wake during close under the close's own
+    /// deadline. The child keeps at most `WAKE_CLOSE_WAIT` of it to land its
+    /// actual reply; only a call still running past that is cancelled, and
+    /// even then the rejoin is awaited under the same deadline so a result
+    /// that raced the abort still wins. Every await on this path is bounded
+    /// by the outer close deadline, never a fresh reset: the first join, the
+    /// post-abort rejoin, each lost-reply probe, and the final apply. When
+    /// no usable completion lands in time the outcome stays unknown: the
+    /// load is left owned by this actor instead of settled from a
+    /// fabricated result, so no report is committed or released here and the
+    /// checkpoint file is kept as-is; the owner teardown below drops the
+    /// load and its `JoinSet` requests the child's abort there, which is
+    /// reported, never quiet. A settled outcome still commits or abandons
+    /// exactly once, and no task outlives the owner.
+    async fn settle_wake_at_close(&mut self, pending: PendingWake, deadline: TokioInstant) {
+        let join_deadline = deadline.min(TokioInstant::now() + WAKE_CLOSE_WAIT);
+        let wanted = pending.handle.id();
+        let mut joined: Option<WakeOutcome> = None;
+        loop {
+            match timeout_at(join_deadline, self.wake_tasks.join_next_with_id()).await {
+                Ok(Some(Ok((id, outcome)))) if id == wanted => {
+                    joined = Some(outcome);
+                    break;
+                }
+                Ok(Some(Err(join))) if join.id() == wanted => {
+                    if let Ok(Some(outcome)) =
+                        timeout_at(deadline, self.classify_lost_wake_at_close(join)).await
+                    {
+                        joined = Some(outcome);
+                    }
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    if let Ok(Some(outcome)) =
+                        timeout_at(deadline, self.classify_stale_wake_at_close(&pending)).await
+                    {
+                        joined = Some(outcome);
+                    }
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        let outcome = if let Some(outcome) = joined {
+            Some(outcome)
+        } else {
+            pending.handle.abort();
+            let mut raced: Option<WakeOutcome> = None;
+            loop {
+                match timeout_at(deadline, self.wake_tasks.join_next_with_id()).await {
+                    Ok(Some(Ok((id, outcome)))) if id == wanted => {
+                        raced = Some(outcome);
+                        break;
+                    }
+                    Ok(Some(Err(join))) if join.id() == wanted => {
+                        if let Ok(Some(outcome)) =
+                            timeout_at(deadline, self.classify_lost_wake_at_close(join)).await
+                        {
+                            raced = Some(outcome);
+                        }
+                        break;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        if let Ok(Some(outcome)) =
+                            timeout_at(deadline, self.classify_stale_wake_at_close(&pending)).await
+                        {
+                            raced = Some(outcome);
+                        }
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            raced
+        };
+        let Some(outcome) = outcome else {
+            self.wake = Some(pending);
+            self.notify_wake_unsettled_at_close();
+            return;
+        };
+        if TokioInstant::now() >= deadline {
+            self.wake = Some(pending);
+            self.notify_wake_unsettled_at_close();
+            return;
+        }
+        if timeout_at(deadline, self.apply_wake_outcome(pending, outcome))
+            .await
+            .is_err()
+        {
+            self.notify_wake_interrupted_at_close();
+        }
+    }
+
+    /// Reports a close that left its in-flight wake unsettled: no usable
+    /// completion landed within the outer close deadline, so the outcome is
+    /// unknown and close settled nothing. The load stays owned by the actor
+    /// until teardown instead of being committed or released here, and the
+    /// checkpoint file is preserved; the notice carries the unknown outcome
+    /// rather than a quiet success or a data-loss verdict.
+    fn notify_wake_unsettled_at_close(&self) {
+        self.services.notify(
+            &self.caller,
+            Notice {
+                turn: None,
+                kind: "orchestration.cancel".into(),
+                text: "the session closed before its last delivery wake could be settled within the close deadline; its outcome is unknown, so close committed and released nothing.".into(),
+            },
+        );
+    }
+
+    /// Reports a close whose wake apply was interrupted at the drain
+    /// deadline: the apply may have partially committed, released, or
+    /// restored, so the notice never claims nothing was done.
+    fn notify_wake_interrupted_at_close(&self) {
+        self.services.notify(
+            &self.caller,
+            Notice {
+                turn: None,
+                kind: "orchestration.cancel".into(),
+                text: "the session closed while its last delivery wake was being settled within the close deadline; settlement was interrupted and may be partially applied, so its outcome is unknown.".into(),
+            },
+        );
+    }
+
+    /// Applies one wake outcome to the load the owner kept: commits a wake
+    /// the host accepted, pauses at the fold's typed cutoff, and abandons
+    /// every other outcome exactly once.
+    async fn apply_wake_outcome(&mut self, pending: PendingWake, outcome: WakeOutcome) {
+        let PendingWake {
+            ready,
+            job_ids,
+            checkpoint,
+            carries_goal,
+            monitor_only,
+            monitor_batches,
+            ..
+        } = pending;
+        match outcome {
+            WakeOutcome::Woken => {
                 self.commit_delivered_wake(&ready, job_ids, monitor_only, monitor_batches)
                     .await;
             }
-            Ok(_) => {
-                self.abandon_wake(&ready, job_ids, checkpoint, carries_goal, None)
-                    .await?;
+            WakeOutcome::NotWoken => {
+                if let Err(error) = self
+                    .abandon_wake(&ready, job_ids, checkpoint, carries_goal, None)
+                    .await
+                {
+                    self.report_delivery_error(error.to_string());
+                }
             }
-            Err(ServiceError::Denied(dal_core::DenyReason::WakeLimit)) => {
-                self.arbiter.stop();
-                self.abandon_wake(&ready, job_ids, checkpoint, carries_goal, None)
-                    .await?;
+            WakeOutcome::WakeLimit => {
+                self.pause_automatic_delivery();
+                if let Err(error) = self
+                    .abandon_wake(&ready, job_ids, checkpoint, carries_goal, None)
+                    .await
+                {
+                    self.report_delivery_error(error.to_string());
+                }
             }
-            Err(error) => {
-                self.abandon_wake(&ready, job_ids, checkpoint, carries_goal, Some(error))
-                    .await?;
+            WakeOutcome::Failed(error) => {
+                if let Err(error) = self
+                    .abandon_wake(&ready, job_ids, checkpoint, carries_goal, Some(error))
+                    .await
+                {
+                    self.report_delivery_error(error.to_string());
+                }
             }
         }
-        Ok(())
+    }
+
+    /// Pauses automatic delivery after the core denies a wake at its
+    /// twenty-turn cutoff, announcing the pause once on the delivery
+    /// channel. The held reports stay queued for the next user turn.
+    fn pause_automatic_delivery(&mut self) {
+        self.arbiter.pause("20 automatic turns in a row");
+        self.services.notify(
+            &self.caller,
+            Notice {
+                turn: None,
+                kind: "orchestration.delivery".into(),
+                text:
+                    "dalgona stopped starting turns by itself after 20 in a row. Your next message delivers the rest."
+                        .into(),
+            },
+        );
     }
 
     /// Commits the job reports a delivered wake carried and returns the ids
@@ -1427,7 +1889,10 @@ impl SessionState {
         Ok(())
     }
 
-    async fn close(&mut self, deadline: TokioInstant) {
+    async fn close(&mut self, deadline: TokioInstant, report_deadline: TokioInstant) {
+        if let Some(pending) = self.wake.take() {
+            self.settle_wake_at_close(pending, deadline).await;
+        }
         self.goal_timer = None;
         self.projection.clear();
         for handle in self.runs.values() {
@@ -1437,7 +1902,19 @@ impl SessionState {
         let held = std::mem::take(&mut self.held);
         if !held.is_empty() {
             let ids = held.iter().map(|report| report.id).collect();
-            let _ = timeout_at(deadline, self.release_reports(ids)).await;
+            let released = timeout_at(deadline, self.release_reports(ids)).await;
+            if !matches!(released, Ok(Ok(()))) {
+                self.held = held;
+                self.services.notify(
+                    &self.caller,
+                    Notice {
+                        turn: None,
+                        kind: "orchestration.cancel".into(),
+                        text: "some held job reports could not be released within the close deadline; they remain held and their delivery outcome is unknown."
+                            .into(),
+                    },
+                );
+            }
         }
         let services = self.services.as_ref();
         let caller = &self.caller;
@@ -1476,8 +1953,20 @@ impl SessionState {
                 }
             }
         );
-        if !aborted.is_empty() {
-            self.retain_aborted_worktrees(aborted).await;
+        if !aborted.is_empty()
+            && timeout_at(report_deadline, self.retain_aborted_worktrees(aborted))
+                .await
+                .is_err()
+        {
+            self.services.notify(
+                &self.caller,
+                Notice {
+                    turn: None,
+                    kind: "orchestration.cancel".into(),
+                    text: "Some aborted worktrees could not be retained within the close deadline. They remain on disk."
+                        .into(),
+                },
+            );
         }
         let failures = match sweep {
             Ok(sweep) => sweep.failure_text(),

@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use dal_agent::{Host, Product};
+use dal_agent::{Env, Host, Product};
 use dal_wire::{
     LocalSocketError, StdioTransport, Transport, WireError, default_rpc_path, serve_acp,
     serve_codex, serve_local, serve_rpc,
@@ -80,6 +80,7 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
         vars,
         cwd,
         config,
+        config_path,
         data_root,
         helper,
         ..
@@ -90,7 +91,19 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
         Ok(transport) => Transport::Stdio(transport),
         Err(error) => return wire_streams_failure(wire, &error),
     };
-    let host = match start_host(product, &config, vars, cwd, helper, &data_root).await {
+    let host = match start_host(
+        product,
+        config,
+        Env {
+            vars,
+            cwd,
+            sandbox_helper: helper,
+        },
+        &data_root,
+        &config_path,
+    )
+    .await
+    {
         Ok(host) => host,
         Err(code) => return code,
     };
@@ -133,6 +146,7 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
         vars,
         cwd,
         config,
+        config_path,
         data_root,
         helper,
         ..
@@ -154,7 +168,19 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
     };
     #[cfg(not(windows))]
     let sid = edge::current_user_sid(&vars);
-    let host = match start_host(product, &config, vars, cwd, helper, &data_root).await {
+    let host = match start_host(
+        product,
+        config,
+        Env {
+            vars,
+            cwd,
+            sandbox_helper: helper,
+        },
+        &data_root,
+        &config_path,
+    )
+    .await
+    {
         Ok(host) => host,
         Err(code) => return code,
     };
@@ -224,6 +250,17 @@ fn wire_transport() -> std::io::Result<StdioTransport> {
     Ok(StdioTransport::from_files(streams.reader, streams.writer))
 }
 
+/// Captures the process standard streams for the stdio wire.
+#[cfg(not(unix))]
+fn process_stdio() -> (tokio::io::Stdin, tokio::io::Stdout) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "process edge: the stdio wire owns standard input"
+    )]
+    let reader = tokio::io::stdin();
+    (reader, tokio::io::stdout())
+}
+
 /// Builds the stdio transport on the process standard streams.
 #[cfg(not(unix))]
 #[expect(
@@ -231,12 +268,51 @@ fn wire_transport() -> std::io::Result<StdioTransport> {
     reason = "the unix variant can fail isolating wire streams; the signature is shared"
 )]
 fn wire_transport() -> std::io::Result<StdioTransport> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "process edge: the stdio wire owns standard input"
-    )]
-    let reader = tokio::io::stdin();
-    Ok(StdioTransport::new(reader, tokio::io::stdout()))
+    let (reader, writer) = process_stdio();
+    Ok(StdioTransport::new(reader, writer))
+}
+
+/// Owned input and output files for a native helper.
+#[cfg(all(feature = "test-support", any(unix, windows)))]
+pub struct RawWireStreams {
+    /// Standard-input file.
+    pub reader: std::fs::File,
+    /// Standard-output file.
+    pub writer: std::fs::File,
+}
+
+/// Captures protocol streams for a native helper. Call once at process startup.
+///
+/// Unix isolates the wire streams onto private copies and points the shared
+/// streams away from the protocol.
+///
+/// # Errors
+///
+/// Returns the operating-system error when the streams cannot be isolated.
+#[cfg(all(feature = "test-support", unix))]
+pub fn raw_wire_streams() -> std::io::Result<RawWireStreams> {
+    let streams = edge::isolate_wire_streams()?;
+    Ok(RawWireStreams {
+        reader: streams.reader,
+        writer: streams.writer,
+    })
+}
+
+/// Captures protocol streams for a native helper. Call once at process startup.
+///
+/// Windows duplicates owned handles for the standard input and output streams.
+///
+/// # Errors
+///
+/// Returns the operating-system error when the handles cannot be duplicated.
+#[cfg(all(feature = "test-support", windows))]
+pub fn raw_wire_streams() -> std::io::Result<RawWireStreams> {
+    use std::os::windows::io::AsHandle;
+
+    let (reader, writer) = process_stdio();
+    let reader = std::fs::File::from(reader.as_handle().try_clone_to_owned()?);
+    let writer = std::fs::File::from(writer.as_handle().try_clone_to_owned()?);
+    Ok(RawWireStreams { reader, writer })
 }
 
 fn wire_streams_failure(wire: Wire, error: &std::io::Error) -> ExitCode {

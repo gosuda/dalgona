@@ -33,6 +33,12 @@ pub(crate) const DAILY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.c
 /// The Antigravity sandbox endpoint, last in the failover order.
 pub(crate) const SANDBOX_ENDPOINT: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 
+/// The Antigravity client version the `User-Agent` carries, captured from the
+/// real client (the backend gates on the version, like Devin's pinned CLI
+/// identity). The request path and the sign-in's project discovery both name
+/// this one value.
+pub(crate) const CLIENT_VERSION: &str = "2.19.1";
+
 /// The unchanged `cl` token the backend expects beside the client version: it
 /// stays fixed while the version moves.
 const USER_AGENT_CL: &str = "963137146";

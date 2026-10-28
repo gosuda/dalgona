@@ -6,7 +6,7 @@ use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use dal_agent::{Env, Host, HostError, SessionRef};
+use dal_agent::{Env, HostError, SessionRef};
 use dal_core::{
     ApprovalMode, ClientId, ConfigOverrides, ConfigProduct, Mode, Screen, ThinkingLevel, Workspace,
 };
@@ -89,6 +89,8 @@ pub mod cli;
 
 /// Command dispatch over the built product.
 mod dispatch;
+#[cfg(all(feature = "test-support", any(unix, windows)))]
+pub use dispatch::{RawWireStreams, raw_wire_streams};
 
 /// Process-edge snapshots, lexical paths, and platform identity.
 mod edge;
@@ -254,19 +256,23 @@ async fn run_command(
                 workspace_path,
                 workspace,
                 config,
+                config_path,
                 data_root,
                 helper,
                 ..
             } = startup;
             run_headless(
                 &cli,
-                vars,
-                cwd,
+                Env {
+                    vars,
+                    cwd,
+                    sandbox_helper: helper,
+                },
                 workspace_path,
                 workspace,
                 config,
+                &config_path,
                 product,
-                helper,
                 &data_root,
             )
             .await
@@ -313,13 +319,12 @@ async fn run_command(
 /// Runs one headless prompt turn over the host agent.
 async fn run_headless(
     cli: &cli::Cli,
-    vars: VarsMap,
-    cwd: PathBuf,
+    env: Env,
     workspace_path: PathBuf,
     workspace: Workspace,
     config: Config,
+    config_path: &Path,
     product: dal_agent::Product,
-    helper: Option<PathBuf>,
     data_root: &Path,
 ) -> ExitCode {
     if config.model().is_none() {
@@ -342,19 +347,9 @@ async fn run_headless(
     // denies gated calls instead of waiting out the broker timeout.
     let approval = config.approval();
     let session = session_ref(cli, workspace);
-    let host = match Host::start(
-        product,
-        config,
-        Env {
-            vars,
-            cwd,
-            sandbox_helper: helper,
-        },
-    )
-    .await
-    {
+    let host = match dispatch::start_host(product, config, env, data_root, config_path).await {
         Ok(host) => host,
-        Err(error) => return host_exit(&error, data_root),
+        Err(code) => return code,
     };
     let agent = match host.open(session, ClientId::new("cli")).await {
         Ok(agent) => agent,

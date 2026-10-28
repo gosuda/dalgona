@@ -30,8 +30,8 @@ use super::hooks::{
 };
 use super::stream::{Calibration, G8Rule, Sample, SampleSet};
 use super::{
-    Engine, FindingsHandle, GuardConfig, GuardFindings, Session, TurnState, checks, metrics,
-    report, strike, strike_key, terse, warnings,
+    Engine, FindingsHandle, GuardConfig, GuardConfigError, GuardFindings, Session, TurnState,
+    checks, metrics, report, strike, strike_key, terse, warnings,
 };
 use crate::parse::{self, Parsed};
 use crate::patch::{
@@ -2630,4 +2630,525 @@ async fn a_watcher_cannot_credit_a_closed_session() {
     let peer = open_peer(&rig).await;
     peer_begin(&rig, peer, 1, "edit").await;
     assert!(router.start(&TurnInfo::new(peer, turn_n(1))).is_some());
+}
+
+#[tokio::test]
+async fn g1_new_file_detection() {
+    let (engine, session, turn) = engine_with_turn(test_config());
+    let src = "fn main() {\n}\n";
+    let post = parsed("/ws/a.rs", src).await;
+    let hunks = [DiffHunk {
+        old_start: 1,
+        old_lines: 0,
+        new_start: 1,
+        new_lines: 2,
+        lines: vec![
+            DiffLine {
+                kind: DiffLineKind::Added,
+                text: "fn main() {".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Added,
+                text: "}".into(),
+            },
+        ],
+    }];
+    let files = [StagedFile {
+        path: Path::new("a.rs"),
+        absolute_path: Path::new("/ws/a.rs"),
+        before: None,
+        after: Some(src.as_bytes()),
+        hunks: &hunks,
+        pre_parse: None,
+        post_parse: Some(post),
+    }];
+    let batch = StagedBatch {
+        session,
+        turn,
+        call: CallId::new("c1"),
+        files: files.to_vec(),
+    };
+    let out = engine.inspect(&batch);
+    assert!(
+        out.iter()
+            .all(|finding| finding.severity != FindingSeverity::Block),
+        "{out:?}"
+    );
+    let state = engine.state.lock().expect("engine state");
+    let turn = state
+        .sessions
+        .get(&session)
+        .expect("session")
+        .turn
+        .as_ref()
+        .expect("turn");
+    assert_eq!((turn.added, turn.deleted), (2, 0));
+    assert_eq!(turn.files.len(), 1);
+    assert_eq!(turn.new_files.len(), 1);
+    assert!(turn.new_files.contains("a.rs"));
+}
+
+#[test]
+fn config_unknown_g8_rule() {
+    let mut section = dal_core::GuardSection::default();
+    section.policies.g8_calibrated_rules = vec!["vibes".to_string()];
+    let error = GuardConfig::from_section(&section, &Calibration::none())
+        .expect_err("unknown g8 rule is rejected");
+    assert_eq!(error, GuardConfigError::UnknownRule("vibes".to_string()));
+    assert_eq!(error.to_string(), "unknown guard g8 rule vibes");
+}
+
+#[test]
+fn node_kinds_exist_in_grammar() {
+    for language in [
+        parse::Language::Rust,
+        parse::Language::Ocaml,
+        parse::Language::OcamlInterface,
+        parse::Language::Python,
+        parse::Language::JavaScript,
+        parse::Language::TypeScript,
+        parse::Language::Tsx,
+        parse::Language::Go,
+        parse::Language::C,
+        parse::Language::Cpp,
+    ] {
+        let table = super::tables::table(language);
+        let grammar = language.grammar();
+        let mut kinds = vec![table.bool_node];
+        for list in [
+            table.functions,
+            table.decisions,
+            table.nesting,
+            table.folded,
+            table.flat,
+            table.else_parents,
+            table.calls,
+            table.comments,
+            table.identifiers,
+            table.labeled_jumps,
+        ] {
+            kinds.extend(list.iter().copied());
+        }
+        for kind in kinds {
+            assert_ne!(
+                grammar.id_for_node_kind(kind, true),
+                0,
+                "{language:?} has no node kind {kind}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cognitive_recursion_else_if() {
+    let plain = "fn f(x: i32) -> i32 {\n if x <= 0 {\n 0\n } else {\n x\n }\n}\n";
+    let chained =
+        "fn f(x: i32) -> i32 {\n if x <= 0 {\n 0\n } else if x == 1 {\n 1\n } else {\n x\n }\n}\n";
+    let recursive = "fn f(x: i32) -> i32 {\n if x <= 0 {\n 0\n } else {\n f(x - 1)\n }\n}\n";
+    let plain_tree = parsed("/ws/a.rs", plain).await;
+    let plain_cog = metrics::measure(parse::Language::Rust, &plain_tree.tree, plain.as_bytes())
+        .functions[0]
+        .cognitive;
+    let chained_tree = parsed("/ws/a.rs", chained).await;
+    let chained_cog = metrics::measure(
+        parse::Language::Rust,
+        &chained_tree.tree,
+        chained.as_bytes(),
+    )
+    .functions[0]
+        .cognitive;
+    assert_eq!(
+        chained_cog,
+        plain_cog + 1,
+        "else-if adds exactly one (plain {plain_cog}, chained {chained_cog})"
+    );
+    let recursive_tree = parsed("/ws/a.rs", recursive).await;
+    let recursive_cog = metrics::measure(
+        parse::Language::Rust,
+        &recursive_tree.tree,
+        recursive.as_bytes(),
+    )
+    .functions[0]
+        .cognitive;
+    assert_eq!(
+        recursive_cog,
+        plain_cog + 1,
+        "recursion adds exactly one (plain {plain_cog}, recursive {recursive_cog})"
+    );
+}
+
+#[tokio::test]
+async fn cyclomatic_definition() {
+    let src = "int f(int x, int y, int z) {\n int r = 0;\n if (x > 0 && y > 0 || z > 0) {\n r = 1;\n }\n switch (x) {\n case 1:\n r += 1;\n break;\n case 2:\n r += 2;\n break;\n case 3:\n r += 3;\n break;\n }\n r += (y > 0) ? 10 : 20;\n return r;\n}\n";
+    let post = parsed("/ws/a.c", src).await;
+    let measured = metrics::measure(parse::Language::C, &post.tree, src.as_bytes());
+    assert_eq!(measured.functions.len(), 1);
+    assert_eq!(
+        measured.functions[0].cyclomatic, 8,
+        "{:?}",
+        measured.functions[0]
+    );
+}
+
+#[tokio::test]
+async fn g8_dedup() {
+    let rig = Rig::open(test_config()).await;
+    rig.begin(1, "edit").await;
+    let router = super::stream::Router::new(Arc::clone(&rig.engine));
+    let mut watch = router
+        .start(&TurnInfo::new(rig.session, turn_n(1)))
+        .expect("watch starts");
+    let (first, channel) = todo_feed();
+    assert!(matches!(
+        watch.feed(channel, first),
+        dal_core::StreamVerdict::Continue
+    ));
+    let (second, channel) = todo_feed();
+    assert!(matches!(
+        watch.feed(channel, second),
+        dal_core::StreamVerdict::Continue
+    ));
+    watch.finish();
+    rig.end(1).await;
+    assert_eq!(rig.findings().stream, vec![(G8Rule::BareTodo, 2)]);
+}
+
+#[tokio::test]
+async fn large_file_skip() {
+    let (engine, session, turn) = engine_with_turn(test_config());
+    // The gate pairs byte images with already-parsed trees, so the test pairs
+    // large byte images with small representative trees instead of parsing
+    // 600 KiB under the 250 ms parse budget.
+    let big_src = format!("fn main() {{}}\n{}", "// padding\n".repeat(70_000));
+    assert!(
+        big_src.len() > 524_288,
+        "fixture exceeds the large-file limit"
+    );
+    let big = parsed("/ws/a.rs", "fn main() {}\n").await;
+    let bad = parsed("/ws/a.rs", "fn broken( {\n").await;
+    let outcome = checks::parse_gate(
+        "big.rs",
+        Path::new("/ws/big.rs"),
+        Some(big_src.as_bytes()),
+        format!("{big_src}fn broken( {{\n").as_bytes(),
+        Some(&big),
+        Some(&bad),
+    );
+    assert!(
+        matches!(outcome, checks::GateOutcome::Reject(_)),
+        "{outcome:?}"
+    );
+    let hunks = [DiffHunk {
+        old_start: 1,
+        old_lines: 1,
+        new_start: 1,
+        new_lines: 2,
+        lines: vec![DiffLine {
+            kind: DiffLineKind::Added,
+            text: "fn main() {}".into(),
+        }],
+    }];
+    let files = [StagedFile {
+        path: Path::new("big.rs"),
+        absolute_path: Path::new("/ws/big.rs"),
+        before: None,
+        after: Some(big_src.as_bytes()),
+        hunks: &hunks,
+        pre_parse: None,
+        post_parse: Some(big),
+    }];
+    let batch = StagedBatch {
+        session,
+        turn,
+        call: CallId::new("c1"),
+        files: files.to_vec(),
+    };
+    let out = engine.inspect(&batch);
+    assert!(
+        out.iter()
+            .any(|finding| finding.text.contains("skipped (large file)")),
+        "{out:?}"
+    );
+}
+
+#[tokio::test]
+async fn non_utf8_skip() {
+    let valid = parsed("/ws/a.rs", "fn main() {\n}\n").await;
+    let outcome = checks::parse_gate(
+        "a.rs",
+        Path::new("/ws/a.rs"),
+        Some(b"fn main() {\n}\n"),
+        b"\xff\xfe",
+        Some(&valid),
+        Some(&valid),
+    );
+    assert!(
+        matches!(outcome, checks::GateOutcome::Skipped),
+        "{outcome:?}"
+    );
+    let control = checks::parse_gate(
+        "a.rs",
+        Path::new("/ws/a.rs"),
+        Some(b"fn main() {\n}\n"),
+        b"fn main() {\n}\n",
+        Some(&valid),
+        Some(&valid),
+    );
+    assert!(
+        matches!(control, checks::GateOutcome::Pass(_)),
+        "{control:?}"
+    );
+    let (engine, session, turn) = engine_with_turn(test_config());
+    let hunks = [DiffHunk {
+        old_start: 1,
+        old_lines: 1,
+        new_start: 1,
+        new_lines: 2,
+        lines: vec![
+            DiffLine {
+                kind: DiffLineKind::Added,
+                text: "fn main() {".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Added,
+                text: "}".into(),
+            },
+        ],
+    }];
+    let files = [StagedFile {
+        path: Path::new("a.rs"),
+        absolute_path: Path::new("/ws/a.rs"),
+        before: Some(b"fn main() {\n}\n".as_ref()),
+        after: Some(b"\xff\xfe".as_ref()),
+        hunks: &hunks,
+        pre_parse: None,
+        post_parse: None,
+    }];
+    let batch = StagedBatch {
+        session,
+        turn,
+        call: CallId::new("c1"),
+        files: files.to_vec(),
+    };
+    let out = engine.inspect(&batch);
+    assert!(
+        out.iter()
+            .all(|finding| finding.severity != FindingSeverity::Block),
+        "{out:?}"
+    );
+    assert!(
+        !out.iter().any(|finding| finding.text.contains("ploc")),
+        "{out:?}"
+    );
+    let state = engine.state.lock().expect("engine state");
+    let turn = state
+        .sessions
+        .get(&session)
+        .expect("session")
+        .turn
+        .as_ref()
+        .expect("turn");
+    assert_eq!((turn.added, turn.deleted), (2, 0));
+}
+
+#[tokio::test]
+async fn g1_reduction_ask() {
+    let rig = Rig::open(test_config()).await;
+    rig.begin(1, "refactor the parser").await;
+    let before_src = "fn main() {}\n";
+    let after_src = "fn main() {\n let x = 1;\n}\n";
+    let pre = parsed("/ws/a.rs", before_src).await;
+    let post = parsed("/ws/a.rs", after_src).await;
+    let mut lines = Vec::new();
+    for index in 0..40 {
+        lines.push(DiffLine {
+            kind: DiffLineKind::Removed,
+            text: format!("old {index}").into(),
+        });
+    }
+    for index in 0..5 {
+        lines.push(DiffLine {
+            kind: DiffLineKind::Added,
+            text: format!("new {index}").into(),
+        });
+    }
+    let hunks = [DiffHunk {
+        old_start: 1,
+        old_lines: 40,
+        new_start: 1,
+        new_lines: 5,
+        lines,
+    }];
+    let files = [StagedFile {
+        path: Path::new("a.rs"),
+        absolute_path: Path::new("/ws/a.rs"),
+        before: Some(before_src.as_bytes()),
+        after: Some(after_src.as_bytes()),
+        hunks: &hunks,
+        pre_parse: Some(pre),
+        post_parse: Some(post),
+    }];
+    let batch = StagedBatch {
+        session: rig.session,
+        turn: turn_n(1),
+        call: CallId::new("c1"),
+        files: files.to_vec(),
+    };
+    let out = rig.engine.inspect(&batch);
+    assert!(
+        out.iter()
+            .all(|finding| finding.severity != FindingSeverity::Block),
+        "{out:?}"
+    );
+    rig.end(1).await;
+    let report = rig
+        .findings()
+        .report
+        .clone()
+        .expect("reduction turn emits a report");
+    assert!(
+        report.contains("TURN CHANGE SUMMARY. Added 5, deleted 40, net -35, files 1, new files 0."),
+        "{report}"
+    );
+    assert!(report.contains("deletion share 0.89"), "{report}");
+    assert!(!report.contains("pure-addition"), "{report}");
+    let pending = rig
+        .begin(2, "follow up")
+        .await
+        .expect("next turn receives the model copy");
+    assert_eq!(
+        pending, *report,
+        "model copy matches the stored turn report byte-identical"
+    );
+}
+
+#[tokio::test]
+async fn g6_never_builds() {
+    let rig = Rig::open(test_config()).await;
+    rig.begin(1, "edit code").await;
+    rig.touch(1, "src/a.rs");
+    rig.end(1).await;
+    let findings = rig.findings();
+    assert!(findings.warnings.is_empty(), "{findings:?}");
+    let report = findings.report.clone().unwrap_or_default();
+    assert!(!report.contains("NEW WARNING NOTICE"), "{report}");
+    assert!(!report.contains("NEW WARNING"), "{report}");
+    rig.assert_no_stray_service_use();
+}
+
+#[tokio::test]
+async fn g6_new_only() {
+    let rig = Rig::open(test_config()).await;
+    rig.begin(1, "build").await;
+    rig.touch(1, "a.ml");
+    assert_eq!(
+        rig.call(1, &exec("c1", CARGO_BUILD)).await,
+        ToolCallVerdict::Allow
+    );
+    let first = "File \"a.ml\", line 3, characters 4-5:\nWarning 26: unused variable x.\n";
+    rig.result(1, "c1", "exec", true, first).await;
+    rig.end(1).await;
+    assert_eq!(rig.findings().warnings.len(), 1);
+    rig.begin(2, "build again").await;
+    rig.touch(2, "a.ml");
+    rig.touch(2, "b.ml");
+    assert_eq!(
+        rig.call(2, &exec("c2", CARGO_BUILD)).await,
+        ToolCallVerdict::Allow
+    );
+    let second = "File \"a.ml\", line 4, characters 4-5:\nWarning 26: unused variable x.\nFile \"b.ml\", line 7, characters 4-5:\nWarning 32: unused variable y.\n";
+    rig.result(2, "c2", "exec", true, second).await;
+    rig.end(2).await;
+    let findings = rig.findings();
+    let report = findings
+        .report
+        .as_deref()
+        .expect("second turn emits a report");
+    assert_eq!(report.matches("NEW WARNING NOTICE").count(), 1, "{report}");
+    assert!(report.contains("b.ml:7"), "{report}");
+    assert!(!report.contains("a.ml:4"), "{report}");
+}
+
+#[tokio::test]
+async fn metrics_ocaml_golden() {
+    let src = "let f x = x\n";
+    let post = parsed("/ws/a.ml", src).await;
+    let measured = metrics::measure(parse::Language::Ocaml, &post.tree, src.as_bytes());
+    assert_eq!(measured.functions.len(), 1, "{measured:?}");
+    let function = &measured.functions[0];
+    assert_eq!(function.name.as_ref(), "f");
+    assert_eq!(function.cyclomatic, 1, "{function:?}");
+    assert_eq!(function.cognitive, 0, "{function:?}");
+    assert_eq!(function.nesting, 0, "{function:?}");
+    assert_eq!(function.ploc, 1, "{function:?}");
+}
+
+#[tokio::test]
+async fn metrics_typescript_golden() {
+    let src = "function f(x) {\nreturn x;\n}\n";
+    let post = parsed("/ws/a.ts", src).await;
+    let measured = metrics::measure(parse::Language::TypeScript, &post.tree, src.as_bytes());
+    assert_eq!(measured.functions.len(), 1, "{measured:?}");
+    let function = &measured.functions[0];
+    assert_eq!(function.name.as_ref(), "f");
+    assert_eq!(function.cyclomatic, 1, "{function:?}");
+    assert_eq!(function.cognitive, 0, "{function:?}");
+    assert_eq!(function.nesting, 0, "{function:?}");
+    assert_eq!(function.ploc, 3, "{function:?}");
+}
+
+#[tokio::test]
+async fn metrics_python_golden() {
+    let src = "def f(x):\n    return x\n";
+    let post = parsed("/ws/a.py", src).await;
+    let measured = metrics::measure(parse::Language::Python, &post.tree, src.as_bytes());
+    assert_eq!(measured.functions.len(), 1, "{measured:?}");
+    let function = &measured.functions[0];
+    assert_eq!(function.name.as_ref(), "f");
+    assert_eq!(function.cyclomatic, 1, "{function:?}");
+    assert_eq!(function.cognitive, 0, "{function:?}");
+    assert_eq!(function.nesting, 0, "{function:?}");
+    assert_eq!(function.ploc, 2, "{function:?}");
+}
+
+#[tokio::test]
+async fn metrics_go_golden() {
+    let src = "package main\nfunc f(x int) int {\nreturn x\n}\n";
+    let post = parsed("/ws/a.go", src).await;
+    let measured = metrics::measure(parse::Language::Go, &post.tree, src.as_bytes());
+    assert_eq!(measured.functions.len(), 1, "{measured:?}");
+    let function = &measured.functions[0];
+    assert_eq!(function.name.as_ref(), "f");
+    assert_eq!(function.cyclomatic, 1, "{function:?}");
+    assert_eq!(function.cognitive, 0, "{function:?}");
+    assert_eq!(function.nesting, 0, "{function:?}");
+    assert_eq!(function.ploc, 3, "{function:?}");
+}
+
+#[tokio::test]
+async fn metrics_c_golden() {
+    let src = "int f(int x) {\nreturn x;\n}\n";
+    let post = parsed("/ws/a.c", src).await;
+    let measured = metrics::measure(parse::Language::C, &post.tree, src.as_bytes());
+    assert_eq!(measured.functions.len(), 1, "{measured:?}");
+    let function = &measured.functions[0];
+    assert_eq!(function.name.as_ref(), "f");
+    assert_eq!(function.cyclomatic, 1, "{function:?}");
+    assert_eq!(function.cognitive, 0, "{function:?}");
+    assert_eq!(function.nesting, 0, "{function:?}");
+    assert_eq!(function.ploc, 3, "{function:?}");
+}
+
+#[tokio::test]
+async fn metrics_cpp_golden() {
+    let src = "int f(int x) {\nreturn x;\n}\n";
+    let post = parsed("/ws/a.cpp", src).await;
+    let measured = metrics::measure(parse::Language::Cpp, &post.tree, src.as_bytes());
+    assert_eq!(measured.functions.len(), 1, "{measured:?}");
+    let function = &measured.functions[0];
+    assert_eq!(function.name.as_ref(), "f");
+    assert_eq!(function.cyclomatic, 1, "{function:?}");
+    assert_eq!(function.cognitive, 0, "{function:?}");
+    assert_eq!(function.nesting, 0, "{function:?}");
+    assert_eq!(function.ploc, 3, "{function:?}");
 }

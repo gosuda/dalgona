@@ -44,20 +44,20 @@ pub use ext::{
     McpBlockError, McpDeclaration, McpEndpoint, McpLaunch, McpRequest, McpResponse, McpServerDecl,
     McpTargetError, ModelId, Name, NameError, NativeOp, OnError, OpId, OpSet, Origin, PluginSource,
     PrivateEffect, Provenance, RUST_STREAM_EVENT, ReadView, Receipt, RedirectPolicy,
-    RegistrationError, RepeatMode, Revision, RuleFile, RuleRecord, RunOutput, RunRequest,
-    RunRequestError, STAR_EVENTS, Scope, ScopeSpec, ScopeSpecError, ScopeUsage, SearchHit,
-    SearchPage, ServerShapeError, Service, ServiceSet, SessionEnd, SessionStart, Settled,
-    SidecarName, SidecarNameError, SidecarOp, Site, SkillRecord, SourceRow, StateError, StateKey,
-    StateKeyError, StateNs, StateOp, StateRecord, StreamVerdict, SymbolHit, SymbolPage,
-    ToolCallEvent, ToolCallVerdict, ToolData, ToolResultEvent, ToolSpec, TurnOp, TurnOpReply,
-    UsesError, ViewNode, Visibility, WakeError, valid_tool_parameters, valid_version,
-    validate_block,
+    RegistrationError, RepeatMode, ReplaceClaim, ReplaceKind, ReplaceRefusal, Revision, RuleFile,
+    RuleRecord, RunOutput, RunRequest, RunRequestError, STAR_EVENTS, Scope, ScopeSpec,
+    ScopeSpecError, ScopeUsage, SearchHit, SearchPage, ServerShapeError, Service, ServiceSet,
+    SessionEnd, SessionStart, Settled, SidecarName, SidecarNameError, SidecarOp, Site, SkillRecord,
+    SourceRow, StateError, StateKey, StateKeyError, StateNs, StateOp, StateRecord, StreamVerdict,
+    SymbolHit, SymbolPage, ToolCallEvent, ToolCallVerdict, ToolData, ToolResultEvent, ToolSpec,
+    TurnOp, TurnOpReply, UsesError, ViewNode, Visibility, WakeError, valid_tool_parameters,
+    valid_version, validate_block,
 };
 pub use fold::{
     CompactLimits, CompactionExtRecord, CompactionReason, CompactionSummary, DeclaredFold, Effect,
-    Emit, Event, LeafExt, Limits, ModelRequestPlan, PartialResponse, PendingCall, Phase,
-    PrivateConflict, PrivateFact, PrivateTerminal, ReplayError, ResolveError, ResolvedCall,
-    Session, Settings, SettledOutcome, Step, TurnSource, TurnStage,
+    Emit, Event, LeafExt, Limits, MAILBOX_WAITING_LIMIT, ModelRequestPlan, PartialResponse,
+    PendingCall, Phase, PrivateConflict, PrivateFact, PrivateTerminal, ReplayError, ResolveError,
+    ResolvedCall, Session, Settings, SettledOutcome, Step, TurnSource, TurnStage,
 };
 pub use id::{
     BlobId, CallId, ClientId, EntryId, Gen, GenerationId, IdError, JobId, PrivateEffectId,
@@ -66,8 +66,8 @@ pub use id::{
 pub use jiff::Timestamp;
 pub use journal::{
     AssistantRoute, AssistantStop, BEFORE_TURN_SOURCE, Block, Branch, BranchError, BranchMode,
-    DecodeError, Decoded, EncodeError, Entry, EntryKind, Header, InferredPurpose, JobEvent,
-    JobKind, JobOutcome, JournalPart, MAX_RECORD, Mail, PrivateOutcome, Product, Record,
+    DecodeError, Decoded, DeliveredMail, EncodeError, Entry, EntryKind, Header, InferredPurpose,
+    JobEvent, JobKind, JobOutcome, JournalPart, MAX_RECORD, Mail, PrivateOutcome, Product, Record,
     ScannedHead, Source, TreeKind, TurnEndStop, TurnSequence, TurnSequenceError,
     VERSION as JOURNAL_VERSION, branch, decode, encode, scan_head,
 };
@@ -83,7 +83,8 @@ pub use request::{
 };
 pub use tokens::{estimate_text_tokens, estimate_tokens};
 pub use update::{
-    ExtState, ExtStatus, Notice, ResolutionCause, ToolOutcomeView, TurnCause, Update, UpdateKind,
+    ExtState, ExtStatus, Notice, ResolutionCause, STATUS_PAYLOAD_LIMIT, StatusPayload,
+    StatusPayloadError, ToolOutcomeView, TurnCause, Update, UpdateKind,
 };
 pub use view::{
     AutoCompaction, EntryView, FileChange, ListQuery, Page, PageReq, PageReqError, SessionInfo,

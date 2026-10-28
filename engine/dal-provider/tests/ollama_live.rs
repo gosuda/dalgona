@@ -41,13 +41,13 @@
 use std::sync::Arc;
 
 use dal_core::{
-    ContextItem, ModelRequest, ModelRoute, ModelToolSpec, Part, Purpose, RawJson, RequestParams,
-    SessionId, ThinkingLevel,
+    Config, ConfigProduct, ContextItem, ModelRequest, ModelRoute, ModelToolSpec, Part, Purpose,
+    RawJson, RequestParams, SessionId, ThinkingLevel,
 };
 use dal_provider::{
-    AuthStyle, CatalogEntry, EnvSnapshot, NoticeSink, Provider, ProviderConfig, ProviderEntry,
-    ProviderIdentity, ProviderSet, ProviderSettings, ResolvedModel, StopReason, StreamEvent,
-    ThinkingSupport, ToolArgs, ToolCall, ToolSupport, Transport, find,
+    CatalogEntry, EnvSnapshot, NoticeSink, Provider, ProviderConfig, ProviderEntry,
+    ProviderIdentity, ProviderSet, ResolvedModel, StopReason, StreamEvent, ThinkingSupport,
+    ToolArgs, ToolCall, ToolSupport,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -91,18 +91,22 @@ fn identity() -> ProviderIdentity {
 
 /// The built-in `ollama` row pointed at the live server, credential-less.
 fn ollama_entry(url: &str) -> ProviderEntry {
-    let def = find("ollama").expect("builtin ollama row");
-    ProviderEntry {
-        id: def.id.into(),
-        def: Some(def),
-        family: def.family,
-        base_url: url.into(),
-        transport: Transport::Https,
-        key_env: None,
-        auth: AuthStyle::None,
-        max_concurrent_requests: 1,
-        settings: ProviderSettings::default(),
-    }
+    let table = format!(
+        "[providers.ollama]\nbase_url = \"{url}\"\nauth = \"none\"\nmax_concurrent_requests = 1\n"
+    );
+    let core = Config::load(
+        ConfigProduct::Dalgon,
+        std::path::Path::new("/tmp/dal-provider-ollama-live"),
+        "",
+        Some(&table),
+    )
+    .expect("provider table parses");
+    ProviderConfig::from_config(&core)
+        .expect("providers decode")
+        .providers
+        .into_iter()
+        .find(|provider| &*provider.id == "ollama")
+        .expect("ollama decoded")
 }
 
 fn live_set(case: &str) -> (ProviderSet, std::path::PathBuf) {

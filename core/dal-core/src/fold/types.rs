@@ -510,6 +510,8 @@ pub enum Effect {
         turn: Option<TurnId>,
         /// First retained entry selected by the fold for this cut.
         first_kept: Option<EntryId>,
+        /// Manual `/compact` focus text; empty for automatic runs.
+        focus: Option<Box<str>>,
     },
     /// Run a command whose side effects belong to the session actor.
     Command {
@@ -583,6 +585,16 @@ pub struct Settings {
 pub(super) enum QueuedInput {
     Steer(Vec<Part>),
     FollowUp { turn: TurnId, source: TurnSource },
+}
+
+/// One waiting `NextTurn` mail row the fold still owes a turn.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PendingMail {
+    /// The mail row's 1-based position among the journal's mail rows; the
+    /// same position a `recv` cursor names.
+    pub(super) position: EntryId,
+    /// The message text the delivery entry carries into the turn input.
+    pub(super) text: Box<str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

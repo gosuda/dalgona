@@ -35,8 +35,7 @@
 //! `crc32fast`; `jiff` formats the signing dates and `sonic-rs` encodes the
 //! body.
 
-use std::collections::BTreeMap;
-use std::mem;
+use std::{borrow::Cow, collections::BTreeMap, mem};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use dal_core::{
@@ -165,6 +164,57 @@ pub(crate) fn region_for(host: &str, configured: Option<&str>) -> String {
         .map(str::trim)
         .filter(|region| !region.is_empty())
         .map_or_else(|| DEFAULT_REGION.to_owned(), str::to_owned)
+}
+
+/// The request base of one resolved region for an entry whose table named no
+/// `base_url`: a standard regional runtime host follows the region, the way
+/// the reference pins its typed endpoint only when no other region applies,
+/// so the region label swaps inside the host (preserving the parsed suffix
+/// shape) and the result is owned. A matching region, an unusable region, or
+/// a host outside the grammar borrows verbatim, so the unchanged path never
+/// allocates and the URL target and the signing scope of [`region_for`]
+/// agree by construction. An entry whose table named its own `base_url`
+/// never calls this: the caller borrows its base and only the signing scope
+/// follows the region.
+#[must_use]
+pub(crate) fn endpoint_for_defaulted_base<'a>(base: &'a str, region: &str) -> Cow<'a, str> {
+    if auth::validate_region_label(region, "configured region").is_err() {
+        return Cow::Borrowed(base);
+    }
+    let Ok(url) = url::Url::parse(base) else {
+        return Cow::Borrowed(base);
+    };
+    let Some(host) = url
+        .host_str()
+        .and_then(|host| relabel_runtime_host(host, region))
+    else {
+        return Cow::Borrowed(base);
+    };
+    let mut moved = url.clone();
+    if moved.set_host(Some(&host)).is_err() {
+        return Cow::Borrowed(base);
+    }
+    Cow::Owned(moved.to_string())
+}
+
+/// The host of a standard regional runtime base with its region label
+/// swapped for `region`; `None` keeps the host verbatim, including when the
+/// label already names `region` — an identical host is not a rewrite, so
+/// the unchanged path borrows and never allocates. The grammar is the one
+/// [`runtime_host_region`] parses, so the label lands exactly where the
+/// old one was read from.
+fn relabel_runtime_host(host: &str, region: &str) -> Option<String> {
+    let rest = host.strip_prefix("bedrock-runtime")?;
+    let rest = rest.strip_prefix("-fips").unwrap_or(rest);
+    let prefix = &host[..host.len() - rest.len()];
+    let rest = rest.strip_prefix('.')?;
+    let (label, suffix) = [".amazonaws.com.cn", ".amazonaws.com", ".api.aws"]
+        .into_iter()
+        .find_map(|candidate| rest.strip_suffix(candidate).map(|label| (label, candidate)))?;
+    if label == region {
+        return None;
+    }
+    Some(format!("{prefix}.{region}{suffix}"))
 }
 
 /// The `host` header value the HTTP client sends for `url`: the host as the

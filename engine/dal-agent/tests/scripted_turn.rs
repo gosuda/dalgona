@@ -942,3 +942,175 @@ async fn scripted_thinking_signature_reaches_the_reasoning_block_and_journal() {
         "the journal line spells the signature item verbatim: {assistant}"
     );
 }
+
+/// Two scripted prompts carry gap-free update sequences with no resync:
+/// the first prompt is accepted as turn 1 with its user entry, the second
+/// as turn 2 with its user entry, and every delivery from 1 carries the
+/// turn's exact tag order without gaps.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the scenario replays two full turns in one walk"
+)]
+async fn prompt_update_sequence() {
+    fn tag(kind: &dal_core::UpdateKind) -> &'static str {
+        match kind {
+            dal_core::UpdateKind::TurnStarted { .. } => "turn_started",
+            dal_core::UpdateKind::Delta { .. } => "delta",
+            dal_core::UpdateKind::ToolStarted { .. } => "tool_started",
+            dal_core::UpdateKind::ToolProgress { .. } => "tool_progress",
+            dal_core::UpdateKind::ToolSettled { .. } => "tool_settled",
+            dal_core::UpdateKind::Notice(_) => "notice",
+            dal_core::UpdateKind::TurnEnded { .. } => "turn_ended",
+            dal_core::UpdateKind::Tree(_) => "tree",
+            dal_core::UpdateKind::Usage(_) => "usage",
+            _ => "other",
+        }
+    }
+
+    async fn drain_turn(
+        subscription: &mut Subscription,
+        want: dal_core::TurnId,
+        mut next_seq: Option<u64>,
+        generation: dal_core::Gen,
+        tags: &mut Vec<String>,
+    ) -> u64 {
+        loop {
+            let delivery = tokio::time::timeout(Duration::from_secs(10), subscription.next())
+                .await
+                .expect("the turn ends")
+                .expect("stream open");
+            let dal_agent::Delivery::Update(update) = delivery else {
+                panic!("a two-prompt run never resyncs: {delivery:?}");
+            };
+            assert_eq!(
+                update.r#gen, generation,
+                "both turns stay in one generation: {update:?}"
+            );
+            // A subscriber observes the session from its attach point on:
+            // the first update fixes the base, and every later update must
+            // continue it with no gap.
+            if let Some(expected) = next_seq {
+                assert_eq!(
+                    update.seq.get(),
+                    expected,
+                    "prompt-submit replies carry gap-free seqs: {update:?}"
+                );
+            }
+            next_seq = Some(update.seq.get() + 1);
+            let label = tag(&update.kind).to_owned();
+            match &update.kind {
+                dal_core::UpdateKind::TurnStarted { turn, .. }
+                | dal_core::UpdateKind::Delta { turn, .. }
+                | dal_core::UpdateKind::TurnEnded { turn, .. } => {
+                    assert_eq!(*turn, want, "turn-scoped update names its turn: {update:?}");
+                }
+                _ => {}
+            }
+            let done = matches!(
+                &update.kind,
+                dal_core::UpdateKind::TurnEnded { turn, .. } if *turn == want
+            );
+            tags.push(label);
+            if done {
+                return next_seq.expect("the turn published at least one update");
+            }
+        }
+    }
+
+    let script = format!("{FIXTURE}{FIXTURE}");
+    let (host, workspace, _tmp) = scripted_host(&script, Vec::new()).await;
+    let agent = host
+        .open(
+            SessionRef::New {
+                workspace,
+                name: None,
+            },
+            ClientId::new("probe"),
+        )
+        .await
+        .expect("open");
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+
+    let reply = agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text { text: "hi".into() }],
+        })
+        .await
+        .expect("submit");
+    let dal_core::Reply::Accepted {
+        turn: turn1,
+        message_id: msg1,
+    } = reply
+    else {
+        panic!("first prompt not accepted: {reply:?}");
+    };
+    assert_eq!(turn1.get(), 1, "the first prompt opens turn 1: {turn1:?}");
+    assert_eq!(msg1.get(), 1, "the first prompt journals entry 1: {msg1:?}");
+    let generation = {
+        let view = agent.view(dal_core::PageReq::default()).expect("view");
+        view.r#gen
+    };
+    let mut tags1 = Vec::new();
+    let next_seq = drain_turn(&mut subscription, turn1, None, generation, &mut tags1).await;
+    assert_eq!(
+        tags1,
+        vec![
+            "turn_started".to_owned(),
+            "tree".to_owned(),
+            "delta".to_owned(),
+            "delta".to_owned(),
+            "tree".to_owned(),
+            "usage".to_owned(),
+            "turn_ended".to_owned(),
+        ],
+        "a scripted text turn publishes the exact lifecycle tag order: {tags1:?}"
+    );
+
+    let reply = agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "again".into(),
+            }],
+        })
+        .await
+        .expect("submit");
+    let dal_core::Reply::Accepted {
+        turn: turn2,
+        message_id: msg2,
+    } = reply
+    else {
+        panic!("second prompt not accepted: {reply:?}");
+    };
+    assert_eq!(
+        turn2.get(),
+        turn1.get() + 1,
+        "the second prompt advances the turn with no gaps: {turn1:?} -> {turn2:?}"
+    );
+    assert_eq!(
+        msg2.get(),
+        msg1.get() + 2,
+        "the two prompts journal user entries 1 and 3 with assistant entry 2 between: {msg1:?} -> {msg2:?}"
+    );
+    let mut tags2 = Vec::new();
+    let end_seq = drain_turn(
+        &mut subscription,
+        turn2,
+        Some(next_seq),
+        generation,
+        &mut tags2,
+    )
+    .await;
+    assert_eq!(
+        tags2, tags1,
+        "the second scripted turn repeats the exact lifecycle tag order: {tags2:?}"
+    );
+    let suffix = u64::try_from(tags2.len()).expect("two scripted turns fit in a u64");
+    assert_eq!(
+        end_seq,
+        next_seq + suffix,
+        "the second turn publishes its own gap-free suffix: {tags2:?}"
+    );
+}

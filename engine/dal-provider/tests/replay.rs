@@ -30,12 +30,12 @@ mod websocket;
 use std::sync::Arc;
 
 use dal_core::{
-    ContextItem, Family, ModelRequest, ModelRoute, Part, Purpose, RequestParams, ThinkingLevel,
+    Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute, Part, Purpose,
+    RequestParams, ThinkingLevel,
 };
 use dal_provider::{
-    AuthStyle, CatalogEntry, EnvSnapshot, Listing, NoticeSink, ProviderConfig, ProviderEntry,
-    ProviderIdentity, ProviderSet, ProviderSettings, ResolvedModel, StopReason, StreamEvent,
-    ThinkingSupport, ToolSupport, Transport,
+    CatalogEntry, EnvSnapshot, Listing, NoticeSink, ProviderConfig, ProviderIdentity, ProviderSet,
+    ResolvedModel, StopReason, StreamEvent, ThinkingSupport, ToolSupport,
 };
 
 use tokio_util::sync::CancellationToken;
@@ -110,25 +110,17 @@ async fn chat_text_turn() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("dalgona-replay-{}-{stamp}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let config = ProviderConfig {
-        default_model: None,
-        thinking: ThinkingLevel::Medium,
-        aliases: Vec::new(),
-        request_max_retries: 0,
-        stream_max_retries: 0,
-        providers: vec![ProviderEntry {
-            id: "chat-test".into(),
-            def: None,
-            family: Family::Chat,
-            base_url: base.into_boxed_str(),
-            transport: Transport::Https,
-            key_env: Some("CHAT_TEST_KEY".into()),
-            auth: AuthStyle::Bearer,
-            max_concurrent_requests: 4,
-            settings: ProviderSettings::default(),
-        }],
-        scripted: None,
-    };
+    let table = format!(
+        "[providers.chat-test]\napi = \"openai_chat\"\nbase_url = \"{base}\"\nkey_env = \"CHAT_TEST_KEY\"\nauth = \"bearer\"\ntransport = \"https\"\nmax_concurrent_requests = 4\n"
+    );
+    let core =
+        Config::load(ConfigProduct::Dalgon, &dir, "", Some(&table)).expect("provider table parses");
+    let mut config = ProviderConfig::from_config(&core).expect("providers decode");
+    config.request_max_retries = 0;
+    config.stream_max_retries = 0;
+    config
+        .providers
+        .retain(|provider| &*provider.id == "chat-test");
     let set = ProviderSet::new(
         &config,
         identity(),

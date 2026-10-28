@@ -352,7 +352,7 @@ impl StdioTransport {
         Ok(inflight)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) async fn pending_len(&self) -> usize {
         self.pending.lock().await.len()
     }

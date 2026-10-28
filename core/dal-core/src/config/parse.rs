@@ -43,6 +43,7 @@ pub(super) const KNOWN_KEY_ORDER: &[&str] = &[
     "model",
     "thinking",
     "approval",
+    "scoped_models",
     "screen",
     "tui",
     "tui.diagrams",
@@ -93,6 +94,9 @@ pub(super) const KNOWN_KEY_ORDER: &[&str] = &[
     "eval",
     "eval.uses",
 ];
+/// The shape `scoped_models` takes, named where the loader and the writer refuse a value.
+pub(super) const SCOPED_MODELS_EXPECTED: &str = "array of non-empty provider/id strings";
+
 pub(super) fn parse_layer(product: ConfigProduct, text: &str) -> Result<ParsedLayer, ConfigError> {
     let value: toml::Value = toml::from_str(text).map_err(|error| syntax_error(text, &error))?;
     let root = match value {
@@ -215,6 +219,15 @@ pub(super) fn parse_file_text(
             "Use a [judge] table with gate, model, timeout_ms, max_concurrent, max_per_turn.",
         ));
     }
+    parse_top_level_fields(product, file, &mut layer)?;
+    Ok(layer)
+}
+
+fn parse_top_level_fields(
+    product: ConfigProduct,
+    file: FileText,
+    layer: &mut ParsedLayer,
+) -> Result<(), ConfigError> {
     if let Some(value) = file.mode {
         layer.mode = Some(parse_mode(value)?);
     }
@@ -226,6 +239,13 @@ pub(super) fn parse_file_text(
     }
     if let Some(value) = file.approval {
         layer.approval = Some(parse_approval("approval", value)?);
+    }
+    if let Some(value) = file.scoped_models {
+        layer.scoped_models = Some(parse_nonempty_strings(
+            "scoped_models",
+            value,
+            SCOPED_MODELS_EXPECTED,
+        )?);
     }
     if let Some(value) = file.screen {
         layer.screen = Some(parse_screen(value)?);
@@ -301,7 +321,7 @@ pub(super) fn parse_file_text(
             "array of non-empty battery names",
         )?);
     }
-    Ok(layer)
+    Ok(())
 }
 
 fn parse_tui(product: ConfigProduct, value: toml::Value) -> Result<TuiConfig, ConfigError> {

@@ -9,7 +9,7 @@
 //! |---|---|---|---|
 //! | Direct Gemini API | `google-generative-ai` | HTTPS SSE | API key in `x-goog-api-key` |
 //! | Vertex AI | `google-vertex` | HTTPS SSE | OAuth `Authorization: Bearer`, or Express `x-goog-api-key` |
-//! | Gemini CLI | `google-gemini-cli` | local subprocess | none; the CLI owns its own store |
+//! | Gemini CLI | `google-gemini-cli` | local subprocess, or HTTPS SSE when natively signed in | none (subprocess); OAuth `Authorization: Bearer` (native) |
 //! | Antigravity | `google-antigravity` | HTTPS SSE | OAuth `Authorization: Bearer` |
 //!
 //! No request is ever signed: no request signing, no signing dependency, and
@@ -18,9 +18,11 @@
 //! [`shared::request_body`] lowers one [`ModelRequest`] and its composed
 //! [`ThinkingPlan`] to the exact JSON body of `POST <base>/models/{id}:
 //! streamGenerateContent?alt=sse` (Gemini/Vertex) or the Cloud Code Assist
-//! envelope (`{project, model, request, requestType}`, Antigravity only;
-//! the Gemini CLI surface is a credential-less local subprocess, never an
-//! HTTP client). Tool schemas and tool-call arguments are written from their
+//! envelope (`{project, requestId, request, model, userAgent, requestType}`,
+//! Antigravity) or the plain `{project, model, request}` envelope (native
+//! Gemini CLI, [`cloud_code`]); the Gemini CLI subprocess surface is a
+//! credential-less local process, never an HTTP client. Tool schemas and
+//! tool-call arguments are written from their
 //! [`RawJson`] text, never re-encoded. The Gemini 3 `thinkingLevel` spelling
 //! and the `thoughtSignature` fields travel byte-exact through the decoders
 //! ([`shared::GeminiDecoder`]) so a signed signature reaches the next turn's
@@ -32,7 +34,9 @@
 //! Antigravity keeps its own variant rather than sharing `google-gemini-cli`:
 //! shared CCA HTTP framing is not shared identity (the Cursor/Devin rule).
 
+pub(crate) mod adc;
 pub(crate) mod antigravity;
+pub(crate) mod cloud_code;
 pub(crate) mod gemini;
 pub(crate) mod gemini_cli;
 pub(crate) mod schema;
