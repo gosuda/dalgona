@@ -26,11 +26,12 @@ struct PasteBuffer {
 pub struct KeyDecoder {
     bytes: Vec<u8>,
     paste: Option<PasteBuffer>,
-    /// When the incomplete escape prefix at the head of `bytes` first
-    /// arrived. It is `Some` only while such a prefix is waiting: every
-    /// escape-path consumption of head bytes goes through `consume`, which
-    /// drops it, and an empty buffer never arms it, so a consumed marker or
-    /// an idle decoder cannot leave a clock running for the next Esc.
+    /// When the incomplete escape or reply prefix at the head of `bytes`
+    /// first arrived. It is `Some` only while such a prefix is waiting:
+    /// every escape-path consumption of head bytes goes through `consume`,
+    /// which drops it, and an empty buffer never arms it, so a consumed
+    /// marker or an idle decoder cannot leave a clock running for the next
+    /// Esc.
     escape_started: Option<Instant>,
 }
 
@@ -82,6 +83,12 @@ impl KeyDecoder {
             }
             if self.bytes.first() == Some(&0x1b) {
                 if self.decode_escape(now, &mut events) {
+                    continue;
+                }
+                break;
+            }
+            if is_c1(self.bytes[0]) {
+                if self.decode_c1(now) {
                     continue;
                 }
                 break;
@@ -156,6 +163,32 @@ impl KeyDecoder {
         }
     }
 
+    /// Consumes a C1-lead packet at the head of the buffer. C1 bytes only
+    /// reach the decoder at position 0 when they are stray or a terminal
+    /// reply lead — a UTF-8 continuation can never sit there, because
+    /// `decode_utf8` consumes each character's bytes atomically and holds
+    /// an incomplete lead behind `bytes`.
+    fn decode_c1(&mut self, now: Instant) -> bool {
+        let started = *self.escape_started.get_or_insert(now);
+        match parse_c1(&self.bytes) {
+            EscapeParse::Consumed(consumed) => {
+                self.consume(consumed);
+                true
+            }
+            EscapeParse::Key(..) => unreachable!("C1 packets never emit keys"),
+            EscapeParse::Partial
+                if now.saturating_duration_since(started) >= Duration::from_millis(50) =>
+            {
+                // A C1 prefix that never completes drops its lead byte so a
+                // torn packet cannot stall every later byte behind it; the
+                // payload tail re-parses on its own.
+                self.consume(1);
+                true
+            }
+            EscapeParse::Partial => false,
+        }
+    }
+
     fn decode_utf8(&mut self, events: &mut Vec<InputEvent>) -> bool {
         let first = self.bytes[0];
         if let Some(key) = control_key(first) {
@@ -224,6 +257,13 @@ fn parse_escape(bytes: &[u8]) -> EscapeParse {
         b'O' => parse_ss3(bytes),
         b'[' => parse_csi(bytes),
         0x08 | 0x7f => EscapeParse::Key(Key::new(KeyCode::Backspace, KeyModifiers::ALT), 2),
+        // Terminal reply strings — OSC `]`, DCS `P`, APC `_`, PM `^`, SOS
+        // `X` — arrive unbidden or after the startup-probe window closes;
+        // consume through their BEL/ST terminator so the payload is never
+        // typed into the composer.
+        b']' | b'P' | b'_' | b'^' | b'X' => {
+            string_consumed(bytes, 2).map_or(EscapeParse::Partial, EscapeParse::Consumed)
+        }
         // Meta sends a second Esc ahead of a sequence, so `\x1b\x1b[D` is
         // the legacy wire form of Alt+Left and `\x1b\x1bOA` of Alt+Up:
         // decode the inner sequence and attach ALT. Anything else behind
@@ -249,6 +289,27 @@ fn parse_escape(bytes: &[u8]) -> EscapeParse {
         ),
         _ => parse_alt_utf8(bytes),
     }
+}
+
+/// Locates the end of a string packet whose body starts at index `body`:
+/// BEL or ST (both forms) terminate it; a bare Esc aborts it and re-parses
+/// on its own. Returns the count to consume, or `None` while incomplete.
+fn string_consumed(bytes: &[u8], body: usize) -> Option<usize> {
+    let mut index = body;
+    while index < bytes.len() {
+        match bytes[index] {
+            0x07 | 0x9c => return Some(index + 1),
+            0x1b => {
+                return Some(if bytes.get(index + 1) == Some(&b'\\') {
+                    index + 2
+                } else {
+                    index
+                });
+            }
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 fn parse_ss3(bytes: &[u8]) -> EscapeParse {
@@ -314,6 +375,41 @@ fn parse_alt_utf8(bytes: &[u8]) -> EscapeParse {
             EscapeParse::Key(Key::new(KeyCode::Esc, KeyModifiers::NONE), 1)
         }
         Err(_) => EscapeParse::Partial,
+    }
+}
+
+/// Parses the C1-lead packet at the head of `bytes`. C1 sequences are a
+/// terminal-reply alphabet here, not a typing one: they are consumed like
+/// their 7-bit counterparts and never produce keys.
+fn parse_c1(bytes: &[u8]) -> EscapeParse {
+    match bytes[0] {
+        // 8-bit CSI: consume through the first final byte; a control byte
+        // terminates it, and a stray Esc aborts and re-parses.
+        0x9b => {
+            let mut index = 1;
+            while index < bytes.len() {
+                match bytes[index] {
+                    0x1b => return EscapeParse::Consumed(index),
+                    0x9c | ..=0x1f | 0x40..=0x7e => return EscapeParse::Consumed(index + 1),
+                    _ => index += 1,
+                }
+            }
+            EscapeParse::Partial
+        }
+        // SS2 and SS3 carry exactly one argument byte.
+        0x8e | 0x8f => {
+            if bytes.len() > 1 {
+                EscapeParse::Consumed(2)
+            } else {
+                EscapeParse::Partial
+            }
+        }
+        // String leaders: DCS, SOS, PM, APC.
+        0x90 | 0x98 | 0x9d | 0x9e | 0x9f => {
+            string_consumed(bytes, 1).map_or(EscapeParse::Partial, EscapeParse::Consumed)
+        }
+        // Stray ST and every other C1 byte drop on their own.
+        _ => EscapeParse::Consumed(1),
     }
 }
 
@@ -447,6 +543,13 @@ fn control_key(byte: u8) -> Option<Key> {
         0x1f => Some(Key::new(KeyCode::Char('_'), KeyModifiers::CONTROL)),
         _ => None,
     }
+}
+
+/// True for a C1 control byte (0x80-0x9f) that can lead a reply packet.
+/// UTF-8 continuation bytes reach the head of the buffer only when they
+/// are stray, so intercepting this range cannot corrupt a character.
+fn is_c1(byte: u8) -> bool {
+    (0x80..=0x9f).contains(&byte)
 }
 
 fn is_prefix(bytes: &[u8], marker: &[u8]) -> bool {

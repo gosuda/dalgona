@@ -208,6 +208,76 @@ fn lone_zwj_is_zero_cells_not_two() -> TestResult {
     Ok(())
 }
 
+/// Drives one composer turn with reply bytes injected after the startup
+/// probe window, then returns the rendered screen text. The composer must
+/// hold exactly `typed` afterwards.
+fn composer_after_reply_bytes(
+    typed: &str,
+    injected: &[u8],
+) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let dir = TestDir::new()?;
+    let mut command = dalgon_command(dir.path(), &["DONE"])?;
+    command.args(["--screen", "inline"]);
+    let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
+    terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
+    terminal.write(typed.as_bytes())?;
+    terminal.collect_for(SETTLE)?;
+    terminal.write(injected)?;
+    terminal.collect_for(SETTLE)?;
+    let mut probe = VtRecorder::new(100, 30);
+    probe.feed(terminal.output());
+    let text = all_text(&probe);
+    quit_cleanly(&mut terminal)?;
+    Ok(text)
+}
+
+#[test]
+fn late_terminal_replies_do_not_type_into_composer() -> TestResult {
+    // Terminal replies that land after the probe window — an OSC 11
+    // background reply, a kitty-graphics APC, a C1-form DSR, and a C1
+    // string — must be consumed, never typed: the composer stays "ok".
+    let injected: &[u8] =
+        b"\x1b]11;rgb:1111/2222/3333\x07\x1b_Gi=31;OK\x1b\\\x9b13;1R\x90Payload\x9c";
+    let text = composer_after_reply_bytes("ok", injected)?;
+    for leak in ["rgb", "Gi=31", "13;1R", "Payload"] {
+        assert!(
+            !text.contains(leak),
+            "reply payload {leak} leaked into the composer: {text}"
+        );
+    }
+    assert!(
+        text.contains("ok"),
+        "typed text missing from screen: {text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn drip_fed_reply_string_does_not_type_into_composer() -> TestResult {
+    // The same OSC reply split across two reads inside the escape window
+    // must still be consumed end to end.
+    let dir = TestDir::new()?;
+    let mut command = dalgon_command(dir.path(), &["DONE"])?;
+    command.args(["--screen", "inline"]);
+    let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
+    terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
+    terminal.write(b"ok")?;
+    terminal.collect_for(SETTLE)?;
+    terminal.write(b"\x1b]11;rgb:1")?;
+    terminal.collect_for(Duration::from_millis(20))?;
+    terminal.write(b"111/2222/3333\x07")?;
+    terminal.collect_for(SETTLE)?;
+    let mut probe = VtRecorder::new(100, 30);
+    probe.feed(terminal.output());
+    let text = all_text(&probe);
+    assert!(
+        !text.contains("rgb") && !text.contains("1111"),
+        "split OSC reply leaked into the composer: {text}"
+    );
+    quit_cleanly(&mut terminal)?;
+    Ok(())
+}
+
 #[test]
 fn real_emoji_sequences_stay_two_cells() -> TestResult {
     let dir = TestDir::new()?;
