@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Tool schemas derived by `schemars` keep numeric keywords as numbers. `starlark`
+  enables `serde_json`'s `arbitrary_precision`, which made `sonic-rs` write
+  `minLength`, `minimum`, and every other bound as an object, so Anthropic
+  rejected the request with `tools.16.custom.input_schema: JSON schema is
+  invalid`. The web and work batteries now encode their schemas through one
+  helper that restores each number.
 - Add the `judge` extension service: an eval cell can ask the session judge one question with `judge.ask` or up to 32 at once with `judge.batch`. The cell may request `judge.ask` or `judge.batch` only when that operation is in its `uses` and in `eval.uses`, and every cell now receives the `judge` and `judge_batch` globals.
 - Refuse judge evaluation outside eval cells, enforced at declaration: the phase table refuses `judge.ask` and `judge.batch` to plugin handlers, commands, and models.
 - The `/login` provider picker puts an exact provider id first when the filter matches one: typing `openai` and pressing Enter starts the OpenAI sign-in, not a longer id like `azure-openai-responses` that only contains the text.

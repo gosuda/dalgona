@@ -386,8 +386,7 @@ pub(crate) fn tool_spec(
 ) -> Result<(dal_core::Name, std::sync::Arc<dal_core::ToolSpec>), dal_core::ext::RegistrationError>
 {
     let name = dal_core::Name::parse(name)?;
-    let parameters = sonic_rs::to_string(schema)
-        .ok()
+    let parameters = crate::schema_json::encode(schema)
         .and_then(|encoded| dal_core::RawJson::parse(&encoded).ok())
         .filter(dal_core::valid_tool_parameters)
         .ok_or(dal_core::ext::RegistrationError::InvalidParameters)?;

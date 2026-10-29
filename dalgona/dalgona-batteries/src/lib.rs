@@ -12,6 +12,7 @@ pub mod orchestration;
 pub mod procs;
 pub mod quality;
 pub mod review;
+pub(crate) mod schema_json;
 pub mod skills;
 pub(crate) mod text;
 pub mod ttsr_rules;

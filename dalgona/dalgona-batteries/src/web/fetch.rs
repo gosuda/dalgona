@@ -293,8 +293,26 @@ fn convert_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_URL_BYTES, effective_max_bytes, validate_url};
+    use super::{
+        MAX_URL_BYTES, TOOL_DESCRIPTION, TOOL_NAME, WebFetchParams, effective_max_bytes,
+        validate_url,
+    };
     use crate::web::test_config;
+
+    #[test]
+    fn the_registered_schema_keeps_numeric_keywords_as_numbers() {
+        let (_, spec) = crate::web::tool_spec(
+            TOOL_NAME,
+            TOOL_DESCRIPTION,
+            &schemars::schema_for!(WebFetchParams),
+        )
+        .expect("web_fetch schema");
+        let parameters = spec.parameters.as_str();
+
+        assert!(parameters.contains(r#""minLength":1"#), "{parameters}");
+        assert!(parameters.contains(r#""maxLength":2048"#), "{parameters}");
+        assert!(parameters.contains(r#""minimum":0"#), "{parameters}");
+    }
 
     #[test]
     fn rejects_ftp_urls_before_network_access() {

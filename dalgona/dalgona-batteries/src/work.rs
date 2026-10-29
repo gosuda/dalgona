@@ -150,8 +150,8 @@ fn tool_spec<P: schemars::JsonSchema>(
 ) -> Result<(Name, Arc<ToolSpec>), RegistrationError> {
     let name =
         Name::parse(name).map_err(|_| RegistrationError::InvalidName { name: name.into() })?;
-    let schema = sonic_rs::to_string(&schemars::schema_for!(P))
-        .map_err(|_| RegistrationError::InvalidParameters)?;
+    let schema = crate::schema_json::encode(&schemars::schema_for!(P))
+        .ok_or(RegistrationError::InvalidParameters)?;
     let parameters = RawJson::parse(&schema).map_err(|_| RegistrationError::InvalidParameters)?;
     if !dal_core::valid_tool_parameters(&parameters) {
         return Err(RegistrationError::InvalidParameters);
