@@ -775,6 +775,34 @@ mod tests {
     }
 
     #[test]
+    fn the_registered_schemas_keep_their_members_as_json() {
+        let (_, todo) =
+            tool_spec::<todo::TodoArgs>(TODO_TOOL, TODO_DESCRIPTION).expect("todo schema");
+        let (_, plan) = tool_spec::<PlanArgs>(PLAN_TOOL, PLAN_DESCRIPTION).expect("plan schema");
+
+        for spec in [&todo, &plan] {
+            let parameters = spec.parameters.as_str();
+            assert!(parameters.contains(r#""type":"object""#), "{parameters}");
+            assert!(
+                !parameters.contains("$serde_json::private::Number"),
+                "{parameters}"
+            );
+        }
+        let todo_parameters = todo.parameters.as_str();
+        assert!(
+            todo_parameters.contains(r#""enum":["read","write"]"#),
+            "{todo_parameters}"
+        );
+        assert!(todo_parameters.contains(r#""todos""#), "{todo_parameters}");
+        let plan_parameters = plan.parameters.as_str();
+        assert!(plan_parameters.contains(r#""plan""#), "{plan_parameters}");
+        assert!(
+            plan_parameters.contains(r#""summary""#),
+            "{plan_parameters}"
+        );
+    }
+
+    #[test]
     fn plan_config_defaults_to_enabled() {
         assert!(PlanConfig::parse_config(None).is_ok_and(|config| config.enabled));
     }

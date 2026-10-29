@@ -24,19 +24,21 @@ pub(crate) fn encode(schema: &schemars::Schema) -> Option<String> {
 }
 
 /// Restores every arbitrary-precision number below `value` to a number.
-fn rewrite(value: &mut Value) -> bool {
+fn rewrite(value: &mut Value) {
     let replacement = value.as_object().and_then(carried_number);
     if let Some(number) = replacement {
         *value = number;
-        return true;
+        return;
     }
     if let Some(object) = value.as_object_mut() {
-        return object.iter_mut().all(|(_, child)| rewrite(child));
+        for (_, child) in object.iter_mut() {
+            rewrite(child);
+        }
+    } else if let Some(items) = value.as_array_mut() {
+        for item in items.iter_mut() {
+            rewrite(item);
+        }
     }
-    if let Some(items) = value.as_array_mut() {
-        return items.iter_mut().all(rewrite);
-    }
-    true
 }
 
 /// The number one arbitrary-precision struct carries, when it carries one.
