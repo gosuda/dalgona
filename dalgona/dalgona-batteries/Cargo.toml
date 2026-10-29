@@ -23,9 +23,9 @@ png = "=0.18.1"
 process-wrap = { version = "=10.0.1", features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 regex-automata = "=0.4.18"
 reqwest = { version = "=0.13.5", features = ["rustls", "json", "stream"] }
-schemars = "=1.2.3"
+schemars.workspace = true
 serde = { version = "=1.0.229", features = ["derive", "rc"] }
-sonic-rs = "=0.5.10"
+sonic-rs.workspace = true
 starlark = "=0.14.2"
 thiserror = "=2.0.21"
 toml.workspace = true
