@@ -42,7 +42,10 @@ fn cluster_width(cluster: &str, mode: WidthMode) -> usize {
     let mut has_zwj = false;
     let mut has_vs16 = false;
     let mut has_keycap = false;
+    let mut has_wide_base = false;
+    let mut has_emoji_base = false;
     let mut max_width = 0;
+    let mut base_cells = 0;
 
     for character in cluster.chars() {
         let scalar = u32::from(character);
@@ -55,11 +58,16 @@ fn cluster_width(cluster: &str, mode: WidthMode) -> usize {
         has_zwj |= scalar == 0x200d;
         has_vs16 |= scalar == 0xfe0f;
         has_keycap |= scalar == 0x20e3;
+        has_emoji_base |= is_emoji_base(scalar);
 
         let character_width = match mode {
             WidthMode::Narrow => character.width().unwrap_or(0),
             WidthMode::Cjk => character.width_cjk().unwrap_or(0),
         };
+        has_wide_base |= character_width >= 2;
+        if scalar != 0x200d && scalar != 0xfe0f && scalar != 0x20e3 {
+            base_cells += character_width;
+        }
         max_width = max_width.max(character_width);
     }
 
@@ -69,14 +77,55 @@ fn cluster_width(cluster: &str, mode: WidthMode) -> usize {
         // cells for what every terminal draws in 2.
         return 2;
     }
-    if has_zwj || has_vs16 || has_keycap || jamo > 0 {
+    if jamo > 0 {
         // A cluster holding any conjoining jamo is a syllable-region glyph:
         // two cells whether it is a complete syllable, an archaic chain, or a
         // lone jamo unicode-width reports as zero-width (Extended-B measures
         // `None`, which would desync the cursor against the drawn cell).
         return 2;
     }
+    if has_zwj {
+        // A ZWJ sequence of emoji-wide members is one two-cell glyph
+        // (👨‍👩‍👧); on text bases the joiner is invisible, so the cluster
+        // keeps the width of its base characters (a lone ZWJ is zero).
+        return if has_wide_base { 2 } else { base_cells };
+    }
+    if has_vs16 {
+        // VS16 forces emoji presentation only on emoji-capable bases
+        // (❤️, ⌛); on text like `x\u{fe0f}` terminals ignore it and the
+        // cluster keeps its one-cell base width.
+        return if has_wide_base || has_emoji_base {
+            2
+        } else {
+            max_width
+        };
+    }
+    if has_keycap {
+        // A keycap cluster (digit, `*` or `#`, VS16, U+20E3) draws as one
+        // two-cell glyph; a stray U+20E3 without an emoji sequence does not.
+        return if has_vs16 || has_emoji_base {
+            2
+        } else {
+            max_width
+        };
+    }
     max_width
+}
+
+fn is_emoji_base(scalar: u32) -> bool {
+    // Scalars carrying the Emoji property whose default presentation is text,
+    // so VS16 promotes them to a two-cell emoji glyph. Pictographs already
+    // measured two cells wide are covered by `has_wide_base`.
+    matches!(scalar,
+        // `0`-`9`, `#`, `*` form real keycap emoji under VS16 + U+20E3.
+        0x23 | 0x2a | 0x30..=0x39
+        | 0x00a9 | 0x00ae | 0x203c | 0x2049 | 0x2122 | 0x2139
+        | 0x2194..=0x2199 | 0x21a9..=0x21aa | 0x231a..=0x231b | 0x2328
+        | 0x23cf | 0x23e9..=0x23f3 | 0x23f8..=0x23fa | 0x24c2
+        | 0x25aa..=0x25ab | 0x25b6 | 0x25c0 | 0x25fb..=0x25fe
+        | 0x2600..=0x27bf | 0x2934..=0x2935 | 0x2b05..=0x2b07
+        | 0x2b1b..=0x2b1c | 0x2b50 | 0x2b55 | 0x3030 | 0x303d
+        | 0x3297 | 0x3299 | 0x1f000..=0x1faff)
 }
 
 fn is_hangul_jamo(scalar: u32) -> bool {
