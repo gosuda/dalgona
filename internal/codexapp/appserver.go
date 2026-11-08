@@ -201,7 +201,7 @@ func spliceStdio(ctx context.Context, stdio io.ReadWriter, dial func(context.Con
 	defer stop()
 	go func() {
 		_ = relayClientLines(conn, stdio, newParamInjector(defaults))
-		closeWrite(conn)
+		closeDaemonWrite(conn)
 	}()
 	_, err = io.Copy(stdio, conn)
 	if ctx.Err() != nil || err == nil || errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
@@ -226,11 +226,9 @@ func relayClientLines(conn net.Conn, client io.Reader, injector *paramInjector) 
 	}
 }
 
-func closeWrite(conn net.Conn) {
-	if half, ok := conn.(interface{ CloseWrite() error }); ok && half.CloseWrite() == nil {
-		return
-	}
-	_ = conn.Close()
+func closeDaemonWrite(conn net.Conn) bool {
+	half, ok := conn.(interface{ CloseWrite() error })
+	return ok && half.CloseWrite() == nil
 }
 
 type webSocketRelay struct {
@@ -320,7 +318,9 @@ func spliceWebSocket(ctx context.Context, ws *websocket.Conn, conn net.Conn, inj
 		relayLinesToWebSocket(ctx, conn, ws)
 	}()
 	relayWebSocketToLines(ctx, ws, conn, injector)
-	cancel()
+	if !closeDaemonWrite(conn) {
+		cancel()
+	}
 	<-done
 	_ = ws.CloseNow()
 }

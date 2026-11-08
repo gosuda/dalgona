@@ -8,8 +8,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -37,12 +39,11 @@ func replyDaemon(conn net.Conn) {
 func TestAppServerStdioRoundTrip(t *testing.T) {
 	appIn, testIn := io.Pipe()
 	testOut, appOut := io.Pipe()
-	daemonSide, appSide := net.Pipe()
-	go replyDaemon(daemonSide)
+	daemonDial := unixDaemon(t, replyDaemon)
 	dials := 0
-	dial := func(context.Context) (net.Conn, error) {
+	dial := func(ctx context.Context) (net.Conn, error) {
 		dials++
-		return appSide, nil
+		return daemonDial(ctx)
 	}
 	var stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -86,49 +87,76 @@ func expectOutputLines(t *testing.T, output *bufio.Reader, want []string) {
 	}
 }
 
-func TestAppServerStdioDeliversRepliesAfterClientEOF(t *testing.T) {
+func replyAfterDelay(conn net.Conn, readRequest func(io.Reader) ([]byte, error)) {
+	defer conn.Close()
+	request, err := readRequest(conn)
+	if err != nil {
+		return
+	}
+	time.Sleep(100 * time.Millisecond)
+	_, _ = conn.Write(append([]byte(`{"got":`), append(bytes.TrimSpace(request), "}\n"...)...))
+}
+
+func readOneLine(r io.Reader) ([]byte, error) {
+	return bufio.NewReader(r).ReadBytes('\n')
+}
+
+func unixDaemon(t *testing.T, serve func(net.Conn)) func(context.Context) (net.Conn, error) {
+	t.Helper()
 	var listenConfig net.ListenConfig
-	listener, err := listenConfig.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	listener, err := listenConfig.Listen(t.Context(), "unix", filepath.Join(t.TempDir(), "d.sock"))
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer listener.Close()
+	t.Cleanup(func() { _ = listener.Close() })
 	go func() {
 		conn, err := listener.Accept()
-		if err != nil {
-			return
+		if err == nil {
+			serve(conn)
 		}
-		defer conn.Close()
-		request, err := io.ReadAll(conn)
-		if err != nil {
-			return
-		}
-		_, _ = conn.Write(append([]byte(`{"got":`), append(bytes.TrimSpace(request), "}\n"...)...))
 	}()
-	dial := func(ctx context.Context) (net.Conn, error) {
+	return func(ctx context.Context) (net.Conn, error) {
 		var dialer net.Dialer
-		return dialer.DialContext(ctx, "tcp", listener.Addr().String())
+		return dialer.DialContext(ctx, "unix", listener.Addr().String())
 	}
-	var stdout, stderr bytes.Buffer
-	stdio := stdioPair{strings.NewReader(`{"id":1,"method":"model/list"}` + "\n"), &stdout}
-	if code := AppServerMain(t.Context(), []string{"app-server"}, stdio, &stderr, dial); code != 0 {
-		t.Fatalf("AppServerMain = %d, stderr %q", code, stderr.String())
+}
+
+func pipeDaemon(context.Context) (net.Conn, error) {
+	daemonSide, appSide := net.Pipe()
+	go replyAfterDelay(daemonSide, readOneLine)
+	return appSide, nil
+}
+
+func TestAppServerStdioDeliversRepliesAfterClientEOF(t *testing.T) {
+	daemons := map[string]func(*testing.T) func(context.Context) (net.Conn, error){
+		"unix socket half-closed": func(t *testing.T) func(context.Context) (net.Conn, error) {
+			return unixDaemon(t, func(conn net.Conn) { replyAfterDelay(conn, io.ReadAll) })
+		},
+		"pipe without half-close": func(*testing.T) func(context.Context) (net.Conn, error) { return pipeDaemon },
 	}
-	if want := `{"got":{"id":1,"method":"model/list"}}` + "\n"; stdout.String() != want {
-		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	for name, daemon := range daemons {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			stdio := stdioPair{strings.NewReader(`{"id":0,"method":"initialize"}` + "\n"), &stdout}
+			args := []string{"--config", "approval_policy=untrusted", "app-server"}
+			if code := AppServerMain(t.Context(), args, stdio, &stderr, daemon(t)); code != 0 {
+				t.Fatalf("AppServerMain = %d, stderr %q", code, stderr.String())
+			}
+			if want := `{"got":{"id":0,"method":"initialize"}}` + "\n"; stdout.String() != want {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+			}
+		})
 	}
 }
 
 func relayToDaemon(t *testing.T, args []string, input string) (received, notes string, code int) {
 	t.Helper()
-	daemonSide, appSide := net.Pipe()
 	got := make(chan []byte, 1)
-	go func() {
-		data, _ := io.ReadAll(daemonSide)
-		_ = daemonSide.Close()
+	dial := unixDaemon(t, func(conn net.Conn) {
+		data, _ := io.ReadAll(conn)
+		_ = conn.Close()
 		got <- data
-	}()
-	dial := func(context.Context) (net.Conn, error) { return appSide, nil }
+	})
 	var stderr bytes.Buffer
 	code = AppServerMain(t.Context(), args, stdioPair{strings.NewReader(input), io.Discard}, &stderr, dial)
 	return string(<-got), stderr.String(), code
