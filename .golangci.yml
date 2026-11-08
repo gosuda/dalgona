@@ -21,11 +21,11 @@ linters:
     - unused
     - wastedassign
   settings:
-    errcheck:
-      exclude-functions:
-        - fmt.Fprint
-        - fmt.Fprintf
-        - fmt.Fprintln
+    gosec:
+      excludes:
+        - G204
+        - G703
+        - G304
     cyclop:
       max-complexity: 9
     gocognit:
@@ -179,9 +179,14 @@ linters:
             - pkg: "github.com/gosuda/dalgona/internal/codexapp"
               desc: dal must stay free of dalgona batteries
   exclusions:
+    presets:
+      - std-error-handling
     rules:
       - path: ^cmd/
         linters: [forbidigo]
+      - path: _test\.go
+        text: "G301|G306|G404|G703"
+        linters: [gosec]
 
 formatters:
   enable:
