@@ -47,6 +47,7 @@ type sessionState struct {
 	seq        uint64
 	hash       string
 	file       *os.File
+	info       os.FileInfo
 	damaged    bool
 	damagedSeq uint64
 }
@@ -63,6 +64,8 @@ type Store struct {
 	idx        *dbIndex
 	sessions   map[string]*sessionState
 	lock       *os.File
+	users      *os.File
+	shared     bool
 	syncfsRoot string
 	mu         sync.Mutex
 	backupStop chan struct{}
@@ -95,11 +98,19 @@ func (s *Store) blobsDir() string {
 	return filepath.Join(s.dir, "blobs")
 }
 
-func Open(dir string) (_ *Store, retErr error) {
+func Open(dir string) (*Store, error) {
+	return open(dir, false)
+}
+
+func OpenShared(dir string) (*Store, error) {
+	return open(dir, true)
+}
+
+func open(dir string, shared bool) (_ *Store, retErr error) {
 	if dir == "" {
 		return nil, errors.New("journal: empty home dir")
 	}
-	s := &Store{dir: dir, sessions: map[string]*sessionState{}}
+	s := &Store{dir: dir, shared: shared, sessions: map[string]*sessionState{}}
 	defer func() {
 		if retErr != nil {
 			retErr = errors.Join(retErr, s.closeLocked())
@@ -110,37 +121,42 @@ func Open(dir string) (_ *Store, retErr error) {
 			return nil, fmt.Errorf("journal: create %s: %w", sub, err)
 		}
 	}
-	lock, err := acquireHomeLock(dir)
-	if err != nil {
-		return nil, err
-	}
-	s.lock = lock
-	if err := s.openMirror(); err != nil {
-		return nil, err
-	}
 	s.syncfsRoot = os.Getenv("DALGONA_SYNCFS")
-	if err := s.reconcileStore(); err != nil {
+	if err := s.attach(); err != nil {
 		return nil, err
 	}
 	s.startBackup()
 	return s, nil
 }
 
-func acquireHomeLock(dir string) (*os.File, error) {
-	path := filepath.Join(dir, "daemon.lock")
-	lock, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("journal: open %s: %w", path, err)
+func (s *Store) attach() error {
+	if s.shared {
+		return s.attachShared()
 	}
-	lockErr := lockFile(lock)
-	if lockErr == nil {
+	lock, err := acquireHomeLock(s.dir)
+	if err != nil {
+		return err
+	}
+	s.lock = lock
+	if err := s.openMirror(); err != nil {
+		return err
+	}
+	return s.reconcileStore()
+}
+
+func acquireHomeLock(dir string) (*os.File, error) {
+	lock, err := openLockFile(filepath.Join(dir, "daemon.lock"))
+	if err != nil {
+		return nil, err
+	}
+	owned, err := tryLock(lock)
+	if err == nil && owned {
 		return lock, nil
 	}
-	closeErr := lock.Close()
-	if isLockBusy(lockErr) {
-		return nil, errors.Join(fmt.Errorf("another dalgona process owns %s", dir), closeErr)
+	if err == nil {
+		err = fmt.Errorf("another dalgona process owns %s", dir)
 	}
-	return nil, errors.Join(fmt.Errorf("journal: lock %s: %w", path, lockErr), closeErr)
+	return nil, errors.Join(err, lock.Close())
 }
 
 func (s *Store) openMirror() error {
@@ -209,7 +225,11 @@ func (s *Store) rebuildMirror() error {
 }
 
 func (s *Store) reloadIndex() error {
-	idx, err := loadIndex(s.db)
+	load := loadIndex
+	if s.shared {
+		load = loadSessionRows
+	}
+	idx, err := load(s.db)
 	if err != nil {
 		return fmt.Errorf("journal: load mirror index: %w", err)
 	}
@@ -256,10 +276,9 @@ func (s *Store) Append(ctx context.Context, session string, events ...[]byte) (u
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.sessions[session]
-	if st == nil {
-		st = &sessionState{hash: genesisPrev}
-		s.sessions[session] = st
+	st, err := s.appendState(session)
+	if err != nil {
+		return 0, err
 	}
 	if st.damaged {
 		return st.seq, fmt.Errorf("journal: session %s is damaged at seq %d", session, st.damagedSeq)
@@ -267,6 +286,24 @@ func (s *Store) Append(ctx context.Context, session string, events ...[]byte) (u
 	if len(events) == 0 {
 		return st.seq, nil
 	}
+	return s.writeBatch(session, st, events)
+}
+
+func (s *Store) appendState(session string) (*sessionState, error) {
+	if s.shared {
+		if err := s.refreshOwned(session); err != nil {
+			return nil, err
+		}
+	}
+	st := s.sessions[session]
+	if st == nil {
+		st = &sessionState{hash: genesisPrev}
+		s.sessions[session] = st
+	}
+	return st, nil
+}
+
+func (s *Store) writeBatch(session string, st *sessionState, events [][]byte) (uint64, error) {
 	batch, err := buildBatch(st, events)
 	if err != nil {
 		return st.seq, err
@@ -281,6 +318,9 @@ func (s *Store) Append(ctx context.Context, session string, events ...[]byte) (u
 		return st.seq, err
 	}
 	st.seq, st.hash = batch.seq, batch.hash
+	if s.shared {
+		st.observe(file)
+	}
 	syncErr := s.syncfs()
 	mirrorErr := mirrorAppend(s.db, session, batch.recs, batch.seq)
 	return batch.seq, errors.Join(syncErr, mirrorErr)
@@ -329,6 +369,9 @@ func (s *Store) appendFile(session string) (*os.File, error) {
 func (s *Store) Replay(session string, fn func(seq uint64, ev []byte) error) (retErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refreshUnowned(session); err != nil {
+		return err
+	}
 	st := s.sessions[session]
 	file, err := os.Open(s.journalPath(session))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -341,7 +384,8 @@ func (s *Store) Replay(session string, fn func(seq uint64, ev []byte) error) (re
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, file.Close()) }()
-	if err := replayFile(file, session, fn); err != nil {
+	cursor := replayCursor{session: session, seq: 1, prevHash: genesisPrev, fn: fn, openTail: s.shared}
+	if err := replayFile(file, &cursor); err != nil {
 		return err
 	}
 	if st != nil && st.damaged {
@@ -355,15 +399,15 @@ type replayCursor struct {
 	seq      uint64
 	prevHash string
 	fn       func(uint64, []byte) error
+	openTail bool
 }
 
-func replayFile(file *os.File, session string, fn func(seq uint64, ev []byte) error) error {
+func replayFile(file *os.File, cursor *replayCursor) error {
 	reader := bufio.NewReaderSize(file, 64*1024)
-	cursor := replayCursor{session: session, seq: 1, prevHash: genesisPrev, fn: fn}
 	var scratch []byte
 	for {
 		line, hadNL, readErr := readJournalLine(reader, &scratch)
-		if line != nil {
+		if line != nil && (hadNL || !cursor.openTail) {
 			if err := cursor.replayLine(line, hadNL); err != nil {
 				return err
 			}
@@ -505,6 +549,11 @@ func (s *Store) headOf(id string, st *sessionState) SessionHead {
 func (s *Store) Sessions() ([]SessionHead, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.shared {
+		if err := s.reloadIndex(); err != nil {
+			return nil, err
+		}
+	}
 	heads := make([]SessionHead, 0, len(s.sessions)+len(s.idx.sessions))
 	seen := map[string]bool{}
 	for id, st := range s.sessions {
@@ -569,10 +618,7 @@ func (s *Store) Close() error {
 	if db != nil {
 		result = errors.Join(result, backupDB(db, s.dir), db.Close())
 	}
-	if s.lock != nil {
-		result = errors.Join(result, unlockFile(s.lock), s.lock.Close())
-	}
-	return result
+	return errors.Join(result, releaseLock(s.users), releaseLock(s.lock))
 }
 
 func (s *Store) closeLocked() error {
@@ -580,34 +626,38 @@ func (s *Store) closeLocked() error {
 	if s.db != nil {
 		result = errors.Join(result, s.db.Close())
 	}
-	if s.lock != nil {
-		result = errors.Join(result, unlockFile(s.lock), s.lock.Close())
-	}
-	return result
+	return errors.Join(result, releaseLock(s.users), releaseLock(s.lock))
 }
 
 func LockSession(dir, session string) (func() error, error) {
-	if !validSessionID(session) {
-		return nil, fmt.Errorf("journal: invalid session id %q", session)
-	}
-	sdir := filepath.Join(dir, "sessions", session)
-	if err := os.MkdirAll(sdir, 0o700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(filepath.Join(sdir, "lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	sdir, err := sessionDirFor(dir, session)
 	if err != nil {
 		return nil, err
 	}
-	lockErr := lockFile(file)
-	if lockErr != nil {
-		closeErr := file.Close()
-		if isLockBusy(lockErr) {
-			return nil, errors.Join(fmt.Errorf("another dal process owns session %s", session), closeErr)
-		}
-		return nil, errors.Join(fmt.Errorf("journal: lock session %s: %w", session, lockErr), closeErr)
+	releaseGate, err := holdLock(filepath.Join(sdir, "repair.lock"))
+	if err != nil {
+		return nil, err
 	}
-	unlock := sync.OnceValue(func() error {
-		return errors.Join(unlockFile(file), file.Close())
-	})
-	return unlock, nil
+	unlock, err := ownSession(sdir, session)
+	gateErr := releaseGate()
+	if gateErr != nil && unlock != nil {
+		gateErr = errors.Join(gateErr, unlock())
+		unlock = nil
+	}
+	return unlock, errors.Join(err, gateErr)
+}
+
+func ownSession(sdir, session string) (func() error, error) {
+	file, err := openLockFile(filepath.Join(sdir, "lock"))
+	if err != nil {
+		return nil, err
+	}
+	owned, err := tryLock(file)
+	if err == nil && owned {
+		return sync.OnceValue(func() error { return releaseLock(file) }), nil
+	}
+	if err == nil {
+		err = fmt.Errorf("another dal process owns session %s", session)
+	}
+	return nil, errors.Join(err, file.Close())
 }

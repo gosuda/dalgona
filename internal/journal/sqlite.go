@@ -153,6 +153,35 @@ func loadIndex(db *sql.DB) (*dbIndex, error) {
 	return idx, nil
 }
 
+func loadSessionRows(db *sql.DB) (*dbIndex, error) {
+	idx := &dbIndex{
+		events:   map[string]*sessIndex{},
+		sessions: map[string]sessionRow{},
+	}
+	if err := loadSessionIndex(db, idx.sessions); err != nil {
+		return nil, err
+	}
+	return idx, nil
+}
+
+func loadSessionEvents(db *sql.DB, sid string) (_ *sessIndex, retErr error) {
+	rows, err := db.Query("SELECT seq, hash FROM events WHERE session = ?", sid)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { retErr = errors.Join(retErr, rows.Close()) }()
+	events := map[string]*sessIndex{}
+	for rows.Next() {
+		var seq uint64
+		var hash string
+		if err := rows.Scan(&seq, &hash); err != nil {
+			return nil, err
+		}
+		indexEvent(events, sid, seq, hash)
+	}
+	return events[sid], rows.Err()
+}
+
 func loadEventIndex(db *sql.DB, events map[string]*sessIndex) (retErr error) {
 	rows, err := db.Query("SELECT session, seq, hash FROM events ORDER BY session, seq")
 	if err != nil {
@@ -294,7 +323,12 @@ const upsertSessionSQL = `INSERT INTO sessions(id, status, head_seq, updated_at)
 		updated_at = excluded.updated_at,
 		status = CASE WHEN sessions.status = 'damaged' THEN 'damaged' ELSE excluded.status END`
 
-func backupDB(db *sql.DB, dir string) error {
+func backupDB(db *sql.DB, dir string) (retErr error) {
+	release, err := holdLock(filepath.Join(dir, "repair.lock"))
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, release()) }()
 	tmp := filepath.Join(dir, "state.db.bak.tmp")
 	final := filepath.Join(dir, "state.db.bak")
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {

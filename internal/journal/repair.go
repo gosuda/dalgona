@@ -52,15 +52,19 @@ func (s *Store) reconcileAll() (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		s.sessions[sid] = &sessionState{
-			seq:        result.head.HeadSeq,
-			hash:       result.lastHash,
-			damaged:    result.head.Status == SessionDamaged,
-			damagedSeq: result.head.DamagedSeq,
-		}
+		s.sessions[sid] = stateOf(result)
 		needsRebuild = needsRebuild || result.rebuild
 	}
 	return needsRebuild, nil
+}
+
+func stateOf(result reconcileResult) *sessionState {
+	return &sessionState{
+		seq:        result.head.HeadSeq,
+		hash:       result.lastHash,
+		damaged:    result.head.Status == SessionDamaged,
+		damagedSeq: result.head.DamagedSeq,
+	}
 }
 
 func fileExists(path string) (bool, error) {
@@ -258,10 +262,25 @@ func (s *Store) finishReconcile(sid string, scan *scanState, head SessionHead, h
 	if scan.damagedSeq > 0 {
 		return scan.rebuild, upsertSession(s.db, sid, string(head.Status), head.HeadSeq)
 	}
-	if scan.rebuild || mirrorHashMismatch(s.idx.events[sid], scan.emits) {
+	if !s.shared && (scan.rebuild || mirrorHashMismatch(s.idx.events[sid], scan.emits)) {
 		return true, nil
 	}
+	if mirrorMatches(s.idx.events[sid], scan.emits) {
+		return false, upsertSession(s.db, sid, string(head.Status), head.HeadSeq)
+	}
 	return false, replaceSession(s.db, sid, scan.emits, head)
+}
+
+func mirrorMatches(si *sessIndex, emits []emitRec) bool {
+	if si == nil || len(si.hashes) != len(emits) {
+		return false
+	}
+	for _, rec := range emits {
+		if si.hashes[rec.seq] != rec.hash {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) persistRepair(sid string, scan *scanState, hasMarker bool) error {
@@ -283,14 +302,20 @@ func (s *Store) quarantineSuffix(sid string, scan *scanState) error {
 	if err := writeQuarantine(s.quarantineDir(), name, scan.orig[scan.stopOff:]); err != nil {
 		return fmt.Errorf("journal: quarantine %s: %w", sid, err)
 	}
-	if scan.torn {
-		slog.Warn(fmt.Sprintf("journal: %s: torn tail of %d bytes quarantined", sid, len(scan.orig)-int(scan.stopOff)))
-		return nil
-	}
-	if scan.damagedSeq > 0 {
-		slog.Warn(fmt.Sprintf("journal: %s: damaged at seq %d; quarantined at quarantine/%s", sid, scan.damagedSeq, name))
+	if message := quarantineMessage(sid, scan, name); message != "" {
+		slog.Warn(strings.ReplaceAll(strings.ReplaceAll(message, "\r", `\r`), "\n", `\n`))
 	}
 	return nil
+}
+
+func quarantineMessage(sid string, scan *scanState, name string) string {
+	if scan.torn {
+		return fmt.Sprintf("journal: %s: torn tail of %d bytes quarantined", sid, len(scan.orig)-int(scan.stopOff))
+	}
+	if scan.damagedSeq > 0 {
+		return fmt.Sprintf("journal: %s: damaged at seq %d; quarantined at quarantine/%s", sid, scan.damagedSeq, name)
+	}
+	return ""
 }
 
 func mirrorHashMismatch(si *sessIndex, emits []emitRec) bool {
