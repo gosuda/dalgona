@@ -173,6 +173,5 @@ type ThreadInfo struct {
 	Head     uint64
 	Damaged  bool
 
-	createdModel string
-	models       []modelOverride
+	models modelTrail
 }

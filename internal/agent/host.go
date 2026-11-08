@@ -152,40 +152,58 @@ func (info *ThreadInfo) wants(raw []byte) bool {
 	return promptLine(raw) && (info.Preview == "" || bytes.Contains(raw, []byte(`"model":`)))
 }
 
-type modelOverride struct {
-	seq   uint64
-	model string
+type modelTrail struct {
+	created string
+	marks   []event.Seqd
+}
+
+func (m *modelTrail) note(seq uint64, e event.Event) bool {
+	switch value := e.(type) {
+	case event.Branch:
+		m.markParent(value.ParentSeq)
+		m.marks = append(m.marks, event.Seqd{Seq: seq, Event: value})
+		return true
+	case event.UserMessage:
+		if value.Model == "" {
+			return false
+		}
+		m.marks = append(m.marks, event.Seqd{Seq: seq, Event: event.UserMessage{Model: value.Model}})
+		return true
+	}
+	return false
+}
+
+func (m *modelTrail) markParent(parent uint64) {
+	i, found := slices.BinarySearchFunc(m.marks, parent, func(item event.Seqd, seq uint64) int { return cmp.Compare(item.Seq, seq) })
+	if parent != 0 && !found {
+		m.marks = slices.Insert(m.marks, i, event.Seqd{Seq: parent})
+	}
+}
+
+func (m *modelTrail) model() string {
+	out := m.created
+	for _, item := range event.ActivePath(m.marks) {
+		if message, ok := item.Event.(event.UserMessage); ok {
+			out = message.Model
+		}
+	}
+	return out
 }
 
 func (h *Host) applyInfo(info *ThreadInfo, seq uint64, e event.Event) {
+	if info.models.note(seq, e) {
+		info.Model = info.models.model()
+	}
 	switch value := e.(type) {
 	case event.SessionCreated:
 		info.Parent, info.ForkOf, info.Advisor = value.Parent, value.ForkOf, value.Advisor
-		info.Cwd, info.Model, info.createdModel, info.Created = value.Cwd, value.Model, value.Model, value.CreatedAt
+		info.Cwd, info.Model, info.models.created, info.Created = value.Cwd, value.Model, value.Model, value.CreatedAt
 	case event.ThreadNamed:
 		info.Name = value.Name
 	case event.ThreadArchived:
 		info.Archived = value.Archived
-	case event.Branch:
-		info.rewindModel(value.ParentSeq)
 	case event.UserMessage:
-		if value.Model != "" {
-			info.models = append(info.models, modelOverride{seq: seq, model: value.Model})
-			info.Model = value.Model
-		}
 		h.applyPreview(info, value)
-	}
-}
-
-func (info *ThreadInfo) rewindModel(parent uint64) {
-	keep := 0
-	for keep < len(info.models) && info.models[keep].seq <= parent {
-		keep++
-	}
-	info.models = slices.Clone(info.models[:keep])
-	info.Model = info.createdModel
-	if keep > 0 {
-		info.Model = info.models[keep-1].model
 	}
 }
 
