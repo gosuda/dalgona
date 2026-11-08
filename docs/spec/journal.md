@@ -1,0 +1,55 @@
+# Event journal
+
+The journal MUST survive a process halt, a forced kill, and a host restart. JSONL is the authority. SQLite is a repairable mirror.
+
+## Record format
+
+Each session uses `sessions/<id>/journal.jsonl`. Each line MUST contain one object followed by `\n`:
+
+```json
+{"seq":1,"prev":"<64 hex>","hash":"<64 hex>","crc":"<8 hex>","ev":{}}
+```
+
+`ev` MUST be one JSON object with a string `type` field. The journal MUST preserve its raw bytes. `crc` MUST be CRC32-Castagnoli of those bytes. `hash` MUST be SHA-256 of the 64-byte `prev` field, the big-endian sequence number, and the raw event bytes. Sequence numbers MUST start at one and increase by one. The first `prev` value MUST be 64 zeroes. A line MUST NOT exceed 16 MiB.
+
+A payload larger than 64 KiB MUST be stored under `blobs/<sha256>`. The event MUST contain the SHA-256 name and byte count. Blob writes MUST use a temporary file, file `fsync`, rename, and directory `fsync`.
+
+## Append
+
+`Append` MUST validate every event before writing. It MUST encode all events for one call and write them with one append write. It MUST `fsync` the journal before it returns. It MUST insert the same records and session head in one immediate SQLite transaction. JSONL remains authoritative when the mirror write fails. The store MUST retain the new JSONL head and report the mirror error.
+
+When `DALGONA_SYNCFS` is set, the journal `fsync` MUST be followed by `Syncfs` for that directory.
+
+## Open and repair
+
+`Open` MUST verify JSONL framing, JSON shape, sequence numbers, CRC values, and the hash chain. The quarantine `<offset>` MUST be the byte offset of the first bad line. The following rules MUST apply.
+
+| Finding | Required action |
+| --- | --- |
+| The final line has no newline, cannot be parsed, or has a CRC or hash failure | Copy the partial final record to `quarantine/<session>-<offset>.bin`. Truncate at the last good line. `fsync` the file and directory. Log `journal: <session>: torn tail of <n> bytes quarantined`. Apply the verified SQLite-suffix rule afterward. |
+| A record has a sequence gap, a duplicate sequence, or a bad link at any position, or another bad record before the final line | Use SQLite only when every row from the damage point through the SQLite head verifies against the chain. Rebuild JSONL from the good prefix and those rows through a temporary file, rename, and directory `fsync`. |
+| SQLite cannot supply that complete verified suffix | Mark the session damaged at the first bad sequence. Keep only the valid prefix for replay. Reject appends. Preserve the bad suffix in quarantine before writing the damage marker. Report `journal: <session>: damaged at seq <n>; quarantined at quarantine/<file>`. |
+| SQLite `quick_check` fails or a mirrored hash differs from JSONL | Move `state.db`, `state.db-wal`, and `state.db-shm` to `quarantine/state-<unix>.db*`. Rebuild the mirror from JSONL. |
+| SQLite is behind JSONL | Insert the missing rows from JSONL. |
+| SQLite is ahead of a complete JSONL file | Append the SQLite suffix only when every row verifies from the JSONL head. Otherwise rebuild the mirror from JSONL. |
+
+`Replay` MUST return every valid prefix event before it returns a damage error. A damaged session MUST remain read-only across later opens. The store MUST NOT silently discard a committed event.
+
+## SQLite mirror
+
+The database is `state.db`. The backup is `state.db.bak`. The store MUST enable WAL, `synchronous=FULL`, foreign keys, and a 5000 ms busy timeout. It MUST use this schema:
+
+```sql
+CREATE TABLE events(session TEXT NOT NULL, seq INTEGER NOT NULL, hash TEXT NOT NULL, ev BLOB NOT NULL, PRIMARY KEY(session, seq));
+CREATE TABLE sessions(id TEXT PRIMARY KEY, parent TEXT, cwd TEXT, title TEXT, status TEXT, head_seq INTEGER, updated_at TEXT);
+```
+
+Every 30 minutes and at clean close, the store MUST run `VACUUM INTO` into `state.db.bak.tmp`. It MUST then rename that file to `state.db.bak`. A clean close MUST report a backup failure. When `state.db` is unusable, the store MUST try `state.db.bak` before it creates an empty mirror. This rule allows a verified backup row to repair damaged JSONL.
+
+## Locks and blobs
+
+`Open` MUST hold an exclusive process lock on `daemon.lock`. A second owner MUST receive `another dalgona process owns <home>`.
+
+`LockSession` MUST hold an exclusive lock at `sessions/<id>/lock`. The caller MUST call the returned unlock function.
+
+Blob names MUST contain exactly 64 lowercase SHA-256 hexadecimal characters. `Blob` MUST reject malformed names and report missing blobs.

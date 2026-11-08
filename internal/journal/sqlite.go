@@ -1,0 +1,325 @@
+package journal
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+const schema = `
+CREATE TABLE IF NOT EXISTS events(
+	session TEXT NOT NULL,
+	seq INTEGER NOT NULL,
+	hash TEXT NOT NULL,
+	ev BLOB NOT NULL,
+	PRIMARY KEY(session, seq)
+);
+CREATE TABLE IF NOT EXISTS sessions(
+	id TEXT PRIMARY KEY,
+	parent TEXT,
+	cwd TEXT,
+	title TEXT,
+	status TEXT,
+	head_seq INTEGER,
+	updated_at TEXT
+);
+`
+
+func dbDSN(path string) string {
+	esc := strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23", " ", "%20").Replace(path)
+	return "file:" + esc + "?_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(FULL)" +
+		"&_pragma=foreign_keys(1)" +
+		"&_pragma=busy_timeout(5000)" +
+		"&_txlock=immediate"
+}
+
+func openDB(path string) (db *sql.DB, err error) {
+	db, err = sql.Open("sqlite", dbDSN(path))
+	if err != nil {
+		return nil, fmt.Errorf("journal: open state.db: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err = db.Exec(schema); err != nil {
+		return nil, errors.Join(fmt.Errorf("journal: create schema: %w", err), db.Close())
+	}
+	return db, nil
+}
+
+func openUsableDB(path string) (*sql.DB, error) {
+	db, err := openDB(path)
+	if err != nil {
+		return nil, err
+	}
+	ok, checkErr := quickCheckOK(db)
+	if checkErr == nil && ok {
+		return db, nil
+	}
+	if checkErr == nil {
+		checkErr = errors.New("quick_check reported corruption")
+	}
+	return nil, errors.Join(fmt.Errorf("journal: quick_check: %w", checkErr), db.Close())
+}
+
+func recoverBackup(dir string) (*sql.DB, error) {
+	source := filepath.Join(dir, "state.db.bak")
+	if _, err := os.Stat(source); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	tmp := filepath.Join(dir, "state.db.recover.tmp")
+	if err := copyMirrorFile(source, tmp); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, "state.db")
+	if err := os.Rename(tmp, path); err != nil {
+		return nil, err
+	}
+	if err := syncDir(dir); err != nil {
+		return nil, err
+	}
+	return openUsableDB(path)
+}
+
+func copyMirrorFile(source, destination string) (retErr error) {
+	src, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, src.Close()) }()
+	dst, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, dst.Close()) }()
+	if _, err = io.Copy(dst, src); err != nil {
+		return err
+	}
+	return dst.Sync()
+}
+
+func quickCheckOK(db *sql.DB) (ok bool, retErr error) {
+	rows, err := db.Query("PRAGMA quick_check")
+	if err != nil {
+		return false, err
+	}
+	defer func() { retErr = errors.Join(retErr, rows.Close()) }()
+	for rows.Next() {
+		var result string
+		if err := rows.Scan(&result); err != nil {
+			return false, err
+		}
+		if result != "ok" {
+			return false, nil
+		}
+	}
+	return true, rows.Err()
+}
+
+type sessIndex struct {
+	hashes map[uint64]string
+	head   uint64
+}
+
+type dbIndex struct {
+	events   map[string]*sessIndex
+	sessions map[string]sessionRow
+}
+
+type sessionRow struct {
+	status  string
+	headSeq uint64
+}
+
+func loadIndex(db *sql.DB) (*dbIndex, error) {
+	idx := &dbIndex{
+		events:   map[string]*sessIndex{},
+		sessions: map[string]sessionRow{},
+	}
+	if err := loadEventIndex(db, idx.events); err != nil {
+		return nil, err
+	}
+	if err := loadSessionIndex(db, idx.sessions); err != nil {
+		return nil, err
+	}
+	return idx, nil
+}
+
+func loadEventIndex(db *sql.DB, events map[string]*sessIndex) (retErr error) {
+	rows, err := db.Query("SELECT session, seq, hash FROM events ORDER BY session, seq")
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, rows.Close()) }()
+	for rows.Next() {
+		var sid string
+		var seq uint64
+		var hash string
+		if err := rows.Scan(&sid, &seq, &hash); err != nil {
+			return err
+		}
+		indexEvent(events, sid, seq, hash)
+	}
+	return rows.Err()
+}
+
+func indexEvent(events map[string]*sessIndex, sid string, seq uint64, hash string) {
+	si := events[sid]
+	if si == nil {
+		si = &sessIndex{hashes: map[uint64]string{}}
+		events[sid] = si
+	}
+	si.hashes[seq] = hash
+	si.head = max(si.head, seq)
+}
+
+func loadSessionIndex(db *sql.DB, sessions map[string]sessionRow) (retErr error) {
+	rows, err := db.Query("SELECT id, status, head_seq FROM sessions")
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, rows.Close()) }()
+	for rows.Next() {
+		var id string
+		var status sql.NullString
+		var head sql.NullInt64
+		if err := rows.Scan(&id, &status, &head); err != nil {
+			return err
+		}
+		sessions[id] = sessionRow{status: status.String, headSeq: uint64(max(head.Int64, 0))}
+	}
+	return rows.Err()
+}
+
+type fetchResult struct {
+	hash string
+	ev   []byte
+	ok   bool
+}
+
+func fetchRow(db *sql.DB, sid string, seq uint64) (fetchResult, error) {
+	row := db.QueryRow("SELECT hash, ev FROM events WHERE session = ? AND seq = ?", sid, seq)
+	var result fetchResult
+	err := row.Scan(&result.hash, &result.ev)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fetchResult{}, nil
+	}
+	if err != nil {
+		return fetchResult{}, err
+	}
+	result.ok = true
+	return result, nil
+}
+
+func withTx(db *sql.DB, fn func(*sql.Tx) error) (retErr error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, rollbackTx(tx)) }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func rollbackTx(tx *sql.Tx) error {
+	err := tx.Rollback()
+	if errors.Is(err, sql.ErrTxDone) {
+		return nil
+	}
+	return err
+}
+
+func insertEventsTx(tx *sql.Tx, sid string, recs []emitRec) (retErr error) {
+	if len(recs) == 0 {
+		return nil
+	}
+	stmt, err := tx.Prepare("INSERT INTO events(session, seq, hash, ev) VALUES(?, ?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, stmt.Close()) }()
+	for _, rec := range recs {
+		if _, err := stmt.Exec(sid, rec.seq, rec.hash, rec.ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func mirrorAppend(db *sql.DB, sid string, recs []emitRec, headSeq uint64) error {
+	return withTx(db, func(tx *sql.Tx) error {
+		if err := insertEventsTx(tx, sid, recs); err != nil {
+			return err
+		}
+		return upsertSessionTx(tx, sid, string(SessionOK), headSeq)
+	})
+}
+
+func replaceSession(db *sql.DB, sid string, recs []emitRec, head SessionHead) error {
+	return withTx(db, func(tx *sql.Tx) error {
+		if _, err := tx.Exec("DELETE FROM events WHERE session = ?", sid); err != nil {
+			return err
+		}
+		if err := insertEventsTx(tx, sid, recs); err != nil {
+			return err
+		}
+		return upsertSessionTx(tx, sid, string(head.Status), head.HeadSeq)
+	})
+}
+
+func upsertSession(db *sql.DB, sid string, status string, headSeq uint64) error {
+	_, err := db.Exec(upsertSessionSQL, sid, status, headSeq, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func upsertSessionTx(tx *sql.Tx, sid string, status string, headSeq uint64) error {
+	_, err := tx.Exec(upsertSessionSQL, sid, status, headSeq, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+const upsertSessionSQL = `INSERT INTO sessions(id, status, head_seq, updated_at)
+	VALUES(?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		head_seq = excluded.head_seq,
+		updated_at = excluded.updated_at,
+		status = CASE WHEN sessions.status = 'damaged' THEN 'damaged' ELSE excluded.status END`
+
+func backupDB(db *sql.DB, dir string) error {
+	tmp := filepath.Join(dir, "state.db.bak.tmp")
+	final := filepath.Join(dir, "state.db.bak")
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("journal: remove stale backup: %w", err)
+	}
+	if _, err := db.Exec("VACUUM INTO ?", tmp); err != nil {
+		return fmt.Errorf("journal: backup state.db: %w", err)
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		return fmt.Errorf("journal: install state.db.bak: %w", err)
+	}
+	return nil
+}
+
+func quarantineDB(dir, quarantine string) error {
+	base := filepath.Join(quarantine, fmt.Sprintf("state-%d.db", time.Now().Unix()))
+	var result error
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		src := filepath.Join(dir, "state.db"+suffix)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if err := os.Rename(src, base+suffix); err != nil {
+			result = errors.Join(result, err)
+		}
+	}
+	return result
+}
