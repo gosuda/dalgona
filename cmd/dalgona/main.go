@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+
+	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/tool/search"
 )
 
 const binary = "dalgona"
@@ -19,6 +22,14 @@ func main() {
 }
 
 func run(_ context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "__shim":
+			return runner.ShimMain(args[1:])
+		case "__search":
+			return search.Main(args[1:], stdout)
+		}
+	}
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Fprintf(stdout, "%s %s\n", binary, version())
 		return 0
