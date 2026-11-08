@@ -1,0 +1,5 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hel"},{"text":"think","thought":true}]}}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"lo"},{"functionCall":{"id":"call-1","name":"read","args":{"path":"a"}}}]}}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":20,"cachedContentTokenCount":3,"candidatesTokenCount":5,"thoughtsTokenCount":2,"totalTokenCount":25}}
