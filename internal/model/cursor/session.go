@@ -181,7 +181,7 @@ func (s *session) kv(view []byte) error {
 }
 
 func sendError(err error) error {
-	if err == nil {
+	if err == nil || errors.Is(err, io.ErrClosedPipe) {
 		return nil
 	}
 	return fmt.Errorf("cursor: send: %w", err)

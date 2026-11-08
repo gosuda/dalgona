@@ -143,7 +143,7 @@ func TestCursorInBandExecRunsThroughTheGate(t *testing.T) {
 	}
 	completed := completedOutputs(events)["call-1"]
 	if !completed.OK || !strings.Contains(completed.Output, "in-band") || resolutions(events)["call-1"].By != "mode:yolo" {
-		t.Fatalf("in-band completion = %+v events=%+v", completed, events)
+		t.Fatalf("in-band completion = %+v", completed)
 	}
 	if countType(events, event.TypeToolStarted) != 1 || countType(events, event.TypeAssistantMessage) != 2 {
 		t.Fatalf("events = %v", h.types(thread.ID()))

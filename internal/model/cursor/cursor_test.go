@@ -355,6 +355,73 @@ func TestDropAfterInBandFailsWithoutSecondRun(t *testing.T) {
 	}
 }
 
+type heldBody struct {
+	io.ReadCloser
+	armed  *atomic.Bool
+	held   bool
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (b *heldBody) Read(p []byte) (int, error) {
+	if b.held {
+		<-b.closed
+		return b.ReadCloser.Read(p)
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.held = n > 0 && b.armed.Load()
+	return n, err
+}
+
+func (b *heldBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(func() { close(b.closed) })
+	return err
+}
+
+type holdAfterReply struct {
+	base  http.RoundTripper
+	armed *atomic.Bool
+}
+
+func (h holdAfterReply) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		req = req.Clone(req.Context())
+		req.Body = &heldBody{ReadCloser: req.Body, armed: h.armed, closed: make(chan struct{})}
+	}
+	return h.base.RoundTrip(req)
+}
+
+func TestStreamCloseAfterServerEndKeepsTurn(t *testing.T) {
+	counter := &inBandCounter{}
+	_, server := newServer(t, func(c *fakeConn) {
+		c.sendExec(shellExec(9))
+		checkShellReply(t, c.execReply())
+		c.endTurn()
+	})
+	armed := &atomic.Bool{}
+	client := *server.Client()
+	client.Transport = holdAfterReply{base: client.Transport, armed: armed}
+	provider := cursor.New(cursor.Config{
+		BaseURL: server.URL, Client: &client,
+		Token: func(context.Context) (string, error) { return "cursor-token", nil },
+		Retry: model.RetryOptions{StartTimeout: 2 * time.Second, IdleTimeout: time.Second, Sleep: func(context.Context, time.Duration) error { return nil }},
+	})
+	inBand := func(ctx context.Context, call model.ToolCall) (model.ToolResult, error) {
+		armed.Store(true)
+		return counter.run(ctx, call)
+	}
+	stream, err := provider.StreamWith(t.Context(), userRequest("run it"), cursor.StreamOptions{InBand: inBand})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := drain(t, stream)
+	if out.failure != nil || out.stop != "stop" || counter.calls.Load() != 1 {
+		t.Fatalf("result = %+v, failure = %+v, in-band calls = %d", out, out.failure, counter.calls.Load())
+	}
+	checkResolvedExec(t, out.calls)
+}
+
 func TestDryRunMcpFrameRunsNothing(t *testing.T) {
 	counter := &inBandCounter{}
 	_, server := newServer(t, func(c *fakeConn) {
