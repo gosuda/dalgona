@@ -279,6 +279,32 @@ func TestMalformedEventRetainsBody(t *testing.T) {
 	}
 }
 
+func TestResponseDoneEndsStreamWithoutWaitingForEOF(t *testing.T) {
+	t.Parallel()
+	const hold = 5 * time.Second
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"ok\"}\n\n" +
+			"event: response.done\n" +
+			"data: {\"type\":\"response.done\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(hold):
+		}
+	}))
+	t.Cleanup(server.Close)
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry(nil)})
+	start := time.Now()
+	summary := drainStream(t, provider, model.Request{Model: "gpt-test"})
+	if elapsed := time.Since(start); elapsed >= hold {
+		t.Fatalf("stream waited %v for EOF after response.done", elapsed)
+	}
+	if summary.text != "ok" || summary.stop != "stop" || summary.usage.Input != 5 || summary.usage.Output != 2 {
+		t.Fatalf("summary = %+v", summary)
+	}
+}
+
 func TestModels(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

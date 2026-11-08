@@ -11,6 +11,8 @@ import (
 	"github.com/gosuda/dalgona/internal/model"
 )
 
+var errTerminalEvent = errors.New("openai: terminal response event")
+
 type responseState struct {
 	stream    *model.EventStream
 	tools     map[int]*model.ToolCall
@@ -66,6 +68,9 @@ func (s *responseState) consume(ctx context.Context, gate *model.StartGate, body
 		gate.FirstEvent()
 		return s.handle(event, data)
 	})
+	if errors.Is(err, errTerminalEvent) {
+		err = nil
+	}
 	err = gate.Error(ctx, err)
 	if err == nil {
 		err = s.finish()
@@ -84,6 +89,9 @@ func (s *responseState) handle(_, data []byte) error {
 	if err != nil {
 		return s.fail(data, err)
 	}
+	if s.done {
+		return errTerminalEvent
+	}
 	return nil
 }
 
@@ -98,7 +106,7 @@ func (s *responseState) dispatch(value responseEvent) error {
 		return errors.New("openai: refusal")
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		s.stream.Emit(model.ReasoningDelta{Text: value.Delta})
-	case "response.completed", "response.incomplete":
+	case "response.completed", "response.done", "response.incomplete":
 		return s.complete(value)
 	case "response.failed", "error":
 		return errors.New(failureMessage(value))

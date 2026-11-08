@@ -75,7 +75,7 @@ func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, req m
 	if err != nil {
 		return model.AttemptResult{Status: http.StatusUnauthorized, Err: err}
 	}
-	body, err := encodeRequest(req)
+	body, err := EncodeRequest(req)
 	if err != nil {
 		return model.AttemptResult{Err: err}
 	}
@@ -97,8 +97,7 @@ func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, req m
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return httpFailure(resp)
 	}
-	state := responseState{stream: stream, freeform: model.FreeformToolNames(req.Tools), ids: make(map[string]bool)}
-	return state.consume(gateCtx, gate, resp.Body, p.cfg.Retry)
+	return NewDecoder(stream, req.Tools).consume(gateCtx, gate, resp.Body, p.cfg.Retry)
 }
 
 func httpFailure(resp *http.Response) model.AttemptResult {
@@ -121,7 +120,7 @@ func (p *Provider) key(ctx context.Context) (string, error) {
 	return APIKeyFromEnv(ctx)
 }
 
-func encodeRequest(req model.Request) ([]byte, error) {
+func EncodeRequest(req model.Request) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := model.NewJSONEncoder(&buffer)
 	encoder.BeginObject()

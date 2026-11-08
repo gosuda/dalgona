@@ -11,7 +11,7 @@ import (
 	"github.com/gosuda/dalgona/internal/model"
 )
 
-type responseState struct {
+type Decoder struct {
 	stream    *model.EventStream
 	freeform  map[string]bool
 	ids       map[string]bool
@@ -20,6 +20,12 @@ type responseState struct {
 	done      bool
 	errorBody []byte
 }
+
+func NewDecoder(stream *model.EventStream, tools []model.Tool) *Decoder {
+	return &Decoder{stream: stream, freeform: model.FreeformToolNames(tools), ids: make(map[string]bool)}
+}
+
+func (s *Decoder) SawTool() bool { return s.sawTool }
 
 type responseEvent struct {
 	Candidates  []candidate
@@ -64,26 +70,26 @@ type providerError struct {
 	Status  string
 }
 
-func (s *responseState) consume(ctx context.Context, gate *model.StartGate, body io.ReadCloser, options model.RetryOptions) model.AttemptResult {
+func (s *Decoder) consume(ctx context.Context, gate *model.StartGate, body io.ReadCloser, options model.RetryOptions) model.AttemptResult {
 	err := model.ReadSSEWithTimeouts(ctx, body, model.SSEOptions{IdleTimeout: options.IdleTimeout, Control: s.stream.Timers()}, func(event, data []byte) error {
 		gate.FirstEvent()
 		return s.handle(event, data)
 	})
 	err = gate.Error(ctx, err)
 	if err == nil {
-		err = s.finish()
+		err = s.Finish()
 	}
 	return model.AttemptResult{Status: 200, SawTool: s.sawTool, Body: s.errorBody, Err: err}
 }
 
-func (s *responseState) handle(_, data []byte) error {
-	if err := s.decodeData(data); err != nil {
+func (s *Decoder) handle(_, data []byte) error {
+	if err := s.Decode(data); err != nil {
 		return s.fail(data, err)
 	}
 	return nil
 }
 
-func (s *responseState) decodeData(data []byte) error {
+func (s *Decoder) Decode(data []byte) error {
 	decoder := jsontext.NewDecoder(bytes.NewReader(data))
 	if decoder.PeekKind() == '[' {
 		if err := model.ReadArrayItems(decoder, func(int) error { return s.decodeAndProcess(decoder) }); err != nil {
@@ -95,7 +101,7 @@ func (s *responseState) decodeData(data []byte) error {
 	return model.RequireJSONEOF(decoder)
 }
 
-func (s *responseState) decodeAndProcess(decoder *jsontext.Decoder) error {
+func (s *Decoder) decodeAndProcess(decoder *jsontext.Decoder) error {
 	value, err := decodeResponseEvent(decoder)
 	if err != nil {
 		return err
@@ -103,7 +109,7 @@ func (s *responseState) decodeAndProcess(decoder *jsontext.Decoder) error {
 	return s.process(value)
 }
 
-func (s *responseState) process(value responseEvent) error {
+func (s *Decoder) process(value responseEvent) error {
 	if value.Error != nil {
 		return errors.New("google: " + value.Error.Code + " " + value.Error.Status + ": " + value.Error.Message)
 	}
@@ -119,7 +125,7 @@ func (s *responseState) process(value responseEvent) error {
 	return s.processCandidate(value.Candidates[0])
 }
 
-func (s *responseState) processCandidate(candidate candidate) error {
+func (s *Decoder) processCandidate(candidate candidate) error {
 	for _, part := range candidate.Content.Parts {
 		if err := s.processPart(part); err != nil {
 			return err
@@ -137,7 +143,7 @@ func (s *responseState) processCandidate(candidate candidate) error {
 	return nil
 }
 
-func (s *responseState) processPart(part part) error {
+func (s *Decoder) processPart(part part) error {
 	if part.FunctionCall != nil {
 		return s.emitTool(*part.FunctionCall)
 	}
@@ -152,7 +158,7 @@ func (s *responseState) processPart(part part) error {
 	return nil
 }
 
-func (s *responseState) emitTool(call functionCall) error {
+func (s *Decoder) emitTool(call functionCall) error {
 	s.counter++
 	id := call.ID
 	if id == "" || s.ids[id] {
@@ -176,7 +182,7 @@ func (s *responseState) emitTool(call functionCall) error {
 	return nil
 }
 
-func (s *responseState) stopReason(finish string) (string, error) {
+func (s *Decoder) stopReason(finish string) (string, error) {
 	switch finish {
 	case "STOP":
 		if s.sawTool {
@@ -190,12 +196,12 @@ func (s *responseState) stopReason(finish string) (string, error) {
 	}
 }
 
-func (s *responseState) fail(data []byte, err error) error {
+func (s *Decoder) fail(data []byte, err error) error {
 	s.errorBody = bytes.Clone(data)
 	return err
 }
 
-func (s *responseState) finish() error {
+func (s *Decoder) Finish() error {
 	if !s.done {
 		return errors.New("google: stream ended without a finish reason")
 	}
