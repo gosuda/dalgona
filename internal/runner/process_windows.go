@@ -42,14 +42,21 @@ func signalProcess(shimPID int, pgid int, signal Signal) error {
 		return err
 	}
 	defer func() { _ = windows.CloseHandle(job) }()
-	exitCode := uint32(1)
-	if signal == SignalKill {
-		exitCode = 137
-	}
-	if err := windows.TerminateJobObject(job, exitCode); err != nil {
+	if err := windows.TerminateJobObject(job, jobExitCode(signal)); err != nil {
 		return fmt.Errorf("runner: terminate job: %w", err)
 	}
 	return nil
+}
+
+func jobExitCode(signal Signal) uint32 {
+	if signal == SignalKill {
+		return 137
+	}
+	return 1
+}
+
+func canceledExit(signal Signal) (int, string) {
+	return int(jobExitCode(signal)), ""
 }
 
 func assignJob(cmd *exec.Cmd) (func(), error) {

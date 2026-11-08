@@ -14,7 +14,10 @@ import (
 	"time"
 )
 
-const shimExecEnvironment = "DALGONA_SHIM_EXEC"
+const (
+	shimExecEnvironment  = "DALGONA_SHIM_EXEC"
+	shimPauseEnvironment = "DALGONA_SHIM_TEST_PAUSE"
+)
 
 func ShimMain(args []string) int {
 	dir, argv, err := parseShimArgs(args)
@@ -42,40 +45,23 @@ func parseShimArgs(args []string) (string, []string, error) {
 }
 
 func runShim(dir string, argv []string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("runner: create shim directory: %w", err)
-	}
-	out, err := os.OpenFile(filepath.Join(dir, "out"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	out, err := openShimOutput(dir)
 	if err != nil {
-		return fmt.Errorf("runner: open shim output: %w", err)
+		return err
 	}
+	pauseShim("pid")
 	if pidErr := writePID(dir); pidErr != nil {
 		return failShim(dir, out, pidErr)
 	}
-	cmd, err := commandForShim(argv)
+	if signal, canceled := readCancel(dir); canceled {
+		return cancelShim(dir, out, signal)
+	}
+	cmd, cleanup, err := startCommand(dir, argv, out)
 	if err != nil {
 		return failShim(dir, out, err)
 	}
-	if sandboxErr := configureSandbox(cmd, dir, currentSandbox()); sandboxErr != nil {
-		return failShim(dir, out, fmt.Errorf("sandbox: %w", sandboxErr))
-	}
-	writer := &limitedWriter{w: out, limit: outputLimit}
-	cmd.Stdout = writer
-	cmd.Stderr = writer
-	configureProcessGroup(cmd)
-	if startErr := cmd.Start(); startErr != nil {
-		return failShim(dir, out, startErr)
-	}
-	if groupErr := writeProcessGroup(dir, cmd.Process.Pid); groupErr != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return failShim(dir, out, groupErr)
-	}
-	cleanup, err := assignJob(cmd)
-	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return failShim(dir, out, err)
+	if signal, canceled := readCancel(dir); canceled {
+		stopCommand(cmd, signal)
 	}
 	waitErr := cmd.Wait()
 	cleanup()
@@ -83,6 +69,72 @@ func runShim(dir string, argv []string) error {
 	closeErr := out.Close()
 	finishErr := finishShim(dir, Exit{Code: code, Signal: signal, EndedAt: time.Now()})
 	return errors.Join(closeErr, finishErr)
+}
+
+func openShimOutput(dir string) (*os.File, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("runner: create shim directory: %w", err)
+	}
+	out, err := os.OpenFile(filepath.Join(dir, "out"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("runner: open shim output: %w", err)
+	}
+	return out, nil
+}
+
+func startCommand(dir string, argv []string, out *os.File) (*exec.Cmd, func(), error) {
+	cmd, err := commandForShim(argv)
+	if err != nil {
+		return nil, nil, err
+	}
+	if sandboxErr := configureSandbox(cmd, dir, currentSandbox()); sandboxErr != nil {
+		return nil, nil, fmt.Errorf("sandbox: %w", sandboxErr)
+	}
+	writer := &limitedWriter{w: out, limit: outputLimit}
+	cmd.Stdout = writer
+	cmd.Stderr = writer
+	configureProcessGroup(cmd)
+	pauseShim("start")
+	if startErr := cmd.Start(); startErr != nil {
+		return nil, nil, startErr
+	}
+	if groupErr := writeProcessGroup(dir, cmd.Process.Pid); groupErr != nil {
+		return nil, nil, abandonCommand(cmd, groupErr)
+	}
+	cleanup, err := assignJob(cmd)
+	if err != nil {
+		return nil, nil, abandonCommand(cmd, err)
+	}
+	return cmd, cleanup, nil
+}
+
+func abandonCommand(cmd *exec.Cmd, cause error) error {
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	return cause
+}
+
+func stopCommand(cmd *exec.Cmd, signal Signal) {
+	if err := signalProcess(os.Getpid(), cmd.Process.Pid, signal); err != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+func cancelShim(dir string, out *os.File, signal Signal) error {
+	code, text := canceledExit(signal)
+	closeErr := out.Close()
+	finishErr := finishShim(dir, Exit{Code: code, Signal: text, EndedAt: time.Now()})
+	return errors.Join(closeErr, finishErr)
+}
+
+func pauseShim(phase string) {
+	name, value, ok := strings.Cut(os.Getenv(shimPauseEnvironment), ":")
+	if !ok || name != phase {
+		return
+	}
+	if delay, err := time.ParseDuration(value); err == nil {
+		time.Sleep(delay)
+	}
 }
 
 func commandForShim(argv []string) (*exec.Cmd, error) {

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -177,6 +178,71 @@ func TestLocal_signalPreservesExitRecord(t *testing.T) {
 	}
 }
 
+func TestLocal_signalBeforePIDPreventsStart(t *testing.T) {
+	dir := t.TempDir()
+	local := newTestLocal(t, filepath.Join(dir, "runs"))
+	env := append(os.Environ(), shimPauseEnvironment+"=pid:300ms")
+	startTestProcess(t, local, ProcessSpec{ID: "early", Argv: []string{"sh", "-c", "touch started; sleep 30"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
+	runDir := filepath.Join(dir, "runs", "early")
+	if _, err := os.Stat(filepath.Join(runDir, "pid")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("pid existed before the signal: %v", err)
+	}
+	if err := local.Signal(t.Context(), "early", SignalTerm); err != nil {
+		t.Fatal(err)
+	}
+	state := waitForExit(t, local, "early", 5*time.Second)
+	if state.Exit.Code == 0 || state.Exit.Signal != syscall.SIGTERM.String() {
+		t.Fatalf("canceled exit = %+v", state.Exit)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "pgid")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("command group was created after the signal: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "started")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("command ran after the signal: %v", err)
+	}
+}
+
+func TestLocal_signalBeforeProcessGroupStopsCommand(t *testing.T) {
+	dir := t.TempDir()
+	local := newTestLocal(t, filepath.Join(dir, "runs"))
+	env := append(os.Environ(), shimPauseEnvironment+"=start:400ms")
+	startTestProcess(t, local, ProcessSpec{ID: "starting", Argv: []string{"sh", "-c", "sleep 30 & wait"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
+	runDir := filepath.Join(dir, "runs", "starting")
+	waitForFile(t, filepath.Join(runDir, "pid"), 5*time.Second)
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(runDir, "pgid")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("pgid existed before the signal: %v", err)
+	}
+	if err := local.Signal(t.Context(), "starting", SignalTerm); err != nil {
+		t.Fatal(err)
+	}
+	state := waitForExit(t, local, "starting", 5*time.Second)
+	if state.Exit.Code == 0 || state.Exit.Signal != syscall.SIGTERM.String() {
+		t.Fatalf("signaled exit = %+v", state.Exit)
+	}
+	pgid, err := readProcessGroup(runDir)
+	if err != nil {
+		t.Fatalf("command never started: %v", err)
+	}
+	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("process group %d outlived the signal: %v", pgid, err)
+	}
+}
+
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not appear", path)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func newTestLocal(t *testing.T, dir string) *Local {
 	t.Helper()
 	local, err := NewLocal(dir)
@@ -268,7 +334,7 @@ func waitForAlive(t *testing.T, local *Local, id string, timeout time.Duration) 
 			t.Fatal(err)
 		}
 		if state.Alive {
-			if _, err := readSignalTarget(t.Context(), filepath.Join(local.dir, id)); err == nil {
+			if _, err := readProcessGroup(filepath.Join(local.dir, id)); err == nil {
 				return
 			}
 		}

@@ -162,53 +162,93 @@ func (l *Local) Signal(ctx context.Context, id string, signal Signal) error {
 		return fmt.Errorf("runner: signal: %w", err)
 	}
 	runDir := filepath.Join(l.dir, id)
-	if _, err := os.Stat(filepath.Join(runDir, "exit")); err == nil {
-		return nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("runner: stat exit: %w", err)
+	if exited, err := exitRecorded(runDir); exited || err != nil {
+		return err
 	}
+	if err := requestCancel(runDir, signal); err != nil {
+		return err
+	}
+	return signalStarted(runDir, signal)
+}
+
+func exitRecorded(runDir string) (bool, error) {
+	_, err := os.Stat(filepath.Join(runDir, "exit"))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("runner: stat exit: %w", err)
+}
+
+func requestCancel(runDir string, signal Signal) error {
+	data := []byte("TERM\n")
+	if signal == SignalKill {
+		data = []byte("KILL\n")
+	}
+	if err := writeAtomic(filepath.Join(runDir, "cancel"), data, 0o600); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ErrProcessNotFound
+		}
+		return fmt.Errorf("runner: write cancel request: %w", err)
+	}
+	if err := syncDir(runDir); err != nil {
+		return fmt.Errorf("runner: sync cancel request: %w", err)
+	}
+	return nil
+}
+
+func signalStarted(runDir string, signal Signal) error {
 	identity, err := readIdentity(filepath.Join(runDir, "pid"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	if !identityAlive(identity) {
-		return ErrProcessNotFound
+		return missingUnlessExited(runDir)
 	}
-	target, err := readSignalTarget(ctx, runDir)
+	target, err := readProcessGroup(runDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	return signalProcess(identity.pid, target, signal)
 }
 
-func readSignalTarget(ctx context.Context, runDir string) (int, error) {
-	path := filepath.Join(runDir, "pgid")
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			target, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
-			if parseErr != nil || target <= 0 {
-				return 0, errors.New("runner: invalid process group")
-			}
-			return target, nil
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return 0, fmt.Errorf("runner: read process group: %w", err)
-		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
-			return 0, fmt.Errorf("runner: read process group: %w", fs.ErrNotExist)
-		}
-		if !identityAliveAt(filepath.Join(runDir, "pid")) {
-			return 0, fmt.Errorf("runner: read process group: %w", fs.ErrNotExist)
-		}
-		time.Sleep(10 * time.Millisecond)
+func missingUnlessExited(runDir string) error {
+	exited, err := exitRecorded(runDir)
+	if err != nil || exited {
+		return err
 	}
+	return ErrProcessNotFound
 }
 
-func identityAliveAt(pidPath string) bool {
-	identity, err := readIdentity(pidPath)
-	return err == nil && identityAlive(identity)
+func readProcessGroup(runDir string) (int, error) {
+	data, err := os.ReadFile(filepath.Join(runDir, "pgid"))
+	if err != nil {
+		return 0, fmt.Errorf("runner: read process group: %w", err)
+	}
+	target, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || target <= 0 {
+		return 0, errors.New("runner: invalid process group")
+	}
+	return target, nil
+}
+
+func readCancel(runDir string) (Signal, bool) {
+	data, err := os.ReadFile(filepath.Join(runDir, "cancel"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, false
+	}
+	if err == nil && strings.TrimSpace(string(data)) == "KILL" {
+		return SignalKill, true
+	}
+	return SignalTerm, true
 }
 
 func (l *Local) ReadFile(ctx context.Context, path string) ([]byte, error) {

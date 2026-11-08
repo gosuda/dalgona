@@ -26,14 +26,22 @@ func startDetached(ctx context.Context, self string, args []string, spec Process
 }
 
 func signalProcess(shimPID int, pgid int, signal Signal) error {
-	value := syscall.SIGTERM
-	if signal == SignalKill {
-		value = syscall.SIGKILL
-	}
-	if err := syscall.Kill(-pgid, value); err != nil {
+	err := syscall.Kill(-pgid, unixSignal(signal))
+	if err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("runner: signal process group: %w", err)
 	}
 	return nil
+}
+
+func unixSignal(signal Signal) syscall.Signal {
+	if signal == SignalKill {
+		return syscall.SIGKILL
+	}
+	return syscall.SIGTERM
+}
+
+func canceledExit(signal Signal) (int, string) {
+	return -1, unixSignal(signal).String()
 }
 
 func configureProcessGroup(cmd *exec.Cmd) {

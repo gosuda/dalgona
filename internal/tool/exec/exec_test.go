@@ -3,6 +3,9 @@ package exec
 import (
 	"context"
 	"encoding/json/jsontext"
+	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -75,6 +78,28 @@ func TestExecTimeoutTerminates(t *testing.T) {
 	}
 	if strings.Contains(string(result.Output), "late") {
 		t.Fatalf("output survived the timeout: %q", result.Output)
+	}
+}
+
+func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
+	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:300ms")
+	env, closeRunner := testEnv(t)
+	defer closeRunner()
+	toolExec := New()
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	result, err := toolExec.Run(ctx, tool.Call{ID: "run-early", Args: jsontext.Value(`{"command":"touch started; sleep 30","escalate":true}`)}, env)
+	if err == nil || result.OK {
+		t.Fatalf("interrupted run ok=%v err=%v", result.OK, err)
+	}
+	if result.ExitCode == nil || *result.ExitCode == 0 {
+		t.Fatalf("interrupted run settled without an exit record: exit=%v err=%v", result.ExitCode, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(env.Cwd, "started")); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("command ran after the interrupt: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(filepath.Dir(result.Path), "pgid")); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("command group was created after the interrupt: %v", statErr)
 	}
 }
 

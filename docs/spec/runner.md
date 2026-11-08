@@ -1,6 +1,6 @@
 # Local runner
 
-The local runner MUST store one directory per call. The directory MUST be `<dir>/<call_id>/`. It MUST contain the files `out`, `pid`, and `exit`.
+The local runner MUST store one directory per call. The directory MUST be `<dir>/<call_id>/`. It MUST contain the files `out`, `pid`, and `exit`. It MAY contain `pgid` and `cancel`.
 
 The parent MUST start the shim detached. The invocation MUST be `<self> __shim --dir <runs/call_id> -- argv...`. On Unix the parent MUST start the shim with `Setsid`. On Windows the parent MUST start the shim with `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`.
 
@@ -15,6 +15,12 @@ The shim MUST start the command in a new process group on Unix. It MUST record t
 `Read` MUST take a byte offset into `out`. It MUST return `Data`, `Next`, `Exit`, `Alive`, and `Path`. `Data` MUST be the bytes from the offset. `Next` MUST be the next unread offset. `Exit` MUST be the exit record when `exit` exists, otherwise unset. `Alive` MUST be true only when the stored pid and start time still name the shim. `Path` MUST name the `out` file.
 
 `Signal` MUST accept `TERM` and `KILL`. The caller MUST send `TERM` before `KILL`. On timeout the caller MUST wait 5 s after `TERM`, then send `KILL`. On Unix `Signal` MUST target the command process group. It MUST NOT signal the shim. On Windows `Signal` MUST kill the process tree through the job object. The shim MUST survive the signal and write the command exit record.
+
+`Signal` MUST return success when `exit` exists. Otherwise it MUST write the file `cancel` before it reads `pid` or `pgid`. `cancel` MUST hold `TERM` or `KILL`. The write MUST use a temporary file and rename, then sync the call directory. A missing call directory MUST make `Signal` return `ErrProcessNotFound`. When `pid` or `pgid` does not exist yet, `Signal` MUST return success and leave the request to the shim. When `pid` names a gone process and `exit` does not exist, `Signal` MUST return `ErrProcessNotFound`. A process group that no longer exists MUST count as success.
+
+The shim MUST read `cancel` after it writes `pid` and before it starts the command. If `cancel` exists, the shim MUST NOT start the command. It MUST write `exit` as for a command that the recorded signal stopped: on Unix `code` -1 and `signal` the signal text, on Windows `code` 1 for `TERM` and 137 for `KILL`. The shim MUST read `cancel` again after it writes `pgid` and assigns the job object. If `cancel` exists, the shim MUST send the recorded signal to the command itself. If that fails, it MUST kill the command process. Each side writes its own file before it reads the file of the other side. So a terminate request that arrives before `pid` or `pgid` exists MUST still stop the command, and the command MUST NOT outlive the request. `cancel` is on disk, so the request MUST survive a daemon restart.
+
+The shim MUST pause at startup only when `DALGONA_SHIM_TEST_PAUSE` is set to `<phase>:<duration>`. Phase `pid` pauses before the shim writes `pid`. Phase `start` pauses after the first `cancel` check and before the command starts. Only tests MAY set this variable.
 
 The shim MUST append stdout and stderr to `out`. After `out` reaches 1 GiB the shim MUST stop appending command bytes. It MUST append this line once:
 
