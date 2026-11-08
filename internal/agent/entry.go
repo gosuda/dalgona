@@ -16,6 +16,9 @@ type preparedInput struct {
 	textBlob *event.BlobRef
 	notices  []event.Notice
 	mentions []event.Mention
+	effort   string
+	settings Settings
+	verbatim bool
 }
 
 func (t *Thread) Submit(ctx context.Context, in Input) error {
@@ -39,29 +42,42 @@ func (t *Thread) prepareInput(in Input) (preparedInput, error) {
 	if err != nil {
 		return preparedInput{}, err
 	}
-	out := preparedInput{kind: kind, text: text, textBlob: blob}
-	for _, word := range keywords.Match(in.Text, t.host.keywords, t.toolNames) {
+	out := preparedInput{
+		kind: kind, text: text, textBlob: blob, effort: in.Effort, verbatim: in.Verbatim,
+		settings: Settings{Model: in.Model, Approval: in.Approval, Sandbox: in.Sandbox},
+	}
+	if in.Verbatim {
+		return out, nil
+	}
+	return out, t.annotate(&out, in.Text)
+}
+
+func (t *Thread) annotate(out *preparedInput, text string) error {
+	for _, word := range keywords.Match(text, t.host.keywords, t.currentTools().names) {
 		noticeText, noticeBlob, err := t.host.textPayload(word.Notice)
 		if err != nil {
-			return preparedInput{}, err
+			return err
 		}
 		out.notices = append(out.notices, event.Notice{Word: word.Word, Text: noticeText, TextBlob: noticeBlob})
 	}
-	for _, mention := range prompt.Mentions(in.Text, t.created.Cwd) {
+	for _, mention := range prompt.Mentions(text, t.created.Cwd) {
 		mentionText, mentionBlob, err := t.host.textPayload(t.host.mask(mention.Text))
 		if err != nil {
-			return preparedInput{}, err
+			return err
 		}
 		out.mentions = append(out.mentions, event.Mention{Path: mention.Path, Text: mentionText, TextBlob: mentionBlob})
 	}
-	return out, nil
+	return nil
 }
 
 func (a *actor) submit(in preparedInput) error {
-	a.autoContinue = true
+	if a.state.Archived {
+		return archivedError(a.t.id)
+	}
 	message := event.UserMessage{
 		ItemID: newID("item-"), Text: in.text, TextBlob: in.textBlob, Kind: string(in.kind),
-		Notices: in.notices, Mentions: in.mentions,
+		Notices: in.notices, Mentions: in.mentions, Effort: in.effort, Verbatim: in.verbatim,
+		Model: in.settings.Model, Approval: string(in.settings.Approval), Sandbox: string(in.settings.Sandbox),
 	}
 	if a.busy {
 		if in.kind == InputPrompt || a.state.TurnID == "" {
@@ -69,6 +85,7 @@ func (a *actor) submit(in preparedInput) error {
 		}
 		message.TurnID = a.state.TurnID
 		_, err := a.append(message)
+		a.autoContinue = a.autoContinue || err == nil
 		return err
 	}
 	turnID := newID("turn-")
@@ -76,6 +93,7 @@ func (a *actor) submit(in preparedInput) error {
 	if _, err := a.append(event.TurnStarted{TurnID: turnID}, message); err != nil {
 		return err
 	}
+	a.autoContinue = true
 	a.spawnTurn(turnID)
 	return nil
 }
@@ -94,7 +112,7 @@ func (a *actor) interrupt() {
 }
 
 func (t *Thread) Answer(requestID string, reply Reply) error {
-	return askErr(t, func(a *actor) error {
+	err := askErr(t, func(a *actor) error {
 		ch, ok := a.approvals[requestID]
 		if !ok {
 			return fmt.Errorf("%w: %s", ErrUnknownRequest, requestID)
@@ -103,6 +121,15 @@ func (t *Thread) Answer(requestID string, reply Reply) error {
 		ch <- reply
 		return nil
 	})
+	if !errors.Is(err, ErrUnknownRequest) {
+		return err
+	}
+	for _, child := range t.host.loadedChildren(t.id) {
+		if child.Answer(requestID, reply) == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func (t *Thread) Revert(beforeTurn string) error {
@@ -165,6 +192,7 @@ func (t *Thread) Fork(ctx context.Context, lastTurn string) (*Thread, error) {
 	}
 	created := source.created
 	created.ID, created.ForkOf, created.Parent, created.Advisor = t.host.newThreadID(), t.id, "", ""
+	created.CreatedAt = t.host.clock().UTC()
 	child, err := t.host.openThread(ctx, loadedSession{created: created}, Overrides{})
 	if err != nil {
 		return nil, err
@@ -173,7 +201,6 @@ func (t *Thread) Fork(ctx context.Context, lastTurn string) (*Thread, error) {
 	if _, err := child.appendEvents(ctx, batch...); err != nil {
 		return nil, errors.Join(err, child.Close())
 	}
-	t.host.registerSession(created, uint64(len(batch)))
 	return child, nil
 }
 
@@ -215,6 +242,9 @@ func forkBatch(created event.SessionCreated, source forkSource) []event.Event {
 		case event.Compaction:
 			value.FirstKeptSeq = firstKeptAfter(renumbered, value.FirstKeptSeq, uint64(len(batch))+1)
 			batch = append(batch, value)
+		case event.AssistantMessage:
+			value.ContextSeq = lastAtOrBefore(renumbered, value.ContextSeq)
+			batch = append(batch, value)
 		default:
 			batch = append(batch, item.Event)
 		}
@@ -233,10 +263,14 @@ func firstKeptAfter(renumbered map[uint64]uint64, old, fallback uint64) uint64 {
 	return best
 }
 
-func (h *Host) registerSession(created event.SessionCreated, head uint64) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.sessions[created.ID] = infoFrom(created, head, false)
+func lastAtOrBefore(renumbered map[uint64]uint64, old uint64) uint64 {
+	var best uint64
+	for from, to := range renumbered {
+		if from <= old && to > best {
+			best = to
+		}
+	}
+	return best
 }
 
 func (t *Thread) Compact(ctx context.Context) error {
@@ -264,8 +298,8 @@ func (a *actor) spawnCompaction() chan error {
 		if err == nil {
 			err = w.compact(ctx, compactManual)
 		}
-		done <- err
 		w.release()
+		done <- err
 	})
 	return done
 }

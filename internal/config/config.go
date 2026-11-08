@@ -36,7 +36,10 @@ func (p Product) Home() string {
 }
 
 type (
-	Flags     struct{ Model, Reasoning, Approval, ToolMode, Sandbox, Runner, Remote, Cwd string }
+	Flags struct {
+		Model, Reasoning, Approval, ToolMode, Sandbox, Runner, Remote, Cwd string
+		Advisor                                                            bool
+	}
 	Reasoning string
 )
 
@@ -144,6 +147,7 @@ type (
 		Enabled      bool
 	}
 	RunnerSpec    struct{ Service, Image, Template, URL string }
+	RemoteSpec    struct{ Service, Image, Template, URL, BoxID string }
 	ProviderSpec  struct{ BaseURL, APIKeyEnv string }
 	ModelSpec     struct{ ContextWindow int }
 	MCPServerSpec struct {
@@ -164,7 +168,7 @@ type (
 	SecretsConfig struct{ Patterns []string }
 	HerdrConfig   struct{ SubagentPanes bool }
 	WebConfig     struct{ Listen, Token, CertFile, KeyFile string }
-	RolesConfig   struct{ Smol, Slow string }
+	RolesConfig   struct{ Smol, Slow, Advisor string }
 	origin        struct {
 		file string
 		line int
@@ -189,6 +193,7 @@ type Config struct {
 	Providers                             map[string]ProviderSpec
 	Models                                map[string]ModelSpec
 	Runners                               map[string]RunnerSpec
+	Remotes                               map[string]RemoteSpec
 	MCPServers                            map[string]MCPServerSpec
 	Discovery                             DiscoveryConfig
 	ApprovalDecider                       ApprovalDeciderConfig
@@ -198,6 +203,9 @@ type Config struct {
 	Herdr                                 HerdrConfig
 	Web                                   WebConfig
 	Roles                                 RolesConfig
+	Advisor                               AdvisorConfig
+	Advisors                              map[string]AdvisorSpec
+	advisorEntries                        map[string]advisorsDoc
 	lines                                 map[string]origin
 }
 
@@ -210,9 +218,9 @@ func defaultConfig(product Product, cwd string) Config {
 		CompactionKeepTokens: 20000, StreamStartTimeout: time.Minute,
 		StreamIdleTimeout: 5 * time.Minute, ApprovalDecider: ApprovalDeciderConfig{Threshold: .9},
 		Web: WebConfig{Listen: "127.0.0.1:7437"}, Providers: map[string]ProviderSpec{},
-		Models: map[string]ModelSpec{}, Runners: map[string]RunnerSpec{},
+		Models: map[string]ModelSpec{}, Runners: map[string]RunnerSpec{}, Remotes: map[string]RemoteSpec{},
 		MCPServers: map[string]MCPServerSpec{}, Keywords: map[string]KeywordSpec{},
-		lines: map[string]origin{},
+		lines: map[string]origin{}, Advisor: defaultAdvisor(), advisorEntries: map[string]advisorsDoc{},
 	}
 }
 
@@ -240,6 +248,7 @@ func Load(product Product, cwd string, flags Flags) (Config, error) {
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
 	}
+	cfg.resolveAdvisors()
 	return cfg, nil
 }
 

@@ -36,20 +36,23 @@ type Thread struct {
 	host       *Host
 	id         string
 	created    event.SessionCreated
-	tools      map[string]tool.Tool
-	modelTools []model.Tool
-	toolNames  []string
+	fixedTools []tool.Tool
+	toolsMu    sync.Mutex
+	toolset    *toolset
+	ext        Extension
 	system     string
 	runner     runner.Runner
 	snapshots  *snapshot.Store
 	release    func() error
 
+	children  chan struct{}
 	inbox     chan func(*actor)
 	quit      chan struct{}
 	stopped   chan struct{}
 	closeOnce sync.Once
 	closeErr  error
 	workers   sync.WaitGroup
+	output    outputRelay
 }
 
 type actor struct {
@@ -99,12 +102,19 @@ func (h *Host) load(id string) (loadedSession, error) {
 }
 
 func (h *Host) openThread(ctx context.Context, loaded loadedSession, overrides Overrides) (*Thread, error) {
+	release, err := h.lockSession(loaded.created.ID)
+	if err != nil {
+		return nil, err
+	}
+	return h.openLocked(ctx, loaded, overrides, release)
+}
+
+func (h *Host) openLocked(ctx context.Context, loaded loadedSession, overrides Overrides, release func() error) (*Thread, error) {
 	t := &Thread{
 		host: h, id: loaded.created.ID, created: loaded.created, snapshots: snapshot.New(),
 		inbox: make(chan func(*actor)), quit: make(chan struct{}), stopped: make(chan struct{}),
-	}
-	if err := t.lock(); err != nil {
-		return nil, err
+		children: make(chan struct{}, maxChildren), ext: baseExtension{}, release: release,
+		output: outputRelay{ch: make(chan Update, outputBuffer)},
 	}
 	if err := t.prepare(ctx, loaded, overrides); err != nil {
 		return nil, errors.Join(err, t.unlock())
@@ -118,37 +128,48 @@ func (h *Host) openThread(ctx context.Context, loaded loadedSession, overrides O
 	h.mu.Unlock()
 	a := &actor{
 		t: t, records: loaded.records, sizes: loaded.sizes, state: loaded.state, damage: loaded.damage,
-		subs: make(map[chan Update]struct{}), approvals: make(map[string]chan Reply), autoContinue: true,
+		subs: make(map[chan Update]struct{}), approvals: make(map[string]chan Reply), autoContinue: !endedByInterrupt(loaded.records),
+	}
+	if loaded.state.TurnID != "" && loaded.damage == nil {
+		a.spawn(func(ctx context.Context) { (&worker{t: t, turnID: loaded.state.TurnID}).recoverTurn(ctx) })
 	}
 	go a.loop()
 	return t, nil
 }
 
-func (t *Thread) lock() error {
-	t.release = func() error { return nil }
-	if t.host.cfg.Product != config.ProductDal {
-		return nil
+func (h *Host) lockSession(id string) (func() error, error) {
+	if h.cfg.Product != config.ProductDal {
+		return func() error { return nil }, nil
 	}
-	release, err := journal.LockSession(t.host.cfg.Config.Home, t.id)
+	release, err := journal.LockSession(h.cfg.Config.Home, id)
 	if err != nil {
-		return fmt.Errorf("agent: lock session %s: %w", t.id, err)
+		return nil, fmt.Errorf("%w", err)
 	}
-	t.release = release
-	return nil
+	return release, nil
+}
+
+func endedByInterrupt(records []event.Seqd) bool {
+	for i := len(records) - 1; i >= 0; i-- {
+		switch value := records[i].Event.(type) {
+		case event.UserMessage:
+			return false
+		case event.TurnCompleted:
+			return value.Status == statusInterrupted
+		}
+	}
+	return false
 }
 
 func (t *Thread) unlock() error { return t.release() }
 
 func (t *Thread) prepare(ctx context.Context, loaded loadedSession, overrides Overrides) error {
-	tools := overrides.Tools
-	if tools == nil {
-		built, err := t.host.cfg.Tools(t.created.Model)
-		if err != nil {
-			return fmt.Errorf("agent: build tools: %w", err)
-		}
-		tools = built
+	t.fixedTools = overrides.Tools
+	if t.fixedTools == nil && t.host.cfg.Extension != nil {
+		t.ext = t.host.cfg.Extension(t)
 	}
-	t.setTools(tools)
+	if _, err := t.toolsFor(pathSettings(loaded.created, loaded.records).Model); err != nil {
+		return err
+	}
 	system, err := t.systemPrompt(overrides.System)
 	if err != nil {
 		return err
@@ -163,18 +184,67 @@ func (t *Thread) prepare(ctx context.Context, loaded loadedSession, overrides Ov
 	return nil
 }
 
-func (t *Thread) setTools(tools []tool.Tool) {
-	t.tools = make(map[string]tool.Tool, len(tools))
-	t.modelTools = make([]model.Tool, 0, len(tools))
-	t.toolNames = make([]string, 0, len(tools))
-	for _, item := range tools {
-		spec := item.Spec()
-		t.tools[spec.Name] = item
-		t.toolNames = append(t.toolNames, spec.Name)
-		t.modelTools = append(t.modelTools, model.Tool{
-			Name: spec.Name, Description: spec.Description, Schema: spec.Schema, Freeform: spec.Freeform,
-		})
+type toolset struct {
+	model  string
+	byName map[string]tool.Tool
+	specs  []model.Tool
+	names  []string
+}
+
+func (t *Thread) Settings() (Settings, error) {
+	v, err := t.view()
+	if err != nil {
+		return Settings{}, err
 	}
+	return pathSettings(t.created, v.records), nil
+}
+
+func (t *Thread) currentTools() *toolset {
+	t.toolsMu.Lock()
+	defer t.toolsMu.Unlock()
+	return t.toolset
+}
+
+func (t *Thread) toolsFor(modelID string) (*toolset, error) {
+	t.toolsMu.Lock()
+	defer t.toolsMu.Unlock()
+	if t.toolset != nil && (t.toolset.model == modelID || t.fixedTools != nil) {
+		return t.toolset, nil
+	}
+	tools, err := t.buildTools(modelID)
+	if err != nil {
+		return nil, err
+	}
+	t.toolset = t.newToolset(modelID, tools)
+	return t.toolset, nil
+}
+
+func (t *Thread) buildTools(modelID string) ([]tool.Tool, error) {
+	if t.fixedTools != nil {
+		return t.fixedTools, nil
+	}
+	built, err := t.host.cfg.Tools(modelID, t.created.Cwd)
+	if err != nil {
+		return nil, fmt.Errorf("agent: build tools: %w", err)
+	}
+	return t.ext.Tools(t.withSubagentTools(built)), nil
+}
+
+func (t *Thread) newToolset(modelID string, tools []tool.Tool) *toolset {
+	out := &toolset{model: modelID, byName: make(map[string]tool.Tool, len(tools))}
+	specs := make([]tool.Spec, len(tools))
+	for i, item := range tools {
+		specs[i] = item.Spec()
+		out.byName[specs[i].Name] = item
+	}
+	visible := t.ext.Visible(specs)
+	out.specs = make([]model.Tool, len(visible))
+	out.names = make([]string, len(visible))
+	for i, spec := range visible {
+		out.names[i] = spec.Name
+		out.specs[i] = model.Tool{Name: spec.Name, Description: spec.Description, Schema: spec.Schema, Freeform: spec.Freeform}
+	}
+	return out
 }
 
 func (t *Thread) systemPrompt(override string) (string, error) {
@@ -190,7 +260,9 @@ func (t *Thread) systemPrompt(override string) (string, error) {
 		OS: runtime.GOOS, Shell: shellName(),
 	}
 	if t.host.cfg.Product == config.ProductDalgona {
-		in.Skills = t.host.cfg.Skills
+		if in.Skills, err = t.host.Skills(t.created.Cwd); err != nil {
+			return "", fmt.Errorf("agent: skills for %s: %w", t.created.Cwd, err)
+		}
 	}
 	return prompt.Assemble(in), nil
 }
@@ -239,7 +311,10 @@ func (a *actor) loop() {
 	for {
 		select {
 		case fn := <-a.t.inbox:
+			a.drainOutput()
 			fn(a)
+		case update := <-a.t.output.ch:
+			a.publishOutput(update)
 		case <-a.t.quit:
 			a.shutdown()
 			return
@@ -323,11 +398,9 @@ func (a *actor) append(events ...event.Event) (uint64, error) {
 		return a.head(), err
 	}
 	last, err := a.t.host.journal.Append(context.Background(), a.t.id, raws...)
-	if last == a.head() {
-		return last, fmt.Errorf("agent: append to %s: %w", a.t.id, cmp.Or(err, errors.New("journal accepted no events")))
-	}
-	if err != nil {
-		a.t.host.log.Warn("agent: journal mirror or sync failed after a durable append", "thread", a.t.id, "error", err)
+	if last != a.head()+uint64(len(events)) {
+		a.damage = fmt.Errorf("agent: append to %s: %w", a.t.id, cmp.Or(err, fmt.Errorf("journal head %d after appending %d events at %d", last, len(events), a.head())))
+		return a.head(), a.damage
 	}
 	a.state = state
 	for i, item := range events {
@@ -336,7 +409,10 @@ func (a *actor) append(events ...event.Event) (uint64, error) {
 		a.sizes = append(a.sizes, len(raws[i]))
 		a.publish(Update{Kind: UpdateEvent, Thread: a.t.id, Seq: seq, Event: item})
 	}
-	a.t.host.setHead(a.t.id, a.head())
+	a.t.host.noteAppend(a.t.id, a.head(), events)
+	if err != nil {
+		a.t.host.log.Warn("agent: journal mirror or volume sync failed after the fsynced append", "thread", a.t.id, "seq", last, "error", err)
+	}
 	return a.head(), nil
 }
 
@@ -415,7 +491,7 @@ func (t *Thread) Status() (Status, error) {
 	return ask(t, func(a *actor) Status {
 		return Status{
 			State: a.state.Status, Busy: a.busy, AutoContinue: a.autoContinue, Head: a.head(),
-			Turn: a.state.TurnID, Subscribers: len(a.subs),
+			Turn: a.state.TurnID, Subscribers: len(a.subs), OutputDropped: a.t.output.dropped.Load(),
 		}
 	})
 }

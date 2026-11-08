@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -50,6 +51,7 @@ type fakeModel struct {
 	requests [][]byte
 	models   []string
 	arrived  chan int
+	route    func(body []byte) (response, bool)
 }
 
 func newFakeModel(t *testing.T) *fakeModel {
@@ -75,14 +77,7 @@ func (f *fakeModel) respond(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	f.mu.Lock()
-	f.requests = append(f.requests, body)
-	count := len(f.requests)
-	next := response{body: sseText("done")}
-	if len(f.queue) > 0 {
-		next, f.queue = f.queue[0], f.queue[1:]
-	}
-	f.mu.Unlock()
+	next, count := f.record(body)
 	select {
 	case f.arrived <- count:
 	default:
@@ -101,6 +96,23 @@ func (f *fakeModel) respond(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	_, _ = io.WriteString(w, next.body)
+}
+
+func (f *fakeModel) record(body []byte) (response, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, body)
+	if f.route != nil {
+		if routed, ok := f.route(body); ok {
+			return routed, len(f.requests)
+		}
+	}
+	if len(f.queue) == 0 {
+		return response{body: sseText("done")}, len(f.requests)
+	}
+	next := f.queue[0]
+	f.queue = f.queue[1:]
+	return next, len(f.requests)
 }
 
 func (f *fakeModel) listModels(w http.ResponseWriter, _ *http.Request) {
@@ -207,6 +219,7 @@ type harness struct {
 func newHarness(t *testing.T, configure ...func(*harness)) *harness {
 	t.Helper()
 	h := &harness{t: t, home: t.TempDir(), cwd: t.TempDir(), model: newFakeModel(t), logs: &logBuffer{}}
+	t.Cleanup(h.reapProcesses)
 	if resolved, err := filepath.EvalSymlinks(h.cwd); err == nil {
 		h.cwd = resolved
 	}
@@ -256,12 +269,42 @@ func (h *harness) providers(onRetry RetryFunc) (*model.Registry, error) {
 	return registry, registry.Register("openai", provider)
 }
 
-func (h *harness) tools(string) ([]tool.Tool, error) {
+func (h *harness) tools(string, string) ([]tool.Tool, error) {
 	return []tool.Tool{read.New(), search.New(), patch.New("replace"), exec.New()}, nil
 }
 
 func (h *harness) runner(_ context.Context, id, _ string) (runner.Runner, error) {
 	return runner.NewLocal(filepath.Join(h.home, "sessions", id, "runs"))
+}
+
+func (h *harness) reapProcesses() {
+	runs, err := filepath.Glob(filepath.Join(h.home, "sessions", "*", "runs", "*"))
+	if err != nil {
+		h.t.Error(err)
+		return
+	}
+	for _, run := range runs {
+		local, err := runner.NewLocal(filepath.Dir(run))
+		if err != nil {
+			h.t.Error(err)
+			continue
+		}
+		if !killUntilExit(local, filepath.Base(run)) {
+			h.t.Errorf("process %s outlived its test", run)
+		}
+	}
+}
+
+func killUntilExit(local *runner.Local, id string) bool {
+	ctx := context.Background()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		out, err := local.Read(ctx, id, 0)
+		if errors.Is(err, runner.ErrProcessNotFound) || (err == nil && out.Exit != nil) {
+			return true
+		}
+		_ = local.Signal(ctx, id, runner.SignalKill)
+	}
+	return false
 }
 
 func (h *harness) start() *Thread {

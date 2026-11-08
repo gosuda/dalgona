@@ -18,11 +18,11 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 
 |Type|Required fields|Optional fields and constraints|
 |---|---|---|
-|`session.created`|`id`, `cwd`, `model`, `approval`, `sandbox`, `runner`|`parent`, `fork_of`, `instructions_blob`, `advisor`; approval is `auto`, `yolo`, or `ask`; sandbox is `workspace-write` or `off`; `advisor` names an advisor child session and MUST come with `parent`|
+|`session.created`|`id`, `cwd`, `model`, `approval`, `sandbox`, `runner`|`parent`, `fork_of`, `instructions_blob`, `advisor`, `created_at`; approval is `auto`, `yolo`, or `ask`; sandbox is `workspace-write` or `off`; `advisor` names an advisor child session and MUST come with `parent`; `created_at` is RFC 3339 UTC|
 |`runner.bound`|`runner`, `service`, `box_id`, `baseline`|None|
 |`turn.started`|`turn_id`|None|
 |`turn.completed`|`turn_id`, `status`|`error`; status is `completed`, `interrupted`, or `failed`|
-|`user.message`|`item_id`, `turn_id`, `text`, `kind`|`notices`, `mentions`; kind is `prompt`, `steer`, or `followup`; each notice has `word` and `text`; each mention has `path` and `text`|
+|`user.message`|`item_id`, `turn_id`, `text`, `kind`|`notices`, `mentions`, `effort`, `model`, `approval`, `sandbox`, `verbatim`; kind is `prompt`, `steer`, or `followup`; each notice has `word` and `text`; each mention has `path` and `text`; effort is `low`, `medium`, `high`, `xhigh`, or `max` and overrides config for its turn; approval and sandbox use the `session.created` values; a `verbatim` message MUST NOT have notices or mentions|
 |`assistant.message`|`item_id`, `turn_id`, `text`, `reasoning`, `tool_calls`, `usage`, `stop_reason`|`context_seq`; usage contains `input`, `output`, `cache_read`, and `cache_write`; each tool call has `id`, `name`, `args`, `freeform`, and `resolved`; `context_seq` is the journal head when the request was built|
 |`tool.started`|`call_id`, `turn_id`, `tool`, `args`, `class`, `repairs`|`files`; class is `read`, `edit`, `exec`, `agent`, `script`, or `remote`; each file has `path`, `pre_sha`, `post_sha`, and optional `pre_blob`|
 |`tool.completed`|`call_id`, `ok`, `output`, `recovered`|`spill`, `exit_code`, `meta`; recovered is `none`, `replayed`, `interrupted`, or `skipped`|
@@ -34,9 +34,11 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 |`child.spawned`|`call_id`, `child_id`, `runner`|None|
 |`branch`|`parent_seq`|Zero selects the empty root path|
 |`script.started`|`run_id`, `source_blob`, `entry`, `args`, `seed`|None|
-|`script.effect`|`run_id`, `n`, `op`, `args_sha`, `result`|Effect indexes are assigned at submission, so they MAY arrive out of order; an index MUST NOT repeat|
+|`script.effect`|`run_id`, `n`, `op`, `args_sha`, and `result` or `error`|Effect indexes are assigned at submission, so they MAY arrive out of order; an index MUST NOT repeat; `error` records a failed effect, such as a declined script tool call, and excludes `result`|
 |`script.completed`|`run_id`, `ok`|Success MUST contain `value` and no `error`; failure MUST contain `error` and no `value`|
 |`advisor.note`|`advisor`, `severity`, `note`, `review_seq`, `delivery`|severity is `nit`, `concern`, or `blocker`; delivery is `steer`, `aside`, or `continue`; `note` MUST be inline and at most 64 KiB|
+|`thread.named`|`name`|At most 1 KiB; the latest one names the thread|
+|`thread.archived`|`archived`|The latest one sets the archive flag|
 
 Text and raw JSON fields named in this section MAY use the blob-reference form. Snapshot metadata in `tool.completed.meta` MUST remain inline and MUST NOT exceed 64 KiB.
 
@@ -60,7 +62,9 @@ The state MUST track:
 
 An approval resolution MUST have a matching unresolved request. A user `accept_session` decision MUST create its grant when the fold folds `approval.resolved` and the request carries `class`; a request without `class` MUST defer the grant to the call's `tool.started`. For `exec` the grant is an argv prefix derived from one command. For an edit or remote tool the grant is that tool name. Agent, read, and script calls MUST NOT create grants. A later `grant:<prefix>` decision MUST NOT create a grant.
 
-`child.spawned` MUST name an in-flight agent call. A branch MUST occur while idle. A nonzero `parent_seq` MUST precede the branch and identify a completed turn. A script effect index MUST NOT repeat; a repeated index with a different `op` or `args_sha` MUST report the mismatch.
+`child.spawned` MUST name an in-flight agent call or a call of an open script. A branch MUST occur while idle. A nonzero `parent_seq` MUST precede the branch and identify a completed turn. A script effect index MUST NOT repeat; a repeated index with a different `op` or `args_sha` MUST report the mismatch.
+
+A script call has `call_id = "<run_id>/<n>"` for an open run. Its `approval.requested`, `tool.started`, `tool.completed`, and `child.spawned` MUST be accepted without an assistant call. A call that Cursor ran in band MUST appear in `assistant.message` with `resolved = true`; its approval, `tool.started`, and `tool.completed` follow the message in one batch.
 
 `advisor.note` MAY occur inside or outside a turn. A second note with the same advisor, `review_seq`, and note text MUST be rejected.
 

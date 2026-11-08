@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 )
@@ -102,5 +103,23 @@ func TestEncodeQuotesControlBytesAsJSON(t *testing.T) {
 		if got := decoded.(event.TurnCompleted).Error; got != want {
 			t.Fatalf("decoded %q, want %q", got, want)
 		}
+	}
+}
+
+func TestThreadMetadataRoundTripAndFold(t *testing.T) {
+	t.Parallel()
+	created := event.SessionCreated{
+		ID: "s", Cwd: "/w", Model: "m/x", Approval: "auto", Sandbox: "off", Runner: "local",
+		CreatedAt: time.Date(2026, 11, 8, 12, 30, 0, 5, time.UTC),
+	}
+	for _, original := range []event.Event{created, event.ThreadNamed{Name: "fix <the> bug"}, event.ThreadArchived{Archived: true}} {
+		assertRoundTrip(t, 0, original)
+	}
+	if (event.ThreadNamed{Name: strings.Repeat("n", event.MaxThreadNameBytes+1)}).Validate() == nil {
+		t.Fatal("oversized name accepted")
+	}
+	state, err := foldEvents(t, event.State{}, created, event.ThreadNamed{Name: "renamed"}, event.ThreadArchived{Archived: true})
+	if err != nil || state.Name != "renamed" || !state.Archived {
+		t.Fatalf("state name=%q archived=%v err=%v", state.Name, state.Archived, err)
 	}
 }

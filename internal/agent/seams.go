@@ -49,10 +49,11 @@ type Read struct {
 }
 
 type Status struct {
-	State        event.Status
-	Busy         bool
-	AutoContinue bool
-	Head         uint64
-	Turn         string
-	Subscribers  int
+	State         event.Status
+	Busy          bool
+	AutoContinue  bool
+	Head          uint64
+	Turn          string
+	Subscribers   int
+	OutputDropped uint64
 }

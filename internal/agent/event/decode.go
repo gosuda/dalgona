@@ -12,6 +12,7 @@ func decodeSessionEvent(kind string, r *objectReader) (Event, error) {
 			ID: r.str("id"), Parent: r.str("parent"), ForkOf: r.str("fork_of"), Cwd: r.str("cwd"),
 			Model: r.str("model"), Approval: r.str("approval"), Sandbox: r.str("sandbox"),
 			Runner: r.str("runner"), InstructionsBlob: r.blob("instructions_blob"), Advisor: r.str("advisor"),
+			CreatedAt: r.timestamp("created_at"),
 		}, nil
 	case TypeRunnerBound:
 		return RunnerBound{
@@ -44,7 +45,8 @@ func decodeUserMessage(r *objectReader) UserMessage {
 	text, textBlob := r.textPayload("text")
 	return UserMessage{
 		ItemID: r.str("item_id"), TurnID: r.str("turn_id"), Text: text, TextBlob: textBlob, Kind: r.str("kind"),
-		Notices: notices, Mentions: mentions,
+		Notices: notices, Mentions: mentions, Effort: r.str("effort"), Verbatim: r.boolean("verbatim"),
+		Model: r.str("model"), Approval: r.str("approval"), Sandbox: r.str("sandbox"),
 	}
 }
 
@@ -237,7 +239,7 @@ func decodeScriptEvent(kind string, r *objectReader) (Event, error) {
 		result, resultBlob := r.rawPayload("result")
 		return ScriptEffect{
 			RunID: r.str("run_id"), N: r.uint64("n"), Op: r.str("op"),
-			ArgsSHA: r.str("args_sha"), Result: result, ResultBlob: resultBlob,
+			ArgsSHA: r.str("args_sha"), Result: result, ResultBlob: resultBlob, Error: r.str("error"),
 		}, nil
 	case TypeScriptCompleted:
 		value, valueBlob := r.rawPayload("value")

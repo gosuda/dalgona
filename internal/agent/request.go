@@ -97,34 +97,39 @@ func (r *reply) empty() bool {
 }
 
 func (w *worker) request(ctx context.Context, v view, messages []model.Message) (model.Request, error) {
-	_, modelID, err := model.ParseModelID(w.t.created.Model)
+	_, modelID, err := model.ParseModelID(w.settings.Model)
 	if err != nil {
 		return model.Request{}, err
 	}
-	caps := w.t.host.capabilities(ctx, w.registry, w.t.created.Model)
+	caps := w.t.host.capabilities(ctx, w.registry, w.settings.Model)
 	return model.Request{
-		Model: modelID, System: w.t.system, Messages: messages, Tools: w.t.modelTools,
+		Model: modelID, System: w.t.system, Messages: messages, Tools: w.tools.specs,
 		Reasoning: model.ClampEffort(w.effort(v), caps.Efforts),
 	}, nil
 }
 
 func (w *worker) effort(v view) string {
-	effort := string(w.t.host.cfg.Config.Reasoning)
-	if effort == string(config.ReasoningDefault) {
-		effort = ""
+	configured := string(w.t.host.cfg.Config.Reasoning)
+	if configured == string(config.ReasoningDefault) {
+		configured = ""
 	}
+	prompt := turnPrompt(v, w.turnID)
+	for _, notice := range prompt.Notices {
+		if w.t.host.keywordEffort(notice.Word) == string(config.ReasoningMax) {
+			return string(config.ReasoningMax)
+		}
+	}
+	return cmp.Or(prompt.Effort, configured)
+}
+
+func turnPrompt(v view, turnID string) event.UserMessage {
 	for _, item := range v.records {
 		message, ok := item.Event.(event.UserMessage)
-		if !ok || message.TurnID != w.turnID || message.Kind != string(InputPrompt) {
-			continue
-		}
-		for _, notice := range message.Notices {
-			if w.t.host.keywordEffort(notice.Word) == string(config.ReasoningMax) {
-				return string(config.ReasoningMax)
-			}
+		if ok && message.TurnID == turnID && message.Kind == string(InputPrompt) {
+			return message
 		}
 	}
-	return effort
+	return event.UserMessage{}
 }
 
 func (h *Host) keywordEffort(word string) string {
@@ -137,11 +142,11 @@ func (h *Host) keywordEffort(word string) string {
 }
 
 func (w *worker) stream(ctx context.Context, req model.Request, contextSeq uint64) (*reply, error) {
-	provider, _, err := model.ParseModelID(w.t.created.Model)
+	provider, _, err := model.ParseModelID(w.settings.Model)
 	if err != nil {
 		return nil, err
 	}
-	stream, err := w.registry.Stream(ctx, provider, req)
+	stream, err := w.openStream(ctx, provider, req)
 	if err != nil {
 		return nil, err
 	}
@@ -234,13 +239,18 @@ func (h *Host) capabilities(ctx context.Context, registry *model.Registry, id st
 	if err != nil {
 		return model.Model{ID: id, Context: model.ContextWindow(id, 0, h.contextOverrides())}
 	}
+	preset, _ := model.Capabilities(provider, modelID)
+	reported := model.Model{ID: modelID, Context: preset.Context}
 	for _, item := range h.providerModels(ctx, registry, provider) {
 		if item.ID == modelID || item.ID == id {
-			item.Context = model.ContextWindow(id, item.Context, h.contextOverrides())
-			return item
+			reported = item
 		}
 	}
-	return model.Model{ID: modelID, Context: model.ContextWindow(id, 0, h.contextOverrides())}
+	if len(reported.Efforts) == 0 {
+		reported.Efforts = preset.Efforts
+	}
+	reported.Context = model.ContextWindow(id, cmp.Or(reported.Context, preset.Context), h.contextOverrides())
+	return reported
 }
 
 func (h *Host) providerModels(ctx context.Context, registry *model.Registry, provider string) []model.Model {
@@ -257,6 +267,9 @@ func (h *Host) providerModels(ctx context.Context, registry *model.Registry, pro
 	models, err := adapter.Models(ctx)
 	if err != nil {
 		h.log.Warn("agent: list provider models", "provider", provider, "error", err)
+		return nil
+	}
+	if len(models) == 0 {
 		return nil
 	}
 	h.mu.Lock()

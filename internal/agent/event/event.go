@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"math"
+	"time"
 )
 
 const (
@@ -28,6 +29,8 @@ const (
 	TypeScriptEffect      = "script.effect"
 	TypeScriptCompleted   = "script.completed"
 	TypeAdvisorNote       = "advisor.note"
+	TypeThreadNamed       = "thread.named"
+	TypeThreadArchived    = "thread.archived"
 )
 
 const MaxInlineBytes = 64 << 10
@@ -115,6 +118,7 @@ type SessionCreated struct {
 	Runner           string
 	InstructionsBlob *BlobRef
 	Advisor          string
+	CreatedAt        time.Time
 }
 
 func (SessionCreated) Type() string { return TypeSessionCreated }
@@ -179,6 +183,11 @@ type UserMessage struct {
 	Kind     string
 	Notices  []Notice
 	Mentions []Mention
+	Effort   string
+	Model    string
+	Approval string
+	Sandbox  string
+	Verbatim bool
 }
 
 func (UserMessage) Type() string { return TypeUserMessage }
@@ -195,7 +204,33 @@ func (e UserMessage) Validate() error {
 	if err := validateNotices(e.Notices); err != nil {
 		return err
 	}
-	return validateMentions(e.Mentions)
+	if err := validateMentions(e.Mentions); err != nil {
+		return err
+	}
+	if e.Verbatim && len(e.Notices)+len(e.Mentions) > 0 {
+		return errors.New("a verbatim message must not have notices or mentions")
+	}
+	return e.validateSettings()
+}
+
+func (e UserMessage) validateSettings() error {
+	checks := [...]struct {
+		name, value string
+		allowed     []string
+	}{
+		{"effort", e.Effort, []string{"low", "medium", "high", "xhigh", "max"}},
+		{"approval", e.Approval, []string{"auto", "yolo", "ask"}},
+		{"sandbox", e.Sandbox, []string{"workspace-write", "off"}},
+	}
+	for _, check := range checks {
+		if check.value == "" {
+			continue
+		}
+		if err := oneOf(check.name, check.value, check.allowed...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateNotices(notices []Notice) error {
@@ -491,6 +526,7 @@ type ScriptEffect struct {
 	ArgsSHA    string
 	Result     jsontext.Value
 	ResultBlob *BlobRef
+	Error      string
 }
 
 func (ScriptEffect) Type() string { return TypeScriptEffect }
@@ -501,7 +537,13 @@ func (e ScriptEffect) Validate() error {
 	if err := validSHA("args_sha", e.ArgsSHA); err != nil {
 		return err
 	}
-	return requiredRawPayload("result", e.Result, e.ResultBlob)
+	if e.Error == "" {
+		return requiredRawPayload("result", e.Result, e.ResultBlob)
+	}
+	if len(e.Result) != 0 || e.ResultBlob != nil {
+		return errors.New("a failed script effect must not have a result")
+	}
+	return nil
 }
 
 type ScriptCompleted struct {
@@ -557,6 +599,25 @@ func (e AdvisorNote) Validate() error {
 func (e AdvisorNote) Render() string {
 	return `<advisory advisor="` + html.EscapeString(e.Advisor) + `" severity="` + html.EscapeString(e.Severity) + `">` +
 		html.EscapeString(e.Note) + `</advisory>`
+}
+
+const MaxThreadNameBytes = 1024
+
+type ThreadNamed struct{ Name string }
+
+func (ThreadNamed) Type() string { return TypeThreadNamed }
+func (e ThreadNamed) Validate() error {
+	if len(e.Name) > MaxThreadNameBytes {
+		return errors.New("thread name exceeds 1 KiB")
+	}
+	return nil
+}
+
+type ThreadArchived struct{ Archived bool }
+
+func (ThreadArchived) Type() string { return TypeThreadArchived }
+func (ThreadArchived) Validate() error {
+	return nil
 }
 
 func required(fields map[string]string) error {

@@ -33,6 +33,7 @@ type fileDoc struct {
 	Providers            map[string]providerDoc `toml:"providers"`
 	Models               map[string]modelDoc    `toml:"models"`
 	Runners              map[string]runnerDoc   `toml:"runners"`
+	Remotes              map[string]remoteDoc   `toml:"remotes"`
 	MCPServers           map[string]mcpDoc      `toml:"mcp_servers"`
 	Discovery            discoveryDoc           `toml:"discovery"`
 	ApprovalDecider      approvalDeciderDoc     `toml:"approval_decider"`
@@ -42,6 +43,8 @@ type fileDoc struct {
 	Herdr                herdrDoc               `toml:"herdr"`
 	Web                  webDoc                 `toml:"web"`
 	Roles                rolesDoc               `toml:"roles"`
+	Advisor              advisorDoc             `toml:"advisor"`
+	Advisors             map[string]advisorsDoc `toml:"advisors"`
 }
 
 type editStyleDoc struct {
@@ -155,6 +158,13 @@ type (
 		Template string `toml:"template"`
 		URL      string `toml:"url"`
 	}
+	remoteDoc struct {
+		Service  *string `toml:"service"`
+		Image    *string `toml:"image"`
+		Template *string `toml:"template"`
+		URL      *string `toml:"url"`
+		BoxID    *string `toml:"box_id"`
+	}
 	mcpDoc struct {
 		Command string            `toml:"command"`
 		Args    []string          `toml:"args"`
@@ -192,8 +202,9 @@ type (
 		KeyFile  *string `toml:"key_file"`
 	}
 	rolesDoc struct {
-		Smol *string `toml:"smol"`
-		Slow *string `toml:"slow"`
+		Smol    *string `toml:"smol"`
+		Slow    *string `toml:"slow"`
+		Advisor *string `toml:"advisor"`
 	}
 )
 
@@ -203,6 +214,7 @@ func (c *Config) merge(current layer) error {
 	}
 	c.mergeMaps(current.doc)
 	c.mergeTables(current.doc)
+	c.mergeAdvisor(current.doc)
 	for key, location := range lineMap(current.path, current.raw) {
 		c.lines[key] = location
 	}
@@ -275,9 +287,7 @@ func (c *Config) mergeMaps(doc *fileDoc) {
 		}
 		c.Models[name] = model
 	}
-	for name, value := range doc.Runners {
-		c.Runners[name] = RunnerSpec(value)
-	}
+	c.mergeBoxes(doc)
 	for name, value := range doc.MCPServers {
 		c.MCPServers[name] = MCPServerSpec(value)
 	}
@@ -287,6 +297,21 @@ func (c *Config) mergeMaps(doc *fileDoc) {
 			keyword.Hue = [2]int{value.Hue[0], value.Hue[1]}
 		}
 		c.Keywords[word] = keyword
+	}
+}
+
+func (c *Config) mergeBoxes(doc *fileDoc) {
+	for name, value := range doc.Runners {
+		c.Runners[name] = RunnerSpec(value)
+	}
+	for name, value := range doc.Remotes {
+		spec := c.Remotes[name]
+		setString(value.Service, &spec.Service)
+		setString(value.Image, &spec.Image)
+		setString(value.Template, &spec.Template)
+		setString(value.URL, &spec.URL)
+		setString(value.BoxID, &spec.BoxID)
+		c.Remotes[name] = spec
 	}
 }
 
@@ -310,6 +335,7 @@ func (c *Config) mergeTables(doc *fileDoc) {
 	mergeWeb(&c.Web, doc.Web)
 	setString(doc.Roles.Smol, &c.Roles.Smol)
 	setString(doc.Roles.Slow, &c.Roles.Slow)
+	setString(doc.Roles.Advisor, &c.Roles.Advisor)
 }
 
 func mergeWeb(target *WebConfig, source webDoc) {
@@ -328,6 +354,9 @@ func (c *Config) applyFlags(flags Flags) {
 	setNonempty(flags.Runner, &c.Runner)
 	setNonempty(flags.Remote, &c.Remote)
 	setNonempty(flags.Cwd, &c.Cwd)
+	if flags.Advisor {
+		c.Advisor.Enabled = true
+	}
 }
 
 func setNonempty(source string, target *string) {
@@ -347,6 +376,7 @@ func (c *Config) validate() error {
 	errs = append(errs, c.validateEditStyle()...)
 	errs = append(errs, c.validateRunners()...)
 	errs = append(errs, c.validateKeywords()...)
+	errs = append(errs, c.validateAdvisors()...)
 	return errors.Join(errs...)
 }
 
@@ -467,7 +497,7 @@ func keywordNoticeExists(home, notice string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-var dalgonaOnlyKeys = map[string]bool{"tool_mode": true, "runner": true, "remote": true, "runners": true, "mcp_servers": true, "discovery": true, "eval": true, "herdr": true, "web": true}
+var dalgonaOnlyKeys = map[string]bool{"tool_mode": true, "runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "discovery": true, "eval": true, "herdr": true, "web": true}
 
 func validateProductLayer(product Product, current layer) error {
 	if product != ProductDal {

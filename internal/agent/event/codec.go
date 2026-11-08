@@ -8,6 +8,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -123,14 +124,35 @@ func decodeByType(kind string, reader *objectReader) (Event, error) {
 		return decodeStateEvent(kind, reader)
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
 		return decodeScriptEvent(kind, reader)
-	case TypeAdvisorNote:
-		return AdvisorNote{
-			Advisor: reader.str("advisor"), Severity: reader.str("severity"), Note: reader.str("note"),
-			ReviewSeq: reader.uint64("review_seq"), Delivery: reader.str("delivery"),
-		}, nil
+	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived:
+		return decodeMetadataEvent(kind, reader), nil
 	default:
 		return nil, fmt.Errorf("unknown event type %q", kind)
 	}
+}
+
+func decodeMetadataEvent(kind string, reader *objectReader) Event {
+	switch kind {
+	case TypeThreadNamed:
+		return ThreadNamed{Name: reader.str("name")}
+	case TypeThreadArchived:
+		return ThreadArchived{Archived: reader.boolean("archived")}
+	default:
+		return AdvisorNote{
+			Advisor: reader.str("advisor"), Severity: reader.str("severity"), Note: reader.str("note"),
+			ReviewSeq: reader.uint64("review_seq"), Delivery: reader.str("delivery"),
+		}
+	}
+}
+
+func (r *objectReader) timestamp(name string) time.Time {
+	text := r.str(name)
+	if text == "" || r.err != nil {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, text)
+	r.err = err
+	return parsed
 }
 
 type objectReader struct {

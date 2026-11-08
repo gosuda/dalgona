@@ -31,6 +31,9 @@ type approvalRecord struct {
 }
 
 func (w *worker) recoverTurn(ctx context.Context) {
+	if w.recoverScriptTurn(ctx) {
+		return
+	}
 	if err := w.openRegistry(); err != nil {
 		w.end(ctx, outcome{status: statusFailed, failure: err.Error()})
 		return
@@ -45,6 +48,9 @@ func (w *worker) recoverTurn(ctx context.Context) {
 func (w *worker) recoverCalls(ctx context.Context) error {
 	v, err := w.t.view()
 	if err != nil {
+		return err
+	}
+	if err = w.use(v); err != nil {
 		return err
 	}
 	for _, call := range lastCalls(v) {
@@ -123,7 +129,7 @@ func (w *worker) finishRecovered(ctx context.Context, p *prepared, recovered str
 }
 
 func (w *worker) recoverStarted(ctx context.Context, v view, state event.ToolState) error {
-	item, ok := w.t.tools[state.Tool]
+	item, ok := w.tools.byName[state.Tool]
 	if !ok {
 		return w.completeRecovered(ctx, state.CallID, remoteInterrupt, recoveredStopped)
 	}
@@ -132,7 +138,7 @@ func (w *worker) recoverStarted(ctx context.Context, v view, state event.ToolSta
 		return err
 	}
 	p := &prepared{call: event.ToolCall{ID: state.CallID, Name: state.Tool}, tool: item, class: item.Class(), args: args}
-	p.verdict = verdict{allow: true, unsandboxed: config.Approval(w.t.created.Approval) == config.ApprovalYolo}
+	p.verdict = verdict{allow: true, unsandboxed: w.settings.Approval == config.ApprovalYolo}
 	switch item.Class() {
 	case tool.ClassExec:
 		return w.recoverExec(ctx, p)
@@ -140,10 +146,37 @@ func (w *worker) recoverStarted(ctx context.Context, v view, state event.ToolSta
 		return w.recoverEdit(ctx, v, p)
 	case tool.ClassRemote:
 		return w.completeRecovered(ctx, state.CallID, remoteInterrupt, recoveredStopped)
-	case tool.ClassRead, tool.ClassAgent, tool.ClassScript:
+	case tool.ClassScript:
+		return w.recoverScript(ctx, v, p)
+	case tool.ClassRead, tool.ClassAgent:
 		return w.finishRecovered(ctx, p, recoveredReplay)
 	}
 	return w.completeRecovered(ctx, state.CallID, remoteInterrupt, recoveredStopped)
+}
+
+func (w *worker) recoverScript(ctx context.Context, v view, p *prepared) error {
+	if err := w.recoverNested(ctx, v, p.call.ID+"/"); err != nil {
+		return err
+	}
+	return w.finishRecovered(ctx, p, recoveredReplay)
+}
+
+func (w *worker) recoverNested(ctx context.Context, v view, prefix string) error {
+	for id := range v.state.InFlight {
+		if !strings.HasPrefix(id, prefix) {
+			continue
+		}
+		current, err := w.t.view()
+		if err != nil {
+			return err
+		}
+		if nested, open := current.state.InFlight[id]; open {
+			if err = w.recoverStarted(ctx, current, nested); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (w *worker) completeRecovered(ctx context.Context, callID, output, recovered string) error {
@@ -152,7 +185,7 @@ func (w *worker) completeRecovered(ctx context.Context, callID, output, recovere
 }
 
 func (w *worker) recoverExec(ctx context.Context, p *prepared) error {
-	out, data, err := w.readProcess(ctx, p.call.ID)
+	out, data, err := w.readProcess(ctx, p.processID())
 	if errors.Is(err, runner.ErrProcessNotFound) {
 		return w.completeRecovered(ctx, p.call.ID, execInterrupted, recoveredStopped)
 	}
@@ -236,7 +269,7 @@ func (w *worker) replanEdit(ctx context.Context, p *prepared) error {
 	if !ok {
 		return w.finishRecovered(ctx, p, recoveredReplay)
 	}
-	plan, err := editor.Plan(ctx, tool.Call{ID: p.call.ID, Name: p.call.Name, Args: p.args}, w.env(p.verdict))
+	plan, err := editor.Plan(ctx, p.toolCall(), w.env(p.verdict))
 	if err != nil {
 		return w.completeRecovered(ctx, p.call.ID, err.Error(), recoveredReplay)
 	}

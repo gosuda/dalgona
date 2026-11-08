@@ -53,11 +53,11 @@ func (a *actor) deliver(note Note) deliverResult {
 
 func (a *actor) effectiveDelivery(requested Delivery) Delivery {
 	switch {
-	case requested == DeliveryAside:
+	case requested == DeliveryAside || !a.autoContinue:
 		return DeliveryAside
 	case a.busy && a.state.TurnID != "":
 		return DeliverySteer
-	case requested == DeliveryContinue && a.autoContinue && !a.busy:
+	case requested == DeliveryContinue && !a.busy:
 		return DeliveryContinue
 	default:
 		return DeliveryAside

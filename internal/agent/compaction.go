@@ -49,14 +49,20 @@ func (t *Thread) compactionView(v view) compactionView {
 			firstKept, out.summary, out.lastMarker = value.FirstKeptSeq, value.Summary, item.Seq
 		}
 	}
+	pruned := prunedCalls(path)
 	for _, item := range path {
 		if _, ok := item.Event.(event.Compaction); ok {
 			continue
 		}
-		if firstKept != 0 && item.Seq < firstKept {
+		summarized := firstKept != 0 && item.Seq < firstKept
+		if summarized {
 			out.prevIdx = len(out.entries) + 1
 		}
-		out.entries = append(out.entries, entryFor(item, v.sizes[item.Seq-1]))
+		entry := entryFor(item, v.sizes[item.Seq-1])
+		if summarized || pruned[entry.CallID] {
+			entry.OutputBytes = 0
+		}
+		out.entries = append(out.entries, entry)
 		out.events = append(out.events, item.Event)
 	}
 	return out
@@ -81,8 +87,9 @@ func usedTokens(cv compactionView) int {
 	tail := 0
 	for i := len(cv.entries) - 1; i >= cv.prevIdx; i-- {
 		message, ok := cv.events[i].(event.AssistantMessage)
-		if ok && cv.entries[i].Seq > cv.lastMarker && message.Usage.Input > 0 {
-			return message.Usage.Input + message.Usage.CacheRead + tail/4
+		prompt := message.Usage.Input + message.Usage.CacheRead + message.Usage.CacheWrite
+		if ok && cv.entries[i].Seq > cv.lastMarker && prompt > 0 {
+			return prompt + tail/4
 		}
 		tail += cv.entries[i].Bytes
 	}
@@ -90,7 +97,7 @@ func usedTokens(cv compactionView) int {
 }
 
 func (w *worker) autoCompact(ctx context.Context, v view) (bool, error) {
-	caps := w.t.host.capabilities(ctx, w.registry, w.t.created.Model)
+	caps := w.t.host.capabilities(ctx, w.registry, w.settings.Model)
 	cv := w.t.compactionView(v)
 	threshold := cmp.Or(w.t.host.cfg.Config.CompactionThreshold, defaultThreshold)
 	if !compact.ShouldCompact(caps.Context, usedTokens(cv), threshold) {
@@ -127,6 +134,9 @@ func (w *worker) compact(ctx context.Context, method string) error {
 	if err != nil {
 		return err
 	}
+	if err = w.use(v); err != nil {
+		return err
+	}
 	cv := w.t.compactionView(v)
 	keep := cmp.Or(w.t.host.cfg.Config.CompactionKeepTokens, defaultKeepTokens)
 	cut, ok := compact.Cut(cv.entries, keep, cv.prevIdx)
@@ -149,7 +159,7 @@ func (w *worker) compact(ctx context.Context, method string) error {
 }
 
 func (w *worker) summarize(ctx context.Context, cv compactionView, cut int, state event.State) (string, error) {
-	resolved, err := w.t.host.ResolveRole(ctx, "smol", w.t.created.Model)
+	resolved, err := w.t.host.ResolveRole(ctx, "smol", w.settings.Model)
 	if err != nil {
 		return "", err
 	}

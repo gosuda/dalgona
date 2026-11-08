@@ -4,7 +4,7 @@ The program MUST read `config.toml` and then `settings.toml` from its product ho
 
 `dal` uses `$DAL_HOME` or `~/.dal`. `dalgona` uses `$DALGONA_HOME` or `~/.dalgona`. The loader MUST expose the resolved home. The two homes MUST remain separate.
 
-The loader MUST reject unknown keys. The error MUST report the file and its 1-based line. `dal` MUST reject `tool_mode`, `runner`, `remote`, `runners`, `mcp_servers`, `discovery`, `eval`, `herdr`, and `web` as dalgona-only settings. Presence MUST trigger this rejection, including an empty table or a false value.
+The loader MUST reject unknown keys. The error MUST report the file and its 1-based line. `dal` MUST reject `tool_mode`, `runner`, `remote`, `runners`, `remotes`, `mcp_servers`, `discovery`, `eval`, `herdr`, and `web` as dalgona-only settings. Presence MUST trigger this rejection, including an empty table or a false value.
 
 The default approval mode is `auto`. The default sandbox is `workspace-write`. The default tool mode is `normal`. The default runner is `local`. The default reasoning level is `default`.
 
@@ -23,6 +23,8 @@ This shape resolves a conflict in the original plan. TOML cannot hold `approval 
 The decider MUST start with `decisions:` or `llm:`. The threshold MUST be in `(0, 1]`. Validation errors MUST name `[approval_decider] decider` or `[approval_decider] threshold`.
 
 The loader MUST validate approval, sandbox, reasoning, tool mode, durations, and runner options. Durations MUST use Go duration syntax. Invalid durations MUST fail loading. A sandbox0 runner MUST use a template and MUST NOT set an image.
+
+A `[remotes.<name>]` table records a Mode B box (see `runners.md`). Its keys are `service`, `image`, `template`, `url`, and `box_id`. Each key MUST merge across layers on its own: a key present in a later layer MUST replace the earlier value, including an empty string, and an absent key MUST keep it. Other keys inside the table MUST fail loading as unknown keys.
 
 Edit styles MUST be one of anchor, replace, hashline, hashline-light, hashline-enhanced, apply_patch, simple, balanced, or strict. A scalar style MUST apply to every model. A style table MUST contain `default`. Model patterns MUST match the full model name without regard to case. `*` matches any run and `?` matches one character. The first row in TOML source order wins.
 

@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -130,6 +131,19 @@ func TestStore_TokenWithEnv(t *testing.T) {
 	}
 	if credential.Key != "custom-environment" {
 		t.Fatalf("credential = %+v", credential)
+	}
+}
+
+func TestStore_TokenWithoutCredentialNamesTheProvider(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	store, err := auth.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Token(t.Context(), "openai")
+	requireAuthError(t, err, "auth: no credential for openai")
+	if !errors.Is(err, auth.ErrNoCredential) {
+		t.Fatalf("error %v does not wrap auth.ErrNoCredential", err)
 	}
 }
 

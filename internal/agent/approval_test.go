@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -20,6 +21,7 @@ import (
 
 type decisionsServer struct {
 	server     *httptest.Server
+	token      string
 	requests   atomic.Int64
 	reversible float64
 	servesTask float64
@@ -28,8 +30,12 @@ type decisionsServer struct {
 
 func newDecisionsServer(t *testing.T, reversible, servesTask float64) *decisionsServer {
 	t.Helper()
-	d := &decisionsServer{reversible: reversible, servesTask: servesTask}
+	d := &decisionsServer{token: cryptorand.Text(), reversible: reversible, servesTask: servesTask}
 	d.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+d.token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		d.requests.Add(1)
 		_, _ = io.Copy(io.Discard, r.Body)
 		if d.delay > 0 {
@@ -48,7 +54,7 @@ func newDecisionsServer(t *testing.T, reversible, servesTask float64) *decisions
 func (d *decisionsServer) decider(timeout time.Duration) Decider {
 	client := decide.NewDecisions(decide.DecisionsConfig{
 		BaseURL: d.server.URL, Model: "typesafe/jev-1.14", HTTPClient: d.server.Client(),
-		Token: func(_ context.Context) (string, error) { return "token", nil },
+		Token: func(_ context.Context) (string, error) { return d.token, nil },
 	})
 	adapter := NewDecider(client, "typesafe/jev-1.14", 0.9, config.ProductDalgona).(clientDecider)
 	adapter.timeout = timeout

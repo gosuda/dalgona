@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json/jsontext"
 	"log/slog"
 	"time"
 
@@ -20,19 +19,11 @@ type RetryFunc func(attempt int, verdict model.Verdict, status int, delay time.D
 
 type ProviderFactory func(onRetry RetryFunc) (*model.Registry, error)
 
-type ToolSet func(modelID string) ([]tool.Tool, error)
+type ToolSet func(modelID, cwd string) ([]tool.Tool, error)
+
+type SkillSet func(cwd string) ([]prompt.Skill, error)
 
 type RunnerFactory func(ctx context.Context, threadID, runnerName string) (runner.Runner, error)
-
-type HookEvent struct {
-	Name   string
-	Thread string
-	Turn   string
-	Tool   string
-	Class  tool.Class
-	Args   jsontext.Value
-	Status string
-}
 
 type HookVerdict struct {
 	Decision string
@@ -40,24 +31,49 @@ type HookVerdict struct {
 	By       string
 }
 
-type Hook interface {
-	Handle(ctx context.Context, e HookEvent) (HookVerdict, error)
+const (
+	HookAllow = "allow"
+	HookDeny  = "deny"
+)
+
+type ToolSurface interface {
+	Tools(builtin []tool.Tool) []tool.Tool
+	Visible(specs []tool.Spec) []tool.Spec
+	Direct(name string) error
 }
 
+type ToolCallHook interface {
+	ToolCall(ctx context.Context, call tool.Call) (HookVerdict, error)
+}
+
+type TurnEndHook interface {
+	TurnEnd(ctx context.Context, turnID, status string) error
+}
+
+type Extension interface {
+	ToolSurface
+	ToolCallHook
+	TurnEndHook
+}
+
+type ExtensionFactory func(t *Thread) Extension
+
 type HostConfig struct {
-	Journal   *journal.Store
-	Config    config.Config
-	Auth      *auth.Store
-	Providers ProviderFactory
-	Tools     ToolSet
-	Runner    RunnerFactory
-	Decider   Decider
-	Hooks     []Hook
-	Product   config.Product
-	Clock     func() time.Time
-	Logger    *slog.Logger
-	Skills    []prompt.Skill
-	ToolNotes []string
+	Journal        *journal.Store
+	Config         config.Config
+	Auth           *auth.Store
+	Providers      ProviderFactory
+	Tools          ToolSet
+	Runner         RunnerFactory
+	Decider        Decider
+	Extension      ExtensionFactory
+	OnChildStarted func(child *Thread)
+	Product        config.Product
+	Clock          func() time.Time
+	Logger         *slog.Logger
+	Skills         SkillSet
+	ToolNotes      []string
+	ProviderIDs    []string
 }
 
 type Overrides struct {
@@ -85,8 +101,19 @@ const (
 )
 
 type Input struct {
-	Kind InputKind
-	Text string
+	Kind     InputKind
+	Text     string
+	Effort   string
+	Model    string
+	Approval config.Approval
+	Sandbox  config.SandboxMode
+	Verbatim bool
+}
+
+type Settings struct {
+	Model    string
+	Approval config.Approval
+	Sandbox  config.SandboxMode
 }
 
 type Reply string
@@ -105,6 +132,7 @@ const (
 	UpdateTextDelta
 	UpdateReasoningDelta
 	UpdateApproval
+	UpdateExecOutput
 )
 
 type ApprovalPrompt struct {
@@ -113,8 +141,10 @@ type ApprovalPrompt struct {
 	Tool      string
 	Class     tool.Class
 	Summary   string
+	Reason    string
 	Commands  []string
 	Paths     []string
+	Resolved  bool
 }
 
 type Update struct {
@@ -123,17 +153,26 @@ type Update struct {
 	Seq      uint64
 	Event    event.Event
 	ItemID   string
+	CallID   string
 	Delta    string
 	Approval ApprovalPrompt
 }
 
 type ThreadInfo struct {
-	ID      string
-	Parent  string
-	ForkOf  string
-	Advisor string
-	Cwd     string
-	Model   string
-	Head    uint64
-	Damaged bool
+	ID       string
+	Parent   string
+	ForkOf   string
+	Advisor  string
+	Cwd      string
+	Model    string
+	Name     string
+	Preview  string
+	Archived bool
+	Created  time.Time
+	Updated  time.Time
+	Head     uint64
+	Damaged  bool
+
+	createdModel string
+	models       []modelOverride
 }

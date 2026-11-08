@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/model"
 )
 
@@ -21,13 +24,41 @@ type worker struct {
 	turnID       string
 	continuation bool
 	registry     *model.Registry
+	inBand       *inBandCalls
+	settings     Settings
+	tools        *toolset
+}
+
+func pathSettings(created event.SessionCreated, records []event.Seqd) Settings {
+	out := Settings{Model: created.Model, Approval: config.Approval(created.Approval), Sandbox: config.SandboxMode(created.Sandbox)}
+	for _, item := range event.ActivePath(records) {
+		if message, ok := item.Event.(event.UserMessage); ok {
+			out.Model = cmp.Or(message.Model, out.Model)
+			out.Approval = cmp.Or(config.Approval(message.Approval), out.Approval)
+			out.Sandbox = cmp.Or(config.SandboxMode(message.Sandbox), out.Sandbox)
+		}
+	}
+	return out
+}
+
+func (w *worker) use(v view) error {
+	w.settings = pathSettings(w.t.created, v.records)
+	tools, err := w.t.toolsFor(w.settings.Model)
+	w.tools = tools
+	return err
 }
 
 type outcome struct {
 	status  string
 	failure string
 	head    uint64
+	final   bool
 }
+
+var (
+	errYielded     = errors.New("agent: the subagent yielded")
+	errHookTimeout = errors.New("agent: a turn_end hook ran past " + hookTimeout.String())
+)
 
 func (a *actor) spawn(job func(ctx context.Context)) {
 	ctx, cancel := context.WithCancelCause(context.Background())
@@ -41,15 +72,6 @@ func (a *actor) spawnTurn(turnID string) {
 
 func (a *actor) spawnContinuation(turnID string) {
 	a.spawn(func(ctx context.Context) { (&worker{t: a.t, turnID: turnID, continuation: true}).runTurn(ctx) })
-}
-
-func (t *Thread) startRecovery() {
-	if err := t.do(func(a *actor) {
-		turnID := a.state.TurnID
-		a.spawn(func(ctx context.Context) { (&worker{t: t, turnID: turnID}).recoverTurn(ctx) })
-	}); err != nil {
-		t.host.log.Warn("agent: recovery not started", "thread", t.id, "error", err)
-	}
 }
 
 func (w *worker) release() {
@@ -120,7 +142,11 @@ func (w *worker) loop(ctx context.Context) outcome {
 			continue
 		}
 		waited = false
-		if err := w.step(ctx, v, messages); err != nil {
+		err = w.step(ctx, v, messages)
+		if errors.Is(err, errYielded) {
+			return outcome{status: statusCompleted, final: true}
+		}
+		if err != nil {
 			return failure(ctx, err)
 		}
 	}
@@ -129,6 +155,9 @@ func (w *worker) loop(ctx context.Context) outcome {
 func (w *worker) context() (view, []model.Message, error) {
 	v, err := w.t.view()
 	if err != nil {
+		return v, nil, err
+	}
+	if err = w.use(v); err != nil {
 		return v, nil, err
 	}
 	messages, err := w.t.messages(v)
@@ -157,12 +186,23 @@ func (w *worker) step(ctx context.Context, v view, messages []model.Message) err
 	if len(reply.calls) == 0 {
 		return nil
 	}
-	if err = w.runCalls(ctx, reply.calls); err != nil {
-		return err
-	}
-	v, err = w.t.view()
+	return w.callRound(ctx, reply.calls)
+}
+
+func (w *worker) callRound(ctx context.Context, calls []event.ToolCall) error {
+	pending, err := w.journalInBand(ctx, calls)
 	if err != nil {
 		return err
+	}
+	if err = w.runCalls(ctx, pending); err != nil {
+		return err
+	}
+	v, err := w.t.view()
+	if err != nil {
+		return err
+	}
+	if yieldedIn(v, calls) {
+		return errYielded
 	}
 	w.boundary(ctx, BoundaryTurn, v.head())
 	return nil
@@ -187,6 +227,9 @@ func (w *worker) boundary(ctx context.Context, kind BoundaryKind, head uint64) {
 }
 
 func (w *worker) end(ctx context.Context, o outcome) bool {
+	if continues, err := ask(w.t, func(a *actor) bool { return a.continues(o) }); err == nil && !continues {
+		w.notifyTurnEnd(ctx, o.status)
+	}
 	ended, err := ask(w.t, func(a *actor) bool { return a.finishTurn(w.turnID, o) })
 	if err != nil {
 		w.t.host.log.Warn("agent: turn ended on a closed thread", "thread", w.t.id, "turn", w.turnID, "error", err)
@@ -198,8 +241,11 @@ func (w *worker) end(ctx context.Context, o outcome) bool {
 	if o.status != statusCompleted {
 		w.announceEnd(o.status)
 	}
-	w.notifyTurnEnd(ctx, o.status)
 	return true
+}
+
+func (a *actor) continues(o outcome) bool {
+	return o.status == statusCompleted && !o.final && a.newInputSince(o.head)
 }
 
 type hookSnapshot struct {
@@ -222,7 +268,7 @@ func (w *worker) announceEnd(status string) {
 }
 
 func (a *actor) finishTurn(turnID string, o outcome) bool {
-	if o.status == statusCompleted && a.newInputSince(o.head) {
+	if a.continues(o) {
 		return false
 	}
 	a.settle(o.status)
@@ -264,18 +310,18 @@ func (a *actor) settle(status string) {
 	for id := range a.state.PendingCalls {
 		events = append(events, event.ToolCompleted{CallID: id, Output: "skipped: " + reason, Recovered: "skipped"})
 	}
+	for run := range a.state.Scripts {
+		events = append(events, event.ScriptCompleted{RunID: run, Error: "cancelled: " + reason})
+	}
 	if _, err := a.append(events...); err != nil {
 		a.t.host.log.Error("agent: settle unfinished calls", "thread", a.t.id, "error", err)
 	}
 }
 
 func (w *worker) notifyTurnEnd(ctx context.Context, status string) {
-	for _, hook := range w.t.host.cfg.Hooks {
-		hookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hookTimeout)
-		_, err := hook.Handle(hookCtx, HookEvent{Name: "turn_end", Thread: w.t.id, Turn: w.turnID, Status: status})
-		cancel()
-		if err != nil {
-			w.t.host.log.Warn("agent: turn_end hook", "thread", w.t.id, "error", err)
-		}
+	hookCtx, cancel := context.WithTimeoutCause(withWorker(context.WithoutCancel(ctx), w), hookTimeout, errHookTimeout)
+	defer cancel()
+	if err := w.t.ext.TurnEnd(hookCtx, w.turnID, status); err != nil {
+		w.t.host.log.Warn("agent: turn_end hook", "thread", w.t.id, "error", err)
 	}
 }

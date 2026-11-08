@@ -2,6 +2,8 @@
 
 This specification defines the approval gate of the agent core. Approvals are automated. Human prompts occur only in approval mode `ask`.
 
+The modes are ordered `yolo` < `auto` < `ask`. A protocol client MAY raise the mode of a turn. A per-turn approval policy MUST NOT lower the thread mode: the effective mode is the stricter of the thread mode and the turn mode. A thread in `ask` therefore keeps human prompts when a client sends `on-request` for a turn.
+
 ## Journal records
 
 Before a call runs, the gate MUST journal `approval.requested` with `request_id`, `call_id`, `summary`, and the call `class`. The gate MUST then journal `approval.resolved` with `decision`, `by`, `reason`, and, for decider verdicts, `scores`. A call MUST NOT reach `tool.started` without an `accept` or `accept_session` resolution.
@@ -20,12 +22,14 @@ Calls that fail before the gate MUST complete through a declined resolution:
 
 The gate MUST run these steps in order and MUST stop at the first verdict.
 
-1. Hooks. Each `Hook` gets a `tool_call` event. `allow` accepts and `deny` declines. A hook error MUST be logged and MUST count as no opinion. Each hook call MUST end within 30 s.
+1. Plugin hooks. Every plugin `tool_call` hook runs as a durable script run `<call_id>/hook:<file>:<fn>`. The first `deny` declines and otherwise the first `allow` accepts, both with `by` = `hook:<file>:<fn>`. A hook failure MUST be logged and MUST count as no opinion. A `turn_end` hook run `<turn_id>/turn_end/hook:<file>:<fn>` MUST run before `turn.completed`, within 30 s.
 2. Mode `yolo`. Accept by `mode:yolo`. `exec` then runs without the harness sandbox.
 3. Mechanical allow, modes `auto` and `ask`. Classes `read`, `agent`, and `script` accept by `mode:<mode>`. In `auto`, class `edit` accepts by `mode:auto` when every planned path is inside the writable roots. In `ask`, class `edit` goes to step 6.
 4. Static rules for `exec` commands and for the `<tool> <args>` text of `remote` calls. A match declines by `rule:<name>` with the reason `declined by rule <name>: <command part>`. The decider MUST NOT see the call.
 5. Decider, mode `auto`. The gate sends an `Action` to the configured `Decider`. A missing decider declines with `declined by decider: no decider is configured`. A decider error declines with `declined by decider: <error>`.
 6. Human, mode `ask`. A matching session grant accepts by `grant:<prefix>`. With no subscribed client, the gate declines with `declined: no client could approve this call`. Otherwise the thread publishes an `UpdateApproval` and waits for `Thread.Answer`. `accept` and `accept_session` accept by `user`. `decline` declines with `declined by user`. `cancel` declines with `cancelled by user` and interrupts the turn. An interrupt during the wait resolves the request as `cancel` by `user`.
+
+Child threads change step 6. A child of a loaded parent, other than an advisor, MUST also publish its `UpdateApproval` to the parent's subscribers, with `Update.Thread` set to the child id. Only parent subscribers count as clients for such a child. With no parent subscriber, the gate declines with `declined: no client could approve this call`. When the request resolves, the child MUST publish the same `UpdateApproval` with `Resolved=true` to the parent's subscribers. The app-server MUST then send `serverRequest/resolved` with the child `threadId` and the `requestId`. When the last parent connection leaves, the app-server MUST decline the pending child request.
 
 Writable roots are the thread working directory, `os.TempDir()`, `os.UserCacheDir()`, and `sandbox_writable_roots`. Each root and path MUST pass through `filepath.EvalSymlinks` for its longest existing prefix.
 

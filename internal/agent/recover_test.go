@@ -21,7 +21,7 @@ const crashSession = "crashed"
 func (h *harness) seed(events ...event.Event) {
 	h.t.Helper()
 	created := event.SessionCreated{
-		ID: crashSession, Cwd: h.cwd, Model: "openai/gpt-test", Approval: string(h.cfg.Config.Approval),
+		ID: crashSession, Cwd: h.cwd, Model: h.cfg.Config.Model, Approval: string(h.cfg.Config.Approval),
 		Sandbox: "off", Runner: "local",
 	}
 	raws := make([][]byte, 0, len(events)+1)
@@ -330,7 +330,7 @@ func TestRecoverRemoteCallIsInterruptedNotRerun(t *testing.T) {
 	t.Parallel()
 	runs := 0
 	h := newHarness(t, func(h *harness) {
-		h.cfg.Tools = func(string) ([]tool.Tool, error) { return []tool.Tool{remoteTool{runs: &runs}}, nil }
+		h.cfg.Tools = func(string, string) ([]tool.Tool, error) { return []tool.Tool{remoteTool{runs: &runs}}, nil }
 	})
 	h.seed(prefix(openTurn("deploy"), []event.Event{assistantCall("c1", "srv__deploy", `{}`)}, approved("c1", "remote"),
 		[]event.Event{startedCall("c1", "srv__deploy", "remote", `{}`)})...)

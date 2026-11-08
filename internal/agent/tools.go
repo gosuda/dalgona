@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html"
 	"io/fs"
+	"net/url"
 	"regexp"
 	"sync"
 	"unicode/utf8"
@@ -39,6 +40,17 @@ type prepared struct {
 	repairs int
 	plan    *tool.Plan
 	verdict verdict
+}
+
+func (p *prepared) processID() string {
+	if p.class == tool.ClassExec || p.class == tool.ClassEdit {
+		return url.PathEscape(p.call.ID)
+	}
+	return p.call.ID
+}
+
+func (p *prepared) toolCall() tool.Call {
+	return tool.Call{ID: p.processID(), Name: p.call.Name, Args: p.args}
 }
 
 func classString(class tool.Class) string {
@@ -83,7 +95,7 @@ func (w *worker) runCalls(ctx context.Context, calls []event.ToolCall) error {
 func (w *worker) agentRun(calls []event.ToolCall) int {
 	count := 0
 	for _, call := range calls {
-		item, ok := w.t.tools[call.Name]
+		item, ok := w.tools.byName[call.Name]
 		if !ok || item.Class() != tool.ClassAgent {
 			break
 		}
@@ -150,10 +162,13 @@ func (w *worker) runAgentBatch(ctx context.Context, calls []event.ToolCall) erro
 }
 
 func (w *worker) prepare(ctx context.Context, call event.ToolCall, requestID string) (*prepared, error) {
-	by := "mode:" + w.t.created.Approval
-	item, ok := w.t.tools[call.Name]
+	by := "mode:" + string(w.settings.Approval)
+	item, ok := w.tools.byName[call.Name]
 	if !ok {
 		return nil, w.declineCall(ctx, call, requestID, decline(by, "Tool "+call.Name+" not found"))
+	}
+	if err := w.t.ext.Direct(call.Name); err != nil {
+		return nil, w.declineCall(ctx, call, requestID, decline(by, err.Error()))
 	}
 	raw, err := w.t.host.loadRaw(call.Args, call.ArgsBlob)
 	if err != nil {
@@ -207,7 +222,7 @@ func (w *worker) gateCall(ctx context.Context, p *prepared, requestID string) (g
 	if !ok {
 		return gc, nil
 	}
-	plan, err := editor.Plan(ctx, tool.Call{ID: p.call.ID, Name: p.call.Name, Args: p.args}, w.env(verdict{}))
+	plan, err := editor.Plan(ctx, p.toolCall(), w.env(verdict{}))
 	if err != nil {
 		return gc, err
 	}
@@ -235,7 +250,7 @@ func (w *worker) declineCall(ctx context.Context, call event.ToolCall, requestID
 
 func (w *worker) failBeforeRun(ctx context.Context, p *prepared, requestID string, cause error) error {
 	if requestID != "" {
-		return w.declineCall(ctx, p.call, requestID, decline("mode:"+w.t.created.Approval, cause.Error()))
+		return w.declineCall(ctx, p.call, requestID, decline("mode:"+string(w.settings.Approval), cause.Error()))
 	}
 	started, err := w.started(p, nil)
 	if err != nil {
@@ -294,14 +309,26 @@ func (w *worker) execute(ctx context.Context, p *prepared) (event.ToolCompleted,
 	if p.plan != nil {
 		result, err = p.plan.Apply(ctx)
 	} else {
-		result, err = p.tool.Run(ctx, tool.Call{ID: p.call.ID, Name: p.call.Name, Args: p.args}, w.env(p.verdict))
+		result, err = w.run(ctx, p)
 	}
 	return w.completion(ctx, p, result, err)
 }
 
+func (w *worker) run(ctx context.Context, p *prepared) (tool.Result, error) {
+	env := w.env(p.verdict)
+	if p.class != tool.ClassExec {
+		return p.tool.Run(withWorker(ctx, w), p.toolCall(), env)
+	}
+	tee := w.t.teeOutput(env.Runner, p.processID(), p.call.ID)
+	env.Runner = tee
+	result, err := p.tool.Run(withWorker(ctx, w), p.toolCall(), env)
+	tee.flush()
+	return result, err
+}
+
 func (w *worker) env(v verdict) tool.Env {
 	mode := runner.SandboxWorkspaceWrite
-	if v.unsandboxed || w.t.created.Sandbox == string(config.SandboxOff) {
+	if v.unsandboxed || w.settings.Sandbox == config.SandboxOff {
 		mode = runner.SandboxOff
 	}
 	roots := append([]string{w.t.created.Cwd}, w.t.host.roots...)
@@ -320,11 +347,11 @@ func (w *worker) completion(ctx context.Context, p *prepared, result tool.Result
 	if runErr != nil {
 		output = joinError(output, runErr.Error())
 	}
-	runPath := ""
+	var run runOutput
 	if p.class == tool.ClassExec {
-		runPath = result.Path
+		run = runOutput{id: p.processID(), path: result.Path}
 	}
-	text, spill, err := w.project(ctx, p.tool.Spec().Keep, w.t.host.mask(output), runPath)
+	text, spill, err := w.project(ctx, p.tool.Spec().Keep, w.t.host.mask(output), run)
 	if err != nil {
 		return event.ToolCompleted{}, err
 	}
@@ -343,9 +370,14 @@ func joinError(output, message string) string {
 	return output + "\n" + message
 }
 
-func (w *worker) project(ctx context.Context, keep tool.Keep, masked, runPath string) (string, *event.Spill, error) {
-	if runPath != "" {
-		if spill, err := w.runSpill(ctx, runPath); err != nil || spill != nil {
+type runOutput struct {
+	id   string
+	path string
+}
+
+func (w *worker) project(ctx context.Context, keep tool.Keep, masked string, run runOutput) (string, *event.Spill, error) {
+	if run.path != "" {
+		if spill, err := w.runSpill(ctx, run); err != nil || spill != nil {
 			return fitTail(masked, event.MaxProjectionBytes), spill, err
 		}
 	}
@@ -361,23 +393,30 @@ func (w *worker) project(ctx context.Context, keep tool.Keep, masked, runPath st
 	return fitTail(text, event.MaxProjectionBytes), &event.Spill{Path: path, Bytes: int64(len(masked)), SHA256: sha}, nil
 }
 
-func (w *worker) runSpill(ctx context.Context, path string) (*event.Spill, error) {
-	info, err := w.t.runner.Stat(ctx, path)
+func (w *worker) runSpill(ctx context.Context, run runOutput) (*event.Spill, error) {
+	info, err := w.t.runner.Stat(ctx, run.path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("agent: stat exec output %s: %w", path, err)
+		return nil, fmt.Errorf("agent: stat exec output %s: %w", run.path, err)
 	}
 	if info.Size <= event.MaxInlineBytes {
 		return nil, nil
 	}
-	data, err := w.t.runner.ReadFile(ctx, path)
-	if err != nil {
-		return nil, fmt.Errorf("agent: read exec spill %s: %w", path, err)
+	hash := sha256.New()
+	var offset int64
+	for {
+		page, err := w.t.runner.Read(ctx, run.id, offset)
+		if err != nil {
+			return nil, fmt.Errorf("agent: read exec spill %s: %w", run.path, err)
+		}
+		if len(page.Data) == 0 || page.Next <= offset {
+			return &event.Spill{Path: run.path, Bytes: offset, SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
+		}
+		hash.Write(page.Data)
+		offset = page.Next
 	}
-	sum := sha256.Sum256(data)
-	return &event.Spill{Path: path, Bytes: int64(len(data)), SHA256: hex.EncodeToString(sum[:])}, nil
 }
 
 func fitTail(text string, limit int) string {

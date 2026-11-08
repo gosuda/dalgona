@@ -224,6 +224,7 @@ func TestLoad_dalRejectsDalgonaSettings(t *testing.T) {
 		{key: "runner", body: "runner = \"local\"\n"},
 		{key: "remote", body: "remote = \"\"\n"},
 		{key: "runners", body: "[runners]\n"},
+		{key: "remotes", body: "[remotes]\n"},
 		{key: "mcp_servers", body: "[mcp_servers]\n"},
 		{key: "discovery", body: "[discovery]\n"},
 		{key: "eval", body: "[eval]\nuses = []\n"},
@@ -355,6 +356,7 @@ func TestWriteSetting_rejectsInvalidOutputWithoutReplacingFile(t *testing.T) {
 		value any
 	}{
 		{key: "wat", value: 1},
+		{key: "remotes.box.wat", value: "x"},
 		{key: "approval", value: "edits"},
 	} {
 		home := t.TempDir()
@@ -368,6 +370,29 @@ func TestWriteSetting_rejectsInvalidOutputWithoutReplacingFile(t *testing.T) {
 			t.Fatal(err)
 		}
 		requireConfigValue(t, string(raw), string(original))
+	}
+}
+
+func TestWriteSetting_roundTripsRemotes(t *testing.T) {
+	home := t.TempDir()
+	writeConfigFile(t, home, "config.toml", "[remotes.work]\nservice = \"docker\"\nimage = \"dalgona-box:dev\"\nbox_id = \"old\"\n")
+	if err := config.WriteSetting(home, "remotes.work", map[string]any{"box_id": "abc123"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DALGONA_HOME", home)
+	cfg, err := config.Load(config.ProductDalgona, t.TempDir(), config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.RemoteSpec{Service: "docker", Image: "dalgona-box:dev", BoxID: "abc123"}
+	if got := cfg.Remotes["work"]; got != want {
+		t.Fatalf("remotes.work = %+v, want %+v", got, want)
+	}
+	if err = config.WriteSetting(home, "remotes.work.box_id", ""); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = config.Load(config.ProductDalgona, t.TempDir(), config.Flags{}); err != nil || cfg.Remotes["work"].BoxID != "" {
+		t.Fatalf("cleared box_id = %q, %v", cfg.Remotes["work"].BoxID, err)
 	}
 }
 

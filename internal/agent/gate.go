@@ -85,7 +85,7 @@ func (w *worker) decide(ctx context.Context, gc gateCall, requestID string) verd
 	if v, ok := w.hookVerdict(ctx, gc); ok {
 		return v
 	}
-	approval := config.Approval(w.t.created.Approval)
+	approval := w.settings.Approval
 	if approval == config.ApprovalYolo {
 		v := accept("mode:yolo")
 		v.unsandboxed = true
@@ -104,22 +104,17 @@ func (w *worker) decide(ctx context.Context, gc gateCall, requestID string) verd
 }
 
 func (w *worker) hookVerdict(ctx context.Context, gc gateCall) (verdict, bool) {
-	for _, hook := range w.t.host.cfg.Hooks {
-		hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
-		result, err := hook.Handle(hookCtx, HookEvent{
-			Name: "tool_call", Thread: w.t.id, Turn: w.turnID, Tool: gc.call.Name, Class: gc.class, Args: gc.args,
-		})
-		cancel()
-		if err != nil {
-			w.t.host.log.Warn("agent: tool_call hook", "thread", w.t.id, "tool", gc.call.Name, "error", err)
-			continue
-		}
-		switch result.Decision {
-		case "allow":
-			return accept(cmp.Or(result.By, "hook")), true
-		case "deny":
-			return decline(cmp.Or(result.By, "hook"), cmp.Or(result.Reason, "declined by hook")), true
-		}
+	call := tool.Call{ID: gc.call.ID, Name: gc.call.Name, Args: gc.args}
+	result, err := w.t.ext.ToolCall(withWorker(ctx, w), call)
+	if err != nil {
+		w.t.host.log.Warn("agent: tool_call hook", "thread", w.t.id, "tool", gc.call.Name, "error", err)
+		return verdict{}, false
+	}
+	switch result.Decision {
+	case HookAllow:
+		return accept(result.By), true
+	case HookDeny:
+		return decline(result.By, cmp.Or(result.Reason, "declined by "+result.By)), true
 	}
 	return verdict{}, false
 }
@@ -193,7 +188,7 @@ func (w *worker) action(gc gateCall) Action {
 }
 
 func (w *worker) sandboxed(gc gateCall) bool {
-	return !gc.escalate && w.t.created.Sandbox != string(config.SandboxOff) && runner.Available()
+	return !gc.escalate && w.settings.Sandbox != config.SandboxOff && runner.Available()
 }
 
 func (w *worker) task() string {
@@ -224,14 +219,25 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 	replies := make(chan Reply, 1)
 	prompt := ApprovalPrompt{
 		RequestID: requestID, CallID: gc.call.ID, Tool: gc.call.Name, Class: gc.class, Summary: summary(gc), Paths: gc.paths,
+		Reason: gc.justification,
 	}
 	if gc.class == tool.ClassExec {
 		prompt.Commands = rules.Split(gc.command)
 	}
 	offered, err := ask(w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
-	if err != nil || !offered {
-		return decline("mode:ask", declineNoClient)
+	forwarded, linked := w.t.forwardApproval(prompt)
+	v := decline("mode:ask", declineNoClient)
+	if err == nil && (forwarded || (offered && !linked)) {
+		v = awaitReply(ctx, replies)
 	}
+	if forwarded {
+		prompt.Resolved = true
+		w.t.forwardApproval(prompt)
+	}
+	return v
+}
+
+func awaitReply(ctx context.Context, replies <-chan Reply) verdict {
 	select {
 	case reply := <-replies:
 		return replyVerdict(reply)
@@ -241,12 +247,21 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 }
 
 func (a *actor) offerApproval(prompt ApprovalPrompt, replies chan Reply) bool {
-	if len(a.subs) == 0 {
-		return false
-	}
 	a.approvals[prompt.RequestID] = replies
 	a.publish(Update{Kind: UpdateApproval, Thread: a.t.id, Approval: prompt})
-	return true
+	return len(a.subs) > 0
+}
+
+func (t *Thread) forwardApproval(prompt ApprovalPrompt) (reached, linked bool) {
+	parent, open := t.host.loadedThread(t.created.Parent)
+	if !open || t.created.Advisor != "" {
+		return false, false
+	}
+	reached, err := ask(parent, func(a *actor) bool {
+		a.publish(Update{Kind: UpdateApproval, Thread: t.id, Approval: prompt})
+		return len(a.subs) > 0
+	})
+	return err == nil && reached, true
 }
 
 func replyVerdict(reply Reply) verdict {

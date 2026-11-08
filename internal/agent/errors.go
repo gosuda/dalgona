@@ -4,6 +4,7 @@ import "errors"
 
 var (
 	ErrThreadRunning  = errors.New("agent: thread is running")
+	ErrArchived       = errors.New("agent: thread is archived")
 	ErrTurnNotOnPath  = errors.New("agent: turn is not on the active path")
 	ErrUnknownTurn    = errors.New("agent: unknown turn")
 	ErrUnknownRequest = errors.New("agent: unknown approval request")
@@ -22,6 +23,10 @@ func (e stateError) Unwrap() error { return e.kind }
 
 func runningError(id string) error {
 	return stateError{message: "thread " + id + " is running", kind: ErrThreadRunning}
+}
+
+func archivedError(id string) error {
+	return stateError{message: "thread " + id + " is archived", kind: ErrArchived}
 }
 
 func notOnPathError(turn string) error {

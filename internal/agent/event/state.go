@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/gosuda/dalgona/internal/agent/rules"
 )
@@ -40,14 +41,11 @@ type GrantRequest struct {
 	Args BlobRef
 }
 
-type ScriptEffectRecord struct {
-	Op      string
-	ArgsSHA string
-}
+const MaxScriptEffectGap = 4096
 
 type ScriptState struct {
 	NextEffect uint64
-	Effects    map[uint64]ScriptEffectRecord
+	Missing    map[uint64]struct{}
 }
 
 type ChildState struct {
@@ -75,6 +73,8 @@ type State struct {
 	Snapshots       map[string]Snapshot
 	CompletedTurns  map[string]uint64
 	Notes           map[string]uint64
+	Name            string
+	Archived        bool
 }
 
 func Fold(s State, seq uint64, e Event) (State, error) {
@@ -152,13 +152,13 @@ func foldEvent(s *State, seq uint64, e Event) error {
 	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeUserMessage:
 		return foldSessionEvent(s, seq, e)
 	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
-		return foldToolEvent(s, e)
+		return foldToolEvent(s, seq, e)
 	case TypeCompaction, TypeContextPruned, TypeChildSpawned, TypeBranch:
 		return foldStateEvent(s, seq, e)
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
 		return foldScriptEvent(s, e)
-	case TypeAdvisorNote:
-		return foldAdvisorNote(s, seq, e)
+	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived:
+		return foldMetadata(s, seq, e)
 	default:
 		return fmt.Errorf("event: fold: unknown type %q", e.Type())
 	}
@@ -220,10 +220,10 @@ func requireTurn(s *State, turnID string) error {
 	return nil
 }
 
-func foldToolEvent(s *State, e Event) error {
+func foldToolEvent(s *State, seq uint64, e Event) error {
 	switch value := e.(type) {
 	case AssistantMessage:
-		return foldAssistantMessage(s, value)
+		return foldAssistantMessage(s, seq, value)
 	case ToolStarted:
 		return foldToolStarted(s, value)
 	case ToolCompleted:
@@ -239,9 +239,12 @@ func foldToolEvent(s *State, e Event) error {
 	}
 }
 
-func foldAssistantMessage(s *State, e AssistantMessage) error {
+func foldAssistantMessage(s *State, seq uint64, e AssistantMessage) error {
 	if err := requireTurn(s, e.TurnID); err != nil {
 		return err
+	}
+	if e.ContextSeq >= seq {
+		return fmt.Errorf("event: fold: context_seq %d is not before assistant.message seq %d", e.ContextSeq, seq)
 	}
 	for _, call := range e.ToolCalls {
 		if _, exists := s.PendingCalls[call.ID]; exists {
@@ -308,7 +311,7 @@ func takeCompletedCall(s *State, e ToolCompleted) (ToolState, error) {
 		return started, nil
 	}
 	pending, exists := s.PendingCalls[e.CallID]
-	if !exists {
+	if !exists && !scriptCall(s, e.CallID) {
 		return ToolState{}, fmt.Errorf("event: fold: tool.completed without tool.started: %s", e.CallID)
 	}
 	started := ToolState{CallID: e.CallID, Tool: pending.Name, Args: pending.Args, ArgsBlob: pending.ArgsBlob}
@@ -321,13 +324,19 @@ func takeCompletedCall(s *State, e ToolCompleted) (ToolState, error) {
 	return started, nil
 }
 
+func scriptCall(s *State, callID string) bool {
+	run, _, found := strings.CutLast(callID, "/")
+	_, open := s.Scripts[run]
+	return found && open
+}
+
 func foldApprovalRequested(s *State, e ApprovalRequested) error {
 	if s.TurnID == "" {
 		return errors.New("event: fold: approval outside a turn")
 	}
 	_, pending := s.PendingCalls[e.CallID]
 	_, running := s.InFlight[e.CallID]
-	if !pending && !running {
+	if !pending && !running && !scriptCall(s, e.CallID) {
 		return fmt.Errorf("event: fold: approval for unknown call %s", e.CallID)
 	}
 	if _, exists := s.Approvals[e.RequestID]; exists {
@@ -442,7 +451,7 @@ func foldStateEvent(s *State, seq uint64, e Event) error {
 
 func foldChild(s *State, e ChildSpawned) error {
 	started, exists := s.InFlight[e.CallID]
-	if !exists || started.Class != "agent" {
+	if (!exists || started.Class != "agent") && !scriptCall(s, e.CallID) {
 		return fmt.Errorf("event: fold: child.spawned for unknown agent call %s", e.CallID)
 	}
 	if _, exists := s.Children[e.ChildID]; exists {
@@ -502,19 +511,19 @@ func foldScriptStarted(s *State, e ScriptStarted) error {
 
 func foldScriptEffect(s *State, e ScriptEffect) error {
 	run, exists := s.Scripts[e.RunID]
-	if !exists || e.N == ^uint64(0) {
+	if !exists || e.N >= run.NextEffect+MaxScriptEffectGap {
 		return fmt.Errorf("event: fold: unexpected script effect %s/%d", e.RunID, e.N)
 	}
-	if recorded, duplicate := run.Effects[e.N]; duplicate {
-		if recorded.Op != e.Op || recorded.ArgsSHA != e.ArgsSHA {
-			return fmt.Errorf("event: fold: script effect %s/%d recorded %s, got %s", e.RunID, e.N, recorded.Op, e.Op)
-		}
+	if _, missing := run.Missing[e.N]; e.N < run.NextEffect && !missing {
 		return fmt.Errorf("event: fold: duplicate script effect %s/%d", e.RunID, e.N)
 	}
-	effects := make(map[uint64]ScriptEffectRecord, len(run.Effects)+1)
-	maps.Copy(effects, run.Effects)
-	effects[e.N] = ScriptEffectRecord{Op: e.Op, ArgsSHA: e.ArgsSHA}
-	run.Effects = effects
+	gaps := make(map[uint64]struct{}, len(run.Missing))
+	maps.Copy(gaps, run.Missing)
+	for n := run.NextEffect; n < e.N; n++ {
+		gaps[n] = struct{}{}
+	}
+	delete(gaps, e.N)
+	run.Missing = gaps
 	run.NextEffect = max(run.NextEffect, e.N+1)
 	s.Scripts[e.RunID] = run
 	return nil
@@ -530,6 +539,19 @@ func foldScriptCompleted(s *State, e ScriptCompleted) error {
 
 func NoteKey(note AdvisorNote) string {
 	return note.Advisor + "\x00" + strconv.FormatUint(note.ReviewSeq, 10) + "\x00" + note.Note
+}
+
+func foldMetadata(s *State, seq uint64, e Event) error {
+	switch value := e.(type) {
+	case ThreadNamed:
+		s.Name = value.Name
+		return nil
+	case ThreadArchived:
+		s.Archived = value.Archived
+		return nil
+	default:
+		return foldAdvisorNote(s, seq, e)
+	}
 }
 
 func foldAdvisorNote(s *State, seq uint64, e Event) error {

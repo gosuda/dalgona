@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -33,8 +34,6 @@ type Host struct {
 	logged   map[string]bool
 	models   map[string][]model.Model
 }
-
-var errStopReplay = errors.New("agent: stop replay")
 
 func NewHost(cfg HostConfig) (*Host, error) {
 	if cfg.Journal == nil || cfg.Providers == nil || cfg.Tools == nil || cfg.Runner == nil {
@@ -116,36 +115,96 @@ func (h *Host) scanSessions() error {
 }
 
 func (h *Host) sessionInfo(head journal.SessionHead) (ThreadInfo, error) {
-	var created event.SessionCreated
-	err := h.journal.Replay(head.ID, func(_ uint64, raw []byte) error {
+	info := ThreadInfo{ID: head.ID, Head: head.HeadSeq, Damaged: head.Status == journal.SessionDamaged}
+	err := h.journal.Replay(head.ID, func(seq uint64, raw []byte) error {
+		if !info.wants(raw) {
+			return nil
+		}
 		decoded, err := event.Decode(raw)
 		if err != nil {
 			return err
 		}
-		value, ok := decoded.(event.SessionCreated)
-		if !ok {
-			return fmt.Errorf("agent: session %s does not start with session.created", head.ID)
-		}
-		created = value
-		return errStopReplay
+		h.applyInfo(&info, seq, decoded)
+		return nil
 	})
-	if err != nil && !errors.Is(err, errStopReplay) {
+	if _, damaged := errors.AsType[*journal.DamageError](err); err != nil && !damaged {
 		return ThreadInfo{}, err
 	}
-	if created.ID == "" {
-		return ThreadInfo{}, fmt.Errorf("agent: session %s is empty", head.ID)
+	if info.Cwd == "" {
+		return ThreadInfo{}, fmt.Errorf("agent: session %s has no session.created", head.ID)
 	}
-	return infoFrom(created, head.HeadSeq, head.Status == journal.SessionDamaged), nil
+	if stat, err := os.Stat(filepath.Join(h.cfg.Config.Home, "sessions", head.ID, "journal.jsonl")); err == nil {
+		info.Updated = stat.ModTime().UTC()
+	}
+	return info, nil
 }
 
-func infoFrom(created event.SessionCreated, head uint64, damaged bool) ThreadInfo {
-	return ThreadInfo{
-		ID: created.ID, Parent: created.Parent, ForkOf: created.ForkOf, Advisor: created.Advisor,
-		Cwd: created.Cwd, Model: created.Model, Head: head, Damaged: damaged,
+func metadataLine(raw []byte) bool {
+	return bytes.HasPrefix(raw, []byte(`{"type":"session.created"`)) || bytes.HasPrefix(raw, []byte(`{"type":"thread.`))
+}
+
+func promptLine(raw []byte) bool { return bytes.HasPrefix(raw, []byte(`{"type":"user.message"`)) }
+
+func (info *ThreadInfo) wants(raw []byte) bool {
+	if metadataLine(raw) || bytes.HasPrefix(raw, []byte(`{"type":"branch"`)) {
+		return true
 	}
+	return promptLine(raw) && (info.Preview == "" || bytes.Contains(raw, []byte(`"model":`)))
+}
+
+type modelOverride struct {
+	seq   uint64
+	model string
+}
+
+func (h *Host) applyInfo(info *ThreadInfo, seq uint64, e event.Event) {
+	switch value := e.(type) {
+	case event.SessionCreated:
+		info.Parent, info.ForkOf, info.Advisor = value.Parent, value.ForkOf, value.Advisor
+		info.Cwd, info.Model, info.createdModel, info.Created = value.Cwd, value.Model, value.Model, value.CreatedAt
+	case event.ThreadNamed:
+		info.Name = value.Name
+	case event.ThreadArchived:
+		info.Archived = value.Archived
+	case event.Branch:
+		info.rewindModel(value.ParentSeq)
+	case event.UserMessage:
+		if value.Model != "" {
+			info.models = append(info.models, modelOverride{seq: seq, model: value.Model})
+			info.Model = value.Model
+		}
+		h.applyPreview(info, value)
+	}
+}
+
+func (info *ThreadInfo) rewindModel(parent uint64) {
+	keep := 0
+	for keep < len(info.models) && info.models[keep].seq <= parent {
+		keep++
+	}
+	info.models = slices.Clone(info.models[:keep])
+	info.Model = info.createdModel
+	if keep > 0 {
+		info.Model = info.models[keep-1].model
+	}
+}
+
+func (h *Host) applyPreview(info *ThreadInfo, value event.UserMessage) {
+	if info.Preview != "" || value.Kind != string(InputPrompt) {
+		return
+	}
+	text, err := h.loadText(value.Text, value.TextBlob)
+	if err != nil {
+		h.log.Warn("agent: thread preview", "thread", info.ID, "error", err)
+	}
+	info.Preview = previewRunes(text, 80)
 }
 
 func (h *Host) Threads() []ThreadInfo {
+	return slices.DeleteFunc(h.AllThreads(), func(info ThreadInfo) bool { return info.Archived })
+}
+
+func (h *Host) AllThreads() []ThreadInfo {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	out := make([]ThreadInfo, 0, len(h.sessions))
@@ -209,7 +268,11 @@ func (h *Host) turnOpen(id string) (bool, error) {
 }
 
 func (h *Host) Start(ctx context.Context, spec ThreadSpec) (*Thread, error) {
-	created, err := h.sessionCreated(spec)
+	return h.startSession(ctx, spec, h.newThreadID())
+}
+
+func (h *Host) startSession(ctx context.Context, spec ThreadSpec, id string) (*Thread, error) {
+	created, err := h.sessionCreated(spec, id)
 	if err != nil {
 		return nil, err
 	}
@@ -220,14 +283,13 @@ func (h *Host) Start(ctx context.Context, spec ThreadSpec) (*Thread, error) {
 	if _, err = thread.appendEvents(ctx, created); err != nil {
 		return nil, errors.Join(err, thread.Close())
 	}
-	h.registerSession(created, 1)
 	return thread, nil
 }
 
-func (h *Host) sessionCreated(spec ThreadSpec) (event.SessionCreated, error) {
+func (h *Host) sessionCreated(spec ThreadSpec, id string) (event.SessionCreated, error) {
 	cfg := h.cfg.Config
 	created := event.SessionCreated{
-		ID: h.newThreadID(), Parent: spec.Parent, Advisor: spec.Advisor,
+		ID: id, Parent: spec.Parent, Advisor: spec.Advisor, CreatedAt: h.clock().UTC(),
 		Cwd:      cmp.Or(spec.Cwd, cfg.Cwd),
 		Model:    cmp.Or(spec.Model, cfg.Model),
 		Approval: string(cmp.Or(spec.Approval, cfg.Approval, config.ApprovalAuto)),
@@ -269,21 +331,18 @@ func (h *Host) ResumeWith(ctx context.Context, id string, overrides Overrides) (
 		return thread, nil
 	}
 	h.mu.Unlock()
+	release, err := h.lockSession(id)
+	if err != nil {
+		return nil, err
+	}
 	loaded, err := h.load(id)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, release())
 	}
 	if loaded.created.Advisor != "" && overrides.Tools == nil {
-		return nil, ErrNeedsOverrides
+		return nil, errors.Join(ErrNeedsOverrides, release())
 	}
-	thread, err := h.openThread(ctx, loaded, overrides)
-	if err != nil {
-		return nil, err
-	}
-	if loaded.state.TurnID != "" && loaded.damage == nil {
-		thread.startRecovery()
-	}
-	return thread, nil
+	return h.openLocked(ctx, loaded, overrides, release)
 }
 
 func (h *Host) Close() error {
@@ -316,11 +375,38 @@ func (h *Host) forget(id string) {
 	h.mu.Unlock()
 }
 
-func (h *Host) setHead(id string, head uint64) {
+func (h *Host) loadedThread(id string) (*Thread, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if info, ok := h.sessions[id]; ok {
-		info.Head = head
-		h.sessions[id] = info
+	thread, ok := h.threads[id]
+	return thread, ok && id != ""
+}
+
+func (h *Host) loadedChildren(parent string) []*Thread {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var children []*Thread
+	for _, thread := range h.threads {
+		if thread.created.Parent == parent && thread.created.Advisor == "" {
+			children = append(children, thread)
+		}
 	}
+	return children
+}
+
+func (h *Host) noteAppend(id string, head uint64, events []event.Event) {
+	h.mu.Lock()
+	info, ok := h.sessions[id]
+	h.mu.Unlock()
+	if !ok {
+		info = ThreadInfo{ID: id}
+	}
+	info.Head, info.Updated = head, h.clock().UTC()
+	first := head - uint64(len(events)) + 1
+	for i, item := range events {
+		h.applyInfo(&info, first+uint64(i), item)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.sessions[id] = info
 }

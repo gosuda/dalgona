@@ -17,7 +17,7 @@ import (
 	"syscall"
 )
 
-var ErrUnknownProvider = errors.New("auth: unknown provider")
+var ErrNoCredential = errors.New("auth: no credential")
 
 type Product string
 
@@ -325,7 +325,7 @@ func (s *Store) Token(ctx context.Context, provider string) (Credential, error) 
 	}
 	credential, ok := s.data[provider]
 	if !ok {
-		return Credential{}, fmt.Errorf("%w %q", ErrUnknownProvider, provider)
+		return Credential{}, fmt.Errorf("%w for %s", ErrNoCredential, provider)
 	}
 	return credential, nil
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -150,6 +151,36 @@ func TestRoleResolutionUsesPresetsAndFallsBack(t *testing.T) {
 	}
 }
 
+type loginLater struct {
+	modelList
+	calls atomic.Int32
+}
+
+func (l *loginLater) Models(ctx context.Context) ([]model.Model, error) {
+	if l.calls.Add(1) == 1 {
+		return nil, nil
+	}
+	return l.modelList.Models(ctx)
+}
+
+func TestRoleResolutionSeesModelsListedAfterAnEmptyList(t *testing.T) {
+	t.Parallel()
+	const thread = "anthropic/claude-opus-5-5"
+	provider := &loginLater{modelList: modelList{ids: []string{"claude-opus-5-5", "claude-haiku-5-5"}}}
+	h := newHarness(t, func(h *harness) {
+		h.cfg.Providers = func(RetryFunc) (*model.Registry, error) {
+			registry := model.NewRegistry()
+			return registry, registry.Register("anthropic", provider)
+		}
+	})
+	if got, err := h.host.ResolveRole(t.Context(), "smol", thread); err != nil || got != thread {
+		t.Fatalf("smol before login = %q, %v", got, err)
+	}
+	if got, err := h.host.ResolveRole(t.Context(), "smol", thread); err != nil || got != "anthropic/claude-haiku-5-5" {
+		t.Fatalf("smol after login = %q, %v", got, err)
+	}
+}
+
 func turnIDs(events []event.Seqd) []string {
 	var ids []string
 	for _, item := range events {
@@ -253,7 +284,7 @@ func TestBranchingRefusesRunningThread(t *testing.T) {
 type rendezvousAgent struct{ arrived *sync.WaitGroup }
 
 func (rendezvousAgent) Spec() tool.Spec {
-	return tool.Spec{Name: "task", Description: "subagent", Schema: jsontext.Value(`{"type":"object"}`)}
+	return tool.Spec{Name: "fanout", Description: "subagent", Schema: jsontext.Value(`{"type":"object"}`)}
 }
 func (rendezvousAgent) Class() tool.Class { return tool.ClassAgent }
 func (r rendezvousAgent) Run(ctx context.Context, call tool.Call, _ tool.Env) (tool.Result, error) {
@@ -275,9 +306,9 @@ func TestConsecutiveAgentCallsRunTogether(t *testing.T) {
 	var arrived sync.WaitGroup
 	arrived.Add(2)
 	h := newHarness(t, func(h *harness) {
-		h.cfg.Tools = func(string) ([]tool.Tool, error) { return []tool.Tool{rendezvousAgent{arrived: &arrived}}, nil }
+		h.cfg.Tools = func(string, string) ([]tool.Tool, error) { return []tool.Tool{rendezvousAgent{arrived: &arrived}}, nil }
 	})
-	h.model.push(calls(call{id: "k1", name: "task", args: `{}`}, call{id: "k2", name: "task", args: `{}`}), text("done"))
+	h.model.push(calls(call{id: "k1", name: "fanout", args: `{}`}, call{id: "k2", name: "fanout", args: `{}`}), text("done"))
 	h.idleThread("spawn two")
 	results := callOutputs(h.model.request(1))
 	if results["k1"] != "child k1" || results["k2"] != "child k2" {
@@ -285,18 +316,20 @@ func TestConsecutiveAgentCallsRunTogether(t *testing.T) {
 	}
 }
 
-type denyExec struct{}
+type denyExec struct{ baseExtension }
 
-func (denyExec) Handle(_ context.Context, e HookEvent) (HookVerdict, error) {
-	if e.Name == "tool_call" && e.Class == tool.ClassExec {
-		return HookVerdict{Decision: "deny", Reason: "hooks forbid exec", By: "hook:policy.star:deny"}, nil
+func (denyExec) ToolCall(_ context.Context, call tool.Call) (HookVerdict, error) {
+	if call.Name == "exec" {
+		return HookVerdict{Decision: HookDeny, Reason: "hooks forbid exec", By: "hook:policy.star:deny"}, nil
 	}
 	return HookVerdict{}, nil
 }
 
 func TestHookVerdictComesFirst(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) { h.cfg.Hooks = []Hook{denyExec{}} })
+	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
+		h.cfg.Extension = func(*Thread) Extension { return denyExec{} }
+	})
 	events := runCalls(t, h, call{id: "x", name: "exec", args: `{"command":"echo hi"}`})
 	resolved := resolutions(events)["x"]
 	if resolved.By != "hook:policy.star:deny" || resolved.Reason != "hooks forbid exec" || started(events, "x") {

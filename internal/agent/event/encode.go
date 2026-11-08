@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"time"
 )
 
 func eventMembers(e Event) ([]member, error) {
@@ -17,8 +18,8 @@ func eventMembers(e Event) ([]member, error) {
 		return stateMembers(e)
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
 		return scriptMembers(e)
-	case TypeAdvisorNote:
-		return advisorNoteMembers(e)
+	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived:
+		return metadataMembers(e)
 	default:
 		return nil, fmt.Errorf("event: unknown event type %q", e.Type())
 	}
@@ -54,6 +55,9 @@ func sessionCreatedMembers(e SessionCreated) []member {
 	fields = optionalString(fields, "parent", e.Parent)
 	fields = optionalString(fields, "fork_of", e.ForkOf)
 	fields = optionalString(fields, "advisor", e.Advisor)
+	if !e.CreatedAt.IsZero() {
+		fields = append(fields, field("created_at", stringValue(e.CreatedAt.UTC().Format(time.RFC3339Nano))))
+	}
 	if e.InstructionsBlob != nil {
 		fields = append(fields, field("instructions_blob", blobValue(e.InstructionsBlob)))
 	}
@@ -72,6 +76,19 @@ func advisorNoteMembers(e Event) ([]member, error) {
 	}, nil
 }
 
+func metadataMembers(e Event) ([]member, error) {
+	switch value := e.(type) {
+	case AdvisorNote:
+		return advisorNoteMembers(value)
+	case ThreadNamed:
+		return []member{field("name", stringValue(value.Name))}, nil
+	case ThreadArchived:
+		return []member{field("archived", boolValue(value.Archived))}, nil
+	default:
+		return nil, fmt.Errorf("event: %T does not match type %s", e, e.Type())
+	}
+}
+
 func userMessageMembers(e UserMessage) []member {
 	fields := []member{
 		field("item_id", stringValue(e.ItemID)), field("turn_id", stringValue(e.TurnID)),
@@ -84,7 +101,13 @@ func userMessageMembers(e UserMessage) []member {
 	if len(e.Mentions) > 0 {
 		fields = append(fields, field("mentions", arrayValue(e.Mentions, mentionValue)))
 	}
-	return fields
+	if e.Verbatim {
+		fields = append(fields, field("verbatim", boolValue(true)))
+	}
+	fields = optionalString(fields, "model", e.Model)
+	fields = optionalString(fields, "approval", e.Approval)
+	fields = optionalString(fields, "sandbox", e.Sandbox)
+	return optionalString(fields, "effort", e.Effort)
 }
 
 func noticeValue(e Notice) jsontext.Value {
@@ -269,7 +292,8 @@ func scriptMembers(e Event) ([]member, error) {
 			field("op", stringValue(value.Op)), field("args_sha", stringValue(value.ArgsSHA)),
 		}
 		fields = optionalRaw(fields, "result", value.Result)
-		return optionalBlobField(fields, "result_blob", value.ResultBlob), nil
+		fields = optionalBlobField(fields, "result_blob", value.ResultBlob)
+		return optionalString(fields, "error", value.Error), nil
 	case ScriptCompleted:
 		fields := []member{field("run_id", stringValue(value.RunID)), field("ok", boolValue(value.OK))}
 		fields = optionalRaw(fields, "value", value.Value)
