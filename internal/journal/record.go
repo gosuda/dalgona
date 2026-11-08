@@ -21,7 +21,7 @@ const (
 	envelopeMid1  = `,"prev":"`
 	envelopeMid2  = `","hash":"`
 	envelopeMid3  = `","crc":"`
-	envelopeEv    = `,"ev":`
+	envelopeEv    = `","ev":`
 	envelopeClose = '}'
 )
 
