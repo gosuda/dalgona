@@ -296,16 +296,21 @@ func waitTimedSSE(ctx context.Context, body io.Closer, control *StreamTimers, si
 		case <-control.change:
 			deadlines.activity(control)
 		case <-deadlines.startC:
-			_ = body.Close()
-			return ErrStreamStartTimeout
+			return abandonSSE(body, signals, ErrStreamStartTimeout)
 		case <-deadlines.idleC:
-			_ = body.Close()
-			return ErrStreamIdleTimeout
+			return abandonSSE(body, signals, ErrStreamIdleTimeout)
 		case <-ctx.Done():
-			_ = body.Close()
-			return ctx.Err()
+			return abandonSSE(body, signals, ctx.Err())
 		}
 	}
+}
+
+func abandonSSE(body io.Closer, signals *sseSignals, cause error) error {
+	_ = body.Close()
+	if readErr := <-signals.result; readErr == nil {
+		return nil
+	}
+	return cause
 }
 
 type Verdict uint8

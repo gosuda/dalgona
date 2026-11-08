@@ -168,45 +168,46 @@ func TestRetryContract(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name        string
-		handler     http.HandlerFunc
+		handler     func() http.HandlerFunc
 		wantRetries int
 		wantError   bool
 	}{
 		{name: "two rate limits then success", handler: rateLimitHandler, wantRetries: 2},
 		{name: "in-band rate limit", handler: inBandRateLimitHandler, wantRetries: 1},
-		{name: "bad request", handler: badRequestHandler, wantError: true},
-		{name: "tool call then drop", handler: toolDropHandler, wantError: true},
-		{name: "headers then silence", handler: silentHandler, wantRetries: 3, wantError: true},
+		{name: "bad request", handler: func() http.HandlerFunc { return badRequestHandler }, wantError: true},
+		{name: "tool call then drop", handler: func() http.HandlerFunc { return toolDropHandler }, wantError: true},
+		{name: "headers then silence", handler: func() http.HandlerFunc { return silentHandler }, wantRetries: 3, wantError: true},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			runRetryScenario(t, test.handler, test.wantRetries, test.wantError)
+			runRetryScenario(t, test.handler(), test.wantRetries, test.wantError)
 		})
 	}
 }
 
-func rateLimitHandler(w http.ResponseWriter, r *http.Request) {
-	count := rateLimitRequests.Add(1)
-	if count <= 2 {
-		w.WriteHeader(http.StatusTooManyRequests)
-		return
+func rateLimitHandler() http.HandlerFunc {
+	var requests atomic.Int32
+	return func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) <= 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(successFixture())
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	_, _ = w.Write(successFixture())
 }
 
-var rateLimitRequests atomic.Int32
-
-func inBandRateLimitHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	if inBandRequests.Add(1) == 1 {
-		_, _ = w.Write([]byte("{\"error\":{\"code\":429,\"message\":\"slow down\"}}\n"))
-		return
+func inBandRateLimitHandler() http.HandlerFunc {
+	var requests atomic.Int32
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests.Add(1) == 1 {
+			_, _ = w.Write([]byte("{\"error\":{\"code\":429,\"message\":\"slow down\"}}\n"))
+			return
+		}
+		_, _ = w.Write(successFixture())
 	}
-	_, _ = w.Write(successFixture())
 }
-
-var inBandRequests atomic.Int32
 
 func badRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusBadRequest)

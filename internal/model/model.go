@@ -144,6 +144,8 @@ type EventStream struct {
 	stopOnce   sync.Once
 	stopParent func() bool
 	timers     *StreamTimers
+	sending    sync.RWMutex
+	closed     bool
 }
 
 func NewEventStream(ctx context.Context, capacity int) *EventStream {
@@ -175,6 +177,11 @@ func (s *EventStream) Context(ctx context.Context) context.Context {
 }
 
 func (s *EventStream) Emit(event Event) bool {
+	s.sending.RLock()
+	defer s.sending.RUnlock()
+	if s.closed {
+		return false
+	}
 	select {
 	case s.events <- event:
 		return true
@@ -189,6 +196,9 @@ func (s *EventStream) Finish(err error) {
 			s.stopParent()
 		}
 		s.initiateStop()
+		s.sending.Lock()
+		defer s.sending.Unlock()
+		s.closed = true
 		s.err = err
 		close(s.done)
 		close(s.events)
