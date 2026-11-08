@@ -1,0 +1,322 @@
+package agent
+
+import (
+	"cmp"
+	"context"
+	"encoding/json/jsontext"
+	"path/filepath"
+	"strings"
+
+	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/agent/rules"
+	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/tool"
+)
+
+const (
+	declineNoClient = "declined: no client could approve this call"
+	taskLimit       = 2000
+	summaryLimit    = 200
+)
+
+type gateCall struct {
+	call          event.ToolCall
+	args          jsontext.Value
+	class         tool.Class
+	command       string
+	escalate      bool
+	justification string
+	paths         []string
+	outside       []string
+	requestID     string
+}
+
+type verdict struct {
+	allow       bool
+	decision    string
+	by          string
+	reason      string
+	scores      map[string]float64
+	unsandboxed bool
+	cancel      bool
+}
+
+func accept(by string) verdict {
+	return verdict{allow: true, decision: "accept", by: by, reason: "allowed"}
+}
+
+func decline(by, reason string) verdict { return verdict{decision: "decline", by: by, reason: reason} }
+
+func (w *worker) gate(ctx context.Context, gc gateCall) (verdict, error) {
+	requestID := gc.requestID
+	if requestID == "" {
+		requestID = newID("req-")
+		requested := event.ApprovalRequested{RequestID: requestID, CallID: gc.call.ID, Summary: summary(gc), Class: classString(gc.class)}
+		if _, err := w.t.appendEvents(ctx, requested); err != nil {
+			return verdict{}, err
+		}
+	}
+	v := w.decide(ctx, gc, requestID)
+	resolved := event.ApprovalResolved{RequestID: requestID, Decision: v.decision, By: v.by, Reason: v.reason, Scores: v.scores}
+	_, err := w.t.appendEvents(ctx, resolved)
+	return v, err
+}
+
+func summary(gc gateCall) string {
+	switch {
+	case gc.class == tool.ClassExec && gc.command != "":
+		return truncate(gc.command, summaryLimit)
+	case len(gc.paths) > 0:
+		return truncate(gc.call.Name+" "+strings.Join(gc.paths, ", "), summaryLimit)
+	default:
+		return truncate(gc.call.Name+" "+string(gc.args), summaryLimit)
+	}
+}
+
+func truncate(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	return strings.ToValidUTF8(text[:limit], "")
+}
+
+func (w *worker) decide(ctx context.Context, gc gateCall, requestID string) verdict {
+	if v, ok := w.hookVerdict(ctx, gc); ok {
+		return v
+	}
+	approval := config.Approval(w.t.created.Approval)
+	if approval == config.ApprovalYolo {
+		v := accept("mode:yolo")
+		v.unsandboxed = true
+		return v
+	}
+	if v, ok := mechanical(gc, approval); ok {
+		return v
+	}
+	if v, ok := staticRule(gc); ok {
+		return v
+	}
+	if approval == config.ApprovalAsk {
+		return w.human(ctx, gc, requestID)
+	}
+	return w.automated(ctx, gc)
+}
+
+func (w *worker) hookVerdict(ctx context.Context, gc gateCall) (verdict, bool) {
+	for _, hook := range w.t.host.cfg.Hooks {
+		hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
+		result, err := hook.Handle(hookCtx, HookEvent{
+			Name: "tool_call", Thread: w.t.id, Turn: w.turnID, Tool: gc.call.Name, Class: gc.class, Args: gc.args,
+		})
+		cancel()
+		if err != nil {
+			w.t.host.log.Warn("agent: tool_call hook", "thread", w.t.id, "tool", gc.call.Name, "error", err)
+			continue
+		}
+		switch result.Decision {
+		case "allow":
+			return accept(cmp.Or(result.By, "hook")), true
+		case "deny":
+			return decline(cmp.Or(result.By, "hook"), cmp.Or(result.Reason, "declined by hook")), true
+		}
+	}
+	return verdict{}, false
+}
+
+func mechanical(gc gateCall, approval config.Approval) (verdict, bool) {
+	by := "mode:" + string(approval)
+	switch gc.class {
+	case tool.ClassRead, tool.ClassAgent, tool.ClassScript:
+		return accept(by), true
+	case tool.ClassEdit:
+		return accept(by), approval == config.ApprovalAuto && len(gc.outside) == 0
+	case tool.ClassExec, tool.ClassRemote:
+		return verdict{}, false
+	}
+	return verdict{}, false
+}
+
+func staticRule(gc gateCall) (verdict, bool) {
+	text := gc.command
+	if gc.class == tool.ClassRemote {
+		text = gc.call.Name + " " + string(gc.args)
+	}
+	if gc.class != tool.ClassExec && gc.class != tool.ClassRemote {
+		return verdict{}, false
+	}
+	name, part, matched := rules.Check(text)
+	if !matched {
+		return verdict{}, false
+	}
+	return decline("rule:"+name, "declined by rule "+name+": "+part), true
+}
+
+func (w *worker) automated(ctx context.Context, gc gateCall) verdict {
+	decider := w.t.host.cfg.Decider
+	if decider == nil {
+		return decline("decider", "declined by decider: no decider is configured")
+	}
+	decision, err := decider.Decide(ctx, w.action(gc))
+	if err != nil {
+		return decline("decider", "declined by decider: "+err.Error())
+	}
+	by := cmp.Or(decision.By, "decider")
+	if !decision.Allow {
+		v := decline(by, cmp.Or(decision.Reason, "declined by decider"))
+		v.scores = decision.Scores
+		return v
+	}
+	v := accept(by)
+	v.reason, v.scores, v.unsandboxed = cmp.Or(decision.Reason, v.reason), decision.Scores, gc.escalate
+	return v
+}
+
+func (w *worker) action(gc gateCall) Action {
+	a := Action{
+		Thread: w.t.id, Tool: gc.call.Name, Class: gc.class, Paths: gc.paths, Project: w.t.created.Cwd,
+		Task: w.task(), Justification: gc.justification, Sandboxed: w.sandboxed(gc),
+	}
+	switch gc.class {
+	case tool.ClassExec:
+		a.Commands, a.Text = rules.Split(gc.command), gc.command
+	case tool.ClassRemote:
+		a.Text = gc.call.Name + " " + string(gc.args)
+		a.Commands = []string{a.Text}
+	case tool.ClassEdit:
+		for _, path := range gc.outside {
+			a.Commands = append(a.Commands, "write "+path)
+		}
+	case tool.ClassRead, tool.ClassAgent, tool.ClassScript:
+	}
+	return a
+}
+
+func (w *worker) sandboxed(gc gateCall) bool {
+	return !gc.escalate && w.t.created.Sandbox != string(config.SandboxOff) && runner.Available()
+}
+
+func (w *worker) task() string {
+	v, err := w.t.view()
+	if err != nil {
+		return ""
+	}
+	path := event.ActivePath(v.records)
+	for i := len(path) - 1; i >= 0; i-- {
+		message, ok := path[i].Event.(event.UserMessage)
+		if !ok {
+			continue
+		}
+		text, err := w.t.host.loadText(message.Text, message.TextBlob)
+		if err != nil {
+			w.t.host.log.Warn("agent: load task text", "thread", w.t.id, "error", err)
+			return ""
+		}
+		return truncate(text, taskLimit)
+	}
+	return ""
+}
+
+func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdict {
+	if prefix := w.matchingGrant(gc); prefix != "" {
+		return accept("grant:" + prefix)
+	}
+	replies := make(chan Reply, 1)
+	prompt := ApprovalPrompt{
+		RequestID: requestID, CallID: gc.call.ID, Tool: gc.call.Name, Class: gc.class, Summary: summary(gc), Paths: gc.paths,
+	}
+	if gc.class == tool.ClassExec {
+		prompt.Commands = rules.Split(gc.command)
+	}
+	offered, err := ask(w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
+	if err != nil || !offered {
+		return decline("mode:ask", declineNoClient)
+	}
+	select {
+	case reply := <-replies:
+		return replyVerdict(reply)
+	case <-ctx.Done():
+		return verdict{decision: "cancel", by: "user", reason: "the turn was interrupted"}
+	}
+}
+
+func (a *actor) offerApproval(prompt ApprovalPrompt, replies chan Reply) bool {
+	if len(a.subs) == 0 {
+		return false
+	}
+	a.approvals[prompt.RequestID] = replies
+	a.publish(Update{Kind: UpdateApproval, Thread: a.t.id, Approval: prompt})
+	return true
+}
+
+func replyVerdict(reply Reply) verdict {
+	switch reply {
+	case ReplyAccept:
+		return accept("user")
+	case ReplyAcceptSession:
+		return verdict{allow: true, decision: "accept_session", by: "user", reason: "allowed for this session"}
+	case ReplyCancel:
+		return verdict{decision: "cancel", by: "user", reason: "cancelled by user", cancel: true}
+	case ReplyDecline:
+		return decline("user", "declined by user")
+	}
+	return decline("user", "declined by user")
+}
+
+func (w *worker) matchingGrant(gc gateCall) string {
+	v, err := w.t.view()
+	if err != nil {
+		return ""
+	}
+	if gc.class != tool.ClassExec {
+		key := "tool:" + gc.call.Name
+		if _, ok := v.state.Grants[key]; ok {
+			return key
+		}
+		return ""
+	}
+	for prefix := range v.state.Grants {
+		if !strings.HasPrefix(prefix, "tool:") && rules.MatchesGrant(gc.command, prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
+
+func (h *Host) outsideRoots(cwd string, paths []string) []string {
+	roots := append([]string{resolveExisting(cwd)}, h.roots...)
+	var outside []string
+	for _, path := range paths {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(cwd, path)
+		}
+		if !insideRoots(roots, resolveExisting(filepath.Clean(path))) {
+			outside = append(outside, path)
+		}
+	}
+	return outside
+}
+
+func insideRoots(roots []string, path string) bool {
+	for _, root := range roots {
+		rel, err := filepath.Rel(root, path)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveExisting(path string) string {
+	suffix := ""
+	for current := path; ; current = filepath.Dir(current) {
+		if real, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(real, suffix)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		suffix = filepath.Join(filepath.Base(current), suffix)
+	}
+}

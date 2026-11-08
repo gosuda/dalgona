@@ -1,0 +1,1 @@
+Decompose the work into independent `task` calls. Dispatch independent slices together. Give each subagent a self-contained target and acceptance criteria. Require each child to return through `yield`. Verify each phase before starting the next. The journal resumes interrupted children without duplicating their completed work. Do not stop while work remains.

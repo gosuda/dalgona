@@ -1,0 +1,88 @@
+# Agent events
+
+Each journal event MUST be one JSON object with a string `type`. The encoder MUST NOT append a newline. The decoder MUST reject malformed JSON, trailing data, invalid field types, unknown event types, and validation failures.
+
+Identifiers MUST NOT be empty. Enumerated fields MUST use the values in this specification. Token counts, repair counts, effect indexes, delays, and blob sizes MUST NOT be negative. SHA-256 fields MUST contain 64 lowercase hexadecimal characters. The encoder MUST write strings as JSON strings and MUST replace invalid UTF-8 with U+FFFD.
+
+## Payload references
+
+An inline text or raw JSON payload MUST NOT exceed 64 KiB. A larger payload MUST use a typed blob reference in the same JSON field:
+
+```json
+{"blob":"<64 lowercase hex>","bytes":123456}
+```
+
+A field MUST NOT contain both an inline value and a blob reference. `tool.completed.output` MUST use `spill` instead of a blob reference. Its spill object MUST contain `path`, `bytes`, and `sha256`. With a spill, the output is a projection: at most 64 KiB of content plus the truncation notice, and in total at most 68 KiB.
+
+## Event records
+
+|Type|Required fields|Optional fields and constraints|
+|---|---|---|
+|`session.created`|`id`, `cwd`, `model`, `approval`, `sandbox`, `runner`|`parent`, `fork_of`, `instructions_blob`, `advisor`; approval is `auto`, `yolo`, or `ask`; sandbox is `workspace-write` or `off`; `advisor` names an advisor child session and MUST come with `parent`|
+|`runner.bound`|`runner`, `service`, `box_id`, `baseline`|None|
+|`turn.started`|`turn_id`|None|
+|`turn.completed`|`turn_id`, `status`|`error`; status is `completed`, `interrupted`, or `failed`|
+|`user.message`|`item_id`, `turn_id`, `text`, `kind`|`notices`, `mentions`; kind is `prompt`, `steer`, or `followup`; each notice has `word` and `text`; each mention has `path` and `text`|
+|`assistant.message`|`item_id`, `turn_id`, `text`, `reasoning`, `tool_calls`, `usage`, `stop_reason`|`context_seq`; usage contains `input`, `output`, `cache_read`, and `cache_write`; each tool call has `id`, `name`, `args`, `freeform`, and `resolved`; `context_seq` is the journal head when the request was built|
+|`tool.started`|`call_id`, `turn_id`, `tool`, `args`, `class`, `repairs`|`files`; class is `read`, `edit`, `exec`, `agent`, `script`, or `remote`; each file has `path`, `pre_sha`, `post_sha`, and optional `pre_blob`|
+|`tool.completed`|`call_id`, `ok`, `output`, `recovered`|`spill`, `exit_code`, `meta`; recovered is `none`, `replayed`, `interrupted`, or `skipped`|
+|`model.retry`|`turn_id`, `attempt`, `verdict`, `status`, `delay_ms`|Attempt MUST be positive; verdict is `retry` or `overflow`|
+|`approval.requested`|`request_id`, `call_id`, `summary`|`class`; class uses the `tool.started` values|
+|`approval.resolved`|`request_id`, `decision`, `by`, `reason`|`scores`; decision is `accept`, `accept_session`, `decline`, or `cancel`; each score MUST be between zero and one|
+|`compaction`|`first_kept_seq`, `summary`, `method`, `tokens_before`, `tokens_after`|`first_kept_seq` MUST be positive; method is `auto`, `manual`, or `overflow`|
+|`context.pruned`|`turn_id`, `call_ids`|`call_ids` MUST contain at least one non-empty identifier|
+|`child.spawned`|`call_id`, `child_id`, `runner`|None|
+|`branch`|`parent_seq`|Zero selects the empty root path|
+|`script.started`|`run_id`, `source_blob`, `entry`, `args`, `seed`|None|
+|`script.effect`|`run_id`, `n`, `op`, `args_sha`, `result`|Effect indexes are assigned at submission, so they MAY arrive out of order; an index MUST NOT repeat|
+|`script.completed`|`run_id`, `ok`|Success MUST contain `value` and no `error`; failure MUST contain `error` and no `value`|
+|`advisor.note`|`advisor`, `severity`, `note`, `review_seq`, `delivery`|severity is `nit`, `concern`, or `blocker`; delivery is `steer`, `aside`, or `continue`; `note` MUST be inline and at most 64 KiB|
+
+Text and raw JSON fields named in this section MAY use the blob-reference form. Snapshot metadata in `tool.completed.meta` MUST remain inline and MUST NOT exceed 64 KiB.
+
+## Fold state
+
+The fold MUST use one of these states: `idle`, `turn_running`, `awaiting_approval`, or `damaged`. An illegal transition MUST return an error and a damaged state. It MUST NOT mutate the input state.
+
+The state MUST track:
+
+- the session and open turn;
+- assistant calls without `tool.started`;
+- started calls without `tool.completed`, including their class and arguments;
+- unresolved approvals and declined calls;
+- open script runs, their recorded effect indexes with `op` and `args_sha`, and the next effect index;
+- spawned children;
+- the latest `runner.bound` and `compaction`;
+- the current todo list, session grants, read snapshots, and completed-turn sequence numbers;
+- delivered advisor notes, keyed by advisor, `review_seq`, and note text.
+
+`turn.started` MUST NOT overlap another turn. Turn-scoped events MUST name the open turn. `turn.completed` MUST NOT leave calls, approvals, or scripts unfinished. `tool.completed` MUST have a matching `tool.started`, except for an unsuccessful skipped call or an unsuccessful call declined by an approval. Those exceptions MUST clear the pending assistant call.
+
+An approval resolution MUST have a matching unresolved request. A user `accept_session` decision MUST create its grant when the fold folds `approval.resolved` and the request carries `class`; a request without `class` MUST defer the grant to the call's `tool.started`. For `exec` the grant is an argv prefix derived from one command. For an edit or remote tool the grant is that tool name. Agent, read, and script calls MUST NOT create grants. A later `grant:<prefix>` decision MUST NOT create a grant.
+
+`child.spawned` MUST name an in-flight agent call. A branch MUST occur while idle. A nonzero `parent_seq` MUST precede the branch and identify a completed turn. A script effect index MUST NOT repeat; a repeated index with a different `op` or `args_sha` MUST report the mismatch.
+
+`advisor.note` MAY occur inside or outside a turn. A second note with the same advisor, `review_seq`, and note text MUST be rejected.
+
+Read metadata MUST restore direct snapshot objects and snapshot objects inside `captures`. A successful `todo` completion MUST replace the todo list from its started arguments.
+
+## Active paths and turn trees
+
+`ActivePath` MUST walk backward from the journal head. It MUST include ordinary events and exclude `branch` control events. At a branch, it MUST jump to `parent_seq` and continue backward. A zero parent MUST select the root. A missing or forward parent MUST stop the walk. The result MUST use journal order.
+
+`Tree` MUST contain one node per `turn.started`. A new turn MUST name the then-current leaf as `ParentTurnID`. A branch MUST move the current leaf to its completed turn or to the root. `Preview` MUST contain at most the first 80 Unicode characters of the turn's first prompt. `Active` MUST match the turns on the final active path.
+
+Model context and thread reads MUST use only the active path. Runner bindings, grants, snapshots, and recovery metadata MUST fold over the full journal.
+
+## Model context
+
+The agent MUST build each model request from the active path after the latest `compaction`: the compaction summary first, then the events with `seq >= first_kept_seq`.
+
+- A `user.message` or an `advisor.note` journaled after the `context_seq` of the next `assistant.message` MUST render after that assistant message, because its request did not carry it.
+- A user message or a `steer` or `continue` note that arrives while tool results are outstanding MUST render after those results.
+- A `followup` message MUST render after the first assistant message without tool calls that follows it, or at the turn end.
+- An `aside` note MUST render inside the next rendered user message.
+- An advisor note MUST render as `<advisory advisor="<name>" severity="<severity>">note</advisory>`, with `&`, `<`, `>`, `"`, and `'` HTML-escaped in every value.
+- Tool results MUST render in call order. A pruned call MUST render the output `[output pruned to fit the context window]`.
+
+The model MUST be called again when the rendered context ends with user content.
