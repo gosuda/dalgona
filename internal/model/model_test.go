@@ -94,6 +94,10 @@ func TestResolveRole(t *testing.T) {
 		{name: "static preset", role: "smol", thread: "anthropic/claude-opus-5-5", offered: []string{"claude-haiku-5-5"}, want: "anthropic/claude-haiku-5-5"},
 		{name: "missing preset", role: "smol", thread: "anthropic/claude-opus-5-5", want: "anthropic/claude-opus-5-5", wantLine: "roles.smol preset anthropic/claude-haiku-5-5 is not offered; using anthropic/claude-opus-5-5"},
 		{name: "slow preset", role: "slow", thread: "openai/gpt-6.1-sol", offered: []string{"gpt-6-astra"}, want: "openai/gpt-6-astra"},
+		{name: "advisor resolves like slow", role: "advisor", thread: "anthropic/claude-opus-5-5", offered: []string{"claude-haiku-5-5", "claude-fable-5-1"}, want: "anthropic/claude-fable-5-1"},
+		{name: "advisor preset not offered", role: "advisor", thread: "google/gemini-3.8-flash", offered: []string{"gemini-3.8-flash"}, want: "google/gemini-3.8-flash", wantLine: "roles.advisor preset google/gemini-4-argon is not offered; using google/gemini-3.8-flash"},
+		{name: "advisor dynamic preset", role: "advisor", thread: "chatcompat/first", offered: []string{"cheap", "large"}, want: "chatcompat/cheap"},
+		{name: "unknown role keeps thread model", role: "reviewer", thread: "openai/gpt-6.1-sol", offered: []string{"gpt-6-astra"}, want: "openai/gpt-6.1-sol"},
 		{name: "dynamic preset", role: "smol", thread: "chatcompat/first", offered: []string{"cheap", "large"}, want: "chatcompat/cheap"},
 		{name: "default role", role: "default", thread: "google/gemini-3.8-flash", want: "google/gemini-3.8-flash"},
 		{name: "explicit model", role: "openai/other", thread: "openai/gpt-6.1-sol", want: "openai/other"},
@@ -106,5 +110,28 @@ func TestResolveRole(t *testing.T) {
 				t.Fatalf("ResolveRole() = %q, %q; want %q, %q", got, line, test.want, test.wantLine)
 			}
 		})
+	}
+}
+
+func TestCapabilitiesCoverEveryPresetModel(t *testing.T) {
+	t.Parallel()
+	for provider, preset := range Presets {
+		for _, id := range []string{preset.Default, preset.Smol, preset.Slow} {
+			capability, ok := Capabilities(provider, id)
+			if !ok || capability.ID != id {
+				t.Fatalf("Capabilities(%q, %q) = %+v, %v", provider, id, capability, ok)
+			}
+		}
+	}
+	sol, _ := Capabilities("openai", "gpt-6.1-sol")
+	if ClampEffort("max", sol.Efforts) != "max" || ClampEffort("high", sol.Efforts) != "high" {
+		t.Fatalf("sol efforts = %v", sol.Efforts)
+	}
+	sol.Efforts[0] = "changed"
+	if again, _ := Capabilities("openai", "gpt-6.1-sol"); again.Efforts[0] != "low" {
+		t.Fatal("Capabilities shares its effort slice")
+	}
+	if _, ok := Capabilities("openai", "gpt-unknown"); ok {
+		t.Fatal("unknown model reported capabilities")
 	}
 }

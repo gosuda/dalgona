@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -23,6 +24,30 @@ func PresetFor(provider string) (Preset, bool) {
 	return preset, ok
 }
 
+var reasoningLowToMax = []string{"low", "medium", "high", "xhigh", "max"}
+
+// source: plan "Model role presets" (https://developers.openai.com/api/docs/guides/latest-model.md, https://platform.claude.com/docs/en/models/overview.md, https://ai.google.dev/gemini-api/docs/models, read 2026-11-08)
+var presetCapabilities = map[string]Model{
+	"openai/gpt-6.1-sol":           {ID: "gpt-6.1-sol", Efforts: reasoningLowToMax},
+	"openai/gpt-6-luna":            {ID: "gpt-6-luna"},
+	"openai/gpt-6-astra":           {ID: "gpt-6-astra", Efforts: reasoningLowToMax},
+	"chatgpt/gpt-6.1-sol":          {ID: "gpt-6.1-sol", Efforts: reasoningLowToMax},
+	"chatgpt/gpt-6-luna":           {ID: "gpt-6-luna"},
+	"chatgpt/gpt-6-astra":          {ID: "gpt-6-astra", Efforts: reasoningLowToMax},
+	"anthropic/claude-opus-5-5":    {ID: "claude-opus-5-5", Context: 1_000_000},
+	"anthropic/claude-haiku-5-5":   {ID: "claude-haiku-5-5"},
+	"anthropic/claude-fable-5-1":   {ID: "claude-fable-5-1"},
+	"google/gemini-3.8-flash":      {ID: "gemini-3.8-flash"},
+	"google/gemini-3.5-flash-lite": {ID: "gemini-3.5-flash-lite"},
+	"google/gemini-4-argon":        {ID: "gemini-4-argon", Context: 1_048_576},
+}
+
+func Capabilities(provider, modelID string) (Model, bool) {
+	capability, ok := presetCapabilities[provider+"/"+modelID]
+	capability.Efforts = slices.Clone(capability.Efforts)
+	return capability, ok
+}
+
 func ResolveRole(role, threadModel string, offered []string) (string, string) {
 	if role == "" || role == "default" {
 		return threadModel, ""
@@ -31,7 +56,7 @@ func ResolveRole(role, threadModel string, offered []string) (string, string) {
 		return role, ""
 	}
 	provider, _, err := ParseModelID(threadModel)
-	if err != nil || (role != "smol" && role != "slow") {
+	if err != nil || !slices.Contains([]string{"smol", "slow", "advisor"}, role) {
 		return threadModel, ""
 	}
 	candidate, ok := rolePreset(provider, role, offered)
@@ -53,7 +78,7 @@ func rolePreset(provider, role string, offered []string) (string, bool) {
 		}
 		return bareModelID(offered[0]), true
 	}
-	if role == "slow" {
+	if role == "slow" || role == "advisor" {
 		return preset.Slow, true
 	}
 	return preset.Smol, true
