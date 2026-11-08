@@ -1,6 +1,7 @@
 <script lang="ts">
 import KeywordText from "#lib/components/KeywordText.svelte";
 import { itemStatusLabel, kindLabel, planStatusLabel } from "#lib/labels.ts";
+import { itemDisplayStatus } from "#lib/reducer.ts";
 import type {
 	JsonValue,
 	KeywordDefinition,
@@ -18,6 +19,7 @@ interface Props {
 	connected: boolean;
 	keywords: readonly KeywordDefinition[];
 	loading: boolean;
+	awaitingApproval: ReadonlySet<string>;
 }
 
 let {
@@ -29,6 +31,7 @@ let {
 	connected,
 	keywords,
 	loading,
+	awaitingApproval,
 }: Props = $props();
 let viewport = $state<HTMLDivElement>();
 let running = $derived(turnStatus === "inProgress");
@@ -108,10 +111,11 @@ function argumentsText(value: JsonValue): string {
 								<p>{item.text}</p>
 							</details>
 						{:else if item.kind === "commandExecution"}
+							{@const status = itemDisplayStatus(item.status, item.id, awaitingApproval)}
 							<article class="tool-item">
 								<header>
 									<span class="item-label">Command</span>
-									<span class="item-status">{itemStatusLabel(item.status)}{item.exitCode === null ? "" : ` · exit ${item.exitCode}`}</span>
+									<span class="item-status" class:awaiting={status === "awaitingApproval"}>{itemStatusLabel(status)}{item.exitCode === null ? "" : ` · exit ${item.exitCode}`}</span>
 								</header>
 								<pre class="command">{item.command}</pre>
 								{#if item.output}
@@ -119,10 +123,11 @@ function argumentsText(value: JsonValue): string {
 								{/if}
 							</article>
 						{:else if item.kind === "fileChange"}
+							{@const status = itemDisplayStatus(item.status, item.id, awaitingApproval)}
 							<article class="tool-item">
 								<header>
 									<span class="item-label">File changes</span>
-									<span class="item-status">{itemStatusLabel(item.status)}</span>
+									<span class="item-status" class:awaiting={status === "awaitingApproval"}>{itemStatusLabel(status)}</span>
 								</header>
 								{#each item.changes as change (`${change.path}:${change.kind}`)}
 									<details class="file-change">
@@ -283,6 +288,11 @@ function argumentsText(value: JsonValue): string {
 		color: var(--color-text-secondary);
 		font-size: var(--text-caption);
 		font-variant-numeric: tabular-nums;
+	}
+
+	.item-status.awaiting {
+		color: var(--color-accent);
+		font-weight: 650;
 	}
 
 	.command {

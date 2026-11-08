@@ -11,7 +11,10 @@ import { threadTitle } from "#lib/labels.ts";
 import { RpcClient, RpcError } from "#lib/protocol.ts";
 import {
 	emptyTranscript,
+	itemsAwaitingApproval,
 	reduceNotification,
+	resolveApprovalRequest,
+	trackApprovalRequest,
 	transcriptForThread,
 } from "#lib/reducer.ts";
 import { turnSteerParams } from "#lib/requests.ts";
@@ -67,6 +70,9 @@ let selectionGeneration = 0;
 
 let running = $derived(transcript.turnStatus === "inProgress");
 let currentApproval = $derived(approvals[0] ?? null);
+let awaitingApproval = $derived(
+	itemsAwaitingApproval(approvals, activeThreadId),
+);
 let approvalChanges = $derived.by(() => {
 	const item = transcript.items.find(
 		(entry) => entry.id === currentApproval?.itemId,
@@ -113,10 +119,7 @@ async function connect(): Promise<void> {
 		},
 		onRequest: (request) => {
 			if (generation === connectionGeneration) {
-				approvals = [
-					...approvals.filter((entry) => entry.id !== request.id),
-					request,
-				];
+				approvals = trackApprovalRequest(approvals, request);
 			}
 		},
 		onStateChange: (state) => {
@@ -430,7 +433,7 @@ function respondApproval(
 	decision: "accept" | "acceptForSession" | "decline" | "cancel",
 ): void {
 	requireClient().respond(request.id, { decision });
-	approvals = approvals.filter((entry) => entry.id !== request.id);
+	approvals = resolveApprovalRequest(approvals, request.id);
 }
 
 function handleNotification(notification: AppNotification): void {
@@ -475,9 +478,7 @@ function handleNotification(notification: AppNotification): void {
 			}
 			break;
 		case "requestResolved":
-			approvals = approvals.filter(
-				(entry) => entry.id !== notification.requestId,
-			);
+			approvals = resolveApprovalRequest(approvals, notification.requestId);
 			break;
 		default: {
 			const exhaustive: never = notification;
@@ -543,6 +544,7 @@ async function sendNextFollowup(threadId: string): Promise<void> {
 			connected={connection === "connected"}
 			{keywords}
 			loading={loadingTranscript}
+			{awaitingApproval}
 		/>
 
 		<Composer

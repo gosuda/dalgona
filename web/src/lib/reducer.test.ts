@@ -2,10 +2,19 @@ import { describe, expect, test } from "vitest";
 import { advisorLabel, itemStatusLabel, kindLabel } from "./labels";
 import {
 	emptyTranscript,
+	itemDisplayStatus,
+	itemsAwaitingApproval,
 	reduceNotification,
+	resolveApprovalRequest,
+	trackApprovalRequest,
 	transcriptForThread,
 } from "./reducer";
-import type { AppNotification, ThreadDetail, TranscriptItem } from "./types";
+import type {
+	AppNotification,
+	ApprovalRequest,
+	ThreadDetail,
+	TranscriptItem,
+} from "./types";
 
 function agent(id: string, text: string, complete: boolean): TranscriptItem {
 	return { id, kind: "agentMessage", text, complete };
@@ -219,6 +228,50 @@ describe("transcript reducer", () => {
 			turn: { ...turn, id: "turn-2" },
 		});
 		expect(nextTurn.plan).toBeNull();
+	});
+});
+
+describe("approval tracking", () => {
+	const request: ApprovalRequest = {
+		id: 7,
+		method: "item/commandExecution/requestApproval",
+		threadId: "thread-1",
+		turnId: "turn-1",
+		itemId: "cmd-1",
+		title: "Run ls",
+		detail: "ls",
+		reason: null,
+	};
+
+	function statusLabel(
+		approvals: readonly ApprovalRequest[],
+		itemId: string,
+	): string {
+		return itemStatusLabel(
+			itemDisplayStatus(
+				"inProgress",
+				itemId,
+				itemsAwaitingApproval(approvals, "thread-1"),
+			),
+		);
+	}
+
+	test("labels the requested item as waiting until the request resolves", () => {
+		const pending = trackApprovalRequest([], request);
+		expect(statusLabel(pending, "cmd-1")).toBe("Waiting for approval");
+		expect(statusLabel(pending, "cmd-2")).toBe("Running");
+		const resolved = resolveApprovalRequest(pending, request.id);
+		expect(statusLabel(resolved, "cmd-1")).toBe("Running");
+	});
+
+	test("keeps finished items and other threads on their own status", () => {
+		const pending = trackApprovalRequest([], {
+			...request,
+			method: "item/fileChange/requestApproval",
+		});
+		const awaiting = itemsAwaitingApproval(pending, "thread-1");
+		expect(itemDisplayStatus("completed", "cmd-1", awaiting)).toBe("completed");
+		expect(itemsAwaitingApproval(pending, "thread-2").has("cmd-1")).toBe(false);
 	});
 });
 

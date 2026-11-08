@@ -1,5 +1,7 @@
 import type {
 	AppNotification,
+	ApprovalRequest,
+	RequestId,
 	ThreadDetail,
 	TranscriptItem,
 	TranscriptState,
@@ -241,4 +243,39 @@ export function reduceNotification(
 		default:
 			return state;
 	}
+}
+
+export function trackApprovalRequest(
+	approvals: readonly ApprovalRequest[],
+	request: ApprovalRequest,
+): readonly ApprovalRequest[] {
+	return [...approvals.filter((entry) => entry.id !== request.id), request];
+}
+
+export function resolveApprovalRequest(
+	approvals: readonly ApprovalRequest[],
+	requestId: RequestId,
+): readonly ApprovalRequest[] {
+	return approvals.filter((entry) => entry.id !== requestId);
+}
+
+export function itemsAwaitingApproval(
+	approvals: readonly ApprovalRequest[],
+	threadId: string | null,
+): ReadonlySet<string> {
+	return new Set(
+		approvals
+			.filter((entry) => entry.threadId === threadId)
+			.map((entry) => entry.itemId),
+	);
+}
+
+export function itemDisplayStatus(
+	status: string,
+	itemId: string,
+	awaitingApproval: ReadonlySet<string>,
+): string {
+	return status === "inProgress" && awaitingApproval.has(itemId)
+		? "awaitingApproval"
+		: status;
 }

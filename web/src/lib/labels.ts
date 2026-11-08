@@ -48,6 +48,7 @@ export function threadTitle(
 
 const itemStatusLabels: Readonly<Record<string, string>> = {
 	inProgress: "Running",
+	awaitingApproval: "Waiting for approval",
 	completed: "Done",
 	failed: "Failed",
 	declined: "Declined",
