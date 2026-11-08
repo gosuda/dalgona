@@ -34,8 +34,12 @@ func newJudgeServer(t *testing.T, hold <-chan struct{}) *judgeServer {
 	t.Helper()
 	s := &judgeServer{}
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.requests.Add(1)
 		body, _ := io.ReadAll(r.Body)
+		if r.Method != http.MethodPost || len(body) == 0 {
+			http.Error(w, "judge ask must be a POST with a payload", http.StatusBadRequest)
+			return
+		}
+		s.requests.Add(1)
 		if hold != nil && bytes.Contains(body, []byte("hold")) {
 			select {
 			case <-hold:
