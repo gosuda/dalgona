@@ -191,6 +191,14 @@ type toolset struct {
 	names  []string
 }
 
+func (s *toolset) lookup(name string) (tool.Tool, bool) {
+	if s == nil {
+		return nil, false
+	}
+	item, ok := s.byName[name]
+	return item, ok
+}
+
 func (t *Thread) Settings() (Settings, error) {
 	v, err := t.view()
 	if err != nil {

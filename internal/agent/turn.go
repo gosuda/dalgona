@@ -44,8 +44,11 @@ func pathSettings(created event.SessionCreated, records []event.Seqd) Settings {
 func (w *worker) use(v view) error {
 	w.settings = pathSettings(w.t.created, v.records)
 	tools, err := w.t.toolsFor(w.settings.Model)
+	if err != nil {
+		return err
+	}
 	w.tools = tools
-	return err
+	return nil
 }
 
 type outcome struct {
@@ -88,11 +91,22 @@ func (a *actor) idle() {
 }
 
 func (w *worker) runTurn(ctx context.Context) {
-	if err := w.openRegistry(); err != nil {
+	if err := w.prime(); err != nil {
 		w.end(ctx, outcome{status: statusFailed, failure: err.Error()})
 		return
 	}
 	w.drive(ctx)
+}
+
+func (w *worker) prime() error {
+	v, err := w.t.view()
+	if err != nil {
+		return err
+	}
+	if err := w.use(v); err != nil {
+		return err
+	}
+	return w.openRegistry()
 }
 
 func (w *worker) drive(ctx context.Context) {

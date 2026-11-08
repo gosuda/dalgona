@@ -34,7 +34,7 @@ func (w *worker) recoverTurn(ctx context.Context) {
 	if w.recoverScriptTurn(ctx) {
 		return
 	}
-	if err := w.openRegistry(); err != nil {
+	if err := w.prime(); err != nil {
 		w.end(ctx, outcome{status: statusFailed, failure: err.Error()})
 		return
 	}

@@ -294,7 +294,7 @@ func (a *actor) spawnCompaction() chan error {
 	}
 	a.spawn(func(ctx context.Context) {
 		w := &worker{t: a.t}
-		err := w.openRegistry()
+		err := w.prime()
 		if err == nil {
 			err = w.compact(ctx, compactManual)
 		}
