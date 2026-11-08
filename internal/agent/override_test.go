@@ -5,11 +5,13 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/tool"
 )
 
 func infoModel(t *testing.T, host *Host, threadID string) string {
@@ -134,4 +136,90 @@ func expectNestedReadInFailedTurn(t *testing.T, h *harness, threadID string) {
 	if !ran || ended.Status != statusFailed || !strings.Contains(ended.Error, "no providers") {
 		t.Fatalf("nested read ran=%v, turn.completed = %+v; events: %v", ran, ended, h.types(threadID))
 	}
+}
+
+type slowBuild struct {
+	building chan struct{}
+	release  chan struct{}
+	unblock  func()
+}
+
+func newSlowBuild(t *testing.T) *slowBuild {
+	t.Helper()
+	release := make(chan struct{})
+	s := &slowBuild{building: make(chan struct{}, 1), release: release, unblock: sync.OnceFunc(func() { close(release) })}
+	t.Cleanup(s.unblock)
+	return s
+}
+
+func (s *slowBuild) tools(h *harness) ToolSet {
+	return func(modelID, cwd string) ([]tool.Tool, error) {
+		if modelID == "openai/gpt-slow" {
+			select {
+			case s.building <- struct{}{}:
+			default:
+			}
+			<-s.release
+		}
+		return h.tools(modelID, cwd)
+	}
+}
+
+func (s *slowBuild) awaitBuilding(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.building:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the slow tool set never started building")
+	}
+}
+
+func (s *slowBuild) expectSubmitDuringBuild(t *testing.T, thread *Thread) {
+	t.Helper()
+	submitted := make(chan error, 1)
+	go func() { submitted <- thread.Submit(t.Context(), Input{Kind: InputSteer, Text: "steer"}) }()
+	select {
+	case err := <-submitted:
+		if err != nil {
+			t.Fatalf("steer during a tool set build: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		s.unblock()
+		t.Fatalf("Submit blocked while a tool set was building; after release it returned %v", <-submitted)
+	}
+}
+
+func expectOneToolset(t *testing.T, thread *Thread, modelID string) {
+	t.Helper()
+	sets := make([]*toolset, 8)
+	var group sync.WaitGroup
+	for i := range sets {
+		group.Go(func() {
+			set, err := thread.toolsFor(modelID)
+			if err != nil {
+				t.Error(err)
+			}
+			sets[i] = set
+		})
+	}
+	group.Wait()
+	for _, set := range sets {
+		if set == nil || set != sets[0] || set != thread.currentTools() {
+			t.Fatal("racing builds for one model returned different tool sets")
+		}
+	}
+}
+
+func TestToolSetBuildDoesNotBlockSubmit(t *testing.T) {
+	slow := newSlowBuild(t)
+	h := newHarness(t, func(h *harness) { h.cfg.Tools = slow.tools(h) })
+	thread := h.start()
+	if err := thread.Submit(t.Context(), Input{Kind: InputPrompt, Text: "go", Model: "openai/gpt-slow"}); err != nil {
+		t.Fatal(err)
+	}
+	slow.awaitBuilding(t)
+	slow.expectSubmitDuringBuild(t, thread)
+	slow.unblock()
+	h.waitIdle(thread)
+	expectOneToolset(t, thread, "openai/gpt-z")
 }

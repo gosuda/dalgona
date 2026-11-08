@@ -214,17 +214,25 @@ func (t *Thread) currentTools() *toolset {
 }
 
 func (t *Thread) toolsFor(modelID string) (*toolset, error) {
-	t.toolsMu.Lock()
-	defer t.toolsMu.Unlock()
-	if t.toolset != nil && (t.toolset.model == modelID || t.fixedTools != nil) {
-		return t.toolset, nil
+	if current := t.currentTools(); t.reuses(current, modelID) {
+		return current, nil
 	}
 	tools, err := t.buildTools(modelID)
 	if err != nil {
 		return nil, err
 	}
-	t.toolset = t.newToolset(modelID, tools)
-	return t.toolset, nil
+	built := t.newToolset(modelID, tools)
+	t.toolsMu.Lock()
+	defer t.toolsMu.Unlock()
+	if t.reuses(t.toolset, modelID) {
+		return t.toolset, nil
+	}
+	t.toolset = built
+	return built, nil
+}
+
+func (t *Thread) reuses(set *toolset, modelID string) bool {
+	return set != nil && (t.fixedTools != nil || set.model == modelID)
 }
 
 func (t *Thread) buildTools(modelID string) ([]tool.Tool, error) {
