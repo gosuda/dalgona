@@ -1,0 +1,4 @@
+pre-commit:
+  commands:
+    verify:
+      run: just verify
