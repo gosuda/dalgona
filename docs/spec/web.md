@@ -1,0 +1,122 @@
+# Web UI server
+
+## Scope
+
+`internal/webui` serves the built web UI and relays JSON-RPC between a browser and the daemon.
+The caller supplies the listen address, the token, the TLS files, a daemon dialer, and an output writer.
+
+## Assets
+
+The package MUST embed `internal/webui/dist` with `//go:embed all:dist`.
+If the root of `dist` holds no entry other than `.gitkeep`, every path except `/rpc` MUST return status 503 with the body `web UI not built; run just web`.
+Otherwise the server MUST serve the files in `dist`. `/` MUST serve `index.html`.
+
+## Token
+
+A loopback listen address is `localhost` or a loopback IP. Every other address, including an empty host, is a LAN address.
+
+A LAN address MUST have a configured token of at least 32 characters. Characters are Unicode code points.
+Otherwise startup MUST fail before it listens, with this exact error:
+
+```text
+web: listening on <addr> needs [web] token (32+ characters)
+```
+
+`<addr>` is the configured listen address.
+
+A loopback address MUST use the configured token when one is set.
+Otherwise it MUST use a new token for each start. The token MUST be 32 bytes from `crypto/rand`, encoded as unpadded base64url.
+
+The server MUST compare SHA-256 digests of the presented token and the expected token with `crypto/subtle.ConstantTimeCompare`.
+
+## TLS
+
+When `CertFile` and `KeyFile` are both set, the server MUST serve TLS with `tls.VersionTLS13` as the minimum version.
+When only one of them is set, startup MUST fail with `web: cert_file and key_file must both be set`.
+A file that does not load MUST fail startup with an error that starts with `web: load cert_file and key_file: `.
+
+## Startup output
+
+All output goes to the caller's writer. Each message is one line.
+
+On a LAN address without TLS, the server MUST write this line once, before the URL:
+
+```text
+web: the token travels unencrypted on <addr>; set cert_file and key_file to use TLS
+```
+
+The server MUST then write `http://<addr>/#token=<token>`, or `https://<addr>/#token=<token>` with TLS.
+In both lines `<addr>` is the bound listener address. The token stays in the URL fragment, so a browser does not send it in page requests.
+
+## RPC relay
+
+`/rpc` MUST require the query parameter `token`. A missing or wrong token MUST get status 401. The server MUST NOT dial the daemon for a rejected request.
+
+For an accepted token, the server MUST dial the daemon with a 10 second limit before the websocket upgrade.
+A dial failure MUST get status 502 and MUST write `web: dial daemon: <error>`.
+The upgrade MUST use `github.com/coder/websocket` with its default origin check.
+
+The relay MUST NOT decode, re-encode, or change message bytes.
+
+- Browser to daemon: each websocket text message MUST become one line: the message bytes followed by one `\n`, in one write.
+- Daemon to browser: each `\n`-terminated line MUST become one websocket text message without the `\n`. A line longer than the 64 KiB read buffer MUST be streamed as one message.
+- A browser message MUST be at most 16 MiB minus 1 byte, which is the daemon line limit without the newline.
+
+Failure behavior:
+
+- A binary message MUST close the websocket with status 1003 (`rpc message is not text`). The daemon MUST receive no bytes from it.
+- A text message that contains `\n` MUST close the websocket with status 1007 (`rpc message contains a newline`). The daemon MUST receive no bytes from it.
+- When the daemon closes, the server MUST drop an unterminated last line and close the websocket with status 1001.
+- When the browser closes, the server MUST close the daemon connection.
+- Any other relay failure MUST close the websocket with status 1011 and MUST write `web: rpc relay: <error>`.
+
+## Server limits and shutdown
+
+The HTTP server MUST set a 10 second header read timeout, a 30 second read timeout, a 60 second write timeout, and a 120 second idle timeout. A websocket connection is not subject to these limits after the upgrade.
+
+When the context ends, the server MUST stop accepting, end every live relay, close every daemon connection, and only then return.
+A clean shutdown MUST return `nil`. Shutdown waits at most 5 seconds for open page requests.
+
+## Browser client
+
+The client in `web/` reads the token from the URL fragment and opens `/rpc`. It speaks the Codex v2 protocol, and `web/src/lib/validation.ts` checks every payload against the shapes in `internal/rpc/testdata/codex-schema`.
+
+### Layout
+
+- Above 52rem the page has two columns, the thread list and the workspace. The workspace holds the status bar, the thread heading, the transcript, and the composer. The transcript scrolls inside its own column.
+- At 52rem or narrower the page stacks the parts and the document scrolls. The thread list keeps a maximum height of 18rem.
+- At 320px nothing may clip or scroll sideways.
+- The transcript follows new output only while the reader is within 32px of its end. It follows the transcript at wide widths and the window at narrow widths. Opening a thread follows its end.
+
+### Status bar
+
+The status bar shows the connection state as text. The turn state follows it as text: `Working`, `Turn completed`, `Turn interrupted`, or `Turn failed`.
+
+It also shows model, approval, sandbox, runner, and advisor. The advisor entry comes from `dalgona/advisor/status`. The client loads it when a thread opens or starts, and again after each `dalgona/advisor/note` for the open thread. It shows one of:
+
+- One advisor: its status (`idle`, `reviewing`, `halted`, or `off`) and its note count.
+- Several advisors: `<n> advisors · <k> reviewing`.
+- `off` when the server answers `-32001`.
+- `unavailable` for any other failure.
+
+No advisor failure opens the error banner.
+
+### Transcript
+
+- Item statuses read `Running`, `Done`, `Failed`, or `Declined`.
+- Unknown item kinds show their type in plain words, such as `Web search`.
+- A `dynamicToolCall` item with tool `advisor` shows as a note card: `advisor · <severity>: <note>`. The note is the text of `contentItems`. The severity is always text. The card's inline-start border marks the severity as a second cue.
+- Other dynamic tools show their `contentItems` text as output.
+- `turn/plan/updated` shows the latest plan of the current turn as a checklist. Each step has a text status: `Done`, `In progress`, or `Pending`. The step in progress carries `aria-current="step"`. A new turn clears the plan.
+- The streaming cursor and "Reasoning in progress" show only while the turn runs.
+- A failed turn ends with `The turn failed: <message>. Send your message again to retry, or start a new thread.`
+- A turn that is retrying after an error shows `Retrying after an error: <message>`.
+- An interrupted turn shows `Turn interrupted. Send a message to continue.`
+
+### Empty states and errors
+
+- With no open thread the transcript says `Pick a thread or start a new one`. When connected, it adds that earlier threads are in the list. When not connected, it says to connect to dalgona.
+- With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a name shows its preview once.
+- A failed connection reads `Unable to connect to dalgona: <detail>. Check that dalgona web is still running, then select Reconnect.`
+- Other request failures read `<action>: <detail>. Reconnect and try again.`
+- In the approval dialog, Decline uses the quiet style. The danger hue marks only Interrupt.

@@ -1,0 +1,253 @@
+import { describe, expect, test } from "vitest";
+import { advisorLabel, itemStatusLabel, kindLabel } from "./labels";
+import {
+	emptyTranscript,
+	reduceNotification,
+	transcriptForThread,
+} from "./reducer";
+import type { AppNotification, ThreadDetail, TranscriptItem } from "./types";
+
+function agent(id: string, text: string, complete: boolean): TranscriptItem {
+	return { id, kind: "agentMessage", text, complete };
+}
+
+function command(id: string, output: string): TranscriptItem {
+	return {
+		id,
+		kind: "commandExecution",
+		command: "ls",
+		output,
+		status: "inProgress",
+		exitCode: null,
+	};
+}
+
+function thread(turns: ThreadDetail["turns"]): ThreadDetail {
+	return {
+		summary: {
+			id: "thread-1",
+			title: "notes",
+			preview: "notes",
+			status: "idle",
+			updatedAt: 10,
+			model: "gpt",
+			cwd: "/work",
+		},
+		turns,
+	};
+}
+
+describe("transcript reducer", () => {
+	test("concatenates deltas onto the matching item without mutating the previous list", () => {
+		const start = emptyTranscript("thread-1");
+		const seeded = reduceNotification(start, {
+			type: "itemStarted",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			item: agent("item-1", "hel", false),
+		});
+		const before = seeded.items;
+		const next = reduceNotification(seeded, {
+			type: "delta",
+			channel: "agent",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			itemId: "item-1",
+			delta: "lo",
+		});
+		expect(before).toEqual([agent("item-1", "hel", false)]);
+		expect(next.items).toEqual([agent("item-1", "hello", false)]);
+		expect(next.items).not.toBe(before);
+	});
+
+	test("replaces the whole item on completion instead of appending a second copy", () => {
+		const seeded = reduceNotification(emptyTranscript("thread-1"), {
+			type: "itemStarted",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			item: agent("item-1", "partial", false),
+		});
+		const done = agent("item-1", "final answer", true);
+		const next = reduceNotification(seeded, {
+			type: "itemCompleted",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			item: done,
+		});
+		expect(next.items).toEqual([done]);
+	});
+
+	test("tracks turn status from started through completed and keeps the turn error", () => {
+		const started = reduceNotification(emptyTranscript("thread-1"), {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn: { id: "turn-1", status: "inProgress", items: [], error: null },
+		});
+		expect(started.turnId).toBe("turn-1");
+		expect(started.turnStatus).toBe("inProgress");
+		const completed = reduceNotification(started, {
+			type: "turnCompleted",
+			threadId: "thread-1",
+			turn: { id: "turn-1", status: "failed", items: [], error: "boom" },
+		});
+		expect(completed.turnStatus).toBe("failed");
+		expect(completed.error).toBe("boom");
+		expect(started.turnStatus).toBe("inProgress");
+	});
+
+	test("hydrates turns in order and keeps the last turn status", () => {
+		const state = transcriptForThread(
+			thread([
+				{
+					id: "turn-1",
+					status: "completed",
+					items: [agent("a", "one", true), command("c", "out")],
+					error: null,
+				},
+				{
+					id: "turn-2",
+					status: "interrupted",
+					items: [agent("b", "two", true)],
+					error: "stopped",
+				},
+			]),
+		);
+		expect(state.items.map((item) => item.id)).toEqual(["a", "c", "b"]);
+		expect(state.turnId).toBe("turn-2");
+		expect(state.turnStatus).toBe("interrupted");
+		expect(state.error).toBe("stopped");
+	});
+
+	test("drops notifications for a different thread", () => {
+		const state = emptyTranscript("thread-1");
+		const foreign: AppNotification = {
+			type: "delta",
+			channel: "agent",
+			threadId: "thread-2",
+			turnId: "turn-9",
+			itemId: "item-9",
+			delta: "nope",
+		};
+		expect(reduceNotification(state, foreign)).toBe(state);
+	});
+
+	test("creates an in-progress item when a delta arrives before item/started", () => {
+		const next = reduceNotification(emptyTranscript("thread-1"), {
+			type: "delta",
+			channel: "command",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			itemId: "cmd-1",
+			delta: "hi",
+		});
+		expect(next.items).toEqual([
+			{
+				id: "cmd-1",
+				kind: "commandExecution",
+				command: "",
+				output: "hi",
+				status: "inProgress",
+				exitCode: null,
+			},
+		]);
+		const grown = reduceNotification(next, {
+			type: "delta",
+			channel: "command",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			itemId: "cmd-1",
+			delta: "!",
+		});
+		expect(grown.items[0]).toMatchObject({ output: "hi!" });
+		const started = reduceNotification(grown, {
+			type: "itemStarted",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			item: {
+				id: "cmd-1",
+				kind: "commandExecution",
+				command: "pwd",
+				output: "",
+				status: "inProgress",
+				exitCode: null,
+			},
+		});
+		expect(started.items).toEqual([
+			{
+				id: "cmd-1",
+				kind: "commandExecution",
+				command: "pwd",
+				output: "hi!",
+				status: "inProgress",
+				exitCode: null,
+			},
+		]);
+	});
+
+	test("keeps the latest plan for the current turn and clears it on a new turn", () => {
+		const steps = [{ step: "fix", status: "inProgress" as const }];
+		const planned = reduceNotification(emptyTranscript("thread-1"), {
+			type: "plan",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			explanation: null,
+			steps,
+		});
+		expect(planned.plan).toEqual({
+			turnId: "turn-1",
+			explanation: null,
+			steps,
+		});
+		const otherThread = reduceNotification(planned, {
+			type: "plan",
+			threadId: "thread-2",
+			turnId: "turn-9",
+			explanation: null,
+			steps: [],
+		});
+		expect(otherThread).toBe(planned);
+		const turn = { status: "inProgress" as const, items: [], error: null };
+		const sameTurn = reduceNotification(planned, {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn: { ...turn, id: "turn-1" },
+		});
+		expect(sameTurn.plan).toEqual(planned.plan);
+		const nextTurn = reduceNotification(planned, {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn: { ...turn, id: "turn-2" },
+		});
+		expect(nextTurn.plan).toBeNull();
+	});
+});
+
+describe("labels", () => {
+	test("summarizes advisor state as text", () => {
+		expect(advisorLabel({ kind: "unknown" })).toBeNull();
+		expect(advisorLabel({ kind: "off" })).toBe("off");
+		const advisor = { name: "advisor", model: "gpt", notes: 1 };
+		expect(
+			advisorLabel({
+				kind: "loaded",
+				advisors: [{ ...advisor, status: "reviewing" }],
+			}),
+		).toBe("reviewing · 1 note");
+		expect(
+			advisorLabel({
+				kind: "loaded",
+				advisors: [
+					{ ...advisor, status: "reviewing" },
+					{ ...advisor, name: "b", status: "disabled", notes: 0 },
+				],
+			}),
+		).toBe("2 advisors · 1 reviewing");
+	});
+
+	test("names statuses and item kinds in plain words", () => {
+		expect(itemStatusLabel("inProgress")).toBe("Running");
+		expect(itemStatusLabel("custom")).toBe("custom");
+		expect(kindLabel("webSearch")).toBe("Web search");
+		expect(kindLabel("imageGeneration")).toBe("Image generation");
+	});
+});

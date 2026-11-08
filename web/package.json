@@ -1,0 +1,31 @@
+{
+	"name": "dalgona-web",
+	"private": true,
+	"version": "0.0.0",
+	"type": "module",
+	"packageManager": "pnpm@12.18.0",
+	"imports": {
+		"#lib/*": "./src/lib/*"
+	},
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"test": "vitest run",
+		"check": "svelte-check",
+		"lint": "biome ci"
+	},
+	"dependencies": {
+		"svelte": "5.57.3"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.6.6",
+		"@sveltejs/adapter-static": "4.0.1",
+		"@sveltejs/kit": "3.1.1",
+		"@sveltejs/vite-plugin-svelte": "7.3.1",
+		"svelte-check": "4.7.8",
+		"typescript": "6.0.3",
+		"vite": "8.3.6",
+		"vitest": "5.1.0"
+	}
+}
