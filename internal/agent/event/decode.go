@@ -10,7 +10,7 @@ func decodeSessionEvent(kind string, r *objectReader) (Event, error) {
 	case TypeSessionCreated:
 		return SessionCreated{
 			ID: r.str("id"), Parent: r.str("parent"), ForkOf: r.str("fork_of"), Cwd: r.str("cwd"),
-			Model: r.str("model"), Approval: r.str("approval"), Sandbox: r.str("sandbox"),
+			Model: r.str("model"), Approval: r.str("approval"), Sandbox: r.str("sandbox"), Effort: r.str("effort"),
 			Runner: r.str("runner"), InstructionsBlob: r.blob("instructions_blob"), Advisor: r.str("advisor"),
 			CreatedAt: r.timestamp("created_at"),
 		}, nil

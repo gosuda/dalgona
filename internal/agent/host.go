@@ -312,6 +312,7 @@ func (h *Host) sessionCreated(spec ThreadSpec, id string) (event.SessionCreated,
 		Model:    cmp.Or(spec.Model, cfg.Model),
 		Approval: string(cmp.Or(spec.Approval, cfg.Approval, config.ApprovalAuto)),
 		Sandbox:  string(cmp.Or(spec.Sandbox, cfg.Sandbox, config.SandboxWorkspaceWrite)),
+		Effort:   string(spec.Effort),
 		Runner:   cmp.Or(spec.Runner, cfg.Runner, "local"),
 	}
 	if created.Model == "" {

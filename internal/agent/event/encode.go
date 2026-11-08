@@ -54,6 +54,7 @@ func sessionCreatedMembers(e SessionCreated) []member {
 	}
 	fields = optionalString(fields, "parent", e.Parent)
 	fields = optionalString(fields, "fork_of", e.ForkOf)
+	fields = optionalString(fields, "effort", e.Effort)
 	fields = optionalString(fields, "advisor", e.Advisor)
 	if !e.CreatedAt.IsZero() {
 		fields = append(fields, field("created_at", stringValue(e.CreatedAt.UTC().Format(time.RFC3339Nano))))

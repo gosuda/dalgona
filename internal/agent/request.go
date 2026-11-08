@@ -109,7 +109,7 @@ func (w *worker) request(ctx context.Context, v view, messages []model.Message) 
 }
 
 func (w *worker) effort(v view) string {
-	configured := string(w.t.host.cfg.Config.Reasoning)
+	configured := cmp.Or(string(w.settings.Effort), string(w.t.host.cfg.Config.Reasoning))
 	if configured == string(config.ReasoningDefault) {
 		configured = ""
 	}

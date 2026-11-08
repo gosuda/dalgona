@@ -116,6 +116,17 @@ func effortName(reasoning config.Reasoning) string {
 	return string(reasoning)
 }
 
+func effortMode(value string) (config.Reasoning, error) {
+	switch config.Reasoning(value) {
+	case "":
+		return "", nil
+	case config.ReasoningLow, config.ReasoningMedium, config.ReasoningHigh, config.ReasoningXHigh, config.ReasoningMax:
+		return config.Reasoning(value), nil
+	case config.ReasoningDefault:
+	}
+	return "", invalidParams("unsupported model_reasoning_effort " + value)
+}
+
 func threadStatus(thread *agent.Thread) ThreadStatus {
 	status, err := thread.Status()
 	if err != nil {
@@ -190,8 +201,9 @@ func (s *server) session(thread *agent.Thread, snap snapshot) (ThreadStartRespon
 	return ThreadStartResponse{
 		ApprovalPolicy: policyName(string(current.Approval)), ApprovalsReviewer: "user",
 		Cwd: snap.created.Cwd, Model: current.Model, ModelProvider: provider(current.Model),
-		Sandbox: sandboxPolicy(string(current.Sandbox)), ReasoningEffort: effortName(s.currentConfig().Reasoning),
-		Thread: s.threadObject(info, threadStatus(thread), snap.turns),
+		Sandbox:         sandboxPolicy(string(current.Sandbox)),
+		ReasoningEffort: cmp.Or(effortName(current.Effort), effortName(s.currentConfig().Reasoning)),
+		Thread:          s.threadObject(info, threadStatus(thread), snap.turns),
 	}, nil
 }
 
@@ -265,6 +277,12 @@ func (s *server) spec(p ThreadStartParams) (agent.ThreadSpec, error) {
 	if err != nil {
 		return agent.ThreadSpec{}, err
 	}
+	var effort config.Reasoning
+	if p.Config != nil {
+		if effort, err = effortMode(p.Config.ModelReasoningEffort); err != nil {
+			return agent.ThreadSpec{}, err
+		}
+	}
 	cwd := cmp.Or(p.Cwd, s.host.Config().Cwd)
 	if cwd != "" {
 		if cwd, err = filepath.Abs(cwd); err != nil {
@@ -275,6 +293,7 @@ func (s *server) spec(p ThreadStartParams) (agent.ThreadSpec, error) {
 	return agent.ThreadSpec{
 		Cwd: cwd, Model: qualifiedModel(p.Model, p.ModelProvider, current.Model),
 		Approval: cmp.Or(approval, current.Approval), Sandbox: cmp.Or(sandbox, current.Sandbox),
+		Effort: effort,
 	}, nil
 }
 
@@ -311,6 +330,9 @@ func (p *ThreadStartParams) member(name string, d *jsontext.Decoder) error {
 		p.ApprovalPolicy = v
 		return err
 	}
+	if name == "config" {
+		return readMembers(d, p.configMember)
+	}
 	var target *string
 	switch name {
 	case "model":
@@ -326,6 +348,18 @@ func (p *ThreadStartParams) member(name string, d *jsontext.Decoder) error {
 	}
 	v, err := readString(d)
 	*target = v
+	return err
+}
+
+func (p *ThreadStartParams) configMember(name string, d *jsontext.Decoder) error {
+	if name != "model_reasoning_effort" {
+		return d.SkipValue()
+	}
+	if p.Config == nil {
+		p.Config = &ThreadStartConfig{}
+	}
+	v, err := readString(d)
+	p.Config.ModelReasoningEffort = v
 	return err
 }
 

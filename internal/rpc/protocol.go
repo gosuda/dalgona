@@ -36,11 +36,15 @@ type (
 		ID string `json:"id"`
 	}
 	ThreadStartParams struct {
-		Model          string `json:"model,omitzero"`
-		ModelProvider  string `json:"modelProvider,omitzero"`
-		ApprovalPolicy string `json:"approvalPolicy,omitzero"`
-		Sandbox        string `json:"sandbox,omitzero"`
-		Cwd            string `json:"cwd,omitzero"`
+		Model          string             `json:"model,omitzero"`
+		ModelProvider  string             `json:"modelProvider,omitzero"`
+		ApprovalPolicy string             `json:"approvalPolicy,omitzero"`
+		Sandbox        string             `json:"sandbox,omitzero"`
+		Cwd            string             `json:"cwd,omitzero"`
+		Config         *ThreadStartConfig `json:"config,omitzero"`
+	}
+	ThreadStartConfig struct {
+		ModelReasoningEffort string `json:"model_reasoning_effort,omitzero"`
 	}
 	ThreadResumeParams struct {
 		ThreadID string `json:"threadId"`

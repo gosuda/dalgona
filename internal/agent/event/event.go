@@ -115,6 +115,7 @@ type SessionCreated struct {
 	Model            string
 	Approval         string
 	Sandbox          string
+	Effort           string
 	Runner           string
 	InstructionsBlob *BlobRef
 	Advisor          string
@@ -133,6 +134,11 @@ func (e SessionCreated) Validate() error {
 	}
 	if err := oneOf("sandbox", e.Sandbox, "workspace-write", "off"); err != nil {
 		return err
+	}
+	if e.Effort != "" {
+		if err := oneOf("effort", e.Effort, "low", "medium", "high", "xhigh", "max"); err != nil {
+			return err
+		}
 	}
 	if e.Advisor != "" && e.Parent == "" {
 		return errors.New("advisor session needs a parent")

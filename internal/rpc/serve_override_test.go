@@ -19,8 +19,9 @@ import (
 )
 
 type modelRequest struct {
-	model string
-	tool  string
+	model  string
+	tool   string
+	effort string
 }
 
 type requestLog struct {
@@ -36,7 +37,10 @@ func (l *requestLog) seen() []modelRequest {
 
 func (l *requestLog) add(body []byte) error {
 	var request struct {
-		Model string `json:"model"`
+		Model     string `json:"model"`
+		Reasoning struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
 		Tools []struct {
 			Name string `json:"name"`
 		} `json:"tools"`
@@ -44,7 +48,7 @@ func (l *requestLog) add(body []byte) error {
 	if err := json.Unmarshal(body, &request); err != nil {
 		return err
 	}
-	seen := modelRequest{model: request.Model}
+	seen := modelRequest{model: request.Model, effort: request.Reasoning.Effort}
 	for _, item := range request.Tools {
 		if item.Name == "patch" || item.Name == "apply_patch" {
 			seen.tool = item.Name
@@ -159,12 +163,12 @@ func TestTurnStartOverridesFollowActivePath(t *testing.T) {
 	expectSession(t, recovered, threadID, ThreadStartResponse{Model: "openai/gpt-x", ApprovalPolicy: "never", Sandbox: SandboxPolicy{Type: "dangerFullAccess"}})
 
 	want := []modelRequest{
-		{"gpt-x", "patch"},
-		{"gpt-y", "apply_patch"},
-		{"gpt-y", "apply_patch"},
-		{"gpt-y", "apply_patch"},
-		{"gpt-y", "apply_patch"},
-		{"gpt-x", "patch"},
+		{model: "gpt-x", tool: "patch"},
+		{model: "gpt-y", tool: "apply_patch"},
+		{model: "gpt-y", tool: "apply_patch"},
+		{model: "gpt-y", tool: "apply_patch"},
+		{model: "gpt-y", tool: "apply_patch"},
+		{model: "gpt-x", tool: "patch"},
 	}
 	expect(t, slices.Equal(requests.seen(), want), "model requests", requests.seen())
 }

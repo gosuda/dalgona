@@ -30,7 +30,7 @@ type worker struct {
 }
 
 func pathSettings(created event.SessionCreated, records []event.Seqd) Settings {
-	out := Settings{Model: created.Model, Approval: config.Approval(created.Approval), Sandbox: config.SandboxMode(created.Sandbox)}
+	out := Settings{Model: created.Model, Approval: config.Approval(created.Approval), Sandbox: config.SandboxMode(created.Sandbox), Effort: config.Reasoning(created.Effort)}
 	for _, item := range event.ActivePath(records) {
 		if message, ok := item.Event.(event.UserMessage); ok {
 			out.Model = cmp.Or(message.Model, out.Model)

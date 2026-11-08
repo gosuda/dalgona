@@ -18,7 +18,7 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 
 |Type|Required fields|Optional fields and constraints|
 |---|---|---|
-|`session.created`|`id`, `cwd`, `model`, `approval`, `sandbox`, `runner`|`parent`, `fork_of`, `instructions_blob`, `advisor`, `created_at`; approval is `auto`, `yolo`, or `ask`; sandbox is `workspace-write` or `off`; `advisor` names an advisor child session and MUST come with `parent`; `created_at` is RFC 3339 UTC|
+|`session.created`|`id`, `cwd`, `model`, `approval`, `sandbox`, `runner`|`parent`, `fork_of`, `effort`, `instructions_blob`, `advisor`, `created_at`; approval is `auto`, `yolo`, or `ask`; sandbox is `workspace-write` or `off`; `effort` is `low`, `medium`, `high`, `xhigh`, or `max` and is the thread default for turns without their own effort; `advisor` names an advisor child session and MUST come with `parent`; `created_at` is RFC 3339 UTC|
 |`runner.bound`|`runner`, `service`, `box_id`, `baseline`|None|
 |`turn.started`|`turn_id`|None|
 |`turn.completed`|`turn_id`, `status`|`error`; status is `completed`, `interrupted`, or `failed`|

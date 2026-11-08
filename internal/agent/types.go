@@ -86,6 +86,7 @@ type ThreadSpec struct {
 	Model    string
 	Approval config.Approval
 	Sandbox  config.SandboxMode
+	Effort   config.Reasoning
 	Runner   string
 	Parent   string
 	Advisor  string
@@ -114,6 +115,7 @@ type Settings struct {
 	Model    string
 	Approval config.Approval
 	Sandbox  config.SandboxMode
+	Effort   config.Reasoning
 }
 
 type Reply string
