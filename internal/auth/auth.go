@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 var ErrUnknownProvider = errors.New("auth: unknown provider")
@@ -61,6 +62,7 @@ type (
 		dir          string
 		data         map[string]Credential
 		raw          map[string]jsontext.Value
+		authInfo     os.FileInfo
 		env          func(string) string
 		secrets      map[string]string
 		patterns     []pattern
@@ -92,23 +94,90 @@ func NewWithPatterns(home string, patterns []string) (*Store, error) {
 	return store, nil
 }
 
+func (s *Store) authPath() string { return filepath.Join(s.dir, "auth.json") }
+
 func (s *Store) loadAuth() error {
-	raw, err := readSecure(filepath.Join(s.dir, "auth.json"))
-	if err != nil || raw == nil {
+	info, raw, err := readSecureInfo(s.authPath())
+	if err != nil {
 		return err
 	}
-	err = readObject(raw, func(provider string, value jsontext.Value) error {
-		credential, decodeErr := decodeCredential(value)
-		if decodeErr != nil {
-			return fmt.Errorf("provider %q: %w", provider, decodeErr)
-		}
-		s.data[provider] = credential
-		s.raw[provider] = value
-		return nil
-	})
+	data, rawEntries := map[string]Credential{}, map[string]jsontext.Value{}
+	if raw != nil {
+		err = readObject(raw, func(provider string, value jsontext.Value) error {
+			credential, decodeErr := decodeCredential(value)
+			if decodeErr != nil {
+				return fmt.Errorf("provider %q: %w", provider, decodeErr)
+			}
+			data[provider] = credential
+			rawEntries[provider] = value
+			return nil
+		})
+	}
 	if err != nil {
 		return fmt.Errorf("auth.json: %w", err)
 	}
+	s.data, s.raw, s.authInfo = data, rawEntries, info
+	return nil
+}
+
+func (s *Store) reloadAuthIfChanged() error {
+	info, err := os.Lstat(s.authPath())
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		info = nil
+	} else if err != nil {
+		return fmt.Errorf("inspect auth.json: %w", err)
+	}
+	if sameAuthFile(s.authInfo, info) {
+		return nil
+	}
+	return s.loadAuth()
+}
+
+func sameAuthFile(previous, current os.FileInfo) bool {
+	if previous == nil || current == nil {
+		return previous == nil && current == nil
+	}
+	return os.SameFile(previous, current) && previous.ModTime().Equal(current.ModTime()) && previous.Size() == current.Size()
+}
+
+func openAuthLock(dir string) (*os.File, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create credential directory: %w", err)
+	}
+	file, err := os.OpenFile(filepath.Join(dir, "auth.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open auth.lock: %w", err)
+	}
+	return file, nil
+}
+
+func (s *Store) updateAuth(apply func()) error {
+	unlock, err := lockAuth(s.dir)
+	if err != nil {
+		return err
+	}
+	err = s.rewriteAuth(apply)
+	if err != nil {
+		if loadErr := s.loadAuth(); loadErr != nil {
+			s.authInfo = nil
+		}
+	}
+	return errors.Join(err, unlock())
+}
+
+func (s *Store) rewriteAuth(apply func()) error {
+	if err := s.loadAuth(); err != nil {
+		return err
+	}
+	apply()
+	if err := writeSecure(s.authPath(), s.encodeAuth); err != nil {
+		return err
+	}
+	info, err := os.Lstat(s.authPath())
+	if err != nil {
+		return fmt.Errorf("inspect auth.json: %w", err)
+	}
+	s.authInfo = info
 	return nil
 }
 
@@ -214,25 +283,30 @@ func jsonString(raw jsontext.Value) (string, error) {
 }
 
 func readSecure(path string) ([]byte, error) {
+	_, raw, err := readSecureInfo(path)
+	return raw, err
+}
+
+func readSecureInfo(path string) (os.FileInfo, []byte, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("inspect %s: %w", filepath.Base(path), err)
+		return nil, nil, fmt.Errorf("inspect %s: %w", filepath.Base(path), err)
 	}
 	insecure := info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		insecure = true
 	}
 	if insecure {
-		return nil, fmt.Errorf("%s must be a regular file with mode 0600", filepath.Base(path))
+		return nil, nil, fmt.Errorf("%s must be a regular file with mode 0600", filepath.Base(path))
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", filepath.Base(path), err)
+		return nil, nil, fmt.Errorf("read %s: %w", filepath.Base(path), err)
 	}
-	return raw, nil
+	return info, raw, nil
 }
 
 func (s *Store) Token(ctx context.Context, provider string) (Credential, error) {
@@ -246,6 +320,9 @@ func (s *Store) Token(ctx context.Context, provider string) (Credential, error) 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reloadAuthIfChanged(); err != nil {
+		return Credential{}, fmt.Errorf("read %s credential: %w", provider, err)
+	}
 	credential, ok := s.data[provider]
 	if !ok {
 		return Credential{}, fmt.Errorf("%w %q", ErrUnknownProvider, provider)
@@ -273,11 +350,17 @@ func envKey(provider, custom string) string {
 }
 
 func (s *Store) SetAPIKey(provider, key string) error {
+	return s.SetCredential(provider, Credential{Type: "api_key", Key: key})
+}
+
+func (s *Store) SetCredential(provider string, c Credential) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data[provider] = Credential{Type: "api_key", Key: key}
-	delete(s.raw, provider)
-	if err := s.persistAuth(); err != nil {
+	err := s.updateAuth(func() {
+		s.data[provider] = c
+		delete(s.raw, provider)
+	})
+	if err != nil {
 		return fmt.Errorf("store %s credential: %w", provider, err)
 	}
 	return nil
@@ -286,9 +369,11 @@ func (s *Store) SetAPIKey(provider, key string) error {
 func (s *Store) Logout(provider string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.data, provider)
-	delete(s.raw, provider)
-	if err := s.persistAuth(); err != nil {
+	err := s.updateAuth(func() {
+		delete(s.data, provider)
+		delete(s.raw, provider)
+	})
+	if err != nil {
 		return fmt.Errorf("remove %s credential: %w", provider, err)
 	}
 	return nil
@@ -302,6 +387,7 @@ type ProviderEntry struct {
 func (s *Store) Entries() []ProviderEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reloadForMask()
 	entries := make([]ProviderEntry, 0, len(s.data))
 	for _, id := range sortedCredentialIDs(s.data) {
 		entries = append(entries, ProviderEntry{ID: id, Credential: s.data[id]})
@@ -311,10 +397,6 @@ func (s *Store) Entries() []ProviderEntry {
 
 func sortedCredentialIDs(credentials map[string]Credential) []string {
 	return slices.Sorted(maps.Keys(credentials))
-}
-
-func (s *Store) persistAuth() error {
-	return writeSecure(filepath.Join(s.dir, "auth.json"), s.encodeAuth)
 }
 
 func (s *Store) encodeAuth(encoder *jsontext.Encoder) error {

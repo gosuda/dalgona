@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/json/jsontext"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -34,11 +35,21 @@ func compilePatterns(patterns []string) ([]pattern, error) {
 	return compiled, nil
 }
 
-const maskPersistenceFailure = "secret masking failed: pattern state was not persisted"
+const (
+	maskPersistenceFailure = "secret masking failed: pattern state was not persisted"
+	maskReloadFailure      = "secret masking failed: auth.json could not be reread"
+)
 
 func (s *Store) Mask(text string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reloadAuthIfChanged(); err != nil {
+		s.maskErr = fmt.Errorf("reload credentials: %w", err)
+		return maskReloadFailure
+	}
+	if !s.secretsDirty {
+		s.maskErr = nil
+	}
 	replacements := s.credentialReplacements()
 	patternReplacements, changed := s.patternReplacements(text)
 	replacements = append(replacements, patternReplacements...)
@@ -57,6 +68,7 @@ func (s *Store) Mask(text string) string {
 func (s *Store) Unmask(text string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reloadForMask()
 	replacements := invertReplacements(s.credentialReplacements())
 	for placeholder, secret := range s.secrets {
 		replacements = append(replacements, replacement{from: placeholder, to: secret})
@@ -68,6 +80,12 @@ func (s *Store) MaskError() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.maskErr
+}
+
+func (s *Store) reloadForMask() {
+	if err := s.reloadAuthIfChanged(); err != nil {
+		slog.Warn("auth: keeping cached credentials", "error", err)
+	}
 }
 
 func invertReplacements(items []replacement) []replacement {

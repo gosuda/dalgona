@@ -157,6 +157,123 @@ func TestStore_SetAPIKeyPreservesUnknownEntries(t *testing.T) {
 	}
 }
 
+func TestStore_SetCredentialRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CHATGPT_API_KEY", "")
+	writeAuthFile(t, home, "auth.json", `{"chatgpt":{"type":"oauth","access":"stale-access","extra":1}}`, 0o600)
+	store, err := auth.Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := auth.Credential{Type: "oauth", Access: "fresh-access", Refresh: "fresh-refresh", Expires: "2026-11-08T10:00:00Z", Account: "acct-1"}
+	if setErr := store.SetCredential("chatgpt", want); setErr != nil {
+		t.Fatal(setErr)
+	}
+	requirePrivateMode(t, filepath.Join(home, "auth.json"))
+	if raw := readAuthJSON(t, home); strings.Contains(raw, "stale-access") || strings.Contains(raw, "extra") {
+		t.Fatalf("stale raw entry survived: %s", raw)
+	}
+	reloaded, err := auth.Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reloaded.Token(t.Context(), "chatgpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("credential = %+v, want %+v", got, want)
+	}
+}
+
+func loadStore(t *testing.T, home string) *auth.Store {
+	t.Helper()
+	store, err := auth.Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func TestStore_TwoStoresKeepEachOthersCredentials(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("CHATGPT_API_KEY", "")
+	writeAuthFile(t, home, "auth.json", `{"chatgpt":{"type":"oauth","access":"old-access-token","refresh":"old-refresh-token"}}`, 0o600)
+	storeA, storeB := loadStore(t, home), loadStore(t, home)
+	if err := storeA.SetAPIKey("openai", "key-from-store-a"); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := auth.Credential{Type: "oauth", Access: "new-access-token", Refresh: "new-refresh-token"}
+	if err := storeB.SetCredential("chatgpt", refreshed); err != nil {
+		t.Fatal(err)
+	}
+	raw := readAuthJSON(t, home)
+	if !strings.Contains(raw, "key-from-store-a") || !strings.Contains(raw, "new-refresh-token") || strings.Contains(raw, "old-refresh-token") {
+		t.Fatalf("auth.json lost a committed credential or kept the rotated token: %s", raw)
+	}
+	if masked := storeB.Mask("sent key-from-store-a"); strings.Contains(masked, "key-from-store-a") {
+		t.Fatalf("store B did not mask store A's key: %q", masked)
+	}
+	got, err := storeA.Token(t.Context(), "chatgpt")
+	if err != nil || got != refreshed {
+		t.Fatalf("store A credential = %+v, %v; want %+v", got, err, refreshed)
+	}
+}
+
+func TestStore_MaskFailsClosedWhenAuthCannotBeReread(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not make auth.json insecure on Windows")
+	}
+	home := t.TempDir()
+	store := loadStore(t, home)
+	if err := store.SetAPIKey("openai", "secret-before-change"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(home, "auth.json")); err != nil {
+		t.Fatal(err)
+	}
+	writeAuthFile(t, home, "auth.json", `{"openai":{"type":"api_key","key":"secret-after-change"}}`, 0o644)
+	requireMask(t, store, "secret-after-change", "secret masking failed: auth.json could not be reread")
+	if store.MaskError() == nil {
+		t.Fatal("reload failure was not recorded")
+	}
+	if err := os.Chmod(filepath.Join(home, "auth.json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Mask("secret-after-change"); strings.Contains(got, "secret-after-change") || store.MaskError() != nil {
+		t.Fatalf("mask after repair = %q, %v", got, store.MaskError())
+	}
+}
+
+func TestStore_ConcurrentWritersKeepEveryProvider(t *testing.T) {
+	home := t.TempDir()
+	const writers = 8
+	stores := make([]*auth.Store, writers)
+	for i := range stores {
+		store, err := auth.Load(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stores[i] = store
+	}
+	errs := make(chan error, writers)
+	for i, store := range stores {
+		go func() { errs <- store.SetAPIKey(fmt.Sprintf("provider%d", i), fmt.Sprintf("secret-value-%d", i)) }()
+	}
+	for range writers {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw := readAuthJSON(t, home)
+	for i := range writers {
+		if want := fmt.Sprintf("secret-value-%d", i); !strings.Contains(raw, want) {
+			t.Fatalf("auth.json lost %q: %s", want, raw)
+		}
+	}
+}
+
 func TestStore_MaskPlaceholders(t *testing.T) {
 	home := t.TempDir()
 	writeAuthFile(t, home, "auth.json", `{"openai":{"type":"api_key","key":"stored-secret"}}`, 0o600)
