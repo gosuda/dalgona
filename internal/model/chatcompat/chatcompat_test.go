@@ -33,11 +33,10 @@ func TestStreamFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(fixture)
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	summary := collectStream(t, provider, model.Request{Model: "test-model"})
 	if summary.failure != nil {
@@ -65,12 +64,11 @@ func assertFixtureCalls(t *testing.T, calls []model.ToolCall) {
 func TestRequestBody(t *testing.T) {
 	t.Parallel()
 	var body []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(successFixture())
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	request := model.Request{
 		Model:  "test-model",
@@ -92,12 +90,11 @@ func TestRequestBody(t *testing.T) {
 func TestFreeformToolRoundTrip(t *testing.T) {
 	t.Parallel()
 	var body []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"p\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{\\\"input\\\":\\\"patch\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"))
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	request := model.Request{
 		Model:    "test-model",
@@ -125,11 +122,10 @@ func TestUsageFallback(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = w.Write([]byte(test.body))
-			}))
-			t.Cleanup(server.Close)
+			})
 			provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 			summary := collectStream(t, provider, model.Request{Model: "test-model"})
 			if summary.failure != nil || summary.usage != test.want {
@@ -142,11 +138,10 @@ func TestUsageFallback(t *testing.T) {
 func TestUsageCachePrecedence(t *testing.T) {
 	t.Parallel()
 	body := "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":4,\"cache_write_tokens\":1},\"cached_tokens\":9}}\n\n"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(body))
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	summary := collectStream(t, provider, model.Request{Model: "test-model"})
 	want := model.Usage{Input: 15, Output: 7, CacheRead: 4, CacheWrite: 1}
@@ -157,11 +152,10 @@ func TestUsageCachePrecedence(t *testing.T) {
 
 func TestReasoningPrecedenceSkipsNonStrings(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"\",\"reasoning\":{\"thinking\":\"nested\"},\"reasoning_text\":\"fallback\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	summary := collectStream(t, provider, model.Request{Model: "test-model"})
 	if summary.failure != nil || summary.reasoning != "fallback" {
@@ -171,11 +165,10 @@ func TestReasoningPrecedenceSkipsNonStrings(t *testing.T) {
 
 func TestRawJSONToolArguments(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"r\",\"function\":{\"name\":\"read\",\"arguments\":{\"path\":\"a\", \"limit\":2}}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"))
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	summary := collectStream(t, provider, model.Request{Model: "test-model"})
 	if summary.failure != nil || len(summary.calls) != 1 || string(summary.calls[0].Args) != `{"path":"a", "limit":2}` {
@@ -189,8 +182,7 @@ func TestModels(t *testing.T) {
 	mux.HandleFunc("GET /models", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"large","context_length":200000,"top_provider":{"context_length":100000,"max_completion_tokens":8192}},{"id":"routed","context_length":null,"top_provider":{"context_length":32000,"max_completion_tokens":null}},{"id":"configured"},{"id":"basic"}]}`))
 	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
+	server := newProviderOnlyServer(t, http.MethodGet, "/models", mux)
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey, ContextWindows: map[string]int{"configured": 64000}})
 	models, err := provider.Models(t.Context())
 	if err != nil {
@@ -209,11 +201,10 @@ func TestModels(t *testing.T) {
 
 func TestMalformedEventRetainsBody(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":7}\n\n"))
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry()})
 	summary := collectStream(t, provider, model.Request{Model: "test-model"})
 	if summary.failure == nil || string(summary.failure.Body) != `{"choices":7}` {
@@ -221,23 +212,26 @@ func TestMalformedEventRetainsBody(t *testing.T) {
 	}
 }
 
+type retryScenario struct {
+	name         string
+	handler      http.HandlerFunc
+	startTimeout time.Duration
+	wantRetries  int
+	wantError    bool
+}
+
 func TestRetryContract(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name        string
-		handler     http.HandlerFunc
-		wantRetries int
-		wantError   bool
-	}{
+	scenarios := []retryScenario{
 		{name: "two rate limits then success", handler: rateLimitHandler(), wantRetries: 2},
 		{name: "in-band rate limit", handler: inBandRateLimitHandler(), wantRetries: 1},
 		{name: "bad request", handler: badRequestHandler, wantError: true},
 		{name: "tool call then drop", handler: toolDropHandler, wantError: true},
-		{name: "headers then silence", handler: silentHandler, wantRetries: 3, wantError: true},
+		{name: "headers then silence", handler: silentHandler, startTimeout: 100 * time.Millisecond, wantRetries: 3, wantError: true},
 	}
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			runRetryScenario(t, test.handler, test.wantRetries, test.wantError)
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			runRetryScenario(t, scenario)
 		})
 	}
 }
@@ -285,26 +279,44 @@ func silentHandler(w http.ResponseWriter, r *http.Request) {
 	<-r.Context().Done()
 }
 
-func runRetryScenario(t *testing.T, handler http.HandlerFunc, wantRetries int, wantError bool) {
+func runRetryScenario(t *testing.T, scenario retryScenario) {
 	t.Helper()
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry()})
+	server := newStreamServer(t, scenario.handler)
+	retry := fastRetry()
+	retry.StartTimeout = scenario.startTimeout
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: retry})
 	var retries int
 	provider.cfg.Retry.OnRetry = func(int, model.Verdict, int, time.Duration) { retries++ }
 	summary := collectStream(t, provider, model.Request{Model: "test-model"})
-	if retries != wantRetries || (summary.failure != nil) != wantError {
-		t.Fatalf("retries = %d, failure = %+v; want %d, error %v", retries, summary.failure, wantRetries, wantError)
+	if retries != scenario.wantRetries || (summary.failure != nil) != scenario.wantError {
+		t.Fatalf("retries = %d, failure = %+v; want %d, error %v", retries, summary.failure, scenario.wantRetries, scenario.wantError)
 	}
 }
 
 func testKey(context.Context) (string, error) { return "test", nil }
 
+func newStreamServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	return newProviderOnlyServer(t, http.MethodPost, "/chat/completions", handler)
+}
+
+func newProviderOnlyServer(t *testing.T, method, path string, handler http.Handler) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method || r.URL.Path != path || r.Header.Get("Authorization") != "Bearer test" {
+			http.NotFound(w, r)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 func fastRetry() model.RetryOptions {
 	return model.RetryOptions{
-		StartTimeout: 100 * time.Millisecond,
-		Sleep:        func(context.Context, time.Duration) error { return nil },
-		Random:       func() float64 { return 0.5 },
+		Sleep:  func(context.Context, time.Duration) error { return nil },
+		Random: func() float64 { return 0.5 },
 	}
 }
 

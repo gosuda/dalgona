@@ -34,11 +34,10 @@ func TestStreamFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(fixture)
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	summary := collectStream(t, provider, model.Request{Model: "gemini-test"})
 	if summary.failure != nil {
@@ -67,11 +66,10 @@ func assertFixtureUsage(t *testing.T, summary streamSummary) {
 
 func TestStreamArrayData(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: [{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}]\n\n"))
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	summary := collectStream(t, provider, model.Request{Model: "gemini-test"})
 	if summary.failure != nil || summary.text != "hello" || summary.stop != "stop" {
@@ -82,12 +80,11 @@ func TestStreamArrayData(t *testing.T) {
 func TestRequestBody(t *testing.T) {
 	t.Parallel()
 	var body []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(successFixture())
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	request := model.Request{
 		Model:  "gemini-test",
@@ -109,12 +106,11 @@ func TestRequestBody(t *testing.T) {
 func TestFreeformToolRoundTrip(t *testing.T) {
 	t.Parallel()
 	var body []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"id\":\"p\",\"name\":\"apply_patch\",\"args\":{\"input\":\"patch\"}}}]},\"finishReason\":\"STOP\"}]}\n\n"))
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	request := model.Request{
 		Model:    "gemini-test",
@@ -146,11 +142,10 @@ func TestSchemaConstRewrite(t *testing.T) {
 
 func TestPromptBlockFails(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n"))
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry()})
 	var retries int
 	provider.cfg.Retry.OnRetry = func(int, model.Verdict, int, time.Duration) { retries++ }
@@ -162,11 +157,10 @@ func TestPromptBlockFails(t *testing.T) {
 
 func TestSecondCandidateIgnored(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"first\"}]},\"finishReason\":\"STOP\"},{\"content\":{\"parts\":[{\"text\":\"second\"}]},\"finishReason\":\"SAFETY\"}]}\n\n"))
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	summary := collectStream(t, provider, model.Request{Model: "gemini-test"})
 	if summary.failure != nil || summary.text != "first" || summary.stop != "stop" {
@@ -184,8 +178,7 @@ func TestModels(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"models":[{"name":"models/large","inputTokenLimit":1000000,"outputTokenLimit":65536,"supportedGenerationMethods":["generateContent"]},{"name":"models/embed","supportedGenerationMethods":["embedContent"]}],"nextPageToken":"next"}`))
 	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
+	server := newProviderOnlyServer(t, http.MethodGet, "/v1beta/models", mux)
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey, ContextWindows: map[string]int{"configured": 64000}})
 	models, err := provider.Models(t.Context())
 	if err != nil {
@@ -202,11 +195,10 @@ func TestModels(t *testing.T) {
 
 func TestMalformedEventRetainsBody(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"candidates\":7}\n\n"))
-	}))
-	t.Cleanup(server.Close)
+	})
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry()})
 	summary := collectStream(t, provider, model.Request{Model: "gemini-test"})
 	if summary.failure == nil || string(summary.failure.Body) != `{"candidates":7}` {
@@ -214,23 +206,26 @@ func TestMalformedEventRetainsBody(t *testing.T) {
 	}
 }
 
+type retryScenario struct {
+	name         string
+	handler      http.HandlerFunc
+	startTimeout time.Duration
+	wantRetries  int
+	wantError    bool
+}
+
 func TestRetryContract(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name        string
-		handler     http.HandlerFunc
-		wantRetries int
-		wantError   bool
-	}{
+	scenarios := []retryScenario{
 		{name: "two rate limits then success", handler: rateLimitHandler(), wantRetries: 2},
 		{name: "in-band rate limit", handler: inBandRateLimitHandler(), wantRetries: 1},
 		{name: "bad request", handler: badRequestHandler, wantError: true},
 		{name: "tool call then drop", handler: toolDropHandler, wantError: true},
-		{name: "headers then silence", handler: silentHandler, wantRetries: 3, wantError: true},
+		{name: "headers then silence", handler: silentHandler, startTimeout: 100 * time.Millisecond, wantRetries: 3, wantError: true},
 	}
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			runRetryScenario(t, test.handler, test.wantRetries, test.wantError)
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			runRetryScenario(t, scenario)
 		})
 	}
 }
@@ -278,26 +273,46 @@ func silentHandler(w http.ResponseWriter, r *http.Request) {
 	<-r.Context().Done()
 }
 
-func runRetryScenario(t *testing.T, handler http.HandlerFunc, wantRetries int, wantError bool) {
+func runRetryScenario(t *testing.T, scenario retryScenario) {
 	t.Helper()
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry()})
+	server := newStreamServer(t, scenario.handler)
+	retry := fastRetry()
+	retry.StartTimeout = scenario.startTimeout
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: retry})
 	var retries int
 	provider.cfg.Retry.OnRetry = func(int, model.Verdict, int, time.Duration) { retries++ }
 	summary := collectStream(t, provider, model.Request{Model: "gemini-test"})
-	if retries != wantRetries || (summary.failure != nil) != wantError {
-		t.Fatalf("retries = %d, failure = %+v; want %d, error %v", retries, summary.failure, wantRetries, wantError)
+	if retries != scenario.wantRetries || (summary.failure != nil) != scenario.wantError {
+		t.Fatalf("retries = %d, failure = %+v; want %d, error %v", retries, summary.failure, scenario.wantRetries, scenario.wantError)
 	}
 }
 
 func testKey(context.Context) (string, error) { return "test", nil }
 
+const streamPath = "/v1beta/models/gemini-test:streamGenerateContent"
+
+func newStreamServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	return newProviderOnlyServer(t, http.MethodPost, streamPath, handler)
+}
+
+func newProviderOnlyServer(t *testing.T, method, path string, handler http.Handler) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method || r.URL.Path != path || r.Header.Get("x-goog-api-key") != "test" {
+			http.NotFound(w, r)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 func fastRetry() model.RetryOptions {
 	return model.RetryOptions{
-		StartTimeout: 100 * time.Millisecond,
-		Sleep:        func(context.Context, time.Duration) error { return nil },
-		Random:       func() float64 { return 0.5 },
+		Sleep:  func(context.Context, time.Duration) error { return nil },
+		Random: func() float64 { return 0.5 },
 	}
 }
 
