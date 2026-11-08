@@ -39,7 +39,7 @@ linters:
       disable:
         - fieldalignment
     staticcheck:
-      checks: ["all"]
+      checks: ["all", "-ST1000", "-ST1020", "-ST1021", "-ST1022"]
     godox:
       keywords: [TODO, FIXME, XXX, HACK]
     revive:
@@ -58,6 +58,44 @@ linters:
         - pattern: ^log\.Print
     depguard:
       rules:
+        fast:
+          files:
+            - $all
+          deny:
+            - pkg: "encoding/json$"
+              desc: use encoding/json/v2 and encoding/json/jsontext; v1 reflects slower and copies more
+            - pkg: "io/ioutil"
+              desc: use io and os
+            - pkg: "log$"
+              desc: use log/slog
+            - pkg: "github.com/sirupsen/logrus"
+              desc: slow allocating logger; use log/slog
+            - pkg: "github.com/pkg/errors"
+              desc: use errors and fmt.Errorf with %w
+            - pkg: "github.com/mattn/go-sqlite3"
+              desc: cgo driver; use modernc.org/sqlite
+            - pkg: "github.com/BurntSushi/toml"
+              desc: use github.com/pelletier/go-toml/v2
+            - pkg: "gopkg.in/yaml.v2"
+              desc: slow reflection decoder; this module has no YAML input
+            - pkg: "github.com/gorilla/websocket"
+              desc: use github.com/coder/websocket
+            - pkg: "nhooyr.io/websocket"
+              desc: use github.com/coder/websocket
+            - pkg: "github.com/golang/protobuf"
+              desc: use google.golang.org/protobuf/encoding/protowire
+            - pkg: "google.golang.org/protobuf/proto"
+              desc: reflection codec; encode and decode with google.golang.org/protobuf/encoding/protowire
+            - pkg: "google.golang.org/protobuf/reflect"
+              desc: reflection codec; encode and decode with google.golang.org/protobuf/encoding/protowire
+            - pkg: "google.golang.org/protobuf/types"
+              desc: reflection codec; encode and decode with google.golang.org/protobuf/encoding/protowire
+            - pkg: "github.com/openai/openai-go"
+              desc: reflection SDK; speak the provider wire with net/http and encoding/json/jsontext
+            - pkg: "github.com/anthropics/anthropic-sdk-go"
+              desc: reflection SDK; speak the provider wire with net/http and encoding/json/jsontext
+            - pkg: "google.golang.org/genai"
+              desc: reflection SDK; speak the provider wire with net/http and encoding/json/jsontext
         core:
           files:
             - "**/internal/journal/**"
