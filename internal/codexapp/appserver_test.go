@@ -1,0 +1,418 @@
+package codexapp
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/coder/websocket"
+)
+
+type stdioPair struct {
+	io.Reader
+	io.Writer
+}
+
+func replyDaemon(conn net.Conn) {
+	defer conn.Close()
+	if _, err := io.WriteString(conn, `{"method":"thread/started"}`+"\n"); err != nil {
+		return
+	}
+	lines := bufio.NewScanner(conn)
+	lines.Buffer(make([]byte, 0, 1<<20), 1<<20)
+	for lines.Scan() {
+		reply := append(append([]byte(`{"echo":`), lines.Bytes()...), "}\n"...)
+		if _, err := conn.Write(reply); err != nil {
+			return
+		}
+	}
+}
+
+func TestAppServerStdioRoundTrip(t *testing.T) {
+	appIn, testIn := io.Pipe()
+	testOut, appOut := io.Pipe()
+	daemonSide, appSide := net.Pipe()
+	go replyDaemon(daemonSide)
+	dials := 0
+	dial := func(context.Context) (net.Conn, error) {
+		dials++
+		return appSide, nil
+	}
+	var stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- AppServerMain(t.Context(), nil, stdioPair{appIn, appOut}, &stderr, dial)
+		_ = appOut.Close()
+	}()
+
+	large := `{"id":3,"method":"turn/start","params":{"text":"` + strings.Repeat("x", 200<<10) + `"}}`
+	requests := []string{`{"id":1,"method":"initialize"}`, `{"method":"initialized"}`, large}
+	go func() {
+		for _, request := range requests {
+			if _, err := io.WriteString(testIn, request+"\n"); err != nil {
+				return
+			}
+		}
+	}()
+
+	output := bufio.NewReaderSize(testOut, 1<<20)
+	want := []string{`{"method":"thread/started"}`}
+	for _, request := range requests {
+		want = append(want, `{"echo":`+request+`}`)
+	}
+	expectOutputLines(t, output, want)
+	_ = testIn.Close()
+	if code := <-done; code != 0 {
+		t.Fatalf("AppServerMain = %d, stderr %q", code, stderr.String())
+	}
+	if dials != 1 || stderr.Len() != 0 {
+		t.Fatalf("dials = %d, stderr = %q", dials, stderr.String())
+	}
+}
+
+func expectOutputLines(t *testing.T, output *bufio.Reader, want []string) {
+	t.Helper()
+	for i, line := range want {
+		got, err := output.ReadString('\n')
+		if err != nil || got != line+"\n" {
+			t.Fatalf("output line %d = %.80q, %v; want %.80q", i, got, err, line)
+		}
+	}
+}
+
+func TestAppServerStdioDeliversRepliesAfterClientEOF(t *testing.T) {
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		request, err := io.ReadAll(conn)
+		if err != nil {
+			return
+		}
+		_, _ = conn.Write(append([]byte(`{"got":`), append(bytes.TrimSpace(request), "}\n"...)...))
+	}()
+	dial := func(ctx context.Context) (net.Conn, error) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, "tcp", listener.Addr().String())
+	}
+	var stdout, stderr bytes.Buffer
+	stdio := stdioPair{strings.NewReader(`{"id":1,"method":"model/list"}` + "\n"), &stdout}
+	if code := AppServerMain(t.Context(), []string{"app-server"}, stdio, &stderr, dial); code != 0 {
+		t.Fatalf("AppServerMain = %d, stderr %q", code, stderr.String())
+	}
+	if want := `{"got":{"id":1,"method":"model/list"}}` + "\n"; stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func relayToDaemon(t *testing.T, args []string, input string) (received, notes string, code int) {
+	t.Helper()
+	daemonSide, appSide := net.Pipe()
+	got := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(daemonSide)
+		_ = daemonSide.Close()
+		got <- data
+	}()
+	dial := func(context.Context) (net.Conn, error) { return appSide, nil }
+	var stderr bytes.Buffer
+	code = AppServerMain(t.Context(), args, stdioPair{strings.NewReader(input), io.Discard}, &stderr, dial)
+	return string(<-got), stderr.String(), code
+}
+
+func TestAppServerConfigMappingAndIgnoredFlags(t *testing.T) {
+	cases := []struct {
+		name   string
+		args   []string
+		params string
+		notes  string
+	}{
+		{
+			name:   "codex values",
+			args:   []string{"--config", "model=gpt-5.1", "-c", `approval_policy="never"`, "--config=sandbox_mode=read-only", "app-server", "--analytics-default-enabled", "--listen", "stdio://"},
+			params: `{"model":"gpt-5.1","approvalPolicy":"never","sandbox":"workspace-write"}`,
+			notes:  "dalgona app-server: ignoring flag --analytics-default-enabled\n",
+		},
+		{
+			name:   "ignored keys and arguments",
+			args:   []string{"-c", "model_reasoning_effort=high", "--config", "approval_policy=on-failure", "-c", "sandbox_mode=danger-full-access", "--stdio", "extra"},
+			params: `{"approvalPolicy":"on-request","sandbox":"danger-full-access"}`,
+			notes: "dalgona app-server: ignoring config key model_reasoning_effort\n" +
+				"dalgona app-server: ignoring flag --stdio\n" +
+				"dalgona app-server: ignoring argument extra\n",
+		},
+		{
+			name:   "unknown values",
+			args:   []string{"-c", "approval_policy=untrusted", "-c", "sandbox_mode=sideways", "app-server", "app-server"},
+			params: `{"approvalPolicy":"untrusted"}`,
+			notes: "dalgona app-server: ignoring config sandbox_mode=\"sideways\"\n" +
+				"dalgona app-server: ignoring argument app-server\n",
+		},
+		{
+			name:   "later value wins",
+			args:   []string{"-c", "approval_policy=never", "-c", "approval_policy=on-request", "-c", "model="},
+			params: `{"approvalPolicy":"on-request"}`,
+			notes:  "dalgona app-server: ignoring config model=\"\"\n",
+		},
+		{
+			name:   "dalgona values",
+			args:   []string{"-c", "approval_policy=ask", "-c", "sandbox_mode=off"},
+			params: `{"approvalPolicy":"untrusted","sandbox":"danger-full-access"}`,
+		},
+		{
+			name:   "no settings",
+			args:   []string{"--listen=stdio://"},
+			params: `{}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			received, notes, code := relayToDaemon(t, tc.args, `{"id":1,"method":"thread/start","params":{}}`+"\n")
+			if code != 0 {
+				t.Fatalf("AppServerMain = %d, stderr %q", code, notes)
+			}
+			if want := `{"id":1,"method":"thread/start","params":` + tc.params + "}\n"; received != want {
+				t.Fatalf("daemon received %q, want %q", received, want)
+			}
+			if notes != tc.notes {
+				t.Fatalf("stderr = %q, want %q", notes, tc.notes)
+			}
+		})
+	}
+}
+
+func TestAppServerInjectsSessionDefaults(t *testing.T) {
+	args := []string{"-c", "model=m", "-c", "approval_policy=never", "-c", "sandbox_mode=danger-full-access"}
+	injected := `"model":"m","approvalPolicy":"never","sandbox":"danger-full-access"`
+	unchanged := func(line string) struct{ sent, received string } { return struct{ sent, received string }{line, line} }
+	exchanges := []struct{ sent, received string }{
+		{`{"id":1,"method":"thread/start","params":{"cwd":"/w"}}` + "\n", `{"id":1,"method":"thread/start","params":{"cwd":"/w",` + injected + `}}` + "\n"},
+		{`{"id":2,"method":"thread/start","params":{"cwd":"/w","model":null,"sandbox":"workspace-write"}}` + "\r\n", `{"id":2,"method":"thread/start","params":{"cwd":"/w","sandbox":"workspace-write","model":"m","approvalPolicy":"never"}}` + "\n"},
+		{`{"id":3,"method":"thread/start"}` + "\n", `{"id":3,"method":"thread/start","params":{` + injected + `}}` + "\n"},
+		{`{"params":null,"method":"thread/start","id":4}` + "\n", `{"params":{` + injected + `},"method":"thread/start","id":4}` + "\n"},
+		unchanged(`{"id":5,"method":"thread/start","params":{"model":"other","approvalPolicy":{"granular":{}},"sandbox":"workspace-write"}}` + "\n"),
+		unchanged(`{"id":6,"method":"turn/start","params":{"threadId":"t","input":[]}}` + "\n"),
+		unchanged(`{"id":7,"method":"thread/resume","params":{"threadId":"t"}}` + "\n"),
+		unchanged(`{"id":8,"method":"thread/compact/start","params":{"threadId":"t"}}` + "\n"),
+		unchanged(`{"id":9,"method":"turn/steer","params":{"note":"thread/start"}}` + "\n"),
+		unchanged(`{ "id" : 10, "method" : "model/list" }` + "\r\n"),
+		unchanged(`{"id":11,"method":"thread/start","params":{}} junk` + "\n"),
+		unchanged(`{"id":12,"method":"thread/start","params":"odd"}` + "\n"),
+		unchanged("not json \"thread/start\"\n"),
+		unchanged(`{"id":13,"method":"model/list"}`),
+	}
+	var sent, want strings.Builder
+	for _, exchange := range exchanges {
+		sent.WriteString(exchange.sent)
+		want.WriteString(exchange.received)
+	}
+	received, notes, code := relayToDaemon(t, args, sent.String())
+	if code != 0 || notes != "" {
+		t.Fatalf("AppServerMain = %d, stderr %q", code, notes)
+	}
+	if received != want.String() {
+		t.Fatalf("daemon received\n%s\nwant\n%s", received, want.String())
+	}
+}
+
+func TestAppServerRejectsInvalidArguments(t *testing.T) {
+	cases := []struct {
+		args    []string
+		code    int
+		message string
+		dial    func(context.Context) (net.Conn, error)
+	}{
+		{
+			args:    []string{"--listen", "ws://0.0.0.0:4500"},
+			code:    2,
+			message: "dalgona app-server: refusing to start non-loopback websocket listener 0.0.0.0:4500 without auth; listen on a loopback address and use SSH port-forwarding\n",
+		},
+		{
+			args:    []string{"--listen", "unix://"},
+			code:    2,
+			message: "dalgona app-server: unsupported --listen \"unix://\"; use stdio:// or ws://IP:PORT\n",
+		},
+		{
+			args:    []string{"--listen", "ws://localhost:4500"},
+			code:    2,
+			message: "dalgona app-server: invalid --listen \"ws://localhost:4500\": ParseAddr(\"localhost\"): unable to parse IP\n",
+		},
+		{args: []string{"--config"}, code: 2, message: "dalgona app-server: --config requires a value\n"},
+		{args: []string{"-c", "model"}, code: 2, message: "dalgona app-server: invalid --config \"model\"; want key=value\n"},
+		{
+			args:    []string{"--listen", "stdio://"},
+			code:    1,
+			message: "dalgona app-server: connect to daemon: daemon down\n",
+			dial:    func(context.Context) (net.Conn, error) { return nil, errors.New("daemon down") },
+		},
+	}
+	for _, tc := range cases {
+		dial := tc.dial
+		if dial == nil {
+			dial = func(context.Context) (net.Conn, error) {
+				t.Errorf("%v: dial called", tc.args)
+				return nil, errors.New("unexpected dial")
+			}
+		}
+		var stderr bytes.Buffer
+		code := AppServerMain(t.Context(), tc.args, stdioPair{strings.NewReader(""), io.Discard}, &stderr, dial)
+		if code != tc.code || stderr.String() != tc.message {
+			t.Errorf("%v: code %d stderr %q, want %d %q", tc.args, code, stderr.String(), tc.code, tc.message)
+		}
+	}
+}
+
+type webSocketHarness struct {
+	t       *testing.T
+	url     string
+	daemons chan net.Conn
+}
+
+func startWebSocketAppServer(t *testing.T, args ...string) (webSocketHarness, func() int) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	stderrRead, stderrWrite := io.Pipe()
+	daemons := make(chan net.Conn, 8)
+	dial := func(context.Context) (net.Conn, error) {
+		daemonSide, appSide := net.Pipe()
+		daemons <- daemonSide
+		return appSide, nil
+	}
+	done := make(chan int, 1)
+	go func() {
+		done <- AppServerMain(ctx, append([]string{"--listen", "ws://127.0.0.1:0"}, args...), stdioPair{strings.NewReader(""), io.Discard}, stderrWrite, dial)
+		_ = stderrWrite.Close()
+	}()
+	notes := bufio.NewReader(stderrRead)
+	banner, err := notes.ReadString('\n')
+	if err != nil {
+		cancel()
+		t.Fatalf("read banner: %v", err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, notes) }()
+	addr, ok := strings.CutPrefix(strings.TrimSpace(banner), "dalgona app-server: listening on ws://")
+	if !ok {
+		cancel()
+		t.Fatalf("banner = %q", banner)
+	}
+	stop := func() int {
+		cancel()
+		return <-done
+	}
+	return webSocketHarness{t: t, url: "ws://" + addr + "/", daemons: daemons}, stop
+}
+
+func (h webSocketHarness) connect() (*websocket.Conn, *bufio.Reader, net.Conn) {
+	h.t.Helper()
+	ws, response, err := websocket.Dial(h.t.Context(), h.url, nil)
+	if err != nil {
+		h.t.Fatalf("dial websocket: %v", err)
+	}
+	if response.Body != nil {
+		_ = response.Body.Close()
+	}
+	ws.SetReadLimit(1 << 20)
+	daemon := <-h.daemons
+	return ws, bufio.NewReader(daemon), daemon
+}
+
+func (h webSocketHarness) send(ws *websocket.Conn, kind websocket.MessageType, message string) {
+	h.t.Helper()
+	if err := ws.Write(h.t.Context(), kind, []byte(message)); err != nil {
+		h.t.Fatalf("write websocket: %v", err)
+	}
+}
+
+func (h webSocketHarness) expectLine(daemon *bufio.Reader, want string) {
+	h.t.Helper()
+	got, err := daemon.ReadString('\n')
+	if err != nil || got != want+"\n" {
+		h.t.Fatalf("daemon line = %q, %v; want %q", got, err, want)
+	}
+}
+
+func (h webSocketHarness) expectMessage(ws *websocket.Conn, want string) {
+	h.t.Helper()
+	kind, got, err := ws.Read(h.t.Context())
+	if err != nil || kind != websocket.MessageText || string(got) != want {
+		h.t.Fatalf("websocket message = %v %.80q %v; want text %.80q", kind, got, err, want)
+	}
+}
+
+func TestAppServerWebSocketSplicesEachConnection(t *testing.T) {
+	h, stop := startWebSocketAppServer(t, "-c", "model=m")
+
+	first, firstDaemon, firstConn := h.connect()
+	second, secondDaemon, secondConn := h.connect()
+
+	h.send(first, websocket.MessageText, `{"id":1,"method":"initialize"}`)
+	h.expectLine(firstDaemon, `{"id":1,"method":"initialize"}`)
+	h.send(second, websocket.MessageText, `{"id":7,"method":"thread/list"}`)
+	h.expectLine(secondDaemon, `{"id":7,"method":"thread/list"}`)
+	h.send(first, websocket.MessageText, "{\n  \"id\": 2,\n  \"method\": \"model/list\"\n}")
+	h.expectLine(firstDaemon, `{"id":2,"method":"model/list"}`)
+	h.send(first, websocket.MessageBinary, `{"id":99}`)
+	h.send(first, websocket.MessageText, `{"method":"initialized"}`)
+	h.expectLine(firstDaemon, `{"method":"initialized"}`)
+	largeRequest := `{"id":3,"method":"turn/start","params":{"text":"` + strings.Repeat("z", 200<<10) + `"}}`
+	h.send(first, websocket.MessageText, largeRequest)
+	h.expectLine(firstDaemon, largeRequest)
+	h.send(first, websocket.MessageText, "{\n  \"id\": 4,\n  \"method\": \"thread/start\"\n}")
+	h.expectLine(firstDaemon, `{"id":4,"method":"thread/start","params":{"model":"m"}}`)
+
+	large := `{"method":"item/agentMessage/delta","params":{"delta":"` + strings.Repeat("y", 200<<10) + `"}}`
+	go func() {
+		_, _ = io.WriteString(firstConn, `{"id":1,"result":{}}`+"\n"+`{"method":"turn/started"}`+"\r\n"+large+"\n")
+		_, _ = io.WriteString(secondConn, `{"id":7,"result":{"data":[]}}`+"\n")
+	}()
+	h.expectMessage(first, `{"id":1,"result":{}}`)
+	h.expectMessage(first, `{"method":"turn/started"}`)
+	h.expectMessage(first, large)
+	h.expectMessage(second, `{"id":7,"result":{"data":[]}}`)
+
+	_ = firstConn.Close()
+	if _, _, err := first.Read(h.t.Context()); websocket.CloseStatus(err) != websocket.StatusNormalClosure {
+		t.Fatalf("read after daemon close: %v", err)
+	}
+	if code := stop(); code != 0 {
+		t.Fatalf("AppServerMain = %d", code)
+	}
+	if _, _, err := second.Read(t.Context()); err == nil {
+		t.Fatal("second connection stayed open after shutdown")
+	}
+}
+
+func TestAppServerWebSocketRefusesOriginHeader(t *testing.T) {
+	h, stop := startWebSocketAppServer(t)
+	defer stop()
+	sameHost := "http://" + strings.TrimSuffix(strings.TrimPrefix(h.url, "ws://"), "/")
+	options := &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {sameHost}}}
+	ws, response, err := websocket.Dial(h.t.Context(), h.url, options)
+	if err == nil {
+		_ = ws.CloseNow()
+		t.Fatal("dial with Origin header succeeded")
+	}
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("response = %v, err = %v", response, err)
+	}
+	_ = response.Body.Close()
+	select {
+	case <-h.daemons:
+		t.Fatal("refused request dialed the daemon")
+	default:
+	}
+}
