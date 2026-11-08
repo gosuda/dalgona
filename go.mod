@@ -24,6 +24,7 @@ require (
 	github.com/sandbox0-ai/sdk-go v0.10.5
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/superfly/sprites-go v0.2.2
+	go.starlark.net v0.0.0-20261021141710-4f4267fb140d
 	golang.org/x/net v0.61.0
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
