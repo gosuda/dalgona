@@ -1,0 +1,207 @@
+:root {
+	--neutral-0: oklch(0.985 0.008 85);
+	--neutral-50: oklch(0.955 0.012 85);
+	--neutral-100: oklch(0.92 0.016 85);
+	--neutral-200: oklch(0.84 0.018 85);
+	--neutral-400: oklch(0.58 0.022 75);
+	--neutral-600: oklch(0.4 0.025 70);
+	--neutral-800: oklch(0.25 0.022 65);
+	--neutral-900: oklch(0.19 0.018 65);
+	--amber-500: oklch(0.56 0.15 48);
+	--amber-600: oklch(0.54 0.14 45);
+	--amber-100: oklch(0.91 0.055 65);
+	--green-600: oklch(0.48 0.11 155);
+	--red-600: oklch(0.5 0.16 25);
+	--red-100: oklch(0.92 0.04 25);
+
+	--color-bg-page: var(--neutral-50);
+	--color-bg-sidebar: var(--neutral-100);
+	--color-bg-surface: var(--neutral-0);
+	--color-bg-inset: var(--neutral-100);
+	--color-bg-selected: var(--amber-100);
+	--color-text: var(--neutral-900);
+	--color-text-secondary: var(--neutral-600);
+	--color-text-on-accent: var(--neutral-0);
+	--color-border: var(--neutral-200);
+	--color-border-strong: var(--neutral-400);
+	--color-accent: var(--amber-600);
+	--color-accent-hover: var(--amber-500);
+	--color-focus: var(--amber-600);
+	--color-success: var(--green-600);
+	--color-danger: var(--red-600);
+	--color-danger-surface: var(--red-100);
+	--color-keyword-surface: var(--neutral-800);
+
+	--font-interface: "Avenir Next", "Noto Sans", sans-serif;
+	--font-code: ui-monospace, "SFMono-Regular", Consolas, monospace;
+	--text-caption: 0.8125rem;
+	--text-body-small: 0.875rem;
+	--text-body: 1rem;
+	--text-heading: 1.25rem;
+	--text-title: 1.75rem;
+
+	--space-1: 4px;
+	--space-2: 8px;
+	--space-3: 12px;
+	--space-4: 16px;
+	--space-5: 24px;
+	--space-6: 32px;
+	--radius-small: 4px;
+	--radius-medium: 8px;
+	--radius-large: 12px;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html {
+	color-scheme: light;
+	font-family: var(--font-interface);
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}
+
+body {
+	margin: 0;
+	background: var(--color-bg-page);
+	color: var(--color-text);
+	font-size: var(--text-body);
+	line-height: 1.55;
+}
+
+button,
+input,
+textarea,
+select {
+	font: inherit;
+}
+
+button,
+select {
+	min-height: 40px;
+}
+
+button {
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-small);
+	background: var(--color-bg-surface);
+	color: var(--color-text);
+	cursor: pointer;
+	font-weight: 600;
+	padding: var(--space-2) var(--space-4);
+	text-box: trim-both cap alphabetic;
+}
+
+button:disabled,
+select:disabled,
+textarea:disabled {
+	cursor: not-allowed;
+	opacity: 0.55;
+}
+
+button.primary {
+	border-color: var(--color-accent);
+	background: var(--color-accent);
+	color: var(--color-text-on-accent);
+}
+
+button.quiet {
+	border-color: var(--color-border);
+	background: transparent;
+}
+
+button.danger {
+	color: var(--color-danger);
+}
+
+:focus-visible {
+	outline: 2px solid var(--color-focus);
+	outline-offset: 2px;
+}
+
+::selection {
+	background: var(--color-bg-selected);
+	color: var(--color-text);
+}
+
+code,
+pre,
+.command,
+.file-path {
+	font-family: var(--font-code);
+	font-variant-numeric: tabular-nums;
+}
+
+pre {
+	margin: 0;
+	max-width: 100%;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+}
+
+.skip-link {
+	position: fixed;
+	inset-block-start: var(--space-3);
+	inset-inline-start: var(--space-3);
+	padding: var(--space-2) var(--space-4);
+	background: var(--color-bg-surface);
+	color: var(--color-text);
+	z-index: 10;
+	transform: translateY(-200%);
+}
+
+.skip-link:focus {
+	transform: translateY(0);
+}
+
+.sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}
+
+@media (hover: hover) {
+	button:not(:disabled):hover {
+		border-color: var(--color-border-strong);
+		background: var(--color-bg-inset);
+	}
+
+	button.primary:not(:disabled):hover {
+		border-color: var(--color-accent-hover);
+		background: var(--color-accent-hover);
+	}
+}
+
+@media (prefers-reduced-motion: no-preference) {
+	button {
+		transition-property: background-color, border-color, color, scale;
+		transition-duration: 120ms, 120ms, 120ms, 150ms;
+		transition-timing-function: ease-out;
+	}
+
+	button:not(:disabled):active {
+		scale: 0.96;
+	}
+}
+
+@media (max-width: 40rem) {
+	input,
+	textarea,
+	select {
+		font-size: 1rem;
+	}
+}
+
+@media (forced-colors: active) {
+	button {
+		border-color: ButtonText;
+	}
+}

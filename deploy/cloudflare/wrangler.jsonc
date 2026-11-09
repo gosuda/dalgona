@@ -1,0 +1,21 @@
+{
+  "name": "dalgona-box",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "containers": [
+    {
+      "class_name": "Box",
+      "image": "ghcr.io/gosuda/dalgona-box:latest",
+      "instance_type": "basic"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "BOX", "class_name": "Box" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Box"] }
+  ]
+}

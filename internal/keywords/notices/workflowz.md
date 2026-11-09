@@ -1,0 +1,1 @@
+Write each phase as one durable `eval` cell. Fan out independent work with `ctx.spawn` or `ctx.scope`. Join children with `ctx.wait`. Give every child a clear task and return shape. Require each child to return through `yield`. Keep failures local to each item. The journal resumes an interrupted wave from recorded effects. Do not dispatch completed work again.

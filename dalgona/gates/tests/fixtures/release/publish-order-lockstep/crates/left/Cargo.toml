@@ -1,7 +1,0 @@
-[package]
-name = "left"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-base = { path = "../base", version = "=0.1.0" }

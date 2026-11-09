@@ -1,0 +1,200 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - cyclop
+    - depguard
+    - dupl
+    - errcheck
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - gocognit
+    - gocritic
+    - godox
+    - gosec
+    - govet
+    - ineffassign
+    - revive
+    - staticcheck
+    - unused
+    - wastedassign
+  settings:
+    gosec:
+      excludes:
+        - G204
+        - G703
+        - G304
+    cyclop:
+      max-complexity: 9
+    gocognit:
+      min-complexity: 14
+    dupl:
+      threshold: 150
+    exhaustive:
+      default-signifies-exhaustive: false
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    staticcheck:
+      checks: ["all", "-ST1000", "-ST1020", "-ST1021", "-ST1022"]
+    godox:
+      keywords: [TODO, FIXME, XXX, HACK]
+    revive:
+      rules:
+        - name: max-control-nesting
+          arguments: [3]
+        - name: argument-limit
+          arguments: [5]
+        - name: function-result-limit
+          arguments: [3]
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print
+        - pattern: ^print$
+        - pattern: ^println$
+        - pattern: ^log\.Print
+    depguard:
+      rules:
+        fast:
+          files:
+            - $all
+          deny:
+            - pkg: "encoding/json$"
+              desc: use encoding/json/v2 and encoding/json/jsontext; v1 reflects slower and copies more
+            - pkg: "io/ioutil"
+              desc: use io and os
+            - pkg: "log$"
+              desc: use log/slog
+            - pkg: "github.com/sirupsen/logrus"
+              desc: slow allocating logger; use log/slog
+            - pkg: "github.com/pkg/errors"
+              desc: use errors and fmt.Errorf with %w
+            - pkg: "github.com/mattn/go-sqlite3"
+              desc: cgo driver; use modernc.org/sqlite
+            - pkg: "github.com/BurntSushi/toml"
+              desc: use github.com/pelletier/go-toml/v2
+            - pkg: "gopkg.in/yaml.v2"
+              desc: slow reflection decoder; this module has no YAML input
+            - pkg: "github.com/gorilla/websocket"
+              desc: use github.com/coder/websocket
+            - pkg: "nhooyr.io/websocket"
+              desc: use github.com/coder/websocket
+            - pkg: "github.com/golang/protobuf"
+              desc: use google.golang.org/protobuf/encoding/protowire
+            - pkg: "google.golang.org/protobuf/proto"
+              desc: reflection codec; encode and decode with google.golang.org/protobuf/encoding/protowire
+            - pkg: "google.golang.org/protobuf/reflect"
+              desc: reflection codec; encode and decode with google.golang.org/protobuf/encoding/protowire
+            - pkg: "google.golang.org/protobuf/types"
+              desc: reflection codec; encode and decode with google.golang.org/protobuf/encoding/protowire
+            - pkg: "github.com/openai/openai-go"
+              desc: reflection SDK; speak the provider wire with net/http and encoding/json/jsontext
+            - pkg: "github.com/anthropics/anthropic-sdk-go"
+              desc: reflection SDK; speak the provider wire with net/http and encoding/json/jsontext
+            - pkg: "google.golang.org/genai"
+              desc: reflection SDK; speak the provider wire with net/http and encoding/json/jsontext
+        core:
+          files:
+            - "**/internal/journal/**"
+            - "**/internal/agent/**"
+            - "**/internal/model/**"
+            - "**/internal/auth/**"
+            - "**/internal/tool/**"
+            - "**/internal/runner/**"
+            - "**/internal/config/**"
+            - "**/internal/decide/**"
+            - "**/internal/keywords/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/rpc"
+              desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/tui"
+              desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/daemon"
+              desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/script"
+              desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/sandboxsvc"
+              desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/mcp"
+              desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/skills"
+              desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/discovery"
+              desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/webui"
+              desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/herdr"
+              desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/codexapp"
+              desc: core must not import interfaces or batteries
+        presentation:
+          files:
+            - "**/internal/app/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/tui"
+              desc: presentation depends on core, core never imports presentation
+        clients:
+          files:
+            - "**/internal/tui/**"
+            - "**/internal/webui/**"
+            - "**/internal/herdr/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/journal"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/agent"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/model"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/auth"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/tool"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/runner"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/config"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/decide"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/keywords"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/script"
+              desc: clients reach the core only through internal/rpc
+        dal:
+          files:
+            - "**/cmd/dal/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/daemon"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/script"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/sandboxsvc"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/mcp"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/skills"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/discovery"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/webui"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/herdr"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/codexapp"
+              desc: dal must stay free of dalgona batteries
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      - path: ^cmd/
+        linters: [forbidigo]
+      - path: _test\.go
+        text: "G301|G306|G404|G703"
+        linters: [gosec]
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports

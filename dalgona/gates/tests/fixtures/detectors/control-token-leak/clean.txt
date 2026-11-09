@@ -1,1 +1,0 @@
-The next operation reads the fixture file and reports its byte count.

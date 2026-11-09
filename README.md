@@ -1,271 +1,216 @@
 # dal and dalgona
 
-**A terminal coding agent with one extension door.**
+## Identity
 
-Dal is a complete terminal coding agent. Dalgona is dal with opinionated batteries, switched on through the same public extension door.
+`dal` (달, "moon") is the minimal agent and terminal interface. `dalgona` (달고나, the Korean sugar candy) is the batteries-included harness built on the same core. One brand family, two products.
 
----
+Use lowercase `dal` and `dalgona` in running text. The executable names are `dal` and `dalgona`. Keep headings in sentence case and actions verb-first. Errors name what happened and how to fix it. Use no exclamation marks or moon puns in errors and status text. Keep any moon motif to at most one visual mark on a user-facing surface.
 
-- [What is this](#what-is-this)
-- [Install](#install)
-- [Quick start](#quick-start)
-- [Features](#features)
-- [Usage](#usage)
-- [Documentation](#documentation)
-- [Development](#development)
-- [License](#license)
+## Choose a product
 
-## What is this
+Use dal for the agent and terminal interface without a daemon. Use dalgona for a per-user daemon, durable Starlark workflows, remote runners, MCP tools, a web interface, and Codex desktop integration. Both use the same agent core and Codex-compatible client protocol. An optional advisor reviews a thread and sends notes. It does not approve actions.
 
-Dal works without dalgona. It ships the agent loop, providers, tools, Starlark extensions, terminal interface, session storage, manuals, and wire protocols in one product.
+Sessions use an append-only JSONL journal with a SQLite mirror. Recovery follows recorded tool outcomes rather than assuming that an interrupted command did nothing. See [recovery](docs/spec/recovery.md) for the cases that can resume and those that must report interruption.
 
-Dalgona reuses dal through the public extension interface and turns on batteries for orchestration, history, quality, judged rules, web, work, MCP, review, ask, skills, ttsr-rules, and procs. It keeps its own configuration, data, and sessions.
+## Build from this checkout
 
-Binaries are `dalgon` (aliases `dal`, `dl`) and `dalgona` (alias `dg`). A plugin that loads in dalgon loads in dalgona.
-
-Everything extends dal through one public interface. Plugins, other programs, and dalgona's batteries use it, and so does dal's own terminal.
-
-In process, the Host and Agent seam carries one snapshot, one change stream, one command path, one request and answer pair, and one blob read. In plain words, a client reads the session state, follows its updates, sends a command, answers a request from the agent, and fetches stored data. A `Host` owns the live sessions. An `Agent` is a handle to one session.
-
-Across processes, the same operations travel as JSON-RPC over stdio or a local socket. The manuals live behind that door at `dal://` and `dalgona://`. [Philosophy](docs/philosophy.md) explains why dal has one door.
-
-## Install
-
-Build from source. No tagged release exists, so the registry and installer channels have nothing to fetch yet. [Install dal and dalgona](docs/install.md) has the details for each OS.
-
-You need git, the latest stable Rust toolchain, and a C toolchain. The symbol grammars compile through `cc`.
+Install the Go toolchain declared in [go.mod](go.mod), then run from the repository root:
 
 ```sh
-git clone https://github.com/gosuda/dalgona
-cd dalgona
-rustup update stable --no-self-update
-cargo build --release --locked -p dalgon -p dalgona
-export PATH="$PWD/target/release:$PATH"
+go install ./cmd/...
+dal --version
+dalgona --version
 ```
 
-In PowerShell, run the first four commands. Then extend `PATH` with this line instead of `export`:
+Go installs both binaries in `GOBIN`, or in `GOPATH/bin` when `GOBIN` is unset. Add that directory to `PATH` if your shell cannot find them.
 
-```powershell
-$env:PATH = "$PWD\target\release;$env:PATH"
-```
+Use `just dist` to build release binaries for Linux, macOS, and Windows on amd64 and arm64. `just box-image` builds the remote box image from those binaries.
 
-The binaries land in `target/release/` (`dalgon` with `dal` and `dl`, plus `dalgona` with `dg`), assuming the default Cargo target directory (`CARGO_TARGET_DIR` and `--target-dir` move it). Run `dalgon --version` to check the install.
+## Start dal
 
-- **Platforms**: Linux, macOS, and Windows on x86_64 and aarch64. Unsigned Windows binaries may trigger SmartScreen; verify the checksum where one is published.
-- **Paths**: `$XDG_CONFIG_HOME/dal/` and `$XDG_DATA_HOME/dal/` on every OS; an `XDG_*` value must be an absolute path or it is ignored. Without those variables, the defaults are `~/.config/dal/` and `~/.local/share/dal/` under your home directory. On Windows, the home directory is `HOME`, `USERPROFILE`, or `HOMEDRIVE` with `HOMEPATH`. Dalgona uses `dalgona` in place of `dal`.
-- **Plugins need no toolchain**: a plugin is Starlark text loaded at startup.
-
-## Quick start
-
-Sign in, pick a model, and run one prompt. [Quickstart: run your first dal agent turn](docs/quickstart.md) walks through each step.
-
-```sh
-dalgon login
-dalgon
-dalgon -p "Summarize this repository's README"
-```
-
-**`dalgon login`** signs in to a provider. **`dalgon`** opens the terminal; type `/model` to pick a model, then send a prompt. **`dalgon -p`** runs one turn and exits; it needs a model. Dal asks before every `patch` and every `exec`.
-
-To verify the install, run these checks. Each comment names the start of the real output or the exit code.
-
-```sh
-dalgon --version
-# dalgon 0.1.0
-dalgon docs
-# prints the dal manual index starting with `# dal://`
-dalgon docs dal://cli
-# prints the command-line page
-dalgon login --help
-# prints sign-in usage starting with `Sign in to a provider`
-dalgon login status
-# exit 1 with no credentials; lists providers as `not configured`
-```
-
-## Features
-
-- **Complete alone**: chat in the terminal, search and edit with approval, keep journals, and read `dal://` without installing dalgona.
-- **Same door**: load any dal plugin in dalgona unchanged. Name a dalgona battery in `disabled_batteries` to leave it out.
-- **Starlark plugins**: ship tools, commands, hooks, skills, rules, and prompt text from one `plugin.star` with no compile step. A broken plugin stops startup and names `path:line:col`. `/reload` keeps the previous set on failure.
-- **Approval first**: ask before every `patch` and every `exec` by default. Headless runs deny when no person can answer. `eval` runs Starlark only and is not a sandbox.
-- **Durable sessions**: continue with `-c`, resume with `-r`, branch with `/fork` and `/clone`, and share with `/export`. Compaction starts at 85 percent of the context window.
-- **Terminal and headless**: work inline or fullscreen, print with `-p`, emit JSON with `--json`, or drive ACP, app-server, RPC, router, and A2A clients over one protocol.
-- **Batteries on demand**: run dalgona for orchestration, plan and todo, ask, web search and fetch, MCP client, review, judged rules, quality guard, history, skills, ttsr-rules, symbol search, hashline edits, and the deferred `procs` tool over background jobs. `dalgona eval` runs Starlark eval packs.
-
-### Scope limits
-
-Dal keeps its core small:
-
-- **No MCP client** in dal; dalgona ships one, and a plugin can reach HTTP services with `net.fetch`.
-- **No plan or todo** in dal; dalgona ships both. **No subagents** by default.
-- **No LSP** in either product, **no upload** (`/export` writes a file you share yourself), **no self-rebuild** (`/reload` reloads plugins), **nothing but Starlark** in `eval`, **no second store** besides the journal, and **no browser front end** in the binary.
-- **Sandbox off by default**: when on, it guards the home directory and sets no network restriction.
-- **A plugin runs with your permissions**: read it before you install it.
-
-## Usage
-
-### Sign in and list models
-
-```sh
-dalgon login
-dalgon login status
-dalgon models
-dalgon logout
-```
-
-`dalgon models` prints the catalog with built-in prices:
-
-```text
-PROVIDER  ID             CONTEXT        PRICE
-openai    gpt-5.6        922000 tokens  $4.000/$20.000 per M tokens
-openai    gpt-5.6-luna   922000 tokens  $0.200/$1.200 per M tokens
-Prices: models.dev, fetched 2026-09-27.
-```
-
-**`login`** signs in interactively or with `--api-key` or `--device-auth` where the provider supports it. **`login status`** exits 0 when at least one provider is ready and 1 otherwise, with a sign-in hint and no secret output. **`models`** lists models with built-in prices and sources. **`logout`** removes stored credentials. **Secrets** live in `auth.json` with mode `0600`; the loader refuses symlinks and group or other permission bits.
-
-### Read the manual
-
-```sh
-dalgon docs
-dalgon docs dal://cli
-dalgona docs dalgona://batteries
-```
-
-**No URI**: `docs` prints the index. **A page URI**: it prints the page. **Unknown URIs** fail with a miss message on stderr and nothing on stdout.
-
-### Run in the terminal
+Start the terminal interface:
 
 ```sh
 dal
-dal --screen fullscreen
+```
+
+In the terminal interface, run `/login <provider>` to sign in, then `/model` to select an offered model. Replace `<provider>` with your provider id, such as `openai` or `anthropic`. API-key providers can use their provider environment variables. No default thread model is shipped.
+
+Enter a task in the composer. Use `/resume` to select an existing session, `/new` to start another, and Esc to interrupt a turn. [The TUI contract](docs/spec/tui.md) lists the commands and keys.
+
+Dal uses `$DAL_HOME`, or `~/.dal` when the variable is unset.
+
+## Start dalgona
+
+Start the daemon-backed terminal interface:
+
+```sh
 dalgona
 ```
 
-**`dal`** starts the inline terminal by default once a provider and model are set. **`--screen fullscreen`** uses the alternate screen and replays the settled transcript on exit. **`dalgona`** starts the batteries product with its own config, data, and sessions. **Type while dal works**: a steer reaches the model at the next safe point, a follow-up waits for the turn to end, and stop ends the turn at once.
-
-### Run one turn without the TUI
+The client starts the user daemon when needed and connects to it. Use `/login <provider>` and `/model` in the terminal interface. Reopen a recorded thread with:
 
 ```sh
-dalgon -p "Summarize the staged diff"
-dalgon --json -o reply.md "Summarize the staged diff"
-dalgon -c -p "Continue with the next file"
-dalgon -r my-session -p "Resume and finish"
+dalgona --resume <thread-id>
 ```
 
-**Print mode** runs one turn, waits up to 3 seconds for extension status to go quiet, and needs a configured model (without one, dalgon reports the missing model and how to set it). **JSON mode** writes one JSON result or error line on stdout (with the stop reason, not the assistant text) only after every status kind is quiet; pair it with `-o FILE` to save the assistant message. **Common run flags**: `-m` for model, `--thinking`, `--mode`, `-n` for name, `-C` for workspace directory, and `--no-session` to skip saving.
+For login-time startup, use `dalgona service install`. Use `dalgona service uninstall` to remove that startup configuration. The platform service rules are in [daemon.md](docs/spec/daemon.md).
 
-### Control sessions and safety
+Dalgona uses `$DALGONA_HOME`, or `~/.dalgona` when the variable is unset. It does not share dal's home.
+
+## Configure a product
+
+Put user configuration in `<home>/config.toml`. The program stores mutable settings in `<home>/settings.toml`. Settings override config, which overrides defaults. Client flags such as `-m`, `--approval`, and `--sandbox` set thread options. `--remote` overrides the configured `remote`. Unknown config keys fail loading.
+
+Both products accept this configuration:
+
+```toml
+approval = "auto"
+sandbox = "workspace-write"
+
+[approval_decider]
+decider = "decisions:typesafe/jev-1.14"
+threshold = 0.9
+
+[advisor]
+enabled = false
+```
+
+`auto` uses static rules and an automated decider. A missing or failed decider declines actions that need its decision. Use `ask` for human approval. Use `yolo` only when you intend to bypass the decider and turn off harness confinement.
+
+Set `enabled = true` in `[advisor]` to request transcript reviews. Use `[advisors.<name>]` for named reviewers. There is no `--advisor` CLI flag. [The advisor contract](docs/spec/advisor.md) defines model selection, review timing, and note delivery.
+
+Use `[approval_decider]`, not `[approval]`. TOML cannot use `approval` as both a scalar and a table. See [configuration](docs/spec/config.md) for keys, provider endpoints, edit styles, and product restrictions.
+
+Use these table names and keys:
+
+| Scope | Keys |
+| --- | --- |
+| Both products, top level | `model`, `reasoning`, `approval`, `sandbox`, `sandbox_writable_roots`, `edit_style`, `compaction_threshold`, `compaction_keep_tokens`, `stream_start_timeout`, `stream_idle_timeout` |
+| `[providers.<name>]` | `base_url`, `api_key_env` |
+| `[models.<name>]` | `context_window` |
+| `[approval_decider]` | `decider`, `threshold` |
+| `[roles]` | `smol`, `slow`, `advisor` |
+| `[advisor]` | `enabled`, `review`, `interval`, `sync`, `continue_severity`, `immune_turns`, `max_notes`, `tools`, `subagents` |
+| `[advisors.<name>]` | `model`, `instructions`, `review`, `interval`, `sync`, `tools`, `enabled` |
+| `[secrets]` | `patterns` |
+| `[keywords.<name>]` | `notice`, `text`, `hue`, `effort`, `requires`, `enabled` |
+| Dalgona only, top level | `tool_mode`, `runner`, `remote` |
+| `[runners.<name>]` (dalgona) | `service`, `image`, `template`, `url` |
+| `[remotes.<name>]` (dalgona) | `service`, `image`, `template`, `url`, `box_id` |
+| `[mcp_servers.<name>]` (dalgona) | `command`, `args`, `env`, `url` |
+| `[discovery]` (dalgona) | `sources` |
+| `[eval]` (dalgona) | `uses` |
+| `[herdr]` (dalgona) | `subagent_panes` |
+| `[web]` (dalgona) | `listen`, `token`, `cert_file`, `key_file` |
+
+`edit_style` accepts a style name or a table of model globs with a required `default` entry. Styles are `anchor`, `replace`, `hashline`, `hashline-light`, `hashline-enhanced`, `apply_patch`, `simple`, `balanced`, and `strict`. Model globs match in declaration order. Dal rejects the dalgona-only settings.
+
+## Run inside an outer sandbox
+
+Run dalgona inside a lightweight outer sandbox, such as a container, microVM, or cloud sandbox runner. The local harness sandbox only confines accidental writes and is not a security boundary. See [sandbox.md](docs/spec/sandbox.md) for the write policy.
+
+Windows has no harness confinement. Linux runs without it when Landlock is unavailable. A remote box supplies the sandbox instead of the local write policy. See [sandbox.md](docs/spec/sandbox.md).
+
+## Connect the Codex desktop app
+
+Install the desktop override:
 
 ```sh
-dalgon -p --approval ask "Inspect the build script"
-dalgon -p --approval edits "Format and update the changelog"
-dalgon -p --approval edits --sandbox "Run the test suite"
+dalgona codex install
 ```
 
-**Run modifiers**: pass `--approval` and `--sandbox` on a TUI or headless invocation (without a prompt, bare `dalgon --approval ...` starts the TUI on a terminal and fails on a pipe). **`ask`** (default) asks before every `patch` and every `exec`. **`edits`** approves edits without asking and still asks for `exec`. **`all`** approves every call and is only for runs already confined by an external sandbox; the built-in `--sandbox` sets no network restriction, so it is not that confinement. **Fail closed**: when no controller can answer, dal denies and says why. **`--sandbox`** runs `exec` children through the platform helper with workspace, temporary, cache, and `sandbox_writable` roots writable. **`dalgon serve`** binds loopback only unless `--public` is given with a token from `dalgon serve token`.
+Restart the Codex desktop app after installation. The installer records prior settings before it changes the user-level executable override. Use `dalgona codex status` to inspect the override and `dalgona codex uninstall` to restore it. The integration does not patch the signed app bundle. See [Codex app integration](docs/spec/codex-app.md).
 
-### Manage plugins
+`dalgona app-server` bridges the desktop protocol. Its default listener is standard input and output. The app-server and the terminal interface use the same daemon protocol.
+
+## Choose where execution runs
+
+### Keep the orchestrator local
+
+Set `runner` to a named entry in dalgona's config. For example:
+
+```toml
+runner = "devbox"
+
+[runners.devbox]
+service = "docker"
+```
+
+The runner uploads the workspace, records its baseline, and runs tools and subagents in the box. The supported services are in [runners.md](docs/spec/runners.md). A fork shares its parent's box. Archiving one thread does not destroy a box still used by another thread.
+
+Use `dalgona pull <thread-id>` to apply the box's changes to the local workspace with `git apply --3way`. Conflicts leave markers and return exit code 1 with the affected files. `dalgona runner gc` lists unused boxes without deleting them. Use `dalgona runner gc --yes` to delete them.
+
+### Run the whole daemon in a box
+
+Configure `[remotes.<name>]`, then run:
 
 ```sh
-dalgon plugin list
-dalgona plugin grant quality
-dalgona plugin revoke quality
+dalgona cloud up <name>
+dalgona --remote <name>
+dalgona cloud pull <name>
+dalgona cloud down <name>
 ```
 
-**Data root only**: user plugins never load from the workspace and must be listed in `plugins` in `dal.toml` before `dalgon plugin grant <name>` can grant them. **Bundled batteries**: in `dalgona`, batteries such as `quality` are already registered (`dalgon` alone rejects `dalgon plugin grant quality` as not configured). **`list`** shows configured plugins and persistent grants. **`grant` and `revoke`** change the stored grant; session grants end with their sessions.
+The named remote uses any service in [runners.md](docs/spec/runners.md) except Cloudflare. Cloudflare cannot host a durable whole-daemon home because its containers lose their files on stop.
 
-### Serve and integrate
+`cloud up` does not copy credentials unless you pass `--copy-auth`. Without credential copying, use `dalgona --remote <name> login` to authenticate in the box. Remote service and box identifiers live in `[remotes.<name>]` in `settings.toml`.
 
-```sh
-dalgon serve
-dalgon serve token
-dalgon serve --public
-dalgon serve --a2a
-dalgon rpc
-dalgon rpc --socket /tmp/dalgon.sock
-dalgon completion bash
-dalgon rules test "check this text"
-```
+`cloud down` destroys the box and its journal after confirmation. `--yes` skips that confirmation for scripts. Pull changes you need before deletion.
 
-**`serve`** starts the local router; **`--public`** listens wider and requires a token, and **`--a2a`** enables the agent-to-agent surface. **`rpc`** serves JSON-RPC over stdio or a local socket. **`completion`** prints shell completions for `bash`, `elvish`, `fish`, `powershell`, and `zsh`. **`rules test`** simulates one stream rule against the given text with `--source`, `--tool`, and `--path` selectors.
+Use `--remote <name>` with the terminal client, `web`, or `app-server` to connect to the in-box daemon through its bridge. See [the service decision](docs/decisions/sandbox-services.md) and [exec-server wire](docs/spec/exec-server.md) for persistence and transport rules.
 
-## Documentation
+## Other product commands
 
-The same pages live inside the binaries and in the checkout. Use `dalgon docs` for `dal://` and `dalgona docs` for `dalgona://`.
+Both products accept these client commands and flags:
 
-Core use:
+| Command or flag | Purpose |
+| --- | --- |
+| `dal`, `dalgona` | Open the terminal interface. |
+| `login [provider]` | List providers or sign in to one. |
+| `logout <provider>` | Remove a stored credential. |
+| `models` | List offered models. |
+| `-p <prompt>` | Run one turn and exit. |
+| `--json` | With `-p`, print one JSON status line. |
+| `--resume <thread-id>` | Resume a recorded thread. |
+| `-c` | Continue the latest thread; cannot combine with `--resume`. |
+| `-m <model-id>` | Select the model for a new thread. |
+| `--approval auto\|ask\|yolo` | Set the approval mode. |
+| `--sandbox workspace-write\|off` | Set the harness sandbox mode. |
+| `-C <directory>` | Change the working directory. |
+| `--help`, `--version` | Print client flag help or the build version. |
 
-- [Quickstart](docs/quickstart.md)
-- [Install](docs/install.md)
-- [Command line](docs/cli.md)
-- [Slash commands](docs/commands.md)
-- [Settings in dal.toml](docs/config.md)
-- [Providers and models](docs/models.md)
-- [Tools, modes, and approval](docs/tools.md)
+Prefix client commands with the product name, for example `dal models` or `dalgona -p "Explain this repository"`. Dalgona also accepts `--remote <name>` to select a configured remote instead of the local daemon.
 
-Extension and session control:
+These commands are specific to dalgona:
 
-- [Plugins](docs/plugins.md)
-- [Port a pi extension](docs/convert-pi.md)
-- [Rules](docs/rules.md)
-- [Symbols and structural editing](docs/symbols.md)
-- [Sandbox](docs/sandbox.md)
-- [Complexity guard](docs/guard.md)
-- [System prompt](docs/prompt.md)
-- [Sessions and compaction](docs/sessions.md)
-- [Terminal and keys](docs/terminal.md)
+| Command | Purpose |
+| --- | --- |
+| `dalgona daemon` | Run the per-user daemon. |
+| `dalgona app-server [--listen <address>]` | Bridge the desktop protocol over standard input and output or a loopback WebSocket. |
+| `dalgona service install\|uninstall` | Add or remove login-time daemon startup. |
+| `dalgona pull <thread-id>` | Apply a thread box's changes locally. |
+| `dalgona runner gc [--yes]` | List unused boxes, or delete them with `--yes`. |
+| `dalgona cloud up <name> [--copy-auth]` | Create a whole-daemon box. |
+| `dalgona cloud pull <name>` | Apply a whole-daemon box's workspace changes locally. |
+| `dalgona cloud down <name> [--yes]` | Destroy a whole-daemon box. |
+| `dalgona codex install\|uninstall\|status` | Manage the desktop executable override. |
+| `dalgona codex record --real <codex-path> [args...]` | Record protocol metadata while running the selected Codex executable. |
+| `dalgona web` | Serve the web interface; set its listener, token, and TLS files in `[web]`, not CLI flags. See [web access rules](docs/spec/web.md). |
+| `dalgona run <file.star> [--arg k=v ...]` | Run a durable Starlark workflow. A value that is valid JSON is passed as JSON; any other value is passed as a string. |
+| `dalgona exec-server [--listen <address>] [--root <directory>] [--data <directory>]` | Serve process and filesystem operations inside a box. |
+| `dalgona bridge` | Connect standard input and output to the local daemon, starting it if needed. |
+| `just dist` | Build release binaries for remote bootstrap. |
+| `just box-image` | Build the remote box image. |
 
-Clients and embedding:
+`app-server` defaults to `stdio://`. Its WebSocket listener accepts `ws://<loopback-address>:<port>`. Use repeated `-c key=value` or `--config key=value` arguments to set `model`, `approval_policy`, or `sandbox_mode` for new desktop threads.
 
-- [Protocol](docs/protocol.md)
-- [Router and A2A](docs/serve.md)
-- [Embed in Rust](docs/sdk.md)
-- [Build a client](docs/integrate.md)
-- [Example plugins](docs/examples.md)
-- [Philosophy: why dal has one extension door](docs/philosophy.md)
+`exec-server` defaults to `--listen stdio:// --root /workspace`. Its WebSocket listener accepts `ws://IP:PORT` and requires `DALGONA_BOX_TOKEN` with at least 32 characters. `--data` selects a persistent data directory. The bridge and exec server run where you invoke them; `--remote` does not redirect them.
 
-Dalgona product:
+`codex record` defaults to forwarding `app-server` when you omit arguments. It writes protocol metadata to `<home>/census/<unix-seconds>.jsonl`.
 
-- [Batteries](dalgona/docs/batteries.md)
-- [Settings that differ](dalgona/docs/config.md)
-- [Orchestration](dalgona/docs/orchestration.md)
-- [Eval packs](dalgona/docs/eval.md)
-- [Dalgona philosophy](dalgona/docs/philosophy.md)
-- [Dalgona readme](dalgona/README.md)
+## Read the contracts and contribute
 
-Project contracts:
+[The documentation index](docs/README.md) links every current specification and decision. Start with [journal](docs/spec/journal.md), [recovery](docs/spec/recovery.md), and [protocol](docs/spec/protocol.md) for the core contracts.
 
-- [Concepts](CONCEPTS.md)
-- [Design](DESIGN.md)
-- [Branding and names](BRANDING.md)
-- [Changelog](CHANGELOG.md)
-- [Product requirements (maintainer spec)](docs/requirements.md)
-- [License](LICENSE.md)
-
-## Development
-
-No `CONTRIBUTING.md` is checked in.
-
-Work from the repository root. It holds one Cargo workspace and one `Cargo.lock`. Use the latest stable Rust toolchain.
-
-Mirror the dal CI lane before review (`.github/workflows/dal.yml`):
-
-```sh
-cargo fmt --check
-cargo clippy --workspace --exclude dalgona --exclude dalgona-batteries --exclude dalgona-gates --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --exclude dalgona --exclude dalgona-batteries --exclude dalgona-gates --all-features --locked
-cargo deny --locked check
-```
-
-The dal lane excludes the dalgona packages; the dalgona lane (`.github/workflows/dalgona.yml`) covers `dalgona`, `dalgona-batteries`, and `dalgona-gates` the same way, so match the scope to your change. `AGENTS.md` lists the merge gates. The timing-lane stress budgets (`DAL_TIMING_BUDGETS`) run only on schedule or manual dispatch, not on every push.
-
-Regenerate the dal manual after doc changes with the `docs-gen` command recorded in `AGENTS.md`. Keep Linux, macOS, and Windows behavior in mind. Do not publish a crate, create or push a tag, create a release, or run a release workflow without explicit approval.
-
-Report issues and propose changes as GitHub issues and pull requests against `gosuda/dalgona`.
-
-## License
-
-Dal and dalgona are source-available under the Sustainable Use License, Version 1.0, with licensor `metaphorics`. Read the full terms in [LICENSE.md](LICENSE.md).
-
-This repository also includes Starlark translations of examples from pi (https://github.com/earendil-works/pi), Copyright (c) 2025 Mario Zechner, used under the MIT License; the license text is in [docs/examples.md](docs/examples.md).
+Read [CONTRIBUTE.md](CONTRIBUTE.md) before changing code and [REVIEW.md](REVIEW.md) before reviewing it. [AGENTS.md](AGENTS.md) contains repository instructions for coding agents. [justfile](justfile) declares the available checks. `just verify` runs the Go, web, and Cloudflare checks. It also runs the hashline model check when `uv` is installed.

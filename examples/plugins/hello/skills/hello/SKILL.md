@@ -1,3 +1,0 @@
-# hello
-
-The smallest skill.

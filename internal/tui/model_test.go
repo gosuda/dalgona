@@ -1,0 +1,466 @@
+package tui
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/gosuda/dalgona/internal/rpc"
+)
+
+type callRecord struct {
+	method string
+	params any
+}
+
+type fakeCaller struct {
+	calls []callRecord
+}
+
+func (f *fakeCaller) Notify(method string, params any) error {
+	f.calls = append(f.calls, callRecord{method: method, params: params})
+	return nil
+}
+
+func (f *fakeCaller) Call(_ context.Context, method string, params, result any) error {
+	f.calls = append(f.calls, callRecord{method: method, params: params})
+	switch out := result.(type) {
+	case *rpc.TurnStartResponse:
+		out.Turn = rpc.Turn{ID: "turn-1", Status: "inProgress"}
+	case *rpc.ThreadResumeResponse:
+		out.Thread = rpc.Thread{ID: "t1", Name: "resumed"}
+	case *rpc.ThreadReadResponse:
+		out.Thread = rpc.Thread{ID: "t1", Name: "resumed"}
+	case *[]rpc.AdvisorState:
+		*out = []rpc.AdvisorState{{Name: "advisor", Model: "gpt-test", Status: "idle", Notes: 2}}
+	}
+	return nil
+}
+
+func TestModelInitializeHandshake(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	if msg, ok := m.initialize()().(resultMsg); !ok || msg.err != nil {
+		t.Fatalf("initialize result = %#v", msg)
+	}
+	if len(caller.calls) != 2 || caller.calls[0].method != "initialize" || caller.calls[1].method != "initialized" {
+		t.Fatalf("handshake calls = %#v", caller.calls)
+	}
+	params, ok := caller.calls[0].params.(rpc.InitializeParams)
+	if !ok || params.ClientInfo.Name != "dalgona" {
+		t.Fatalf("initialize params = %#v", caller.calls[0].params)
+	}
+}
+
+func TestModelShowsConnectionLoss(t *testing.T) {
+	t.Parallel()
+	m := newModel(nil, Options{}, nil)
+	m.threadID = "t1"
+	m, _ = drive(t, m, disconnectedMsg{err: errors.New("EOF")})
+	m, _ = drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"x","items":[],"status":"completed"}}`)})
+	assertContains(t, strings.Join(strings.Fields(m.View().Content), " "), "state: disconnected", "connection lost: EOF; restart the TUI, then /resume t1")
+}
+
+func drive(t *testing.T, m model, msg tea.Msg) (model, tea.Cmd) {
+	t.Helper()
+	updated, command := m.Update(msg)
+	next, ok := updated.(model)
+	if !ok {
+		t.Fatalf("Update returned %T, want model", updated)
+	}
+	return next, command
+}
+
+func press(code rune, mod tea.KeyMod, text string) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: code, Mod: mod, Text: text}
+}
+
+func TestModelStreamsItemsAndShowsStates(t *testing.T) {
+	t.Parallel()
+	m := newModel(nil, Options{}, nil)
+	m.width = 40
+	m.composer.SetWidth(40)
+	m, _ = drive(t, m, notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)})
+	m, _ = drive(t, m, notificationMsg{method: "item/started", params: []byte(`{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":{"type":"agentMessage","id":"a1","text":""}}`)})
+	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"hel"}`)})
+	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"lo"}`)})
+	view := m.View().Content
+	for _, want := range []string{"hello", "state: running", "default · auto · workspace-write · demo"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("streaming view missing %q:\n%s", want, view)
+		}
+	}
+	m, command := drive(t, m, notificationMsg{method: "item/completed", params: []byte(`{"threadId":"t1","turnId":"turn-1","completedAtMs":2,"item":{"type":"agentMessage","id":"a1","text":""}}`)})
+	if command == nil {
+		t.Fatal("completed item did not schedule tea.Println")
+	}
+	m, _ = drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"interrupted"}}`)})
+	if !strings.Contains(m.View().Content, "state: interrupted") {
+		t.Fatalf("interrupted state is not visible:\n%s", m.View().Content)
+	}
+	m.sandbox = "off"
+	m, _ = drive(t, m, notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":"provider unavailable"}}`)})
+	view = strings.Join(strings.Fields(m.View().Content), " ")
+	for _, want := range []string{"state: failed", "no sandbox", "retry the turn"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("failure view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func assertContains(t *testing.T, view string, wants ...string) {
+	t.Helper()
+	for _, want := range wants {
+		if !strings.Contains(view, want) {
+			t.Errorf("view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func runCommand(t *testing.T, m model, command tea.Cmd, missing string) model {
+	t.Helper()
+	if command == nil {
+		t.Fatal(missing)
+	}
+	m, _ = drive(t, m, command())
+	return m
+}
+
+func TestModelApprovalPromptAndDecision(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		key      rune
+		decision string
+	}{
+		{key: 'y', decision: "accept"},
+		{key: 'a', decision: "acceptForSession"},
+		{key: 'n', decision: "decline"},
+	}
+	for _, test := range tests {
+		t.Run(test.decision, func(t *testing.T) {
+			t.Parallel()
+			m := newModel(nil, Options{}, nil)
+			answer := make(chan requestAnswer, 1)
+			request := serverRequestMsg{
+				method: "item/commandExecution/requestApproval",
+				params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"cmd1","startedAtMs":1,"command":"go test ./..."}`),
+				answer: answer,
+			}
+			m, _ = drive(t, m, request)
+			assertContains(t, m.View().Content, "approval required", "go test ./...", "[y] accept", "[a] accept for session", "[n] decline", "state: awaiting approval")
+			m, _ = drive(t, m, press(test.key, 0, string(test.key)))
+			response := <-answer
+			decision, ok := response.value.(rpc.CommandExecutionRequestApprovalResponse)
+			if !ok || decision.Decision != test.decision || response.err != nil {
+				t.Fatalf("approval response = %#v, %v; want %s", response.value, response.err, test.decision)
+			}
+			if m.state != stateRunning {
+				t.Fatalf("state after approval = %q, want running", m.state)
+			}
+		})
+	}
+}
+
+func TestModelPromptAndSteer(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.threadID = "t1"
+	m.composer.SetValue("hello")
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	if command == nil {
+		t.Fatal("Enter did not send a prompt")
+	}
+	m, _ = drive(t, m, command())
+	if got := caller.calls[0].method; got != "turn/start" {
+		t.Fatalf("prompt method = %q, want turn/start", got)
+	}
+	if m.turnID != "turn-1" {
+		t.Fatalf("accepted turn id = %q, want turn-1", m.turnID)
+	}
+	m.composer.SetValue("change course")
+	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+	if command == nil {
+		t.Fatal("Enter while running did not steer")
+	}
+	m, _ = drive(t, m, command())
+	steer, ok := caller.calls[1].params.(rpc.TurnSteerParams)
+	if caller.calls[1].method != "turn/steer" || !ok || steer.ExpectedTurnID != "turn-1" {
+		t.Fatalf("running prompt call = %#v, want turn/steer expecting turn-1", caller.calls[1])
+	}
+}
+
+func TestModelFollowupAndInterrupt(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.threadID = "t1"
+	m.turnID = "turn-1"
+	m.state = stateRunning
+	m.composer.SetValue("after this")
+	m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+	if len(m.followups) != 1 || m.followups[0] != "after this" {
+		t.Fatalf("follow-up queue = %v, want [after this]", m.followups)
+	}
+	m, command := drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`)})
+	m = runCommand(t, m, command, "completed turn did not start the queued follow-up")
+	last := caller.calls[len(caller.calls)-1]
+	params, ok := last.params.(rpc.TurnStartParams)
+	if !ok || last.method != "turn/start" || params.Input[0].Text != "after this" {
+		t.Fatalf("follow-up call = %#v, want turn/start after this", last)
+	}
+	m, command = drive(t, m, press(tea.KeyEscape, 0, ""))
+	m = runCommand(t, m, command, "Esc did not interrupt the active turn")
+	last = caller.calls[len(caller.calls)-1]
+	if last.method != "turn/interrupt" || m.state != stateInterrupted {
+		t.Fatalf("interrupt = %q, state %q", last.method, m.state)
+	}
+}
+
+func TestModelSlashCommands(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input  string
+		method string
+	}{
+		{input: "/model", method: "model/list"},
+		{input: "/model gpt-test", method: "config/value/write"},
+		{input: "/resume", method: "thread/list"},
+		{input: "/new", method: "thread/start"},
+		{input: "/compact", method: "thread/compact/start"},
+		{input: "/login openai", method: "account/login/start"},
+		{input: "/tree", method: "dalgona/thread/tree"},
+		{input: "/revert", method: "dalgona/thread/tree"},
+		{input: "/fork", method: "thread/fork"},
+	}
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			caller := new(fakeCaller)
+			m := newModel(caller, Options{}, nil)
+			m.threadID = "t1"
+			command := m.executeSlash(test.input)
+			if command == nil {
+				t.Fatal("slash command produced no RPC command")
+			}
+			result := command()
+			if len(caller.calls) != 1 || caller.calls[0].method != test.method {
+				t.Fatalf("calls = %#v, want %s", caller.calls, test.method)
+			}
+			if _, ok := result.(resultMsg); !ok {
+				t.Fatalf("command result = %T, want resultMsg", result)
+			}
+		})
+	}
+}
+
+func TestModelSelectorActions(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.threadID = "t1"
+	m, _ = drive(t, m, resultMsg{op: "models", value: &rpc.ModelListResponse{Data: []rpc.Model{{ID: "one"}, {ID: "hidden", Hidden: true}, {ID: "two"}}}})
+	m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	if command == nil {
+		t.Fatal("model selection produced no command")
+	}
+	m, _ = drive(t, m, command())
+	if m.modelName != "two" || caller.calls[0].method != "config/value/write" {
+		t.Fatalf("selected model = %q, calls %#v", m.modelName, caller.calls)
+	}
+	m, _ = drive(t, m, resultMsg{op: "revertTree", value: &rpc.ThreadTreeResponse{Turns: []rpc.TreeTurn{{TurnID: "turn-8", Preview: "old"}, {TurnID: "turn-9", Preview: "work", Active: true}}}})
+	assertContains(t, m.View().Content, "revert before a turn", "work")
+	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = runCommand(t, m, command, "revert selection produced no command")
+	last := caller.calls[len(caller.calls)-1]
+	params, ok := last.params.(rpc.ThreadRevertParams)
+	if last.method != "thread/revert" || !ok || params.BeforeTurnID != "turn-9" {
+		t.Fatalf("revert call = %#v", last)
+	}
+	assertContains(t, m.View().Content, "files changed by later turns are not reverted")
+}
+
+func TestModelTreeSelectionSetsLeaf(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.threadID = "t1"
+	m, _ = drive(t, m, resultMsg{op: "tree", value: &rpc.ThreadTreeResponse{Turns: []rpc.TreeTurn{{TurnID: "turn-8", Preview: "old"}, {TurnID: "turn-9", Preview: "work", Active: true}}}})
+	assertContains(t, m.View().Content, "choose the active branch", "old", "work (active)")
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = runCommand(t, m, command, "tree selection produced no command")
+	last := caller.calls[len(caller.calls)-1]
+	params, ok := last.params.(rpc.ThreadLeafSetParams)
+	if last.method != "dalgona/thread/leaf/set" || !ok || params.TurnID != "turn-8" {
+		t.Fatalf("leaf call = %#v", last)
+	}
+	assertContains(t, m.View().Content, "files changed by later turns are not reverted")
+}
+
+func TestModelRendersSettledAssistantMarkdown(t *testing.T) {
+	t.Parallel()
+	m := newModel(nil, Options{}, nil)
+	m.width = 40
+	rendered := stripANSI(m.renderSettledItem(rpc.Item{Type: "agentMessage", Text: "**bold** and `code`"}))
+	if strings.Contains(rendered, "**") || !strings.Contains(rendered, "bold") || !strings.Contains(rendered, "code") {
+		t.Fatalf("settled markdown = %q", rendered)
+	}
+}
+
+func TestComposerAcceptsShiftedText(t *testing.T) {
+	t.Parallel()
+	m := newModel(nil, Options{}, nil)
+	m, _ = drive(t, m, press('h', tea.ModShift, "H"))
+	m, _ = drive(t, m, press('i', tea.ModCapsLock, "I"))
+	if got := m.composer.Value(); got != "HI" {
+		t.Fatalf("composer = %q, want HI", got)
+	}
+}
+
+func TestModelSessionOptionsDriveStatusAndThreadStart(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{Model: "openai/gpt-test", Approval: "yolo", Sandbox: "workspace-write"}, nil)
+	assertContains(t, m.View().Content, "openai/gpt-test · yolo · no sandbox · new thread")
+	m.startThread()()
+	params, ok := caller.calls[0].params.(rpc.ThreadStartParams)
+	if !ok || params.Model != "openai/gpt-test" || params.ApprovalPolicy != "never" || params.Sandbox != "danger-full-access" {
+		t.Fatalf("thread/start params = %#v", caller.calls[0].params)
+	}
+}
+
+func TestModelHoldsFollowupAfterInterruptedTurn(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.threadID = "t1"
+	m.turnID = "turn-1"
+	m.state = stateRunning
+	m.followups = []string{"later"}
+	m, command := drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"interrupted"}}`)})
+	if command != nil || len(caller.calls) != 0 {
+		t.Fatalf("interrupted turn released follow-up: calls %#v", caller.calls)
+	}
+	assertContains(t, strings.Join(strings.Fields(m.View().Content), " "), "state: interrupted", "1 follow-up held")
+	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+	runCommand(t, m, command, "empty Enter did not release the held follow-up")
+	params, ok := caller.calls[0].params.(rpc.TurnStartParams)
+	if !ok || params.Input[0].Text != "later" {
+		t.Fatalf("released follow-up = %#v", caller.calls[0])
+	}
+}
+
+func TestModelDoubleCtrlCAndNarrowWrap(t *testing.T) {
+	t.Parallel()
+	m := newModel(nil, Options{}, nil)
+	m.width = 40
+	m.composer.SetWidth(40)
+	m.title = "a thread with a long visible title"
+	m.live = []liveItem{{Item: rpc.Item{ID: "a1", Type: "agentMessage", Text: strings.Repeat("wrappable ", 20)}}}
+	m, command := drive(t, m, press('c', tea.ModCtrl, ""))
+	if command != nil || !strings.Contains(m.notice, "again") {
+		t.Fatalf("first Ctrl+C command = %v, notice %q", command, m.notice)
+	}
+	_, command = drive(t, m, press('c', tea.ModCtrl, ""))
+	if command == nil {
+		t.Fatal("second Ctrl+C did not quit")
+	}
+	if _, ok := command().(tea.QuitMsg); !ok {
+		t.Fatalf("second Ctrl+C returned %T, want tea.QuitMsg", command())
+	}
+	for line := range strings.SplitSeq(m.View().Content, "\n") {
+		if width := lipgloss.Width(line); width > 40 {
+			t.Errorf("line width = %d, want <= 40: %q", width, line)
+		}
+	}
+}
+
+func TestModelReportsMalformedProtocolWithRecovery(t *testing.T) {
+	t.Parallel()
+	m := newModel(nil, Options{}, nil)
+	m.threadID = "t1"
+	m, _ = drive(t, m, notificationMsg{method: "item/started", params: []byte(`[]`)})
+	if !strings.Contains(m.notice, "protocol error") || !strings.Contains(m.notice, "/resume t1") {
+		t.Fatalf("malformed notification notice = %q", m.notice)
+	}
+}
+
+func TestModelOpensInitialThread(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		threadID string
+		methods  []string
+	}{
+		{name: "new", methods: []string{"thread/start"}},
+		{name: "resume", threadID: "t2", methods: []string{"thread/resume", "thread/read"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := newModel(caller, Options{ThreadID: test.threadID}, nil)
+			m.startThread()()
+			if len(caller.calls) != len(test.methods) {
+				t.Fatalf("calls = %#v, want methods %v", caller.calls, test.methods)
+			}
+			for i, method := range test.methods {
+				if caller.calls[i].method != method {
+					t.Fatalf("call %d = %q, want %q", i, caller.calls[i].method, method)
+				}
+			}
+		})
+	}
+}
+
+func TestModelIgnoresStaleStatusAndInterruptAcknowledgement(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.threadID = "t1"
+	m.seq = 4
+	m.turnID = "turn-new"
+	m.state = stateRunning
+	m, _ = drive(t, m, notificationMsg{method: "thread/status/changed", params: []byte(`{"threadId":"t1","status":{"type":"systemError"},"seq":3}`)})
+	if m.state != stateRunning || m.seq != 4 {
+		t.Fatalf("stale status changed state to %q seq %d", m.state, m.seq)
+	}
+	m, _ = drive(t, m, resultMsg{op: "interrupt", turnID: "turn-old"})
+	if m.state != stateRunning {
+		t.Fatalf("stale interrupt changed state to %q", m.state)
+	}
+	if len(caller.calls) != 0 {
+		t.Fatalf("stale messages caused calls %#v", caller.calls)
+	}
+}
+
+func TestModelResetsStatusSeqOnThreadChange(t *testing.T) {
+	t.Parallel()
+	m := newModel(nil, Options{}, nil)
+	m, _ = drive(t, m, notificationMsg{method: "thread/status/changed", params: []byte(`{"threadId":"t1","status":{"type":"idle"},"seq":9}`)})
+	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Thread: rpc.Thread{ID: "t2"}}})
+	m, _ = drive(t, m, notificationMsg{method: "thread/status/changed", params: []byte(`{"threadId":"t2","status":{"type":"active","activeFlags":[]},"seq":2}`)})
+	if m.threadID != "t2" || m.state != stateRunning || m.seq != 2 {
+		t.Fatalf("after /new: thread %q state %q seq %d", m.threadID, m.state, m.seq)
+	}
+}
+
+func TestModelFailurePreservesComposerAndSteerState(t *testing.T) {
+	t.Parallel()
+	m := newModel(nil, Options{}, nil)
+	m.threadID = "t1"
+	m.state = stateRunning
+	m.composer.SetValue("new text")
+	m, _ = drive(t, m, resultMsg{op: "steer", text: "old text", err: errors.New("closed")})
+	if got := m.composer.Value(); got != "old text\nnew text" {
+		t.Fatalf("composer after steer failure = %q", got)
+	}
+	if m.state != stateRunning {
+		t.Fatalf("steer failure changed state to %q", m.state)
+	}
+}

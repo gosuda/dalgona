@@ -1,2 +1,0 @@
-data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Partial"}]},"index":0}],"usageMetadata":{"promptTokenCount":9,"totalTokenCount":9},"modelVersion":"gemini-3-pro","responseId":"resp-cut-1"}
-

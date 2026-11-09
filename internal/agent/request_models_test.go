@@ -1,0 +1,179 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gosuda/dalgona/internal/model"
+)
+
+var (
+	errStubModels = errors.New("agent: stub models unavailable")
+	errStubStream = errors.New("agent: stub stream unused")
+)
+
+type stubModelLister struct {
+	mu       sync.Mutex
+	calls    atomic.Int64
+	models   []model.Model
+	err      error
+	deadline atomic.Bool
+}
+
+func (s *stubModelLister) Models(ctx context.Context) ([]model.Model, error) {
+	s.calls.Add(1)
+	_, ok := ctx.Deadline()
+	s.deadline.Store(ok)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.models, s.err
+}
+
+func (s *stubModelLister) Stream(context.Context, model.Request) (model.Stream, error) {
+	return nil, errStubStream
+}
+
+func modelsRegistry(t *testing.T, provider model.Provider) *model.Registry {
+	t.Helper()
+	registry := model.NewRegistry()
+	if err := registry.Register("stub", provider); err != nil {
+		t.Fatalf("agent: register provider: %v", err)
+	}
+	return registry
+}
+
+func TestProviderModelsCachesFailures(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	now := time.Now()
+	h.host.clock = func() time.Time { return now }
+	lister := &stubModelLister{err: errStubModels}
+	registry := modelsRegistry(t, lister)
+	if got := h.host.providerModels(t.Context(), registry, "stub"); len(got) != 0 {
+		t.Fatalf("agent: providerModels = %v, want empty", got)
+	}
+	if got := h.host.providerModels(t.Context(), registry, "stub"); len(got) != 0 {
+		t.Fatalf("agent: providerModels = %v, want empty", got)
+	}
+	if calls := lister.calls.Load(); calls != 1 {
+		t.Fatalf("agent: provider models calls = %d, want 1 cached failure", calls)
+	}
+	now = now.Add(2 * negativeModelsTTL)
+	if got := h.host.providerModels(t.Context(), registry, "stub"); len(got) != 0 {
+		t.Fatalf("agent: providerModels = %v, want empty", got)
+	}
+	if calls := lister.calls.Load(); calls != 2 {
+		t.Fatalf("agent: provider models calls = %d, want refresh after TTL", calls)
+	}
+}
+
+func TestProviderModelsBoundsLookup(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	lister := &stubModelLister{models: []model.Model{{ID: "stub-a"}}}
+	registry := modelsRegistry(t, lister)
+	if got := h.host.providerModels(t.Context(), registry, "stub"); len(got) != 1 {
+		t.Fatalf("agent: providerModels = %v, want one model", got)
+	}
+	if !lister.deadline.Load() {
+		t.Fatal("agent: provider models lookup ran without a timeout")
+	}
+	if got := h.host.providerModels(t.Context(), registry, "stub"); len(got) != 1 {
+		t.Fatalf("agent: providerModels = %v, want one model", got)
+	}
+	if calls := lister.calls.Load(); calls != 1 {
+		t.Fatalf("agent: provider models calls = %d, want 1 cached success", calls)
+	}
+}
+
+func TestProviderModelsSkipsCacheOnCallerCancel(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	now := time.Now()
+	h.host.clock = func() time.Time { return now }
+	lister := &stubModelLister{err: errStubModels}
+	registry := modelsRegistry(t, lister)
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(context.Canceled)
+	if got := h.host.providerModels(ctx, registry, "stub"); len(got) != 0 {
+		t.Fatalf("agent: providerModels = %v, want empty", got)
+	}
+	if got := h.host.providerModels(t.Context(), registry, "stub"); len(got) != 0 {
+		t.Fatalf("agent: providerModels = %v, want empty", got)
+	}
+	if calls := lister.calls.Load(); calls != 2 {
+		t.Fatalf("agent: provider models calls = %d, want 2 without caching caller cancel", calls)
+	}
+}
+
+type blockingModelLister struct {
+	calls   atomic.Int64
+	release chan struct{}
+}
+
+func (s *blockingModelLister) Models(context.Context) ([]model.Model, error) {
+	s.calls.Add(1)
+	<-s.release
+	return []model.Model{{ID: "stub-a"}}, nil
+}
+
+func (s *blockingModelLister) Stream(context.Context, model.Request) (model.Stream, error) {
+	return nil, errStubStream
+}
+
+func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func collectModels(t *testing.T, done chan []model.Model, callers int) {
+	t.Helper()
+	for range callers {
+		select {
+		case got := <-done:
+			if len(got) != 1 {
+				t.Fatalf("agent: providerModels = %v, want one model", got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("agent: concurrent lookup did not return")
+		}
+	}
+}
+
+func TestProviderModelsCollapsesConcurrentLookups(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	lister := &blockingModelLister{release: make(chan struct{})}
+	registry := modelsRegistry(t, lister)
+	const callers = 8
+	var entered atomic.Int64
+	done := make(chan []model.Model, callers)
+	for range callers {
+		go func() {
+			entered.Add(1)
+			done <- h.host.providerModels(context.Background(), registry, "stub")
+		}()
+	}
+	waitFor(t, 5*time.Second, "agent: concurrent lookups did not start", func() bool {
+		return entered.Load() == callers
+	})
+	waitFor(t, 5*time.Second, "agent: lookup never reached the provider", func() bool {
+		return lister.calls.Load() != 0
+	})
+	time.Sleep(200 * time.Millisecond)
+	close(lister.release)
+	collectModels(t, done, callers)
+	if calls := lister.calls.Load(); calls != 1 {
+		t.Fatalf("agent: provider models calls = %d, want 1 collapsed lookup", calls)
+	}
+}

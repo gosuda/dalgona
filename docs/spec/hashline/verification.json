@@ -1,0 +1,49 @@
+{
+  "model": "hashline-v1-range-gap-identity",
+  "status": "passed",
+  "single_splice": {
+    "file_lengths": [
+      0,
+      8
+    ],
+    "inserted_lengths": [
+      0,
+      3
+    ],
+    "range_cases": 14178,
+    "range_accepted": 5676,
+    "gap_cases": 4335,
+    "gap_accepted": 2400
+  },
+  "two_splices": {
+    "initial_file_lengths": [
+      0,
+      5
+    ],
+    "inserted_lengths_each": [
+      0,
+      2
+    ],
+    "range_cases": 62621,
+    "range_accepted": 17824,
+    "gap_cases": 28539,
+    "gap_accepted": 9940
+  },
+  "regressions": [
+    "equal_text_is_not_original_identity",
+    "known_aba_does_not_revive_target",
+    "range_boundary_insertions_do_not_expand_target",
+    "gap_occupancy_and_neighbors_are_protected",
+    "empty_and_eof_gap_conflicts",
+    "later_delivery_cannot_authorize_pending_request",
+    "enhanced_acceptance_is_light_plus_coverage",
+    "eof_separator_change_invalidates_touched_line"
+  ],
+  "limitations": [
+    "Bounded pure model, not a proof over all inputs.",
+    "Line identities are modeled; filesystem occurrence identities are not supplied by hashes.",
+    "No filesystem, parser, AST, journal, transport, allocator or process-race tests.",
+    "Known conflicts remain invalid even when later edits restore equal bytes or adjacency.",
+    "Observation checks are abstract ordering checks, not delivery instrumentation."
+  ]
+}
