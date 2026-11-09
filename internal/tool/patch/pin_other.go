@@ -39,10 +39,6 @@ func (p *dirPin) readFileAt(base string) ([]byte, error) {
 	return nil, errors.New("patch: pinned writes are unavailable on this platform")
 }
 
-func (p *dirPin) leafExists(base string) (bool, error) {
-	return false, errors.New("patch: pinned writes are unavailable on this platform")
-}
-
 func (p *dirPin) leafExistsAfterChain(base, display string) (bool, error) {
 	return false, errors.New("patch: pinned writes are unavailable on this platform")
 }

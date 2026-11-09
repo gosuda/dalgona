@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -63,6 +64,13 @@ func canceledExit(signal Signal) (int, string) {
 	return int(jobExitCode(signal)), ""
 }
 
+func windowsPID(pid int) (uint32, bool) {
+	if pid < 0 || uint64(pid) > math.MaxUint32 {
+		return 0, false
+	}
+	return uint32(pid), true
+}
+
 func assignJob(cmd *exec.Cmd) (func(), error) {
 	name, err := windows.UTF16PtrFromString(jobName(os.Getpid()))
 	if err != nil {
@@ -72,7 +80,12 @@ func assignJob(cmd *exec.Cmd) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("runner: create job: %w", err)
 	}
-	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+	pid, ok := windowsPID(cmd.Process.Pid)
+	if !ok {
+		_ = windows.CloseHandle(job)
+		return nil, fmt.Errorf("runner: invalid command pid %d", cmd.Process.Pid)
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, pid)
 	if err != nil {
 		_ = windows.CloseHandle(job)
 		return nil, fmt.Errorf("runner: open command process: %w", err)
@@ -95,7 +108,7 @@ func openJobObject(name string) (windows.Handle, error) {
 		return 0, fmt.Errorf("runner: encode job name: %w", err)
 	}
 	procedure := windows.NewLazySystemDLL("kernel32.dll").NewProc("OpenJobObjectW")
-	handle, _, callErr := procedure.Call(jobObjectTerminate, 0, uintptr(unsafe.Pointer(encoded)))
+	handle, _, callErr := procedure.Call(jobObjectTerminate, 0, uintptr(unsafe.Pointer(encoded))) //nolint:gosec // OpenJobObjectW expects the job name passed as uintptr
 	if handle == 0 {
 		return 0, fmt.Errorf("runner: open job: %w", callErr)
 	}
@@ -107,7 +120,11 @@ func jobName(pid int) string {
 }
 
 func processIsAlive(pid int) bool {
-	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	wpid, ok := windowsPID(pid)
+	if !ok {
+		return false
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, wpid)
 	if err != nil {
 		return false
 	}
@@ -120,7 +137,11 @@ func processIsAlive(pid int) bool {
 }
 
 func processStartTime(pid int) string {
-	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	wpid, ok := windowsPID(pid)
+	if !ok {
+		return ""
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, wpid)
 	if err != nil {
 		return ""
 	}

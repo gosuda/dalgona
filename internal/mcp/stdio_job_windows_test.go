@@ -3,6 +3,7 @@
 package mcp_test
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -76,6 +77,9 @@ func waitPidFile(t *testing.T, path string) int {
 }
 
 func windowsProcessAlive(pid int) bool {
+	if pid < 0 || uint64(pid) > math.MaxUint32 {
+		return false
+	}
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
 		return false

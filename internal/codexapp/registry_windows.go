@@ -71,8 +71,8 @@ func broadcastEnvironmentChange() error {
 		smtoAbortIfHung = 0x0002
 	)
 	var result uintptr
-	_, _, callErr := proc.Call(hwndBroadcast, wmSettingChange, 0, uintptr(unsafe.Pointer(setting)), smtoAbortIfHung, 5000, uintptr(unsafe.Pointer(&result)))
-	if callErr != windows.ERROR_SUCCESS && callErr != windows.ERROR_TIMEOUT {
+	_, _, callErr := proc.Call(hwndBroadcast, wmSettingChange, 0, uintptr(unsafe.Pointer(setting)), smtoAbortIfHung, 5000, uintptr(unsafe.Pointer(&result))) //nolint:gosec // SendMessageTimeoutW needs the string and result pointers passed as uintptr
+	if !errors.Is(callErr, windows.ERROR_SUCCESS) && !errors.Is(callErr, windows.ERROR_TIMEOUT) {
 		return fmt.Errorf("codexapp: broadcast environment change: %w", callErr)
 	}
 	return nil

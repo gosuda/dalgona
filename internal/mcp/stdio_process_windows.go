@@ -5,6 +5,7 @@ package mcp
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"syscall"
@@ -32,20 +33,31 @@ func killStdioProcess(cmd *exec.Cmd) error {
 	return nil
 }
 
+func windowsPID(pid int) (uint32, bool) {
+	if pid < 0 || uint64(pid) > math.MaxUint32 {
+		return 0, false
+	}
+	return uint32(pid), true
+}
+
 func assignStdioJob(cmd *exec.Cmd) (func(), error) {
 	if cmd.Process == nil {
 		return nil, errors.New("mcp: stdio process not started")
 	}
-	pid := uint32(cmd.Process.Pid)
+	pid, ok := windowsPID(cmd.Process.Pid)
+	if !ok {
+		return nil, fmt.Errorf("mcp: invalid stdio process pid %d", cmd.Process.Pid)
+	}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		resumeStdioProcessBestEffort(pid)
 		return nil, fmt.Errorf("mcp: create stdio job: %w", err)
 	}
-	if err := setKillOnJobClose(job); err != nil {
+	killErr := setKillOnJobClose(job)
+	if killErr != nil {
 		_ = windows.CloseHandle(job)
 		resumeStdioProcessBestEffort(pid)
-		return nil, fmt.Errorf("mcp: limit stdio job: %w", err)
+		return nil, fmt.Errorf("mcp: limit stdio job: %w", killErr)
 	}
 	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, pid)
 	if err != nil {
@@ -79,7 +91,7 @@ func setKillOnJobClose(job windows.Handle) error {
 	_, err := windows.SetInformationJobObject(
 		job,
 		windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&info)),
+		uintptr(unsafe.Pointer(&info)), //nolint:gosec // SetInformationJobObject expects a pointer to the limit struct
 		uint32(unsafe.Sizeof(info)),
 	)
 	return err
