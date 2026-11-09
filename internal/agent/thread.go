@@ -141,7 +141,7 @@ func (h *Host) lockSession(id string) (func() error, error) {
 	if h.cfg.Product != config.ProductDal {
 		return func() error { return nil }, nil
 	}
-	release, err := journal.LockSession(h.cfg.Config.Home, id)
+	release, err := h.journal.LockSession(id)
 	if err != nil {
 		return nil, fmt.Errorf("%w", err)
 	}

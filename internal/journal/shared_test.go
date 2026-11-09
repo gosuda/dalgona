@@ -196,28 +196,36 @@ func runSharedChild(t *testing.T, dir string) {
 	closeStore(t, store)
 }
 
+func mustLockOwnedSession(t *testing.T, store *Store, session string) func() error {
+	t.Helper()
+	release, err := store.LockSession(session)
+	if err != nil {
+		t.Fatalf("LockSession %s: %v", session, err)
+	}
+	return release
+}
+
 func TestOpenSharedSkipsOwnedSession(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions", "x", "journal.jsonl")
-	store := mustOpenShared(t, dir)
-	release := mustLockSession(t, dir, "x")
-	events := appendEvents(t, store, "x", 3)
-	closeStore(t, store)
+	owner := mustOpenShared(t, dir)
+	release := mustLockOwnedSession(t, owner, "x")
+	events := appendEvents(t, owner, "x", 3)
 	committed := readFile(t, path)
 	torn := append(bytes.Clone(committed), `{"seq":4,"prev":"`...)
 	writeFile(t, path, torn)
 
-	store = mustOpenShared(t, dir)
+	other := mustOpenShared(t, dir)
 	if !bytes.Equal(readFile(t, path), torn) {
 		t.Fatal("OpenShared repaired a session that another owner holds")
 	}
-	requireEvents(t, replayEvents(t, store, "x"), events)
+	requireEvents(t, replayEvents(t, other, "x"), events)
 	if !bytes.Equal(readFile(t, path), torn) {
-		t.Fatal("Replay repaired a session that another owner holds")
+		t.Fatal("Replay by a second Store repaired a session that the owning Store holds")
 	}
 	mustRelease(t, release)
 
-	requireEvents(t, replayEvents(t, store, "x"), events)
+	requireEvents(t, replayEvents(t, other, "x"), events)
 	if !bytes.Equal(readFile(t, path), committed) {
 		t.Fatal("Replay of an unowned session left the torn tail in place")
 	}
@@ -225,12 +233,13 @@ func TestOpenSharedSkipsOwnedSession(t *testing.T) {
 	if !bytes.Equal(readFile(t, quarantined), torn[len(committed):]) {
 		t.Fatal("torn tail was not quarantined")
 	}
-	release = mustLockSession(t, dir, "x")
-	if seq, err := store.Append(context.Background(), "x", event(3)); err != nil || seq != 4 {
+	release = mustLockOwnedSession(t, other, "x")
+	if seq, err := other.Append(context.Background(), "x", event(3)); err != nil || seq != 4 {
 		t.Fatalf("Append after repair seq = %d, err = %v", seq, err)
 	}
 	mustRelease(t, release)
-	closeStore(t, store)
+	closeStore(t, owner)
+	closeStore(t, other)
 }
 
 func TestOpenSharedRepairsMirrorRowsPerSession(t *testing.T) {
@@ -331,6 +340,111 @@ func TestOpenSharedLeavesMirrorWhilePeerIsOpen(t *testing.T) {
 	if err != nil || len(matches) == 0 {
 		t.Fatalf("sole opener did not quarantine the unusable state.db: %v, %v", matches, err)
 	}
+}
+
+func TestSessionReleaseHoldsRepairGate(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpenShared(t, dir)
+	appendEvents(t, store, "g", 1)
+	sdir, err := sessionDirFor(dir, "g")
+	if err != nil {
+		t.Fatalf("sessionDirFor: %v", err)
+	}
+	release := mustLockOwnedSession(t, store, "g")
+	releaseGate, err := holdLock(filepath.Join(sdir, "repair.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- release() }()
+	select {
+	case err := <-done:
+		t.Fatalf("release returned %v while a repair probe held the gate", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if !store.sessionLockedByUs(sdir) {
+		_ = releaseGate()
+		t.Fatal("release dropped ownership before the gate freed")
+	}
+	if err := releaseGate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("release after the gate: %v", err)
+	}
+	if store.sessionLockedByUs(sdir) {
+		t.Fatal("release left the session marked owned")
+	}
+	closeStore(t, store)
+}
+
+func resetSessionDir(t *testing.T, sdir string) {
+	t.Helper()
+	if err := os.Remove(sdir); err != nil {
+		t.Fatalf("unblock session dir: %v", err)
+	}
+	if err := os.MkdirAll(sdir, 0o700); err != nil {
+		t.Fatalf("recreate session dir: %v", err)
+	}
+}
+
+func TestReleaseRetriesAfterGateFailure(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpenShared(t, dir)
+	appendEvents(t, store, "g", 1)
+	sdir, err := sessionDirFor(dir, "g")
+	if err != nil {
+		t.Fatalf("sessionDirFor: %v", err)
+	}
+	release := mustLockOwnedSession(t, store, "g")
+	if err := os.RemoveAll(sdir); err != nil {
+		t.Fatalf("remove session dir: %v", err)
+	}
+	if err := os.WriteFile(sdir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("block session dir: %v", err)
+	}
+	if err := release(); err == nil {
+		t.Fatal("release succeeded while repair.lock was unopenable")
+	}
+	if !store.sessionLockedByUs(sdir) {
+		t.Fatal("failed release dropped ownership")
+	}
+	resetSessionDir(t, sdir)
+	if err := release(); err != nil {
+		t.Fatalf("release retry: %v", err)
+	}
+	if store.sessionLockedByUs(sdir) {
+		t.Fatal("release left the session marked owned")
+	}
+	if err := release(); err != nil {
+		t.Fatalf("second release: %v", err)
+	}
+	closeStore(t, store)
+}
+
+func TestReplayConcurrentWithRelease(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpenShared(t, dir)
+	release := mustLockOwnedSession(t, store, "s")
+	appendEvents(t, store, "s", 3)
+	var got [][]byte
+	replayDone := make(chan error, 1)
+	go func() {
+		replayDone <- store.Replay("s", func(_ uint64, ev []byte) error {
+			got = append(got, bytes.Clone(ev))
+			return nil
+		})
+	}()
+	releaseDone := make(chan error, 1)
+	go func() { releaseDone <- release() }()
+	if err := <-replayDone; err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if err := <-releaseDone; err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	requireEvents(t, got, numberedEvents(3))
+	closeStore(t, store)
 }
 
 func TestLockSessionWaitsForRepairProbe(t *testing.T) {
@@ -455,4 +569,31 @@ func TestSessionDirForRetriesParentSync(t *testing.T) {
 	if len(synced) != 1 || synced[0] != filepath.Join(dir, "sessions") {
 		t.Fatalf("synced = %v, want one parent sync", synced)
 	}
+}
+
+func TestReplaySeesDamageUnderOwnSessionLock(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpenShared(t, dir)
+	release := mustLockOwnedSession(t, store, "s")
+	appendEvents(t, store, "s", 2)
+	path := filepath.Join(dir, "sessions", "s", "journal.jsonl")
+	committed := readFile(t, path)
+	firstEnd := bytes.IndexByte(committed, '\n') + 1
+	writeFile(t, path, committed[:firstEnd])
+	writeFile(t, filepath.Join(dir, "sessions", "s", "damaged"), []byte("2\n"))
+	var got [][]byte
+	replayErr := store.Replay("s", func(_ uint64, ev []byte) error {
+		got = append(got, bytes.Clone(ev))
+		return nil
+	})
+	damage, ok := errors.AsType[*DamageError](replayErr)
+	if !ok || damage.Seq != 2 {
+		t.Fatalf("Replay error = %v, want damage at seq 2", replayErr)
+	}
+	requireEvents(t, got, [][]byte{event(0)})
+	if _, err := store.Append(context.Background(), "s", event(9)); err == nil {
+		t.Fatal("damaged session accepted an append")
+	}
+	mustRelease(t, release)
+	closeStore(t, store)
 }

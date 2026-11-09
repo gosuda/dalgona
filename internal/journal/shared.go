@@ -8,6 +8,41 @@ import (
 	"path/filepath"
 )
 
+func sessionLockKey(sdir string) string {
+	if abs, err := filepath.Abs(sdir); err == nil {
+		sdir = abs
+	}
+	return filepath.Clean(sdir)
+}
+
+func (s *Store) noteSessionLocked(sdir string) {
+	key := sessionLockKey(sdir)
+	s.ownedMu.Lock()
+	defer s.ownedMu.Unlock()
+	if s.owned == nil {
+		s.owned = make(map[string]int)
+	}
+	s.owned[key]++
+}
+
+func (s *Store) forgetSessionLocked(sdir string) {
+	key := sessionLockKey(sdir)
+	s.ownedMu.Lock()
+	defer s.ownedMu.Unlock()
+	if s.owned[key] <= 1 {
+		delete(s.owned, key)
+		return
+	}
+	s.owned[key]--
+}
+
+func (s *Store) sessionLockedByUs(sdir string) bool {
+	key := sessionLockKey(sdir)
+	s.ownedMu.Lock()
+	defer s.ownedMu.Unlock()
+	return s.owned[key] > 0
+}
+
 func (s *Store) attachShared() error {
 	if err := s.joinMirror(); err != nil {
 		return err
@@ -89,13 +124,23 @@ func (s *Store) refreshUnowned(sid string) (retErr error) {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, releaseGate()) }()
+	return s.reloadUnownedSession(sid, sdir)
+}
+
+func (s *Store) reloadUnownedSession(sid, sdir string) (retErr error) {
 	file, err := openLockFile(filepath.Join(sdir, "lock"))
 	if err != nil {
 		return err
 	}
-	owned, err := tryLock(file)
-	if err != nil || !owned {
-		return errors.Join(err, file.Close())
+	if s.sessionLockedByUs(sdir) {
+		if err := file.Close(); err != nil {
+			return err
+		}
+		return s.loadSession(sid)
+	}
+	owned, lockErr := tryLock(file)
+	if lockErr != nil || !owned {
+		return errors.Join(lockErr, file.Close())
 	}
 	defer func() { retErr = errors.Join(retErr, releaseLock(file)) }()
 	return s.loadSession(sid)

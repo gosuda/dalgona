@@ -73,6 +73,8 @@ type Store struct {
 	backupStop chan struct{}
 	backupWg   sync.WaitGroup
 	closed     bool
+	ownedMu    sync.Mutex
+	owned      map[string]int
 }
 
 var syncfsHook = syncfsDir
@@ -117,6 +119,7 @@ func open(dir string, shared bool) (_ *Store, retErr error) {
 		shared:   shared,
 		sessions: map[string]*sessionState{},
 		slocks:   map[string]*sync.Mutex{},
+		owned:    map[string]int{},
 		dirSync:  syncDir,
 	}
 	defer func() {
@@ -824,6 +827,24 @@ func LockSession(dir, session string) (func() error, error) {
 	return unlock, errors.Join(err, gateErr)
 }
 
+func (s *Store) LockSession(session string) (func() error, error) {
+	sdir, err := sessionDirFor(s.dir, session)
+	if err != nil {
+		return nil, err
+	}
+	releaseGate, err := holdLock(filepath.Join(sdir, "repair.lock"))
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := s.ownSession(sdir, session)
+	gateErr := releaseGate()
+	if gateErr != nil && unlock != nil {
+		gateErr = errors.Join(gateErr, unlock())
+		unlock = nil
+	}
+	return unlock, errors.Join(err, gateErr)
+}
+
 func ownSession(sdir, session string) (func() error, error) {
 	file, err := openLockFile(filepath.Join(sdir, "lock"))
 	if err != nil {
@@ -831,10 +852,57 @@ func ownSession(sdir, session string) (func() error, error) {
 	}
 	owned, err := tryLock(file)
 	if err == nil && owned {
-		return sync.OnceValue(func() error { return releaseLock(file) }), nil
+		return sync.OnceValue(func() error {
+			return releaseLock(file)
+		}), nil
 	}
 	if err == nil {
 		err = fmt.Errorf("another dal process owns session %s", session)
 	}
 	return nil, errors.Join(err, file.Close())
+}
+
+func (s *Store) ownSession(sdir, session string) (func() error, error) {
+	file, err := openLockFile(filepath.Join(sdir, "lock"))
+	if err != nil {
+		return nil, err
+	}
+	owned, err := tryLock(file)
+	if err == nil && owned {
+		s.noteSessionLocked(sdir)
+		released := false
+		return func() error {
+			if released {
+				return nil
+			}
+			releaseGate, gateErr := holdRepairGate(sdir)
+			if gateErr != nil {
+				return gateErr
+			}
+			lockErr := releaseLock(file)
+			if lockErr != nil {
+				return errors.Join(lockErr, releaseGate())
+			}
+			s.forgetSessionLocked(sdir)
+			released = true
+			return releaseGate()
+		}, nil
+	}
+	if err == nil {
+		err = fmt.Errorf("another dal process owns session %s", session)
+	}
+	return nil, errors.Join(err, file.Close())
+}
+
+func holdRepairGate(sdir string) (func() error, error) {
+	var releaseGate func() error
+	var gateErr error
+	for range 3 {
+		releaseGate, gateErr = holdLock(filepath.Join(sdir, "repair.lock"))
+		if gateErr == nil {
+			return releaseGate, nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return nil, gateErr
 }
