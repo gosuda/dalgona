@@ -570,21 +570,30 @@ func (s *Store) Sessions() ([]SessionHead, error) {
 	heads := make([]SessionHead, 0, len(s.sessions)+len(s.idx.sessions))
 	seen := map[string]bool{}
 	for id, st := range s.sessions {
-		heads = append(heads, s.headOf(id, st))
+		heads = append(heads, s.freshHead(id, st))
 		seen[id] = true
 	}
 	for id, row := range s.idx.sessions {
 		if seen[id] {
 			continue
 		}
-		status := SessionStatus(row.status)
-		if status == "" {
-			status = SessionOK
-		}
-		heads = append(heads, SessionHead{ID: id, HeadSeq: row.headSeq, Status: status})
+		heads = append(heads, mirrorRowHead(id, row))
 	}
 	slices.SortFunc(heads, func(a, b SessionHead) int { return cmp.Compare(a.ID, b.ID) })
 	return heads, nil
+}
+
+func (s *Store) freshHead(id string, st *sessionState) SessionHead {
+	if s.shared {
+		if row, ok := s.idx.sessions[id]; ok && !st.damaged {
+			return mirrorRowHead(id, row)
+		}
+	}
+	return s.headOf(id, st)
+}
+
+func mirrorRowHead(id string, row sessionRow) SessionHead {
+	return SessionHead{ID: id, HeadSeq: row.headSeq, Status: cmp.Or(SessionStatus(row.status), SessionOK)}
 }
 
 func (s *Store) startBackup() {

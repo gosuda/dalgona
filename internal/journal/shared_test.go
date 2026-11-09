@@ -368,6 +368,57 @@ func TestLockSessionWaitsForRepairProbe(t *testing.T) {
 	}
 }
 
+func TestSessionsSharedReloadsMirrorRows(t *testing.T) {
+	dir := t.TempDir()
+	first := mustOpenShared(t, dir)
+	release := mustLockSession(t, dir, "s")
+	if _, err := first.Append(t.Context(), "s", event(0)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	mustRelease(t, release)
+
+	second := mustOpenShared(t, dir)
+	release = mustLockSession(t, dir, "s")
+	if err := appendOneByOne(second, "s", 1, 2); err != nil {
+		t.Fatalf("peer append: %v", err)
+	}
+	mustRelease(t, release)
+	closeStore(t, second)
+
+	heads, err := first.Sessions()
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	if len(heads) != 1 || heads[0].ID != "s" || heads[0].HeadSeq != 3 || heads[0].Status != SessionOK {
+		t.Fatalf("Sessions = %+v, want s at reloaded head 3 ok", heads)
+	}
+	closeStore(t, first)
+}
+
+func TestSessionsSharedKeepsLocalDamage(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpenShared(t, dir)
+	release := mustLockSession(t, dir, "s")
+	appendEvents(t, store, "s", 1)
+	if err := store.sessions["s"].file.Close(); err != nil {
+		t.Fatalf("sever handle: %v", err)
+	}
+	if _, err := store.Append(t.Context(), "s", event(5)); err == nil {
+		t.Fatal("append on a severed handle succeeded")
+	}
+	store.sessions["s"].file = nil
+	heads, err := store.Sessions()
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	want := SessionHead{ID: "s", HeadSeq: 1, Status: SessionDamaged, DamagedSeq: 2}
+	if len(heads) != 1 || heads[0] != want {
+		t.Fatalf("Sessions = %+v, want %+v", heads, want)
+	}
+	mustRelease(t, release)
+	closeStore(t, store)
+}
+
 func TestOpenSharedListsPeerSessions(t *testing.T) {
 	dir := t.TempDir()
 	first := mustOpenShared(t, dir)
