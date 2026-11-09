@@ -87,6 +87,8 @@ type boxRunner struct {
 
 var _ runner.Runner = (*boxRunner)(nil)
 
+func (*boxRunner) RemoteHost() bool { return true }
+
 func (r *boxRunner) ensure(ctx context.Context) (*link, error) {
 	for {
 		l, wait, err := r.claim()

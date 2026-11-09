@@ -38,6 +38,8 @@ The binder MUST record `runner.bound` through `Recorder.RecordRunnerBound(ctx, t
 
 Paths MUST map from the thread `cwd` to `/workspace`. `cwd` maps to `/workspace`. `cwd/a/b` maps to `/workspace/a/b`. An empty `ProcessSpec.Dir` maps to `/workspace`. Relative paths and paths outside `cwd` MUST pass through unchanged.
 
+Every remote box runs Linux. The exec tool MUST build remote commands with `sh -c` and MUST keep `cmd /C` for local Windows execution only.
+
 Concurrent calls on one runner MUST share one bind. The lock MUST NOT be held during network calls. When a call fails and the exec stream is dead, the runner MUST reconnect by `box_id` and retry that call once. `Start` is idempotent per call id, and `Read` continues by call id, so commands survive stream loss.
 
 `Close` MUST close the exec stream. It MUST NOT destroy the box.

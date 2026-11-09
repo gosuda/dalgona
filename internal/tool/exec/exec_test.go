@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -231,5 +232,38 @@ func TestExecUnsandboxedRunsOutsideWritableRoots(t *testing.T) {
 	}
 	if strings.TrimSpace(string(result.Output)) != outside {
 		t.Fatalf("pwd = %q, want %q", result.Output, outside)
+	}
+}
+
+type remoteStub struct {
+	runner.Runner
+	argv []string
+}
+
+func (remoteStub) RemoteHost() bool { return true }
+
+func (s *remoteStub) Start(ctx context.Context, spec runner.ProcessSpec) error {
+	s.argv = spec.Argv
+	return errors.New("remote start stub")
+}
+
+func TestExecUsesLinuxShellForRemote(t *testing.T) {
+	stub := &remoteStub{}
+	env := tool.Env{Runner: stub, Cwd: t.TempDir(), Sandbox: runner.Sandbox{Mode: runner.SandboxOff}}
+	if _, err := New().Run(t.Context(), tool.Call{ID: "run-remote", Args: jsontext.Value(`{"command":"echo hi"}`)}, env); err == nil {
+		t.Fatal("remote stub start accepted")
+	}
+	want := []string{"sh", "-c", "echo hi"}
+	if !slices.Equal(stub.argv, want) {
+		t.Fatalf("remote argv = %q, want %q", stub.argv, want)
+	}
+	if got := shellArgvForHost(stub, "windows", "echo hi"); !slices.Equal(got, want) {
+		t.Fatalf("remote shell on windows host = %q, want %q", got, want)
+	}
+	if got := shellArgvForHost(nil, "windows", "echo hi"); !slices.Equal(got, []string{"cmd", "/C", "echo hi"}) {
+		t.Fatalf("local shell on windows host = %q, want cmd", got)
+	}
+	if got := shellArgvForHost(nil, "linux", "echo hi"); !slices.Equal(got, want) {
+		t.Fatalf("local shell on linux host = %q, want %q", got, want)
 	}
 }

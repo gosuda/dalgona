@@ -45,6 +45,8 @@ func (e fileMissingError) Unwrap() error { return fs.ErrNotExist }
 
 var _ Runner = (*Remote)(nil)
 
+func (*Remote) RemoteHost() bool { return true }
+
 func NewRemote(ctx context.Context, boxID string, conn io.ReadWriteCloser) (*Remote, error) {
 	remote := &Remote{
 		conn:       conn,

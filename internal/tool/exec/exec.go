@@ -57,7 +57,7 @@ func (t *Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Resu
 	}
 	spec := runner.ProcessSpec{
 		ID:      call.ID,
-		Argv:    shellArgv(command),
+		Argv:    shellArgvFor(env.Runner, command),
 		Dir:     cwd,
 		Sandbox: runner.Sandbox{Mode: mode, WritableRoots: env.Sandbox.WritableRoots},
 	}
@@ -321,8 +321,16 @@ func sleep(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func shellArgv(command string) []string {
-	if runtime.GOOS == "windows" {
+func shellArgvFor(run runner.Runner, command string) []string {
+	return shellArgvForHost(run, runtime.GOOS, command)
+}
+
+func shellArgvForHost(run runner.Runner, hostGOOS, command string) []string {
+	type remoteHost interface{ RemoteHost() bool }
+	if host, ok := run.(remoteHost); ok && host.RemoteHost() {
+		return []string{"sh", "-c", command}
+	}
+	if hostGOOS == "windows" {
 		return []string{"cmd", "/C", command}
 	}
 	return []string{"sh", "-c", command}
