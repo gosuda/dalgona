@@ -2,6 +2,7 @@
   "name": "@gosuda/dalgona-cloudflare",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@12.18.0",
   "scripts": {
     "check": "tsc --noEmit"
   },
