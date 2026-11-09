@@ -44,6 +44,7 @@ type toolTrace struct {
 type effectCache struct {
 	mu      sync.Mutex
 	head    int
+	turn    string
 	starts  map[string]event.ScriptStarted
 	effects map[effectKey]event.ScriptEffect
 	tools   map[string]toolTrace
@@ -58,6 +59,42 @@ func newEffectCache() *effectCache {
 }
 
 func callID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
+func turnStart(records []event.Seqd) (string, int) {
+	for i := len(records) - 1; i >= 0; i-- {
+		if started, ok := records[i].Event.(event.TurnStarted); ok {
+			return started.TurnID, i
+		}
+	}
+	return "", 0
+}
+
+func scopedRecords(records []event.Seqd) []event.Seqd {
+	_, pos := turnStart(records)
+	if pos < 0 || pos > len(records) {
+		return records
+	}
+	return records[pos:]
+}
+
+func (c *effectCache) ensureTurn(records []event.Seqd) {
+	turn, pos := turnStart(records)
+	if c.turn != turn {
+		c.starts = map[string]event.ScriptStarted{}
+		c.effects = map[effectKey]event.ScriptEffect{}
+		c.tools = map[string]toolTrace{}
+		c.turn = turn
+		c.head = pos
+	}
+	if c.head < 0 {
+		c.head = 0
+	}
+	if c.head > len(records) {
+		c.head = len(records)
+	}
+	if pos > c.head {
+		c.head = pos
+	}
+}
 
 func orNull(value jsontext.Value) jsontext.Value {
 	if len(value) == 0 {
@@ -82,11 +119,14 @@ func effectIndex(n int) uint64 {
 }
 
 func (fx effects) Started(start script.RunStart) (script.RunStart, error) {
-	records, _, err := fx.t.Records()
+	records, state, err := fx.t.Records()
 	if err != nil {
 		return script.RunStart{}, err
 	}
 	if started, ok := fx.idx.start(records, start.ID); ok {
+		if _, open := state.Scripts[start.ID]; !open {
+			return script.RunStart{}, fmt.Errorf("scripthost: duplicate run id %s", start.ID)
+		}
 		return fx.pinned(started)
 	}
 	source, err := fx.t.PutBlob(start.Source)
@@ -138,7 +178,7 @@ func traceEffect(records []event.Seqd, run string, n int) effectTrace {
 	id := callID(run, n)
 	index := effectIndex(n)
 	var trace effectTrace
-	for _, item := range records {
+	for _, item := range scopedRecords(records) {
 		switch value := item.Event.(type) {
 		case event.ScriptEffect:
 			if value.RunID == run && value.N == index {
@@ -187,13 +227,14 @@ func (c *effectCache) start(records []event.Seqd, run string) (event.ScriptStart
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.ensureTurn(records)
 	c.observe(records)
 	started, ok := c.starts[run]
 	return started, ok
 }
 
 func scanStart(records []event.Seqd, run string) (event.ScriptStarted, bool) {
-	for _, item := range records {
+	for _, item := range scopedRecords(records) {
 		if started, ok := item.Event.(event.ScriptStarted); ok && started.RunID == run {
 			return started, true
 		}
@@ -209,6 +250,7 @@ func (c *effectCache) trace(records []event.Seqd, run string, n int) effectTrace
 	index := effectIndex(n)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.ensureTurn(records)
 	c.observe(records)
 	var trace effectTrace
 	if effect, ok := c.effects[effectKey{run: run, n: index}]; ok {
