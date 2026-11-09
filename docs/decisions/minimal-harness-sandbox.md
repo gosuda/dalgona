@@ -2,7 +2,7 @@
 
 ## Invariant
 
-The harness sandbox MUST prevent accidental writes outside the allowed roots. It MUST NOT claim to isolate hostile code. Users SHOULD run dalgona in an outer container, microVM, or cloud sandbox.
+The harness sandbox MUST prevent accidental writes outside the allowed roots. It MUST NOT claim to isolate hostile code. [sandbox.md](../spec/sandbox.md) describes the outer sandbox.
 
 `workspace-write` MUST be the default local policy. Reads and network access MUST remain allowed. `off` MUST disable confinement. Approval mode `yolo` MUST force `off`. Windows and Linux without Landlock MUST report that no harness sandbox is active.
 

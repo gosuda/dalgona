@@ -55,7 +55,7 @@ A remote box MUST ignore the sandbox mode. The box is the sandbox. A request tha
 
 The daemon socket (`<home>/dalgona.sock`, mode `0600`) MUST stay out of sandboxed child environments: the runner MUST strip `DALGONA_HOME` and `DAL_HOME` from them, so the child cannot read the socket path from its environment. `off` MUST keep the parent environment unchanged.
 
-This hiding is best-effort, not a boundary. Landlock filesystem rules do not mediate `connect(2)` to an existing pathname unix socket: under this policy a denied write outside the roots still leaves a connect to a pathname socket there working. Landlock scoping covers abstract unix sockets only, and the daemon socket is a pathname socket. `HOME` stays in the child environment, so `$HOME/.dalgona/dalgona.sock` remains guessable, and reads are allowed on every path. A sandboxed child of the same uid can therefore still dial the socket. The harness sandbox only keeps commands from writing outside the workspace by accident; it is not a security boundary.
+This hiding is best-effort, not a boundary. Landlock filesystem rules do not mediate `connect(2)` to an existing pathname unix socket: under this policy a denied write outside the roots still leaves a connect to a pathname socket there working. Landlock scoping covers abstract unix sockets only, and the daemon socket is a pathname socket. `HOME` stays in the child environment, so `$HOME/.dalgona/dalgona.sock` remains guessable, and reads are allowed on every path. A sandboxed child of the same uid can therefore still dial the socket.
 
 ## Failure
 

@@ -108,7 +108,7 @@ Use these table names and keys:
 
 ## Run inside an outer sandbox
 
-Run dalgona inside a lightweight outer sandbox, such as a container, microVM, or cloud sandbox runner. The local harness sandbox prevents accidental writes outside the workspace and configured writable roots. It is not a security boundary. It permits reads and network access.
+Run dalgona inside a lightweight outer sandbox, such as a container, microVM, or cloud sandbox runner. The local harness sandbox only confines accidental writes and is not a security boundary. See [sandbox.md](docs/spec/sandbox.md) for the write policy.
 
 Windows has no harness confinement. Linux runs without it when Landlock is unavailable. A remote box supplies the sandbox instead of the local write policy. See [sandbox.md](docs/spec/sandbox.md).
 
