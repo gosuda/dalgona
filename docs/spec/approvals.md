@@ -22,7 +22,7 @@ Calls that fail before the gate MUST complete through a declined resolution:
 
 The gate MUST run these steps in order and MUST stop at the first verdict.
 
-1. Plugin hooks. Every plugin `tool_call` hook runs as a durable script run `<call_id>/hook:<file>:<fn>`. The first `deny` declines and otherwise the first `allow` accepts, both with `by` = `hook:<file>:<fn>`. A hook failure MUST be logged and MUST count as no opinion. A `turn_end` hook run `<turn_id>/turn_end/hook:<file>:<fn>` MUST run before `turn.completed`, within 30 s.
+1. Plugin hooks. Every plugin `tool_call` hook runs as a durable script run `<call_id>/hook:<file>:<fn>`. Every hook MUST run. The first `deny` declines and otherwise the first `allow` accepts, both with `by` = `hook:<file>:<fn>`. A hook failure MUST be logged and MUST count as no opinion for that hook only; later hooks MUST still run. A `turn_end` hook run `<turn_id>/turn_end/hook:<file>:<fn>` MUST run before `turn.completed`, within 30 s.
 2. Mode `yolo`. Accept by `mode:yolo`. `exec` then runs without the harness sandbox.
 3. Mechanical allow, modes `auto` and `ask`. Classes `read`, `agent`, and `script` accept by `mode:<mode>`. In `auto`, class `edit` accepts by `mode:auto` when every planned path is inside the writable roots. In `ask`, class `edit` goes to step 6.
 4. Static rules for `exec` commands and for the `<tool> <args>` text of `remote` calls. A match declines by `rule:<name>` with the reason `declined by rule <name>: <command part>`. The decider MUST NOT see the call.

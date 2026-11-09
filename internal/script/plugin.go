@@ -363,17 +363,32 @@ func (p *Plugins) Emit(ctx context.Context, fx Effects, runID, event string, pay
 
 func (p *Plugins) ToolCall(ctx context.Context, fx Effects, runID string, call tool.Call) (HookDecision, error) {
 	payload := toolCallPayload(call)
-	var allow HookDecision
+	var allow, deny HookDecision
+	var errs []error
 	for _, target := range p.hooks(EventToolCall) {
 		decision, err := target.decision(p.hook(ctx, fx, runID, target, payload))
-		if err != nil || decision.Decision == DecisionDeny {
-			return decision, err
+		if err != nil {
+			errs = append(errs, err)
+			continue
 		}
-		if allow.Decision == "" {
-			allow = decision
+		switch decision.Decision {
+		case DecisionDeny:
+			if deny.Decision == "" {
+				deny = decision
+			}
+		case DecisionAllow:
+			if allow.Decision == "" {
+				allow = decision
+			}
 		}
 	}
-	return allow, nil
+	if deny.Decision != "" {
+		return deny, errors.Join(errs...)
+	}
+	if allow.Decision != "" {
+		return allow, errors.Join(errs...)
+	}
+	return HookDecision{}, errors.Join(errs...)
 }
 
 func toolCallPayload(call tool.Call) jsontext.Value {

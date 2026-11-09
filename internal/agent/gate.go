@@ -111,7 +111,6 @@ func (w *worker) hookVerdict(ctx context.Context, gc gateCall) (verdict, bool) {
 	result, err := w.t.ext.ToolCall(withWorker(ctx, w), call)
 	if err != nil {
 		w.t.host.log.Warn("agent: tool_call hook", "thread", w.t.id, "tool", gc.call.Name, "error", err)
-		return verdict{}, false
 	}
 	switch result.Decision {
 	case HookAllow:
