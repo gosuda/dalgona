@@ -118,7 +118,12 @@ func (s *Store) isCurrent(sid string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("journal: stat %s: %w", sid, err)
 	}
-	return st != nil && st.info != nil && os.SameFile(st.info, info) && st.info.Size() == info.Size(), nil
+	if st == nil || st.info == nil {
+		return false, nil
+	}
+	same := os.SameFile(st.info, info) && st.info.Size() == info.Size() &&
+		st.info.ModTime().Equal(info.ModTime())
+	return same, nil
 }
 
 func (s *Store) loadSession(sid string) error {
