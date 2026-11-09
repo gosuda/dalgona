@@ -11,10 +11,13 @@ import { threadTitle } from "#lib/labels.ts";
 import { RpcClient, RpcError } from "#lib/protocol.ts";
 import {
 	activeApproval,
+	dropSentFollowup,
 	emptyTranscript,
+	isSentFollowupAtHead,
 	itemsAwaitingApproval,
 	otherThreadApprovalCount,
 	reduceNotification,
+	requeueFailedFollowup,
 	resolveApprovalRequest,
 	trackApprovalRequest,
 	transcriptForThread,
@@ -358,9 +361,9 @@ async function createThread(): Promise<void> {
 	}
 }
 
-async function sendMessage(text: string): Promise<void> {
+async function sendMessage(text: string): Promise<boolean> {
 	const threadId = activeThreadId;
-	if (threadId === null) return;
+	if (threadId === null) return false;
 	try {
 		const result = await requireClient().call(
 			"turn/start",
@@ -377,12 +380,14 @@ async function sendMessage(text: string): Promise<void> {
 			turn: result.turn,
 		});
 		recordPreview(threadId, text);
+		return true;
 	} catch (error) {
 		reportFailure(
 			connectionGeneration,
 			"Unable to send message",
 			error instanceof Error ? error : String(error),
 		);
+		return false;
 	}
 }
 
@@ -415,7 +420,11 @@ async function steerMessage(text: string): Promise<void> {
 
 function queueFollowup(text: string): void {
 	if (!running) {
-		void sendMessage(text);
+		const threadId = activeThreadId;
+		void sendMessage(text).then((sent) => {
+			if (!sent && activeThreadId === threadId)
+				queuedFollowups = requeueFailedFollowup(queuedFollowups, text);
+		});
 		return;
 	}
 	queuedFollowups = [...queuedFollowups, text];
@@ -516,10 +525,16 @@ function handleNotification(notification: AppNotification): void {
 }
 
 async function sendNextFollowup(threadId: string): Promise<void> {
-	const next = queuedFollowups[0];
-	if (next === undefined || activeThreadId !== threadId) return;
-	queuedFollowups = queuedFollowups.slice(1);
-	await sendMessage(next);
+	const snapshot = queuedFollowups[0];
+	if (snapshot === undefined || activeThreadId !== threadId) return;
+	if (await sendMessage(snapshot)) {
+		if (
+			activeThreadId === threadId &&
+			isSentFollowupAtHead(queuedFollowups, snapshot)
+		) {
+			queuedFollowups = dropSentFollowup(queuedFollowups);
+		}
+	}
 }
 </script>
 

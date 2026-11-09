@@ -276,6 +276,10 @@ export function otherThreadApprovalCount(
 	return approvals.filter((entry) => entry.threadId !== threadId).length;
 }
 
+export function dropSentFollowup(queue: readonly string[]): readonly string[] {
+	return queue.slice(1);
+}
+
 export function itemsAwaitingApproval(
 	approvals: readonly ApprovalRequest[],
 	threadId: string | null,
@@ -295,4 +299,18 @@ export function itemDisplayStatus(
 	return status === "inProgress" && awaitingApproval.has(itemId)
 		? "awaitingApproval"
 		: status;
+}
+
+export function isSentFollowupAtHead(
+	queue: readonly string[],
+	sent: string,
+): boolean {
+	return queue[0] === sent;
+}
+
+export function requeueFailedFollowup(
+	queue: readonly string[],
+	text: string,
+): readonly string[] {
+	return [...queue, text];
 }

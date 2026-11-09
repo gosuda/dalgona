@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { advisorLabel, itemStatusLabel, kindLabel } from "./labels";
 import {
 	activeApproval,
+	dropSentFollowup,
 	emptyTranscript,
 	itemDisplayStatus,
 	itemsAwaitingApproval,
@@ -47,6 +48,8 @@ function thread(turns: ThreadDetail["turns"]): ThreadDetail {
 		turns,
 	};
 }
+
+import { isSentFollowupAtHead, requeueFailedFollowup } from "./reducer";
 
 describe("transcript reducer", () => {
 	test("concatenates deltas onto the matching item without mutating the previous list", () => {
@@ -306,6 +309,16 @@ describe("active approval filtering", () => {
 	});
 });
 
+describe("followup queue", () => {
+	test("drops the head of the queue after a successful send", () => {
+		expect(dropSentFollowup(["first", "second"])).toEqual(["second"]);
+	});
+
+	test("keeps an empty queue empty", () => {
+		expect(dropSentFollowup([])).toEqual([]);
+	});
+});
+
 describe("labels", () => {
 	test("summarizes advisor state as text", () => {
 		expect(advisorLabel({ kind: "unknown" })).toBeNull();
@@ -333,5 +346,21 @@ describe("labels", () => {
 		expect(itemStatusLabel("custom")).toBe("custom");
 		expect(kindLabel("webSearch")).toBe("Web search");
 		expect(kindLabel("imageGeneration")).toBe("Image generation");
+	});
+});
+
+describe("followup queue snapshot", () => {
+	test("commits only when the sent item is still at the head", () => {
+		expect(isSentFollowupAtHead(["first", "second"], "first")).toBe(true);
+		expect(isSentFollowupAtHead(["other"], "first")).toBe(false);
+		expect(isSentFollowupAtHead([], "first")).toBe(false);
+	});
+
+	test("requeues a failed direct send", () => {
+		expect(requeueFailedFollowup(["queued"], "failed")).toEqual([
+			"queued",
+			"failed",
+		]);
+		expect(requeueFailedFollowup([], "failed")).toEqual(["failed"]);
 	});
 });
