@@ -431,13 +431,18 @@ func floatValue(value float64) jsontext.Value {
 
 func objectValue(fields ...member) jsontext.Value {
 	out := []byte{'{'}
-	for i, field := range fields {
+	for i, item := range fields {
 		if i > 0 {
 			out = append(out, ',')
 		}
-		out = strconv.AppendQuote(out, field.name)
+		name := item.name
+		if !utf8.ValidString(name) {
+			name = strings.ToValidUTF8(name, "\uFFFD")
+		}
+		quoted, _ := jsontext.AppendQuote(nil, name)
+		out = append(out, quoted...)
 		out = append(out, ':')
-		out = append(out, field.value...)
+		out = append(out, item.value...)
 	}
 	out = append(out, '}')
 	return jsontext.Value(out)
