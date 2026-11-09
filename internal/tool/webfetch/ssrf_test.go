@@ -16,6 +16,14 @@ func testTool() tool.Tool {
 	return &Tool{client: newLoopbackClient(), allow: loopbackAddrs}
 }
 
+func newLoopbackClient() *http.Client {
+	return newClient(loopbackAddrs)
+}
+
+func loopbackAddrs(ip net.IP) bool {
+	return ip.IsLoopback() || !blockedIP(ip)
+}
+
 func TestBlockedIPTable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

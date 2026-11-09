@@ -106,10 +106,6 @@ func newHTTPClient() *http.Client {
 	return newClient(publicAddrs)
 }
 
-func newLoopbackClient() *http.Client {
-	return newClient(loopbackAddrs)
-}
-
 func newClient(allow func(net.IP) bool) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
@@ -123,10 +119,6 @@ func newClient(allow func(net.IP) bool) *http.Client {
 
 func publicAddrs(ip net.IP) bool {
 	return !blockedIP(ip)
-}
-
-func loopbackAddrs(ip net.IP) bool {
-	return ip.IsLoopback() || !blockedIP(ip)
 }
 
 var blockedPrefixes = []netip.Prefix{
