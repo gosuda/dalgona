@@ -26,6 +26,8 @@ const (
 
 var errDiscarded = errors.New("advisor: review discarded: destructive shell directive in advisor output")
 
+var testHook func()
+
 type review struct {
 	seq       uint64
 	start     uint64
@@ -290,12 +292,15 @@ func (a *advisor) complete(ctx context.Context, rv review) error {
 	if unsafeOutput(events, reviewText(events)) {
 		return errDiscarded
 	}
-	if !a.enabled() {
-		return nil
-	}
 	var errs []error
 	for _, note := range pendingNotes(events, a.maxNotes) {
+		if !a.enabled() {
+			break
+		}
 		errs = append(errs, a.deliver(ctx, note))
+		if testHook != nil {
+			testHook()
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -383,6 +388,13 @@ func (a *advisor) admitBlocker(ctx context.Context, parsed advice) (string, erro
 	admission := a.guard.Admit(parsed.note, parsed.severity)
 	if admission.Verdict != VerdictAccepted {
 		return string(admission.Verdict), nil
+	}
+	if testHook != nil {
+		testHook()
+	}
+	if !a.enabled() {
+		a.guard.Withdraw(admission)
+		return verdictDiscarded, nil
 	}
 	if err := a.deliver(ctx, pendingNote{key: admission.Key, text: parsed.note, advice: parsed}); err != nil {
 		a.guard.Withdraw(admission)
