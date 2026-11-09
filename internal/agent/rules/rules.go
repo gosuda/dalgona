@@ -148,7 +148,7 @@ func GrantPrefix(command string) (string, bool) {
 		return "", false
 	}
 	prefix := quoteToken(tokens[0])
-	if len(tokens) > 1 && !strings.HasPrefix(tokens[1], "-") {
+	if len(tokens) > 1 {
 		prefix += " " + quoteToken(tokens[1])
 	}
 	return prefix, true

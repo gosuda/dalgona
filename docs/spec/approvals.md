@@ -27,7 +27,7 @@ The gate MUST run these steps in order and MUST stop at the first verdict.
 3. Mechanical allow, modes `auto` and `ask`. Classes `read`, `agent`, and `script` accept by `mode:<mode>`. In `auto`, class `edit` accepts by `mode:auto` when every planned path is inside the writable roots. In `ask`, class `edit` goes to step 6.
 4. Static rules for `exec` commands and for the `<tool> <args>` text of `remote` calls. A match declines by `rule:<name>` with the reason `declined by rule <name>: <command part>`. The decider MUST NOT see the call.
 5. Decider, mode `auto`. The gate sends an `Action` to the configured `Decider`. A missing decider declines with `declined by decider: no decider is configured`. A decider error declines with `declined by decider: <error>`.
-6. Human, mode `ask`. A matching session grant accepts by `grant:<prefix>`. With no subscribed client, the gate declines with `declined: no client could approve this call`. Otherwise the thread publishes an `UpdateApproval` and waits for `Thread.Answer`. `accept` and `accept_session` accept by `user`. `decline` declines with `declined by user`. `cancel` declines with `cancelled by user` and interrupts the turn. An interrupt during the wait resolves the request as `cancel` by `user`.
+6. Human, mode `ask`. A matching session grant accepts by `grant:<prefix>`. With no subscribed client, the gate declines with `declined: no client could approve this call`. Otherwise the thread publishes an `UpdateApproval` and waits for `Thread.Answer`. The prompt summary names the thread working directory and, for an escalated `exec` call, that the call runs unsandboxed. `accept` and `accept_session` accept by `user`. `decline` declines with `declined by user`. `cancel` declines with `cancelled by user` and interrupts the turn. An interrupt during the wait resolves the request as `cancel` by `user`.
 
 Child threads change step 6. A child of a loaded parent, other than an advisor, MUST also publish its `UpdateApproval` to the parent's subscribers, with `Update.Thread` set to the child id. Only parent subscribers count as clients for such a child. With no parent subscriber, the gate declines with `declined: no client could approve this call`. When the request resolves, the child MUST publish the same `UpdateApproval` with `Resolved=true` to the parent's subscribers. The app-server MUST then send `serverRequest/resolved` with the child `threadId` and the `requestId`. When the last parent connection leaves, the app-server MUST decline the pending child request.
 
@@ -46,9 +46,9 @@ Writable roots are the thread working directory, `os.TempDir()`, `os.UserCacheDi
 
 ## Session grants
 
-A user `accept_session` resolution MUST create a grant once the fold knows the call class from `approval.requested`.
+A user `accept_session` resolution MUST create a grant once the fold knows the call class from `approval.requested`. When the resolution is journaled before the class is known, the fold carries the grant prefix forward and creates the grant from the later `tool.started` record.
 
-- `exec`: the grant is the argv prefix from `rules.GrantPrefix`. A compound command MUST NOT create a grant. A later command matches only through `rules.MatchesGrant`.
+- `exec`: the grant is the first two argv words from `rules.GrantPrefix`, with a flag in second position kept. A compound command MUST NOT create a grant. The grant records whether the accepted call was escalated, and a later command matches only when escalation agrees and `rules.MatchesGrant` holds.
 - `edit` and `remote`: the grant is `tool:<name>`.
 - Other classes MUST NOT create grants.
 - A `grant:<prefix>` resolution MUST NOT create a new grant.

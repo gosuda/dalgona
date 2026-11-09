@@ -53,10 +53,8 @@ func (w *worker) gate(ctx context.Context, gc gateCall) (verdict, error) {
 	if requestID == "" {
 		requestID = newID("req-")
 		requested := event.ApprovalRequested{RequestID: requestID, CallID: gc.call.ID, Summary: summary(gc), Class: classString(gc.class)}
-		if gc.class == tool.ClassExec && gc.command != "" {
-			if prefix, ok := rules.GrantPrefix(gc.command); ok {
-				requested.GrantPrefix = prefix
-			}
+		if prefix, ok := grantPrefixFor(gc); ok {
+			requested.GrantPrefix = prefix
 		}
 		if _, err := w.t.appendEvents(ctx, requested); err != nil {
 			return verdict{}, err
@@ -226,6 +224,7 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 		RequestID: requestID, CallID: gc.call.ID, Tool: gc.call.Name, Class: gc.class, Summary: summary(gc), Paths: gc.paths,
 		Reason: gc.justification,
 	}
+	prompt.Summary = withRunContext(prompt.Summary, gc, w.t.created.Cwd)
 	if gc.class == tool.ClassExec {
 		prompt.Commands = rules.Split(gc.command)
 	}
@@ -295,12 +294,52 @@ func (w *worker) matchingGrant(gc gateCall) string {
 		}
 		return ""
 	}
-	for prefix := range v.state.Grants {
-		if !strings.HasPrefix(prefix, "tool:") && rules.MatchesGrant(gc.command, prefix) {
+	for key := range v.state.Grants {
+		if strings.HasPrefix(key, "tool:") {
+			continue
+		}
+		prefix, escalated := splitGrantKey(key)
+		if escalated != gc.escalate {
+			continue
+		}
+		if rules.MatchesGrant(gc.command, prefix) {
 			return prefix
 		}
 	}
 	return ""
+}
+
+const grantEscalatedSuffix = "\x00escalate"
+
+func splitGrantKey(key string) (string, bool) {
+	if prefix, ok := strings.CutSuffix(key, grantEscalatedSuffix); ok {
+		return prefix, true
+	}
+	return key, false
+}
+
+func withRunContext(summary string, gc gateCall, cwd string) string {
+	if gc.class == tool.ClassExec && gc.escalate {
+		summary += " [unsandboxed]"
+	}
+	if cwd != "" {
+		summary += " [cwd " + cwd + "]"
+	}
+	return summary
+}
+
+func grantPrefixFor(gc gateCall) (string, bool) {
+	if gc.class != tool.ClassExec || gc.command == "" {
+		return "", false
+	}
+	prefix, ok := rules.GrantPrefix(gc.command)
+	if !ok {
+		return "", false
+	}
+	if gc.escalate {
+		prefix += grantEscalatedSuffix
+	}
+	return prefix, true
 }
 
 func (h *Host) outsideRoots(cwd string, paths []string) []string {

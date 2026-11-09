@@ -91,11 +91,11 @@ func TestGrants(t *testing.T) {
 			rejects:       []string{"go build"},
 		},
 		{
-			name:    "one token",
+			name:    "flag second token",
 			command: "ls -la",
-			prefix:  "ls",
-			matches: []string{"ls src"},
-			rejects: []string{"ls src && go build"},
+			prefix:  "ls -la",
+			matches: []string{"ls -la", "ls -la /tmp"},
+			rejects: []string{"ls src", "ls src && go build"},
 		},
 		{
 			name:    "quoted token boundary",
