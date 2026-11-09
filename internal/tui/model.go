@@ -549,6 +549,7 @@ func (m *model) setThread(id string) {
 		m.threadID = id
 		m.turnID = ""
 		m.seq = 0
+		m.followups = nil
 	}
 }
 
