@@ -50,7 +50,55 @@ func openDB(path string) (db *sql.DB, err error) {
 	if _, err = db.Exec(schema); err != nil {
 		return nil, errors.Join(fmt.Errorf("journal: create schema: %w", err), db.Close())
 	}
+	if err = migrateDB(db); err != nil {
+		return nil, errors.Join(fmt.Errorf("journal: migrate state.db: %w", err), db.Close())
+	}
 	return db, nil
+}
+
+const schemaVersion = 1
+
+func migrateDB(db *sql.DB) error {
+	version, err := schemaVersionOf(db)
+	if err != nil {
+		return err
+	}
+	if version > schemaVersion {
+		return fmt.Errorf("journal: state.db version %d exceeds supported %d", version, schemaVersion)
+	}
+	for version < schemaVersion {
+		if err := applyMigration(db, version+1); err != nil {
+			return err
+		}
+		version++
+	}
+	return nil
+}
+
+func schemaVersionOf(db *sql.DB) (int, error) {
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
+}
+
+func setUserVersion(db *sql.DB, version int) error {
+	_, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", version))
+	return err
+}
+
+func applyMigration(db *sql.DB, target int) error {
+	switch target {
+	case 1:
+		return migrateToV1(db)
+	default:
+		return fmt.Errorf("journal: unknown schema version %d", target)
+	}
+}
+
+func migrateToV1(db *sql.DB) error {
+	return setUserVersion(db, 1)
 }
 
 func openUsableDB(path string) (*sql.DB, error) {

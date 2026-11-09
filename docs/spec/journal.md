@@ -44,6 +44,8 @@ CREATE TABLE events(session TEXT NOT NULL, seq INTEGER NOT NULL, hash TEXT NOT N
 CREATE TABLE sessions(id TEXT PRIMARY KEY, parent TEXT, cwd TEXT, title TEXT, status TEXT, head_seq INTEGER, updated_at TEXT);
 ```
 
+The database MUST record its schema version in `PRAGMA user_version`. `openDB` MUST apply ordered migrations at open and MUST reject a database whose version exceeds the supported version. Databases without a version adopt version 1 with no row changes.
+
 Every 30 minutes and at clean close, the store MUST run `VACUUM INTO` into `state.db.bak.tmp`. It MUST then rename that file to `state.db.bak`. The store MUST hold an exclusive lock on `repair.lock` from the removal of a stale `state.db.bak.tmp` through the rename. A clean close MUST report a backup failure. When `state.db` is unusable, the store MUST try `state.db.bak` before it creates an empty mirror. This rule allows a verified backup row to repair damaged JSONL.
 
 ## Locks
