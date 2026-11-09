@@ -158,8 +158,6 @@ func TestServiceUnauthorized(t *testing.T) {
 
 func TestCreateRejectsInvalidBoxName(t *testing.T) {
 	t.Parallel()
-	server, log := newLifecycleServer(t)
-	service := New(server.URL, "token")
 	invalid := []string{
 		"",
 		"dalgona-remote-a.b",
@@ -167,14 +165,43 @@ func TestCreateRejectsInvalidBoxName(t *testing.T) {
 		"has space",
 		"a/b",
 	}
-	for _, name := range invalid {
-		if _, err := service.Create(t.Context(), sandboxsvc.Spec{Name: name}); err == nil || !strings.Contains(err.Error(), "invalid box name") {
-			t.Fatalf("Create(%q) error = %v, want invalid box name", name, err)
-		}
+	callers := []struct {
+		name string
+		call func(context.Context, *Service, string) error
+	}{
+		{"Create", func(ctx context.Context, service *Service, name string) error {
+			_, err := service.Create(ctx, sandboxsvc.Spec{Name: name})
+			return err
+		}},
+		{"Attach", func(ctx context.Context, service *Service, name string) error {
+			_, err := service.Attach(ctx, name)
+			return err
+		}},
+		{"Destroy", func(ctx context.Context, service *Service, name string) error {
+			return service.Destroy(ctx, name)
+		}},
+		{"Connect", func(ctx context.Context, service *Service, name string) error {
+			_, err := service.Connect(ctx, name, sandboxsvc.ExecServer)
+			return err
+		}},
 	}
-	if methods, _ := log.snapshot(); len(methods) != 0 {
-		t.Fatalf("invalid names sent %d requests, want none", len(methods))
+	for _, caller := range callers {
+		t.Run(caller.name, func(t *testing.T) {
+			server, log := newLifecycleServer(t)
+			service := New(server.URL, "token")
+			for _, name := range invalid {
+				err := caller.call(t.Context(), service, name)
+				if err == nil || !strings.Contains(err.Error(), "invalid box name") {
+					t.Errorf("%s(%q) error = %v, want invalid box name", caller.name, name, err)
+				}
+			}
+			if got, _ := log.snapshot(); len(got) != 0 {
+				t.Errorf("%s: invalid names sent %d requests, want none", caller.name, len(got))
+			}
+		})
 	}
+	server, _ := newLifecycleServer(t)
+	service := New(server.URL, "token")
 	if _, err := service.Create(t.Context(), sandboxsvc.Spec{Name: "dalgona-remote-" + strings.Repeat("a", 49)}); err != nil {
 		t.Fatalf("Create with 49-char remote name = %v, want success", err)
 	}
