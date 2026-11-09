@@ -197,6 +197,31 @@ func TestJournalMidlineRepair(t *testing.T) {
 	closeStore(t, store)
 }
 
+func TestJournalKeepsValidTailPastMirrorHead(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpen(t, dir)
+	events := appendEvents(t, store, "s", 5)
+	closeStore(t, store)
+	path := journalFile(dir)
+	original := readFile(t, path)
+	corruptSecondLine(t, path)
+	deleteMirrorFrom(t, dir, 4)
+
+	store = mustOpen(t, dir)
+	requireEvents(t, replayEvents(t, store, "s"), events)
+	if repaired := readFile(t, path); !bytes.Equal(repaired, original) {
+		t.Fatal("rebuilt journal is not byte-identical to the original")
+	}
+	seq, err := store.Append(context.Background(), "s", event(99))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 6 {
+		t.Fatalf("next seq = %d, want 6", seq)
+	}
+	closeStore(t, store)
+}
+
 func deleteMirrorFrom(t *testing.T, dir string, firstMissing int) {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbDSN(filepath.Join(dir, "state.db")))

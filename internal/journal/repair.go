@@ -25,6 +25,8 @@ type scanState struct {
 	rebuilt    []byte
 	emits      []emitRec
 	lastHash   string
+	lines      []record
+	endsNL     bool
 	stopOff    int64
 	damagedSeq uint64
 	torn       bool
@@ -228,14 +230,10 @@ func (s *Store) scanJournal(sid string, data []byte, si *sessIndex) (scanState, 
 	}
 	lines := splitLines(data)
 	endsNL := len(data) > 0 && data[len(data)-1] == '\n'
+	scan.lines = lines
+	scan.endsNL = endsNL
 	for i := range lines {
-		line := linePosition{
-			record:   lines[i],
-			seq:      uint64(i + 1),
-			last:     i == len(lines)-1,
-			complete: i < len(lines)-1 || endsNL,
-		}
-		stop, err := s.scanLine(sid, &scan, line, si)
+		stop, err := s.scanLine(sid, &scan, i, uint64(i)+1, si)
 		if err != nil {
 			return scanState{}, err
 		}
@@ -258,7 +256,13 @@ type linePosition struct {
 	complete bool
 }
 
-func (s *Store) scanLine(sid string, scan *scanState, line linePosition, si *sessIndex) (bool, error) {
+func (s *Store) scanLine(sid string, scan *scanState, idx int, seq uint64, si *sessIndex) (bool, error) {
+	line := linePosition{
+		record:   scan.lines[idx],
+		seq:      seq,
+		last:     idx == len(scan.lines)-1,
+		complete: idx < len(scan.lines)-1 || scan.endsNL,
+	}
 	raw := scan.orig[line.record.lineOff:line.record.lineEnd]
 	verified := verifyRecord(raw, line.seq, scan.lastHash)
 	if verified.kind == lineOK && line.complete {
@@ -272,7 +276,7 @@ func (s *Store) scanLine(sid string, scan *scanState, line linePosition, si *ses
 		return true, nil
 	}
 	scan.stopOff = line.record.lineOff
-	if err := s.repairDamagedLine(sid, scan, line.seq, si); err != nil {
+	if err := s.repairDamagedLine(sid, scan, seq, si); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -319,7 +323,25 @@ func (s *Store) repairDamagedLine(sid string, scan *scanState, start uint64, si 
 		prevHash = rec.hash
 	}
 	scan.changed = true
+	appendValidTail(scan, si.head)
 	return nil
+}
+
+func appendValidTail(scan *scanState, resume uint64) {
+	for idx := range scan.lines {
+		seq := uint64(idx) + 1
+		if seq <= resume {
+			continue
+		}
+		raw := scan.orig[scan.lines[idx].lineOff:scan.lines[idx].lineEnd]
+		verified := verifyRecord(raw, seq, scan.lastHash)
+		if verified.kind == lineOK && (idx < len(scan.lines)-1 || scan.endsNL) {
+			appendScannedRecord(scan, raw, verified)
+			continue
+		}
+		scan.damagedSeq = seq
+		return
+	}
 }
 
 func (s *Store) restoreTail(sid string, scan *scanState, si *sessIndex) error {
@@ -375,7 +397,10 @@ func (s *Store) finishReconcile(sid string, plan reconcilePlan) (bool, error) {
 		return false, err
 	}
 	if plan.scan.damagedSeq > 0 {
-		return plan.scan.rebuild, upsertSession(s.db, sid, string(plan.head.Status), plan.head.HeadSeq)
+		if mirrorMatches(plan.mirror, plan.scan.emits) {
+			return plan.scan.rebuild, upsertSession(s.db, sid, string(plan.head.Status), plan.head.HeadSeq)
+		}
+		return plan.scan.rebuild, replaceSession(s.db, sid, plan.scan.emits, plan.head)
 	}
 	if !s.shared && (plan.scan.rebuild || mirrorHashMismatch(plan.mirror, plan.scan.emits)) {
 		return true, nil
