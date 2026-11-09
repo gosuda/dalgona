@@ -20,6 +20,14 @@ import (
 
 type CommandRunner func(context.Context, string, ...string) error
 
+func runCommand(ctx context.Context, name string, args ...string) error {
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
+	}
+	return nil
+}
+
 type ServiceEnv struct {
 	Home, GOOS, APPDATA string
 	Run                 CommandRunner

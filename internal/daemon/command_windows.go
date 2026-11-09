@@ -3,8 +3,6 @@
 package daemon
 
 import (
-	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,13 +12,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func runCommand(ctx context.Context, name string, args ...string) error {
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
-	}
-	return nil
-}
 func serviceUID() string { return "0" }
 func spawn(home, exe string) error {
 	logFile, err := os.OpenFile(home+"\\daemon.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
