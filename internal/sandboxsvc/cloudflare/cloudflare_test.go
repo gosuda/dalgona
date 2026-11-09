@@ -155,3 +155,27 @@ func TestServiceUnauthorized(t *testing.T) {
 		t.Fatalf("connect error = %v, want 401", connectErr)
 	}
 }
+
+func TestCreateRejectsInvalidBoxName(t *testing.T) {
+	t.Parallel()
+	server, log := newLifecycleServer(t)
+	service := New(server.URL, "token")
+	invalid := []string{
+		"",
+		"dalgona-remote-a.b",
+		"dalgona-remote-" + strings.Repeat("a", 50),
+		"has space",
+		"a/b",
+	}
+	for _, name := range invalid {
+		if _, err := service.Create(t.Context(), sandboxsvc.Spec{Name: name}); err == nil || !strings.Contains(err.Error(), "invalid box name") {
+			t.Fatalf("Create(%q) error = %v, want invalid box name", name, err)
+		}
+	}
+	if methods, _ := log.snapshot(); len(methods) != 0 {
+		t.Fatalf("invalid names sent %d requests, want none", len(methods))
+	}
+	if _, err := service.Create(t.Context(), sandboxsvc.Spec{Name: "dalgona-remote-" + strings.Repeat("a", 49)}); err != nil {
+		t.Fatalf("Create with 49-char remote name = %v, want success", err)
+	}
+}

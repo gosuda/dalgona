@@ -57,27 +57,38 @@ export class Box extends Container<Env> {
 }
 
 type Target = { box: DurableObjectStub; path: "/" | "/bridge" };
+type Route = { target: Target | null; invalidName: boolean };
 
 const BOX_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
-function boxFor(request: Request, env: Env): Target | null {
+function boxFor(request: Request, env: Env): Route {
 	const url = new URL(request.url);
 	const match = /^\/box\/([^/]+)(\/bridge)?\/?$/.exec(url.pathname);
 	if (match === null || match[1] === undefined) {
-		return null;
+		return { target: null, invalidName: false };
 	}
 	if (!BOX_NAME_PATTERN.test(match[1])) {
-		return null;
+		return { target: null, invalidName: true };
 	}
 	const path = match[2] === "/bridge" ? "/bridge" : "/";
-	return { box: env.BOX.getByName(match[1]), path };
+	return {
+		target: { box: env.BOX.getByName(match[1]), path },
+		invalidName: false,
+	};
 }
 
 async function handle(request: Request, env: Env): Promise<Response> {
 	if (!authorized(request, env.DALGONA_TOKEN)) {
 		return new Response("unauthorized", { status: 401 });
 	}
-	const target = boxFor(request, env);
+	const route = boxFor(request, env);
+	if (route.invalidName) {
+		return new Response(
+			"invalid box name: use letters, digits, _ or -, up to 64 chars, starting with a letter or digit",
+			{ status: 400 },
+		);
+	}
+	const target = route.target;
 	if (target === null) {
 		return new Response("not found", { status: 404 });
 	}

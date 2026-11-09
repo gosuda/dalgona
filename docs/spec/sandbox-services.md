@@ -47,3 +47,7 @@ Each open command stream MUST start a refresh task. The task MUST refresh the sa
 The stream adapter MUST send each write as one `SendInput` call with an empty request identifier. Reads MUST return only stdout data. A read smaller than the available stdout chunk MUST retain the remainder for the next read. Reads MUST log stderr at debug level without returning it. A done message MUST return `io.EOF`. A zero-length read MUST NOT receive from the remote stream.
 
 Close MUST send `TERM` before closing the remote stream. It MUST attempt the remote close after a signal failure. Repeated close calls MUST have no additional remote effect.
+
+## Cloudflare
+
+Every box name MUST match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, the worker route rule. Create, Attach, Destroy, and Connect MUST fail before any request with `cloudflare: invalid box name` when it does not. The worker MUST answer a request whose box name breaks the rule with 400 `invalid box name` and keep 404 for unknown routes.

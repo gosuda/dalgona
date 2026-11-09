@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/coder/websocket"
@@ -22,6 +23,8 @@ type Service struct {
 func New(baseURL, token string) *Service {
 	return &Service{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: http.DefaultClient}
 }
+
+var boxName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 
 func (s *Service) Create(ctx context.Context, spec sandboxsvc.Spec) (string, error) {
 	if err := s.post(ctx, spec.Name); err != nil {
@@ -96,9 +99,9 @@ func (s *Service) request(ctx context.Context, method, id string) (*http.Request
 	if s.baseURL == "" {
 		return nil, errors.New("cloudflare: empty worker URL")
 	}
-	u, err := url.JoinPath(s.baseURL, "box", id)
+	u, err := s.boxURL(id)
 	if err != nil {
-		return nil, fmt.Errorf("cloudflare: build URL: %w", err)
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, http.NoBody)
 	if err != nil {
@@ -111,15 +114,13 @@ func (s *Service) request(ctx context.Context, method, id string) (*http.Request
 }
 
 func (s *Service) websocketURL(id, suffix string) (string, error) {
-	var u string
-	var err error
-	if suffix == "/" {
-		u, err = url.JoinPath(s.baseURL, "box", id)
-	} else {
-		u, err = url.JoinPath(s.baseURL, "box", id, suffix)
+	var elem []string
+	if suffix != "/" {
+		elem = []string{suffix}
 	}
+	u, err := s.boxURL(id, elem...)
 	if err != nil {
-		return "", fmt.Errorf("cloudflare: build websocket URL: %w", err)
+		return "", err
 	}
 	parsed, err := url.Parse(u)
 	if err != nil {
@@ -135,4 +136,15 @@ func (s *Service) websocketURL(id, suffix string) (string, error) {
 		return "", fmt.Errorf("cloudflare: unsupported URL scheme %q", parsed.Scheme)
 	}
 	return parsed.String(), nil
+}
+
+func (s *Service) boxURL(id string, elem ...string) (string, error) {
+	if !boxName.MatchString(id) {
+		return "", fmt.Errorf("cloudflare: invalid box name %q: must match %s", id, boxName)
+	}
+	u, err := url.JoinPath(s.baseURL, append([]string{"box", id}, elem...)...)
+	if err != nil {
+		return "", fmt.Errorf("cloudflare: build URL: %w", err)
+	}
+	return u, nil
 }
