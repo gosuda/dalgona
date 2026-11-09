@@ -308,6 +308,37 @@ func TestBootstrap_skipsMatchingVersion(t *testing.T) {
 	}
 }
 
+func TestProbeScriptKeepsVersionDiagnosticOnStdout(t *testing.T) {
+	home := t.TempDir()
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "HOME=") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "HOME="+home)
+	cmd := exec.Command("sh", "-c", probeScript)
+	cmd.Env = env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatal("probe succeeded with no dalgona binary under HOME; want the version check to fail")
+	}
+	archOut, err := exec.Command("uname", "-m").Output()
+	if err != nil {
+		t.Fatalf("uname -m: %v", err)
+	}
+	arch := strings.TrimSpace(string(archOut))
+	line, _, _ := strings.Cut(stdout.String(), "\n")
+	if strings.TrimSpace(line) != arch {
+		t.Fatalf("probe first stdout line = %q, want arch %q (stdout %q, stderr %q)", line, arch, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("probe wrote %q to stderr; the daemon forwards stderr in separate frames that can arrive before the arch line", stderr.String())
+	}
+}
+
 func TestExecRPC_writeFileSyncsFilesystem(t *testing.T) {
 	local := newLocalContractRunner(t).(*Local)
 	saved := syncFS

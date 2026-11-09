@@ -34,7 +34,7 @@ const (
 	uploadScript   = `mkdir -p "$(dirname "$1")" && head -c "$3" | base64 -d > "$1" && chmod "$2" "$1"`
 	chmodScript    = `chmod +x "$@"`
 	treeScript     = `cd /workspace && git init -q && git add -A && git write-tree`
-	probeScript    = `uname -m; ~/.dalgona/bin/dalgona --version`
+	probeScript    = `uname -m; ~/.dalgona/bin/dalgona --version 2>&1`
 )
 
 type Stream interface {
