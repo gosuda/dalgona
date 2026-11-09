@@ -116,6 +116,9 @@ func (s *Service) Destroy(ctx context.Context, id string) error {
 		return errors.New("docker: nil client")
 	}
 	if _, err := s.client.ContainerRemove(ctx, id, client.ContainerRemoveOptions{Force: true}); err != nil {
+		if cerrdefs.IsNotFound(err) {
+			return fmt.Errorf("docker: remove container %s: %w", id, sandboxsvc.ErrGone)
+		}
 		return fmt.Errorf("docker: remove container %s: %w", id, err)
 	}
 	return nil

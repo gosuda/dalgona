@@ -10,9 +10,16 @@ import (
 	"sync"
 	"time"
 
+	sdk "github.com/modal-labs/modal-client/go"
+
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/sandboxsvc"
 )
+
+func isModalGone(err error) bool {
+	_, ok := errors.AsType[sdk.NotFoundError](err)
+	return ok
+}
 
 const defaultImage = "docker.io/library/buildpack-deps:stable"
 
@@ -149,9 +156,15 @@ func (s *Service) Destroy(ctx context.Context, id string) error {
 	}
 	box, err := s.api.FromID(ctx, sandboxID)
 	if err != nil {
+		if isModalGone(err) {
+			return fmt.Errorf("modal: attach %s: %w", id, sandboxsvc.ErrGone)
+		}
 		return fmt.Errorf("modal: attach %s: %w", id, err)
 	}
 	if err := box.Terminate(ctx); err != nil {
+		if isModalGone(err) {
+			return fmt.Errorf("modal: terminate %s: %w", id, sandboxsvc.ErrGone)
+		}
 		return fmt.Errorf("modal: terminate %s: %w", id, err)
 	}
 	if err := s.api.DeleteVolume(ctx, volume); err != nil {

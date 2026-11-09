@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -118,6 +119,9 @@ func (s *Service) Attach(ctx context.Context, id string) (string, error) {
 
 func (s *Service) Destroy(ctx context.Context, id string) error {
 	if _, err := s.client.DeleteSandbox(ctx, id); err != nil {
+		if apiErr, ok := errors.AsType[*sdk.APIError](err); ok && apiErr.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("sandbox0: delete %s: %w", id, sandboxsvc.ErrGone)
+		}
 		return fmt.Errorf("sandbox0: delete %s: %w", id, err)
 	}
 	return nil

@@ -2,6 +2,7 @@ package sandboxsvc
 
 import (
 	"context"
+	"errors"
 	"io"
 )
 
@@ -23,4 +24,10 @@ type Service interface {
 	Attach(ctx context.Context, id string) (current string, err error)
 	Destroy(ctx context.Context, id string) error
 	Connect(ctx context.Context, id string, e Endpoint) (io.ReadWriteCloser, error)
+}
+
+var ErrGone = errors.New("sandboxsvc: box is gone")
+
+func IsGone(err error) bool {
+	return errors.Is(err, ErrGone)
 }

@@ -56,7 +56,7 @@ func (s *Service) Destroy(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.boxes[id]; !ok {
-		return fmt.Errorf("fake: unknown box %s", id)
+		return fmt.Errorf("fake: unknown box %s: %w", id, sandboxsvc.ErrGone)
 	}
 	delete(s.boxes, id)
 	s.destroyed++

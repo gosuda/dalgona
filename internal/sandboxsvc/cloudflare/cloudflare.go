@@ -47,6 +47,9 @@ func (s *Service) Destroy(ctx context.Context, id string) error {
 		return fmt.Errorf("cloudflare: delete %s: %w", id, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("cloudflare: delete %s: status 404: %w", id, sandboxsvc.ErrGone)
+	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return fmt.Errorf("cloudflare: delete %s: status %d", id, resp.StatusCode)
 	}

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/sandboxsvc"
 )
 
 // Box is a journaled box with no unarchived thread bound to it.
@@ -138,6 +139,9 @@ func (b *Binder) destroy(ctx context.Context, runnerName string, key boxKey) err
 		return err
 	}
 	if err := svc.Destroy(ctx, key.id); err != nil {
+		if sandboxsvc.IsGone(err) {
+			return b.appendLedger("destroyed", key.service, key.id)
+		}
 		return fmt.Errorf("remote: destroy box %s: %w", key.id, err)
 	}
 	return b.appendLedger("destroyed", key.service, key.id)

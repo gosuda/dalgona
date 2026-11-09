@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"strings"
 	"sync"
 
 	flysprites "github.com/superfly/sprites-go"
@@ -62,12 +64,25 @@ func (s *Service) Destroy(ctx context.Context, id string) error {
 	}
 	sprite, err := s.client.GetSprite(ctx, id)
 	if err != nil {
+		if isSpriteGone(err) {
+			return fmt.Errorf("sprites: attach %s: %w", id, sandboxsvc.ErrGone)
+		}
 		return fmt.Errorf("sprites: attach %s: %w", id, err)
 	}
 	if err := sprite.Delete(ctx); err != nil {
+		if isSpriteGone(err) {
+			return fmt.Errorf("sprites: delete %s: %w", id, sandboxsvc.ErrGone)
+		}
 		return fmt.Errorf("sprites: delete %s: %w", id, err)
 	}
 	return nil
+}
+
+func isSpriteGone(err error) bool {
+	if apiErr, ok := errors.AsType[*flysprites.APIError](err); ok {
+		return apiErr.StatusCode == http.StatusNotFound
+	}
+	return strings.HasPrefix(err.Error(), "sprite not found:")
 }
 
 func (s *Service) Connect(ctx context.Context, id string, endpoint sandboxsvc.Endpoint) (io.ReadWriteCloser, error) {
