@@ -200,7 +200,7 @@ func consume(ctx context.Context, gate *model.StartGate, body io.ReadCloser, dec
 	if err == nil {
 		err = decoder.Finish()
 	}
-	return model.AttemptResult{Status: http.StatusOK, SawTool: decoder.SawTool(), Body: failed, Err: err}
+	return model.AttemptResult{Status: http.StatusOK, SawTool: decoder.SawTool(), SawContent: decoder.SawContent(), Body: failed, Err: err}
 }
 
 func decodeChunk(decoder *google.Decoder, data []byte) error {

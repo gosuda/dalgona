@@ -27,16 +27,17 @@ var (
 )
 
 type session struct {
-	stream  *model.EventStream
-	conv    *conversation
-	inBand  func(context.Context, model.ToolCall) (model.ToolResult, error)
-	tools   []wire.McpToolDefinition
-	writer  *frameWriter
-	body    *idleBody
-	frames  *frameReader
-	sawTool bool
-	aborted []uint32
-	failed  []byte
+	stream     *model.EventStream
+	conv       *conversation
+	inBand     func(context.Context, model.ToolCall) (model.ToolResult, error)
+	tools      []wire.McpToolDefinition
+	writer     *frameWriter
+	body       *idleBody
+	frames     *frameReader
+	sawTool    bool
+	sawContent bool
+	aborted    []uint32
+	failed     []byte
 }
 
 func (s *session) consume(ctx context.Context, gate *model.StartGate, body *idleBody) model.AttemptResult {
@@ -47,9 +48,9 @@ func (s *session) consume(ctx context.Context, gate *model.StartGate, body *idle
 	body.pause()
 	err = gate.Error(ctx, err)
 	if err != nil {
-		return model.AttemptResult{Status: failureStatus(err), SawTool: s.sawTool, Body: s.failed, Err: err}
+		return model.AttemptResult{Status: failureStatus(err), SawTool: s.sawTool, SawContent: s.sawContent, Body: s.failed, Err: err}
 	}
-	return model.AttemptResult{Status: http.StatusOK, SawTool: s.sawTool}
+	return model.AttemptResult{Status: http.StatusOK, SawTool: s.sawTool, SawContent: s.sawContent}
 }
 
 func (s *session) readFrames(ctx context.Context, gate *model.StartGate) error {
@@ -110,8 +111,10 @@ func (s *session) handle(ctx context.Context, payload []byte) (bool, error) {
 func (s *session) interaction(update *wire.InteractionUpdate) bool {
 	switch {
 	case update.Text != nil && len(update.Text.TextView) != 0:
+		s.sawContent = true
 		s.stream.Emit(model.TextDelta{Text: string(update.Text.TextView)})
 	case update.Thinking != nil && len(update.Thinking.TextView) != 0:
+		s.sawContent = true
 		s.stream.Emit(model.ReasoningDelta{Text: string(update.Thinking.TextView)})
 	case update.Ended != nil:
 		s.stream.Emit(turnUsage(update.Ended))

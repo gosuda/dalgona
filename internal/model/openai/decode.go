@@ -14,11 +14,12 @@ import (
 var errTerminalEvent = errors.New("openai: terminal response event")
 
 type responseState struct {
-	stream    *model.EventStream
-	tools     map[int]*model.ToolCall
-	sawTool   bool
-	done      bool
-	errorBody []byte
+	stream     *model.EventStream
+	tools      map[int]*model.ToolCall
+	sawTool    bool
+	sawContent bool
+	done       bool
+	errorBody  []byte
 }
 
 type responseEvent struct {
@@ -75,7 +76,7 @@ func (s *responseState) consume(ctx context.Context, gate *model.StartGate, body
 	if err == nil {
 		err = s.finish()
 	}
-	return model.AttemptResult{Status: 200, SawTool: s.sawTool, Body: s.errorBody, Err: err}
+	return model.AttemptResult{Status: 200, SawTool: s.sawTool, SawContent: s.sawContent, Body: s.errorBody, Err: err}
 }
 
 func (s *responseState) handle(_, data []byte) error {
@@ -101,10 +102,12 @@ func (s *responseState) dispatch(value responseEvent) error {
 	}
 	switch value.Type {
 	case "response.output_text.delta":
+		s.sawContent = true
 		s.stream.Emit(model.TextDelta{Text: value.Delta})
 	case "response.refusal.delta", "response.refusal.done":
 		return errors.New("openai: refusal")
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		s.sawContent = true
 		s.stream.Emit(model.ReasoningDelta{Text: value.Delta})
 	case "response.completed", "response.done", "response.incomplete":
 		return s.complete(value)

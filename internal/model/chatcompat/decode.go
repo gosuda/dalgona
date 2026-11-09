@@ -12,15 +12,16 @@ import (
 )
 
 type responseState struct {
-	stream    *model.EventStream
-	calls     map[int]*model.ToolCall
-	order     []int
-	idIndexes map[string]int
-	nextIndex int
-	freeform  map[string]bool
-	sawTool   bool
-	done      bool
-	errorBody []byte
+	stream     *model.EventStream
+	calls      map[int]*model.ToolCall
+	order      []int
+	idIndexes  map[string]int
+	nextIndex  int
+	freeform   map[string]bool
+	sawTool    bool
+	sawContent bool
+	done       bool
+	errorBody  []byte
 }
 
 type responseEvent struct {
@@ -86,7 +87,7 @@ func (s *responseState) consume(ctx context.Context, gate *model.StartGate, body
 	if err == nil {
 		err = s.finish()
 	}
-	return model.AttemptResult{Status: 200, SawTool: s.sawTool, Body: s.errorBody, Err: err}
+	return model.AttemptResult{Status: 200, SawTool: s.sawTool, SawContent: s.sawContent, Body: s.errorBody, Err: err}
 }
 
 func (s *responseState) handle(_, data []byte) error {
@@ -120,9 +121,11 @@ func (s *responseState) dispatch(value responseEvent) error {
 
 func (s *responseState) handleChoice(choice choice) error {
 	if choice.Delta.Content != "" {
+		s.sawContent = true
 		s.stream.Emit(model.TextDelta{Text: choice.Delta.Content})
 	}
 	if reasoning := choice.Delta.reasoning(); reasoning != "" {
+		s.sawContent = true
 		s.stream.Emit(model.ReasoningDelta{Text: reasoning})
 	}
 	for _, call := range choice.Delta.ToolCalls {

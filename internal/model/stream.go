@@ -433,6 +433,7 @@ type AttemptResult struct {
 	Status     int
 	RetryAfter time.Duration
 	SawTool    bool
+	SawContent bool
 	Body       []byte
 	Err        error
 }
@@ -452,7 +453,7 @@ func RunRetries(ctx context.Context, options RetryOptions, attempt func(context.
 			return result
 		}
 		verdict := classifyAttempt(result)
-		if result.SawTool || verdict != Retry || index == 3 {
+		if !retryableAttempt(result, verdict, index) {
 			return result
 		}
 		delay := RetryDelay(index, result.RetryAfter, options.Random)
@@ -465,6 +466,13 @@ func RunRetries(ctx context.Context, options RetryOptions, attempt func(context.
 		}
 	}
 	return AttemptResult{Err: errors.New("model: retry loop exhausted")}
+}
+
+func retryableAttempt(result AttemptResult, verdict Verdict, index int) bool {
+	if result.SawTool || result.SawContent || verdict != Retry {
+		return false
+	}
+	return index < 3
 }
 
 func classifyAttempt(result AttemptResult) Verdict {

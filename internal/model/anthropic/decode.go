@@ -12,15 +12,16 @@ import (
 )
 
 type responseState struct {
-	stream    *model.EventStream
-	freeform  map[string]bool
-	tools     map[int]*model.ToolCall
-	signature string
-	usage     usage
-	sawTool   bool
-	done      bool
-	stopped   bool
-	errorBody []byte
+	stream     *model.EventStream
+	freeform   map[string]bool
+	tools      map[int]*model.ToolCall
+	signature  string
+	usage      usage
+	sawTool    bool
+	sawContent bool
+	done       bool
+	stopped    bool
+	errorBody  []byte
 }
 
 type responseEvent struct {
@@ -80,7 +81,7 @@ func (s *responseState) consume(ctx context.Context, gate *model.StartGate, body
 	if err == nil {
 		err = s.finish()
 	}
-	return model.AttemptResult{Status: 200, SawTool: s.sawTool, Body: s.errorBody, Err: err}
+	return model.AttemptResult{Status: 200, SawTool: s.sawTool, SawContent: s.sawContent, Body: s.errorBody, Err: err}
 }
 
 func (s *responseState) handle(_ []byte, data []byte) error {
@@ -143,8 +144,10 @@ func (s *responseState) startBlock(index int, block block) {
 func (s *responseState) contentDelta(index int, delta delta) error {
 	switch delta.Type {
 	case "text_delta":
+		s.sawContent = true
 		s.stream.Emit(model.TextDelta{Text: delta.Text})
 	case "thinking_delta":
+		s.sawContent = true
 		s.stream.Emit(model.ReasoningDelta{Text: delta.Thinking})
 	case "signature_delta":
 		s.signature = delta.Signature

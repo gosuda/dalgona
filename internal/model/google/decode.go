@@ -12,13 +12,14 @@ import (
 )
 
 type Decoder struct {
-	stream    *model.EventStream
-	freeform  map[string]bool
-	ids       map[string]bool
-	counter   int
-	sawTool   bool
-	done      bool
-	errorBody []byte
+	stream     *model.EventStream
+	freeform   map[string]bool
+	ids        map[string]bool
+	counter    int
+	sawTool    bool
+	sawContent bool
+	done       bool
+	errorBody  []byte
 }
 
 func NewDecoder(stream *model.EventStream, tools []model.Tool) *Decoder {
@@ -26,6 +27,8 @@ func NewDecoder(stream *model.EventStream, tools []model.Tool) *Decoder {
 }
 
 func (s *Decoder) SawTool() bool { return s.sawTool }
+
+func (s *Decoder) SawContent() bool { return s.sawContent }
 
 type responseEvent struct {
 	Candidates  []candidate
@@ -80,7 +83,7 @@ func (s *Decoder) consume(ctx context.Context, gate *model.StartGate, body io.Re
 	if err == nil {
 		err = s.Finish()
 	}
-	return model.AttemptResult{Status: 200, SawTool: s.sawTool, Body: s.errorBody, Err: err}
+	return model.AttemptResult{Status: 200, SawTool: s.sawTool, SawContent: s.sawContent, Body: s.errorBody, Err: err}
 }
 
 func (s *Decoder) handle(_, data []byte) error {
@@ -151,6 +154,7 @@ func (s *Decoder) processPart(part part) error {
 	if part.Text == "" {
 		return nil
 	}
+	s.sawContent = true
 	if part.Thought {
 		s.stream.Emit(model.ReasoningDelta{Text: part.Text})
 		return nil

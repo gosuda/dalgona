@@ -58,7 +58,7 @@ OpenAI reasoning summaries and reasoning text MUST produce reasoning deltas. Ant
 
 Usage MUST separate uncached input, cached reads, and cache writes. OpenAI and chat-compatible usage MUST subtract cache reads and writes from total prompt tokens. Chat-compatible cache reads MUST prefer `prompt_tokens_details.cached_tokens`, then `prompt_cache_hit_tokens`, then top-level `cached_tokens`, in any key order. Anthropic usage MUST merge non-null fields from `message_start` and `message_delta`. A null field MUST keep the earlier value. Google usage MUST subtract cached content from input and add thought tokens to output.
 
-Stop reasons MUST use `stop`, `length`, or `toolUse`. Provider safety, refusal, unknown, and terminal error reasons MUST fail the stream. OpenAI refusal events and Google `promptFeedback.blockReason` MUST fail the stream. A stream without its required terminal event MUST fail. A stream that emitted a tool call MUST NOT retry. A stream failure MUST retain the raw event that caused it.
+Stop reasons MUST use `stop`, `length`, or `toolUse`. Provider safety, refusal, unknown, and terminal error reasons MUST fail the stream. OpenAI refusal events and Google `promptFeedback.blockReason` MUST fail the stream. A stream without its required terminal event MUST fail. A stream that emitted a tool call, text, or reasoning MUST NOT retry, because the retry would re-emit the partial content after the failed attempt. A stream failure MUST retain the raw event that caused it.
 
 Google SSE data MAY contain one response object or an array of response objects. Only the first candidate MUST produce events.
 

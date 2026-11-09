@@ -58,3 +58,15 @@ func TestRunRetriesRepeatsTransportFailure(t *testing.T) {
 		t.Fatalf("attempts = %d, err = %v; want 4 attempts and an error", attempts, result.Err)
 	}
 }
+
+func TestRunRetriesStopsAfterContentEmitted(t *testing.T) {
+	t.Parallel()
+	var attempts int
+	result := RunRetries(t.Context(), RetryOptions{Sleep: func(context.Context, time.Duration) error { return nil }}, func(context.Context) AttemptResult {
+		attempts++
+		return AttemptResult{SawContent: true, Err: &url.Error{Op: "Post", URL: "https://example.com/v1", Err: errors.New("connection reset by peer")}}
+	})
+	if attempts != 1 || result.Err == nil {
+		t.Fatalf("attempts = %d, err = %v; want 1 attempt and an error", attempts, result.Err)
+	}
+}

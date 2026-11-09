@@ -34,15 +34,16 @@ type usageMax struct {
 }
 
 type chatState struct {
-	stream   *model.EventStream
-	freeform map[string]bool
-	inflate  inflater
-	calls    []openCall
-	active   int
-	stop     int32
-	usage    usageMax
-	sawTool  bool
-	failed   []byte
+	stream     *model.EventStream
+	freeform   map[string]bool
+	inflate    inflater
+	calls      []openCall
+	active     int
+	stop       int32
+	usage      usageMax
+	sawTool    bool
+	sawContent bool
+	failed     []byte
 }
 
 func newChatState(stream *model.EventStream, tools []model.Tool) *chatState {
@@ -54,9 +55,9 @@ func (s *chatState) consume(ctx context.Context, gate *model.StartGate, idle *id
 	idle.stop()
 	err = gate.Error(ctx, err)
 	if err != nil {
-		return model.AttemptResult{Status: connectStatus(err, http.StatusOK), SawTool: s.sawTool, Body: s.failed, Err: err}
+		return model.AttemptResult{Status: connectStatus(err, http.StatusOK), SawTool: s.sawTool, SawContent: s.sawContent, Body: s.failed, Err: err}
 	}
-	return model.AttemptResult{Status: http.StatusOK, SawTool: s.sawTool}
+	return model.AttemptResult{Status: http.StatusOK, SawTool: s.sawTool, SawContent: s.sawContent}
 }
 
 func (s *chatState) readFrames(gate *model.StartGate, body io.Reader) error {
@@ -91,9 +92,11 @@ func (s *chatState) apply(payload []byte) error {
 		return fmt.Errorf("devin: decode chat message: %w", err)
 	}
 	if len(message.DeltaThinkingView) != 0 {
+		s.sawContent = true
 		s.stream.Emit(model.ReasoningDelta{Text: string(message.DeltaThinkingView)})
 	}
 	if len(message.DeltaTextView) != 0 {
+		s.sawContent = true
 		s.stream.Emit(model.TextDelta{Text: string(message.DeltaTextView)})
 	}
 	for index := range message.ToolCalls {
