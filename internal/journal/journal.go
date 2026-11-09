@@ -607,7 +607,11 @@ func (s *Store) freshHead(id string, st *sessionState) SessionHead {
 }
 
 func mirrorRowHead(id string, row sessionRow) SessionHead {
-	return SessionHead{ID: id, HeadSeq: row.headSeq, Status: cmp.Or(SessionStatus(row.status), SessionOK)}
+	status := SessionStatus(row.status)
+	if status != SessionOK && status != SessionDamaged {
+		status = SessionDamaged
+	}
+	return SessionHead{ID: id, HeadSeq: row.headSeq, Status: status}
 }
 
 func (s *Store) startBackup() {

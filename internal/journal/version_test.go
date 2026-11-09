@@ -39,8 +39,8 @@ func TestMirrorSchemaCarriesVersion(t *testing.T) {
 	store := mustOpen(t, dir)
 	version := queryUserVersion(t, store.db)
 	closeStore(t, store)
-	if version != 1 {
-		t.Fatalf("user_version = %d, want 1", version)
+	if version != 2 {
+		t.Fatalf("user_version = %d, want 2", version)
 	}
 }
 
@@ -56,8 +56,8 @@ func TestMirrorMigratesLegacyVersion(t *testing.T) {
 	}
 	reopened := mustOpen(t, dir)
 	defer closeStore(t, reopened)
-	if version := queryUserVersion(t, reopened.db); version != 1 {
-		t.Fatalf("user_version = %d, want 1 after migration", version)
+	if version := queryUserVersion(t, reopened.db); version != 2 {
+		t.Fatalf("user_version = %d, want 2 after migration", version)
 	}
 	head, err := reopened.Status("s")
 	if err != nil {

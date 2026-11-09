@@ -13,6 +13,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const sessionsColumns = `(id TEXT PRIMARY KEY, parent TEXT, cwd TEXT, title TEXT, status TEXT NOT NULL CHECK(status IN ('ok','damaged')), head_seq INTEGER NOT NULL CHECK(head_seq >= 0), updated_at TEXT)`
+
 const schema = `
 CREATE TABLE IF NOT EXISTS events(
 	session TEXT NOT NULL,
@@ -21,15 +23,7 @@ CREATE TABLE IF NOT EXISTS events(
 	ev BLOB NOT NULL,
 	PRIMARY KEY(session, seq)
 );
-CREATE TABLE IF NOT EXISTS sessions(
-	id TEXT PRIMARY KEY,
-	parent TEXT,
-	cwd TEXT,
-	title TEXT,
-	status TEXT,
-	head_seq INTEGER,
-	updated_at TEXT
-);
+CREATE TABLE IF NOT EXISTS sessions` + sessionsColumns + `;
 `
 
 func dbDSN(path string) string {
@@ -56,7 +50,7 @@ func openDB(path string) (db *sql.DB, err error) {
 	return db, nil
 }
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 func migrateDB(db *sql.DB) error {
 	version, err := schemaVersionOf(db)
@@ -92,6 +86,8 @@ func applyMigration(db *sql.DB, target int) error {
 	switch target {
 	case 1:
 		return migrateToV1(db)
+	case 2:
+		return migrateToV2(db)
 	default:
 		return fmt.Errorf("journal: unknown schema version %d", target)
 	}
@@ -99,6 +95,35 @@ func applyMigration(db *sql.DB, target int) error {
 
 func migrateToV1(db *sql.DB) error {
 	return setUserVersion(db, 1)
+}
+
+func migrateToV2(db *sql.DB) error {
+	if err := withTx(db, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`UPDATE sessions SET status = 'damaged' WHERE status IS NULL OR status NOT IN ('ok','damaged')`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE sessions SET head_seq = 0 WHERE head_seq IS NULL OR head_seq < 0`); err != nil {
+			return err
+		}
+		for _, stmt := range sessionsV2Rebuild() {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return setUserVersion(db, 2)
+}
+
+func sessionsV2Rebuild() []string {
+	return []string{
+		"CREATE TABLE sessions_new" + sessionsColumns,
+		"INSERT INTO sessions_new SELECT id, parent, cwd, title, status, head_seq, updated_at FROM sessions",
+		"DROP TABLE sessions",
+		"ALTER TABLE sessions_new RENAME TO sessions",
+	}
 }
 
 func openUsableDB(path string) (*sql.DB, error) {
@@ -271,9 +296,20 @@ func loadSessionIndex(db *sql.DB, sessions map[string]sessionRow) (retErr error)
 		if err := rows.Scan(&id, &status, &head); err != nil {
 			return err
 		}
-		sessions[id] = sessionRow{status: status.String, headSeq: uint64(max(head.Int64, 0))}
+		sessions[id] = coerceSessionRow(status, head)
 	}
 	return rows.Err()
+}
+
+func coerceSessionRow(status sql.NullString, head sql.NullInt64) sessionRow {
+	row := sessionRow{status: status.String, headSeq: uint64(max(head.Int64, 0))}
+	if !status.Valid || (row.status != string(SessionOK) && row.status != string(SessionDamaged)) {
+		row.status = string(SessionDamaged)
+	}
+	if !head.Valid || head.Int64 < 0 {
+		row.headSeq = 0
+	}
+	return row
 }
 
 type fetchResult struct {
