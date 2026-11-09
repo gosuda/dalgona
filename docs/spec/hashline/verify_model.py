@@ -8,6 +8,7 @@ parser, journal, observation transport, or production patch engine.
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -300,9 +301,9 @@ def main() -> None:
             "Observation checks are abstract ordering checks, not delivery instrumentation.",
         ],
     }
-    text = json.dumps(report, indent=2) + "\n"
-    Path(__file__).with_name("verification.json").write_text(text, encoding="utf-8")
-    print(text, end="")
+    data = (json.dumps(report, indent=2) + "\n").encode("utf-8")
+    Path(__file__).with_name("verification.json").write_bytes(data)
+    sys.stdout.buffer.write(data)
 
 
 if __name__ == "__main__":
