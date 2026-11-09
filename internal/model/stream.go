@@ -18,10 +18,62 @@ import (
 
 type SSEHandler func(event, data []byte) error
 
+const (
+	maxSSELineBytes  = 1 << 20
+	maxSSEEventBytes = 8 << 20
+)
+
 var (
 	ErrStreamStartTimeout = errors.New("model: first stream event timeout")
 	ErrStreamIdleTimeout  = errors.New("model: stream idle timeout")
+	ErrSSELineTooLarge    = errors.New("model: sse line too large")
+	ErrSSEEventTooLarge   = errors.New("model: sse event too large")
 )
+
+func (p *sseParser) appendData(value []byte) error {
+	add := len(value)
+	if len(p.data) != 0 {
+		add++
+	}
+	if len(p.data)+add > maxSSEEventBytes {
+		return ErrSSEEventTooLarge
+	}
+	if len(p.data) != 0 {
+		p.data = append(p.data, '\n')
+	}
+	p.data = append(p.data, value...)
+	return nil
+}
+
+func (p *sseParser) consume(line []byte) error {
+	line = bytes.TrimSuffix(line, []byte{'\n'})
+	line = bytes.TrimSuffix(line, []byte{'\r'})
+	switch {
+	case len(line) == 0:
+		return p.flush()
+	case bytes.HasPrefix(line, []byte("event:")):
+		p.event = append(p.event[:0], bytes.TrimSpace(line[6:])...)
+	case bytes.HasPrefix(line, []byte("data:")):
+		return p.appendData(bytes.TrimSpace(line[5:]))
+	case line[0] == '{' || line[0] == '[':
+		p.data = append(p.data[:0], line...)
+	}
+	return nil
+}
+
+func readSSELine(reader *bufio.Reader) ([]byte, error) {
+	var line []byte
+	for {
+		part, err := reader.ReadSlice('\n')
+		line = append(line, part...)
+		if len(line) > maxSSELineBytes {
+			return nil, ErrSSELineTooLarge
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return line, err
+		}
+	}
+}
 
 type StartGate struct {
 	cancel context.CancelCauseFunc
@@ -88,29 +140,6 @@ func ReadSSE(ctx context.Context, body io.Reader, handler SSEHandler) error {
 	}
 }
 
-func (p *sseParser) consume(line []byte) error {
-	line = bytes.TrimSuffix(line, []byte{'\n'})
-	line = bytes.TrimSuffix(line, []byte{'\r'})
-	switch {
-	case len(line) == 0:
-		return p.flush()
-	case bytes.HasPrefix(line, []byte("event:")):
-		p.event = append(p.event[:0], bytes.TrimSpace(line[6:])...)
-	case bytes.HasPrefix(line, []byte("data:")):
-		p.appendData(bytes.TrimSpace(line[5:]))
-	case line[0] == '{' || line[0] == '[':
-		p.data = append(p.data[:0], line...)
-	}
-	return nil
-}
-
-func (p *sseParser) appendData(value []byte) {
-	if len(p.data) != 0 {
-		p.data = append(p.data, '\n')
-	}
-	p.data = append(p.data, value...)
-}
-
 func (p *sseParser) flush() error {
 	if len(p.event) == 0 && len(p.data) == 0 {
 		return nil
@@ -127,17 +156,6 @@ func (p *sseParser) finish(err error) error {
 		return p.flush()
 	}
 	return err
-}
-
-func readSSELine(reader *bufio.Reader) ([]byte, error) {
-	var line []byte
-	for {
-		part, err := reader.ReadSlice('\n')
-		line = append(line, part...)
-		if !errors.Is(err, bufio.ErrBufferFull) {
-			return line, err
-		}
-	}
 }
 
 type StreamTimers struct {
