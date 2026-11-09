@@ -37,11 +37,13 @@ const (
 	probeScript    = `uname -m; ~/.dalgona/bin/dalgona --version 2>&1`
 )
 
+// Stream is a command pipe. Wait must return after Close: waitStream
+// closes the stream on cancel and again after the grace period, and the
+// worker goroutine exits only when Wait returns.
 type Stream interface {
 	io.ReadWriteCloser
 	Wait() (exitCode int, err error)
 }
-
 type RunFunc func(ctx context.Context, argv []string) (Stream, error)
 
 type BootstrapFunc func(ctx context.Context, boxID string, run RunFunc) error
@@ -330,6 +332,8 @@ func writeStdin(st Stream, stdin io.Reader) error {
 	return nil
 }
 
+var waitCancelGrace = 5 * time.Second
+
 func waitStream(ctx context.Context, st Stream) (int, error) {
 	ch := make(chan waitResult, 1)
 	go func() {
@@ -339,11 +343,16 @@ func waitStream(ctx context.Context, st Stream) (int, error) {
 	select {
 	case <-ctx.Done():
 		_ = st.Close()
-		res := <-ch
-		if res.err != nil {
-			return res.code, fmt.Errorf("runner: wait for command: %w", ctx.Err())
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				return res.code, fmt.Errorf("runner: wait for command: %w", ctx.Err())
+			}
+			return res.code, nil
+		case <-time.After(waitCancelGrace):
+			_ = st.Close()
+			return 0, fmt.Errorf("runner: wait for command: %w", ctx.Err())
 		}
-		return res.code, fmt.Errorf("runner: wait for command: %w", ctx.Err())
 	case res := <-ch:
 		if res.err != nil {
 			return res.code, fmt.Errorf("runner: wait for command: %w", res.err)
