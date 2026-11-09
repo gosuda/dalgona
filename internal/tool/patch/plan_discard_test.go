@@ -36,6 +36,29 @@ func TestPatchFailedPlanReleasesPins(t *testing.T) {
 	}
 }
 
+func TestPatchCreateIntoMissingParentIgnoresRootSymlinkLeaf(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires additional privileges")
+	}
+	env, cwd := editTestEnv(t)
+	outside := filepath.Join(t.TempDir(), "target.txt")
+	if err := os.WriteFile(outside, []byte("outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(cwd, "g.txt")); err != nil {
+		t.Fatal(err)
+	}
+	plan := planFor(t, env, `{"changes":[{"path":"nd/g.txt","create":"content\n"}]}`)
+	if _, err := plan.Apply(t.Context()); err != nil {
+		t.Fatalf("create blocked by an unrelated root symlink leaf: %v", err)
+	}
+	requireFile(t, filepath.Join(cwd, "nd", "g.txt"), "content\n")
+	requireFile(t, outside, "outside\n")
+	if info, err := os.Lstat(filepath.Join(cwd, "g.txt")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("root symlink leaf disturbed: %v %v", info, err)
+	}
+}
+
 func TestPatchDiscardedPlanReleasesPins(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("requires /proc/self/fd")

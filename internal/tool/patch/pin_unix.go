@@ -41,9 +41,11 @@ func pinVerifiedComponents(env tool.Env, display, absolute string) (*dirPin, err
 			return nil, err
 		}
 	}
-	if err := pin.checkLeaf(name, display); err != nil {
-		pin.close()
-		return nil, err
+	if len(pin.missing) == 0 {
+		if err := pin.checkLeaf(name, display); err != nil {
+			pin.close()
+			return nil, err
+		}
 	}
 	return pin, nil
 }
