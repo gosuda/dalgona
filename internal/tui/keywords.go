@@ -36,11 +36,20 @@ type tag struct {
 	selfClosing bool
 }
 
+func isSearchableKeyword(word string) bool {
+	return word != "" && word == strings.ToLower(word)
+}
+
+func keywordAt(masked, word []rune, start int) bool {
+	end := start + len(word)
+	return slices.Equal(masked[start:end], word) && keywordBoundary(masked, start, end)
+}
+
 func matchKeywords(prompt string, table []Keyword) []Keyword {
 	masked := maskNonProse([]rune(prompt))
 	result := make([]Keyword, 0, len(table))
 	for _, item := range table {
-		if item.Word != "" && item.Word == strings.ToLower(item.Word) && containsKeyword(masked, []rune(item.Word)) {
+		if isSearchableKeyword(item.Word) && containsKeyword(masked, []rune(item.Word)) {
 			result = append(result, item)
 		}
 	}
@@ -51,7 +60,7 @@ func keywordSpans(prompt string, table []Keyword) []keywordSpan {
 	masked := maskNonProse([]rune(prompt))
 	var spans []keywordSpan
 	for _, item := range table {
-		if item.Word == "" || item.Word != strings.ToLower(item.Word) {
+		if !isSearchableKeyword(item.Word) {
 			continue
 		}
 		spans = appendKeywordSpans(spans, masked, item)
@@ -63,8 +72,8 @@ func keywordSpans(prompt string, table []Keyword) []keywordSpan {
 func appendKeywordSpans(spans []keywordSpan, masked []rune, item Keyword) []keywordSpan {
 	word := []rune(item.Word)
 	for start := 0; start+len(word) <= len(masked); start++ {
-		end := start + len(word)
-		if slices.Equal(masked[start:end], word) && keywordBoundary(masked, start, end) {
+		if keywordAt(masked, word, start) {
+			end := start + len(word)
 			spans = append(spans, keywordSpan{start: start, end: end, keyword: item})
 			start = end - 1
 		}
@@ -74,8 +83,7 @@ func appendKeywordSpans(spans []keywordSpan, masked []rune, item Keyword) []keyw
 
 func containsKeyword(masked, word []rune) bool {
 	for start := 0; start+len(word) <= len(masked); start++ {
-		end := start + len(word)
-		if slices.Equal(masked[start:end], word) && keywordBoundary(masked, start, end) {
+		if keywordAt(masked, word, start) {
 			return true
 		}
 	}
