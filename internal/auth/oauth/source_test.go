@@ -39,9 +39,40 @@ func expiredToken() oauth.Token {
 	return oauth.Token{Access: "old-access", Refresh: "old-refresh", Expires: time.Now().Add(30 * time.Second), Account: "acct-1"}
 }
 
+func gatedRefreshHandler(calls *atomic.Int32, entered chan struct{}, release chan struct{}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil || r.PostForm.Get("refresh_token") != "old-refresh" || r.PostForm.Get("grant_type") != "refresh_token" {
+			http.Error(w, "bad refresh request", http.StatusBadRequest)
+			return
+		}
+		calls.Add(1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`))
+	}
+}
+
 func TestSourceRefreshesOnceUnderConcurrentCallers(t *testing.T) {
 	var calls atomic.Int32
-	server := refreshServer(t, &calls, statusOf(http.StatusOK))
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := scopedServer(t, gatedRefreshHandler(&calls, entered, release))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
 	var saved []oauth.Token
 	var saveMu sync.Mutex
 	source := oauth.NewSource(oauth.Provider{ID: "test", TokenURL: server.URL},
@@ -52,24 +83,55 @@ func TestSourceRefreshesOnceUnderConcurrentCallers(t *testing.T) {
 			saved = append(saved, token)
 			return nil
 		})
-	access := concurrentAccess(t, source, 8)
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("refresh calls = %d, want 1", got)
+	done := make(chan []string, 1)
+	go func() { done <- concurrentAccess(t, source, 8) }()
+	select {
+	case <-entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("first refresh never reached the token endpoint")
 	}
-	for index, value := range access {
-		if value != "new-access" {
-			t.Fatalf("caller %d access = %q", index, value)
+	requireNoSecondRefreshWhileGated(t, &calls)
+	close(release)
+	requireRefreshedAccess(t, done, &calls, &saved)
+}
+
+func requireNoSecondRefreshWhileGated(t *testing.T, calls *atomic.Int32) {
+	t.Helper()
+	settle := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(settle) {
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("refresh calls while gated = %d, want 1", got)
 		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	checkSaved(t, saved)
+}
+
+func requireRefreshedAccess(t *testing.T, done chan []string, calls *atomic.Int32, saved *[]oauth.Token) {
+	t.Helper()
+	select {
+	case access := <-done:
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("refresh calls = %d, want 1", got)
+		}
+		for index, value := range access {
+			if value != "new-access" {
+				t.Fatalf("caller %d access = %q", index, value)
+			}
+		}
+		checkSaved(t, *saved)
+	case <-time.After(20 * time.Second):
+		t.Fatal("concurrent callers never returned")
+	}
 }
 
 func concurrentAccess(t *testing.T, source *oauth.Source, callers int) []string {
 	t.Helper()
 	var wg sync.WaitGroup
 	access := make([]string, callers)
+	start := make(chan struct{})
 	for index := range access {
 		wg.Go(func() {
+			<-start
 			token, err := source.Token(t.Context())
 			if err != nil {
 				t.Errorf("token: %v", err)
@@ -77,6 +139,7 @@ func concurrentAccess(t *testing.T, source *oauth.Source, callers int) []string 
 			access[index] = token.Access
 		})
 	}
+	close(start)
 	wg.Wait()
 	return access
 }
