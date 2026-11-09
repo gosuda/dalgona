@@ -42,7 +42,7 @@ func (s *server) initialize(context.Context, jsontext.Value) (jsontext.Value, er
 	family, name := platform()
 	o := newOut()
 	o.open()
-	o.str("userAgent", string(cfg.Product)+"/"+version())
+	o.str("userAgent", string(cfg.Product)+"/"+config.Version())
 	o.str("codexHome", cfg.Home)
 	o.str("platformFamily", family)
 	o.str("platformOs", name)

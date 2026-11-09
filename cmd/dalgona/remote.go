@@ -155,7 +155,7 @@ func callRemote(ctx context.Context, std stdio, method string, params any) int {
 	}
 	defer func() { _ = client.Close() }()
 	var initialized rpc.InitializeResult
-	if err := client.Initialize(ctx, rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: binary, Version: version()}}, &initialized); err != nil {
+	if err := client.Initialize(ctx, rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: binary, Version: config.Version()}}, &initialized); err != nil {
 		return fail(std, 1, err)
 	}
 	var result remoteResult

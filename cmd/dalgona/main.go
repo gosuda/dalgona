@@ -6,11 +6,11 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"slices"
 	"strings"
 	"syscall"
 
+	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool/search"
 	"github.com/gosuda/dalgona/internal/tool/webfetch"
@@ -46,7 +46,7 @@ func run(ctx context.Context, args []string, std stdio) int {
 	}
 	std.remote = name
 	if len(args) == 1 && args[0] == "--version" {
-		fmt.Fprintf(std.out, "%s %s\n", binary, version())
+		fmt.Fprintf(std.out, "%s %s\n", binary, config.Version())
 		return 0
 	}
 	command, rest := dispatch(args)
@@ -104,12 +104,4 @@ var commands = map[string]func(context.Context, []string, stdio) int{
 func fail(std stdio, code int, err error) int {
 	fmt.Fprintf(std.errOut, "%s: %v\n", binary, err)
 	return code
-}
-
-func version() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok || info.Main.Version == "" {
-		return "(devel)"
-	}
-	return info.Main.Version
 }

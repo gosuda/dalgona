@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,14 +27,6 @@ func unixSeconds(t time.Time) int64 {
 		return 0
 	}
 	return t.Unix()
-}
-
-func version() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok || info.Main.Version == "" {
-		return "(devel)"
-	}
-	return info.Main.Version
 }
 
 func provider(model string) string {
@@ -161,7 +152,7 @@ func (s *server) threadObject(info agent.ThreadInfo, status ThreadStatus, turns 
 		ID: info.ID, SessionID: info.ID, Name: info.Name, Preview: info.Preview,
 		Model: info.Model, ModelProvider: provider(info.Model),
 		CreatedAt: unixSeconds(info.Created), UpdatedAt: unixSeconds(info.Updated),
-		Cwd: info.Cwd, CLIVersion: version(), Source: "appServer", Status: status,
+		Cwd: info.Cwd, CLIVersion: config.Version(), Source: "appServer", Status: status,
 		ParentThreadID: info.Parent, ForkedFromID: info.ForkOf, Turns: turns,
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
@@ -41,7 +40,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		case "__search":
 			return search.Main(args[1:], stdout)
 		case "--version":
-			fmt.Fprintf(stdout, "%s %s\n", binary, version())
+			fmt.Fprintf(stdout, "%s %s\n", binary, config.Version())
 			return 0
 		}
 	}
@@ -71,14 +70,6 @@ func runTUI(ctx context.Context, conn io.ReadWriteCloser, opts app.TUIOptions) e
 		OnStatus: onStatus, OnChildSpawned: opts.OnChildSpawned, Input: opts.Stdin, Output: opts.Stdout,
 		ThreadID: opts.ThreadID, Model: opts.Model, Approval: opts.Approval, Sandbox: opts.Sandbox,
 	})
-}
-
-func version() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok || info.Main.Version == "" {
-		return "(devel)"
-	}
-	return info.Main.Version
 }
 
 type servedPipe struct {
