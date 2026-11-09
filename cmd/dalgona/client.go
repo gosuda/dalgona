@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gosuda/dalgona/cmd/internal/tuiwire"
 	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/herdr"
-	"github.com/gosuda/dalgona/internal/tui"
 )
 
 const (
@@ -32,25 +32,12 @@ func runClient(ctx context.Context, args []string, std stdio) int {
 	env := app.CLIEnv{
 		Product: config.ProductDalgona, Home: cfg.Home, Remote: cmp.Or(std.remote, cfg.Remote),
 		Dial:  func(ctx context.Context) (io.ReadWriteCloser, error) { return dial(ctx) },
-		Stdin: std.in, Stdout: std.out, Stderr: std.errOut, TUI: runTUI,
+		Stdin: std.in, Stdout: std.out, Stderr: std.errOut, TUI: tuiwire.Run,
 	}
 	release := attachHerdr(ctx, &env, cfg.Herdr, os.Getenv)
 	code := app.RunCLI(ctx, env, args)
 	release()
 	return code
-}
-
-func runTUI(ctx context.Context, conn io.ReadWriteCloser, opts app.TUIOptions) error {
-	var onStatus func(tui.Status)
-	if opts.OnStatus != nil {
-		onStatus = func(s tui.Status) {
-			opts.OnStatus(app.Status{State: s.State, Seq: s.Seq, ThreadID: s.ThreadID})
-		}
-	}
-	return tui.Run(ctx, conn, tui.Options{
-		OnStatus: onStatus, OnChildSpawned: opts.OnChildSpawned, Input: opts.Stdin, Output: opts.Stdout,
-		ThreadID: opts.ThreadID, Model: opts.Model, Approval: opts.Approval, Sandbox: opts.Sandbox,
-	})
 }
 
 type herdrWorker struct {

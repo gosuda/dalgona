@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/gosuda/dalgona/cmd/internal/tuiwire"
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/advisor"
 	"github.com/gosuda/dalgona/internal/app"
@@ -20,7 +21,6 @@ import (
 	"github.com/gosuda/dalgona/internal/rpc"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool/search"
-	"github.com/gosuda/dalgona/internal/tui"
 )
 
 const binary = "dal"
@@ -49,7 +49,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	env := app.CLIEnv{
 		Product: config.ProductDal, Home: home, Dial: local.dial,
 		Stdin: stdin, Stdout: stdout, Stderr: stderr,
-		TUI: runTUI,
+		TUI: tuiwire.Run,
 	}
 	code := app.RunCLI(ctx, env, args)
 	if err := local.Close(); err != nil {
@@ -57,19 +57,6 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return max(code, 1)
 	}
 	return code
-}
-
-func runTUI(ctx context.Context, conn io.ReadWriteCloser, opts app.TUIOptions) error {
-	var onStatus func(tui.Status)
-	if opts.OnStatus != nil {
-		onStatus = func(s tui.Status) {
-			opts.OnStatus(app.Status{State: s.State, Seq: s.Seq, ThreadID: s.ThreadID})
-		}
-	}
-	return tui.Run(ctx, conn, tui.Options{
-		OnStatus: onStatus, OnChildSpawned: opts.OnChildSpawned, Input: opts.Stdin, Output: opts.Stdout,
-		ThreadID: opts.ThreadID, Model: opts.Model, Approval: opts.Approval, Sandbox: opts.Sandbox,
-	})
 }
 
 type servedPipe struct {
