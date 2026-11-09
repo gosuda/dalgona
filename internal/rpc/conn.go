@@ -321,6 +321,11 @@ func (c *Conn) abort(enqueueErr error) {
 }
 
 func (c *Conn) enqueue(e envelope, delta bool) error {
+	if delta && isDeltaMethod(e.Method) {
+		if stream, err := parseDelta(e.Params); err == nil {
+			return c.queue.pushStreamed(e.Method, stream, c.slowClose)
+		}
+	}
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
@@ -428,7 +433,14 @@ func newOutQueue() *outQueue {
 }
 
 func (q *outQueue) push(b []byte, method string, params jsontext.Value, delta bool, closeFn func() error) error {
-	item := newQueued(b, method, params, delta)
+	return q.finish(newQueued(b, method, params, delta), closeFn)
+}
+
+func (q *outQueue) pushStreamed(method string, stream queuedDelta, closeFn func() error) error {
+	return q.finish(queued{method: method, delta: true, stream: &stream}, closeFn)
+}
+
+func (q *outQueue) finish(item queued, closeFn func() error) error {
 	q.mu.Lock()
 	if q.merge(item) {
 		q.mu.Unlock()
