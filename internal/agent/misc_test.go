@@ -173,9 +173,12 @@ func TestRoleResolutionSeesModelsListedAfterAnEmptyList(t *testing.T) {
 			return registry, registry.Register("anthropic", provider)
 		}
 	})
+	now := time.Now()
+	h.host.clock = func() time.Time { return now }
 	if got, err := h.host.ResolveRole(t.Context(), "smol", thread); err != nil || got != thread {
 		t.Fatalf("smol before login = %q, %v", got, err)
 	}
+	now = now.Add(2 * negativeModelsTTL)
 	if got, err := h.host.ResolveRole(t.Context(), "smol", thread); err != nil || got != "anthropic/claude-haiku-5-5" {
 		t.Fatalf("smol after login = %q, %v", got, err)
 	}

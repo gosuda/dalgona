@@ -43,7 +43,7 @@ func TestTurnReadsThenAnswers(t *testing.T) {
 func TestSystemPromptIsStableAndNoticeRidesNewestMessage(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	h.host.models["openai"] = []model.Model{{ID: "gpt-test", Context: 128000, Efforts: []string{"low", "medium", "high"}}}
+	h.host.models["openai"] = modelCache{models: []model.Model{{ID: "gpt-test", Context: 128000, Efforts: []string{"low", "medium", "high"}}}}
 	thread := h.start()
 	h.submit(thread, "first question")
 	h.waitIdle(thread)

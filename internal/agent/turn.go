@@ -143,7 +143,7 @@ func (w *worker) loop(ctx context.Context) outcome {
 		if ctx.Err() != nil {
 			return outcome{status: statusInterrupted}
 		}
-		v, messages, err := w.context()
+		v, messages, err := w.context(ctx)
 		if err != nil {
 			return failure(ctx, err)
 		}
@@ -166,7 +166,7 @@ func (w *worker) loop(ctx context.Context) outcome {
 	}
 }
 
-func (w *worker) context() (view, []model.Message, error) {
+func (w *worker) context(ctx context.Context) (view, []model.Message, error) {
 	v, err := w.t.view()
 	if err != nil {
 		return v, nil, err

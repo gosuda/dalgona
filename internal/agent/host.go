@@ -17,7 +17,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/journal"
 	"github.com/gosuda/dalgona/internal/keywords"
-	"github.com/gosuda/dalgona/internal/model"
+	"golang.org/x/sync/singleflight"
 )
 
 type Host struct {
@@ -28,11 +28,12 @@ type Host struct {
 	keywords []keywords.Keyword
 	roots    []string
 
-	mu       sync.Mutex
-	threads  map[string]*Thread
-	sessions map[string]ThreadInfo
-	logged   map[string]bool
-	models   map[string][]model.Model
+	mu          sync.Mutex
+	threads     map[string]*Thread
+	sessions    map[string]ThreadInfo
+	logged      map[string]bool
+	models      map[string]modelCache
+	modelsGroup singleflight.Group
 }
 
 func NewHost(cfg HostConfig) (*Host, error) {
@@ -43,7 +44,7 @@ func NewHost(cfg HostConfig) (*Host, error) {
 	h := &Host{
 		cfg: cfg, journal: cfg.Journal, log: cmp.Or(cfg.Logger, slog.Default()), clock: cfg.Clock,
 		threads: make(map[string]*Thread), sessions: make(map[string]ThreadInfo),
-		logged: make(map[string]bool), models: make(map[string][]model.Model),
+		logged: make(map[string]bool), models: make(map[string]modelCache),
 	}
 	if h.clock == nil {
 		h.clock = time.Now

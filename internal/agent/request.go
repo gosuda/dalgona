@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/config"
@@ -15,9 +16,20 @@ import (
 
 const maxEmptyRetries = 2
 
+const (
+	providerModelsTimeout = 30 * time.Second
+	negativeModelsTTL     = time.Minute
+)
+
+type modelCache struct {
+	models  []model.Model
+	expires time.Time
+}
+
 var (
 	errEmptyResponse = errors.New("empty model response")
 	errOverflowTwice = errors.New("context overflow after compaction")
+	errModelsTimeout = errors.New("agent: list provider models timed out")
 )
 
 type reply struct {
@@ -66,7 +78,7 @@ func (w *worker) callModel(ctx context.Context, v view, messages []model.Message
 		if err = w.recoverOverflow(ctx); err != nil {
 			return nil, err
 		}
-		if v, messages, err = w.context(); err != nil {
+		if v, messages, err = w.context(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -266,28 +278,62 @@ func (h *Host) capabilities(ctx context.Context, registry *model.Registry, id st
 }
 
 func (h *Host) providerModels(ctx context.Context, registry *model.Registry, provider string) []model.Model {
-	h.mu.Lock()
-	cached, ok := h.models[provider]
-	h.mu.Unlock()
-	if ok {
-		return cached
+	if models, ok := h.cachedModels(provider); ok {
+		return models
 	}
 	adapter, found := registry.Provider(provider)
 	if !found {
 		return nil
 	}
-	models, err := adapter.Models(ctx)
+	models := h.lookupModels(ctx, adapter, provider)
+	if len(models) == 0 {
+		if ctx.Err() == nil {
+			h.cacheModels(provider, nil, h.clock().Add(negativeModelsTTL))
+		}
+		return nil
+	}
+	return models
+}
+
+func (h *Host) cachedModels(provider string) ([]model.Model, bool) {
+	h.mu.Lock()
+	cached, ok := h.models[provider]
+	now := h.clock()
+	h.mu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	if !cached.expires.IsZero() && !now.Before(cached.expires) {
+		return nil, false
+	}
+	return cached.models, true
+}
+
+func (h *Host) lookupModels(ctx context.Context, adapter model.Provider, provider string) []model.Model {
+	out, err, _ := h.modelsGroup.Do(provider, func() (any, error) {
+		lookupCtx, cancel := context.WithTimeoutCause(ctx, providerModelsTimeout, errModelsTimeout)
+		defer cancel()
+		models, lerr := adapter.Models(lookupCtx)
+		if lerr != nil {
+			return nil, lerr
+		}
+		if len(models) == 0 {
+			return []model.Model{}, nil
+		}
+		h.cacheModels(provider, models, time.Time{})
+		return models, nil
+	})
 	if err != nil {
 		h.log.Warn("agent: list provider models", "provider", provider, "error", err)
-		return nil
 	}
-	if len(models) == 0 {
-		return nil
-	}
-	h.mu.Lock()
-	h.models[provider] = models
-	h.mu.Unlock()
+	models, _ := out.([]model.Model)
 	return models
+}
+
+func (h *Host) cacheModels(provider string, models []model.Model, expires time.Time) {
+	h.mu.Lock()
+	h.models[provider] = modelCache{models: models, expires: expires}
+	h.mu.Unlock()
 }
 
 func (h *Host) contextOverrides() map[string]int {
