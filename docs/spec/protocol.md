@@ -69,7 +69,7 @@ A product MAY add methods. Built-in methods take precedence over added methods. 
 
 ## Policy mapping
 
-`approvalPolicy`: `never` maps to `yolo`; `on-request` and `on-failure` map to `auto`; `untrusted` and any `granular` object map to `ask`; another object MUST give `-32602`. `sandbox`: `danger-full-access` maps to `off`; `workspace-write` and `read-only` map to `workspace-write`. `sandboxPolicy.type`: `dangerFullAccess` maps to `off`; `workspaceWrite` and `readOnly` map to `workspace-write`; `externalSandbox` MUST give `-32602` `unsupported sandboxPolicy externalSandbox`. Responses report `yolo` as `never`, `auto` as `on-request`, and `ask` as `untrusted`; `off` as `dangerFullAccess`, else `workspaceWrite`. The `model` of every thread object MUST be the effective model of the active path. `thread/start`, `thread/resume`, and `thread/fork` MUST also report the effective approval and sandbox. They MUST NOT report the `session.created` values.
+`approvalPolicy`: `never` maps to `yolo`; `on-request` and `on-failure` map to `auto`; `untrusted` and any `granular` object map to `ask`; another object MUST give `-32602`. `sandbox`: `danger-full-access` maps to `off`; `workspace-write` and `read-only` map to `workspace-write`. `sandboxPolicy.type`: `dangerFullAccess` maps to `off`; `workspaceWrite` and `readOnly` map to `workspace-write`; `externalSandbox` MUST give `-32602` `unsupported sandboxPolicy externalSandbox`. Responses report `yolo` as `never`, `auto` as `on-request`, and `ask` as `untrusted`; `off` as `dangerFullAccess`, else `workspaceWrite`. The `model` of every thread object MUST be the effective model of the active path. `thread/start`, `thread/resume`, and `thread/fork` MUST also report the effective approval and sandbox. They MUST NOT report the `session.created` values. The effective sandbox is `off` when the configured policy is not `off` but the runner reports no harness sandbox; the server sources this from the agent layer.
 
 ## Server requests
 
@@ -108,36 +108,6 @@ Tool kinds: class `exec` gives `commandExecution`; class `edit` gives `fileChang
 A file change carries the per-file section of the patch text. A file without a pre-image is `add`. A file without a post-image is `delete`.
 
 When a subscription closes because the subscriber was slow, the server MUST subscribe again and replay the missed events from the journal in sequence order. An event with a sequence number at or below the last delivered one MUST NOT be sent twice.
-
-## App-server websocket
-
-`dalgona app-server --listen ws://IP:PORT` MUST listen on a loopback
-address only. It speaks the same protocol as stdio mode. There are no
-`/readyz` or `/healthz` endpoints; every request is a websocket upgrade.
-
-The listener follows the Codex capability-token contract:
-
-- `--ws-auth capability-token --ws-token-file /absolute/path` reads the
-  bearer token from the file (surrounding whitespace ignored).
-- `--ws-auth capability-token --ws-token-sha256 <64 hex chars>` verifies
-  the bearer token against its SHA-256 digest.
-
-`--ws-auth signed-bearer-token` is not supported and MUST fail before
-listening. Auth flags without `--ws-auth` MUST fail as well.
-
-Without `--ws-auth`, the server MUST mint a fresh token of 32 bytes from
-`crypto/rand` (unpadded base64url) on every start, write it with mode
-`0600` to `<home>/app-server-token` (temporary file plus rename), and
-print only `dalgona app-server: token file <path>` to stderr. The raw
-token MUST NOT appear on stderr. A Codex client connects with
-`codex --remote ws://127.0.0.1:PORT --remote-auth-token-env VAR` after
-reading the file into `VAR`.
-
-Every websocket upgrade MUST carry `Authorization: Bearer <token>`. The
-server MUST compare SHA-256 digests of the presented and expected tokens
-with `crypto/subtle.ConstantTimeCompare`. A missing or wrong token MUST
-get status 401. The server MUST NOT dial the daemon for a rejected
-request.
 
 ## Clients
 

@@ -27,7 +27,7 @@ The live view shows, in order: streaming items, the approval dialog, an open sel
 <model> · <approval> · <sandbox> · <thread title>
 ```
 
-Sandbox `off` MUST show as `no sandbox`. A non-empty follow-up queue appends ` · <n> follow-up queued`.
+Sandbox `off` MUST show as `no sandbox`. The status row MUST show the server reported sandbox from `thread/start`: when the harness sandbox is unavailable the server reports `dangerFullAccess` and the TUI shows `no sandbox` even if the local option is `workspace-write`. A non-empty follow-up queue appends ` · <n> follow-up queued`.
 
 The composer shows `› `, the typed text, and the cursor `▏`. When the composer is empty, the cursor comes first and the placeholder follows it in faint text. The placeholder never glows.
 

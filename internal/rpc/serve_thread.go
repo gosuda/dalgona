@@ -198,10 +198,14 @@ func (s *server) session(thread *agent.Thread, snap snapshot) (ThreadStartRespon
 	if err != nil {
 		return ThreadStartResponse{}, hostError(err, thread.ID(), "")
 	}
+	effective := current.Sandbox
+	if resolved, resolveErr := thread.EffectiveSandbox(); resolveErr == nil {
+		effective = resolved
+	}
 	return ThreadStartResponse{
 		ApprovalPolicy: policyName(string(current.Approval)), ApprovalsReviewer: "user",
 		Cwd: snap.created.Cwd, Model: current.Model, ModelProvider: provider(current.Model),
-		Sandbox:         sandboxPolicy(string(current.Sandbox)),
+		Sandbox:         sandboxPolicy(string(effective)),
 		ReasoningEffort: cmp.Or(effortName(current.Effort), effortName(s.currentConfig().Reasoning)),
 		Thread:          s.threadObject(info, threadStatus(thread), snap.turns),
 	}, nil

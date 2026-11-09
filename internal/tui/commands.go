@@ -581,9 +581,23 @@ func (m *model) applyNewThread(value any) tea.Cmd {
 	}
 	m.setThread(response.Thread.ID)
 	m.title = threadTitle(response.Thread)
+	m.sandbox = serverSandbox(response.Sandbox.Type, m.sandbox)
 	m.live = nil
 	m.setState(stateIdle)
 	return tea.Println("started " + m.title)
+}
+
+func serverSandbox(serverType, fallback string) string {
+	switch serverType {
+	case "dangerFullAccess":
+		return "off"
+	case "workspaceWrite":
+		return "workspace-write"
+	case "readOnly":
+		return "workspace-write"
+	default:
+		return fallback
+	}
 }
 
 func (m *model) applyForked(value any) tea.Cmd {
