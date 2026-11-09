@@ -17,6 +17,10 @@ hashline-model:
     #!/usr/bin/env bash
     set -euo pipefail
     if ! command -v uv >/dev/null; then
+        if [ "${CI:-}" = "true" ]; then
+            echo "hashline-model: uv is required in CI and is not installed" >&2
+            exit 1
+        fi
         echo "hashline-model: skipped, uv is not installed"
         exit 0
     fi
