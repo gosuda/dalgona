@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"net/url"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/config"
@@ -67,6 +68,10 @@ func (t *Thread) Spawn(ctx context.Context, callID string, req task.Request) (to
 }
 
 func (t *Thread) childFor(ctx context.Context, callID string, req task.Request) (*Thread, error) {
+	raw, err := url.PathUnescape(callID)
+	if err == nil {
+		callID = raw
+	}
 	v, err := t.view()
 	if err != nil {
 		return nil, err

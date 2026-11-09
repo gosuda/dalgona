@@ -2,6 +2,8 @@
 
 The local runner MUST store one directory per call. The directory MUST be `<dir>/<call_id>/`. It MUST contain the files `out`, `pid`, and `exit`. It MAY contain `pgid` and `cancel`.
 
+Callers MUST escape a call id that contains `/`, such as a nested `<run>/<n>` cell call id, to a single path component before `Start`. A call id with `/` MUST NOT reach the runs directory.
+
 The parent MUST start the shim detached. The invocation MUST be `<self> __shim --dir <runs/call_id> -- argv...`. On Unix the parent MUST start the shim with `Setsid`. On Windows the parent MUST start the shim with `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`.
 
 `ProcessSpec.Argv[0]` equal to `@self` MUST resolve to `os.Executable()` on the local runner. On a remote exec server it MUST resolve to the exec-server binary path.

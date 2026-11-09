@@ -43,10 +43,7 @@ type prepared struct {
 }
 
 func (p *prepared) processID() string {
-	if p.class == tool.ClassExec || p.class == tool.ClassEdit {
-		return url.PathEscape(p.call.ID)
-	}
-	return p.call.ID
+	return url.PathEscape(p.call.ID)
 }
 
 func (p *prepared) toolCall() tool.Call {
@@ -296,11 +293,19 @@ func (w *worker) started(p *prepared, files []tool.FileChange) (event.ToolStarte
 	for _, file := range files {
 		change := event.FileChange{Path: file.Path, PreSHA: file.PreSHA, PostSHA: file.PostSHA}
 		if file.PreSHA != "" {
-			sha, err := w.t.host.journal.PutBlob(file.Pre)
+			masked := file.Pre
+			if w.t.host.cfg.Auth != nil {
+				text := w.t.host.cfg.Auth.Mask(string(file.Pre))
+				if maskErr := w.t.host.cfg.Auth.MaskError(); maskErr != nil {
+					return event.ToolStarted{}, fmt.Errorf("agent: secret masking failed: %w", maskErr)
+				}
+				masked = []byte(text)
+			}
+			sha, err := w.t.host.journal.PutBlob(masked)
 			if err != nil {
 				return event.ToolStarted{}, fmt.Errorf("agent: store pre-image of %s: %w", file.Path, err)
 			}
-			change.PreBlob = &event.BlobRef{Blob: sha, Bytes: int64(len(file.Pre))}
+			change.PreBlob = &event.BlobRef{Blob: sha, Bytes: int64(len(masked))}
 		}
 		started.Files = append(started.Files, change)
 	}
@@ -446,17 +451,45 @@ func (w *worker) storeSnapshots(meta jsontext.Value) error {
 	if err != nil {
 		return fmt.Errorf("agent: tool metadata: %w", err)
 	}
+	mapping := make(map[string]string)
 	for _, ref := range refs {
 		entry, err := w.t.snapshots.Get(ref)
 		if err != nil {
 			w.t.host.log.Warn("agent: tool metadata names an unknown snapshot", "thread", w.t.id, "ref", ref, "error", err)
 			continue
 		}
-		if _, err := w.t.host.journal.PutBlob(entry.Data); err != nil {
+		masked := entry.Data
+		if w.t.host.cfg.Auth != nil {
+			text := w.t.host.cfg.Auth.Mask(string(entry.Data))
+			if maskErr := w.t.host.cfg.Auth.MaskError(); maskErr != nil {
+				return fmt.Errorf("agent: secret masking failed: %w", maskErr)
+			}
+			masked = []byte(text)
+		}
+		sha, err := w.t.host.journal.PutBlob(masked)
+		if err != nil {
 			return fmt.Errorf("agent: store read snapshot %s: %w", ref, err)
 		}
+		if sha != entry.Blob {
+			mapping[entry.Blob] = sha
+		}
 	}
+	if len(mapping) == 0 {
+		return nil
+	}
+	rewritten := rewriteSnapshotBlobs(meta, mapping)
+	copy(meta, rewritten)
 	return nil
+}
+
+func rewriteSnapshotBlobs(meta jsontext.Value, mapping map[string]string) jsontext.Value {
+	out := []byte(meta)
+	for old, updated := range mapping {
+		oldNeedle := []byte(`"blob":"` + old + `"`)
+		newRepl := []byte(`"blob":"` + updated + `"`)
+		out = bytes.ReplaceAll(out, oldNeedle, newRepl)
+	}
+	return jsontext.Value(out)
 }
 
 func metaRefs(meta jsontext.Value) ([]string, error) {
