@@ -355,7 +355,10 @@ func (s *Store) appendFile(session string) (*os.File, error) {
 	if st.file != nil {
 		return st.file, nil
 	}
-	if err := os.MkdirAll(s.sessionDir(session), 0o700); err != nil {
+	dir := s.sessionDir(session)
+	_, dirErr := os.Stat(dir)
+	_, fileErr := os.Stat(s.journalPath(session))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	file, err := os.OpenFile(s.journalPath(session), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -363,6 +366,16 @@ func (s *Store) appendFile(session string) (*os.File, error) {
 		return nil, fmt.Errorf("journal: open %s: %w", s.journalPath(session), err)
 	}
 	st.file = file
+	if errors.Is(fileErr, fs.ErrNotExist) || errors.Is(dirErr, fs.ErrNotExist) {
+		if syncErr := syncDir(dir); syncErr != nil {
+			return nil, syncErr
+		}
+	}
+	if errors.Is(dirErr, fs.ErrNotExist) {
+		if syncErr := syncDir(filepath.Dir(dir)); syncErr != nil {
+			return nil, syncErr
+		}
+	}
 	return file, nil
 }
 

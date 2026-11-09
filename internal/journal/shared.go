@@ -168,8 +168,15 @@ func sessionDirFor(dir, session string) (string, error) {
 		return "", fmt.Errorf("journal: invalid session id %q", session)
 	}
 	sdir := filepath.Join(dir, "sessions", session)
+	_, dirErr := os.Stat(sdir)
 	if err := os.MkdirAll(sdir, 0o700); err != nil {
 		return "", fmt.Errorf("journal: create %s: %w", sdir, err)
+	}
+	if !errors.Is(dirErr, fs.ErrNotExist) {
+		return sdir, nil
+	}
+	if err := syncDir(filepath.Dir(sdir)); err != nil {
+		return "", err
 	}
 	return sdir, nil
 }
