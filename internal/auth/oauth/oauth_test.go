@@ -89,15 +89,22 @@ func openLoopback(rawURL string, expected *atomic.Value, page chan<- callbackPag
 		return errors.New("PKCE method is not S256")
 	}
 	redirect := query.Get("redirect_uri")
-	go requestPage(redirect+"?code=browser-code&state="+url.QueryEscape(state), page)
+	requestPage(redirect+"?code=browser-code&state="+url.QueryEscape(state), page)
 	return nil
 }
 
 func TestPKCEStateMismatch(t *testing.T) {
+	t.Run("browser stray ignored", func(t *testing.T) { testBrowserStrayIgnored(t) })
+	t.Run("paste mismatch", func(t *testing.T) { testPasteMismatch(t) })
+}
+
+func testBrowserStrayIgnored(t *testing.T) {
+	t.Helper()
 	var tokenCalls atomic.Int32
 	tokenServer := scopedServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		tokenCalls.Add(1)
-		writer.WriteHeader(http.StatusInternalServerError)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"access_token":"access"}`)
 	}))
 	defer tokenServer.Close()
 	provider := testProvider(tokenServer.URL, freePort(t), 0)
@@ -106,16 +113,70 @@ func TestPKCEStateMismatch(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		redirect := authURL.Query().Get("redirect_uri")
-		go requestPage(redirect+"?code=code&state=wrong", make(chan callbackPage, 1))
+		query := authURL.Query()
+		redirect := query.Get("redirect_uri")
+		expected := query.Get("state")
+		if status := getLoopbackStatus(t, redirect+"?code=code&state=wrong"); status != http.StatusBadRequest {
+			return errors.New("stray callback was not rejected")
+		}
+		if status := getLoopbackStatus(t, redirect); status != http.StatusBadRequest {
+			return errors.New("empty callback was not rejected")
+		}
+		page := make(chan callbackPage, 1)
+		requestPage(redirect+"?code=code&state="+url.QueryEscape(expected), page)
+		if result := <-page; result.err != nil {
+			return result.err
+		}
 		return nil
 	}
-	_, err := oauth.PKCE(context.Background(), provider, open, nil)
-	if err == nil || err.Error() != "OAuth state mismatch" {
-		t.Fatalf("state mismatch error = %v", err)
+	token, err := oauth.PKCE(context.Background(), provider, open, nil)
+	if err != nil {
+		t.Fatalf("PKCE after stray callbacks: %v", err)
 	}
-	if tokenCalls.Load() != 0 {
-		t.Fatalf("mismatched state reached token endpoint")
+	if token.Access != "access" {
+		t.Fatalf("access = %q", token.Access)
+	}
+	if tokenCalls.Load() != 1 {
+		t.Fatalf("token calls = %d, want 1", tokenCalls.Load())
+	}
+}
+
+func getLoopbackStatus(t *testing.T, rawURL string) int {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse callback URL: %v", err)
+	}
+	switch parsed.Hostname() {
+	case "127.0.0.1", "localhost", "::1":
+	default:
+		t.Fatalf("callback host = %q, want loopback", parsed.Hostname())
+	}
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		t.Fatalf("callback request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("callback GET: %v", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, response.Body)
+	return response.StatusCode
+}
+
+func testPasteMismatch(t *testing.T) {
+	t.Helper()
+	pasteServer := scopedServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		t.Errorf("mismatched paste must not reach token endpoint")
+		writer.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer pasteServer.Close()
+	pasteProvider := testProvider(pasteServer.URL, freePort(t), 0)
+	pasteOpen := func(rawURL string) error { return nil }
+	paste := func(context.Context) (string, error) { return "http://localhost/callback?code=x&state=wrong", nil }
+	if _, err := oauth.PKCE(context.Background(), pasteProvider, pasteOpen, paste); err == nil || err.Error() != "OAuth state mismatch" {
+		t.Fatalf("paste mismatch error = %v", err)
 	}
 }
 
@@ -222,7 +283,7 @@ func openFallback(rawURL string, fallback int, page chan<- callbackPage) error {
 	if redirect.Port() != fmt.Sprint(fallback) {
 		return fmt.Errorf("redirect port = %s, want %d", redirect.Port(), fallback)
 	}
-	go requestPage(query.Get("redirect_uri")+"?code=code&state="+url.QueryEscape(query.Get("state")), page)
+	requestPage(query.Get("redirect_uri")+"?code=code&state="+url.QueryEscape(query.Get("state")), page)
 	return nil
 }
 

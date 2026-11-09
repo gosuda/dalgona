@@ -131,7 +131,7 @@ type pkceParameters struct {
 	state     string
 }
 
-func startCallback(provider Provider) (*callbackServer, error) {
+func startCallback(provider Provider, expectedState string) (*callbackServer, error) {
 	host := cmp.Or(provider.BindHost, provider.RedirectHost)
 	if host == "" {
 		return nil, errors.New("provider has no callback")
@@ -146,8 +146,14 @@ func startCallback(provider Provider) (*callbackServer, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(provider.RedirectPath, func(writer http.ResponseWriter, request *http.Request) {
 		query := request.URL.Query()
+		code := query.Get("code")
+		state := query.Get("state")
+		if code == "" || subtle.ConstantTimeCompare([]byte(state), []byte(expectedState)) != 1 {
+			http.Error(writer, "invalid oauth callback", http.StatusBadRequest)
+			return
+		}
 		select {
-		case callback.result <- callbackResult{code: query.Get("code"), state: query.Get("state")}:
+		case callback.result <- callbackResult{code: code, state: state}:
 		default:
 		}
 		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -193,7 +199,7 @@ func PKCE(ctx context.Context, provider Provider, open func(string) error, paste
 	if err != nil {
 		return Token{}, err
 	}
-	callback, err := startCallback(provider)
+	callback, err := startCallback(provider, parameters.state)
 	if err != nil {
 		return Token{}, err
 	}
@@ -469,7 +475,7 @@ func do(request *http.Request) (wireResponse, error) {
 	client := http.Client{Timeout: 30 * time.Second}
 	response, err := client.Do(request)
 	if err != nil {
-		return wireResponse{}, fmt.Errorf("send oauth request: %w", err)
+		return wireResponse{}, fmt.Errorf("send oauth request: %w", redactRequestQuery(err))
 	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	closeErr := response.Body.Close()
@@ -483,6 +489,21 @@ func do(request *http.Request) (wireResponse, error) {
 		return wireResponse{}, errors.New("oauth response exceeds 1 MiB")
 	}
 	return wireResponse{status: response.StatusCode, body: body}, nil
+}
+
+func redactRequestQuery(err error) error {
+	urlError, ok := errors.AsType[*url.Error](err)
+	if !ok || urlError.URL == "" {
+		return err
+	}
+	parsed, parseErr := url.Parse(urlError.URL)
+	if parseErr != nil || parsed.RawQuery == "" {
+		return err
+	}
+	redacted := *urlError
+	parsed.RawQuery = "REDACTED"
+	redacted.URL = parsed.String()
+	return &redacted
 }
 
 func (response wireResponse) requireSuccess() error {
