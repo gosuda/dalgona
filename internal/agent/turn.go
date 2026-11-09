@@ -244,27 +244,38 @@ func (w *worker) boundary(ctx context.Context, kind BoundaryKind, head uint64) {
 }
 
 func (w *worker) end(ctx context.Context, o outcome) bool {
-	if continues, err := ask(w.t, func(a *actor) bool { return a.continues(o) }); err == nil && !continues {
-		w.notifyTurnEnd(ctx, o.status)
-	}
-	ended, err := ask(w.t, func(a *actor) bool { return a.finishTurn(w.turnID, o) })
+	decided, err := ask(w.t, func(a *actor) endDecision {
+		return endDecision{settle: !a.continues(o), head: a.head()}
+	})
 	if err != nil {
 		w.t.host.log.Warn("agent: turn ended on a closed thread", "thread", w.t.id, "turn", w.turnID, "error", err)
 		return true
 	}
-	if !ended {
-		return false
+	if decided.settle {
+		w.notifyTurnEnd(ctx, o.status)
 	}
-	if o.status != statusCompleted {
+	ended, err := ask(w.t, func(a *actor) bool {
+		if !decided.settle {
+			return false
+		}
+		return a.settleTurn(w.turnID, o, decided.head)
+	})
+	if err != nil {
+		w.t.host.log.Warn("agent: turn ended on a closed thread", "thread", w.t.id, "turn", w.turnID, "error", err)
+		return true
+	}
+	if ended && o.status != statusCompleted {
 		w.announceEnd(o.status)
 	}
-	return true
+	return ended
 }
 
-func (a *actor) finishTurn(turnID string, o outcome) bool {
-	if a.continues(o) {
-		return false
-	}
+type endDecision struct {
+	settle bool
+	head   uint64
+}
+
+func (a *actor) settleTurn(turnID string, o outcome, head uint64) bool {
 	a.settle(o.status)
 	completed := event.TurnCompleted{TurnID: turnID, Status: o.status, Error: o.failure}
 	if _, err := a.append(completed); err != nil {
@@ -272,6 +283,12 @@ func (a *actor) finishTurn(turnID string, o outcome) bool {
 	}
 	clear(a.approvals)
 	a.idle()
+	if o.status == statusCompleted && a.newInputSince(head) {
+		next := newID("turn-")
+		if _, err := a.append(event.TurnStarted{TurnID: next}); err == nil {
+			a.spawnContinuation(next)
+		}
+	}
 	return true
 }
 
