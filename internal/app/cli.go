@@ -20,7 +20,6 @@ import (
 	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/rpc"
-	"github.com/gosuda/dalgona/internal/tui"
 )
 
 type CLIEnv struct {
@@ -30,9 +29,34 @@ type CLIEnv struct {
 	Remote         string
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
-	OnStatus       func(tui.Status)
+	OnStatus       func(Status)
 	OnChildSpawned func(childID, cwd string)
+	TUI            TUIBackend
 }
+
+// Status reports presentation progress without naming a presentation
+// package, so core orchestration stays independent of terminal widgets.
+type Status struct {
+	State    string
+	Seq      uint64
+	ThreadID string
+}
+
+// TUIOptions carries everything the interactive presentation layer needs.
+type TUIOptions struct {
+	OnStatus       func(Status)
+	OnChildSpawned func(childID, cwd string)
+	Stdin          io.Reader
+	Stdout         io.Writer
+	ThreadID       string
+	Model          string
+	Approval       string
+	Sandbox        string
+}
+
+// TUIBackend launches the interactive presentation layer. Command entry
+// points wire it, so this package never imports a presentation package.
+type TUIBackend func(ctx context.Context, conn io.ReadWriteCloser, opts TUIOptions) error
 
 type cliFlags struct {
 	prompt   string
@@ -393,8 +417,11 @@ func (env CLIEnv) interactive(ctx context.Context, f cliFlags) error {
 	if err != nil {
 		return err
 	}
-	runErr := tui.Run(ctx, conn, tui.Options{
-		OnStatus: env.OnStatus, OnChildSpawned: env.OnChildSpawned, Input: env.Stdin, Output: env.Stdout,
+	if env.TUI == nil {
+		return errors.Join(errors.New("app: interactive terminal is not wired"), closeQuiet(conn))
+	}
+	runErr := env.TUI(ctx, conn, TUIOptions{
+		OnStatus: env.OnStatus, OnChildSpawned: env.OnChildSpawned, Stdin: env.Stdin, Stdout: env.Stdout,
 		ThreadID: threadID, Model: f.model, Approval: f.approval, Sandbox: f.sandbox,
 	})
 	return errors.Join(runErr, closeQuiet(conn))

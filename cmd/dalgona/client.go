@@ -32,12 +32,25 @@ func runClient(ctx context.Context, args []string, std stdio) int {
 	env := app.CLIEnv{
 		Product: config.ProductDalgona, Home: cfg.Home, Remote: cmp.Or(std.remote, cfg.Remote),
 		Dial:  func(ctx context.Context) (io.ReadWriteCloser, error) { return dial(ctx) },
-		Stdin: std.in, Stdout: std.out, Stderr: std.errOut,
+		Stdin: std.in, Stdout: std.out, Stderr: std.errOut, TUI: runTUI,
 	}
 	release := attachHerdr(ctx, &env, cfg.Herdr, os.Getenv)
 	code := app.RunCLI(ctx, env, args)
 	release()
 	return code
+}
+
+func runTUI(ctx context.Context, conn io.ReadWriteCloser, opts app.TUIOptions) error {
+	var onStatus func(tui.Status)
+	if opts.OnStatus != nil {
+		onStatus = func(s tui.Status) {
+			opts.OnStatus(app.Status{State: s.State, Seq: s.Seq, ThreadID: s.ThreadID})
+		}
+	}
+	return tui.Run(ctx, conn, tui.Options{
+		OnStatus: onStatus, OnChildSpawned: opts.OnChildSpawned, Input: opts.Stdin, Output: opts.Stdout,
+		ThreadID: opts.ThreadID, Model: opts.Model, Approval: opts.Approval, Sandbox: opts.Sandbox,
+	})
 }
 
 type herdrWorker struct {
@@ -46,8 +59,8 @@ type herdrWorker struct {
 	done     chan struct{}
 	mu       sync.Mutex
 	closed   bool
-	last     tui.Status
-	pending  map[string]tui.Status
+	last     app.Status
+	pending  map[string]app.Status
 	order    []string
 	panes    [][2]string
 }
@@ -59,7 +72,7 @@ func attachHerdr(ctx context.Context, env *app.CLIEnv, cfg config.HerdrConfig, g
 	}
 	w := &herdrWorker{
 		reporter: reporter, wake: make(chan struct{}, 1), done: make(chan struct{}),
-		pending: make(map[string]tui.Status),
+		pending: make(map[string]app.Status),
 	}
 	detached := context.WithoutCancel(ctx)
 	work, stopWork := context.WithCancel(detached)
@@ -71,7 +84,7 @@ func attachHerdr(ctx context.Context, env *app.CLIEnv, cfg config.HerdrConfig, g
 	return func() { w.release(detached, stopWork) }
 }
 
-func (w *herdrWorker) status(status tui.Status) {
+func (w *herdrWorker) status(status app.Status) {
 	if status.ThreadID == "" {
 		return
 	}
@@ -123,10 +136,10 @@ func (w *herdrWorker) run(base context.Context) {
 	}
 }
 
-func (w *herdrWorker) take() ([]tui.Status, [][2]string) {
+func (w *herdrWorker) take() ([]app.Status, [][2]string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	statuses := make([]tui.Status, 0, len(w.order))
+	statuses := make([]app.Status, 0, len(w.order))
 	for _, id := range w.order {
 		statuses = append(statuses, w.pending[id])
 	}

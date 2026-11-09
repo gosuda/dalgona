@@ -130,6 +130,12 @@ linters:
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/codexapp"
               desc: core must not import interfaces or batteries
+        presentation:
+          files:
+            - "**/internal/app/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/tui"
+              desc: presentation depends on core, core never imports presentation
         clients:
           files:
             - "**/internal/tui/**"

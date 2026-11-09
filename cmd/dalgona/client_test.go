@@ -13,7 +13,6 @@ import (
 
 	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/tui"
 )
 
 func fakeHerdr(t *testing.T) string {
@@ -37,7 +36,7 @@ func TestHerdrReportsStatusChildrenAndRelease(t *testing.T) {
 	log := fakeHerdr(t)
 	var env app.CLIEnv
 	release := attachHerdr(t.Context(), &env, config.HerdrConfig{SubagentPanes: true}, herdrEnv)
-	for _, status := range []tui.Status{
+	for _, status := range []app.Status{
 		{State: "idle"},
 		{State: "running", Seq: 3, ThreadID: "thread-a"},
 		{State: "awaiting approval", Seq: 7, ThreadID: "thread-a"},
@@ -105,11 +104,11 @@ func TestHerdrResetsSequenceWhenTheThreadChanges(t *testing.T) {
 	log := fakeHerdr(t)
 	var env app.CLIEnv
 	release := attachHerdr(t.Context(), &env, config.HerdrConfig{}, herdrEnv)
-	env.OnStatus(tui.Status{State: "running", Seq: 9, ThreadID: "thread-a"})
+	env.OnStatus(app.Status{State: "running", Seq: 9, ThreadID: "thread-a"})
 	waitForCalls(t, log, 1)
-	env.OnStatus(tui.Status{State: "idle", Seq: 2, ThreadID: "thread-b"})
+	env.OnStatus(app.Status{State: "idle", Seq: 2, ThreadID: "thread-b"})
 	waitForCalls(t, log, 2)
-	env.OnStatus(tui.Status{State: "working", Seq: 3, ThreadID: "thread-a"})
+	env.OnStatus(app.Status{State: "working", Seq: 3, ThreadID: "thread-a"})
 	release()
 	data, err := os.ReadFile(log)
 	if err != nil {
