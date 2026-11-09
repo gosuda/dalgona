@@ -20,7 +20,7 @@ Two clients MAY start two daemons at the same time. The lock rule above makes th
 
 ## User service
 
-Linux installation MUST write `~/.config/systemd/user/dalgona.service` with `ExecStart=<absolute executable> daemon` and `Restart=always`, then run `systemctl --user enable --now dalgona.service`. macOS installation MUST write `~/Library/LaunchAgents/dev.dalgona.daemon.plist` with `RunAtLoad` and `KeepAlive`, then run `launchctl bootstrap gui/<uid> <plist>`. Windows installation MUST run `schtasks /Create /SC ONLOGON /TN dalgona /TR "<absolute executable> daemon" /F`. Uninstall MUST disable the service and remove the file or task.
+Installation MUST quote the executable path in the systemd unit (`ExecStart="<absolute executable>" daemon`) and MUST XML-escape it in the launchd plist. When `DALGONA_HOME` is set at install time, the unit and plist MUST pin `DALGONA_HOME` to that value, so the login-time daemon uses the installing client's home. Linux installation MUST write `~/.config/systemd/user/dalgona.service` with `ExecStart="<absolute executable>" daemon` and `Restart=always`, then run `systemctl --user enable --now dalgona.service`. macOS installation MUST write `~/Library/LaunchAgents/dev.dalgona.daemon.plist` with `RunAtLoad` and `KeepAlive`, then run `launchctl bootstrap gui/<uid> <plist>`. Windows installation MUST run `schtasks /Create /SC ONLOGON /TN dalgona /TR "<absolute executable> daemon" /F`. Uninstall MUST disable the service and remove the file or task. It MUST remove the file even when disabling fails, MUST tolerate a service that is not loaded, and MUST report any remaining errors.
 
 Service commands MUST be injectable in tests. Installation errors MUST be returned.
 
