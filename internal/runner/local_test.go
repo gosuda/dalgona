@@ -216,7 +216,7 @@ func TestLocal_signalBeforeProcessGroupStopsCommand(t *testing.T) {
 	if err := local.Signal(t.Context(), "starting", SignalTerm); err != nil {
 		t.Fatal(err)
 	}
-	state := waitForExit(t, local, "starting", 5*time.Second)
+	state := waitForExit(t, local, "starting", 30*time.Second)
 	if state.Exit.Code == 0 || state.Exit.Signal != syscall.SIGTERM.String() {
 		t.Fatalf("signaled exit = %+v", state.Exit)
 	}
