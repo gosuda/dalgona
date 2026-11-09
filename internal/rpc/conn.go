@@ -418,17 +418,24 @@ type (
 	outQueue struct {
 		mu    sync.Mutex
 		items []queued
+		last  map[string]*queuedDelta
 		wake  chan struct{}
 	}
 )
 
-func newOutQueue() *outQueue { return &outQueue{wake: make(chan struct{}, 1)} }
+func newOutQueue() *outQueue {
+	return &outQueue{last: make(map[string]*queuedDelta), wake: make(chan struct{}, 1)}
+}
+
 func (q *outQueue) push(b []byte, method string, params jsontext.Value, delta bool, closeFn func() error) error {
 	item := newQueued(b, method, params, delta)
 	q.mu.Lock()
 	if q.merge(item) {
 		q.mu.Unlock()
 		return nil
+	}
+	if item.stream != nil {
+		q.last[item.method+"\x00"+item.stream.itemID] = item.stream
 	}
 	accepted := q.append(item)
 	q.mu.Unlock()
@@ -452,7 +459,25 @@ func newQueued(b []byte, method string, params jsontext.Value, delta bool) queue
 }
 
 func (q *outQueue) merge(item queued) bool {
-	return len(q.items) >= 1024 && item.stream != nil && mergeDelta(q.items, item.method, item.stream)
+	if len(q.items) < 1024 || item.stream == nil {
+		return false
+	}
+	prev, ok := q.last[item.method+"\x00"+item.stream.itemID]
+	if !ok {
+		return false
+	}
+	prev.text = append(prev.text, item.stream.text...)
+	return true
+}
+
+func (q *outQueue) forget(item queued) {
+	if item.stream == nil {
+		return
+	}
+	key := item.method + "\x00" + item.stream.itemID
+	if q.last[key] == item.stream {
+		delete(q.last, key)
+	}
 }
 
 func (q *outQueue) append(item queued) bool {
@@ -474,6 +499,7 @@ func (q *outQueue) pop(closed <-chan struct{}) (queued, bool) {
 			item := q.items[0]
 			q.items[0] = queued{}
 			q.items = q.items[1:]
+			q.forget(item)
 			q.mu.Unlock()
 			return item, true
 		}
