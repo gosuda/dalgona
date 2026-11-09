@@ -556,6 +556,9 @@ func (s *Store) Status(session string) (SessionHead, error) {
 	}
 	st := s.sessions[session]
 	if st == nil {
+		if row, ok := s.idx.sessions[session]; ok {
+			return mirrorRowHead(session, row), nil
+		}
 		return SessionHead{}, fmt.Errorf("journal: unknown session %s", session)
 	}
 	return s.freshHead(session, st), nil
