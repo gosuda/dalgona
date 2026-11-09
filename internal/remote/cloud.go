@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/runner"
@@ -62,7 +63,15 @@ func (b *Binder) recordedBox(ctx context.Context, svc sandboxsvc.Service, name s
 		return spec, fmt.Errorf("remote: create box for %s: %w", name, err)
 	}
 	spec.BoxID = id
-	return spec, b.setRemote(name, spec)
+	if err := b.setRemote(name, spec); err != nil {
+		destroyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		if destroyErr := svc.Destroy(destroyCtx, id); destroyErr != nil {
+			return spec, errors.Join(err, destroyErr)
+		}
+		return spec, err
+	}
+	return spec, nil
 }
 
 func (b *Binder) seedWorkspace(ctx context.Context, r runner.Runner, boxID string) error {
