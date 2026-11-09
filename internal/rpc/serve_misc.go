@@ -18,13 +18,21 @@ import (
 )
 
 func platform() (family, name string) {
-	switch runtime.GOOS {
-	case "windows":
-		return "windows", "windows"
-	case "darwin":
-		return "unix", "macos"
+	name = platformOSType(runtime.GOOS)
+	if name == "windows" {
+		return "windows", name
 	}
-	return "unix", runtime.GOOS
+	return "unix", name
+}
+
+func platformOSType(goos string) string {
+	switch goos {
+	case "darwin":
+		return "macos"
+	case "windows":
+		return "windows"
+	}
+	return "linux"
 }
 
 var chatGPTProvider = func() (oauth.Provider, bool) { return oauth.ProviderByID("chatgpt") }
