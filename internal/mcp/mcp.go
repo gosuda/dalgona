@@ -184,6 +184,7 @@ func (c *Client) restartStdioLocked(ctx context.Context) error {
 	}
 	c.transport = transport
 	if err := c.initializeLocked(ctx); err != nil {
+		_ = transport.Close()
 		return fmt.Errorf("mcp: initialize restarted server: %w", err)
 	}
 	return nil
