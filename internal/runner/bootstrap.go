@@ -600,6 +600,25 @@ func writeBaseline(ctx context.Context, r Runner) (string, error) {
 	return sha, nil
 }
 
+var runnerKillGrace = 2 * time.Second
+
+func stopRunnerProcess(r Runner, id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), runnerKillGrace)
+	defer cancel()
+	if err := r.Signal(ctx, id, SignalTerm); err != nil {
+		return
+	}
+	for ctx.Err() == nil {
+		out, err := r.Read(ctx, id, 0)
+		if err != nil || out.Exit != nil {
+			break
+		}
+	}
+	killCtx, killCancel := context.WithTimeout(context.Background(), time.Second)
+	defer killCancel()
+	_ = r.Signal(killCtx, id, SignalKill)
+}
+
 func runRemote(ctx context.Context, r Runner, argv []string) (string, error) {
 	id, err := newProcID()
 	if err != nil {
@@ -635,6 +654,7 @@ func waitExit(ctx context.Context, r Runner, id string) (string, int, error) {
 	for {
 		out, err := r.Read(ctx, id, offset)
 		if err != nil {
+			stopRunnerProcess(r, id)
 			return "", 0, fmt.Errorf("runner: read process %s: %w", id, err)
 		}
 		buf.Write(out.Data)
@@ -642,7 +662,7 @@ func waitExit(ctx context.Context, r Runner, id string) (string, int, error) {
 		if out.Exit != nil {
 			return buf.String(), out.Exit.Code, nil
 		}
-		if err := waitPoll(ctx, timer); err != nil {
+		if err := waitPoll(ctx, r, id, timer); err != nil {
 			return "", 0, fmt.Errorf("runner: process %s: %w", id, err)
 		}
 	}
@@ -655,11 +675,12 @@ func nextOffset(offset int64, out Output) int64 {
 	return offset + int64(len(out.Data))
 }
 
-func waitPoll(ctx context.Context, timer *time.Timer) error {
+func waitPoll(ctx context.Context, r Runner, id string, timer *time.Timer) error {
 	drainTimer(timer)
 	timer.Reset(pollInterval)
 	select {
 	case <-ctx.Done():
+		stopRunnerProcess(r, id)
 		return ctx.Err()
 	case <-timer.C:
 		return nil

@@ -336,6 +336,25 @@ func (r *boxRunner) Close() error {
 	return nil
 }
 
+var boxKillGrace = 2 * time.Second
+
+func stopProcess(r runner.Runner, id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), boxKillGrace)
+	defer cancel()
+	if err := r.Signal(ctx, id, runner.SignalTerm); err != nil {
+		return
+	}
+	for ctx.Err() == nil {
+		out, err := r.Read(ctx, id, 0)
+		if err != nil || out.Exit != nil {
+			break
+		}
+	}
+	killCtx, killCancel := context.WithTimeout(context.Background(), time.Second)
+	defer killCancel()
+	_ = r.Signal(killCtx, id, runner.SignalKill)
+}
+
 func boxRun(ctx context.Context, r runner.Runner, argv ...string) (string, int, error) {
 	var random [8]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -352,6 +371,7 @@ func boxRun(ctx context.Context, r runner.Runner, argv ...string) (string, int, 
 	for {
 		chunk, err := r.Read(ctx, id, offset)
 		if err != nil {
+			stopProcess(r, id)
 			return "", 0, fmt.Errorf("remote: read process %s: %w", id, err)
 		}
 		out.Write(chunk.Data)
@@ -361,6 +381,7 @@ func boxRun(ctx context.Context, r runner.Runner, argv ...string) (string, int, 
 		}
 		select {
 		case <-ctx.Done():
+			stopProcess(r, id)
 			return "", 0, ctx.Err()
 		case <-ticker.C:
 		}
