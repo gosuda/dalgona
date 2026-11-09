@@ -10,7 +10,7 @@ import (
 )
 
 func RunWorkflow(ctx context.Context, t *agent.Thread, cfg Config, w script.Workflow) (script.Outcome, error) {
-	fx := effects{t: t, judge: cfg.Judge, log: cmp.Or(cfg.Logger, slog.Default())}
+	fx := effects{t: t, judge: cfg.Judge, log: cmp.Or(cfg.Logger, slog.Default()), idx: newEffectCache()}
 	var outcome script.Outcome
 	err := t.RunScript(ctx, w.Entry, func(ctx context.Context) error {
 		var runErr error

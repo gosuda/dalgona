@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"strconv"
+	"sync"
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -25,6 +26,35 @@ type effects struct {
 	t     *agent.Thread
 	judge JudgeFactory
 	log   *slog.Logger
+	idx   *effectCache
+}
+
+type effectKey struct {
+	run string
+	n   uint64
+}
+
+type toolTrace struct {
+	started      event.ToolStarted
+	completed    event.ToolCompleted
+	hasStarted   bool
+	hasCompleted bool
+}
+
+type effectCache struct {
+	mu      sync.Mutex
+	head    int
+	starts  map[string]event.ScriptStarted
+	effects map[effectKey]event.ScriptEffect
+	tools   map[string]toolTrace
+}
+
+func newEffectCache() *effectCache {
+	return &effectCache{
+		starts:  map[string]event.ScriptStarted{},
+		effects: map[effectKey]event.ScriptEffect{},
+		tools:   map[string]toolTrace{},
+	}
 }
 
 func callID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
@@ -56,10 +86,8 @@ func (fx effects) Started(start script.RunStart) (script.RunStart, error) {
 	if err != nil {
 		return script.RunStart{}, err
 	}
-	for _, item := range records {
-		if started, ok := item.Event.(event.ScriptStarted); ok && started.RunID == start.ID {
-			return fx.pinned(started)
-		}
+	if started, ok := fx.idx.start(records, start.ID); ok {
+		return fx.pinned(started)
 	}
 	source, err := fx.t.PutBlob(start.Source)
 	if err != nil {
@@ -97,7 +125,7 @@ func (fx effects) Lookup(run string, n int) (script.Recorded, bool) {
 		fx.log.Warn("scripthost: lookup on an unreadable thread", "thread", fx.t.ID(), "run", run, "error", err)
 		return script.Recorded{Interrupted: true}, true
 	}
-	return fx.recorded(traceEffect(records, run, n))
+	return fx.recorded(fx.idx.trace(records, run, n))
 }
 
 type effectTrace struct {
@@ -124,6 +152,77 @@ func traceEffect(records []event.Seqd, run string, n int) effectTrace {
 			if value.CallID == id {
 				trace.completed = &value
 			}
+		}
+	}
+	return trace
+}
+
+func (c *effectCache) observe(records []event.Seqd) {
+	for _, item := range records[min(c.head, len(records)):] {
+		switch value := item.Event.(type) {
+		case event.ScriptStarted:
+			if _, ok := c.starts[value.RunID]; !ok {
+				c.starts[value.RunID] = value
+			}
+		case event.ScriptEffect:
+			c.effects[effectKey{run: value.RunID, n: value.N}] = value
+		case event.ToolStarted:
+			trace := c.tools[value.CallID]
+			trace.started = value
+			trace.hasStarted = true
+			c.tools[value.CallID] = trace
+		case event.ToolCompleted:
+			trace := c.tools[value.CallID]
+			trace.completed = value
+			trace.hasCompleted = true
+			c.tools[value.CallID] = trace
+		}
+	}
+	c.head = len(records)
+}
+
+func (c *effectCache) start(records []event.Seqd, run string) (event.ScriptStarted, bool) {
+	if c == nil {
+		return scanStart(records, run)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.observe(records)
+	started, ok := c.starts[run]
+	return started, ok
+}
+
+func scanStart(records []event.Seqd, run string) (event.ScriptStarted, bool) {
+	for _, item := range records {
+		if started, ok := item.Event.(event.ScriptStarted); ok && started.RunID == run {
+			return started, true
+		}
+	}
+	return event.ScriptStarted{}, false
+}
+
+func (c *effectCache) trace(records []event.Seqd, run string, n int) effectTrace {
+	if c == nil {
+		return traceEffect(records, run, n)
+	}
+	id := callID(run, n)
+	index := effectIndex(n)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.observe(records)
+	var trace effectTrace
+	if effect, ok := c.effects[effectKey{run: run, n: index}]; ok {
+		effect := effect
+		trace.effect = &effect
+	}
+	if tool, ok := c.tools[id]; ok {
+		if tool.hasStarted {
+			started := tool.started
+			trace.started = &started
+		}
+		if tool.hasCompleted {
+			completed := tool.completed
+			trace.completed = &completed
 		}
 	}
 	return trace
@@ -160,23 +259,21 @@ func (fx effects) Record(slot script.Slot, result jsontext.Value) error {
 }
 
 func (fx effects) recordResult(slot script.Slot, result jsontext.Value) error {
-	return fx.appendEffect(slot, result, "", false)
+	value, blob, err := fx.t.StoreRaw(result)
+	if err != nil {
+		return err
+	}
+	return fx.t.Append(context.Background(), event.ScriptEffect{
+		RunID: slot.Run, N: effectIndex(slot.N), Op: slot.Op, ArgsSHA: slot.ArgsSHA,
+		Result: value, ResultBlob: blob,
+	})
 }
 
 func (fx effects) recordDenial(slot script.Slot, reason string) error {
-	return fx.appendEffect(slot, nil, reason, true)
-}
-
-func (fx effects) appendEffect(slot script.Slot, result jsontext.Value, failure string, denied bool) error {
-	effect := event.ScriptEffect{RunID: slot.Run, N: effectIndex(slot.N), Op: slot.Op, ArgsSHA: slot.ArgsSHA, Error: failure, Denied: denied}
-	if failure == "" {
-		value, blob, err := fx.t.StoreRaw(result)
-		if err != nil {
-			return err
-		}
-		effect.Result, effect.ResultBlob = value, blob
-	}
-	return fx.t.Append(context.Background(), effect)
+	return fx.t.Append(context.Background(), event.ScriptEffect{
+		RunID: slot.Run, N: effectIndex(slot.N), Op: slot.Op, ArgsSHA: slot.ArgsSHA,
+		Error: reason, Denied: true,
+	})
 }
 
 func (fx effects) Completed(run string, outcome script.Outcome) error {
@@ -208,7 +305,7 @@ func (fx effects) CallTool(ctx context.Context, slot script.Slot, name string, a
 	if err != nil {
 		return nil, err
 	}
-	return fx.callResult(slot, traceEffect(records, slot.Run, slot.N))
+	return fx.callResult(slot, fx.idx.trace(records, slot.Run, slot.N))
 }
 
 func (fx effects) callResult(slot script.Slot, trace effectTrace) (jsontext.Value, error) {

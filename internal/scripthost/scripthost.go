@@ -28,7 +28,7 @@ func New(cfg Config) agent.ExtensionFactory {
 		cfg.Logger = slog.Default()
 	}
 	return func(t *agent.Thread) agent.Extension {
-		return extension{mode: cfg.Mode, eval: cfg.Eval, plugins: cfg.Plugins, fx: effects{t: t, judge: cfg.Judge, log: cfg.Logger}}
+		return extension{mode: cfg.Mode, eval: cfg.Eval, plugins: cfg.Plugins, fx: effects{t: t, judge: cfg.Judge, log: cfg.Logger, idx: newEffectCache()}}
 	}
 }
 
