@@ -307,6 +307,67 @@ func TestLocal_sandboxConfinesWrites(t *testing.T) {
 	}
 }
 
+func TestLocal_sandboxDeniesWriteThroughSymlink(t *testing.T) {
+	if !Available() {
+		t.Skip("landlock ABI is 0")
+	}
+	fixture := setupSymlinkEscape(t)
+	local := newTestLocal(t, filepath.Join(fixture.dir, "runs"))
+	script := `touch ./inside-ok; if echo pwned >> "$1"; then echo link-ok; else echo link-denied; fi`
+	startTestProcess(t, local, ProcessSpec{ID: "symlink", Argv: []string{"sh", "-c", script, "_", fixture.link}, Dir: fixture.workspace, Env: fixture.env, Sandbox: Sandbox{Mode: SandboxWorkspaceWrite, WritableRoots: []string{fixture.workspace}}})
+	state := waitForExit(t, local, "symlink", 8*time.Second)
+	if state.Exit.Code != 0 {
+		t.Fatalf("sandboxed script failed: %+v output %s", state.Exit, state.Data)
+	}
+	if !strings.Contains(string(state.Data), "link-denied") {
+		t.Fatalf("write through symlink was not denied: %s", state.Data)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.workspace, "inside-ok")); err != nil {
+		t.Fatalf("write inside the roots failed: %v", err)
+	}
+	data, err := os.ReadFile(fixture.outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "secret" {
+		t.Fatalf("outside file changed through symlink: %q", data)
+	}
+}
+
+type symlinkFixture struct {
+	dir       string
+	workspace string
+	link      string
+	outside   string
+	env       []string
+}
+
+func setupSymlinkEscape(t *testing.T) symlinkFixture {
+	t.Helper()
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	tmproot := filepath.Join(dir, "tmp")
+	cache := filepath.Join(dir, "cache")
+	home := filepath.Join(dir, "home")
+	for _, path := range []string{workspace, tmproot, cache, home} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(workspace, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	env := setEnvironment(os.Environ(), "HOME", home)
+	env = setEnvironment(env, "TMPDIR", tmproot)
+	env = setEnvironment(env, "XDG_CACHE_HOME", cache)
+	return symlinkFixture{dir: dir, workspace: workspace, link: link, outside: outside, env: env}
+}
+
 func waitForExit(t *testing.T, local *Local, id string, timeout time.Duration) Output {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
