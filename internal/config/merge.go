@@ -357,23 +357,25 @@ func mergeWeb(target *WebConfig, source webDoc) {
 }
 
 func (c *Config) applyFlags(flags Flags) {
-	setNonempty(flags.Model, &c.Model)
-	setNonempty(flags.Reasoning, (*string)(&c.Reasoning))
-	setNonempty(flags.Approval, (*string)(&c.Approval))
-	setNonempty(flags.ToolMode, (*string)(&c.ToolMode))
-	setNonempty(flags.Sandbox, (*string)(&c.Sandbox))
-	setNonempty(flags.Runner, &c.Runner)
-	setNonempty(flags.Remote, &c.Remote)
-	setNonempty(flags.Cwd, &c.Cwd)
+	c.setFlag(flags.Model, &c.Model, "model")
+	c.setFlag(flags.Reasoning, (*string)(&c.Reasoning), "reasoning")
+	c.setFlag(flags.Approval, (*string)(&c.Approval), "approval")
+	c.setFlag(flags.ToolMode, (*string)(&c.ToolMode), "tool_mode")
+	c.setFlag(flags.Sandbox, (*string)(&c.Sandbox), "sandbox")
+	c.setFlag(flags.Runner, &c.Runner, "runner")
+	c.setFlag(flags.Remote, &c.Remote, "remote")
+	c.setFlag(flags.Cwd, &c.Cwd, "cwd")
 	if flags.Advisor {
 		c.Advisor.Enabled = true
 	}
 }
 
-func setNonempty(source string, target *string) {
-	if source != "" {
-		*target = source
+func (c *Config) setFlag(source string, target *string, key string) {
+	if source == "" {
+		return
 	}
+	*target = source
+	c.lines[key] = origin{file: "flags", line: 0}
 }
 
 type exactError string
@@ -421,17 +423,17 @@ func (c *Config) validateApprovalDecider() []error {
 
 func (c *Config) validateEditStyle() []error {
 	if c.EditStyle.Default == "" {
-		return []error{exactError("config.toml: edit_style table needs a default entry.")}
+		return []error{exactError(c.originFile("edit_style") + ": edit_style table needs a default entry.")}
 	}
 	if !validEditStyle(c.EditStyle.Default) {
-		return []error{exactError("config.toml: edit_style must be one of anchor, replace, hashline, hashline-light, hashline-enhanced, apply_patch, simple, balanced, strict.")}
+		return []error{exactError(c.originFile("edit_style") + ": edit_style must be one of anchor, replace, hashline, hashline-light, hashline-enhanced, apply_patch, simple, balanced, strict.")}
 	}
 	for _, row := range c.EditStyle.Rows {
 		if row.Glob == "" {
-			return []error{exactError("config.toml: edit_style keys must not be empty.")}
+			return []error{exactError(c.originFile("edit_style") + ": edit_style keys must not be empty.")}
 		}
 		if !validEditStyle(row.Style) {
-			return []error{exactError("config.toml: edit_style must be one of anchor, replace, hashline, hashline-light, hashline-enhanced, apply_patch, simple, balanced, strict.")}
+			return []error{exactError(c.originFile("edit_style") + ": edit_style must be one of anchor, replace, hashline, hashline-light, hashline-enhanced, apply_patch, simple, balanced, strict.")}
 		}
 	}
 	return nil
@@ -448,10 +450,11 @@ func (c *Config) validateRunners() []error {
 		if runner.Service != "sandbox0" {
 			continue
 		}
+		key := "runners." + name
 		if runner.Image != "" {
-			errs = append(errs, fmt.Errorf("config.toml: runners.%s: sandbox0 takes template, not image", name))
+			errs = append(errs, fmt.Errorf("%s: runners.%s: sandbox0 takes template, not image", c.originFile(key), name))
 		} else if runner.Template == "" {
-			errs = append(errs, fmt.Errorf("config.toml: runners.%s: sandbox0 requires a template", name))
+			errs = append(errs, fmt.Errorf("%s: runners.%s: sandbox0 requires a template", c.originFile(key), name))
 		}
 	}
 	return errs
@@ -460,17 +463,27 @@ func (c *Config) validateRunners() []error {
 func (c *Config) validateKeywords() []error {
 	var errs []error
 	for _, word := range slices.Sorted(maps.Keys(c.Keywords)) {
-		if err := validateKeyword(c.Home, word, c.Keywords[word]); err != nil {
+		if err := validateKeyword(c.Home, c.originFile("keywords."+word), word, c.Keywords[word]); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errs
 }
 
+func (c *Config) originFile(key string) string {
+	if location, ok := c.lines[key]; ok {
+		return location.file
+	}
+	return "config.toml"
+}
+
 func (c *Config) valueError(key, message string) error {
-	location := c.lines[key]
-	if location.line == 0 {
+	location, ok := c.lines[key]
+	if !ok {
 		location = origin{file: "config.toml", line: 1}
+	}
+	if location.line == 0 {
+		return fmt.Errorf("%s: %s", location.file, message)
 	}
 	return fmt.Errorf("%s:%d: %s", location.file, location.line, message)
 }
@@ -488,18 +501,18 @@ var keywordWordRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,31}$`)
 
 var builtinKeywords = map[string]bool{"ultrathink": true, "jevify": true, "workflowz": true, "orchestrate": true}
 
-func validateKeyword(home, word string, keyword KeywordSpec) error {
+func validateKeyword(home, originFile, word string, keyword KeywordSpec) error {
 	if !keywordWordRe.MatchString(word) {
-		return fmt.Errorf("config.toml: keyword %q must be lowercase letters, digits, _ or -, 2-32 chars", word)
+		return fmt.Errorf("%s: keyword %q must be lowercase letters, digits, _ or -, 2-32 chars", originFile, word)
 	}
 	if !builtinKeywords[word] && (keyword.Notice == "") == (keyword.Text == "") {
-		return fmt.Errorf("config.toml: keyword %q needs exactly one of notice or text", word)
+		return fmt.Errorf("%s: keyword %q needs exactly one of notice or text", originFile, word)
 	}
 	if builtinKeywords[word] && keyword.Notice != "" && keyword.Text != "" {
-		return fmt.Errorf("config.toml: keyword %q needs exactly one of notice or text", word)
+		return fmt.Errorf("%s: keyword %q needs exactly one of notice or text", originFile, word)
 	}
 	if keyword.Notice != "" && !keywordNoticeExists(home, keyword.Notice) {
-		return fmt.Errorf("config.toml: keyword %q notice file %s not found", word, keyword.Notice)
+		return fmt.Errorf("%s: keyword %q notice file %s not found", originFile, word, keyword.Notice)
 	}
 	return nil
 }
