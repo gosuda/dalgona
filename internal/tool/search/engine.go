@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
@@ -165,24 +166,47 @@ func grep(entries []fileEntry, args args) (outcome, error) {
 	if err != nil {
 		return outcome{}, err
 	}
+	scanned, kept, total := collectMatches(files, matcher, args.Limit)
+	return renderGrep(scanned, kept, total, args.Pattern), nil
+}
+
+const grepWorkers = 8
+
+type fileMatches struct {
+	file  grepFile
+	lines []int
+}
+
+func collectMatches(files []fileEntry, matcher *regexp.Regexp, limit int) ([]grepFile, []hit, int) {
+	results := make([]fileMatches, len(files))
+	workers := min(grepWorkers, len(files))
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			for i := w; i < len(results); i += workers {
+				file, lines := scanFile(files[i], matcher)
+				results[i] = fileMatches{file: file, lines: lines}
+			}
+		})
+	}
+	wg.Wait()
 	var scanned []grepFile
 	var kept []hit
 	total := 0
-	for _, entry := range files {
-		file, matches := scanFile(entry, matcher)
-		if len(matches) == 0 {
+	for _, result := range results {
+		if len(result.lines) == 0 {
 			continue
 		}
 		fileIndex := len(scanned)
-		scanned = append(scanned, file)
-		for _, line := range matches {
+		scanned = append(scanned, result.file)
+		for _, line := range result.lines {
 			total++
-			if len(kept) < args.Limit {
+			if len(kept) < limit {
 				kept = append(kept, hit{file: fileIndex, line: line})
 			}
 		}
 	}
-	return renderGrep(scanned, kept, total, args.Pattern), nil
+	return scanned, kept, total
 }
 
 func grepRegexp(args args) (*regexp.Regexp, error) {
