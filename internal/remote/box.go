@@ -341,9 +341,7 @@ var boxKillGrace = 2 * time.Second
 func stopProcess(r runner.Runner, id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), boxKillGrace)
 	defer cancel()
-	if err := r.Signal(ctx, id, runner.SignalTerm); err != nil {
-		return
-	}
+	_ = r.Signal(ctx, id, runner.SignalTerm)
 	var offset int64
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
