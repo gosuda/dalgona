@@ -54,6 +54,11 @@ type Env struct {
 	Snapshots *snapshot.Store
 }
 
+func IsLocalRunner(run runner.Runner) bool {
+	_, ok := run.(*runner.Local)
+	return ok
+}
+
 type Result struct {
 	Output   []byte
 	OK       bool

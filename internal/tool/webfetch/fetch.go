@@ -65,7 +65,7 @@ func (t *Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Resu
 	if env.Runner == nil {
 		return execute(ctx, args, t.client)
 	}
-	if _, ok := env.Runner.(*runner.Local); ok {
+	if tool.IsLocalRunner(env.Runner) {
 		return execute(ctx, args, t.client)
 	}
 	return executeRemote(ctx, call.ID, args, env)

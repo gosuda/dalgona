@@ -131,13 +131,8 @@ type linkFileRunner interface {
 	LinkFile(ctx context.Context, oldpath, newpath string) error
 }
 
-func isLocalRunner(run runner.Runner) bool {
-	_, ok := run.(*runner.Local)
-	return ok
-}
-
 func supportsNoReplace(run runner.Runner) bool {
-	if isLocalRunner(run) {
+	if tool.IsLocalRunner(run) {
 		return true
 	}
 	_, ok := run.(linkFileRunner)
@@ -302,7 +297,7 @@ func publishAbsent(ctx context.Context, env tool.Env, state *writeState, target 
 	if linker, ok := env.Runner.(linkFileRunner); ok {
 		return linker.LinkFile(ctx, state.temp, target)
 	}
-	if _, ok := env.Runner.(*runner.Local); !ok {
+	if !tool.IsLocalRunner(env.Runner) {
 		return errors.New("no_replace_unavailable")
 	}
 	return os.Link(state.temp, target)

@@ -21,7 +21,7 @@ type dirPin struct {
 }
 
 func pinVerifiedComponents(env tool.Env, display, absolute string) (*dirPin, error) {
-	if !isLocalRunner(env.Runner) {
+	if !tool.IsLocalRunner(env.Runner) {
 		return nil, nil
 	}
 	root, err := os.Open(env.Cwd)

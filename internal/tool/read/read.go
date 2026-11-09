@@ -67,7 +67,7 @@ func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result,
 	if testHookReadSwap != nil {
 		testHookReadSwap()
 	}
-	if isLocalRunner(env.Runner) {
+	if tool.IsLocalRunner(env.Runner) {
 		return readPinnedFile(ctx, env, path, display, parsed)
 	}
 	info, err := env.Runner.Stat(ctx, path)
@@ -285,11 +285,6 @@ func binary(data []byte) bool {
 	return bytes.IndexByte(probe, 0) >= 0 || !utf8.Valid(data)
 }
 
-func isLocalRunner(run runner.Runner) bool {
-	_, ok := run.(*runner.Local)
-	return ok
-}
-
 func ensureWithinWorkspace(cwd, path, display string) error {
 	root, rootErr := filepath.EvalSymlinks(cwd)
 	if rootErr != nil {
@@ -328,7 +323,7 @@ func resolvePath(cwd, home, raw string) (string, string, error) {
 }
 
 func checkWorkspacePath(env tool.Env, raw, path, display string) error {
-	if filepath.IsAbs(raw) || !isLocalRunner(env.Runner) {
+	if filepath.IsAbs(raw) || !tool.IsLocalRunner(env.Runner) {
 		return nil
 	}
 	return ensureWithinWorkspace(env.Cwd, path, display)
