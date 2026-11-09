@@ -146,6 +146,7 @@ func (w *worker) stream(ctx context.Context, req model.Request, contextSeq uint6
 	if err != nil {
 		return nil, err
 	}
+	w.flushInBand(context.WithoutCancel(ctx), contextSeq)
 	stream, err := w.openStream(ctx, provider, req)
 	if err != nil {
 		return nil, err
@@ -208,13 +209,23 @@ func (w *worker) journalAssistant(ctx context.Context, result *reply) error {
 	if err = w.storeCallArgs(result.calls); err != nil {
 		return err
 	}
+	calls := result.calls
+	if w.inBand != nil {
+		pending := make([]event.ToolCall, 0, len(result.calls))
+		for _, call := range result.calls {
+			if !w.inBand.resolved(call.ID) {
+				pending = append(pending, call)
+			}
+		}
+		calls = pending
+	}
 	stop := "stop"
-	if len(result.calls) > 0 {
+	if len(calls) > 0 {
 		stop = "tool_calls"
 	}
 	message := event.AssistantMessage{
 		ItemID: result.itemID, TurnID: w.turnID, Text: text, TextBlob: textBlob, Reasoning: reasoning, ReasoningBlob: reasoningBlob,
-		ToolCalls: result.calls, StopReason: cmp.Or(result.stop, stop), ContextSeq: result.contextSeq,
+		ToolCalls: calls, StopReason: cmp.Or(result.stop, stop), ContextSeq: result.contextSeq,
 		Usage: event.Usage{Input: result.usage.Input, Output: result.usage.Output, CacheRead: result.usage.CacheRead, CacheWrite: result.usage.CacheWrite},
 	}
 	_, err = w.t.appendEvents(ctx, message)

@@ -53,6 +53,12 @@ func (p *prepared) toolCall() tool.Call {
 	return tool.Call{ID: p.processID(), Name: p.call.Name, Args: p.args}
 }
 
+func (p *prepared) discardPlan() {
+	if p.plan != nil && p.plan.Discard != nil {
+		p.plan.Discard()
+	}
+}
+
 func classString(class tool.Class) string {
 	switch class {
 	case tool.ClassRead:

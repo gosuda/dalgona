@@ -192,6 +192,7 @@ func (w *worker) step(ctx context.Context, v view, messages []model.Message) err
 	}
 	reply, err := w.callModel(ctx, v, messages)
 	if err != nil {
+		w.flushInBand(context.WithoutCancel(ctx), v.head())
 		return err
 	}
 	if err = w.journalAssistant(ctx, reply); err != nil {
