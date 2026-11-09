@@ -289,7 +289,11 @@ func (c *Conn) handleClientRequest(e envelope) {
 	}
 	result, handlerErr := c.clientHandler.Request(c.ctx, e.Method, e.Params)
 	if handlerErr != nil {
-		c.replyError(e.ID, -32601, handlerErr.Error())
+		code, message := -32603, handlerErr.Error()
+		if coded, ok := errors.AsType[*RPCError](handlerErr); ok {
+			code, message = coded.Code, coded.Message
+		}
+		c.replyError(e.ID, code, message)
 		return
 	}
 	raw, err := json.Marshal(result)
