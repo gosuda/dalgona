@@ -42,7 +42,7 @@ web-check:
 cf-check:
     pnpm -C deploy/cloudflare install --frozen-lockfile
     pnpm -C deploy/cloudflare exec tsc --noEmit
-    pnpm -C deploy/cloudflare exec ../../web/node_modules/.bin/biome ci .
+    pnpm -C deploy/cloudflare exec biome ci .
 
 dist:
     #!/usr/bin/env bash
