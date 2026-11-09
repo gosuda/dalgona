@@ -57,6 +57,9 @@ func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result,
 	if err != nil {
 		return tool.Result{}, err
 	}
+	if err = checkWorkspacePath(env, parsed.Path, path, display); err != nil {
+		return tool.Result{}, err
+	}
 	info, err := env.Runner.Stat(ctx, path)
 	if err != nil {
 		return tool.Result{}, fmt.Errorf("read: %s does not exist: %w", parsed.Path, err)
@@ -64,20 +67,28 @@ func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result,
 	if info.Mode.IsDir() {
 		return readDirectory(ctx, env, path, display)
 	}
+	data, err := loadCheckedFile(ctx, env, path, display, info)
+	if err != nil {
+		return tool.Result{}, err
+	}
+	return render(data, display, parsed, env.Snapshots), nil
+}
+
+func loadCheckedFile(ctx context.Context, env tool.Env, path, display string, info runner.FileInfo) ([]byte, error) {
 	if info.Size > maxFileBytes {
-		return tool.Result{}, fmt.Errorf("read: %s is a %d-byte text file; the limit is 16 MiB", display, info.Size)
+		return nil, fmt.Errorf("read: %s is a %d-byte text file; the limit is 16 MiB", display, info.Size)
 	}
 	data, err := env.Runner.ReadFile(ctx, path)
 	if err != nil {
-		return tool.Result{}, fmt.Errorf("read %s: %w", display, err)
+		return nil, fmt.Errorf("read %s: %w", display, err)
 	}
 	if len(data) > maxFileBytes {
-		return tool.Result{}, fmt.Errorf("read: %s is a %d-byte text file; the limit is 16 MiB", display, len(data))
+		return nil, fmt.Errorf("read: %s is a %d-byte text file; the limit is 16 MiB", display, len(data))
 	}
 	if binary(data) {
-		return tool.Result{}, fmt.Errorf("read: %s is a binary file (%d bytes)", display, len(data))
+		return nil, fmt.Errorf("read: %s is a binary file (%d bytes)", display, len(data))
 	}
-	return render(data, display, parsed, env.Snapshots), nil
+	return data, nil
 }
 
 func readDirectory(ctx context.Context, env tool.Env, path, display string) (tool.Result, error) {
@@ -183,6 +194,27 @@ func binary(data []byte) bool {
 	return bytes.IndexByte(probe, 0) >= 0 || !utf8.Valid(data)
 }
 
+func isLocalRunner(run runner.Runner) bool {
+	_, ok := run.(*runner.Local)
+	return ok
+}
+
+func ensureWithinWorkspace(cwd, path, display string) error {
+	root, rootErr := filepath.EvalSymlinks(cwd)
+	if rootErr != nil {
+		return fmt.Errorf("read: cannot inspect %s: %w", display, rootErr)
+	}
+	target, targetErr := filepath.EvalSymlinks(path)
+	if targetErr != nil {
+		return fmt.Errorf("read: cannot inspect %s: %w", display, targetErr)
+	}
+	rel, relErr := filepath.Rel(root, target)
+	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("read: %s escapes the workspace via symlink", display)
+	}
+	return nil
+}
+
 func resolvePath(cwd, home, raw string) (string, string, error) {
 	if raw == "" {
 		return "", "", errors.New("read: path must not be empty")
@@ -202,6 +234,13 @@ func resolvePath(cwd, home, raw string) (string, string, error) {
 		return "", "", errors.New("read: path must stay within the workspace")
 	}
 	return filepath.Join(cwd, clean), filepath.ToSlash(clean), nil
+}
+
+func checkWorkspacePath(env tool.Env, raw, path, display string) error {
+	if filepath.IsAbs(raw) || !isLocalRunner(env.Runner) {
+		return nil
+	}
+	return ensureWithinWorkspace(env.Cwd, path, display)
 }
 
 var spillPattern = regexp.MustCompile(`^(?:blobs/[0-9a-f]{64}|runs/[^/]+/out|sessions/[^/]+/runs/[^/]+/out)$`)
