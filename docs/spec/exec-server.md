@@ -29,7 +29,7 @@ An unstamped binary MUST use `(devel)` as its version.
 
 ### Process methods
 
-`process/start` params contain `processId`, `argv`, `cwd`, `env`, and `sandbox`. `env` is an object. `sandbox` contains `mode` and `writableRoots`. The server MUST pass these values to `Local.Start`. `Remote.Start` MUST send sandbox mode `off`, because the box is the sandbox. A repeated `processId` MUST NOT start a second process.
+`process/start` params contain `processId`, `argv`, `cwd`, `env`, and `sandbox`. `env` is an object. `sandbox` contains `mode` and `writableRoots`. The server MUST pass these values to `Local.Start`. `Remote.Start` MUST send sandbox mode `off`, because the box is the sandbox. A repeated `processId` MUST NOT start a second process. A request arriving over the websocket box channel MUST NOT weaken the sandbox below the server start mode: when the server floor is `workspace-write`, `process/start` with any other mode MUST fail with `-32602`. The floor is `workspace-write` only when the server itself started with `DALGONA_SANDBOX_MODE=workspace-write`; otherwise the box is the sandbox and `off` stays allowed.
 
 `process/read` params contain `processId` and `offset`. The result contains `dataBase64`, `next`, `exit`, `alive`, and `path`. A non-null `exit` contains `code`, `signal`, and `endedAtMs`.
 

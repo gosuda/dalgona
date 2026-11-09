@@ -98,7 +98,7 @@ func TestExecRPC_terminateReportsRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := callMethod(t.Context(), local, "process/terminate", params)
+	result, err := callMethod(t.Context(), local, "process/terminate", params, trustedExecPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestDispatchRPC_suppressesNotificationErrors(t *testing.T) {
 	var out bytes.Buffer
 	writer := rpcWriter{w: &out, mu: &sync.Mutex{}}
 	line := []byte(`{"jsonrpc":"2.0","method":"missing/method"}`)
-	if err := dispatchRPC(t.Context(), writer, nil, line); err != nil {
+	if err := dispatchRPC(t.Context(), writer, nil, line, trustedExecPolicy()); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -360,7 +360,7 @@ func TestExecRPC_writeFileSyncsFilesystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, callErr := callMethod(t.Context(), local, "fs/writeFile", params); callErr != nil {
+	if _, callErr := callMethod(t.Context(), local, "fs/writeFile", params, trustedExecPolicy()); callErr != nil {
 		t.Fatal(callErr)
 	}
 	if syncs != 1 {

@@ -45,7 +45,7 @@ Windows MUST always run without a harness sandbox. Linux MUST do the same when `
 
 ## Remote
 
-A remote box MUST ignore the sandbox mode. The box is the sandbox.
+A remote box MUST ignore the sandbox mode. The box is the sandbox. A request that reaches the exec server over the websocket box channel MUST NOT weaken the sandbox below the server start mode, and the server MUST fail the request closed with `-32602` when it does.
 
 ## Daemon socket visibility
 

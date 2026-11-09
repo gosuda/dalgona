@@ -38,7 +38,7 @@ type stdioConn struct {
 func (stdioConn) Close() error { return nil }
 
 func Serve(ctx context.Context, conn io.ReadWriteCloser, local *Local) error {
-	return serveExecRPC(ctx, conn, local)
+	return serveExecRPC(ctx, conn, local, trustedExecPolicy())
 }
 
 func ExecServerMain(args []string, stdin io.Reader, stdout io.Writer) int {
@@ -174,6 +174,17 @@ func ExecServerHandler(ctx context.Context, local *Local, token string, bridge B
 	return execWSHandler(ctx, local, token, bridge)
 }
 
+func serverSandboxFloor() SandboxMode {
+	switch SandboxMode(os.Getenv("DALGONA_SANDBOX_MODE")) {
+	case SandboxWorkspaceWrite:
+		return SandboxWorkspaceWrite
+	case SandboxOff, "":
+		return SandboxOff
+	default:
+		return SandboxWorkspaceWrite
+	}
+}
+
 func serveExecWS(ctx context.Context, listener net.Listener, local *Local, token string, bridge BridgeFunc) error {
 	server := &http.Server{Handler: ExecServerHandler(ctx, local, token, bridge), ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
@@ -248,7 +259,7 @@ func serveExecWebsocket(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if bridge != nil {
 		err = bridge(ctx, conn)
 	} else {
-		err = Serve(ctx, conn, local)
+		err = serveBoxChannel(ctx, conn, local, serverSandboxFloor())
 	}
 	if err != nil && ctx.Err() == nil {
 		slog.Debug("exec-server: websocket connection", "error", err)

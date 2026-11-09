@@ -28,6 +28,10 @@ const (
 	rpcFileMissing    = -32002
 )
 
+// ErrSandboxDowngrade reports a box-channel request that weakens the
+// sandbox below the server start mode.
+var ErrSandboxDowngrade = errors.New("runner: sandbox downgrade refused")
+
 var (
 	errParse          = errors.New("parse error")
 	errInvalidParams  = rpcStatusError{code: rpcInvalidParams, msg: "invalid params"}
@@ -59,7 +63,18 @@ type rpcWriter struct {
 	mu *sync.Mutex
 }
 
-func serveExecRPC(ctx context.Context, conn io.ReadWriteCloser, local *Local) error {
+type execPolicy struct {
+	boxChannel bool
+	floor      SandboxMode
+}
+
+func trustedExecPolicy() execPolicy { return execPolicy{} }
+
+func serveBoxChannel(ctx context.Context, conn io.ReadWriteCloser, local *Local, floor SandboxMode) error {
+	return serveExecRPC(ctx, conn, local, execPolicy{boxChannel: true, floor: floor})
+}
+
+func serveExecRPC(ctx context.Context, conn io.ReadWriteCloser, local *Local, policy execPolicy) error {
 	closeConn := sync.OnceFunc(func() { _ = conn.Close() })
 	stop := context.AfterFunc(ctx, closeConn)
 	defer stop()
@@ -74,7 +89,7 @@ func serveExecRPC(ctx context.Context, conn io.ReadWriteCloser, local *Local) er
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		if err := dispatchRPC(ctx, writer, local, line); err != nil {
+		if err := dispatchRPC(ctx, writer, local, line, policy); err != nil {
 			return err
 		}
 	}
@@ -90,7 +105,7 @@ func serveReadError(ctx context.Context, err error) error {
 	return err
 }
 
-func dispatchRPC(ctx context.Context, writer rpcWriter, local *Local, line []byte) error {
+func dispatchRPC(ctx context.Context, writer rpcWriter, local *Local, line []byte, policy execPolicy) error {
 	msg, err := parseRPC(line)
 	if err != nil {
 		return writeRPCError(writer, nil, rpcParseError, "parse error")
@@ -98,7 +113,7 @@ func dispatchRPC(ctx context.Context, writer rpcWriter, local *Local, line []byt
 	if msg.method == "" {
 		return nil
 	}
-	result, err := callMethod(ctx, local, msg.method, msg.params)
+	result, err := callMethod(ctx, local, msg.method, msg.params, policy)
 	if !msg.hasID {
 		return nil
 	}
@@ -109,7 +124,12 @@ func dispatchRPC(ctx context.Context, writer rpcWriter, local *Local, line []byt
 	return writeRPCResult(writer, msg.id, result)
 }
 
-func callMethod(ctx context.Context, local *Local, method string, params jsontext.Value) (jsontext.Value, error) {
+func callMethod(ctx context.Context, local *Local, method string, params jsontext.Value, policy execPolicy) (jsontext.Value, error) {
+	if method == "process/start" && policy.boxChannel {
+		if err := checkSandboxFloor(params, policy.floor); err != nil {
+			return nil, err
+		}
+	}
 	handler, ok := rpcMethods[method]
 	if !ok {
 		return nil, errMethodNotFound
@@ -117,9 +137,26 @@ func callMethod(ctx context.Context, local *Local, method string, params jsontex
 	return handler(ctx, local, params)
 }
 
+func checkSandboxFloor(params jsontext.Value, floor SandboxMode) error {
+	if floor == SandboxOff {
+		return nil
+	}
+	spec, err := decodeProcessSpec(params)
+	if err != nil {
+		return err
+	}
+	if spec.Sandbox.Mode == SandboxWorkspaceWrite {
+		return nil
+	}
+	return ErrSandboxDowngrade
+}
+
 func rpcStatus(err error) (int, string) {
 	if status, ok := errors.AsType[rpcStatusError](err); ok {
 		return status.code, status.msg
+	}
+	if errors.Is(err, ErrSandboxDowngrade) {
+		return rpcInvalidParams, err.Error()
 	}
 	if errors.Is(err, ErrProcessNotFound) {
 		return rpcProcessMissing, ErrProcessNotFound.Error()
