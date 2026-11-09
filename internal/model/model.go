@@ -22,10 +22,6 @@ type Stream interface {
 	Close() error
 }
 
-type IdleStream interface {
-	Timers() *StreamTimers
-}
-
 type Event interface{ event() }
 
 type TextDelta struct{ Text string }
@@ -234,5 +230,3 @@ func (s *EventStream) Close() error {
 		return context.DeadlineExceeded
 	}
 }
-
-func SplitModel(value string) (string, string, error) { return ParseModelID(value) }
