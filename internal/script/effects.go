@@ -37,6 +37,7 @@ type Recorded struct {
 	ArgsSHA     string
 	Result      jsontext.Value
 	Error       string
+	Denied      bool
 	Interrupted bool
 }
 

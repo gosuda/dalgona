@@ -34,7 +34,7 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 |`child.spawned`|`call_id`, `child_id`, `runner`|None|
 |`branch`|`parent_seq`|Zero selects the empty root path|
 |`script.started`|`run_id`, `source_blob`, `entry`, `args`, `seed`|None|
-|`script.effect`|`run_id`, `n`, `op`, `args_sha`, and `result` or `error`|Effect indexes are assigned at submission, so they MAY arrive out of order; an index MUST NOT repeat; `error` records a failed effect, such as a declined script tool call, and excludes `result`|
+|`script.effect`|`run_id`, `n`, `op`, `args_sha`, and `result` or `error`|Effect indexes are assigned at submission, so they MAY arrive out of order; an index MUST NOT repeat; `error` records a failed effect, such as a declined script tool call, and excludes `result`; a denial MUST set `denied` to `true` alongside `error`, and the encoder MUST omit `denied` otherwise|
 |`script.completed`|`run_id`, `ok`|Success MUST contain `value` and no `error`; failure MUST contain `error` and no `value`|
 |`advisor.note`|`advisor`, `severity`, `note`, `review_seq`, `delivery`|severity is `nit`, `concern`, or `blocker`; delivery is `steer`, `aside`, or `continue`; `note` MUST be inline and at most 64 KiB|
 |`thread.named`|`name`|At most 1 KiB; the latest one names the thread|

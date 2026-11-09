@@ -246,6 +246,7 @@ func decodeScriptEvent(kind string, r *objectReader) (Event, error) {
 		return ScriptEffect{
 			RunID: r.str("run_id"), N: r.uint64("n"), Op: r.str("op"),
 			ArgsSHA: r.str("args_sha"), Result: result, ResultBlob: resultBlob, Error: r.str("error"),
+			Denied: r.boolean("denied"),
 		}, nil
 	case TypeScriptCompleted:
 		value, valueBlob := r.rawPayload("value")

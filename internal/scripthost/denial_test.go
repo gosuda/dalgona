@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/script"
 )
 
 func TestDeniedTryCallRecordsAMarkedEffect(t *testing.T) {
@@ -23,11 +22,11 @@ func TestDeniedTryCallRecordsAMarkedEffect(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if !strings.HasPrefix(effect.Error, script.DeniedMark) {
-			t.Fatalf("recorded denial = %q, want %q prefix", effect.Error, script.DeniedMark)
+		if !effect.Denied {
+			t.Fatalf("recorded denial = %+v, want the denied flag set", effect)
 		}
-		if !strings.Contains(effect.Error, "hooks forbid exec") {
-			t.Fatalf("recorded denial = %q, want the hook reason", effect.Error)
+		if effect.Error != "hooks forbid exec" {
+			t.Fatalf("recorded denial = %q, want the bare hook reason", effect.Error)
 		}
 		marked = true
 	}

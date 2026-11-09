@@ -44,7 +44,7 @@ type Effects interface {
 ```
 
 - `Started` MUST journal `script.started` when the run id is new and return the given start. For a known run id it MUST NOT journal and MUST return the pinned start. The engine MUST execute the pinned `Source` with the pinned `Seed`.
-- `Lookup` MUST return the recorded effect `n` of a run. `Recorded.Interrupted` MUST be `true` when the effect started and its outcome is unknown after the host applied the recovery table. `Recorded.Error` MUST hold the failure text of a failed effect.
+- `Lookup` MUST return the recorded effect `n` of a run. `Recorded.Interrupted` MUST be `true` when the effect started and its outcome is unknown after the host applied the recovery table. `Recorded.Error` MUST hold the failure text of a failed effect. `Recorded.Denied` MUST be `true` only for a recorded denial.
 - `Record` MUST journal `script.effect` with `run_id`, `n`, `op`, `args_sha`, and `result`. The engine calls `Record` for `time`, `sleep`, and `judge`.
 - `Completed` MUST journal `script.completed` for the run: `ok` and `value` for status `completed`, otherwise `ok=false` and the error message. The engine MUST call it once when any started run ends: an eval cell, a plugin tool, hook, or command, and a workflow.
 - `CallTool` MUST run the tool through approvals and the thread's runner. It MUST journal `tool.started` and `tool.completed` with `call_id = "<run>/<n>"`. A later `Lookup` of that index MUST return the recorded value. A tool failure MUST return an error. A denial MUST wrap `script.ErrDenied`.
@@ -71,7 +71,7 @@ For each effect the engine MUST call `Lookup` first:
 - No record: the effect MUST run live.
 - A record with a different `op` or `args_sha`: the run MUST stop with status `failed`, code `nondeterminism`, and message `nondeterminism at effect <n>: recorded <op>, got <op>`.
 - `Interrupted`: the run MUST stop with status `indeterminate`.
-- `Error`: the effect MUST fail with that text.
+- `Denied`: the run MUST stop with status `denied`. Any other `Error`: the effect MUST fail with that text.
 - Otherwise the effect MUST return the recorded result and MUST NOT run again.
 
 `sleep` MUST record the absolute wake deadline in Unix nanoseconds before it waits. A replayed sleep MUST wait only until that deadline.

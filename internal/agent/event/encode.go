@@ -296,7 +296,11 @@ func scriptMembers(e Event) ([]member, error) {
 		}
 		fields = optionalRaw(fields, "result", value.Result)
 		fields = optionalBlobField(fields, "result_blob", value.ResultBlob)
-		return optionalString(fields, "error", value.Error), nil
+		fields = optionalString(fields, "error", value.Error)
+		if value.Denied {
+			fields = append(fields, field("denied", boolValue(true)))
+		}
+		return fields, nil
 	case ScriptCompleted:
 		fields := []member{field("run_id", stringValue(value.RunID)), field("ok", boolValue(value.OK))}
 		fields = optionalRaw(fields, "value", value.Value)

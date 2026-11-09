@@ -74,6 +74,44 @@ func TestCodecRoundTripBlobPayloads(t *testing.T) {
 	}
 }
 
+func TestCodecScriptEffectDeniedRoundTrip(t *testing.T) {
+	t.Parallel()
+	denied := event.ScriptEffect{RunID: "s", N: 1, Op: "tool:exec", ArgsSHA: digest, Error: "hooks forbid exec", Denied: true}
+	encoded, err := event.Encode(denied)
+	if err != nil {
+		t.Fatalf("Encode denied: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"denied":true`) {
+		t.Fatalf("denied effect encoding = %s, want a denied member", encoded)
+	}
+	decoded, err := event.Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode denied: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, event.Event(denied)) {
+		t.Fatalf("denied round trip mismatch: got %#v want %#v", decoded, denied)
+	}
+}
+
+func TestCodecScriptEffectDeniedOmitted(t *testing.T) {
+	t.Parallel()
+	failed := event.ScriptEffect{RunID: "s", N: 1, Op: "tool:exec", ArgsSHA: digest, Error: "denied: disk quota exceeded"}
+	encoded, err := event.Encode(failed)
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+	if strings.Contains(string(encoded), `"denied"`) {
+		t.Fatalf("plain failure encoding = %s, must omit the denied member", encoded)
+	}
+	legacy, err := event.Decode([]byte(`{"type":"script.effect","run_id":"s","n":1,"op":"tool:exec","args_sha":"` + digest + `","error":"boom"}`))
+	if err != nil {
+		t.Fatalf("Decode legacy effect: %v", err)
+	}
+	if effect, ok := legacy.(event.ScriptEffect); !ok || effect.Denied {
+		t.Fatalf("legacy effect = %#v, want Denied false", legacy)
+	}
+}
+
 func TestDecodeRejectsUnknownAndMalformedEvents(t *testing.T) {
 	t.Parallel()
 	inputs := []string{
@@ -147,9 +185,16 @@ func randomEvents(r *rand.Rand) []event.Event {
 		event.ChildSpawned{CallID: text(r), ChildID: text(r), Runner: text(r)},
 		event.Branch{ParentSeq: r.Uint64N(1000000)},
 		event.ScriptStarted{RunID: text(r), SourceBlob: blob(r), Entry: text(r), Args: raw(r), Seed: r.Uint64()},
-		event.ScriptEffect{RunID: text(r), N: r.Uint64(), Op: text(r), ArgsSHA: sha(r), Result: raw(r)},
+		randomScriptEffect(r),
 		randomScriptCompleted(r),
 	}
+}
+
+func randomScriptEffect(r *rand.Rand) event.ScriptEffect {
+	if r.IntN(2) == 0 {
+		return event.ScriptEffect{RunID: text(r), N: r.Uint64(), Op: text(r), ArgsSHA: sha(r), Result: raw(r)}
+	}
+	return event.ScriptEffect{RunID: text(r), N: r.Uint64(), Op: text(r), ArgsSHA: sha(r), Error: text(r), Denied: true}
 }
 
 func randomScriptCompleted(r *rand.Rand) event.ScriptCompleted {

@@ -133,7 +133,7 @@ func (fx effects) recorded(trace effectTrace) (script.Recorded, bool) {
 	switch {
 	case trace.effect != nil:
 		result, err := fx.t.LoadRaw(trace.effect.Result, trace.effect.ResultBlob)
-		return script.Recorded{Op: trace.effect.Op, ArgsSHA: trace.effect.ArgsSHA, Result: result, Error: trace.effect.Error, Interrupted: err != nil}, true
+		return script.Recorded{Op: trace.effect.Op, ArgsSHA: trace.effect.ArgsSHA, Result: result, Error: trace.effect.Error, Denied: trace.effect.Denied, Interrupted: err != nil}, true
 	case trace.started != nil:
 		return fx.recordedTool(*trace.started, trace.completed), true
 	default:
@@ -156,11 +156,19 @@ func (fx effects) recordedTool(started event.ToolStarted, completed *event.ToolC
 }
 
 func (fx effects) Record(slot script.Slot, result jsontext.Value) error {
-	return fx.recordEffect(slot, result, "")
+	return fx.recordResult(slot, result)
 }
 
-func (fx effects) recordEffect(slot script.Slot, result jsontext.Value, failure string) error {
-	effect := event.ScriptEffect{RunID: slot.Run, N: effectIndex(slot.N), Op: slot.Op, ArgsSHA: slot.ArgsSHA, Error: failure}
+func (fx effects) recordResult(slot script.Slot, result jsontext.Value) error {
+	return fx.appendEffect(slot, result, "", false)
+}
+
+func (fx effects) recordDenial(slot script.Slot, reason string) error {
+	return fx.appendEffect(slot, nil, reason, true)
+}
+
+func (fx effects) appendEffect(slot script.Slot, result jsontext.Value, failure string, denied bool) error {
+	effect := event.ScriptEffect{RunID: slot.Run, N: effectIndex(slot.N), Op: slot.Op, ArgsSHA: slot.ArgsSHA, Error: failure, Denied: denied}
 	if failure == "" {
 		value, blob, err := fx.t.StoreRaw(result)
 		if err != nil {
@@ -209,7 +217,7 @@ func (fx effects) callResult(slot script.Slot, trace effectTrace) (jsontext.Valu
 		if trace.completed != nil {
 			reason = cmp.Or(trace.completed.Output, reason)
 		}
-		if err := fx.recordEffect(slot, nil, script.DeniedMark+reason); err != nil {
+		if err := fx.recordDenial(slot, reason); err != nil {
 			return nil, err
 		}
 		return nil, fmt.Errorf("%w: %s", script.ErrDenied, reason)
@@ -230,7 +238,7 @@ func (fx effects) Spawn(ctx context.Context, slot script.Slot, prompt string, op
 	if err != nil {
 		return "", err
 	}
-	return id, fx.recordEffect(slot, quoteJSON(id), "")
+	return id, fx.recordResult(slot, quoteJSON(id))
 }
 
 func (fx effects) Wait(ctx context.Context, ids []string) ([]string, error) {

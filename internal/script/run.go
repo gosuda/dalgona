@@ -95,8 +95,6 @@ type run struct {
 	printed  int
 }
 
-const DeniedMark = "denied: "
-
 func newRun(fx Effects, id string, cfg runConfig) *run {
 	r := &run{fx: fx, id: id, cfg: cfg, cancel: func(error) {}}
 	r.thread = &starlark.Thread{Name: id, Print: r.print}
@@ -198,10 +196,10 @@ func (r *run) resolve(ctx context.Context, slot Slot, live effectFunc) (jsontext
 	if rec.Interrupted {
 		return nil, r.halt(&stopError{status: StatusIndeterminate, code: codeIndet, msg: fmt.Sprintf("effect %d (%s) was interrupted; it may have partly run", slot.N, slot.Op)})
 	}
+	if rec.Denied {
+		return nil, r.effectError(ctx, fmt.Errorf("%w: %s", ErrDenied, rec.Error))
+	}
 	if rec.Error != "" {
-		if msg, ok := strings.CutPrefix(rec.Error, DeniedMark); ok {
-			return nil, r.effectError(ctx, fmt.Errorf("%w: %s", ErrDenied, msg))
-		}
 		return nil, errors.New(rec.Error)
 	}
 	return rec.Result, nil

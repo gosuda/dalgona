@@ -129,11 +129,10 @@ func TestValidateRejectsInvalidEvents(t *testing.T) {
 		changed(scriptEffect, func(e *event.ScriptEffect) { e.RunID = "" }),
 		changed(scriptEffect, func(e *event.ScriptEffect) { e.Op = "" }),
 		changed(scriptEffect, func(e *event.ScriptEffect) { e.ArgsSHA = "bad" }),
-		changed(scriptEffect, func(e *event.ScriptEffect) { e.Result = nil }),
+		changed(scriptEffect, func(e *event.ScriptEffect) { e.Result = nil; e.ResultBlob = nil; e.Error = ""; e.Denied = false }),
 		changed(scriptCompleted, func(e *event.ScriptCompleted) { e.RunID = "" }),
+		event.ScriptEffect{RunID: "run", Op: "tool:exec", ArgsSHA: digest, Denied: true},
 		event.ScriptCompleted{RunID: "run", OK: true},
-		event.ScriptCompleted{RunID: "run", OK: true, Value: jsontext.Value(`null`), Error: "bad"},
-		event.ScriptCompleted{RunID: "run"},
 		event.ScriptCompleted{RunID: "run", Value: jsontext.Value(`null`), Error: "bad"},
 	}
 	for i, candidate := range invalid {

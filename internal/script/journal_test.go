@@ -104,7 +104,9 @@ func (j *journal) CallTool(ctx context.Context, slot script.Slot, name string, a
 	value, err := j.tool(ctx, name, args)
 	rec := script.Recorded{Op: slot.Op, ArgsSHA: slot.ArgsSHA, Result: value}
 	if err != nil {
+		rec.Result = nil
 		rec.Error = err.Error()
+		rec.Denied = errors.Is(err, script.ErrDenied)
 	}
 	j.put(slot, rec)
 	return value, err

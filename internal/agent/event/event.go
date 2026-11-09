@@ -535,6 +535,7 @@ type ScriptEffect struct {
 	Result     jsontext.Value
 	ResultBlob *BlobRef
 	Error      string
+	Denied     bool
 }
 
 func (ScriptEffect) Type() string { return TypeScriptEffect }
@@ -544,6 +545,9 @@ func (e ScriptEffect) Validate() error {
 	}
 	if err := validSHA("args_sha", e.ArgsSHA); err != nil {
 		return err
+	}
+	if e.Denied && e.Error == "" {
+		return errors.New("a denied script effect must have an error")
 	}
 	if e.Error == "" {
 		return requiredRawPayload("result", e.Result, e.ResultBlob)
