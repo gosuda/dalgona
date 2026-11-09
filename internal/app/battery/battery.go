@@ -35,7 +35,17 @@ type Daemon struct {
 	binder            *remote.Binder
 }
 
-type WorkspaceApprover func(ctx context.Context, cwd string, servers []discovery.MCPServer) bool
+// TrustDecision is the workspace trust prompt outcome. Cancel leaves the
+// session unpoisoned: nothing is recorded and the next turn prompts again.
+type TrustDecision int
+
+const (
+	TrustRefuse TrustDecision = iota
+	TrustAccept
+	TrustCancel
+)
+
+type WorkspaceApprover func(ctx context.Context, cwd string, servers []discovery.MCPServer) TrustDecision
 
 func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error) {
 	logger := cmp.Or(base.Logger, slog.Default())
@@ -121,11 +131,12 @@ func (p *projects) skills(cwd string) ([]prompt.Skill, error) {
 	return out, nil
 }
 
-func (p *projects) tools(cwd string) []tool.Tool {
-	return append(p.native.tools(), p.serversFor(cwd).tools()...)
+func (p *projects) tools(ctx context.Context, cwd string) []tool.Tool {
+	return append(p.native.tools(), p.serversFor(ctx, config.CanonicalWorkspace(cwd)).tools()...)
 }
 
-func (p *projects) serversFor(cwd string) *servers {
+func (p *projects) serversFor(ctx context.Context, cwd string) *servers {
+	cwd = config.CanonicalWorkspace(cwd)
 	for {
 		started, wait, owned := p.begin(cwd)
 		if started != nil {
@@ -135,15 +146,18 @@ func (p *projects) serversFor(cwd string) *servers {
 			select {
 			case <-wait:
 				continue
+			case <-ctx.Done():
+				return &servers{}
 			case <-p.life.Done():
 				return &servers{}
 			}
 		}
-		return p.resolveOwned(cwd)
+		return p.resolveOwned(ctx, cwd)
 	}
 }
 
 func (p *projects) begin(cwd string) (started *servers, wait <-chan struct{}, owned bool) {
+	cwd = config.CanonicalWorkspace(cwd)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if cached, ok := p.byCwd[cwd]; ok {
@@ -159,7 +173,8 @@ func (p *projects) begin(cwd string) (started *servers, wait <-chan struct{}, ow
 	return nil, nil, true
 }
 
-func (p *projects) resolveOwned(cwd string) *servers {
+func (p *projects) resolveOwned(ctx context.Context, cwd string) *servers {
+	cwd = config.CanonicalWorkspace(cwd)
 	found, err := p.discover(cwd)
 	if err != nil {
 		p.log.Warn("mcp: discovery failed", "cwd", cwd, "error", err)
@@ -167,8 +182,17 @@ func (p *projects) resolveOwned(cwd string) *servers {
 	kept := stripNative(found.MCPServers, p.nativeList)
 	home, workspace := splitWorkspace(kept)
 	allowed, prompt := p.classify(cwd, home, kept, workspace)
+	cache := true
 	if prompt {
-		allowed = p.settleTrust(cwd, home, kept, workspace)
+		allowed, cache = p.settleTrust(ctx, cwd, home, kept, workspace)
+	}
+	if !cache {
+		p.mu.Lock()
+		done := p.pending[cwd]
+		delete(p.pending, cwd)
+		p.mu.Unlock()
+		close(done)
+		return &servers{}
 	}
 	started := startServers(p.life, allowed, p.log)
 	p.mu.Lock()
@@ -187,6 +211,7 @@ func (p *projects) resolveOwned(cwd string) *servers {
 }
 
 func (p *projects) classify(cwd string, home, kept, workspace []discovery.MCPServer) ([]discovery.MCPServer, bool) {
+	cwd = config.CanonicalWorkspace(cwd)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.workspaceAllowed(cwd, workspace) {
@@ -198,33 +223,43 @@ func (p *projects) classify(cwd string, home, kept, workspace []discovery.MCPSer
 	return home, true
 }
 
-func (p *projects) settleTrust(cwd string, home, kept, workspace []discovery.MCPServer) []discovery.MCPServer {
-	if !p.requestTrust(p.life, cwd, workspace) {
+func (p *projects) settleTrust(ctx context.Context, cwd string, home, kept, workspace []discovery.MCPServer) ([]discovery.MCPServer, bool) {
+	cwd = config.CanonicalWorkspace(cwd)
+	switch p.requestTrust(ctx, cwd, workspace) {
+	case TrustAccept:
+		p.noteTrusted(cwd)
+		return kept, true
+	case TrustCancel:
+		return nil, false
+	case TrustRefuse:
 		p.noteRefused(cwd)
-		return home
+		return home, true
+	default:
+		p.noteRefused(cwd)
+		return home, true
 	}
-	p.noteTrusted(cwd)
-	return kept
 }
 
 func (p *projects) workspaceAllowed(cwd string, workspace []discovery.MCPServer) bool {
-	return len(workspace) == 0 || p.trusted[cwd]
+	return len(workspace) == 0 || p.trusted[config.CanonicalWorkspace(cwd)]
 }
 
-func (p *projects) requestTrust(ctx context.Context, cwd string, workspace []discovery.MCPServer) bool {
+func (p *projects) requestTrust(ctx context.Context, cwd string, workspace []discovery.MCPServer) TrustDecision {
 	if p.approver == nil {
-		return false
+		return TrustRefuse
 	}
-	return p.approver(ctx, cwd, workspace)
+	return p.approver(ctx, config.CanonicalWorkspace(cwd), workspace)
 }
 
 func (p *projects) noteRefused(cwd string) {
+	cwd = config.CanonicalWorkspace(cwd)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.refused[cwd] = true
 }
 
 func (p *projects) noteTrusted(cwd string) {
+	cwd = config.CanonicalWorkspace(cwd)
 	if err := config.TrustWorkspace(p.home, cwd); err != nil {
 		p.log.Warn("mcp: trust workspace not persisted", "cwd", cwd, "error", err)
 	}
@@ -243,7 +278,7 @@ func loadTrusted(home string, logger *slog.Logger) map[string]bool {
 	}
 	for _, cwd := range listed {
 		if cwd != "" {
-			trusted[cwd] = true
+			trusted[config.CanonicalWorkspace(cwd)] = true
 		}
 	}
 	return trusted
@@ -279,9 +314,25 @@ func WorkspaceTrustPrompt(cwd string, servers []discovery.MCPServer) string {
 
 func describeWorkspaceServer(server discovery.MCPServer) string {
 	if server.URL != "" {
-		return server.Name + ": " + server.URL
+		base := server.Name + ": " + server.URL
+		if len(server.Env) > 0 {
+			env := slices.Clone(server.Env)
+			slices.Sort(env)
+			base += " env " + strings.Join(env, " ")
+		}
+		return base
 	}
 	detail := strings.TrimSpace(server.Command + " " + strings.Join(server.Args, " "))
+	if len(server.Env) > 0 {
+		env := slices.Clone(server.Env)
+		slices.Sort(env)
+		envText := "env " + strings.Join(env, " ")
+		if detail == "" {
+			detail = envText
+		} else {
+			detail += " " + envText
+		}
+	}
 	if detail == "" {
 		return server.Name
 	}

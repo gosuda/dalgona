@@ -34,7 +34,7 @@ func (w *worker) recoverTurn(ctx context.Context) {
 	if w.recoverScriptTurn(ctx) {
 		return
 	}
-	if err := w.prime(); err != nil {
+	if err := w.prime(ctx); err != nil {
 		w.end(ctx, outcome{status: statusFailed, failure: err.Error()})
 		return
 	}
@@ -50,7 +50,7 @@ func (w *worker) recoverCalls(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err = w.use(v); err != nil {
+	if err = w.use(ctx, v); err != nil {
 		return err
 	}
 	for _, call := range lastCalls(v) {

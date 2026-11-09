@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"bytes"
+	"context"
 	json "encoding/json/v2"
 	"io"
 	"net/http"
@@ -89,7 +90,7 @@ func recordRequests(t *testing.T, r *rig) *requestLog {
 func editStyleTools(t *testing.T, r *rig) {
 	t.Helper()
 	styles := config.EditStyleSpec{Rows: []config.EditStyleRow{{Glob: "*gpt-y*", Style: "apply_patch"}}, Default: "replace"}
-	r.cfg.Tools = func(modelID, _ string) ([]tool.Tool, error) {
+	r.cfg.Tools = func(_ context.Context, modelID, _ string) ([]tool.Tool, error) {
 		return []tool.Tool{read.New(), exec.New(), patch.New(styles.EditStyle(modelID))}, nil
 	}
 	reopen(t, r)

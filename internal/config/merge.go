@@ -622,8 +622,20 @@ func TrustedWorkspaces(home string) ([]string, error) {
 	return slices.Clone(stored.doc.MCPTrustedWorkspaces), nil
 }
 
+func CanonicalWorkspace(cwd string) string {
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return filepath.Clean(cwd)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(resolved)
+}
+
 func TrustWorkspace(home, cwd string) error {
-	clean := filepath.Clean(cwd)
+	clean := CanonicalWorkspace(cwd)
 	trusted, err := TrustedWorkspaces(home)
 	if err != nil {
 		return err

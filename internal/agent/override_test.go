@@ -153,15 +153,19 @@ func newSlowBuild(t *testing.T) *slowBuild {
 }
 
 func (s *slowBuild) tools(h *harness) ToolSet {
-	return func(modelID, cwd string) ([]tool.Tool, error) {
+	return func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error) {
 		if modelID == "openai/gpt-slow" {
 			select {
 			case s.building <- struct{}{}:
 			default:
 			}
-			<-s.release
+			select {
+			case <-s.release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
-		return h.tools(modelID, cwd)
+		return h.tools(ctx, modelID, cwd)
 	}
 }
 
@@ -195,7 +199,7 @@ func expectOneToolset(t *testing.T, thread *Thread, modelID string) {
 	var group sync.WaitGroup
 	for i := range sets {
 		group.Go(func() {
-			set, err := thread.toolsFor(modelID)
+			set, err := thread.toolsFor(t.Context(), modelID)
 			if err != nil {
 				t.Error(err)
 			}

@@ -158,7 +158,9 @@ func newRig(t *testing.T, approval config.Approval) *rig {
 			Product: config.ProductDal, Reasoning: config.ReasoningDefault,
 		},
 		Providers: r.providers,
-		Tools:     func(string, string) ([]tool.Tool, error) { return []tool.Tool{read.New(), exec.New()}, nil },
+		Tools: func(context.Context, string, string) ([]tool.Tool, error) {
+			return []tool.Tool{read.New(), exec.New()}, nil
+		},
 		Runner: func(_ context.Context, id, _ string) (runner.Runner, error) {
 			return runner.NewLocal(filepath.Join(r.home, "sessions", id, "runs"))
 		},

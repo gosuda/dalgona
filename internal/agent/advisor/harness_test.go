@@ -293,7 +293,7 @@ func (h *harness) providers(onRetry agent.RetryFunc) (*model.Registry, error) {
 	return registry, registry.Register("openai", provider)
 }
 
-func (*harness) tools(string, string) ([]tool.Tool, error) {
+func (*harness) tools(context.Context, string, string) ([]tool.Tool, error) {
 	return []tool.Tool{read.New(), search.New()}, nil
 }
 

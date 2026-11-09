@@ -39,13 +39,13 @@ func startInBandTurn(t *testing.T, thread *Thread) {
 func inBandHarness(t *testing.T, fail error) (*harness, *Thread, *worker) {
 	t.Helper()
 	h := newHarness(t, func(h *harness) {
-		h.cfg.Tools = func(string, string) ([]tool.Tool, error) {
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
 			return []tool.Tool{durableStub{fail: fail}}, nil
 		}
 	})
 	thread := h.start()
 	startInBandTurn(t, thread)
-	ts, err := thread.toolsFor("openai/gpt-test")
+	ts, err := thread.toolsFor(t.Context(), "openai/gpt-test")
 	if err != nil {
 		t.Fatalf("agent: tools: %v", err)
 	}

@@ -42,7 +42,7 @@ func newDalgonaRig(t *testing.T) *rig {
 			Product: config.ProductDalgona, Reasoning: config.ReasoningDefault,
 		},
 		Providers: r.providers,
-		Tools:     func(string, string) ([]tool.Tool, error) { return []tool.Tool{exec.New()}, nil },
+		Tools:     func(context.Context, string, string) ([]tool.Tool, error) { return []tool.Tool{exec.New()}, nil },
 		Runner: func(_ context.Context, id, _ string) (runner.Runner, error) {
 			return runner.NewLocal(filepath.Join(r.home, "sessions", id, "runs"))
 		},

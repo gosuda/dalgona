@@ -32,7 +32,7 @@ A custom keyword name MUST match `^[a-z][a-z0-9_-]{1,31}$`. A custom keyword MUS
 
 `WriteSetting` MUST update only `settings.toml`. It MUST preserve `config.toml`. It MUST preserve the source order of existing `edit_style` rows. It MUST decode and validate the new document before replacing the file. Invalid keys and values MUST leave the prior file unchanged. It MUST write through a temporary file and rename it into place.
 
-Workspace trust MUST persist as the top-level `mcp_trusted_workspaces` list of workspace paths in `settings.toml`. Only `WriteSetting` and the helpers built on it (`TrustedWorkspaces`, `TrustWorkspace`) MAY write it. An empty list means no workspace is trusted. Every entry MUST be a nonempty workspace path, stored cleaned. `dal` MUST reject the key as dalgona-only.
+Workspace trust MUST persist as the top-level `mcp_trusted_workspaces` list of workspace paths in `settings.toml`. Only `WriteSetting` and the helpers built on it (`TrustedWorkspaces`, `TrustWorkspace`, `CanonicalWorkspace`) MAY write it. An empty list means no workspace is trusted. Every entry MUST be a nonempty workspace path, stored in canonical form (`filepath.Abs` plus `EvalSymlinks`, falling back to `Clean`). `dal` MUST reject the key as dalgona-only.
 
 ```toml
 mcp_trusted_workspaces = ["/work/repo"]

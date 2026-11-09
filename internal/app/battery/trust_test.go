@@ -83,14 +83,14 @@ func loadDaemon(t *testing.T, daemon *battery.Daemon, cfg config.Config) app.Bat
 
 func requireWorkspaceEcho(t *testing.T, extra app.Batteries, cwd string) {
 	t.Helper()
-	if !hasToolName(extra.Tools(cwd), "wsfix__echo") {
+	if !hasToolName(extra.Tools(t.Context(), cwd), "wsfix__echo") {
 		t.Fatal("workspace MCP tool is absent")
 	}
 }
 
 func requireNoWorkspaceEcho(t *testing.T, extra app.Batteries, cwd string) {
 	t.Helper()
-	if hasToolName(extra.Tools(cwd), "wsfix__echo") {
+	if hasToolName(extra.Tools(t.Context(), cwd), "wsfix__echo") {
 		t.Fatal("workspace MCP tool is present")
 	}
 }
@@ -111,7 +111,7 @@ func requireNoStart(t *testing.T, startLog string) {
 }
 
 type approvalSight struct {
-	decision   bool
+	decision   battery.TrustDecision
 	wantServer string
 	calls      int
 	cwd        string
@@ -119,7 +119,7 @@ type approvalSight struct {
 }
 
 func sightedDaemon(sight *approvalSight) *battery.Daemon {
-	return &battery.Daemon{WorkspaceApprover: func(_ context.Context, cwd string, servers []discovery.MCPServer) bool {
+	return &battery.Daemon{WorkspaceApprover: func(_ context.Context, cwd string, servers []discovery.MCPServer) battery.TrustDecision {
 		sight.calls++
 		sight.cwd = cwd
 		sight.single = len(servers) == 1 && (sight.wantServer == "" || servers[0].Command == sight.wantServer)
@@ -138,7 +138,7 @@ func TestWorkspaceServerDoesNotStartBeforeTrust(t *testing.T) {
 func TestWorkspaceServerStartsAfterTrust(t *testing.T) {
 	server := buildMCPServer(t)
 	fixture := newTrustFixture(t, server)
-	sight := &approvalSight{decision: true, wantServer: server}
+	sight := &approvalSight{decision: battery.TrustAccept, wantServer: server}
 	extra := loadDaemon(t, sightedDaemon(sight), fixture.cfg)
 	requireWorkspaceEcho(t, extra, fixture.cwd)
 	if sight.calls != 1 || sight.cwd != fixture.cwd || !sight.single {
@@ -157,7 +157,7 @@ func TestWorkspaceServerStartsAfterTrust(t *testing.T) {
 
 func TestWorkspaceTrustPersistsAcrossRestart(t *testing.T) {
 	fixture := newTrustFixture(t, buildMCPServer(t))
-	first := loadDaemon(t, sightedDaemon(&approvalSight{decision: true}), fixture.cfg)
+	first := loadDaemon(t, sightedDaemon(&approvalSight{decision: battery.TrustAccept}), fixture.cfg)
 	requireWorkspaceEcho(t, first, fixture.cwd)
 	reloaded, err := config.Load(config.ProductDalgona, fixture.cwd, config.Flags{})
 	if err != nil {
@@ -179,6 +179,22 @@ func TestWorkspaceRefusalHoldsForSession(t *testing.T) {
 	requireNoStart(t, fixture.startLog)
 }
 
+func TestWorkspaceCancelPromptsAgain(t *testing.T) {
+	fixture := newTrustFixture(t, buildMCPServer(t))
+	sight := &approvalSight{decision: battery.TrustCancel}
+	extra := loadDaemon(t, sightedDaemon(sight), fixture.cfg)
+	requireNoWorkspaceEcho(t, extra, fixture.cwd)
+	requireNoWorkspaceEcho(t, extra, fixture.cwd)
+	if sight.calls != 2 {
+		t.Fatalf("approver calls = %d, want a prompt per turn after cancel", sight.calls)
+	}
+	requireNoStart(t, fixture.startLog)
+	trusted, err := config.TrustedWorkspaces(fixture.dalHome)
+	if err != nil || len(trusted) != 0 {
+		t.Fatalf("trusted workspaces = %q, %v, want none after cancel", trusted, err)
+	}
+}
+
 func TestHomeDiscoveredServersStartWithoutTrust(t *testing.T) {
 	server := buildMCPServer(t)
 	_, userHome := trustEnv(t, "[discovery]\nsources = [\"claude\"]\n")
@@ -196,7 +212,7 @@ func TestHomeDiscoveredServersStartWithoutTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	extra := loadDaemon(t, &battery.Daemon{}, cfg)
-	if !hasToolName(extra.Tools(cwd), "homefix__echo") {
+	if !hasToolName(extra.Tools(t.Context(), cwd), "homefix__echo") {
 		t.Fatal("home MCP tool is absent without any trust prompt")
 	}
 }

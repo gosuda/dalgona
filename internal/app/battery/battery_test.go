@@ -74,7 +74,7 @@ func TestLoadServesConfiguredMCPToolsAndSkills(t *testing.T) {
 	})
 	project := t.TempDir()
 	projectSkill := writeSkill(t, filepath.Join(project, ".dalgona", "skills"), "deploy", "Ship a build.")
-	requireEcho(t, findTool(t, extra.Tools(project), "fix__echo"))
+	requireEcho(t, findTool(t, extra.Tools(t.Context(), project), "fix__echo"))
 	listed, err := extra.Skills(project)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +119,7 @@ func TestNativeMCPServersStartOncePerHost(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = extra.Close() })
 	for _, cwd := range []string{t.TempDir(), t.TempDir()} {
-		findTool(t, extra.Tools(cwd), "fix__echo")
+		findTool(t, extra.Tools(t.Context(), cwd), "fix__echo")
 	}
 	data, err := os.ReadFile(startLog)
 	if err != nil {

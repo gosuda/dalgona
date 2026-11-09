@@ -17,6 +17,7 @@ import (
 	"github.com/gosuda/dalgona/internal/app/battery"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/daemon"
+	"github.com/gosuda/dalgona/internal/discovery"
 	"github.com/gosuda/dalgona/internal/rpc"
 	"github.com/gosuda/dalgona/internal/runner"
 )
@@ -52,6 +53,7 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 	}
 	logger := slog.New(slog.NewTextHandler(std.errOut, nil))
 	batteries := &battery.Daemon{}
+	batteries.WorkspaceApprover = workspaceTrustDecision
 	advisors := advisor.NewRegistry()
 	newHost := func(ctx context.Context) (*agent.Host, func() error, error) {
 		return app.NewHost(ctx, app.Options{
@@ -69,6 +71,38 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 		return fail(std, 1, err)
 	}
 	return 0
+}
+
+func workspaceTrustDecision(ctx context.Context, cwd string, servers []discovery.MCPServer) battery.TrustDecision {
+	thread, ok := agent.ThreadFromContext(ctx)
+	if !ok || thread == nil {
+		return battery.TrustRefuse
+	}
+	req := agent.WorkspaceApprovalRequest{Cwd: cwd, Servers: workspaceApprovalServers(servers)}
+	reply, err := thread.RequestWorkspaceApproval(ctx, req)
+	if err != nil && reply != agent.ReplyCancel {
+		return battery.TrustRefuse
+	}
+	switch reply {
+	case agent.ReplyAccept, agent.ReplyAcceptSession:
+		return battery.TrustAccept
+	case agent.ReplyCancel:
+		return battery.TrustCancel
+	case agent.ReplyDecline:
+		return battery.TrustRefuse
+	default:
+		return battery.TrustRefuse
+	}
+}
+
+func workspaceApprovalServers(servers []discovery.MCPServer) []agent.WorkspaceServer {
+	out := make([]agent.WorkspaceServer, 0, len(servers))
+	for _, server := range servers {
+		out = append(out, agent.WorkspaceServer{
+			Name: server.Name, Command: server.Command, Args: server.Args, Env: server.Env, URL: server.URL,
+		})
+	}
+	return out
 }
 
 func runService(_ context.Context, args []string, std stdio) int {

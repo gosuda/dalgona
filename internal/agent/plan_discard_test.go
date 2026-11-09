@@ -39,7 +39,7 @@ func TestDeclinedPlanIsDiscarded(t *testing.T) {
 	t.Parallel()
 	var discards, applied atomic.Int64
 	h := newHarness(t, withApproval(config.ApprovalAsk), func(h *harness) {
-		h.cfg.Tools = func(string, string) ([]tool.Tool, error) {
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
 			return []tool.Tool{&discardFakeTool{discards: &discards, applied: &applied}}, nil
 		}
 	})
@@ -62,7 +62,7 @@ func TestAcceptedPlanIsNotDiscarded(t *testing.T) {
 	t.Parallel()
 	var discards, applied atomic.Int64
 	h := newHarness(t, withApproval(config.ApprovalAuto), func(h *harness) {
-		h.cfg.Tools = func(string, string) ([]tool.Tool, error) {
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
 			return []tool.Tool{&discardFakeTool{discards: &discards, applied: &applied}}, nil
 		}
 	})

@@ -330,7 +330,9 @@ func TestRecoverRemoteCallIsInterruptedNotRerun(t *testing.T) {
 	t.Parallel()
 	runs := 0
 	h := newHarness(t, func(h *harness) {
-		h.cfg.Tools = func(string, string) ([]tool.Tool, error) { return []tool.Tool{remoteTool{runs: &runs}}, nil }
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
+			return []tool.Tool{remoteTool{runs: &runs}}, nil
+		}
 	})
 	h.seed(prefix(openTurn("deploy"), []event.Event{assistantCall("c1", "srv__deploy", `{}`)}, approved("c1", "remote"),
 		[]event.Event{startedCall("c1", "srv__deploy", "remote", `{}`)})...)

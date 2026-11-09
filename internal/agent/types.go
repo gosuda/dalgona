@@ -19,7 +19,7 @@ type RetryFunc func(attempt int, verdict model.Verdict, status int, delay time.D
 
 type ProviderFactory func(onRetry RetryFunc) (*model.Registry, error)
 
-type ToolSet func(modelID, cwd string) ([]tool.Tool, error)
+type ToolSet func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error)
 
 type SkillSet func(cwd string) ([]prompt.Skill, error)
 

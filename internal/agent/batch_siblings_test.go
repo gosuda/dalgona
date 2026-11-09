@@ -27,7 +27,7 @@ func (flakyAgent) Run(_ context.Context, call tool.Call, _ tool.Env) (tool.Resul
 func TestAgentBatchKeepsSuccessfulSiblings(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
-		h.cfg.Tools = func(string, string) ([]tool.Tool, error) { return []tool.Tool{flakyAgent{}}, nil }
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) { return []tool.Tool{flakyAgent{}}, nil }
 	})
 	events := runCalls(t, h,
 		call{id: "good", name: "fanout", args: `{}`},

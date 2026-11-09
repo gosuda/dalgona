@@ -224,11 +224,11 @@ func TestToolsAndSkillsFollowTheThreadCwd(t *testing.T) {
 	var mu sync.Mutex
 	var toolCwds, skillCwds []string
 	h := newHarness(t, func(h *harness) {
-		h.cfg.Tools = func(modelID, cwd string) ([]tool.Tool, error) {
+		h.cfg.Tools = func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			toolCwds = append(toolCwds, cwd)
-			return h.tools(modelID, cwd)
+			return h.tools(ctx, modelID, cwd)
 		}
 		h.cfg.Skills = func(cwd string) ([]prompt.Skill, error) {
 			mu.Lock()

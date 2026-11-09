@@ -134,7 +134,7 @@ func (w *worker) compact(ctx context.Context, method string) error {
 	if err != nil {
 		return err
 	}
-	if err = w.use(v); err != nil {
+	if err = w.use(ctx, v); err != nil {
 		return err
 	}
 	cv := w.t.compactionView(v)

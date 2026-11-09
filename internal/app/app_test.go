@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -305,11 +306,11 @@ func (namedTool) Spec() tool.Spec { return tool.Spec{Name: "fix__echo"} }
 
 func TestToolSetAppendsBatteryToolsForEveryModel(t *testing.T) {
 	var asked string
-	set := toolSet(config.Config{EditStyle: config.EditStyleSpec{Default: "anchor"}}, func(cwd string) []tool.Tool {
+	set := toolSet(config.Config{EditStyle: config.EditStyleSpec{Default: "anchor"}}, func(ctx context.Context, cwd string) []tool.Tool {
 		asked = cwd
 		return []tool.Tool{namedTool{}}
 	})
-	tools, err := set("gpt-test", "/project")
+	tools, err := set(t.Context(), "gpt-test", "/project")
 	if asked != "/project" {
 		t.Fatalf("battery tools built for cwd %q, want /project", asked)
 	}

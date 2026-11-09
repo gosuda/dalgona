@@ -25,10 +25,7 @@ func (s *server) ask(ctx context.Context, w *watch, update agent.Update) {
 		return
 	}
 	turnID := w.tracker.currentTurn()
-	cwd := w.tracker.created.Cwd
-	if it, ok := w.tracker.items[prompt.CallID]; ok && it.Cwd != "" {
-		cwd = it.Cwd
-	}
+	cwd := approvalCwd(prompt, w)
 	threadID := update.Thread
 	if threadID != w.thread.ID() {
 		turnID = ""
@@ -57,6 +54,16 @@ func (s *server) ask(ctx context.Context, w *watch, update agent.Update) {
 		cancel()
 		s.declineIfAlone(a)
 	}
+}
+
+func approvalCwd(prompt agent.ApprovalPrompt, w *watch) string {
+	if len(prompt.Paths) > 0 && prompt.Tool == "mcp_workspace" && prompt.Paths[0] != "" {
+		return prompt.Paths[0]
+	}
+	if it, ok := w.tracker.items[prompt.CallID]; ok && it.Cwd != "" {
+		return it.Cwd
+	}
+	return w.tracker.created.Cwd
 }
 
 func (s *server) spawn(register, task func()) bool {

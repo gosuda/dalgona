@@ -41,9 +41,9 @@ func pathSettings(created event.SessionCreated, records []event.Seqd) Settings {
 	return out
 }
 
-func (w *worker) use(v view) error {
+func (w *worker) use(ctx context.Context, v view) error {
 	w.settings = pathSettings(w.t.created, v.records)
-	tools, err := w.t.toolsFor(w.settings.Model)
+	tools, err := w.t.toolsFor(ctx, w.settings.Model)
 	if err != nil {
 		return err
 	}
@@ -91,19 +91,19 @@ func (a *actor) idle() {
 }
 
 func (w *worker) runTurn(ctx context.Context) {
-	if err := w.prime(); err != nil {
+	if err := w.prime(ctx); err != nil {
 		w.end(ctx, outcome{status: statusFailed, failure: err.Error()})
 		return
 	}
 	w.drive(ctx)
 }
 
-func (w *worker) prime() error {
+func (w *worker) prime(ctx context.Context) error {
 	v, err := w.t.view()
 	if err != nil {
 		return err
 	}
-	if err := w.use(v); err != nil {
+	if err := w.use(ctx, v); err != nil {
 		return err
 	}
 	return w.openRegistry()
@@ -171,7 +171,7 @@ func (w *worker) context(ctx context.Context) (view, []model.Message, error) {
 	if err != nil {
 		return v, nil, err
 	}
-	if err = w.use(v); err != nil {
+	if err = w.use(ctx, v); err != nil {
 		return v, nil, err
 	}
 	messages, err := w.t.messages(v)

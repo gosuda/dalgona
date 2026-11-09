@@ -47,7 +47,7 @@ type Base struct {
 }
 
 type Batteries struct {
-	Tools     func(cwd string) []tool.Tool
+	Tools     func(ctx context.Context, cwd string) []tool.Tool
 	Skills    agent.SkillSet
 	Extension agent.ExtensionFactory
 	Runner    agent.RunnerFactory
@@ -129,7 +129,7 @@ func loadBatteries(ctx context.Context, opts Options, base Base) (Batteries, err
 
 func withDefaults(extra Batteries, local agent.RunnerFactory) Batteries {
 	if extra.Tools == nil {
-		extra.Tools = func(string) []tool.Tool { return nil }
+		extra.Tools = func(context.Context, string) []tool.Tool { return nil }
 	}
 	if extra.Runner == nil {
 		extra.Runner = local
@@ -143,13 +143,13 @@ func withDefaults(extra Batteries, local agent.RunnerFactory) Batteries {
 	return extra
 }
 
-func toolSet(cfg config.Config, extra func(cwd string) []tool.Tool) agent.ToolSet {
-	return func(modelID, cwd string) ([]tool.Tool, error) {
+func toolSet(cfg config.Config, extra func(ctx context.Context, cwd string) []tool.Tool) agent.ToolSet {
+	return func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error) {
 		tools := []tool.Tool{
 			read.New(), search.New(), patch.New(cfg.EditStyle.EditStyle(modelID)),
 			exec.New(), todo.New(), webfetch.New(),
 		}
-		return append(tools, extra(cwd)...), nil
+		return append(tools, extra(ctx, cwd)...), nil
 	}
 }
 

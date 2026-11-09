@@ -169,7 +169,7 @@ func (t *Thread) prepare(ctx context.Context, loaded loadedSession, overrides Ov
 	if t.fixedTools == nil && t.host.cfg.Extension != nil {
 		t.ext = t.host.cfg.Extension(t)
 	}
-	if _, err := t.toolsFor(pathSettings(loaded.created, loaded.records).Model); err != nil {
+	if _, err := t.toolsFor(ctx, pathSettings(loaded.created, loaded.records).Model); err != nil {
 		return err
 	}
 	system, err := t.systemPrompt(overrides.System)
@@ -215,11 +215,11 @@ func (t *Thread) currentTools() *toolset {
 	return t.toolset
 }
 
-func (t *Thread) toolsFor(modelID string) (*toolset, error) {
+func (t *Thread) toolsFor(ctx context.Context, modelID string) (*toolset, error) {
 	if current := t.currentTools(); t.reuses(current, modelID) {
 		return current, nil
 	}
-	tools, err := t.buildTools(modelID)
+	tools, err := t.buildTools(ctx, modelID)
 	if err != nil {
 		return nil, err
 	}
@@ -237,11 +237,11 @@ func (t *Thread) reuses(set *toolset, modelID string) bool {
 	return set != nil && (t.fixedTools != nil || set.model == modelID)
 }
 
-func (t *Thread) buildTools(modelID string) ([]tool.Tool, error) {
+func (t *Thread) buildTools(ctx context.Context, modelID string) ([]tool.Tool, error) {
 	if t.fixedTools != nil {
 		return t.fixedTools, nil
 	}
-	built, err := t.host.cfg.Tools(modelID, t.created.Cwd)
+	built, err := t.host.cfg.Tools(ContextWithThread(ctx, t), modelID, t.created.Cwd)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build tools: %w", err)
 	}

@@ -52,7 +52,7 @@ func (a *actor) startScript(text string, run func(context.Context) error, done c
 func (w *worker) runScript(ctx context.Context, run func(context.Context) error) error {
 	v, err := w.t.view()
 	if err == nil {
-		err = w.use(v)
+		err = w.use(ctx, v)
 	}
 	if err == nil {
 		err = w.openRegistry()

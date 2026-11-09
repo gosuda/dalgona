@@ -36,7 +36,7 @@ func newAdvisorRig(t *testing.T, registry *advisor.Registry) *rig {
 	host, err := agent.NewHost(agent.HostConfig{
 		Journal: store, Auth: credentials, ProviderIDs: []string{"openai"}, Config: advisorConfig(r),
 		Providers: r.providers,
-		Tools:     func(string, string) ([]tool.Tool, error) { return []tool.Tool{read.New()}, nil },
+		Tools:     func(context.Context, string, string) ([]tool.Tool, error) { return []tool.Tool{read.New()}, nil },
 		Runner: func(_ context.Context, id, _ string) (runner.Runner, error) {
 			return runner.NewLocal(filepath.Join(r.home, "sessions", id, "runs"))
 		},

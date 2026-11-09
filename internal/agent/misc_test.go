@@ -309,7 +309,9 @@ func TestConsecutiveAgentCallsRunTogether(t *testing.T) {
 	var arrived sync.WaitGroup
 	arrived.Add(2)
 	h := newHarness(t, func(h *harness) {
-		h.cfg.Tools = func(string, string) ([]tool.Tool, error) { return []tool.Tool{rendezvousAgent{arrived: &arrived}}, nil }
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
+			return []tool.Tool{rendezvousAgent{arrived: &arrived}}, nil
+		}
 	})
 	h.model.push(calls(call{id: "k1", name: "fanout", args: `{}`}, call{id: "k2", name: "fanout", args: `{}`}), text("done"))
 	h.idleThread("spawn two")

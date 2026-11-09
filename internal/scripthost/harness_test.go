@@ -168,7 +168,9 @@ func newHarness(t *testing.T, configure ...func(*harness)) *harness {
 			Sandbox: config.SandboxOff, Product: config.ProductDalgona, Reasoning: config.ReasoningDefault,
 		},
 		Providers: h.providers,
-		Tools:     func(string, string) ([]tool.Tool, error) { return []tool.Tool{read.New(), exec.New()}, nil },
+		Tools: func(context.Context, string, string) ([]tool.Tool, error) {
+			return []tool.Tool{read.New(), exec.New()}, nil
+		},
 		Runner: func(_ context.Context, id, _ string) (runner.Runner, error) {
 			return runner.NewLocal(filepath.Join(h.home, "sessions", id, "runs"))
 		},
