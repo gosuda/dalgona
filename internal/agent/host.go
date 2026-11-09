@@ -278,11 +278,15 @@ func (h *Host) sessionCreated(spec ThreadSpec, id string) (event.SessionCreated,
 	if instructions == "" {
 		return created, nil
 	}
-	sha, err := h.journal.PutBlob([]byte(instructions))
+	masked, err := h.mask(instructions)
+	if err != nil {
+		return created, fmt.Errorf("agent: mask instructions: %w", err)
+	}
+	sha, err := h.journal.PutBlob([]byte(masked))
 	if err != nil {
 		return created, fmt.Errorf("agent: store instructions: %w", err)
 	}
-	created.InstructionsBlob = &event.BlobRef{Blob: sha, Bytes: int64(len(instructions))}
+	created.InstructionsBlob = &event.BlobRef{Blob: sha, Bytes: int64(len(masked))}
 	return created, nil
 }
 
