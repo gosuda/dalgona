@@ -315,9 +315,17 @@ func TestInBandExecRunsOnceAndEmitsResolvedCall(t *testing.T) {
 		t.Fatalf("result = %+v, in-band calls = %d", out, counter.calls.Load())
 	}
 	checkResolvedExec(t, out.calls)
-	time.Sleep(50 * time.Millisecond)
-	if counter.calls.Load() != 1 {
-		t.Fatalf("in-band calls after stream end = %d", counter.calls.Load())
+	requireStableInBandCalls(t, counter, 1)
+}
+
+func requireStableInBandCalls(t *testing.T, counter *inBandCounter, want int32) {
+	t.Helper()
+	quiescent := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(quiescent) {
+		if got := counter.calls.Load(); got != want {
+			t.Fatalf("in-band calls = %d, want %d: duplicate execution after stream end", got, want)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
