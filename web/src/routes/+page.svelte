@@ -232,9 +232,12 @@ async function loadThreads(generation: number): Promise<void> {
 		);
 		if (generation !== connectionGeneration) return;
 		threads = result.threads;
+		if (activeThreadId !== null) {
+			await selectThread(activeThreadId);
+			return;
+		}
 		const first = result.threads[0];
-		if (activeThreadId === null && first !== undefined)
-			await selectThread(first.id);
+		if (first !== undefined) await selectThread(first.id);
 	} finally {
 		if (generation === connectionGeneration) loadingThreads = false;
 	}
@@ -314,10 +317,10 @@ async function selectThread(threadId: string): Promise<void> {
 		);
 		if (selection !== selectionGeneration) return;
 		upsertThread(result.thread);
+		if (threadId !== activeThreadId) queuedFollowups = [];
 		activeThreadId = threadId;
 		transcript = transcriptForThread(result.thread);
 		advisor = { kind: "unknown" };
-		queuedFollowups = [];
 		errorMessage = "";
 		status = result.status;
 		selectedModel = result.status.model || selectedModel;

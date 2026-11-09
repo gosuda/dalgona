@@ -118,5 +118,6 @@ No advisor failure opens the error banner.
 - With no open thread the transcript says `Pick a thread or start a new one`. When connected, it adds that earlier threads are in the list. When not connected, it says to connect to dalgona.
 - With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a name shows its preview once.
 - A failed connection reads `Unable to connect to dalgona: <detail>. Check that dalgona web is still running, then select Reconnect.`
+- Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
 - Other request failures read `<action>: <detail>. Reconnect and try again.`
 - In the approval dialog, Decline uses the quiet style. The danger hue marks only Interrupt.
