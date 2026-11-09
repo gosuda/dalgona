@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -721,13 +722,32 @@ func writeSettings(path string, raw []byte) error {
 	if err := file.Chmod(0o600); err != nil {
 		return errors.Join(fmt.Errorf("chmod settings.toml: %w", err), file.Close())
 	}
+	if err := file.Sync(); err != nil {
+		return errors.Join(fmt.Errorf("sync settings.toml: %w", err), file.Close())
+	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close settings.toml: %w", err)
 	}
 	if err := os.Rename(temporary, path); err != nil {
 		return fmt.Errorf("replace settings.toml: %w", err)
 	}
-	return nil
+	return syncDir(filepath.Dir(path))
+}
+
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", dir, err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return fmt.Errorf("fsync %s: %w", dir, syncErr)
+	}
+	return closeErr
 }
 
 func setNested(values map[string]any, parts []string, value any) {

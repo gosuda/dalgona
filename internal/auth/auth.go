@@ -482,13 +482,32 @@ func writeSecure(path string, encode func(*jsontext.Encoder) error) error {
 	if err := encode(jsontext.NewEncoder(file)); err != nil {
 		return errors.Join(err, file.Close())
 	}
+	if err := file.Sync(); err != nil {
+		return errors.Join(fmt.Errorf("sync credential file: %w", err), file.Close())
+	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close credential file: %w", err)
 	}
 	if err := os.Rename(temporary, path); err != nil {
 		return fmt.Errorf("replace %s: %w", filepath.Base(path), err)
 	}
-	return nil
+	return syncDir(filepath.Dir(path))
+}
+
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", dir, err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return fmt.Errorf("fsync %s: %w", dir, syncErr)
+	}
+	return closeErr
 }
 
 func (s *Store) Dir() string { return s.dir }
