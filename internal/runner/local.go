@@ -3,6 +3,7 @@ package runner
 import (
 	"cmp"
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -104,10 +105,18 @@ func runnerEnvironment(base []string, dir string, mode SandboxMode, roots []stri
 	env = append(env,
 		"DALGONA_RUN_CWD="+dir,
 		"DALGONA_SANDBOX_MODE="+string(mode),
-		"DALGONA_SANDBOX_ROOTS="+strings.Join(roots, string(os.PathListSeparator)),
+		"DALGONA_SANDBOX_ROOTS="+encodeRoots(roots),
 		"DALGONA_SHIM_EXEC=0",
 	)
 	return env
+}
+
+func encodeRoots(roots []string) string {
+	data, err := json.Marshal(roots)
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
 }
 
 func withoutRunnerEnvironment(env []string) []string {

@@ -1,9 +1,11 @@
 package runner
 
 import (
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -287,10 +289,12 @@ func removeEnvironment(env []string, key string) []string {
 }
 
 func splitRoots(value string) []string {
-	if value == "" {
+	var roots []string
+	if err := json.Unmarshal([]byte(value), &roots); err != nil {
+		slog.Warn("runner: invalid sandbox roots encoding", "error", err)
 		return nil
 	}
-	return strings.Split(value, string(os.PathListSeparator))
+	return roots
 }
 
 var syncFS = syncConfiguredFilesystem
