@@ -418,22 +418,25 @@ func (a *actor) appendCtx(ctx context.Context, events ...event.Event) (uint64, e
 		return a.head(), err
 	}
 	last, err := a.t.host.journal.Append(ctx, a.t.id, raws...)
-	if last != a.head()+uint64(len(events)) {
-		a.damage = fmt.Errorf("agent: append to %s: %w", a.t.id, cmp.Or(err, fmt.Errorf("journal head %d after appending %d events at %d", last, len(events), a.head())))
-		return a.head(), a.damage
+	if last == a.head()+uint64(len(events)) {
+		a.state = state
+		for i, item := range events {
+			seq := a.head() + 1
+			a.records = append(a.records, event.Seqd{Seq: seq, Event: item})
+			a.sizes = append(a.sizes, len(raws[i]))
+			a.publish(Update{Kind: UpdateEvent, Thread: a.t.id, Seq: seq, Event: item})
+		}
+		a.t.host.noteAppend(a.t.id, a.head(), events)
+		if err != nil {
+			a.t.host.log.Warn("agent: journal mirror or volume sync failed after the fsynced append", "thread", a.t.id, "seq", last, "error", err)
+		}
+		return a.head(), nil
 	}
-	a.state = state
-	for i, item := range events {
-		seq := a.head() + 1
-		a.records = append(a.records, event.Seqd{Seq: seq, Event: item})
-		a.sizes = append(a.sizes, len(raws[i]))
-		a.publish(Update{Kind: UpdateEvent, Thread: a.t.id, Seq: seq, Event: item})
-	}
-	a.t.host.noteAppend(a.t.id, a.head(), events)
 	if err != nil {
-		a.t.host.log.Warn("agent: journal mirror or volume sync failed after the fsynced append", "thread", a.t.id, "seq", last, "error", err)
+		return a.head(), err
 	}
-	return a.head(), nil
+	a.damage = fmt.Errorf("agent: append to %s: journal head %d after appending %d events at %d", a.t.id, last, len(events), a.head())
+	return a.head(), a.damage
 }
 
 func (a *actor) prepareAppend(events []event.Event) (event.State, [][]byte, error) {
