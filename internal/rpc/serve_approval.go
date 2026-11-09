@@ -44,12 +44,14 @@ func (s *server) ask(ctx context.Context, w *watch, update agent.Update) {
 		}
 	}
 	askCtx, cancel := context.WithCancel(ctx)
-	started := s.spawn(func() {
-		s.pending[prompt.RequestID] = cancel
-	}, func() {
+	started, dup := s.spawnApproval(prompt.RequestID, cancel, func() {
 		defer s.settle(prompt.RequestID)
 		s.request(ctx, askCtx, a)
 	})
+	if dup {
+		cancel()
+		return
+	}
 	if !started {
 		cancel()
 		s.declineIfAlone(a)
@@ -75,6 +77,20 @@ func (s *server) spawn(register, task func()) bool {
 	register()
 	s.tasks.Go(task)
 	return true
+}
+
+func (s *server) spawnApproval(requestID string, cancel context.CancelFunc, task func()) (started, dup bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return false, false
+	}
+	if _, exists := s.pending[requestID]; exists {
+		return true, true
+	}
+	s.pending[requestID] = cancel
+	s.tasks.Go(task)
+	return true, false
 }
 
 func cmdText(prompt agent.ApprovalPrompt) string {
