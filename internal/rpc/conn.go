@@ -36,7 +36,7 @@ type Conn struct {
 	handler        Handler
 	clientHandler  ClientHandler
 	clientMessages chan envelope
-	pending        map[string]chan response
+	pending        map[string]*pendingCall
 	mu             sync.Mutex
 	ids            uint64
 	queue          *outQueue
@@ -45,6 +45,12 @@ type Conn struct {
 	closeErr       error
 	handlers       sync.WaitGroup
 	remote         string
+}
+
+type pendingCall struct {
+	ch        chan response
+	abandoned <-chan struct{}
+	done      chan struct{}
 }
 
 type (
@@ -77,7 +83,7 @@ func newConnection(ctx context.Context, rwc io.ReadWriteCloser, handler Handler)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return &Conn{ReadWriteCloser: rwc, ctx: ctx, handler: handler, pending: make(map[string]chan response), queue: newOutQueue(), closed: make(chan struct{}), remote: peerName(rwc)}
+	return &Conn{ReadWriteCloser: rwc, ctx: ctx, handler: handler, pending: make(map[string]*pendingCall), queue: newOutQueue(), closed: make(chan struct{}), remote: peerName(rwc)}
 }
 
 func (c *Conn) start() {
@@ -110,10 +116,10 @@ func (c *Conn) CallID(ctx context.Context, id string, method string, params any,
 }
 
 func (c *Conn) call(ctx context.Context, idv jsontext.Value, method string, params any, result any) error {
-	ch := make(chan response, 1)
+	pc := &pendingCall{ch: make(chan response, 1), abandoned: ctx.Done(), done: make(chan struct{})}
 	key := string(idv)
 	c.mu.Lock()
-	c.pending[key] = ch
+	c.pending[key] = pc
 	c.mu.Unlock()
 	pv, err := marshalParams(params)
 	if err != nil {
@@ -131,7 +137,8 @@ func (c *Conn) call(ctx context.Context, idv jsontext.Value, method string, para
 	case <-c.closed:
 		c.removePending(key)
 		return io.ErrClosedPipe
-	case r := <-ch:
+	case r := <-pc.ch:
+		defer close(pc.done)
 		if r.err != nil {
 			return fmt.Errorf("rpc error %d: %w", r.err.Code, &RPCError{Code: r.err.Code, Message: r.err.Message, Data: r.err.Data})
 		}
@@ -160,7 +167,7 @@ func (c *Conn) Close() error {
 			c.closeErr = fmt.Errorf("close rpc connection: %w", err)
 		}
 		c.mu.Lock()
-		c.pending = make(map[string]chan response)
+		c.pending = make(map[string]*pendingCall)
 		c.mu.Unlock()
 	})
 	return c.closeErr
@@ -212,11 +219,17 @@ func (c *Conn) dispatchResponse(e envelope) {
 		return
 	}
 	c.mu.Lock()
-	ch := c.pending[string(e.ID)]
+	pc := c.pending[string(e.ID)]
 	delete(c.pending, string(e.ID))
 	c.mu.Unlock()
-	if ch != nil {
-		ch <- response{result: e.Result, err: e.Error}
+	if pc == nil {
+		return
+	}
+	pc.ch <- response{result: e.Result, err: e.Error}
+	select {
+	case <-pc.done:
+	case <-pc.abandoned:
+	case <-c.closed:
 	}
 }
 
