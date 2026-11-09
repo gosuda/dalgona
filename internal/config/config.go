@@ -227,7 +227,10 @@ func defaultConfig(product Product, cwd string) Config {
 func Load(product Product, cwd string, flags Flags) (Config, error) {
 	cfg := defaultConfig(product, cwd)
 	if cfg.Cwd == "" {
-		cfg.Cwd = currentDirectory()
+		cfg.Cwd = "."
+		if directory, err := os.Getwd(); err == nil {
+			cfg.Cwd = directory
+		}
 	}
 	for _, name := range []string{"config.toml", "settings.toml"} {
 		layer := readLayer(filepath.Join(cfg.Home, name))
@@ -250,14 +253,6 @@ func Load(product Product, cwd string, flags Flags) (Config, error) {
 	}
 	cfg.resolveAdvisors()
 	return cfg, nil
-}
-
-func currentDirectory() string {
-	directory, err := os.Getwd()
-	if err != nil {
-		return "."
-	}
-	return directory
 }
 
 type layer struct {
