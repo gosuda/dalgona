@@ -26,8 +26,15 @@ func findTextMatches(view, old, context string, atEOF bool) []textMatch {
 	if len(matches) == 0 {
 		matches = canonicalMatches(view, normalized, 0)
 	}
-	out := matches[:0]
+	return selectNonOverlapping(matches, view, context, atEOF)
+}
+
+func selectNonOverlapping(matches []textMatch, view, context string, atEOF bool) []textMatch {
+	out := make([]textMatch, 0, len(matches))
 	for _, match := range matches {
+		if len(out) > 0 && match.start < out[len(out)-1].end {
+			continue
+		}
 		if (!atEOF || match.end == len(view)) && strings.Contains(view[:match.start], context) {
 			out = append(out, match)
 		}
