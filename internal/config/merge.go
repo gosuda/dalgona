@@ -443,8 +443,13 @@ func (c *Config) validateRunners() []error {
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(c.Runners)) {
 		runner := c.Runners[name]
-		if runner.Service == "sandbox0" && runner.Image != "" {
+		if runner.Service != "sandbox0" {
+			continue
+		}
+		if runner.Image != "" {
 			errs = append(errs, fmt.Errorf("config.toml: runners.%s: sandbox0 takes template, not image", name))
+		} else if runner.Template == "" {
+			errs = append(errs, fmt.Errorf("config.toml: runners.%s: sandbox0 requires a template", name))
 		}
 	}
 	return errs
