@@ -410,10 +410,11 @@ func (e ModelRetry) Validate() error {
 }
 
 type ApprovalRequested struct {
-	RequestID string
-	CallID    string
-	Summary   string
-	Class     string
+	RequestID   string
+	CallID      string
+	Summary     string
+	Class       string
+	GrantPrefix string
 }
 
 func (ApprovalRequested) Type() string { return TypeApprovalRequested }

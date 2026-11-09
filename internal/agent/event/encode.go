@@ -136,7 +136,7 @@ func toolMembers(e Event) ([]member, error) {
 			field("request_id", stringValue(value.RequestID)), field("call_id", stringValue(value.CallID)),
 			field("summary", stringValue(value.Summary)),
 		}
-		return optionalString(fields, "class", value.Class), nil
+		return optionalString(optionalString(fields, "class", value.Class), "grant_prefix", value.GrantPrefix), nil
 	case ApprovalResolved:
 		return approvalResolvedMembers(value), nil
 	default:

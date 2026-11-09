@@ -27,7 +27,7 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 |`tool.started`|`call_id`, `turn_id`, `tool`, `args`, `class`, `repairs`|`files`; class is `read`, `edit`, `exec`, `agent`, `script`, or `remote`; each file has `path`, `pre_sha`, `post_sha`, and optional `pre_blob`|
 |`tool.completed`|`call_id`, `ok`, `output`, `recovered`|`spill`, `exit_code`, `meta`; recovered is `none`, `replayed`, `interrupted`, or `skipped`|
 |`model.retry`|`turn_id`, `attempt`, `verdict`, `status`, `delay_ms`|Attempt MUST be positive; verdict is `retry` or `overflow`|
-|`approval.requested`|`request_id`, `call_id`, `summary`|`class`; class uses the `tool.started` values|
+|`approval.requested`|`request_id`, `call_id`, `summary`|`class`; class uses the `tool.started` values; an exec approval MAY carry `grant_prefix`, the argv prefix folded into a session grant when `args` is spilled to a blob|
 |`approval.resolved`|`request_id`, `decision`, `by`, `reason`|`scores`; decision is `accept`, `accept_session`, `decline`, or `cancel`; each score MUST be between zero and one|
 |`compaction`|`first_kept_seq`, `summary`, `method`, `tokens_before`, `tokens_after`|`first_kept_seq` MUST be positive; method is `auto`, `manual`, or `overflow`|
 |`context.pruned`|`turn_id`, `call_ids`|`call_ids` MUST contain at least one non-empty identifier|

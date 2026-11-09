@@ -53,6 +53,11 @@ func (w *worker) gate(ctx context.Context, gc gateCall) (verdict, error) {
 	if requestID == "" {
 		requestID = newID("req-")
 		requested := event.ApprovalRequested{RequestID: requestID, CallID: gc.call.ID, Summary: summary(gc), Class: classString(gc.class)}
+		if gc.class == tool.ClassExec && gc.command != "" {
+			if prefix, ok := rules.GrantPrefix(gc.command); ok {
+				requested.GrantPrefix = prefix
+			}
+		}
 		if _, err := w.t.appendEvents(ctx, requested); err != nil {
 			return verdict{}, err
 		}

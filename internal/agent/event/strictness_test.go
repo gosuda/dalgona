@@ -58,3 +58,24 @@ func TestFoldAcceptsFarOutOfOrderScriptEffects(t *testing.T) {
 		t.Fatal("duplicate effect index accepted")
 	}
 }
+
+func TestFoldAcceptSessionBlobbedExecCreatesGrant(t *testing.T) {
+	t.Parallel()
+	assistant := event.AssistantMessage{
+		ItemID: "a", TurnID: "t",
+		ToolCalls:  []event.ToolCall{{ID: "c", Name: "exec", ArgsBlob: &event.BlobRef{Blob: digest, Bytes: 70000}}},
+		StopReason: "tool_calls",
+	}
+	state, err := foldEvents(t, event.State{},
+		event.TurnStarted{TurnID: "t"},
+		assistant,
+		event.ApprovalRequested{RequestID: "r", CallID: "c", Summary: "big", Class: "exec", GrantPrefix: "git"},
+		event.ApprovalResolved{RequestID: "r", Decision: "accept_session", By: "user", Reason: "ok"},
+	)
+	if err != nil {
+		t.Fatalf("fold: %v", err)
+	}
+	if state.Grants["git"] != "exec" {
+		t.Fatalf("grants = %#v, want a git prefix grant for exec", state.Grants)
+	}
+}

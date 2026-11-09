@@ -89,6 +89,7 @@ func decodeToolEvent(kind string, r *objectReader) (Event, error) {
 	case TypeApprovalRequested:
 		return ApprovalRequested{
 			RequestID: r.str("request_id"), CallID: r.str("call_id"), Summary: r.str("summary"), Class: r.str("class"),
+			GrantPrefix: r.str("grant_prefix"),
 		}, nil
 	case TypeApprovalResolved:
 		r.require("reason")

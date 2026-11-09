@@ -31,18 +31,15 @@ type ToolState struct {
 }
 
 type ApprovalState struct {
-	CallID  string
-	Summary string
-	Class   string
-}
-
-type GrantRequest struct {
-	Tool string
-	Args BlobRef
+	CallID      string
+	Summary     string
+	Class       string
+	GrantPrefix string
 }
 
 type ScriptState struct {
-	Seen map[uint64]struct{}
+	NextEffect uint64
+	Seen       map[uint64]struct{}
 }
 
 type ChildState struct {
@@ -58,7 +55,6 @@ type State struct {
 	PendingCalls    map[string]ToolCall
 	Approvals       map[string]ApprovalState
 	SessionAccepted map[string]struct{}
-	PendingGrants   map[string]GrantRequest
 	DeclinedCalls   map[string]string
 	Scripts         map[string]ScriptState
 	Children        map[string]ChildState
@@ -100,7 +96,6 @@ func (s State) clone() State {
 	s.PendingCalls = maps.Clone(s.PendingCalls)
 	s.Approvals = maps.Clone(s.Approvals)
 	s.SessionAccepted = maps.Clone(s.SessionAccepted)
-	s.PendingGrants = maps.Clone(s.PendingGrants)
 	s.DeclinedCalls = maps.Clone(s.DeclinedCalls)
 	s.Scripts = maps.Clone(s.Scripts)
 	for id, run := range s.Scripts {
@@ -346,7 +341,7 @@ func foldApprovalRequested(s *State, e ApprovalRequested) error {
 	if s.Approvals == nil {
 		s.Approvals = make(map[string]ApprovalState)
 	}
-	s.Approvals[e.RequestID] = ApprovalState{CallID: e.CallID, Summary: e.Summary, Class: e.Class}
+	s.Approvals[e.RequestID] = ApprovalState{CallID: e.CallID, Summary: e.Summary, Class: e.Class, GrantPrefix: e.GrantPrefix}
 	return nil
 }
 
@@ -377,11 +372,12 @@ func foldApprovalResolved(s *State, e ApprovalResolved) error {
 }
 
 type grantSource struct {
-	callID   string
-	tool     string
-	class    string
-	args     jsontext.Value
-	argsBlob *BlobRef
+	callID      string
+	tool        string
+	class       string
+	args        jsontext.Value
+	argsBlob    *BlobRef
+	grantPrefix string
 }
 
 func grantSourceFor(s *State, request ApprovalState) (grantSource, bool) {
@@ -389,7 +385,7 @@ func grantSourceFor(s *State, request ApprovalState) (grantSource, bool) {
 	if request.Class == "" || !pending {
 		return grantSource{}, false
 	}
-	return grantSource{callID: call.ID, tool: call.Name, class: request.Class, args: call.Args, argsBlob: call.ArgsBlob}, true
+	return grantSource{callID: call.ID, tool: call.Name, class: request.Class, args: call.Args, argsBlob: call.ArgsBlob, grantPrefix: request.GrantPrefix}, true
 }
 
 func foldGrant(s *State, source grantSource) error {
@@ -407,24 +403,24 @@ func foldGrant(s *State, source grantSource) error {
 }
 
 func foldExecGrant(s *State, source grantSource) error {
-	if source.argsBlob != nil {
-		if s.PendingGrants == nil {
-			s.PendingGrants = make(map[string]GrantRequest)
+	prefix := source.grantPrefix
+	if prefix == "" {
+		if source.argsBlob != nil {
+			return nil
 		}
-		s.PendingGrants[source.callID] = GrantRequest{Tool: source.tool, Args: *source.argsBlob}
-		return nil
-	}
-	fields, err := decodeObject(source.args)
-	if err != nil {
-		return fmt.Errorf("event: fold: exec grant arguments: %w", err)
-	}
-	command, err := decodeString(fields["command"])
-	if err != nil {
-		return fmt.Errorf("event: fold: exec grant command: %w", err)
-	}
-	prefix, ok := rules.GrantPrefix(command)
-	if !ok {
-		return nil
+		fields, err := decodeObject(source.args)
+		if err != nil {
+			return fmt.Errorf("event: fold: exec grant arguments: %w", err)
+		}
+		command, err := decodeString(fields["command"])
+		if err != nil {
+			return fmt.Errorf("event: fold: exec grant command: %w", err)
+		}
+		var ok bool
+		prefix, ok = rules.GrantPrefix(command)
+		if !ok {
+			return nil
+		}
 	}
 	if s.Grants == nil {
 		s.Grants = make(map[string]string)
@@ -522,6 +518,7 @@ func foldScriptEffect(s *State, e ScriptEffect) error {
 		run.Seen = make(map[uint64]struct{})
 	}
 	run.Seen[e.N] = struct{}{}
+	run.NextEffect = max(run.NextEffect, e.N+1)
 	s.Scripts[e.RunID] = run
 	return nil
 }
