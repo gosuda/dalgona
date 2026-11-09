@@ -584,12 +584,23 @@ func (w *worker) repeated(name string, args jsontext.Value) (bool, error) {
 			if err != nil {
 				return false, err
 			}
-			if callKey(value.Tool, startedArgs) == key {
+			match, reset := guardStep(value, startedArgs, key)
+			if reset {
+				return false, nil
+			}
+			if match {
 				count++
 			}
 		}
 	}
 	return count >= loopGuardLimit, nil
+}
+
+func guardStep(start event.ToolStarted, args jsontext.Value, key string) (match, reset bool) {
+	if callKey(start.Tool, args) == key {
+		return true, false
+	}
+	return false, start.Class == classString(tool.ClassEdit) || start.Class == classString(tool.ClassExec)
 }
 
 func callKey(name string, args jsontext.Value) string {
