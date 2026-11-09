@@ -440,9 +440,11 @@ func (s *session) abort(abortID, execID uint32, cancel context.CancelCauseFunc) 
 		cancel(errExecAborted)
 		return
 	}
-	if len(s.aborted) < maxQueuedFrames {
-		s.aborted = append(s.aborted, abortID)
+	if len(s.aborted) >= maxQueuedFrames {
+		copy(s.aborted, s.aborted[1:])
+		s.aborted = s.aborted[:len(s.aborted)-1]
 	}
+	s.aborted = append(s.aborted, abortID)
 }
 
 func classifyCallFrame(read frameRead) (callFrame, uint32) {
