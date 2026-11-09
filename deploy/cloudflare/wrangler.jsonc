@@ -6,7 +6,7 @@
   "containers": [
     {
       "class_name": "Box",
-      "image": "ghcr.io/gosuda/dalgona-box:devel",
+      "image": "ghcr.io/gosuda/dalgona-box:latest",
       "instance_type": "basic"
     }
   ],
