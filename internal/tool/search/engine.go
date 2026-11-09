@@ -61,24 +61,58 @@ func resolveScope(cwd, raw string) (string, error) {
 	if _, err := os.Stat(path); err != nil {
 		return "", fmt.Errorf("search: %s does not exist: %w", raw, err)
 	}
+	if err := checkScopeContainment(cwd, path, raw); err != nil {
+		return "", err
+	}
 	return path, nil
+}
+
+func checkScopeContainment(cwd, path, raw string) error {
+	root, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return fmt.Errorf("search: cannot inspect %s: %w", raw, err)
+	}
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("search: cannot inspect %s: %w", raw, err)
+	}
+	if escapesRoot(root, target) {
+		return fmt.Errorf("search: %s escapes the workspace via symlink", raw)
+	}
+	return nil
+}
+
+func escapesRoot(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return true
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 type walker struct {
 	cwd     string
 	scope   string
+	root    string
 	ignores ignoreStack
 	entries []fileEntry
 }
 
 func walkScope(cwd, scope string) ([]fileEntry, error) {
-	w := &walker{cwd: cwd, scope: scope, ignores: loadIgnore(cwd)}
+	root, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return nil, fmt.Errorf("search: cannot inspect workspace: %w", err)
+	}
+	w := &walker{cwd: cwd, scope: scope, root: root, ignores: loadIgnore(cwd)}
 	w.ignores.loadScopeIgnores(cwd, scope)
-	if err := filepath.WalkDir(scope, w.visit); err != nil {
-		return nil, fmt.Errorf("search: cannot walk %s: %w", scope, err)
+	if walkErr := filepath.WalkDir(scope, w.visit); walkErr != nil {
+		return nil, fmt.Errorf("search: cannot walk %s: %w", scope, walkErr)
 	}
 	info, err := os.Stat(scope)
 	if err == nil && !info.IsDir() {
+		if !w.contained(scope) {
+			return w.entries, nil
+		}
 		if addErr := w.add(scope); addErr != nil {
 			return nil, addErr
 		}
@@ -100,7 +134,18 @@ func (w *walker) visit(path string, entry fs.DirEntry, err error) error {
 	if entry.IsDir() {
 		return nil
 	}
+	if !w.contained(path) {
+		return nil
+	}
 	return w.add(path)
+}
+
+func (w *walker) contained(path string) bool {
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	return !escapesRoot(w.root, target)
 }
 
 func (w *walker) excluded(path string, entry fs.DirEntry) bool {
@@ -239,6 +284,9 @@ func matchingFiles(entries []fileEntry, pattern string) ([]fileEntry, error) {
 }
 
 func scanFile(entry fileEntry, matcher *regexp.Regexp) (grepFile, []int) {
+	if info, err := os.Lstat(entry.absolute); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return grepFile{}, nil
+	}
 	data, err := os.ReadFile(entry.absolute)
 	if err != nil || len(data) > maxSearchFileBytes || bytes.IndexByte(data[:min(len(data), 8192)], 0) >= 0 || !utf8.Valid(data) {
 		return grepFile{}, nil
