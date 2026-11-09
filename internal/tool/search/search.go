@@ -54,6 +54,11 @@ func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result,
 	}
 	data, err := collect(ctx, env.Runner, id)
 	if err != nil {
+		killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		defer cancel()
+		if killErr := env.Runner.Signal(killCtx, id, runner.SignalKill); killErr != nil {
+			return tool.Result{}, errors.Join(err, fmt.Errorf("search: kill subprocess: %w", killErr))
+		}
 		return tool.Result{}, err
 	}
 	result, err := decodeOutcome(data)
