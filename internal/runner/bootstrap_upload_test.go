@@ -1,10 +1,13 @@
 package runner
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -91,5 +94,69 @@ func TestEnumGit_drainsOutputOnEmitError(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("enumGit blocked draining git output after emit error")
+	}
+}
+
+func writeRunningBinary(t *testing.T, dir string) {
+	t.Helper()
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available")
+	}
+	dest := filepath.Join(dir, "dalgona")
+	blob, err := os.ReadFile(shell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(dest, blob, 0o755); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	running := exec.Command(dest, "-c", "sleep 30")
+	if startErr := running.Start(); startErr != nil {
+		t.Fatal(startErr)
+	}
+	t.Cleanup(func() {
+		_ = running.Process.Kill()
+		_, _ = running.Process.Wait()
+	})
+}
+
+func runUploadScript(t *testing.T, dest string, encoded string) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", uploadScript, "_", dest, "0755", strconv.Itoa(len(encoded)))
+	cmd.Stdin = strings.NewReader(encoded)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("upload script: %v: %s", err, out)
+	}
+}
+
+func TestUploadScript_replacesRunningBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("upload script targets POSIX sh")
+	}
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "dalgona")
+	writeRunningBinary(t, dir)
+	data := []byte("new-binary-content")
+	encoded := base64.StdEncoding.EncodeToString(data) + "\n"
+	runUploadScript(t, dest, encoded)
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("installed %d bytes, want %d", len(got), len(data))
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "dalgona" {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("leftover temp files: %q", names)
 	}
 }

@@ -67,7 +67,7 @@ With `--data`, the server MUST create `<data>/workspace` and `<data>/home`. It M
 
 `Bootstrap` MUST probe `uname -m` and `~/.dalgona/bin/dalgona --version`. It MUST support `amd64` and `arm64`. The remote version is the last whitespace-separated field of the `--version` output. A version equal to the local binary version MUST skip the upload. A version mismatch MUST select the matching local Linux binary and upload it to `~/.dalgona/bin/dalgona` with mode 0755.
 
-The upload MUST use standard base64 with 76-column lines, each ending in a newline. It MUST run `mkdir -p "$(dirname "$1")" && head -c "$3" | base64 -d > "$1" && chmod "$2" "$1"` with the destination, `0755`, and the exact encoded byte count. The box MUST stop reading after that count, so the upload MUST NOT depend on stdin EOF. A stream with `CloseWrite` MUST still half-close after the last byte. A stream without it MUST stay open until the command exits.
+The upload MUST use standard base64 with 76-column lines, each ending in a newline. It MUST run `mkdir -p "$(dirname "$1")" && tmp="$1.tmp.$$" && trap 'rm -f "$tmp"' EXIT && head -c "$3" | base64 -d > "$tmp" && chmod "$2" "$tmp" && mv "$tmp" "$1"` with the destination, `0755`, and the exact encoded byte count. The decode MUST land in a temporary file in the same directory, and the install MUST be an atomic rename, so a running detached binary never sees a truncated page and the write never hits `ETXTBSY`. The box MUST stop reading after that count, so the upload MUST NOT depend on stdin EOF. A stream with `CloseWrite` MUST still half-close after the last byte. A stream without it MUST stay open until the command exits.
 
 A missing sibling binary MUST report:
 

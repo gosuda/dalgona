@@ -31,7 +31,7 @@ const (
 	maxPathBuf     = 8 << 20
 	workspaceRoot  = "/workspace"
 	baselinePath   = "/workspace/.dalgona-baseline"
-	uploadScript   = `mkdir -p "$(dirname "$1")" && head -c "$3" | base64 -d > "$1" && chmod "$2" "$1"`
+	uploadScript   = `mkdir -p "$(dirname "$1")" && tmp="$1.tmp.$$" && trap 'rm -f "$tmp"' EXIT && head -c "$3" | base64 -d > "$tmp" && chmod "$2" "$tmp" && mv "$tmp" "$1"`
 	chmodScript    = `chmod +x "$@"`
 	treeScript     = `cd /workspace && git init -q && git add -A && git write-tree`
 	probeScript    = `uname -m; ~/.dalgona/bin/dalgona --version 2>&1`
