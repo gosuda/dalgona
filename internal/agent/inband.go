@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/agent/rules"
 	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/model/cursor"
 	"github.com/gosuda/dalgona/internal/tool"
@@ -112,8 +113,14 @@ func (w *worker) executeInBand(ctx context.Context, p *prepared, gc gateCall, re
 		return nil, event.ToolCompleted{}, err
 	}
 	v := p.verdict
+	requested := event.ApprovalRequested{RequestID: requestID, CallID: p.call.ID, Summary: summary(gc), Class: classString(p.class)}
+	if p.class == tool.ClassExec && gc.command != "" {
+		if prefix, ok := rules.GrantPrefix(gc.command); ok {
+			requested.GrantPrefix = prefix
+		}
+	}
 	events := []event.Event{
-		event.ApprovalRequested{RequestID: requestID, CallID: p.call.ID, Summary: summary(gc), Class: classString(p.class)},
+		requested,
 		event.ApprovalResolved{RequestID: requestID, Decision: v.decision, By: v.by, Reason: v.reason, Scores: v.scores},
 		started, completed,
 	}
