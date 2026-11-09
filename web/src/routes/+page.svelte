@@ -271,10 +271,6 @@ async function loadAdvisor(threadId: string): Promise<void> {
 async function selectThread(threadId: string): Promise<void> {
 	const selection = ++selectionGeneration;
 	loadingTranscript = true;
-	activeThreadId = threadId;
-	transcript = emptyTranscript(threadId);
-	advisor = { kind: "unknown" };
-	queuedFollowups = [];
 	try {
 		const result = await requireClient().call(
 			"thread/resume",
@@ -283,7 +279,11 @@ async function selectThread(threadId: string): Promise<void> {
 		);
 		if (selection !== selectionGeneration) return;
 		upsertThread(result.thread);
+		activeThreadId = threadId;
 		transcript = transcriptForThread(result.thread);
+		advisor = { kind: "unknown" };
+		queuedFollowups = [];
+		errorMessage = "";
 		status = result.status;
 		selectedModel = result.status.model || selectedModel;
 		void loadAdvisor(threadId);

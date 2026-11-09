@@ -67,6 +67,7 @@ function activityLabel(thread: ThreadSummary): string {
 							class="thread"
 							class:selected={thread.id === activeId}
 							aria-current={thread.id === activeId ? "page" : undefined}
+							disabled={disabled}
 							onclick={() => onSelect(thread.id)}
 						>
 							<span class="thread-topline">
@@ -175,6 +176,10 @@ function activityLabel(thread: ThreadSummary): string {
 		background: transparent;
 		padding: var(--space-3);
 		text-align: start;
+	}
+
+	.thread:disabled {
+		opacity: 0.55;
 	}
 
 	.thread.selected {
