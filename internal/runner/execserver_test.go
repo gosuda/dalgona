@@ -356,7 +356,7 @@ func TestExecRPC_writeFileSyncsFilesystem(t *testing.T) {
 		}
 		return nil
 	}
-	params, err := encodeWriteParams(path, []byte("durable"), 0o600)
+	params, err := encodeWriteParams(path, []byte("durable"), 0o600, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

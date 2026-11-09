@@ -31,7 +31,7 @@ An unstamped binary MUST use `(devel)` as its version.
 
 `process/start` params contain `processId`, `argv`, `cwd`, `env`, and `sandbox`. `env` is an object. `sandbox` contains `mode` and `writableRoots`. The server MUST pass these values to `Local.Start`. `Remote.Start` MUST send sandbox mode `off`, because the box is the sandbox. A repeated `processId` MUST NOT start a second process. A request arriving over the websocket box channel MUST NOT weaken the sandbox below the server start mode: when the server floor is `workspace-write`, `process/start` with any other mode MUST fail with `-32602`. The floor is `workspace-write` only when the server itself started with `DALGONA_SANDBOX_MODE=workspace-write`; otherwise the box is the sandbox and `off` stays allowed.
 
-`process/read` params contain `processId` and `offset`. The result contains `dataBase64`, `next`, `exit`, `alive`, and `path`. A non-null `exit` contains `code`, `signal`, and `endedAtMs`.
+`process/read` params contain `processId`, `offset`, and `limit`. The result contains `dataBase64`, `next`, `exit`, `alive`, and `path`. A non-null `exit` contains `code`, `signal`, and `endedAtMs`. The server MUST return at most `limit` bytes, defaulting to 1 MiB for a missing or out-of-range `limit`, so no response line exceeds the 16 MiB framing cap. The client MUST send `limit` and MUST keep reading from `next` while a page is full.
 
 `process/signal` params contain `processId` and `signal`. The signal MUST be `term` or `kill`.
 
@@ -39,8 +39,8 @@ An unstamped binary MUST use `(devel)` as its version.
 
 ### Filesystem methods
 
-- `fs/readFile` takes `path` and returns `dataBase64`.
-- `fs/writeFile` takes `path`, `dataBase64`, and numeric `mode`. A mode outside 0 to 4294967295 MUST produce `-32602`. When `DALGONA_SYNCFS` names a directory, the server MUST call `syncfs` on that directory after the rename completes. A sync failure MUST fail the call.
+- `fs/readFile` takes `path`, `offset`, and `limit`, and returns `dataBase64` with the `next` offset. Pages MUST be at most `limit` bytes, defaulting to 1 MiB, and the client MUST loop from `next` until a short page arrives.
+- `fs/writeFile` takes `path`, `dataBase64`, numeric `mode`, and `offset`. Offset zero MUST replace the file atomically. A nonzero `offset` MUST write one chunk of a paged upload at that byte position; the client MUST split large files into 1 MiB chunks so no request line exceeds the 16 MiB framing cap. A mode outside 0 to 4294967295 MUST produce `-32602`. A negative `offset` MUST produce `-32602`. When `DALGONA_SYNCFS` names a directory, the server MUST call `syncfs` on that directory after the rename completes. A sync failure MUST fail the call.
 - `fs/getMetadata` takes `path` and returns `name`, `size`, `mode`, `modTimeMs`, `isDirectory`, and `isFile`.
 - `fs/readDirectory` takes `path` and returns `entries`. Each entry uses the metadata fields above.
 - `fs/remove` takes `path`.

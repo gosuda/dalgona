@@ -253,3 +253,94 @@ func waitContractAlive(t *testing.T, r Runner, id string) {
 		}
 	}
 }
+
+func newPipedRemoteContract(t *testing.T, ctx context.Context, local *Local) Runner {
+	t.Helper()
+	server, client := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, server, local) }()
+	t.Cleanup(func() { stopContractServer(t, server, done) })
+	remote := newRemoteContract(t, client)
+	t.Cleanup(func() { _ = remote.Close() })
+	return remote
+}
+
+func pipeFileRoundTrip(t *testing.T, ctx context.Context, newPiped func(*testing.T) Runner, local *Local, want []byte) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "large.bin")
+	if err := local.WriteFile(ctx, path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := newPiped(t).ReadFile(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("ReadFile returned %d bytes, want %d", len(got), len(want))
+	}
+	upload := filepath.Join(t.TempDir(), "upload.bin")
+	if err := newPiped(t).WriteFile(ctx, upload, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stored, readErr := local.ReadFile(ctx, upload)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(stored, want) {
+		t.Fatalf("WriteFile stored %d bytes, want %d", len(stored), len(want))
+	}
+}
+
+func TestRemotePagesLargePayloads(t *testing.T) {
+	ctx := t.Context()
+	local, ok := newLocalContractRunner(t).(*Local)
+	if !ok {
+		t.Fatal("local contract runner is not *Local")
+	}
+	newPiped := func(t *testing.T) Runner {
+		t.Helper()
+		return newPipedRemoteContract(t, ctx, local)
+	}
+	const size = 13 << 20
+	want := bytes.Repeat([]byte("abcdefg1"), size/8)
+	t.Run("file", func(t *testing.T) {
+		pipeFileRoundTrip(t, ctx, newPiped, local, want)
+	})
+	t.Run("processRead", func(t *testing.T) {
+		spec := ProcessSpec{
+			ID:      "large-output",
+			Argv:    []string{"sh", "-c", "head -c 13631488 /dev/zero | tr '\\0' 'p'"},
+			Dir:     t.TempDir(),
+			Sandbox: Sandbox{Mode: SandboxOff},
+		}
+		remote := newPiped(t)
+		if err := remote.Start(ctx, spec); err != nil {
+			t.Fatal(err)
+		}
+		state := drainRemoteProcess(t, remote, ctx, spec.ID)
+		if len(state.Data) != size || !bytes.Equal(state.Data, bytes.Repeat([]byte("p"), size)) {
+			t.Fatalf("process output = %d bytes, want %d of 'p'", len(state.Data), size)
+		}
+	})
+}
+
+func drainRemoteProcess(t *testing.T, remote Runner, ctx context.Context, id string) Output {
+	t.Helper()
+	drainCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	var state Output
+	for {
+		page, err := remote.Read(drainCtx, id, state.Next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.Data = append(state.Data, page.Data...)
+		state.Next = page.Next
+		if page.Exit != nil {
+			return state
+		}
+		if drainCtx.Err() != nil {
+			t.Fatal(drainCtx.Err())
+		}
+	}
+}

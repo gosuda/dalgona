@@ -156,6 +156,34 @@ func isRunnerEnvironment(key string) bool {
 }
 
 func (l *Local) Read(ctx context.Context, id string, offset int64) (Output, error) {
+	first, err := l.readPage(ctx, id, offset, readPageSize)
+	if err != nil {
+		return Output{}, err
+	}
+	if first.Exit == nil || int64(len(first.Data)) < readPageSize {
+		return first, nil
+	}
+	combined := first.Data
+	next := first.Next
+	var last Output
+	for {
+		page, err := l.readPage(ctx, id, next, readPageSize)
+		if err != nil {
+			return Output{}, err
+		}
+		combined = append(combined, page.Data...)
+		next = page.Next
+		last = page
+		if page.Exit == nil || int64(len(page.Data)) < readPageSize {
+			break
+		}
+	}
+	last.Data = combined
+	last.Next = next
+	return last, nil
+}
+
+func (l *Local) readPage(ctx context.Context, id string, offset, limit int64) (Output, error) {
 	if err := ctx.Err(); err != nil {
 		return Output{}, fmt.Errorf("runner: read: %w", err)
 	}
@@ -169,7 +197,7 @@ func (l *Local) Read(ctx context.Context, id string, offset int64) (Output, erro
 		}
 		return Output{}, fmt.Errorf("runner: stat process: %w", err)
 	}
-	data, err := readAt(runDir, offset)
+	data, err := readAt(runDir, offset, limit)
 	if err != nil {
 		return Output{}, err
 	}
@@ -307,6 +335,68 @@ func (l *Local) WriteFile(ctx context.Context, path string, data []byte, perm fs
 	return nil
 }
 
+func (l *Local) readFileAt(ctx context.Context, path string, offset, limit int64) ([]byte, int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, fmt.Errorf("runner: read file: %w", err)
+	}
+	if offset < 0 {
+		return nil, 0, errors.New("runner: negative file offset")
+	}
+	file, err := openNoFollow(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("runner: read file %s: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+	if _, seekErr := file.Seek(offset, io.SeekStart); seekErr != nil {
+		return nil, 0, fmt.Errorf("runner: seek file %s: %w", path, seekErr)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return nil, 0, fmt.Errorf("runner: read file %s: %w", path, err)
+	}
+	return data, offset + int64(len(data)), nil
+}
+
+func (l *Local) writeFileAt(ctx context.Context, path string, data []byte, offset int64, perm fs.FileMode) error {
+	if offset == 0 {
+		return l.WriteFile(ctx, path, data, perm)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("runner: write file: %w", err)
+	}
+	if offset < 0 {
+		return errors.New("runner: negative file offset")
+	}
+	if _, err := statNoFollow(path); err != nil {
+		return fmt.Errorf("runner: write file %s: %w", path, err)
+	}
+	return appendFileAt(path, data, offset, perm)
+}
+
+func appendFileAt(path string, data []byte, offset int64, perm fs.FileMode) error {
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("runner: write file %s: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return fmt.Errorf("runner: seek file %s: %w", path, err)
+	}
+	if _, err := file.Write(data); err != nil {
+		return fmt.Errorf("runner: write file %s: %w", path, err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("runner: sync file %s: %w", path, err)
+	}
+	if err := file.Chmod(perm); err != nil {
+		return fmt.Errorf("runner: chmod file %s: %w", path, err)
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("runner: sync parent: %w", err)
+	}
+	return nil
+}
+
 func (l *Local) Stat(ctx context.Context, path string) (FileInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return FileInfo{}, fmt.Errorf("runner: stat: %w", err)
@@ -353,7 +443,7 @@ func (l *Local) Remove(ctx context.Context, path string) error {
 
 func (l *Local) Close() error { return nil }
 
-func readAt(dir string, offset int64) ([]byte, error) {
+func readAt(dir string, offset, limit int64) ([]byte, error) {
 	file, err := os.Open(filepath.Join(dir, "out"))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -365,7 +455,7 @@ func readAt(dir string, offset int64) ([]byte, error) {
 	if _, seekErr := file.Seek(offset, io.SeekStart); seekErr != nil {
 		return nil, fmt.Errorf("runner: seek output: %w", seekErr)
 	}
-	data, err := io.ReadAll(file)
+	data, err := io.ReadAll(io.LimitReader(file, limit))
 	if err != nil {
 		return nil, fmt.Errorf("runner: read output: %w", err)
 	}

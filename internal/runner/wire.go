@@ -19,6 +19,8 @@ import (
 
 const maxRPCLine = 16 << 20
 
+const readPageSize = 1 << 20
+
 const (
 	rpcParseError     = -32700
 	rpcInvalidParams  = -32602
@@ -196,11 +198,11 @@ func rpcStart(ctx context.Context, local *Local, params jsontext.Value) (jsontex
 }
 
 func rpcRead(ctx context.Context, local *Local, params jsontext.Value) (jsontext.Value, error) {
-	id, offset, err := decodeReadParams(params)
+	page, err := decodeReadParams(params)
 	if err != nil {
 		return nil, err
 	}
-	out, err := local.Read(ctx, id, offset)
+	out, err := local.readPage(ctx, page.id, page.offset, page.limit)
 	if err != nil {
 		return nil, err
 	}
@@ -249,15 +251,15 @@ func encodeRunning(running bool) (jsontext.Value, error) {
 }
 
 func rpcReadFile(ctx context.Context, local *Local, params jsontext.Value) (jsontext.Value, error) {
-	path, err := requirePath(params)
+	page, err := decodeReadFileParams(params)
 	if err != nil {
 		return nil, err
 	}
-	data, err := local.ReadFile(ctx, path)
+	data, next, err := local.readFileAt(ctx, page.path, page.offset, page.limit)
 	if err != nil {
 		return nil, err
 	}
-	return encodeData(data)
+	return encodeData(data, next)
 }
 
 func rpcWriteFile(ctx context.Context, local *Local, params jsontext.Value) (jsontext.Value, error) {
@@ -265,7 +267,11 @@ func rpcWriteFile(ctx context.Context, local *Local, params jsontext.Value) (jso
 	if err != nil {
 		return nil, err
 	}
-	if writeErr := local.WriteFile(ctx, write.path, write.data, write.mode); writeErr != nil {
+	if write.offset == 0 {
+		if writeErr := local.WriteFile(ctx, write.path, write.data, write.mode); writeErr != nil {
+			return nil, writeErr
+		}
+	} else if writeErr := local.writeFileAt(ctx, write.path, write.data, write.offset, write.mode); writeErr != nil {
 		return nil, writeErr
 	}
 	if syncErr := syncFS(); syncErr != nil {
@@ -639,7 +645,7 @@ func writeExitFields(enc *jsontext.Encoder, exit *Exit) error {
 	return writeInt(enc, "endedAtMs", exit.EndedAt.UnixMilli())
 }
 
-func encodeData(data []byte) (jsontext.Value, error) {
+func encodeData(data []byte, next int64) (jsontext.Value, error) {
 	var buf bytes.Buffer
 	enc := jsontext.NewEncoder(&buf)
 	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
@@ -647,6 +653,9 @@ func encodeData(data []byte) (jsontext.Value, error) {
 	}
 	encoded := base64.StdEncoding.EncodeToString(data)
 	if err := writeString(enc, "dataBase64", encoded); err != nil {
+		return nil, err
+	}
+	if err := writeInt(enc, "next", next); err != nil {
 		return nil, err
 	}
 	if err := enc.WriteToken(jsontext.EndObject); err != nil {
@@ -852,20 +861,58 @@ func finishProcessSpec(fields map[string]jsontext.Value, id string, argv []strin
 	return ProcessSpec{ID: id, Argv: argv, Dir: dir, Env: env, Sandbox: sandbox}, nil
 }
 
-func decodeReadParams(params jsontext.Value) (string, int64, error) {
+type readPageParams struct {
+	id     string
+	path   string
+	offset int64
+	limit  int64
+}
+
+func decodeReadParams(params jsontext.Value) (readPageParams, error) {
 	fields, err := paramsFields(params)
 	if err != nil {
-		return "", 0, err
+		return readPageParams{}, err
 	}
 	id, err := fieldString(fields, "processId")
 	if err != nil {
-		return "", 0, err
+		return readPageParams{}, err
 	}
 	offset, err := optionalInt(fields, "offset")
 	if err != nil {
-		return "", 0, err
+		return readPageParams{}, err
 	}
-	return id, offset, nil
+	limit, err := optionalInt(fields, "limit")
+	if err != nil {
+		return readPageParams{}, err
+	}
+	return readPageParams{id: id, offset: offset, limit: clampPage(limit)}, nil
+}
+
+func decodeReadFileParams(params jsontext.Value) (readPageParams, error) {
+	fields, err := paramsFields(params)
+	if err != nil {
+		return readPageParams{}, err
+	}
+	path, err := fieldString(fields, "path")
+	if err != nil {
+		return readPageParams{}, err
+	}
+	offset, err := optionalInt(fields, "offset")
+	if err != nil {
+		return readPageParams{}, err
+	}
+	limit, err := optionalInt(fields, "limit")
+	if err != nil {
+		return readPageParams{}, err
+	}
+	return readPageParams{path: path, offset: offset, limit: clampPage(limit)}, nil
+}
+
+func clampPage(limit int64) int64 {
+	if limit <= 0 || limit > readPageSize {
+		return readPageSize
+	}
+	return limit
 }
 
 func decodeSignalParams(params jsontext.Value) (string, Signal, error) {
@@ -911,9 +958,10 @@ func signalName(signal Signal) (string, error) {
 }
 
 type writeFileParams struct {
-	path string
-	data []byte
-	mode fs.FileMode
+	path   string
+	data   []byte
+	mode   fs.FileMode
+	offset int64
 }
 
 func decodeWriteFile(params jsontext.Value) (writeFileParams, error) {
@@ -941,7 +989,14 @@ func finishWriteFile(fields map[string]jsontext.Value, path, encoded string) (wr
 	if err != nil {
 		return writeFileParams{}, err
 	}
-	return writeFileParams{path: path, data: data, mode: mode}, nil
+	offset, err := optionalInt(fields, "offset")
+	if err != nil {
+		return writeFileParams{}, err
+	}
+	if offset < 0 {
+		return writeFileParams{}, errInvalidParams
+	}
+	return writeFileParams{path: path, data: data, mode: mode, offset: offset}, nil
 }
 
 func requireProcessID(params jsontext.Value) (string, error) {

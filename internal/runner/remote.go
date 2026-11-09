@@ -135,7 +135,28 @@ func (r *Remote) Start(ctx context.Context, spec ProcessSpec) error {
 }
 
 func (r *Remote) Read(ctx context.Context, id string, offset int64) (Output, error) {
-	params, err := encodeReadParams(id, offset)
+	var combined []byte
+	next := offset
+	var last Output
+	for {
+		page, err := r.readPage(ctx, id, next)
+		if err != nil {
+			return Output{}, err
+		}
+		combined = append(combined, page.Data...)
+		next = page.Next
+		last = page
+		if int64(len(page.Data)) < readPageSize {
+			break
+		}
+	}
+	last.Data = combined
+	last.Next = next
+	return last, nil
+}
+
+func (r *Remote) readPage(ctx context.Context, id string, offset int64) (Output, error) {
+	params, err := encodeReadParams(id, offset, readPageSize)
 	if err != nil {
 		return Output{}, err
 	}
@@ -146,7 +167,7 @@ func (r *Remote) Read(ctx context.Context, id string, offset int64) (Output, err
 	return decodeOutput(result)
 }
 
-func encodeReadParams(id string, offset int64) (jsontext.Value, error) {
+func encodeReadParams(id string, offset, limit int64) (jsontext.Value, error) {
 	var buf bytes.Buffer
 	enc := jsontext.NewEncoder(&buf)
 	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
@@ -156,6 +177,9 @@ func encodeReadParams(id string, offset int64) (jsontext.Value, error) {
 		return nil, err
 	}
 	if err := writeInt(enc, "offset", offset); err != nil {
+		return nil, err
+	}
+	if err := writeInt(enc, "limit", limit); err != nil {
 		return nil, err
 	}
 	if err := enc.WriteToken(jsontext.EndObject); err != nil {
@@ -196,24 +220,66 @@ func encodeSignalParams(id, name string) (jsontext.Value, error) {
 }
 
 func (r *Remote) ReadFile(ctx context.Context, path string) ([]byte, error) {
-	params, err := pathParams(path)
-	if err != nil {
+	var combined []byte
+	var offset int64
+	for {
+		params, err := encodeReadFileParams(path, offset, readPageSize)
+		if err != nil {
+			return nil, err
+		}
+		result, err := r.call(ctx, "fs/readFile", params)
+		if err != nil {
+			return nil, err
+		}
+		data, next, err := decodeData(result)
+		if err != nil {
+			return nil, err
+		}
+		combined = append(combined, data...)
+		if int64(len(data)) < readPageSize {
+			return combined, nil
+		}
+		offset = next
+	}
+}
+
+func encodeReadFileParams(path string, offset, limit int64) (jsontext.Value, error) {
+	var buf bytes.Buffer
+	enc := jsontext.NewEncoder(&buf)
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 		return nil, err
 	}
-	result, err := r.call(ctx, "fs/readFile", params)
-	if err != nil {
+	if err := writeString(enc, "path", path); err != nil {
 		return nil, err
 	}
-	return decodeData(result)
+	if err := writeInt(enc, "offset", offset); err != nil {
+		return nil, err
+	}
+	if err := writeInt(enc, "limit", limit); err != nil {
+		return nil, err
+	}
+	if err := enc.WriteToken(jsontext.EndObject); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (r *Remote) WriteFile(ctx context.Context, path string, data []byte, perm fs.FileMode) error {
-	params, err := encodeWriteParams(path, data, perm)
-	if err != nil {
-		return err
+	var offset int64
+	for {
+		end := min(offset+readPageSize, int64(len(data)))
+		params, err := encodeWriteParams(path, data[offset:end], perm, offset)
+		if err != nil {
+			return err
+		}
+		if _, err := r.call(ctx, "fs/writeFile", params); err != nil {
+			return err
+		}
+		if end == int64(len(data)) {
+			return nil
+		}
+		offset = end
 	}
-	_, err = r.call(ctx, "fs/writeFile", params)
-	return err
 }
 
 func (r *Remote) Stat(ctx context.Context, path string) (FileInfo, error) {
@@ -264,7 +330,7 @@ func pathParams(path string) (jsontext.Value, error) {
 	return buf.Bytes(), nil
 }
 
-func encodeWriteParams(path string, data []byte, perm fs.FileMode) (jsontext.Value, error) {
+func encodeWriteParams(path string, data []byte, perm fs.FileMode, offset int64) (jsontext.Value, error) {
 	var buf bytes.Buffer
 	enc := jsontext.NewEncoder(&buf)
 	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
@@ -280,26 +346,33 @@ func encodeWriteParams(path string, data []byte, perm fs.FileMode) (jsontext.Val
 	if err := writeInt(enc, "mode", int64(perm)); err != nil {
 		return nil, err
 	}
+	if err := writeInt(enc, "offset", offset); err != nil {
+		return nil, err
+	}
 	if err := enc.WriteToken(jsontext.EndObject); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
 }
 
-func decodeData(raw jsontext.Value) ([]byte, error) {
+func decodeData(raw jsontext.Value) ([]byte, int64, error) {
 	fields, err := objectFields(raw)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	encoded, err := fieldString(fields, "dataBase64")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil, errors.New("runner: invalid dataBase64")
+		return nil, 0, errors.New("runner: invalid dataBase64")
 	}
-	return data, nil
+	next, err := optionalInt(fields, "next")
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, next, nil
 }
 
 func (r *Remote) Close() error {
