@@ -184,7 +184,7 @@ func UninstallService(env ServiceEnv) error {
 		stop := tolerateNotLoaded(run(context.Background(), "launchctl", "bootout", "gui/"+serviceUID(), path))
 		return errors.Join(stop, removeServiceFile(path))
 	case "windows":
-		return run(context.Background(), "schtasks", "/Delete", "/TN", "dalgona", "/F")
+		return tolerateNotLoaded(run(context.Background(), "schtasks", "/Delete", "/TN", "dalgona", "/F"))
 	default:
 		return fmt.Errorf("unsupported operating system %q", goos)
 	}
@@ -198,7 +198,7 @@ func tolerateNotLoaded(err error) error {
 		return err
 	}
 	message := strings.ToLower(err.Error())
-	for _, marker := range []string{"not loaded", "not found", "could not find", "no such file"} {
+	for _, marker := range []string{"not loaded", "not found", "could not find", "no such file", "cannot find the file specified", "does not exist"} {
 		if strings.Contains(message, marker) {
 			return nil
 		}

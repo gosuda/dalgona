@@ -165,3 +165,26 @@ func TestSystemdUnitRejectsControlCharacters(t *testing.T) {
 		})
 	}
 }
+
+func TestWindowsUninstallToleratesMissingTask(t *testing.T) {
+	for _, msg := range []string{
+		"ERROR: The system cannot find the file specified.",
+		`ERROR: The specified task "dalgona" does not exist.`,
+	} {
+		t.Run(msg, func(t *testing.T) {
+			run := func(context.Context, string, ...string) error { return errors.New(msg) }
+			if err := UninstallService(ServiceEnv{GOOS: "windows", Run: run}); err != nil {
+				t.Fatalf("windows uninstall with missing task %q = %v, want nil", msg, err)
+			}
+		})
+	}
+}
+
+func TestWindowsUninstallReportsMissingExecutable(t *testing.T) {
+	run := func(context.Context, string, ...string) error {
+		return errors.New(`exec: "schtasks": executable file not found in %PATH%`)
+	}
+	if err := UninstallService(ServiceEnv{GOOS: "windows", Run: run}); err == nil {
+		t.Fatalf("windows uninstall with missing schtasks = nil, want error")
+	}
+}
