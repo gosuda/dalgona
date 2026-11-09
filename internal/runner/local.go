@@ -22,7 +22,8 @@ var outputLimit int64 = 1 << 30
 var ErrProcessNotFound = errors.New("runner: process not found")
 
 type Local struct {
-	dir string
+	dir           string
+	afterSnapshot func()
 }
 
 type processIdentity struct {
@@ -197,16 +198,42 @@ func (l *Local) readPage(ctx context.Context, id string, offset, limit int64) (O
 		}
 		return Output{}, fmt.Errorf("runner: stat process: %w", err)
 	}
-	data, err := readAt(runDir, offset, limit)
+	exit, data, err := l.snapshot(runDir, offset, limit)
 	if err != nil {
 		return Output{}, err
 	}
-	exit, err := readExit(filepath.Join(runDir, "exit"))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return Output{}, err
+	if exit == nil {
+		data, exit = backfillTail(runDir, offset, limit, data)
 	}
 	alive := exit == nil && processAlive(filepath.Join(runDir, "pid"))
 	return Output{Data: data, Next: offset + int64(len(data)), Exit: exit, Alive: alive, Path: filepath.Join(runDir, "out")}, nil
+}
+
+func (l *Local) snapshot(runDir string, offset, limit int64) (*Exit, []byte, error) {
+	exit, err := readExit(filepath.Join(runDir, "exit"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, err
+	}
+	data, err := readAt(runDir, offset, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	if hook := l.afterSnapshot; hook != nil {
+		hook()
+	}
+	return exit, data, nil
+}
+
+func backfillTail(runDir string, offset, limit int64, data []byte) ([]byte, *Exit) {
+	late, err := readExit(filepath.Join(runDir, "exit"))
+	if err != nil || late == nil {
+		return data, nil
+	}
+	fresh, err := readAt(runDir, offset, limit)
+	if err != nil {
+		return data, late
+	}
+	return fresh, late
 }
 
 func (l *Local) Signal(ctx context.Context, id string, signal Signal) error {

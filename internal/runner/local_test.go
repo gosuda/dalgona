@@ -405,3 +405,54 @@ func waitForAlive(t *testing.T, local *Local, id string, timeout time.Duration) 
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestLocal_readDrainsTailAfterExit(t *testing.T) {
+	local := newTestLocal(t, filepath.Join(t.TempDir(), "runs"))
+	runDir := filepath.Join(local.dir, "tail")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outPath := filepath.Join(runDir, "out")
+	if err := os.WriteFile(outPath, []byte("abc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	local.afterSnapshot = func() {
+		if err := os.WriteFile(outPath, []byte("abcdef"), 0o600); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := writeExit(filepath.Join(runDir, "exit"), Exit{Code: 0, EndedAt: time.Now()}); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { local.afterSnapshot = nil })
+	state, err := local.Read(t.Context(), "tail", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(state.Data) != "abcdef" || state.Exit == nil || state.Exit.Code != 0 {
+		t.Fatalf("terminal read = %q exit %+v, want abcdef with exit 0", state.Data, state.Exit)
+	}
+}
+
+func TestLocal_readDrainsMultiPageTerminal(t *testing.T) {
+	local := newTestLocal(t, filepath.Join(t.TempDir(), "runs"))
+	runDir := filepath.Join(local.dir, "big")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Repeat([]byte("7"), 2*readPageSize+13)
+	if err := os.WriteFile(filepath.Join(runDir, "out"), want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeExit(filepath.Join(runDir, "exit"), Exit{Code: 0, EndedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := local.Read(t.Context(), "big", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(state.Data, want) || state.Exit == nil {
+		t.Fatalf("terminal read = %d bytes exit %+v, want %d with exit", len(state.Data), state.Exit, len(want))
+	}
+}

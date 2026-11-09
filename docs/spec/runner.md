@@ -12,7 +12,7 @@ The shim MUST write `pid` before it starts the command. `pid` MUST store the pro
 
 The shim MUST start the command in a new process group on Unix. It MUST record the group id in `pgid`. On Windows it MUST assign the command to a named job object. The parent MUST reap the shim without waiting for the command in the caller.
 
-`Read` MUST take a byte offset into `out`. It MUST return `Data`, `Next`, `Exit`, `Alive`, and `Path`. `Data` MUST be the bytes from the offset. `Next` MUST be the next unread offset. `Exit` MUST be the exit record when `exit` exists, otherwise unset. `Alive` MUST be true only when the stored pid and start time still name the shim. `Path` MUST name the `out` file.
+`Read` MUST take a byte offset into `out`. It MUST return `Data`, `Next`, `Exit`, `Alive`, and `Path`. `Data` MUST be the bytes from the offset. `Next` MUST be the next unread offset. `Exit` MUST be the exit record when `exit` exists, otherwise unset. `Alive` MUST be true only when the stored pid and start time still name the shim. `Path` MUST name the `out` file. `Read` MUST check `exit` before taking the final output snapshot, and when `exit` appears after an empty check it MUST drain `out` again. A terminal response MUST carry every byte written before the exit record, across as many pages as that takes.
 
 `Signal` MUST accept `TERM` and `KILL`. The caller MUST send `TERM` before `KILL`. On timeout the caller MUST wait 5 s after `TERM`, then send `KILL`. On Unix `Signal` MUST target the command process group. It MUST NOT signal the shim. On Windows `Signal` MUST kill the process tree through the job object. The shim MUST survive the signal and write the command exit record.
 
