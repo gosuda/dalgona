@@ -156,14 +156,21 @@ func (w *worker) runAgentBatch(ctx context.Context, calls []event.ToolCall) erro
 		group.Go(func() { results[i], errs[i] = w.execute(ctx, p) })
 	}
 	group.Wait()
-	if err := errors.Join(errs...); err != nil {
+	if err := w.appendResults(ctx, results); err != nil {
 		return err
 	}
-	events := make([]event.Event, len(results))
-	for i, completed := range results {
-		events[i] = completed
+	return errors.Join(errs...)
+}
+
+func (w *worker) appendResults(ctx context.Context, results []event.ToolCompleted) error {
+	events := make([]event.Event, 0, len(results))
+	for _, completed := range results {
+		if completed.CallID == "" {
+			continue
+		}
+		events = append(events, completed)
 	}
-	_, err := w.t.appendEvents(ctx, events...)
+	_, err := w.t.appendEvents(context.WithoutCancel(ctx), events...)
 	return err
 }
 
