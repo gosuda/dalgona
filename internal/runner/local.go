@@ -81,9 +81,6 @@ func (l *Local) spawn(runDir string, spec ProcessSpec) error {
 	args = append(args, argv...)
 	mode := cmp.Or(spec.Sandbox.Mode, SandboxWorkspaceWrite)
 	roots := slices.Clone(spec.Sandbox.WritableRoots)
-	if spec.Dir != "" {
-		roots = append(roots, spec.Dir)
-	}
 	spec.Env = runnerEnvironment(spec.Env, spec.Dir, mode, roots)
 	cmd, err := startDetached(context.Background(), self, args, spec)
 	if err != nil {

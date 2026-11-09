@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -177,5 +178,58 @@ func TestExecRequiresRunner(t *testing.T) {
 	toolExec := New()
 	if _, err := toolExec.Run(context.Background(), tool.Call{ID: "run-10", Args: jsontext.Value(`{"command":"true"}`)}, tool.Env{}); err == nil {
 		t.Fatal("missing runner accepted")
+	}
+}
+
+func TestExecResolvesRelativeCwdAgainstWorkspace(t *testing.T) {
+	env, closeRunner := testEnv(t)
+	defer closeRunner()
+	sub := filepath.Join(env.Cwd, "web")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toolExec := New()
+	args := jsontext.Value(`{"command":"pwd","cwd":"web"}`)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-rel", Args: args}, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(result.Output)) != sub {
+		t.Fatalf("pwd = %q, want %q", result.Output, sub)
+	}
+}
+
+func TestExecRefusesCwdOutsideWritableRoots(t *testing.T) {
+	env, closeRunner := testEnv(t)
+	defer closeRunner()
+	outside := t.TempDir()
+	toolExec := New()
+	args := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(outside) + `}`)
+	if _, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-out", Args: args}, env); err == nil {
+		t.Fatal("cwd outside the writable roots was accepted")
+	}
+}
+
+func TestExecUnsandboxedRunsOutsideWritableRoots(t *testing.T) {
+	env, closeRunner := testEnv(t)
+	defer closeRunner()
+	outside := t.TempDir()
+	toolExec := New()
+	escalated := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(outside) + `,"escalate":true,"justification":"retry"}`)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-out-esc", Args: escalated}, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(result.Output)) != outside {
+		t.Fatalf("pwd = %q, want %q", result.Output, outside)
+	}
+	env.Sandbox.Mode = runner.SandboxOff
+	plain := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(outside) + `}`)
+	result, err = toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-out-off", Args: plain}, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(result.Output)) != outside {
+		t.Fatalf("pwd = %q, want %q", result.Output, outside)
 	}
 }

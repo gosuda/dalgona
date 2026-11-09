@@ -30,7 +30,7 @@ func TestLocal_linuxSandbox(t *testing.T) {
 	env = setEnvironment(env, "XDG_CACHE_HOME", cache)
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
 	command := `if touch "$HOME/outside-runner"; then echo outside-ok; else echo outside-denied; fi; touch ./inside`
-	spec := ProcessSpec{ID: "sandbox", Argv: []string{"sh", "-c", command}, Dir: workspace, Env: env, Sandbox: Sandbox{Mode: SandboxWorkspaceWrite}}
+	spec := ProcessSpec{ID: "sandbox", Argv: []string{"sh", "-c", command}, Dir: workspace, Env: env, Sandbox: Sandbox{Mode: SandboxWorkspaceWrite, WritableRoots: []string{workspace}}}
 	startTestProcess(t, local, spec)
 	state := waitForExit(t, local, "sandbox", 5*time.Second)
 	if state.Exit.Code != 0 {

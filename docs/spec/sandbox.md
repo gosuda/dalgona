@@ -19,6 +19,10 @@ A command MAY read any path. Network access MUST stay allowed. A command MAY wri
 
 The runner MUST pass every root through `filepath.EvalSymlinks` before it applies the policy.
 
+## Working directory
+
+An `exec` call MUST resolve a relative `cwd` against the thread working directory to an absolute path before the runner starts. When the mode is `workspace-write`, the resolved directory MUST sit inside the writable roots above (the thread working directory counts), otherwise the call MUST fail without starting. In `off` (including an approved escalation) a relative `cwd` MUST still resolve once against the thread working directory, and the command runs there. The runner MUST NOT add the command directory to the writable roots: only the caller-declared roots confine the command.
+
 ## Linux
 
 The shim MUST apply this policy before it execs the command:

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -46,13 +47,13 @@ func (t *Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Resu
 	if env.Masker != nil {
 		command = env.Masker.Unmask(command)
 	}
-	cwd, err := commandDirectory(args.cwd, env.Cwd)
-	if err != nil {
-		return tool.Result{}, err
-	}
 	mode := env.Sandbox.Mode
 	if args.escalate {
 		mode = runner.SandboxOff
+	}
+	cwd, err := commandDirectory(args.cwd, env, mode)
+	if err != nil {
+		return tool.Result{}, err
 	}
 	spec := runner.ProcessSpec{
 		ID:      call.ID,
@@ -127,18 +128,97 @@ func setTimeout(result *arguments, value []byte) error {
 	return nil
 }
 
-func commandDirectory(argument string, configured string) (string, error) {
-	if argument != "" {
-		return argument, nil
+func commandDirectory(argument string, env tool.Env, mode runner.SandboxMode) (string, error) {
+	if argument == "" {
+		return execBaseDir(env)
 	}
-	if configured != "" {
-		return configured, nil
+	base, err := execBaseDir(env)
+	if err != nil {
+		return "", err
+	}
+	candidate := resolveExecDir(argument, base)
+	if mode == "" {
+		mode = runner.SandboxWorkspaceWrite
+	}
+	if mode != runner.SandboxWorkspaceWrite {
+		return candidate, nil
+	}
+	if !insideWritableRoots(env, candidate) {
+		return "", fmt.Errorf("exec: cwd %q is outside the writable roots", candidate)
+	}
+	return candidate, nil
+}
+
+func execBaseDir(env tool.Env) (string, error) {
+	if env.Cwd != "" {
+		if filepath.IsAbs(env.Cwd) {
+			return env.Cwd, nil
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("exec: working directory: %w", err)
+		}
+		return filepath.Join(cwd, env.Cwd), nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("exec: working directory: %w", err)
 	}
 	return cwd, nil
+}
+
+func resolveExecDir(argument string, base string) string {
+	if filepath.IsAbs(argument) {
+		return filepath.Clean(argument)
+	}
+	return filepath.Join(base, argument)
+}
+
+func insideWritableRoots(env tool.Env, candidate string) bool {
+	base, err := execBaseDir(env)
+	if err != nil {
+		return false
+	}
+	target := resolveExistingLink(candidate)
+	for _, root := range writableRoots(env, base) {
+		if withinRoot(root, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func writableRoots(env tool.Env, base string) []string {
+	roots := make([]string, 0, len(env.Sandbox.WritableRoots)+1)
+	if env.Cwd != "" {
+		roots = append(roots, resolveExistingLink(base))
+	}
+	for _, root := range env.Sandbox.WritableRoots {
+		if !filepath.IsAbs(root) {
+			root = filepath.Join(base, root)
+		}
+		roots = append(roots, resolveExistingLink(root))
+	}
+	return roots
+}
+
+func withinRoot(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+func resolveExistingLink(path string) string {
+	suffix := ""
+	for current := path; ; current = filepath.Dir(current) {
+		if real, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(real, suffix)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		suffix = filepath.Join(filepath.Base(current), suffix)
+	}
 }
 
 type waitState struct {
