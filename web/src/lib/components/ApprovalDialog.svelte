@@ -11,16 +11,25 @@ interface Props {
 
 let { request, changes, onDecision }: Props = $props();
 let dialog = $state<HTMLDialogElement>();
+let previousFocus = $state<HTMLElement | null>(null);
 
 $effect(() => {
 	const current = request;
 	const requestId = current?.id;
 	if (!dialog) return;
-	if (current && !dialog.open) dialog.showModal();
+	if (current && !dialog.open) {
+		previousFocus =
+			document.activeElement instanceof HTMLElement
+				? document.activeElement
+				: null;
+		dialog.showModal();
+	}
 	if (requestId !== undefined) {
 		dialog.querySelector<HTMLElement>("#approval-title")?.focus();
-	} else if (!current && dialog.open) {
-		dialog.close();
+	} else {
+		if (dialog.open) dialog.close();
+		previousFocus?.focus();
+		previousFocus = null;
 	}
 });
 
@@ -60,6 +69,7 @@ function decide(decision: Decision): void {
 				<button class="primary" onclick={() => decide("accept")}>Accept action</button>
 				<button onclick={() => decide("acceptForSession")}>Accept for session</button>
 				<button class="quiet" onclick={() => decide("decline")}>Decline action</button>
+				<button class="quiet" onclick={() => decide("cancel")}>Cancel</button>
 			</div>
 		</div>
 	{/if}
