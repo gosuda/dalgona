@@ -249,6 +249,9 @@ func (w *worker) task() string {
 }
 
 func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdict {
+	if w.t.created.Advisor != "" {
+		return w.automated(ctx, gc)
+	}
 	if prefix := w.matchingGrant(gc); prefix != "" {
 		return accept("grant:" + prefix)
 	}
