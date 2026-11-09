@@ -38,6 +38,7 @@ type credentials struct {
 type sourceEntry struct {
 	source *oauth.Source
 	stored auth.Credential
+	saving auth.Credential
 }
 
 type unlisted struct {
@@ -99,7 +100,7 @@ func (c *credentials) source(ctx context.Context, provider string) *oauth.Source
 	stored, err := c.stored(ctx, provider, "")
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if entry, ok := c.sources[provider]; ok && err == nil && entry.stored == stored {
+	if entry, ok := c.sources[provider]; ok && err == nil && (entry.stored == stored || entry.saving == stored) {
 		return entry.source
 	}
 	entry := &sourceEntry{stored: stored}
@@ -112,18 +113,26 @@ func (c *credentials) source(ctx context.Context, provider string) *oauth.Source
 		return tokenFrom(credential)
 	}
 	save := func(_ context.Context, token oauth.Token) error {
-		credential := credentialFrom(token)
-		if err := c.store.SetCredential(provider, credential); err != nil {
-			return err
-		}
-		c.mu.Lock()
-		entry.stored = credential
-		c.mu.Unlock()
-		return nil
+		return c.saveCredential(entry, provider, credentialFrom(token))
 	}
 	entry.source = oauth.NewSource(definition, load, save)
 	c.sources[provider] = entry
 	return entry.source
+}
+
+func (c *credentials) saveCredential(entry *sourceEntry, provider string, credential auth.Credential) error {
+	c.mu.Lock()
+	expected := entry.stored
+	entry.saving = credential
+	c.mu.Unlock()
+	written, err := c.store.SetCredentialIfUnchanged(provider, expected, credential)
+	c.mu.Lock()
+	if written {
+		entry.stored = credential
+	}
+	entry.saving = auth.Credential{}
+	c.mu.Unlock()
+	return err
 }
 
 func (c *credentials) devinKey(ctx context.Context) (string, error) {

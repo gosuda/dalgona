@@ -373,6 +373,27 @@ func (s *Store) SetCredential(provider string, c Credential) error {
 	return nil
 }
 
+// SetCredentialIfUnchanged stores next only while the stored credential for
+// provider still equals previous, reloading auth.json under the file lock so
+// the comparison sees concurrent writers. It reports whether it wrote.
+func (s *Store) SetCredentialIfUnchanged(provider string, previous, next Credential) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	written := false
+	err := s.updateAuth(func() {
+		if s.data[provider] != previous {
+			return
+		}
+		s.data[provider] = next
+		delete(s.raw, provider)
+		written = true
+	})
+	if err != nil {
+		return false, fmt.Errorf("store %s credential: %w", provider, err)
+	}
+	return written, nil
+}
+
 func (s *Store) Logout(provider string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
