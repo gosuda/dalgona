@@ -209,7 +209,7 @@ func (fx effects) callResult(slot script.Slot, trace effectTrace) (jsontext.Valu
 		if trace.completed != nil {
 			reason = cmp.Or(trace.completed.Output, reason)
 		}
-		if err := fx.recordEffect(slot, nil, reason); err != nil {
+		if err := fx.recordEffect(slot, nil, script.DeniedMark+reason); err != nil {
 			return nil, err
 		}
 		return nil, fmt.Errorf("%w: %s", script.ErrDenied, reason)
