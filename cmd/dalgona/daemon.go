@@ -22,8 +22,6 @@ import (
 	"github.com/gosuda/dalgona/internal/runner"
 )
 
-func home() string { return config.ProductDalgona.Home() }
-
 func executable() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -40,7 +38,7 @@ func ensure(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return daemon.Ensure(ctx, home(), exe)
+	return daemon.Ensure(ctx, config.ProductDalgona.Home(), exe)
 }
 
 func runDaemon(ctx context.Context, args []string, std stdio) int {

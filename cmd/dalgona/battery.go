@@ -55,7 +55,7 @@ func runWeb(ctx context.Context, args []string, std stdio) int {
 
 func runCodex(ctx context.Context, args []string, std stdio) int {
 	if len(args) > 0 && args[0] == "record" {
-		return codexapp.RecordMain(ctx, args[1:], std, std.errOut, home())
+		return codexapp.RecordMain(ctx, args[1:], std, std.errOut, config.ProductDalgona.Home())
 	}
 	if len(args) != 1 {
 		return usage(std, "codex record|install|uninstall|status")
@@ -64,7 +64,7 @@ func runCodex(ctx context.Context, args []string, std stdio) int {
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	env := codexapp.Env{DalgonaHome: home()}
+	env := codexapp.Env{DalgonaHome: config.ProductDalgona.Home()}
 	switch args[0] {
 	case "install":
 		return codexResult(std, codexapp.Install(env, exe), "Restart the Codex app to use dalgona.")
