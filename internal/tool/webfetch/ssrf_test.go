@@ -209,3 +209,67 @@ func TestDialGuardBlocksLocalhostName(t *testing.T) {
 		t.Fatalf("dial error %v does not say blocked", err)
 	}
 }
+
+func TestBlockedIPSpecialRanges(t *testing.T) {
+	t.Parallel()
+	blocked := []struct {
+		prefix string
+		addrs  []string
+	}{
+		{"0.0.0.0/8", []string{"0.0.0.0", "0.1.2.3", "0.255.255.255"}},
+		{"10.0.0.0/8", []string{"10.0.0.0", "10.1.2.3", "10.255.255.255"}},
+		{"100.64.0.0/10", []string{"100.64.0.0", "100.64.0.1", "100.127.255.255"}},
+		{"127.0.0.0/8", []string{"127.0.0.0", "127.0.0.1", "127.255.255.255"}},
+		{"169.254.0.0/16", []string{"169.254.0.0", "169.254.169.254", "169.254.255.255"}},
+		{"172.16.0.0/12", []string{"172.16.0.0", "172.16.9.9", "172.31.255.255"}},
+		{"192.0.0.0/24", []string{"192.0.0.0", "192.0.0.170"}},
+		{"192.0.2.0/24", []string{"192.0.2.0", "192.0.2.1", "192.0.2.255"}},
+		{"192.168.0.0/16", []string{"192.168.0.0", "192.168.1.1", "192.168.255.255"}},
+		{"198.18.0.0/15", []string{"198.18.0.0", "198.18.0.1", "198.19.255.255"}},
+		{"198.51.100.0/24", []string{"198.51.100.0", "198.51.100.7", "198.51.100.255"}},
+		{"203.0.113.0/24", []string{"203.0.113.0", "203.0.113.9", "203.0.113.255"}},
+		{"224.0.0.0/4", []string{"224.0.0.0", "224.0.0.1", "239.255.255.255"}},
+		{"240.0.0.0/4", []string{"240.0.0.1", "255.255.255.254", "255.255.255.255"}},
+		{"255.255.255.255/32", []string{"255.255.255.255"}},
+		{"::/128", []string{"::"}},
+		{"::1/128", []string{"::1"}},
+		{"fc00::/7", []string{"fc00::1", "fd00::1", "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"}},
+		{"fe80::/10", []string{"fe80::1", "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff"}},
+		{"ff00::/8", []string{"ff00::1", "ff02::1", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"}},
+		{"64:ff9b::/96", []string{"64:ff9b::808:808", "64:ff9b::a00:1", "64:ff9b::c000:201"}},
+		{"2001:db8::/32", []string{"2001:db8::1", "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"}},
+		{"4-in-6 mapped", []string{"::ffff:0.1.2.3", "::ffff:10.0.0.1", "::ffff:100.64.0.1", "::ffff:198.18.0.1"}},
+	}
+	for _, tc := range blocked {
+		for _, raw := range tc.addrs {
+			ip := net.ParseIP(raw)
+			if ip == nil {
+				t.Fatalf("bad test IP %q in %s", raw, tc.prefix)
+			}
+			if !blockedIP(ip) {
+				t.Errorf("blockedIP(%s) in %s = false, want true", raw, tc.prefix)
+			}
+		}
+	}
+	allowed := []string{
+		"8.8.8.8",
+		"1.1.1.1",
+		"9.9.9.9",
+		"100.128.0.1",
+		"172.32.0.1",
+		"192.167.0.1",
+		"198.20.0.1",
+		"::ffff:8.8.8.8",
+		"2606:4700:4700::1111",
+		"2001:4860:4860::8888",
+	}
+	for _, raw := range allowed {
+		ip := net.ParseIP(raw)
+		if ip == nil {
+			t.Fatalf("bad test IP %q", raw)
+		}
+		if blockedIP(ip) {
+			t.Errorf("blockedIP(%s) = true, want false", raw)
+		}
+	}
+}

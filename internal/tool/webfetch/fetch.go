@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -128,22 +129,70 @@ func loopbackAddrs(ip net.IP) bool {
 	return ip.IsLoopback() || !blockedIP(ip)
 }
 
+var blockedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("255.255.255.255/32"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
+var nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+
 func blockedIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
 		return true
 	}
-	if ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+	addr = addr.Unmap()
+	if !addr.IsValid() {
 		return true
 	}
-	return inSharedSpace(ip)
+	for _, prefix := range blockedPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	if embedded, ok := embeddedIPv4(addr); ok {
+		for _, prefix := range blockedPrefixes {
+			if prefix.Contains(embedded) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-func inSharedSpace(ip net.IP) bool {
-	room := ip.To4()
-	return room != nil && room[0] == 100 && room[1]&0xC0 == 0x40
+func embeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
+	if !addr.Is6() || !nat64Prefix.Contains(addr) {
+		return netip.Addr{}, false
+	}
+	raw := addr.As16()
+	embedded := netip.AddrFrom4([4]byte{raw[12], raw[13], raw[14], raw[15]})
+	if !embedded.IsValid() {
+		return netip.Addr{}, false
+	}
+	return embedded, true
 }
 
 func hostIP(host string) net.IP {
