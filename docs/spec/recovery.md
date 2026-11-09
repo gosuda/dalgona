@@ -13,7 +13,7 @@ This specification defines how the agent core recovers a session after a halt, C
 
 The host MUST replay the journal through the event fold before it acts. Grants, read snapshots, runner bindings, advisor notes, and completed turns MUST fold over the full journal. Model context MUST use only the active path.
 
-Read snapshots MUST be restored from their blobs in epoch and revision order. A snapshot that cannot be restored MUST be logged. It MUST NOT stop recovery.
+Read snapshots MUST be restored from their blobs in epoch and revision order. A snapshot that cannot be restored MUST be logged. It MUST NOT stop recovery, except that a snapshot whose masked bytes contain a secret placeholder that cannot be unmasked MUST abort the open with an error and MUST NOT populate the snapshot store with placeholder text.
 
 ## Rules
 

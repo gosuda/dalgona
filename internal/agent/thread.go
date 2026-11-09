@@ -182,7 +182,9 @@ func (t *Thread) prepare(ctx context.Context, loaded loadedSession, overrides Ov
 		return fmt.Errorf("agent: runner %s: %w", t.created.Runner, err)
 	}
 	t.runner = run
-	t.restoreSnapshots(loaded.state)
+	if err := t.restoreSnapshots(loaded.state); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -294,7 +296,7 @@ func shellName() string {
 
 func instructionsText(home, cwd string) string { return prompt.Instructions(home, cwd) }
 
-func (t *Thread) restoreSnapshots(state event.State) {
+func (t *Thread) restoreSnapshots(state event.State) error {
 	snapshots := make([]event.Snapshot, 0, len(state.Snapshots))
 	for _, item := range state.Snapshots {
 		snapshots = append(snapshots, item)
@@ -303,22 +305,32 @@ func (t *Thread) restoreSnapshots(state event.State) {
 		return cmp.Or(cmp.Compare(a.Epoch, b.Epoch), cmp.Compare(a.Revision, b.Revision), cmp.Compare(a.Ref, b.Ref))
 	})
 	for _, item := range snapshots {
-		data, err := t.host.journal.Blob(item.Blob)
-		if err == nil {
-			err = t.snapshots.Restore(snapshotMeta(item), data)
-		}
+		masked, err := t.host.journal.Blob(item.Blob)
 		if err != nil {
+			t.host.log.Warn("agent: restore read snapshot", "thread", t.id, "ref", item.Ref, "error", err)
+			continue
+		}
+		if digest := snapshot.Digest(masked); digest != item.Blob {
+			t.host.log.Warn("agent: restore read snapshot", "thread", t.id, "ref", item.Ref, "error", "blob digest mismatch")
+			continue
+		}
+		raw, err := t.host.unmaskStrict(string(masked))
+		if err != nil {
+			return fmt.Errorf("agent: restore snapshot %s: %w", item.Ref, err)
+		}
+		if err := t.snapshots.Restore(snapshotMetaWithDigest(item, snapshot.Digest([]byte(raw))), []byte(raw)); err != nil {
 			t.host.log.Warn("agent: restore read snapshot", "thread", t.id, "ref", item.Ref, "error", err)
 		}
 	}
+	return nil
 }
 
-func snapshotMeta(item event.Snapshot) []byte {
+func snapshotMetaWithDigest(item event.Snapshot, digest string) []byte {
 	shown := make([]snapshot.Range, len(item.Shown))
 	for i, line := range item.Shown {
 		shown[i] = snapshot.Range{Start: line.Start, End: line.End}
 	}
-	entry := snapshot.Entry{Ref: item.Ref, Path: item.Path, Blob: item.Blob, Shown: shown, Revision: item.Revision, Epoch: item.Epoch}
+	entry := snapshot.Entry{Ref: item.Ref, Path: item.Path, Blob: digest, Shown: shown, Revision: item.Revision, Epoch: item.Epoch}
 	return entry.Meta()
 }
 

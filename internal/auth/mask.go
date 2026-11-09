@@ -78,6 +78,34 @@ func (s *Store) Unmask(text string) string {
 	return applyReplacements(text, replacements)
 }
 
+func (s *Store) UnmaskStrict(text string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reloadForMask()
+	s.refreshSecrets()
+	replacements := invertReplacements(s.credentialReplacements())
+	for placeholder, secret := range s.secrets {
+		replacements = append(replacements, replacement{from: placeholder, to: secret})
+	}
+	out := applyReplacements(text, replacements)
+	if token, ok := unresolvedPlaceholder(out); ok {
+		return "", fmt.Errorf("auth: secret placeholder %q cannot be restored: secrets.json is missing or home changed", token)
+	}
+	return out, nil
+}
+
+func unresolvedPlaceholder(text string) (string, bool) {
+	rel := strings.Index(text, "{{secret:")
+	if rel < 0 {
+		return "", false
+	}
+	relEnd := strings.Index(text[rel:], "}}")
+	if relEnd < 0 {
+		return "", false
+	}
+	return text[rel : rel+relEnd+2], true
+}
+
 func (s *Store) MaskError() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

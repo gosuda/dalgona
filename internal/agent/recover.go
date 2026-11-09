@@ -290,6 +290,7 @@ func (w *worker) fileSHA(ctx context.Context, path string) (string, error) {
 
 func (w *worker) restoreEdit(ctx context.Context, callID string, files []event.FileChange, current []string) error {
 	var changed []string
+	var targets []event.FileChange
 	for i, file := range files {
 		if current[i] == file.PreSHA {
 			continue
@@ -298,7 +299,18 @@ func (w *worker) restoreEdit(ctx context.Context, callID string, files []event.F
 		if current[i] != file.PostSHA {
 			continue
 		}
-		if err := w.restoreFile(ctx, file); err != nil {
+		targets = append(targets, file)
+	}
+	restored := make([][]byte, len(targets))
+	for i, file := range targets {
+		data, err := w.preImage(file)
+		if err != nil {
+			return err
+		}
+		restored[i] = data
+	}
+	for i, file := range targets {
+		if err := w.writeRestored(ctx, file, restored[i]); err != nil {
 			return err
 		}
 	}
@@ -306,17 +318,28 @@ func (w *worker) restoreEdit(ctx context.Context, callID string, files []event.F
 	return w.completeRecovered(ctx, callID, output, recoveredStopped)
 }
 
-func (w *worker) restoreFile(ctx context.Context, file event.FileChange) error {
+func (w *worker) preImage(file event.FileChange) ([]byte, error) {
+	if file.PreBlob == nil {
+		return nil, nil
+	}
+	data, err := w.t.host.journal.Blob(file.PreBlob.Blob)
+	if err != nil {
+		return nil, fmt.Errorf("agent: load pre-image of %s: %w", file.Path, err)
+	}
+	raw, err := w.t.host.unmaskStrict(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("agent: restore %s: %w", file.Path, err)
+	}
+	return []byte(raw), nil
+}
+
+func (w *worker) writeRestored(ctx context.Context, file event.FileChange, data []byte) error {
 	path := absPath(w.t.created.Cwd, file.Path)
 	if file.PreBlob == nil {
 		if err := w.t.runner.Remove(ctx, path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("agent: restore %s: %w", file.Path, err)
 		}
 		return nil
-	}
-	data, err := w.t.host.journal.Blob(file.PreBlob.Blob)
-	if err != nil {
-		return fmt.Errorf("agent: load pre-image of %s: %w", file.Path, err)
 	}
 	mode := fs.FileMode(0o644)
 	if info, statErr := w.t.runner.Stat(ctx, path); statErr == nil {
@@ -328,6 +351,17 @@ func (w *worker) restoreFile(ctx context.Context, file event.FileChange) error {
 		return fmt.Errorf("agent: restore %s: %w", file.Path, err)
 	}
 	return nil
+}
+
+func (h *Host) unmaskStrict(text string) (string, error) {
+	if h.cfg.Auth == nil {
+		return text, nil
+	}
+	out, err := h.cfg.Auth.UnmaskStrict(text)
+	if err != nil {
+		return "", fmt.Errorf("agent: restore secret placeholder: %w", err)
+	}
+	return out, nil
 }
 
 func absPath(cwd, path string) string {
