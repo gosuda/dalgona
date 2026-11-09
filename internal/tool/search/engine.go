@@ -29,9 +29,9 @@ type hit struct {
 }
 
 type grepFile struct {
-	entry fileEntry
-	data  []byte
-	lines []string
+	entry  fileEntry
+	data   []byte
+	starts []int
 }
 
 func execute(cwd string, args args) (outcome, error) {
@@ -219,14 +219,14 @@ func scanFile(entry fileEntry, matcher *regexp.Regexp) (grepFile, []int) {
 	if err != nil || len(data) > maxSearchFileBytes || bytes.IndexByte(data[:min(len(data), 8192)], 0) >= 0 || !utf8.Valid(data) {
 		return grepFile{}, nil
 	}
-	lines := splitLines(data)
+	starts := splitStarts(data)
 	var ordered []int
-	for i, line := range lines {
-		if matcher.MatchString(line) {
+	for i := range starts {
+		if matcher.Match(lineBytes(data, starts, i+1)) {
 			ordered = append(ordered, i+1)
 		}
 	}
-	return grepFile{entry: entry, data: data, lines: lines}, ordered
+	return grepFile{entry: entry, data: data, starts: starts}, ordered
 }
 
 func renderGrep(files []grepFile, kept []hit, total int, pattern string) outcome {
@@ -237,7 +237,7 @@ func renderGrep(files []grepFile, kept []hit, total int, pattern string) outcome
 	rows := make([]string, 0, len(kept)*(context+1))
 	captures := make([]capture, 0, len(files))
 	for i, file := range files {
-		marks := lineMarks(kept, i, len(file.lines), context)
+		marks := lineMarks(kept, i, len(file.starts), context)
 		if len(marks) == 0 {
 			continue
 		}
@@ -262,22 +262,6 @@ func contextWidth(hits int) int {
 	}
 }
 
-func appendFileRows(rows []string, file grepFile, marks map[int]byte) ([]string, []snapshot.Range) {
-	shown := make([]snapshot.Range, 0, len(marks))
-	for line := 1; line <= len(file.lines); line++ {
-		marker, ok := marks[line]
-		if !ok {
-			continue
-		}
-		text, complete := cropMatch(file.lines[line-1])
-		rows = append(rows, fmt.Sprintf("%s:%d%c %s", file.entry.display, line, marker, text))
-		if complete {
-			shown = appendShown(shown, line)
-		}
-	}
-	return rows, shown
-}
-
 func lineMarks(kept []hit, file, count, context int) map[int]byte {
 	out := make(map[int]byte)
 	for _, item := range kept {
@@ -294,18 +278,20 @@ func lineMarks(kept []hit, file, count, context int) map[int]byte {
 	return out
 }
 
-func splitLines(data []byte) []string {
-	if len(data) == 0 {
-		return nil
+func appendFileRows(rows []string, file grepFile, marks map[int]byte) ([]string, []snapshot.Range) {
+	shown := make([]snapshot.Range, 0, len(marks))
+	for line := 1; line <= len(file.starts); line++ {
+		marker, ok := marks[line]
+		if !ok {
+			continue
+		}
+		text, complete := cropMatch(string(lineBytes(file.data, file.starts, line)))
+		rows = append(rows, fmt.Sprintf("%s:%d%c %s", file.entry.display, line, marker, text))
+		if complete {
+			shown = appendShown(shown, line)
+		}
 	}
-	lines := strings.Split(string(data), "\n")
-	if lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	for i := range lines {
-		lines[i], _ = strings.CutSuffix(lines[i], "\r")
-	}
-	return lines
+	return rows, shown
 }
 
 func cropMatch(line string) (string, bool) {
@@ -326,4 +312,34 @@ func appendShown(ranges []snapshot.Range, line int) []snapshot.Range {
 		return ranges
 	}
 	return append(ranges, snapshot.Range{Start: line, End: line})
+}
+
+func splitStarts(data []byte) []int {
+	starts := make([]int, 0, bytes.Count(data, []byte("\n"))+1)
+	start := 0
+	for i, b := range data {
+		if b != '\n' {
+			continue
+		}
+		starts = append(starts, start)
+		start = i + 1
+	}
+	if start < len(data) {
+		starts = append(starts, start)
+	}
+	return starts
+}
+
+func lineBytes(data []byte, starts []int, line int) []byte {
+	end := len(data)
+	if line < len(starts) {
+		end = starts[line] - 1
+	} else if end > starts[line-1] && data[end-1] == '\n' {
+		end--
+	}
+	chunk := data[starts[line-1]:end]
+	if len(chunk) > 0 && chunk[len(chunk)-1] == '\r' {
+		chunk = chunk[:len(chunk)-1]
+	}
+	return chunk
 }
