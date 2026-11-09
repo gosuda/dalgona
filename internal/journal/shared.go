@@ -110,7 +110,9 @@ func (s *Store) refreshOwned(sid string) error {
 }
 
 func (s *Store) isCurrent(sid string) (bool, error) {
+	s.mu.Lock()
 	st := s.sessions[sid]
+	s.mu.Unlock()
 	info, err := os.Stat(s.journalPath(sid))
 	if errors.Is(err, fs.ErrNotExist) {
 		return st == nil || st.seq == 0, nil
@@ -131,9 +133,7 @@ func (s *Store) loadSession(sid string) error {
 	if err != nil {
 		return fmt.Errorf("journal: load mirror index %s: %w", sid, err)
 	}
-	s.idx.events[sid] = mirror
-	defer delete(s.idx.events, sid)
-	result, err := s.reconcileSession(sid)
+	result, err := s.reconcileSession(sid, mirror)
 	if err != nil {
 		return err
 	}
@@ -141,6 +141,8 @@ func (s *Store) loadSession(sid string) error {
 	if err != nil {
 		return fmt.Errorf("journal: stat %s: %w", sid, err)
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var closeErr error
 	if old := s.sessions[sid]; old != nil && old.file != nil {
 		closeErr = old.file.Close()

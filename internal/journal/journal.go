@@ -2,7 +2,6 @@ package journal
 
 import (
 	"bufio"
-	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -64,6 +63,7 @@ type Store struct {
 	db         *sql.DB
 	idx        *dbIndex
 	sessions   map[string]*sessionState
+	slocks     map[string]*sync.Mutex
 	lock       *os.File
 	users      *os.File
 	shared     bool
@@ -116,6 +116,7 @@ func open(dir string, shared bool) (_ *Store, retErr error) {
 		dir:      dir,
 		shared:   shared,
 		sessions: map[string]*sessionState{},
+		slocks:   map[string]*sync.Mutex{},
 		dirSync:  syncDir,
 	}
 	defer func() {
@@ -270,6 +271,20 @@ func buildBatch(st *sessionState, events [][]byte) (appendBatch, error) {
 	return batch, nil
 }
 
+func (s *Store) lockFor(session string) *sync.Mutex {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.slocks == nil {
+		s.slocks = map[string]*sync.Mutex{}
+	}
+	l, ok := s.slocks[session]
+	if !ok {
+		l = &sync.Mutex{}
+		s.slocks[session] = l
+	}
+	return l
+}
+
 func (s *Store) Append(ctx context.Context, session string, events ...[]byte) (uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -277,12 +292,25 @@ func (s *Store) Append(ctx context.Context, session string, events ...[]byte) (u
 	if !validSessionID(session) {
 		return 0, fmt.Errorf("journal: invalid session id %q", session)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.appendState(session)
-	if err != nil {
-		return 0, err
+	l := s.lockFor(session)
+	l.Lock()
+	defer l.Unlock()
+	if s.shared {
+		if err := s.refreshOwned(session); err != nil {
+			return 0, err
+		}
 	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return 0, errors.New("journal: store is closed")
+	}
+	st := s.sessions[session]
+	if st == nil {
+		st = &sessionState{hash: genesisPrev}
+		s.sessions[session] = st
+	}
+	s.mu.Unlock()
 	if st.damaged {
 		return st.seq, fmt.Errorf("journal: session %s is damaged at seq %d", session, st.damagedSeq)
 	}
@@ -292,26 +320,12 @@ func (s *Store) Append(ctx context.Context, session string, events ...[]byte) (u
 	return s.writeBatch(session, st, events)
 }
 
-func (s *Store) appendState(session string) (*sessionState, error) {
-	if s.shared {
-		if err := s.refreshOwned(session); err != nil {
-			return nil, err
-		}
-	}
-	st := s.sessions[session]
-	if st == nil {
-		st = &sessionState{hash: genesisPrev}
-		s.sessions[session] = st
-	}
-	return st, nil
-}
-
 func (s *Store) writeBatch(session string, st *sessionState, events [][]byte) (uint64, error) {
 	batch, err := buildBatch(st, events)
 	if err != nil {
 		return st.seq, err
 	}
-	file, err := s.appendFile(session)
+	file, err := s.appendFile(session, st)
 	if err != nil {
 		return st.seq, err
 	}
@@ -353,8 +367,7 @@ func (s *Store) syncfs() error {
 	return nil
 }
 
-func (s *Store) appendFile(session string) (*os.File, error) {
-	st := s.sessions[session]
+func (s *Store) appendFile(session string, st *sessionState) (*os.File, error) {
 	if st.file != nil {
 		return st.file, nil
 	}
@@ -381,32 +394,63 @@ func (s *Store) appendFile(session string) (*os.File, error) {
 	return file, nil
 }
 
-func (s *Store) Replay(session string, fn func(seq uint64, ev []byte) error) (retErr error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshUnowned(session); err != nil {
-		return err
-	}
-	st := s.sessions[session]
-	file, err := os.Open(s.journalPath(session))
-	if errors.Is(err, fs.ErrNotExist) {
-		if st == nil || st.seq == 0 {
-			return nil
-		}
-		return fmt.Errorf("journal: session %s journal missing", session)
-	}
+func (s *Store) Replay(session string, fn func(seq uint64, ev []byte) error) error {
+	snap, err := s.beginReplay(session)
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.Join(retErr, file.Close()) }()
-	cursor := replayCursor{session: session, seq: 1, prevHash: genesisPrev, fn: fn, openTail: s.shared}
-	if err := replayFile(file, &cursor); err != nil {
-		return err
+	if snap.file == nil {
+		return nil
 	}
-	if st != nil && st.damaged {
-		return &DamageError{Session: session, Seq: st.damagedSeq}
+	cursor := replayCursor{session: session, seq: 1, prevHash: genesisPrev, fn: fn, openTail: s.shared}
+	replayErr := replayFile(snap.file, snap.limit, &cursor)
+	if closeErr := snap.file.Close(); closeErr != nil || replayErr != nil {
+		return errors.Join(replayErr, closeErr)
+	}
+	if snap.damaged {
+		return &DamageError{Session: session, Seq: snap.damagedSeq}
 	}
 	return nil
+}
+
+type replaySnapshot struct {
+	file       *os.File
+	limit      int64
+	damaged    bool
+	damagedSeq uint64
+}
+
+func (s *Store) beginReplay(session string) (replaySnapshot, error) {
+	l := s.lockFor(session)
+	l.Lock()
+	defer l.Unlock()
+	if err := s.refreshUnowned(session); err != nil {
+		return replaySnapshot{}, err
+	}
+	s.mu.Lock()
+	st := s.sessions[session]
+	var seq uint64
+	var damaged bool
+	var damagedSeq uint64
+	if st != nil {
+		seq, damaged, damagedSeq = st.seq, st.damaged, st.damagedSeq
+	}
+	s.mu.Unlock()
+	file, err := os.Open(s.journalPath(session))
+	if errors.Is(err, fs.ErrNotExist) {
+		if st == nil || seq == 0 {
+			return replaySnapshot{}, nil
+		}
+		return replaySnapshot{}, fmt.Errorf("journal: session %s journal missing", session)
+	}
+	if err != nil {
+		return replaySnapshot{}, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return replaySnapshot{}, errors.Join(err, file.Close())
+	}
+	return replaySnapshot{file: file, limit: info.Size(), damaged: damaged, damagedSeq: damagedSeq}, nil
 }
 
 type replayCursor struct {
@@ -417,24 +461,65 @@ type replayCursor struct {
 	openTail bool
 }
 
-func replayFile(file *os.File, cursor *replayCursor) error {
-	reader := bufio.NewReaderSize(file, 64*1024)
-	var scratch []byte
+type replayScanner struct {
+	file    *os.File
+	limit   int64
+	cursor  *replayCursor
+	reader  *bufio.Reader
+	scratch []byte
+}
+
+func replayFile(file *os.File, limit int64, cursor *replayCursor) error {
+	scanner := &replayScanner{
+		file:   file,
+		limit:  limit,
+		cursor: cursor,
+		reader: bufio.NewReaderSize(io.LimitReader(file, limit), 64*1024),
+	}
 	for {
-		line, hadNL, readErr := readJournalLine(reader, &scratch)
-		if line != nil && (hadNL || !cursor.openTail) {
-			if err := cursor.replayLine(line, hadNL); err != nil {
-				return err
-			}
+		line, hadNL, readErr := readJournalLine(scanner.reader, &scanner.scratch)
+		stop, err := scanner.chunk(line, hadNL, readErr)
+		if err != nil {
+			return err
 		}
-		if readErr == nil {
-			continue
-		}
-		if errors.Is(readErr, io.EOF) {
+		if stop {
 			return nil
 		}
-		return readErr
 	}
+}
+
+func (s *replayScanner) chunk(line []byte, hadNL bool, readErr error) (bool, error) {
+	if line != nil && (hadNL || !s.cursor.openTail) {
+		if s.cutShort(hadNL, readErr) {
+			return true, nil
+		}
+		if err := s.cursor.replayLine(line, hadNL); err != nil {
+			return true, err
+		}
+	}
+	if readErr == nil {
+		return false, nil
+	}
+	if errors.Is(readErr, io.EOF) {
+		return true, nil
+	}
+	return true, readErr
+}
+
+func (s *replayScanner) cutShort(hadNL bool, readErr error) bool {
+	if hadNL || s.cursor.openTail || !errors.Is(readErr, io.EOF) {
+		return false
+	}
+	grown, err := fileGrownBeyond(s.file, s.limit)
+	return err == nil && grown
+}
+
+func fileGrownBeyond(file *os.File, limit int64) (bool, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	return info.Size() > limit, nil
 }
 
 func (c *replayCursor) replayLine(line []byte, hadNL bool) error {
@@ -543,6 +628,9 @@ func (s *Store) Blob(sha string) ([]byte, error) {
 }
 
 func (s *Store) Status(session string) (SessionHead, error) {
+	l := s.lockFor(session)
+	l.Lock()
+	defer l.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.shared {
@@ -569,27 +657,70 @@ func (s *Store) headOf(id string, st *sessionState) SessionHead {
 	return head
 }
 
-func (s *Store) Sessions() ([]SessionHead, error) {
+func (s *Store) sessionIDs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.sessionIDsLocked()
+}
+
+func (s *Store) sessionIDsLocked() []string {
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(s.sessions)+len(s.idx.sessions))
+	for id := range s.sessions {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for id := range s.idx.sessions {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+func (s *Store) lockSessions(ids []string) func() {
+	locks := make([]*sync.Mutex, 0, len(ids))
+	for _, id := range ids {
+		locks = append(locks, s.lockFor(id))
+	}
+	for _, l := range locks {
+		l.Lock()
+	}
+	return func() {
+		for _, l := range locks {
+			l.Unlock()
+		}
+	}
+}
+
+func (s *Store) Sessions() ([]SessionHead, error) {
+	s.mu.Lock()
 	if s.shared {
 		if err := s.reloadIndex(); err != nil {
+			s.mu.Unlock()
 			return nil, err
 		}
 	}
-	heads := make([]SessionHead, 0, len(s.sessions)+len(s.idx.sessions))
-	seen := map[string]bool{}
-	for id, st := range s.sessions {
-		heads = append(heads, s.freshHead(id, st))
-		seen[id] = true
-	}
-	for id, row := range s.idx.sessions {
-		if seen[id] {
+	ids := s.sessionIDsLocked()
+	s.mu.Unlock()
+	unlock := s.lockSessions(ids)
+	defer unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	heads := make([]SessionHead, 0, len(ids))
+	for _, id := range ids {
+		if st := s.sessions[id]; st != nil {
+			heads = append(heads, s.freshHead(id, st))
 			continue
 		}
-		heads = append(heads, mirrorRowHead(id, row))
+		if row, ok := s.idx.sessions[id]; ok {
+			heads = append(heads, mirrorRowHead(id, row))
+		}
 	}
-	slices.SortFunc(heads, func(a, b SessionHead) int { return cmp.Compare(a.ID, b.ID) })
 	return heads, nil
 }
 
@@ -635,24 +766,34 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closed = true
-	hasBackup := s.backupStop != nil
-	if hasBackup {
+	stopBackup := s.backupStop != nil
+	if stopBackup {
 		close(s.backupStop)
 	}
+	s.mu.Unlock()
+	if stopBackup {
+		s.backupWg.Wait()
+	}
+	s.mu.Lock()
+	ids := s.sessionIDsLocked()
+	s.mu.Unlock()
+	unlock := s.lockSessions(ids)
+	defer unlock()
+	s.mu.Lock()
 	db := s.db
-	var result error
+	dir := s.dir
+	dirSync := s.dirSync
+	var fileErr error
 	for _, st := range s.sessions {
 		if st.file != nil {
-			result = errors.Join(result, st.file.Close())
+			fileErr = errors.Join(fileErr, st.file.Close())
 			st.file = nil
 		}
 	}
 	s.mu.Unlock()
-	if hasBackup {
-		s.backupWg.Wait()
-	}
+	result := fileErr
 	if db != nil {
-		result = errors.Join(result, s.backupDB(), db.Close())
+		result = errors.Join(result, backupDBFiles(db, dir, dirSync), db.Close())
 	}
 	return errors.Join(result, releaseLock(s.users), releaseLock(s.lock))
 }

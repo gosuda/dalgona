@@ -71,9 +71,7 @@ func (s *Store) reconcileOne(sid string) (bool, error) {
 		s.sessions[sid] = stateOf(reconciled)
 		return false, nil
 	}
-	s.idx.events[sid] = si
-	result, err := s.reconcileSession(sid)
-	delete(s.idx.events, sid)
+	result, err := s.reconcileSession(sid, si)
 	if err != nil {
 		return false, err
 	}
@@ -188,7 +186,7 @@ func fileExists(path string) (bool, error) {
 	return false, err
 }
 
-func (s *Store) reconcileSession(sid string) (reconcileResult, error) {
+func (s *Store) reconcileSession(sid string, mirror *sessIndex) (reconcileResult, error) {
 	data, err := os.ReadFile(s.journalPath(sid))
 	if err != nil {
 		return reconcileResult{}, fmt.Errorf("journal: read %s: %w", sid, err)
@@ -197,7 +195,6 @@ func (s *Store) reconcileSession(sid string) (reconcileResult, error) {
 	if err != nil {
 		return reconcileResult{}, err
 	}
-	mirror := s.idx.events[sid]
 	if hasMarker {
 		mirror = nil
 	}
@@ -213,7 +210,8 @@ func (s *Store) reconcileSession(sid string) (reconcileResult, error) {
 		head.Status = SessionDamaged
 		head.DamagedSeq = scan.damagedSeq
 	}
-	rebuild, err := s.finishReconcile(sid, &scan, head, hasMarker)
+	plan := reconcilePlan{scan: &scan, head: head, hasMarker: hasMarker, mirror: mirror}
+	rebuild, err := s.finishReconcile(sid, plan)
 	if err != nil {
 		return reconcileResult{}, err
 	}
@@ -365,20 +363,27 @@ func (s *Store) fetchVerified(sid string, seq uint64, prevHash string) (emitRec,
 	return emitRec{seq: seq, hash: result.hash, ev: result.ev}, true, nil
 }
 
-func (s *Store) finishReconcile(sid string, scan *scanState, head SessionHead, hasMarker bool) (bool, error) {
-	if err := s.persistRepair(sid, scan, hasMarker); err != nil {
+type reconcilePlan struct {
+	scan      *scanState
+	head      SessionHead
+	hasMarker bool
+	mirror    *sessIndex
+}
+
+func (s *Store) finishReconcile(sid string, plan reconcilePlan) (bool, error) {
+	if err := s.persistRepair(sid, plan.scan, plan.hasMarker); err != nil {
 		return false, err
 	}
-	if scan.damagedSeq > 0 {
-		return scan.rebuild, upsertSession(s.db, sid, string(head.Status), head.HeadSeq)
+	if plan.scan.damagedSeq > 0 {
+		return plan.scan.rebuild, upsertSession(s.db, sid, string(plan.head.Status), plan.head.HeadSeq)
 	}
-	if !s.shared && (scan.rebuild || mirrorHashMismatch(s.idx.events[sid], scan.emits)) {
+	if !s.shared && (plan.scan.rebuild || mirrorHashMismatch(plan.mirror, plan.scan.emits)) {
 		return true, nil
 	}
-	if mirrorMatches(s.idx.events[sid], scan.emits) {
-		return false, upsertSession(s.db, sid, string(head.Status), head.HeadSeq)
+	if mirrorMatches(plan.mirror, plan.scan.emits) {
+		return false, upsertSession(s.db, sid, string(plan.head.Status), plan.head.HeadSeq)
 	}
-	return false, replaceSession(s.db, sid, scan.emits, head)
+	return false, replaceSession(s.db, sid, plan.scan.emits, plan.head)
 }
 
 func mirrorMatches(si *sessIndex, emits []emitRec) bool {
