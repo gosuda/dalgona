@@ -14,6 +14,8 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/pelletier/go-toml/v2/unstable"
+
+	"github.com/gosuda/dalgona/internal/keywords"
 )
 
 type fileDoc struct {
@@ -292,9 +294,16 @@ func (c *Config) mergeMaps(doc *fileDoc) {
 		c.MCPServers[name] = MCPServerSpec(value)
 	}
 	for word, value := range doc.Keywords {
-		keyword := KeywordSpec{Notice: value.Notice, Text: value.Text, Effort: value.Effort, Requires: value.Requires, Enabled: value.Enabled == nil || *value.Enabled}
+		keyword := KeywordSpec{Notice: value.Notice, Text: value.Text, Effort: value.Effort, Requires: value.Requires}
 		if len(value.Hue) == 2 {
 			keyword.Hue = [2]int{value.Hue[0], value.Hue[1]}
+		}
+		if value.Enabled != nil {
+			keyword.Enabled = *value.Enabled
+		} else if existing, ok := c.Keywords[word]; ok {
+			keyword.Enabled = existing.Enabled
+		} else {
+			keyword.Enabled = keywords.DefaultEnabled(string(c.Product), word)
 		}
 		c.Keywords[word] = keyword
 	}

@@ -19,13 +19,17 @@ type Keyword struct {
 //go:embed notices/*.md
 var noticeFiles embed.FS
 
-func Builtins(product string) []Keyword {
-	all := []Keyword{
+func builtinTable(product string) []Keyword {
+	return []Keyword{
 		{Word: "ultrathink", Hue: [2]int{0, 330}, Effort: "max", Notice: notice("ultrathink.md"), Enabled: true},
 		{Word: "jevify", Hue: [2]int{300, 420}, Requires: []string{"eval"}, Effort: "default", Notice: notice("jevify.md"), Enabled: product == "dalgona"},
 		{Word: "workflowz", Hue: [2]int{30, 150}, Requires: []string{"eval", "task"}, Effort: "default", Notice: notice("workflowz.md"), Enabled: product == "dalgona"},
 		{Word: "orchestrate", Hue: [2]int{150, 280}, Requires: []string{"task"}, Effort: "default", Notice: notice("orchestrate.md"), Enabled: product == "dalgona"},
 	}
+}
+
+func Builtins(product string) []Keyword {
+	all := builtinTable(product)
 	out := make([]Keyword, 0, len(all))
 	for _, item := range all {
 		if item.Enabled {
@@ -34,6 +38,15 @@ func Builtins(product string) []Keyword {
 		}
 	}
 	return out
+}
+
+func DefaultEnabled(product, word string) bool {
+	for _, item := range builtinTable(product) {
+		if item.Word == word {
+			return item.Enabled
+		}
+	}
+	return true
 }
 
 func Merge(builtins, custom []Keyword) []Keyword {
