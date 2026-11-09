@@ -8,7 +8,12 @@ import StatusBar from "#lib/components/StatusBar.svelte";
 import ThreadList from "#lib/components/ThreadList.svelte";
 import Transcript from "#lib/components/Transcript.svelte";
 import { threadTitle } from "#lib/labels.ts";
-import { RpcClient, RpcError } from "#lib/protocol.ts";
+import {
+	RpcClient,
+	RpcError,
+	rpcSocketUrl,
+	tokenFromHash,
+} from "#lib/protocol.ts";
 import {
 	activeApproval,
 	dropSentFollowup,
@@ -69,6 +74,7 @@ let loadingThreads = $state(false);
 let loadingTranscript = $state(false);
 let startingThread = $state(false);
 let errorMessage = $state("");
+let accessToken = $state("");
 let client: RpcClient | undefined;
 let connectionGeneration = 0;
 let selectionGeneration = 0;
@@ -105,9 +111,11 @@ function requireClient(): RpcClient {
 }
 
 function websocketUrl(): string {
-	const scheme = location.protocol === "https:" ? "wss" : "ws";
-	const token = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
-	return `${scheme}://${location.host}/rpc?token=${encodeURIComponent(token)}`;
+	return rpcSocketUrl(
+		location.host,
+		location.protocol === "https:",
+		accessToken,
+	);
 }
 
 async function connect(): Promise<void> {
@@ -115,8 +123,14 @@ async function connect(): Promise<void> {
 	client?.close();
 	approvals = [];
 	errorMessage = "";
-	const token = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
-	if (token === "") {
+	const hashed = tokenFromHash(location.hash);
+	if (hashed !== "") {
+		accessToken = hashed;
+	}
+	if (location.hash !== "") {
+		history.replaceState(null, "", `${location.pathname}${location.search}`);
+	}
+	if (accessToken === "") {
 		connection = "disconnected";
 		errorMessage =
 			"The URL has no access token. Open the full URL printed by dalgona web.";

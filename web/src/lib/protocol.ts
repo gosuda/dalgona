@@ -68,6 +68,22 @@ function rpcError(value: JsonValue | undefined): RpcError {
 	);
 }
 
+export function tokenFromHash(hash: string): string {
+	const params = new URLSearchParams(
+		hash.startsWith("#") ? hash.slice(1) : hash,
+	);
+	return params.get("token") ?? "";
+}
+
+export function rpcSocketUrl(
+	host: string,
+	secure: boolean,
+	token: string,
+): string {
+	const scheme = secure ? "wss" : "ws";
+	return `${scheme}://${host}/rpc?token=${encodeURIComponent(token)}`;
+}
+
 export class RpcClient {
 	private readonly url: string;
 	private readonly handlers: RpcHandlers;
