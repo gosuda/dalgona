@@ -620,7 +620,7 @@ func (s *Store) startBackup() {
 			case <-s.backupStop:
 				return
 			case <-ticker.C:
-				if err := backupDB(s.db, s.dir); err != nil {
+				if err := s.backupDB(); err != nil {
 					slog.Warn("journal: backup failed", "error", err)
 				}
 			}
@@ -652,7 +652,7 @@ func (s *Store) Close() error {
 		s.backupWg.Wait()
 	}
 	if db != nil {
-		result = errors.Join(result, backupDB(db, s.dir), db.Close())
+		result = errors.Join(result, s.backupDB(), db.Close())
 	}
 	return errors.Join(result, releaseLock(s.users), releaseLock(s.lock))
 }

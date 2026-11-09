@@ -375,22 +375,25 @@ const upsertSessionSQL = `INSERT INTO sessions(id, status, head_seq, updated_at)
 		updated_at = excluded.updated_at,
 		status = CASE WHEN sessions.status = 'damaged' THEN 'damaged' ELSE excluded.status END`
 
-func backupDB(db *sql.DB, dir string) (retErr error) {
-	release, err := holdLock(filepath.Join(dir, "repair.lock"))
+func (s *Store) backupDB() (retErr error) {
+	release, err := holdLock(filepath.Join(s.dir, "repair.lock"))
 	if err != nil {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, release()) }()
-	tmp := filepath.Join(dir, "state.db.bak.tmp")
-	final := filepath.Join(dir, "state.db.bak")
+	tmp := filepath.Join(s.dir, "state.db.bak.tmp")
+	final := filepath.Join(s.dir, "state.db.bak")
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("journal: remove stale backup: %w", err)
 	}
-	if _, err := db.Exec("VACUUM INTO ?", tmp); err != nil {
+	if _, err := s.db.Exec("VACUUM INTO ?", tmp); err != nil {
 		return fmt.Errorf("journal: backup state.db: %w", err)
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		return fmt.Errorf("journal: install state.db.bak: %w", err)
+	}
+	if err := s.dirSync(s.dir); err != nil {
+		return fmt.Errorf("journal: sync backup dir %s: %w", s.dir, err)
 	}
 	return nil
 }

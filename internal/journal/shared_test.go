@@ -273,7 +273,7 @@ func TestOpenSharedConcurrentBackups(t *testing.T) {
 	for i := range errs {
 		wg.Go(func() {
 			for range 10 {
-				errs[i] = errors.Join(errs[i], backupDB(stores[i%len(stores)].db, dir))
+				errs[i] = errors.Join(errs[i], stores[i%len(stores)].backupDB())
 			}
 		})
 	}
