@@ -109,21 +109,24 @@ func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, curre
 	body := requestBody{Reader: io.MultiReader(bytes.NewReader(wire.AppendFrame(nil, 0, payload)), reader), pipe: reader}
 	httpReq, err := p.newRequest(gateCtx, runPath, body, token)
 	if err != nil {
+		_ = pipe.Close()
 		return model.AttemptResult{Err: err}
 	}
 	httpReq.Header.Set("Content-Type", "application/connect+proto")
 	stopBeats := repeat(gateCtx, heartbeatPeriod, func() error {
 		return writer.send(&wire.AgentClientMessage{MessageNumber: wire.ClientHeartbeatNumber, MessageView: []byte{}})
 	})
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		writer.close()
+		stopBeats()
+		return model.AttemptResult{Err: gate.Error(gateCtx, fmt.Errorf("cursor: request: %w", err))}
+	}
+	defer resp.Body.Close()
 	defer func() {
 		writer.close()
 		stopBeats()
 	}()
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return model.AttemptResult{Err: gate.Error(gateCtx, fmt.Errorf("cursor: request: %w", err))}
-	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return httpFailure(resp)
 	}
