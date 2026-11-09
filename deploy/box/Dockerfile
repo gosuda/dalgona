@@ -1,8 +1,11 @@
-FROM docker.io/library/buildpack-deps:stable@sha256:5214476af627916270063c9f99a969381f32cd961c861ea95e740ba71abc125f
+FROM docker.io/library/debian:stable-slim@sha256:fbfb4059d2127120aa05b6e6064523d2102552f0cf0026ddf0701c12f1f8f3e0
 
 ARG TARGETARCH
 
-RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin dalgona \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists \
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin dalgona \
     && mkdir -p /workspace /data \
     && chown -R dalgona:dalgona /workspace /data
 
