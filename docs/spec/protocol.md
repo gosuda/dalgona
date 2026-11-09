@@ -12,9 +12,10 @@ Error codes:
 
 | Code | Use |
 |---|---|
+| `-32700` | Parse error. The line is not valid JSON. The `id` is `null` when it cannot be determined. |
+| `-32600` | Invalid request. Valid JSON that is not a request, for example wrong member types, and thread state conflicts such as `thread <id> is running` or `turn <id> is not running`. |
 | `-32601` | Unknown method. Message: `Method not found`. |
-| `-32600` | The request conflicts with thread state, for example `thread <id> is running` or `turn <id> is not running`. |
-| `-32602` | Invalid or unknown parameters, for example `unknown thread <id>`, `turn <id> is not on the active path`, `unknown turn <id>`, `unsupported approvalPolicy <value>`. |
+| `-32602` | Invalid or unknown parameters, for example `unknown thread <id>`, `turn <id> is not on the active path`, `unknown turn <id>`, `unsupported approvalPolicy <value>`, `unsupported keyPath <value>`. |
 | `-32603` | Internal failure, and every handler error without a more specific code. The message is the cause. |
 | `-32001` | `advisor runtime is not available`. |
 

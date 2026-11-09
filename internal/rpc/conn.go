@@ -185,11 +185,24 @@ func (c *Conn) readLoop() {
 	s := bufio.NewScanner(c)
 	s.Buffer(make([]byte, 4096), 16<<20)
 	for s.Scan() {
+		raw := s.Bytes()
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
 		var e envelope
-		if err := json.Unmarshal(s.Bytes(), &e); err != nil {
+		if err := json.Unmarshal(raw, &e); err != nil {
+			var v any
+			if json.Unmarshal(raw, &v) == nil {
+				c.replyInvalidRequest(raw)
+			} else {
+				c.replyParseError(raw)
+			}
 			continue
 		}
 		c.dispatch(e)
+	}
+	if err := s.Err(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		slog.Error("rpc: read failure", "error", err, "remote", c.remote)
 	}
 	if c.handler != nil {
 		c.drainAfterRead()
@@ -197,6 +210,27 @@ func (c *Conn) readLoop() {
 	if err := c.Close(); err != nil {
 		slog.Debug("rpc: close after read failure", "error", err)
 	}
+}
+
+func (c *Conn) replyParseError(raw []byte) {
+	var probe struct {
+		ID jsontext.Value `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || len(probe.ID) == 0 {
+		c.replyError(jsontext.Value("null"), codeParseError, "Parse error")
+		return
+	}
+	c.replyError(probe.ID, codeParseError, "Parse error")
+}
+
+func (c *Conn) replyInvalidRequest(raw []byte) {
+	var probe struct {
+		ID jsontext.Value `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || len(probe.ID) == 0 {
+		return
+	}
+	c.replyError(probe.ID, codeInvalidRequest, "Invalid request")
 }
 
 func (c *Conn) dispatch(e envelope) {

@@ -12,6 +12,7 @@ const (
 	codeInvalidParams  = -32602
 	codeInternal       = -32603
 	codeNotAvailable   = -32001
+	codeParseError     = -32700
 )
 
 func invalidParams(message string) error {
