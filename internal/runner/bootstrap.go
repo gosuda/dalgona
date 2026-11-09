@@ -608,10 +608,20 @@ func stopRunnerProcess(r Runner, id string) {
 	if err := r.Signal(ctx, id, SignalTerm); err != nil {
 		return
 	}
+	var offset int64
+	timer := time.NewTimer(pollInterval)
+	defer timer.Stop()
 	for ctx.Err() == nil {
-		out, err := r.Read(ctx, id, 0)
+		out, err := r.Read(ctx, id, offset)
 		if err != nil || out.Exit != nil {
 			break
+		}
+		offset = nextOffset(offset, out)
+		drainTimer(timer)
+		timer.Reset(pollInterval)
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
 		}
 	}
 	killCtx, killCancel := context.WithTimeout(context.Background(), time.Second)

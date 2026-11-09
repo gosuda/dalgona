@@ -344,10 +344,18 @@ func stopProcess(r runner.Runner, id string) {
 	if err := r.Signal(ctx, id, runner.SignalTerm); err != nil {
 		return
 	}
+	var offset int64
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
 	for ctx.Err() == nil {
-		out, err := r.Read(ctx, id, 0)
+		out, err := r.Read(ctx, id, offset)
 		if err != nil || out.Exit != nil {
 			break
+		}
+		offset = max(out.Next, offset+int64(len(out.Data)))
+		select {
+		case <-ctx.Done():
+		case <-ticker.C:
 		}
 	}
 	killCtx, killCancel := context.WithTimeout(context.Background(), time.Second)

@@ -108,3 +108,71 @@ func (r *readLossRunner) ReadDir(context.Context, string) ([]runner.FileInfo, er
 }
 func (r *readLossRunner) Remove(context.Context, string) error { return errors.New("unused") }
 func (r *readLossRunner) Close() error                         { return nil }
+
+type stopPollFake struct {
+	signals []runner.Signal
+	reads   int
+	offsets []int64
+	bytes   int64
+}
+
+func (f *stopPollFake) Start(context.Context, runner.ProcessSpec) error { return nil }
+
+func (f *stopPollFake) Read(_ context.Context, _ string, off int64) (runner.Output, error) {
+	f.reads++
+	f.offsets = append(f.offsets, off)
+	data := []byte("running\n")
+	f.bytes += int64(len(data))
+	return runner.Output{Data: data, Next: off + int64(len(data))}, nil
+}
+
+func (f *stopPollFake) Signal(_ context.Context, _ string, s runner.Signal) error {
+	f.signals = append(f.signals, s)
+	return nil
+}
+
+func (f *stopPollFake) ReadFile(context.Context, string) ([]byte, error) {
+	return nil, errors.New("unused")
+}
+
+func (f *stopPollFake) WriteFile(context.Context, string, []byte, fs.FileMode) error {
+	return errors.New("unused")
+}
+
+func (f *stopPollFake) Stat(context.Context, string) (runner.FileInfo, error) {
+	return runner.FileInfo{}, errors.New("unused")
+}
+
+func (f *stopPollFake) ReadDir(context.Context, string) ([]runner.FileInfo, error) {
+	return nil, errors.New("unused")
+}
+
+func (f *stopPollFake) Remove(context.Context, string) error { return errors.New("unused") }
+func (f *stopPollFake) Close() error                         { return nil }
+
+func TestStopProcess_pollsWithOffset(t *testing.T) {
+	const grace = 200 * time.Millisecond
+	const interval = 25 * time.Millisecond
+	old := boxKillGrace
+	boxKillGrace = grace
+	defer func() { boxKillGrace = old }()
+	f := &stopPollFake{}
+	stopProcess(f, "p1")
+	if len(f.signals) < 2 || f.signals[0] != runner.SignalTerm || f.signals[len(f.signals)-1] != runner.SignalKill {
+		t.Fatalf("signals = %v, want TERM then KILL", f.signals)
+	}
+	wantMax := int(grace/interval) + 5
+	if f.reads > wantMax {
+		t.Fatalf("reads = %d, want <= %d (grace/interval); unbounded burst", f.reads, wantMax)
+	}
+	var maxOff int64
+	for _, off := range f.offsets {
+		maxOff = max(maxOff, off)
+	}
+	if maxOff <= 0 {
+		t.Fatalf("max offset = %d, want > 0 (offset reads)", maxOff)
+	}
+	if f.bytes != int64(f.reads*len("running\n")) {
+		t.Fatalf("bytes = %d, want %d", f.bytes, f.reads*len("running\n"))
+	}
+}
