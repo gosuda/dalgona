@@ -160,7 +160,7 @@ func (m *model) queueFollowup() tea.Cmd {
 	m.followups = append(m.followups, text)
 	m.composer.SetValue("")
 	m.notice = fmt.Sprintf("queued follow-up %d of %d", len(m.followups), maxFollowups)
-	if m.state != stateRunning && m.state != stateAwaitingApproval {
+	if m.state == stateIdle {
 		return m.startQueuedFollowup()
 	}
 	return nil
