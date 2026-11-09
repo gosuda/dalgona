@@ -299,3 +299,25 @@ func TestInstallUnreadableDesktopChangesNothing(t *testing.T) {
 	assertMissing(t, fixture.vscode)
 	assertMissing(t, recordPath(fixture.env.DalgonaHome))
 }
+
+func TestReinstallRecordsNewlyActiveMechanism(t *testing.T) {
+	t.Parallel()
+	fixture := newLinuxFixture(t)
+	if err := Install(fixture.env, fixture.exe); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	assertMissing(t, fixture.userDesktop)
+	writeTestFile(t, fixture.source, []byte(desktopSourceText))
+	if err := Install(fixture.env, fixture.exe); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	if _, err := os.Stat(fixture.userDesktop); err != nil {
+		t.Fatalf("desktop was not written by reinstall: %v", err)
+	}
+	if err := Uninstall(fixture.env); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	assertMissing(t, fixture.userDesktop)
+	assertMissing(t, fixture.environmentPath)
+	assertMissing(t, fixture.vscode)
+}

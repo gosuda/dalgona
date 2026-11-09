@@ -169,13 +169,11 @@ func prepareRecord(env Env, home string, platform platformMechanisms) (installRe
 	if errors.Is(err, errRecordNotFound) {
 		rec = installRecord{}
 	}
-	if len(rec.Files) == 0 {
-		files, captureErr := captureFiles(env, platform.files)
-		if captureErr != nil {
-			return installRecord{}, captureErr
-		}
-		rec.Files = files
+	captured, err := captureFiles(env, platform.files)
+	if err != nil {
+		return installRecord{}, err
 	}
+	mergeRecordFiles(&rec, captured)
 	if rec.EnvSet || platform.environment == nil {
 		return rec, nil
 	}
@@ -197,6 +195,20 @@ func captureFiles(env Env, mechanisms []fileMechanism) ([]storedFile, error) {
 		files = append(files, file)
 	}
 	return files, nil
+}
+
+func mergeRecordFiles(rec *installRecord, captured []storedFile) {
+	seen := make(map[string]struct{}, len(rec.Files)+len(captured))
+	for _, file := range rec.Files {
+		seen[file.Path] = struct{}{}
+	}
+	for _, file := range captured {
+		if _, ok := seen[file.Path]; ok {
+			continue
+		}
+		seen[file.Path] = struct{}{}
+		rec.Files = append(rec.Files, file)
+	}
 }
 
 func renderFiles(env Env, exe string, mechanisms []fileMechanism) ([]pendingFile, error) {
