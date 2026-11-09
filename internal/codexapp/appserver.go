@@ -4,6 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
@@ -11,6 +16,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +29,8 @@ const (
 	appServerPrefix       = "dalgona app-server: "
 	webSocketMessageLimit = 64 << 20
 	daemonLineBuffer      = 64 << 10
+	webSocketTokenBytes   = 32
+	wsTokenFileName       = "app-server-token"
 )
 
 type sessionField int
@@ -45,7 +54,24 @@ type appServerArgs struct {
 	defaults       sessionDefaults
 	listen         string
 	subcommandSeen bool
+	ws             wsAuthArgs
 }
+
+type Deps struct {
+	Home string
+	Dial func(context.Context) (net.Conn, error)
+}
+
+type wsAuthArgs struct {
+	mode        string
+	tokenFile   string
+	tokenSHA256 string
+}
+
+const (
+	wsAuthCapabilityToken   = "capability-token"
+	wsAuthSignedBearerToken = "signed-bearer-token"
+)
 
 var codexApprovalPolicies = map[string]string{
 	"never":      "never",
@@ -75,16 +101,23 @@ var configSettings = map[string]configSetting{
 	"sandbox_mode":    {field: fieldSandbox, values: codexSandboxModes},
 }
 
-func AppServerMain(ctx context.Context, args []string, stdio io.ReadWriter, stderr io.Writer, dial func(context.Context) (net.Conn, error)) int {
+func AppServerMain(ctx context.Context, args []string, stdio io.ReadWriter, stderr io.Writer, deps Deps) int {
 	parsed, err := parseAppServerArgs(args, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s%v\n", appServerPrefix, err)
 		return 2
 	}
 	if parsed.listen == "" {
-		err = spliceStdio(ctx, stdio, dial, parsed.defaults)
+		err = spliceStdio(ctx, stdio, deps.Dial, parsed.defaults)
 	} else {
-		err = serveWebSocket(ctx, parsed.listen, stderr, dial, parsed.defaults)
+		err = serveWebSocket(ctx, wsServerConfig{
+			addr:     parsed.listen,
+			home:     deps.Home,
+			stderr:   stderr,
+			dial:     deps.Dial,
+			defaults: parsed.defaults,
+			auth:     parsed.ws,
+		})
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "%s%v\n", appServerPrefix, err)
@@ -102,31 +135,112 @@ func parseAppServerArgs(args []string, notes io.Writer) (appServerArgs, error) {
 		}
 		i = next
 	}
+	if err := parsed.validateWSAuth(); err != nil {
+		return appServerArgs{}, err
+	}
 	return parsed, nil
 }
 
 func (a *appServerArgs) consume(args []string, i int, notes io.Writer) (int, error) {
 	name, value, inline := strings.Cut(args[i], "=")
 	switch {
-	case name == "--config" || name == "-c":
+	case isConfigFlag(name):
 		raw, next, err := flagValue(args, i, name, value, inline)
 		if err != nil {
 			return i, err
 		}
 		return next, a.addConfig(raw, notes)
 	case name == "--listen":
+		return a.consumeListen(args, i, name, value, inline)
+	case isWSAuthFlag(name):
 		raw, next, err := flagValue(args, i, name, value, inline)
 		if err != nil {
 			return i, err
 		}
-		a.listen, err = parseListen(raw)
-		return next, err
+		return next, a.setWSAuth(name, raw)
 	case args[i] == "app-server" && !a.subcommandSeen:
 		a.subcommandSeen = true
 	default:
 		noteIgnoredArgument(notes, args[i])
 	}
 	return i, nil
+}
+
+func isConfigFlag(name string) bool {
+	return name == "--config" || name == "-c"
+}
+
+func isWSAuthFlag(name string) bool {
+	switch name {
+	case "--ws-auth", "--ws-token-file", "--ws-token-sha256":
+		return true
+	}
+	return false
+}
+
+func (a *appServerArgs) consumeListen(args []string, i int, name, value string, inline bool) (int, error) {
+	raw, next, err := flagValue(args, i, name, value, inline)
+	if err != nil {
+		return i, err
+	}
+	a.listen, err = parseListen(raw)
+	return next, err
+}
+
+func (a *appServerArgs) setWSAuth(name, raw string) error {
+	switch name {
+	case "--ws-auth":
+		a.ws.mode = raw
+	case "--ws-token-file":
+		a.ws.tokenFile = raw
+	default:
+		a.ws.tokenSHA256 = raw
+	}
+	return nil
+}
+
+func (a *appServerArgs) validateWSAuth() error {
+	switch a.ws.mode {
+	case "":
+		if a.ws.tokenFile != "" || a.ws.tokenSHA256 != "" {
+			return errors.New("websocket auth flags require --ws-auth capability-token")
+		}
+	case wsAuthCapabilityToken:
+		return a.ws.validateCapabilityToken()
+	case wsAuthSignedBearerToken:
+		return errors.New("--ws-auth signed-bearer-token is not supported; use --ws-auth capability-token")
+	default:
+		return fmt.Errorf("unsupported --ws-auth %q; use capability-token", a.ws.mode)
+	}
+	return nil
+}
+
+func (a wsAuthArgs) validateCapabilityToken() error {
+	if a.tokenFile != "" && a.tokenSHA256 != "" {
+		return errors.New("--ws-token-file and --ws-token-sha256 are mutually exclusive")
+	}
+	if a.tokenFile == "" && a.tokenSHA256 == "" {
+		return errors.New("--ws-token-file or --ws-token-sha256 is required when --ws-auth capability-token is set")
+	}
+	if a.tokenFile != "" {
+		return a.validateTokenFilePath()
+	}
+	return a.validateTokenSum()
+}
+
+func (a wsAuthArgs) validateTokenFilePath() error {
+	if !filepath.IsAbs(a.tokenFile) {
+		return fmt.Errorf("--ws-token-file must be an absolute path: %q", a.tokenFile)
+	}
+	return nil
+}
+
+func (a wsAuthArgs) validateTokenSum() error {
+	sum, err := hex.DecodeString(a.tokenSHA256)
+	if err != nil || len(sum) != sha256.Size {
+		return fmt.Errorf("--ws-token-sha256 must be 64-character hex of the token SHA-256: %q", a.tokenSHA256)
+	}
+	return nil
 }
 
 func flagValue(args []string, i int, name, value string, inline bool) (string, int, error) {
@@ -232,22 +346,37 @@ func closeDaemonWrite(conn net.Conn) bool {
 }
 
 type webSocketRelay struct {
-	dial     func(context.Context) (net.Conn, error)
-	defaults sessionDefaults
-	stderr   io.Writer
-	mu       sync.Mutex
-	closed   bool
-	active   sync.WaitGroup
+	dial        func(context.Context) (net.Conn, error)
+	defaults    sessionDefaults
+	stderr      io.Writer
+	tokenDigest [sha256.Size]byte
+	mu          sync.Mutex
+	closed      bool
+	active      sync.WaitGroup
 }
 
-func serveWebSocket(ctx context.Context, addr string, stderr io.Writer, dial func(context.Context) (net.Conn, error), defaults sessionDefaults) error {
-	var config net.ListenConfig
-	listener, err := config.Listen(ctx, "tcp", addr)
+type wsServerConfig struct {
+	addr     string
+	home     string
+	stderr   io.Writer
+	dial     func(context.Context) (net.Conn, error)
+	defaults sessionDefaults
+	auth     wsAuthArgs
+}
+
+func serveWebSocket(ctx context.Context, cfg wsServerConfig) error {
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(ctx, "tcp", cfg.addr)
 	if err != nil {
-		return fmt.Errorf("listen on ws://%s: %w", addr, err)
+		return fmt.Errorf("listen on ws://%s: %w", cfg.addr, err)
 	}
-	fmt.Fprintf(stderr, "%slistening on ws://%s\n", appServerPrefix, listener.Addr())
-	relay := &webSocketRelay{dial: dial, defaults: defaults, stderr: stderr}
+	fmt.Fprintf(cfg.stderr, "%slistening on ws://%s\n", appServerPrefix, listener.Addr())
+	digest, err := resolveWSTokenDigest(cfg.stderr, cfg.home, cfg.auth)
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	relay := &webSocketRelay{dial: cfg.dial, defaults: cfg.defaults, stderr: cfg.stderr, tokenDigest: digest}
 	server := &http.Server{
 		Handler:           relay,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -260,7 +389,65 @@ func serveWebSocket(ctx context.Context, addr string, stderr io.Writer, dial fun
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
-	return fmt.Errorf("serve ws://%s: %w", addr, err)
+	return fmt.Errorf("serve ws://%s: %w", cfg.addr, err)
+}
+
+func resolveWSTokenDigest(stderr io.Writer, home string, auth wsAuthArgs) ([sha256.Size]byte, error) {
+	if auth.mode == "" {
+		return writeDefaultWSToken(stderr, home)
+	}
+	if auth.tokenFile != "" {
+		raw, err := os.ReadFile(auth.tokenFile)
+		if err != nil {
+			return [sha256.Size]byte{}, fmt.Errorf("read --ws-token-file: %w", err)
+		}
+		token := strings.TrimSpace(string(raw))
+		if token == "" {
+			return [sha256.Size]byte{}, errors.New("--ws-token-file is empty")
+		}
+		return sha256.Sum256([]byte(token)), nil
+	}
+	sum, err := hex.DecodeString(auth.tokenSHA256)
+	if err != nil || len(sum) != sha256.Size {
+		return [sha256.Size]byte{}, fmt.Errorf("--ws-token-sha256 must be 64-character hex of the token SHA-256: %q", auth.tokenSHA256)
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], sum)
+	return digest, nil
+}
+
+func writeDefaultWSToken(stderr io.Writer, home string) ([sha256.Size]byte, error) {
+	var none [sha256.Size]byte
+	if home == "" {
+		return none, errors.New("ws token file needs a daemon home")
+	}
+	raw := make([]byte, webSocketTokenBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return none, fmt.Errorf("generate ws token: %w", err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return none, fmt.Errorf("create token dir: %w", err)
+	}
+	path := filepath.Join(home, wsTokenFileName)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(token+"\n"), 0o600); err != nil {
+		return none, fmt.Errorf("write ws token file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return none, fmt.Errorf("publish ws token file: %w", err)
+	}
+	fmt.Fprintf(stderr, "%stoken file %s\n", appServerPrefix, path)
+	return sha256.Sum256([]byte(token)), nil
+}
+
+func authorizedBearerToken(header string, want [sha256.Size]byte) bool {
+	token, ok := strings.CutPrefix(header, "Bearer ")
+	if !ok || token == "" {
+		return false
+	}
+	digest := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(digest[:], want[:]) == 1
 }
 
 func (r *webSocketRelay) begin() bool {
@@ -284,6 +471,10 @@ func (r *webSocketRelay) shutdown() {
 func (r *webSocketRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.Header.Get("Origin") != "" {
 		http.Error(w, "websocket requests with an Origin header are refused", http.StatusForbidden)
+		return
+	}
+	if !authorizedBearerToken(req.Header.Get("Authorization"), r.tokenDigest) {
+		http.Error(w, "websocket authorization required", http.StatusUnauthorized)
 		return
 	}
 	if !r.begin() {

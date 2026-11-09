@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,7 +51,7 @@ func TestAppServerStdioRoundTrip(t *testing.T) {
 	var stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- AppServerMain(t.Context(), nil, stdioPair{appIn, appOut}, &stderr, dial)
+		done <- AppServerMain(t.Context(), nil, stdioPair{appIn, appOut}, &stderr, Deps{Home: t.TempDir(), Dial: dial})
 		_ = appOut.Close()
 	}()
 
@@ -139,7 +142,7 @@ func TestAppServerStdioDeliversRepliesAfterClientEOF(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			stdio := stdioPair{strings.NewReader(`{"id":0,"method":"initialize"}` + "\n"), &stdout}
 			args := []string{"--config", "approval_policy=untrusted", "app-server"}
-			if code := AppServerMain(t.Context(), args, stdio, &stderr, daemon(t)); code != 0 {
+			if code := AppServerMain(t.Context(), args, stdio, &stderr, Deps{Home: t.TempDir(), Dial: daemon(t)}); code != 0 {
 				t.Fatalf("AppServerMain = %d, stderr %q", code, stderr.String())
 			}
 			if want := `{"got":{"id":0,"method":"initialize"}}` + "\n"; stdout.String() != want {
@@ -158,7 +161,7 @@ func relayToDaemon(t *testing.T, args []string, input string) (received, notes s
 		got <- data
 	})
 	var stderr bytes.Buffer
-	code = AppServerMain(t.Context(), args, stdioPair{strings.NewReader(input), io.Discard}, &stderr, dial)
+	code = AppServerMain(t.Context(), args, stdioPair{strings.NewReader(input), io.Discard}, &stderr, Deps{Home: t.TempDir(), Dial: dial})
 	return string(<-got), stderr.String(), code
 }
 
@@ -280,7 +283,14 @@ func TestAppServerRejectsInvalidArguments(t *testing.T) {
 			message: "dalgona app-server: invalid --listen \"ws://localhost:4500\": ParseAddr(\"localhost\"): unable to parse IP\n",
 		},
 		{args: []string{"--config"}, code: 2, message: "dalgona app-server: --config requires a value\n"},
-		{args: []string{"-c", "model"}, code: 2, message: "dalgona app-server: invalid --config \"model\"; want key=value\n"},
+		{args: []string{"--ws-auth"}, code: 2, message: "dalgona app-server: --ws-auth requires a value\n"},
+		{args: []string{"--ws-auth", "bogus"}, code: 2, message: "dalgona app-server: unsupported --ws-auth \"bogus\"; use capability-token\n"},
+		{args: []string{"--ws-auth", "signed-bearer-token"}, code: 2, message: "dalgona app-server: --ws-auth signed-bearer-token is not supported; use --ws-auth capability-token\n"},
+		{args: []string{"--ws-auth", "capability-token"}, code: 2, message: "dalgona app-server: --ws-token-file or --ws-token-sha256 is required when --ws-auth capability-token is set\n"},
+		{args: []string{"--ws-auth", "capability-token", "--ws-token-file", "a", "--ws-token-sha256", "b"}, code: 2, message: "dalgona app-server: --ws-token-file and --ws-token-sha256 are mutually exclusive\n"},
+		{args: []string{"--ws-auth", "capability-token", "--ws-token-file", "relative/path"}, code: 2, message: "dalgona app-server: --ws-token-file must be an absolute path: \"relative/path\"\n"},
+		{args: []string{"--ws-auth", "capability-token", "--ws-token-sha256", "not-hex"}, code: 2, message: "dalgona app-server: --ws-token-sha256 must be 64-character hex of the token SHA-256: \"not-hex\"\n"},
+		{args: []string{"--ws-token-file", "/tmp/token"}, code: 2, message: "dalgona app-server: websocket auth flags require --ws-auth capability-token\n"},
 		{
 			args:    []string{"--listen", "stdio://"},
 			code:    1,
@@ -297,7 +307,7 @@ func TestAppServerRejectsInvalidArguments(t *testing.T) {
 			}
 		}
 		var stderr bytes.Buffer
-		code := AppServerMain(t.Context(), tc.args, stdioPair{strings.NewReader(""), io.Discard}, &stderr, dial)
+		code := AppServerMain(t.Context(), tc.args, stdioPair{strings.NewReader(""), io.Discard}, &stderr, Deps{Home: t.TempDir(), Dial: dial})
 		if code != tc.code || stderr.String() != tc.message {
 			t.Errorf("%v: code %d stderr %q, want %d %q", tc.args, code, stderr.String(), tc.code, tc.message)
 		}
@@ -305,24 +315,26 @@ func TestAppServerRejectsInvalidArguments(t *testing.T) {
 }
 
 type webSocketHarness struct {
-	t       *testing.T
-	url     string
-	daemons chan net.Conn
+	t         *testing.T
+	url       string
+	token     string
+	tokenPath string
+	daemons   chan net.Conn
 }
 
-func startWebSocketAppServer(t *testing.T, args ...string) (webSocketHarness, func() int) {
+func launchAppServer(t *testing.T, home string, args ...string) (webSocketHarness, *bufio.Reader, func() int) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	stderrRead, stderrWrite := io.Pipe()
-	daemons := make(chan net.Conn, 8)
+	h := webSocketHarness{t: t, daemons: make(chan net.Conn, 8)}
 	dial := func(context.Context) (net.Conn, error) {
 		daemonSide, appSide := net.Pipe()
-		daemons <- daemonSide
+		h.daemons <- daemonSide
 		return appSide, nil
 	}
 	done := make(chan int, 1)
 	go func() {
-		done <- AppServerMain(ctx, append([]string{"--listen", "ws://127.0.0.1:0"}, args...), stdioPair{strings.NewReader(""), io.Discard}, stderrWrite, dial)
+		done <- AppServerMain(ctx, append([]string{"--listen", "ws://127.0.0.1:0"}, args...), stdioPair{strings.NewReader(""), io.Discard}, stderrWrite, Deps{Home: home, Dial: dial})
 		_ = stderrWrite.Close()
 	}()
 	notes := bufio.NewReader(stderrRead)
@@ -331,22 +343,68 @@ func startWebSocketAppServer(t *testing.T, args ...string) (webSocketHarness, fu
 		cancel()
 		t.Fatalf("read banner: %v", err)
 	}
-	go func() { _, _ = io.Copy(io.Discard, notes) }()
 	addr, ok := strings.CutPrefix(strings.TrimSpace(banner), "dalgona app-server: listening on ws://")
 	if !ok {
 		cancel()
 		t.Fatalf("banner = %q", banner)
 	}
+	h.url = "ws://" + addr + "/"
 	stop := func() int {
 		cancel()
 		return <-done
 	}
-	return webSocketHarness{t: t, url: "ws://" + addr + "/", daemons: daemons}, stop
+	return h, notes, stop
+}
+
+func drainNotes(notes *bufio.Reader) {
+	go func() { _, _ = io.Copy(io.Discard, notes) }()
+}
+
+func startWebSocketAppServer(t *testing.T, args ...string) (webSocketHarness, func() int) {
+	t.Helper()
+	h, notes, stop := launchAppServer(t, t.TempDir(), args...)
+	second, err := notes.ReadString('\n')
+	if err != nil {
+		stop()
+		t.Fatalf("read token line: %v", err)
+	}
+	drainNotes(notes)
+	path, ok := strings.CutPrefix(strings.TrimSpace(second), "dalgona app-server: token file ")
+	if !ok || path == "" {
+		stop()
+		t.Fatalf("token line = %q", second)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		stop()
+		t.Fatalf("read token file: %v", err)
+	}
+	h.tokenPath = path
+	h.token = strings.TrimSpace(string(raw))
+	if h.token == "" {
+		stop()
+		t.Fatal("token file is empty")
+	}
+	return h, stop
+}
+
+func startWebSocketAppServerWithToken(t *testing.T, token string, args ...string) (webSocketHarness, func() int) {
+	t.Helper()
+	h, notes, stop := launchAppServer(t, t.TempDir(), args...)
+	drainNotes(notes)
+	h.token = token
+	return h, stop
+}
+
+func sha256Hex(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func (h webSocketHarness) connect() (*websocket.Conn, *bufio.Reader, net.Conn) {
 	h.t.Helper()
-	ws, response, err := websocket.Dial(h.t.Context(), h.url, nil)
+	options := &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + h.token}}}
+	ws, response, err := websocket.Dial(h.t.Context(), h.url, options)
 	if err != nil {
 		h.t.Fatalf("dial websocket: %v", err)
 	}
@@ -443,4 +501,139 @@ func TestAppServerWebSocketRefusesOriginHeader(t *testing.T) {
 		t.Fatal("refused request dialed the daemon")
 	default:
 	}
+}
+
+func TestAppServerWebSocketRequiresBearerToken(t *testing.T) {
+	h, stop := startWebSocketAppServer(t)
+	defer stop()
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+	}{
+		{name: "missing", header: nil},
+		{name: "wrong", header: http.Header{"Authorization": {"Bearer wrong-token"}}},
+		{name: "scheme", header: http.Header{"Authorization": {"Token " + h.token}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options := &websocket.DialOptions{}
+			if tc.header != nil {
+				options.HTTPHeader = tc.header
+			}
+			ws, response, err := websocket.Dial(h.t.Context(), h.url, options)
+			if err == nil {
+				_ = ws.CloseNow()
+				t.Fatal("unauthenticated dial succeeded")
+			}
+			if response == nil || response.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("response = %v, err = %v", response, err)
+			}
+			_ = response.Body.Close()
+			select {
+			case <-h.daemons:
+				t.Fatal("rejected request dialed the daemon")
+			default:
+			}
+		})
+	}
+}
+
+func TestAppServerWebSocketWritesTokenFile(t *testing.T) {
+	home := t.TempDir()
+	h, notes, stop := launchAppServer(t, home)
+	defer func() {
+		if code := stop(); code != 0 {
+			t.Fatalf("AppServerMain = %d", code)
+		}
+	}()
+	second, err := notes.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read token line: %v", err)
+	}
+	drainNotes(notes)
+	want := filepath.Join(home, "app-server-token")
+	path, ok := strings.CutPrefix(strings.TrimSpace(second), "dalgona app-server: token file ")
+	if !ok || path != want {
+		t.Fatalf("token line = %q, want token file %q", second, want)
+	}
+	token := readTokenFileToken(t, path)
+	if strings.Contains(second, token) {
+		t.Fatal("stderr leaks the raw token")
+	}
+	checkTokenFilePermissions(t, path)
+	h.token = token
+	checkWebSocketRoundTrip(h)
+}
+
+func readTokenFileToken(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		t.Fatal("token file is empty")
+	}
+	return token
+}
+
+func checkTokenFilePermissions(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat token file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("token file mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func checkWebSocketRoundTrip(h webSocketHarness) {
+	ws, daemon, conn := h.connect()
+	defer conn.Close()
+	h.send(ws, websocket.MessageText, `{"id":1,"method":"initialize"}`)
+	h.expectLine(daemon, `{"id":1,"method":"initialize"}`)
+	_ = ws.CloseNow()
+}
+
+func TestAppServerWebSocketCapabilityTokenFile(t *testing.T) {
+	token := "file-secret-token"
+	path := filepath.Join(t.TempDir(), "ws-token")
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	h, stop := startWebSocketAppServerWithToken(t, token, "--ws-auth", "capability-token", "--ws-token-file", path)
+	defer stop()
+	ws, daemon, conn := h.connect()
+	defer conn.Close()
+	h.send(ws, websocket.MessageText, `{"id":1,"method":"initialize"}`)
+	h.expectLine(daemon, `{"id":1,"method":"initialize"}`)
+	_ = ws.CloseNow()
+
+	bad, response, err := websocket.Dial(h.t.Context(), h.url, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer other"}}})
+	if err == nil {
+		_ = bad.CloseNow()
+		t.Fatal("wrong token dial succeeded")
+	}
+	if response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("response = %v, err = %v", response, err)
+	}
+	_ = response.Body.Close()
+	select {
+	case <-h.daemons:
+		t.Fatal("rejected request dialed the daemon")
+	default:
+	}
+}
+
+func TestAppServerWebSocketCapabilityTokenSHA256(t *testing.T) {
+	token := "sha-secret-token"
+	sum := sha256Hex(token)
+	h, stop := startWebSocketAppServerWithToken(t, token, "--ws-auth", "capability-token", "--ws-token-sha256", sum)
+	defer stop()
+	ws, daemon, conn := h.connect()
+	defer conn.Close()
+	h.send(ws, websocket.MessageText, `{"id":1,"method":"initialize"}`)
+	h.expectLine(daemon, `{"id":1,"method":"initialize"}`)
+	_ = ws.CloseNow()
 }

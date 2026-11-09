@@ -31,7 +31,7 @@ func runAppServer(ctx context.Context, args []string, std stdio) int {
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	return codexapp.AppServerMain(ctx, args, std, std.errOut, dial)
+	return codexapp.AppServerMain(ctx, args, std, std.errOut, codexapp.Deps{Home: cfg.Home, Dial: dial})
 }
 
 func runWeb(ctx context.Context, args []string, std stdio) int {
