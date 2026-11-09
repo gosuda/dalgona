@@ -212,20 +212,6 @@ type sessionRow struct {
 	headSeq uint64
 }
 
-func loadIndex(db *sql.DB) (*dbIndex, error) {
-	idx := &dbIndex{
-		events:   map[string]*sessIndex{},
-		sessions: map[string]sessionRow{},
-	}
-	if err := loadEventIndex(db, idx.events); err != nil {
-		return nil, err
-	}
-	if err := loadSessionIndex(db, idx.sessions); err != nil {
-		return nil, err
-	}
-	return idx, nil
-}
-
 func loadSessionRows(db *sql.DB) (*dbIndex, error) {
 	idx := &dbIndex{
 		events:   map[string]*sessIndex{},
@@ -253,24 +239,6 @@ func loadSessionEvents(db *sql.DB, sid string) (_ *sessIndex, retErr error) {
 		indexEvent(events, sid, seq, hash)
 	}
 	return events[sid], rows.Err()
-}
-
-func loadEventIndex(db *sql.DB, events map[string]*sessIndex) (retErr error) {
-	rows, err := db.Query("SELECT session, seq, hash FROM events ORDER BY session, seq")
-	if err != nil {
-		return err
-	}
-	defer func() { retErr = errors.Join(retErr, rows.Close()) }()
-	for rows.Next() {
-		var sid string
-		var seq uint64
-		var hash string
-		if err := rows.Scan(&sid, &seq, &hash); err != nil {
-			return err
-		}
-		indexEvent(events, sid, seq, hash)
-	}
-	return rows.Err()
 }
 
 func indexEvent(events map[string]*sessIndex, sid string, seq uint64, hash string) {

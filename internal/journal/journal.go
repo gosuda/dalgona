@@ -232,11 +232,7 @@ func (s *Store) rebuildMirror() error {
 }
 
 func (s *Store) reloadIndex() error {
-	load := loadIndex
-	if s.shared {
-		load = loadSessionRows
-	}
-	idx, err := load(s.db)
+	idx, err := loadSessionRows(s.db)
 	if err != nil {
 		return fmt.Errorf("journal: load mirror index: %w", err)
 	}

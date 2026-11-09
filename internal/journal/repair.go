@@ -1,9 +1,11 @@
 package journal
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -40,22 +42,130 @@ func (s *Store) reconcileAll() (bool, error) {
 		if !entry.IsDir() || !validSessionID(entry.Name()) {
 			continue
 		}
-		sid := entry.Name()
-		exists, err := fileExists(s.journalPath(sid))
-		if err != nil {
-			return false, fmt.Errorf("journal: stat %s: %w", sid, err)
-		}
-		if !exists {
-			continue
-		}
-		result, err := s.reconcileSession(sid)
+		rebuilt, err := s.reconcileOne(entry.Name())
 		if err != nil {
 			return false, err
 		}
-		s.sessions[sid] = stateOf(result)
-		needsRebuild = needsRebuild || result.rebuild
+		needsRebuild = needsRebuild || rebuilt
 	}
 	return needsRebuild, nil
+}
+
+func (s *Store) reconcileOne(sid string) (bool, error) {
+	exists, err := fileExists(s.journalPath(sid))
+	if err != nil {
+		return false, fmt.Errorf("journal: stat %s: %w", sid, err)
+	}
+	if !exists {
+		return false, nil
+	}
+	si, err := loadSessionEvents(s.db, sid)
+	if err != nil {
+		return false, fmt.Errorf("journal: load mirror index %s: %w", sid, err)
+	}
+	reconciled, clean, err := s.reconcileClean(sid, si)
+	if err != nil {
+		return false, err
+	}
+	if clean {
+		s.sessions[sid] = stateOf(reconciled)
+		return false, nil
+	}
+	s.idx.events[sid] = si
+	result, err := s.reconcileSession(sid)
+	delete(s.idx.events, sid)
+	if err != nil {
+		return false, err
+	}
+	s.sessions[sid] = stateOf(result)
+	return result.rebuild, nil
+}
+
+func (s *Store) reconcileClean(sid string, si *sessIndex) (reconcileResult, bool, error) {
+	verified, clean, err := s.verifyCleanJournal(sid, si)
+	if err != nil || !clean {
+		return reconcileResult{}, false, err
+	}
+	if err := upsertSession(s.db, sid, string(SessionOK), verified.head.HeadSeq); err != nil {
+		return reconcileResult{}, false, err
+	}
+	return verified, true, nil
+}
+
+func (s *Store) verifyCleanJournal(sid string, si *sessIndex) (reconcileResult, bool, error) {
+	empty := reconcileResult{}
+	file, skip, err := s.openCleanJournal(sid)
+	if err != nil || skip {
+		return empty, false, err
+	}
+	defer func() { _ = file.Close() }()
+	return scanCleanJournal(sid, file, si)
+}
+
+func (s *Store) openCleanJournal(sid string) (*os.File, bool, error) {
+	_, marked, err := readMarker(s.sessionDir(sid))
+	if err != nil {
+		return nil, false, err
+	}
+	if marked {
+		return nil, true, nil
+	}
+	file, err := os.Open(s.journalPath(sid))
+	if err != nil {
+		return nil, false, err
+	}
+	return file, false, nil
+}
+
+func scanCleanJournal(sid string, file *os.File, si *sessIndex) (reconcileResult, bool, error) {
+	empty := reconcileResult{}
+	reader := bufio.NewReaderSize(file, 64*1024)
+	var scratch []byte
+	prev := genesisPrev
+	var seq uint64
+	for {
+		line, hadNL, readErr := readJournalLine(reader, &scratch)
+		if line != nil {
+			if !hadNL {
+				return empty, false, nil
+			}
+			seq++
+			next, ok := checkCleanLine(si, line, seq, prev)
+			if !ok {
+				return empty, false, nil
+			}
+			prev = next
+		}
+		if readErr == nil {
+			continue
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		return empty, false, readErr
+	}
+	return cleanResult(sid, si, seq, prev)
+}
+
+func cleanResult(sid string, si *sessIndex, seq uint64, prev string) (reconcileResult, bool, error) {
+	if si != nil && si.head != seq {
+		return reconcileResult{}, false, nil
+	}
+	return reconcileResult{
+		head:     SessionHead{ID: sid, HeadSeq: seq, Status: SessionOK},
+		lastHash: prev,
+	}, true, nil
+}
+
+func checkCleanLine(si *sessIndex, line []byte, seq uint64, prev string) (string, bool) {
+	verified := verifyRecord(line, seq, prev)
+	if verified.kind != lineOK {
+		return "", false
+	}
+	if si == nil || si.head < seq || si.hashes[seq] != verified.hash {
+		return "", false
+	}
+	return verified.hash, true
 }
 
 func stateOf(result reconcileResult) *sessionState {
