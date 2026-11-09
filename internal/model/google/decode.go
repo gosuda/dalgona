@@ -46,9 +46,10 @@ type content struct {
 }
 
 type part struct {
-	Text         string
-	Thought      bool
-	FunctionCall *functionCall
+	Text             string
+	Thought          bool
+	FunctionCall     *functionCall
+	ThoughtSignature string
 }
 
 type functionCall struct {
@@ -145,7 +146,7 @@ func (s *Decoder) processCandidate(candidate candidate) error {
 
 func (s *Decoder) processPart(part part) error {
 	if part.FunctionCall != nil {
-		return s.emitTool(*part.FunctionCall)
+		return s.emitTool(*part.FunctionCall, part.ThoughtSignature)
 	}
 	if part.Text == "" {
 		return nil
@@ -158,7 +159,7 @@ func (s *Decoder) processPart(part part) error {
 	return nil
 }
 
-func (s *Decoder) emitTool(call functionCall) error {
+func (s *Decoder) emitTool(call functionCall, signature string) error {
 	s.counter++
 	id := call.ID
 	if id == "" || s.ids[id] {
@@ -169,7 +170,7 @@ func (s *Decoder) emitTool(call functionCall) error {
 	if len(args) == 0 {
 		args = jsontext.Value(`{}`)
 	}
-	tool := model.ToolCall{ID: id, Name: call.Name, Args: args, Freeform: s.freeform[call.Name]}
+	tool := model.ToolCall{ID: id, Name: call.Name, Args: args, Freeform: s.freeform[call.Name], Signature: signature}
 	if tool.Freeform {
 		input, err := model.DecodeFreeformInput(args)
 		if err != nil {
@@ -312,6 +313,8 @@ func readPart(decoder *jsontext.Decoder, part *part) error {
 			err = readNullableString(decoder, &part.Text)
 		case "thought":
 			part.Thought, err = model.ReadBool(decoder)
+		case "thoughtSignature":
+			err = readNullableString(decoder, &part.ThoughtSignature)
 		case "functionCall":
 			part.FunctionCall, err = readFunctionCall(decoder)
 		default:

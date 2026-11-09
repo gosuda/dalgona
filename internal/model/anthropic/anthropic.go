@@ -128,7 +128,7 @@ func encodeRequest(req model.Request) ([]byte, error) {
 	encoder.StringKey("model", req.Model)
 	encoder.IntKey("max_tokens", 4096)
 	encodeSystem(encoder, req.System)
-	encodeMessages(encoder, req.Messages)
+	encodeMessages(encoder, req.Messages, req.Reasoning)
 	encodeTools(encoder, req.Tools)
 	encoder.BoolKey("stream", true)
 	encodeThinking(encoder, req.Reasoning)
@@ -149,7 +149,7 @@ func encodeSystem(encoder *model.JSONEncoder, system string) {
 	encoder.EndArray()
 }
 
-func encodeMessages(encoder *model.JSONEncoder, messages []model.Message) {
+func encodeMessages(encoder *model.JSONEncoder, messages []model.Message, reasoning string) {
 	encoder.Key("messages")
 	encoder.BeginArray()
 	lastUser := lastUserMessage(messages)
@@ -160,7 +160,7 @@ func encodeMessages(encoder *model.JSONEncoder, messages []model.Message) {
 			index = end
 			continue
 		}
-		encodeMessage(encoder, messages[index], index == lastUser)
+		encodeMessage(encoder, messages[index], index == lastUser, reasoning)
 	}
 	encoder.EndArray()
 }
@@ -187,9 +187,9 @@ func toolResultGroupEnd(messages []model.Message, start int) int {
 	return end
 }
 
-func encodeMessage(encoder *model.JSONEncoder, message model.Message, cache bool) {
+func encodeMessage(encoder *model.JSONEncoder, message model.Message, cache bool, reasoning string) {
 	if message.Role == "assistant" {
-		encodeAssistant(encoder, message)
+		encodeAssistant(encoder, message, reasoning)
 		if len(message.ToolResults) != 0 {
 			encodeToolResultGroup(encoder, []model.Message{message}, cache)
 		}
@@ -210,16 +210,17 @@ func encodeMessage(encoder *model.JSONEncoder, message model.Message, cache bool
 	encoder.EndObject()
 }
 
-func encodeAssistant(encoder *model.JSONEncoder, message model.Message) {
-	if message.Text == "" && message.Reasoning == "" && len(message.ToolCalls) == 0 {
+func encodeAssistant(encoder *model.JSONEncoder, message model.Message, reasoning string) {
+	signature, replay := thinkingBlock(message, thinkingEnabled(reasoning))
+	if message.Text == "" && len(message.ToolCalls) == 0 && !replay {
 		return
 	}
 	encoder.BeginObject()
 	encoder.StringKey("role", "assistant")
 	encoder.Key("content")
 	encoder.BeginArray()
-	if message.Reasoning != "" {
-		encodeTextBlock(encoder, message.Reasoning, false)
+	if replay {
+		encodeThinkingBlock(encoder, message.Reasoning, signature)
 	}
 	if message.Text != "" {
 		encodeTextBlock(encoder, message.Text, false)
@@ -228,6 +229,26 @@ func encodeAssistant(encoder *model.JSONEncoder, message model.Message) {
 		encodeToolUse(encoder, call)
 	}
 	encoder.EndArray()
+	encoder.EndObject()
+}
+
+func thinkingBlock(message model.Message, thinking bool) (string, bool) {
+	if !thinking || message.Reasoning == "" {
+		return "", false
+	}
+	for _, call := range message.ToolCalls {
+		if call.Signature != "" {
+			return call.Signature, true
+		}
+	}
+	return "", false
+}
+
+func encodeThinkingBlock(encoder *model.JSONEncoder, reasoning, signature string) {
+	encoder.BeginObject()
+	encoder.StringKey("type", "thinking")
+	encoder.StringKey("thinking", reasoning)
+	encoder.StringKey("signature", signature)
 	encoder.EndObject()
 }
 
@@ -316,7 +337,7 @@ func encodeTools(encoder *model.JSONEncoder, tools []model.Tool) {
 }
 
 func encodeThinking(encoder *model.JSONEncoder, reasoning string) {
-	if reasoning == "" || reasoning == "default" {
+	if !thinkingEnabled(reasoning) {
 		return
 	}
 	encoder.Key("thinking")
@@ -328,6 +349,10 @@ func encodeThinking(encoder *model.JSONEncoder, reasoning string) {
 	encoder.BeginObject()
 	encoder.StringKey("effort", anthropicEffort(reasoning))
 	encoder.EndObject()
+}
+
+func thinkingEnabled(reasoning string) bool {
+	return reasoning != "" && reasoning != "default"
 }
 
 func anthropicEffort(reasoning string) string {

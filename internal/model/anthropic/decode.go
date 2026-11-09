@@ -15,6 +15,7 @@ type responseState struct {
 	stream    *model.EventStream
 	freeform  map[string]bool
 	tools     map[int]*model.ToolCall
+	signature string
 	usage     usage
 	sawTool   bool
 	done      bool
@@ -48,6 +49,7 @@ type delta struct {
 	Type       string
 	Text       string
 	Thinking   string
+	Signature  string
 	Partial    string
 	StopReason string
 }
@@ -144,6 +146,8 @@ func (s *responseState) contentDelta(index int, delta delta) error {
 		s.stream.Emit(model.TextDelta{Text: delta.Text})
 	case "thinking_delta":
 		s.stream.Emit(model.ReasoningDelta{Text: delta.Thinking})
+	case "signature_delta":
+		s.signature = delta.Signature
 	case "input_json_delta":
 		tool := s.tool(index)
 		tool.Args = append(tool.Args, delta.Partial...)
@@ -180,6 +184,7 @@ func (s *responseState) finishTool(index int) error {
 		}
 		tool.Args = input
 	}
+	tool.Signature = s.signature
 	s.stream.Emit(*tool)
 	delete(s.tools, index)
 	return nil
@@ -339,6 +344,8 @@ func readDelta(decoder *jsontext.Decoder, delta *delta) error {
 			delta.Text, err = model.ReadString(decoder)
 		case "thinking":
 			delta.Thinking, err = model.ReadString(decoder)
+		case "signature":
+			delta.Signature, err = model.ReadString(decoder)
 		case "partial_json":
 			delta.Partial, err = model.ReadString(decoder)
 		case "stop_reason":

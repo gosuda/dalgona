@@ -237,6 +237,9 @@ func encodeFunctionCall(encoder *model.JSONEncoder, call model.ToolCall) {
 		encoder.ValueKey("args", call.Args)
 	}
 	encoder.EndObject()
+	if call.Signature != "" {
+		encoder.StringKey("thoughtSignature", call.Signature)
+	}
 	encoder.EndObject()
 }
 
