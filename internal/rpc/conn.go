@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,7 @@ type Conn struct {
 	once           sync.Once
 	closeErr       error
 	handlers       sync.WaitGroup
+	remote         string
 }
 
 type (
@@ -75,7 +77,7 @@ func newConnection(ctx context.Context, rwc io.ReadWriteCloser, handler Handler)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return &Conn{ReadWriteCloser: rwc, ctx: ctx, handler: handler, pending: make(map[string]chan response), queue: newOutQueue(), closed: make(chan struct{})}
+	return &Conn{ReadWriteCloser: rwc, ctx: ctx, handler: handler, pending: make(map[string]chan response), queue: newOutQueue(), closed: make(chan struct{}), remote: peerName(rwc)}
 }
 
 func (c *Conn) start() {
@@ -306,7 +308,25 @@ func (c *Conn) enqueue(e envelope, delta bool) error {
 	if err != nil {
 		return err
 	}
-	return c.queue.push(b, e.Method, e.Params, delta, c.Close)
+	return c.queue.push(b, e.Method, e.Params, delta, c.slowClose)
+}
+
+func (c *Conn) slowClose() error {
+	slog.Error("rpc: closing slow client " + c.remote)
+	if err := c.Close(); err != nil {
+		return fmt.Errorf("close slow client: %w", err)
+	}
+	return nil
+}
+
+func peerName(rwc io.ReadWriteCloser) string {
+	type adder interface{ RemoteAddr() net.Addr }
+	if addr, ok := rwc.(adder); ok {
+		if remote := addr.RemoteAddr(); remote != nil {
+			return remote.String()
+		}
+	}
+	return "unknown"
 }
 
 func (c *Conn) writeLoop() {
@@ -396,7 +416,7 @@ func (q *outQueue) push(b []byte, method string, params jsontext.Value, delta bo
 	accepted := q.append(item)
 	q.mu.Unlock()
 	if !accepted {
-		return closeSlowClient(closeFn)
+		return errors.Join(io.ErrShortBuffer, closeFn())
 	}
 	return nil
 }
@@ -428,14 +448,6 @@ func (q *outQueue) append(item queued) bool {
 	default:
 	}
 	return true
-}
-
-func closeSlowClient(closeFn func() error) error {
-	slog.Error("rpc: closing slow client <addr>")
-	if err := closeFn(); err != nil {
-		return errors.Join(io.ErrShortBuffer, fmt.Errorf("close slow client: %w", err))
-	}
-	return io.ErrShortBuffer
 }
 
 func (q *outQueue) pop(closed <-chan struct{}) (queued, bool) {
