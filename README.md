@@ -137,7 +137,7 @@ runner = "devbox"
 service = "docker"
 ```
 
-The runner uploads the workspace, records its baseline, and runs tools and subagents in the box. Supported service choices are `docker`, `sprites`, `modal`, `sandbox0`, and `cloudflare`. A fork shares its parent's box. Archiving one thread does not destroy a box still used by another thread.
+The runner uploads the workspace, records its baseline, and runs tools and subagents in the box. The supported services are in [runners.md](docs/spec/runners.md). A fork shares its parent's box. Archiving one thread does not destroy a box still used by another thread.
 
 Use `dalgona pull <thread-id>` to apply the box's changes to the local workspace with `git apply --3way`. Conflicts leave markers and return exit code 1 with the affected files. `dalgona runner gc` lists unused boxes without deleting them. Use `dalgona runner gc --yes` to delete them.
 
@@ -152,7 +152,7 @@ dalgona cloud pull <name>
 dalgona cloud down <name>
 ```
 
-The named remote uses Docker, Sprites, Modal, or Sandbox0. Cloudflare cannot host a durable whole-daemon home because its containers lose their files on stop.
+The named remote uses any service in [runners.md](docs/spec/runners.md) except Cloudflare. Cloudflare cannot host a durable whole-daemon home because its containers lose their files on stop.
 
 `cloud up` does not copy credentials unless you pass `--copy-auth`. Without credential copying, use `dalgona --remote <name> login` to authenticate in the box. Remote service and box identifiers live in `[remotes.<name>]` in `settings.toml`.
 

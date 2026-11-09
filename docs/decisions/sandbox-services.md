@@ -4,7 +4,7 @@
 
 Remote execution MUST use the `Service` seam in `internal/sandboxsvc`. A service MUST create, attach, connect, and destroy a box. Callers MUST use the identifier returned by attach, because a service MAY replace the box.
 
-The supported service choices are Docker, Fly Sprites, Modal, Sandbox0, and Cloudflare. Exec and subagents MAY run in any of these boxes while the orchestrator stays local. A whole-daemon box MUST use Docker, Sprites, Modal, or Sandbox0. It MUST NOT use Cloudflare, because stopped Cloudflare containers do not retain their files.
+[runners.md](../spec/runners.md) lists the supported services. Exec and subagents MAY run in any listed box while the orchestrator stays local. A whole-daemon box MUST use a service that [runners.md](../spec/runners.md) allows for fully cloud mode.
 
 Modal replacement MUST retain the named volume. Sandbox0 MUST use a template, not an image. [sandbox-services.md](../spec/sandbox-services.md) defines these persistence contracts. [exec-server.md](../spec/exec-server.md) defines the common wire, bootstrap, and binary-version checks.
 
