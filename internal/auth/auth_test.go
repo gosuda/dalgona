@@ -64,7 +64,8 @@ func requireUnmask(t *testing.T, store *auth.Store, input, want string) {
 
 func TestLoad_refusesGroupReadableFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix permission bits are not available")
+		requireLoadRefusesNonRegularFile(t)
+		return
 	}
 	home := t.TempDir()
 	writeAuthFile(t, home, "auth.json", `{}`, 0o640)
@@ -73,12 +74,23 @@ func TestLoad_refusesGroupReadableFile(t *testing.T) {
 }
 
 func TestLoad_refusesSymlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Symlink creation requires additional privileges")
-	}
 	home := t.TempDir()
 	writeAuthFile(t, home, "real.json", `{}`, 0o600)
 	if err := os.Symlink(filepath.Join(home, "real.json"), filepath.Join(home, "auth.json")); err != nil {
+		if runtime.GOOS != "windows" {
+			t.Fatal(err)
+		}
+		requireLoadRefusesNonRegularFile(t)
+		return
+	}
+	_, err := auth.Load(home)
+	requireAuthError(t, err, "auth.json must be a regular file with mode 0600")
+}
+
+func requireLoadRefusesNonRegularFile(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, "auth.json"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	_, err := auth.Load(home)
