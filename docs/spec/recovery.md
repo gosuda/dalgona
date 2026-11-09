@@ -31,7 +31,7 @@ Recovery MUST walk the tool calls of the last `assistant.message` of the open tu
 |`tool.started`, class `edit`, no `files`|Plan and apply the edit again. Journal `recovered=replayed`.|
 |`tool.started`, class `edit`, every file sha equals `post_sha`|Journal `ok=true`, `recovered=replayed`, output `the edit was applied before the host restarted`.|
 |`tool.started`, class `edit`, every file sha equals `pre_sha`|Plan and apply the edit again. Journal `recovered=replayed`.|
-|`tool.started`, class `edit`, any other mix|Restore each file whose sha equals `post_sha` from its `pre_blob`. Remove the file when `pre_sha` is empty. Journal `ok=false`, `recovered=interrupted`, output `interrupted: files changed during recovery: <paths>`. `<paths>` lists every file whose sha differed from `pre_sha`, joined with `, `.|
+|`tool.started`, class `edit`, any other mix|Restore each file whose sha equals `post_sha` from its `pre_blob` with the current file's mode (`0644` when the file is absent). Remove the file when `pre_sha` is empty. Journal `ok=false`, `recovered=interrupted`, output `interrupted: files changed during recovery: <paths>`. `<paths>` lists every file whose sha differed from `pre_sha`, joined with `, `.|
 |`tool.started`, class `exec`, exit recorded|Complete with the recorded output, projected from the tail, and the exit code. Journal `recovered=replayed`.|
 |`tool.started`, class `exec`, process alive|Wait through the exec tool. `runner.Start` with the same call id MUST be a no-op. Journal `recovered=replayed`.|
 |`tool.started`, class `exec`, process gone without exit|Complete with the output read so far and the line `interrupted: the host restarted while this command ran; it may have partly run`. Journal `ok=false`, `recovered=interrupted`.|

@@ -318,7 +318,13 @@ func (w *worker) restoreFile(ctx context.Context, file event.FileChange) error {
 	if err != nil {
 		return fmt.Errorf("agent: load pre-image of %s: %w", file.Path, err)
 	}
-	if err := w.t.runner.WriteFile(ctx, path, data, 0o644); err != nil {
+	mode := fs.FileMode(0o644)
+	if info, statErr := w.t.runner.Stat(ctx, path); statErr == nil {
+		mode = info.Mode.Perm()
+	} else if !errors.Is(statErr, fs.ErrNotExist) {
+		return fmt.Errorf("agent: stat %s for recovery: %w", file.Path, statErr)
+	}
+	if err := w.t.runner.WriteFile(ctx, path, data, mode); err != nil {
 		return fmt.Errorf("agent: restore %s: %w", file.Path, err)
 	}
 	return nil
