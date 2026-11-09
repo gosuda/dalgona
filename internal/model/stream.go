@@ -528,9 +528,11 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+const maxRetryAfter = 5 * time.Minute
+
 func RetryDelay(attempt int, retryAfter time.Duration, random func() float64) time.Duration {
-	if retryAfter > 0 && retryAfter <= time.Minute {
-		return retryAfter
+	if retryAfter > 0 {
+		return min(retryAfter, maxRetryAfter)
 	}
 	base := time.Second << min(attempt, 2)
 	if random == nil {
