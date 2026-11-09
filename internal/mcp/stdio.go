@@ -16,16 +16,20 @@ import (
 var errServerCrashed = errors.New("stdio server crashed")
 
 type stdioTransport struct {
-	command string
-	args    []string
-	env     []string
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  *bufio.Reader
-	stderr  stderrTail
+	command    string
+	args       []string
+	env        []string
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	stdout     *bufio.Reader
+	stdoutPipe io.Closer
+	jobCleanup func()
+	stderr     stderrTail
 }
 
 const stderrTailBytes = 4096
+
+const stdioWaitDelay = 5 * time.Second
 
 type stderrTail struct {
 	mu  sync.Mutex
@@ -74,6 +78,7 @@ func newStdioTransport(command string, args, env []string) (*stdioTransport, err
 func (t *stdioTransport) start() error {
 	cmd := exec.Command(t.command, t.args...)
 	cmd.Env = append(os.Environ(), t.env...)
+	configureStdioProcess(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("mcp: open stdio stdin: %w", err)
@@ -84,13 +89,22 @@ func (t *stdioTransport) start() error {
 		return fmt.Errorf("mcp: open stdio stdout: %w", err)
 	}
 	cmd.Stderr = &t.stderr
-	if err := cmd.Start(); err != nil {
+	if startErr := cmd.Start(); startErr != nil {
 		_ = stdin.Close()
-		return fmt.Errorf("mcp: start stdio server %q: %w", t.command, err)
+		return fmt.Errorf("mcp: start stdio server %q: %w", t.command, startErr)
+	}
+	cleanup, err := assignStdioJob(cmd)
+	if err != nil {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("mcp: confine stdio server %q: %w", t.command, err)
 	}
 	t.cmd = cmd
 	t.stdin = stdin
 	t.stdout = bufio.NewReaderSize(stdout, 64*1024)
+	t.stdoutPipe = stdout
+	t.jobCleanup = cleanup
 	return nil
 }
 
@@ -155,7 +169,6 @@ func (t *stdioTransport) writeLine(ctx context.Context, message []byte) error {
 		return nil
 	case <-ctx.Done():
 		_ = t.Close()
-		<-resultChannel
 		return ctx.Err()
 	}
 }
@@ -179,7 +192,6 @@ func (t *stdioTransport) readLine(ctx context.Context) ([]byte, error) {
 		return result.line, nil
 	case <-ctx.Done():
 		_ = t.Close()
-		<-resultChannel
 		return nil, ctx.Err()
 	}
 }
@@ -187,13 +199,20 @@ func (t *stdioTransport) readLine(ctx context.Context) ([]byte, error) {
 func (t *stdioTransport) Close() error {
 	cmd := t.cmd
 	stdin := t.stdin
+	stdoutPipe := t.stdoutPipe
+	cleanup := t.jobCleanup
 	t.cmd = nil
 	t.stdin = nil
 	t.stdout = nil
+	t.stdoutPipe = nil
+	t.jobCleanup = nil
 	if cmd == nil {
 		return nil
 	}
-	return errors.Join(closePipe(stdin), stopProcess(cmd))
+	if cleanup != nil {
+		cleanup()
+	}
+	return errors.Join(closePipe(stdin), closePipe(stdoutPipe), stopProcess(cmd))
 }
 
 func closePipe(pipe io.Closer) error {
@@ -209,7 +228,7 @@ func closePipe(pipe io.Closer) error {
 func stopProcess(cmd *exec.Cmd) error {
 	var errs []error
 	if cmd.Process != nil {
-		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if err := killStdioProcess(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			errs = append(errs, err)
 		}
 	}

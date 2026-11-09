@@ -14,15 +14,15 @@ Each JSON-RPC request MUST use a new numeric identifier. The client MUST ignore 
 
 ## stdio transport
 
-The client MUST start the configured command with its configured arguments. The child environment MUST contain the caller environment followed by the configured entries.
+The client MUST start the configured command in its own process group (a job object on Windows) with its configured arguments. The child environment MUST contain the caller environment followed by the configured entries.
 
 Each message MUST be one UTF-8 JSON object followed by a newline. Messages MUST NOT contain embedded newlines. The client MUST discard child standard error output.
 
-A stdio request MUST finish within five minutes unless its caller sets an earlier deadline. Cancellation MUST close the child process and join the pending pipe operation.
+A stdio request MUST finish within five minutes unless its caller sets an earlier deadline. Cancellation MUST close the whole child process group and return without waiting for the pending pipe operation.
 
 A process crash MUST invalidate the transport. The client MUST restart the process, repeat initialization, and retry the interrupted request once. The client MUST return the second failure without another retry.
 
-Closing the client MUST close standard input, terminate the child, and reap it.
+Closing the client MUST close standard input, terminate the whole process group, and reap the direct child. The transport MUST bound pipe waits with WaitDelay so a grandchild holding stdout cannot hang Close.
 
 ## Streamable HTTP transport
 

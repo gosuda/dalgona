@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"strconv"
+	"time"
 )
 
 const echoSchema = `{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"x-dalgona-passthrough":true}`
@@ -20,8 +23,17 @@ func main() {
 }
 
 func run() error {
+	if os.Getenv("MCP_TEST_HOLD_STDOUT") != "" {
+		time.Sleep(30 * time.Second)
+		return nil
+	}
 	if err := recordStart(); err != nil {
 		return err
+	}
+	if pidFile := os.Getenv("GRANDCHILD_PID_FILE"); pidFile != "" {
+		if err := spawnStdoutHolder(pidFile); err != nil {
+			return err
+		}
 	}
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4096), 16<<20)
@@ -79,6 +91,24 @@ func recordStart() error {
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close start log: %w", err)
+	}
+	return nil
+}
+func spawnStdoutHolder(pidFile string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	child := exec.Command(exe)
+	child.Env = append(os.Environ(), "MCP_TEST_HOLD_STDOUT=1")
+	child.Stdout = os.Stdout
+	if err := child.Start(); err != nil {
+		return err
+	}
+	pid := child.Process.Pid
+	_ = child.Process.Release()
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0o600); err != nil {
+		return err
 	}
 	return nil
 }
