@@ -65,8 +65,14 @@ func runShim(dir string, argv []string) error {
 	if signal, canceled := readCancel(dir); canceled {
 		stopCommand(cmd, signal)
 	}
+	waitingDone := make(chan struct{})
+	go watchCancelWhileWaiting(dir, cmd.Process.Pid, waitingDone)
 	waitErr := cmd.Wait()
+	close(waitingDone)
 	cleanup()
+	if signal, canceled := readCancel(dir); canceled {
+		ensureProcessGroupGone(cmd.Process.Pid, signal)
+	}
 	code, signal := exitDetails(waitErr)
 	closeErr := out.Close()
 	finishErr := finishShim(dir, Exit{Code: code, Signal: signal, EndedAt: time.Now()})

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 func startDetached(ctx context.Context, self string, args []string, spec ProcessSpec) (*exec.Cmd, error) {
@@ -31,6 +32,46 @@ func signalProcess(shimPID int, pgid int, signal Signal) error {
 		return fmt.Errorf("runner: signal process group: %w", err)
 	}
 	return nil
+}
+
+func ensureProcessGroupGone(pgid int, signal Signal) {
+	if pgid <= 0 {
+		return
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		_ = signalProcess(os.Getpid(), pgid, signal)
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func watchCancelWhileWaiting(dir string, pgid int, done <-chan struct{}) {
+	if pgid <= 0 {
+		return
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			sig, ok := readCancel(dir)
+			if !ok {
+				continue
+			}
+			if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+				return
+			}
+			_ = signalProcess(os.Getpid(), pgid, sig)
+		}
+	}
 }
 
 func unixSignal(signal Signal) syscall.Signal {

@@ -48,6 +48,10 @@ func signalProcess(shimPID int, pgid int, signal Signal) error {
 	return nil
 }
 
+func ensureProcessGroupGone(pgid int, signal Signal) {}
+
+func watchCancelWhileWaiting(dir string, pgid int, done <-chan struct{}) {}
+
 func jobExitCode(signal Signal) uint32 {
 	if signal == SignalKill {
 		return 137

@@ -224,8 +224,15 @@ func TestLocal_signalBeforeProcessGroupStopsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command never started: %v", err)
 	}
-	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
-		t.Fatalf("process group %d outlived the signal: %v", pgid, err)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process group %d outlived the signal", pgid)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
