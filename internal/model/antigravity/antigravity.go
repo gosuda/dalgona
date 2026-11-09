@@ -211,6 +211,53 @@ func consume(ctx context.Context, gate *model.StartGate, body io.ReadCloser, dec
 
 func decodeChunk(decoder *google.Decoder, data []byte) error {
 	reader := jsontext.NewDecoder(bytes.NewReader(data))
+	if reader.PeekKind() == '[' {
+		return decodeArrayChunk(decoder, data, reader)
+	}
+	response, err := extractResponse(data, reader)
+	if err != nil {
+		return err
+	}
+	if err := model.RequireJSONEOF(reader); err != nil {
+		return err
+	}
+	if response == nil {
+		return decoder.Decode(data)
+	}
+	return decoder.Decode(response)
+}
+
+func decodeArrayChunk(decoder *google.Decoder, data []byte, reader *jsontext.Decoder) error {
+	arrayErr := model.ReadArrayItems(reader, func(int) error {
+		start := valueStart(data, reader.InputOffset())
+		response, err := extractResponse(data, reader)
+		if err != nil {
+			return err
+		}
+		if response == nil {
+			response = data[start:reader.InputOffset()]
+		}
+		return decoder.Decode(response)
+	})
+	if arrayErr != nil {
+		return arrayErr
+	}
+	return model.RequireJSONEOF(reader)
+}
+
+func valueStart(data []byte, start int64) int64 {
+	for start < int64(len(data)) {
+		switch data[start] {
+		case ',', ' ', '\t', '\n', '\r':
+			start++
+			continue
+		}
+		return start
+	}
+	return start
+}
+
+func extractResponse(data []byte, reader *jsontext.Decoder) ([]byte, error) {
 	var response []byte
 	err := model.ReadObjectFields(reader, func(key string) error {
 		if key != "response" {
@@ -222,13 +269,7 @@ func decodeChunk(decoder *google.Decoder, data []byte) error {
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("decode chunk: %w", err)
+		return nil, fmt.Errorf("decode chunk: %w", err)
 	}
-	if err := model.RequireJSONEOF(reader); err != nil {
-		return err
-	}
-	if response == nil {
-		return decoder.Decode(data)
-	}
-	return decoder.Decode(response)
+	return response, nil
 }

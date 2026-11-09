@@ -2,6 +2,7 @@ package antigravity_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,11 +14,34 @@ import (
 	"github.com/gosuda/dalgona/internal/model/antigravity"
 )
 
+const arrayStream = "data: [{\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"he\"}]}}]},\"traceId\":\"t1\"}," +
+	"{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"llo\"}]},\"finishReason\":\"STOP\"}]," +
+	"\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":3,\"cachedContentTokenCount\":4,\"thoughtsTokenCount\":1}}]\n\n"
+
 func newSingleReplyServer(t *testing.T, handle func(w http.ResponseWriter, r *http.Request)) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(handle))
 	t.Cleanup(server.Close)
 	return server
+}
+
+func TestStreamDecodesArrayEvents(t *testing.T) {
+	server := newSingleReplyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1internal:loadCodeAssist":
+			_, _ = io.WriteString(w, paidProject(false))
+		case "/v1internal:streamGenerateContent":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, arrayStream)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	adapter := antigravity.New(antigravity.Config{
+		BaseURL: server.URL,
+		Token:   func(context.Context) (string, error) { return "access", nil },
+	})
+	streamHello(t, adapter, model.Request{Model: "gemini-3.8-flash", Messages: []model.Message{{Role: "user", Text: "hi"}}})
 }
 
 func newForbiddenDiscoveryServer(t *testing.T, attempts *atomic.Int32) *httptest.Server {
