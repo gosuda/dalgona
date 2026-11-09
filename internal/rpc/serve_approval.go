@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"errors"
@@ -94,10 +95,7 @@ func (s *server) spawnApproval(requestID string, cancel context.CancelFunc, task
 }
 
 func cmdText(prompt agent.ApprovalPrompt) string {
-	if len(prompt.Commands) == 0 {
-		return prompt.Summary
-	}
-	return strings.Join(prompt.Commands, " && ")
+	return cmp.Or(prompt.Command, strings.Join(prompt.Commands, " && "), prompt.Summary)
 }
 
 func (s *server) settle(requestID string) {

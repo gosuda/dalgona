@@ -262,6 +262,7 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 	}
 	prompt.Summary = withRunContext(prompt.Summary, gc, w.t.created.Cwd)
 	if gc.class == tool.ClassExec {
+		prompt.Command = gc.command
 		prompt.Commands = rules.Split(gc.command)
 	}
 	offered, err := ask(w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })

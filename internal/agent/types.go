@@ -144,6 +144,7 @@ type ApprovalPrompt struct {
 	Class     tool.Class
 	Summary   string
 	Reason    string
+	Command   string
 	Commands  []string
 	Paths     []string
 	Resolved  bool
