@@ -208,6 +208,9 @@ func (w *worker) callRound(ctx context.Context, calls []event.ToolCall) error {
 	if err != nil {
 		return err
 	}
+	if w.inBand.takeCancel() {
+		w.interruptTurn()
+	}
 	if err = w.runCalls(ctx, pending); err != nil {
 		return err
 	}
@@ -258,6 +261,20 @@ func (w *worker) end(ctx context.Context, o outcome) bool {
 	return true
 }
 
+func (a *actor) finishTurn(turnID string, o outcome) bool {
+	if a.continues(o) {
+		return false
+	}
+	a.settle(o.status)
+	completed := event.TurnCompleted{TurnID: turnID, Status: o.status, Error: o.failure}
+	if _, err := a.append(completed); err != nil {
+		a.t.host.log.Error("agent: journal turn.completed", "thread", a.t.id, "turn", turnID, "error", err)
+	}
+	clear(a.approvals)
+	a.idle()
+	return true
+}
+
 func (a *actor) continues(o outcome) bool {
 	return o.status == statusCompleted && !o.final && a.newInputSince(o.head)
 }
@@ -279,20 +296,6 @@ func (w *worker) announceEnd(status string) {
 	if wait := snap.hook(Boundary{Thread: w.t.id, Turn: w.turnID, Kind: BoundaryAgentEnd, Head: snap.head, Ended: status}); wait != nil {
 		w.t.host.log.Debug("agent: ignoring a wait for an ended turn", "thread", w.t.id, "turn", w.turnID)
 	}
-}
-
-func (a *actor) finishTurn(turnID string, o outcome) bool {
-	if a.continues(o) {
-		return false
-	}
-	a.settle(o.status)
-	completed := event.TurnCompleted{TurnID: turnID, Status: o.status, Error: o.failure}
-	if _, err := a.append(completed); err != nil {
-		a.t.host.log.Error("agent: journal turn.completed", "thread", a.t.id, "turn", turnID, "error", err)
-	}
-	clear(a.approvals)
-	a.idle()
-	return true
 }
 
 func (a *actor) newInputSince(head uint64) bool {

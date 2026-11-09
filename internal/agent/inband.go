@@ -14,6 +14,7 @@ import (
 type inBandCalls struct {
 	mu     sync.Mutex
 	events map[string][]event.Event
+	cancel bool
 }
 
 func (c *inBandCalls) put(callID string, events []event.Event) {
@@ -28,6 +29,24 @@ func (c *inBandCalls) take(callID string) ([]event.Event, bool) {
 	events, ok := c.events[callID]
 	delete(c.events, callID)
 	return events, ok
+}
+
+func (c *inBandCalls) markCancel() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cancel = true
+}
+
+func (c *inBandCalls) takeCancel() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cancelled := c.cancel
+	c.cancel = false
+	return cancelled
+}
+
+func (w *worker) interruptTurn() {
+	_, _ = ask(w.t, func(a *actor) bool { a.interrupt(); return true })
 }
 
 func (w *worker) openStream(ctx context.Context, providerID string, req model.Request) (model.Stream, error) {
@@ -66,7 +85,14 @@ func (w *worker) inBandEvents(ctx context.Context, call event.ToolCall) ([]event
 	}
 	v := w.decide(ctx, gc, requestID)
 	if !v.allow {
-		return declinedInBand(call, requestID, p.class, summary(gc), v)
+		events, completed, err := declinedInBand(call, requestID, p.class, summary(gc), v)
+		if err != nil {
+			return nil, event.ToolCompleted{}, err
+		}
+		if v.cancel {
+			w.inBand.markCancel()
+		}
+		return events, completed, nil
 	}
 	p.verdict = v
 	return w.executeInBand(ctx, p, gc, requestID)
