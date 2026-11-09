@@ -12,6 +12,7 @@ The exec server runs processes and filesystem operations through one `Local` run
 - Malformed JSON MUST produce error `-32700`. An unknown method MUST produce `-32601`. Invalid parameters MUST produce `-32602`.
 - A missing process MUST produce `-32001`. A missing file MUST produce `-32002`. Other operation failures MUST produce `-32000`.
 - The server MUST close the stream when cancellation ends the read operation. The client MUST wake every pending call when the stream closes.
+- When `TERM` fails because the stream closed and the runner can redial, the caller MUST open one fresh connection within 2 s and MUST send `TERM`, poll, and `KILL` over it.
 
 ## Methods
 

@@ -278,6 +278,28 @@ func (info *threadInfo) apply(decoded event.Event) {
 	}
 }
 
+type redialRunner struct {
+	runner.Runner
+	connect func(ctx context.Context) (runner.Runner, error)
+}
+
+func (r *redialRunner) Redial(ctx context.Context) (runner.Runner, error) {
+	return r.connect(ctx)
+}
+
+func newRedialRunner(l *link, svc sandboxsvc.Service, boxID string) *redialRunner {
+	return &redialRunner{
+		Runner: l.remote,
+		connect: func(ctx context.Context) (runner.Runner, error) {
+			_, fresh, err := connect(ctx, svc, boxID)
+			if err != nil {
+				return nil, err
+			}
+			return fresh.remote, nil
+		},
+	}
+}
+
 func connect(ctx context.Context, svc sandboxsvc.Service, boxID string) (string, *link, error) {
 	current, err := svc.Attach(ctx, boxID)
 	if err != nil {

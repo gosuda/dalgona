@@ -189,7 +189,7 @@ func (r *boxRunner) create(ctx context.Context, svc sandboxsvc.Service, cwd, par
 	}
 	l.cwd = cwd
 	bound := event.RunnerBound{Runner: r.name, Service: r.spec.Service, BoxID: current}
-	bound.Baseline, err = r.b.upload(ctx, l.remote, cwd)
+	bound.Baseline, err = r.b.upload(ctx, newRedialRunner(l, svc, id), cwd)
 	if err == nil {
 		err = r.b.record(ctx, r.thread, bound)
 	}
@@ -214,7 +214,7 @@ func (r *boxRunner) reattach(ctx context.Context, svc sandboxsvc.Service, cwd st
 		return nil, err
 	}
 	l.cwd = cwd
-	final, err := r.reconcile(ctx, l, bound, current)
+	final, err := r.reconcile(ctx, newRedialRunner(l, svc, current), cwd, bound, current)
 	if err == nil && current != attachID {
 		err = r.b.replaced(ctx, r.thread, final, attachID)
 	}
@@ -228,19 +228,19 @@ func (r *boxRunner) reattach(ctx context.Context, svc sandboxsvc.Service, cwd st
 	return l, nil
 }
 
-func (r *boxRunner) reconcile(ctx context.Context, l *link, bound event.RunnerBound, current string) (event.RunnerBound, error) {
+func (r *boxRunner) reconcile(ctx context.Context, up runner.Runner, cwd string, bound event.RunnerBound, current string) (event.RunnerBound, error) {
 	bound.BoxID = current
 	if !losesFiles(bound.Service) {
 		return bound, nil
 	}
-	_, statErr := l.remote.Stat(ctx, baselineFile)
+	_, statErr := up.Stat(ctx, baselineFile)
 	if statErr == nil {
 		return bound, nil
 	}
 	if !errors.Is(statErr, fs.ErrNotExist) {
 		return bound, fmt.Errorf("remote: box %s baseline: %w", current, statErr)
 	}
-	baseline, err := r.b.upload(ctx, l.remote, l.cwd)
+	baseline, err := r.b.upload(ctx, up, cwd)
 	if err != nil {
 		return bound, err
 	}

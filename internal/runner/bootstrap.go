@@ -623,15 +623,27 @@ func writeBaseline(ctx context.Context, r Runner) (string, error) {
 
 var runnerKillGrace = 2 * time.Second
 
+const runnerRedialBudget = 2 * time.Second
+
+// Redialer supplies a fresh connection for process teardown when the
+// current stream is dead.
+type Redialer interface {
+	Redial(ctx context.Context) (Runner, error)
+}
+
 func StopProcessWithGrace(r Runner, id string, grace time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
-	_ = r.Signal(ctx, id, SignalTerm)
+	stop, closeStop, termPending := stopTarget(ctx, r, id)
+	defer closeStop()
+	if termPending {
+		_ = stop.Signal(ctx, id, SignalTerm)
+	}
 	var offset int64
 	timer := time.NewTimer(pollInterval)
 	defer timer.Stop()
 	for ctx.Err() == nil {
-		out, err := r.Read(ctx, id, offset)
+		out, err := stop.Read(ctx, id, offset)
 		if err != nil || out.Exit != nil {
 			break
 		}
@@ -645,7 +657,36 @@ func StopProcessWithGrace(r Runner, id string, grace time.Duration) {
 	}
 	killCtx, killCancel := context.WithTimeout(context.Background(), time.Second)
 	defer killCancel()
-	_ = r.Signal(killCtx, id, SignalKill)
+	_ = stop.Signal(killCtx, id, SignalKill)
+}
+
+func stopTarget(ctx context.Context, r Runner, id string) (Runner, func(), bool) {
+	err := r.Signal(ctx, id, SignalTerm)
+	if err == nil {
+		return r, func() {}, false
+	}
+	fresh, ok := redialAfterClosedStream(r, err)
+	if !ok {
+		return r, func() {}, false
+	}
+	return fresh, func() { _ = fresh.Close() }, true
+}
+
+func redialAfterClosedStream(r Runner, termErr error) (Runner, bool) {
+	if !errors.Is(termErr, errRemoteClosed) {
+		return nil, false
+	}
+	rd, ok := r.(Redialer)
+	if !ok {
+		return nil, false
+	}
+	dialCtx, cancel := context.WithTimeout(context.Background(), runnerRedialBudget)
+	defer cancel()
+	fresh, err := rd.Redial(dialCtx)
+	if err != nil {
+		return nil, false
+	}
+	return fresh, true
 }
 
 func stopRunnerProcess(r Runner, id string) {

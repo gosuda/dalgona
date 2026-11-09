@@ -42,7 +42,7 @@ func (b *Binder) CloudUp(ctx context.Context, name string, copyAuth bool) error 
 	if err = b.trackReplacement(name, spec, current); err != nil {
 		return err
 	}
-	if err = b.seedWorkspace(ctx, l.remote, current); err != nil {
+	if err = b.seedWorkspace(ctx, newRedialRunner(l, svc, current), current); err != nil {
 		return err
 	}
 	if copyAuth {
