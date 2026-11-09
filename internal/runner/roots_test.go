@@ -36,3 +36,13 @@ func TestRunnerEnvironment_emptyRoots(t *testing.T) {
 		t.Fatalf("splitRoots = %v, want empty", got)
 	}
 }
+
+func TestRunnerEnvironment_stripsBoxToken(t *testing.T) {
+	base := []string{"PATH=/usr/bin", boxEnvironmentKey + "=secret-token-value", "HOME=/root"}
+	env := runnerEnvironment(base, "/tmp/work", SandboxWorkspaceWrite, []string{"/tmp/work"})
+	for _, item := range env {
+		if strings.HasPrefix(item, boxEnvironmentKey+"=") {
+			t.Fatalf("box token leaked into child environment: %q", item)
+		}
+	}
+}

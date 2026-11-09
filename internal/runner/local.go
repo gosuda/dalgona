@@ -132,6 +132,9 @@ func withoutRunnerEnvironment(env []string) []string {
 }
 
 func isRunnerEnvironment(key string) bool {
+	if key == boxEnvironmentKey {
+		return true
+	}
 	switch key {
 	case "DALGONA_RUN_CWD", "DALGONA_SANDBOX_MODE", "DALGONA_SANDBOX_ROOTS", "DALGONA_SHIM_EXEC":
 		return true
