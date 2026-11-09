@@ -531,6 +531,7 @@ func (s *Store) Dir() string { return s.dir }
 type Masker interface {
 	Mask(string) string
 	Unmask(string) string
+	UnmaskStrict(string) (string, error)
 }
 
 func (s *Store) Masker() Masker { return s }

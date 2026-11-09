@@ -109,15 +109,133 @@ func (s *Store) UnmaskStrict(text string) (string, error) {
 }
 
 func unresolvedPlaceholder(text string) (string, bool) {
-	rel := strings.Index(text, "{{secret:")
-	if rel < 0 {
-		return "", false
+	for offset := 0; offset < len(text); {
+		rel := strings.Index(text[offset:], "{{secret:")
+		if rel < 0 {
+			return "", false
+		}
+		start := offset + rel
+		endRel := strings.Index(text[start:], "}}")
+		if endRel < 0 {
+			return "", false
+		}
+		token := text[start : start+endRel+2]
+		if isSecretPlaceholder(token) {
+			return token, true
+		}
+		offset = start + 1
 	}
-	relEnd := strings.Index(text[rel:], "}}")
-	if relEnd < 0 {
-		return "", false
+	return "", false
+}
+
+func isSecretPlaceholder(token string) bool {
+	const prefix = "{{secret:"
+	const suffix = "}}"
+	if !strings.HasPrefix(token, prefix) || !strings.HasSuffix(token, suffix) {
+		return false
 	}
-	return text[rel : rel+relEnd+2], true
+	inner := token[len(prefix) : len(token)-len(suffix)]
+	if inner == "" {
+		return false
+	}
+	if strings.HasPrefix(inner, "pattern") {
+		return isPatternPlaceholder(inner)
+	}
+	if strings.HasPrefix(inner, "auth:") {
+		return isAuthPlaceholder(inner)
+	}
+	return isEnvPlaceholder(inner)
+}
+
+func isPatternPlaceholder(inner string) bool {
+	rest, ok := strings.CutPrefix(inner, "pattern")
+	if !ok {
+		return false
+	}
+	index, number, ok := strings.Cut(rest, ":")
+	if !ok || index == "" || number == "" {
+		return false
+	}
+	return isDecimalDigits(index) && isDecimalDigits(number)
+}
+
+func isAuthPlaceholder(inner string) bool {
+	rest, ok := strings.CutPrefix(inner, "auth:")
+	if !ok || rest == "" {
+		return false
+	}
+	provider, kind, found := strings.Cut(rest, ":")
+	if !isProviderID(provider) {
+		return false
+	}
+	if !found {
+		return true
+	}
+	if strings.Contains(kind, ":") {
+		return false
+	}
+	return kind == "access" || kind == "refresh"
+}
+
+func isEnvPlaceholder(inner string) bool {
+	if strings.ContainsAny(inner, ":{}") {
+		return false
+	}
+	if !secretEnvironmentName(inner) {
+		return false
+	}
+	return isEnvName(inner)
+}
+
+func isDecimalDigits(text string) bool {
+	for i := range len(text) {
+		if text[i] < '0' || text[i] > '9' {
+			return false
+		}
+	}
+	return len(text) > 0
+}
+
+func isEnvName(text string) bool {
+	if text == "" {
+		return false
+	}
+	for i := range len(text) {
+		if !isEnvChar(text[i]) {
+			return false
+		}
+	}
+	return !isDigit(text[0])
+}
+
+func isEnvChar(c byte) bool {
+	switch {
+	case c == '_':
+		return true
+	case isDigit(c):
+		return true
+	case c >= 'A' && c <= 'Z':
+		return true
+	case c >= 'a' && c <= 'z':
+		return true
+	default:
+		return false
+	}
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+func isProviderID(text string) bool {
+	if text == "" {
+		return false
+	}
+	for i := range len(text) {
+		c := text[i]
+		if c <= ' ' || c == ':' || c == '{' || c == '}' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) MaskError() error {

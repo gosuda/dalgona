@@ -25,6 +25,10 @@ func (fakeMasker) Unmask(text string) string {
 	return strings.ReplaceAll(text, "{{secret:CMD}}", "echo unmasked-secret-value")
 }
 
+func (fakeMasker) UnmaskStrict(text string) (string, error) {
+	return fakeMasker{}.Unmask(text), nil
+}
+
 func testEnv(t *testing.T) (tool.Env, func()) {
 	t.Helper()
 	runs, err := runner.NewLocal(filepath.Join(t.TempDir(), "runs"))

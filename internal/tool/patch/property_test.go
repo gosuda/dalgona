@@ -489,8 +489,16 @@ func (m quoteMasker) Unmask(text string) string {
 	return strings.ReplaceAll(text, "{{secret}}", m.secret)
 }
 
+func (m quoteMasker) UnmaskStrict(text string) (string, error) {
+	return m.Unmask(text), nil
+}
+
 type maskerStub struct{}
 
 func (maskerStub) Mask(text string) string { return strings.ReplaceAll(text, "secret", "{{secret}}") }
 
 func (maskerStub) Unmask(text string) string { return strings.ReplaceAll(text, "{{secret}}", "secret") }
+
+func (maskerStub) UnmaskStrict(text string) (string, error) {
+	return maskerStub{}.Unmask(text), nil
+}

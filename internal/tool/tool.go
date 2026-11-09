@@ -43,6 +43,7 @@ type Call struct {
 type Masker interface {
 	Mask(text string) string
 	Unmask(text string) string
+	UnmaskStrict(text string) (string, error)
 }
 type Env struct {
 	Runner    runner.Runner

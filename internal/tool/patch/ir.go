@@ -96,15 +96,25 @@ type parseFailure struct {
 
 func (e parseFailure) Error() string { return e.message }
 
-func unmaskEdits(edits []edit, unmask func(string) string) {
+func unmaskEdits(edits []edit, unmask func(string) (string, error)) error {
 	for i := range edits {
-		edits[i].locator.old = unmask(edits[i].locator.old)
-		edits[i].locator.context = unmask(edits[i].locator.context)
-		edits[i].body = unmask(edits[i].body)
+		var err error
+		if edits[i].locator.old, err = unmask(edits[i].locator.old); err != nil {
+			return err
+		}
+		if edits[i].locator.context, err = unmask(edits[i].locator.context); err != nil {
+			return err
+		}
+		if edits[i].body, err = unmask(edits[i].body); err != nil {
+			return err
+		}
 		for row := range edits[i].locator.quoted {
-			edits[i].locator.quoted[row] = unmask(edits[i].locator.quoted[row])
+			if edits[i].locator.quoted[row], err = unmask(edits[i].locator.quoted[row]); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 type styleError struct {

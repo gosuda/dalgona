@@ -44,7 +44,9 @@ func (e Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Pl
 		return tool.Plan{}, parseError(e.style, err)
 	}
 	if env.Masker != nil {
-		unmaskEdits(edits, env.Masker.Unmask)
+		if unmaskErr := unmaskEdits(edits, env.Masker.UnmaskStrict); unmaskErr != nil {
+			return tool.Plan{}, fmt.Errorf("patch: secret placeholder cannot be restored: %w", unmaskErr)
+		}
 	}
 	if len(edits) == 0 || len(edits) > 64 {
 		return tool.Plan{}, errors.New("patch: a payload may hold 1 to 64 edits; split the change into several calls")

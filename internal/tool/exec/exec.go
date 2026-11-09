@@ -45,7 +45,11 @@ func (t *Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Resu
 	}
 	command := args.command
 	if env.Masker != nil {
-		command = env.Masker.Unmask(command)
+		unmasked, unmaskErr := env.Masker.UnmaskStrict(command)
+		if unmaskErr != nil {
+			return tool.Result{}, fmt.Errorf("exec: secret placeholder cannot be restored: %w", unmaskErr)
+		}
+		command = unmasked
 	}
 	mode := env.Sandbox.Mode
 	if args.escalate {

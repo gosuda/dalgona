@@ -645,6 +645,8 @@ type identityMasker struct{}
 func (identityMasker) Mask(text string) string   { return text }
 func (identityMasker) Unmask(text string) string { return text }
 
+func (identityMasker) UnmaskStrict(text string) (string, error) { return text, nil }
+
 func (h *Host) masker() tool.Masker {
 	if h.cfg.Auth == nil {
 		return identityMasker{}
