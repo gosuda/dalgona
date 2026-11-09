@@ -70,7 +70,7 @@ func validateProcessSpec(spec ProcessSpec) error {
 }
 
 func (l *Local) spawn(runDir string, spec ProcessSpec) error {
-	self, err := os.Executable()
+	self, err := selfExe()
 	if err != nil {
 		return fmt.Errorf("runner: executable: %w", err)
 	}

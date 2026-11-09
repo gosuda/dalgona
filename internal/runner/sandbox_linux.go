@@ -23,7 +23,7 @@ func configureSandbox(cmd *exec.Cmd, dir string, sandbox Sandbox) error {
 	if sandbox.Mode != SandboxWorkspaceWrite || !Available() {
 		return nil
 	}
-	self, err := os.Executable()
+	self, err := selfExe()
 	if err != nil {
 		return fmt.Errorf("resolve shim executable: %w", err)
 	}

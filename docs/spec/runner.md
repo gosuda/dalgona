@@ -4,9 +4,9 @@ The local runner MUST store one directory per call. The directory MUST be `<dir>
 
 Callers MUST escape a call id that contains `/`, such as a nested `<run>/<n>` cell call id, to a single path component before `Start`. A call id with `/` MUST NOT reach the runs directory.
 
-The parent MUST start the shim detached. The invocation MUST be `<self> __shim --dir <runs/call_id> -- argv...`. On Unix the parent MUST start the shim with `Setsid`. On Windows the parent MUST start the shim with `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`.
+The parent MUST start the shim detached. The invocation MUST be `<self> __shim --dir <runs/call_id> -- argv...`. On Linux `<self>` MUST be `/proc/self/exe`, so the shim and the parent are one build when an upgrade replaces the file at the start path. On macOS and Windows `<self>` MUST be `os.Executable()`. The runner passes writable roots to the shim in `DALGONA_SANDBOX_ROOTS`. The value is an internal format between the parent and the shim of one build. On Unix the parent MUST start the shim with `Setsid`. On Windows the parent MUST start the shim with `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`.
 
-`ProcessSpec.Argv[0]` equal to `@self` MUST resolve to `os.Executable()` on the local runner. On a remote exec server it MUST resolve to the exec-server binary path.
+`ProcessSpec.Argv[0]` equal to `@self` MUST resolve to the parent build: `/proc/self/exe` on Linux and `os.Executable()` on macOS and Windows. On a remote exec server it MUST resolve to the exec-server binary path.
 
 `Start` MUST be idempotent. An existing call directory for the same call id MUST make `Start` return success. It MUST NOT start a second process.
 

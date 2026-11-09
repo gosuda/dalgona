@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -126,12 +127,16 @@ func TestLocal_resolvesSelf(t *testing.T) {
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
 	startTestProcess(t, local, ProcessSpec{ID: "self", Argv: []string{"@self", "__self-test"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
 	state := waitForExit(t, local, "self", 5*time.Second)
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
+	want := "/proc/self/exe"
+	if runtime.GOOS != "linux" {
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = executable
 	}
-	if strings.TrimSpace(string(state.Data)) != executable {
-		t.Fatalf("@self output = %q, want %q", state.Data, executable)
+	if strings.TrimSpace(string(state.Data)) != want {
+		t.Fatalf("@self output = %q, want %q", state.Data, want)
 	}
 }
 
