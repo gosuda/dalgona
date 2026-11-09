@@ -40,11 +40,6 @@ var providerDefs = map[string]ProviderDef{
 	"sandbox0":   {ID: "sandbox0", EnvKey: "SANDBOX0_TOKEN", Products: []Product{ProductDalgona}},
 }
 
-func ProviderDefFor(id string) (ProviderDef, bool) {
-	definition, ok := providerDefs[id]
-	return definition, ok
-}
-
 type (
 	Credential struct {
 		Type    string `json:"type"`
