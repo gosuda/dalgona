@@ -148,7 +148,7 @@ func (t *Thread) supervise(ctx context.Context, child *Thread, prompt string) (t
 
 func waitTurnEnd(ctx context.Context, child *Thread) error {
 	updates := child.Subscribe()
-	defer child.Unsubscribe(updates)
+	defer func() { child.Unsubscribe(updates) }()
 	for {
 		status, err := child.Status()
 		if err != nil || !status.Busy {
