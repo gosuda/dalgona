@@ -11,6 +11,7 @@ var (
 	ErrDamaged        = errors.New("agent: session is damaged")
 	ErrClosed         = errors.New("agent: thread is closed")
 	ErrNeedsOverrides = errors.New("agent: advisor session needs its tools and prompt")
+	ErrTurnNotRunning = errors.New("agent: turn is not running")
 )
 
 type stateError struct {
@@ -35,4 +36,8 @@ func notOnPathError(turn string) error {
 
 func unknownTurnError(turn string) error {
 	return stateError{message: "unknown turn " + turn, kind: ErrUnknownTurn}
+}
+
+func turnNotRunningError(turn string) error {
+	return stateError{message: "turn " + turn + " is not running", kind: ErrTurnNotRunning}
 }

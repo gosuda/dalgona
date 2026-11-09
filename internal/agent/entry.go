@@ -118,6 +118,19 @@ func (a *actor) interrupt() {
 	}
 }
 
+func (t *Thread) InterruptTurn(ctx context.Context, turnID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return askErr(t, func(a *actor) error {
+		if a.state.TurnID == "" || a.state.TurnID != turnID {
+			return turnNotRunningError(turnID)
+		}
+		a.interrupt()
+		return nil
+	})
+}
+
 func (t *Thread) Answer(requestID string, reply Reply) error {
 	err := askErr(t, func(a *actor) error {
 		ch, ok := a.approvals[requestID]

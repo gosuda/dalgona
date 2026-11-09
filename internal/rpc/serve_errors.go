@@ -40,6 +40,8 @@ func hostError(err error, threadID, turnID string) error {
 		return invalidParams("turn " + turnID + " is not on the active path")
 	case errors.Is(err, agent.ErrUnknownTurn):
 		return invalidParams("unknown turn " + turnID)
+	case errors.Is(err, agent.ErrTurnNotRunning):
+		return invalidRequest("turn " + turnID + " is not running")
 	case errors.Is(err, agent.ErrNothingToSummarize):
 		return invalidRequest(err.Error())
 	case errors.Is(err, agent.ErrDamaged), errors.Is(err, agent.ErrClosed), errors.Is(err, agent.ErrArchived):
