@@ -280,6 +280,22 @@ export function dropSentFollowup(queue: readonly string[]): readonly string[] {
 	return queue.slice(1);
 }
 
+export interface ScrollSnapshot {
+	readonly count: number;
+	readonly lastId: string | null;
+}
+
+export function shouldAutoScrollForUpdate(
+	running: boolean,
+	previous: ScrollSnapshot,
+	next: ScrollSnapshot,
+): boolean {
+	if (!running) {
+		return true;
+	}
+	return previous.count !== next.count || previous.lastId !== next.lastId;
+}
+
 export function itemsAwaitingApproval(
 	approvals: readonly ApprovalRequest[],
 	threadId: string | null,

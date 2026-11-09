@@ -1,7 +1,11 @@
 <script lang="ts">
 import KeywordText from "#lib/components/KeywordText.svelte";
 import { itemStatusLabel, kindLabel, planStatusLabel } from "#lib/labels.ts";
-import { itemDisplayStatus } from "#lib/reducer.ts";
+import {
+	itemDisplayStatus,
+	type ScrollSnapshot,
+	shouldAutoScrollForUpdate,
+} from "#lib/reducer.ts";
 import type {
 	JsonValue,
 	KeywordDefinition,
@@ -37,6 +41,8 @@ let viewport = $state<HTMLDivElement>();
 let running = $derived(turnStatus === "inProgress");
 let followedThread: string | null = null;
 let following = true;
+let scrollQueued = false;
+let scrolledSnapshot: ScrollSnapshot = { count: 0, lastId: null };
 
 function scroller(): Element | null {
 	if (!viewport) return null;
@@ -50,11 +56,26 @@ $effect(() => {
 	if (threadId !== followedThread) {
 		followedThread = threadId;
 		following = true;
+		scrolledSnapshot = { count: 0, lastId: null };
 	}
-	const target = scroller();
-	if (target && currentItems && following) {
-		target.scrollTo({ top: target.scrollHeight, behavior: "auto" });
-	}
+	const nextSnapshot: ScrollSnapshot = {
+		count: currentItems.length,
+		lastId: currentItems.at(-1)?.id ?? null,
+	};
+	const previousSnapshot = scrolledSnapshot;
+	scrolledSnapshot = nextSnapshot;
+	if (!shouldAutoScrollForUpdate(running, previousSnapshot, nextSnapshot))
+		return;
+	if (!following) return;
+	if (scrollQueued) return;
+	scrollQueued = true;
+	requestAnimationFrame(() => {
+		scrollQueued = false;
+		const target = scroller();
+		if (target && following) {
+			target.scrollTo({ top: target.scrollHeight, behavior: "auto" });
+		}
+	});
 });
 
 function trackFollowing(): void {

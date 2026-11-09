@@ -9,6 +9,7 @@ import {
 	otherThreadApprovalCount,
 	reduceNotification,
 	resolveApprovalRequest,
+	shouldAutoScrollForUpdate,
 	trackApprovalRequest,
 	transcriptForThread,
 } from "./reducer";
@@ -316,6 +317,38 @@ describe("followup queue", () => {
 
 	test("keeps an empty queue empty", () => {
 		expect(dropSentFollowup([])).toEqual([]);
+	});
+});
+
+describe("transcript autoscroll", () => {
+	test("scrolls when a new item arrives while streaming", () => {
+		expect(
+			shouldAutoScrollForUpdate(
+				true,
+				{ count: 1, lastId: "a" },
+				{ count: 2, lastId: "b" },
+			),
+		).toBe(true);
+	});
+
+	test("skips scrolls for deltas into the same item while streaming", () => {
+		expect(
+			shouldAutoScrollForUpdate(
+				true,
+				{ count: 1, lastId: "a" },
+				{ count: 1, lastId: "a" },
+			),
+		).toBe(false);
+	});
+
+	test("scrolls again once the turn settles", () => {
+		expect(
+			shouldAutoScrollForUpdate(
+				false,
+				{ count: 1, lastId: "a" },
+				{ count: 1, lastId: "a" },
+			),
+		).toBe(true);
 	});
 });
 
