@@ -16,7 +16,10 @@ import (
 var (
 	apiKeyProviders = []string{"anthropic", "google", "openai", "openrouter"}
 	oauthProviders  = []string{"antigravity", "chatgpt", "cursor", "devin"}
+	runnerServices  = []string{"cloudflare", "sandbox0", "sprites"}
 )
+
+func apiKeyLoginTargets() []string { return slices.Concat(apiKeyProviders, runnerServices) }
 
 func Providers() []string {
 	return slices.Sorted(slices.Values(slices.Concat(apiKeyProviders, oauthProviders)))

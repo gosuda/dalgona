@@ -205,8 +205,8 @@ func (env CLIEnv) parseLogin(args []string) (loginRequest, error) {
 }
 
 func (r loginRequest) check() error {
-	if r.apiKey != "" && !slices.Contains(apiKeyProviders, r.provider) {
-		return fmt.Errorf("login %s: --api-key works only for %s", r.provider, strings.Join(apiKeyProviders, ", "))
+	if r.apiKey != "" && !slices.Contains(apiKeyLoginTargets(), r.provider) {
+		return fmt.Errorf("login %s: --api-key works only for %s", r.provider, strings.Join(apiKeyLoginTargets(), ", "))
 	}
 	return nil
 }
@@ -277,7 +277,7 @@ func (env CLIEnv) remoteLoginParams(request loginRequest) (rpc.AccountLoginStart
 	switch {
 	case request.provider == "":
 		return rpc.AccountLoginStartParams{}, nil
-	case slices.Contains(apiKeyProviders, request.provider):
+	case slices.Contains(apiKeyLoginTargets(), request.provider):
 		key, err := env.readAPIKey(request)
 		return rpc.AccountLoginStartParams{Type: "apiKey", Provider: request.provider, APIKey: key}, err
 	case request.provider == "chatgpt":
