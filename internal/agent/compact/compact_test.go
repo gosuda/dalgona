@@ -35,6 +35,30 @@ func TestCutKeepsTurnBoundary(t *testing.T) {
 	}
 }
 
+func TestCutSkipsSteerInsideToolBatch(t *testing.T) {
+	entries := []Entry{
+		{Kind: UserMessage, Bytes: 20},
+		{Kind: AssistantMessage, Bytes: 20},
+		{Kind: ToolStarted, Bytes: 20, CallID: "a"},
+		{Kind: UserMessage, Bytes: 20},
+		{Kind: ToolCompleted, Bytes: 20, CallID: "a"},
+		{Kind: UserMessage, Bytes: 20},
+	}
+	cut, ok := Cut(entries, 8, 0)
+	if !ok {
+		t.Fatal("Cut() reported no boundary")
+	}
+	if cut != 1 {
+		t.Fatalf("Cut() = %d, want the assistant call at 1", cut)
+	}
+	if entries[cut].Kind != AssistantMessage {
+		t.Fatalf("cut starts at %v", entries[cut].Kind)
+	}
+	if _, ok := Cut(entries[:2], 8, 0); ok {
+		t.Fatal("Cut() found a boundary while a tool batch stayed pending with no call to keep")
+	}
+}
+
 func TestPruneSelectLargestOlderOutputs(t *testing.T) {
 	entries := []Entry{
 		{Kind: ToolCompleted, CallID: "old-small", OutputBytes: 9000},

@@ -107,6 +107,9 @@ func randomHistory(random *rand.Rand) view {
 			}
 			add(message, random.IntN(2000)+50)
 			add(event.ToolStarted{CallID: callID, TurnID: id, Tool: "read", Class: "read", Args: jsontext.Value(`{}`)}, 80)
+			if random.IntN(4) == 0 {
+				add(event.UserMessage{ItemID: "s" + callID, TurnID: id, Text: "steer", Kind: "steer"}, random.IntN(200)+10)
+			}
 			add(event.ToolCompleted{CallID: callID, OK: true, Output: "o", Recovered: "none"}, random.IntN(20000)+50)
 		}
 		add(event.AssistantMessage{ItemID: "z" + id, TurnID: id, StopReason: "stop"}, random.IntN(3000)+50)
@@ -135,15 +138,30 @@ func TestCompactionCutKeepsCallsWithTheirMessage(t *testing.T) {
 }
 
 func cutPossible(entries []compact.Entry, target, prev int) bool {
+	depth := batchDepth(entries)
 	tail := 0
 	for i := len(entries) - 1; i > prev; i-- {
 		tail += entries[i].Bytes
-		boundary := entries[i].Kind == compact.UserMessage || entries[i].Kind == compact.AssistantMessage
+		boundary := (entries[i].Kind == compact.UserMessage || entries[i].Kind == compact.AssistantMessage) && depth[i] == 0
 		if boundary && tail >= target {
 			return true
 		}
 	}
 	return false
+}
+
+func batchDepth(entries []compact.Entry) []int {
+	depth := make([]int, len(entries)+1)
+	open := 0
+	for i, entry := range entries {
+		if entry.Kind == compact.ToolStarted {
+			open++
+		} else if entry.Kind == compact.ToolCompleted && open > 0 {
+			open--
+		}
+		depth[i+1] = open
+	}
+	return depth
 }
 
 func assertCut(t *testing.T, iteration int, cv compactionView, cut, keep int) {

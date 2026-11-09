@@ -71,7 +71,17 @@ func findCut(entries []Entry, target int) (int, bool) {
 }
 
 func turnBoundary(entries []Entry, cut int) int {
-	for cut > 0 && cut < len(entries) && !isBoundary(entries[cut].Kind) {
+	depth := make([]int, len(entries)+1)
+	open := 0
+	for i, entry := range entries {
+		if entry.Kind == ToolStarted {
+			open++
+		} else if entry.Kind == ToolCompleted && open > 0 {
+			open--
+		}
+		depth[i+1] = open
+	}
+	for cut > 0 && cut < len(entries) && (!isBoundary(entries[cut].Kind) || depth[cut] > 0) {
 		cut--
 	}
 	return cut
