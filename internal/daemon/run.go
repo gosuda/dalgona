@@ -49,9 +49,16 @@ func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc)
 	return accept(ctx, listener, &tasks, func(conn net.Conn) { serveConn(ctx, conn, host, serve) })
 }
 
-func tightenHome(home string) error {
+func makeHomeDir(home string) error {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return fmt.Errorf("daemon home: %w", err)
+	}
+	return nil
+}
+
+func tightenHome(home string) error {
+	if err := makeHomeDir(home); err != nil {
+		return err
 	}
 	if err := os.Chmod(home, 0o700); err != nil { //nolint:gosec // a home directory needs the exec bit
 		return fmt.Errorf("daemon home permissions: %w", err)

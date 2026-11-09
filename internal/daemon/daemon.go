@@ -40,8 +40,8 @@ var (
 )
 
 func Ensure(ctx context.Context, home, exe string) (net.Conn, error) {
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return nil, fmt.Errorf("daemon home: %w", err)
+	if err := makeHomeDir(home); err != nil {
+		return nil, err
 	}
 	sock := SocketPath(home)
 	if conn, err := net.Dial("unix", sock); err == nil {
