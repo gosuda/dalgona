@@ -102,7 +102,7 @@ func describeWorkspaceServer(server WorkspaceServer) string {
 		detail = strings.TrimSpace(server.Command + " " + strings.Join(server.Args, " "))
 	}
 	if len(server.Env) > 0 {
-		env := slices.Clone(server.Env)
+		env := redactWorkspaceEnv(server.Env)
 		slices.Sort(env)
 		envText := "env " + strings.Join(env, " ")
 		if detail == "" {
@@ -115,6 +115,19 @@ func describeWorkspaceServer(server WorkspaceServer) string {
 		return server.Name
 	}
 	return detail
+}
+
+func redactWorkspaceEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			out = append(out, entry)
+			continue
+		}
+		out = append(out, key+"=<redacted>")
+	}
+	return out
 }
 
 type threadContextKey struct{}

@@ -95,7 +95,7 @@ func (s *server) spawnApproval(requestID string, cancel context.CancelFunc, task
 }
 
 func cmdText(prompt agent.ApprovalPrompt) string {
-	return cmp.Or(prompt.Command, strings.Join(prompt.Commands, " && "), prompt.Summary)
+	return cmp.Or(prompt.Command, strings.Join(prompt.Commands, "\n"), prompt.Summary)
 }
 
 func (s *server) settle(requestID string) {

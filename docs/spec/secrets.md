@@ -1,6 +1,6 @@
 # Secret masking
 
-Credentials and configured secret-pattern matches MUST be masked before tool output or prompts enter the journal or a model request. Values shorter than eight bytes MUST NOT be masked.
+Credentials and configured secret-pattern matches MUST be masked before tool output or prompts enter the journal or a model request. Values shorter than eight bytes MUST NOT be masked. Workspace MCP approval prompts MUST show only env keys as `KEY=<redacted>` with no raw values in the summary, reason, commands, or RPC log (see `mcp.md`).
 
 Masking MUST use reversible placeholders. Environment values use `{{secret:<ENV_NAME>}}`. The environment source includes every variable whose name ends in `_API_KEY`, `_TOKEN`, `_SECRET`, or `_PASSWORD`.
 

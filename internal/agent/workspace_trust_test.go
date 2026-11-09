@@ -8,17 +8,32 @@ import (
 
 func TestFormatWorkspaceServerShowsEnv(t *testing.T) {
 	t.Parallel()
-	server := WorkspaceServer{Name: "ws", Command: "uvx", Args: []string{"mcp-server", "--fast"}, Env: []string{"PATH=/tmp/bin:/usr/bin", "LD_PRELOAD=/tmp/preload.so"}}
+	server := WorkspaceServer{Name: "ws", Command: "uvx", Args: []string{"mcp-server", "--fast"}, Env: []string{"PATH=/tmp/bin:/usr/bin", "LD_PRELOAD=/tmp/preload.so", "API_KEY=live_secret"}}
 	got := FormatWorkspaceServer(server)
-	for _, want := range []string{"uvx", "mcp-server", "--fast", "PATH=/tmp/bin:/usr/bin", "LD_PRELOAD=/tmp/preload.so"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("formatted server %q does not contain %q", got, want)
+	requireContains(t, got, []string{"uvx", "mcp-server", "--fast", "PATH=<redacted>", "LD_PRELOAD=<redacted>", "API_KEY=<redacted>"})
+	requireAbsent(t, got, []string{"/tmp/bin", "/tmp/preload.so", "live_secret"})
+	prompt := FormatWorkspacePrompt("/work/repo", []WorkspaceServer{server})
+	requireContains(t, prompt, []string{"/work/repo", "uvx", "PATH=<redacted>", "API_KEY=<redacted>"})
+	requireAbsent(t, prompt, []string{"/tmp/bin", "live_secret"})
+	for _, cmd := range WorkspaceCommands([]WorkspaceServer{server}) {
+		requireAbsent(t, cmd, []string{"live_secret", "/tmp/bin"})
+	}
+}
+
+func requireContains(t *testing.T, haystack string, wants []string) {
+	t.Helper()
+	for _, want := range wants {
+		if !strings.Contains(haystack, want) {
+			t.Fatalf("value %q does not contain %q", haystack, want)
 		}
 	}
-	prompt := FormatWorkspacePrompt("/work/repo", []WorkspaceServer{server})
-	for _, want := range []string{"/work/repo", "uvx", "PATH=/tmp/bin:/usr/bin"} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt %q does not contain %q", prompt, want)
+}
+
+func requireAbsent(t *testing.T, haystack string, absents []string) {
+	t.Helper()
+	for _, absent := range absents {
+		if strings.Contains(haystack, absent) {
+			t.Fatalf("value %q leaks raw value %q", haystack, absent)
 		}
 	}
 }
@@ -46,6 +61,20 @@ func checkPromptContains(t *testing.T, prompt ApprovalPrompt, wants []string) {
 	}
 }
 
+func checkPromptAbsent(t *testing.T, prompt ApprovalPrompt, absents []string) {
+	t.Helper()
+	for _, absent := range absents {
+		if strings.Contains(prompt.Summary, absent) || strings.Contains(prompt.Reason, absent) {
+			t.Fatalf("approval prompt %q leaks raw value %q", prompt.Summary, absent)
+		}
+		for _, cmd := range prompt.Commands {
+			if strings.Contains(cmd, absent) {
+				t.Fatalf("approval command %q leaks raw value %q", cmd, absent)
+			}
+		}
+	}
+}
+
 func TestRequestWorkspaceApprovalReachesClient(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -63,7 +92,8 @@ func TestRequestWorkspaceApprovalReachesClient(t *testing.T) {
 		done <- result{reply: reply, err: err}
 	}()
 	prompt := awaitApprovalPrompt(t, updates)
-	checkPromptContains(t, prompt, []string{"/work/repo", "/tmp/srv", "--fast", "PATH=/tmp/bin"})
+	checkPromptContains(t, prompt, []string{"/work/repo", "/tmp/srv", "--fast", "PATH=<redacted>"})
+	checkPromptAbsent(t, prompt, []string{"/tmp/bin"})
 	if prompt.Tool != "mcp_workspace" {
 		t.Fatalf("approval tool = %q, want mcp_workspace", prompt.Tool)
 	}
