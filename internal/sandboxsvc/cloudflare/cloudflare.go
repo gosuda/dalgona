@@ -1,45 +1,26 @@
 package cloudflare
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json/jsontext"
-	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/coder/websocket"
 	"github.com/gosuda/dalgona/internal/sandboxsvc"
 )
 
-type Probe func(ctx context.Context, id string) bool
-
 type Service struct {
 	baseURL string
 	token   string
 	client  *http.Client
-	probe   Probe
 }
 
-func New(baseURL, token string, probe ...Probe) *Service {
-	var p Probe
-	if len(probe) != 0 {
-		p = probe[0]
-	}
-	return &Service{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: http.DefaultClient, probe: p}
-}
-
-func NewWithClient(baseURL, token string, client *http.Client, probe Probe) *Service {
-	if client == nil {
-		client = http.DefaultClient
-	}
-	return &Service{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: client, probe: probe}
+func New(baseURL, token string) *Service {
+	return &Service{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: http.DefaultClient}
 }
 
 func (s *Service) Create(ctx context.Context, spec sandboxsvc.Spec) (string, error) {
@@ -89,57 +70,7 @@ func (s *Service) Connect(ctx context.Context, id string, endpoint sandboxsvc.En
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare: connect %s: %w", id, err)
 	}
-	return websocket.NetConn(ctx, conn, websocket.MessageBinary), nil
-}
-
-func (s *Service) Replaced(ctx context.Context, id string) bool {
-	if s.probe != nil {
-		return s.probe(ctx, id)
-	}
-	conn, err := s.Connect(ctx, id, sandboxsvc.ExecServer)
-	if err != nil {
-		return false
-	}
-	missing, probeErr := probeBaseline(ctx, conn)
-	return probeErr == nil && missing
-}
-
-func probeBaseline(ctx context.Context, conn io.ReadWriteCloser) (bool, error) {
-	defer func() { _ = conn.Close() }()
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-	if deadline, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
-		_ = deadline.SetReadDeadline(time.Now().Add(5 * time.Second))
-	}
-	request := []byte(`{"id":1,"method":"fs/readFile","params":{"path":"/workspace/.dalgona-baseline"}}` + "\n")
-	if _, err := conn.Write(request); err != nil {
-		return false, fmt.Errorf("cloudflare: write baseline probe: %w", err)
-	}
-	reader := bufio.NewReaderSize(conn, 4096)
-	line, err := reader.ReadBytes('\n')
-	if err != nil {
-		return false, fmt.Errorf("cloudflare: read baseline probe: %w", err)
-	}
-	var response struct {
-		Error jsontext.Value `json:"error"`
-	}
-	if decodeErr := json.Unmarshal(line, &response); decodeErr != nil {
-		return false, fmt.Errorf("cloudflare: decode baseline probe: %w", decodeErr)
-	}
-	return baselineErrorMissing(response.Error), nil
-}
-
-func baselineErrorMissing(raw jsontext.Value) bool {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return false
-	}
-	var wireError struct {
-		Code int `json:"code"`
-	}
-	if err := json.Unmarshal(raw, &wireError); err != nil {
-		return false
-	}
-	return wireError.Code == -32004
+	return websocket.NetConn(ctx, conn, websocket.MessageText), nil
 }
 
 func (s *Service) post(ctx context.Context, id string) error {
