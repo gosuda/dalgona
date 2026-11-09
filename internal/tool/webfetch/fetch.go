@@ -47,7 +47,7 @@ func (t *Tool) Spec() tool.Spec {
 	return tool.Spec{
 		Name:        "web_fetch",
 		Description: "Fetch an HTTP or HTTPS URL. HTML is converted to text. Other textual content is returned unchanged. The response body is capped by max_bytes.",
-		Schema:      jsontext.Value(`{"type":"object","properties":{"url":{"type":"string"},"max_bytes":{"type":"integer","minimum":1}},"required":["url"],"additionalProperties":false}`),
+		Schema:      jsontext.Value(`{"type":"object","properties":{"url":{"type":"string"},"max_bytes":{"type":"integer","minimum":1,"maximum":16777216}},"required":["url"],"additionalProperties":false}`),
 		Keep:        tool.KeepHead,
 	}
 }
@@ -405,6 +405,9 @@ func positiveBytes(raw string) (int64, error) {
 	}
 	if limit <= 0 || limit == int64(^uint64(0)>>1) {
 		return 0, errors.New("web_fetch: max_bytes must be positive and less than the maximum signed integer")
+	}
+	if limit > 16<<20 {
+		return 0, errors.New("web_fetch: max_bytes must be at most 16777216")
 	}
 	return limit, nil
 }
