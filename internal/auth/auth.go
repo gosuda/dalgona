@@ -26,13 +26,10 @@ const (
 	ProductDalgona Product = "dalgona"
 )
 
-type (
-	ProductScope = Product
-	ProviderDef  struct {
-		ID, EnvKey string
-		Products   []Product
-	}
-)
+type ProviderDef struct {
+	ID, EnvKey string
+	Products   []Product
+}
 
 var providerDefs = map[string]ProviderDef{
 	"openai":     {ID: "openai", EnvKey: "OPENAI_API_KEY", Products: []Product{ProductDal, ProductDalgona}},
@@ -73,7 +70,7 @@ type (
 
 func Load(home string) (*Store, error) { return NewWithPatterns(home, nil) }
 
-func New(home string) (*Store, error) { return NewWithPatterns(home, nil) }
+func New(home string) (*Store, error) { return Load(home) }
 
 func NewWithPatterns(home string, patterns []string) (*Store, error) {
 	store := &Store{
@@ -240,37 +237,41 @@ func readObject(raw []byte, visit func(string, jsontext.Value) error) error {
 	return nil
 }
 
+var credentialFieldNames = []string{"type", "key", "access", "refresh", "expires", "account"}
+
+func credentialField(credential *Credential, name string) *string {
+	switch name {
+	case "type":
+		return &credential.Type
+	case "key":
+		return &credential.Key
+	case "access":
+		return &credential.Access
+	case "refresh":
+		return &credential.Refresh
+	case "expires":
+		return &credential.Expires
+	case "account":
+		return &credential.Account
+	}
+	return nil
+}
+
 func decodeCredential(raw jsontext.Value) (Credential, error) {
 	var credential Credential
 	err := readObject(raw, func(name string, value jsontext.Value) error {
-		switch name {
-		case "type", "key", "access", "refresh", "expires", "account":
-			text, err := jsonString(value)
-			if err != nil {
-				return fmt.Errorf("field %q: %w", name, err)
-			}
-			setCredentialField(&credential, name, text)
+		field := credentialField(&credential, name)
+		if field == nil {
+			return nil
 		}
+		text, err := jsonString(value)
+		if err != nil {
+			return fmt.Errorf("field %q: %w", name, err)
+		}
+		*field = text
 		return nil
 	})
 	return credential, err
-}
-
-func setCredentialField(credential *Credential, name, value string) {
-	switch name {
-	case "type":
-		credential.Type = value
-	case "key":
-		credential.Key = value
-	case "access":
-		credential.Access = value
-	case "refresh":
-		credential.Refresh = value
-	case "expires":
-		credential.Expires = value
-	case "account":
-		credential.Account = value
-	}
 }
 
 func jsonString(raw jsontext.Value) (string, error) {
@@ -462,22 +463,16 @@ func writeCredential(encoder *jsontext.Encoder, credential Credential) error {
 	if err := encoder.WriteToken(jsontext.BeginObject); err != nil {
 		return fmt.Errorf("write credential: %w", err)
 	}
-	fields := []struct{ name, value string }{
-		{name: "type", value: credential.Type},
-		{name: "key", value: credential.Key},
-		{name: "access", value: credential.Access},
-		{name: "refresh", value: credential.Refresh},
-		{name: "expires", value: credential.Expires},
-		{name: "account", value: credential.Account},
-	}
-	for _, field := range fields {
-		if field.value == "" {
+	mutable := credential
+	for _, name := range credentialFieldNames {
+		value := *credentialField(&mutable, name)
+		if value == "" {
 			continue
 		}
-		if err := encoder.WriteToken(jsontext.String(field.name)); err != nil {
+		if err := encoder.WriteToken(jsontext.String(name)); err != nil {
 			return fmt.Errorf("write credential field: %w", err)
 		}
-		if err := encoder.WriteToken(jsontext.String(field.value)); err != nil {
+		if err := encoder.WriteToken(jsontext.String(value)); err != nil {
 			return fmt.Errorf("write credential value: %w", err)
 		}
 	}
@@ -539,7 +534,3 @@ type Masker interface {
 }
 
 func (s *Store) Masker() Masker { return s }
-
-func ParseKeyValue(value string) (string, string, bool) {
-	return strings.Cut(value, "=")
-}
