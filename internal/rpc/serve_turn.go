@@ -87,7 +87,11 @@ func (p *turnParams) prompt(current string) (agent.Input, error) {
 	if err != nil {
 		return agent.Input{}, err
 	}
-	in := agent.Input{Kind: agent.InputPrompt, Text: strings.Join(p.text, "\n"), Effort: p.effort, Approval: approval, Sandbox: sandbox}
+	effort, err := effortMode(p.effort)
+	if err != nil {
+		return agent.Input{}, err
+	}
+	in := agent.Input{Kind: agent.InputPrompt, Text: strings.Join(p.text, "\n"), Effort: string(effort), Approval: approval, Sandbox: sandbox}
 	if p.model != "" {
 		in.Model = qualifiedModel(p.model, "", current)
 	}
