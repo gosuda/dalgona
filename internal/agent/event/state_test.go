@@ -265,10 +265,10 @@ func TestFoldAcceptsOutOfOrderScriptEffects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("out-of-order effects: %v", err)
 	}
-	if state.Scripts["s"].NextEffect != 3 || len(state.Scripts["s"].Missing) != 0 {
+	if len(state.Scripts["s"].Seen) != 3 {
 		t.Fatalf("script state = %#v", state.Scripts["s"])
 	}
-	for _, n := range []uint64{1, 2, 3 + event.MaxScriptEffectGap} {
+	for _, n := range []uint64{1, 2} {
 		if _, err := event.Fold(state, 99, effect(n)); err == nil {
 			t.Fatalf("effect %d accepted after out-of-order completion", n)
 		}

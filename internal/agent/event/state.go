@@ -41,11 +41,8 @@ type GrantRequest struct {
 	Args BlobRef
 }
 
-const MaxScriptEffectGap = 4096
-
 type ScriptState struct {
-	NextEffect uint64
-	Missing    map[uint64]struct{}
+	Seen map[uint64]struct{}
 }
 
 type ChildState struct {
@@ -106,6 +103,10 @@ func (s State) clone() State {
 	s.PendingGrants = maps.Clone(s.PendingGrants)
 	s.DeclinedCalls = maps.Clone(s.DeclinedCalls)
 	s.Scripts = maps.Clone(s.Scripts)
+	for id, run := range s.Scripts {
+		run.Seen = maps.Clone(run.Seen)
+		s.Scripts[id] = run
+	}
 	s.Children = maps.Clone(s.Children)
 	s.Grants = maps.Clone(s.Grants)
 	s.Snapshots = maps.Clone(s.Snapshots)
@@ -511,20 +512,16 @@ func foldScriptStarted(s *State, e ScriptStarted) error {
 
 func foldScriptEffect(s *State, e ScriptEffect) error {
 	run, exists := s.Scripts[e.RunID]
-	if !exists || e.N >= run.NextEffect+MaxScriptEffectGap {
+	if !exists {
 		return fmt.Errorf("event: fold: unexpected script effect %s/%d", e.RunID, e.N)
 	}
-	if _, missing := run.Missing[e.N]; e.N < run.NextEffect && !missing {
+	if _, seen := run.Seen[e.N]; seen {
 		return fmt.Errorf("event: fold: duplicate script effect %s/%d", e.RunID, e.N)
 	}
-	gaps := make(map[uint64]struct{}, len(run.Missing))
-	maps.Copy(gaps, run.Missing)
-	for n := run.NextEffect; n < e.N; n++ {
-		gaps[n] = struct{}{}
+	if run.Seen == nil {
+		run.Seen = make(map[uint64]struct{})
 	}
-	delete(gaps, e.N)
-	run.Missing = gaps
-	run.NextEffect = max(run.NextEffect, e.N+1)
+	run.Seen[e.N] = struct{}{}
 	s.Scripts[e.RunID] = run
 	return nil
 }
