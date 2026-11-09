@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/rules"
 )
@@ -50,6 +51,16 @@ type ChildState struct {
 type State struct {
 	Status          Status
 	SessionID       string
+	Parent          string
+	ForkOf          string
+	Advisor         string
+	Cwd             string
+	SessionModel    string
+	Model           string
+	modelMarks      []modelMark
+	Preview         string
+	PreviewBlob     *BlobRef
+	CreatedAt       time.Time
 	TurnID          string
 	InFlight        map[string]ToolState
 	PendingCalls    map[string]ToolCall
@@ -69,29 +80,22 @@ type State struct {
 	Name            string
 	Archived        bool
 }
+type modelMark struct {
+	seq    uint64
+	model  string
+	branch bool
+	parent uint64
+}
 
 func Fold(s State, seq uint64, e Event) (State, error) {
-	next := s.clone()
-	if next.Status == "" {
-		next.Status = StatusIdle
+	next := s.Clone()
+	if err := next.Apply(seq, e); err != nil {
+		return next, err
 	}
-	if next.Status == StatusDamaged {
-		return next, errors.New("event: fold: session is damaged")
-	}
-	if seq == 0 || e == nil {
-		return next.damage(errors.New("event: fold needs a positive sequence and an event"))
-	}
-	if err := e.Validate(); err != nil {
-		return next.damage(fmt.Errorf("event: fold validation: %w", err))
-	}
-	if err := foldEvent(&next, seq, e); err != nil {
-		return next.damage(err)
-	}
-	next.Status = next.deriveStatus()
 	return next, nil
 }
 
-func (s State) clone() State {
+func (s State) Clone() State {
 	s.InFlight = maps.Clone(s.InFlight)
 	s.PendingCalls = maps.Clone(s.PendingCalls)
 	s.Approvals = maps.Clone(s.Approvals)
@@ -109,6 +113,7 @@ func (s State) clone() State {
 	s.Notes = maps.Clone(s.Notes)
 	s.Todos = slices.Clone(s.Todos)
 	s.TodoBlob = cloneBlob(s.TodoBlob)
+	s.modelMarks = slices.Clone(s.modelMarks)
 	if s.Runner != nil {
 		value := *s.Runner
 		s.Runner = &value
@@ -120,6 +125,26 @@ func (s State) clone() State {
 	return s
 }
 
+func (s *State) Apply(seq uint64, e Event) error {
+	if s.Status == "" {
+		s.Status = StatusIdle
+	}
+	if s.Status == StatusDamaged {
+		return errors.New("event: fold: session is damaged")
+	}
+	if seq == 0 || e == nil {
+		return s.damage(errors.New("event: fold needs a positive sequence and an event"))
+	}
+	if err := e.Validate(); err != nil {
+		return s.damage(fmt.Errorf("event: fold validation: %w", err))
+	}
+	if err := foldEvent(s, seq, e); err != nil {
+		return s.damage(err)
+	}
+	s.Status = s.deriveStatus()
+	return nil
+}
+
 func cloneBlob(blob *BlobRef) *BlobRef {
 	if blob == nil {
 		return nil
@@ -128,9 +153,9 @@ func cloneBlob(blob *BlobRef) *BlobRef {
 	return &value
 }
 
-func (s State) damage(err error) (State, error) {
+func (s *State) damage(err error) error {
 	s.Status = StatusDamaged
-	return s, err
+	return err
 }
 
 func (s State) deriveStatus() Status {
@@ -167,6 +192,8 @@ func foldSessionEvent(s *State, seq uint64, e Event) error {
 			return errors.New("event: fold: duplicate session.created")
 		}
 		s.SessionID = value.ID
+		s.Parent, s.ForkOf, s.Advisor = value.Parent, value.ForkOf, value.Advisor
+		s.Cwd, s.SessionModel, s.Model, s.CreatedAt = value.Cwd, value.Model, value.Model, value.CreatedAt
 		return nil
 	case RunnerBound:
 		copy := value
@@ -177,9 +204,40 @@ func foldSessionEvent(s *State, seq uint64, e Event) error {
 	case TurnCompleted:
 		return completeTurn(s, seq, value)
 	case UserMessage:
-		return requireTurn(s, value.TurnID)
+		return noteSessionMessage(s, seq, value)
 	default:
 		return fmt.Errorf("event: fold: %T does not match %s", e, e.Type())
+	}
+}
+
+func noteSessionMessage(s *State, seq uint64, value UserMessage) error {
+	if err := requireTurn(s, value.TurnID); err != nil {
+		return err
+	}
+	noteModel(s, seq, value.Model)
+	notePreview(s, value)
+	return nil
+}
+
+func noteModel(s *State, seq uint64, model string) {
+	if model == "" {
+		return
+	}
+	s.modelMarks = append(s.modelMarks, modelMark{seq: seq, model: model})
+	s.Model = model
+}
+
+func notePreview(s *State, value UserMessage) {
+	if value.Kind != "prompt" || s.Preview != "" {
+		return
+	}
+	if value.Text != "" {
+		text := []rune(value.Text)
+		s.Preview = string(text[:min(len(text), 80)])
+		return
+	}
+	if value.TextBlob != nil && s.PreviewBlob == nil {
+		s.PreviewBlob = value.TextBlob
 	}
 }
 
@@ -242,17 +300,27 @@ func foldAssistantMessage(s *State, seq uint64, e AssistantMessage) error {
 	if e.ContextSeq >= seq {
 		return fmt.Errorf("event: fold: context_seq %d is not before assistant.message seq %d", e.ContextSeq, seq)
 	}
+	if err := checkDuplicateCalls(s, e.ToolCalls); err != nil {
+		return err
+	}
+	if s.PendingCalls == nil && len(e.ToolCalls) > 0 {
+		s.PendingCalls = make(map[string]ToolCall)
+	}
 	for _, call := range e.ToolCalls {
-		if _, exists := s.PendingCalls[call.ID]; exists {
-			return fmt.Errorf("event: fold: duplicate assistant call %s", call.ID)
-		}
-		if _, exists := s.InFlight[call.ID]; exists {
-			return fmt.Errorf("event: fold: duplicate assistant call %s", call.ID)
-		}
-		if s.PendingCalls == nil {
-			s.PendingCalls = make(map[string]ToolCall)
-		}
 		s.PendingCalls[call.ID] = call
+	}
+	return nil
+}
+
+func checkDuplicateCalls(s *State, calls []ToolCall) error {
+	seen := make(map[string]struct{}, len(calls))
+	for _, call := range calls {
+		_, pending := s.PendingCalls[call.ID]
+		_, inflight := s.InFlight[call.ID]
+		if _, dup := seen[call.ID]; dup || pending || inflight {
+			return fmt.Errorf("event: fold: duplicate assistant call %s", call.ID)
+		}
+		seen[call.ID] = struct{}{}
 	}
 	return nil
 }
@@ -264,46 +332,69 @@ func foldToolStarted(s *State, e ToolStarted) error {
 	if _, exists := s.InFlight[e.CallID]; exists {
 		return fmt.Errorf("event: fold: duplicate tool.started %s", e.CallID)
 	}
+	source := grantSource{callID: e.CallID, tool: e.Tool, class: e.Class, args: e.Args, argsBlob: e.ArgsBlob}
+	key := ""
+	if prefix, accepted := s.SessionAccepted[e.CallID]; accepted {
+		source.grantPrefix = prefix
+		var err error
+		key, err = grantKey(source)
+		if err != nil {
+			return err
+		}
+	}
 	if s.InFlight == nil {
 		s.InFlight = make(map[string]ToolState)
 	}
 	s.InFlight[e.CallID] = ToolState{CallID: e.CallID, Tool: e.Tool, Class: e.Class, Args: e.Args, ArgsBlob: e.ArgsBlob}
 	delete(s.PendingCalls, e.CallID)
-	if prefix, accepted := s.SessionAccepted[e.CallID]; accepted {
-		delete(s.SessionAccepted, e.CallID)
-		return foldGrant(s, grantSource{callID: e.CallID, tool: e.Tool, class: e.Class, args: e.Args, argsBlob: e.ArgsBlob, grantPrefix: prefix})
+	delete(s.SessionAccepted, e.CallID)
+	if key != "" {
+		storeGrant(s, key, source.tool)
 	}
 	return nil
 }
 
 func foldToolCompleted(s *State, e ToolCompleted) error {
-	started, err := takeCompletedCall(s, e)
+	started, err := findCompletedCall(s, e)
 	if err != nil {
 		return err
 	}
-	if err := foldSnapshots(s, e.Meta); err != nil {
+	snapshots, err := decodeSnapshots(e.Meta)
+	if err != nil {
 		return err
 	}
-	if started.Tool == "todo" && e.OK {
-		return foldTodoCompletion(s, started)
+	todos, err := decodeCompletedTodos(started, e)
+	if err != nil {
+		return err
 	}
+	forgetCompletedCall(s, e)
+	recordSnapshots(s, snapshots)
+	foldCompletedTodos(s, started, e, todos)
 	return nil
 }
 
-func foldTodoCompletion(s *State, started ToolState) error {
+func decodeCompletedTodos(started ToolState, e ToolCompleted) ([]TodoItem, error) {
+	if started.Tool != "todo" || !e.OK || started.ArgsBlob != nil {
+		return nil, nil
+	}
+	return decodeTodoItems(started.Args)
+}
+
+func foldCompletedTodos(s *State, started ToolState, e ToolCompleted, todos []TodoItem) {
+	if started.Tool != "todo" || !e.OK {
+		return
+	}
 	if started.ArgsBlob != nil {
 		s.Todos = nil
 		s.TodoBlob = cloneBlob(started.ArgsBlob)
-		return nil
+		return
 	}
 	s.TodoBlob = nil
-	return foldTodos(s, started.Args)
+	s.Todos = todos
 }
 
-func takeCompletedCall(s *State, e ToolCompleted) (ToolState, error) {
+func findCompletedCall(s *State, e ToolCompleted) (ToolState, error) {
 	if started, exists := s.InFlight[e.CallID]; exists {
-		delete(s.InFlight, e.CallID)
-		delete(s.DeclinedCalls, e.CallID)
 		return started, nil
 	}
 	pending, exists := s.PendingCalls[e.CallID]
@@ -315,9 +406,17 @@ func takeCompletedCall(s *State, e ToolCompleted) (ToolState, error) {
 	if e.OK || (e.Recovered != "skipped" && !declined) {
 		return ToolState{}, fmt.Errorf("event: fold: unstarted call %s is neither skipped nor declined", e.CallID)
 	}
+	return started, nil
+}
+
+func forgetCompletedCall(s *State, e ToolCompleted) {
+	if _, exists := s.InFlight[e.CallID]; exists {
+		delete(s.InFlight, e.CallID)
+		delete(s.DeclinedCalls, e.CallID)
+		return
+	}
 	delete(s.PendingCalls, e.CallID)
 	delete(s.DeclinedCalls, e.CallID)
-	return started, nil
 }
 
 func scriptCall(s *State, callID string) bool {
@@ -345,30 +444,60 @@ func foldApprovalRequested(s *State, e ApprovalRequested) error {
 	return nil
 }
 
+type resolvedGrant struct {
+	key      string
+	tool     string
+	deferred bool
+}
+
 func foldApprovalResolved(s *State, e ApprovalResolved) error {
 	request, exists := s.Approvals[e.RequestID]
 	if !exists {
 		return fmt.Errorf("event: fold: approval.resolved without request: %s", e.RequestID)
 	}
-	delete(s.Approvals, e.RequestID)
-	if e.Decision == "decline" || e.Decision == "cancel" {
-		if s.DeclinedCalls == nil {
-			s.DeclinedCalls = make(map[string]string)
-		}
-		s.DeclinedCalls[request.CallID] = e.Reason
+	grant, err := resolveGrant(s, request, e)
+	if err != nil {
+		return err
 	}
-	if e.Decision != "accept_session" || e.By != "user" {
+	delete(s.Approvals, e.RequestID)
+	recordDecline(s, request.CallID, e)
+	if grant.key != "" {
+		storeGrant(s, grant.key, grant.tool)
 		return nil
 	}
-	source, known := grantSourceFor(s, request)
-	if known {
-		return foldGrant(s, source)
+	if !grant.deferred {
+		return nil
 	}
 	if s.SessionAccepted == nil {
 		s.SessionAccepted = make(map[string]string)
 	}
 	s.SessionAccepted[request.CallID] = request.GrantPrefix
 	return nil
+}
+
+func resolveGrant(s *State, request ApprovalState, e ApprovalResolved) (resolvedGrant, error) {
+	if e.Decision != "accept_session" || e.By != "user" {
+		return resolvedGrant{}, nil
+	}
+	source, known := grantSourceFor(s, request)
+	if !known {
+		return resolvedGrant{deferred: true}, nil
+	}
+	key, err := grantKey(source)
+	if err != nil {
+		return resolvedGrant{}, err
+	}
+	return resolvedGrant{key: key, tool: source.tool}, nil
+}
+
+func recordDecline(s *State, callID string, e ApprovalResolved) {
+	if e.Decision != "decline" && e.Decision != "cancel" {
+		return
+	}
+	if s.DeclinedCalls == nil {
+		s.DeclinedCalls = make(map[string]string)
+	}
+	s.DeclinedCalls[callID] = e.Reason
 }
 
 type grantSource struct {
@@ -388,45 +517,44 @@ func grantSourceFor(s *State, request ApprovalState) (grantSource, bool) {
 	return grantSource{callID: call.ID, tool: call.Name, class: request.Class, args: call.Args, argsBlob: call.ArgsBlob, grantPrefix: request.GrantPrefix}, true
 }
 
-func foldGrant(s *State, source grantSource) error {
+func grantKey(source grantSource) (string, error) {
 	if source.class == "exec" {
-		return foldExecGrant(s, source)
+		return execGrantKey(source)
 	}
 	if source.class != "edit" && source.class != "remote" {
-		return nil
+		return "", nil
 	}
-	if s.Grants == nil {
-		s.Grants = make(map[string]string)
-	}
-	s.Grants["tool:"+source.tool] = source.tool
-	return nil
+	return "tool:" + source.tool, nil
 }
 
-func foldExecGrant(s *State, source grantSource) error {
+func execGrantKey(source grantSource) (string, error) {
 	prefix := source.grantPrefix
 	if prefix == "" {
 		if source.argsBlob != nil {
-			return nil
+			return "", nil
 		}
 		fields, err := decodeObject(source.args)
 		if err != nil {
-			return fmt.Errorf("event: fold: exec grant arguments: %w", err)
+			return "", fmt.Errorf("event: fold: exec grant arguments: %w", err)
 		}
 		command, err := decodeString(fields["command"])
 		if err != nil {
-			return fmt.Errorf("event: fold: exec grant command: %w", err)
+			return "", fmt.Errorf("event: fold: exec grant command: %w", err)
 		}
 		var ok bool
 		prefix, ok = rules.GrantPrefix(command)
 		if !ok {
-			return nil
+			return "", nil
 		}
 	}
+	return prefix, nil
+}
+
+func storeGrant(s *State, key string, tool string) {
 	if s.Grants == nil {
 		s.Grants = make(map[string]string)
 	}
-	s.Grants[prefix] = source.tool
-	return nil
+	s.Grants[key] = tool
 }
 
 func foldStateEvent(s *State, seq uint64, e Event) error {
@@ -469,14 +597,63 @@ func foldBranch(s *State, seq, parent uint64) error {
 		return errors.New("event: fold: branch parent must precede the branch")
 	}
 	if parent == 0 {
+		markBranch(s, seq, parent)
 		return nil
 	}
 	for _, completedSeq := range s.CompletedTurns {
 		if completedSeq == parent {
+			markBranch(s, seq, parent)
 			return nil
 		}
 	}
 	return fmt.Errorf("event: fold: unknown branch parent seq %d", parent)
+}
+
+func markBranch(s *State, seq, parent uint64) {
+	marks := make([]modelMark, 0, len(s.modelMarks)+2)
+	inserted := parent == 0
+	for _, mark := range s.modelMarks {
+		if !inserted && mark.seq >= parent {
+			if mark.seq > parent {
+				marks = append(marks, modelMark{seq: parent})
+			}
+			inserted = true
+		}
+		marks = append(marks, mark)
+	}
+	if !inserted {
+		marks = append(marks, modelMark{seq: parent})
+	}
+	marks = append(marks, modelMark{seq: seq, branch: true, parent: parent})
+	s.modelMarks = marks
+	s.Model = resolveModel(s.SessionModel, marks)
+}
+
+func resolveModel(created string, marks []modelMark) string {
+	positions := make(map[uint64]int, len(marks))
+	for i, mark := range marks {
+		positions[mark.seq] = i
+	}
+	cursor := len(marks) - 1
+	for cursor >= 0 {
+		mark := marks[cursor]
+		if mark.branch {
+			if mark.parent == 0 {
+				break
+			}
+			next, ok := positions[mark.parent]
+			if !ok || next >= cursor {
+				break
+			}
+			cursor = next
+			continue
+		}
+		if mark.model != "" {
+			return mark.model
+		}
+		cursor--
+	}
+	return created
 }
 
 func foldScriptEvent(s *State, e Event) error {
@@ -564,10 +741,10 @@ func foldAdvisorNote(s *State, seq uint64, e Event) error {
 	return nil
 }
 
-func foldTodos(s *State, raw jsontext.Value) error {
+func decodeTodoItems(raw jsontext.Value) ([]TodoItem, error) {
 	fields, err := decodeObject(raw)
 	if err != nil {
-		return fmt.Errorf("event: fold: todo arguments: %w", err)
+		return nil, fmt.Errorf("event: fold: todo arguments: %w", err)
 	}
 	var items []TodoItem
 	r := objectReader{fields: fields}
@@ -577,10 +754,9 @@ func foldTodos(s *State, raw jsontext.Value) error {
 		return err
 	})
 	if r.err != nil {
-		return fmt.Errorf("event: fold: todo arguments: %w", r.err)
+		return nil, fmt.Errorf("event: fold: todo arguments: %w", r.err)
 	}
-	s.Todos = items
-	return nil
+	return items, nil
 }
 
 func decodeTodoItem(raw jsontext.Value) (TodoItem, error) {
@@ -602,26 +778,29 @@ func decodeTodoItem(raw jsontext.Value) (TodoItem, error) {
 	return item, nil
 }
 
-func foldSnapshots(s *State, meta jsontext.Value) error {
+func decodeSnapshots(meta jsontext.Value) ([]Snapshot, error) {
 	trimmed := bytes.TrimSpace(meta)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return nil
+		return nil, nil
 	}
 	fields, err := decodeObject(trimmed)
 	if err != nil {
-		return fmt.Errorf("event: fold: snapshot metadata: %w", err)
+		return nil, fmt.Errorf("event: fold: snapshot metadata: %w", err)
 	}
 	snapshots, err := snapshotMetadata(fields)
 	if err != nil {
-		return fmt.Errorf("event: fold: snapshot metadata: %w", err)
+		return nil, fmt.Errorf("event: fold: snapshot metadata: %w", err)
+	}
+	return snapshots, nil
+}
+
+func recordSnapshots(s *State, snapshots []Snapshot) {
+	if len(snapshots) > 0 && s.Snapshots == nil {
+		s.Snapshots = make(map[string]Snapshot)
 	}
 	for _, snapshot := range snapshots {
-		if s.Snapshots == nil {
-			s.Snapshots = make(map[string]Snapshot)
-		}
 		s.Snapshots[snapshot.Ref] = snapshot
 	}
-	return nil
 }
 
 func snapshotMetadata(fields map[string]jsontext.Value) ([]Snapshot, error) {
