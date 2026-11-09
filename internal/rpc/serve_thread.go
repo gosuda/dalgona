@@ -439,7 +439,7 @@ func (s *server) listThreads(p ThreadListParams) (jsontext.Value, error) {
 	if p.Limit < 0 {
 		return nil, invalidParams("invalid limit " + strconv.Itoa(p.Limit))
 	}
-	end := min(start+cmp.Or(p.Limit, defaultListLimit), len(infos))
+	end := cappedEnd(start, cmp.Or(p.Limit, defaultListLimit), len(infos))
 	response := ThreadListResponse{Data: make([]Thread, 0, end-start)}
 	for _, info := range infos[start:end] {
 		response.Data = append(response.Data, s.threadObject(info, s.listedStatus(info), nil))
@@ -448,6 +448,13 @@ func (s *server) listThreads(p ThreadListParams) (jsontext.Value, error) {
 		response.NextCursor = strconv.Itoa(end)
 	}
 	return encode(response)
+}
+
+func cappedEnd(start, limit, total int) int {
+	if limit > total-start {
+		return total
+	}
+	return start + limit
 }
 
 func cursorOffset(cursor string) (int, error) {
