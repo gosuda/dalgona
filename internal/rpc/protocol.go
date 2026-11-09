@@ -57,6 +57,7 @@ type (
 		Cursor   string `json:"cursor,omitzero"`
 		Limit    int    `json:"limit,omitzero"`
 		Archived bool   `json:"archived,omitzero"`
+		HasLimit bool   `json:"-"`
 	}
 	ThreadNameSetParams struct {
 		ThreadID string `json:"threadId"`

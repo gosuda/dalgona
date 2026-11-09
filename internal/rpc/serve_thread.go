@@ -415,6 +415,7 @@ func (s *server) threadList(_ context.Context, params jsontext.Value) (jsontext.
 			p.Cursor, err = readString(d)
 		case "limit":
 			p.Limit, err = readInt(d)
+			p.HasLimit = err == nil
 		case "archived":
 			p.Archived, err = readBool(d)
 		default:
@@ -439,7 +440,11 @@ func (s *server) listThreads(p ThreadListParams) (jsontext.Value, error) {
 	if p.Limit < 0 {
 		return nil, invalidParams("invalid limit " + strconv.Itoa(p.Limit))
 	}
-	end := cappedEnd(start, cmp.Or(p.Limit, defaultListLimit), len(infos))
+	limit := p.Limit
+	if !p.HasLimit {
+		limit = defaultListLimit
+	}
+	end := cappedEnd(start, limit, len(infos))
 	response := ThreadListResponse{Data: make([]Thread, 0, end-start)}
 	for _, info := range infos[start:end] {
 		response.Data = append(response.Data, s.threadObject(info, s.listedStatus(info), nil))
