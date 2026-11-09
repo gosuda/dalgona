@@ -695,10 +695,10 @@ func (m *model) renderApproval() string {
 		lines = append(lines, "thread "+current.threadID)
 	}
 	if current.command != "" {
-		lines = append(lines, "$ "+current.command)
+		lines = append(lines, "$ "+sanitizeText(current.command))
 	}
 	if current.reason != "" {
-		lines = append(lines, "reason: "+current.reason)
+		lines = append(lines, "reason: "+sanitizeText(current.reason))
 	}
 	lines = append(lines, approvalChoices(m.width)...)
 	return wrapTerminal(strings.Join(lines, "\n"), m.width)
