@@ -436,6 +436,9 @@ func (s *server) listThreads(p ThreadListParams) (jsontext.Value, error) {
 		return nil, err
 	}
 	start = min(start, len(infos))
+	if p.Limit < 0 {
+		return nil, invalidParams("invalid limit " + strconv.Itoa(p.Limit))
+	}
 	end := min(start+cmp.Or(p.Limit, defaultListLimit), len(infos))
 	response := ThreadListResponse{Data: make([]Thread, 0, end-start)}
 	for _, info := range infos[start:end] {
