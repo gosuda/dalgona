@@ -77,17 +77,20 @@ func TestFetchReportsHTTPError(t *testing.T) {
 	}
 }
 
-func TestMainMatchesInProcessFetch(t *testing.T) {
+func TestMainBlocksLoopbackWhileToolAllows(t *testing.T) {
 	t.Parallel()
 	server := textServer(t, "text/html", `<p>A &amp; B</p><script>hidden</script>`)
 	direct := runLocal(t, server.URL, 1024)
+	if !direct.OK {
+		t.Fatalf("loopback fetch through test client failed: %q", direct.Output)
+	}
 	var output bytes.Buffer
 	code := Main([]string{server.URL, "1024"}, &output)
-	if code != 0 {
+	if code != 2 {
 		t.Fatalf("Main exit code = %d, output = %q", code, output.String())
 	}
-	if !bytes.Equal(output.Bytes(), direct.Output) {
-		t.Fatalf("Main output = %q, direct output = %q", output.Bytes(), direct.Output)
+	if !strings.Contains(output.String(), "blocked") {
+		t.Fatalf("Main output = %q, want blocked host", output.String())
 	}
 }
 
@@ -111,7 +114,7 @@ func TestRemoteFetchUsesHiddenCommand(t *testing.T) {
 func TestFetchRejectsInvalidLimits(t *testing.T) {
 	t.Parallel()
 	for _, raw := range []string{`{"url":"https://example.test","max_bytes":0}`, `{"url":"https://example.test","max_bytes":1.5}`} {
-		if _, err := parseArgs([]byte(raw)); err == nil {
+		if _, err := parseArgs([]byte(raw), publicAddrs); err == nil {
 			t.Fatalf("accepted arguments %s", raw)
 		}
 	}
@@ -124,7 +127,7 @@ func runLocal(t *testing.T, rawURL string, limit int64) tool.Result {
 		t.Fatal(err)
 	}
 	raw := `{"url":` + strconv.Quote(rawURL) + `,"max_bytes":` + strconv.FormatInt(limit, 10) + `}`
-	result, err := New().Run(t.Context(), tool.Call{Args: []byte(raw)}, tool.Env{Runner: local})
+	result, err := testTool().Run(t.Context(), tool.Call{Args: []byte(raw)}, tool.Env{Runner: local})
 	if err != nil {
 		t.Fatal(err)
 	}

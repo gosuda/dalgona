@@ -2,6 +2,7 @@ package webfetch
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"errors"
@@ -27,6 +28,7 @@ var errFetchTimeout = errors.New("remote fetch timed out")
 
 type Tool struct {
 	client *http.Client
+	allow  func(net.IP) bool
 }
 
 type arguments struct {
@@ -41,7 +43,7 @@ type processResult struct {
 	offset int64
 }
 
-func New() tool.Tool { return &Tool{client: newHTTPClient()} }
+func New() tool.Tool { return &Tool{client: newHTTPClient(), allow: publicAddrs} }
 
 func (t *Tool) Spec() tool.Spec {
 	return tool.Spec{
@@ -55,7 +57,7 @@ func (t *Tool) Spec() tool.Spec {
 func (t *Tool) Class() tool.Class { return tool.ClassRead }
 
 func (t *Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result, error) {
-	args, err := parseArgs(call.Args)
+	args, err := parseArgs(call.Args, t.allow)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -100,11 +102,108 @@ func execute(ctx context.Context, args arguments, client *http.Client) (tool.Res
 }
 
 func newHTTPClient() *http.Client {
+	return newClient(publicAddrs)
+}
+
+func newLoopbackClient() *http.Client {
+	return newClient(loopbackAddrs)
+}
+
+func newClient(allow func(net.IP) bool) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.Proxy = nil
+	transport.DialContext = dialGuard(allow)
 	transport.TLSHandshakeTimeout = 10 * time.Second
 	transport.ResponseHeaderTimeout = 15 * time.Second
-	return &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	client.CheckRedirect = checkRedirect(allow)
+	return client
+}
+
+func publicAddrs(ip net.IP) bool {
+	return !blockedIP(ip)
+}
+
+func loopbackAddrs(ip net.IP) bool {
+	return ip.IsLoopback() || !blockedIP(ip)
+}
+
+func blockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+		return true
+	}
+	if ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	return inSharedSpace(ip)
+}
+
+func inSharedSpace(ip net.IP) bool {
+	room := ip.To4()
+	return room != nil && room[0] == 100 && room[1]&0xC0 == 0x40
+}
+
+func hostIP(host string) net.IP {
+	bare, _, _ := strings.Cut(host, "%")
+	return net.ParseIP(bare)
+}
+
+func dialGuard(allow func(net.IP) bool) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("web_fetch: invalid dial address: %w", err)
+		}
+		if ip := hostIP(host); ip != nil {
+			if !allow(ip) {
+				return nil, fmt.Errorf("web_fetch: blocked address %q", host)
+			}
+			return dialer.DialContext(ctx, network, address)
+		}
+		resolved, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("web_fetch: resolve %q: %w", host, err)
+		}
+		plan := dialPlan{dialer: dialer, network: network, host: host, port: port, addrs: resolved, allow: allow}
+		return plan.connect(ctx)
+	}
+}
+
+type dialPlan struct {
+	dialer  *net.Dialer
+	network string
+	host    string
+	port    string
+	addrs   []net.IPAddr
+	allow   func(net.IP) bool
+}
+
+func (plan dialPlan) connect(ctx context.Context) (net.Conn, error) {
+	var lastErr error
+	for _, addr := range plan.addrs {
+		if !plan.allow(addr.IP) {
+			continue
+		}
+		var conn net.Conn
+		conn, lastErr = plan.dialer.DialContext(ctx, plan.network, net.JoinHostPort(addr.IP.String(), plan.port))
+		if lastErr == nil {
+			return conn, nil
+		}
+	}
+	return nil, cmp.Or(lastErr, fmt.Errorf("web_fetch: host %q resolves only to blocked addresses", plan.host))
+}
+
+func checkRedirect(allow func(net.IP) bool) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("web_fetch: stopped after 10 redirects")
+		}
+		return validateURL(req.URL.String(), allow)
+	}
 }
 
 func readCapped(body io.Reader, limit int64) ([]byte, bool, error) {
@@ -315,7 +414,7 @@ func Main(argv []string, stdout io.Writer) int {
 		return 2
 	}
 	args := arguments{url: argv[0], maxBytes: limit}
-	if validationErr := validateURL(args.url); validationErr != nil {
+	if validationErr := validateURL(args.url, publicAddrs); validationErr != nil {
 		_, _ = fmt.Fprint(stdout, validationErr)
 		return 2
 	}
@@ -333,7 +432,7 @@ func Main(argv []string, stdout io.Writer) int {
 	return 0
 }
 
-func parseArgs(raw jsontext.Value) (arguments, error) {
+func parseArgs(raw jsontext.Value, allow func(net.IP) bool) (arguments, error) {
 	decoder := jsontext.NewDecoder(bytes.NewReader(raw))
 	start, err := decoder.ReadToken()
 	if err != nil {
@@ -355,7 +454,7 @@ func parseArgs(raw jsontext.Value) (arguments, error) {
 	if _, err := decoder.ReadToken(); err != nil {
 		return arguments{}, fmt.Errorf("web_fetch: read argument end: %w", err)
 	}
-	if err := validateURL(args.url); err != nil {
+	if err := validateURL(args.url, allow); err != nil {
 		return arguments{}, err
 	}
 	return args, nil
@@ -412,13 +511,16 @@ func positiveBytes(raw string) (int64, error) {
 	return limit, nil
 }
 
-func validateURL(raw string) error {
+func validateURL(raw string, allow func(net.IP) bool) error {
 	parsed, err := url.ParseRequestURI(raw)
 	if err != nil {
 		return fmt.Errorf("web_fetch: invalid URL: %w", err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" {
 		return errors.New("web_fetch: URL must use http or https and include a host")
+	}
+	if ip := hostIP(parsed.Hostname()); ip != nil && !allow(ip) {
+		return fmt.Errorf("web_fetch: URL host %q is blocked", parsed.Hostname())
 	}
 	return nil
 }

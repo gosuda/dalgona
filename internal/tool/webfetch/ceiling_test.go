@@ -30,7 +30,7 @@ func TestMaxBytesRejectsValuesOverTheCeiling(t *testing.T) {
 }
 
 func TestParseArgsRejectsOversizedMaxBytes(t *testing.T) {
-	_, err := parseArgs(jsontext.Value(`{"url":"https://example.com","max_bytes":1073741824}`))
+	_, err := parseArgs(jsontext.Value(`{"url":"https://example.com","max_bytes":1073741824}`), publicAddrs)
 	if err == nil {
 		t.Fatal("parseArgs accepted max_bytes over the ceiling")
 	}
