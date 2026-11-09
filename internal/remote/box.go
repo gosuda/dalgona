@@ -339,26 +339,7 @@ func (r *boxRunner) Close() error {
 var boxKillGrace = 2 * time.Second
 
 func stopProcess(r runner.Runner, id string) {
-	ctx, cancel := context.WithTimeout(context.Background(), boxKillGrace)
-	defer cancel()
-	_ = r.Signal(ctx, id, runner.SignalTerm)
-	var offset int64
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	for ctx.Err() == nil {
-		out, err := r.Read(ctx, id, offset)
-		if err != nil || out.Exit != nil {
-			break
-		}
-		offset = max(out.Next, offset+int64(len(out.Data)))
-		select {
-		case <-ctx.Done():
-		case <-ticker.C:
-		}
-	}
-	killCtx, killCancel := context.WithTimeout(context.Background(), time.Second)
-	defer killCancel()
-	_ = r.Signal(killCtx, id, runner.SignalKill)
+	runner.StopProcessWithGrace(r, id, boxKillGrace)
 }
 
 func boxRun(ctx context.Context, r runner.Runner, argv ...string) (string, int, error) {

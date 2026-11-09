@@ -620,12 +620,10 @@ func writeBaseline(ctx context.Context, r Runner) (string, error) {
 
 var runnerKillGrace = 2 * time.Second
 
-func stopRunnerProcess(r Runner, id string) {
-	ctx, cancel := context.WithTimeout(context.Background(), runnerKillGrace)
+func StopProcessWithGrace(r Runner, id string, grace time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
-	if err := r.Signal(ctx, id, SignalTerm); err != nil {
-		return
-	}
+	_ = r.Signal(ctx, id, SignalTerm)
 	var offset int64
 	timer := time.NewTimer(pollInterval)
 	defer timer.Stop()
@@ -645,6 +643,10 @@ func stopRunnerProcess(r Runner, id string) {
 	killCtx, killCancel := context.WithTimeout(context.Background(), time.Second)
 	defer killCancel()
 	_ = r.Signal(killCtx, id, SignalKill)
+}
+
+func stopRunnerProcess(r Runner, id string) {
+	StopProcessWithGrace(r, id, runnerKillGrace)
 }
 
 func runRemote(ctx context.Context, r Runner, argv []string) (string, error) {
