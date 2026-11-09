@@ -282,7 +282,12 @@ func (l *Local) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("runner: read file: %w", err)
 	}
-	data, err := os.ReadFile(path)
+	file, err := openNoFollow(path)
+	if err != nil {
+		return nil, fmt.Errorf("runner: read file %s: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("runner: read file %s: %w", path, err)
 	}
@@ -309,7 +314,7 @@ func (l *Local) Stat(ctx context.Context, path string) (FileInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return FileInfo{}, fmt.Errorf("runner: stat: %w", err)
 	}
-	st, err := os.Stat(path)
+	st, err := statNoFollow(path)
 	if err != nil {
 		return FileInfo{}, fmt.Errorf("runner: stat %s: %w", path, err)
 	}

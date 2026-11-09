@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -48,6 +50,8 @@ func (Tool) Spec() tool.Spec {
 
 func (Tool) Class() tool.Class { return tool.ClassRead }
 
+var testHookReadSwap func()
+
 func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result, error) {
 	parsed, err := parseArgs(call.Args)
 	if err != nil {
@@ -59,6 +63,12 @@ func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result,
 	}
 	if err = checkWorkspacePath(env, parsed.Path, path, display); err != nil {
 		return tool.Result{}, err
+	}
+	if testHookReadSwap != nil {
+		testHookReadSwap()
+	}
+	if isLocalRunner(env.Runner) {
+		return readPinnedFile(ctx, env, path, display, parsed)
 	}
 	info, err := env.Runner.Stat(ctx, path)
 	if err != nil {
@@ -91,11 +101,92 @@ func loadCheckedFile(ctx context.Context, env tool.Env, path, display string, in
 	return data, nil
 }
 
+func readPinnedFile(ctx context.Context, env tool.Env, path, display string, parsed args) (tool.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return tool.Result{}, fmt.Errorf("read: %w", err)
+	}
+	root := env.Cwd
+	if filepath.IsAbs(parsed.Path) {
+		root = env.Home
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return tool.Result{}, fmt.Errorf("read: cannot inspect %s: %w", display, err)
+	}
+	file, err := runner.OpenPinned(root, rel)
+	if err != nil {
+		return tool.Result{}, pinnedRefusal(display, parsed.Path, err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return tool.Result{}, fmt.Errorf("read %s: %w", display, err)
+	}
+	if info.IsDir() {
+		return readPinnedDirectory(file, display)
+	}
+	data, err := readPinnedContents(file, info.Size(), display)
+	if err != nil {
+		return tool.Result{}, err
+	}
+	return render(data, display, parsed, env.Snapshots), nil
+}
+
+func readPinnedContents(file *os.File, size int64, display string) ([]byte, error) {
+	if size > maxFileBytes {
+		return nil, fmt.Errorf("read: %s is a %d-byte text file; the limit is 16 MiB", display, size)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", display, err)
+	}
+	if int64(len(data)) > maxFileBytes {
+		return nil, fmt.Errorf("read: %s is a %d-byte text file; the limit is 16 MiB", display, len(data))
+	}
+	if binary(data) {
+		return nil, fmt.Errorf("read: %s is a binary file (%d bytes)", display, len(data))
+	}
+	return data, nil
+}
+
+func pinnedRefusal(display, raw string, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read: %s does not exist: %w", raw, err)
+	}
+	if errors.Is(err, runner.ErrPinnedSymlink) {
+		return fmt.Errorf("read: %s contains a symlink; refusing to follow it", display)
+	}
+	if errors.Is(err, runner.ErrPinnedEscape) {
+		return fmt.Errorf("read: %s must stay within the workspace: %w", display, err)
+	}
+	return fmt.Errorf("read %s: %w", display, err)
+}
+
 func readDirectory(ctx context.Context, env tool.Env, path, display string) (tool.Result, error) {
 	entries, err := env.Runner.ReadDir(ctx, path)
 	if err != nil {
 		return tool.Result{}, fmt.Errorf("read directory %s: %w", display, err)
 	}
+	return renderDirectory(entries, display), nil
+}
+
+func readPinnedDirectory(dir *os.File, display string) (tool.Result, error) {
+	raw, err := dir.ReadDir(-1)
+	if err != nil {
+		return tool.Result{}, fmt.Errorf("read directory %s: %w", display, err)
+	}
+	entries := make([]runner.FileInfo, 0, len(raw))
+	for _, entry := range raw {
+		var mode fs.FileMode
+		if entry.IsDir() {
+			mode = fs.ModeDir
+		}
+		entries = append(entries, runner.FileInfo{Name: entry.Name(), Mode: mode})
+	}
+	return renderDirectory(entries, display), nil
+}
+
+func renderDirectory(entries []runner.FileInfo, display string) tool.Result {
 	slices.SortFunc(entries, func(a, b runner.FileInfo) int {
 		return cmp.Or(
 			cmp.Compare(dirRank(b.Mode.IsDir()), dirRank(a.Mode.IsDir())),
@@ -114,7 +205,7 @@ func readDirectory(ctx context.Context, env tool.Env, path, display string) (too
 		}
 		out.WriteByte('\n')
 	}
-	return tool.Result{Output: []byte(out.String()), OK: true, Path: display}, nil
+	return tool.Result{Output: []byte(out.String()), OK: true, Path: display}
 }
 
 func render(data []byte, path string, args args, store *snapshot.Store) tool.Result {
