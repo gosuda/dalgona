@@ -1,7 +1,9 @@
 package event_test
 
 import (
+	"bytes"
 	"encoding/json/jsontext"
+	"reflect"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -77,5 +79,42 @@ func TestFoldAcceptSessionBlobbedExecCreatesGrant(t *testing.T) {
 	}
 	if state.Grants["git"] != "exec" {
 		t.Fatalf("grants = %#v, want a git prefix grant for exec", state.Grants)
+	}
+}
+
+func TestToolCallSignatureRoundTrip(t *testing.T) {
+	t.Parallel()
+	original := event.AssistantMessage{
+		ItemID: "a", TurnID: "t",
+		ToolCalls:  []event.ToolCall{{ID: "c", Name: "exec", Args: jsontext.Value(`{"command":"ls"}`), Signature: "sig-abc"}},
+		Usage:      event.Usage{Input: 1},
+		StopReason: "tool_calls",
+	}
+	encoded, err := event.Encode(original)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"signature"`)) {
+		t.Fatalf("encoded %s omits signature", encoded)
+	}
+	decoded, err := event.Decode(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, event.Event(original)) {
+		t.Fatalf("round trip mismatch: %#v", decoded)
+	}
+	plain := event.AssistantMessage{
+		ItemID: "a", TurnID: "t",
+		ToolCalls:  []event.ToolCall{{ID: "c", Name: "exec", Args: jsontext.Value(`{"command":"ls"}`)}},
+		Usage:      event.Usage{Input: 1},
+		StopReason: "tool_calls",
+	}
+	encoded, err = event.Encode(plain)
+	if err != nil {
+		t.Fatalf("encode plain: %v", err)
+	}
+	if bytes.Contains(encoded, []byte(`"signature"`)) {
+		t.Fatalf("encoded %s emits an empty signature", encoded)
 	}
 }

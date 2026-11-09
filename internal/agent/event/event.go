@@ -60,12 +60,13 @@ type Mention struct {
 }
 
 type ToolCall struct {
-	ID       string
-	Name     string
-	Args     jsontext.Value
-	ArgsBlob *BlobRef
-	Freeform bool
-	Resolved bool
+	ID        string
+	Name      string
+	Args      jsontext.Value
+	ArgsBlob  *BlobRef
+	Freeform  bool
+	Resolved  bool
+	Signature string
 }
 
 type Usage struct {

@@ -184,6 +184,7 @@ func (w *worker) apply(result *reply, next model.Event) error {
 	case model.ToolCall:
 		result.calls = append(result.calls, event.ToolCall{
 			ID: cmp.Or(value.ID, newID("call-")), Name: value.Name, Args: value.Args, Freeform: value.Freeform, Resolved: value.Resolved,
+			Signature: value.Signature,
 		})
 	case model.Usage:
 		result.usage = value

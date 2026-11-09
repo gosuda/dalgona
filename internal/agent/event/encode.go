@@ -165,7 +165,9 @@ func toolCallValue(e ToolCall) jsontext.Value {
 		field("freeform", boolValue(e.Freeform)), field("resolved", boolValue(e.Resolved)),
 	}
 	fields = optionalRaw(fields, "args", e.Args)
-	return objectValue(optionalBlobField(fields, "args_blob", e.ArgsBlob)...)
+	fields = optionalBlobField(fields, "args_blob", e.ArgsBlob)
+	fields = optionalString(fields, "signature", e.Signature)
+	return objectValue(fields...)
 }
 
 func usageValue(e Usage) jsontext.Value {

@@ -132,7 +132,7 @@ func decodeToolCall(raw jsontext.Value) (ToolCall, error) {
 	args, argsBlob := r.rawPayload("args")
 	value := ToolCall{
 		ID: r.str("id"), Name: r.str("name"), Args: args, ArgsBlob: argsBlob,
-		Freeform: r.boolean("freeform"), Resolved: r.boolean("resolved"),
+		Freeform: r.boolean("freeform"), Resolved: r.boolean("resolved"), Signature: r.str("signature"),
 	}
 	return value, r.err
 }
