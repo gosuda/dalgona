@@ -50,4 +50,4 @@ Close MUST send `TERM` before closing the remote stream. It MUST attempt the rem
 
 ## Cloudflare
 
-Every box name MUST match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, the worker route rule. Create, Attach, Destroy, and Connect MUST fail before any request with `cloudflare: invalid box name` when it does not. The worker MUST answer a request whose box name breaks the rule with 400 `invalid box name` and keep 404 for unknown routes.
+Every box name MUST match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, the worker route rule. Create, Attach, Destroy, and Connect MUST fail before any request with `cloudflare: invalid box name` when it does not. The worker MUST check authorization first and answer 401 when it fails. For an authorized request whose box name breaks the rule, the worker MUST answer 400 `invalid box name`. It MUST answer 404 for unknown routes.
