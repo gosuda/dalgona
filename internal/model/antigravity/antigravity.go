@@ -104,7 +104,7 @@ func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, req m
 	}
 	project, err := p.Project(ctx)
 	if err != nil {
-		return model.AttemptResult{Err: err}
+		return model.AttemptResult{Status: controlStatus(err), Err: err}
 	}
 	body, err := encodeEnvelope(req, project)
 	if err != nil {

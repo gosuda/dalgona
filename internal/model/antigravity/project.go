@@ -216,6 +216,20 @@ type controlCall struct {
 	body                []byte
 }
 
+type controlError struct {
+	status int
+	err    error
+}
+
+func (e *controlError) Error() string { return e.err.Error() }
+
+func controlStatus(err error) int {
+	if failure, ok := errors.AsType[*controlError](err); ok {
+		return failure.status
+	}
+	return 0
+}
+
 func (p *Provider) control(ctx context.Context, call controlCall, out any) error {
 	httpReq, err := p.newRequest(ctx, call.method, call.path, call.body, call.token)
 	if err != nil {
@@ -228,7 +242,10 @@ func (p *Provider) control(ctx context.Context, call controlCall, out any) error
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("antigravity: %s: http %d: %s", call.path, resp.StatusCode, bytes.TrimSpace(raw))
+		return &controlError{
+			status: resp.StatusCode,
+			err:    fmt.Errorf("antigravity: %s: http %d: %s", call.path, resp.StatusCode, bytes.TrimSpace(raw)),
+		}
 	}
 	if err := json.UnmarshalRead(resp.Body, out); err != nil {
 		return fmt.Errorf("antigravity: decode %s: %w", call.path, err)

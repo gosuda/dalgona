@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -452,11 +453,28 @@ func classifyAttempt(result AttemptResult) Verdict {
 		return Classify(result.Status, result.Body)
 	}
 	message := []byte(result.Err.Error())
+	if result.Status == 0 {
+		if isOverflow(message) {
+			return Overflow
+		}
+		if transportFailure(result.Err) {
+			return Retry
+		}
+		return Terminal
+	}
 	verdict := Classify(result.Status, message)
 	if verdict == Terminal && transientError(result.Err, message) {
 		return Retry
 	}
 	return verdict
+}
+
+func transportFailure(err error) bool {
+	if errors.Is(err, ErrStreamStartTimeout) || errors.Is(err, ErrStreamIdleTimeout) {
+		return true
+	}
+	_, isTransport := errors.AsType[net.Error](err)
+	return isTransport
 }
 
 func transientError(err error, message []byte) bool {
