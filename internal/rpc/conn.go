@@ -45,6 +45,8 @@ type Conn struct {
 	closeErr       error
 	handlers       sync.WaitGroup
 	remote         string
+	clientReqMu    sync.Mutex
+	clientReqs     map[string]*clientReq
 }
 
 type pendingCall struct {
@@ -299,10 +301,67 @@ func (c *Conn) clientDispatchLoop() {
 	for {
 		select {
 		case e := <-c.clientMessages:
+			if len(e.ID) > 0 {
+				c.dispatchClientRequest(e)
+				continue
+			}
+			c.cancelClientRequest(e)
 			c.handleClientMessage(e)
 		case <-c.closed:
 			return
 		}
+	}
+}
+
+type clientReq struct {
+	cancel context.CancelFunc
+}
+
+func (c *Conn) dispatchClientRequest(e envelope) {
+	ctx, cancel := context.WithCancel(c.ctx)
+	key := string(e.ID)
+	entry := &clientReq{cancel: cancel}
+	c.clientReqMu.Lock()
+	if c.clientReqs == nil {
+		c.clientReqs = make(map[string]*clientReq)
+	}
+	if old, ok := c.clientReqs[key]; ok {
+		old.cancel()
+	}
+	c.clientReqs[key] = entry
+	c.clientReqMu.Unlock()
+	c.handlers.Go(func() {
+		defer func() {
+			cancel()
+			c.clientReqMu.Lock()
+			if c.clientReqs[key] == entry {
+				delete(c.clientReqs, key)
+			}
+			c.clientReqMu.Unlock()
+		}()
+		c.handleClientRequest(ctx, e)
+	})
+}
+
+func (c *Conn) cancelClientRequest(e envelope) {
+	if e.Method != "serverRequest/resolved" {
+		return
+	}
+	var n struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(e.Params, &n); err != nil || n.RequestID == "" {
+		return
+	}
+	idv, err := json.Marshal(n.RequestID)
+	if err != nil {
+		return
+	}
+	c.clientReqMu.Lock()
+	entry := c.clientReqs[string(idv)]
+	c.clientReqMu.Unlock()
+	if entry != nil {
+		entry.cancel()
 	}
 }
 
@@ -313,15 +372,15 @@ func (c *Conn) handleClientMessage(e envelope) {
 		}
 		return
 	}
-	c.handleClientRequest(e)
+	c.handleClientRequest(c.ctx, e)
 }
 
-func (c *Conn) handleClientRequest(e envelope) {
+func (c *Conn) handleClientRequest(ctx context.Context, e envelope) {
 	if c.clientHandler == nil {
 		c.replyError(e.ID, -32601, "Method not found")
 		return
 	}
-	result, handlerErr := c.clientHandler.Request(c.ctx, e.Method, e.Params)
+	result, handlerErr := c.clientHandler.Request(ctx, e.Method, e.Params)
 	if handlerErr != nil {
 		code, message := -32603, handlerErr.Error()
 		if coded, ok := errors.AsType[*RPCError](handlerErr); ok {

@@ -75,7 +75,7 @@ A product MAY add methods. Built-in methods take precedence over added methods. 
 
 The server sends approval requests only for threads in approval mode `ask`, plus one workspace trust prompt per untrusted workspace. An exec call uses `item/commandExecution/requestApproval`. An edit call uses `item/fileChange/requestApproval`. A workspace trust prompt reuses `item/commandExecution/requestApproval` with the workspace path as `cwd`, the joined server commands plus env as `command`, and the full workspace prompt as `reason`. The request `id` is the approval request id of the journal. `itemId` is the tool call id, empty for workspace trust.
 
-Decisions `accept`, `acceptForSession`, `decline`, and `cancel` map to the host replies. An object decision MUST count as `accept`. Other values MUST count as `decline`. When the approval resolves, every subscriber receives `serverRequest/resolved {threadId, requestId}` and the server cancels its pending request. When a client fails to answer and it is the last subscriber, the server MUST decline.
+Decisions `accept`, `acceptForSession`, `decline`, and `cancel` map to the host replies. An object decision MUST count as `accept`. Other values MUST count as `decline`. When the approval resolves, every subscriber receives `serverRequest/resolved {threadId, requestId}` and the server cancels its pending request. When a client fails to answer and it is the last subscriber, the server MUST decline. A client MUST handle each server request on its own task so an open prompt never blocks notification delivery, and it MUST cancel that task when the matching `serverRequest/resolved` arrives.
 
 ## Notifications and items
 
