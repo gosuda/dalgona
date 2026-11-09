@@ -7,20 +7,45 @@ import (
 	"unicode"
 )
 
-var risky = []struct {
+type riskyRule struct {
 	name string
 	re   *regexp.Regexp
-}{
+}
+
+var risky = []riskyRule{
 	{"substitution", regexp.MustCompile(`\$\(|<\(|>\(|` + "`" + `|\\\r?\n`)},
 	{"shell-wrapper", regexp.MustCompile(`^(\S*['"\\=$]|[-0-9])`)},
 	{"privilege", regexp.MustCompile(`^(sudo|doas|su)\b`)},
 	{"nested-shell", regexp.MustCompile(`^(bash|sh|zsh|fish|eval|xargs)\b`)},
 	{"inline-interpreter", regexp.MustCompile(`^(node|bun|python3?)\s+(-\S+\s+)*(-c|-e|-p|--eval)\b`)},
-	{"recursive-delete", regexp.MustCompile(`^rm\s+(-\S*[rR]\S*\s+)+`)},
+	{"recursive-delete", regexp.MustCompile(`^rm\b`)},
 	{"git-destructive", regexp.MustCompile(`^git\b.*\b(push|reset\s+--hard|clean\s+-\S*[fd]|branch\s+-D)\b`)},
 	{"publish", regexp.MustCompile(`^(npm|pnpm|yarn|bun)\s+publish\b`)},
 	{"deploy", regexp.MustCompile(`^(wrangler|vercel|fly|flyctl)\s+deploy\b|^terraform\s+(apply|destroy)\b|^kubectl\s+(delete|apply)\b`)},
 	{"credentials", regexp.MustCompile(`(?i)\.env\b|\.ssh\b|\.aws\b|\.npmrc\b|\.netrc\b|credentials`)},
+}
+
+func isRecursiveRm(command string) bool {
+	tokens := tokenize(command)
+	if len(tokens) == 0 || tokens[0] != "rm" {
+		return false
+	}
+	for _, token := range tokens[1:] {
+		if token == "--" {
+			return false
+		}
+		if isRecursiveFlag(token) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRecursiveFlag(token string) bool {
+	if token == "--recursive" {
+		return true
+	}
+	return len(token) > 1 && token[0] == '-' && token[1] != '-' && strings.ContainsAny(token[1:], "rR")
 }
 
 type charKind uint8
@@ -129,10 +154,8 @@ func Check(command string) (string, string, bool) {
 	}
 	for _, part := range Split(command) {
 		normal := normalize(part)
-		for _, rule := range risky[1:] {
-			if rule.re.MatchString(normal) || rule.name == "credentials" && rule.re.MatchString(part) {
-				return rule.name, part, true
-			}
+		if name, ok := matchRisky(risky[1:], part, normal); ok {
+			return name, part, true
 		}
 	}
 	return "", "", false
@@ -142,13 +165,26 @@ func Check(command string) (string, string, bool) {
 func CheckValue(value string) (string, string, bool) {
 	for _, part := range Split(value) {
 		normal := normalize(part)
-		for _, rule := range risky[2:] {
-			if rule.re.MatchString(normal) || rule.name == "credentials" && rule.re.MatchString(part) {
-				return rule.name, part, true
-			}
+		if name, ok := matchRisky(risky[2:], part, normal); ok {
+			return name, part, true
 		}
 	}
 	return "", "", false
+}
+
+func matchRisky(rulesList []riskyRule, part, normal string) (string, bool) {
+	for _, rule := range rulesList {
+		if rule.name == "recursive-delete" {
+			if isRecursiveRm(normal) {
+				return rule.name, true
+			}
+			continue
+		}
+		if rule.re.MatchString(normal) || rule.name == "credentials" && rule.re.MatchString(part) {
+			return rule.name, true
+		}
+	}
+	return "", false
 }
 
 func GrantPrefix(command string) (string, bool) {

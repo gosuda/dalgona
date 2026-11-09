@@ -155,3 +155,27 @@ func checkGrantMatch(t *testing.T, command, prefix string, want bool) {
 		t.Errorf("MatchesGrant(%q, %q) = %v, want %v", command, prefix, got, want)
 	}
 }
+
+func TestRecursiveDeleteFlagOrders(t *testing.T) {
+	t.Parallel()
+	match := []string{
+		"rm -rf dir",
+		"rm -f -r /tmp/x",
+		"rm -v -rf x",
+		"rm -r -f x",
+		"rm -Rf x",
+		"rm --recursive x",
+		"rm --force --recursive x",
+	}
+	for _, command := range match {
+		if name, _, ok := Check(command); !ok || name != "recursive-delete" {
+			t.Errorf("Check(%q) = %q, %v; want recursive-delete", command, name, ok)
+		}
+	}
+	miss := []string{"rm -f file", "rm file", "rm riffraff", "rm --force file"}
+	for _, command := range miss {
+		if name, _, ok := Check(command); ok {
+			t.Errorf("Check(%q) = %q, %v; want no match", command, name, ok)
+		}
+	}
+}
