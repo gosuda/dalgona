@@ -72,10 +72,7 @@ func TestRuntime_syncFinalHoldsTurnCompletedUntilReviewEnds(t *testing.T) {
 				close(gate)
 				return
 			}
-			time.Sleep(300 * time.Millisecond)
-			if completed() {
-				t.Fatal("turn.completed was journaled before the review ended")
-			}
+			requireTurnHeldWhileReviewRuns(t, completed)
 			close(gate)
 			h.waitFor("turn.completed after the review", completed)
 			child := journalEvents(t, h.store, childOf(t, h.host, thread.ID()))
@@ -403,4 +400,15 @@ func TestRuntime_failedRecoveredReviewKeepsItsRangeForTheNextReview(t *testing.T
 func waitReviewSettled(h *harness, rt *Runtime) {
 	h.t.Helper()
 	h.waitFor("the review to settle", func() bool { return advisorState(h.t, rt) != StateReviewing })
+}
+
+func requireTurnHeldWhileReviewRuns(t *testing.T, completed func() bool) {
+	t.Helper()
+	hold := time.Now().Add(time.Second)
+	for time.Now().Before(hold) {
+		if completed() {
+			t.Fatal("turn.completed was journaled before the review ended")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
