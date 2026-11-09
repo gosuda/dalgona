@@ -7,6 +7,40 @@ import (
 	"github.com/gosuda/dalgona/internal/agent/event"
 )
 
+func TestDecodeRejectsMissingRequiredMembers(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "assistant.message usage",
+			raw:  `{"type":"assistant.message","item_id":"a","turn_id":"t","text":"","reasoning":"","tool_calls":[],"stop_reason":"end_turn"}`,
+		},
+		{
+			name: "approval.resolved reason",
+			raw:  `{"type":"approval.resolved","request_id":"r","decision":"accept","by":"user"}`,
+		},
+		{
+			name: "compaction tokens_before",
+			raw:  `{"type":"compaction","first_kept_seq":1,"summary":"s","method":"auto","tokens_after":10}`,
+		},
+		{
+			name: "compaction tokens_after",
+			raw:  `{"type":"compaction","first_kept_seq":1,"summary":"s","method":"auto","tokens_before":10}`,
+		},
+		{
+			name: "model.retry status",
+			raw:  `{"type":"model.retry","turn_id":"t","attempt":1,"verdict":"retry","delay_ms":100}`,
+		},
+	}
+	for _, tc := range cases {
+		if _, err := event.Decode([]byte(tc.raw)); err == nil {
+			t.Fatalf("%s: decode accepted a record missing a required member", tc.name)
+		}
+	}
+}
+
 func TestFoldAcceptsFarOutOfOrderScriptEffects(t *testing.T) {
 	t.Parallel()
 	script := event.ScriptStarted{RunID: "s", SourceBlob: event.BlobRef{Blob: digest, Bytes: 1}, Entry: "main", Args: jsontext.Value(`{}`)}

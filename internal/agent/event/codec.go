@@ -160,6 +160,15 @@ type objectReader struct {
 	err    error
 }
 
+func (r *objectReader) require(name string) {
+	if r.err != nil {
+		return
+	}
+	if _, ok := r.fields[name]; !ok {
+		r.err = fmt.Errorf("missing required member %q", name)
+	}
+}
+
 func (r *objectReader) str(name string) string {
 	if r.err != nil {
 		return ""

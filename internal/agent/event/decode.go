@@ -81,6 +81,7 @@ func decodeToolEvent(kind string, r *objectReader) (Event, error) {
 	case TypeToolCompleted:
 		return decodeToolCompleted(r), nil
 	case TypeModelRetry:
+		r.require("status")
 		return ModelRetry{
 			TurnID: r.str("turn_id"), Attempt: r.number("attempt"), Verdict: r.str("verdict"),
 			Status: r.number("status"), DelayMS: r.int64("delay_ms"),
@@ -90,6 +91,7 @@ func decodeToolEvent(kind string, r *objectReader) (Event, error) {
 			RequestID: r.str("request_id"), CallID: r.str("call_id"), Summary: r.str("summary"), Class: r.str("class"),
 		}, nil
 	case TypeApprovalResolved:
+		r.require("reason")
 		return ApprovalResolved{
 			RequestID: r.str("request_id"), Decision: r.str("decision"), By: r.str("by"),
 			Reason: r.str("reason"), Scores: r.scores("scores"),
@@ -106,6 +108,7 @@ func decodeAssistantMessage(r *objectReader) AssistantMessage {
 		calls = append(calls, value)
 		return err
 	})
+	r.require("usage")
 	usage, err := decodeUsage(r.raw("usage"))
 	if r.err == nil {
 		r.err = err
@@ -206,6 +209,8 @@ func decodeSpill(raw jsontext.Value) (Spill, error) {
 func decodeStateEvent(kind string, r *objectReader) (Event, error) {
 	switch kind {
 	case TypeCompaction:
+		r.require("tokens_before")
+		r.require("tokens_after")
 		return Compaction{
 			FirstKeptSeq: r.uint64("first_kept_seq"), Summary: r.str("summary"), Method: r.str("method"),
 			TokensBefore: r.number("tokens_before"), TokensAfter: r.number("tokens_after"),
