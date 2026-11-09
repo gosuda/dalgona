@@ -118,6 +118,12 @@ func (w *worker) runNestedCall(ctx context.Context, call event.ToolCall, request
 }
 
 func (t *Thread) StartChild(ctx context.Context, callID string, req task.Request) (string, error) {
+	select {
+	case t.children <- struct{}{}:
+	case <-ctx.Done():
+		return "", context.Cause(ctx)
+	}
+	defer func() { <-t.children }()
 	child, err := t.childFor(ctx, callID, req)
 	if err != nil {
 		return "", err
