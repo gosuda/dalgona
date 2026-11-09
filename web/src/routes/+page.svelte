@@ -10,8 +10,10 @@ import Transcript from "#lib/components/Transcript.svelte";
 import { threadTitle } from "#lib/labels.ts";
 import { RpcClient, RpcError } from "#lib/protocol.ts";
 import {
+	activeApproval,
 	emptyTranscript,
 	itemsAwaitingApproval,
+	otherThreadApprovalCount,
 	reduceNotification,
 	resolveApprovalRequest,
 	trackApprovalRequest,
@@ -67,9 +69,11 @@ let errorMessage = $state("");
 let client: RpcClient | undefined;
 let connectionGeneration = 0;
 let selectionGeneration = 0;
-
 let running = $derived(transcript.turnStatus === "inProgress");
-let currentApproval = $derived(approvals[0] ?? null);
+let currentApproval = $derived(activeApproval(approvals, activeThreadId));
+let otherApprovalCount = $derived(
+	otherThreadApprovalCount(approvals, activeThreadId),
+);
 let awaitingApproval = $derived(
 	itemsAwaitingApproval(approvals, activeThreadId),
 );
@@ -560,6 +564,13 @@ async function sendNextFollowup(threadId: string): Promise<void> {
 	</main>
 </div>
 
+{#if otherApprovalCount > 0}
+	<p class="approval-queue-note" role="status">
+		{otherApprovalCount} approval{otherApprovalCount === 1 ? "" : "s"} waiting
+		on another thread. Switch threads to review.
+	</p>
+{/if}
+
 <ApprovalDialog
 	request={currentApproval}
 	changes={approvalChanges}
@@ -628,6 +639,14 @@ async function sendNextFollowup(threadId: string): Promise<void> {
 		min-height: 32px;
 		padding: var(--space-1) var(--space-3);
 		font-size: var(--text-caption);
+	}
+
+	.approval-queue-note {
+		margin: 0 var(--space-5) var(--space-3);
+		border-inline-start: 2px solid var(--color-accent);
+		background: var(--color-bg-inset);
+		padding: var(--space-3);
+		font-size: var(--text-body-small);
 	}
 
 	:global(.transcript) {

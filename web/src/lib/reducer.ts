@@ -259,6 +259,23 @@ export function resolveApprovalRequest(
 	return approvals.filter((entry) => entry.id !== requestId);
 }
 
+export function activeApproval(
+	approvals: readonly ApprovalRequest[],
+	threadId: string | null,
+): ApprovalRequest | null {
+	if (threadId === null) {
+		return null;
+	}
+	return approvals.find((entry) => entry.threadId === threadId) ?? null;
+}
+
+export function otherThreadApprovalCount(
+	approvals: readonly ApprovalRequest[],
+	threadId: string | null,
+): number {
+	return approvals.filter((entry) => entry.threadId !== threadId).length;
+}
+
 export function itemsAwaitingApproval(
 	approvals: readonly ApprovalRequest[],
 	threadId: string | null,

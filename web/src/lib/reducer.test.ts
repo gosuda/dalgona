@@ -1,9 +1,11 @@
 import { describe, expect, test } from "vitest";
 import { advisorLabel, itemStatusLabel, kindLabel } from "./labels";
 import {
+	activeApproval,
 	emptyTranscript,
 	itemDisplayStatus,
 	itemsAwaitingApproval,
+	otherThreadApprovalCount,
 	reduceNotification,
 	resolveApprovalRequest,
 	trackApprovalRequest,
@@ -272,6 +274,35 @@ describe("approval tracking", () => {
 		const awaiting = itemsAwaitingApproval(pending, "thread-1");
 		expect(itemDisplayStatus("completed", "cmd-1", awaiting)).toBe("completed");
 		expect(itemsAwaitingApproval(pending, "thread-2").has("cmd-1")).toBe(false);
+	});
+});
+
+describe("active approval filtering", () => {
+	const first: ApprovalRequest = {
+		id: 7,
+		method: "item/commandExecution/requestApproval",
+		threadId: "thread-1",
+		turnId: "turn-1",
+		itemId: "cmd-1",
+		title: "Run ls",
+		detail: "ls",
+		reason: null,
+	};
+	const other: ApprovalRequest = { ...first, id: 8, threadId: "thread-2" };
+
+	test("shows the approval that belongs to the active thread", () => {
+		expect(activeApproval([other, first], "thread-1")).toBe(first);
+		expect(activeApproval([other, first], "thread-2")).toBe(other);
+	});
+
+	test("shows nothing when no approval belongs to the active thread", () => {
+		expect(activeApproval([other], "thread-1")).toBeNull();
+		expect(activeApproval([other], null)).toBeNull();
+	});
+
+	test("counts approvals waiting on other threads", () => {
+		expect(otherThreadApprovalCount([first, other], "thread-1")).toBe(1);
+		expect(otherThreadApprovalCount([first, other], "thread-3")).toBe(2);
 	});
 });
 
