@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type CommandRunner func(context.Context, string, ...string) error
@@ -82,14 +83,37 @@ func InstallService(env ServiceEnv, exe string) error {
 	}
 }
 
+func systemdEscapeValue(s string) (string, error) {
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return "", fmt.Errorf("value contains control character U+%04X", r)
+		}
+	}
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s, nil
+}
+
 func installLinuxService(home, exe, dalgonaHome string, run CommandRunner) error {
+	exeEscaped, err := systemdEscapeValue(exe)
+	if err != nil {
+		return fmt.Errorf("invalid executable path: %w", err)
+	}
+	homeEscaped := ""
+	if dalgonaHome != "" {
+		var err error
+		homeEscaped, err = systemdEscapeValue(dalgonaHome)
+		if err != nil {
+			return fmt.Errorf("invalid DALGONA_HOME: %w", err)
+		}
+	}
 	dir := filepath.Join(home, ".config", "systemd", "user")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create systemd user directory: %w", err)
 	}
-	unit := fmt.Sprintf("[Unit]\nDescription=dalgona daemon\n[Service]\nExecStart=\"%s\" daemon\nRestart=always\n", exe)
+	unit := fmt.Sprintf("[Unit]\nDescription=dalgona daemon\n[Service]\nExecStart=\"%s\" daemon\nRestart=always\n", exeEscaped)
 	if dalgonaHome != "" {
-		unit += fmt.Sprintf("Environment=\"DALGONA_HOME=%s\"\n", dalgonaHome)
+		unit += fmt.Sprintf("Environment=\"DALGONA_HOME=%s\"\n", homeEscaped)
 	}
 	unit += "[Install]\nWantedBy=default.target\n"
 	if err := os.WriteFile(filepath.Join(dir, "dalgona.service"), []byte(unit), 0o600); err != nil {

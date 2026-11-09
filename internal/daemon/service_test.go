@@ -136,3 +136,32 @@ func writeServiceStub(t *testing.T, home, goos string) string {
 	}
 	return path
 }
+
+func TestSystemdUnitEscapesQuotesAndBackslashes(t *testing.T) {
+	unit := installLinuxUnit(t, `/opt/a"b\c/dalgona`, `/home/x"y\z`)
+	if want := `ExecStart="/opt/a\"b\\c/dalgona" daemon`; !strings.Contains(unit, want) {
+		t.Fatalf("unit %q lacks escaped ExecStart %q", unit, want)
+	}
+	if want := `Environment="DALGONA_HOME=/home/x\"y\\z"`; !strings.Contains(unit, want) {
+		t.Fatalf("unit %q lacks escaped Environment %q", unit, want)
+	}
+}
+
+func TestSystemdUnitRejectsControlCharacters(t *testing.T) {
+	for _, tc := range []struct{ name, exe, home string }{
+		{"exe-newline", "/opt/bad\n/dalgona", ""},
+		{"exe-cr", "/opt/bad\r/dalgona", ""},
+		{"exe-control", "/opt/bad\x01/dalgona", ""},
+		{"exe-nel", "/opt/bad\u0085/dalgona", ""},
+		{"home-newline", "/abs/dalgona", "/home/bad\nname"},
+		{"home-control", "/abs/dalgona", "/home/bad\x7fname"},
+		{"home-nel", "/abs/dalgona", "/home/bad\u0085name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := shortHome(t)
+			if err := installLinuxService(home, tc.exe, tc.home, nilRun); err == nil {
+				t.Fatalf("installLinuxService(%q, %q) = nil, want control-character error", tc.exe, tc.home)
+			}
+		})
+	}
+}
