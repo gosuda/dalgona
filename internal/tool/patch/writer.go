@@ -50,15 +50,16 @@ func applyBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Resu
 	}
 	effects, failed, commitErr := commitWriteSet(ctx, env, states)
 	if commitErr != nil {
-		rollbackFailures := rollback(ctx, env, effects)
+		commitCtx := context.WithoutCancel(ctx)
+		rollbackFailures := rollback(commitCtx, env, effects)
 		if len(rollbackFailures) == 0 {
-			cleanupStates(ctx, env, states)
+			cleanupStates(commitCtx, env, states)
 		} else {
-			cleanupStatesKeepBackups(ctx, env, states)
+			cleanupStatesKeepBackups(commitCtx, env, states)
 		}
 		return tool.Result{}, writeError(failed, commitErr, states, rollbackFailures)
 	}
-	cleanupStates(ctx, env, states)
+	cleanupStates(context.WithoutCancel(ctx), env, states)
 	refs := recordSnapshots(env, batch.files)
 	return tool.Result{Output: appliedOutput(batch.files, refs), OK: true}, nil
 }
@@ -230,6 +231,7 @@ func tempSuffix() (string, error) {
 }
 
 func commitWriteSet(ctx context.Context, env tool.Env, states []*writeState) ([]*writeEffect, *writeState, error) {
+	commitCtx := context.WithoutCancel(ctx)
 	var effects []*writeEffect
 	for _, state := range states {
 		if len(effects) == 0 {
@@ -237,7 +239,7 @@ func commitWriteSet(ctx context.Context, env tool.Env, states []*writeState) ([]
 				return effects, state, err
 			}
 		}
-		effect, err := commitOne(ctx, env, state)
+		effect, err := commitOne(commitCtx, env, state)
 		if err != nil {
 			if effect != nil {
 				effects = append(effects, effect)
