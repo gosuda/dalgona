@@ -15,6 +15,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/pelletier/go-toml/v2/unstable"
 
+	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/keywords"
 )
 
@@ -569,33 +570,65 @@ func tomlKeyLine(raw []byte, node *unstable.Node) int {
 }
 
 func WriteSetting(home, key string, value any) error {
-	parts := strings.Split(key, ".")
-	if slices.Contains(parts, "") {
-		return errors.New("settings key must contain nonempty dot-separated parts")
+	unlock, err := auth.LockHome(home)
+	if err != nil {
+		return fmt.Errorf("lock settings write: %w", err)
+	}
+	defer func() { _ = unlock() }()
+	parts, err := splitSettingKey(key)
+	if err != nil {
+		return err
 	}
 	path := filepath.Join(home, "settings.toml")
-	raw, readErr := os.ReadFile(path)
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return fmt.Errorf("read settings.toml: %w", readErr)
+	raw, err := readSettingsFile(path)
+	if err != nil {
+		return err
 	}
-	original, doc, decodeErr := decodeSettingsDocument(path, raw)
-	if decodeErr != nil {
-		return decodeErr
+	original, doc, err := decodeSettingsDocument(path, raw)
+	if err != nil {
+		return err
 	}
 	setNested(doc, parts, value)
+	output, err := encodeSettingsDocument(doc, original)
+	if err != nil {
+		return err
+	}
+	return persistSettings(home, path, output)
+}
+
+func splitSettingKey(key string) ([]string, error) {
+	parts := strings.Split(key, ".")
+	if slices.Contains(parts, "") {
+		return nil, errors.New("settings key must contain nonempty dot-separated parts")
+	}
+	return parts, nil
+}
+
+func readSettingsFile(path string) ([]byte, error) {
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("read settings.toml: %w", readErr)
+	}
+	return raw, nil
+}
+
+func encodeSettingsDocument(doc map[string]any, original *fileDoc) ([]byte, error) {
 	preserveEditStyleOrder(doc, original)
 	var output bytes.Buffer
-	encodeErr := toml.NewEncoder(&output).EnableMarshalerInterface().Encode(doc)
-	if encodeErr != nil {
-		return fmt.Errorf("encode settings.toml: %w", encodeErr)
+	if encodeErr := toml.NewEncoder(&output).EnableMarshalerInterface().Encode(doc); encodeErr != nil {
+		return nil, fmt.Errorf("encode settings.toml: %w", encodeErr)
 	}
-	if validateErr := validateSettings(home, path, output.Bytes()); validateErr != nil {
+	return output.Bytes(), nil
+}
+
+func persistSettings(home, path string, output []byte) error {
+	if validateErr := validateSettings(home, path, output); validateErr != nil {
 		return validateErr
 	}
 	if mkdirErr := os.MkdirAll(home, 0o700); mkdirErr != nil {
 		return fmt.Errorf("create config home: %w", mkdirErr)
 	}
-	if writeErr := writeSettings(path, output.Bytes()); writeErr != nil {
+	if writeErr := writeSettings(path, output); writeErr != nil {
 		return writeErr
 	}
 	return nil

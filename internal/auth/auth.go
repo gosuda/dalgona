@@ -151,6 +151,13 @@ func openAuthLock(dir string) (*os.File, error) {
 	return file, nil
 }
 
+// LockHome takes the same exclusive cross-process lock on home's auth.lock
+// that the store uses, for packages that must serialize writes in the same
+// directory. The returned func releases it and should be deferred.
+func LockHome(dir string) (func() error, error) {
+	return lockAuth(dir)
+}
+
 func (s *Store) updateAuth(apply func()) error {
 	unlock, err := lockAuth(s.dir)
 	if err != nil {
