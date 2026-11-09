@@ -249,15 +249,7 @@ func (w *worker) declineCall(ctx context.Context, call event.ToolCall, requestID
 }
 
 func (w *worker) failBeforeRun(ctx context.Context, p *prepared, requestID string, cause error) error {
-	if requestID != "" {
-		return w.declineCall(ctx, p.call, requestID, decline("mode:"+string(w.settings.Approval), cause.Error()))
-	}
-	started, err := w.started(p, nil)
-	if err != nil {
-		return err
-	}
-	_, err = w.t.appendEvents(ctx, started, event.ToolCompleted{CallID: p.call.ID, Output: cause.Error(), Recovered: "none"})
-	return err
+	return w.declineCall(ctx, p.call, requestID, decline("mode:"+string(w.settings.Approval), cause.Error()))
 }
 
 func (w *worker) start(ctx context.Context, p *prepared) error {
