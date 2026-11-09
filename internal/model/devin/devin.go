@@ -54,12 +54,6 @@ type session struct {
 
 func New(cfg Config) *Provider {
 	cfg.BaseURL = strings.TrimRight(cmp.Or(cfg.BaseURL, DefaultBaseURL), "/")
-	if cfg.Retry.StartTimeout == 0 {
-		cfg.Retry.StartTimeout = model.DefaultRetryOptions().StartTimeout
-		if cfg.Retry.IdleTimeout == 0 {
-			cfg.Retry.IdleTimeout = model.DefaultRetryOptions().IdleTimeout
-		}
-	}
 	return &Provider{cfg: cfg, client: model.NewHTTPClient(cfg.Client), session: session{turn: make(chan struct{}, 1)}}
 }
 
