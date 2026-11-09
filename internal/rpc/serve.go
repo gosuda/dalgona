@@ -293,22 +293,19 @@ func (s *server) run(ctx context.Context, w *watch) {
 			w.thread.Unsubscribe(ch)
 			return
 		}
-		if err := w.catchUp(); err != nil {
+		if err := s.catchUp(w); err != nil {
 			return
 		}
 	}
 }
 
-func (w *watch) catchUp() error {
+func (s *server) catchUp(w *watch) error {
 	read, err := w.thread.ReadAfter(w.head)
 	if err != nil {
 		return err
 	}
 	for _, e := range read.Events {
-		if e.Seq > w.head {
-			w.tracker.apply(e.Seq, e.Event)
-			w.head = e.Seq
-		}
+		s.applyUpdate(w, agent.Update{Kind: agent.UpdateEvent, Seq: e.Seq, Event: e.Event})
 	}
 	return nil
 }
