@@ -82,6 +82,7 @@ func policyName(approval string) string {
 	case config.ApprovalAsk:
 		return "untrusted"
 	case config.ApprovalAuto:
+		return "on-request"
 	}
 	return "on-request"
 }
@@ -114,6 +115,7 @@ func effortMode(value string) (config.Reasoning, error) {
 	case config.ReasoningLow, config.ReasoningMedium, config.ReasoningHigh, config.ReasoningXHigh, config.ReasoningMax:
 		return config.Reasoning(value), nil
 	case config.ReasoningDefault:
+		return "", invalidParams("unsupported model_reasoning_effort " + value)
 	}
 	return "", invalidParams("unsupported model_reasoning_effort " + value)
 }
