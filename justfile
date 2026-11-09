@@ -98,7 +98,9 @@ dist:
         done
     done
 
+box_tag := `git describe --tags --exact-match HEAD 2>/dev/null || git rev-parse --short=12 HEAD`
+
 box-image: dist
-    docker buildx build -f deploy/box/Dockerfile --platform linux/amd64,linux/arm64 -t dalgona-box:$(go run ./cmd/dalgona --version | cut -d' ' -f2) .
+    docker buildx build -f deploy/box/Dockerfile --platform linux/amd64,linux/arm64 -t dalgona-box:{{box_tag}} .
 
 verify: fmt-check vet lint test vuln hashline-model web-check cf-check
