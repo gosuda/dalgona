@@ -209,4 +209,5 @@ func (p *dirPin) close() {
 		return
 	}
 	_ = p.file.Close()
+	p.file = nil
 }

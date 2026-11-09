@@ -66,6 +66,7 @@ func stage(ctx context.Context, style Style, edits []edit, env tool.Env) (staged
 		return stagedBatch{}, errors.New("patch: the edits produce no change")
 	}
 	if err := checkRenameTargets(files); err != nil {
+		closeFiles(files)
 		return stagedBatch{}, err
 	}
 	return stagedBatch{style: style, files: files}, nil
@@ -77,6 +78,7 @@ func stageGroups(ctx context.Context, style Style, groups []fileGroup, env tool.
 	for _, group := range groups {
 		file, err := stageFile(ctx, style, group, env)
 		if err != nil {
+			closeFiles(files)
 			return nil, err
 		}
 		if file == nil {
@@ -84,9 +86,13 @@ func stageGroups(ctx context.Context, style Style, groups []fileGroup, env tool.
 		}
 		stagedBytes += len(file.before) + len(file.after)
 		if stagedBytes > 64<<20 {
+			file.closePins()
+			closeFiles(files)
 			return nil, errors.New("patch: this call stages over 64 MiB; split it into several calls")
 		}
 		if file.pin, err = pinVerifiedComponents(env, group.display, group.absolute); err != nil {
+			file.closePins()
+			closeFiles(files)
 			return nil, err
 		}
 		files = append(files, file)
@@ -213,6 +219,7 @@ func stageUpdate(ctx context.Context, style Style, group fileGroup, env tool.Env
 	}
 	resolver := fileResolver{style: style, group: group, env: env, file: file}
 	if err := resolver.stageContent(ctx, doc); err != nil {
+		file.closePins()
 		return nil, err
 	}
 	if bytes.Equal(before, file.after) && file.renameTo == "" {
@@ -324,6 +331,24 @@ func (f *stagedFile) publishPin() *dirPin {
 		return f.renamePin
 	}
 	return f.pin
+}
+
+func (f *stagedFile) closePins() {
+	if f == nil {
+		return
+	}
+	f.pin.close()
+	f.renamePin.close()
+}
+
+func (b stagedBatch) closePins() {
+	closeFiles(b.files)
+}
+
+func closeFiles(files []*stagedFile) {
+	for _, file := range files {
+		file.closePins()
+	}
 }
 
 func (b stagedBatch) changes() []tool.FileChange {

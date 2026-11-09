@@ -37,6 +37,7 @@ func applyBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Resu
 	if len(batch.files) == 0 {
 		return tool.Result{Output: []byte("no_change\n"), OK: true}, nil
 	}
+	defer batch.closePins()
 	if err := verifyBatch(ctx, env, batch.files); err != nil {
 		return tool.Result{}, err
 	}

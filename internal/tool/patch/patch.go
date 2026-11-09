@@ -59,6 +59,7 @@ func (e Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Pl
 		Apply: func(ctx context.Context) (tool.Result, error) {
 			return applyBatch(ctx, env, batch)
 		},
+		Discard: batch.closePins,
 	}, nil
 }
 
