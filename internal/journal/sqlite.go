@@ -344,16 +344,50 @@ func backupDB(db *sql.DB, dir string) (retErr error) {
 }
 
 func quarantineDB(dir, quarantine string) error {
-	base := filepath.Join(quarantine, fmt.Sprintf("state-%d.db", time.Now().Unix()))
+	stem, err := quarantineStem(quarantine)
+	if err != nil {
+		return err
+	}
 	var result error
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		src := filepath.Join(dir, "state.db"+suffix)
 		if _, err := os.Stat(src); err != nil {
 			continue
 		}
-		if err := os.Rename(src, base+suffix); err != nil {
+		if err := os.Rename(src, stem+suffix); err != nil {
 			result = errors.Join(result, err)
 		}
 	}
 	return result
+}
+
+func quarantineStem(quarantine string) (string, error) {
+	base := fmt.Sprintf("state-%d-%d.db", time.Now().UnixNano(), os.Getpid())
+	for attempt := range 100 {
+		name := base
+		if attempt > 0 {
+			name = fmt.Sprintf("%s-%d", base, attempt)
+		}
+		if free, err := quarantineFree(quarantine, name); err != nil || !free {
+			if err != nil {
+				return "", err
+			}
+			continue
+		}
+		return filepath.Join(quarantine, name), nil
+	}
+	return "", fmt.Errorf("journal: quarantine names exhausted in %s", quarantine)
+}
+
+func quarantineFree(quarantine, name string) (bool, error) {
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_, err := os.Stat(filepath.Join(quarantine, name+suffix))
+		if err == nil {
+			return false, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return true, nil
 }
