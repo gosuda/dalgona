@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json/jsontext"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -51,17 +52,17 @@ func (s *Store) Mask(text string) string {
 		s.maskErr = nil
 	}
 	replacements := s.credentialReplacements()
-	patternReplacements, changed := s.patternReplacements(text)
-	replacements = append(replacements, patternReplacements...)
-	s.secretsDirty = s.secretsDirty || changed
-	if s.secretsDirty {
-		if err := s.persistSecrets(); err != nil {
+	hits := s.collectPatternHits(text)
+	if len(hits) > 0 || s.secretsDirty {
+		if err := s.syncPatternSecrets(hits); err != nil {
+			s.secretsDirty = true
 			s.maskErr = fmt.Errorf("persist pattern secrets: %w", err)
 			return maskPersistenceFailure
 		}
 		s.secretsDirty = false
 		s.maskErr = nil
 	}
+	replacements = append(replacements, s.lookupPatternReplacements(text)...)
 	return applyReplacements(text, replacements)
 }
 
@@ -69,6 +70,7 @@ func (s *Store) Unmask(text string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reloadForMask()
+	s.refreshSecrets()
 	replacements := invertReplacements(s.credentialReplacements())
 	for placeholder, secret := range s.secrets {
 		replacements = append(replacements, replacement{from: placeholder, to: secret})
@@ -86,6 +88,244 @@ func (s *Store) reloadForMask() {
 	if err := s.reloadAuthIfChanged(); err != nil {
 		slog.Warn("auth: keeping cached credentials", "error", err)
 	}
+}
+
+func (s *Store) refreshSecrets() {
+	unlock, err := lockAuth(s.dir)
+	if err != nil {
+		slog.Warn("auth: keeping cached pattern secrets", "error", err)
+		return
+	}
+	disk, readErr := readSecretsMap(s.dir)
+	unlockErr := unlock()
+	if readErr != nil {
+		slog.Warn("auth: keeping cached pattern secrets", "error", readErr)
+		return
+	}
+	if unlockErr != nil {
+		slog.Warn("auth: releasing pattern secret lock", "error", unlockErr)
+	}
+	s.secrets = mergeSecretMaps(disk, s.secrets)
+}
+
+type patternHit struct {
+	index int
+	value string
+}
+
+func patternPrefix(index int) string {
+	return "{{secret:pattern" + strconv.Itoa(index) + ":"
+}
+
+func placeholderPrefix(placeholder string) (string, bool) {
+	const base = "{{secret:pattern"
+	after, ok := strings.CutPrefix(placeholder, base)
+	if !ok {
+		return "", false
+	}
+	indexPart, remainder, ok := strings.Cut(after, ":")
+	if !ok {
+		return "", false
+	}
+	if _, err := strconv.Atoi(indexPart); err != nil {
+		return "", false
+	}
+	number, ok := strings.CutSuffix(remainder, "}}")
+	if !ok {
+		return "", false
+	}
+	if _, err := strconv.Atoi(number); err != nil {
+		return "", false
+	}
+	return base + indexPart + ":", true
+}
+
+func findPatternPlaceholder(secrets map[string]string, prefix, value string) (string, bool) {
+	for placeholder, secret := range secrets {
+		if strings.HasPrefix(placeholder, prefix) && secret == value {
+			return placeholder, true
+		}
+	}
+	return "", false
+}
+
+func nextPatternNumberIn(secrets map[string]string, prefix string) int {
+	next := 0
+	for placeholder := range secrets {
+		number, hasPrefix := strings.CutPrefix(placeholder, prefix)
+		if !hasPrefix {
+			continue
+		}
+		number, hasSuffix := strings.CutSuffix(number, "}}")
+		if !hasSuffix {
+			continue
+		}
+		value, err := strconv.Atoi(number)
+		if err == nil && value >= next {
+			next = value + 1
+		}
+	}
+	return next
+}
+
+func (s *Store) collectPatternHits(text string) []patternHit {
+	var hits []patternHit
+	seen := make(map[patternHit]struct{})
+	for _, configured := range s.patterns {
+		for _, location := range configured.re.FindAllStringIndex(text, -1) {
+			value := text[location[0]:location[1]]
+			if len(value) < 8 {
+				continue
+			}
+			hit := patternHit{index: configured.index, value: value}
+			if _, ok := seen[hit]; ok {
+				continue
+			}
+			seen[hit] = struct{}{}
+			hits = append(hits, hit)
+		}
+	}
+	return hits
+}
+
+func (s *Store) lookupPatternReplacements(text string) []replacement {
+	var items []replacement
+	for _, configured := range s.patterns {
+		prefix := patternPrefix(configured.index)
+		for _, location := range configured.re.FindAllStringIndex(text, -1) {
+			value := text[location[0]:location[1]]
+			if len(value) < 8 {
+				continue
+			}
+			if placeholder, ok := findPatternPlaceholder(s.secrets, prefix, value); ok {
+				items = append(items, replacement{from: value, to: placeholder})
+			}
+		}
+	}
+	return items
+}
+
+func (s *Store) syncPatternSecrets(hits []patternHit) error {
+	unlock, err := lockAuth(s.dir)
+	if err != nil {
+		return err
+	}
+	syncErr := s.syncPatternSecretsLocked(hits)
+	return errors.Join(syncErr, unlock())
+}
+
+func (s *Store) syncPatternSecretsLocked(hits []patternHit) error {
+	disk, err := readSecretsMap(s.dir)
+	if err != nil {
+		return err
+	}
+	merged := mergeSecretMaps(disk, s.secrets)
+	allocated := allocatePatternHits(merged, hits)
+	if !allocated && maps.Equal(disk, merged) {
+		s.secrets = merged
+		return nil
+	}
+	if err := writeSecretsMap(s.dir, merged); err != nil {
+		s.secrets = merged
+		return err
+	}
+	s.secrets = merged
+	return nil
+}
+
+func allocatePatternHits(secrets map[string]string, hits []patternHit) bool {
+	allocated := false
+	for _, hit := range hits {
+		prefix := patternPrefix(hit.index)
+		if _, ok := findPatternPlaceholder(secrets, prefix, hit.value); ok {
+			continue
+		}
+		placeholder := prefix + strconv.Itoa(nextPatternNumberIn(secrets, prefix)) + "}}"
+		secrets[placeholder] = hit.value
+		allocated = true
+	}
+	return allocated
+}
+
+func mergeSecretMaps(disk, memory map[string]string) map[string]string {
+	merged := make(map[string]string, len(disk)+len(memory))
+	maps.Copy(merged, disk)
+	for placeholder, secret := range memory {
+		mergeOneSecret(merged, placeholder, secret)
+	}
+	return merged
+}
+
+func mergeOneSecret(merged map[string]string, placeholder, secret string) {
+	if existing, ok := merged[placeholder]; ok && existing == secret {
+		return
+	}
+	prefix, ok := placeholderPrefix(placeholder)
+	if !ok {
+		if _, exists := merged[placeholder]; !exists {
+			merged[placeholder] = secret
+		}
+		return
+	}
+	if _, exists := merged[placeholder]; exists {
+		if _, ok := findPatternPlaceholder(merged, prefix, secret); ok {
+			return
+		}
+		fresh := prefix + strconv.Itoa(nextPatternNumberIn(merged, prefix)) + "}}"
+		merged[fresh] = secret
+		return
+	}
+	if _, ok := findPatternPlaceholder(merged, prefix, secret); ok {
+		return
+	}
+	merged[placeholder] = secret
+}
+
+func readSecretsMap(dir string) (map[string]string, error) {
+	raw, err := readSecure(filepath.Join(dir, "secrets.json"))
+	if err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		return map[string]string{}, nil
+	}
+	secrets := make(map[string]string)
+	err = readObject(raw, func(placeholder string, value jsontext.Value) error {
+		secret, decodeErr := jsonString(value)
+		if decodeErr != nil {
+			return fmt.Errorf("placeholder %q: %w", placeholder, decodeErr)
+		}
+		secrets[placeholder] = secret
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("secrets.json: %w", err)
+	}
+	return secrets, nil
+}
+
+func writeSecretsMap(dir string, secrets map[string]string) error {
+	return writeSecure(filepath.Join(dir, "secrets.json"), func(encoder *jsontext.Encoder) error {
+		return encodeSecrets(encoder, secrets)
+	})
+}
+
+func encodeSecrets(encoder *jsontext.Encoder, secrets map[string]string) error {
+	if err := encoder.WriteToken(jsontext.BeginObject); err != nil {
+		return fmt.Errorf("write secrets object: %w", err)
+	}
+	for _, placeholder := range slices.Sorted(maps.Keys(secrets)) {
+		if err := encoder.WriteToken(jsontext.String(placeholder)); err != nil {
+			return fmt.Errorf("write secret placeholder: %w", err)
+		}
+		if err := encoder.WriteToken(jsontext.String(secrets[placeholder])); err != nil {
+			return fmt.Errorf("write secret value: %w", err)
+		}
+	}
+	if err := encoder.WriteToken(jsontext.EndObject); err != nil {
+		return fmt.Errorf("finish secrets object: %w", err)
+	}
+	return nil
 }
 
 func invertReplacements(items []replacement) []replacement {
@@ -147,55 +387,6 @@ func secretEnvironmentName(name string) bool {
 	return strings.HasSuffix(name, "_API_KEY") || strings.HasSuffix(name, "_TOKEN") || strings.HasSuffix(name, "_SECRET") || strings.HasSuffix(name, "_PASSWORD")
 }
 
-func (s *Store) patternReplacements(text string) ([]replacement, bool) {
-	var items []replacement
-	changed := false
-	for _, configured := range s.patterns {
-		for _, location := range configured.re.FindAllStringIndex(text, -1) {
-			value := text[location[0]:location[1]]
-			if len(value) < 8 {
-				continue
-			}
-			placeholder, added := s.patternPlaceholder(configured.index, value)
-			changed = changed || added
-			items = append(items, replacement{from: value, to: placeholder})
-		}
-	}
-	return items, changed
-}
-
-func (s *Store) patternPlaceholder(index int, value string) (string, bool) {
-	prefix := "{{secret:pattern" + strconv.Itoa(index) + ":"
-	for placeholder, secret := range s.secrets {
-		if strings.HasPrefix(placeholder, prefix) && secret == value {
-			return placeholder, false
-		}
-	}
-	next := s.nextPatternNumber(prefix)
-	placeholder := prefix + strconv.Itoa(next) + "}}"
-	s.secrets[placeholder] = value
-	return placeholder, true
-}
-
-func (s *Store) nextPatternNumber(prefix string) int {
-	next := 0
-	for placeholder := range s.secrets {
-		number, hasPrefix := strings.CutPrefix(placeholder, prefix)
-		if !hasPrefix {
-			continue
-		}
-		number, hasSuffix := strings.CutSuffix(number, "}}")
-		if !hasSuffix {
-			continue
-		}
-		value, err := strconv.Atoi(number)
-		if err == nil && value >= next {
-			next = value + 1
-		}
-	}
-	return next
-}
-
 func applyReplacements(text string, items []replacement) string {
 	slices.SortFunc(items, func(a, b replacement) int {
 		if len(a.from) != len(b.from) {
@@ -233,24 +424,4 @@ func replacementAt(text string, items []replacement) (replacement, bool) {
 		}
 	}
 	return replacement{}, false
-}
-
-func (s *Store) persistSecrets() error {
-	return writeSecure(filepath.Join(s.dir, "secrets.json"), func(encoder *jsontext.Encoder) error {
-		if err := encoder.WriteToken(jsontext.BeginObject); err != nil {
-			return fmt.Errorf("write secrets object: %w", err)
-		}
-		for _, placeholder := range slices.Sorted(maps.Keys(s.secrets)) {
-			if err := encoder.WriteToken(jsontext.String(placeholder)); err != nil {
-				return fmt.Errorf("write secret placeholder: %w", err)
-			}
-			if err := encoder.WriteToken(jsontext.String(s.secrets[placeholder])); err != nil {
-				return fmt.Errorf("write secret value: %w", err)
-			}
-		}
-		if err := encoder.WriteToken(jsontext.EndObject); err != nil {
-			return fmt.Errorf("finish secrets object: %w", err)
-		}
-		return nil
-	})
 }
