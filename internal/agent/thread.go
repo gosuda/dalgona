@@ -71,19 +71,20 @@ type actor struct {
 
 func (h *Host) load(id string) (loadedSession, error) {
 	var out loadedSession
+	var acc event.State
 	err := h.journal.Replay(id, func(seq uint64, raw []byte) error {
 		decoded, err := event.Decode(raw)
 		if err != nil {
 			return &journal.DamageError{Session: id, Seq: seq}
 		}
-		state, err := event.Fold(out.state, seq, decoded)
-		if err != nil {
+		status := acc.Status
+		if err := acc.Apply(seq, decoded); err != nil {
+			acc.Status = status
 			return &journal.DamageError{Session: id, Seq: seq}
 		}
 		if created, ok := decoded.(event.SessionCreated); ok && seq == 1 {
 			out.created = created
 		}
-		out.state = state
 		out.records = append(out.records, event.Seqd{Seq: seq, Event: decoded})
 		out.sizes = append(out.sizes, len(raw))
 		return nil
@@ -92,6 +93,7 @@ func (h *Host) load(id string) (loadedSession, error) {
 		out.damage = err
 		err = nil
 	}
+	out.state = acc
 	if err != nil {
 		return out, fmt.Errorf("agent: replay %s: %w", id, err)
 	}
@@ -426,7 +428,7 @@ func (a *actor) appendCtx(ctx context.Context, events ...event.Event) (uint64, e
 			a.sizes = append(a.sizes, len(raws[i]))
 			a.publish(Update{Kind: UpdateEvent, Thread: a.t.id, Seq: seq, Event: item})
 		}
-		a.t.host.noteAppend(a.t.id, a.head(), events)
+		a.t.host.noteAppend(a.t.id, a.head(), state)
 		if err != nil {
 			a.t.host.log.Warn("agent: journal mirror or volume sync failed after the fsynced append", "thread", a.t.id, "seq", last, "error", err)
 		}
@@ -440,20 +442,19 @@ func (a *actor) appendCtx(ctx context.Context, events ...event.Event) (uint64, e
 }
 
 func (a *actor) prepareAppend(events []event.Event) (event.State, [][]byte, error) {
-	state := a.state
+	acc := a.state.Clone()
 	raws := make([][]byte, len(events))
 	for i, item := range events {
 		raw, err := event.Encode(item)
 		if err != nil {
-			return state, nil, err
+			return a.state, nil, err
 		}
-		next, err := event.Fold(state, a.head()+uint64(i)+1, item)
-		if err != nil {
-			return state, nil, err
+		if err := acc.Apply(a.head()+uint64(i)+1, item); err != nil {
+			return a.state, nil, err
 		}
-		state, raws[i] = next, raw
+		raws[i] = raw
 	}
-	return state, raws, nil
+	return acc, raws, nil
 }
 
 func (a *actor) publish(update Update) {

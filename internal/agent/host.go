@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -117,110 +116,53 @@ func (h *Host) scanSessions() error {
 
 func (h *Host) sessionInfo(head journal.SessionHead) (ThreadInfo, error) {
 	info := ThreadInfo{ID: head.ID, Head: head.HeadSeq, Damaged: head.Status == journal.SessionDamaged}
+	var state event.State
 	err := h.journal.Replay(head.ID, func(seq uint64, raw []byte) error {
-		if !info.wants(raw) {
-			return nil
-		}
 		decoded, err := event.Decode(raw)
 		if err != nil {
 			return &journal.DamageError{Session: head.ID, Seq: seq}
 		}
-		h.applyInfo(&info, seq, decoded)
+		status := state.Status
+		if err := state.Apply(seq, decoded); err != nil {
+			state.Status = status
+			return errFoldDamaged
+		}
 		return nil
 	})
 	if err != nil {
-		if _, damaged := errors.AsType[*journal.DamageError](err); !damaged {
+		if _, damaged := errors.AsType[*journal.DamageError](err); !damaged && !errors.Is(err, errFoldDamaged) {
 			return ThreadInfo{}, err
 		}
 		info.Damaged = true
-		return info, nil
 	}
-	if info.Cwd == "" && !info.Damaged {
+	if state.Cwd == "" && !info.Damaged {
 		return ThreadInfo{}, fmt.Errorf("agent: session %s has no session.created", head.ID)
 	}
+	h.projectInfo(&info, state)
 	if stat, err := os.Stat(filepath.Join(h.cfg.Config.Home, "sessions", head.ID, "journal.jsonl")); err == nil {
 		info.Updated = stat.ModTime().UTC()
 	}
 	return info, nil
 }
 
-func metadataLine(raw []byte) bool {
-	return bytes.HasPrefix(raw, []byte(`{"type":"session.created"`)) || bytes.HasPrefix(raw, []byte(`{"type":"thread.`))
+var errFoldDamaged = errors.New("agent: stop replay at fold damage")
+
+func (h *Host) projectInfo(info *ThreadInfo, state event.State) {
+	info.Parent, info.ForkOf, info.Advisor = state.Parent, state.ForkOf, state.Advisor
+	info.Cwd, info.Model = state.Cwd, state.Model
+	info.Name, info.Archived, info.Created = state.Name, state.Archived, state.CreatedAt
+	info.Preview = h.resolvePreview(info.ID, state)
 }
 
-func promptLine(raw []byte) bool { return bytes.HasPrefix(raw, []byte(`{"type":"user.message"`)) }
-
-func (info *ThreadInfo) wants(raw []byte) bool {
-	if metadataLine(raw) || bytes.HasPrefix(raw, []byte(`{"type":"branch"`)) {
-		return true
-	}
-	return promptLine(raw) && (info.Preview == "" || bytes.Contains(raw, []byte(`"model":`)))
-}
-
-type modelTrail struct {
-	created string
-	marks   []event.Seqd
-}
-
-func (m *modelTrail) note(seq uint64, e event.Event) bool {
-	switch value := e.(type) {
-	case event.Branch:
-		m.markParent(value.ParentSeq)
-		m.marks = append(m.marks, event.Seqd{Seq: seq, Event: value})
-		return true
-	case event.UserMessage:
-		if value.Model == "" {
-			return false
-		}
-		m.marks = append(m.marks, event.Seqd{Seq: seq, Event: event.UserMessage{Model: value.Model}})
-		return true
-	}
-	return false
-}
-
-func (m *modelTrail) markParent(parent uint64) {
-	i, found := slices.BinarySearchFunc(m.marks, parent, func(item event.Seqd, seq uint64) int { return cmp.Compare(item.Seq, seq) })
-	if parent != 0 && !found {
-		m.marks = slices.Insert(m.marks, i, event.Seqd{Seq: parent})
-	}
-}
-
-func (m *modelTrail) model() string {
-	out := m.created
-	for _, item := range event.ActivePath(m.marks) {
-		if message, ok := item.Event.(event.UserMessage); ok {
-			out = message.Model
+func (h *Host) resolvePreview(id string, state event.State) string {
+	if state.PreviewBlob != nil {
+		if text, err := h.loadText("", state.PreviewBlob); err != nil {
+			h.log.Warn("agent: thread preview", "thread", id, "error", err)
+		} else if text != "" {
+			return previewRunes(text, 80)
 		}
 	}
-	return out
-}
-
-func (h *Host) applyInfo(info *ThreadInfo, seq uint64, e event.Event) {
-	if info.models.note(seq, e) {
-		info.Model = info.models.model()
-	}
-	switch value := e.(type) {
-	case event.SessionCreated:
-		info.Parent, info.ForkOf, info.Advisor = value.Parent, value.ForkOf, value.Advisor
-		info.Cwd, info.Model, info.models.created, info.Created = value.Cwd, value.Model, value.Model, value.CreatedAt
-	case event.ThreadNamed:
-		info.Name = value.Name
-	case event.ThreadArchived:
-		info.Archived = value.Archived
-	case event.UserMessage:
-		h.applyPreview(info, value)
-	}
-}
-
-func (h *Host) applyPreview(info *ThreadInfo, value event.UserMessage) {
-	if info.Preview != "" || value.Kind != string(InputPrompt) {
-		return
-	}
-	text, err := h.loadText(value.Text, value.TextBlob)
-	if err != nil {
-		h.log.Warn("agent: thread preview", "thread", info.ID, "error", err)
-	}
-	info.Preview = previewRunes(text, 80)
+	return state.Preview
 }
 
 func (h *Host) Threads() []ThreadInfo {
@@ -418,7 +360,8 @@ func (h *Host) loadedChildren(parent string) []*Thread {
 	return children
 }
 
-func (h *Host) noteAppend(id string, head uint64, events []event.Event) {
+func (h *Host) noteAppend(id string, head uint64, state event.State) {
+	preview := h.resolvePreview(id, state)
 	h.mu.Lock()
 	info, ok := h.sessions[id]
 	h.mu.Unlock()
@@ -426,9 +369,11 @@ func (h *Host) noteAppend(id string, head uint64, events []event.Event) {
 		info = ThreadInfo{ID: id}
 	}
 	info.Head, info.Updated = head, h.clock().UTC()
-	first := head - uint64(len(events)) + 1
-	for i, item := range events {
-		h.applyInfo(&info, first+uint64(i), item)
+	info.Parent, info.ForkOf, info.Advisor = state.Parent, state.ForkOf, state.Advisor
+	info.Cwd, info.Model = state.Cwd, state.Model
+	info.Name, info.Archived, info.Created = state.Name, state.Archived, state.CreatedAt
+	if info.Preview == "" {
+		info.Preview = preview
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

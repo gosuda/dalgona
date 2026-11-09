@@ -174,6 +174,4 @@ type ThreadInfo struct {
 	Updated  time.Time
 	Head     uint64
 	Damaged  bool
-
-	models modelTrail
 }
