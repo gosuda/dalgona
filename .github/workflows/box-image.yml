@@ -7,8 +7,6 @@ name: "Box image"
 permissions:
   contents: "read"
   packages: "write"
-  attestations: "write"
-  id-token: "write"
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -48,7 +46,6 @@ jobs:
           tags: |
             ghcr.io/gosuda/dalgona-box:${{ github.ref_name }}
             ghcr.io/gosuda/dalgona-box:${{ github.sha }}
-            ghcr.io/gosuda/dalgona-box:latest
           provenance: "mode=max"
           sbom: "true"
           labels: "org.opencontainers.image.source=https://github.com/gosuda/dalgona"

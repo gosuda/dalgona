@@ -5,9 +5,9 @@ Release flow for the box container image.
 ## Publish
 
 Push a `v*` tag. `.github/workflows/box-image.yml` builds the
-multi-arch image and pushes three tags: the version, the commit sha,
-and `latest`. `latest` is a convenience tag only and is never
-deployed.
+multi-arch image and pushes two tags: the version and the commit sha.
+Backport and prerelease tags must not move a shared reference, so the
+workflow never publishes `latest`.
 
 ## Pin
 
