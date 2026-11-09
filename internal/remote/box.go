@@ -349,6 +349,7 @@ func boxRun(ctx context.Context, r runner.Runner, argv ...string) (string, int, 
 	}
 	id := "remote-" + hex.EncodeToString(random[:])
 	if err := r.Start(ctx, runner.ProcessSpec{ID: id, Argv: argv, Dir: boxWorkspace}); err != nil {
+		stopProcess(r, id)
 		return "", 0, fmt.Errorf("remote: start %s: %w", argv[0], err)
 	}
 	var out bytes.Buffer
