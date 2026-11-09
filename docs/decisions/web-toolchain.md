@@ -4,7 +4,7 @@
 
 The web UI MUST pin TypeScript 6.0.3. It MUST NOT use TypeScript 7.0.2 with the pinned Svelte tooling.
 
-Scope: `web/package.json` and `web/pnpm-lock.yaml`. Enforcement: `just web-check` runs Biome, Vitest, and svelte-check on the frozen lockfile.
+Scope: `web/package.json` and `web/pnpm-lock.yaml`. Enforcement: `just web` installs dependencies with `pnpm --frozen-lockfile` and builds the assets. `just web-check` runs Biome, Vitest, and svelte-check with the installed tools.
 
 ## Evidence
 
