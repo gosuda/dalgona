@@ -6,7 +6,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 )
 
-func TestAuditInterruptRejectsWrongTurn(t *testing.T) {
+func TestTurnInterruptRejectsWrongTurn(t *testing.T) {
 	r := newRig(t, config.ApprovalYolo)
 	c := r.connect()
 	threadID := startThread(t, r, c, nil)
@@ -14,7 +14,7 @@ func TestAuditInterruptRejectsWrongTurn(t *testing.T) {
 		codeInvalidRequest, "turn nope is not running")
 }
 
-func TestAuditInterruptRejectsMissingTurn(t *testing.T) {
+func TestTurnInterruptRejectsMissingTurn(t *testing.T) {
 	r := newRig(t, config.ApprovalYolo)
 	c := r.connect()
 	threadID := startThread(t, r, c, nil)

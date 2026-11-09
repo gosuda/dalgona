@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -417,4 +419,120 @@ func closeRPCPair(t *testing.T, c *Conn, peer net.Conn) {
 			t.Errorf("close RPC peer: %v", err)
 		}
 	})
+}
+
+func readReply(t *testing.T, right net.Conn) []byte {
+	t.Helper()
+	reply := make(chan []byte, 1)
+	go func() {
+		line, err := bufio.NewReader(right).ReadBytes('\n')
+		if err == nil {
+			reply <- line
+		}
+	}()
+	select {
+	case line := <-reply:
+		return line
+	case <-time.After(5 * time.Second):
+		t.Fatal("no reply for malformed envelope")
+		return nil
+	}
+}
+
+func TestWrongTypeRequestGetsInvalidRequest(t *testing.T) {
+	left, right := net.Pipe()
+	c := NewConn(t.Context(), left, nil)
+	defer c.Close()
+	defer right.Close()
+	if _, err := right.Write([]byte(`{"id":3,"method":53}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	line := readReply(t, right)
+	var got struct {
+		ID    int `json:"id"`
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(line, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != 3 || got.Error == nil || got.Error.Code != -32600 {
+		t.Fatalf("reply=%s", line)
+	}
+}
+
+func TestInvalidJSONGetsParseError(t *testing.T) {
+	left, right := net.Pipe()
+	c := NewConn(t.Context(), left, nil)
+	defer c.Close()
+	defer right.Close()
+	if _, err := right.Write([]byte(`{"id":3,"method":` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	line := readReply(t, right)
+	var got struct {
+		ID    *int `json:"id"`
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(line, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Error == nil || got.Error.Code != -32700 {
+		t.Fatalf("reply=%s", line)
+	}
+	if got.ID != nil {
+		t.Fatalf("parse error id must be null, reply=%s", line)
+	}
+}
+
+func notifyDelta(tb testing.TB, c *Conn, itemID, delta string) {
+	tb.Helper()
+	params := map[string]string{"threadId": "t", "itemId": itemID, "delta": delta}
+	if err := c.Notify("item/agentMessage/delta", params); err != nil {
+		tb.Fatal(err)
+	}
+}
+
+func newPipedConn(tb testing.TB) (*Conn, func()) {
+	tb.Helper()
+	server, peer := net.Pipe()
+	c := NewConn(tb.Context(), server, nil)
+	return c, func() {
+		_ = peer.Close()
+		_ = c.Close()
+	}
+}
+
+func BenchmarkDeltaMerge(b *testing.B) {
+	c, done := newPipedConn(b)
+	defer done()
+	for range 1024 {
+		notifyDelta(b, c, "same", "x")
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		notifyDelta(b, c, "same", "y")
+	}
+}
+
+func TestDeltaMergeNotifyLatency(t *testing.T) {
+	const distinct = 1024
+	const pushes = 2000
+	c, done := newPipedConn(t)
+	defer done()
+	for i := range distinct {
+		notifyDelta(t, c, "fill-"+strconv.Itoa(i), "x")
+	}
+	lat := make([]time.Duration, 0, pushes)
+	for i := range pushes {
+		start := time.Now()
+		notifyDelta(t, c, "new-"+strconv.Itoa(i), "y")
+		lat = append(lat, time.Since(start))
+	}
+	slices.Sort(lat)
+	pct := func(p float64) time.Duration { return lat[int(p*float64(len(lat)-1))] }
+	t.Logf("notify push latency p50=%v p95=%v p99=%v max=%v", pct(0.50), pct(0.95), pct(0.99), lat[len(lat)-1])
 }

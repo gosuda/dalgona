@@ -439,3 +439,80 @@ func turnApprovalReachesClient(t *testing.T, threadParams map[string]any, turnPo
 	command := findItem(readTurn(t, c.collect("turn/completed")).completed, "call-t")
 	expect(t, command.Status == statusCompleted, "command after approval", command)
 }
+
+func TestSettingKeyRejectsBadEffort(t *testing.T) {
+	if _, _, err := settingKey("model_reasoning_effort", "loud"); err == nil {
+		t.Fatal("loud effort accepted")
+	}
+	if _, _, err := settingKey("model_reasoning_effort", 3); err == nil {
+		t.Fatal("numeric effort accepted")
+	}
+}
+
+func TestSettingKeyRejectsNonStringPolicy(t *testing.T) {
+	if _, _, err := settingKey("approval_policy", true); err == nil {
+		t.Fatal("bool approval accepted")
+	}
+	if _, _, err := settingKey("sandbox_mode", 7); err == nil {
+		t.Fatal("numeric sandbox accepted")
+	}
+}
+
+func TestSettingKeyRejectsUnmappedAndNumeric(t *testing.T) {
+	if _, _, err := settingKey("compaction_threshold", 0.5); err == nil {
+		t.Fatal("unmapped numeric key accepted")
+	}
+	if _, _, err := settingKey("wat", "x"); err == nil {
+		t.Fatal("unknown key accepted")
+	}
+	if _, _, err := settingKey("model", 3); err == nil {
+		t.Fatal("numeric model accepted")
+	}
+	if _, _, err := settingKey("", "x"); err == nil {
+		t.Fatal("empty keyPath accepted")
+	}
+}
+
+func checkDirectSettingKey(t *testing.T, keyPath, input, wantKey, wantValue string) {
+	t.Helper()
+	key, value, err := settingKey(keyPath, input)
+	if err != nil || key != wantKey || value != wantValue {
+		t.Fatalf("direct %s rejected: %q %v %v", keyPath, key, value, err)
+	}
+}
+
+func TestSettingKeyAcceptsDirectKeys(t *testing.T) {
+	checkDirectSettingKey(t, "model", "openai/gpt-x", "model", "openai/gpt-x")
+	checkDirectSettingKey(t, "approval", "yolo", "approval", "yolo")
+	checkDirectSettingKey(t, "sandbox", "off", "sandbox", string(config.SandboxOff))
+	checkDirectSettingKey(t, "reasoning", "low", "reasoning", "low")
+}
+
+func TestConfigWriteRejectsUnsupportedKeepsFile(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	c := r.connect()
+	c.fails("config/value/write", map[string]any{"keyPath": "compaction_threshold", "value": 0.5}, codeInvalidParams, "unsupported keyPath compaction_threshold")
+	c.fails("config/value/write", map[string]any{"keyPath": "model", "value": 3}, codeInvalidParams, "model must be a string")
+	var cfg ConfigReadResponse
+	c.ok("config/read", map[string]any{}, &cfg)
+	if cfg.Config.Model != "openai/gpt-test" {
+		t.Fatalf("rejected write changed memory: %+v", cfg.Config)
+	}
+}
+
+func TestPlatformOSTypeClampsToSpec(t *testing.T) {
+	for _, goos := range []string{"freebsd", "openbsd", "netbsd", "solaris"} {
+		if got := platformOSType(goos); got != "linux" {
+			t.Fatalf("platformOSType(%q)=%q, want linux", goos, got)
+		}
+	}
+	if got := platformOSType("darwin"); got != "macos" {
+		t.Fatalf("darwin=%q, want macos", got)
+	}
+	if got := platformOSType("windows"); got != "windows" {
+		t.Fatalf("windows=%q, want windows", got)
+	}
+	if got := platformOSType("linux"); got != "linux" {
+		t.Fatalf("linux=%q, want linux", got)
+	}
+}

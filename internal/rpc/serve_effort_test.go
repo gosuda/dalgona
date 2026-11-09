@@ -55,3 +55,14 @@ func TestThreadStartRejectsUnknownConfigEffort(t *testing.T) {
 		"config": map[string]any{"model_reasoning_effort": "loud"},
 	}, codeInvalidParams, "unsupported model_reasoning_effort loud")
 }
+
+func TestTurnStartRejectsUnknownEffortValue(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	c := r.connect()
+	threadID := startThread(t, r, c, nil)
+	c.fails("turn/start", map[string]any{
+		"threadId": threadID,
+		"input":    []textInput{{Type: "text", Text: "hi"}},
+		"effort":   "loud",
+	}, codeInvalidParams, "unsupported model_reasoning_effort loud")
+}
