@@ -600,6 +600,9 @@ func (m *model) applyTurnAccepted(value any) tea.Cmd {
 	if !ok {
 		return m.unexpectedResult("accepted turn")
 	}
+	if _, done := m.completedTurns[response.Turn.ID]; done {
+		return nil
+	}
 	m.turnID = response.Turn.ID
 	m.setState(stateRunning)
 	return nil

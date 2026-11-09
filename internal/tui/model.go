@@ -50,6 +50,7 @@ type model struct {
 	seq            uint64
 	threadID       string
 	turnID         string
+	completedTurns map[string]struct{}
 	title          string
 	modelName      string
 	approvalMode   string
@@ -406,6 +407,10 @@ func (m *model) applyTurnCompleted(params jsontext.Value) error {
 		return nil
 	}
 	m.turnID = ""
+	if m.completedTurns == nil {
+		m.completedTurns = map[string]struct{}{}
+	}
+	m.completedTurns[event.Turn.ID] = struct{}{}
 	m.setState(turnState(event.Turn.Status))
 	if m.state != stateIdle {
 		if len(m.followups) > 0 {
@@ -550,6 +555,7 @@ func (m *model) setThread(id string) {
 		m.turnID = ""
 		m.seq = 0
 		m.followups = nil
+		m.completedTurns = nil
 	}
 }
 
