@@ -54,7 +54,7 @@ type State struct {
 	InFlight        map[string]ToolState
 	PendingCalls    map[string]ToolCall
 	Approvals       map[string]ApprovalState
-	SessionAccepted map[string]struct{}
+	SessionAccepted map[string]string
 	DeclinedCalls   map[string]string
 	Scripts         map[string]ScriptState
 	Children        map[string]ChildState
@@ -269,9 +269,9 @@ func foldToolStarted(s *State, e ToolStarted) error {
 	}
 	s.InFlight[e.CallID] = ToolState{CallID: e.CallID, Tool: e.Tool, Class: e.Class, Args: e.Args, ArgsBlob: e.ArgsBlob}
 	delete(s.PendingCalls, e.CallID)
-	if _, accepted := s.SessionAccepted[e.CallID]; accepted {
+	if prefix, accepted := s.SessionAccepted[e.CallID]; accepted {
 		delete(s.SessionAccepted, e.CallID)
-		return foldGrant(s, grantSource{callID: e.CallID, tool: e.Tool, class: e.Class, args: e.Args, argsBlob: e.ArgsBlob})
+		return foldGrant(s, grantSource{callID: e.CallID, tool: e.Tool, class: e.Class, args: e.Args, argsBlob: e.ArgsBlob, grantPrefix: prefix})
 	}
 	return nil
 }
@@ -365,9 +365,9 @@ func foldApprovalResolved(s *State, e ApprovalResolved) error {
 		return foldGrant(s, source)
 	}
 	if s.SessionAccepted == nil {
-		s.SessionAccepted = make(map[string]struct{})
+		s.SessionAccepted = make(map[string]string)
 	}
-	s.SessionAccepted[request.CallID] = struct{}{}
+	s.SessionAccepted[request.CallID] = request.GrantPrefix
 	return nil
 }
 
