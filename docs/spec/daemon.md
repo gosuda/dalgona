@@ -6,7 +6,7 @@
 
 When the lock is held by another process, `Run` MUST return `another dalgona process owns <home>`. It MUST NOT remove or replace `<home>/dalgona.sock` in this case.
 
-After the lock is held, `Run` MUST remove a stale `dalgona.sock` and then listen on it. A failure to remove or listen MUST stop `Run` with an error.
+After the lock is held, `Run` MUST remove a stale `dalgona.sock` and then listen on it. `Run` MUST create `<home>` with mode `0700` and MUST tighten an existing `<home>` to mode `0700` before it builds the host, so the host never reads config or the journal from a loose directory. It MUST set the socket file to mode `0600` after it listens, so only the owning user can reach the RPC surface. A failure to create, tighten, remove, listen, or set these permissions MUST stop `Run` with an error.
 
 `Run` MUST call `Host.Recover` once, in the background. Recovery MUST NOT delay the accept loop. Each connection MUST get its own `serve` call, so a client gets its `initialize` answer while recovery runs. Recovery errors MUST be logged. They MUST NOT stop the daemon.
 
