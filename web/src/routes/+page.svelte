@@ -110,6 +110,8 @@ function websocketUrl(): string {
 async function connect(): Promise<void> {
 	const generation = ++connectionGeneration;
 	client?.close();
+	approvals = [];
+	errorMessage = "";
 	const token = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
 	if (token === "") {
 		connection = "disconnected";
@@ -136,6 +138,8 @@ async function connect(): Promise<void> {
 		},
 	});
 	client = rpc;
+	// Invalidate in-flight thread resumes from the previous connection.
+	selectionGeneration += 1;
 	try {
 		await rpc.open();
 		if (generation !== connectionGeneration) return;
@@ -153,26 +157,30 @@ async function connect(): Promise<void> {
 		);
 		rpc.notify("initialized", {});
 		await Promise.all([
-			loadThreads().catch((error) =>
+			loadThreads(generation).catch((error) =>
 				reportFailure(
+					generation,
 					"Unable to load threads",
 					error instanceof Error ? error : String(error),
 				),
 			),
-			loadModels().catch((error) =>
+			loadModels(generation).catch((error) =>
 				reportFailure(
+					generation,
 					"Unable to load models",
 					error instanceof Error ? error : String(error),
 				),
 			),
-			loadConfig().catch((error) =>
+			loadConfig(generation).catch((error) =>
 				reportFailure(
+					generation,
 					"Unable to load configuration",
 					error instanceof Error ? error : String(error),
 				),
 			),
-			loadKeywords().catch((error) =>
+			loadKeywords(generation).catch((error) =>
 				reportFailure(
+					generation,
 					"Unable to load keywords",
 					error instanceof Error ? error : String(error),
 				),
@@ -187,12 +195,17 @@ async function connect(): Promise<void> {
 	}
 }
 
-function reportFailure(action: string, error: Error | string): void {
+function reportFailure(
+	generation: number,
+	action: string,
+	error: Error | string,
+): void {
+	if (generation !== connectionGeneration) return;
 	const detail = typeof error === "string" ? error : error.message;
 	errorMessage = `${action}: ${detail}. Reconnect and try again.`;
 }
 
-async function loadThreads(): Promise<void> {
+async function loadThreads(generation: number): Promise<void> {
 	loadingThreads = true;
 	try {
 		const result = await requireClient().call(
@@ -200,43 +213,48 @@ async function loadThreads(): Promise<void> {
 			{ limit: 100, sortKey: "updated_at", sortDirection: "desc" },
 			parseThreadListResponse,
 		);
+		if (generation !== connectionGeneration) return;
 		threads = result.threads;
 		const first = result.threads[0];
 		if (activeThreadId === null && first !== undefined)
 			await selectThread(first.id);
 	} finally {
-		loadingThreads = false;
+		if (generation === connectionGeneration) loadingThreads = false;
 	}
 }
 
-async function loadModels(): Promise<void> {
+async function loadModels(generation: number): Promise<void> {
 	const result = await requireClient().call(
 		"model/list",
 		{ includeHidden: false },
 		parseModelListResponse,
 	);
+	if (generation !== connectionGeneration) return;
 	models = result;
 	const selected = result.find((model) => model.id === selectedModel);
 	const first = result.find((model) => !model.hidden);
 	if (selected === undefined && first !== undefined) selectedModel = first.id;
 }
 
-async function loadConfig(): Promise<void> {
+async function loadConfig(generation: number): Promise<void> {
 	const result = await requireClient().call(
 		"config/read",
 		{},
 		parseConfigReadResponse,
 	);
+	if (generation !== connectionGeneration) return;
 	status = result;
 	if (result.model) selectedModel = result.model;
 }
 
-async function loadKeywords(): Promise<void> {
-	keywords = await requireClient().call(
+async function loadKeywords(generation: number): Promise<void> {
+	const result = await requireClient().call(
 		"dalgona/keywords/list",
 		{},
 		parseKeywordsResponse,
 	);
+	if (generation !== connectionGeneration) return;
+	keywords = result;
 }
 
 function upsertThread(thread: ThreadDetail): void {
@@ -291,6 +309,7 @@ async function selectThread(threadId: string): Promise<void> {
 	} catch (error) {
 		if (selection === selectionGeneration)
 			reportFailure(
+				connectionGeneration,
 				"Unable to open thread",
 				error instanceof Error ? error : String(error),
 			);
@@ -330,6 +349,7 @@ async function createThread(): Promise<void> {
 		void loadAdvisor(result.thread.summary.id);
 	} catch (error) {
 		reportFailure(
+			connectionGeneration,
 			"Unable to start thread",
 			error instanceof Error ? error : String(error),
 		);
@@ -359,6 +379,7 @@ async function sendMessage(text: string): Promise<void> {
 		recordPreview(threadId, text);
 	} catch (error) {
 		reportFailure(
+			connectionGeneration,
 			"Unable to send message",
 			error instanceof Error ? error : String(error),
 		);
@@ -385,6 +406,7 @@ async function steerMessage(text: string): Promise<void> {
 		);
 	} catch (error) {
 		reportFailure(
+			connectionGeneration,
 			"Unable to steer turn",
 			error instanceof Error ? error : String(error),
 		);
@@ -409,6 +431,7 @@ async function interruptTurn(): Promise<void> {
 		);
 	} catch (error) {
 		reportFailure(
+			connectionGeneration,
 			"Unable to interrupt turn",
 			error instanceof Error ? error : String(error),
 		);
@@ -426,6 +449,7 @@ async function changeModel(model: string): Promise<void> {
 		);
 	} catch (error) {
 		reportFailure(
+			connectionGeneration,
 			"Unable to save model selection",
 			error instanceof Error ? error : String(error),
 		);
