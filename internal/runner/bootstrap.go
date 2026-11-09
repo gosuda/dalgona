@@ -355,6 +355,9 @@ func waitStream(ctx context.Context, st Stream) (int, error) {
 		}
 	case res := <-ch:
 		if res.err != nil {
+			if ctx.Err() != nil {
+				return res.code, fmt.Errorf("runner: wait for command: %w", ctx.Err())
+			}
 			return res.code, fmt.Errorf("runner: wait for command: %w", res.err)
 		}
 		return res.code, nil
