@@ -95,16 +95,8 @@ func systemdEscapeValue(s string) (string, error) {
 	return s, nil
 }
 
-func systemdEscapeExecValue(s string) (string, error) {
-	escaped, err := systemdEscapeValue(s)
-	if err != nil {
-		return "", err
-	}
-	return strings.ReplaceAll(escaped, `$`, `$$`), nil
-}
-
 func installLinuxService(home, exe, dalgonaHome string, run CommandRunner) error {
-	exeEscaped, err := systemdEscapeExecValue(exe)
+	exeEscaped, err := systemdEscapeValue(exe)
 	if err != nil {
 		return fmt.Errorf("invalid executable path: %w", err)
 	}
