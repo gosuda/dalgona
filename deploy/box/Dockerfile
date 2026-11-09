@@ -6,8 +6,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin dalgona \
-    && mkdir -p /workspace /data \
-    && chown -R dalgona:dalgona /workspace /data
+    && mkdir -p /data/workspace /data/home \
+    && chown -R dalgona:dalgona /data \
+    && ln -s /data/workspace /workspace
 
 COPY --chown=dalgona:dalgona dist/dalgona-linux-${TARGETARCH} /usr/local/bin/dalgona
 
