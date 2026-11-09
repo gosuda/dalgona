@@ -27,19 +27,34 @@ func TestTurnBookKeepsEarlyCompletionAndTexts(t *testing.T) {
 	if want := (turnResult{status: "completed", stop: "stop", texts: []string{"first"}}); err != nil || !reflect.DeepEqual(result, want) {
 		t.Fatalf("early completion: %+v %v, want %+v", result, err, want)
 	}
-	done := make(chan turnResult, 1)
+	book.parkNotify = make(chan struct{}, 1)
+	waitCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	type lateOutcome struct {
+		result turnResult
+		err    error
+	}
+	done := make(chan lateOutcome, 1)
 	go func() {
-		late, waitErr := book.wait(t.Context(), "u2")
-		if waitErr != nil {
-			t.Error(waitErr)
-		}
-		done <- late
+		late, waitErr := book.wait(waitCtx, "u2")
+		done <- lateOutcome{result: late, err: waitErr}
 	}()
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-book.parkNotify:
+	case <-time.After(10 * time.Second):
+		t.Fatal("turn-book waiter never parked on the changed channel")
+	}
 	book.Notification("turn/completed", jsontext.Value(`{"threadId":"t","turn":{"id":"u2","items":[],"status":"failed","error":{"message":"boom"}}}`))
-	late := <-done
-	if want := (turnResult{status: "failed", stop: "boom", texts: []string{"other turn"}}); !reflect.DeepEqual(late, want) {
-		t.Fatalf("late completion: %+v, want %+v", late, want)
+	select {
+	case outcome := <-done:
+		if outcome.err != nil {
+			t.Fatalf("late wait: %v", outcome.err)
+		}
+		if want := (turnResult{status: "failed", stop: "boom", texts: []string{"other turn"}}); !reflect.DeepEqual(outcome.result, want) {
+			t.Fatalf("late completion: %+v, want %+v", outcome.result, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("late completion never arrived after the waiter parked")
 	}
 }
 

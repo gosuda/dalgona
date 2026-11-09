@@ -670,13 +670,14 @@ type turnResult struct {
 }
 
 type turnBook struct {
-	stderr  io.Writer
-	mu      sync.Mutex
-	changed chan struct{}
-	done    map[string]turnResult
-	texts   map[string][]string
-	logins  map[string]rpc.AccountLoginCompletedNotification
-	lost    <-chan struct{}
+	stderr     io.Writer
+	mu         sync.Mutex
+	changed    chan struct{}
+	parkNotify chan struct{}
+	done       map[string]turnResult
+	texts      map[string][]string
+	logins     map[string]rpc.AccountLoginCompletedNotification
+	lost       <-chan struct{}
 }
 
 func newTurnBook(stderr io.Writer) *turnBook {
@@ -761,6 +762,7 @@ func (b *turnBook) await(ctx context.Context, ready func() bool) error {
 		if ok {
 			return nil
 		}
+		b.notifyParked()
 		select {
 		case <-changed:
 		case <-b.lost:
@@ -771,6 +773,16 @@ func (b *turnBook) await(ctx context.Context, ready func() bool) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+}
+
+func (b *turnBook) notifyParked() {
+	if b.parkNotify == nil {
+		return
+	}
+	select {
+	case b.parkNotify <- struct{}{}:
+	default:
 	}
 }
 
