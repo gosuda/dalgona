@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/runner"
@@ -20,6 +21,8 @@ type writeState struct {
 	file   *stagedFile
 	temp   string
 	backup string
+	dest   *dirPin
+	src    *dirPin
 }
 
 type writeEffect struct {
@@ -47,10 +50,14 @@ func applyBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Resu
 	effects, failed, commitErr := commitWriteSet(ctx, env, states)
 	if commitErr != nil {
 		rollbackFailures := rollback(ctx, env, effects)
-		cleanupStates(ctx, env, states, len(rollbackFailures) == 0)
+		if len(rollbackFailures) == 0 {
+			cleanupStates(ctx, env, states)
+		} else {
+			cleanupStatesKeepBackups(ctx, env, states)
+		}
 		return tool.Result{}, writeError(failed, commitErr, states, rollbackFailures)
 	}
-	cleanupStates(ctx, env, states, true)
+	cleanupStates(ctx, env, states)
 	refs := recordSnapshots(env, batch.files)
 	return tool.Result{Output: appliedOutput(batch.files, refs), OK: true}, nil
 }
@@ -61,7 +68,7 @@ func verifyBatch(ctx context.Context, env tool.Env, files []*stagedFile) error {
 			return err
 		}
 		if file.renameTo != "" {
-			if err := verifyAbsent(ctx, env, file.renameAbs, file.renameTo); err != nil {
+			if err := verifyAbsent(ctx, env, file.renamePin, file.renameAbs, file.renameTo); err != nil {
 				return err
 			}
 		}
@@ -71,9 +78,9 @@ func verifyBatch(ctx context.Context, env tool.Env, files []*stagedFile) error {
 
 func verifySource(ctx context.Context, env tool.Env, file *stagedFile) error {
 	if !file.exists {
-		return verifyAbsent(ctx, env, file.absolute, file.path)
+		return verifyAbsent(ctx, env, file.pin, file.absolute, file.path)
 	}
-	current, err := env.Runner.ReadFile(ctx, file.absolute)
+	current, err := readPinned(ctx, env, file.pin, file.absolute)
 	if err != nil {
 		return fmt.Errorf("patch: cannot read %s before commit: %w", file.path, err)
 	}
@@ -83,7 +90,32 @@ func verifySource(ctx context.Context, env tool.Env, file *stagedFile) error {
 	return nil
 }
 
-func verifyAbsent(ctx context.Context, env tool.Env, absolute, display string) error {
+func readPinned(ctx context.Context, env tool.Env, pin *dirPin, path string) ([]byte, error) {
+	if pin != nil {
+		return pin.readFileAt(filepath.Base(path))
+	}
+	return env.Runner.ReadFile(ctx, path)
+}
+
+func verifyAbsent(ctx context.Context, env tool.Env, pin *dirPin, absolute, display string) error {
+	if pin != nil {
+		return verifyAbsentAt(pin, absolute, display)
+	}
+	return verifyAbsentPath(ctx, env, absolute, display)
+}
+
+func verifyAbsentAt(pin *dirPin, absolute, display string) error {
+	exists, err := pin.leafExistsAfterChain(filepath.Base(absolute), display)
+	if err != nil {
+		return fmt.Errorf("patch: cannot inspect %s: %w", display, err)
+	}
+	if exists {
+		return fmt.Errorf("patch: %s already exists", display)
+	}
+	return nil
+}
+
+func verifyAbsentPath(ctx context.Context, env tool.Env, absolute, display string) error {
 	_, err := env.Runner.Stat(ctx, absolute)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -98,8 +130,13 @@ type linkFileRunner interface {
 	LinkFile(ctx context.Context, oldpath, newpath string) error
 }
 
+func isLocalRunner(run runner.Runner) bool {
+	_, ok := run.(*runner.Local)
+	return ok
+}
+
 func supportsNoReplace(run runner.Runner) bool {
-	if _, ok := run.(*runner.Local); ok {
+	if isLocalRunner(run) {
 		return true
 	}
 	_, ok := run.(linkFileRunner)
@@ -123,12 +160,12 @@ func stageWriteSet(ctx context.Context, env tool.Env, files []*stagedFile) ([]*w
 	for _, file := range files {
 		state, err := stageOneWrite(ctx, env, file)
 		if err != nil {
-			cleanupStates(ctx, env, states, true)
+			cleanupStates(ctx, env, states)
 			return nil, err
 		}
 		states = append(states, state)
 		if err := ctx.Err(); err != nil {
-			cleanupStates(ctx, env, states, true)
+			cleanupStates(ctx, env, states)
 			return nil, err
 		}
 	}
@@ -140,27 +177,52 @@ func stageOneWrite(ctx context.Context, env tool.Env, file *stagedFile) (*writeS
 	if err != nil {
 		return nil, err
 	}
-	state := &writeState{file: file}
+	state := &writeState{file: file, dest: file.publishPin(), src: file.pin}
 	target := file.absolute
 	if file.renameTo != "" {
 		target = file.renameAbs
 	}
 	if !file.deleted {
+		if err := state.dest.mkdirChain(file.path, 0o700); err != nil {
+			state.closePins()
+			return nil, err
+		}
 		state.temp = target + ".dalgona-tmp-" + suffix
-		if err := env.Runner.WriteFile(ctx, state.temp, file.after, file.mode); err != nil {
+		if err := state.stageWrite(ctx, env, state.dest, state.temp, file.after); err != nil {
+			state.closePins()
 			return nil, fmt.Errorf("patch: cannot stage %s: %w", file.path, err)
 		}
 	}
 	if file.exists {
 		state.backup = file.absolute + ".dalgona-backup-" + suffix
-		if err := env.Runner.WriteFile(ctx, state.backup, file.before, file.mode); err != nil {
+		if err := state.stageWrite(ctx, env, state.src, state.backup, file.before); err != nil {
 			if state.temp != "" {
-				_ = env.Runner.Remove(ctx, state.temp)
+				_ = state.removeAt(ctx, env, state.dest, state.temp)
 			}
+			state.closePins()
 			return nil, fmt.Errorf("patch: cannot back up %s: %w", file.path, err)
 		}
 	}
 	return state, nil
+}
+
+func (s *writeState) stageWrite(ctx context.Context, env tool.Env, pin *dirPin, path string, data []byte) error {
+	if pin != nil {
+		return pin.writeFileAt(filepath.Base(path), data, s.file.mode)
+	}
+	return env.Runner.WriteFile(ctx, path, data, s.file.mode)
+}
+
+func (s *writeState) removeAt(ctx context.Context, env tool.Env, pin *dirPin, path string) error {
+	if pin != nil {
+		return pin.unlinkFileAt(filepath.Base(path))
+	}
+	return env.Runner.Remove(ctx, path)
+}
+
+func (s *writeState) closePins() {
+	s.dest.close()
+	s.src.close()
 }
 
 func tempSuffix() (string, error) {
@@ -194,7 +256,7 @@ func commitWriteSet(ctx context.Context, env tool.Env, states []*writeState) ([]
 func commitOne(ctx context.Context, env tool.Env, state *writeState) (*writeEffect, error) {
 	file := state.file
 	if file.deleted {
-		if err := env.Runner.Remove(ctx, file.absolute); err != nil {
+		if err := state.removeAt(ctx, env, state.src, file.absolute); err != nil {
 			return nil, fmt.Errorf("patch: cannot delete %s: %w", file.path, err)
 		}
 		return &writeEffect{state: state, target: file.absolute, removedSource: true}, nil
@@ -218,7 +280,7 @@ func commitRename(ctx context.Context, env tool.Env, state *writeState) (*writeE
 		return nil, fmt.Errorf("patch: cannot write %s: %w", file.renameAbs, err)
 	}
 	effect := &writeEffect{state: state, target: file.renameAbs, created: true}
-	if err := env.Runner.Remove(ctx, file.absolute); err != nil {
+	if err := state.removeAt(ctx, env, state.src, file.absolute); err != nil {
 		return effect, fmt.Errorf("patch: cannot remove rename source %s: %w", file.path, err)
 	}
 	effect.removedSource = true
@@ -226,10 +288,16 @@ func commitRename(ctx context.Context, env tool.Env, state *writeState) (*writeE
 }
 
 func publishExisting(ctx context.Context, env tool.Env, state *writeState, target string) error {
+	if state.dest != nil {
+		return state.dest.publishOver(filepath.Base(target), state.file.after, state.file.mode)
+	}
 	return env.Runner.WriteFile(ctx, target, state.file.after, state.file.mode)
 }
 
 func publishAbsent(ctx context.Context, env tool.Env, state *writeState, target string) error {
+	if state.dest != nil {
+		return state.dest.linkFileAt(filepath.Base(state.temp), filepath.Base(target))
+	}
 	if linker, ok := env.Runner.(linkFileRunner); ok {
 		return linker.LinkFile(ctx, state.temp, target)
 	}
@@ -251,34 +319,67 @@ func rollback(ctx context.Context, env tool.Env, effects []*writeEffect) []strin
 }
 
 func restoreEffect(ctx context.Context, env tool.Env, effect *writeEffect) error {
-	file := effect.state.file
+	state := effect.state
+	file := state.file
 	var failures []error
 	if effect.created {
-		if err := env.Runner.Remove(ctx, effect.target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := state.removeAt(ctx, env, state.dest, effect.target); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			failures = append(failures, err)
 		}
 	}
 	if effect.replaced {
-		if err := env.Runner.WriteFile(ctx, effect.target, file.before, file.mode); err != nil {
+		if err := state.restoreAt(ctx, env, state.dest, effect.target); err != nil {
 			failures = append(failures, err)
 		}
 	}
 	if effect.removedSource || file.deleted {
-		if err := env.Runner.WriteFile(ctx, file.absolute, file.before, file.mode); err != nil {
+		if err := state.restoreAt(ctx, env, state.src, file.absolute); err != nil {
 			failures = append(failures, err)
 		}
 	}
 	return errors.Join(failures...)
 }
 
-func cleanupStates(ctx context.Context, env tool.Env, states []*writeState, backups bool) {
+func (s *writeState) restoreAt(ctx context.Context, env tool.Env, pin *dirPin, path string) error {
+	if pin == nil {
+		return env.Runner.WriteFile(ctx, path, s.file.before, s.file.mode)
+	}
+	suffix, err := tempSuffix()
+	if err != nil {
+		return err
+	}
+	base := filepath.Base(path)
+	temp := base + ".dalgona-restore-" + suffix
+	if err := pin.writeFileAt(temp, s.file.before, s.file.mode); err != nil {
+		return err
+	}
+	return pin.renameFileAt(temp, base)
+}
+
+func cleanupStates(ctx context.Context, env tool.Env, states []*writeState) {
 	for _, state := range states {
-		if state.temp != "" {
-			_ = env.Runner.Remove(ctx, state.temp)
-		}
-		if backups && state.backup != "" {
-			_ = env.Runner.Remove(ctx, state.backup)
-		}
+		cleanupTempState(ctx, env, state)
+		cleanupBackupState(ctx, env, state)
+		state.closePins()
+	}
+}
+
+func cleanupStatesKeepBackups(ctx context.Context, env tool.Env, states []*writeState) {
+	for _, state := range states {
+		cleanupTempState(ctx, env, state)
+		state.closePins()
+	}
+}
+
+func cleanupTempState(ctx context.Context, env tool.Env, state *writeState) {
+	if state.temp != "" {
+		_ = state.removeAt(ctx, env, state.dest, state.temp)
+	}
+}
+
+func cleanupBackupState(ctx context.Context, env tool.Env, state *writeState) {
+	if state.backup != "" {
+		_ = state.removeAt(ctx, env, state.src, state.backup)
 	}
 }
 

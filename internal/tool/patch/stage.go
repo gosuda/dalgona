@@ -33,6 +33,8 @@ type stagedFile struct {
 	mode      fs.FileMode
 	renameTo  string
 	renameAbs string
+	pin       *dirPin
+	renamePin *dirPin
 	splices   []snapshot.Splice
 	sound     bool
 }
@@ -83,6 +85,9 @@ func stageGroups(ctx context.Context, style Style, groups []fileGroup, env tool.
 		stagedBytes += len(file.before) + len(file.after)
 		if stagedBytes > 64<<20 {
 			return nil, errors.New("patch: this call stages over 64 MiB; split it into several calls")
+		}
+		if file.pin, err = pinVerifiedComponents(env, group.display, group.absolute); err != nil {
+			return nil, err
 		}
 		files = append(files, file)
 	}
@@ -312,6 +317,13 @@ func checkRenameTargets(files []*stagedFile) error {
 		claimed[file.renameAbs] = file.renameTo
 	}
 	return nil
+}
+
+func (f *stagedFile) publishPin() *dirPin {
+	if f.renamePin != nil {
+		return f.renamePin
+	}
+	return f.pin
 }
 
 func (b stagedBatch) changes() []tool.FileChange {

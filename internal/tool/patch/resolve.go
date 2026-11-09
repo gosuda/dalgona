@@ -53,6 +53,9 @@ func (r fileResolver) stageRename(ctx context.Context, item edit) error {
 			return proofErr
 		}
 	}
+	if r.file.renamePin, err = pinVerifiedComponents(r.env, display, absolute); err != nil {
+		return err
+	}
 	r.file.renameTo, r.file.renameAbs = display, absolute
 	return nil
 }
