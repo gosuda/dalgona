@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"path/filepath"
 	"strings"
 
@@ -135,18 +136,51 @@ func mechanical(gc gateCall, approval config.Approval) (verdict, bool) {
 }
 
 func staticRule(gc gateCall) (verdict, bool) {
-	text := gc.command
 	if gc.class == tool.ClassRemote {
-		text = gc.call.Name + " " + string(gc.args)
+		return staticRemoteRule(gc)
 	}
-	if gc.class != tool.ClassExec && gc.class != tool.ClassRemote {
+	if gc.class != tool.ClassExec {
 		return verdict{}, false
 	}
-	name, part, matched := rules.Check(text)
+	name, part, matched := rules.Check(gc.command)
 	if !matched {
 		return verdict{}, false
 	}
 	return decline("rule:"+name, "declined by rule "+name+": "+part), true
+}
+
+func staticRemoteRule(gc gateCall) (verdict, bool) {
+	for _, value := range remoteStrings(string(gc.args)) {
+		if name, part, ok := rules.CheckValue(value); ok {
+			return decline("rule:"+name, "declined by rule "+name+": "+part), true
+		}
+	}
+	return verdict{}, false
+}
+
+func remoteStrings(raw string) []string {
+	var decoded any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return nil
+	}
+	var out []string
+	var walk func(value any)
+	walk = func(value any) {
+		switch value := value.(type) {
+		case string:
+			out = append(out, value)
+		case []any:
+			for _, item := range value {
+				walk(item)
+			}
+		case map[string]any:
+			for _, item := range value {
+				walk(item)
+			}
+		}
+	}
+	walk(decoded)
+	return out
 }
 
 func (w *worker) automated(ctx context.Context, gc gateCall) verdict {
