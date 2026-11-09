@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -475,7 +476,7 @@ func classifyAttempt(result AttemptResult) Verdict {
 		if isOverflow(message) {
 			return Overflow
 		}
-		if transportFailure(result.Err) {
+		if transportFailure(result.Err) || transportTextFailure(result.Err, message) {
 			return Retry
 		}
 		return Terminal
@@ -493,6 +494,16 @@ func transportFailure(err error) bool {
 	}
 	_, isTransport := errors.AsType[net.Error](err)
 	return isTransport
+}
+
+func transportTextFailure(err error, message []byte) bool {
+	if !hasTransientText(message) {
+		return false
+	}
+	_, isSyscall := errors.AsType[*os.SyscallError](err)
+	return errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		isSyscall
 }
 
 func transientError(err error, message []byte) bool {
