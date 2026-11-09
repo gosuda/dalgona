@@ -44,6 +44,46 @@ cf-check:
     pnpm -C deploy/cloudflare exec tsc --noEmit
     pnpm -C deploy/cloudflare exec biome ci .
 
+[positional-arguments]
+cf-pin tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag="$1"
+    if [[ ! "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+        echo "cf-pin: invalid tag: $tag" >&2
+        exit 1
+    fi
+    ref="ghcr.io/gosuda/dalgona-box:$tag"
+    open=$(printf '\173\173')
+    close=$(printf '\175\175')
+    if ! digest=$(docker buildx imagetools inspect "$ref" --format "$open.Manifest.Digest$close" 2>&1); then
+        echo "cf-pin: cannot inspect $ref:" >&2
+        echo "$digest" >&2
+        exit 1
+    fi
+    if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        echo "cf-pin: bad digest for $ref: $digest" >&2
+        exit 1
+    fi
+    IMAGE="ghcr.io/gosuda/dalgona-box@$digest" python3 - <<'EOF'
+    import io, os
+    path = "{{justfile_directory()}}/deploy/cloudflare/wrangler.jsonc"
+    image = os.environ["IMAGE"]
+    with io.open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+    hits = [i for i, line in enumerate(lines) if "ghcr.io/gosuda/dalgona-box" in line]
+    if len(hits) != 1:
+        raise SystemExit("expected one box image line, found %d" % len(hits))
+    lines[hits[0]] = '      "image": "%s",\n' % image
+    with io.open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.writelines(lines)
+    EOF
+    just cf-deploy-check
+    echo "cf-pin: $ref pinned"
+
+cf-deploy-check:
+    grep -Eq '"image": "ghcr.io/gosuda/dalgona-box@sha256:[0-9a-f]{64}"' {{justfile_directory()}}/deploy/cloudflare/wrangler.jsonc || (echo "cf-deploy-check: wrangler.jsonc image must be a digest pin; run: just cf-pin <tag>" >&2; exit 1)
+
 dist:
     #!/usr/bin/env bash
     set -euo pipefail

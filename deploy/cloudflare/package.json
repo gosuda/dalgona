@@ -4,7 +4,8 @@
   "type": "module",
   "packageManager": "pnpm@12.18.0",
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "deploy": "just cf-deploy-check && wrangler deploy"
   },
   "dependencies": {
     "@cloudflare/containers": "0.3.7"
