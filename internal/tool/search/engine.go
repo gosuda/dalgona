@@ -72,6 +72,7 @@ type walker struct {
 
 func walkScope(cwd, scope string) ([]fileEntry, error) {
 	w := &walker{cwd: cwd, scope: scope, ignores: loadIgnore(cwd)}
+	w.ignores.loadScopeIgnores(cwd, scope)
 	if err := filepath.WalkDir(scope, w.visit); err != nil {
 		return nil, fmt.Errorf("search: cannot walk %s: %w", scope, err)
 	}

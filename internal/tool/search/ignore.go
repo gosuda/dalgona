@@ -32,6 +32,17 @@ func (s *ignoreStack) loadDir(root, dir string) {
 	s.loadFile(dir, filepath.Join(dir, ".gitignore"))
 }
 
+func (s *ignoreStack) loadScopeIgnores(root, scope string) {
+	rel, err := filepath.Rel(root, scope)
+	if err != nil || rel == "." {
+		return
+	}
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(rel)), "/")
+	for depth := 1; depth <= len(parts); depth++ {
+		s.loadDir(root, filepath.Join(append([]string{root}, parts[:depth]...)...))
+	}
+}
+
 func (s *ignoreStack) loadFile(base, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
