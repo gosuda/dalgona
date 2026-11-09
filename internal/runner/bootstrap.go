@@ -419,6 +419,9 @@ func putUpload(ctx context.Context, r Runner, job uploadJob, mu *sync.Mutex, exe
 func putFile(ctx context.Context, r Runner, job uploadJob) error {
 	file, err := os.Open(job.local)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("runner: open %s: %w", job.local, err)
 	}
 	defer func() { _ = file.Close() }()
@@ -465,6 +468,9 @@ func enumGit(ctx context.Context, cwd string, emit func(uploadJob) error) error 
 		return fmt.Errorf("runner: git ls-files: %w", err)
 	}
 	scanErr := scanNUL(ctx, cwd, stdout, emit)
+	if scanErr != nil {
+		_, _ = io.Copy(io.Discard, stdout)
+	}
 	waitErr := cmd.Wait()
 	if scanErr != nil {
 		return scanErr
@@ -529,6 +535,9 @@ func emitRel(cwd, rel string, emit func(uploadJob) error) error {
 	abs := filepath.Join(cwd, filepath.FromSlash(rel))
 	info, err := os.Lstat(abs)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("runner: stat %s: %w", abs, err)
 	}
 	if !info.Mode().IsRegular() {
