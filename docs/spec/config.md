@@ -4,7 +4,7 @@ The program MUST read `config.toml` and then `settings.toml` from its product ho
 
 `dal` uses `$DAL_HOME` or `~/.dal`. `dalgona` uses `$DALGONA_HOME` or `~/.dalgona`. The loader MUST expose the resolved home. The two homes MUST remain separate.
 
-The loader MUST reject unknown keys. The error MUST report the file and its 1-based line. `dal` MUST reject `tool_mode`, `runner`, `remote`, `runners`, `remotes`, `mcp_servers`, `discovery`, `eval`, `herdr`, and `web` as dalgona-only settings. Presence MUST trigger this rejection, including an empty table or a false value.
+The loader MUST reject unknown keys. The error MUST report the file and its 1-based line. `dal` MUST reject `tool_mode`, `runner`, `remote`, `runners`, `remotes`, `mcp_servers`, `mcp_trusted_workspaces`, `discovery`, `eval`, `herdr`, and `web` as dalgona-only settings. Presence MUST trigger this rejection, including an empty table or a false value.
 
 The default approval mode is `auto`. The default sandbox is `workspace-write`. The default tool mode is `normal`. The default runner is `local`. The default reasoning level is `default`.
 
@@ -31,3 +31,9 @@ Edit styles MUST be one of anchor, replace, hashline, hashline-light, hashline-e
 A custom keyword name MUST match `^[a-z][a-z0-9_-]{1,31}$`. A custom keyword MUST set exactly one of `notice` or `text`. A notice path MUST be relative to the product home and MUST name an existing regular file. A built-in keyword override MAY set only selected fields, including `enabled = false`.
 
 `WriteSetting` MUST update only `settings.toml`. It MUST preserve `config.toml`. It MUST preserve the source order of existing `edit_style` rows. It MUST decode and validate the new document before replacing the file. Invalid keys and values MUST leave the prior file unchanged. It MUST write through a temporary file and rename it into place.
+
+Workspace trust MUST persist as the top-level `mcp_trusted_workspaces` list of workspace paths in `settings.toml`. Only `WriteSetting` and the helpers built on it (`TrustedWorkspaces`, `TrustWorkspace`) MAY write it. An empty list means no workspace is trusted. Every entry MUST be a nonempty workspace path, stored cleaned. `dal` MUST reject the key as dalgona-only.
+
+```toml
+mcp_trusted_workspaces = ["/work/repo"]
+```

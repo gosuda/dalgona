@@ -49,3 +49,9 @@ Tool arguments MUST be a JSON object. An omitted argument value MUST become `{}`
 Text blocks MUST produce their text. Image blocks MUST produce `[image <mimeType>]`. Resource links MUST produce `[resource <name>: <uri>]`, or `[resource <uri>]` when the name is absent. Other block types MUST produce `[unsupported content <type>]`. Multiple blocks MUST be separated by one newline.
 
 `isError: true` MUST produce a tool result with `OK = false`. It MUST NOT produce a transport error. JSON-RPC errors and malformed results MUST produce errors.
+
+## Workspace trust
+
+A workspace MCP server is any discovered server whose configuration file lives under the current working directory. Home and product-level servers are not workspace servers. The host MUST NOT start a workspace server process until the user trusts that workspace.
+
+The host MUST ask once per workspace, showing the workspace path with every server command and its arguments, through the same approval channel that asks about tool calls. An approval MUST persist the workspace in `mcp_trusted_workspaces` (see `config.md`) so a host restart keeps the trust. A refusal MUST hold for the session: the servers MUST stay stopped and the host MUST NOT ask again. While a workspace is untrusted, its servers MUST stay unstarted and their tools MUST stay absent. Home and product-level servers MUST start as before, without a trust prompt.

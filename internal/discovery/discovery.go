@@ -14,6 +14,7 @@ type (
 		Name, Command string
 		Args, Env     []string
 		URL           string
+		Workspace     bool
 	}
 	Skill  struct{ Name, Description, Path string }
 	Result struct {
@@ -120,10 +121,20 @@ func codex(home, cwd string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	for _, root := range []string{filepath.Join(home, ".codex"), filepath.Join(cwd, ".codex")} {
-		servers, err := tomlMCP(filepath.Join(root, "config.toml"))
+	roots := []struct {
+		path      string
+		workspace bool
+	}{
+		{filepath.Join(home, ".codex"), false},
+		{filepath.Join(cwd, ".codex"), true},
+	}
+	for _, root := range roots {
+		servers, err := tomlMCP(filepath.Join(root.path, "config.toml"))
 		if err != nil {
 			return Result{}, err
+		}
+		if root.workspace {
+			markWorkspaceServers(servers)
 		}
 		r.MCPServers = append(r.MCPServers, servers...)
 	}
@@ -135,20 +146,32 @@ func claude(home, cwd string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	paths := []string{
-		filepath.Join(home, ".claude.json"),
-		filepath.Join(home, ".claude", "mcp.json"),
-		filepath.Join(cwd, ".claude", "mcp.json"),
-		filepath.Join(cwd, ".mcp.json"),
+	paths := []struct {
+		path      string
+		workspace bool
+	}{
+		{filepath.Join(home, ".claude.json"), false},
+		{filepath.Join(home, ".claude", "mcp.json"), false},
+		{filepath.Join(cwd, ".claude", "mcp.json"), true},
+		{filepath.Join(cwd, ".mcp.json"), true},
 	}
-	for _, path := range paths {
-		servers, err := jsonMCP(path)
+	for _, item := range paths {
+		servers, err := jsonMCP(item.path)
 		if err != nil {
 			return Result{}, err
+		}
+		if item.workspace {
+			markWorkspaceServers(servers)
 		}
 		r.MCPServers = append(r.MCPServers, servers...)
 	}
 	return r, nil
+}
+
+func markWorkspaceServers(servers []MCPServer) {
+	for i := range servers {
+		servers[i].Workspace = true
+	}
 }
 
 func tree(home, cwd, dir, instruction string) (Result, error) {

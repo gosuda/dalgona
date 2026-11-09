@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,10 +29,13 @@ import (
 var mcpStartTimeout = 30 * time.Second
 
 type Daemon struct {
-	Remote  remote.Options
-	Scripts scripthost.Config
-	binder  *remote.Binder
+	Remote            remote.Options
+	Scripts           scripthost.Config
+	WorkspaceApprover WorkspaceApprover
+	binder            *remote.Binder
 }
+
+type WorkspaceApprover func(ctx context.Context, cwd string, servers []discovery.MCPServer) bool
 
 func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error) {
 	logger := cmp.Or(base.Logger, slog.Default())
@@ -46,9 +50,11 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 	life := context.WithoutCancel(ctx)
 	native := nativeServers(base.Config)
 	projects := &projects{
-		cfg: base.Config, userHome: userHome, log: logger, life: life, nativeList: native,
+		cfg: base.Config, home: base.Config.Home, userHome: userHome, log: logger, life: life, nativeList: native,
 		native: startServers(life, native, logger), byCwd: make(map[string]*servers),
+		approver: d.WorkspaceApprover, trusted: map[string]bool{}, refused: map[string]bool{}, pending: map[string]chan struct{}{},
 	}
+	projects.trusted = loadTrusted(base.Config.Home, logger)
 	d.Remote = remote.Options{Config: base.Config, Auth: base.Auth, Journal: base.Journal, Local: base.Local, Logger: logger}
 	d.binder = remote.NewBinder(d.Remote)
 	d.Scripts = scripthost.Config{
@@ -67,14 +73,19 @@ func (d *Daemon) Archive(ctx context.Context, threadID string) error {
 
 type projects struct {
 	cfg        config.Config
+	home       string
 	userHome   string
 	log        *slog.Logger
 	life       context.Context
 	nativeList []discovery.MCPServer
 	native     *servers
+	approver   WorkspaceApprover
 	mu         sync.Mutex
 	closed     bool
 	byCwd      map[string]*servers
+	trusted    map[string]bool
+	refused    map[string]bool
+	pending    map[string]chan struct{}
 }
 
 func (p *projects) discover(cwd string) (discovery.Result, error) {
@@ -115,24 +126,166 @@ func (p *projects) tools(cwd string) []tool.Tool {
 }
 
 func (p *projects) serversFor(cwd string) *servers {
+	for {
+		started, wait, owned := p.begin(cwd)
+		if started != nil {
+			return started
+		}
+		if !owned {
+			select {
+			case <-wait:
+				continue
+			case <-p.life.Done():
+				return &servers{}
+			}
+		}
+		return p.resolveOwned(cwd)
+	}
+}
+
+func (p *projects) begin(cwd string) (started *servers, wait <-chan struct{}, owned bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if started, ok := p.byCwd[cwd]; ok {
-		return started
+	if cached, ok := p.byCwd[cwd]; ok {
+		return cached, nil, false
 	}
 	if p.closed {
-		return &servers{}
+		return &servers{}, nil, false
 	}
+	if pending, ok := p.pending[cwd]; ok {
+		return nil, pending, false
+	}
+	p.pending[cwd] = make(chan struct{})
+	return nil, nil, true
+}
+
+func (p *projects) resolveOwned(cwd string) *servers {
 	found, err := p.discover(cwd)
 	if err != nil {
 		p.log.Warn("mcp: discovery failed", "cwd", cwd, "error", err)
 	}
-	discovered := slices.DeleteFunc(found.MCPServers, func(server discovery.MCPServer) bool {
-		return slices.ContainsFunc(p.nativeList, func(native discovery.MCPServer) bool { return native.Name == server.Name })
-	})
-	started := startServers(p.life, discovered, p.log)
+	kept := stripNative(found.MCPServers, p.nativeList)
+	home, workspace := splitWorkspace(kept)
+	allowed, prompt := p.classify(cwd, home, kept, workspace)
+	if prompt {
+		allowed = p.settleTrust(cwd, home, kept, workspace)
+	}
+	started := startServers(p.life, allowed, p.log)
+	p.mu.Lock()
+	done := p.pending[cwd]
+	delete(p.pending, cwd)
+	if p.closed {
+		p.mu.Unlock()
+		_ = started.close()
+		close(done)
+		return &servers{}
+	}
 	p.byCwd[cwd] = started
+	p.mu.Unlock()
+	close(done)
 	return started
+}
+
+func (p *projects) classify(cwd string, home, kept, workspace []discovery.MCPServer) ([]discovery.MCPServer, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.workspaceAllowed(cwd, workspace) {
+		return kept, false
+	}
+	if p.refused[cwd] {
+		return home, false
+	}
+	return home, true
+}
+
+func (p *projects) settleTrust(cwd string, home, kept, workspace []discovery.MCPServer) []discovery.MCPServer {
+	if !p.requestTrust(p.life, cwd, workspace) {
+		p.noteRefused(cwd)
+		return home
+	}
+	p.noteTrusted(cwd)
+	return kept
+}
+
+func (p *projects) workspaceAllowed(cwd string, workspace []discovery.MCPServer) bool {
+	return len(workspace) == 0 || p.trusted[cwd]
+}
+
+func (p *projects) requestTrust(ctx context.Context, cwd string, workspace []discovery.MCPServer) bool {
+	if p.approver == nil {
+		return false
+	}
+	return p.approver(ctx, cwd, workspace)
+}
+
+func (p *projects) noteRefused(cwd string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refused[cwd] = true
+}
+
+func (p *projects) noteTrusted(cwd string) {
+	if err := config.TrustWorkspace(p.home, cwd); err != nil {
+		p.log.Warn("mcp: trust workspace not persisted", "cwd", cwd, "error", err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.trusted[cwd] = true
+	delete(p.refused, cwd)
+}
+
+func loadTrusted(home string, logger *slog.Logger) map[string]bool {
+	trusted := map[string]bool{}
+	listed, err := config.TrustedWorkspaces(home)
+	if err != nil {
+		logger.Warn("mcp: trusted workspaces unreadable", "error", err)
+		return trusted
+	}
+	for _, cwd := range listed {
+		if cwd != "" {
+			trusted[cwd] = true
+		}
+	}
+	return trusted
+}
+
+func stripNative(found []discovery.MCPServer, native []discovery.MCPServer) []discovery.MCPServer {
+	return slices.DeleteFunc(slices.Clone(found), func(server discovery.MCPServer) bool {
+		return slices.ContainsFunc(native, func(other discovery.MCPServer) bool { return other.Name == server.Name })
+	})
+}
+
+func splitWorkspace(found []discovery.MCPServer) (home, workspace []discovery.MCPServer) {
+	for _, server := range found {
+		if server.Workspace {
+			workspace = append(workspace, server)
+		} else {
+			home = append(home, server)
+		}
+	}
+	return home, workspace
+}
+
+func WorkspaceTrustPrompt(cwd string, servers []discovery.MCPServer) string {
+	ordered := slices.Clone(servers)
+	slices.SortFunc(ordered, func(a, b discovery.MCPServer) int { return strings.Compare(a.Name, b.Name) })
+	lines := make([]string, 0, len(servers)+1)
+	lines = append(lines, "Trust MCP servers for workspace "+cwd+"?")
+	for _, server := range ordered {
+		lines = append(lines, describeWorkspaceServer(server))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func describeWorkspaceServer(server discovery.MCPServer) string {
+	if server.URL != "" {
+		return server.Name + ": " + server.URL
+	}
+	detail := strings.TrimSpace(server.Command + " " + strings.Join(server.Args, " "))
+	if detail == "" {
+		return server.Name
+	}
+	return server.Name + ": " + detail
 }
 
 func (p *projects) close() error {

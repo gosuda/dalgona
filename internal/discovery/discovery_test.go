@@ -105,9 +105,9 @@ command = "codex-project"
 	wantServers := []discovery.MCPServer{
 		{Name: "shared", Command: "native"},
 		{Name: "ordered", Command: "claude"},
-		{Name: "project-only", Command: "claude-project"},
+		{Name: "project-only", Command: "claude-project", Workspace: true},
 		{Name: "codex-only", Command: "codex-only"},
-		{Name: "codex-project", Command: "codex-project"},
+		{Name: "codex-project", Command: "codex-project", Workspace: true},
 		{Name: "plug:ordered", Command: "plugin-ordered"},
 		{Name: "plug:plug-only", Command: "plugin-only"},
 	}

@@ -39,6 +39,7 @@ type fileDoc struct {
 	Runners              map[string]runnerDoc   `toml:"runners"`
 	Remotes              map[string]remoteDoc   `toml:"remotes"`
 	MCPServers           map[string]mcpDoc      `toml:"mcp_servers"`
+	MCPTrustedWorkspaces []string               `toml:"mcp_trusted_workspaces"`
 	Discovery            discoveryDoc           `toml:"discovery"`
 	ApprovalDecider      approvalDeciderDoc     `toml:"approval_decider"`
 	Eval                 *evalDoc               `toml:"eval"`
@@ -526,7 +527,7 @@ func keywordNoticeExists(home, notice string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-var dalgonaOnlyKeys = map[string]bool{"tool_mode": true, "runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "discovery": true, "eval": true, "herdr": true, "web": true}
+var dalgonaOnlyKeys = map[string]bool{"tool_mode": true, "runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "eval": true, "herdr": true, "web": true}
 
 func validateProductLayer(product Product, current layer) error {
 	if product != ProductDal {
@@ -608,6 +609,29 @@ func WriteSetting(home, key string, value any) error {
 		return err
 	}
 	return persistSettings(home, path, output)
+}
+
+func TrustedWorkspaces(home string) ([]string, error) {
+	stored := readLayer(filepath.Join(home, "settings.toml"))
+	if stored.err != nil {
+		return nil, stored.err
+	}
+	if stored.doc == nil {
+		return nil, nil
+	}
+	return slices.Clone(stored.doc.MCPTrustedWorkspaces), nil
+}
+
+func TrustWorkspace(home, cwd string) error {
+	clean := filepath.Clean(cwd)
+	trusted, err := TrustedWorkspaces(home)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(trusted, clean) {
+		return nil
+	}
+	return WriteSetting(home, "mcp_trusted_workspaces", append(trusted, clean))
 }
 
 func splitSettingKey(key string) ([]string, error) {
