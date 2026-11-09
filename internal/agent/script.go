@@ -35,7 +35,11 @@ func (a *actor) startScript(text string, run func(context.Context) error, done c
 	if a.busy {
 		return runningError(a.t.id)
 	}
-	masked, blob, err := a.t.host.textPayload(a.t.host.mask(text))
+	maskedText, err := a.t.host.mask(text)
+	if err != nil {
+		return err
+	}
+	masked, blob, err := a.t.host.textPayload(maskedText)
 	if err != nil {
 		return err
 	}

@@ -117,9 +117,13 @@ func (o *outputTee) flush() {
 }
 
 func (o *outputTee) emit(n int) {
-	text := o.thread.host.mask(string(o.pending[:n]))
+	masked, err := o.thread.host.mask(string(o.pending[:n]))
 	o.pending = o.pending[:copy(o.pending, o.pending[n:])]
-	if text != "" {
-		o.thread.sendOutput(Update{Kind: UpdateExecOutput, CallID: o.callID, Delta: text})
+	if err != nil {
+		o.thread.host.log.Warn("agent: drop exec output delta on masking failure", "call", o.callID, "error", err)
+		return
+	}
+	if masked != "" {
+		o.thread.sendOutput(Update{Kind: UpdateExecOutput, CallID: o.callID, Delta: masked})
 	}
 }

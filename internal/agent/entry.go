@@ -37,7 +37,10 @@ func (t *Thread) prepareInput(in Input) (preparedInput, error) {
 	if kind == "" {
 		kind = InputPrompt
 	}
-	masked := t.host.mask(in.Text)
+	masked, err := t.host.mask(in.Text)
+	if err != nil {
+		return preparedInput{}, err
+	}
 	text, blob, err := t.host.textPayload(masked)
 	if err != nil {
 		return preparedInput{}, err
@@ -61,7 +64,11 @@ func (t *Thread) annotate(out *preparedInput, text string) error {
 		out.notices = append(out.notices, event.Notice{Word: word.Word, Text: noticeText, TextBlob: noticeBlob})
 	}
 	for _, mention := range prompt.Mentions(text, t.created.Cwd) {
-		mentionText, mentionBlob, err := t.host.textPayload(t.host.mask(mention.Text))
+		maskedMention, err := t.host.mask(mention.Text)
+		if err != nil {
+			return err
+		}
+		mentionText, mentionBlob, err := t.host.textPayload(maskedMention)
 		if err != nil {
 			return err
 		}

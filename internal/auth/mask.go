@@ -44,6 +44,20 @@ const (
 func (s *Store) Mask(text string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.maskLocked(text)
+}
+
+func (s *Store) MaskWithError(text string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	masked := s.maskLocked(text)
+	if s.maskErr != nil {
+		return "", s.maskErr
+	}
+	return masked, nil
+}
+
+func (s *Store) maskLocked(text string) string {
 	if err := s.reloadAuthIfChanged(); err != nil {
 		s.maskErr = fmt.Errorf("reload credentials: %w", err)
 		return maskReloadFailure

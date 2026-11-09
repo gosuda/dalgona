@@ -295,8 +295,8 @@ func (w *worker) started(p *prepared, files []tool.FileChange) (event.ToolStarte
 		if file.PreSHA != "" {
 			masked := file.Pre
 			if w.t.host.cfg.Auth != nil {
-				text := w.t.host.cfg.Auth.Mask(string(file.Pre))
-				if maskErr := w.t.host.cfg.Auth.MaskError(); maskErr != nil {
+				text, maskErr := w.t.host.cfg.Auth.MaskWithError(string(file.Pre))
+				if maskErr != nil {
 					return event.ToolStarted{}, fmt.Errorf("agent: secret masking failed: %w", maskErr)
 				}
 				masked = []byte(text)
@@ -367,7 +367,11 @@ func (w *worker) completion(ctx context.Context, p *prepared, result tool.Result
 	if p.class == tool.ClassExec {
 		run = runOutput{id: p.processID(), path: result.Path}
 	}
-	text, spill, err := w.project(ctx, p.tool.Spec().Keep, w.t.host.mask(output), run)
+	maskedOutput, err := w.t.host.mask(output)
+	if err != nil {
+		return event.ToolCompleted{}, err
+	}
+	text, spill, err := w.project(ctx, p.tool.Spec().Keep, maskedOutput, run)
 	if err != nil {
 		return event.ToolCompleted{}, err
 	}
@@ -460,8 +464,8 @@ func (w *worker) storeSnapshots(meta jsontext.Value) error {
 		}
 		masked := entry.Data
 		if w.t.host.cfg.Auth != nil {
-			text := w.t.host.cfg.Auth.Mask(string(entry.Data))
-			if maskErr := w.t.host.cfg.Auth.MaskError(); maskErr != nil {
+			text, maskErr := w.t.host.cfg.Auth.MaskWithError(string(entry.Data))
+			if maskErr != nil {
 				return fmt.Errorf("agent: secret masking failed: %w", maskErr)
 			}
 			masked = []byte(text)
@@ -625,11 +629,15 @@ func readArgFields(args jsontext.Value) (argFields, error) {
 	return out, err
 }
 
-func (h *Host) mask(text string) string {
+func (h *Host) mask(text string) (string, error) {
 	if h.cfg.Auth == nil {
-		return text
+		return text, nil
 	}
-	return h.cfg.Auth.Mask(text)
+	masked, err := h.cfg.Auth.MaskWithError(text)
+	if err != nil {
+		return "", fmt.Errorf("agent: secret masking failed: %w", err)
+	}
+	return masked, nil
 }
 
 type identityMasker struct{}

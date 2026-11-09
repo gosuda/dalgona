@@ -16,6 +16,7 @@ The masker MUST select the longest matching value at each input position. Equal-
 
 Read snapshots and edit pre-images MUST be masked before they enter the blob store. Snapshot metadata MUST name the masked bytes. Restores MUST unmask to the original bytes before use, so recovery and planning keep working with no raw secrets in the journal. A restore that encounters a secret placeholder with no known value MUST fail closed: recovery MUST abort with an error without writing placeholder bytes, and snapshot opens MUST abort with an error without populating the store. Unknown placeholders MUST remain unchanged on display paths only.
 
+When `MaskError` reports a failure, the host MUST fail the submit or tool call and MUST NOT journal or send the failure sentence. Prompts MUST be rejected before journaling. Tool output MUST fail the call with `OK=false` or return an error, never with the failure sentence as output.
 
 `auth.json` MUST be a regular file with mode 0600. The exact refusal error is `auth.json must be a regular file with mode 0600`. Windows MUST check only the regular-file requirement. Writes MUST use a unique temporary file, mode 0600, and an atomic rename. Unknown provider entries and their unknown fields MUST survive a load and write cycle without modification.
 
