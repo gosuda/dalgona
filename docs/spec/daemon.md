@@ -8,6 +8,8 @@ When the lock is held by another process, `Run` MUST return `another dalgona pro
 
 After the lock is held, `Run` MUST remove a stale `dalgona.sock` and then listen on it. `Run` MUST create `<home>` with mode `0700` and MUST tighten an existing `<home>` to mode `0700` before it builds the host, so the host never reads config or the journal from a loose directory. It MUST set the socket file to mode `0600` after it listens, so only the owning user can reach the RPC surface. A failure to create, tighten, remove, listen, or set these permissions MUST stop `Run` with an error.
 
+The daemon performs no peer credential check on the socket: any same-uid process that reaches `<home>/dalgona.sock` can speak the RPC protocol. The runner keeps the home path out of sandboxed child environments (see [sandbox.md](sandbox.md)), but the default path stays guessable, so this hiding is best-effort only.
+
 `Run` MUST call `Host.Recover` once, in the background. Recovery MUST NOT delay the accept loop. Each connection MUST get its own `serve` call, so a client gets its `initialize` answer while recovery runs. Recovery errors MUST be logged. They MUST NOT stop the daemon.
 
 When the context ends, `Run` MUST stop accepting, close every open connection, and wait for the connection and recovery work. It MUST then close the host and the journal, which releases the lock. Closing the listener removes the socket file. An accept failure that does not come from the context MUST stop `Run` with an error.

@@ -102,6 +102,9 @@ func runnerEnvironment(base []string, dir string, mode SandboxMode, roots []stri
 		base = os.Environ()
 	}
 	env := withoutRunnerEnvironment(base)
+	if mode != SandboxOff {
+		env = withoutHomeEnvironment(env)
+	}
 	env = append(env,
 		"DALGONA_RUN_CWD="+dir,
 		"DALGONA_SANDBOX_MODE="+string(mode),
@@ -109,6 +112,18 @@ func runnerEnvironment(base []string, dir string, mode SandboxMode, roots []stri
 		"DALGONA_SHIM_EXEC=0",
 	)
 	return env
+}
+
+func withoutHomeEnvironment(env []string) []string {
+	result := make([]string, 0, len(env))
+	for _, value := range env {
+		key, _, ok := strings.Cut(value, "=")
+		if ok && (key == "DALGONA_HOME" || key == "DAL_HOME") {
+			continue
+		}
+		result = append(result, value)
+	}
+	return result
 }
 
 func encodeRoots(roots []string) string {
