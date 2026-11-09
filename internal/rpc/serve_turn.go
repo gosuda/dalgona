@@ -211,6 +211,17 @@ func (s *server) turnInterrupt(ctx context.Context, params jsontext.Value) (json
 	if err != nil {
 		return nil, err
 	}
+	id := cmp.Or(p.turnID, p.expectedTurnID)
+	if id == "" {
+		return nil, invalidParams("missing turnId")
+	}
+	status, err := thread.Status()
+	if err != nil {
+		return nil, hostError(err, p.threadID, id)
+	}
+	if status.Turn == "" || id != status.Turn {
+		return nil, invalidRequest("turn " + id + " is not running")
+	}
 	thread.Interrupt()
 	return emptyObject(), nil
 }
