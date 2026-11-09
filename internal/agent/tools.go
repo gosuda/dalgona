@@ -25,7 +25,7 @@ import (
 
 const (
 	loopGuardLimit   = 4
-	loopGuardMessage = "repeated call: this exact call already ran 4 times in a row; change approach"
+	loopGuardMessage = "repeated call: this exact call already ran 4 times; change approach"
 	skipInterrupted  = "the turn was interrupted"
 	skipRestarted    = "the host restarted before this call ran"
 )
@@ -536,10 +536,9 @@ func (w *worker) repeated(name string, args jsontext.Value) (bool, error) {
 			if err != nil {
 				return false, err
 			}
-			if callKey(value.Tool, startedArgs) != key {
-				return false, nil
+			if callKey(value.Tool, startedArgs) == key {
+				count++
 			}
-			count++
 		}
 	}
 	return count >= loopGuardLimit, nil
