@@ -58,10 +58,15 @@ export class Box extends Container<Env> {
 
 type Target = { box: DurableObjectStub; path: "/" | "/bridge" };
 
+const BOX_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
 function boxFor(request: Request, env: Env): Target | null {
 	const url = new URL(request.url);
 	const match = /^\/box\/([^/]+)(\/bridge)?\/?$/.exec(url.pathname);
 	if (match === null || match[1] === undefined) {
+		return null;
+	}
+	if (!BOX_NAME_PATTERN.test(match[1])) {
 		return null;
 	}
 	const path = match[2] === "/bridge" ? "/bridge" : "/";
