@@ -148,14 +148,22 @@ func TestAgentEndWaitHoldsTurnUntilReleased(t *testing.T) {
 	if _, err := thread.Deliver(t.Context(), blocker(DeliverySteer, 1)); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond)
-	if types := h.types(thread.ID()); types[len(types)-1] == "turn.completed" {
-		t.Fatalf("turn completed during the wait: %v", types)
-	}
+	requireNoTurnCompletedDuringWait(t, h, thread)
 	close(release)
 	h.waitIdle(thread)
 	if h.model.count() != 2 || lastTurn(h.events(thread.ID())).Status != statusCompleted {
 		t.Fatalf("requests = %d, events = %v", h.model.count(), h.types(thread.ID()))
+	}
+}
+
+func requireNoTurnCompletedDuringWait(t *testing.T, h *harness, thread *Thread) {
+	t.Helper()
+	hold := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(hold) {
+		if types := h.types(thread.ID()); len(types) > 0 && types[len(types)-1] == "turn.completed" {
+			t.Fatalf("turn completed during the wait: %v", types)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
