@@ -286,7 +286,9 @@ func (a *actor) settleTurn(turnID string, o outcome, head uint64) bool {
 	a.idle()
 	if o.status == statusCompleted && a.newInputSince(head) {
 		next := newID("turn-")
-		if _, err := a.append(event.TurnStarted{TurnID: next}); err == nil {
+		if _, err := a.append(event.TurnStarted{TurnID: next}); err != nil {
+			a.t.host.log.Error("agent: journal turn.started", "thread", a.t.id, "turn", next, "error", err)
+		} else {
 			a.spawnContinuation(next)
 		}
 	}
