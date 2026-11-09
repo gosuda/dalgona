@@ -168,12 +168,6 @@ func createExecRootLink(root, workspace string) error {
 	return nil
 }
 
-// ExecServerHandler returns the websocket handler served on the exec-server
-// listener, applying bearer-token auth and routing / and /bridge.
-func ExecServerHandler(ctx context.Context, local *Local, token string, bridge BridgeFunc) http.Handler {
-	return execWSHandler(ctx, local, token, bridge)
-}
-
 func serverSandboxFloor() SandboxMode {
 	switch SandboxMode(os.Getenv("DALGONA_SANDBOX_MODE")) {
 	case SandboxWorkspaceWrite:
@@ -186,7 +180,7 @@ func serverSandboxFloor() SandboxMode {
 }
 
 func serveExecWS(ctx context.Context, listener net.Listener, local *Local, token string, bridge BridgeFunc) error {
-	server := &http.Server{Handler: ExecServerHandler(ctx, local, token, bridge), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Handler: execWSHandler(ctx, local, token, bridge), ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() { errCh <- server.Serve(listener) }()
 	return waitExecListener(ctx, server, errCh)

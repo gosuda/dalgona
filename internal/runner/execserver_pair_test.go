@@ -1,4 +1,6 @@
-package cloudflare
+//go:build !windows
+
+package runner
 
 import (
 	"bufio"
@@ -6,61 +8,57 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/runner"
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/coder/websocket"
 )
 
 const pairContents = "baseline"
 
-func TestServiceConnectPairsWithExecServer(t *testing.T) {
-	t.Parallel()
-	local, err := runner.NewLocal(filepath.Join(t.TempDir(), "runs"))
+func TestExecWS_servesPlainJSONClient(t *testing.T) {
+	root := t.TempDir()
+	local, err := NewLocal(filepath.Join(root, "runs"))
 	if err != nil {
 		t.Fatalf("new local: %v", err)
 	}
-	service := New(newExecServer(t, local).URL, "token")
-	conn := connectExecServer(t, service)
-	defer func() { _ = conn.Close() }()
-	encoded := base64.StdEncoding.EncodeToString([]byte(pairContents))
-	assertReadReply(t, sendReadRequest(t, conn, writePairingFixture(t)), encoded)
-}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "pair-token"
+	ctx := t.Context()
+	done := make(chan error, 1)
+	go func() { done <- serveExecWS(ctx, listener, local, token, nil) }()
+	t.Cleanup(func() { stopContractServer(t, listener, done) })
 
-func newExecServer(t *testing.T, local *runner.Local) *httptest.Server {
-	t.Helper()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.URL.Path = "/"
-		runner.ExecServerHandler(t.Context(), local, "token", nil).ServeHTTP(w, r)
+	ws, _, err := websocket.Dial(ctx, "ws://"+listener.Addr().String()+"/", &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}},
 	})
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	return server
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn := websocket.NetConn(ctx, ws, websocket.MessageText)
+	defer func() { _ = conn.Close() }()
+
+	encoded := base64.StdEncoding.EncodeToString([]byte(pairContents))
+	line := sendPairRead(t, conn, writePairFixture(t, root))
+	assertPairReply(t, line, encoded)
 }
 
-func writePairingFixture(t *testing.T) string {
+func writePairFixture(t *testing.T, root string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "probe.txt")
+	path := filepath.Join(root, "probe.txt")
 	if err := os.WriteFile(path, []byte(pairContents), 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
 	return path
 }
 
-func connectExecServer(t *testing.T, service *Service) io.ReadWriteCloser {
-	t.Helper()
-	conn, err := service.Connect(t.Context(), "box-1", sandboxsvc.ExecServer)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	return conn
-}
-
-func sendReadRequest(t *testing.T, conn io.ReadWriteCloser, path string) []byte {
+func sendPairRead(t *testing.T, conn io.ReadWriteCloser, path string) []byte {
 	t.Helper()
 	request := fmt.Sprintf(`{"id":1,"method":"fs/readFile","params":{"path":%q}}`+"\n", path)
 	if _, err := conn.Write([]byte(request)); err != nil {
@@ -73,7 +71,7 @@ func sendReadRequest(t *testing.T, conn io.ReadWriteCloser, path string) []byte 
 	return line
 }
 
-func assertReadReply(t *testing.T, line []byte, want string) {
+func assertPairReply(t *testing.T, line []byte, want string) {
 	t.Helper()
 	var response struct {
 		ID     int `json:"id"`
