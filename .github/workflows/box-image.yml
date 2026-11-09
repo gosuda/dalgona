@@ -4,10 +4,11 @@ name: "Box image"
   push:
     tags:
       - "v*"
-
 permissions:
   contents: "read"
   packages: "write"
+  attestations: "write"
+  id-token: "write"
 
 jobs:
   publish:
@@ -39,5 +40,10 @@ jobs:
           file: "deploy/box/Dockerfile"
           platforms: "linux/amd64,linux/arm64"
           push: "true"
-          tags: "ghcr.io/gosuda/dalgona-box:${{ github.ref_name }}"
+          tags: |
+            ghcr.io/gosuda/dalgona-box:${{ github.ref_name }}
+            ghcr.io/gosuda/dalgona-box:${{ github.sha }}
+            ghcr.io/gosuda/dalgona-box:latest
+          provenance: "mode=max"
+          sbom: "true"
           labels: "org.opencontainers.image.source=https://github.com/gosuda/dalgona"

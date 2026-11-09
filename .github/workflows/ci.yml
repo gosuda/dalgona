@@ -34,6 +34,10 @@ jobs:
           version: "12.18.0"
       - name: "Set up just"
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - name: "Set up uv"
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.12"
       - name: "Build the web UI"
         run: "just web"
       - name: "Verify"
