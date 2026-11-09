@@ -108,6 +108,9 @@ func resolveToken(cfg Config, lan bool) (string, error) {
 		return "", fmt.Errorf("web: listening on %s needs [web] token (32+ characters)", cfg.Listen)
 	}
 	if cfg.Token != "" {
+		if !tokenIsFragmentSafe(cfg.Token) {
+			return "", fmt.Errorf("web: [web] token must contain only [A-Za-z0-9_-]; '+' and '&' cannot survive the URL fragment")
+		}
 		return cfg.Token, nil
 	}
 	raw := make([]byte, randomTokenBytes)
@@ -115,6 +118,17 @@ func resolveToken(cfg Config, lan bool) (string, error) {
 		return "", fmt.Errorf("web: generate token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func tokenIsFragmentSafe(token string) bool {
+	for _, r := range token {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func loadTLS(cfg Config) (*tls.Config, error) {
