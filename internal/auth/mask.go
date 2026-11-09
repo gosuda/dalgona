@@ -442,7 +442,7 @@ func mergeOneSecret(merged map[string]string, placeholder, secret string) {
 }
 
 func readSecretsMap(dir string) (map[string]string, error) {
-	raw, err := readSecure(filepath.Join(dir, "secrets.json"))
+	_, raw, err := readSecureInfo(filepath.Join(dir, "secrets.json"))
 	if err != nil {
 		return nil, err
 	}

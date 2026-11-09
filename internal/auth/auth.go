@@ -174,7 +174,7 @@ func (s *Store) rewriteAuth(apply func()) error {
 }
 
 func (s *Store) loadSecrets() error {
-	raw, err := readSecure(filepath.Join(s.dir, "secrets.json"))
+	_, raw, err := readSecureInfo(filepath.Join(s.dir, "secrets.json"))
 	if err != nil || raw == nil {
 		return err
 	}
@@ -276,11 +276,6 @@ func jsonString(raw jsontext.Value) (string, error) {
 		return "", errors.New("unexpected data after JSON string")
 	}
 	return text, nil
-}
-
-func readSecure(path string) ([]byte, error) {
-	_, raw, err := readSecureInfo(path)
-	return raw, err
 }
 
 func readSecureInfo(path string) (os.FileInfo, []byte, error) {
