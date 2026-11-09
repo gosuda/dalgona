@@ -115,7 +115,7 @@ func (w *worker) skip(ctx context.Context, calls []event.ToolCall, reason string
 	for _, call := range calls {
 		events = append(events, event.ToolCompleted{CallID: call.ID, Output: "skipped: " + reason, Recovered: "skipped"})
 	}
-	_, err := w.t.appendEvents(ctx, events...)
+	_, err := w.t.appendEvents(context.WithoutCancel(ctx), events...)
 	return err
 }
 
@@ -128,7 +128,7 @@ func (w *worker) runCall(ctx context.Context, call event.ToolCall, requestID str
 	if err != nil {
 		return err
 	}
-	_, err = w.t.appendEvents(ctx, completed)
+	_, err = w.t.appendEvents(context.WithoutCancel(ctx), completed)
 	return err
 }
 

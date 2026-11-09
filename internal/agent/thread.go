@@ -392,9 +392,9 @@ type appendResult struct {
 	err  error
 }
 
-func (t *Thread) appendEvents(_ context.Context, events ...event.Event) (uint64, error) {
+func (t *Thread) appendEvents(ctx context.Context, events ...event.Event) (uint64, error) {
 	result, err := ask(t, func(a *actor) appendResult {
-		head, err := a.append(events...)
+		head, err := a.appendCtx(ctx, events...)
 		return appendResult{head: head, err: err}
 	})
 	return result.head, errors.Join(err, result.err)
@@ -403,6 +403,10 @@ func (t *Thread) appendEvents(_ context.Context, events ...event.Event) (uint64,
 func (a *actor) head() uint64 { return uint64(len(a.records)) }
 
 func (a *actor) append(events ...event.Event) (uint64, error) {
+	return a.appendCtx(context.Background(), events...)
+}
+
+func (a *actor) appendCtx(ctx context.Context, events ...event.Event) (uint64, error) {
 	if a.damage != nil {
 		return a.head(), fmt.Errorf("%w: %w", ErrDamaged, a.damage)
 	}
@@ -413,7 +417,7 @@ func (a *actor) append(events ...event.Event) (uint64, error) {
 	if err != nil {
 		return a.head(), err
 	}
-	last, err := a.t.host.journal.Append(context.Background(), a.t.id, raws...)
+	last, err := a.t.host.journal.Append(ctx, a.t.id, raws...)
 	if last != a.head()+uint64(len(events)) {
 		a.damage = fmt.Errorf("agent: append to %s: %w", a.t.id, cmp.Or(err, fmt.Errorf("journal head %d after appending %d events at %d", last, len(events), a.head())))
 		return a.head(), a.damage
