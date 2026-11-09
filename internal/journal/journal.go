@@ -528,7 +528,7 @@ func fileGrownBeyond(file *os.File, limit int64) (bool, error) {
 func (c *replayCursor) replayLine(line []byte, hadNL bool) error {
 	verified := verifyRecord(line, c.seq, c.prevHash)
 	if verified.kind != lineOK || !hadNL {
-		return fmt.Errorf("journal: %s: corrupt record at seq %d", c.session, c.seq)
+		return &DamageError{Session: c.session, Seq: c.seq}
 	}
 	if err := c.fn(verified.seq, verified.ev); err != nil {
 		return err

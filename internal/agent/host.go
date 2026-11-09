@@ -122,15 +122,19 @@ func (h *Host) sessionInfo(head journal.SessionHead) (ThreadInfo, error) {
 		}
 		decoded, err := event.Decode(raw)
 		if err != nil {
-			return err
+			return &journal.DamageError{Session: head.ID, Seq: seq}
 		}
 		h.applyInfo(&info, seq, decoded)
 		return nil
 	})
-	if _, damaged := errors.AsType[*journal.DamageError](err); err != nil && !damaged {
-		return ThreadInfo{}, err
+	if err != nil {
+		if _, damaged := errors.AsType[*journal.DamageError](err); !damaged {
+			return ThreadInfo{}, err
+		}
+		info.Damaged = true
+		return info, nil
 	}
-	if info.Cwd == "" {
+	if info.Cwd == "" && !info.Damaged {
 		return ThreadInfo{}, fmt.Errorf("agent: session %s has no session.created", head.ID)
 	}
 	if stat, err := os.Stat(filepath.Join(h.cfg.Config.Home, "sessions", head.ID, "journal.jsonl")); err == nil {
