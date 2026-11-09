@@ -57,6 +57,31 @@ func NewDecider(client decide.Client, modelName string, threshold float64, produ
 	return clientDecider{client: client, model: modelName, threshold: threshold, product: product, timeout: deciderTimeout}
 }
 
+// ClientFactory resolves the decide client for the thread being judged.
+// It lets callers own model and credential lookup while this package owns
+// the whole Decide path, so approval keeps one scoring implementation.
+type ClientFactory func(ctx context.Context, threadID string) (decide.Client, string, error)
+
+type factoryDecider struct {
+	factory   ClientFactory
+	threshold float64
+	product   config.Product
+}
+
+// NewFactoryDecider returns a Decider that resolves its client per action
+// and scores through the same path as NewDecider.
+func NewFactoryDecider(factory ClientFactory, threshold float64, product config.Product) Decider {
+	return factoryDecider{factory: factory, threshold: threshold, product: product}
+}
+
+func (d factoryDecider) Decide(ctx context.Context, a Action) (Decision, error) {
+	client, name, err := d.factory(ctx, a.Thread)
+	if err != nil {
+		return Decision{}, err
+	}
+	return NewDecider(client, name, d.threshold, d.product).Decide(ctx, a)
+}
+
 func (d clientDecider) Decide(ctx context.Context, a Action) (Decision, error) {
 	by := "decider:" + d.model
 	state, err := d.state(a)

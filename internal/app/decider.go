@@ -79,7 +79,13 @@ func newJudges(ctx context.Context, cfg config.Config, creds *credentials, roles
 	return &judges{cfg: cfg, creds: creds, roles: roles, spec: spec}, nil
 }
 
-func (j *judges) decider() agent.Decider { return threadDecider{j: j} }
+func (j *judges) decider() agent.Decider {
+	return agent.NewFactoryDecider(j.resolve, j.cfg.ApprovalDecider.Threshold, j.cfg.Product)
+}
+
+func (j *judges) resolve(ctx context.Context, threadID string) (decide.Client, string, error) {
+	return j.client(ctx, j.spec, j.roles.threadModel(threadID, j.cfg.Model))
+}
 
 func (j *judges) judge(ctx context.Context, modelSpec, threadModel string) (decide.Client, error) {
 	spec := j.spec
@@ -115,14 +121,4 @@ func (j *judges) client(ctx context.Context, spec decide.Spec, threadModel strin
 		return nil, "", fmt.Errorf("judge model %s: unknown provider %s", resolved, providerID)
 	}
 	return decide.NewLLM(provider, modelName), resolved, nil
-}
-
-type threadDecider struct{ j *judges }
-
-func (d threadDecider) Decide(ctx context.Context, a agent.Action) (agent.Decision, error) {
-	client, name, err := d.j.client(ctx, d.j.spec, d.j.roles.threadModel(a.Thread, d.j.cfg.Model))
-	if err != nil {
-		return agent.Decision{}, err
-	}
-	return agent.NewDecider(client, name, d.j.cfg.ApprovalDecider.Threshold, d.j.cfg.Product).Decide(ctx, a)
 }
