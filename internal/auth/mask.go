@@ -251,7 +251,7 @@ func (s *Store) reloadForMask() {
 }
 
 func (s *Store) refreshSecrets() {
-	unlock, err := lockAuth(s.dir)
+	unlock, err := LockHome(s.dir)
 	if err != nil {
 		slog.Warn("auth: keeping cached pattern secrets", "error", err)
 		return
@@ -366,7 +366,7 @@ func (s *Store) lookupPatternReplacements(text string) []replacement {
 }
 
 func (s *Store) syncPatternSecrets(hits []patternHit) error {
-	unlock, err := lockAuth(s.dir)
+	unlock, err := LockHome(s.dir)
 	if err != nil {
 		return err
 	}

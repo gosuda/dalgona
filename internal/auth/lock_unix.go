@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func lockAuth(dir string) (func() error, error) {
+func LockHome(dir string) (func() error, error) {
 	file, err := openAuthLock(dir)
 	if err != nil {
 		return nil, err
