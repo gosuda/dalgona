@@ -209,40 +209,40 @@ func (s *server) session(thread *agent.Thread, snap snapshot) (ThreadStartRespon
 
 type settingOverrides struct {
 	mu     sync.Mutex
-	values map[string]string
+	values map[string]any
 }
 
 var hostSettings sync.Map
 
 func overridesOf(host *agent.Host) *settingOverrides {
-	value, _ := hostSettings.LoadOrStore(host, &settingOverrides{values: map[string]string{}})
+	value, _ := hostSettings.LoadOrStore(host, &settingOverrides{values: map[string]any{}})
 	overrides, _ := value.(*settingOverrides)
 	return overrides
 }
 
 func (o *settingOverrides) set(key string, value any) {
-	text, ok := value.(string)
-	if !ok {
-		return
-	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.values[key] = text
+	o.values[key] = value
 }
 
 func (o *settingOverrides) apply(cfg config.Config) config.Config {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for key, value := range o.values {
+		text, ok := value.(string)
+		if !ok {
+			continue
+		}
 		switch key {
 		case "model":
-			cfg.Model = value
+			cfg.Model = text
 		case "approval":
-			cfg.Approval = config.Approval(value)
+			cfg.Approval = config.Approval(text)
 		case "sandbox":
-			cfg.Sandbox = config.SandboxMode(value)
+			cfg.Sandbox = config.SandboxMode(text)
 		case "reasoning":
-			cfg.Reasoning = config.Reasoning(value)
+			cfg.Reasoning = config.Reasoning(text)
 		}
 	}
 	return cfg

@@ -84,7 +84,20 @@ func (s *server) configRead(context.Context, jsontext.Value) (jsontext.Value, er
 }
 
 func settingKey(keyPath string, value any) (string, any, error) {
-	text, _ := value.(string)
+	switch keyPath {
+	case "approval_policy", "sandbox_mode", "model_reasoning_effort":
+		return mappedSettingKey(keyPath, value)
+	case "model", "approval", "sandbox", "reasoning":
+		return directSettingKey(keyPath, value)
+	}
+	return "", nil, invalidParams("unsupported keyPath " + keyPath)
+}
+
+func mappedSettingKey(keyPath string, value any) (string, any, error) {
+	text, ok := value.(string)
+	if !ok {
+		return "", nil, invalidParams(keyPath + " must be a string")
+	}
 	switch keyPath {
 	case "approval_policy":
 		mode, err := approvalMode(text)
@@ -92,10 +105,28 @@ func settingKey(keyPath string, value any) (string, any, error) {
 	case "sandbox_mode":
 		mode, err := sandboxMode(text)
 		return "sandbox", string(mode), err
-	case "model_reasoning_effort":
-		return "reasoning", value, nil
 	}
-	return keyPath, value, nil
+	mode, err := effortMode(text)
+	return "reasoning", string(mode), err
+}
+
+func directSettingKey(keyPath string, value any) (string, any, error) {
+	text, ok := value.(string)
+	if !ok {
+		return "", nil, invalidParams(keyPath + " must be a string")
+	}
+	switch keyPath {
+	case "approval":
+		mode, err := approvalMode(text)
+		return "approval", string(mode), err
+	case "sandbox":
+		mode, err := sandboxMode(text)
+		return "sandbox", string(mode), err
+	case "reasoning":
+		mode, err := effortMode(text)
+		return "reasoning", string(mode), err
+	}
+	return "model", text, nil
 }
 
 func (s *server) configValueWrite(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
