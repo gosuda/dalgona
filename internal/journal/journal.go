@@ -50,6 +50,7 @@ type sessionState struct {
 	info       os.FileInfo
 	damaged    bool
 	damagedSeq uint64
+	dirSynced  bool
 }
 
 type emitRec struct {
@@ -67,6 +68,7 @@ type Store struct {
 	users      *os.File
 	shared     bool
 	syncfsRoot string
+	dirSync    func(string) error
 	mu         sync.Mutex
 	backupStop chan struct{}
 	backupWg   sync.WaitGroup
@@ -110,7 +112,12 @@ func open(dir string, shared bool) (_ *Store, retErr error) {
 	if dir == "" {
 		return nil, errors.New("journal: empty home dir")
 	}
-	s := &Store{dir: dir, shared: shared, sessions: map[string]*sessionState{}}
+	s := &Store{
+		dir:      dir,
+		shared:   shared,
+		sessions: map[string]*sessionState{},
+		dirSync:  syncDir,
+	}
 	defer func() {
 		if retErr != nil {
 			retErr = errors.Join(retErr, s.closeLocked())
@@ -356,8 +363,6 @@ func (s *Store) appendFile(session string) (*os.File, error) {
 		return st.file, nil
 	}
 	dir := s.sessionDir(session)
-	_, dirErr := os.Stat(dir)
-	_, fileErr := os.Stat(s.journalPath(session))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -365,17 +370,18 @@ func (s *Store) appendFile(session string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("journal: open %s: %w", s.journalPath(session), err)
 	}
+	if !st.dirSynced {
+		if syncErr := s.dirSync(dir); syncErr != nil {
+			_ = file.Close()
+			return nil, syncErr
+		}
+		if syncErr := s.dirSync(filepath.Dir(dir)); syncErr != nil {
+			_ = file.Close()
+			return nil, syncErr
+		}
+		st.dirSynced = true
+	}
 	st.file = file
-	if errors.Is(fileErr, fs.ErrNotExist) || errors.Is(dirErr, fs.ErrNotExist) {
-		if syncErr := syncDir(dir); syncErr != nil {
-			return nil, syncErr
-		}
-	}
-	if errors.Is(dirErr, fs.ErrNotExist) {
-		if syncErr := syncDir(filepath.Dir(dir)); syncErr != nil {
-			return nil, syncErr
-		}
-	}
 	return file, nil
 }
 
@@ -543,11 +549,16 @@ func (s *Store) Blob(sha string) ([]byte, error) {
 func (s *Store) Status(session string) (SessionHead, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.shared {
+		if err := s.reloadIndex(); err != nil {
+			return SessionHead{}, err
+		}
+	}
 	st := s.sessions[session]
 	if st == nil {
 		return SessionHead{}, fmt.Errorf("journal: unknown session %s", session)
 	}
-	return s.headOf(session, st), nil
+	return s.freshHead(session, st), nil
 }
 
 func (s *Store) headOf(id string, st *sessionState) SessionHead {

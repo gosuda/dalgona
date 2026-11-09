@@ -434,3 +434,25 @@ func TestOpenSharedListsPeerSessions(t *testing.T) {
 	closeStore(t, first)
 	closeStore(t, second)
 }
+
+func TestSessionDirForRetriesParentSync(t *testing.T) {
+	dir := t.TempDir()
+	injected := errors.New("injected dir sync failure")
+	if _, err := sessionDirForSync(dir, "s", func(string) error { return injected }); err == nil {
+		t.Fatal("sessionDirForSync with failing sync succeeded")
+	}
+	var synced []string
+	sdir, err := sessionDirForSync(dir, "s", func(path string) error {
+		synced = append(synced, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("sessionDirForSync retry: %v", err)
+	}
+	if want := filepath.Join(dir, "sessions", "s"); sdir != want {
+		t.Fatalf("sdir = %s, want %s", sdir, want)
+	}
+	if len(synced) != 1 || synced[0] != filepath.Join(dir, "sessions") {
+		t.Fatalf("synced = %v, want one parent sync", synced)
+	}
+}

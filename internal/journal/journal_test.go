@@ -370,3 +370,27 @@ func TestJournalSyncfs(t *testing.T) {
 	}
 	closeStore(t, store)
 }
+
+func TestAppendFileRetriesDirSync(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpen(t, dir)
+	calls := 0
+	store.dirSync = func(string) error {
+		calls++
+		if calls == 1 {
+			return errors.New("injected dir sync failure")
+		}
+		return nil
+	}
+	if _, err := store.Append(t.Context(), "s", event(0)); err == nil {
+		t.Fatal("Append with failing dir sync succeeded")
+	}
+	if _, err := store.Append(t.Context(), "s", event(1)); err != nil {
+		t.Fatalf("Append after sync recovery: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("dir sync calls = %d, want 3 (fail once, retry both dirs)", calls)
+	}
+	requireEvents(t, replayEvents(t, store, "s"), [][]byte{event(1)})
+	closeStore(t, store)
+}
