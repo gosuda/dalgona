@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +18,8 @@ import (
 	"github.com/gosuda/dalgona/internal/runner"
 	"golang.org/x/sys/unix"
 )
+
+const probeSockName = "dalgona.sock"
 
 func serveGuarded(sock string, refused chan<- error, served *atomic.Int32) (net.Listener, error) {
 	listener, err := net.Listen("unix", sock)
@@ -115,12 +116,12 @@ func childExitCode(t *testing.T, cmd *exec.Cmd) (int, []byte) {
 
 func probeRendezvous(t *testing.T) string {
 	t.Helper()
-	dir := filepath.Join(os.TempDir(), "dalgona-probe-"+strconv.Itoa(os.Getpid()))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	dir, err := os.MkdirTemp("", "dg")
+	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return filepath.Join(dir, "dalgona.sock")
+	return filepath.Join(dir, probeSockName)
 }
 
 func TestAcceptRefusesSandboxedPeer(t *testing.T) {
@@ -145,7 +146,7 @@ func TestAcceptRefusesSandboxedPeer(t *testing.T) {
 		}
 		assertNoRefusal(t, refused)
 	}
-	refuseNNPChild(t, refused)
+	refuseNNPChild(t, sock, refused)
 	t.Run("landlock", func(t *testing.T) {
 		if !runner.Available() {
 			t.Skip("Landlock ABI is 0")
@@ -157,9 +158,11 @@ func TestAcceptRefusesSandboxedPeer(t *testing.T) {
 	}
 }
 
-func refuseNNPChild(t *testing.T, refused <-chan error) {
+func refuseNNPChild(t *testing.T, sock string, refused <-chan error) {
 	t.Helper()
-	code, out := childExitCode(t, childWithEnv(t, "DALGONA_TEST_DIAL=1", "DALGONA_TEST_NNP=1"))
+	cmd := childWithEnv(t, "DALGONA_TEST_DIAL=1", "DALGONA_TEST_NNP=1")
+	cmd.Dir = filepath.Dir(sock)
+	code, out := childExitCode(t, cmd)
 	if code != 4 {
 		t.Fatalf("sandboxed child exit = %d, want 4: %s", code, out)
 	}
@@ -235,29 +238,50 @@ func dispatchDialProbe() (bool, int) {
 		return false, 0
 	}
 	if os.Getenv("DALGONA_TEST_NNP") != "" {
-		if os.Getenv("DALGONA_TEST_NNP_SEALED") == "" {
-			if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-				return true, 2
-			}
-			exe, err := os.Executable()
-			if err != nil {
-				return true, 2
-			}
-			if err := unix.Exec(exe, []string{exe}, append(os.Environ(), "DALGONA_TEST_NNP_SEALED=1")); err != nil {
-				return true, 2
-			}
-		}
-		return true, dialProbe(probeSock())
+		return true, runNNPProbe()
 	}
-	sock, err := dialTarget()
-	if err != nil {
-		return true, 2
-	}
-	return true, dialProbe(sock)
+	return true, runFileProbe()
 }
 
-func probeSock() string {
-	return filepath.Join(os.TempDir(), "dalgona-probe-"+strconv.Itoa(os.Getppid()), "dalgona.sock")
+func runNNPProbe() int {
+	if os.Getenv("DALGONA_TEST_NNP_SEALED") == "" {
+		return sealAndReexec()
+	}
+	sock, err := probeSockFromCwd()
+	if err != nil {
+		return 2
+	}
+	return dialProbe(sock)
+}
+
+func sealAndReexec() int {
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return 2
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return 2
+	}
+	if err := unix.Exec(exe, []string{exe}, append(os.Environ(), "DALGONA_TEST_NNP_SEALED=1")); err != nil {
+		return 2
+	}
+	return 2
+}
+
+func probeSockFromCwd() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, probeSockName), nil
+}
+
+func runFileProbe() int {
+	sock, err := dialTarget()
+	if err != nil {
+		return 2
+	}
+	return dialProbe(sock)
 }
 
 func dialTarget() (string, error) {
