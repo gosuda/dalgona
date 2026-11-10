@@ -325,7 +325,7 @@ func missingUnlessExited(runDir string) error {
 }
 
 func readProcessGroup(runDir string) (int, error) {
-	data, err := os.ReadFile(filepath.Join(runDir, "pgid"))
+	data, err := readRunFile(filepath.Join(runDir, "pgid"))
 	if err != nil {
 		return 0, fmt.Errorf("runner: read process group: %w", err)
 	}
@@ -507,7 +507,7 @@ func readAt(dir string, offset, limit int64) ([]byte, error) {
 }
 
 func readIdentity(path string) (processIdentity, error) {
-	data, err := os.ReadFile(path)
+	data, err := readRunFile(path)
 	if err != nil {
 		return processIdentity{}, fmt.Errorf("runner: read pid: %w", err)
 	}
@@ -535,7 +535,7 @@ func identityAlive(identity processIdentity) bool {
 }
 
 func readExit(path string) (*Exit, error) {
-	data, err := os.ReadFile(path)
+	data, err := readRunFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("runner: read exit: %w", err)
 	}
