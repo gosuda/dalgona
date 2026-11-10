@@ -38,7 +38,7 @@ Every response and notification in the Codex subset MUST validate against the ve
 | Method | Result |
 |---|---|
 | `thread/start {model?, modelProvider?, cwd?, approvalPolicy?, sandbox?, config?}` | `ThreadStartResponse`. The server also sends `thread/started`. A missing `model` takes the model from the current settings. A `model` without `/` is a Codex bare id: the server prefixes it with `modelProvider`, or else with the provider of the current settings model. A missing `approvalPolicy` or `sandbox` takes the current settings value. `config.model_reasoning_effort` sets the thread's default reasoning effort: every turn of the thread that sends no `effort` uses it, and a turn's own `effort` wins. It is journaled with the session, so `thread/resume` and `thread/fork` keep it, and the response reports it as `reasoningEffort`. A non-empty value outside `low`, `medium`, `high`, `xhigh`, `max` MUST give `-32602` `unsupported model_reasoning_effort <value>`. |
-| `thread/resume {threadId}` | `ThreadResumeResponse` with all turns of the active path. |
+| `thread/resume {threadId}` | `ThreadResumeResponse` with all turns of the active path. The snapshot MUST replay the full active path, including history before a compaction marker. |
 | `thread/list {cursor?, limit?, archived?}` | Threads ordered by `updatedAt`, newest first. `archived` selects archived threads. `limit` defaults to 50. `nextCursor` is the offset of the next page. |
 | `thread/read {threadId, includeTurns?}` | `{thread}`. Turns are present only with `includeTurns`. |
 | `thread/name/set {threadId, name}` | `{}`. Subscribers receive `thread/name/updated`. |
