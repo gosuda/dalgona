@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -97,12 +98,26 @@ func TestExecUnmasksCommand(t *testing.T) {
 	}
 }
 
+func waitThenPrintLateCommand() string {
+	if runtime.GOOS == "windows" {
+		return "echo early & ping -n 31 127.0.0.1 >nul & echo late"
+	}
+	return "echo early; sleep 30; echo late"
+}
+
+func createMarkerThenWaitCommand() string {
+	if runtime.GOOS == "windows" {
+		return "type nul > started & ping -n 31 127.0.0.1 >nul"
+	}
+	return "touch started; sleep 30"
+}
+
 func TestExecTimeoutTerminates(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	toolExec := New()
 	toolExec.grace = 300 * time.Millisecond
-	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-3", Args: jsontext.Value(`{"command":"sleep 30; echo late","timeout_ms":120}`)}, env)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-3", Args: jsontext.Value(`{"command":` + strconv.Quote(waitThenPrintLateCommand()) + `,"timeout_ms":2000}`)}, env)
 	if err == nil {
 		t.Fatal("timeout run returned no error")
 	}
@@ -111,6 +126,12 @@ func TestExecTimeoutTerminates(t *testing.T) {
 	}
 	if result.OK {
 		t.Fatal("timed out call reported success")
+	}
+	if result.ExitCode == nil {
+		t.Fatal("timed out call settled without an exit record")
+	}
+	if !strings.Contains(string(result.Output), "early") {
+		t.Fatalf("output before the timeout is missing: %q", result.Output)
 	}
 	if strings.Contains(string(result.Output), "late") {
 		t.Fatalf("output survived the timeout: %q", result.Output)
@@ -134,7 +155,7 @@ func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
 	defer cancel()
 	finished := make(chan execOutcome, 1)
 	go func() {
-		result, runErr := toolExec.Run(ctx, tool.Call{ID: "run-early", Args: jsontext.Value(`{"command":"touch started; sleep 30","escalate":true}`)}, env)
+		result, runErr := toolExec.Run(ctx, tool.Call{ID: "run-early", Args: jsontext.Value(`{"command":` + strconv.Quote(createMarkerThenWaitCommand()) + `,"escalate":true}`)}, env)
 		finished <- execOutcome{result: result, runErr: runErr}
 	}()
 	runDir := filepath.Join(runsDir, "run-early")
