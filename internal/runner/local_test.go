@@ -207,14 +207,14 @@ func TestLocal_signalBeforePIDPreventsStart(t *testing.T) {
 	}
 }
 
-func TestLocal_signalBeforeProcessGroupStopsCommand(t *testing.T) {
+func TestLocal_signalBeforeGroupReturnsNilAndEndsTerminated(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
-	env := append(os.Environ(), shimPauseEnvironment+"=start:400ms")
+	env := append(os.Environ(), shimPauseEnvironment+"=start:5s")
 	startTestProcess(t, local, ProcessSpec{ID: "starting", Argv: []string{"sh", "-c", "sleep 30 & wait"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
 	runDir := filepath.Join(dir, "runs", "starting")
-	waitForFile(t, filepath.Join(runDir, "pid"), 5*time.Second)
-	time.Sleep(100 * time.Millisecond)
+	waitForFile(t, filepath.Join(runDir, "pid"), 10*time.Second)
+	time.Sleep(200 * time.Millisecond)
 	if _, err := os.Stat(filepath.Join(runDir, "pgid")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("pgid existed before the signal: %v", err)
 	}

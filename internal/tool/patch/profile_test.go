@@ -169,6 +169,21 @@ func TestProfileQuotedPathAndBodyRows(t *testing.T) {
 	if actual := readFixture(t, cwd, path); actual != expected {
 		t.Fatalf("body %q, want %q", actual, expected)
 	}
+	hostile := "odd @#]\"\\.txt"
+	hostileInput := "[" + snapshot.JSONString(hostile) + "#NEW]\nPUT >$:\n++plus\n+-minus\n+```\n+[not-a-header]\n"
+	hostileEdits, parseErr := parse(HashlineEnhanced, hostileInput)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	if len(hostileEdits) != 1 {
+		t.Fatalf("hostile edits %d, want 1", len(hostileEdits))
+	}
+	if hostileEdits[0].path != hostile {
+		t.Fatalf("hostile path %q, want %q", hostileEdits[0].path, hostile)
+	}
+	if hostileEdits[0].body != expected {
+		t.Fatalf("hostile body %q, want %q", hostileEdits[0].body, expected)
+	}
 }
 
 func TestProfileGrammarRejections(t *testing.T) {

@@ -3,10 +3,11 @@
 package runner
 
 import (
+	"errors"
 	"os"
 	"os/exec"
+	"syscall"
 	"testing"
-	"time"
 )
 
 func TestSignalProcessMissingGroup(t *testing.T) {
@@ -19,29 +20,35 @@ func TestSignalProcessMissingGroup(t *testing.T) {
 }
 
 func TestSignalProcessLiveGroup(t *testing.T) {
-	cmd := exec.Command("sh", "-c", "sleep 30")
+	cmd := exec.Command("sleep", "30")
 	configureProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	pgid := cmd.Process.Pid
-	cleanup := func() {
+	defer func() {
 		_ = signalProcess(os.Getpid(), pgid, SignalKill)
 		_ = cmd.Wait()
-	}
-	defer cleanup()
+	}()
 	if processGroupGone(pgid) {
 		t.Fatal("processGroupGone live group = true, want false")
 	}
 	if err := signalProcess(os.Getpid(), pgid, SignalKill); err != nil {
 		t.Fatalf("signalProcess live group = %v, want nil", err)
 	}
-	_ = cmd.Wait()
-	deadline := time.Now().Add(5 * time.Second)
-	for !processGroupGone(pgid) {
-		if time.Now().After(deadline) {
-			t.Fatal("processGroupGone killed group = false after 5s, want true")
-		}
-		time.Sleep(10 * time.Millisecond)
+	waitErr := cmd.Wait()
+	exitErr, ok := errors.AsType[*exec.ExitError](waitErr)
+	if !ok {
+		t.Fatalf("live wait = %v, want signaled exit", waitErr)
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("live status type = %T, want WaitStatus", exitErr.Sys())
+	}
+	if !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("live status = %v, want SIGKILL", status)
+	}
+	if !processGroupGone(pgid) {
+		t.Fatal("processGroupGone killed group = false, want true")
 	}
 }

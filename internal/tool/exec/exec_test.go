@@ -29,6 +29,11 @@ func (fakeMasker) UnmaskStrict(text string) (string, error) {
 	return fakeMasker{}.Unmask(text), nil
 }
 
+type execOutcome struct {
+	result tool.Result
+	runErr error
+}
+
 func testEnv(t *testing.T) (tool.Env, func()) {
 	t.Helper()
 	runs, err := runner.NewLocal(filepath.Join(t.TempDir(), "runs"))
@@ -113,24 +118,66 @@ func TestExecTimeoutTerminates(t *testing.T) {
 }
 
 func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
-	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:300ms")
-	env, closeRunner := testEnv(t)
-	defer closeRunner()
+	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:2s")
+	runsDir := filepath.Join(t.TempDir(), "runs")
+	runs, newErr := runner.NewLocal(runsDir)
+	if newErr != nil {
+		t.Fatal(newErr)
+	}
+	defer func() {
+		_ = runs.Close()
+	}()
+	cwd := t.TempDir()
+	env := tool.Env{Runner: runs, Cwd: cwd, Sandbox: runner.Sandbox{Mode: runner.SandboxWorkspaceWrite, WritableRoots: []string{cwd}}}
 	toolExec := New()
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	result, err := toolExec.Run(ctx, tool.Call{ID: "run-early", Args: jsontext.Value(`{"command":"touch started; sleep 30","escalate":true}`)}, env)
-	if err == nil || result.OK {
-		t.Fatalf("interrupted run ok=%v err=%v", result.OK, err)
+	finished := make(chan execOutcome, 1)
+	go func() {
+		result, runErr := toolExec.Run(ctx, tool.Call{ID: "run-early", Args: jsontext.Value(`{"command":"touch started; sleep 30","escalate":true}`)}, env)
+		finished <- execOutcome{result: result, runErr: runErr}
+	}()
+	runDir := filepath.Join(runsDir, "run-early")
+	waitForRunDir(t, runDir, cancel)
+	cancel()
+	settled := awaitExecOutcome(t, finished)
+	if settled.runErr == nil || settled.result.OK {
+		t.Fatalf("interrupted run ok=%v err=%v", settled.result.OK, settled.runErr)
 	}
-	if result.ExitCode == nil || *result.ExitCode == 0 {
-		t.Fatalf("interrupted run settled without an exit record: exit=%v err=%v", result.ExitCode, err)
+	if settled.result.ExitCode == nil || *settled.result.ExitCode == 0 {
+		t.Fatalf("interrupted run settled without an exit record: exit=%v err=%v", settled.result.ExitCode, settled.runErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(env.Cwd, "started")); !errors.Is(statErr, fs.ErrNotExist) {
+	if _, statErr := os.Stat(filepath.Join(cwd, "started")); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Fatalf("command ran after the interrupt: %v", statErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(filepath.Dir(result.Path), "pgid")); !errors.Is(statErr, fs.ErrNotExist) {
+	if _, statErr := os.Stat(filepath.Join(runDir, "pgid")); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Fatalf("command group was created after the interrupt: %v", statErr)
+	}
+}
+
+func waitForRunDir(t *testing.T, runDir string, cancel context.CancelFunc) {
+	t.Helper()
+	appear := time.Now().Add(10 * time.Second)
+	for {
+		if _, statErr := os.Stat(runDir); statErr == nil {
+			return
+		}
+		if time.Now().After(appear) {
+			cancel()
+			t.Fatal("run directory did not appear")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func awaitExecOutcome(t *testing.T, finished chan execOutcome) execOutcome {
+	t.Helper()
+	select {
+	case settled := <-finished:
+		return settled
+	case <-time.After(15 * time.Second):
+		t.Fatal("interrupted run did not settle")
+		return execOutcome{}
 	}
 }
 

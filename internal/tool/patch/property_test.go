@@ -365,6 +365,40 @@ func TestMaskerLeavesPathsAndPreservesJSON(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(cwd, "literal-"+masked+".txt")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("path text was unmasked")
 	}
+	checkHostileMaskerRoundTrip(t)
+}
+
+func checkHostileMaskerRoundTrip(t *testing.T) {
+	t.Helper()
+	hostileSecret := "a\"b\\c\n"
+	encoded := snapshot.JSONString(hostileSecret)
+	decoded, decodeErr := jsonString(jsontext.Value(encoded))
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if decoded != hostileSecret {
+		t.Fatalf("hostile JSON %q, want %q", decoded, hostileSecret)
+	}
+	hostileInput := `{"changes":[{"path":` + snapshot.JSONString("literal-{{secret}}.txt") + `,"old":"{{secret}}","new":"new-{{secret}}"}]}`
+	hostileEdits, parseErr := parse(Replace, hostileInput)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	if len(hostileEdits) != 1 {
+		t.Fatalf("hostile edits %d, want 1", len(hostileEdits))
+	}
+	if unmaskErr := unmaskEdits(hostileEdits, quoteMasker{secret: hostileSecret}.UnmaskStrict); unmaskErr != nil {
+		t.Fatal(unmaskErr)
+	}
+	if hostileEdits[0].path != "literal-{{secret}}.txt" {
+		t.Fatalf("hostile path %q was unmasked", hostileEdits[0].path)
+	}
+	if hostileEdits[0].locator.old != hostileSecret {
+		t.Fatalf("hostile old %q, want %q", hostileEdits[0].locator.old, hostileSecret)
+	}
+	if hostileEdits[0].body != "new-"+hostileSecret {
+		t.Fatalf("hostile new %q, want %q", hostileEdits[0].body, "new-"+hostileSecret)
+	}
 }
 
 func TestStyleAliasesAndDefault(t *testing.T) {
