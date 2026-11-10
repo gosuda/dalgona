@@ -24,6 +24,9 @@ type (
 func SocketPath(home string) string { return filepath.Join(home, "dalgona.sock") }
 
 func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc) (err error) {
+	if limitErr := checkSocketPathLimit(home); limitErr != nil {
+		return limitErr
+	}
 	if chmodErr := tightenHome(home); chmodErr != nil {
 		return chmodErr
 	}

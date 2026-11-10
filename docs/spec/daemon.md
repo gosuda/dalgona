@@ -24,6 +24,10 @@ When the context ends, `Run` MUST stop accepting, close every open connection, a
 
 `Ensure` MUST reuse an accepting socket. If the socket is missing or stale, it MUST start `<executable> daemon` detached and append stdout and stderr to `daemon.log`. On Unix the child MUST run in a new session. On Windows it MUST use `DETACHED_PROCESS` and `CREATE_NEW_PROCESS_GROUP`. `Ensure` MUST retry for five seconds. On timeout it MUST return `daemon did not start: see <home>/daemon.log`.
 
+`Ensure` and `Run` MUST reject a socket path of `<limit>` bytes or more before spawning or listening, with `daemon socket path <path> is <n> bytes; the limit is <limit>; use a shorter home directory`.
+
+The limit MUST be 104 on darwin and the BSDs and 108 on Linux and Windows.
+
 Two clients MAY start two daemons at the same time. The lock rule above makes the second daemon exit without effect on the first.
 
 ## User service

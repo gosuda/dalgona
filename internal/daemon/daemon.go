@@ -40,6 +40,9 @@ var (
 )
 
 func Ensure(ctx context.Context, home, exe string) (net.Conn, error) {
+	if limitErr := checkSocketPathLimit(home); limitErr != nil {
+		return nil, limitErr
+	}
 	if err := tightenHomeRoot(home); err != nil {
 		return nil, err
 	}
