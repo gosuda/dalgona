@@ -67,6 +67,10 @@ Every 30 minutes and at clean close, the store MUST run `VACUUM INTO` into `stat
 
 In both modes, the store MUST keep the mirror rows of a session when they hold exactly the JSONL sequence numbers and hashes. It MUST then update only the session row.
 
+## Compaction
+
+A compaction marker MUST keep each tool result with the assistant message that issued it. A cut MUST be safe only when each kept call id has its issuing assistant message in the kept suffix.
+
 ## Blobs
 
 Blob names MUST contain exactly 64 lowercase SHA-256 hexadecimal characters. `Blob` MUST reject malformed names and report missing blobs.

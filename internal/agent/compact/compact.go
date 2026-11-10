@@ -21,6 +21,7 @@ type Entry struct {
 	Kind        Kind
 	Bytes       int
 	CallID      string
+	CallIDs     []string
 	OutputBytes int
 }
 
@@ -71,20 +72,43 @@ func findCut(entries []Entry, target int) (int, bool) {
 }
 
 func turnBoundary(entries []Entry, cut int) int {
-	depth := make([]int, len(entries)+1)
-	open := 0
-	for i, entry := range entries {
-		if entry.Kind == ToolStarted {
-			open++
-		} else if entry.Kind == ToolCompleted && open > 0 {
-			open--
-		}
-		depth[i+1] = open
-	}
-	for cut > 0 && cut < len(entries) && (!isBoundary(entries[cut].Kind) || depth[cut] > 0) {
+	for cut > 0 && cut < len(entries) && !safeCut(entries, cut) {
 		cut--
 	}
 	return cut
+}
+
+func safeCut(entries []Entry, cut int) bool {
+	if !isBoundary(entries[cut].Kind) {
+		return false
+	}
+	issued := issuedIDs(entries, cut)
+	for i := cut; i < len(entries); i++ {
+		if !exposed(entries[i]) {
+			continue
+		}
+		if _, ok := issued[entries[i].CallID]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func issuedIDs(entries []Entry, cut int) map[string]struct{} {
+	issued := make(map[string]struct{})
+	for i := cut; i < len(entries); i++ {
+		if entries[i].Kind != AssistantMessage {
+			continue
+		}
+		for _, id := range entries[i].CallIDs {
+			issued[id] = struct{}{}
+		}
+	}
+	return issued
+}
+
+func exposed(entry Entry) bool {
+	return (entry.Kind == ToolStarted || entry.Kind == ToolCompleted) && entry.CallID != ""
 }
 
 func PruneSelect(entries []Entry, protectTokens, minBytes, maxCount, targetTokens int) []string {

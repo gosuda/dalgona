@@ -75,8 +75,11 @@ func entryFor(item event.Seqd, size int) compact.Entry {
 		entry.Kind = compact.UserMessage
 	case event.AssistantMessage:
 		entry.Kind = compact.AssistantMessage
+		for _, call := range value.ToolCalls {
+			entry.CallIDs = append(entry.CallIDs, call.ID)
+		}
 	case event.ToolStarted:
-		entry.Kind = compact.ToolStarted
+		entry.Kind, entry.CallID = compact.ToolStarted, value.CallID
 	case event.ToolCompleted:
 		entry.Kind, entry.CallID, entry.OutputBytes = compact.ToolCompleted, value.CallID, len(value.Output)
 	}

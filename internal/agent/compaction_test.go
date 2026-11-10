@@ -100,22 +100,49 @@ func randomHistory(random *rand.Rand) view {
 		add(event.TurnStarted{TurnID: id}, 30)
 		add(event.UserMessage{ItemID: "u" + id, TurnID: id, Text: "q", Kind: "prompt"}, random.IntN(4000)+50)
 		for step := range random.IntN(4) {
-			callID := id + "c" + strconv.Itoa(step)
-			message := event.AssistantMessage{
-				ItemID: "a" + callID, TurnID: id, StopReason: "tool_calls",
-				ToolCalls: []event.ToolCall{{ID: callID, Name: "read", Args: jsontext.Value(`{}`)}},
-			}
-			add(message, random.IntN(2000)+50)
-			add(event.ToolStarted{CallID: callID, TurnID: id, Tool: "read", Class: "read", Args: jsontext.Value(`{}`)}, 80)
-			if random.IntN(4) == 0 {
-				add(event.UserMessage{ItemID: "s" + callID, TurnID: id, Text: "steer", Kind: "steer"}, random.IntN(200)+10)
-			}
-			add(event.ToolCompleted{CallID: callID, OK: true, Output: "o", Recovered: "none"}, random.IntN(20000)+50)
+			addRandomStep(random, add, id, step)
 		}
 		add(event.AssistantMessage{ItemID: "z" + id, TurnID: id, StopReason: "stop"}, random.IntN(3000)+50)
 		add(event.TurnCompleted{TurnID: id, Status: "completed"}, 30)
 	}
 	return v
+}
+
+func addRandomStep(random *rand.Rand, add func(event.Event, int), id string, step int) {
+	if random.IntN(4) == 0 {
+		addBatchedStep(random, add, id, step)
+		return
+	}
+	callID := id + "c" + strconv.Itoa(step)
+	message := event.AssistantMessage{
+		ItemID: "a" + callID, TurnID: id, StopReason: "tool_calls",
+		ToolCalls: []event.ToolCall{{ID: callID, Name: "read", Args: jsontext.Value(`{}`)}},
+	}
+	add(message, random.IntN(2000)+50)
+	add(event.ToolStarted{CallID: callID, TurnID: id, Tool: "read", Class: "read", Args: jsontext.Value(`{}`)}, 80)
+	if random.IntN(4) == 0 {
+		add(event.UserMessage{ItemID: "s" + callID, TurnID: id, Text: "steer", Kind: "steer"}, random.IntN(200)+10)
+	}
+	add(event.ToolCompleted{CallID: callID, OK: true, Output: "o", Recovered: "none"}, random.IntN(20000)+50)
+}
+
+func addBatchedStep(random *rand.Rand, add func(event.Event, int), id string, step int) {
+	callA := id + "c" + strconv.Itoa(step) + "a"
+	callB := id + "c" + strconv.Itoa(step) + "b"
+	batched := event.AssistantMessage{
+		ItemID: "a" + callA, TurnID: id, StopReason: "tool_calls",
+		ToolCalls: []event.ToolCall{{ID: callA, Name: "read", Args: jsontext.Value(`{}`)}, {ID: callB, Name: "read", Args: jsontext.Value(`{}`)}},
+	}
+	add(batched, random.IntN(2000)+50)
+	add(event.ToolStarted{CallID: callA, TurnID: id, Tool: "read", Class: "read", Args: jsontext.Value(`{}`)}, 80)
+	if random.IntN(2) == 0 {
+		add(event.UserMessage{ItemID: "s" + callA, TurnID: id, Text: "steer", Kind: "steer"}, random.IntN(200)+10)
+	}
+	add(event.ToolCompleted{CallID: callB, Output: "declined", Recovered: "none"}, random.IntN(20000)+50)
+	if random.IntN(2) == 0 {
+		add(event.UserMessage{ItemID: "s" + callB, TurnID: id, Text: "steer", Kind: "steer"}, random.IntN(200)+10)
+	}
+	add(event.ToolCompleted{CallID: callA, OK: true, Output: "o", Recovered: "none"}, random.IntN(20000)+50)
 }
 
 func TestCompactionCutKeepsCallsWithTheirMessage(t *testing.T) {
@@ -138,30 +165,42 @@ func TestCompactionCutKeepsCallsWithTheirMessage(t *testing.T) {
 }
 
 func cutPossible(entries []compact.Entry, target, prev int) bool {
-	depth := batchDepth(entries)
 	tail := 0
 	for i := len(entries) - 1; i > prev; i-- {
 		tail += entries[i].Bytes
-		boundary := (entries[i].Kind == compact.UserMessage || entries[i].Kind == compact.AssistantMessage) && depth[i] == 0
-		if boundary && tail >= target {
-			return true
+		if tail < target {
+			continue
 		}
+		if entries[i].Kind != compact.UserMessage && entries[i].Kind != compact.AssistantMessage {
+			continue
+		}
+		if suffixOrphans(entries, i) {
+			continue
+		}
+		return true
 	}
 	return false
 }
 
-func batchDepth(entries []compact.Entry) []int {
-	depth := make([]int, len(entries)+1)
-	open := 0
-	for i, entry := range entries {
-		if entry.Kind == compact.ToolStarted {
-			open++
-		} else if entry.Kind == compact.ToolCompleted && open > 0 {
-			open--
+func suffixOrphans(entries []compact.Entry, cut int) bool {
+	issued := make(map[string]struct{})
+	for i := cut; i < len(entries); i++ {
+		for _, id := range entries[i].CallIDs {
+			issued[id] = struct{}{}
 		}
-		depth[i+1] = open
 	}
-	return depth
+	for i := cut; i < len(entries); i++ {
+		if entries[i].CallID == "" {
+			continue
+		}
+		if entries[i].Kind != compact.ToolStarted && entries[i].Kind != compact.ToolCompleted {
+			continue
+		}
+		if _, ok := issued[entries[i].CallID]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func assertCut(t *testing.T, iteration int, cv compactionView, cut, keep int) {
