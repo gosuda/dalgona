@@ -134,21 +134,9 @@ func (w *worker) runCall(ctx context.Context, call event.ToolCall, requestID str
 }
 
 func (w *worker) runAgentBatch(ctx context.Context, calls []event.ToolCall) error {
-	ready := make([]*prepared, 0, len(calls))
-	for i, call := range calls {
-		if ctx.Err() != nil {
-			if err := w.skip(ctx, calls[i:], skipInterrupted); err != nil {
-				return err
-			}
-			break
-		}
-		p, err := w.prepare(ctx, call, "")
-		if err != nil {
-			return err
-		}
-		if p != nil {
-			ready = append(ready, p)
-		}
+	ready, err := w.prepareBatch(ctx, calls)
+	if err != nil {
+		return err
 	}
 	results := make([]event.ToolCompleted, len(ready))
 	errs := make([]error, len(ready))
@@ -162,6 +150,36 @@ func (w *worker) runAgentBatch(ctx context.Context, calls []event.ToolCall) erro
 		return err
 	}
 	return errors.Join(errs...)
+}
+
+func (w *worker) prepareBatch(ctx context.Context, calls []event.ToolCall) ([]*prepared, error) {
+	ready := make([]*prepared, 0, len(calls))
+	complete := false
+	defer func() {
+		if complete {
+			return
+		}
+		for _, p := range ready {
+			p.discardPlan()
+		}
+	}()
+	for i, call := range calls {
+		if ctx.Err() != nil {
+			if err := w.skip(ctx, calls[i:], skipInterrupted); err != nil {
+				return nil, err
+			}
+			break
+		}
+		p, err := w.prepare(ctx, call, "")
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			ready = append(ready, p)
+		}
+	}
+	complete = true
+	return ready, nil
 }
 
 func discardFailed(ready []*prepared, errs []error) {

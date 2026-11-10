@@ -203,3 +203,60 @@ func TestAdmitStartFailureDiscardsPlan(t *testing.T) {
 		t.Fatalf("discards = %d, want 1 after start failure", got)
 	}
 }
+
+type batchDiscardAgent struct {
+	discards *atomic.Int64
+	applied  *atomic.Int64
+}
+
+func (b *batchDiscardAgent) Spec() tool.Spec {
+	return tool.Spec{Name: "batchdiscard", Description: "batch fake editor", Schema: jsontext.Value(`{"type":"object"}`)}
+}
+
+func (b *batchDiscardAgent) Class() tool.Class { return tool.ClassAgent }
+
+func (b *batchDiscardAgent) Run(context.Context, tool.Call, tool.Env) (tool.Result, error) {
+	return tool.Result{Output: []byte("run"), OK: true}, nil
+}
+
+func (b *batchDiscardAgent) Plan(context.Context, tool.Call, tool.Env) (tool.Plan, error) {
+	return tool.Plan{
+		Apply: func(context.Context) (tool.Result, error) {
+			b.applied.Add(1)
+			return tool.Result{Output: []byte("applied"), OK: true}, nil
+		},
+		Discard: func() { b.discards.Add(1) },
+	}, nil
+}
+
+func TestAgentBatchPrepareFailureDiscardsReadyPlans(t *testing.T) {
+	t.Parallel()
+	var discards, applied atomic.Int64
+	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
+			return []tool.Tool{&batchDiscardAgent{discards: &discards, applied: &applied}}, nil
+		}
+	})
+	thread := h.start()
+	ctx := t.Context()
+	if _, err := thread.appendEvents(ctx, event.TurnStarted{TurnID: "turn-test"}); err != nil {
+		t.Fatal(err)
+	}
+	w := &worker{t: thread, turnID: "turn-test"}
+	if err := w.prime(ctx); err != nil {
+		t.Fatal(err)
+	}
+	calls := []event.ToolCall{
+		{ID: "b1", Name: "batchdiscard", Args: jsontext.Value(`{}`)},
+		{ID: "b2", Name: "batchdiscard", Args: jsontext.Value(`{}`), ArgsBlob: &event.BlobRef{Blob: "missing", Bytes: 2}},
+	}
+	if err := w.runAgentBatch(ctx, calls); err == nil {
+		t.Fatal("runAgentBatch with failing second prepare succeeded")
+	}
+	if got := discards.Load(); got != 1 {
+		t.Fatalf("discards = %d, want 1 after batch prepare failure", got)
+	}
+	if got := applied.Load(); got != 0 {
+		t.Fatalf("applied = %d, want 0 after batch prepare failure", got)
+	}
+}
