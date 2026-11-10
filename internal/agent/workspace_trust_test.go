@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -116,5 +118,75 @@ func TestRequestWorkspaceApprovalDeclinesWithoutClient(t *testing.T) {
 	}
 	if reply != ReplyDecline {
 		t.Fatalf("reply = %q, want decline", reply)
+	}
+}
+
+func TestRequestWorkspaceApprovalCancelDiscardsPrompt(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	thread := h.start()
+	updates := thread.Subscribe()
+	defer thread.Unsubscribe(updates)
+	ctx, cancel := context.WithCancel(t.Context())
+	type result struct {
+		reply      Reply
+		requestErr error
+	}
+	done := make(chan result, 1)
+	go func() {
+		reply, requestErr := thread.RequestWorkspaceApproval(ctx, WorkspaceApprovalRequest{Cwd: "/work/repo"})
+		done <- result{reply: reply, requestErr: requestErr}
+	}()
+	prompt := awaitApprovalPrompt(t, updates)
+	cancel()
+	select {
+	case out := <-done:
+		if out.reply != ReplyCancel {
+			t.Fatalf("reply = %q, want cancel", out.reply)
+		}
+		if out.requestErr == nil {
+			t.Fatal("cancelled trust request returned nil error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled trust request did not return")
+	}
+	if answerErr := thread.Answer(prompt.RequestID, ReplyAccept); !errors.Is(answerErr, ErrUnknownRequest) {
+		t.Fatalf("Answer after cancel = %v, want unknown approval request", answerErr)
+	}
+}
+
+func TestRequestWorkspaceApprovalLinkedDeclineDiscardsPrompt(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	parent := h.start()
+	child, childErr := h.host.Start(t.Context(), ThreadSpec{Parent: parent.ID()})
+	if childErr != nil {
+		t.Fatal(childErr)
+	}
+	updates := child.Subscribe()
+	defer child.Unsubscribe(updates)
+	type result struct {
+		reply      Reply
+		requestErr error
+	}
+	done := make(chan result, 1)
+	go func() {
+		reply, requestErr := child.RequestWorkspaceApproval(t.Context(), WorkspaceApprovalRequest{Cwd: "/work/repo"})
+		done <- result{reply: reply, requestErr: requestErr}
+	}()
+	prompt := awaitApprovalPrompt(t, updates)
+	select {
+	case out := <-done:
+		if out.reply != ReplyDecline {
+			t.Fatalf("reply = %q, want decline", out.reply)
+		}
+		if out.requestErr != nil {
+			t.Fatalf("linked decline returned error %v, want nil", out.requestErr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("linked trust request did not return")
+	}
+	if answerErr := child.Answer(prompt.RequestID, ReplyAccept); !errors.Is(answerErr, ErrUnknownRequest) {
+		t.Fatalf("Answer after linked decline = %v, want unknown approval request", answerErr)
 	}
 }

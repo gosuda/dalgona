@@ -58,3 +58,4 @@ The host MUST ask once per workspace, showing the workspace path with every serv
 
 Opening a thread MUST NOT ask for workspace trust. Discovery that needs approval MUST wait for the first turn, when the actor loop runs and a client can answer the prompt.
 When no thread is available for the approval channel, the host MUST cancel the trust request. The next turn MUST ask again.
+When a trust request ends without an answer, the host MUST discard its pending approval. A later answer for that request MUST fail as an unknown approval request.
