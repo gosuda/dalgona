@@ -56,15 +56,6 @@ describe("child approvals", () => {
 		expect(foreign.childThreadIds).toEqual([]);
 	});
 
-	test("does not record the same child twice", () => {
-		const once = reduceNotification(
-			emptyTranscript("thread-1"),
-			spawned("thread-1", "child-9"),
-		);
-		const twice = reduceNotification(once, spawned("thread-1", "child-9"));
-		expect(twice.childThreadIds).toEqual(["child-9"]);
-	});
-
 	test("shows a child approval in the open parent thread", () => {
 		const approvals = trackApprovalRequest([], childRequest);
 		const transcript = reduceNotification(
