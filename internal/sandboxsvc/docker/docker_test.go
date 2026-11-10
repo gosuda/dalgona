@@ -74,8 +74,12 @@ func newDockerClient(t *testing.T) *client.Client {
 	}
 	pingCtx, cancelPing := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancelPing()
-	if _, pingErr := cli.Ping(pingCtx, client.PingOptions{NegotiateAPIVersion: true}); pingErr != nil {
+	ping, pingErr := cli.Ping(pingCtx, client.PingOptions{NegotiateAPIVersion: true})
+	if pingErr != nil {
 		t.Skipf("Docker daemon did not answer: %v", pingErr)
+	}
+	if ping.OSType != "" && ping.OSType != "linux" {
+		t.Skipf("Docker daemon runs %s containers", ping.OSType)
 	}
 	return cli
 }
