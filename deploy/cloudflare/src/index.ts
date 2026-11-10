@@ -33,7 +33,7 @@ function routedRequest(request: Request, path: "/" | "/bridge"): Request {
 	return new Request(source, request);
 }
 
-async function boxToken(token: string, box: string): Promise<string> {
+export async function boxToken(token: string, box: string): Promise<string> {
 	const key = await crypto.subtle.importKey(
 		"raw",
 		encoder.encode(token),

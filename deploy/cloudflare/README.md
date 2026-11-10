@@ -45,4 +45,6 @@ then runs `just cf-deploy-check` to prove the pin. Commit the result.
 
 `just cf-deploy-check` fails unless the image is a digest pin, so run
 it as the deploy step before `wrangler deploy`. `just cf-check` stays
-limited to typecheck and lint and never blocks on the pin.
+limited to typecheck, lint, and tests and never blocks on the pin.
+
+Run the worker route tests with `pnpm -C deploy/cloudflare test`.

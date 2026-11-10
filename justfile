@@ -42,7 +42,9 @@ web-check:
 cf-check:
     pnpm -C deploy/cloudflare install --frozen-lockfile
     pnpm -C deploy/cloudflare exec tsc --noEmit
+    pnpm -C deploy/cloudflare exec tsc --noEmit -p tsconfig.test.json
     pnpm -C deploy/cloudflare exec biome ci .
+    pnpm -C deploy/cloudflare test
 
 [positional-arguments]
 cf-pin tag:
