@@ -79,7 +79,7 @@ func TestExecBoundsOutputToTail(t *testing.T) {
 	if !result.OK || result.ExitCode == nil || *result.ExitCode != 0 {
 		t.Fatalf("bounded run ok = %v exit = %+v", result.OK, result.ExitCode)
 	}
-	requireBoundedTail(t, string(result.Output), boundedExpectation{data: data, total: total, head: "HEAD-MARKER-0001", tail: "TAIL-MARKER-9999", path: "runs/bound-1/out"})
+	requireBoundedOutput(t, string(result.Output), boundedExpectation{data: data, total: total, head: "HEAD-MARKER-0001", tail: "TAIL-MARKER-9999", path: "runs/bound-1/out"}, string(data[total-boundKeep:]))
 }
 
 type boundedExpectation struct {
@@ -90,11 +90,17 @@ type boundedExpectation struct {
 	path  string
 }
 
-func requireBoundedTail(t *testing.T, got string, want boundedExpectation) {
+func requireBoundedOutput(t *testing.T, got string, want boundedExpectation, window string) {
 	t.Helper()
 	notice := "\n[output truncated: " + strconv.Itoa(want.total) + " bytes total; full output: " + want.path + "; page it with read offset/limit]"
+	if !utf8.ValidString(got) {
+		t.Fatal("bounded result kept part of a rune")
+	}
 	if !strings.HasSuffix(got, notice) {
 		t.Fatalf("result misses total notice, output length = %d", len(got))
+	}
+	if !strings.Contains(got, strconv.Itoa(want.total)) {
+		t.Fatal("bounded result misses the total byte count")
 	}
 	if !strings.Contains(got, want.tail) {
 		t.Fatal("bounded result lost the output tail")
@@ -102,8 +108,12 @@ func requireBoundedTail(t *testing.T, got string, want boundedExpectation) {
 	if strings.Contains(got, want.head) {
 		t.Fatal("bounded result kept the output head")
 	}
-	if got != string(want.data[want.total-boundKeep:])+notice {
-		t.Fatal("bounded result is not the last 64 KiB plus the total notice")
+	if !strings.Contains(got, window) {
+		t.Fatal("bounded result is not the intact tail window from a rune boundary")
+	}
+	body := strings.TrimSuffix(got, notice)
+	if len(body) > boundKeep || len(body) < boundKeep-(utf8.UTFMax-1) {
+		t.Fatalf("bounded result keeps %d bytes, want last 64 KiB from a rune boundary", len(body))
 	}
 }
 
@@ -121,13 +131,5 @@ func TestExecBoundsOutputTrimsPartialRune(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	notice := "\n[output truncated: " + strconv.Itoa(total) + " bytes total; full output: runs/bound-2/out; page it with read offset/limit]"
-	got := string(result.Output)
-	if !utf8.ValidString(got) {
-		t.Fatal("bounded result kept part of a rune")
-	}
-	want := string(data[11:]) + notice
-	if got != want {
-		t.Fatal("bounded result does not start at the first whole rune of the tail")
-	}
+	requireBoundedOutput(t, string(result.Output), boundedExpectation{data: data, total: total, head: "HEADMARK", tail: "TAILMARK", path: "runs/bound-2/out"}, string(data[11:]))
 }
