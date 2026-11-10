@@ -174,38 +174,35 @@ func (s *Store) isCurrent(sid string) (bool, error) {
 }
 
 func (s *Store) loadSession(sid string) error {
-	var oldFile *os.File
-	func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if old := s.sessions[sid]; old != nil {
-			oldFile = old.file
-			old.file = nil
-			old.info = nil
-		}
-	}()
-	var closeErr error
-	if oldFile != nil {
-		closeErr = oldFile.Close()
-	}
 	mirror, err := loadSessionEvents(s.db, sid)
 	if err != nil {
-		return errors.Join(fmt.Errorf("journal: load mirror index %s: %w", sid, err), closeErr)
+		return fmt.Errorf("journal: load mirror index %s: %w", sid, err)
+	}
+	s.mu.Lock()
+	old := s.sessions[sid]
+	var oldFile *os.File
+	if old != nil {
+		oldFile = old.file
+		old.file = nil
+	}
+	s.mu.Unlock()
+	if oldFile != nil {
+		_ = oldFile.Close()
 	}
 	result, err := s.reconcileSession(sid, mirror)
 	if err != nil {
-		return errors.Join(err, closeErr)
+		return err
 	}
 	info, err := os.Stat(s.journalPath(sid))
 	if err != nil {
-		return errors.Join(fmt.Errorf("journal: stat %s: %w", sid, err), closeErr)
+		return fmt.Errorf("journal: stat %s: %w", sid, err)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	st := stateOf(result)
 	st.info = info
 	s.sessions[sid] = st
-	return closeErr
+	s.mu.Unlock()
+	return nil
 }
 
 func (st *sessionState) observe(file *os.File) {

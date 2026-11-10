@@ -603,3 +603,65 @@ func TestReplaySeesDamageUnderOwnSessionLock(t *testing.T) {
 	mustRelease(t, release)
 	closeStore(t, store)
 }
+
+func poisonMirror(t *testing.T, store *Store) func() {
+	t.Helper()
+	bad, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open scratch db: %v", err)
+	}
+	_ = bad.Close()
+	orig := store.db
+	store.db = bad
+	return func() { store.db = orig }
+}
+
+func cachedHandle(t *testing.T, store *Store, session string) *os.File {
+	t.Helper()
+	st := store.sessions[session]
+	if st == nil || st.file == nil || st.info == nil {
+		t.Fatalf("session was not cached with an open handle")
+	}
+	return st.file
+}
+
+func requireCachedHandle(t *testing.T, store *Store, session string, want *os.File) {
+	t.Helper()
+	kept := store.sessions[session]
+	if kept == nil || kept.file != want {
+		t.Fatal("failed reload dropped the cached append handle")
+	}
+	if kept.info == nil {
+		t.Fatal("failed reload dropped the cached file identity")
+	}
+}
+
+func TestLoadSessionFailureKeepsCachedEntry(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpenShared(t, dir)
+	release := mustLockSession(t, dir, "s")
+	if _, err := store.Append(t.Context(), "s", event(0)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	mustRelease(t, release)
+	oldFile := cachedHandle(t, store, "s")
+	restore := poisonMirror(t, store)
+	loadErr := store.loadSession("s")
+	restore()
+	if loadErr == nil {
+		t.Fatal("loadSession with an unusable mirror succeeded")
+	}
+	requireCachedHandle(t, store, "s", oldFile)
+	if _, err := oldFile.Stat(); err != nil {
+		t.Fatalf("cached handle is unusable after failed reload: %v", err)
+	}
+	if err := store.loadSession("s"); err != nil {
+		t.Fatalf("reload after mirror recovery: %v", err)
+	}
+	release = mustLockSession(t, dir, "s")
+	if _, err := store.Append(t.Context(), "s", event(1)); err != nil {
+		t.Fatalf("Append after recovery: %v", err)
+	}
+	mustRelease(t, release)
+	requireEvents(t, replayEvents(t, store, "s"), [][]byte{event(0), event(1)})
+}
