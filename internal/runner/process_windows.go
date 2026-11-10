@@ -9,7 +9,9 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -36,6 +38,34 @@ func startDetached(ctx context.Context, self string, args []string, spec Process
 }
 
 func configureProcessGroup(cmd *exec.Cmd) {}
+
+func configureShimCommand(cmd *exec.Cmd, argv []string) {
+	command, ok := splitWindowsShellCommand(argv)
+	if !ok {
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	shape := WindowsShellArgv("")
+	cmd.SysProcAttr.CmdLine = shape[0] + " /S " + shape[1] + ` "` + command + `"`
+}
+
+func splitWindowsShellCommand(argv []string) (string, bool) {
+	shape := WindowsShellArgv("")
+	if len(argv) != len(shape) {
+		return "", false
+	}
+	base := strings.ToLower(filepath.Base(argv[0]))
+	shell := strings.ToLower(shape[0])
+	if base != shell && base != shell+".exe" {
+		return "", false
+	}
+	if !strings.EqualFold(argv[1], shape[1]) {
+		return "", false
+	}
+	return argv[2], true
+}
 
 func signalProcess(shimPID int, pgid int, signal Signal) error {
 	job, err := openJobObject(jobName(shimPID))

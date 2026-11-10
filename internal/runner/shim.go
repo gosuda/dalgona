@@ -156,7 +156,12 @@ func commandForShim(argv []string) (*exec.Cmd, error) {
 	cmd.Dir = os.Getenv("DALGONA_RUN_CWD")
 	cmd.Env = shimEnv(os.Environ())
 	cmd.Args[0] = path
+	configureShimCommand(cmd, argv)
 	return cmd, nil
+}
+
+func WindowsShellArgv(command string) []string {
+	return []string{"cmd", "/C", command}
 }
 
 func currentSandbox() Sandbox {

@@ -23,6 +23,9 @@ func TestMain(m *testing.M) {
 	if handled, code := dispatchDialProbe(); handled {
 		os.Exit(code)
 	}
+	if mode := os.Getenv("DALGONA_WINDOWS_SHIM_TEST_HELPER"); mode != "" {
+		os.Exit(runWindowsShimHelper(mode))
+	}
 	os.Exit(m.Run())
 }
 

@@ -12,7 +12,7 @@ The parent MUST start the shim detached. The invocation MUST be `<self> __shim -
 
 The shim MUST write `pid` before it starts the command. `pid` MUST store the process id and the process start time. Recovery and `Read` MUST accept a process only when both values match. A recycled process id MUST NOT count as the shim. `Start` MUST write `pid` before it returns. The parent MUST write the same values as the shim. The first `Read` after `Start` MUST report a live process when no `exit` exists.
 
-The shim MUST start the command in a new process group on Unix. It MUST record the group id in `pgid`. On Windows it MUST assign the command to a named job object. The parent MUST reap the shim without waiting for the command in the caller.
+The shim MUST start the command in a new process group on Unix. It MUST record the group id in `pgid`. On Windows it MUST assign the command to a named job object. On Windows the shim MUST run a `cmd /C <command>` argv verbatim as `cmd /S /C "<command>"`. The `/S` switch MUST make `cmd` strip exactly the outer quote pair. The parent MUST reap the shim without waiting for the command in the caller.
 
 `Read` MUST take a byte offset into `out`. It MUST return `Data`, `Next`, `Exit`, `Alive`, and `Path`. `Data` MUST be the bytes from the offset. `Next` MUST be the next unread offset. `Exit` MUST be the exit record when `exit` exists, otherwise unset. `Alive` MUST be true only when the stored pid and start time still name the shim. `Path` MUST name the `out` file. `Read` MUST check `exit` before taking the final output snapshot, and when `exit` appears after an empty check it MUST drain `out` again. A terminal response MUST carry every byte written before the exit record, across as many pages as that takes.
 

@@ -368,7 +368,7 @@ func shellArgvForHost(run runner.Runner, hostGOOS, command string) []string {
 		return []string{"sh", "-c", command}
 	}
 	if hostGOOS == "windows" {
-		return []string{"cmd", "/C", command}
+		return runner.WindowsShellArgv(command)
 	}
 	return []string{"sh", "-c", command}
 }

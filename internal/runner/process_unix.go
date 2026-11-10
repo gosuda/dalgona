@@ -103,6 +103,10 @@ func configureProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+func configureShimCommand(_ *exec.Cmd, _ []string) {}
+
+func runWindowsShimHelper(_ string) int { return 2 }
+
 func processIsAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
