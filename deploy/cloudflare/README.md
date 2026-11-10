@@ -1,5 +1,16 @@
 # dalgona-box on Cloudflare
 
+## Box tokens
+
+The Go client sends `DALGONA_TOKEN` to the worker. The worker checks
+it in constant time and accepts only that value. Each box gets its own
+token. The token is HMAC-SHA256 over the box name keyed by
+`DALGONA_TOKEN`. The durable object reads the box name from
+`ctx.id.name` and fails with 500 when it is missing. It sets
+`DALGONA_BOX_TOKEN` to the box token and replaces the Authorization
+header with the box token before proxying into the container. A box
+token cannot call worker routes.
+
 Release flow for the box container image.
 
 ## Publish
