@@ -8,6 +8,20 @@ import type {
 	TurnStatus,
 } from "./types";
 
+export type KnownChildThreads = Readonly<Record<string, readonly string[]>>;
+
+export function recordChildThread(
+	known: KnownChildThreads,
+	threadId: string,
+	childId: string,
+): KnownChildThreads {
+	const existing: readonly string[] = known[threadId] ?? [];
+	if (existing.includes(childId)) {
+		return known;
+	}
+	return { ...known, [threadId]: [...existing, childId] };
+}
+
 export function emptyTranscript(threadId: string | null): TranscriptState {
 	return {
 		threadId,
@@ -20,7 +34,10 @@ export function emptyTranscript(threadId: string | null): TranscriptState {
 	};
 }
 
-export function transcriptForThread(thread: ThreadDetail): TranscriptState {
+export function transcriptForThread(
+	thread: ThreadDetail,
+	knownChildren: KnownChildThreads = {},
+): TranscriptState {
 	const items: TranscriptItem[] = [];
 	let turnId: string | null = null;
 	let turnStatus: TurnStatus | null = null;
@@ -33,6 +50,7 @@ export function transcriptForThread(thread: ThreadDetail): TranscriptState {
 			items.push(item);
 		}
 	}
+	const preserved: readonly string[] = knownChildren[thread.summary.id] ?? [];
 	return {
 		threadId: thread.summary.id,
 		turnId,
@@ -40,7 +58,7 @@ export function transcriptForThread(thread: ThreadDetail): TranscriptState {
 		items,
 		error,
 		plan: null,
-		childThreadIds: [],
+		childThreadIds: [...preserved],
 	};
 }
 
@@ -171,14 +189,19 @@ export function reduceNotification(
 	notification: AppNotification,
 ): TranscriptState {
 	switch (notification.type) {
-		case "threadStarted":
+		case "threadStarted": {
 			if (
 				state.threadId !== null &&
 				notification.thread.summary.id !== state.threadId
 			) {
 				return state;
 			}
-			return transcriptForThread(notification.thread);
+			const rebuilt = transcriptForThread(notification.thread);
+			if (state.threadId !== null && state.threadId === rebuilt.threadId) {
+				return { ...rebuilt, childThreadIds: [...state.childThreadIds] };
+			}
+			return rebuilt;
+		}
 		case "threadStatus":
 		case "threadName":
 		case "advisorNote":

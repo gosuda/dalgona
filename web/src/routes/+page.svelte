@@ -14,6 +14,7 @@ import {
 	rpcSocketUrl,
 	tokenFromHash,
 } from "#lib/protocol.ts";
+import type { KnownChildThreads } from "#lib/reducer.ts";
 import {
 	activeApproval,
 	dropSentFollowup,
@@ -21,6 +22,7 @@ import {
 	isSentFollowupAtHead,
 	itemsAwaitingApproval,
 	otherThreadApprovalCount,
+	recordChildThread,
 	reduceNotification,
 	requeueFailedFollowup,
 	resolveApprovalRequest,
@@ -69,6 +71,7 @@ let status = $state<StatusInfo>({
 let keywords = $state<readonly KeywordDefinition[]>([]);
 let advisor = $state<AdvisorSummary>({ kind: "unknown" });
 let approvals = $state<readonly ApprovalRequest[]>([]);
+let knownChildren = $state<KnownChildThreads>({});
 let queuedFollowups = $state<readonly string[]>([]);
 let loadingThreads = $state(false);
 let loadingTranscript = $state(false);
@@ -325,7 +328,7 @@ async function selectThread(threadId: string): Promise<void> {
 		upsertThread(result.thread);
 		if (threadId !== activeThreadId) queuedFollowups = [];
 		activeThreadId = threadId;
-		transcript = transcriptForThread(result.thread);
+		transcript = transcriptForThread(result.thread, knownChildren);
 		advisor = { kind: "unknown" };
 		errorMessage = "";
 		status = result.status;
@@ -351,7 +354,7 @@ async function readThread(threadId: string, selection: number): Promise<void> {
 		parseThreadReadResponse,
 	);
 	if (selection === selectionGeneration)
-		transcript = transcriptForThread(thread);
+		transcript = transcriptForThread(thread, knownChildren);
 }
 
 async function createThread(): Promise<void> {
@@ -516,6 +519,14 @@ function handleNotification(notification: AppNotification): void {
 					: thread,
 			);
 			break;
+		case "childSpawned":
+			knownChildren = recordChildThread(
+				knownChildren,
+				notification.threadId,
+				notification.childId,
+			);
+			transcript = reduceNotification(transcript, notification);
+			break;
 		case "plan":
 		case "turnStarted":
 		case "turnCompleted":
@@ -523,8 +534,6 @@ function handleNotification(notification: AppNotification): void {
 		case "itemCompleted":
 		case "delta":
 		case "error":
-		case "childSpawned":
-			transcript = reduceNotification(transcript, notification);
 			if (
 				notification.type === "turnCompleted" &&
 				notification.threadId === activeThreadId &&

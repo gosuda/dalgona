@@ -112,7 +112,7 @@ No advisor failure opens the error banner.
 
 ### Approvals
 
-The client records child threads from `dalgona/thread/childSpawned`. An approval from a child of the open thread MUST appear in the approval dialog of the open thread. The answer MUST carry the child request id. An approval from any other thread MUST count as waiting on another thread.
+The client records child threads from `dalgona/thread/childSpawned`. An approval from a child of the open thread MUST appear in the approval dialog of the open thread. The answer MUST carry the child request id. An approval from any other thread MUST count as waiting on another thread. The client MUST keep child links per parent thread id when it rebuilds the transcript from `thread/resume` or `thread/read`. It MUST NOT apply links from another thread.
 
 ### Empty states and errors
 

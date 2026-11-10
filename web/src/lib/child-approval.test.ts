@@ -3,11 +3,14 @@ import {
 	activeApproval,
 	emptyTranscript,
 	itemsAwaitingApproval,
+	type KnownChildThreads,
 	otherThreadApprovalCount,
+	recordChildThread,
 	reduceNotification,
 	trackApprovalRequest,
+	transcriptForThread,
 } from "./reducer";
-import type { ApprovalRequest } from "./types";
+import type { ApprovalRequest, ThreadDetail } from "./types";
 import { parseNotification } from "./validation";
 
 const childRequest: ApprovalRequest = {
@@ -26,6 +29,21 @@ function spawned(threadId: string, childId: string) {
 		type: "childSpawned" as const,
 		threadId,
 		childId,
+	};
+}
+
+function parentDetail(id: string): ThreadDetail {
+	return {
+		summary: {
+			id,
+			title: "notes",
+			preview: "notes",
+			status: "idle",
+			updatedAt: 10,
+			model: "gpt",
+			cwd: "/work",
+		},
+		turns: [],
 	};
 }
 
@@ -64,7 +82,7 @@ describe("child approvals", () => {
 		);
 		expect(
 			activeApproval(approvals, "thread-1", transcript.childThreadIds),
-		).toBe(childRequest);
+		).toStrictEqual(childRequest);
 		expect(
 			otherThreadApprovalCount(
 				approvals,
@@ -90,5 +108,36 @@ describe("child approvals", () => {
 		expect(otherThreadApprovalCount(approvals, "thread-1", ["child-9"])).toBe(
 			1,
 		);
+	});
+
+	test("keeps a child approval visible after the parent reopens", () => {
+		let known: KnownChildThreads = {};
+		known = recordChildThread(known, "thread-1", "child-9");
+		const approvals = trackApprovalRequest([], childRequest);
+		const reopened = transcriptForThread(parentDetail("thread-1"), known);
+		expect(
+			activeApproval(approvals, reopened.threadId, reopened.childThreadIds),
+		).toStrictEqual(childRequest);
+		expect(
+			otherThreadApprovalCount(
+				approvals,
+				reopened.threadId,
+				reopened.childThreadIds,
+			),
+		).toBe(0);
+		expect(
+			itemsAwaitingApproval(
+				approvals,
+				reopened.threadId,
+				reopened.childThreadIds,
+			).has("cmd-9"),
+		).toBe(true);
+	});
+
+	test("scopes reopened child links to the reopened thread", () => {
+		let known: KnownChildThreads = {};
+		known = recordChildThread(known, "thread-1", "child-9");
+		const reopened = transcriptForThread(parentDetail("thread-2"), known);
+		expect(reopened.childThreadIds).toEqual([]);
 	});
 });
