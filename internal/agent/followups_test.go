@@ -238,9 +238,12 @@ func TestToolsAndSkillsFollowTheThreadCwd(t *testing.T) {
 		}
 	})
 	other := t.TempDir()
-	if _, err := h.host.Start(t.Context(), ThreadSpec{Cwd: other}); err != nil {
+	thread, err := h.host.Start(t.Context(), ThreadSpec{Cwd: other})
+	if err != nil {
 		t.Fatal(err)
 	}
+	h.submit(thread, "hi")
+	h.waitIdle(thread)
 	mu.Lock()
 	defer mu.Unlock()
 	if !slices.Equal(toolCwds, []string{other}) || !slices.Equal(skillCwds, []string{other}) {

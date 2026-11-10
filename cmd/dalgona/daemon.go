@@ -73,8 +73,8 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 
 func workspaceTrustDecision(ctx context.Context, cwd string, servers []discovery.MCPServer) battery.TrustDecision {
 	thread, ok := agent.ThreadFromContext(ctx)
-	if !ok || thread == nil {
-		return battery.TrustRefuse
+	if !ok {
+		return battery.TrustCancel
 	}
 	req := agent.WorkspaceApprovalRequest{Cwd: cwd, Servers: workspaceApprovalServers(servers)}
 	reply, err := thread.RequestWorkspaceApproval(ctx, req)

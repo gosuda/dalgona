@@ -23,6 +23,9 @@ type preparedInput struct {
 }
 
 func (t *Thread) Submit(ctx context.Context, in Input) error {
+	if err := t.ensureTools(ctx); err != nil {
+		return err
+	}
 	prepared, err := t.prepareInput(in)
 	if err != nil {
 		return err
@@ -58,7 +61,7 @@ func (t *Thread) prepareInput(in Input) (preparedInput, error) {
 }
 
 func (t *Thread) annotate(out *preparedInput, text string) error {
-	for _, word := range keywords.Match(text, t.host.keywords, t.currentTools().names) {
+	for _, word := range keywords.Match(text, t.host.keywords, t.toolNames()) {
 		maskedNotice, err := t.host.mask(word.Notice)
 		if err != nil {
 			return err

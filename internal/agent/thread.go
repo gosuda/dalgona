@@ -169,9 +169,6 @@ func (t *Thread) prepare(ctx context.Context, loaded loadedSession, overrides Ov
 	if t.fixedTools == nil && t.host.cfg.Extension != nil {
 		t.ext = t.host.cfg.Extension(t)
 	}
-	if _, err := t.toolsFor(ctx, pathSettings(loaded.created, loaded.records).Model); err != nil {
-		return err
-	}
 	system, err := t.systemPrompt(overrides.System)
 	if err != nil {
 		return err
@@ -215,6 +212,26 @@ func (t *Thread) currentTools() *toolset {
 	t.toolsMu.Lock()
 	defer t.toolsMu.Unlock()
 	return t.toolset
+}
+
+func (t *Thread) toolNames() []string {
+	set := t.currentTools()
+	if set == nil {
+		return nil
+	}
+	return set.names
+}
+
+func (t *Thread) ensureTools(ctx context.Context) error {
+	if t.currentTools() != nil {
+		return nil
+	}
+	v, err := t.view()
+	if err != nil {
+		return err
+	}
+	_, err = t.toolsFor(ctx, pathSettings(t.created, v.records).Model)
+	return err
 }
 
 func (t *Thread) toolsFor(ctx context.Context, modelID string) (*toolset, error) {
