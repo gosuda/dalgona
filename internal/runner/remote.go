@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"path"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 )
@@ -326,7 +326,14 @@ func stagingPath(dest string) (string, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", fmt.Errorf("runner: stage upload: %w", err)
 	}
-	return path.Join(path.Dir(dest), fmt.Sprintf(".dalgona-partial-%x", nonce)), nil
+	name := fmt.Sprintf(".dalgona-partial-%x", nonce)
+	if i := strings.LastIndexByte(dest, '/'); i >= 0 {
+		return dest[:i+1] + name, nil
+	}
+	if i := strings.LastIndexByte(dest, '\\'); i >= 0 {
+		return dest[:i+1] + name, nil
+	}
+	return name, nil
 }
 
 func (r *Remote) Stat(ctx context.Context, path string) (FileInfo, error) {
