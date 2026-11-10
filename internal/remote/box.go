@@ -64,14 +64,42 @@ func (l *link) boxPath(p string) string {
 	if p == "" {
 		return boxWorkspace
 	}
-	if !filepath.IsAbs(p) || l.cwd == "" {
+	if l.cwd == "" {
 		return p
 	}
-	rel, err := filepath.Rel(l.cwd, p)
+	if rel, ok := posixRel(l.cwd, p); ok {
+		return path.Join(boxWorkspace, rel)
+	}
+	if rel, ok := hostRel(l.cwd, p); ok {
+		return path.Join(boxWorkspace, rel)
+	}
+	return p
+}
+
+func posixRel(cwd, p string) (string, bool) {
+	if !path.IsAbs(cwd) || !path.IsAbs(p) {
+		return "", false
+	}
+	cwd = path.Clean(cwd)
+	p = path.Clean(p)
+	if p == cwd {
+		return ".", true
+	}
+	if cwd == "/" {
+		return strings.TrimPrefix(p, "/"), true
+	}
+	return strings.CutPrefix(p, cwd+"/")
+}
+
+func hostRel(cwd, p string) (string, bool) {
+	if !filepath.IsAbs(cwd) || !filepath.IsAbs(p) {
+		return "", false
+	}
+	rel, err := filepath.Rel(cwd, p)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return p
+		return "", false
 	}
-	return path.Join(boxWorkspace, filepath.ToSlash(rel))
+	return filepath.ToSlash(rel), true
 }
 
 type boxRunner struct {
