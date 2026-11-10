@@ -299,6 +299,9 @@ func scanFile(entry fileEntry, matcher *regexp.Regexp) (grepFile, []int) {
 			ordered = append(ordered, i+1)
 		}
 	}
+	if len(ordered) == 0 {
+		return grepFile{}, nil
+	}
 	return grepFile{entry: entry, data: data, starts: starts}, ordered
 }
 
