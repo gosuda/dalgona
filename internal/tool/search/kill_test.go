@@ -23,11 +23,8 @@ func (r *failReadRunner) Start(ctx context.Context, spec runner.ProcessSpec) err
 	return r.Runner.Start(ctx, spec)
 }
 
-func (r *failReadRunner) Read(ctx context.Context, id string, offset int64) (runner.Output, error) {
-	if offset > 0 {
-		return runner.Output{}, errors.New("injected read failure")
-	}
-	return r.Runner.Read(ctx, id, offset)
+func (r *failReadRunner) Read(context.Context, string, int64) (runner.Output, error) {
+	return runner.Output{}, errors.New("injected read failure")
 }
 
 func (r *failReadRunner) Signal(ctx context.Context, id string, signal runner.Signal) error {
