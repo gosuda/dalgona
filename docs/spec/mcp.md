@@ -22,7 +22,7 @@ A stdio request MUST finish within five minutes unless its caller sets an earlie
 
 A process crash MUST invalidate the transport. The client MUST restart the process, repeat initialization, and retry the interrupted request once. The client MUST return the second failure without another retry.
 
-Closing the client MUST close standard input, terminate the whole process group, and reap the direct child. The transport MUST bound pipe waits with WaitDelay so a grandchild holding stdout cannot hang Close.
+Closing the client MUST close standard input, terminate the whole process group, and reap the direct child. Terminating a child that already exited MUST succeed. The transport MUST bound pipe waits with WaitDelay so a grandchild holding stdout cannot hang Close.
 
 ## Streamable HTTP transport
 
