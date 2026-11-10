@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -69,10 +70,11 @@ func TestSessionInfoPropagatesJournalIOError(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("agent: remove journal: %v", err)
 	}
-	if err := os.Mkdir(path, 0o755); err != nil {
-		t.Fatalf("agent: replace journal with dir: %v", err)
-	}
-	if _, err := h.host.sessionInfo(journal.SessionHead{ID: id, HeadSeq: head}); err == nil {
+	_, err := h.host.sessionInfo(journal.SessionHead{ID: id, HeadSeq: head})
+	if err == nil {
 		t.Fatal("agent: sessionInfo hid journal I/O error as damaged")
+	}
+	if _, damaged := errors.AsType[*journal.DamageError](err); damaged || errors.Is(err, errFoldDamaged) {
+		t.Fatalf("agent: sessionInfo reported journal I/O error as damage: %v", err)
 	}
 }
