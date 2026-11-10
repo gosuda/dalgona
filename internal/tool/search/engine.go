@@ -304,7 +304,7 @@ func scanFile(entry fileEntry, matcher *regexp.Regexp) (grepFile, []int) {
 
 func searchableFile(path string) bool {
 	info, err := os.Lstat(path)
-	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.Size() <= maxSearchFileBytes
+	return err == nil && info.Mode().IsRegular() && info.Size() <= maxSearchFileBytes
 }
 
 func searchableText(data []byte) bool {
