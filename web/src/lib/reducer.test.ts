@@ -516,4 +516,74 @@ describe("open thread notification", () => {
 		expect(update.knownChildren).toBe(knownChildren);
 		expect(update.sendFollowup).toBe(false);
 	});
+
+	test("a failed turn ends the running state without allowing the queued follow-up", () => {
+		const running = applyOpenThreadNotification(
+			{
+				transcript: emptyTranscript("thread-1"),
+				knownChildren: {},
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "turnStarted",
+				threadId: "thread-1",
+				turn: { id: "turn-1", status: "inProgress", items: [], error: null },
+			},
+		);
+		const done = applyOpenThreadNotification(
+			{
+				transcript: running.transcript,
+				knownChildren: running.knownChildren,
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "turnCompleted",
+				threadId: "thread-1",
+				turn: { id: "turn-1", status: "failed", items: [], error: "boom" },
+			},
+		);
+		expect(done.transcript.turnStatus).toBe("failed");
+		expect(done.transcript.error).toBe("boom");
+		expect(done.sendFollowup).toBe(false);
+	});
+
+	test("an interrupted turn ends the running state without allowing the queued follow-up", () => {
+		const running = applyOpenThreadNotification(
+			{
+				transcript: emptyTranscript("thread-1"),
+				knownChildren: {},
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "turnStarted",
+				threadId: "thread-1",
+				turn: { id: "turn-1", status: "inProgress", items: [], error: null },
+			},
+		);
+		const done = applyOpenThreadNotification(
+			{
+				transcript: running.transcript,
+				knownChildren: running.knownChildren,
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "turnCompleted",
+				threadId: "thread-1",
+				turn: { id: "turn-1", status: "interrupted", items: [], error: null },
+			},
+		);
+		expect(done.transcript.turnStatus).toBe("interrupted");
+		expect(done.sendFollowup).toBe(false);
+	});
+
+	test("a child spawned on another thread records the link and leaves the open transcript", () => {
+		const transcript = emptyTranscript("thread-1");
+		const update = applyOpenThreadNotification(
+			{ transcript, knownChildren: {}, activeThreadId: "thread-1" },
+			{ type: "childSpawned", threadId: "thread-2", childId: "child-9" },
+		);
+		expect(update.knownChildren).toEqual({ "thread-2": ["child-9"] });
+		expect(update.transcript).toBe(transcript);
+		expect(update.sendFollowup).toBe(false);
+	});
 });
