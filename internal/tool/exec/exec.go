@@ -273,7 +273,7 @@ func (t *Tool) wait(ctx context.Context, run runner.Runner, id string, timeout t
 	for {
 		current, readErr := run.Read(waitCtx, id, state.offset)
 		if readErr != nil {
-			readErr = timeoutCauseOr(readErr, waitCtx, ctx, timeoutErr)
+			readErr = timeoutCauseOr(readErr, waitCtx, ctx)
 			return t.terminate(run, id, state, readErr)
 		}
 		state.appendOutput(current.Data)
@@ -293,7 +293,7 @@ func (t *Tool) wait(ctx context.Context, run runner.Runner, id string, timeout t
 	}
 }
 
-func timeoutCauseOr(readErr error, waitCtx context.Context, parent context.Context, timeoutErr error) error {
+func timeoutCauseOr(readErr error, waitCtx context.Context, parent context.Context) error {
 	if parent.Err() != nil {
 		return readErr
 	}
@@ -303,11 +303,7 @@ func timeoutCauseOr(readErr error, waitCtx context.Context, parent context.Conte
 	if !errors.Is(readErr, context.DeadlineExceeded) && !errors.Is(readErr, context.Canceled) {
 		return readErr
 	}
-	cause := context.Cause(waitCtx)
-	if cause == nil {
-		return timeoutErr
-	}
-	return cause
+	return context.Cause(waitCtx)
 }
 
 func (t *Tool) terminate(run runner.Runner, id string, state waitState, cause error) (tool.Result, error) {
