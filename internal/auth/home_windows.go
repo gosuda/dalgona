@@ -71,16 +71,53 @@ func CheckHomeDir(dir string) error {
 	if userErr != nil {
 		return userErr
 	}
-	return checkHomeSDDL(dir, sd.String(), user.String())
+	system, systemErr := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if systemErr != nil {
+		return systemErr
+	}
+	admins, adminsErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if adminsErr != nil {
+		return adminsErr
+	}
+	return checkHomeSDDLAllow(dir, sd.String(), homeTrusteeAllow(user, system, admins))
+}
+
+func homeTrusteeAllow(user, system, admins *windows.SID) func(string) (bool, string) {
+	allowed := []*windows.SID{user, system, admins}
+	return func(principal string) (bool, string) {
+		sid, sidErr := sddlTrusteeSID(principal, user, system, admins)
+		if sidErr != nil {
+			return false, principal
+		}
+		for _, want := range allowed {
+			if sid.Equals(want) {
+				return true, ""
+			}
+		}
+		return false, sid.String()
+	}
+}
+
+func sddlTrusteeSID(principal string, user, system, admins *windows.SID) (*windows.SID, error) {
+	switch principal {
+	case "LA":
+		if user.IsWellKnown(windows.WinAccountAdministratorSid) {
+			return user, nil
+		}
+		return nil, errors.New("auth: home grants access to a foreign administrator")
+	case "SY":
+		return system, nil
+	case "BA":
+		return admins, nil
+	case "WD":
+		return windows.CreateWellKnownSid(windows.WinWorldSid)
+	default:
+		return windows.StringToSid(principal)
+	}
 }
 
 func currentUserSID() (*windows.SID, error) {
-	var token windows.Token
-	if openErr := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); openErr != nil {
-		return nil, openErr
-	}
-	defer func() { _ = token.Close() }()
-	info, infoErr := token.GetTokenUser()
+	info, infoErr := windows.GetCurrentProcessToken().GetTokenUser()
 	if infoErr != nil {
 		return nil, infoErr
 	}

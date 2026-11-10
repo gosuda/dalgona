@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func checkHomeSDDL(dir, sddl, user string) error {
+func checkHomeSDDLAllow(dir, sddl string, allow func(principal string) (bool, string)) error {
 	entries, protected, sectionErr := homeDACLSection(dir, sddl)
 	if sectionErr != nil {
 		return sectionErr
@@ -21,12 +21,14 @@ func checkHomeSDDL(dir, sddl, user string) error {
 		if !ok {
 			return fmt.Errorf("auth: home %s has malformed ACL", dir)
 		}
-		allowed, known := homeACEAllowed(aceType, principal, user)
+		allowType, known := homeACETypeAllows(aceType)
 		if !known {
 			return fmt.Errorf("auth: home %s has unknown ACE type %s", dir, aceType)
 		}
-		if !allowed {
-			return fmt.Errorf("auth: home %s grants access to %s", dir, canonicalPrincipalSID(principal))
+		if allowType {
+			if allowed, display := allow(principal); !allowed {
+				return fmt.Errorf("auth: home %s grants access to %s", dir, display)
+			}
 		}
 	}
 	return nil
@@ -40,12 +42,12 @@ func aceFields(entry string) (string, string, bool) {
 	return parts[0], parts[5], true
 }
 
-func homeACEAllowed(aceType, principal, user string) (bool, bool) {
+func homeACETypeAllows(aceType string) (bool, bool) {
 	switch aceType {
 	case "A", "OA", "XA", "ZA":
-		return homePrincipalAllowed(principal, user), true
-	case "D", "OD", "XD", "AU", "AL", "OU", "OL", "ML", "RA", "SP", "XU", "TL", "FL":
 		return true, true
+	case "D", "OD", "XD", "AU", "AL", "OU", "OL", "ML", "RA", "SP", "XU", "TL", "FL":
+		return false, true
 	default:
 		return false, false
 	}
@@ -114,26 +116,4 @@ func splitACEEntries(body string) ([]string, bool) {
 		return nil, false
 	}
 	return entries, true
-}
-
-func canonicalPrincipalSID(principal string) string {
-	switch principal {
-	case "SY":
-		return "S-1-5-18"
-	case "BA":
-		return "S-1-5-32-544"
-	case "WD":
-		return "S-1-1-0"
-	default:
-		return principal
-	}
-}
-
-func homePrincipalAllowed(principal, user string) bool {
-	switch canonicalPrincipalSID(principal) {
-	case user, "S-1-5-18", "S-1-5-32-544":
-		return true
-	default:
-		return false
-	}
 }
