@@ -86,7 +86,7 @@ func TestOpenPinnedRefusesSymlinks(t *testing.T) {
 
 func TestOpenPinnedRefusesEscape(t *testing.T) {
 	root, _ := pinnedRoot(t)
-	for _, rel := range []string{"../escape", "sub/../../escape", "/abs"} {
+	for _, rel := range []string{"../escape", "sub/../../escape", "/abs", "//abs", "/sub/../escape", "sub/../../../escape"} {
 		if _, err := OpenPinned(root, rel); !errors.Is(err, ErrPinnedEscape) {
 			t.Fatalf("escape %q error = %v, want ErrPinnedEscape", rel, err)
 		}

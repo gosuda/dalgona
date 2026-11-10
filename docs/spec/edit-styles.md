@@ -16,7 +16,7 @@ A parser MUST NOT read or write a target file. One resolver MUST validate guards
 
 Each file MUST be valid UTF-8 text of at most 16 MiB. The resolver MUST reject NUL bytes. It MUST preserve a BOM, mixed line endings, and an unterminated final line. Inserted text MUST use CRLF only when CRLF is dominant in the source file.
 
-Paths MUST remain below the session workspace. Absolute paths, NUL bytes, and parent traversal outside the workspace MUST fail. A rename destination MUST NOT contain parent traversal.
+Paths MUST remain below the session workspace. Absolute paths, NUL bytes, and parent traversal outside the workspace MUST fail. Rooted paths and paths with a volume name MUST fail the same way as absolute paths. A rename destination MUST NOT contain parent traversal.
 
 ## Grammars
 
