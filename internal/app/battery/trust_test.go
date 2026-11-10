@@ -21,6 +21,7 @@ func trustEnv(t *testing.T, configBody string) (dalHome, userHome string) {
 	userHome = t.TempDir()
 	t.Setenv("DALGONA_HOME", dalHome)
 	t.Setenv("HOME", userHome)
+	t.Setenv("USERPROFILE", userHome)
 	if configBody != "" {
 		if err := os.WriteFile(filepath.Join(dalHome, "config.toml"), []byte(configBody), 0o600); err != nil {
 			t.Fatal(err)

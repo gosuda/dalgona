@@ -33,13 +33,8 @@ func buildMCPServer(t *testing.T) string {
 
 func dalgonaHome(t *testing.T, server string) string {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("DALGONA_HOME", home)
-	t.Setenv("HOME", t.TempDir())
 	settings := "[mcp_servers.fix]\ncommand = " + strconv.Quote(server) + "\n"
-	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(settings), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	home, _ := trustEnv(t, settings)
 	writeSkill(t, filepath.Join(home, "skills"), "review", "Review a diff.")
 	return home
 }
