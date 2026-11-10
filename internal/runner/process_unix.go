@@ -48,13 +48,17 @@ func processGroupGone(pgid int) bool {
 	return errors.Is(probeErr, syscall.EPERM) && processGroupDrained(pgid)
 }
 
+func processGroupStopped(pgid int) bool {
+	return processGroupGone(pgid) || processGroupDrained(pgid)
+}
+
 func ensureProcessGroupGone(pgid int, signal Signal) {
 	if pgid <= 0 {
 		return
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if processGroupGone(pgid) {
+		if processGroupStopped(pgid) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -70,7 +74,7 @@ func stopSpawnGroup(string, int) bool { return false }
 func killSpawnGroup(shimPID int, pgid int) bool {
 	_ = signalProcess(shimPID, pgid, SignalKill)
 	ensureProcessGroupGone(pgid, SignalKill)
-	return processGroupGone(pgid)
+	return processGroupStopped(pgid)
 }
 
 func watchCancelWhileWaiting(dir string, pgid int, done <-chan struct{}) {

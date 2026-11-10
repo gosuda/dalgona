@@ -89,7 +89,7 @@ func TestLocal_spawnFailureKillsCommand(t *testing.T) {
 		t.Fatalf("Start error = %v, want test spawn failure", err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for !processGroupGone(target) {
+	for !processGroupStopped(target) {
 		if time.Now().After(deadline) {
 			t.Fatalf("process group %d outlived the failed start", target)
 		}
