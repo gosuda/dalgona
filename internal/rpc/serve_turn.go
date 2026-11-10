@@ -187,17 +187,17 @@ func (s *server) turnSteer(ctx context.Context, params jsontext.Value) (jsontext
 	if err != nil {
 		return nil, err
 	}
+	expected := cmp.Or(p.expectedTurnID, p.turnID)
+	in := agent.Input{Kind: agent.InputSteer, Text: strings.Join(p.text, "\n"), ExpectedTurnID: expected}
+	if err = thread.Submit(ctx, in); err != nil {
+		return nil, hostError(err, p.threadID, expected)
+	}
+	if expected != "" {
+		return encode(TurnSteerResponse{TurnID: expected})
+	}
 	status, err := thread.Status()
 	if err != nil {
 		return nil, hostError(err, p.threadID, "")
-	}
-	expected := cmp.Or(p.expectedTurnID, p.turnID)
-	if status.Turn == "" || (expected != "" && expected != status.Turn) {
-		return nil, invalidRequest("turn " + expected + " is not running")
-	}
-	in := agent.Input{Kind: agent.InputSteer, Text: strings.Join(p.text, "\n")}
-	if err := thread.Submit(ctx, in); err != nil {
-		return nil, hostError(err, p.threadID, status.Turn)
 	}
 	return encode(TurnSteerResponse{TurnID: status.Turn})
 }

@@ -47,7 +47,7 @@ Every response and notification in the Codex subset MUST validate against the ve
 | `thread/revert {threadId, beforeTurnId}` | `{thread}` with no turns. Subscribers receive `thread/reverted`. |
 | `thread/fork {threadId, lastTurnId?}` | `ThreadForkResponse`. The server also sends `thread/started` for the fork. |
 | `turn/start {threadId, input, effort?, model?, approvalPolicy?, sandboxPolicy?}` | `{turn}` with status `inProgress`. `effort` overrides the reasoning effort for this turn only. `model`, `approvalPolicy`, and `sandboxPolicy` override this turn and later turns on the active path; a missing value keeps the thread value. A turn `approvalPolicy` MUST NOT lower the thread mode: the server applies the stricter of the thread mode and the mapped turn mode, in the order `yolo` < `auto` < `ask`. A bare `model` id takes the provider of the thread model. |
-| `turn/steer {threadId, expectedTurnId?, input}` | `{turnId}`. When `expectedTurnId` is set, it MUST name the running turn. |
+| `turn/steer {threadId, expectedTurnId?, input}` | `{turnId}`. When `expectedTurnId` is set, it MUST name the running turn. The server MUST check the target atomically with submission. A steer for a turn that is not running MUST fail and MUST NOT start a turn. |
 | `turn/interrupt {threadId, turnId}` | `{}`. |
 | `model/list` | Models of every configured provider. `id` is `<provider>/<model>`. |
 | `config/read` | `{config: {model, model_provider, approval_policy, sandbox_mode, model_reasoning_effort}, origins: {}}` from the current settings. |

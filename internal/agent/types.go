@@ -102,13 +102,14 @@ const (
 )
 
 type Input struct {
-	Kind     InputKind
-	Text     string
-	Effort   string
-	Model    string
-	Approval config.Approval
-	Sandbox  config.SandboxMode
-	Verbatim bool
+	Kind           InputKind
+	Text           string
+	Effort         string
+	Model          string
+	Approval       config.Approval
+	Sandbox        config.SandboxMode
+	Verbatim       bool
+	ExpectedTurnID string
 }
 
 type Settings struct {
