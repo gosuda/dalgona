@@ -59,7 +59,11 @@ func (t *Thread) prepareInput(in Input) (preparedInput, error) {
 
 func (t *Thread) annotate(out *preparedInput, text string) error {
 	for _, word := range keywords.Match(text, t.host.keywords, t.currentTools().names) {
-		noticeText, noticeBlob, err := t.host.textPayload(word.Notice)
+		maskedNotice, err := t.host.mask(word.Notice)
+		if err != nil {
+			return err
+		}
+		noticeText, noticeBlob, err := t.host.textPayload(maskedNotice)
 		if err != nil {
 			return err
 		}
