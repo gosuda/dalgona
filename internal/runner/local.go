@@ -110,7 +110,7 @@ func (l *Local) spawn(runDir string, spec ProcessSpec) error {
 func writeSpawnPID(dir string, pid int) error {
 	start := processStartTime(pid)
 	if start == "" {
-		return nil
+		return fmt.Errorf("runner: process start time is unavailable for pid %d", pid)
 	}
 	return writePIDFile(dir, pid, start)
 }

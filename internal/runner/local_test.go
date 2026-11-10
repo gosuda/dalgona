@@ -169,6 +169,19 @@ func TestLocal_rejectsMismatchedProcessIdentity(t *testing.T) {
 	}
 }
 
+func TestWriteSpawnPID_rejectsUnavailableStartTime(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "run")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSpawnPID(runDir, 1<<30); err == nil {
+		t.Fatal("writeSpawnPID succeeded with an unavailable process start time")
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "pid")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("pid file state = %v, want absent", err)
+	}
+}
+
 func TestLocal_signalPreservesExitRecord(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
