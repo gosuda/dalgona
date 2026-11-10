@@ -130,8 +130,12 @@ func TestExecUsesWorkspaceDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(result.Output)) != env.Cwd {
-		t.Fatalf("pwd = %q, want %q", result.Output, env.Cwd)
+	want, err := filepath.EvalSymlinks(env.Cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(result.Output)) != want {
+		t.Fatalf("pwd = %q, want %q", result.Output, want)
 	}
 }
 
@@ -199,8 +203,12 @@ func TestExecResolvesRelativeCwdAgainstWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(result.Output)) != sub {
-		t.Fatalf("pwd = %q, want %q", result.Output, sub)
+	want, err := filepath.EvalSymlinks(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(result.Output)) != want {
+		t.Fatalf("pwd = %q, want %q", result.Output, want)
 	}
 }
 
@@ -219,14 +227,18 @@ func TestExecUnsandboxedRunsOutsideWritableRoots(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	outside := t.TempDir()
+	want, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
 	toolExec := New()
 	escalated := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(outside) + `,"escalate":true,"justification":"retry"}`)
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-out-esc", Args: escalated}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(result.Output)) != outside {
-		t.Fatalf("pwd = %q, want %q", result.Output, outside)
+	if strings.TrimSpace(string(result.Output)) != want {
+		t.Fatalf("pwd = %q, want %q", result.Output, want)
 	}
 	env.Sandbox.Mode = runner.SandboxOff
 	plain := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(outside) + `}`)
@@ -234,8 +246,8 @@ func TestExecUnsandboxedRunsOutsideWritableRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(result.Output)) != outside {
-		t.Fatalf("pwd = %q, want %q", result.Output, outside)
+	if strings.TrimSpace(string(result.Output)) != want {
+		t.Fatalf("pwd = %q, want %q", result.Output, want)
 	}
 }
 

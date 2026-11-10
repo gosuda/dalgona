@@ -115,6 +115,21 @@ func TestExecRPC_terminateReportsRunning(t *testing.T) {
 	}
 }
 
+func requireExecRootLink(t *testing.T, root, data string) {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalData, err := filepath.EvalSymlinks(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != filepath.Join(canonicalData, "workspace") {
+		t.Fatalf("resolved root = %q", resolved)
+	}
+}
+
 func TestPrepareExecRoot_linksPersistentWorkspace(t *testing.T) {
 	data := t.TempDir()
 	root := filepath.Join(t.TempDir(), "workspace-link")
@@ -126,13 +141,7 @@ func TestPrepareExecRoot_linksPersistentWorkspace(t *testing.T) {
 	if got != root {
 		t.Fatalf("root = %q, want %q", got, root)
 	}
-	resolved, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolved != filepath.Join(data, "workspace") {
-		t.Fatalf("resolved root = %q", resolved)
-	}
+	requireExecRootLink(t, root, data)
 	if os.Getenv("HOME") != filepath.Join(data, "home") {
 		t.Fatalf("HOME = %q", os.Getenv("HOME"))
 	}

@@ -108,7 +108,11 @@ func TestNestedAppendsEachFileOnce(t *testing.T) {
 	if strings.Contains(got, "ROOT MUST NOT APPEAR") {
 		t.Fatalf("cwd instruction was injected by Nested: %s", got)
 	}
-	wantPaths := []string{subAgents, subClaude, deepAgents}
+	canonicalCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	wantPaths := []string{filepath.Join(canonicalCwd, "sub", "AGENTS.md"), filepath.Join(canonicalCwd, "sub", "CLAUDE.md"), filepath.Join(canonicalCwd, "sub", "deep", "AGENTS.md")}
 	if !slices.Equal(newlySeen, wantPaths) {
 		t.Fatalf("newlySeen = %q, want %q", newlySeen, wantPaths)
 	}
