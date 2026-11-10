@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	"errors"
@@ -265,21 +266,54 @@ func encodeReadFileParams(path string, offset, limit int64) (jsontext.Value, err
 }
 
 func (r *Remote) WriteFile(ctx context.Context, path string, data []byte, perm fs.FileMode) error {
+	temp, err := stagingPath(path)
+	if err != nil {
+		return err
+	}
+	cleanup := context.WithoutCancel(ctx)
 	var offset int64
 	for {
 		end := min(offset+readPageSize, int64(len(data)))
-		params, err := encodeWriteParams(path, data[offset:end], perm, offset)
-		if err != nil {
-			return err
+		chunk, chunkErr := encodeWriteParams(temp, data[offset:end], perm, offset)
+		if chunkErr != nil {
+			r.removeStaged(cleanup, temp)
+			return chunkErr
 		}
-		if _, err := r.call(ctx, "fs/writeFile", params); err != nil {
-			return err
+		if _, callErr := r.call(ctx, "fs/writeFile", chunk); callErr != nil {
+			r.removeStaged(cleanup, temp)
+			return callErr
 		}
 		if end == int64(len(data)) {
-			return nil
+			break
 		}
 		offset = end
 	}
+	params, err := encodeRenameParams(temp, path)
+	if err != nil {
+		r.removeStaged(cleanup, temp)
+		return err
+	}
+	if _, err := r.call(ctx, "fs/rename", params); err != nil {
+		r.removeStaged(cleanup, temp)
+		return err
+	}
+	return nil
+}
+
+func (r *Remote) removeStaged(ctx context.Context, path string) {
+	params, err := pathParams(path)
+	if err != nil {
+		return
+	}
+	_, _ = r.call(ctx, "fs/remove", params)
+}
+
+func stagingPath(path string) (string, error) {
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("runner: stage upload: %w", err)
+	}
+	return fmt.Sprintf("%s.dalgona-partial-%x", path, nonce), nil
 }
 
 func (r *Remote) Stat(ctx context.Context, path string) (FileInfo, error) {
