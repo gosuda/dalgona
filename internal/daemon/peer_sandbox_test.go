@@ -234,8 +234,17 @@ func dispatchDialProbe() (bool, int) {
 		return false, 0
 	}
 	if os.Getenv("DALGONA_TEST_NNP") != "" {
-		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-			return true, 2
+		if os.Getenv("DALGONA_TEST_NNP_SEALED") == "" {
+			if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+				return true, 2
+			}
+			exe, err := os.Executable()
+			if err != nil {
+				return true, 2
+			}
+			if err := unix.Exec(exe, []string{exe}, append(os.Environ(), "DALGONA_TEST_NNP_SEALED=1")); err != nil {
+				return true, 2
+			}
 		}
 		return true, dialProbe(probeSock())
 	}
