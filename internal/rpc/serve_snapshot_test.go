@@ -65,3 +65,42 @@ func assertSnapshotTurns(t *testing.T, c *wireClient, r *rig, threadID, turnID s
 		t.Fatalf("thread/resume turns = %+v, want one turn %s", resumed.Thread.Turns, turnID)
 	}
 }
+
+func TestSnapshotKeepsSessionCreatedAfterRevertToRoot(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	c := r.connect()
+	threadID := startThread(t, r, c, nil)
+	r.llm.push(llmReply{body: sseText("done")})
+	turnID := startTurn(t, c, threadID, "hello")
+	c.collect("turn/completed")
+	c.ok("thread/revert", map[string]any{"threadId": threadID, "beforeTurnId": turnID}, nil)
+	c.await("thread/reverted", nil)
+	var read ThreadReadResponse
+	c.ok("thread/read", map[string]any{"threadId": threadID, "includeTurns": true}, &read)
+	if read.Thread.Cwd != r.cwd {
+		t.Fatalf("thread/read cwd = %q, want %q", read.Thread.Cwd, r.cwd)
+	}
+	if read.Thread.Model != "openai/gpt-test" {
+		t.Fatalf("thread/read model = %q, want %q", read.Thread.Model, "openai/gpt-test")
+	}
+	if read.Thread.CreatedAt == 0 {
+		t.Fatalf("thread/read createdAt = 0, want non-zero")
+	}
+	if len(read.Thread.Turns) != 0 {
+		t.Fatalf("thread/read turns = %+v, want zero turns", read.Thread.Turns)
+	}
+	var resumed ThreadResumeResponse
+	c.ok("thread/resume", map[string]any{"threadId": threadID}, &resumed)
+	if resumed.Cwd != r.cwd {
+		t.Fatalf("thread/resume cwd = %q, want %q", resumed.Cwd, r.cwd)
+	}
+	if resumed.Model != "openai/gpt-test" {
+		t.Fatalf("thread/resume model = %q, want %q", resumed.Model, "openai/gpt-test")
+	}
+	if resumed.Thread.CreatedAt != read.Thread.CreatedAt {
+		t.Fatalf("thread/resume createdAt = %d, want %d", resumed.Thread.CreatedAt, read.Thread.CreatedAt)
+	}
+	if len(resumed.Thread.Turns) != 0 {
+		t.Fatalf("thread/resume turns = %+v, want zero turns", resumed.Thread.Turns)
+	}
+}

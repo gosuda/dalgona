@@ -273,6 +273,11 @@ func (s *server) fill(thread *agent.Thread, tr *tracker) (snapshot, uint64, erro
 	}
 	c := &collector{}
 	tr.sink = c
+	if len(records) > 0 {
+		if created, ok := records[0].Event.(event.SessionCreated); ok {
+			tr.created = created
+		}
+	}
 	for _, e := range event.ActivePath(records) {
 		tr.apply(e.Seq, e.Event)
 	}
