@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import worker, { boxToken } from "./index.ts";
+import worker, { Box, boxToken } from "./index.ts";
 
 type SeenRequest = {
 	authorization: string | null;
@@ -342,4 +342,109 @@ test("returns 401 for a non bearer scheme", async () => {
 	);
 	assert.equal(response.status, 401);
 	assert.equal(stubs.size, 0);
+});
+
+type BoxContext = ConstructorParameters<typeof Box>[0];
+type BoxEnvironment = ConstructorParameters<typeof Box>[1];
+
+type ObservedBox = {
+	ctx: { id: { name: string | undefined } };
+	envVars: Record<string, string> | undefined;
+	forwarded: Request[];
+};
+
+function observed(box: Box): ObservedBox {
+	const candidate: unknown = box;
+	return candidate as ObservedBox;
+}
+
+function boxContext(name: string | undefined): BoxContext {
+	const ctx: unknown = { id: { name } };
+	return ctx as BoxContext;
+}
+
+function boxEnvironment(): BoxEnvironment {
+	const env: unknown = {
+		BOX: {
+			getByName: (): never => {
+				throw new Error("test setup: Box test never uses BOX");
+			},
+		},
+		DALGONA_TOKEN: MASTER_TOKEN,
+	};
+	return env as BoxEnvironment;
+}
+
+function createBox(name: string | undefined): { box: Box; seen: ObservedBox } {
+	const box = new Box(boxContext(name), boxEnvironment());
+	return { box, seen: observed(box) };
+}
+
+test("Box answers 500 and forwards nothing without a box name", async () => {
+	const missing = createBox(undefined);
+	const missingResponse = await missing.box.fetch(
+		new Request("https://worker.test/"),
+	);
+	assert.equal(missingResponse.status, 500);
+	assert.equal(missing.seen.forwarded.length, 0);
+
+	const empty = createBox("");
+	const emptyResponse = await empty.box.fetch(
+		new Request("https://worker.test/"),
+	);
+	assert.equal(emptyResponse.status, 500);
+	assert.equal(empty.seen.forwarded.length, 0);
+});
+
+test("Box forwards the derived box token instead of the worker token", async () => {
+	const { box, seen } = createBox("alpha");
+	const expected = await boxToken(MASTER_TOKEN, "alpha");
+	const response = await box.fetch(
+		new Request("https://worker.test/", {
+			headers: { Authorization: `Bearer ${MASTER_TOKEN}` },
+		}),
+	);
+	assert.equal(response.status, 200);
+	assert.equal(seen.forwarded.length, 1);
+	const forwarded = seen.forwarded[0];
+	if (forwarded === undefined) {
+		throw new Error("test setup: container received no request");
+	}
+	assert.equal(forwarded.headers.get("Authorization"), `Bearer ${expected}`);
+	assert.notEqual(
+		forwarded.headers.get("Authorization"),
+		`Bearer ${MASTER_TOKEN}`,
+	);
+});
+
+test("Box exposes the derived token as DALGONA_BOX_TOKEN", async () => {
+	const { box, seen } = createBox("alpha");
+	const expected = await boxToken(MASTER_TOKEN, "alpha");
+	const response = await box.fetch(new Request("https://worker.test/"));
+	assert.equal(response.status, 200);
+	assert.equal(seen.envVars?.["DALGONA_BOX_TOKEN"], expected);
+	assert.notEqual(seen.envVars?.["DALGONA_BOX_TOKEN"], MASTER_TOKEN);
+});
+
+test("Boxes for different names forward different tokens", async () => {
+	const first = createBox("alpha");
+	const second = createBox("beta");
+	const firstResponse = await first.box.fetch(
+		new Request("https://worker.test/"),
+	);
+	const secondResponse = await second.box.fetch(
+		new Request("https://worker.test/"),
+	);
+	assert.equal(firstResponse.status, 200);
+	assert.equal(secondResponse.status, 200);
+	const firstForwarded = first.seen.forwarded[0];
+	const secondForwarded = second.seen.forwarded[0];
+	if (firstForwarded === undefined || secondForwarded === undefined) {
+		throw new Error("test setup: container received no request");
+	}
+	const firstAuth = firstForwarded.headers.get("Authorization");
+	const secondAuth = secondForwarded.headers.get("Authorization");
+	assert.equal(firstAuth, `Bearer ${await boxToken(MASTER_TOKEN, "alpha")}`);
+	assert.equal(secondAuth, `Bearer ${await boxToken(MASTER_TOKEN, "beta")}`);
+	assert.notEqual(firstAuth, secondAuth);
 });
