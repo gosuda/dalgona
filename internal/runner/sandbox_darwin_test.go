@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -24,6 +25,7 @@ func serveDarwinListener(t *testing.T, sock string) {
 			if err != nil {
 				return
 			}
+			_, _ = io.ReadFull(conn, make([]byte, 4))
 			_, _ = conn.Write([]byte("ok"))
 			_ = conn.Close()
 		}

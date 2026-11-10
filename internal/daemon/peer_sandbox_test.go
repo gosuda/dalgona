@@ -40,6 +40,7 @@ func serveGuarded(sock string, refused chan<- error, served *atomic.Int32) (net.
 				continue
 			}
 			served.Add(1)
+			_, _ = io.ReadFull(conn, make([]byte, 4))
 			_, _ = conn.Write([]byte("ok"))
 			_ = conn.Close()
 		}
