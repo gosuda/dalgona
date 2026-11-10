@@ -8,7 +8,7 @@ The parent MUST start the shim detached. The invocation MUST be `<self> __shim -
 
 `ProcessSpec.Argv[0]` equal to `@self` MUST resolve to the parent build: `/proc/self/exe` on Linux and `os.Executable()` on macOS and Windows. On a remote exec server it MUST resolve to the exec-server binary path.
 
-`Start` MUST be idempotent. An existing call directory for the same call id MUST make `Start` return success. It MUST NOT start a second process.
+`Start` MUST be idempotent. An existing call directory for the same call id MUST make `Start` return success. It MUST NOT start a second process. When `Start` fails after it creates the call directory, it MUST remove that directory, so a retry with the same call id starts the command.
 
 The shim MUST write `pid` before it starts the command. `pid` MUST store the process id and the process start time. Recovery and `Read` MUST accept a process only when both values match. A recycled process id MUST NOT count as the shim. `Start` MUST write `pid` before it returns. The parent MUST write the same values as the shim. The first `Read` after `Start` MUST report a live process when no `exit` exists.
 
