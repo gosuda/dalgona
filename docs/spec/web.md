@@ -110,6 +110,10 @@ No advisor failure opens the error banner.
 - A turn that is retrying after an error shows `Retrying after an error: <message>`.
 - An interrupted turn shows `Turn interrupted. Send a message to continue.`
 
+### Approvals
+
+The client records child threads from `dalgona/thread/childSpawned`. An approval from a child of the open thread MUST appear in the approval dialog of the open thread. The answer MUST carry the child request id. An approval from any other thread MUST count as waiting on another thread.
+
 ### Empty states and errors
 
 - With no open thread the transcript says `Pick a thread or start a new one`. When connected, it adds that earlier threads are in the list. When not connected, it says to connect to dalgona.

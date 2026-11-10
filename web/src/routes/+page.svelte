@@ -79,12 +79,18 @@ let client: RpcClient | undefined;
 let connectionGeneration = 0;
 let selectionGeneration = 0;
 let running = $derived(transcript.turnStatus === "inProgress");
-let currentApproval = $derived(activeApproval(approvals, activeThreadId));
+let currentApproval = $derived(
+	activeApproval(approvals, activeThreadId, transcript.childThreadIds),
+);
 let otherApprovalCount = $derived(
-	otherThreadApprovalCount(approvals, activeThreadId),
+	otherThreadApprovalCount(
+		approvals,
+		activeThreadId,
+		transcript.childThreadIds,
+	),
 );
 let awaitingApproval = $derived(
-	itemsAwaitingApproval(approvals, activeThreadId),
+	itemsAwaitingApproval(approvals, activeThreadId, transcript.childThreadIds),
 );
 let approvalChanges = $derived.by(() => {
 	const item = transcript.items.find(
@@ -517,6 +523,7 @@ function handleNotification(notification: AppNotification): void {
 		case "itemCompleted":
 		case "delta":
 		case "error":
+		case "childSpawned":
 			transcript = reduceNotification(transcript, notification);
 			if (
 				notification.type === "turnCompleted" &&

@@ -16,6 +16,7 @@ export function emptyTranscript(threadId: string | null): TranscriptState {
 		items: [],
 		error: null,
 		plan: null,
+		childThreadIds: [],
 	};
 }
 
@@ -39,6 +40,7 @@ export function transcriptForThread(thread: ThreadDetail): TranscriptState {
 		items,
 		error,
 		plan: null,
+		childThreadIds: [],
 	};
 }
 
@@ -182,6 +184,18 @@ export function reduceNotification(
 		case "advisorNote":
 		case "requestResolved":
 			return state;
+		case "childSpawned": {
+			if (!sameThread(state, notification.threadId)) {
+				return state;
+			}
+			if (state.childThreadIds.includes(notification.childId)) {
+				return state;
+			}
+			return {
+				...state,
+				childThreadIds: [...state.childThreadIds, notification.childId],
+			};
+		}
 		case "plan": {
 			if (!sameThread(state, notification.threadId)) {
 				return state;
@@ -277,21 +291,37 @@ export function resolveApprovalRequest(
 	return approvals.filter((entry) => entry.id !== requestId);
 }
 
+function isOpenApproval(
+	threadId: string | null,
+	childThreadIds: readonly string[],
+	entryThreadId: string,
+): boolean {
+	return (
+		threadId !== null &&
+		(entryThreadId === threadId || childThreadIds.includes(entryThreadId))
+	);
+}
+
 export function activeApproval(
 	approvals: readonly ApprovalRequest[],
 	threadId: string | null,
+	childThreadIds: readonly string[],
 ): ApprovalRequest | null {
-	if (threadId === null) {
-		return null;
-	}
-	return approvals.find((entry) => entry.threadId === threadId) ?? null;
+	return (
+		approvals.find((entry) =>
+			isOpenApproval(threadId, childThreadIds, entry.threadId),
+		) ?? null
+	);
 }
 
 export function otherThreadApprovalCount(
 	approvals: readonly ApprovalRequest[],
 	threadId: string | null,
+	childThreadIds: readonly string[],
 ): number {
-	return approvals.filter((entry) => entry.threadId !== threadId).length;
+	return approvals.filter(
+		(entry) => !isOpenApproval(threadId, childThreadIds, entry.threadId),
+	).length;
 }
 
 export function dropSentFollowup(queue: readonly string[]): readonly string[] {
@@ -317,10 +347,13 @@ export function shouldAutoScrollForUpdate(
 export function itemsAwaitingApproval(
 	approvals: readonly ApprovalRequest[],
 	threadId: string | null,
+	childThreadIds: readonly string[],
 ): ReadonlySet<string> {
 	return new Set(
 		approvals
-			.filter((entry) => entry.threadId === threadId)
+			.filter((entry) =>
+				isOpenApproval(threadId, childThreadIds, entry.threadId),
+			)
 			.map((entry) => entry.itemId),
 	);
 }
