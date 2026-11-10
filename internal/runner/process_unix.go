@@ -27,11 +27,25 @@ func startDetached(ctx context.Context, self string, args []string, spec Process
 }
 
 func signalProcess(shimPID int, pgid int, signal Signal) error {
-	err := syscall.Kill(-pgid, unixSignal(signal))
-	if err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("runner: signal process group: %w", err)
+	killErr := syscall.Kill(-pgid, unixSignal(signal))
+	if killErr == nil || errors.Is(killErr, syscall.ESRCH) {
+		return nil
 	}
-	return nil
+	if errors.Is(killErr, syscall.EPERM) && processGroupDrained(pgid) {
+		return nil
+	}
+	return fmt.Errorf("runner: signal process group: %w", killErr)
+}
+
+func processGroupGone(pgid int) bool {
+	probeErr := syscall.Kill(-pgid, 0)
+	if probeErr == nil {
+		return false
+	}
+	if errors.Is(probeErr, syscall.ESRCH) {
+		return true
+	}
+	return errors.Is(probeErr, syscall.EPERM) && processGroupDrained(pgid)
 }
 
 func ensureProcessGroupGone(pgid int, signal Signal) {
@@ -40,7 +54,7 @@ func ensureProcessGroupGone(pgid int, signal Signal) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+		if processGroupGone(pgid) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -66,7 +80,7 @@ func watchCancelWhileWaiting(dir string, pgid int, done <-chan struct{}) {
 			if !ok {
 				continue
 			}
-			if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			if processGroupGone(pgid) {
 				return
 			}
 			_ = signalProcess(os.Getpid(), pgid, sig)
