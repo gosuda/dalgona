@@ -104,10 +104,20 @@ func readOneLine(r io.Reader) ([]byte, error) {
 	return bufio.NewReader(r).ReadBytes('\n')
 }
 
+func shortSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "codexapp-sock-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "d.sock")
+}
+
 func unixDaemon(t *testing.T, serve func(net.Conn)) func(context.Context) (net.Conn, error) {
 	t.Helper()
 	var listenConfig net.ListenConfig
-	listener, err := listenConfig.Listen(t.Context(), "unix", filepath.Join(t.TempDir(), "d.sock"))
+	listener, err := listenConfig.Listen(t.Context(), "unix", shortSocketPath(t))
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}

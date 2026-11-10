@@ -87,8 +87,18 @@ func countLines(lines []string, parts ...string) int {
 	return count
 }
 
+func shortDaemonHome(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dalgona-home-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestRunWorkflowExecsTwiceThroughTheDaemon(t *testing.T) {
-	home, work := t.TempDir(), t.TempDir()
+	home, work := shortDaemonHome(t), t.TempDir()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("DALGONA_HOME", home)
 	config := "model = \"openai/gpt-test\"\napproval = \"yolo\"\nsandbox = \"off\"\n"
