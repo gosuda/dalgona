@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -284,11 +285,11 @@ func matchingFiles(entries []fileEntry, pattern string) ([]fileEntry, error) {
 }
 
 func scanFile(entry fileEntry, matcher *regexp.Regexp) (grepFile, []int) {
-	if info, err := os.Lstat(entry.absolute); err != nil || info.Mode()&os.ModeSymlink != 0 {
+	if !searchableFile(entry.absolute) {
 		return grepFile{}, nil
 	}
-	data, err := os.ReadFile(entry.absolute)
-	if err != nil || len(data) > maxSearchFileBytes || bytes.IndexByte(data[:min(len(data), 8192)], 0) >= 0 || !utf8.Valid(data) {
+	data, err := readCapped(entry.absolute)
+	if err != nil || !searchableText(data) {
 		return grepFile{}, nil
 	}
 	starts := splitStarts(data)
@@ -299,6 +300,24 @@ func scanFile(entry fileEntry, matcher *regexp.Regexp) (grepFile, []int) {
 		}
 	}
 	return grepFile{entry: entry, data: data, starts: starts}, ordered
+}
+
+func searchableFile(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.Size() <= maxSearchFileBytes
+}
+
+func searchableText(data []byte) bool {
+	return len(data) <= maxSearchFileBytes && bytes.IndexByte(data[:min(len(data), 8192)], 0) < 0 && utf8.Valid(data)
+}
+
+func readCapped(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	return io.ReadAll(io.LimitReader(file, maxSearchFileBytes+1))
 }
 
 func renderGrep(files []grepFile, kept []hit, total int, pattern string) outcome {

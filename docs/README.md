@@ -16,6 +16,7 @@ The specifications define required behavior. They do not certify that each comma
 - [Harness sandbox](spec/sandbox.md): write confinement and platform fallbacks.
 - [Sandbox services](spec/sandbox-services.md): Modal and Sandbox0 lifecycle and persistence.
 - [Remote runners](spec/runners.md): thread boxes, fully cloud mode, pull, and box cleanup.
+- [Search](spec/search.md): size ceiling and regular-file scans.
 - [Edit styles](spec/edit-styles.md): parser, resolver, writer, and refusal contracts.
 - [Hashline profiles](spec/hashline/README.md): shared, Light, Enhanced, conformance, and review documents. This imported set distinguishes proposal requirements from its bounded model-check evidence.
 - [Hashline shared contract](spec/hashline/hashline-common-v1.md): syntax, edit evidence, mapping, lifecycle, and authorization.
