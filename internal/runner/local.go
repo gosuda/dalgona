@@ -53,10 +53,14 @@ func (l *Local) Start(ctx context.Context, spec ProcessSpec) error {
 		return fmt.Errorf("runner: create process directory: %w", err)
 	}
 	if err := l.spawn(runDir, spec); err != nil {
-		_ = os.RemoveAll(runDir)
+		removeRunDir(runDir)
 		return err
 	}
 	return nil
+}
+
+func removeRunDir(dir string) {
+	_ = os.RemoveAll(dir)
 }
 
 func validateProcessSpec(spec ProcessSpec) error {
