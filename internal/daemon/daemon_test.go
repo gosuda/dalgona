@@ -25,9 +25,13 @@ func TestMain(m *testing.M) {
 	}
 	if home := os.Getenv("DALGONA_TEST_DAEMON"); home != "" {
 		runDaemonTestHelper(home)
+		os.Exit(0)
 	}
 	if os.Getenv("DALGONA_TEST_NEVER_LISTEN") != "" {
 		os.Exit(0)
+	}
+	if handled, code := dispatchDialProbe(); handled {
+		os.Exit(code)
 	}
 	os.Exit(m.Run())
 }

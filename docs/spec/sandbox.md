@@ -31,17 +31,17 @@ The shim MUST apply this policy before it execs the command:
 landlock.V3.BestEffort().RestrictPaths(landlock.RODirs("/"), landlock.RWDirs(roots...), landlock.RWDirs("/dev"))
 ```
 
-`Available()` MUST report whether the Landlock ABI exists. When the go-landlock v0.11.0 ABI query reports no ABI, the command MUST run without Landlock. That case MUST NOT fail the command.
+`Available()` MUST report whether the Landlock ABI exists. When the go-landlock v0.11.0 ABI query reports no ABI, the command MUST run without Landlock. That case MUST NOT fail the command. Linux denies no socket path. On Linux the daemon refuses a sandboxed peer instead.
 
 ## macOS
 
 The shim MUST exec `/usr/bin/sandbox-exec -p <profile> -- argv...`. The profile MUST be:
 
 ```
-(version 1) (allow default) (deny file-write*) (allow file-write* (subpath "<root>")...) (allow file-write* (literal "/dev/null") (literal "/dev/zero") (regex #"^/dev/tty") (regex #"^/dev/fd/"))
+(version 1) (allow default) (deny network-outbound (remote unix-socket (path-literal "<denied>"))...) (deny file-write*) (allow file-write* (subpath "<root>")...) (allow file-write* (literal "/dev/null") (literal "/dev/zero") (regex #"^/dev/tty") (regex #"^/dev/fd/"))
 ```
 
-Each root string MUST escape `"` and `\`.
+The agent MUST add the daemon socket to the denied list for each `workspace-write` exec call. The runner MUST apply the denied list on macOS. The runner MUST pass no denied list when the mode is `off`. For each denied socket the profile MUST deny both the cleaned path and the resolved path when they differ. A missing socket MUST resolve through its real parent directory. The call MUST fail when the parent directory does not resolve. Each denied path MUST escape `"` and `\` the same way a writable root does. A denied path with a control character MUST fail the command.
 
 ## No harness sandbox
 
@@ -49,13 +49,15 @@ Windows MUST always run without a harness sandbox. Linux MUST do the same when `
 
 ## Remote
 
-A remote box MUST ignore the sandbox mode. The box is the sandbox. A request that reaches the exec server over the websocket box channel MUST NOT weaken the sandbox below the server start mode, and the server MUST fail the request closed with `-32602` when it does.
+A remote box MUST ignore the sandbox mode. The box is the sandbox. A request that reaches the exec server over the websocket box channel MUST NOT weaken the sandbox below the server start mode, and the server MUST fail the request closed with `-32602` when it does. Remote and box runners carry no deny list: no daemon socket exists in a box.
 
 ## Daemon socket visibility
 
 The daemon socket (`<home>/dalgona.sock`, mode `0600`) MUST stay out of sandboxed child environments: the runner MUST strip `DALGONA_HOME` and `DAL_HOME` from them, so the child cannot read the socket path from its environment. `off` MUST keep the parent environment unchanged.
 
-This hiding is best-effort, not a boundary. Landlock filesystem rules do not mediate `connect(2)` to an existing pathname unix socket: under this policy a denied write outside the roots still leaves a connect to a pathname socket there working. Landlock scoping covers abstract unix sockets only, and the daemon socket is a pathname socket. `HOME` stays in the child environment, so `$HOME/.dalgona/dalgona.sock` remains guessable, and reads are allowed on every path. A sandboxed child of the same uid can therefore still dial the socket.
+This hiding is best-effort, not a boundary. Landlock filesystem rules do not mediate `connect(2)` to an existing pathname unix socket: under this policy a denied write outside the roots still leaves a connect to a pathname socket there working. Landlock scoping covers abstract unix sockets only, and the daemon socket is a pathname socket. `HOME` stays in the child environment, so `$HOME/.dalgona/dalgona.sock` remains guessable, and reads are allowed on every path. A sandboxed child of the same uid can therefore still dial the socket. On Linux the daemon MUST refuse to serve that peer (see [daemon.md](daemon.md)). On macOS the seatbelt profile MUST deny the connect itself.
+
+The local sandbox limits file writes. A sandboxed command can still reach other services of the same user (for example the systemd user manager or a container daemon). It is not a boundary against a hostile process. A process outside the sandbox that hands an open daemon connection to a sandboxed command is out of scope.
 
 ## Failure
 

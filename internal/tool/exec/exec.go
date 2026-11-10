@@ -64,7 +64,7 @@ func (t *Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Resu
 		ID:      call.ID,
 		Argv:    shellArgvFor(env.Runner, command),
 		Dir:     cwd,
-		Sandbox: runner.Sandbox{Mode: mode, WritableRoots: env.Sandbox.WritableRoots},
+		Sandbox: runner.Sandbox{Mode: mode, WritableRoots: env.Sandbox.WritableRoots, DeniedSockets: env.Sandbox.DeniedSockets},
 	}
 	if err := env.Runner.Start(ctx, spec); err != nil {
 		return tool.Result{}, fmt.Errorf("exec: start: %w", err)

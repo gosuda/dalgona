@@ -35,10 +35,10 @@ func TestVerifyPeerConnSameUID(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
-	if perr := verifyPeerConn(client); perr != nil {
+	if perr := verifyDialedPeer(client); perr != nil {
 		t.Fatalf("client peer refused: %v", perr)
 	}
-	if perr := verifyPeerConn(server); perr != nil {
+	if perr := verifyAcceptedPeer(server, daemonMarked()); perr != nil {
 		t.Fatalf("server peer refused: %v", perr)
 	}
 }

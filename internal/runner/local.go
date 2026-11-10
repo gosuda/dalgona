@@ -81,8 +81,11 @@ func (l *Local) spawn(runDir string, spec ProcessSpec) error {
 	args := []string{"__shim", "--dir", runDir, "--"}
 	args = append(args, argv...)
 	mode := cmp.Or(spec.Sandbox.Mode, SandboxWorkspaceWrite)
-	roots := slices.Clone(spec.Sandbox.WritableRoots)
-	spec.Env = runnerEnvironment(spec.Env, spec.Dir, mode, roots)
+	spec.Env = runnerEnvironment(spec.Env, spec.Dir, Sandbox{
+		Mode:          mode,
+		WritableRoots: slices.Clone(spec.Sandbox.WritableRoots),
+		DeniedSockets: slices.Clone(spec.Sandbox.DeniedSockets),
+	})
 	cmd, err := startDetached(context.Background(), self, args, spec)
 	if err != nil {
 		return err
@@ -108,18 +111,19 @@ func writeSpawnPID(dir string, pid int) error {
 	return writePIDFile(dir, pid, start)
 }
 
-func runnerEnvironment(base []string, dir string, mode SandboxMode, roots []string) []string {
+func runnerEnvironment(base []string, dir string, sandbox Sandbox) []string {
 	if len(base) == 0 {
 		base = os.Environ()
 	}
 	env := withoutRunnerEnvironment(base)
-	if mode != SandboxOff {
+	if sandbox.Mode != SandboxOff {
 		env = withoutHomeEnvironment(env)
 	}
 	env = append(env,
 		"DALGONA_RUN_CWD="+dir,
-		"DALGONA_SANDBOX_MODE="+string(mode),
-		"DALGONA_SANDBOX_ROOTS="+encodeRoots(roots),
+		"DALGONA_SANDBOX_MODE="+string(sandbox.Mode),
+		"DALGONA_SANDBOX_ROOTS="+encodeRoots(sandbox.WritableRoots),
+		sandboxDeniedEnvironment+"="+encodeRoots(sandbox.DeniedSockets),
 		"DALGONA_SHIM_EXEC=0",
 	)
 	return env
@@ -162,7 +166,7 @@ func isRunnerEnvironment(key string) bool {
 		return true
 	}
 	switch key {
-	case "DALGONA_RUN_CWD", "DALGONA_SANDBOX_MODE", "DALGONA_SANDBOX_ROOTS", "DALGONA_SHIM_EXEC":
+	case "DALGONA_RUN_CWD", "DALGONA_SANDBOX_MODE", "DALGONA_SANDBOX_ROOTS", "DALGONA_SHIM_EXEC", sandboxDeniedEnvironment:
 		return true
 	default:
 		return false

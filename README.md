@@ -108,7 +108,7 @@ Use these table names and keys:
 
 ## Run inside an outer sandbox
 
-Run dalgona inside a lightweight outer sandbox, such as a container, microVM, or cloud sandbox runner. The local harness sandbox only confines accidental writes and is not a security boundary. See [sandbox.md](docs/spec/sandbox.md) for the write policy.
+Run dalgona inside a lightweight outer sandbox, such as a container, microVM, or cloud sandbox runner. The local harness sandbox only confines accidental writes and is not a security boundary. See [sandbox.md](docs/spec/sandbox.md) for the write policy. On Linux, when the local write policy applies, a `dalgona` command that a sandboxed command starts is refused by the daemon. On macOS, the sandbox profile denies access to the daemon socket. A daemon that itself runs with `no_new_privs` logs a warning, and sandboxed commands can still reach it.
 
 Windows has no harness confinement. Linux runs without it when Landlock is unavailable. A remote box supplies the sandbox instead of the local write policy. See [sandbox.md](docs/spec/sandbox.md).
 

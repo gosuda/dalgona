@@ -38,12 +38,39 @@ func peerUID(conn net.Conn) (int, error) {
 	return uid, nil
 }
 
-func verifyPeerConn(conn net.Conn) error {
+func verifyDialedPeer(conn net.Conn) error {
 	got, err := peerUID(conn)
 	if err != nil {
 		return err
 	}
 	return checkUID(got, os.Getuid())
+}
+
+func verifyAcceptedPeer(conn net.Conn, daemonMarked bool) error {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return errors.New("daemon: peer requires unix connection")
+	}
+	raw, rawErr := uc.SyscallConn()
+	if rawErr != nil {
+		return rawErr
+	}
+	var result error
+	if ctlErr := raw.Control(func(fd uintptr) {
+		uid, pid, credErr := peerCredsFromFD(int(fd))
+		if credErr != nil {
+			result = credErr
+			return
+		}
+		if idErr := checkUID(uid, os.Getuid()); idErr != nil {
+			result = idErr
+			return
+		}
+		result = checkPeerSandbox(int(fd), pid, daemonMarked)
+	}); ctlErr != nil {
+		return ctlErr
+	}
+	return result
 }
 
 func verifyHome(home string) error {

@@ -89,11 +89,11 @@ func dialPeer(sock string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if perr := verifyPeerConn(conn); perr != nil {
+	if perr := verifyDialedPeer(conn); perr != nil {
 		_ = conn.Close()
 		return nil, perr
 	}
-	return conn, nil
+	return annotateSandboxedClient(conn), nil
 }
 
 func waitSocket(ctx context.Context, home, sock string) (net.Conn, error) {

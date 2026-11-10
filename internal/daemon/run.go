@@ -26,6 +26,8 @@ func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc)
 	if chmodErr := tightenHome(home); chmodErr != nil {
 		return chmodErr
 	}
+	marked := daemonMarked()
+	logConfinedDaemon(marked)
 	host, closeHost, err := newHost(ctx)
 	if err != nil {
 		return err
@@ -46,7 +48,7 @@ func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc)
 	})
 	stopListener := context.AfterFunc(ctx, func() { closeListener(listener) })
 	defer stopListener()
-	return accept(ctx, listener, &tasks, func(conn net.Conn) { serveConn(ctx, conn, host, serve) })
+	return accept(ctx, listener, &tasks, marked, func(conn net.Conn) { serveConn(ctx, conn, host, serve) })
 }
 
 func makeHomeDir(home string) error {
@@ -83,7 +85,7 @@ func listen(home string) (net.Listener, error) {
 	return listener, nil
 }
 
-func accept(ctx context.Context, listener net.Listener, tasks *sync.WaitGroup, handle func(net.Conn)) error {
+func accept(ctx context.Context, listener net.Listener, tasks *sync.WaitGroup, marked bool, handle func(net.Conn)) error {
 	defer closeListener(listener)
 	for {
 		conn, err := listener.Accept()
@@ -93,7 +95,7 @@ func accept(ctx context.Context, listener net.Listener, tasks *sync.WaitGroup, h
 			}
 			return fmt.Errorf("daemon accept: %w", err)
 		}
-		if perr := verifyPeerConn(conn); perr != nil {
+		if perr := verifyAcceptedPeer(conn, marked); perr != nil {
 			_ = conn.Close()
 			slog.Warn("daemon: refusing connection", "error", perr)
 			continue

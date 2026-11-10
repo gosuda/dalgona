@@ -11,6 +11,7 @@ import (
 	"html"
 	"io/fs"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"sync"
 	"unicode/utf8"
@@ -369,8 +370,17 @@ func (w *worker) env(v verdict) tool.Env {
 	roots := append([]string{w.t.created.Cwd}, w.t.host.roots...)
 	return tool.Env{
 		Runner: w.t.runner, Cwd: w.t.created.Cwd, Home: w.t.host.cfg.Config.Home,
-		Sandbox: runner.Sandbox{Mode: mode, WritableRoots: roots}, Masker: w.t.host.masker(), Snapshots: w.t.snapshots,
+		Sandbox: deniedSocketSandbox(mode, roots, w.t.host.cfg.Config.Home), Masker: w.t.host.masker(), Snapshots: w.t.snapshots,
 	}
+}
+
+func deniedSocketSandbox(mode runner.SandboxMode, roots []string, home string) runner.Sandbox {
+	sandbox := runner.Sandbox{Mode: mode, WritableRoots: roots}
+	if mode == runner.SandboxOff || home == "" {
+		return sandbox
+	}
+	sandbox.DeniedSockets = []string{filepath.Join(home, "dalgona.sock")}
+	return sandbox
 }
 
 func (w *worker) completion(ctx context.Context, p *prepared, result tool.Result, runErr error) (event.ToolCompleted, error) {

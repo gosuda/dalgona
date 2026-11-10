@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	shimExecEnvironment  = "DALGONA_SHIM_EXEC"
-	shimPauseEnvironment = "DALGONA_SHIM_TEST_PAUSE"
+	shimExecEnvironment      = "DALGONA_SHIM_EXEC"
+	shimPauseEnvironment     = "DALGONA_SHIM_TEST_PAUSE"
+	sandboxDeniedEnvironment = "DALGONA_SANDBOX_DENIED"
 )
 
 func ShimMain(args []string) int {
@@ -95,6 +96,7 @@ func startCommand(dir string, argv []string, out *os.File) (*exec.Cmd, func(), e
 	if err != nil {
 		return nil, nil, err
 	}
+	cmd.Env = stripDeniedEnvironment(cmd.Env)
 	if sandboxErr := configureSandbox(cmd, dir, currentSandbox()); sandboxErr != nil {
 		return nil, nil, fmt.Errorf("sandbox: %w", sandboxErr)
 	}
@@ -161,6 +163,7 @@ func currentSandbox() Sandbox {
 	return Sandbox{
 		Mode:          SandboxMode(os.Getenv("DALGONA_SANDBOX_MODE")),
 		WritableRoots: splitRoots(os.Getenv("DALGONA_SANDBOX_ROOTS")),
+		DeniedSockets: splitRoots(os.Getenv("DALGONA_SANDBOX_DENIED")),
 	}
 }
 
@@ -282,12 +285,27 @@ func canonicalEnvironmentKey(key string) string {
 }
 
 func splitRoots(value string) []string {
+	if value == "" {
+		return nil
+	}
 	var roots []string
 	if err := json.Unmarshal([]byte(value), &roots); err != nil {
 		slog.Warn("runner: invalid sandbox roots encoding", "error", err)
 		return nil
 	}
 	return roots
+}
+
+func stripDeniedEnvironment(env []string) []string {
+	result := make([]string, 0, len(env))
+	for _, item := range env {
+		key, _, ok := strings.Cut(item, "=")
+		if ok && key == sandboxDeniedEnvironment {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 var syncFS = syncConfiguredFilesystem

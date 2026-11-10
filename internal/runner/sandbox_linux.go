@@ -39,7 +39,7 @@ func execSandboxed(dir string, argv []string) error {
 	if err := applySandbox(currentSandbox()); err != nil {
 		return fmt.Errorf("apply sandbox: %w", err)
 	}
-	env := removeEnvironment(os.Environ(), shimExecEnvironment)
+	env := stripDeniedEnvironment(removeEnvironment(os.Environ(), shimExecEnvironment))
 	if err := unix.Exec(argv[0], argv, env); err != nil {
 		return fmt.Errorf("exec command: %w", err)
 	}
