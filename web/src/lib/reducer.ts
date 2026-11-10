@@ -300,6 +300,38 @@ export function reduceNotification(
 	}
 }
 
+export interface OpenThreadState {
+	readonly transcript: TranscriptState;
+	readonly knownChildren: KnownChildThreads;
+	readonly activeThreadId: string | null;
+}
+
+export interface OpenThreadUpdate {
+	readonly transcript: TranscriptState;
+	readonly knownChildren: KnownChildThreads;
+	readonly sendFollowup: boolean;
+}
+
+export function applyOpenThreadNotification(
+	state: OpenThreadState,
+	notification: AppNotification,
+): OpenThreadUpdate {
+	const transcript = reduceNotification(state.transcript, notification);
+	const knownChildren =
+		notification.type === "childSpawned"
+			? recordChildThread(
+					state.knownChildren,
+					notification.threadId,
+					notification.childId,
+				)
+			: state.knownChildren;
+	const sendFollowup =
+		notification.type === "turnCompleted" &&
+		notification.threadId === state.activeThreadId &&
+		notification.turn.status === "completed";
+	return { transcript, knownChildren, sendFollowup };
+}
+
 export function trackApprovalRequest(
 	approvals: readonly ApprovalRequest[],
 	request: ApprovalRequest,

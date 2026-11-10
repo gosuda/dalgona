@@ -17,13 +17,12 @@ import {
 import type { KnownChildThreads } from "#lib/reducer.ts";
 import {
 	activeApproval,
+	applyOpenThreadNotification,
 	dropSentFollowup,
 	emptyTranscript,
 	isSentFollowupAtHead,
 	itemsAwaitingApproval,
 	otherThreadApprovalCount,
-	recordChildThread,
-	reduceNotification,
 	requeueFailedFollowup,
 	resolveApprovalRequest,
 	trackApprovalRequest,
@@ -400,11 +399,15 @@ async function sendMessage(text: string): Promise<boolean> {
 			},
 			parseTurnStartResponse,
 		);
-		transcript = reduceNotification(transcript, {
-			type: "turnStarted",
-			threadId,
-			turn: result.turn,
-		});
+		const started = applyOpenThreadNotification(
+			{ transcript, knownChildren, activeThreadId },
+			{
+				type: "turnStarted",
+				threadId,
+				turn: result.turn,
+			},
+		);
+		transcript = started.transcript;
 		recordPreview(threadId, text);
 		return true;
 	} catch (error) {
@@ -500,10 +503,15 @@ function respondApproval(
 }
 
 function handleNotification(notification: AppNotification): void {
+	const update = applyOpenThreadNotification(
+		{ transcript, knownChildren, activeThreadId },
+		notification,
+	);
+	transcript = update.transcript;
+	knownChildren = update.knownChildren;
 	switch (notification.type) {
 		case "threadStarted":
 			upsertThread(notification.thread);
-			transcript = reduceNotification(transcript, notification);
 			break;
 		case "threadStatus":
 			threads = threads.map((thread) =>
@@ -520,13 +528,6 @@ function handleNotification(notification: AppNotification): void {
 			);
 			break;
 		case "childSpawned":
-			knownChildren = recordChildThread(
-				knownChildren,
-				notification.threadId,
-				notification.childId,
-			);
-			transcript = reduceNotification(transcript, notification);
-			break;
 		case "plan":
 		case "turnStarted":
 		case "turnCompleted":
@@ -534,13 +535,6 @@ function handleNotification(notification: AppNotification): void {
 		case "itemCompleted":
 		case "delta":
 		case "error":
-			if (
-				notification.type === "turnCompleted" &&
-				notification.threadId === activeThreadId &&
-				notification.turn.status === "completed"
-			) {
-				void sendNextFollowup(notification.threadId);
-			}
 			break;
 		case "advisorNote":
 			if (notification.threadId === activeThreadId) {
@@ -554,6 +548,9 @@ function handleNotification(notification: AppNotification): void {
 			const exhaustive: never = notification;
 			throw new Error(`unsupported notification: ${String(exhaustive)}`);
 		}
+	}
+	if (update.sendFollowup && activeThreadId !== null) {
+		void sendNextFollowup(activeThreadId);
 	}
 }
 
