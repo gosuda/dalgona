@@ -123,12 +123,13 @@ var writeSpawnPIDFunc = writeSpawnPID
 
 func abortSpawn(runDir string, cmd *exec.Cmd) error {
 	cancelErr := requestCancel(runDir, SignalKill)
+	stopped := stopSpawnGroup(runDir, cmd.Process.Pid)
 	reaped, reapErr := reapSpawn(cmd, 5*time.Second)
 	if !reaped {
 		markerErr := writeAbortMarker(runDir)
 		return errors.Join(cancelErr, reapErr, markerErr)
 	}
-	if abortSpawnGroup(runDir, cmd.Process.Pid) {
+	if stopped || abortSpawnGroup(runDir, cmd.Process.Pid) {
 		removeRunDir(runDir)
 		return errors.Join(cancelErr, reapErr)
 	}

@@ -65,6 +65,8 @@ func ensureProcessGroupGone(pgid int, signal Signal) {
 	}
 }
 
+func stopSpawnGroup(string, int) bool { return false }
+
 func killSpawnGroup(shimPID int, pgid int) bool {
 	_ = signalProcess(shimPID, pgid, SignalKill)
 	ensureProcessGroupGone(pgid, SignalKill)

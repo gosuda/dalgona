@@ -18,17 +18,17 @@ func TestLocal_spawnFailureKillsCommand(t *testing.T) {
 	local := newWindowsLocal(t, filepath.Join(dir, "runs"))
 	id := "spawn-failure"
 	runDir := filepath.Join(dir, "runs", id)
-	started := filepath.Join(dir, "started")
+	pidFile := filepath.Join(dir, "grandchild.pid")
 	var target int
 	oldWriteSpawnPID := writeSpawnPIDFunc
 	writeSpawnPIDFunc = func(d string, _ int) error {
 		windowsWaitForRunFile(t, filepath.Join(d, "pgid"), 30*time.Second)
-		windowsWaitForRunFile(t, started, 30*time.Second)
 		group, err := readProcessGroup(d)
 		if err != nil {
 			t.Fatal(err)
 		}
 		target = group
+		waitWindowsShimPID(t, pidFile)
 		return errTestSpawnFailureWindows
 	}
 	defer func() { writeSpawnPIDFunc = oldWriteSpawnPID }()
@@ -36,8 +36,10 @@ func TestLocal_spawnFailureKillsCommand(t *testing.T) {
 		if target > 0 {
 			_ = terminateSpawnPID(target)
 		}
+		killWindowsProcessByFile(pidFile)
 	})
-	spec := ProcessSpec{ID: id, Argv: []string{"cmd", "/C", "echo started > started & ping -n 60 127.0.0.1 >nul"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}}
+	env := append(os.Environ(), windowsShimHelperEnv+"=hold", windowsShimPidFileEnv+"="+pidFile)
+	spec := ProcessSpec{ID: id, Argv: []string{"@self"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}}
 	if err := local.Start(t.Context(), spec); !errors.Is(err, errTestSpawnFailureWindows) {
 		t.Fatalf("Start error = %v, want test spawn failure", err)
 	}
@@ -48,6 +50,11 @@ func TestLocal_spawnFailureKillsCommand(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	grandchild, ok := readWindowsPIDFile(pidFile)
+	if !ok {
+		t.Fatal("grandchild pid file is not a pid")
+	}
+	waitWindowsProcessGone(t, grandchild)
 	if _, err := os.Stat(runDir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("run directory remains after failed Start")
 	}

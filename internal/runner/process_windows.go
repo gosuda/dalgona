@@ -81,17 +81,49 @@ func signalProcess(shimPID int, pgid int, signal Signal) error {
 	return nil
 }
 
-func killSpawnGroup(shimPID int, pgid int) bool {
-	_ = signalProcess(shimPID, pgid, SignalKill)
-	_ = terminateSpawnPID(pgid)
-	deadline := time.Now().Add(5 * time.Second)
-	for processIsAlive(pgid) {
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(50 * time.Millisecond)
+func stopSpawnGroup(runDir string, shimPID int) bool {
+	pgid, readErr := readProcessGroup(runDir)
+	if readErr != nil {
+		return false
 	}
-	return true
+	return killSpawnGroup(shimPID, pgid)
+}
+
+func killSpawnGroup(shimPID int, pgid int) bool {
+	root, openErr := openSpawnProcess(pgid)
+	if openErr != nil {
+		return !processIsAlive(pgid)
+	}
+	defer func() { _ = windows.CloseHandle(root) }()
+	if termErr := terminateSpawnJob(shimPID); termErr != nil {
+		return false
+	}
+	event, waitErr := windows.WaitForSingleObject(root, 5000)
+	if waitErr != nil {
+		return false
+	}
+	return event == windows.WAIT_OBJECT_0
+}
+
+func openSpawnProcess(pgid int) (windows.Handle, error) {
+	wpid, ok := windowsPID(pgid)
+	if !ok {
+		return 0, ErrProcessNotFound
+	}
+	process, err := windows.OpenProcess(windows.SYNCHRONIZE, false, wpid)
+	if err != nil {
+		return 0, err
+	}
+	return process, nil
+}
+
+func terminateSpawnJob(shimPID int) error {
+	job, err := openJobObject(jobName(shimPID))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(job) }()
+	return windows.TerminateJobObject(job, jobExitCode(SignalKill))
 }
 
 func terminateSpawnPID(pid int) error {
