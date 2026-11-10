@@ -113,13 +113,26 @@ func TestNestedAppendsEachFileOnce(t *testing.T) {
 		t.Fatalf("resolve temp dir: %v", err)
 	}
 	wantPaths := []string{filepath.Join(canonicalCwd, "sub", "AGENTS.md"), filepath.Join(canonicalCwd, "sub", "CLAUDE.md"), filepath.Join(canonicalCwd, "sub", "deep", "AGENTS.md")}
-	if !slices.Equal(newlySeen, wantPaths) {
+	if !slices.Equal(canonicalInstructionPaths(t, newlySeen), canonicalInstructionPaths(t, wantPaths)) {
 		t.Fatalf("newlySeen = %q, want %q", newlySeen, wantPaths)
 	}
 	again, againPaths := prompt.Nested(cwd, readPath, seen)
 	if again != "" || len(againPaths) != 0 {
 		t.Fatalf("second Nested returned text %q and paths %q", again, againPaths)
 	}
+}
+
+func canonicalInstructionPaths(t *testing.T, paths []string) []string {
+	t.Helper()
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", path, err)
+		}
+		out = append(out, resolved)
+	}
+	return out
 }
 
 func TestNestedCapAndContainment(t *testing.T) {
