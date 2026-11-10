@@ -8,7 +8,7 @@ The advisor is an optional reviewer. It reads the transcript of a primary thread
 
 | Key | Type | Default | Values |
 | --- | --- | --- | --- |
-| `advisor.enabled` | bool | `false` | `--advisor` MUST set it to `true` for one run. |
+| `advisor.enabled` | bool | `false` | `true` MUST turn the advisor on. No command-line flag sets it. |
 | `advisor.review` | string | `"turn"` | `turn`, `agent-end` |
 | `advisor.interval` | int | `1` | 1 or more |
 | `advisor.sync` | string | `"off"` | `off`, `final`, `strict` |
