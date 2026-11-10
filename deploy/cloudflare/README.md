@@ -11,6 +11,16 @@ token. The token is HMAC-SHA256 over the box name keyed by
 header with the box token before proxying into the container. A box
 token cannot call worker routes.
 
+A box that an earlier worker version started still holds `DALGONA_TOKEN`
+as its box token. After you deploy this version, destroy and create each
+existing box again. Until then the worker sends that box a token it does
+not accept, and the box keeps a credential that opens every box.
+Destroying a box discards its changes that you did not pull. First run
+`dalgona pull <thread-id>` for each thread whose changes you need. Then
+archive the threads of the box and run `dalgona runner gc --yes`, which
+deletes each box whose threads are all archived. `dalgona cloud down`
+refuses Cloudflare boxes.
+
 Release flow for the box container image.
 
 ## Publish
