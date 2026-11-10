@@ -5,6 +5,7 @@ package runner
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"syscall"
@@ -23,7 +24,17 @@ func publishReplace(tmp, dst string, perm fs.FileMode) error {
 	if replaceUnchanged(tmp, dst, perm) {
 		return nil
 	}
-	return retryReplaceRename(tmp, dst)
+	cleared := clearReadOnly(dst)
+	if err := retryReplaceRename(tmp, dst); err != nil {
+		if cleared {
+			return errors.Join(err, restoreReadOnly(dst))
+		}
+		return err
+	}
+	if cleared {
+		return preserveReadOnly(dst, perm)
+	}
+	return nil
 }
 
 func replaceUnchanged(tmp, dst string, perm fs.FileMode) bool {
@@ -108,4 +119,38 @@ func replaceDenied(err error) bool {
 		return false
 	}
 	return errno == syscall.ERROR_ACCESS_DENIED || errno == windows.ERROR_SHARING_VIOLATION
+}
+
+const replaceReadOnlyMode = 0o400
+
+func clearReadOnly(dst string) bool {
+	info, err := statNoFollow(dst)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	if info.Mode().Perm()&0o200 != 0 {
+		return false
+	}
+	return os.Chmod(dst, 0o600) == nil
+}
+
+func restoreReadOnly(dst string) error {
+	return os.Chmod(dst, replaceReadOnlyMode)
+}
+
+func preserveReadOnly(dst string, perm fs.FileMode) error {
+	if perm.Perm()&0o200 != 0 {
+		return nil
+	}
+	info, err := statNoFollow(dst)
+	if err != nil {
+		return fmt.Errorf("runner: stat replaced file: %w", err)
+	}
+	if info.Mode().Perm()&0o200 == 0 {
+		return nil
+	}
+	if chmodErr := os.Chmod(dst, replaceReadOnlyMode); chmodErr != nil {
+		return fmt.Errorf("runner: restore read-only file: %w", chmodErr)
+	}
+	return nil
 }

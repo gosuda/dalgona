@@ -180,3 +180,33 @@ func TestPublishReplaceRenamesLargeIdenticalFile(t *testing.T) {
 		t.Fatal("publish held large file succeeded, want bounded retry error")
 	}
 }
+
+func TestLocalWriteFileReplacesReadOnlyFile(t *testing.T) {
+	dir := t.TempDir()
+	local, err := NewLocal(filepath.Join(dir, "runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	path := filepath.Join(dir, "note.txt")
+	if writeErr := os.WriteFile(path, []byte("before\n"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if chmodErr := os.Chmod(path, replaceReadOnlyMode); chmodErr != nil {
+		t.Fatal(chmodErr)
+	}
+	after := []byte("after\n")
+	if writeErr := local.WriteFile(t.Context(), path, after, 0o444); writeErr != nil {
+		t.Fatalf("write read-only file: %v", writeErr)
+	}
+	if actual := readReplaceTarget(t, path); !bytes.Equal(actual, after) {
+		t.Fatalf("read-only file content %q, want %q", actual, after)
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode().Perm()&0o200 != 0 {
+		t.Fatalf("read-only file mode %v, want without owner write", info.Mode().Perm())
+	}
+}

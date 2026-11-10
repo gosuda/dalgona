@@ -52,7 +52,7 @@ On Linux, if `DALGONA_SYNCFS` is set, the shim MUST call `syncfs` on that path a
 
 Crash recovery for class `Exec` MUST follow these rules. A recorded `exit` MUST complete the call with that output. A live shim MUST stay running until exit. A gone process with no `exit` MUST complete with the output so far and error `interrupted: the host restarted while this command ran; it may have partly run`. Recovery MUST set `recovered=interrupted`. Recovery MUST NOT start the command again.
 
-File methods MUST be `ReadFile`, `WriteFile`, `Stat`, `ReadDir`, and `Remove`. `WriteFile` MUST write a temporary file and rename it. The write MUST keep the requested permission mode. Each method MUST stop when the context is cancelled before the operation. `ReadFile` and `Stat` MUST NOT follow a symbolic link in the final path component; the call MUST fail instead.
+File methods MUST be `ReadFile`, `WriteFile`, `Stat`, `ReadDir`, and `Remove`. `WriteFile` MUST write a temporary file and rename it. The write MUST keep the requested permission mode. On Windows `WriteFile` MUST replace a read-only destination file. The replaced file MUST keep the read-only attribute. Each method MUST stop when the context is cancelled before the operation. `ReadFile` and `Stat` MUST NOT follow a symbolic link in the final path component; the call MUST fail instead.
 
 Output projection for `exec` MUST use `tool.Project` with `Keep` `Tail`. Output of 64 KiB or less MUST be returned whole. Larger output MUST keep the last 64 KiB. The cut MUST fall on a UTF-8 rune boundary. The projected text MUST end with this line, with `<N>` the total byte count and `<spill>` the `out` path:
 
