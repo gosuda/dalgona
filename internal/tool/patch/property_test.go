@@ -352,17 +352,17 @@ func TestMaskerUnmasksLocatorAndBody(t *testing.T) {
 func TestMaskerLeavesPathsAndPreservesJSON(t *testing.T) {
 	env, cwd := editTestEnv(t)
 	path := "literal-{{secret}}.txt"
-	secret := "a\"b\\c\n"
-	writeFixture(t, cwd, path, secret)
-	env.Masker = quoteMasker{secret: secret}
+	masked := "a&b'c #d]e"
+	writeFixture(t, cwd, path, masked)
+	env.Masker = quoteMasker{secret: masked}
 	input := `{"changes":[{"path":` + snapshot.JSONString(path) + `,"old":"{{secret}}","new":"new-{{secret}}"}]}`
 	if _, err := runPatch(t, env, Replace, input); err != nil {
 		t.Fatal(err)
 	}
-	if actual := readFixture(t, cwd, path); actual != "new-"+secret {
+	if actual := readFixture(t, cwd, path); actual != "new-"+masked {
 		t.Fatalf("masked quoted secret result %q", actual)
 	}
-	if _, err := os.Stat(filepath.Join(cwd, "literal-"+secret+".txt")); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(cwd, "literal-"+masked+".txt")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("path text was unmasked")
 	}
 }

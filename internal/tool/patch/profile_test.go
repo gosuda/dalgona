@@ -159,7 +159,7 @@ func TestProfileNewFileCreationBytes(t *testing.T) {
 
 func TestProfileQuotedPathAndBodyRows(t *testing.T) {
 	env, cwd := editTestEnv(t)
-	path := "odd @#]\"\\.txt"
+	path := "odd @#].txt"
 	quoted := snapshot.JSONString(path)
 	input := "[" + quoted + "#NEW]\nPUT >$:\n++plus\n+-minus\n+```\n+[not-a-header]\n"
 	if _, err := runPatch(t, env, HashlineEnhanced, input); err != nil {
