@@ -8,11 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode"
-
-	"golang.org/x/sys/unix"
 )
 
 const sandboxExec = "/usr/bin/sandbox-exec"
@@ -112,19 +109,11 @@ func appendDeniedSpellings(denied []string, spellings ...string) ([]string, erro
 }
 
 func canonicalParentDir(path string) (string, error) {
-	fd, err := unix.Open(filepath.Dir(path), unix.O_RDONLY, 0)
+	realParent, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
 		return "", fmt.Errorf("resolve denied socket parent %s: %w", path, err)
 	}
-	defer func() { _ = unix.Close(fd) }()
-	link, err := os.Readlink("/dev/fd/" + strconv.Itoa(fd))
-	if err != nil {
-		return "", fmt.Errorf("resolve denied socket parent %s: %w", path, err)
-	}
-	if !filepath.IsAbs(link) {
-		return "", fmt.Errorf("resolve denied socket parent %s: not a path", path)
-	}
-	return filepath.Join(link, filepath.Base(path)), nil
+	return filepath.Join(realParent, filepath.Base(path)), nil
 }
 
 func sandboxProfile(roots []string, denied []string) string {
