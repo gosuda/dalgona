@@ -31,6 +31,8 @@ The server MUST compare SHA-256 digests of the presented token and the expected 
 
 ## TLS
 
+A LAN address MUST use TLS. Without `CertFile` and `KeyFile`, startup MUST fail before it listens with `web: listening on <addr> needs cert_file and key_file for TLS`. `<addr>` is the configured listen address.
+
 When `CertFile` and `KeyFile` are both set, the server MUST serve TLS with `tls.VersionTLS13` as the minimum version.
 When only one of them is set, startup MUST fail with `web: cert_file and key_file must both be set`.
 A file that does not load MUST fail startup with an error that starts with `web: load cert_file and key_file: `.
@@ -39,13 +41,7 @@ A file that does not load MUST fail startup with an error that starts with `web:
 
 All output goes to the caller's writer. Each message is one line.
 
-On a LAN address without TLS, the server MUST write this line once, before the URL:
-
-```text
-web: the token travels unencrypted on <addr>; set cert_file and key_file to use TLS
-```
-
-The server MUST then write `http://<addr>/#token=<token>`, or `https://<addr>/#token=<token>` with TLS.
+The server MUST write `http://<addr>/#token=<token>`, or `https://<addr>/#token=<token>` with TLS.
 In both lines `<addr>` is the bound listener address. The token stays in the URL fragment, so a browser does not send it in page requests.
 
 ## RPC relay

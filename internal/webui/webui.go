@@ -70,6 +70,9 @@ func serve(ctx context.Context, cfg Config, site fs.FS, dial Dialer, log io.Writ
 	if err != nil {
 		return err
 	}
+	if lan && tlsConfig == nil {
+		return fmt.Errorf("web: listening on %s needs cert_file and key_file for TLS", cfg.Listen)
+	}
 	pages, err := pageHandler(site)
 	if err != nil {
 		return err
@@ -80,12 +83,9 @@ func serve(ctx context.Context, cfg Config, site fs.FS, dial Dialer, log io.Writ
 	}
 	s := &server{tokenDigest: sha256.Sum256([]byte(token)), dial: dial, log: log}
 	addr := ln.Addr().String()
-	scheme := "https"
-	if tlsConfig == nil {
-		scheme = "http"
-		if lan {
-			s.logf("web: the token travels unencrypted on %s; set cert_file and key_file to use TLS\n", addr)
-		}
+	scheme := "http"
+	if tlsConfig != nil {
+		scheme = "https"
 	}
 	s.logf("%s://%s/#token=%s\n", scheme, addr, token)
 	return s.run(ctx, ln, pages)

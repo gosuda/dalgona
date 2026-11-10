@@ -117,25 +117,22 @@ func TestLoopbackGeneratesFreshToken(t *testing.T) {
 	}
 }
 
-func TestLANWithoutTLSWarnsOnce(t *testing.T) {
+func TestLANWithoutTLSRefusesToStart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
 	token := strings.Repeat("t", 32)
-	lines := make(lineSink, 8)
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, Config{Listen: "0.0.0.0:0", Token: token}, builtSite(), refuseDial, lines) }()
-	warning := <-lines
-	announced := <-lines
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("serve: %v", err)
+	err := serve(ctx, Config{Listen: "0.0.0.0:0", Token: token}, builtSite(), refuseDial, io.Discard)
+	want := "web: listening on 0.0.0.0:0 needs cert_file and key_file for TLS"
+	if err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %q", err, want)
 	}
-	addr := strings.TrimPrefix(strings.TrimSuffix(announced, "/#token="+token+"\n"), "http://")
-	want := "web: the token travels unencrypted on " + addr + "; set cert_file and key_file to use TLS\n"
-	if warning != want {
-		t.Fatalf("warning %q, want %q", warning, want)
-	}
-	if len(lines) != 0 {
-		t.Fatalf("unexpected extra output %q", <-lines)
+}
+
+func TestLANWithTLSAnnouncesHTTPS(t *testing.T) {
+	certFile, keyFile, _ := writeSelfSigned(t)
+	r := start(t, Config{Listen: "0.0.0.0:0", Token: strings.Repeat("t", 32), CertFile: certFile, KeyFile: keyFile}, builtSite(), refuseDial)
+	if !strings.HasPrefix(r.base, "https://") {
+		t.Fatalf("announced base %q, want https", r.base)
 	}
 }
 
