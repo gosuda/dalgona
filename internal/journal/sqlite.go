@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -411,35 +412,44 @@ func backupDBFiles(db *sql.DB, dir string, dirSync func(string) error) (retErr e
 	return nil
 }
 
+var (
+	quarantineNow = time.Now
+	quarantineSeq atomic.Uint64
+)
+
 func quarantineDB(dir, quarantine string) error {
-	stem, err := quarantineStem(quarantine)
-	if err != nil {
-		return err
+	stem, stemErr := quarantineStem(quarantine)
+	if stemErr != nil {
+		return stemErr
 	}
 	var result error
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		src := filepath.Join(dir, "state.db"+suffix)
-		if _, err := os.Stat(src); err != nil {
+		if _, statErr := os.Stat(src); statErr != nil {
 			continue
 		}
-		if err := os.Rename(src, stem+suffix); err != nil {
-			result = errors.Join(result, err)
+		if renameErr := os.Rename(src, stem+suffix); renameErr != nil {
+			result = errors.Join(result, renameErr)
 		}
 	}
 	return result
 }
 
 func quarantineStem(quarantine string) (string, error) {
-	base := fmt.Sprintf("state-%d-%d.db", time.Now().UnixNano(), os.Getpid())
+	stamp := quarantineNow().UnixNano()
+	pid := os.Getpid()
+	seq := quarantineSeq.Add(1)
+	base := fmt.Sprintf("state-%d-%d-%d", stamp, pid, seq)
 	for attempt := range 100 {
-		name := base
+		name := base + ".db"
 		if attempt > 0 {
-			name = fmt.Sprintf("%s-%d", base, attempt)
+			name = fmt.Sprintf("%s-%d.db", base, attempt)
 		}
-		if free, err := quarantineFree(quarantine, name); err != nil || !free {
-			if err != nil {
-				return "", err
-			}
+		free, freeErr := quarantineFree(quarantine, name)
+		if freeErr != nil {
+			return "", freeErr
+		}
+		if !free {
 			continue
 		}
 		return filepath.Join(quarantine, name), nil

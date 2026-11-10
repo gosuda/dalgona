@@ -438,14 +438,26 @@ func (s *Store) persistRepair(sid string, scan *scanState, hasMarker bool) error
 }
 
 func (s *Store) quarantineSuffix(sid string, scan *scanState) error {
-	name := fmt.Sprintf("%s-%d.bin", sid, scan.stopOff)
-	if err := writeQuarantine(s.quarantineDir(), name, scan.orig[scan.stopOff:]); err != nil {
-		return fmt.Errorf("journal: quarantine %s: %w", sid, err)
+	dir := s.quarantineDir()
+	base := fmt.Sprintf("%s-%d", sid, scan.stopOff)
+	data := scan.orig[scan.stopOff:]
+	for attempt := range 100 {
+		candidate := base + ".bin"
+		if attempt > 0 {
+			candidate = fmt.Sprintf("%s-%d.bin", base, quarantineSeq.Add(1))
+		}
+		writeErr := writeQuarantine(dir, candidate, data)
+		if writeErr == nil {
+			if message := quarantineMessage(sid, scan, candidate); message != "" {
+				slog.Warn(strings.ReplaceAll(strings.ReplaceAll(message, "\r", `\r`), "\n", `\n`))
+			}
+			return nil
+		}
+		if !errors.Is(writeErr, os.ErrExist) {
+			return fmt.Errorf("journal: quarantine %s: %w", sid, writeErr)
+		}
 	}
-	if message := quarantineMessage(sid, scan, name); message != "" {
-		slog.Warn(strings.ReplaceAll(strings.ReplaceAll(message, "\r", `\r`), "\n", `\n`))
-	}
-	return nil
+	return fmt.Errorf("journal: quarantine %s: names exhausted", sid)
 }
 
 func quarantineMessage(sid string, scan *scanState, name string) string {
@@ -576,9 +588,27 @@ func truncateJournal(path string, size int) (retErr error) {
 	return syncDir(filepath.Dir(path))
 }
 
-func writeQuarantine(dir, name string, data []byte) error {
-	if err := writeFileSync(filepath.Join(dir, name), data); err != nil {
-		return err
+func writeQuarantine(dir, name string, data []byte) (retErr error) {
+	path := filepath.Join(dir, name)
+	file, openErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if openErr != nil {
+		return openErr
 	}
-	return syncDir(dir)
+	defer func() {
+		retErr = errors.Join(retErr, file.Close())
+	}()
+	written, writeErr := file.Write(data)
+	if writeErr != nil {
+		return writeErr
+	}
+	if written != len(data) {
+		return ioShortWrite(path, written, len(data))
+	}
+	if syncErr := file.Sync(); syncErr != nil {
+		return syncErr
+	}
+	if dirErr := syncDir(dir); dirErr != nil {
+		return dirErr
+	}
+	return nil
 }
