@@ -62,6 +62,9 @@ func TestSessionInfoPropagatesJournalIOError(t *testing.T) {
 	thread := h.start()
 	id := thread.ID()
 	head := journalHead(t, h, id)
+	if err := h.journal.Close(); err != nil {
+		t.Fatalf("agent: close journal: %v", err)
+	}
 	path := filepath.Join(h.home, "sessions", id, "journal.jsonl")
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("agent: remove journal: %v", err)
