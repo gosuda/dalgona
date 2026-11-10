@@ -288,26 +288,19 @@ func rpcRename(ctx context.Context, _ *Local, params jsontext.Value) (jsontext.V
 	if err != nil {
 		return nil, err
 	}
-	if err := publishStaged(ctx, from, to); err != nil {
-		return nil, err
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("runner: rename: %w", err)
+	}
+	if err := os.Rename(from, to); err != nil {
+		return nil, fmt.Errorf("runner: rename %s: %w", from, err)
+	}
+	if err := syncDir(filepath.Dir(to)); err != nil {
+		return nil, fmt.Errorf("runner: sync parent: %w", err)
 	}
 	if syncErr := syncFS(); syncErr != nil {
 		return nil, fmt.Errorf("runner: sync filesystem: %w", syncErr)
 	}
 	return emptyObject(), nil
-}
-
-func publishStaged(ctx context.Context, from, to string) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("runner: rename: %w", err)
-	}
-	if err := os.Rename(from, to); err != nil {
-		return fmt.Errorf("runner: rename %s: %w", from, err)
-	}
-	if err := syncDir(filepath.Dir(to)); err != nil {
-		return fmt.Errorf("runner: sync parent: %w", err)
-	}
-	return nil
 }
 
 func decodeRenameParams(params jsontext.Value) (string, string, error) {

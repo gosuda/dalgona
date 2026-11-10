@@ -111,15 +111,6 @@ type inBandDenial struct {
 	verdict verdict
 }
 
-func (w *worker) inBandClass(name string) tool.Class {
-	if w.tools != nil {
-		if item, ok := w.tools.byName[name]; ok {
-			return item.Class()
-		}
-	}
-	return tool.ClassRemote
-}
-
 func (w *worker) inBandEvents(ctx context.Context, call model.ToolCall) (event.ToolCompleted, error) {
 	if err := ctx.Err(); err != nil {
 		return event.ToolCompleted{}, err
@@ -127,8 +118,15 @@ func (w *worker) inBandEvents(ctx context.Context, call model.ToolCall) (event.T
 	if w.inBand.takeCancel() {
 		w.inBand.markCancel()
 		toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: call.Args, Freeform: call.Freeform}
-		return w.denyInBand(ctx, toolCall, newID("req-"), inBandDenial{class: w.inBandClass(call.Name), verdict: verdict{decision: "cancel", by: "user", reason: "cancelled by user", cancel: true}})
+		class := tool.ClassRemote
+		if w.tools != nil {
+			if item, ok := w.tools.byName[call.Name]; ok {
+				class = item.Class()
+			}
+		}
+		return w.denyInBand(ctx, toolCall, newID("req-"), inBandDenial{class: class, verdict: verdict{decision: "cancel", by: "user", reason: "cancelled by user", cancel: true}})
 	}
+
 	toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: call.Args, Freeform: call.Freeform}
 	requestID := newID("req-")
 	guard, err := w.prepareGuard(ctx, toolCall, requestID)
