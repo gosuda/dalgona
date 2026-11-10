@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,8 +17,12 @@ import (
 )
 
 type scriptedFault struct {
-	failAt int
-	writes int
+	failAt     int
+	writes     int
+	writeDelay time.Duration
+	dropRemove bool
+	firstWrite chan struct{}
+	writeOnce  sync.Once
 }
 
 func (f *scriptedFault) inject() bool {
@@ -25,11 +30,25 @@ func (f *scriptedFault) inject() bool {
 	return f.failAt > 0 && f.writes == f.failAt
 }
 
-func newScriptedRemote(t *testing.T, local *Local, failWriteAt int) *Remote {
+func (f *scriptedFault) stall(msg rpcMessage) bool {
+	if msg.method == "fs/writeFile" {
+		f.writeOnce.Do(func() {
+			if f.firstWrite != nil {
+				close(f.firstWrite)
+			}
+		})
+		if f.writeDelay > 0 {
+			time.Sleep(f.writeDelay)
+		}
+		return false
+	}
+	return msg.method == "fs/remove" && f.dropRemove
+}
+
+func serveFaultRemote(t *testing.T, local *Local, fault *scriptedFault) *Remote {
 	t.Helper()
 	server, client := net.Pipe()
 	done := make(chan struct{})
-	fault := &scriptedFault{failAt: failWriteAt}
 	go func() {
 		defer close(done)
 		defer func() { _ = server.Close() }()
@@ -65,8 +84,30 @@ func newScriptedRemote(t *testing.T, local *Local, failWriteAt int) *Remote {
 	return remote
 }
 
+func newScriptedRemote(t *testing.T, local *Local, failWriteAt int) *Remote {
+	t.Helper()
+	return serveFaultRemote(t, local, &scriptedFault{failAt: failWriteAt})
+}
+
+func newStallRemote(t *testing.T, local *Local, writeDelay time.Duration) (*Remote, <-chan struct{}) {
+	t.Helper()
+	firstWrite := make(chan struct{})
+	remote := serveFaultRemote(t, local, &scriptedFault{writeDelay: writeDelay, firstWrite: firstWrite})
+	return remote, firstWrite
+}
+
+func newHungRemoveRemote(t *testing.T, local *Local, writeDelay time.Duration) (*Remote, <-chan struct{}) {
+	t.Helper()
+	firstWrite := make(chan struct{})
+	remote := serveFaultRemote(t, local, &scriptedFault{writeDelay: writeDelay, dropRemove: true, firstWrite: firstWrite})
+	return remote, firstWrite
+}
+
 func scriptedReply(ctx context.Context, local *Local, writer rpcWriter, fault *scriptedFault, msg rpcMessage) error {
 	if msg.method == "" {
+		return nil
+	}
+	if fault.stall(msg) {
 		return nil
 	}
 	if msg.method == "fs/writeFile" && fault.inject() {
@@ -190,4 +231,80 @@ func stagedInDir(dir, name string) ([]string, error) {
 		}
 	}
 	return staged, nil
+}
+
+func TestRemoteWriteFileLongBasename(t *testing.T) {
+	dir := t.TempDir()
+	local, err := NewLocal(filepath.Join(dir, "runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := newScriptedRemote(t, local, 0)
+	dest := filepath.Join(dir, strings.Repeat("a", 255))
+	want := []byte("long-basename-payload")
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if uploadErr := remote.WriteFile(ctx, dest, want, 0o600); uploadErr != nil {
+		t.Fatal(uploadErr)
+	}
+	got, readErr := os.ReadFile(dest)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("long basename upload holds %d bytes, want %d", len(got), len(want))
+	}
+	assertNoStagedFiles(t, dir)
+}
+
+func cancelMidUpload(t *testing.T, remote *Remote, firstWrite <-chan struct{}, dest string, data []byte) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- remote.WriteFile(ctx, dest, data, 0o600)
+	}()
+	<-firstWrite
+	cancel()
+	select {
+	case writeErr := <-done:
+		return writeErr
+	case <-time.After(30 * time.Second):
+		t.Fatal("WriteFile did not return within 30s after cancellation")
+		return nil
+	}
+}
+
+func TestRemoteWriteFileCancelledUploadReturnsWithinBound(t *testing.T) {
+	dir := t.TempDir()
+	local, err := NewLocal(filepath.Join(dir, "runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, firstWrite := newHungRemoveRemote(t, local, 500*time.Millisecond)
+	dest := filepath.Join(dir, "target.txt")
+	data := bytes.Repeat([]byte("n"), 2*readPageSize+16)
+	writeErr := cancelMidUpload(t, remote, firstWrite, dest, data)
+	if writeErr == nil {
+		t.Fatal("WriteFile succeeded after cancellation")
+	}
+	if !errors.Is(writeErr, context.Canceled) && !errors.Is(writeErr, context.DeadlineExceeded) {
+		t.Fatalf("WriteFile error = %v, want context cancellation", writeErr)
+	}
+}
+
+func TestRemoteWriteFileCancelledUploadRemovesStaged(t *testing.T) {
+	dir := t.TempDir()
+	local, err := NewLocal(filepath.Join(dir, "runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, firstWrite := newStallRemote(t, local, 500*time.Millisecond)
+	dest := filepath.Join(dir, "target.txt")
+	data := bytes.Repeat([]byte("n"), 2*readPageSize+16)
+	if writeErr := cancelMidUpload(t, remote, firstWrite, dest, data); writeErr == nil {
+		t.Fatal("WriteFile succeeded after cancellation")
+	}
+	assertNoStagedFiles(t, dir)
 }
