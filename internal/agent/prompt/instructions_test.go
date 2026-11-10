@@ -145,3 +145,50 @@ func writeTestFile(t *testing.T, path, text string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink creation requires additional privileges: %v", err)
+	}
+}
+
+func TestInstructionsIgnoreOutsideSymlink(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	repo := filepath.Join(base, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("create git marker: %v", err)
+	}
+	writeTestFile(t, filepath.Join(home, "AGENTS.md"), "HOME")
+	outside := filepath.Join(base, "outside")
+	writeTestFile(t, filepath.Join(outside, "secret.md"), "TOP-SECRET-OUTSIDE")
+	escape := filepath.Join(repo, "AGENTS.md")
+	symlinkOrSkip(t, filepath.Join(outside, "secret.md"), escape)
+	cwd := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := prompt.Instructions(home, cwd); strings.Contains(got, "TOP-SECRET-OUTSIDE") {
+		t.Fatalf("outside symlink reached the instructions: %s", got)
+	}
+	inner := filepath.Join(repo, "inner.md")
+	writeTestFile(t, inner, "INNER-OK")
+	if err := os.Remove(escape); err != nil {
+		t.Fatal(err)
+	}
+	symlinkOrSkip(t, inner, escape)
+	if got := prompt.Instructions(home, cwd); !strings.Contains(got, "INNER-OK") {
+		t.Fatalf("inside link did not load: %s", got)
+	}
+	deep := filepath.Join(cwd, "deep", "x.go")
+	writeTestFile(t, deep, "package x")
+	if err := os.Remove(escape); err != nil {
+		t.Fatal(err)
+	}
+	symlinkOrSkip(t, filepath.Join(outside, "secret.md"), filepath.Join(cwd, "deep", "AGENTS.md"))
+	if got, _ := prompt.Nested(cwd, deep, map[string]bool{}); strings.Contains(got, "TOP-SECRET-OUTSIDE") {
+		t.Fatalf("outside nested symlink reached the instructions: %s", got)
+	}
+}
