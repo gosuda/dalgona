@@ -106,7 +106,7 @@ func readOneLine(r io.Reader) ([]byte, error) {
 
 func shortSocketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "codexapp-sock-*")
+	dir, err := os.MkdirTemp("", "cas-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestAppServerWebSocketWritesTokenFile(t *testing.T) {
 	if strings.Contains(second, token) {
 		t.Fatal("stderr leaks the raw token")
 	}
-	checkTokenFilePermissions(t, path)
+	assertOwnerOnly(t, path)
 	h.token = token
 	checkWebSocketRoundTrip(h)
 }
@@ -585,17 +585,6 @@ func readTokenFileToken(t *testing.T, path string) string {
 		t.Fatal("token file is empty")
 	}
 	return token
-}
-
-func checkTokenFilePermissions(t *testing.T, path string) {
-	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat token file: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("token file mode = %o, want 600", info.Mode().Perm())
-	}
 }
 
 func checkWebSocketRoundTrip(h webSocketHarness) {
