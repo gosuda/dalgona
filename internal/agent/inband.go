@@ -140,6 +140,7 @@ func (w *worker) inBandEvents(ctx context.Context, call model.ToolCall) (event.T
 	}
 	v, err := w.approveInBand(ctx, guard.p, guard.gc, requestID)
 	if err != nil {
+		guard.p.discardPlan()
 		return event.ToolCompleted{}, err
 	}
 	return w.resolveInBand(ctx, guard.p, toolCall, v)
@@ -155,6 +156,7 @@ func (w *worker) resolveInBand(ctx context.Context, p *prepared, toolCall event.
 	}
 	p.verdict = v
 	if err := w.start(ctx, p); err != nil {
+		p.discardPlan()
 		return event.ToolCompleted{}, err
 	}
 	return w.executeInBand(ctx, p)
@@ -202,9 +204,11 @@ func (w *worker) prepareGuard(ctx context.Context, toolCall event.ToolCall, requ
 	by := "mode:" + string(w.settings.Approval)
 	gc, gateErr := w.gateCall(ctx, p, requestID)
 	if gateErr != nil {
+		p.discardPlan()
 		return inBandGuard{gc: gc, denial: &inBandDenial{p.class, summary(gc), decline(by, gateErr.Error())}}, nil
 	}
 	if err := w.journalCover(ctx, toolCall); err != nil {
+		p.discardPlan()
 		return inBandGuard{}, err
 	}
 	return inBandGuard{p: p, gc: gc}, nil
@@ -236,6 +240,7 @@ func (w *worker) prepareInBand(toolCall event.ToolCall) (*prepared, *inBandDenia
 func (w *worker) executeInBand(ctx context.Context, p *prepared) (event.ToolCompleted, error) {
 	completed, err := w.execute(ctx, p)
 	if err != nil {
+		p.discardPlan()
 		return event.ToolCompleted{}, err
 	}
 	if _, err := w.t.appendEvents(context.WithoutCancel(ctx), completed); err != nil {

@@ -77,7 +77,7 @@ A gap MUST survive only while both original neighbors remain adjacent. An insert
 
 `Plan` MUST calculate every pre-image and post-image before any write. It MUST set `PreSHA` and `PostSHA` to SHA-256 hex. An absent file MUST have an empty pre-state. A deleted file MUST have an empty post-state. `Pre` MUST contain exact pre-image bytes.
 
-All parse, binding, coverage, shape, overlap, and path checks MUST finish before the first write. Valid no-ops MUST return `no_change`. Mixed batches MUST apply only effective edits.
+All parse, binding, coverage, shape, overlap, and path checks MUST finish before the first write. Valid no-ops MUST return `no_change`. Mixed batches MUST apply only effective edits. A plan that fails after preparation MUST release its pinned directory handles, and a second release MUST succeed.
 
 `Plan` MUST unmask secret placeholders after parsing and before resolution. It MUST unmask only locator text, apply_patch context, and new content. It MUST NOT unmask paths, rename destinations, tags, or references. A placeholder with no known value MUST stay as written.
 

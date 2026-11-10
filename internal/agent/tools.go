@@ -51,8 +51,10 @@ func (p *prepared) toolCall() tool.Call {
 }
 
 func (p *prepared) discardPlan() {
-	if p.plan != nil && p.plan.Discard != nil {
-		p.plan.Discard()
+	plan := p.plan
+	p.plan = nil
+	if plan != nil && plan.Discard != nil {
+		plan.Discard()
 	}
 }
 
@@ -123,6 +125,7 @@ func (w *worker) runCall(ctx context.Context, call event.ToolCall, requestID str
 	}
 	completed, err := w.execute(ctx, p)
 	if err != nil {
+		p.discardPlan()
 		return err
 	}
 	_, err = w.t.appendEvents(context.WithoutCancel(ctx), completed)
@@ -153,10 +156,19 @@ func (w *worker) runAgentBatch(ctx context.Context, calls []event.ToolCall) erro
 		group.Go(func() { results[i], errs[i] = w.execute(ctx, p) })
 	}
 	group.Wait()
+	discardFailed(ready, errs)
 	if err := w.appendResults(ctx, results); err != nil {
 		return err
 	}
 	return errors.Join(errs...)
+}
+
+func discardFailed(ready []*prepared, errs []error) {
+	for i, err := range errs {
+		if err != nil {
+			ready[i].discardPlan()
+		}
+	}
 }
 
 func (w *worker) appendResults(ctx context.Context, results []event.ToolCompleted) error {
@@ -206,20 +218,23 @@ func (w *worker) admit(ctx context.Context, p *prepared, requestID string) (*pre
 	}
 	v, err := w.gate(ctx, gc)
 	if err != nil {
+		p.discardPlan()
 		return nil, err
 	}
 	if v.cancel {
 		w.t.Interrupt()
 	}
 	if !v.allow {
-		if p.plan != nil && p.plan.Discard != nil {
-			p.plan.Discard()
-		}
+		p.discardPlan()
 		_, err := w.t.appendEvents(ctx, event.ToolCompleted{CallID: p.call.ID, Output: v.reason, Recovered: "none"})
 		return nil, err
 	}
 	p.verdict = v
-	return p, w.start(ctx, p)
+	if err := w.start(ctx, p); err != nil {
+		p.discardPlan()
+		return nil, err
+	}
+	return p, nil
 }
 
 func (w *worker) gateCall(ctx context.Context, p *prepared, requestID string) (gateCall, error) {
@@ -265,7 +280,8 @@ func (w *worker) declineCall(ctx context.Context, call event.ToolCall, requestID
 }
 
 func (w *worker) failBeforeRun(ctx context.Context, p *prepared, requestID string, cause error) error {
-	return w.declineCall(ctx, p.call, requestID, decline("mode:"+string(w.settings.Approval), cause.Error()), p.plan)
+	p.discardPlan()
+	return w.declineCall(ctx, p.call, requestID, decline("mode:"+string(w.settings.Approval), cause.Error()), nil)
 }
 
 func (w *worker) start(ctx context.Context, p *prepared) error {
@@ -324,6 +340,9 @@ func (w *worker) execute(ctx context.Context, p *prepared) (event.ToolCompleted,
 	var err error
 	if p.plan != nil {
 		result, err = p.plan.Apply(ctx)
+		if err != nil {
+			p.discardPlan()
+		}
 	} else {
 		result, err = w.run(ctx, p)
 	}
