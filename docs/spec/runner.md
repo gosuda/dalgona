@@ -10,7 +10,7 @@ The parent MUST start the shim detached. The invocation MUST be `<self> __shim -
 
 `Start` MUST be idempotent. An existing call directory for the same call id MUST make `Start` return success. It MUST NOT start a second process.
 
-The shim MUST write `pid` before it starts the command. `pid` MUST store the process id and the process start time. Recovery and `Read` MUST accept a process only when both values match. A recycled process id MUST NOT count as the shim.
+The shim MUST write `pid` before it starts the command. `pid` MUST store the process id and the process start time. Recovery and `Read` MUST accept a process only when both values match. A recycled process id MUST NOT count as the shim. `Start` MUST write `pid` before it returns. The parent MUST write the same values as the shim. The first `Read` after `Start` MUST report a live process when no `exit` exists.
 
 The shim MUST start the command in a new process group on Unix. It MUST record the group id in `pgid`. On Windows it MUST assign the command to a named job object. The parent MUST reap the shim without waiting for the command in the caller.
 

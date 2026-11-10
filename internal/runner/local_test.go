@@ -189,8 +189,8 @@ func TestLocal_signalBeforePIDPreventsStart(t *testing.T) {
 	env := append(os.Environ(), shimPauseEnvironment+"=pid:300ms")
 	startTestProcess(t, local, ProcessSpec{ID: "early", Argv: []string{"sh", "-c", "touch started; sleep 30"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
 	runDir := filepath.Join(dir, "runs", "early")
-	if _, err := os.Stat(filepath.Join(runDir, "pid")); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("pid existed before the signal: %v", err)
+	if _, err := os.Stat(filepath.Join(runDir, "pid")); err != nil {
+		t.Fatalf("parent did not write pid before the signal: %v", err)
 	}
 	if err := local.Signal(t.Context(), "early", SignalTerm); err != nil {
 		t.Fatal(err)

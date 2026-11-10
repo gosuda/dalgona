@@ -87,12 +87,25 @@ func (l *Local) spawn(runDir string, spec ProcessSpec) error {
 	if err != nil {
 		return err
 	}
+	if err := writeSpawnPID(runDir, cmd.Process.Pid); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
+	}
 	go func() {
 		if err := cmd.Wait(); err != nil {
 			slog.Debug("runner: shim exited without a clean status", "error", err)
 		}
 	}()
 	return nil
+}
+
+func writeSpawnPID(dir string, pid int) error {
+	start := processStartTime(pid)
+	if start == "" {
+		return nil
+	}
+	return writePIDFile(dir, pid, start)
 }
 
 func runnerEnvironment(base []string, dir string, mode SandboxMode, roots []string) []string {

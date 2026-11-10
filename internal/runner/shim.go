@@ -170,6 +170,10 @@ func writePID(dir string) error {
 	if start == "" {
 		return errors.New("runner: process start time is unavailable")
 	}
+	return writePIDFile(dir, pid, start)
+}
+
+func writePIDFile(dir string, pid int, start string) error {
 	data := []byte(strconv.Itoa(pid) + " " + start + "\n")
 	if err := writeAtomic(filepath.Join(dir, "pid"), data, 0o600); err != nil {
 		return fmt.Errorf("runner: write pid: %w", err)
