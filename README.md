@@ -38,7 +38,7 @@ In the terminal interface, run `/login <provider>` to sign in, then `/model` to 
 
 Enter a task in the composer. Use `/resume` to select an existing session, `/new` to start another, and Esc to interrupt a turn. [The TUI contract](docs/spec/tui.md) lists the commands and keys.
 
-Dal uses `$DAL_HOME`, or `~/.dal` when the variable is unset.
+Dal uses `$DAL_HOME`, or `~/.dal` when the variable is unset. On Windows, dal sets a private access list on this directory for your user account, SYSTEM, and Administrators.
 
 ## Start dalgona
 
@@ -56,7 +56,7 @@ dalgona --resume <thread-id>
 
 For login-time startup, use `dalgona service install`. Use `dalgona service uninstall` to remove that startup configuration. The platform service rules are in [daemon.md](docs/spec/daemon.md).
 
-Dalgona uses `$DALGONA_HOME`, or `~/.dalgona` when the variable is unset. It does not share dal's home.
+Dalgona uses `$DALGONA_HOME`, or `~/.dalgona` when the variable is unset. It does not share dal's home. On Windows, dalgona sets a private access list on this directory for your user account, SYSTEM, and Administrators: daemon start resets the list on the home and everything inside it, and a client refuses to start when it cannot protect the home.
 
 ## Configure a product
 

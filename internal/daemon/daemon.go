@@ -40,7 +40,7 @@ var (
 )
 
 func Ensure(ctx context.Context, home, exe string) (net.Conn, error) {
-	if err := tightenHome(home); err != nil {
+	if err := tightenHomeRoot(home); err != nil {
 		return nil, err
 	}
 	if err := verifyHome(home); err != nil {

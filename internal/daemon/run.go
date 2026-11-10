@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/gosuda/dalgona/internal/agent"
+	"github.com/gosuda/dalgona/internal/auth"
 )
 
 type (
@@ -51,19 +52,22 @@ func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc)
 	return accept(ctx, listener, &tasks, marked, func(conn net.Conn) { serveConn(ctx, conn, host, serve) })
 }
 
-func makeHomeDir(home string) error {
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return fmt.Errorf("daemon home: %w", err)
+func tightenHome(home string) error {
+	if homeErr := auth.ProtectHomeTree(home); homeErr != nil {
+		return fmt.Errorf("daemon home: %w", homeErr)
+	}
+	if chmodErr := os.Chmod(home, 0o700); chmodErr != nil { //nolint:gosec // a home directory needs the exec bit
+		return fmt.Errorf("daemon home permissions: %w", chmodErr)
 	}
 	return nil
 }
 
-func tightenHome(home string) error {
-	if err := makeHomeDir(home); err != nil {
-		return err
+func tightenHomeRoot(home string) error {
+	if homeErr := auth.ProtectHomeDir(home); homeErr != nil {
+		return fmt.Errorf("daemon home: %w", homeErr)
 	}
-	if err := os.Chmod(home, 0o700); err != nil { //nolint:gosec // a home directory needs the exec bit
-		return fmt.Errorf("daemon home permissions: %w", err)
+	if chmodErr := os.Chmod(home, 0o700); chmodErr != nil { //nolint:gosec // a home directory needs the exec bit
+		return fmt.Errorf("daemon home permissions: %w", chmodErr)
 	}
 	return nil
 }

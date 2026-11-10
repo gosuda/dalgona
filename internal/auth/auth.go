@@ -133,8 +133,8 @@ func sameAuthFile(previous, current os.FileInfo) bool {
 }
 
 func openAuthLock(dir string) (*os.File, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create credential directory: %w", err)
+	if dirErr := ProtectHomeDir(dir); dirErr != nil {
+		return nil, fmt.Errorf("create credential directory: %w", dirErr)
 	}
 	file, err := os.OpenFile(filepath.Join(dir, "auth.lock"), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
@@ -466,8 +466,8 @@ func writeCredential(encoder *jsontext.Encoder, credential Credential) error {
 }
 
 func writeSecure(path string, encode func(*jsontext.Encoder) error) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create credential directory: %w", err)
+	if dirErr := ProtectHomeDir(filepath.Dir(path)); dirErr != nil {
+		return fmt.Errorf("create credential directory: %w", dirErr)
 	}
 	file, err := os.CreateTemp(filepath.Dir(path), ".credentials-*.tmp")
 	if err != nil {

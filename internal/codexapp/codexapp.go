@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/gosuda/dalgona/internal/auth"
 )
 
 type Env struct {
@@ -95,8 +97,8 @@ func Install(env Env, exe string) error {
 	}
 	home := userHome(env)
 	dalgonaHome := dataHome(env, home)
-	if err := os.MkdirAll(dalgonaHome, 0o700); err != nil {
-		return fmt.Errorf("codexapp: create home: %w", err)
+	if homeErr := auth.ProtectHomeDir(dalgonaHome); homeErr != nil {
+		return fmt.Errorf("codexapp: create home: %w", homeErr)
 	}
 	platform := activePlatform(env)
 	rec, err := prepareRecord(env, dalgonaHome, platform)

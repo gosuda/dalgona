@@ -1,6 +1,6 @@
 # Codex app integration
 
-`dalgona codex install` MUST make the Codex desktop app use the current native dalgona executable. The executable path MUST be absolute. An install MUST fail before changing a target when the path is empty or a required file cannot be read.
+`dalgona codex install` MUST make the Codex desktop app use the current native dalgona executable. The executable path MUST be absolute. An install MUST fail before changing a target when the path is empty or a required file cannot be read. On Windows the installer MUST protect the home directory before it writes the install record.
 
 The installer MUST record its prior state in `<dalgona-home>/codex-install.json` before it changes any target. The record MUST contain every file's prior bytes and whether the file existed. The record MUST use mode `0600`. The installer MUST publish the record with a temporary file and rename. A reinstall MUST keep prior record entries and add the prior state of any newly active target, so uninstall restores every file the installer ever changed.
 

@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/gosuda/dalgona/internal/auth"
 )
 
 const (
@@ -426,8 +428,8 @@ func writeDefaultWSToken(stderr io.Writer, home string) ([sha256.Size]byte, erro
 		return none, fmt.Errorf("generate ws token: %w", err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return none, fmt.Errorf("create token dir: %w", err)
+	if homeErr := auth.ProtectHomeDir(home); homeErr != nil {
+		return none, fmt.Errorf("create token dir: %w", homeErr)
 	}
 	path := filepath.Join(home, wsTokenFileName)
 	tmp := path + ".tmp"

@@ -2,7 +2,11 @@
 
 package daemon
 
-import "net"
+import (
+	"net"
+
+	"github.com/gosuda/dalgona/internal/auth"
+)
 
 func verifyAcceptedPeer(net.Conn, bool) error {
 	return nil
@@ -12,8 +16,8 @@ func verifyDialedPeer(net.Conn) error {
 	return nil
 }
 
-func verifyHome(string) error {
-	return nil
+func verifyHome(home string) error {
+	return auth.CheckHomeDir(home)
 }
 
 func verifySocket(string) error {
