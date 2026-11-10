@@ -115,6 +115,8 @@ func assignJob(cmd *exec.Cmd) (func(), error) {
 	return func() {}, nil
 }
 
+func resumeCommand(_ *exec.Cmd) error { return nil }
+
 func exitDetails(waitErr error) (int, string) {
 	if waitErr == nil {
 		return 0, ""

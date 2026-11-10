@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -40,12 +41,13 @@ func startDetached(ctx context.Context, self string, args []string, spec Process
 func configureProcessGroup(cmd *exec.Cmd) {}
 
 func configureShimCommand(cmd *exec.Cmd, argv []string) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
 	command, ok := splitWindowsShellCommand(argv)
 	if !ok {
 		return
-	}
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	shape := WindowsShellArgv("")
 	cmd.SysProcAttr.CmdLine = shape[0] + " /S " + shape[1] + ` "` + command + `"`
@@ -130,6 +132,63 @@ func assignJob(cmd *exec.Cmd) (func(), error) {
 		_ = windows.CloseHandle(job)
 	}
 	return cleanup, nil
+}
+
+func resumeCommand(cmd *exec.Cmd) error {
+	pid, ok := windowsPID(cmd.Process.Pid)
+	if !ok {
+		return fmt.Errorf("runner: invalid command pid %d", cmd.Process.Pid)
+	}
+	return resumeCommandProcess(pid)
+}
+
+func resumeCommandProcess(pid uint32) error {
+	var lastErr error
+	for range 20 {
+		resumed, err := resumeCommandThreadsOnce(pid)
+		if resumed {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("runner: no command threads to resume")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return fmt.Errorf("runner: resume command: %w", lastErr)
+}
+
+func resumeCommandThreadsOnce(pid uint32) (bool, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return false, fmt.Errorf("runner: snapshot command threads: %w", err)
+	}
+	defer func() { _ = windows.CloseHandle(snapshot) }()
+	var entry windows.ThreadEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	if err := windows.Thread32First(snapshot, &entry); err != nil {
+		return false, fmt.Errorf("runner: list command threads: %w", err)
+	}
+	resumed := false
+	for {
+		if entry.OwnerProcessID == pid {
+			thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+			if err != nil {
+				return resumed, fmt.Errorf("runner: open command thread: %w", err)
+			}
+			_, err = windows.ResumeThread(thread)
+			_ = windows.CloseHandle(thread)
+			if err != nil {
+				return resumed, fmt.Errorf("runner: resume command thread: %w", err)
+			}
+			resumed = true
+		}
+		if err := windows.Thread32Next(snapshot, &entry); err != nil {
+			break
+		}
+	}
+	return resumed, nil
 }
 
 func openJobObject(name string) (windows.Handle, error) {

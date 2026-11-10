@@ -115,6 +115,10 @@ func startCommand(dir string, argv []string, out *os.File) (*exec.Cmd, func(), e
 	if err != nil {
 		return nil, nil, abandonCommand(cmd, err)
 	}
+	if resumeErr := resumeCommand(cmd); resumeErr != nil {
+		cleanup()
+		return nil, nil, abandonCommand(cmd, resumeErr)
+	}
 	return cmd, cleanup, nil
 }
 
