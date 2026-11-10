@@ -82,8 +82,28 @@ func entryFor(item event.Seqd, size int) compact.Entry {
 		entry.Kind, entry.CallID = compact.ToolStarted, value.CallID
 	case event.ToolCompleted:
 		entry.Kind, entry.CallID, entry.OutputBytes = compact.ToolCompleted, value.CallID, len(value.Output)
+	default:
+		entry.CallID, entry.RunID = scopeIDs(item.Event)
 	}
 	return entry
+}
+
+func scopeIDs(item event.Event) (string, string) {
+	switch value := item.(type) {
+	case event.ToolStarted:
+		return value.CallID, ""
+	case event.ToolCompleted:
+		return value.CallID, ""
+	case event.ScriptStarted:
+		return "", value.RunID
+	case event.ScriptEffect:
+		return "", value.RunID
+	case event.ScriptCompleted:
+		return "", value.RunID
+	case event.ChildSpawned:
+		return value.CallID, ""
+	}
+	return "", ""
 }
 
 func usedTokens(cv compactionView) int {

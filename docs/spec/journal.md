@@ -69,7 +69,7 @@ In both modes, the store MUST keep the mirror rows of a session when they hold e
 
 ## Compaction
 
-A compaction marker MUST keep each tool result with the assistant message that issued it. A cut MUST be safe only when each kept call id has its issuing assistant message in the kept suffix.
+A compaction marker MUST keep each tool result with the assistant message that issued it. The scope of a call id or a run id is the part before "/". A cut MUST be safe only when no scope occurs on both sides of the cut. A cut MUST start at a user message or an assistant message.
 
 ## Blobs
 

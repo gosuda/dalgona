@@ -3,6 +3,8 @@ package compact
 import (
 	"fmt"
 	"math/rand"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -102,12 +104,12 @@ func TestCutPropertyNeverSplitsToolBatch(t *testing.T) {
 		if !ok {
 			continue
 		}
-		assertCutKeepsIssuers(t, entries, cut)
+		assertCutKeepsScopes(t, entries, cut)
 	}
 }
 
 func randomEntries(rng *rand.Rand) []Entry {
-	entries := make([]Entry, 0, 30)
+	entries := make([]Entry, 0, 40)
 	for turn := range 5 {
 		entries = append(entries, Entry{Kind: UserMessage, Bytes: rng.Intn(20) + 1})
 		ids := randomCallIDs(rng, turn)
@@ -117,14 +119,42 @@ func randomEntries(rng *rand.Rand) []Entry {
 			continue
 		}
 		for _, id := range ids {
+			if rng.Intn(4) == 0 {
+				entries = append(entries, nestedScriptBatch(rng, id)...)
+				continue
+			}
 			entries = append(entries, Entry{Kind: ToolStarted, Bytes: rng.Intn(20) + 1, CallID: id})
 			if rng.Intn(4) == 0 {
 				entries = append(entries, Entry{Kind: UserMessage, Bytes: rng.Intn(20) + 1})
 			}
 			entries = append(entries, Entry{Kind: ToolCompleted, Bytes: rng.Intn(20) + 1, CallID: id})
 		}
+		if rng.Intn(5) == 0 {
+			entries = append(entries, Entry{Kind: Other, Bytes: rng.Intn(20) + 1})
+		}
 	}
 	return entries
+}
+
+func nestedScriptBatch(rng *rand.Rand, id string) []Entry {
+	out := []Entry{
+		{Kind: ToolStarted, Bytes: rng.Intn(20) + 1, CallID: id},
+		{Kind: Other, Bytes: rng.Intn(20) + 1, RunID: id},
+	}
+	for n := range rng.Intn(3) {
+		call := id + "/" + strconv.Itoa(n)
+		if rng.Intn(3) != 0 {
+			out = append(out, Entry{Kind: ToolStarted, Bytes: rng.Intn(20) + 1, CallID: call})
+		}
+		out = append(out, Entry{Kind: ToolCompleted, Bytes: rng.Intn(20) + 1, CallID: call})
+	}
+	if rng.Intn(3) == 0 {
+		out = append(out, Entry{Kind: Other, Bytes: rng.Intn(20) + 1, CallID: id + "/spawn"})
+	}
+	return append(out,
+		Entry{Kind: Other, Bytes: rng.Intn(20) + 1, RunID: id},
+		Entry{Kind: ToolCompleted, Bytes: rng.Intn(20) + 1, CallID: id},
+	)
 }
 
 func randomCallIDs(rng *rand.Rand, turn int) []string {
@@ -145,18 +175,71 @@ func declinedSiblingBatch(rng *rand.Rand, ids []string) []Entry {
 	}
 }
 
-func assertCutKeepsIssuers(t *testing.T, entries []Entry, cut int) {
+func assertCutKeepsScopes(t *testing.T, entries []Entry, cut int) {
 	t.Helper()
 	if entries[cut].Kind != UserMessage && entries[cut].Kind != AssistantMessage {
 		t.Fatalf("cut %d starts at %v", cut, entries[cut].Kind)
 	}
-	issued := issuedIDs(entries, cut)
-	for i := cut; i < len(entries); i++ {
-		if !exposed(entries[i]) {
-			continue
+	before := make(map[string]struct{})
+	for _, entry := range entries[:cut] {
+		for _, id := range entryIDs(entry) {
+			before[testRoot(id)] = struct{}{}
 		}
-		if _, ok := issued[entries[i].CallID]; !ok {
-			t.Fatalf("cut %d orphans call %q", cut, entries[i].CallID)
+	}
+	for _, entry := range entries[cut:] {
+		for _, id := range entryIDs(entry) {
+			if _, ok := before[testRoot(id)]; ok {
+				t.Fatalf("cut %d splits scope of %q", cut, id)
+			}
 		}
+	}
+}
+
+func entryIDs(entry Entry) []string {
+	ids := make([]string, 0, 3)
+	if entry.CallID != "" {
+		ids = append(ids, entry.CallID)
+	}
+	for _, id := range entry.CallIDs {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if entry.RunID != "" {
+		ids = append(ids, entry.RunID)
+	}
+	return ids
+}
+
+func testRoot(id string) string {
+	root, _, _ := strings.Cut(id, "/")
+	return root
+}
+
+func TestCutKeepsNestedScriptFamily(t *testing.T) {
+	entries := []Entry{
+		{Kind: UserMessage, Bytes: 20},
+		{Kind: AssistantMessage, Bytes: 20, CallIDs: []string{"e"}},
+		{Kind: ToolStarted, Bytes: 20, CallID: "e"},
+		{Kind: Other, Bytes: 20, RunID: "e"},
+		{Kind: ToolStarted, Bytes: 20, CallID: "e/1"},
+		{Kind: UserMessage, Bytes: 20},
+		{Kind: ToolCompleted, Bytes: 20, CallID: "e/1"},
+		{Kind: Other, Bytes: 20, RunID: "e"},
+		{Kind: ToolCompleted, Bytes: 20, CallID: "e"},
+		{Kind: UserMessage, Bytes: 20},
+	}
+	cut, ok := Cut(entries, 11, 0)
+	if !ok {
+		t.Fatal("Cut() reported no boundary")
+	}
+	if cut != 1 {
+		t.Fatalf("Cut() = %d, want the assistant call at 1", cut)
+	}
+	if !safeCut(entries, 1) {
+		t.Fatal("safeCut() rejected the assistant call that keeps the family")
+	}
+	if safeCut(entries, 5) {
+		t.Fatal("safeCut() allowed a cut inside a nested script family")
 	}
 }

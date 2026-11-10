@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"math"
 	"slices"
+	"strings"
 )
 
 type Kind int
@@ -22,6 +23,7 @@ type Entry struct {
 	Bytes       int
 	CallID      string
 	CallIDs     []string
+	RunID       string
 	OutputBytes int
 }
 
@@ -72,8 +74,17 @@ func findCut(entries []Entry, target int) (int, bool) {
 }
 
 func turnBoundary(entries []Entry, cut int) int {
-	for cut > 0 && cut < len(entries) && !safeCut(entries, cut) {
+	if cut <= 0 || cut >= len(entries) {
+		return cut
+	}
+	first := scopeFirst(entries)
+	earliest := len(entries)
+	for i := len(entries) - 1; i >= cut; i-- {
+		earliest = earliestScope(first, entries[i], earliest)
+	}
+	for cut > 0 && (!isBoundary(entries[cut].Kind) || earliest < cut) {
 		cut--
+		earliest = earliestScope(first, entries[cut], earliest)
 	}
 	return cut
 }
@@ -82,33 +93,57 @@ func safeCut(entries []Entry, cut int) bool {
 	if !isBoundary(entries[cut].Kind) {
 		return false
 	}
-	issued := issuedIDs(entries, cut)
-	for i := cut; i < len(entries); i++ {
-		if !exposed(entries[i]) {
-			continue
-		}
-		if _, ok := issued[entries[i].CallID]; !ok {
-			return false
-		}
+	first := scopeFirst(entries)
+	earliest := len(entries)
+	for i := len(entries) - 1; i >= cut; i-- {
+		earliest = earliestScope(first, entries[i], earliest)
 	}
-	return true
+	return earliest >= cut
 }
 
-func issuedIDs(entries []Entry, cut int) map[string]struct{} {
-	issued := make(map[string]struct{})
-	for i := cut; i < len(entries); i++ {
-		if entries[i].Kind != AssistantMessage {
-			continue
+func scopeFirst(entries []Entry) map[string]int {
+	first := make(map[string]int)
+	for i, entry := range entries {
+		noteScope(first, entry.CallID, i)
+		for _, id := range entry.CallIDs {
+			noteScope(first, id, i)
 		}
-		for _, id := range entries[i].CallIDs {
-			issued[id] = struct{}{}
-		}
+		noteScope(first, entry.RunID, i)
 	}
-	return issued
+	return first
 }
 
-func exposed(entry Entry) bool {
-	return (entry.Kind == ToolStarted || entry.Kind == ToolCompleted) && entry.CallID != ""
+func noteScope(first map[string]int, id string, i int) {
+	if id == "" {
+		return
+	}
+	root := scopeRoot(id)
+	if _, ok := first[root]; !ok {
+		first[root] = i
+	}
+}
+
+func earliestScope(first map[string]int, entry Entry, earliest int) int {
+	earliest = earliestID(first, entry.CallID, earliest)
+	for _, id := range entry.CallIDs {
+		earliest = earliestID(first, id, earliest)
+	}
+	return earliestID(first, entry.RunID, earliest)
+}
+
+func earliestID(first map[string]int, id string, earliest int) int {
+	if id == "" {
+		return earliest
+	}
+	if i, ok := first[scopeRoot(id)]; ok && i < earliest {
+		return i
+	}
+	return earliest
+}
+
+func scopeRoot(id string) string {
+	root, _, _ := strings.Cut(id, "/")
+	return root
 }
 
 func PruneSelect(entries []Entry, protectTokens, minBytes, maxCount, targetTokens int) []string {
