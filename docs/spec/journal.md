@@ -19,7 +19,7 @@ A payload larger than 64 KiB MUST be stored under `blobs/<sha256>`. The event MU
 
 `Append` MUST validate every event before writing. It MUST encode all events for one call and write them with one append write. It MUST `fsync` the journal before it returns. It MUST insert the same records and session head in one immediate SQLite transaction. JSONL remains authoritative when the mirror write fails. The store MUST retain the new JSONL head and report the mirror error.
 
-When `DALGONA_SYNCFS` is set, the journal `fsync` MUST be followed by `Syncfs` for that directory.
+On Linux, when `DALGONA_SYNCFS` is set, the journal `fsync` MUST be followed by `Syncfs` for that directory. On other systems the variable MUST have no effect.
 
 ## Open and repair
 

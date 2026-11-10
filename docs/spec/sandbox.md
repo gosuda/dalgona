@@ -59,4 +59,4 @@ This hiding is best-effort, not a boundary. Landlock filesystem rules do not med
 
 ## Failure
 
-The shim MUST apply the policy before it starts the command. A policy error MUST write the error to `out`. The call MUST exit nonzero. The shim MUST still write `exit` and perform the configured `DALGONA_SYNCFS` operation.
+The shim MUST apply the policy before it starts the command. A policy error MUST write the error to `out`. The call MUST exit nonzero. The shim MUST still write `exit`. On Linux, the shim MUST perform the configured `DALGONA_SYNCFS` operation. On other systems the variable MUST have no effect.

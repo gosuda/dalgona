@@ -48,7 +48,7 @@ The command environment MUST be the caller environment plus these defaults. Each
 
 The shim MUST write `exit` by a temporary file and rename. `exit` MUST be JSON `{"code":N,"signal":"","ended_at":"RFC3339"}`. `code` MUST be the numeric exit code. `signal` MUST be the signal text, or empty. `ended_at` MUST be an RFC3339 timestamp.
 
-If `DALGONA_SYNCFS` is set, the shim MUST call `syncfs` on that path after the `exit` rename. It MUST NOT call `syncfs` before the rename completes.
+On Linux, if `DALGONA_SYNCFS` is set, the shim MUST call `syncfs` on that path after the `exit` rename. It MUST NOT call `syncfs` before the rename completes. On other systems the variable MUST have no effect.
 
 Crash recovery for class `Exec` MUST follow these rules. A recorded `exit` MUST complete the call with that output. A live shim MUST stay running until exit. A gone process with no `exit` MUST complete with the output so far and error `interrupted: the host restarted while this command ran; it may have partly run`. Recovery MUST set `recovered=interrupted`. Recovery MUST NOT start the command again.
 
