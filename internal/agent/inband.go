@@ -65,6 +65,9 @@ func (c *inBandCalls) markCancel() {
 }
 
 func (c *inBandCalls) takeCancel() bool {
+	if c == nil {
+		return false
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cancelled := c.cancel
@@ -108,9 +111,23 @@ type inBandDenial struct {
 	verdict verdict
 }
 
+func (w *worker) inBandClass(name string) tool.Class {
+	if w.tools != nil {
+		if item, ok := w.tools.byName[name]; ok {
+			return item.Class()
+		}
+	}
+	return tool.ClassRemote
+}
+
 func (w *worker) inBandEvents(ctx context.Context, call model.ToolCall) (event.ToolCompleted, error) {
 	if err := ctx.Err(); err != nil {
 		return event.ToolCompleted{}, err
+	}
+	if w.inBand.takeCancel() {
+		w.inBand.markCancel()
+		toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: call.Args, Freeform: call.Freeform}
+		return w.denyInBand(ctx, toolCall, newID("req-"), inBandDenial{class: w.inBandClass(call.Name), verdict: verdict{decision: "cancel", by: "user", reason: "cancelled by user", cancel: true}})
 	}
 	toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: call.Args, Freeform: call.Freeform}
 	requestID := newID("req-")
@@ -229,6 +246,9 @@ func (w *worker) executeInBand(ctx context.Context, p *prepared) (event.ToolComp
 }
 
 func (w *worker) denyInBand(ctx context.Context, call event.ToolCall, requestID string, denial inBandDenial) (event.ToolCompleted, error) {
+	if err := w.journalCover(ctx, call); err != nil {
+		return event.ToolCompleted{}, err
+	}
 	requested := event.ApprovalRequested{RequestID: requestID, CallID: call.ID, Summary: truncate(cmp.Or(denial.text, call.Name), summaryLimit), Class: classString(denial.class)}
 	if _, err := w.t.appendEvents(ctx, requested); err != nil {
 		return event.ToolCompleted{}, err
