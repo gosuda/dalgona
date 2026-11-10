@@ -81,6 +81,32 @@ func signalProcess(shimPID int, pgid int, signal Signal) error {
 	return nil
 }
 
+func killSpawnGroup(shimPID int, pgid int) bool {
+	_ = signalProcess(shimPID, pgid, SignalKill)
+	_ = terminateSpawnPID(pgid)
+	deadline := time.Now().Add(5 * time.Second)
+	for processIsAlive(pgid) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true
+}
+
+func terminateSpawnPID(pid int) error {
+	wpid, ok := windowsPID(pid)
+	if !ok {
+		return errors.New("runner: invalid spawn pid")
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, wpid)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(process) }()
+	return windows.TerminateProcess(process, 137)
+}
+
 func ensureProcessGroupGone(pgid int, signal Signal) {}
 
 func watchCancelWhileWaiting(dir string, pgid int, done <-chan struct{}) {}

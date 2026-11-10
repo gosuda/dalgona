@@ -65,6 +65,12 @@ func ensureProcessGroupGone(pgid int, signal Signal) {
 	}
 }
 
+func killSpawnGroup(shimPID int, pgid int) bool {
+	_ = signalProcess(shimPID, pgid, SignalKill)
+	ensureProcessGroupGone(pgid, SignalKill)
+	return processGroupGone(pgid)
+}
+
 func watchCancelWhileWaiting(dir string, pgid int, done <-chan struct{}) {
 	if pgid <= 0 {
 		return
