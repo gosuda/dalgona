@@ -8,7 +8,9 @@ When the lock is held by another process, `Run` MUST return `another dalgona pro
 
 After the lock is held, `Run` MUST remove a stale `dalgona.sock` and then listen on it. `Run` MUST create `<home>` with mode `0700` and MUST tighten an existing `<home>` to mode `0700` before it builds the host, so the host never reads config or the journal from a loose directory. It MUST set the socket file to mode `0600` after it listens, so only the owning user can reach the RPC surface. A failure to create, tighten, remove, listen, or set these permissions MUST stop `Run` with an error.
 
-The daemon performs no peer credential check on the socket: any same-uid process that reaches `<home>/dalgona.sock` can speak the RPC protocol. The runner keeps the home path out of sandboxed child environments (see [sandbox.md](sandbox.md)), but the default path stays guessable, so this hiding is best-effort only.
+`Run` MUST accept a connection only when the peer uid equals its own uid. On Linux it MUST read the peer uid with `SO_PEERCRED`. On macOS and FreeBSD it MUST read the peer uid with `LOCAL_PEERCRED`. On other unix targets the peer check MUST fail closed and refuse the connection. On Windows it MUST keep the existing mode control and MUST NOT apply a peer uid check.
+
+The peer check MUST NOT count as a boundary against the same uid: any same-uid process that reaches `<home>/dalgona.sock` can speak the RPC protocol. The runner keeps the home path out of sandboxed child environments (see [sandbox.md](sandbox.md)), but the default path stays guessable, so this hiding is best-effort only.
 
 `Run` MUST call `Host.Recover` once, in the background. Recovery MUST NOT delay the accept loop. Each connection MUST get its own `serve` call, so a client gets its `initialize` answer while recovery runs. Recovery errors MUST be logged. They MUST NOT stop the daemon.
 
@@ -16,7 +18,9 @@ When the context ends, `Run` MUST stop accepting, close every open connection, a
 
 ## Ensure
 
-`Ensure` MUST reuse an accepting socket. If the socket is unavailable, it MUST start `<executable> daemon` detached and append stdout and stderr to `daemon.log`. On Unix the child MUST run in a new session. On Windows it MUST use `DETACHED_PROCESS` and `CREATE_NEW_PROCESS_GROUP`. `Ensure` MUST retry for five seconds. On timeout it MUST return `daemon did not start: see <home>/daemon.log`.
+`Ensure` MUST tighten `<home>` to mode `0700` and MUST refuse a home that is not owned by the current uid or whose mode is not `0700`. `Ensure` MUST refuse a socket that is not owned by the current uid. `Ensure` MUST verify the peer uid of each dialed connection and MUST close a connection whose peer uid differs, without sending any request on it. A pre-bound socket from another user MUST be refused, never answered. On Windows `Ensure` MUST keep the existing mode control and MUST NOT apply uid checks. On other unix targets without a peer credential call, the peer check MUST fail closed and `Ensure` MUST refuse the socket.
+
+`Ensure` MUST reuse an accepting socket. If the socket is missing or stale, it MUST start `<executable> daemon` detached and append stdout and stderr to `daemon.log`. On Unix the child MUST run in a new session. On Windows it MUST use `DETACHED_PROCESS` and `CREATE_NEW_PROCESS_GROUP`. `Ensure` MUST retry for five seconds. On timeout it MUST return `daemon did not start: see <home>/daemon.log`.
 
 Two clients MAY start two daemons at the same time. The lock rule above makes the second daemon exit without effect on the first.
 

@@ -93,6 +93,11 @@ func accept(ctx context.Context, listener net.Listener, tasks *sync.WaitGroup, h
 			}
 			return fmt.Errorf("daemon accept: %w", err)
 		}
+		if perr := verifyPeerConn(conn); perr != nil {
+			_ = conn.Close()
+			slog.Warn("daemon: refusing connection", "error", perr)
+			continue
+		}
 		tasks.Go(func() { handle(conn) })
 	}
 }
