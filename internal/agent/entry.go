@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +24,9 @@ type preparedInput struct {
 }
 
 func (t *Thread) Submit(ctx context.Context, in Input) error {
+	if err := t.rejectStaleSteer(in); err != nil {
+		return err
+	}
 	if err := t.ensureTools(ctx); err != nil {
 		return err
 	}
@@ -34,6 +38,18 @@ func (t *Thread) Submit(ctx context.Context, in Input) error {
 		return err
 	}
 	return askErr(t, func(a *actor) error { return a.submit(prepared) })
+}
+
+func (t *Thread) rejectStaleSteer(in Input) error {
+	kind := cmp.Or(in.Kind, InputPrompt)
+	if kind != InputSteer {
+		return nil
+	}
+	turnID, err := ask(t, func(a *actor) string { return a.state.TurnID })
+	if err != nil {
+		return err
+	}
+	return checkSteerTarget(turnID, preparedInput{kind: kind, expectedTurnID: in.ExpectedTurnID})
 }
 
 func (t *Thread) prepareInput(in Input) (preparedInput, error) {
