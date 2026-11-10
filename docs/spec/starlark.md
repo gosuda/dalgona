@@ -83,7 +83,7 @@ Workflows and `eval` cells have `ctx` and `tools` (the same as `ctx.tools`). Plu
 - `ctx.tools.<name>(**kw)` and `ctx.tools["<name>"](**kw)` MUST call the tool. Positional arguments MUST fail. A failed call MUST stop the script.
 - `ctx.try_call(op, *args, **kw)` MUST return `struct(ok, value, error)`. It MUST NOT catch a denial, `scope_exceeded`, cancellation, nondeterminism, an interrupted effect, or a step limit.
 - `ctx.scope(limit)` MUST accept a limit from 1 to 64. `scope.tools.<name>(**kw)` MUST submit the call and return `None`. At most `limit` calls MUST run at the same time. `scope.all()` MUST wait for every submitted call and return the results in submission order. A failed call MUST raise the first failure in submission order. A scope MUST hold at most 4096 pending calls.
-- `ctx.spawn(prompt, runner = None, model = None)` MUST return the child id.
+- `ctx.spawn(prompt, runner = None, model = None)` MUST return the child id. At most 8 children MUST run at the same time. A spawn MUST wait while 8 children run. Closing a child MUST free its slot. A child MUST hold its slot until its turn ends or the child stops.
 - `ctx.wait(ids)` MUST return a list of final texts.
 - `ctx.sleep(seconds)` MUST accept a non-negative finite number.
 - `ctx.log(msg)` MUST pass the message to `Log`.
