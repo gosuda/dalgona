@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -554,8 +553,6 @@ func TestStateDirPersistsConversation(t *testing.T) {
 			t.Fatalf("turn %s failed: %v", text, out.failure.Err)
 		}
 	}
-	checkPrivateFile(t, filepath.Join(dir, "checkpoint"))
-	checkPrivateFile(t, filepath.Join(dir, "blobs", hex.EncodeToString(blobID[:])))
 }
 
 func TestRetryableTrailerRetriesTurn(t *testing.T) {

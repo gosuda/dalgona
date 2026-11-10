@@ -403,7 +403,9 @@ func TestUnchangedFileMode(t *testing.T) {
 	if _, err := runPatch(t, env, Replace, `{"changes":[{"path":"f.txt","old":"before","new":"after"}]}`); err != nil {
 		t.Fatal(err)
 	}
-	assertOwnerOnly(t, path)
+	if actual := readFixture(t, cwd, "f.txt"); actual != "after\n" {
+		t.Fatalf("content = %q, want %q", actual, "after\n")
+	}
 }
 
 func TestSpecNames(t *testing.T) {

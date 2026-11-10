@@ -39,11 +39,17 @@ func readAuthJSON(t *testing.T, home string) string {
 
 func requirePrivateMode(t *testing.T, path string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		if homeErr := auth.CheckHomeDir(filepath.Dir(path)); homeErr != nil {
+			t.Fatalf("home: %v", homeErr)
+		}
+		return
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %o", info.Mode().Perm())
 	}
 }
