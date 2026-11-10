@@ -80,6 +80,7 @@ func daemonTestFailure(err error) {
 
 func TestEnsureStartsAndReuses(t *testing.T) {
 	home := shortHome(t)
+	t.Cleanup(func() { waitForDaemonLogRelease(t, home) })
 	t.Cleanup(func() { stopDaemonHelper(t, home) })
 	t.Setenv("DALGONA_TEST_DAEMON", home)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -151,6 +152,26 @@ func waitForDaemonHelperExit(t *testing.T, home string) {
 	}
 }
 
+func waitForDaemonLogRelease(t *testing.T, home string) {
+	t.Helper()
+	path := filepath.Join(home, "daemon.log")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := os.Remove(path)
+		if err == nil {
+			return
+		}
+		if os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("daemon log still in use: %v", err)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func readHelperPID(home string) (int, error) {
 	path := filepath.Join(home, "helper.pid")
 	deadline := time.Now().Add(time.Second)
@@ -175,6 +196,7 @@ func TestEnsureTimeout(t *testing.T) {
 	ensureTimeout = 20 * time.Millisecond
 	defer func() { ensureTimeout = old }()
 	home := shortHome(t)
+	t.Cleanup(func() { waitForDaemonLogRelease(t, home) })
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
