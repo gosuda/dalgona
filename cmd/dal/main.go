@@ -34,6 +34,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if err := config.AnchorHome(); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", binary, err)
+		return 1
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "__shim":

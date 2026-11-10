@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/agent/prompt"
+	"github.com/gosuda/dalgona/internal/config"
 )
 
 func TestInstructionsWalkAndFallback(t *testing.T) {
@@ -207,5 +208,40 @@ func TestInstructionsIgnoreOutsideSymlink(t *testing.T) {
 	symlinkOrSkip(t, filepath.Join(outside, "secret.md"), filepath.Join(cwd, "deep", "AGENTS.md"))
 	if got, _ := prompt.Nested(cwd, deep, map[string]bool{}); strings.Contains(got, "TOP-SECRET-OUTSIDE") {
 		t.Fatalf("outside nested symlink reached the instructions: %s", got)
+	}
+}
+
+func TestInstructionsRelativeProductHome(t *testing.T) {
+	base := t.TempDir()
+	t.Chdir(base)
+	t.Setenv("DALGONA_HOME", "home")
+	if err := config.AnchorHome(); err != nil {
+		t.Fatal(err)
+	}
+	home := config.ProductDalgona.Home()
+	if !filepath.IsAbs(home) {
+		t.Fatalf("product home = %q, want absolute", home)
+	}
+	writeTestFile(t, filepath.Join(home, "AGENTS.md"), "HOME")
+	repo := filepath.Join(base, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("create git marker: %v", err)
+	}
+	cwd := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	if got := prompt.Instructions(home, cwd); !strings.Contains(got, ">HOME</instructions>") {
+		t.Fatalf("relative home instructions missing: %s", got)
+	}
+	outside := filepath.Join(base, "outside")
+	writeTestFile(t, filepath.Join(outside, "secret.md"), "TOP-SECRET-OUTSIDE")
+	escape := filepath.Join(repo, "AGENTS.md")
+	symlinkOrSkip(t, filepath.Join(outside, "secret.md"), escape)
+	if got := prompt.Instructions(home, cwd); strings.Contains(got, "TOP-SECRET-OUTSIDE") || !strings.Contains(got, ">HOME</instructions>") {
+		t.Fatalf("relative home containment failed: %s", got)
 	}
 }

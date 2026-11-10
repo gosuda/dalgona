@@ -28,6 +28,10 @@ func (s stdio) Read(p []byte) (int, error)  { return s.in.Read(p) }
 func (s stdio) Write(p []byte) (int, error) { return s.out.Write(p) }
 
 func main() {
+	if err := config.AnchorHome(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", binary, err)
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := run(ctx, os.Args[1:], stdio{in: os.Stdin, out: os.Stdout, errOut: os.Stderr})
 	stop()
