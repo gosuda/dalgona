@@ -1,6 +1,7 @@
 # Event journal
 
 The journal MUST survive a process halt, a forced kill, and a host restart. JSONL is the authority. SQLite is a repairable mirror.
+Directory `fsync` MUST be a no-op on Windows because the operating system rejects directory sync.
 
 ## Record format
 

@@ -550,15 +550,6 @@ func ioShortWrite(path string, written, total int) error {
 	return fmt.Errorf("journal: write %s: short write %d of %d", path, written, total)
 }
 
-func syncDir(dir string) (err error) {
-	file, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, file.Close()) }()
-	return file.Sync()
-}
-
 func rewriteJournal(dir string, data []byte) error {
 	tmp := filepath.Join(dir, "journal.jsonl.tmp")
 	if err := writeFileSync(tmp, data); err != nil {
