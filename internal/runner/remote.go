@@ -322,16 +322,19 @@ func (r *Remote) removeStaged(ctx context.Context, path string) {
 }
 
 func stagingPath(dest string) (string, error) {
+	if dest == "" {
+		return "", errors.New("runner: empty destination path")
+	}
 	var nonce [8]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", fmt.Errorf("runner: stage upload: %w", err)
 	}
 	name := fmt.Sprintf(".dalgona-partial-%x", nonce)
-	if i := strings.LastIndexByte(dest, '/'); i >= 0 {
-		return dest[:i+1] + name, nil
+	if dir, _, found := strings.CutLast(dest, "/"); found {
+		return dir + "/" + name, nil
 	}
-	if i := strings.LastIndexByte(dest, '\\'); i >= 0 {
-		return dest[:i+1] + name, nil
+	if dir, _, found := strings.CutLast(dest, "\\"); found {
+		return dir + "\\" + name, nil
 	}
 	return name, nil
 }
