@@ -99,7 +99,9 @@ func shortDaemonHome(t *testing.T) string {
 
 func TestRunWorkflowExecsTwiceThroughTheDaemon(t *testing.T) {
 	home, work := shortDaemonHome(t), t.TempDir()
-	t.Setenv("HOME", t.TempDir())
+	userHome := t.TempDir()
+	t.Setenv("HOME", userHome)
+	t.Setenv("USERPROFILE", userHome)
 	t.Setenv("DALGONA_HOME", home)
 	config := "model = \"openai/gpt-test\"\napproval = \"yolo\"\nsandbox = \"off\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {

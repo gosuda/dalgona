@@ -179,7 +179,7 @@ func checkConfigWrites(t *testing.T, r *rig, c *wireClient) ThreadStartResponse 
 	expect(t, cfg.Config.Model == "openai/gpt-other" && cfg.Config.ApprovalPolicy == "untrusted" && cfg.Config.SandboxMode == "workspace-write", "config/read after writes", cfg.Config)
 	var started ThreadStartResponse
 	c.ok("thread/start", map[string]any{"cwd": r.cwd}, &started)
-	expect(t, started.Model == "openai/gpt-other" && started.ApprovalPolicy == "untrusted" && started.Sandbox.Type == "workspaceWrite", "thread/start after config write", started)
+	expect(t, started.Model == "openai/gpt-other" && started.ApprovalPolicy == "untrusted" && started.Sandbox.Type == effectiveWorkspaceWriteType(), "thread/start after config write", started)
 	return started
 }
 

@@ -149,7 +149,7 @@ func TestTurnStartOverridesFollowActivePath(t *testing.T) {
 		"sandboxPolicy":  map[string]any{"type": "workspaceWrite", "networkAccess": false},
 	})
 	overrideTurn(t, c, plain)
-	overridden := ThreadStartResponse{Model: "openai/gpt-y", ApprovalPolicy: "untrusted", Sandbox: SandboxPolicy{Type: "workspaceWrite"}}
+	overridden := ThreadStartResponse{Model: "openai/gpt-y", ApprovalPolicy: "untrusted", Sandbox: SandboxPolicy{Type: effectiveWorkspaceWriteType()}}
 	expectSession(t, c, threadID, overridden)
 	var fork ThreadStartResponse
 	c.ok("thread/fork", map[string]any{"threadId": threadID}, &fork)
