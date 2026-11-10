@@ -92,7 +92,7 @@ Use these table names and keys:
 | `[approval_decider]` | `decider`, `threshold` |
 | `[roles]` | `smol`, `slow`, `advisor` |
 | `[advisor]` | `enabled`, `review`, `interval`, `sync`, `continue_severity`, `immune_turns`, `max_notes`, `tools`, `subagents` |
-| `[advisors.<name>]` | `model`, `instructions`, `review`, `interval`, `sync`, `tools`, `enabled` |
+| `[advisors.<name>]` | `model`, `instructions`, `review`, `interval`, `sync`, `tools`, `subagents`, `enabled` |
 | `[secrets]` | `patterns` |
 | `[keywords.<name>]` | `notice`, `text`, `hue`, `effort`, `requires`, `enabled` |
 | Dalgona only, top level | `tool_mode`, `runner`, `remote` |

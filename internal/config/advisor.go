@@ -13,6 +13,14 @@ type (
 	AdvisorSync   string
 )
 
+type AdvisorSubagents int
+
+const (
+	AdvisorSubagentsInherit AdvisorSubagents = iota
+	AdvisorSubagentsOn
+	AdvisorSubagentsOff
+)
+
 const (
 	AdvisorReviewTurn     AdvisorReview = "turn"
 	AdvisorReviewAgentEnd AdvisorReview = "agent-end"
@@ -43,6 +51,7 @@ type AdvisorSpec struct {
 	Sync                AdvisorSync
 	Tools               []string
 	Enabled             bool
+	Subagents           AdvisorSubagents
 }
 
 type (
@@ -65,6 +74,7 @@ type (
 		Sync         *string  `toml:"sync"`
 		Tools        []string `toml:"tools"`
 		Enabled      *bool    `toml:"enabled"`
+		Subagents    *bool    `toml:"subagents"`
 	}
 )
 
@@ -112,6 +122,7 @@ func mergeAdvisorEntry(target, source advisorsDoc) advisorsDoc {
 	target.Interval = cmp.Or(source.Interval, target.Interval)
 	target.Sync = cmp.Or(source.Sync, target.Sync)
 	target.Enabled = cmp.Or(source.Enabled, target.Enabled)
+	target.Subagents = cmp.Or(source.Subagents, target.Subagents)
 	if source.Tools != nil {
 		target.Tools = source.Tools
 	}
@@ -152,6 +163,12 @@ func (c *Config) resolveAdvisor(entry advisorsDoc) AdvisorSpec {
 	setInt(entry.Interval, &spec.Interval)
 	setString(entry.Sync, (*string)(&spec.Sync))
 	setBool(entry.Enabled, &spec.Enabled)
+	if entry.Subagents != nil {
+		spec.Subagents = AdvisorSubagentsOff
+		if *entry.Subagents {
+			spec.Subagents = AdvisorSubagentsOn
+		}
+	}
 	if entry.Tools != nil {
 		spec.Tools = entry.Tools
 	}
