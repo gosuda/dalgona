@@ -579,7 +579,7 @@ func writeAtomic(path string, data []byte, perm fs.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary file: %w", err)
 	}
-	if err := os.Rename(name, path); err != nil {
+	if err := publishReplace(name, path, perm); err != nil {
 		return fmt.Errorf("rename temporary file: %w", err)
 	}
 	return nil
