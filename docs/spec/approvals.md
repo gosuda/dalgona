@@ -16,7 +16,7 @@ Calls that fail before the gate MUST complete through a declined resolution:
 
 - An unknown tool: `Tool <name> not found`, by `mode:<mode>`.
 - Arguments that `tool.Repair` rejects: `invalid arguments for <name>: <error>`, by `mode:<mode>`.
-- The loop guard: `repeated call: this exact call already ran 4 times; change approach`, by `rule:loop-guard`. The key is the tool name plus the arguments in RFC 8785 canonical form. Four earlier `tool.started` records with the same key trigger the guard. Counting stops at the most recent `user.message` and at the most recent `tool.started` record with a different key in class `edit` or `exec`; other calls between repeats do not reset the count.
+- The loop guard: `repeated call: this exact call already ran 4 times; change approach`, by `rule:loop-guard`. The key is the tool name plus the arguments in RFC 8785 canonical form. Four earlier `tool.started` records with the same key trigger the guard. Counting stops at the most recent `user.message` and at the most recent `tool.started` record with a different key in class `edit` or `exec` that completed with `ok=true`. A failed or unfinished state-changing call MUST NOT reset the count. Other calls between repeats do not reset the count.
 
 ## Gate order
 

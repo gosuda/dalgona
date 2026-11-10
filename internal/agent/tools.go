@@ -591,35 +591,55 @@ func (w *worker) repeated(name string, args jsontext.Value) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	key := callKey(name, args)
 	path := event.ActivePath(v.records)
-	count := 0
-	for i := len(path) - 1; i >= 0 && count < loopGuardLimit; i-- {
+	scan := guardScan{key: callKey(name, args), ok: make(map[string]struct{})}
+	for i := len(path) - 1; i >= 0 && scan.count < loopGuardLimit; i-- {
 		switch value := path[i].Event.(type) {
 		case event.UserMessage:
 			return false, nil
+		case event.ToolCompleted:
+			scan.observeCompleted(value)
 		case event.ToolStarted:
 			startedArgs, err := w.t.host.loadRaw(value.Args, value.ArgsBlob)
 			if err != nil {
 				return false, err
 			}
-			match, reset := guardStep(value, startedArgs, key)
-			if reset {
+			if scan.observeStarted(value, startedArgs) {
 				return false, nil
-			}
-			if match {
-				count++
 			}
 		}
 	}
-	return count >= loopGuardLimit, nil
+	return scan.exceeded(), nil
 }
 
-func guardStep(start event.ToolStarted, args jsontext.Value, key string) (match, reset bool) {
-	if callKey(start.Tool, args) == key {
-		return true, false
+type guardScan struct {
+	key   string
+	count int
+	ok    map[string]struct{}
+}
+
+func (s *guardScan) observeCompleted(completed event.ToolCompleted) {
+	if completed.OK {
+		s.ok[completed.CallID] = struct{}{}
 	}
-	return false, start.Class == classString(tool.ClassEdit) || start.Class == classString(tool.ClassExec)
+}
+
+func (s *guardScan) observeStarted(start event.ToolStarted, args jsontext.Value) bool {
+	if callKey(start.Tool, args) == s.key {
+		s.count++
+		return false
+	}
+	if start.Class != classString(tool.ClassEdit) && start.Class != classString(tool.ClassExec) {
+		return false
+	}
+	if _, good := s.ok[start.CallID]; !good {
+		return false
+	}
+	return true
+}
+
+func (s *guardScan) exceeded() bool {
+	return s.count >= loopGuardLimit
 }
 
 func callKey(name string, args jsontext.Value) string {
