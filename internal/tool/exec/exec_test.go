@@ -40,6 +40,31 @@ func testEnv(t *testing.T) (tool.Env, func()) {
 	return env, func() { _ = runs.Close() }
 }
 
+func printCwdCommand(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(exe)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return filepath.Base(exe) + " __print-cwd"
+}
+
+func requireCwdOutput(t *testing.T, result tool.Result, dir string) {
+	t.Helper()
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := filepath.EvalSymlinks(strings.TrimSpace(string(result.Output)))
+	if err != nil {
+		t.Fatalf("cwd output = %q: %v", result.Output, err)
+	}
+	if got != want {
+		t.Fatalf("cwd = %q, want %q", got, want)
+	}
+}
+
 func TestExecRunsCommand(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
@@ -126,17 +151,12 @@ func TestExecUsesWorkspaceDirectory(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	toolExec := New()
-	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-5", Args: jsontext.Value(`{"command":"pwd"}`)}, env)
+	command := printCwdCommand(t)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-5", Args: jsontext.Value(`{"command":` + strconv.Quote(command) + `}`)}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := filepath.EvalSymlinks(env.Cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(result.Output)) != want {
-		t.Fatalf("pwd = %q, want %q", result.Output, want)
-	}
+	requireCwdOutput(t, result, env.Cwd)
 }
 
 func TestExecRejectsBadArguments(t *testing.T) {
@@ -198,18 +218,13 @@ func TestExecResolvesRelativeCwdAgainstWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	toolExec := New()
-	args := jsontext.Value(`{"command":"pwd","cwd":"web"}`)
+	command := printCwdCommand(t)
+	args := jsontext.Value(`{"command":` + strconv.Quote(command) + `,"cwd":"web"}`)
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-rel", Args: args}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := filepath.EvalSymlinks(sub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(result.Output)) != want {
-		t.Fatalf("pwd = %q, want %q", result.Output, want)
-	}
+	requireCwdOutput(t, result, sub)
 }
 
 func TestExecRefusesCwdOutsideWritableRoots(t *testing.T) {
@@ -227,28 +242,21 @@ func TestExecUnsandboxedRunsOutsideWritableRoots(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	outside := t.TempDir()
-	want, err := filepath.EvalSymlinks(outside)
-	if err != nil {
-		t.Fatal(err)
-	}
 	toolExec := New()
-	escalated := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(outside) + `,"escalate":true,"justification":"retry"}`)
+	command := printCwdCommand(t)
+	escalated := jsontext.Value(`{"command":` + strconv.Quote(command) + `,"cwd":` + strconv.Quote(outside) + `,"escalate":true,"justification":"retry"}`)
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-out-esc", Args: escalated}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(result.Output)) != want {
-		t.Fatalf("pwd = %q, want %q", result.Output, want)
-	}
+	requireCwdOutput(t, result, outside)
 	env.Sandbox.Mode = runner.SandboxOff
-	plain := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(outside) + `}`)
+	plain := jsontext.Value(`{"command":` + strconv.Quote(command) + `,"cwd":` + strconv.Quote(outside) + `}`)
 	result, err = toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-out-off", Args: plain}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(result.Output)) != want {
-		t.Fatalf("pwd = %q, want %q", result.Output, want)
-	}
+	requireCwdOutput(t, result, outside)
 }
 
 type remoteStub struct {
