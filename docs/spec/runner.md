@@ -24,7 +24,7 @@ On Windows the runner MUST retry a call-directory file open that fails with a sh
 
 The shim MUST read `cancel` after it writes `pid` and before it starts the command. If `cancel` exists, the shim MUST NOT start the command. It MUST write `exit` as for a command that the recorded signal stopped: on Unix `code` -1 and `signal` the signal text, on Windows `code` 1 for `TERM` and 137 for `KILL`. The shim MUST read `cancel` again after it writes `pgid` and assigns the job object. If `cancel` exists, the shim MUST send the recorded signal to the command itself. If that fails, it MUST kill the command process. Each side writes its own file before it reads the file of the other side. So a terminate request that arrives before `pid` or `pgid` exists MUST still stop the command, and the command MUST NOT outlive the request. `cancel` is on disk, so the request MUST survive a daemon restart.
 
-A tool that signals a run MUST poll `Read` until `Exit` exists before the tool returns. The poll MUST stop at a bounded deadline. The tool MUST report a deadline timeout as an error.
+A tool that signals a run MUST poll `Read` until `Exit` exists before the tool returns. The poll MUST stop at a bounded deadline. The tool MUST report a deadline timeout as an error. A `Read` error that the tool deadline causes MUST surface as the deadline timeout. A `Read` error from caller cancellation or I/O failure MUST surface unchanged.
 
 The shim MUST pause at startup only when `DALGONA_SHIM_TEST_PAUSE` is set to `<phase>:<duration>`. Phase `pid` pauses before the shim writes `pid`. Phase `start` pauses after the first `cancel` check and before the command starts. Only tests MAY set this variable.
 

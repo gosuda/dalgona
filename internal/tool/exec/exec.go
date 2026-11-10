@@ -265,14 +265,16 @@ func trimTailStart(data []byte) []byte {
 }
 
 func (t *Tool) wait(ctx context.Context, run runner.Runner, id string, timeout time.Duration) (tool.Result, error) {
-	waitCtx, cancel := context.WithTimeoutCause(ctx, timeout, fmt.Errorf("exec: timed out after %s", timeout))
+	timeoutErr := fmt.Errorf("exec: timed out after %s", timeout)
+	waitCtx, cancel := context.WithTimeoutCause(ctx, timeout, timeoutErr)
 	defer cancel()
 	state := waitState{}
 	delay := 10 * time.Millisecond
 	for {
-		current, err := run.Read(waitCtx, id, state.offset)
-		if err != nil {
-			return t.terminate(run, id, state, err)
+		current, readErr := run.Read(waitCtx, id, state.offset)
+		if readErr != nil {
+			readErr = timeoutCauseOr(readErr, waitCtx, ctx, timeoutErr)
+			return t.terminate(run, id, state, readErr)
 		}
 		state.appendOutput(current.Data)
 		state.offset = current.Next
@@ -280,14 +282,32 @@ func (t *Tool) wait(ctx context.Context, run runner.Runner, id string, timeout t
 		if current.Exit != nil {
 			return projectedResult(state, current.Exit), nil
 		}
-		if err := sleep(waitCtx, delay); err != nil {
-			if context.Cause(waitCtx) != nil {
-				err = context.Cause(waitCtx)
+		sleepErr := sleep(waitCtx, delay)
+		if sleepErr != nil {
+			if cause := context.Cause(waitCtx); cause != nil {
+				sleepErr = cause
 			}
-			return t.terminate(run, id, state, err)
+			return t.terminate(run, id, state, sleepErr)
 		}
 		delay = min(delay*2, 100*time.Millisecond)
 	}
+}
+
+func timeoutCauseOr(readErr error, waitCtx context.Context, parent context.Context, timeoutErr error) error {
+	if parent.Err() != nil {
+		return readErr
+	}
+	if waitCtx.Err() == nil {
+		return readErr
+	}
+	if !errors.Is(readErr, context.DeadlineExceeded) && !errors.Is(readErr, context.Canceled) {
+		return readErr
+	}
+	cause := context.Cause(waitCtx)
+	if cause == nil {
+		return timeoutErr
+	}
+	return cause
 }
 
 func (t *Tool) terminate(run runner.Runner, id string, state waitState, cause error) (tool.Result, error) {
