@@ -29,6 +29,9 @@ func mustOpenShared(t *testing.T, dir string) *Store {
 	if err != nil {
 		t.Fatalf("OpenShared: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
 	return store
 }
 
@@ -378,13 +381,20 @@ func TestSessionReleaseHoldsRepairGate(t *testing.T) {
 	closeStore(t, store)
 }
 
-func resetSessionDir(t *testing.T, sdir string) {
+func blockRepairGate(t *testing.T, gatePath string) {
 	t.Helper()
-	if err := os.Remove(sdir); err != nil {
-		t.Fatalf("unblock session dir: %v", err)
+	if err := os.Remove(gatePath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("clear repair gate: %v", err)
 	}
-	if err := os.MkdirAll(sdir, 0o700); err != nil {
-		t.Fatalf("recreate session dir: %v", err)
+	if err := os.Mkdir(gatePath, 0o700); err != nil {
+		t.Fatalf("block repair gate: %v", err)
+	}
+}
+
+func unblockRepairGate(t *testing.T, gatePath string) {
+	t.Helper()
+	if err := os.Remove(gatePath); err != nil {
+		t.Fatalf("unblock repair gate: %v", err)
 	}
 }
 
@@ -397,19 +407,15 @@ func TestReleaseRetriesAfterGateFailure(t *testing.T) {
 		t.Fatalf("sessionDirFor: %v", err)
 	}
 	release := mustLockOwnedSession(t, store, "g")
-	if err := os.RemoveAll(sdir); err != nil {
-		t.Fatalf("remove session dir: %v", err)
-	}
-	if err := os.WriteFile(sdir, []byte("x"), 0o600); err != nil {
-		t.Fatalf("block session dir: %v", err)
-	}
+	gatePath := filepath.Join(sdir, "repair.lock")
+	blockRepairGate(t, gatePath)
 	if err := release(); err == nil {
 		t.Fatal("release succeeded while repair.lock was unopenable")
 	}
 	if !store.sessionLockedByUs(sdir) {
 		t.Fatal("failed release dropped ownership")
 	}
-	resetSessionDir(t, sdir)
+	unblockRepairGate(t, gatePath)
 	if err := release(); err != nil {
 		t.Fatalf("release retry: %v", err)
 	}
