@@ -88,10 +88,32 @@ func (t *Thread) childFor(ctx context.Context, callID string, req task.Request) 
 		}
 	}
 	child, err := t.host.openChild(ctx, spec, id)
-	if err == nil && req.Advisor && t.host.cfg.OnChildStarted != nil {
-		t.host.cfg.OnChildStarted(child)
-	}
+	t.notifyChildStarted(child, req, err)
 	return child, err
+}
+
+func (t *Thread) notifyChildStarted(child *Thread, req task.Request, err error) {
+	if err != nil || t.host.cfg.OnChildStarted == nil {
+		return
+	}
+	if req.Advisor || childAdvisorConfigured(t.host.cfg.Config) {
+		t.host.cfg.OnChildStarted(child, req)
+	}
+}
+
+func childAdvisorConfigured(cfg config.Config) bool {
+	if !cfg.Advisor.Enabled {
+		return false
+	}
+	if cfg.Advisor.Subagents {
+		return true
+	}
+	for _, spec := range cfg.Advisors {
+		if spec.Subagents == config.AdvisorSubagentsOn {
+			return true
+		}
+	}
+	return false
 }
 
 func childOf(state event.State, callID string) (string, bool) {

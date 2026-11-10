@@ -13,6 +13,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
 func reasoningEffort(request map[string]any) any {
@@ -256,7 +257,7 @@ func TestTaskAdvisorOptInCallsTheChildHook(t *testing.T) {
 	var mu sync.Mutex
 	var attached []string
 	h := newHarness(t, func(h *harness) {
-		h.cfg.OnChildStarted = func(child *Thread) {
+		h.cfg.OnChildStarted = func(child *Thread, _ task.Request) {
 			mu.Lock()
 			defer mu.Unlock()
 			attached = append(attached, child.created.Parent)
