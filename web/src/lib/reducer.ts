@@ -189,7 +189,25 @@ export function reduceNotification(
 			const { turnId, explanation, steps } = notification;
 			return { ...state, plan: { turnId, explanation, steps } };
 		}
-		case "turnStarted":
+		case "turnStarted": {
+			if (!sameThread(state, notification.threadId)) {
+				return state;
+			}
+			if (
+				state.turnId === notification.turn.id &&
+				state.turnStatus !== null &&
+				state.turnStatus !== "inProgress"
+			) {
+				return state;
+			}
+			return {
+				...state,
+				turnId: notification.turn.id,
+				turnStatus: notification.turn.status,
+				error: notification.turn.error,
+				plan: state.plan?.turnId === notification.turn.id ? state.plan : null,
+			};
+		}
 		case "turnCompleted": {
 			if (!sameThread(state, notification.threadId)) {
 				return state;

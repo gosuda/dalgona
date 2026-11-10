@@ -87,6 +87,7 @@ The client in `web/` reads the token from the URL fragment and opens `/rpc`. It 
 ### Status bar
 
 The status bar shows the connection state as text. The turn state follows it as text: `Working`, `Turn completed`, `Turn interrupted`, or `Turn failed`.
+A `turnStarted` response for a turn already shown as `Turn completed`, `Turn interrupted`, or `Turn failed` MUST NOT replace that status or clear its error.
 
 It also shows model, approval, sandbox, runner, and advisor. The advisor entry comes from `dalgona/advisor/status`. The client loads it when a thread opens or starts, and again after each `dalgona/advisor/note` for the open thread. It shows one of:
 
