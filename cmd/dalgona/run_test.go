@@ -105,8 +105,8 @@ func TestRunWorkflowExecsTwiceThroughTheDaemon(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	workflow := "a = ctx.tools.exec(command = \"printf one-%d\" % args[\"n\"])\n" +
-		"b = ctx.tools.exec(command = \"printf two\")\nprint(a)\nprint(b)\n{\"n\": args[\"n\"], \"label\": args[\"label\"]}\n"
+	workflow := "a = ctx.tools.exec(command = \"echo one-%d\" % args[\"n\"])\n" +
+		"b = ctx.tools.exec(command = \"echo two\")\nprint(a)\nprint(b)\n{\"n\": args[\"n\"], \"label\": args[\"label\"]}\n"
 	if err := os.WriteFile(filepath.Join(work, "flow.star"), []byte(workflow), 0o600); err != nil {
 		t.Fatal(err)
 	}

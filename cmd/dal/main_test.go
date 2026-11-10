@@ -10,10 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -155,8 +155,15 @@ func TestPrintModeEndToEnd(t *testing.T) {
 	}
 }
 
+func holdCommand() string {
+	if runtime.GOOS == "windows" {
+		return "echo run >> runs.txt & ping -n 4 127.0.0.1 >nul & echo ok"
+	}
+	return "echo run >> runs.txt; sleep 3; echo ok"
+}
+
 func TestKilledTurnResumesFromShim(t *testing.T) {
-	e := newDalEnv(t, sseExec("call-sleep", "echo run >> runs.txt; sleep 3; echo ok"))
+	e := newDalEnv(t, sseExec("call-sleep", holdCommand()))
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	cmd, _, stderr := e.command(ctx, "-p", "run it", "--json", "-m", "openai/gpt-test", "--approval", "yolo", "-C", e.cwd)
@@ -165,7 +172,7 @@ func TestKilledTurnResumesFromShim(t *testing.T) {
 	}
 	journal := waitForJournal(t, e.home, `"tool.started"`)
 	waitForFile(t, filepath.Join(filepath.Dir(journal), "runs", "*", "pid"))
-	if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
+	if err := cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmd.Wait(); err == nil {
@@ -189,7 +196,10 @@ func checkRecovered(t *testing.T, journal, marker string) {
 		t.Fatalf("journal has no tool.completed with output ok:\n%s", data)
 	}
 	runs, err := os.ReadFile(marker)
-	if err != nil || string(runs) != "run\n" {
+	if err != nil {
+		t.Fatalf("command ran %q times (err %v); recovery must not rerun it", runs, err)
+	}
+	if fields := strings.Fields(string(runs)); len(fields) != 1 || fields[0] != "run" {
 		t.Fatalf("command ran %q times (err %v); recovery must not rerun it", runs, err)
 	}
 }

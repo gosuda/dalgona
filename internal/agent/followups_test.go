@@ -88,7 +88,7 @@ func TestRecordRunnerBoundOnceAndForkCarriesIt(t *testing.T) {
 func TestSteerDuringToolRidesTheNextRequest(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, withApproval(config.ApprovalYolo))
-	h.model.push(calls(call{id: "c1", name: "exec", args: `{"command":"sleep 0.5"}`}), text("done with beta"))
+	h.model.push(calls(call{id: "c1", name: "exec", args: `{"command":"` + holdCommand(1) + `"}`}), text("done with beta"))
 	thread := h.start()
 	h.submit(thread, "run it")
 	h.waitEvent(thread.ID(), func(e event.Event) bool {
