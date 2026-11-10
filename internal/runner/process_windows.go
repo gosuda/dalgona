@@ -44,7 +44,7 @@ func configureShimCommand(cmd *exec.Cmd, argv []string) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED | windows.CREATE_NO_WINDOW
 	command, ok := splitWindowsShellCommand(argv)
 	if !ok {
 		return
