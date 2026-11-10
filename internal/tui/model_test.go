@@ -325,11 +325,11 @@ func TestComposerAcceptsShiftedText(t *testing.T) {
 func TestModelSessionOptionsDriveStatusAndThreadStart(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
-	m := newModel(caller, Options{Model: "openai/gpt-test", Approval: "yolo", Sandbox: "workspace-write"}, nil)
+	m := newModel(caller, Options{Model: "openai/gpt-test", Approval: "yolo", Sandbox: "workspace-write", Cwd: "/repo/checkout"}, nil)
 	assertContains(t, m.View().Content, "openai/gpt-test · yolo · no sandbox · new thread")
 	m.startThread()()
 	params, ok := caller.calls[0].params.(rpc.ThreadStartParams)
-	if !ok || params.Model != "openai/gpt-test" || params.ApprovalPolicy != "never" || params.Sandbox != "danger-full-access" {
+	if !ok || params.Model != "openai/gpt-test" || params.ApprovalPolicy != "never" || params.Sandbox != "danger-full-access" || params.Cwd != "/repo/checkout" {
 		t.Fatalf("thread/start params = %#v", caller.calls[0].params)
 	}
 }

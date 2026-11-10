@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -56,6 +57,13 @@ func TestInteractivePassesFlagsAndStdioToBackend(t *testing.T) {
 	if gotConn != conn {
 		t.Fatal("backend did not receive the dialed connection")
 	}
+	assertBackendSession(t, gotOpts)
+	assertBackendCwd(t, gotOpts)
+	assertBackendStdio(t, gotOpts, &stdin, &stdout)
+}
+
+func assertBackendSession(t *testing.T, gotOpts TUIOptions) {
+	t.Helper()
 	if gotOpts.ThreadID != "thread-x" {
 		t.Fatalf("backend thread = %q, want thread-x", gotOpts.ThreadID)
 	}
@@ -68,10 +76,25 @@ func TestInteractivePassesFlagsAndStdioToBackend(t *testing.T) {
 	if gotOpts.Sandbox != "workspace-write" {
 		t.Fatalf("backend sandbox = %q, want workspace-write", gotOpts.Sandbox)
 	}
-	if gotOpts.Stdin != io.Reader(&stdin) {
+}
+
+func assertBackendCwd(t *testing.T, gotOpts TUIOptions) {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotOpts.Cwd != cwd {
+		t.Fatalf("backend cwd = %q, want %q", gotOpts.Cwd, cwd)
+	}
+}
+
+func assertBackendStdio(t *testing.T, gotOpts TUIOptions, stdin, stdout *bytes.Buffer) {
+	t.Helper()
+	if gotOpts.Stdin != io.Reader(stdin) {
 		t.Fatal("backend did not receive the configured stdin")
 	}
-	if gotOpts.Stdout != io.Writer(&stdout) {
+	if gotOpts.Stdout != io.Writer(stdout) {
 		t.Fatal("backend did not receive the configured stdout")
 	}
 }

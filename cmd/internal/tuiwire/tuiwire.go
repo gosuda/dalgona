@@ -17,6 +17,6 @@ func Run(ctx context.Context, conn io.ReadWriteCloser, opts app.TUIOptions) erro
 	}
 	return tui.Run(ctx, conn, tui.Options{
 		OnStatus: onStatus, OnChildSpawned: opts.OnChildSpawned, Input: opts.Stdin, Output: opts.Stdout,
-		ThreadID: opts.ThreadID, Model: opts.Model, Approval: opts.Approval, Sandbox: opts.Sandbox,
+		ThreadID: opts.ThreadID, Model: opts.Model, Approval: opts.Approval, Sandbox: opts.Sandbox, Cwd: opts.Cwd,
 	})
 }
