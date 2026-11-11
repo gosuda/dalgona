@@ -198,6 +198,7 @@ XTerm*
 /target/
 /.build-target/
 /.ruff_cache/
+/bin/
 /dist/
 !/internal/webui/dist/
 /internal/webui/dist/*

@@ -1,3 +1,16 @@
+build:
+    go build -trimpath -o bin/ ./cmd/...
+
+[no-cd, no-exit-message, positional-arguments]
+dal *args:
+    @go build -C "{{justfile_directory()}}" -trimpath -o bin/ ./cmd/dal
+    @exec "{{justfile_directory()}}/bin/dal" "$@"
+
+[no-cd, no-exit-message, positional-arguments]
+dalgona *args:
+    @go build -C "{{justfile_directory()}}" -trimpath -o bin/ ./cmd/dalgona
+    @exec "{{justfile_directory()}}/bin/dalgona" "$@"
+
 fmt-check:
     go tool golangci-lint fmt --diff
 
