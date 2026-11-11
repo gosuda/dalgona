@@ -24,7 +24,7 @@ dalgona --version
 
 Go installs both binaries in `GOBIN`, or in `GOPATH/bin` when `GOBIN` is unset. Add that directory to `PATH` if your shell cannot find them.
 
-`just build` builds both binaries for your platform into `bin/`. `just dal [args...]` and `just dalgona [args...]` run a command from source without installing it, for example `just dalgona web`.
+`just build` builds both binaries for your platform into `bin/`. `just dal [args...]` and `just dalgona [args...]` rebuild one command into `bin/` and run it with your arguments, for example `just dalgona --version`. Run `just web` first when you want the web interface; without it `dalgona web` answers that the web UI is not built.
 
 Use `just dist` to build release binaries for Linux, macOS, and Windows on amd64 and arm64. `just box-image` builds the remote box image from those binaries.
 
