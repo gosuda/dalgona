@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,6 +30,11 @@ func (fakeMasker) UnmaskStrict(text string) (string, error) {
 	return fakeMasker{}.Unmask(text), nil
 }
 
+type execOutcome struct {
+	result tool.Result
+	runErr error
+}
+
 func testEnv(t *testing.T) (tool.Env, func()) {
 	t.Helper()
 	runs, err := runner.NewLocal(filepath.Join(t.TempDir(), "runs"))
@@ -38,6 +44,31 @@ func testEnv(t *testing.T) (tool.Env, func()) {
 	cwd := t.TempDir()
 	env := tool.Env{Runner: runs, Cwd: cwd, Sandbox: runner.Sandbox{Mode: runner.SandboxWorkspaceWrite, WritableRoots: []string{cwd}}}
 	return env, func() { _ = runs.Close() }
+}
+
+func printCwdCommand(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(exe)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return filepath.Base(exe) + " __print-cwd"
+}
+
+func requireCwdOutput(t *testing.T, result tool.Result, dir string) {
+	t.Helper()
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := filepath.EvalSymlinks(strings.TrimSpace(string(result.Output)))
+	if err != nil {
+		t.Fatalf("cwd output = %q: %v", result.Output, err)
+	}
+	if got != want {
+		t.Fatalf("cwd = %q, want %q", got, want)
+	}
 }
 
 func TestExecRunsCommand(t *testing.T) {
@@ -67,12 +98,26 @@ func TestExecUnmasksCommand(t *testing.T) {
 	}
 }
 
+func waitThenPrintLateCommand() string {
+	if runtime.GOOS == "windows" {
+		return "echo early & ping -n 31 127.0.0.1 >nul & echo late"
+	}
+	return "echo early; sleep 30; echo late"
+}
+
+func createMarkerThenWaitCommand() string {
+	if runtime.GOOS == "windows" {
+		return "type nul > started & ping -n 31 127.0.0.1 >nul"
+	}
+	return "touch started; sleep 30"
+}
+
 func TestExecTimeoutTerminates(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	toolExec := New()
 	toolExec.grace = 300 * time.Millisecond
-	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-3", Args: jsontext.Value(`{"command":"sleep 30; echo late","timeout_ms":120}`)}, env)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-3", Args: jsontext.Value(`{"command":` + strconv.Quote(waitThenPrintLateCommand()) + `,"timeout_ms":2000}`)}, env)
 	if err == nil {
 		t.Fatal("timeout run returned no error")
 	}
@@ -82,30 +127,78 @@ func TestExecTimeoutTerminates(t *testing.T) {
 	if result.OK {
 		t.Fatal("timed out call reported success")
 	}
+	if result.ExitCode == nil {
+		t.Fatal("timed out call settled without an exit record")
+	}
+	if !strings.Contains(string(result.Output), "early") {
+		t.Fatalf("output before the timeout is missing: %q", result.Output)
+	}
 	if strings.Contains(string(result.Output), "late") {
 		t.Fatalf("output survived the timeout: %q", result.Output)
 	}
 }
 
 func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
-	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:300ms")
-	env, closeRunner := testEnv(t)
-	defer closeRunner()
+	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:2s")
+	runsDir := filepath.Join(t.TempDir(), "runs")
+	runs, newErr := runner.NewLocal(runsDir)
+	if newErr != nil {
+		t.Fatal(newErr)
+	}
+	defer func() {
+		_ = runs.Close()
+	}()
+	cwd := t.TempDir()
+	env := tool.Env{Runner: runs, Cwd: cwd, Sandbox: runner.Sandbox{Mode: runner.SandboxWorkspaceWrite, WritableRoots: []string{cwd}}}
 	toolExec := New()
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	result, err := toolExec.Run(ctx, tool.Call{ID: "run-early", Args: jsontext.Value(`{"command":"touch started; sleep 30","escalate":true}`)}, env)
-	if err == nil || result.OK {
-		t.Fatalf("interrupted run ok=%v err=%v", result.OK, err)
+	finished := make(chan execOutcome, 1)
+	go func() {
+		result, runErr := toolExec.Run(ctx, tool.Call{ID: "run-early", Args: jsontext.Value(`{"command":` + strconv.Quote(createMarkerThenWaitCommand()) + `,"escalate":true}`)}, env)
+		finished <- execOutcome{result: result, runErr: runErr}
+	}()
+	runDir := filepath.Join(runsDir, "run-early")
+	waitForRunDir(t, runDir, cancel)
+	cancel()
+	settled := awaitExecOutcome(t, finished)
+	if settled.runErr == nil || settled.result.OK {
+		t.Fatalf("interrupted run ok=%v err=%v", settled.result.OK, settled.runErr)
 	}
-	if result.ExitCode == nil || *result.ExitCode == 0 {
-		t.Fatalf("interrupted run settled without an exit record: exit=%v err=%v", result.ExitCode, err)
+	if settled.result.ExitCode == nil || *settled.result.ExitCode == 0 {
+		t.Fatalf("interrupted run settled without an exit record: exit=%v err=%v", settled.result.ExitCode, settled.runErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(env.Cwd, "started")); !errors.Is(statErr, fs.ErrNotExist) {
+	if _, statErr := os.Stat(filepath.Join(cwd, "started")); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Fatalf("command ran after the interrupt: %v", statErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(filepath.Dir(result.Path), "pgid")); !errors.Is(statErr, fs.ErrNotExist) {
+	if _, statErr := os.Stat(filepath.Join(runDir, "pgid")); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Fatalf("command group was created after the interrupt: %v", statErr)
+	}
+}
+
+func waitForRunDir(t *testing.T, runDir string, cancel context.CancelFunc) {
+	t.Helper()
+	appear := time.Now().Add(10 * time.Second)
+	for {
+		if _, statErr := os.Stat(runDir); statErr == nil {
+			return
+		}
+		if time.Now().After(appear) {
+			cancel()
+			t.Fatal("run directory did not appear")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func awaitExecOutcome(t *testing.T, finished chan execOutcome) execOutcome {
+	t.Helper()
+	select {
+	case settled := <-finished:
+		return settled
+	case <-time.After(15 * time.Second):
+		t.Fatal("interrupted run did not settle")
+		return execOutcome{}
 	}
 }
 
@@ -126,13 +219,12 @@ func TestExecUsesWorkspaceDirectory(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	toolExec := New()
-	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-5", Args: jsontext.Value(`{"command":"pwd"}`)}, env)
+	command := printCwdCommand(t)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-5", Args: jsontext.Value(`{"command":` + strconv.Quote(command) + `}`)}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(result.Output)) != env.Cwd {
-		t.Fatalf("pwd = %q, want %q", result.Output, env.Cwd)
-	}
+	requireCwdOutput(t, result, env.Cwd)
 }
 
 func TestExecRejectsBadArguments(t *testing.T) {
@@ -194,14 +286,13 @@ func TestExecResolvesRelativeCwdAgainstWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	toolExec := New()
-	args := jsontext.Value(`{"command":"pwd","cwd":"web"}`)
+	command := printCwdCommand(t)
+	args := jsontext.Value(`{"command":` + strconv.Quote(command) + `,"cwd":"web"}`)
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-rel", Args: args}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(result.Output)) != sub {
-		t.Fatalf("pwd = %q, want %q", result.Output, sub)
-	}
+	requireCwdOutput(t, result, sub)
 }
 
 func TestExecRefusesCwdOutsideWritableRoots(t *testing.T) {
@@ -220,23 +311,20 @@ func TestExecUnsandboxedRunsOutsideWritableRoots(t *testing.T) {
 	defer closeRunner()
 	outside := t.TempDir()
 	toolExec := New()
-	escalated := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(outside) + `,"escalate":true,"justification":"retry"}`)
+	command := printCwdCommand(t)
+	escalated := jsontext.Value(`{"command":` + strconv.Quote(command) + `,"cwd":` + strconv.Quote(outside) + `,"escalate":true,"justification":"retry"}`)
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-out-esc", Args: escalated}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(result.Output)) != outside {
-		t.Fatalf("pwd = %q, want %q", result.Output, outside)
-	}
+	requireCwdOutput(t, result, outside)
 	env.Sandbox.Mode = runner.SandboxOff
-	plain := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(outside) + `}`)
+	plain := jsontext.Value(`{"command":` + strconv.Quote(command) + `,"cwd":` + strconv.Quote(outside) + `}`)
 	result, err = toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-out-off", Args: plain}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(result.Output)) != outside {
-		t.Fatalf("pwd = %q, want %q", result.Output, outside)
-	}
+	requireCwdOutput(t, result, outside)
 }
 
 type remoteStub struct {

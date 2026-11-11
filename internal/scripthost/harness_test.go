@@ -345,6 +345,10 @@ func loadPlugins(t *testing.T, files map[string]string) *script.Plugins {
 	return plugins
 }
 
+func skipCrashCopy(name, rel string) bool {
+	return strings.HasPrefix(name, "state.db") || name == "lock" || strings.HasSuffix(name, ".lock") || strings.Contains(rel, "runs")
+}
+
 func copyHome(t *testing.T, from, to string) {
 	t.Helper()
 	source, err := os.OpenRoot(from)
@@ -359,7 +363,7 @@ func copyHome(t *testing.T, from, to string) {
 			return err
 		case entry.IsDir():
 			return os.MkdirAll(target, 0o700)
-		case strings.HasPrefix(entry.Name(), "state.db") || entry.Name() == "lock" || strings.Contains(rel, "runs"):
+		case skipCrashCopy(entry.Name(), rel):
 			return nil
 		}
 		data, err := source.ReadFile(rel)

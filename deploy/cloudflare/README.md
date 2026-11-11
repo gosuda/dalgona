@@ -1,5 +1,26 @@
 # dalgona-box on Cloudflare
 
+## Box tokens
+
+The Go client sends `DALGONA_TOKEN` to the worker. The worker checks
+it in constant time and accepts only that value. Each box gets its own
+token. The token is HMAC-SHA256 over the box name keyed by
+`DALGONA_TOKEN`. The durable object reads the box name from
+`ctx.id.name` and fails with 500 when it is missing. It sets
+`DALGONA_BOX_TOKEN` to the box token and replaces the Authorization
+header with the box token before proxying into the container. A box
+token cannot call worker routes.
+
+A box that an earlier worker version started still holds `DALGONA_TOKEN`
+as its box token. After you deploy this version, destroy and create each
+existing box again. Until then the worker sends that box a token it does
+not accept, and the box keeps a credential that opens every box.
+Destroying a box discards its changes that you did not pull. First run
+`dalgona pull <thread-id>` for each thread whose changes you need. Then
+archive the threads of the box and run `dalgona runner gc --yes`, which
+deletes each box whose threads are all archived. `dalgona cloud down`
+refuses Cloudflare boxes.
+
 Release flow for the box container image.
 
 ## Publish
@@ -24,4 +45,6 @@ then runs `just cf-deploy-check` to prove the pin. Commit the result.
 
 `just cf-deploy-check` fails unless the image is a digest pin, so run
 it as the deploy step before `wrangler deploy`. `just cf-check` stays
-limited to typecheck and lint and never blocks on the pin.
+limited to typecheck, lint, and tests and never blocks on the pin.
+
+Run the worker route tests with `pnpm -C deploy/cloudflare test`.

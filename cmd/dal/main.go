@@ -17,6 +17,7 @@ import (
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/advisor"
 	"github.com/gosuda/dalgona/internal/app"
+	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/rpc"
 	"github.com/gosuda/dalgona/internal/runner"
@@ -33,6 +34,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if err := config.AnchorHome(); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", binary, err)
+		return 1
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "__shim":
@@ -134,8 +139,8 @@ func (p *inProcess) Close() error {
 }
 
 func openLog(home string) (*slog.Logger, func() error, error) {
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return nil, nil, fmt.Errorf("create %s: %w", home, err)
+	if homeErr := auth.ProtectHomeTree(home); homeErr != nil {
+		return nil, nil, fmt.Errorf("create %s: %w", home, homeErr)
 	}
 	file, err := os.OpenFile(filepath.Join(home, "dal.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {

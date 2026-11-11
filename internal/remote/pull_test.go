@@ -42,15 +42,25 @@ func TestApplyDiffReportsConflicts(t *testing.T) {
 	}
 }
 
+func pinLF(t *testing.T, dir string) {
+	t.Helper()
+	for _, kv := range [][2]string{{"core.autocrlf", "false"}, {"core.eol", "lf"}} {
+		cmd := exec.Command("git", "config", kv[0], kv[1])
+		cmd.Dir = dir
+		must(t, cmd.Run())
+	}
+}
+
 func TestApplyDiffInRepoSubdirectory(t *testing.T) {
 	box := gitWorkspace(t)
+	pinLF(t, box)
 	must(t, os.WriteFile(filepath.Join(box, "hello.txt"), []byte("two from box\n"), 0o644))
 	diffCmd := exec.Command("git", "diff", "--no-ext-diff", "--no-color", "--binary")
 	diffCmd.Dir = box
 	diff, err := diffCmd.Output()
 	must(t, err)
-
 	repo := gitWorkspace(t)
+	pinLF(t, repo)
 	sub := filepath.Join(repo, "sub")
 	must(t, os.Mkdir(sub, 0o755))
 	must(t, os.Rename(filepath.Join(repo, "hello.txt"), filepath.Join(sub, "hello.txt")))

@@ -38,4 +38,6 @@ An MCP JSON file MAY contain the server map directly or under `mcpServers`. Ever
 
 A skill file MUST start with `---` on its first line. A later `---` line MUST close the frontmatter. The `name` and `description` fields define the skill. LF and CRLF line endings are valid. A missing or empty name MUST use the containing directory name. A skill directory MAY be a symbolic link to a directory.
 
+Instruction files MUST stay inside their home directory or workspace root. The loader MUST resolve each candidate and MUST ignore a file that resolves outside its root. A link inside the root MAY load.
+
 Missing optional files and directories MUST be ignored. Malformed TOML, JSON, or skill frontmatter MUST return an error that names the file. The loader MUST NOT silently drop a malformed enabled source.

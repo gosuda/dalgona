@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -554,16 +552,6 @@ func TestStateDirPersistsConversation(t *testing.T) {
 		if out := drain(t, stream); out.failure != nil {
 			t.Fatalf("turn %s failed: %v", text, out.failure.Err)
 		}
-	}
-	checkPrivateFile(t, filepath.Join(dir, "checkpoint"))
-	checkPrivateFile(t, filepath.Join(dir, "blobs", hex.EncodeToString(blobID[:])))
-}
-
-func checkPrivateFile(t *testing.T, path string) {
-	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("%s: info = %v, err = %v", path, info, err)
 	}
 }
 

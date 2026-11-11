@@ -123,19 +123,49 @@ func (t *Thread) StartChild(ctx context.Context, callID string, req task.Request
 	case <-ctx.Done():
 		return "", context.Cause(ctx)
 	}
-	defer func() { <-t.children }()
 	child, err := t.childFor(ctx, callID, req)
 	if err != nil {
+		<-t.children
 		return "", err
 	}
 	report, err := ask(child, func(a *actor) childReport { return a.childReport() })
 	if err != nil {
+		<-t.children
 		return "", err
 	}
 	if report.stage == stageNeedsPrompt {
-		err = child.Submit(ctx, Input{Kind: InputPrompt, Text: req.Prompt})
+		if err := child.Submit(ctx, Input{Kind: InputPrompt, Text: req.Prompt}); err != nil {
+			<-t.children
+			return "", err
+		}
 	}
-	return child.id, err
+	go t.watchChild(child)
+	return child.id, nil
+}
+
+func (t *Thread) watchChild(child *Thread) {
+	updates := child.Subscribe()
+	defer func() {
+		child.Unsubscribe(updates)
+		<-t.children
+	}()
+	for {
+		status, err := child.Status()
+		if err != nil {
+			return
+		}
+		if !status.Busy {
+			return
+		}
+		select {
+		case _, open := <-updates:
+			if !open {
+				updates = child.Subscribe()
+			}
+		case <-child.stopped:
+			return
+		}
+	}
 }
 
 func (t *Thread) ChildText(ctx context.Context, childID string) (string, error) {

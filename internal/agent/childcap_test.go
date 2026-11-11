@@ -17,7 +17,7 @@ func TestStartChildBoundsConcurrentSpawns(t *testing.T) {
 	fire := sync.OnceFunc(func() { close(release) })
 	entered := make(chan struct{}, 16)
 	h := newHarness(t, func(h *harness) {
-		h.cfg.OnChildStarted = func(*Thread) { entered <- struct{}{}; <-release }
+		h.cfg.OnChildStarted = func(*Thread, task.Request) { entered <- struct{}{}; <-release }
 	})
 	for range 16 {
 		h.model.push(text("child done"))

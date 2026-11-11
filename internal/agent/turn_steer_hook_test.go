@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/model"
 )
 
 type steerFlagOnTurnEnd struct {
@@ -49,23 +51,32 @@ func countTurnStarted(t *testing.T, h *harness, id string) int {
 	return n
 }
 
-func TestLateSteerStartsNormalTurn(t *testing.T) {
-	t.Parallel()
+func lateSteerHarness(t *testing.T, steer func(*Thread), configure ...func(*harness)) (*harness, *Thread, *steerFlagOnTurnEnd) {
+	t.Helper()
 	var ext *steerFlagOnTurnEnd
-	h := newHarness(t, func(h *harness) {
+	base := func(h *harness) {
 		h.cfg.Extension = func(th *Thread) Extension {
 			ext = &steerFlagOnTurnEnd{thread: th}
-			ext.steer = sync.OnceFunc(func() {
-				_ = th.Submit(context.Background(), Input{Kind: InputSteer, Text: "follow up"})
-			})
+			ext.steer = sync.OnceFunc(func() { steer(th) })
 			return ext
 		}
-	})
-	h.model.push(text("first done"), text("steered done"))
+	}
+	opts := append([]func(*harness){base}, configure...)
+	h := newHarness(t, opts...)
 	thread := h.start()
 	if err := thread.SetBoundaryHook(ext.hook); err != nil {
 		t.Fatal(err)
 	}
+	return h, thread, ext
+}
+
+func TestLateSteerStartsNormalTurn(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	h, thread, ext := lateSteerHarness(t, func(th *Thread) {
+		_ = th.Submit(ctx, Input{Kind: InputSteer, Text: "follow up"})
+	})
+	h.model.push(text("first done"), text("steered done"))
 	h.submit(thread, "hello")
 	h.waitIdle(thread)
 	ext.mu.Lock()
@@ -85,22 +96,12 @@ func TestLateSteerStartsNormalTurn(t *testing.T) {
 
 func TestLateSteerInterruptedStartsNoTurn(t *testing.T) {
 	t.Parallel()
-	var ext *steerFlagOnTurnEnd
-	h := newHarness(t, func(h *harness) {
-		h.cfg.Extension = func(th *Thread) Extension {
-			ext = &steerFlagOnTurnEnd{thread: th}
-			ext.steer = sync.OnceFunc(func() {
-				_ = th.Submit(context.Background(), Input{Kind: InputSteer, Text: "follow up"})
-				th.Interrupt()
-			})
-			return ext
-		}
+	ctx := t.Context()
+	h, thread, _ := lateSteerHarness(t, func(th *Thread) {
+		_ = th.Submit(ctx, Input{Kind: InputSteer, Text: "follow up"})
+		th.Interrupt()
 	})
 	h.model.push(text("first done"))
-	thread := h.start()
-	if err := thread.SetBoundaryHook(ext.hook); err != nil {
-		t.Fatal(err)
-	}
 	h.submit(thread, "hello")
 	h.waitIdle(thread)
 	if got := countTurnStarted(t, h, thread.ID()); got != 1 {
@@ -108,5 +109,25 @@ func TestLateSteerInterruptedStartsNoTurn(t *testing.T) {
 	}
 	if got := h.model.count(); got != 1 {
 		t.Fatalf("agent: model requests = %d, want 1 after interrupt", got)
+	}
+}
+
+func TestLateSteerFailedStartsNoTurn(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	h, thread, _ := lateSteerHarness(t, func(th *Thread) {
+		_ = th.Submit(ctx, Input{Kind: InputSteer, Text: "follow up"})
+	}, func(h *harness) {
+		h.cfg.Providers = func(RetryFunc) (*model.Registry, error) {
+			return nil, errors.New("no providers")
+		}
+	})
+	h.submit(thread, "hello")
+	h.waitIdle(thread)
+	if got := countTurnStarted(t, h, thread.ID()); got != 1 {
+		t.Fatalf("agent: turn.started count = %d, want 1 after failure", got)
+	}
+	if turn := lastTurn(h.events(thread.ID())); turn.Status != statusFailed {
+		t.Fatalf("agent: turn.completed status = %q, want failed", turn.Status)
 	}
 }

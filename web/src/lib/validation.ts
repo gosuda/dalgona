@@ -744,6 +744,20 @@ export function parseNotification(value: unknown): AppNotification | null {
 				steps: params["plan"].map(planStep),
 			};
 		}
+		case "dalgona/thread/childSpawned": {
+			if (
+				!isObject(params) ||
+				typeof params["threadId"] !== "string" ||
+				typeof params["childId"] !== "string"
+			) {
+				return null;
+			}
+			return {
+				type: "childSpawned",
+				threadId: params["threadId"],
+				childId: params["childId"],
+			};
+		}
 		case "dalgona/advisor/note": {
 			if (!isObject(params) || typeof params["threadId"] !== "string") {
 				return null;

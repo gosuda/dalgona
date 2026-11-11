@@ -14,14 +14,15 @@ import {
 	rpcSocketUrl,
 	tokenFromHash,
 } from "#lib/protocol.ts";
+import type { KnownChildThreads } from "#lib/reducer.ts";
 import {
 	activeApproval,
+	applyOpenThreadNotification,
 	dropSentFollowup,
 	emptyTranscript,
 	isSentFollowupAtHead,
 	itemsAwaitingApproval,
 	otherThreadApprovalCount,
-	reduceNotification,
 	requeueFailedFollowup,
 	resolveApprovalRequest,
 	trackApprovalRequest,
@@ -69,6 +70,7 @@ let status = $state<StatusInfo>({
 let keywords = $state<readonly KeywordDefinition[]>([]);
 let advisor = $state<AdvisorSummary>({ kind: "unknown" });
 let approvals = $state<readonly ApprovalRequest[]>([]);
+let knownChildren = $state<KnownChildThreads>({});
 let queuedFollowups = $state<readonly string[]>([]);
 let loadingThreads = $state(false);
 let loadingTranscript = $state(false);
@@ -79,12 +81,18 @@ let client: RpcClient | undefined;
 let connectionGeneration = 0;
 let selectionGeneration = 0;
 let running = $derived(transcript.turnStatus === "inProgress");
-let currentApproval = $derived(activeApproval(approvals, activeThreadId));
+let currentApproval = $derived(
+	activeApproval(approvals, activeThreadId, transcript.childThreadIds),
+);
 let otherApprovalCount = $derived(
-	otherThreadApprovalCount(approvals, activeThreadId),
+	otherThreadApprovalCount(
+		approvals,
+		activeThreadId,
+		transcript.childThreadIds,
+	),
 );
 let awaitingApproval = $derived(
-	itemsAwaitingApproval(approvals, activeThreadId),
+	itemsAwaitingApproval(approvals, activeThreadId, transcript.childThreadIds),
 );
 let approvalChanges = $derived.by(() => {
 	const item = transcript.items.find(
@@ -319,7 +327,7 @@ async function selectThread(threadId: string): Promise<void> {
 		upsertThread(result.thread);
 		if (threadId !== activeThreadId) queuedFollowups = [];
 		activeThreadId = threadId;
-		transcript = transcriptForThread(result.thread);
+		transcript = transcriptForThread(result.thread, knownChildren);
 		advisor = { kind: "unknown" };
 		errorMessage = "";
 		status = result.status;
@@ -345,7 +353,7 @@ async function readThread(threadId: string, selection: number): Promise<void> {
 		parseThreadReadResponse,
 	);
 	if (selection === selectionGeneration)
-		transcript = transcriptForThread(thread);
+		transcript = transcriptForThread(thread, knownChildren);
 }
 
 async function createThread(): Promise<void> {
@@ -391,11 +399,15 @@ async function sendMessage(text: string): Promise<boolean> {
 			},
 			parseTurnStartResponse,
 		);
-		transcript = reduceNotification(transcript, {
-			type: "turnStarted",
-			threadId,
-			turn: result.turn,
-		});
+		const started = applyOpenThreadNotification(
+			{ transcript, knownChildren, activeThreadId },
+			{
+				type: "turnStarted",
+				threadId,
+				turn: result.turn,
+			},
+		);
+		transcript = started.transcript;
 		recordPreview(threadId, text);
 		return true;
 	} catch (error) {
@@ -491,10 +503,15 @@ function respondApproval(
 }
 
 function handleNotification(notification: AppNotification): void {
+	const update = applyOpenThreadNotification(
+		{ transcript, knownChildren, activeThreadId },
+		notification,
+	);
+	transcript = update.transcript;
+	knownChildren = update.knownChildren;
 	switch (notification.type) {
 		case "threadStarted":
 			upsertThread(notification.thread);
-			transcript = reduceNotification(transcript, notification);
 			break;
 		case "threadStatus":
 			threads = threads.map((thread) =>
@@ -510,6 +527,7 @@ function handleNotification(notification: AppNotification): void {
 					: thread,
 			);
 			break;
+		case "childSpawned":
 		case "plan":
 		case "turnStarted":
 		case "turnCompleted":
@@ -517,14 +535,6 @@ function handleNotification(notification: AppNotification): void {
 		case "itemCompleted":
 		case "delta":
 		case "error":
-			transcript = reduceNotification(transcript, notification);
-			if (
-				notification.type === "turnCompleted" &&
-				notification.threadId === activeThreadId &&
-				notification.turn.status === "completed"
-			) {
-				void sendNextFollowup(notification.threadId);
-			}
 			break;
 		case "advisorNote":
 			if (notification.threadId === activeThreadId) {
@@ -538,6 +548,9 @@ function handleNotification(notification: AppNotification): void {
 			const exhaustive: never = notification;
 			throw new Error(`unsupported notification: ${String(exhaustive)}`);
 		}
+	}
+	if (update.sendFollowup && activeThreadId !== null) {
+		void sendNextFollowup(activeThreadId);
 	}
 }
 

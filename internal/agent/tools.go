@@ -11,6 +11,7 @@ import (
 	"html"
 	"io/fs"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"sync"
 	"unicode/utf8"
@@ -51,8 +52,10 @@ func (p *prepared) toolCall() tool.Call {
 }
 
 func (p *prepared) discardPlan() {
-	if p.plan != nil && p.plan.Discard != nil {
-		p.plan.Discard()
+	plan := p.plan
+	p.plan = nil
+	if plan != nil && plan.Discard != nil {
+		plan.Discard()
 	}
 }
 
@@ -123,6 +126,7 @@ func (w *worker) runCall(ctx context.Context, call event.ToolCall, requestID str
 	}
 	completed, err := w.execute(ctx, p)
 	if err != nil {
+		p.discardPlan()
 		return err
 	}
 	_, err = w.t.appendEvents(context.WithoutCancel(ctx), completed)
@@ -130,21 +134,9 @@ func (w *worker) runCall(ctx context.Context, call event.ToolCall, requestID str
 }
 
 func (w *worker) runAgentBatch(ctx context.Context, calls []event.ToolCall) error {
-	ready := make([]*prepared, 0, len(calls))
-	for i, call := range calls {
-		if ctx.Err() != nil {
-			if err := w.skip(ctx, calls[i:], skipInterrupted); err != nil {
-				return err
-			}
-			break
-		}
-		p, err := w.prepare(ctx, call, "")
-		if err != nil {
-			return err
-		}
-		if p != nil {
-			ready = append(ready, p)
-		}
+	ready, err := w.prepareBatch(ctx, calls)
+	if err != nil {
+		return err
 	}
 	results := make([]event.ToolCompleted, len(ready))
 	errs := make([]error, len(ready))
@@ -153,10 +145,49 @@ func (w *worker) runAgentBatch(ctx context.Context, calls []event.ToolCall) erro
 		group.Go(func() { results[i], errs[i] = w.execute(ctx, p) })
 	}
 	group.Wait()
+	discardFailed(ready, errs)
 	if err := w.appendResults(ctx, results); err != nil {
 		return err
 	}
 	return errors.Join(errs...)
+}
+
+func (w *worker) prepareBatch(ctx context.Context, calls []event.ToolCall) ([]*prepared, error) {
+	ready := make([]*prepared, 0, len(calls))
+	complete := false
+	defer func() {
+		if complete {
+			return
+		}
+		for _, p := range ready {
+			p.discardPlan()
+		}
+	}()
+	for i, call := range calls {
+		if ctx.Err() != nil {
+			if err := w.skip(ctx, calls[i:], skipInterrupted); err != nil {
+				return nil, err
+			}
+			break
+		}
+		p, err := w.prepare(ctx, call, "")
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			ready = append(ready, p)
+		}
+	}
+	complete = true
+	return ready, nil
+}
+
+func discardFailed(ready []*prepared, errs []error) {
+	for i, err := range errs {
+		if err != nil {
+			ready[i].discardPlan()
+		}
+	}
 }
 
 func (w *worker) appendResults(ctx context.Context, results []event.ToolCompleted) error {
@@ -206,20 +237,23 @@ func (w *worker) admit(ctx context.Context, p *prepared, requestID string) (*pre
 	}
 	v, err := w.gate(ctx, gc)
 	if err != nil {
+		p.discardPlan()
 		return nil, err
 	}
 	if v.cancel {
 		w.t.Interrupt()
 	}
 	if !v.allow {
-		if p.plan != nil && p.plan.Discard != nil {
-			p.plan.Discard()
-		}
+		p.discardPlan()
 		_, err := w.t.appendEvents(ctx, event.ToolCompleted{CallID: p.call.ID, Output: v.reason, Recovered: "none"})
 		return nil, err
 	}
 	p.verdict = v
-	return p, w.start(ctx, p)
+	if err := w.start(ctx, p); err != nil {
+		p.discardPlan()
+		return nil, err
+	}
+	return p, nil
 }
 
 func (w *worker) gateCall(ctx context.Context, p *prepared, requestID string) (gateCall, error) {
@@ -265,7 +299,8 @@ func (w *worker) declineCall(ctx context.Context, call event.ToolCall, requestID
 }
 
 func (w *worker) failBeforeRun(ctx context.Context, p *prepared, requestID string, cause error) error {
-	return w.declineCall(ctx, p.call, requestID, decline("mode:"+string(w.settings.Approval), cause.Error()), p.plan)
+	p.discardPlan()
+	return w.declineCall(ctx, p.call, requestID, decline("mode:"+string(w.settings.Approval), cause.Error()), nil)
 }
 
 func (w *worker) start(ctx context.Context, p *prepared) error {
@@ -324,6 +359,9 @@ func (w *worker) execute(ctx context.Context, p *prepared) (event.ToolCompleted,
 	var err error
 	if p.plan != nil {
 		result, err = p.plan.Apply(ctx)
+		if err != nil {
+			p.discardPlan()
+		}
 	} else {
 		result, err = w.run(ctx, p)
 	}
@@ -350,8 +388,17 @@ func (w *worker) env(v verdict) tool.Env {
 	roots := append([]string{w.t.created.Cwd}, w.t.host.roots...)
 	return tool.Env{
 		Runner: w.t.runner, Cwd: w.t.created.Cwd, Home: w.t.host.cfg.Config.Home,
-		Sandbox: runner.Sandbox{Mode: mode, WritableRoots: roots}, Masker: w.t.host.masker(), Snapshots: w.t.snapshots,
+		Sandbox: deniedSocketSandbox(mode, roots, w.t.host.cfg.Config.Home), Masker: w.t.host.masker(), Snapshots: w.t.snapshots,
 	}
+}
+
+func deniedSocketSandbox(mode runner.SandboxMode, roots []string, home string) runner.Sandbox {
+	sandbox := runner.Sandbox{Mode: mode, WritableRoots: roots}
+	if mode == runner.SandboxOff || home == "" {
+		return sandbox
+	}
+	sandbox.DeniedSockets = []string{filepath.Join(home, "dalgona.sock")}
+	return sandbox
 }
 
 func (w *worker) completion(ctx context.Context, p *prepared, result tool.Result, runErr error) (event.ToolCompleted, error) {
@@ -572,35 +619,55 @@ func (w *worker) repeated(name string, args jsontext.Value) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	key := callKey(name, args)
 	path := event.ActivePath(v.records)
-	count := 0
-	for i := len(path) - 1; i >= 0 && count < loopGuardLimit; i-- {
+	scan := guardScan{key: callKey(name, args), ok: make(map[string]struct{})}
+	for i := len(path) - 1; i >= 0 && scan.count < loopGuardLimit; i-- {
 		switch value := path[i].Event.(type) {
 		case event.UserMessage:
 			return false, nil
+		case event.ToolCompleted:
+			scan.observeCompleted(value)
 		case event.ToolStarted:
 			startedArgs, err := w.t.host.loadRaw(value.Args, value.ArgsBlob)
 			if err != nil {
 				return false, err
 			}
-			match, reset := guardStep(value, startedArgs, key)
-			if reset {
+			if scan.observeStarted(value, startedArgs) {
 				return false, nil
-			}
-			if match {
-				count++
 			}
 		}
 	}
-	return count >= loopGuardLimit, nil
+	return scan.exceeded(), nil
 }
 
-func guardStep(start event.ToolStarted, args jsontext.Value, key string) (match, reset bool) {
-	if callKey(start.Tool, args) == key {
-		return true, false
+type guardScan struct {
+	key   string
+	count int
+	ok    map[string]struct{}
+}
+
+func (s *guardScan) observeCompleted(completed event.ToolCompleted) {
+	if completed.OK {
+		s.ok[completed.CallID] = struct{}{}
 	}
-	return false, start.Class == classString(tool.ClassEdit) || start.Class == classString(tool.ClassExec)
+}
+
+func (s *guardScan) observeStarted(start event.ToolStarted, args jsontext.Value) bool {
+	if callKey(start.Tool, args) == s.key {
+		s.count++
+		return false
+	}
+	if start.Class != classString(tool.ClassEdit) && start.Class != classString(tool.ClassExec) {
+		return false
+	}
+	if _, good := s.ok[start.CallID]; !good {
+		return false
+	}
+	return true
+}
+
+func (s *guardScan) exceeded() bool {
+	return s.count >= loopGuardLimit
 }
 
 func callKey(name string, args jsontext.Value) string {

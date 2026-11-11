@@ -463,3 +463,10 @@ func (c *wireClient) checkResponse(method string, m message) {
 	}
 	validateLine(c.t, schema, m.Result)
 }
+
+func effectiveWorkspaceWriteType() string {
+	if runner.Available() {
+		return "workspaceWrite"
+	}
+	return "dangerFullAccess"
+}

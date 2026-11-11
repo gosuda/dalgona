@@ -9,8 +9,11 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -37,6 +40,35 @@ func startDetached(ctx context.Context, self string, args []string, spec Process
 
 func configureProcessGroup(cmd *exec.Cmd) {}
 
+func configureShimCommand(cmd *exec.Cmd, argv []string) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED | windows.CREATE_NO_WINDOW
+	command, ok := splitWindowsShellCommand(argv)
+	if !ok {
+		return
+	}
+	shape := WindowsShellArgv("")
+	cmd.SysProcAttr.CmdLine = shape[0] + " /S " + shape[1] + ` "` + command + `"`
+}
+
+func splitWindowsShellCommand(argv []string) (string, bool) {
+	shape := WindowsShellArgv("")
+	if len(argv) != len(shape) {
+		return "", false
+	}
+	base := strings.ToLower(filepath.Base(argv[0]))
+	shell := strings.ToLower(shape[0])
+	if base != shell && base != shell+".exe" {
+		return "", false
+	}
+	if !strings.EqualFold(argv[1], shape[1]) {
+		return "", false
+	}
+	return argv[2], true
+}
+
 func signalProcess(shimPID int, pgid int, signal Signal) error {
 	job, err := openJobObject(jobName(shimPID))
 	if err != nil {
@@ -47,6 +79,64 @@ func signalProcess(shimPID int, pgid int, signal Signal) error {
 		return fmt.Errorf("runner: terminate job: %w", err)
 	}
 	return nil
+}
+
+func stopSpawnGroup(runDir string, shimPID int) bool {
+	pgid, readErr := readProcessGroup(runDir)
+	if readErr != nil {
+		return false
+	}
+	return killSpawnGroup(shimPID, pgid)
+}
+
+func killSpawnGroup(shimPID int, pgid int) bool {
+	root, openErr := openSpawnProcess(pgid)
+	if openErr != nil {
+		return !processIsAlive(pgid)
+	}
+	defer func() { _ = windows.CloseHandle(root) }()
+	if termErr := terminateSpawnJob(shimPID); termErr != nil {
+		return false
+	}
+	event, waitErr := windows.WaitForSingleObject(root, 5000)
+	if waitErr != nil {
+		return false
+	}
+	return event == windows.WAIT_OBJECT_0
+}
+
+func openSpawnProcess(pgid int) (windows.Handle, error) {
+	wpid, ok := windowsPID(pgid)
+	if !ok {
+		return 0, ErrProcessNotFound
+	}
+	process, err := windows.OpenProcess(windows.SYNCHRONIZE, false, wpid)
+	if err != nil {
+		return 0, err
+	}
+	return process, nil
+}
+
+func terminateSpawnJob(shimPID int) error {
+	job, err := openJobObject(jobName(shimPID))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(job) }()
+	return windows.TerminateJobObject(job, jobExitCode(SignalKill))
+}
+
+func terminateSpawnPID(pid int) error {
+	wpid, ok := windowsPID(pid)
+	if !ok {
+		return errors.New("runner: invalid spawn pid")
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, wpid)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(process) }()
+	return windows.TerminateProcess(process, 137)
 }
 
 func ensureProcessGroupGone(pgid int, signal Signal) {}
@@ -100,6 +190,63 @@ func assignJob(cmd *exec.Cmd) (func(), error) {
 		_ = windows.CloseHandle(job)
 	}
 	return cleanup, nil
+}
+
+func resumeCommand(cmd *exec.Cmd) error {
+	pid, ok := windowsPID(cmd.Process.Pid)
+	if !ok {
+		return fmt.Errorf("runner: invalid command pid %d", cmd.Process.Pid)
+	}
+	return resumeCommandProcess(pid)
+}
+
+func resumeCommandProcess(pid uint32) error {
+	var lastErr error
+	for range 20 {
+		resumed, err := resumeCommandThreadsOnce(pid)
+		if resumed {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("runner: no command threads to resume")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return fmt.Errorf("runner: resume command: %w", lastErr)
+}
+
+func resumeCommandThreadsOnce(pid uint32) (bool, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return false, fmt.Errorf("runner: snapshot command threads: %w", err)
+	}
+	defer func() { _ = windows.CloseHandle(snapshot) }()
+	var entry windows.ThreadEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	if err := windows.Thread32First(snapshot, &entry); err != nil {
+		return false, fmt.Errorf("runner: list command threads: %w", err)
+	}
+	resumed := false
+	for {
+		if entry.OwnerProcessID == pid {
+			thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+			if err != nil {
+				return resumed, fmt.Errorf("runner: open command thread: %w", err)
+			}
+			_, err = windows.ResumeThread(thread)
+			_ = windows.CloseHandle(thread)
+			if err != nil {
+				return resumed, fmt.Errorf("runner: resume command thread: %w", err)
+			}
+			resumed = true
+		}
+		if err := windows.Thread32Next(snapshot, &entry); err != nil {
+			break
+		}
+	}
+	return resumed, nil
 }
 
 func openJobObject(name string) (windows.Handle, error) {

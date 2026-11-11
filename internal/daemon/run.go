@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/gosuda/dalgona/internal/agent"
+	"github.com/gosuda/dalgona/internal/auth"
 )
 
 type (
@@ -23,9 +24,14 @@ type (
 func SocketPath(home string) string { return filepath.Join(home, "dalgona.sock") }
 
 func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc) (err error) {
+	if limitErr := checkSocketPathLimit(home); limitErr != nil {
+		return limitErr
+	}
 	if chmodErr := tightenHome(home); chmodErr != nil {
 		return chmodErr
 	}
+	marked := daemonMarked()
+	logConfinedDaemon(marked)
 	host, closeHost, err := newHost(ctx)
 	if err != nil {
 		return err
@@ -46,22 +52,25 @@ func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc)
 	})
 	stopListener := context.AfterFunc(ctx, func() { closeListener(listener) })
 	defer stopListener()
-	return accept(ctx, listener, &tasks, func(conn net.Conn) { serveConn(ctx, conn, host, serve) })
+	return accept(ctx, listener, &tasks, marked, func(conn net.Conn) { serveConn(ctx, conn, host, serve) })
 }
 
-func makeHomeDir(home string) error {
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return fmt.Errorf("daemon home: %w", err)
+func tightenHome(home string) error {
+	if homeErr := auth.ProtectHomeTree(home); homeErr != nil {
+		return fmt.Errorf("daemon home: %w", homeErr)
+	}
+	if chmodErr := os.Chmod(home, 0o700); chmodErr != nil { //nolint:gosec // a home directory needs the exec bit
+		return fmt.Errorf("daemon home permissions: %w", chmodErr)
 	}
 	return nil
 }
 
-func tightenHome(home string) error {
-	if err := makeHomeDir(home); err != nil {
-		return err
+func tightenHomeRoot(home string) error {
+	if homeErr := auth.ProtectHomeDir(home); homeErr != nil {
+		return fmt.Errorf("daemon home: %w", homeErr)
 	}
-	if err := os.Chmod(home, 0o700); err != nil { //nolint:gosec // a home directory needs the exec bit
-		return fmt.Errorf("daemon home permissions: %w", err)
+	if chmodErr := os.Chmod(home, 0o700); chmodErr != nil { //nolint:gosec // a home directory needs the exec bit
+		return fmt.Errorf("daemon home permissions: %w", chmodErr)
 	}
 	return nil
 }
@@ -83,7 +92,7 @@ func listen(home string) (net.Listener, error) {
 	return listener, nil
 }
 
-func accept(ctx context.Context, listener net.Listener, tasks *sync.WaitGroup, handle func(net.Conn)) error {
+func accept(ctx context.Context, listener net.Listener, tasks *sync.WaitGroup, marked bool, handle func(net.Conn)) error {
 	defer closeListener(listener)
 	for {
 		conn, err := listener.Accept()
@@ -92,6 +101,11 @@ func accept(ctx context.Context, listener net.Listener, tasks *sync.WaitGroup, h
 				return nil
 			}
 			return fmt.Errorf("daemon accept: %w", err)
+		}
+		if perr := verifyAcceptedPeer(conn, marked); perr != nil {
+			_ = conn.Close()
+			slog.Warn("daemon: refusing connection", "error", perr)
+			continue
 		}
 		tasks.Go(func() { handle(conn) })
 	}

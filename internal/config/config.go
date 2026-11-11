@@ -35,6 +35,46 @@ func (p Product) Home() string {
 	return filepath.Join(home, dir)
 }
 
+func AnchorHome() error {
+	for _, key := range []string{"DALGONA_HOME", "DAL_HOME"} {
+		value := os.Getenv(key)
+		if value == "" || filepath.IsAbs(value) {
+			continue
+		}
+		wd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("config: resolve home %s: %w", key, err)
+		}
+		if err := os.Setenv(key, filepath.Join(wd, value)); err != nil {
+			return fmt.Errorf("config: anchor home %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func productHome(product Product) (string, error) {
+	home := product.Home()
+	if !filepath.IsAbs(home) {
+		return "", fmt.Errorf("config: home %q is not absolute; resolve it at process start", home)
+	}
+	return home, nil
+}
+
+func newConfig(product Product, cwd string) (Config, error) {
+	home, err := productHome(product)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg := defaultConfigWithHome(product, home, cwd)
+	if cfg.Cwd == "" {
+		cfg.Cwd = "."
+		if directory, err := os.Getwd(); err == nil {
+			cfg.Cwd = directory
+		}
+	}
+	return cfg, nil
+}
+
 type (
 	Flags struct {
 		Model, Reasoning, Approval, ToolMode, Sandbox, Runner, Remote, Cwd string
@@ -210,8 +250,12 @@ type Config struct {
 }
 
 func defaultConfig(product Product, cwd string) Config {
+	return defaultConfigWithHome(product, product.Home(), cwd)
+}
+
+func defaultConfigWithHome(product Product, home, cwd string) Config {
 	return Config{
-		Home: product.Home(), Product: product, Cwd: cwd,
+		Home: home, Product: product, Cwd: cwd,
 		Reasoning: ReasoningDefault, Approval: ApprovalAuto, ToolMode: ToolModeNormal,
 		Sandbox: SandboxWorkspaceWrite, Runner: "local",
 		EditStyle: EditStyleSpec{Default: "anchor"}, CompactionThreshold: .8,
@@ -225,12 +269,9 @@ func defaultConfig(product Product, cwd string) Config {
 }
 
 func Load(product Product, cwd string, flags Flags) (Config, error) {
-	cfg := defaultConfig(product, cwd)
-	if cfg.Cwd == "" {
-		cfg.Cwd = "."
-		if directory, err := os.Getwd(); err == nil {
-			cfg.Cwd = directory
-		}
+	cfg, err := newConfig(product, cwd)
+	if err != nil {
+		return Config{}, err
 	}
 	for _, name := range []string{"config.toml", "settings.toml"} {
 		layer := readLayer(filepath.Join(cfg.Home, name))

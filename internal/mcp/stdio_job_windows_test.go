@@ -16,8 +16,6 @@ import (
 	"github.com/gosuda/dalgona/internal/mcp"
 )
 
-const windowsStillActive = 259
-
 func TestStdioCloseKillsJobGrandchild(t *testing.T) {
 	binary := buildServer(t)
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
@@ -80,14 +78,14 @@ func windowsProcessAlive(pid int) bool {
 	if pid < 0 || uint64(pid) > math.MaxUint32 {
 		return false
 	}
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-	if err != nil {
+	handle, openErr := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if openErr != nil {
 		return false
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
-	var code uint32
-	if err := windows.GetExitCodeProcess(handle, &code); err != nil {
+	event, waitErr := windows.WaitForSingleObject(handle, 0)
+	if waitErr != nil {
 		return false
 	}
-	return code == windowsStillActive
+	return event == uint32(windows.WAIT_TIMEOUT)
 }

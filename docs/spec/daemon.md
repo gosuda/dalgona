@@ -6,17 +6,27 @@
 
 When the lock is held by another process, `Run` MUST return `another dalgona process owns <home>`. It MUST NOT remove or replace `<home>/dalgona.sock` in this case.
 
-After the lock is held, `Run` MUST remove a stale `dalgona.sock` and then listen on it. `Run` MUST create `<home>` with mode `0700` and MUST tighten an existing `<home>` to mode `0700` before it builds the host, so the host never reads config or the journal from a loose directory. It MUST set the socket file to mode `0600` after it listens, so only the owning user can reach the RPC surface. A failure to create, tighten, remove, listen, or set these permissions MUST stop `Run` with an error.
+After the lock is held, `Run` MUST remove a stale `dalgona.sock` and then listen on it. `Run` MUST create `<home>` with mode `0700` and MUST tighten an existing `<home>` to mode `0700` before it builds the host, so the host never reads config or the journal from a loose directory. On Windows the create step MUST set a protected DACL that grants access only to the current user, SYSTEM, and Administrators. The tighten step MUST reapply that DACL to the home and to every file and directory inside it. It MUST set the socket file to mode `0600` after it listens, so only the owning user can reach the RPC surface. A failure to create, tighten, remove, listen, or set these permissions MUST stop `Run` with an error.
 
-The daemon performs no peer credential check on the socket: any same-uid process that reaches `<home>/dalgona.sock` can speak the RPC protocol. The runner keeps the home path out of sandboxed child environments (see [sandbox.md](sandbox.md)), but the default path stays guessable, so this hiding is best-effort only.
+`Run` MUST accept a connection only when the peer uid equals its own uid. On Linux it MUST read the peer uid with `SO_PEERCRED`. On macOS and FreeBSD it MUST read the peer uid with `LOCAL_PEERCRED`. On other unix targets the peer check MUST fail closed and refuse the connection. On Windows it MUST enforce the protected home DACL and MUST NOT apply a peer uid check.
+
+On Linux `Run` MUST also refuse a peer with `no_new_privs` set, unless the daemon itself has `no_new_privs` set. It MUST read the peer mark from `/proc/<pid>/status` for the pid from `SO_PEERCRED`. When the kernel supports `SO_PEERPIDFD`, it MUST hold the peer with the pidfd and confirm after the read that the same process is still alive. If the kernel reports `ENOPROTOOPT`, it MUST use the pid alone. Any other pidfd error MUST refuse the peer. It MUST fail closed when the peer status is unreadable. `Ensure` MUST check only the peer uid when it dials. A client MUST NOT refuse a daemon for this mark. When the daemon itself has `no_new_privs` set, `Run` MUST log one warning at start that sandboxed commands can reach it, and it MUST still start. When a client's first exchange with the daemon fails and the client has `no_new_privs` set, the client MUST report that the daemon refuses clients that run inside a sandbox.
+
+The peer check MUST NOT count as a boundary against the same uid: any unsandboxed same-uid process that reaches `<home>/dalgona.sock` can speak the RPC protocol. The runner keeps the home path out of sandboxed child environments (see [sandbox.md](sandbox.md)), but the default path stays guessable, so this hiding is best-effort only.
+
+Administrators and SYSTEM are inside the boundary. The check covers the home directory entry. The daemon resets children at start. A child loosened afterwards stays loosened until the next daemon start.
 
 `Run` MUST call `Host.Recover` once, in the background. Recovery MUST NOT delay the accept loop. Each connection MUST get its own `serve` call, so a client gets its `initialize` answer while recovery runs. Recovery errors MUST be logged. They MUST NOT stop the daemon.
 
 When the context ends, `Run` MUST stop accepting, close every open connection, and wait for the connection and recovery work. It MUST then close the host and the journal, which releases the lock. Closing the listener removes the socket file. An accept failure that does not come from the context MUST stop `Run` with an error.
 
-## Ensure
+`Ensure` MUST tighten `<home>` to mode `0700` and MUST refuse a home that is not owned by the current uid or whose mode is not `0700`. `Ensure` MUST refuse a socket that is not owned by the current uid. `Ensure` MUST verify the peer uid of each dialed connection and MUST close a connection whose peer uid differs, without sending any request on it. A pre-bound socket from another user MUST be refused, never answered. On Windows `Ensure` MUST protect the home before it verifies the home. It MUST refuse a home that still grants access to any other principal. It MUST NOT apply uid checks. On other unix targets without a peer credential call, the peer check MUST fail closed and `Ensure` MUST refuse the socket.
 
-`Ensure` MUST reuse an accepting socket. If the socket is unavailable, it MUST start `<executable> daemon` detached and append stdout and stderr to `daemon.log`. On Unix the child MUST run in a new session. On Windows it MUST use `DETACHED_PROCESS` and `CREATE_NEW_PROCESS_GROUP`. `Ensure` MUST retry for five seconds. On timeout it MUST return `daemon did not start: see <home>/daemon.log`.
+`Ensure` MUST reuse an accepting socket. If the socket is missing or stale, it MUST start `<executable> daemon` detached and append stdout and stderr to `daemon.log`. On Unix the child MUST run in a new session. On Windows it MUST use `DETACHED_PROCESS` and `CREATE_NEW_PROCESS_GROUP`. `Ensure` MUST retry for five seconds. On timeout it MUST return `daemon did not start: see <home>/daemon.log`.
+
+`Ensure` and `Run` MUST reject a socket path of `<limit>` bytes or more before spawning or listening, with `daemon socket path <path> is <n> bytes; the limit is <limit>; use a shorter home directory`.
+
+The limit MUST be 104 on darwin and the BSDs and 108 on Linux and Windows.
 
 Two clients MAY start two daemons at the same time. The lock rule above makes the second daemon exit without effect on the first.
 

@@ -176,12 +176,15 @@ importers:
       '@cloudflare/workers-types':
         specifier: 5.20261106.1
         version: 5.20261106.1
+      '@types/node':
+        specifier: 26.6.6
+        version: 26.6.6
       typescript:
         specifier: 7.0.2
         version: 7.0.2
       wrangler:
         specifier: 4.158.0
-        version: 4.158.0(@cloudflare/workers-types@5.20261106.1)
+        version: 4.158.0(@cloudflare/workers-types@5.20261106.1)(@types/node@26.6.6)
 
 packages:
 
@@ -654,6 +657,9 @@ packages:
   '@speed-highlight/core@1.2.24':
     resolution: {integrity: sha512-qeW2e1l78afw8VhRPfPQ1Gjj+KU5XFQ/OFV5ti6eTa9bruO7mJyZtA4vw0ofqmA3tKCkROE9xLk3VZoeRc98nw==}
 
+  '@types/node@26.6.6':
+    resolution: {integrity: sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog==}
+
   '@typescript/typescript-aix-ppc64@7.0.2':
     resolution: {integrity: sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==}
     engines: {node: '>=16.20.0'}
@@ -837,6 +843,9 @@ packages:
     resolution: {integrity: sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==}
     engines: {node: '>=16.20.0'}
     hasBin: true
+
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
   undici@7.30.1:
     resolution: {integrity: sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==}
@@ -1168,6 +1177,10 @@ snapshots:
 
   '@speed-highlight/core@1.2.24': {}
 
+  '@types/node@26.6.6':
+    dependencies:
+      undici-types: 8.9.0
+
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
 
@@ -1270,10 +1283,10 @@ snapshots:
 
   kleur@4.1.5: {}
 
-  miniflare@5.20261104.0-beta:
+  miniflare@5.20261104.0-beta(@types/node@26.6.6):
     dependencies:
       '@cspotcode/source-map-support': 0.8.1
-      sharp: 0.35.5
+      sharp: 0.35.5(@types/node@26.6.6)
       undici: 7.30.1
       workerd: 1.20261104.1
       ws: 8.21.0
@@ -1289,7 +1302,7 @@ snapshots:
 
   semver@7.8.6: {}
 
-  sharp@0.35.5:
+  sharp@0.35.5(@types/node@26.6.6):
     dependencies:
       '@img/colour': 1.1.0
       detect-libc: 2.1.2
@@ -1320,6 +1333,7 @@ snapshots:
       '@img/sharp-win32-arm64': 0.35.5
       '@img/sharp-win32-ia32': 0.35.5
       '@img/sharp-win32-x64': 0.35.5
+      '@types/node': 26.6.6
 
   supports-color@10.2.2: {}
 
@@ -1349,6 +1363,8 @@ snapshots:
       '@typescript/typescript-win32-arm64': 7.0.2
       '@typescript/typescript-win32-x64': 7.0.2
 
+  undici-types@8.9.0: {}
+
   undici@7.30.1: {}
 
   unenv@2.0.0-rc.24:
@@ -1363,14 +1379,14 @@ snapshots:
       '@cloudflare/workerd-linux-arm64': 1.20261104.1
       '@cloudflare/workerd-windows-64': 1.20261104.1
 
-  wrangler@4.158.0(@cloudflare/workers-types@5.20261106.1):
+  wrangler@4.158.0(@cloudflare/workers-types@5.20261106.1)(@types/node@26.6.6):
     dependencies:
       '@cloudflare/kv-asset-handler': 0.5.0
       '@cloudflare/unenv-preset': 2.16.2(unenv@2.0.0-rc.24)(workerd@1.20261104.1)
       '@cspotcode/source-map-support': 0.8.1
       blake3-wasm: 2.1.5
       esbuild: 0.28.2
-      miniflare: 5.20261104.0-beta
+      miniflare: 5.20261104.0-beta(@types/node@26.6.6)
       path-to-regexp: 6.3.0
       unenv: 2.0.0-rc.24
       workerd: 1.20261104.1

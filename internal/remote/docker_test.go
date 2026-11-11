@@ -80,8 +80,12 @@ func requireDocker(t *testing.T) {
 	defer func() { _ = cli.Close() }()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if _, err := cli.Ping(ctx, client.PingOptions{NegotiateAPIVersion: true}); err != nil {
-		t.Skipf("Docker daemon did not answer: %v", err)
+	ping, pingErr := cli.Ping(ctx, client.PingOptions{NegotiateAPIVersion: true})
+	if pingErr != nil {
+		t.Skipf("Docker daemon did not answer: %v", pingErr)
+	}
+	if ping.OSType != "" && ping.OSType != "linux" {
+		t.Skipf("Docker daemon runs %s containers", ping.OSType)
 	}
 }
 

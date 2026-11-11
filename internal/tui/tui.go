@@ -27,6 +27,7 @@ type Options struct {
 	Model          string
 	Approval       string
 	Sandbox        string
+	Cwd            string
 	Width          int
 	Height         int
 }

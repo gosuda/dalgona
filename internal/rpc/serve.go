@@ -267,16 +267,25 @@ func (s *server) snapshot(thread *agent.Thread) (snapshot, error) {
 }
 
 func (s *server) fill(thread *agent.Thread, tr *tracker) (snapshot, uint64, error) {
-	read, err := thread.ReadAfter(0)
+	records, _, err := thread.Records()
 	if err != nil {
 		return snapshot{}, 0, hostError(err, thread.ID(), "")
 	}
 	c := &collector{}
 	tr.sink = c
-	for _, e := range read.Events {
+	if len(records) > 0 {
+		if created, ok := records[0].Event.(event.SessionCreated); ok {
+			tr.created = created
+		}
+	}
+	for _, e := range event.ActivePath(records) {
 		tr.apply(e.Seq, e.Event)
 	}
-	return snapshot{created: tr.created, turns: c.result()}, read.Head, nil
+	var head uint64
+	if len(records) > 0 {
+		head = records[len(records)-1].Seq
+	}
+	return snapshot{created: tr.created, turns: c.result()}, head, nil
 }
 
 func (s *server) run(ctx context.Context, w *watch) {

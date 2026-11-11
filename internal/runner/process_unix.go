@@ -27,11 +27,29 @@ func startDetached(ctx context.Context, self string, args []string, spec Process
 }
 
 func signalProcess(shimPID int, pgid int, signal Signal) error {
-	err := syscall.Kill(-pgid, unixSignal(signal))
-	if err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("runner: signal process group: %w", err)
+	killErr := syscall.Kill(-pgid, unixSignal(signal))
+	if killErr == nil || errors.Is(killErr, syscall.ESRCH) {
+		return nil
 	}
-	return nil
+	if errors.Is(killErr, syscall.EPERM) && processGroupDrained(pgid) {
+		return nil
+	}
+	return fmt.Errorf("runner: signal process group: %w", killErr)
+}
+
+func processGroupGone(pgid int) bool {
+	probeErr := syscall.Kill(-pgid, 0)
+	if probeErr == nil {
+		return false
+	}
+	if errors.Is(probeErr, syscall.ESRCH) {
+		return true
+	}
+	return errors.Is(probeErr, syscall.EPERM) && processGroupDrained(pgid)
+}
+
+func processGroupStopped(pgid int) bool {
+	return processGroupGone(pgid) || processGroupDrained(pgid)
 }
 
 func ensureProcessGroupGone(pgid int, signal Signal) {
@@ -40,7 +58,7 @@ func ensureProcessGroupGone(pgid int, signal Signal) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+		if processGroupStopped(pgid) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -49,6 +67,14 @@ func ensureProcessGroupGone(pgid int, signal Signal) {
 		_ = signalProcess(os.Getpid(), pgid, signal)
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func stopSpawnGroup(string, int) bool { return false }
+
+func killSpawnGroup(shimPID int, pgid int) bool {
+	_ = signalProcess(shimPID, pgid, SignalKill)
+	ensureProcessGroupGone(pgid, SignalKill)
+	return processGroupStopped(pgid)
 }
 
 func watchCancelWhileWaiting(dir string, pgid int, done <-chan struct{}) {
@@ -66,7 +92,7 @@ func watchCancelWhileWaiting(dir string, pgid int, done <-chan struct{}) {
 			if !ok {
 				continue
 			}
-			if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			if processGroupGone(pgid) {
 				return
 			}
 			_ = signalProcess(os.Getpid(), pgid, sig)
@@ -89,6 +115,10 @@ func configureProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+func configureShimCommand(_ *exec.Cmd, _ []string) {}
+
+func runWindowsShimHelper(_ string) int { return 2 }
+
 func processIsAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
@@ -96,6 +126,8 @@ func processIsAlive(pid int) bool {
 func assignJob(cmd *exec.Cmd) (func(), error) {
 	return func() {}, nil
 }
+
+func resumeCommand(_ *exec.Cmd) error { return nil }
 
 func exitDetails(waitErr error) (int, string) {
 	if waitErr == nil {

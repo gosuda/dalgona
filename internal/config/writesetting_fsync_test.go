@@ -15,13 +15,7 @@ func TestWriteSetting_durableWrite(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	path := filepath.Join(home, "settings.toml")
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v, want 0600", info.Mode().Perm())
-	}
+	assertOwnerOnly(t, path)
 	raw, err := os.ReadFile(path)
 	if err != nil || !settingsKeySet(string(raw), "model", "m") {
 		t.Fatalf("content = %q, err = %v", raw, err)

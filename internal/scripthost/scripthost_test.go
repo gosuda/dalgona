@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -98,6 +99,13 @@ func (c crash) revive(t *testing.T, judge *judgeServer) []event.Seqd {
 	return revived.idle(parent)
 }
 
+func holdCommand() string {
+	if runtime.GOOS == "windows" {
+		return "ping -n 30 127.0.0.1 >nul"
+	}
+	return "sleep 30"
+}
+
 func nestedDone(callID string) func([]event.Seqd) bool {
 	return func(events []event.Seqd) bool {
 		_, ok := outputs(events)[callID]
@@ -112,7 +120,7 @@ func TestScriptReplaysRecordedEffectsAfterCrash(t *testing.T) {
 	judge := newJudgeServer(t, nil)
 	events := c.revive(t, judge)
 	log, err := os.ReadFile(filepath.Join(c.cwd, "log.txt"))
-	if err != nil || string(log) != "one\ntwo\n" {
+	if err != nil || !slices.Equal(strings.Fields(string(log)), []string{"one", "two"}) {
 		t.Fatalf("log = %q, %v", log, err)
 	}
 	if got := outputs(events)["e"].Output; !strings.Contains(got, `"status":"completed"`) || !strings.Contains(got, `"value":0.9`) {
@@ -125,7 +133,7 @@ func TestScriptReplaysRecordedEffectsAfterCrash(t *testing.T) {
 
 func TestEvalKilledMidExecRecoversIndeterminate(t *testing.T) {
 	t.Parallel()
-	c := crashDuringEval(t, "tools.exec(command = \"sleep 30\")\n1", func(h *harness, parent string) {
+	c := crashDuringEval(t, "tools.exec(command = \""+holdCommand()+"\")\n1", func(h *harness, parent string) {
 		h.await(parent, func(events []event.Seqd) bool { return count(events, event.TypeToolStarted) == 2 })
 	})
 	events := c.revive(t, newJudgeServer(t, nil))

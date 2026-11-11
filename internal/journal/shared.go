@@ -178,6 +178,17 @@ func (s *Store) loadSession(sid string) error {
 	if err != nil {
 		return fmt.Errorf("journal: load mirror index %s: %w", sid, err)
 	}
+	s.mu.Lock()
+	old := s.sessions[sid]
+	var oldFile *os.File
+	if old != nil {
+		oldFile = old.file
+		old.file = nil
+	}
+	s.mu.Unlock()
+	if oldFile != nil {
+		_ = oldFile.Close()
+	}
 	result, err := s.reconcileSession(sid, mirror)
 	if err != nil {
 		return err
@@ -187,15 +198,11 @@ func (s *Store) loadSession(sid string) error {
 		return fmt.Errorf("journal: stat %s: %w", sid, err)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	var closeErr error
-	if old := s.sessions[sid]; old != nil && old.file != nil {
-		closeErr = old.file.Close()
-	}
 	st := stateOf(result)
 	st.info = info
 	s.sessions[sid] = st
-	return closeErr
+	s.mu.Unlock()
+	return nil
 }
 
 func (st *sessionState) observe(file *os.File) {

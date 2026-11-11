@@ -22,15 +22,37 @@ func configureStdioProcess(cmd *exec.Cmd) {
 	cmd.WaitDelay = stdioWaitDelay
 }
 
+const stdioProcessExitWait = 5000
+
 func killStdioProcess(cmd *exec.Cmd) error {
 	proc := cmd.Process
 	if proc == nil {
 		return nil
 	}
 	if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if stdioProcessExited(proc.Pid) {
+			return nil
+		}
 		return err
 	}
 	return nil
+}
+
+func stdioProcessExited(pid int) bool {
+	pid32, ok := windowsPID(pid)
+	if !ok {
+		return false
+	}
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid32)
+	if err != nil {
+		return errors.Is(err, windows.ERROR_INVALID_PARAMETER)
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	event, err := windows.WaitForSingleObject(handle, stdioProcessExitWait)
+	if err != nil {
+		return false
+	}
+	return event == windows.WAIT_OBJECT_0
 }
 
 func windowsPID(pid int) (uint32, bool) {

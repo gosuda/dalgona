@@ -21,6 +21,7 @@ func trustEnv(t *testing.T, configBody string) (dalHome, userHome string) {
 	userHome = t.TempDir()
 	t.Setenv("DALGONA_HOME", dalHome)
 	t.Setenv("HOME", userHome)
+	t.Setenv("USERPROFILE", userHome)
 	if configBody != "" {
 		if err := os.WriteFile(filepath.Join(dalHome, "config.toml"), []byte(configBody), 0o600); err != nil {
 			t.Fatal(err)
@@ -141,13 +142,14 @@ func TestWorkspaceServerStartsAfterTrust(t *testing.T) {
 	sight := &approvalSight{decision: battery.TrustAccept, wantServer: server}
 	extra := loadDaemon(t, sightedDaemon(sight), fixture.cfg)
 	requireWorkspaceEcho(t, extra, fixture.cwd)
-	if sight.calls != 1 || sight.cwd != fixture.cwd || !sight.single {
+	wantCwd := config.CanonicalWorkspace(fixture.cwd)
+	if sight.calls != 1 || sight.cwd != wantCwd || !sight.single {
 		t.Fatalf("approver calls = %d, cwd = %q, single = %v", sight.calls, sight.cwd, sight.single)
 	}
 	requireOneStart(t, fixture.startLog)
 	trusted, err := config.TrustedWorkspaces(fixture.dalHome)
-	if err != nil || len(trusted) != 1 || trusted[0] != fixture.cwd {
-		t.Fatalf("trusted workspaces = %q, %v, want [%q]", trusted, err, fixture.cwd)
+	if err != nil || len(trusted) != 1 || trusted[0] != wantCwd {
+		t.Fatalf("trusted workspaces = %q, %v, want [%q]", trusted, err, wantCwd)
 	}
 	requireWorkspaceEcho(t, extra, fixture.cwd)
 	if sight.calls != 1 {

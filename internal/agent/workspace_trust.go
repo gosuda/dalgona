@@ -46,6 +46,7 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 	}
 	forwarded, linked := t.forwardApproval(prompt)
 	if !forwarded && (!offered || linked) {
+		t.discardApproval(requestID)
 		return ReplyDecline, nil
 	}
 	select {
@@ -56,12 +57,20 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 		}
 		return reply, nil
 	case <-ctx.Done():
+		t.discardApproval(requestID)
 		if forwarded {
 			prompt.Resolved = true
 			t.forwardApproval(prompt)
 		}
 		return ReplyCancel, ctx.Err()
 	}
+}
+
+func (t *Thread) discardApproval(requestID string) {
+	_, _ = ask(t, func(a *actor) struct{} {
+		delete(a.approvals, requestID)
+		return struct{}{}
+	})
 }
 
 // FormatWorkspacePrompt renders the workspace path with each server command,

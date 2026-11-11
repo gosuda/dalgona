@@ -51,3 +51,7 @@ Close MUST send `TERM` before closing the remote stream. It MUST attempt the rem
 ## Cloudflare
 
 Every box name MUST match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, the worker route rule. Create, Attach, Destroy, and Connect MUST fail before any request with `cloudflare: invalid box name` when it does not. The worker MUST check authorization first and answer 401 when it fails. For an authorized request whose box name breaks the rule, the worker MUST answer 400 `invalid box name`. It MUST answer 404 for unknown routes.
+
+The worker MUST accept only `DALGONA_TOKEN` on worker routes. It MUST compare the bearer in constant time. A box token MUST NOT pass worker authorization. The client MUST send `DALGONA_TOKEN` to the worker.
+
+The durable object MUST read the box name from `ctx.id.name`. A missing box name MUST fail with 500. It MUST derive the box token with HMAC-SHA256 over the box name keyed by `DALGONA_TOKEN`. It MUST set `DALGONA_BOX_TOKEN` to the box token. It MUST replace the Authorization header with the box token when it proxies into the container.

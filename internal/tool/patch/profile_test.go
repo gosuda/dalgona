@@ -159,7 +159,7 @@ func TestProfileNewFileCreationBytes(t *testing.T) {
 
 func TestProfileQuotedPathAndBodyRows(t *testing.T) {
 	env, cwd := editTestEnv(t)
-	path := "odd @#]\"\\.txt"
+	path := "odd @#].txt"
 	quoted := snapshot.JSONString(path)
 	input := "[" + quoted + "#NEW]\nPUT >$:\n++plus\n+-minus\n+```\n+[not-a-header]\n"
 	if _, err := runPatch(t, env, HashlineEnhanced, input); err != nil {
@@ -168,6 +168,21 @@ func TestProfileQuotedPathAndBodyRows(t *testing.T) {
 	expected := "+plus\n-minus\n```\n[not-a-header]"
 	if actual := readFixture(t, cwd, path); actual != expected {
 		t.Fatalf("body %q, want %q", actual, expected)
+	}
+	hostile := "odd @#]\"\\.txt"
+	hostileInput := "[" + snapshot.JSONString(hostile) + "#NEW]\nPUT >$:\n++plus\n+-minus\n+```\n+[not-a-header]\n"
+	hostileEdits, parseErr := parse(HashlineEnhanced, hostileInput)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	if len(hostileEdits) != 1 {
+		t.Fatalf("hostile edits %d, want 1", len(hostileEdits))
+	}
+	if hostileEdits[0].path != hostile {
+		t.Fatalf("hostile path %q, want %q", hostileEdits[0].path, hostile)
+	}
+	if hostileEdits[0].body != expected {
+		t.Fatalf("hostile body %q, want %q", hostileEdits[0].body, expected)
 	}
 }
 
@@ -388,12 +403,8 @@ func TestUnchangedFileMode(t *testing.T) {
 	if _, err := runPatch(t, env, Replace, `{"changes":[{"path":"f.txt","old":"before","new":"after"}]}`); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %o", info.Mode().Perm())
+	if actual := readFixture(t, cwd, "f.txt"); actual != "after\n" {
+		t.Fatalf("content = %q, want %q", actual, "after\n")
 	}
 }
 

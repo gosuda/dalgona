@@ -3,6 +3,7 @@ package scripthost_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestWorkflowReplaysRecordedEffectsAfterCrash(t *testing.T) {
 	judge := newJudgeServer(t, nil)
 	revived, events := reviveWorkflow(t, crashed.cwd, home, threadID, judge)
 	log, err := os.ReadFile(filepath.Join(crashed.cwd, "log.txt"))
-	if err != nil || string(log) != "one\ntwo\nthree\n" {
+	if err != nil || !slices.Equal(logLines(log), []string{"one", "two", "three"}) {
 		t.Fatalf("log = %q, %v", log, err)
 	}
 	if judge.requests.Load() != 1 || revived.model.requests("dalgona run flow.star") != 0 {
@@ -30,6 +31,18 @@ func TestWorkflowReplaysRecordedEffectsAfterCrash(t *testing.T) {
 	if len(completed) != 1 || !completed[0].OK || !strings.Contains(string(completed[0].Value), "0.9") || turn.Status != "completed" {
 		t.Fatalf("script.completed = %+v, turn = %+v", completed, turn)
 	}
+}
+
+func logLines(data []byte) []string {
+	raw := strings.Split(string(data), "\n")
+	if len(raw) > 0 && raw[len(raw)-1] == "" {
+		raw = raw[:len(raw)-1]
+	}
+	lines := make([]string, 0, len(raw))
+	for _, line := range raw {
+		lines = append(lines, strings.TrimRight(line, " \r"))
+	}
+	return lines
 }
 
 func crashWorkflow(t *testing.T, code string) (*harness, string, string) {

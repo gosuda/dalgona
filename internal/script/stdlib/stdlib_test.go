@@ -444,5 +444,5 @@ func runPython(t *testing.T, version, source string) string {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("execute CPython %s: %v\nstderr:\n%s\nsource:\n%s", version, err, stderr.String(), source)
 	}
-	return stdout.String()
+	return strings.ReplaceAll(stdout.String(), "\r\n", "\n")
 }

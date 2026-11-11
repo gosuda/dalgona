@@ -90,6 +90,7 @@ func (m *model) newThread() tea.Cmd {
 		Model:          m.modelName,
 		ApprovalPolicy: approvalPolicy(m.approvalMode),
 		Sandbox:        sandboxPolicy(m.sandbox),
+		Cwd:            m.opts.Cwd,
 	}
 	return m.call("new", "thread/start", params, new(rpc.ThreadStartResponse), "")
 }

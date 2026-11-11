@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	"errors"
@@ -11,7 +12,9 @@ import (
 	"io"
 	"io/fs"
 	"runtime/debug"
+	"strings"
 	"sync"
+	"time"
 )
 
 type Remote struct {
@@ -264,22 +267,76 @@ func encodeReadFileParams(path string, offset, limit int64) (jsontext.Value, err
 	return buf.Bytes(), nil
 }
 
+const stagedCleanupTimeout = 5 * time.Second
+
 func (r *Remote) WriteFile(ctx context.Context, path string, data []byte, perm fs.FileMode) error {
+	temp, err := stagingPath(path)
+	if err != nil {
+		return err
+	}
+	var attempted bool
+	cleanup := func() {
+		if attempted {
+			r.removeStaged(ctx, temp)
+		}
+	}
 	var offset int64
 	for {
 		end := min(offset+readPageSize, int64(len(data)))
-		params, err := encodeWriteParams(path, data[offset:end], perm, offset)
-		if err != nil {
-			return err
+		chunk, chunkErr := encodeWriteParams(temp, data[offset:end], perm, offset)
+		if chunkErr != nil {
+			cleanup()
+			return chunkErr
 		}
-		if _, err := r.call(ctx, "fs/writeFile", params); err != nil {
-			return err
+		_, callErr := r.call(ctx, "fs/writeFile", chunk)
+		attempted = true
+		if callErr != nil {
+			cleanup()
+			return callErr
 		}
 		if end == int64(len(data)) {
-			return nil
+			break
 		}
 		offset = end
 	}
+	params, err := encodeRenameParams(temp, path)
+	if err != nil {
+		r.removeStaged(ctx, temp)
+		return err
+	}
+	if _, err := r.call(ctx, "fs/rename", params); err != nil {
+		r.removeStaged(ctx, temp)
+		return err
+	}
+	return nil
+}
+
+func (r *Remote) removeStaged(ctx context.Context, path string) {
+	params, err := pathParams(path)
+	if err != nil {
+		return
+	}
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), stagedCleanupTimeout)
+	defer cancel()
+	_, _ = r.call(cleanup, "fs/remove", params)
+}
+
+func stagingPath(dest string) (string, error) {
+	if dest == "" {
+		return "", errors.New("runner: empty destination path")
+	}
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("runner: stage upload: %w", err)
+	}
+	name := fmt.Sprintf(".dalgona-partial-%x", nonce)
+	if dir, _, found := strings.CutLast(dest, "/"); found {
+		return dir + "/" + name, nil
+	}
+	if dir, _, found := strings.CutLast(dest, "\\"); found {
+		return dir + "\\" + name, nil
+	}
+	return name, nil
 }
 
 func (r *Remote) Stat(ctx context.Context, path string) (FileInfo, error) {

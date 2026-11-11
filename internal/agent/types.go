@@ -13,6 +13,7 @@ import (
 	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
 type RetryFunc func(attempt int, verdict model.Verdict, status int, delay time.Duration)
@@ -67,7 +68,7 @@ type HostConfig struct {
 	Runner         RunnerFactory
 	Decider        Decider
 	Extension      ExtensionFactory
-	OnChildStarted func(child *Thread)
+	OnChildStarted func(child *Thread, req task.Request)
 	Product        config.Product
 	Clock          func() time.Time
 	Logger         *slog.Logger
@@ -102,13 +103,14 @@ const (
 )
 
 type Input struct {
-	Kind     InputKind
-	Text     string
-	Effort   string
-	Model    string
-	Approval config.Approval
-	Sandbox  config.SandboxMode
-	Verbatim bool
+	Kind           InputKind
+	Text           string
+	Effort         string
+	Model          string
+	Approval       config.Approval
+	Sandbox        config.SandboxMode
+	Verbatim       bool
+	ExpectedTurnID string
 }
 
 type Settings struct {

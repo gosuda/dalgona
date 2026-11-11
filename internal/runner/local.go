@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -48,15 +49,22 @@ func (l *Local) Start(ctx context.Context, spec ProcessSpec) error {
 	runDir := filepath.Join(l.dir, spec.ID)
 	if err := os.Mkdir(runDir, 0o700); err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			return nil
+			return checkKeptRun(runDir, spec.ID)
 		}
 		return fmt.Errorf("runner: create process directory: %w", err)
 	}
-	if err := l.spawn(runDir, spec); err != nil {
-		_ = os.Remove(runDir)
-		return err
+	return l.spawn(runDir, spec)
+}
+
+func removeRunDir(dir string) {
+	_ = os.RemoveAll(dir)
+}
+
+func checkKeptRun(runDir string, id string) error {
+	if _, statErr := os.Stat(filepath.Join(runDir, "aborted")); statErr != nil {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("runner: start %s: run directory kept after unconfirmed stop: %s", id, runDir)
 }
 
 func validateProcessSpec(spec ProcessSpec) error {
@@ -81,11 +89,19 @@ func (l *Local) spawn(runDir string, spec ProcessSpec) error {
 	args := []string{"__shim", "--dir", runDir, "--"}
 	args = append(args, argv...)
 	mode := cmp.Or(spec.Sandbox.Mode, SandboxWorkspaceWrite)
-	roots := slices.Clone(spec.Sandbox.WritableRoots)
-	spec.Env = runnerEnvironment(spec.Env, spec.Dir, mode, roots)
+	spec.Env = runnerEnvironment(spec.Env, spec.Dir, Sandbox{
+		Mode:          mode,
+		WritableRoots: slices.Clone(spec.Sandbox.WritableRoots),
+		DeniedSockets: slices.Clone(spec.Sandbox.DeniedSockets),
+	})
 	cmd, err := startDetached(context.Background(), self, args, spec)
 	if err != nil {
+		removeRunDir(runDir)
 		return err
+	}
+	writeErr := writeSpawnPIDFunc(runDir, cmd.Process.Pid)
+	if writeErr != nil {
+		return errors.Join(writeErr, abortSpawn(runDir, cmd))
 	}
 	go func() {
 		if err := cmd.Wait(); err != nil {
@@ -95,18 +111,115 @@ func (l *Local) spawn(runDir string, spec ProcessSpec) error {
 	return nil
 }
 
-func runnerEnvironment(base []string, dir string, mode SandboxMode, roots []string) []string {
+func writeSpawnPID(dir string, pid int) error {
+	start := processStartTime(pid)
+	if start == "" {
+		return fmt.Errorf("runner: process start time is unavailable for pid %d", pid)
+	}
+	return writePIDFile(dir, pid, start)
+}
+
+var writeSpawnPIDFunc = writeSpawnPID
+
+func abortSpawn(runDir string, cmd *exec.Cmd) error {
+	cancelErr := requestCancel(runDir, SignalKill)
+	stopped := stopSpawnGroup(runDir, cmd.Process.Pid)
+	reaped, reapErr := reapSpawn(cmd, 5*time.Second)
+	if !reaped {
+		markerErr := writeAbortMarker(runDir)
+		return errors.Join(cancelErr, reapErr, markerErr)
+	}
+	if stopped || abortSpawnGroup(runDir, cmd.Process.Pid) {
+		removeRunDir(runDir)
+		return errors.Join(cancelErr, reapErr)
+	}
+	markerErr := writeAbortMarker(runDir)
+	return errors.Join(cancelErr, reapErr, markerErr)
+}
+
+func reapSpawn(cmd *exec.Cmd, timeout time.Duration) (bool, error) {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case waitErr := <-done:
+		return true, unexpectedWaitError(waitErr)
+	case <-timer.C:
+	}
+	if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		go drainSpawnWait(done)
+		return false, killErr
+	}
+	reapTimer := time.NewTimer(timeout)
+	defer reapTimer.Stop()
+	select {
+	case waitErr := <-done:
+		return true, unexpectedWaitError(waitErr)
+	case <-reapTimer.C:
+		go drainSpawnWait(done)
+		return false, nil
+	}
+}
+
+func drainSpawnWait(done <-chan error) {
+	if waitErr := <-done; unexpectedWaitError(waitErr) != nil {
+		slog.Debug("runner: abandoned shim wait failed", "error", waitErr)
+	}
+}
+
+func unexpectedWaitError(waitErr error) error {
+	if waitErr == nil {
+		return nil
+	}
+	if _, ok := errors.AsType[*exec.ExitError](waitErr); ok {
+		return nil
+	}
+	return waitErr
+}
+
+func abortSpawnGroup(runDir string, shimPID int) bool {
+	pgid, readErr := readProcessGroup(runDir)
+	if readErr != nil {
+		if !errors.Is(readErr, fs.ErrNotExist) {
+			return false
+		}
+		return spawnNeverStarted(runDir)
+	}
+	return killSpawnGroup(shimPID, pgid)
+}
+
+func spawnNeverStarted(runDir string) bool {
+	if exited, statErr := exitRecorded(runDir); statErr == nil && exited {
+		return true
+	}
+	_, statErr := os.Stat(filepath.Join(runDir, "pid"))
+	return errors.Is(statErr, fs.ErrNotExist)
+}
+
+func writeAbortMarker(runDir string) error {
+	if writeErr := writeAtomic(filepath.Join(runDir, "aborted"), []byte("unconfirmed stop\n"), 0o600); writeErr != nil {
+		return fmt.Errorf("runner: write abort marker: %w", writeErr)
+	}
+	if syncErr := syncDir(runDir); syncErr != nil {
+		return fmt.Errorf("runner: sync abort marker directory: %w", syncErr)
+	}
+	return nil
+}
+
+func runnerEnvironment(base []string, dir string, sandbox Sandbox) []string {
 	if len(base) == 0 {
 		base = os.Environ()
 	}
 	env := withoutRunnerEnvironment(base)
-	if mode != SandboxOff {
+	if sandbox.Mode != SandboxOff {
 		env = withoutHomeEnvironment(env)
 	}
 	env = append(env,
 		"DALGONA_RUN_CWD="+dir,
-		"DALGONA_SANDBOX_MODE="+string(mode),
-		"DALGONA_SANDBOX_ROOTS="+encodeRoots(roots),
+		"DALGONA_SANDBOX_MODE="+string(sandbox.Mode),
+		"DALGONA_SANDBOX_ROOTS="+encodeRoots(sandbox.WritableRoots),
+		sandboxDeniedEnvironment+"="+encodeRoots(sandbox.DeniedSockets),
 		"DALGONA_SHIM_EXEC=0",
 	)
 	return env
@@ -149,7 +262,7 @@ func isRunnerEnvironment(key string) bool {
 		return true
 	}
 	switch key {
-	case "DALGONA_RUN_CWD", "DALGONA_SANDBOX_MODE", "DALGONA_SANDBOX_ROOTS", "DALGONA_SHIM_EXEC":
+	case "DALGONA_RUN_CWD", "DALGONA_SANDBOX_MODE", "DALGONA_SANDBOX_ROOTS", "DALGONA_SHIM_EXEC", sandboxDeniedEnvironment:
 		return true
 	default:
 		return false
@@ -308,7 +421,7 @@ func missingUnlessExited(runDir string) error {
 }
 
 func readProcessGroup(runDir string) (int, error) {
-	data, err := os.ReadFile(filepath.Join(runDir, "pgid"))
+	data, err := readRunFile(filepath.Join(runDir, "pgid"))
 	if err != nil {
 		return 0, fmt.Errorf("runner: read process group: %w", err)
 	}
@@ -490,7 +603,7 @@ func readAt(dir string, offset, limit int64) ([]byte, error) {
 }
 
 func readIdentity(path string) (processIdentity, error) {
-	data, err := os.ReadFile(path)
+	data, err := readRunFile(path)
 	if err != nil {
 		return processIdentity{}, fmt.Errorf("runner: read pid: %w", err)
 	}
@@ -518,7 +631,7 @@ func identityAlive(identity processIdentity) bool {
 }
 
 func readExit(path string) (*Exit, error) {
-	data, err := os.ReadFile(path)
+	data, err := readRunFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("runner: read exit: %w", err)
 	}
@@ -562,7 +675,7 @@ func writeAtomic(path string, data []byte, perm fs.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary file: %w", err)
 	}
-	if err := os.Rename(name, path); err != nil {
+	if err := publishReplace(name, path, perm); err != nil {
 		return fmt.Errorf("rename temporary file: %w", err)
 	}
 	return nil

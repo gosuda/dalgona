@@ -16,6 +16,7 @@ const (
 type Sandbox struct {
 	Mode          SandboxMode
 	WritableRoots []string
+	DeniedSockets []string
 }
 
 type ProcessSpec struct {

@@ -16,15 +16,30 @@ const (
 )
 
 func Instructions(home, cwd string) string {
-	home = filepath.Clean(home)
-	homeAgents := filepath.Join(home, "AGENTS.md")
-	paths := []string{homeAgents}
-	root := repositoryRoot(cwd)
-	for _, dir := range directoriesDown(root, cwd) {
-		path := firstInstruction(dir)
-		if filepath.Clean(path) != homeAgents {
-			paths = append(paths, path)
+	homeRoot, homeErr := filepath.EvalSymlinks(filepath.Clean(home))
+	resolvedCWD, cwdErr := filepath.EvalSymlinks(filepath.Clean(cwd))
+	if cwdErr != nil {
+		resolvedCWD = filepath.Clean(cwd)
+	}
+	root := repositoryRoot(resolvedCWD)
+	wsRoot, wsErr := filepath.EvalSymlinks(root)
+	if wsErr != nil {
+		wsRoot = filepath.Clean(root)
+	}
+	paths := make([]string, 0, 3)
+	homeFile := ""
+	if homeErr == nil {
+		if resolved, ok := regularWorkspaceFile(homeRoot, filepath.Join(homeRoot, "AGENTS.md")); ok {
+			paths = append(paths, resolved)
+			homeFile = resolved
 		}
+	}
+	for _, dir := range directoriesDown(wsRoot, resolvedCWD) {
+		resolved, ok := firstInstruction(wsRoot, dir)
+		if !ok || resolved == homeFile {
+			continue
+		}
+		paths = append(paths, resolved)
 	}
 	return renderInstructionFiles(paths, instructionLimit)
 }
@@ -38,7 +53,14 @@ func Nested(cwd, readPath string, seen map[string]bool) (string, []string) {
 	if err != nil || rel == "." || outsidePath(rel) {
 		return "", nil
 	}
-	return renderNewInstructions(nestedInstructionPaths(root, rel), seen)
+	candidates := nestedInstructionPaths(root, rel)
+	kept := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if resolved, ok := regularWorkspaceFile(root, candidate); ok {
+			kept = append(kept, resolved)
+		}
+	}
+	return renderNewInstructions(kept, seen)
 }
 
 func repositoryRoot(cwd string) string {
@@ -73,12 +95,13 @@ func directoriesDown(root, cwd string) []string {
 	return dirs
 }
 
-func firstInstruction(dir string) string {
-	agents := filepath.Join(dir, "AGENTS.md")
-	if info, err := os.Stat(agents); err == nil && info.Mode().IsRegular() {
-		return agents
+func firstInstruction(root, dir string) (string, bool) {
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if resolved, ok := regularWorkspaceFile(root, filepath.Join(dir, name)); ok {
+			return resolved, true
+		}
 	}
-	return filepath.Join(dir, "CLAUDE.md")
+	return "", false
 }
 
 func renderInstructionFiles(paths []string, limit int) string {

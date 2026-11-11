@@ -8,6 +8,20 @@ import type {
 	TurnStatus,
 } from "./types";
 
+export type KnownChildThreads = Readonly<Record<string, readonly string[]>>;
+
+export function recordChildThread(
+	known: KnownChildThreads,
+	threadId: string,
+	childId: string,
+): KnownChildThreads {
+	const existing: readonly string[] = known[threadId] ?? [];
+	if (existing.includes(childId)) {
+		return known;
+	}
+	return { ...known, [threadId]: [...existing, childId] };
+}
+
 export function emptyTranscript(threadId: string | null): TranscriptState {
 	return {
 		threadId,
@@ -16,10 +30,14 @@ export function emptyTranscript(threadId: string | null): TranscriptState {
 		items: [],
 		error: null,
 		plan: null,
+		childThreadIds: [],
 	};
 }
 
-export function transcriptForThread(thread: ThreadDetail): TranscriptState {
+export function transcriptForThread(
+	thread: ThreadDetail,
+	knownChildren: KnownChildThreads = {},
+): TranscriptState {
 	const items: TranscriptItem[] = [];
 	let turnId: string | null = null;
 	let turnStatus: TurnStatus | null = null;
@@ -32,6 +50,7 @@ export function transcriptForThread(thread: ThreadDetail): TranscriptState {
 			items.push(item);
 		}
 	}
+	const preserved: readonly string[] = knownChildren[thread.summary.id] ?? [];
 	return {
 		threadId: thread.summary.id,
 		turnId,
@@ -39,6 +58,7 @@ export function transcriptForThread(thread: ThreadDetail): TranscriptState {
 		items,
 		error,
 		plan: null,
+		childThreadIds: [...preserved],
 	};
 }
 
@@ -169,19 +189,36 @@ export function reduceNotification(
 	notification: AppNotification,
 ): TranscriptState {
 	switch (notification.type) {
-		case "threadStarted":
+		case "threadStarted": {
 			if (
 				state.threadId !== null &&
 				notification.thread.summary.id !== state.threadId
 			) {
 				return state;
 			}
-			return transcriptForThread(notification.thread);
+			const rebuilt = transcriptForThread(notification.thread);
+			if (state.threadId !== null && state.threadId === rebuilt.threadId) {
+				return { ...rebuilt, childThreadIds: [...state.childThreadIds] };
+			}
+			return rebuilt;
+		}
 		case "threadStatus":
 		case "threadName":
 		case "advisorNote":
 		case "requestResolved":
 			return state;
+		case "childSpawned": {
+			if (!sameThread(state, notification.threadId)) {
+				return state;
+			}
+			if (state.childThreadIds.includes(notification.childId)) {
+				return state;
+			}
+			return {
+				...state,
+				childThreadIds: [...state.childThreadIds, notification.childId],
+			};
+		}
 		case "plan": {
 			if (!sameThread(state, notification.threadId)) {
 				return state;
@@ -189,7 +226,25 @@ export function reduceNotification(
 			const { turnId, explanation, steps } = notification;
 			return { ...state, plan: { turnId, explanation, steps } };
 		}
-		case "turnStarted":
+		case "turnStarted": {
+			if (!sameThread(state, notification.threadId)) {
+				return state;
+			}
+			if (
+				state.turnId === notification.turn.id &&
+				state.turnStatus !== null &&
+				state.turnStatus !== "inProgress"
+			) {
+				return state;
+			}
+			return {
+				...state,
+				turnId: notification.turn.id,
+				turnStatus: notification.turn.status,
+				error: notification.turn.error,
+				plan: state.plan?.turnId === notification.turn.id ? state.plan : null,
+			};
+		}
 		case "turnCompleted": {
 			if (!sameThread(state, notification.threadId)) {
 				return state;
@@ -245,6 +300,38 @@ export function reduceNotification(
 	}
 }
 
+export interface OpenThreadState {
+	readonly transcript: TranscriptState;
+	readonly knownChildren: KnownChildThreads;
+	readonly activeThreadId: string | null;
+}
+
+export interface OpenThreadUpdate {
+	readonly transcript: TranscriptState;
+	readonly knownChildren: KnownChildThreads;
+	readonly sendFollowup: boolean;
+}
+
+export function applyOpenThreadNotification(
+	state: OpenThreadState,
+	notification: AppNotification,
+): OpenThreadUpdate {
+	const transcript = reduceNotification(state.transcript, notification);
+	const knownChildren =
+		notification.type === "childSpawned"
+			? recordChildThread(
+					state.knownChildren,
+					notification.threadId,
+					notification.childId,
+				)
+			: state.knownChildren;
+	const sendFollowup =
+		notification.type === "turnCompleted" &&
+		notification.threadId === state.activeThreadId &&
+		notification.turn.status === "completed";
+	return { transcript, knownChildren, sendFollowup };
+}
+
 export function trackApprovalRequest(
 	approvals: readonly ApprovalRequest[],
 	request: ApprovalRequest,
@@ -259,21 +346,37 @@ export function resolveApprovalRequest(
 	return approvals.filter((entry) => entry.id !== requestId);
 }
 
+function isOpenApproval(
+	threadId: string | null,
+	childThreadIds: readonly string[],
+	entryThreadId: string,
+): boolean {
+	return (
+		threadId !== null &&
+		(entryThreadId === threadId || childThreadIds.includes(entryThreadId))
+	);
+}
+
 export function activeApproval(
 	approvals: readonly ApprovalRequest[],
 	threadId: string | null,
+	childThreadIds: readonly string[],
 ): ApprovalRequest | null {
-	if (threadId === null) {
-		return null;
-	}
-	return approvals.find((entry) => entry.threadId === threadId) ?? null;
+	return (
+		approvals.find((entry) =>
+			isOpenApproval(threadId, childThreadIds, entry.threadId),
+		) ?? null
+	);
 }
 
 export function otherThreadApprovalCount(
 	approvals: readonly ApprovalRequest[],
 	threadId: string | null,
+	childThreadIds: readonly string[],
 ): number {
-	return approvals.filter((entry) => entry.threadId !== threadId).length;
+	return approvals.filter(
+		(entry) => !isOpenApproval(threadId, childThreadIds, entry.threadId),
+	).length;
 }
 
 export function dropSentFollowup(queue: readonly string[]): readonly string[] {
@@ -299,10 +402,13 @@ export function shouldAutoScrollForUpdate(
 export function itemsAwaitingApproval(
 	approvals: readonly ApprovalRequest[],
 	threadId: string | null,
+	childThreadIds: readonly string[],
 ): ReadonlySet<string> {
 	return new Set(
 		approvals
-			.filter((entry) => entry.threadId === threadId)
+			.filter((entry) =>
+				isOpenApproval(threadId, childThreadIds, entry.threadId),
+			)
 			.map((entry) => entry.itemId),
 	);
 }

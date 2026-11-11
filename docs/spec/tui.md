@@ -13,6 +13,7 @@ The TUI is a protocol client. It MUST import only `internal/rpc` from this modul
 - `Input`, `Output`: terminal streams. Empty fields use the process terminal.
 - `ThreadID`: when set, startup calls `thread/resume` and then `thread/read` with `includeTurns: true`. When empty, startup calls `thread/start`.
 - `Model`, `Approval`, `Sandbox`: session values for `thread/start` and for the status row. An empty model omits `model` from `thread/start` and shows as `default`. A model chosen with `/model` replaces it for later `thread/start` calls. The approval and sandbox defaults are `auto` and `workspace-write`. Approval `yolo` MUST force sandbox `off`. `thread/start` maps approval `yolo` to `never`, `ask` to `untrusted`, and other values to `on-request`. It maps sandbox `off` to `danger-full-access` and other values to `workspace-write`.
+- `Cwd`: the client working directory. Every `thread/start` MUST send it as `cwd`.
 - `Width`, `Height`: the terminal size when the output is not a terminal. Both MUST be positive to apply.
 
 Startup runs these steps in order: `initialize` with client name `dalgona`, the `initialized` notification, `dalgona/keywords/list` (once per connection), then the thread open call. `Run` returns nil when the user quits or `ctx` ends. On return, `Run` MUST close the RPC connection.

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gosuda/dalgona/internal/auth"
 )
 
 const (
@@ -92,6 +94,9 @@ func parseRecordArgs(args []string) (string, []string, error) {
 
 func openCensus(home string, now time.Time) (*censusLog, error) {
 	dir := filepath.Join(home, "census")
+	if homeErr := auth.ProtectHomeDir(home); homeErr != nil {
+		return nil, fmt.Errorf("create census directory: %w", homeErr)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create census directory: %w", err)
 	}

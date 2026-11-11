@@ -286,12 +286,18 @@ func TestGCDestroysConfirmedUnboundBoxes(t *testing.T) {
 func TestBoxPathMapsThreadCwdToWorkspace(t *testing.T) {
 	l := &link{cwd: "/home/u/proj"}
 	for in, want := range map[string]string{
-		"":                    "/workspace",
-		"/home/u/proj":        "/workspace",
-		"/home/u/proj/a/b.go": "/workspace/a/b.go",
-		"/home/u/project":     "/home/u/project",
-		"/etc/hosts":          "/etc/hosts",
-		"rel/x":               "rel/x",
+		"":                         "/workspace",
+		"/home/u/proj":             "/workspace",
+		"/home/u/proj/":            "/workspace",
+		"/home/u/proj/a/b.go":      "/workspace/a/b.go",
+		"/home/u/proj/./a":         "/workspace/a",
+		"/home/u/proj/../proj/a":   "/workspace/a",
+		"/home/u/proj/a\\b":        "/workspace/a\\b",
+		"/home/u/proj/../../etc/x": "/home/u/proj/../../etc/x",
+		"/home/u/project":          "/home/u/project",
+		"/etc/hosts":               "/etc/hosts",
+		"/":                        "/",
+		"rel/x":                    "rel/x",
 	} {
 		if got := l.boxPath(in); got != want {
 			t.Errorf("boxPath(%q) = %q, want %q", in, got, want)

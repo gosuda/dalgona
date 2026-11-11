@@ -33,16 +33,31 @@ function routedRequest(request: Request, path: "/" | "/bridge"): Request {
 	return new Request(source, request);
 }
 
+export async function boxToken(token: string, box: string): Promise<string> {
+	const key = await crypto.subtle.importKey(
+		"raw",
+		encoder.encode(token),
+		{ name: "HMAC", hash: "SHA-256" },
+		false,
+		["sign"],
+	);
+	const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(box));
+	return [...new Uint8Array(signature)]
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
 export class Box extends Container<Env> {
 	override defaultPort = 7438;
 	override sleepAfter = "6h";
 
-	constructor(ctx: DurableObjectState<Env>, env: Env) {
-		super(ctx, env);
-		this.envVars = { DALGONA_BOX_TOKEN: env.DALGONA_TOKEN };
-	}
-
 	override async fetch(request: Request): Promise<Response> {
+		const name = this.ctx.id.name;
+		if (name === undefined || name === "") {
+			return new Response("unknown box", { status: 500 });
+		}
+		const token = await boxToken(this.env.DALGONA_TOKEN, name);
+		this.envVars = { DALGONA_BOX_TOKEN: token };
 		const lifecycle = request.headers.get("X-Dalgona-Lifecycle");
 		if (lifecycle === "start") {
 			await this.startAndWaitForPorts({ ports: 7438 });
@@ -52,7 +67,9 @@ export class Box extends Container<Env> {
 			await this.destroy();
 			return new Response(null, { status: 204 });
 		}
-		return super.fetch(request);
+		const headers = new Headers(request.headers);
+		headers.set("Authorization", `Bearer ${token}`);
+		return super.fetch(new Request(request, { headers }));
 	}
 }
 

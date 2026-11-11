@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { advisorLabel, itemStatusLabel, kindLabel } from "./labels";
 import {
 	activeApproval,
+	applyOpenThreadNotification,
 	dropSentFollowup,
 	emptyTranscript,
 	itemDisplayStatus,
@@ -257,7 +258,7 @@ describe("approval tracking", () => {
 			itemDisplayStatus(
 				"inProgress",
 				itemId,
-				itemsAwaitingApproval(approvals, "thread-1"),
+				itemsAwaitingApproval(approvals, "thread-1", []),
 			),
 		);
 	}
@@ -275,9 +276,11 @@ describe("approval tracking", () => {
 			...request,
 			method: "item/fileChange/requestApproval",
 		});
-		const awaiting = itemsAwaitingApproval(pending, "thread-1");
+		const awaiting = itemsAwaitingApproval(pending, "thread-1", []);
 		expect(itemDisplayStatus("completed", "cmd-1", awaiting)).toBe("completed");
-		expect(itemsAwaitingApproval(pending, "thread-2").has("cmd-1")).toBe(false);
+		expect(itemsAwaitingApproval(pending, "thread-2", []).has("cmd-1")).toBe(
+			false,
+		);
 	});
 });
 
@@ -295,18 +298,18 @@ describe("active approval filtering", () => {
 	const other: ApprovalRequest = { ...first, id: 8, threadId: "thread-2" };
 
 	test("shows the approval that belongs to the active thread", () => {
-		expect(activeApproval([other, first], "thread-1")).toBe(first);
-		expect(activeApproval([other, first], "thread-2")).toBe(other);
+		expect(activeApproval([other, first], "thread-1", [])).toBe(first);
+		expect(activeApproval([other, first], "thread-2", [])).toBe(other);
 	});
 
 	test("shows nothing when no approval belongs to the active thread", () => {
-		expect(activeApproval([other], "thread-1")).toBeNull();
-		expect(activeApproval([other], null)).toBeNull();
+		expect(activeApproval([other], "thread-1", [])).toBeNull();
+		expect(activeApproval([other], null, [])).toBeNull();
 	});
 
 	test("counts approvals waiting on other threads", () => {
-		expect(otherThreadApprovalCount([first, other], "thread-1")).toBe(1);
-		expect(otherThreadApprovalCount([first, other], "thread-3")).toBe(2);
+		expect(otherThreadApprovalCount([first, other], "thread-1", [])).toBe(1);
+		expect(otherThreadApprovalCount([first, other], "thread-3", [])).toBe(2);
 	});
 });
 
@@ -395,5 +398,192 @@ describe("followup queue snapshot", () => {
 			"failed",
 		]);
 		expect(requeueFailedFollowup([], "failed")).toEqual(["failed"]);
+	});
+});
+
+describe("open thread notification", () => {
+	test("an item notification changes the transcript without a follow-up", () => {
+		const update = applyOpenThreadNotification(
+			{
+				transcript: emptyTranscript("thread-1"),
+				knownChildren: {},
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "itemStarted",
+				threadId: "thread-1",
+				turnId: "turn-1",
+				item: agent("item-1", "hello", false),
+			},
+		);
+		expect(update.transcript.items).toEqual([agent("item-1", "hello", false)]);
+		expect(update.sendFollowup).toBe(false);
+	});
+
+	test("a streamed text delta appends to the open transcript", () => {
+		const seeded = applyOpenThreadNotification(
+			{
+				transcript: emptyTranscript("thread-1"),
+				knownChildren: {},
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "itemStarted",
+				threadId: "thread-1",
+				turnId: "turn-1",
+				item: agent("item-1", "hel", false),
+			},
+		);
+		const update = applyOpenThreadNotification(
+			{
+				transcript: seeded.transcript,
+				knownChildren: seeded.knownChildren,
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "delta",
+				channel: "agent",
+				threadId: "thread-1",
+				turnId: "turn-1",
+				itemId: "item-1",
+				delta: "lo",
+			},
+		);
+		expect(update.transcript.items).toEqual([agent("item-1", "hello", false)]);
+		expect(update.sendFollowup).toBe(false);
+	});
+
+	test("a completed turn ends the running state and allows the queued follow-up", () => {
+		const running = applyOpenThreadNotification(
+			{
+				transcript: emptyTranscript("thread-1"),
+				knownChildren: {},
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "turnStarted",
+				threadId: "thread-1",
+				turn: { id: "turn-1", status: "inProgress", items: [], error: null },
+			},
+		);
+		expect(running.transcript.turnStatus).toBe("inProgress");
+		expect(running.sendFollowup).toBe(false);
+		const done = applyOpenThreadNotification(
+			{
+				transcript: running.transcript,
+				knownChildren: running.knownChildren,
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "turnCompleted",
+				threadId: "thread-1",
+				turn: { id: "turn-1", status: "completed", items: [], error: null },
+			},
+		);
+		expect(done.transcript.turnStatus).toBe("completed");
+		expect(done.sendFollowup).toBe(true);
+	});
+
+	test("a spawned child records the link on the open thread", () => {
+		const update = applyOpenThreadNotification(
+			{
+				transcript: emptyTranscript("thread-1"),
+				knownChildren: {},
+				activeThreadId: "thread-1",
+			},
+			{ type: "childSpawned", threadId: "thread-1", childId: "child-1" },
+		);
+		expect(update.knownChildren).toEqual({ "thread-1": ["child-1"] });
+		expect(update.transcript.childThreadIds).toEqual(["child-1"]);
+		expect(update.sendFollowup).toBe(false);
+	});
+
+	test("a notification for another thread changes nothing", () => {
+		const transcript = emptyTranscript("thread-1");
+		const knownChildren = {};
+		const update = applyOpenThreadNotification(
+			{ transcript, knownChildren, activeThreadId: "thread-1" },
+			{
+				type: "delta",
+				channel: "agent",
+				threadId: "thread-2",
+				turnId: "turn-9",
+				itemId: "item-9",
+				delta: "nope",
+			},
+		);
+		expect(update.transcript).toBe(transcript);
+		expect(update.knownChildren).toBe(knownChildren);
+		expect(update.sendFollowup).toBe(false);
+	});
+
+	test("a failed turn ends the running state without allowing the queued follow-up", () => {
+		const running = applyOpenThreadNotification(
+			{
+				transcript: emptyTranscript("thread-1"),
+				knownChildren: {},
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "turnStarted",
+				threadId: "thread-1",
+				turn: { id: "turn-1", status: "inProgress", items: [], error: null },
+			},
+		);
+		const done = applyOpenThreadNotification(
+			{
+				transcript: running.transcript,
+				knownChildren: running.knownChildren,
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "turnCompleted",
+				threadId: "thread-1",
+				turn: { id: "turn-1", status: "failed", items: [], error: "boom" },
+			},
+		);
+		expect(done.transcript.turnStatus).toBe("failed");
+		expect(done.transcript.error).toBe("boom");
+		expect(done.sendFollowup).toBe(false);
+	});
+
+	test("an interrupted turn ends the running state without allowing the queued follow-up", () => {
+		const running = applyOpenThreadNotification(
+			{
+				transcript: emptyTranscript("thread-1"),
+				knownChildren: {},
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "turnStarted",
+				threadId: "thread-1",
+				turn: { id: "turn-1", status: "inProgress", items: [], error: null },
+			},
+		);
+		const done = applyOpenThreadNotification(
+			{
+				transcript: running.transcript,
+				knownChildren: running.knownChildren,
+				activeThreadId: "thread-1",
+			},
+			{
+				type: "turnCompleted",
+				threadId: "thread-1",
+				turn: { id: "turn-1", status: "interrupted", items: [], error: null },
+			},
+		);
+		expect(done.transcript.turnStatus).toBe("interrupted");
+		expect(done.sendFollowup).toBe(false);
+	});
+
+	test("a child spawned on another thread records the link and leaves the open transcript", () => {
+		const transcript = emptyTranscript("thread-1");
+		const update = applyOpenThreadNotification(
+			{ transcript, knownChildren: {}, activeThreadId: "thread-1" },
+			{ type: "childSpawned", threadId: "thread-2", childId: "child-9" },
+		);
+		expect(update.knownChildren).toEqual({ "thread-2": ["child-9"] });
+		expect(update.transcript).toBe(transcript);
+		expect(update.sendFollowup).toBe(false);
 	});
 });

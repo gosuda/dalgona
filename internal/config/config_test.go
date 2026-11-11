@@ -440,3 +440,39 @@ func TestWriteSetting_updatesOnlySettings(t *testing.T) {
 		t.Fatalf("temporary settings file remains: %v", err)
 	}
 }
+
+func TestAnchorHomeResolvesRelativeToWorkdir(t *testing.T) {
+	base := t.TempDir()
+	t.Chdir(base)
+	t.Setenv("DALGONA_HOME", "home")
+	t.Setenv("DAL_HOME", "")
+	if err := os.Unsetenv("DAL_HOME"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.AnchorHome(); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("DAL_HOME"); got != "" {
+		t.Fatalf("unset DAL_HOME became %q", got)
+	}
+	anchored := os.Getenv("DALGONA_HOME")
+	if want := filepath.Join(base, "home"); anchored != want {
+		t.Fatalf("anchored home = %q, want %q", anchored, want)
+	}
+	t.Setenv("DALGONA_HOME", base)
+	if err := config.AnchorHome(); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("DALGONA_HOME"); got != base {
+		t.Fatalf("absolute home changed to %q", got)
+	}
+}
+
+func TestLoadRejectsRelativeHome(t *testing.T) {
+	base := t.TempDir()
+	t.Chdir(base)
+	t.Setenv("DALGONA_HOME", "home")
+	if _, err := config.Load(config.ProductDalgona, base, config.Flags{}); err == nil {
+		t.Fatal("load accepted a relative home")
+	}
+}

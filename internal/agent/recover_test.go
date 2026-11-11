@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -212,7 +213,11 @@ func (h *harness) startProcessUntil(id, command string, ready func(runner.Output
 		h.t.Fatal(err)
 	}
 	defer func() { _ = local.Close() }()
-	spec := runner.ProcessSpec{ID: id, Argv: []string{"sh", "-c", command}, Dir: h.cwd, Sandbox: runner.Sandbox{Mode: runner.SandboxOff}}
+	argv := []string{"sh", "-c", command}
+	if runtime.GOOS == "windows" {
+		argv = []string{"cmd", "/C", command}
+	}
+	spec := runner.ProcessSpec{ID: id, Argv: argv, Dir: h.cwd, Sandbox: runner.Sandbox{Mode: runner.SandboxOff}}
 	if err := local.Start(h.t.Context(), spec); err != nil {
 		h.t.Fatal(err)
 	}
@@ -244,8 +249,13 @@ func TestRecoverExecThatExited(t *testing.T) {
 func TestRecoverExecStillRunning(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	h.startRunningProcess("c1", "sleep 1; echo late")
-	h.seed(execPrefix("c1", "sleep 1; echo late")...)
+	separator := ";"
+	if runtime.GOOS == "windows" {
+		separator = "&"
+	}
+	command := holdCommand(1) + separator + " echo late"
+	h.startRunningProcess("c1", command)
+	h.seed(execPrefix("c1", command)...)
 	events := h.recoverSession()
 	got := completedOutputs(events)["c1"]
 	if !got.OK || !strings.Contains(got.Output, "late") {

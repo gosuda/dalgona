@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/agent/prompt"
+	"github.com/gosuda/dalgona/internal/config"
 )
 
 func TestInstructionsWalkAndFallback(t *testing.T) {
@@ -108,14 +109,31 @@ func TestNestedAppendsEachFileOnce(t *testing.T) {
 	if strings.Contains(got, "ROOT MUST NOT APPEAR") {
 		t.Fatalf("cwd instruction was injected by Nested: %s", got)
 	}
-	wantPaths := []string{subAgents, subClaude, deepAgents}
-	if !slices.Equal(newlySeen, wantPaths) {
+	canonicalCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	wantPaths := []string{filepath.Join(canonicalCwd, "sub", "AGENTS.md"), filepath.Join(canonicalCwd, "sub", "CLAUDE.md"), filepath.Join(canonicalCwd, "sub", "deep", "AGENTS.md")}
+	if !slices.Equal(canonicalInstructionPaths(t, newlySeen), canonicalInstructionPaths(t, wantPaths)) {
 		t.Fatalf("newlySeen = %q, want %q", newlySeen, wantPaths)
 	}
 	again, againPaths := prompt.Nested(cwd, readPath, seen)
 	if again != "" || len(againPaths) != 0 {
 		t.Fatalf("second Nested returned text %q and paths %q", again, againPaths)
 	}
+}
+
+func canonicalInstructionPaths(t *testing.T, paths []string) []string {
+	t.Helper()
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", path, err)
+		}
+		out = append(out, resolved)
+	}
+	return out
 }
 
 func TestNestedCapAndContainment(t *testing.T) {
@@ -143,5 +161,87 @@ func writeTestFile(t *testing.T, path, text string) {
 	}
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink creation requires additional privileges: %v", err)
+	}
+}
+
+func TestInstructionsIgnoreOutsideSymlink(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	repo := filepath.Join(base, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("create git marker: %v", err)
+	}
+	writeTestFile(t, filepath.Join(home, "AGENTS.md"), "HOME")
+	outside := filepath.Join(base, "outside")
+	writeTestFile(t, filepath.Join(outside, "secret.md"), "TOP-SECRET-OUTSIDE")
+	escape := filepath.Join(repo, "AGENTS.md")
+	symlinkOrSkip(t, filepath.Join(outside, "secret.md"), escape)
+	cwd := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := prompt.Instructions(home, cwd); strings.Contains(got, "TOP-SECRET-OUTSIDE") {
+		t.Fatalf("outside symlink reached the instructions: %s", got)
+	}
+	inner := filepath.Join(repo, "inner.md")
+	writeTestFile(t, inner, "INNER-OK")
+	if err := os.Remove(escape); err != nil {
+		t.Fatal(err)
+	}
+	symlinkOrSkip(t, inner, escape)
+	if got := prompt.Instructions(home, cwd); !strings.Contains(got, "INNER-OK") {
+		t.Fatalf("inside link did not load: %s", got)
+	}
+	deep := filepath.Join(cwd, "deep", "x.go")
+	writeTestFile(t, deep, "package x")
+	if err := os.Remove(escape); err != nil {
+		t.Fatal(err)
+	}
+	symlinkOrSkip(t, filepath.Join(outside, "secret.md"), filepath.Join(cwd, "deep", "AGENTS.md"))
+	if got, _ := prompt.Nested(cwd, deep, map[string]bool{}); strings.Contains(got, "TOP-SECRET-OUTSIDE") {
+		t.Fatalf("outside nested symlink reached the instructions: %s", got)
+	}
+}
+
+func TestInstructionsRelativeProductHome(t *testing.T) {
+	base := t.TempDir()
+	t.Chdir(base)
+	t.Setenv("DALGONA_HOME", "home")
+	if err := config.AnchorHome(); err != nil {
+		t.Fatal(err)
+	}
+	home := config.ProductDalgona.Home()
+	if !filepath.IsAbs(home) {
+		t.Fatalf("product home = %q, want absolute", home)
+	}
+	writeTestFile(t, filepath.Join(home, "AGENTS.md"), "HOME")
+	repo := filepath.Join(base, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("create git marker: %v", err)
+	}
+	cwd := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	if got := prompt.Instructions(home, cwd); !strings.Contains(got, ">HOME</instructions>") {
+		t.Fatalf("relative home instructions missing: %s", got)
+	}
+	outside := filepath.Join(base, "outside")
+	writeTestFile(t, filepath.Join(outside, "secret.md"), "TOP-SECRET-OUTSIDE")
+	escape := filepath.Join(repo, "AGENTS.md")
+	symlinkOrSkip(t, filepath.Join(outside, "secret.md"), escape)
+	if got := prompt.Instructions(home, cwd); strings.Contains(got, "TOP-SECRET-OUTSIDE") || !strings.Contains(got, ">HOME</instructions>") {
+		t.Fatalf("relative home containment failed: %s", got)
 	}
 }

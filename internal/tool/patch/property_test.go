@@ -352,18 +352,52 @@ func TestMaskerUnmasksLocatorAndBody(t *testing.T) {
 func TestMaskerLeavesPathsAndPreservesJSON(t *testing.T) {
 	env, cwd := editTestEnv(t)
 	path := "literal-{{secret}}.txt"
-	secret := "a\"b\\c\n"
-	writeFixture(t, cwd, path, secret)
-	env.Masker = quoteMasker{secret: secret}
+	masked := "a&b'c #d]e"
+	writeFixture(t, cwd, path, masked)
+	env.Masker = quoteMasker{secret: masked}
 	input := `{"changes":[{"path":` + snapshot.JSONString(path) + `,"old":"{{secret}}","new":"new-{{secret}}"}]}`
 	if _, err := runPatch(t, env, Replace, input); err != nil {
 		t.Fatal(err)
 	}
-	if actual := readFixture(t, cwd, path); actual != "new-"+secret {
+	if actual := readFixture(t, cwd, path); actual != "new-"+masked {
 		t.Fatalf("masked quoted secret result %q", actual)
 	}
-	if _, err := os.Stat(filepath.Join(cwd, "literal-"+secret+".txt")); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(cwd, "literal-"+masked+".txt")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("path text was unmasked")
+	}
+	checkHostileMaskerRoundTrip(t)
+}
+
+func checkHostileMaskerRoundTrip(t *testing.T) {
+	t.Helper()
+	hostileSecret := "a\"b\\c\n"
+	encoded := snapshot.JSONString(hostileSecret)
+	decoded, decodeErr := jsonString(jsontext.Value(encoded))
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if decoded != hostileSecret {
+		t.Fatalf("hostile JSON %q, want %q", decoded, hostileSecret)
+	}
+	hostileInput := `{"changes":[{"path":` + snapshot.JSONString("literal-{{secret}}.txt") + `,"old":"{{secret}}","new":"new-{{secret}}"}]}`
+	hostileEdits, parseErr := parse(Replace, hostileInput)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	if len(hostileEdits) != 1 {
+		t.Fatalf("hostile edits %d, want 1", len(hostileEdits))
+	}
+	if unmaskErr := unmaskEdits(hostileEdits, quoteMasker{secret: hostileSecret}.UnmaskStrict); unmaskErr != nil {
+		t.Fatal(unmaskErr)
+	}
+	if hostileEdits[0].path != "literal-{{secret}}.txt" {
+		t.Fatalf("hostile path %q was unmasked", hostileEdits[0].path)
+	}
+	if hostileEdits[0].locator.old != hostileSecret {
+		t.Fatalf("hostile old %q, want %q", hostileEdits[0].locator.old, hostileSecret)
+	}
+	if hostileEdits[0].body != "new-"+hostileSecret {
+		t.Fatalf("hostile new %q, want %q", hostileEdits[0].body, "new-"+hostileSecret)
 	}
 }
 

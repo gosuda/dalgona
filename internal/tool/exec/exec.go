@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
@@ -63,7 +64,7 @@ func (t *Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Resu
 		ID:      call.ID,
 		Argv:    shellArgvFor(env.Runner, command),
 		Dir:     cwd,
-		Sandbox: runner.Sandbox{Mode: mode, WritableRoots: env.Sandbox.WritableRoots},
+		Sandbox: runner.Sandbox{Mode: mode, WritableRoots: env.Sandbox.WritableRoots, DeniedSockets: env.Sandbox.DeniedSockets},
 	}
 	if err := env.Runner.Start(ctx, spec); err != nil {
 		return tool.Result{}, fmt.Errorf("exec: start: %w", err)
@@ -225,43 +226,91 @@ func resolveExistingLink(path string) string {
 	}
 }
 
+const execOutputKeep = 64 * 1024
+
 type waitState struct {
-	output []byte
+	tail   []byte
+	total  int64
 	offset int64
 	path   string
 }
 
+func (s *waitState) appendOutput(data []byte) {
+	s.total += int64(len(data))
+	keep := data
+	if len(keep) > execOutputKeep {
+		keep = keep[len(keep)-execOutputKeep:]
+	}
+	s.tail = append(s.tail, keep...)
+	if len(s.tail) > execOutputKeep {
+		copy(s.tail, s.tail[len(s.tail)-execOutputKeep:])
+		s.tail = s.tail[:execOutputKeep]
+	}
+}
+
+func projectBounded(tail []byte, total int64, spill string) (string, bool) {
+	if total <= execOutputKeep {
+		return string(tail), false
+	}
+	window := trimTailStart(tail)
+	return string(window) + "\n[output truncated: " + strconv.FormatInt(total, 10) + " bytes total; full output: " + spill + "; page it with read offset/limit]", true
+}
+
+func trimTailStart(data []byte) []byte {
+	index := 0
+	for index < len(data) && index < utf8.UTFMax-1 && !utf8.RuneStart(data[index]) {
+		index++
+	}
+	return data[index:]
+}
+
 func (t *Tool) wait(ctx context.Context, run runner.Runner, id string, timeout time.Duration) (tool.Result, error) {
-	waitCtx, cancel := context.WithTimeoutCause(ctx, timeout, fmt.Errorf("exec: timed out after %s", timeout))
+	timeoutErr := fmt.Errorf("exec: timed out after %s", timeout)
+	waitCtx, cancel := context.WithTimeoutCause(ctx, timeout, timeoutErr)
 	defer cancel()
 	state := waitState{}
 	delay := 10 * time.Millisecond
 	for {
-		current, err := run.Read(waitCtx, id, state.offset)
-		if err != nil {
-			return t.terminate(run, id, state, err)
+		current, readErr := run.Read(waitCtx, id, state.offset)
+		if readErr != nil {
+			readErr = timeoutCauseOr(readErr, waitCtx, ctx)
+			return t.terminate(run, id, state, readErr)
 		}
-		state.output = append(state.output, current.Data...)
+		state.appendOutput(current.Data)
 		state.offset = current.Next
 		state.path = current.Path
 		if current.Exit != nil {
 			return projectedResult(state, current.Exit), nil
 		}
-		if err := sleep(waitCtx, delay); err != nil {
-			if context.Cause(waitCtx) != nil {
-				err = context.Cause(waitCtx)
+		sleepErr := sleep(waitCtx, delay)
+		if sleepErr != nil {
+			if cause := context.Cause(waitCtx); cause != nil {
+				sleepErr = cause
 			}
-			return t.terminate(run, id, state, err)
+			return t.terminate(run, id, state, sleepErr)
 		}
 		delay = min(delay*2, 100*time.Millisecond)
 	}
+}
+
+func timeoutCauseOr(readErr error, waitCtx context.Context, parent context.Context) error {
+	if parent.Err() != nil {
+		return readErr
+	}
+	if waitCtx.Err() == nil {
+		return readErr
+	}
+	if !errors.Is(readErr, context.DeadlineExceeded) && !errors.Is(readErr, context.Canceled) {
+		return readErr
+	}
+	return context.Cause(waitCtx)
 }
 
 func (t *Tool) terminate(run runner.Runner, id string, state waitState, cause error) (tool.Result, error) {
 	termErr := signalProcess(run, id, runner.SignalTerm)
 	current, waitErr := t.awaitExit(run, id, state.offset, termErr)
 	if current.Path != "" {
-		state.output = append(state.output, current.Data...)
+		state.appendOutput(current.Data)
 		state.offset = current.Next
 		state.path = current.Path
 	}
@@ -304,7 +353,7 @@ func signalProcess(run runner.Runner, id string, signal runner.Signal) error {
 }
 
 func projectedResult(state waitState, exit *runner.Exit) tool.Result {
-	projection, _ := tool.Project(state.output, tool.KeepTail, state.path)
+	projection, _ := projectBounded(state.tail, state.total, state.path)
 	result := tool.Result{Output: []byte(projection), OK: false, Path: state.path}
 	if exit != nil {
 		result.OK = exit.Code == 0
@@ -335,7 +384,7 @@ func shellArgvForHost(run runner.Runner, hostGOOS, command string) []string {
 		return []string{"sh", "-c", command}
 	}
 	if hostGOOS == "windows" {
-		return []string{"cmd", "/C", command}
+		return runner.WindowsShellArgv(command)
 	}
 	return []string{"sh", "-c", command}
 }

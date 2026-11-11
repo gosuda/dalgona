@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -11,17 +12,24 @@ import (
 )
 
 type preparedInput struct {
-	kind     InputKind
-	text     string
-	textBlob *event.BlobRef
-	notices  []event.Notice
-	mentions []event.Mention
-	effort   string
-	settings Settings
-	verbatim bool
+	kind           InputKind
+	text           string
+	textBlob       *event.BlobRef
+	notices        []event.Notice
+	mentions       []event.Mention
+	effort         string
+	settings       Settings
+	verbatim       bool
+	expectedTurnID string
 }
 
 func (t *Thread) Submit(ctx context.Context, in Input) error {
+	if err := t.rejectStaleSteer(in); err != nil {
+		return err
+	}
+	if err := t.ensureTools(ctx); err != nil {
+		return err
+	}
 	prepared, err := t.prepareInput(in)
 	if err != nil {
 		return err
@@ -30,6 +38,18 @@ func (t *Thread) Submit(ctx context.Context, in Input) error {
 		return err
 	}
 	return askErr(t, func(a *actor) error { return a.submit(prepared) })
+}
+
+func (t *Thread) rejectStaleSteer(in Input) error {
+	kind := cmp.Or(in.Kind, InputPrompt)
+	if kind != InputSteer {
+		return nil
+	}
+	turnID, err := ask(t, func(a *actor) string { return a.state.TurnID })
+	if err != nil {
+		return err
+	}
+	return checkSteerTarget(turnID, preparedInput{kind: kind, expectedTurnID: in.ExpectedTurnID})
 }
 
 func (t *Thread) prepareInput(in Input) (preparedInput, error) {
@@ -47,7 +67,8 @@ func (t *Thread) prepareInput(in Input) (preparedInput, error) {
 	}
 	out := preparedInput{
 		kind: kind, text: text, textBlob: blob, effort: in.Effort, verbatim: in.Verbatim,
-		settings: Settings{Model: in.Model, Approval: in.Approval, Sandbox: in.Sandbox},
+		settings:       Settings{Model: in.Model, Approval: in.Approval, Sandbox: in.Sandbox},
+		expectedTurnID: in.ExpectedTurnID,
 	}
 	if in.Verbatim {
 		return out, nil
@@ -56,8 +77,12 @@ func (t *Thread) prepareInput(in Input) (preparedInput, error) {
 }
 
 func (t *Thread) annotate(out *preparedInput, text string) error {
-	for _, word := range keywords.Match(text, t.host.keywords, t.currentTools().names) {
-		noticeText, noticeBlob, err := t.host.textPayload(word.Notice)
+	for _, word := range keywords.Match(text, t.host.keywords, t.toolNames()) {
+		maskedNotice, err := t.host.mask(word.Notice)
+		if err != nil {
+			return err
+		}
+		noticeText, noticeBlob, err := t.host.textPayload(maskedNotice)
 		if err != nil {
 			return err
 		}
@@ -77,9 +102,22 @@ func (t *Thread) annotate(out *preparedInput, text string) error {
 	return nil
 }
 
+func checkSteerTarget(turnID string, in preparedInput) error {
+	if in.kind != InputSteer {
+		return nil
+	}
+	if turnID == "" || (in.expectedTurnID != "" && turnID != in.expectedTurnID) {
+		return turnNotRunningError(in.expectedTurnID)
+	}
+	return nil
+}
+
 func (a *actor) submit(in preparedInput) error {
 	if a.state.Archived {
 		return archivedError(a.t.id)
+	}
+	if err := checkSteerTarget(a.state.TurnID, in); err != nil {
+		return err
 	}
 	message := event.UserMessage{
 		ItemID: newID("item-"), Text: in.text, TextBlob: in.textBlob, Kind: string(in.kind),

@@ -25,6 +25,9 @@ func mustOpen(t *testing.T, dir string) *Store {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
 	return store
 }
 
@@ -94,40 +97,111 @@ func journalFile(dir string) string {
 
 func TestJournalTruncatedTail(t *testing.T) {
 	rng := rand.New(rand.NewPCG(42, 42))
-	for caseID := range 500 {
+	fixtures := make(map[int]string, 12)
+	for count := 1; count <= 12; count++ {
+		fixtures[count] = buildTruncFixture(t, count)
+	}
+	specs := make([]truncSpec, 500)
+	for i := range specs {
+		specs[i] = planTruncCase(t, rng, fixtures)
+	}
+	sem := make(chan struct{}, 8)
+	for caseID, spec := range specs {
 		t.Run(fmt.Sprintf("case-%d", caseID), func(t *testing.T) {
-			dir := t.TempDir()
-			store := mustOpen(t, dir)
-			events := appendEvents(t, store, "s", 1+rng.IntN(12))
-			closeStore(t, store)
-			path := journalFile(dir)
-			original := readFile(t, path)
-			starts := lineStarts(original)
-			line := rng.IntN(len(events))
-			start := starts[line]
-			end := start + bytes.IndexByte(original[start:], '\n')
-			offset := start + 1 + rng.IntN(end-start-1)
-			writeFile(t, path, original[:offset])
-			deleteMirrorFrom(t, dir, line+1)
-
-			store = mustOpen(t, dir)
-			got := replayEvents(t, store, "s")
-			requireEvents(t, got, events[:line])
-			seq, err := store.Append(context.Background(), "s", event(99))
-			if err != nil {
-				t.Fatalf("Append after repair: %v", err)
-			}
-			if got, want := strconv.FormatUint(seq, 10), strconv.Itoa(line+1); got != want {
-				t.Fatalf("next seq = %s, want %s", got, want)
-			}
-			quarantine := filepath.Join(dir, "quarantine", fmt.Sprintf("s-%d.bin", start))
-			if !bytes.Equal(readFile(t, quarantine), original[start:offset]) {
-				t.Fatal("quarantined tail differs from removed bytes")
-			}
-			closeStore(t, store)
+			t.Parallel()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			runTruncCase(t, fixtures[spec.count], spec)
 		})
 	}
 	t.Run("committed-suffix", testCommittedSuffix)
+}
+
+type truncSpec struct {
+	count  int
+	line   int
+	offset int
+}
+
+func buildTruncFixture(t *testing.T, count int) string {
+	t.Helper()
+	dir := t.TempDir()
+	store := mustOpen(t, dir)
+	appendEvents(t, store, "s", count)
+	closeStore(t, store)
+	return dir
+}
+
+func planTruncCase(t *testing.T, rng *rand.Rand, fixtures map[int]string) truncSpec {
+	t.Helper()
+	count := 1 + rng.IntN(12)
+	original := readFile(t, journalFile(fixtures[count]))
+	starts := lineStarts(original)
+	line := rng.IntN(count)
+	start := starts[line]
+	end := start + bytes.IndexByte(original[start:], '\n')
+	offset := start + 1 + rng.IntN(end-start-1)
+	return truncSpec{count: count, line: line, offset: offset}
+}
+
+func runTruncCase(t *testing.T, fixture string, spec truncSpec) {
+	t.Helper()
+	dir := t.TempDir()
+	copyDir(t, fixture, dir)
+	path := journalFile(dir)
+	original := readFile(t, path)
+	start := lineStarts(original)[spec.line]
+	t.Logf("count=%d line=%d offset=%d start=%d", spec.count, spec.line, spec.offset, start)
+	writeFile(t, path, original[:spec.offset])
+	deleteMirrorFrom(t, dir, spec.line+1)
+	store := mustOpen(t, dir)
+	events := make([][]byte, spec.count)
+	for i := range events {
+		events[i] = event(i)
+	}
+	got := replayEvents(t, store, "s")
+	requireEvents(t, got, events[:spec.line])
+	seq, err := store.Append(context.Background(), "s", event(99))
+	if err != nil {
+		t.Fatalf("Append after repair: %v", err)
+	}
+	if got, want := strconv.FormatUint(seq, 10), strconv.Itoa(spec.line+1); got != want {
+		t.Fatalf("next seq = %s, want %s", got, want)
+	}
+	quarantine := filepath.Join(dir, "quarantine", fmt.Sprintf("s-%d.bin", start))
+	if !bytes.Equal(readFile(t, quarantine), original[start:spec.offset]) {
+		t.Fatal("quarantined tail differs from removed bytes")
+	}
+	closeStore(t, store)
+}
+
+func copyDir(t *testing.T, src, dst string) {
+	t.Helper()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, entry := range entries {
+		s := filepath.Join(src, entry.Name())
+		d := filepath.Join(dst, entry.Name())
+		if entry.IsDir() {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			copyDir(t, s, d)
+			continue
+		}
+		if !entry.Type().IsRegular() {
+			t.Fatalf("copy %s: not a regular file", s)
+		}
+		data, err := os.ReadFile(s)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		if err := os.WriteFile(d, data, 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
 }
 
 func testCommittedSuffix(t *testing.T) {

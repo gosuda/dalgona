@@ -87,16 +87,28 @@ func countLines(lines []string, parts ...string) int {
 	return count
 }
 
+func shortDaemonHome(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dalgona-home-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestRunWorkflowExecsTwiceThroughTheDaemon(t *testing.T) {
-	home, work := t.TempDir(), t.TempDir()
-	t.Setenv("HOME", t.TempDir())
+	home, work := shortDaemonHome(t), t.TempDir()
+	userHome := t.TempDir()
+	t.Setenv("HOME", userHome)
+	t.Setenv("USERPROFILE", userHome)
 	t.Setenv("DALGONA_HOME", home)
 	config := "model = \"openai/gpt-test\"\napproval = \"yolo\"\nsandbox = \"off\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	workflow := "a = ctx.tools.exec(command = \"printf one-%d\" % args[\"n\"])\n" +
-		"b = ctx.tools.exec(command = \"printf two\")\nprint(a)\nprint(b)\n{\"n\": args[\"n\"], \"label\": args[\"label\"]}\n"
+	workflow := "a = ctx.tools.exec(command = \"echo one-%d\" % args[\"n\"])\n" +
+		"b = ctx.tools.exec(command = \"echo two\")\nprint(a)\nprint(b)\n{\"n\": args[\"n\"], \"label\": args[\"label\"]}\n"
 	if err := os.WriteFile(filepath.Join(work, "flow.star"), []byte(workflow), 0o600); err != nil {
 		t.Fatal(err)
 	}

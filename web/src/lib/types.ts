@@ -116,6 +116,7 @@ export interface TranscriptState {
 	readonly items: readonly TranscriptItem[];
 	readonly error: string | null;
 	readonly plan: TurnPlan | null;
+	readonly childThreadIds: readonly string[];
 }
 
 export type AdvisorStatus = "idle" | "reviewing" | "halted" | "disabled";
@@ -177,6 +178,11 @@ export type AppNotification =
 			readonly steps: readonly PlanStep[];
 	  }
 	| { readonly type: "advisorNote"; readonly threadId: string }
+	| {
+			readonly type: "childSpawned";
+			readonly threadId: string;
+			readonly childId: string;
+	  }
 	| { readonly type: "requestResolved"; readonly requestId: RequestId };
 
 export interface ModelOption {

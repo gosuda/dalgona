@@ -15,14 +15,23 @@ func mustChmod(t *testing.T, path string, mode os.FileMode) {
 	}
 }
 
-func checkModes(t *testing.T, cwd string, wants map[string]int) {
+func recordedMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
+}
+
+func checkModes(t *testing.T, cwd string, wants map[string]os.FileMode) {
 	t.Helper()
 	for path, want := range wants {
 		info, err := os.Stat(filepath.Join(cwd, path))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if int(info.Mode().Perm()) != want {
+		if info.Mode().Perm() != want {
 			t.Fatalf("%s mode = %o, want %o", path, info.Mode().Perm(), want)
 		}
 	}
@@ -38,8 +47,10 @@ func TestRecoverEditRestoresFileMode(t *testing.T) {
 	h.write("run.sh", scriptPost)
 	h.write("secret.txt", secretPost)
 	h.write("other.txt", "foreign\n")
-	mustChmod(t, filepath.Join(h.cwd, "run.sh"), 0o755) //nolint:gosec // test requires the exec bit to prove mode preservation
+	mustChmod(t, filepath.Join(h.cwd, "run.sh"), 0o755)
 	mustChmod(t, filepath.Join(h.cwd, "secret.txt"), 0o600)
+	runMode := recordedMode(t, filepath.Join(h.cwd, "run.sh"))
+	secretMode := recordedMode(t, filepath.Join(h.cwd, "secret.txt"))
 	script := h.fileChange("run.sh", scriptPre, scriptPost)
 	secret := h.fileChange("secret.txt", secretPre, secretPost)
 	other := h.fileChange("other.txt", "other-old\n", "other-new\n")
@@ -56,7 +67,7 @@ func TestRecoverEditRestoresFileMode(t *testing.T) {
 	if h.read("secret.txt") != secretPre {
 		t.Fatalf("secret.txt = %q", h.read("secret.txt"))
 	}
-	checkModes(t, h.cwd, map[string]int{"run.sh": 0o755, "secret.txt": 0o600})
+	checkModes(t, h.cwd, map[string]os.FileMode{"run.sh": runMode, "secret.txt": secretMode})
 	if h.read("other.txt") != "foreign\n" {
 		t.Fatalf("other.txt = %q", h.read("other.txt"))
 	}

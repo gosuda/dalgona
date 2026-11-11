@@ -59,6 +59,9 @@ func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result,
 		if killErr := env.Runner.Signal(killCtx, id, runner.SignalKill); killErr != nil {
 			return tool.Result{}, errors.Join(err, fmt.Errorf("search: kill subprocess: %w", killErr))
 		}
+		if waitErr := waitExit(env.Runner, id); waitErr != nil {
+			return tool.Result{}, errors.Join(err, waitErr)
+		}
 		return tool.Result{}, err
 	}
 	result, err := decodeOutcome(data)
@@ -94,6 +97,27 @@ func collect(ctx context.Context, run runner.Runner, id string) ([]byte, error) 
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
+	}
+}
+
+const exitGrace = 5 * time.Second
+
+func waitExit(run runner.Runner, id string) error {
+	deadline := time.Now().Add(exitGrace)
+	for {
+		readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		state, readErr := run.Read(readCtx, id, 0)
+		cancel()
+		if readErr == nil && state.Exit != nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if readErr != nil {
+				return fmt.Errorf("search: wait for subprocess exit: %w", readErr)
+			}
+			return errors.New("search: subprocess did not exit")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

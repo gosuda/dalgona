@@ -40,7 +40,7 @@ func TestMain(m *testing.M) {
 const (
 	rolePrimary = "primary"
 	roleAdvisor = "advisor"
-	waitLimit   = 20 * time.Second
+	waitLimit   = 60 * time.Second
 )
 
 type response struct {

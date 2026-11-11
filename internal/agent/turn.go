@@ -185,7 +185,14 @@ func failure(ctx context.Context, err error) outcome {
 	return outcome{status: statusFailed, failure: err.Error()}
 }
 
+func (w *worker) consumeInBandCancel() {
+	if w.inBand != nil && w.inBand.takeCancel() {
+		w.interruptTurn()
+	}
+}
+
 func (w *worker) step(ctx context.Context, v view, messages []model.Message) error {
+	defer w.consumeInBandCancel()
 	compacted, err := w.autoCompact(ctx, v)
 	if err != nil || compacted {
 		return err
@@ -209,9 +216,7 @@ func (w *worker) callRound(ctx context.Context, calls []event.ToolCall) error {
 	if err != nil {
 		return err
 	}
-	if w.inBand.takeCancel() {
-		w.interruptTurn()
-	}
+	w.consumeInBandCancel()
 	if err = w.runCalls(ctx, pending); err != nil {
 		return err
 	}

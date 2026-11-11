@@ -13,6 +13,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
 func reasoningEffort(request map[string]any) any {
@@ -88,7 +89,7 @@ func TestRecordRunnerBoundOnceAndForkCarriesIt(t *testing.T) {
 func TestSteerDuringToolRidesTheNextRequest(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, withApproval(config.ApprovalYolo))
-	h.model.push(calls(call{id: "c1", name: "exec", args: `{"command":"sleep 0.5"}`}), text("done with beta"))
+	h.model.push(calls(call{id: "c1", name: "exec", args: `{"command":"` + holdCommand(1) + `"}`}), text("done with beta"))
 	thread := h.start()
 	h.submit(thread, "run it")
 	h.waitEvent(thread.ID(), func(e event.Event) bool {
@@ -238,9 +239,12 @@ func TestToolsAndSkillsFollowTheThreadCwd(t *testing.T) {
 		}
 	})
 	other := t.TempDir()
-	if _, err := h.host.Start(t.Context(), ThreadSpec{Cwd: other}); err != nil {
+	thread, err := h.host.Start(t.Context(), ThreadSpec{Cwd: other})
+	if err != nil {
 		t.Fatal(err)
 	}
+	h.submit(thread, "hi")
+	h.waitIdle(thread)
 	mu.Lock()
 	defer mu.Unlock()
 	if !slices.Equal(toolCwds, []string{other}) || !slices.Equal(skillCwds, []string{other}) {
@@ -253,7 +257,7 @@ func TestTaskAdvisorOptInCallsTheChildHook(t *testing.T) {
 	var mu sync.Mutex
 	var attached []string
 	h := newHarness(t, func(h *harness) {
-		h.cfg.OnChildStarted = func(child *Thread) {
+		h.cfg.OnChildStarted = func(child *Thread, _ task.Request) {
 			mu.Lock()
 			defer mu.Unlock()
 			attached = append(attached, child.created.Parent)

@@ -11,6 +11,8 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -177,6 +179,7 @@ var rpcMethods = map[string]func(context.Context, *Local, jsontext.Value) (jsont
 	"process/terminate": rpcTerminate,
 	"fs/readFile":       rpcReadFile,
 	"fs/writeFile":      rpcWriteFile,
+	"fs/rename":         rpcRename,
 	"fs/getMetadata":    rpcMetadata,
 	"fs/readDirectory":  rpcReadDir,
 	"fs/remove":         rpcRemove,
@@ -278,6 +281,78 @@ func rpcWriteFile(ctx context.Context, local *Local, params jsontext.Value) (jso
 		return nil, fmt.Errorf("runner: sync filesystem: %w", syncErr)
 	}
 	return emptyObject(), nil
+}
+
+func rpcRename(ctx context.Context, _ *Local, params jsontext.Value) (jsontext.Value, error) {
+	from, to, err := decodeRenameParams(params)
+	if err != nil {
+		return nil, err
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, fmt.Errorf("runner: rename: %w", err)
+	}
+	if err = publishStagedRename(from, to); err != nil {
+		return nil, err
+	}
+	if err := syncDir(filepath.Dir(to)); err != nil {
+		return nil, fmt.Errorf("runner: sync parent: %w", err)
+	}
+	if syncErr := syncFS(); syncErr != nil {
+		return nil, fmt.Errorf("runner: sync filesystem: %w", syncErr)
+	}
+	return emptyObject(), nil
+}
+
+func publishStagedRename(from, to string) error {
+	info, err := os.Lstat(from)
+	if err != nil {
+		return fmt.Errorf("runner: rename %s: %w", from, err)
+	}
+	if err := publishReplace(from, to, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("runner: rename %s: %w", from, err)
+	}
+	if from != to {
+		if _, err := os.Lstat(from); err == nil {
+			if err := os.Remove(from); err != nil {
+				return fmt.Errorf("runner: remove staged file %s: %w", from, err)
+			}
+		}
+	}
+	return nil
+}
+
+func decodeRenameParams(params jsontext.Value) (string, string, error) {
+	fields, err := paramsFields(params)
+	if err != nil {
+		return "", "", err
+	}
+	from, err := fieldString(fields, "from")
+	if err != nil {
+		return "", "", err
+	}
+	to, err := fieldString(fields, "to")
+	if err != nil {
+		return "", "", err
+	}
+	return from, to, nil
+}
+
+func encodeRenameParams(from, to string) (jsontext.Value, error) {
+	var buf bytes.Buffer
+	enc := jsontext.NewEncoder(&buf)
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return nil, err
+	}
+	if err := writeString(enc, "from", from); err != nil {
+		return nil, err
+	}
+	if err := writeString(enc, "to", to); err != nil {
+		return nil, err
+	}
+	if err := enc.WriteToken(jsontext.EndObject); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func rpcMetadata(ctx context.Context, local *Local, params jsontext.Value) (jsontext.Value, error) {

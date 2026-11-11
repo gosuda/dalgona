@@ -16,5 +16,18 @@ func TestMain(m *testing.M) {
 		_, _ = fmt.Fprint(os.Stdout, os.Args[0])
 		os.Exit(0)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "__print-cwd" {
+		os.Exit(printCwd())
+	}
 	os.Exit(m.Run())
+}
+
+func printCwd() int {
+	dir, err := os.Getwd()
+	if err != nil {
+		_, _ = fmt.Fprint(os.Stderr, err)
+		return 1
+	}
+	_, _ = fmt.Fprint(os.Stdout, dir)
+	return 0
 }

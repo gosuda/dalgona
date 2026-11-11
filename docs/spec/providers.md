@@ -62,6 +62,8 @@ Stop reasons MUST use `stop`, `length`, or `toolUse`. Provider safety, refusal, 
 
 Google SSE data MAY contain one response object or an array of response objects. Only the first candidate MUST produce events.
 
+When Google returns a function call without an id, or with an id the decoder already saw, the decoder MUST generate an id with a decoder-unique prefix. A first-seen provider-supplied id MUST stay unchanged.
+
 The stream MUST stop when its context is canceled. A consumer MAY use `Next` or range over `Events`. The event queue MUST remain bounded. `Emit` after `Finish` MUST return false and MUST NOT send. An SSE read that ends on cancel, start timeout, or idle timeout MUST close the body and MUST wait for its reader goroutine before it returns. When the reader had already reached a clean end of stream, the read MUST return success.
 
 ## Capabilities and roles

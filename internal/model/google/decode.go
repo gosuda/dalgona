@@ -3,6 +3,7 @@ package google
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ type Decoder struct {
 	freeform   map[string]bool
 	ids        map[string]bool
 	counter    int
+	prefix     string
 	sawTool    bool
 	sawContent bool
 	done       bool
@@ -167,7 +169,10 @@ func (s *Decoder) emitTool(call functionCall, signature string) error {
 	s.counter++
 	id := call.ID
 	if id == "" || s.ids[id] {
-		id = fmt.Sprintf("%s_%d", call.Name, s.counter)
+		if s.prefix == "" {
+			s.prefix = rand.Text()
+		}
+		id = fmt.Sprintf("%s_%s_%d", call.Name, s.prefix, s.counter)
 	}
 	s.ids[id] = true
 	args := call.Args

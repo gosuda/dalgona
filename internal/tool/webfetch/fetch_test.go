@@ -165,3 +165,7 @@ func (r *remoteRunner) Start(_ context.Context, spec runner.ProcessSpec) error {
 func (r *remoteRunner) Read(_ context.Context, _ string, _ int64) (runner.Output, error) {
 	return r.output, nil
 }
+
+func (r *remoteRunner) Signal(_ context.Context, _ string, _ runner.Signal) error {
+	return nil
+}

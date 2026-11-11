@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +20,13 @@ import (
 	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/tool"
 )
+
+func holdCommand(seconds int) string {
+	if runtime.GOOS == "windows" {
+		return "ping -n " + strconv.Itoa(seconds+1) + " 127.0.0.1 >nul"
+	}
+	return "sleep " + strconv.Itoa(seconds)
+}
 
 func (h *harness) waitEvent(id string, match func(event.Event) bool) {
 	h.t.Helper()
@@ -36,7 +45,7 @@ func TestInterruptDuringBatchSkipsUnstartedCalls(t *testing.T) {
 	h := newHarness(t, withApproval(config.ApprovalYolo))
 	h.write("a.txt", "a\n")
 	h.model.push(calls(
-		call{id: "c1", name: "exec", args: `{"command":"sleep 30"}`},
+		call{id: "c1", name: "exec", args: `{"command":"` + holdCommand(30) + `"}`},
 		call{id: "c2", name: "read", args: `{"path":"a.txt"}`},
 		call{id: "c3", name: "read", args: `{"path":"a.txt"}`},
 	), text("resumed"))

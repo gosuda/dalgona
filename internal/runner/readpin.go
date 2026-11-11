@@ -25,6 +25,9 @@ func checkPinnedRel(rel string) (string, error) {
 	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("%w: %s", ErrPinnedEscape, rel)
 	}
+	if strings.HasPrefix(clean, "/") || strings.HasPrefix(clean, string(filepath.Separator)) || filepath.VolumeName(clean) != "" {
+		return "", fmt.Errorf("%w: %s", ErrPinnedEscape, rel)
+	}
 	return clean, nil
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/gosuda/dalgona/internal/tool/patch"
 	"github.com/gosuda/dalgona/internal/tool/read"
 	"github.com/gosuda/dalgona/internal/tool/search"
+	"github.com/gosuda/dalgona/internal/tool/task"
 	"github.com/gosuda/dalgona/internal/tool/todo"
 	"github.com/gosuda/dalgona/internal/tool/webfetch"
 )
@@ -175,12 +176,16 @@ func newAdvisors(registry *advisor.Registry, logger *slog.Logger) *advisors {
 	return &advisors{registry: registry, log: cmp.Or(logger, slog.Default())}
 }
 
-func (a *advisors) attach(child *agent.Thread) {
+func (a *advisors) attach(child *agent.Thread, req task.Request) {
 	host := a.host.Load()
 	if host == nil {
 		return
 	}
-	if _, err := a.registry.AttachChild(context.Background(), host, child); err != nil {
+	attach := a.registry.Attach
+	if req.Advisor {
+		attach = a.registry.AttachChild
+	}
+	if _, err := attach(context.Background(), host, child); err != nil {
 		a.log.Error("advisor: attach", "thread", child.ID(), "error", err)
 	}
 }

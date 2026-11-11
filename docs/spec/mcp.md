@@ -22,7 +22,7 @@ A stdio request MUST finish within five minutes unless its caller sets an earlie
 
 A process crash MUST invalidate the transport. The client MUST restart the process, repeat initialization, and retry the interrupted request once. The client MUST return the second failure without another retry.
 
-Closing the client MUST close standard input, terminate the whole process group, and reap the direct child. The transport MUST bound pipe waits with WaitDelay so a grandchild holding stdout cannot hang Close.
+Closing the client MUST close standard input, terminate the whole process group, and reap the direct child. Terminating a child that already exited MUST succeed. The transport MUST bound pipe waits with WaitDelay so a grandchild holding stdout cannot hang Close.
 
 ## Streamable HTTP transport
 
@@ -55,3 +55,7 @@ Text blocks MUST produce their text. Image blocks MUST produce `[image <mimeType
 A workspace MCP server is any discovered server whose configuration file lives under the current working directory. Home and product-level servers are not workspace servers. The host MUST NOT start a workspace server process until the user trusts that workspace.
 
 The host MUST ask once per workspace, showing the workspace path with every server command, its arguments, and its env keys, through the same approval channel that asks about tool calls. Env entries reach the child process, so the `PATH` or `LD_PRELOAD` key MUST appear in the prompt when set, but every env value MUST appear only as `KEY=<redacted>` with no raw value in the summary, reason, commands, or RPC log. The `command` field MUST join one server line per server with newlines, not shell conjunctions. The workspace identity is the canonical path (`filepath.Abs` plus `EvalSymlinks`, falling back to `Clean`): the in-memory session map and `mcp_trusted_workspaces` MUST use this same form. An approval MUST persist the workspace in `mcp_trusted_workspaces` (see `config.md`) so a host restart keeps the trust. A refusal MUST hold for the session: the servers MUST stay stopped and the host MUST NOT ask again. While a workspace is untrusted, its servers MUST stay unstarted and their tools MUST stay absent. Home and product-level servers MUST start as before, without a trust prompt.
+
+Opening a thread MUST NOT ask for workspace trust. Discovery that needs approval MUST wait for the first turn, when the actor loop runs and a client can answer the prompt.
+When no thread is available for the approval channel, the host MUST cancel the trust request. The next turn MUST ask again.
+When a trust request ends without an answer, the host MUST discard its pending approval. A later answer for that request MUST fail as an unknown approval request.

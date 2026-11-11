@@ -169,6 +169,19 @@ func TestLocal_rejectsMismatchedProcessIdentity(t *testing.T) {
 	}
 }
 
+func TestWriteSpawnPID_rejectsUnavailableStartTime(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "run")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSpawnPID(runDir, 1<<30); err == nil {
+		t.Fatal("writeSpawnPID succeeded with an unavailable process start time")
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "pid")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("pid file state = %v, want absent", err)
+	}
+}
+
 func TestLocal_signalPreservesExitRecord(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
@@ -189,8 +202,8 @@ func TestLocal_signalBeforePIDPreventsStart(t *testing.T) {
 	env := append(os.Environ(), shimPauseEnvironment+"=pid:300ms")
 	startTestProcess(t, local, ProcessSpec{ID: "early", Argv: []string{"sh", "-c", "touch started; sleep 30"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
 	runDir := filepath.Join(dir, "runs", "early")
-	if _, err := os.Stat(filepath.Join(runDir, "pid")); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("pid existed before the signal: %v", err)
+	if _, err := os.Stat(filepath.Join(runDir, "pid")); err != nil {
+		t.Fatalf("parent did not write pid before the signal: %v", err)
 	}
 	if err := local.Signal(t.Context(), "early", SignalTerm); err != nil {
 		t.Fatal(err)
@@ -207,14 +220,14 @@ func TestLocal_signalBeforePIDPreventsStart(t *testing.T) {
 	}
 }
 
-func TestLocal_signalBeforeProcessGroupStopsCommand(t *testing.T) {
+func TestLocal_signalBeforeGroupReturnsNilAndEndsTerminated(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
-	env := append(os.Environ(), shimPauseEnvironment+"=start:400ms")
+	env := append(os.Environ(), shimPauseEnvironment+"=start:5s")
 	startTestProcess(t, local, ProcessSpec{ID: "starting", Argv: []string{"sh", "-c", "sleep 30 & wait"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
 	runDir := filepath.Join(dir, "runs", "starting")
-	waitForFile(t, filepath.Join(runDir, "pid"), 5*time.Second)
-	time.Sleep(100 * time.Millisecond)
+	waitForFile(t, filepath.Join(runDir, "pid"), 10*time.Second)
+	time.Sleep(200 * time.Millisecond)
 	if _, err := os.Stat(filepath.Join(runDir, "pgid")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("pgid existed before the signal: %v", err)
 	}

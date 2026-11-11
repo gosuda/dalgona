@@ -65,6 +65,9 @@ func (c *inBandCalls) markCancel() {
 }
 
 func (c *inBandCalls) takeCancel() bool {
+	if c == nil {
+		return false
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cancelled := c.cancel
@@ -112,6 +115,18 @@ func (w *worker) inBandEvents(ctx context.Context, call model.ToolCall) (event.T
 	if err := ctx.Err(); err != nil {
 		return event.ToolCompleted{}, err
 	}
+	if w.inBand.takeCancel() {
+		w.inBand.markCancel()
+		toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: call.Args, Freeform: call.Freeform}
+		class := tool.ClassRemote
+		if w.tools != nil {
+			if item, ok := w.tools.byName[call.Name]; ok {
+				class = item.Class()
+			}
+		}
+		return w.denyInBand(ctx, toolCall, newID("req-"), inBandDenial{class: class, verdict: verdict{decision: "cancel", by: "user", reason: "cancelled by user", cancel: true}})
+	}
+
 	toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: call.Args, Freeform: call.Freeform}
 	requestID := newID("req-")
 	guard, err := w.prepareGuard(ctx, toolCall, requestID)
@@ -123,6 +138,7 @@ func (w *worker) inBandEvents(ctx context.Context, call model.ToolCall) (event.T
 	}
 	v, err := w.approveInBand(ctx, guard.p, guard.gc, requestID)
 	if err != nil {
+		guard.p.discardPlan()
 		return event.ToolCompleted{}, err
 	}
 	return w.resolveInBand(ctx, guard.p, toolCall, v)
@@ -138,6 +154,7 @@ func (w *worker) resolveInBand(ctx context.Context, p *prepared, toolCall event.
 	}
 	p.verdict = v
 	if err := w.start(ctx, p); err != nil {
+		p.discardPlan()
 		return event.ToolCompleted{}, err
 	}
 	return w.executeInBand(ctx, p)
@@ -185,9 +202,11 @@ func (w *worker) prepareGuard(ctx context.Context, toolCall event.ToolCall, requ
 	by := "mode:" + string(w.settings.Approval)
 	gc, gateErr := w.gateCall(ctx, p, requestID)
 	if gateErr != nil {
+		p.discardPlan()
 		return inBandGuard{gc: gc, denial: &inBandDenial{p.class, summary(gc), decline(by, gateErr.Error())}}, nil
 	}
 	if err := w.journalCover(ctx, toolCall); err != nil {
+		p.discardPlan()
 		return inBandGuard{}, err
 	}
 	return inBandGuard{p: p, gc: gc}, nil
@@ -219,6 +238,7 @@ func (w *worker) prepareInBand(toolCall event.ToolCall) (*prepared, *inBandDenia
 func (w *worker) executeInBand(ctx context.Context, p *prepared) (event.ToolCompleted, error) {
 	completed, err := w.execute(ctx, p)
 	if err != nil {
+		p.discardPlan()
 		return event.ToolCompleted{}, err
 	}
 	if _, err := w.t.appendEvents(context.WithoutCancel(ctx), completed); err != nil {
@@ -229,6 +249,9 @@ func (w *worker) executeInBand(ctx context.Context, p *prepared) (event.ToolComp
 }
 
 func (w *worker) denyInBand(ctx context.Context, call event.ToolCall, requestID string, denial inBandDenial) (event.ToolCompleted, error) {
+	if err := w.journalCover(ctx, call); err != nil {
+		return event.ToolCompleted{}, err
+	}
 	requested := event.ApprovalRequested{RequestID: requestID, CallID: call.ID, Summary: truncate(cmp.Or(denial.text, call.Name), summaryLimit), Class: classString(denial.class)}
 	if _, err := w.t.appendEvents(ctx, requested); err != nil {
 		return event.ToolCompleted{}, err

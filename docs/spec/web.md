@@ -31,6 +31,8 @@ The server MUST compare SHA-256 digests of the presented token and the expected 
 
 ## TLS
 
+A LAN address MUST use TLS. Without `CertFile` and `KeyFile`, startup MUST fail before it listens with `web: listening on <addr> needs cert_file and key_file for TLS`. `<addr>` is the configured listen address.
+
 When `CertFile` and `KeyFile` are both set, the server MUST serve TLS with `tls.VersionTLS13` as the minimum version.
 When only one of them is set, startup MUST fail with `web: cert_file and key_file must both be set`.
 A file that does not load MUST fail startup with an error that starts with `web: load cert_file and key_file: `.
@@ -39,13 +41,7 @@ A file that does not load MUST fail startup with an error that starts with `web:
 
 All output goes to the caller's writer. Each message is one line.
 
-On a LAN address without TLS, the server MUST write this line once, before the URL:
-
-```text
-web: the token travels unencrypted on <addr>; set cert_file and key_file to use TLS
-```
-
-The server MUST then write `http://<addr>/#token=<token>`, or `https://<addr>/#token=<token>` with TLS.
+The server MUST write `http://<addr>/#token=<token>`, or `https://<addr>/#token=<token>` with TLS.
 In both lines `<addr>` is the bound listener address. The token stays in the URL fragment, so a browser does not send it in page requests.
 
 ## RPC relay
@@ -91,6 +87,7 @@ The client in `web/` reads the token from the URL fragment and opens `/rpc`. It 
 ### Status bar
 
 The status bar shows the connection state as text. The turn state follows it as text: `Working`, `Turn completed`, `Turn interrupted`, or `Turn failed`.
+A `turnStarted` response for a turn already shown as `Turn completed`, `Turn interrupted`, or `Turn failed` MUST NOT replace that status or clear its error.
 
 It also shows model, approval, sandbox, runner, and advisor. The advisor entry comes from `dalgona/advisor/status`. The client loads it when a thread opens or starts, and again after each `dalgona/advisor/note` for the open thread. It shows one of:
 
@@ -112,6 +109,10 @@ No advisor failure opens the error banner.
 - A failed turn ends with `The turn failed: <message>. Send your message again to retry, or start a new thread.`
 - A turn that is retrying after an error shows `Retrying after an error: <message>`.
 - An interrupted turn shows `Turn interrupted. Send a message to continue.`
+
+### Approvals
+
+The client records child threads from `dalgona/thread/childSpawned`. An approval from a child of the open thread MUST appear in the approval dialog of the open thread. The answer MUST carry the child request id. An approval from any other thread MUST count as waiting on another thread. The client MUST keep child links per parent thread id when it rebuilds the transcript from `thread/resume` or `thread/read`. It MUST NOT apply links from another thread.
 
 ### Empty states and errors
 

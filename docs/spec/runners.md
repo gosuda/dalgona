@@ -36,7 +36,7 @@ box <box_id> was replaced; unpulled box changes are lost
 
 The binder MUST record `runner.bound` through `Recorder.RecordRunnerBound(ctx, threadID, bound)`. `*agent.Host` implements it by appending through the thread actor. With no recorder, binding MUST fail.
 
-Paths MUST map from the thread `cwd` to `/workspace`. `cwd` maps to `/workspace`. `cwd/a/b` maps to `/workspace/a/b`. An empty `ProcessSpec.Dir` maps to `/workspace`. Relative paths and paths outside `cwd` MUST pass through unchanged.
+Paths MUST map from the thread `cwd` to `/workspace`. `cwd` maps to `/workspace`. `cwd/a/b` maps to `/workspace/a/b`. An empty `ProcessSpec.Dir` maps to `/workspace`. Relative paths and paths outside `cwd` MUST pass through unchanged. Box path mapping MUST use POSIX path rules on every host.
 
 Every remote box runs Linux. The exec tool MUST build remote commands with `sh -c` and MUST keep `cmd /C` for local Windows execution only.
 

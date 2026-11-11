@@ -52,6 +52,7 @@ type TUIOptions struct {
 	Model          string
 	Approval       string
 	Sandbox        string
+	Cwd            string
 }
 
 // TUIBackend launches the interactive presentation layer. Command entry
@@ -420,9 +421,13 @@ func (env CLIEnv) interactive(ctx context.Context, f cliFlags) error {
 	if env.TUI == nil {
 		return errors.Join(errors.New("app: interactive terminal is not wired"), closeQuiet(conn))
 	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return errors.Join(err, closeQuiet(conn))
+	}
 	runErr := env.TUI(ctx, conn, TUIOptions{
 		OnStatus: env.OnStatus, OnChildSpawned: env.OnChildSpawned, Stdin: env.Stdin, Stdout: env.Stdout,
-		ThreadID: threadID, Model: f.model, Approval: f.approval, Sandbox: f.sandbox,
+		ThreadID: threadID, Model: f.model, Approval: f.approval, Sandbox: f.sandbox, Cwd: cwd,
 	})
 	return errors.Join(runErr, closeQuiet(conn))
 }

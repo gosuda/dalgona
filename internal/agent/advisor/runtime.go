@@ -84,13 +84,12 @@ func Attach(ctx context.Context, host *agent.Host, thread *agent.Thread, cfg con
 }
 
 func (r *Runtime) addAdvisors(ctx context.Context, host *agent.Host, info agent.ThreadInfo, cfg config.Config) error {
-	on := cfg.Advisor.Enabled && (info.Parent == "" || cfg.Advisor.Subagents)
 	for _, name := range slices.Sorted(maps.Keys(cfg.Advisors)) {
 		a, err := r.newAdvisor(ctx, host, info, cfg, name)
 		if err != nil {
 			return err
 		}
-		a.on = on
+		a.on = advisorOn(cfg, a.spec, info)
 		r.advisors = append(r.advisors, a)
 	}
 	for _, a := range r.advisors {
@@ -101,6 +100,24 @@ func (r *Runtime) addAdvisors(ctx context.Context, host *agent.Host, info agent.
 		}
 	}
 	return nil
+}
+
+func advisorOn(cfg config.Config, spec config.AdvisorSpec, info agent.ThreadInfo) bool {
+	if !cfg.Advisor.Enabled {
+		return false
+	}
+	if info.Parent == "" {
+		return true
+	}
+	on := cfg.Advisor.Subagents
+	switch spec.Subagents {
+	case config.AdvisorSubagentsOn:
+		on = true
+	case config.AdvisorSubagentsOff:
+		on = false
+	case config.AdvisorSubagentsInherit:
+	}
+	return on
 }
 
 func threadInfo(host *agent.Host, id string) (agent.ThreadInfo, bool) {

@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	shimExecEnvironment  = "DALGONA_SHIM_EXEC"
-	shimPauseEnvironment = "DALGONA_SHIM_TEST_PAUSE"
+	shimExecEnvironment      = "DALGONA_SHIM_EXEC"
+	shimPauseEnvironment     = "DALGONA_SHIM_TEST_PAUSE"
+	sandboxDeniedEnvironment = "DALGONA_SANDBOX_DENIED"
 )
 
 func ShimMain(args []string) int {
@@ -95,6 +96,7 @@ func startCommand(dir string, argv []string, out *os.File) (*exec.Cmd, func(), e
 	if err != nil {
 		return nil, nil, err
 	}
+	cmd.Env = stripDeniedEnvironment(cmd.Env)
 	if sandboxErr := configureSandbox(cmd, dir, currentSandbox()); sandboxErr != nil {
 		return nil, nil, fmt.Errorf("sandbox: %w", sandboxErr)
 	}
@@ -112,6 +114,10 @@ func startCommand(dir string, argv []string, out *os.File) (*exec.Cmd, func(), e
 	cleanup, err := assignJob(cmd)
 	if err != nil {
 		return nil, nil, abandonCommand(cmd, err)
+	}
+	if resumeErr := resumeCommand(cmd); resumeErr != nil {
+		cleanup()
+		return nil, nil, abandonCommand(cmd, resumeErr)
 	}
 	return cmd, cleanup, nil
 }
@@ -154,13 +160,19 @@ func commandForShim(argv []string) (*exec.Cmd, error) {
 	cmd.Dir = os.Getenv("DALGONA_RUN_CWD")
 	cmd.Env = shimEnv(os.Environ())
 	cmd.Args[0] = path
+	configureShimCommand(cmd, argv)
 	return cmd, nil
+}
+
+func WindowsShellArgv(command string) []string {
+	return []string{"cmd", "/C", command}
 }
 
 func currentSandbox() Sandbox {
 	return Sandbox{
 		Mode:          SandboxMode(os.Getenv("DALGONA_SANDBOX_MODE")),
 		WritableRoots: splitRoots(os.Getenv("DALGONA_SANDBOX_ROOTS")),
+		DeniedSockets: splitRoots(os.Getenv("DALGONA_SANDBOX_DENIED")),
 	}
 }
 
@@ -170,6 +182,10 @@ func writePID(dir string) error {
 	if start == "" {
 		return errors.New("runner: process start time is unavailable")
 	}
+	return writePIDFile(dir, pid, start)
+}
+
+func writePIDFile(dir string, pid int, start string) error {
 	data := []byte(strconv.Itoa(pid) + " " + start + "\n")
 	if err := writeAtomic(filepath.Join(dir, "pid"), data, 0o600); err != nil {
 		return fmt.Errorf("runner: write pid: %w", err)
@@ -278,12 +294,27 @@ func canonicalEnvironmentKey(key string) string {
 }
 
 func splitRoots(value string) []string {
+	if value == "" {
+		return nil
+	}
 	var roots []string
 	if err := json.Unmarshal([]byte(value), &roots); err != nil {
 		slog.Warn("runner: invalid sandbox roots encoding", "error", err)
 		return nil
 	}
 	return roots
+}
+
+func stripDeniedEnvironment(env []string) []string {
+	result := make([]string, 0, len(env))
+	for _, item := range env {
+		key, _, ok := strings.Cut(item, "=")
+		if ok && key == sandboxDeniedEnvironment {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 var syncFS = syncConfiguredFilesystem

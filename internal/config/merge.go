@@ -675,8 +675,8 @@ func persistSettings(home, path string, output []byte) error {
 	if validateErr := validateSettings(home, path, output); validateErr != nil {
 		return validateErr
 	}
-	if mkdirErr := os.MkdirAll(home, 0o700); mkdirErr != nil {
-		return fmt.Errorf("create config home: %w", mkdirErr)
+	if dirErr := auth.ProtectHomeDir(home); dirErr != nil {
+		return fmt.Errorf("create config home: %w", dirErr)
 	}
 	if writeErr := writeSettings(path, output); writeErr != nil {
 		return writeErr

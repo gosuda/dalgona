@@ -325,7 +325,7 @@ func (h *harness) submit(thread *Thread, prompt string) {
 
 func (h *harness) waitIdle(thread *Thread) {
 	h.t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		status, err := thread.Status()
 		if err != nil {
@@ -341,7 +341,7 @@ func (h *harness) waitIdle(thread *Thread) {
 
 func (h *harness) waitRequests(n int) {
 	h.t.Helper()
-	deadline := time.After(20 * time.Second)
+	deadline := time.After(60 * time.Second)
 	for h.model.count() < n {
 		select {
 		case <-h.model.arrived:

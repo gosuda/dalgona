@@ -8,7 +8,7 @@ The advisor is an optional reviewer. It reads the transcript of a primary thread
 
 | Key | Type | Default | Values |
 | --- | --- | --- | --- |
-| `advisor.enabled` | bool | `false` | `--advisor` MUST set it to `true` for one run. |
+| `advisor.enabled` | bool | `false` | `true` MUST turn the advisor on. No command-line flag sets it. |
 | `advisor.review` | string | `"turn"` | `turn`, `agent-end` |
 | `advisor.interval` | int | `1` | 1 or more |
 | `advisor.sync` | string | `"off"` | `off`, `final`, `strict` |
@@ -18,7 +18,7 @@ The advisor is an optional reviewer. It reads the transcript of a primary thread
 | `advisor.tools` | string list | `["read", "search"]` | Tool names. `[]` grants no investigative tool. |
 | `advisor.subagents` | bool | `false` | `true` MUST advise subagents too. |
 
-An `[advisors.<name>]` entry MAY set `model`, `instructions`, `review`, `interval`, `sync`, `tools`, and `enabled`. An omitted `review`, `interval`, `sync`, or `tools` MUST inherit the `[advisor]` value. An explicit `tools = []` MUST replace the inherited list. `enabled` MUST default to `true`. `model` and `instructions` MUST default to `""`.
+An `[advisors.<name>]` entry MAY set `model`, `instructions`, `review`, `interval`, `sync`, `tools`, `subagents`, and `enabled`. An omitted `review`, `interval`, `sync`, or `tools` MUST inherit the `[advisor]` value. An explicit `tools = []` MUST replace the inherited list. An omitted `subagents` MUST inherit the subagent decision of `[advisor]`. `enabled` MUST default to `true`. `model` and `instructions` MUST default to `""`.
 
 When no `[advisors.<name>]` entry exists, the roster MUST contain exactly one advisor named `advisor` with inherited values. When one or more entries exist, the roster MUST contain only those entries.
 
@@ -180,4 +180,4 @@ The TUI MUST render a note as a dim card `advisor · <severity>: <note>`. `/advi
 
 ### Subagents
 
-A subagent MUST run without an advisor, unless the `task` call or `[advisor] subagents = true` opts in. `Attach` MUST start the runtime of a thread with a `parent` as disabled, unless `cfg.Advisor.Subagents` is true. A `task` call opts in when its caller passes a configuration with `Subagents` set.
+A subagent MUST run without an advisor, unless the `task` call, `[advisor] subagents = true`, or the advisor entry opts in. `Attach` MUST start the runtime of a thread with a `parent` as disabled for every advisor that does not apply. An entry with `subagents = true` MUST advise every subagent thread, also when the global key is `false` and the `task` call did not opt in. An entry with `subagents = false` MUST never advise a subagent thread, also when the global key is `true` or the `task` call opted in. An entry with omitted `subagents` MUST advise a subagent exactly when the global rule opts in. A `task` call opts in when its caller passes a configuration with `Subagents` set. The key MUST NOT change behavior on a top-level thread. `[advisor] enabled = false` MUST turn every advisor off, and an entry with `enabled = false` MUST stay off.

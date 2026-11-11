@@ -1,6 +1,7 @@
 # Event journal
 
 The journal MUST survive a process halt, a forced kill, and a host restart. JSONL is the authority. SQLite is a repairable mirror.
+Directory `fsync` MUST be a no-op on Windows because the operating system rejects directory sync.
 
 ## Record format
 
@@ -18,7 +19,7 @@ A payload larger than 64 KiB MUST be stored under `blobs/<sha256>`. The event MU
 
 `Append` MUST validate every event before writing. It MUST encode all events for one call and write them with one append write. It MUST `fsync` the journal before it returns. It MUST insert the same records and session head in one immediate SQLite transaction. JSONL remains authoritative when the mirror write fails. The store MUST retain the new JSONL head and report the mirror error.
 
-When `DALGONA_SYNCFS` is set, the journal `fsync` MUST be followed by `Syncfs` for that directory.
+On Linux, when `DALGONA_SYNCFS` is set, the journal `fsync` MUST be followed by `Syncfs` for that directory. On other systems the variable MUST have no effect.
 
 ## Open and repair
 
@@ -26,10 +27,10 @@ When `DALGONA_SYNCFS` is set, the journal `fsync` MUST be followed by `Syncfs` f
 
 | Finding | Required action |
 | --- | --- |
-| The final line has no newline, cannot be parsed, or has a CRC or hash failure | Copy the partial final record to `quarantine/<session>-<offset>.bin`. Truncate at the last good line. `fsync` the file and directory. Log `journal: <session>: torn tail of <n> bytes quarantined`. Apply the verified SQLite-suffix rule afterward. |
+| The final line has no newline, cannot be parsed, or has a CRC or hash failure | Copy the partial final record to `quarantine/<session>-<offset>.bin`. When that file exists, the store MUST write `quarantine/<session>-<offset>-<seq>.bin` where `<seq>` is a per-process sequence number. The store MUST NOT overwrite a file in quarantine. Truncate at the last good line. `fsync` the file and directory. Log `journal: <session>: torn tail of <n> bytes quarantined`. Apply the verified SQLite-suffix rule afterward. |
 | A record has a sequence gap, a duplicate sequence, or a bad link at any position, or another bad record before the final line | Use SQLite only when every row from the damage point through the SQLite head verifies against the chain. Rebuild JSONL from the good prefix and those rows through a temporary file, rename, and directory `fsync`. Keep every later JSONL record that verifies against the resulting chain. Rebuild the mirror from the kept JSONL. Valid records past the mirror head MUST NOT be discarded. |
 | SQLite cannot supply that complete verified suffix | Mark the session damaged at the first bad sequence. Keep only the valid prefix for replay. Reject appends. Preserve the bad suffix in quarantine before writing the damage marker. Report `journal: <session>: damaged at seq <n>; quarantined at quarantine/<file>`. |
-| SQLite `quick_check` fails or a mirrored hash differs from JSONL | Move `state.db`, `state.db-wal`, and `state.db-shm` to `quarantine/state-<unix>.db*`. Rebuild the mirror from JSONL. |
+| SQLite `quick_check` fails or a mirrored hash differs from JSONL | Move `state.db`, `state.db-wal`, and `state.db-shm` to `quarantine/state-<nanos>-<pid>-<seq>.db`, `quarantine/state-<nanos>-<pid>-<seq>.db-wal`, and `quarantine/state-<nanos>-<pid>-<seq>.db-shm`. `<nanos>` is Unix time in nanoseconds, `<pid>` is the process id, and `<seq>` is a per-process sequence number. The three files of one quarantine MUST share one stem. When a candidate name exists, the store MUST use the next free name with `-<n>` added to the stem. The store MUST NOT overwrite a file in quarantine. Rebuild the mirror from JSONL. |
 | SQLite is behind JSONL | Insert the missing rows from JSONL. |
 | SQLite is ahead of a complete JSONL file | Append the SQLite suffix only when every row verifies from the JSONL head. Otherwise rebuild the mirror from JSONL. |
 
@@ -61,10 +62,14 @@ Every 30 minutes and at clean close, the store MUST run `VACUUM INTO` into `stat
 - Mirror join: `OpenShared` MUST hold an exclusive lock on `repair.lock` while it opens `state.db`. Under that lock it MUST try an exclusive lock on `users.lock` without a wait. When it gets the lock, no other shared store is open. Only then MAY it apply the `state.db` quarantine and backup rules. It MUST then release the exclusive lock and take a shared lock on `users.lock` before it releases `repair.lock`. It MUST hold the shared lock until close. When another shared store is open and `state.db` is unusable, `OpenShared` MUST fail and MUST NOT move `state.db`.
 - Session repair: the store MUST apply the repair table to a session only while a session lock is held. At open and in `Replay`, it MUST hold `sessions/<id>/repair.lock` and try `sessions/<id>/lock` without a wait. It MUST skip the repair when another owner holds the lock. When the calling Store holds the session lock, the probe would report its own lock as busy, so that Store MUST skip the probe and reload the session directly. Any other Store MUST observe the lock as busy and skip the repair. A damaged session then stays read-only. `Append` MUST trust the caller's session lock.
 - Mirror repair: a mirror hash mismatch or an unverifiable SQLite suffix MUST replace the rows of that session from JSONL. The store MUST NOT quarantine or rebuild the whole `state.db` in shared mode.
-- Freshness: before `Append`, the store MUST compare the journal file identity and size with the values after its last load or write. On a difference, it MUST reload the session through the repair table. `Sessions` MUST reload the session rows from `state.db`.
+- Freshness: before `Append`, the store MUST compare the journal file identity and size with the values after its last load or write. On a difference, it MUST reload the session through the repair table. Before the reload repairs the session file, the store MUST close its own append handle for that session. `Sessions` MUST reload the session rows from `state.db`.
 - Replay: `Replay` MUST stop without error at a final line that has no `\n`. Another owner can be in the middle of that append.
 
 In both modes, the store MUST keep the mirror rows of a session when they hold exactly the JSONL sequence numbers and hashes. It MUST then update only the session row.
+
+## Compaction
+
+A compaction marker MUST keep each tool result with the assistant message that issued it. The scope of a call id or a run id is the part before "/". A cut MUST be safe only when no scope occurs on both sides of the cut. A cut MUST start at a user message or an assistant message.
 
 ## Blobs
 

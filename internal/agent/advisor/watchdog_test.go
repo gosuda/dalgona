@@ -85,10 +85,10 @@ func TestWatchdog_withoutRepositoryReadsOnlyCwd(t *testing.T) {
 func TestWatchdog_homeInsideProjectAppearsOnceAndPathIsEscaped(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	cwd := filepath.Join(base, `a&"b`)
+	cwd := filepath.Join(base, "a&'b")
 	home := filepath.Join(cwd, ".dalgona")
 	writeWatchdogFile(t, filepath.Join(home, "WATCHDOG.md"), "<raw & kept>")
-	escaped := filepath.Join(base, "a&amp;&#34;b", ".dalgona", "WATCHDOG.md")
+	escaped := filepath.Join(base, "a&amp;&#39;b", ".dalgona", "WATCHDOG.md")
 	want := `<watchdog path="` + escaped + `"><raw & kept></watchdog>`
 	if got := advisor.Watchdog(home, cwd); got != want {
 		t.Fatalf("Watchdog = %q, want %q", got, want)
