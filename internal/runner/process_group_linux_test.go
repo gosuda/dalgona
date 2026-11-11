@@ -3,26 +3,24 @@
 package runner
 
 import (
-	"io"
 	"os/exec"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestProcessGroupDrainedZombieOnly(t *testing.T) {
 	cmd := exec.Command("true")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	pgid := cmd.Process.Pid
-	if _, err := io.ReadAll(out); err != nil {
-		t.Fatalf("zombie child output = %v, want EOF", err)
+	var exited unix.Siginfo
+	if err := unix.Waitid(unix.P_PID, pgid, &exited, unix.WEXITED|unix.WNOWAIT, nil); err != nil {
+		t.Fatalf("wait for zombie child = %v, want nil", err)
 	}
 	if processGroupGone(pgid) {
 		t.Fatal("processGroupGone zombie-only group = true, want false")

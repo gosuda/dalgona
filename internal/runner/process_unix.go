@@ -26,15 +26,26 @@ func startDetached(ctx context.Context, self string, args []string, spec Process
 	return cmd, nil
 }
 
+const groupExitSettle = 2 * time.Second
+
 func signalProcess(shimPID int, pgid int, signal Signal) error {
-	killErr := syscall.Kill(-pgid, unixSignal(signal))
-	if killErr == nil || errors.Is(killErr, syscall.ESRCH) {
-		return nil
+	deadline := time.Now().Add(groupExitSettle)
+	for {
+		killErr := syscall.Kill(-pgid, unixSignal(signal))
+		if killErr == nil || errors.Is(killErr, syscall.ESRCH) {
+			return nil
+		}
+		if !errors.Is(killErr, syscall.EPERM) {
+			return fmt.Errorf("runner: signal process group: %w", killErr)
+		}
+		if processGroupDrained(pgid) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("runner: signal process group: %w", killErr)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if errors.Is(killErr, syscall.EPERM) && processGroupDrained(pgid) {
-		return nil
-	}
-	return fmt.Errorf("runner: signal process group: %w", killErr)
 }
 
 func processGroupGone(pgid int) bool {
