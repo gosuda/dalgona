@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -182,12 +183,13 @@ func (s *slowBuild) expectSubmitDuringBuild(t *testing.T, thread *Thread) {
 	t.Helper()
 	submitted := make(chan error, 1)
 	go func() { submitted <- thread.Submit(t.Context(), Input{Kind: InputSteer, Text: "steer"}) }()
+	synctest.Wait()
 	select {
 	case err := <-submitted:
 		if err != nil {
 			t.Fatalf("steer during a tool set build: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	default:
 		s.unblock()
 		t.Fatalf("Submit blocked while a tool set was building; after release it returned %v", <-submitted)
 	}
@@ -215,15 +217,17 @@ func expectOneToolset(t *testing.T, thread *Thread, modelID string) {
 }
 
 func TestToolSetBuildDoesNotBlockSubmit(t *testing.T) {
-	slow := newSlowBuild(t)
-	h := newHarness(t, func(h *harness) { h.cfg.Tools = slow.tools(h) })
-	thread := h.start()
-	if err := thread.Submit(t.Context(), Input{Kind: InputPrompt, Text: "go", Model: "openai/gpt-slow"}); err != nil {
-		t.Fatal(err)
-	}
-	slow.awaitBuilding(t)
-	slow.expectSubmitDuringBuild(t, thread)
-	slow.unblock()
-	h.waitIdle(thread)
-	expectOneToolset(t, thread, "openai/gpt-z")
+	synctest.Test(t, func(t *testing.T) {
+		slow := newSlowBuild(t)
+		h := newHarness(t, func(h *harness) { h.cfg.Tools = slow.tools(h) })
+		thread := h.start()
+		if err := thread.Submit(t.Context(), Input{Kind: InputPrompt, Text: "go", Model: "openai/gpt-slow"}); err != nil {
+			t.Fatal(err)
+		}
+		slow.awaitBuilding(t)
+		slow.expectSubmitDuringBuild(t, thread)
+		slow.unblock()
+		h.waitIdle(thread)
+		expectOneToolset(t, thread, "openai/gpt-z")
+	})
 }
