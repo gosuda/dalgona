@@ -24,6 +24,8 @@ dalgona --version
 
 Go installs both binaries in `GOBIN`, or in `GOPATH/bin` when `GOBIN` is unset. Add that directory to `PATH` if your shell cannot find them.
 
+`just build` builds both binaries for your platform into `bin/`. `just dal [args...]` and `just dalgona [args...]` run a command from source without installing it, for example `just dalgona web`.
+
 Use `just dist` to build release binaries for Linux, macOS, and Windows on amd64 and arm64. `just box-image` builds the remote box image from those binaries.
 
 ## Start dal
@@ -200,6 +202,9 @@ These commands are specific to dalgona:
 | `dalgona run <file.star> [--arg k=v ...]` | Run a durable Starlark workflow. A value that is valid JSON is passed as JSON; any other value is passed as a string. |
 | `dalgona exec-server [--listen <address>] [--root <directory>] [--data <directory>]` | Serve process and filesystem operations inside a box. |
 | `dalgona bridge` | Connect standard input and output to the local daemon, starting it if needed. |
+| `just build` | Build `dal` and `dalgona` for this platform into `bin/`. |
+| `just dal [args...]` | Run `dal` from source with the given arguments. |
+| `just dalgona [args...]` | Run `dalgona` from source with the given arguments. |
 | `just dist` | Build release binaries for remote bootstrap. |
 | `just box-image` | Build the remote box image. |
 

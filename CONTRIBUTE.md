@@ -26,7 +26,7 @@ Use the versions pinned in [go.mod](go.mod) and [web/package.json](web/package.j
 
 [justfile](justfile) declares `fmt-check`, `vet`, `lint`, `test`, `vuln`, `hashline-model`, `web-check`, and `cf-check`. Run them together with `just verify`. `test` uses the race detector. `hashline-model` skips when `uv` is absent; do not report that skip as a pass.
 
-Use `just web` to install the locked web dependencies and build the assets. `web-check` uses the installed web tools. `cf-check` installs the locked Cloudflare dependencies before its checks. `just dist` builds release binaries, and `just box-image` builds the remote box image.
+Use `just web` to install the locked web dependencies and build the assets. `web-check` uses the installed web tools. `cf-check` installs the locked Cloudflare dependencies before its checks. `just build` builds both binaries for the host into `bin/`; `just dal` and `just dalgona` run them from source and pass their arguments through. `just dist` builds release binaries, and `just box-image` builds the remote box image.
 
 Report the checks you ran, their results, and any untested requirement. Distinguish local checks from live-provider, reboot, desktop-app, and cloud-service checks.
 
