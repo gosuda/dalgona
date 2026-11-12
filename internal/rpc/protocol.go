@@ -87,6 +87,7 @@ type (
 		Text string         `json:"text,omitzero"`
 		Name string         `json:"name,omitzero"`
 		Data jsontext.Value `json:"data,omitzero"`
+		URL  string         `json:"url,omitzero"`
 	}
 	TurnSteerParams struct {
 		ThreadID       string      `json:"threadId"`

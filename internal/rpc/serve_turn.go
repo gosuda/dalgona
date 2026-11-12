@@ -20,6 +20,9 @@ type turnParams struct {
 	approvalPolicy string
 	sandboxPolicy  string
 	text           []string
+	images         []agent.Image
+	imageErr       error
+	imageBytes     int64
 }
 
 func (p *turnParams) member(name string, d *jsontext.Decoder) error {
@@ -91,7 +94,11 @@ func (p *turnParams) prompt(current string) (agent.Input, error) {
 	if err != nil {
 		return agent.Input{}, err
 	}
-	in := agent.Input{Kind: agent.InputPrompt, Text: strings.Join(p.text, "\n"), Effort: string(effort), Approval: approval, Sandbox: sandbox}
+	images, err := p.checkedImages()
+	if err != nil {
+		return agent.Input{}, err
+	}
+	in := agent.Input{Kind: agent.InputPrompt, Text: strings.Join(p.text, "\n"), Effort: string(effort), Approval: approval, Sandbox: sandbox, Images: images}
 	if p.model != "" {
 		in.Model = qualifiedModel(p.model, "", current)
 	}
@@ -108,8 +115,8 @@ func stricterApproval(thread, turn config.Approval) config.Approval {
 }
 
 func (p *turnParams) readInput(d *jsontext.Decoder) error {
-	var kind, text, path string
-	err := readMembers(d, stringMembers(map[string]*string{"type": &kind, "text": &text, "path": &path}))
+	var kind, text, path, url string
+	err := readMembers(d, stringMembers(map[string]*string{"type": &kind, "text": &text, "path": &path, "url": &url}))
 	if err != nil {
 		return err
 	}
@@ -118,6 +125,10 @@ func (p *turnParams) readInput(d *jsontext.Decoder) error {
 		p.text = append(p.text, text)
 	case "mention", "skill":
 		p.text = append(p.text, "@"+path)
+	case "image":
+		p.takeImage(func(admit func(int64) error) (agent.Image, error) { return imageFromURL(url, admit) })
+	case "localImage":
+		p.takeImage(func(admit func(int64) error) (agent.Image, error) { return imageFromPath(path, admit) })
 	default:
 		return invalidParams("unsupported input type " + kind)
 	}
@@ -188,7 +199,11 @@ func (s *server) turnSteer(ctx context.Context, params jsontext.Value) (jsontext
 		return nil, err
 	}
 	expected := cmp.Or(p.expectedTurnID, p.turnID)
-	in := agent.Input{Kind: agent.InputSteer, Text: strings.Join(p.text, "\n"), ExpectedTurnID: expected}
+	images, err := p.checkedImages()
+	if err != nil {
+		return nil, err
+	}
+	in := agent.Input{Kind: agent.InputSteer, Text: strings.Join(p.text, "\n"), ExpectedTurnID: expected, Images: images}
 	if err = thread.Submit(ctx, in); err != nil {
 		return nil, hostError(err, p.threadID, expected)
 	}
