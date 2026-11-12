@@ -232,4 +232,22 @@ describe("session", () => {
 		);
 		session.stop();
 	});
+
+	test("keeps one notice per text and at most five", () => {
+		const { dial } = fakeDial("t1");
+		const session = new Session(dial);
+		session.notify("error", "Same");
+		session.notify("warning", "Same");
+		expect(session.notices.map((notice) => notice.tone)).toEqual(["warning"]);
+		for (let index = 0; index < 6; index += 1) {
+			session.notify("info", `note ${index}`);
+		}
+		expect(session.notices.map((notice) => notice.text)).toEqual([
+			"note 1",
+			"note 2",
+			"note 3",
+			"note 4",
+			"note 5",
+		]);
+	});
 });

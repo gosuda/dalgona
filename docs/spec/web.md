@@ -136,10 +136,17 @@ The client records subagent threads from `dalgona/thread/childSpawned`. An appro
 
 - With no open thread the transcript says `Pick a thread or start a new one`. When connected, it says that earlier threads are in the list. When not connected, it says to connect to dalgona.
 - With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a title shows its preview. A thread with neither shows `Untitled thread`.
-- A failed connection reads `Unable to connect to dalgona: <detail>. Check that dalgona web is still running, then select Reconnect.`
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
-- Other request failures read `<action>: <detail>. Reconnect and try again.`
 - In the approval dialog, Decline and Cancel use the quiet style. The composer's `Interrupt turn` button has the danger style.
+
+### Notices
+
+Two regions MUST be on the page before any notice arrives.
+The alert region holds errors. The status region holds warnings and information.
+A notice MUST name only the controls that it shows.
+Dismiss MUST remove its notice and move focus to the message field.
+A notice with the same text as a notice on the page MUST replace it.
+The page MUST keep at most five notices. It MUST remove the oldest first.
 
 ### Focus
 

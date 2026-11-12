@@ -30,6 +30,9 @@ import type {
 	JsonValue,
 	KeywordDefinition,
 	ModelOption,
+	Notice,
+	NoticeAction,
+	NoticeTone,
 	RequestId,
 	RpcHandlers,
 	StatusInfo,
@@ -76,6 +79,8 @@ function applyThemeToPage(setting: ThemeSetting): void {
 	if (typeof document === "undefined") return;
 	applyTheme(setting, document, localStorage);
 }
+
+const MAX_NOTICES = 5;
 
 type Decision = "accept" | "acceptForSession" | "decline" | "cancel";
 
@@ -154,8 +159,9 @@ export class Session {
 	loadingThreads: boolean = $state(false);
 	loadingTranscript: boolean = $state(false);
 	startingThread: boolean = $state(false);
-	errorMessage: string = $state("");
+	notices: readonly Notice[] = $state([]);
 	statusSeq: Readonly<Record<string, number>> = $state({});
+	private noticeSeq = 0;
 
 	running: boolean = $derived(this.transcript.turnStatus === "inProgress");
 	currentApproval: ApprovalRequest | null = $derived(
@@ -247,15 +253,29 @@ export class Session {
 		this.client?.close();
 	}
 
-	clearError(): void {
-		this.errorMessage = "";
+	notify(
+		tone: NoticeTone,
+		text: string,
+		actions: readonly NoticeAction[] = [],
+	): void {
+		const id = ++this.noticeSeq;
+		const kept = this.notices.filter((notice) => notice.text !== text);
+		this.notices = [...kept, { id, tone, text, actions }].slice(-MAX_NOTICES);
+	}
+
+	dismiss(id: number): void {
+		this.notices = this.notices.filter((notice) => notice.id !== id);
+	}
+
+	private clearErrors(): void {
+		this.notices = this.notices.filter((notice) => notice.tone !== "error");
 	}
 
 	async connect(): Promise<void> {
 		const generation = ++this.connectionGeneration;
 		this.client?.close();
 		this.approvals = [];
-		this.errorMessage = "";
+		this.clearErrors();
 		const hashed = tokenFromHash(this.location.hash);
 		if (hashed !== "") {
 			this.accessToken = hashed;
@@ -269,8 +289,10 @@ export class Session {
 		}
 		if (this.accessToken === "") {
 			this.connection = "disconnected";
-			this.errorMessage =
-				"The URL has no access token. Open the full URL printed by dalgona web.";
+			this.notify(
+				"error",
+				"The URL has no access token. Open the full URL printed by dalgona web.",
+			);
 			return;
 		}
 		const rpc = this.dial(this.websocketUrl(), {
@@ -288,7 +310,7 @@ export class Session {
 			},
 			onError: (message) => {
 				if (generation === this.connectionGeneration) {
-					this.errorMessage = `${message}. Reconnect and try again.`;
+					this.notify("error", `${message}. Reconnect and try again.`);
 				}
 			},
 		});
@@ -351,7 +373,10 @@ export class Session {
 			if (generation === this.connectionGeneration) {
 				this.connection = "disconnected";
 				const detail = error instanceof Error ? error.message : String(error);
-				this.errorMessage = `Unable to connect to dalgona: ${detail}. Check that dalgona web is still running, then select Reconnect.`;
+				this.notify(
+					"error",
+					`Unable to connect to dalgona: ${detail}. Check that dalgona web is still running, then select Reconnect.`,
+				);
 			}
 		}
 	}
@@ -376,7 +401,7 @@ export class Session {
 	): void {
 		if (generation !== this.connectionGeneration) return;
 		const detail = typeof error === "string" ? error : error.message;
-		this.errorMessage = `${action}: ${detail}. Reconnect and try again.`;
+		this.notify("error", `${action}: ${detail}. Reconnect and try again.`);
 	}
 
 	private async loadThreads(generation: number): Promise<void> {
@@ -492,7 +517,7 @@ export class Session {
 			this.activeThreadId = threadId;
 			this.transcript = transcriptForThread(result.thread, this.knownChildren);
 			this.advisor = { kind: "unknown" };
-			this.errorMessage = "";
+			this.clearErrors();
 			this.status = result.status;
 			this.selectedModel = result.status.model || this.selectedModel;
 			void this.loadAdvisor(threadId);
@@ -538,7 +563,7 @@ export class Session {
 			this.status = result.status;
 			this.selectedModel = result.status.model || this.selectedModel;
 			this.queuedFollowups = [];
-			this.errorMessage = "";
+			this.clearErrors();
 			void this.loadAdvisor(result.thread.summary.id);
 		} catch (error) {
 			this.reportFailure(

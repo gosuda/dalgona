@@ -2,6 +2,7 @@
 import ApprovalDialog from "#lib/components/ApprovalDialog.svelte";
 import Composer from "#lib/components/Composer.svelte";
 import ModelPicker from "#lib/components/ModelPicker.svelte";
+import NoticeStack from "#lib/components/NoticeStack.svelte";
 import StatusBar from "#lib/components/StatusBar.svelte";
 import ThreadList from "#lib/components/ThreadList.svelte";
 import Transcript from "#lib/components/Transcript.svelte";
@@ -54,12 +55,10 @@ let { session }: Props = $props();
 			/>
 		</div>
 
-		{#if session.errorMessage}
-			<div class="error-banner" role="alert">
-				<p>{session.errorMessage}</p>
-				<button class="quiet" onclick={() => session.clearError()}>Dismiss error</button>
-			</div>
-		{/if}
+		<NoticeStack
+			notices={session.notices}
+			onDismiss={(id) => session.dismiss(id)}
+		/>
 
 		<Transcript
 			threadId={session.activeThreadId}
@@ -140,29 +139,6 @@ let { session }: Props = $props();
 		text-wrap: balance;
 	}
 
-	.error-banner {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		margin: 0 var(--space-5) var(--space-3);
-		border-inline-start: 2px solid var(--color-danger);
-		background: var(--color-danger-surface);
-		padding: var(--space-3);
-	}
-
-	.error-banner p {
-		margin: 0;
-		font-size: var(--text-body-small);
-	}
-
-	.error-banner button {
-		flex: none;
-		min-height: 32px;
-		padding: var(--space-1) var(--space-3);
-		font-size: var(--text-caption);
-	}
-
 	.approval-queue-note {
 		margin: 0 var(--space-5) var(--space-3);
 		border-inline-start: 2px solid var(--color-accent);
@@ -191,11 +167,6 @@ let { session }: Props = $props();
 	@media (max-width: 40rem) {
 		.workspace-heading {
 			padding: var(--space-3) var(--space-4);
-		}
-
-		.error-banner {
-			align-items: start;
-			margin-inline: var(--space-4);
 		}
 	}
 </style>

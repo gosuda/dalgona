@@ -247,3 +247,17 @@ export interface RpcHandlers {
 	readonly onStateChange: (state: ConnectionState) => void;
 	readonly onError: (message: string) => void;
 }
+
+export type NoticeTone = "error" | "warning" | "info";
+
+export interface NoticeAction {
+	readonly label: string;
+	readonly run: () => void;
+}
+
+export interface Notice {
+	readonly id: number;
+	readonly tone: NoticeTone;
+	readonly text: string;
+	readonly actions: readonly NoticeAction[];
+}
