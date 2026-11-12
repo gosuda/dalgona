@@ -133,7 +133,7 @@ func runSameBuildHelper(t *testing.T) {
 		Dir:  dir,
 		Env:  []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir},
 	})
-	state := waitForExit(t, local, "samebuild", 15*time.Second)
+	state := waitForExit(t, local, "samebuild")
 	if state.Exit == nil || state.Exit.Code != 0 {
 		t.Fatalf("call did not end with exit code 0: %+v output %s", state.Exit, state.Data)
 	}

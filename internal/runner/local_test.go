@@ -31,7 +31,7 @@ func TestLocal_survivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := waitForExit(t, reopened, "survival", 8*time.Second)
+	state := waitForExit(t, reopened, "survival")
 	if state.Exit.Code != 0 || state.Alive || !strings.Contains(string(state.Data), "done") {
 		t.Fatalf("unexpected recovered state: %+v", state)
 	}
@@ -46,7 +46,7 @@ func TestLocal_startIsIdempotent(t *testing.T) {
 	if err := local.Start(t.Context(), spec); err != nil {
 		t.Fatal(err)
 	}
-	waitForExit(t, local, "same", 5*time.Second)
+	waitForExit(t, local, "same")
 	data, err := os.ReadFile(counter)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestLocal_environmentDefaults(t *testing.T) {
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
 	env := []string{"PATH=" + os.Getenv("PATH"), "CI=custom", "PAGER=less"}
 	startTestProcess(t, local, ProcessSpec{ID: "env", Argv: []string{"sh", "-c", "env"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
-	state := waitForExit(t, local, "env", 5*time.Second)
+	state := waitForExit(t, local, "env")
 	values := map[string]string{}
 	for line := range strings.SplitSeq(string(state.Data), "\n") {
 		key, value, ok := strings.Cut(line, "=")
@@ -126,7 +126,7 @@ func TestLocal_resolvesSelf(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
 	startTestProcess(t, local, ProcessSpec{ID: "self", Argv: []string{"@self", "__self-test"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
-	state := waitForExit(t, local, "self", 5*time.Second)
+	state := waitForExit(t, local, "self")
 	want := "/proc/self/exe"
 	if runtime.GOOS != "linux" {
 		executable, err := os.Executable()
@@ -190,7 +190,7 @@ func TestLocal_signalPreservesExitRecord(t *testing.T) {
 	if err := local.Signal(t.Context(), "signal", SignalTerm); err != nil {
 		t.Fatal(err)
 	}
-	state := waitForExit(t, local, "signal", 5*time.Second)
+	state := waitForExit(t, local, "signal")
 	if state.Exit.Code == 0 || state.Exit.Signal == "" {
 		t.Fatalf("signaled exit = %+v", state.Exit)
 	}
@@ -208,7 +208,7 @@ func TestLocal_signalBeforePIDPreventsStart(t *testing.T) {
 	if err := local.Signal(t.Context(), "early", SignalTerm); err != nil {
 		t.Fatal(err)
 	}
-	state := waitForExit(t, local, "early", 5*time.Second)
+	state := waitForExit(t, local, "early")
 	if state.Exit.Code == 0 || state.Exit.Signal != syscall.SIGTERM.String() {
 		t.Fatalf("canceled exit = %+v", state.Exit)
 	}
@@ -234,7 +234,7 @@ func TestLocal_signalBeforeGroupReturnsNilAndEndsTerminated(t *testing.T) {
 	if err := local.Signal(t.Context(), "starting", SignalTerm); err != nil {
 		t.Fatal(err)
 	}
-	state := waitForExit(t, local, "starting", 30*time.Second)
+	state := waitForExit(t, local, "starting")
 	if state.Exit.Code == 0 || state.Exit.Signal != syscall.SIGTERM.String() {
 		t.Fatalf("signaled exit = %+v", state.Exit)
 	}
@@ -283,22 +283,16 @@ func startTestProcess(t *testing.T, local *Local, spec ProcessSpec) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		for {
-			state, err := local.Read(ctx, spec.ID, 0)
-			if err == nil && (state.Exit != nil || !state.Alive) {
-				return
-			}
-			err = local.Signal(ctx, spec.ID, SignalKill)
-			if errors.Is(err, ErrProcessNotFound) {
-				return
-			}
-			if ctx.Err() != nil {
-				t.Errorf("cleanup process %s: %v", spec.ID, err)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+		err := local.Signal(context.Background(), spec.ID, SignalKill)
+		if errors.Is(err, ErrProcessNotFound) {
+			return
+		}
+		if err != nil {
+			t.Errorf("cleanup process %s: %v", spec.ID, err)
+			return
+		}
+		if err := waitShimExit(local, spec.ID); err != nil {
+			t.Errorf("cleanup process %s: %v", spec.ID, err)
 		}
 	})
 }
@@ -317,7 +311,7 @@ func TestLocal_sandboxConfinesWrites(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(outside) })
 	script := `touch ./inside && touch "$1"; rc=$?; echo rc=$rc`
 	startTestProcess(t, local, ProcessSpec{ID: "sandbox", Argv: []string{"sh", "-c", script, "_", outside}, Dir: dir, Sandbox: Sandbox{Mode: SandboxWorkspaceWrite, WritableRoots: []string{dir}}})
-	state := waitForExit(t, local, "sandbox", 8*time.Second)
+	state := waitForExit(t, local, "sandbox")
 	if state.Exit.Code != 0 {
 		t.Fatalf("sandboxed script failed: %+v output %s", state.Exit, state.Data)
 	}
@@ -340,7 +334,7 @@ func TestLocal_sandboxDeniesWriteThroughSymlink(t *testing.T) {
 	local := newTestLocal(t, filepath.Join(fixture.dir, "runs"))
 	script := `touch ./inside-ok; if echo pwned >> "$1"; then echo link-ok; else echo link-denied; fi`
 	startTestProcess(t, local, ProcessSpec{ID: "symlink", Argv: []string{"sh", "-c", script, "_", fixture.link}, Dir: fixture.workspace, Env: fixture.env, Sandbox: Sandbox{Mode: SandboxWorkspaceWrite, WritableRoots: []string{fixture.workspace}}})
-	state := waitForExit(t, local, "symlink", 8*time.Second)
+	state := waitForExit(t, local, "symlink")
 	if state.Exit.Code != 0 {
 		t.Fatalf("sandboxed script failed: %+v output %s", state.Exit, state.Data)
 	}
@@ -393,22 +387,27 @@ func setupSymlinkEscape(t *testing.T) symlinkFixture {
 	return symlinkFixture{dir: dir, workspace: workspace, link: link, outside: outside, env: env}
 }
 
-func waitForExit(t *testing.T, local *Local, id string, timeout time.Duration) Output {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		state, err := local.Read(t.Context(), id, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if state.Exit != nil {
-			return state
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("process %s did not exit", id)
-		}
-		time.Sleep(10 * time.Millisecond)
+func waitShimExit(local *Local, id string) error {
+	identity, err := readIdentity(filepath.Join(local.dir, id, "pid"))
+	if err != nil {
+		return err
 	}
+	return waitProcessExit(identity.pid, identity.start)
+}
+
+func waitForExit(t *testing.T, local *Local, id string) Output {
+	t.Helper()
+	if err := waitShimExit(local, id); err != nil {
+		t.Fatalf("wait for shim %s: %v", id, err)
+	}
+	state, err := local.Read(t.Context(), id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Exit == nil {
+		t.Fatalf("shim %s exited without an exit record: %+v", id, state)
+	}
+	return state
 }
 
 func waitForAlive(t *testing.T, local *Local, id string, timeout time.Duration) {

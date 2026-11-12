@@ -18,7 +18,7 @@ func rerunOnce(t *testing.T, local *Local, dir string, id string, counter string
 	if retryErr != nil {
 		t.Fatal(retryErr)
 	}
-	state := waitForExit(t, local, id, 5*time.Second)
+	state := waitForExit(t, local, id)
 	if state.Exit == nil || state.Exit.Code != 0 {
 		t.Fatalf("second Start exit = %+v", state.Exit)
 	}

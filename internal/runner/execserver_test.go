@@ -109,7 +109,7 @@ func TestExecRPC_terminateReportsRunning(t *testing.T) {
 	if _, err := fieldBool(fields, "running"); err != nil {
 		t.Fatal(err)
 	}
-	state := waitForExit(t, local, spec.ID, 5*time.Second)
+	state := waitForExit(t, local, spec.ID)
 	if state.Exit == nil || state.Alive {
 		t.Fatalf("terminated state = %+v", state)
 	}
