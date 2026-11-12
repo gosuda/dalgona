@@ -282,3 +282,17 @@ func TestImageSendsTextBeforeImage(t *testing.T) {
 		t.Fatalf("sent %#v, want the text describe, then one image", input)
 	}
 }
+
+func TestImagePasteUsesTheModelTheThreadRuns(t *testing.T) {
+	t.Parallel()
+	m := newModel(new(fakeCaller), Options{}, nil)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, resultMsg{op: "levels", value: &rpc.ModelListResponse{Data: []rpc.Model{{ID: "local/qwen-test", InputModalities: []string{"text", "image"}}}}})
+	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Model: "local/qwen-test", Thread: rpc.Thread{ID: "t1"}}})
+	path := writePNG(t, filepath.Join(t.TempDir(), "pixel.png"), 1, 1, 0)
+	m, command := drive(t, m, tea.PasteMsg{Content: path})
+	m = runCommand(t, m, command, "pasting an image path started no read")
+	if !strings.Contains(dockText(m), "[Image #1 1x1]") {
+		t.Fatalf("image path made no chip; notice %q; dock:\n%s", m.notice, dockText(m))
+	}
+}
