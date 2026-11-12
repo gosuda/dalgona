@@ -22,10 +22,12 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 |`runner.bound`|`runner`, `service`, `box_id`, `baseline`|None|
 |`turn.started`|`turn_id`|`started_at`, an RFC 3339 UTC timestamp that the server stamps at append|
 |`turn.completed`|`turn_id`, `status`|`error`. Status is `completed`, `interrupted`, or `failed`. `completed_at`, an RFC 3339 UTC timestamp that the server stamps at append|
+|`turn.judged`|`turn_id`, `by`, `verdict`, `paths`, `elapsed_ms`|`scores`, `flags`, `spoken`, `feedback`, `skipped`, `truncated`, `error`. Verdict is `clean`, `uncertain`, `flagged`, or `error`. `error` MUST be present for an `error` verdict and absent otherwise. `paths` holds at most 64 masked paths. `scores` names `sound` and `incomplete`. `feedback` is true exactly when `spoken` is not empty. Each `skipped` path is in `paths`
 |`user.message`|`item_id`, `turn_id`, `text`, `kind`|`notices`, `mentions`, `images`, `effort`, `model`, `approval`, `sandbox`, `verbatim`. Kind is `prompt`, `steer`, or `followup`. Each notice has `word` and `text`. Each mention has `path` and `text`. Each image has `mime`, optional `path`, and `image`, a blob reference. Effort is `low`, `medium`, `high`, `xhigh`, or `max` and overrides config for its turn. Approval and sandbox use the `session.created` values. A `verbatim` message MUST NOT have notices or mentions|
 |`assistant.message`|`item_id`, `turn_id`, `text`, `reasoning`, `tool_calls`, `usage`, `stop_reason`|`context_seq`. Usage contains `input`, `output`, `cache_read`, and `cache_write`. Each tool call has `id`, `name`, `args`, `freeform`, and `resolved`. Each tool call MAY have a `signature`, the provider thought-signature replayed to the next request. Each tool call MAY have `redacted_thinking`, opaque provider strings replayed unchanged. `context_seq` is the journal head when the request was built. `context_window` is the model context window in tokens, and it is omitted when unknown|
 |`tool.started`|`call_id`, `turn_id`, `tool`, `args`, `class`, `repairs`|`files`. Class is `read`, `edit`, `exec`, `agent`, `script`, or `remote`. Each file has `path`, `pre_sha`, `post_sha`, and optional `pre_blob`. Each file MAY have `post_blob`, the masked post-image of the file. `started_at`, an RFC 3339 UTC timestamp that the server stamps at append|
 |`tool.completed`|`call_id`, `ok`, `output`, `recovered`|`spill`, `exit_code`, `meta`. Recovered is `none`, `replayed`, `interrupted`, or `skipped`. `completed_at`, an RFC 3339 UTC timestamp that the server stamps at append|
+|`tool.judged`|`call_id`, `turn_id`, `by`, `verdict`, `paths`, `elapsed_ms`|`scores`, `flags`, `spoken`, `feedback`, `truncated`, `parts`, `failed_parts`, `error`. Verdict is `clean`, `uncertain`, `flagged`, or `error`. `error` MUST be present for an `error` verdict and absent otherwise. `paths` holds at most 64 masked paths. `parts` counts the requests of the unit, and `failed_parts` counts the requests that failed. `feedback` is true exactly when `spoken` is not empty|
 |`model.retry`|`turn_id`, `attempt`, `verdict`, `status`, `delay_ms`|Attempt MUST be positive. Verdict is `retry` or `overflow`|
 |`approval.requested`|`request_id`, `call_id`, `summary`|`class`. Class uses the `tool.started` values. An exec approval MAY carry `grant_prefix`, the argv prefix folded into a thread grant when `args` is spilled to a blob|
 |`approval.resolved`|`request_id`, `decision`, `by`, `reason`|`scores`. Decision is `accept`, `accept_session`, `decline`, or `cancel`. Each score MUST be between zero and one|
@@ -67,10 +69,13 @@ The state MUST track:
 - the latest `runner.bound` and `compaction`.
 - the current todo list, thread grants, read snapshots, and completed-turn sequence numbers.
 - delivered advisor notes, keyed by advisor, `review_seq`, and note text.
+- edit calls judged in the open turn.
+- turn judged.
 
 The fold MUST set `Preview` to the first 80 Unicode characters of the first user message of kind `prompt` with inline text. Until `Preview` is set, the fold sets `PreviewBlob` to the text blob of the first user message of kind `prompt` that has one.
 
 `turn.started` MUST NOT overlap another turn. Turn-scoped events MUST name the open turn. `turn.completed` MUST NOT leave calls, approvals, or scripts unfinished. `tool.completed` MUST have a matching `tool.started`, except for an unsuccessful skipped call or an unsuccessful call declined by an approval. Those exceptions MUST clear the pending assistant call.
+`tool.judged` MUST name the open turn. `tool.judged` MUST NOT name a call that is pending or in flight. `tool.judged` MUST NOT repeat for a call within a turn. `turn.judged` MUST name the open turn. `turn.judged` MUST NOT repeat for a turn id.
 
 An approval resolution MUST have a matching unresolved request. The fold MUST create the thread grant for a user `accept_session` decision when the request carries `class`. A request without `class` MUST defer the thread grant to the `tool.started` of the call. For `exec` the thread grant is an argv prefix derived from one command. For an edit or remote tool the thread grant is that tool name. Agent, read, and script calls MUST NOT create thread grants. A later `grant:<prefix>` decision MUST NOT create a thread grant.
 

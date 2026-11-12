@@ -116,9 +116,9 @@ func decodeObject(raw []byte) (map[string]jsontext.Value, error) {
 
 func decodeByType(kind string, reader *objectReader) (Event, error) {
 	switch kind {
-	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeUserMessage:
+	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeTurnJudged, TypeUserMessage:
 		return decodeSessionEvent(kind, reader)
-	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
+	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
 		return decodeToolEvent(kind, reader)
 	case TypeCompaction, TypeContextPruned, TypeChildSpawned, TypeBranch:
 		return decodeStateEvent(kind, reader)

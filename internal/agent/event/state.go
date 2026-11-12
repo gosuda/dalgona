@@ -81,6 +81,8 @@ type State struct {
 	Grants          map[string]string
 	Snapshots       map[string]Snapshot
 	CompletedTurns  map[string]uint64
+	JudgedCalls     map[string]struct{}
+	JudgedTurns     map[string]struct{}
 	Notes           map[string]uint64
 	Name            string
 	Archived        bool
@@ -115,6 +117,8 @@ func (s State) Clone() State {
 	s.Grants = maps.Clone(s.Grants)
 	s.Snapshots = maps.Clone(s.Snapshots)
 	s.CompletedTurns = maps.Clone(s.CompletedTurns)
+	s.JudgedCalls = maps.Clone(s.JudgedCalls)
+	s.JudgedTurns = maps.Clone(s.JudgedTurns)
 	s.Notes = maps.Clone(s.Notes)
 	s.Todos = slices.Clone(s.Todos)
 	s.TodoBlob = cloneBlob(s.TodoBlob)
@@ -175,9 +179,9 @@ func (s State) deriveStatus() Status {
 
 func foldEvent(s *State, seq uint64, e Event) error {
 	switch e.Type() {
-	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeUserMessage:
+	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeTurnJudged, TypeUserMessage:
 		return foldSessionEvent(s, seq, e)
-	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
+	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
 		return foldToolEvent(s, seq, e)
 	case TypeCompaction, TypeContextPruned, TypeChildSpawned, TypeBranch:
 		return foldStateEvent(s, seq, e)
@@ -193,13 +197,7 @@ func foldEvent(s *State, seq uint64, e Event) error {
 func foldSessionEvent(s *State, seq uint64, e Event) error {
 	switch value := e.(type) {
 	case SessionCreated:
-		if s.SessionID != "" || s.TurnID != "" {
-			return errors.New("event: fold: duplicate session.created")
-		}
-		s.SessionID = value.ID
-		s.Parent, s.ForkOf, s.Advisor = value.Parent, value.ForkOf, value.Advisor
-		s.Cwd, s.SessionModel, s.Model, s.CreatedAt = value.Cwd, value.Model, value.Model, value.CreatedAt
-		return nil
+		return foldSessionCreated(s, value)
 	case RunnerBound:
 		copy := value
 		s.Runner = &copy
@@ -208,11 +206,23 @@ func foldSessionEvent(s *State, seq uint64, e Event) error {
 		return startTurn(s, value.TurnID)
 	case TurnCompleted:
 		return completeTurn(s, seq, value)
+	case TurnJudged:
+		return foldTurnJudged(s, value)
 	case UserMessage:
 		return noteSessionMessage(s, seq, value)
 	default:
 		return fmt.Errorf("event: fold: %T does not match %s", e, e.Type())
 	}
+}
+
+func foldSessionCreated(s *State, value SessionCreated) error {
+	if s.SessionID != "" || s.TurnID != "" {
+		return errors.New("event: fold: duplicate session.created")
+	}
+	s.SessionID = value.ID
+	s.Parent, s.ForkOf, s.Advisor = value.Parent, value.ForkOf, value.Advisor
+	s.Cwd, s.SessionModel, s.Model, s.CreatedAt = value.Cwd, value.Model, value.Model, value.CreatedAt
+	return nil
 }
 
 func noteSessionMessage(s *State, seq uint64, value UserMessage) error {
@@ -268,6 +278,7 @@ func completeTurn(s *State, seq uint64, e TurnCompleted) error {
 		s.CompletedTurns = make(map[string]uint64)
 	}
 	s.CompletedTurns[e.TurnID] = seq
+	s.JudgedCalls = nil
 	s.TurnID = ""
 	return nil
 }
@@ -279,6 +290,39 @@ func requireTurn(s *State, turnID string) error {
 	return nil
 }
 
+func foldToolJudged(s *State, e ToolJudged) error {
+	if err := requireTurn(s, e.TurnID); err != nil {
+		return err
+	}
+	_, pending := s.PendingCalls[e.CallID]
+	_, running := s.InFlight[e.CallID]
+	if pending || running {
+		return fmt.Errorf("event: fold: tool.judged before tool.completed: %s", e.CallID)
+	}
+	if _, judged := s.JudgedCalls[e.CallID]; judged {
+		return fmt.Errorf("event: fold: duplicate tool.judged %s", e.CallID)
+	}
+	if s.JudgedCalls == nil {
+		s.JudgedCalls = make(map[string]struct{})
+	}
+	s.JudgedCalls[e.CallID] = struct{}{}
+	return nil
+}
+
+func foldTurnJudged(s *State, e TurnJudged) error {
+	if err := requireTurn(s, e.TurnID); err != nil {
+		return err
+	}
+	if _, judged := s.JudgedTurns[e.TurnID]; judged {
+		return fmt.Errorf("event: fold: duplicate turn.judged %s", e.TurnID)
+	}
+	if s.JudgedTurns == nil {
+		s.JudgedTurns = make(map[string]struct{})
+	}
+	s.JudgedTurns[e.TurnID] = struct{}{}
+	return nil
+}
+
 func foldToolEvent(s *State, seq uint64, e Event) error {
 	switch value := e.(type) {
 	case AssistantMessage:
@@ -287,6 +331,8 @@ func foldToolEvent(s *State, seq uint64, e Event) error {
 		return foldToolStarted(s, value)
 	case ToolCompleted:
 		return foldToolCompleted(s, value)
+	case ToolJudged:
+		return foldToolJudged(s, value)
 	case ModelRetry:
 		return requireTurn(s, value.TurnID)
 	case ApprovalRequested:

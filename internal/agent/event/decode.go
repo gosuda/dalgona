@@ -22,6 +22,8 @@ func decodeSessionEvent(kind string, r *objectReader) (Event, error) {
 		return TurnStarted{TurnID: r.str("turn_id"), StartedAt: r.timestamp("started_at")}, nil
 	case TypeTurnCompleted:
 		return TurnCompleted{TurnID: r.str("turn_id"), Status: r.str("status"), Error: r.str("error"), CompletedAt: r.timestamp("completed_at")}, nil
+	case TypeTurnJudged:
+		return decodeTurnJudged(r), nil
 	case TypeUserMessage:
 		return decodeUserMessage(r), nil
 	default:
@@ -91,6 +93,55 @@ func decodeImage(raw jsontext.Value) (Image, error) {
 	return value, r.err
 }
 
+func decodeTurnJudged(r *objectReader) TurnJudged {
+	r.require("turn_id")
+	r.require("by")
+	r.require("verdict")
+	r.require("elapsed_ms")
+	return TurnJudged{
+		TurnID: r.str("turn_id"), By: r.str("by"), Verdict: r.str("verdict"), Paths: r.stringList("paths"),
+		Scores: r.scores("scores"), Flags: r.stringList("flags"), Spoken: r.stringList("spoken"),
+		Skipped: r.stringList("skipped"), Feedback: r.boolean("feedback"), Truncated: r.boolean("truncated"),
+		Error: r.str("error"), ElapsedMS: r.int64("elapsed_ms"),
+	}
+}
+
+func decodeToolJudged(r *objectReader) ToolJudged {
+	r.require("call_id")
+	r.require("turn_id")
+	r.require("by")
+	r.require("verdict")
+	r.require("elapsed_ms")
+	return ToolJudged{
+		CallID: r.str("call_id"), TurnID: r.str("turn_id"), By: r.str("by"), Verdict: r.str("verdict"),
+		Paths: r.stringList("paths"), Scores: r.scores("scores"), Flags: r.stringList("flags"),
+		Spoken: r.stringList("spoken"), Feedback: r.boolean("feedback"), Truncated: r.boolean("truncated"),
+		Parts: r.count("parts", 2, 1), FailedParts: r.count("failed_parts", 1, 0),
+		Error: r.str("error"), ElapsedMS: r.int64("elapsed_ms"),
+	}
+}
+
+func (r *objectReader) stringList(name string) []string {
+	var values []string
+	r.array(name, func(raw jsontext.Value) error {
+		value, err := decodeString(raw)
+		values = append(values, value)
+		return err
+	})
+	return values
+}
+
+func (r *objectReader) count(name string, minimum, absent int) int {
+	if _, ok := r.fields[name]; !ok {
+		return absent
+	}
+	value := r.number(name)
+	if r.err == nil && value < minimum {
+		r.err = fmt.Errorf("%s must be %d or more when present", name, minimum)
+	}
+	return value
+}
+
 func decodeToolEvent(kind string, r *objectReader) (Event, error) {
 	switch kind {
 	case TypeAssistantMessage:
@@ -99,6 +150,8 @@ func decodeToolEvent(kind string, r *objectReader) (Event, error) {
 		return decodeToolStarted(r), nil
 	case TypeToolCompleted:
 		return decodeToolCompleted(r), nil
+	case TypeToolJudged:
+		return decodeToolJudged(r), nil
 	case TypeModelRetry:
 		r.require("status")
 		return ModelRetry{

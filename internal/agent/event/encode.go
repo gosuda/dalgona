@@ -10,9 +10,9 @@ import (
 
 func eventMembers(e Event) ([]member, error) {
 	switch e.Type() {
-	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeUserMessage:
+	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeTurnJudged, TypeUserMessage:
 		return sessionMembers(e)
-	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
+	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
 		return toolMembers(e)
 	case TypeCompaction, TypeContextPruned, TypeChildSpawned, TypeBranch:
 		return stateMembers(e)
@@ -40,6 +40,8 @@ func sessionMembers(e Event) ([]member, error) {
 	case TurnCompleted:
 		fields := []member{field("turn_id", stringValue(value.TurnID)), field("status", stringValue(value.Status))}
 		return timeField(optionalString(fields, "error", value.Error), "completed_at", value.CompletedAt), nil
+	case TurnJudged:
+		return turnJudgedMembers(value), nil
 	case UserMessage:
 		return userMessageMembers(value), nil
 	default:
@@ -131,6 +133,58 @@ func imageValue(e Image) jsontext.Value {
 	return objectValue(optionalBlobField(fields, "image", &e.Blob)...)
 }
 
+func turnJudgedMembers(e TurnJudged) []member {
+	fields := []member{
+		field("turn_id", stringValue(e.TurnID)), field("by", stringValue(e.By)),
+		field("verdict", stringValue(e.Verdict)), field("paths", arrayValue(e.Paths, stringValue)),
+	}
+	fields = judgedFields(fields, e.Scores, e.Flags, e.Spoken, e.Feedback)
+	if len(e.Skipped) > 0 {
+		fields = append(fields, field("skipped", arrayValue(e.Skipped, stringValue)))
+	}
+	if e.Truncated {
+		fields = append(fields, field("truncated", boolValue(true)))
+	}
+	fields = optionalString(fields, "error", e.Error)
+	return append(fields, field("elapsed_ms", int64Value(e.ElapsedMS)))
+}
+
+func toolJudgedMembers(e ToolJudged) []member {
+	fields := []member{
+		field("call_id", stringValue(e.CallID)), field("turn_id", stringValue(e.TurnID)),
+		field("by", stringValue(e.By)), field("verdict", stringValue(e.Verdict)),
+		field("paths", arrayValue(e.Paths, stringValue)),
+	}
+	fields = judgedFields(fields, e.Scores, e.Flags, e.Spoken, e.Feedback)
+	if e.Truncated {
+		fields = append(fields, field("truncated", boolValue(true)))
+	}
+	if e.Parts > 1 {
+		fields = append(fields, field("parts", intValue(e.Parts)))
+	}
+	if e.FailedParts > 0 {
+		fields = append(fields, field("failed_parts", intValue(e.FailedParts)))
+	}
+	fields = optionalString(fields, "error", e.Error)
+	return append(fields, field("elapsed_ms", int64Value(e.ElapsedMS)))
+}
+
+func judgedFields(fields []member, scores map[string]float64, flags, spoken []string, feedback bool) []member {
+	if len(scores) > 0 {
+		fields = append(fields, field("scores", scoresValue(scores)))
+	}
+	if len(flags) > 0 {
+		fields = append(fields, field("flags", arrayValue(flags, stringValue)))
+	}
+	if len(spoken) > 0 {
+		fields = append(fields, field("spoken", arrayValue(spoken, stringValue)))
+	}
+	if feedback {
+		fields = append(fields, field("feedback", boolValue(true)))
+	}
+	return fields
+}
+
 func toolMembers(e Event) ([]member, error) {
 	switch value := e.(type) {
 	case AssistantMessage:
@@ -139,6 +193,8 @@ func toolMembers(e Event) ([]member, error) {
 		return toolStartedMembers(value), nil
 	case ToolCompleted:
 		return toolCompletedMembers(value), nil
+	case ToolJudged:
+		return toolJudgedMembers(value), nil
 	case ModelRetry:
 		return modelRetryMembers(value), nil
 	case ApprovalRequested:
