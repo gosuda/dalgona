@@ -16,7 +16,6 @@ import (
 	"github.com/gosuda/dalgona/internal/model/devin/wire"
 )
 
-// source: git show f2cb47b8:engine/dal-provider/src/family/devin/proto.rs stop_reason
 const (
 	stopUnspecified  = 0
 	stopPattern      = 2

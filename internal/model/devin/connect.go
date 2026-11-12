@@ -17,7 +17,6 @@ import (
 
 const maxFramePayload = 16 << 20
 
-// source: https://connectrpc.com/docs/protocol/#error-codes
 var connectHTTPStatus = map[string]int{
 	"canceled":            499,
 	"unknown":             http.StatusInternalServerError,

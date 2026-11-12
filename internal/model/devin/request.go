@@ -15,7 +15,6 @@ import (
 	"github.com/gosuda/dalgona/internal/model/devin/wire"
 )
 
-// source: git show f2cb47b8:engine/dal-provider/src/family/devin/request.rs
 const (
 	ideName          = "devin-cli"
 	ideType          = "chisel"
