@@ -62,6 +62,8 @@ Use one name for each thing in user-facing text and new specifications.
 - [Discovery](spec/discovery.md): opt-in imports of instructions, skills, and server config.
 - [herdr integration](spec/herdr.md): pane reports and subagent panes.
 
+`just spec-style` checks sentence length, semicolons and dashes in `docs/spec`.
+
 ## Decisions
 
 Each decision file states its Invariant, Scope, and Enforcement. It MAY end with `## Rejected alternatives`; each entry names one alternative and the one reason it lost. A replaced decision MUST stay in this directory: add `Superseded by [<title>](<file>.md) on <YYYY-MM-DD>.` under its title, keep its text, and move its entry to the end of this list with the suffix `(superseded)`. Never delete a decision file.

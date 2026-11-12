@@ -42,6 +42,22 @@ hashline-model:
     uv run --no-project --python 3.12 docs/spec/hashline/verify_model.py > "$out"
     cmp "$out" docs/spec/hashline/verification.json
 
+spec-style:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'status=$?; [ "$status" -eq 0 ] || echo "spec-style: failed with status $status" >&2' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if ! command -v uv >/dev/null; then
+        if [ "${CI:-}" = "true" ]; then
+            echo "spec-style: uv is required in CI and is not installed" >&2
+            exit 1
+        fi
+        echo "spec-style: skipped, uv is not installed"
+        exit 0
+    fi
+    uv run --no-project --python 3.12 docs/spec/check_style.py docs/spec
+
 web:
     pnpm -C web install --frozen-lockfile
     pnpm -C web build
