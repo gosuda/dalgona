@@ -447,14 +447,13 @@ func (m *model) applyLogin(value any) tea.Cmd {
 	}
 	url := sanitizeText(cmp.Or(response.AuthURL, response.VerificationURL))
 	if url == "" {
-		m.noticef("login started; follow the provider instructions or run /login again to retry")
 		return nil
 	}
-	notice := "login: open " + url + " in a browser; the TUI will resume when login completes"
+	notice := "Open " + url + " to sign in"
 	if response.UserCode != "" {
 		notice += "; enter code " + response.UserCode
 	}
-	m.noticef("%s", notice)
+	m.noticef("%s; waiting for the provider to confirm", notice)
 	return nil
 }
 

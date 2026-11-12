@@ -36,6 +36,8 @@ func (m *model) applyDecodedNotification(msg notificationMsg) (tea.Cmd, error) {
 		return nil, m.applyChildSpawned(msg.params)
 	case "dalgona/advisor/note":
 		return nil, m.applyAdvisorNote(msg.params)
+	case "account/login/completed":
+		return nil, m.applyLoginCompleted(msg.params)
 	default:
 		return nil, nil
 	}
@@ -135,6 +137,19 @@ func (m *model) applyAdvisorNote(params jsontext.Value) error {
 		key := fmt.Sprintf("advisor:%s:%d", event.ThreadID, m.out.seq)
 		m.commit(key, strings.Split(m.renderAdvisorCard(event.Advisor, event.Severity, event.Note), "\n"))
 	}
+	return nil
+}
+
+func (m *model) applyLoginCompleted(params jsontext.Value) error {
+	var event rpc.AccountLoginCompletedNotification
+	if err := decodeParams(params, &event); err != nil {
+		return err
+	}
+	if !event.Success {
+		m.errorf("Login failed: %s; run /login again", cmp.Or(event.Error, "unknown error"))
+		return nil
+	}
+	m.noticef("Signed in to %s. Run /model to choose a model", event.Provider)
 	return nil
 }
 
