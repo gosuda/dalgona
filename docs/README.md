@@ -1,6 +1,6 @@
 # Documentation
 
-Use [the project README](../README.md) for installation and the product command surface. Use [CONTRIBUTE.md](../CONTRIBUTE.md) for changes and [REVIEW.md](../REVIEW.md) for review rules.
+Use [the project README](../README.md) for installation and the product command surface. Use [CONTRIBUTE.md](../CONTRIBUTE.md) for changes and [REVIEW.md](../REVIEW.md) for review rules. Use [DESIGN.md](../DESIGN.md) for the visual system.
 
 The specifications define required behavior. They do not certify that each command or integration has passed its acceptance checks. The decisions state invariants, scope, and enforcement. RFC 2119 keywords such as MUST and SHOULD carry their normative meaning in these documents.
 
