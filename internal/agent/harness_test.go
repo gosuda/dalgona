@@ -37,6 +37,24 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+const fakeModelURL = "http://model.test"
+
+type handlerTransport struct{ handler http.Handler }
+
+func (tr handlerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		defer func() { _ = req.Body.Close() }()
+	}
+	recorder := httptest.NewRecorder()
+	tr.handler.ServeHTTP(recorder, req)
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
+	result := recorder.Result()
+	result.Request = req
+	return result, nil
+}
+
 type response struct {
 	status int
 	body   string
@@ -45,7 +63,7 @@ type response struct {
 
 type fakeModel struct {
 	t        *testing.T
-	server   *httptest.Server
+	handler  http.Handler
 	mu       sync.Mutex
 	queue    []response
 	requests [][]byte
@@ -60,8 +78,7 @@ func newFakeModel(t *testing.T) *fakeModel {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /responses", f.respond)
 	mux.HandleFunc("GET /models", f.listModels)
-	f.server = httptest.NewServer(mux)
-	t.Cleanup(f.server.Close)
+	f.handler = mux
 	return f
 }
 
@@ -263,8 +280,10 @@ func (h *harness) providers(onRetry RetryFunc) (*model.Registry, error) {
 	retry.Sleep = func(context.Context, time.Duration) error { return nil }
 	retry.OnRetry = onRetry
 	provider := openai.New(openai.Config{
-		BaseURL: h.model.server.URL, Client: h.model.server.Client(), Retry: retry,
-		APIKey: func(context.Context) (string, error) { return "test-key", nil },
+		BaseURL: fakeModelURL,
+		Client:  &http.Client{Transport: handlerTransport{handler: h.model.handler}},
+		Retry:   retry,
+		APIKey:  func(context.Context) (string, error) { return "test-key", nil },
 	})
 	return registry, registry.Register("openai", provider)
 }

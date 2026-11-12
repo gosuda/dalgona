@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/model"
@@ -125,17 +126,6 @@ func (s *blockingModelLister) Stream(context.Context, model.Request) (model.Stre
 	return nil, errStubStream
 }
 
-func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal(msg)
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 func collectModels(t *testing.T, done chan []model.Model, callers int) {
 	t.Helper()
 	for range callers {
@@ -152,28 +142,26 @@ func collectModels(t *testing.T, done chan []model.Model, callers int) {
 
 func TestProviderModelsCollapsesConcurrentLookups(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t)
-	lister := &blockingModelLister{release: make(chan struct{})}
-	registry := modelsRegistry(t, lister)
-	const callers = 8
-	var entered atomic.Int64
-	done := make(chan []model.Model, callers)
-	for range callers {
-		go func() {
-			entered.Add(1)
-			done <- h.host.providerModels(context.Background(), registry, "stub")
-		}()
-	}
-	waitFor(t, 5*time.Second, "agent: concurrent lookups did not start", func() bool {
-		return entered.Load() == callers
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t)
+		lister := &blockingModelLister{release: make(chan struct{})}
+		registry := modelsRegistry(t, lister)
+		const callers = 8
+		done := make(chan []model.Model, callers)
+		for range callers {
+			go func() {
+				done <- h.host.providerModels(t.Context(), registry, "stub")
+			}()
+		}
+		synctest.Wait()
+		if calls := lister.calls.Load(); calls != 1 {
+			close(lister.release)
+			t.Fatalf("agent: provider models calls while %d lookups wait = %d, want 1", callers, calls)
+		}
+		close(lister.release)
+		collectModels(t, done, callers)
+		if calls := lister.calls.Load(); calls != 1 {
+			t.Fatalf("agent: provider models calls = %d, want 1 collapsed lookup", calls)
+		}
 	})
-	waitFor(t, 5*time.Second, "agent: lookup never reached the provider", func() bool {
-		return lister.calls.Load() != 0
-	})
-	time.Sleep(200 * time.Millisecond)
-	close(lister.release)
-	collectModels(t, done, callers)
-	if calls := lister.calls.Load(); calls != 1 {
-		t.Fatalf("agent: provider models calls = %d, want 1 collapsed lookup", calls)
-	}
 }
