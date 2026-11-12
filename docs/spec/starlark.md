@@ -16,7 +16,7 @@ The agent host implements one interface. It is built from small interfaces that 
 
 ```go
 type Journal interface {
-	Started(start RunStart) (RunStart, error)
+	Started(start RunStart) (RunStart, *Outcome, error)
 	Lookup(run string, n int) (Recorded, bool)
 	Record(slot Slot, result jsontext.Value) error
 	Completed(run string, outcome Outcome) error
@@ -43,7 +43,7 @@ type Effects interface {
 }
 ```
 
-- `Started` MUST journal `script.started` when the run id is new in the open turn and return the given start. For a known open run id it MUST NOT journal and MUST return the pinned start. A known run id that completed earlier in the same open turn MUST fail as a duplicate run id. A run id from a prior turn MUST start fresh. The engine MUST execute the pinned `Source` with the pinned `Seed`.
+- `Started` MUST journal `script.started` when the run id is new in the open turn and return the given start. For a known open run id it MUST NOT journal and MUST return the pinned start. A known run id that completed earlier in the same open turn MUST return its recorded outcome when the request has the same entry point, source, and arguments. The engine MUST NOT run the source again. A different request with that run id MUST fail as a duplicate run id. A run id from a prior turn MUST start fresh. The recorded outcome has the status that the run ended with. A completed run has the value. A failed or stopped run has the code, the message, and the stage. It has no prints. The engine MUST execute the pinned `Source` with the pinned `Seed`.
 - `Lookup` MUST return the recorded effect `n` of a run in the open turn. `Recorded.Interrupted` MUST be `true` when the effect started and its outcome is unknown after the host applied the recovery table. `Recorded.Error` MUST hold the failure text of a failed effect. `Recorded.Denied` MUST be `true` only for a recorded denial.
 - `Record` MUST journal `script.effect` with `run_id`, `n`, `op`, `args_sha`, and `result`. The engine calls `Record` for `time`, `sleep`, and `judge`.
 - `Completed` MUST journal `script.completed` for the run: `ok` and `value` for status `completed`, otherwise `ok=false` and the error message. The engine MUST call it once when any started run ends: an eval cell, a plugin tool, hook, or command, and a workflow.

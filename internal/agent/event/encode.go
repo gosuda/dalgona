@@ -308,7 +308,11 @@ func scriptMembers(e Event) ([]member, error) {
 		fields := []member{field("run_id", stringValue(value.RunID)), field("ok", boolValue(value.OK))}
 		fields = optionalRaw(fields, "value", value.Value)
 		fields = optionalBlobField(fields, "value_blob", value.ValueBlob)
-		return optionalString(fields, "error", value.Error), nil
+		fields = optionalString(fields, "error", value.Error)
+		fields = optionalString(fields, "status", value.Status)
+		fields = optionalString(fields, "code", value.Code)
+		fields = optionalString(fields, "stage", value.Stage)
+		return fields, nil
 	default:
 		return nil, fmt.Errorf("event: %T does not match type %s", e, e.Type())
 	}

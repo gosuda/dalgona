@@ -183,9 +183,12 @@ func registerHook(add func(registration)) builtinFunc {
 }
 
 func (p *Plugins) invoke(ctx context.Context, fx Effects, inv invocation) (Outcome, error) {
-	start, err := fx.Started(RunStart{ID: inv.runID, Entry: "plugins/" + inv.file.name, Source: inv.file.source, Args: inv.args, Seed: newSeed()})
+	start, done, err := fx.Started(RunStart{ID: inv.runID, Entry: "plugins/" + inv.file.name, Source: inv.file.source, Args: inv.args, Seed: newSeed()})
 	if err != nil {
 		return Outcome{}, fmt.Errorf("plugin run %s: start run: %w", inv.runID, err)
+	}
+	if done != nil {
+		return *done, nil
 	}
 	return complete(fx, start.ID, inv.run(ctx, fx, start))
 }

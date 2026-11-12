@@ -14,9 +14,12 @@ type Workflow struct {
 }
 
 func RunWorkflow(ctx context.Context, fx Effects, w Workflow) (Outcome, error) {
-	start, err := fx.Started(RunStart{ID: w.ID, Entry: w.Entry, Source: w.Source, Args: w.Args, Seed: newSeed()})
+	start, done, err := fx.Started(RunStart{ID: w.ID, Entry: w.Entry, Source: w.Source, Args: w.Args, Seed: newSeed()})
 	if err != nil {
 		return Outcome{}, fmt.Errorf("workflow %s: start run: %w", w.ID, err)
+	}
+	if done != nil {
+		return *done, nil
 	}
 	return complete(fx, start.ID, runWorkflow(ctx, fx, start))
 }

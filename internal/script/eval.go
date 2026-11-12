@@ -82,9 +82,12 @@ func (e *Eval) Run(ctx context.Context, call tool.Call, _ tool.Env) (tool.Result
 	if outcome.Status != "" {
 		return replyResult(call.ID, outcome)
 	}
-	start, err := e.fx.Started(RunStart{ID: call.ID, Entry: EvalName, Source: []byte(req.code), Args: call.Args, Seed: newSeed()})
+	start, done, err := e.fx.Started(RunStart{ID: call.ID, Entry: EvalName, Source: []byte(req.code), Args: call.Args, Seed: newSeed()})
 	if err != nil {
 		return tool.Result{}, fmt.Errorf("eval %s: start run: %w", call.ID, err)
+	}
+	if done != nil {
+		return replyResult(call.ID, *done)
 	}
 	outcome, err = complete(e.fx, start.ID, e.started(ctx, start))
 	if err != nil {

@@ -3,6 +3,7 @@ package scripthost_test
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"io"
 	"log/slog"
@@ -23,6 +24,8 @@ import (
 	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/decide"
+	"github.com/gosuda/dalgona/internal/journal"
+	"github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/scripthost"
 )
 
@@ -133,6 +136,66 @@ func TestScriptReplaysRecordedEffectsAfterCrash(t *testing.T) {
 	}
 	if judge.requests.Load() != 1 || count(events, event.TypeScriptCompleted) != 1 {
 		t.Fatalf("judge requests = %d, script.completed = %d", judge.requests.Load(), count(events, event.TypeScriptCompleted))
+	}
+}
+
+func TestRecoveredEvalReturnsRecordedOutcome(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	home := t.TempDir()
+	store, err := journal.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceBlob, err := store.PutBlob([]byte("7"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := jsontext.Value(`{"code":"7"}`)
+	records := []event.Event{
+		event.SessionCreated{ID: "t1", Cwd: h.cwd, Model: h.cfg.Config.Model, Approval: string(h.cfg.Config.Approval), Sandbox: "off", Runner: "local"},
+		event.TurnStarted{TurnID: "t"},
+		event.UserMessage{ItemID: "m1", TurnID: "t", Kind: "prompt", Text: "run it"},
+		event.AssistantMessage{ItemID: "a1", TurnID: "t", StopReason: "tool_calls", ToolCalls: []event.ToolCall{{ID: "e", Name: "eval", Args: args}}},
+		event.ToolStarted{CallID: "e", TurnID: "t", Tool: "eval", Class: "script", Args: args},
+		event.ScriptStarted{RunID: "e", SourceBlob: event.BlobRef{Blob: sourceBlob, Bytes: 1}, Entry: "eval", Args: args, Seed: 1},
+		event.ScriptCompleted{RunID: "e", OK: true, Value: jsontext.Value("8")},
+	}
+	appendRecords(t, store, records)
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.model.push(text("done"))
+	h.open(home)
+	if err = h.host.Recover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	thread, err := h.host.Resume(t.Context(), "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := h.idle(thread)
+	want, err := (script.Outcome{Status: script.StatusCompleted, Value: jsontext.Value("8")}).Reply("e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := outputs(events)["e"].Output; got != string(want) {
+		t.Fatalf("recovered eval output = %s, want %s", got, want)
+	}
+}
+
+func appendRecords(t *testing.T, store *journal.Store, records []event.Event) {
+	t.Helper()
+	raws := make([][]byte, 0, len(records))
+	for _, item := range records {
+		raw, err := event.Encode(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raws = append(raws, raw)
+	}
+	if _, err := store.Append(t.Context(), "t1", raws...); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -577,6 +577,9 @@ type ScriptCompleted struct {
 	Value     jsontext.Value
 	ValueBlob *BlobRef
 	Error     string
+	Status    string
+	Code      string
+	Stage     string
 }
 
 func (ScriptCompleted) Type() string { return TypeScriptCompleted }

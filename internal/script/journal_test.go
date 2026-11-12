@@ -36,14 +36,14 @@ func newJournal(fn toolFunc) *journal {
 	return &journal{starts: map[string]script.RunStart{}, records: map[string]map[int]script.Recorded{}, tool: fn}
 }
 
-func (j *journal) Started(start script.RunStart) (script.RunStart, error) {
+func (j *journal) Started(start script.RunStart) (script.RunStart, *script.Outcome, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if pinned, ok := j.starts[start.ID]; ok {
-		return pinned, nil
+		return pinned, nil, nil
 	}
 	j.starts[start.ID] = start
-	return start, nil
+	return start, nil, nil
 }
 
 func (j *journal) Lookup(run string, n int) (script.Recorded, bool) {

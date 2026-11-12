@@ -53,7 +53,7 @@ type JudgeRequest struct {
 }
 
 type Journal interface {
-	Started(start RunStart) (RunStart, error)
+	Started(start RunStart) (RunStart, *Outcome, error)
 	Lookup(run string, n int) (Recorded, bool)
 	Record(slot Slot, result jsontext.Value) error
 	Completed(run string, outcome Outcome) error

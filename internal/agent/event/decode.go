@@ -258,6 +258,7 @@ func decodeScriptEvent(kind string, r *objectReader) (Event, error) {
 		value, valueBlob := r.rawPayload("value")
 		return ScriptCompleted{
 			RunID: r.str("run_id"), OK: r.boolean("ok"), Value: value, ValueBlob: valueBlob, Error: r.str("error"),
+			Status: r.str("status"), Code: r.str("code"), Stage: r.str("stage"),
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported script event %q", kind)
