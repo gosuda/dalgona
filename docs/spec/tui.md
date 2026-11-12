@@ -135,6 +135,16 @@ Tab and Shift+Tab MUST cycle the effort of the highlighted model.
 Enter MUST write `model` with `config/value/write`, and MUST write `model_reasoning_effort` after it when the effort changed.
 A failed write MUST keep the model picker open and MUST show `Could not save` in its hint row.
 
+The settings panel MUST list seven rows in this order: Approval, Verbosity, Theme, Icons, Status, Edit review, and Notifications.
+Up and Down MUST move between rows. Left and Right MUST change the value of a row. On Status, they MUST move between the seven status items.
+Space MUST toggle a status item on Status, and MUST change the value of any other row.
+Theme, verbosity, and icons MUST take effect at once while the panel is open.
+Enter MUST save the changed rows in one `config/batchWrite` request. The keyPaths MUST be the wire names `approval`, `verbosity`, `theme`, `icons`, `statusHide`, `editReview`, and `notifications`.
+A failed save MUST keep the settings panel open and MUST show `Could not save settings` in the live row. A key press MUST NOT clear that text. It MUST stay until the panel closes or a save succeeds.
+While a save is in flight, Enter MUST send no request.
+A successful save that changes approval MUST show `saved; open threads keep their approval and sandbox`. Any other successful save MUST show `Saved to <file>`.
+Esc MUST restore the saved values and MUST close the settings panel.
+
 ## Print
 
 The client MUST call `tea.Println` only from `drain`, and MUST have at most one print in flight.

@@ -71,6 +71,9 @@ type model struct {
 	confirm     *confirmation
 	matchSeq    int
 	review      *reviewState
+	settings    *settingsPanel
+	saving      *settingsPanel
+	prefs       map[string]string
 }
 
 type connInfo struct {

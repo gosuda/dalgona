@@ -122,6 +122,8 @@ func (m *model) applySetting(setting settingValue) {
 		}
 	case "statusHide":
 		m.setStatusHide(setting.Value)
+	default:
+		m.rememberSetting(setting)
 	}
 }
 
@@ -291,6 +293,8 @@ func (m *model) applySuccessResult(msg resultMsg) tea.Cmd {
 		return m.applyInitialize(msg.value)
 	case "settings":
 		return m.applySettings(msg.value)
+	case "settingsSave":
+		return m.applySettingsSaved(msg)
 	default:
 		return m.applyConfirmation(msg)
 	}
@@ -438,11 +442,12 @@ func (m *model) applyInterrupt(msg resultMsg) tea.Cmd {
 	return nil
 }
 
+func (m *model) panelFailed(msg resultMsg) bool {
+	return m.saveFailed(msg) || m.settingsFailed(msg) || m.reviewFailed(msg)
+}
+
 func (m *model) applyResultError(msg resultMsg) tea.Cmd {
-	if m.saveFailed(msg) {
-		return nil
-	}
-	if m.reviewFailed(msg) {
+	if m.panelFailed(msg) {
 		return nil
 	}
 	if msg.op == "send" || msg.op == "steer" {

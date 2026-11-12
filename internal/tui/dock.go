@@ -55,7 +55,7 @@ func (m *model) dockLines() []string {
 }
 
 func (m *model) panelOpen() bool {
-	return len(m.approvals) > 0 || m.confirm != nil || m.list != nil
+	return len(m.approvals) > 0 || m.confirm != nil || m.list != nil || m.settings != nil
 }
 
 func (m *model) inputRows(width, limit int) ([]string, int, int) {
@@ -340,6 +340,8 @@ func (m *model) liveText() string {
 	switch {
 	case m.hint.text != "":
 		return m.screen.dockTheme().paint(roleDim, m.hint.text)
+	case m.settings != nil && m.settings.saveErr != "":
+		return m.screen.dockTheme().paintBold(roleFailedText, m.settings.saveErr)
 	case m.notice != "":
 		notice := m.noticeLine()
 		if m.noticeError {
@@ -403,6 +405,8 @@ func (m *model) panelLines() []string {
 		return framePanel(&m.screen, m.listPanelView(), panelRows(panelList, m.screen.height))
 	case m.popupShown():
 		return m.popupLines()
+	case m.settings != nil:
+		return framePanel(&m.screen, m.settingsView(), panelRows(panelSettings, m.screen.height))
 	default:
 		return nil
 	}

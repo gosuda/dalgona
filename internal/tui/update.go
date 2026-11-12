@@ -124,6 +124,8 @@ func (m *model) overlayKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return m.confirmKey(key), true
 	case m.list != nil:
 		return m.listKey(msg), true
+	case m.settings != nil:
+		return m.settingsKey(msg), true
 	}
 	return nil, false
 }
