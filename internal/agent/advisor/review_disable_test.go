@@ -62,3 +62,25 @@ func TestAdmitBlocker_discardsAfterAdmissionWhenDisabled(t *testing.T) {
 		t.Fatalf("notes = %+v, want none delivered after the disable", notes)
 	}
 }
+
+func TestAdmitBlocker_discardsWhenReviewCannotBeRead(t *testing.T) {
+	h := newHarness(t, nil)
+	_, rt := h.start()
+	a := rt.advisors[0]
+	child, err := a.ensureChild(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.guard.BeginReview()
+	if err = child.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	verdict, err := a.admitBlocker(t.Context(), advice{note: "drop the column", severity: SeverityBlocker})
+	if err != nil {
+		t.Fatalf("admitBlocker = %v, want a discarded verdict with no error", err)
+	}
+	if verdict != verdictDiscarded {
+		t.Fatalf("verdict = %q, want %q", verdict, verdictDiscarded)
+	}
+}

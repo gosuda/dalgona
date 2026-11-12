@@ -382,8 +382,13 @@ func (a *advisor) admit(ctx context.Context, parsed advice) (string, error) {
 }
 
 func (a *advisor) admitBlocker(ctx context.Context, parsed advice) (string, error) {
-	if safe, err := a.safeSoFar(); err != nil || !safe || !a.enabled() {
-		return verdictDiscarded, err
+	safe, err := a.safeSoFar()
+	if err != nil {
+		slog.Warn("advisor: blocker discarded, review unreadable", "advisor", a.name, "error", err)
+		return verdictDiscarded, nil
+	}
+	if !safe || !a.enabled() {
+		return verdictDiscarded, nil
 	}
 	admission := a.guard.Admit(parsed.note, parsed.severity)
 	if admission.Verdict != VerdictAccepted {
