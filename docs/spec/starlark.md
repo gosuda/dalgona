@@ -43,14 +43,14 @@ type Effects interface {
 }
 ```
 
-- `Started` MUST journal `script.started` when the run id is new in the open turn and return the given start. For a known open run id it MUST NOT journal and MUST return the pinned start. A known run id that completed earlier in the same open turn MUST return its recorded outcome when the request has the same entry point, source, and arguments. The engine MUST NOT run the source again. A different request with that run id MUST fail as a duplicate run id. A run id from a prior turn MUST start fresh. The recorded outcome has the status that the run ended with. A completed run has the value. A failed or stopped run has the code, the message, and the stage. It has no prints. The engine MUST execute the pinned `Source` with the pinned `Seed`.
+- `Started` MUST journal `script.started` when the run id is new in the open turn and return the given start. For a known open run id it MUST NOT journal and MUST return the pinned start. A known run id that completed earlier in the same open turn MUST return its recorded outcome. That outcome applies only when the request has the same entry point, source, and arguments. The engine MUST NOT run the source again. A different request with that run id MUST fail as a duplicate run id. A run id from a prior turn MUST start fresh. The recorded outcome has the status that the run ended with. A completed run has the value. A failed or stopped run has the code, the message, and the stage. It has no prints. The engine MUST execute the pinned `Source` with the pinned `Seed`.
 - `Lookup` MUST return the recorded effect `n` of a run in the open turn. `Recorded.Interrupted` MUST be `true` when the effect started and its outcome is unknown after the host applied the recovery table. `Recorded.Error` MUST hold the failure text of a failed effect. `Recorded.Denied` MUST be `true` only for a recorded denial.
 - `Record` MUST journal `script.effect` with `run_id`, `n`, `op`, `args_sha`, and `result`. The engine calls `Record` for `time`, `sleep`, and `judge`.
 - `Completed` MUST journal `script.completed` for the run: `ok` and `value` for status `completed`, otherwise `ok=false` and the error message. The engine MUST call it once when any started run ends: an eval cell, a plugin tool, hook, or command, and a workflow.
 - `CallTool` MUST run the tool through approvals and the thread's runner. It MUST journal `tool.started` and `tool.completed` with `call_id = "<run>/<n>"`. A later `Lookup` of that index MUST return the recorded value. A tool failure MUST return an error. A denial MUST wrap `script.ErrDenied`.
 - `Spawn` MUST journal `child.spawned` with `call_id = "<run>/<n>"`. A later `Lookup` MUST return the child id as a JSON string.
 - `Wait` MUST return the final text of each child, in input order.
-- `Judge` MUST ask the decider for `req.Model`, or for the resolved `[approval] decider` when the model is empty. It MUST return an object that maps each question name to an object with `choice`, `noul`, `score`, `probabilities`, and `confidence` as the answer has them.
+- `Judge` MUST ask the decider for `req.Model`, or for the resolved `[approval_decider] decider` when the model is empty. It MUST return an object that maps each question name to an object with `choice`, `noul`, `score`, `probabilities`, and `confidence` as the answer has them.
 
 ## Effects and replay
 
@@ -87,7 +87,7 @@ Workflows and `eval` cells have `ctx` and `tools` (the same as `ctx.tools`). Plu
 - `ctx.wait(ids)` MUST return a list of final texts.
 - `ctx.sleep(seconds)` MUST accept a non-negative finite number.
 - `ctx.log(msg)` MUST pass the message to `Log`.
-- `ctx.judge(state, questions, model = None)` MUST return a dict from question name to answer. The state MUST be a string, dict, or list. Each question MUST be a dict with `type` `choice`, `noul`, `bool`, or `score`; `bool` MUST be sent as `noul`. A `choice` answer is `struct(choice, probabilities, confidence)`. A `noul` answer is `struct(noul)`. A `score` answer is `struct(score, probabilities, confidence)`. A missing field MUST be `None`.
+- `ctx.judge(state, questions, model = None)` MUST return a dict from question name to answer. The state MUST be a string, dict, or list. Each question MUST be a dict with `type` `choice`, `noul`, `bool`, or `score`. `bool` MUST be sent as `noul`. A `choice` answer is `struct(choice, probabilities, confidence)`. A `noul` answer is `struct(noul)`. A `score` answer is `struct(score, probabilities, confidence)`. A missing field MUST be `None`.
 - `ctx.judge_batch(states, questions, concurrency = 8, model = None)` MUST return one `struct(answers, error)` per state, in input order. `concurrency` MUST be from 1 to 64. An item failure MUST set `error` and MUST NOT raise. Invalid questions, an invalid concurrency, and each stop condition listed for `ctx.try_call` MUST raise. A batch MUST hold at most 4096 states.
 
 ## The eval tool
@@ -95,6 +95,8 @@ Workflows and `eval` cells have `ctx` and `tools` (the same as `ctx.tools`). Plu
 `eval` has class `Script`. Its arguments MUST be `{"code": str, "uses"?: [str], "data"?: any}`. Another field MUST fail with code `invalid_args` and stage `args`.
 
 A cell MUST see `ctx`, `tools`, and `data`. `data` MUST be `None` when absent. A cell MUST NOT keep globals for the next cell. Each call MUST be a durable run with `run_id = call_id`.
+
+A `data` value that cannot decode MUST fail with status `failed`, code `invalid_args`, and stage `args`.
 
 `uses` lists tool names. The allow list MUST be `[eval] uses` when that key is set. Otherwise it MUST be the tool-mode default. A cell without `uses` MUST get the whole allow list. A `uses` entry outside the allow list MUST stop the cell before it runs, with status `denied`, code `scope_exceeded`, and stage `uses`. A call to a tool outside the cell's list MUST stop the cell with status `denied` and code `scope_exceeded`. `uses` does not limit `ctx.spawn`, `ctx.wait`, `ctx.judge`, `ctx.judge_batch`, `ctx.sleep`, or `ctx.log`.
 
@@ -135,6 +137,8 @@ The reply MUST be:
 ## Workflows
 
 `RunWorkflow` MUST run a file as a durable run. It MUST predeclare `ctx`, `tools`, and `args`, the decoded JSON arguments or `None`. Every tool MUST be reachable and allowed. The engine calls `Completed` with the returned `Outcome`. `Outcome.Reply` MUST encode the reply shape above.
+
+A workflow whose `args` cannot decode MUST fail with status `failed`, code `invalid_args`, and stage `args`.
 
 `dalgona run <file.star> [--arg k=v ...]` MUST read the file in the client and call the daemon method `dalgona/script/run` with `{"entry", "source", "args"?, "cwd"}`. `entry` is the path as typed. `cwd` is the client's working directory. Each `--arg k=v` MUST become member `k` of one `args` object. The value MUST be the JSON value when `v` is valid JSON. Otherwise it MUST be the string `v`. Without `--arg`, `args` MUST be absent and the script MUST see `None`. Another argument shape MUST exit with code 2 and the usage line.
 
