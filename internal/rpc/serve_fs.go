@@ -7,8 +7,12 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"sync"
+	"time"
 )
 
 const fsFileLimit = 16 << 20
@@ -16,6 +20,7 @@ const fsFileLimit = 16 << 20
 type fsParams struct {
 	path, sourcePath, destinationPath, dataBase64 string
 	recursive, force                              *bool
+	watchID                                       string
 }
 
 func decodeFsParams(params jsontext.Value) (fsParams, error) {
@@ -31,6 +36,8 @@ func decodeFsParams(params jsontext.Value) (fsParams, error) {
 			p.destinationPath, err = readString(d)
 		case "dataBase64":
 			p.dataBase64, err = readString(d)
+		case "watchId":
+			p.watchID, err = readString(d)
 		case "recursive":
 			p.recursive, err = readOptBool(d)
 		case "force":
@@ -321,4 +328,232 @@ func copyFile(src, dst string, perm fs.FileMode) error {
 		err = closeErr
 	}
 	return err
+}
+
+const (
+	fsWatchLimit      = 64
+	fsWatchEntryLimit = 10000
+	fsPollBudget      = 20000
+	fsPollInterval    = time.Second
+	fsSlowInterval    = 5 * time.Second
+	fsChangedLimit    = 1000
+)
+
+var fsPolls = &fsPoller{now: time.Now}
+
+type fsPoller struct {
+	now         func() time.Time
+	mu          sync.Mutex
+	windowStart time.Time
+	spent       int
+}
+
+func (p *fsPoller) reserve(entries int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	if now.Sub(p.windowStart) >= fsPollInterval {
+		p.windowStart = now
+		p.spent = 0
+	}
+	if p.spent+entries > fsPollBudget {
+		return false
+	}
+	p.spent += entries
+	return true
+}
+
+type fsFileState struct {
+	size     int64
+	mode     fs.FileMode
+	modified int64
+}
+
+type fsWatcher struct {
+	root   string
+	isDir  bool
+	cancel context.CancelFunc
+	last   map[string]fsFileState
+}
+
+func (s *server) fsWatch(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
+	p, err := decodeFsParams(params)
+	if err != nil {
+		return nil, err
+	}
+	path, err := absPath(p.path)
+	if err != nil {
+		return nil, err
+	}
+	root, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, fsError(path, err)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, fsError(root, err)
+	}
+	names, err := fsChildren(root, info.IsDir())
+	if err != nil {
+		return nil, internalError(err)
+	}
+	if len(names) > fsWatchEntryLimit {
+		return nil, invalidParams("directory has more than 10000 entries")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	watch := &fsWatcher{root: root, isDir: info.IsDir(), cancel: cancel, last: fsStat(names)}
+	if err := s.addFsWatch(p.watchID, watch); err != nil {
+		cancel()
+		return nil, err
+	}
+	go s.pollFsWatch(ctx, p.watchID, watch)
+	o := newOut()
+	o.open()
+	o.str("path", root)
+	o.close()
+	return o.bytes()
+}
+
+func (s *server) addFsWatch(id string, watch *fsWatcher) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return internalError(errors.New("rpc: server is closing"))
+	}
+	if _, ok := s.fsWatches[id]; ok {
+		return invalidParams("watch " + id + " exists")
+	}
+	if len(s.fsWatches) >= fsWatchLimit {
+		return invalidParams("too many watches")
+	}
+	s.fsWatchers.Add(1)
+	s.fsWatches[id] = watch
+	return nil
+}
+
+func (s *server) fsUnwatch(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
+	p, err := decodeFsParams(params)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	watch, ok := s.fsWatches[p.watchID]
+	delete(s.fsWatches, p.watchID)
+	s.mu.Unlock()
+	if !ok {
+		return nil, invalidParams("unknown watch " + p.watchID)
+	}
+	watch.cancel()
+	return emptyObject(), nil
+}
+
+func (s *server) stopFsWatches() {
+	s.mu.Lock()
+	watches := slices.Collect(maps.Values(s.fsWatches))
+	clear(s.fsWatches)
+	s.mu.Unlock()
+	for _, watch := range watches {
+		watch.cancel()
+	}
+	s.fsWatchers.Wait()
+}
+
+func (s *server) pollFsWatch(ctx context.Context, id string, watch *fsWatcher) {
+	defer s.fsWatchers.Done()
+	delay := fsPollInterval
+	for {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		delay = s.pollFsOnce(id, watch, fsPolls)
+	}
+}
+
+func (s *server) pollFsOnce(id string, watch *fsWatcher, budget *fsPoller) time.Duration {
+	names, err := fsChildren(watch.root, watch.isDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		names, err = nil, nil
+	}
+	if err != nil || len(names) > fsWatchEntryLimit {
+		return fsPollInterval
+	}
+	if !budget.reserve(len(names)) {
+		return fsSlowInterval
+	}
+	current := fsStat(names)
+	changed := fsDiff(watch.last, current)
+	watch.last = current
+	s.sendFsChanged(id, changed)
+	return fsPollInterval
+}
+
+func fsChildren(root string, isDir bool) ([]string, error) {
+	if !isDir {
+		return []string{root}, nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, filepath.Join(root, entry.Name()))
+	}
+	return names, nil
+}
+
+func fsStat(names []string) map[string]fsFileState {
+	out := make(map[string]fsFileState, len(names))
+	for _, name := range names {
+		info, err := os.Lstat(name)
+		if err != nil {
+			continue
+		}
+		out[name] = fsFileState{size: info.Size(), mode: info.Mode(), modified: info.ModTime().UnixNano()}
+	}
+	return out
+}
+
+func fsDiff(before, after map[string]fsFileState) []string {
+	var changed []string
+	for name, entry := range after {
+		if old, ok := before[name]; !ok || old != entry {
+			changed = append(changed, name)
+		}
+	}
+	for name := range before {
+		if _, ok := after[name]; !ok {
+			changed = append(changed, name)
+		}
+	}
+	slices.Sort(changed)
+	return changed
+}
+
+func (s *server) sendFsChanged(id string, paths []string) {
+	for start := 0; start < len(paths); start += fsChangedLimit {
+		end := min(start+fsChangedLimit, len(paths))
+		s.send("fs/changed", fsChanged{watchID: id, paths: paths[start:end]})
+	}
+}
+
+type fsChanged struct {
+	watchID string
+	paths   []string
+}
+
+func (n fsChanged) write(o *out) {
+	o.open()
+	o.str("watchId", n.watchID)
+	o.key("changedPaths")
+	o.openArray()
+	for _, path := range n.paths {
+		o.text(path)
+	}
+	o.closeArray()
+	o.close()
 }

@@ -55,6 +55,8 @@ func init() {
 		"fs/readDirectory":               (*server).fsReadDirectory,
 		"fs/remove":                      (*server).fsRemove,
 		"fs/copy":                        (*server).fsCopy,
+		"fs/watch":                       (*server).fsWatch,
+		"fs/unwatch":                     (*server).fsUnwatch,
 		"dalgona/keywords/list":          (*server).keywordsList,
 		"dalgona/keywords/match":         (*server).keywordsMatch,
 		"dalgona/thread/tree":            (*server).threadTree,
@@ -68,18 +70,20 @@ func init() {
 }
 
 type server struct {
-	host     *agent.Host
-	opts     ServeOptions
-	closing  bool
-	conn     *Conn
-	log      *slog.Logger
-	mu       sync.Mutex
-	watches  map[string]*watch
-	procs    map[string]context.CancelFunc
-	pending  map[string]context.CancelFunc
-	logins   map[string]context.CancelFunc
-	watchers sync.WaitGroup
-	tasks    sync.WaitGroup
+	host       *agent.Host
+	opts       ServeOptions
+	closing    bool
+	conn       *Conn
+	log        *slog.Logger
+	mu         sync.Mutex
+	watches    map[string]*watch
+	procs      map[string]context.CancelFunc
+	pending    map[string]context.CancelFunc
+	logins     map[string]context.CancelFunc
+	watchers   sync.WaitGroup
+	tasks      sync.WaitGroup
+	fsWatches  map[string]*fsWatcher
+	fsWatchers sync.WaitGroup
 }
 
 type watch struct {
@@ -113,6 +117,7 @@ func ServeWith(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host, o
 	s := &server{
 		host: host, log: cmp.Or(opts.Logger, slog.Default()), opts: opts,
 		watches: map[string]*watch{}, pending: map[string]context.CancelFunc{}, logins: map[string]context.CancelFunc{},
+		fsWatches: map[string]*fsWatcher{},
 	}
 	s.conn = newConnection(ctx, conn, s.handle)
 	s.conn.start()
@@ -149,6 +154,7 @@ func (s *server) shutdown() {
 		w.stop()
 	}
 	s.watchers.Wait()
+	s.stopFsWatches()
 }
 
 func (s *server) handle(ctx context.Context, name string, params jsontext.Value) (jsontext.Value, error) {

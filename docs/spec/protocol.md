@@ -90,6 +90,7 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `fs/readFile {path}`, `fs/writeFile {path, dataBase64}`, `fs/createDirectory {path, recursive?}` | `{dataBase64}`, `{}`, `{}`. See File methods. |
 | `fs/getMetadata {path}`, `fs/readDirectory {path}` | `{isDirectory, isFile, isSymlink, createdAtMs, modifiedAtMs}`, `{entries: [{fileName, isDirectory, isFile}]}`. See File methods. |
 | `fs/remove {path, recursive?, force?}`, `fs/copy {sourcePath, destinationPath, recursive?}` | `{}`. See File methods. |
+| `fs/watch {watchId, path}`, `fs/unwatch {watchId}` | `{path}`, `{}`. The server sends `fs/changed` notifications for a watch. See File methods. |
 | `dalgona/retry/wait {threadId, turnId, remainingMs}` | Notification, not a method. Sent once a second during an attended rate-limit wait, and once with `remainingMs` 0 when the wait ends. Not journaled. |
 
 `thread/revert`, `thread/fork`, `turn/start`, and `dalgona/thread/leaf/set` require an idle thread. A running thread MUST give `-32600` `thread <id> is running`.
@@ -115,6 +116,14 @@ The `fs/*` methods MUST take absolute paths. A relative path MUST give `-32602` 
 `fs/readDirectory` MUST list entries sorted by name. A path that is not a directory MUST give `-32602` `not a directory: <path>`.
 
 `fs/copy` MUST copy a directory only when `recursive` is true. Otherwise it MUST give `-32602` `copying a directory needs recursive`.
+
+`fs/watch` MUST resolve links in `path`. It MUST watch the entry of a file, or the direct entries of a directory. It MUST refuse a watch id that already exists, a connection with 64 watches, and a directory with more than 10000 entries.
+
+`fs/watch` MUST poll each watch once a second. A poll MUST send `fs/changed {watchId, changedPaths}` for each path whose size, mode, or modification time changed, or that appeared or vanished. A message MUST name at most 1000 paths.
+
+One poll MUST stat at most 20000 entries across all watches. A watch whose poll would exceed that budget MUST poll again after 5 seconds.
+
+`fs/unwatch` MUST stop the watch. An unknown watch id MUST give `-32602` `unknown watch <id>`.
 
 Any other OS failure MUST give `-32603` with the cause.
 

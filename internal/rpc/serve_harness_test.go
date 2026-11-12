@@ -394,6 +394,8 @@ var responseSchemas = map[string]string{
 	"fs/readDirectory":       "v2/FsReadDirectoryResponse.json",
 	"fs/remove":              "v2/FsRemoveResponse.json",
 	"fs/copy":                "v2/FsCopyResponse.json",
+	"fs/watch":               "v2/FsWatchResponse.json",
+	"fs/unwatch":             "v2/FsUnwatchResponse.json",
 }
 
 var (
