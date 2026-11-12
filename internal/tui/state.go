@@ -220,7 +220,7 @@ type shellResultMsg struct {
 }
 
 func newModel(client caller, opts Options, done <-chan struct{}) model {
-	approvalMode := cmp.Or(opts.Approval, "auto")
+	approvalMode := opts.Approval
 	sandbox := cmp.Or(opts.Sandbox, "workspace-write")
 	if approvalMode == "yolo" {
 		sandbox = "off"

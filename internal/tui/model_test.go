@@ -101,7 +101,7 @@ func TestModelStreamsItemsAndShowsStates(t *testing.T) {
 	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"hel"}`)})
 	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"lo"}`)})
 	view := m.View().Content
-	for _, want := range []string{"hello", "Working", "default ✓ ⊡"} {
+	for _, want := range []string{"hello", "Working", "default ⊡"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("streaming view missing %q:\n%s", want, view)
 		}

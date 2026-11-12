@@ -161,7 +161,7 @@ func (m *model) startThread() tea.Cmd {
 func (m *model) newThread() tea.Cmd {
 	params := rpc.ThreadStartParams{
 		Model:          m.thread.modelName,
-		ApprovalPolicy: approvalPolicy(m.thread.approvalMode),
+		ApprovalPolicy: approvalPolicy(m.conn.opts.Approval),
 		Sandbox:        sandboxPolicy(m.thread.sandbox),
 		Cwd:            m.conn.opts.Cwd,
 	}
@@ -174,9 +174,22 @@ func approvalPolicy(mode string) string {
 		return "never"
 	case "ask":
 		return "untrusted"
-	default:
+	case "auto":
 		return "on-request"
 	}
+	return ""
+}
+
+func approvalFromPolicy(policy string) string {
+	switch policy {
+	case "never":
+		return "yolo"
+	case "untrusted":
+		return "ask"
+	case "on-request", "on-failure":
+		return "auto"
+	}
+	return ""
 }
 
 func sandboxPolicy(mode string) string {
@@ -400,7 +413,8 @@ func (m *model) applyLevels(msg resultMsg) {
 
 type resumedThread struct {
 	rpc.ThreadReadResponse
-	effort string
+	effort   string
+	approval string
 }
 
 func (m *model) applyDataResult(msg resultMsg) tea.Cmd {
@@ -590,6 +604,7 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	}
 	previous := m.thread.id
 	m.setThread(response.Thread.ID)
+	m.thread.approvalMode = approvalFromPolicy(response.approval)
 	m.thread.effort = response.effort
 	m.thread.title = threadTitle(response.Thread)
 	m.noticeMoved(m.thread.title)
@@ -632,6 +647,7 @@ func (m *model) applyNewThread(value any) tea.Cmd {
 		return m.unexpectedResult("new thread")
 	}
 	m.setThread(response.Thread.ID)
+	m.thread.approvalMode = approvalFromPolicy(response.ApprovalPolicy)
 	m.thread.effort = response.ReasoningEffort
 	m.thread.title = threadTitle(response.Thread)
 	m.noticeMoved(m.thread.title)
