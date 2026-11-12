@@ -1,6 +1,6 @@
 # Advisor
 
-The advisor is an optional reviewer. It reads the transcript of a primary thread and sends short notes back into that thread. Both products, `dal` and `dalgona`, MUST support it. The advisor MUST NOT approve or reject actions. The advisor MUST NOT change primary session state, except when it delivers a note.
+The advisor is an optional reviewer. It reads the transcript of a primary thread and sends short notes back into that thread. Both products, `dal` and `dalgona`, MUST support it. The advisor MUST NOT approve or reject actions. The advisor MUST NOT change primary thread state, except when it delivers a note.
 
 ## Configuration
 
@@ -74,19 +74,19 @@ Each file MUST be wrapped as `<watchdog path="<path>">` + content + `</watchdog>
 
 ## Runtime
 
-There MUST be one advisor runtime per pair of thread and advisor name. The runtime MUST be a child session in the journal: `session.created` with `parent` and `advisor: <name>`. Its transcript, usage, and in-flight review MUST recover after a crash like any thread. The advisor MUST NOT be a peer. `thread/list` MUST NOT list it. Clients MUST NOT address it, except read-only through `thread/read`.
+There MUST be one advisor runtime per pair of thread and advisor name. The runtime MUST be a child thread in the journal: `session.created` with `parent` and `advisor: <name>`. Its transcript, usage, and in-flight review MUST recover after a crash like any thread. The advisor MUST NOT be a peer. `thread/list` MUST NOT list it. Clients MUST NOT address it, except read-only through `thread/read`.
 
-`Attach(ctx, host, thread, cfg)` MUST build one runtime for every roster entry of the thread. The runtime MUST create the advisor session at its first review. An existing advisor session MUST be resumed with the advisor tools and prompt. `Runtime.Close` MUST remove the boundary hook, stop the review loops, and close every advisor session. A later `Attach` MUST then resume the session with its own tools. When `Attach` fails, it MUST close every advisor session that it opened.
+`Attach(ctx, host, thread, cfg)` MUST build one runtime for every roster entry of the thread. The runtime MUST create the advisor thread at its first review. An existing advisor thread MUST be resumed with the advisor tools and prompt. `Runtime.Close` MUST remove the boundary hook, stop the review loops, and close every advisor thread. A later `Attach` MUST then resume the thread with its own tools. When `Attach` fails, it MUST close every advisor thread that it opened.
 
 The advisor model MUST be the first non-empty value of: the entry `model`, `[roles] advisor`, `[roles] slow`, the role `advisor`. The host role resolver MUST then resolve that value against the thread model.
 
 ### Review input
 
-A review MUST receive the primary's new active-path events after the advisor cursor (a journal seq). The cursor MUST reset on compaction, revert, leaf move, and fork. After a reset, the next review MUST replay the bounded current active path. When the advisor is enabled mid-session, the cursor MUST start at the current head. A fork without an advisor session MUST start its cursor at 0.
+A review MUST receive the primary's new active-path events after the advisor cursor (a journal seq). The cursor MUST reset on compaction, revert, leaf move, and fork. After a reset, the next review MUST replay the bounded current active path. When the advisor is enabled mid-thread, the cursor MUST start at the current head. A fork without an advisor thread MUST start its cursor at 0.
 
 The review text MUST be at most 64 KiB minus 1024 bytes, so that the journal keeps it inline. The runtime MUST keep the newest rendered events that fit. When older events do not fit, the text MUST start with `[<n> earlier events omitted]`. The newest event that does not fit MUST keep its first and last bytes, joined by `\n[<k> bytes omitted]\n`, when at least 64 bytes of budget remain.
 
-The advisor session MUST receive the review as one prompt: `<review seq="<head>">\n` + review text + `</review>\n`. `<head>` MUST be the primary journal head that the review covers. The review prompt MUST be submitted with `Input.Verbatim`, so that keywords and `@path` mentions in the primary transcript add no notice, no attachment, and no effort change. Each review prompt MUST request effort `medium`. After a restart, the cursor MUST be the `seq` of the last review prompt whose advisor turn completed. When no such prompt exists, the cursor MUST start at the current head. The last review prompt MUST then complete once. When it succeeds, the cursor MUST move to its `seq`.
+The advisor thread MUST receive the review as one prompt: `<review seq="<head>">\n` + review text + `</review>\n`. `<head>` MUST be the primary journal head that the review covers. The review prompt MUST be submitted with `Input.Verbatim`. Keywords and `@path` mentions in the primary transcript MUST add no notice, no attachment, and no effort change. Each review prompt MUST request effort `medium`. After a restart, the cursor MUST be the `seq` of the last review prompt whose advisor turn completed. When no such prompt exists, the cursor MUST start at the current head. The last review prompt MUST then complete once. When it succeeds, the cursor MUST move to its `seq`.
 
 `Render(events)` MUST produce the review text with these elements, one per line group:
 
@@ -106,17 +106,19 @@ Delivered notes MUST NOT appear in review input. The `advisor.note` event MUST N
 
 ### Cadence
 
-A boundary is the point after a model step whose tool calls all completed (`turn`) or the point where the model stops calling tools (`agent-end`). The end of a failed or interrupted turn MUST also be an `agent-end` boundary, but the primary MUST NOT wait there. With `review = "turn"`, every boundary MUST be eligible. With `review = "agent-end"`, only `agent-end` boundaries MUST be eligible. A boundary of a continuation turn MUST NOT be eligible. Only an advisor `continue` delivery while idle MUST start a continuation turn. Input that arrives while the `turn_end` hook runs MUST start a normal turn when auto-continue is on, and MUST NOT start a turn when auto-continue is off. The advisor MUST review at every `interval`-th eligible boundary. Events from skipped boundaries MUST go into the next review. A review MUST NOT start while the previous review of the same advisor runs. Reviews that are requested during a running review MUST merge into one review.
+A boundary is the point after a model step whose tool calls all completed (`turn`) or the point where the model stops calling tools (`agent-end`). The end of a failed or interrupted turn MUST also be an `agent-end` boundary, but the primary MUST NOT wait there. With `review = "turn"`, every boundary MUST be eligible. With `review = "agent-end"`, only `agent-end` boundaries MUST be eligible. A boundary of a continuation turn MUST NOT be eligible. Only an advisor `continue` delivery while idle MUST start a continuation turn. Input that arrives while the `turn_end` hook runs MUST start a normal turn when the turn completed and auto-continue is on. The advisor MUST review at every `interval`-th eligible boundary. Events from skipped boundaries MUST go into the next review. A review MUST NOT start while the previous review of the same advisor runs. Reviews that are requested during a running review MUST merge into one review.
 
 ### Tools
 
-The advisor MUST have the `advise` tool with arguments `{note, severity}`, where `severity` is `nit`, `concern`, or `blocker`. It MUST also have the tools in its `tools` list that the runtime can build: `read`, `search`, `exec`, and `web_fetch`. Other names MUST NOT give the advisor a tool. Those tools MUST run through the same approval gate and runner as primary tools, in the advisor's own snapshot store. An advisor session has no approval client, so it MUST NOT wait for a human decision: in `ask` mode its calls fall back to the configured decider, and decline when no decider is configured. A call to a tool that is not granted MUST return `Tool <name> not found`.
+The advisor MUST have the `advise` tool with arguments `{note, severity}`, where `severity` is `nit`, `concern`, or `blocker`. It MUST also have the tools in its `tools` list that the runtime can build: `read`, `search`, `exec`, and `web_fetch`. Other names MUST NOT give the advisor a tool. Those tools MUST run through the same approval gate and runner as primary tools, in the advisor's own snapshot store. An advisor thread has no approval client. It MUST NOT wait for a user decision. In `ask` mode, its calls fall back to the configured decider. When no decider is configured, its calls decline. A call to a tool that is not granted MUST return `Tool <name> not found`.
 
 The `advise` result MUST be exactly one word: the guard verdict, or `discarded` when the review output is unsafe (see Failures). An accepted `blocker` MUST go to the primary before the tool returns. An accepted `nit` or `concern` MUST stay pending until the review ends. At the end of a completed review, the runtime MUST deliver the pending notes in order. The runtime MUST compute them from the advisor journal: the accepted `advise` results of this review, applied in order through a fresh guard. A pending note that a later admission names in `Displaced` MUST be dropped. Because `Thread.Deliver` journals each (advisor, review_seq, note) once, a repeated delivery after a crash MUST NOT add an event.
 
+An `advise` call whose arguments exceed 64 KiB MUST fail with the error `advise: note is too long`.
+
 ### Emission guard
 
-Each advisor MUST have its own guard. `Normalize(note)` MUST apply, in order: NFKC, lowercase, replace each run of characters that are not Unicode letters or numbers with one space, and trim the ends.
+Each advisor MUST have its own guard. `Normalize(note)` MUST apply NFKC, then lowercase. It MUST then replace each run of characters that are not Unicode letters or numbers with one space. It MUST then trim the ends.
 
 `Guard.Admit(note, severity)` MUST return one verdict. The tool result MUST state it as `accepted`, `duplicate`, `noise`, or `budget`.
 
@@ -127,13 +129,13 @@ Each advisor MUST have its own guard. `Normalize(note)` MUST apply, in order: NF
 
 A rejected note MUST NOT change guard state. A `blocker` MUST NOT use a budget slot.
 
-Displacement: when the budget is full, a non-blocker note MAY replace the lowest-severity pending note of the current review, but only when its severity is strictly higher. The admission MUST name the replaced note in `Displaced`. The caller MUST drop that pending note before it queues the accepted note. A re-raise of a pending note from the same review at a higher severity MUST name that note in `Displaced`. A pending note that a `blocker` re-raise replaces MUST free its slot. `Guard.Delivered(key)` MUST mark a note as delivered. A delivered note MUST keep its slot and MUST NOT be displaced. Notes from an earlier review MUST NOT be displaced.
+Displacement: when the budget is full, a non-blocker note MAY replace the lowest-severity pending note of the current review. It MAY do so only when its severity is strictly higher. The admission MUST name the replaced note in `Displaced`. The caller MUST drop that pending note before it queues the accepted note. A re-raise of a pending note from the same review at a higher severity MUST name that note in `Displaced`. A pending note that a `blocker` re-raise replaces MUST free its slot. `Guard.Delivered(key)` MUST mark a note as delivered. A delivered note MUST keep its slot and MUST NOT be displaced. Notes from an earlier review MUST NOT be displaced.
 
 `Guard.BeginReview()` MUST clear the budget slots and MUST keep the duplicate history. `Guard.Reset()` MUST clear both. The runtime MUST call `Reset` when the cursor resets. `Admit` MUST be safe for concurrent calls.
 
 ### Delivery
 
-The primary MUST journal each accepted note as `advisor.note {advisor, severity, note, review_seq, delivery}`. The model MUST receive the note in the next user-role content as `<advisory advisor="<name>" severity="<severity>">` + escaped note + `</advisory>`. The note text MUST escape `&`, `<`, and `>`.
+The primary MUST journal each accepted note as `advisor.note {advisor, severity, note, review_seq, delivery}`. The model MUST receive the note in the next user-role content as `<advisory advisor="<name>" severity="<severity>">` + escaped note + `</advisory>`. The note text MUST escape `&`, `<`, `>`, `"`, and `'`.
 
 `Route(state, severity, policy)` MUST choose `delivery`:
 
@@ -159,13 +161,13 @@ An idle primary MUST start at most one continuation per batch of notes. After th
 
 ### Sync
 
-`sync = "off"` MUST NOT make the primary wait. `sync = "final"` MUST make the primary wait at each `agent-end` boundary until every review requested so far has ended, before it reports the turn completed. `sync = "strict"` MUST also make the primary wait at every boundary that requested a review. A wait MUST end when the review ends with any outcome, when the advisor halts or is disabled, when the primary turn is interrupted, or when the runtime closes.
+`sync = "off"` MUST NOT make the primary wait. `sync = "final"` MUST make the primary wait at each `agent-end` boundary until every review requested so far has ended, before it reports the turn completed. `sync = "strict"` MUST also make the primary wait at every boundary that requested a review. A wait MUST end when the review ends with any outcome. A wait MUST also end when the advisor halts or is disabled. A wait MUST also end when the primary turn is interrupted or the runtime closes.
 
 ### Failures
 
 Reviews MUST use the shared retry rules. A review fails when the advisor turn does not complete, when its output is unsafe, or when a delivery fails. After 3 failed reviews in a row, the advisor MUST stop with status `halted`. It MUST stay halted until `Runtime.Reset` (`/advisor reset`) or a restart. A successful review MUST reset the count. A failed review MUST NOT move the cursor.
 
-The output of a review is unsafe when an assistant text of the review contains a destructive shell directive that the review input does not contain. The rule set MUST come from `internal/agent/rules`: `rules.Check` with the rules `recursive-delete`, `git-destructive`, `publish`, and `deploy`. Candidates MUST be each text line, with backticks removed and a leading `$` removed, and each backtick span. An assistant text stored as a blob MUST count as unsafe. A `blocker` MUST be delivered only when the review output up to its call is safe and the advisor is enabled. Otherwise its result MUST be `discarded`. An unsafe review MUST deliver none of its pending notes. A blocker that was delivered before later unsafe output MUST stay delivered. When a live blocker delivery fails, the guard MUST forget that admission, so that a re-raise can be accepted.
+The output of a review is unsafe when an assistant text of the review contains a destructive shell directive. A directive that the review input also contains does not make the output unsafe. The rule set MUST come from `internal/agent/rules`: `rules.Check` with the rules `recursive-delete`, `git-destructive`, `publish`, and `deploy`. Candidates MUST be each text line, with backticks removed and a leading `$` removed, and each backtick span. An assistant text stored as a blob MUST count as unsafe. A `blocker` MUST be delivered only when the review output up to its call is safe and the advisor is enabled. Otherwise its result MUST be `discarded`. An unsafe review MUST deliver none of its pending notes. A blocker that was delivered before later unsafe output MUST stay delivered. When a live blocker delivery fails, the guard MUST forget that admission, so that a re-raise can be accepted.
 
 ### Protocol
 
@@ -173,11 +175,14 @@ The server MUST send the notification `dalgona/advisor/note {threadId, advisor, 
 
 - `dalgona/advisor/status {threadId}` MUST return `[{name, model, status, notes, usage}]`. `status` MUST be `idle`, `reviewing`, `halted`, or `disabled`.
 - `dalgona/advisor/set {threadId, enabled}` MUST turn the advisor on or off for the thread.
+- `dalgona/advisor/reset {threadId}` MUST clear the halted state and the failure count of the thread's advisors. The `status`, `set`, and `reset` methods MUST attach the thread's advisor runtime when it is not attached.
 
-The server MUST serve these methods from the thread runtime. `Runtime.Status()` MUST return one entry per roster entry, sorted by name. `notes` MUST count the `advisor.note` events of the advisor on the primary active path after its last compaction. `usage` MUST sum the usage of the assistant messages on the advisor session active path after its last compaction. `Runtime.SetEnabled(enabled)` MUST turn every roster entry on or off. An entry with `enabled = false` MUST stay `disabled`. Turning an advisor off MUST interrupt its running review, and that review MUST deliver no more notes and MUST NOT count as a failure. Turning it on MUST start the cursor at the current head.
+The server MUST serve these methods from the thread runtime. `Runtime.Status()` MUST return one entry per roster entry, sorted by name. `notes` MUST count the `advisor.note` events of the advisor on the primary active path after its last compaction. `usage` MUST sum the usage of the assistant messages on the advisor thread active path after its last compaction. `Runtime.SetEnabled(enabled)` MUST turn every roster entry on or off. An entry with `enabled = false` MUST stay `disabled`. Turning an advisor off MUST interrupt its running review, and that review MUST deliver no more notes and MUST NOT count as a failure. Turning it on MUST start the cursor at the current head.
 
-The TUI MUST render a note as a dim card `advisor · <severity>: <note>`. `/advisor` MUST toggle the advisor. `/advisor status` MUST list the advisors.
+The `usage` object MUST contain exactly `inputTokens` and `outputTokens`.
+
+The TUI MUST render a note as a dim card. For the advisor named `advisor`, the card reads `advisor · <severity>: <note>`. For any other advisor, the card reads `advisor <name> · <severity>: <note>`. `/advisor` MUST toggle the advisor. `/advisor status` MUST list the advisors.
 
 ### Subagents
 
-A subagent MUST run without an advisor, unless the `task` call, `[advisor] subagents = true`, or the advisor entry opts in. `Attach` MUST start the runtime of a thread with a `parent` as disabled for every advisor that does not apply. An entry with `subagents = true` MUST advise every subagent thread, also when the global key is `false` and the `task` call did not opt in. An entry with `subagents = false` MUST never advise a subagent thread, also when the global key is `true` or the `task` call opted in. An entry with omitted `subagents` MUST advise a subagent exactly when the global rule opts in. A `task` call opts in when its caller passes a configuration with `Subagents` set. The key MUST NOT change behavior on a top-level thread. `[advisor] enabled = false` MUST turn every advisor off, and an entry with `enabled = false` MUST stay off.
+A subagent MUST run without an advisor, unless the `task` call, `[advisor] subagents = true`, or the advisor entry opts in. `Attach` MUST start the runtime of a thread with a `parent` as disabled for every advisor that does not apply. An entry with `subagents = true` MUST advise every subagent thread, also when the global key is `false` and the `task` call did not opt in. An entry with `subagents = false` MUST never advise a subagent thread, also when the global key is `true` or the `task` call opted in. An entry with omitted `subagents` MUST advise a subagent exactly when the global rule opts in. A `task` call opts in when its `advisor` argument is `true`. The key MUST NOT change behavior on a top-level thread. `[advisor] enabled = false` MUST turn every advisor off, and an entry with `enabled = false` MUST stay off.
