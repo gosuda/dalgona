@@ -12,6 +12,9 @@ func (t *Thread) EffectiveSandbox() (config.SandboxMode, error) {
 	if err != nil {
 		return "", err
 	}
+	if settings.Approval == config.ApprovalYolo {
+		return config.SandboxOff, nil
+	}
 	if settings.Sandbox != config.SandboxOff && !runner.Available() {
 		return config.SandboxOff, nil
 	}
