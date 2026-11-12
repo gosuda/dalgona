@@ -147,7 +147,7 @@ The primary MUST journal each accepted note as `advisor.note {advisor, severity,
 
 The immune window is active when a concern or blocker steer was delivered and fewer than `immune_turns` boundaries have passed since then. Inside the window, a `nit` or `concern` MUST be `aside`. A `blocker` MUST ignore the window.
 
-The primary is running when `Status.Busy` is true. It is idle when it is not busy and auto-continue is on. It is interrupted when it is not busy and auto-continue is off.
+The primary is running when `Status.Busy` is true and auto-continue is on. It is idle when it is not busy and auto-continue is on. It is interrupted when auto-continue is off, whether or not it is busy. A user interrupt turns auto-continue off, so a turn that is still ending is interrupted.
 
 | Primary | Severity | Outside window | Inside window |
 | --- | --- | --- | --- |
