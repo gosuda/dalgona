@@ -46,6 +46,7 @@ const (
 	reviewFlagged            = "flagged"
 	reviewError              = "error"
 	reviewPathsWithheld      = "[paths withheld: masking failed]"
+	reviewSummaryErrorBytes  = 120
 )
 
 var (
@@ -303,6 +304,74 @@ func reviewSentence(id string) string {
 		}
 	}
 	return "The review raised the flag " + id + "."
+}
+
+type ReviewOutcome struct {
+	Verdict   string
+	Scores    map[string]float64
+	Flags     []string
+	Spoken    []string
+	Error     string
+	Truncated bool
+}
+
+func ReviewSummary(o ReviewOutcome) string {
+	switch o.Verdict {
+	case reviewClean:
+		return "No problems found"
+	case reviewFlagged:
+		text := "Flagged: " + reviewLabels(o.Flags)
+		if len(o.Spoken) == 0 {
+			text += " (not sent to the model)"
+		}
+		return text + reviewCoverage(o.Truncated)
+	case reviewUncertain:
+		return reviewUncertainSummary(o.Scores, o.Truncated)
+	case reviewError:
+		return "Failed: " + truncate(o.Error, reviewSummaryErrorBytes)
+	}
+	return ""
+}
+
+func reviewUncertainSummary(scores map[string]float64, truncated bool) string {
+	var labels []string
+	for _, q := range reviewQuestions {
+		score, ok := scores[q.id]
+		if q.id != soundID && ok && score >= reviewUncertainThreshold && score < reviewFlagThreshold {
+			labels = append(labels, q.label)
+		}
+	}
+	if len(labels) == 0 {
+		if truncated {
+			return "Uncertain: part of the diff was not judged"
+		}
+		return "Uncertain: no label applies"
+	}
+	return "Uncertain: " + strings.Join(labels, ", ") + reviewCoverage(truncated)
+}
+
+func reviewCoverage(truncated bool) string {
+	if truncated {
+		return "; part of the diff was not judged"
+	}
+	return ""
+}
+
+func reviewLabels(ids []string) string {
+	labels := make([]string, 0, len(ids))
+	for _, id := range ids {
+		labels = append(labels, reviewLabel(id))
+	}
+	return strings.Join(labels, ", ")
+}
+
+func reviewLabel(id string) string {
+	for _, q := range reviewQuestions {
+		if q.id == id {
+			return q.label
+		}
+	}
+	return id
 }
 
 func (w *worker) prepareUnit(ctx context.Context, task, name string, changes []event.FileChange) unitInput {

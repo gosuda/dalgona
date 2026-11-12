@@ -13,6 +13,8 @@ var dalgonaNotifications = []string{
 	"dalgona/thread/childSpawned",
 	"dalgona/advisor/note",
 	"dalgona/retry/wait",
+	"dalgona/tool/judged",
+	"dalgona/turn/judged",
 }
 
 func dalgonaSchemaName(method, suffix string) string {

@@ -226,6 +226,36 @@ func (n AdvisorNoteNotification) write(o *out) {
 	o.close()
 }
 
+func (n ToolJudgedNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("turnId", n.TurnID)
+	o.str("itemId", n.ItemID)
+	o.str("verdict", n.Verdict)
+	o.str("summary", n.Summary)
+	writePaths(o, n.Paths)
+	o.close()
+}
+
+func (n TurnJudgedNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("turnId", n.TurnID)
+	o.str("verdict", n.Verdict)
+	o.str("summary", n.Summary)
+	writePaths(o, n.Paths)
+	o.close()
+}
+
+func writePaths(o *out, paths []string) {
+	o.key("paths")
+	o.openArray()
+	for _, path := range paths {
+		o.text(path)
+	}
+	o.closeArray()
+}
+
 func (p CommandExecutionRequestApprovalParams) write(o *out) {
 	o.open()
 	o.str("threadId", p.ThreadID)

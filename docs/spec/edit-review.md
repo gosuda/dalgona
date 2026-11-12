@@ -136,3 +136,15 @@ The turn review MUST send the cumulative change of each path, with 0 context lin
 A path whose last change has a post-image digest but no post-image blob MUST be listed in `skipped`. That path MUST NOT be judged. A deletion has no post-image by nature, so its last change MUST be judged. The path of a deletion MUST NOT be listed in `skipped`.
 
 The turn review MUST wait at most 8 seconds for its one request. The turn review MUST NOT speak when it is truncated, but it MUST still journal its verdict. A turn that the user interrupts MUST journal an error verdict and MUST NOT add a message.
+
+## Clients
+
+The server MUST send `dalgona/tool/judged` for each judged edit call, and `dalgona/turn/judged` for each judged turn. Each notification MUST carry the verdict and a `summary`.
+
+The `summary` of a `clean` verdict MUST be `No problems found`. The `summary` of a `flagged` verdict MUST start with `Flagged:` and MUST list the labels of its flags. It MUST add ` (not sent to the model)` when no flag speaks.
+
+The `summary` of an `uncertain` verdict MUST start with `Uncertain:`. The `summary` of an `error` verdict MUST start with `Failed:`, followed by the error text. The error text MUST be at most 120 bytes, cut at a character boundary.
+
+A review that covered part of the diff MUST add `part of the diff was not judged` to a `flagged` or `uncertain` summary.
+
+These notifications are live only. The server MUST NOT return them in thread history.

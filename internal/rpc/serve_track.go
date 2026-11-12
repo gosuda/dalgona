@@ -77,6 +77,8 @@ var eventHandlers = map[string]eventHandler{
 	event.TypeThreadNamed:       (*tracker).threadNamed,
 	event.TypeThreadArchived:    (*tracker).threadArchived,
 	event.TypeBranch:            (*tracker).branch,
+	event.TypeToolJudged:        (*tracker).toolJudged,
+	event.TypeTurnJudged:        (*tracker).turnJudged,
 }
 
 func (t *tracker) apply(seq uint64, ev event.Event) {
@@ -488,6 +490,26 @@ func (t *tracker) advisorNote(seq uint64, ev event.Event) {
 	})
 	t.sink.notify("dalgona/advisor/note", func() writer {
 		return AdvisorNoteNotification{ThreadID: t.threadID, Advisor: e.Advisor, Severity: e.Severity, Note: e.Note, Delivery: e.Delivery}
+	})
+}
+
+func (t *tracker) toolJudged(_ uint64, ev event.Event) {
+	e, _ := ev.(event.ToolJudged)
+	t.sink.notify("dalgona/tool/judged", func() writer {
+		return ToolJudgedNotification{
+			ThreadID: t.threadID, TurnID: e.TurnID, ItemID: e.CallID, Verdict: e.Verdict,
+			Summary: agent.ReviewSummary(agent.ReviewOutcome{Verdict: e.Verdict, Scores: e.Scores, Flags: e.Flags, Spoken: e.Spoken, Error: e.Error, Truncated: e.Truncated}), Paths: e.Paths,
+		}
+	})
+}
+
+func (t *tracker) turnJudged(_ uint64, ev event.Event) {
+	e, _ := ev.(event.TurnJudged)
+	t.sink.notify("dalgona/turn/judged", func() writer {
+		return TurnJudgedNotification{
+			ThreadID: t.threadID, TurnID: e.TurnID, Verdict: e.Verdict,
+			Summary: agent.ReviewSummary(agent.ReviewOutcome{Verdict: e.Verdict, Scores: e.Scores, Flags: e.Flags, Spoken: e.Spoken, Error: e.Error, Truncated: e.Truncated}), Paths: e.Paths,
+		}
 	})
 }
 

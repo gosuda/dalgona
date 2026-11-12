@@ -384,6 +384,21 @@ type (
 		Note     string `json:"note"`
 		Delivery string `json:"delivery"`
 	}
+	ToolJudgedNotification struct {
+		ThreadID string   `json:"threadId"`
+		TurnID   string   `json:"turnId"`
+		ItemID   string   `json:"itemId"`
+		Verdict  string   `json:"verdict"`
+		Summary  string   `json:"summary"`
+		Paths    []string `json:"paths"`
+	}
+	TurnJudgedNotification struct {
+		ThreadID string   `json:"threadId"`
+		TurnID   string   `json:"turnId"`
+		Verdict  string   `json:"verdict"`
+		Summary  string   `json:"summary"`
+		Paths    []string `json:"paths"`
+	}
 	RetryWaitNotification struct {
 		ThreadID    string `json:"threadId"`
 		TurnID      string `json:"turnId"`

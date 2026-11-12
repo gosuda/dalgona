@@ -895,3 +895,41 @@ func TestRecoveryDoesNotJudgeReapprovedEdit(t *testing.T) {
 		t.Fatalf("a.txt = %q, want the re-approved edit applied", got)
 	}
 }
+
+func TestReviewSummary(t *testing.T) {
+	long := strings.Repeat("e", 200)
+	cases := []struct {
+		name      string
+		verdict   string
+		scores    map[string]float64
+		flags     []string
+		spoken    []string
+		errText   string
+		truncated bool
+		want      string
+	}{
+		{name: "clean", verdict: "clean", want: "No problems found"},
+		{name: "flagged and spoken", verdict: "flagged", flags: []string{"broken_syntax", "lost_code"}, spoken: []string{"broken_syntax"}, want: "Flagged: broken syntax, removed code"},
+		{name: "flagged not sent", verdict: "flagged", flags: []string{"mystery"}, want: "Flagged: mystery (not sent to the model)"},
+		{name: "uncertain labels in table order", verdict: "uncertain", scores: map[string]float64{"lost_code": 0.62, "placeholder": 0.71, "sound": 0.6, "broken_syntax": 0.1}, want: "Uncertain: removed code, placeholder"},
+		{name: "error cut to 120 bytes", verdict: "error", errText: long, want: "Failed: " + long[:120]},
+		{name: "clean with unsent hunks", verdict: "clean", truncated: true, want: "No problems found"},
+		{name: "flagged spoken and truncated", verdict: "flagged", flags: []string{"broken_syntax", "lost_code"}, spoken: []string{"broken_syntax"}, truncated: true, want: "Flagged: broken syntax, removed code; part of the diff was not judged"},
+		{name: "flagged not sent and truncated", verdict: "flagged", flags: []string{"mystery"}, truncated: true, want: "Flagged: mystery (not sent to the model); part of the diff was not judged"},
+		{name: "uncertain without label and truncated", verdict: "uncertain", scores: map[string]float64{"broken_syntax": 0.1, "sound": 0.2}, truncated: true, want: "Uncertain: part of the diff was not judged"},
+		{name: "uncertain without label", verdict: "uncertain", scores: map[string]float64{"broken_syntax": 0.1, "sound": 0.2}, want: "Uncertain: no label applies"},
+		{name: "uncertain labels and truncated", verdict: "uncertain", scores: map[string]float64{"lost_code": 0.62, "placeholder": 0.71, "sound": 0.6, "broken_syntax": 0.1}, truncated: true, want: "Uncertain: removed code, placeholder; part of the diff was not judged"},
+		{name: "error with unsent hunks", verdict: "error", errText: long, truncated: true, want: "Failed: " + long[:120]},
+		{name: "uncertain at the lower bound", verdict: "uncertain", scores: map[string]float64{"lost_code": 0.5}, want: "Uncertain: removed code"},
+		{name: "uncertain stops below the flag threshold", verdict: "uncertain", scores: map[string]float64{"lost_code": 0.9}, want: "Uncertain: no label applies"},
+		{name: "error cut at a character boundary", verdict: "error", errText: "a" + strings.Repeat("가", 50), want: "Failed: a" + strings.Repeat("가", 39)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ReviewSummary(ReviewOutcome{Verdict: tc.verdict, Scores: tc.scores, Flags: tc.flags, Spoken: tc.spoken, Error: tc.errText, Truncated: tc.truncated})
+			if got != tc.want {
+				t.Fatalf("ReviewSummary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
