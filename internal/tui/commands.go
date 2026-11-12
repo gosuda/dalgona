@@ -5,13 +5,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/gosuda/dalgona/internal/rpc"
 )
@@ -365,7 +369,26 @@ func (m *model) applyInitialize(value any) tea.Cmd {
 	m.conn.product = sanitizeText(product)
 	m.conn.version = sanitizeText(version)
 	m.conn.platformFamily = sanitizeText(result.PlatformFamily)
+	m.commit("welcome", m.welcomeLines())
 	return nil
+}
+
+func (m *model) welcomeLines() []string {
+	dim := lipgloss.NewStyle().Faint(true)
+	details := slices.DeleteFunc([]string{m.conn.version, cmp.Or(m.thread.modelName, "default"), displayCwd(m.conn.opts.Cwd)}, func(s string) bool { return s == "" })
+	name := lipgloss.NewStyle().Bold(true).Render(m.conn.product)
+	return []string{name + dim.Render(" "+sanitizeText(strings.Join(details, " · "))), dim.Render("Type a prompt · / commands · ? keys")}
+}
+
+func displayCwd(cwd string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return cwd
+	}
+	if rest, ok := strings.CutPrefix(cwd, home); ok && (rest == "" || rest[0] == filepath.Separator) {
+		return "~" + rest
+	}
+	return cwd
 }
 
 func (m *model) applyLevels(msg resultMsg) {

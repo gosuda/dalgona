@@ -18,6 +18,8 @@ The TUI is a protocol client. It MUST import only `internal/rpc` from this modul
 
 Startup runs these requests in order: `initialize` with client name `dalgona`, the `initialized` notification, `dalgona/settings/read`, `dalgona/keywords/list` (once per connection), `model/list`, then the thread open call. When `icons` is `auto` under kitty, the client also sends the terminal query named in Icons. `Run` returns nil when the user quits or `ctx` ends. On return, `Run` MUST close the RPC connection.
 
+After `initialize` succeeds, the client MUST print one welcome row with the product, version, model, and working directory. A home directory MUST show as `~`. The welcome row MUST use only bold and dim text. When `initialize` fails, the client MUST print the welcome row with the error on one line. Quit MUST print one exit row. The exit row MUST name the thread and the `--resume` command, or say that no thread was started. The client MUST print the exit row before it returns `tea.Quit`, unless the window height is 0. While the client leaves, the view MUST be one blank row.
+
 ## Screen
 
 The TUI MUST run inline, except for the review. The review is the only view that MUST use the alternate screen. A completed item MUST print once to scrollback with `tea.Println`. Completed assistant text MUST render as Markdown through Glamour.

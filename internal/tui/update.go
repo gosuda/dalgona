@@ -323,6 +323,14 @@ func (m *model) quit() {
 	m.closeReview()
 	m.leaving = true
 	m.quitting = true
+	m.commit("exit", []string{m.exitLine()})
+}
+
+func (m *model) exitLine() string {
+	if m.thread.id == "" {
+		return "No thread was started"
+	}
+	return fmt.Sprintf("Thread %s saved · resume with %s --resume %s", sanitizeText(m.thread.title), m.conn.product, sanitizeText(m.thread.id))
 }
 
 func (m *model) finishQuit() tea.Cmd {
