@@ -114,14 +114,22 @@ func (m *model) drain() tea.Cmd {
 	if bound < 1 {
 		return nil
 	}
-	rows := m.takeChunk(bound)
-	if len(rows) == 0 {
+	text, ok := m.nextChunk(bound)
+	if !ok {
 		return nil
 	}
 	m.out.frozen = m.View()
 	m.out.printing = true
 	printed := func() tea.Msg { return printedMsg{} }
-	return tea.Sequence(tea.Println(chunkText(rows)), printed)
+	return tea.Sequence(tea.Println(text), printed)
+}
+
+func (m *model) nextChunk(bound int) (string, bool) {
+	rows := m.takeChunk(bound)
+	if len(rows) == 0 {
+		return "", false
+	}
+	return m.screen.emit(chunkText(rows)), true
 }
 
 func (m *model) takeChunk(bound int) []string {
@@ -154,7 +162,7 @@ func (m *model) renderAdvisorCard(advisor, severity, note string) string {
 	if advisor != "" && advisor != label {
 		label += " " + advisor
 	}
-	return faint.Render(label + " · " + severity + ": " + note)
+	return m.screen.theme.paint(roleDim, label+" · "+severity+": "+note)
 }
 
 func (m *model) renderSettledItem(item rpc.Item) string {

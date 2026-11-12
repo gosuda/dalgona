@@ -69,7 +69,11 @@ func (m *model) editorRows(width, limit int) []string {
 func (m *model) liveRow() string {
 	parts := []string{"state: " + m.thread.state}
 	if m.notice != "" {
-		parts = append(parts, strings.ReplaceAll(m.notice, "\n", " · "))
+		notice := strings.ReplaceAll(m.notice, "\n", " · ")
+		if m.noticeError {
+			notice = m.screen.dockTheme().paintBold(roleFailedText, notice)
+		}
+		parts = append(parts, notice)
 	}
 	if tail := m.liveTail(); tail != "" {
 		parts = append(parts, tail)

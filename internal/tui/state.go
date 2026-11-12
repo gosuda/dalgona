@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -71,14 +72,20 @@ type inputState struct {
 }
 
 type screenState struct {
-	width   int
-	height  int
-	focused bool
-	method  ansi.Method
+	width        int
+	height       int
+	focused      bool
+	method       ansi.Method
+	themeSetting string
+	theme        theme
+	color        bool
+	profile      colorprofile.Profile
+	dark         bool
+	hasDark      bool
 }
 
 type outState struct {
-	markdown map[int]*glamour.TermRenderer
+	markdown map[mdKey]*glamour.TermRenderer
 	printed  map[string]struct{}
 	entries  []entry
 	pending  []string
@@ -131,8 +138,8 @@ func newModel(client caller, opts Options, done <-chan struct{}) model {
 	return model{
 		conn:   connInfo{client: client, opts: opts, done: done},
 		input:  inputState{composer: newComposer()},
-		screen: screenState{width: 80, focused: true},
-		out:    outState{markdown: make(map[int]*glamour.TermRenderer), printed: make(map[string]struct{})},
+		screen: screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII},
+		out:    outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{})},
 		live:   liveState{deltas: new(deltaDecoder)},
 		thread: threadInfo{state: stateIdle, title: "new thread", modelName: opts.Model, approvalMode: approvalMode, sandbox: sandbox},
 	}

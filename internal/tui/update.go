@@ -8,8 +8,8 @@ import (
 )
 
 func (m model) Init() tea.Cmd {
-	start := tea.Sequence(m.initialize(), m.loadKeywords(), m.startThread())
-	return tea.Batch(m.input.composer.Focus(), start)
+	start := tea.Sequence(m.initialize(), m.readSettings(), m.loadKeywords(), m.startThread())
+	return tea.Batch(m.input.composer.Focus(), tea.RequestBackgroundColor, start)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -54,7 +54,7 @@ func (m *model) updateTerminal(msg tea.Msg) bool {
 			m.out.settling = false
 		}
 	default:
-		return false
+		return m.updateColour(msg)
 	}
 	return true
 }
@@ -126,7 +126,9 @@ func (m model) View() tea.View {
 		view.ReportFocus = true
 		return view
 	}
-	return m.dockView()
+	view := m.dockView()
+	view.Content = m.screen.emit(view.Content)
+	return view
 }
 
 func (m *model) noticef(format string, args ...any) {

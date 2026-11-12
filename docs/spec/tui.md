@@ -182,6 +182,22 @@ The sanitizer MUST replace each byte that is not valid UTF-8 with U+FFFD. A raw 
 The client MUST measure text with the width method of its renderer.
 A user whose terminal draws East Asian Ambiguous characters two cells wide MUST set `RUNEWIDTH_EASTASIAN=1`.
 
+## Theme
+
+The `theme` setting MUST be `auto`, `auto-soft`, `day`, `soft-day`, `night`, or `soft-night`.
+`auto` MUST show `night` on a dark terminal and `day` on a light one.
+`auto-soft` MUST show `soft-night` on a dark terminal and `soft-day` on a light one.
+The client MUST learn the background from the terminal's reply to a background colour request.
+Until that reply arrives, `auto` and `auto-soft` MUST show the night theme.
+`NO_COLOR` with any non-empty value MUST turn colour off.
+With colour off, the client MUST keep bold, dim, and reverse video, and MUST NOT emit colour.
+Without colour, Markdown MUST use the no-TTY style.
+Emphasis MUST keep its `*` markers, strong text its `**` markers, and inline code no marker.
+The client MUST paint text in the text, dim, accent-text, and failed-text roles.
+An error notice MUST be bold in the failed-text role.
+A row written before the theme is known MUST NOT use a colour.
+A theme change MUST NOT rewrite a written row.
+
 ## Keyword glow
 
 The TUI reimplements the `internal/keywords` matcher. A keyword matches only as an exact lowercase word in prose. Fenced code, inline code, HTML comments, and XML or HTML elements with their contents are masked first.

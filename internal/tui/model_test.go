@@ -327,8 +327,8 @@ func TestModelRendersSettledAssistantMarkdown(t *testing.T) {
 	m := newModel(nil, Options{}, nil)
 	m.screen.width = 40
 	rendered := stripANSI(m.renderSettledItem(rpc.Item{Type: "agentMessage", Text: "**bold** and `code`"}))
-	if strings.Contains(rendered, "**") || !strings.Contains(rendered, "bold") || !strings.Contains(rendered, "code") {
-		t.Fatalf("settled markdown = %q", rendered)
+	if !strings.Contains(rendered, "**bold**") || !strings.Contains(rendered, "code") {
+		t.Fatalf("settled markdown = %q, want the emphasis markers kept without colour", rendered)
 	}
 }
 

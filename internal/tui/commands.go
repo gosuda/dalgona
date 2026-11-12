@@ -78,6 +78,34 @@ func (m *model) loadKeywords() tea.Cmd {
 	return m.call("keywords", "dalgona/keywords/list", rpc.DalgonaKeywordsListParams{}, &keywords, "")
 }
 
+type settingValue struct {
+	Key   string `json:"key"`
+	Value any    `json:"value"`
+}
+
+type settingsReply struct {
+	Settings []settingValue `json:"settings"`
+}
+
+func (m *model) readSettings() tea.Cmd {
+	var reply settingsReply
+	return m.call("settings", "dalgona/settings/read", struct{}{}, &reply, "")
+}
+
+func (m *model) applySettings(value any) tea.Cmd {
+	reply, ok := value.(*settingsReply)
+	if !ok {
+		return m.unexpectedResult("settings")
+	}
+	for _, setting := range reply.Settings {
+		if text, isText := setting.Value.(string); isText && setting.Key == "theme" {
+			m.screen.themeSetting = text
+		}
+	}
+	m.screen.setTheme()
+	return nil
+}
+
 func (m *model) startThread() tea.Cmd {
 	if m.conn.opts.ThreadID != "" {
 		return m.resumeThread(m.conn.opts.ThreadID)
@@ -219,6 +247,8 @@ func (m *model) applyResult(msg resultMsg) tea.Cmd {
 		return m.applyDataResult(msg)
 	case "send", "followup":
 		return m.applyTurnAccepted(msg.value)
+	case "settings":
+		return m.applySettings(msg.value)
 	default:
 		return m.applyConfirmation(msg)
 	}

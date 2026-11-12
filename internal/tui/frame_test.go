@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gosuda/dalgona/internal/rpc"
@@ -15,6 +16,9 @@ import (
 func playTerminal(m model) model {
 	if !m.out.started && m.screen.height == 0 {
 		m.screen.height = 24
+	}
+	if m.screen.color && m.screen.profile == colorprofile.ASCII {
+		m.screen.profile = colorprofile.TrueColor
 	}
 	m.out.started = true
 	m.out.geometry = m.currentGeometry()

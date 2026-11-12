@@ -141,16 +141,23 @@ func waitStatus(ctx context.Context, t *testing.T, statuses <-chan Status, state
 	}
 }
 
-func serveTurn(conn net.Conn) error {
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
+func answerStartup(conn net.Conn, reader *bufio.Reader) error {
 	if err := answerRequest(conn, reader, "initialize", `{"userAgent":"dalgona/test","codexHome":"/tmp","platformFamily":"unix","platformOs":"linux"}`); err != nil {
 		return err
 	}
 	if err := readNotification(reader, "initialized"); err != nil {
 		return err
 	}
-	if err := answerRequest(conn, reader, "dalgona/keywords/list", `[]`); err != nil {
+	if err := answerRequest(conn, reader, "dalgona/settings/read", `{"settings":[]}`); err != nil {
+		return err
+	}
+	return answerRequest(conn, reader, "dalgona/keywords/list", `[]`)
+}
+
+func serveTurn(conn net.Conn) error {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	if err := answerStartup(conn, reader); err != nil {
 		return err
 	}
 	threadStart := `{"approvalPolicy":"on-request","approvalsReviewer":"user","cwd":"/work","model":"gpt-test",` +
