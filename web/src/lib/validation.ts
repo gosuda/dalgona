@@ -256,16 +256,33 @@ function changeKind(value: unknown): string {
 	return "update";
 }
 
+function fileCount(value: unknown): number | undefined | null {
+	if (value === undefined) {
+		return undefined;
+	}
+	return typeof value === "number" && Number.isInteger(value) && value >= 0
+		? value
+		: null;
+}
+
 function fileChanges(value: unknown): FileChange[] {
 	if (!Array.isArray(value)) {
 		return [];
 	}
 	const changes: FileChange[] = [];
 	for (const entry of value) {
+		if (!isObject(entry)) {
+			continue;
+		}
+		const additions = fileCount(entry["additions"]);
+		const deletions = fileCount(entry["deletions"]);
+		const omitted = entry["diffOmitted"];
 		if (
-			!isObject(entry) ||
 			typeof entry["path"] !== "string" ||
-			typeof entry["diff"] !== "string"
+			typeof entry["diff"] !== "string" ||
+			additions === null ||
+			deletions === null ||
+			(omitted !== undefined && typeof omitted !== "boolean")
 		) {
 			continue;
 		}
@@ -273,6 +290,9 @@ function fileChanges(value: unknown): FileChange[] {
 			path: entry["path"],
 			diff: entry["diff"],
 			kind: changeKind(entry["kind"]),
+			diffOmitted: omitted === true,
+			...(additions === undefined ? {} : { additions }),
+			...(deletions === undefined ? {} : { deletions }),
 		});
 	}
 	return changes;

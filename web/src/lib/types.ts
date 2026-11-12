@@ -36,6 +36,9 @@ export interface FileChange {
 	readonly path: string;
 	readonly diff: string;
 	readonly kind: string;
+	readonly additions?: number;
+	readonly deletions?: number;
+	readonly diffOmitted: boolean;
 }
 
 export type JsonValue =

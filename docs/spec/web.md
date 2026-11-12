@@ -147,6 +147,13 @@ No advisor failure opens the error banner.
 - A failed turn ends with `The turn failed: <message>. Send your message again to retry, or start a new thread.`
 - A turn that is retrying after an error shows `Retrying after an error: <message>`.
 - An interrupted turn shows `Turn interrupted. Send a message to continue.`
+- Each file change MUST show one diff card with its path and its kind word.
+- A diff card MUST show its line counts as text when the server sends `additions`.
+- The kind word MUST read `Added`, `Changed`, or `Deleted`.
+- A diff card MUST mark each added line and each removed line with its own element, and MUST keep the prefix character.
+- A diff card MUST show at most 60 lines and MUST say how many lines it hides.
+- A diff card MUST show `Diff not shown.` when the server omits the diff.
+- Rows and diffs MUST be chosen by item kind, not by tool name.
 
 ### Markdown
 

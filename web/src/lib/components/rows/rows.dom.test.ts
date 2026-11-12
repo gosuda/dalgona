@@ -55,7 +55,14 @@ describe("transcript rows", () => {
 				{
 					id: "f1",
 					kind: "fileChange",
-					changes: [{ path: "a.txt", diff: "-old\n+new", kind: "update" }],
+					changes: [
+						{
+							path: "a.txt",
+							diff: "-old\n+new",
+							kind: "update",
+							diffOmitted: false,
+						},
+					],
 					status: "completed",
 				},
 				{
@@ -199,6 +206,7 @@ describe("transcript rows", () => {
 			path: "a.txt",
 			diff: "-old\n+new",
 			kind: "update" as const,
+			diffOmitted: false,
 		};
 		const { container } = render(Transcript, {
 			props: props([
@@ -211,5 +219,35 @@ describe("transcript rows", () => {
 			]),
 		});
 		expect(container.querySelectorAll(".file-change")).toHaveLength(2);
+	});
+
+	test("renders a rewrite change as a file-change row", () => {
+		const { container } = render(Transcript, {
+			props: props([
+				{
+					id: "f2",
+					kind: "fileChange",
+					changes: [
+						{
+							path: "b.txt",
+							kind: "update",
+							diff: "--- a/b.txt\n+++ b/b.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n",
+							additions: 1,
+							deletions: 1,
+							diffOmitted: false,
+						},
+					],
+					status: "completed",
+				},
+			]),
+		});
+		const rows = container.querySelectorAll(".file-change");
+		expect(rows).toHaveLength(1);
+		const summary = rows[0]?.querySelector("summary")?.textContent ?? "";
+		expect(summary).toContain("Changed");
+		expect(summary).toContain("b.txt");
+		expect(summary).toContain("+1 −1");
+		expect(rows[0]?.querySelector("del")?.textContent).toBe("-beta");
+		expect(rows[0]?.querySelector("ins")?.textContent).toBe("+gamma");
 	});
 });

@@ -1,4 +1,5 @@
 <script lang="ts">
+import DiffCard from "#lib/components/DiffCard.svelte";
 import type { RowProps } from "#lib/components/rows/types.ts";
 import StateTag from "#lib/components/StateTag.svelte";
 import { stateKey } from "#lib/labels.ts";
@@ -19,10 +20,7 @@ let { item, awaiting }: RowProps = $props();
 			{/if}
 		</header>
 		{#each item.changes as change, index (`${index}:${change.path}`)}
-			<details class="file-change">
-				<summary><span class="file-path">{change.path}</span> · {change.kind}</summary>
-				<pre class="output">{change.diff}</pre>
-			</details>
+			<DiffCard {change} open={false} />
 		{/each}
 	</article>
 {/if}
@@ -58,28 +56,5 @@ let { item, awaiting }: RowProps = $props();
 		color: var(--dim);
 		font-size: var(--size-caption);
 		font-variant-numeric: tabular-nums;
-	}
-
-	.file-change {
-		max-width: 70ch;
-		margin-block-start: var(--space-3);
-		color: var(--dim);
-		font-size: var(--size-small);
-	}
-
-	.file-change summary {
-		color: var(--text);
-		cursor: pointer;
-		font-weight: 600;
-	}
-
-	.output {
-		max-height: 24rem;
-		margin-block-start: var(--space-3);
-		overflow: auto;
-		overscroll-behavior: contain;
-		color: var(--dim);
-		font-size: var(--size-caption);
-		line-height: 1.55;
 	}
 </style>
