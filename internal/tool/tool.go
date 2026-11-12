@@ -83,11 +83,8 @@ type FileChange struct {
 }
 
 type Plan struct {
-	Files []FileChange
-	Apply func(ctx context.Context) (Result, error)
-	// Discard releases resources held for Apply (directory pins).
-	// It is idempotent and safe to call after Apply. Call it when
-	// the plan will not be applied, such as a declined approval.
+	Files   []FileChange
+	Apply   func(ctx context.Context) (Result, error)
 	Discard func()
 }
 

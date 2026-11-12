@@ -92,6 +92,8 @@ A refused call MUST name the file and the line, and MUST write nothing.
 
 All parse, binding, coverage, shape, overlap, and path checks MUST finish before the first write. Valid no-ops MUST return `no_change`. Mixed batches MUST apply only effective edits. A plan that fails after preparation MUST release its pinned directory handles. A second release MUST succeed.
 
+A plan that will not be applied, such as a declined approval, MUST be released through `Discard`.
+
 A call MUST contain at least one edit. A call MUST NOT contain more than 64 edits. A call MUST NOT contain more than 8 MiB of input.
 
 `Plan` MUST unmask secret placeholders after parsing and before resolution. It MUST unmask only locator text, apply_patch context, and new content. It MUST NOT unmask paths, rename destinations, tags, or references. A placeholder with no known value MUST fail the call. The error MUST name the placeholder.
