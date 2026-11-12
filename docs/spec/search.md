@@ -44,6 +44,16 @@ Search MUST pass the index root, the generation name, its clock, and the racy wi
 
 An index failure is exit status 1 whose output names an unusable index or a corrupt index. After an index failure, Search MUST remove `CURRENT` only when it still names the failed generation. Removing `CURRENT` reads the file and then removes it, so a publish between those two steps is removed too. The search then runs without an index until the next build, and its output does not change. Search MUST run the same call again without an index, under a new process id. Search MUST log an index failure at warn level, and the model MUST NOT receive it.
 
+When a grep call counts at least `indexRebuildBytes` uncovered bytes, Search MUST start one build for the workspace.
+
+The search call MUST NOT wait for a build. A build that runs longer than 10 minutes MUST be killed. Any build failure MUST kill the build child and wait for its exit. The generation MUST be removed only after that exit is confirmed.
+
+A workspace MUST have at most one build start in each process, even when that build fails.
+
+After an unusable index, Search MUST NOT start a build for that workspace in any process for 10 minutes. A failed build MUST NOT block a build in a new process.
+
+Deleting the directory `search` under the product home MUST restore the scan, and no other state changes.
+
 ## Fuzzy file search
 
 The `fuzzyFileSearch` method MUST list regular files under each requested root and MUST NOT list directories.

@@ -41,6 +41,13 @@ func newIndexLocal(t *testing.T) *runner.Local {
 
 func indexedEnv(t *testing.T, files map[string]string) (tool.Env, string) {
 	t.Helper()
+	env, root := buildEnv(t, files)
+	publishIndexFor(t, env.Cwd, root)
+	return env, root
+}
+
+func buildEnv(t *testing.T, files map[string]string) (tool.Env, string) {
+	t.Helper()
 	requireIndexHost(t)
 	base := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(base, "tmp"), 0o700); err != nil {
@@ -57,7 +64,6 @@ func indexedEnv(t *testing.T, files map[string]string) (tool.Env, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	publishIndexFor(t, ws, root)
 	env := tool.Env{
 		Runner: newIndexLocal(t), Cwd: ws, Home: home, Snapshots: snapshot.New(),
 		Sandbox: runner.Sandbox{Mode: runner.SandboxWorkspaceWrite},

@@ -120,16 +120,22 @@ func runGrep(ctx context.Context, env tool.Env, id string, raw jsontext.Value) (
 
 func grepWithIndex(ctx context.Context, env tool.Env, ref indexRef, id string, raw jsontext.Value) (outcome, error) {
 	result, err := runSearch(ctx, env, id, raw, ref)
-	if ref.gen == "" || !isIndexFailure(err) {
-		return result, err
+	if err != nil && ref.gen != "" && isIndexFailure(err) {
+		result, err = retryWithoutIndex(ctx, env, ref, raw, err)
 	}
-	return retryWithoutIndex(ctx, env, ref, raw, err)
+	if err == nil && ref.root != "" && int64(result.Unindexed) >= indexRebuildBytes {
+		startBuild(ref.root, env)
+	}
+	return result, err
 }
 
 func retryWithoutIndex(ctx context.Context, env tool.Env, ref indexRef, raw jsontext.Value, cause error) (outcome, error) {
 	slog.Default().Warn("search: index failed, retrying without it", "root", ref.root, "generation", ref.gen, "error", cause)
 	if err := forgetGeneration(ref.root, ref.gen); err != nil {
 		slog.Default().Warn("search: could not remove the failed index", "root", ref.root, "generation", ref.gen, "error", err)
+	}
+	if err := recordIndexFailure(ref.root, time.Now()); err != nil {
+		slog.Default().Warn("search: could not record the index failure", "root", ref.root, "error", err)
 	}
 	id, err := newProcessID("search-")
 	if err != nil {

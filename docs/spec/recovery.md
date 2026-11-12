@@ -43,6 +43,8 @@ Recovery MUST walk the tool calls of the last `assistant.message` of the open tu
 |`tool.started`, class `remote`|Journal `ok=false`, `recovered=interrupted`, output `interrupted: the tool may have partly run`. The call MUST NOT run again.|
 |`tool.started` for a tool that the thread no longer has|Same as class `remote`.|
 
+A background index build writes no journal event. A crash during a build leaves one generation directory, which the next publish removes.
+
 Sha values MUST be SHA-256 of the file bytes, as lowercase hex. An absent file MUST have the empty sha.
 
 An edit that recovery runs, replays, or completes MUST NOT be judged.
