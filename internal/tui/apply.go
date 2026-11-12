@@ -303,12 +303,18 @@ func (m *model) acceptThread(id string) bool {
 }
 
 func (m *model) setThread(id string) {
-	if id != m.thread.id {
-		m.thread.id = id
-		m.thread.turnID = ""
-		m.thread.seq = 0
-		m.queue = nil
-		m.thread.completedTurns = nil
+	if id == m.thread.id {
+		return
+	}
+	m.thread.id = id
+	m.thread.turnID = ""
+	m.thread.seq = 0
+	m.thread.completedTurns = nil
+}
+
+func (m *model) noticeMoved(title string) {
+	if n := len(m.queue); n > 0 {
+		m.noticef("%d follow-ups moved to %s; press Enter on an empty prompt to send the next", n, title)
 	}
 }
 

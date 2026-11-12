@@ -3,27 +3,30 @@ package tui
 import (
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 
-func TestSetThreadClearsFollowups(t *testing.T) {
+func TestThreadSwitchKeepsFollowups(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
 	m.thread.id = "t1"
-	m.queue = []string{"stale"}
+	m.queue = []string{"a", "b"}
 	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Thread: rpc.Thread{ID: "t2"}}})
-	if len(m.queue) != 0 {
-		t.Fatalf("followups survived /new: %q", m.queue)
+	if len(m.queue) != 2 {
+		t.Fatalf("followups after /new = %q, want both kept", m.queue)
 	}
-	m.input.composer.SetValue("queued")
-	caller := new(fakeCaller)
-	m.conn.client = caller
-	m, command := drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
-	m = runCommand(t, m, command, "queued text after /new did not start a turn")
-	params, ok := caller.calls[len(caller.calls)-1].params.(rpc.TurnStartParams)
-	if len(caller.calls) != 1 || !ok || params.ThreadID != "t2" || params.Input[0].Text != "queued" {
-		t.Fatalf("queued text after /new = %#v, want one turn/start on t2", caller.calls)
+	assertContains(t, m.View().Content, "2 follow-ups moved to")
+	assertContains(t, m.notice, "2 follow-ups moved to")
+}
+
+func TestSameThreadResumeNoticesHeldFollowups(t *testing.T) {
+	t.Parallel()
+	m := newModel(nil, Options{}, nil)
+	m.thread.id = "t1"
+	m.queue = []string{"a", "b"}
+	m, _ = drive(t, m, resultMsg{op: "resumed", value: &rpc.ThreadReadResponse{Thread: rpc.Thread{ID: "t1"}}})
+	assertContains(t, m.notice, "2 follow-ups moved to")
+	if len(m.queue) != 2 {
+		t.Fatalf("followups after a same-thread resume = %q, want both kept", m.queue)
 	}
 }

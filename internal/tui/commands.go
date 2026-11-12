@@ -354,6 +354,7 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	}
 	m.setThread(response.Thread.ID)
 	m.thread.title = threadTitle(response.Thread)
+	m.noticeMoved(m.thread.title)
 	m.setState(threadState(response.Thread.Status))
 	m.live.items = nil
 	var items []rpc.Item
@@ -380,6 +381,7 @@ func (m *model) applyNewThread(value any) tea.Cmd {
 	}
 	m.setThread(response.Thread.ID)
 	m.thread.title = threadTitle(response.Thread)
+	m.noticeMoved(m.thread.title)
 	m.thread.sandbox = serverSandbox(response.Sandbox.Type, m.thread.sandbox)
 	m.live.items = nil
 	m.setState(stateIdle)
@@ -411,6 +413,7 @@ func (m *model) applyForked(value any) tea.Cmd {
 		return m.unexpectedResult("forked thread")
 	}
 	m.setThread(response.Thread.ID)
+	m.noticeMoved(threadTitle(response.Thread))
 	return m.resumeThread(response.Thread.ID)
 }
 
