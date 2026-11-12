@@ -39,8 +39,8 @@ func TestForPathExtensionTable(t *testing.T) {
 	if _, ok := ByName("nope"); ok {
 		t.Fatal("ByName(nope) found")
 	}
-	if got := Names(); !slices.Equal(got, []string{"go", "javascript", "python", "rust", "tsx", "typescript"}) {
-		t.Fatalf("Names() = %v, want the six registry names", got)
+	if got := Names(); !slices.Equal(got, []string{"c", "c_sharp", "cpp", "go", "java", "javascript", "kotlin", "python", "rust", "tsx", "typescript"}) {
+		t.Fatalf("Names() = %v, want the eleven registry names", got)
 	}
 }
 
@@ -238,4 +238,139 @@ func TestSymbolsFixtureRust(t *testing.T) {
 		{Kind: "method", Name: "run", Start: 12, End: 12, Depth: 1},
 		{Kind: "method", Name: "new", Start: 16, End: 18, Depth: 0},
 	})
+}
+
+func TestSymbolsFixtureJava(t *testing.T) {
+	t.Parallel()
+	assertFixtureSymbols(t, "java", "testdata/java/Greeter.java", []Symbol{
+		{Kind: "class", Name: "Greeter", Start: 1, End: 4, Depth: 0},
+		{Kind: "method", Name: "Greeter", Start: 2, End: 2, Depth: 1},
+		{Kind: "method", Name: "hi", Start: 3, End: 3, Depth: 1},
+		{Kind: "interface", Name: "Named", Start: 5, End: 5, Depth: 0},
+		{Kind: "enum", Name: "Mode", Start: 6, End: 6, Depth: 0},
+		{Kind: "class", Name: "Point", Start: 7, End: 7, Depth: 0},
+	})
+}
+
+func TestSymbolsFixtureC(t *testing.T) {
+	t.Parallel()
+	assertFixtureSymbols(t, "c", "testdata/c/sample.c", []Symbol{
+		{Kind: "type", Name: "Pt", Start: 1, End: 3, Depth: 0},
+		{Kind: "type", Name: "Count", Start: 4, End: 4, Depth: 0},
+		{Kind: "function", Name: "add", Start: 5, End: 7, Depth: 0},
+		{Kind: "function", Name: "label", Start: 8, End: 10, Depth: 0},
+	})
+}
+
+func TestSymbolsFixtureCPP(t *testing.T) {
+	t.Parallel()
+	assertFixtureSymbols(t, "cpp", "testdata/cpp/sample.cpp", []Symbol{
+		{Kind: "function", Name: "add", Start: 1, End: 3, Depth: 0},
+		{Kind: "class", Name: "Box", Start: 4, End: 7, Depth: 0},
+		{Kind: "method", Name: "open", Start: 6, End: 6, Depth: 1},
+		{Kind: "method", Name: "reset", Start: 8, End: 8, Depth: 0},
+		{Kind: "module", Name: "util", Start: 9, End: 10, Depth: 0},
+	})
+}
+
+func TestSymbolsFixtureCSharp(t *testing.T) {
+	t.Parallel()
+	assertFixtureSymbols(t, "c_sharp", "testdata/c_sharp/Sample.cs", []Symbol{
+		{Kind: "class", Name: "Greeter", Start: 1, End: 4, Depth: 0},
+		{Kind: "method", Name: "Greeter", Start: 2, End: 2, Depth: 1},
+		{Kind: "method", Name: "Hi", Start: 3, End: 3, Depth: 1},
+		{Kind: "interface", Name: "INamed", Start: 5, End: 5, Depth: 0},
+		{Kind: "enum", Name: "Mode", Start: 6, End: 6, Depth: 0},
+		{Kind: "type", Name: "Pt", Start: 7, End: 7, Depth: 0},
+		{Kind: "class", Name: "Dot", Start: 8, End: 8, Depth: 0},
+	})
+}
+
+func TestSymbolsFixtureKotlin(t *testing.T) {
+	t.Parallel()
+	assertFixtureSymbols(t, "kotlin", "testdata/kotlin/Sample.kt", []Symbol{
+		{Kind: "class", Name: "Box", Start: 1, End: 3, Depth: 0},
+		{Kind: "method", Name: "open", Start: 2, End: 2, Depth: 1},
+		{Kind: "interface", Name: "Named", Start: 4, End: 4, Depth: 0},
+		{Kind: "enum", Name: "Mode", Start: 5, End: 5, Depth: 0},
+		{Kind: "constant", Name: "A", Start: 5, End: 5, Depth: 1},
+		{Kind: "constant", Name: "B", Start: 5, End: 5, Depth: 1},
+		{Kind: "class", Name: "Store", Start: 6, End: 6, Depth: 0},
+		{Kind: "type", Name: "Id", Start: 7, End: 7, Depth: 0},
+	})
+}
+
+func symbolsWithin(t *testing.T, langName string, src []byte) ([]Symbol, Report, error) {
+	t.Helper()
+	lang, ok := ByName(langName)
+	if !ok {
+		t.Fatalf("%s language missing", langName)
+	}
+	if _, err := lang.l.outliner(); err != nil {
+		t.Fatalf("outliner %s: %v", langName, err)
+	}
+	return symbolsFrom(t, lang.NewParser(), src)
+}
+
+func symbolsFrom(t *testing.T, parser *Parser, src []byte) ([]Symbol, Report, error) {
+	t.Helper()
+	type outcome struct {
+		symbols []Symbol
+		report  Report
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		symbols, report, err := parser.Symbols(t.Context(), src)
+		done <- outcome{symbols, report, err}
+	}()
+	select {
+	case got := <-done:
+		return got.symbols, got.report, got.err
+	case <-time.After(10 * time.Second):
+		t.Fatal("Symbols did not return within 10s")
+		return nil, Report{}, nil
+	}
+}
+
+func TestSymbolsCPPIssue1558(t *testing.T) {
+	t.Parallel()
+	lang, ok := ByName("cpp")
+	if !ok {
+		t.Fatal("cpp language missing")
+	}
+	symbols, report, err := symbolsFrom(t, newParser(lang.l, 0), []byte(";e s d>f(T);template"))
+	if err != nil {
+		t.Fatalf("Symbols: %v", err)
+	}
+	if !report.Stopped {
+		t.Fatalf("report = %+v, want Stopped", report)
+	}
+	if len(symbols) != 0 {
+		t.Fatalf("symbols = %d, want none", len(symbols))
+	}
+}
+
+func TestSymbolsOneMiBSingleLine(t *testing.T) {
+	t.Parallel()
+	src := "package p\nvar s = \"" + strings.Repeat("a", 1<<20)
+	_, report, err := symbolsWithin(t, "go", []byte(src))
+	if err != nil {
+		t.Fatalf("Symbols: %v", err)
+	}
+	if !report.Stopped && !report.SyntaxErrors {
+		t.Fatalf("report = %+v, want Stopped or SyntaxErrors", report)
+	}
+}
+
+func TestSymbolsDeeplyNestedBrackets(t *testing.T) {
+	t.Parallel()
+	src := "package p\n" + strings.Repeat("(", 200_000)
+	_, report, err := symbolsWithin(t, "go", []byte(src))
+	if err != nil {
+		t.Fatalf("Symbols: %v", err)
+	}
+	if !report.Stopped && !report.SyntaxErrors {
+		t.Fatalf("report = %+v, want Stopped or SyntaxErrors", report)
+	}
 }

@@ -12,8 +12,13 @@ import (
 	"time"
 
 	"github.com/odvcencio/gotreesitter"
+	c "github.com/odvcencio/gotreesitter/grammars/c"
+	csharp "github.com/odvcencio/gotreesitter/grammars/c_sharp"
+	cpp "github.com/odvcencio/gotreesitter/grammars/cpp"
 	golang "github.com/odvcencio/gotreesitter/grammars/go"
+	java "github.com/odvcencio/gotreesitter/grammars/java"
 	javascript "github.com/odvcencio/gotreesitter/grammars/javascript"
+	kotlin "github.com/odvcencio/gotreesitter/grammars/kotlin"
 	python "github.com/odvcencio/gotreesitter/grammars/python"
 	grammarruntime "github.com/odvcencio/gotreesitter/grammars/runtime"
 	rust "github.com/odvcencio/gotreesitter/grammars/rust"
@@ -47,6 +52,21 @@ var pythonQuery string
 //go:embed queries/rust.scm
 var rustQuery string
 
+//go:embed queries/c.scm
+var cQuery string
+
+//go:embed queries/cpp.scm
+var cppQuery string
+
+//go:embed queries/c_sharp.scm
+var csharpQuery string
+
+//go:embed queries/java.scm
+var javaQuery string
+
+//go:embed queries/kotlin.scm
+var kotlinQuery string
+
 type language struct {
 	name       string
 	extensions []string
@@ -68,8 +88,13 @@ func (l *language) syntaxOnly() bool {
 }
 
 var registry = []*language{
+	newLanguage("c", []string{".c", ".h"}, c.Language, cQuery),
+	newLanguage("c_sharp", []string{".cs"}, csharp.Language, csharpQuery),
+	newLanguage("cpp", []string{".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}, cpp.Language, cppQuery),
 	newLanguage("go", []string{".go"}, golang.Language, goQuery),
+	newLanguage("java", []string{".java"}, java.Language, javaQuery),
 	newLanguage("javascript", []string{".js", ".jsx", ".mjs", ".cjs"}, javascript.Language, javascriptQuery),
+	newLanguage("kotlin", []string{".kt", ".kts"}, kotlin.Language, kotlinQuery),
 	newLanguage("python", []string{".py"}, python.Language, pythonQuery),
 	newLanguage("rust", []string{".rs"}, rust.Language, rustQuery),
 	newLanguage("tsx", []string{".tsx"}, tsx.Language, tsxQuery),
