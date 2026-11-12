@@ -51,6 +51,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [Advisor](spec/advisor.md): review cadence, note delivery, isolation, and recovery.
 - [Magic keywords](spec/keywords.md): user-prose matching, notices, and required tools.
 - [Starlark](spec/starlark.md): durable runs, effect replay, the eval tool, workflows, and plugins.
+- [Ask tool](spec/ask.md): question arguments, cleaning, and result text for the user-question tool.
 
 ### Clients and integrations
 
@@ -83,3 +84,4 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [Web toolchain](decisions/web-toolchain.md): TypeScript compatibility with the Svelte tools.
 - [Connect wire](decisions/connect-wire.md): one framing and field-helper package for the Connect providers.
 - [Edit styles](decisions/edit-styles.md): anchor default, explicit hashline profiles, and no symbol locators.
+- [Ask tool](decisions/ask-tool.md): model questions answered by the user through the client wire.
