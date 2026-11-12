@@ -101,7 +101,7 @@ func TestModelSchedulesShimmerOnlyForVisibleMatch(t *testing.T) {
 func TestComposerAndSentMessageKeywordGlow(t *testing.T) {
 	t.Parallel()
 	table := []Keyword{{Word: "ultrathink", Hue: [2]int{0, 330}}}
-	m := newModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{}, nil)
 	m.screen.width = 8
 	m.input.composer.SetWidth(8)
 	m.input.keywords = table

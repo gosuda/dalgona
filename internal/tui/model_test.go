@@ -68,12 +68,21 @@ func TestModelShowsConnectionLoss(t *testing.T) {
 
 func drive(t *testing.T, m model, msg tea.Msg) (model, tea.Cmd) {
 	t.Helper()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, command := range batch {
+			if command != nil {
+				m, _ = drive(t, m, command())
+			}
+		}
+		return m, nil
+	}
+	m = playTerminal(m)
 	updated, command := m.Update(msg)
 	next, ok := updated.(model)
 	if !ok {
 		t.Fatalf("Update returned %T, want model", updated)
 	}
-	return next, command
+	return settleFrames(next), command
 }
 
 func press(code rune, mod tea.KeyMod, text string) tea.KeyPressMsg {
@@ -106,11 +115,13 @@ func TestModelStreamsItemsAndShowsStates(t *testing.T) {
 	m.thread.sandbox = "off"
 	m, _ = drive(t, m, notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":"provider unavailable"}}`)})
 	view = strings.Join(strings.Fields(m.View().Content), " ")
-	for _, want := range []string{"state: failed", "no sandbox", "retry the turn"} {
+	for _, want := range []string{"state: failed", "no sandbox"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("failure view missing %q:\n%s", want, view)
 		}
 	}
+	assertContains(t, m.View().Content, "error: provider unav")
+	assertContains(t, m.notice, "retry the turn")
 }
 
 func assertContains(t *testing.T, view string, wants ...string) {
@@ -299,7 +310,8 @@ func TestModelTreeSelectionSetsLeaf(t *testing.T) {
 	if last.method != "dalgona/thread/leaf/set" || !ok || params.TurnID != "turn-8" {
 		t.Fatalf("leaf call = %#v", last)
 	}
-	assertContains(t, m.View().Content, "files changed by later turns are not reverted")
+	assertContains(t, m.View().Content, "files changed by later turns are not re")
+	assertContains(t, m.notice, "files changed by later turns are not reverted")
 }
 
 func TestModelRendersSettledAssistantMarkdown(t *testing.T) {
@@ -325,7 +337,7 @@ func TestComposerAcceptsShiftedText(t *testing.T) {
 func TestModelSessionOptionsDriveStatusAndThreadStart(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
-	m := newModel(caller, Options{Model: "openai/gpt-test", Approval: "yolo", Sandbox: "workspace-write", Cwd: "/repo/checkout"}, nil)
+	m := newTestModel(caller, Options{Model: "openai/gpt-test", Approval: "yolo", Sandbox: "workspace-write", Cwd: "/repo/checkout"}, nil)
 	assertContains(t, m.View().Content, "openai/gpt-test · yolo · no sandbox · new thread")
 	m.startThread()()
 	params, ok := caller.calls[0].params.(rpc.ThreadStartParams)

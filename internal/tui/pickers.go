@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"strings"
-
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/rpc"
@@ -22,24 +20,27 @@ type choice struct {
 	active bool
 }
 
-func (m *model) renderSelector() string {
-	lines := []string{m.selector.title, "↑/↓ choose · Enter select · Esc cancel"}
-	for i, item := range m.selector.choices {
-		marker := "  "
-		if i == m.selector.cursor {
-			marker = "› "
-		}
+func (m *model) selectorPanel() panelView {
+	body := make([]string, 0, len(m.selector.choices))
+	for _, item := range m.selector.choices {
 		active := ""
 		if item.active {
 			active = " (active)"
 		}
-		line := marker + item.label + active
+		line := item.label + active
 		if item.detail != "" {
 			line += " — " + item.detail
 		}
-		lines = append(lines, line)
+		body = append(body, line)
 	}
-	return wrapTerminal(strings.Join(lines, "\n"), m.screen.width)
+	return panelView{
+		kind:    m.selector.kind,
+		layout:  panelList,
+		title:   m.selector.title,
+		body:    body,
+		actions: []string{"↑/↓ choose · Enter select · Esc cancel"},
+		cursor:  m.selector.cursor,
+	}
 }
 
 func (m *model) selectKey(key string) tea.Cmd {

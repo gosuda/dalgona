@@ -13,31 +13,31 @@ import (
 )
 
 func (m *model) applyNotification(msg notificationMsg) tea.Cmd {
-	m.pendingCommand = nil
-	if err := m.applyDecodedNotification(msg); err != nil {
+	command, err := m.applyDecodedNotification(msg)
+	if err != nil {
 		m.errorf("protocol error in %s: %v; reconnect with %s or use /new", msg.method, err, m.resumeHint())
 		return nil
 	}
 	m.emitStatus()
-	return m.pendingCommand
+	return command
 }
 
-func (m *model) applyDecodedNotification(msg notificationMsg) error {
+func (m *model) applyDecodedNotification(msg notificationMsg) (tea.Cmd, error) {
 	switch msg.method {
 	case "thread/started", "thread/status/changed", "thread/name/updated", "thread/reverted":
-		return m.applyThreadNotification(msg)
+		return nil, m.applyThreadNotification(msg)
 	case "turn/started", "turn/completed", "turn/plan/updated":
 		return m.applyTurnNotification(msg)
 	case "item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/textDelta", "item/commandExecution/outputDelta":
-		return m.applyItemNotification(msg)
+		return nil, m.applyItemNotification(msg)
 	case "error":
-		return m.applyError(msg.params)
+		return nil, m.applyError(msg.params)
 	case "dalgona/thread/childSpawned":
-		return m.applyChildSpawned(msg.params)
+		return nil, m.applyChildSpawned(msg.params)
 	case "dalgona/advisor/note":
-		return m.applyAdvisorNote(msg.params)
+		return nil, m.applyAdvisorNote(msg.params)
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
@@ -55,14 +55,14 @@ func (m *model) applyThreadNotification(msg notificationMsg) error {
 	}
 }
 
-func (m *model) applyTurnNotification(msg notificationMsg) error {
+func (m *model) applyTurnNotification(msg notificationMsg) (tea.Cmd, error) {
 	switch msg.method {
 	case "turn/started":
-		return m.applyTurnStarted(msg.params)
+		return nil, m.applyTurnStarted(msg.params)
 	case "turn/completed":
 		return m.applyTurnCompleted(msg.params)
 	default:
-		return m.applyPlan(msg.params)
+		return nil, m.applyPlan(msg.params)
 	}
 }
 
@@ -131,7 +131,9 @@ func (m *model) applyAdvisorNote(params jsontext.Value) error {
 		return err
 	}
 	if m.acceptThread(event.ThreadID) {
-		m.pendingCommand = tea.Println(m.renderAdvisorCard(event.Advisor, event.Severity, event.Note))
+		m.out.seq++
+		key := fmt.Sprintf("advisor:%s:%d", event.ThreadID, m.out.seq)
+		m.commit(key, strings.Split(m.renderAdvisorCard(event.Advisor, event.Severity, event.Note), "\n"))
 	}
 	return nil
 }
@@ -150,13 +152,13 @@ func (m *model) applyTurnStarted(params jsontext.Value) error {
 	return nil
 }
 
-func (m *model) applyTurnCompleted(params jsontext.Value) error {
+func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 	var event rpc.TurnCompletedNotification
 	if err := decodeParams(params, &event); err != nil {
-		return err
+		return nil, err
 	}
 	if !m.acceptThread(event.ThreadID) {
-		return nil
+		return nil, nil
 	}
 	m.thread.turnID = ""
 	if m.thread.completedTurns == nil {
@@ -168,10 +170,9 @@ func (m *model) applyTurnCompleted(params jsontext.Value) error {
 		if len(m.queue) > 0 {
 			m.noticef("turn %s; %d follow-up held, press Enter on an empty composer to send it", m.thread.state, len(m.queue))
 		}
-		return nil
+		return nil, nil
 	}
-	m.pendingCommand = m.startQueuedFollowup()
-	return nil
+	return m.startQueuedFollowup(), nil
 }
 
 func (m *model) applyItemStarted(params jsontext.Value) error {
@@ -198,7 +199,7 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 	item := m.liveItem(event.Item.ID).settle(sanitizeItem(event.Item))
 	m.live.items = slices.DeleteFunc(m.live.items, func(live liveItem) bool { return live.ID == item.ID })
 	if !isAdvisorItem(item) {
-		m.pendingCommand = tea.Println(m.renderSettledItem(item))
+		m.commit("item:"+event.ThreadID+":"+item.ID, strings.Split(m.renderSettledItem(item), "\n"))
 	}
 	return nil
 }

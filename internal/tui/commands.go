@@ -196,6 +196,11 @@ func (m *model) applyResult(msg resultMsg) tea.Cmd {
 	if strings.HasPrefix(msg.op, "advisor") {
 		return m.applyAdvisorResult(msg)
 	}
+	if msg.op == "initialize" && msg.err != nil {
+		flat := strings.Join(strings.Fields(msg.err.Error()), " ")
+		m.commit("welcome", []string{m.screen.fit(sanitizeText("Could not start: "+flat+". Press ctrl+c to exit."), terminalWidth(m.screen.width))})
+		return nil
+	}
 	if msg.err != nil {
 		return m.applyResultError(msg)
 	}
@@ -351,16 +356,21 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	m.thread.title = threadTitle(response.Thread)
 	m.setState(threadState(response.Thread.Status))
 	m.live.items = nil
-	lines := make([]string, 0, len(response.Thread.Turns))
+	var items []rpc.Item
 	for _, turn := range response.Thread.Turns {
-		for _, item := range turn.Items {
-			lines = append(lines, m.renderSettledItem(item))
-		}
+		items = append(items, turn.Items...)
 	}
-	if len(lines) == 0 {
-		return tea.Println("resumed " + m.thread.title)
+	head := []string{"resumed " + m.thread.title}
+	if len(items) > maxSettledItems {
+		head = append(head, fmt.Sprintf("%d earlier items are not shown", len(items)-maxSettledItems))
+		items = items[len(items)-maxSettledItems:]
 	}
-	return tea.Println(strings.Join(lines, "\n"))
+	m.out.loads++
+	m.commit(threadKey(m.thread.id, m.out.loads), head)
+	for _, item := range items {
+		m.commit("item:"+m.thread.id+":"+item.ID, strings.Split(m.renderSettledItem(item), "\n"))
+	}
+	return nil
 }
 
 func (m *model) applyNewThread(value any) tea.Cmd {
@@ -373,7 +383,13 @@ func (m *model) applyNewThread(value any) tea.Cmd {
 	m.thread.sandbox = serverSandbox(response.Sandbox.Type, m.thread.sandbox)
 	m.live.items = nil
 	m.setState(stateIdle)
-	return tea.Println("started " + m.thread.title)
+	m.out.loads++
+	m.commit(threadKey(m.thread.id, m.out.loads), []string{"started " + m.thread.title})
+	return nil
+}
+
+func threadKey(threadID string, load int) string {
+	return fmt.Sprintf("thread:%s:%d", threadID, load)
 }
 
 func serverSandbox(serverType, fallback string) string {

@@ -3,28 +3,90 @@ package tui
 import (
 	"cmp"
 	"fmt"
+	"slices"
 	"strings"
+
+	tea "charm.land/bubbletea/v2"
 )
 
-func (m *model) renderView() string {
-	sections := make([]string, 0, 6)
-	if live := m.renderLiveItems(); live != "" {
-		sections = append(sections, live)
+const composerMaxRows = 6
+
+func (m *model) dockLines() []string {
+	if m.screen.height < 2 {
+		return nil
 	}
-	if len(m.approvals) > 0 {
-		sections = append(sections, m.renderApproval())
+	panel := m.panelLines()
+	editorLimit := min(composerMaxRows, max(1, m.screen.height-3))
+	if m.panelOpen() {
+		editorLimit = 1
 	}
-	if m.selector != nil {
-		sections = append(sections, m.renderSelector())
+	editor := m.editorRows(terminalWidth(m.screen.width), editorLimit)
+	budget := m.screen.height - 1
+	showBand, showLive := true, true
+	count := func() int {
+		n := len(editor) + len(panel)
+		if showLive {
+			n++
+		}
+		if showBand {
+			n++
+		}
+		return n
 	}
+	if count() > budget {
+		showBand = false
+	}
+	if count() > budget {
+		showLive = false
+	}
+	lines := slices.Clone(editor)
+	lines = append(lines, panel...)
+	if showLive {
+		lines = append(lines, m.liveRow())
+	}
+	if showBand {
+		lines = append(lines, m.statusRow())
+	}
+	return lines
+}
+
+func (m *model) panelOpen() bool {
+	return len(m.approvals) > 0 || m.selector != nil
+}
+
+func (m *model) editorRows(width, limit int) []string {
+	c := m.input.composer
+	text := glowKeywords(c.textView(), m.input.keywords, m.composerPhase()) + c.placeholderView()
+	rows := m.screen.wrap(text, width)
+	if len(rows) <= limit {
+		return rows
+	}
+	caret := len(m.screen.wrap("› "+string(c.text[:c.cursor]), width)) - 1
+	start := min(max(0, caret-limit+1), len(rows)-limit)
+	return rows[start : start+limit]
+}
+
+func (m *model) liveRow() string {
+	parts := []string{"state: " + m.thread.state}
 	if m.notice != "" {
-		sections = append(sections, wrapTerminal(m.notice, m.screen.width))
+		parts = append(parts, strings.ReplaceAll(m.notice, "\n", " · "))
 	}
-	sections = append(sections, "state: "+m.thread.state)
-	composer := glowKeywords(m.input.composer.textView(), m.input.keywords, m.composerPhase()) + m.input.composer.placeholderView()
-	sections = append(sections, wrapTerminal(composer, m.screen.width))
-	sections = append(sections, m.statusRow())
-	return strings.Join(sections, "\n")
+	if tail := m.liveTail(); tail != "" {
+		parts = append(parts, tail)
+	}
+	return m.screen.fit(strings.Join(parts, " · "), terminalWidth(m.screen.width))
+}
+
+func (m *model) liveTail() string {
+	for i := len(m.live.items) - 1; i >= 0; i-- {
+		if isAdvisorItem(m.live.items[i].Item) {
+			continue
+		}
+		if tail := m.live.items[i].tail(); tail != "" {
+			return tail
+		}
+	}
+	return ""
 }
 
 func (m *model) statusRow() string {
@@ -36,16 +98,22 @@ func (m *model) statusRow() string {
 	if len(m.queue) > 0 {
 		status += fmt.Sprintf(" · %d follow-up queued", len(m.queue))
 	}
-	return wrapTerminal(status, m.screen.width)
+	return m.screen.fit(status, terminalWidth(m.screen.width))
 }
 
-func (m *model) renderLiveItems() string {
-	lines := make([]string, 0, len(m.live.items))
-	for _, item := range m.live.items {
-		if isAdvisorItem(item.Item) {
-			continue
-		}
-		lines = append(lines, wrapTerminal(item.view(), m.screen.width))
+func (m *model) panelLines() []string {
+	switch {
+	case len(m.approvals) > 0:
+		return framePanel(&m.screen, m.approvalPanel(), panelRows(panelApproval, m.screen.height))
+	case m.selector != nil:
+		return framePanel(&m.screen, m.selectorPanel(), panelRows(panelList, m.screen.height))
+	default:
+		return nil
 	}
-	return strings.Join(lines, "\n")
+}
+
+func (m model) dockView() tea.View {
+	view := tea.NewView(strings.Join(m.dockLines(), "\n"))
+	view.ReportFocus = true
+	return view
 }

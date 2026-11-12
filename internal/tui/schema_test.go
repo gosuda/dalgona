@@ -3,12 +3,10 @@ package tui
 import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/gosuda/dalgona/internal/rpc"
@@ -128,11 +126,7 @@ func schemaSettled(t *testing.T, m model, data string) (model, string) {
 	if len(m.live.items) != 0 {
 		t.Fatalf("completed item is still live: %#v", m.live.items)
 	}
-	return m, printed(command)
-}
-
-func printed(command tea.Cmd) string {
-	return stripANSI(fmt.Sprintf("%+v", command()))
+	return m, stripANSI(lastEntry(t, m))
 }
 
 func TestModelAppliesSchemaExactErrors(t *testing.T) {

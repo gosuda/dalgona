@@ -12,6 +12,8 @@ import (
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 
+const framesPerSecond = 60
+
 type Status struct {
 	State    string
 	Seq      uint64
@@ -65,7 +67,7 @@ func Run(ctx context.Context, conn io.ReadWriteCloser, opts Options) error {
 }
 
 func programOptions(ctx context.Context, opts Options) []tea.ProgramOption {
-	options := []tea.ProgramOption{tea.WithContext(ctx)}
+	options := []tea.ProgramOption{tea.WithContext(ctx), tea.WithFPS(framesPerSecond)}
 	if opts.Input != nil {
 		options = append(options, tea.WithInput(opts.Input))
 	}

@@ -22,7 +22,7 @@ Startup runs these steps in order: `initialize` with client name `dalgona`, the 
 
 The TUI MUST run inline. It MUST NOT use the alternate screen. A completed item MUST print once to scrollback with `tea.Println`. Completed assistant text MUST render as Markdown through Glamour.
 
-The live view shows these parts in order. They are: streaming items, the approval dialog, an open selector, the notice line, the state line `state: <state>`, the composer, and one status row:
+The dock holds, from the top, the composer, an open panel, the live row, and the status row. The live row shows the state, the notice, and the newest live text, each cut to one row:
 
 ```
 <model> · <approval> · <sandbox> · <thread title>
@@ -32,13 +32,49 @@ Sandbox `off` MUST show as `no sandbox`. The status row MUST show the sandbox th
 
 The composer shows `› `, the typed text, and the cursor `▏`. When the composer is empty, the cursor comes first and the placeholder follows it in faint text. The placeholder never glows.
 
-States are `idle`, `running`, `awaiting approval`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. All live text MUST wrap at the terminal width. At 40 columns, a line MUST NOT exceed 40 cells.
+States are `idle`, `running`, `awaiting approval`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. Live text MUST be cut to one row, and a cut text MUST end with `...`. At 40 columns no line may exceed 39 cells.
 
 A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` selector shows each thread's mapped state.
 
 The TUI follows one thread. The first thread it sees, from a response or a notification, becomes the TUI's thread. `/new`, `/resume`, and `/fork` replace it. Notifications whose `threadId` names another thread, such as a spawned subagent, MUST NOT change the title, state, live items, or thread. When the TUI changes thread, it MUST clear the follow-up queue.
 
 When a read from `conn` fails, the TUI MUST enter `disconnected` and show `connection lost: <cause>; restart the TUI, then /resume <thread>`. A later notification MUST NOT leave `disconnected`.
+
+## Layout
+
+The dock MUST be the last rows of the screen. From the top, it holds the composer, an open panel, the live row, and the status row.
+
+The dock MUST keep its height. Only a key press, a paste, the opening or closing of a panel, or a window resize MAY change it. A failed send or steer that puts its text back in the composer MAY also change it.
+
+The dock MUST have at most the window height minus one rows. The client MUST show no dock row in a window of fewer than two rows.
+
+The composer MUST show at most six rows, or one row while a panel is open. A panel MUST have a fixed height for its kind, capped at the window height minus four rows.
+
+When the dock is too tall, the client MUST drop the status row first, then the live row. The input line MUST NOT drop.
+
+Every dock row MUST be at most the window width minus one cell.
+
+## Print
+
+The client MUST call `tea.Println` only from `drain`, and MUST have at most one print in flight.
+
+The client MUST start a print only after the dock height, the window size, and the alternate screen state have not changed for three frames. A change of text inside the dock MUST NOT reset that wait.
+
+The client MUST keep the view frozen while a print is in flight.
+
+A print MUST hold at most the window rows minus the dock rows.
+
+The client MUST show an empty view until its first row has printed.
+
+A failed `initialize` MUST print one row that starts with `Could not start:`.
+
+Each thread load MUST print its own thread row, also when the same thread loads again.
+
+With a window height of 0, quit and suspend MUST return at once and MAY drop the rows that wait.
+
+A tool call nested in an eval call MUST print as its own row before the row of the eval call.
+
+The client cannot see a failed write to the terminal. A write that fails is therefore not reported.
 
 ## Keys and commands
 

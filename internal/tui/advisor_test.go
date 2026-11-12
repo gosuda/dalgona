@@ -23,7 +23,7 @@ func TestModelPrintsAdvisorNoteOnce(t *testing.T) {
 	if command == nil {
 		t.Fatal("advisor note did not print a card")
 	}
-	assertContains(t, printed(command), "advisor · concern: run the race detector before merging")
+	assertContains(t, lastEntry(t, m), "advisor · concern: run the race detector before merging")
 	m = schemaNotification(t, m, "item/started", "ItemStartedNotification",
 		`{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":`+strings.Replace(advisorItem, `"completed"`, `"inProgress"`, 1)+`}`)
 	if strings.Contains(m.View().Content, "advisor") {
@@ -117,7 +117,7 @@ func TestModelQueuesApprovalsAndIgnoresOtherThreads(t *testing.T) {
 
 func TestComposerPlaceholderFollowsCursor(t *testing.T) {
 	t.Parallel()
-	m := newModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{}, nil)
 	assertContains(t, stripANSI(m.View().Content), "› ▏Send a prompt; / for commands")
 	m.input.composer.SetValue("typed")
 	view := stripANSI(m.View().Content)

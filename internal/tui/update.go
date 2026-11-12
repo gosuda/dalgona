@@ -17,8 +17,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		command = m.updateKey(msg)
+	case notificationMsg, serverRequestMsg, resultMsg, shimmerMsg, disconnectedMsg:
+		command = m.updateAsync(msg)
+	default:
+		if !m.updateTerminal(msg) {
+			command = m.updateComposer(msg)
+		}
+	}
+	if _, ok := msg.(shimmerMsg); !ok {
+		command = tea.Batch(command, m.scheduleShimmer())
+	}
+	settle := m.settle()
+	printCommand := m.drain()
+	return m, tea.Batch(command, settle, printCommand)
+}
+
+func (m *model) updateTerminal(msg tea.Msg) bool {
+	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.screen.width = msg.Width
+		m.screen.height = msg.Height
 		m.input.composer.SetWidth(msg.Width)
 	case tea.FocusMsg:
 		m.screen.focused = true
@@ -28,15 +46,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.composer.focused = false
 	case tea.ModeReportMsg:
 		m.applyModeReport(msg)
-	case notificationMsg, serverRequestMsg, resultMsg, shimmerMsg, disconnectedMsg:
-		command = m.updateAsync(msg)
+	case printedMsg:
+		m.out.printing = false
+		m.out.started = true
+	case settledMsg:
+		if msg.n == m.out.settleN {
+			m.out.settling = false
+		}
 	default:
-		command = m.updateComposer(msg)
+		return false
 	}
-	if _, ok := msg.(shimmerMsg); !ok {
-		command = tea.Batch(command, m.scheduleShimmer())
-	}
-	return m, command
+	return true
 }
 
 func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
@@ -95,10 +115,15 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 }
 
 func (m model) View() tea.View {
-	view := tea.NewView(m.renderView())
-	view.AltScreen = false
-	view.ReportFocus = true
-	return view
+	if m.out.printing {
+		return m.out.frozen
+	}
+	if !m.out.started {
+		view := tea.NewView("")
+		view.ReportFocus = true
+		return view
+	}
+	return m.dockView()
 }
 
 func (m *model) noticef(format string, args ...any) {

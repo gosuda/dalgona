@@ -25,19 +25,18 @@ type caller interface {
 }
 
 type model struct {
-	conn           connInfo
-	thread         threadInfo
-	live           liveState
-	input          inputState
-	screen         screenState
-	out            outState
-	notice         string
-	noticeError    bool
-	queue          []string
-	ctrlCArmed     bool
-	pendingCommand tea.Cmd
-	approvals      []approval
-	selector       *selector
+	conn        connInfo
+	thread      threadInfo
+	live        liveState
+	input       inputState
+	screen      screenState
+	out         outState
+	notice      string
+	noticeError bool
+	queue       []string
+	ctrlCArmed  bool
+	approvals   []approval
+	selector    *selector
 }
 
 type connInfo struct {
@@ -72,12 +71,24 @@ type inputState struct {
 
 type screenState struct {
 	width   int
+	height  int
 	focused bool
 	method  ansi.Method
 }
 
 type outState struct {
 	markdown map[int]*glamour.TermRenderer
+	printed  map[string]struct{}
+	entries  []entry
+	pending  []string
+	printing bool
+	frozen   tea.View
+	geometry frameGeometry
+	started  bool
+	settling bool
+	settleN  int
+	seq      int
+	loads    int
 }
 
 type notificationMsg struct {
@@ -120,7 +131,7 @@ func newModel(client caller, opts Options, done <-chan struct{}) model {
 		conn:   connInfo{client: client, opts: opts, done: done},
 		input:  inputState{composer: newComposer()},
 		screen: screenState{width: 80, focused: true},
-		out:    outState{markdown: make(map[int]*glamour.TermRenderer)},
+		out:    outState{markdown: make(map[int]*glamour.TermRenderer), printed: make(map[string]struct{})},
 		live:   liveState{deltas: new(deltaDecoder)},
 		thread: threadInfo{state: stateIdle, title: "new thread", modelName: opts.Model, approvalMode: approvalMode, sandbox: sandbox},
 	}

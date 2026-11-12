@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -18,11 +17,13 @@ func TestAppendSanitizedDropsBidiAndPrivateUse(t *testing.T) {
 	}
 }
 
-func printedText(command tea.Cmd) string {
-	if command == nil {
-		return ""
+func committedText(m model) string {
+	var b strings.Builder
+	for _, entry := range m.out.entries {
+		b.WriteString(entry.text)
+		b.WriteByte('\n')
 	}
-	return fmt.Sprint(command())
+	return b.String()
 }
 
 func TestUntrustedTextIsSanitizedAtEveryEntry(t *testing.T) {
@@ -49,8 +50,8 @@ func TestUntrustedTextIsSanitizedAtEveryEntry(t *testing.T) {
 			t.Parallel()
 			m := newModel(nil, Options{}, nil)
 			m.thread.id = "t1"
-			m, command := drive(t, m, tc.msg)
-			shown := m.View().Content + "\n" + printedText(command)
+			m, _ = drive(t, m, tc.msg)
+			shown := m.View().Content + "\n" + committedText(m)
 			if !strings.Contains(shown, "xy") {
 				t.Errorf("view lost the visible text:\n%q", shown)
 			}
