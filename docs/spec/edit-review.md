@@ -94,3 +94,33 @@ The `truncated` member MUST be true when the unit omits hunks, leaves out a larg
 A judge error, a timeout, a missing answer, or an out-of-range answer MUST fail its part. A failed part MUST NOT fail the edit call, and the call MUST keep its `ok` result.
 
 A factory error MUST give an error verdict for the unit. A unit MUST be an error only when every part fails.
+
+## Feedback
+
+A flagged edit MUST add one feedback block after the results of its round. The block MUST sit at the journal position of its `tool.judged` event, in this form:
+
+```text
+<edit-review call="<call id>" paths="<paths>">
+An automatic review of this edit found possible problems:
+- <one sentence for each spoken question, in journal order>
+Check the changed lines. If a problem is real, fix it. If not, ignore this review.
+</edit-review>
+```
+
+A turn review MUST add one block at the journal position of its `turn.judged` event, in this form:
+
+```text
+<turn-review turn="<turn id>">
+An automatic review of this turn found possible problems:
+- <one sentence for each spoken question, in journal order>
+Check the changed files. If a problem is real, fix it. If not, ignore this review.
+</turn-review>
+```
+
+The `paths` attribute MUST list the masked paths of the call, joined with `, `. Every attribute value MUST be HTML-escaped.
+
+A review that covered part of the edit MUST add the line `This review covered part of the edit.` after its bullets. A review that covered the whole edit MUST NOT add that line.
+
+A clean verdict MUST add no block. Each earlier message MUST keep its bytes in the next request, so the provider prompt cache still matches.
+
+A rebuilt request MUST read the `spoken` ids from the journal, not from the current `feedback` setting.

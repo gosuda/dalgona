@@ -106,5 +106,6 @@ The agent MUST build each model request from the active path after the latest `c
 - An advisor note MUST render as `<advisory advisor="<name>" severity="<severity>">note</advisory>`, with `&`, `<`, `>`, `"`, and `'` HTML-escaped in every value.
 - Tool results MUST render in call order. A pruned call MUST render the output `[output pruned to fit the context window]`.
 - An image of a `user.message` MUST render in the same model message as the text of that message.
+- A `tool.judged` with `feedback` true MUST render as one user message at its journal position, after the round's tool results, using the edit-review template. A `turn.judged` with `feedback` true MUST render as one user message at its journal position, using the turn-review template. An event without `feedback` MUST NOT render. Both templates use only journaled `spoken` ids and fields.
 
 The model MUST be called again when the rendered context ends with user content.

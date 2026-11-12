@@ -10,6 +10,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"html"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -264,6 +265,43 @@ func (w *worker) judgeEdit(ctx context.Context, callID, task, name string, chang
 
 func reviewTimeoutCause(d time.Duration) error {
 	return fmt.Errorf("review timed out after %s", d)
+}
+
+func reviewFeedback(e event.ToolJudged) string {
+	paths := make([]string, 0, len(e.Paths))
+	for _, path := range e.Paths {
+		paths = append(paths, html.EscapeString(path))
+	}
+	coverage := ""
+	if e.Truncated {
+		coverage = "This review covered part of the edit.\n"
+	}
+	return "<edit-review call=\"" + html.EscapeString(e.CallID) + "\" paths=\"" + strings.Join(paths, ", ") + "\">\n" +
+		"An automatic review of this edit found possible problems:\n" + reviewBullets(e.Spoken) + coverage +
+		"Check the changed lines. If a problem is real, fix it. If not, ignore this review.\n</edit-review>"
+}
+
+func reviewTurnFeedback(e event.TurnJudged) string {
+	return "<turn-review turn=\"" + html.EscapeString(e.TurnID) + "\">\n" +
+		"An automatic review of this turn found possible problems:\n" + reviewBullets(e.Spoken) +
+		"Check the changed files. If a problem is real, fix it. If not, ignore this review.\n</turn-review>"
+}
+
+func reviewBullets(spoken []string) string {
+	var out strings.Builder
+	for _, id := range spoken {
+		out.WriteString("- " + reviewSentence(id) + "\n")
+	}
+	return out.String()
+}
+
+func reviewSentence(id string) string {
+	for _, q := range reviewQuestions {
+		if q.id == id {
+			return q.feedback
+		}
+	}
+	return "The review raised the flag " + id + "."
 }
 
 func (w *worker) prepareUnit(ctx context.Context, task, name string, changes []event.FileChange) unitInput {

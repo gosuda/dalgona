@@ -132,6 +132,22 @@ func (b *transcript) add(e event.Event) {
 		b.result(value)
 	case event.AdvisorNote:
 		b.note(value)
+	case event.ToolJudged:
+		b.judged(value)
+	case event.TurnJudged:
+		b.turnJudged(value)
+	}
+}
+
+func (b *transcript) judged(e event.ToolJudged) {
+	if e.Feedback {
+		b.emitUser(userTurn{text: reviewFeedback(e)})
+	}
+}
+
+func (b *transcript) turnJudged(e event.TurnJudged) {
+	if e.Feedback {
+		b.emitUser(userTurn{text: reviewTurnFeedback(e)})
 	}
 }
 
