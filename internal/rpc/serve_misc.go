@@ -13,6 +13,7 @@ import (
 	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/model"
 )
 
 func platform() (family, name string) {
@@ -63,9 +64,28 @@ func (s *server) modelList(ctx context.Context, _ jsontext.Value) (jsontext.Valu
 		response.Data = append(response.Data, Model{
 			ID: m.ID, Model: m.ID, DisplayName: m.ID, IsDefault: m.ID == current,
 			DefaultReasoningEffort: defaultEffort(m.Efforts), SupportedReasoningEfforts: efforts,
+			ContextWindow: m.Context, Provider: provider(m.ID), Presets: presetRoles(m.ID),
 		})
 	}
 	return encode(response)
+}
+
+func presetRoles(id string) []string {
+	providerID, modelID, err := model.ParseModelID(id)
+	if err != nil {
+		return nil
+	}
+	preset, ok := model.PresetFor(providerID)
+	if !ok {
+		return nil
+	}
+	var roles []string
+	for _, role := range []struct{ name, id string }{{"default", preset.Default}, {"smol", preset.Smol}, {"slow", preset.Slow}} {
+		if role.id == modelID {
+			roles = append(roles, role.name)
+		}
+	}
+	return roles
 }
 
 func defaultEffort(efforts []string) string {

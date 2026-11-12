@@ -163,6 +163,14 @@ func (m Model) write(o *out) {
 		o.close()
 	}
 	o.closeArray()
+	o.int("contextWindow", int64(m.ContextWindow))
+	o.str("provider", m.Provider)
+	o.key("presets")
+	o.openArray()
+	for _, role := range m.Presets {
+		o.text(role)
+	}
+	o.closeArray()
 	o.close()
 }
 

@@ -137,6 +137,9 @@ type (
 		IsDefault                 bool                    `json:"isDefault"`
 		DefaultReasoningEffort    string                  `json:"defaultReasoningEffort"`
 		SupportedReasoningEfforts []ReasoningEffortOption `json:"supportedReasoningEfforts"`
+		ContextWindow             int                     `json:"contextWindow"`
+		Provider                  string                  `json:"provider"`
+		Presets                   []string                `json:"presets"`
 	}
 	ReasoningEffortOption struct {
 		ReasoningEffort string `json:"reasoningEffort"`

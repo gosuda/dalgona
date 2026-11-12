@@ -19,6 +19,8 @@ An explicit `[roles]` value MUST override the preset. An unavailable role preset
 
 This decision applies to model selection and role resolution, not provider entitlement. [providers.md](../spec/providers.md) and [advisor.md](../spec/advisor.md) define runtime behavior. The `default` column is a model-picker hint, not a configured thread model.
 
+`model/list` MUST report the preset roles that name each model, in the order `default`, `smol`, and `slow`. This report exposes the preset tables on the wire. It MUST NOT grant access to a model that the provider does not offer.
+
 ## Selection evidence
 
 The approved selection record dated 2026-11-08 cites the native model guides for [OpenAI](https://developers.openai.com/api/docs/guides/latest-model.md), [Anthropic](https://platform.claude.com/docs/en/models/overview.md), and [Google](https://ai.google.dev/gemini-api/docs/models). It selects Sol over Astra for the same recorded Terminal-Bench score at a lower price. It selects Opus over Fable for the default role. These are the recorded design inputs, not new measurements from this repository.
