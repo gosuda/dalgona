@@ -91,9 +91,7 @@ func writableRoots(cfg config.Config) []string {
 		if root == "" {
 			continue
 		}
-		if real, err := filepath.EvalSymlinks(root); err == nil {
-			root = real
-		}
+		root = resolveExisting(root)
 		resolved = append(resolved, filepath.Clean(root))
 	}
 	return resolved
