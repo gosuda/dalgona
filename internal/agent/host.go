@@ -17,6 +17,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/journal"
 	"github.com/gosuda/dalgona/internal/keywords"
+	"github.com/gosuda/dalgona/internal/runner"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -34,6 +35,8 @@ type Host struct {
 	logged      map[string]bool
 	models      map[string]modelCache
 	modelsGroup singleflight.Group
+	execMu      sync.Mutex
+	exec        *runner.Local
 
 	settingsMu sync.Mutex
 	live       config.Config

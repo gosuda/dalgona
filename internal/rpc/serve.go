@@ -46,6 +46,8 @@ func init() {
 		"account/logout":                 (*server).logout,
 		"skills/list":                    (*server).skillsList,
 		"mcpServerStatus/list":           (*server).mcpServerStatusList,
+		"command/exec":                   (*server).commandExec,
+		"command/exec/terminate":         (*server).commandExecTerminate,
 		"dalgona/keywords/list":          (*server).keywordsList,
 		"dalgona/keywords/match":         (*server).keywordsMatch,
 		"dalgona/thread/tree":            (*server).threadTree,
@@ -66,6 +68,7 @@ type server struct {
 	log      *slog.Logger
 	mu       sync.Mutex
 	watches  map[string]*watch
+	procs    map[string]context.CancelFunc
 	pending  map[string]context.CancelFunc
 	logins   map[string]context.CancelFunc
 	watchers sync.WaitGroup
@@ -123,6 +126,9 @@ func (s *server) shutdown() {
 	s.closing = true
 	for _, stop := range s.logins {
 		stop()
+	}
+	for _, cancel := range s.procs {
+		cancel()
 	}
 	s.mu.Unlock()
 	s.tasks.Wait()

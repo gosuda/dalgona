@@ -39,6 +39,15 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "__shim" {
 		os.Exit(runner.ShimMain(os.Args[2:]))
 	}
+	if value, ok := os.LookupEnv("RPC_TEST_PRINT"); ok {
+		_, _ = os.Stdout.WriteString(value)
+		os.Exit(3)
+	}
+	if os.Getenv("RPC_TEST_SLEEP") != "" {
+		_, _ = os.Stdout.WriteString("ready")
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
 }
 
@@ -351,31 +360,33 @@ func (c *wireClient) checkStatusSeq(params jsontext.Value) {
 }
 
 var responseSchemas = map[string]string{
-	"initialize":           "v1/InitializeResponse.json",
-	"thread/start":         "v2/ThreadStartResponse.json",
-	"thread/resume":        "v2/ThreadResumeResponse.json",
-	"thread/fork":          "v2/ThreadForkResponse.json",
-	"thread/list":          "v2/ThreadListResponse.json",
-	"thread/read":          "v2/ThreadReadResponse.json",
-	"thread/name/set":      "v2/ThreadSetNameResponse.json",
-	"thread/archive":       "v2/ThreadArchiveResponse.json",
-	"thread/unarchive":     "v2/ThreadUnarchiveResponse.json",
-	"thread/compact/start": "v2/ThreadCompactStartResponse.json",
-	"thread/revert":        "v2/ThreadRevertResponse.json",
-	"turn/start":           "v2/TurnStartResponse.json",
-	"turn/steer":           "v2/TurnSteerResponse.json",
-	"turn/interrupt":       "v2/TurnInterruptResponse.json",
-	"review/start":         "v2/ReviewStartResponse.json",
-	"model/list":           "v2/ModelListResponse.json",
-	"config/read":          "v2/ConfigReadResponse.json",
-	"config/value/write":   "v2/ConfigWriteResponse.json",
-	"config/batchWrite":    "v2/ConfigWriteResponse.json",
-	"account/read":         "v2/GetAccountResponse.json",
-	"account/login/start":  "v2/LoginAccountResponse.json",
-	"account/login/cancel": "v2/CancelLoginAccountResponse.json",
-	"account/logout":       "v2/LogoutAccountResponse.json",
-	"skills/list":          "v2/SkillsListResponse.json",
-	"mcpServerStatus/list": "v2/ListMcpServerStatusResponse.json",
+	"initialize":             "v1/InitializeResponse.json",
+	"thread/start":           "v2/ThreadStartResponse.json",
+	"thread/resume":          "v2/ThreadResumeResponse.json",
+	"thread/fork":            "v2/ThreadForkResponse.json",
+	"thread/list":            "v2/ThreadListResponse.json",
+	"thread/read":            "v2/ThreadReadResponse.json",
+	"thread/name/set":        "v2/ThreadSetNameResponse.json",
+	"thread/archive":         "v2/ThreadArchiveResponse.json",
+	"thread/unarchive":       "v2/ThreadUnarchiveResponse.json",
+	"thread/compact/start":   "v2/ThreadCompactStartResponse.json",
+	"thread/revert":          "v2/ThreadRevertResponse.json",
+	"turn/start":             "v2/TurnStartResponse.json",
+	"turn/steer":             "v2/TurnSteerResponse.json",
+	"turn/interrupt":         "v2/TurnInterruptResponse.json",
+	"review/start":           "v2/ReviewStartResponse.json",
+	"model/list":             "v2/ModelListResponse.json",
+	"config/read":            "v2/ConfigReadResponse.json",
+	"config/value/write":     "v2/ConfigWriteResponse.json",
+	"config/batchWrite":      "v2/ConfigWriteResponse.json",
+	"account/read":           "v2/GetAccountResponse.json",
+	"account/login/start":    "v2/LoginAccountResponse.json",
+	"account/login/cancel":   "v2/CancelLoginAccountResponse.json",
+	"account/logout":         "v2/LogoutAccountResponse.json",
+	"skills/list":            "v2/SkillsListResponse.json",
+	"mcpServerStatus/list":   "v2/ListMcpServerStatusResponse.json",
+	"command/exec":           "v2/CommandExecResponse.json",
+	"command/exec/terminate": "v2/CommandExecTerminateResponse.json",
 }
 
 var (
