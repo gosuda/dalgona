@@ -55,6 +55,8 @@ A name MUST match `^[a-z][a-z0-9_-]{0,31}$`. When a name is invalid, the loader 
 
 When the preset is not offered, the resolver MUST log `roles.advisor preset <id> is not offered; using <model>`. The advisor request MUST ask for effort `medium`, clamped to the efforts that the model supports.
 
+A provider with no static preset MUST use its first offered model as its `slow` preset.
+
 ## WATCHDOG.md
 
 `WATCHDOG.md` holds guidance for the advisor only. The primary thread MUST NOT receive it.
