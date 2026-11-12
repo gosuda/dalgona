@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -357,5 +358,70 @@ func TestExecUsesLinuxShellForRemote(t *testing.T) {
 	}
 	if got := shellArgvForHost(nil, "linux", "echo hi"); !slices.Equal(got, want) {
 		t.Fatalf("local shell on linux host = %q, want %q", got, want)
+	}
+}
+
+type exitAfterKillRunner struct {
+	runner.Runner
+	mu     sync.Mutex
+	killed bool
+	reads  int
+	after  int
+}
+
+func (f *exitAfterKillRunner) Start(context.Context, runner.ProcessSpec) error { return nil }
+
+func (f *exitAfterKillRunner) Signal(_ context.Context, _ string, signal runner.Signal) error {
+	if signal == runner.SignalKill {
+		f.mu.Lock()
+		f.killed = true
+		f.mu.Unlock()
+	}
+	return nil
+}
+
+func (f *exitAfterKillRunner) Read(context.Context, string, int64) (runner.Output, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := runner.Output{Path: "runs/exit-after-kill/out"}
+	if !f.killed {
+		return out, nil
+	}
+	f.reads++
+	if f.after > 0 && f.reads >= f.after {
+		out.Exit = &runner.Exit{Code: 137}
+	}
+	return out, nil
+}
+
+func TestExecKilledCallPollsForExitRecord(t *testing.T) {
+	fake := &exitAfterKillRunner{after: 3}
+	env := tool.Env{Runner: fake, Cwd: t.TempDir(), Sandbox: runner.Sandbox{Mode: runner.SandboxOff}}
+	toolExec := New()
+	toolExec.grace = 300 * time.Millisecond
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "kill-poll", Args: jsontext.Value(`{"command":"true","timeout_ms":100}`)}, env)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %v, want the timeout", err)
+	}
+	if result.OK {
+		t.Fatal("killed call reported success")
+	}
+	if result.ExitCode == nil || *result.ExitCode != 137 {
+		t.Fatalf("killed call settled without the exit record it polled for: exit=%v", result.ExitCode)
+	}
+}
+
+func TestExecKilledCallWithoutExitReportsError(t *testing.T) {
+	fake := &exitAfterKillRunner{}
+	env := tool.Env{Runner: fake, Cwd: t.TempDir(), Sandbox: runner.Sandbox{Mode: runner.SandboxOff}}
+	toolExec := New()
+	toolExec.grace = 300 * time.Millisecond
+	toolExec.killWait = 300 * time.Millisecond
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "kill-silent", Args: jsontext.Value(`{"command":"true","timeout_ms":100}`)}, env)
+	if err == nil || !strings.Contains(err.Error(), "did not report an exit") {
+		t.Fatalf("error = %v, want the missing exit report", err)
+	}
+	if result.ExitCode != nil {
+		t.Fatalf("silent kill reported an exit code: %d", *result.ExitCode)
 	}
 }

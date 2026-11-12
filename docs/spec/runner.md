@@ -26,6 +26,8 @@ The shim MUST read `cancel` after it writes `pid` and before it starts the comma
 
 A tool that signals a run MUST poll `Read` until `Exit` exists before the tool returns. The poll MUST stop at a bounded deadline. The tool MUST report a deadline timeout as an error. A `Read` error that the tool deadline causes MUST surface as the deadline timeout. A `Read` error from caller cancellation or I/O failure MUST surface unchanged.
 
+After `KILL`, the tool MUST poll `Read` until `Exit` exists or the deadline passes, then return the error `process did not report an exit`.
+
 The shim MUST pause only when `DALGONA_SHIM_TEST_PAUSE` is set to `<phase>:<socket>`. At that phase it MUST connect to the Unix socket at `<socket>` and wait until the peer closes the connection. A failed connect or read MUST end the pause. Phase `pid` pauses before the shim writes `pid`. Phase `start` pauses after the first `cancel` check and before the command starts. Phase `group` pauses after the shim writes `pgid` and assigns the job object, and before the second `cancel` check. Only tests MAY set this variable.
 
 The shim MUST append stdout and stderr to `out`. After `out` reaches 1 GiB the shim MUST stop appending command bytes. It MUST append this line once:
