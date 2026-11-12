@@ -43,8 +43,10 @@ func TestMain(m *testing.M) {
 }
 
 type llmReply struct {
-	body string
-	gate <-chan struct{}
+	body       string
+	gate       <-chan struct{}
+	status     int
+	retryAfter string
 }
 
 type fakeLLM struct {
@@ -98,7 +100,14 @@ func (f *fakeLLM) respond(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
+	if reply.retryAfter != "" {
+		w.Header().Set("Retry-After", reply.retryAfter)
+	}
+	if reply.status != 0 {
+		w.WriteHeader(reply.status)
+	} else {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
 	_, _ = io.WriteString(w, reply.body)
 }
 

@@ -332,6 +332,8 @@ func (s *server) drain(ctx context.Context, w *watch, ch <-chan agent.Update) {
 			s.ask(ctx, w, update)
 		case agent.UpdateExecOutput:
 			w.tracker.execOutput(update.CallID, update.Delta)
+		case agent.UpdateRetryWait:
+			w.tracker.retryWait(update.Turn, update.Wait)
 		}
 	}
 }

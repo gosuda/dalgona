@@ -138,6 +138,7 @@ func (w *worker) onRetry(attempt int, verdict model.Verdict, status int, delay t
 }
 
 func (w *worker) loop(ctx context.Context) outcome {
+	ctx = model.WithRetryWatch(ctx, w.retryWatch())
 	waited := false
 	for {
 		if ctx.Err() != nil {

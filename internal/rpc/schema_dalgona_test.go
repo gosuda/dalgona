@@ -12,6 +12,7 @@ import (
 var dalgonaNotifications = []string{
 	"dalgona/thread/childSpawned",
 	"dalgona/advisor/note",
+	"dalgona/retry/wait",
 }
 
 func dalgonaSchemaName(method, suffix string) string {

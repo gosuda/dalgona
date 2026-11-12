@@ -299,6 +299,11 @@ type (
 		Note     string `json:"note"`
 		Delivery string `json:"delivery"`
 	}
+	RetryWaitNotification struct {
+		ThreadID    string `json:"threadId"`
+		TurnID      string `json:"turnId"`
+		RemainingMS int64  `json:"remainingMs"`
+	}
 	CommandExecutionRequestApprovalParams struct {
 		ThreadID    string `json:"threadId"`
 		TurnID      string `json:"turnId"`

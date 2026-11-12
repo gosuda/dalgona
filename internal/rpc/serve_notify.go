@@ -197,3 +197,12 @@ func (p FileChangeRequestApprovalParams) write(o *out) {
 	o.optStr("reason", p.Reason)
 	o.close()
 }
+
+func (n RetryWaitNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("turnId", n.TurnID)
+	o.key("remainingMs")
+	o.token(jsontext.Int(n.RemainingMS))
+	o.close()
+}

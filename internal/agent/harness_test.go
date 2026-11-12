@@ -56,9 +56,10 @@ func (tr handlerTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 type response struct {
-	status int
-	body   string
-	gate   chan struct{}
+	status     int
+	body       string
+	gate       chan struct{}
+	retryAfter string
 }
 
 type fakeModel struct {
@@ -105,6 +106,9 @@ func (f *fakeModel) respond(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		}
+	}
+	if next.retryAfter != "" {
+		w.Header().Set("Retry-After", next.retryAfter)
 	}
 	if next.status != 0 {
 		w.WriteHeader(next.status)
@@ -231,11 +235,12 @@ type harness struct {
 	cfg     HostConfig
 	logs    *logBuffer
 	host    *Host
+	sleep   func(context.Context, time.Duration) error
 }
 
 func newHarness(t *testing.T, configure ...func(*harness)) *harness {
 	t.Helper()
-	h := &harness{t: t, home: t.TempDir(), cwd: t.TempDir(), model: newFakeModel(t), logs: &logBuffer{}}
+	h := &harness{t: t, home: t.TempDir(), cwd: t.TempDir(), model: newFakeModel(t), logs: &logBuffer{}, sleep: func(context.Context, time.Duration) error { return nil }}
 	t.Cleanup(h.reapProcesses)
 	if resolved, err := filepath.EvalSymlinks(h.cwd); err == nil {
 		h.cwd = resolved
@@ -277,7 +282,7 @@ func (h *harness) newHost() *Host {
 func (h *harness) providers(onRetry RetryFunc) (*model.Registry, error) {
 	registry := model.NewRegistry()
 	retry := model.DefaultRetryOptions()
-	retry.Sleep = func(context.Context, time.Duration) error { return nil }
+	retry.Sleep = h.sleep
 	retry.OnRetry = onRetry
 	provider := openai.New(openai.Config{
 		BaseURL: fakeModelURL,

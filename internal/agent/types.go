@@ -138,6 +138,7 @@ const (
 	UpdateReasoningDelta
 	UpdateApproval
 	UpdateExecOutput
+	UpdateRetryWait
 )
 
 type ApprovalPrompt struct {
@@ -162,6 +163,8 @@ type Update struct {
 	CallID   string
 	Delta    string
 	Approval ApprovalPrompt
+	Turn     string
+	Wait     time.Duration
 }
 
 type ThreadInfo struct {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 )
@@ -209,6 +210,12 @@ func (t *tracker) execOutput(callID, delta string) {
 	turnID := t.currentTurn()
 	t.sink.notify("item/commandExecution/outputDelta", func() writer {
 		return CommandExecutionOutputDeltaNotification{ThreadID: t.threadID, TurnID: turnID, ItemID: callID, Delta: delta}
+	})
+}
+
+func (t *tracker) retryWait(turnID string, wait time.Duration) {
+	t.sink.notify("dalgona/retry/wait", func() writer {
+		return RetryWaitNotification{ThreadID: t.threadID, TurnID: turnID, RemainingMS: wait.Milliseconds()}
 	})
 }
 
