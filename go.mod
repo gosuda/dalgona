@@ -26,6 +26,7 @@ require (
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
 	github.com/modal-labs/modal-client/go v0.11.1
+	github.com/odvcencio/gotreesitter v0.57.0
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/sandbox0-ai/sdk-go v0.10.5
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3

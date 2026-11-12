@@ -96,6 +96,26 @@ linters:
               desc: reflection SDK; speak the provider wire with net/http and encoding/json/jsontext
             - pkg: "google.golang.org/genai"
               desc: reflection SDK; speak the provider wire with net/http and encoding/json/jsontext
+        syntax:
+          files:
+            - "!**/internal/syntax/**"
+          deny:
+            - pkg: "github.com/odvcencio/gotreesitter"
+              desc: only internal/syntax imports the tree-sitter library
+        copyleft:
+          files:
+            - $all
+          deny:
+            - pkg: "github.com/odvcencio/gotreesitter/grammars$"
+              desc: the aggregate package embeds the copyleft grammars; import grammars/<name>
+            - pkg: "github.com/odvcencio/gotreesitter/grammars/caddy$"
+              desc: copyleft grammar under GPL-3.0 per licenses/grammars.json
+            - pkg: "github.com/odvcencio/gotreesitter/grammars/disassembly$"
+              desc: copyleft grammar under GPL-3.0 per licenses/grammars.json
+            - pkg: "github.com/odvcencio/gotreesitter/grammars/jq$"
+              desc: copyleft grammar under GPL-3.0 per licenses/grammars.json
+            - pkg: "github.com/odvcencio/gotreesitter/grammars/nim$"
+              desc: copyleft grammar under MPL-2.0 per licenses/grammars.json
         core:
           files:
             - "**/internal/journal/**"
@@ -108,6 +128,7 @@ linters:
             - "**/internal/decide/**"
             - "**/internal/textdiff/**"
             - "**/internal/keywords/**"
+            - "**/internal/syntax/**"
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/rpc"
               desc: core must not import interfaces or batteries

@@ -31,6 +31,7 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |github.com/charmbracelet/x/ansi|v0.11.9|2026-10-08|TUI measure and truncation|none|
 |github.com/charmbracelet/colorprofile|v0.4.3|2026-03-09|TUI colour downsampling to the terminal's profile, and the `NO_COLOR` rule.|none|
 |github.com/charmbracelet/x/vt|v0.1.0|2026-10-12|test-only terminal emulator for the print test, MIT licence. Pinned 2026-11-11.|none|
+|github.com/odvcencio/gotreesitter|v0.57.0|2026-11-08|syntax package for the symbols, definition, syntax and rewrite modes, with 23 grammars. Licence MIT, per `LICENSE` at v0.57.0. Decision in `docs/decisions/syntax-package.md`.|none, POST `https://api.osv.dev/v1/query` returned no record on 2026-11-12|
 |github.com/coder/websocket|v1.8.15|2026-06-15|websocket|none|
 |github.com/containerd/errdefs|v1.0.0|2024-10-08|Docker runner error types|none|
 |github.com/landlock-lsm/go-landlock|v0.11.2|2026-11-10|Linux write confinement|none|
