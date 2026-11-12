@@ -88,7 +88,7 @@ func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, erro
 	host, err := agent.NewHost(agent.HostConfig{
 		Journal: journalStore, Config: cfg, Auth: store, Tools: toolSet(cfg, extra.Tools),
 		Providers:   func(onRetry agent.RetryFunc) (*model.Registry, error) { return creds.registry(cfg, onRetry) },
-		ProviderIDs: providerIDs(cfg), Decider: judges.decider(), Extension: extra.Extension,
+		ProviderIDs: providerIDs(cfg), Decider: judges.decider(), Extension: extra.Extension, EditFeedback: cfg.EditReview.Feedback,
 		Runner: extra.Runner, Product: product, Logger: opts.Logger, Skills: extra.Skills,
 		OnChildStarted: advisors.attach,
 	})

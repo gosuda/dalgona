@@ -62,6 +62,7 @@ type ExtensionFactory func(t *Thread) Extension
 type HostConfig struct {
 	Journal        *journal.Store
 	Config         config.Config
+	EditFeedback   []string
 	Auth           *auth.Store
 	Providers      ProviderFactory
 	Tools          ToolSet

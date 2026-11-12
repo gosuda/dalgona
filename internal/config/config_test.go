@@ -215,6 +215,57 @@ func TestLoad_approvalDecider(t *testing.T) {
 	requireConfigError(t, err, "config.toml:2: [approval_decider] threshold must be in (0, 1]")
 }
 
+func TestLoad_editReview(t *testing.T) {
+	cfg, err := loadConfig(t, config.ProductDalgona, "", "", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireConfigValue(t, cfg.EditReview.Enabled, false)
+	if cfg.EditReview.Feedback != nil {
+		t.Fatalf("default feedback = %v, want nil", cfg.EditReview.Feedback)
+	}
+
+	cfg, err = loadConfig(t, config.ProductDalgona, "[edit_review]\nenabled = true\n", "", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireConfigValue(t, cfg.EditReview.Enabled, true)
+
+	cfg, err = loadConfig(t, config.ProductDalgona, "[edit_review]\nenabled = true\n", "[edit_review]\nenabled = false\n", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireConfigValue(t, cfg.EditReview.Enabled, false)
+
+	_, err = loadConfig(t, config.ProductDalgona, "[edit_review]\nenabled = \"yes\"\n", "", config.Flags{})
+	if err == nil {
+		t.Fatal("enabled = \"yes\" loaded, want an error")
+	}
+}
+
+func TestLoad_editReviewFeedback(t *testing.T) {
+	cfg, err := loadConfig(t, config.ProductDalgona, "[edit_review]\nfeedback = [\"lost_code\", \"wrong_logic\"]\n", "", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.EditReview.Feedback) != 2 || cfg.EditReview.Feedback[0] != "lost_code" || cfg.EditReview.Feedback[1] != "wrong_logic" {
+		t.Fatalf("feedback = %v, want [lost_code wrong_logic]", cfg.EditReview.Feedback)
+	}
+
+	cfg, err = loadConfig(t, config.ProductDalgona, "[edit_review]\nfeedback = []\n", "", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EditReview.Feedback == nil || len(cfg.EditReview.Feedback) != 0 {
+		t.Fatalf("empty feedback = %#v, want non-nil empty list", cfg.EditReview.Feedback)
+	}
+
+	_, err = loadConfig(t, config.ProductDalgona, "[edit_review]\nfeedback = \"lost_code\"\n", "", config.Flags{})
+	if err == nil {
+		t.Fatal("feedback as a string loaded, want an error")
+	}
+}
+
 func TestLoad_dalRejectsDalgonaSettings(t *testing.T) {
 	tests := []struct {
 		key  string
@@ -229,6 +280,7 @@ func TestLoad_dalRejectsDalgonaSettings(t *testing.T) {
 		{key: "discovery", body: "[discovery]\n"},
 		{key: "eval", body: "[eval]\nuses = []\n"},
 		{key: "herdr", body: "[herdr]\nsubagent_panes = false\n"},
+		{key: "edit_review", body: "[edit_review]\nenabled = false\n"},
 		{key: "web", body: "[web]\nlisten = \"127.0.0.1:7437\"\n"},
 	}
 	for _, test := range tests {

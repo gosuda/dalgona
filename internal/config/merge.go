@@ -42,6 +42,7 @@ type fileDoc struct {
 	MCPTrustedWorkspaces []string               `toml:"mcp_trusted_workspaces"`
 	Discovery            discoveryDoc           `toml:"discovery"`
 	ApprovalDecider      approvalDeciderDoc     `toml:"approval_decider"`
+	EditReview           editReviewDoc          `toml:"edit_review"`
 	Eval                 *evalDoc               `toml:"eval"`
 	Secrets              secretsDoc             `toml:"secrets"`
 	Keywords             map[string]keywordDoc  `toml:"keywords"`
@@ -182,6 +183,10 @@ type (
 	approvalDeciderDoc struct {
 		Decider   *string  `toml:"decider"`
 		Threshold *float64 `toml:"threshold"`
+	}
+	editReviewDoc struct {
+		Enabled  *bool    `toml:"enabled"`
+		Feedback []string `toml:"feedback"`
 	}
 	evalDoc struct {
 		Uses []string `toml:"uses"`
@@ -334,6 +339,12 @@ func (c *Config) mergeTables(doc *fileDoc) {
 	setString(doc.ApprovalDecider.Decider, &c.ApprovalDecider.Decider)
 	if doc.ApprovalDecider.Threshold != nil {
 		c.ApprovalDecider.Threshold = *doc.ApprovalDecider.Threshold
+	}
+	if doc.EditReview.Enabled != nil {
+		c.EditReview.Enabled = *doc.EditReview.Enabled
+	}
+	if doc.EditReview.Feedback != nil {
+		c.EditReview.Feedback = doc.EditReview.Feedback
 	}
 	if doc.Eval != nil {
 		c.Eval = EvalConfig{Uses: doc.Eval.Uses, Set: true}
@@ -527,7 +538,7 @@ func keywordNoticeExists(home, notice string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-var dalgonaOnlyKeys = map[string]bool{"tool_mode": true, "runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "eval": true, "herdr": true, "web": true}
+var dalgonaOnlyKeys = map[string]bool{"tool_mode": true, "runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "eval": true, "herdr": true, "web": true, "edit_review": true}
 
 func validateProductLayer(product Product, current layer) error {
 	if product != ProductDal {

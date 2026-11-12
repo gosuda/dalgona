@@ -201,6 +201,10 @@ type (
 		Decider   string
 		Threshold float64
 	}
+	EditReviewConfig struct {
+		Enabled  bool
+		Feedback []string
+	}
 	EvalConfig struct {
 		Uses []string
 		Set  bool
@@ -237,6 +241,7 @@ type Config struct {
 	MCPServers                            map[string]MCPServerSpec
 	Discovery                             DiscoveryConfig
 	ApprovalDecider                       ApprovalDeciderConfig
+	EditReview                            EditReviewConfig
 	Eval                                  EvalConfig
 	Secrets                               SecretsConfig
 	Keywords                              map[string]KeywordSpec
