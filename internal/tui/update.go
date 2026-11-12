@@ -21,7 +21,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		command = m.updateKey(msg)
-	case notificationMsg, serverRequestMsg, resultMsg, disconnectedMsg, debounceMsg, searchResultMsg:
+	case notificationMsg, serverRequestMsg, resultMsg, disconnectedMsg, debounceMsg, searchResultMsg, shellResultMsg:
 		command = m.updateAsync(msg)
 	case spinner.TickMsg:
 		command = m.updateTick(msg)
@@ -108,6 +108,8 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		return m.applyResult(msg)
+	case shellResultMsg:
+		m.applyShell(msg)
 	case disconnectedMsg:
 		m.setState(stateDisconnected)
 		m.errorf("connection lost: %v; restart the TUI, then %s", msg.err, m.resumeHint())
@@ -160,9 +162,16 @@ func (m *model) keyCommand(msg tea.KeyPressMsg) tea.Cmd {
 	if command, handled := m.overlayKey(msg); handled {
 		return command
 	}
+	if command, handled := m.shellKey(key, msg); handled {
+		return command
+	}
 	if command, handled := m.popupKey(msg); handled {
 		return command
 	}
+	return m.promptKey(msg, key)
+}
+
+func (m *model) promptKey(msg tea.KeyPressMsg, key string) tea.Cmd {
 	switch key {
 	case "enter":
 		if m.input.composer.continueLine() {

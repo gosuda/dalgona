@@ -17,6 +17,8 @@ const (
 	promptCells     = 2
 )
 
+const shellPlaceholder = "Shell · enter runs · esc leaves"
+
 const (
 	pasteChipLines = 10
 	pasteLimit     = 1 << 20
@@ -26,6 +28,7 @@ const (
 type chip struct {
 	label string
 	text  string
+	shell bool
 }
 
 type inputMode int
@@ -543,10 +546,12 @@ func (c *editor) paste(text string) {
 		c.insert([]rune(text))
 		return
 	}
-	c.chips = append(c.chips, chip{text: text})
-	n := len(c.chips)
-	c.chips[n-1].label = chipLabel(n, text)
-	c.insert([]rune{chipAtom(n - 1)})
+	c.addChip(chip{label: chipLabel(len(c.chips)+1, text), text: text})
+}
+
+func (c *editor) addChip(ch chip) {
+	c.chips = append(c.chips, ch)
+	c.insert([]rune{chipAtom(len(c.chips) - 1)})
 }
 
 func (c *editor) prune() {
@@ -562,7 +567,11 @@ func (c *editor) prune() {
 			continue
 		}
 		renamed[atom] = chipAtom(len(kept))
-		kept = append(kept, chip{label: chipLabel(len(kept)+1, ch.text), text: ch.text})
+		label := ch.label
+		if !ch.shell {
+			label = chipLabel(len(kept)+1, ch.text)
+		}
+		kept = append(kept, chip{label: label, text: ch.text, shell: ch.shell})
 	}
 	for i, r := range c.text {
 		if next, ok := renamed[r]; ok {
@@ -570,4 +579,30 @@ func (c *editor) prune() {
 		}
 	}
 	c.chips = kept
+}
+
+func (m *model) enterShell() {
+	m.input.mode = inputShell
+	m.input.composer.placeholder = shellPlaceholder
+}
+
+func (m *model) leaveShell() {
+	m.input.mode = inputPrompt
+	m.input.composer.placeholder = placeholderText
+}
+
+func (m *model) shellKey(key string, msg tea.KeyPressMsg) (tea.Cmd, bool) {
+	switch {
+	case m.input.mode == inputPrompt && msg.Text == "!" && m.input.composer.Value() == "":
+		m.enterShell()
+		return nil, true
+	case m.input.mode != inputShell:
+		return nil, false
+	case key == "enter":
+		return m.runShell(), true
+	case key == "esc" && m.input.composer.Value() == "":
+		m.leaveShell()
+		return nil, true
+	}
+	return nil, false
 }

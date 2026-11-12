@@ -82,6 +82,13 @@ func (m *model) textMode() inputMode {
 	return m.input.mode
 }
 
+func (m *model) promptGlyph() string {
+	if m.textMode() == inputShell {
+		return inputLabel(inputShell)
+	}
+	return promptText
+}
+
 func (m *model) panelInputLine(width int) (string, int) {
 	switch mode := m.textMode(); mode {
 	case inputPrompt, inputShell:
@@ -94,7 +101,7 @@ func (m *model) panelInputLine(width int) (string, int) {
 
 func (m *model) draftLine(width int) (string, int) {
 	first := m.input.composer.firstLine()
-	prompt := m.screen.dockTheme().hueText(threadHue(m.thread.id), promptText)
+	prompt := m.screen.dockTheme().hueText(threadHue(m.thread.id), m.promptGlyph())
 	line := m.screen.fit(prompt+first, terminalWidth(width))
 	return line, min(promptCells+m.screen.cells(first), terminalWidth(width))
 }
@@ -163,7 +170,7 @@ func (m *model) editorRows(width, limit int) ([]string, int, int) {
 	lines, row, col := m.input.composer.layout(&m.screen, width, m.draftSpans(), m.screen.dockTheme())
 	start := max(0, row-limit+1)
 	end := min(len(lines), start+limit)
-	prompt := m.screen.dockTheme().hueText(threadHue(m.thread.id), promptText)
+	prompt := m.screen.dockTheme().hueText(threadHue(m.thread.id), m.promptGlyph())
 	rows := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
 		lead := strings.Repeat(" ", promptCells)

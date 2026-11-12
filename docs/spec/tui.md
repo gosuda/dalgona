@@ -221,6 +221,10 @@ Tab and Enter MUST replace the token with `@<path> `. Esc MUST close the file pa
 A change of the file query MUST clear the rows of the previous query. The palette MUST NOT insert a path from an older query.
 A file palette with no rows MUST consume Enter and MUST NOT send the draft.
 When the file search is missing on the server, the first such palette MUST show `File search is unavailable on this server`.
+Enter in shell mode MUST run the line with `command/exec`, MUST add its output to the prompt as a chip, and MUST keep shell mode.
+The client MUST allow a shell command its 120 second timeout before it reports a failure.
+The chip MUST quote the output in a fence longer than any run of backticks in the output.
+Esc on an empty shell line MUST leave shell mode.
 
 ## Keys and commands
 

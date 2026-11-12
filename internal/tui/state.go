@@ -127,6 +127,7 @@ type inputState struct {
 	popup       *completion
 	fileSeq     int
 	fileMissing bool
+	shells      int
 }
 
 type screenState struct {
@@ -204,6 +205,14 @@ type resultMsg struct {
 
 type disconnectedMsg struct {
 	err error
+}
+
+type shellResultMsg struct {
+	n       int
+	command string
+	result  rpc.CommandExecResponse
+	err     error
+	elapsed time.Duration
 }
 
 func newModel(client caller, opts Options, done <-chan struct{}) model {

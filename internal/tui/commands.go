@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +25,11 @@ func (m *model) commandContext() (context.Context, context.CancelFunc) {
 }
 
 func requestContext(done <-chan struct{}) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	return boundedContext(done, requestTimeout)
+}
+
+func boundedContext(done <-chan struct{}, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	if done == nil {
 		return ctx, cancel
 	}
@@ -611,4 +616,101 @@ func (m *model) applyLogin(value any) tea.Cmd {
 func (m *model) unexpectedResult(name string) tea.Cmd {
 	m.errorf("%s", name+" response has an unexpected shape; reconnect and retry")
 	return nil
+}
+
+type shellParams struct {
+	Command        []string `json:"command"`
+	Cwd            string   `json:"cwd"`
+	TimeoutMS      int64    `json:"timeoutMs"`
+	OutputBytesCap int64    `json:"outputBytesCap"`
+}
+
+const (
+	shellTimeoutMS = 120000
+	shellOutputCap = 65536
+	shellMargin    = 10 * time.Second
+)
+
+func (m *model) runShell() tea.Cmd {
+	command := strings.TrimSpace(m.input.composer.Expanded())
+	if command == "" {
+		return nil
+	}
+	m.input.composer.SetValue("")
+	m.input.shells++
+	return m.shellCommand(m.input.shells, command)
+}
+
+func (m *model) shellCommand(n int, command string) tea.Cmd {
+	argv := []string{"sh", "-c", command}
+	if m.conn.platformFamily == "windows" {
+		argv = []string{"cmd", "/C", command}
+	}
+	params := shellParams{Command: argv, Cwd: m.conn.opts.Cwd, TimeoutMS: shellTimeoutMS, OutputBytesCap: shellOutputCap}
+	client, done, clock := m.conn.client, m.conn.done, m.conn.clock
+	return func() tea.Msg {
+		if client == nil {
+			return shellResultMsg{n: n, command: command, err: errors.New("rpc client is not connected")}
+		}
+		ctx, cancel := boundedContext(done, shellTimeoutMS*time.Millisecond+shellMargin)
+		defer cancel()
+		started := clock()
+		var result rpc.CommandExecResponse
+		err := client.Call(ctx, "command/exec", params, &result)
+		return shellResultMsg{n: n, command: command, result: result, err: err, elapsed: clock().Sub(started)}
+	}
+}
+
+func (m *model) applyShell(msg shellResultMsg) {
+	key := "shell:" + strconv.Itoa(msg.n)
+	ms := msg.elapsed.Milliseconds()
+	command := sanitizeText(msg.command)
+	if msg.err != nil {
+		m.commit(key, m.renderRow(row{label: "!", subject: command, state: "Failed", duration: durationText(&ms), body: textLines(sanitizeText(msg.err.Error()))}))
+		return
+	}
+	output := shellOutput(msg.result)
+	exit := msg.result.ExitCode
+	status := "completed"
+	if exit != 0 {
+		status = "failed"
+	}
+	item := rpc.Item{Type: "commandExecution", Command: command, Status: status, Output: output, ExitCode: &exit, DurationMs: &ms}
+	r := commandRow(item, m.screen.level())
+	r.mark, r.label = "", "!"
+	m.commit(key, m.renderRow(r))
+	label := fmt.Sprintf("[Shell #%d exit %d, %s]", msg.n, exit, pluralText(len(textLines(output)), "line"))
+	m.input.composer.addChip(chip{label: label, text: shellExpansion(command, exit, output), shell: true})
+}
+
+func shellOutput(result rpc.CommandExecResponse) string {
+	var parts []string
+	for _, text := range []string{result.Stdout, result.Stderr} {
+		if text != "" {
+			parts = append(parts, strings.TrimSuffix(text, "\n"))
+		}
+	}
+	return sanitizeText(strings.Join(parts, "\n"))
+}
+
+func shellExpansion(command string, exit int, output string) string {
+	fence := strings.Repeat("`", max(3, longestBacktickRun(output)+1))
+	span := "`"
+	if strings.Contains(command, "`") {
+		span, command = "``", " "+command+" "
+	}
+	return fmt.Sprintf("Output of %s%s%s (exit %d):\n%s\n%s\n%s", span, command, span, exit, fence, output, fence)
+}
+
+func longestBacktickRun(text string) int {
+	longest, run := 0, 0
+	for _, r := range text {
+		if r != '`' {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
+	}
+	return longest
 }
