@@ -30,6 +30,7 @@ func TestBuiltinsProductMetadata(t *testing.T) {
 		{word: "jevify", hue: [2]int{300, 420}, tools: []string{"eval"}, effort: "default"},
 		{word: "workflowz", hue: [2]int{30, 150}, tools: []string{"eval", "task"}, effort: "default"},
 		{word: "orchestrate", hue: [2]int{150, 280}, tools: []string{"task"}, effort: "default"},
+		{word: "ratchet", hue: [2]int{20, 70}, tools: []string{"ratchet", "exec", "task"}, effort: "default"},
 		{word: "decide", hue: [2]int{200, 250}, effort: "default"},
 		{word: "simplify", hue: [2]int{90, 140}, effort: "default"},
 	}
@@ -73,6 +74,7 @@ func TestBuiltinsNotices(t *testing.T) {
 		"jevify":      {"ctx.judge_batch", "rubric", "journal"},
 		"workflowz":   {"eval", "ctx.spawn", "ctx.scope", "ctx.wait", "journal"},
 		"orchestrate": {"task", "yield", "Verify"},
+		"ratchet":     {"ratchet", "approve", "gate", "exec", "task", "held-out"},
 		"decide":      {"option", "Recommend", "change your recommendation"},
 		"simplify":    {"Delete", "validation", "error path", "evidence"},
 	}

@@ -25,6 +25,8 @@ func TestDefaultEnabled(t *testing.T) {
 		{"dalgona", "jevify", true},
 		{"dalgona", "workflowz", true},
 		{"dalgona", "orchestrate", true},
+		{"dal", "ratchet", false},
+		{"dalgona", "ratchet", true},
 		{"dal", "review", true},
 	}
 	for _, test := range cases {

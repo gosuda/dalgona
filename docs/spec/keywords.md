@@ -12,6 +12,7 @@ A `Keyword` MUST contain a word, a hue range, an optional required-tool list, an
 | `jevify` | `[300, 420]` | `eval` | `default` |
 | `workflowz` | `[30, 150]` | `eval`, `task` | `default` |
 | `orchestrate` | `[150, 280]` | `task` | `default` |
+| `ratchet` | `[20, 70]` | `ratchet`, `exec`, `task` | `default` |
 | `decide` | `[200, 250]` | none | `default` |
 | `simplify` | `[90, 140]` | none | `default` |
 
@@ -59,5 +60,6 @@ Each sentence MUST use plain verbs and carry one instruction or fact. The notice
 - `jevify`: freeze the rubric before reading data, pre-filter, judge the batch, read flagged or uncertain items, and report counts and confirmed items. Settled judgments MUST replay from the journal.
 - `workflowz`: write durable `eval` phases, fan out, join subagents, contain item failures, and resume recorded effects without dispatching them again.
 - `orchestrate`: decompose into `task` calls, require `yield`, verify each phase, and continue until no work remains.
+- `ratchet`: build the eval through the `ratchet` actions in order, and get each approval from the user. Run the runner with `exec`, and give the analyzer only the train view through `tools.task(...)` in an `eval` cell. Follow each gate decision, and stop at `done`.
 - `decide`: name the options, recommend one with the deciding reason, and state what would change the recommendation.
 - `simplify`: delete first, and keep validation, error paths and evidence.
