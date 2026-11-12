@@ -446,3 +446,24 @@ describe("request queue", () => {
 		).toBeTruthy();
 	});
 });
+
+describe("dock height", () => {
+	afterEach(() => {
+		Reflect.deleteProperty(HTMLElement.prototype, "clientHeight");
+		cleanup();
+	});
+
+	test("publishes the dock's height so Jump to latest sits above it", async () => {
+		Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+			configurable: true,
+			get(this: HTMLElement) {
+				return this.classList.contains("dock") ? 240 : 0;
+			},
+		});
+		const dial = (_url: string, _handlers: RpcHandlers): RpcPort => idlePort();
+		render(App, { props: { session: new Session(dial) } });
+		await tick();
+		const shell = document.querySelector<HTMLElement>(".shell");
+		expect(shell?.style.getPropertyValue("--dock-height")).toBe("240px");
+	});
+});

@@ -32,7 +32,14 @@ select {
 
 button,
 select {
-	min-height: 40px;
+	min-height: var(--control-height);
+}
+
+@media (pointer: coarse) {
+	button,
+	select {
+		min-height: var(--control-height-coarse);
+	}
 }
 
 button {
@@ -160,12 +167,10 @@ dd,
 	}
 }
 
-@media (max-width: 40rem) {
-	input,
-	textarea,
-	select {
-		font-size: 1rem;
-	}
+input,
+textarea,
+select {
+	font-size: max(1rem, var(--size-body));
 }
 
 @media (forced-colors: active) {

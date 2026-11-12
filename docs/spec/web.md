@@ -92,7 +92,9 @@ The page holds one `Session`, which owns the connection and the page state.
 - At 320px nothing MUST clip or scroll sideways.
 - The transcript follows new output only while the reader is within 32px of its end. It follows the transcript at wide widths and the window at narrow widths. Opening a thread follows its end.
 - The transcript MUST show a Jump to latest button while a turn runs and the reader is away from the end. The button MUST show the count of items that arrive while the reader is away as `· N new`. Activating the button MUST scroll to the end and move focus to the last row.
+- At 52rem or narrower the Jump to latest button MUST sit above the dock, whatever the dock's height. The client MUST measure the dock and publish its height to the button.
 - The skip link MUST name the transcript and target `#transcript`.
+- At 52rem or narrower the dock (notices, request card, composer) stays at the bottom of the viewport. Form text is at least 16px.
 
 ### Theme
 

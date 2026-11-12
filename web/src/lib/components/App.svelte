@@ -23,6 +23,7 @@ interface Props {
 }
 
 let { session }: Props = $props();
+let dockHeight = $state(0);
 const waitingThreadIds = $derived(
 	new Set(session.requests.map((request) => request.threadId)),
 );
@@ -91,7 +92,7 @@ const subagentTitle = $derived.by(() => {
 
 <a class="skip-link" href="#transcript">Skip to transcript</a>
 
-<div class="shell">
+<div class="shell" style:--dock-height="{dockHeight}px">
 	<ThreadList
 		threads={session.threads}
 		activeId={session.activeThreadId}
@@ -150,7 +151,7 @@ const subagentTitle = $derived.by(() => {
 			readOutput={(itemId, offset) => session.readItemOutput(itemId, offset)}
 		/>
 
-		<div class="dock">
+		<div class="dock" bind:clientHeight={dockHeight}>
 			<NoticeStack
 				notices={session.notices}
 				waiting={session.waitingElsewhere}
@@ -257,6 +258,13 @@ const subagentTitle = $derived.by(() => {
 			grid-template-rows: auto auto;
 			height: auto;
 			min-height: 100dvh;
+		}
+
+		.dock {
+			position: sticky;
+			inset-block-end: 0;
+			background: var(--surface);
+			border-block-start: 1px solid var(--line);
 		}
 	}
 

@@ -51,6 +51,5 @@ let { models, value, disabled, onChange }: Props = $props();
 		background: var(--surface);
 		color: var(--text);
 		padding: var(--space-2) var(--space-3);
-		font-size: var(--size-small);
 	}
 </style>

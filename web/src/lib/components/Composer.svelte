@@ -159,7 +159,6 @@ function onKeydown(event: KeyboardEvent): void {
 		color: var(--text);
 		caret-color: var(--accent-text);
 		padding: var(--space-3);
-		font-size: var(--size-body);
 		line-height: 1.5;
 	}
 
