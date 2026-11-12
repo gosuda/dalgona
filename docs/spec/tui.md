@@ -92,7 +92,7 @@ The client cannot see a failed write to the terminal. A write that fails is ther
 | `/compact` | `thread/compact/start` |
 | `/login <provider>` | `account/login/start`. It shows the returned URL and user code |
 | `/tree` | `dalgona/thread/tree` selector. Enter calls `dalgona/thread/leaf/set` |
-| `/revert` | Active-path turns from `dalgona/thread/tree`. Enter calls `thread/revert` |
+| `/revert` | Active-path turns from `dalgona/thread/tree`. Enter opens a confirm panel, and its Enter calls `thread/revert`. Esc keeps the turn |
 | `/fork` | `thread/fork`, then resumes the new thread |
 | `/advisor` | `dalgona/advisor/status`, then `dalgona/advisor/set` with `enabled` true when no advisor is active and false otherwise. The notice says `advisor on` or `advisor off` |
 | `/advisor status` | `dalgona/advisor/status`. It writes one notice line per advisor with its name, status, model, notes, and token usage |

@@ -51,7 +51,7 @@ func (m *model) dockLines() []string {
 }
 
 func (m *model) panelOpen() bool {
-	return len(m.approvals) > 0 || m.selector != nil
+	return len(m.approvals) > 0 || m.confirm != nil || m.selector != nil
 }
 
 func (m *model) editorRows(width, limit int) []string {
@@ -105,6 +105,8 @@ func (m *model) panelLines() []string {
 	switch {
 	case len(m.approvals) > 0:
 		return framePanel(&m.screen, m.approvalPanel(), panelRows(panelApproval, m.screen.height))
+	case m.confirm != nil:
+		return framePanel(&m.screen, m.confirmPanel(), panelRows(panelConfirm, m.screen.height))
 	case m.selector != nil:
 		return framePanel(&m.screen, m.selectorPanel(), panelRows(panelList, m.screen.height))
 	default:

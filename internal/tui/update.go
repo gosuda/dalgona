@@ -84,6 +84,9 @@ func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	if len(m.approvals) > 0 {
 		return m.answerApprovalKey(msg.String())
 	}
+	if m.confirm != nil {
+		return m.confirmKey(msg.String())
+	}
 	if m.selector != nil {
 		return m.selectKey(msg.String())
 	}

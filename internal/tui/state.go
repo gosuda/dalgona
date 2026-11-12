@@ -37,6 +37,7 @@ type model struct {
 	ctrlCArmed  bool
 	approvals   []approval
 	selector    *selector
+	confirm     *confirmation
 }
 
 type connInfo struct {

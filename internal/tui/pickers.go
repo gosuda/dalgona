@@ -78,8 +78,8 @@ func (m *model) activateChoice() tea.Cmd {
 		params := rpc.ThreadLeafSetParams{ThreadID: m.thread.id, TurnID: selected.id}
 		return m.call("leaf", "dalgona/thread/leaf/set", params, nil, "")
 	case "revert":
-		params := rpc.ThreadRevertParams{ThreadID: m.thread.id, BeforeTurnID: selected.id}
-		return m.call("revert", "thread/revert", params, nil, "")
+		m.openRevert(selected.id, selected.label)
+		return nil
 	default:
 		return nil
 	}

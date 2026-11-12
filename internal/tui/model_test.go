@@ -286,14 +286,21 @@ func TestModelSelectorActions(t *testing.T) {
 	}
 	m, _ = drive(t, m, resultMsg{op: "revertTree", value: &rpc.ThreadTreeResponse{Turns: []rpc.TreeTurn{{TurnID: "turn-8", Preview: "old"}, {TurnID: "turn-9", Preview: "work", Active: true}}}})
 	assertContains(t, m.View().Content, "revert before a turn", "work")
+	before := len(caller.calls)
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	if len(caller.calls) != before {
+		t.Fatalf("enter on the picker sent %d calls, want none before the confirm", len(caller.calls)-before)
+	}
+	assertContains(t, m.View().Content, "Revert to before this turn?")
 	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
-	m = runCommand(t, m, command, "revert selection produced no command")
+	m = runCommand(t, m, command, "confirm produced no command")
 	last := caller.calls[len(caller.calls)-1]
 	params, ok := last.params.(rpc.ThreadRevertParams)
 	if last.method != "thread/revert" || !ok || params.BeforeTurnID != "turn-9" {
 		t.Fatalf("revert call = %#v", last)
 	}
-	assertContains(t, m.View().Content, "files changed by later turns are not reverted")
+	assertContains(t, m.View().Content, "files changed by later turns are not re")
+	assertContains(t, m.notice, "files changed by later turns are not reverted")
 }
 
 func TestModelTreeSelectionSetsLeaf(t *testing.T) {
