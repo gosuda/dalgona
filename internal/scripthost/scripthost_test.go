@@ -396,3 +396,18 @@ func TestCellSpawnsChildrenThroughTaskAndSpawn(t *testing.T) {
 		t.Fatalf("child.spawned = %d, child a requests = %d", spawned, h.model.requests("child a"))
 	}
 }
+
+func TestNestedExecAsksInAskMode(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, func(h *harness) {
+		h.scripts.Mode = config.ToolModeNormal
+		h.cfg.Config.Approval = config.ApprovalAsk
+	})
+	h.model.push(evalCall("tools.exec(command = 'echo hi')"), text("done"))
+	events := h.idle(h.run("run it"))
+	resolved := decisions(events)
+	nested, ok := resolved["e/1"]
+	if !ok || nested.Decision != "decline" || nested.By != "mode:ask" || nested.Reason != "declined: no client could approve this call" {
+		t.Fatalf("nested decision e/1 = %+v, all decisions = %+v", nested, resolved)
+	}
+}

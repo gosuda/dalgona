@@ -13,13 +13,12 @@ import (
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
-
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 )
 
 const (
 	maxScopeLimit = 64
 	maxPending    = 4096
+	maxCalls      = 1024
 )
 
 type effectFunc func(context.Context) (jsontext.Value, error)
@@ -119,11 +118,20 @@ func (t *toolsValue) bind(name string) *starlark.Builtin {
 }
 
 func (r *run) prepareTool(name string, kwargs []starlark.Tuple) (Slot, effectFunc, error) {
-	if name == asktool.Name {
-		return Slot{}, nil, r.halt(&stopError{status: StatusDenied, code: codeScope, msg: "tool ask needs the user and runs only as a direct call"})
+	action := kwString(kwargs, "action")
+	if waitsForUser(name, action) {
+		label := name
+		if name == ratchetName {
+			label += " " + action
+		}
+		return Slot{}, nil, r.halt(&stopError{status: StatusDenied, code: codeScope, msg: fmt.Sprintf("tool %s needs the user and runs only as a direct call", label)})
 	}
 	if !r.cfg.allow.has(name) {
 		return Slot{}, nil, r.halt(&stopError{status: StatusDenied, code: codeScope, msg: fmt.Sprintf("tool %s is not in this script's uses", name)})
+	}
+	r.calls++
+	if r.calls > maxCalls {
+		return Slot{}, nil, r.halt(&stopError{status: StatusLimitExceeded, code: codeLimit, msg: fmt.Sprintf("the script exceeded %d tool calls", maxCalls)})
 	}
 	payload, err := kwargsJSON(kwargs)
 	if err != nil {
@@ -137,6 +145,16 @@ func (r *run) prepareTool(name string, kwargs []starlark.Tuple) (Slot, effectFun
 		return r.fx.CallTool(ctx, slot, name, payload)
 	}
 	return slot, effect, nil
+}
+
+func kwString(kwargs []starlark.Tuple, key string) string {
+	for _, kv := range kwargs {
+		if name, _ := starlark.AsString(kv[0]); name == key {
+			value, _ := starlark.AsString(kv[1])
+			return value
+		}
+	}
+	return ""
 }
 
 type future struct {

@@ -7,13 +7,14 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/tool"
 	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	"github.com/gosuda/dalgona/internal/tool/yield"
 )
 
 const EvalName = "eval"
 
 const ratchetName = "ratchet"
 
-var evalFirstNames = []string{"read", "search", "patch", "apply_patch", "exec", asktool.Name, ratchetName, EvalName}
+var evalFirstNames = []string{"read", "search", "patch", "apply_patch", "exec", asktool.Name, ratchetName, yield.Name, EvalName}
 
 func visibleNames(mode config.ToolMode) []string {
 	switch mode {
@@ -22,7 +23,7 @@ func visibleNames(mode config.ToolMode) []string {
 	case config.ToolModeEvalFirst:
 		return evalFirstNames
 	case config.ToolModeEvalOnly:
-		return []string{asktool.Name, EvalName}
+		return []string{asktool.Name, yield.Name, EvalName}
 	}
 	return nil
 }
@@ -55,23 +56,12 @@ func FoldedTools(mode config.ToolMode, all []tool.Spec) []tool.Spec {
 	return folded
 }
 
-func DefaultUses(mode config.ToolMode, all []tool.Spec) []string {
-	var source []tool.Spec
-	switch mode {
-	case config.ToolModeNormal:
-		return []string{}
-	case config.ToolModeEvalFirst:
-		source = FoldedTools(mode, all)
-	case config.ToolModeEvalOnly:
-		source = all
-	}
-	uses := make([]string, 0, len(source))
-	for _, spec := range source {
-		if spec.Name != EvalName && spec.Name != asktool.Name {
-			uses = append(uses, spec.Name)
-		}
-	}
-	return uses
+func inCells(name string) bool {
+	return name != EvalName && name != yield.Name
+}
+
+func waitsForUser(name, action string) bool {
+	return name == asktool.Name || (name == ratchetName && action == "approve")
 }
 
 func CheckDirect(mode config.ToolMode, name string) error {

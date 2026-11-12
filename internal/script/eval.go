@@ -40,14 +40,14 @@ func NewEval(fx Effects, opts EvalOptions) *Eval {
 	tools := make([]tool.Spec, 0, len(opts.Tools))
 	names := make([]string, 0, len(opts.Tools))
 	for _, spec := range opts.Tools {
-		if spec.Name != EvalName {
+		if inCells(spec.Name) {
 			tools = append(tools, spec)
 			names = append(names, spec.Name)
 		}
 	}
-	allow := opts.Config.Uses
-	if !opts.Config.Set {
-		allow = DefaultUses(opts.Mode, tools)
+	allow := names
+	if opts.Config.Set {
+		allow = opts.Config.Uses
 	}
 	return &Eval{
 		fx:    fx,

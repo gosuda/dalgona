@@ -87,6 +87,7 @@ type run struct {
 	thread   *starlark.Thread
 	cancel   context.CancelCauseFunc
 	next     int
+	calls    int
 	loading  bool
 	mu       sync.Mutex
 	fatal    *stopError
