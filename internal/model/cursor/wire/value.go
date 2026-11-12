@@ -14,7 +14,6 @@ import (
 
 const maxValueDepth = 64
 
-// source: https://protobuf.dev/reference/protobuf/google.protobuf/#value
 const (
 	valueNull   = 1
 	valueNumber = 2

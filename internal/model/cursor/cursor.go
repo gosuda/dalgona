@@ -16,7 +16,6 @@ import (
 	"github.com/gosuda/dalgona/internal/model/cursor/wire"
 )
 
-// source: .references/senpi/packages/ai/src/api/cursor-agent.ts
 const (
 	DefaultBaseURL  = "https://api2.cursor.sh"
 	runPath         = "/agent.v1.AgentService/Run"

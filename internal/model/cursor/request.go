@@ -11,7 +11,6 @@ import (
 	"github.com/gosuda/dalgona/internal/model/cursor/wire"
 )
 
-// source: .references/senpi/packages/ai/src/api/cursor-agent.ts buildGrpcRequest, buildMcpToolDefinitions
 const (
 	defaultSystemPrompt = "You are a helpful assistant."
 	providerIdentifier  = "dalgona"

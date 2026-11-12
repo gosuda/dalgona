@@ -22,7 +22,6 @@ const (
 
 var errStreamCut = errors.New("cursor: stream ended before turnEnded")
 
-// source: https://connectrpc.com/docs/protocol/#error-codes
 var connectHTTPStatus = map[string]int{
 	"canceled":            499,
 	"unknown":             http.StatusInternalServerError,
