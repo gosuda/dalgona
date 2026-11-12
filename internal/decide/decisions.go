@@ -108,7 +108,6 @@ type wireAnswer struct {
 	confidence    float64
 }
 
-// source: https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request.md
 func decodeDecisionAnswers(reader io.Reader, questions map[string]Question) (map[string]Answer, error) {
 	decoder := jsontext.NewDecoder(reader)
 	if err := readKind(decoder, jsontext.KindBeginObject); err != nil {

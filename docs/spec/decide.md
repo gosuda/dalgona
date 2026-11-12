@@ -28,7 +28,7 @@ The Decisions adapter MUST send `POST https://openrouter.ai/api/alpha/decisions`
 
 The request MUST have `Content-Type: application/json`, `Accept: application/json`, and `Authorization: Bearer <token>`. The token callback MUST receive the request context. A token callback failure MUST stop the request.
 
-The JSON body MUST contain `model`, `state`, and `questions`. Question names MUST have a deterministic order. Criteria MUST use the shapes in the [Decisions API schema](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request.md). The [Jev guide](https://openrouter.ai/docs/guides/community/jev) defines the typed question semantics.
+The JSON body MUST contain `model`, `state`, and `questions`. Question names MUST have a deterministic order. Criteria and answers MUST use the shapes in the [Decisions API schema](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request.md). The [Jev guide](https://openrouter.ai/docs/guides/community/jev) defines the typed question semantics.
 
 The adapter MUST decode the response as a stream. It MUST read the top-level `answers` object and ignore unknown response fields. Every requested answer MUST exist. Its `type` MUST match its question type. Its required value MUST exist. A refusal, type mismatch, missing answer, malformed number, or malformed JSON MUST fail.
 
