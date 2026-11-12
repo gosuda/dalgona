@@ -1,5 +1,5 @@
 <script lang="ts">
-import { threadTitle } from "#lib/labels.ts";
+import { stateKey, stateWords, threadTitle } from "#lib/labels.ts";
 import type { ThreadSummary } from "#lib/types.ts";
 
 interface Props {
@@ -28,7 +28,8 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 });
 
 function activityLabel(thread: ThreadSummary): string {
-	return thread.status === "active" ? "Working" : "Idle";
+	const key = stateKey(thread.status, thread.activeFlags);
+	return key === null ? thread.status : stateWords[key];
 }
 </script>
 
@@ -80,7 +81,7 @@ function activityLabel(thread: ThreadSummary): string {
 								<span class="preview prose">{thread.preview}</span>
 							{/if}
 							<span class="meta">
-								<span class:working={thread.status === "active"}>{activityLabel(thread)}</span>
+								<span>{activityLabel(thread)}</span>
 								<span>{thread.model ?? "Default model"}</span>
 							</span>
 						</button>
@@ -227,11 +228,6 @@ function activityLabel(thread: ThreadSummary): string {
 		flex-wrap: wrap;
 		justify-content: space-between;
 		gap: var(--space-2);
-	}
-
-	.meta .working {
-		color: var(--added-text);
-		font-weight: 650;
 	}
 
 	.empty {

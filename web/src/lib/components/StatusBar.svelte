@@ -1,5 +1,6 @@
 <script lang="ts">
-import { advisorLabel } from "#lib/labels.ts";
+import StateTag from "#lib/components/StateTag.svelte";
+import { advisorLabel, type StateKey, stateKey } from "#lib/labels.ts";
 import type {
 	AdvisorSummary,
 	ConnectionState,
@@ -12,10 +13,26 @@ interface Props {
 	connection: ConnectionState;
 	advisor: AdvisorSummary;
 	turnStatus: TurnStatus | null;
+	turnStartedAtMs: number | null;
+	retryRemainingMs: number | null;
+	point: boolean;
+	activeFlags: readonly string[];
+	revision: number;
 	onReconnect: () => void;
 }
 
-let { status, connection, advisor, turnStatus, onReconnect }: Props = $props();
+let {
+	status,
+	connection,
+	advisor,
+	turnStatus,
+	turnStartedAtMs,
+	retryRemainingMs,
+	point,
+	activeFlags,
+	revision,
+	onReconnect,
+}: Props = $props();
 let advisorText = $derived(advisorLabel(advisor));
 
 const connectionLabels: Record<ConnectionState, string> = {
@@ -25,21 +42,33 @@ const connectionLabels: Record<ConnectionState, string> = {
 	disconnected: "Offline",
 };
 
-const turnLabels: Record<TurnStatus, string> = {
-	inProgress: "Working",
-	completed: "Turn completed",
-	interrupted: "Turn interrupted",
-	failed: "Turn failed",
+const turnStates: Record<TurnStatus, StateKey> = {
+	inProgress: "inProgress",
+	completed: "completed",
+	interrupted: "interrupted",
+	failed: "failed",
 };
+let turnKey = $derived(
+	turnStatus === null
+		? null
+		: turnStatus === "inProgress"
+			? (stateKey("active", activeFlags) ?? "inProgress")
+			: turnStates[turnStatus],
+);
 </script>
 
 <header class="status-bar">
 	<div class="connection">
 		<span class:online={connection === "connected"} class="connection-mark" aria-hidden="true"></span>
 		<span role="status">{connectionLabels[connection]}</span>
-		{#if turnStatus}
-			<span aria-hidden="true">·</span>
-			<span class:working={turnStatus === "inProgress"}>{turnLabels[turnStatus]}</span>
+		{#if turnKey}
+			<StateTag
+				state={turnKey}
+				startedAtMs={turnStartedAtMs}
+				retryRemainingMs={retryRemainingMs}
+				tick={revision}
+				{point}
+			/>
 		{/if}
 	</div>
 
@@ -104,9 +133,6 @@ const turnLabels: Record<TurnStatus, string> = {
 		background: var(--added-text);
 	}
 
-	.working {
-		color: var(--added-text);
-	}
 
 	dl {
 		display: flex;

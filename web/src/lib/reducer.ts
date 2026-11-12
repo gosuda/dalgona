@@ -31,6 +31,7 @@ export function emptyTranscript(threadId: string | null): TranscriptState {
 		error: null,
 		plan: null,
 		childThreadIds: [],
+		turnStartedAtMs: null,
 	};
 }
 
@@ -42,9 +43,11 @@ export function transcriptForThread(
 	let turnId: string | null = null;
 	let turnStatus: TurnStatus | null = null;
 	let error: string | null = null;
+	let turnStartedAtMs: number | null = null;
 	for (const turn of thread.turns) {
 		turnId = turn.id;
 		turnStatus = turn.status;
+		turnStartedAtMs = turn.startedAtMs ?? null;
 		error = turn.error;
 		for (const item of turn.items) {
 			items.push(item);
@@ -59,6 +62,7 @@ export function transcriptForThread(
 		error,
 		plan: null,
 		childThreadIds: [...preserved],
+		turnStartedAtMs,
 	};
 }
 
@@ -243,6 +247,7 @@ export function reduceNotification(
 				turnStatus: notification.turn.status,
 				error: notification.turn.error,
 				plan: state.plan?.turnId === notification.turn.id ? state.plan : null,
+				turnStartedAtMs: notification.turn.startedAtMs ?? null,
 			};
 		}
 		case "turnCompleted": {
@@ -255,6 +260,7 @@ export function reduceNotification(
 				turnStatus: notification.turn.status,
 				error: notification.turn.error,
 				plan: state.plan?.turnId === notification.turn.id ? state.plan : null,
+				turnStartedAtMs: notification.turn.startedAtMs ?? state.turnStartedAtMs,
 			};
 		}
 		case "itemStarted": {

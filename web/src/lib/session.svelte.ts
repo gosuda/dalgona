@@ -32,6 +32,7 @@ import type {
 	NoticeAction,
 	NoticeTone,
 	RequestId,
+	RetryWait,
 	RpcHandlers,
 	StatusInfo,
 	ThreadDetail,
@@ -93,6 +94,7 @@ const effectKinds = [
 	"threadName",
 	"advisorNote",
 	"requestResolved",
+	"retryWait",
 ] as const;
 
 type EffectKind = (typeof effectKinds)[number];
@@ -142,6 +144,7 @@ export class Session {
 	threads: readonly ThreadSummary[] = $state([]);
 	activeThreadId: string | null = $state(null);
 	transcript: TranscriptState = $state(emptyTranscript(null));
+	transcriptRevision: number = $state(0);
 	models: readonly ModelOption[] = $state([]);
 	selectedModel: string = $state("");
 	status: StatusInfo = $state({
@@ -160,9 +163,21 @@ export class Session {
 	startingThread: boolean = $state(false);
 	notices: readonly Notice[] = $state([]);
 	statusSeq: Readonly<Record<string, number>> = $state({});
+	retryWait: RetryWait | null = $state(null);
 	private noticeSeq = 0;
 
 	running: boolean = $derived(this.transcript.turnStatus === "inProgress");
+	retryRemainingMs: number | null = $derived.by(() => {
+		const wait = this.retryWait;
+		if (
+			wait === null ||
+			wait.threadId !== this.activeThreadId ||
+			wait.turnId !== this.transcript.turnId
+		) {
+			return null;
+		}
+		return wait.remainingMs;
+	});
 	currentApproval: ApprovalRequest | null = $derived(
 		activeApproval(
 			this.approvals,
@@ -218,9 +233,23 @@ export class Session {
 				this.statusSeq = seqs;
 				this.threads = this.threads.map((thread) =>
 					thread.id === notification.threadId
-						? { ...thread, status: notification.status }
+						? {
+								...thread,
+								status: notification.status,
+								activeFlags: notification.activeFlags,
+							}
 						: thread,
 				);
+			},
+			retryWait: (notification) => {
+				this.retryWait =
+					notification.remainingMs > 0
+						? {
+								threadId: notification.threadId,
+								turnId: notification.turnId,
+								remainingMs: notification.remainingMs,
+							}
+						: null;
 			},
 			threadName: (notification) => {
 				this.threads = this.threads.map((thread) =>
@@ -722,6 +751,7 @@ export class Session {
 			},
 			notification,
 		);
+		if (update.transcript !== this.transcript) this.transcriptRevision += 1;
 		this.transcript = update.transcript;
 		this.knownChildren = update.knownChildren;
 		if (isEffectKind(notification.type)) {

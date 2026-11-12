@@ -209,7 +209,7 @@ function argumentsText(value: JsonValue): string {
 		{/if}
 
 		{#if running}
-			<p class="turn-outcome working">
+			<p class="turn-outcome">
 				{error ? `Retrying after an error: ${error}` : "Working · new output appears here"}
 			</p>
 		{:else if turnStatus === "failed"}
@@ -440,10 +440,6 @@ function argumentsText(value: JsonValue): string {
 		font-size: var(--size-caption);
 		font-weight: 600;
 		overflow-wrap: break-word;
-	}
-
-	.turn-outcome.working {
-		color: var(--added-text);
 	}
 
 	.turn-outcome.failed {

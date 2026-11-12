@@ -130,6 +130,13 @@ export function parseJsonValue(value: unknown): JsonValue | undefined {
 	return out;
 }
 
+function threadFlags(value: unknown): string[] {
+	if (!isObject(value) || !Array.isArray(value["activeFlags"])) return [];
+	return value["activeFlags"].filter(
+		(flag): flag is string => typeof flag === "string",
+	);
+}
+
 function activity(value: unknown): ThreadActivity {
 	if (!isObject(value)) {
 		return "unknown";
@@ -400,6 +407,8 @@ function turnSnapshot(value: unknown, label: string): TurnSnapshot {
 		status,
 		items,
 		error: turnError(turn["error"]),
+		startedAtMs:
+			typeof turn["startedAt"] === "number" ? turn["startedAt"] * 1000 : null,
 	};
 }
 
@@ -413,6 +422,7 @@ function threadSummary(value: {
 		title: name ?? preview,
 		preview,
 		status: activity(value["status"]),
+		activeFlags: threadFlags(value["status"]),
 		updatedAt: requiredNumber(value, "updatedAt", "thread"),
 		model: typeof value["model"] === "string" ? value["model"] : null,
 		cwd: typeof value["cwd"] === "string" ? value["cwd"] : "",
@@ -732,6 +742,25 @@ function threadStatusNotice(params: Members): AppNotification | null {
 		threadId: params["threadId"],
 		seq: typeof params["seq"] === "number" ? params["seq"] : 0,
 		status: activity(params["status"]),
+		activeFlags: threadFlags(params["status"]),
+	};
+}
+
+function retryWaitNotice(params: Members): AppNotification | null {
+	const remainingMs = params["remainingMs"];
+	if (
+		typeof params["threadId"] !== "string" ||
+		typeof params["turnId"] !== "string" ||
+		typeof remainingMs !== "number" ||
+		remainingMs < 0
+	) {
+		return null;
+	}
+	return {
+		type: "retryWait",
+		threadId: params["threadId"],
+		turnId: params["turnId"],
+		remainingMs,
 	};
 }
 
@@ -867,6 +896,10 @@ const notifications: Readonly<Record<string, NotificationSpec>> = {
 	"dalgona/advisor/note": {
 		required: ["advisor", "delivery", "note", "severity", "threadId"],
 		parse: advisorNoteNotice,
+	},
+	"dalgona/retry/wait": {
+		required: ["remainingMs", "threadId", "turnId"],
+		parse: retryWaitNotice,
 	},
 	"serverRequest/resolved": {
 		required: ["requestId", "threadId"],

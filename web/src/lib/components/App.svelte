@@ -14,6 +14,10 @@ interface Props {
 }
 
 let { session }: Props = $props();
+const openThreadFlags = $derived(
+	session.threads.find((thread) => thread.id === session.activeThreadId)
+		?.activeFlags ?? [],
+);
 </script>
 
 <svelte:head>
@@ -39,6 +43,11 @@ let { session }: Props = $props();
 			connection={session.connection}
 			advisor={session.advisor}
 			turnStatus={session.transcript.turnStatus}
+			turnStartedAtMs={session.transcript.turnStartedAtMs}
+			retryRemainingMs={session.retryRemainingMs}
+			point={session.running && session.currentApproval === null}
+			activeFlags={openThreadFlags}
+			revision={session.transcriptRevision}
 			onReconnect={() => void session.connect()}
 		/>
 

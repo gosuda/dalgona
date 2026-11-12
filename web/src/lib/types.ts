@@ -20,9 +20,16 @@ export interface ThreadSummary {
 	readonly title: string;
 	readonly preview: string;
 	readonly status: ThreadActivity;
+	readonly activeFlags?: readonly string[];
 	readonly updatedAt: number;
 	readonly model: string | null;
 	readonly cwd: string;
+}
+
+export interface RetryWait {
+	readonly threadId: string;
+	readonly turnId: string;
+	readonly remainingMs: number;
 }
 
 export interface FileChange {
@@ -89,6 +96,7 @@ export interface TurnSnapshot {
 	readonly status: TurnStatus;
 	readonly items: readonly TranscriptItem[];
 	readonly error: string | null;
+	readonly startedAtMs?: number | null;
 }
 
 export interface ThreadDetail {
@@ -117,6 +125,7 @@ export interface TranscriptState {
 	readonly error: string | null;
 	readonly plan: TurnPlan | null;
 	readonly childThreadIds: readonly string[];
+	readonly turnStartedAtMs: number | null;
 }
 
 export type AdvisorStatus = "idle" | "reviewing" | "halted" | "disabled";
@@ -139,6 +148,7 @@ export type AppNotification =
 			readonly threadId: string;
 			readonly seq: number;
 			readonly status: ThreadActivity;
+			readonly activeFlags: readonly string[];
 	  }
 	| {
 			readonly type: "threadName";
@@ -149,6 +159,12 @@ export type AppNotification =
 			readonly type: "turnStarted" | "turnCompleted";
 			readonly threadId: string;
 			readonly turn: TurnSnapshot;
+	  }
+	| {
+			readonly type: "retryWait";
+			readonly threadId: string;
+			readonly turnId: string;
+			readonly remainingMs: number;
 	  }
 	| {
 			readonly type: "itemStarted" | "itemCompleted";

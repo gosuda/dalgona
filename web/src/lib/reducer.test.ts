@@ -109,6 +109,33 @@ describe("transcript reducer", () => {
 		expect(started.turnStatus).toBe("inProgress");
 	});
 
+	test("keeps the start of the open turn for the live counter", () => {
+		const started = reduceNotification(emptyTranscript("thread-1"), {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn: {
+				id: "turn-1",
+				status: "inProgress",
+				items: [],
+				error: null,
+				startedAtMs: 5000,
+			},
+		});
+		expect(started.turnStartedAtMs).toBe(5000);
+		const completed = reduceNotification(started, {
+			type: "turnCompleted",
+			threadId: "thread-1",
+			turn: {
+				id: "turn-1",
+				status: "completed",
+				items: [],
+				error: null,
+				startedAtMs: 5000,
+			},
+		});
+		expect(completed.turnStartedAtMs).toBe(5000);
+	});
+
 	test("hydrates turns in order and keeps the last turn status", () => {
 		const state = transcriptForThread(
 			thread([
@@ -263,10 +290,10 @@ describe("approval tracking", () => {
 
 	test("labels the requested item as waiting until the request resolves", () => {
 		const pending = trackApprovalRequest([], request);
-		expect(statusLabel(pending, "cmd-1")).toBe("Waiting for approval");
-		expect(statusLabel(pending, "cmd-2")).toBe("Running");
+		expect(statusLabel(pending, "cmd-1")).toBe("Waiting");
+		expect(statusLabel(pending, "cmd-2")).toBe("Working");
 		const resolved = resolveApprovalRequest(pending, request.id);
-		expect(statusLabel(resolved, "cmd-1")).toBe("Running");
+		expect(statusLabel(resolved, "cmd-1")).toBe("Working");
 	});
 
 	test("keeps finished items and other threads on their own status", () => {
@@ -371,7 +398,7 @@ describe("labels", () => {
 	});
 
 	test("names statuses and item kinds in plain words", () => {
-		expect(itemStatusLabel("inProgress")).toBe("Running");
+		expect(itemStatusLabel("inProgress")).toBe("Working");
 		expect(itemStatusLabel("custom")).toBe("custom");
 		expect(kindLabel("webSearch")).toBe("Web search");
 		expect(kindLabel("imageGeneration")).toBe("Image generation");

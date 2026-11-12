@@ -15,7 +15,13 @@ describe("notification validation", () => {
 		).toEqual({
 			type: "turnCompleted",
 			threadId: "thread-1",
-			turn: { id: "turn-1", status: "completed", items: [], error: null },
+			turn: {
+				id: "turn-1",
+				status: "completed",
+				items: [],
+				error: null,
+				startedAtMs: null,
+			},
 		});
 	});
 
@@ -201,5 +207,63 @@ describe("notification validation", () => {
 				params: { threadId: "thread-1", status: { type: "idle" } },
 			}),
 		).toMatchObject({ type: "threadStatus", threadId: "thread-1", seq: 0 });
+	});
+
+	it("keeps the active flags of a thread status", () => {
+		expect(
+			parseNotification({
+				method: "thread/status/changed",
+				params: {
+					threadId: "thread-1",
+					seq: 8,
+					status: { type: "active", activeFlags: ["waitingOnUserInput"] },
+				},
+			}),
+		).toMatchObject({
+			type: "threadStatus",
+			status: "active",
+			activeFlags: ["waitingOnUserInput"],
+		});
+	});
+
+	it("reads the start of a turn in milliseconds", () => {
+		expect(
+			parseNotification({
+				method: "turn/started",
+				params: {
+					threadId: "thread-1",
+					turn: {
+						id: "turn-1",
+						status: "inProgress",
+						items: [],
+						error: null,
+						startedAt: 1794391200,
+					},
+				},
+			}),
+		).toMatchObject({
+			type: "turnStarted",
+			turn: { id: "turn-1", startedAtMs: 1794391200000 },
+		});
+	});
+
+	it("parses a retry wait and rejects one without a count", () => {
+		expect(
+			parseNotification({
+				method: "dalgona/retry/wait",
+				params: { threadId: "thread-1", turnId: "turn-1", remainingMs: 59000 },
+			}),
+		).toEqual({
+			type: "retryWait",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			remainingMs: 59000,
+		});
+		expect(
+			parseNotification({
+				method: "dalgona/retry/wait",
+				params: { threadId: "thread-1", turnId: "turn-1" },
+			}),
+		).toBeNull();
 	});
 });

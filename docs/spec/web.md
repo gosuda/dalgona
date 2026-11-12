@@ -113,8 +113,8 @@ The licence texts of the fonts and the icon subset MUST ship in `web/static/lice
 
 ### Status bar
 
-The status bar shows the connection state as text. The turn state follows it as text: `Working`, `Turn completed`, `Turn interrupted`, or `Turn failed`.
-A `turn/started` notification for a turn already shown as `Turn completed`, `Turn interrupted`, or `Turn failed` MUST NOT replace that status or clear its error.
+The status bar shows the connection state as text. The turn state is a state tag: `Working`, `Waiting` while the open thread waits for the user, `Done`, `Stopped`, or `Failed`.
+A `turn/started` notification for a turn already shown as `Done`, `Stopped`, or `Failed` MUST NOT replace that status or clear its error.
 
 The client MUST keep the highest applied `seq` for each thread. It MUST ignore a `thread/status/changed` whose `seq` is lower, as `docs/spec/protocol.md` requires.
 
@@ -129,7 +129,7 @@ No advisor failure opens the error banner.
 
 ### Transcript
 
-- Item statuses read `Running`, `Done`, `Failed`, `Declined`, or `Waiting for approval`. Other statuses show their raw value.
+- Item statuses read `Working`, `Done`, `Failed`, `Declined`, or `Waiting`. Other statuses show their raw value.
 - Unknown item kinds show their type in plain words, such as `Web search`.
 - A `dynamicToolCall` item with tool `advisor` shows as a note card: `advisor · <severity>: <note>`. The note is the text of `contentItems`. The severity is always text. The card's inline-start border marks the severity as a second cue.
 - Other dynamic tools show their `contentItems` text as output.
@@ -138,6 +138,15 @@ No advisor failure opens the error banner.
 - A failed turn ends with `The turn failed: <message>. Send your message again to retry, or start a new thread.`
 - A turn that is retrying after an error shows `Retrying after an error: <message>`.
 - An interrupted turn shows `Turn interrupted. Send a message to continue.`
+
+### Motion
+
+A live thread shows one breathing dot and one elapsed counter. Both MUST stop under `prefers-reduced-motion: reduce`.
+Under `prefers-reduced-motion: reduce` the counter MUST NOT tick on a timer. It MUST update only when the transcript changes.
+The elapsed counter MUST read in the duration form of `web/src/lib/format.ts`: `0 ms`, `1s`, `1m 00s`, and `1h 00m`.
+A thread that waits for a user answer or an approval MUST show `Waiting`.
+During a rate-limit wait the tag MUST show `rate limited · retrying in <m>m <ss>s · esc stops` in place of the counter until `dalgona/retry/wait` reports zero.
+A finished row MUST NOT tick.
 
 ### Approvals
 

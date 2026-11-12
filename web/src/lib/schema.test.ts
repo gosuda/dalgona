@@ -286,6 +286,7 @@ const helloThread = {
 		title: "hello",
 		preview: "hello",
 		status: "idle",
+		activeFlags: [],
 		updatedAt: 2,
 		model: null,
 		cwd: "/work",
@@ -298,6 +299,7 @@ const completedTurn = {
 	status: "completed",
 	items: [],
 	error: null,
+	startedAtMs: null,
 };
 
 const agentMessage = {
@@ -323,6 +325,7 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 		threadId: "thread-1",
 		seq: 0,
 		status: "idle",
+		activeFlags: [],
 	},
 	ThreadNameUpdatedNotification: {
 		type: "threadName",

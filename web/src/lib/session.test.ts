@@ -260,6 +260,26 @@ describe("session", () => {
 			"note 5",
 		]);
 	});
+
+	test("tracks the rate-limit wait of the open turn until it reaches zero", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		const wait = (remainingMs: number): AppNotification => {
+			const parsed = parseNotification({
+				method: "dalgona/retry/wait",
+				params: { threadId: "t1", turnId: "turn-1", remainingMs },
+			});
+			if (parsed === null) throw new Error("retry wait did not parse");
+			return parsed;
+		};
+		ports[0]?.deliver(wait(90000));
+		expect(session.retryRemainingMs).toBe(90000);
+		ports[0]?.deliver(wait(0));
+		expect(session.retryRemainingMs).toBeNull();
+		session.stop();
+	});
 });
 
 describe("recovery actions", () => {

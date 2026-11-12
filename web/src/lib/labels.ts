@@ -50,16 +50,61 @@ export function threadTitle(
 	return thread.title || thread.preview || "Untitled thread";
 }
 
-const itemStatusLabels: Readonly<Record<string, string>> = {
-	inProgress: "Running",
-	awaitingApproval: "Waiting for approval",
+export type StateKey =
+	| "inProgress"
+	| "awaitingApproval"
+	| "completed"
+	| "failed"
+	| "declined"
+	| "interrupted"
+	| "idle"
+	| "disconnected";
+
+export const stateWords: Readonly<Record<StateKey, string>> = {
+	inProgress: "Working",
+	awaitingApproval: "Waiting",
 	completed: "Done",
 	failed: "Failed",
 	declined: "Declined",
+	interrupted: "Stopped",
+	idle: "Ready",
+	disconnected: "Offline",
 };
 
+const stateKeys: Readonly<Record<string, StateKey>> = {
+	active: "inProgress",
+	idle: "idle",
+	systemError: "failed",
+	inProgress: "inProgress",
+	awaitingApproval: "awaitingApproval",
+	completed: "completed",
+	failed: "failed",
+	declined: "declined",
+	interrupted: "interrupted",
+	disconnected: "disconnected",
+};
+
+const waitingFlags: readonly string[] = [
+	"waitingOnApproval",
+	"waitingOnUserInput",
+];
+
+export function stateKey(
+	status: string,
+	activeFlags: readonly string[] = [],
+): StateKey | null {
+	if (
+		status === "active" &&
+		activeFlags.some((flag) => waitingFlags.includes(flag))
+	) {
+		return "awaitingApproval";
+	}
+	return Object.hasOwn(stateKeys, status) ? (stateKeys[status] ?? null) : null;
+}
+
 export function itemStatusLabel(status: string): string {
-	return itemStatusLabels[status] ?? status;
+	const key = stateKey(status);
+	return key === null ? status : stateWords[key];
 }
 
 const planStatusLabels: Record<PlanStepStatus, string> = {
