@@ -64,6 +64,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [MCP client](spec/mcp.md): tool discovery, calls, and transports.
 - [Discovery](spec/discovery.md): opt-in imports of instructions, skills, and server config.
 - [herdr integration](spec/herdr.md): pane reports and subagent panes.
+- [Live debugging](spec/live-debug.md): scripted model server, script format, and stream framing.
 
 `just spec-style` checks sentence length, semicolons and dashes in `docs/spec`.
 
@@ -87,3 +88,4 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [Edit styles](decisions/edit-styles.md): anchor default, explicit hashline profiles, and no symbol locators.
 - [Ask tool](decisions/ask-tool.md): model questions answered by the user through the client wire.
 - [Ratchet](decisions/ratchet.md): host-owned eval gate in the dalgona battery.
+- [llmstub test support](decisions/llmstub-test-support.md): scripted chat-completions server for tests and live sessions.
