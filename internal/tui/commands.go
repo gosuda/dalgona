@@ -415,6 +415,7 @@ type resumedThread struct {
 	rpc.ThreadReadResponse
 	effort   string
 	approval string
+	model    string
 }
 
 func (m *model) applyDataResult(msg resultMsg) tea.Cmd {
@@ -606,6 +607,7 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	m.setThread(response.Thread.ID)
 	m.thread.approvalMode = approvalFromPolicy(response.approval)
 	m.thread.effort = response.effort
+	m.thread.modelName = response.model
 	m.thread.title = threadTitle(response.Thread)
 	m.noticeMoved(m.thread.title)
 	m.setState(threadState(response.Thread.Status))
@@ -649,6 +651,7 @@ func (m *model) applyNewThread(value any) tea.Cmd {
 	m.setThread(response.Thread.ID)
 	m.thread.approvalMode = approvalFromPolicy(response.ApprovalPolicy)
 	m.thread.effort = response.ReasoningEffort
+	m.thread.modelName = response.Model
 	m.thread.title = threadTitle(response.Thread)
 	m.noticeMoved(m.thread.title)
 	m.thread.sandbox = serverSandbox(response.Sandbox.Type, m.thread.sandbox)

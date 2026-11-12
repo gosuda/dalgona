@@ -34,6 +34,7 @@ func (f *fakeCaller) Call(_ context.Context, method string, params, result any) 
 		out.Turn = rpc.Turn{ID: "turn-1", Status: "inProgress"}
 	case *rpc.ThreadResumeResponse:
 		out.Thread = rpc.Thread{ID: "t1", Name: "resumed"}
+		out.Model = "local/qwen-test"
 	case *rpc.ThreadReadResponse:
 		out.Thread = rpc.Thread{ID: "t1", Name: "resumed"}
 	case *[]rpc.AdvisorState:
@@ -562,5 +563,27 @@ func TestNestedTodoWritesPlanRowOnly(t *testing.T) {
 	}
 	if first, _, _ := strings.Cut(entryText(t, m, "plan:turn-1:0"), "\n"); first != "Plan" {
 		t.Fatalf("plan row starts with %q, want Plan", first)
+	}
+}
+
+func TestNewThreadShowsServerModel(t *testing.T) {
+	t.Parallel()
+	m := newModel(new(fakeCaller), Options{}, nil)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Model: "local/qwen-test", Thread: rpc.Thread{ID: "t1"}}})
+	if m.thread.modelName != "local/qwen-test" {
+		t.Fatalf("model = %q, want the model the server reports", m.thread.modelName)
+	}
+	assertContains(t, dockText(m), "local/qwen-test")
+}
+
+func TestResumedThreadShowsServerModel(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, m.resumeThread("t1")())
+	if m.thread.modelName != "local/qwen-test" {
+		t.Fatalf("model = %q, want the model the server reports", m.thread.modelName)
 	}
 }
