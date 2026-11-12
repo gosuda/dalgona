@@ -86,7 +86,7 @@ The page holds one `Session`, which owns the connection and the page state.
 
 ### Layout
 
-- Above 52rem the page has two columns, the thread list and the workspace. The workspace holds the status bar, the thread heading, the transcript, and the composer. The transcript scrolls inside its own column.
+- Above 52rem the page has two columns, the thread list and the workspace. The workspace holds the thread header with its status band, the transcript, and the composer. The transcript scrolls inside its own column.
 - At 52rem or narrower the page stacks the parts and the document scrolls. At 52rem or narrower the thread list (not the sidebar) keeps a maximum height of 18rem and scrolls.
 - The open thread has an inline-start bar and a strong title as well as its fill, so it stays distinct under forced colours.
 - At 320px nothing MUST clip or scroll sideways.
@@ -114,21 +114,33 @@ Elapsed time, counts, and percentages MUST use tabular figures.
 Nerd Font glyphs MUST come from the `Symbols Nerd Subset` font that `web/src/lib/theme/fonts.css` declares.
 The licence texts of the fonts and the icon subset MUST ship in `web/static/licenses`.
 
-### Status bar
+### Thread header and status band
 
-The status bar shows the connection state as text. The turn state is a state tag: `Working`, `Waiting` while the open thread waits for the user, `Done`, `Stopped`, or `Failed`.
+The thread header shows the open thread title and its state tag. The state tag is `Working`, `Waiting` while the open thread waits for the user, `Done`, `Stopped`, or `Failed`. The tag shows `Ready` when the thread is idle, and `Offline` when the connection is down.
 A `turn/started` notification for a turn already shown as `Done`, `Stopped`, or `Failed` MUST NOT replace that status or clear its error.
 
 The client MUST keep the highest applied `seq` for each thread. It MUST ignore a `thread/status/changed` whose `seq` is lower, as `docs/spec/protocol.md` requires.
 
-It also shows model, approval, sandbox, runner, and advisor. The advisor entry comes from `dalgona/advisor/status`. The client loads it when a thread opens or starts, and again after each `dalgona/advisor/note` for the open thread. It shows one of:
+The status band sits at the end of the header. It shows these items in this order: model, effort, approval, sandbox, folder, queue, context, and mark.
+The client MUST NOT render an item whose id is in `statusHide`. The client MUST NOT hide `model`.
 
-- One advisor: its status (`idle`, `reviewing`, `halted`, or `off`) and its note count.
-- Several advisors: `<n> advisors · <k> reviewing`.
-- `off` when the server answers `-32001`.
-- `unavailable` for any other failure.
+- Model shows the model name, as the model picker does until the model panel ships.
+- Effort shows one glyph by rank among the model's efforts. It MUST NOT show when the model has fewer than two efforts.
+- The effective effort is the thread effort, or the model default when the thread sends none.
+- Approval and sandbox show one glyph each. Sandbox `off` shows the none glyph.
+- Folder shows one glyph, and its title is the folder name.
+- Queue shows one glyph and the count, only when a follow-up is queued.
+- Context shows a moon gauge and the percent of the context window in use. It MUST NOT show when the window is unknown. It MUST NOT show token counts.
+- Mark shows the small candy mark.
 
-No advisor failure opens the error banner.
+Each icon MUST carry an `aria-label` that states its value in words. The browser draws Nerd glyphs from its own subset font, and it ignores the `icons` setting.
+
+The band MUST keep a details list under `Status` that holds every shown item as text. The list MUST appear when `statusHide` names an item, and when the window is 40rem or narrower.
+
+At 40rem or narrower the band is one row under the title. Below a band width of 30rem the folder item MUST drop. Below 26rem the queue item MUST drop. Below 16rem the effort item MUST drop. Below 12rem the mark item MUST drop. Model, context, approval, and sandbox MUST NOT drop.
+
+The document title MUST be `dalgona · <title> · <state>`, with the same state word as the header tag.
+
 
 ### Transcript
 

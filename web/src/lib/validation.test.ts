@@ -266,6 +266,33 @@ describe("notification validation", () => {
 			}),
 		).toBeNull();
 	});
+
+	it("parses a token usage update and returns null for a malformed one", () => {
+		const breakdown = {
+			totalTokens: 8,
+			inputTokens: 5,
+			cachedInputTokens: 0,
+			cacheWriteInputTokens: 0,
+			outputTokens: 3,
+			reasoningOutputTokens: 0,
+		};
+		const params = (tokenUsage: unknown) => ({
+			method: "thread/tokenUsage/updated",
+			params: { threadId: "thread-1", turnId: "turn-1", tokenUsage },
+		});
+		expect(
+			parseNotification(
+				params({ last: breakdown, total: breakdown, modelContextWindow: 200 }),
+			),
+		).toMatchObject({ type: "tokenUsage", usage: { contextWindow: 200 } });
+		expect(parseNotification(params({ total: breakdown }))).toBeNull();
+		expect(parseNotification(params({ last: breakdown }))).toBeNull();
+		expect(
+			parseNotification(
+				params({ last: { ...breakdown, inputTokens: "5" }, total: breakdown }),
+			),
+		).toBeNull();
+	});
 });
 
 describe("file change validation", () => {

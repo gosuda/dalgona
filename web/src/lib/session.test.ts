@@ -526,4 +526,39 @@ describe("completed turns", () => {
 		expect(session.completedThreadIds.has("t2")).toBe(true);
 		session.stop();
 	});
+
+	test("keeps the token usage a resumed thread reports", async () => {
+		const breakdown = {
+			totalTokens: 27,
+			inputTokens: 20,
+			cachedInputTokens: 0,
+			cacheWriteInputTokens: 0,
+			outputTokens: 7,
+			reasoningOutputTokens: 0,
+		};
+		const resumeWithUsage: Answer = (params) => ({
+			thread: thread(threadIdOf(params), []),
+			model: "gpt-test",
+			approvalsReviewer: "user",
+			modelProvider: "openai",
+			approvalPolicy: "on-request",
+			sandbox: "workspace-write",
+			cwd: "/work",
+			tokenUsage: {
+				last: breakdown,
+				total: breakdown,
+				modelContextWindow: 200000,
+			},
+		});
+		const { dial } = fakeDial("none", { "thread/resume": resumeWithUsage });
+		const session = new Session(dial);
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.connection).toBe("connected");
+		});
+		await session.selectThread("t2");
+		expect(session.usage).toHaveProperty(["t2", "contextWindow"], 200000);
+		expect(session.usage).toHaveProperty(["t2", "total", "totalTokens"], 27);
+		session.stop();
+	});
 });

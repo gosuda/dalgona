@@ -18,6 +18,8 @@ import type {
 	ThreadListResult,
 	ThreadStartResult,
 	ThreadSummary,
+	TokenBreakdown,
+	TokenUsage,
 	TranscriptItem,
 	TurnSnapshot,
 	TurnStartResult,
@@ -193,24 +195,56 @@ function sandboxLabel(value: unknown): string {
 	return "read-only";
 }
 
-function runnerLabel(value: unknown): string {
-	if (typeof value === "string" && value !== "") {
-		return value;
-	}
-	return "local";
-}
-
 function statusInfo(
 	model: unknown,
 	approval: unknown,
 	sandbox: unknown,
-	runner: unknown,
+	effort: unknown,
 ): StatusInfo {
 	return {
 		model: typeof model === "string" ? model : "",
 		approval: approvalLabel(approval),
 		sandbox: sandboxLabel(sandbox),
-		runner: runnerLabel(runner),
+		effort: typeof effort === "string" && effort !== "" ? effort : null,
+	};
+}
+
+function reasoningEfforts(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	return value.map((entry) =>
+		requiredString(object(entry, "model"), "reasoningEffort", "model"),
+	);
+}
+
+function tokenBreakdown(value: unknown, label: string): TokenBreakdown {
+	const source = object(value, label);
+	return {
+		totalTokens: requiredNumber(source, "totalTokens", label),
+		inputTokens: requiredNumber(source, "inputTokens", label),
+		cachedInputTokens: requiredNumber(source, "cachedInputTokens", label),
+		cacheWriteInputTokens: requiredNumber(
+			source,
+			"cacheWriteInputTokens",
+			label,
+		),
+		outputTokens: requiredNumber(source, "outputTokens", label),
+		reasoningOutputTokens: requiredNumber(
+			source,
+			"reasoningOutputTokens",
+			label,
+		),
+	};
+}
+
+function tokenUsage(value: unknown, label: string): TokenUsage {
+	const source = object(value, label);
+	const contextWindow = source["modelContextWindow"];
+	return {
+		last: tokenBreakdown(source["last"], label),
+		total: tokenBreakdown(source["total"], label),
+		contextWindow: typeof contextWindow === "number" ? contextWindow : null,
 	};
 }
 
@@ -534,8 +568,12 @@ export function parseThreadStartResponse(value: unknown): ThreadStartResult {
 			body["model"],
 			body["approvalPolicy"],
 			body["sandbox"],
-			body["runner"],
+			body["reasoningEffort"],
 		),
+		usage:
+			body["tokenUsage"] === undefined
+				? null
+				: tokenUsage(body["tokenUsage"], "thread/start"),
 	};
 }
 
@@ -551,6 +589,7 @@ export function parseModelListResponse(value: unknown): readonly ModelOption[] {
 	}
 	return body["data"].map((entry) => {
 		const model = object(entry, "model");
+		const defaultEffort = model["defaultReasoningEffort"];
 		return {
 			id: requiredString(model, "id", "model"),
 			label:
@@ -560,6 +599,11 @@ export function parseModelListResponse(value: unknown): readonly ModelOption[] {
 			description:
 				typeof model["description"] === "string" ? model["description"] : "",
 			hidden: model["hidden"] === true,
+			efforts: reasoningEfforts(model["supportedReasoningEfforts"]),
+			defaultEffort:
+				typeof defaultEffort === "string" && defaultEffort !== ""
+					? defaultEffort
+					: null,
 		};
 	});
 }
@@ -572,7 +616,7 @@ export function parseConfigReadResponse(value: unknown): StatusInfo {
 		config["model"],
 		config["approval_policy"],
 		config["sandbox_mode"],
-		config["runner"],
+		config["model_reasoning_effort"],
 	);
 }
 
@@ -856,6 +900,30 @@ function retryWaitNotice(params: Members): AppNotification | null {
 	};
 }
 
+function tokenUsageNotice(params: Members): AppNotification | null {
+	if (
+		typeof params["threadId"] !== "string" ||
+		typeof params["turnId"] !== "string"
+	) {
+		return null;
+	}
+	let usage: TokenUsage;
+	try {
+		usage = tokenUsage(params["tokenUsage"], "thread/tokenUsage/updated");
+	} catch (error) {
+		if (error instanceof InvalidPayload) {
+			return null;
+		}
+		throw error;
+	}
+	return {
+		type: "tokenUsage",
+		threadId: params["threadId"],
+		turnId: params["turnId"],
+		usage,
+	};
+}
+
 const editVerdicts = ["clean", "uncertain", "flagged", "error"] as const;
 
 function parseReview(params: Members): EditReview | null {
@@ -1026,6 +1094,10 @@ const notifications: Readonly<Record<string, NotificationSpec>> = {
 	"turn/plan/updated": {
 		required: ["plan", "threadId", "turnId"],
 		parse: planNotice,
+	},
+	"thread/tokenUsage/updated": {
+		required: ["threadId", "tokenUsage", "turnId"],
+		parse: tokenUsageNotice,
 	},
 	"dalgona/thread/childSpawned": {
 		required: ["childId", "cwd", "threadId"],

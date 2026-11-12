@@ -41,6 +41,7 @@ import type {
 	StatusInfo,
 	ThreadDetail,
 	ThreadSummary,
+	TokenUsage,
 	TranscriptState,
 	WaitingElsewhere,
 } from "./types";
@@ -102,6 +103,7 @@ const effectKinds = [
 	"advisorNote",
 	"requestResolved",
 	"retryWait",
+	"tokenUsage",
 ] as const;
 
 type EffectKind = (typeof effectKinds)[number];
@@ -160,8 +162,10 @@ export class Session {
 		model: "Default",
 		approval: "auto",
 		sandbox: "workspace-write",
-		runner: "local",
+		effort: null,
 	});
+	usage: Readonly<Record<string, TokenUsage>> = $state({});
+	statusHide: readonly string[] = $state([]);
 	userAgent: string | null = $state(null);
 	keywords: readonly KeywordDefinition[] = $state([]);
 	advisor: AdvisorSummary = $state({ kind: "unknown" });
@@ -262,6 +266,12 @@ export class Session {
 								remainingMs: notification.remainingMs,
 							}
 						: null;
+			},
+			tokenUsage: (notification) => {
+				this.usage = {
+					...this.usage,
+					[notification.threadId]: notification.usage,
+				};
 			},
 			threadName: (notification) => {
 				this.threads = this.threads.map((thread) =>
@@ -539,6 +549,11 @@ export class Session {
 		const verbosity = settings.find((setting) => setting.key === "verbosity");
 		if (verbosity !== undefined)
 			this.verbosity = parseVerbosity(verbosity.value);
+		const hidden = settings.find((setting) => setting.key === "statusHide");
+		if (hidden !== undefined && Array.isArray(hidden.value))
+			this.statusHide = hidden.value.filter(
+				(item): item is string => typeof item === "string",
+			);
 	}
 
 	private async loadKeywords(generation: number): Promise<void> {
@@ -615,6 +630,8 @@ export class Session {
 			this.advisor = { kind: "unknown" };
 			this.clearErrors();
 			this.status = result.status;
+			if (result.usage !== null)
+				this.usage = { ...this.usage, [threadId]: result.usage };
 			this.selectedModel = result.status.model || this.selectedModel;
 			void this.loadAdvisor(threadId);
 			if (result.thread.turns.length === 0)
@@ -662,6 +679,11 @@ export class Session {
 			this.activeThreadId = result.thread.summary.id;
 			this.transcript = transcriptForThread(result.thread);
 			this.status = result.status;
+			if (result.usage !== null)
+				this.usage = {
+					...this.usage,
+					[result.thread.summary.id]: result.usage,
+				};
 			this.selectedModel = result.status.model || this.selectedModel;
 			this.queuedFollowups = [];
 			this.clearErrors();

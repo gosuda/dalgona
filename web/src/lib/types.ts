@@ -245,6 +245,12 @@ export type AppNotification =
 			readonly turnId: string;
 			readonly review: EditReview;
 	  }
+	| {
+			readonly type: "tokenUsage";
+			readonly threadId: string;
+			readonly turnId: string;
+			readonly usage: TokenUsage;
+	  }
 	| { readonly type: "requestResolved"; readonly requestId: RequestId };
 
 export interface ModelOption {
@@ -252,13 +258,30 @@ export interface ModelOption {
 	readonly label: string;
 	readonly description: string;
 	readonly hidden: boolean;
+	readonly efforts: readonly string[];
+	readonly defaultEffort: string | null;
 }
 
 export interface StatusInfo {
 	readonly model: string;
 	readonly approval: string;
 	readonly sandbox: string;
-	readonly runner: string;
+	readonly effort: string | null;
+}
+
+export interface TokenBreakdown {
+	readonly totalTokens: number;
+	readonly inputTokens: number;
+	readonly cachedInputTokens: number;
+	readonly cacheWriteInputTokens: number;
+	readonly outputTokens: number;
+	readonly reasoningOutputTokens: number;
+}
+
+export interface TokenUsage {
+	readonly last: TokenBreakdown;
+	readonly total: TokenBreakdown;
+	readonly contextWindow: number | null;
 }
 
 export interface ThreadListResult {
@@ -269,6 +292,7 @@ export interface ThreadListResult {
 export interface ThreadStartResult {
 	readonly thread: ThreadDetail;
 	readonly status: StatusInfo;
+	readonly usage: TokenUsage | null;
 }
 
 export interface TurnStartResult {

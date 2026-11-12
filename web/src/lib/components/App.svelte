@@ -1,13 +1,14 @@
 <script lang="ts">
 import ApprovalDialog from "#lib/components/ApprovalDialog.svelte";
 import Composer from "#lib/components/Composer.svelte";
-import ModelPicker from "#lib/components/ModelPicker.svelte";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
-import StatusBar from "#lib/components/StatusBar.svelte";
+import StateTag from "#lib/components/StateTag.svelte";
+import StatusBand from "#lib/components/StatusBand.svelte";
 import ThreadList from "#lib/components/ThreadList.svelte";
 import Transcript from "#lib/components/Transcript.svelte";
+import { type StateKey, stateKey, stateWords } from "#lib/labels.ts";
 import type { Session } from "#lib/session.svelte.ts";
-import type { ApprovalRequest } from "#lib/types.ts";
+import type { ApprovalRequest, TurnStatus } from "#lib/types.ts";
 
 interface Props {
 	session: Session;
@@ -17,14 +18,42 @@ let { session }: Props = $props();
 const waitingThreadIds = $derived(
 	new Set(session.approvals.map((request) => request.threadId)),
 );
-const openThreadFlags = $derived(
-	session.threads.find((thread) => thread.id === session.activeThreadId)
-		?.activeFlags ?? [],
+const activeThread = $derived(
+	session.threads.find((thread) => thread.id === session.activeThreadId),
+);
+const openThreadFlags = $derived(activeThread?.activeFlags ?? []);
+const folder = $derived(
+	(activeThread?.cwd ?? "").split(/[\\/]/).findLast((part) => part !== "") ??
+		"",
+);
+const usage = $derived(
+	session.activeThreadId === null
+		? null
+		: (session.usage[session.activeThreadId] ?? null),
+);
+
+const turnStates: Record<TurnStatus, StateKey> = {
+	inProgress: "inProgress",
+	completed: "completed",
+	interrupted: "interrupted",
+	failed: "failed",
+};
+const headerState: StateKey = $derived(
+	session.connection === "disconnected"
+		? "disconnected"
+		: session.transcript.turnStatus === null
+			? "idle"
+			: session.transcript.turnStatus === "inProgress"
+				? (stateKey("active", openThreadFlags) ?? "inProgress")
+				: turnStates[session.transcript.turnStatus],
+);
+const titleText = $derived(
+	`dalgona · ${session.activeTitle} · ${stateWords[headerState]}`,
 );
 </script>
 
 <svelte:head>
-	<title>{session.activeTitle} · dalgona</title>
+	<title>{titleText}</title>
 </svelte:head>
 
 <a class="skip-link" href="#transcript">Skip to transcript</a>
@@ -44,31 +73,29 @@ const openThreadFlags = $derived(
 	/>
 
 	<main id="main-content" class="workspace" tabindex="-1">
-		<StatusBar
-			status={session.status}
-			connection={session.connection}
-			advisor={session.advisor}
-			turnStatus={session.transcript.turnStatus}
-			turnStartedAtMs={session.transcript.turnStartedAtMs}
-			retryRemainingMs={session.retryRemainingMs}
-			point={session.running && session.currentApproval === null}
-			activeFlags={openThreadFlags}
-			revision={session.transcriptRevision}
-			onReconnect={() => void session.connect()}
-		/>
-
-		<div class="workspace-heading">
-			<div>
-				<p>Current thread</p>
+		<header class="thread-head">
+			<div class="thread-title">
 				<h2>{session.activeTitle}</h2>
+				<StateTag
+					state={headerState}
+					startedAtMs={session.transcript.turnStartedAtMs}
+					retryRemainingMs={session.retryRemainingMs}
+					tick={session.transcriptRevision}
+					point={session.running && session.currentApproval === null}
+				/>
 			</div>
-			<ModelPicker
+			<StatusBand
+				status={session.status}
 				models={session.models}
-				value={session.selectedModel}
-				disabled={session.connection !== "connected"}
-				onChange={(model) => void session.changeModel(model)}
+				selectedModel={session.selectedModel}
+				pickerDisabled={session.connection !== "connected"}
+				usage={usage}
+				statusHide={session.statusHide}
+				folder={folder}
+				queued={session.queuedFollowups.length}
+				onModel={(model) => void session.changeModel(model)}
 			/>
-		</div>
+		</header>
 
 		<NoticeStack
 			notices={session.notices}
@@ -137,25 +164,28 @@ const openThreadFlags = $derived(
 		outline: none;
 	}
 
-	.workspace-heading {
+	.thread-head {
 		display: flex;
-		align-items: end;
-		justify-content: space-between;
+		align-items: flex-start;
 		flex-wrap: wrap;
-		gap: var(--space-3);
+		gap: var(--space-3) var(--space-6);
+		border-block-end: 1px solid var(--line);
+		background: var(--surface);
 		padding: var(--space-4) var(--space-6);
 	}
 
-	.workspace-heading p {
-		margin: 0 0 var(--space-1);
-		color: var(--dim);
-		font-size: var(--size-caption);
+	.thread-title {
+		display: flex;
+		flex: 1 1 16rem;
+		min-width: 0;
+		flex-direction: column;
+		gap: var(--space-2);
 	}
 
-	.workspace-heading h2 {
+	.thread-title h2 {
 		max-width: 48rem;
 		margin: 0;
-		overflow-wrap: break-word;
+		overflow-wrap: anywhere;
 		font-size: var(--size-heading);
 		font-weight: 650;
 		line-height: 1.25;
@@ -176,7 +206,7 @@ const openThreadFlags = $derived(
 	}
 
 	@media (max-width: 40rem) {
-		.workspace-heading {
+		.thread-head {
 			padding: var(--space-3) var(--space-4);
 		}
 	}

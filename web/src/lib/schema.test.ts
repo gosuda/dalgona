@@ -236,6 +236,33 @@ const codexCases: readonly CodexCase[] = [
 		threadId: "thread-1",
 		turnId: "turn-1",
 	}),
+	notification(
+		"thread/tokenUsage/updated",
+		"ThreadTokenUsageUpdatedNotification",
+		{
+			threadId: "thread-1",
+			turnId: "turn-1",
+			tokenUsage: {
+				last: {
+					totalTokens: 8,
+					inputTokens: 5,
+					cachedInputTokens: 0,
+					cacheWriteInputTokens: 0,
+					outputTokens: 3,
+					reasoningOutputTokens: 0,
+				},
+				total: {
+					totalTokens: 8,
+					inputTokens: 5,
+					cachedInputTokens: 0,
+					cacheWriteInputTokens: 0,
+					outputTokens: 3,
+					reasoningOutputTokens: 0,
+				},
+				modelContextWindow: 200000,
+			},
+		},
+	),
 	notification("serverRequest/resolved", "ServerRequestResolvedNotification", {
 		requestId: "req-1",
 		threadId: "thread-1",
@@ -314,8 +341,9 @@ const threadStartValue = {
 		model: "gpt-test",
 		approval: "yolo",
 		sandbox: "workspace-write",
-		runner: "local",
+		effort: null,
 	},
+	usage: null,
 };
 
 const expectedParsed: Readonly<Record<string, JsonValue>> = {
@@ -422,14 +450,45 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 	ThreadReadResponse: helloThread,
 	TurnStartResponse: { turn: completedTurn },
 	TurnSteerResponse: { turnId: "turn-1" },
+	ThreadTokenUsageUpdatedNotification: {
+		type: "tokenUsage",
+		threadId: "thread-1",
+		turnId: "turn-1",
+		usage: {
+			last: {
+				totalTokens: 8,
+				inputTokens: 5,
+				cachedInputTokens: 0,
+				cacheWriteInputTokens: 0,
+				outputTokens: 3,
+				reasoningOutputTokens: 0,
+			},
+			total: {
+				totalTokens: 8,
+				inputTokens: 5,
+				cachedInputTokens: 0,
+				cacheWriteInputTokens: 0,
+				outputTokens: 3,
+				reasoningOutputTokens: 0,
+			},
+			contextWindow: 200000,
+		},
+	},
 	ModelListResponse: [
-		{ id: "gpt-test", label: "GPT", description: "A model", hidden: false },
+		{
+			id: "gpt-test",
+			label: "GPT",
+			description: "A model",
+			hidden: false,
+			efforts: [],
+			defaultEffort: "medium",
+		},
 	],
 	ConfigReadResponse: {
 		model: "",
 		approval: "auto",
 		sandbox: "read-only",
-		runner: "local",
+		effort: null,
 	},
 };
 

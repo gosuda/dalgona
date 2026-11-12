@@ -4,7 +4,13 @@ import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import App from "#lib/components/App.svelte";
 import { type RpcPort, Session } from "#lib/session.svelte.ts";
-import type { ApprovalRequest, JsonValue, RpcHandlers } from "#lib/types.ts";
+import type {
+	ApprovalRequest,
+	JsonValue,
+	RpcHandlers,
+	ThreadActivity,
+	ThreadSummary,
+} from "#lib/types.ts";
 import { parseNotification } from "#lib/validation.ts";
 
 function idlePort(): RpcPort {
@@ -76,6 +82,22 @@ function parsed(method: string, params: JsonValue) {
 	return notification;
 }
 
+function threadSummary(
+	status: ThreadActivity,
+	activeFlags: readonly string[],
+): ThreadSummary {
+	return {
+		id: "thread-1",
+		title: "hello",
+		preview: "hello",
+		status,
+		activeFlags: [...activeFlags],
+		updatedAt: 1,
+		model: null,
+		cwd: "/work/app",
+	};
+}
+
 describe("elapsed counter under reduced motion", () => {
 	afterEach(() => {
 		cleanup();
@@ -117,7 +139,7 @@ describe("elapsed counter under reduced motion", () => {
 		);
 		const { container } = render(App, { props: { session } });
 		await tick();
-		expect(container.querySelector(".status-bar")?.textContent).toContain(
+		expect(container.querySelector(".thread-head")?.textContent).toContain(
 			"0 ms",
 		);
 
@@ -131,7 +153,86 @@ describe("elapsed counter under reduced motion", () => {
 			}),
 		);
 		await tick();
-		expect(container.querySelector(".status-bar")?.textContent).toContain("3s");
+		expect(container.querySelector(".thread-head")?.textContent).toContain(
+			"3s",
+		);
 		session.stop();
+	});
+});
+
+describe("thread header state", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	function openTurn(flags: readonly string[]) {
+		const { session, handlers } = sessionWithHandler();
+		session.activeThreadId = "thread-1";
+		handlers.onNotification(
+			parsed("thread/started", {
+				thread: {
+					id: "thread-1",
+					name: "hello",
+					updatedAt: 1,
+					status: { type: "active", activeFlags: [...flags] },
+					turns: [],
+				},
+			}),
+		);
+		handlers.onNotification(
+			parsed("turn/started", {
+				threadId: "thread-1",
+				turn: { id: "turn-2", status: "inProgress", items: [] },
+			}),
+		);
+		return session;
+	}
+
+	test("shows Waiting while the open thread waits on an approval", () => {
+		const { container } = render(App, {
+			props: { session: openTurn(["waitingOnApproval"]) },
+		});
+		expect(container.querySelector(".thread-head")?.textContent).toContain(
+			"Waiting",
+		);
+	});
+
+	test("shows Waiting while the open thread waits on a user answer", () => {
+		const { container } = render(App, {
+			props: { session: openTurn(["waitingOnUserInput"]) },
+		});
+		expect(container.querySelector(".thread-head")?.textContent).toContain(
+			"Waiting",
+		);
+	});
+
+	test("shows Working while the open thread runs with no waiting flag", () => {
+		const { container } = render(App, { props: { session: openTurn([]) } });
+		const header = container.querySelector(".thread-head")?.textContent ?? "";
+		expect(header).toContain("Working");
+		expect(header).not.toContain("Waiting");
+	});
+
+	test("the document title carries the state word", () => {
+		const session = openTurn([]);
+		render(App, { props: { session } });
+		expect(document.title).toBe("dalgona · hello · Working");
+	});
+
+	test("the document title names Ready for an idle open thread", () => {
+		const { session } = sessionWithHandler();
+		session.threads = [threadSummary("idle", [])];
+		session.activeThreadId = "thread-1";
+		render(App, { props: { session } });
+		expect(document.title).toBe("dalgona · hello · Ready");
+	});
+
+	test("the document title names Offline when the connection is down", () => {
+		const { session } = sessionWithHandler();
+		session.threads = [threadSummary("idle", [])];
+		session.activeThreadId = "thread-1";
+		session.connection = "disconnected";
+		render(App, { props: { session } });
+		expect(document.title).toBe("dalgona · hello · Offline");
 	});
 });
