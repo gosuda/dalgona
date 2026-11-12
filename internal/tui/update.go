@@ -126,6 +126,8 @@ func (m *model) overlayKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return m.listKey(msg), true
 	case m.settings != nil:
 		return m.settingsKey(msg), true
+	case m.login != nil:
+		return m.loginKey(msg), true
 	}
 	return nil, false
 }
@@ -277,7 +279,7 @@ func (m *model) finishSuspend() tea.Cmd {
 }
 
 func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
-	if paste, ok := msg.(tea.PasteMsg); ok && m.list != nil {
+	if paste, ok := msg.(tea.PasteMsg); ok && (m.list != nil || m.loginTyping()) {
 		m.input.field.pasteLine(paste.Content)
 		return nil
 	}

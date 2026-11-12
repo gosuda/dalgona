@@ -259,6 +259,9 @@ func (m *model) interrupt() tea.Cmd {
 }
 
 func (m *model) applyResult(msg resultMsg) tea.Cmd {
+	if cmd, handled := m.applyLoginResult(msg); handled {
+		return cmd
+	}
 	if cmd, handled := m.applyPreludeResult(msg); handled {
 		return cmd
 	}
@@ -425,8 +428,6 @@ func (m *model) applyConfirmation(msg resultMsg) tea.Cmd {
 		m.noticef("active branch changed; files changed by later turns are not reverted")
 	case "modelSet", "modelEffort":
 		return m.applyModelResult(msg)
-	case "login":
-		return m.applyLogin(msg.value)
 	case "steer":
 		m.noticef("steering message accepted")
 	}

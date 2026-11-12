@@ -144,6 +144,15 @@ A failed save MUST keep the settings panel open and MUST show `Could not save se
 While a save is in flight, Enter MUST send no request.
 A successful save that changes approval MUST show `saved; open threads keep their approval and sandbox`. Any other successful save MUST show `Saved to <file>`.
 Esc MUST restore the saved values and MUST close the settings panel.
+The login panel MUST list the providers from `dalgona/account/providers/list`. `/login <provider>` MUST open it at that provider's methods.
+A provider with the `apiKey` method MUST offer an `API key` method. ChatGPT MUST offer `Browser` and `Device code` methods.
+A provider that signs in from a shell MUST show the command to run there, and MUST offer no method.
+The API key field MUST show one `*` for each rune. The key MUST NOT appear in a row, notice, history, or review.
+Enter on the API key field MUST send `account/login/start` with `type` `apiKey`. The panel MUST close when the provider accepts the key.
+A refused key MUST keep the field open with the error in the panel. Esc on the field MUST clear it and return to the methods.
+A browser or device sign-in MUST show the link, and a device sign-in MUST show the user code. It MUST wait for `account/login/completed`.
+Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
+A paste into the API key field MUST keep its first line and MUST NOT make a chip.
 
 ## Print
 
@@ -213,7 +222,7 @@ Esc MUST close the palette and keep the draft. Typing a character MUST reopen it
 | `/resume [id]` | `thread/list` list panel, or `thread/resume` then `thread/read` |
 | `/new` | Opens a confirm panel titled `Start a new thread?`. Its body reads `<n> follow-ups move to it` when the queue holds follow-ups. Enter calls `thread/start`. Esc cancels |
 | `/compact` | Opens a confirm panel titled `Compact the context?`. Its body reads `ctx <pct>% of <window> tokens` when the window is known. Enter calls `thread/compact/start`. Esc cancels |
-| `/login <provider>` | `account/login/start`. It shows the returned URL and user code |
+| `/login [provider]` | Login panel. `dalgona/account/providers/list` loads the providers. Its methods call `account/login/start` |
 | `/tree` | `dalgona/thread/tree` list panel. Enter calls `dalgona/thread/leaf/set` |
 | `/revert` | Active-path turns from `dalgona/thread/tree`. Enter opens a confirm panel, and its Enter calls `thread/revert`. Esc keeps the turn |
 | `/fork` | `dalgona/thread/tree` lists the active-path turns, newest first. Enter calls `thread/fork` with the highlighted turn as `lastTurnId`, then resumes the new thread |

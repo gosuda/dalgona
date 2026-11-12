@@ -19,7 +19,7 @@ func (m *model) executeSlash(name, argument string) tea.Cmd {
 	case "resume":
 		return m.resumeCommand(argument)
 	case "login":
-		return m.loginCommand(argument)
+		return m.openLogin(argument)
 	case "advisor":
 		return m.advisorCommand(argument)
 	case "settings":
@@ -152,16 +152,6 @@ func (m *model) resumeThread(id string) tea.Cmd {
 		err := m.conn.client.Call(ctx, "thread/read", rpc.ThreadReadParams{ThreadID: id, IncludeTurns: true}, &read)
 		return resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: read, effort: resumed.ReasoningEffort}, err: err}
 	}
-}
-
-func (m *model) loginCommand(provider string) tea.Cmd {
-	if provider == "" {
-		m.noticef("usage: /login <provider>; for example /login openai or /login chatgpt")
-		return nil
-	}
-	params := rpc.AccountLoginStartParams{Provider: provider}
-	result := new(rpc.LoginAccountResponse)
-	return m.call("login", "account/login/start", params, result, provider)
 }
 
 func (m *model) treeCommand(op string) tea.Cmd {

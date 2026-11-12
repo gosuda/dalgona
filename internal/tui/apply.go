@@ -187,6 +187,7 @@ func (m *model) applyLoginCompleted(params jsontext.Value) error {
 	if err := decodeParams(params, &event); err != nil {
 		return err
 	}
+	m.closeWaitingLogin()
 	if !event.Success {
 		m.errorf("Login failed: %s; run /login again", cmp.Or(event.Error, "unknown error"))
 		return nil

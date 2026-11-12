@@ -69,6 +69,7 @@ type model struct {
 	approvals   []approval
 	list        *listPanel
 	confirm     *confirmation
+	login       *loginPanel
 	matchSeq    int
 	review      *reviewState
 	settings    *settingsPanel

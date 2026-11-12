@@ -258,7 +258,7 @@ func TestModelSlashCommands(t *testing.T) {
 		{input: "/model", method: "model/list"},
 		{input: "/model gpt-test", method: "config/value/write"},
 		{input: "/resume", method: "thread/list"},
-		{input: "/login openai", method: "account/login/start"},
+		{input: "/login openai", method: "dalgona/account/providers/list"},
 		{input: "/tree", method: "dalgona/thread/tree"},
 		{input: "/revert", method: "dalgona/thread/tree"},
 		{input: "/fork", method: "dalgona/thread/tree"},

@@ -55,7 +55,7 @@ func (m *model) dockLines() []string {
 }
 
 func (m *model) panelOpen() bool {
-	return len(m.approvals) > 0 || m.confirm != nil || m.list != nil || m.settings != nil
+	return len(m.approvals) > 0 || m.confirm != nil || m.list != nil || m.settings != nil || m.login != nil
 }
 
 func (m *model) inputRows(width, limit int) ([]string, int, int) {
@@ -75,6 +75,9 @@ func (m *model) textMode() inputMode {
 			return inputTarget
 		}
 		return inputFilter
+	}
+	if m.login != nil && m.login.phase == loginAPIKey {
+		return inputAPIKey
 	}
 	return m.input.mode
 }
@@ -407,6 +410,8 @@ func (m *model) panelLines() []string {
 		return m.popupLines()
 	case m.settings != nil:
 		return framePanel(&m.screen, m.settingsView(), panelRows(panelSettings, m.screen.height))
+	case m.login != nil:
+		return framePanel(&m.screen, m.loginPanelView(), panelRows(panelLogin, m.screen.height))
 	default:
 		return nil
 	}
