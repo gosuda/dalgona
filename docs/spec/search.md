@@ -10,6 +10,20 @@ Search MUST skip `.git` and every path that `.gitignore` or `.git/info/exclude` 
 
 The `grep` mode MUST skip binary files and files that are not valid UTF-8. Only the `grep` mode reads file contents.
 
+## Index
+
+The index MUST live under the product home, in one directory for each workspace. The builder MUST index only the workspace root, and MUST write only its generation directory.
+
+The builder MUST add only regular files that a grep call could read, each at most 16 MiB. The builder MUST stat a file before it reads the file, and MUST NOT follow a symbolic link.
+
+The builder MUST write no record for a file that is not regular, is over 16 MiB, or has no change time. A file that the builder does not read or index MUST be recorded as not indexed.
+
+The builder MUST leave unread each file whose size would take the total of indexed bytes past 1 GiB. The builder MUST keep reading the files after that file. The builder MUST sync the trigram file and the manifest before it exits with status 0.
+
+Only the parent MUST publish a generation, by an atomic rename of `CURRENT`, after the builder exits with status 0. A publish MUST remove every other generation directory of the workspace.
+
+On platforms without change times, including Windows, the index MUST NOT be built or used. The builder MUST run in the sandbox of the search call.
+
 ## Fuzzy file search
 
 The `fuzzyFileSearch` method MUST list regular files under each requested root and MUST NOT list directories.

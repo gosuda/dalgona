@@ -51,6 +51,7 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |github.com/evilmartians/lefthook/v2|v2.2.2|2026-10-13|hook tool|none|
 |github.com/golangci/golangci-lint/v2|v2.15.0|2026-10-16|lint tool|none|
 |golang.org/x/vuln|v1.9.0|2026-10-11|govulncheck tool|none|
+|github.com/google/codesearch|v1.2.0|2020-03-29|search index for the grep mode, see `search-index.md`. Licence BSD-3-Clause. No module requirements.|none|
 
 The OSV column holds the result of `POST https://api.osv.dev/v1/querybatch` for each row's exact pin, run on 2026-11-12. `none` means the response listed no vulnerability for that pin. The batch run also covered `github.com/aymanbagabas/go-udiff` v0.4.1, which a later phase adds, and it returned `none`.
 |Module|Pin|Released|Use|

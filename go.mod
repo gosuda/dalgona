@@ -21,6 +21,7 @@ require (
 	github.com/charmbracelet/x/vt v0.1.0
 	github.com/coder/websocket v1.8.15
 	github.com/containerd/errdefs v1.0.0
+	github.com/google/codesearch v1.2.0
 	github.com/landlock-lsm/go-landlock v0.11.2
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2

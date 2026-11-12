@@ -308,8 +308,8 @@ func scanFile(entry fileEntry, matcher *regexp.Regexp) (grepFile, []int) {
 	if !searchableFile(entry.absolute) {
 		return grepFile{}, nil
 	}
-	data, err := readCapped(entry.absolute)
-	if err != nil || !searchableText(data) {
+	data, ok := readSearchable(entry.absolute)
+	if !ok {
 		return grepFile{}, nil
 	}
 	starts := splitStarts(data)
@@ -327,7 +327,19 @@ func scanFile(entry fileEntry, matcher *regexp.Regexp) (grepFile, []int) {
 
 func searchableFile(path string) bool {
 	info, err := os.Lstat(path)
-	return err == nil && info.Mode().IsRegular() && info.Size() <= maxSearchFileBytes
+	return err == nil && searchableInfo(info)
+}
+
+func searchableInfo(info fs.FileInfo) bool {
+	return info.Mode().IsRegular() && info.Size() <= maxSearchFileBytes
+}
+
+func readSearchable(path string) ([]byte, bool) {
+	data, err := readCapped(path)
+	if err != nil || !searchableText(data) {
+		return nil, false
+	}
+	return data, true
 }
 
 func searchableText(data []byte) bool {

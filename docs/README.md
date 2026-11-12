@@ -15,6 +15,9 @@ Use one name for each thing in user-facing text and new specifications.
 - Subagent: a thread that a tool call starts under another thread. `child.spawned` and `parent` are its journal names.
 - Interrupt: the user stops the running turn, which ends with status `interrupted`. `cancel` is only an approval decision.
 - Mode: the per-thread approval mode and sandbox mode, and the tool mode set in configuration. Name the remote shapes thread boxes and the daemon in a box.
+- Generation: one built search index of a workspace, in a directory named for its build start. `CURRENT` names the published generation.
+- Manifest: the file in a generation that lists each indexed path with its size and times.
+- Trigram: a three-byte sequence that the search index uses to name candidate files.
 
 ## Specifications
 
@@ -89,3 +92,4 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [Ask tool](decisions/ask-tool.md): model questions answered by the user through the client wire.
 - [Ratchet](decisions/ratchet.md): host-owned eval gate in the dalgona battery.
 - [llmstub test support](decisions/llmstub-test-support.md): scripted chat-completions server for tests and live sessions.
+- [Search index](decisions/search-index.md): the grep index, its trust rule, and its rejected engines.
