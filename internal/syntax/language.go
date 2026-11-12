@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/odvcencio/gotreesitter"
+	bash "github.com/odvcencio/gotreesitter/grammars/bash"
 	c "github.com/odvcencio/gotreesitter/grammars/c"
 	csharp "github.com/odvcencio/gotreesitter/grammars/c_sharp"
 	cpp "github.com/odvcencio/gotreesitter/grammars/cpp"
@@ -19,9 +20,14 @@ import (
 	java "github.com/odvcencio/gotreesitter/grammars/java"
 	javascript "github.com/odvcencio/gotreesitter/grammars/javascript"
 	kotlin "github.com/odvcencio/gotreesitter/grammars/kotlin"
+	lua "github.com/odvcencio/gotreesitter/grammars/lua"
+	markdown "github.com/odvcencio/gotreesitter/grammars/markdown"
+	php "github.com/odvcencio/gotreesitter/grammars/php"
 	python "github.com/odvcencio/gotreesitter/grammars/python"
+	ruby "github.com/odvcencio/gotreesitter/grammars/ruby"
 	grammarruntime "github.com/odvcencio/gotreesitter/grammars/runtime"
 	rust "github.com/odvcencio/gotreesitter/grammars/rust"
+	swift "github.com/odvcencio/gotreesitter/grammars/swift"
 	tsx "github.com/odvcencio/gotreesitter/grammars/tsx"
 	typescript "github.com/odvcencio/gotreesitter/grammars/typescript"
 )
@@ -67,6 +73,24 @@ var javaQuery string
 //go:embed queries/kotlin.scm
 var kotlinQuery string
 
+//go:embed queries/swift.scm
+var swiftQuery string
+
+//go:embed queries/ruby.scm
+var rubyQuery string
+
+//go:embed queries/php.scm
+var phpQuery string
+
+//go:embed queries/bash.scm
+var bashQuery string
+
+//go:embed queries/lua.scm
+var luaQuery string
+
+//go:embed queries/markdown.scm
+var markdownQuery string
+
 type language struct {
 	name       string
 	extensions []string
@@ -88,6 +112,7 @@ func (l *language) syntaxOnly() bool {
 }
 
 var registry = []*language{
+	newLanguage("bash", []string{".sh"}, bash.Language, bashQuery),
 	newLanguage("c", []string{".c", ".h"}, c.Language, cQuery),
 	newLanguage("c_sharp", []string{".cs"}, csharp.Language, csharpQuery),
 	newLanguage("cpp", []string{".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}, cpp.Language, cppQuery),
@@ -95,8 +120,13 @@ var registry = []*language{
 	newLanguage("java", []string{".java"}, java.Language, javaQuery),
 	newLanguage("javascript", []string{".js", ".jsx", ".mjs", ".cjs"}, javascript.Language, javascriptQuery),
 	newLanguage("kotlin", []string{".kt", ".kts"}, kotlin.Language, kotlinQuery),
+	newLanguage("lua", []string{".lua"}, lua.Language, luaQuery),
+	newLanguage("markdown", []string{".md"}, markdown.Language, markdownQuery),
+	newLanguage("php", []string{".php"}, php.Language, phpQuery),
 	newLanguage("python", []string{".py"}, python.Language, pythonQuery),
+	newLanguage("ruby", []string{".rb"}, ruby.Language, rubyQuery),
 	newLanguage("rust", []string{".rs"}, rust.Language, rustQuery),
+	newLanguage("swift", []string{".swift"}, swift.Language, swiftQuery),
 	newLanguage("tsx", []string{".tsx"}, tsx.Language, tsxQuery),
 	newLanguage("typescript", []string{".ts", ".mts", ".cts"}, typescript.Language, typescriptQuery),
 }

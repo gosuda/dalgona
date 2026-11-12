@@ -23,6 +23,14 @@ Baseline linux/amd64 binaries before the package existed, built with go1.27.4 fr
 
 Nothing in `cmd/` imports `internal/syntax` at this step, so these sizes hold until the search tool imports it. The sizes after the grammars are linked are recorded by Code symbols step 9.
 
+## Known gaps
+
+Setext headings give no symbol on gotreesitter v0.57.0. Observed on 2026-11-12 with `Outliner.OutlineTree` over the markdown fixture:
+
+- The plan's row `(section (setext_heading heading_content: (paragraph) @name)) @definition.section` names the enclosing section of each setext heading. The setext heading is a child of the atx section that holds it, so that row and the atx row name the same node. The outliner reports `OmittedNameConflict` 2 and drops `Setup`, so the row is removed.
+- The row `(setext_heading heading_content: (paragraph) @name) @definition.section` avoids the conflict and gives `Heading text` at rows 8 to 10. Its span is the heading and its underline, so `definition` would print no body. It is not used, because decision 36 requires a heading span that holds its body.
+- Code symbols step 6 MUST state in `docs/spec/search.md` that setext headings give no symbol.
+
 ## Rejected alternatives
 
 - A wrapper that returns trees and nodes. It lost because each caller would then repeat the parser setup, the time limit and the release rule, and the library import would spread across packages.

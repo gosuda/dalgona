@@ -39,8 +39,8 @@ func TestForPathExtensionTable(t *testing.T) {
 	if _, ok := ByName("nope"); ok {
 		t.Fatal("ByName(nope) found")
 	}
-	if got := Names(); !slices.Equal(got, []string{"c", "c_sharp", "cpp", "go", "java", "javascript", "kotlin", "python", "rust", "tsx", "typescript"}) {
-		t.Fatalf("Names() = %v, want the eleven registry names", got)
+	if got := Names(); !slices.Equal(got, []string{"bash", "c", "c_sharp", "cpp", "go", "java", "javascript", "kotlin", "lua", "markdown", "php", "python", "ruby", "rust", "swift", "tsx", "typescript"}) {
+		t.Fatalf("Names() = %v, want the seventeen registry names", got)
 	}
 }
 
@@ -373,4 +373,94 @@ func TestSymbolsDeeplyNestedBrackets(t *testing.T) {
 	if !report.Stopped && !report.SyntaxErrors {
 		t.Fatalf("report = %+v, want Stopped or SyntaxErrors", report)
 	}
+}
+
+type fixtureCase struct {
+	lang string
+	path string
+	want []Symbol
+}
+
+var fixtureCases = map[string]fixtureCase{
+	"swift": {"swift", "testdata/swift/definitions.swift", []Symbol{
+		{Kind: "interface", Name: "Named", Start: 1, End: 3, Depth: 0},
+		{Kind: "method", Name: "name", Start: 2, End: 2, Depth: 1},
+		{Kind: "class", Name: "Box", Start: 4, End: 6, Depth: 0},
+		{Kind: "method", Name: "open", Start: 5, End: 5, Depth: 1},
+		{Kind: "type", Name: "Pt", Start: 7, End: 9, Depth: 0},
+		{Kind: "enum", Name: "Mode", Start: 10, End: 12, Depth: 0},
+		{Kind: "constant", Name: "fast", Start: 11, End: 11, Depth: 1},
+		{Kind: "type", Name: "Id", Start: 13, End: 13, Depth: 0},
+	}},
+	"ruby": {"ruby", "testdata/ruby/definitions.rb", []Symbol{
+		{Kind: "module", Name: "Tools", Start: 1, End: 9, Depth: 0},
+		{Kind: "constant", Name: "LIMIT", Start: 2, End: 2, Depth: 1},
+		{Kind: "class", Name: "Runner", Start: 3, End: 6, Depth: 1},
+		{Kind: "method", Name: "run", Start: 4, End: 5, Depth: 2},
+		{Kind: "method", Name: "build", Start: 7, End: 8, Depth: 1},
+		{Kind: "function", Name: "top", Start: 10, End: 11, Depth: 0},
+		{Kind: "function", Name: "m", Start: 12, End: 13, Depth: 0},
+		{Kind: "class", Name: "Store::Vault", Start: 14, End: 17, Depth: 0},
+		{Kind: "method", Name: "name=", Start: 15, End: 16, Depth: 1},
+	}},
+	"php": {"php", "testdata/php/definitions.php", []Symbol{
+		{Kind: "function", Name: "helper", Start: 2, End: 2, Depth: 0},
+		{Kind: "class", Name: "Box", Start: 3, End: 5, Depth: 0},
+		{Kind: "method", Name: "open", Start: 4, End: 4, Depth: 1},
+		{Kind: "interface", Name: "Named", Start: 6, End: 6, Depth: 0},
+		{Kind: "interface", Name: "Logs", Start: 7, End: 7, Depth: 0},
+		{Kind: "enum", Name: "Mode", Start: 8, End: 10, Depth: 0},
+		{Kind: "constant", Name: "Fast", Start: 9, End: 9, Depth: 1},
+		{Kind: "constant", Name: "LIMIT", Start: 11, End: 11, Depth: 0},
+	}},
+	"bash": {"bash", "testdata/bash/definitions.sh", []Symbol{
+		{Kind: "function", Name: "greet", Start: 1, End: 3, Depth: 0},
+		{Kind: "function", Name: "run_all", Start: 4, End: 6, Depth: 0},
+	}},
+	"lua": {"lua", "testdata/lua/definitions.lua", []Symbol{
+		{Kind: "function", Name: "helper", Start: 1, End: 3, Depth: 0},
+		{Kind: "method", Name: "open", Start: 4, End: 6, Depth: 0},
+		{Kind: "method", Name: "close", Start: 7, End: 9, Depth: 0},
+		{Kind: "function", Name: "run", Start: 10, End: 11, Depth: 0},
+	}},
+	"markdown": {"markdown", "testdata/markdown/definitions.md", []Symbol{
+		{Kind: "section", Name: "Title", Start: 1, End: 10, Depth: 0},
+		{Kind: "section", Name: "Setup", Start: 5, End: 10, Depth: 1},
+	}},
+}
+
+func assertFixtureCase(t *testing.T, name string) {
+	t.Helper()
+	c := fixtureCases[name]
+	assertFixtureSymbols(t, c.lang, c.path, c.want)
+}
+
+func TestSymbolsFixtureSwift(t *testing.T) {
+	t.Parallel()
+	assertFixtureCase(t, "swift")
+}
+
+func TestSymbolsFixtureRuby(t *testing.T) {
+	t.Parallel()
+	assertFixtureCase(t, "ruby")
+}
+
+func TestSymbolsFixturePHP(t *testing.T) {
+	t.Parallel()
+	assertFixtureCase(t, "php")
+}
+
+func TestSymbolsFixtureBash(t *testing.T) {
+	t.Parallel()
+	assertFixtureCase(t, "bash")
+}
+
+func TestSymbolsFixtureLua(t *testing.T) {
+	t.Parallel()
+	assertFixtureCase(t, "lua")
+}
+
+func TestSymbolsFixtureMarkdown(t *testing.T) {
+	t.Parallel()
+	assertFixtureCase(t, "markdown")
 }

@@ -72,15 +72,15 @@ func (p *Parser) Symbols(ctx context.Context, src []byte) ([]Symbol, Report, err
 	if p.lang.syntaxOnly() {
 		return nil, Report{}, fmt.Errorf("syntax: no definition query for %s", p.lang.name)
 	}
-	outliner, err := p.lang.outliner()
-	if err != nil {
-		return nil, Report{}, fmt.Errorf("syntax: outliner %s: %w", p.lang.name, err)
-	}
 	tree, report, err := p.parse(ctx, src)
 	if err != nil || tree == nil {
 		return nil, report, err
 	}
 	defer tree.Release()
+	outliner, err := p.lang.outliner()
+	if err != nil {
+		return nil, Report{}, fmt.Errorf("syntax: outliner %s: %w", p.lang.name, err)
+	}
 	forest, outline := outliner.OutlineTree(tree)
 	if outline.DeclineReason != "" {
 		return nil, report, fmt.Errorf("syntax: outline declined: %s", outline.DeclineReason)
@@ -114,7 +114,7 @@ func appendKept(out *[]Symbol, s gotreesitter.OutlineSymbol, depth int) error {
 		Kind:  kind,
 		Name:  s.Name,
 		Start: int(s.Range.StartPoint.Row) + 1,
-		End:   int(s.Range.EndPoint.Row) + 1,
+		End:   lastLine(s.Range),
 		Depth: depth,
 	})
 	if !containerKinds[kind] {
@@ -138,4 +138,11 @@ func checkKinds(children []gotreesitter.OutlineSymbol) error {
 		}
 	}
 	return nil
+}
+
+func lastLine(r gotreesitter.Range) int {
+	if r.EndPoint.Column == 0 && r.EndPoint.Row > r.StartPoint.Row {
+		return int(r.EndPoint.Row)
+	}
+	return int(r.EndPoint.Row) + 1
 }
