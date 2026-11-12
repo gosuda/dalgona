@@ -35,10 +35,11 @@ func sessionMembers(e Event) ([]member, error) {
 			field("box_id", stringValue(value.BoxID)), field("baseline", stringValue(value.Baseline)),
 		}, nil
 	case TurnStarted:
-		return []member{field("turn_id", stringValue(value.TurnID))}, nil
+		fields := []member{field("turn_id", stringValue(value.TurnID))}
+		return timeField(fields, "started_at", value.StartedAt), nil
 	case TurnCompleted:
 		fields := []member{field("turn_id", stringValue(value.TurnID)), field("status", stringValue(value.Status))}
-		return optionalString(fields, "error", value.Error), nil
+		return timeField(optionalString(fields, "error", value.Error), "completed_at", value.CompletedAt), nil
 	case UserMessage:
 		return userMessageMembers(value), nil
 	default:
@@ -191,7 +192,7 @@ func toolStartedMembers(e ToolStarted) []member {
 	if len(e.Files) > 0 {
 		fields = append(fields, field("files", arrayValue(e.Files, fileChangeValue)))
 	}
-	return fields
+	return timeField(fields, "started_at", e.StartedAt)
 }
 
 func fileChangeValue(e FileChange) jsontext.Value {
@@ -216,7 +217,14 @@ func toolCompletedMembers(e ToolCompleted) []member {
 	if e.ExitCode != nil {
 		fields = append(fields, field("exit_code", intValue(*e.ExitCode)))
 	}
-	return optionalRaw(fields, "meta", e.Meta)
+	return timeField(optionalRaw(fields, "meta", e.Meta), "completed_at", e.CompletedAt)
+}
+
+func timeField(fields []member, name string, at time.Time) []member {
+	if at.IsZero() {
+		return fields
+	}
+	return append(fields, field(name, stringValue(at.UTC().Format(time.RFC3339Nano))))
 }
 
 func spillValue(e Spill) jsontext.Value {

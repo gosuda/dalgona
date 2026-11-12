@@ -162,7 +162,10 @@ func (e RunnerBound) Validate() error {
 	})
 }
 
-type TurnStarted struct{ TurnID string }
+type TurnStarted struct {
+	TurnID    string
+	StartedAt time.Time
+}
 
 func (TurnStarted) Type() string { return TypeTurnStarted }
 func (e TurnStarted) Validate() error {
@@ -170,9 +173,10 @@ func (e TurnStarted) Validate() error {
 }
 
 type TurnCompleted struct {
-	TurnID string
-	Status string
-	Error  string
+	TurnID      string
+	Status      string
+	Error       string
+	CompletedAt time.Time
 }
 
 func (TurnCompleted) Type() string { return TypeTurnCompleted }
@@ -320,14 +324,15 @@ func (u Usage) Validate() error {
 }
 
 type ToolStarted struct {
-	CallID   string
-	TurnID   string
-	Tool     string
-	Args     jsontext.Value
-	ArgsBlob *BlobRef
-	Class    string
-	Repairs  int
-	Files    []FileChange
+	CallID    string
+	TurnID    string
+	Tool      string
+	Args      jsontext.Value
+	ArgsBlob  *BlobRef
+	Class     string
+	Repairs   int
+	Files     []FileChange
+	StartedAt time.Time
 }
 
 func (ToolStarted) Type() string { return TypeToolStarted }
@@ -368,13 +373,14 @@ func validateFileChanges(files []FileChange) error {
 }
 
 type ToolCompleted struct {
-	CallID    string
-	OK        bool
-	Output    string
-	Spill     *Spill
-	ExitCode  *int
-	Recovered string
-	Meta      jsontext.Value
+	CallID      string
+	OK          bool
+	Output      string
+	Spill       *Spill
+	ExitCode    *int
+	Recovered   string
+	Meta        jsontext.Value
+	CompletedAt time.Time
 }
 
 func (ToolCompleted) Type() string { return TypeToolCompleted }

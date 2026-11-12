@@ -66,6 +66,12 @@ func (t Turn) write(o *out) {
 	if t.StartedAt != 0 {
 		o.int("startedAt", t.StartedAt)
 	}
+	if t.CompletedAt != 0 {
+		o.int("completedAt", t.CompletedAt)
+	}
+	if t.DurationMs != 0 {
+		o.int("durationMs", t.DurationMs)
+	}
 	o.close()
 }
 

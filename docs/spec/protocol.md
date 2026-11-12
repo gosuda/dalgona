@@ -100,6 +100,8 @@ Each connection subscribes to every thread that it starts, resumes, or changes. 
 
 `thread/status/changed` carries the extension member `seq`: the journal sequence number of the event that changed the status. A client MUST ignore a status with a lower `seq` than one it already applied.
 
+Turn objects carry `startedAt` and `completedAt` as Unix seconds, and `durationMs` in milliseconds on `turn/completed`. A `commandExecution`, `mcpToolCall`, or `dynamicToolCall` item MUST carry `durationMs` when the journal holds both of its times. The server computes each duration from the journal times `started_at` and `completed_at`, so a replay shows the same values as the live stream.
+
 | Source | Notification |
 |---|---|
 | `turn.started` | `turn/started`, `thread/status/changed` active |

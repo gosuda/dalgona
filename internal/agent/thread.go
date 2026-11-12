@@ -443,6 +443,7 @@ func (a *actor) appendCtx(ctx context.Context, events ...event.Event) (uint64, e
 	if len(events) == 0 {
 		return a.head(), nil
 	}
+	events = stampTimes(events, a.t.host.clock().UTC())
 	state, raws, err := a.prepareAppend(events)
 	if err != nil {
 		return a.head(), err

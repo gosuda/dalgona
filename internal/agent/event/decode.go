@@ -19,9 +19,9 @@ func decodeSessionEvent(kind string, r *objectReader) (Event, error) {
 			Runner: r.str("runner"), Service: r.str("service"), BoxID: r.str("box_id"), Baseline: r.str("baseline"),
 		}, nil
 	case TypeTurnStarted:
-		return TurnStarted{TurnID: r.str("turn_id")}, nil
+		return TurnStarted{TurnID: r.str("turn_id"), StartedAt: r.timestamp("started_at")}, nil
 	case TypeTurnCompleted:
-		return TurnCompleted{TurnID: r.str("turn_id"), Status: r.str("status"), Error: r.str("error")}, nil
+		return TurnCompleted{TurnID: r.str("turn_id"), Status: r.str("status"), Error: r.str("error"), CompletedAt: r.timestamp("completed_at")}, nil
 	case TypeUserMessage:
 		return decodeUserMessage(r), nil
 	default:
@@ -170,6 +170,7 @@ func decodeToolStarted(r *objectReader) ToolStarted {
 	return ToolStarted{
 		CallID: r.str("call_id"), TurnID: r.str("turn_id"), Tool: r.str("tool"), Args: args, ArgsBlob: argsBlob,
 		Class: r.str("class"), Repairs: r.number("repairs"), Files: files,
+		StartedAt: r.timestamp("started_at"),
 	}
 }
 
@@ -200,6 +201,7 @@ func decodeToolCompleted(r *objectReader) ToolCompleted {
 	return ToolCompleted{
 		CallID: r.str("call_id"), OK: r.boolean("ok"), Output: r.str("output"), Spill: spill,
 		ExitCode: exitCode, Recovered: r.str("recovered"), Meta: r.raw("meta"),
+		CompletedAt: r.timestamp("completed_at"),
 	}
 }
 

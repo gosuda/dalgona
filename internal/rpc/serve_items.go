@@ -76,6 +76,7 @@ func (it Item) writeCommand(o *out) {
 	if it.ExitCode != nil {
 		o.int("exitCode", int64(*it.ExitCode))
 	}
+	it.writeDuration(o)
 }
 
 func (it Item) writeFileChange(o *out) {
@@ -100,6 +101,7 @@ func (it Item) writeMCP(o *out) {
 	o.str("tool", it.Tool)
 	o.raw("arguments", it.Arguments)
 	o.str("status", toolStatus(it.Status))
+	it.writeDuration(o)
 	switch it.Status {
 	case statusCompleted:
 		o.key("result")
@@ -124,6 +126,7 @@ func (it Item) writeDynamic(o *out) {
 	o.str("tool", it.Tool)
 	o.raw("arguments", it.Arguments)
 	o.str("status", toolStatus(it.Status))
+	it.writeDuration(o)
 	if it.Status == statusInProgress {
 		return
 	}
@@ -135,6 +138,12 @@ func (it Item) writeDynamic(o *out) {
 	o.str("text", it.Output)
 	o.close()
 	o.closeArray()
+}
+
+func (it Item) writeDuration(o *out) {
+	if it.DurationMs != nil {
+		o.int("durationMs", *it.DurationMs)
+	}
 }
 
 func toolStatus(status string) string {
@@ -283,9 +292,10 @@ func (s *itemDecoder) member(name string, d *jsontext.Decoder) error {
 		*target = v
 		return err
 	}
+	if handled, err := s.number(name, d); handled {
+		return err
+	}
 	switch name {
-	case "exitCode":
-		return s.it.readExit(d)
 	case "arguments":
 		v, err := d.ReadValue()
 		s.it.Arguments = jsontext.Value(bytes.Clone(v))
@@ -302,6 +312,16 @@ func (s *itemDecoder) member(name string, d *jsontext.Decoder) error {
 		return readMembers(d, s.it.textMember("message"))
 	}
 	return d.SkipValue()
+}
+
+func (s *itemDecoder) number(name string, d *jsontext.Decoder) (bool, error) {
+	switch name {
+	case "exitCode":
+		return true, s.it.readExit(d)
+	case "durationMs":
+		return true, s.it.readDuration(d)
+	}
+	return false, nil
 }
 
 func (s *itemDecoder) resultMember(name string, d *jsontext.Decoder) error {
@@ -337,6 +357,17 @@ func (it *Item) readExit(d *jsontext.Decoder) error {
 	}
 	code, err := readInt(d)
 	it.ExitCode = &code
+	return err
+}
+
+func (it *Item) readDuration(d *jsontext.Decoder) error {
+	if d.PeekKind() == 'n' {
+		_, err := d.ReadToken()
+		return err
+	}
+	ms, err := readInt(d)
+	value := int64(ms)
+	it.DurationMs = &value
 	return err
 }
 

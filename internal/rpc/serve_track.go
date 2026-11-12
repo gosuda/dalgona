@@ -34,11 +34,13 @@ type tracker struct {
 	sink      sink
 	turn      string
 	lastTurn  string
+	turnAt    time.Time
 	items     map[string]*Item
 	calls     map[string]event.ToolCall
 	classes   map[string]string
 	approvals map[string]string
 	declined  map[string]bool
+	callAt    map[string]time.Time
 	total     TokenUsageBreakdown
 	seq       uint64
 }
@@ -48,6 +50,7 @@ func newTracker(threadID string, load func(*event.BlobRef) ([]byte, error), chil
 		threadID: threadID, load: load, childCwd: childCwd, log: log,
 		items: map[string]*Item{}, calls: map[string]event.ToolCall{}, classes: map[string]string{},
 		approvals: map[string]string{}, declined: map[string]bool{},
+		callAt: map[string]time.Time{},
 	}
 }
 
@@ -114,14 +117,14 @@ func (t *tracker) startComplete(turnID string, it *Item) {
 
 func (t *tracker) turnStarted(_ uint64, ev event.Event) {
 	e, _ := ev.(event.TurnStarted)
-	t.turn, t.lastTurn = e.TurnID, e.TurnID
-	t.sink.turn(methodTurnStarted, Turn{ID: e.TurnID, Status: statusInProgress})
+	t.turn, t.lastTurn, t.turnAt = e.TurnID, e.TurnID, e.StartedAt
+	t.sink.turn(methodTurnStarted, Turn{ID: e.TurnID, Status: statusInProgress, StartedAt: unixSeconds(e.StartedAt)})
 	t.setStatus("active")
 }
 
 func (t *tracker) turnCompleted(_ uint64, ev event.Event) {
 	e, _ := ev.(event.TurnCompleted)
-	turn := Turn{ID: e.TurnID, Status: e.Status}
+	turn := Turn{ID: e.TurnID, Status: e.Status, StartedAt: unixSeconds(t.turnAt), CompletedAt: unixSeconds(e.CompletedAt), DurationMs: durationMs(t.turnAt, e.CompletedAt)}
 	if e.Error != "" {
 		turn.Error = &TurnError{Message: e.Error}
 		t.sink.notify("error", func() writer {
@@ -129,6 +132,7 @@ func (t *tracker) turnCompleted(_ uint64, ev event.Event) {
 		})
 	}
 	t.turn = ""
+	t.turnAt = time.Time{}
 	clear(t.items)
 	t.sink.turn(methodTurnCompleted, turn)
 	t.setStatus("idle")
@@ -263,6 +267,9 @@ func (t *tracker) openCall(callID string) *Item {
 func (t *tracker) toolStarted(_ uint64, ev event.Event) {
 	e, _ := ev.(event.ToolStarted)
 	fresh := t.toolItem(e.CallID, e.Tool, e.Class, t.args(e.Args, e.ArgsBlob), e.Files)
+	if !e.StartedAt.IsZero() {
+		t.callAt[e.CallID] = e.StartedAt
+	}
 	if it, ok := t.items[e.CallID]; ok {
 		*it = *fresh
 		return
@@ -284,6 +291,7 @@ func (t *tracker) toolCompleted(_ uint64, ev event.Event) {
 		it.Status = statusFailed
 	}
 	it.Output, it.ExitCode = e.Output, e.ExitCode
+	t.finishDuration(it, e.CallID, e.CompletedAt)
 	turnID := t.currentTurn()
 	t.sink.item(methodItemCompleted, turnID, it)
 	if it.Tool == "todo" && e.OK {
@@ -293,6 +301,23 @@ func (t *tracker) toolCompleted(_ uint64, ev event.Event) {
 	delete(t.calls, e.CallID)
 	delete(t.classes, e.CallID)
 	delete(t.declined, e.CallID)
+}
+
+func durationMs(from, to time.Time) int64 {
+	if from.IsZero() || to.IsZero() {
+		return 0
+	}
+	return to.Sub(from).Milliseconds()
+}
+
+func (t *tracker) finishDuration(it *Item, callID string, completed time.Time) {
+	started, ok := t.callAt[callID]
+	delete(t.callAt, callID)
+	if !ok || completed.IsZero() {
+		return
+	}
+	ms := completed.Sub(started).Milliseconds()
+	it.DurationMs = &ms
 }
 
 func (t *tracker) plan(turnID string, args jsontext.Value) {

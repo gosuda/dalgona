@@ -41,28 +41,31 @@ type (
 		Turns          []Turn       `json:"turns"`
 	}
 	Turn struct {
-		ID        string     `json:"id"`
-		Items     []Item     `json:"items"`
-		Status    string     `json:"status"`
-		Error     *TurnError `json:"error,omitzero"`
-		StartedAt int64      `json:"startedAt,omitzero"`
+		ID          string     `json:"id"`
+		Items       []Item     `json:"items"`
+		Status      string     `json:"status"`
+		Error       *TurnError `json:"error,omitzero"`
+		StartedAt   int64      `json:"startedAt,omitzero"`
+		CompletedAt int64      `json:"completedAt,omitzero"`
+		DurationMs  int64      `json:"durationMs,omitzero"`
 	}
 	TurnError struct {
 		Message string `json:"message"`
 	}
 	Item struct {
-		Type      string
-		ID        string
-		Text      string
-		Command   string
-		Cwd       string
-		Status    string
-		Output    string
-		ExitCode  *int
-		Changes   []FileChange
-		Server    string
-		Tool      string
-		Arguments jsontext.Value
+		Type       string
+		ID         string
+		Text       string
+		Command    string
+		Cwd        string
+		Status     string
+		Output     string
+		ExitCode   *int
+		Changes    []FileChange
+		Server     string
+		Tool       string
+		Arguments  jsontext.Value
+		DurationMs *int64
 	}
 	FileChange struct {
 		Path string `json:"path"`

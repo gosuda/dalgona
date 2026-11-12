@@ -374,6 +374,7 @@ func (c *collector) turn(method string, turn Turn) {
 	}
 	if b := c.find(turn.ID); b != nil {
 		b.turn.Status, b.turn.Error = turn.Status, turn.Error
+		b.turn.CompletedAt, b.turn.DurationMs = turn.CompletedAt, turn.DurationMs
 	}
 }
 
