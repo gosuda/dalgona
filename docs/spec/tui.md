@@ -20,7 +20,7 @@ Startup runs these requests in order: `initialize` with client name `dalgona`, t
 
 ## Screen
 
-The TUI MUST run inline. It MUST NOT use the alternate screen. A completed item MUST print once to scrollback with `tea.Println`. Completed assistant text MUST render as Markdown through Glamour.
+The TUI MUST run inline, except for the review. The review is the only view that MUST use the alternate screen. A completed item MUST print once to scrollback with `tea.Println`. Completed assistant text MUST render as Markdown through Glamour.
 
 The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the notice, else the newest live text.
 
@@ -111,6 +111,14 @@ With a window height of 0, quit and suspend MUST return at once and MAY drop the
 A tool call nested in an eval call MUST print as its own row before the row of the eval call.
 
 The client cannot see a failed write to the terminal. A write that fails is therefore not reported.
+
+## Review
+
+`ctrl+o` MUST open the review on the newest entry. The review MUST show the full text of an entry, not its cut form.
+The review MUST close only on `esc`, `q`, or `ctrl+o`. A quit or suspend key MUST close the review first.
+Rows that finish while the review is open MUST wait, and they MUST print after the review closes.
+The review header MUST show the count of waiting rows. The footer MUST name the scroll keys and the entry keys.
+The client MUST keep the last 1000 committed rows for the review and MUST drop the oldest first.
 
 ## Keys and commands
 

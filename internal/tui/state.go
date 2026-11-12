@@ -70,6 +70,7 @@ type model struct {
 	selector    *selector
 	confirm     *confirmation
 	matchSeq    int
+	review      *reviewState
 }
 
 type connInfo struct {

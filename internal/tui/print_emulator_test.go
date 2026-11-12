@@ -54,10 +54,16 @@ type noInit struct {
 
 func (n noInit) Init() tea.Cmd { return nil }
 
+type noopMsg struct{}
+
 func (n noInit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if p, ok := msg.(probe); ok {
 		p.reply <- p.read(n.model)
 		return n, nil
+	}
+	if mutate, ok := msg.(func(*model)); ok {
+		mutate(&n.model)
+		msg = noopMsg{}
 	}
 	next, command := n.model.Update(msg)
 	n.model = next.(model)
@@ -245,4 +251,63 @@ func TestDockGrowDuringPrintKeepsHistoryClean(t *testing.T) {
 			t.Fatalf("open dock line %q in history:\n%s", line, history)
 		}
 	})
+}
+
+type heldRows struct {
+	pending  int
+	printing bool
+}
+
+func TestPrintOnAltScreenExitKeepsRows(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		run := startEmulated(emuWidth, emuHeight, nil)
+		defer run.stop()
+		run.send(commandDone("seq 1"))
+		run.waitFor(t, "first row printed", func(h, s string) bool { return rowCount(h, s, "seq 1") == 1 })
+		run.send(press('o', tea.ModCtrl, ""))
+		run.waitFor(t, "review open", func(_, _ string) bool {
+			return run.read(func(m model) any { return m.review != nil }).(bool)
+		})
+		waitSettled(run)
+		run.send(commitFiveRows)
+		held := run.read(func(m model) any {
+			return heldRows{pending: len(m.out.pending), printing: m.out.printing}
+		}).(heldRows)
+		if held.printing || held.pending != 5 {
+			t.Fatalf("rows committed while the review is open printed or left the queue: pending %d, printing %t", held.pending, held.printing)
+		}
+		run.send(press(tea.KeyEscape, 0, ""))
+		run.waitFor(t, "five rows printed after the review closes", fiveRowsPrinted)
+		if run.altScreen() {
+			t.Fatal("the rows were printed while the emulator is on the alternate screen")
+		}
+	})
+}
+
+func waitSettled(run *emulatedRun) {
+	for run.read(func(m model) any { return m.out.settling }).(bool) {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func commitFiveRows(m *model) {
+	for i := 1; i <= 5; i++ {
+		m.commit(fmt.Sprintf("five:%d", i), []string{fmt.Sprintf("five-%d", i)})
+	}
+}
+
+func fiveRowsPrinted(history, screen string) bool {
+	for i := 1; i <= 5; i++ {
+		if rowCount(history, screen, fmt.Sprintf("five-%d", i)) != 1 {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *emulatedRun) altScreen() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.em.IsAltScreen()
 }

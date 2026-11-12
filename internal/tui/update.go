@@ -53,12 +53,15 @@ func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 		m.screen.width = msg.Width
 		m.screen.height = msg.Height
 		m.input.composer.SetWidth(msg.Width)
+		m.fitReview()
 	case tea.FocusMsg:
 		m.screen.focused = true
 		m.input.composer.focused = true
 	case tea.BlurMsg:
 		m.screen.focused = false
 		m.input.composer.focused = false
+	case tea.MouseWheelMsg:
+		m.scrollReview(msg)
 	case tea.ModeReportMsg:
 		m.applyModeReport(msg)
 	default:
@@ -106,20 +109,32 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+func (m *model) overlayKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
+	key := msg.String()
+	switch {
+	case m.review != nil:
+		return m.reviewKey(msg), true
+	case key == "ctrl+o":
+		m.openReview()
+		return nil, true
+	case len(m.approvals) > 0:
+		return m.answerApprovalKey(key), true
+	case m.confirm != nil:
+		return m.confirmKey(key), true
+	case m.selector != nil:
+		return m.selectKey(key), true
+	}
+	return nil, false
+}
+
 func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	m.noticef("")
 	key := msg.String()
 	if command, handled := m.guardKey(key); handled {
 		return command
 	}
-	if len(m.approvals) > 0 {
-		return m.answerApprovalKey(key)
-	}
-	if m.confirm != nil {
-		return m.confirmKey(key)
-	}
-	if m.selector != nil {
-		return m.selectKey(key)
+	if command, handled := m.overlayKey(msg); handled {
+		return command
 	}
 	switch key {
 	case "enter":
@@ -173,6 +188,7 @@ func (m *model) clearGuard() {
 }
 
 func (m *model) quit() {
+	m.closeReview()
 	m.leaving = true
 	m.quitting = true
 }
@@ -188,6 +204,7 @@ func (m *model) finishQuit() tea.Cmd {
 }
 
 func (m *model) suspend() {
+	m.closeReview()
 	m.leaving = true
 	m.suspending = true
 }
@@ -220,6 +237,12 @@ func (m model) View() tea.View {
 	}
 	if !m.out.started {
 		view := tea.NewView("")
+		view.ReportFocus = true
+		return view
+	}
+	if m.review != nil {
+		view := tea.NewView(m.screen.emit(m.reviewView()))
+		view.AltScreen = true
 		view.ReportFocus = true
 		return view
 	}

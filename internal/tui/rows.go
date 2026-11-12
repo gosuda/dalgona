@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gosuda/dalgona/internal/rpc"
 )
@@ -20,6 +21,8 @@ const (
 	settleDelay     = 3 * time.Second / framesPerSecond
 	maxSettledItems = 200
 )
+
+const maxReviewEntries = 1000
 
 type printedMsg struct{}
 
@@ -35,8 +38,9 @@ type frameGeometry struct {
 }
 
 type entry struct {
-	key  string
-	text string
+	key   string
+	title string
+	text  string
 }
 
 type liveItem struct {
@@ -56,6 +60,13 @@ func (l *liveItem) tail() string {
 		return lastLine(l.Output + string(l.output))
 	}
 	return lastLine(l.Text + string(l.text))
+}
+
+func (l liveItem) snapshot() rpc.Item {
+	item := l.Item
+	item.Text += string(l.text)
+	item.Output += string(l.output)
+	return item
 }
 
 func (l *liveItem) activity() string {
@@ -83,8 +94,21 @@ func (m *model) commit(key string, lines []string) {
 		return
 	}
 	m.out.printed[key] = struct{}{}
-	m.out.entries = append(m.out.entries, entry{key: key, text: strings.Join(lines, "\n")})
+	m.out.entries = append(m.out.entries, newEntry(key, lines))
+	if extra := len(m.out.entries) - maxReviewEntries; extra > 0 {
+		m.out.entries = slices.Clone(m.out.entries[extra:])
+	}
 	m.out.pending = append(m.out.pending, lines...)
+}
+
+func newEntry(key string, lines []string) entry {
+	text := strings.Join(lines, "\n")
+	return entry{key: key, title: entryTitle(text), text: text}
+}
+
+func entryTitle(text string) string {
+	first, _, _ := strings.Cut(text, "\n")
+	return strings.TrimSpace(ansi.Strip(first))
 }
 
 func (m *model) settle() tea.Cmd {
@@ -117,7 +141,7 @@ func lineCount(content string) int {
 }
 
 func (m *model) drain() tea.Cmd {
-	if m.out.printing || m.out.settling || len(m.out.pending) == 0 {
+	if m.out.printing || m.out.settling || m.review != nil || len(m.out.pending) == 0 {
 		return nil
 	}
 	bound := m.screen.height - len(m.dockLines())

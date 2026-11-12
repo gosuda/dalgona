@@ -79,7 +79,7 @@ func bodyWindow(p panelView, rows int) (int, []string) {
 	start, end = bodySpan(p, rows-1)
 	shown := slices.Clone(p.body[start:end])
 	if end < len(p.body) {
-		shown = append(shown, fmt.Sprintf("↓ %d more lines · ↑↓ scroll", len(p.body)-end))
+		shown = append(shown, fmt.Sprintf("↓ %d more lines · ↑↓ scroll · ctrl+o full view", len(p.body)-end))
 	}
 	return start, shown
 }
