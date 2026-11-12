@@ -28,8 +28,11 @@ A disabled entry MUST NOT appear in the merged table. This rule MUST allow `[key
 The matcher MUST hide non-prose regions without changing rune positions. It MUST preserve newlines. It MUST support these regions:
 
 - Fenced code blocks with at least three backticks or tildes. A fence MAY have up to three leading spaces. A closing fence MUST use the same marker and at least the opening length. An unclosed fence MUST hide the rest of the prompt.
+- An opening backtick fence MUST NOT have a backtick in its info string.
+- A closing fence MUST contain only whitespace after its marker.
 - Inline code spans delimited by equal-length backtick runs. An unmatched run MUST remain literal text.
 - XML and HTML comments, tags, and balanced element sections. Tag names MUST match without case sensitivity. Quoted `>` characters MUST NOT close a tag. An unclosed element MUST hide only its opening tag. An unclosed comment MUST hide the rest of the prompt.
+- If another `<` appears before the tag ends, the first `<` MUST stay plain text.
 
 A keyword MUST NOT fire when any required tool is absent. The matcher MUST return each matching keyword at most once. Results MUST follow table order.
 
