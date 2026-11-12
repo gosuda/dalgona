@@ -192,7 +192,7 @@ The feature checks run once at 1280 px in `day`. The layout matrix runs every wi
 
 |#|Feature|Action|Proof|
 |---|---|---|---|
-|W01|Connect, token, empty states|load the URL|The status shows connected. The transcript says `Pick a thread or start a new one`. The page icon is the candy mark, `dalgona-small.svg` (Design record, Product marks), served at `/dalgona-small.svg`: `internal/webui/webui.go:155` serves each file under `dist` at its path, `web/static/` is not in the checkout at commit `3c4b6f94`. The web workstream, Step 9 creates it and copies the icon, so the icon check fails until that step lands. `curl` without a token gets 401 (in `live-check`).|
+|W01|Connect, token, empty states|load the URL|The idle state word is `Ready`. No row shows `Offline`. The transcript says `Pick a thread or start a new one`. The page icon is the candy mark, `dalgona-small.svg` (Design record, Product marks), served at `/dalgona-small.svg`: `internal/webui/webui.go:155` serves each file under `dist` at its path, `web/static/` is not in the checkout at commit `3c4b6f94`. The web workstream, Step 9 creates it and copies the icon, so the icon check fails until that step lands. `curl` without a token gets 401 (in `live-check`).|
 |W02|Live regions|load|`[aria-live]` nodes exist at load with empty text. No `role=log` sits on the streaming delta container.|
 |W03|Streaming Markdown, thinking shown, sanitizing|send `show markdown`|Heading, list, code and table render. Thinking collapses. The hostile line renders as text, and `document.title` is unchanged.|
 |W04|Tool card, read|`read a.txt`|The card reads `Done`. The `t-read-2` record exists.|
