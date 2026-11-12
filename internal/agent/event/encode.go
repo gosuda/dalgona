@@ -157,6 +157,9 @@ func assistantMessageMembers(e AssistantMessage) []member {
 	if e.ContextSeq != 0 {
 		fields = append(fields, field("context_seq", uint64Value(e.ContextSeq)))
 	}
+	if e.ContextWindow != 0 {
+		fields = append(fields, field("context_window", intValue(e.ContextWindow)))
+	}
 	return fields
 }
 

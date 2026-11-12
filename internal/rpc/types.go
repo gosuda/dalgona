@@ -76,14 +76,15 @@ type (
 		Type string `json:"type"`
 	}
 	ThreadStartResponse struct {
-		ApprovalPolicy    string        `json:"approvalPolicy"`
-		ApprovalsReviewer string        `json:"approvalsReviewer"`
-		Cwd               string        `json:"cwd"`
-		Model             string        `json:"model"`
-		ModelProvider     string        `json:"modelProvider"`
-		Sandbox           SandboxPolicy `json:"sandbox"`
-		ReasoningEffort   string        `json:"reasoningEffort,omitzero"`
-		Thread            Thread        `json:"thread"`
+		ApprovalPolicy    string            `json:"approvalPolicy"`
+		ApprovalsReviewer string            `json:"approvalsReviewer"`
+		Cwd               string            `json:"cwd"`
+		Model             string            `json:"model"`
+		ModelProvider     string            `json:"modelProvider"`
+		Sandbox           SandboxPolicy     `json:"sandbox"`
+		ReasoningEffort   string            `json:"reasoningEffort,omitzero"`
+		TokenUsage        *ThreadTokenUsage `json:"tokenUsage,omitzero"`
+		Thread            Thread            `json:"thread"`
 	}
 	ThreadResumeResponse = ThreadStartResponse
 	ThreadForkResponse   = ThreadStartResponse

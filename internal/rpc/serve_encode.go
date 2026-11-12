@@ -93,6 +93,10 @@ func (r ThreadStartResponse) write(o *out) {
 	o.str("type", r.Sandbox.Type)
 	o.close()
 	o.optStr("reasoningEffort", r.ReasoningEffort)
+	if r.TokenUsage != nil {
+		o.key("tokenUsage")
+		r.TokenUsage.write(o)
+	}
 	o.key("thread")
 	r.Thread.write(o)
 	o.close()

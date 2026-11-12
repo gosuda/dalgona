@@ -20,13 +20,14 @@ const (
 )
 
 type worker struct {
-	t            *Thread
-	turnID       string
-	continuation bool
-	registry     *model.Registry
-	inBand       *inBandCalls
-	settings     Settings
-	tools        *toolset
+	t             *Thread
+	turnID        string
+	continuation  bool
+	registry      *model.Registry
+	inBand        *inBandCalls
+	settings      Settings
+	tools         *toolset
+	contextWindow int
 }
 
 func pathSettings(created event.SessionCreated, records []event.Seqd) Settings {

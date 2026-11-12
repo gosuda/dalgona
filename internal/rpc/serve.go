@@ -202,6 +202,7 @@ func (s *server) childCwd(id string) string {
 type snapshot struct {
 	created event.SessionCreated
 	turns   []Turn
+	usage   *ThreadTokenUsage
 }
 
 func (s *server) attach(ctx context.Context, thread *agent.Thread) (snapshot, error) {
@@ -285,7 +286,7 @@ func (s *server) fill(thread *agent.Thread, tr *tracker) (snapshot, uint64, erro
 	if len(records) > 0 {
 		head = records[len(records)-1].Seq
 	}
-	return snapshot{created: tr.created, turns: c.result()}, head, nil
+	return snapshot{created: tr.created, turns: c.result(), usage: tr.usageSnapshot()}, head, nil
 }
 
 func (s *server) run(ctx context.Context, w *watch) {

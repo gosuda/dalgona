@@ -41,15 +41,19 @@ func (n ThreadTokenUsageUpdatedNotification) write(o *out) {
 	o.str("threadId", n.ThreadID)
 	o.str("turnId", n.TurnID)
 	o.key("tokenUsage")
+	n.TokenUsage.write(o)
+	o.close()
+}
+
+func (u ThreadTokenUsage) write(o *out) {
 	o.open()
 	o.key("last")
-	n.TokenUsage.Last.write(o)
+	u.Last.write(o)
 	o.key("total")
-	n.TokenUsage.Total.write(o)
-	if n.TokenUsage.ModelContextWindow > 0 {
-		o.int("modelContextWindow", int64(n.TokenUsage.ModelContextWindow))
+	u.Total.write(o)
+	if u.ModelContextWindow > 0 {
+		o.int("modelContextWindow", int64(u.ModelContextWindow))
 	}
-	o.close()
 	o.close()
 }
 

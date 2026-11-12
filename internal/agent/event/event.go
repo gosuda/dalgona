@@ -280,6 +280,7 @@ type AssistantMessage struct {
 	Usage         Usage
 	StopReason    string
 	ContextSeq    uint64
+	ContextWindow int
 }
 
 func (AssistantMessage) Type() string { return TypeAssistantMessage }
@@ -297,6 +298,9 @@ func (e AssistantMessage) Validate() error {
 		if err := validateToolCall(i, call); err != nil {
 			return err
 		}
+	}
+	if e.ContextWindow < 0 {
+		return errors.New("context_window must not be negative")
 	}
 	return e.Usage.Validate()
 }

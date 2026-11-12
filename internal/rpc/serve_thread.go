@@ -200,6 +200,7 @@ func (s *server) session(thread *agent.Thread, snap snapshot) (ThreadStartRespon
 		Cwd: snap.created.Cwd, Model: current.Model, ModelProvider: provider(current.Model),
 		Sandbox:         sandboxPolicy(string(effective)),
 		ReasoningEffort: cmp.Or(effortName(current.Effort), effortName(s.currentConfig().Reasoning)),
+		TokenUsage:      snap.usage,
 		Thread:          s.threadObject(info, threadStatus(thread), snap.turns),
 	}, nil
 }

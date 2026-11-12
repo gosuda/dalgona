@@ -41,7 +41,7 @@ type tracker struct {
 	approvals map[string]string
 	declined  map[string]bool
 	callAt    map[string]time.Time
-	total     TokenUsageBreakdown
+	usage     ThreadTokenUsage
 	seq       uint64
 }
 
@@ -151,6 +151,9 @@ func (t *tracker) assistantMessage(_ uint64, ev event.Event) {
 		call.Args = t.args(call.Args, call.ArgsBlob)
 		t.calls[call.ID] = call
 	}
+	if e.ContextWindow > 0 {
+		t.usage.ModelContextWindow = e.ContextWindow
+	}
 	if e.Usage == (event.Usage{}) {
 		return
 	}
@@ -158,11 +161,20 @@ func (t *tracker) assistantMessage(_ uint64, ev event.Event) {
 		InputTokens: e.Usage.Input, CachedInputTokens: e.Usage.CacheRead, CacheWriteInputTokens: e.Usage.CacheWrite,
 		OutputTokens: e.Usage.Output, TotalTokens: e.Usage.Input + e.Usage.Output,
 	}
-	t.total = t.total.add(last)
-	total := t.total
+	t.usage.Last = last
+	t.usage.Total = t.usage.Total.add(last)
+	usage := t.usage
 	t.sink.notify("thread/tokenUsage/updated", func() writer {
-		return ThreadTokenUsageUpdatedNotification{ThreadID: t.threadID, TurnID: e.TurnID, TokenUsage: ThreadTokenUsage{Last: last, Total: total}}
+		return ThreadTokenUsageUpdatedNotification{ThreadID: t.threadID, TurnID: e.TurnID, TokenUsage: usage}
 	})
+}
+
+func (t *tracker) usageSnapshot() *ThreadTokenUsage {
+	if t.usage.Last == (TokenUsageBreakdown{}) && t.usage.ModelContextWindow == 0 {
+		return nil
+	}
+	usage := t.usage
+	return &usage
 }
 
 func (t *tracker) finishStream(turnID, kind, id, text string) {

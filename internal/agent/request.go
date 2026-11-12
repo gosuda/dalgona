@@ -114,6 +114,7 @@ func (w *worker) request(ctx context.Context, v view, messages []model.Message) 
 		return model.Request{}, err
 	}
 	caps := w.t.host.capabilities(ctx, w.registry, w.settings.Model)
+	w.contextWindow = caps.Context
 	return model.Request{
 		Model: modelID, System: w.t.system, Messages: messages, Tools: w.tools.specs,
 		Reasoning: model.ClampEffort(w.effort(v), caps.Efforts),
@@ -237,7 +238,7 @@ func (w *worker) journalAssistant(ctx context.Context, result *reply) error {
 	}
 	message := event.AssistantMessage{
 		ItemID: result.itemID, TurnID: w.turnID, Text: text, TextBlob: textBlob, Reasoning: reasoning, ReasoningBlob: reasoningBlob,
-		ToolCalls: calls, StopReason: cmp.Or(result.stop, stop), ContextSeq: result.contextSeq,
+		ToolCalls: calls, StopReason: cmp.Or(result.stop, stop), ContextSeq: result.contextSeq, ContextWindow: w.contextWindow,
 		Usage: event.Usage{Input: result.usage.Input, Output: result.usage.Output, CacheRead: result.usage.CacheRead, CacheWrite: result.usage.CacheWrite},
 	}
 	_, err = w.t.appendEvents(ctx, message)

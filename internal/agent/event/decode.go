@@ -119,7 +119,8 @@ func decodeAssistantMessage(r *objectReader) AssistantMessage {
 	return AssistantMessage{
 		ItemID: r.str("item_id"), TurnID: r.str("turn_id"), Text: text, TextBlob: textBlob,
 		Reasoning: reasoning, ReasoningBlob: reasoningBlob, ToolCalls: calls, Usage: usage, StopReason: r.str("stop_reason"),
-		ContextSeq: r.uint64("context_seq"),
+		ContextSeq:    r.uint64("context_seq"),
+		ContextWindow: r.number("context_window"),
 	}
 }
 
