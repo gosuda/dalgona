@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -140,7 +141,8 @@ func TestExecTimeoutTerminates(t *testing.T) {
 }
 
 func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
-	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:2s")
+	gate := listenShimGate(t)
+	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:"+gate.path)
 	runsDir := filepath.Join(t.TempDir(), "runs")
 	runs, newErr := runner.NewLocal(runsDir)
 	if newErr != nil {
@@ -160,8 +162,10 @@ func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
 		finished <- execOutcome{result: result, runErr: runErr}
 	}()
 	runDir := filepath.Join(runsDir, "run-early")
-	waitForRunDir(t, runDir, cancel)
+	parked := gate.awaitShim(t)
 	cancel()
+	waitForPath(t, filepath.Join(runDir, "cancel"), cancel)
+	_ = parked.Close()
 	settled := awaitExecOutcome(t, finished)
 	if settled.runErr == nil || settled.result.OK {
 		t.Fatalf("interrupted run ok=%v err=%v", settled.result.OK, settled.runErr)
@@ -177,16 +181,50 @@ func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
 	}
 }
 
-func waitForRunDir(t *testing.T, runDir string, cancel context.CancelFunc) {
+type shimGate struct {
+	path     string
+	listener *net.UnixListener
+}
+
+func listenShimGate(t *testing.T) shimGate {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dgx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return shimGate{path: path, listener: listener}
+}
+
+func (g shimGate) awaitShim(t *testing.T) net.Conn {
+	t.Helper()
+	if err := g.listener.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := g.listener.Accept()
+	if err != nil {
+		t.Fatalf("shim never reached the pid pause: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+func waitForPath(t *testing.T, path string, cancel context.CancelFunc) {
 	t.Helper()
 	appear := time.Now().Add(10 * time.Second)
 	for {
-		if _, statErr := os.Stat(runDir); statErr == nil {
+		if _, statErr := os.Stat(path); statErr == nil {
 			return
 		}
 		if time.Now().After(appear) {
 			cancel()
-			t.Fatal("run directory did not appear")
+			t.Fatalf("%s did not appear", path)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
