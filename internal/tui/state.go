@@ -119,6 +119,7 @@ type inputState struct {
 	marksFor string
 	field    textField
 	mode     inputMode
+	popup    *completion
 }
 
 type screenState struct {

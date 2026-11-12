@@ -128,13 +128,30 @@ func (m *model) overlayKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
-func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
+func (m *model) composerKey(msg tea.KeyPressMsg, key string) tea.Cmd {
+	switch key {
+	case "up":
+		if m.recallOlder() {
+			return nil
+		}
+	case "down":
+		if m.recallNewer() {
+			return nil
+		}
+	}
+	return m.updateComposer(msg)
+}
+
+func (m *model) keyCommand(msg tea.KeyPressMsg) tea.Cmd {
 	m.noticef("")
 	key := msg.String()
 	if command, handled := m.guardKey(key); handled {
 		return command
 	}
 	if command, handled := m.overlayKey(msg); handled {
+		return command
+	}
+	if command, handled := m.popupKey(msg); handled {
 		return command
 	}
 	switch key {
@@ -152,18 +169,10 @@ func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 }
 
-func (m *model) composerKey(msg tea.KeyPressMsg, key string) tea.Cmd {
-	switch key {
-	case "up":
-		if m.recallOlder() {
-			return nil
-		}
-	case "down":
-		if m.recallNewer() {
-			return nil
-		}
-	}
-	return m.updateComposer(msg)
+func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
+	command := m.keyCommand(msg)
+	m.syncPopup(false)
+	return command
 }
 
 func (m *model) guardKey(key string) (tea.Cmd, bool) {
@@ -272,6 +281,7 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 	}
 	updated, command := m.input.composer.Update(&m.screen, msg)
 	m.input.composer = updated
+	m.syncPopup(typedText(msg))
 	return command
 }
 

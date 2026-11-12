@@ -59,6 +59,9 @@ func (m *model) panelOpen() bool {
 }
 
 func (m *model) inputRows(width, limit int) ([]string, int, int) {
+	if m.popupShown() {
+		return m.editorRows(width, 1)
+	}
 	if !m.panelOpen() {
 		return m.editorRows(width, limit)
 	}
@@ -388,6 +391,8 @@ func (m *model) panelLines() []string {
 		return framePanel(&m.screen, m.confirmPanel(), panelRows(panelConfirm, m.screen.height))
 	case m.list != nil:
 		return framePanel(&m.screen, m.listPanelView(), panelRows(panelList, m.screen.height))
+	case m.popupShown():
+		return m.popupLines()
 	default:
 		return nil
 	}

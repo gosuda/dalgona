@@ -166,7 +166,7 @@ The client MUST keep the last 1000 committed rows for the review and MUST drop t
 ## Editor
 
 The composer MUST wrap text to the window width minus three cells.
-Enter MUST send the prompt, except after a backslash.
+Enter MUST send the prompt, except after a backslash and while the command palette lists a command.
 Enter after a backslash MUST replace the backslash with a newline.
 Shift+Enter and Ctrl+J MUST insert a newline.
 Alt+Enter MUST queue the draft as a follow-up.
@@ -181,15 +181,21 @@ The history MUST hold the 200 newest prompts. It MUST skip a prompt equal to the
 Ctrl+C with a non-empty draft MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
 
+The composer MUST show a command palette when the caret is in a first token that starts with `/`, with no panel or review open.
+The palette MUST list at most 8 matching commands and MUST NOT open for `//`.
+Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token.
+Enter MUST run a highlighted command only when the draft is only its first token and the command takes no argument. Otherwise, Enter MUST complete the command and keep the rest of the draft.
+Esc MUST close the palette and keep the draft. Typing a character MUST reopen it.
+
 ## Keys and commands
 
 | Input | Effect |
 |---|---|
-| Enter, idle | `turn/start` with the composer text |
+| Enter, idle | `turn/start` with the composer text, unless the command palette lists a command. The palette then runs or completes that command |
 | Enter, running or awaiting approval | `turn/steer` with the composer text |
 | Enter, empty composer | Starts the oldest held follow-up when no turn runs |
 | Alt+Enter | Queues a follow-up, at most 32 |
-| Esc | Clears a non-empty list filter first. With an empty filter, closes the list panel. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row, and a second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
+| Esc | Closes an open command palette first and keeps the draft. Otherwise clears a non-empty list filter first. With an empty filter, closes the list panel. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row, and a second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
 | Ctrl+C twice | Quits. With an empty draft, the first press shows `Ctrl+C again to exit` in the live row. With a non-empty draft, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. A second press within 2000 ms quits |
 | `/model [id]` | `model/list` list panel, or `config/value/write` key `model` |
 | `/resume [id]` | `thread/list` list panel, or `thread/resume` then `thread/read` |
