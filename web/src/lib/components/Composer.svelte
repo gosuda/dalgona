@@ -1,11 +1,14 @@
 <script lang="ts">
+import FollowupQueue from "#lib/components/FollowupQueue.svelte";
 import { handoffFocus } from "#lib/focus.ts";
 import type { KeywordMatch } from "#lib/types.ts";
 
 interface Props {
 	disabled: boolean;
 	running: boolean;
-	queuedCount: number;
+	followups: readonly string[];
+	onEditFollowup: (index: number) => string | undefined;
+	onRemoveFollowup: (index: number) => void;
 	onMatch?: (text: string) => Promise<readonly KeywordMatch[]>;
 	onSend: (text: string) => void;
 	onSteer: (text: string) => void;
@@ -16,7 +19,9 @@ interface Props {
 let {
 	disabled,
 	running,
-	queuedCount,
+	followups,
+	onEditFollowup,
+	onRemoveFollowup,
 	onMatch,
 	onSend,
 	onSteer,
@@ -75,9 +80,15 @@ function queueFollowup(): void {
 	text = "";
 }
 
+function editFollowup(index: number): void {
+	const restored = onEditFollowup(index);
+	if (restored !== undefined) text = restored;
+	textarea?.focus();
+}
+
 function onKeydown(event: KeyboardEvent): void {
 	if (event.isComposing || event.key !== "Enter") return;
-	if ((event.metaKey || event.ctrlKey) && running) {
+	if (event.altKey && running) {
 		event.preventDefault();
 		queueFollowup();
 	} else if (!event.shiftKey) {
@@ -94,6 +105,7 @@ function onKeydown(event: KeyboardEvent): void {
 			submitPrimary();
 		}}
 	>
+		<FollowupQueue items={followups} onEdit={editFollowup} onRemove={onRemoveFollowup} />
 		<label for="prompt">Message</label>
 		<textarea
 			bind:this={textarea}
@@ -112,9 +124,8 @@ function onKeydown(event: KeyboardEvent): void {
 		{/if}
 		<div class="composer-meta">
 			<p id="composer-help">
-				Enter to {running ? "steer" : "send"} · Shift+Enter for a new line{running ? " · Ctrl+Enter to queue" : ""}
+				Enter to {running ? "steer" : "send"} · Shift+Enter for a new line{running ? " · Alt+Enter to queue" : ""}
 			</p>
-			<p class="queued" role="status">{queuedCount > 0 ? `${queuedCount} follow-up${queuedCount === 1 ? "" : "s"} queued` : ""}</p>
 		</div>
 		<p id="composer-error" class="error" role="alert">{error}</p>
 
@@ -184,10 +195,6 @@ function onKeydown(event: KeyboardEvent): void {
 		margin: var(--space-2) 0 0;
 		color: var(--dim);
 		font-size: var(--size-caption);
-	}
-
-	.queued {
-		font-variant-numeric: tabular-nums;
 	}
 
 	.error {

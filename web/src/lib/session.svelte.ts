@@ -813,6 +813,19 @@ export class Session {
 		this.queuedFollowups = [...this.queuedFollowups, text];
 	}
 
+	editFollowup(index: number): string | undefined {
+		const text = this.queuedFollowups[index];
+		if (text === undefined) return undefined;
+		this.removeFollowup(index);
+		return text;
+	}
+
+	removeFollowup(index: number): void {
+		this.queuedFollowups = this.queuedFollowups.filter(
+			(_, position) => position !== index,
+		);
+	}
+
 	async interruptTurn(): Promise<void> {
 		if (this.activeThreadId === null || this.transcript.turnId === null) return;
 		try {

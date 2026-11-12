@@ -7,7 +7,9 @@ function baseProps() {
 	return {
 		disabled: false,
 		running: false,
-		queuedCount: 0,
+		followups: [] as readonly string[],
+		onEditFollowup: vi.fn(() => undefined),
+		onRemoveFollowup: vi.fn(),
 		onSend: vi.fn(),
 		onSteer: vi.fn(),
 		onFollowup: vi.fn(),
@@ -56,5 +58,58 @@ describe("composer focus", () => {
 			);
 		});
 		expect(onMatch).toHaveBeenCalledWith("ultrathink");
+	});
+});
+
+describe("follow-up queue", () => {
+	afterEach(cleanup);
+
+	test("Alt+Enter queues and the entry is listed", async () => {
+		const onFollowup = vi.fn();
+		const view = render(Composer, {
+			props: { ...baseProps(), running: true, onFollowup },
+		});
+		const field = screen.getByRole("textbox", { name: "Message" });
+		await fireEvent.input(field, { target: { value: "after the build" } });
+		await fireEvent.keyDown(field, { key: "Enter", altKey: true });
+		expect(onFollowup).toHaveBeenCalledWith("after the build");
+		await view.rerender({ followups: ["after the build"] });
+		expect(
+			screen.getByRole("list", { name: "Queued follow-ups" }).textContent,
+		).toContain("after the build");
+	});
+
+	test("Edit returns the text to the composer", async () => {
+		const onEditFollowup = vi.fn(() => "second follow-up");
+		render(Composer, {
+			props: {
+				...baseProps(),
+				followups: ["first", "second follow-up"],
+				onEditFollowup,
+			},
+		});
+		await fireEvent.click(
+			screen.getAllByRole("button", { name: "Edit" })[1] as HTMLElement,
+		);
+		expect(onEditFollowup).toHaveBeenCalledWith(1);
+		expect(
+			(screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement)
+				.value,
+		).toBe("second follow-up");
+	});
+
+	test("Remove drops only that entry", async () => {
+		const onRemoveFollowup = vi.fn();
+		render(Composer, {
+			props: {
+				...baseProps(),
+				followups: ["a", "b", "c"],
+				onRemoveFollowup,
+			},
+		});
+		await fireEvent.click(
+			screen.getAllByRole("button", { name: "Remove" })[1] as HTMLElement,
+		);
+		expect(onRemoveFollowup).toHaveBeenCalledWith(1);
 	});
 });

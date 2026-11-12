@@ -268,3 +268,10 @@ The header MUST show `Offline` while the connection is down.
 A control that disappears while focused hands focus to the message field. The submit control keeps its element and changes only its label.
 
 Start thread stays focusable and reports `aria-disabled` while a start is in flight.
+
+### Composer
+
+While a turn runs, Alt+Enter MUST queue the message as a follow-up. Enter MUST steer the turn instead.
+The queue MUST list each follow-up by its first line, above the message field.
+Edit MUST put the follow-up's text into the message field and remove the follow-up from the queue.
+Remove MUST drop only the follow-up that it names.

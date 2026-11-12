@@ -187,7 +187,9 @@ const subagentTitle = $derived.by(() => {
 			<Composer
 				disabled={session.connection !== "connected" || session.activeThreadId === null || session.loadingTranscript}
 				running={session.running}
-				queuedCount={session.queuedFollowups.length}
+				followups={session.queuedFollowups}
+				onEditFollowup={(index) => session.editFollowup(index)}
+				onRemoveFollowup={(index) => session.removeFollowup(index)}
 				onMatch={(text) => session.matchKeywords(text)}
 				onSend={(text) => void session.sendMessage(text)}
 				onSteer={(text) => void session.steerMessage(text)}

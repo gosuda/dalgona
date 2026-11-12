@@ -274,6 +274,28 @@ describe("session", () => {
 		session.stop();
 	});
 
+	test("editing a follow-up returns its text and drops only that entry", async () => {
+		const { dial } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		for (const text of ["a", "b", "c"]) session.queueFollowup(text);
+		expect(session.editFollowup(1)).toBe("b");
+		expect(session.queuedFollowups).toEqual(["a", "c"]);
+		session.stop();
+	});
+
+	test("removing a follow-up drops only that entry", async () => {
+		const { dial } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		for (const text of ["a", "b", "c"]) session.queueFollowup(text);
+		session.removeFollowup(1);
+		expect(session.queuedFollowups).toEqual(["a", "c"]);
+		session.stop();
+	});
+
 	test("opening another thread discards queued follow-ups", async () => {
 		const { dial } = fakeDial("t1");
 		const session = new Session(dial);
