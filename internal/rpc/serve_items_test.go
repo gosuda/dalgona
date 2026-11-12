@@ -100,16 +100,3 @@ func TestItemDecodeIgnoresMemberOrder(t *testing.T) {
 		}
 	}
 }
-
-func TestPatchSectionSelectsFile(t *testing.T) {
-	patch := "*** Begin Patch\n*** Update File: a.go\n@@\n-x\n+y\n*** Add File: dir/b.go\n+new\n*** End Patch\n"
-	if got := patchSection(patch, "/repo/a.go"); got != "*** Update File: a.go\n@@\n-x\n+y\n" {
-		t.Fatalf("a.go section %q", got)
-	}
-	if got := patchSection(patch, "/repo/dir/b.go"); got != "*** Add File: dir/b.go\n+new\n" {
-		t.Fatalf("b.go section %q", got)
-	}
-	if got := patchSection(patch, "/repo/c.go"); got != patch {
-		t.Fatalf("unknown file section %q", got)
-	}
-}

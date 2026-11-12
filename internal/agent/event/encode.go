@@ -206,6 +206,9 @@ func fileChangeValue(e FileChange) jsontext.Value {
 	if e.PreBlob != nil {
 		fields = append(fields, field("pre_blob", blobValue(e.PreBlob)))
 	}
+	if e.PostBlob != nil {
+		fields = append(fields, field("post_blob", blobValue(e.PostBlob)))
+	}
 	return objectValue(fields...)
 }
 

@@ -316,6 +316,22 @@ func (w *worker) start(ctx context.Context, p *prepared) error {
 	return err
 }
 
+func (h *Host) maskedBlob(data []byte) (*event.BlobRef, error) {
+	masked := data
+	if h.cfg.Auth != nil {
+		text, err := h.cfg.Auth.MaskWithError(string(data))
+		if err != nil {
+			return nil, fmt.Errorf("agent: secret masking failed: %w", err)
+		}
+		masked = []byte(text)
+	}
+	sha, err := h.journal.PutBlob(masked)
+	if err != nil {
+		return nil, fmt.Errorf("agent: store blob: %w", err)
+	}
+	return &event.BlobRef{Blob: sha, Bytes: int64(len(masked))}, nil
+}
+
 func (w *worker) started(p *prepared, files []tool.FileChange) (event.ToolStarted, error) {
 	args, blob, err := w.t.host.rawPayload(p.args)
 	if err != nil {
@@ -328,19 +344,18 @@ func (w *worker) started(p *prepared, files []tool.FileChange) (event.ToolStarte
 	for _, file := range files {
 		change := event.FileChange{Path: file.Path, PreSHA: file.PreSHA, PostSHA: file.PostSHA}
 		if file.PreSHA != "" {
-			masked := file.Pre
-			if w.t.host.cfg.Auth != nil {
-				text, maskErr := w.t.host.cfg.Auth.MaskWithError(string(file.Pre))
-				if maskErr != nil {
-					return event.ToolStarted{}, fmt.Errorf("agent: secret masking failed: %w", maskErr)
-				}
-				masked = []byte(text)
-			}
-			sha, err := w.t.host.journal.PutBlob(masked)
+			ref, err := w.t.host.maskedBlob(file.Pre)
 			if err != nil {
-				return event.ToolStarted{}, fmt.Errorf("agent: store pre-image of %s: %w", file.Path, err)
+				return event.ToolStarted{}, fmt.Errorf("agent: pre-image of %s: %w", file.Path, err)
 			}
-			change.PreBlob = &event.BlobRef{Blob: sha, Bytes: int64(len(masked))}
+			change.PreBlob = ref
+		}
+		if file.PostSHA != "" {
+			ref, err := w.t.host.maskedBlob(file.Post)
+			if err != nil {
+				return event.ToolStarted{}, fmt.Errorf("agent: post-image of %s: %w", file.Path, err)
+			}
+			change.PostBlob = ref
 		}
 		started.Files = append(started.Files, change)
 	}

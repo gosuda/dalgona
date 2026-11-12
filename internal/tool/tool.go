@@ -79,6 +79,7 @@ type FileChange struct {
 	PostSHA string `json:"post_sha"`
 	PreBlob string `json:"pre_blob,omitempty"`
 	Pre     []byte `json:"-"`
+	Post    []byte `json:"-"`
 }
 
 type Plan struct {

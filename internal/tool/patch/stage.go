@@ -362,13 +362,17 @@ func (b stagedBatch) changes() []tool.FileChange {
 	var out []tool.FileChange
 	for _, file := range b.files {
 		postPresent := !file.deleted && file.renameTo == ""
+		var post []byte
+		if postPresent {
+			post = file.after
+		}
 		out = append(out, tool.FileChange{
 			Path: file.path, PreSHA: fileSHA(file.before, file.exists),
-			PostSHA: fileSHA(file.after, postPresent), Pre: file.before,
+			PostSHA: fileSHA(file.after, postPresent), Pre: file.before, Post: post,
 		})
 		if file.renameTo != "" {
 			out = append(out, tool.FileChange{
-				Path: file.renameTo, PostSHA: snapshot.Digest(file.after),
+				Path: file.renameTo, PostSHA: snapshot.Digest(file.after), Post: file.after,
 			})
 		}
 	}

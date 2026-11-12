@@ -182,7 +182,7 @@ func decodeFileChange(raw jsontext.Value) (FileChange, error) {
 	}
 	r := objectReader{fields: fields}
 	value := FileChange{
-		Path: r.str("path"), PreSHA: r.str("pre_sha"), PostSHA: r.str("post_sha"), PreBlob: r.blob("pre_blob"),
+		Path: r.str("path"), PreSHA: r.str("pre_sha"), PostSHA: r.str("post_sha"), PreBlob: r.blob("pre_blob"), PostBlob: r.blob("post_blob"),
 	}
 	return value, r.err
 }

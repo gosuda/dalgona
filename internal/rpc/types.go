@@ -68,9 +68,12 @@ type (
 		DurationMs *int64
 	}
 	FileChange struct {
-		Path string `json:"path"`
-		Kind string `json:"kind"`
-		Diff string `json:"diff"`
+		Path        string `json:"path"`
+		Kind        string `json:"kind"`
+		Diff        string `json:"diff"`
+		Additions   int    `json:"additions"`
+		Deletions   int    `json:"deletions"`
+		DiffOmitted bool   `json:"-"`
 	}
 	SandboxPolicy struct {
 		Type string `json:"type"`

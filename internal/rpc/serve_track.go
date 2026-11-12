@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/textdiff"
 )
 
 const (
@@ -242,15 +243,14 @@ func (t *tracker) toolItem(callID, tool, class string, args jsontext.Value, file
 		it.Command = argString(args, "command")
 		it.Cwd = cmp.Or(argString(args, "cwd"), t.created.Cwd)
 	case kindFileChange:
-		it.Changes = fileChanges(args, files)
+		it.Changes = t.fileChanges(files)
 	case kindMCP:
 		it.Server, it.Tool, _ = strings.Cut(tool, "__")
 	}
 	return it
 }
 
-func fileChanges(args jsontext.Value, files []event.FileChange) []FileChange {
-	text := patchText(args)
+func (t *tracker) fileChanges(files []event.FileChange) []FileChange {
 	changes := make([]FileChange, 0, len(files))
 	for _, file := range files {
 		kind := kindUpdate
@@ -260,9 +260,33 @@ func fileChanges(args jsontext.Value, files []event.FileChange) []FileChange {
 		case file.PostSHA == "":
 			kind = kindDelete
 		}
-		changes = append(changes, FileChange{Path: file.Path, Kind: kind, Diff: patchSection(text, file.Path)})
+		changes = append(changes, t.fileChange(file, kind))
 	}
 	return changes
+}
+
+func (t *tracker) fileChange(file event.FileChange, kind string) FileChange {
+	pre, preOK := t.image(file.Path, file.PreSHA, file.PreBlob)
+	post, postOK := t.image(file.Path, file.PostSHA, file.PostBlob)
+	if !preOK || !postOK || len(pre) > textdiff.Limit || len(post) > textdiff.Limit {
+		return omittedChange(file.Path, kind)
+	}
+	return diffChange(file.Path, kind, pre, post)
+}
+
+func (t *tracker) image(path, sha string, blob *event.BlobRef) ([]byte, bool) {
+	if sha == "" {
+		return nil, true
+	}
+	if blob == nil {
+		return nil, false
+	}
+	data, err := t.load(blob)
+	if err != nil {
+		t.log.Warn("file change image unreadable", "path", path, "error", err)
+		return nil, false
+	}
+	return data, true
 }
 
 func (t *tracker) openCall(callID string) *Item {

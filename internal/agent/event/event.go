@@ -78,10 +78,11 @@ type Usage struct {
 }
 
 type FileChange struct {
-	Path    string
-	PreSHA  string
-	PostSHA string
-	PreBlob *BlobRef
+	Path     string
+	PreSHA   string
+	PostSHA  string
+	PreBlob  *BlobRef
+	PostBlob *BlobRef
 }
 
 type Spill struct {
@@ -370,6 +371,9 @@ func validateFileChanges(files []FileChange) error {
 			return fmt.Errorf("files[%d]: %w", i, err)
 		}
 		if err := validateBlob("pre_blob", file.PreBlob); err != nil {
+			return fmt.Errorf("files[%d]: %w", i, err)
+		}
+		if err := validateBlob("post_blob", file.PostBlob); err != nil {
 			return fmt.Errorf("files[%d]: %w", i, err)
 		}
 	}

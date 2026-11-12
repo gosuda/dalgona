@@ -126,7 +126,9 @@ Turn objects carry `startedAt` and `completedAt` as Unix seconds, and `durationM
 
 The tool class sets the item kind. Class `exec` gives `commandExecution`. Class `edit` gives `fileChange` with one change per file. Class `remote` gives `mcpToolCall` with the tool name `<server>__<tool>` after the MCP name rule. Any other tool gives `dynamicToolCall`. A call that completes without a start, with a `decline` or `cancel` decision, has status `declined` for `commandExecution` and `fileChange`. For other kinds, that call has status `failed`. Its output is the decline reason.
 
-A file change carries the per-file section of the patch text. A file without a pre-image is `add`. A file without a post-image is `delete`.
+A file change carries a unified diff of its journaled pre-image and post-image, with three lines of context. `additions` and `deletions` count the added and removed lines. A file without a pre-image is `add`. A file without a post-image is `delete`.
+
+A file change MUST set `diffOmitted` to `true` when either image is over 1 MiB. It MUST also do so when an image has a digest but no blob, or when its blob cannot be loaded. An update record written before post blobs existed has a post digest and no post blob. Such a change MUST have an empty `diff` and no counts.
 
 When a subscription closes because the subscriber was slow, the server MUST subscribe again and replay the missed events from the journal in sequence order. An event with a sequence number at or below the last delivered one MUST NOT be sent twice.
 

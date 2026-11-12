@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/json/jsontext"
-	"path/filepath"
 	"strings"
 )
 
@@ -83,17 +82,27 @@ func (it Item) writeFileChange(o *out) {
 	o.key("changes")
 	o.openArray()
 	for _, change := range it.Changes {
-		o.open()
-		o.str("path", change.Path)
-		o.key("kind")
-		o.open()
-		o.str("type", change.Kind)
-		o.close()
-		o.str("diff", change.Diff)
-		o.close()
+		change.write(o)
 	}
 	o.closeArray()
 	o.str("status", it.Status)
+}
+
+func (c FileChange) write(o *out) {
+	o.open()
+	o.str("path", c.Path)
+	o.key("kind")
+	o.open()
+	o.str("type", c.Kind)
+	o.close()
+	o.str("diff", c.Diff)
+	if c.DiffOmitted {
+		o.boolean("diffOmitted", true)
+	} else {
+		o.int("additions", int64(c.Additions))
+		o.int("deletions", int64(c.Deletions))
+	}
+	o.close()
 }
 
 func (it Item) writeMCP(o *out) {
@@ -191,66 +200,6 @@ func argString(args jsontext.Value, key string) string {
 		return err
 	})
 	return value
-}
-
-func patchText(args jsontext.Value) string {
-	trimmed := bytes.TrimSpace(args)
-	if len(trimmed) > 0 && trimmed[0] == '"' {
-		d := jsontext.NewDecoder(bytes.NewReader(trimmed))
-		if text, err := readString(d); err == nil {
-			return text
-		}
-	}
-	for _, key := range [...]string{"input", "patch"} {
-		if text := argString(args, key); text != "" {
-			return text
-		}
-	}
-	return string(args)
-}
-
-var patchHeaders = [...]string{"*** Add File: ", "*** Update File: ", "*** Delete File: "}
-
-func patchSection(text, path string) string {
-	start, ok := sectionStart(text, path)
-	if !ok {
-		return text
-	}
-	section := text[start:]
-	_, body, _ := strings.Cut(section, "\n")
-	for offset := len(section) - len(body); offset < len(section); {
-		line, rest, _ := strings.Cut(section[offset:], "\n")
-		if _, header := fileHeader(line); header || strings.HasPrefix(line, "*** End Patch") {
-			return section[:offset]
-		}
-		offset = len(section) - len(rest)
-	}
-	return section
-}
-
-func sectionStart(text, path string) (int, bool) {
-	for offset := 0; offset < len(text); {
-		line, rest, _ := strings.Cut(text[offset:], "\n")
-		if header, ok := fileHeader(line); ok && samePath(header, path) {
-			return offset, true
-		}
-		offset = len(text) - len(rest)
-	}
-	return 0, false
-}
-
-func fileHeader(line string) (string, bool) {
-	for _, prefix := range patchHeaders {
-		if path, ok := strings.CutPrefix(line, prefix); ok {
-			return strings.TrimSpace(path), true
-		}
-	}
-	return "", false
-}
-
-func samePath(header, path string) bool {
-	header, path = filepath.ToSlash(filepath.Clean(header)), filepath.ToSlash(filepath.Clean(path))
-	return header == path || strings.HasSuffix(path, "/"+header)
 }
 
 type itemDecoder struct {
@@ -414,6 +363,18 @@ func (it *Item) readChange(d *jsontext.Decoder) error {
 		case "diff":
 			v, err := readString(d)
 			change.Diff = v
+			return err
+		case "additions":
+			v, err := readInt(d)
+			change.Additions = v
+			return err
+		case "deletions":
+			v, err := readInt(d)
+			change.Deletions = v
+			return err
+		case "diffOmitted":
+			v, err := readBool(d)
+			change.DiffOmitted = v
 			return err
 		case "kind":
 			return readMembers(d, func(name string, d *jsontext.Decoder) error {
