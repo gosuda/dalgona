@@ -310,7 +310,10 @@ export interface ModelOption {
 	readonly hidden: boolean;
 	readonly efforts: readonly string[];
 	readonly defaultEffort: string | null;
+	readonly presets: readonly ModelPreset[];
 }
+
+export type ModelPreset = "default" | "smol" | "slow";
 
 export interface StatusInfo {
 	readonly model: string;

@@ -896,22 +896,44 @@ export class Session {
 		}
 	}
 
-	async changeModel(model: string): Promise<void> {
-		this.selectedModel = model;
-		this.status = { ...this.status, model };
+	async saveModel(model: string, effort: string | null): Promise<boolean> {
+		const generation = this.connectionGeneration;
+		const edits: { keyPath: string; value: string; mergeStrategy: string }[] = [
+			{ keyPath: "model", value: model, mergeStrategy: "replace" },
+		];
+		if (effort !== null) {
+			edits.push({
+				keyPath: "model_reasoning_effort",
+				value: effort,
+				mergeStrategy: "replace",
+			});
+		}
 		try {
 			await this.requireClient().call(
-				"config/value/write",
-				{ keyPath: "model", value: model, mergeStrategy: "replace" },
+				"config/batchWrite",
+				{ edits },
 				parseVoidResponse,
 			);
 		} catch (error) {
 			this.reportFailure(
 				"Unable to save model selection",
 				error instanceof Error ? error : String(error),
-				() => void this.changeModel(model),
+				() => void this.saveModel(model, effort),
+			);
+			return false;
+		}
+		this.selectedModel = model;
+		try {
+			await this.loadConfig(generation);
+		} catch (error) {
+			this.reportFailure(
+				"Unable to load configuration",
+				error instanceof Error ? error : String(error),
+				() => void this.loadConfig(generation),
 			);
 		}
+		this.closePanel();
+		return true;
 	}
 
 	async saveSettings(edits: readonly SettingEdit[]): Promise<boolean> {

@@ -455,10 +455,10 @@ describe("recovery actions", () => {
 		const session = new Session(dial);
 		session.start(location);
 		await waitForThread(session, "t1");
-		session.changeModel("gpt-next");
+		void session.saveModel("gpt-next", null);
 		await vi.waitFor(() => {
 			expect(session.notices.map((notice) => notice.text)).toContain(
-				"Unable to save model selection: no answer for config/value/write.",
+				"Unable to save model selection: no answer for config/batchWrite.",
 			);
 		});
 		const notice = session.notices.find((item) =>
@@ -470,7 +470,7 @@ describe("recovery actions", () => {
 		expect(again).toBeDefined();
 		again?.run();
 		expect(
-			ports[0]?.calls.filter((method) => method === "config/value/write"),
+			ports[0]?.calls.filter((method) => method === "config/batchWrite"),
 		).toHaveLength(2);
 		session.stop();
 	});

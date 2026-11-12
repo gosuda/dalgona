@@ -8,7 +8,6 @@ import {
 	queueGlyph,
 } from "#lib/band.ts";
 import Mark from "#lib/components/Mark.svelte";
-import ModelPicker from "#lib/components/ModelPicker.svelte";
 import { countLabel } from "#lib/labels.ts";
 import type { ModelOption, StatusInfo, TokenUsage } from "#lib/types.ts";
 
@@ -16,24 +15,24 @@ interface Props {
 	status: StatusInfo;
 	models: readonly ModelOption[];
 	selectedModel: string;
-	pickerDisabled: boolean;
+	modelDisabled: boolean;
 	usage: TokenUsage | null;
 	statusHide: readonly string[];
 	folder: string;
 	queued: number;
-	onModel: (model: string) => void;
+	onOpenModel: () => void;
 }
 
 let {
 	status,
 	models,
 	selectedModel,
-	pickerDisabled,
+	modelDisabled,
 	usage,
 	statusHide,
 	folder,
 	queued,
-	onModel,
+	onOpenModel,
 }: Props = $props();
 
 const hidden = $derived(new Set(statusHide));
@@ -65,12 +64,14 @@ const shown = $derived({
 		<div class="item model" data-item="model" style:--band-row="1">
 			<dt class="sr-only">Model</dt>
 			<dd>
-				<ModelPicker
-					models={models}
-					value={selectedModel}
-					disabled={pickerDisabled}
-					onChange={onModel}
-				/>
+				<button
+					type="button"
+					class="model-button"
+					disabled={modelDisabled}
+					onclick={() => onOpenModel()}
+				>
+					{selectedModel === "" ? "Choose a model" : selectedModel}
+				</button>
 			</dd>
 		</div>
 		{#if shown.effort}
@@ -202,7 +203,9 @@ const shown = $derived({
 		margin: 0;
 	}
 
-	.item.model :global(select) {
+	.item.model .model-button {
+		max-width: 20rem;
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -243,7 +246,7 @@ const shown = $derived({
 			width: 100%;
 		}
 
-		.item.model :global(select) {
+		.item.model .model-button {
 			max-width: 100%;
 		}
 

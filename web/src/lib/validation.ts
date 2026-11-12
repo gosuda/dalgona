@@ -12,6 +12,7 @@ import type {
 	LoginProvider,
 	LoginStart,
 	ModelOption,
+	ModelPreset,
 	PlanStep,
 	RequestId,
 	StatusInfo,
@@ -584,6 +585,13 @@ export function parseThreadReadResponse(value: unknown): ThreadDetail {
 	return threadDetail(body["thread"]);
 }
 
+function modelPresets(value: unknown): ModelPreset[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((item: unknown) =>
+		item === "default" || item === "smol" || item === "slow" ? [item] : [],
+	);
+}
+
 export function parseModelListResponse(value: unknown): readonly ModelOption[] {
 	const body = object(value, "model/list");
 	if (!Array.isArray(body["data"])) {
@@ -606,6 +614,7 @@ export function parseModelListResponse(value: unknown): readonly ModelOption[] {
 				typeof defaultEffort === "string" && defaultEffort !== ""
 					? defaultEffort
 					: null,
+			presets: modelPresets(model["presets"]),
 		};
 	});
 }

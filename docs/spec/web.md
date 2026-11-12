@@ -127,7 +127,7 @@ The client MUST keep the highest applied `seq` for each thread. It MUST ignore a
 The status band sits at the end of the header. It shows these items in this order: model, effort, approval, sandbox, folder, queue, context, and mark.
 The client MUST NOT render an item whose id is in `statusHide`. The client MUST NOT hide `model`.
 
-- Model shows the model name, as the model picker does until the model panel ships.
+- Model shows the model name. Activating it MUST open the model panel.
 - Effort shows one glyph by rank among the model's efforts. It MUST NOT show when the model has fewer than two efforts.
 - The effective effort is the thread effort, or the model default when the thread sends none.
 - Approval and sandbox show one glyph each. Sandbox `off` shows the none glyph.
@@ -335,3 +335,10 @@ A successful login MUST show `Signed in to <provider>`, reload the models, and c
 A failed browser or device-code login MUST show `Login failed` with a Try again action.
 Closing the login panel or opening another panel MUST cancel a pending browser or device-code login with `account/login/cancel`.
 A start response that arrives after the cancel MUST be cancelled with the `loginId` it returns.
+
+The model panel MUST list each visible model under `Models`, with its description.
+The model panel MUST list each preset under `Presets`, as the preset, the model, and its default effort.
+Choosing a preset MUST fill the model and its default effort.
+The model panel MUST save the model and its effort in one `config/batchWrite` call, with the key paths `model` and `model_reasoning_effort`.
+The model panel MUST NOT save a model that the list lacks, or an effort that the model does not offer.
+A model panel with no models MUST show `No models. Log in to a provider to list its models.` with a Log in action.

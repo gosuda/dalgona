@@ -496,6 +496,7 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 			hidden: false,
 			efforts: [],
 			defaultEffort: "medium",
+			presets: [],
 		},
 	],
 	ConfigReadResponse: {

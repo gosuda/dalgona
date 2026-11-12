@@ -17,6 +17,7 @@ const model: ModelOption = {
 	hidden: false,
 	efforts: ["low", "medium", "high"],
 	defaultEffort: "medium",
+	presets: [],
 };
 
 const usage: TokenUsage = {
@@ -53,12 +54,12 @@ function props(
 		status,
 		models: [model],
 		selectedModel: "gpt-test",
-		pickerDisabled: false,
+		modelDisabled: false,
 		usage,
 		statusHide: [],
 		folder: "app",
 		queued: 0,
-		onModel: vi.fn(),
+		onOpenModel: vi.fn(),
 		...overrides,
 	};
 }

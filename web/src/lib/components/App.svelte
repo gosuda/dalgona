@@ -5,6 +5,7 @@ import Composer from "#lib/components/Composer.svelte";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
 import KeyListPanel from "#lib/components/panels/KeyListPanel.svelte";
 import LoginPanel from "#lib/components/panels/LoginPanel.svelte";
+import ModelPanel from "#lib/components/panels/ModelPanel.svelte";
 import Panel from "#lib/components/panels/Panel.svelte";
 import SettingsPanel from "#lib/components/panels/SettingsPanel.svelte";
 import QuestionCard from "#lib/components/QuestionCard.svelte";
@@ -148,12 +149,12 @@ function onWindowKeydown(event: KeyboardEvent): void {
 				status={session.status}
 				models={session.models}
 				selectedModel={session.selectedModel}
-				pickerDisabled={session.connection !== "connected"}
+				modelDisabled={session.connection !== "connected"}
 				usage={usage}
 				statusHide={session.statusHide}
 				folder={folder}
 				queued={session.queuedFollowups.length}
-				onModel={(model) => void session.changeModel(model)}
+				onOpenModel={() => session.openPanel("model")}
 			/>
 		</header>
 
@@ -231,9 +232,10 @@ function onWindowKeydown(event: KeyboardEvent): void {
 
 <KeyListPanel open={session.panel === "keys"} onClose={() => session.closePanel()} />
 <LoginPanel {session} open={session.panel === "login"} onClose={() => session.closePanel()} />
+<ModelPanel {session} open={session.panel === "model"} onClose={() => session.closePanel()} />
 <Panel
 	title={genericTitle}
-	open={session.panel !== null && session.panel !== "keys" && session.panel !== "settings" && session.panel !== "login"}
+	open={session.panel !== null && session.panel !== "keys" && session.panel !== "settings" && session.panel !== "login" && session.panel !== "model"}
 	onClose={() => session.closePanel()}
 >
 	{#snippet children()}{/snippet}
