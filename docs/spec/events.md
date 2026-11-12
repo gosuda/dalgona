@@ -18,7 +18,7 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 
 |Type|Required fields|Optional fields and constraints|
 |---|---|---|
-|`session.created`|`id`, `cwd`, `model`, `approval`, `sandbox`, `runner`|`parent`, `fork_of`, `effort`, `instructions_blob`, `advisor`, `created_at`; approval is `auto`, `yolo`, or `ask`; sandbox is `workspace-write` or `off`; `effort` is `low`, `medium`, `high`, `xhigh`, or `max` and is the thread default for turns without their own effort; `advisor` names an advisor child session and MUST come with `parent`; `created_at` is RFC 3339 UTC|
+|`session.created`|`id`, `cwd`, `model`, `approval`, `sandbox`, `runner`|`parent`, `fork_of`, `effort`, `instructions_blob`, `advisor`, `created_at`; approval is `auto`, `yolo`, or `ask`; sandbox is `workspace-write` or `off`; `effort` is `low`, `medium`, `high`, `xhigh`, or `max` and is the thread default for turns without their own effort; `advisor` names an advisor child thread and MUST come with `parent`; `created_at` is an RFC 3339 timestamp that the encoder writes in UTC|
 |`runner.bound`|`runner`, `service`, `box_id`, `baseline`|None|
 |`turn.started`|`turn_id`|None|
 |`turn.completed`|`turn_id`, `status`|`error`; status is `completed`, `interrupted`, or `failed`|
@@ -27,7 +27,7 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 |`tool.started`|`call_id`, `turn_id`, `tool`, `args`, `class`, `repairs`|`files`; class is `read`, `edit`, `exec`, `agent`, `script`, or `remote`; each file has `path`, `pre_sha`, `post_sha`, and optional `pre_blob`|
 |`tool.completed`|`call_id`, `ok`, `output`, `recovered`|`spill`, `exit_code`, `meta`; recovered is `none`, `replayed`, `interrupted`, or `skipped`|
 |`model.retry`|`turn_id`, `attempt`, `verdict`, `status`, `delay_ms`|Attempt MUST be positive; verdict is `retry` or `overflow`|
-|`approval.requested`|`request_id`, `call_id`, `summary`|`class`; class uses the `tool.started` values; an exec approval MAY carry `grant_prefix`, the argv prefix folded into a session grant when `args` is spilled to a blob|
+|`approval.requested`|`request_id`, `call_id`, `summary`|`class`; class uses the `tool.started` values; an exec approval MAY carry `grant_prefix`, the argv prefix folded into a thread grant when `args` is spilled to a blob|
 |`approval.resolved`|`request_id`, `decision`, `by`, `reason`|`scores`; decision is `accept`, `accept_session`, `decline`, or `cancel`; each score MUST be between zero and one|
 |`compaction`|`first_kept_seq`, `summary`, `method`, `tokens_before`, `tokens_after`|`first_kept_seq` MUST be positive; method is `auto`, `manual`, or `overflow`|
 |`context.pruned`|`turn_id`, `call_ids`|`call_ids` MUST contain at least one non-empty identifier|
@@ -46,25 +46,29 @@ Text and raw JSON fields named in this section MAY use the blob-reference form. 
 
 The fold MUST use one of these states: `idle`, `turn_running`, `awaiting_approval`, or `damaged`. An illegal transition MUST return an error and a damaged state. It MUST NOT mutate the input state.
 
+After the state becomes `damaged`, every later fold MUST return an error.
+
 The state MUST track:
 
-- the session and open turn;
-- assistant calls without `tool.started`;
-- started calls without `tool.completed`, including their class and arguments;
-- unresolved approvals and declined calls;
-- open script runs, their recorded effect indexes with `op` and `args_sha`, and the next effect index;
-- spawned children;
-- the latest `runner.bound` and `compaction`;
-- the current todo list, session grants, read snapshots, and completed-turn sequence numbers;
+- the thread and open turn.
+- assistant calls without `tool.started`.
+- started calls without `tool.completed`, including their class and arguments.
+- unresolved approvals and declined calls.
+- open script runs, their recorded effect indexes with `op` and `args_sha`, and the next effect index.
+- spawned children.
+- the latest `runner.bound` and `compaction`.
+- the current todo list, thread grants, read snapshots, and completed-turn sequence numbers.
 - delivered advisor notes, keyed by advisor, `review_seq`, and note text.
+
+The fold MUST set `Preview` to the first 80 Unicode characters of the first user message of kind `prompt` with inline text. Until `Preview` is set, the fold sets `PreviewBlob` to the text blob of the first user message of kind `prompt` that has one.
 
 `turn.started` MUST NOT overlap another turn. Turn-scoped events MUST name the open turn. `turn.completed` MUST NOT leave calls, approvals, or scripts unfinished. `tool.completed` MUST have a matching `tool.started`, except for an unsuccessful skipped call or an unsuccessful call declined by an approval. Those exceptions MUST clear the pending assistant call.
 
-An approval resolution MUST have a matching unresolved request. A user `accept_session` decision MUST create its grant when the fold folds `approval.resolved` and the request carries `class`; a request without `class` MUST defer the grant to the call's `tool.started`. For `exec` the grant is an argv prefix derived from one command. For an edit or remote tool the grant is that tool name. Agent, read, and script calls MUST NOT create grants. A later `grant:<prefix>` decision MUST NOT create a grant.
+An approval resolution MUST have a matching unresolved request. The fold MUST create the grant for a user `accept_session` decision when the request carries `class`. A request without `class` MUST defer the grant to the `tool.started` of the call. For `exec` the grant is an argv prefix derived from one command. For an edit or remote tool the grant is that tool name. Agent, read, and script calls MUST NOT create grants. A later `grant:<prefix>` decision MUST NOT create a grant.
 
-`child.spawned` MUST name an in-flight agent call or a call of an open script. A branch MUST occur while idle. A nonzero `parent_seq` MUST precede the branch and identify a completed turn. A script effect index MUST NOT repeat; a repeated index with a different `op` or `args_sha` MUST report the mismatch.
+`child.spawned` MUST name an in-flight agent call or a call of an open script. A branch MUST occur while idle. A nonzero `parent_seq` MUST precede the branch and identify a completed turn. A script effect index MUST NOT repeat. A repeated index with a different `op` or `args_sha` MUST report the mismatch.
 
-A script call has `call_id = "<run_id>/<n>"` for an open run. Its `approval.requested`, `tool.started`, `tool.completed`, and `child.spawned` MUST be accepted without an assistant call. A call that Cursor ran in band MUST appear in `assistant.message` with `resolved = true`; its approval, `tool.started`, and `tool.completed` follow the message in one batch.
+A script call has `call_id = "<run_id>/<n>"` for an open run. Its `approval.requested`, `tool.started`, `tool.completed`, and `child.spawned` MUST be accepted without an assistant call. A call that Cursor ran in band MUST appear in `assistant.message` with `resolved = true`. Its approval, `tool.started`, and `tool.completed` follow the message in one batch.
 
 `advisor.note` MAY occur inside or outside a turn. A second note with the same advisor, `review_seq`, and note text MUST be rejected.
 
@@ -82,7 +86,7 @@ Model context and thread reads MUST use only the active path. Runner bindings, g
 
 The agent MUST build each model request from the active path after the latest `compaction`: the compaction summary first, then the events with `seq >= first_kept_seq`.
 
-- A `user.message` or an `advisor.note` journaled after the `context_seq` of the next `assistant.message` MUST render after that assistant message, because its request did not carry it.
+- A `user.message` or `advisor.note` journaled after the `context_seq` of the next `assistant.message` MUST render after that assistant message. The request for that assistant message does not carry the input.
 - A user message or a `steer` or `continue` note that arrives while tool results are outstanding MUST render after those results.
 - A `followup` message MUST render after the first assistant message without tool calls that follows it, or at the turn end.
 - An `aside` note MUST render inside the next rendered user message.
