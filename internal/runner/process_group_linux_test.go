@@ -3,10 +3,10 @@
 package runner
 
 import (
+	"bufio"
 	"os/exec"
 	"syscall"
 	"testing"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -37,9 +37,13 @@ func TestProcessGroupDrainedZombieOnly(t *testing.T) {
 }
 
 func TestProcessGroupDrainedLiveGroup(t *testing.T) {
-	cmd := exec.Command("sleep", "30")
+	cmd := exec.Command("sh", "-c", "echo ready; exec sleep 30")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	pgid := cmd.Process.Pid
@@ -47,12 +51,15 @@ func TestProcessGroupDrainedLiveGroup(t *testing.T) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	}()
-	deadline := time.Now().Add(10 * time.Second)
-	for processGroupStopped(pgid) {
-		if time.Now().After(deadline) {
-			t.Fatalf("process group %d stopped before it started", pgid)
-		}
-		time.Sleep(5 * time.Millisecond)
+	ready, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready != "ready\n" {
+		t.Fatalf("child said %q, want ready", ready)
+	}
+	if processGroupStopped(pgid) {
+		t.Fatal("processGroupStopped live group = true, want false")
 	}
 	if processGroupDrained(pgid) {
 		t.Fatal("processGroupDrained live group = true, want false")
