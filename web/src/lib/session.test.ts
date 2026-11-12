@@ -131,15 +131,25 @@ class FakePort implements RpcPort {
 	respond(_id: RequestId, _result: JsonValue): void {}
 
 	close(): void {}
+
+	drop(): void {
+		this.handlers.onStateChange("disconnected");
+	}
 }
 
-function fakeDial(runningThread: string): {
+function fakeDial(
+	runningThread: string,
+	overrides: Record<string, Answer> = {},
+): {
 	dial: (url: string, handlers: RpcHandlers) => RpcPort;
 	ports: FakePort[];
 } {
 	const ports: FakePort[] = [];
 	const dial = (_url: string, handlers: RpcHandlers): RpcPort => {
-		const port = new FakePort(handlers, answers(runningThread));
+		const port = new FakePort(handlers, {
+			...answers(runningThread),
+			...overrides,
+		});
 		ports.push(port);
 		return port;
 	};
@@ -249,5 +259,171 @@ describe("session", () => {
 			"note 4",
 			"note 5",
 		]);
+	});
+});
+
+describe("recovery actions", () => {
+	beforeEach(() => {
+		vi.stubGlobal("history", { replaceState: vi.fn() });
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	test("offers Try again for a failed request while connected", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		session.changeModel("gpt-next");
+		await vi.waitFor(() => {
+			expect(session.notices.map((notice) => notice.text)).toContain(
+				"Unable to save model selection: no answer for config/value/write.",
+			);
+		});
+		const notice = session.notices.find((item) =>
+			item.text.startsWith("Unable to save model selection"),
+		);
+		const again = notice?.actions.find(
+			(action) => action.label === "Try again",
+		);
+		expect(again).toBeDefined();
+		again?.run();
+		expect(
+			ports[0]?.calls.filter((method) => method === "config/value/write"),
+		).toHaveLength(2);
+		session.stop();
+	});
+
+	test("offers Reconnect when the connection drops", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		ports[0]?.drop();
+		const notice = session.notices.find(
+			(item) => item.text === "Disconnected from dalgona.",
+		);
+		const reconnect = notice?.actions.find(
+			(action) => action.label === "Reconnect",
+		);
+		expect(reconnect).toBeDefined();
+		reconnect?.run();
+		await vi.waitFor(() => {
+			expect(ports).toHaveLength(2);
+		});
+		session.stop();
+	});
+});
+
+function sentText(params: JsonValue): string {
+	if (typeof params !== "object" || params === null || !("input" in params)) {
+		return "";
+	}
+	const { input } = params;
+	const first = Array.isArray(input) ? input[0] : undefined;
+	if (typeof first !== "object" || first === null || !("text" in first)) {
+		return "";
+	}
+	const { text } = first;
+	return typeof text === "string" ? text : "";
+}
+
+function failingOnce(sent: string[]): Answer {
+	let failed = false;
+	return (params) => {
+		if (!failed) {
+			failed = true;
+			throw new Error("network down");
+		}
+		sent.push(sentText(params));
+		return { turn: { id: "turn-2", status: "inProgress", items: [] } };
+	};
+}
+
+function completion(threadId: string, turnId: string): AppNotification {
+	const parsed = parseNotification({
+		method: "turn/completed",
+		params: {
+			threadId,
+			turn: { id: turnId, status: "completed", items: [] },
+		},
+	});
+	if (parsed === null) throw new Error("completion did not parse");
+	return parsed;
+}
+
+function retryAction(session: Session, label: string): () => void {
+	const notice = session.notices.find((entry) =>
+		entry.text.startsWith("Unable to send message"),
+	);
+	const action = notice?.actions.find((entry) => entry.label === label);
+	if (action === undefined) throw new Error(`no ${label} action`);
+	return action.run;
+}
+
+describe("failed follow-up sends", () => {
+	beforeEach(() => {
+		vi.stubGlobal("history", { replaceState: vi.fn() });
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	test("a follow-up queued while idle is sent once when Try again succeeds", async () => {
+		const sent: string[] = [];
+		const { dial, ports } = fakeDial("none", {
+			"turn/start": failingOnce(sent),
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+
+		session.queueFollowup("later");
+		await vi.waitFor(() => {
+			expect(retryAction(session, "Try again")).toBeDefined();
+		});
+		expect(session.queuedFollowups).toEqual([]);
+
+		retryAction(session, "Try again")();
+		await vi.waitFor(() => {
+			expect(sent).toEqual(["later"]);
+		});
+		ports[0]?.deliver(completion("t1", "turn-2"));
+		await vi.waitFor(() => {
+			expect(session.running).toBe(false);
+		});
+		expect(sent).toEqual(["later"]);
+		session.stop();
+	});
+
+	test("a queued follow-up whose send fails is sent once when Try again succeeds", async () => {
+		const sent: string[] = [];
+		const { dial, ports } = fakeDial("t1", {
+			"turn/start": failingOnce(sent),
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+
+		session.queueFollowup("next");
+		expect(session.queuedFollowups).toEqual(["next"]);
+		ports[0]?.deliver(completion("t1", "turn-1"));
+		await vi.waitFor(() => {
+			expect(retryAction(session, "Try again")).toBeDefined();
+		});
+
+		retryAction(session, "Try again")();
+		await vi.waitFor(() => {
+			expect(sent).toEqual(["next"]);
+		});
+		ports[0]?.deliver(completion("t1", "turn-2"));
+		await vi.waitFor(() => {
+			expect(session.running).toBe(false);
+		});
+		expect(sent).toEqual(["next"]);
+		session.stop();
 	});
 });

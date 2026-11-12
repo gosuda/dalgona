@@ -423,20 +423,6 @@ export function itemDisplayStatus(
 		: status;
 }
 
-export function isSentFollowupAtHead(
-	queue: readonly string[],
-	sent: string,
-): boolean {
-	return queue[0] === sent;
-}
-
-export function requeueFailedFollowup(
-	queue: readonly string[],
-	text: string,
-): readonly string[] {
-	return [...queue, text];
-}
-
 export function acceptThreadStatus(
 	applied: Readonly<Record<string, number>>,
 	threadId: string,

@@ -22,7 +22,7 @@ const connectionLabels: Record<ConnectionState, string> = {
 	idle: "Not connected",
 	connecting: "Connecting",
 	connected: "Connected",
-	disconnected: "Disconnected",
+	disconnected: "Offline",
 };
 
 const turnLabels: Record<TurnStatus, string> = {

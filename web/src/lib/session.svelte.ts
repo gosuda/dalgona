@@ -6,11 +6,9 @@ import {
 	applyOpenThreadNotification,
 	dropSentFollowup,
 	emptyTranscript,
-	isSentFollowupAtHead,
 	itemsAwaitingApproval,
 	type KnownChildThreads,
 	otherThreadApprovalCount,
-	requeueFailedFollowup,
 	resolveApprovalRequest,
 	trackApprovalRequest,
 	transcriptForThread,
@@ -306,11 +304,21 @@ export class Session {
 				}
 			},
 			onStateChange: (state) => {
-				if (generation === this.connectionGeneration) this.connection = state;
+				if (generation !== this.connectionGeneration) return;
+				const dropped =
+					this.connection === "connected" && state === "disconnected";
+				this.connection = state;
+				if (dropped) {
+					this.notify("error", "Disconnected from dalgona.", [
+						this.reconnectAction(),
+					]);
+				}
 			},
 			onError: (message) => {
 				if (generation === this.connectionGeneration) {
-					this.notify("error", `${message}. Reconnect and try again.`);
+					this.notify("error", `Connection error: ${message}.`, [
+						this.reconnectAction(),
+					]);
 				}
 			},
 		});
@@ -333,41 +341,46 @@ export class Session {
 			);
 			rpc.notify("initialized", {});
 			await Promise.all([
-				this.loadThreads(generation).catch((error) =>
-					this.reportFailure(
-						generation,
-						"Unable to load threads",
-						error instanceof Error ? error : String(error),
-					),
-				),
-				this.loadModels(generation).catch((error) =>
-					this.reportFailure(
-						generation,
-						"Unable to load models",
-						error instanceof Error ? error : String(error),
-					),
-				),
-				this.loadConfig(generation).catch((error) =>
-					this.reportFailure(
-						generation,
-						"Unable to load configuration",
-						error instanceof Error ? error : String(error),
-					),
-				),
-				this.loadKeywords(generation).catch((error) =>
-					this.reportFailure(
-						generation,
-						"Unable to load keywords",
-						error instanceof Error ? error : String(error),
-					),
-				),
-				this.loadSettings(generation).catch((error) =>
-					this.reportFailure(
-						generation,
-						"Unable to load settings",
-						error instanceof Error ? error : String(error),
-					),
-				),
+				this.loadThreads(generation).catch((error) => {
+					if (generation === this.connectionGeneration)
+						this.reportFailure(
+							"Unable to load threads",
+							error instanceof Error ? error : String(error),
+							() => void this.loadThreads(generation),
+						);
+				}),
+				this.loadModels(generation).catch((error) => {
+					if (generation === this.connectionGeneration)
+						this.reportFailure(
+							"Unable to load models",
+							error instanceof Error ? error : String(error),
+							() => void this.loadModels(generation),
+						);
+				}),
+				this.loadConfig(generation).catch((error) => {
+					if (generation === this.connectionGeneration)
+						this.reportFailure(
+							"Unable to load configuration",
+							error instanceof Error ? error : String(error),
+							() => void this.loadConfig(generation),
+						);
+				}),
+				this.loadKeywords(generation).catch((error) => {
+					if (generation === this.connectionGeneration)
+						this.reportFailure(
+							"Unable to load keywords",
+							error instanceof Error ? error : String(error),
+							() => void this.loadKeywords(generation),
+						);
+				}),
+				this.loadSettings(generation).catch((error) => {
+					if (generation === this.connectionGeneration)
+						this.reportFailure(
+							"Unable to load settings",
+							error instanceof Error ? error : String(error),
+							() => void this.loadSettings(generation),
+						);
+				}),
 			]);
 		} catch (error) {
 			if (generation === this.connectionGeneration) {
@@ -375,7 +388,8 @@ export class Session {
 				const detail = error instanceof Error ? error.message : String(error);
 				this.notify(
 					"error",
-					`Unable to connect to dalgona: ${detail}. Check that dalgona web is still running, then select Reconnect.`,
+					`Unable to connect to dalgona: ${detail}. Check that dalgona web is still running.`,
+					[this.reconnectAction()],
 				);
 			}
 		}
@@ -394,14 +408,22 @@ export class Session {
 		return this.client;
 	}
 
+	private reconnectAction(): NoticeAction {
+		return { label: "Reconnect", run: () => void this.connect() };
+	}
+
 	private reportFailure(
-		generation: number,
 		action: string,
 		error: Error | string,
+		retry: () => void,
 	): void {
-		if (generation !== this.connectionGeneration) return;
 		const detail = typeof error === "string" ? error : error.message;
-		this.notify("error", `${action}: ${detail}. Reconnect and try again.`);
+		const sentence = detail.endsWith(".") ? detail : `${detail}.`;
+		const recovery: NoticeAction =
+			this.connection === "connected"
+				? { label: "Try again", run: retry }
+				: this.reconnectAction();
+		this.notify("error", `${action}: ${sentence}`, [recovery]);
 	}
 
 	private async loadThreads(generation: number): Promise<void> {
@@ -526,9 +548,9 @@ export class Session {
 		} catch (error) {
 			if (selection === this.selectionGeneration)
 				this.reportFailure(
-					this.connectionGeneration,
 					"Unable to open thread",
 					error instanceof Error ? error : String(error),
+					() => void this.selectThread(threadId),
 				);
 		} finally {
 			if (selection === this.selectionGeneration)
@@ -567,9 +589,9 @@ export class Session {
 			void this.loadAdvisor(result.thread.summary.id);
 		} catch (error) {
 			this.reportFailure(
-				this.connectionGeneration,
 				"Unable to start thread",
 				error instanceof Error ? error : String(error),
+				() => void this.createThread(),
 			);
 		} finally {
 			this.startingThread = false;
@@ -606,9 +628,9 @@ export class Session {
 			return true;
 		} catch (error) {
 			this.reportFailure(
-				this.connectionGeneration,
 				"Unable to send message",
 				error instanceof Error ? error : String(error),
+				() => void this.sendMessage(text),
 			);
 			return false;
 		}
@@ -634,23 +656,16 @@ export class Session {
 			);
 		} catch (error) {
 			this.reportFailure(
-				this.connectionGeneration,
 				"Unable to steer turn",
 				error instanceof Error ? error : String(error),
+				() => void this.steerMessage(text),
 			);
 		}
 	}
 
 	queueFollowup(text: string): void {
 		if (!this.running) {
-			const threadId = this.activeThreadId;
-			void this.sendMessage(text).then((sent) => {
-				if (!sent && this.activeThreadId === threadId)
-					this.queuedFollowups = requeueFailedFollowup(
-						this.queuedFollowups,
-						text,
-					);
-			});
+			void this.sendMessage(text);
 			return;
 		}
 		this.queuedFollowups = [...this.queuedFollowups, text];
@@ -666,9 +681,9 @@ export class Session {
 			);
 		} catch (error) {
 			this.reportFailure(
-				this.connectionGeneration,
 				"Unable to interrupt turn",
 				error instanceof Error ? error : String(error),
+				() => void this.interruptTurn(),
 			);
 		}
 	}
@@ -684,9 +699,9 @@ export class Session {
 			);
 		} catch (error) {
 			this.reportFailure(
-				this.connectionGeneration,
 				"Unable to save model selection",
 				error instanceof Error ? error : String(error),
+				() => void this.changeModel(model),
 			);
 		}
 	}
@@ -718,16 +733,10 @@ export class Session {
 		}
 	}
 
-	private async sendNextFollowup(threadId: string): Promise<void> {
-		const snapshot = this.queuedFollowups[0];
-		if (snapshot === undefined || this.activeThreadId !== threadId) return;
-		if (await this.sendMessage(snapshot)) {
-			if (
-				this.activeThreadId === threadId &&
-				isSentFollowupAtHead(this.queuedFollowups, snapshot)
-			) {
-				this.queuedFollowups = dropSentFollowup(this.queuedFollowups);
-			}
-		}
+	private sendNextFollowup(threadId: string): void {
+		const next = this.queuedFollowups[0];
+		if (next === undefined || this.activeThreadId !== threadId) return;
+		this.queuedFollowups = dropSentFollowup(this.queuedFollowups);
+		void this.sendMessage(next);
 	}
 }

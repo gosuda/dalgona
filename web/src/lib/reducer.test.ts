@@ -52,8 +52,6 @@ function thread(turns: ThreadDetail["turns"]): ThreadDetail {
 	};
 }
 
-import { isSentFollowupAtHead, requeueFailedFollowup } from "./reducer";
-
 describe("transcript reducer", () => {
 	test("concatenates deltas onto the matching item without mutating the previous list", () => {
 		const start = emptyTranscript("thread-1");
@@ -383,22 +381,6 @@ describe("labels", () => {
 		expect(itemStatusLabel("custom")).toBe("custom");
 		expect(kindLabel("webSearch")).toBe("Web search");
 		expect(kindLabel("imageGeneration")).toBe("Image generation");
-	});
-});
-
-describe("followup queue snapshot", () => {
-	test("commits only when the sent item is still at the head", () => {
-		expect(isSentFollowupAtHead(["first", "second"], "first")).toBe(true);
-		expect(isSentFollowupAtHead(["other"], "first")).toBe(false);
-		expect(isSentFollowupAtHead([], "first")).toBe(false);
-	});
-
-	test("requeues a failed direct send", () => {
-		expect(requeueFailedFollowup(["queued"], "failed")).toEqual([
-			"queued",
-			"failed",
-		]);
-		expect(requeueFailedFollowup([], "failed")).toEqual(["failed"]);
 	});
 });
 

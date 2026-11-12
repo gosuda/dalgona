@@ -147,6 +147,12 @@ A notice MUST name only the controls that it shows.
 Dismiss MUST remove its notice and move focus to the message field.
 A notice with the same text as a notice on the page MUST replace it.
 The page MUST keep at most five notices. It MUST remove the oldest first.
+A failed request MUST show `<action>: <detail>.`. While connected, the notice MUST offer `Try again`, which repeats the request. Otherwise it MUST offer `Reconnect`.
+A queued follow-up whose send fails MUST leave the queue. Its notice's `Try again` MUST send it once.
+A dropped connection MUST show `Disconnected from dalgona.` with `Reconnect`.
+A failed connect MUST show `Unable to connect to dalgona: <detail>. Check that dalgona web is still running.` with `Reconnect`.
+A socket error MUST show `Connection error: <message>.` with `Reconnect`.
+The header MUST show `Offline` while the connection is down.
 
 ### Focus
 
