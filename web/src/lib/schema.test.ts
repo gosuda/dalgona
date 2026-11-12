@@ -114,6 +114,7 @@ const model = {
 	displayName: "GPT",
 	hidden: false,
 	id: "gpt-test",
+	inputModalities: ["text", "image"],
 	isDefault: true,
 	model: "gpt-test",
 	supportedReasoningEfforts: [],
@@ -517,6 +518,7 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 			efforts: [],
 			defaultEffort: "medium",
 			presets: [],
+			inputModalities: ["text", "image"],
 		},
 	],
 	ConfigReadResponse: {

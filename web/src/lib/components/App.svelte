@@ -224,11 +224,12 @@ function onWindowKeydown(event: KeyboardEvent): void {
 				onRemoveFollowup={(index) => session.removeFollowup(index)}
 				onMatch={(text) => session.matchKeywords(text)}
 				onFileSearch={(query) => session.searchFiles(query)}
-				onSend={(text) => void session.sendMessage(text)}
+				onSend={(text, attachments) => void session.sendMessage(text, attachments)}
 				onSteer={(text) => void session.steerMessage(text)}
 				onFollowup={(text) => session.queueFollowup(text)}
 				onInterrupt={() => void session.interruptTurn()}
 				retrying={session.retryRemainingMs !== null}
+				acceptsImages={session.modelAcceptsImages}
 				onOpenPanel={(kind) => session.openPanel(kind)}
 			/>
 		</div>

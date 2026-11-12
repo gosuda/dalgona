@@ -396,3 +396,160 @@ describe("file mention", () => {
 		}
 	});
 });
+function pastedText(text: string) {
+	return {
+		getData: (type: string) => (type === "text/plain" ? text : ""),
+		files: [],
+	};
+}
+
+function pastedFiles(files: readonly File[]) {
+	return { getData: () => "", files };
+}
+
+describe("paste chips and image paste", () => {
+	afterEach(cleanup);
+
+	test("a long paste becomes a chip and is sent after the typed text", async () => {
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "please summarise" } });
+		const pasted = Array.from(
+			{ length: 12 },
+			(_, index) => `line ${index + 1}`,
+		).join("\n");
+		await fireEvent.paste(field, { clipboardData: pastedText(pasted) });
+		expect(screen.getByText("Pasted text · 12 lines")).toBeTruthy();
+		expect(field.value).toBe("please summarise");
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(onSend).toHaveBeenCalledWith("please summarise", {
+			texts: [pasted],
+			images: [],
+		});
+		expect(screen.queryByText("Pasted text · 12 lines")).toBeNull();
+	});
+
+	test("a pasted image is sent as an image input", async () => {
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		const shot = new File(
+			[new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])],
+			"shot.png",
+			{
+				type: "image/png",
+			},
+		);
+		await fireEvent.paste(field, { clipboardData: pastedFiles([shot]) });
+		await waitFor(() => {
+			expect(screen.getByText("Image · shot.png · 8 B")).toBeTruthy();
+		});
+		await fireEvent.input(field, { target: { value: "what is this" } });
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(onSend).toHaveBeenCalledTimes(1);
+		const [text, attachments] = onSend.mock.calls[0] as [
+			string,
+			{ images: { name: string; dataUrl: string }[] },
+		];
+		expect(text).toBe("what is this");
+		expect(
+			attachments.images.map((image) => [image.name, image.dataUrl]),
+		).toEqual([["shot.png", "data:image/png;base64,iVBORw0KGgo="]]);
+	});
+
+	test("an oversized message is kept with an error", async () => {
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		const large = () =>
+			new File([new Uint8Array(5 * 1024 * 1024)], "big.png", {
+				type: "image/png",
+			});
+		await fireEvent.paste(field, {
+			clipboardData: pastedFiles([large(), large(), large()]),
+		});
+		await waitFor(() => {
+			expect(screen.getAllByText(/Image · big\.png/)).toHaveLength(3);
+		});
+		await fireEvent.input(field, { target: { value: "three screenshots" } });
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(onSend).not.toHaveBeenCalled();
+		expect(field.value).toBe("three screenshots");
+		expect(document.getElementById("composer-error")?.textContent).toBe(
+			"The message and images are too large to send together. Remove an image.",
+		);
+	}, 60000);
+	test("pasting eleven images at once keeps ten chips and the limit notice", async () => {
+		const reads = vi.spyOn(FileReader.prototype, "readAsDataURL");
+		render(Composer, { props: baseProps() });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		const files = Array.from({ length: 11 }, (_, index) =>
+			pngFile(`shot${index + 1}.png`),
+		);
+		await fireEvent.paste(field, { clipboardData: pastedFiles(files) });
+		await Promise.all((reads.mock.contexts as FileReader[]).map(waitForRead));
+		expect(reads.mock.calls).toHaveLength(10);
+		await waitFor(() => {
+			expect(screen.getAllByText(/^Image · shot/)).toHaveLength(10);
+		});
+		expect(document.getElementById("composer-error")?.textContent).toBe(
+			"At most 10 images per message.",
+		);
+		reads.mockRestore();
+	});
+
+	test("nine lines with a trailing newline stay in the message field", async () => {
+		render(Composer, { props: baseProps() });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		const nine = `${Array.from({ length: 9 }, (_, index) => `line ${index + 1}`).join("\n")}\n`;
+		await fireEvent.paste(field, { clipboardData: pastedText(nine) });
+		expect(screen.queryByText(/^Pasted text/)).toBeNull();
+	});
+
+	test("ten lines with a trailing newline become a ten-line chip", async () => {
+		render(Composer, { props: baseProps() });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		const ten = `${Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n")}\n`;
+		await fireEvent.paste(field, { clipboardData: pastedText(ten) });
+		expect(screen.getByText("Pasted text · 10 lines")).toBeTruthy();
+	});
+
+	test("ten lines without a trailing newline become a ten-line chip", async () => {
+		render(Composer, { props: baseProps() });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		const ten = Array.from(
+			{ length: 10 },
+			(_, index) => `line ${index + 1}`,
+		).join("\n");
+		await fireEvent.paste(field, { clipboardData: pastedText(ten) });
+		expect(screen.getByText("Pasted text · 10 lines")).toBeTruthy();
+	});
+});
+
+function pngFile(name: string): File {
+	return new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], name, {
+		type: "image/png",
+	});
+}
+
+function waitForRead(reader: FileReader): Promise<void> {
+	if (reader.readyState === FileReader.DONE) return Promise.resolve();
+	const { promise, resolve } = Promise.withResolvers<void>();
+	reader.addEventListener("loadend", () => resolve());
+	return promise;
+}

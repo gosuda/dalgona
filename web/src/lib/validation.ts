@@ -612,6 +612,11 @@ export function parseModelListResponse(value: unknown): readonly ModelOption[] {
 				typeof model["description"] === "string" ? model["description"] : "",
 			hidden: model["hidden"] === true,
 			efforts: reasoningEfforts(model["supportedReasoningEfforts"]),
+			inputModalities: Array.isArray(model["inputModalities"])
+				? model["inputModalities"].filter(
+						(item): item is string => typeof item === "string",
+					)
+				: ["text"],
 			defaultEffort:
 				typeof defaultEffort === "string" && defaultEffort !== ""
 					? defaultEffort

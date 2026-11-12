@@ -1,3 +1,4 @@
+import { type Attachments, messageInput, NO_ATTACHMENTS } from "./attachments";
 import {
 	type PanelKind,
 	panelsRefusedWhileRunning,
@@ -186,6 +187,11 @@ export class Session {
 	transcript: TranscriptState = $state(emptyTranscript(null));
 	transcriptRevision: number = $state(0);
 	models: readonly ModelOption[] = $state([]);
+
+	get modelAcceptsImages(): boolean {
+		const model = this.models.find((entry) => entry.id === this.selectedModel);
+		return model === undefined || model.inputModalities.includes("image");
+	}
 	selectedModel: string = $state("");
 	status: StatusInfo = $state({
 		model: "Default",
@@ -279,10 +285,10 @@ export class Session {
 			item.kind === "userMessage" ? [item.text] : [],
 		);
 		for (const text of prompts) {
-			if (texts[texts.length - 1] !== text) texts.push(text);
+			if (text !== "" && texts[texts.length - 1] !== text) texts.push(text);
 		}
 		for (const text of this.sentTexts) {
-			if (!texts.includes(text)) texts.push(text);
+			if (text !== "" && !texts.includes(text)) texts.push(text);
 		}
 		return texts;
 	});
@@ -932,7 +938,10 @@ export class Session {
 		}
 	}
 
-	async sendMessage(text: string): Promise<boolean> {
+	async sendMessage(
+		text: string,
+		attachments: Attachments = NO_ATTACHMENTS,
+	): Promise<boolean> {
 		const threadId = this.activeThreadId;
 		if (threadId === null) return false;
 		try {
@@ -940,7 +949,7 @@ export class Session {
 				"turn/start",
 				{
 					threadId,
-					input: [{ type: "text", text, text_elements: [] }],
+					input: messageInput(text, attachments),
 					model: this.selectedModel || null,
 				},
 				parseTurnStartResponse,
@@ -965,7 +974,7 @@ export class Session {
 			this.reportFailure(
 				"Unable to send message",
 				error instanceof Error ? error : String(error),
-				() => void this.sendMessage(text),
+				() => void this.sendMessage(text, attachments),
 			);
 			return false;
 		}

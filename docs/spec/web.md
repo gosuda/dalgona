@@ -281,6 +281,13 @@ ArrowUp MUST recall the previous message when the caret is at the start of the m
 ArrowDown MUST recall the next message when the caret is at the end or while you browse. It MUST restore the draft after the newest message.
 Typing into a recalled message MUST make the edited text the draft. The caret MUST move to the start of the message field after each recall.
 
+Text of 10 or more lines pasted into the message field MUST become a chip that shows its line count. Show MUST expand the chip text in a read-only block, and Remove MUST drop the chip.
+Pasted images MUST be PNG, JPEG or GIF files of at most 5 MiB. The composer MUST keep at most 10 images. The composer MUST refuse an image with `this model does not accept images` when the selected model has no image input.
+
+Enter MUST send the typed text, then the pasted texts, then the images, as one message. A steer or follow-up MUST keep the chips for the next send.
+An empty typed text MUST NOT add a text item to the message.
+A message whose input array exceeds 15 MiB of JSON MUST stay in the composer with an error, and MUST NOT be sent. The limit is measured on the input array, not on the whole turn/start request.
+
 | Key | Caret and selection | Effect |
 |---|---|---|
 | ArrowUp | At the start, nothing selected | Recalls the previous message you sent. |

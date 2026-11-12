@@ -1,10 +1,23 @@
 <script lang="ts">
 import { onDestroy, tick, untrack } from "svelte";
 import {
+	type Attachments,
+	attachmentsOf,
+	type Chip,
+	IMAGE_TYPES,
+	MAX_IMAGE_BYTES,
+	MAX_IMAGES,
+	MAX_MESSAGE_BYTES,
+	messageBytes,
+	PASTE_CHIP_LINES,
+	readDataUrl,
+} from "#lib/attachments.ts";
+import {
 	type PanelKind,
 	parseComposerText,
 	slashCommands,
 } from "#lib/commands.ts";
+import AttachmentChips from "#lib/components/AttachmentChips.svelte";
 import CommandPalette from "#lib/components/CommandPalette.svelte";
 import CompletionList from "#lib/components/CompletionList.svelte";
 import FollowupQueue from "#lib/components/FollowupQueue.svelte";
@@ -40,12 +53,13 @@ interface Props {
 	onRemoveFollowup: (index: number) => void;
 	onMatch?: (text: string) => Promise<readonly KeywordMatch[]>;
 	onFileSearch?: (query: string) => Promise<readonly FileMatch[]>;
-	onSend: (text: string) => void;
+	onSend: (text: string, attachments: Attachments) => void;
 	onSteer: (text: string) => void;
 	onFollowup: (text: string) => void;
 	onInterrupt: () => void;
 	retrying?: boolean;
 	onOpenPanel?: (kind: PanelKind) => void;
+	acceptsImages?: boolean;
 }
 
 let {
@@ -63,6 +77,7 @@ let {
 	onInterrupt,
 	retrying = false,
 	onOpenPanel,
+	acceptsImages = true,
 }: Props = $props();
 let text = $state("");
 let error = $state("");
@@ -74,6 +89,9 @@ let textarea = $state<HTMLTextAreaElement>();
 let region = $state<HTMLElement>();
 let guardUntil = $state(0);
 let guardTimer: ReturnType<typeof setTimeout> | undefined;
+let chips = $state<readonly Chip[]>([]);
+let nextChipId = 0;
+let pendingReads = 0;
 const interruptArmed = $derived(running && guardUntil > 0);
 const parsed = $derived(parseComposerText(text));
 const commandQuery = $derived(parsed.kind === "command" ? parsed.query : null);
@@ -250,28 +268,119 @@ function validText(): string | null {
 	return null;
 }
 
+function clearDraft(): void {
+	text = "";
+	browsing = null;
+}
+
+function imageCount(): number {
+	return chips.filter((chip) => chip.kind === "image").length;
+}
+
+function removeChip(id: number): void {
+	chips = chips.filter((chip) => chip.id !== id);
+}
+
+async function attachImage(file: File): Promise<void> {
+	if (!acceptsImages) {
+		error = "this model does not accept images";
+		return;
+	}
+	if (!IMAGE_TYPES.includes(file.type)) {
+		error = `unsupported image type ${file.type}; send PNG, JPEG or GIF`;
+		return;
+	}
+	if (file.size > MAX_IMAGE_BYTES) {
+		error = "Image is larger than 5 MiB.";
+		return;
+	}
+	if (imageCount() + pendingReads >= MAX_IMAGES) {
+		error = "At most 10 images per message.";
+		return;
+	}
+	error = "";
+	pendingReads += 1;
+	try {
+		const dataUrl = await readDataUrl(file);
+		chips = [
+			...chips,
+			{
+				kind: "image",
+				id: ++nextChipId,
+				name: file.name,
+				mime: file.type,
+				size: file.size,
+				dataUrl,
+			},
+		];
+	} catch (failure) {
+		error = `Cannot read image: ${failure instanceof Error ? failure.message : String(failure)}`;
+	} finally {
+		pendingReads -= 1;
+	}
+}
+
+function onPaste(event: ClipboardEvent): void {
+	const data = event.clipboardData;
+	if (!data) return;
+	const images = Array.from(data.files).filter((file) =>
+		file.type.startsWith("image/"),
+	);
+	if (images.length > 0) {
+		event.preventDefault();
+		for (const file of images) void attachImage(file);
+		return;
+	}
+	const pasted = data.getData("text/plain").replace(/\r\n?/g, "\n");
+	const body = pasted.endsWith("\n") ? pasted.slice(0, -1) : pasted;
+	const lines = body.split("\n").length;
+	if (lines < PASTE_CHIP_LINES) return;
+	event.preventDefault();
+	chips = [...chips, { kind: "paste", id: ++nextChipId, text: pasted, lines }];
+}
+
+function sendDraft(): void {
+	const typed = text.trim();
+	const attachments = attachmentsOf(chips);
+	if (
+		typed === "" &&
+		attachments.texts.length === 0 &&
+		attachments.images.length === 0
+	) {
+		validText();
+		return;
+	}
+	if (messageBytes(typed, attachments) > MAX_MESSAGE_BYTES) {
+		error =
+			"The message and images are too large to send together. Remove an image.";
+		return;
+	}
+	error = "";
+	onSend(typed, attachments);
+	clearDraft();
+	chips = [];
+}
+
 function submitPrimary(): void {
 	if (commandQuery !== null) {
 		submitCommand(commandQuery);
 		return;
 	}
-	const value = validText();
-	if (!value) return;
 	if (running) {
+		const value = validText();
+		if (!value) return;
 		onSteer(value);
-	} else {
-		onSend(value);
+		clearDraft();
+		return;
 	}
-	text = "";
-	browsing = null;
+	sendDraft();
 }
 
 function queueFollowup(): void {
 	const value = validText();
 	if (!value) return;
 	onFollowup(value);
-	text = "";
-	browsing = null;
+	clearDraft();
 }
 
 function editFollowup(index: number): void {
@@ -367,6 +476,7 @@ function onKeydown(event: KeyboardEvent): void {
 			aria-controls={completionId}
 			aria-activedescendant={completionId === undefined ? undefined : `${completionId}-${activeCompletion}`}
 			onkeydown={onKeydown}
+			onpaste={onPaste}
 			oninput={(event) => {
 				syncCaret(event.currentTarget);
 				browsing = null;
@@ -389,6 +499,7 @@ function onKeydown(event: KeyboardEvent): void {
 		{#if fileOpen}
 			<CompletionList id={fileListId} label="Files" items={fileItems} active={fileActive} />
 		{/if}
+		<AttachmentChips {chips} onRemove={removeChip} />
 		{#if matches.length > 0}
 			<p class="keywords">Keywords: {matches.map((match) => match.word).join(", ")}</p>
 		{/if}

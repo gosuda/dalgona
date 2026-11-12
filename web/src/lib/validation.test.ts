@@ -3,6 +3,7 @@ import { RpcError } from "./protocol.js";
 import {
 	parseAdvisorStatusResponse,
 	parseApprovalRequest,
+	parseModelListResponse,
 	parseNotification,
 } from "./validation.js";
 
@@ -525,5 +526,23 @@ describe("live file-change approval", () => {
 				grantRoot: "/work",
 			})?.detail,
 		).toBe("");
+	});
+});
+
+describe("model list input modalities", () => {
+	it("reads text and image from the server", () => {
+		const [model] = parseModelListResponse({
+			data: [
+				{ id: "vision", model: "vision", inputModalities: ["text", "image"] },
+			],
+		});
+		expect(model?.inputModalities).toEqual(["text", "image"]);
+	});
+
+	it("treats a model without inputModalities as text only", () => {
+		const [model] = parseModelListResponse({
+			data: [{ id: "plain", model: "plain" }],
+		});
+		expect(model?.inputModalities).toEqual(["text"]);
 	});
 });

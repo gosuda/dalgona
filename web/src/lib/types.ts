@@ -324,6 +324,7 @@ export interface ModelOption {
 	readonly efforts: readonly string[];
 	readonly defaultEffort: string | null;
 	readonly presets: readonly ModelPreset[];
+	readonly inputModalities: readonly string[];
 }
 
 export type ModelPreset = "default" | "smol" | "slow";

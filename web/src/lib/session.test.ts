@@ -768,3 +768,40 @@ describe("file search", () => {
 		session.stop();
 	});
 });
+
+describe("recall history", () => {
+	beforeEach(() => {
+		vi.stubGlobal("history", { replaceState: vi.fn() });
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	test("an image-only message adds no empty entry to the recall history", async () => {
+		const { dial } = fakeDial("none", {
+			"turn/start": () => ({
+				turn: { id: "turn-2", status: "inProgress", items: [] },
+			}),
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		await session.sendMessage("first");
+		await session.sendMessage("", {
+			texts: [],
+			images: [
+				{
+					kind: "image",
+					id: 1,
+					name: "shot.png",
+					mime: "image/png",
+					size: 8,
+					dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+				},
+			],
+		});
+		expect(session.history).toEqual(["first"]);
+		session.stop();
+	});
+});

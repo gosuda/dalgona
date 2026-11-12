@@ -18,6 +18,7 @@ const model: ModelOption = {
 	efforts: ["low", "medium", "high"],
 	defaultEffort: "medium",
 	presets: [],
+	inputModalities: ["text", "image"],
 };
 
 const usage: TokenUsage = {
