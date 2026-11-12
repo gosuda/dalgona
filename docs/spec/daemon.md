@@ -50,6 +50,8 @@ login <provider> cannot run inside remote <name>; run `dalgona login <provider>`
 
 Login without a provider MUST list providers. The daemon's credential store MUST reread `auth.json` when its size, time, or identity changes, so a new login applies to the next model request. Writers MUST serialize on `<home>/auth.lock`, MUST reread the file under that lock, and MUST change only their own provider entry. When a changed `auth.json` cannot be reread, `Mask` MUST return `secret masking failed: auth.json could not be reread` and MUST record the error. The daemon MUST drop a cached OAuth token when the stored credential changes outside the daemon.
 
+A conditional credential writer MUST reload `auth.json` under `<home>/auth.lock`, MUST write only on a match, and MUST report whether it wrote.
+
 The API-key login targets are `anthropic`, `google`, `openai`, `openrouter`, `cloudflare`, `sandbox0`, and `sprites`. With `--api-key <key>`, login MUST store the key without a prompt. The `--api-key` option works only for the API-key login targets. For another provider, login fails with `login <provider>: --api-key works only for <targets>`.
 
 `login chatgpt --device-auth` MUST sign in with the ChatGPT device code and print `Open <url> and enter the code <code> to log in to chatgpt.`. With any other provider, the flag MUST fail with `login <provider>: --device-auth works only for chatgpt`.

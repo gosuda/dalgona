@@ -1,5 +1,7 @@
 # OAuth flows
 
+The `chatgpt` entry MUST take its client values from Codex `codex-rs/login/src/server.rs`. The `anthropic` entry MUST take its client values from `pi`'s `packages/ai/src/auth/oauth/anthropic.ts`. The `antigravity` entry MUST take its values from `oh-my-pi`'s `packages/catalog/src/compat/rules/auth/google-antigravity.kdl`. The `devin` entry MUST take its values from `oh-my-pi`'s `packages/catalog/src/compat/rules/auth/devin.kdl`. The `cursor` entry MUST take its values from `oh-my-pi`'s `packages/ai/src/registry/oauth/cursor.ts`.
+
 The OAuth package MUST expose provider-neutral authorization flows. It MUST NOT import `internal/auth`. The `Providers` table MUST include ChatGPT, Claude, Google Antigravity, Devin, and Cursor. Each entry MUST use the client identifiers, scopes, endpoints, and parameter names of its named donor.
 
 `Provider` describes authorization, token, device, poll, and refresh endpoints. It also describes client credentials, scopes, loopback binding, advertised redirect URIs, port fallback, and extra authorization parameters. `PollURL` and `RefreshURL` MAY differ from `TokenURL`.
