@@ -80,7 +80,7 @@ A clean shutdown MUST return `nil`. Shutdown waits at most 5 seconds for open pa
 
 ## Browser client
 
-The client in `web/` reads the token from the URL fragment and opens `/rpc`. It speaks the Codex v2 protocol. `web/src/lib/validation.ts` parses each payload by hand and does not check it against the schema in `internal/rpc/testdata/codex-schema`. The Go tests in `internal/rpc` check encoded protocol objects against that schema.
+The client in `web/` reads the token from the URL fragment and opens `/rpc`. It speaks the Codex v2 protocol. `web/src/lib/validation.ts` parses each payload the client reads. A parser MUST reject a payload that lacks a member that the schema in `internal/rpc/testdata/codex-schema` or `internal/rpc/testdata/dalgona-schema` requires. `web/src/lib/schema.test.ts` checks this for every Codex payload parser and for the dalgona result and notification parsers.
 
 ### Layout
 

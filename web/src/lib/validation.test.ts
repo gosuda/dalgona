@@ -24,6 +24,7 @@ describe("notification validation", () => {
 			parseNotification({
 				method: "item/completed",
 				params: {
+					completedAtMs: 2,
 					threadId: "thread-1",
 					turnId: "turn-1",
 					item: { type: "agentMessage", id: "item-1", text: "finished" },
@@ -102,6 +103,7 @@ describe("notification validation", () => {
 			method: "item/completed",
 			params: {
 				threadId: "thread-1",
+				completedAtMs: 2,
 				turnId: "turn-1",
 				item: {
 					type: "dynamicToolCall",

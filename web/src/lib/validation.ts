@@ -74,6 +74,13 @@ function requiredNumber(
 	return value;
 }
 
+function hasMembers(
+	source: { readonly [key: string]: unknown },
+	keys: readonly string[],
+): boolean {
+	return keys.every((key) => source[key] !== undefined);
+}
+
 function textList(value: unknown): string {
 	if (!Array.isArray(value)) {
 		return "";
@@ -379,6 +386,7 @@ function turnError(value: unknown): string | null {
 
 function turnSnapshot(value: unknown, label: string): TurnSnapshot {
 	const turn = object(value, label);
+	if (!hasMembers(turn, ["id", "items", "status"])) fail(label);
 	const status = turnStatus(turn["status"], label);
 	const completion = status === "inProgress" ? "pending" : "complete";
 	const items: TranscriptItem[] = [];
@@ -436,6 +444,19 @@ export function parseThreadListResponse(value: unknown): ThreadListResult {
 
 export function parseThreadStartResponse(value: unknown): ThreadStartResult {
 	const body = object(value, "thread/start");
+	if (
+		!hasMembers(body, [
+			"approvalPolicy",
+			"approvalsReviewer",
+			"cwd",
+			"model",
+			"modelProvider",
+			"sandbox",
+			"thread",
+		])
+	) {
+		fail("thread/start");
+	}
 	return {
 		thread: threadDetail(body["thread"]),
 		status: statusInfo(
@@ -474,6 +495,7 @@ export function parseModelListResponse(value: unknown): readonly ModelOption[] {
 
 export function parseConfigReadResponse(value: unknown): StatusInfo {
 	const body = object(value, "config/read");
+	if (!hasMembers(body, ["config", "origins"])) fail("config/read");
 	const config = object(body["config"], "config");
 	return statusInfo(
 		config["model"],
@@ -584,12 +606,23 @@ export function parseAdvisorStatusResponse(
 		fail("dalgona/advisor/status");
 	}
 	return value.map((entry) => {
-		const row = object(entry, "advisor");
+		const row = object(entry, "advisor status");
+		if (!hasMembers(row, ["name", "model", "status", "notes", "usage"])) {
+			fail("advisor status");
+		}
+		if (
+			!hasMembers(object(row["usage"], "advisor status"), [
+				"inputTokens",
+				"outputTokens",
+			])
+		) {
+			fail("advisor status");
+		}
 		return {
-			name: requiredString(row, "name", "advisor"),
-			model: typeof row["model"] === "string" ? row["model"] : "",
+			name: requiredString(row, "name", "advisor status"),
+			model: requiredString(row, "model", "advisor status"),
 			status: advisorStatus(row["status"]),
-			notes: requiredNumber(row, "notes", "advisor"),
+			notes: requiredNumber(row, "notes", "advisor status"),
 		};
 	});
 }
@@ -662,122 +695,177 @@ function turnNotice(
 	};
 }
 
+type Members = { readonly [key: string]: unknown };
+
+interface NotificationSpec {
+	readonly required: readonly string[];
+	readonly parse: (params: Members) => AppNotification | null;
+}
+
+function threadStatusNotice(params: Members): AppNotification | null {
+	if (typeof params["threadId"] !== "string") {
+		return null;
+	}
+	return {
+		type: "threadStatus",
+		threadId: params["threadId"],
+		seq: typeof params["seq"] === "number" ? params["seq"] : 0,
+		status: activity(params["status"]),
+	};
+}
+
+function threadNameNotice(params: Members): AppNotification | null {
+	if (typeof params["threadId"] !== "string") {
+		return null;
+	}
+	return {
+		type: "threadName",
+		threadId: params["threadId"],
+		name: typeof params["threadName"] === "string" ? params["threadName"] : "",
+	};
+}
+
+function threadStartedNotice(params: Members): AppNotification {
+	return { type: "threadStarted", thread: threadDetail(params["thread"]) };
+}
+
+function errorNotice(params: Members): AppNotification | null {
+	if (
+		typeof params["threadId"] !== "string" ||
+		typeof params["turnId"] !== "string" ||
+		typeof params["willRetry"] !== "boolean"
+	) {
+		return null;
+	}
+	return {
+		type: "error",
+		threadId: params["threadId"],
+		turnId: params["turnId"],
+		message: turnError(params["error"]) ?? "",
+		willRetry: params["willRetry"],
+	};
+}
+
+function planNotice(params: Members): AppNotification | null {
+	if (
+		typeof params["threadId"] !== "string" ||
+		typeof params["turnId"] !== "string" ||
+		!Array.isArray(params["plan"])
+	) {
+		return null;
+	}
+	const explanation = params["explanation"];
+	return {
+		type: "plan",
+		threadId: params["threadId"],
+		turnId: params["turnId"],
+		explanation: typeof explanation === "string" ? explanation : null,
+		steps: params["plan"].map(planStep),
+	};
+}
+
+function childSpawnedNotice(params: Members): AppNotification | null {
+	if (
+		typeof params["threadId"] !== "string" ||
+		typeof params["childId"] !== "string"
+	) {
+		return null;
+	}
+	return {
+		type: "childSpawned",
+		threadId: params["threadId"],
+		childId: params["childId"],
+	};
+}
+
+function advisorNoteNotice(params: Members): AppNotification | null {
+	if (typeof params["threadId"] !== "string") {
+		return null;
+	}
+	return { type: "advisorNote", threadId: params["threadId"] };
+}
+
+function requestResolvedNotice(params: Members): AppNotification | null {
+	const requestId = params["requestId"];
+	if (typeof requestId !== "string" && typeof requestId !== "number") {
+		return null;
+	}
+	return { type: "requestResolved", requestId };
+}
+
+const notifications: Readonly<Record<string, NotificationSpec>> = {
+	"thread/started": { required: ["thread"], parse: threadStartedNotice },
+	"thread/status/changed": {
+		required: ["status", "threadId"],
+		parse: threadStatusNotice,
+	},
+	"thread/name/updated": {
+		required: ["threadId"],
+		parse: threadNameNotice,
+	},
+	"turn/started": {
+		required: ["threadId", "turn"],
+		parse: (params) => turnNotice("turnStarted", params),
+	},
+	"turn/completed": {
+		required: ["threadId", "turn"],
+		parse: (params) => turnNotice("turnCompleted", params),
+	},
+	"item/started": {
+		required: ["item", "startedAtMs", "threadId", "turnId"],
+		parse: (params) => itemNotice("itemStarted", params),
+	},
+	"item/completed": {
+		required: ["completedAtMs", "item", "threadId", "turnId"],
+		parse: (params) => itemNotice("itemCompleted", params),
+	},
+	"item/agentMessage/delta": {
+		required: ["delta", "itemId", "threadId", "turnId"],
+		parse: (params) => delta("agent", params),
+	},
+	"item/reasoning/textDelta": {
+		required: ["contentIndex", "delta", "itemId", "threadId", "turnId"],
+		parse: (params) => delta("reasoning", params),
+	},
+	"item/commandExecution/outputDelta": {
+		required: ["delta", "itemId", "threadId", "turnId"],
+		parse: (params) => delta("command", params),
+	},
+	error: {
+		required: ["error", "threadId", "turnId", "willRetry"],
+		parse: errorNotice,
+	},
+	"turn/plan/updated": {
+		required: ["plan", "threadId", "turnId"],
+		parse: planNotice,
+	},
+	"dalgona/thread/childSpawned": {
+		required: ["childId", "cwd", "threadId"],
+		parse: childSpawnedNotice,
+	},
+	"dalgona/advisor/note": {
+		required: ["advisor", "delivery", "note", "severity", "threadId"],
+		parse: advisorNoteNotice,
+	},
+	"serverRequest/resolved": {
+		required: ["requestId", "threadId"],
+		parse: requestResolvedNotice,
+	},
+};
+
 export function parseNotification(value: unknown): AppNotification | null {
 	if (!isObject(value) || typeof value["method"] !== "string") {
 		return null;
 	}
+	const method = value["method"];
 	const params = value["params"];
-	switch (value["method"]) {
-		case "thread/started": {
-			if (!isObject(params)) {
-				return null;
-			}
-			return { type: "threadStarted", thread: threadDetail(params["thread"]) };
-		}
-		case "thread/status/changed": {
-			if (!isObject(params) || typeof params["threadId"] !== "string") {
-				return null;
-			}
-			return {
-				type: "threadStatus",
-				threadId: params["threadId"],
-				seq: typeof params["seq"] === "number" ? params["seq"] : 0,
-				status: activity(params["status"]),
-			};
-		}
-		case "thread/name/updated": {
-			if (!isObject(params) || typeof params["threadId"] !== "string") {
-				return null;
-			}
-			return {
-				type: "threadName",
-				threadId: params["threadId"],
-				name:
-					typeof params["threadName"] === "string" ? params["threadName"] : "",
-			};
-		}
-		case "turn/started":
-			return turnNotice("turnStarted", params);
-		case "turn/completed":
-			return turnNotice("turnCompleted", params);
-		case "item/started":
-			return itemNotice("itemStarted", params);
-		case "item/completed":
-			return itemNotice("itemCompleted", params);
-		case "item/agentMessage/delta":
-			return delta("agent", params);
-		case "item/reasoning/textDelta":
-			return delta("reasoning", params);
-		case "item/commandExecution/outputDelta":
-			return delta("command", params);
-		case "error": {
-			if (
-				!isObject(params) ||
-				typeof params["threadId"] !== "string" ||
-				typeof params["turnId"] !== "string" ||
-				typeof params["willRetry"] !== "boolean"
-			) {
-				return null;
-			}
-			return {
-				type: "error",
-				threadId: params["threadId"],
-				turnId: params["turnId"],
-				message: turnError(params["error"]) ?? "",
-				willRetry: params["willRetry"],
-			};
-		}
-		case "turn/plan/updated": {
-			if (
-				!isObject(params) ||
-				typeof params["threadId"] !== "string" ||
-				typeof params["turnId"] !== "string" ||
-				!Array.isArray(params["plan"])
-			) {
-				return null;
-			}
-			const explanation = params["explanation"];
-			return {
-				type: "plan",
-				threadId: params["threadId"],
-				turnId: params["turnId"],
-				explanation: typeof explanation === "string" ? explanation : null,
-				steps: params["plan"].map(planStep),
-			};
-		}
-		case "dalgona/thread/childSpawned": {
-			if (
-				!isObject(params) ||
-				typeof params["threadId"] !== "string" ||
-				typeof params["childId"] !== "string"
-			) {
-				return null;
-			}
-			return {
-				type: "childSpawned",
-				threadId: params["threadId"],
-				childId: params["childId"],
-			};
-		}
-		case "dalgona/advisor/note": {
-			if (!isObject(params) || typeof params["threadId"] !== "string") {
-				return null;
-			}
-			return { type: "advisorNote", threadId: params["threadId"] };
-		}
-		case "serverRequest/resolved": {
-			if (
-				!isObject(params) ||
-				(typeof params["requestId"] !== "string" &&
-					typeof params["requestId"] !== "number")
-			) {
-				return null;
-			}
-			return { type: "requestResolved", requestId: params["requestId"] };
-		}
-		default:
-			return null;
+	const spec = Object.hasOwn(notifications, method)
+		? notifications[method]
+		: undefined;
+	if (spec === undefined || !isObject(params)) {
+		return null;
 	}
+	return hasMembers(params, spec.required) ? spec.parse(params) : null;
 }
 
 export function parseApprovalRequest(
@@ -785,44 +873,41 @@ export function parseApprovalRequest(
 	id: RequestId,
 	params: unknown,
 ): ApprovalRequest | null {
-	if (!isObject(params)) {
+	if (method !== commandApprovalMethod && method !== fileApprovalMethod) {
 		return null;
 	}
-	if (
-		typeof params["threadId"] !== "string" ||
-		typeof params["turnId"] !== "string" ||
-		typeof params["itemId"] !== "string"
-	) {
-		return null;
-	}
-	const reason = typeof params["reason"] === "string" ? params["reason"] : null;
-	if (method === "item/commandExecution/requestApproval") {
-		const command =
-			typeof params["command"] === "string" ? params["command"] : "";
+	const body = object(params, "approval request");
+	if (!hasMembers(body, approvalMembers)) fail("approval request");
+	const threadId = requiredString(body, "threadId", "approval request");
+	const turnId = requiredString(body, "turnId", "approval request");
+	const itemId = requiredString(body, "itemId", "approval request");
+	const reason = typeof body["reason"] === "string" ? body["reason"] : null;
+	if (method === commandApprovalMethod) {
+		const command = typeof body["command"] === "string" ? body["command"] : "";
 		return {
 			id,
 			method,
-			threadId: params["threadId"],
-			turnId: params["turnId"],
-			itemId: params["itemId"],
+			threadId,
+			turnId,
+			itemId,
 			title: "Run command?",
 			detail: command,
 			reason,
 		};
 	}
-	if (method === "item/fileChange/requestApproval") {
-		const root =
-			typeof params["grantRoot"] === "string" ? params["grantRoot"] : "";
-		return {
-			id,
-			method,
-			threadId: params["threadId"],
-			turnId: params["turnId"],
-			itemId: params["itemId"],
-			title: "Apply file changes?",
-			detail: root,
-			reason,
-		};
-	}
-	return null;
+	const root = typeof body["grantRoot"] === "string" ? body["grantRoot"] : "";
+	return {
+		id,
+		method,
+		threadId,
+		turnId,
+		itemId,
+		title: "Apply file changes?",
+		detail: root,
+		reason,
+	};
 }
+
+const commandApprovalMethod = "item/commandExecution/requestApproval";
+const fileApprovalMethod = "item/fileChange/requestApproval";
+const approvalMembers = ["itemId", "startedAtMs", "threadId", "turnId"];

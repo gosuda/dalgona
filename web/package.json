@@ -26,6 +26,7 @@
 		"@testing-library/dom": "10.4.2",
 		"@testing-library/svelte": "5.4.2",
 		"@testing-library/user-event": "14.6.9",
+		"ajv": "8.20.0",
 		"happy-dom": "21.0.4",
 		"svelte-check": "4.7.8",
 		"typescript": "6.0.3",
