@@ -314,7 +314,6 @@ func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
 	return decodeModels(resp.Body, p.cfg.ContextWindows)
 }
 
-// source: .references/pi/packages/ai/src/providers/openrouter-api.ts
 type modelList struct {
 	Data []struct {
 		ID          string `json:"id"`
