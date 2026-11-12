@@ -39,6 +39,20 @@ func TestExecServerMain_requiresWebsocketToken(t *testing.T) {
 	}
 }
 
+func TestExecServerMain_requiresThirtyTwoCharacters(t *testing.T) {
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
+	t.Setenv(boxEnvironmentKey, strings.Repeat("é", 16))
+	var stdout bytes.Buffer
+	code := ExecServerMain([]string{"--listen", "ws://127.0.0.1:99999", "--root", t.TempDir()}, strings.NewReader(""), &stdout)
+	if code != 1 {
+		t.Fatalf("ExecServerMain returned %d, want 1", code)
+	}
+	want := "exec-server: ws listen needs DALGONA_BOX_TOKEN (32+ characters)\n"
+	if stdout.String() != want {
+		t.Fatalf("diagnostic = %q, want %q", stdout.String(), want)
+	}
+}
+
 func TestExecWS_rejectsWrongToken(t *testing.T) {
 	local := newLocalContractRunner(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
