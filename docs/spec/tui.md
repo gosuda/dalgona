@@ -258,10 +258,28 @@ A row MUST end with one blank line.
 The state word MUST be `Done` for `completed`, `Failed` for `failed`, `Declined` for `declined`, and `Working` for `inProgress`.
 A failed row MUST show `Failed` in bold failed-text, with no background.
 A successful `todo` call MUST NOT print a tool row.
-A nested tool call MUST print its own row under its `<run>/<n>` item ID.
-An `eval` item MUST print one line with its code line count and its state word.
+At `medium` and `high`, a nested tool call MUST print its own row under its `<run>/<n>` item ID.
+At `medium`, an `eval` item MUST print one line with its code line count and its state word.
+At `high`, an `eval` item MUST print its first code line as its subject and its output as body lines.
 A file change MUST print one row for each file, with its added and removed counts.
 A file change whose diff the server omitted MUST show `diff omitted` in place of its counts.
+
+## Verbosity
+
+The `verbosity` setting MUST be `low`, `medium`, or `high`, and its default MUST be `medium`.
+At `high`, the client MUST write every block of an item in full, except for a failed item.
+At `medium`, the client MUST print each item as its own row.
+At `medium`, the client MUST write reasoning as one line, `Thinking · N lines · ctrl+o`.
+At `medium`, the client MUST keep the last 10 lines of command output, after a line `… N earlier lines`.
+At `medium` and `low`, the client MUST keep 60 lines of each file diff, then a line `… N more lines · ctrl+o`.
+At `low`, the client MUST write reasoning as one line, as at `medium`.
+At `low`, the client MUST hold each successful tool item of a turn in an open group, except failed items.
+At `low`, the client MUST write the open group as one line.
+The line MUST read `Ran N commands · edited M files · called K tools`.
+The open group MUST print when an agent message starts or the turn completes.
+A failed item MUST keep its last 10 lines at every level.
+A failed item MUST write the open group before its own row.
+`ctrl+o` MUST open the full text of an item at every level.
 
 ## Motion
 

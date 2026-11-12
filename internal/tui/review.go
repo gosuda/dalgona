@@ -64,7 +64,7 @@ func (m *model) liveEntry() *entry {
 		return nil
 	}
 	item := m.live.items[len(m.live.items)-1].snapshot()
-	snapshot := newEntry("live:"+item.ID, m.renderSettledItem(item))
+	snapshot := newEntry("live:"+item.ID, m.renderItem(item, verbosityHigh))
 	return &snapshot
 }
 

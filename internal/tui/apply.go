@@ -184,6 +184,7 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 	if !m.acceptThread(event.ThreadID) {
 		return nil, nil
 	}
+	m.flushGroup()
 	m.thread.turnID = ""
 	if m.thread.completedTurns == nil {
 		m.thread.completedTurns = map[string]struct{}{}
@@ -215,6 +216,9 @@ func (m *model) applyItemStarted(params jsontext.Value) error {
 	}
 	live := m.liveItem(event.Item.ID)
 	live.Item = mergeItem(sanitizeItem(event.Item), live.Item)
+	if event.Item.Type == "agentMessage" {
+		m.flushGroup()
+	}
 	return nil
 }
 
@@ -229,7 +233,7 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 	item := m.liveItem(event.Item.ID).settle(sanitizeItem(event.Item))
 	m.live.items = slices.DeleteFunc(m.live.items, func(live liveItem) bool { return live.ID == item.ID })
 	if !isAdvisorItem(item) {
-		m.commit("item:"+event.ThreadID+":"+item.ID, m.renderSettledItem(item))
+		m.settleItem("item:"+event.ThreadID+":"+item.ID, item)
 	}
 	return nil
 }
@@ -261,6 +265,9 @@ func (m *model) applyDelta(method string, params jsontext.Value) error {
 	}
 	item := m.liveItem(delta.itemID)
 	item.Type = deltaType(method)
+	if item.Type == "agentMessage" {
+		m.flushGroup()
+	}
 	if item.Type == "commandExecution" {
 		item.output = appendSanitized(item.output, delta.text)
 	} else {
@@ -352,6 +359,7 @@ func (m *model) setThread(id string) {
 	if id == m.thread.id {
 		return
 	}
+	m.flushGroup()
 	m.thread.id = id
 	m.thread.turnID = ""
 	m.thread.seq = 0

@@ -5,6 +5,7 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,14 @@ const (
 )
 
 const maxReviewEntries = 1000
+
+const (
+	verbosityLow     = "low"
+	verbosityMedium  = "medium"
+	verbosityHigh    = "high"
+	diffPreviewLines = 60
+	outputTailLines  = 10
+)
 
 type printedMsg struct{}
 
@@ -87,18 +96,105 @@ func isAdvisorItem(item rpc.Item) bool {
 }
 
 func (m *model) commit(key string, lines []string) {
-	if len(lines) == 0 {
+	m.commitFull(key, lines, lines)
+}
+
+func (m *model) commitFull(key string, lines, full []string) {
+	if len(lines) == 0 || !m.keepEntry(key, full) {
 		return
 	}
+	m.out.pending = append(m.out.pending, lines...)
+}
+
+func (m *model) keepEntry(key string, full []string) bool {
 	if _, ok := m.out.printed[key]; ok {
-		return
+		return false
 	}
 	m.out.printed[key] = struct{}{}
-	m.out.entries = append(m.out.entries, newEntry(key, lines))
+	m.out.entries = append(m.out.entries, newEntry(key, full))
 	if extra := len(m.out.entries) - maxReviewEntries; extra > 0 {
 		m.out.entries = slices.Clone(m.out.entries[extra:])
 	}
-	m.out.pending = append(m.out.pending, lines...)
+	return true
+}
+
+func (s *screenState) level() string {
+	return cmp.Or(s.verbosity, verbosityMedium)
+}
+
+func (m *model) settleItem(key string, item rpc.Item) {
+	if _, seen := m.out.printed[key]; seen || silentTodo(item) {
+		return
+	}
+	item = sanitizeItem(item)
+	level := m.screen.level()
+	if level == verbosityLow && groupedItem(item) {
+		if m.keepEntry(key, m.renderItem(item, verbosityHigh)) {
+			m.live.group = append(m.live.group, item)
+		}
+		return
+	}
+	m.flushGroup()
+	printed := m.renderItem(item, level)
+	full := printed
+	if level != verbosityHigh && levelSensitive(item) {
+		full = m.renderItem(item, verbosityHigh)
+	}
+	m.commitFull(key, printed, full)
+}
+
+func silentTodo(item rpc.Item) bool {
+	return item.Type == "dynamicToolCall" && item.Tool == "todo" && item.Status == "completed"
+}
+
+func groupedItem(item rpc.Item) bool {
+	return item.Status == "completed" && isToolItem(item)
+}
+
+func levelSensitive(item rpc.Item) bool {
+	return item.Type != "agentMessage" && item.Type != "userMessage"
+}
+
+func (m *model) flushGroup() {
+	if len(m.live.group) == 0 {
+		return
+	}
+	summary := groupSummary(m.live.group)
+	m.live.group = nil
+	m.live.groupN++
+	m.commit(fmt.Sprintf("group:%s:%d", m.thread.turnID, m.live.groupN), []string{m.screen.theme.paint(roleDim, summary), ""})
+}
+
+func groupSummary(items []rpc.Item) string {
+	var commands, files, calls int
+	for _, item := range items {
+		switch item.Type {
+		case "commandExecution":
+			commands++
+		case "fileChange":
+			files += max(1, len(item.Changes))
+		default:
+			calls++
+		}
+	}
+	var parts []string
+	if commands > 0 {
+		parts = append(parts, "Ran "+pluralText(commands, "command"))
+	}
+	if files > 0 {
+		parts = append(parts, "edited "+pluralText(files, "file"))
+	}
+	if calls > 0 {
+		parts = append(parts, "called "+pluralText(calls, "tool"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func pluralText(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return strconv.Itoa(n) + " " + word + "s"
 }
 
 func newEntry(key string, lines []string) entry {
@@ -312,8 +408,8 @@ func itemBody(item rpc.Item) []string {
 	return append(textLines(item.Text), textLines(item.Output)...)
 }
 
-func commandRow(item rpc.Item) row {
-	r := row{mark: "$", subject: firstLine(item.Command), state: statusWord(item.Status), duration: durationText(item.DurationMs), body: textLines(item.Output)}
+func commandRow(item rpc.Item, level string) row {
+	r := row{mark: "$", subject: firstLine(item.Command), state: statusWord(item.Status), duration: durationText(item.DurationMs), body: levelBody(item, textLines(item.Output), level)}
 	if item.ExitCode != nil {
 		r.meta = fmt.Sprintf("exit %d", *item.ExitCode)
 	}
@@ -332,7 +428,7 @@ func changeLabel(kind string) string {
 	return "Changed"
 }
 
-func (m *model) changeRow(change rpc.FileChange, state string) row {
+func (m *model) changeRow(change rpc.FileChange, state, level string) row {
 	r := row{label: changeLabel(change.Kind), subject: change.Path, state: state}
 	if change.DiffOmitted {
 		r.meta = "diff omitted"
@@ -340,23 +436,31 @@ func (m *model) changeRow(change rpc.FileChange, state string) row {
 		return r
 	}
 	r.meta = fmt.Sprintf("+%d −%d", change.Additions, change.Deletions)
-	r.body = m.diffBody(change.Diff)
+	r.body = m.diffBody(change.Diff, level)
 	return r
 }
 
-func (m *model) diffBody(diff string) []string {
+func (m *model) diffBody(diff, level string) []string {
 	lines := textLines(diff)
+	cut := 0
+	if level != verbosityHigh && len(lines) > diffPreviewLines {
+		cut = len(lines) - diffPreviewLines
+		lines = lines[:diffPreviewLines]
+	}
 	index := slices.IndexFunc(lines, func(line string) bool { return strings.HasPrefix(line, "@@") })
 	if index < 0 {
 		index = len(lines)
 	}
 	t := m.screen.theme
-	out := make([]string, 0, len(lines))
+	out := make([]string, 0, len(lines)+1)
 	for _, line := range lines[:index] {
 		out = append(out, t.paint(roleDim, line))
 	}
 	for _, line := range lines[index:] {
 		out = append(out, m.diffLine(line))
+	}
+	if cut > 0 {
+		out = append(out, t.paint(roleDim, fmt.Sprintf("… %d more lines · ctrl+o", cut)))
 	}
 	return out
 }
@@ -374,7 +478,7 @@ func (m *model) diffLine(line string) string {
 	return line
 }
 
-func (m *model) renderFileChange(item rpc.Item) []string {
+func (m *model) renderFileChange(item rpc.Item, level string) []string {
 	state := statusWord(item.Status)
 	if len(item.Changes) == 0 {
 		return m.renderRow(row{label: "File change", state: state})
@@ -384,7 +488,13 @@ func (m *model) renderFileChange(item rpc.Item) []string {
 		out = append(out, fmt.Sprintf("Changed %d files", len(item.Changes)))
 	}
 	for _, change := range item.Changes {
-		out = append(out, m.renderRow(m.changeRow(change, state))...)
+		diffLevel := level
+		if item.Status == "failed" {
+			diffLevel = verbosityHigh
+		}
+		r := m.changeRow(change, state, diffLevel)
+		r.body = levelBody(item, r.body, level)
+		out = append(out, m.renderRow(r)...)
 	}
 	return out
 }
@@ -424,12 +534,20 @@ func (m *model) advisorCard(item rpc.Item) (string, bool) {
 	return m.renderAdvisorCard(args.Advisor, args.Severity, item.Output), true
 }
 
-func (m *model) evalLines(item rpc.Item) []string {
+func (m *model) evalLines(item rpc.Item, level string) []string {
 	var args struct {
 		Code string `json:"code"`
 	}
+	decoded := json.Unmarshal(item.Arguments, &args) == nil
+	if level == verbosityHigh {
+		subject := ""
+		if decoded {
+			subject = firstLine(sanitizeText(args.Code))
+		}
+		return m.renderRow(row{label: "Eval", subject: subject, state: statusWord(item.Status), duration: durationText(item.DurationMs), body: levelBody(item, itemBody(item), level)})
+	}
 	text := "Eval"
-	if json.Unmarshal(item.Arguments, &args) == nil {
+	if decoded {
 		count := len(textLines(sanitizeText(args.Code)))
 		noun := "lines of code"
 		if count == 1 {
@@ -447,34 +565,44 @@ func (m *model) evalLines(item rpc.Item) []string {
 	return append(out, "")
 }
 
-const failedTailLines = 10
-
 func (m *model) failedTail(lines []string) []string {
-	if extra := len(lines) - failedTailLines; extra > 0 {
-		lines = append([]string{fmt.Sprintf("… %d earlier lines", extra)}, lines[extra:]...)
-	}
 	width := max(1, terminalWidth(m.screen.width)-rowLeadWidth)
 	var out []string
-	for _, line := range lines {
+	for _, line := range tailLines(lines, outputTailLines) {
 		out = append(out, m.rowBody(line, rowLeadWidth, width)...)
 	}
 	return out
 }
 
-func (m *model) renderDynamic(item rpc.Item) []string {
+func tailLines(lines []string, keep int) []string {
+	extra := len(lines) - keep
+	if extra <= 0 {
+		return lines
+	}
+	return append([]string{fmt.Sprintf("… %d earlier lines", extra)}, lines[extra:]...)
+}
+
+func levelBody(item rpc.Item, lines []string, level string) []string {
+	if item.Status == "failed" || (level != verbosityHigh && item.Type == "commandExecution") {
+		return tailLines(lines, outputTailLines)
+	}
+	return lines
+}
+
+func (m *model) renderDynamic(item rpc.Item, level string) []string {
 	if card, ok := m.advisorCard(item); ok {
 		return append(textLines(card), "")
 	}
-	if item.Tool == "todo" && item.Status == "completed" {
+	if silentTodo(item) {
 		return nil
 	}
 	if item.Tool == evalTool {
-		return m.evalLines(item)
+		return m.evalLines(item, level)
 	}
-	return m.renderRow(row{label: toolLabel(item.Tool), subject: toolSubject(item), state: statusWord(item.Status), duration: durationText(item.DurationMs), body: itemBody(item)})
+	return m.renderRow(row{label: toolLabel(item.Tool), subject: toolSubject(item), state: statusWord(item.Status), duration: durationText(item.DurationMs), body: levelBody(item, itemBody(item), level)})
 }
 
-func (m *model) renderSettledItem(item rpc.Item) []string {
+func (m *model) renderItem(item rpc.Item, level string) []string {
 	item = sanitizeItem(item)
 	switch item.Type {
 	case "userMessage":
@@ -486,26 +614,37 @@ func (m *model) renderSettledItem(item rpc.Item) []string {
 		}
 		return append(textLines(m.renderMarkdown(item.Text)), "")
 	case "commandExecution":
-		return m.renderRow(commandRow(item))
+		return m.renderRow(commandRow(item, level))
 	case "fileChange":
-		return m.renderFileChange(item)
+		return m.renderFileChange(item, level)
 	case "dynamicToolCall":
-		return m.renderDynamic(item)
+		return m.renderDynamic(item, level)
 	default:
-		return m.renderOtherItem(item)
+		return m.renderOtherItem(item, level)
 	}
 }
 
-func (m *model) renderOtherItem(item rpc.Item) []string {
+func (m *model) renderOtherItem(item rpc.Item, level string) []string {
 	switch item.Type {
 	case "reasoning":
-		return m.renderRow(row{label: "Thinking", body: textLines(item.Text)})
+		if level == verbosityHigh {
+			return m.renderRow(row{label: "Thinking", body: textLines(item.Text)})
+		}
+		return m.thinkingLine(item.Text)
 	case "mcpToolCall":
-		return m.renderRow(row{label: "Called", subject: item.Server + "/" + item.Tool, state: statusWord(item.Status), duration: durationText(item.DurationMs), body: itemBody(item)})
+		return m.renderRow(row{label: "Called", subject: item.Server + "/" + item.Tool, state: statusWord(item.Status), duration: durationText(item.DurationMs), body: levelBody(item, itemBody(item), level)})
 	case "contextCompaction":
 		return m.renderRow(row{label: "Compacted context", body: textLines(item.Text)})
 	}
-	return m.renderRow(row{label: item.Type, state: statusWord(item.Status), body: itemBody(item)})
+	return m.renderRow(row{label: item.Type, state: statusWord(item.Status), body: levelBody(item, itemBody(item), level)})
+}
+
+func (m *model) thinkingLine(text string) []string {
+	lines := textLines(text)
+	if len(lines) == 0 {
+		return nil
+	}
+	return []string{m.screen.theme.paint(roleDim, "Thinking · "+pluralText(len(lines), "line")+" · ctrl+o"), ""}
 }
 
 func terminalWidth(width int) int {

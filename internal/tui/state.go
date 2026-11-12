@@ -105,6 +105,8 @@ type liveState struct {
 	deltas     *deltaDecoder
 	plan       []rpc.TurnPlanStep
 	retryUntil time.Time
+	group      []rpc.Item
+	groupN     int
 }
 
 type inputState struct {
@@ -133,6 +135,7 @@ type screenState struct {
 	kittyAsked   bool
 	kittyWindow  bool
 	kittyNerd    bool
+	verbosity    string
 }
 
 type outState struct {

@@ -16,7 +16,7 @@ import (
 var rowSGR = regexp.MustCompile(`\x1b\[([0-9;]*)m`)
 
 func settledText(m *model, item rpc.Item) string {
-	return strings.Join(m.renderSettledItem(item), "\n")
+	return strings.Join(m.renderItem(item, verbosityMedium), "\n")
 }
 
 func hasBackground(text string) bool {
@@ -87,6 +87,7 @@ func TestCommitSplitsByHeight(t *testing.T) {
 	t.Parallel()
 	m := rowModel(t, 40)
 	m.screen.height = 8
+	m.screen.verbosity = "high"
 	lines := make([]string, 30)
 	for i := range lines {
 		lines[i] = "line " + strconv.Itoa(i+1)
@@ -121,7 +122,7 @@ func TestRowFitsOneCellShort(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
 	m.screen.width = 40
-	for _, line := range m.renderSettledItem(rpc.Item{Type: "commandExecution", Command: strings.Repeat("a", 200), Status: "completed"}) {
+	for _, line := range m.renderItem(rpc.Item{Type: "commandExecution", Command: strings.Repeat("a", 200), Status: "completed"}, verbosityMedium) {
 		if cells := m.screen.cells(line); cells > 39 {
 			t.Fatalf("row is %d cells, want at most 39: %q", cells, line)
 		}
@@ -141,7 +142,7 @@ func TestFailedRowIsBoldTextNotFill(t *testing.T) {
 	m := newModel(nil, Options{}, nil)
 	m.screen.width = 100
 	m.screen.theme = newTheme(themeNight, true)
-	row := m.renderSettledItem(rpc.Item{Type: "commandExecution", Command: "go test", Status: "failed"})[0]
+	row := m.renderItem(rpc.Item{Type: "commandExecution", Command: "go test", Status: "failed"}, verbosityMedium)[0]
 	if !strings.Contains(row, "\x1b[1;38;2;232;112;95mFailed") {
 		t.Fatalf("failed word is not bold failed-text: %q", row)
 	}
@@ -186,9 +187,9 @@ func TestNestedPatchRowIsEdit(t *testing.T) {
 
 func TestEvalRowAtMediumIsOneLine(t *testing.T) {
 	t.Parallel()
-	m := rowModel(t, 100)
+	m := holdPrints(rowModel(t, 100))
 	m = notifyItem(t, m, "item/completed", `{"type":"dynamicToolCall","id":"e1","tool":"eval","arguments":{"code":"a\nb\nc"},"status":"completed"}`)
-	text := strings.TrimRight(entryText(t, m, "item:t1:e1"), "\n")
+	text := strings.TrimSpace(stripANSI(strings.Join(m.out.pending, "\n")))
 	if text != "Eval · 3 lines of code · Done" {
 		t.Fatalf("eval row = %q, want one line", text)
 	}
@@ -247,7 +248,7 @@ func TestEmptyAgentMessageAndNilCommitPrintNothing(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
 	m.screen.width = 100
-	if got := m.renderSettledItem(rpc.Item{Type: "agentMessage", Text: ""}); len(got) != 0 {
+	if got := m.renderItem(rpc.Item{Type: "agentMessage", Text: ""}, verbosityMedium); len(got) != 0 {
 		t.Fatalf("empty agent message rendered %q, want no rows", got)
 	}
 	m.commit("item:t1:empty", nil)

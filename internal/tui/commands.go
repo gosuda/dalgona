@@ -118,6 +118,10 @@ func (m *model) applySetting(setting settingValue) {
 		if text, ok := setting.Value.(string); ok {
 			m.screen.iconsSetting = text
 		}
+	case "verbosity":
+		if text, ok := setting.Value.(string); ok {
+			m.screen.verbosity = text
+		}
 	case "statusHide":
 		m.setStatusHide(setting.Value)
 	}
@@ -448,6 +452,11 @@ func (m *model) applyKeywords(value any) tea.Cmd {
 	return nil
 }
 
+type turnItem struct {
+	turn string
+	item rpc.Item
+}
+
 func (m *model) applyResumed(value any) tea.Cmd {
 	response, ok := value.(*resumedThread)
 	if !ok {
@@ -459,9 +468,11 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	m.noticeMoved(m.thread.title)
 	m.setState(threadState(response.Thread.Status))
 	m.live.items = nil
-	var items []rpc.Item
+	var items []turnItem
 	for _, turn := range response.Thread.Turns {
-		items = append(items, turn.Items...)
+		for _, item := range turn.Items {
+			items = append(items, turnItem{turn: turn.ID, item: item})
+		}
 	}
 	head := []string{"resumed " + m.thread.title}
 	if len(items) > maxSettledItems {
@@ -470,9 +481,17 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	}
 	m.out.loads++
 	m.commit(threadKey(m.thread.id, m.out.loads), head)
-	for _, item := range items {
-		m.commit("item:"+m.thread.id+":"+item.ID, m.renderSettledItem(item))
+	var turn string
+	for _, entry := range items {
+		if entry.turn != turn {
+			m.flushGroup()
+			turn = entry.turn
+			m.thread.turnID = turn
+		}
+		m.settleItem("item:"+m.thread.id+":"+entry.item.ID, entry.item)
 	}
+	m.flushGroup()
+	m.thread.turnID = ""
 	return nil
 }
 
