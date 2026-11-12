@@ -207,5 +207,5 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
 - `-p <prompt>` runs one turn and exits. Without `--json` it prints the agent messages of the turn. With `--json` it prints `{"thread":"<id>","status":"completed|interrupted|failed","stop_reason":"..."}`. `stop_reason` is `stop` for a completed turn, the turn error for a failed turn, and `interrupted` for an interrupted turn. The exit code is 0 only for a completed turn.
 - `--resume <id>` and `-c` (latest thread) select a thread. With `-p ""`, the command waits for a recovered turn and does not start a new turn.
 - `-m`, `--approval auto|ask|yolo`, `--sandbox workspace-write|off` apply to a new thread. `-C <dir>` changes the working directory first.
-- In `-p` mode the client declines every approval request.
+- In `-p` mode the client declines every approval request. It answers each question with an error. The server declines a question only when no other attached window can answer it. The model then receives `declined: no client could answer this question`.
 - `login [provider] [--device-auth]`, `logout <provider>`, and `models` complete without the TUI. `login` without a provider lists the providers.

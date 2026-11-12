@@ -740,6 +740,9 @@ func (b *turnBook) signal() {
 }
 
 func (b *turnBook) Request(_ context.Context, method string, params jsontext.Value) (any, error) {
+	if method == "item/tool/requestUserInput" {
+		return nil, b.refuseQuestion(params)
+	}
 	if !strings.HasSuffix(method, "/requestApproval") {
 		return nil, fmt.Errorf("unsupported server request %s", method)
 	}
@@ -749,6 +752,21 @@ func (b *turnBook) Request(_ context.Context, method string, params jsontext.Val
 	}
 	fmt.Fprintf(b.stderr, "declined %s: no interactive client\n", cmp.Or(ask.Command, ask.Reason, ask.ItemID))
 	return rpc.CommandExecutionRequestApprovalResponse{Decision: "decline"}, nil
+}
+
+var errNoInteractiveClient = errors.New("no interactive client")
+
+func (b *turnBook) refuseQuestion(params jsontext.Value) error {
+	var ask rpc.ToolRequestUserInputParams
+	if err := json.Unmarshal(params, &ask); err != nil {
+		return err
+	}
+	header := ""
+	if len(ask.Questions) > 0 {
+		header = ask.Questions[0].Header
+	}
+	fmt.Fprintf(b.stderr, "declined question %s: no interactive client\n", header)
+	return errNoInteractiveClient
 }
 
 func (b *turnBook) wait(ctx context.Context, turnID string) (turnResult, error) {
