@@ -302,3 +302,47 @@ func TestQuestionNotificationOSC99(t *testing.T) {
 		t.Fatalf("notification = %#v, want %#v", got, want)
 	}
 }
+
+const sandboxQuestionJSON = `{"threadId":"t1","turnId":"turn-1","itemId":"call-sb","isBlocking":true,"questions":[` +
+	`{"id":"sandbox","header":"Sandbox","question":"The harness sandbox is not available. How should commands in this thread run?","isOther":false,"isSecret":false,"multiSelect":false,` +
+	`"options":[{"label":"Accept","description":"Run without a sandbox. Every command asks first."},{"label":"Dangerously accept","description":"Run without a sandbox under approval mode auto."}]}]}`
+
+func TestAskDockSteady(t *testing.T) {
+	t.Parallel()
+	m, _ := openQuestion(t, questionParamsJSON)
+	keys := make([]tea.KeyPressMsg, 50)
+	for i := range keys {
+		keys[i] = tea.KeyPressMsg{Code: tea.KeyDown}
+	}
+	m = assertSteadyDock(t, m, keys)
+	if got := len(m.dockLines()); got != 16 {
+		t.Fatalf("dock has %d rows with a question open, want 16", got)
+	}
+	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	typing := make([]tea.KeyPressMsg, 50)
+	for i := range typing {
+		typing[i] = press('a', 0, "a")
+	}
+	assertSteadyDock(t, m, typing)
+	if got := len(m.dockLines()); got != 16 {
+		t.Fatalf("dock has %d rows in answer mode, want 16", got)
+	}
+}
+
+func TestSandboxChoiceIsAskCard(t *testing.T) {
+	t.Parallel()
+	m, answer := openQuestion(t, sandboxQuestionJSON)
+	view := strings.Join(m.dockLines(), "\n")
+	for _, want := range []string{"Question 1 of 1 · Sandbox", "Accept", "Dangerously accept"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("sandbox card lacks %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Other") {
+		t.Fatalf("sandbox card shows an Other row:\n%s", view)
+	}
+	_, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if got := answerJSON(t, answer); got != `{"answers":{}}` {
+		t.Fatalf("answer = %s, want the cancel shape", got)
+	}
+}

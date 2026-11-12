@@ -477,3 +477,5 @@ With two or more rows, the card keeps its title and its hint row. With one row i
 A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<itemId>`. A question closed by another window writes no row.
 
 A question request that the TUI accepts MUST send a desktop notification `<product>: Waiting for your answer · <title>`, when notifications are on and the window is blurred.
+
+The sandbox choice is an ask card with the options Accept and Dangerously accept, and no Other row.
