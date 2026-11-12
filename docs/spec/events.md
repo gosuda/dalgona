@@ -22,7 +22,7 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 |`runner.bound`|`runner`, `service`, `box_id`, `baseline`|None|
 |`turn.started`|`turn_id`|`started_at`, an RFC 3339 UTC timestamp that the server stamps at append|
 |`turn.completed`|`turn_id`, `status`|`error`. Status is `completed`, `interrupted`, or `failed`. `completed_at`, an RFC 3339 UTC timestamp that the server stamps at append|
-|`user.message`|`item_id`, `turn_id`, `text`, `kind`|`notices`, `mentions`, `effort`, `model`, `approval`, `sandbox`, `verbatim`. Kind is `prompt`, `steer`, or `followup`. Each notice has `word` and `text`. Each mention has `path` and `text`. Effort is `low`, `medium`, `high`, `xhigh`, or `max` and overrides config for its turn. Approval and sandbox use the `session.created` values. A `verbatim` message MUST NOT have notices or mentions|
+|`user.message`|`item_id`, `turn_id`, `text`, `kind`|`notices`, `mentions`, `images`, `effort`, `model`, `approval`, `sandbox`, `verbatim`. Kind is `prompt`, `steer`, or `followup`. Each notice has `word` and `text`. Each mention has `path` and `text`. Each image has `mime`, optional `path`, and `image`, a blob reference. Effort is `low`, `medium`, `high`, `xhigh`, or `max` and overrides config for its turn. Approval and sandbox use the `session.created` values. A `verbatim` message MUST NOT have notices or mentions|
 |`assistant.message`|`item_id`, `turn_id`, `text`, `reasoning`, `tool_calls`, `usage`, `stop_reason`|`context_seq`. Usage contains `input`, `output`, `cache_read`, and `cache_write`. Each tool call has `id`, `name`, `args`, `freeform`, and `resolved`. Each tool call MAY have a `signature`, the provider thought-signature replayed to the next request. Each tool call MAY have `redacted_thinking`, opaque provider strings replayed unchanged. `context_seq` is the journal head when the request was built. `context_window` is the model context window in tokens, and it is omitted when unknown|
 |`tool.started`|`call_id`, `turn_id`, `tool`, `args`, `class`, `repairs`|`files`. Class is `read`, `edit`, `exec`, `agent`, `script`, or `remote`. Each file has `path`, `pre_sha`, `post_sha`, and optional `pre_blob`. Each file MAY have `post_blob`, the masked post-image of the file. `started_at`, an RFC 3339 UTC timestamp that the server stamps at append|
 |`tool.completed`|`call_id`, `ok`, `output`, `recovered`|`spill`, `exit_code`, `meta`. Recovered is `none`, `replayed`, `interrupted`, or `skipped`. `completed_at`, an RFC 3339 UTC timestamp that the server stamps at append|
@@ -41,6 +41,14 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 |`thread.archived`|`archived`|The latest one sets the archive flag|
 
 Text and raw JSON fields named in this section MAY use the blob-reference form. Snapshot metadata in `tool.completed.meta` MUST remain inline and MUST NOT exceed 64 KiB.
+
+### Image attachments
+
+A `user.message` MUST carry at most 10 images in its `images` member.
+Each image MUST name a blob of PNG, JPEG, or GIF data.
+An image MUST NOT use an inline payload.
+An image path MUST be masked before the event is journaled.
+A `verbatim` message carries its images like any other message.
 
 ## Fold state
 

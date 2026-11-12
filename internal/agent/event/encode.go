@@ -103,6 +103,9 @@ func userMessageMembers(e UserMessage) []member {
 	if len(e.Mentions) > 0 {
 		fields = append(fields, field("mentions", arrayValue(e.Mentions, mentionValue)))
 	}
+	if len(e.Images) > 0 {
+		fields = append(fields, field("images", arrayValue(e.Images, imageValue)))
+	}
 	if e.Verbatim {
 		fields = append(fields, field("verbatim", boolValue(true)))
 	}
@@ -120,6 +123,12 @@ func noticeValue(e Notice) jsontext.Value {
 func mentionValue(e Mention) jsontext.Value {
 	fields := []member{field("path", stringValue(e.Path)), field("text", stringValue(e.Text))}
 	return objectValue(optionalBlobField(fields, "text_blob", e.TextBlob)...)
+}
+
+func imageValue(e Image) jsontext.Value {
+	fields := []member{field("mime", stringValue(e.Mime))}
+	fields = optionalString(fields, "path", e.Path)
+	return objectValue(optionalBlobField(fields, "image", &e.Blob)...)
 }
 
 func toolMembers(e Event) ([]member, error) {

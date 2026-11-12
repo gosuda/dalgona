@@ -290,3 +290,68 @@ func positive(r *rand.Rand) int {
 func pick[T any](r *rand.Rand, values ...T) T {
 	return values[r.IntN(len(values))]
 }
+
+func TestUserMessageImagesRoundTrip(t *testing.T) {
+	t.Parallel()
+	original := event.UserMessage{
+		ItemID: "item-01", TurnID: "turn-01", Text: "what is this", Kind: "prompt",
+		Images: []event.Image{{Mime: "image/png", Path: "/work/shot.png", Blob: event.BlobRef{Blob: strings.Repeat("a", 64), Bytes: 12}}},
+	}
+	assertRoundTrip(t, 0, original)
+}
+
+func TestUserMessageImageJournalForm(t *testing.T) {
+	t.Parallel()
+	original := event.UserMessage{
+		ItemID: "item-01", TurnID: "turn-01", Text: "what is this", Kind: "prompt",
+		Images: []event.Image{{Mime: "image/png", Path: "/home/u/shot.png", Blob: event.BlobRef{Blob: strings.Repeat("a", 64), Bytes: 12}}},
+	}
+	encoded, err := event.Encode(original)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	want := `{"type":"user.message","item_id":"item-01","turn_id":"turn-01","text":"what is this","kind":"prompt","images":[{"mime":"image/png","path":"/home/u/shot.png","image":{"blob":"` + strings.Repeat("a", 64) + `","bytes":12}}]}`
+	if string(encoded) != want {
+		t.Fatalf("journal form\ngot:  %s\nwant: %s", encoded, want)
+	}
+}
+
+func TestUserMessageImageValidate(t *testing.T) {
+	t.Parallel()
+	good := event.BlobRef{Blob: strings.Repeat("a", 64), Bytes: 12}
+	tests := []struct {
+		name   string
+		images []event.Image
+		err    string
+	}{
+		{
+			name:   "mime refused",
+			images: []event.Image{{Mime: "text/plain", Blob: good}},
+			err:    "images[0]: mime must be image/png, image/jpeg or image/gif",
+		},
+		{
+			name:   "zero bytes refused",
+			images: []event.Image{{Mime: "image/png", Blob: event.BlobRef{Blob: good.Blob}}},
+			err:    "images[0]: bytes must be between 1 and 5242880",
+		},
+		{
+			name:   "eleven images refused",
+			images: make([]event.Image, 11),
+			err:    "a message takes at most 10 images",
+		},
+		{
+			name:   "blob name not a digest",
+			images: []event.Image{{Mime: "image/png", Blob: event.BlobRef{Blob: "xyz", Bytes: 12}}},
+			err:    "images[0]: image must be a lowercase SHA-256 digest",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			message := event.UserMessage{ItemID: "item-01", TurnID: "turn-01", Text: "x", Kind: "prompt", Images: tc.images}
+			err := message.Validate()
+			if err == nil || err.Error() != tc.err {
+				t.Fatalf("Validate = %v, want %q", err, tc.err)
+			}
+		})
+	}
+}

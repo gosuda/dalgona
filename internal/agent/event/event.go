@@ -64,6 +64,12 @@ type Mention struct {
 	TextBlob *BlobRef
 }
 
+type Image struct {
+	Mime string
+	Path string
+	Blob BlobRef
+}
+
 type ToolCall struct {
 	ID               string
 	Name             string
@@ -201,6 +207,7 @@ type UserMessage struct {
 	Kind     string
 	Notices  []Notice
 	Mentions []Mention
+	Images   []Image
 	Effort   string
 	Model    string
 	Approval string
@@ -223,6 +230,9 @@ func (e UserMessage) Validate() error {
 		return err
 	}
 	if err := validateMentions(e.Mentions); err != nil {
+		return err
+	}
+	if err := validateImages(e.Images); err != nil {
 		return err
 	}
 	if e.Verbatim && len(e.Notices)+len(e.Mentions) > 0 {
@@ -271,6 +281,33 @@ func validateMentions(mentions []Mention) error {
 		if err := optionalTextPayload("mention text", mention.Text, mention.TextBlob); err != nil {
 			return fmt.Errorf("mentions[%d]: %w", i, err)
 		}
+	}
+	return nil
+}
+
+func validateImages(images []Image) error {
+	if len(images) > MaxImages {
+		return fmt.Errorf("a message takes at most %d images", MaxImages)
+	}
+	for i, image := range images {
+		if err := validateImage(i, image); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateImage(i int, image Image) error {
+	switch image.Mime {
+	case "image/png", "image/jpeg", "image/gif":
+	default:
+		return fmt.Errorf("images[%d]: mime must be image/png, image/jpeg or image/gif", i)
+	}
+	if image.Blob.Bytes < 1 || image.Blob.Bytes > MaxImageBytes {
+		return fmt.Errorf("images[%d]: bytes must be between 1 and %d", i, MaxImageBytes)
+	}
+	if err := validSHA("image", image.Blob.Blob); err != nil {
+		return fmt.Errorf("images[%d]: %w", i, err)
 	}
 	return nil
 }

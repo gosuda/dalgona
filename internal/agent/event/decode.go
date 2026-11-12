@@ -32,6 +32,7 @@ func decodeSessionEvent(kind string, r *objectReader) (Event, error) {
 func decodeUserMessage(r *objectReader) UserMessage {
 	var notices []Notice
 	var mentions []Mention
+	var images []Image
 	r.array("notices", func(raw jsontext.Value) error {
 		value, err := decodeNotice(raw)
 		notices = append(notices, value)
@@ -42,10 +43,15 @@ func decodeUserMessage(r *objectReader) UserMessage {
 		mentions = append(mentions, value)
 		return err
 	})
+	r.array("images", func(raw jsontext.Value) error {
+		value, err := decodeImage(raw)
+		images = append(images, value)
+		return err
+	})
 	text, textBlob := r.textPayload("text")
 	return UserMessage{
 		ItemID: r.str("item_id"), TurnID: r.str("turn_id"), Text: text, TextBlob: textBlob, Kind: r.str("kind"),
-		Notices: notices, Mentions: mentions, Effort: r.str("effort"), Verbatim: r.boolean("verbatim"),
+		Notices: notices, Mentions: mentions, Images: images, Effort: r.str("effort"), Verbatim: r.boolean("verbatim"),
 		Model: r.str("model"), Approval: r.str("approval"), Sandbox: r.str("sandbox"),
 	}
 }
@@ -69,6 +75,19 @@ func decodeMention(raw jsontext.Value) (Mention, error) {
 	r := objectReader{fields: fields}
 	text, textBlob := r.textPayload("text")
 	value := Mention{Path: r.str("path"), Text: text, TextBlob: textBlob}
+	return value, r.err
+}
+
+func decodeImage(raw jsontext.Value) (Image, error) {
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return Image{}, err
+	}
+	r := objectReader{fields: fields}
+	value := Image{Mime: r.str("mime"), Path: r.str("path")}
+	if blob := r.blob("image"); blob != nil {
+		value.Blob = *blob
+	}
 	return value, r.err
 }
 
