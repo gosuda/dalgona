@@ -552,3 +552,52 @@ func TestSymbolsFixtureMarkdown(t *testing.T) {
 	t.Parallel()
 	assertFixtureCase(t, "markdown")
 }
+
+func TestCaptureNamesSortedDistinct(t *testing.T) {
+	t.Parallel()
+	lang, ok := ByName("go")
+	if !ok {
+		t.Fatal("go language missing")
+	}
+	q, err := lang.Compile("(function_declaration name: (identifier) @name) @definition.function")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	want := []string{"definition.function", "name"}
+	if got := q.CaptureNames(); !slices.Equal(got, want) {
+		t.Fatalf("CaptureNames() = %v, want %v", got, want)
+	}
+}
+
+func TestErrorLineOfBrokenGo(t *testing.T) {
+	t.Parallel()
+	_, report, err := symbolsWithin(t, "go", []byte("package a\n\nfunc Bad( {\n"))
+	if err != nil {
+		t.Fatalf("Symbols: %v", err)
+	}
+	if !report.SyntaxErrors || report.ErrorLine != 3 {
+		t.Fatalf("report = %+v, want SyntaxErrors at line 3", report)
+	}
+}
+
+func TestErrorLineZeroOnValidGo(t *testing.T) {
+	t.Parallel()
+	_, report, err := symbolsWithin(t, "go", []byte("package a\n\nfunc Good() {}\n"))
+	if err != nil {
+		t.Fatalf("Symbols: %v", err)
+	}
+	if report.SyntaxErrors || report.ErrorLine != 0 {
+		t.Fatalf("report = %+v, want no syntax error and ErrorLine 0", report)
+	}
+}
+
+func TestExtensionsOfGo(t *testing.T) {
+	t.Parallel()
+	lang, ok := ByName("go")
+	if !ok {
+		t.Fatal("go language missing")
+	}
+	if got := lang.Extensions(); !slices.Equal(got, []string{".go"}) {
+		t.Fatalf("Extensions() = %v, want [.go]", got)
+	}
+}

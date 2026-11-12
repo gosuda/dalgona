@@ -183,6 +183,10 @@ func (l Language) HasDefinitions() bool {
 	return !l.l.syntaxOnly()
 }
 
+func (l Language) Extensions() []string {
+	return slices.Clone(l.l.extensions)
+}
+
 func (l Language) NewParser() *Parser {
 	return newParser(l.l, parseTimeout)
 }
@@ -237,5 +241,21 @@ func (p *Parser) parse(ctx context.Context, src []byte) (*gotreesitter.Tree, Rep
 		}
 		return nil, Report{}, fmt.Errorf("syntax: parse %s: %w", p.lang.name, err)
 	}
-	return tree, Report{SyntaxErrors: tree.RootNode().HasError()}, nil
+	root := tree.RootNode()
+	return tree, Report{SyntaxErrors: root.HasError(), ErrorLine: firstErrorLine(root)}, nil
+}
+
+func firstErrorLine(n *gotreesitter.Node) int {
+	if !n.HasError() {
+		return 0
+	}
+	if n.IsError() || n.IsMissing() {
+		return int(n.StartPoint().Row) + 1
+	}
+	for i := range n.ChildCount() {
+		if line := firstErrorLine(n.Child(i)); line > 0 {
+			return line
+		}
+	}
+	return 0
 }

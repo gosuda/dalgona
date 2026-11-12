@@ -33,6 +33,7 @@ type Symbol struct {
 type Report struct {
 	SyntaxErrors bool
 	Stopped      bool
+	ErrorLine    int
 }
 
 var containerKinds = map[Kind]bool{
