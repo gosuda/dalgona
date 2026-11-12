@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -25,7 +27,7 @@ func (m *model) executeSlash(name, argument string) tea.Cmd {
 	}
 }
 
-var busyThreadCommands = map[string]bool{"new": true, "compact": true, "tree": true, "revert": true, "fork": true}
+var busyThreadCommands = map[string]bool{"new": true, "compact": true, "tree": true, "revert": true, "fork": true, "review": true}
 
 func (m *model) executeThreadCommand(name string) tea.Cmd {
 	if busyThreadCommands[name] && m.busyRefusal(name) {
@@ -33,28 +35,71 @@ func (m *model) executeThreadCommand(name string) tea.Cmd {
 	}
 	switch name {
 	case "new":
-		return m.newThread()
+		m.openNewConfirm()
 	case "compact":
-		params := rpc.ThreadCompactStartParams{ThreadID: m.thread.id}
-		return m.call("compact", "thread/compact/start", params, nil, "")
+		m.openCompactConfirm()
 	case "tree":
 		return m.treeCommand("tree")
 	case "revert":
 		return m.treeCommand("revertTree")
 	case "fork":
-		params := rpc.ThreadForkParams{ThreadID: m.thread.id}
-		result := new(rpc.ThreadForkResponse)
-		return m.call("fork", "thread/fork", params, result, "")
-	default:
-		return nil
+		return m.treeCommand("forkTree")
+	case "review":
+		m.openReviewPanel()
 	}
+	return nil
+}
+
+func (m *model) openNewConfirm() {
+	c := confirmation{kind: confirmNew, title: "Start a new thread?", action: "[enter] start  [esc] cancel"}
+	if n := len(m.queue); n > 0 {
+		c.lines = []string{fmt.Sprintf("%d follow-ups move to it", n)}
+	}
+	m.openConfirm(c)
+}
+
+func (m *model) openCompactConfirm() {
+	c := confirmation{kind: confirmCompact, title: "Compact the context?", action: "[enter] compact  [esc] cancel"}
+	if fraction, ok := contextFraction(m.thread.usage); ok {
+		c.lines = []string{fmt.Sprintf("ctx %d%% of %d tokens", int(math.Round(fraction*100)), m.thread.usage.ModelContextWindow)}
+	}
+	m.openConfirm(c)
+}
+
+func (m *model) openReviewPanel() {
+	m.openList(&listPanel{kind: "review", title: "Review changes", efforts: map[string]effortPick{}, items: []listItem{
+		{id: reviewUncommitted, label: "Uncommitted changes"},
+		{id: reviewBase, label: "Base branch"},
+		{id: reviewCommit, label: "Commit"},
+		{id: reviewCustom, label: "Custom"},
+	}})
+}
+
+const (
+	reviewUncommitted = "uncommittedChanges"
+	reviewBase        = "baseBranch"
+	reviewCommit      = "commit"
+	reviewCustom      = "custom"
+)
+
+func (m *model) reviewStart(target, text string) tea.Cmd {
+	params := rpc.ReviewStartParams{ThreadID: m.thread.id, Target: rpc.ReviewTarget{Type: target}}
+	switch target {
+	case reviewBase:
+		params.Target.Branch = text
+	case reviewCommit:
+		params.Target.SHA = text
+	case reviewCustom:
+		params.Target.Instructions = text
+	}
+	return m.call("review", "review/start", params, new(rpc.ReviewStartResponse), "")
 }
 
 func (m *model) advisorCommand(argument string) tea.Cmd {
 	params := rpc.DalgonaAdvisorStatusParams{ThreadID: m.thread.id}
 	switch argument {
 	case "":
-		return m.call("advisorToggle", "dalgona/advisor/status", params, new([]rpc.AdvisorState), "")
+		return m.call("advisorPanel", "dalgona/advisor/status", params, new([]rpc.AdvisorState), "")
 	case "status":
 		return m.call("advisorStatus", "dalgona/advisor/status", params, new([]rpc.AdvisorState), "")
 	case "reset":
@@ -158,8 +203,9 @@ var commands = []command{
 	{name: "login", args: "[provider]", summary: "Sign in to a provider"},
 	{name: "tree", summary: "Show the turns of this thread and move to one"},
 	{name: "revert", summary: "Revert this thread to before a turn"},
-	{name: "fork", summary: "Fork this thread at the last turn"},
+	{name: "fork", summary: "Fork this thread at a turn you pick"},
 	{name: "advisor", args: "[status|reset]", summary: "Turn the advisor on or off, show its status, or reset it"},
+	{name: "review", summary: "Review uncommitted changes, a branch, or a commit"},
 }
 
 type slashKind int

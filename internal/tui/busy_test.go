@@ -45,8 +45,8 @@ func TestThreadCommandsAllowedWhenIdle(t *testing.T) {
 	caller := new(fakeCaller)
 	m := newModel(caller, Options{}, nil)
 	m.thread.id = "t1"
-	if command := m.executeSlash("new", ""); command == nil {
-		t.Fatal("/new produced no RPC command while idle")
+	if command := m.executeSlash("new", ""); command != nil || m.confirm == nil {
+		t.Fatal("idle /new did not open the confirm panel")
 	}
 	if m.notice != "" {
 		t.Fatalf("idle /new set notice %q", m.notice)

@@ -121,13 +121,10 @@ func queueText(icons iconSet, n int) string {
 }
 
 func (m *model) contextText(icons iconSet) string {
-	usage := m.thread.usage
-	if usage.ModelContextWindow <= 0 {
+	fraction, ok := contextFraction(m.thread.usage)
+	if !ok {
 		return ""
 	}
-	last := usage.Last
-	used := last.InputTokens + last.CachedInputTokens + last.CacheWriteInputTokens + last.OutputTokens
-	fraction := min(1, max(0, float64(used)/float64(usage.ModelContextWindow)))
 	field := fmt.Sprintf("%3d%%", int(math.Round(fraction*100)))
 	if !icons.nerd {
 		return field

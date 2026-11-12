@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
+	"strconv"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -30,7 +32,7 @@ func (m *model) listRows() int {
 
 func (m *model) listPanelView() panelView {
 	list := m.list
-	indexes := list.visible(m.input.field.value())
+	indexes := list.visible(m.listQuery())
 	body := make([]string, 0, len(indexes))
 	for _, i := range indexes {
 		body = append(body, m.listLine(list.items[i]))
@@ -60,7 +62,7 @@ func (m *model) listLine(item listItem) string {
 }
 
 func (m *model) highlighted() (listItem, bool) {
-	indexes := m.list.visible(m.input.field.value())
+	indexes := m.list.visible(m.listQuery())
 	if m.list.cursor < 0 || m.list.cursor >= len(indexes) {
 		return listItem{}, false
 	}
@@ -68,7 +70,7 @@ func (m *model) highlighted() (listItem, bool) {
 }
 
 func (m *model) moveList(delta int) {
-	count := len(m.list.visible(m.input.field.value()))
+	count := len(m.list.visible(m.listQuery()))
 	if count == 0 {
 		m.list.cursor = 0
 		return
@@ -79,19 +81,30 @@ func (m *model) moveList(delta int) {
 func (m *model) listKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch key := msg.String(); key {
 	case "enter":
-		return m.activateChoice()
+		return m.listEnter()
 	case "esc":
 		m.escapeList()
 	case "tab":
 		m.cycleEffort(1)
 	case "shift+tab":
 		m.cycleEffort(-1)
+	case "ctrl+r":
+		if m.list.kind == "advisor" {
+			m.openConfirm(confirmation{kind: confirmAdvisorReset, title: "Reset the advisor?", action: "[enter] reset  [esc] keep"})
+		}
 	default:
 		if !m.listMove(key) {
 			m.listEdit(msg)
 		}
 	}
 	return nil
+}
+
+func (m *model) listEnter() tea.Cmd {
+	if m.list.pending != "" {
+		return m.sendReview()
+	}
+	return m.activateChoice()
 }
 
 func (m *model) listMove(key string) bool {
@@ -122,6 +135,12 @@ func (m *model) listEdit(msg tea.KeyPressMsg) {
 }
 
 func (m *model) escapeList() {
+	if m.list.pending != "" {
+		m.list.pending = ""
+		m.list.err = ""
+		m.input.field = textField{}
+		return
+	}
 	if m.input.field.value() != "" {
 		m.input.field = textField{}
 		m.list.cursor = 0
@@ -155,8 +174,13 @@ func (m *model) activateChoice() tea.Cmd {
 		return nil
 	}
 	kind := m.list.kind
-	if kind == "model" {
+	switch kind {
+	case "model":
 		return m.saveModel(item)
+	case "advisor":
+		return m.toggleAdvisor(item)
+	case "review":
+		return m.chooseReview(item)
 	}
 	m.closeList()
 	switch kind {
@@ -167,6 +191,9 @@ func (m *model) activateChoice() tea.Cmd {
 		return m.call("leaf", "dalgona/thread/leaf/set", params, nil, "")
 	case "revert":
 		m.openRevert(item.id, item.label)
+	case "fork":
+		params := rpc.ThreadForkParams{ThreadID: m.thread.id, LastTurnID: item.id}
+		return m.call("fork", "thread/fork", params, new(rpc.ThreadForkResponse), "")
 	}
 	return nil
 }
@@ -256,15 +283,21 @@ func (m *model) applyTree(op string, value any) tea.Cmd {
 		return m.unexpectedResult("thread tree")
 	}
 	kind, title := "tree", "choose the active branch"
-	if op == "revertTree" {
+	switch op {
+	case "revertTree":
 		kind, title = "revert", "revert before a turn"
+	case "forkTree":
+		kind, title = "fork", "fork at a turn"
 	}
 	items := make([]listItem, 0, len(response.Turns))
 	for _, turn := range response.Turns {
-		if op == "revertTree" && !turn.Active {
+		if op != "tree" && !turn.Active {
 			continue
 		}
 		items = append(items, listItem{id: sanitizeText(turn.TurnID), label: sanitizeText(turn.Preview), detail: sanitizeText(turn.TurnID), active: turn.Active})
+	}
+	if op == "forkTree" {
+		slices.Reverse(items)
 	}
 	if len(items) == 0 {
 		m.noticef("no turns are available on this path; send a prompt first")
@@ -310,4 +343,76 @@ func (p *listPanel) modelItem(item rpc.Model, label, activeModel, activeEffort s
 		}
 	}
 	return listItem{id: id, label: label, detail: sanitizeText(item.DisplayName), active: id == activeModel}
+}
+
+func (m *model) listQuery() string {
+	if m.list.pending != "" {
+		return ""
+	}
+	return m.input.field.value()
+}
+
+func (m *model) openAdvisorList(states []rpc.AdvisorState) {
+	items := make([]listItem, 0, len(states))
+	for _, state := range states {
+		items = append(items, listItem{id: sanitizeText(state.Name), label: sanitizeText(state.Name) + " · " + sanitizeText(state.Status), detail: advisorDetail(state), active: state.Status != "disabled"})
+	}
+	m.openList(&listPanel{kind: "advisor", title: "advisor", items: items, efforts: map[string]effortPick{}})
+}
+
+func advisorDetail(state rpc.AdvisorState) string {
+	return fmt.Sprintf("%s · %d notes · %d in / %d out tokens", cmp.Or(sanitizeText(state.Model), "default model"), state.Notes, state.Usage.InputTokens, state.Usage.OutputTokens)
+}
+
+func (m *model) toggleAdvisor(item listItem) tea.Cmd {
+	m.list.err = ""
+	enabled := !item.active
+	params := rpc.DalgonaAdvisorSetParams{ThreadID: m.thread.id, Enabled: enabled}
+	return m.call("advisorSet", "dalgona/advisor/set", params, nil, strconv.FormatBool(enabled))
+}
+
+func (m *model) chooseReview(item listItem) tea.Cmd {
+	if item.id == reviewUncommitted {
+		m.closeList()
+		return m.reviewStart(reviewUncommitted, "")
+	}
+	m.list.pending = item.id
+	m.list.err = ""
+	m.input.field = textField{}
+	return nil
+}
+
+func (m *model) sendReview() tea.Cmd {
+	m.list.err = ""
+	return m.reviewStart(m.list.pending, m.input.field.value())
+}
+
+func reviewLabel(target string) string {
+	switch target {
+	case reviewBase:
+		return "branch"
+	case reviewCommit:
+		return "commit"
+	}
+	return "instructions"
+}
+
+func (m *model) reviewFailed(msg resultMsg) bool {
+	if msg.op != "review" || m.list == nil || m.list.kind != "review" {
+		return false
+	}
+	m.list.err = sanitizeText(fmt.Sprintf("%v", msg.err))
+	return true
+}
+
+func (m *model) finishReview() {
+	if m.list != nil && m.list.kind == "review" {
+		m.closeList()
+	}
+}
+
+func (m *model) finishAdvisorList() {
+	if m.list != nil && m.list.kind == "advisor" {
+		m.closeList()
+	}
 }

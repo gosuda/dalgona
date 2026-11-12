@@ -17,6 +17,16 @@ type (
 		ThreadID string `json:"threadId"`
 		Enabled  bool   `json:"enabled"`
 	}
+	ReviewStartParams struct {
+		ThreadID string       `json:"threadId"`
+		Target   ReviewTarget `json:"target"`
+	}
+	ReviewTarget struct {
+		Type         string `json:"type"`
+		Branch       string `json:"branch,omitzero"`
+		SHA          string `json:"sha,omitzero"`
+		Instructions string `json:"instructions,omitzero"`
+	}
 
 	ThreadStatus struct {
 		Type        string   `json:"type"`

@@ -251,38 +251,63 @@ func firstEscArms(t *testing.T, m model, caller *fakeCaller) model {
 
 func TestModelSlashCommands(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
+	direct := []struct {
 		input  string
 		method string
 	}{
 		{input: "/model", method: "model/list"},
 		{input: "/model gpt-test", method: "config/value/write"},
 		{input: "/resume", method: "thread/list"},
-		{input: "/new", method: "thread/start"},
-		{input: "/compact", method: "thread/compact/start"},
 		{input: "/login openai", method: "account/login/start"},
 		{input: "/tree", method: "dalgona/thread/tree"},
 		{input: "/revert", method: "dalgona/thread/tree"},
-		{input: "/fork", method: "thread/fork"},
+		{input: "/fork", method: "dalgona/thread/tree"},
 	}
-	for _, test := range tests {
+	for _, test := range direct {
 		t.Run(test.input, func(t *testing.T) {
-			caller := new(fakeCaller)
-			m := newModel(caller, Options{}, nil)
-			m.thread.id = "t1"
+			caller, m := slashModel()
+			name, argument, _ := parseSlash(test.input)
+			checkCallResult(t, caller, m.executeSlash(name, argument), test.method)
+		})
+	}
+	confirmed := []struct {
+		input  string
+		method string
+	}{
+		{input: "/new", method: "thread/start"},
+		{input: "/compact", method: "thread/compact/start"},
+	}
+	for _, test := range confirmed {
+		t.Run(test.input, func(t *testing.T) {
+			caller, m := slashModel()
 			name, argument, _ := parseSlash(test.input)
 			command := m.executeSlash(name, argument)
-			if command == nil {
-				t.Fatal("slash command produced no RPC command")
+			if command != nil || m.confirm == nil {
+				t.Fatal("slash command must open a confirm panel before its request")
 			}
-			result := command()
-			if len(caller.calls) != 1 || caller.calls[0].method != test.method {
-				t.Fatalf("calls = %#v, want %s", caller.calls, test.method)
-			}
-			if _, ok := result.(resultMsg); !ok {
-				t.Fatalf("command result = %T, want resultMsg", result)
-			}
+			checkCallResult(t, caller, m.confirmKey("enter"), test.method)
 		})
+	}
+}
+
+func slashModel() (*fakeCaller, model) {
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.thread.id = "t1"
+	return caller, m
+}
+
+func checkCallResult(t *testing.T, caller *fakeCaller, command tea.Cmd, method string) {
+	t.Helper()
+	if command == nil {
+		t.Fatal("slash command produced no RPC command")
+	}
+	result := command()
+	if len(caller.calls) != 1 || caller.calls[0].method != method {
+		t.Fatalf("calls = %#v, want %s", caller.calls, method)
+	}
+	if _, ok := result.(resultMsg); !ok {
+		t.Fatalf("command result = %T, want resultMsg", result)
 	}
 }
 

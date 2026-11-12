@@ -57,11 +57,12 @@ func TestModelAdvisorCommands(t *testing.T) {
 	m.thread.id = "t1"
 	m.input.composer.SetValue("/advisor")
 	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
-	m, command = drive(t, m, command())
-	if command == nil || caller.calls[0].method != "dalgona/advisor/status" {
-		t.Fatalf("toggle did not follow the status read with a set call; calls %#v", caller.calls)
+	m = runCommand(t, m, command, "/advisor made no status read")
+	if m.list == nil || m.list.kind != "advisor" || caller.calls[0].method != "dalgona/advisor/status" {
+		t.Fatalf("/advisor did not open the advisor panel; calls %#v", caller.calls)
 	}
-	m, _ = drive(t, m, command())
+	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = runCommand(t, m, command, "toggle produced no command")
 	set, ok := caller.calls[1].params.(rpc.DalgonaAdvisorSetParams)
 	if caller.calls[1].method != "dalgona/advisor/set" || !ok || set.Enabled || set.ThreadID != "t1" {
 		t.Fatalf("toggle set call = %#v", caller.calls[1])

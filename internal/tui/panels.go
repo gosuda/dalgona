@@ -59,6 +59,7 @@ type listPanel struct {
 	err           string
 	efforts       map[string]effortPick
 	pendingEffort string
+	pending       string
 }
 
 func (p *listPanel) visible(query string) []int {

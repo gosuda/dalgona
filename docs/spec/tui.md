@@ -105,6 +105,8 @@ Esc MUST clear a non-empty filter. Esc MUST close the panel when the filter is e
 A list panel MUST lose its filter when another panel opens above it.
 The input line MUST show the filter while a list panel is open.
 The input line MUST show the first line of the draft while another panel is open, with the caret at its end.
+A confirm panel MUST show its title, its body, and its action row. It MUST NOT send a request before Enter.
+The review target input MUST show `branch:`, `commit:`, or `instructions:` as its label, and MUST hide the filter while it waits for text.
 
 The input line MUST show the mode of the top panel, as the table below gives.
 
@@ -199,18 +201,19 @@ Esc MUST close the palette and keep the draft. Typing a character MUST reopen it
 | Ctrl+C twice | Quits. With an empty draft, the first press shows `Ctrl+C again to exit` in the live row. With a non-empty draft, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. A second press within 2000 ms quits |
 | `/model [id]` | `model/list` list panel, or `config/value/write` key `model` |
 | `/resume [id]` | `thread/list` list panel, or `thread/resume` then `thread/read` |
-| `/new` | `thread/start` |
-| `/compact` | `thread/compact/start` |
+| `/new` | Opens a confirm panel titled `Start a new thread?`. Its body reads `<n> follow-ups move to it` when the queue holds follow-ups. Enter calls `thread/start`. Esc cancels |
+| `/compact` | Opens a confirm panel titled `Compact the context?`. Its body reads `ctx <pct>% of <window> tokens` when the window is known. Enter calls `thread/compact/start`. Esc cancels |
 | `/login <provider>` | `account/login/start`. It shows the returned URL and user code |
 | `/tree` | `dalgona/thread/tree` list panel. Enter calls `dalgona/thread/leaf/set` |
 | `/revert` | Active-path turns from `dalgona/thread/tree`. Enter opens a confirm panel, and its Enter calls `thread/revert`. Esc keeps the turn |
-| `/fork` | `thread/fork`, then resumes the new thread |
-| `/advisor` | `dalgona/advisor/status`, then `dalgona/advisor/set` with `enabled` true when no advisor is active and false otherwise. The notice says `advisor on` or `advisor off` |
+| `/fork` | `dalgona/thread/tree` lists the active-path turns, newest first. Enter calls `thread/fork` with the highlighted turn as `lastTurnId`, then resumes the new thread |
+| `/advisor` | `dalgona/advisor/status` opens an advisor list. Enter calls `dalgona/advisor/set` for the highlighted advisor, enabling it when disabled and disabling it otherwise. Ctrl+R opens a confirm panel titled `Reset the advisor?`, whose Enter calls `dalgona/advisor/reset`. The notice says `advisor on` or `advisor off`. The list closes after a toggle or a reset |
 | `/advisor status` | `dalgona/advisor/status`. It writes one notice line per advisor with its name, status, model, notes, and token usage |
 | `/advisor reset` | `dalgona/advisor/reset` |
+| `/review` | `review/start`. The list `Review changes` offers `Uncommitted changes`, which starts at once, and `Base branch`, `Commit`, and `Custom`, which take the text of the input line before Enter sends it. The review runs as a turn on the thread |
 | `//text` | Sends `/text` as a prompt. A first token that holds a second `/`, such as a path, sends the whole text as a prompt |
 
-While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, and `/revert` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
+While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, `/revert`, and `/review` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
 
 `turn/steer` sends `expectedTurnId` set to the active turn.
 

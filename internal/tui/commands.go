@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
-	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -285,7 +283,7 @@ func (m *model) applyPreludeResult(msg resultMsg) (tea.Cmd, bool) {
 
 func (m *model) applySuccessResult(msg resultMsg) tea.Cmd {
 	switch msg.op {
-	case "keywords", "models", "threads", "tree", "revertTree", "resumed", "new", "fork":
+	case "keywords", "models", "threads", "tree", "revertTree", "forkTree", "resumed", "new", "fork":
 		return m.applyDataResult(msg)
 	case "send", "followup":
 		return m.applyTurnAccepted(msg.value)
@@ -330,7 +328,7 @@ func (m *model) applyDataResult(msg resultMsg) tea.Cmd {
 		return m.applyModels(msg.value)
 	case "threads":
 		return m.applyThreads(msg.value)
-	case "tree", "revertTree":
+	case "tree", "revertTree", "forkTree":
 		return m.applyTree(msg.op, msg.value)
 	case "resumed":
 		return m.applyResumed(msg.value)
@@ -345,28 +343,49 @@ func (m *model) applyDataResult(msg resultMsg) tea.Cmd {
 
 func (m *model) applyAdvisorResult(msg resultMsg) tea.Cmd {
 	if msg.err != nil {
-		m.errorf("%s", advisorFailure(msg.err))
+		m.advisorFailed(msg.err)
 		return nil
 	}
 	states, _ := msg.value.(*[]rpc.AdvisorState)
 	switch msg.op {
-	case "advisorToggle", "advisorStatus":
+	case "advisorPanel":
 		if states == nil {
 			return m.unexpectedResult("advisor status")
 		}
-		if msg.op == "advisorToggle" {
-			return m.toggleAdvisor(*states)
+		if len(*states) == 0 {
+			m.noticef("%s", advisorStatusText(*states))
+			return nil
+		}
+		m.openAdvisorList(*states)
+	case "advisorStatus":
+		if states == nil {
+			return m.unexpectedResult("advisor status")
 		}
 		m.noticef("%s", advisorStatusText(*states))
 	case "advisorSet":
-		m.noticef("advisor off; run /advisor to turn it back on")
-		if msg.text == "true" {
-			m.noticef("advisor on; it reviews after each turn")
-		}
+		m.advisorToggled(msg.text == "true")
 	case "advisorReset":
+		m.finishAdvisorList()
 		m.noticef("advisor reset; it reviews the current branch at the next turn")
 	}
 	return nil
+}
+
+func (m *model) advisorFailed(err error) {
+	if m.list != nil && m.list.kind == "advisor" {
+		m.list.err = advisorFailure(err)
+		return
+	}
+	m.errorf("%s", advisorFailure(err))
+}
+
+func (m *model) advisorToggled(enabled bool) {
+	m.finishAdvisorList()
+	if enabled {
+		m.noticef("advisor on; it reviews after each turn")
+		return
+	}
+	m.noticef("advisor off; run /advisor to turn it back on")
 }
 
 func advisorFailure(err error) string {
@@ -374,12 +393,6 @@ func advisorFailure(err error) string {
 		return "advisor unavailable: " + rpcErr.Message + "; set [advisor] enabled = true in config.toml, then restart dalgona"
 	}
 	return fmt.Sprintf("advisor request failed: %v; retry the /advisor command", err)
-}
-
-func (m *model) toggleAdvisor(states []rpc.AdvisorState) tea.Cmd {
-	enabled := !slices.ContainsFunc(states, func(state rpc.AdvisorState) bool { return state.Status != "disabled" })
-	params := rpc.DalgonaAdvisorSetParams{ThreadID: m.thread.id, Enabled: enabled}
-	return m.call("advisorSet", "dalgona/advisor/set", params, nil, strconv.FormatBool(enabled))
 }
 
 func advisorStatusText(states []rpc.AdvisorState) string {
@@ -397,11 +410,9 @@ func advisorStatusText(states []rpc.AdvisorState) string {
 func (m *model) applyConfirmation(msg resultMsg) tea.Cmd {
 	switch msg.op {
 	case "interrupt":
-		if msg.turnID != m.thread.turnID {
-			return nil
-		}
-		m.setState(stateInterrupted)
-		m.noticef("interrupt requested; wait for turn completion before sending")
+		return m.applyInterrupt(msg)
+	case "review":
+		m.finishReview()
 	case "compact":
 		m.noticef("compaction started; wait for the context compaction item")
 	case "revert":
@@ -418,8 +429,20 @@ func (m *model) applyConfirmation(msg resultMsg) tea.Cmd {
 	return nil
 }
 
+func (m *model) applyInterrupt(msg resultMsg) tea.Cmd {
+	if msg.turnID != m.thread.turnID {
+		return nil
+	}
+	m.setState(stateInterrupted)
+	m.noticef("interrupt requested; wait for turn completion before sending")
+	return nil
+}
+
 func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 	if m.saveFailed(msg) {
+		return nil
+	}
+	if m.reviewFailed(msg) {
 		return nil
 	}
 	if msg.op == "send" || msg.op == "steer" {

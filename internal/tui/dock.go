@@ -71,6 +71,9 @@ func (m *model) inputRows(width, limit int) ([]string, int, int) {
 
 func (m *model) textMode() inputMode {
 	if len(m.approvals) == 0 && m.confirm == nil && m.list != nil {
+		if m.list.pending != "" {
+			return inputTarget
+		}
 		return inputFilter
 	}
 	return m.input.mode
@@ -94,7 +97,7 @@ func (m *model) draftLine(width int) (string, int) {
 }
 
 func (m *model) fieldLine(mode inputMode, width int) (string, int) {
-	label := inputLabel(mode)
+	label := m.fieldLabel(mode)
 	text := m.input.field.text
 	if mode == inputAPIKey {
 		text = []rune(strings.Repeat("*", len(text)))
@@ -102,6 +105,13 @@ func (m *model) fieldLine(mode inputMode, width int) (string, int) {
 	room := terminalWidth(width) - m.screen.cells(label)
 	window, caret := fieldWindow(&m.screen, text, m.input.field.cursor, room)
 	return m.screen.fit(label+window, terminalWidth(width)), m.screen.cells(label) + caret
+}
+
+func (m *model) fieldLabel(mode inputMode) string {
+	if mode == inputTarget {
+		return reviewLabel(m.list.pending) + ": "
+	}
+	return inputLabel(mode)
 }
 
 func fieldWindow(s *screenState, text []rune, cursor, room int) (string, int) {
