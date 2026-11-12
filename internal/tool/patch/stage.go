@@ -62,6 +62,10 @@ func stage(ctx context.Context, style Style, edits []edit, env tool.Env) (staged
 	if err != nil {
 		return stagedBatch{}, err
 	}
+	if err := checkOmissions(files); err != nil {
+		closeFiles(files)
+		return stagedBatch{}, err
+	}
 	if len(files) == 0 && !style.profile() {
 		return stagedBatch{}, errors.New("patch: the edits produce no change")
 	}

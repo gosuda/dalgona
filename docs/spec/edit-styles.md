@@ -73,6 +73,19 @@ The store MUST record exact splices for sound line edits. A span insertion at it
 
 A gap MUST survive only while both original neighbors remain adjacent. An insertion at the same gap MUST conflict. A changed neighbor MUST conflict. A later undo MUST NOT revive a conflict. Missing history, an external digest change, or an unsound splice MUST end the usable lineage.
 
+## Omission placeholders
+
+A write MUST NOT stand in for omitted code with a comment that holds an ellipsis.
+An ellipsis is three periods or the character U+2026.
+A comment is a placeholder when its text holds only dots or brackets.
+A comment is also a placeholder when its text starts with a listed phrase. A space or the end of the text MUST follow the phrase.
+The phrases are `rest of`, `existing code`, `existing implementation`, `existing methods`, `remaining code`, `remaining implementation`, `remaining methods`, `unchanged`, and `previous code`.
+The phrases are also `same as before`, `code omitted`, `implementation omitted`, `omitted`, `other methods`, `keep existing`, `keep the rest`, and `etc`.
+The comment prefixes MUST be `//`, `#`, `--`, `;`, `/*`, `(*`, or `<!--`.
+A placeholder MUST be refused only when the old file holds fewer copies of the same line.
+Files with the extensions `.md`, `.markdown`, `.mdx`, `.rst`, `.txt`, and `.adoc` MUST NOT be checked.
+A refused call MUST name the file and the line, and MUST write nothing.
+
 ## Planning and recovery
 
 `Plan` MUST calculate every pre-image and post-image before any write. It MUST set `PreSHA` and `PostSHA` to SHA-256 hex. An absent file MUST have an empty pre-state. A deleted file MUST have an empty post-state. `Pre` MUST contain exact pre-image bytes.
