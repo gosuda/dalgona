@@ -103,7 +103,7 @@ Each connection subscribes to every thread that it starts, resumes, or changes. 
 | `child.spawned` | `dalgona/thread/childSpawned {threadId, childId, cwd}` |
 | `advisor.note` | a completed `dynamicToolCall` item with tool `advisor`, and `dalgona/advisor/note {threadId, advisor, severity, note, delivery}` |
 
-Tool kinds: class `exec` gives `commandExecution`; class `edit` gives `fileChange` with one change per file; class `remote` gives `mcpToolCall` (tool name `<server>__<tool>`); every other tool gives `dynamicToolCall`. A call that completes without a start and with a `decline` or `cancel` decision has status `declined` for `commandExecution` and `fileChange` and `failed` for other kinds. Its output is the decline reason.
+Tool kinds: class `exec` gives `commandExecution`; class `edit` gives `fileChange` with one change per file; class `remote` gives `mcpToolCall` (tool name `<server>__<tool>` after the MCP name rule); every other tool gives `dynamicToolCall`. A call that completes without a start and with a `decline` or `cancel` decision has status `declined` for `commandExecution` and `fileChange` and `failed` for other kinds. Its output is the decline reason.
 
 A file change carries the per-file section of the patch text. A file without a pre-image is `add`. A file without a post-image is `delete`.
 

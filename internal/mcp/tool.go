@@ -73,7 +73,7 @@ func (c *Client) adaptTool(raw []byte) (tool.Tool, error) {
 		client: c,
 		name:   name,
 		spec: tool.Spec{
-			Name:        c.cfg.Name + "__" + name,
+			Name:        toolName(c.cfg.Name, name),
 			Description: description,
 			Schema:      schema,
 		},

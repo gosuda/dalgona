@@ -40,7 +40,7 @@ An HTTP 404 response for an active session MUST start a replacement session and 
 
 The client MUST request `tools/list` until `nextCursor` is absent or empty. Each later request MUST include the returned cursor. A repeated cursor MUST fail discovery.
 
-Each server tool MUST become a tool named `<server>__<tool>`. Its class MUST be `ClassRemote`. Its `inputSchema` MUST pass through without modification. A tool definition MUST have a nonempty name and an object schema.
+Each server tool MUST become a tool named `<server>__<tool>`. A name with a character outside `[A-Za-z0-9_-]`, a first character other than a letter or `_`, or more than 64 bytes MUST be rewritten. Each bad character MUST become `_`. A first character other than a letter or `_` MUST gain a leading `_`. A rewritten name MUST keep at most 55 leading bytes, then add `_` and the first 8 hex digits of SHA-256 of the original `<server>__<tool>`. `tools/call` MUST send the original tool name. Its class MUST be `ClassRemote`. Its `inputSchema` MUST pass through without modification. A tool definition MUST have a nonempty name and an object schema.
 
 ## Tool calls
 
