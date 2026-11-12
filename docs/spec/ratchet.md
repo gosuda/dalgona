@@ -163,3 +163,48 @@ The train view MUST NOT list a row or a trace of a test case.
 The train view MUST give each train case its target mean for every gated variant, or none when the variant lacks it.
 
 The status table MUST mark the best round with `(best)`.
+
+## Tool
+
+The `ratchet` tool MUST run only on the local runner. It MUST refuse any other runner.
+
+Each call MUST name one action. The action MUST be `init`, `plan`, `split`, `approve`, `check`, `gate`, `train`, or `status`.
+
+The tool MUST refuse a member that the action does not take, and MUST name the member.
+
+Calls on one flow MUST run one at a time. The `approve` action MUST wait for the user without holding that lock.
+
+The `approve` action MUST ask about the digest of its stage, and MUST record an approval only when that digest is still the same.
+
+The `approve` action MUST return `asked` false, and MUST NOT ask, when its stage is already current.
+
+The `approve` action MUST return `declined: ratchet approvals need an interactive client` when no client is attached.
+
+The `approve` action MUST return `cancelled: the question was closed; nothing was recorded` when the user cancels.
+
+The `approve` action MUST record nothing on abort, and MUST return the feedback text on revise.
+
+The `split` action MUST derive its seed from the call id when the call gives no seed.
+
+The `gate` action MUST require a summary of at most 200 characters, except for the baseline.
+
+The `status` action MUST return the approvals, the best round, the done state, and the round table.
+
+The tool MUST accept the arguments of the schema `schemaJSON` in `internal/ratchet/tool.go`.
+
+The tool MUST accept the `action` and `flow` members for every action.
+
+The tool MUST return JSON text with the keys of the table below for each action.
+
+| Action | Members it takes | Keys of its result |
+|---|---|---|
+| `init` | `cases`, `harness`, `change`, `off_limits` | `cases`, `change`, `dir`, `flow`, `harness`, `off_limits` |
+| `plan` | `target`, `direction`, `hold`, `directions`, `reps`, `plateau`, `rounds`, `command` | `command`, `goal`, `reps`, `stop` |
+| `split` | `strata`, `test_fraction`, `seed` | `seed`, `strata`, `test`, `train` |
+| `approve` | `stage`, `question`, `preview` | `approved`, `asked`, `sha`, `stage` on approval |
+| `approve` (abort) | `stage`, `question`, `preview` | `aborted`, `approved`, `asked`, `stage` |
+| `approve` (revise) | `stage`, `question`, `preview` | `approved`, `asked`, `feedback`, `stage` |
+| `check` | `variant` | `changed_files`, `command`, `expected_rows`, `out_dir`, `reps`, `variant` |
+| `gate` | `variant`, `summary` | `best`, `changed_files`, `decision`, `deltas`, `done`, `done_reason`, `flat_rounds`, `plateau`, `reasons`, `table`, `test`, `train`, `variant`, `warnings` |
+| `train` | `variant` | `history`, `rows`, `traces`, `variant` |
+| `status` | none | `approvals`, `best`, `done`, `done_reason`, `flat_rounds`, `flow`, `plateau`, `table` |

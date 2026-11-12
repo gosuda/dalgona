@@ -18,36 +18,36 @@ const variantPattern = `^(baseline|v[1-9][0-9]{0,3})$`
 var variantName = regexp.MustCompile(variantPattern)
 
 type checkResult struct {
-	Variant      string   `json:"variant"`
+	ChangedFiles []string `json:"changed_files"`
 	Command      string   `json:"command"`
 	ExpectedRows int      `json:"expected_rows"`
 	OutDir       string   `json:"out_dir"`
 	Reps         int      `json:"reps"`
-	ChangedFiles []string `json:"changed_files"`
+	Variant      string   `json:"variant"`
 }
 
 type gateResult struct {
-	Variant      string             `json:"variant"`
-	Decision     string             `json:"decision"`
-	Reasons      []string           `json:"reasons"`
-	Warnings     []string           `json:"warnings"`
-	Deltas       map[string]pair    `json:"deltas"`
-	Train        map[string]summary `json:"train"`
-	Test         map[string]summary `json:"test"`
 	Best         *bestRound         `json:"best"`
-	Plateau      bool               `json:"plateau"`
+	ChangedFiles []string           `json:"changed_files"`
+	Decision     string             `json:"decision"`
+	Deltas       map[string]pair    `json:"deltas"`
 	Done         bool               `json:"done"`
 	DoneReason   string             `json:"done_reason"`
 	FlatRounds   int                `json:"flat_rounds"`
-	ChangedFiles []string           `json:"changed_files"`
+	Plateau      bool               `json:"plateau"`
+	Reasons      []string           `json:"reasons"`
 	Table        string             `json:"table"`
+	Test         map[string]summary `json:"test"`
+	Train        map[string]summary `json:"train"`
+	Variant      string             `json:"variant"`
+	Warnings     []string           `json:"warnings"`
 }
 
 type trainView struct {
-	Variant string                         `json:"variant"`
+	History map[string]map[string]*float64 `json:"history"`
 	Rows    []jsontext.Value               `json:"rows"`
 	Traces  []string                       `json:"traces"`
-	History map[string]map[string]*float64 `json:"history"`
+	Variant string                         `json:"variant"`
 }
 
 type outcome struct {
