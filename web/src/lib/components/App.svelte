@@ -159,10 +159,6 @@ const openThreadFlags = $derived(
 			height: auto;
 			min-height: 100dvh;
 		}
-
-		:global(.sidebar) {
-			max-height: 18rem;
-		}
 	}
 
 	@media (max-width: 40rem) {

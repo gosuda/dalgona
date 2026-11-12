@@ -87,7 +87,7 @@ The page holds one `Session`, which owns the connection and the page state.
 ### Layout
 
 - Above 52rem the page has two columns, the thread list and the workspace. The workspace holds the status bar, the thread heading, the transcript, and the composer. The transcript scrolls inside its own column.
-- At 52rem or narrower the page stacks the parts and the document scrolls. The thread list keeps a maximum height of 18rem.
+- At 52rem or narrower the page stacks the parts and the document scrolls. At 52rem or narrower the thread list (not the sidebar) keeps a maximum height of 18rem and scrolls.
 - The open thread has an inline-start bar and a strong title as well as its fill, so it stays distinct under forced colours.
 - At 320px nothing MUST clip or scroll sideways.
 - The transcript follows new output only while the reader is within 32px of its end. It follows the transcript at wide widths and the window at narrow widths. Opening a thread follows its end.

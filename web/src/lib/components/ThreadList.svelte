@@ -71,7 +71,8 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 			<p>Start a thread to give the agent a task.</p>
 		</div>
 	{:else}
-		<nav aria-label="Conversation threads">
+		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+		<nav aria-label="Conversation threads" tabindex="0">
 			<ul>
 				{#each threads as thread (thread.id)}
 					{@const key = rowKey(thread)}
@@ -320,6 +321,12 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 			border-inline-end: 0;
 			border-block-end: 1px solid var(--line);
 			padding: var(--space-4);
+		}
+
+		nav {
+			max-height: 18rem;
+			overflow-y: auto;
+			overscroll-behavior: contain;
 		}
 
 		.brand {
