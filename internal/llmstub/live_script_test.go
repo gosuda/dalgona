@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"testing"
 
 	jsontext "encoding/json/jsontext"
@@ -132,5 +133,25 @@ func TestLiveScriptRoutesScriptedRequests(t *testing.T) {
 				t.Fatalf("first matching turn = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLiveSubagentTurnYields(t *testing.T) {
+	t.Parallel()
+	turns := loadLiveScript(t).Turns
+	view, err := decodeRequest([]byte(`{"messages":[{"role":"user","content":"helper task: count files"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := firstMatch(turns, view)
+	index := slices.IndexFunc(turns, func(turn Turn) bool { return turn.ID == id })
+	if index < 0 {
+		t.Fatal("no scripted turn answers the subagent request")
+	}
+	yields := slices.ContainsFunc(turns[index].Steps, func(step Step) bool {
+		return step.ToolCall != nil && step.ToolCall.Name == "yield"
+	})
+	if !yields {
+		t.Fatalf("subagent turn %s never calls yield, so the child ends as subagent ended without yield", id)
 	}
 }

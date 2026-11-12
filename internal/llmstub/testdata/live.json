@@ -1943,10 +1943,16 @@
    },
    "steps": [
     {
-     "text": "There are 5 files."
+     "tool_call": {
+      "id": "call-child-yield",
+      "name": "yield",
+      "arguments": {
+       "data": "There are 5 files."
+      }
+     }
     },
     {
-     "finish": "stop"
+     "finish": "tool_calls"
     }
    ]
   }
