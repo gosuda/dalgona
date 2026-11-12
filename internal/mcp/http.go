@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-// source: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
 var errSessionExpired = errors.New("MCP session expired")
 
 type httpTransport struct {
@@ -231,7 +230,6 @@ func (t *httpTransport) Close() error {
 	return nil
 }
 
-// source: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
 func (t *httpTransport) deleteSession() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

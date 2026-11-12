@@ -28,6 +28,8 @@ Closing the client MUST close standard input, terminate the whole process group,
 
 ## Streamable HTTP transport
 
+The Streamable HTTP transport MUST follow the MCP transports specification at `https://modelcontextprotocol.io/specification/2025-11-25/basic/transports`.
+
 Every message MUST use an HTTP POST to the configured URL. The client MUST send `Content-Type: application/json` and `Accept: application/json, text/event-stream`.
 
 After initialization, every request MUST contain `MCP-Protocol-Version: 2025-11-25`. When the server supplies `Mcp-Session-Id`, every later request MUST contain the same value. The session identifier MUST contain only visible ASCII bytes.
@@ -43,6 +45,8 @@ Closing the HTTP client MUST send an HTTP DELETE with `Mcp-Session-Id` when a se
 The error for a non-2xx response MUST contain at most the first 8192 bytes of the response body.
 
 ## Tool discovery
+
+Tool discovery and tool calls MUST follow the MCP server tools specification at `https://modelcontextprotocol.io/specification/2025-11-25/server/tools`.
 
 The client MUST request `tools/list` until `nextCursor` is absent or empty. Each later request MUST include the returned cursor. A repeated cursor MUST fail discovery.
 

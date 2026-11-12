@@ -10,7 +10,6 @@ import (
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
-// source: https://modelcontextprotocol.io/specification/2025-11-25/server/tools
 type serverTool struct {
 	client *Client
 	name   string
