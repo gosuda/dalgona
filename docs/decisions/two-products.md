@@ -6,6 +6,8 @@
 
 Each product MUST use its own home. `dal` MUST use `$DAL_HOME` or `~/.dal`. `dalgona` MUST use `$DALGONA_HOME` or `~/.dalgona`. Config MUST reject a dalgona-only setting in dal.
 
+A relative `$DAL_HOME` or `$DALGONA_HOME` is made absolute by `config.AnchorHome`, and `Load` rejects a relative home. If the user home directory is unknown, the home is the relative `.dal` or `.dalgona` directory.
+
 ## Scope
 
 This decision applies to `cmd/dal`, `cmd/dalgona`, and `internal/config`. [README.md](../../README.md) defines the product names. [config.md](../spec/config.md) defines the config boundary.
