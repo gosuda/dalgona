@@ -130,11 +130,16 @@ func makeResult(result outcome, store *snapshot.Store) tool.Result {
 }
 
 func Main(argv []string, stdout io.Writer) int {
-	if len(argv) != 1 {
-		_, _ = fmt.Fprint(stdout, "usage: __search <json-arguments>")
+	if len(argv) != 1 && len(argv) != 5 {
+		_, _ = fmt.Fprint(stdout, "usage: __search <json-arguments> [<root> <generation> <now-ns> <racy-ns>]")
 		return 2
 	}
 	parsed, err := parseArgs(jsontext.Value(argv[0]))
+	if err != nil {
+		_, _ = fmt.Fprint(stdout, err)
+		return 2
+	}
+	dir, clock, err := parseIndexArgs(argv[1:])
 	if err != nil {
 		_, _ = fmt.Fprint(stdout, err)
 		return 2
@@ -144,9 +149,12 @@ func Main(argv []string, stdout io.Writer) int {
 		_, _ = fmt.Fprint(stdout, err)
 		return 2
 	}
-	result, err := execute(cwd, parsed)
+	result, err := execute(cwd, parsed, dir, clock)
 	if err != nil {
 		_, _ = fmt.Fprint(stdout, err)
+		if errors.Is(err, errIndex) {
+			return indexFailedStatus
+		}
 		return 2
 	}
 	if _, err := stdout.Write(encodeOutcome(result)); err != nil {

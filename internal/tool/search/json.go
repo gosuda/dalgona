@@ -29,8 +29,9 @@ type capture struct {
 }
 
 type outcome struct {
-	Text     string
-	Captures []capture
+	Text      string
+	Captures  []capture
+	Unindexed int
 }
 
 func eachField(raw jsontext.Value, visit func(key string, value jsontext.Value) error) error {
@@ -216,7 +217,10 @@ func encodeOutcome(result outcome) []byte {
 		}
 		out = append(out, `]}`...)
 	}
-	out = append(out, `]}`...)
+	out = append(out, ']')
+	out = append(out, `,"unindexed":`...)
+	out = strconv.AppendInt(out, int64(result.Unindexed), 10)
+	out = append(out, '}')
 	return out
 }
 
@@ -229,6 +233,8 @@ func decodeOutcome(data []byte) (outcome, error) {
 			result.Text, fieldErr = stringArg(value)
 		case "captures":
 			result.Captures, fieldErr = decodeCaptures(value)
+		case "unindexed":
+			result.Unindexed, fieldErr = intArg(value)
 		default:
 			fieldErr = fmt.Errorf("unknown field %q", key)
 		}

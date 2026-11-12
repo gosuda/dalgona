@@ -37,11 +37,11 @@ func BenchmarkWalkScopeFind(b *testing.B) {
 	root := b.TempDir()
 	writeDeepTree(b, root, 20000, 2000)
 	parsed := args{Mode: "find", Pattern: "no-such-name", Path: ".", Limit: 1}
-	if _, err := execute(root, parsed); err != nil {
+	if _, err := execute(root, parsed, "", freshness{}); err != nil {
 		b.Fatal(err)
 	}
 	benchSamples(b, nil, func() {
-		if _, err := execute(root, parsed); err != nil {
+		if _, err := execute(root, parsed, "", freshness{}); err != nil {
 			b.Fatal(err)
 		}
 	})

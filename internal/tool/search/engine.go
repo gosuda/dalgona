@@ -36,7 +36,7 @@ type grepFile struct {
 	starts []int
 }
 
-func execute(cwd string, args args) (outcome, error) {
+func execute(cwd string, args args, dir string, clock freshness) (outcome, error) {
 	scope, err := resolveScope(cwd, args.Path)
 	if err != nil {
 		return outcome{}, err
@@ -48,7 +48,7 @@ func execute(cwd string, args args) (outcome, error) {
 	if args.Mode == "find" {
 		return find(entries, args)
 	}
-	return grep(entries, args)
+	return grep(entries, args, dir, clock)
 }
 
 func resolveScope(cwd, raw string) (string, error) {
@@ -223,7 +223,7 @@ func find(entries []fileEntry, args args) (outcome, error) {
 	return outcome{Text: strings.Join(paths, "\n")}, nil
 }
 
-func grep(entries []fileEntry, args args) (outcome, error) {
+func grep(entries []fileEntry, args args, dir string, clock freshness) (outcome, error) {
 	matcher, err := grepRegexp(args)
 	if err != nil {
 		return outcome{}, err
@@ -232,8 +232,15 @@ func grep(entries []fileEntry, args args) (outcome, error) {
 	if err != nil {
 		return outcome{}, err
 	}
+	filter, err := openTrigramFilter(dir, grepPattern(args), clock)
+	if err != nil {
+		return outcome{}, err
+	}
+	files, counted := planReads(files, filter)
 	scanned, kept, total := collectMatches(files, matcher, args.Limit)
-	return renderGrep(scanned, kept, total, args.Pattern), nil
+	out := renderGrep(scanned, kept, total, args.Pattern)
+	out.Unindexed = counted
+	return out, nil
 }
 
 const grepWorkers = 8
@@ -275,7 +282,7 @@ func collectMatches(files []fileEntry, matcher *regexp.Regexp, limit int) ([]gre
 	return scanned, kept, total
 }
 
-func grepRegexp(args args) (*regexp.Regexp, error) {
+func grepPattern(args args) string {
 	pattern := args.Pattern
 	if args.Literal {
 		pattern = regexp.QuoteMeta(pattern)
@@ -283,7 +290,11 @@ func grepRegexp(args args) (*regexp.Regexp, error) {
 	if args.IgnoreCase {
 		pattern = "(?i)" + pattern
 	}
-	re, err := regexp.Compile(pattern)
+	return pattern
+}
+
+func grepRegexp(args args) (*regexp.Regexp, error) {
+	re, err := regexp.Compile(grepPattern(args))
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}

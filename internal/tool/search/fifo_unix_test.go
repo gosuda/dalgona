@@ -18,7 +18,7 @@ func TestSearchSkipsFIFO(t *testing.T) {
 	done := make(chan outcome, 1)
 	failed := make(chan error, 1)
 	go func() {
-		out, err := execute(cwd, args{Mode: "grep", Pattern: "nothing", Limit: 100})
+		out, err := execute(cwd, args{Mode: "grep", Pattern: "nothing", Limit: 100}, "", freshness{})
 		if err != nil {
 			failed <- err
 			return

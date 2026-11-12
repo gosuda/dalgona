@@ -149,7 +149,7 @@ func (r *fakeProcessRunner) Start(ctx context.Context, spec runner.ProcessSpec) 
 	if err != nil {
 		return err
 	}
-	result, err := execute(spec.Dir, parsed)
+	result, err := execute(spec.Dir, parsed, "", freshness{})
 	if err != nil {
 		return err
 	}

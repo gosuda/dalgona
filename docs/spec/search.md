@@ -24,6 +24,18 @@ Only the parent MUST publish a generation, by an atomic rename of `CURRENT`, aft
 
 On platforms without change times, including Windows, the index MUST NOT be built or used. The builder MUST run in the sandbox of the search call.
 
+A grep call with an index MUST return the same output as a grep call without one. The index MUST let the search skip a file only when its trigram query cannot match the file.
+
+A file MUST count as covered only when its size, modification time and change time equal its manifest record. A covered file MUST have both times more than 2 seconds older than the build start.
+
+The search MUST read every file when its clock is earlier than the build start. A file without a covering record MUST be read as it is without an index.
+
+A file that the last build did not index MUST NOT count toward the build threshold while its stat is unchanged.
+
+The find mode MUST NOT use an index. The search child MUST exit with status 1 only when the index is unusable.
+
+The search child MUST treat a generation deleted during the call as no index. The search child MUST write nothing to standard error when it succeeds. The search MUST NOT show the unindexed byte count to the model.
+
 ## Fuzzy file search
 
 The `fuzzyFileSearch` method MUST list regular files under each requested root and MUST NOT list directories.
