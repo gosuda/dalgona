@@ -192,6 +192,7 @@ func sandboxName(mode string) string {
 type loginRequest struct {
 	provider string
 	apiKey   string
+	device   bool
 }
 
 func (env CLIEnv) login(ctx context.Context, args []string) error {
@@ -216,14 +217,15 @@ func (env CLIEnv) parseLogin(args []string) (loginRequest, error) {
 	fs := flag.NewFlagSet(string(env.Product)+" login", flag.ContinueOnError)
 	fs.SetOutput(env.Stderr)
 	fs.StringVar(&request.apiKey, "api-key", "", "store `key` for an API-key provider without a prompt")
+	fs.BoolVar(&request.device, "device-auth", false, "sign in to chatgpt with a device code on a host without a browser")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return request, err
 		}
 		return request, errUsage
 	}
-	if fs.NArg() > 0 || (request.apiKey != "" && request.provider == "") {
-		fmt.Fprintf(env.Stderr, "usage: %s login [provider] [--api-key key]\n", env.Product)
+	if fs.NArg() > 0 || ((request.apiKey != "" || request.device) && request.provider == "") {
+		fmt.Fprintf(env.Stderr, "usage: %s login [provider] [--api-key key] [--device-auth]\n", env.Product)
 		return request, errUsage
 	}
 	return request, nil
@@ -232,6 +234,9 @@ func (env CLIEnv) parseLogin(args []string) (loginRequest, error) {
 func (r loginRequest) check() error {
 	if r.apiKey != "" && !slices.Contains(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), r.provider) {
 		return fmt.Errorf("login %s: --api-key works only for %s", r.provider, strings.Join(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), ", "))
+	}
+	if r.device && r.provider != "chatgpt" {
+		return fmt.Errorf("login %s: --device-auth works only for chatgpt", r.provider)
 	}
 	return nil
 }
@@ -249,9 +254,12 @@ func (env CLIEnv) localLogin(ctx context.Context, request loginRequest) error {
 		env.listProviders(signedIn)
 		return nil
 	}
-	if request.apiKey != "" {
+	switch {
+	case request.apiKey != "":
 		err = store.SetAPIKey(request.provider, request.apiKey)
-	} else {
+	case request.device:
+		err = LoginDevice(ctx, store, request.provider, env.Stdout)
+	default:
 		err = Login(ctx, store, request.provider, env.Stdin, env.Stdout)
 	}
 	if err != nil {
@@ -329,7 +337,7 @@ func (env CLIEnv) readAPIKey(request loginRequest) (string, error) {
 
 func (env CLIEnv) printLoginPrompt(provider string, started rpc.LoginAccountResponse) {
 	if started.UserCode != "" {
-		fmt.Fprintf(env.Stdout, "Open %s and enter the code %s to log in to %s.\n", started.VerificationURL, started.UserCode, provider)
+		printDeviceCode(env.Stdout, provider, started.VerificationURL, started.UserCode)
 		return
 	}
 	fmt.Fprintf(env.Stdout, "Open this URL to log in to %s:\n%s\n", provider, started.AuthURL)

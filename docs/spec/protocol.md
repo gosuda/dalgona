@@ -151,4 +151,4 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
 - `--resume <id>` and `-c` (latest thread) select a thread. With `-p ""`, the command waits for a recovered turn and does not start a new turn.
 - `-m`, `--approval auto|ask|yolo`, `--sandbox workspace-write|off` apply to a new thread. `-C <dir>` changes the working directory first.
 - In `-p` mode the client declines every approval request.
-- `login [provider]`, `logout <provider>`, and `models` complete without the TUI. `login` without a provider lists the providers.
+- `login [provider] [--device-auth]`, `logout <provider>`, and `models` complete without the TUI. `login` without a provider lists the providers.

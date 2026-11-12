@@ -35,6 +35,21 @@ func Login(ctx context.Context, store *auth.Store, provider string, in io.Reader
 	}
 }
 
+func LoginDevice(ctx context.Context, store *auth.Store, provider string, out io.Writer) error {
+	definition, _ := oauth.ProviderByID(provider)
+	token, err := oauth.DeviceCode(ctx, definition, func(code, url string) {
+		printDeviceCode(out, provider, url, code)
+	})
+	if err != nil {
+		return fmt.Errorf("login %s: %w", provider, err)
+	}
+	return store.SetCredential(provider, credentialFrom(token))
+}
+
+func printDeviceCode(out io.Writer, provider, url, code string) {
+	fmt.Fprintf(out, "Open %s and enter the code %s to log in to %s.\n", url, code, provider)
+}
+
 func ignoreEOF(err error) error {
 	if errors.Is(err, io.EOF) {
 		return nil
