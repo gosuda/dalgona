@@ -13,3 +13,8 @@ This decision applies to local execution in `internal/runner`. It does not add a
 ## Enforcement
 
 Runner sandbox tests in `internal/runner` check policy construction and platform behavior. The shim MUST write a nonzero exit record when policy application fails. Review MUST reject any status or documentation that calls the harness policy a security boundary. `just test` runs the Go tests; platform-specific behavior still requires the matching host.
+
+## Rejected alternatives
+
+- A container or virtual machine around every local command. It lost because this sandbox exists to stop accidental writes; isolating hostile code is outside this sandbox, as the [decision index](../README.md) says. [sandbox.md](../spec/sandbox.md) defines the write confinement.
+- Blocking network access by default. It lost because installing packages and fetching sources are normal agent work, and the policy guards writes.

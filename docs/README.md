@@ -64,6 +64,8 @@ Use one name for each thing in user-facing text and new specifications.
 
 ## Decisions
 
+Each decision file states its Invariant, Scope, and Enforcement. It MAY end with `## Rejected alternatives`; each entry names one alternative and the one reason it lost. A replaced decision MUST stay in this directory: add `Superseded by [<title>](<file>.md) on <YYYY-MM-DD>.` under its title, keep its text, and move its entry to the end of this list with the suffix `(superseded)`. Never delete a decision file.
+
 - [Two products](decisions/two-products.md): shared core, separate homes, and battery boundaries.
 - [Codex protocol as core](decisions/codex-protocol-as-core.md): one client protocol and inward dependency direction.
 - [Journal authority and mirror](decisions/journal-authority-and-mirror.md): JSONL authority and verified repair.
@@ -77,3 +79,4 @@ Use one name for each thing in user-facing text and new specifications.
 - [Dependencies](decisions/dependencies.md): codecs, import restrictions, and pins.
 - [Web toolchain](decisions/web-toolchain.md): TypeScript compatibility with the Svelte tools.
 - [Connect wire](decisions/connect-wire.md): one framing and field-helper package for the Connect providers.
+- [Edit styles](decisions/edit-styles.md): anchor default, explicit hashline profiles, and no symbol locators.

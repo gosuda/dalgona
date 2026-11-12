@@ -13,3 +13,7 @@ This decision applies to `internal/agent/advisor`, advisor config, journal event
 ## Enforcement
 
 Tests in `internal/agent/advisor/guard_test.go`, `render_test.go`, `route_test.go`, and `watchdog_test.go` check deduplication, note filtering, the delivery matrix, and advisor-only guidance. `internal/agent/event/advisor_test.go` checks event validation and duplicate delivery refusal. `internal/config/advisor_test.go` checks both product configs. These checks MUST NOT be treated as proof of crash recovery or end-to-end runtime delivery. Those paths require runtime integration tests. `just test` runs the existing tests.
+
+## Rejected alternatives
+
+- The advisor on by default. It lost because each review adds a model request per reviewed turn, and the user should choose that cost with `advisor.enabled = true` or `/advisor`.
