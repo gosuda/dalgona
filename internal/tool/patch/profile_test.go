@@ -355,6 +355,23 @@ func TestMoveAfterEditInvalidatesOldPath(t *testing.T) {
 	}
 }
 
+func TestHashlineRejectsSymbolOperations(t *testing.T) {
+	source := "one\ntwo\nthree\n"
+	for _, style := range []Style{Hashline, HashlineLight, HashlineEnhanced} {
+		for _, op := range []string{"PUT 2*:\n+x\n", "CUT 2*\n", "PUT >2*:\n+x\n"} {
+			env, cwd := editTestEnv(t)
+			writeFixture(t, cwd, "f.txt", source)
+			proof := styleProofFor(env, style, source)
+			if _, err := runPatch(t, env, style, renderHashline("f.txt", nil, proof.ref)+op); err == nil {
+				t.Fatalf("%s with %q: symbol op accepted", style, op)
+			}
+			if actual := readFixture(t, cwd, "f.txt"); actual != source {
+				t.Fatalf("%s with %q: fixture changed to %q", style, op, actual)
+			}
+		}
+	}
+}
+
 func TestApprovalGapDriftRejectsPreparedPlan(t *testing.T) {
 	env, cwd := editTestEnv(t)
 	writeFixture(t, cwd, "f.txt", "before\n")

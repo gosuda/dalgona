@@ -1,7 +1,6 @@
 # Reviewed Hashline specifications
 
-Reviewed proposal, 2026-09-28. These files specify two optional new profiles for
-dal's existing patch engine. They do not implement the feature or change defaults.
+Reviewed 2026-09-28 and adopted 2026-11-08. These files specify the `hashline-light` and `hashline-enhanced` edit styles that `internal/tool/patch` implements. Neither is a default.
 
 **Light relaxes prior observation. Enhanced requires prior observation. Both
 identify the source snapshot and reject unsupported target changes.**
@@ -27,9 +26,6 @@ Run with `uv run --no-project --python 3.12 verify_model.py`.
 This is not a filesystem implementation, unrestricted proof, performance benchmark,
 or claim that the product tests pass. The conformance document distinguishes
 executed checks from required implementation work.
-
-[package-checks.json](package-checks.json) records document/link/source-hash checks.
-[SHA256SUMS](SHA256SUMS) records the packaged file checksums, excluding itself.
 
 ## Adoption rule
 

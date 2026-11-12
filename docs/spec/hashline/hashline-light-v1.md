@@ -1,6 +1,6 @@
 # Hashline Light v1
 
-Status: reviewed proposal; not implemented or selected by default.
+Status: implemented in `internal/tool/patch` as edit style `hashline-light`; not selected by default.
 Identifier: `hashline-light`. Contract version: 1.
 Required base: [Shared specification](hashline-common-v1.md).
 
@@ -58,7 +58,7 @@ ends the usable history even if the old endpoint text survives elsewhere.
 
 ## L04. Operations, exceptions, and selection
 
-Syntax, mapping, gaps, N*, NEW, REM, MV, byte preservation, output, replay, and
+Syntax, mapping, gaps, NEW, REM, MV, byte preservation, output, replay, and
 limits follow the common contract unchanged.
 
 REM retains the explicit-file-delete observation exemption common to both profiles.
@@ -76,13 +76,13 @@ table is part of this specification.
 
 ## L05. Canonical model-facing description
 
-The symbols-on description is:
+The description is `lightDescription` in `internal/tool/patch/description.go`:
 
 ```text
 Edit files from a read/search snapshot. Copy its [path@reference] header.
 PUT N: or PUT N-M: replaces original lines using + body rows. CUT N or
 CUT N-M removes them. PUT <N:, PUT >N:, and PUT >$: insert in original
-snapshot gaps. N* operations require enabled symbol support.
+snapshot gaps.
 [PATH#NEW] plus PUT >$: creates a file. REM explicitly deletes; MV DEST
 renames after edits. REM/MV require the unchanged complete source file.
 All operations use the referenced before-image. Light permits replacement
@@ -93,9 +93,6 @@ a reference or choose a target by similar text. Empty PUT is invalid; use
 CUT. A valid no-op is not an error or proof of task completion. Pre-commit
 refusal writes no target. Inspect commit I/O outcomes; never retry blindly.
 ```
-
-With symbols off, remove the N* sentence and its grammar productions. Keep all
-other semantics identical. Shared quoting and byte-framing rules still apply.
 
 ## L06. Acceptance cases
 

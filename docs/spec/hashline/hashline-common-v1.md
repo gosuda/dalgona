@@ -1,13 +1,13 @@
 # Hashline v1: shared specification
 
-Status: reviewed proposal; not implemented or adopted as a product default.
+Status: implemented in `internal/tool/patch` as the `hashline-light` and `hashline-enhanced` edit styles; neither is a product default.
 Date: 2026-09-28.
 Applies to: `hashline-light` and `hashline-enhanced`, contract version 1.
 Companions: [Light](hashline-light-v1.md), [Enhanced](hashline-enhanced-v1.md),
 [Conformance](hashline-conformance-v1.md), [Review and source map](hashline-review.md).
 
 Adopted on 2026-11-08 as the contract for the Go `patch` tool's `hashline-light` and `hashline-enhanced` styles.
-MUST and MUST NOT define this proposed contract, not existing product behavior. Source-derived requirements and deliberate amendments are
+MUST and MUST NOT define the contract that these two styles implement. Source-derived requirements and deliberate amendments are
 separated in the review. Source locators such as S-PROOF refer to that source map.
 
 ## C01. Decision and scope
@@ -107,8 +107,6 @@ as snapshot references. They MUST NOT accept tagless existing-file headers,
 | `CUT N`, `CUT N-M`, `CUT N.=M` | Delete the indicated cells. |
 | `PUT <N:`, `PUT >N:` | Insert in the source gap before or after N. |
 | `PUT >$:` | Insert in the referenced snapshot's EOF gap. |
-| `PUT N*:`, `CUT N*` | Replace/remove the source node beginning at N; symbols must be enabled. |
-| `PUT >N*:` | Insert after that source node. |
 | `REM` | Explicit file deletion under C10. |
 | `MV DEST` | Rename after the file's content edits under C10. |
 
@@ -252,20 +250,13 @@ stale head/tail exception (S-PROOF).
 A pure gap removes no line body, so profile coverage does not differ. A terminator
 side effect can make it destructive; C11 determines its actual footprint.
 
-## C09. AST operations
+## C09. Symbol operations
 
-Gate syntax on the existing `symbols` feature and `search_symbols` setting.
-Resolve N* in the source snapshot with the existing parser and outermost named-
-node convention, including decorator/attribute/doc and Markdown section rules.
-Never reinterpret stale N against the current file. Expired source/parser evidence
-returns `needs_context`, not a current-AST search.
-
-Map the entire node footprint through C07. At that mapped position verify language/
-parser identity, kind, and exact current extent. Changed attachment or boundary
-returns `node_changed`. `PUT >N*:` validates the source node and its following gap.
-Equal-body nodes elsewhere are not substitutes. Enhanced requires coverage of the
-entire effective destructive footprint; Light does not. No extra parser is added
-(S-AST).
+Symbol locators are outside this contract. A profile MUST reject an operation
+whose locator contains `*`, such as `PUT N*:`, `CUT N*`, or `PUT >N*:`. The
+error MUST start with `patch: line <n>: block ops (N*) are not supported; use
+a line range`, and no target is written. Line ranges and gaps from read or
+search output address the same text.
 
 ## C10. Create, delete, and rename
 
@@ -469,10 +460,9 @@ coverage. No internal fetch, automatic retag, or automatic destructive retry.
 | `observer_blocked` | rejected | Address the staged finding; do not bypass the observer. |
 | `no_replace_unavailable` | rejected | Use a supported no-clobber writer; no overwrite fallback. |
 | `binding_mismatch`, `outside_workspace`, `permission_denied` | rejected | Correct binding/authority; no protected diagnostic leak. |
-| `target_changed`, `gap_changed`, `node_changed`, `path_changed` | conflict | Inspect current state and decide again. |
+| `target_changed`, `gap_changed`, `path_changed` | conflict | Inspect current state and decide again. |
 | `approval_stale` | conflict | Prepare again; old approval is not reusable. |
 | `invalid_syntax`, `invalid_range`, `mixed_references`, `overlap`, `invalid_shape` | rejected | Correct the payload. |
-| `symbols_unavailable` | rejected | Use explicit ranges or user-enabled supported symbols. |
 | `resource_busy`, `resource_limit` | rejected | Retry admission or split; never downgrade proof. |
 | `invocation_mismatch` | rejected | Do not reuse invocation identity for different input. |
 | `write_failed`, `sync_failed`, `rollback_failed` | write_error | Inspect reported effects. |

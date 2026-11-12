@@ -1,6 +1,6 @@
 # Hashline Enhanced v1
 
-Status: reviewed proposal; not implemented or selected by default.
+Status: implemented in `internal/tool/patch` as edit style `hashline-enhanced`; not selected by default.
 Identifier: `hashline-enhanced`. Contract version: 1.
 Required base: [Shared specification](hashline-common-v1.md).
 
@@ -79,13 +79,13 @@ silently reuses old unverified coordinates.
 
 ## E06. Canonical model-facing description
 
-The symbols-on description is:
+The description is `enhancedDescription` in `internal/tool/patch/description.go`:
 
 ```text
 Edit files from a read/search snapshot. Copy its [path@reference] header.
 PUT N: or PUT N-M: replaces original lines using + body rows. CUT removes
 original lines. PUT <N:, PUT >N:, and PUT >$: insert in source-snapshot
-gaps. N* operations require enabled symbol support. Every existing cell
+gaps. Every existing cell
 changed by replacement or CUT must have been fully shown to this caller.
 Folded/truncated rows do not count. A missing-context reply can supply rows
 for a later request, never this one. The host maps intact targets through
@@ -97,9 +97,6 @@ MV DEST renames after edits. Do not mix references or overlap operations.
 A valid no-op is not an error or proof of task completion. Never downgrade
 to Light to bypass refusal. Never blind-retry an uncertain commit.
 ```
-
-With symbols off, remove the N* sentence and grammar productions. Shared quoting,
-framing, and lifecycle contracts remain unchanged.
 
 ## E07. Acceptance cases
 

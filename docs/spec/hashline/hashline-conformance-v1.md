@@ -57,10 +57,6 @@ result survived.
 | GAP-02 | Either original neighbor changes | Conflict. |
 | GAP-03 | Edits elsewhere shift adjacent neighbors together | Map original gap. |
 | GAP-04 | Stale BOF/EOF request | No current-head/tail bypass. |
-| AST-01 | Source node survives known shift with same kind/extent | Map and revalidate. |
-| AST-02 | Equal node exists after history gap | No body-search proof. |
-| AST-03 | Decorator/doc attachment or extent changes | Node conflict. |
-| AST-04 | Source/parser evidence expired or disabled | Needs context or unsupported operation; no guessing. |
 
 ## T04. Observation and profile tests
 
@@ -148,7 +144,7 @@ Run all L-series and E-series cases in their profile specifications, plus:
 | 1 | Patch: snapshot.rs, ir.rs, resolve.rs, tests.rs | Reference/revision values, pure mapping/coverage, failing contract tests. |
 | 2 | Read/search plus runtime context | Same-buffer capture and final-delivery metadata. |
 | 3 | Agent/extension request and evaluator owners | Immutable cutoffs and consumer-bound evidence. |
-| 4 | Patch: styles/hashline.rs, style.rs, ast.rs | New profiles, source-node resolution, section merge. |
+| 4 | Patch: styles/hashline.rs, style.rs | New profiles and section merge. |
 | 5 | Patch writer, store and dispatcher | Private prepared plans, truthful outcomes, invocation replay. |
 | 6 | CLI/config/docs/wire | Explicit style selection and new-style schemas/descriptions. |
 | 7 | Gate owner | Filesystem, fault, race, resource, and end-to-end evidence. |
@@ -165,7 +161,6 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo clippy --all-targets --locked -- -D warnings
 cargo check --locked --no-default-features -p dal-core -p dal-tools
 cargo test --locked -p dal-tools patch
-cargo test --locked -p dal-tools --features symbols patch
 cargo test --locked -p dal-agent
 cargo test --locked -p dal-store
 cargo deny --locked check
