@@ -82,6 +82,8 @@ A clean shutdown MUST return `nil`. Shutdown waits at most 5 seconds for open pa
 
 The client in `web/` reads the token from the URL fragment and opens `/rpc`. It speaks the Codex v2 protocol. `web/src/lib/validation.ts` parses each payload the client reads. A parser MUST reject a payload that lacks a member that the schema in `internal/rpc/testdata/codex-schema` or `internal/rpc/testdata/dalgona-schema` requires. `web/src/lib/schema.test.ts` checks this for every Codex payload parser and for the dalgona result and notification parsers.
 
+The page holds one `Session`, which owns the connection and the page state.
+
 ### Layout
 
 - Above 52rem the page has two columns, the thread list and the workspace. The workspace holds the status bar, the thread heading, the transcript, and the composer. The transcript scrolls inside its own column.
