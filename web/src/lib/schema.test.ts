@@ -441,7 +441,7 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 		turnId: "turn-1",
 		itemId: "item-5",
 		title: "Apply file changes?",
-		detail: "/work",
+		detail: "",
 		reason: null,
 	},
 	ThreadListResponse: { threads: [], nextCursor: null },

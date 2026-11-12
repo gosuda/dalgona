@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { RpcError } from "./protocol.js";
-import { parseAdvisorStatusResponse, parseNotification } from "./validation.js";
+import {
+	parseAdvisorStatusResponse,
+	parseApprovalRequest,
+	parseNotification,
+} from "./validation.js";
 
 describe("notification validation", () => {
 	it("parses a completed turn", () => {
@@ -469,5 +473,57 @@ describe("edit review validation", () => {
 				},
 			}),
 		).toBeNull();
+	});
+});
+
+describe("live file-change approval", () => {
+	it("reads file changes from a live file-change approval", () => {
+		const diff =
+			"--- a/b.txt\n+++ b/b.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n";
+		expect(
+			parseNotification({
+				method: "item/fileChange/patchUpdated",
+				params: {
+					threadId: "thread-1",
+					turnId: "turn-2",
+					itemId: "fc-2",
+					changes: [
+						{
+							path: "b.txt",
+							kind: { type: "update" },
+							diff,
+							additions: 1,
+							deletions: 1,
+						},
+					],
+				},
+			}),
+		).toEqual({
+			type: "fileChangesUpdated",
+			threadId: "thread-1",
+			itemId: "fc-2",
+			changes: [
+				{
+					path: "b.txt",
+					kind: "update",
+					diff,
+					diffOmitted: false,
+					additions: 1,
+					deletions: 1,
+				},
+			],
+		});
+	});
+
+	it("keeps the grant root out of a file-change approval", () => {
+		expect(
+			parseApprovalRequest("item/fileChange/requestApproval", "req-2", {
+				itemId: "fc-2",
+				startedAtMs: 4,
+				threadId: "thread-1",
+				turnId: "turn-2",
+				grantRoot: "/work",
+			})?.detail,
+		).toBe("");
 	});
 });

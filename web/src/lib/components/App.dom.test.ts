@@ -236,3 +236,97 @@ describe("thread header state", () => {
 		expect(document.title).toBe("dalgona · hello · Offline");
 	});
 });
+
+describe("file-change approval diff", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	test("shows the diff of a live file-change approval before item/completed", async () => {
+		const { session, handlers } = sessionWithHandler();
+		session.activeThreadId = "thread-1";
+		handlers.onNotification(
+			parsed("item/fileChange/patchUpdated", {
+				threadId: "thread-1",
+				turnId: "turn-2",
+				itemId: "fc-9",
+				changes: [
+					{
+						path: "b.txt",
+						kind: { type: "update" },
+						diff: "--- a/b.txt\n+++ b/b.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n",
+						additions: 1,
+						deletions: 1,
+					},
+				],
+			}),
+		);
+		handlers.onRequest({
+			id: "req-9",
+			method: "item/fileChange/requestApproval",
+			threadId: "thread-1",
+			turnId: "turn-2",
+			itemId: "fc-9",
+			title: "Apply file changes?",
+			detail: "",
+			reason: null,
+		});
+		render(App, { props: { session } });
+		await tick();
+		expect(screen.getByText("+gamma")).toBeTruthy();
+		expect(screen.getByText("b.txt")).toBeTruthy();
+		session.stop();
+	});
+
+	test("keeps the pending approval's diff when another thread sends the same item", async () => {
+		const { session, handlers } = sessionWithHandler();
+		session.activeThreadId = "thread-1";
+		handlers.onNotification(
+			parsed("item/fileChange/patchUpdated", {
+				threadId: "thread-1",
+				turnId: "turn-2",
+				itemId: "fc-9",
+				changes: [
+					{
+						path: "b.txt",
+						kind: { type: "update" },
+						diff: "--- a/b.txt\n+++ b/b.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n",
+						additions: 1,
+						deletions: 1,
+					},
+				],
+			}),
+		);
+		handlers.onRequest({
+			id: "req-9",
+			method: "item/fileChange/requestApproval",
+			threadId: "thread-1",
+			turnId: "turn-2",
+			itemId: "fc-9",
+			title: "Apply file changes?",
+			detail: "",
+			reason: null,
+		});
+		handlers.onNotification(
+			parsed("item/fileChange/patchUpdated", {
+				threadId: "thread-2",
+				turnId: "turn-9",
+				itemId: "fc-9",
+				changes: [
+					{
+						path: "c.txt",
+						kind: { type: "update" },
+						diff: "--- a/c.txt\n+++ b/c.txt\n@@ -1 +1 @@\n-one\n+delta\n",
+						additions: 1,
+						deletions: 1,
+					},
+				],
+			}),
+		);
+		render(App, { props: { session } });
+		await tick();
+		expect(screen.getByText("+gamma")).toBeTruthy();
+		expect(screen.queryByText("+delta")).toBeNull();
+		session.stop();
+	});
+});

@@ -251,6 +251,12 @@ export type AppNotification =
 			readonly turnId: string;
 			readonly usage: TokenUsage;
 	  }
+	| {
+			readonly type: "fileChangesUpdated";
+			readonly threadId: string;
+			readonly itemId: string;
+			readonly changes: readonly FileChange[];
+	  }
 	| { readonly type: "requestResolved"; readonly requestId: RequestId };
 
 export interface ModelOption {

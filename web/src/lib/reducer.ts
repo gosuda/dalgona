@@ -2,6 +2,7 @@ import type {
 	AppNotification,
 	ApprovalRequest,
 	EditReview,
+	FileChange,
 	RequestId,
 	ThreadDetail,
 	TranscriptItem,
@@ -404,6 +405,71 @@ export function resolveApprovalRequest(
 	requestId: RequestId,
 ): readonly ApprovalRequest[] {
 	return approvals.filter((entry) => entry.id !== requestId);
+}
+
+export type PatchChanges = Readonly<
+	Record<string, Readonly<Record<string, readonly FileChange[]>>>
+>;
+
+export function recordPatchChanges(
+	patches: PatchChanges,
+	threadId: string,
+	itemId: string,
+	changes: readonly FileChange[],
+): PatchChanges {
+	return {
+		...patches,
+		[threadId]: { ...patches[threadId], [itemId]: changes },
+	};
+}
+
+export function patchChangesFor(
+	patches: PatchChanges,
+	threadId: string,
+	itemId: string,
+): readonly FileChange[] | null {
+	if (!Object.hasOwn(patches, threadId)) return null;
+	const byItem = patches[threadId];
+	if (byItem === undefined || !Object.hasOwn(byItem, itemId)) return null;
+	return byItem[itemId] ?? null;
+}
+
+export function forgetPatchChanges(
+	patches: PatchChanges,
+	approval: ApprovalRequest,
+): PatchChanges {
+	if (patchChangesFor(patches, approval.threadId, approval.itemId) === null) {
+		return patches;
+	}
+	const byItem: Readonly<Record<string, readonly FileChange[]>> =
+		patches[approval.threadId] ?? {};
+	const kept = Object.fromEntries(
+		Object.entries(byItem).filter(([itemId]) => itemId !== approval.itemId),
+	);
+	return { ...patches, [approval.threadId]: kept };
+}
+
+export function keepPendingPatchChanges(
+	patches: PatchChanges,
+	approvals: readonly ApprovalRequest[],
+): PatchChanges {
+	let kept: PatchChanges = {};
+	for (const approval of approvals) {
+		const changes = patchChangesFor(
+			patches,
+			approval.threadId,
+			approval.itemId,
+		);
+		if (changes !== null) {
+			kept = recordPatchChanges(
+				kept,
+				approval.threadId,
+				approval.itemId,
+				changes,
+			);
+		}
+	}
+	return kept;
 }
 
 function isOpenApproval(

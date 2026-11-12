@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type RpcPort, Session } from "./session.svelte";
 import type {
 	AppNotification,
+	ApprovalRequest,
 	JsonValue,
 	RequestId,
 	RpcHandlers,
@@ -128,6 +129,9 @@ class FakePort implements RpcPort {
 	deliver(notification: AppNotification): void {
 		this.handlers.onNotification(notification);
 	}
+	request(request: ApprovalRequest): void {
+		this.handlers.onRequest(request);
+	}
 	respond(_id: RequestId, _result: JsonValue): void {}
 
 	close(): void {}
@@ -173,6 +177,62 @@ function statusNotice(seq: number, status: string): AppNotification {
 	});
 	if (parsed === null) throw new Error("status notice did not parse");
 	return parsed;
+}
+
+function patchNotice(
+	threadId: string,
+	itemId: string,
+	path: string,
+): AppNotification {
+	const parsed = parseNotification({
+		method: "item/fileChange/patchUpdated",
+		params: {
+			threadId,
+			turnId: "turn-1",
+			itemId,
+			changes: [
+				{
+					path,
+					kind: { type: "update" },
+					diff: `--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old\n+new\n`,
+					additions: 1,
+					deletions: 1,
+				},
+			],
+		},
+	});
+	if (parsed === null) throw new Error("patch notice did not parse");
+	return parsed;
+}
+
+function resolvedNotice(threadId: string, requestId: string): AppNotification {
+	const parsed = parseNotification({
+		method: "serverRequest/resolved",
+		params: { threadId, requestId },
+	});
+	if (parsed === null) throw new Error("resolved notice did not parse");
+	return parsed;
+}
+
+function fileApproval(
+	id: string,
+	threadId: string,
+	itemId: string,
+): ApprovalRequest {
+	return {
+		id,
+		method: "item/fileChange/requestApproval",
+		threadId,
+		turnId: "turn-1",
+		itemId,
+		title: "Apply file changes?",
+		detail: "",
+		reason: null,
+	};
+}
+
+function paths(changes: readonly { readonly path: string }[]): string[] {
+	return changes.map((change) => change.path);
 }
 
 describe("session", () => {
@@ -225,6 +285,52 @@ describe("session", () => {
 		await session.selectThread("t2");
 		expect(session.activeThreadId).toBe("t2");
 		expect(session.queuedFollowups).toEqual([]);
+		session.stop();
+	});
+
+	test("forgets a file change's diff once its approval resolves", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port");
+		port.deliver(patchNotice("t1", "fc-9", "a.txt"));
+		port.request(fileApproval("req-1", "t1", "fc-9"));
+		expect(paths(session.approvalChanges)).toEqual(["a.txt"]);
+		port.deliver(resolvedNotice("t1", "req-1"));
+		port.request(fileApproval("req-2", "t1", "fc-9"));
+		expect(paths(session.approvalChanges)).toEqual([]);
+		session.stop();
+	});
+
+	test("keeps a pending approval's diff across a thread switch", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port");
+		port.deliver(patchNotice("t1", "fc-9", "a.txt"));
+		port.request(fileApproval("req-1", "t1", "fc-9"));
+		await session.selectThread("t2");
+		await session.selectThread("t1");
+		expect(paths(session.approvalChanges)).toEqual(["a.txt"]);
+		session.stop();
+	});
+
+	test("drops a file change's diff that no pending approval needs on a thread switch", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port");
+		port.deliver(patchNotice("t1", "fc-7", "stale.txt"));
+		await session.selectThread("t2");
+		await session.selectThread("t1");
+		port.request(fileApproval("req-7", "t1", "fc-7"));
+		expect(paths(session.approvalChanges)).toEqual([]);
 		session.stop();
 	});
 

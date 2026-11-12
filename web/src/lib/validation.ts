@@ -1049,6 +1049,20 @@ function requestResolvedNotice(params: Members): AppNotification | null {
 	return { type: "requestResolved", requestId };
 }
 
+function fileChangesNotice(params: Members): AppNotification | null {
+	const threadId = params["threadId"];
+	const itemId = params["itemId"];
+	if (typeof threadId !== "string" || typeof itemId !== "string") {
+		return null;
+	}
+	return {
+		type: "fileChangesUpdated",
+		threadId,
+		itemId,
+		changes: fileChanges(params["changes"]),
+	};
+}
+
 const notifications: Readonly<Record<string, NotificationSpec>> = {
 	"thread/started": { required: ["thread"], parse: threadStartedNotice },
 	"thread/status/changed": {
@@ -1119,6 +1133,10 @@ const notifications: Readonly<Record<string, NotificationSpec>> = {
 		required: ["paths", "summary", "threadId", "turnId", "verdict"],
 		parse: turnJudgedNotice,
 	},
+	"item/fileChange/patchUpdated": {
+		required: ["changes", "itemId", "threadId", "turnId"],
+		parse: fileChangesNotice,
+	},
 	"serverRequest/resolved": {
 		required: ["requestId", "threadId"],
 		parse: requestResolvedNotice,
@@ -1167,7 +1185,6 @@ export function parseApprovalRequest(
 			reason,
 		};
 	}
-	const root = typeof body["grantRoot"] === "string" ? body["grantRoot"] : "";
 	return {
 		id,
 		method,
@@ -1175,7 +1192,7 @@ export function parseApprovalRequest(
 		turnId,
 		itemId,
 		title: "Apply file changes?",
-		detail: root,
+		detail: "",
 		reason,
 	};
 }

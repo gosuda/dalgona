@@ -6,9 +6,14 @@ import {
 	applyOpenThreadNotification,
 	dropSentFollowup,
 	emptyTranscript,
+	forgetPatchChanges,
 	itemsAwaitingApproval,
 	type KnownChildThreads,
+	keepPendingPatchChanges,
 	lastTurnStatus,
+	type PatchChanges,
+	patchChangesFor,
+	recordPatchChanges,
 	recordThreadTurn,
 	requestsElsewhere,
 	resolveApprovalRequest,
@@ -104,6 +109,7 @@ const effectKinds = [
 	"requestResolved",
 	"retryWait",
 	"tokenUsage",
+	"fileChangesUpdated",
 ] as const;
 
 type EffectKind = (typeof effectKinds)[number];
@@ -170,6 +176,7 @@ export class Session {
 	keywords: readonly KeywordDefinition[] = $state([]);
 	advisor: AdvisorSummary = $state({ kind: "unknown" });
 	approvals: readonly ApprovalRequest[] = $state([]);
+	patchChanges: PatchChanges = $state({});
 	knownChildren: KnownChildThreads = $state({});
 	queuedFollowups: readonly string[] = $state([]);
 	loadingThreads: boolean = $state(false);
@@ -217,8 +224,16 @@ export class Session {
 		),
 	);
 	approvalChanges: readonly FileChange[] = $derived.by(() => {
+		const approval = this.currentApproval;
+		if (approval === null) return [];
+		const changes = patchChangesFor(
+			this.patchChanges,
+			approval.threadId,
+			approval.itemId,
+		);
+		if (changes !== null) return changes;
 		const item = this.transcript.items.find(
-			(entry) => entry.id === this.currentApproval?.itemId,
+			(entry) => entry.id === approval.itemId,
 		);
 		return item?.kind === "fileChange" ? item.changes : [];
 	});
@@ -286,9 +301,17 @@ export class Session {
 				}
 			},
 			requestResolved: (notification) => {
-				this.approvals = resolveApprovalRequest(
-					this.approvals,
-					notification.requestId,
+				const approval = this.approvals.find(
+					(entry) => entry.id === notification.requestId,
+				);
+				if (approval !== undefined) this.settleApproval(approval);
+			},
+			fileChangesUpdated: (notification) => {
+				this.patchChanges = recordPatchChanges(
+					this.patchChanges,
+					notification.threadId,
+					notification.itemId,
+					notification.changes,
 				);
 			},
 		};
@@ -624,7 +647,13 @@ export class Session {
 			);
 			if (selection !== this.selectionGeneration) return;
 			this.upsertThread(result.thread);
-			if (threadId !== this.activeThreadId) this.queuedFollowups = [];
+			if (threadId !== this.activeThreadId) {
+				this.queuedFollowups = [];
+				this.patchChanges = keepPendingPatchChanges(
+					this.patchChanges,
+					this.approvals,
+				);
+			}
 			this.activeThreadId = threadId;
 			this.transcript = transcriptForThread(result.thread, this.knownChildren);
 			this.advisor = { kind: "unknown" };
@@ -809,7 +838,12 @@ export class Session {
 
 	respondApproval(request: ApprovalRequest, decision: Decision): void {
 		this.requireClient().respond(request.id, { decision });
+		this.settleApproval(request);
+	}
+
+	private settleApproval(request: ApprovalRequest): void {
 		this.approvals = resolveApprovalRequest(this.approvals, request.id);
+		this.patchChanges = forgetPatchChanges(this.patchChanges, request);
 	}
 
 	private handleNotification(notification: AppNotification): void {
