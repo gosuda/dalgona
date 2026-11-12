@@ -18,6 +18,8 @@ Avoid an allocation or copy when a slice, reused buffer, or stream can do the sa
 
 Make each test detect a distinct, plausible defect. Take expected values from an independent oracle or an explicit contract. Do not assert source text, use saved output as proof, or repeat the implementation as the oracle.
 
+Prove that a new test detects its defect with a mutation probe: put that defect into the code, for example by dropping, duplicating, or reordering one step, watch the test fail, then restore the code. Never commit the probe.
+
 For persistence changes, test interruption and damaged input against [journal.md](docs/spec/journal.md) and [recovery.md](docs/spec/recovery.md). For protocol changes, preserve [protocol.md](docs/spec/protocol.md) and the vendored schema tests in `internal/rpc`. For edit changes, test refusal without partial writes under [edit-styles.md](docs/spec/edit-styles.md).
 
 ## Use the declared tools
