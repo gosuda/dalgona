@@ -30,7 +30,7 @@ Every message MUST use an HTTP POST to the configured URL. The client MUST send 
 
 After initialization, every request MUST contain `MCP-Protocol-Version: 2025-11-25`. When the server supplies `Mcp-Session-Id`, every later request MUST contain the same value. The session identifier MUST contain only visible ASCII bytes.
 
-The client MUST accept either `application/json` or `text/event-stream` responses. JSON responses MUST contain exactly one matching JSON-RPC response. SSE responses MAY contain other messages before the matching response. Adjacent SSE `data` lines MUST form one event payload. Empty events and comments MUST be ignored.
+The client MUST accept either `application/json` or `text/event-stream` responses. JSON responses MUST contain exactly one matching JSON-RPC response. SSE responses MAY contain other messages before the matching response. Adjacent SSE `data` lines MUST form one event payload. The client MUST ignore empty events and comments.
 
 A JSON response MUST NOT exceed 16 MiB. One SSE line MUST NOT exceed 16 MiB. An HTTP exchange MUST finish within five minutes unless its caller sets an earlier deadline.
 

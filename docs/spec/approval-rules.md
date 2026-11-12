@@ -6,6 +6,6 @@ The rules package MUST classify shell commands before a model decider runs.
 
 `GrantPrefix` MUST reject compound commands and tokenize POSIX quotes and escapes. It MUST return the first token and the second token, including a second token that starts with `-`. `MatchesGrant` MUST accept only the same prefix.
 
-Malformed or empty input MUST produce no grant. Unknown command shapes MUST remain subject to normal approval.
+Malformed or empty input MUST produce no thread grant. Unknown command shapes MUST remain subject to normal approval.
 
 An unterminated quote or a trailing backslash is malformed.

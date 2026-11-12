@@ -30,7 +30,7 @@ When no layer sets `[approval_decider] threshold`, its value MUST be `0.9`.
 
 The loader MUST validate approval, sandbox, reasoning, tool mode, durations, and runner options. Durations MUST use Go duration syntax. Invalid durations MUST fail loading. A sandbox0 runner MUST use a template and MUST NOT set an image.
 
-A `[remotes.<name>]` table records a Mode B box (see `runners.md`). Its keys are `service`, `image`, `template`, `url`, and `box_id`. Each key MUST merge across layers on its own. A key present in a later layer MUST replace the earlier value, including an empty string. An absent key MUST keep the earlier value. Other keys inside the table MUST fail loading as unknown keys.
+A `[remotes.<name>]` table records a daemon in a box (Mode B, see `runners.md`). Its keys are `service`, `image`, `template`, `url`, and `box_id`. Each key MUST merge across layers on its own. A key present in a later layer MUST replace the earlier value, including an empty string. An absent key MUST keep the earlier value. Other keys inside the table MUST fail loading as unknown keys.
 
 Edit styles MUST be one of anchor, replace, hashline, hashline-light, hashline-enhanced, apply_patch, simple, balanced, or strict. A scalar style MUST apply to every model. A style table MUST contain `default`. Model patterns MUST match the full model name without regard to case. `*` matches any run and `?` matches one character. The first row in TOML source order wins.
 

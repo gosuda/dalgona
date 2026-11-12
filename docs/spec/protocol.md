@@ -46,7 +46,7 @@ Every response and notification in the Codex subset MUST validate against the ve
 | `thread/compact/start {threadId}` | `{}` after the compaction. |
 | `thread/revert {threadId, beforeTurnId}` | `{thread}` with no turns. Subscribers receive `thread/reverted`. |
 | `thread/fork {threadId, lastTurnId?}` | `ThreadForkResponse`. The server also sends `thread/started` for the fork. |
-| `turn/start {threadId, input, effort?, model?, approvalPolicy?, sandboxPolicy?}` | `{turn}` with status `inProgress`. `effort` overrides the reasoning effort for this turn only. `model`, `approvalPolicy`, and `sandboxPolicy` override this turn and later turns on the active path; a missing value keeps the thread value. A turn `approvalPolicy` MUST NOT lower the thread mode: the server applies the stricter of the thread mode and the mapped turn mode, in the order `yolo` < `auto` < `ask`. A bare `model` id takes the provider of the thread model. |
+| `turn/start {threadId, input, effort?, model?, approvalPolicy?, sandboxPolicy?}` | `{turn}` with status `inProgress`. `effort` overrides the reasoning effort for this turn only. `model`, `approvalPolicy`, and `sandboxPolicy` override this turn and later turns on the active path. A missing value keeps the thread value. A turn `approvalPolicy` MUST NOT lower the thread mode: the server applies the stricter of the thread mode and the mapped turn mode, in the order `yolo` < `auto` < `ask`. A bare `model` id takes the provider of the thread model. |
 | `turn/steer {threadId, expectedTurnId?, input}` | `{turnId}`. When `expectedTurnId` is set, it MUST name the running turn. The server MUST check the target atomically with submission. A steer for a turn that is not running MUST fail and MUST NOT start a turn. The server MUST reject such a steer before it resolves tools or asks for workspace trust. |
 | `turn/interrupt {threadId, turnId}` | `{}`. |
 | `model/list` | Models of every configured provider. `id` is `<provider>/<model>`. |
@@ -65,7 +65,7 @@ Every response and notification in the Codex subset MUST validate against the ve
 
 `thread/revert`, `thread/fork`, `turn/start`, and `dalgona/thread/leaf/set` require an idle thread. A running thread MUST give `-32600` `thread <id> is running`.
 
-A product MAY add methods. Built-in methods take precedence over added methods. A product MAY run a precondition before `thread/archive` on an idle thread. If the precondition fails, the thread MUST stay unarchived. The server MUST return error `-32603` with the message `archive hook: <cause>`.
+A product MAY add methods. Built-in methods take precedence over added methods. A product MAY run an archive hook on an idle thread. The hook MUST run after `Host.Archive` journals `thread.archived`. If the hook fails, the server MUST unarchive the thread. The server MUST return error `-32603` with the message `archive hook: <cause>`.
 
 ## Policy mapping
 
@@ -94,7 +94,7 @@ Each connection subscribes to every thread that it starts, resumes, or changes. 
 | `approval.requested` | `item/started` for the call when not started, `thread/status/changed` with `waitingOnApproval` |
 | `approval.resolved` | `serverRequest/resolved` |
 | `tool.started` | `item/started` |
-| `tool.completed` | `item/completed`; for the `todo` tool also `turn/plan/updated` |
+| `tool.completed` | `item/completed`. For the `todo` tool, also `turn/plan/updated` |
 | `compaction` | `contextCompaction` item |
 | `model.retry` | `error` with `willRetry: true` |
 | `thread.named` | `thread/name/updated` |

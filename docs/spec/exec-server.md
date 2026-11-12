@@ -95,5 +95,5 @@ runner: box <id> has no base64; use an image with coreutils
 - Remote paths MUST be `/workspace/<slash-relative-path>`.
 - Files MUST retain their permission bits. Files with mode 0755 MUST also pass through the prescribed `chmod +x` batch.
 - The server MUST run `git init -q && git add -A && git write-tree` in `/workspace` and require exit code zero.
-- The returned tree ID MUST be written to `/workspace/.dalgona-baseline`.
+- The server MUST write the returned tree ID to `/workspace/.dalgona-baseline`.
 - Process output MUST be read until the durable exit record appears. A process without an exit record MUST NOT be treated as complete.

@@ -50,5 +50,5 @@ Each sentence MUST use plain verbs and carry one instruction or fact. The notice
 
 - `ultrathink`: reason step by step before answering.
 - `jevify`: freeze the rubric before reading data, pre-filter, judge the batch, read flagged or uncertain items, and report counts and confirmed items. Settled judgments MUST replay from the journal.
-- `workflowz`: write durable `eval` phases, fan out, join children, contain item failures, and resume recorded effects without dispatching them again.
+- `workflowz`: write durable `eval` phases, fan out, join subagents, contain item failures, and resume recorded effects without dispatching them again.
 - `orchestrate`: decompose into `task` calls, require `yield`, verify each phase, and continue until no work remains.

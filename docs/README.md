@@ -9,6 +9,7 @@ The specifications define required behavior. They do not certify that each comma
 Use one name for each thing in user-facing text and new specifications.
 
 - Thread: one conversation with its journal, turns, and settings. Write thread, not session. The storage names `session.created` and `sessions/` stay.
+- Thread grant: an approval that lets later calls of one command or tool run in the same thread. The journal names it `grant:<prefix>`. Write thread grant, not session grant.
 - Follow-up: a prompt queued while a turn runs; it starts the next turn. `followup` is only the `user.message` kind.
 - Thinking and reasoning: interfaces show thinking; the wire, journal, and config field is `reasoning`.
 - Subagent: a thread that a tool call starts under another thread. `child.spawned` and `parent` are its journal names.
@@ -45,7 +46,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [OAuth flows](spec/oauth.md): authorization, device login, token exchange, and refresh.
 - [Secret masking](spec/secrets.md): reversible placeholders and credential file rules.
 - [Approvals](spec/approvals.md): gate order, modes, decider inputs, and recovery.
-- [Static approval rules](spec/approval-rules.md): shell classification and session grants.
+- [Static approval rules](spec/approval-rules.md): shell classification and thread grants.
 - [Decision clients](spec/decide.md): typed questions, adapter formats, and time limits.
 - [Advisor](spec/advisor.md): review cadence, note delivery, isolation, and recovery.
 - [Magic keywords](spec/keywords.md): user-prose matching, notices, and required tools.

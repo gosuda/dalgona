@@ -42,7 +42,7 @@ A non-2xx response MUST fail with its HTTP status. The error body MUST be limite
 
 The LLM adapter MUST use the supplied `model.Provider` and model identifier. It MUST place the state and questions in one user message. It MUST set a system prompt that requires only one JSON object and no other text. The prompt MUST define the score scale as the expected zero-based index into the criteria.
 
-The response object MUST map each question name to its direct value. It MUST contain every requested name and no other name. Duplicate names MUST fail. Choice values MUST be strings. Noul and score values MUST be numbers. A score outside `0` through `len(criteria)-1` MUST fail. Markdown fences, prose, explanations, tool calls, and separate answer objects MUST NOT be accepted.
+The response object MUST map each question name to its direct value. It MUST contain every requested name and no other name. Duplicate names MUST fail. Choice values MUST be strings. Noul and score values MUST be numbers. A score outside `0` through `len(criteria)-1` MUST fail. The adapter MUST NOT accept Markdown fences, prose, explanations, tool calls, and separate answer objects.
 
 The adapter does not check that a noul value lies in 0 through 1.
 

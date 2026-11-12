@@ -10,7 +10,7 @@ The TUI is a protocol client. It MUST import only `internal/rpc` from this modul
 
 - `OnStatus func(Status)`: called after each state change and each applied notification. `Status` holds `State`, `Seq`, and `ThreadID`. `Seq` is the highest `seq` seen in `thread/status/changed` for the current thread. That `seq` is the journal sequence of the event that changed the status. `Seq` resets to 0 when the TUI's thread changes, because each thread has its own journal.
 - `OnChildSpawned func(childID, cwd string)`: called once for each `dalgona/thread/childSpawned {threadId, childId, cwd}` whose `threadId` is the TUI's thread.
-- `Input`, `Output`: terminal streams. Empty fields use the process terminal.
+- `Input` and `Output` are terminal streams. Empty fields use the process terminal.
 - `ThreadID`: when set, startup calls `thread/resume` and then `thread/read` with `includeTurns: true`. When empty, startup calls `thread/start`.
 - `Model`, `Approval`, `Sandbox`: option values for `thread/start` and for the status row. An empty model omits `model` from `thread/start` and shows as `default`. A model chosen with `/model` replaces it for later `thread/start` calls. The approval and sandbox defaults are `auto` and `workspace-write`. Approval `yolo` MUST force sandbox `off`. `thread/start` maps approval `yolo` to `never`, `ask` to `untrusted`, and other values to `on-request`. It maps sandbox `off` to `danger-full-access` and other values to `workspace-write`.
 - `Cwd`: the client working directory. Every `thread/start` MUST send it as `cwd`.
@@ -32,13 +32,13 @@ Sandbox `off` MUST show as `no sandbox`. The status row MUST show the sandbox th
 
 The composer shows `› `, the typed text, and the cursor `▏`. When the composer is empty, the cursor comes first and the placeholder follows it in faint text. The placeholder never glows.
 
-States are `idle`, `running`, `awaiting approval`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. All live text MUST wrap at the terminal width. At 40 columns no line may exceed 40 cells.
+States are `idle`, `running`, `awaiting approval`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. All live text MUST wrap at the terminal width. At 40 columns, a line MUST NOT exceed 40 cells.
 
 A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` selector shows each thread's mapped state.
 
-The TUI follows one thread. The first thread it sees, from a response or a notification, becomes the TUI's thread. `/new`, `/resume`, and `/fork` replace it. Notifications whose `threadId` names another thread, such as a spawned child, MUST NOT change the title, state, live items, or thread. When the TUI changes thread, it MUST clear the follow-up queue.
+The TUI follows one thread. The first thread it sees, from a response or a notification, becomes the TUI's thread. `/new`, `/resume`, and `/fork` replace it. Notifications whose `threadId` names another thread, such as a spawned subagent, MUST NOT change the title, state, live items, or thread. When the TUI changes thread, it MUST clear the follow-up queue.
 
-When a read from `conn` fails, the TUI MUST enter `disconnected` and show `connection lost: <cause>; restart the TUI, then /resume <thread>`. No later notification may leave `disconnected`.
+When a read from `conn` fails, the TUI MUST enter `disconnected` and show `connection lost: <cause>; restart the TUI, then /resume <thread>`. A later notification MUST NOT leave `disconnected`.
 
 ## Keys and commands
 
@@ -48,18 +48,18 @@ When a read from `conn` fails, the TUI MUST enter `disconnected` and show `conne
 | Enter, running or awaiting approval | `turn/steer` with the composer text |
 | Enter, empty composer | Starts the oldest held follow-up when no turn runs |
 | Alt+Enter | Queues a follow-up, at most 32 |
-| Esc | Closes a selector; otherwise `turn/interrupt` on the active turn |
-| Ctrl+C twice | Quits; the first press shows a confirmation notice |
+| Esc | Closes a selector. Otherwise it sends `turn/interrupt` on the active turn |
+| Ctrl+C twice | Quits. The first press shows a confirmation notice |
 | `/model [id]` | `model/list` selector, or `config/value/write` key `model` |
 | `/resume [id]` | `thread/list` selector, or `thread/resume` then `thread/read` |
 | `/new` | `thread/start` |
 | `/compact` | `thread/compact/start` |
-| `/login <provider>` | `account/login/start`; shows the returned URL and user code |
-| `/tree` | `dalgona/thread/tree` selector; Enter calls `dalgona/thread/leaf/set` |
-| `/revert` | Active-path turns from `dalgona/thread/tree`; Enter calls `thread/revert` |
+| `/login <provider>` | `account/login/start`. It shows the returned URL and user code |
+| `/tree` | `dalgona/thread/tree` selector. Enter calls `dalgona/thread/leaf/set` |
+| `/revert` | Active-path turns from `dalgona/thread/tree`. Enter calls `thread/revert` |
 | `/fork` | `thread/fork`, then resumes the new thread |
-| `/advisor` | `dalgona/advisor/status`, then `dalgona/advisor/set` with `enabled` true when no advisor is active and false otherwise; the notice says `advisor on` or `advisor off` |
-| `/advisor status` | `dalgona/advisor/status`; one notice line per advisor: name, status, model, notes, and token usage |
+| `/advisor` | `dalgona/advisor/status`, then `dalgona/advisor/set` with `enabled` true when no advisor is active and false otherwise. The notice says `advisor on` or `advisor off` |
+| `/advisor status` | `dalgona/advisor/status`. It writes one notice line per advisor with its name, status, model, notes, and token usage |
 | `/advisor reset` | `dalgona/advisor/reset` |
 
 `turn/steer` sends `expectedTurnId` set to the active turn.
@@ -84,7 +84,7 @@ A server request whose parameters do not decode MUST receive an error answer. Th
 
 ## Notifications
 
-The TUI applies these notifications: `thread/started`, `thread/status/changed`, `thread/name/updated` (`threadName`), `thread/reverted`, `turn/started`, `turn/completed`, `turn/plan/updated`, `item/started`, `item/completed`, the three delta notifications, `error`, `dalgona/thread/childSpawned`, and `dalgona/advisor/note`. It ignores `thread/tokenUsage/updated`, `serverRequest/resolved`, and unknown methods. A `thread/status/changed` whose `seq` is lower than the last seen `seq` MUST be ignored. `turn/started` clears the notice line.
+The TUI applies these notifications: `thread/started`, `thread/status/changed`, `thread/name/updated` (`threadName`), `thread/reverted`, `turn/started`, `turn/completed`, `turn/plan/updated`, `item/started`, `item/completed`, the three delta notifications, `error`, `dalgona/thread/childSpawned`, and `dalgona/advisor/note`. It ignores `thread/tokenUsage/updated`, `serverRequest/resolved`, and unknown methods. The TUI MUST ignore a `thread/status/changed` whose `seq` is lower than the last seen `seq`. `turn/started` clears the notice line.
 
 `turn/plan/updated` shows the plan in the notice line. The first line is `plan`, then one line per step: `[done] <step>`, `[in progress] <step>`, or `[pending] <step>`.
 

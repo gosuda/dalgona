@@ -46,7 +46,7 @@ Concurrent calls on one runner MUST share one bind. The lock MUST NOT be held du
 
 ## Archive
 
-`(*Binder).Archive(ctx, threadID)` MUST run before `thread/archive` journals `thread.archived`. A thread without `runner.bound` MUST succeed with no effect. Archived state MUST come from each thread's latest `thread.archived` record.
+`(*Binder).Archive(ctx, threadID)` MUST run as the archive hook, after `Host.Archive` journals `thread.archived`. If the archive hook fails, the server MUST unarchive the thread. A thread without `runner.bound` MUST succeed with no effect. Archived state MUST come from each thread's latest `thread.archived` record.
 
 When another unarchived thread has a latest `runner.bound` that resolves to the same box, Archive MUST keep the box and log at info level:
 

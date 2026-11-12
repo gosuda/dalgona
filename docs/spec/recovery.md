@@ -21,9 +21,9 @@ Recovery MUST walk the tool calls of the last `assistant.message` of the open tu
 
 |State at crash|Recovery|
 |---|---|
-|Turn open, no call pending|Rebuild the request from the folded active path and call the model again. Streamed text that was not journaled is discarded.|
+|Turn open, no call pending|Rebuild the request from the folded active path and call the model again. Recovery discards streamed text that was not journaled.|
 |Call with `tool.completed`|No action.|
-|`approval.requested` without `approval.resolved`|Decide again. `auto`: static rules, then the decider. `ask`: ask the clients again. With no subscribed client, decline with `declined: no client could approve this call`. The existing request id MUST be reused.|
+|`approval.requested` without `approval.resolved`|Decide again. `auto`: static rules, then the decider. `ask`: ask the clients again. With no subscribed client, decline with `declined: no client could approve this call`. Recovery MUST reuse the existing request id.|
 |`approval.resolved` with `decline` or `cancel`, no `tool.completed`|Journal `tool.completed` with `ok=false`, `recovered=none`, and the decline reason as output.|
 |`approval.resolved` with `accept` or `accept_session`, no `tool.started`|Journal `tool.completed` with `ok=false`, `recovered=skipped`, output `skipped: the host restarted before this call ran`. The call MUST NOT run. A thread grant from `accept_session` stays in force because the fold records it at `approval.resolved`.|
 |Assistant call with no approval and no `tool.started`|Same as the previous row: `recovered=skipped`, output `skipped: the host restarted before this call ran`.|
@@ -37,7 +37,7 @@ Recovery MUST walk the tool calls of the last `assistant.message` of the open tu
 |`tool.started`, class `exec`, process gone without exit|Complete with the output read so far and the line `interrupted: the host restarted while this command ran; it may have partly run`. Journal `ok=false`, `recovered=interrupted`.|
 |`tool.started`, class `exec`, no run record|Journal `ok=false`, `recovered=interrupted`, output `interrupted: the host restarted while this command ran; it may have partly run`. The command MUST NOT run again.|
 |`tool.started`, class `agent` (`task`)|Find the subagent through the call's `child.spawned`. If the subagent thread exists, resume it and wait for its final `turn.completed`. If only `child.spawned` exists, create the subagent with that id. If no `child.spawned` exists, nothing ran, so spawn it. A subagent with no user message gets the task prompt. Complete the call from the subagent's last successful `yield` (`{"data":…}` or `{"error":…}`), or after one `Call yield now: data on success, error on failure.` follow-up with `subagent ended without yield; last message: <first 2000 characters>`. A second subagent MUST NOT be spawned for the same call. Journal `recovered=replayed`.|
-|`tool.started`, class `script` (`eval` or a plugin tool)|First apply this table to every in-flight call `<call_id>/<n>` of the run, so an interrupted nested call completes with `recovered=interrupted`. Then call the tool again with the same call id. The engine re-executes the pinned source with the pinned seed and replays recorded effects. An interrupted effect ends the run with status `indeterminate`. A run that already has `script.completed` returns its recorded outcome, and the engine does not run the source again. An unresolved approval of a nested call is reused, not requested again. Journal `recovered=replayed`.|
+|`tool.started`, class `script` (`eval` or a plugin tool)|First apply this table to every in-flight call `<call_id>/<n>` of the run, so an interrupted nested call completes with `recovered=interrupted`. Then call the tool again with the same call id. The engine re-executes the pinned source with the pinned seed and replays recorded effects. An interrupted effect ends the run with status `indeterminate`. A run that already has `script.completed` returns its recorded outcome, and the engine does not run the source again. Recovery reuses an unresolved approval of a nested call and does not request it again. Journal `recovered=replayed`.|
 |`tool.started`, class `remote`|Journal `ok=false`, `recovered=interrupted`, output `interrupted: the tool may have partly run`. The call MUST NOT run again.|
 |`tool.started` for a tool that the thread no longer has|Same as class `remote`.|
 
@@ -47,7 +47,7 @@ A Cursor in-band call is journaled only after its `assistant.message`. A crash b
 
 After the calls are complete, recovery MUST continue the turn loop. The next model request MUST carry a result for every call.
 
-The reasoning effort of a recovered turn follows this order. Precedence runs in this order: a keyword with effort `max`, then the `effort` field, then the thread effort, then `reasoning` in config.
+A recovered turn MUST take reasoning effort in this order: a keyword with effort `max`, the `effort` field, the thread effort, then `reasoning` in config.
 
 The model, approval, and sandbox of a turn step MUST come from the last `user.message` on the active path that sets each field. A field that no such message sets MUST come from `session.created`. A fork copies the active path, so the fork MUST keep these values. A turn step MUST rebuild the tool set when its model differs from the model of the current tool set. The rebuilt tool set makes the edit style follow the model.
 

@@ -32,5 +32,5 @@ executed checks from required implementation work.
 ## Adoption rule
 
 Keep legacy styles, aliases, and defaults. Enable the new profiles explicitly.
-Never downgrade Enhanced automatically after refusal. Changing a product default
-requires the stated conformance and measured edit-evaluation gates.
+Enhanced MUST NOT downgrade automatically after refusal. A change to a product default
+MUST pass the stated conformance and measured edit-evaluation gates.

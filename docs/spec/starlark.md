@@ -48,8 +48,8 @@ type Effects interface {
 - `Record` MUST journal `script.effect` with `run_id`, `n`, `op`, `args_sha`, and `result`. The engine calls `Record` for `time`, `sleep`, and `judge`.
 - `Completed` MUST journal `script.completed` for the run: `ok` and `value` for status `completed`, otherwise `ok=false` and the error message. The engine MUST call it once when any started run ends: an eval cell, a plugin tool, hook, or command, and a workflow.
 - `CallTool` MUST run the tool through approvals and the thread's runner. It MUST journal `tool.started` and `tool.completed` with `call_id = "<run>/<n>"`. A later `Lookup` of that index MUST return the recorded value. A tool failure MUST return an error. A denial MUST wrap `script.ErrDenied`.
-- `Spawn` MUST journal `child.spawned` with `call_id = "<run>/<n>"`. A later `Lookup` MUST return the child id as a JSON string.
-- `Wait` MUST return the final text of each child, in input order.
+- `Spawn` MUST journal `child.spawned` with `call_id = "<run>/<n>"`. A later `Lookup` MUST return the subagent id as a JSON string.
+- `Wait` MUST return the final text of each subagent, in input order.
 - `Judge` MUST ask the decider for `req.Model`, or for the resolved `[approval_decider] decider` when the model is empty. It MUST return an object that maps each question name to an object with `choice`, `noul`, `score`, `probabilities`, and `confidence` as the answer has them.
 
 ## Effects and replay
@@ -83,7 +83,7 @@ Workflows and `eval` cells have `ctx` and `tools` (the same as `ctx.tools`). Plu
 - `ctx.tools.<name>(**kw)` and `ctx.tools["<name>"](**kw)` MUST call the tool. Positional arguments MUST fail. A failed call MUST stop the script.
 - `ctx.try_call(op, *args, **kw)` MUST return `struct(ok, value, error)`. It MUST NOT catch a denial, `scope_exceeded`, cancellation, nondeterminism, an interrupted effect, or a step limit.
 - `ctx.scope(limit)` MUST accept a limit from 1 to 64. `scope.tools.<name>(**kw)` MUST submit the call and return `None`. At most `limit` calls MUST run at the same time. `scope.all()` MUST wait for every submitted call and return the results in submission order. A failed call MUST raise the first failure in submission order. A scope MUST hold at most 4096 pending calls.
-- `ctx.spawn(prompt, runner = None, model = None)` MUST return the child id. At most 8 children MUST run at the same time. A spawn MUST wait while 8 children run. Closing a child MUST free its slot. A child MUST hold its slot until its turn ends or the child stops.
+- `ctx.spawn(prompt, runner = None, model = None)` MUST return the subagent id. At most 8 subagents MUST run at the same time. A spawn MUST wait while 8 subagents run. Closing a subagent MUST free its slot. A subagent MUST hold its slot until its turn ends or the subagent stops.
 - `ctx.wait(ids)` MUST return a list of final texts.
 - `ctx.sleep(seconds)` MUST accept a non-negative finite number.
 - `ctx.log(msg)` MUST pass the message to `Log`.

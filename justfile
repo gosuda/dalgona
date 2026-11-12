@@ -134,4 +134,4 @@ box_tag := `git describe --tags --exact-match HEAD 2>/dev/null || git rev-parse 
 box-image: dist
     docker buildx build -f deploy/box/Dockerfile --platform linux/amd64,linux/arm64 -t dalgona-box:{{box_tag}} .
 
-verify: fmt-check vet lint test vuln hashline-model web-check cf-check
+verify: fmt-check vet lint test vuln hashline-model spec-style web-check cf-check

@@ -18,26 +18,26 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 
 |Type|Required fields|Optional fields and constraints|
 |---|---|---|
-|`session.created`|`id`, `cwd`, `model`, `approval`, `sandbox`, `runner`|`parent`, `fork_of`, `effort`, `instructions_blob`, `advisor`, `created_at`; approval is `auto`, `yolo`, or `ask`; sandbox is `workspace-write` or `off`; `effort` is `low`, `medium`, `high`, `xhigh`, or `max` and is the thread default for turns without their own effort; `advisor` names an advisor child thread and MUST come with `parent`; `created_at` is an RFC 3339 timestamp that the encoder writes in UTC|
+|`session.created`|`id`, `cwd`, `model`, `approval`, `sandbox`, `runner`|`parent`, `fork_of`, `effort`, `instructions_blob`, `advisor`, `created_at`. Approval is `auto`, `yolo`, or `ask`. Sandbox is `workspace-write` or `off`. `effort` is `low`, `medium`, `high`, `xhigh`, or `max` and is the thread default for turns without their own effort. `advisor` names an advisor child thread and MUST come with `parent`. `created_at` is an RFC 3339 timestamp that the encoder writes in UTC|
 |`runner.bound`|`runner`, `service`, `box_id`, `baseline`|None|
 |`turn.started`|`turn_id`|None|
-|`turn.completed`|`turn_id`, `status`|`error`; status is `completed`, `interrupted`, or `failed`|
-|`user.message`|`item_id`, `turn_id`, `text`, `kind`|`notices`, `mentions`, `effort`, `model`, `approval`, `sandbox`, `verbatim`; kind is `prompt`, `steer`, or `followup`; each notice has `word` and `text`; each mention has `path` and `text`; effort is `low`, `medium`, `high`, `xhigh`, or `max` and overrides config for its turn; approval and sandbox use the `session.created` values; a `verbatim` message MUST NOT have notices or mentions|
-|`assistant.message`|`item_id`, `turn_id`, `text`, `reasoning`, `tool_calls`, `usage`, `stop_reason`|`context_seq`; usage contains `input`, `output`, `cache_read`, and `cache_write`; each tool call has `id`, `name`, `args`, `freeform`, `resolved`, optional `signature` (the provider thought-signature replayed to the next request), and optional `redacted_thinking` (opaque provider strings replayed unchanged); `context_seq` is the journal head when the request was built|
-|`tool.started`|`call_id`, `turn_id`, `tool`, `args`, `class`, `repairs`|`files`; class is `read`, `edit`, `exec`, `agent`, `script`, or `remote`; each file has `path`, `pre_sha`, `post_sha`, and optional `pre_blob`|
-|`tool.completed`|`call_id`, `ok`, `output`, `recovered`|`spill`, `exit_code`, `meta`; recovered is `none`, `replayed`, `interrupted`, or `skipped`|
-|`model.retry`|`turn_id`, `attempt`, `verdict`, `status`, `delay_ms`|Attempt MUST be positive; verdict is `retry` or `overflow`|
-|`approval.requested`|`request_id`, `call_id`, `summary`|`class`; class uses the `tool.started` values; an exec approval MAY carry `grant_prefix`, the argv prefix folded into a thread grant when `args` is spilled to a blob|
-|`approval.resolved`|`request_id`, `decision`, `by`, `reason`|`scores`; decision is `accept`, `accept_session`, `decline`, or `cancel`; each score MUST be between zero and one|
-|`compaction`|`first_kept_seq`, `summary`, `method`, `tokens_before`, `tokens_after`|`first_kept_seq` MUST be positive; method is `auto`, `manual`, or `overflow`|
+|`turn.completed`|`turn_id`, `status`|`error`. Status is `completed`, `interrupted`, or `failed`|
+|`user.message`|`item_id`, `turn_id`, `text`, `kind`|`notices`, `mentions`, `effort`, `model`, `approval`, `sandbox`, `verbatim`. Kind is `prompt`, `steer`, or `followup`. Each notice has `word` and `text`. Each mention has `path` and `text`. Effort is `low`, `medium`, `high`, `xhigh`, or `max` and overrides config for its turn. Approval and sandbox use the `session.created` values. A `verbatim` message MUST NOT have notices or mentions|
+|`assistant.message`|`item_id`, `turn_id`, `text`, `reasoning`, `tool_calls`, `usage`, `stop_reason`|`context_seq`. Usage contains `input`, `output`, `cache_read`, and `cache_write`. Each tool call has `id`, `name`, `args`, `freeform`, and `resolved`. Each tool call MAY have a `signature`, the provider thought-signature replayed to the next request. Each tool call MAY have `redacted_thinking`, opaque provider strings replayed unchanged. `context_seq` is the journal head when the request was built|
+|`tool.started`|`call_id`, `turn_id`, `tool`, `args`, `class`, `repairs`|`files`. Class is `read`, `edit`, `exec`, `agent`, `script`, or `remote`. Each file has `path`, `pre_sha`, `post_sha`, and optional `pre_blob`|
+|`tool.completed`|`call_id`, `ok`, `output`, `recovered`|`spill`, `exit_code`, `meta`. Recovered is `none`, `replayed`, `interrupted`, or `skipped`|
+|`model.retry`|`turn_id`, `attempt`, `verdict`, `status`, `delay_ms`|Attempt MUST be positive. Verdict is `retry` or `overflow`|
+|`approval.requested`|`request_id`, `call_id`, `summary`|`class`. Class uses the `tool.started` values. An exec approval MAY carry `grant_prefix`, the argv prefix folded into a thread grant when `args` is spilled to a blob|
+|`approval.resolved`|`request_id`, `decision`, `by`, `reason`|`scores`. Decision is `accept`, `accept_session`, `decline`, or `cancel`. Each score MUST be between zero and one|
+|`compaction`|`first_kept_seq`, `summary`, `method`, `tokens_before`, `tokens_after`|`first_kept_seq` MUST be positive. Method is `auto`, `manual`, or `overflow`|
 |`context.pruned`|`turn_id`, `call_ids`|`call_ids` MUST contain at least one non-empty identifier|
 |`child.spawned`|`call_id`, `child_id`, `runner`|None|
 |`branch`|`parent_seq`|Zero selects the empty root path|
 |`script.started`|`run_id`, `source_blob`, `entry`, `args`, `seed`|None|
-|`script.effect`|`run_id`, `n`, `op`, `args_sha`, and `result` or `error`|Effect indexes are assigned at submission, so they MAY arrive out of order; an index MUST NOT repeat; `error` records a failed effect, such as a declined script tool call, and excludes `result`; a denial MUST set `denied` to `true` alongside `error`, and the encoder MUST omit `denied` otherwise|
-|`script.completed`|`run_id`, `ok`|Success MUST contain `value` and no `error`; failure MUST contain `error` and no `value`|
-|`advisor.note`|`advisor`, `severity`, `note`, `review_seq`, `delivery`|severity is `nit`, `concern`, or `blocker`; delivery is `steer`, `aside`, or `continue`; `note` MUST be inline and at most 64 KiB|
-|`thread.named`|`name`|At most 1 KiB; the latest one names the thread|
+|`script.effect`|`run_id`, `n`, `op`, `args_sha`, and `result` or `error`|Effect indexes are assigned at submission, so they MAY arrive out of order. An index MUST NOT repeat. `error` records a failed effect, such as a declined script tool call, and excludes `result`. A denial MUST set `denied` to `true` alongside `error`, and the encoder MUST omit `denied` otherwise|
+|`script.completed`|`run_id`, `ok`|Success MUST contain `value` and no `error`. Failure MUST contain `error` and no `value`|
+|`advisor.note`|`advisor`, `severity`, `note`, `review_seq`, `delivery`|Severity is `nit`, `concern`, or `blocker`. Delivery is `steer`, `aside`, or `continue`. `note` MUST be inline and at most 64 KiB|
+|`thread.named`|`name`|At most 1 KiB. The latest one names the thread|
 |`thread.archived`|`archived`|The latest one sets the archive flag|
 
 Text and raw JSON fields named in this section MAY use the blob-reference form. Snapshot metadata in `tool.completed.meta` MUST remain inline and MUST NOT exceed 64 KiB.
@@ -55,7 +55,7 @@ The state MUST track:
 - started calls without `tool.completed`, including their class and arguments.
 - unresolved approvals and declined calls.
 - open script runs, their recorded effect indexes with `op` and `args_sha`, and the next effect index.
-- spawned children.
+- spawned subagents.
 - the latest `runner.bound` and `compaction`.
 - the current todo list, thread grants, read snapshots, and completed-turn sequence numbers.
 - delivered advisor notes, keyed by advisor, `review_seq`, and note text.
@@ -64,7 +64,7 @@ The fold MUST set `Preview` to the first 80 Unicode characters of the first user
 
 `turn.started` MUST NOT overlap another turn. Turn-scoped events MUST name the open turn. `turn.completed` MUST NOT leave calls, approvals, or scripts unfinished. `tool.completed` MUST have a matching `tool.started`, except for an unsuccessful skipped call or an unsuccessful call declined by an approval. Those exceptions MUST clear the pending assistant call.
 
-An approval resolution MUST have a matching unresolved request. The fold MUST create the grant for a user `accept_session` decision when the request carries `class`. A request without `class` MUST defer the grant to the `tool.started` of the call. For `exec` the grant is an argv prefix derived from one command. For an edit or remote tool the grant is that tool name. Agent, read, and script calls MUST NOT create grants. A later `grant:<prefix>` decision MUST NOT create a grant.
+An approval resolution MUST have a matching unresolved request. The fold MUST create the thread grant for a user `accept_session` decision when the request carries `class`. A request without `class` MUST defer the thread grant to the `tool.started` of the call. For `exec` the thread grant is an argv prefix derived from one command. For an edit or remote tool the thread grant is that tool name. Agent, read, and script calls MUST NOT create thread grants. A later `grant:<prefix>` decision MUST NOT create a thread grant.
 
 `child.spawned` MUST name an in-flight agent call or a call of an open script. A branch MUST occur while idle. A nonzero `parent_seq` MUST precede the branch and identify a completed turn. A script effect index MUST NOT repeat. A repeated index with a different `op` or `args_sha` MUST report the mismatch.
 
@@ -80,7 +80,7 @@ Read metadata MUST restore direct snapshot objects and snapshot objects inside `
 
 `Tree` MUST contain one node per `turn.started`. A new turn MUST name the then-current leaf as `ParentTurnID`. A branch MUST move the current leaf to its completed turn or to the root. `Preview` MUST contain at most the first 80 Unicode characters of the turn's first prompt. `Active` MUST match the turns on the final active path.
 
-Model context and thread reads MUST use only the active path. Runner bindings, grants, snapshots, and recovery metadata MUST fold over the full journal.
+Model context and thread reads MUST use only the active path. Runner bindings, thread grants, snapshots, and recovery metadata MUST fold over the full journal.
 
 ## Model context
 

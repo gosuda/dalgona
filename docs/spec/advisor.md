@@ -86,7 +86,7 @@ A review MUST receive the primary's new active-path events after the advisor cur
 
 The review text MUST be at most 64 KiB minus 1024 bytes, so that the journal keeps it inline. The runtime MUST keep the newest rendered events that fit. When older events do not fit, the text MUST start with `[<n> earlier events omitted]`. The newest event that does not fit MUST keep its first and last bytes, joined by `\n[<k> bytes omitted]\n`, when at least 64 bytes of budget remain.
 
-The advisor thread MUST receive the review as one prompt: `<review seq="<head>">\n` + review text + `</review>\n`. `<head>` MUST be the primary journal head that the review covers. The review prompt MUST be submitted with `Input.Verbatim`. Keywords and `@path` mentions in the primary transcript MUST add no notice, no attachment, and no effort change. Each review prompt MUST request effort `medium`. After a restart, the cursor MUST be the `seq` of the last review prompt whose advisor turn completed. When no such prompt exists, the cursor MUST start at the current head. The last review prompt MUST then complete once. When it succeeds, the cursor MUST move to its `seq`.
+The advisor thread MUST receive the review as one prompt: `<review seq="<head>">\n` + review text + `</review>\n`. `<head>` MUST be the primary journal head that the review covers. The runtime MUST submit the review prompt with `Input.Verbatim`. Keywords and `@path` mentions in the primary transcript MUST add no notice, no attachment, and no effort change. Each review prompt MUST request effort `medium`. After a restart, the cursor MUST be the `seq` of the last review prompt whose advisor turn completed. When no such prompt exists, the cursor MUST start at the current head. The last review prompt MUST then complete once. When it succeeds, the cursor MUST move to its `seq`.
 
 `Render(events)` MUST produce the review text with these elements, one per line group:
 
@@ -157,7 +157,7 @@ The primary is running when `Status.Busy` is true. It is idle when it is not bus
 | idle | blocker | continue | continue |
 | interrupted | any | aside | aside |
 
-An idle primary MUST start at most one continuation per batch of notes. After that continuation started, more notes from the batch MUST be `aside`. A continuation MUST NOT schedule another review. A user interrupt (Esc, `turn/interrupt`) MUST put the primary in the interrupted state until the next user input. In that state, auto-continue MUST be off.
+An idle primary MUST start at most one continuation per batch of notes. After that continuation starts, more notes from the batch MUST be `aside`. A continuation MUST NOT schedule another review. A user interrupt (Esc, `turn/interrupt`) MUST put the primary in the interrupted state until the next user input. In that state, auto-continue MUST be off.
 
 ### Sync
 

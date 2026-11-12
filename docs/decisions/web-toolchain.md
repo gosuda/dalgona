@@ -8,12 +8,12 @@ Scope: `web/package.json` and `web/pnpm-lock.yaml`. Enforcement: `just web` inst
 
 ## Pins on 2026-11-11
 
-Grounded on 2026-11-11. Each row gives the exact pin in the repository. Each pin equals the latest stable release, except pnpm and TypeScript. pnpm stays at 12.18.0 while the npm stable tag names it. TypeScript stays at 6.0.3 by the invariant above. The OSV column holds the result of `POST https://api.osv.dev/v1/querybatch` for each exact pin, run on 2026-11-12.
+Grounded on 2026-11-11. Each row gives the exact pin in the repository. Each pin equals the latest stable release, except pnpm and TypeScript. pnpm stays at 12.18.0 while the npm stable tag names it. TypeScript stays at 6.0.3 by the invariant above. The OSV column holds the result of `POST https://api.osv.dev/v1/querybatch` for each npm pin, run on 2026-11-12. The Node.js row is not an npm package and was not sent to that query.
 
 |Package|Pin|Released|Use|OSV batch 2026-11-12|
 |---|---|---|---|---|
 |pnpm (`web/package.json`, `.github/workflows/ci.yml`)|12.18.0|not recorded|package manager and CI setup|none|
-|Node.js (`.github/workflows/ci.yml`)|26.13.1|2026-11-11|CI runtime. Raised from 26.13.0 on 2026-11-12 to the 26.x release that the Node.js security release page of 2026-11-11 lists as Latest LTS, with the 26.x fixes. The CVE IDs that the plan named (CVE-2026-105482, CVE-2026-105483, CVE-2026-106069, CVE-2026-111497) are not on that page, so those IDs are not confirmed fixed.|none|
+|Node.js (`.github/workflows/ci.yml`)|26.13.1|2026-11-11|CI runtime. Raised from 26.13.0 on 2026-11-12 to the 26.x release that the Node.js security release page of 2026-11-11 lists as Latest LTS, with the 26.x fixes. The CVE IDs that the plan named (CVE-2026-105482, CVE-2026-105483, CVE-2026-106069, CVE-2026-111497) are not on that page, so those IDs are not confirmed fixed.|not queried|
 |svelte|5.57.3|2026-10-26|UI framework|none|
 |@sveltejs/kit|3.2.0|2026-11-10|app framework and build|none|
 |@sveltejs/adapter-static|4.0.1|2026-10-29|static build output|none|

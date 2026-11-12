@@ -21,7 +21,7 @@ This decision applies to model selection and role resolution, not provider entit
 
 ## Selection evidence
 
-The approved selection record dated 2026-11-08 cites the native model guides for [OpenAI](https://developers.openai.com/api/docs/guides/latest-model.md), [Anthropic](https://platform.claude.com/docs/en/models/overview.md), and [Google](https://ai.google.dev/gemini-api/docs/models). It selected Sol over Astra for the same recorded Terminal-Bench score at a lower price. It selected Opus over Fable for the default role. These are the recorded design inputs, not new measurements from this repository.
+The approved selection record dated 2026-11-08 cites the native model guides for [OpenAI](https://developers.openai.com/api/docs/guides/latest-model.md), [Anthropic](https://platform.claude.com/docs/en/models/overview.md), and [Google](https://ai.google.dev/gemini-api/docs/models). It selects Sol over Astra for the same recorded Terminal-Bench score at a lower price. It selects Opus over Fable for the default role. These are the recorded design inputs, not new measurements from this repository.
 
 | Recorded comparison | Selection evidence |
 | --- | --- |
@@ -30,7 +30,7 @@ The approved selection record dated 2026-11-08 cites the native model guides for
 | [SWE-bench Verified](https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/) | The record excludes this benchmark after OpenAI stopped reporting it on 2026-02-23 because of contamination. |
 | [OpenRouter programming usage](https://openrouter.ai/collections/programming/), data through 2026-11-07 | DeepSeek V4.1 Flash: 26.4%. GLM 5.3 Flash: 6.3%. Step 5 Preview: 6.1%. These figures measure traffic, not quality. |
 
-The record cross-checked native names against [OpenRouter's catalog](https://openrouter.ai/api/v1/models). OpenRouter identifiers MUST NOT replace native identifiers on a provider wire. Subscription availability MUST still follow the provider's offered list. The record cites [ChatGPT model documentation](https://learn.chatgpt.com/docs/models/) and [Claude Code model aliases](https://code.claude.com/docs/en/model-config/), not an endpoint allowlist.
+The record cross-checks native names against [OpenRouter's catalog](https://openrouter.ai/api/v1/models). OpenRouter identifiers MUST NOT replace native identifiers on a provider wire. Subscription availability MUST still follow the provider's offered list. The record cites [ChatGPT model documentation](https://learn.chatgpt.com/docs/models/) and [Claude Code model aliases](https://code.claude.com/docs/en/model-config/), not an endpoint allowlist.
 
 ## Enforcement
 

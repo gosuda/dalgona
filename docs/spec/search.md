@@ -8,4 +8,4 @@ Search MUST return at most `limit` results. The `limit` argument MUST be from 1 
 
 Search MUST skip `.git` and every path that `.gitignore` or `.git/info/exclude` excludes. Search MUST NOT follow symbolic links.
 
-The `grep` mode MUST skip binary files and files that are not valid UTF-8. At commit `3c4b6f94`, only the `grep` mode reads file contents.
+The `grep` mode MUST skip binary files and files that are not valid UTF-8. Only the `grep` mode reads file contents.

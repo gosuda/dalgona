@@ -16,7 +16,7 @@ Calls that fail before the gate MUST complete through a declined resolution:
 
 - An unknown tool: `Tool <name> not found`, by `mode:<mode>`.
 - Arguments that `tool.Repair` rejects: `invalid arguments for <name>: <error>`, by `mode:<mode>`.
-- The loop guard: `repeated call: this exact call already ran 4 times; change approach`, by `rule:loop-guard`. The key is the tool name plus the arguments in RFC 8785 canonical form. Four earlier `tool.started` records with the same key trigger the guard. Counting stops at the most recent `user.message`. Counting also stops at the most recent `tool.started` record with a different key when that record is class `edit` or `exec` and completed with `ok=true`. A failed or unfinished state-changing call MUST NOT reset the count. Other calls between repeats do not reset the count.
+- The loop guard: `repeated call: this exact call already ran 4 times; change approach`, by `rule:loop-guard`. The key is the tool name plus the arguments in RFC 8785 canonical form. Four earlier `tool.started` records with the same key trigger the guard. Counting stops at the most recent `user.message`. Counting also stops at the most recent `tool.started` record with a different key when that record is class `edit` or `exec` and completed with `ok=true`. A failed or unfinished state-changing call MUST NOT reset the count. Other calls between repeats MUST NOT reset the count.
 
 ## Gate order
 
@@ -27,7 +27,7 @@ The gate MUST run these steps in order and MUST stop at the first verdict.
 3. Mechanical allow, modes `auto` and `ask`. Classes `read`, `agent`, and `script` accept by `mode:<mode>`. In `auto`, class `edit` accepts by `mode:auto` when every planned path is inside the writable roots. In `ask`, class `edit` goes to step 6.
 4. Static rules for `exec` commands. For `remote` calls, only the semantic deny rules apply. They check each decoded string value of the JSON arguments. Shell-syntax rules never see the raw JSON. A match declines by `rule:<name>` with the reason `declined by rule <name>: <command part>`. The decider MUST NOT see the call.
 5. Decider, mode `auto`. The gate sends an `Action` to the configured `Decider`. A missing decider declines with `declined by decider: no decider is configured`. A decider error declines with `declined by decider: <error>`.
-6. User, mode `ask`. A matching session grant accepts by `grant:<prefix>`. With no subscribed client, the gate declines with `declined: no client could approve this call`. Otherwise the thread publishes an `UpdateApproval` and waits for `Thread.Answer`. The prompt summary names the thread working directory and, for an escalated `exec` call, that the call runs unsandboxed. For an `exec` call the prompt carries the exact command text. The app-server MUST show that text verbatim, not as a reassembled form. `accept` and `accept_session` accept by `user`. `decline` declines with `declined by user`. `cancel` declines with `cancelled by user` and interrupts the turn. An interrupt during the wait resolves the request as `cancel` by `user`.
+6. User, mode `ask`. A matching thread grant accepts by `grant:<prefix>`. With no subscribed client, the gate declines with `declined: no client could approve this call`. Otherwise the thread publishes an `UpdateApproval` and waits for `Thread.Answer`. The prompt summary names the thread working directory and, for an escalated `exec` call, that the call runs unsandboxed. For an `exec` call the prompt carries the exact command text. The app-server MUST show that text verbatim, not as a reassembled form. `accept` and `accept_session` accept by `user`. `decline` declines with `declined by user`. `cancel` declines with `cancelled by user` and interrupts the turn. An interrupt during the wait resolves the request as `cancel` by `user`.
 
 An advisor thread MUST NOT wait for a user decision. In mode `ask`, it MUST use step 5 instead of step 6.
 
@@ -49,13 +49,13 @@ Writable roots are the thread working directory, `os.TempDir()`, `os.UserCacheDi
 - An error, a timeout of 8 s, or a missing or out-of-range answer MUST decline with `declined by decider <model>: <error>`.
 - An escalated `exec` call (`escalate=true`) MUST be decided with `sandboxed=false` and its justification. When allowed, it runs without the harness sandbox.
 
-## Session grants
+## Thread grants
 
-A user `accept_session` resolution MUST create a grant once the fold knows the call class from `approval.requested`. When the resolution is journaled before the class is known, the fold carries the grant prefix forward. The fold creates the grant from the later `tool.started` record.
+A user `accept_session` resolution MUST create a thread grant once the fold knows the call class from `approval.requested`. When the resolution is journaled before the class is known, the fold carries the grant prefix forward. The fold creates the thread grant from the later `tool.started` record.
 
-- `exec`: the grant is the first two argv words from `rules.GrantPrefix`, with a flag in second position kept. A compound command MUST NOT create a grant. The grant records whether the accepted call was escalated, and a later command matches only when escalation agrees and `rules.MatchesGrant` holds.
-- `edit` and `remote`: the grant is `tool:<name>`.
-- Other classes MUST NOT create grants.
-- A `grant:<prefix>` resolution MUST NOT create a new grant.
+- `exec`: the thread grant is the first two argv words from `rules.GrantPrefix`, with a flag in second position kept. A compound command MUST NOT create a thread grant. The thread grant records whether the accepted call was escalated, and a later command matches only when escalation agrees and `rules.MatchesGrant` holds.
+- `edit` and `remote`: the thread grant is `tool:<name>`.
+- Other classes MUST NOT create thread grants.
+- A `grant:<prefix>` resolution MUST NOT create a new thread grant.
 
-Grants MUST fold over the full journal, so they survive a revert, a leaf move, and a restart.
+Thread grants MUST fold over the full journal, so they survive a revert, a leaf move, and a restart.

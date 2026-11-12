@@ -22,7 +22,7 @@ For each effective replacement or CUT:
 EnhancedEligible(edit) = SharedChecks(edit) AND PriorCoverage(edit)
 ```
 
-Every existing cell in the effective destructive footprint must have been fully
+Every existing cell in the effective destructive footprint MUST have been fully
 delivered to this caller before its request cutoff. Coverage belongs to the
 same snapshot/history and caller and transfers only through exact preserved
 cells. Host-internal reads, other agents' reads, truncated output, and future
@@ -53,17 +53,17 @@ The parser refuses source-node (`N*`) operations with a parse error.
 ## E04. Examples
 
 Snapshot S includes fully delivered source lines 40-45. A cooperating patch inserts
-ten lines before line 5. The host maps S:40-45 to current 50-55 and may prepare the
+ten lines before line 5. The host maps S:40-45 to current 50-55 and can prepare the
 edit without another whole-file read.
 
 If a cooperating patch inserts inside the target, it conflicts: the new middle
-text was not in the requested source span. If the target changes and later returns
+text is not in the requested source span. If the target changes and later returns
 to equal bytes, it remains invalid. If the current file breaks retained history,
 require a new read rather than searching for an equal block elsewhere.
 
 A model request starts at delivery cutoff 7 and emits calls A and B. A fails and
-returns a preview at delivery 8. B cannot use delivery 8 because B was already
-chosen under cutoff 7. A subsequent request with cutoff 8 may use complete rows
+returns a preview at delivery 8. B cannot use delivery 8 because B is already
+chosen under cutoff 7. A subsequent request with cutoff 8 MAY use complete rows
 from that preview. This establishes availability to a decision context, not proof
 of comprehension.
 
@@ -74,11 +74,11 @@ results do not count as model observations unless separately delivered there.
 
 For a known target with unseen rows, the request fails with this error:
 `patch: changes[N]: lines A-B of PATH need prior observation. Read them, then resend`.
-The request writes no target. A later explicit request may use the new delivery.
+The request writes no target. A later explicit request MAY use the new delivery.
 Never upgrade the pending request after an internal fetch.
 
 For missing history, the request fails with `patch: reference REF for PATH is stale: snapshot: stale reference. Read again`.
-The caller must read the file again. Do not offer a retag-only repair that silently reuses old unverified coordinates.
+The caller MUST read the file again. Do not offer a retag-only repair that silently reuses old unverified coordinates.
 
 ## E06. Canonical model-facing description
 
@@ -107,7 +107,7 @@ to Light to bypass refusal. Never blind-retry an uncertain commit.
 |---|---|---|
 | E-01 | Fully observed intact target before cutoff | Preparation succeeds. |
 | E-02 | Folded or truncated middle rows | Error ends with `need prior observation. Read them, then resend`. No target is written. |
-| E-03 | Complete missing rows delivered before a new request | New request may succeed. |
+| E-03 | Complete missing rows delivered before a new request | A new request can succeed. |
 | E-04 | Missing rows delivered after this request began | Pending call still lacks coverage. |
 | E-05 | Another subagent observed the same bytes | No coverage for this consumer. |
 | E-06 | Intact target moved through known prefix insertion | Map and prepare. |

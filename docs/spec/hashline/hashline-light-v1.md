@@ -6,8 +6,8 @@ Required base: [Shared specification](hashline-common-v1.md).
 
 ## L01. Purpose
 
-Permit deliberate replacement of text the caller did not fully inspect, while
-retaining snapshot binding and concurrent-change detection.
+Light permits deliberate replacement of text the caller did not fully inspect.
+It keeps snapshot binding and concurrent-change detection.
 
 Light is snapshot-bound, observation-optional editing. It is not a write to
 whatever currently occupies an old line number. Missing references, changed
@@ -26,14 +26,14 @@ continuous verified history, unchanged target, resource admission, containment,
 nonoverlap, staged-observer acceptance, and authorization. Eligibility permits
 preparation. It does not guarantee I/O success.
 
-Do not require every affected line to have been delivered. The complete source
-snapshot and mapping evidence must still be available, and its header must have
+Light MUST NOT require every affected line to have been delivered. The complete source
+snapshot and mapping evidence MUST still be available, and its header MUST have
 been delivered before the call's cutoff. Missing display is permitted. Missing
 snapshot evidence is not.
 
 ## L03. Example
 
-A read captured a complete file snapshot but delivered:
+A read captures a complete file snapshot but delivers:
 
 ```text
 [src/table.rs@r0123456789abcdef0123456789abcdef.1]
@@ -66,12 +66,12 @@ It still requires an unchanged complete source reference and normal authorizatio
 A valid no-op returns no_change without file writes or fabricated coverage. Invalid
 or stale requests cannot become no-ops merely because desired text already exists.
 
-Light may remove important code the caller never inspected. That is its deliberate
+Light can remove important code the caller never inspected. That is its deliberate
 risk. Snapshot validity does not establish that the chosen edit is appropriate.
 
 Only user-controlled configuration or runtime policy established before the model
-request selects Light. A model cannot select it by changing its header. Never
-downgrade an Enhanced refusal automatically. No unmeasured model-family fallback
+request selects Light. A model cannot select it by changing its header. A refused
+Enhanced edit MUST NOT fall back to Light automatically. No unmeasured model-family fallback
 table is part of this specification.
 
 ## L05. Canonical model-facing description

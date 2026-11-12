@@ -21,7 +21,7 @@ an implementation gate, not something inferred from a filename.
 
 ## R02. Source map
 
-Primary source: attached `spec/dalgon-v0-plan.md`, kept in this repository at `dalgona-private/spec/dalgon-v0-plan.md`, 16,732 physical lines, 2,107,077 bytes.
+Primary source: attached `spec/dalgon-v0-plan.md`, 16,732 physical lines, 2,107,077 bytes. The file is not tracked in git, because `.gitignore` excludes `dalgona-private/`.
 SHA-256, verified against the mounted attachment:
 
 ```text
@@ -65,7 +65,7 @@ be wrong.
 Revision: executable mapping uses only authoritative recorded operations.
 Content search is diagnostic, never edit proof. Covered by C02/C06-C09 and MAP-07.
 
-### High: known edit-then-undo must not revive a target
+### High: known edit-then-undo MUST NOT revive a target
 
 A current-digest fast path can hide A-to-B-to-A history. Likewise, an insertion
 inside a protected range can be removed later, restoring adjacency but not the
@@ -148,7 +148,7 @@ whole-source stability and approval. Specify NEW absence, MV lifecycle, and
 valid no-op behavior. C10-C11 state the rule. FILE tests check it. This is a deliberate retained
 exception, not an accidental coverage bypass.
 
-### Medium: presentation errors should not weaken target proof
+### Medium: presentation errors SHOULD NOT weaken target proof
 
 No-op-as-error, duplicate sections, reference churn, and unhelpful stale messages
 cause avoidable retries without establishing useful safety properties.
@@ -190,7 +190,7 @@ rules and a fixed coverage-policy choice, not a dynamic proof framework.
 | Explicit file-delete exception | Retained. Both descriptions state it: the Enhanced one at `description.go:13` and the Light one at `description.go:11`. |
 | Stale head/tail bypass | Legacy checks the tag before every locator kind, gaps included. Profiles map head and tail gaps through the snapshot store. |
 | No-change failure | Profiles return `no_change` for a valid exact no-op. The writer returns `no_change` for an empty batch in every style. |
-| Duplicate-file-section failure | Same-reference sections may merge in new profiles only. |
+| Duplicate-file-section failure | Same-reference sections MAY merge in new profiles only. |
 | Output shape | Existing fields retained; versioned metadata added only for new profiles. |
 | External drift | Remains a hard history boundary, not auto-relocation input. |
 | NEW final-newline behavior | Explicit rule for new profiles; existing-file rules retained. |

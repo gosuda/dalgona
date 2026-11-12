@@ -7,8 +7,8 @@ Companions: [Light](hashline-light-v1.md), [Enhanced](hashline-enhanced-v1.md),
 [Conformance](hashline-conformance-v1.md), [Review and source map](hashline-review.md).
 
 Adopted on 2026-11-08 as the contract for the Go `patch` tool's `hashline-light` and `hashline-enhanced` styles.
-MUST and MUST NOT define the contract for these two styles. Some requirements in C13 to C16 are not yet implemented. Source-derived requirements and deliberate amendments are
-separated in the review. Source locators such as S-PROOF refer to that source map.
+This document defines the contract for these two styles. Some requirements in C13 to C16 are not yet implemented. The review separates source-derived requirements
+from deliberate amendments. Source locators such as S-PROOF refer to that source map.
 
 ## C01. Decision and scope
 
@@ -59,7 +59,7 @@ touching its target. Tests and review remain necessary.
 | Snapshot | Immutable captured file bytes, full digest, and line metadata. Retention is bounded. |
 | Document | Host-local logical identity for a file within a workspace. Detected replacement, deletion, or untracked rename breaks continuity. |
 | Lineage epoch | Period with a continuous cooperating edit history. A detected history gap ends it. |
-| Revision | Monotonic document sequence within an epoch; not a content hash. |
+| Revision | Monotonic document sequence within an epoch. It is not a content hash. |
 | Read reference | Opaque host-issued handle bound to a snapshot and the owning thread store. It is not a grant. |
 | Consumer | Model context or sequential evaluator receiving tool data. A TUI viewer is not automatically that consumer. |
 | Evidence cutoff | Last completed delivery a request is allowed to use. |
@@ -106,7 +106,7 @@ The parser rejects `[PATH#TAG]` headers in these profiles. The error text is `pa
 |---|---|
 | `PUT N:` | Replace source line N. |
 | `PUT N-M:` | Replace inclusive source lines N through M. |
-| `PUT N.=M:` | Exact alias of `PUT N-M:`; M is an endpoint, not a count. |
+| `PUT N.=M:` | Exact alias of `PUT N-M:`. M is an endpoint, not a count. |
 | `CUT N`, `CUT N-M`, `CUT N.=M` | Delete the indicated cells. |
 | `PUT <N:`, `PUT >N:` | Insert in the source gap before or after N. |
 | `PUT >$:` | Insert in the referenced snapshot's EOF gap. |
@@ -122,7 +122,7 @@ A PUT body ends at the first line that does not start with `+`.
 
 Accept LF/CRLF framing and an omitted final framing line break. Framing omission
 MUST NOT alter source newline intent. One outer Markdown fence and one matched
-Begin/End Patch envelope may be removed under the source plan's unwrapping rule.
+Begin/End Patch envelope MAY be removed under the source plan's unwrapping rule.
 Unpaired envelopes are invalid in these new profiles. Never strip inner fences,
 rewrite body text, or reinterpret another dialect.
 
@@ -131,8 +131,8 @@ contain delimiters, leading/trailing whitespace, a control character, or begin
 with a double quote. All others use one JSON-quoted string. Header parsing is
 quote-aware and expects exactly `@<ReadRef>]` or `#NEW]` outside that string.
 In bare paths, `@`, `#`, `]`, CR, and LF are reserved. A leading `[` is legal
-because the opening header bracket is consumed separately. `MV "new path.rs"`
-Decode once. NUL is always invalid.
+because the opening header bracket is consumed separately. Decode a quoted path once, as in `MV "new path.rs"`.
+NUL is always invalid.
 
 Grammar-constrained providers and the bounded line parser MUST accept identical
 productions. Other providers use the existing JSON envelope `{"input":"..."}`.
@@ -160,15 +160,15 @@ not share observation authority.
 
 The reference becomes eligible only after its header has been delivered. Only
 complete source lines in that delivery count as observed. Folded blocks, ellipses,
-dropped output, truncated lines, and omitted long lines do not count. Escaping may
+dropped output, truncated lines, and omitted long lines do not count. Escaping MAY
 count only when lossless, unambiguously decodable, and bound by renderer metadata
-to the complete source line. BOM and EOL encoding may be metadata rather than
+to the complete source line. BOM and EOL encoding MAY be metadata rather than
 printed characters.
 
 Before sending a model request, freeze its reference eligibility and evidence
 cutoff. Every returned tool call uses that same cutoff, including parallel calls.
 A preview from one call MUST NOT authorize another already-issued call. Only a
-later decision request can use the new delivery. Historical session delivery is
+later decision request can use the new delivery. Historical thread delivery is
 the coverage contract, not proof the model understood or still remembers it.
 
 A sequential evaluator has a distinct consumer identity. A read returned to it
@@ -177,10 +177,10 @@ the patch planner is not such a delivery. Evaluator data does not silently becom
 model-context evidence. An embedder unable to establish a reliable delivery
 boundary MUST reject Enhanced with `observation_unavailable`.
 
-Edit echoes credit only their fully delivered lines. Unchanged cells may retain
+Edit echoes credit only their fully delivered lines. Unchanged cells MAY retain
 coverage through a verified Chain. Replaced cells need a new qualifying delivery.
 An evicted/unknown/wrong-boot reference needs a fresh read, not an implicit current
-snapshot. Wrong session/consumer/path binding is a rejection and MUST NOT reveal
+snapshot. Wrong thread/consumer/path binding is a rejection and MUST NOT reveal
 foreign-context data.
 
 ## C06. Revision continuity and authoritative footprints
@@ -194,11 +194,11 @@ effective splices committed by the engine. Do not infer preserved occurrences fr
 a minimal display diff. A broad replacement replaces its entire recorded footprint,
 even where the new body repeats old lines.
 
-Other shared-engine dialects may contribute edges only when their exact resolved
+Other shared-engine dialects MAY contribute edges only when their exact resolved
 mutation is available. An opaque mutation ends the epoch. Shell output or watcher
 notifications cannot create an edge. Before following a Chain, verify continuity,
 head digest, and current path identity. A missing edge, detected external drift,
-uncertain outcome, or inconsistent footprint ends the lineage. Fresh reads may
+uncertain outcome, or inconsistent footprint ends the lineage. Fresh reads MAY
 start a new epoch. Old references remain invalid.
 
 Equal-text, equal-node, symbol-name, fuzzy, or nearby-line search MUST NOT establish
@@ -267,7 +267,7 @@ count as existing paths. It cannot mix with operations on the same destination.
 It needs no prior file reference because it removes nothing.
 
 NEW and the MV destination MUST use no-replace publication, not an existence
-check followed by an overwriting rename. The writer/store owner must expose
+check followed by an overwriting rename. The writer/store owner MUST expose
 that primitive on each supported platform. If unavailable, reject
 `no_replace_unavailable`. Do not fall back to an operation that can clobber
 a destination created by another process. This requirement does not make
@@ -280,13 +280,13 @@ to have been delivered for REM. Both descriptions MUST state the exception. Norm
 patch authorization still applies. The reference is not deletion permission.
 
 MV requires the referenced complete source, a contained absent destination, and
-unchanged source/destination conditions. It may appear once, last under a source
+unchanged source/destination conditions. It MAY appear once, last under a source
 header, after content edits. Its source/destination cannot be independently targeted
 elsewhere in the batch. Evaluate edits plus rename from the same before-image.
 
 For REM/MV, unchanged complete source means no effective cooperating content or
 lifecycle change since the reference, even if a later undo restores equal bytes.
-After MV, invalidate old-path executable references. A destination reference may
+After MV, invalidate old-path executable references. A destination reference MAY
 carry only correctly transferred consumer coverage. Do not silently follow a
 reference to another path.
 
@@ -367,12 +367,12 @@ Report observed outcome, not intended outcome. The new profiles do not yet emit 
 | Status | Commit state | Meaning |
 |---|---|---|
 | `applied` | `complete` | Requested effects and required success-record boundary completed. |
-| `no_change` | `none` | Valid request with no effective edit; no target writes. |
-| `needs_context` | `none` | Evidence missing or insufficient; no target writes. |
+| `no_change` | `none` | Valid request with no effective edit. No target writes. |
+| `needs_context` | `none` | Evidence missing or insufficient. No target writes. |
 | `conflict` | `none` | Known target, gap, path, or approval condition changed. |
 | `rejected` | `none` | Invalid request, binding, authority, operation, or resource admission. |
 | `interrupted` | `none` | Interruption completed before any target mutation. |
-| `write_error` | `none`, `restored`, `complete`, `partial` | I/O failed; known post-state is stated separately. |
+| `write_error` | `none`, `restored`, `complete`, `partial` | I/O failed. The known post-state is stated separately. |
 | `indeterminate` | `unknown` | Final effects cannot be established. |
 
 `restored` means writes occurred and were verified restored. Never describe it as
@@ -382,7 +382,7 @@ affected path and verified before/after state. Unknown state requires indetermin
 
 Do not publish executable references or Chain edges before commit and its required
 record boundary succeed. Invalidate relevant epochs on partial/uncertain outcomes.
-A result-journal failure after file writes must not appear as no effect. Stop and
+A result-journal failure after file writes MUST NOT appear as no effect. Stop and
 recover under the store contract. Do not retry destructively on guessed state.
 
 ## C14. Memory and admission
@@ -410,7 +410,7 @@ or return `resource_busy`, `resource_limit`, or `reference_expired`. No partial-
 waits, hidden copies, or unlimited pinning during model think time. The store does not
 pin evidence for a prepared call. A printed reference is not a retention promise.
 
-A requested evidence set exceeding the pool must be split. Never weaken proof to
+A requested evidence set that exceeds the pool MUST be split. Never weaken proof to
 fit it. If a successful commit cannot retain a fresh echo reference, report success
 and a reread instruction without an executable reference. Do not reclassify already
 written files as an edit rejection.
@@ -448,7 +448,7 @@ actual changes, never the whole proposed plan on partial failure. Display diffs
 are not proof.
 
 Recovery respects current read permission and reveals no foreign consumer data.
-Recovery display is not implemented yet. It may show at most 40 complete lines and 16 KiB of source text total. Never truncate
+Recovery display is not implemented yet. It MAY show at most 40 complete lines and 16 KiB of source text total. Never truncate
 and register a line as observed. An overlong line yields a read instruction only.
 List uncovered ranges in `remaining`. Only the final delivery establishes future
 coverage. No internal fetch, automatic retag, or automatic destructive retry.
@@ -457,18 +457,18 @@ coverage. No internal fetch, automatic retag, or automatic destructive retry.
 |---|---|---|
 | `reference_missing`, `reference_expired`, `reference_unknown` | needs_context | Read and copy an eligible new header. |
 | `history_gap` | needs_context | Read current content and identify the target again. |
-| `unobserved_range` | needs_context | Deliver missing complete lines; submit a new call. |
+| `unobserved_range` | needs_context | Deliver missing complete lines. Submit a new call. |
 | `observation_unavailable` | rejected | Use a runtime with a reliable delivery boundary. |
-| `interrupted` | interrupted | No target effect; a later request is a new decision. |
-| `observer_blocked` | rejected | Address the staged finding; do not bypass the observer. |
-| `no_replace_unavailable` | rejected | Use a supported no-clobber writer; no overwrite fallback. |
-| `binding_mismatch`, `outside_workspace`, `permission_denied` | rejected | Correct binding/authority; no protected diagnostic leak. |
+| `interrupted` | interrupted | No target effect. A later request is a new decision. |
+| `observer_blocked` | rejected | Address the staged finding. Do not bypass the observer. |
+| `no_replace_unavailable` | rejected | Use a supported no-clobber writer. Do not use an overwrite fallback. |
+| `binding_mismatch`, `outside_workspace`, `permission_denied` | rejected | Correct binding/authority. No protected diagnostic leak. |
 | `target_changed`, `gap_changed`, `path_changed` | conflict | Inspect current state and decide again. |
 | `invalid_syntax`, `invalid_range`, `mixed_references`, `overlap`, `invalid_shape` | rejected | Correct the payload. |
-| `resource_busy`, `resource_limit` | rejected | Retry admission or split; never downgrade proof. |
+| `resource_busy`, `resource_limit` | rejected | Retry admission or split. Never downgrade proof. |
 | `invocation_mismatch` | rejected | Do not reuse invocation identity for different input. |
 | `write_failed`, `sync_failed`, `rollback_failed` | write_error | Inspect reported effects. |
-| `commit_unknown`, `result_record_missing` | indeterminate | Recover and inspect; never blindly re-execute. |
+| `commit_unknown`, `result_record_missing` | indeterminate | Recover and inspect. Never blindly re-execute. |
 
 `error_class` maps to the existing vocabulary: applied/no_change/interrupted -> null.
 reference/coverage -> proof. History and changed-condition conflicts -> stale.
@@ -486,7 +486,7 @@ that a bug must be elsewhere.
 ## C16. Invocation identity and replay
 
 The records and replay rules in this section are not implemented yet. Deduplicate before preparation. A bare provider CallId is not sufficient. Runtime
-invocation identity binds session, originating open generation, turn/request,
+invocation identity binds thread, originating open generation, turn/request,
 authenticated consumer, and final post-hook payload. Reconnecting clients replay
 that identity. A new model call has a new identity even with equal text.
 
@@ -497,7 +497,7 @@ Cancelling its waiter does not cancel that owner operation.
 
 After bounded syntax/envelope validation and deduplication, append an invocation
 start before preparation. Append its terminal outcome whenever the journal stays
-healthy, including no_change and pre-commit rejection. Use existing session extension
+healthy, including no_change and pre-commit rejection. Use existing thread extension
 records, not a new journal. Kinds are `hashline.invocation_started` and
 `hashline.invocation_settled`, owned by dispatch/store integration. Start holds
 identity, fingerprint, profile/version, and parsed requested paths. Settled holds
@@ -505,12 +505,12 @@ the terminal output. Records contain no credentials or private-plan citations.
 
 A matching settled record replays without execution, with `replayed=true`.
 Historical previews/references from replay create no fresh observation authority.
-They may be printed as historical, but the caller needs a new read for fresh
+They MAY be printed as historical, but the caller needs a new read for fresh
 executable evidence. Never mint a current reference while replaying an old result.
 
 After recovery, started-but-unsettled is indeterminate, not safe to retry. An
 unstarted old-host/open invocation is not executable either: its evidence expired,
-so a new explicit edit is required. Ephemeral sessions deduplicate only within
+so a new explicit edit is required. Ephemeral threads deduplicate only within
 live-host lifetime. This is recorded-result replay, not a claim of exactly-once
 filesystem effects across crashes.
 

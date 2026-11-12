@@ -2,9 +2,9 @@
 
 ## Scope
 
-The `patch` tool SHALL support `anchor`, `replace`, `hashline`, `hashline-light`, `hashline-enhanced`, and `apply_patch`. The aliases SHALL be `balanced` for `anchor`, `simple` for `replace`, and `strict` for `hashline`. `anchor` SHALL be the default.
+The `patch` tool MUST support `anchor`, `replace`, `hashline`, `hashline-light`, `hashline-enhanced`, and `apply_patch`. The aliases MUST be `balanced` for `anchor`, `simple` for `replace`, and `strict` for `hashline`. `anchor` MUST be the default.
 
-`apply_patch` SHALL use tool name `apply_patch` and freeform input. Other styles SHALL use tool name `patch`. Other styles SHALL accept an `input` string, except `replace`, which SHALL accept a `changes` array.
+`apply_patch` MUST use tool name `apply_patch` and freeform input. Other styles MUST use tool name `patch`. Other styles MUST accept an `input` string, except `replace`, which MUST accept a `changes` array.
 
 Symbol locators and symbol search are outside this contract. Parsers MUST reject `N*`, `Node`, `Symbol`, and `DefTag` operations.
 
@@ -16,7 +16,7 @@ A parser MUST NOT read or write a target file. One resolver MUST validate guards
 
 Each file MUST be valid UTF-8 text of at most 16 MiB. The resolver MUST reject NUL bytes. It MUST preserve a BOM, mixed line endings, and an unterminated final line. Inserted text MUST use CRLF only when CRLF is dominant in the source file.
 
-Paths MUST remain below the session workspace. Absolute paths, NUL bytes, and parent traversal outside the workspace MUST fail. Rooted paths and paths with a volume name MUST fail the same way as absolute paths. A rename destination MUST NOT contain parent traversal.
+Paths MUST remain below the thread workspace. Absolute paths, NUL bytes, and parent traversal outside the workspace MUST fail. Rooted paths and paths with a volume name MUST fail the same way as absolute paths. A rename destination MUST NOT contain parent traversal.
 
 ## Grammars
 

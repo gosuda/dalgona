@@ -59,7 +59,7 @@ The upgrade MUST use `github.com/coder/websocket` with its default origin check.
 The relay MUST NOT decode, re-encode, or change message bytes.
 
 - Browser to daemon: each websocket text message MUST become one line: the message bytes followed by one `\n`, in one write.
-- Daemon to browser: each `\n`-terminated line MUST become one websocket text message without the `\n`. A line longer than the 64 KiB read buffer MUST be streamed as one message.
+- Daemon to browser: each `\n`-terminated line MUST become one websocket text message without the `\n`. The relay MUST stream a line longer than the 64 KiB read buffer as one message.
 - A browser message MUST be at most 16 MiB minus 1 byte, which is the daemon line limit without the newline.
 - A browser message larger than that limit MUST close the websocket.
 
@@ -80,19 +80,19 @@ A clean shutdown MUST return `nil`. Shutdown waits at most 5 seconds for open pa
 
 ## Browser client
 
-The client in `web/` reads the token from the URL fragment and opens `/rpc`. It speaks the Codex v2 protocol, and `web/src/lib/validation.ts` checks every payload against the shapes in `internal/rpc/testdata/codex-schema`.
+The client in `web/` reads the token from the URL fragment and opens `/rpc`. It speaks the Codex v2 protocol. `web/src/lib/validation.ts` parses each payload by hand and does not check it against the schema in `internal/rpc/testdata/codex-schema`. The Go tests in `internal/rpc` check encoded protocol objects against that schema.
 
 ### Layout
 
 - Above 52rem the page has two columns, the thread list and the workspace. The workspace holds the status bar, the thread heading, the transcript, and the composer. The transcript scrolls inside its own column.
 - At 52rem or narrower the page stacks the parts and the document scrolls. The thread list keeps a maximum height of 18rem.
-- At 320px nothing may clip or scroll sideways.
+- At 320px nothing MUST clip or scroll sideways.
 - The transcript follows new output only while the reader is within 32px of its end. It follows the transcript at wide widths and the window at narrow widths. Opening a thread follows its end.
 
 ### Status bar
 
 The status bar shows the connection state as text. The turn state follows it as text: `Working`, `Turn completed`, `Turn interrupted`, or `Turn failed`.
-A `turnStarted` response for a turn already shown as `Turn completed`, `Turn interrupted`, or `Turn failed` MUST NOT replace that status or clear its error.
+A `turn/started` notification for a turn already shown as `Turn completed`, `Turn interrupted`, or `Turn failed` MUST NOT replace that status or clear its error.
 
 It also shows model, approval, sandbox, runner, and advisor. The advisor entry comes from `dalgona/advisor/status`. The client loads it when a thread opens or starts, and again after each `dalgona/advisor/note` for the open thread. It shows one of:
 
@@ -117,11 +117,11 @@ No advisor failure opens the error banner.
 
 ### Approvals
 
-The client records child threads from `dalgona/thread/childSpawned`. An approval from a child of the open thread MUST appear in the approval dialog of the open thread. The answer MUST carry the child request id. An approval from any other thread MUST count as waiting on another thread. The client MUST keep child links per parent thread id when it rebuilds the transcript from `thread/resume` or `thread/read`. It MUST NOT apply links from another thread.
+The client records subagent threads from `dalgona/thread/childSpawned`. An approval from a subagent of the open thread MUST appear in the approval dialog of the open thread. The answer MUST carry the subagent request id. An approval from any other thread MUST count as waiting on another thread. The client MUST keep subagent links per parent thread id when it rebuilds the transcript from `thread/resume` or `thread/read`. It MUST NOT apply links from another thread.
 
 ### Empty states and errors
 
-- With no open thread the transcript says `Pick a thread or start a new one`. When connected, it adds that earlier threads are in the list. When not connected, it says to connect to dalgona.
+- With no open thread the transcript says `Pick a thread or start a new one`. When connected, it says that earlier threads are in the list. When not connected, it says to connect to dalgona.
 - With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a title shows its preview. A thread with neither shows `Untitled thread`.
 - A failed connection reads `Unable to connect to dalgona: <detail>. Check that dalgona web is still running, then select Reconnect.`
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.

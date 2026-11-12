@@ -32,7 +32,7 @@ The `claude-plugins` source MUST read `~/.claude/plugins/installed_plugins.json`
 
 The loader MUST process plugin ids in sorted order. The loader MUST skip a plugin id with no `@`, an empty name, or an empty marketplace.
 
-The loader MUST skip an entry whose `enabled` field is `false`. It MUST skip every entry for a plugin whose plugin id is `false` in `enabledPlugins` in `~/.claude/settings.json`. Other value types in `enabledPlugins` MUST be ignored. A disabled plugin MUST NOT have its manifest, skills, or MCP configuration read.
+The loader MUST skip an entry whose `enabled` field is `false`. It MUST skip every entry for a plugin whose value is `false` in `enabledPlugins` in `~/.claude/settings.json`. Other value types in `enabledPlugins` MUST be ignored. A disabled plugin MUST NOT have its manifest, skills, or MCP configuration read.
 
 For each enabled plugin root, the loader MAY read `.claude-plugin/plugin.json`. The `skills` field selects one skill directory or an array of skill directories. Its default is `skills`. The loader MUST skip each non-string entry in a `skills` array. The `mcpServers` field has these forms:
 
@@ -50,4 +50,4 @@ A skill file MUST start with `---` on its first line. A later `---` line MUST cl
 
 Instruction files MUST stay inside their home directory or workspace root. The loader MUST resolve each candidate and MUST ignore a file that resolves outside its root. A link inside the root MAY load.
 
-Missing optional files and directories MUST be ignored. Malformed TOML, JSON, or skill frontmatter MUST return an error that names the file. The loader MUST NOT silently drop a malformed enabled source.
+The loader MUST ignore missing optional files and directories. Malformed TOML, JSON, or skill frontmatter MUST return an error that names the file. The loader MUST NOT silently drop a malformed enabled source.
