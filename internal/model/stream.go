@@ -347,12 +347,15 @@ func Classify(status int, body []byte) Verdict {
 		return Overflow
 	}
 	if verdict := classifyHTTPStatus(status); verdict != 0 {
+		if status == http.StatusTooManyRequests && isQuota(body) {
+			return Terminal
+		}
 		return verdict
 	}
 	if status != 0 && status != http.StatusOK {
 		return Terminal
 	}
-	if hasRetryableCode(body) {
+	if hasRetryableCode(body) && !isQuota(body) {
 		return Retry
 	}
 	return Terminal
@@ -376,6 +379,18 @@ func isOverflow(body []byte) bool {
 	return strings.Contains(lower, "context_length_exceeded") ||
 		strings.Contains(lower, "prompt is too long") ||
 		strings.Contains(lower, "exceeds the maximum number of tokens")
+}
+
+var quotaCodes = [...]string{"insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "organization_usage_limit_exceeded", "usage_limit_reached", "usage_not_included"}
+
+func isQuota(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	for _, code := range quotaCodes {
+		if strings.Contains(lower, `"`+code+`"`) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasRetryableCode(body []byte) bool {

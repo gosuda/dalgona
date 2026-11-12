@@ -196,6 +196,30 @@ func TestRetryAfterOverLimitStopsTheRequest(t *testing.T) {
 	}
 }
 
+func TestQuotaRateLimitDoesNotRetry(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"You exceeded your current quota","type":"insufficient_quota","code":"insufficient_quota"}}`))
+	}))
+	t.Cleanup(server.Close)
+	var retries int
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry(func(int, model.Verdict, int, time.Duration) { retries++ })})
+	stream, err := provider.Stream(t.Context(), model.Request{Model: "gpt-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure, ok := lastEvent(t, stream).(model.Error)
+	if !ok {
+		t.Fatal("last event is not model.Error")
+	}
+	if failure.Status != http.StatusTooManyRequests || retries != 0 || requests.Load() != 1 {
+		t.Fatalf("status = %d, retries = %d, requests = %d; want 429, 0, 1", failure.Status, retries, requests.Load())
+	}
+}
+
 func TestBadRequestDoesNotRetry(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
