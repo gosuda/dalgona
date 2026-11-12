@@ -38,6 +38,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [Hashline review](spec/hashline/hashline-review.md): findings, amendments, rejected alternatives, and source-line map.
 - [Hashline model checker](spec/hashline/verify_model.py): bounded range and gap identity checks, not a filesystem or patch engine.
 - [Hashline model results](spec/hashline/verification.json): recorded range, gap, and regression check results.
+- [Ratchet](spec/ratchet.md): held-out eval flows, approvals, and the keep, revert or rerun gate.
 
 ### Configuration and model behavior
 
@@ -85,3 +86,4 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [Connect wire](decisions/connect-wire.md): one framing and field-helper package for the Connect providers.
 - [Edit styles](decisions/edit-styles.md): anchor default, explicit hashline profiles, and no symbol locators.
 - [Ask tool](decisions/ask-tool.md): model questions answered by the user through the client wire.
+- [Ratchet](decisions/ratchet.md): host-owned eval gate in the dalgona battery.

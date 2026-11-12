@@ -119,6 +119,7 @@ dist:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p dist
+    cp THIRD_PARTY_NOTICES.md dist/
     for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
         os=${target%/*}
         arch=${target#*/}
