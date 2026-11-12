@@ -147,3 +147,17 @@ The host MUST mask the header, question, label, description and preview of each 
 The host MUST NOT journal a question or its answer.
 
 The thread status MUST count the open questions.
+
+## Scope
+
+The `ask` tool MUST be available in top-level threads of `dal` and `dalgona`.
+
+A subagent MUST NOT get the `ask` tool, because no user reads a subagent's questions.
+
+An advisor thread MUST NOT get the `ask` tool, because an advisor waits for no person.
+
+A call to `ask` in a subagent MUST complete with the error `Tool ask not found`.
+
+Recovery MUST NOT ask an open question again. It MUST complete the call as interrupted, as the recovery table of [recovery.md](recovery.md) states.
+
+The rule MUST be enforced by `withThreadTools` in `internal/agent/spawn.go`. `TestAskToolOnlyOnTopLevelThreads` and `TestAskToolInDal` in `internal/agent/ask_tool_test.go` check it.

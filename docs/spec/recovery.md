@@ -27,6 +27,7 @@ Recovery MUST walk the tool calls of the last `assistant.message` of the open tu
 |`approval.resolved` with `decline` or `cancel`, no `tool.completed`|Journal `tool.completed` with `ok=false`, `recovered=none`, and the decline reason as output.|
 |`approval.resolved` with `accept` or `accept_session`, no `tool.started`|Journal `tool.completed` with `ok=false`, `recovered=skipped`, output `skipped: the host restarted before this call ran`. The call MUST NOT run. A thread grant from `accept_session` stays in force because the fold records it at `approval.resolved`.|
 |Assistant call with no approval and no `tool.started`|Same as the previous row: `recovered=skipped`, output `skipped: the host restarted before this call ran`.|
+|`tool.started` for `ask`|Journal `ok=false`, `recovered=interrupted`, output `interrupted: the host restarted before the user answered`. The question MUST NOT be asked again.|
 |`tool.started`, class `read`|Run the call again. Journal `recovered=replayed`.|
 |`tool.started`, class `edit`, no `files`|Plan and apply the edit again. Journal `recovered=replayed`.|
 |`tool.started`, class `edit`, every file sha equals `post_sha`|Journal `ok=true`, `recovered=replayed`, output `the edit was applied before the host restarted`.|

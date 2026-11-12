@@ -9,6 +9,7 @@ import (
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/tool"
+	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 	"github.com/gosuda/dalgona/internal/tool/task"
 	"github.com/gosuda/dalgona/internal/tool/yield"
 )
@@ -36,13 +37,14 @@ type childReport struct {
 	damage error
 }
 
-func (t *Thread) withSubagentTools(tools []tool.Tool) []tool.Tool {
+func (t *Thread) withThreadTools(tools []tool.Tool) []tool.Tool {
 	if t.created.Advisor != "" {
 		return tools
 	}
 	if t.created.Parent != "" {
 		return append(tools, yield.New())
 	}
+	tools = append(tools, asktool.New(t))
 	if t.host.cfg.Product == config.ProductDalgona {
 		return append(tools, task.New(t))
 	}

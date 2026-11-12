@@ -14,6 +14,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
+	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 
@@ -349,5 +350,19 @@ func TestRecoverRemoteCallIsInterruptedNotRerun(t *testing.T) {
 	got := completedOutputs(h.recoverSession())["c1"]
 	if runs != 0 || got.OK || got.Recovered != "interrupted" || got.Output != remoteInterrupt {
 		t.Fatalf("runs = %d, completion = %+v", runs, got)
+	}
+}
+
+func TestRecoverInterruptsOpenAsk(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	args := `{"questions":[{"header":"Database","question":"Which database?","options":[{"label":"SQLite","description":"One file."},{"label":"Postgres","description":"A server."}]}]}`
+	h.seed(prefix(openTurn("go"), []event.Event{assistantCall("c1", "ask", args)}, []event.Event{startedCall("c1", "ask", "read", args)})...)
+	got := completedOutputs(h.recoverSession())["c1"]
+	if got.OK || got.Recovered != "interrupted" || got.Output != asktool.TextRestarted {
+		t.Fatalf("completion = %+v", got)
+	}
+	if out := callOutputs(h.model.request(0))["c1"]; out != asktool.TextRestarted {
+		t.Fatalf("model saw %q, want %q", out, asktool.TextRestarted)
 	}
 }

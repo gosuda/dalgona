@@ -265,3 +265,19 @@ func TestServeQuestionUnreadableAnswer(t *testing.T) {
 		t.Fatalf("reply = %+v, want an unreadable-answer failure", reply)
 	}
 }
+
+func TestServeAskToolEndToEnd(t *testing.T) {
+	r := newDalgonaRig(t)
+	c := r.connect()
+	args := `{"questions":[{"header":"Database","question":"Which database?","options":[{"label":"SQLite","description":"One file."},{"label":"Postgres","description":"A server."}]}]}`
+	r.llm.push(llmReply{body: sseCall("call-q", "ask", args)}, llmReply{body: sseText("done")})
+	threadID := startThread(t, r, c, nil)
+	startTurn(t, c, threadID, "ask me")
+	req := awaitInputRequest(t, c)
+	c.respond(req.ID, `{"answers":{"q1":{"answers":["Postgres"]}}}`)
+	log := readTurn(t, c.collect("turn/completed"))
+	expect(t, log.status == statusCompleted, "turn status", log.status)
+	item := findItem(log.completed, "call-q")
+	want := "User answers:\n- Database (Which database?): Postgres"
+	expect(t, item.Output == want, "ask output", item.Output)
+}

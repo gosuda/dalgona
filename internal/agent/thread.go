@@ -268,7 +268,7 @@ func (t *Thread) buildTools(ctx context.Context, modelID string) ([]tool.Tool, e
 	if err != nil {
 		return nil, fmt.Errorf("agent: build tools: %w", err)
 	}
-	return t.ext.Tools(t.withSubagentTools(built)), nil
+	return t.ext.Tools(t.withThreadTools(built)), nil
 }
 
 func (t *Thread) newToolset(modelID string, tools []tool.Tool) *toolset {

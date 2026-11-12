@@ -12,6 +12,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
+	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 
@@ -129,6 +130,9 @@ func (w *worker) finishRecovered(ctx context.Context, p *prepared, recovered str
 }
 
 func (w *worker) recoverStarted(ctx context.Context, v view, state event.ToolState) error {
+	if state.Tool == asktool.Name {
+		return w.completeRecovered(ctx, state.CallID, asktool.TextRestarted, recoveredStopped)
+	}
 	item, ok := w.tools.byName[state.Tool]
 	if !ok {
 		return w.completeRecovered(ctx, state.CallID, remoteInterrupt, recoveredStopped)
