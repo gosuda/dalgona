@@ -168,6 +168,9 @@ func (m *model) keyCommand(msg tea.KeyPressMsg) tea.Cmd {
 	if command, handled := m.overlayKey(msg); handled {
 		return command
 	}
+	if command, handled := m.followupKey(msg); handled {
+		return command
+	}
 	if command, handled := m.shellKey(key, msg); handled {
 		return command
 	}
@@ -198,6 +201,19 @@ func (m *model) promptKey(msg tea.KeyPressMsg, key string) tea.Cmd {
 func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	command := m.keyCommand(msg)
 	return tea.Batch(command, m.syncPopup(false))
+}
+
+func (m *model) followupKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
+	switch msg.String() {
+	case "alt+q":
+		m.openQueue()
+		return nil, true
+	case "alt+up":
+		if m.input.composer.Value() == "" && len(m.queue) > 0 {
+			return m.dequeueFollowup(), true
+		}
+	}
+	return nil, false
 }
 
 func (m *model) guardKey(key string) (tea.Cmd, bool) {

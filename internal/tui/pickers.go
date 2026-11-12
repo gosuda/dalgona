@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -14,6 +15,7 @@ import (
 const (
 	listHint  = "↑/↓ choose · Enter select · Esc cancel"
 	modelHint = "↑/↓ choose · Tab effort · Enter select · Esc cancel"
+	queueHint = "↑/↓ move · Esc close"
 )
 
 func (m *model) openList(list *listPanel) {
@@ -24,6 +26,37 @@ func (m *model) openList(list *listPanel) {
 func (m *model) closeList() {
 	m.list = nil
 	m.input.field = textField{}
+}
+
+const queueKind = "queue"
+
+func (m *model) openQueue() {
+	m.openList(&listPanel{kind: queueKind, title: "Queued follow-ups", items: queueItems(m.queue)})
+}
+
+func queueItems(queue []string) []listItem {
+	items := make([]listItem, 0, len(queue))
+	for i, text := range queue {
+		first, _, _ := strings.Cut(text, "\n")
+		items = append(items, listItem{id: fmt.Sprint(i), label: fmt.Sprintf("%d. %s", i+1, sanitizeText(first))})
+	}
+	return items
+}
+
+func (m *model) syncQueue() {
+	if m.list == nil || m.list.kind != queueKind {
+		return
+	}
+	m.list.items = queueItems(m.queue)
+	m.list.cursor = min(m.list.cursor, max(0, len(m.list.items)-1))
+}
+
+func (m *model) queueKey(key string) {
+	if key == "esc" {
+		m.closeList()
+		return
+	}
+	m.listMove(key)
 }
 
 func (m *model) listRows() int {
@@ -38,8 +71,11 @@ func (m *model) listPanelView() panelView {
 		body = append(body, m.listLine(list.items[i]))
 	}
 	actions := []string{listHint}
-	if list.kind == "model" {
+	switch list.kind {
+	case "model":
 		actions[0] = modelHint
+	case queueKind:
+		actions[0] = queueHint
 	}
 	if list.err != "" {
 		actions = []string{list.err}
@@ -79,6 +115,10 @@ func (m *model) moveList(delta int) {
 }
 
 func (m *model) listKey(msg tea.KeyPressMsg) tea.Cmd {
+	if m.list.kind == queueKind {
+		m.queueKey(msg.String())
+		return nil
+	}
 	switch key := msg.String(); key {
 	case "enter":
 		return m.listEnter()
@@ -89,15 +129,19 @@ func (m *model) listKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "shift+tab":
 		m.cycleEffort(-1)
 	case "ctrl+r":
-		if m.list.kind == "advisor" {
-			m.openConfirm(confirmation{kind: confirmAdvisorReset, title: "Reset the advisor?", action: "[enter] reset  [esc] keep"})
-		}
+		m.askAdvisorReset()
 	default:
 		if !m.listMove(key) {
 			m.listEdit(msg)
 		}
 	}
 	return nil
+}
+
+func (m *model) askAdvisorReset() {
+	if m.list.kind == "advisor" {
+		m.openConfirm(confirmation{kind: confirmAdvisorReset, title: "Reset the advisor?", action: "[enter] reset  [esc] keep"})
+	}
 }
 
 func (m *model) listEnter() tea.Cmd {

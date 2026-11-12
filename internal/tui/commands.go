@@ -252,11 +252,21 @@ func (m *model) queueFollowup() tea.Cmd {
 		return nil
 	}
 	m.queue = append(m.queue, text)
+	m.syncQueue()
 	m.input.composer.SetValue("")
 	m.noticef("queued follow-up %d of %d", len(m.queue), maxFollowups)
 	if m.thread.state == stateIdle {
 		return m.startQueuedFollowup()
 	}
+	return nil
+}
+
+func (m *model) dequeueFollowup() tea.Cmd {
+	last := len(m.queue) - 1
+	text := m.queue[last]
+	m.queue = m.queue[:last]
+	m.syncQueue()
+	m.input.composer.SetValue(text)
 	return nil
 }
 
@@ -267,6 +277,7 @@ func (m *model) startQueuedFollowup() tea.Cmd {
 	text := m.queue[0]
 	m.queue = m.queue[1:]
 	m.input.history.add(text, "")
+	m.syncQueue()
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(text)}
 	result := new(rpc.TurnStartResponse)
@@ -484,6 +495,7 @@ func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 	}
 	if msg.op == "followup" {
 		m.queue = append([]string{msg.text}, m.queue...)
+		m.syncQueue()
 	}
 	if msg.op == "send" || msg.op == "followup" {
 		m.setState(stateFailed)

@@ -408,7 +408,7 @@ func TestModelHoldsFollowupAfterInterruptedTurn(t *testing.T) {
 		t.Fatalf("interrupted turn released follow-up: calls %#v", caller.calls)
 	}
 	assertContains(t, strings.Join(strings.Fields(m.View().Content), " "), "Stopped")
-	assertShown(t, m, "1 follow-up held")
+	assertShown(t, m, "Held · 1 · Enter on an empty prompt sends the next")
 	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
 	runCommand(t, m, command, "empty Enter did not release the held follow-up")
 	params, ok := caller.calls[0].params.(rpc.TurnStartParams)

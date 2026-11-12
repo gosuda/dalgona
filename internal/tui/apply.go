@@ -242,7 +242,7 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 	m.setState(turnState(event.Turn.Status))
 	if m.thread.state != stateIdle {
 		if len(m.queue) > 0 {
-			m.noticef("turn %s; %d follow-up held, press Enter on an empty composer to send it", m.thread.state, len(m.queue))
+			m.noticef("Held · %d · Enter on an empty prompt sends the next", len(m.queue))
 		}
 		return nil, nil
 	}
