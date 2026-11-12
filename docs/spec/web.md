@@ -247,6 +247,7 @@ The card MUST move focus to its title when it appears. A `serverRequest/resolved
 - With no open thread the transcript says `Pick a thread or start a new one`. When connected, it says that earlier threads are in the list. When not connected, it says to connect to dalgona.
 - With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a title shows its preview. A thread with neither shows `Untitled thread`.
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
+- A new connection MUST discard thread resumes still in flight from the previous connection.
 - In the approval card, Decline and Cancel use the quiet style. The composer's `Interrupt turn` button has the danger style.
 
 ### Notices
