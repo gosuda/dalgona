@@ -283,6 +283,10 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 		m.input.field.pasteLine(paste.Content)
 		return nil
 	}
+	if paste, ok := msg.(tea.PasteMsg); ok && len(paste.Content) > pasteLimit {
+		m.noticef("Paste is %d bytes, over the 1 MiB limit; save it to a file and mention it with @path", len(paste.Content))
+		return nil
+	}
 	updated, command := m.input.composer.Update(&m.screen, msg)
 	m.input.composer = updated
 	m.syncPopup(typedText(msg))

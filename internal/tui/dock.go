@@ -93,7 +93,7 @@ func (m *model) panelInputLine(width int) (string, int) {
 }
 
 func (m *model) draftLine(width int) (string, int) {
-	first, _, _ := strings.Cut(m.input.composer.Value(), "\n")
+	first := m.input.composer.firstLine()
 	prompt := m.screen.dockTheme().hueText(threadHue(m.thread.id), promptText)
 	line := m.screen.fit(prompt+first, terminalWidth(width))
 	return line, min(promptCells+m.screen.cells(first), terminalWidth(width))

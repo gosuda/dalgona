@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"unicode"
@@ -15,6 +16,17 @@ const (
 	promptText      = "› "
 	promptCells     = 2
 )
+
+const (
+	pasteChipLines = 10
+	pasteLimit     = 1 << 20
+	chipRuneBase   = 0xF0000
+)
+
+type chip struct {
+	label string
+	text  string
+}
 
 type inputMode int
 
@@ -98,6 +110,7 @@ type editor struct {
 	width       int
 	focused     bool
 	placeholder string
+	chips       []chip
 }
 
 func newEditor() editor {
@@ -116,6 +129,7 @@ func (c editor) Value() string {
 func (c *editor) SetValue(value string) {
 	c.text = []rune(value)
 	c.cursor = len(c.text)
+	c.chips = nil
 }
 
 func (c *editor) SetWidth(width int) {
@@ -142,6 +156,26 @@ func (c editor) rows(s *screenState, width int) []editorRow {
 }
 
 func (c editor) lineRows(s *screenState, line string, offset, cell int) []editorRow {
+	var rows []editorRow
+	start := 0
+	for i, r := range line {
+		if _, ok := c.chipOf(r); !ok {
+			continue
+		}
+		if start < i {
+			rows = append(rows, c.textRows(s, line[start:i], offset+start, cell)...)
+		}
+		size := utf8.RuneLen(r)
+		rows = append(rows, editorRow{text: line[i : i+size], start: offset + i, end: offset + i + size})
+		start = i + size
+	}
+	if start < len(line) || len(rows) == 0 {
+		rows = append(rows, c.textRows(s, line[start:], offset+start, cell)...)
+	}
+	return rows
+}
+
+func (c editor) textRows(s *screenState, line string, offset, cell int) []editorRow {
 	parts := s.wrap(line, cell)
 	rows := make([]editorRow, 0, len(parts))
 	pos := 0
@@ -186,6 +220,12 @@ func caretRow(rows []editorRow, at int) int {
 }
 
 func (c editor) cellsBefore(s *screenState, row editorRow, at int) int {
+	if ch, ok := c.chipRow(row); ok {
+		if at > row.start {
+			return s.cells(ch.label)
+		}
+		return 0
+	}
 	n := min(max(at-row.start, 0), len(row.text))
 	return s.cells(row.text[:n])
 }
@@ -207,6 +247,10 @@ func (c editor) layout(s *screenState, width int, spans []keywordSpan, t theme) 
 	row := caretRow(rows, at)
 	lines := make([]string, len(rows))
 	for i, r := range rows {
+		if ch, ok := c.chipRow(r); ok {
+			lines[i] = t.paint(roleText, s.fit(ch.label, editorCells(width)))
+			continue
+		}
 		lines[i] = norm.NFC.String(markKeywords(r.text, localSpans(spans, r), t))
 	}
 	if c.Value() == "" {
@@ -235,10 +279,11 @@ func (c *editor) continueLine() bool {
 func (c editor) Update(s *screenState, msg tea.Msg) (editor, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
-		c.insert([]rune(sanitizeText(msg.Content)))
+		c.paste(msg.Content)
 	case tea.KeyPressMsg:
 		c.updateKey(s, msg)
 	}
+	c.prune()
 	return c, nil
 }
 
@@ -316,6 +361,12 @@ func (c *editor) moveRow(s *screenState, delta int) {
 }
 
 func (c editor) runeAt(s *screenState, row editorRow, col int) int {
+	if _, ok := c.chipRow(row); ok {
+		if col <= 0 {
+			return utf8.RuneCountInString(c.Value()[:row.start])
+		}
+		return utf8.RuneCountInString(c.Value()[:row.end])
+	}
 	offset, width := 0, 0
 	for _, r := range row.text {
 		cells := s.cells(string(r))
@@ -420,4 +471,103 @@ func (c *editor) moveRight() {
 	if c.cursor < len(c.text) {
 		c.cursor++
 	}
+}
+
+func chipAtom(index int) rune {
+	atom := rune(chipRuneBase)
+	for range index + 1 {
+		atom++
+	}
+	return atom
+}
+
+func chipLabel(number int, text string) string {
+	return fmt.Sprintf("[Paste #%d +%d lines]", number, strings.Count(text, "\n")+1)
+}
+
+func (c editor) chipOf(r rune) (chip, bool) {
+	index := int(r) - chipRuneBase - 1
+	if index < 0 || index >= len(c.chips) {
+		return chip{}, false
+	}
+	return c.chips[index], true
+}
+
+func (c editor) chipRow(row editorRow) (chip, bool) {
+	r, size := utf8.DecodeRuneInString(row.text)
+	if size == 0 || size != len(row.text) {
+		return chip{}, false
+	}
+	return c.chipOf(r)
+}
+
+func (c editor) display(runes []rune) string {
+	var out strings.Builder
+	for _, r := range runes {
+		if ch, ok := c.chipOf(r); ok {
+			out.WriteString(ch.label)
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
+}
+
+func (c editor) firstLine() string {
+	line := c.text
+	if i := slices.Index(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	return c.display(line)
+}
+
+func (c editor) Expanded() string {
+	return c.expand(c.Value())
+}
+
+func (c editor) expand(text string) string {
+	var out strings.Builder
+	for _, r := range text {
+		if ch, ok := c.chipOf(r); ok {
+			out.WriteString(ch.text)
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
+}
+
+func (c *editor) paste(text string) {
+	text = sanitizeText(text)
+	if strings.Count(text, "\n")+1 < pasteChipLines {
+		c.insert([]rune(text))
+		return
+	}
+	c.chips = append(c.chips, chip{text: text})
+	n := len(c.chips)
+	c.chips[n-1].label = chipLabel(n, text)
+	c.insert([]rune{chipAtom(n - 1)})
+}
+
+func (c *editor) prune() {
+	inUse := make(map[rune]bool, len(c.chips))
+	for _, r := range c.text {
+		inUse[r] = true
+	}
+	renamed := make(map[rune]rune, len(c.chips))
+	kept := make([]chip, 0, len(c.chips))
+	for i, ch := range c.chips {
+		atom := chipAtom(i)
+		if !inUse[atom] {
+			continue
+		}
+		renamed[atom] = chipAtom(len(kept))
+		kept = append(kept, chip{label: chipLabel(len(kept)+1, ch.text), text: ch.text})
+	}
+	for i, r := range c.text {
+		if next, ok := renamed[r]; ok {
+			c.text[i] = next
+		}
+	}
+	c.chips = kept
 }

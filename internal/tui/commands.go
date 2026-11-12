@@ -167,24 +167,25 @@ func sandboxPolicy(mode string) string {
 }
 
 func (m *model) submitPrompt() tea.Cmd {
-	text := strings.TrimSpace(m.input.composer.Value())
+	composer := m.input.composer
+	text := strings.TrimSpace(composer.expand(composer.Value()))
 	if text == "" {
 		return m.startQueuedFollowup()
 	}
-	m.input.composer.SetValue("")
-	if strings.HasPrefix(text, "/") {
-		name, arg, kind := parseSlash(text)
+	if raw := strings.TrimSpace(composer.Value()); strings.HasPrefix(raw, "/") {
+		name, arg, kind := parseSlash(raw)
 		switch kind {
 		case slashCommand:
-			return m.executeSlash(name, arg)
+			m.input.composer.SetValue("")
+			return m.executeSlash(name, composer.expand(arg))
 		case slashUnknown:
-			m.input.composer.SetValue(text)
 			m.noticef("unknown command /%s; start with // to send it as a prompt", name)
 			return nil
 		case slashPrompt:
-			text = arg
+			text = composer.expand(arg)
 		}
 	}
+	m.input.composer.SetValue("")
 	if m.thread.id == "" {
 		m.noticef("thread is not ready; wait for startup or use /new to retry")
 		m.input.composer.SetValue(text)
@@ -215,7 +216,7 @@ func textInput(text string) []rpc.InputItem {
 }
 
 func (m *model) queueFollowup() tea.Cmd {
-	text := strings.TrimSpace(m.input.composer.Value())
+	text := strings.TrimSpace(m.input.composer.Expanded())
 	if text == "" {
 		return nil
 	}
@@ -469,7 +470,7 @@ func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 }
 
 func (m *model) restoreComposer(text string) {
-	current := m.input.composer.Value()
+	current := m.input.composer.Expanded()
 	if current != "" {
 		text += "\n" + current
 	}

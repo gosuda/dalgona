@@ -201,6 +201,13 @@ Ctrl+K MUST delete from the caret to the end of the line.
 The history MUST hold the 200 newest prompts. It MUST skip a prompt equal to the one before it, and it MUST NOT hold a `/login` line.
 Ctrl+C with a non-empty draft MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
+A paste of fewer than 10 lines MUST be inserted as text.
+A paste of 10 or more lines MUST become one chip labelled `[Paste #n +L lines]`, where L counts its lines.
+A chip MUST take one composer row, whatever the length of its paste.
+Backspace and Delete MUST remove a whole chip.
+Sending MUST replace each chip with its full pasted text, in order.
+The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
+A paste over 1 MiB MUST be refused with a notice that names the limit.
 
 The composer MUST show a command palette when the caret is in a first token that starts with `/`, with no panel or review open.
 The palette MUST list at most 8 matching commands and MUST NOT open for `//`.

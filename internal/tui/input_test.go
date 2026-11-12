@@ -7,6 +7,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/gosuda/dalgona/internal/rpc"
 )
 
 func TestEditorNewlineKeys(t *testing.T) {
@@ -183,5 +185,102 @@ func TestEditorFollowsRendererWidthMode(t *testing.T) {
 	}
 	if before.X != 2+6 || after.X != 2+2 {
 		t.Fatalf("caret after the family emoji at X %d before the mode report and %d after, want 8 and 4", before.X, after.X)
+	}
+}
+
+func pasteLines(n int) string {
+	lines := make([]string, n)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %02d", i+1)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func TestLargePasteBecomesChipAndExpandsOnSend(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.thread.id = "t1"
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(12)})
+	if !strings.Contains(dockText(m), "[Paste #1 +12 lines]") {
+		t.Fatalf("composer does not show the paste chip:\n%s", dockText(m))
+	}
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	runCommand(t, m, command, "Enter did not send the prompt")
+	if len(caller.calls) == 0 || caller.calls[0].method != "turn/start" {
+		t.Fatalf("calls = %#v, want turn/start", caller.calls)
+	}
+	input := caller.calls[0].params.(rpc.TurnStartParams).Input
+	if len(input) != 1 || input[0].Text != pasteLines(12) {
+		t.Fatalf("sent %q, want the twelve pasted lines", input)
+	}
+}
+
+func TestChipPromptIsSentUnchangedWhenSlashLike(t *testing.T) {
+	for _, first := range []string{"// x", "/model foo"} {
+		caller := new(fakeCaller)
+		m := newModel(caller, Options{}, nil)
+		m.thread.id = "t1"
+		m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+		content := first + "\n" + pasteLines(11)
+		m, _ = drive(t, m, tea.PasteMsg{Content: content})
+		m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+		runCommand(t, m, command, "Enter did not send the prompt for "+first)
+		if len(caller.calls) == 0 || caller.calls[0].method != "turn/start" {
+			t.Fatalf("%q: calls = %#v, want turn/start only", first, caller.calls)
+		}
+		input := caller.calls[0].params.(rpc.TurnStartParams).Input
+		if len(input) != 1 || input[0].Text != content {
+			t.Fatalf("%q: sent %#v, want the paste unchanged", first, input)
+		}
+	}
+}
+
+func TestChipDeletesAsUnit(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{}, nil)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(12)})
+	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if got := m.input.composer.Value(); got != "" {
+		t.Fatalf("backspace left %q, want the whole chip removed", got)
+	}
+	if strings.Contains(dockText(m), "[Paste #") {
+		t.Fatalf("chip label survived backspace:\n%s", dockText(m))
+	}
+}
+
+func TestOversizePasteRefused(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{}, nil)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, tea.PasteMsg{Content: strings.Repeat("a", 1<<20+1)})
+	want := "Paste is 1048577 bytes, over the 1 MiB limit; save it to a file and mention it with @path"
+	if m.notice != want {
+		t.Fatalf("notice = %q, want %q", m.notice, want)
+	}
+	if got := m.input.composer.Value(); got != "" {
+		t.Fatalf("refused paste reached the composer: %d bytes", len(got))
+	}
+}
+
+func TestPasteIntoFilterKeepsFirstLine(t *testing.T) {
+	t.Parallel()
+	m := openModelPicker(t, new(fakeCaller))
+	m, _ = drive(t, m, tea.PasteMsg{Content: "one\ntwo"})
+	if got := m.input.field.value(); got != "one" {
+		t.Fatalf("filter holds %q, want the first line only", got)
+	}
+}
+
+func TestChipRowDoesNotGrowComposer(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{}, nil)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	before := len(m.dockLines())
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(40)})
+	if got := len(m.dockLines()); got != before || got != 3 {
+		t.Fatalf("dock is %d rows after a 40-line paste, want %d (composer, live row, status band)", got, before)
 	}
 }
