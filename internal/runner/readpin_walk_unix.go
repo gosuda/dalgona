@@ -12,12 +12,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func splitPinnedRel(rel string) []string {
-	return strings.Split(filepath.ToSlash(rel), "/")
-}
-
 func walkNoFollow(dir *os.File, rel string) (*os.File, error) {
-	parts := splitPinnedRel(rel)
+	parts := strings.Split(filepath.ToSlash(rel), "/")
 	cur := dir
 	for i, part := range parts {
 		last := i == len(parts)-1

@@ -371,14 +371,6 @@ func ConsumeModelConfigRequest(b []byte, m *ModelConfigRequest) error {
 	})
 }
 
-func AppendGetCliModelConfigsRequest(dst []byte, m *GetCliModelConfigsRequest) []byte {
-	return AppendModelConfigRequest(dst, m)
-}
-
-func ConsumeGetCliModelConfigsRequest(b []byte, m *GetCliModelConfigsRequest) error {
-	return ConsumeModelConfigRequest(b, m)
-}
-
 type ModelConfigResponse struct {
 	Models                    []ClientModelConfig
 	DefaultOverrideConfigView []byte
@@ -410,14 +402,6 @@ func ConsumeModelConfigResponse(b []byte, m *ModelConfigResponse) error {
 		}
 		return nil
 	})
-}
-
-func AppendGetCliModelConfigsResponse(dst []byte, m *GetCliModelConfigsResponse) []byte {
-	return AppendModelConfigResponse(dst, m)
-}
-
-func ConsumeGetCliModelConfigsResponse(b []byte, m *GetCliModelConfigsResponse) error {
-	return ConsumeModelConfigResponse(b, m)
 }
 
 type GetUserJWTRequest struct {

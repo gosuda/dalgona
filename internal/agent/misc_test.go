@@ -87,7 +87,7 @@ func TestSecretsAreMaskedInJournalAndUnmaskedInExec(t *testing.T) {
 	const secret = "sk-test-123456789"
 	t.Setenv("OPENAI_API_KEY", secret)
 	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
-		store, err := auth.New(h.home)
+		store, err := auth.Load(h.home)
 		if err != nil {
 			t.Fatal(err)
 		}

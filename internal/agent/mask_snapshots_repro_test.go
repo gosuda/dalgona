@@ -14,7 +14,7 @@ func TestReproSnapshotPreimageMasked(t *testing.T) {
 	const secret = "repro-secret-987654321"
 	t.Setenv("REPRO_SNAP_API_KEY", secret)
 	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
-		store, err := auth.New(h.home)
+		store, err := auth.Load(h.home)
 		if err != nil {
 			t.Fatal(err)
 		}

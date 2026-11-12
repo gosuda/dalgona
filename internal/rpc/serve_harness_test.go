@@ -147,7 +147,7 @@ func newRig(t *testing.T, approval config.Approval) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	credentials, err := auth.New(r.home)
+	credentials, err := auth.Load(r.home)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -201,7 +201,7 @@ func (s *replacingService) Attach(ctx context.Context, id string) (string, error
 
 func TestTokenIgnoresProviderAPIKeyEnvironment(t *testing.T) {
 	home := t.TempDir()
-	store, err := auth.New(home)
+	store, err := auth.Load(home)
 	must(t, err)
 	must(t, store.SetAPIKey("cloudflare", "worker-secret"))
 	t.Setenv("CLOUDFLARE_API_KEY", "account-key")

@@ -63,7 +63,7 @@ type ChatMessagePrompt struct {
 	PhaseView            []byte
 }
 
-func AppendChatPrompt(dst []byte, m *ChatMessagePrompt) []byte {
+func AppendChatMessagePrompt(dst []byte, m *ChatMessagePrompt) []byte {
 	dst = appendRaw(dst, 1, m.MessageIDView)
 	dst = appendInt32(dst, 2, m.Source)
 	dst = appendRaw(dst, 3, m.PromptView)
@@ -91,11 +91,7 @@ func AppendChatPrompt(dst []byte, m *ChatMessagePrompt) []byte {
 	return appendRaw(dst, 19, m.PhaseView)
 }
 
-func AppendChatMessagePrompt(dst []byte, m *ChatMessagePrompt) []byte {
-	return AppendChatPrompt(dst, m)
-}
-
-func ConsumeChatPrompt(b []byte, m *ChatMessagePrompt) error {
+func ConsumeChatMessagePrompt(b []byte, m *ChatMessagePrompt) error {
 	return consumeFields(b, "devin chat prompt", func(f field) error {
 		switch {
 		case f.number <= 5:
@@ -108,10 +104,6 @@ func ConsumeChatPrompt(b []byte, m *ChatMessagePrompt) error {
 			return consumeChatPromptMetadata(f, m)
 		}
 	})
-}
-
-func ConsumeChatMessagePrompt(b []byte, m *ChatMessagePrompt) error {
-	return ConsumeChatPrompt(b, m)
 }
 
 func consumeChatPromptBase(f field, m *ChatMessagePrompt) error {
@@ -318,7 +310,7 @@ func AppendGetChatMessageRequest(dst []byte, m *GetChatMessageRequest) []byte {
 	dst = appendOptionalMessage(dst, 1, m.Metadata, AppendMetadata)
 	dst = appendRaw(dst, 2, m.PromptView)
 	for i := range m.Prompts {
-		dst = appendMessage(dst, 3, &m.Prompts[i], AppendChatPrompt)
+		dst = appendMessage(dst, 3, &m.Prompts[i], AppendChatMessagePrompt)
 	}
 	dst = appendBool(dst, 5, m.UseInternalChatModel)
 	dst = appendInt32(dst, 6, m.InternalChatModel)
@@ -375,7 +367,7 @@ func consumeChatRequestBase(f field, m *GetChatMessageRequest) error {
 			return err
 		}
 		var prompt ChatMessagePrompt
-		if err := ConsumeChatPrompt(bytesValue(f), &prompt); err != nil {
+		if err := ConsumeChatMessagePrompt(bytesValue(f), &prompt); err != nil {
 			return err
 		}
 		m.Prompts = append(m.Prompts, prompt)

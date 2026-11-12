@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/journal"
 	"github.com/gosuda/dalgona/internal/keywords"
@@ -274,7 +275,7 @@ func (h *Host) sessionCreated(spec ThreadSpec, id string) (event.SessionCreated,
 	if spec.System != "" {
 		return created, nil
 	}
-	instructions := instructionsText(cfg.Home, created.Cwd)
+	instructions := prompt.Instructions(cfg.Home, created.Cwd)
 	if instructions == "" {
 		return created, nil
 	}

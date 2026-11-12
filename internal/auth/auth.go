@@ -65,8 +65,6 @@ type (
 
 func Load(home string) (*Store, error) { return NewWithPatterns(home, nil) }
 
-func New(home string) (*Store, error) { return Load(home) }
-
 func NewWithPatterns(home string, patterns []string) (*Store, error) {
 	store := &Store{
 		dir: home, data: map[string]Credential{}, raw: map[string]jsontext.Value{},

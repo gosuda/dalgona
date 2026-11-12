@@ -3,7 +3,9 @@ package journal
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -571,8 +573,8 @@ func finishJournalLine(line []byte, err error) ([]byte, bool, error) {
 }
 
 func (s *Store) PutBlob(data []byte) (string, error) {
-	sum := sha256Sum(data)
-	sha := hexString(sum[:])
+	sum := sha256.Sum256(data)
+	sha := hex.EncodeToString(sum[:])
 	path := filepath.Join(s.blobsDir(), sha)
 	if _, err := os.Stat(path); err == nil {
 		return sha, nil

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -112,7 +113,7 @@ func newerHead(current head, entry Entry) bool {
 
 func sameSnapshot(have, entry Entry) bool {
 	return have.Path == entry.Path && have.Blob == entry.Blob && have.Revision == entry.Revision &&
-		have.Epoch == entry.Epoch && rangesEqual(have.Shown, entry.Shown)
+		have.Epoch == entry.Epoch && slices.Equal(have.Shown, entry.Shown)
 }
 
 func validateShown(shown []Range, lines int) error {

@@ -311,8 +311,6 @@ func shellName() string {
 	return cmp.Or(os.Getenv("SHELL"), "sh")
 }
 
-func instructionsText(home, cwd string) string { return prompt.Instructions(home, cwd) }
-
 func (t *Thread) restoreSnapshots(state event.State) error {
 	snapshots := make([]event.Snapshot, 0, len(state.Snapshots))
 	for _, item := range state.Snapshots {

@@ -335,10 +335,6 @@ func abandonSSE(body io.Closer, signals *sseSignals, cause error) error {
 
 type Verdict uint8
 
-func ReadSSEWithIdle(ctx context.Context, body io.ReadCloser, idle time.Duration, handler SSEHandler) error {
-	return ReadSSEWithTimeouts(ctx, body, SSEOptions{IdleTimeout: idle}, handler)
-}
-
 const (
 	Retry Verdict = iota + 1
 	Overflow

@@ -128,7 +128,7 @@ func serveModels(w http.ResponseWriter) {
 		{ModelUIDView: []byte("swe-1-6"), ContextWindow: 1},
 		{ModelUIDView: []byte("swe-1-6-fast")},
 	}}
-	_, _ = w.Write(wire.AppendGetCliModelConfigsResponse(nil, &response))
+	_, _ = w.Write(wire.AppendModelConfigResponse(nil, &response))
 }
 
 func frame(message *wire.GetChatMessageResponse) []byte {
