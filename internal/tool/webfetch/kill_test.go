@@ -3,6 +3,9 @@ package webfetch
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"testing"
@@ -19,6 +22,7 @@ type failReadRemoteRunner struct {
 	started   bool
 	signals   []runner.Signal
 	remaining int
+	killed    chan struct{}
 }
 
 func (r *failReadRemoteRunner) Start(ctx context.Context, spec runner.ProcessSpec) error {
@@ -36,21 +40,34 @@ func (r *failReadRemoteRunner) Read(ctx context.Context, id string, offset int64
 
 func (r *failReadRemoteRunner) Signal(ctx context.Context, id string, signal runner.Signal) error {
 	r.signals = append(r.signals, signal)
-	return r.Runner.Signal(ctx, id, signal)
+	err := r.Runner.Signal(ctx, id, signal)
+	if signal == runner.SignalKill && r.killed != nil {
+		close(r.killed)
+	}
+	return err
 }
 
 func TestRemoteKillWaitsForHelperExit(t *testing.T) {
-	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:2s")
+	gate := listenShimGate(t)
+	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:"+gate.path)
 	local, err := runner.NewLocal(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = local.Close() })
-	wrapped := &failReadRemoteRunner{Runner: local, remaining: 1}
+	wrapped := &failReadRemoteRunner{Runner: local, remaining: 1, killed: make(chan struct{})}
 	env := tool.Env{Runner: wrapped, Cwd: t.TempDir()}
 	t.Cleanup(func() { waitFetchExit(t, local, "fetch-kill") })
 	call := tool.Call{ID: "fetch-kill", Args: []byte(`{"url":"https://example.test/doc","max_bytes":4096}`)}
-	_, runErr := New().Run(t.Context(), call, env)
+	finished := make(chan error, 1)
+	go func() {
+		_, callErr := New().Run(t.Context(), call, env)
+		finished <- callErr
+	}()
+	parked := gate.awaitShim(t)
+	awaitKill(t, wrapped.killed)
+	_ = parked.Close()
+	runErr := awaitRunError(t, finished)
 	if runErr == nil {
 		t.Fatal("collect failure returned no error")
 	}
@@ -134,5 +151,59 @@ func waitFetchExit(t *testing.T, run runner.Runner, id string) runner.Output {
 			t.Fatalf("subprocess %s still running after 60s: last read error: %v", id, readErr)
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+type shimGate struct {
+	path     string
+	listener *net.UnixListener
+}
+
+func listenShimGate(t *testing.T) shimGate {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dgw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return shimGate{path: path, listener: listener}
+}
+
+func (g shimGate) awaitShim(t *testing.T) net.Conn {
+	t.Helper()
+	if err := g.listener.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := g.listener.Accept()
+	if err != nil {
+		t.Fatalf("shim never reached the pid pause: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+func awaitKill(t *testing.T, killed <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-killed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("collect failure never requested a kill")
+	}
+}
+
+func awaitRunError(t *testing.T, finished <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-finished:
+		return err
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not return after the kill")
+		return nil
 	}
 }

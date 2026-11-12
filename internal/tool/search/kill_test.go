@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"errors"
+	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"testing"
@@ -19,6 +22,7 @@ type failReadRunner struct {
 	started bool
 	signals []runner.Signal
 	reads   int
+	killed  chan struct{}
 }
 
 func (r *failReadRunner) Start(ctx context.Context, spec runner.ProcessSpec) error {
@@ -36,17 +40,30 @@ func (r *failReadRunner) Read(ctx context.Context, id string, offset int64) (run
 
 func (r *failReadRunner) Signal(ctx context.Context, id string, signal runner.Signal) error {
 	r.signals = append(r.signals, signal)
-	return r.Runner.Signal(ctx, id, signal)
+	err := r.Runner.Signal(ctx, id, signal)
+	if signal == runner.SignalKill && r.killed != nil {
+		close(r.killed)
+	}
+	return err
 }
 
 func TestRunKillsSubprocessWhenCollectFails(t *testing.T) {
-	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:2s")
+	gate := listenShimGate(t)
+	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:"+gate.path)
 	env, _ := searchTestEnv(t)
 	inner := env.Runner
-	wrapped := &failReadRunner{Runner: inner}
+	wrapped := &failReadRunner{Runner: inner, killed: make(chan struct{})}
 	env.Runner = wrapped
 	t.Cleanup(func() { waitRunExit(t, inner, "search-kill") })
-	_, err := Tool{}.Run(t.Context(), tool.Call{ID: "search-kill", Args: jsontext.Value(`{"mode":"grep","pattern":"x"}`)}, env)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := Tool{}.Run(t.Context(), tool.Call{ID: "search-kill", Args: jsontext.Value(`{"mode":"grep","pattern":"x"}`)}, env)
+		finished <- err
+	}()
+	parked := gate.awaitShim(t)
+	awaitKill(t, wrapped.killed)
+	_ = parked.Close()
+	err := awaitRunError(t, finished)
 	if err == nil {
 		t.Fatal("collect failure returned no error")
 	}
@@ -66,6 +83,60 @@ func TestRunKillsSubprocessWhenCollectFails(t *testing.T) {
 	}
 	if state.Exit.Code != want {
 		t.Fatalf("killed run exit code %d, want %d", state.Exit.Code, want)
+	}
+}
+
+type shimGate struct {
+	path     string
+	listener *net.UnixListener
+}
+
+func listenShimGate(t *testing.T) shimGate {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dgs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return shimGate{path: path, listener: listener}
+}
+
+func (g shimGate) awaitShim(t *testing.T) net.Conn {
+	t.Helper()
+	if err := g.listener.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := g.listener.Accept()
+	if err != nil {
+		t.Fatalf("shim never reached the pid pause: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+func awaitKill(t *testing.T, killed <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-killed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("collect failure never requested a kill")
+	}
+}
+
+func awaitRunError(t *testing.T, finished <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-finished:
+		return err
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not return after the kill")
+		return nil
 	}
 }
 
