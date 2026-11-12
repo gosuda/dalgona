@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 )
 
 type (
@@ -177,7 +178,7 @@ func markWorkspaceServers(servers []MCPServer) {
 func tree(home, cwd, dir, instruction string) (Result, error) {
 	r := Result{}
 	for _, root := range []string{filepath.Join(home, dir), filepath.Join(cwd, dir)} {
-		item, err := readInstruction(filepath.Join(root, instruction))
+		item, err := readInstruction(root, filepath.Join(root, instruction))
 		if err != nil {
 			return Result{}, err
 		}
@@ -193,8 +194,18 @@ func tree(home, cwd, dir, instruction string) (Result, error) {
 	return r, nil
 }
 
-func readInstruction(path string) (*Instruction, error) {
-	data, err := os.ReadFile(path)
+func readInstruction(root, path string) (*Instruction, error) {
+	resolved, inside, err := resolveWithin(root, path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve instruction %s: %w", path, err)
+	}
+	if !inside {
+		return nil, nil
+	}
+	data, err := os.ReadFile(resolved)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -202,4 +213,21 @@ func readInstruction(path string) (*Instruction, error) {
 		return nil, fmt.Errorf("read instruction %s: %w", path, err)
 	}
 	return &Instruction{Path: path, Text: string(data)}, nil
+}
+
+func resolveWithin(root, target string) (string, bool, error) {
+	base, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", false, err
+	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", false, err
+	}
+	relative, err := filepath.Rel(base, resolved)
+	if err != nil {
+		return "", false, err
+	}
+	inside := relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	return resolved, inside, nil
 }

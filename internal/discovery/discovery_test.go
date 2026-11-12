@@ -237,6 +237,29 @@ func TestDiscoverFollowsSkillDirectorySymlink(t *testing.T) {
 	}
 }
 
+func TestInstructionSymlinkOutsideRootIsIgnored(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	secret := filepath.Join(root, "secret", "AGENTS.md")
+	writeFixture(t, secret, "secret")
+	link := filepath.Join(home, ".codex", "AGENTS.md")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("file symlinks are unavailable: %v", err)
+	}
+	got, err := discovery.Discover(home, t.TempDir(), []string{"codex"}, discovery.Native{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range got.Instructions {
+		if item.Path == link || item.Text == "secret" {
+			t.Fatalf("instruction read through a link outside its root: %#v", item)
+		}
+	}
+}
+
 func TestDiscoverRejectsMalformedSources(t *testing.T) {
 	tests := []struct {
 		name   string
