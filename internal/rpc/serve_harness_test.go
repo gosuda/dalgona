@@ -365,6 +365,7 @@ var responseSchemas = map[string]string{
 	"turn/start":           "v2/TurnStartResponse.json",
 	"turn/steer":           "v2/TurnSteerResponse.json",
 	"turn/interrupt":       "v2/TurnInterruptResponse.json",
+	"review/start":         "v2/ReviewStartResponse.json",
 	"model/list":           "v2/ModelListResponse.json",
 	"config/read":          "v2/ConfigReadResponse.json",
 	"config/value/write":   "v2/ConfigWriteResponse.json",

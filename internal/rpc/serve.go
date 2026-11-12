@@ -34,6 +34,7 @@ func init() {
 		"turn/start":                     (*server).turnStart,
 		"turn/steer":                     (*server).turnSteer,
 		"turn/interrupt":                 (*server).turnInterrupt,
+		"review/start":                   (*server).reviewStart,
 		"model/list":                     (*server).modelList,
 		"config/read":                    (*server).configRead,
 		"config/value/write":             (*server).configValueWrite,

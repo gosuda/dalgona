@@ -23,6 +23,7 @@ func TestCodexSchemasCompileAndValidate(t *testing.T) {
 		{"ThreadRevertParams", "v2/ThreadRevertParams.json", ThreadRevertParams{ThreadID: "thread", BeforeTurnID: "turn"}},
 		{"ThreadForkParams", "v2/ThreadForkParams.json", ThreadForkParams{ThreadID: "thread"}},
 		{"TurnInterruptParams", "v2/TurnInterruptParams.json", TurnInterruptParams{ThreadID: "thread", TurnID: "turn"}},
+		{"ReviewStartParams", "v2/ReviewStartParams.json", map[string]any{"threadId": "thread", "target": map[string]any{"type": "custom", "instructions": "check"}}},
 		{"ModelListParams", "v2/ModelListParams.json", ModelListParams{}},
 		{"ConfigReadParams", "v2/ConfigReadParams.json", ConfigReadParams{}},
 		{"ConfigValueWriteParams", "v2/ConfigValueWriteParams.json", ConfigValueWriteParams{KeyPath: "model", MergeStrategy: "replace", Value: "openai/gpt"}},
