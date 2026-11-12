@@ -21,7 +21,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		command = m.updateKey(msg)
-	case notificationMsg, serverRequestMsg, resultMsg, disconnectedMsg:
+	case notificationMsg, serverRequestMsg, resultMsg, disconnectedMsg, debounceMsg, searchResultMsg:
 		command = m.updateAsync(msg)
 	case spinner.TickMsg:
 		command = m.updateTick(msg)
@@ -93,6 +93,11 @@ func (m *model) updateFrame(msg tea.Msg) bool {
 
 func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
+	case debounceMsg:
+		return m.applyDebounce(msg)
+	case searchResultMsg:
+		m.applySearch(msg)
+		return nil
 	case notificationMsg:
 		return m.applyNotification(msg)
 	case serverRequestMsg:
@@ -175,8 +180,7 @@ func (m *model) keyCommand(msg tea.KeyPressMsg) tea.Cmd {
 
 func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	command := m.keyCommand(msg)
-	m.syncPopup(false)
-	return command
+	return tea.Batch(command, m.syncPopup(false))
 }
 
 func (m *model) guardKey(key string) (tea.Cmd, bool) {
@@ -289,8 +293,7 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 	}
 	updated, command := m.input.composer.Update(&m.screen, msg)
 	m.input.composer = updated
-	m.syncPopup(typedText(msg))
-	return command
+	return tea.Batch(command, m.syncPopup(typedText(msg)))
 }
 
 func (m model) View() tea.View {

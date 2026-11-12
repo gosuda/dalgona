@@ -2,24 +2,55 @@ package tui
 
 import (
 	"cmp"
+	"errors"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/gosuda/dalgona/internal/rpc"
 )
 
-const popupItems = 8
+const (
+	popupItems      = 8
+	popupCommand    = "command"
+	popupFile       = "file"
+	fileDebounce    = 120 * time.Millisecond
+	fileSearchGone  = "File search is unavailable on this server"
+	fileRPCNotFound = -32601
+)
 
 type completion struct {
 	kind   string
 	items  []listItem
 	cursor int
+	query  string
+	seq    int
+	notice string
+}
+
+type fileHit struct {
+	Path string `json:"path"`
+}
+
+type fileSearchParams struct {
+	Query string   `json:"query"`
+	Roots []string `json:"roots"`
+}
+
+type fileSearchReply struct {
+	Files []fileHit `json:"files"`
 }
 
 func newCompletion(query string) *completion {
-	return &completion{kind: "command", items: commandItems(query)}
+	return &completion{kind: popupCommand, items: commandItems(query)}
+}
+
+func newFileCompletion(query string, seq int) *completion {
+	return &completion{kind: popupFile, query: query, seq: seq}
 }
 
 func (c *completion) refilter(query string) {
@@ -86,16 +117,122 @@ func (m *model) commandQuery() (string, bool) {
 	return strings.TrimPrefix(token, "/"), true
 }
 
-func (m *model) syncPopup(typed bool) {
-	query, ok := m.commandQuery()
-	switch {
-	case !ok:
-		m.input.popup = nil
-	case m.input.popup != nil:
-		m.input.popup.refilter(query)
-	case typed:
-		m.input.popup = newCompletion(query)
+func (c *editor) tokenAt() (start, end int) {
+	start, end = c.cursor, c.cursor
+	for start > 0 && !unicode.IsSpace(c.text[start-1]) {
+		start--
 	}
+	for end < len(c.text) && !unicode.IsSpace(c.text[end]) {
+		end++
+	}
+	return start, end
+}
+
+func (m *model) fileQuery() (string, bool) {
+	if m.panelOpen() || m.review != nil || m.textMode() != inputPrompt {
+		return "", false
+	}
+	start, end := m.input.composer.tokenAt()
+	if start == end || m.input.composer.text[start] != '@' {
+		return "", false
+	}
+	return string(m.input.composer.text[start+1 : end]), true
+}
+
+func (m *model) syncPopup(typed bool) tea.Cmd {
+	if query, ok := m.commandQuery(); ok {
+		switch {
+		case m.input.popup != nil && m.input.popup.kind == popupCommand:
+			m.input.popup.refilter(query)
+		case typed:
+			m.input.popup = newCompletion(query)
+		default:
+			m.input.popup = nil
+		}
+		return nil
+	}
+	if query, ok := m.fileQuery(); ok {
+		if typed {
+			return m.openFilePopup(query)
+		}
+		return m.refreshFilePopup(query)
+	}
+	m.input.popup = nil
+	return nil
+}
+
+func (m *model) openFilePopup(query string) tea.Cmd {
+	m.input.fileSeq++
+	m.input.popup = newFileCompletion(query, m.input.fileSeq)
+	return m.debounceFile(m.input.fileSeq)
+}
+
+func (m *model) refreshFilePopup(query string) tea.Cmd {
+	popup := m.input.popup
+	if popup == nil || popup.kind != popupFile {
+		m.input.popup = nil
+		return nil
+	}
+	if popup.query == query {
+		return nil
+	}
+	m.input.fileSeq++
+	popup.query, popup.seq = query, m.input.fileSeq
+	popup.items, popup.cursor = nil, 0
+	return m.debounceFile(popup.seq)
+}
+
+func (m *model) debounceFile(seq int) tea.Cmd {
+	return tea.Tick(fileDebounce, func(time.Time) tea.Msg { return debounceMsg{seq: seq} })
+}
+
+func (m *model) applyDebounce(msg debounceMsg) tea.Cmd {
+	popup := m.input.popup
+	if popup == nil || popup.kind != popupFile || popup.seq != msg.seq || popup.query == "" {
+		return nil
+	}
+	return m.searchFiles(msg.seq, popup.query)
+}
+
+func (m *model) searchFiles(seq int, query string) tea.Cmd {
+	client, done := m.conn.client, m.conn.done
+	params := fileSearchParams{Query: query, Roots: []string{m.conn.opts.Cwd}}
+	return func() tea.Msg {
+		if client == nil {
+			return searchResultMsg{seq: seq, err: errors.New("rpc client is not connected")}
+		}
+		ctx, cancel := requestContext(done)
+		defer cancel()
+		var reply fileSearchReply
+		err := client.Call(ctx, "fuzzyFileSearch", params, &reply)
+		return searchResultMsg{seq: seq, files: reply.Files, err: err}
+	}
+}
+
+func (m *model) applySearch(msg searchResultMsg) {
+	popup := m.input.popup
+	if popup == nil || popup.kind != popupFile || popup.seq != msg.seq {
+		return
+	}
+	popup.items = nil
+	if msg.err != nil {
+		m.fileSearchFailed(popup, msg.err)
+		return
+	}
+	for _, hit := range msg.files[:min(len(msg.files), popupItems)] {
+		path := sanitizeText(hit.Path)
+		popup.items = append(popup.items, listItem{id: path, label: path})
+	}
+	popup.cursor = min(popup.cursor, max(0, len(popup.items)-1))
+}
+
+func (m *model) fileSearchFailed(popup *completion, err error) {
+	rpcErr, ok := errors.AsType[*rpc.RPCError](err)
+	if !ok || rpcErr.Code != fileRPCNotFound || m.input.fileMissing {
+		return
+	}
+	m.input.fileMissing = true
+	popup.notice = fileSearchGone
 }
 
 func (m *model) popupShown() bool {
@@ -125,7 +262,7 @@ func (m *model) popupKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return nil, true
 	case "enter":
 		if len(popup.items) == 0 {
-			return nil, false
+			return nil, popup.kind == popupFile
 		}
 		return m.runPopup(), true
 	}
@@ -133,6 +270,10 @@ func (m *model) popupKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 }
 
 func (m *model) completePopup() {
+	if m.input.popup.kind == popupFile {
+		m.completeFile()
+		return
+	}
 	name := m.input.popup.selected()
 	m.input.popup = nil
 	_, tail := splitToken(m.input.composer.Value())
@@ -142,7 +283,21 @@ func (m *model) completePopup() {
 	m.input.composer.cursor = utf8.RuneCountInString(head + " ")
 }
 
+func (m *model) completeFile() {
+	popup := m.input.popup
+	m.input.popup = nil
+	e := &m.input.composer
+	start, end := e.tokenAt()
+	insert := []rune("@" + popup.selected() + " ")
+	e.text = slices.Concat(e.text[:start], insert, e.text[end:])
+	e.cursor = start + len(insert)
+}
+
 func (m *model) runPopup() tea.Cmd {
+	if m.input.popup.kind == popupFile {
+		m.completeFile()
+		return nil
+	}
 	name := m.input.popup.selected()
 	_, tail := splitToken(m.input.composer.Value())
 	if commandNamed(name).args != "" || tail != "" {
@@ -161,7 +316,11 @@ func (m *model) popupLines() []string {
 	lines := make([]string, 0, rows)
 	for i := range rows {
 		if i >= len(popup.items) {
-			lines = append(lines, "")
+			line := ""
+			if i == 0 && popup.notice != "" {
+				line = m.screen.fit(popup.notice, width)
+			}
+			lines = append(lines, line)
 			continue
 		}
 		item := popup.items[i]

@@ -215,6 +215,13 @@ Up and Down MUST move the highlight. With no matching command, Up and Down MUST 
 Enter MUST run a highlighted command only when the draft is only its first token and the command takes no argument. Otherwise, Enter MUST complete the command and keep the rest of the draft.
 Esc MUST close the palette and keep the draft. Typing a character MUST reopen it.
 
+The composer MUST show a file palette when the caret is in a token that starts with `@`, with no panel or review open.
+The file palette MUST search for the text after `@` 120 ms after the last keystroke, and it MUST list at most 8 paths.
+Tab and Enter MUST replace the token with `@<path> `. Esc MUST close the file palette and keep the draft.
+A change of the file query MUST clear the rows of the previous query. The palette MUST NOT insert a path from an older query.
+A file palette with no rows MUST consume Enter and MUST NOT send the draft.
+When the file search is missing on the server, the first such palette MUST show `File search is unavailable on this server`.
+
 ## Keys and commands
 
 | Input | Effect |

@@ -117,14 +117,16 @@ type liveState struct {
 }
 
 type inputState struct {
-	composer editor
-	history  history
-	keywords []Keyword
-	marks    []keywordSpan
-	marksFor string
-	field    textField
-	mode     inputMode
-	popup    *completion
+	composer    editor
+	history     history
+	keywords    []Keyword
+	marks       []keywordSpan
+	marksFor    string
+	field       textField
+	mode        inputMode
+	popup       *completion
+	fileSeq     int
+	fileMissing bool
 }
 
 type screenState struct {
@@ -178,6 +180,16 @@ type serverRequestMsg struct {
 
 type requestAnswer struct {
 	value any
+	err   error
+}
+
+type debounceMsg struct {
+	seq int
+}
+
+type searchResultMsg struct {
+	seq   int
+	files []fileHit
 	err   error
 }
 
