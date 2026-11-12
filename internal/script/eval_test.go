@@ -269,3 +269,12 @@ func TestCellCallCapStopsRunawayLoop(t *testing.T) {
 		t.Fatalf("executed %d tool calls, want 1024", executed)
 	}
 }
+
+func TestRewriteIsReachableFromCells(t *testing.T) {
+	j := newJournal(echoTool)
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeEvalFirst, Tools: specs("rewrite", "eval")})
+	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools.rewrite(lang = 'go', pattern = 'x', target = 'x', replace = 'y')['tool']"}`)
+	if string(got.Value) != `"rewrite"` {
+		t.Fatalf("cell call to rewrite = %+v", got)
+	}
+}

@@ -33,6 +33,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [Remote runners](spec/runners.md): thread boxes, fully cloud mode, pull, and box cleanup.
 - [Search](spec/search.md): size ceiling and regular-file scans.
 - [Edit styles](spec/edit-styles.md): parser, resolver, writer, and refusal contracts.
+- [Rewrite](spec/rewrite.md): structural replacement by tree-sitter capture, its bounds, and its refusals.
 - [Hashline profiles](spec/hashline/README.md): shared, Light, Enhanced, conformance, and review documents. This imported set distinguishes proposal requirements from its bounded model-check evidence.
 - [Hashline shared contract](spec/hashline/hashline-common-v1.md): syntax, edit evidence, mapping, lifecycle, and authorization.
 - [Hashline Light](spec/hashline/hashline-light-v1.md): snapshot-bound edits without a prior-observation requirement.

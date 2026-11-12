@@ -329,6 +329,22 @@ func TestToolSetAppendsBatteryToolsForEveryModel(t *testing.T) {
 	}
 }
 
+func TestToolSetListsRewriteAfterPatch(t *testing.T) {
+	set := toolSet(config.Config{EditStyle: config.EditStyleSpec{Default: "anchor"}}, func(context.Context, string) []tool.Tool { return nil })
+	tools, err := set(t.Context(), "gpt-test", "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(tools))
+	for _, item := range tools {
+		names = append(names, item.Spec().Name)
+	}
+	at := slices.Index(names, "patch")
+	if at < 0 || at+1 >= len(names) || names[at+1] != "rewrite" {
+		t.Fatalf("tool set %q lists rewrite after patch in no position", names)
+	}
+}
+
 func TestDeciderUsesTheActionThreadModel(t *testing.T) {
 	t.Setenv("DALGONA_HOME", t.TempDir())
 	host, closeHost, err := NewHost(t.Context(), Options{Product: config.ProductDalgona, Cwd: t.TempDir()})

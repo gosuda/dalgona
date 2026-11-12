@@ -22,6 +22,7 @@ import (
 	"github.com/gosuda/dalgona/internal/tool/exec"
 	"github.com/gosuda/dalgona/internal/tool/patch"
 	"github.com/gosuda/dalgona/internal/tool/read"
+	"github.com/gosuda/dalgona/internal/tool/rewrite"
 	"github.com/gosuda/dalgona/internal/tool/search"
 	"github.com/gosuda/dalgona/internal/tool/task"
 	"github.com/gosuda/dalgona/internal/tool/todo"
@@ -150,7 +151,7 @@ func withDefaults(extra Batteries, local agent.RunnerFactory) Batteries {
 func toolSet(cfg config.Config, extra func(ctx context.Context, cwd string) []tool.Tool) agent.ToolSet {
 	return func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error) {
 		tools := []tool.Tool{
-			read.New(), search.New(), patch.New(cfg.EditStyle.EditStyle(modelID)),
+			read.New(), search.New(), patch.New(cfg.EditStyle.EditStyle(modelID)), rewrite.New(),
 			exec.New(), todo.New(), webfetch.New(),
 		}
 		return append(tools, extra(ctx, cwd)...), nil
