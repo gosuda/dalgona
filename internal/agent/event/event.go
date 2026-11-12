@@ -35,6 +35,11 @@ const (
 
 const MaxInlineBytes = 64 << 10
 
+const (
+	MaxImages     = 10
+	MaxImageBytes = 5 << 20
+)
+
 const MaxProjectionBytes = MaxInlineBytes + 4<<10
 
 type Event interface {

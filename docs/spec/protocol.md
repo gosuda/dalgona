@@ -100,6 +100,14 @@ A client MUST handle `account/login/completed` as follows. On `success` true, it
 
 A product MAY add methods. Built-in methods take precedence over added methods. A product MAY run an archive hook on an idle thread. The hook MUST run after `Host.Archive` journals `thread.archived`. If the hook fails, the server MUST unarchive the thread. The server MUST return error `-32603` with the message `archive hook: <cause>`.
 
+### Input images
+
+The server MUST accept at most 10 images in one request.
+The server MUST accept an image of at most 5242880 bytes.
+The server MUST accept at most 10485760 bytes of image data in one request.
+The server MUST accept only PNG, JPEG and GIF image data.
+The server MUST detect the image type from the first bytes of the data.
+
 ## File methods
 
 The `fs/*` methods MUST take absolute paths. A relative path MUST give `-32602` `path must be absolute`. A path that does not exist MUST give `-32602` `no such file: <path>`.
