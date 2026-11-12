@@ -37,7 +37,7 @@ func (m *model) now() time.Time {
 
 func (m *model) turnLive() bool {
 	switch m.thread.state {
-	case stateRunning, stateAwaitingApproval, "awaiting input":
+	case stateRunning, stateAwaitingApproval, stateAwaitingInput:
 		return true
 	}
 	_, waiting := m.retryRemaining()

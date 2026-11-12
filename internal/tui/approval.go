@@ -23,9 +23,13 @@ type approval struct {
 	reason    string
 	scroll    int
 	answer    chan requestAnswer
+	card      *questionCard
 }
 
 func (m *model) applyRequest(msg serverRequestMsg) tea.Cmd {
+	if msg.method == "item/tool/requestUserInput" {
+		return m.applyQuestion(msg)
+	}
 	request, err := decodeApproval(msg.method, msg.params)
 	if err != nil {
 		msg.answer <- requestAnswer{err: err}
@@ -64,8 +68,13 @@ func (m *model) applyRequestResolved(params jsontext.Value) error {
 	if index < 0 {
 		return nil
 	}
+	card := m.approvals[index].card
 	m.dropApproval(index)
-	m.noticef("%s", resolvedNotice(event.Resolution))
+	if card != nil {
+		m.noticef("%s", questionResolvedNotice(event.Resolution))
+	} else {
+		m.noticef("%s", resolvedNotice(event.Resolution))
+	}
 	return nil
 }
 
@@ -85,7 +94,7 @@ func (m *model) dropApproval(index int) {
 	open := m.approvals[index]
 	m.approvals = slices.Delete(m.approvals, index, index+1)
 	delete(m.live.patches, patchKey{open.threadID, open.itemID})
-	if len(m.approvals) == 0 && m.thread.state == stateAwaitingApproval {
+	if len(m.approvals) == 0 && (m.thread.state == stateAwaitingApproval || m.thread.state == stateAwaitingInput) {
 		m.setState(stateRunning)
 	}
 }

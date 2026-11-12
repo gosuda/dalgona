@@ -70,6 +70,9 @@ func (m *model) inputRows(width, limit int) ([]string, int, int) {
 }
 
 func (m *model) textMode() inputMode {
+	if m.typingAnswer() {
+		return inputAnswer
+	}
 	if len(m.approvals) == 0 && m.confirm == nil && m.list != nil {
 		if m.list.pending != "" {
 			return inputTarget
@@ -200,7 +203,7 @@ func stateWord(state string, lastTurn time.Duration) string {
 	switch state {
 	case stateRunning:
 		return "Working"
-	case stateAwaitingApproval, "awaiting input":
+	case stateAwaitingApproval, stateAwaitingInput:
 		return "Waiting"
 	case stateInterrupted:
 		return "Stopped"
@@ -405,10 +408,17 @@ func activityLabel(item rpc.Item) string {
 	return ""
 }
 
+func (m *model) decisionLines() []string {
+	if m.approvals[0].card != nil {
+		return m.questionLines(terminalWidth(m.screen.width), panelRows(panelAsk, m.screen.height))
+	}
+	return framePanel(&m.screen, m.approvalPanel(), panelRows(panelApproval, m.screen.height))
+}
+
 func (m *model) panelLines() []string {
 	switch {
 	case len(m.approvals) > 0:
-		return framePanel(&m.screen, m.approvalPanel(), panelRows(panelApproval, m.screen.height))
+		return m.decisionLines()
 	case m.confirm != nil:
 		return framePanel(&m.screen, m.confirmPanel(), panelRows(panelConfirm, m.screen.height))
 	case m.list != nil:

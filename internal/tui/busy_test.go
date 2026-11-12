@@ -10,7 +10,7 @@ func TestThreadCommandsRefusedMidTurn(t *testing.T) {
 	}{
 		{state: stateRunning, word: "working"},
 		{state: stateAwaitingApproval, word: "waiting for approval"},
-		{state: "awaiting input", word: "waiting for an answer"},
+		{state: stateAwaitingInput, word: "waiting for an answer"},
 	}
 	for _, state := range states {
 		for _, name := range []string{"new", "resume", "fork", "compact", "tree", "revert"} {

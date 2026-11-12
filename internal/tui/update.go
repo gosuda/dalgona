@@ -132,6 +132,13 @@ func (m *model) applyResultMessage(msg resultMsg) tea.Cmd {
 	return m.applyResult(msg)
 }
 
+func (m *model) decisionKey(msg tea.KeyPressMsg) tea.Cmd {
+	if m.approvals[0].card != nil {
+		return m.answerQuestionKey(msg)
+	}
+	return m.answerApprovalKey(msg.String())
+}
+
 func (m *model) overlayKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	key := msg.String()
 	switch {
@@ -141,7 +148,7 @@ func (m *model) overlayKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		m.openReview()
 		return nil, true
 	case len(m.approvals) > 0:
-		return m.answerApprovalKey(key), true
+		return m.decisionKey(msg), true
 	case m.confirm != nil:
 		return m.confirmKey(key), true
 	case m.list != nil:
@@ -346,7 +353,7 @@ func (m *model) finishSuspend() tea.Cmd {
 }
 
 func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
-	if paste, ok := msg.(tea.PasteMsg); ok && (m.list != nil || m.loginTyping()) {
+	if paste, ok := msg.(tea.PasteMsg); ok && (m.list != nil || m.loginTyping() || m.typingAnswer()) {
 		m.input.field.pasteLine(paste.Content)
 		return nil
 	}

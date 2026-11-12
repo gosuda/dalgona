@@ -178,7 +178,7 @@ func busyWord(state string) string {
 		return "working"
 	case stateAwaitingApproval:
 		return "waiting for approval"
-	case "awaiting input":
+	case stateAwaitingInput:
 		return "waiting for an answer"
 	default:
 		return ""

@@ -479,6 +479,9 @@ func threadState(status rpc.ThreadStatus) string {
 		if slices.Contains(status.ActiveFlags, "waitingOnApproval") {
 			return stateAwaitingApproval
 		}
+		if slices.Contains(status.ActiveFlags, "waitingOnUserInput") {
+			return stateAwaitingInput
+		}
 		return stateRunning
 	case "systemError":
 		return stateFailed

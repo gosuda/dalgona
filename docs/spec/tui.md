@@ -28,13 +28,13 @@ The dock holds, from the top, the composer, an open panel, the live row, and the
 
 The composer shows `› ` in the thread hue, then the typed text. The terminal cursor marks the insertion point. When the composer is empty, the placeholder follows the prompt in dim text. The placeholder never shows a keyword mark.
 
-States are `idle`, `running`, `awaiting approval`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. Live text MUST be cut to one row, and a cut text MUST end with `...`. At 40 columns no line may exceed 39 cells.
+States are `idle`, `running`, `awaiting approval`, `awaiting input`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. Live text MUST be cut to one row, and a cut text MUST end with `...`. At 40 columns no line may exceed 39 cells.
 
 The state words are `Working`, `Waiting`, `Stopped`, `Failed`, `Offline`, `Ready`, and `Done`. `running` shows `Working`, `awaiting approval` and `awaiting input` show `Waiting`, `interrupted` shows `Stopped`, `disconnected` shows `Offline`, and `idle` is named `Ready`, or `Done` after a completed turn. An idle live row MUST show no state word.
 
 A notice that does not fit the free text of the live row MUST also print once as a row, with the full text.
 
-The `/resume` list panel shows each thread's mapped state.
+A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. `active` with the flag `waitingOnUserInput` gives `awaiting input`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` list panel shows each thread's mapped state.
 
 The TUI follows one thread. The first thread it sees, from a response or a notification, becomes the TUI's thread. `/new`, `/resume`, and `/fork` replace it. Notifications whose `threadId` names another thread, such as a spawned child, MUST NOT change the title, state, live items, or thread. When a `/new`, `/resume`, or `/fork` load applies, the TUI MUST keep the follow-up queue. It MUST show `<n> follow-ups moved to <title>; press Enter on an empty prompt to send the next` when that load applies and the queue holds at least one follow-up.
 
@@ -463,3 +463,17 @@ The composer MUST show marks only for the draft that the newest accepted `dalgon
 A keyword mark is bold. It is also underlined once the theme is known. It MUST take the accent color only when color is on. The mark MUST NOT change the visible text, and it MUST NOT depend on color alone.
 
 A completed user message MUST show the marks listed in its `keywords` member. A cursor inside a marked word MUST split the mark around the cursor. The mark has no animation and schedules no tick.
+
+## Questions
+
+A `item/tool/requestUserInput` request joins the decision queue behind earlier approvals and questions. The card shows the oldest open decision. The TUI MUST show one question card for each request. Its title reads `Question <i> of <n> · <header>`.
+
+Rows mode moves with `up`, `k`, `down`, and `j`. `tab`, `right`, and `l` move to the next question. `shift+tab`, `left`, and `h` move back. Digits pick an option. `space` toggles a multi-select option. In a single-select question, `enter` picks the option under the cursor and advances. In a multi-select question, `enter` advances without changing the picks. On the last question, `enter` submits. `s` submits now. `esc` dismisses the card.
+
+The Other row opens typing. Typing uses the input line with the label `answer: `. `enter` stores the typed text and advances. `esc` leaves typing, or dismisses a free-text question.
+
+With two or more rows, the card keeps its title and its hint row. With one row it shows the title alone. At window height 4 or less the card is not drawn. The preview drops first, then the question text, then the options scroll.
+
+A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<itemId>`. A question closed by another window writes no row.
+
+A question request that the TUI accepts MUST send a desktop notification `<product>: Waiting for your answer · <title>`, when notifications are on and the window is blurred.
