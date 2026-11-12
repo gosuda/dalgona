@@ -104,6 +104,11 @@ Cancellation before the first target mutation MUST leave every target unchanged.
 
 Existing file modes MUST survive updates. Renames MUST carry the source mode. New files MUST use mode `0644`, subject to the process umask.
 
+For the local runner, every platform MUST write through a directory handle held from planning.
+Unix MUST use `openat`-family calls. Other platforms MUST use `os.Root`, so no write resolves outside the workspace.
+A symbolic link MUST be refused when the pin is taken.
+On Windows, a read-only target MUST stay read-only after replacement.
+
 ## Errors
 
 Every parse error MUST end with this exact suffix, with the selected style substituted:
