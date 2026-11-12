@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	type Mock,
+	test,
+	vi,
+} from "vitest";
 import { type RpcPort, Session } from "./session.svelte";
 import type {
 	AppNotification,
@@ -1027,3 +1035,174 @@ describe("shell mode", () => {
 		session.stop();
 	});
 });
+
+describe("desktop notifications", () => {
+	let permission: string;
+	let visibility: string;
+	let shown: { text: string; body: string; tag: string }[];
+	let requestPermission: Mock;
+
+	beforeEach(() => {
+		vi.stubGlobal("history", { replaceState: vi.fn() });
+		permission = "granted";
+		visibility = "hidden";
+		shown = [];
+		requestPermission = vi.fn(() => {
+			permission = "granted";
+			return Promise.resolve("granted");
+		});
+		class FakeNotification {
+			static get permission(): string {
+				return permission;
+			}
+			static requestPermission = requestPermission;
+			constructor(text: string, options: { body: string; tag: string }) {
+				shown.push({ text, body: options.body, tag: options.tag });
+			}
+		}
+		vi.stubGlobal("Notification", FakeNotification);
+		vi.stubGlobal("document", {
+			get visibilityState(): string {
+				return visibility;
+			},
+		});
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	test("notifies on a waiting approval only when hidden and granted", async () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial, () => {});
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.connection).toBe("connected");
+		});
+		await vi.waitFor(() => {
+			expect(session.threads).toHaveLength(2);
+		});
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port was dialled");
+
+		visibility = "visible";
+		port.request(approval("req-1"));
+		expect(shown).toEqual([]);
+
+		visibility = "hidden";
+		permission = "default";
+		port.request(approval("req-2"));
+		expect(shown).toEqual([]);
+
+		permission = "granted";
+		port.request(approval("req-3"));
+		expect(shown).toEqual([
+			{ text: "Waiting for your reply", body: "Untitled thread", tag: "t1" },
+		]);
+		session.stop();
+	});
+
+	test("never asks for permission without a click", async () => {
+		permission = "default";
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial, () => {});
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.connection).toBe("connected");
+		});
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port was dialled");
+
+		port.request(approval("req-1"));
+		port.deliver(turnNotice("turn/completed", "t1", "completed"));
+		expect(requestPermission).not.toHaveBeenCalled();
+		expect(session.desktopNotifications).toBe("off");
+
+		await session.requestDesktopNotifications();
+		expect(requestPermission).toHaveBeenCalledTimes(1);
+		expect(session.desktopNotifications).toBe("on");
+		session.stop();
+	});
+
+	test("an interrupted turn calls notifyAttention", async () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial, () => {});
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.connection).toBe("connected");
+		});
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port was dialled");
+
+		const attention = vi.spyOn(session, "notifyAttention");
+		port.deliver(turnNotice("turn/completed", "t2", "interrupted"));
+		expect(attention).toHaveBeenCalledWith("interrupted", "t2");
+		session.stop();
+	});
+
+	test("a throwing Notification constructor does not skip the queued follow-up", async () => {
+		vi.stubGlobal(
+			"Notification",
+			class ThrowingNotification {
+				static get permission(): string {
+					return "granted";
+				}
+				static requestPermission = requestPermission;
+				constructor() {
+					throw new Error("illegal constructor");
+				}
+			},
+		);
+		const sent: string[] = [];
+		const { dial, ports } = fakeDial("t1", {
+			"turn/start": (params) => {
+				sent.push(sentText(params));
+				return { turn: { id: "turn-2", status: "inProgress", items: [] } };
+			},
+		});
+		const session = new Session(dial, () => {});
+		session.start(location);
+		await waitForThread(session, "t1");
+
+		session.queueFollowup("next");
+		ports[0]?.deliver(completion("t1", "turn-1"));
+		await vi.waitFor(() => {
+			expect(sent).toEqual(["next"]);
+		});
+		session.stop();
+	});
+
+	test("names a finished turn by its state word", async () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial, () => {});
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.connection).toBe("connected");
+		});
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port was dialled");
+
+		port.deliver(turnNotice("turn/completed", "t2", "completed"));
+		port.deliver(turnNotice("turn/completed", "t2", "failed"));
+		port.deliver(turnNotice("turn/completed", "t2", "interrupted"));
+		expect(shown.map((entry) => entry.text)).toEqual([
+			"Done",
+			"Failed",
+			"Stopped",
+		]);
+		session.stop();
+	});
+});
+
+function approval(id: string): ApprovalRequest {
+	return {
+		id,
+		method: "item/commandExecution/requestApproval",
+		threadId: "t1",
+		turnId: "turn-1",
+		itemId: "call-1",
+		title: "Run this command?",
+		detail: "ls",
+		reason: null,
+	};
+}

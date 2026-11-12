@@ -1,5 +1,6 @@
 <script lang="ts">
 import { untrack } from "svelte";
+import DesktopNotifications from "#lib/components/DesktopNotifications.svelte";
 import Panel from "#lib/components/panels/Panel.svelte";
 import type { Session } from "#lib/session.svelte.ts";
 import {
@@ -115,7 +116,10 @@ async function save(): Promise<void> {
 				<input type="checkbox" bind:checked={draft.editReview} />
 				Review edits
 			</label>
-			<p class="row">Desktop notifications</p>
+			<DesktopNotifications
+				value={session.desktopNotifications}
+				onAllow={() => void session.requestDesktopNotifications()}
+			/>
 			{#if problem !== null}
 				<p class="problem" role="alert">{problem}</p>
 			{/if}
@@ -156,11 +160,6 @@ async function save(): Promise<void> {
 
 	.single {
 		justify-content: flex-start;
-	}
-
-	.row {
-		margin: 0;
-		color: var(--dim);
 	}
 
 	.problem {

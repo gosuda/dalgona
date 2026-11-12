@@ -12,6 +12,15 @@ import {
 	slashCommands,
 } from "./commands";
 import { threadTitle } from "./labels";
+import {
+	type AttentionKind,
+	attentionOf,
+	attentionTexts,
+	type DesktopNotifications,
+	desktopState,
+	notificationPermission,
+	visibilityState,
+} from "./notifications";
 import { RpcError, rpcSocketUrl, tokenFromHash } from "./protocol";
 import { questionResponse, resolutionNotice } from "./question";
 import {
@@ -241,6 +250,9 @@ export class Session {
 	loginProviders: readonly LoginProvider[] = $state([]);
 	login: LoginFlow | null = $state.raw(null);
 	panelTurnId: string | null = $state(null);
+	desktopNotifications: DesktopNotifications = $state(
+		desktopState(notificationPermission()),
+	);
 	private noticeSeq = 0;
 
 	running: boolean = $derived(this.transcript.turnStatus === "inProgress");
@@ -588,6 +600,7 @@ export class Session {
 			onRequest: (request) => {
 				if (generation === this.connectionGeneration) {
 					this.requests = trackRequest(this.requests, request);
+					this.notifyAttention("waiting", request.threadId);
 				}
 			},
 			onQuestion: (request) => {
@@ -1388,6 +1401,27 @@ export class Session {
 		this.patchChanges = forgetPatchChanges(this.patchChanges, request);
 	}
 
+	async requestDesktopNotifications(): Promise<void> {
+		if (notificationPermission() === undefined) return;
+		await Notification.requestPermission();
+		this.desktopNotifications = desktopState(notificationPermission());
+	}
+
+	notifyAttention(kind: AttentionKind, threadId: string): void {
+		const permission = notificationPermission();
+		this.desktopNotifications = desktopState(permission);
+		if (permission !== "granted" || visibilityState() !== "hidden") return;
+		const thread = this.threads.find((entry) => entry.id === threadId);
+		try {
+			new Notification(attentionTexts[kind], {
+				body: thread === undefined ? threadId : threadTitle(thread),
+				tag: threadId,
+			});
+		} catch {
+			this.desktopNotifications = "unsupported";
+		}
+	}
+
 	private handleNotification(notification: AppNotification): void {
 		const update = applyOpenThreadNotification(
 			{
@@ -1409,6 +1443,12 @@ export class Session {
 				notification.threadId,
 				notification.turn.status,
 			);
+		}
+		if (notification.type === "turnCompleted") {
+			const attention = attentionOf(notification.turn.status);
+			if (attention !== null) {
+				this.notifyAttention(attention, notification.threadId);
+			}
 		}
 		if (isEffectKind(notification.type)) {
 			const effect = this.effects[notification.type] as (

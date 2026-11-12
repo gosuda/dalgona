@@ -264,6 +264,17 @@ A failed connect MUST show `Unable to connect to dalgona: <detail>. Check that d
 A socket error MUST show `Connection error: <message>.` with `Reconnect`.
 The header MUST show `Offline` while the connection is down.
 
+### Notifications
+
+The client MUST send a desktop notification only while the tab is hidden and the browser has granted permission.
+A waiting request MUST send `Waiting for your reply`.
+A turn that ends `completed`, `failed`, or `interrupted` MUST send `Done`, `Failed`, or `Stopped`.
+Each notification MUST name its thread in the body and use the thread id as its tag.
+The client MUST NOT ask for permission on load. It MUST ask only when the user chooses `Allow desktop notifications`.
+The last row of the Settings panel MUST show `Desktop notifications are on`, `Desktop notifications are blocked in this browser`, or `Desktop notifications are off`.
+The Settings panel row MUST show the button only while permission is undecided.
+A browser without the Notification API MUST show no Settings panel row.
+
 ### Focus
 
 A control that disappears while focused hands focus to the message field. The submit control keeps its element and changes only its label.
