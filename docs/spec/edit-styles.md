@@ -77,7 +77,7 @@ A gap MUST survive only while both original neighbors remain adjacent. An insert
 
 A write MUST NOT stand in for omitted code with a comment that holds an ellipsis.
 An ellipsis is three periods or the character U+2026.
-A comment is a placeholder when its text holds only dots or brackets.
+A comment is a placeholder when it holds an ellipsis and its other text is only dots, brackets, or a listed phrase.
 A comment is also a placeholder when its text starts with a listed phrase. A space or the end of the text MUST follow the phrase.
 The phrases are `rest of`, `existing code`, `existing implementation`, `existing methods`, `remaining code`, `remaining implementation`, `remaining methods`, `unchanged`, and `previous code`.
 The phrases are also `same as before`, `code omitted`, `implementation omitted`, `omitted`, `other methods`, `keep existing`, `keep the rest`, and `etc`.

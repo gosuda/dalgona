@@ -176,10 +176,10 @@ Each file change MUST show its edit review as one line under its diff cards, for
 ### Verbosity
 
 - The setting `verbosity` takes `low`, `medium`, or `high`. The client MUST read it from `dalgona/settings/read`, and the default MUST be `medium`.
-- At `high`, every row MUST show its full text.
+- At `high`, every row MUST show its full text, except a failed row, which keeps its last 10 lines.
 - At `medium`, an `eval` row MUST show one line, such as `Eval · 2 lines of code · Done`.
 - At `medium`, a reasoning row MUST show one line, such as `Thinking · 3 lines · ctrl+o`. While the text streams, it MUST show its last line only.
-- At `medium`, a command row MUST show its last 10 lines and MUST say how many lines it hides.
+- At `medium`, a command row MUST show its last 10 lines and the total line count, such as `Showing the last 10 of 40 lines`.
 - At `medium`, a diff card MUST show at most 60 lines of each file.
 - At `low`, consecutive tool rows MUST join one tool group, which MUST show one summary line, such as `Ran 2 commands · called 3 tools`.
 - A failed tool row MUST show its last 10 lines at every level, and it MUST end its tool group.
@@ -187,7 +187,7 @@ Each file change MUST show its edit review as one line under its diff cards, for
 - `Ctrl+O` MUST open the review for the latest finished row when focus is in the transcript or the composer.
 - The review MUST close on Escape and MUST return focus to the control that opened it.
 - The review MUST load spilled command output one page at a time from `dalgona/item/output/read`.
-- The rules and the summary text MUST follow the terminal workstream, Step 16.
+- The rules and the summary text MUST match the Verbosity section of `docs/spec/tui.md`.
 
 ### Markdown
 

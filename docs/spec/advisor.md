@@ -181,7 +181,7 @@ The server MUST serve these methods from the thread runtime. `Runtime.Status()` 
 
 The `usage` object MUST contain exactly `inputTokens` and `outputTokens`.
 
-The TUI MUST render a note as a dim card. For the advisor named `advisor`, the card reads `advisor · <severity>: <note>`. For any other advisor, the card reads `advisor <name> · <severity>: <note>`. `/advisor` MUST toggle the advisor. `/advisor status` MUST list the advisors.
+The TUI MUST render a note as a dim card. For the advisor named `advisor`, the card reads `advisor · <severity>: <note>`. For any other advisor, the card reads `advisor <name> · <severity>: <note>`. `/advisor` MUST open a panel that lists the advisors. Enter in that panel MUST toggle the highlighted advisor. `/advisor status` MUST list the advisors.
 
 ### Subagents
 

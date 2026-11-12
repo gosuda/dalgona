@@ -37,7 +37,7 @@ Probe binaries, linux/amd64, go1.27.4, built from the same tree with one `main` 
 |the 23 grammars through `internal/syntax`|8325807|
 |the aggregate package `grammars`|22030362|
 
-The decision 3 figures in the code-symbols plan (2.4 MB, 17.7 MB, 22.7 MB and 36.9 MB) were not reproduced by these probes. The probe values above are the measured ones. The product delta is about twice the 23-grammar probe. This step did not split the rest of the delta.
+The size estimates of the earlier design (2.4 MB, 17.7 MB, 22.7 MB and 36.9 MB) were not reproduced by these probes. The probe values above are the measured ones. The product delta is about twice the 23-grammar probe. This step did not split the rest of the delta.
 
 ## Bounds and measurements
 
@@ -125,15 +125,15 @@ Parse worker count (`BenchmarkSymbolsWorkers`, 64 files of 64 KiB, median of ten
 
 Child peak resident set (`BenchmarkSymbolsChildPeakRSS`, 64 files of 256 KiB, three runs): 72152, 74212 and 63792 KiB, with 60 files reported as not parsed in each run. The 1 MiB per-call byte cap parses four of the 64 files. An earlier single run of the same benchmark, in the same session, measured 301276 KiB, so the peak varies with the collector and the load.
 
-Every sample of every 1 MiB row stopped early, for all 17 languages. The record does not separate the stop reasons. A stop can come from the 2 s timeout, from the 256 MiB memory budget, or from a work limit. So the 1 MiB rows measure the time to a stop, not a complete parse. The plan rule records a p99 of the 1 MiB parse above `parseTimeout` as a failure. The 1 MiB p99 is above 2 s in 16 of 17 languages, so 16 failures are recorded. The c row is the exception at 1142.8 ms. No constant changes in this record. A measured p99 above `parseTimeout` for a complete parse is a failure that needs a new entry here before any constant changes.
+Every sample of every 1 MiB row stopped early, for all 17 languages. The record does not separate the stop reasons. A stop can come from the 2 s timeout, from the 256 MiB memory budget, or from a work limit. So the 1 MiB rows measure the time to a stop, not a complete parse. The 1 MiB p99 is above 2 s in 16 of 17 languages, so 16 failures are recorded. The c row is the exception at 1142.8 ms. No constant changes in this record. A measured p99 above `parseTimeout` for a complete parse is a failure that needs a new entry here before any constant changes.
 
 ## Known gaps
 
 Setext headings give no symbol on gotreesitter v0.57.0. Observed on 2026-11-12 with `Outliner.OutlineTree` over the markdown fixture:
 
-- The plan's row `(section (setext_heading heading_content: (paragraph) @name)) @definition.section` names the enclosing section of each setext heading. The setext heading is a child of the atx section that holds it, so that row and the atx row name the same node. The outliner reports `OmittedNameConflict` 2 and drops `Setup`, so the row is removed.
-- The row `(setext_heading heading_content: (paragraph) @name) @definition.section` avoids the conflict and gives `Heading text` at rows 8 to 10. Its span is the heading and its underline, so `definition` would print no body. It is not used, because decision 36 requires a heading span that holds its body.
-- Code symbols step 6 MUST state in `docs/spec/search.md` that setext headings give no symbol.
+- The row `(section (setext_heading heading_content: (paragraph) @name)) @definition.section` names the enclosing section of each setext heading. The setext heading is a child of the atx section that holds it, so that row and the atx row name the same node. The outliner reports `OmittedNameConflict` 2 and drops `Setup`, so the row is removed.
+- The row `(setext_heading heading_content: (paragraph) @name) @definition.section` avoids the conflict and gives `Heading text` at rows 8 to 10. Its span is the heading and its underline, so `definition` would print no body. It is not used. A Markdown heading's span MUST include the body of the heading, so that `definition` can print it.
+- `docs/spec/search.md`, Symbols and syntax, states that setext headings give no symbol.
 
 ## Rejected alternatives
 

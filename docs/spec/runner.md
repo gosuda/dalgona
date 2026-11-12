@@ -32,7 +32,7 @@ A tool that signals a run MUST poll `Read` until `Exit` exists before the tool r
 
 The poll MUST end when the caller's context ends, and it MUST return that context's cause. A tool's own timeout MUST NOT end the poll.
 
-After `KILL`, the tool MUST poll `Read` until `Exit` exists or the deadline passes, then return the error `process did not report an exit`.
+After `KILL`, the tool MUST poll `Read` until `Exit` exists or the deadline passes. It MUST then return the error `exec: process did not report an exit after SIGKILL`.
 
 The shim MUST pause only when `DALGONA_SHIM_TEST_PAUSE` is set to `<phase>:<socket>`. At that phase it MUST connect to the Unix socket at `<socket>` and wait until the peer closes the connection. A failed connect or read MUST end the pause. Phase `pid` pauses before the shim writes `pid`. Phase `start` pauses after the first `cancel` check and before the command starts. Phase `group` pauses after the shim writes `pgid` and assigns the job object, and before the second `cancel` check. Only tests MAY set this variable.
 

@@ -8,7 +8,7 @@ The modes are ordered `yolo` < `auto` < `ask`. A protocol client MAY raise the m
 
 Before a call runs, the gate MUST journal `approval.requested` with `request_id`, `call_id`, `summary`, and the call `class`. The gate MUST then journal `approval.resolved` with `decision`, `by`, `reason`, and, for decider verdicts, `scores`. A call MUST NOT reach `tool.started` without an `accept` or `accept_session` resolution.
 
-`by` MUST be one of `mode:<mode>`, `rule:<name>`, `decider:<model>`, `user`, `grant:<prefix>`, or the `By` value of a hook.
+`by` MUST be one of `mode:<mode>`, `rule:<name>`, `decider:<model>`, `decider`, `user`, `grant:<prefix>`, or the `By` value of a hook. The bare `decider` MUST be used when no decider or no model name exists.
 
 A declined call MUST complete with `tool.completed`, `ok=false`, and the decline reason as its output. It MUST NOT be marked `skipped`. Later calls in the same assistant message MUST still run. After a cancel decision on an in-band call, every later call in that turn MUST complete as declined and MUST NOT run.
 

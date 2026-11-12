@@ -31,5 +31,5 @@ The 4 GB sweep of `BenchmarkThresholdSweep` has not run on this host, so the val
 
 ## Rulings
 
-- No cross-process lock guards the index build of a workspace. The review row that asked for one is closed by decisions 14 and 15 of the code-search plan: one build starts in each process, and each build publishes by an atomic rename of `CURRENT` after its own generation directory is complete. When two processes build, the later rename wins, and the publisher removes the other generation directories.
-- The index format is named in the manifest magic, `codesearch v1.2.0`, and not in the directory name. The directory is `search/<hash16>`, and the generation directory is `<start-ns>-<random>`, as the plan's schemas define.
+- No cross-process lock guards the index build of a workspace. One build starts at most once in each process, and each build publishes by an atomic rename of `CURRENT` after its own generation directory is complete. When two processes build, the later rename wins, and the publisher removes the other generation directories.
+- The index format is named in the manifest magic, `codesearch v1.2.0`, and not in the directory name. The directory is `search/<hash16>`, and the generation directory is `<start-ns>-<random>`, where `<start-ns>` is the build start in 20 decimal digits of Unix nanoseconds and `<random>` is 16 hex digits.

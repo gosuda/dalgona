@@ -1,6 +1,6 @@
 # Providers
 
-The model package MUST expose one normalized stream for every provider. A provider MUST NOT expose vendor types to the agent. Request and stream JSON MUST use `encoding/json/jsontext` token and value APIs. Reflection-based JSON coding is permitted only for cold model-list responses.
+The model package MUST expose one normalized stream for every provider. A provider MUST NOT expose vendor types to the agent. Request and stream JSON MUST use `encoding/json/jsontext` token and value APIs. Reflection-based JSON coding is permitted only for cold data that the program reads once, such as model-list and control responses.
 
 ## Requests
 

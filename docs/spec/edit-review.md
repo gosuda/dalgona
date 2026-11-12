@@ -70,6 +70,7 @@ The file kind comes from the extension of the path. Each extension MUST belong t
 | `unclear_contract` | code, interface | none |
 | `off_token` | interface | none |
 | `layout_motion` | interface | none |
+| `incomplete` | turn unit only | the task is not empty |
 
 ## Verdicts
 
@@ -128,6 +129,8 @@ A rebuilt request MUST read the `spoken` ids from the journal, not from the curr
 ## Turn review
 
 A turn review MUST run once for each turn, before the turn ends, and only when an edit of that turn passed the pre-filter. It MUST NOT run during recovery, and it MUST NOT run for a turn without a task.
+
+The turn unit MUST ask `sound` and `incomplete`.
 
 A continuation turn MUST be judged as its own unit, with only the edits that it made. A turn id MUST have at most one turn review.
 

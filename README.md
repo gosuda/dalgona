@@ -156,7 +156,7 @@ dalgona cloud down <name>
 
 The named remote uses any service in [runners.md](docs/spec/runners.md) except Cloudflare. Cloudflare cannot host a durable whole-daemon home because its containers lose their files on stop.
 
-`cloud up` does not copy credentials unless you pass `--copy-auth`. Without credential copying, use `dalgona --remote <name> login` to authenticate in the box. Remote service and box identifiers live in `[remotes.<name>]` in `settings.toml`.
+`cloud up` does not copy credentials unless you pass `--copy-auth`. Without credential copying, use `dalgona --remote <name> login` for API-key providers and `chatgpt`. Sign in to `antigravity`, `cursor`, or `devin` here, then run `dalgona cloud up <name> --copy-auth`. Remote service and box identifiers live in `[remotes.<name>]` in `settings.toml`.
 
 `cloud down` destroys the box and its journal after confirmation. `--yes` skips that confirmation for scripts. Pull changes you need before deletion.
 
@@ -218,4 +218,4 @@ These commands are specific to dalgona:
 
 [The documentation index](docs/README.md) links every current specification and decision. Start with [journal](docs/spec/journal.md), [recovery](docs/spec/recovery.md), and [protocol](docs/spec/protocol.md) for the core contracts.
 
-Read [CONTRIBUTE.md](CONTRIBUTE.md) before changing code and [REVIEW.md](REVIEW.md) before reviewing it. [AGENTS.md](AGENTS.md) contains repository instructions for coding agents. [justfile](justfile) declares the available checks. `just verify` runs the Go, web, and Cloudflare checks. It also runs the hashline model check when `uv` is installed.
+Read [CONTRIBUTE.md](CONTRIBUTE.md) before changing code and [REVIEW.md](REVIEW.md) before reviewing it. [AGENTS.md](AGENTS.md) contains repository instructions for coding agents. [justfile](justfile) declares the available checks. `just verify` runs the Go, spec-style, web, and Cloudflare checks. It also runs the hashline model check when `uv` is installed.

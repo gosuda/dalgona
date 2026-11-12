@@ -70,7 +70,7 @@ A non-empty pattern MUST first select the files in which some line matches it.
 
 A name pattern that is not literal MUST NOT use `^`, `$`, `\A`, `\z`, `\b`, or `\B`.
 
-The `kind` argument MUST be one of the eleven kinds, and it MUST NOT be set in any other mode.
+The `kind` argument MUST be one of the eleven kinds. It MUST NOT be set in any mode other than `symbols` and `definition`.
 
 The `pattern` argument MAY be empty only in the symbols mode.
 

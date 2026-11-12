@@ -26,7 +26,7 @@ The TUI MUST run inline, except for the review. The review is the only view that
 
 Streamed text MUST print each final block once, and the live row MUST show one tail row.
 
-The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the notice, else the newest live text.
+The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the notice, else the activity.
 
 The composer shows `› ` in the thread hue, then the typed text. The terminal cursor marks the insertion point. When the composer is empty, the placeholder follows the prompt in dim text. The placeholder never shows a keyword mark.
 
@@ -119,7 +119,7 @@ The input line MUST show the mode of the top panel, as the table below gives.
 | inputPrompt | `› ` | The prompt draft | Sends the prompt | Follows the Keys table |
 | inputShell | `! ` | A shell command | Runs the command | Leaves shell mode |
 | inputFilter | `filter: ` | The list filter | Chooses the highlighted item | Clears the filter, then closes the list panel |
-| inputTarget | `target: ` | A branch, a commit, or custom instructions | Sends the review | Clears the text and the pending target. The list stays open |
+| inputTarget | `branch: `, `commit: `, or `instructions: ` | A branch, a commit, or custom instructions | Sends the review | Clears the text and the pending target. The list stays open |
 | inputAnswer | `answer: ` | The Other text or a free-text answer | Keeps the text and moves on | Returns to the option rows, or dismisses a free-text question |
 | inputAPIKey | `API key: ` | The key, shown as one `*` for each rune | Sends `account/login/start` | Clears the key and returns to the method rows |
 
@@ -155,7 +155,7 @@ The API key field MUST show one `*` for each rune. The key MUST NOT appear in a 
 Enter on the API key field MUST send `account/login/start` with `type` `apiKey`. The panel MUST close when the provider accepts the key.
 A refused key MUST keep the field open with the error in the panel. Esc on the field MUST clear it and return to the methods.
 A browser or device sign-in MUST show the link, and a device sign-in MUST show the user code. It MUST wait for `account/login/completed`.
-Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
+Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in…`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
 A paste into the API key field MUST keep its first line and MUST NOT make a chip.
 
 ## Print
@@ -306,7 +306,7 @@ A server request whose parameters do not decode MUST receive an error answer. Th
 
 ## Notifications
 
-The TUI applies these notifications: `thread/started`, `thread/status/changed`, `thread/tokenUsage/updated`, `thread/name/updated` (`threadName`), `thread/reverted`, `turn/started`, `turn/completed`, and `turn/plan/updated`. It also applies `item/started`, `item/completed`, the three delta notifications, `item/fileChange/patchUpdated`, `serverRequest/resolved`, `error`, `dalgona/thread/childSpawned`, and `dalgona/advisor/note`. The TUI also applies `dalgona/tool/judged`, `dalgona/turn/judged`, and `account/login/completed`. `account/login/completed` shows `Signed in to <provider>. Run /model to choose a model` on success, and `Login failed: <error>; run /login again` on failure. It ignores unknown methods. The TUI MUST ignore a `thread/status/changed` whose `seq` is lower than the last seen `seq`. `turn/started` clears the notice line.
+The TUI applies these notifications: `thread/started`, `thread/status/changed`, `thread/tokenUsage/updated`, `thread/name/updated` (`threadName`), `thread/reverted`, `turn/started`, `turn/completed`, `turn/plan/updated`, and `dalgona/retry/wait`. It also applies `item/started`, `item/completed`, the three delta notifications, `item/fileChange/patchUpdated`, `serverRequest/resolved`, `error`, `dalgona/thread/childSpawned`, and `dalgona/advisor/note`. The TUI also applies `dalgona/tool/judged`, `dalgona/turn/judged`, and `account/login/completed`. `account/login/completed` shows `Signed in to <provider>. Run /model to choose a model` on success, and `Login failed: <error>; run /login again` on failure. It ignores unknown methods. The TUI MUST ignore a `thread/status/changed` whose `seq` is lower than the last seen `seq`. `turn/started` clears the notice line.
 
 A `/login` response without a URL or a code MUST NOT change the notice line. Its outcome arrives in `account/login/completed`.
 A failed login without error text MUST show `Login failed: unknown error; run /login again`.
@@ -333,7 +333,7 @@ Decoding works as follows:
 - Other notifications and responses decode through the `internal/rpc` types with `encoding/json/v2`.
 - Unknown fields MUST be ignored.
 
-Settled status labels show `inProgress` as `running`. Other statuses show as sent.
+Settled status labels show `inProgress` as `Working`. Other statuses show as sent.
 
 The TUI also applies `dalgona/tool/judged` and `dalgona/turn/judged`. A judged notification MUST print at most one row. Its key MUST be `review:<threadId>:<itemId>` for a tool verdict, and `review:<threadId>:<turnId>` for a turn verdict. The row MUST read `review`, two spaces, the summary, two spaces, and the paths joined with `, `. A `flagged` row MUST use the warning text role. An `error` row MUST use bold failed text. An `uncertain` row MUST use dim text, and it MUST print only at verbosity `high`. A `clean` verdict MUST print no row. These notifications are live only, so `thread/read` history MUST NOT show a review row.
 
@@ -435,7 +435,8 @@ At `high`, the client MUST write every block of an item in full, except for a fa
 At `medium`, the client MUST print each item as its own row.
 At `medium`, the client MUST write reasoning as one line, `Thinking · N lines · ctrl+o`.
 At `medium`, the client MUST keep the last 10 lines of command output, after a line `… N earlier lines`.
-At `medium` and `low`, the client MUST keep 60 lines of each file diff, then a line `… N more lines · ctrl+o`.
+At `medium`, the client MUST keep 60 lines of each file diff, then a line `… N more lines · ctrl+o`.
+At `low`, a successful file change MUST print no diff. It counts only in the open group line.
 At `low`, the client MUST write reasoning as one line, as at `medium`.
 At `low`, the client MUST hold each successful tool item of a turn in an open group, except failed items.
 At `low`, the client MUST write the open group as one line.

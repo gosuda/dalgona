@@ -73,7 +73,7 @@ In both modes, the store MUST keep the mirror rows of a thread when they hold ex
 
 A compaction marker MUST keep each tool result with the assistant message that issued it. The scope of a call id or a run id is the part before "/". A cut MUST be safe only when no scope occurs on both sides of the cut. A cut MUST start at a user message or an assistant message.
 
-The agent MUST NOT append a compaction whose `tokens_after` is not smaller than `tokens_before`. An automatic compaction that does not shrink MUST leave the turn running without a marker. After an automatic compaction that does not shrink, the agent MUST NOT run another automatic compaction until a compaction marker is appended. A manual or overflow compaction MUST fail with `compaction: the summary is not smaller than the context it replaces`.
+The agent MUST NOT append a compaction whose `tokens_after` is not smaller than `tokens_before`. An automatic compaction that does not shrink MUST leave the turn running without a marker. After an automatic compaction that does not shrink, the agent MUST NOT run another automatic compaction until a compaction marker is appended. A manual or overflow compaction MUST fail with `compaction: the summary is not smaller than the context it replaces (<before> tokens before, <after> after)`.
 
 ## Blobs
 

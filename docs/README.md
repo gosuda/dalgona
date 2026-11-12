@@ -16,7 +16,7 @@ Use one name for each thing in user-facing text and new specifications.
 - Interrupt: the user stops the running turn, which ends with status `interrupted`. `cancel` is only an approval decision.
 - Mode: the per-thread approval mode and sandbox mode, and the tool mode set in configuration. Name the remote shapes thread boxes and the daemon in a box.
 - Generation: one built search index of a workspace, in a directory named for its build start. `CURRENT` names the published generation.
-- Manifest: the file in a generation that lists each indexed path with its size and times.
+- Manifest: the file in a generation that lists each eligible file with its size, its times, and whether the index holds it.
 - Trigram: a three-byte sequence that the search index uses to name candidate files.
 
 ## Specifications
