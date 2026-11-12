@@ -434,6 +434,26 @@ type AttemptResult struct {
 	Err        error
 }
 
+type retryWatchKey struct{}
+
+type RetryWatch struct {
+	Attended func() bool
+	Tick     func(remaining time.Duration)
+}
+
+func WithRetryWatch(ctx context.Context, watch RetryWatch) context.Context {
+	return context.WithValue(ctx, retryWatchKey{}, watch)
+}
+
+func retryWatchFrom(ctx context.Context) RetryWatch {
+	watch, _ := ctx.Value(retryWatchKey{}).(RetryWatch)
+	return watch
+}
+
+func (w RetryWatch) attended() bool {
+	return w.Attended != nil && w.Attended()
+}
+
 func DefaultRetryOptions() RetryOptions {
 	return RetryOptions{StartTimeout: time.Minute, IdleTimeout: 5 * time.Minute, Sleep: sleepContext, Random: rand.Float64}
 }
@@ -450,6 +470,10 @@ func RunRetries(ctx context.Context, options RetryOptions, attempt func(context.
 		}
 		verdict := classifyAttempt(result)
 		if !retryableAttempt(result, verdict, index) {
+			return result
+		}
+		if err := waitError(ctx, result.RetryAfter); err != nil {
+			result.Err = err
 			return result
 		}
 		delay := RetryDelay(index, result.RetryAfter, options.Random)
@@ -518,7 +542,25 @@ func retrySleep(ctx context.Context, sleep func(context.Context, time.Duration) 
 	if sleep == nil {
 		sleep = sleepContext
 	}
-	return sleep(ctx, delay)
+	watch := retryWatchFrom(ctx)
+	ticking := watch.Tick != nil && delay > maxUnattendedRetryAfter
+	if ticking {
+		defer watch.Tick(0)
+	}
+	for remaining := delay; remaining > 0; {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if ticking {
+			watch.Tick(remaining)
+		}
+		step := min(remaining, time.Second)
+		if err := sleep(ctx, step); err != nil {
+			return err
+		}
+		remaining -= step
+	}
+	return nil
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {
@@ -532,11 +574,14 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-const maxRetryAfter = 5 * time.Minute
+const (
+	maxRetryAfter           = 5 * time.Minute
+	maxUnattendedRetryAfter = time.Minute
+)
 
 func RetryDelay(attempt int, retryAfter time.Duration, random func() float64) time.Duration {
 	if retryAfter > 0 {
-		return min(retryAfter, maxRetryAfter)
+		return retryAfter
 	}
 	base := time.Second << min(attempt, 2)
 	if random == nil {
@@ -544,6 +589,18 @@ func RetryDelay(attempt int, retryAfter time.Duration, random func() float64) ti
 	}
 	factor := 0.8 + random()*0.4
 	return time.Duration(float64(base) * factor)
+}
+
+func waitError(ctx context.Context, wait time.Duration) error {
+	limit := maxUnattendedRetryAfter
+	if wait > limit && retryWatchFrom(ctx).attended() {
+		limit = maxRetryAfter
+	}
+	if wait <= limit {
+		return nil
+	}
+	seconds := int64((wait + time.Second - 1) / time.Second)
+	return errors.New("rate limited for " + strconv.FormatInt(seconds, 10) + " s, over the " + strconv.FormatInt(int64(limit/time.Second), 10) + " s wait limit")
 }
 
 func RetryAfter(header string) time.Duration {

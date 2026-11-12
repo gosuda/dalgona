@@ -172,6 +172,30 @@ func TestRetryInBandRateLimit(t *testing.T) {
 	}
 }
 
+func TestRetryAfterOverLimitStopsTheRequest(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(server.Close)
+	var retries int
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry(func(int, model.Verdict, int, time.Duration) { retries++ })})
+	stream, err := provider.Stream(t.Context(), model.Request{Model: "gpt-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure, ok := lastEvent(t, stream).(model.Error)
+	if !ok {
+		t.Fatal("last event is not model.Error")
+	}
+	if failure.Message != "rate limited for 120 s, over the 60 s wait limit" || failure.Status != http.StatusTooManyRequests || retries != 0 || requests.Load() != 1 {
+		t.Fatalf("message = %q, status = %d, retries = %d, requests = %d", failure.Message, failure.Status, retries, requests.Load())
+	}
+}
+
 func TestBadRequestDoesNotRetry(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
