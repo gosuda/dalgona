@@ -135,6 +135,13 @@ func TestToolModeLists(t *testing.T) {
 	}
 }
 
+func TestEvalFirstListsRatchet(t *testing.T) {
+	all := specs("read", "exec", "ratchet", "eval")
+	if got, want := names(script.ModelTools(config.ToolModeEvalFirst, all)), []string{"read", "exec", "ratchet", "eval"}; !slices.Equal(got, want) {
+		t.Fatalf("eval-first visible = %v, want %v", got, want)
+	}
+}
+
 func TestCheckDirectRejectsFoldedTools(t *testing.T) {
 	err := script.CheckDirect(config.ToolModeEvalFirst, "web_fetch")
 	if err == nil || err.Error() != "tool web_fetch is not available in tool_mode eval-first; call it from eval" {

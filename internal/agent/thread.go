@@ -355,6 +355,8 @@ func snapshotMetaWithDigest(item event.Snapshot, digest string) []byte {
 
 func (t *Thread) ID() string { return t.id }
 
+func (t *Thread) TopLevel() bool { return t.created.Parent == "" && t.created.Advisor == "" }
+
 func (a *actor) loop() {
 	defer close(a.t.stopped)
 	for {

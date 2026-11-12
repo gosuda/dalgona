@@ -11,7 +11,9 @@ import (
 
 const EvalName = "eval"
 
-var evalFirstNames = []string{"read", "search", "patch", "apply_patch", "exec", asktool.Name, EvalName}
+const ratchetName = "ratchet"
+
+var evalFirstNames = []string{"read", "search", "patch", "apply_patch", "exec", asktool.Name, ratchetName, EvalName}
 
 func visibleNames(mode config.ToolMode) []string {
 	switch mode {

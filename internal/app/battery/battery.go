@@ -71,7 +71,10 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 		Plugins: plugins, Judge: base.Judge, Mode: base.Config.ToolMode, Eval: base.Config.Eval, Logger: logger,
 	}
 	return app.Batteries{
-		Tools: projects.tools, Skills: projects.skills, Runner: d.binder.Runner,
+		Tools: func(ctx context.Context, cwd string) []tool.Tool {
+			return append(projects.tools(ctx, cwd), ratchetTools(ctx)...)
+		},
+		Skills: projects.skills, Runner: d.binder.Runner,
 		Extension: scripthost.New(d.Scripts),
 		Attach:    func(h *agent.Host) { d.binder.SetRecorder(h) }, Close: projects.close,
 		MCPStatus: projects.status,
