@@ -20,7 +20,6 @@ import (
 	"github.com/gosuda/dalgona/internal/model/google"
 )
 
-// source: .references/oh-my-pi/packages/catalog/src/wire/gemini-headers.ts
 const (
 	DefaultBaseURL = "https://daily-cloudcode-pa.googleapis.com"
 	clientVersion  = "2.26.0"
@@ -175,7 +174,6 @@ func encodeEnvelope(req model.Request, project string) ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-// source: .references/oh-my-pi/packages/ai/src/providers/google-gemini-cli.ts buildAntigravityRequestEnvelope
 func newRequestID(messages int) (string, error) {
 	var ids [32]byte
 	if _, err := rand.Read(ids[:]); err != nil {
