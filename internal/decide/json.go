@@ -37,10 +37,8 @@ func writeAsk(encoder *jsontext.Encoder, modelID string, state jsontext.Value, q
 	if err := encoder.WriteToken(jsontext.BeginObject); err != nil {
 		return err
 	}
-	if modelID != "" {
-		if err := writeNameToken(encoder, "model", jsontext.String(modelID)); err != nil {
-			return err
-		}
+	if err := writeNameToken(encoder, "model", jsontext.String(modelID)); err != nil {
+		return err
 	}
 	if err := writeNameValue(encoder, "state", state); err != nil {
 		return err

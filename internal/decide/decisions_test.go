@@ -43,6 +43,30 @@ func TestDecisionsAskDecodesTypedAnswers(t *testing.T) {
 	checkDecisionsAnswers(t, answers)
 }
 
+func TestDecisionsAskRejectsEmptyModel(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	server := newDecisionsServer(t, "/decisions", func(_ http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+	})
+	client := decide.NewDecisions(decide.DecisionsConfig{
+		BaseURL: server.URL + "/decisions",
+		Model:   "",
+		Token: func(context.Context) (string, error) {
+			return "t", nil
+		},
+	})
+	_, err := client.Ask(t.Context(), jsontext.Value(`"x"`), map[string]decide.Question{
+		"is_bug": {Type: decide.TypeNoul},
+	})
+	if err == nil || err.Error() != "decisions: model identifier is required" {
+		t.Fatalf("error = %v, want decisions: model identifier is required", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("requests sent = %d, want 0", got)
+	}
+}
+
 func TestDecisionsAskRejectsInvalidResponses(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

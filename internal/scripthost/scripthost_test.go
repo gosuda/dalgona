@@ -26,6 +26,8 @@ import (
 	"github.com/gosuda/dalgona/internal/scripthost"
 )
 
+const productDefaultDecisionsModel = "typesafe/jev-1.14"
+
 type judgeServer struct {
 	server   *httptest.Server
 	requests atomic.Int32
@@ -55,6 +57,9 @@ func newJudgeServer(t *testing.T, hold <-chan struct{}) *judgeServer {
 }
 
 func (s *judgeServer) client(_ context.Context, modelName, _ string) (decide.Client, error) {
+	if modelName == "" {
+		modelName = productDefaultDecisionsModel
+	}
 	return decide.NewDecisions(decide.DecisionsConfig{
 		BaseURL: s.server.URL, Model: modelName, HTTPClient: s.server.Client(),
 		Token: func(context.Context) (string, error) { return "token", nil },
