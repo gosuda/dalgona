@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -625,33 +627,62 @@ func tomlKeyLine(raw []byte, node *unstable.Node) int {
 	return 1 + bytes.Count(raw[:offset], []byte{'\n'})
 }
 
+var ErrSettingsChanged = errors.New("settings.toml changed")
+
 func WriteSettings(home string, edits ...SettingEdit) error {
+	_, err := WriteSettingsIf(home, "", edits...)
+	return err
+}
+
+func WriteSettingsIf(home, expectedVersion string, edits ...SettingEdit) (string, error) {
 	unlock, err := auth.LockHome(home)
 	if err != nil {
-		return fmt.Errorf("lock settings write: %w", err)
+		return "", fmt.Errorf("lock settings write: %w", err)
 	}
 	defer func() { _ = unlock() }()
 	path := filepath.Join(home, "settings.toml")
 	raw, err := readSettingsFile(path)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if expectedVersion != "" && digestSettings(raw) != expectedVersion {
+		return "", fmt.Errorf("%w; expected version %s", ErrSettingsChanged, expectedVersion)
 	}
 	original, doc, err := decodeSettingsDocument(path, raw)
 	if err != nil {
-		return err
+		return "", err
 	}
+	if err := applySettingEdits(doc, edits); err != nil {
+		return "", err
+	}
+	return persistSettingsDocument(home, path, doc, original)
+}
+
+func applySettingEdits(doc map[string]any, edits []SettingEdit) error {
 	for _, edit := range edits {
-		parts, splitErr := splitSettingKey(edit.Key)
-		if splitErr != nil {
-			return splitErr
+		parts, err := splitSettingKey(edit.Key)
+		if err != nil {
+			return err
 		}
 		setNested(doc, parts, edit.Value)
 	}
+	return nil
+}
+
+func persistSettingsDocument(home, path string, doc map[string]any, original *fileDoc) (string, error) {
 	output, err := encodeSettingsDocument(doc, original)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return persistSettings(home, path, output)
+	if err := persistSettings(home, path, output); err != nil {
+		return "", err
+	}
+	return digestSettings(output), nil
+}
+
+func digestSettings(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func TrustedWorkspaces(home string) ([]string, error) {

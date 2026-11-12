@@ -4,10 +4,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/jsontext"
-	"os"
 	"runtime"
 	"slices"
 	"time"
@@ -98,8 +95,60 @@ func settingKey(keyPath string, value any) (string, any, error) {
 		return mappedSettingKey(keyPath, value)
 	case "model", "approval", "sandbox", "reasoning":
 		return directSettingKey(keyPath, value)
+	case "verbosity", "theme", "icons":
+		return choiceSettingKey(keyPath, value)
+	case "statusHide":
+		return statusHideSettingKey(value)
+	case "editReview":
+		return flagSettingKey("edit_review.enabled", "editReview", value)
+	case "notifications":
+		return flagSettingKey("notifications", "notifications", value)
 	}
 	return "", nil, invalidParams("unsupported keyPath " + keyPath)
+}
+
+func choiceSettingKey(key string, value any) (string, any, error) {
+	text, ok := value.(string)
+	if !ok {
+		return "", nil, invalidParams(key + " must be a string")
+	}
+	if !interactiveOption(key, text) {
+		return "", nil, invalidParams("unsupported " + key + " " + text)
+	}
+	return key, text, nil
+}
+
+func interactiveOption(key, text string) bool {
+	for _, spec := range config.InteractiveSettings {
+		if spec.Key == key {
+			return slices.ContainsFunc(spec.Options, func(option any) bool { return option == any(text) })
+		}
+	}
+	return false
+}
+
+func statusHideSettingKey(value any) (string, any, error) {
+	items, ok := value.([]any)
+	if !ok {
+		return "status_hide", value, nil
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		text, isText := item.(string)
+		if !isText {
+			return "", nil, invalidParams("statusHide must be a list of strings")
+		}
+		ids = append(ids, text)
+	}
+	return "status_hide", ids, nil
+}
+
+func flagSettingKey(key, wire string, value any) (string, any, error) {
+	flag, ok := value.(bool)
+	if !ok {
+		return "", nil, invalidParams(wire + " must be a boolean")
+	}
+	return key, flag, nil
 }
 
 func mappedSettingKey(keyPath string, value any) (string, any, error) {
@@ -160,17 +209,12 @@ func (s *server) configValueWrite(_ context.Context, params jsontext.Value) (jso
 	if err != nil {
 		return nil, err
 	}
-	cfg := s.host.Config()
-	if writeErr := s.host.WriteSettings(config.SettingEdit{Key: key, Value: setting}); writeErr != nil {
-		return nil, invalidParams(writeErr.Error())
-	}
-	path := cfg.SettingsPath()
-	data, err := os.ReadFile(path)
+	version, err := s.writeEdits("", config.SettingEdit{Key: key, Value: setting})
 	if err != nil {
-		return nil, internalError(err)
+		return nil, err
 	}
-	sum := sha256.Sum256(data)
-	return encode(ConfigWriteResponse{FilePath: path, Status: "ok", Version: hex.EncodeToString(sum[:])})
+	cfg := s.host.Config()
+	return encode(ConfigWriteResponse{FilePath: cfg.SettingsPath(), Status: "ok", Version: version})
 }
 
 func (s *server) authStore() *auth.Store { return s.host.Auth() }

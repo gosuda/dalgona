@@ -37,6 +37,7 @@ func init() {
 		"model/list":               (*server).modelList,
 		"config/read":              (*server).configRead,
 		"config/value/write":       (*server).configValueWrite,
+		"config/batchWrite":        (*server).configBatchWrite,
 		"account/read":             (*server).accountRead,
 		"account/login/start":      (*server).loginStart,
 		"account/login/cancel":     (*server).loginCancel,
@@ -49,6 +50,7 @@ func init() {
 		"dalgona/advisor/status":   (*server).advisorStatus,
 		"dalgona/advisor/set":      (*server).advisorSet,
 		"dalgona/advisor/reset":    (*server).advisorReset,
+		"dalgona/settings/read":    (*server).settingsRead,
 		"dalgona/item/output/read": (*server).itemOutputRead,
 	}
 }

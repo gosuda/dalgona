@@ -21,17 +21,23 @@ func (h *Host) Config() config.Config {
 }
 
 func (h *Host) WriteSettings(edits ...config.SettingEdit) error {
+	_, err := h.WriteSettingsIf("", edits...)
+	return err
+}
+
+func (h *Host) WriteSettingsIf(expectedVersion string, edits ...config.SettingEdit) (string, error) {
 	h.settingsMu.Lock()
 	defer h.settingsMu.Unlock()
 	next, err := h.live.With(edits...)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err = config.WriteSettings(h.live.Home, edits...); err != nil {
-		return err
+	version, err := config.WriteSettingsIf(h.live.Home, expectedVersion, edits...)
+	if err != nil {
+		return "", err
 	}
 	h.live = next
-	return nil
+	return version, nil
 }
 
 func (h *Host) Auth() *auth.Store { return h.cfg.Auth }

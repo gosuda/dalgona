@@ -62,6 +62,10 @@ func (l *requestLog) add(body []byte) error {
 }
 
 func recordRequests(t *testing.T, r *rig) *requestLog {
+	return recordRequestsListing(t, r, `{"data":[{"id":"gpt-x"},{"id":"gpt-y"}]}`)
+}
+
+func recordRequestsListing(t *testing.T, r *rig, listing string) *requestLog {
 	t.Helper()
 	log := &requestLog{}
 	f := &fakeLLM{}
@@ -79,7 +83,7 @@ func recordRequests(t *testing.T, r *rig) *requestLog {
 		f.respond(w, req)
 	})
 	mux.HandleFunc("GET /models", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"data":[{"id":"gpt-x"},{"id":"gpt-y"}]}`)
+		_, _ = io.WriteString(w, listing)
 	})
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(f.server.Close)

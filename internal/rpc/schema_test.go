@@ -26,6 +26,7 @@ func TestCodexSchemasCompileAndValidate(t *testing.T) {
 		{"ModelListParams", "v2/ModelListParams.json", ModelListParams{}},
 		{"ConfigReadParams", "v2/ConfigReadParams.json", ConfigReadParams{}},
 		{"ConfigValueWriteParams", "v2/ConfigValueWriteParams.json", ConfigValueWriteParams{KeyPath: "model", MergeStrategy: "replace", Value: "openai/gpt"}},
+		{"ConfigBatchWriteParams", "v2/ConfigBatchWriteParams.json", map[string]any{"edits": []map[string]any{{"keyPath": "verbosity", "mergeStrategy": "replace", "value": "low"}}}},
 		{"SkillsListParams", "v2/SkillsListParams.json", SkillsListParams{}},
 		{"CommandExecutionRequestApprovalParams", "CommandExecutionRequestApprovalParams.json", CommandExecutionRequestApprovalParams{ThreadID: "thread", TurnID: "turn", ItemID: "item", StartedAtMs: 1, Command: "echo hi"}},
 		{"FileChangeRequestApprovalParams", "FileChangeRequestApprovalParams.json", FileChangeRequestApprovalParams{ThreadID: "thread", TurnID: "turn", ItemID: "item", StartedAtMs: 1}},

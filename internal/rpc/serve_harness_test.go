@@ -344,6 +344,7 @@ var responseSchemas = map[string]string{
 	"model/list":           "v2/ModelListResponse.json",
 	"config/read":          "v2/ConfigReadResponse.json",
 	"config/value/write":   "v2/ConfigWriteResponse.json",
+	"config/batchWrite":    "v2/ConfigWriteResponse.json",
 	"account/read":         "v2/GetAccountResponse.json",
 	"account/login/start":  "v2/LoginAccountResponse.json",
 	"account/login/cancel": "v2/CancelLoginAccountResponse.json",
