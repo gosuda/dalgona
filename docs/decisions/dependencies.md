@@ -41,7 +41,7 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |github.com/sandbox0-ai/sdk-go|v0.10.5|2026-10-30|Sandbox0 runner|none|
 |github.com/santhosh-tekuri/jsonschema/v6|v6.0.3|2026-06-28|protocol schema tests only|none|
 |github.com/superfly/sprites-go|v0.2.2|2026-10-20|Sprites runner|none|
-|go.starlark.net|v0.0.0-20261021141710-4f4267fb140d|2026-10-21|scripts|none|
+|go.starlark.net|v0.0.0-20261021141710-4f4267fb140d|2026-10-21|scripts, dal eval|none|
 |golang.org/x/net|v0.62.0|2026-10-27|HTML tokenizing in web fetch|none|
 |golang.org/x/sync|v0.25.0|2026-10-15|errgroup and singleflight|none|
 |golang.org/x/sys|v0.50.0|2026-11-06|OS calls|none|

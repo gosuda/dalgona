@@ -271,14 +271,12 @@ func TestLoad_dalRejectsDalgonaSettings(t *testing.T) {
 		key  string
 		body string
 	}{
-		{key: "tool_mode", body: "tool_mode = \"normal\"\n"},
 		{key: "runner", body: "runner = \"local\"\n"},
 		{key: "remote", body: "remote = \"\"\n"},
 		{key: "runners", body: "[runners]\n"},
 		{key: "remotes", body: "[remotes]\n"},
 		{key: "mcp_servers", body: "[mcp_servers]\n"},
 		{key: "discovery", body: "[discovery]\n"},
-		{key: "eval", body: "[eval]\nuses = []\n"},
 		{key: "herdr", body: "[herdr]\nsubagent_panes = false\n"},
 		{key: "edit_review", body: "[edit_review]\nenabled = false\n"},
 		{key: "web", body: "[web]\nlisten = \"127.0.0.1:7437\"\n"},
@@ -288,6 +286,18 @@ func TestLoad_dalRejectsDalgonaSettings(t *testing.T) {
 			_, err := loadConfig(t, config.ProductDal, test.body, "", config.Flags{})
 			requireConfigError(t, err, "config.toml:1: "+test.key+" is a dalgona setting")
 		})
+	}
+}
+
+func TestLoad_dalAcceptsToolModeAndEval(t *testing.T) {
+	cfg, err := loadConfig(t, config.ProductDal, "tool_mode = \"eval-only\"\n[eval]\nuses = [\"read\"]\n", "", config.Flags{})
+	if err != nil {
+		t.Fatalf("dal rejected tool_mode and [eval]: %v", err)
+	}
+	requireConfigValue(t, cfg.ToolMode, config.ToolModeEvalOnly)
+	requireConfigValue(t, cfg.Eval.Set, true)
+	if len(cfg.Eval.Uses) != 1 || cfg.Eval.Uses[0] != "read" {
+		t.Fatalf("Eval.Uses = %v, want [read]", cfg.Eval.Uses)
 	}
 }
 

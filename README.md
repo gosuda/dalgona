@@ -88,7 +88,7 @@ Use these table names and keys:
 
 | Scope | Keys |
 | --- | --- |
-| Both products, top level | `model`, `reasoning`, `approval`, `sandbox`, `sandbox_writable_roots`, `edit_style`, `compaction_threshold`, `compaction_keep_tokens`, `stream_start_timeout`, `stream_idle_timeout` |
+| Both products, top level | `model`, `reasoning`, `approval`, `tool_mode`, `sandbox`, `sandbox_writable_roots`, `edit_style`, `compaction_threshold`, `compaction_keep_tokens`, `stream_start_timeout`, `stream_idle_timeout` |
 | `[providers.<name>]` | `base_url`, `api_key_env` |
 | `[models.<name>]` | `context_window` |
 | `[approval_decider]` | `decider`, `threshold` |
@@ -97,12 +97,12 @@ Use these table names and keys:
 | `[advisors.<name>]` | `model`, `instructions`, `review`, `interval`, `sync`, `tools`, `subagents`, `enabled` |
 | `[secrets]` | `patterns` |
 | `[keywords.<name>]` | `notice`, `text`, `hue`, `effort`, `requires`, `enabled` |
-| Dalgona only, top level | `tool_mode`, `runner`, `remote` |
+| Dalgona only, top level | `runner`, `remote` |
 | `[runners.<name>]` (dalgona) | `service`, `image`, `template`, `url` |
 | `[remotes.<name>]` (dalgona) | `service`, `image`, `template`, `url`, `box_id` |
 | `[mcp_servers.<name>]` (dalgona) | `command`, `args`, `env`, `url` |
 | `[discovery]` (dalgona) | `sources` |
-| `[eval]` (dalgona) | `uses` |
+| `[eval]` | `uses` |
 | `[herdr]` (dalgona) | `subagent_panes` |
 | `[web]` (dalgona) | `listen`, `token`, `cert_file`, `key_file` |
 

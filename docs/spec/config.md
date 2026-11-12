@@ -4,7 +4,7 @@ The program MUST read `config.toml` and then `settings.toml` from its product ho
 
 `dal` uses `$DAL_HOME` or `~/.dal`. `dalgona` uses `$DALGONA_HOME` or `~/.dalgona`. The loader MUST expose the resolved home. The resolved home MUST be an absolute path. A relative home MUST resolve against the directory the process started in. The two homes MUST remain separate. On Windows the `dal` host start and the dalgona daemon start MUST reset the protected DACL on the product home. The same reset MUST apply to every file and directory inside the home. The same reset MUST NOT change a symlink or an irregular entry.
 
-The loader MUST reject unknown keys. The error MUST report the file and its 1-based line. `dal` MUST reject `tool_mode`, `runner`, `remote`, `runners`, `remotes`, `mcp_servers`, `mcp_trusted_workspaces`, `discovery`, `eval`, `herdr`, `web`, and `edit_review` as dalgona-only settings. Presence MUST trigger this rejection, including an empty table or a false value.
+The loader MUST reject unknown keys. The error MUST report the file and its 1-based line. `dal` MUST reject `runner`, `remote`, `runners`, `remotes`, `mcp_servers`, `mcp_trusted_workspaces`, `discovery`, `herdr`, `web`, and `edit_review` as dalgona-only settings. Presence MUST trigger this rejection, including an empty table or a false value. `tool_mode` and `[eval]` MUST load in both products.
 
 If a layer cannot be read or fails validation, `Load` MUST return an error.
 

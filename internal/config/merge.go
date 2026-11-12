@@ -570,7 +570,7 @@ func keywordNoticeExists(home, notice string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-var dalgonaOnlyKeys = map[string]bool{"tool_mode": true, "runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "eval": true, "herdr": true, "web": true, "edit_review": true}
+var dalgonaOnlyKeys = map[string]bool{"runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "herdr": true, "web": true, "edit_review": true}
 
 func validateProductLayer(product Product, current layer) error {
 	if product != ProductDal {

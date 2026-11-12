@@ -109,7 +109,7 @@ func startHost(ctx context.Context, home string) (localHost, error) {
 		return localHost{}, err
 	}
 	advisors := advisor.NewRegistry()
-	host, closeHost, err := app.NewHost(ctx, app.Options{Product: config.ProductDal, Cwd: cwd, Logger: logger, Advisors: advisors})
+	host, closeHost, err := app.NewHost(ctx, app.Options{Product: config.ProductDal, Cwd: cwd, Logger: logger, Advisors: advisors, Batteries: evalBatteries})
 	if err != nil {
 		return localHost{}, errors.Join(err, closeLog())
 	}

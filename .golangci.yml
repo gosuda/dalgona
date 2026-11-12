@@ -171,8 +171,8 @@ linters:
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/daemon"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/script"
-              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/script$"
+              desc: dal imports the script engine only through internal/scripthost
             - pkg: "github.com/gosuda/dalgona/internal/sandboxsvc"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/mcp"
@@ -186,6 +186,8 @@ linters:
             - pkg: "github.com/gosuda/dalgona/internal/herdr"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/codexapp"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/app/battery"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/ratchet"
               desc: dal must stay free of dalgona batteries
