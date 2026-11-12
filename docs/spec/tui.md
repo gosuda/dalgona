@@ -12,23 +12,17 @@ The TUI is a protocol client. It MUST import only `internal/rpc` from this modul
 - `OnChildSpawned func(childID, cwd string)`: called once for each `dalgona/thread/childSpawned {threadId, childId, cwd}` whose `threadId` is the TUI's thread.
 - `Input` and `Output` are terminal streams. Empty fields use the process terminal.
 - `ThreadID`: when set, startup calls `thread/resume` and then `thread/read` with `includeTurns: true`. When empty, startup calls `thread/start`.
-- `Model`, `Approval`, `Sandbox`: option values for `thread/start` and for the status row. An empty model omits `model` from `thread/start` and shows as `default`. A model chosen with `/model` replaces it for later `thread/start` calls. The approval and sandbox defaults are `auto` and `workspace-write`. Approval `yolo` MUST force sandbox `off`. `thread/start` maps approval `yolo` to `never`, `ask` to `untrusted`, and other values to `on-request`. It maps sandbox `off` to `danger-full-access` and other values to `workspace-write`.
+- `Model`, `Approval`, `Sandbox`: option values for `thread/start` and for the status band. An empty model omits `model` from `thread/start` and shows as `default`. A model chosen with `/model` replaces it for later `thread/start` calls. The approval and sandbox defaults are `auto` and `workspace-write`. Approval `yolo` MUST force sandbox `off`. `thread/start` maps approval `yolo` to `never`, `ask` to `untrusted`, and other values to `on-request`. It maps sandbox `off` to `danger-full-access` and other values to `workspace-write`.
 - `Cwd`: the client working directory. Every `thread/start` MUST send it as `cwd`.
 - `Width`, `Height`: the terminal size when the output is not a terminal. Both MUST be positive to apply.
 
-Startup runs these steps in order: `initialize` with client name `dalgona`, the `initialized` notification, `dalgona/keywords/list` (once per connection), then the thread open call. `Run` returns nil when the user quits or `ctx` ends. On return, `Run` MUST close the RPC connection.
+Startup runs these requests in order: `initialize` with client name `dalgona`, the `initialized` notification, `dalgona/settings/read`, `dalgona/keywords/list` (once per connection), `model/list`, then the thread open call. When `icons` is `auto` under kitty, the client also sends the terminal query named in Icons. `Run` returns nil when the user quits or `ctx` ends. On return, `Run` MUST close the RPC connection.
 
 ## Screen
 
 The TUI MUST run inline. It MUST NOT use the alternate screen. A completed item MUST print once to scrollback with `tea.Println`. Completed assistant text MUST render as Markdown through Glamour.
 
-The dock holds, from the top, the composer, an open panel, the live row, and the status row. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the notice, else the newest live text.
-
-```
-<model> · <approval> · <sandbox> · <thread title>
-```
-
-Sandbox `off` MUST show as `no sandbox`. The status row MUST show the sandbox that the server reports in `thread/start`. When the harness sandbox is unavailable, the server reports `dangerFullAccess`. The TUI then shows `no sandbox`, even if the local option is `workspace-write`. A non-empty follow-up queue appends ` · <n> follow-up queued`.
+The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the notice, else the newest live text.
 
 The composer shows `› `, the typed text, and the cursor `▏`. When the composer is empty, the cursor comes first and the placeholder follows it in faint text. The placeholder never shows a keyword mark.
 
@@ -44,9 +38,47 @@ The TUI follows one thread. The first thread it sees, from a response or a notif
 
 When a read from `conn` fails, the TUI MUST enter `disconnected` and show `connection lost: <cause>; restart the TUI, then /resume <thread>`. A later notification MUST NOT leave `disconnected`.
 
+## Status band
+
+The status band is one row of fixed fields at the bottom of the dock.
+
+The band MUST show these items in this order: `model`, `effort`, `approval`, `sandbox`, `folder`, `queue`, `context`, and `mark`. The left group holds `model` through `queue`. The right group holds `context` and `mark`.
+
+- `model` shows the model name as text. The client MUST NOT hide it.
+- `effort` shows one glyph for the effort rank. It is hidden when the model has fewer than two effort levels.
+- `approval` shows one glyph for `ask`, `auto`, or `yolo`.
+- `sandbox` shows one glyph for `workspace-write` or `off`. When the harness sandbox is unavailable, the server reports `dangerFullAccess`, and the client MUST show the `off` glyph.
+- `folder` shows the folder name, cut to 16 cells with `...`.
+- `queue` shows `+` and the count of queued follow-ups. It is shown only when a follow-up is queued.
+- `context` shows the percent of the context window in use. In `nerd` mode, a moon gauge comes before the percent.
+- `mark` shows the product name.
+
+The setting `status_hide` lists items to hide. Its default is empty. The client MUST NOT hide `model`.
+
+The percent of `context` MUST keep four cells, and the count of `queue` MUST keep three cells. A changed value MUST NOT move any other item.
+
+When the row is too narrow, the client MUST drop whole items in this order: `folder`, `queue`, `effort`, and `mark`. It MUST NOT drop `model`, `context`, `approval`, or `sandbox`. When those still do not fit, it MUST cut the `model` text with `...`.
+
+## Icons
+
+The setting `icons` MUST be `auto`, `unicode`, or `nerd`. Its default is `auto`.
+
+`auto` MUST start as `unicode`. When `KITTY_WINDOW_ID` is set and `icons` is loaded as `auto`, the client MUST send the capability request `kitty-query-font_family` once. A reply that does not name `kitty-query-font_family` MUST NOT change the glyphs. While `icons` is `auto`, a reply that names a Nerd Font MUST switch the client to `nerd`. A Nerd Font name matches `(?i)nerd ?font` or `NF[MP]?(-|$)`.
+
+| Item | Glyphs |
+|---|---|
+| effort | `⣀`, `⣤`, `⣶`, `⣿` by rank, at index `round(rank × 3 / (levels − 1))` |
+| approval | `?` for `ask`, `✓` for `auto`, `!` for `yolo` |
+| sandbox | `⊡` for `workspace-write`, `⊘` for `off` |
+| folder | `▸` |
+| queue | `+`, then the count |
+| context | the percent alone. In `nerd` mode, a moon gauge at index `round(fraction × 14)` from `U+E38D` to `U+E39B`, then the percent |
+
+Each Unicode glyph MUST have East Asian Width `N`, `Na`, or `H`. A Nerd Font glyph counts one cell, and one space follows it.
+
 ## Layout
 
-The dock MUST be the last rows of the screen. From the top, it holds the composer, an open panel, the live row, and the status row.
+The dock MUST be the last rows of the screen. From the top, it holds the composer, an open panel, the live row, and the status band.
 
 The dock MUST keep its height. Only a key press, a paste, the opening or closing of a panel, or a window resize MAY change it. A failed send or steer that puts its text back in the composer MAY also change it.
 
@@ -54,7 +86,7 @@ The dock MUST have at most the window height minus one rows. The client MUST sho
 
 The composer MUST show at most six rows, or one row while a panel is open. A panel MUST have a fixed height for its kind, capped at the window height minus four rows.
 
-When the dock is too tall, the client MUST drop the status row first, then the live row. The input line MUST NOT drop.
+When the dock is too tall, the client MUST drop the status band first, then the live row. The input line MUST NOT drop.
 
 Every dock row MUST be at most the window width minus one cell.
 
@@ -127,7 +159,7 @@ A server request whose parameters do not decode MUST receive an error answer. Th
 
 ## Notifications
 
-The TUI applies these notifications: `thread/started`, `thread/status/changed`, `thread/name/updated` (`threadName`), `thread/reverted`, `turn/started`, `turn/completed`, `turn/plan/updated`, `item/started`, `item/completed`, the three delta notifications, `error`, `dalgona/thread/childSpawned`, `dalgona/advisor/note`, and `account/login/completed`. `account/login/completed` shows `Signed in to <provider>. Run /model to choose a model` on success, and `Login failed: <error>; run /login again` on failure. It ignores `thread/tokenUsage/updated`, `serverRequest/resolved`, and unknown methods. The TUI MUST ignore a `thread/status/changed` whose `seq` is lower than the last seen `seq`. `turn/started` clears the notice line.
+The TUI applies these notifications: `thread/started`, `thread/status/changed`, `thread/tokenUsage/updated`, `thread/name/updated` (`threadName`), `thread/reverted`, `turn/started`, `turn/completed`, `turn/plan/updated`, `item/started`, `item/completed`, the three delta notifications, `error`, `dalgona/thread/childSpawned`, `dalgona/advisor/note`, and `account/login/completed`. `account/login/completed` shows `Signed in to <provider>. Run /model to choose a model` on success, and `Login failed: <error>; run /login again` on failure. It ignores `serverRequest/resolved` and unknown methods. The TUI MUST ignore a `thread/status/changed` whose `seq` is lower than the last seen `seq`. `turn/started` clears the notice line.
 
 A `/login` response without a URL or a code MUST NOT change the notice line. Its outcome arrives in `account/login/completed`.
 A failed login without error text MUST show `Login failed: unknown error; run /login again`.

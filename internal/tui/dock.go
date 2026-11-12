@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"cmp"
-	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,7 +47,7 @@ func (m *model) dockLines() []string {
 		lines = append(lines, m.liveRow())
 	}
 	if showBand {
-		lines = append(lines, m.statusRow())
+		lines = append(lines, m.bandRow())
 	}
 	return lines
 }
@@ -289,18 +287,6 @@ func activityLabel(item rpc.Item) string {
 		return item.Tool
 	}
 	return ""
-}
-
-func (m *model) statusRow() string {
-	sandbox := m.thread.sandbox
-	if sandbox == "off" || sandbox == "" {
-		sandbox = "no sandbox"
-	}
-	status := fmt.Sprintf("%s · %s · %s · %s", cmp.Or(m.thread.modelName, "default"), m.thread.approvalMode, sandbox, m.thread.title)
-	if len(m.queue) > 0 {
-		status += fmt.Sprintf(" · %d follow-up queued", len(m.queue))
-	}
-	return m.screen.fit(status, terminalWidth(m.screen.width))
 }
 
 func (m *model) panelLines() []string {

@@ -66,10 +66,13 @@ type model struct {
 }
 
 type connInfo struct {
-	client caller
-	opts   Options
-	done   <-chan struct{}
-	clock  func() time.Time
+	client         caller
+	opts           Options
+	done           <-chan struct{}
+	clock          func() time.Time
+	product        string
+	version        string
+	platformFamily string
 }
 
 type threadInfo struct {
@@ -84,6 +87,9 @@ type threadInfo struct {
 	sandbox        string
 	turnStartedAt  time.Time
 	lastTurn       time.Duration
+	effort         string
+	usage          rpc.ThreadTokenUsage
+	levels         map[string][]string
 }
 
 type liveState struct {
@@ -114,6 +120,11 @@ type screenState struct {
 	motion       bool
 	spin         spinner.Model
 	ticking      bool
+	iconsSetting string
+	statusHide   []string
+	kittyAsked   bool
+	kittyWindow  bool
+	kittyNerd    bool
 }
 
 type outState struct {

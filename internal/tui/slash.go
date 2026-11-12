@@ -102,7 +102,7 @@ func (m *model) resumeThread(id string) tea.Cmd {
 		}
 		var read rpc.ThreadReadResponse
 		err := m.conn.client.Call(ctx, "thread/read", rpc.ThreadReadParams{ThreadID: id, IncludeTurns: true}, &read)
-		return resultMsg{op: "resumed", value: &read, err: err}
+		return resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: read, effort: resumed.ReasoningEffort}, err: err}
 	}
 }
 

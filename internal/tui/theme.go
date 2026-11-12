@@ -202,18 +202,20 @@ func (m *model) applyColorProfile(msg tea.ColorProfileMsg) {
 	}
 }
 
-func (m *model) updateColour(msg tea.Msg) bool {
+func (m *model) updateColour(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.EnvMsg:
-		m.applyEnv(msg)
+		return m.applyEnvMsg(msg), true
+	case tea.CapabilityMsg:
+		m.applyCapability(msg)
 	case tea.ColorProfileMsg:
 		m.applyColorProfile(msg)
 	case tea.BackgroundColorMsg:
 		m.applyBackground(msg)
 	default:
-		return false
+		return nil, false
 	}
-	return true
+	return nil, true
 }
 
 func (m *model) applyBackground(msg tea.BackgroundColorMsg) {

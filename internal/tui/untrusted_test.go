@@ -37,7 +37,6 @@ func TestUntrustedTextIsSanitizedAtEveryEntry(t *testing.T) {
 		{"commandExecution output delta", notificationMsg{method: "item/commandExecution/outputDelta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"c1","delta":"x\u001b]0;pwn\u0007y\u202e"}`)}},
 		{"item/started command", notificationMsg{method: "item/started", params: []byte(`{"threadId":"t1","turnId":"turn-1","item":{"type":"commandExecution","id":"c1","command":"x\u001b]0;pwn\u0007y\u202e"}}`)}},
 		{"error message", notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":"x\u001b]0;pwn\u0007y\u202e"}}`)}},
-		{"thread name", notificationMsg{method: "thread/name/updated", params: []byte(`{"threadId":"t1","threadName":"x\u001b]0;pwn\u0007y\u202e"}`)}},
 		{"plan step", notificationMsg{method: "turn/plan/updated", params: []byte(`{"threadId":"t1","turnId":"turn-1","plan":[{"step":"x\u001b]0;pwn\u0007y\u202e","status":"inProgress"}]}`)}},
 		{"advisor note", notificationMsg{method: "dalgona/advisor/note", params: []byte(`{"threadId":"t1","advisor":"x\u001b]0;pwn\u0007y\u202e","severity":"info","note":"x\u001b]0;pwn\u0007y\u202e"}`)}},
 		{"model display name", resultMsg{op: "models", value: &rpc.ModelListResponse{Data: []rpc.Model{{ID: "m1", DisplayName: hostile}}}}},
@@ -59,6 +58,16 @@ func TestUntrustedTextIsSanitizedAtEveryEntry(t *testing.T) {
 				t.Errorf("view kept untrusted control text:\n%q", shown)
 			}
 		})
+	}
+}
+
+func TestUntrustedThreadNameIsSanitizedInState(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{}, nil)
+	m.thread.id = "t1"
+	m, _ = drive(t, m, notificationMsg{method: "thread/name/updated", params: []byte(`{"threadId":"t1","threadName":"x\u001b]0;pwn\u0007y\u202e"}`)})
+	if m.thread.title != "xy" {
+		t.Fatalf("thread title = %q, want the visible text xy", m.thread.title)
 	}
 }
 

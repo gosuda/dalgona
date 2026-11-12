@@ -158,7 +158,7 @@ func TestModelRendersSchemaExactResponses(t *testing.T) {
 	}
 	m := newModel(nil, Options{}, nil)
 	m.screen.width = 120
-	m, command := drive(t, m, resultMsg{op: "resumed", value: &read})
+	m, command := drive(t, m, resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: read}})
 	if command == nil || m.thread.id != "t1" || m.thread.title != "demo" || m.thread.state != stateIdle {
 		t.Fatalf("resumed: command %v id %q title %q state %q", command, m.thread.id, m.thread.title, m.thread.state)
 	}

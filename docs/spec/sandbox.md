@@ -47,7 +47,7 @@ The agent MUST add the daemon socket to the denied list for each `workspace-writ
 
 ## No harness sandbox
 
-Windows MUST always run without a harness sandbox. Linux MUST do the same when `Available()` is false. The decider state MUST carry `sandboxed=false`. The status row MUST show `no sandbox` in place of the sandbox setting. The runner MUST NOT raise an error for this fallback. It MUST NOT report a process with no harness sandbox as confined.
+Windows MUST always run without a harness sandbox. Linux MUST do the same when `Available()` is false. The decider state MUST carry `sandboxed=false`. The status band MUST show the `off` sandbox glyph in place of the sandbox setting. The runner MUST NOT raise an error for this fallback. It MUST NOT report a process with no harness sandbox as confined.
 
 ## Remote
 

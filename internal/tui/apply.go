@@ -25,7 +25,7 @@ func (m *model) applyNotification(msg notificationMsg) tea.Cmd {
 
 func (m *model) applyDecodedNotification(msg notificationMsg) (tea.Cmd, error) {
 	switch msg.method {
-	case "thread/started", "thread/status/changed", "thread/name/updated", "thread/reverted":
+	case "thread/started", "thread/status/changed", "thread/name/updated", "thread/reverted", "thread/tokenUsage/updated":
 		return nil, m.applyThreadNotification(msg)
 	case "turn/started", "turn/completed", "turn/plan/updated", "dalgona/retry/wait":
 		return m.applyTurnNotification(msg)
@@ -50,6 +50,8 @@ func (m *model) applyThreadNotification(msg notificationMsg) error {
 		return m.applyThreadStarted(msg.params)
 	case "thread/status/changed":
 		return m.applyThreadStatus(msg.params)
+	case "thread/tokenUsage/updated":
+		return m.applyTokenUsage(msg.params)
 	case "thread/name/updated":
 		return m.applyThreadName(msg.params)
 	default:
@@ -358,6 +360,20 @@ func (m *model) setThread(id string) {
 	m.thread.turnStartedAt = time.Time{}
 	m.live.plan = nil
 	m.live.retryUntil = time.Time{}
+	m.thread.effort = ""
+	m.thread.usage = rpc.ThreadTokenUsage{}
+}
+
+func (m *model) applyTokenUsage(params jsontext.Value) error {
+	var event rpc.ThreadTokenUsageUpdatedNotification
+	if err := decodeParams(params, &event); err != nil {
+		return err
+	}
+	if !m.acceptThread(event.ThreadID) {
+		return nil
+	}
+	m.thread.usage = event.TokenUsage
+	return nil
 }
 
 func (m *model) noticeMoved(title string) {

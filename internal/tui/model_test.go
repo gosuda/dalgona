@@ -100,7 +100,7 @@ func TestModelStreamsItemsAndShowsStates(t *testing.T) {
 	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"hel"}`)})
 	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"lo"}`)})
 	view := m.View().Content
-	for _, want := range []string{"hello", "Working", "default · auto · workspace-write · demo"} {
+	for _, want := range []string{"hello", "Working", "default ✓ ⊡"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("streaming view missing %q:\n%s", want, view)
 		}
@@ -116,7 +116,7 @@ func TestModelStreamsItemsAndShowsStates(t *testing.T) {
 	m.thread.sandbox = "off"
 	m, _ = drive(t, m, notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":"provider unavailable"}}`)})
 	view = strings.Join(strings.Fields(m.View().Content), " ")
-	for _, want := range []string{"Failed", "no sandbox"} {
+	for _, want := range []string{"Failed", "⊘"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("failure view missing %q:\n%s", want, view)
 		}
@@ -347,7 +347,7 @@ func TestModelSessionOptionsDriveStatusAndThreadStart(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
 	m := newTestModel(caller, Options{Model: "openai/gpt-test", Approval: "yolo", Sandbox: "workspace-write", Cwd: "/repo/checkout"}, nil)
-	assertContains(t, m.View().Content, "openai/gpt-test · yolo · no sandbox · new thread")
+	assertContains(t, m.View().Content, "openai/gpt-test ! ⊘ ▸ checkout")
 	m.startThread()()
 	params, ok := caller.calls[0].params.(rpc.ThreadStartParams)
 	if !ok || params.Model != "openai/gpt-test" || params.ApprovalPolicy != "never" || params.Sandbox != "danger-full-access" || params.Cwd != "/repo/checkout" {

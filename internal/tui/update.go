@@ -9,7 +9,7 @@ import (
 )
 
 func (m model) Init() tea.Cmd {
-	start := tea.Sequence(m.initialize(), m.readSettings(), m.loadKeywords(), m.startThread())
+	start := tea.Sequence(m.initialize(), m.readSettings(), m.loadKeywords(), m.loadLevels(), m.startThread())
 	return tea.Batch(m.input.composer.Focus(), tea.RequestBackgroundColor, start)
 }
 
@@ -27,7 +27,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hintExpiredMsg:
 		m.expireHint(msg)
 	default:
-		if !m.updateTerminal(msg) {
+		var handled bool
+		command, handled = m.updateTerminal(msg)
+		if !handled {
 			command = m.updateComposer(msg)
 		}
 	}
@@ -43,7 +45,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(command, tick, settle, printCommand)
 }
 
-func (m *model) updateTerminal(msg tea.Msg) bool {
+func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.screen.width = msg.Width
@@ -67,7 +69,7 @@ func (m *model) updateTerminal(msg tea.Msg) bool {
 	default:
 		return m.updateColour(msg)
 	}
-	return true
+	return nil, true
 }
 
 func (m *model) updateAsync(msg tea.Msg) tea.Cmd {

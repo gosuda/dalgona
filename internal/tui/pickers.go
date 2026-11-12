@@ -90,6 +90,7 @@ func (m *model) applyModels(value any) tea.Cmd {
 	if !ok {
 		return m.unexpectedResult("models")
 	}
+	m.rememberLevels(response.Data)
 	choices := make([]choice, 0, len(response.Data))
 	for _, item := range response.Data {
 		if item.Hidden {

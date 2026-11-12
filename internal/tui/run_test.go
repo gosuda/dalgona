@@ -151,7 +151,10 @@ func answerStartup(conn net.Conn, reader *bufio.Reader) error {
 	if err := answerRequest(conn, reader, "dalgona/settings/read", `{"settings":[]}`); err != nil {
 		return err
 	}
-	return answerRequest(conn, reader, "dalgona/keywords/list", `[]`)
+	if err := answerRequest(conn, reader, "dalgona/keywords/list", `[]`); err != nil {
+		return err
+	}
+	return answerRequest(conn, reader, "model/list", `{"data":[]}`)
 }
 
 func serveTurn(conn net.Conn) error {

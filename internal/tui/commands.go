@@ -65,7 +65,7 @@ func (m *model) initialize() tea.Cmd {
 		if err := m.conn.client.Call(ctx, "initialize", params, &result); err != nil {
 			return resultMsg{op: "initialize", err: err}
 		}
-		return resultMsg{op: "initialize", err: m.conn.client.Notify("initialized", nil)}
+		return resultMsg{op: "initialize", value: &result, err: m.conn.client.Notify("initialized", nil)}
 	}
 }
 
@@ -102,12 +102,29 @@ func (m *model) applySettings(value any) tea.Cmd {
 		return m.unexpectedResult("settings")
 	}
 	for _, setting := range reply.Settings {
-		if text, isText := setting.Value.(string); isText && setting.Key == "theme" {
-			m.screen.themeSetting = text
-		}
+		m.applySetting(setting)
 	}
 	m.screen.setTheme()
-	return nil
+	return m.requestKittyFont()
+}
+
+func (m *model) applySetting(setting settingValue) {
+	switch setting.Key {
+	case "theme":
+		if text, ok := setting.Value.(string); ok {
+			m.screen.themeSetting = text
+		}
+	case "icons":
+		if text, ok := setting.Value.(string); ok {
+			m.screen.iconsSetting = text
+		}
+	case "statusHide":
+		m.setStatusHide(setting.Value)
+	}
+}
+
+func (m *model) loadLevels() tea.Cmd {
+	return m.call("levels", "model/list", rpc.ModelListParams{}, new(rpc.ModelListResponse), "")
 }
 
 func (m *model) startThread() tea.Cmd {
@@ -235,27 +252,67 @@ func (m *model) interrupt() tea.Cmd {
 }
 
 func (m *model) applyResult(msg resultMsg) tea.Cmd {
-	if strings.HasPrefix(msg.op, "advisor") {
-		return m.applyAdvisorResult(msg)
-	}
-	if msg.op == "initialize" && msg.err != nil {
-		flat := strings.Join(strings.Fields(msg.err.Error()), " ")
-		m.commit("welcome", []string{m.screen.fit(sanitizeText("Could not start: "+flat+". Press ctrl+c to exit."), terminalWidth(m.screen.width))})
-		return nil
+	if cmd, handled := m.applyPreludeResult(msg); handled {
+		return cmd
 	}
 	if msg.err != nil {
 		return m.applyResultError(msg)
 	}
+	return m.applySuccessResult(msg)
+}
+
+func (m *model) applyPreludeResult(msg resultMsg) (tea.Cmd, bool) {
+	switch {
+	case msg.op == "levels":
+		m.applyLevels(msg)
+		return nil, true
+	case strings.HasPrefix(msg.op, "advisor"):
+		return m.applyAdvisorResult(msg), true
+	case msg.op == "initialize" && msg.err != nil:
+		flat := strings.Join(strings.Fields(msg.err.Error()), " ")
+		m.commit("welcome", []string{m.screen.fit(sanitizeText("Could not start: "+flat+". Press ctrl+c to exit."), terminalWidth(m.screen.width))})
+		return nil, true
+	}
+	return nil, false
+}
+
+func (m *model) applySuccessResult(msg resultMsg) tea.Cmd {
 	switch msg.op {
 	case "keywords", "models", "threads", "tree", "revertTree", "resumed", "new", "fork":
 		return m.applyDataResult(msg)
 	case "send", "followup":
 		return m.applyTurnAccepted(msg.value)
+	case "initialize":
+		return m.applyInitialize(msg.value)
 	case "settings":
 		return m.applySettings(msg.value)
 	default:
 		return m.applyConfirmation(msg)
 	}
+}
+
+func (m *model) applyInitialize(value any) tea.Cmd {
+	result, ok := value.(*rpc.InitializeResult)
+	if !ok {
+		return m.unexpectedResult("initialize")
+	}
+	product, version, _ := strings.Cut(result.UserAgent, "/")
+	m.conn.product = sanitizeText(product)
+	m.conn.version = sanitizeText(version)
+	m.conn.platformFamily = sanitizeText(result.PlatformFamily)
+	return nil
+}
+
+func (m *model) applyLevels(msg resultMsg) {
+	response, ok := msg.value.(*rpc.ModelListResponse)
+	if ok && msg.err == nil {
+		m.rememberLevels(response.Data)
+	}
+}
+
+type resumedThread struct {
+	rpc.ThreadReadResponse
+	effort string
 }
 
 func (m *model) applyDataResult(msg resultMsg) tea.Cmd {
@@ -392,11 +449,12 @@ func (m *model) applyKeywords(value any) tea.Cmd {
 }
 
 func (m *model) applyResumed(value any) tea.Cmd {
-	response, ok := value.(*rpc.ThreadReadResponse)
+	response, ok := value.(*resumedThread)
 	if !ok {
 		return m.unexpectedResult("resumed thread")
 	}
 	m.setThread(response.Thread.ID)
+	m.thread.effort = response.effort
 	m.thread.title = threadTitle(response.Thread)
 	m.noticeMoved(m.thread.title)
 	m.setState(threadState(response.Thread.Status))
@@ -424,6 +482,7 @@ func (m *model) applyNewThread(value any) tea.Cmd {
 		return m.unexpectedResult("new thread")
 	}
 	m.setThread(response.Thread.ID)
+	m.thread.effort = response.ReasoningEffort
 	m.thread.title = threadTitle(response.Thread)
 	m.noticeMoved(m.thread.title)
 	m.thread.sandbox = serverSandbox(response.Sandbox.Type, m.thread.sandbox)
