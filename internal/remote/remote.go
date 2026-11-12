@@ -1,5 +1,3 @@
-// Package remote binds threads to sandbox boxes (Mode A) and runs the whole
-// daemon in a box (Mode B). See docs/spec/runners.md.
 package remote
 
 import (
@@ -35,29 +33,20 @@ const (
 	baselineFile = "/workspace/.dalgona-baseline"
 )
 
-// Recorder appends runner.bound to an open thread's journal. *agent.Host
-// implements it through RecordRunnerBound.
 type Recorder interface {
 	RecordRunnerBound(ctx context.Context, threadID string, b event.RunnerBound) error
 }
 
-// Options configures a Binder. Config and Journal are required for Mode A;
-// Mode B needs Config only.
 type Options struct {
 	Config  config.Config
 	Auth    *auth.Store
 	Journal *journal.Store
-	// Local serves runner names that are not [runners.<name>] entries.
-	Local func(ctx context.Context, threadID, runnerName string) (runner.Runner, error)
-	// Confirm asks the user a yes or no question. Nil answers no.
+	Local   func(ctx context.Context, threadID, runnerName string) (runner.Runner, error)
 	Confirm func(prompt string) (bool, error)
-	// Out receives user-facing notes. Nil discards them.
-	Out    io.Writer
-	Logger *slog.Logger
+	Out     io.Writer
+	Logger  *slog.Logger
 }
 
-// Binder owns box bindings for one daemon. Its Runner method is the
-// agent.HostConfig.Runner factory.
 type Binder struct {
 	opts     Options
 	log      *slog.Logger
@@ -85,17 +74,12 @@ func NewBinder(opts Options) *Binder {
 	return b
 }
 
-// SetRecorder installs the runner.bound recorder. The host exists only after
-// its factory, so the daemon calls this right after agent.NewHost.
 func (b *Binder) SetRecorder(r Recorder) {
 	b.mu.Lock()
 	b.recorder = r
 	b.mu.Unlock()
 }
 
-// Runner returns a lazily bound box runner for [runners.<name>] entries and
-// defers other names to Options.Local. Binding happens on first use, after
-// the thread's session.created (and a fork's copied runner.bound) is journaled.
 func (b *Binder) Runner(ctx context.Context, threadID, runnerName string) (runner.Runner, error) {
 	spec, ok := b.opts.Config.Runners[runnerName]
 	if !ok {

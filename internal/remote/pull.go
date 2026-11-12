@@ -12,17 +12,12 @@ import (
 
 const diffScript = `cd /workspace && git add -A && out="$HOME/.dalgona/pull.diff" && mkdir -p "$HOME/.dalgona" && git diff --no-ext-diff --no-color --binary --cached "$1" -- . ':(exclude).dalgona-baseline' > "$out" && printf '\n%s' "$out"`
 
-// ConflictError lists the local files that git apply --3way left with
-// conflict markers.
 type ConflictError struct{ Files []string }
 
 func (e *ConflictError) Error() string {
 	return "remote: pull left conflicts in " + strings.Join(e.Files, ", ")
 }
 
-// Pull applies the thread box's changes since its baseline to the thread's
-// local working directory with git apply --3way. Conflicts return
-// *ConflictError.
 func (b *Binder) Pull(ctx context.Context, threadID string) error {
 	info, err := b.threadInfo(threadID)
 	if err != nil {

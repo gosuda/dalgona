@@ -14,7 +14,6 @@ import (
 	"github.com/gosuda/dalgona/internal/sandboxsvc"
 )
 
-// Box is a journaled box with no unarchived thread bound to it.
 type Box struct {
 	Service string
 	ID      string
@@ -26,9 +25,6 @@ type boxKey struct{ service, id string }
 
 func boxOf(bound event.RunnerBound) boxKey { return boxKey{bound.Service, bound.BoxID} }
 
-// Archive destroys the thread's box unless another unarchived thread's latest
-// runner.bound names it. thread/archive calls it before it journals
-// thread.archived.
 func (b *Binder) Archive(ctx context.Context, threadID string) error {
 	info, err := b.threadInfo(threadID)
 	if err != nil || info.bound == nil {
@@ -82,8 +78,6 @@ func (b *Binder) eachBound(fn func(threadID string, info threadInfo) bool) error
 	return nil
 }
 
-// GC lists boxes whose bound threads are all archived, asks through
-// Options.Confirm, and destroys them on yes. It returns the listed boxes.
 func (b *Binder) GC(ctx context.Context) ([]Box, error) {
 	boxes, err := b.unboundBoxes()
 	if err != nil || len(boxes) == 0 {

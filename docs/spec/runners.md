@@ -36,6 +36,8 @@ box <box_id> was replaced; unpulled box changes are lost
 
 The binder MUST record `runner.bound` through `Recorder.RecordRunnerBound(ctx, threadID, bound)`. `*agent.Host` implements it by appending through the thread actor. With no recorder, binding MUST fail.
 
+The `Attach` hook of the daemon host MUST call `SetRecorder` with the new `*agent.Host`, because the host is the recorder.
+
 Paths MUST map from the thread `cwd` to `/workspace`. `cwd` maps to `/workspace`. `cwd/a/b` maps to `/workspace/a/b`. An empty `ProcessSpec.Dir` maps to `/workspace`. Relative paths and paths outside `cwd` MUST pass through unchanged. Box path mapping MUST use POSIX path rules on every host.
 
 Every remote box runs Linux. The exec tool MUST build remote commands with `sh -c` and MUST keep `cmd /C` for local Windows execution only.
@@ -78,6 +80,10 @@ An empty diff MUST print `nothing to pull` and succeed. Otherwise the diff MUST 
 remote: pull left conflict markers in:
   <file>
 ```
+
+Files that `git apply --3way` leaves with conflict markers MUST be listed in `ConflictError`.
+
+In a git work tree, `Binder.Pull` MUST return a `*ConflictError` that lists the unmerged files.
 
 Pull MUST NOT move the baseline. A second pull MUST diff against the same baseline.
 
@@ -125,3 +131,5 @@ func CloudMain(ctx context.Context, opts Options, args []string, stdio IO) int
 ```
 
 The `Main` functions MUST return 0 on success, 1 on failure, and 2 on a usage error. They MUST ask questions on `Stdout` and read answers from `Stdin`.
+
+Without `Options.Journal`, `Pull`, `Archive`, `GC`, and runner binding MUST fail. `CloudUp`, `CloudDown`, and `CloudPull` MUST NOT need `Options.Journal`.
