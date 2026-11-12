@@ -343,9 +343,9 @@ Run existing staged observers before asking. They report or block, never rewrite
 Approval binds this exact plan. Release path locks while a person decides; retained
 immutable evidence/staging leases remain charged and release on timeout/cancellation.
 
-After approval, reacquire the full write set and recheck digests, revision/epoch,
-identity/path conditions, and absences. Any mismatch returns `approval_stale`
-without target writes. Never rebase or rebuild under old approval. No-ask policies
+After approval, the writer rechecks every source digest and every required
+absence. A mismatch fails the call with `patch: <path> changed while you were
+approving. Nothing was written. Try again` and writes no target. Never rebase or rebuild under old approval. No-ask policies
 still produce an internal authorization decision bound to the prepared plan.
 Light never relaxes grants or approval (S-WRITE).
 
@@ -461,7 +461,6 @@ coverage. No internal fetch, automatic retag, or automatic destructive retry.
 | `no_replace_unavailable` | rejected | Use a supported no-clobber writer; no overwrite fallback. |
 | `binding_mismatch`, `outside_workspace`, `permission_denied` | rejected | Correct binding/authority; no protected diagnostic leak. |
 | `target_changed`, `gap_changed`, `path_changed` | conflict | Inspect current state and decide again. |
-| `approval_stale` | conflict | Prepare again; old approval is not reusable. |
 | `invalid_syntax`, `invalid_range`, `mixed_references`, `overlap`, `invalid_shape` | rejected | Correct the payload. |
 | `resource_busy`, `resource_limit` | rejected | Retry admission or split; never downgrade proof. |
 | `invocation_mismatch` | rejected | Do not reuse invocation identity for different input. |

@@ -383,6 +383,8 @@ func TestApprovalGapDriftRejectsPreparedPlan(t *testing.T) {
 	writeFixture(t, cwd, "f.txt", "drift\n")
 	if _, err := plan.Apply(t.Context()); err == nil {
 		t.Fatal("approval-gap drift committed")
+	} else if err.Error() != "patch: f.txt changed while you were approving. Nothing was written. Try again" {
+		t.Fatalf("approval-gap drift error %q", err.Error())
 	}
 	if actual := readFixture(t, cwd, "f.txt"); actual != "drift\n" {
 		t.Fatalf("drift overwritten %q", actual)
