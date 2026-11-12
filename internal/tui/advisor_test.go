@@ -31,15 +31,15 @@ func TestModelPrintsAdvisorNoteOnce(t *testing.T) {
 	}
 	m, command = drive(t, m, notificationMsg{method: "item/completed", params: schemaValue(t, "ItemCompletedNotification",
 		`{"threadId":"t1","turnId":"turn-1","completedAtMs":2,"item":`+advisorItem+`}`)})
-	if command != nil || len(m.live) != 0 {
-		t.Fatalf("completed advisor item printed again: command %v, live %#v", command, m.live)
+	if command != nil || len(m.live.items) != 0 {
+		t.Fatalf("completed advisor item printed again: command %v, live %#v", command, m.live.items)
 	}
 }
 
 func TestModelRendersResumedAdvisorItemAsCard(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
-	m.width = 120
+	m.screen.width = 120
 	note := "run the race detector before merging"
 	item := rpc.Item{
 		Type: "dynamicToolCall", ID: "adv1", Tool: "advisor", Status: "completed", Output: note,
@@ -54,8 +54,8 @@ func TestModelAdvisorCommands(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
 	m := newModel(caller, Options{}, nil)
-	m.threadID = "t1"
-	m.composer.SetValue("/advisor")
+	m.thread.id = "t1"
+	m.input.composer.SetValue("/advisor")
 	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
 	m, command = drive(t, m, command())
 	if command == nil || caller.calls[0].method != "dalgona/advisor/status" {
@@ -67,7 +67,7 @@ func TestModelAdvisorCommands(t *testing.T) {
 		t.Fatalf("toggle set call = %#v", caller.calls[1])
 	}
 	assertContains(t, m.notice, "advisor off", "/advisor")
-	m.composer.SetValue("/advisor status")
+	m.input.composer.SetValue("/advisor status")
 	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
 	m = runCommand(t, m, command, "/advisor status made no call")
 	assertContains(t, m.notice, "advisor advisor · idle · gpt-test · 2 notes")
@@ -81,8 +81,8 @@ func TestModelAdvisorCommands(t *testing.T) {
 func TestModelQueuesApprovalsAndIgnoresOtherThreads(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
-	m.width = 40
-	m.threadID = "t1"
+	m.screen.width = 40
+	m.thread.id = "t1"
 	first, second := make(chan requestAnswer, 1), make(chan requestAnswer, 1)
 	m, _ = drive(t, m, serverRequestMsg{
 		method: "item/commandExecution/requestApproval", answer: first,
@@ -110,8 +110,8 @@ func TestModelQueuesApprovalsAndIgnoresOtherThreads(t *testing.T) {
 	}
 	m, _ = drive(t, m, notificationMsg{method: "thread/status/changed", params: []byte(`{"threadId":"child-1","status":{"type":"systemError"}}`)})
 	m, _ = drive(t, m, notificationMsg{method: "thread/name/updated", params: []byte(`{"threadId":"child-1","threadName":"child"}`)})
-	if m.threadID != "t1" || m.state != stateRunning || m.title == "child" || len(m.approvals) != 0 {
-		t.Fatalf("child notifications changed thread %q state %q title %q approvals %d", m.threadID, m.state, m.title, len(m.approvals))
+	if m.thread.id != "t1" || m.thread.state != stateRunning || m.thread.title == "child" || len(m.approvals) != 0 {
+		t.Fatalf("child notifications changed thread %q state %q title %q approvals %d", m.thread.id, m.thread.state, m.thread.title, len(m.approvals))
 	}
 }
 
@@ -119,7 +119,7 @@ func TestComposerPlaceholderFollowsCursor(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
 	assertContains(t, stripANSI(m.View().Content), "› ▏Send a prompt; / for commands")
-	m.composer.SetValue("typed")
+	m.input.composer.SetValue("typed")
 	view := stripANSI(m.View().Content)
 	if strings.Contains(view, "Send a prompt") {
 		t.Fatalf("placeholder shown beside typed text:\n%s", view)

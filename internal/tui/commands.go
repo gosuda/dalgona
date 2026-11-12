@@ -23,12 +23,12 @@ const (
 
 func (m *model) commandContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-	if m.done == nil {
+	if m.conn.done == nil {
 		return ctx, cancel
 	}
 	go func() {
 		select {
-		case <-m.done:
+		case <-m.conn.done:
 			cancel()
 		case <-ctx.Done():
 		}
@@ -37,31 +37,31 @@ func (m *model) commandContext() (context.Context, context.CancelFunc) {
 }
 
 func (m *model) call(op, method string, params, result any, text string) tea.Cmd {
-	turnID := m.turnID
+	turnID := m.thread.turnID
 	return func() tea.Msg {
-		if m.client == nil {
+		if m.conn.client == nil {
 			return resultMsg{op: op, text: text, err: errors.New("rpc client is not connected")}
 		}
 		ctx, cancel := m.commandContext()
 		defer cancel()
-		err := m.client.Call(ctx, method, params, result)
+		err := m.conn.client.Call(ctx, method, params, result)
 		return resultMsg{op: op, value: result, text: text, turnID: turnID, err: err}
 	}
 }
 
 func (m *model) initialize() tea.Cmd {
 	return func() tea.Msg {
-		if m.client == nil {
+		if m.conn.client == nil {
 			return resultMsg{op: "initialize", err: errors.New("rpc client is not connected")}
 		}
 		ctx, cancel := m.commandContext()
 		defer cancel()
 		params := rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: "dalgona", Title: "dalgona TUI", Version: clientVersion()}}
 		var result rpc.InitializeResult
-		if err := m.client.Call(ctx, "initialize", params, &result); err != nil {
+		if err := m.conn.client.Call(ctx, "initialize", params, &result); err != nil {
 			return resultMsg{op: "initialize", err: err}
 		}
-		return resultMsg{op: "initialize", err: m.client.Notify("initialized", nil)}
+		return resultMsg{op: "initialize", err: m.conn.client.Notify("initialized", nil)}
 	}
 }
 
@@ -79,18 +79,18 @@ func (m *model) loadKeywords() tea.Cmd {
 }
 
 func (m *model) startThread() tea.Cmd {
-	if m.opts.ThreadID != "" {
-		return m.resumeThread(m.opts.ThreadID)
+	if m.conn.opts.ThreadID != "" {
+		return m.resumeThread(m.conn.opts.ThreadID)
 	}
 	return m.newThread()
 }
 
 func (m *model) newThread() tea.Cmd {
 	params := rpc.ThreadStartParams{
-		Model:          m.modelName,
-		ApprovalPolicy: approvalPolicy(m.approvalMode),
-		Sandbox:        sandboxPolicy(m.sandbox),
-		Cwd:            m.opts.Cwd,
+		Model:          m.thread.modelName,
+		ApprovalPolicy: approvalPolicy(m.thread.approvalMode),
+		Sandbox:        sandboxPolicy(m.thread.sandbox),
+		Cwd:            m.conn.opts.Cwd,
 	}
 	return m.call("new", "thread/start", params, new(rpc.ThreadStartResponse), "")
 }
@@ -114,20 +114,20 @@ func sandboxPolicy(mode string) string {
 }
 
 func (m *model) submitPrompt() tea.Cmd {
-	text := strings.TrimSpace(m.composer.Value())
+	text := strings.TrimSpace(m.input.composer.Value())
 	if text == "" {
 		return m.startQueuedFollowup()
 	}
-	m.composer.SetValue("")
+	m.input.composer.SetValue("")
 	if strings.HasPrefix(text, "/") {
 		return m.executeSlash(text)
 	}
-	if m.threadID == "" {
+	if m.thread.id == "" {
 		m.notice = "thread is not ready; wait for startup or use /new to retry"
-		m.composer.SetValue(text)
+		m.input.composer.SetValue(text)
 		return nil
 	}
-	if m.state == stateRunning || m.state == stateAwaitingApproval {
+	if m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
 		return m.sendSteer(text)
 	}
 	return m.sendPrompt(text)
@@ -135,13 +135,13 @@ func (m *model) submitPrompt() tea.Cmd {
 
 func (m *model) sendPrompt(text string) tea.Cmd {
 	m.setState(stateRunning)
-	params := rpc.TurnStartParams{ThreadID: m.threadID, Input: textInput(text)}
+	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(text)}
 	result := new(rpc.TurnStartResponse)
 	return m.call("send", "turn/start", params, result, text)
 }
 
 func (m *model) sendSteer(text string) tea.Cmd {
-	params := rpc.TurnSteerParams{ThreadID: m.threadID, ExpectedTurnID: m.turnID, Input: textInput(text)}
+	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: textInput(text)}
 	return m.call("steer", "turn/steer", params, new(rpc.TurnSteerResponse), text)
 }
 
@@ -150,31 +150,31 @@ func textInput(text string) []rpc.InputItem {
 }
 
 func (m *model) queueFollowup() tea.Cmd {
-	text := strings.TrimSpace(m.composer.Value())
+	text := strings.TrimSpace(m.input.composer.Value())
 	if text == "" {
 		return nil
 	}
-	if len(m.followups) >= maxFollowups {
+	if len(m.queue) >= maxFollowups {
 		m.notice = fmt.Sprintf("follow-up queue is full (%d); wait for the active turn or press Esc", maxFollowups)
 		return nil
 	}
-	m.followups = append(m.followups, text)
-	m.composer.SetValue("")
-	m.notice = fmt.Sprintf("queued follow-up %d of %d", len(m.followups), maxFollowups)
-	if m.state == stateIdle {
+	m.queue = append(m.queue, text)
+	m.input.composer.SetValue("")
+	m.notice = fmt.Sprintf("queued follow-up %d of %d", len(m.queue), maxFollowups)
+	if m.thread.state == stateIdle {
 		return m.startQueuedFollowup()
 	}
 	return nil
 }
 
 func (m *model) startQueuedFollowup() tea.Cmd {
-	if len(m.followups) == 0 || m.state == stateRunning || m.state == stateAwaitingApproval {
+	if len(m.queue) == 0 || m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
 		return nil
 	}
-	text := m.followups[0]
-	m.followups = m.followups[1:]
+	text := m.queue[0]
+	m.queue = m.queue[1:]
 	m.setState(stateRunning)
-	params := rpc.TurnStartParams{ThreadID: m.threadID, Input: textInput(text)}
+	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(text)}
 	result := new(rpc.TurnStartResponse)
 	return m.call("followup", "turn/start", params, result, text)
 }
@@ -184,161 +184,12 @@ func (m *model) interrupt() tea.Cmd {
 		m.selector = nil
 		return nil
 	}
-	if m.state != stateRunning && m.state != stateAwaitingApproval {
+	if m.thread.state != stateRunning && m.thread.state != stateAwaitingApproval {
 		m.notice = "idle; nothing to interrupt"
 		return nil
 	}
-	params := rpc.TurnInterruptParams{ThreadID: m.threadID, TurnID: m.turnID}
+	params := rpc.TurnInterruptParams{ThreadID: m.thread.id, TurnID: m.thread.turnID}
 	return m.call("interrupt", "turn/interrupt", params, nil, "")
-}
-
-func (m *model) executeSlash(input string) tea.Cmd {
-	name, argument, _ := strings.Cut(strings.TrimPrefix(input, "/"), " ")
-	argument = strings.TrimSpace(argument)
-	switch name {
-	case "model":
-		return m.modelCommand(argument)
-	case "resume":
-		return m.resumeCommand(argument)
-	case "login":
-		return m.loginCommand(argument)
-	case "advisor":
-		return m.advisorCommand(argument)
-	default:
-		return m.executeThreadCommand(name)
-	}
-}
-
-func (m *model) executeThreadCommand(name string) tea.Cmd {
-	switch name {
-	case "new":
-		return m.newThread()
-	case "compact":
-		params := rpc.ThreadCompactStartParams{ThreadID: m.threadID}
-		return m.call("compact", "thread/compact/start", params, nil, "")
-	case "tree":
-		return m.treeCommand("tree")
-	case "revert":
-		return m.treeCommand("revertTree")
-	case "fork":
-		params := rpc.ThreadForkParams{ThreadID: m.threadID}
-		result := new(rpc.ThreadForkResponse)
-		return m.call("fork", "thread/fork", params, result, "")
-	default:
-		m.notice = "unknown command; use /model /resume /new /compact /login /tree /revert /fork /advisor"
-		return nil
-	}
-}
-
-func (m *model) advisorCommand(argument string) tea.Cmd {
-	params := rpc.DalgonaAdvisorStatusParams{ThreadID: m.threadID}
-	switch argument {
-	case "":
-		return m.call("advisorToggle", "dalgona/advisor/status", params, new([]rpc.AdvisorState), "")
-	case "status":
-		return m.call("advisorStatus", "dalgona/advisor/status", params, new([]rpc.AdvisorState), "")
-	case "reset":
-		return m.call("advisorReset", "dalgona/advisor/reset", params, nil, "")
-	default:
-		m.notice = "usage: /advisor to turn the advisor on or off, /advisor status, or /advisor reset"
-		return nil
-	}
-}
-
-func (m *model) modelCommand(argument string) tea.Cmd {
-	if argument != "" {
-		return m.setModel(argument)
-	}
-	result := new(rpc.ModelListResponse)
-	return m.call("models", "model/list", rpc.ModelListParams{}, result, "")
-}
-
-func (m *model) setModel(id string) tea.Cmd {
-	params := rpc.ConfigValueWriteParams{KeyPath: "model", MergeStrategy: "replace", Value: id}
-	return m.call("modelSet", "config/value/write", params, nil, id)
-}
-
-func (m *model) resumeCommand(argument string) tea.Cmd {
-	if argument != "" {
-		return m.resumeThread(argument)
-	}
-	result := new(rpc.ThreadListResponse)
-	return m.call("threads", "thread/list", rpc.ThreadListParams{Limit: 50}, result, "")
-}
-
-func (m *model) resumeThread(id string) tea.Cmd {
-	return func() tea.Msg {
-		if m.client == nil {
-			return resultMsg{op: "resumed", err: errors.New("rpc client is not connected")}
-		}
-		ctx, cancel := m.commandContext()
-		defer cancel()
-		var resumed rpc.ThreadResumeResponse
-		if err := m.client.Call(ctx, "thread/resume", rpc.ThreadResumeParams{ThreadID: id}, &resumed); err != nil {
-			return resultMsg{op: "resumed", err: err}
-		}
-		var read rpc.ThreadReadResponse
-		err := m.client.Call(ctx, "thread/read", rpc.ThreadReadParams{ThreadID: id, IncludeTurns: true}, &read)
-		return resultMsg{op: "resumed", value: &read, err: err}
-	}
-}
-
-func (m *model) loginCommand(provider string) tea.Cmd {
-	if provider == "" {
-		m.notice = "usage: /login <provider>; for example /login openai or /login chatgpt"
-		return nil
-	}
-	params := rpc.AccountLoginStartParams{Provider: provider}
-	result := new(rpc.LoginAccountResponse)
-	return m.call("login", "account/login/start", params, result, provider)
-}
-
-func (m *model) treeCommand(op string) tea.Cmd {
-	params := rpc.ThreadTreeParams{ThreadID: m.threadID}
-	result := new(rpc.ThreadTreeResponse)
-	return m.call(op, "dalgona/thread/tree", params, result, "")
-}
-
-func (m *model) selectKey(key string) tea.Cmd {
-	if len(m.selector.choices) == 0 {
-		m.selector = nil
-		return nil
-	}
-	switch key {
-	case "up", "ctrl+p":
-		m.selector.cursor--
-	case "down", "ctrl+n":
-		m.selector.cursor++
-	case "enter":
-		return m.activateChoice()
-	case "esc":
-		m.selector = nil
-	}
-	if m.selector != nil {
-		count := len(m.selector.choices)
-		m.selector.cursor = (m.selector.cursor%count + count) % count
-	}
-	return nil
-}
-
-func (m *model) activateChoice() tea.Cmd {
-	selected := m.selector.choices[m.selector.cursor]
-	kind := m.selector.kind
-	m.selector = nil
-	switch kind {
-	case "model":
-		return m.setModel(selected.id)
-	case "resume":
-		return m.resumeThread(selected.id)
-	case "tree":
-		params := rpc.ThreadLeafSetParams{ThreadID: m.threadID, TurnID: selected.id}
-		return m.call("leaf", "dalgona/thread/leaf/set", params, nil, "")
-	case "revert":
-		params := rpc.ThreadRevertParams{ThreadID: m.threadID, BeforeTurnID: selected.id}
-		return m.call("revert", "thread/revert", params, nil, "")
-	default:
-		return nil
-	}
 }
 
 func (m *model) applyResult(msg resultMsg) tea.Cmd {
@@ -414,7 +265,7 @@ func advisorFailure(err error) string {
 
 func (m *model) toggleAdvisor(states []rpc.AdvisorState) tea.Cmd {
 	enabled := !slices.ContainsFunc(states, func(state rpc.AdvisorState) bool { return state.Status != "disabled" })
-	params := rpc.DalgonaAdvisorSetParams{ThreadID: m.threadID, Enabled: enabled}
+	params := rpc.DalgonaAdvisorSetParams{ThreadID: m.thread.id, Enabled: enabled}
 	return m.call("advisorSet", "dalgona/advisor/set", params, nil, strconv.FormatBool(enabled))
 }
 
@@ -433,7 +284,7 @@ func advisorStatusText(states []rpc.AdvisorState) string {
 func (m *model) applyConfirmation(msg resultMsg) tea.Cmd {
 	switch msg.op {
 	case "interrupt":
-		if msg.turnID != m.turnID {
+		if msg.turnID != m.thread.turnID {
 			return nil
 		}
 		m.setState(stateInterrupted)
@@ -445,7 +296,7 @@ func (m *model) applyConfirmation(msg resultMsg) tea.Cmd {
 	case "leaf":
 		m.notice = "active branch changed; files changed by later turns are not reverted"
 	case "modelSet":
-		m.modelName = msg.text
+		m.thread.modelName = msg.text
 		m.notice = "model set to " + msg.text
 	case "login":
 		return m.applyLogin(msg.value)
@@ -460,7 +311,7 @@ func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 		m.restoreComposer(msg.text)
 	}
 	if msg.op == "followup" {
-		m.followups = append([]string{msg.text}, m.followups...)
+		m.queue = append([]string{msg.text}, m.queue...)
 	}
 	if msg.op == "send" || msg.op == "followup" {
 		m.setState(stateFailed)
@@ -474,11 +325,11 @@ func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 }
 
 func (m *model) restoreComposer(text string) {
-	current := m.composer.Value()
+	current := m.input.composer.Value()
 	if current != "" {
 		text += "\n" + current
 	}
-	m.composer.SetValue(text)
+	m.input.composer.SetValue(text)
 }
 
 func (m *model) applyKeywords(value any) tea.Cmd {
@@ -487,70 +338,7 @@ func (m *model) applyKeywords(value any) tea.Cmd {
 		m.notice = "keyword list has an unexpected shape; restart the TUI to retry"
 		return nil
 	}
-	m.keywords = *keywords
-	return nil
-}
-
-func (m *model) applyModels(value any) tea.Cmd {
-	response, ok := value.(*rpc.ModelListResponse)
-	if !ok {
-		return m.unexpectedResult("models")
-	}
-	choices := make([]choice, 0, len(response.Data))
-	for _, item := range response.Data {
-		if item.Hidden {
-			continue
-		}
-		choices = append(choices, choice{id: item.ID, label: item.ID, detail: item.DisplayName, active: item.ID == m.modelName})
-	}
-	if len(choices) == 0 {
-		m.notice = "no models are available; run /login <provider> and retry /model"
-		return nil
-	}
-	m.selector = &selector{kind: "model", title: "choose a model", choices: choices}
-	return nil
-}
-
-func (m *model) applyThreads(value any) tea.Cmd {
-	response, ok := value.(*rpc.ThreadListResponse)
-	if !ok {
-		return m.unexpectedResult("threads")
-	}
-	choices := make([]choice, 0, len(response.Data))
-	for _, item := range response.Data {
-		choices = append(choices, choice{id: item.ID, label: threadTitle(item), detail: threadState(item.Status), active: item.ID == m.threadID})
-	}
-	if len(choices) == 0 {
-		m.notice = "no threads are available; use /new to start one"
-		return nil
-	}
-	m.selector = &selector{kind: "resume", title: "resume a thread", choices: choices}
-	return nil
-}
-
-func (m *model) applyTree(op string, value any) tea.Cmd {
-	response, ok := value.(*rpc.ThreadTreeResponse)
-	if !ok {
-		return m.unexpectedResult("thread tree")
-	}
-	kind := "tree"
-	title := "choose the active branch"
-	choices := make([]choice, 0, len(response.Turns))
-	for _, turn := range response.Turns {
-		if op == "revertTree" {
-			kind = "revert"
-			title = "revert before a turn"
-		}
-		if op == "revertTree" && !turn.Active {
-			continue
-		}
-		choices = append(choices, choice{id: turn.TurnID, label: turn.Preview, detail: turn.TurnID, active: turn.Active})
-	}
-	if len(choices) == 0 {
-		m.notice = "no turns are available on this path; send a prompt first"
-		return nil
-	}
-	m.selector = &selector{kind: kind, title: title, choices: choices}
+	m.input.keywords = *keywords
 	return nil
 }
 
@@ -560,9 +348,9 @@ func (m *model) applyResumed(value any) tea.Cmd {
 		return m.unexpectedResult("resumed thread")
 	}
 	m.setThread(response.Thread.ID)
-	m.title = threadTitle(response.Thread)
+	m.thread.title = threadTitle(response.Thread)
 	m.setState(threadState(response.Thread.Status))
-	m.live = nil
+	m.live.items = nil
 	lines := make([]string, 0, len(response.Thread.Turns))
 	for _, turn := range response.Thread.Turns {
 		for _, item := range turn.Items {
@@ -570,7 +358,7 @@ func (m *model) applyResumed(value any) tea.Cmd {
 		}
 	}
 	if len(lines) == 0 {
-		return tea.Println("resumed " + m.title)
+		return tea.Println("resumed " + m.thread.title)
 	}
 	return tea.Println(strings.Join(lines, "\n"))
 }
@@ -581,11 +369,11 @@ func (m *model) applyNewThread(value any) tea.Cmd {
 		return m.unexpectedResult("new thread")
 	}
 	m.setThread(response.Thread.ID)
-	m.title = threadTitle(response.Thread)
-	m.sandbox = serverSandbox(response.Sandbox.Type, m.sandbox)
-	m.live = nil
+	m.thread.title = threadTitle(response.Thread)
+	m.thread.sandbox = serverSandbox(response.Sandbox.Type, m.thread.sandbox)
+	m.live.items = nil
 	m.setState(stateIdle)
-	return tea.Println("started " + m.title)
+	return tea.Println("started " + m.thread.title)
 }
 
 func serverSandbox(serverType, fallback string) string {
@@ -615,10 +403,10 @@ func (m *model) applyTurnAccepted(value any) tea.Cmd {
 	if !ok {
 		return m.unexpectedResult("accepted turn")
 	}
-	if _, done := m.completedTurns[response.Turn.ID]; done {
+	if _, done := m.thread.completedTurns[response.Turn.ID]; done {
 		return nil
 	}
-	m.turnID = response.Turn.ID
+	m.thread.turnID = response.Turn.ID
 	m.setState(stateRunning)
 	return nil
 }

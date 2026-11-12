@@ -30,7 +30,7 @@ func TestSanitizeTextStripsControlsAndEscapes(t *testing.T) {
 func TestRenderSettledItemStripsEscapes(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
-	m.width = 80
+	m.screen.width = 80
 	item := rpc.Item{Type: "commandExecution", Command: "\x1b[8mrm -rf /\x1b[0m", Output: "esc\x1b]0;pwn\x07aped"}
 	rendered := m.renderSettledItem(item)
 	if strings.ContainsAny(rendered, "\x1b\x07") {
@@ -48,7 +48,7 @@ func TestRenderSettledItemStripsEscapes(t *testing.T) {
 func TestRenderApprovalStripsEscapes(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
-	m.width = 80
+	m.screen.width = 80
 	m.approvals = []approval{{threadID: "t1", command: "\x1b[8msecret\x1b[0m echo hi", reason: "why\x1b]0;t\x07not"}}
 	view := m.renderApproval()
 	if strings.ContainsAny(view, "\x1b\x07") {

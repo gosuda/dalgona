@@ -51,10 +51,10 @@ func schemaNotification(t *testing.T, m model, method, schema, data string) mode
 func schemaStartedModel(t *testing.T) model {
 	t.Helper()
 	m := newModel(nil, Options{}, nil)
-	m.width = 120
+	m.screen.width = 120
 	m = schemaNotification(t, m, "thread/started", "ThreadStartedNotification", `{"thread":`+schemaThread+`}`)
-	if m.threadID != "t1" || m.title != "demo" || m.state != stateIdle {
-		t.Fatalf("thread/started: id %q title %q state %q", m.threadID, m.title, m.state)
+	if m.thread.id != "t1" || m.thread.title != "demo" || m.thread.state != stateIdle {
+		t.Fatalf("thread/started: id %q title %q state %q", m.thread.id, m.thread.title, m.thread.state)
 	}
 	return m
 }
@@ -64,17 +64,17 @@ func TestModelAppliesSchemaExactThreadNotifications(t *testing.T) {
 	m := schemaStartedModel(t)
 	m = schemaNotification(t, m, "thread/status/changed", "ThreadStatusChangedNotification",
 		`{"threadId":"t1","status":{"type":"active","activeFlags":["waitingOnApproval"]}}`)
-	if m.state != stateAwaitingApproval {
-		t.Fatalf("waitingOnApproval state = %q", m.state)
+	if m.thread.state != stateAwaitingApproval {
+		t.Fatalf("waitingOnApproval state = %q", m.thread.state)
 	}
 	m = schemaNotification(t, m, "thread/status/changed", "ThreadStatusChangedNotification",
 		`{"threadId":"t1","status":{"type":"active","activeFlags":[]}}`)
-	if m.state != stateRunning {
-		t.Fatalf("active state = %q", m.state)
+	if m.thread.state != stateRunning {
+		t.Fatalf("active state = %q", m.thread.state)
 	}
 	m = schemaNotification(t, m, "thread/name/updated", "ThreadNameUpdatedNotification", `{"threadId":"t1","threadName":"renamed"}`)
-	if m.title != "renamed" {
-		t.Fatalf("thread name = %q", m.title)
+	if m.thread.title != "renamed" {
+		t.Fatalf("thread name = %q", m.thread.title)
 	}
 }
 
@@ -83,8 +83,8 @@ func TestModelAppliesSchemaExactTurnNotifications(t *testing.T) {
 	m := schemaStartedModel(t)
 	m.notice = "error: earlier failure; retry the turn, /resume t1, or /new"
 	m = schemaNotification(t, m, "turn/started", "TurnStartedNotification", `{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)
-	if m.notice != "" || m.turnID != "turn-1" {
-		t.Fatalf("turn/started kept notice %q, turn %q", m.notice, m.turnID)
+	if m.notice != "" || m.thread.turnID != "turn-1" {
+		t.Fatalf("turn/started kept notice %q, turn %q", m.notice, m.thread.turnID)
 	}
 	m = schemaNotification(t, m, "turn/plan/updated", "TurnPlanUpdatedNotification",
 		`{"threadId":"t1","turnId":"turn-1","plan":[{"step":"read the test","status":"completed"},{"step":"fix the decoder","status":"inProgress"}]}`)
@@ -125,8 +125,8 @@ func schemaSettled(t *testing.T, m model, data string) (model, string) {
 	if command == nil || strings.Contains(m.notice, "protocol error") {
 		t.Fatalf("item/completed: command %v, notice %q", command, m.notice)
 	}
-	if len(m.live) != 0 {
-		t.Fatalf("completed item is still live: %#v", m.live)
+	if len(m.live.items) != 0 {
+		t.Fatalf("completed item is still live: %#v", m.live.items)
 	}
 	return m, printed(command)
 }
@@ -140,17 +140,17 @@ func TestModelAppliesSchemaExactErrors(t *testing.T) {
 	m := schemaStartedModel(t)
 	m = schemaNotification(t, m, "turn/started", "TurnStartedNotification", `{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)
 	m = schemaNotification(t, m, "error", "ErrorNotification", `{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"stream reset"}}`)
-	if m.state != stateRunning || !strings.Contains(m.notice, "retrying the turn") {
-		t.Fatalf("retrying error: state %q notice %q", m.state, m.notice)
+	if m.thread.state != stateRunning || !strings.Contains(m.notice, "retrying the turn") {
+		t.Fatalf("retrying error: state %q notice %q", m.thread.state, m.notice)
 	}
 	m = schemaNotification(t, m, "error", "ErrorNotification", `{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":"stream reset"}}`)
-	if m.state != stateFailed || !strings.Contains(m.notice, "/resume t1") {
-		t.Fatalf("final error: state %q notice %q", m.state, m.notice)
+	if m.thread.state != stateFailed || !strings.Contains(m.notice, "/resume t1") {
+		t.Fatalf("final error: state %q notice %q", m.thread.state, m.notice)
 	}
 	m = schemaNotification(t, m, "turn/completed", "TurnCompletedNotification",
 		`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"failed","error":{"message":"stream reset"}}}`)
-	if m.state != stateFailed || m.turnID != "" {
-		t.Fatalf("failed turn: state %q turn %q", m.state, m.turnID)
+	if m.thread.state != stateFailed || m.thread.turnID != "" {
+		t.Fatalf("failed turn: state %q turn %q", m.thread.state, m.thread.turnID)
 	}
 }
 
@@ -161,10 +161,10 @@ func TestModelRendersSchemaExactResponses(t *testing.T) {
 		t.Fatalf("decode thread/read: %v", err)
 	}
 	m := newModel(nil, Options{}, nil)
-	m.width = 120
+	m.screen.width = 120
 	m, command := drive(t, m, resultMsg{op: "resumed", value: &read})
-	if command == nil || m.threadID != "t1" || m.title != "demo" || m.state != stateIdle {
-		t.Fatalf("resumed: command %v id %q title %q state %q", command, m.threadID, m.title, m.state)
+	if command == nil || m.thread.id != "t1" || m.thread.title != "demo" || m.thread.state != stateIdle {
+		t.Fatalf("resumed: command %v id %q title %q state %q", command, m.thread.id, m.thread.title, m.thread.state)
 	}
 	text := stripANSI(strings.Join([]string{
 		m.renderSettledItem(read.Thread.Turns[0].Items[0]),

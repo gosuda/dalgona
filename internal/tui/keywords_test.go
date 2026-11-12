@@ -76,13 +76,13 @@ func TestKeywordGlowUsesGradientAndPhase(t *testing.T) {
 func TestModelSchedulesShimmerOnlyForVisibleMatch(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
-	m.keywords = []Keyword{{Word: "ultrathink", Hue: [2]int{0, 330}}}
-	m.composer.SetValue("plain prompt")
+	m.input.keywords = []Keyword{{Word: "ultrathink", Hue: [2]int{0, 330}}}
+	m.input.composer.SetValue("plain prompt")
 	m, command := drive(t, m, tea.PasteMsg{Content: " still plain"})
 	if command != nil {
 		t.Fatal("plain composer scheduled a shimmer tick")
 	}
-	m.composer.SetValue("ultrathink")
+	m.input.composer.SetValue("ultrathink")
 	m, command = drive(t, m, tea.PasteMsg{Content: ""})
 	if command == nil {
 		t.Fatal("visible keyword did not schedule a shimmer tick")
@@ -91,9 +91,9 @@ func TestModelSchedulesShimmerOnlyForVisibleMatch(t *testing.T) {
 	if command != nil {
 		t.Fatal("blurred composer scheduled a new shimmer tick")
 	}
-	m.shimmerActive = true
+	m.input.shimmerActive = true
 	m, command = drive(t, m, shimmerMsg{})
-	if command != nil || m.shimmerActive {
+	if command != nil || m.input.shimmerActive {
 		t.Fatal("blurred composer kept the shimmer timer active")
 	}
 }
@@ -102,10 +102,10 @@ func TestComposerAndSentMessageKeywordGlow(t *testing.T) {
 	t.Parallel()
 	table := []Keyword{{Word: "ultrathink", Hue: [2]int{0, 330}}}
 	m := newModel(nil, Options{}, nil)
-	m.width = 8
-	m.composer.SetWidth(8)
-	m.keywords = table
-	m.composer.SetValue("ultrathink")
+	m.screen.width = 8
+	m.input.composer.SetWidth(8)
+	m.input.keywords = table
+	m.input.composer.SetValue("ultrathink")
 	view := m.View().Content
 	if !strings.Contains(view, "\x1b[38;2;245;71;71mu") {
 		t.Fatalf("composer broken across lines lost keyword color:\n%q", view)

@@ -11,15 +11,15 @@ import (
 func TestSetThreadClearsFollowups(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
-	m.threadID = "t1"
-	m.followups = []string{"stale"}
+	m.thread.id = "t1"
+	m.queue = []string{"stale"}
 	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Thread: rpc.Thread{ID: "t2"}}})
-	if len(m.followups) != 0 {
-		t.Fatalf("followups survived /new: %q", m.followups)
+	if len(m.queue) != 0 {
+		t.Fatalf("followups survived /new: %q", m.queue)
 	}
-	m.composer.SetValue("queued")
+	m.input.composer.SetValue("queued")
 	caller := new(fakeCaller)
-	m.client = caller
+	m.conn.client = caller
 	m, command := drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
 	m = runCommand(t, m, command, "queued text after /new did not start a turn")
 	params, ok := caller.calls[len(caller.calls)-1].params.(rpc.TurnStartParams)
