@@ -1,7 +1,7 @@
 # Hashline v1: conformance and integration
 
 Status: proposed implementation acceptance suite. Only V01's bounded model was
-executed; the product tests below are requirements, not claimed completed work.
+executed. The product tests below are requirements, not claimed completed work.
 Contracts: [Common](hashline-common-v1.md), [Light](hashline-light-v1.md),
 [Enhanced](hashline-enhanced-v1.md).
 
@@ -18,16 +18,18 @@ oracles independently split BOM/LF/CRLF. Observation tests instrument final cons
 delivery, not merely the read function. Recovery tests do not assume a terminal
 result survived.
 
+No Go test uses these IDs yet. T08 assigns the tests to the gate owner, order 7.
+
 ## T02. Reference and grammar tests
 
 | ID | Scenario | Required outcome |
 |---|---|---|
 | REF-01 | Correct session/open generation/consumer/path | Reference resolves to its immutable source snapshot. |
-| REF-02 | Same token from another consumer or child | Reject binding; no foreign preview. |
-| REF-03 | Old host, resume, fork, or clone reuses token | No write or accidental reference reuse. |
-| REF-04 | Eviction followed by new issuance | Old token remains expired. |
+| REF-02 | Same reference from another consumer or child | Reject binding; no foreign preview. |
+| REF-03 | Old host, resume, fork, or clone reuses reference | No write or accidental reference reuse. |
+| REF-04 | Eviction followed by new issuance | Old reference remains expired. |
 | REF-05 | Counter reaches maximum | Refuse issuance; no wrap. |
-| REF-06 | Two revisions have equal bytes/digest | Preserve distinct revisions and intervening history. |
+| REF-06 | Two revisions have equal bytes/digest | Preserve distinct revisions and intervening lineage. |
 | SYN-01 | PUT N, N-M and N.=M equivalent locators | Equal IR and staged bytes. |
 | SYN-02 | Quoted paths contain spaces, @, #, ], quotes, backslashes | Decode once without delimiter confusion. |
 | SYN-03 | Tagless, old #TAG, invented or latest reference | No implicit current-file interpretation. |
@@ -36,6 +38,8 @@ result survived.
 | SYN-06 | LF/CRLF framing; no final framing LF | Identical intended source bytes. |
 | SYN-07 | NEW with blank row, trailing blank row, nonempty row | Exact creation-byte rule. |
 | SYN-08 | Body length differs from source range length | Valid replacement; endpoint is not a body count. |
+
+SYN-07 follows the NEW creation-byte rule in C11 of [Common](hashline-common-v1.md).
 
 ## T03. Mapping and occurrence tests
 
@@ -49,7 +53,7 @@ result survived.
 | MAP-06 | Internal insertion later removed | First conflict stays terminal. |
 | MAP-07 | Original changes; equal text now uniquely elsewhere | No relocation. |
 | MAP-08 | Duplicates exist but recorded operations preserve original | Map the recorded occurrence, not a matching copy. |
-| MAP-09 | Current bytes differ from retained head | End lineage; no synthesized diff history. |
+| MAP-09 | Current bytes differ from retained head | End the lineage. Do not synthesize missing edges. |
 | MAP-10 | Broad replacement repeats interior source lines | Those lines are replaced unless actual footprint proves preservation. |
 | MAP-11 | Multiple same-before-image splices | Descending composition matches independent oracle. |
 | MAP-12 | Later operations restore old position | Do not revive invalid target. |
@@ -85,12 +89,12 @@ Run all L-series and E-series cases in their profile specifications, plus:
 | RAW-02 | Real mixed-EOL edit | Untouched raw bytes preserved. |
 | RAW-03 | Append after unterminated final line | Include changed separator in actual footprint. |
 | RAW-04 | Delete final unterminated line | Include any preceding terminator change. |
-| RAW-05 | No sound line-cell footprint representation | End lineage; no false narrow mapping. |
+| RAW-05 | No sound line-cell footprint representation | End the lineage. Do not create a false narrow mapping. |
 | FILE-01 | NEW races with another creator | No clobbering of an existing destination. |
 | FILE-02 | REM, unchanged full source and approval, partial display | Both honor explicit deletion exception. |
 | FILE-03 | REM after effective source mutation | Conflict, including edits later undone. |
 | FILE-04 | MV destination exists or escapes workspace | Reject without partial source mutation. |
-| FILE-05 | MV plus edits succeeds | Destination reference; old-path refs invalid. |
+| FILE-05 | MV after edits in the same file section succeeds | Destination reference; old-path refs invalid. An operation after MV fails. |
 | FILE-06 | Detected replacement/symlink retarget/canonical mismatch | Invalidate or reject; no guessed continuity. |
 | BATCH-01 | Duplicate sections, same bound reference | Merge before overlap/shape checking. |
 | BATCH-02 | Different references for same canonical file | mixed_references. |
@@ -137,14 +141,16 @@ Run all L-series and E-series cases in their profile specifications, plus:
 | COMPAT-03 | Old tolerant output receiver | Existing fields meaningful; new metadata ignored when unsupported. |
 | COMPAT-04 | Enhanced conflict | No automatic Light fallback or config change. |
 
+The owner has not set numeric ceilings for MEM-04 or MEM-07. The per-call staging ceiling in code is 64 MiB (`internal/tool/patch/stage.go`).
+
 ## T08. Integration order and owners
 
 | Order | Owner | Deliverable |
 |---|---|---|
-| 1 | Patch: snapshot.rs, ir.rs, resolve.rs, tests.rs | Reference/revision values, pure mapping/coverage, failing contract tests. |
+| 1 | Patch: internal/tool/snapshot/store.go, internal/tool/patch/ir.go, internal/tool/patch/resolve.go, internal/tool/patch/*_test.go | Reference/revision values, pure mapping/coverage, failing contract tests. |
 | 2 | Read/search plus runtime context | Same-buffer capture and final-delivery metadata. |
 | 3 | Agent/extension request and evaluator owners | Immutable cutoffs and consumer-bound evidence. |
-| 4 | Patch: styles/hashline.rs, style.rs | New profiles and section merge. |
+| 4 | Patch: internal/tool/patch/hashline.go, internal/tool/patch/ir.go | New profiles and section merge. |
 | 5 | Patch writer, store and dispatcher | Private prepared plans, truthful outcomes, invocation replay. |
 | 6 | CLI/config/docs/wire | Explicit style selection and new-style schemas/descriptions. |
 | 7 | Gate owner | Filesystem, fault, race, resource, and end-to-end evidence. |
@@ -156,14 +162,8 @@ load private planning files.
 Future product checks, not executed in this task:
 
 ```sh
-cargo fmt --check --all
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo clippy --all-targets --locked -- -D warnings
-cargo check --locked --no-default-features -p dal-core -p dal-tools
-cargo test --locked -p dal-tools patch
-cargo test --locked -p dal-agent
-cargo test --locked -p dal-store
-cargo deny --locked check
+just verify
+go test -race -count=1 ./internal/tool/patch/...
 ```
 
 Run filesystem/fault tests on supported native platform lanes. The pure model is
@@ -172,7 +172,7 @@ not a substitute for those tests.
 ## V01. Executed bounded model
 
 [verify_model.py](verify_model.py) models range/gap mapping with unique occurrence
-IDs. Its report is [verification.json](verification.json). Run:
+IDs. Its report is [verification.json](verification.json). Run from `docs/spec/hashline`:
 
 ```sh
 uv run --no-project --python 3.12 verify_model.py
@@ -181,7 +181,9 @@ uv run --no-project --python 3.12 verify_model.py
 Actual runs used available interpreters through `uv --python` in the conversation
 runtime and Codexify's private scratch workspace. Both returned exit 0 with the
 same counts. The exported script was formatted and checked with Ruff through
-Codexify; no product Rust suite was run.
+Codexify. No product Rust suite was run.
+
+`just hashline-model` fails when the verifier output differs from `verification.json`. When `CI` is `true` and `uv` is missing, `just hashline-model` fails. Otherwise, when `uv` is missing, `just hashline-model` prints `hashline-model: skipped, uv is not installed`. It then exits with status 0.
 
 | Lane | Cases | Accepted mappings |
 |---|---:|---:|
