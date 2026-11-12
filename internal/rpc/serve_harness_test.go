@@ -208,6 +208,8 @@ type wireClient struct {
 	next     int
 	waiting  map[string]chan message
 	methods  map[string]string
+	seqs     map[string]uint64
+	order    []string
 	notes    chan message
 	requests chan message
 	served   chan error
@@ -220,6 +222,7 @@ func (r *rig) connectWith(opts ServeOptions) *wireClient {
 	left, right := net.Pipe()
 	c := &wireClient{
 		t: r.t, conn: right, waiting: map[string]chan message{}, methods: map[string]string{},
+		seqs:  map[string]uint64{},
 		notes: make(chan message, 100000), requests: make(chan message, 64), served: make(chan error, 1),
 	}
 	go func() { c.served <- ServeWith(r.t.Context(), left, r.host, opts) }()
@@ -258,21 +261,59 @@ func (c *wireClient) route(line []byte, m message) {
 	switch {
 	case m.Method != "" && len(m.ID) > 0:
 		validateLine(c.t, "ServerRequest.json", line)
+		c.arrived(m.Method)
 		c.requests <- m
 	case m.Method != "":
-		if !strings.HasPrefix(m.Method, "dalgona/") {
-			validateLine(c.t, "ServerNotification.json", line)
-		}
+		c.checkNotification(line, m)
+		c.arrived(m.Method)
 		c.notes <- m
 	default:
 		c.mu.Lock()
 		ch := c.waiting[string(m.ID)]
 		method := c.methods[string(m.ID)]
 		c.mu.Unlock()
+		c.arrived(method)
 		c.checkResponse(method, m)
 		if ch != nil {
 			ch <- m
 		}
+	}
+}
+
+func (c *wireClient) arrived(method string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.order = append(c.order, method)
+}
+
+func (c *wireClient) checkNotification(line []byte, m message) {
+	if strings.HasPrefix(m.Method, "dalgona/") {
+		validateSchema(c.t, "dalgona-schema", dalgonaSchemaName(m.Method, ".json"), m.Params)
+		return
+	}
+	validateLine(c.t, "ServerNotification.json", line)
+	if m.Method == "thread/status/changed" {
+		c.checkStatusSeq(m.Params)
+	}
+}
+
+func (c *wireClient) checkStatusSeq(params jsontext.Value) {
+	var status struct {
+		ThreadID string `json:"threadId"`
+		Seq      uint64 `json:"seq"`
+	}
+	if err := json.Unmarshal(params, &status); err != nil {
+		c.t.Errorf("decode thread/status/changed %s: %v", params, err)
+		return
+	}
+	c.mu.Lock()
+	last := c.seqs[status.ThreadID]
+	if status.Seq > last {
+		c.seqs[status.ThreadID] = status.Seq
+	}
+	c.mu.Unlock()
+	if status.Seq <= last {
+		c.t.Errorf("status seq %d after %d for %s", status.Seq, last, status.ThreadID)
 	}
 }
 
@@ -308,17 +349,23 @@ var (
 
 func validateLine(t *testing.T, path string, raw []byte) {
 	t.Helper()
+	validateSchema(t, "codex-schema", path, raw)
+}
+
+func validateSchema(t *testing.T, dir, path string, raw []byte) {
+	t.Helper()
+	key := filepath.Join(dir, path)
 	schemaMu.Lock()
-	sch, ok := schemaCache[path]
+	sch, ok := schemaCache[key]
 	if !ok {
 		var err error
-		sch, err = jsonschema.NewCompiler().Compile(filepath.Join("testdata", "codex-schema", path))
+		sch, err = jsonschema.NewCompiler().Compile(filepath.Join("testdata", dir, path))
 		if err != nil {
 			schemaMu.Unlock()
-			t.Errorf("compile %s: %v", path, err)
+			t.Errorf("compile %s: %v", key, err)
 			return
 		}
-		schemaCache[path] = sch
+		schemaCache[key] = sch
 	}
 	schemaMu.Unlock()
 	value, err := jsonschema.UnmarshalJSON(strings.NewReader(string(raw)))
@@ -327,7 +374,7 @@ func validateLine(t *testing.T, path string, raw []byte) {
 		return
 	}
 	if err := sch.Validate(value); err != nil {
-		t.Errorf("%s does not validate against %s: %v", raw, path, err)
+		t.Errorf("%s does not validate against %s: %v", raw, key, err)
 	}
 }
 
@@ -453,7 +500,11 @@ func fieldOf(t *testing.T, raw jsontext.Value, path ...string) string {
 }
 
 func (c *wireClient) checkResponse(method string, m message) {
-	if m.Error != nil || strings.HasPrefix(method, "dalgona/") {
+	if m.Error != nil {
+		return
+	}
+	if strings.HasPrefix(method, "dalgona/") {
+		validateSchema(c.t, "dalgona-schema", dalgonaSchemaName(method, ".result.json"), m.Result)
 		return
 	}
 	schema, ok := responseSchemas[method]

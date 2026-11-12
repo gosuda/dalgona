@@ -24,10 +24,8 @@ func (n ThreadStatusChangedNotification) write(o *out) {
 	o.str("threadId", n.ThreadID)
 	o.key("status")
 	n.Status.write(o)
-	if n.Seq > 0 {
-		o.key("seq")
-		o.token(jsontext.Uint(n.Seq))
-	}
+	o.key("seq")
+	o.token(jsontext.Uint(n.Seq))
 	o.close()
 }
 

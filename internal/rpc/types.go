@@ -209,7 +209,7 @@ type (
 	ThreadStatusChangedNotification struct {
 		ThreadID string       `json:"threadId"`
 		Status   ThreadStatus `json:"status"`
-		Seq      uint64       `json:"seq,omitzero"`
+		Seq      uint64       `json:"seq"`
 	}
 	ThreadNameUpdatedNotification struct {
 		ThreadID   string `json:"threadId"`

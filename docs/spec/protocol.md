@@ -25,7 +25,23 @@ The wire supports concurrent requests in both directions. Request identifiers MU
 
 ## Schema
 
-Every response and notification in the Codex subset MUST validate against the vendored schema in `internal/rpc/testdata/codex-schema` (Codex commit `c9b4267c370a755da12ec1c8648c2451163212b7`). Extension methods and notifications under `dalgona/` have no Codex schema. The server encodes every message with `encoding/json/jsontext` or `encoding/json/v2`.
+Every response and notification in the Codex subset MUST validate against the vendored schema in `internal/rpc/testdata/codex-schema` (Codex commit `c9b4267c370a755da12ec1c8648c2451163212b7`). Extension methods and notifications under `dalgona/` MUST validate against `internal/rpc/testdata/dalgona-schema`. The server encodes every message with `encoding/json/jsontext` or `encoding/json/v2`.
+
+## Client guarantees
+
+A client MAY validate every message against the schemas. A client MUST ignore an unknown member and an unknown notification method.
+
+- Every response, notification, and server request in the Codex subset MUST validate against `internal/rpc/testdata/codex-schema`.
+- Every `dalgona/` message MUST validate against `internal/rpc/testdata/dalgona-schema`.
+- Every `thread/status/changed` MUST carry `seq`, an integer of at least 1.
+- Per connection and thread, `seq` MUST strictly increase. This holds after a slow-subscriber catch-up.
+- A client MUST drop a status whose `seq` is lower than the last status it applied for that thread.
+- Notifications of one thread MUST arrive in journal order.
+- `item/started` MUST precede the deltas and `item/completed` of the same item.
+- `item/fileChange/patchUpdated` for an edit approval MUST precede its `item/fileChange/requestApproval`.
+- `warning` MUST precede the sandbox choice request.
+- A server request MUST close with `serverRequest/resolved` when another client or the server settles it.
+- Text, diffs, and outputs MUST be masked before they leave the server. The exceptions are `command/exec` output and `fs/readFile` data.
 
 ## Startup
 

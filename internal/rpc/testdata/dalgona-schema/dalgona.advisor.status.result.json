@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/advisor/status result",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["name", "model", "status", "notes", "usage"],
+    "properties": {
+      "name": {"type": "string"},
+      "model": {"type": "string"},
+      "status": {"type": "string"},
+      "notes": {"type": "integer"},
+      "usage": {
+        "type": "object",
+        "required": ["inputTokens", "outputTokens"],
+        "properties": {
+          "inputTokens": {"type": "integer"},
+          "outputTokens": {"type": "integer"}
+        }
+      }
+    }
+  }
+}
