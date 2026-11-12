@@ -264,9 +264,16 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 	if !m.acceptThread(event.ThreadID) {
 		return nil
 	}
-	item := m.liveItem(event.Item.ID).settle(sanitizeItem(event.Item))
-	m.live.items = slices.DeleteFunc(m.live.items, func(live liveItem) bool { return live.ID == item.ID })
-	if !isAdvisorItem(item) {
+	final := sanitizeItem(event.Item)
+	live := m.liveItem(event.Item.ID)
+	answer := cmp.Or(final.Type, live.Type) == "agentMessage"
+	if answer {
+		m.flushGroup()
+		m.finishAnswer(event.ThreadID, live, final.Text)
+	}
+	item := live.settle(final)
+	m.live.items = slices.DeleteFunc(m.live.items, func(candidate liveItem) bool { return candidate.ID == item.ID })
+	if !answer && !isAdvisorItem(item) {
 		m.settleItem("item:"+event.ThreadID+":"+item.ID, item)
 	}
 	return nil
@@ -301,6 +308,8 @@ func (m *model) applyDelta(method string, params jsontext.Value) error {
 	item.Type = deltaType(method)
 	if item.Type == "agentMessage" {
 		m.flushGroup()
+		m.streamAnswer(delta.threadID, item, delta.text)
+		return nil
 	}
 	if item.Type == "commandExecution" {
 		item.output = appendSanitized(item.output, delta.text)

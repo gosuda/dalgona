@@ -54,8 +54,12 @@ type entry struct {
 
 type liveItem struct {
 	rpc.Item
-	text   []byte
-	output []byte
+	raw        []byte
+	text       []byte
+	output     []byte
+	split      blockSplitter
+	blocks     int
+	streamTail string
 }
 
 func (l *liveItem) settle(final rpc.Item) rpc.Item {
@@ -65,8 +69,11 @@ func (l *liveItem) settle(final rpc.Item) rpc.Item {
 }
 
 func (l *liveItem) tail() string {
-	if l.Type == "commandExecution" {
+	switch l.Type {
+	case "commandExecution":
 		return lastLine(l.Output + string(l.output))
+	case "agentMessage":
+		return strings.TrimSpace(l.streamTail)
 	}
 	return lastLine(l.Text + string(l.text))
 }

@@ -22,6 +22,8 @@ Startup runs these requests in order: `initialize` with client name `dalgona`, t
 
 The TUI MUST run inline, except for the review. The review is the only view that MUST use the alternate screen. A completed item MUST print once to scrollback with `tea.Println`. Completed assistant text MUST render as Markdown through Glamour.
 
+Streamed text MUST print each final block once, and the live row MUST show one tail row.
+
 The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the notice, else the newest live text.
 
 The composer shows `› `, the typed text, and the cursor `▏`. When the composer is empty, the cursor comes first and the placeholder follows it in faint text. The placeholder never shows a keyword mark.
@@ -212,7 +214,8 @@ The sanitizer MUST remove escape sequences and control bytes, except newline and
 It MUST also remove DEL, C1 controls, bidirectional controls, and private-use runes from U+F0000 to U+FFFFD.
 The sanitizer MUST replace each byte that is not valid UTF-8 with U+FFFD. A raw byte from 0x80 to 0x9F MUST NOT pass as a C1 control.
 
-- Each delta of agent message, reasoning, and command output text, as it is appended.
+- Each delta of reasoning and command output text, as it is appended.
+- The agent message text, sanitized after each delta from all deltas received so far.
 - The text, command, working directory, tool, server, status, file change path, and diff of an item, when it starts or completes.
 - The thread name, title, and id.
 - Each plan step.

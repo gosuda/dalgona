@@ -60,3 +60,10 @@ func (m *model) renderMarkdown(text string) string {
 	}
 	return strings.TrimSpace(rendered)
 }
+
+func (m *model) renderBlock(b block) []string {
+	if b.code {
+		return []string{b.text}
+	}
+	return append(textLines(m.renderMarkdown(b.text)), "")
+}

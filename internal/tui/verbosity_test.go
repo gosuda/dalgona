@@ -123,6 +123,17 @@ func TestFailedItemFlushesGroupFirst(t *testing.T) {
 	assertContains(t, text, "… 20 earlier lines", "Ran 1 command")
 }
 
+func TestAnswerFlushesGroupFirst(t *testing.T) {
+	t.Parallel()
+	m := verbosityModel(t, "low")
+	m = notifyItem(t, m, "item/completed", commandItem("c1", "completed", 3))
+	m = notifyItem(t, m, "item/completed", `{"type":"agentMessage","id":"a1","text":"Answer."}`)
+	keys := entryKeys(m)
+	if len(keys) != 3 || keys[1] != "group:turn-1:1" || keys[2] != "block:t1:a1:0" {
+		t.Fatalf("entry order %q, want the group line before the answer", keys)
+	}
+}
+
 func TestGroupFlushesBeforeThreadSwitch(t *testing.T) {
 	t.Parallel()
 	m := verbosityModel(t, "low")
