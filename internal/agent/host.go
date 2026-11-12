@@ -40,6 +40,10 @@ type Host struct {
 
 	settingsMu sync.Mutex
 	live       config.Config
+
+	reviewTimeout time.Duration
+	reviewSlots   chan struct{}
+	reviewMask    func(string) (string, error)
 }
 
 func NewHost(cfg HostConfig) (*Host, error) {
@@ -51,12 +55,16 @@ func NewHost(cfg HostConfig) (*Host, error) {
 		cfg: cfg, live: cfg.Config, journal: cfg.Journal, log: cmp.Or(cfg.Logger, slog.Default()), clock: cfg.Clock,
 		threads: make(map[string]*Thread), sessions: make(map[string]ThreadInfo),
 		logged: make(map[string]bool), models: make(map[string]modelCache),
+		reviewTimeout: reviewTimeout, reviewSlots: make(chan struct{}, reviewHostRequests),
 	}
 	if h.clock == nil {
 		h.clock = time.Now
 	}
 	table, err := customKeywords(cfg.Config)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkReviewFeedback(cfg.EditFeedback); err != nil {
 		return nil, err
 	}
 	h.keywords = keywords.Merge(keywords.Builtins(string(cfg.Product)), table)

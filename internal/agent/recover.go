@@ -32,6 +32,7 @@ type approvalRecord struct {
 }
 
 func (w *worker) recoverTurn(ctx context.Context) {
+	w.recovering = true
 	if w.recoverScriptTurn(ctx) {
 		return
 	}

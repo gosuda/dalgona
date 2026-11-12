@@ -40,6 +40,7 @@ type prepared struct {
 	args    jsontext.Value
 	repairs int
 	plan    *tool.Plan
+	files   []event.FileChange
 	verdict verdict
 }
 
@@ -130,6 +131,9 @@ func (w *worker) runCall(ctx context.Context, call event.ToolCall, requestID str
 		return err
 	}
 	_, err = w.t.appendEvents(context.WithoutCancel(ctx), completed)
+	if err == nil {
+		w.startReview(ctx, p, completed)
+	}
 	return err
 }
 
@@ -313,8 +317,11 @@ func (w *worker) start(ctx context.Context, p *prepared) error {
 	if err != nil {
 		return err
 	}
-	_, err = w.t.appendEvents(ctx, started)
-	return err
+	if _, err = w.t.appendEvents(ctx, started); err != nil {
+		return err
+	}
+	p.files = started.Files
+	return nil
 }
 
 func (h *Host) maskedBlob(data []byte) (*event.BlobRef, error) {

@@ -75,6 +75,7 @@ type ExtensionFactory func(t *Thread) Extension
 type HostConfig struct {
 	Journal          *journal.Store
 	Config           config.Config
+	EditJudge        ClientFactory
 	EditFeedback     []string
 	Auth             *auth.Store
 	Providers        ProviderFactory

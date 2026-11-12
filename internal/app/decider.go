@@ -83,6 +83,13 @@ func (j *judges) decider() agent.Decider {
 	return agent.NewFactoryDecider(j.resolve, j.cfg.ApprovalDecider.Threshold, j.cfg.Product)
 }
 
+func (j *judges) editJudge() agent.ClientFactory {
+	if !j.cfg.EditReview.Enabled {
+		return nil
+	}
+	return j.resolve
+}
+
 func (j *judges) resolve(ctx context.Context, threadID string) (decide.Client, string, error) {
 	return j.client(ctx, j.spec, j.roles.threadModel(threadID, j.cfg.Model))
 }

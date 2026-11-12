@@ -28,6 +28,9 @@ type worker struct {
 	settings      Settings
 	tools         *toolset
 	contextWindow int
+	round         *reviewRound
+	eligible      bool
+	recovering    bool
 }
 
 func pathSettings(created event.SessionCreated, records []event.Seqd) Settings {
@@ -219,8 +222,14 @@ func (w *worker) callRound(ctx context.Context, calls []event.ToolCall) error {
 		return err
 	}
 	w.consumeInBandCancel()
-	if err = w.runCalls(ctx, pending); err != nil {
+	w.round = &reviewRound{}
+	err = w.runCalls(ctx, pending)
+	joinErr := w.joinReviews(ctx)
+	if err != nil {
 		return err
+	}
+	if joinErr != nil {
+		return joinErr
 	}
 	v, err := w.t.view()
 	if err != nil {
