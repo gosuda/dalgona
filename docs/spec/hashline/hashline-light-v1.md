@@ -1,6 +1,6 @@
 # Hashline Light v1
 
-Status: implemented in `internal/tool/patch` as edit style `hashline-light`; not selected by default.
+Status: implemented as an explicit edit style. The default style is `anchor`.
 Identifier: `hashline-light`. Contract version: 1.
 Required base: [Shared specification](hashline-common-v1.md).
 
@@ -15,7 +15,7 @@ targets, broken history, stale approval, or invalid authority still prevent writ
 
 ## L02. Acceptance condition
 
-For each effective replacement or CUT, including source-node operations:
+For each effective replacement or CUT:
 
 ```text
 LightEligible(edit) = SharedChecks(edit)
@@ -24,16 +24,16 @@ LightEligible(edit) = SharedChecks(edit)
 SharedChecks includes eligible caller-bound reference, valid source locator,
 continuous verified history, unchanged target, resource admission, containment,
 nonoverlap, staged-observer acceptance, and authorization. Eligibility permits
-preparation; it does not guarantee I/O success.
+preparation. It does not guarantee I/O success.
 
-Do not require every affected line to have been displayed. The complete source
+Do not require every affected line to have been delivered. The complete source
 snapshot and mapping evidence must still be available, and its header must have
-been delivered before the call's cutoff. Missing display is permitted; missing
+been delivered before the call's cutoff. Missing display is permitted. Missing
 snapshot evidence is not.
 
 ## L03. Example
 
-A read captured a complete file snapshot but displayed:
+A read captured a complete file snapshot but delivered:
 
 ```text
 [src/table.rs@r0123456789abcdef0123456789abcdef.1]
@@ -59,7 +59,7 @@ ends the usable history even if the old endpoint text survives elsewhere.
 ## L04. Operations, exceptions, and selection
 
 Syntax, mapping, gaps, NEW, REM, MV, byte preservation, output, replay, and
-limits follow the common contract unchanged.
+limits follow the common contract. The parser refuses `N*` operations with `patch: line N: block ops (N*) are not supported; use a line range`.
 
 REM retains the explicit-file-delete observation exemption common to both profiles.
 It still requires an unchanged complete source reference and normal authorization.
@@ -99,13 +99,12 @@ refusal writes no target. Inspect commit I/O outcomes; never retry blindly.
 | ID | Given | Required result |
 |---|---|---|
 | L-01 | Delivered reference, retained snapshot, unseen intact range | Preparation succeeds. |
-| L-02 | Same range after unrecorded external drift | needs_context/history_gap; no write. |
+| L-02 | Same range after unrecorded external drift | Error ends with `is stale: snapshot: stale reference. Read again`. No target is written. |
 | L-03 | Recorded insertion before an intact range | Map original range and prepare. |
-| L-04 | Recorded insertion inside that range | conflict/target_changed. |
-| L-05 | Unseen source node with valid source parse and preserved extent | Preparation succeeds. |
-| L-06 | Source-node evidence expired | needs_context; no current-AST guess. |
+| L-04 | Recorded insertion inside that range | Error ends with `is stale: snapshot: target changed. Read again`. No target is written. |
+| L-05 | Source-node operation `N*` | Error: `patch: line N: block ops (N*) are not supported; use a line range`. |
 | L-07 | Tagless existing-file header | No current-coordinate write. |
-| L-08 | Target valid but authorization denied | rejected/permission_denied. |
+| L-08 | Target valid but approval declined | Decline with reason `declined by user`. |
 | L-09 | Target changed then restored through known history | Conflict despite equal final bytes. |
 | L-10 | Valid no-op with no coverage | no_change in both profiles. |
 
