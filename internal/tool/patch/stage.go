@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -185,7 +186,7 @@ func resolvePatchPath(cwd, raw string) (string, string, error) {
 	if raw == "" {
 		return "", "", errors.New("patch: path must not be empty")
 	}
-	if filepath.IsAbs(raw) || strings.IndexByte(raw, 0) >= 0 {
+	if rootedOrVolume.MatchString(raw) || strings.IndexByte(raw, 0) >= 0 {
 		return "", "", fmt.Errorf("patch: %s is outside the workspace %s", raw, cwd)
 	}
 	clean := filepath.Clean(raw)
@@ -194,6 +195,8 @@ func resolvePatchPath(cwd, raw string) (string, string, error) {
 	}
 	return filepath.ToSlash(clean), filepath.Join(cwd, clean), nil
 }
+
+var rootedOrVolume = regexp.MustCompile(`^(?:[A-Za-z]:|[/\\])`)
 
 func stageFile(ctx context.Context, style Style, group fileGroup, env tool.Env) (*stagedFile, error) {
 	if len(group.edits) == 1 && group.edits[0].kind == editCreate {
