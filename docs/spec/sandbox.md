@@ -31,7 +31,7 @@ The shim MUST apply this policy before it execs the command:
 landlock.V3.BestEffort().RestrictPaths(landlock.RODirs("/"), landlock.RWDirs(roots...), landlock.RWDirs("/dev"))
 ```
 
-`Available()` MUST report whether the Landlock ABI exists. When the go-landlock v0.11.0 ABI query reports no ABI, the command MUST run without Landlock. That case MUST NOT fail the command. Linux denies no socket path. On Linux the daemon refuses a sandboxed peer instead.
+`Available()` MUST report whether the Landlock ABI exists. When the go-landlock v0.11.2 ABI query reports no ABI, the command MUST run without Landlock. That case MUST NOT fail the command. Linux denies no socket path. On Linux the daemon refuses a sandboxed peer instead.
 
 ## macOS
 
