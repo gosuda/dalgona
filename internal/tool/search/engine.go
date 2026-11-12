@@ -53,6 +53,8 @@ func execute(cwd string, args args, dir string, clock freshness) (outcome, error
 		return find(entries, args)
 	case "symbols":
 		return symbolsMode(context.Background(), entries, args, start, time.Now)
+	case "definition":
+		return definitionMode(context.Background(), entries, args, start, time.Now)
 	}
 	return grep(entries, args, dir, clock)
 }
@@ -450,6 +452,9 @@ func cropMatch(line string) (string, bool) {
 }
 
 func appendShown(ranges []snapshot.Range, line int) []snapshot.Range {
+	if len(ranges) > 0 && line <= ranges[len(ranges)-1].End {
+		return ranges
+	}
 	if len(ranges) > 0 && ranges[len(ranges)-1].End+1 == line {
 		ranges[len(ranges)-1].End = line
 		return ranges

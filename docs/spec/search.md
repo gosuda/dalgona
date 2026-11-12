@@ -4,7 +4,7 @@
 
 Search MUST skip any file over the 16 MiB search ceiling before it reads the file. Search MUST scan only regular files.
 
-Search MUST return at most `limit` results. The `limit` argument MUST be from 1 to 1000.
+Search MUST return at most `limit` results for the find and grep modes. The definition mode MUST print at most `limit` source lines. The `limit` argument MUST be from 1 to 1000.
 
 Search MUST skip `.git` and every path that `.gitignore` or `.git/info/exclude` excludes. Search MUST NOT follow symbolic links.
 
@@ -91,6 +91,20 @@ Symbol rows MUST be sorted by path and then by start line.
 Symbol rows MUST NOT carry snapshot tags.
 
 Markdown setext headings MUST NOT give a symbol. Only ATX headings give a section symbol.
+
+### Definition
+
+The definition mode MUST print each matching definition as a header row, followed by its source lines.
+
+Each body row MUST use the form `PATH:LINE: TEXT`.
+
+The definition mode MUST cap the body rows at `limit` for one call, and it MUST end the body with `[Truncated: N more lines]` when it cuts.
+
+The definition mode MUST NOT accept an empty pattern.
+
+A header row MAY be read with the `read` tool, from line START through line END.
+
+A definition longer than 2000 lines needs one `read` call for each 2000 lines.
 
 ## Fuzzy file search
 

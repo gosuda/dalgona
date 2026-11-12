@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/syntax"
+	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 
 const (
@@ -121,39 +122,148 @@ func hasAnchor(re *regexpsyntax.Regexp) bool {
 	return false
 }
 
-func symbolsMode(ctx context.Context, entries []fileEntry, args args, start time.Time, now func() time.Time) (outcome, error) {
+type parseRun struct {
+	matcher  *regexp.Regexp
+	jobs     []parseJob
+	results  []parseResult
+	searched int
+	tally    callTally
+}
+
+func parseFiles(ctx context.Context, entries []fileEntry, args args, start time.Time, now func() time.Time) (parseRun, error) {
+	var run parseRun
 	matcher, err := namePattern(args)
 	if err != nil {
-		return outcome{}, err
+		return run, err
 	}
+	run.matcher = matcher
 	candidates, err := parseCandidates(ctx, entries, args.Glob, supportedPath)
 	if err != nil {
-		return outcome{}, err
+		return run, err
 	}
-	var tally callTally
 	files := make([]fileEntry, 0, len(candidates))
 	for _, entry := range candidates {
 		if languageOf(entry.display).HasDefinitions() {
 			files = append(files, entry)
 		} else {
-			tally.syntaxOnly++
+			run.tally.syntaxOnly++
 		}
 	}
-	jobs := dispatchSymbols(files, matcher, start, now, &tally)
-	results, err := parseJobs(ctx, jobs)
+	run.searched = len(files)
+	run.jobs = dispatchSymbols(files, matcher, start, now, &run.tally)
+	run.results, err = parseJobs(ctx, run.jobs)
+	if err != nil {
+		return run, err
+	}
+	noteParses(run.jobs, run.results, &run.tally)
+	return run, nil
+}
+
+func noteParses(jobs []parseJob, results []parseResult, tally *callTally) {
+	for i, job := range jobs {
+		switch {
+		case results[i].report.Stopped:
+			tally.parseNotes = append(tally.parseNotes, "[Parse: stopped, no rows: "+job.file.display+"]")
+		case results[i].report.SyntaxErrors:
+			tally.parseNotes = append(tally.parseNotes, "[Parse: syntax errors, rows kept: "+job.file.display+"]")
+		}
+	}
+}
+
+func symbolsMode(ctx context.Context, entries []fileEntry, args args, start time.Time, now func() time.Time) (outcome, error) {
+	run, err := parseFiles(ctx, entries, args, start, now)
 	if err != nil {
 		return outcome{}, err
 	}
-	rows, truncated := symbolRows(jobs, results, args, matcher, &tally)
-	lines := rows
+	rows, truncated := symbolRows(run.jobs, run.results, args, run.matcher)
 	if len(rows) == 0 {
-		lines = []string{emptySymbolsReply(args.Pattern, len(files))}
+		rows = []string{emptySymbolsReply(args.Pattern, run.searched)}
 	}
+	return outcome{Text: finishReply(rows, run.tally, truncated, "symbols")}, nil
+}
+
+func finishReply(lines []string, tally callTally, cut int, unit string) string {
 	lines = append(lines, tally.footers()...)
-	if truncated > 0 {
-		lines = append(lines, fmt.Sprintf("[Truncated: %d more symbols]", truncated))
+	if cut > 0 {
+		lines = append(lines, fmt.Sprintf("[Truncated: %d more %s]", cut, unit))
 	}
-	return outcome{Text: strings.Join(lines, "\n")}, nil
+	return strings.Join(lines, "\n")
+}
+
+func definitionMode(ctx context.Context, entries []fileEntry, args args, start time.Time, now func() time.Time) (outcome, error) {
+	run, err := parseFiles(ctx, entries, args, start, now)
+	if err != nil {
+		return outcome{}, err
+	}
+	rows, captures, cut := definitionRows(run, args)
+	if len(rows) == 0 {
+		rows = []string{emptySymbolsReply(args.Pattern, run.searched)}
+	}
+	return outcome{Text: finishReply(rows, run.tally, cut, "lines"), Captures: captures}, nil
+}
+
+type definitionTarget struct {
+	job    int
+	symbol syntax.Symbol
+	last   int
+}
+
+func wantedDefinitions(run parseRun, args args) ([]definitionTarget, int) {
+	var targets []definitionTarget
+	total := 0
+	for i, result := range run.results {
+		lastLine := len(run.jobs[i].starts)
+		for _, symbol := range result.symbols {
+			end := min(symbol.End, lastLine)
+			if !symbolWanted(symbol, args, run.matcher) || end < symbol.Start {
+				continue
+			}
+			targets = append(targets, definitionTarget{job: i, symbol: symbol, last: end})
+			total += end - symbol.Start + 1
+		}
+	}
+	return targets, total
+}
+
+func definitionRows(run parseRun, args args) ([]string, []capture, int) {
+	targets, total := wantedDefinitions(run, args)
+	var rows []string
+	files := make([]capture, len(run.jobs))
+	printed := 0
+	for _, target := range targets {
+		if printed == args.Limit {
+			break
+		}
+		job := run.jobs[target.job]
+		last := min(target.last, target.symbol.Start+args.Limit-printed-1)
+		rows = append(rows, symbolRow(job, target.symbol))
+		rows, files[target.job].Shown = appendBody(rows, job, target.symbol.Start, last, files[target.job].Shown)
+		files[target.job].Path = job.file.display
+		files[target.job].Data = job.data
+		printed += last - target.symbol.Start + 1
+	}
+	return rows, printedCaptures(files), total - printed
+}
+
+func printedCaptures(files []capture) []capture {
+	var out []capture
+	for _, file := range files {
+		if file.Path != "" {
+			out = append(out, file)
+		}
+	}
+	return out
+}
+
+func appendBody(rows []string, job parseJob, from, to int, shown []snapshot.Range) ([]string, []snapshot.Range) {
+	for line := from; line <= to; line++ {
+		text, complete := cropMatch(string(lineBytes(job.data, job.starts, line)))
+		rows = append(rows, fmt.Sprintf("%s:%d: %s", job.file.display, line, text))
+		if complete {
+			shown = appendShown(shown, line)
+		}
+	}
+	return rows, shown
 }
 
 func emptySymbolsReply(pattern string, searched int) string {
@@ -229,19 +339,11 @@ func parseJobs(ctx context.Context, jobs []parseJob) ([]parseResult, error) {
 	return results, nil
 }
 
-func symbolRows(jobs []parseJob, results []parseResult, args args, matcher *regexp.Regexp, tally *callTally) ([]string, int) {
+func symbolRows(jobs []parseJob, results []parseResult, args args, matcher *regexp.Regexp) ([]string, int) {
 	var rows []string
 	truncated := 0
 	for i, job := range jobs {
-		result := results[i]
-		if result.report.Stopped {
-			tally.parseNotes = append(tally.parseNotes, "[Parse: stopped, no rows: "+job.file.display+"]")
-			continue
-		}
-		if result.report.SyntaxErrors {
-			tally.parseNotes = append(tally.parseNotes, "[Parse: syntax errors, rows kept: "+job.file.display+"]")
-		}
-		for _, symbol := range result.symbols {
+		for _, symbol := range results[i].symbols {
 			if !symbolWanted(symbol, args, matcher) {
 				continue
 			}

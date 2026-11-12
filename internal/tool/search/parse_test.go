@@ -236,7 +236,7 @@ func TestKindOnlyForSymbols(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	got := runMainError(t, `{"mode":"find","pattern":"*.go","kind":["function"]}`)
-	if got != "search: kind applies only to symbols" {
+	if got != "search: kind applies only to symbols and definition" {
 		t.Fatalf("error = %q", got)
 	}
 }
@@ -247,6 +247,86 @@ func TestFindRequiresPattern(t *testing.T) {
 	got := runMainError(t, `{"mode":"find"}`)
 	if got != "search: pattern must not be empty" {
 		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestDefinitionOneDefinition(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeSearchFixture(t, root, "src/a.go", "package a\n\nfunc Alpha() int {\n\treturn 1\n}\n")
+	got := runMain(t, `{"mode":"definition","pattern":"Alpha","path":"src"}`)
+	want := "src/a.go:3-5: function func Alpha() int {\nsrc/a.go:3: func Alpha() int {\nsrc/a.go:4: \treturn 1\nsrc/a.go:5: }"
+	if got.Text != want {
+		t.Fatalf("definition = %q, want %q", got.Text, want)
+	}
+	shown := []snapshot.Range{{Start: 3, End: 5}}
+	if len(got.Captures) != 1 || got.Captures[0].Path != "src/a.go" || !slices.Equal(got.Captures[0].Shown, shown) {
+		t.Fatalf("captures = %+v, want one capture of src/a.go shown 3-5", got.Captures)
+	}
+}
+
+func TestDefinitionSameNameTwoFiles(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeSearchFixture(t, root, "a/x.go", "package p\n\nfunc Shared() {}\n")
+	writeSearchFixture(t, root, "b/x.go", "package p\n\nfunc Shared() {}\n")
+	got := runMain(t, `{"mode":"definition","pattern":"Shared"}`).Text
+	want := "a/x.go:3-3: function func Shared() {}\na/x.go:3: func Shared() {}\nb/x.go:3-3: function func Shared() {}\nb/x.go:3: func Shared() {}"
+	if got != want {
+		t.Fatalf("definition = %q, want %q", got, want)
+	}
+}
+
+func TestDefinitionBodyCutByLimit(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	var source strings.Builder
+	source.WriteString("package p\n\nfunc Long() {\n")
+	for line := 4; line <= 32; line++ {
+		fmt.Fprintf(&source, "\tv%d := %d\n", line, line)
+	}
+	source.WriteString("}\n")
+	writeSearchFixture(t, root, "long.go", source.String())
+	got := runMain(t, `{"mode":"definition","pattern":"Long","limit":10}`).Text
+	var want strings.Builder
+	want.WriteString("long.go:3-33: function func Long() {\n")
+	want.WriteString("long.go:3: func Long() {\n")
+	for line := 4; line <= 12; line++ {
+		fmt.Fprintf(&want, "long.go:%d: \tv%d := %d\n", line, line, line)
+	}
+	want.WriteString("[Truncated: 21 more lines]")
+	if got != want.String() {
+		t.Fatalf("definition = %q, want %q", got, want.String())
+	}
+}
+
+func TestDefinitionNoMatch(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeSearchFixture(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	got := runMain(t, `{"mode":"definition","pattern":"Missing"}`).Text
+	if want := "No matches for Missing. Searched 1 files of supported languages."; got != want {
+		t.Fatalf("definition = %q, want %q", got, want)
+	}
+}
+
+func TestDefinitionRequiresPattern(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	got := runMainError(t, `{"mode":"definition"}`)
+	if got != "search: pattern must not be empty" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestDefinitionKindFilter(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeSearchFixture(t, root, "src/c.ts", "export class C {\n  m(): void {}\n}\n")
+	got := runMain(t, `{"mode":"definition","pattern":"m","kind":["method"],"path":"src"}`).Text
+	want := "  src/c.ts:2-2: method m(): void {}\nsrc/c.ts:2:   m(): void {}"
+	if got != want {
+		t.Fatalf("definition = %q, want %q", got, want)
 	}
 }
 
@@ -407,4 +487,11 @@ func TestSymbolsDeadlineWaitsForExit(t *testing.T) {
 			t.Fatal("Run returned before the child exited")
 		}
 	})
+}
+
+func TestDefinitionRefusesAnchorExactText(t *testing.T) {
+	err := runToolError(t, `{"mode":"definition","pattern":"^Run$"}`)
+	if err == nil || err.Error() != anchorRefusal {
+		t.Fatalf("error = %v, want %q", err, anchorRefusal)
+	}
 }

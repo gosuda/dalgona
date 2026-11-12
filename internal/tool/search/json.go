@@ -107,9 +107,14 @@ func validateArgs(out args) error {
 	return validateKinds(out)
 }
 
+var (
+	searchModes = []string{"find", "grep", "symbols", "definition"}
+	kindModes   = []string{"symbols", "definition"}
+)
+
 func validateMode(out args) error {
-	if out.Mode != "find" && out.Mode != "grep" && out.Mode != "symbols" {
-		return errors.New("search: mode must be find, grep, or symbols")
+	if !slices.Contains(searchModes, out.Mode) {
+		return errors.New("search: mode must be find, grep, symbols, or definition")
 	}
 	if out.Pattern == "" && out.Mode != "symbols" {
 		return errors.New("search: pattern must not be empty")
@@ -123,8 +128,8 @@ func validateKinds(out args) error {
 			return fmt.Errorf("search: unknown kind %s", kind)
 		}
 	}
-	if len(out.Kind) > 0 && out.Mode != "symbols" {
-		return errors.New("search: kind applies only to symbols")
+	if len(out.Kind) > 0 && !slices.Contains(kindModes, out.Mode) {
+		return errors.New("search: kind applies only to symbols and definition")
 	}
 	return nil
 }
