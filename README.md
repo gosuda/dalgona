@@ -36,7 +36,7 @@ Start the terminal interface:
 dal
 ```
 
-In the terminal interface, run `/login <provider>` to sign in, then `/model` to select an offered model. Replace `<provider>` with your provider id, such as `openai` or `anthropic`. API-key providers can use their provider environment variables. No default thread model is shipped.
+In the terminal interface, run `/login <provider>` to open the sign-in panel for that provider, then `/model` to select an offered model. A ChatGPT account shows a browser link or a device code. An API-key provider such as `openai` or `anthropic` takes its key in the panel. A provider that signs in from a shell shows the command to run there. API-key providers can use their provider environment variables. No default thread model is shipped.
 
 Enter a task in the composer. Use `/resume` to select an existing thread, `/new` to start another, and Esc twice to interrupt a turn. [The TUI contract](docs/spec/tui.md) lists the commands and keys.
 
