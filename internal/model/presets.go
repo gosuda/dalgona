@@ -26,7 +26,6 @@ func PresetFor(provider string) (Preset, bool) {
 
 var reasoningLowToMax = []string{"low", "medium", "high", "xhigh", "max"}
 
-// source: plan "Model role presets" (https://developers.openai.com/api/docs/guides/latest-model.md, https://platform.claude.com/docs/en/models/overview.md, https://ai.google.dev/gemini-api/docs/models, read 2026-11-08)
 var presetCapabilities = map[string]Model{
 	"openai/gpt-6.1-sol":           {ID: "gpt-6.1-sol", Efforts: reasoningLowToMax},
 	"openai/gpt-6-luna":            {ID: "gpt-6-luna"},

@@ -93,6 +93,8 @@ The Anthropic, OpenAI, and Google adapters MUST report images for each listed mo
 
 Static role presets MUST match the decision table. Providers without a static preset MUST use their first offered model for `smol` and `slow`. An unavailable preset MUST return the thread model and this exact log line: `roles.<name> preset <id> is not offered; using <model>`.
 
+Providers MUST take their static preset identifiers from the native model guides of OpenAI, Anthropic, and Google, as cited in `docs/decisions/model-presets.md`, read 2026-11-08.
+
 Effort clamping MUST choose the highest supported level at or below the request. It MUST choose the lowest supported level when every level exceeds the request. Nil effort support MUST omit the effort field.
 
 A provider that does not implement image input MUST refuse a turn that carries an image. The server MUST refuse with `this model does not accept images`. The server MUST replace the images of earlier turns with a text notice for such a model.
