@@ -49,16 +49,6 @@ func TestLoad_advisorRosterInheritsAndOverridesAcrossLayers(t *testing.T) {
 	})
 }
 
-func TestLoad_advisorFlagEnablesForOneRun(t *testing.T) {
-	cfg, err := loadConfig(t, config.ProductDalgona, "[advisor]\nenabled = false\n", "", config.Flags{Advisor: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.Advisor.Enabled {
-		t.Fatal("--advisor did not enable the advisor")
-	}
-}
-
 func TestLoad_dalAcceptsAdvisorTables(t *testing.T) {
 	cfg, err := loadConfig(t, config.ProductDal, "[advisor]\nenabled = true\n[advisors.reviewer]\nmodel = \"anthropic/claude-fable-5-1\"\n", "[roles]\nadvisor = \"openai/gpt-6-astra\"\n", config.Flags{})
 	if err != nil {

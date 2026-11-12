@@ -395,9 +395,6 @@ func (c *Config) applyFlags(flags Flags) {
 	c.setFlag(flags.Runner, &c.Runner, "runner")
 	c.setFlag(flags.Remote, &c.Remote, "remote")
 	c.setFlag(flags.Cwd, &c.Cwd, "cwd")
-	if flags.Advisor {
-		c.Advisor.Enabled = true
-	}
 }
 
 func (c *Config) setFlag(source string, target *string, key string) {

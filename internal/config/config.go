@@ -78,7 +78,6 @@ func newConfig(product Product, cwd string) (Config, error) {
 type (
 	Flags struct {
 		Model, Reasoning, Approval, ToolMode, Sandbox, Runner, Remote, Cwd string
-		Advisor                                                            bool
 	}
 	Reasoning string
 )
