@@ -87,6 +87,9 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `dalgona/advisor/set {threadId, enabled}`, `dalgona/advisor/reset {threadId}` | `{}`. |
 | `dalgona/item/output/read {threadId, itemId, offset?}` | `{text, offset, next, total}`. `next` equals `total` at the end of the output. A call without a spill MUST give `-32602` `call <id> has no spilled output`. |
 | `dalgona/keywords/match {threadId?, text, kind?}` | `{matches:[{word, byteRange:{start, end}, hue, effort?, summary}]}`, sorted by start. `kind` is `prompt` (the default) or `steer`. Text over 64 KiB MUST give `-32602` `text exceeds 64 KiB`. |
+| `fs/readFile {path}`, `fs/writeFile {path, dataBase64}`, `fs/createDirectory {path, recursive?}` | `{dataBase64}`, `{}`, `{}`. See File methods. |
+| `fs/getMetadata {path}`, `fs/readDirectory {path}` | `{isDirectory, isFile, isSymlink, createdAtMs, modifiedAtMs}`, `{entries: [{fileName, isDirectory, isFile}]}`. See File methods. |
+| `fs/remove {path, recursive?, force?}`, `fs/copy {sourcePath, destinationPath, recursive?}` | `{}`. See File methods. |
 | `dalgona/retry/wait {threadId, turnId, remainingMs}` | Notification, not a method. Sent once a second during an attended rate-limit wait, and once with `remainingMs` 0 when the wait ends. Not journaled. |
 
 `thread/revert`, `thread/fork`, `turn/start`, and `dalgona/thread/leaf/set` require an idle thread. A running thread MUST give `-32600` `thread <id> is running`.
@@ -94,6 +97,26 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 A client MUST handle `account/login/completed` as follows. On `success` true, it MUST close the login panel, show `Signed in to <provider>`, and request `model/list` again. On `success` false, it MUST keep the panel open and show `error` beside the key field. A client MUST NOT promise that a turn resumes after a login.
 
 A product MAY add methods. Built-in methods take precedence over added methods. A product MAY run an archive hook on an idle thread. The hook MUST run after `Host.Archive` journals `thread.archived`. If the hook fails, the server MUST unarchive the thread. The server MUST return error `-32603` with the message `archive hook: <cause>`.
+
+## File methods
+
+The `fs/*` methods MUST take absolute paths. A relative path MUST give `-32602` `path must be absolute`. A path that does not exist MUST give `-32602` `no such file: <path>`.
+
+`fs/readFile` MUST return `{dataBase64}`. `fs/readFile` and `fs/writeFile` MUST refuse a file over 16 MiB with `-32602` `file larger than 16 MiB`.
+
+`fs/readFile` MUST refuse a path that is not a regular file with `-32602` `not a regular file: <path>`. `fs/writeFile` MUST give `-32602` `no such file: <path>` when the parent directory does not exist.
+
+`fs/writeFile` MUST write through a temporary file in the same directory and then rename it over the path. A new file MUST have mode `0o644`. An existing file MUST keep its mode. Invalid base64 MUST give `-32602` `dataBase64 is not valid base64`.
+
+`fs/createDirectory` and `fs/remove` MUST treat `recursive` as true when it is absent. `fs/remove` MUST treat `force` as true when it is absent. With `force` false, a missing path MUST give `-32602` `no such file: <path>`.
+
+`fs/getMetadata` MUST take `isSymlink` from the link itself. It MUST take the other flags and times from the link target. A dangling link MUST report its own times, and neither a file nor a directory.
+
+`fs/readDirectory` MUST list entries sorted by name. A path that is not a directory MUST give `-32602` `not a directory: <path>`.
+
+`fs/copy` MUST copy a directory only when `recursive` is true. Otherwise it MUST give `-32602` `copying a directory needs recursive`.
+
+Any other OS failure MUST give `-32603` with the cause.
 
 ## Policy mapping
 

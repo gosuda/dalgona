@@ -387,6 +387,13 @@ var responseSchemas = map[string]string{
 	"mcpServerStatus/list":   "v2/ListMcpServerStatusResponse.json",
 	"command/exec":           "v2/CommandExecResponse.json",
 	"command/exec/terminate": "v2/CommandExecTerminateResponse.json",
+	"fs/readFile":            "v2/FsReadFileResponse.json",
+	"fs/writeFile":           "v2/FsWriteFileResponse.json",
+	"fs/createDirectory":     "v2/FsCreateDirectoryResponse.json",
+	"fs/getMetadata":         "v2/FsGetMetadataResponse.json",
+	"fs/readDirectory":       "v2/FsReadDirectoryResponse.json",
+	"fs/remove":              "v2/FsRemoveResponse.json",
+	"fs/copy":                "v2/FsCopyResponse.json",
 }
 
 var (
