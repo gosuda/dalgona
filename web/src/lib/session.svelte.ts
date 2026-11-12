@@ -8,6 +8,8 @@ import {
 	emptyTranscript,
 	itemsAwaitingApproval,
 	type KnownChildThreads,
+	lastTurnStatus,
+	recordThreadTurn,
 	requestsElsewhere,
 	resolveApprovalRequest,
 	trackApprovalRequest,
@@ -164,6 +166,7 @@ export class Session {
 	notices: readonly Notice[] = $state([]);
 	statusSeq: Readonly<Record<string, number>> = $state({});
 	retryWait: RetryWait | null = $state(null);
+	completedThreadIds: ReadonlySet<string> = $state(new Set());
 	private noticeSeq = 0;
 
 	running: boolean = $derived(this.transcript.turnStatus === "inProgress");
@@ -526,6 +529,11 @@ export class Session {
 	}
 
 	private upsertThread(thread: ThreadDetail): void {
+		this.completedThreadIds = recordThreadTurn(
+			this.completedThreadIds,
+			thread.summary.id,
+			lastTurnStatus(thread),
+		);
 		const summary = thread.summary;
 		const index = this.threads.findIndex((entry) => entry.id === summary.id);
 		if (index < 0) {
@@ -594,6 +602,11 @@ export class Session {
 			"thread/read",
 			{ threadId, includeTurns: true },
 			parseThreadReadResponse,
+		);
+		this.completedThreadIds = recordThreadTurn(
+			this.completedThreadIds,
+			thread.summary.id,
+			lastTurnStatus(thread),
 		);
 		if (selection === this.selectionGeneration)
 			this.transcript = transcriptForThread(thread, this.knownChildren);
@@ -754,6 +767,16 @@ export class Session {
 		if (update.transcript !== this.transcript) this.transcriptRevision += 1;
 		this.transcript = update.transcript;
 		this.knownChildren = update.knownChildren;
+		if (
+			notification.type === "turnStarted" ||
+			notification.type === "turnCompleted"
+		) {
+			this.completedThreadIds = recordThreadTurn(
+				this.completedThreadIds,
+				notification.threadId,
+				notification.turn.status,
+			);
+		}
 		if (isEffectKind(notification.type)) {
 			const effect = this.effects[notification.type] as (
 				value: AppNotification,

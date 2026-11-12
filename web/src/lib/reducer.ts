@@ -440,3 +440,25 @@ export function acceptThreadStatus(
 	}
 	return { ...applied, [threadId]: Math.max(seq, previous) };
 }
+
+export function recordThreadTurn(
+	completed: ReadonlySet<string>,
+	threadId: string,
+	status: TurnStatus | null,
+): ReadonlySet<string> {
+	const done = status === "completed";
+	if (completed.has(threadId) === done) {
+		return completed;
+	}
+	const next = new Set(completed);
+	if (done) {
+		next.add(threadId);
+	} else {
+		next.delete(threadId);
+	}
+	return next;
+}
+
+export function lastTurnStatus(thread: ThreadDetail): TurnStatus | null {
+	return thread.turns[thread.turns.length - 1]?.status ?? null;
+}

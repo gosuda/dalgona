@@ -447,3 +447,83 @@ describe("failed follow-up sends", () => {
 		session.stop();
 	});
 });
+
+function turnNotice(
+	method: "turn/started" | "turn/completed",
+	threadId: string,
+	status: string,
+): AppNotification {
+	const parsed = parseNotification({
+		method,
+		params: {
+			threadId,
+			turn: { id: "turn-2", status, items: [], error: null },
+		},
+	});
+	if (parsed === null) throw new Error("turn notice did not parse");
+	return parsed;
+}
+
+describe("completed turns", () => {
+	beforeEach(() => {
+		vi.stubGlobal("history", { replaceState: vi.fn() });
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	test("marks a thread when its turn completes and clears the mark when the next turn starts", async () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial);
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.connection).toBe("connected");
+		});
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port was dialled");
+		port.deliver(turnNotice("turn/completed", "t2", "completed"));
+		expect(session.completedThreadIds.has("t2")).toBe(true);
+		port.deliver(turnNotice("turn/started", "t2", "inProgress"));
+		expect(session.completedThreadIds.has("t2")).toBe(false);
+		session.stop();
+	});
+
+	test("clears the mark when the last turn ends in another state", async () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial);
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.connection).toBe("connected");
+		});
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port was dialled");
+		port.deliver(turnNotice("turn/completed", "t2", "completed"));
+		port.deliver(turnNotice("turn/completed", "t2", "interrupted"));
+		expect(session.completedThreadIds.has("t2")).toBe(false);
+		session.stop();
+	});
+
+	test("reads the mark from the last turn of a loaded thread", async () => {
+		const completedResume: Answer = (params) => ({
+			thread: thread(threadIdOf(params), [
+				{ id: "turn-1", status: "completed", items: [] },
+			]),
+			model: "gpt-test",
+			approvalsReviewer: "user",
+			modelProvider: "openai",
+			approvalPolicy: "on-request",
+			sandbox: "workspace-write",
+			cwd: "/work",
+		});
+		const { dial } = fakeDial("none", { "thread/resume": completedResume });
+		const session = new Session(dial);
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.connection).toBe("connected");
+		});
+		await session.selectThread("t2");
+		expect(session.completedThreadIds.has("t2")).toBe(true);
+		session.stop();
+	});
+});

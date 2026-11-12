@@ -1,5 +1,7 @@
 <script lang="ts">
-import { stateKey, stateWords, threadTitle } from "#lib/labels.ts";
+import StateTag from "#lib/components/StateTag.svelte";
+import { threadHue } from "#lib/hue.ts";
+import { type StateKey, stateKey, threadTitle } from "#lib/labels.ts";
 import type { ThreadSummary } from "#lib/types.ts";
 
 interface Props {
@@ -8,6 +10,8 @@ interface Props {
 	loading: boolean;
 	connected: boolean;
 	disabled: boolean;
+	waitingThreadIds: ReadonlySet<string>;
+	completedThreadIds: ReadonlySet<string>;
 	onNew: () => void;
 	onSelect: (threadId: string) => void;
 }
@@ -18,6 +22,8 @@ let {
 	loading,
 	connected,
 	disabled,
+	waitingThreadIds,
+	completedThreadIds,
 	onNew,
 	onSelect,
 }: Props = $props();
@@ -27,9 +33,14 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 	day: "numeric",
 });
 
-function activityLabel(thread: ThreadSummary): string {
+function rowKey(thread: ThreadSummary): StateKey | null {
+	if (waitingThreadIds.has(thread.id)) {
+		return "awaitingApproval";
+	}
 	const key = stateKey(thread.status, thread.activeFlags);
-	return key === null ? thread.status : stateWords[key];
+	return key === "idle" && completedThreadIds.has(thread.id)
+		? "completed"
+		: key;
 }
 </script>
 
@@ -63,25 +74,38 @@ function activityLabel(thread: ThreadSummary): string {
 		<nav aria-label="Conversation threads">
 			<ul>
 				{#each threads as thread (thread.id)}
+					{@const key = rowKey(thread)}
 					<li>
 						<button
 							class="thread"
-							class:selected={thread.id === activeId}
-							aria-current={thread.id === activeId ? "page" : undefined}
+							aria-current={thread.id === activeId ? "true" : undefined}
 							disabled={disabled}
 							onclick={() => onSelect(thread.id)}
 						>
 							<span class="thread-topline">
-								<strong>{threadTitle(thread)}</strong>
-								<time datetime={new Date(thread.updatedAt * 1000).toISOString()}>
-									{dateFormatter.format(new Date(thread.updatedAt * 1000))}
-								</time>
+								<span class="name">
+									<span
+										class="hue-dot"
+										data-hue={threadHue(thread.id)}
+										aria-hidden="true"
+									></span>
+									<strong class="title">{threadTitle(thread)}</strong>
+								</span>
 							</span>
 							{#if thread.preview && thread.preview !== threadTitle(thread)}
 								<span class="preview prose">{thread.preview}</span>
 							{/if}
 							<span class="meta">
-								<span>{activityLabel(thread)}</span>
+								<span class="state-line">
+									{#if key === null}
+										<span>{thread.status}</span>
+									{:else}
+										<StateTag state={key} />
+									{/if}
+									<time datetime={new Date(thread.updatedAt * 1000).toISOString()}>
+										{dateFormatter.format(new Date(thread.updatedAt * 1000))}
+									</time>
+								</span>
 								<span>{thread.model ?? "Default model"}</span>
 							</span>
 						</button>
@@ -177,8 +201,10 @@ function activityLabel(thread: ThreadSummary): string {
 		min-height: 0;
 		gap: var(--space-2);
 		border-color: transparent;
+		border-inline-start: 0 solid var(--text);
 		background: transparent;
 		padding: var(--space-3);
+		padding-inline-start: calc(var(--space-3) + 2px);
 		text-align: start;
 	}
 
@@ -186,9 +212,28 @@ function activityLabel(thread: ThreadSummary): string {
 		opacity: 0.55;
 	}
 
-	.thread.selected {
-		border-color: var(--strong);
+	.thread[aria-current="true"] {
+		border-inline-start-width: 2px;
+		padding-inline-start: var(--space-3);
 		background: var(--tone);
+	}
+
+	.thread[aria-current="true"] .title {
+		font-weight: var(--weight-strong);
+	}
+
+	@media (hover: hover) {
+		.thread[aria-current="true"]:not(:disabled):hover {
+			border-color: transparent;
+			border-inline-start-color: var(--text);
+			background: var(--tone);
+		}
+	}
+
+	@media (forced-colors: active) {
+		.thread[aria-current="true"] {
+			border-inline-start-color: Highlight;
+		}
 	}
 
 	.thread-topline {
@@ -196,6 +241,21 @@ function activityLabel(thread: ThreadSummary): string {
 		align-items: baseline;
 		justify-content: space-between;
 		gap: var(--space-2);
+	}
+
+	.name {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		min-width: 0;
+	}
+
+	.hue-dot {
+		flex: none;
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--point);
 	}
 
 	.thread-topline strong {
@@ -217,6 +277,12 @@ function activityLabel(thread: ThreadSummary): string {
 	time {
 		flex: none;
 		font-variant-numeric: tabular-nums;
+	}
+
+	.state-line {
+		display: flex;
+		align-items: baseline;
+		gap: var(--space-2);
 	}
 
 	.preview {

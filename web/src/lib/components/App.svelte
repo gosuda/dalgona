@@ -14,6 +14,9 @@ interface Props {
 }
 
 let { session }: Props = $props();
+const waitingThreadIds = $derived(
+	new Set(session.approvals.map((request) => request.threadId)),
+);
 const openThreadFlags = $derived(
 	session.threads.find((thread) => thread.id === session.activeThreadId)
 		?.activeFlags ?? [],
@@ -33,6 +36,8 @@ const openThreadFlags = $derived(
 		loading={session.loadingThreads}
 		connected={session.connection === "connected"}
 		disabled={session.connection !== "connected" || session.startingThread}
+		waitingThreadIds={waitingThreadIds}
+		completedThreadIds={session.completedThreadIds}
 		onNew={() => void session.createThread()}
 		onSelect={(threadId) => void session.selectThread(threadId)}
 	/>
