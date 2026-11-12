@@ -106,7 +106,7 @@ Use these table names and keys:
 | `[herdr]` (dalgona) | `subagent_panes` |
 | `[web]` (dalgona) | `listen`, `token`, `cert_file`, `key_file` |
 
-`edit_style` accepts a style name or a table of model globs with a required `default` entry. Styles are `anchor`, `replace`, `hashline`, `hashline-light`, `hashline-enhanced`, `apply_patch`, `simple`, `balanced`, and `strict`. Model globs match in declaration order. Dal rejects the dalgona-only settings.
+`edit_style` accepts a style name or a table of model globs with a required `default` entry. Styles are `anchor`, `replace`, `hashline`, `hashline-light`, `hashline-enhanced`, `apply_patch`, `simple`, `balanced`, and `strict`. Model globs match in declaration order. Dal rejects the dalgona-only settings. The default `tool_mode` is `eval-first` in both products. Set `tool_mode = "normal"` to restore the full tool list.
 
 ## Run inside an outer sandbox
 

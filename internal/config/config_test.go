@@ -53,13 +53,23 @@ func TestLoad_defaults(t *testing.T) {
 	requireConfigValue(t, cfg.Model, "")
 	requireConfigValue(t, cfg.Reasoning, config.ReasoningDefault)
 	requireConfigValue(t, cfg.Approval, config.ApprovalAuto)
-	requireConfigValue(t, cfg.ToolMode, config.ToolModeNormal)
+	requireConfigValue(t, cfg.ToolMode, config.ToolModeEvalFirst)
 	requireConfigValue(t, cfg.Sandbox, config.SandboxWorkspaceWrite)
 	requireConfigValue(t, cfg.Runner, "local")
 	requireConfigValue(t, cfg.EditStyle.EditStyle("any/model"), "anchor")
 	requireConfigValue(t, cfg.StreamStartTimeout, time.Minute)
 	requireConfigValue(t, cfg.StreamIdleTimeout, 5*time.Minute)
 	requireConfigValue(t, cfg.ApprovalDecider.Threshold, 0.9)
+}
+
+func TestLoad_defaultToolModeIsEvalFirst(t *testing.T) {
+	for _, product := range []config.Product{config.ProductDal, config.ProductDalgona} {
+		cfg, err := loadConfig(t, product, "", "", config.Flags{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireConfigValue(t, cfg.ToolMode, config.ToolModeEvalFirst)
+	}
 }
 
 func TestLoad_modelPrecedence(t *testing.T) {

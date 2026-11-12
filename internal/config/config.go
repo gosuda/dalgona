@@ -293,7 +293,7 @@ func defaultConfig(product Product, cwd string) Config {
 func defaultConfigWithHome(product Product, home, cwd string) Config {
 	return Config{
 		Home: home, Product: product, Cwd: cwd,
-		Reasoning: ReasoningDefault, Approval: ApprovalAuto, ToolMode: ToolModeNormal,
+		Reasoning: ReasoningDefault, Approval: ApprovalAuto, ToolMode: ToolModeEvalFirst,
 		Sandbox: SandboxWorkspaceWrite, Runner: "local",
 		Verbosity: VerbosityMedium, Theme: ThemeAuto, Icons: IconsAuto, StatusHide: []string{}, Notifications: true,
 		EditStyle: EditStyleSpec{Default: "anchor"}, CompactionThreshold: .8,

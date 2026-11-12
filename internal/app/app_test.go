@@ -22,6 +22,7 @@ import (
 	"github.com/gosuda/dalgona/internal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/scripthost"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -349,5 +350,36 @@ func TestDeciderUsesTheActionThreadModel(t *testing.T) {
 	}
 	if got := roles.threadModel("missing", "openai/fallback"); got != "openai/fallback" {
 		t.Fatalf("unknown thread model = %q", got)
+	}
+}
+
+func TestDefaultToolModeShowsOnlyTheEvalFirstList(t *testing.T) {
+	for _, product := range []config.Product{config.ProductDal, config.ProductDalgona} {
+		home := "DALGONA_HOME"
+		if product == config.ProductDal {
+			home = "DAL_HOME"
+		}
+		t.Setenv(home, t.TempDir())
+		cfg, err := config.Load(product, t.TempDir(), config.Flags{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		builtin, err := toolSet(cfg, func(context.Context, string) []tool.Tool { return nil })(t.Context(), "openai/gpt-test", t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ext := scripthost.New(scripthost.Config{Mode: cfg.ToolMode})(nil)
+		tools := ext.Tools(builtin)
+		specs := make([]tool.Spec, 0, len(tools))
+		for _, item := range tools {
+			specs = append(specs, item.Spec())
+		}
+		var names []string
+		for _, spec := range ext.Visible(specs) {
+			names = append(names, spec.Name)
+		}
+		if want := []string{"read", "search", "patch", "exec", "eval"}; !slices.Equal(names, want) {
+			t.Fatalf("%s visible tools = %v, want %v", product, names, want)
+		}
 	}
 }
