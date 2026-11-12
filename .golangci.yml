@@ -106,6 +106,7 @@ linters:
             - "**/internal/runner/**"
             - "**/internal/config/**"
             - "**/internal/decide/**"
+            - "**/internal/textdiff/**"
             - "**/internal/keywords/**"
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/rpc"
