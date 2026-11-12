@@ -113,3 +113,53 @@ A digest MUST refuse a directory that holds more than 10000 files.
 A missing path MUST contribute its name to the digest, marked as missing.
 
 An approval MUST report `stale` when its digest differs from the current digest, and `missing` when none exists.
+
+## Runner contract
+
+A variant MUST write `results.jsonl` in its output directory, with one row for each case and repetition.
+
+A row MUST carry `case_id`, `rep`, and `status`. The `status` MUST be `ok` or `truncated`.
+
+A row MUST carry `grade`, which MUST be a number, a boolean, or an object of numbers and booleans.
+
+A failed attempt MUST go to `errors.jsonl` with `case_id`, `rep`, and a non-empty `class`.
+
+A train case MAY write a trace named `traces/<case>_rep<k>.json`. A test case MUST NOT write a trace.
+
+A test row MUST NOT carry text fields other than `case_id`, `status`, `model`, and `tags`.
+
+## Gate checks
+
+The gate MUST refuse a variant that lacks a `(case, rep)` slot, and MUST name the missing slots.
+
+The gate MUST refuse a variant with a duplicate `(case, rep)` row.
+
+A slot that only errored MUST make the variant rerun, except in the baseline, which MUST refuse.
+
+The gate MUST refuse a trace of a test case, and any trace file that is not `<case>_rep<k>.json`.
+
+The gate MUST refuse a test row that carries output text.
+
+The gate MUST refuse a guardrail with fewer than two measured cases on train or test.
+
+The gate MUST refuse a change to the change paths made after `check`.
+
+The gate MUST replay a round whose results digest is unchanged, and MUST NOT record a second round.
+
+The `check` action MUST refuse a variant that is not the next expected variant.
+
+The `check` action MUST refuse a non-baseline variant whose change digest equals the best round's.
+
+The `check` action MUST refuse while an approval is not current, or while the flow is done.
+
+The baseline gate MUST warn when the target sits near its ceiling, or when train and test differ by more than their intervals.
+
+## Train view
+
+The train view MUST list the rows and traces of train cases only.
+
+The train view MUST NOT list a row or a trace of a test case.
+
+The train view MUST give each train case its target mean for every gated variant, or none when the variant lacks it.
+
+The status table MUST mark the best round with `(best)`.

@@ -3,17 +3,15 @@ package ratchet
 import "math"
 
 type summary struct {
-	N    int
-	Mean *float64
-	Half *float64
+	N    int      `json:"n"`
+	Mean *float64 `json:"mean"`
+	Half *float64 `json:"half"`
 }
 
 type delta struct {
 	summary
-	Verdict string
+	Verdict string `json:"verdict"`
 }
-
-type caseMeans map[string]float64
 
 var tCritical95 = [...]float64{
 	12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,

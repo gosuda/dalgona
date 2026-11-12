@@ -8,8 +8,8 @@ import (
 const maxReruns = 2
 
 type pair struct {
-	Train delta
-	Test  delta
+	Train delta `json:"train"`
+	Test  delta `json:"test"`
 }
 
 type guard struct {
