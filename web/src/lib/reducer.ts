@@ -436,3 +436,15 @@ export function requeueFailedFollowup(
 ): readonly string[] {
 	return [...queue, text];
 }
+
+export function acceptThreadStatus(
+	applied: Readonly<Record<string, number>>,
+	threadId: string,
+	seq: number,
+): Readonly<Record<string, number>> | null {
+	const previous = applied[threadId] ?? 0;
+	if (seq > 0 && seq < previous) {
+		return null;
+	}
+	return { ...applied, [threadId]: Math.max(seq, previous) };
+}

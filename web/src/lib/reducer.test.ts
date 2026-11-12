@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { advisorLabel, itemStatusLabel, kindLabel } from "./labels";
 import {
+	acceptThreadStatus,
 	activeApproval,
 	applyOpenThreadNotification,
 	dropSentFollowup,
@@ -585,5 +586,24 @@ describe("open thread notification", () => {
 		expect(update.knownChildren).toEqual({ "thread-2": ["child-9"] });
 		expect(update.transcript).toBe(transcript);
 		expect(update.sendFollowup).toBe(false);
+	});
+});
+
+describe("thread status order", () => {
+	test("ignores a status with a lower seq than one already applied", () => {
+		expect(acceptThreadStatus({ "thread-1": 5 }, "thread-1", 3)).toBeNull();
+	});
+
+	test("applies a status without seq", () => {
+		expect(acceptThreadStatus({ "thread-1": 5 }, "thread-1", 0)).toEqual({
+			"thread-1": 5,
+		});
+	});
+
+	test("keeps one seq per thread", () => {
+		expect(acceptThreadStatus({ "thread-1": 5 }, "thread-2", 2)).toEqual({
+			"thread-1": 5,
+			"thread-2": 2,
+		});
 	});
 });

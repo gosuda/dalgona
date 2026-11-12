@@ -137,6 +137,7 @@ export type AppNotification =
 	| {
 			readonly type: "threadStatus";
 			readonly threadId: string;
+			readonly seq: number;
 			readonly status: ThreadActivity;
 	  }
 	| {

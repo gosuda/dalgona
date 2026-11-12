@@ -185,4 +185,19 @@ describe("notification validation", () => {
 			"rpc error -32001: advisor runtime is not available",
 		);
 	});
+
+	it("reads the seq of a thread status and defaults it to zero", () => {
+		expect(
+			parseNotification({
+				method: "thread/status/changed",
+				params: { threadId: "thread-1", seq: 7, status: { type: "idle" } },
+			}),
+		).toMatchObject({ type: "threadStatus", threadId: "thread-1", seq: 7 });
+		expect(
+			parseNotification({
+				method: "thread/status/changed",
+				params: { threadId: "thread-1", status: { type: "idle" } },
+			}),
+		).toMatchObject({ type: "threadStatus", threadId: "thread-1", seq: 0 });
+	});
 });

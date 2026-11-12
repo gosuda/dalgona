@@ -16,6 +16,7 @@ import {
 } from "#lib/protocol.ts";
 import type { KnownChildThreads } from "#lib/reducer.ts";
 import {
+	acceptThreadStatus,
 	activeApproval,
 	applyOpenThreadNotification,
 	dropSentFollowup,
@@ -77,6 +78,7 @@ let loadingTranscript = $state(false);
 let startingThread = $state(false);
 let errorMessage = $state("");
 let accessToken = $state("");
+let statusSeq = $state<Readonly<Record<string, number>>>({});
 let client: RpcClient | undefined;
 let connectionGeneration = 0;
 let selectionGeneration = 0;
@@ -513,13 +515,21 @@ function handleNotification(notification: AppNotification): void {
 		case "threadStarted":
 			upsertThread(notification.thread);
 			break;
-		case "threadStatus":
+		case "threadStatus": {
+			const seqs = acceptThreadStatus(
+				statusSeq,
+				notification.threadId,
+				notification.seq,
+			);
+			if (seqs === null) break;
+			statusSeq = seqs;
 			threads = threads.map((thread) =>
 				thread.id === notification.threadId
 					? { ...thread, status: notification.status }
 					: thread,
 			);
 			break;
+		}
 		case "threadName":
 			threads = threads.map((thread) =>
 				thread.id === notification.threadId

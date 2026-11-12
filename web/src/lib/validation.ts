@@ -681,6 +681,7 @@ export function parseNotification(value: unknown): AppNotification | null {
 			return {
 				type: "threadStatus",
 				threadId: params["threadId"],
+				seq: typeof params["seq"] === "number" ? params["seq"] : 0,
 				status: activity(params["status"]),
 			};
 		}
