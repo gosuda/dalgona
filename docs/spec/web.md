@@ -104,6 +104,7 @@ The client MUST cache the setting under the browser key `dalgona.theme` and appl
 Each theme MUST use only the colour roles of `DESIGN.md`. The client MUST NOT paint a gradient.
 Every text role MUST meet 4.5:1 against its ground. Control edges and the focus ring MUST meet 3:1 against their ground. The ink on the point MUST meet 4.5:1.
 Under forced colours, every button edge and focus ring MUST keep a visible border.
+The Settings panel MUST save the choice under the setting path `theme`.
 
 ### Type
 
@@ -320,3 +321,8 @@ That submit MUST show `No command named /<name>. Start with // to send a message
 
 Pressing `?` while no field has focus MUST open the key list.
 Escape MUST close a panel and MUST return focus to the element that opened it.
+The Settings panel MUST save only the settings whose values changed, in one `config/batchWrite` call.
+The Settings panel MUST send the key paths `approval`, `verbosity`, `theme`, `statusHide`, and `editReview`.
+An empty or unknown choice MUST NOT be saved, and the panel MUST show `Choose a <label>.` in its body.
+After a save, the client MUST apply the theme at once and MUST reload the settings.
+A save that changes `approval` MUST show `saved; open threads keep their approval and sandbox`.

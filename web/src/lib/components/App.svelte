@@ -5,6 +5,7 @@ import Composer from "#lib/components/Composer.svelte";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
 import KeyListPanel from "#lib/components/panels/KeyListPanel.svelte";
 import Panel from "#lib/components/panels/Panel.svelte";
+import SettingsPanel from "#lib/components/panels/SettingsPanel.svelte";
 import QuestionCard from "#lib/components/QuestionCard.svelte";
 import StateTag from "#lib/components/StateTag.svelte";
 import StatusBand from "#lib/components/StatusBand.svelte";
@@ -230,11 +231,16 @@ function onWindowKeydown(event: KeyboardEvent): void {
 <KeyListPanel open={session.panel === "keys"} onClose={() => session.closePanel()} />
 <Panel
 	title={genericTitle}
-	open={session.panel !== null && session.panel !== "keys"}
+	open={session.panel !== null && session.panel !== "keys" && session.panel !== "settings"}
 	onClose={() => session.closePanel()}
 >
 	{#snippet children()}{/snippet}
 </Panel>
+<SettingsPanel
+	{session}
+	open={session.panel === "settings"}
+	onClose={() => session.closePanel()}
+/>
 
 <style>
 	.shell {

@@ -23,6 +23,7 @@ import {
 	transcriptForThread,
 } from "./reducer";
 import { turnSteerParams } from "./requests";
+import type { SettingEdit } from "./settings";
 import {
 	applyTheme,
 	parseThemeSetting,
@@ -55,6 +56,7 @@ import type {
 	TranscriptState,
 	WaitingElsewhere,
 } from "./types";
+import type { SettingValue } from "./validation";
 import {
 	parseAdvisorStatusResponse,
 	parseConfigReadResponse,
@@ -193,6 +195,7 @@ export class Session {
 	retryWait: RetryWait | null = $state(null);
 	completedThreadIds: ReadonlySet<string> = $state(new Set());
 	verbosity: Verbosity = $state("medium");
+	settingValues: readonly SettingValue[] = $state([]);
 	panel: PanelKind | null = $state(null);
 	private noticeSeq = 0;
 
@@ -603,6 +606,7 @@ export class Session {
 			parseSettingsReadResponse,
 		);
 		if (generation !== this.connectionGeneration) return;
+		this.settingValues = settings;
 		const theme = settings.find((setting) => setting.key === "theme");
 		if (theme !== undefined)
 			this.applyThemeSetting(parseThemeSetting(theme.value));
@@ -886,6 +890,49 @@ export class Session {
 				() => void this.changeModel(model),
 			);
 		}
+	}
+
+	async saveSettings(edits: readonly SettingEdit[]): Promise<boolean> {
+		const generation = this.connectionGeneration;
+		try {
+			await this.requireClient().call(
+				"config/batchWrite",
+				{
+					edits: edits.map((edit) => ({
+						keyPath: edit.keyPath,
+						value: edit.value,
+						mergeStrategy: "replace",
+					})),
+				},
+				parseVoidResponse,
+			);
+		} catch (error) {
+			this.reportFailure(
+				"Unable to save settings",
+				error instanceof Error ? error : String(error),
+				() => void this.saveSettings(edits),
+			);
+			return false;
+		}
+		const theme = edits.find((edit) => edit.keyPath === "theme");
+		if (typeof theme?.value === "string")
+			this.applyThemeSetting(parseThemeSetting(theme.value));
+		try {
+			await this.loadSettings(generation);
+		} catch (error) {
+			this.reportFailure(
+				"Unable to load settings",
+				error instanceof Error ? error : String(error),
+				() => void this.loadSettings(generation),
+			);
+		}
+		if (edits.some((edit) => edit.keyPath === "approval"))
+			this.notify(
+				"info",
+				"saved; open threads keep their approval and sandbox",
+			);
+		this.closePanel();
+		return true;
 	}
 
 	respondApproval(request: ApprovalRequest, decision: Decision): void {
