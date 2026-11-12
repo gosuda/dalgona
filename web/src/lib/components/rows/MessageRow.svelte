@@ -3,7 +3,7 @@ import KeywordText from "#lib/components/KeywordText.svelte";
 import Markdown from "#lib/components/Markdown.svelte";
 import type { RowProps } from "#lib/components/rows/types.ts";
 
-let { item, running }: RowProps = $props();
+let { item, running, onRewind }: RowProps = $props();
 </script>
 
 {#if item.kind === "userMessage"}
@@ -12,6 +12,9 @@ let { item, running }: RowProps = $props();
 		<p class="prose"><KeywordText text={item.text} matches={item.keywords} /></p>
 		{#if item.keywords.length > 0}
 			<p class="keywords">Keywords: {item.keywords.map((match) => match.word).join(", ")}</p>
+		{/if}
+		{#if onRewind !== undefined}
+			<button type="button" class="rewind" onclick={() => onRewind(item.turnId)}>Rewind to here</button>
 		{/if}
 	</article>
 {:else if item.kind === "agentMessage"}

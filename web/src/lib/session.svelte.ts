@@ -1,4 +1,8 @@
-import type { PanelKind } from "./commands";
+import {
+	type PanelKind,
+	panelsRefusedWhileRunning,
+	slashCommands,
+} from "./commands";
 import { threadTitle } from "./labels";
 import { RpcError, rpcSocketUrl, tokenFromHash } from "./protocol";
 import { questionResponse, resolutionNotice } from "./question";
@@ -50,6 +54,7 @@ import type {
 	QuestionSelection,
 	RequestId,
 	RetryWait,
+	ReviewTarget,
 	RpcHandlers,
 	ServerRequest,
 	StatusInfo,
@@ -57,6 +62,7 @@ import type {
 	ThreadSummary,
 	TokenUsage,
 	TranscriptState,
+	TreeTurn,
 	WaitingElsewhere,
 } from "./types";
 import type { SettingValue } from "./validation";
@@ -74,6 +80,7 @@ import {
 	parseThreadListResponse,
 	parseThreadReadResponse,
 	parseThreadStartResponse,
+	parseThreadTreeResponse,
 	parseTurnStartResponse,
 	parseTurnSteerResponse,
 	parseVoidResponse,
@@ -205,6 +212,7 @@ export class Session {
 	panel: PanelKind | null = $state(null);
 	loginProviders: readonly LoginProvider[] = $state([]);
 	login: LoginFlow | null = $state.raw(null);
+	panelTurnId: string | null = $state(null);
 	private noticeSeq = 0;
 
 	running: boolean = $derived(this.transcript.turnStatus === "inProgress");
@@ -379,9 +387,14 @@ export class Session {
 		this.notices = this.notices.filter((notice) => notice.id !== id);
 	}
 
-	openPanel(kind: PanelKind): void {
+	openPanel(kind: PanelKind, turnId: string | null = null): void {
+		if (this.running && panelsRefusedWhileRunning[kind] === true) {
+			this.refuseWhileRunning(kind);
+			return;
+		}
 		if (this.panel === "login" && kind !== "login") this.cancelLogin();
 		this.panel = kind;
+		this.panelTurnId = turnId;
 		if (kind === "login") {
 			this.loadLoginProviders().catch((error: unknown) =>
 				this.reportFailure(
@@ -396,6 +409,119 @@ export class Session {
 	closePanel(): void {
 		if (this.panel === "login") this.cancelLogin();
 		this.panel = null;
+		this.panelTurnId = null;
+	}
+
+	private refuseWhileRunning(kind: PanelKind): void {
+		const name =
+			slashCommands.find((command) => command.panel === kind)?.name ?? kind;
+		const text = `/${name} is unavailable while a turn is working; wait for it to finish or interrupt it first`;
+		this.notify("warning", text, [
+			{ label: "Interrupt", run: () => void this.interruptTurn() },
+			{
+				label: "Close",
+				run: () => {
+					this.notices = this.notices.filter((notice) => notice.text !== text);
+				},
+			},
+		]);
+	}
+
+	async listThreads(): Promise<readonly ThreadSummary[]> {
+		const result = await this.requireClient().call(
+			"thread/list",
+			{ limit: 100 },
+			parseThreadListResponse,
+		);
+		return result.threads;
+	}
+
+	async threadTurns(): Promise<readonly TreeTurn[]> {
+		const threadId = this.requireThread();
+		return this.requireClient().call(
+			"dalgona/thread/tree",
+			{ threadId },
+			parseThreadTreeResponse,
+		);
+	}
+
+	async compactThread(): Promise<void> {
+		const threadId = this.requireThread();
+		await this.requireClient().call(
+			"thread/compact/start",
+			{ threadId },
+			parseVoidResponse,
+		);
+	}
+
+	async forkThread(lastTurnId: string): Promise<void> {
+		const threadId = this.requireThread();
+		const result = await this.requireClient().call(
+			"thread/fork",
+			{ threadId, lastTurnId },
+			parseThreadStartResponse,
+		);
+		this.upsertThread(result.thread);
+		await this.selectThread(result.thread.summary.id);
+	}
+
+	async setLeaf(turnId: string): Promise<void> {
+		const threadId = this.requireThread();
+		await this.requireClient().call(
+			"dalgona/thread/leaf/set",
+			{ threadId, turnId },
+			parseVoidResponse,
+		);
+		await this.selectThread(threadId);
+	}
+
+	async rewindTo(beforeTurnId: string): Promise<void> {
+		const threadId = this.requireThread();
+		await this.requireClient().call(
+			"thread/revert",
+			{ threadId, beforeTurnId },
+			parseVoidResponse,
+		);
+		await this.selectThread(threadId);
+	}
+
+	async refreshAdvisor(): Promise<void> {
+		if (this.activeThreadId !== null)
+			await this.loadAdvisor(this.activeThreadId);
+	}
+
+	async setAdvisor(enabled: boolean): Promise<void> {
+		const threadId = this.requireThread();
+		await this.requireClient().call(
+			"dalgona/advisor/set",
+			{ threadId, enabled },
+			parseVoidResponse,
+		);
+		await this.loadAdvisor(threadId);
+	}
+
+	async resetAdvisor(): Promise<void> {
+		const threadId = this.requireThread();
+		await this.requireClient().call(
+			"dalgona/advisor/reset",
+			{ threadId },
+			parseVoidResponse,
+		);
+		await this.loadAdvisor(threadId);
+	}
+
+	async startReview(target: ReviewTarget): Promise<void> {
+		const threadId = this.requireThread();
+		await this.requireClient().call(
+			"review/start",
+			{ threadId, target },
+			parseVoidResponse,
+		);
+	}
+
+	private requireThread(): string {
+		if (this.activeThreadId === null) throw new Error("No thread is open.");
+		return this.activeThreadId;
 	}
 
 	private clearErrors(): void {

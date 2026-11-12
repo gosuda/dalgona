@@ -8,6 +8,9 @@ import LoginPanel from "#lib/components/panels/LoginPanel.svelte";
 import ModelPanel from "#lib/components/panels/ModelPanel.svelte";
 import Panel from "#lib/components/panels/Panel.svelte";
 import SettingsPanel from "#lib/components/panels/SettingsPanel.svelte";
+import ThreadPanels, {
+	threadPanelKinds,
+} from "#lib/components/panels/ThreadPanels.svelte";
 import QuestionCard from "#lib/components/QuestionCard.svelte";
 import StateTag from "#lib/components/StateTag.svelte";
 import StatusBand from "#lib/components/StatusBand.svelte";
@@ -176,6 +179,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 			awaitingApproval={session.awaitingApproval}
 			verbosity={session.verbosity}
 			readOutput={(itemId, offset) => session.readItemOutput(itemId, offset)}
+			onRewind={(turnId) => session.openPanel("rewind", turnId)}
 		/>
 
 		<div class="dock" bind:clientHeight={dockHeight}>
@@ -235,7 +239,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 <ModelPanel {session} open={session.panel === "model"} onClose={() => session.closePanel()} />
 <Panel
 	title={genericTitle}
-	open={session.panel !== null && session.panel !== "keys" && session.panel !== "settings" && session.panel !== "login" && session.panel !== "model"}
+	open={session.panel !== null && session.panel !== "keys" && session.panel !== "settings" && session.panel !== "login" && session.panel !== "model" && !threadPanelKinds.has(session.panel)}
 	onClose={() => session.closePanel()}
 >
 	{#snippet children()}{/snippet}
@@ -245,6 +249,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 	open={session.panel === "settings"}
 	onClose={() => session.closePanel()}
 />
+<ThreadPanels {session} />
 
 <style>
 	.shell {

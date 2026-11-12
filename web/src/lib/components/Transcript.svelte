@@ -54,6 +54,7 @@ interface Props {
 	onStart: () => void;
 	verbosity?: Verbosity;
 	readOutput: (itemId: string, offset: number) => Promise<OutputPage>;
+	onRewind?: (turnId: string) => void;
 }
 
 const rowComponents: Record<TranscriptItem["kind"], Component<RowProps>> = {
@@ -87,6 +88,7 @@ let {
 	onStart,
 	verbosity = "medium",
 	readOutput,
+	onRewind,
 }: Props = $props();
 let viewport = $state<HTMLElement>();
 let running = $derived(turnStatus === "inProgress");
@@ -219,7 +221,7 @@ function jumpToLatest(): void {
 						{@const presentation = presentRow(entry, verbosity, isLiveItem(entry))}
 						{#if presentation.mode !== "hidden"}
 							<li class:from-user={entry.kind === "userMessage"}>
-								<Row item={entry} {running} awaiting={awaitingApproval} {presentation} onOpen={() => openReview(entry)} />
+								<Row item={entry} {running} awaiting={awaitingApproval} {presentation} onOpen={() => openReview(entry)} {onRewind} />
 							</li>
 						{/if}
 					{/if}

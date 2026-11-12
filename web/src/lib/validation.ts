@@ -24,6 +24,7 @@ import type {
 	TokenBreakdown,
 	TokenUsage,
 	TranscriptItem,
+	TreeTurn,
 	TurnSnapshot,
 	TurnStartResult,
 	TurnStatus,
@@ -810,6 +811,26 @@ export function parseVoidResponse(value: unknown): null {
 		return null;
 	}
 	fail("void");
+}
+
+export function parseThreadTreeResponse(value: unknown): readonly TreeTurn[] {
+	const body = object(value, "dalgona/thread/tree");
+	if (!Array.isArray(body["turns"])) {
+		fail("dalgona/thread/tree");
+	}
+	return body["turns"].map((entry) => {
+		const turn = object(entry, "tree turn");
+		if (!hasMembers(turn, ["turnId", "parentTurnId", "preview", "active"])) {
+			fail("tree turn");
+		}
+		const parent = turn["parentTurnId"];
+		return {
+			turnId: requiredString(turn, "turnId", "tree turn"),
+			parentTurnId: typeof parent === "string" ? parent : null,
+			preview: requiredString(turn, "preview", "tree turn"),
+			active: turn["active"] === true,
+		};
+	});
 }
 
 function delta(

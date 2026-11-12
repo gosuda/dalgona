@@ -342,3 +342,13 @@ Choosing a preset MUST fill the model and its default effort.
 The model panel MUST save the model and its effort in one `config/batchWrite` call, with the key paths `model` and `model_reasoning_effort`.
 The model panel MUST NOT save a model that the list lacks, or an effort that the model does not offer.
 A model panel with no models MUST show `No models. Log in to a provider to list its models.` with a Log in action.
+
+The resume panel MUST list threads from `thread/list` with a filter field.
+The fork panel MUST list the turns of the open thread and MUST send `thread/fork` with the chosen turn.
+The tree panel MUST list the turns with their preview and an Active mark, and MUST send `dalgona/thread/leaf/set` for the chosen turn.
+The rewind panel MUST ask for confirmation before it sends `thread/revert`.
+The advisor panel MUST show each advisor and MUST offer turning the advisor on or off and resetting it.
+The review panel MUST send `review/start` with the chosen target and MUST NOT send it with an empty branch, commit, or instructions.
+Each user message MUST show a Rewind to here control that opens the rewind panel on that turn.
+While a turn runs, `/new`, `/compact`, `/fork`, `/tree`, and `/revert` MUST NOT open a panel.
+That refusal MUST show `/<name> is unavailable while a turn is working; wait for it to finish or interrupt it first` with Interrupt and Close actions.

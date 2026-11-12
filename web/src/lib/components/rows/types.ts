@@ -7,4 +7,5 @@ export interface RowProps {
 	readonly awaiting: ReadonlySet<string>;
 	readonly presentation?: RowPresentation;
 	readonly onOpen?: () => void;
+	readonly onRewind?: ((turnId: string) => void) | undefined;
 }

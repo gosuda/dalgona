@@ -42,6 +42,14 @@ export const slashCommands: readonly SlashCommand[] = [
 	{ name: "help", summary: "Show keys", panel: "keys" },
 ];
 
+export const panelsRefusedWhileRunning: Partial<Record<PanelKind, true>> = {
+	new: true,
+	compact: true,
+	fork: true,
+	tree: true,
+	rewind: true,
+};
+
 export type ComposerInput =
 	| { readonly kind: "message"; readonly text: string }
 	| { readonly kind: "command"; readonly query: string }

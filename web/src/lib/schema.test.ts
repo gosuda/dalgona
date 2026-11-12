@@ -603,6 +603,20 @@ describe("dalgona schema conformance", () => {
 			title: "dalgona/thread/leaf/set params",
 		},
 		{ fixture: {}, title: "dalgona/thread/leaf/set result" },
+		{ fixture: { threadId: "thread-1" }, title: "dalgona/thread/tree params" },
+		{
+			fixture: {
+				turns: [
+					{
+						turnId: "turn-1",
+						parentTurnId: null,
+						preview: "first prompt",
+						active: true,
+					},
+				],
+			},
+			title: "dalgona/thread/tree result",
+		},
 	];
 
 	it("validates each dalgona fixture against its schema", () => {

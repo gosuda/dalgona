@@ -174,6 +174,19 @@ export type AdvisorSummary =
 	| { readonly kind: "loaded"; readonly advisors: readonly AdvisorState[] }
 	| { readonly kind: "off" | "unavailable" | "unknown" };
 
+export interface TreeTurn {
+	readonly turnId: string;
+	readonly parentTurnId: string | null;
+	readonly preview: string;
+	readonly active: boolean;
+}
+
+export type ReviewTarget =
+	| { readonly type: "uncommittedChanges" }
+	| { readonly type: "baseBranch"; readonly branch: string }
+	| { readonly type: "commit"; readonly sha: string }
+	| { readonly type: "custom"; readonly instructions: string };
+
 export type AppNotification =
 	| { readonly type: "threadStarted"; readonly thread: ThreadDetail }
 	| {
