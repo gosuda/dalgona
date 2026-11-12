@@ -27,8 +27,8 @@ func New() tool.Tool { return Tool{} }
 func (Tool) Spec() tool.Spec {
 	return tool.Spec{
 		Name:        "search",
-		Description: "Search the workspace. mode \"find\" lists files whose path matches the glob in pattern. A glob without / matches the file name at any depth. mode \"grep\" lists lines that match pattern, an RE2 regular expression, or plain text when literal is true. Search skips .git and every path that .gitignore or .git/info/exclude excludes. It does not follow symbolic links. It skips binary files and files over 16 MiB. find returns at most limit paths, sorted. grep returns at most limit matches as path:line:text and cuts lines at 500 characters. When results were cut, the last line starts with [Truncated:.",
-		Schema:      jsontext.Value(`{"type":"object","properties":{"mode":{"type":"string","enum":["find","grep"]},"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"literal":{"type":"boolean"},"ignore_case":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":1000}},"required":["mode","pattern"],"additionalProperties":false}`),
+		Description: "Search the workspace. mode \"find\" lists files whose path matches the glob in pattern. A glob without / matches the file name at any depth. mode \"grep\" lists lines that match pattern, an RE2 regular expression, or plain text when literal is true. mode \"symbols\" lists the definitions of files as path, line range, kind and first line, and pattern is optional; kind limits the rows to the named kinds. Search skips .git and every path that .gitignore or .git/info/exclude excludes. It does not follow symbolic links. It skips binary files and files over 16 MiB. find returns at most limit paths, sorted. grep returns at most limit matches as path:line:text and cuts lines at 500 characters. When results were cut, the last line starts with [Truncated:.",
+		Schema:      jsontext.Value(`{"type":"object","properties":{"mode":{"type":"string","enum":["find","grep","symbols"]},"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"literal":{"type":"boolean"},"ignore_case":{"type":"boolean"},"kind":{"type":"array","items":{"type":"string","enum":["function","method","class","interface","type","enum","constant","variable","module","macro","section"]}},"limit":{"type":"integer","minimum":1,"maximum":1000}},"required":["mode"],"additionalProperties":false}`),
 		Keep:        tool.KeepHead,
 	}
 }
@@ -50,7 +50,9 @@ func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result,
 	if parsed.Mode == "grep" {
 		result, err = runGrep(ctx, env, id, call.Args)
 	} else {
-		result, err = runSearch(ctx, env, id, call.Args, indexRef{})
+		runCtx, cancel := parseContext(ctx, parsed.Mode)
+		defer cancel()
+		result, err = runSearch(runCtx, env, id, call.Args, indexRef{})
 	}
 	if err != nil {
 		return tool.Result{}, err
@@ -83,6 +85,13 @@ func searchArgs(raw jsontext.Value, ref indexRef, now time.Time) []string {
 	return append(argv, ref.root, ref.gen, strconv.FormatInt(now.UnixNano(), 10), strconv.FormatInt(racyWindow.Nanoseconds(), 10))
 }
 
+func parseContext(ctx context.Context, mode string) (context.Context, context.CancelFunc) {
+	if mode != "symbols" {
+		return ctx, func() {}
+	}
+	return context.WithTimeoutCause(ctx, parseDeadline, errParseDeadline)
+}
+
 func runSearch(ctx context.Context, env tool.Env, id string, raw jsontext.Value, ref indexRef) (outcome, error) {
 	spec := runner.ProcessSpec{
 		ID: id, Argv: searchArgs(raw, ref, time.Now()),
@@ -93,7 +102,7 @@ func runSearch(ctx context.Context, env tool.Env, id string, raw jsontext.Value,
 	}
 	data, err := collect(ctx, env.Runner, id)
 	if err != nil {
-		return outcome{}, killAndAwait(ctx, env.Runner, id, err)
+		return outcome{}, childFailure(ctx, env.Runner, id, err)
 	}
 	result, err := decodeOutcome(data)
 	if err != nil {
@@ -102,16 +111,36 @@ func runSearch(ctx context.Context, env tool.Env, id string, raw jsontext.Value,
 	return result, nil
 }
 
-func killAndAwait(ctx context.Context, run runner.Runner, id string, cause error) error {
+const refusalStatus = 2
+
+func childFailure(ctx context.Context, run runner.Runner, id string, err error) error {
+	if exit, ok := errors.AsType[exitError](err); ok {
+		if exit.code == refusalStatus {
+			return errors.New(string(exit.output))
+		}
+		return exit
+	}
+	cleanup := killAndAwait(ctx, run, id)
+	if errors.Is(context.Cause(ctx), errParseDeadline) {
+		return errors.Join(errParseDeadline, cleanup)
+	}
+	return errors.Join(err, cleanup)
+}
+
+func killAndAwait(ctx context.Context, run runner.Runner, id string) error {
+	waitCtx := ctx
+	if errors.Is(context.Cause(ctx), errParseDeadline) {
+		waitCtx = context.WithoutCancel(ctx)
+	}
 	killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer cancel()
-	if killErr := run.Signal(killCtx, id, runner.SignalKill); killErr != nil {
-		return errors.Join(cause, fmt.Errorf("search: kill subprocess: %w", killErr))
+	if err := run.Signal(killCtx, id, runner.SignalKill); err != nil {
+		return fmt.Errorf("search: kill subprocess: %w", err)
 	}
-	if waitErr := runner.AwaitExit(ctx, run, id, 5*time.Second); waitErr != nil {
-		return errors.Join(cause, fmt.Errorf("search: wait for subprocess exit: %w", waitErr))
+	if err := runner.AwaitExit(waitCtx, run, id, 5*time.Second); err != nil {
+		return fmt.Errorf("search: wait for subprocess exit: %w", err)
 	}
-	return cause
+	return nil
 }
 
 func runGrep(ctx context.Context, env tool.Env, id string, raw jsontext.Value) (outcome, error) {

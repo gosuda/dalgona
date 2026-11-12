@@ -3,6 +3,7 @@ package search
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
@@ -37,6 +39,7 @@ type grepFile struct {
 }
 
 func execute(cwd string, args args, dir string, clock freshness) (outcome, error) {
+	start := time.Now()
 	scope, err := resolveScope(cwd, args.Path)
 	if err != nil {
 		return outcome{}, err
@@ -45,8 +48,11 @@ func execute(cwd string, args args, dir string, clock freshness) (outcome, error
 	if err != nil {
 		return outcome{}, err
 	}
-	if args.Mode == "find" {
+	switch args.Mode {
+	case "find":
 		return find(entries, args)
+	case "symbols":
+		return symbolsMode(context.Background(), entries, args, start, time.Now)
 	}
 	return grep(entries, args, dir, clock)
 }

@@ -54,6 +54,44 @@ After an unusable index, Search MUST NOT start a build for that workspace in any
 
 Deleting the directory `search` under the product home MUST restore the scan, and no other state changes.
 
+## Symbols and syntax
+
+The symbols mode MUST list the definitions under `path` as `PATH:START-END: KIND TEXT` rows.
+
+A child row MUST be indented by two spaces for each level of nesting.
+
+Definitions inside a function, method, constant, or variable MUST NOT be listed.
+
+The symbols mode MUST parse only files whose extension belongs to a language with a definition query.
+
+The `.h` extension MUST belong to the `c` language, and it MUST NOT select `cpp`.
+
+A non-empty pattern MUST first select the files in which some line matches it.
+
+A name pattern that is not literal MUST NOT use `^`, `$`, `\A`, `\z`, `\b`, or `\B`.
+
+The `kind` argument MUST be one of the eleven kinds, and it MUST NOT be set in any other mode.
+
+The `pattern` argument MAY be empty only in the symbols mode.
+
+The symbols mode MUST parse at most 256 files and 1 MiB of source in one call.
+
+A file over 256 KiB MUST NOT be parsed.
+
+Each parse MUST stop after 2 seconds. A call MUST stop starting new files after 10 seconds, and it MUST count each remaining file of a supported language as not parsed.
+
+The search child MUST stop after 30 seconds, and the search MUST return an error that names the deadline.
+
+A file whose parse stopped MUST give no rows, and it MUST appear in a `[Parse: stopped, no rows:]` line.
+
+A file whose tree has syntax errors MUST keep its rows, and it MUST appear in a `[Parse: syntax errors, rows kept:]` line.
+
+Symbol rows MUST be sorted by path and then by start line.
+
+Symbol rows MUST NOT carry snapshot tags.
+
+Markdown setext headings MUST NOT give a symbol. Only ATX headings give a section symbol.
+
 ## Fuzzy file search
 
 The `fuzzyFileSearch` method MUST list regular files under each requested root and MUST NOT list directories.

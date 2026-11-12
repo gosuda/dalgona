@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
@@ -19,6 +20,7 @@ type args struct {
 	Glob       string
 	Literal    bool
 	IgnoreCase bool
+	Kind       []string
 	Limit      int
 }
 
@@ -96,14 +98,33 @@ func parseArgs(raw jsontext.Value) (args, error) {
 }
 
 func validateArgs(out args) error {
-	if out.Mode != "find" && out.Mode != "grep" {
-		return errors.New("search: mode must be \"find\" or \"grep\"")
-	}
-	if out.Pattern == "" {
-		return errors.New("search: pattern must not be empty")
+	if err := validateMode(out); err != nil {
+		return err
 	}
 	if out.Limit < 1 || out.Limit > 1000 {
 		return errors.New("search: limit must be between 1 and 1000")
+	}
+	return validateKinds(out)
+}
+
+func validateMode(out args) error {
+	if out.Mode != "find" && out.Mode != "grep" && out.Mode != "symbols" {
+		return errors.New("search: mode must be find, grep, or symbols")
+	}
+	if out.Pattern == "" && out.Mode != "symbols" {
+		return errors.New("search: pattern must not be empty")
+	}
+	return nil
+}
+
+func validateKinds(out args) error {
+	for _, kind := range out.Kind {
+		if !slices.Contains(symbolKinds, kind) {
+			return fmt.Errorf("search: unknown kind %s", kind)
+		}
+	}
+	if len(out.Kind) > 0 && out.Mode != "symbols" {
+		return errors.New("search: kind applies only to symbols")
 	}
 	return nil
 }
@@ -117,6 +138,8 @@ func setArg(out *args, name string, value jsontext.Value) error {
 		out.Literal, err = boolArg(value)
 	case "ignore_case":
 		out.IgnoreCase, err = boolArg(value)
+	case "kind":
+		out.Kind, err = stringsArg(value)
 	case "limit":
 		out.Limit, err = intArg(value)
 	default:
@@ -153,6 +176,19 @@ func soleToken(value jsontext.Value) (string, jsontext.Kind, error) {
 		return "", 0, err
 	}
 	return token.String(), token.Kind(), nil
+}
+
+func stringsArg(value jsontext.Value) ([]string, error) {
+	var out []string
+	err := eachItem(value, func(item jsontext.Value) error {
+		text, err := stringArg(item)
+		if err != nil {
+			return err
+		}
+		out = append(out, text)
+		return nil
+	})
+	return out, err
 }
 
 func stringArg(value jsontext.Value) (string, error) {
