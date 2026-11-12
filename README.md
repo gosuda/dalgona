@@ -38,7 +38,7 @@ dal
 
 In the terminal interface, run `/login <provider>` to sign in, then `/model` to select an offered model. Replace `<provider>` with your provider id, such as `openai` or `anthropic`. API-key providers can use their provider environment variables. No default thread model is shipped.
 
-Enter a task in the composer. Use `/resume` to select an existing thread, `/new` to start another, and Esc to interrupt a turn. [The TUI contract](docs/spec/tui.md) lists the commands and keys.
+Enter a task in the composer. Use `/resume` to select an existing thread, `/new` to start another, and Esc twice to interrupt a turn. [The TUI contract](docs/spec/tui.md) lists the commands and keys.
 
 Dal uses `$DAL_HOME`, or `~/.dal` when the variable is unset. On Windows, dal sets a private access list on this directory for your user account, SYSTEM, and Administrators.
 

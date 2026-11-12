@@ -42,7 +42,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	settle := m.settle()
 	printCommand := m.drain()
 	tick := m.scheduleTick()
-	return m, tea.Batch(command, tick, settle, printCommand)
+	quit := m.finishQuit()
+	suspend := m.finishSuspend()
+	return m, tea.Batch(command, tick, settle, printCommand, quit, suspend)
 }
 
 func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
@@ -59,6 +61,17 @@ func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 		m.input.composer.focused = false
 	case tea.ModeReportMsg:
 		m.applyModeReport(msg)
+	default:
+		if m.updateFrame(msg) {
+			return nil, true
+		}
+		return m.updateColour(msg)
+	}
+	return nil, true
+}
+
+func (m *model) updateFrame(msg tea.Msg) bool {
+	switch msg := msg.(type) {
 	case printedMsg:
 		m.out.printing = false
 		m.out.started = true
@@ -66,10 +79,12 @@ func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 		if msg.n == m.out.settleN {
 			m.out.settling = false
 		}
+	case tea.ResumeMsg:
+		m.leaving = false
 	default:
-		return m.updateColour(msg)
+		return false
 	}
-	return nil, true
+	return true
 }
 
 func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
@@ -93,37 +108,98 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 
 func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	m.noticef("")
-	if msg.String() == "ctrl+c" {
-		return m.confirmExit()
+	key := msg.String()
+	if command, handled := m.guardKey(key); handled {
+		return command
 	}
-	m.ctrlCArmed = false
 	if len(m.approvals) > 0 {
-		return m.answerApprovalKey(msg.String())
+		return m.answerApprovalKey(key)
 	}
 	if m.confirm != nil {
-		return m.confirmKey(msg.String())
+		return m.confirmKey(key)
 	}
 	if m.selector != nil {
-		return m.selectKey(msg.String())
+		return m.selectKey(key)
 	}
-	switch msg.String() {
+	switch key {
 	case "enter":
 		return m.submitPrompt()
 	case "alt+enter":
 		return m.queueFollowup()
 	case "esc":
-		return m.interrupt()
+		return m.escape()
 	default:
 		return m.updateComposer(msg)
 	}
 }
 
-func (m *model) confirmExit() tea.Cmd {
-	if m.ctrlCArmed {
+func (m *model) guardKey(key string) (tea.Cmd, bool) {
+	switch key {
+	case "ctrl+c":
+		return m.exitKey(), true
+	case "ctrl+z":
+		m.suspend()
+		return nil, true
+	}
+	if key != "esc" {
+		m.clearGuard()
+	}
+	return nil, false
+}
+
+func (m *model) exitKey() tea.Cmd {
+	if m.hint.pending == "exit" {
+		m.quit()
+		return nil
+	}
+	return m.setHint("Ctrl+C again to exit", "exit")
+}
+
+func (m *model) escape() tea.Cmd {
+	if !m.turnLive() {
+		return m.interrupt()
+	}
+	if _, waiting := m.retryRemaining(); waiting || m.hint.pending == "interrupt" {
+		m.clearHint()
+		return m.interrupt()
+	}
+	return m.setHint("Esc again to interrupt", "interrupt")
+}
+
+func (m *model) clearGuard() {
+	if m.hint.pending != "" {
+		m.clearHint()
+	}
+}
+
+func (m *model) quit() {
+	m.leaving = true
+	m.quitting = true
+}
+
+func (m *model) finishQuit() tea.Cmd {
+	if !m.quitting {
+		return nil
+	}
+	if m.screen.height == 0 || (!m.out.printing && !m.out.settling && len(m.out.pending) == 0) {
 		return tea.Quit
 	}
-	m.ctrlCArmed = true
-	m.noticef("press Ctrl+C again to exit; Esc interrupts the active turn")
+	return nil
+}
+
+func (m *model) suspend() {
+	m.leaving = true
+	m.suspending = true
+}
+
+func (m *model) finishSuspend() tea.Cmd {
+	if !m.suspending {
+		return nil
+	}
+	if m.screen.height == 0 || (!m.out.printing && len(m.out.pending) == 0) {
+		m.suspending = false
+		return tea.Suspend
+	}
 	return nil
 }
 
@@ -136,6 +212,11 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 func (m model) View() tea.View {
 	if m.out.printing {
 		return m.out.frozen
+	}
+	if m.leaving {
+		view := tea.NewView(" ")
+		view.ProgramStatus = &tea.ProgramStatus{State: tea.ProgramStateIdle}
+		return view
 	}
 	if !m.out.started {
 		view := tea.NewView("")

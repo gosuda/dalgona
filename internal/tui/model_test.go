@@ -226,12 +226,26 @@ func TestModelFollowupAndInterrupt(t *testing.T) {
 	if !ok || last.method != "turn/start" || params.Input[0].Text != "after this" {
 		t.Fatalf("follow-up call = %#v, want turn/start after this", last)
 	}
+	m = firstEscArms(t, m, caller)
 	m, command = drive(t, m, press(tea.KeyEscape, 0, ""))
 	m = runCommand(t, m, command, "Esc did not interrupt the active turn")
 	last = caller.calls[len(caller.calls)-1]
 	if last.method != "turn/interrupt" || m.thread.state != stateInterrupted {
 		t.Fatalf("interrupt = %q, state %q", last.method, m.thread.state)
 	}
+}
+
+func firstEscArms(t *testing.T, m model, caller *fakeCaller) model {
+	t.Helper()
+	calls := len(caller.calls)
+	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
+	if len(caller.calls) != calls {
+		t.Fatalf("first Esc sent %q, want no request", caller.calls[len(caller.calls)-1].method)
+	}
+	if m.hint.text != "Esc again to interrupt" {
+		t.Fatalf("first Esc hint = %q", m.hint.text)
+	}
+	return m
 }
 
 func TestModelSlashCommands(t *testing.T) {
@@ -385,15 +399,19 @@ func TestModelDoubleCtrlCAndNarrowWrap(t *testing.T) {
 	m.thread.title = "a thread with a long visible title"
 	m.live.items = []liveItem{{Item: rpc.Item{ID: "a1", Type: "agentMessage", Text: strings.Repeat("wrappable ", 20)}}}
 	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
-	if !strings.Contains(m.notice, "again") {
-		t.Fatalf("first Ctrl+C notice %q", m.notice)
+	if !strings.Contains(m.hint.text, "again") {
+		t.Fatalf("first Ctrl+C hint %q", m.hint.text)
 	}
-	_, command := drive(t, m, press('c', tea.ModCtrl, ""))
-	if command == nil {
+	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+	if !m.quitting {
 		t.Fatal("second Ctrl+C did not quit")
 	}
+	command := m.finishQuit()
+	if command == nil {
+		t.Fatal("quit did not finish after the rows printed")
+	}
 	if _, ok := command().(tea.QuitMsg); !ok {
-		t.Fatalf("second Ctrl+C returned %T, want tea.QuitMsg", command())
+		t.Fatalf("quit returned %T, want tea.QuitMsg", command())
 	}
 	for line := range strings.SplitSeq(m.View().Content, "\n") {
 		if width := lipgloss.Width(line); width > 40 {

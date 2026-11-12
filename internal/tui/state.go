@@ -41,6 +41,11 @@ func (m *model) setHint(text, pending string) tea.Cmd {
 	return tea.Tick(hintWindow, func(time.Time) tea.Msg { return hintExpiredMsg{id: id} })
 }
 
+func (m *model) clearHint() {
+	m.hint.id++
+	m.hint.text, m.hint.pending = "", ""
+}
+
 type caller interface {
 	Call(context.Context, string, any, any) error
 	Notify(string, any) error
@@ -58,7 +63,9 @@ type model struct {
 	noticeN     int
 	hint        hintState
 	queue       []string
-	ctrlCArmed  bool
+	leaving     bool
+	quitting    bool
+	suspending  bool
 	approvals   []approval
 	selector    *selector
 	confirm     *confirmation

@@ -120,8 +120,8 @@ The client cannot see a failed write to the terminal. A write that fails is ther
 | Enter, running or awaiting approval | `turn/steer` with the composer text |
 | Enter, empty composer | Starts the oldest held follow-up when no turn runs |
 | Alt+Enter | Queues a follow-up, at most 32 |
-| Esc | Closes a selector. Otherwise it sends `turn/interrupt` on the active turn |
-| Ctrl+C twice | Quits. The first press shows a confirmation notice |
+| Esc | Closes a selector. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row, and a second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
+| Ctrl+C twice | Quits. The first press shows `Ctrl+C again to exit` in the live row, and a second press within 2000 ms quits |
 | `/model [id]` | `model/list` selector, or `config/value/write` key `model` |
 | `/resume [id]` | `thread/list` selector, or `thread/resume` then `thread/read` |
 | `/new` | `thread/start` |

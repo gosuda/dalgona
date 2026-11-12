@@ -224,3 +224,16 @@ func TestActivityNamesCommandAndFileChange(t *testing.T) {
 		t.Fatalf("file change activity = %q, want %q", got, "Editing notes.md")
 	}
 }
+
+func TestHintUsesLiveRowAndAddsNoRow(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{}, nil)
+	m = rawUpdate(t, m, tea.WindowSizeMsg{Width: 40, Height: 8})
+	before := len(m.dockLines())
+	m.setHint("Esc again to interrupt", "interrupt")
+	if got := len(m.dockLines()); got != before {
+		t.Fatalf("dock height with a hint = %d, want %d", got, before)
+	}
+	m = rawUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 8})
+	assertShown(t, m, "Esc again to interrupt")
+}
