@@ -22,6 +22,8 @@ Prove that a new test detects its defect with a mutation probe: put that defect 
 
 For persistence changes, test interruption and damaged input against [journal.md](docs/spec/journal.md) and [recovery.md](docs/spec/recovery.md). For protocol changes, preserve [protocol.md](docs/spec/protocol.md) and the vendored schema tests in `internal/rpc`. For edit changes, test refusal without partial writes under [edit-styles.md](docs/spec/edit-styles.md).
 
+Live debugging: `just live-up`, then follow [live-debug.md](docs/spec/live-debug.md); `just live-down` stops everything.
+
 ## Use the declared tools
 
 Use the versions pinned in [go.mod](go.mod) and [web/package.json](web/package.json). Do not weaken a gate, raise a limit, or exclude a failing test to make a change pass.

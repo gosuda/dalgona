@@ -75,3 +75,48 @@ A script, record, or listen error MUST exit with status 1.
 On SIGINT or SIGTERM, the command MUST stop serving. It MUST wait at most 5 seconds for active requests. If the wait completes, the command MUST exit with status 0. If it does not, the command MUST exit with status 1.
 
 The command MUST allow 10 seconds for a client to send its request headers.
+
+## Run recipe
+
+`just live-up` MUST stop with an error when the server named in `/tmp/dg/llmstub.pid` still runs.
+`just live-up` MUST remove `/tmp/dg` and build `dal`, `dalgona`, and `llmstub` into `/tmp/dg/bin`.
+`just live-up` MUST copy the workspace fixture to `/tmp/dg/ws` and commit it to a git repository.
+`just live-up` MUST write one configuration for each product. The `dalgona` configuration MUST set `[edit_review] feedback` to `lost_code`.
+`just live-up` MUST start the scripted server on `127.0.0.1:18080` and record its requests to `/tmp/dg/requests.jsonl`.
+`just live-up` MUST start the daemon and `dalgona web` with isolated homes.
+`just live-up` MUST write the web address to `/tmp/dg/web.url` and the environment exports to `/tmp/dg/env`.
+`just live-check` MUST run `just live-up`, then one `read` turn through `dal` and one through `dalgona`.
+`just live-check` MUST pass only when two requests name the turn `t-read-2` and no request is unmatched.
+`just live-check` MUST pass only when the web relay answers 401 without a token and the web page answers 200.
+`just live-check` MUST run `just live-down` when it exits.
+`just live-check` MUST exit with status 1 without starting anything when a stack is in use.
+`just live-check` MUST set its `just live-down` trap before it runs `just live-up`, so a failed start is stopped.
+
+## Stopping
+
+`just live-down` MUST send `SIGTERM` only to a process whose command line starts with `/tmp/dg/bin/`.
+`just live-down` MUST wait up to 6 seconds for each process it stops.
+`just live-down` MUST end the tmux server on the socket `dglive`.
+`just live-down` MUST remove the pid files of the processes it stops.
+`just live-down` MUST exit with status 1 when a process still runs or when the daemon socket remains.
+
+## tui tool
+
+`just omp-tui-install` MUST copy the `tui` tool files from `.references/oh-my-pi/.omp/tools` into `.omp/tools`, which git ignores.
+`just omp-tui-install` MUST install the tool dependencies with `bun install --frozen-lockfile`.
+The omp host MUST restart with `/restart` after the install, because omp loads custom tools when a session starts.
+A check MUST show the `tui` tool in the tool list, and `{"op":"list"}` MUST answer `no sessions`.
+A terminal session MUST start with `timeout: 1`, because the app serves no debug socket.
+When the `tui` tool is absent, a session MUST use tmux on the socket `dglive`, as the table below shows.
+
+| tui operation | tmux equivalent |
+|---|---|
+| start | `tmux -L dglive new-session -d -s dg -x 100 -y 30 "env -i PATH=$PATH TERM=xterm-256color COLORTERM=truecolor $(sed 's/^export //' /tmp/dg/env) /tmp/dg/bin/dalgona -C /tmp/dg/ws"` |
+| send literal text | `tmux -L dglive send-keys -t dg -l 'TEXT'` |
+| send Enter, Escape, C-c, C-o or Up | `tmux -L dglive send-keys -t dg Enter`, `Escape`, `C-c`, `C-o` or `Up` |
+| send raw bytes | `tmux -L dglive send-keys -t dg -H HEX` |
+| bracketed paste | `tmux -L dglive set-buffer 'TEXT'`, then `paste-buffer -p -t dg` |
+| screen | `tmux -L dglive capture-pane -p -t dg`, with `-S -200` for scrollback |
+| raw bytes | `tmux -L dglive pipe-pane -o -t dg 'cat >> /tmp/dg/raw.bin'`, started before the first input |
+| resize | `tmux -L dglive resize-window -t dg -x 40 -y 30` |
+| shot | not available. The report marks colour and theme rows `Not proven: no tui tool` and checks them in the browser only. |
