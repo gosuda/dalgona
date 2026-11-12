@@ -134,7 +134,7 @@ func (s *skippedCompaction) matches(cv compactionView) bool {
 func (w *worker) autoCompact(ctx context.Context, v view) (bool, error) {
 	caps := w.t.host.capabilities(ctx, w.registry, w.settings.Model)
 	cv := w.t.compactionView(v)
-	threshold := cmp.Or(w.t.host.cfg.Config.CompactionThreshold, defaultThreshold)
+	threshold := cmp.Or(w.t.host.Config().CompactionThreshold, defaultThreshold)
 	if !compact.ShouldCompact(caps.Context, usedTokens(cv), threshold) || w.t.skipped.matches(cv) {
 		return false, nil
 	}
@@ -177,7 +177,7 @@ func (w *worker) compact(ctx context.Context, method string) error {
 		return err
 	}
 	cv := w.t.compactionView(v)
-	keep := cmp.Or(w.t.host.cfg.Config.CompactionKeepTokens, defaultKeepTokens)
+	keep := cmp.Or(w.t.host.Config().CompactionKeepTokens, defaultKeepTokens)
 	cut, ok := compact.Cut(cv.entries, keep, cv.prevIdx)
 	if !ok {
 		w.t.host.logOnce(fmt.Sprintf("%s\x00%s\x00%d", nothingToSummarizeText, w.t.id, cv.lastMarker), nothingToSummarizeText, "thread", w.t.id)

@@ -122,7 +122,7 @@ func (w *worker) request(ctx context.Context, v view, messages []model.Message) 
 }
 
 func (w *worker) effort(v view) string {
-	configured := cmp.Or(string(w.settings.Effort), string(w.t.host.cfg.Config.Reasoning))
+	configured := cmp.Or(string(w.settings.Effort), string(w.t.host.Config().Reasoning))
 	if configured == string(config.ReasoningDefault) {
 		configured = ""
 	}
@@ -338,8 +338,9 @@ func (h *Host) cacheModels(provider string, models []model.Model, expires time.T
 }
 
 func (h *Host) contextOverrides() map[string]int {
-	overrides := make(map[string]int, len(h.cfg.Config.Models))
-	for id, spec := range h.cfg.Config.Models {
+	models := h.Config().Models
+	overrides := make(map[string]int, len(models))
+	for id, spec := range models {
 		overrides[id] = spec.ContextWindow
 	}
 	return overrides
@@ -348,9 +349,9 @@ func (h *Host) contextOverrides() map[string]int {
 func (h *Host) ResolveRole(ctx context.Context, role, threadModel string) (string, error) {
 	switch role {
 	case "smol":
-		role = cmp.Or(h.cfg.Config.Roles.Smol, role)
+		role = cmp.Or(h.Config().Roles.Smol, role)
 	case "slow":
-		role = cmp.Or(h.cfg.Config.Roles.Slow, role)
+		role = cmp.Or(h.Config().Roles.Slow, role)
 	}
 	provider, _, err := model.ParseModelID(threadModel)
 	if err != nil {

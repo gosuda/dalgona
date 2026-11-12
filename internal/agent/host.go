@@ -34,6 +34,9 @@ type Host struct {
 	logged      map[string]bool
 	models      map[string]modelCache
 	modelsGroup singleflight.Group
+
+	settingsMu sync.Mutex
+	live       config.Config
 }
 
 func NewHost(cfg HostConfig) (*Host, error) {
@@ -42,7 +45,7 @@ func NewHost(cfg HostConfig) (*Host, error) {
 	}
 	cfg.Product = cmp.Or(cfg.Product, cfg.Config.Product, config.ProductDalgona)
 	h := &Host{
-		cfg: cfg, journal: cfg.Journal, log: cmp.Or(cfg.Logger, slog.Default()), clock: cfg.Clock,
+		cfg: cfg, live: cfg.Config, journal: cfg.Journal, log: cmp.Or(cfg.Logger, slog.Default()), clock: cfg.Clock,
 		threads: make(map[string]*Thread), sessions: make(map[string]ThreadInfo),
 		logged: make(map[string]bool), models: make(map[string]modelCache),
 	}
@@ -138,7 +141,7 @@ func (h *Host) sessionInfo(head journal.SessionHead) (ThreadInfo, error) {
 		return ThreadInfo{}, fmt.Errorf("agent: session %s has no session.created", head.ID)
 	}
 	h.projectInfo(&info, state)
-	if stat, err := os.Stat(filepath.Join(h.cfg.Config.Home, "sessions", head.ID, "journal.jsonl")); err == nil {
+	if stat, err := os.Stat(filepath.Join(h.Config().Home, "sessions", head.ID, "journal.jsonl")); err == nil {
 		info.Updated = stat.ModTime().UTC()
 	}
 	return info, nil
@@ -251,7 +254,7 @@ func (h *Host) startSession(ctx context.Context, spec ThreadSpec, id string) (*T
 }
 
 func (h *Host) sessionCreated(spec ThreadSpec, id string) (event.SessionCreated, error) {
-	cfg := h.cfg.Config
+	cfg := h.Config()
 	created := event.SessionCreated{
 		ID: id, Parent: spec.Parent, Advisor: spec.Advisor, CreatedAt: h.clock().UTC(),
 		Cwd:      cmp.Or(spec.Cwd, cfg.Cwd),

@@ -14,7 +14,25 @@ import (
 	"github.com/gosuda/dalgona/internal/model"
 )
 
-func (h *Host) Config() config.Config { return h.cfg.Config }
+func (h *Host) Config() config.Config {
+	h.settingsMu.Lock()
+	defer h.settingsMu.Unlock()
+	return h.live
+}
+
+func (h *Host) WriteSettings(edits ...config.SettingEdit) error {
+	h.settingsMu.Lock()
+	defer h.settingsMu.Unlock()
+	next, err := h.live.With(edits...)
+	if err != nil {
+		return err
+	}
+	if err = config.WriteSettings(h.live.Home, edits...); err != nil {
+		return err
+	}
+	h.live = next
+	return nil
+}
 
 func (h *Host) Auth() *auth.Store { return h.cfg.Auth }
 

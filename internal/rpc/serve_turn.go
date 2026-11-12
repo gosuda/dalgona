@@ -140,7 +140,7 @@ func (s *server) turnStart(ctx context.Context, params jsontext.Value) (jsontext
 		return nil, err
 	}
 	info, _ := s.info(p.threadID)
-	in, err := p.prompt(cmp.Or(info.Model, s.currentConfig().Model))
+	in, err := p.prompt(cmp.Or(info.Model, s.host.Config().Model))
 	if err != nil {
 		return nil, err
 	}

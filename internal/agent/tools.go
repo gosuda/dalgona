@@ -401,9 +401,10 @@ func (w *worker) env(v verdict) tool.Env {
 		mode = runner.SandboxOff
 	}
 	roots := append([]string{w.t.created.Cwd}, w.t.host.roots...)
+	home := w.t.host.Config().Home
 	return tool.Env{
-		Runner: w.t.runner, Cwd: w.t.created.Cwd, Home: w.t.host.cfg.Config.Home,
-		Sandbox: deniedSocketSandbox(mode, roots, w.t.host.cfg.Config.Home), Masker: w.t.host.masker(), Snapshots: w.t.snapshots,
+		Runner: w.t.runner, Cwd: w.t.created.Cwd, Home: home,
+		Sandbox: deniedSocketSandbox(mode, roots, home), Masker: w.t.host.masker(), Snapshots: w.t.snapshots,
 	}
 }
 

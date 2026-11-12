@@ -48,6 +48,8 @@ The interactive settings MUST use the keys in the table below.
 
 The `auto` theme MUST follow the system and use `night` or `day`. The `auto-soft` theme MUST follow the system and use `soft-night` or `soft-day`. The `status_hide` key MUST NOT name `model`.
 
+`Host.WriteSettings` MUST apply each interactive setting to the running host at once. A rejected edit MUST leave the running settings and `settings.toml` unchanged. A saved `approval` or `sandbox` MUST NOT change a thread that is already running. Each thread keeps the values that its journal records.
+
 When no layer sets `[approval_decider] threshold`, its value MUST be `0.9`.
 
 The loader MUST validate approval, sandbox, reasoning, tool mode, durations, and runner options. Durations MUST use Go duration syntax. Invalid durations MUST fail loading. A sandbox0 runner MUST use a template and MUST NOT set an image.

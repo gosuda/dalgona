@@ -56,7 +56,7 @@ func (s *server) modelList(ctx context.Context, _ jsontext.Value) (jsontext.Valu
 	if err != nil {
 		return nil, internalError(err)
 	}
-	current := s.currentConfig().Model
+	current := s.host.Config().Model
 	response := ModelListResponse{Data: make([]Model, 0, len(models))}
 	for _, m := range models {
 		efforts := make([]ReasoningEffortOption, 0, len(m.Efforts))
@@ -82,7 +82,7 @@ func defaultEffort(efforts []string) string {
 }
 
 func (s *server) configRead(context.Context, jsontext.Value) (jsontext.Value, error) {
-	cfg := s.currentConfig()
+	cfg := s.host.Config()
 	return encode(ConfigReadResponse{
 		Config: ConfigValues{
 			Model: cfg.Model, ModelProvider: provider(cfg.Model), ApprovalPolicy: policyName(string(cfg.Approval)),
@@ -161,10 +161,9 @@ func (s *server) configValueWrite(_ context.Context, params jsontext.Value) (jso
 		return nil, err
 	}
 	cfg := s.host.Config()
-	if writeErr := config.WriteSettings(cfg.Home, config.SettingEdit{Key: key, Value: setting}); writeErr != nil {
+	if writeErr := s.host.WriteSettings(config.SettingEdit{Key: key, Value: setting}); writeErr != nil {
 		return nil, invalidParams(writeErr.Error())
 	}
-	overridesOf(s.host).set(key, setting)
 	path := cfg.SettingsPath()
 	data, err := os.ReadFile(path)
 	if err != nil {

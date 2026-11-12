@@ -96,7 +96,7 @@ func (t *Thread) notifyChildStarted(child *Thread, req task.Request, err error) 
 	if err != nil || t.host.cfg.OnChildStarted == nil {
 		return
 	}
-	if req.Advisor || childAdvisorConfigured(t.host.cfg.Config) {
+	if req.Advisor || childAdvisorConfigured(t.host.Config()) {
 		t.host.cfg.OnChildStarted(child, req)
 	}
 }
