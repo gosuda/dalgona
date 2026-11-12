@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 
 	json "encoding/json/v2"
@@ -167,24 +169,63 @@ func encodeMessage(encoder *model.JSONEncoder, message model.Message) {
 		encoder.StringKey("content", model.ToolResultText(result.Output))
 		encoder.EndObject()
 	}
-	if message.Role == "user" && message.Text != "" && len(message.ToolResults) != 0 {
-		encodeTextMessage(encoder, "user", message.Text)
+	if message.Role == "user" && len(message.ToolResults) != 0 && (message.Text != "" || len(message.Images) != 0) {
+		encoder.BeginObject()
+		encoder.StringKey("role", "user")
+		encodeUserContent(encoder, message)
+		encoder.EndObject()
 	}
 }
 
 func encodeAssistantOrUser(encoder *model.JSONEncoder, message model.Message) {
 	encoder.BeginObject()
 	encoder.StringKey("role", message.Role)
-	if message.Text == "" && message.Role == "assistant" {
+	switch {
+	case message.Text == "" && message.Role == "assistant":
 		encoder.Key("content")
 		encoder.Null()
-	} else {
+	case message.Role == "user":
+		encodeUserContent(encoder, message)
+	default:
 		encoder.StringKey("content", message.Text)
 	}
 	if message.Reasoning != "" {
 		encoder.StringKey("reasoning_content", message.Reasoning)
 	}
 	encodeMessageCalls(encoder, message.ToolCalls)
+	encoder.EndObject()
+}
+
+func encodeUserContent(encoder *model.JSONEncoder, message model.Message) {
+	if len(message.Images) == 0 {
+		encoder.StringKey("content", message.Text)
+		return
+	}
+	encoder.Key("content")
+	encoder.BeginArray()
+	for _, image := range message.Images {
+		encodeImagePart(encoder, image)
+	}
+	if message.Text != "" {
+		encodeTextPart(encoder, message.Text)
+	}
+	encoder.EndArray()
+}
+
+func encodeImagePart(encoder *model.JSONEncoder, image model.Image) {
+	encoder.BeginObject()
+	encoder.StringKey("type", "image_url")
+	encoder.Key("image_url")
+	encoder.BeginObject()
+	encoder.StringKey("url", "data:"+image.Mime+";base64,"+base64.StdEncoding.EncodeToString(image.Data))
+	encoder.EndObject()
+	encoder.EndObject()
+}
+
+func encodeTextPart(encoder *model.JSONEncoder, text string) {
+	encoder.BeginObject()
+	encoder.StringKey("type", "text")
+	encoder.StringKey("text", text)
 	encoder.EndObject()
 }
 
@@ -282,6 +323,9 @@ type modelList struct {
 			Context   int `json:"context_length"`
 			MaxOutput int `json:"max_completion_tokens"`
 		} `json:"top_provider"`
+		Architecture struct {
+			InputModalities []string `json:"input_modalities"`
+		} `json:"architecture"`
 	} `json:"data"`
 }
 
@@ -298,7 +342,12 @@ func decodeModels(reader io.Reader, windows map[string]int) ([]model.Model, erro
 			Context:    model.ContextWindow(item.ID, reported, windows),
 			MaxOutput:  item.TopProvider.MaxOutput,
 			ToolChoice: true,
+			Images:     acceptsImages(item.Architecture.InputModalities),
 		})
 	}
 	return models, nil
+}
+
+func acceptsImages(modalities []string) bool {
+	return slices.Contains(modalities, "image")
 }

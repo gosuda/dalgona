@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -416,5 +417,71 @@ func assertToolHistory(t *testing.T, messages []requestMessage) {
 	}
 	if messages[3].Role != "user" || string(messages[3].Content) != `"after tools"` {
 		t.Fatalf("user text = %+v", messages)
+	}
+}
+
+func TestEncodeRequestSendsImageURL(t *testing.T) {
+	t.Parallel()
+	body, err := encodeRequest(model.Request{Messages: []model.Message{{
+		Role:   "user",
+		Text:   "What is this?",
+		Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		Messages []any `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &value); err != nil {
+		t.Fatalf("request JSON: %v\n%s", err, body)
+	}
+	const want = `{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}},{"type":"text","text":"What is this?"}]}`
+	var expected any
+	if err := json.Unmarshal([]byte(want), &expected); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Messages) != 1 || !reflect.DeepEqual(value.Messages[0], expected) {
+		t.Fatalf("messages = %v, want %s", value.Messages, want)
+	}
+}
+
+func TestEncodeRequestSendsImageAfterToolResults(t *testing.T) {
+	t.Parallel()
+	body, err := encodeRequest(model.Request{Messages: []model.Message{{
+		Role:        "user",
+		Text:        "look",
+		ToolResults: []model.ToolResult{{ID: "call-1", Output: jsontext.Value(`"done"`)}},
+		Images:      []model.Image{{Mime: "image/gif", Data: []byte("GIF89a")}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		Messages []requestMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &value); err != nil {
+		t.Fatalf("request JSON: %v\n%s", err, body)
+	}
+	if len(value.Messages) != 2 || value.Messages[0].Role != "tool" || value.Messages[1].Role != "user" {
+		t.Fatalf("messages = %+v", value.Messages)
+	}
+	if !bytes.Contains(value.Messages[1].Content, []byte(`"image_url"`)) || !bytes.Contains(value.Messages[1].Content, []byte(`data:image/gif;base64,R0lGODlh`)) {
+		t.Fatalf("user content = %s", value.Messages[1].Content)
+	}
+}
+
+func TestDecodeModelsReadsInputModalities(t *testing.T) {
+	t.Parallel()
+	models, err := decodeModels(strings.NewReader(`{"data":[{"id":"a/text-only","architecture":{"input_modalities":["text"]}},{"id":"a/vision","architecture":{"input_modalities":["text","image"]}},{"id":"b/plain"}]}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []bool
+	for _, m := range models {
+		got = append(got, m.Images)
+	}
+	if !reflect.DeepEqual(got, []bool{false, true, false}) {
+		t.Fatalf("images = %v, want [false true false]", got)
 	}
 }
