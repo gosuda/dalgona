@@ -366,7 +366,7 @@ func TestModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []model.Model{{ID: "known", Context: 64000, ToolChoice: true}, {ID: "other", Context: 128000, ToolChoice: true}}
+	want := []model.Model{{ID: "known", Context: 64000, ToolChoice: true, Images: true}, {ID: "other", Context: 128000, ToolChoice: true, Images: true}}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("models = %+v, want %+v", models, want)
 	}
@@ -494,5 +494,67 @@ func assertRequestReasoning(t *testing.T, body []byte, effort, summary string) {
 	t.Helper()
 	if effort != "high" || summary != "auto" || !bytes.Contains(body, []byte(`"include":["reasoning.encrypted_content"]`)) {
 		t.Fatalf("reasoning effort = %q, summary = %q", effort, summary)
+	}
+}
+
+func TestEncodeRequestSendsInputImage(t *testing.T) {
+	t.Parallel()
+	input := userInput(t, model.Message{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
+	if len(input) != 1 {
+		t.Fatalf("input = %d items, want 1: %s", len(input), input)
+	}
+	sameJSON(t, input[0], `{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"auto"},{"type":"input_text","text":"What is this?"}]}`)
+}
+
+func TestEncodeRequestOmitsEmptyTextWithImage(t *testing.T) {
+	t.Parallel()
+	input := userInput(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
+	if len(input) != 1 {
+		t.Fatalf("input = %d items, want 1: %s", len(input), input)
+	}
+	sameJSON(t, input[0], `{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"auto"}]}`)
+}
+
+func TestEncodeRequestKeepsImagesWithToolResults(t *testing.T) {
+	t.Parallel()
+	input := userInput(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}, ToolResults: []model.ToolResult{{ID: "call-1", Output: jsontext.Value(`"done"`)}}})
+	if len(input) != 2 {
+		t.Fatalf("input = %d items, want 2: %s", len(input), input)
+	}
+	sameJSON(t, input[0], `{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"auto"}]}`)
+	sameJSON(t, input[1], `{"type":"function_call_output","call_id":"call-1","output":"done"}`)
+}
+
+func userInput(t *testing.T, message model.Message) []jsontext.Value {
+	t.Helper()
+	var body []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(successFixture())
+	}))
+	t.Cleanup(server.Close)
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
+	_ = drainStream(t, provider, model.Request{Model: "gpt-test", Messages: []model.Message{message}})
+	var value struct {
+		Input []jsontext.Value `json:"input"`
+	}
+	if err := json.Unmarshal(body, &value); err != nil {
+		t.Fatalf("request JSON: %v\n%s", err, body)
+	}
+	return value.Input
+}
+
+func sameJSON(t *testing.T, got jsontext.Value, want string) {
+	t.Helper()
+	var g, w any
+	if err := json.Unmarshal(got, &g); err != nil {
+		t.Fatalf("item %s: %v", got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &w); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(g, w) {
+		t.Fatalf("item = %s, want %s", got, want)
 	}
 }

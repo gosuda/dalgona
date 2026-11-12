@@ -343,7 +343,16 @@ func TestImageRecordCheckedOnCacheHit(t *testing.T) {
 }
 
 func TestTextOnlyModelRefusesCurrentTurnImage(t *testing.T) {
-	h := newHarness(t)
+	h := newHarness(t, func(h *harness) {
+		h.cfg.Providers = func(onRetry RetryFunc) (*model.Registry, error) {
+			provider, err := openaiProvider(h, onRetry)
+			if err != nil {
+				return nil, err
+			}
+			registry := model.NewRegistry()
+			return registry, registry.Register("openai", &requestRecorder{provider: provider})
+		}
+	})
 	thread := h.start()
 	err := thread.Submit(t.Context(), Input{
 		Kind: InputPrompt, Text: "what is this",
