@@ -32,6 +32,8 @@ The JSON body MUST contain `model`, `state`, and `questions`. Question names MUS
 
 The adapter MUST decode the response as a stream. It MUST read the top-level `answers` object and ignore unknown response fields. Every requested answer MUST exist. Its `type` MUST match its question type. Its required value MUST exist. A refusal, type mismatch, missing answer, malformed number, or malformed JSON MUST fail.
 
+A refusal is an answer whose `type` is `refusal`.
+
 Probabilities MUST decode as an object of numeric values. Choice and score answers MAY include confidence and probabilities. Noul answers use their `noul` number directly.
 
 A non-2xx response MUST fail with its HTTP status. The error body MUST be limited to 1 MiB.
@@ -41,6 +43,8 @@ A non-2xx response MUST fail with its HTTP status. The error body MUST be limite
 The LLM adapter MUST use the supplied `model.Provider` and model identifier. It MUST place the state and questions in one user message. It MUST set a system prompt that requires only one JSON object and no other text. The prompt MUST define the score scale as the expected zero-based index into the criteria.
 
 The response object MUST map each question name to its direct value. It MUST contain every requested name and no other name. Duplicate names MUST fail. Choice values MUST be strings. Noul and score values MUST be numbers. A score outside `0` through `len(criteria)-1` MUST fail. Markdown fences, prose, explanations, tool calls, and separate answer objects MUST NOT be accepted.
+
+The adapter does not check that a noul value lies in 0 through 1.
 
 The adapter MUST concatenate text deltas in stream order. A provider stream failure MUST fail the request. Invalid JSON or an invalid answer shape MUST return an error containing `llm: invalid JSON`.
 
