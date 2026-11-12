@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"github.com/gosuda/dalgona/internal/model/devin/wire"
 )
 
@@ -63,7 +64,7 @@ func (s *chatState) consume(ctx context.Context, gate *model.StartGate, idle *id
 func (s *chatState) readFrames(gate *model.StartGate, body io.Reader) error {
 	buffer := make([]byte, 0, 32<<10)
 	for {
-		frame, err := wire.ReadFrame(body, buffer, maxFramePayload)
+		frame, err := connectwire.ReadFrame(body, buffer, maxFramePayload)
 		if errors.Is(err, io.EOF) {
 			return s.finishAtEOF()
 		}
@@ -76,7 +77,7 @@ func (s *chatState) readFrames(gate *model.StartGate, body io.Reader) error {
 		if err != nil {
 			return fmt.Errorf("devin: %w", err)
 		}
-		if frame.Flags&wire.EndStream != 0 {
+		if frame.Flags&connectwire.EndStream != 0 {
 			return s.finishTrailer(payload)
 		}
 		if err := s.apply(payload); err != nil {
@@ -163,7 +164,7 @@ func (s *chatState) finishAtEOF() error {
 }
 
 func (s *chatState) finishTrailer(payload []byte) error {
-	if err := wire.TrailerError(payload); err != nil {
+	if err := connectwire.TrailerError(payload); err != nil {
 		s.failed = bytes.Clone(payload)
 		return fmt.Errorf("devin: stream: %w", err)
 	}

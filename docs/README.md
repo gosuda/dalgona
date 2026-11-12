@@ -65,3 +65,4 @@ The specifications define required behavior. They do not certify that each comma
 - [Advisor](decisions/advisor.md): optional review without approval authority.
 - [Dependencies](decisions/dependencies.md): codecs, import restrictions, and pins.
 - [Web toolchain](decisions/web-toolchain.md): TypeScript compatibility with the Svelte tools.
+- [Connect wire](decisions/connect-wire.md): one framing and field-helper package for the Connect providers.

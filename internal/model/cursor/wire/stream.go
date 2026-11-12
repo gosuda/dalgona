@@ -1,21 +1,24 @@
 package wire
 
-import "google.golang.org/protobuf/encoding/protowire"
+import (
+	"github.com/gosuda/dalgona/internal/model/connectwire"
+	"google.golang.org/protobuf/encoding/protowire"
+)
 
 type TextDelta struct {
 	TextView []byte
 }
 
 func AppendTextDelta(dst []byte, m *TextDelta) []byte {
-	return appendRaw(dst, 1, m.TextView)
+	return connectwire.AppendRaw(dst, 1, m.TextView)
 }
 
 func ConsumeTextDelta(b []byte, m *TextDelta) error {
-	return consumeFields(b, "cursor text delta", func(f field) error {
-		if f.number != 1 {
+	return connectwire.ConsumeFields(b, "cursor text delta", func(f connectwire.Field) error {
+		if f.Number != 1 {
 			return nil
 		}
-		return setBytes(f, "cursor text delta", &m.TextView)
+		return connectwire.SetBytes(f, "cursor text delta", &m.TextView)
 	})
 }
 
@@ -24,15 +27,15 @@ type ThinkingDelta struct {
 }
 
 func AppendThinkingDelta(dst []byte, m *ThinkingDelta) []byte {
-	return appendRaw(dst, 1, m.TextView)
+	return connectwire.AppendRaw(dst, 1, m.TextView)
 }
 
 func ConsumeThinkingDelta(b []byte, m *ThinkingDelta) error {
-	return consumeFields(b, "cursor thinking delta", func(f field) error {
-		if f.number != 1 {
+	return connectwire.ConsumeFields(b, "cursor thinking delta", func(f connectwire.Field) error {
+		if f.Number != 1 {
 			return nil
 		}
-		return setBytes(f, "cursor thinking delta", &m.TextView)
+		return connectwire.SetBytes(f, "cursor thinking delta", &m.TextView)
 	})
 }
 
@@ -41,15 +44,15 @@ type TokenDelta struct {
 }
 
 func AppendTokenDelta(dst []byte, m *TokenDelta) []byte {
-	return appendInt32(dst, 1, m.Tokens)
+	return connectwire.AppendInt32(dst, 1, m.Tokens)
 }
 
 func ConsumeTokenDelta(b []byte, m *TokenDelta) error {
-	return consumeFields(b, "cursor token delta", func(f field) error {
-		if f.number != 1 {
+	return connectwire.ConsumeFields(b, "cursor token delta", func(f connectwire.Field) error {
+		if f.Number != 1 {
 			return nil
 		}
-		return setInt32(f, "cursor token delta", &m.Tokens)
+		return connectwire.SetInt32(f, "cursor token delta", &m.Tokens)
 	})
 }
 
@@ -61,31 +64,31 @@ type McpToolCall struct {
 
 func AppendMcpToolCall(dst []byte, m *McpToolCall) []byte {
 	if m.Args != nil {
-		dst = appendMessage(dst, 1, m.Args, AppendMcpArgs)
+		dst = connectwire.AppendMessage(dst, 1, m.Args, AppendMcpArgs)
 	}
 	if m.Result != nil {
-		dst = appendMessage(dst, 2, m.Result, AppendMcpResult)
+		dst = connectwire.AppendMessage(dst, 2, m.Result, AppendMcpResult)
 	}
-	return appendRaw(dst, 3, m.DescriptionView)
+	return connectwire.AppendRaw(dst, 3, m.DescriptionView)
 }
 
 func ConsumeMcpToolCall(b []byte, m *McpToolCall) error {
-	return consumeFields(b, "cursor MCP call", func(f field) error {
-		switch f.number {
+	return connectwire.ConsumeFields(b, "cursor MCP call", func(f connectwire.Field) error {
+		switch f.Number {
 		case 1:
-			if err := requireKind(f, protowire.BytesType, "cursor MCP call"); err != nil {
+			if err := connectwire.RequireKind(f, protowire.BytesType, "cursor MCP call"); err != nil {
 				return err
 			}
 			m.Args = new(McpArgs)
-			return ConsumeMcpArgs(bytesValue(f), m.Args)
+			return ConsumeMcpArgs(connectwire.BytesValue(f), m.Args)
 		case 2:
-			if err := requireKind(f, protowire.BytesType, "cursor MCP call"); err != nil {
+			if err := connectwire.RequireKind(f, protowire.BytesType, "cursor MCP call"); err != nil {
 				return err
 			}
 			m.Result = new(McpResult)
-			return ConsumeMcpResult(bytesValue(f), m.Result)
+			return ConsumeMcpResult(connectwire.BytesValue(f), m.Result)
 		case 3:
-			return setBytes(f, "cursor MCP call", &m.DescriptionView)
+			return connectwire.SetBytes(f, "cursor MCP call", &m.DescriptionView)
 		default:
 			return nil
 		}
@@ -101,28 +104,28 @@ type ToolCall struct {
 
 func AppendToolCall(dst []byte, m *ToolCall) []byte {
 	if m.Mcp != nil {
-		dst = appendMessage(dst, 15, m.Mcp, AppendMcpToolCall)
+		dst = connectwire.AppendMessage(dst, 15, m.Mcp, AppendMcpToolCall)
 	} else if m.VariantNumber != 0 {
-		dst = appendVariant(dst, protowire.Number(m.VariantNumber), m.VariantView)
+		dst = connectwire.AppendVariant(dst, protowire.Number(m.VariantNumber), m.VariantView)
 	}
-	return appendRaw(dst, 57, m.ToolCallIDView)
+	return connectwire.AppendRaw(dst, 57, m.ToolCallIDView)
 }
 
 func ConsumeToolCall(b []byte, m *ToolCall) error {
-	return consumeFields(b, "cursor tool call", func(f field) error {
-		switch f.number {
+	return connectwire.ConsumeFields(b, "cursor tool call", func(f connectwire.Field) error {
+		switch f.Number {
 		case 15:
-			if err := requireKind(f, protowire.BytesType, "cursor tool call"); err != nil {
+			if err := connectwire.RequireKind(f, protowire.BytesType, "cursor tool call"); err != nil {
 				return err
 			}
 			m.Mcp = new(McpToolCall)
-			return ConsumeMcpToolCall(bytesValue(f), m.Mcp)
+			return ConsumeMcpToolCall(connectwire.BytesValue(f), m.Mcp)
 		case 57:
-			return setBytes(f, "cursor tool call", &m.ToolCallIDView)
+			return connectwire.SetBytes(f, "cursor tool call", &m.ToolCallIDView)
 		default:
-			if f.kind == protowire.BytesType && f.number >= 1 && f.number <= 69 {
-				m.VariantNumber = f.number
-				return setBytes(f, "cursor tool call", &m.VariantView)
+			if f.Kind == protowire.BytesType && f.Number >= 1 && f.Number <= 69 {
+				m.VariantNumber = f.Number
+				return connectwire.SetBytes(f, "cursor tool call", &m.VariantView)
 			}
 			return nil
 		}
@@ -136,26 +139,26 @@ type ToolCallStartedUpdate struct {
 }
 
 func AppendToolCallStartedUpdate(dst []byte, m *ToolCallStartedUpdate) []byte {
-	dst = appendRaw(dst, 1, m.CallIDView)
+	dst = connectwire.AppendRaw(dst, 1, m.CallIDView)
 	if m.ToolCall != nil {
-		dst = appendMessage(dst, 2, m.ToolCall, AppendToolCall)
+		dst = connectwire.AppendMessage(dst, 2, m.ToolCall, AppendToolCall)
 	}
-	return appendRaw(dst, 3, m.ModelCallIDView)
+	return connectwire.AppendRaw(dst, 3, m.ModelCallIDView)
 }
 
 func ConsumeToolCallStartedUpdate(b []byte, m *ToolCallStartedUpdate) error {
-	return consumeFields(b, "cursor tool started", func(f field) error {
-		switch f.number {
+	return connectwire.ConsumeFields(b, "cursor tool started", func(f connectwire.Field) error {
+		switch f.Number {
 		case 1:
-			return setBytes(f, "cursor tool started", &m.CallIDView)
+			return connectwire.SetBytes(f, "cursor tool started", &m.CallIDView)
 		case 2:
-			if err := requireKind(f, protowire.BytesType, "cursor tool started"); err != nil {
+			if err := connectwire.RequireKind(f, protowire.BytesType, "cursor tool started"); err != nil {
 				return err
 			}
 			m.ToolCall = new(ToolCall)
-			return ConsumeToolCall(bytesValue(f), m.ToolCall)
+			return ConsumeToolCall(connectwire.BytesValue(f), m.ToolCall)
 		case 3:
-			return setBytes(f, "cursor tool started", &m.ModelCallIDView)
+			return connectwire.SetBytes(f, "cursor tool started", &m.ModelCallIDView)
 		default:
 			return nil
 		}
@@ -180,29 +183,29 @@ type PartialToolCallUpdate struct {
 }
 
 func AppendPartialToolCallUpdate(dst []byte, m *PartialToolCallUpdate) []byte {
-	dst = appendRaw(dst, 1, m.CallIDView)
+	dst = connectwire.AppendRaw(dst, 1, m.CallIDView)
 	if m.ToolCall != nil {
-		dst = appendMessage(dst, 2, m.ToolCall, AppendToolCall)
+		dst = connectwire.AppendMessage(dst, 2, m.ToolCall, AppendToolCall)
 	}
-	dst = appendRaw(dst, 3, m.ArgsTextView)
-	return appendRaw(dst, 4, m.ModelCallIDView)
+	dst = connectwire.AppendRaw(dst, 3, m.ArgsTextView)
+	return connectwire.AppendRaw(dst, 4, m.ModelCallIDView)
 }
 
 func ConsumePartialToolCallUpdate(b []byte, m *PartialToolCallUpdate) error {
-	return consumeFields(b, "cursor partial tool call", func(f field) error {
-		switch f.number {
+	return connectwire.ConsumeFields(b, "cursor partial tool call", func(f connectwire.Field) error {
+		switch f.Number {
 		case 1:
-			return setBytes(f, "cursor partial tool call", &m.CallIDView)
+			return connectwire.SetBytes(f, "cursor partial tool call", &m.CallIDView)
 		case 2:
-			if err := requireKind(f, protowire.BytesType, "cursor partial tool call"); err != nil {
+			if err := connectwire.RequireKind(f, protowire.BytesType, "cursor partial tool call"); err != nil {
 				return err
 			}
 			m.ToolCall = new(ToolCall)
-			return ConsumeToolCall(bytesValue(f), m.ToolCall)
+			return ConsumeToolCall(connectwire.BytesValue(f), m.ToolCall)
 		case 3:
-			return setBytes(f, "cursor partial tool call", &m.ArgsTextView)
+			return connectwire.SetBytes(f, "cursor partial tool call", &m.ArgsTextView)
 		case 4:
-			return setBytes(f, "cursor partial tool call", &m.ModelCallIDView)
+			return connectwire.SetBytes(f, "cursor partial tool call", &m.ModelCallIDView)
 		default:
 			return nil
 		}
@@ -216,20 +219,20 @@ type ToolCallDeltaUpdate struct {
 }
 
 func AppendToolCallDeltaUpdate(dst []byte, m *ToolCallDeltaUpdate) []byte {
-	dst = appendRaw(dst, 1, m.CallIDView)
-	dst = appendRaw(dst, 2, m.ToolCallDeltaView)
-	return appendRaw(dst, 3, m.ModelCallIDView)
+	dst = connectwire.AppendRaw(dst, 1, m.CallIDView)
+	dst = connectwire.AppendRaw(dst, 2, m.ToolCallDeltaView)
+	return connectwire.AppendRaw(dst, 3, m.ModelCallIDView)
 }
 
 func ConsumeToolCallDeltaUpdate(b []byte, m *ToolCallDeltaUpdate) error {
-	return consumeFields(b, "cursor tool delta", func(f field) error {
-		switch f.number {
+	return connectwire.ConsumeFields(b, "cursor tool delta", func(f connectwire.Field) error {
+		switch f.Number {
 		case 1:
-			return setBytes(f, "cursor tool delta", &m.CallIDView)
+			return connectwire.SetBytes(f, "cursor tool delta", &m.CallIDView)
 		case 2:
-			return setBytes(f, "cursor tool delta", &m.ToolCallDeltaView)
+			return connectwire.SetBytes(f, "cursor tool delta", &m.ToolCallDeltaView)
 		case 3:
-			return setBytes(f, "cursor tool delta", &m.ModelCallIDView)
+			return connectwire.SetBytes(f, "cursor tool delta", &m.ModelCallIDView)
 		default:
 			return nil
 		}
@@ -247,26 +250,26 @@ type Usage struct {
 type TurnEndedUpdate = Usage
 
 func AppendUsage(dst []byte, m *Usage) []byte {
-	dst = appendInt64(dst, 1, m.Input)
-	dst = appendInt64(dst, 2, m.Output)
-	dst = appendInt64(dst, 3, m.CacheRead)
-	dst = appendInt64(dst, 4, m.CacheWrite)
-	return appendInt64(dst, 5, m.Reasoning)
+	dst = connectwire.AppendInt64(dst, 1, m.Input)
+	dst = connectwire.AppendInt64(dst, 2, m.Output)
+	dst = connectwire.AppendInt64(dst, 3, m.CacheRead)
+	dst = connectwire.AppendInt64(dst, 4, m.CacheWrite)
+	return connectwire.AppendInt64(dst, 5, m.Reasoning)
 }
 
 func ConsumeUsage(b []byte, m *Usage) error {
-	return consumeFields(b, "cursor turn end", func(f field) error {
-		switch f.number {
+	return connectwire.ConsumeFields(b, "cursor turn end", func(f connectwire.Field) error {
+		switch f.Number {
 		case 1:
-			return setInt64(f, "cursor turn end", &m.Input)
+			return connectwire.SetInt64(f, "cursor turn end", &m.Input)
 		case 2:
-			return setInt64(f, "cursor turn end", &m.Output)
+			return connectwire.SetInt64(f, "cursor turn end", &m.Output)
 		case 3:
-			return setInt64(f, "cursor turn end", &m.CacheRead)
+			return connectwire.SetInt64(f, "cursor turn end", &m.CacheRead)
 		case 4:
-			return setInt64(f, "cursor turn end", &m.CacheWrite)
+			return connectwire.SetInt64(f, "cursor turn end", &m.CacheWrite)
 		case 5:
-			return setInt64(f, "cursor turn end", &m.Reasoning)
+			return connectwire.SetInt64(f, "cursor turn end", &m.Reasoning)
 		default:
 			return nil
 		}
@@ -297,13 +300,13 @@ type InteractionUpdate struct {
 func AppendInteractionUpdate(dst []byte, m *InteractionUpdate) []byte {
 	switch {
 	case m.Text != nil:
-		return appendMessage(dst, 1, m.Text, AppendTextDelta)
+		return connectwire.AppendMessage(dst, 1, m.Text, AppendTextDelta)
 	case m.Thinking != nil:
-		return appendMessage(dst, 4, m.Thinking, AppendThinkingDelta)
+		return connectwire.AppendMessage(dst, 4, m.Thinking, AppendThinkingDelta)
 	case m.TokenDelta != nil:
-		return appendMessage(dst, 8, m.TokenDelta, AppendTokenDelta)
+		return connectwire.AppendMessage(dst, 8, m.TokenDelta, AppendTokenDelta)
 	case m.Ended != nil:
-		return appendMessage(dst, 14, m.Ended, AppendTurnEndedUpdate)
+		return connectwire.AppendMessage(dst, 14, m.Ended, AppendTurnEndedUpdate)
 	}
 	return appendInteractionTool(dst, m)
 }
@@ -311,22 +314,22 @@ func AppendInteractionUpdate(dst []byte, m *InteractionUpdate) []byte {
 func appendInteractionTool(dst []byte, m *InteractionUpdate) []byte {
 	switch {
 	case m.Started != nil:
-		return appendMessage(dst, 2, m.Started, AppendToolCallStartedUpdate)
+		return connectwire.AppendMessage(dst, 2, m.Started, AppendToolCallStartedUpdate)
 	case m.Completed != nil:
-		return appendMessage(dst, 3, m.Completed, AppendToolCallCompletedUpdate)
+		return connectwire.AppendMessage(dst, 3, m.Completed, AppendToolCallCompletedUpdate)
 	case m.Partial != nil:
-		return appendMessage(dst, 7, m.Partial, AppendPartialToolCallUpdate)
+		return connectwire.AppendMessage(dst, 7, m.Partial, AppendPartialToolCallUpdate)
 	case m.ToolDelta != nil:
-		return appendMessage(dst, 15, m.ToolDelta, AppendToolCallDeltaUpdate)
+		return connectwire.AppendMessage(dst, 15, m.ToolDelta, AppendToolCallDeltaUpdate)
 	case m.VariantNumber != 0:
-		return appendVariant(dst, protowire.Number(m.VariantNumber), m.VariantView)
+		return connectwire.AppendVariant(dst, protowire.Number(m.VariantNumber), m.VariantView)
 	}
 	return dst
 }
 
 func ConsumeInteractionUpdate(b []byte, m *InteractionUpdate) error {
-	return consumeFields(b, "cursor interaction", func(f field) error {
-		if !isVariant(f, 1, 17) {
+	return connectwire.ConsumeFields(b, "cursor interaction", func(f connectwire.Field) error {
+		if !connectwire.IsVariant(f, 1, 17) {
 			return nil
 		}
 		*m = InteractionUpdate{}
@@ -334,27 +337,27 @@ func ConsumeInteractionUpdate(b []byte, m *InteractionUpdate) error {
 	})
 }
 
-func consumeInteractionVariant(f field, m *InteractionUpdate) error {
-	switch f.number {
+func consumeInteractionVariant(f connectwire.Field, m *InteractionUpdate) error {
+	switch f.Number {
 	case 1:
-		return consumeNested(f, "cursor interaction", &m.Text, ConsumeTextDelta)
+		return connectwire.ConsumeNested(f, "cursor interaction", &m.Text, ConsumeTextDelta)
 	case 2:
-		return consumeNested(f, "cursor interaction", &m.Started, ConsumeToolCallStartedUpdate)
+		return connectwire.ConsumeNested(f, "cursor interaction", &m.Started, ConsumeToolCallStartedUpdate)
 	case 3:
-		return consumeNested(f, "cursor interaction", &m.Completed, ConsumeToolCallCompletedUpdate)
+		return connectwire.ConsumeNested(f, "cursor interaction", &m.Completed, ConsumeToolCallCompletedUpdate)
 	case 4:
-		return consumeNested(f, "cursor interaction", &m.Thinking, ConsumeThinkingDelta)
+		return connectwire.ConsumeNested(f, "cursor interaction", &m.Thinking, ConsumeThinkingDelta)
 	case 7:
-		return consumeNested(f, "cursor interaction", &m.Partial, ConsumePartialToolCallUpdate)
+		return connectwire.ConsumeNested(f, "cursor interaction", &m.Partial, ConsumePartialToolCallUpdate)
 	case 8:
-		return consumeNested(f, "cursor interaction", &m.TokenDelta, ConsumeTokenDelta)
+		return connectwire.ConsumeNested(f, "cursor interaction", &m.TokenDelta, ConsumeTokenDelta)
 	case 14:
-		return consumeNested(f, "cursor interaction", &m.Ended, ConsumeTurnEndedUpdate)
+		return connectwire.ConsumeNested(f, "cursor interaction", &m.Ended, ConsumeTurnEndedUpdate)
 	case 15:
-		return consumeNested(f, "cursor interaction", &m.ToolDelta, ConsumeToolCallDeltaUpdate)
+		return connectwire.ConsumeNested(f, "cursor interaction", &m.ToolDelta, ConsumeToolCallDeltaUpdate)
 	}
-	m.VariantNumber = f.number
-	return setBytes(f, "cursor interaction", &m.VariantView)
+	m.VariantNumber = f.Number
+	return connectwire.SetBytes(f, "cursor interaction", &m.VariantView)
 }
 
 type AgentServerMessage struct {
@@ -366,30 +369,30 @@ type AgentServerMessage struct {
 
 func AppendAgentServerMessage(dst []byte, m *AgentServerMessage) []byte {
 	if m.Interaction != nil {
-		return appendMessage(dst, 1, m.Interaction, AppendInteractionUpdate)
+		return connectwire.AppendMessage(dst, 1, m.Interaction, AppendInteractionUpdate)
 	}
 	if m.Exec != nil {
-		return appendMessage(dst, 2, m.Exec, AppendExecServerMessage)
+		return connectwire.AppendMessage(dst, 2, m.Exec, AppendExecServerMessage)
 	}
 	if m.MessageNumber != 0 {
-		return appendVariant(dst, protowire.Number(m.MessageNumber), m.MessageView)
+		return connectwire.AppendVariant(dst, protowire.Number(m.MessageNumber), m.MessageView)
 	}
 	return dst
 }
 
 func ConsumeAgentServerMessage(b []byte, m *AgentServerMessage) error {
-	return consumeFields(b, "cursor server message", func(f field) error {
-		if !isVariant(f, 1, 7) {
+	return connectwire.ConsumeFields(b, "cursor server message", func(f connectwire.Field) error {
+		if !connectwire.IsVariant(f, 1, 7) {
 			return nil
 		}
 		*m = AgentServerMessage{}
-		switch f.number {
+		switch f.Number {
 		case 1:
-			return consumeNested(f, "cursor server message", &m.Interaction, ConsumeInteractionUpdate)
+			return connectwire.ConsumeNested(f, "cursor server message", &m.Interaction, ConsumeInteractionUpdate)
 		case 2:
-			return consumeNested(f, "cursor server message", &m.Exec, ConsumeExecServerMessage)
+			return connectwire.ConsumeNested(f, "cursor server message", &m.Exec, ConsumeExecServerMessage)
 		}
-		m.MessageNumber = f.number
-		return setBytes(f, "cursor server message", &m.MessageView)
+		m.MessageNumber = f.Number
+		return connectwire.SetBytes(f, "cursor server message", &m.MessageView)
 	})
 }

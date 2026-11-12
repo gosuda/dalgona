@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -123,11 +124,11 @@ func appendNested(dst []byte, n protowire.Number, encode func([]byte) ([]byte, e
 		return nil, err
 	}
 	size := len(dst) - start
-	prefix := varintSize(size)
+	prefix := connectwire.VarintSize(size)
 	var pad [binary.MaxVarintLen64]byte
 	dst = append(dst, pad[:prefix]...)
 	copy(dst[start+prefix:], dst[start:start+size])
-	writeVarint(dst[start:start+prefix], size)
+	connectwire.WriteVarint(dst[start:start+prefix], size)
 	return dst, nil
 }
 
@@ -144,10 +145,10 @@ func writeValueJSON(encoder *jsontext.Encoder, b []byte, depth int) error {
 	if depth > maxValueDepth {
 		return errors.New("value nesting exceeds 64 levels")
 	}
-	var last field
+	var last connectwire.Field
 	found := false
-	err := consumeFields(b, "cursor value", func(f field) error {
-		if f.number >= valueNull && f.number <= valueList {
+	err := connectwire.ConsumeFields(b, "cursor value", func(f connectwire.Field) error {
+		if f.Number >= valueNull && f.Number <= valueList {
 			last, found = f, true
 		}
 		return nil
@@ -161,22 +162,22 @@ func writeValueJSON(encoder *jsontext.Encoder, b []byte, depth int) error {
 	return writeValueField(encoder, last, depth)
 }
 
-func writeValueField(encoder *jsontext.Encoder, f field, depth int) error {
-	switch f.number {
+func writeValueField(encoder *jsontext.Encoder, f connectwire.Field, depth int) error {
+	switch f.Number {
 	case valueNumber:
-		if err := requireKind(f, protowire.Fixed64Type, "cursor value"); err != nil {
+		if err := connectwire.RequireKind(f, protowire.Fixed64Type, "cursor value"); err != nil {
 			return err
 		}
-		bits, _ := protowire.ConsumeFixed64(f.raw)
+		bits, _ := protowire.ConsumeFixed64(f.Raw)
 		return encoder.WriteToken(jsontext.Float(math.Float64frombits(bits)))
 	case valueString:
-		if err := requireKind(f, protowire.BytesType, "cursor value"); err != nil {
+		if err := connectwire.RequireKind(f, protowire.BytesType, "cursor value"); err != nil {
 			return err
 		}
-		return encoder.WriteToken(jsontext.String(string(f.data)))
+		return encoder.WriteToken(jsontext.String(string(f.Data)))
 	case valueBool:
 		var value bool
-		if err := setBool(f, "cursor value", &value); err != nil {
+		if err := connectwire.SetBool(f, "cursor value", &value); err != nil {
 			return err
 		}
 		return encoder.WriteToken(jsontext.Bool(value))
@@ -188,21 +189,21 @@ func writeValueField(encoder *jsontext.Encoder, f field, depth int) error {
 	return encoder.WriteToken(jsontext.Null)
 }
 
-func writeStructJSON(encoder *jsontext.Encoder, f field, depth int) error {
-	if err := requireKind(f, protowire.BytesType, "cursor struct"); err != nil {
+func writeStructJSON(encoder *jsontext.Encoder, f connectwire.Field, depth int) error {
+	if err := connectwire.RequireKind(f, protowire.BytesType, "cursor struct"); err != nil {
 		return err
 	}
 	if err := encoder.WriteToken(jsontext.BeginObject); err != nil {
 		return err
 	}
-	err := consumeFields(f.data, "cursor struct", func(entry field) error {
-		if entry.number != 1 {
+	err := connectwire.ConsumeFields(f.Data, "cursor struct", func(entry connectwire.Field) error {
+		if entry.Number != 1 {
 			return nil
 		}
-		if err := requireKind(entry, protowire.BytesType, "cursor struct"); err != nil {
+		if err := connectwire.RequireKind(entry, protowire.BytesType, "cursor struct"); err != nil {
 			return err
 		}
-		return writeStructEntry(encoder, entry.data, depth)
+		return writeStructEntry(encoder, entry.Data, depth)
 	})
 	if err != nil {
 		return err
@@ -212,12 +213,12 @@ func writeStructJSON(encoder *jsontext.Encoder, f field, depth int) error {
 
 func writeStructEntry(encoder *jsontext.Encoder, entry []byte, depth int) error {
 	var key, value []byte
-	err := consumeFields(entry, "cursor struct entry", func(f field) error {
-		switch f.number {
+	err := connectwire.ConsumeFields(entry, "cursor struct entry", func(f connectwire.Field) error {
+		switch f.Number {
 		case 1:
-			return setBytes(f, "cursor struct entry", &key)
+			return connectwire.SetBytes(f, "cursor struct entry", &key)
 		case 2:
-			return setBytes(f, "cursor struct entry", &value)
+			return connectwire.SetBytes(f, "cursor struct entry", &value)
 		}
 		return nil
 	})
@@ -230,21 +231,21 @@ func writeStructEntry(encoder *jsontext.Encoder, entry []byte, depth int) error 
 	return writeValueJSON(encoder, value, depth+1)
 }
 
-func writeListJSON(encoder *jsontext.Encoder, f field, depth int) error {
-	if err := requireKind(f, protowire.BytesType, "cursor list"); err != nil {
+func writeListJSON(encoder *jsontext.Encoder, f connectwire.Field, depth int) error {
+	if err := connectwire.RequireKind(f, protowire.BytesType, "cursor list"); err != nil {
 		return err
 	}
 	if err := encoder.WriteToken(jsontext.BeginArray); err != nil {
 		return err
 	}
-	err := consumeFields(f.data, "cursor list", func(item field) error {
-		if item.number != 1 {
+	err := connectwire.ConsumeFields(f.Data, "cursor list", func(item connectwire.Field) error {
+		if item.Number != 1 {
 			return nil
 		}
-		if err := requireKind(item, protowire.BytesType, "cursor list"); err != nil {
+		if err := connectwire.RequireKind(item, protowire.BytesType, "cursor list"); err != nil {
 			return err
 		}
-		return writeValueJSON(encoder, item.data, depth+1)
+		return writeValueJSON(encoder, item.Data, depth+1)
 	})
 	if err != nil {
 		return err

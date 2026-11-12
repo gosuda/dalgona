@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"github.com/gosuda/dalgona/internal/model/cursor/wire"
 )
 
@@ -45,7 +46,7 @@ func failureStatus(err error) int {
 	if errors.Is(err, errStreamCut) {
 		return http.StatusServiceUnavailable
 	}
-	if connectErr, ok := errors.AsType[*wire.ConnectError](err); ok {
+	if connectErr, ok := errors.AsType[*connectwire.ConnectError](err); ok {
 		if status, known := connectHTTPStatus[connectErr.Code]; known {
 			return status
 		}
@@ -100,7 +101,7 @@ func (w *idleBody) resume() {
 }
 
 type frameRead struct {
-	frame wire.Frame
+	frame connectwire.Frame
 	err   error
 }
 
@@ -116,7 +117,7 @@ func newFrameReader(body *idleBody) *frameReader {
 	return &frameReader{body: body, current: make([]byte, 0, 32<<10)}
 }
 
-func (r *frameReader) next() (wire.Frame, error) {
+func (r *frameReader) next() (connectwire.Frame, error) {
 	if len(r.queued) != 0 {
 		read := r.queued[0]
 		r.queued = r.queued[1:]
@@ -128,7 +129,7 @@ func (r *frameReader) next() (wire.Frame, error) {
 		r.spare, r.current = r.current, read.frame.Payload
 		return read.frame, read.err
 	}
-	frame, err := wire.ReadFrame(r.body, r.current, maxFramePayload)
+	frame, err := connectwire.ReadFrame(r.body, r.current, maxFramePayload)
 	if err == nil {
 		r.current = frame.Payload[:0]
 	}
@@ -140,7 +141,7 @@ func (r *frameReader) lookahead() <-chan frameRead {
 		ahead := make(chan frameRead, 1)
 		r.ahead = ahead
 		go func(buffer []byte) {
-			frame, err := wire.ReadFrame(r.body, buffer, maxFramePayload)
+			frame, err := connectwire.ReadFrame(r.body, buffer, maxFramePayload)
 			ahead <- frameRead{frame: frame, err: err}
 		}(r.spare)
 	}
@@ -180,7 +181,7 @@ func (w *frameWriter) send(message *wire.AgentClientMessage) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.payload = wire.AppendAgentClientMessage(w.payload[:0], message)
-	w.frame = wire.AppendFrame(w.frame[:0], 0, w.payload)
+	w.frame = connectwire.AppendFrame(w.frame[:0], 0, w.payload)
 	_, err := w.pipe.Write(w.frame)
 	return err
 }

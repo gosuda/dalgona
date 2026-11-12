@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"github.com/gosuda/dalgona/internal/model/cursor"
 	"github.com/gosuda/dalgona/internal/model/cursor/wire"
 )
@@ -31,7 +32,7 @@ type fakeConn struct {
 
 func (c *fakeConn) send(message *wire.AgentServerMessage) {
 	c.t.Helper()
-	frame := wire.AppendFrame(nil, 0, wire.AppendAgentServerMessage(nil, message))
+	frame := connectwire.AppendFrame(nil, 0, wire.AppendAgentServerMessage(nil, message))
 	if _, err := c.writer.Write(frame); err != nil {
 		c.t.Errorf("write server frame: %v", err)
 	}
@@ -146,7 +147,7 @@ func (f *fakeCursor) nextScript() func(*fakeConn) {
 func readClient(body io.Reader, inbound chan<- *wire.AgentClientMessage) {
 	defer close(inbound)
 	for {
-		frame, err := wire.ReadFrame(body, nil, 1<<24)
+		frame, err := connectwire.ReadFrame(body, nil, 1<<24)
 		if err != nil {
 			return
 		}
@@ -160,7 +161,7 @@ func readClient(body io.Reader, inbound chan<- *wire.AgentClientMessage) {
 
 func serveModels(w http.ResponseWriter) {
 	response := wire.GetUsableModelsResponse{Models: []wire.ModelDetails{{ModelIDView: []byte("gpt-5.5")}, {ModelIDView: []byte(" composer-2.5 ")}, {ModelIDView: []byte("gpt-5.5")}}}
-	_, _ = w.Write(wire.AppendFrame(nil, 0, wire.AppendGetUsableModelsResponse(nil, &response)))
+	_, _ = w.Write(connectwire.AppendFrame(nil, 0, wire.AppendGetUsableModelsResponse(nil, &response)))
 }
 
 func newServer(t *testing.T, scripts ...func(*fakeConn)) (*fakeCursor, *httptest.Server) {
@@ -557,7 +558,7 @@ func TestStateDirPersistsConversation(t *testing.T) {
 
 func TestRetryableTrailerRetriesTurn(t *testing.T) {
 	fake, server := newServer(t, func(c *fakeConn) {
-		frame := wire.AppendFrame(nil, wire.EndStream, []byte(`{"error":{"code":"resource_exhausted","message":"busy"}}`))
+		frame := connectwire.AppendFrame(nil, connectwire.EndStream, []byte(`{"error":{"code":"resource_exhausted","message":"busy"}}`))
 		_, _ = c.writer.Write(frame)
 		c.flusher.Flush()
 	}, func(c *fakeConn) {

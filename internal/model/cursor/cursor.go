@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"github.com/gosuda/dalgona/internal/model/cursor/wire"
 )
 
@@ -106,7 +107,7 @@ func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, curre
 	defer gate.Close()
 	reader, pipe := io.Pipe()
 	writer := &frameWriter{pipe: pipe}
-	body := requestBody{Reader: io.MultiReader(bytes.NewReader(wire.AppendFrame(nil, 0, payload)), reader), pipe: reader}
+	body := requestBody{Reader: io.MultiReader(bytes.NewReader(connectwire.AppendFrame(nil, 0, payload)), reader), pipe: reader}
 	httpReq, err := p.newRequest(gateCtx, runPath, body, token)
 	if err != nil {
 		_ = pipe.Close()
@@ -205,7 +206,7 @@ func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
 }
 
 func unaryPayload(payload []byte) []byte {
-	frame, err := wire.ReadFrame(bytes.NewReader(payload), nil, maxFramePayload)
+	frame, err := connectwire.ReadFrame(bytes.NewReader(payload), nil, maxFramePayload)
 	if err != nil || frame.Flags != 0 {
 		return payload
 	}

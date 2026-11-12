@@ -1,6 +1,9 @@
 package wire
 
-import "google.golang.org/protobuf/encoding/protowire"
+import (
+	"github.com/gosuda/dalgona/internal/model/connectwire"
+	"google.golang.org/protobuf/encoding/protowire"
+)
 
 const (
 	ClientExecControlNumber int32 = 5
@@ -31,29 +34,29 @@ func AppendExecClientControl(dst []byte, m *ExecClientControl) []byte {
 	if m.Kind < ExecStreamClose || m.Kind > ExecHeartbeat {
 		return dst
 	}
-	return appendMessage(dst, protowire.Number(m.Kind), m, appendExecControlBody)
+	return connectwire.AppendMessage(dst, protowire.Number(m.Kind), m, appendExecControlBody)
 }
 
 func appendExecControlBody(dst []byte, m *ExecClientControl) []byte {
-	dst = appendUint32(dst, 1, m.ID)
+	dst = connectwire.AppendUint32(dst, 1, m.ID)
 	if m.Kind == ExecThrow {
-		dst = appendRaw(dst, 2, m.ErrorView)
+		dst = connectwire.AppendRaw(dst, 2, m.ErrorView)
 	}
 	return dst
 }
 
 func ConsumeExecClientControl(b []byte, m *ExecClientControl) error {
-	return consumeFields(b, "cursor exec control", func(f field) error {
-		if !isVariant(f, ExecStreamClose, ExecHeartbeat) {
+	return connectwire.ConsumeFields(b, "cursor exec control", func(f connectwire.Field) error {
+		if !connectwire.IsVariant(f, ExecStreamClose, ExecHeartbeat) {
 			return nil
 		}
-		*m = ExecClientControl{Kind: f.number}
-		return consumeFields(f.data, "cursor exec control", func(inner field) error {
-			switch inner.number {
+		*m = ExecClientControl{Kind: f.Number}
+		return connectwire.ConsumeFields(f.Data, "cursor exec control", func(inner connectwire.Field) error {
+			switch inner.Number {
 			case 1:
-				return setUint32(inner, "cursor exec control", &m.ID)
+				return connectwire.SetUint32(inner, "cursor exec control", &m.ID)
 			case 2:
-				return setBytes(inner, "cursor exec control", &m.ErrorView)
+				return connectwire.SetBytes(inner, "cursor exec control", &m.ErrorView)
 			}
 			return nil
 		})
@@ -64,16 +67,16 @@ func AppendTextMessage(dst, text []byte) []byte {
 	if text == nil {
 		text = []byte{}
 	}
-	return appendRaw(dst, 1, text)
+	return connectwire.AppendRaw(dst, 1, text)
 }
 
 func ConsumeTextMessage(b []byte) ([]byte, error) {
 	var text []byte
-	err := consumeFields(b, "cursor text message", func(f field) error {
-		if f.number != 1 {
+	err := connectwire.ConsumeFields(b, "cursor text message", func(f connectwire.Field) error {
+		if f.Number != 1 {
 			return nil
 		}
-		return setBytes(f, "cursor text message", &text)
+		return connectwire.SetBytes(f, "cursor text message", &text)
 	})
 	return text, err
 }

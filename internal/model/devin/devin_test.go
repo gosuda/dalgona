@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"github.com/gosuda/dalgona/internal/model/devin"
 	"github.com/gosuda/dalgona/internal/model/devin/wire"
 )
@@ -101,8 +102,8 @@ func (f *fakeDevin) serveChat(w http.ResponseWriter, r *http.Request, body []byt
 
 func decodeChatRequest(t *testing.T, body []byte) *wire.GetChatMessageRequest {
 	t.Helper()
-	frame, err := wire.ReadFrame(bytes.NewReader(body), nil, 1<<24)
-	if err != nil || frame.Flags != wire.Compressed {
+	frame, err := connectwire.ReadFrame(bytes.NewReader(body), nil, 1<<24)
+	if err != nil || frame.Flags != connectwire.Compressed {
 		t.Fatalf("chat frame flags = %d, err = %v", frame.Flags, err)
 	}
 	reader, err := gzip.NewReader(bytes.NewReader(frame.Payload))
@@ -132,7 +133,7 @@ func serveModels(w http.ResponseWriter) {
 }
 
 func frame(message *wire.GetChatMessageResponse) []byte {
-	return wire.AppendFrame(nil, 0, wire.AppendGetChatMessageResponse(nil, message))
+	return connectwire.AppendFrame(nil, 0, wire.AppendGetChatMessageResponse(nil, message))
 }
 
 func gzipFrame(message *wire.GetChatMessageResponse) []byte {
@@ -140,11 +141,11 @@ func gzipFrame(message *wire.GetChatMessageResponse) []byte {
 	writer := gzip.NewWriter(&buffer)
 	_, _ = writer.Write(wire.AppendGetChatMessageResponse(nil, message))
 	_ = writer.Close()
-	return wire.AppendFrame(nil, wire.Compressed, buffer.Bytes())
+	return connectwire.AppendFrame(nil, connectwire.Compressed, buffer.Bytes())
 }
 
 func endFrame(trailer string) []byte {
-	return wire.AppendFrame(nil, wire.EndStream, []byte(trailer))
+	return connectwire.AppendFrame(nil, connectwire.EndStream, []byte(trailer))
 }
 
 func toolTurn(w http.ResponseWriter) {

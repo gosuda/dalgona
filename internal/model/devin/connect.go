@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/model"
-	"github.com/gosuda/dalgona/internal/model/devin/wire"
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 )
 
 const maxFramePayload = 16 << 20
@@ -38,7 +38,7 @@ var connectHTTPStatus = map[string]int{
 }
 
 func connectStatus(err error, fallback int) int {
-	if connectErr, ok := errors.AsType[*wire.ConnectError](err); ok {
+	if connectErr, ok := errors.AsType[*connectwire.ConnectError](err); ok {
 		if status, known := connectHTTPStatus[connectErr.Code]; known {
 			return status
 		}
@@ -51,8 +51,8 @@ type inflater struct {
 	out    bytes.Buffer
 }
 
-func (f *inflater) payload(frame wire.Frame) ([]byte, error) {
-	if frame.Flags&wire.Compressed == 0 {
+func (f *inflater) payload(frame connectwire.Frame) ([]byte, error) {
+	if frame.Flags&connectwire.Compressed == 0 {
 		return frame.Payload, nil
 	}
 	source := bytes.NewReader(frame.Payload)
@@ -79,7 +79,7 @@ func (f *inflater) payload(frame wire.Frame) ([]byte, error) {
 func gzipFrame(payload []byte) ([]byte, error) {
 	var buffer bytes.Buffer
 	buffer.Grow(len(payload)/2 + 64)
-	buffer.Write([]byte{wire.Compressed, 0, 0, 0, 0})
+	buffer.Write([]byte{connectwire.Compressed, 0, 0, 0, 0})
 	writer := gzip.NewWriter(&buffer)
 	if _, err := writer.Write(payload); err != nil {
 		return nil, fmt.Errorf("gzip request: %w", err)
