@@ -475,6 +475,8 @@ A completed user message MUST show the marks listed in its `keywords` member. A 
 
 A `item/tool/requestUserInput` request joins the decision queue behind earlier approvals and questions. The card shows the oldest open decision. The TUI MUST show one question card for each request. Its title reads `Question <i> of <n> · <header>`.
 
+While a question waits, the live row MUST say `Waiting for your answer`.
+
 Rows mode moves with `up`, `k`, `down`, and `j`. `tab`, `right`, and `l` move to the next question. `shift+tab`, `left`, and `h` move back. Digits pick an option. `space` toggles a multi-select option. In a single-select question, `enter` picks the option under the cursor and advances. In a multi-select question, `enter` advances without changing the picks. On the last question, `enter` submits. `s` submits now. `esc` dismisses the card.
 
 The Other row opens typing. Typing uses the input line with the label `answer: `. `enter` stores the typed text and advances. `esc` leaves typing, or dismisses a free-text question.

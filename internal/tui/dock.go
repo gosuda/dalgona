@@ -370,6 +370,9 @@ func (m *model) noticeLine() string {
 }
 
 func (m *model) activity() string {
+	if len(m.approvals) > 0 && m.approvals[0].card != nil {
+		return "Waiting for your answer"
+	}
 	if len(m.approvals) > 0 || m.thread.state == stateAwaitingApproval {
 		return "Waiting for your approval"
 	}

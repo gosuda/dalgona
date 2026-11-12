@@ -55,3 +55,12 @@ func TestIdleStatusAfterFailedTurnKeepsFailed(t *testing.T) {
 		t.Fatalf("live row after a failed turn and an idle status = %q, want Failed", got)
 	}
 }
+
+func TestQuestionLiveRowSaysAnswerNotApproval(t *testing.T) {
+	t.Parallel()
+	m, _ := openQuestion(t, questionParamsJSON)
+	got := stripANSI(m.liveRow())
+	if !strings.Contains(got, "Waiting for your answer") || strings.Contains(got, "approval") {
+		t.Fatalf("live row while a question waits = %q, want the answer wording", got)
+	}
+}
