@@ -36,6 +36,14 @@ The find mode MUST NOT use an index. The search child MUST exit with status 1 on
 
 The search child MUST treat a generation deleted during the call as no index. The search child MUST write nothing to standard error when it succeeds. The search MUST NOT show the unindexed byte count to the model.
 
+Search MUST use an index only for grep calls, only with a local runner, and only when the sandbox enforces its writable roots. Search MUST NOT read or build an index when the sandbox is off or the runner cannot enforce it.
+
+The index root MUST be the product home, plus `search`, plus a 16-digit hash of the canonical workspace path. Search MUST NOT use an index when the index root lies inside the workspace, the temp directory, the user cache, or a writable root.
+
+Search MUST pass the index root, the generation name, its clock, and the racy window to the search child as arguments. The model MUST NOT be able to choose the index root or the generation.
+
+An index failure is exit status 1 whose output names an unusable index or a corrupt index. After an index failure, Search MUST remove `CURRENT` only when it still names the failed generation. Removing `CURRENT` reads the file and then removes it, so a publish between those two steps is removed too. The search then runs without an index until the next build, and its output does not change. Search MUST run the same call again without an index, under a new process id. Search MUST log an index failure at warn level, and the model MUST NOT receive it.
+
 ## Fuzzy file search
 
 The `fuzzyFileSearch` method MUST list regular files under each requested root and MUST NOT list directories.

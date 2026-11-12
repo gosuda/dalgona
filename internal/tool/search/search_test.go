@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -137,19 +138,27 @@ type fakeProcessRunner struct {
 	data []byte
 	read bool
 	ids  []string
+	argv [][]string
 }
 
 func (r *fakeProcessRunner) Start(ctx context.Context, spec runner.ProcessSpec) error {
 	r.ids = append(r.ids, spec.ID)
+	r.argv = append(r.argv, slices.Clone(spec.Argv))
 	r.read = false
-	if len(spec.Argv) != 3 || spec.Argv[0] != "@self" || spec.Argv[1] != "__search" {
+	if (len(spec.Argv) != 3 && len(spec.Argv) != 7) || spec.Argv[0] != "@self" || spec.Argv[1] != "__search" {
 		return errors.New("unexpected process")
 	}
 	parsed, err := parseArgs(jsontext.Value(spec.Argv[2]))
 	if err != nil {
 		return err
 	}
-	result, err := execute(spec.Dir, parsed, "", freshness{})
+	dir, clock := "", freshness{}
+	if len(spec.Argv) == 7 {
+		if dir, clock, err = parseIndexArgs(spec.Argv[3:]); err != nil {
+			return err
+		}
+	}
+	result, err := execute(spec.Dir, parsed, dir, clock)
 	if err != nil {
 		return err
 	}

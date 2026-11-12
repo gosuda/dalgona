@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,41 +36,116 @@ func (Tool) Spec() tool.Spec {
 func (Tool) Class() tool.Class { return tool.ClassRead }
 
 func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result, error) {
-	if _, err := parseArgs(call.Args); err != nil {
+	parsed, err := parseArgs(call.Args)
+	if err != nil {
 		return tool.Result{}, err
 	}
 	id := call.ID
 	if id == "" {
-		var random [16]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			return tool.Result{}, fmt.Errorf("search: allocate process id: %w", err)
+		if id, err = newProcessID("search-"); err != nil {
+			return tool.Result{}, err
 		}
-		id = "search-" + hex.EncodeToString(random[:])
 	}
+	var result outcome
+	if parsed.Mode == "grep" {
+		result, err = runGrep(ctx, env, id, call.Args)
+	} else {
+		result, err = runSearch(ctx, env, id, call.Args, indexRef{})
+	}
+	if err != nil {
+		return tool.Result{}, err
+	}
+	return makeResult(result, env.Snapshots), nil
+}
+
+type exitError struct {
+	code   int
+	output []byte
+}
+
+func (e exitError) Error() string {
+	return fmt.Sprintf("search: subprocess exited %d: %s", e.code, e.output)
+}
+
+func newProcessID(prefix string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("search: allocate process id: %w", err)
+	}
+	return prefix + hex.EncodeToString(random[:]), nil
+}
+
+func searchArgs(raw jsontext.Value, ref indexRef, now time.Time) []string {
+	argv := []string{"@self", "__search", string(raw)}
+	if ref.gen == "" {
+		return argv
+	}
+	return append(argv, ref.root, ref.gen, strconv.FormatInt(now.UnixNano(), 10), strconv.FormatInt(racyWindow.Nanoseconds(), 10))
+}
+
+func runSearch(ctx context.Context, env tool.Env, id string, raw jsontext.Value, ref indexRef) (outcome, error) {
 	spec := runner.ProcessSpec{
-		ID: id, Argv: []string{"@self", "__search", string(call.Args)},
+		ID: id, Argv: searchArgs(raw, ref, time.Now()),
 		Dir: env.Cwd, Sandbox: env.Sandbox,
 	}
 	if err := env.Runner.Start(ctx, spec); err != nil {
-		return tool.Result{}, fmt.Errorf("search: start subprocess: %w", err)
+		return outcome{}, fmt.Errorf("search: start subprocess: %w", err)
 	}
 	data, err := collect(ctx, env.Runner, id)
 	if err != nil {
-		killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
-		defer cancel()
-		if killErr := env.Runner.Signal(killCtx, id, runner.SignalKill); killErr != nil {
-			return tool.Result{}, errors.Join(err, fmt.Errorf("search: kill subprocess: %w", killErr))
-		}
-		if waitErr := runner.AwaitExit(ctx, env.Runner, id, 5*time.Second); waitErr != nil {
-			return tool.Result{}, errors.Join(err, fmt.Errorf("search: wait for subprocess exit: %w", waitErr))
-		}
-		return tool.Result{}, err
+		return outcome{}, killAndAwait(ctx, env.Runner, id, err)
 	}
 	result, err := decodeOutcome(data)
 	if err != nil {
-		return tool.Result{}, errors.New(string(data))
+		return outcome{}, errors.New(string(data))
 	}
-	return makeResult(result, env.Snapshots), nil
+	return result, nil
+}
+
+func killAndAwait(ctx context.Context, run runner.Runner, id string, cause error) error {
+	killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	if killErr := run.Signal(killCtx, id, runner.SignalKill); killErr != nil {
+		return errors.Join(cause, fmt.Errorf("search: kill subprocess: %w", killErr))
+	}
+	if waitErr := runner.AwaitExit(ctx, run, id, 5*time.Second); waitErr != nil {
+		return errors.Join(cause, fmt.Errorf("search: wait for subprocess exit: %w", waitErr))
+	}
+	return cause
+}
+
+func runGrep(ctx context.Context, env tool.Env, id string, raw jsontext.Value) (outcome, error) {
+	return grepWithIndex(ctx, env, indexFor(env), id, raw)
+}
+
+func grepWithIndex(ctx context.Context, env tool.Env, ref indexRef, id string, raw jsontext.Value) (outcome, error) {
+	result, err := runSearch(ctx, env, id, raw, ref)
+	if ref.gen == "" || !isIndexFailure(err) {
+		return result, err
+	}
+	return retryWithoutIndex(ctx, env, ref, raw, err)
+}
+
+func retryWithoutIndex(ctx context.Context, env tool.Env, ref indexRef, raw jsontext.Value, cause error) (outcome, error) {
+	slog.Default().Warn("search: index failed, retrying without it", "root", ref.root, "generation", ref.gen, "error", cause)
+	if err := forgetGeneration(ref.root, ref.gen); err != nil {
+		slog.Default().Warn("search: could not remove the failed index", "root", ref.root, "generation", ref.gen, "error", err)
+	}
+	id, err := newProcessID("search-")
+	if err != nil {
+		return outcome{}, err
+	}
+	return runSearch(ctx, env, id, raw, indexRef{})
+}
+
+const corruptIndexText = "corrupt index"
+
+func isIndexFailure(err error) bool {
+	exit, ok := errors.AsType[exitError](err)
+	if !ok || exit.code != indexFailedStatus {
+		return false
+	}
+	return bytes.Contains(exit.output, []byte(errIndex.Error())) || bytes.Contains(exit.output, []byte(corruptIndexText))
 }
 
 func collect(ctx context.Context, run runner.Runner, id string) ([]byte, error) {
@@ -83,7 +160,7 @@ func collect(ctx context.Context, run runner.Runner, id string) ([]byte, error) 
 		offset = out.Next
 		if out.Exit != nil {
 			if out.Exit.Code != 0 {
-				return nil, fmt.Errorf("search: subprocess exited %d: %s", out.Exit.Code, data)
+				return nil, exitError{code: out.Exit.Code, output: data}
 			}
 			return data, nil
 		}
@@ -158,7 +235,7 @@ func Main(argv []string, stdout io.Writer) int {
 		return 2
 	}
 	if _, err := stdout.Write(encodeOutcome(result)); err != nil {
-		return 1
+		return 2
 	}
 	return 0
 }
