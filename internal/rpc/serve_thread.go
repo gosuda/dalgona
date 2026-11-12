@@ -126,6 +126,9 @@ func threadStatus(thread *agent.Thread) ThreadStatus {
 	}
 	switch status.State {
 	case event.StatusTurnRunning:
+		if status.Questions > 0 {
+			return ThreadStatus{Type: "active", ActiveFlags: []string{"waitingOnUserInput"}}
+		}
 		return ThreadStatus{Type: "active", ActiveFlags: []string{}}
 	case event.StatusAwaitingApproval:
 		return ThreadStatus{Type: "active", ActiveFlags: []string{"waitingOnApproval"}}

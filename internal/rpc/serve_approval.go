@@ -45,7 +45,7 @@ func (s *server) ask(ctx context.Context, w *watch, update agent.Update) {
 		}
 	}
 	askCtx, cancel := context.WithCancel(ctx)
-	started, dup := s.spawnApproval(prompt.RequestID, cancel, func() {
+	started, dup := s.spawnRequest(prompt.RequestID, cancel, func() {
 		defer s.settle(prompt.RequestID)
 		s.request(ctx, askCtx, a)
 	})
@@ -80,7 +80,7 @@ func (s *server) spawn(register, task func()) bool {
 	return true
 }
 
-func (s *server) spawnApproval(requestID string, cancel context.CancelFunc, task func()) (started, dup bool) {
+func (s *server) spawnRequest(requestID string, cancel context.CancelFunc, task func()) (started, dup bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closing {

@@ -59,3 +59,24 @@ func validateCodexSchema(t *testing.T, path string, input any) {
 		t.Fatal(err)
 	}
 }
+
+func TestCodexSchemasValidateUserInput(t *testing.T) {
+	params := ToolRequestUserInputParams{
+		ThreadID: "thread", TurnID: "turn", ItemID: "call", IsBlocking: true,
+		Questions: []ToolRequestUserInputQuestion{
+			{
+				ID: "q1", Header: "Database", Question: "Which?", IsOther: true, MultiSelect: true,
+				Options: []ToolRequestUserInputOption{{Label: "Postgres", Description: "A server.", Preview: "image: postgres"}},
+			},
+			{ID: "q2", Header: "Name", Question: "What?"},
+		},
+	}
+	encoded, err := encode(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join("testdata", "codex-schema")
+	validateCodexSchema(t, filepath.Join(root, "ToolRequestUserInputParams.json"), encoded)
+	response := ToolRequestUserInputResponse{Answers: map[string]ToolRequestUserInputAnswer{"q1": {Answers: []string{"Postgres"}}}}
+	validateCodexSchema(t, filepath.Join(root, "ToolRequestUserInputResponse.json"), response)
+}

@@ -519,13 +519,10 @@ func (t *Thread) Unsubscribe(ch <-chan Update) {
 func (a *actor) unsubscribe(target <-chan Update) {
 	for ch := range a.subs {
 		if ch == target {
-			close(ch)
-			delete(a.subs, ch)
+			a.drop(ch)
 		}
 	}
-	if len(a.subs) == 0 {
-		a.declineQuestions()
-	}
+	a.settleQuestions()
 }
 
 type view struct {

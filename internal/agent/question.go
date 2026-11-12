@@ -15,6 +15,7 @@ type pendingQuestion struct {
 	prompt  QuestionPrompt
 	replies chan asktool.Reply
 	opened  uint64
+	refused map[<-chan Update]struct{}
 }
 
 func (t *Thread) Ask(ctx context.Context, callID string, questions []asktool.Question) (asktool.Reply, error) {
@@ -49,6 +50,21 @@ func (t *Thread) AnswerQuestion(requestID string, reply asktool.Reply) error {
 	})
 }
 
+func (t *Thread) CannotAnswerQuestion(requestID string, window <-chan Update) error {
+	return askErr(t, func(a *actor) error {
+		pending, ok := a.questions[requestID]
+		if !ok {
+			return fmt.Errorf("%w: %s", ErrUnknownRequest, requestID)
+		}
+		if !a.attached(window) {
+			return nil
+		}
+		pending.refused[window] = struct{}{}
+		a.settleQuestions()
+		return nil
+	})
+}
+
 func (h *Host) maskQuestions(questions []asktool.Question) ([]asktool.Question, error) {
 	var firstErr error
 	mask := func(text string) string {
@@ -76,12 +92,8 @@ func (a *actor) offerQuestion(prompt QuestionPrompt, replies chan asktool.Reply)
 		return false
 	}
 	a.questionSeq++
-	a.questions[prompt.RequestID] = &pendingQuestion{prompt: prompt, replies: replies, opened: a.questionSeq}
+	a.questions[prompt.RequestID] = &pendingQuestion{prompt: prompt, replies: replies, opened: a.questionSeq, refused: map[<-chan Update]struct{}{}}
 	a.publish(Update{Kind: UpdateQuestion, Thread: a.t.id, Question: prompt})
-	if len(a.subs) == 0 {
-		delete(a.questions, prompt.RequestID)
-		return false
-	}
 	return true
 }
 
@@ -116,10 +128,30 @@ func (a *actor) resolveQuestion(requestID string, reply asktool.Reply) bool {
 	return true
 }
 
-func (a *actor) declineQuestions() {
-	for requestID := range a.questions {
-		a.resolveQuestion(requestID, asktool.Reply{Outcome: asktool.OutcomeNoClient})
+func (a *actor) settleQuestions() {
+	for requestID, pending := range a.questions {
+		if a.allRefused(pending) {
+			a.resolveQuestion(requestID, asktool.Reply{Outcome: asktool.OutcomeNoClient})
+		}
 	}
+}
+
+func (a *actor) allRefused(pending *pendingQuestion) bool {
+	for ch := range a.subs {
+		if _, ok := pending.refused[ch]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *actor) attached(window <-chan Update) bool {
+	for ch := range a.subs {
+		if ch == window {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *actor) subscribe(ch chan Update) {
@@ -136,8 +168,15 @@ func (a *actor) sendUpdate(ch chan Update, update Update) {
 	select {
 	case ch <- update:
 	default:
-		close(ch)
-		delete(a.subs, ch)
+		a.drop(ch)
 		a.t.host.log.Warn("agent: closing slow subscriber", "thread", a.t.id)
+	}
+}
+
+func (a *actor) drop(ch chan Update) {
+	close(ch)
+	delete(a.subs, ch)
+	for _, pending := range a.questions {
+		delete(pending.refused, ch)
 	}
 }

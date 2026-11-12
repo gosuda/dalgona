@@ -255,6 +255,7 @@ type wireClient struct {
 	notes    chan message
 	requests chan message
 	served   chan error
+	arrivals []message
 }
 
 func (r *rig) connect() *wireClient { return r.connectWith(ServeOptions{}) }
@@ -300,6 +301,9 @@ func (c *wireClient) read() {
 }
 
 func (c *wireClient) route(line []byte, m message) {
+	c.mu.Lock()
+	c.arrivals = append(c.arrivals, m)
+	c.mu.Unlock()
 	switch {
 	case m.Method != "" && len(m.ID) > 0:
 		validateLine(c.t, "ServerRequest.json", line)

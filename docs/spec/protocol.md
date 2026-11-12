@@ -148,11 +148,21 @@ The server sends approval requests only for threads in approval mode `ask`, plus
 
 Decisions `accept`, `acceptForSession`, `decline`, and `cancel` map to the host replies. The decision `approved` maps to accept, `approved_for_session` maps to acceptForSession, and `abort` maps to cancel. An object decision MUST count as `accept`. Other values MUST count as `decline`. When the approval resolves, every subscriber receives `serverRequest/resolved {threadId, requestId}` and the server cancels its pending request. When a client fails to answer and it is the last subscriber, the server MUST decline. A client MUST handle each server request on its own task. An open prompt MUST NOT block notification delivery. A client MUST cancel that task when the matching `serverRequest/resolved` arrives.
 
+The server sends `item/tool/requestUserInput` for an `ask` call. The request `id` is a question request id that the host generates, and the host does not journal it. `itemId` is the call id. Question ids are `q1` to `q4` by position.
+
+A client MUST answer with `answers` that maps each question id to a list of strings. An answer equal to an option label is that option. Any other string is typed text.
+
+A client MUST answer `{"answers": {}}` to dismiss the questions. Any other error response MUST mean that the window cannot answer.
+
+The server MUST decline a question with the no-client result when every attached window cannot answer. The first answer MUST decide the question, and every subscriber receives `serverRequest/resolved` with a `resolution` of `answered`, `cancelled`, `interrupted` or `declined`.
+
 ## Notifications and items
+
+`waitingOnUserInput` is an active flag that the server sets while a question is open. It carries no journal event.
 
 Each connection subscribes to every thread that it starts, resumes, or changes. The server translates journal events and stream deltas:
 
-`thread/status/changed` carries the extension member `seq`: the journal sequence number of the event that changed the status. A client MUST ignore a status with a lower `seq` than one it already applied.
+`thread/status/changed` carries the extension member `seq`: the journal sequence number of the event that changed the status. A status that changed without a journal event MUST carry the last `seq` the connection sent for that thread, plus one. A client MUST ignore a status with a lower `seq` than one it already applied.
 
 Turn objects carry `startedAt` and `completedAt` as Unix seconds, and `durationMs` in milliseconds on `turn/completed`. A `commandExecution`, `mcpToolCall`, or `dynamicToolCall` item MUST carry `durationMs` when the journal holds both of its times. The server computes each duration from the journal times `started_at` and `completed_at`, so a replay shows the same values as the live stream.
 

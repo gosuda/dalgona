@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	asktool "github.com/gosuda/dalgona/internal/tool/ask"
@@ -216,5 +217,152 @@ func TestStatusCountsOpenQuestions(t *testing.T) {
 	}
 	if status.Questions != 0 {
 		t.Fatalf("open questions = %d, want 0", status.Questions)
+	}
+}
+
+func TestQuestionDeclinesWhenEveryWindowCannotAnswer(t *testing.T) {
+	t.Parallel()
+	thread := newHarness(t).start()
+	first := thread.Subscribe()
+	second := thread.Subscribe()
+	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	prompt := nextQuestionUpdate(t, first, false)
+	nextQuestionUpdate(t, second, false)
+	if err := thread.CannotAnswerQuestion(prompt.RequestID, first); err != nil {
+		t.Fatalf("first CannotAnswerQuestion: %v", err)
+	}
+	if err := thread.CannotAnswerQuestion(prompt.RequestID, second); err != nil {
+		t.Fatalf("second CannotAnswerQuestion: %v", err)
+	}
+	if reply := waitQuestionResult(t, results); reply.Outcome != asktool.OutcomeNoClient {
+		t.Fatalf("outcome = %v, want no client", reply.Outcome)
+	}
+}
+
+func TestRefusalFromOneWindowCountsOnce(t *testing.T) {
+	t.Parallel()
+	thread := newHarness(t).start()
+	first := thread.Subscribe()
+	second := thread.Subscribe()
+	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	prompt := nextQuestionUpdate(t, first, false)
+	nextQuestionUpdate(t, second, false)
+	for range 2 {
+		if err := thread.CannotAnswerQuestion(prompt.RequestID, first); err != nil {
+			t.Fatalf("CannotAnswerQuestion: %v", err)
+		}
+	}
+	status, err := thread.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.Questions != 1 {
+		t.Fatalf("open questions = %d, want 1 while the second window can answer", status.Questions)
+	}
+	if err := thread.CannotAnswerQuestion(prompt.RequestID, second); err != nil {
+		t.Fatalf("second CannotAnswerQuestion: %v", err)
+	}
+	if reply := waitQuestionResult(t, results); reply.Outcome != asktool.OutcomeNoClient {
+		t.Fatalf("outcome = %v, want no client", reply.Outcome)
+	}
+}
+
+func TestRefusingWindowLeavingDoesNotDecline(t *testing.T) {
+	t.Parallel()
+	thread := newHarness(t).start()
+	first := thread.Subscribe()
+	second := thread.Subscribe()
+	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	prompt := nextQuestionUpdate(t, first, false)
+	nextQuestionUpdate(t, second, false)
+	if err := thread.CannotAnswerQuestion(prompt.RequestID, first); err != nil {
+		t.Fatalf("CannotAnswerQuestion: %v", err)
+	}
+	thread.Unsubscribe(first)
+	answer := asktool.Reply{Outcome: asktool.OutcomeAnswered, Answers: [][]string{{"SQLite"}}}
+	if err := thread.AnswerQuestion(prompt.RequestID, answer); err != nil {
+		t.Fatalf("AnswerQuestion after the refusing window left: %v", err)
+	}
+	if reply := waitQuestionResult(t, results); reply.Outcome != asktool.OutcomeAnswered {
+		t.Fatalf("outcome = %v, want answered", reply.Outcome)
+	}
+}
+
+func TestRefusalDoesNotDoubleCountAfterSlowClose(t *testing.T) {
+	t.Parallel()
+	thread := newHarness(t).start()
+	first := thread.Subscribe()
+	second := thread.Subscribe()
+	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	prompt := nextQuestionUpdate(t, first, false)
+	nextQuestionUpdate(t, second, false)
+	if err := thread.CannotAnswerQuestion(prompt.RequestID, first); err != nil {
+		t.Fatalf("CannotAnswerQuestion: %v", err)
+	}
+	flood(thread, second)
+	requireClosed(t, first)
+	resubscribed := thread.Subscribe()
+	if replayed := nextQuestionUpdate(t, resubscribed, false); replayed.RequestID != prompt.RequestID {
+		t.Fatalf("replayed request %q, want %q", replayed.RequestID, prompt.RequestID)
+	}
+	if err := thread.CannotAnswerQuestion(prompt.RequestID, resubscribed); err != nil {
+		t.Fatalf("re-asked CannotAnswerQuestion: %v", err)
+	}
+	answer := asktool.Reply{Outcome: asktool.OutcomeAnswered, Answers: [][]string{{"Postgres"}}}
+	if err := thread.AnswerQuestion(prompt.RequestID, answer); err != nil {
+		t.Fatalf("question closed after the re-asked window refused: %v", err)
+	}
+	if reply := waitQuestionResult(t, results); reply.Outcome != asktool.OutcomeAnswered {
+		t.Fatalf("outcome = %v, want answered", reply.Outcome)
+	}
+}
+
+func TestOfferKeepsQuestionWhenItClosesSoleWindowAsSlow(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		thread := newHarness(t).start()
+		thread.Subscribe()
+		for range subscriberBuffer {
+			thread.publish(Update{Kind: UpdateExecOutput, CallID: "flood"})
+		}
+		results := askAsync(t.Context(), thread, "call-1", testQuestions())
+		synctest.Wait()
+		resubscribed := thread.Subscribe()
+		prompt := nextQuestionUpdate(t, resubscribed, false)
+		answer := asktool.Reply{Outcome: asktool.OutcomeAnswered, Answers: [][]string{{"SQLite"}}}
+		if err := thread.AnswerQuestion(prompt.RequestID, answer); err != nil {
+			t.Fatalf("question closed when its offer closed the sole window as slow: %v", err)
+		}
+		if reply := waitQuestionResult(t, results); reply.Outcome != asktool.OutcomeAnswered {
+			t.Fatalf("outcome = %v, want answered", reply.Outcome)
+		}
+	})
+}
+
+func flood(thread *Thread, keep <-chan Update) {
+	for range subscriberBuffer + 1 {
+		thread.publish(Update{Kind: UpdateExecOutput, CallID: "flood"})
+		_, _ = thread.Status()
+		for drained := false; !drained; {
+			select {
+			case <-keep:
+			default:
+				drained = true
+			}
+		}
+	}
+}
+
+func requireClosed(t *testing.T, updates <-chan Update) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case _, ok := <-updates:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("subscriber was not closed as slow")
+		}
 	}
 }

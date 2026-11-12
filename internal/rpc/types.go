@@ -335,8 +335,36 @@ type (
 	}
 	CommandExecutionOutputDeltaNotification = AgentMessageDeltaNotification
 	ServerRequestResolvedNotification       struct {
-		ThreadID  string `json:"threadId"`
-		RequestID string `json:"requestId"`
+		ThreadID   string `json:"threadId"`
+		RequestID  string `json:"requestId"`
+		Resolution string `json:"resolution,omitzero"`
+	}
+	ToolRequestUserInputParams struct {
+		ThreadID   string                         `json:"threadId"`
+		TurnID     string                         `json:"turnId"`
+		ItemID     string                         `json:"itemId"`
+		IsBlocking bool                           `json:"isBlocking"`
+		Questions  []ToolRequestUserInputQuestion `json:"questions"`
+	}
+	ToolRequestUserInputQuestion struct {
+		ID          string                       `json:"id"`
+		Header      string                       `json:"header"`
+		Question    string                       `json:"question"`
+		IsOther     bool                         `json:"isOther"`
+		IsSecret    bool                         `json:"isSecret"`
+		MultiSelect bool                         `json:"multiSelect"`
+		Options     []ToolRequestUserInputOption `json:"options"`
+	}
+	ToolRequestUserInputOption struct {
+		Label       string `json:"label"`
+		Description string `json:"description"`
+		Preview     string `json:"preview,omitzero"`
+	}
+	ToolRequestUserInputResponse struct {
+		Answers map[string]ToolRequestUserInputAnswer `json:"answers"`
+	}
+	ToolRequestUserInputAnswer struct {
+		Answers []string `json:"answers"`
 	}
 	AccountLoginCompletedNotification struct {
 		LoginID  string `json:"loginId,omitzero"`

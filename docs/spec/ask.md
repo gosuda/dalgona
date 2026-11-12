@@ -134,6 +134,10 @@ A subscriber that joins MUST receive every open question, oldest first.
 
 When the last subscriber leaves, the host MUST end every open question with the no-client result.
 
+A window that cannot answer MUST count once for each question. The host MUST stop counting a window when it leaves.
+
+A subscriber that the host closes as slow MUST NOT end the open questions, because the server subscribes again and receives them.
+
 The first answer to a question MUST decide it. A later answer MUST fail with an unknown request error.
 
 An interrupt of the turn MUST end the question as interrupted.

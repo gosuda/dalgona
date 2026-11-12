@@ -151,6 +151,51 @@ func (n ServerRequestResolvedNotification) write(o *out) {
 	o.open()
 	o.str("threadId", n.ThreadID)
 	o.str("requestId", n.RequestID)
+	o.optStr("resolution", n.Resolution)
+	o.close()
+}
+
+func (p ToolRequestUserInputParams) write(o *out) {
+	o.open()
+	o.str("threadId", p.ThreadID)
+	o.str("turnId", p.TurnID)
+	o.str("itemId", p.ItemID)
+	o.boolean("isBlocking", p.IsBlocking)
+	o.key("questions")
+	o.openArray()
+	for _, question := range p.Questions {
+		question.write(o)
+	}
+	o.closeArray()
+	o.close()
+}
+
+func (q ToolRequestUserInputQuestion) write(o *out) {
+	o.open()
+	o.str("id", q.ID)
+	o.str("header", q.Header)
+	o.str("question", q.Question)
+	o.boolean("isOther", q.IsOther)
+	o.boolean("isSecret", q.IsSecret)
+	o.boolean("multiSelect", q.MultiSelect)
+	o.key("options")
+	if q.Options == nil {
+		o.null()
+	} else {
+		o.openArray()
+		for _, option := range q.Options {
+			option.write(o)
+		}
+		o.closeArray()
+	}
+	o.close()
+}
+
+func (p ToolRequestUserInputOption) write(o *out) {
+	o.open()
+	o.str("label", p.Label)
+	o.str("description", p.Description)
+	o.optStr("preview", p.Preview)
 	o.close()
 }
 

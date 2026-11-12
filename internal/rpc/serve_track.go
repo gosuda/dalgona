@@ -46,6 +46,7 @@ type tracker struct {
 	callAt    map[string]time.Time
 	usage     ThreadTokenUsage
 	seq       uint64
+	statusSeq uint64
 }
 
 func newTracker(threadID string, load func(*event.BlobRef) ([]byte, error), childCwd func(string) string, keywords func(threadID, text string, kind agent.InputKind) []agent.KeywordMatch, log *slog.Logger) *tracker {
@@ -107,7 +108,12 @@ func (t *tracker) args(args jsontext.Value, blob *event.BlobRef) jsontext.Value 
 }
 
 func (t *tracker) setStatus(kind string, flags ...string) {
-	status, seq := ThreadStatus{Type: kind, ActiveFlags: flags}, t.seq
+	seq := t.seq
+	if seq <= t.statusSeq {
+		seq = t.statusSeq + 1
+	}
+	t.statusSeq = seq
+	status := ThreadStatus{Type: kind, ActiveFlags: flags}
 	t.sink.notify("thread/status/changed", func() writer {
 		return ThreadStatusChangedNotification{ThreadID: t.threadID, Status: status, Seq: seq}
 	})
