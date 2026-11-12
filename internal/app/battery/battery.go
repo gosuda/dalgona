@@ -35,8 +35,6 @@ type Daemon struct {
 	binder            *remote.Binder
 }
 
-// TrustDecision is the workspace trust prompt outcome. Cancel leaves the
-// session unpoisoned: nothing is recorded and the next turn prompts again.
 type TrustDecision int
 
 const (

@@ -34,15 +34,12 @@ type CLIEnv struct {
 	TUI            TUIBackend
 }
 
-// Status reports presentation progress without naming a presentation
-// package, so core orchestration stays independent of terminal widgets.
 type Status struct {
 	State    string
 	Seq      uint64
 	ThreadID string
 }
 
-// TUIOptions carries everything the interactive presentation layer needs.
 type TUIOptions struct {
 	OnStatus       func(Status)
 	OnChildSpawned func(childID, cwd string)
@@ -55,8 +52,6 @@ type TUIOptions struct {
 	Cwd            string
 }
 
-// TUIBackend launches the interactive presentation layer. Command entry
-// points wire it, so this package never imports a presentation package.
 type TUIBackend func(ctx context.Context, conn io.ReadWriteCloser, opts TUIOptions) error
 
 type cliFlags struct {

@@ -213,3 +213,5 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
 - `-m`, `--approval auto|ask|yolo`, `--sandbox workspace-write|off` apply to a new thread. `-C <dir>` changes the working directory first.
 - In `-p` mode the client declines every approval request. It answers each question with an error. The server declines a question only when no other attached window can answer it. The model then receives `declined: no client could answer this question`.
 - `login [provider] [--device-auth]`, `logout <provider>`, and `models` complete without the TUI. `login` without a provider lists the providers.
+
+`app.TUIOptions.OnStatus` MUST receive `app.Status` values that `cmd/internal/tuiwire` converts from `tui.Status`. `internal/app` MUST NOT import `internal/tui`, so command entry points set `CLIEnv.TUI`.
