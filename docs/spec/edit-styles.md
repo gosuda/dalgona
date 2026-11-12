@@ -71,7 +71,7 @@ The store MUST issue monotonic references. It MUST NOT reuse a reference after e
 
 The store MUST record exact splices for sound line edits. A span insertion at its start MUST shift the span without expanding it. An insertion at its end MUST leave the span unchanged. An insertion inside a span MUST conflict. A replacement overlapping any target cell MUST conflict.
 
-A gap MUST survive only while both original neighbors remain adjacent. An insertion at the same gap MUST conflict. A changed neighbor MUST conflict. A later undo MUST NOT revive a conflict. Missing history, an external digest change, or an unsound splice MUST end the usable lineage.
+A gap MUST survive only while both original neighbors remain adjacent. An insertion at the same gap MUST conflict. A changed neighbor MUST conflict. A later undo or edit that restores adjacency MUST NOT revive a conflict. Missing history, an external digest change, or an unsound splice MUST end the usable lineage.
 
 ## Omission placeholders
 

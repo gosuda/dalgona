@@ -1,10 +1,3 @@
-"""Bounded model checks for Hashline v1 target mapping.
-
-Run: uv run --no-project --python 3.12 verify_model.py
-This model uses unique line identities. It does not implement the filesystem,
-parser, journal, observation transport, or production patch engine.
-"""
-
 from __future__ import annotations
 
 import json
@@ -67,7 +60,6 @@ def splices(length: int, max_inserted: int) -> Iterator[Splice]:
 
 
 def base_file(length: int) -> tuple[Atom, ...]:
-    # Repeated text deliberately does not imply shared occurrence identity.
     return tuple(Atom(index, f"line-{index % 2}") for index in range(length))
 
 
@@ -85,7 +77,6 @@ def apply_splice(
 
 
 def map_span(target: Span, edit: Splice) -> Span | None:
-    """Map one untouched original span through one effective recorded splice."""
     if edit.start == edit.end:
         if target.start < edit.start < target.end:
             return None
@@ -100,7 +91,6 @@ def map_span(target: Span, edit: Splice) -> Span | None:
 
 
 def map_gap(gap: int, source_length: int, edit: Splice) -> int | None:
-    """A gap survives only while both original neighbors remain adjacent."""
     assert 0 <= gap <= source_length and edit.end <= source_length
     if edit.start == edit.end:
         if edit.start == gap:
@@ -176,7 +166,6 @@ def check_two_splices() -> tuple[Counts, Counts]:
                 for target in spans(length):
                     one = map_span(target, first)
                     actual = None if one is None else map_span(one, second)
-                    # Conflict is sticky even if later edits restore adjacency.
                     expected = (
                         None if one is None else span_oracle(original, current, target)
                     )
@@ -243,7 +232,6 @@ def check_regressions() -> tuple[str, ...]:
     assert map_gap(4, 4, Splice(4, 4, 1)) is None
     passed.append("empty_and_eof_gap_conflicts")
 
-    # A preview delivered at sequence 8 is unavailable to a request frozen at 7.
     delivery_sequence = 8
     old_request_cutoff = 7
     new_request_cutoff = 8
@@ -251,7 +239,6 @@ def check_regressions() -> tuple[str, ...]:
     assert delivery_sequence <= new_request_cutoff
     passed.append("later_delivery_cannot_authorize_pending_request")
 
-    # The only observation-policy difference is coverage for an effective removal.
     for valid_reference in (False, True):
         for unchanged_target in (False, True):
             for observed in (False, True):
@@ -262,7 +249,6 @@ def check_regressions() -> tuple[str, ...]:
                     assert light and not observed
     passed.append("enhanced_acceptance_is_light_plus_coverage")
 
-    # Boundary edits to raw line terminators must have expanded footprints.
     assert map_span(Span(0, 1), Splice(0, 1, 2)) is None
     passed.append("eof_separator_change_invalidates_touched_line")
     return tuple(passed)

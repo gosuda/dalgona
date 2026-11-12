@@ -29,6 +29,8 @@ This is not a filesystem implementation, unrestricted proof, performance benchma
 or claim that the product tests pass. The conformance document distinguishes
 executed checks from required implementation work.
 
+The model checker MUST NOT stand in for the parser, journal, observation transport, or production patch engine. The model MUST give each line of the base file its own identity, even when its text repeats.
+
 ## Adoption rule
 
 Keep legacy styles, aliases, and defaults. Enable the new profiles explicitly.
