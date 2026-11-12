@@ -29,6 +29,7 @@ type gateCall struct {
 	escalate      bool
 	justification string
 	paths         []string
+	files         []tool.FileChange
 	outside       []string
 	requestID     string
 }
@@ -256,14 +257,9 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 		return accept("grant:" + prefix)
 	}
 	replies := make(chan Reply, 1)
-	prompt := ApprovalPrompt{
-		RequestID: requestID, CallID: gc.call.ID, Tool: gc.call.Name, Class: gc.class, Summary: summary(gc), Paths: gc.paths,
-		Reason: gc.justification,
-	}
-	prompt.Summary = withRunContext(prompt.Summary, gc, w.t.created.Cwd)
-	if gc.class == tool.ClassExec {
-		prompt.Command = gc.command
-		prompt.Commands = rules.Split(gc.command)
+	prompt, ok := w.approvalPrompt(gc, requestID)
+	if !ok {
+		return decline("mode:ask", "declined: secret masking failed")
 	}
 	offered, err := ask(w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
 	forwarded, linked := w.t.forwardApproval(prompt)
@@ -276,6 +272,27 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 		w.t.forwardApproval(prompt)
 	}
 	return v
+}
+
+func (w *worker) approvalPrompt(gc gateCall, requestID string) (ApprovalPrompt, bool) {
+	prompt := ApprovalPrompt{
+		RequestID: requestID, CallID: gc.call.ID, Tool: gc.call.Name, Class: gc.class, Summary: summary(gc), Paths: gc.paths,
+		Reason: gc.justification,
+	}
+	prompt.Summary = withRunContext(prompt.Summary, gc, w.t.created.Cwd)
+	if gc.class == tool.ClassExec {
+		prompt.Command = gc.command
+		prompt.Commands = rules.Split(gc.command)
+	}
+	if gc.class != tool.ClassEdit {
+		return prompt, true
+	}
+	files, err := w.approvalFiles(gc.files)
+	if err != nil {
+		return prompt, false
+	}
+	prompt.Files = files
+	return prompt, true
 }
 
 func awaitReply(ctx context.Context, replies <-chan Reply) verdict {

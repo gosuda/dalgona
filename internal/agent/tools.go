@@ -274,6 +274,7 @@ func (w *worker) gateCall(ctx context.Context, p *prepared, requestID string) (g
 		return gc, err
 	}
 	p.plan = &plan
+	gc.files = plan.Files
 	for _, file := range plan.Files {
 		gc.paths = append(gc.paths, file.Path)
 	}

@@ -21,6 +21,11 @@ import (
 
 func newDalgonaRig(t *testing.T) *rig {
 	t.Helper()
+	return newDalgonaRigWithTools(t, exec.New())
+}
+
+func newDalgonaRigWithTools(t *testing.T, tools ...tool.Tool) *rig {
+	t.Helper()
 	r := &rig{t: t, home: t.TempDir(), cwd: t.TempDir(), llm: newFakeLLM(t)}
 	t.Setenv("DAL_HOME", r.home)
 	if resolved, err := filepath.EvalSymlinks(r.cwd); err == nil {
@@ -42,7 +47,7 @@ func newDalgonaRig(t *testing.T) *rig {
 			Product: config.ProductDalgona, Reasoning: config.ReasoningDefault,
 		},
 		Providers: r.providers,
-		Tools:     func(context.Context, string, string) ([]tool.Tool, error) { return []tool.Tool{exec.New()}, nil },
+		Tools:     func(context.Context, string, string) ([]tool.Tool, error) { return tools, nil },
 		Runner: func(_ context.Context, id, _ string) (runner.Runner, error) {
 			return runner.NewLocal(filepath.Join(r.home, "sessions", id, "runs"))
 		},

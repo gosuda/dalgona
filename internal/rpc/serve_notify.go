@@ -248,6 +248,20 @@ func (p FileChangeRequestApprovalParams) write(o *out) {
 	o.close()
 }
 
+func (n FileChangePatchUpdatedNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("turnId", n.TurnID)
+	o.str("itemId", n.ItemID)
+	o.key("changes")
+	o.openArray()
+	for _, change := range n.Changes {
+		change.write(o)
+	}
+	o.closeArray()
+	o.close()
+}
+
 func (n RetryWaitNotification) write(o *out) {
 	o.open()
 	o.str("threadId", n.ThreadID)

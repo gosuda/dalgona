@@ -408,7 +408,13 @@ type (
 	CommandExecutionRequestApprovalResponse struct {
 		Decision string `json:"decision"`
 	}
-	FileChangeRequestApprovalResponse = CommandExecutionRequestApprovalResponse
+	FileChangeRequestApprovalResponse  = CommandExecutionRequestApprovalResponse
+	FileChangePatchUpdatedNotification struct {
+		ThreadID string
+		TurnID   string
+		ItemID   string
+		Changes  []FileChange
+	}
 )
 
 func (e *RPCError) Error() string { return e.Message }

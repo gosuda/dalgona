@@ -168,7 +168,17 @@ type ApprovalPrompt struct {
 	Command   string
 	Commands  []string
 	Paths     []string
+	Files     []ApprovalFile
 	Resolved  bool
+}
+
+type ApprovalFile struct {
+	Path     string
+	Pre      []byte
+	Post     []byte
+	Added    bool
+	Deleted  bool
+	TooLarge bool
 }
 
 type QuestionPrompt struct {

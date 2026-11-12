@@ -26,27 +26,19 @@ func (s *server) ask(ctx context.Context, w *watch, update agent.Update) {
 		return
 	}
 	turnID := w.tracker.currentTurn()
-	cwd := approvalCwd(prompt, w)
 	threadID := update.Thread
 	if threadID != w.thread.ID() {
 		turnID = ""
 	}
-	a := approvalAsk{thread: w.thread, requestID: prompt.RequestID}
-	if prompt.Class == tool.ClassEdit {
-		a.method = "item/fileChange/requestApproval"
-		a.params = FileChangeRequestApprovalParams{
-			ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, StartedAtMs: nowMillis(), Reason: prompt.Summary,
-		}
-	} else {
-		a.method = "item/commandExecution/requestApproval"
-		a.params = CommandExecutionRequestApprovalParams{
-			ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, StartedAtMs: nowMillis(),
-			Command: cmdText(prompt), Cwd: cwd, Reason: prompt.Reason,
-		}
-	}
+	method, params := approvalParams(prompt, threadID, turnID, approvalCwd(prompt, w))
+	a := approvalAsk{thread: w.thread, requestID: prompt.RequestID, method: method, params: params}
+	note := approvalNotice(prompt, threadID, turnID)
 	askCtx, cancel := context.WithCancel(ctx)
 	started, dup := s.spawnRequest(prompt.RequestID, cancel, func() {
 		defer s.settle(prompt.RequestID)
+		if note != nil {
+			s.send("item/fileChange/patchUpdated", *note)
+		}
 		s.request(ctx, askCtx, a)
 	})
 	if dup {
@@ -56,6 +48,22 @@ func (s *server) ask(ctx context.Context, w *watch, update agent.Update) {
 	if !started {
 		cancel()
 		s.declineIfAlone(a)
+		return
+	}
+	if note != nil {
+		recordApprovalChanges(w, threadID, *note)
+	}
+}
+
+func approvalParams(prompt agent.ApprovalPrompt, threadID, turnID, cwd string) (string, writer) {
+	if prompt.Class == tool.ClassEdit {
+		return "item/fileChange/requestApproval", FileChangeRequestApprovalParams{
+			ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, StartedAtMs: nowMillis(), Reason: prompt.Summary,
+		}
+	}
+	return "item/commandExecution/requestApproval", CommandExecutionRequestApprovalParams{
+		ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, StartedAtMs: nowMillis(),
+		Command: cmdText(prompt), Cwd: cwd, Reason: prompt.Reason,
 	}
 }
 
@@ -176,4 +184,41 @@ func replyFor(decision string) agent.Reply {
 		return agent.ReplyCancel
 	}
 	return agent.ReplyDecline
+}
+
+func approvalNotice(prompt agent.ApprovalPrompt, threadID, turnID string) *FileChangePatchUpdatedNotification {
+	if prompt.Class != tool.ClassEdit {
+		return nil
+	}
+	note := FileChangePatchUpdatedNotification{ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, Changes: approvalChanges(prompt.Files)}
+	return &note
+}
+
+func recordApprovalChanges(w *watch, threadID string, note FileChangePatchUpdatedNotification) {
+	if item, ok := w.tracker.items[note.ItemID]; ok && threadID == w.thread.ID() {
+		item.Changes = note.Changes
+	}
+}
+
+func approvalChanges(files []agent.ApprovalFile) []FileChange {
+	changes := make([]FileChange, 0, len(files))
+	for _, file := range files {
+		kind := approvalKind(file)
+		if file.TooLarge {
+			changes = append(changes, omittedChange(file.Path, kind))
+			continue
+		}
+		changes = append(changes, diffChange(file.Path, kind, file.Pre, file.Post))
+	}
+	return changes
+}
+
+func approvalKind(file agent.ApprovalFile) string {
+	switch {
+	case file.Added:
+		return kindAdd
+	case file.Deleted:
+		return kindDelete
+	}
+	return kindUpdate
 }
