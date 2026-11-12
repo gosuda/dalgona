@@ -125,6 +125,7 @@ type Input struct {
 	Approval       config.Approval
 	Sandbox        config.SandboxMode
 	Verbatim       bool
+	Images         []Image
 	ExpectedTurnID string
 }
 

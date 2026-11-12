@@ -78,3 +78,5 @@ The agent MUST NOT append a compaction whose `tokens_after` is not smaller than 
 ## Blobs
 
 Blob names MUST contain exactly 64 lowercase SHA-256 hexadecimal characters. `Blob` MUST reject malformed names and report missing blobs.
+
+An image MUST be stored as a blob, whatever its size.

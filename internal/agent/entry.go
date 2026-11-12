@@ -17,6 +17,7 @@ type preparedInput struct {
 	textBlob       *event.BlobRef
 	notices        []event.Notice
 	mentions       []event.Mention
+	images         []event.Image
 	effort         string
 	settings       Settings
 	verbatim       bool
@@ -70,6 +71,11 @@ func (t *Thread) prepareInput(in Input) (preparedInput, error) {
 		settings:       Settings{Model: in.Model, Approval: in.Approval, Sandbox: in.Sandbox},
 		expectedTurnID: in.ExpectedTurnID,
 	}
+	images, err := t.prepareImages(in.Images)
+	if err != nil {
+		return preparedInput{}, err
+	}
+	out.images = images
 	if in.Verbatim {
 		return out, nil
 	}
@@ -121,7 +127,7 @@ func (a *actor) submit(in preparedInput) error {
 	}
 	message := event.UserMessage{
 		ItemID: newID("item-"), Text: in.text, TextBlob: in.textBlob, Kind: string(in.kind),
-		Notices: in.notices, Mentions: in.mentions, Effort: in.effort, Verbatim: in.verbatim,
+		Notices: in.notices, Mentions: in.mentions, Images: in.images, Effort: in.effort, Verbatim: in.verbatim,
 		Model: in.settings.Model, Approval: string(in.settings.Approval), Sandbox: string(in.settings.Sandbox),
 	}
 	if a.busy {

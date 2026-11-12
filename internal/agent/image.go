@@ -40,3 +40,31 @@ func CheckImages(images []Image) error {
 	}
 	return nil
 }
+
+func (t *Thread) prepareImages(images []Image) ([]event.Image, error) {
+	if err := CheckImages(images); err != nil {
+		return nil, err
+	}
+	var out []event.Image
+	for _, image := range images {
+		mime, err := ImageMIME(image.Data)
+		if err != nil {
+			return nil, err
+		}
+		if mime != image.Mime {
+			return nil, fmt.Errorf("image type %s does not match its declared type %s", mime, image.Mime)
+		}
+		path := ""
+		if image.Path != "" {
+			if path, err = t.host.mask(image.Path); err != nil {
+				return nil, err
+			}
+		}
+		blob, err := t.PutBlob(image.Data)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event.Image{Mime: image.Mime, Path: path, Blob: blob})
+	}
+	return out, nil
+}
