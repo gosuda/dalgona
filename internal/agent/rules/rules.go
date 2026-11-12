@@ -26,8 +26,8 @@ var risky = []riskyRule{
 }
 
 func isRecursiveRm(command string) bool {
-	tokens := tokenize(command)
-	if len(tokens) == 0 || tokens[0] != "rm" {
+	tokens, ok := tokenize(command)
+	if !ok || len(tokens) == 0 || tokens[0] != "rm" {
 		return false
 	}
 	for _, token := range tokens[1:] {
@@ -192,8 +192,8 @@ func GrantPrefix(command string) (string, bool) {
 	if len(parts) != 1 {
 		return "", false
 	}
-	tokens := tokenize(parts[0])
-	if len(tokens) == 0 {
+	tokens, ok := tokenize(parts[0])
+	if !ok || len(tokens) == 0 {
 		return "", false
 	}
 	prefix := quoteToken(tokens[0])
@@ -214,7 +214,7 @@ func needsTokenQuote(r rune) bool {
 	return unicode.IsSpace(r) || strings.ContainsRune("'\"\\", r)
 }
 
-func tokenize(s string) []string {
+func tokenize(s string) ([]string, bool) {
 	var out []string
 	var token strings.Builder
 	var scanner shellScanner
@@ -227,7 +227,10 @@ func tokenize(s string) []string {
 		case escapedChar, quoteChar:
 		}
 	}
-	return flushToken(out, &token)
+	if scanner.quote != 0 || scanner.escaped {
+		return nil, false
+	}
+	return flushToken(out, &token), true
 }
 
 func flushToken(tokens []string, token *strings.Builder) []string {
@@ -244,9 +247,9 @@ func MatchesGrant(command, prefix string) bool {
 	if len(parts) != 1 {
 		return false
 	}
-	granted := tokenize(prefix)
-	candidate := tokenize(parts[0])
-	if len(granted) == 0 || len(candidate) < len(granted) {
+	granted, grantedOK := tokenize(prefix)
+	candidate, candidateOK := tokenize(parts[0])
+	if !grantedOK || !candidateOK || len(granted) == 0 || len(candidate) < len(granted) {
 		return false
 	}
 	return slices.Equal(candidate[:len(granted)], granted)
