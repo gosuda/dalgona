@@ -369,14 +369,14 @@ export function activeApproval(
 	);
 }
 
-export function otherThreadApprovalCount(
+export function requestsElsewhere(
 	approvals: readonly ApprovalRequest[],
 	threadId: string | null,
 	childThreadIds: readonly string[],
-): number {
+): readonly ApprovalRequest[] {
 	return approvals.filter(
 		(entry) => !isOpenApproval(threadId, childThreadIds, entry.threadId),
-	).length;
+	);
 }
 
 export function dropSentFollowup(queue: readonly string[]): readonly string[] {

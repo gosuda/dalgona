@@ -1,15 +1,21 @@
 <script lang="ts">
 import { handoffFocus } from "#lib/focus.ts";
-import type { Notice } from "#lib/types.ts";
+import { countLabel } from "#lib/labels.ts";
+import type { Notice, WaitingElsewhere } from "#lib/types.ts";
 
 interface Props {
 	notices: readonly Notice[];
+	waiting: WaitingElsewhere;
 	onDismiss: (id: number) => void;
+	onOpenWaiting: (threadId: string) => void;
 }
 
-let { notices, onDismiss }: Props = $props();
+let { notices, waiting, onDismiss, onOpenWaiting }: Props = $props();
 let errors = $derived(notices.filter((notice) => notice.tone === "error"));
 let others = $derived(notices.filter((notice) => notice.tone !== "error"));
+let waitingText = $derived(
+	`${countLabel(waiting.count, "request", "requests")} waiting on another thread.`,
+);
 
 function focusMessage(): HTMLElement | undefined {
 	return document.getElementById("prompt") ?? undefined;
@@ -22,6 +28,15 @@ function focusMessage(): HTMLElement | undefined {
 	{/each}
 </div>
 <div class="notices" role="status">
+	{#if waiting.count > 0}
+		<div class="notice notice-info">
+			<p>{waitingText}</p>
+			{#if waiting.threadId}
+				{@const threadId = waiting.threadId}
+				<button class="quiet" onclick={() => onOpenWaiting(threadId)}>Open thread</button>
+			{/if}
+		</div>
+	{/if}
 	{#each others as notice (notice.id)}
 		{@render row(notice)}
 	{/each}

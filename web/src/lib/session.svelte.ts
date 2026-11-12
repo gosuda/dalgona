@@ -8,7 +8,7 @@ import {
 	emptyTranscript,
 	itemsAwaitingApproval,
 	type KnownChildThreads,
-	otherThreadApprovalCount,
+	requestsElsewhere,
 	resolveApprovalRequest,
 	trackApprovalRequest,
 	transcriptForThread,
@@ -37,6 +37,7 @@ import type {
 	ThreadDetail,
 	ThreadSummary,
 	TranscriptState,
+	WaitingElsewhere,
 } from "./types";
 import {
 	parseAdvisorStatusResponse,
@@ -169,13 +170,14 @@ export class Session {
 			this.transcript.childThreadIds,
 		),
 	);
-	otherApprovalCount: number = $derived(
-		otherThreadApprovalCount(
+	waitingElsewhere: WaitingElsewhere = $derived.by(() => {
+		const waiting = requestsElsewhere(
 			this.approvals,
 			this.activeThreadId,
 			this.transcript.childThreadIds,
-		),
-	);
+		);
+		return { count: waiting.length, threadId: waiting[0]?.threadId ?? null };
+	});
 	awaitingApproval: ReadonlySet<string> = $derived(
 		itemsAwaitingApproval(
 			this.approvals,

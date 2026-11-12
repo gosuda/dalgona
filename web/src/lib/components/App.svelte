@@ -57,7 +57,9 @@ let { session }: Props = $props();
 
 		<NoticeStack
 			notices={session.notices}
+			waiting={session.waitingElsewhere}
 			onDismiss={(id) => session.dismiss(id)}
+			onOpenWaiting={(threadId) => void session.selectThread(threadId)}
 		/>
 
 		<Transcript
@@ -84,13 +86,6 @@ let { session }: Props = $props();
 		/>
 	</main>
 </div>
-
-{#if session.otherApprovalCount > 0}
-	<p class="approval-queue-note" role="status">
-		{session.otherApprovalCount} approval{session.otherApprovalCount === 1 ? "" : "s"} waiting
-		on another thread. Switch threads to review.
-	</p>
-{/if}
 
 <ApprovalDialog
 	request={session.currentApproval}
@@ -137,14 +132,6 @@ let { session }: Props = $props();
 		font-weight: 650;
 		line-height: 1.25;
 		text-wrap: balance;
-	}
-
-	.approval-queue-note {
-		margin: 0 var(--space-5) var(--space-3);
-		border-inline-start: 2px solid var(--color-accent);
-		background: var(--color-bg-inset);
-		padding: var(--space-3);
-		font-size: var(--text-body-small);
 	}
 
 	:global(.transcript) {

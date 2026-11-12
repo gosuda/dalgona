@@ -18,6 +18,10 @@ function noteCount(count: number): string {
 	return `${count} ${plural.select(count) === "one" ? "note" : "notes"}`;
 }
 
+export function countLabel(n: number, one: string, many: string): string {
+	return `${n} ${plural.select(n) === "one" ? one : many}`;
+}
+
 export function advisorLabel(summary: AdvisorSummary): string | null {
 	switch (summary.kind) {
 		case "unknown":

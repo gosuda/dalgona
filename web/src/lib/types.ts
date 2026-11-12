@@ -261,3 +261,8 @@ export interface Notice {
 	readonly text: string;
 	readonly actions: readonly NoticeAction[];
 }
+
+export interface WaitingElsewhere {
+	readonly count: number;
+	readonly threadId: string | null;
+}

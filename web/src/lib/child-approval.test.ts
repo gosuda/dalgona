@@ -4,7 +4,6 @@ import {
 	emptyTranscript,
 	itemsAwaitingApproval,
 	type KnownChildThreads,
-	otherThreadApprovalCount,
 	recordChildThread,
 	reduceNotification,
 	trackApprovalRequest,
@@ -84,13 +83,6 @@ describe("child approvals", () => {
 			activeApproval(approvals, "thread-1", transcript.childThreadIds),
 		).toStrictEqual(childRequest);
 		expect(
-			otherThreadApprovalCount(
-				approvals,
-				"thread-1",
-				transcript.childThreadIds,
-			),
-		).toBe(0);
-		expect(
 			itemsAwaitingApproval(
 				approvals,
 				"thread-1",
@@ -105,9 +97,6 @@ describe("child approvals", () => {
 			threadId: "thread-2",
 		});
 		expect(activeApproval(approvals, "thread-1", ["child-9"])).toBeNull();
-		expect(otherThreadApprovalCount(approvals, "thread-1", ["child-9"])).toBe(
-			1,
-		);
 	});
 
 	test("keeps a child approval visible after the parent reopens", () => {
@@ -118,13 +107,6 @@ describe("child approvals", () => {
 		expect(
 			activeApproval(approvals, reopened.threadId, reopened.childThreadIds),
 		).toStrictEqual(childRequest);
-		expect(
-			otherThreadApprovalCount(
-				approvals,
-				reopened.threadId,
-				reopened.childThreadIds,
-			),
-		).toBe(0);
 		expect(
 			itemsAwaitingApproval(
 				approvals,

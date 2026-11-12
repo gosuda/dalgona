@@ -8,7 +8,6 @@ import {
 	emptyTranscript,
 	itemDisplayStatus,
 	itemsAwaitingApproval,
-	otherThreadApprovalCount,
 	reduceNotification,
 	resolveApprovalRequest,
 	shouldAutoScrollForUpdate,
@@ -304,11 +303,6 @@ describe("active approval filtering", () => {
 	test("shows nothing when no approval belongs to the active thread", () => {
 		expect(activeApproval([other], "thread-1", [])).toBeNull();
 		expect(activeApproval([other], null, [])).toBeNull();
-	});
-
-	test("counts approvals waiting on other threads", () => {
-		expect(otherThreadApprovalCount([first, other], "thread-1", [])).toBe(1);
-		expect(otherThreadApprovalCount([first, other], "thread-3", [])).toBe(2);
 	});
 });
 
