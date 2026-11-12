@@ -16,7 +16,7 @@ func (s *statusSink) notify(_ string, build func() writer) { s.notes = append(s.
 
 func TestStatusNotificationAlwaysCarriesSeq(t *testing.T) {
 	sink := &statusSink{}
-	tr := newTracker("t1", nil, nil, slog.New(slog.DiscardHandler))
+	tr := newTracker("t1", nil, nil, nil, slog.New(slog.DiscardHandler))
 	tr.sink = sink
 	tr.apply(1, event.TurnStarted{TurnID: "u1"})
 	if len(sink.notes) == 0 {

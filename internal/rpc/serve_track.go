@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/textdiff"
 )
@@ -31,6 +32,7 @@ type tracker struct {
 	created   event.SessionCreated
 	load      func(*event.BlobRef) ([]byte, error)
 	childCwd  func(id string) string
+	keywords  func(threadID, text string, kind agent.InputKind) []agent.KeywordMatch
 	log       *slog.Logger
 	sink      sink
 	turn      string
@@ -46,9 +48,9 @@ type tracker struct {
 	seq       uint64
 }
 
-func newTracker(threadID string, load func(*event.BlobRef) ([]byte, error), childCwd func(string) string, log *slog.Logger) *tracker {
+func newTracker(threadID string, load func(*event.BlobRef) ([]byte, error), childCwd func(string) string, keywords func(threadID, text string, kind agent.InputKind) []agent.KeywordMatch, log *slog.Logger) *tracker {
 	return &tracker{
-		threadID: threadID, load: load, childCwd: childCwd, log: log,
+		threadID: threadID, load: load, childCwd: childCwd, keywords: keywords, log: log,
 		items: map[string]*Item{}, calls: map[string]event.ToolCall{}, classes: map[string]string{},
 		approvals: map[string]string{}, declined: map[string]bool{},
 		callAt: map[string]time.Time{},
@@ -141,7 +143,24 @@ func (t *tracker) turnCompleted(_ uint64, ev event.Event) {
 
 func (t *tracker) userMessage(_ uint64, ev event.Event) {
 	e, _ := ev.(event.UserMessage)
-	t.startComplete(e.TurnID, &Item{Type: kindUser, ID: e.ItemID, Text: t.text(e.Text, e.TextBlob)})
+	text := t.text(e.Text, e.TextBlob)
+	item := &Item{Type: kindUser, ID: e.ItemID, Text: text, Keywords: t.noticeMatches(e, text)}
+	t.startComplete(e.TurnID, item)
+}
+
+func (t *tracker) noticeMatches(e event.UserMessage, text string) []KeywordMatch {
+	kind := agent.InputKind(cmp.Or(e.Kind, string(agent.InputPrompt)))
+	journaled := make(map[string]bool, len(e.Notices))
+	for _, notice := range e.Notices {
+		journaled[notice.Word] = true
+	}
+	var out []KeywordMatch
+	for _, match := range t.keywords(t.threadID, text, kind) {
+		if journaled[match.Word] {
+			out = append(out, keywordMatchOf(match))
+		}
+	}
+	return out
 }
 
 func (t *tracker) assistantMessage(_ uint64, ev event.Event) {

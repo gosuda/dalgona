@@ -274,6 +274,37 @@ func (k keywordList) write(o *out) {
 	o.closeArray()
 }
 
+func (m KeywordMatch) write(o *out) {
+	o.open()
+	o.str("word", m.Word)
+	o.key("byteRange")
+	o.open()
+	o.int("start", int64(m.ByteRange.Start))
+	o.int("end", int64(m.ByteRange.End))
+	o.close()
+	o.key("hue")
+	o.openArray()
+	o.token(jsontext.Int(int64(m.Hue[0])))
+	o.token(jsontext.Int(int64(m.Hue[1])))
+	o.closeArray()
+	if m.Effort != "" {
+		o.str("effort", m.Effort)
+	}
+	o.str("summary", m.Summary)
+	o.close()
+}
+
+func (r KeywordsMatchResponse) write(o *out) {
+	o.open()
+	o.key("matches")
+	o.openArray()
+	for _, match := range r.Matches {
+		match.write(o)
+	}
+	o.closeArray()
+	o.close()
+}
+
 func (r ThreadTreeResponse) write(o *out) {
 	o.open()
 	o.key("turns")

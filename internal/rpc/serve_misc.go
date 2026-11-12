@@ -12,6 +12,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/config"
@@ -423,4 +424,30 @@ func (s *server) keywordsList(context.Context, jsontext.Value) (jsontext.Value, 
 		}
 	}
 	return encode(list)
+}
+
+const maxKeywordText = 64 << 10
+
+func (s *server) keywordsMatch(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
+	var p KeywordsMatchParams
+	if err := decodeParams(params, stringMembers(map[string]*string{"threadId": &p.ThreadID, "text": &p.Text, "kind": &p.Kind})); err != nil {
+		return nil, err
+	}
+	if len(p.Text) > maxKeywordText {
+		return nil, invalidParams("text exceeds 64 KiB")
+	}
+	kind := agent.InputKind(cmp.Or(p.Kind, string(agent.InputPrompt)))
+	if kind != agent.InputPrompt && kind != agent.InputSteer {
+		return nil, invalidParams("unsupported kind " + string(kind))
+	}
+	matches := s.host.KeywordMatches(p.ThreadID, p.Text, kind)
+	response := KeywordsMatchResponse{Matches: make([]KeywordMatch, 0, len(matches))}
+	for _, match := range matches {
+		response.Matches = append(response.Matches, keywordMatchOf(match))
+	}
+	return encode(response)
+}
+
+func keywordMatchOf(match agent.KeywordMatch) KeywordMatch {
+	return KeywordMatch{Word: match.Word, ByteRange: ByteRange{Start: match.Start, End: match.End}, Hue: match.Hue, Effort: match.Effort, Summary: match.Summary}
 }

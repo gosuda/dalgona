@@ -43,6 +43,7 @@ func init() {
 		"account/logout":           (*server).logout,
 		"skills/list":              (*server).skillsList,
 		"dalgona/keywords/list":    (*server).keywordsList,
+		"dalgona/keywords/match":   (*server).keywordsMatch,
 		"dalgona/thread/tree":      (*server).threadTree,
 		"dalgona/thread/leaf/set":  (*server).leafSet,
 		"dalgona/advisor/status":   (*server).advisorStatus,
@@ -192,7 +193,7 @@ func (s *server) watching(id string) bool {
 }
 
 func (s *server) newTracker(id string) *tracker {
-	return newTracker(id, s.host.Blob, s.childCwd, s.log)
+	return newTracker(id, s.host.Blob, s.childCwd, s.host.KeywordMatches, s.log)
 }
 
 func (s *server) childCwd(id string) string {

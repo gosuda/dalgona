@@ -34,7 +34,12 @@ The matcher MUST hide non-prose regions without changing rune positions. It MUST
 - XML and HTML comments, tags, and balanced element sections. Tag names MUST match without case sensitivity. Quoted `>` characters MUST NOT close a tag. An unclosed element MUST hide only its opening tag. An unclosed comment MUST hide the rest of the prompt.
 - If another `<` appears before the tag ends, the first `<` MUST stay plain text.
 
-A keyword MUST NOT fire when any required tool is absent. The matcher MUST return each matching keyword at most once. Results MUST follow table order.
+`Match` MUST NOT return a keyword when a required tool is absent. `Match` MUST return each matching keyword at most once. Results MUST follow table order.
+
+`Usable` MUST return the keywords that are enabled, lowercase, and whose required tools are all present.
+`Previewable` MUST return the keywords that are enabled and lowercase, without checking required tools. A thread that has not resolved its tools MUST use `Previewable`.
+`Spans` MUST return every non-overlapping prose occurrence of each keyword it receives, sorted by start.
+Each span MUST give UTF-8 byte offsets, with the end offset exclusive.
 
 ## Boundaries
 

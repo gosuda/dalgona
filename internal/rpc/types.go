@@ -67,6 +67,7 @@ type (
 		Arguments  jsontext.Value
 		DurationMs *int64
 		Spill      *OutputSpill
+		Keywords   []KeywordMatch
 	}
 	OutputSpill struct {
 		Path   string `json:"path"`
@@ -194,6 +195,25 @@ type (
 	Keyword struct {
 		Word string `json:"word"`
 		Hue  [2]int `json:"hue"`
+	}
+	KeywordsMatchParams struct {
+		ThreadID string
+		Text     string
+		Kind     string
+	}
+	KeywordsMatchResponse struct {
+		Matches []KeywordMatch
+	}
+	KeywordMatch struct {
+		Word      string
+		ByteRange ByteRange
+		Hue       [2]int
+		Effort    string
+		Summary   string
+	}
+	ByteRange struct {
+		Start int
+		End   int
 	}
 	ThreadTreeResponse struct {
 		Turns []TreeTurn `json:"turns"`

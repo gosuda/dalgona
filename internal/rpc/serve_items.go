@@ -41,6 +41,7 @@ func (it Item) write(o *out) {
 		o.str("text", it.Text)
 		o.close()
 		o.closeArray()
+		it.writeKeywords(o)
 	case kindAgent:
 		o.str("text", it.Text)
 	case kindReasoning:
@@ -170,6 +171,18 @@ func (it Item) writeSpill(o *out) {
 	o.close()
 }
 
+func (it Item) writeKeywords(o *out) {
+	if len(it.Keywords) == 0 {
+		return
+	}
+	o.key("keywords")
+	o.openArray()
+	for _, match := range it.Keywords {
+		match.write(o)
+	}
+	o.closeArray()
+}
+
 func toolStatus(status string) string {
 	if status == statusDeclined {
 		return statusFailed
@@ -256,7 +269,7 @@ func (s *itemDecoder) member(name string, d *jsontext.Decoder) error {
 		*target = v
 		return err
 	}
-	if handled, err := s.number(name, d); handled {
+	if handled, err := s.typed(name, d); handled {
 		return err
 	}
 	switch name {
@@ -278,7 +291,7 @@ func (s *itemDecoder) member(name string, d *jsontext.Decoder) error {
 	return d.SkipValue()
 }
 
-func (s *itemDecoder) number(name string, d *jsontext.Decoder) (bool, error) {
+func (s *itemDecoder) typed(name string, d *jsontext.Decoder) (bool, error) {
 	switch name {
 	case "exitCode":
 		return true, s.it.readExit(d)
@@ -286,6 +299,8 @@ func (s *itemDecoder) number(name string, d *jsontext.Decoder) (bool, error) {
 		return true, s.it.readDuration(d)
 	case "outputSpill":
 		return true, s.it.readSpill(d)
+	case "keywords":
+		return true, s.it.readKeywords(d)
 	}
 	return false, nil
 }
@@ -360,6 +375,66 @@ func (it *Item) readSpill(d *jsontext.Decoder) error {
 		return err
 	})
 	it.Spill = &spill
+	return err
+}
+
+func (it *Item) readKeywords(d *jsontext.Decoder) error {
+	if d.PeekKind() == 'n' {
+		_, err := d.ReadToken()
+		return err
+	}
+	return readArray(d, func() error {
+		var match KeywordMatch
+		err := readMembers(d, func(name string, d *jsontext.Decoder) error {
+			return readKeywordMember(name, d, &match)
+		})
+		it.Keywords = append(it.Keywords, match)
+		return err
+	})
+}
+
+func readKeywordMember(name string, d *jsontext.Decoder, match *KeywordMatch) error {
+	var err error
+	switch name {
+	case "word":
+		match.Word, err = readString(d)
+	case "byteRange":
+		err = readByteRange(d, &match.ByteRange)
+	case "hue":
+		err = readHue(d, &match.Hue)
+	case "effort":
+		match.Effort, err = readString(d)
+	case "summary":
+		match.Summary, err = readString(d)
+	default:
+		err = d.SkipValue()
+	}
+	return err
+}
+
+func readByteRange(d *jsontext.Decoder, r *ByteRange) error {
+	return readMembers(d, func(name string, d *jsontext.Decoder) error {
+		var err error
+		switch name {
+		case "start":
+			r.Start, err = readInt(d)
+		case "end":
+			r.End, err = readInt(d)
+		default:
+			err = d.SkipValue()
+		}
+		return err
+	})
+}
+
+func readHue(d *jsontext.Decoder, hue *[2]int) error {
+	var values []int
+	err := readArray(d, func() error {
+		n, err := readInt(d)
+		values = append(values, n)
+		return err
+	})
+	copy(hue[:], values)
 	return err
 }
 

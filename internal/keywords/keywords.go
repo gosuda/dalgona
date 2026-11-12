@@ -1,10 +1,12 @@
 package keywords
 
 import (
+	"cmp"
 	"embed"
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 type Keyword struct {
@@ -78,15 +80,65 @@ func mergeKeyword(base, override Keyword) Keyword {
 	return override
 }
 
-func Match(prompt string, table []Keyword, tools []string) []Keyword {
-	masked := mask([]rune(prompt))
+type Span struct {
+	Keyword    Keyword
+	Start, End int
+}
+
+func Usable(table []Keyword, tools []string) []Keyword {
 	available := make(map[string]struct{}, len(tools))
 	for _, tool := range tools {
 		available[tool] = struct{}{}
 	}
 	result := make([]Keyword, 0, len(table))
 	for _, item := range table {
-		if matchable(item, available) && containsKeyword(masked, []rune(item.Word)) {
+		if matchable(item, available) {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func Spans(prompt string, table []Keyword) []Span {
+	masked := mask([]rune(prompt))
+	offsets := runeOffsets(prompt)
+	var spans []Span
+	for _, item := range table {
+		word := []rune(item.Word)
+		if len(word) == 0 {
+			continue
+		}
+		for start := 0; start+len(word) <= len(masked); {
+			end := start + len(word)
+			if slices.Equal(masked[start:end], word) && boundary(masked, start, end) {
+				spans = append(spans, Span{Keyword: item, Start: offsets[start], End: offsets[end]})
+				start = end
+				continue
+			}
+			start++
+		}
+	}
+	slices.SortStableFunc(spans, func(a, b Span) int { return cmp.Compare(a.Start, b.Start) })
+	return spans
+}
+
+func runeOffsets(text string) []int {
+	offsets := make([]int, 0, utf8.RuneCountInString(text)+1)
+	for i := range text {
+		offsets = append(offsets, i)
+	}
+	return append(offsets, len(text))
+}
+
+func Match(prompt string, table []Keyword, tools []string) []Keyword {
+	usable := Usable(table, tools)
+	matched := make(map[string]bool, len(usable))
+	for _, span := range Spans(prompt, usable) {
+		matched[span.Keyword.Word] = true
+	}
+	result := make([]Keyword, 0, len(usable))
+	for _, item := range usable {
+		if matched[item.Word] {
 			result = append(result, item)
 		}
 	}
@@ -94,17 +146,21 @@ func Match(prompt string, table []Keyword, tools []string) []Keyword {
 }
 
 func matchable(item Keyword, available map[string]struct{}) bool {
-	return item.Enabled && requirementsMet(item.Requires, available) && item.Word != "" && item.Word == strings.ToLower(item.Word)
+	return usableWord(item) && requirementsMet(item.Requires, available)
 }
 
-func containsKeyword(masked, word []rune) bool {
-	for start := 0; start+len(word) <= len(masked); start++ {
-		end := start + len(word)
-		if slices.Equal(masked[start:end], word) && boundary(masked, start, end) {
-			return true
+func usableWord(item Keyword) bool {
+	return item.Enabled && item.Word != "" && item.Word == strings.ToLower(item.Word)
+}
+
+func Previewable(table []Keyword) []Keyword {
+	result := make([]Keyword, 0, len(table))
+	for _, item := range table {
+		if usableWord(item) {
+			result = append(result, item)
 		}
 	}
-	return false
+	return result
 }
 
 func notice(name string) string {
