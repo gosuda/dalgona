@@ -302,6 +302,24 @@ func checkPrompts(t *testing.T, prompts []wire.ChatMessagePrompt) {
 	}
 }
 
+func TestBuildPromptsCarriesImages(t *testing.T) {
+	var retries atomic.Int32
+	fake, server := newFake(t, textTurn)
+	png := []byte("\x89PNG\r\n\x1a\n")
+	req := model.Request{Model: "swe-1-6", Messages: []model.Message{{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: png}}}}}
+	drain(t, newProvider(server, &retries), req)
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	prompts := fake.chats[0].prompts
+	if len(prompts) != 1 || len(prompts[0].Images) != 1 {
+		t.Fatalf("prompts = %+v, want one prompt with one image", prompts)
+	}
+	image := prompts[0].Images[0]
+	if string(image.MimeTypeView) != "image/png" || string(image.Base64DataView) != base64.StdEncoding.EncodeToString(png) {
+		t.Fatalf("image = %q %q, want image/png and the base64 of the PNG bytes", image.MimeTypeView, image.Base64DataView)
+	}
+}
+
 func TestJWTIsCachedThenRenewedAfterExpiryAndRejection(t *testing.T) {
 	var retries atomic.Int32
 	fake, server := newFake(t, textTurn)
