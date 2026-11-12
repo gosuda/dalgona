@@ -26,7 +26,7 @@ The TUI MUST run inline, except for the review. The review is the only view that
 
 Streamed text MUST print each final block once, and the live row MUST show one tail row.
 
-The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the notice, else the activity.
+The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the settings error. Otherwise it shows the rate-limit countdown while a retry wait runs, else the notice, else the activity.
 
 The composer shows `› ` in the thread hue, then the typed text. The terminal cursor marks the insertion point. When the composer is empty, the placeholder follows the prompt in dim text. The placeholder never shows a keyword mark.
 

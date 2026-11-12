@@ -28,6 +28,21 @@ func TestRetryWaitShowsCountdownAndEscStops(t *testing.T) {
 	}
 }
 
+func TestRetryWaitCountdownShowsOverRetryNotice(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	m := newTestModel(new(fakeCaller), Options{}, nil)
+	m.conn.clock = func() time.Time { return now }
+	m.screen.width = 120
+	m, _ = drive(t, m, notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)})
+	m, _ = drive(t, m, notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"model request failed (retry, status 429); retry 1 in 120000 ms"}}`)})
+	m, _ = drive(t, m, notificationMsg{method: "dalgona/retry/wait", params: []byte(`{"threadId":"t1","turnId":"turn-1","remainingMs":120000}`)})
+	want := "rate limited · retrying in 2m 00s · esc stops"
+	if got := stripANSI(m.liveRow()); !strings.Contains(got, want) {
+		t.Fatalf("live row during a retry wait = %q, want %q", got, want)
+	}
+}
+
 func TestTickRunsOnlyWhileLive(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)

@@ -355,7 +355,11 @@ func (m *model) liveText() string {
 		return m.screen.dockTheme().paint(roleDim, m.hint.text)
 	case m.settings != nil && m.settings.saveErr != "":
 		return m.screen.dockTheme().paintBold(roleFailedText, m.settings.saveErr)
-	case m.notice != "":
+	}
+	if left, ok := m.retryRemaining(); ok {
+		return retryLine(left)
+	}
+	if m.notice != "" {
 		notice := m.noticeLine()
 		if m.noticeError {
 			return m.screen.dockTheme().paintBold(roleFailedText, notice)
