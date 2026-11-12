@@ -284,6 +284,9 @@ func Load(product Product, cwd string, flags Flags) (Config, error) {
 		if err := validateProductLayer(product, layer); err != nil {
 			return Config{}, err
 		}
+		if err := validateTrustedWorkspaces(layer); err != nil {
+			return Config{}, err
+		}
 		if err := cfg.merge(layer); err != nil {
 			return Config{}, err
 		}
@@ -294,6 +297,15 @@ func Load(product Product, cwd string, flags Flags) (Config, error) {
 	}
 	cfg.resolveAdvisors()
 	return cfg, nil
+}
+
+func validateTrustedWorkspaces(l layer) error {
+	for _, workspace := range l.doc.MCPTrustedWorkspaces {
+		if workspace == "" {
+			return fmt.Errorf("%s: mcp_trusted_workspaces entry must be a nonempty path", filepath.Base(l.path))
+		}
+	}
+	return nil
 }
 
 type layer struct {

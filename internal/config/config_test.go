@@ -239,6 +239,11 @@ func TestLoad_dalRejectsDalgonaSettings(t *testing.T) {
 	}
 }
 
+func TestLoad_rejectsEmptyTrustedWorkspace(t *testing.T) {
+	_, err := loadConfig(t, config.ProductDalgona, "", "mcp_trusted_workspaces = [\"\"]\n", config.Flags{})
+	requireConfigError(t, err, "settings.toml: mcp_trusted_workspaces entry must be a nonempty path")
+}
+
 func TestLoad_rejectsInvalidDuration(t *testing.T) {
 	_, err := loadConfig(t, config.ProductDalgona, "stream_start_timeout = \"soon\"\n", "", config.Flags{})
 	if err == nil || !strings.Contains(err.Error(), "stream_start_timeout") {
