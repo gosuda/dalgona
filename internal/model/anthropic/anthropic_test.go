@@ -137,8 +137,8 @@ func TestModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []model.Model{
-		{ID: "first", Context: 200000, MaxOutput: 4096, Efforts: []string{"low", "high", "max"}, ToolChoice: true},
-		{ID: "second", Context: 64000, MaxOutput: 8192, ToolChoice: true},
+		{ID: "first", Context: 200000, MaxOutput: 4096, Efforts: []string{"low", "high", "max"}, ToolChoice: true, Images: true},
+		{ID: "second", Context: 64000, MaxOutput: 8192, ToolChoice: true, Images: true},
 	}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("models = %+v, want %+v", models, want)
@@ -404,5 +404,72 @@ func TestEncodePassesXHighAndMaxEffort(t *testing.T) {
 				t.Fatalf("reasoning %q sent effort %q, want %q", tc.reasoning, value.OutputConfig.Effort, tc.want)
 			}
 		})
+	}
+}
+
+func TestEncodeRequestSendsImageBlock(t *testing.T) {
+	t.Parallel()
+	content := userContent(t, model.Message{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
+	if len(content) != 2 {
+		t.Fatalf("content = %d blocks, want 2: %s", len(content), content)
+	}
+	sameJSON(t, content[0], `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}`)
+	sameJSON(t, content[1], `{"type":"text","text":"What is this?","cache_control":{"type":"ephemeral"}}`)
+}
+
+func TestEncodeRequestSendsImageOnlyMessage(t *testing.T) {
+	t.Parallel()
+	content := userContent(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
+	if len(content) != 1 {
+		t.Fatalf("content = %d blocks, want 1: %s", len(content), content)
+	}
+	sameJSON(t, content[0], `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="},"cache_control":{"type":"ephemeral"}}`)
+}
+
+func TestEncodeRequestKeepsImagesWithToolResults(t *testing.T) {
+	t.Parallel()
+	content := userContent(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}, ToolResults: []model.ToolResult{{ID: "call-1", Output: jsontext.Value(`"done"`)}}})
+	if len(content) != 2 {
+		t.Fatalf("content = %d blocks, want 2: %s", len(content), content)
+	}
+	sameJSON(t, content[0], `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}`)
+	sameJSON(t, content[1], `{"type":"tool_result","tool_use_id":"call-1","content":"done","cache_control":{"type":"ephemeral"}}`)
+}
+
+func userContent(t *testing.T, message model.Message) []jsontext.Value {
+	t.Helper()
+	var body []byte
+	server := newStreamServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(successFixture())
+	})
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
+	_ = collectStream(t, provider, model.Request{Model: "claude-test", Messages: []model.Message{message}})
+	var value struct {
+		Messages []struct {
+			Content []jsontext.Value `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &value); err != nil {
+		t.Fatalf("request JSON: %v\n%s", err, body)
+	}
+	if len(value.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1: %s", len(value.Messages), body)
+	}
+	return value.Messages[0].Content
+}
+
+func sameJSON(t *testing.T, got jsontext.Value, want string) {
+	t.Helper()
+	var g, w any
+	if err := json.Unmarshal(got, &g); err != nil {
+		t.Fatalf("block %s: %v", got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &w); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(g, w) {
+		t.Fatalf("block = %s, want %s", got, want)
 	}
 }
