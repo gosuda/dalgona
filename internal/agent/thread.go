@@ -66,7 +66,7 @@ type actor struct {
 	subs         map[chan Update]struct{}
 	busy         bool
 	cancel       context.CancelCauseFunc
-	approvals    map[string]chan Reply
+	approvals    map[string]*pendingApproval
 	questions    map[string]*pendingQuestion
 	questionSeq  uint64
 	autoContinue bool
@@ -134,7 +134,7 @@ func (h *Host) openLocked(ctx context.Context, loaded loadedSession, overrides O
 	h.mu.Unlock()
 	a := &actor{
 		t: t, records: loaded.records, sizes: loaded.sizes, state: loaded.state, damage: loaded.damage,
-		subs: make(map[chan Update]struct{}), approvals: make(map[string]chan Reply), questions: make(map[string]*pendingQuestion), autoContinue: !endedByInterrupt(loaded.records),
+		subs: make(map[chan Update]struct{}), approvals: make(map[string]*pendingApproval), questions: make(map[string]*pendingQuestion), autoContinue: !endedByInterrupt(loaded.records),
 	}
 	if loaded.state.TurnID != "" && loaded.damage == nil {
 		a.spawn(func(ctx context.Context) { (&worker{t: t, turnID: loaded.state.TurnID}).recoverTurn(ctx) })
@@ -523,6 +523,7 @@ func (a *actor) unsubscribe(target <-chan Update) {
 		}
 	}
 	a.settleQuestions()
+	a.settleApprovals()
 }
 
 type view struct {

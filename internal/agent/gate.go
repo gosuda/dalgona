@@ -262,14 +262,15 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 		return decline("mode:ask", "declined: secret masking failed")
 	}
 	offered, err := ask(w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
-	forwarded, linked := w.t.forwardApproval(prompt)
+	forwarded, linked := w.t.forwardApproval(prompt, replies)
 	v := decline("mode:ask", declineNoClient)
 	if err == nil && (forwarded || (offered && !linked)) {
 		v = awaitReply(ctx, replies)
 	}
 	if forwarded {
 		prompt.Resolved = true
-		w.t.forwardApproval(prompt)
+		w.t.forwardApproval(prompt, nil)
+		w.t.discardApproval(prompt.RequestID)
 	}
 	return v
 }
@@ -305,19 +306,31 @@ func awaitReply(ctx context.Context, replies <-chan Reply) verdict {
 }
 
 func (a *actor) offerApproval(prompt ApprovalPrompt, replies chan Reply) bool {
-	a.approvals[prompt.RequestID] = replies
+	a.approvals[prompt.RequestID] = newPendingApproval(replies)
 	a.publish(Update{Kind: UpdateApproval, Thread: a.t.id, Approval: prompt})
 	return len(a.subs) > 0
 }
 
-func (t *Thread) forwardApproval(prompt ApprovalPrompt) (reached, linked bool) {
+func (t *Thread) forwardApproval(prompt ApprovalPrompt, replies chan Reply) (reached, linked bool) {
 	parent, open := t.host.loadedThread(t.created.Parent)
 	if !open || t.created.Advisor != "" {
 		return false, false
 	}
 	reached, err := ask(parent, func(a *actor) bool {
+		if prompt.Resolved {
+			delete(a.approvals, prompt.RequestID)
+			a.publish(Update{Kind: UpdateApproval, Thread: t.id, Approval: prompt})
+			return false
+		}
+		if len(a.subs) > 0 {
+			a.approvals[prompt.RequestID] = newPendingApproval(replies)
+		}
 		a.publish(Update{Kind: UpdateApproval, Thread: t.id, Approval: prompt})
-		return len(a.subs) > 0
+		kept := len(a.subs) > 0
+		if !kept {
+			delete(a.approvals, prompt.RequestID)
+		}
+		return kept
 	})
 	return err == nil && reached, true
 }

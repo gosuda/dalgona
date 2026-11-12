@@ -358,7 +358,7 @@ func (s *server) drain(ctx context.Context, w *watch, ch <-chan agent.Update) {
 		case agent.UpdateReasoningDelta:
 			w.tracker.reasoningDelta(update.ItemID, update.Delta)
 		case agent.UpdateApproval:
-			s.ask(ctx, w, update)
+			s.ask(ctx, w, ch, update)
 		case agent.UpdateExecOutput:
 			w.tracker.execOutput(update.CallID, update.Delta)
 		case agent.UpdateRetryWait:

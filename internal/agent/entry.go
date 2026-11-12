@@ -177,12 +177,10 @@ func (t *Thread) InterruptTurn(ctx context.Context, turnID string) error {
 
 func (t *Thread) Answer(requestID string, reply Reply) error {
 	err := askErr(t, func(a *actor) error {
-		ch, ok := a.approvals[requestID]
-		if !ok {
+		if _, ok := a.approvals[requestID]; !ok {
 			return fmt.Errorf("%w: %s", ErrUnknownRequest, requestID)
 		}
-		delete(a.approvals, requestID)
-		ch <- reply
+		a.resolveApproval(requestID, reply)
 		return nil
 	})
 	if !errors.Is(err, ErrUnknownRequest) {

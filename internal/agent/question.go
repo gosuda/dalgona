@@ -130,15 +130,15 @@ func (a *actor) resolveQuestion(requestID string, reply asktool.Reply) bool {
 
 func (a *actor) settleQuestions() {
 	for requestID, pending := range a.questions {
-		if a.allRefused(pending) {
+		if a.allRefused(pending.refused) {
 			a.resolveQuestion(requestID, asktool.Reply{Outcome: asktool.OutcomeNoClient})
 		}
 	}
 }
 
-func (a *actor) allRefused(pending *pendingQuestion) bool {
+func (a *actor) allRefused(refused map[<-chan Update]struct{}) bool {
 	for ch := range a.subs {
-		if _, ok := pending.refused[ch]; !ok {
+		if _, ok := refused[ch]; !ok {
 			return false
 		}
 	}
@@ -177,6 +177,9 @@ func (a *actor) drop(ch chan Update) {
 	close(ch)
 	delete(a.subs, ch)
 	for _, pending := range a.questions {
+		delete(pending.refused, ch)
+	}
+	for _, pending := range a.approvals {
 		delete(pending.refused, ch)
 	}
 }

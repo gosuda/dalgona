@@ -44,7 +44,7 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 	if err != nil {
 		return ReplyDecline, err
 	}
-	forwarded, linked := t.forwardApproval(prompt)
+	forwarded, linked := t.forwardApproval(prompt, replies)
 	if !forwarded && (!offered || linked) {
 		t.discardApproval(requestID)
 		return ReplyDecline, nil
@@ -53,14 +53,14 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 	case reply := <-replies:
 		if forwarded {
 			prompt.Resolved = true
-			t.forwardApproval(prompt)
+			t.forwardApproval(prompt, nil)
 		}
 		return reply, nil
 	case <-ctx.Done():
 		t.discardApproval(requestID)
 		if forwarded {
 			prompt.Resolved = true
-			t.forwardApproval(prompt)
+			t.forwardApproval(prompt, nil)
 		}
 		return ReplyCancel, ctx.Err()
 	}

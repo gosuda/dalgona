@@ -17,9 +17,10 @@ type approvalAsk struct {
 	requestID string
 	method    string
 	params    writer
+	window    <-chan agent.Update
 }
 
-func (s *server) ask(ctx context.Context, w *watch, update agent.Update) {
+func (s *server) ask(ctx context.Context, w *watch, ch <-chan agent.Update, update agent.Update) {
 	prompt := update.Approval
 	if prompt.Resolved {
 		s.resolved(update.Thread, prompt.RequestID)
@@ -31,7 +32,7 @@ func (s *server) ask(ctx context.Context, w *watch, update agent.Update) {
 		turnID = ""
 	}
 	method, params := approvalParams(prompt, threadID, turnID, approvalCwd(prompt, w))
-	a := approvalAsk{thread: w.thread, requestID: prompt.RequestID, method: method, params: params}
+	a := approvalAsk{thread: w.thread, requestID: prompt.RequestID, method: method, params: params, window: ch}
 	note := approvalNotice(prompt, threadID, turnID)
 	askCtx, cancel := context.WithCancel(ctx)
 	started, dup := s.spawnRequest(prompt.RequestID, cancel, func() {
@@ -41,16 +42,10 @@ func (s *server) ask(ctx context.Context, w *watch, update agent.Update) {
 		}
 		s.request(ctx, askCtx, a)
 	})
-	if dup {
+	if dup || !started {
 		cancel()
-		return
 	}
-	if !started {
-		cancel()
-		s.declineIfAlone(a)
-		return
-	}
-	if note != nil {
+	if note != nil && started && !dup {
 		recordApprovalChanges(w, threadID, *note)
 	}
 }
@@ -134,20 +129,17 @@ func (s *server) request(serveCtx, askCtx context.Context, a approvalAsk) {
 	case err == nil:
 		s.answer(a, decisionReply(response))
 	case serveCtx.Err() != nil, errors.Is(err, io.ErrClosedPipe):
-		s.declineIfAlone(a)
 	case askCtx.Err() != nil:
 	default:
-		s.log.Info("rpc: approval request failed; declining", "request", a.requestID, "error", err)
-		s.answer(a, agent.ReplyDecline)
+		s.cannotAnswerApproval(a, err)
 	}
 }
 
-func (s *server) declineIfAlone(a approvalAsk) {
-	status, err := a.thread.Status()
-	if err != nil || status.Subscribers > 1 {
-		return
+func (s *server) cannotAnswerApproval(a approvalAsk, cause error) {
+	s.log.Info("rpc: approval request failed; this window cannot answer", "request", a.requestID, "error", cause)
+	if err := a.thread.CannotAnswerApproval(a.requestID, a.window); err != nil && !errors.Is(err, agent.ErrUnknownRequest) {
+		s.log.Warn("rpc: report unanswerable approval", "request", a.requestID, "error", err)
 	}
-	s.answer(a, agent.ReplyDecline)
 }
 
 func (s *server) answer(a approvalAsk, reply agent.Reply) {

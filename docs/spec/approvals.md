@@ -35,6 +35,8 @@ A `-p` turn answers every approval request with `decline` and prints a notice to
 
 Subagent threads change step 6. A subagent MUST also publish its `UpdateApproval` to the parent's subscribers, with `Update.Thread` set to the subagent id. Only parent subscribers count as clients for a subagent. With no parent subscriber, the gate declines with `declined: no client could approve this call`. When the request resolves, the subagent MUST publish the same `UpdateApproval` with `Resolved=true` to the parent's subscribers. The app-server MUST then send `serverRequest/resolved` with the subagent `threadId` and the `requestId`. When the last parent connection leaves, the app-server MUST decline the pending subagent request. A connection that watches both threads MUST send each approval request id once. A repeated delivery of the same request id MUST NOT send a second request.
 
+A client error on an approval request MUST mean that the client cannot answer. The app-server MUST decline the request when every attached subscriber has reported that it cannot answer. The app-server MUST decline the request when the last subscriber leaves. For a subagent request, the attached subscribers are the parent's subscribers. Otherwise the request MUST stay open for the other subscribers. The first answer MUST win.
+
 Writable roots are the thread working directory, `os.TempDir()`, `os.UserCacheDir()`, and `sandbox_writable_roots`. Each root and path MUST pass through `filepath.EvalSymlinks` for its longest existing prefix.
 
 ## Decider adapter
