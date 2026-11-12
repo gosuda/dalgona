@@ -669,7 +669,6 @@ func (m *model) applyForked(value any) tea.Cmd {
 	if !ok {
 		return m.unexpectedResult("forked thread")
 	}
-	m.setThread(response.Thread.ID)
 	m.noticeMoved(threadTitle(response.Thread))
 	return m.resumeThread(response.Thread.ID)
 }
