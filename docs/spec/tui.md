@@ -244,6 +244,8 @@ Esc on an empty shell line MUST leave shell mode.
 | Alt+Enter | Queues a follow-up, at most 32 |
 | Alt+Q | Opens the queue panel, which lists each queued follow-up as `<i>. <first line>` |
 | Alt+Up, empty composer | Moves the newest queued follow-up back into the composer |
+| `?`, empty composer | Opens the help panel. It lists each key with its action, then one status line for each shown status item. `?` or Esc closes it. Up and Down scroll one line, and PgUp and PgDn scroll a page |
+| `/help` | Opens the help panel |
 | Esc | Closes an open command palette first and keeps the draft. Otherwise clears a non-empty list filter first. With an empty filter, closes the list panel. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row, and a second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
 | Esc on an empty prompt, while idle | The first Esc shows `Esc again to rewind` in the live row. A second Esc within 2000 ms opens the rewind list of active turns, newest first. |
 | Ctrl+C twice | Quits. With an empty draft, the first press shows `Ctrl+C again to exit` in the live row. With a non-empty draft, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. A second press within 2000 ms quits |

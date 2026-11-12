@@ -141,6 +141,8 @@ func (m *model) overlayKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return m.settingsKey(msg), true
 	case m.login != nil:
 		return m.loginKey(msg), true
+	case m.help != nil:
+		return m.helpKey(key), true
 	}
 	return nil, false
 }
@@ -191,6 +193,8 @@ func (m *model) promptKey(msg tea.KeyPressMsg, key string) tea.Cmd {
 		return m.queueFollowup()
 	case "ctrl+v":
 		return m.clipboardImage()
+	case "?":
+		return m.questionKey(msg, key)
 	case "esc":
 		return m.escape()
 	default:

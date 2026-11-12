@@ -70,6 +70,7 @@ type model struct {
 	list        *listPanel
 	confirm     *confirmation
 	login       *loginPanel
+	help        *helpPanel
 	matchSeq    int
 	review      *reviewState
 	settings    *settingsPanel

@@ -25,6 +25,9 @@ func (m *model) executeSlash(name, argument string) tea.Cmd {
 	case "settings":
 		m.openSettings()
 		return nil
+	case "help":
+		m.openHelp()
+		return nil
 	default:
 		return m.executeThreadCommand(name)
 	}
@@ -200,6 +203,7 @@ var commands = []command{
 	{name: "advisor", args: "[status|reset]", summary: "Turn the advisor on or off, show its status, or reset it"},
 	{name: "review", summary: "Review uncommitted changes, a branch, or a commit"},
 	{name: "settings", summary: "Show settings"},
+	{name: "help", summary: "Show keys"},
 }
 
 type slashKind int

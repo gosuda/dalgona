@@ -55,7 +55,7 @@ func (m *model) dockLines() []string {
 }
 
 func (m *model) panelOpen() bool {
-	return len(m.approvals) > 0 || m.confirm != nil || m.list != nil || m.settings != nil || m.login != nil
+	return len(m.approvals) > 0 || m.confirm != nil || m.list != nil || m.settings != nil || m.login != nil || m.help != nil
 }
 
 func (m *model) inputRows(width, limit int) ([]string, int, int) {
@@ -419,6 +419,8 @@ func (m *model) panelLines() []string {
 		return framePanel(&m.screen, m.settingsView(), panelRows(panelSettings, m.screen.height))
 	case m.login != nil:
 		return framePanel(&m.screen, m.loginPanelView(), panelRows(panelLogin, m.screen.height))
+	case m.help != nil:
+		return framePanel(&m.screen, m.helpView(), panelRows(panelHelp, m.screen.height))
 	default:
 		return nil
 	}
