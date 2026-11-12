@@ -302,7 +302,17 @@ func pluginPath(root, configured string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("check plugin path %s: %w", configured, err)
 	}
-	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+	inside := insideRelative(relative)
+	if inside {
+		_, inside, err = resolveWithin(base, target)
+		if errors.Is(err, os.ErrNotExist) {
+			return target, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("check plugin path %s: %w", configured, err)
+		}
+	}
+	if !inside {
 		return "", fmt.Errorf("plugin path %q escapes plugin root %s", configured, root)
 	}
 	return target, nil

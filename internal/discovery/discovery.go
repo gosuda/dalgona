@@ -228,6 +228,9 @@ func resolveWithin(root, target string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	inside := relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-	return resolved, inside, nil
+	return resolved, insideRelative(relative), nil
+}
+
+func insideRelative(relative string) bool {
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
