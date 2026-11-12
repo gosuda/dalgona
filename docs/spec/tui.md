@@ -12,7 +12,7 @@ The TUI is a protocol client. It MUST import only `internal/rpc` from this modul
 - `OnChildSpawned func(childID, cwd string)`: called once for each `dalgona/thread/childSpawned {threadId, childId, cwd}` whose `threadId` is the TUI's thread.
 - `Input`, `Output`: terminal streams. Empty fields use the process terminal.
 - `ThreadID`: when set, startup calls `thread/resume` and then `thread/read` with `includeTurns: true`. When empty, startup calls `thread/start`.
-- `Model`, `Approval`, `Sandbox`: session values for `thread/start` and for the status row. An empty model omits `model` from `thread/start` and shows as `default`. A model chosen with `/model` replaces it for later `thread/start` calls. The approval and sandbox defaults are `auto` and `workspace-write`. Approval `yolo` MUST force sandbox `off`. `thread/start` maps approval `yolo` to `never`, `ask` to `untrusted`, and other values to `on-request`. It maps sandbox `off` to `danger-full-access` and other values to `workspace-write`.
+- `Model`, `Approval`, `Sandbox`: option values for `thread/start` and for the status row. An empty model omits `model` from `thread/start` and shows as `default`. A model chosen with `/model` replaces it for later `thread/start` calls. The approval and sandbox defaults are `auto` and `workspace-write`. Approval `yolo` MUST force sandbox `off`. `thread/start` maps approval `yolo` to `never`, `ask` to `untrusted`, and other values to `on-request`. It maps sandbox `off` to `danger-full-access` and other values to `workspace-write`.
 - `Cwd`: the client working directory. Every `thread/start` MUST send it as `cwd`.
 - `Width`, `Height`: the terminal size when the output is not a terminal. Both MUST be positive to apply.
 
@@ -22,13 +22,13 @@ Startup runs these steps in order: `initialize` with client name `dalgona`, the 
 
 The TUI MUST run inline. It MUST NOT use the alternate screen. A completed item MUST print once to scrollback with `tea.Println`. Completed assistant text MUST render as Markdown through Glamour.
 
-The live view shows, in order: streaming items, the approval dialog, an open selector, the notice line, the state line `state: <state>`, the composer, and one status row:
+The live view shows these parts in order. They are: streaming items, the approval dialog, an open selector, the notice line, the state line `state: <state>`, the composer, and one status row:
 
 ```
 <model> · <approval> · <sandbox> · <thread title>
 ```
 
-Sandbox `off` MUST show as `no sandbox`. The status row MUST show the server reported sandbox from `thread/start`: when the harness sandbox is unavailable the server reports `dangerFullAccess` and the TUI shows `no sandbox` even if the local option is `workspace-write`. A non-empty follow-up queue appends ` · <n> follow-up queued`.
+Sandbox `off` MUST show as `no sandbox`. The status row MUST show the sandbox that the server reports in `thread/start`. When the harness sandbox is unavailable, the server reports `dangerFullAccess`. The TUI then shows `no sandbox`, even if the local option is `workspace-write`. A non-empty follow-up queue appends ` · <n> follow-up queued`.
 
 The composer shows `› `, the typed text, and the cursor `▏`. When the composer is empty, the cursor comes first and the placeholder follows it in faint text. The placeholder never glows.
 
@@ -36,7 +36,7 @@ States are `idle`, `running`, `awaiting approval`, `interrupted`, `failed`, and 
 
 A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` selector shows each thread's mapped state.
 
-The TUI follows one thread. The first thread it sees, from a response or a notification, becomes the TUI's thread. `/new`, `/resume`, and `/fork` replace it. Notifications whose `threadId` names another thread, such as a spawned child, MUST NOT change the title, state, live items, or thread.
+The TUI follows one thread. The first thread it sees, from a response or a notification, becomes the TUI's thread. `/new`, `/resume`, and `/fork` replace it. Notifications whose `threadId` names another thread, such as a spawned child, MUST NOT change the title, state, live items, or thread. When the TUI changes thread, it MUST clear the follow-up queue.
 
 When a read from `conn` fails, the TUI MUST enter `disconnected` and show `connection lost: <cause>; restart the TUI, then /resume <thread>`. No later notification may leave `disconnected`.
 
@@ -64,6 +64,8 @@ When a read from `conn` fails, the TUI MUST enter `disconnected` and show `conne
 
 `turn/steer` sends `expectedTurnId` set to the active turn.
 
+When the queue holds 32 follow-ups, Alt+Enter MUST show `follow-up queue is full (32); wait for the active turn or press Esc`. After a follow-up is queued, the notice MUST show `queued follow-up <n> of 32`. An unknown slash command MUST show `unknown command; use /model /resume /new /compact /login /tree /revert /fork /advisor`. After `/advisor reset`, the notice MUST show `advisor reset; it reviews the current branch at the next turn`.
+
 A follow-up starts after `turn/completed` only when the turn ends idle. After an interrupted or failed turn, the queue MUST stay held and the notice MUST say how to release it. After a revert, a leaf change, or `thread/reverted`, the TUI MUST show `files changed by later turns are not reverted`.
 
 ## Approvals
@@ -77,6 +79,8 @@ A follow-up starts after `turn/completed` only when the turn ends idle. After an
 - The labels `[y] accept`, `[a] accept for session`, `[n] decline`, and `[esc] cancel and interrupt`. They share one line when it fits the width. Otherwise each label gets its own line.
 
 The keys answer `accept`, `acceptForSession`, and `decline`. Esc answers `cancel` and interrupts the turn. Each request MUST block until a key answers it, the TUI exits, or the RPC context ends. A new request MUST NOT replace one that waits. Other server requests MUST fail with an error.
+
+A server request whose parameters do not decode MUST receive an error answer. The TUI MUST show `approval request failed: <cause>; reconnect and retry the turn`.
 
 ## Notifications
 
@@ -108,7 +112,7 @@ Every error notice MUST name a recovery action.
 - An `error` notification with `willRetry: false` sets `failed` and shows `error: <message>; retry the turn, /resume <thread>, or /new`. With `willRetry: true`, the state is unchanged and the notice is `error: <message>; retrying the turn, no action needed`.
 - With no thread yet, `/resume <thread>` in these notices reads `/resume`.
 - An advisor command that fails with `-32001` shows `advisor unavailable: <message>; set [advisor] enabled = true in config.toml, then restart dalgona`. Any other advisor failure shows `advisor request failed: <cause>; retry the /advisor command`.
-- A failed `turn/start` or `turn/steer` returns its text to the composer ahead of any newer draft. A failed follow-up returns to the head of the queue. A failed `turn/start` sets `failed`; a failed steer keeps the turn state.
+- A failed `turn/start` or `turn/steer` returns its text to the composer ahead of any newer draft. A failed follow-up returns to the head of the queue. A failed `turn/start` sets `failed`. A failed steer keeps the turn state.
 - A prompt sent before a thread exists stays in the composer with `thread is not ready; wait for startup or use /new to retry`.
 - A failed keyword list MUST NOT block prompting.
 - An interrupt result for an earlier turn MUST NOT change the current state.
