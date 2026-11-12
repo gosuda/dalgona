@@ -120,6 +120,14 @@ describe("verbosity", () => {
 		});
 	});
 
+	test("a failed row keeps its last 10 lines at high too", () => {
+		const failed: TranscriptItem = { ...ls, status: "failed" };
+		expect(presentRow(failed, "high", false)).toEqual({
+			mode: "tail",
+			tailLines: 10,
+		});
+	});
+
 	test("low hides tool rows and groups consecutive tool calls", () => {
 		for (const item of fixture) {
 			expect(presentRow(item, "low", false).mode).toBe("hidden");

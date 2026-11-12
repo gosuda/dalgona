@@ -63,12 +63,12 @@ export function presentRow(
 	level: Verbosity,
 	live: boolean,
 ): RowPresentation {
+	if (isToolItem(item) && failed(item)) return tailOf(commandTailLines);
 	if (level === "high") return fullPresentation;
 	if (item.kind === "reasoning") {
 		return live ? tailOf(1) : linePresentation;
 	}
 	if (!isToolItem(item)) return fullPresentation;
-	if (failed(item)) return tailOf(commandTailLines);
 	if (level === "low") return hiddenPresentation;
 	return mediumToolRow(item);
 }
