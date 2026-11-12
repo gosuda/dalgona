@@ -107,6 +107,7 @@ func (m *model) applySettings(value any) tea.Cmd {
 	}
 	for _, setting := range reply.Settings {
 		m.applySetting(setting)
+		m.applyNotifications(setting)
 	}
 	m.screen.setTheme()
 	return m.requestKittyFont()
@@ -130,6 +131,15 @@ func (m *model) applySetting(setting settingValue) {
 		m.setStatusHide(setting.Value)
 	default:
 		m.rememberSetting(setting)
+	}
+}
+
+func (m *model) applyNotifications(setting settingValue) {
+	if setting.Key != "notifications" {
+		return
+	}
+	if on, ok := setting.Value.(bool); ok {
+		m.screen.notifications = on
 	}
 }
 
@@ -555,6 +565,7 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	if !ok {
 		return m.unexpectedResult("resumed thread")
 	}
+	previous := m.thread.id
 	m.setThread(response.Thread.ID)
 	m.thread.effort = response.effort
 	m.thread.title = threadTitle(response.Thread)
@@ -567,13 +578,14 @@ func (m *model) applyResumed(value any) tea.Cmd {
 			items = append(items, turnItem{turn: turn.ID, item: item})
 		}
 	}
-	head := []string{"resumed " + m.thread.title}
+	m.out.loads++
+	if previous != m.thread.id {
+		m.commit(threadKey(m.thread.id, m.out.loads), []string{m.threadSeparator()})
+	}
 	if len(items) > maxSettledItems {
-		head = append(head, fmt.Sprintf("%d earlier items are not shown", len(items)-maxSettledItems))
+		m.commit(fmt.Sprintf("earlier:%s:%d", m.thread.id, m.out.loads), []string{fmt.Sprintf("%d earlier items are not shown", len(items)-maxSettledItems)})
 		items = items[len(items)-maxSettledItems:]
 	}
-	m.out.loads++
-	m.commit(threadKey(m.thread.id, m.out.loads), head)
 	var turn string
 	for _, entry := range items {
 		if entry.item.Type == "userMessage" {
@@ -610,6 +622,10 @@ func (m *model) applyNewThread(value any) tea.Cmd {
 
 func threadKey(threadID string, load int) string {
 	return fmt.Sprintf("thread:%s:%d", threadID, load)
+}
+
+func (m *model) threadSeparator() string {
+	return m.screen.fit("── "+m.thread.title+" ──", terminalWidth(m.screen.width))
 }
 
 func serverSandbox(serverType, fallback string) string {

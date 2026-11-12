@@ -195,6 +195,7 @@ func (s *screenState) emit(text string) string {
 }
 
 func (m *model) applyEnv(msg tea.EnvMsg) {
+	m.screen.env = msg
 	m.screen.color = msg.Getenv("NO_COLOR") == ""
 	if !m.screen.color {
 		m.screen.profile = colorprofile.ASCII

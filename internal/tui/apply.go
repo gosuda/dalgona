@@ -240,13 +240,14 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 	m.live.plan = nil
 	m.live.retryUntil = time.Time{}
 	m.setState(turnState(event.Turn.Status))
+	notify := m.notify(m.notifyLine(turnWord(event.Turn.Status)))
 	if m.thread.state != stateIdle {
 		if len(m.queue) > 0 {
 			m.noticef("Held · %d · Enter on an empty prompt sends the next", len(m.queue))
 		}
-		return nil, nil
+		return notify, nil
 	}
-	return m.startQueuedFollowup(), nil
+	return tea.Batch(notify, m.startQueuedFollowup()), nil
 }
 
 func (m *model) applyItemStarted(params jsontext.Value) error {
@@ -496,6 +497,17 @@ func turnState(status string) string {
 		return stateFailed
 	default:
 		return stateIdle
+	}
+}
+
+func turnWord(status string) string {
+	switch status {
+	case "failed":
+		return "Failed"
+	case "interrupted":
+		return "Stopped"
+	default:
+		return "Done"
 	}
 }
 

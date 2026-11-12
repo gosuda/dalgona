@@ -38,6 +38,8 @@ The `/resume` list panel shows each thread's mapped state.
 
 The TUI follows one thread. The first thread it sees, from a response or a notification, becomes the TUI's thread. `/new`, `/resume`, and `/fork` replace it. Notifications whose `threadId` names another thread, such as a spawned child, MUST NOT change the title, state, live items, or thread. When a `/new`, `/resume`, or `/fork` load applies, the TUI MUST keep the follow-up queue. It MUST show `<n> follow-ups moved to <title>; press Enter on an empty prompt to send the next` when that load applies and the queue holds at least one follow-up.
 
+A `/resume` or `/fork` load of another thread MUST print a separator row, `── <title> ──`, under the key `thread:<threadId>:<n>`. A `/new` load MUST print the row `started <title>` under the same key form. Earlier items of a long thread MUST print their cut note under the key `earlier:<threadId>:<n>`.
+
 When a read from `conn` fails, the TUI MUST enter `disconnected` and show `connection lost: <cause>; restart the TUI, then /resume <thread>`. A later notification MUST NOT leave `disconnected`.
 
 ## Status band
@@ -168,7 +170,7 @@ The client MUST show an empty view until its first row has printed.
 
 A failed `initialize` MUST print one row that starts with `Could not start:`.
 
-Each thread load MUST print its own thread row, also when the same thread loads again.
+A thread load of the followed thread MUST NOT print a thread row. A load of another thread MUST print one.
 
 With a window height of 0, quit and suspend MUST return at once and MAY drop the rows that wait.
 
@@ -332,6 +334,16 @@ Decoding works as follows:
 Settled status labels show `inProgress` as `running`. Other statuses show as sent.
 
 The TUI also applies `dalgona/tool/judged` and `dalgona/turn/judged`. A judged notification MUST print at most one row. Its key MUST be `review:<threadId>:<itemId>` for a tool verdict, and `review:<threadId>:<turnId>` for a turn verdict. The row MUST read `review`, two spaces, the summary, two spaces, and the paths joined with `, `. A `flagged` row MUST use the warning text role. An `error` row MUST use bold failed text. An `uncertain` row MUST use dim text, and it MUST print only at verbosity `high`. A `clean` verdict MUST print no row. These notifications are live only, so `thread/read` history MUST NOT show a review row.
+
+## Title and notifications
+
+The window title MUST read `<product> · <title> · <state word>`. The TUI MUST request focus reports.
+
+A desktop notification MUST be sent only while the window is blurred and the `notifications` setting is true. The TUI MUST send a bell when `TMUX` is set. Otherwise it MUST send OSC 99 when `TERM` is `xterm-kitty`, OSC 9 when `TERM_PROGRAM` is `iTerm.app`, `WezTerm`, or `ghostty`, and a bell.
+
+A turn end MUST notify with `<product>: <word> · <title>`, where the word is `Done`, `Failed`, or `Stopped`.
+
+An approval request for the followed thread MUST notify with `<product>: Waiting for approval · <title>`.
 
 ## Advisor notes
 

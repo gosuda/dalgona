@@ -133,25 +133,27 @@ type inputState struct {
 }
 
 type screenState struct {
-	width        int
-	height       int
-	focused      bool
-	method       ansi.Method
-	themeSetting string
-	theme        theme
-	color        bool
-	profile      colorprofile.Profile
-	dark         bool
-	hasDark      bool
-	motion       bool
-	spin         spinner.Model
-	ticking      bool
-	iconsSetting string
-	statusHide   []string
-	kittyAsked   bool
-	kittyWindow  bool
-	kittyNerd    bool
-	verbosity    string
+	width         int
+	height        int
+	focused       bool
+	method        ansi.Method
+	themeSetting  string
+	theme         theme
+	color         bool
+	profile       colorprofile.Profile
+	dark          bool
+	hasDark       bool
+	motion        bool
+	spin          spinner.Model
+	ticking       bool
+	iconsSetting  string
+	statusHide    []string
+	kittyAsked    bool
+	kittyWindow   bool
+	kittyNerd     bool
+	verbosity     string
+	env           tea.EnvMsg
+	notifications bool
 }
 
 type outState struct {
@@ -226,7 +228,7 @@ func newModel(client caller, opts Options, done <-chan struct{}) model {
 	return model{
 		conn:   connInfo{client: client, opts: opts, done: done, clock: time.Now},
 		input:  inputState{composer: newEditor()},
-		screen: screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII, motion: true, spin: newSpinner(true)},
+		screen: screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII, motion: true, spin: newSpinner(true), notifications: true},
 		out:    outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{})},
 		live:   liveState{deltas: new(deltaDecoder)},
 		thread: threadInfo{state: stateIdle, title: "new thread", modelName: opts.Model, approvalMode: approvalMode, sandbox: sandbox},

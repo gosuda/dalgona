@@ -25,20 +25,22 @@ type approval struct {
 	answer    chan requestAnswer
 }
 
-func (m *model) applyRequest(msg serverRequestMsg) {
+func (m *model) applyRequest(msg serverRequestMsg) tea.Cmd {
 	request, err := decodeApproval(msg.method, msg.params)
 	if err != nil {
 		msg.answer <- requestAnswer{err: err}
 		m.errorf("approval request failed: %v; reconnect and retry the turn", err)
-		return
+		return nil
 	}
 	request.requestID = msg.requestID
 	request.answer = msg.answer
 	m.input.field = textField{}
 	m.approvals = append(m.approvals, request)
-	if m.acceptThread(request.threadID) {
-		m.setState(stateAwaitingApproval)
+	if !m.acceptThread(request.threadID) {
+		return nil
 	}
+	m.setState(stateAwaitingApproval)
+	return m.notify(m.notifyLine("Waiting for approval"))
 }
 
 func (m *model) applyPatchUpdated(params jsontext.Value) error {

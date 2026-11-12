@@ -110,7 +110,7 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 	case notificationMsg:
 		return m.applyNotification(msg)
 	case serverRequestMsg:
-		m.applyRequest(msg)
+		return m.applyRequest(msg)
 	case resultMsg:
 		return m.applyResultMessage(msg)
 	case shellResultMsg:
@@ -364,6 +364,13 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 }
 
 func (m model) View() tea.View {
+	view := m.frame()
+	view.ReportFocus = true
+	view.WindowTitle = m.windowTitle()
+	return view
+}
+
+func (m model) frame() tea.View {
 	var view tea.View
 	switch {
 	case m.out.printing:
