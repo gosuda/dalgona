@@ -371,3 +371,38 @@ func assertRequestMessages(t *testing.T, messages []requestMessage) {
 		t.Fatalf("newest user block = %+v", last)
 	}
 }
+
+func TestEncodePassesXHighAndMaxEffort(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		reasoning string
+		want      string
+	}{
+		{reasoning: "minimal", want: "low"},
+		{reasoning: "low", want: "low"},
+		{reasoning: "medium", want: "medium"},
+		{reasoning: "high", want: "high"},
+		{reasoning: "xhigh", want: "xhigh"},
+		{reasoning: "max", want: "max"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.reasoning, func(t *testing.T) {
+			t.Parallel()
+			var body []byte
+			server := newStreamServer(t, func(w http.ResponseWriter, r *http.Request) {
+				body, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write(successFixture())
+			})
+			provider := New(Config{BaseURL: server.URL, APIKey: testKey})
+			_ = collectStream(t, provider, model.Request{Model: "claude-test", Reasoning: tc.reasoning})
+			var value requestPayload
+			if err := json.Unmarshal(body, &value); err != nil {
+				t.Fatalf("request JSON: %v\n%s", err, body)
+			}
+			if value.OutputConfig.Effort != tc.want {
+				t.Fatalf("reasoning %q sent effort %q, want %q", tc.reasoning, value.OutputConfig.Effort, tc.want)
+			}
+		})
+	}
+}

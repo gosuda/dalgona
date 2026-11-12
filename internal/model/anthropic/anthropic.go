@@ -353,8 +353,8 @@ func anthropicEffort(reasoning string) string {
 	switch reasoning {
 	case "minimal", "low":
 		return "low"
-	case "medium":
-		return "medium"
+	case "medium", "high", "xhigh", "max":
+		return reasoning
 	default:
 		return "high"
 	}
