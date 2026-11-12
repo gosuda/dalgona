@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -327,7 +328,7 @@ func (m *model) applyPreludeResult(msg resultMsg) (tea.Cmd, bool) {
 
 func (m *model) applySuccessResult(msg resultMsg) tea.Cmd {
 	switch msg.op {
-	case "keywords", "models", "threads", "tree", "revertTree", "forkTree", "resumed", "new", "fork":
+	case "keywords", "models", "threads", "tree", "revertTree", "forkTree", "rewindTree", "resumed", "new", "fork":
 		return m.applyDataResult(msg)
 	case "send", "followup":
 		return m.applyTurnAccepted(msg.value)
@@ -337,6 +338,9 @@ func (m *model) applySuccessResult(msg resultMsg) tea.Cmd {
 		return m.applySettings(msg.value)
 	case "settingsSave":
 		return m.applySettingsSaved(msg)
+	case "rewind":
+		m.applyRewind(msg.text)
+		return nil
 	default:
 		return m.applyConfirmation(msg)
 	}
@@ -374,7 +378,7 @@ func (m *model) applyDataResult(msg resultMsg) tea.Cmd {
 		return m.applyModels(msg.value)
 	case "threads":
 		return m.applyThreads(msg.value)
-	case "tree", "revertTree", "forkTree":
+	case "tree", "revertTree", "forkTree", "rewindTree":
 		return m.applyTree(msg.op, msg.value)
 	case "resumed":
 		return m.applyResumed(msg.value)
@@ -482,6 +486,13 @@ func (m *model) applyInterrupt(msg resultMsg) tea.Cmd {
 	return nil
 }
 
+func (m *model) applyRewind(label string) {
+	m.input.composer.SetValue(label)
+	if utf8.RuneCountInString(label) == 80 {
+		m.noticef("Draft holds the first 80 characters of that prompt")
+	}
+}
+
 func (m *model) panelFailed(msg resultMsg) bool {
 	return m.saveFailed(msg) || m.settingsFailed(msg) || m.reviewFailed(msg)
 }
@@ -504,8 +515,16 @@ func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 		m.errorf("keyword highlighting unavailable: %v; prompting is ready, restart to retry", msg.err)
 		return nil
 	}
-	m.errorf("%s failed: %v; retry, %s, or /new", msg.op, msg.err, m.resumeHint())
+	m.errorf("%s failed: %v; retry, %s, or /new", resultLabel(msg.op), msg.err, m.resumeHint())
 	return nil
+}
+
+func resultLabel(op string) string {
+	switch op {
+	case "tree", "revertTree", "rewindTree":
+		return "turn list"
+	}
+	return op
 }
 
 func (m *model) restoreComposer(text string) {

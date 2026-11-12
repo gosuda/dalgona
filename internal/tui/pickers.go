@@ -227,6 +227,10 @@ func (m *model) activateChoice() tea.Cmd {
 		return m.chooseReview(item)
 	}
 	m.closeList()
+	return m.activateClosed(kind, item)
+}
+
+func (m *model) activateClosed(kind string, item listItem) tea.Cmd {
 	switch kind {
 	case "resume":
 		return m.resumeThread(item.id)
@@ -235,6 +239,8 @@ func (m *model) activateChoice() tea.Cmd {
 		return m.call("leaf", "dalgona/thread/leaf/set", params, nil, "")
 	case "revert":
 		m.openRevert(item.id, item.label)
+	case "rewind":
+		m.openRewind(item.id, item.label)
 	case "fork":
 		params := rpc.ThreadForkParams{ThreadID: m.thread.id, LastTurnID: item.id}
 		return m.call("fork", "thread/fork", params, new(rpc.ThreadForkResponse), "")
@@ -326,13 +332,7 @@ func (m *model) applyTree(op string, value any) tea.Cmd {
 	if !ok {
 		return m.unexpectedResult("thread tree")
 	}
-	kind, title := "tree", "choose the active branch"
-	switch op {
-	case "revertTree":
-		kind, title = "revert", "revert before a turn"
-	case "forkTree":
-		kind, title = "fork", "fork at a turn"
-	}
+	kind, title := treeKind(op)
 	items := make([]listItem, 0, len(response.Turns))
 	for _, turn := range response.Turns {
 		if op != "tree" && !turn.Active {
@@ -340,7 +340,7 @@ func (m *model) applyTree(op string, value any) tea.Cmd {
 		}
 		items = append(items, listItem{id: sanitizeText(turn.TurnID), label: sanitizeText(turn.Preview), detail: sanitizeText(turn.TurnID), active: turn.Active})
 	}
-	if op == "forkTree" {
+	if op == "forkTree" || op == "rewindTree" {
 		slices.Reverse(items)
 	}
 	if len(items) == 0 {
@@ -349,6 +349,22 @@ func (m *model) applyTree(op string, value any) tea.Cmd {
 	}
 	m.openList(&listPanel{kind: kind, title: title, items: items, efforts: map[string]effortPick{}})
 	return nil
+}
+
+func treeKind(op string) (kind, title string) {
+	switch op {
+	case "revertTree":
+		return "revert", "revert before a turn"
+	case "forkTree":
+		return "fork", "fork at a turn"
+	case "rewindTree":
+		return "rewind", "rewind to before a turn"
+	}
+	return "tree", "choose the active branch"
+}
+
+func (m *model) rewindCommand() tea.Cmd {
+	return m.treeCommand("rewindTree")
 }
 
 func newModelList(models []rpc.Model, activeModel, activeEffort string) *listPanel {

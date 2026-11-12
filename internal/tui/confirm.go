@@ -8,10 +8,14 @@ import (
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 
-const revertNotice = "Later turns leave the active path. Files changed by later turns are not reverted."
+const (
+	revertNotice = "Later turns leave the active path. Files changed by later turns are not reverted."
+	rewindNotice = "The prompt returns to the editor. Files changed by later turns are not reverted."
+)
 
 const (
 	confirmRevert       = "revert"
+	confirmRewind       = "rewind"
 	confirmNew          = "new"
 	confirmCompact      = "compact"
 	confirmAdvisorReset = "advisorReset"
@@ -35,6 +39,10 @@ func (m *model) openRevert(turnID, preview string) {
 	m.openConfirm(confirmation{kind: confirmRevert, id: turnID, title: "Revert to before this turn?", preview: preview, action: "[enter] revert  [esc] keep"})
 }
 
+func (m *model) openRewind(turnID, preview string) {
+	m.openConfirm(confirmation{kind: confirmRewind, id: turnID, title: "Rewind to before this turn?", preview: preview, action: "[enter] rewind  [esc] keep"})
+}
+
 func (m *model) confirmPanel() panelView {
 	c := m.confirm
 	return panelView{
@@ -51,16 +59,21 @@ func (m *model) confirmPanel() panelView {
 
 func (m *model) confirmBody(c *confirmation) []string {
 	width := terminalWidth(m.screen.width)
-	if c.kind != confirmRevert {
+	if c.kind != confirmRevert && c.kind != confirmRewind {
 		body := make([]string, 0, len(c.lines))
 		for _, line := range c.lines {
 			body = append(body, m.screen.fit(line, width))
 		}
 		return body
 	}
-	flat := strings.Join(strings.Fields(c.preview), " ")
-	body := []string{"`" + m.screen.fit(flat, width-2) + "`"}
-	rest := m.screen.wrap(revertNotice, width)
+	var body []string
+	notice := rewindNotice
+	if c.kind == confirmRevert {
+		flat := strings.Join(strings.Fields(c.preview), " ")
+		body = append(body, "`"+m.screen.fit(flat, width-2)+"`")
+		notice = revertNotice
+	}
+	rest := m.screen.wrap(notice, width)
 	if len(rest) > 3 {
 		rest = append(rest[:2], m.screen.fit(strings.Join(rest[2:], " "), width))
 	}
@@ -84,6 +97,9 @@ func (m *model) confirmed(c confirmation) tea.Cmd {
 	case confirmRevert:
 		params := rpc.ThreadRevertParams{ThreadID: m.thread.id, BeforeTurnID: c.id}
 		return m.call("revert", "thread/revert", params, nil, "")
+	case confirmRewind:
+		params := rpc.ThreadRevertParams{ThreadID: m.thread.id, BeforeTurnID: c.id}
+		return m.call("rewind", "thread/revert", params, nil, c.preview)
 	case confirmNew:
 		return m.newThread()
 	case confirmCompact:

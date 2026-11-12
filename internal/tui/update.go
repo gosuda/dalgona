@@ -267,6 +267,9 @@ func (m *model) recallNewer() bool {
 
 func (m *model) escape() tea.Cmd {
 	if !m.turnLive() {
+		if m.thread.state == stateIdle {
+			return m.idleEscape()
+		}
 		return m.interrupt()
 	}
 	if _, waiting := m.retryRemaining(); waiting || m.hint.pending == "interrupt" {
@@ -274,6 +277,20 @@ func (m *model) escape() tea.Cmd {
 		return m.interrupt()
 	}
 	return m.setHint("Esc again to interrupt", "interrupt")
+}
+
+func (m *model) idleEscape() tea.Cmd {
+	if m.input.composer.Value() != "" {
+		return m.interrupt()
+	}
+	if m.thread.id == "" {
+		return nil
+	}
+	if m.hint.pending == "rewind" {
+		m.clearHint()
+		return m.rewindCommand()
+	}
+	return m.setHint("Esc again to rewind", "rewind")
 }
 
 func (m *model) clearGuard() {
