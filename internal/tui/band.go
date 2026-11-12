@@ -258,11 +258,15 @@ func (m *model) rememberLevels(models []rpc.Model) {
 	if m.thread.levels == nil {
 		m.thread.levels = make(map[string][]string)
 	}
+	if m.thread.inputModalities == nil {
+		m.thread.inputModalities = make(map[string][]string)
+	}
 	for _, item := range models {
 		levels := make([]string, 0, len(item.SupportedReasoningEfforts))
 		for _, option := range item.SupportedReasoningEfforts {
 			levels = append(levels, option.ReasoningEffort)
 		}
 		m.thread.levels[item.ID] = levels
+		m.thread.inputModalities[item.ID] = item.InputModalities
 	}
 }

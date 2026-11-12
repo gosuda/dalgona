@@ -174,50 +174,72 @@ func sandboxPolicy(mode string) string {
 func (m *model) submitPrompt() tea.Cmd {
 	composer := m.input.composer
 	text := strings.TrimSpace(composer.expand(composer.Value()))
-	if text == "" {
+	images := composer.images()
+	if text == "" && len(images) == 0 {
 		return m.startQueuedFollowup()
 	}
-	if raw := strings.TrimSpace(composer.Value()); strings.HasPrefix(raw, "/") {
-		name, arg, kind := parseSlash(raw)
-		switch kind {
-		case slashCommand:
-			m.input.composer.SetValue("")
-			return m.executeSlash(name, composer.expand(arg))
-		case slashUnknown:
-			m.noticef("unknown command /%s; start with // to send it as a prompt", name)
-			return nil
-		case slashPrompt:
-			text = composer.expand(arg)
-		}
+	text, command, done := m.slashSubmit(composer, text)
+	if done {
+		return command
 	}
 	m.input.composer.SetValue("")
 	if m.thread.id == "" {
 		m.noticef("thread is not ready; wait for startup or use /new to retry")
-		m.input.composer.SetValue(text)
+		m.input.composer = composer
 		return nil
 	}
 	if m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
-		return m.sendSteer(text)
+		return m.sendSteer(text, images)
 	}
-	return m.sendPrompt(text)
+	return m.sendPrompt(text, images)
 }
 
-func (m *model) sendPrompt(text string) tea.Cmd {
+func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool) {
+	raw := strings.TrimSpace(composer.Value())
+	if !strings.HasPrefix(raw, "/") {
+		return text, nil, false
+	}
+	name, arg, kind := parseSlash(raw)
+	switch kind {
+	case slashCommand:
+		m.input.composer.SetValue("")
+		return "", m.executeSlash(name, composer.expand(arg)), true
+	case slashUnknown:
+		m.noticef("unknown command /%s; start with // to send it as a prompt", name)
+		return "", nil, true
+	case slashPrompt:
+		return composer.expand(arg), nil, false
+	}
+	return text, nil, false
+}
+
+func (m *model) sendPrompt(text string, images []chip) tea.Cmd {
 	m.input.history.add(text, "")
 	m.setState(stateRunning)
-	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(text)}
+	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: promptInput(text, images)}
 	result := new(rpc.TurnStartResponse)
 	return m.call("send", "turn/start", params, result, text)
 }
 
-func (m *model) sendSteer(text string) tea.Cmd {
+func (m *model) sendSteer(text string, images []chip) tea.Cmd {
 	m.input.history.add(text, m.thread.turnID)
-	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: textInput(text)}
+	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: promptInput(text, images)}
 	return m.call("steer", "turn/steer", params, new(rpc.TurnSteerResponse), text)
 }
 
 func textInput(text string) []rpc.InputItem {
 	return []rpc.InputItem{{Type: "text", Text: text}}
+}
+
+func promptInput(text string, images []chip) []rpc.InputItem {
+	var items []rpc.InputItem
+	if text != "" {
+		items = append(items, rpc.InputItem{Type: "text", Text: text})
+	}
+	for _, ch := range images {
+		items = append(items, rpc.InputItem{Type: "image", URL: ch.image})
+	}
+	return items
 }
 
 func (m *model) queueFollowup() tea.Cmd {

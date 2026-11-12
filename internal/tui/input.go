@@ -29,6 +29,9 @@ type chip struct {
 	label string
 	text  string
 	shell bool
+	image string
+	size  string
+	bytes int
 }
 
 type inputMode int
@@ -568,10 +571,11 @@ func (c *editor) prune() {
 		}
 		renamed[atom] = chipAtom(len(kept))
 		label := ch.label
-		if !ch.shell {
-			label = chipLabel(len(kept)+1, ch.text)
+		if ch.image != "" || !ch.shell {
+			label = ch.tag(len(kept) + 1)
 		}
-		kept = append(kept, chip{label: label, text: ch.text, shell: ch.shell})
+		ch.label = label
+		kept = append(kept, ch)
 	}
 	for i, r := range c.text {
 		if next, ok := renamed[r]; ok {

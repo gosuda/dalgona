@@ -21,7 +21,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		command = m.updateKey(msg)
-	case notificationMsg, serverRequestMsg, resultMsg, disconnectedMsg, debounceMsg, searchResultMsg, shellResultMsg:
+	case notificationMsg, serverRequestMsg, resultMsg, disconnectedMsg, debounceMsg, searchResultMsg, shellResultMsg, imageMsg:
 		command = m.updateAsync(msg)
 	case spinner.TickMsg:
 		command = m.updateTick(msg)
@@ -103,18 +103,24 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 	case serverRequestMsg:
 		m.applyRequest(msg)
 	case resultMsg:
-		if msg.op == "keywordMatch" {
-			m.applyKeywordMatch(msg)
-			return nil
-		}
-		return m.applyResult(msg)
+		return m.applyResultMessage(msg)
 	case shellResultMsg:
 		m.applyShell(msg)
 	case disconnectedMsg:
 		m.setState(stateDisconnected)
 		m.errorf("connection lost: %v; restart the TUI, then %s", msg.err, m.resumeHint())
+	case imageMsg:
+		m.applyImage(msg)
 	}
 	return nil
+}
+
+func (m *model) applyResultMessage(msg resultMsg) tea.Cmd {
+	if msg.op == "keywordMatch" {
+		m.applyKeywordMatch(msg)
+		return nil
+	}
+	return m.applyResult(msg)
 }
 
 func (m *model) overlayKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
@@ -180,6 +186,8 @@ func (m *model) promptKey(msg tea.KeyPressMsg, key string) tea.Cmd {
 		return m.submitPrompt()
 	case "alt+enter":
 		return m.queueFollowup()
+	case "ctrl+v":
+		return m.clipboardImage()
 	case "esc":
 		return m.escape()
 	default:
@@ -300,9 +308,13 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 		m.noticef("Paste is %d bytes, over the 1 MiB limit; save it to a file and mention it with @path", len(paste.Content))
 		return nil
 	}
+	var imageCmd tea.Cmd
+	if paste, ok := msg.(tea.PasteMsg); ok && m.textMode() == inputPrompt {
+		imageCmd = m.imagePasteCmd(sanitizeText(paste.Content))
+	}
 	updated, command := m.input.composer.Update(&m.screen, msg)
 	m.input.composer = updated
-	return tea.Batch(command, m.syncPopup(typedText(msg)))
+	return tea.Batch(command, m.syncPopup(typedText(msg)), imageCmd)
 }
 
 func (m model) View() tea.View {

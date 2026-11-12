@@ -208,6 +208,14 @@ Backspace and Delete MUST remove a whole chip.
 Sending MUST replace each chip with its full pasted text, in order.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB MUST be refused with a notice that names the limit.
+Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
+A pasted path to a PNG, JPEG, or GIF file MUST become an image chip labelled `[Image #n WxH]`.
+A pasted path to a WebP file MUST be refused with the notice `unsupported image type image/webp; send PNG, JPEG or GIF`.
+An image chip MUST take one composer row.
+A prompt MUST hold at most 10 images and at most 10485760 bytes of image data.
+An image over 5242880 bytes MUST be refused with a notice that names the file and its size.
+A model without image input MUST refuse an image paste with the notice `this model does not accept images`.
+Sending MUST send each image chip as an image input item after the text.
 
 The composer MUST show a command palette when the caret is in a first token that starts with `/`, with no panel or review open.
 The palette MUST list at most 8 matching commands and MUST NOT open for `//`.

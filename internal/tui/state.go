@@ -88,20 +88,21 @@ type connInfo struct {
 }
 
 type threadInfo struct {
-	id             string
-	turnID         string
-	state          string
-	seq            uint64
-	completedTurns map[string]struct{}
-	title          string
-	modelName      string
-	approvalMode   string
-	sandbox        string
-	turnStartedAt  time.Time
-	lastTurn       time.Duration
-	effort         string
-	usage          rpc.ThreadTokenUsage
-	levels         map[string][]string
+	id              string
+	turnID          string
+	state           string
+	seq             uint64
+	completedTurns  map[string]struct{}
+	title           string
+	modelName       string
+	approvalMode    string
+	sandbox         string
+	turnStartedAt   time.Time
+	lastTurn        time.Duration
+	effort          string
+	usage           rpc.ThreadTokenUsage
+	levels          map[string][]string
+	inputModalities map[string][]string
 }
 
 type liveState struct {
