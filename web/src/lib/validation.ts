@@ -3,6 +3,7 @@ import type {
 	AdvisorStatus,
 	AppNotification,
 	ApprovalRequest,
+	CommandExecResult,
 	EditReview,
 	FileChange,
 	FileMatch,
@@ -742,7 +743,17 @@ export function parseInitializeResponse(value: unknown): InitializeInfo {
 	const body = object(value, "initialize");
 	return {
 		userAgent: requiredString(body, "userAgent", "initialize"),
+		platformFamily: requiredString(body, "platformFamily", "initialize"),
 		platformOs: requiredString(body, "platformOs", "initialize"),
+	};
+}
+
+export function parseCommandExecResponse(value: unknown): CommandExecResult {
+	const body = object(value, "command/exec");
+	return {
+		exitCode: requiredNumber(body, "exitCode", "command/exec"),
+		stdout: requiredString(body, "stdout", "command/exec"),
+		stderr: requiredString(body, "stderr", "command/exec"),
 	};
 }
 

@@ -79,7 +79,11 @@ class FakeRpc implements RpcPort {
 }
 
 const baseAnswers: Record<string, Answer> = {
-	initialize: () => ({ userAgent: "dalgona/0.1.0", platformOs: "linux" }),
+	initialize: () => ({
+		userAgent: "dalgona/0.1.0",
+		platformFamily: "unix",
+		platformOs: "linux",
+	}),
 	"thread/list": () => ({ data: [], nextCursor: null }),
 	"model/list": () => ({ data: [] }),
 	"config/read": () => ({ config: { model: "gpt-test" }, origins: {} }),

@@ -36,6 +36,8 @@ function promptField(): HTMLElement | undefined {
 						aria-expanded={shown[chip.id] ? "true" : "false"}
 						onclick={() => toggle(chip.id)}
 					>{shown[chip.id] ? "Hide" : "Show"}</button>
+				{:else if chip.kind === "shell"}
+					<span class="label">[Shell #{chip.n} exit {chip.exitCode}, {chip.lines} {chip.lines === 1 ? "line" : "lines"}]</span>
 				{:else}
 					<span class="label">Image · {chip.name} · {sizeLabel(chip.size)}</span>
 				{/if}

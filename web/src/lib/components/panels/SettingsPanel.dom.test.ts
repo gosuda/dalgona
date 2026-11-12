@@ -80,7 +80,11 @@ function savedSettings(
 	reads: Record<string, JsonValue> = saved,
 ): Record<string, Answer> {
 	return {
-		initialize: () => ({ userAgent: "dalgona/0.1.0", platformOs: "linux" }),
+		initialize: () => ({
+			userAgent: "dalgona/0.1.0",
+			platformFamily: "linux",
+			platformOs: "linux",
+		}),
 		"dalgona/settings/read": () => ({
 			settings: Object.entries(reads).map(([key, value]) => ({ key, value })),
 		}),

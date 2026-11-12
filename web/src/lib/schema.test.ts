@@ -4,6 +4,7 @@ import type { JsonValue } from "./types.js";
 import {
 	parseAdvisorStatusResponse,
 	parseApprovalRequest,
+	parseCommandExecResponse,
 	parseConfigReadResponse,
 	parseFuzzyFileSearchResponse,
 	parseKeywordsResponse,
@@ -329,6 +330,11 @@ const codexCases: readonly CodexCase[] = [
 		},
 		parseFuzzyFileSearchResponse,
 	),
+	response(
+		"CommandExecResponse",
+		{ exitCode: 0, stderr: "", stdout: "hi\n" },
+		parseCommandExecResponse,
+	),
 ];
 
 const helloThread = {
@@ -527,6 +533,7 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 		sandbox: "read-only",
 		effort: null,
 	},
+	CommandExecResponse: { exitCode: 0, stderr: "", stdout: "hi\n" },
 };
 
 describe("codex schema conformance", () => {

@@ -372,7 +372,14 @@ export interface TurnSteerResult {
 
 export interface InitializeInfo {
 	readonly userAgent: string;
+	readonly platformFamily: string;
 	readonly platformOs: string;
+}
+
+export interface CommandExecResult {
+	readonly exitCode: number;
+	readonly stdout: string;
+	readonly stderr: string;
 }
 
 export interface KeywordDefinition {

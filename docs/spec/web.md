@@ -288,6 +288,20 @@ Enter MUST send the typed text, then the pasted texts, then the images, as one m
 An empty typed text MUST NOT add a text item to the message.
 A message whose input array exceeds 15 MiB of JSON MUST stay in the composer with an error, and MUST NOT be sent. The limit is measured on the input array, not on the whole turn/start request.
 
+A message that starts with `!` MUST be a shell command, and Enter MUST run it in the thread's working directory.
+The field MUST be labelled `Shell command` in shell mode.
+The help line MUST read `Enter runs the command in <cwd>. It is not sent to the agent.`
+The client MUST call `command/exec` with `sh -c`, or with `cmd /C` on Windows.
+The client MUST time out a shell command after 120 seconds and keep at most 64 KiB of output.
+A shell command MUST commit one row to the transcript and MUST NOT be journaled.
+The output MUST become a chip labelled `[Shell #n exit N, L lines]`. The next message MUST send the chip's text as one more text block.
+An empty shell line MUST NOT run and MUST show `Enter a command after !.`
+A shell command whose call fails MUST show a failed row and MUST NOT make a chip.
+A shell command with no open thread, or in a thread with no working directory, MUST show `Open a thread before running a shell command` and MUST keep the draft.
+A shell command that finishes after the user opens another thread MUST NOT add its row or its chip to that thread.
+Alt+Enter MUST NOT queue a message that starts with `!`. It MUST show `Shell commands run with Enter`.
+The output fence MUST be longer than any run of backticks in the output, and MUST be at least three backticks.
+
 | Key | Caret and selection | Effect |
 |---|---|---|
 | ArrowUp | At the start, nothing selected | Recalls the previous message you sent. |

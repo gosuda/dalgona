@@ -11,6 +11,7 @@ import {
 	messageBytes,
 	PASTE_CHIP_LINES,
 	readDataUrl,
+	type ShellRun,
 } from "#lib/attachments.ts";
 import {
 	type PanelKind,
@@ -60,6 +61,8 @@ interface Props {
 	retrying?: boolean;
 	onOpenPanel?: (kind: PanelKind) => void;
 	acceptsImages?: boolean;
+	cwd?: string;
+	onShell?: (command: string) => Promise<ShellRun | null> | null;
 }
 
 let {
@@ -78,6 +81,8 @@ let {
 	retrying = false,
 	onOpenPanel,
 	acceptsImages = true,
+	cwd = "",
+	onShell,
 }: Props = $props();
 let text = $state("");
 let error = $state("");
@@ -361,7 +366,27 @@ function sendDraft(): void {
 	chips = [];
 }
 
+function runShell(command: string): void {
+	if (command === "") {
+		error = "Enter a command after !.";
+		return;
+	}
+	error = "";
+	const run = onShell?.(command);
+	if (run === undefined || run === null) return;
+	clearDraft();
+	void run.then((finished) => {
+		if (finished !== null) {
+			chips = [...chips, { kind: "shell", id: ++nextChipId, ...finished }];
+		}
+	});
+}
+
 function submitPrimary(): void {
+	if (parsed.kind === "shell") {
+		void runShell(parsed.command);
+		return;
+	}
 	if (commandQuery !== null) {
 		submitCommand(commandQuery);
 		return;
@@ -377,6 +402,10 @@ function submitPrimary(): void {
 }
 
 function queueFollowup(): void {
+	if (parsed.kind === "shell") {
+		error = "Shell commands run with Enter";
+		return;
+	}
 	const value = validText();
 	if (!value) return;
 	onFollowup(value);
@@ -460,7 +489,7 @@ function onKeydown(event: KeyboardEvent): void {
 		}}
 	>
 		<FollowupQueue items={followups} onEdit={editFollowup} onRemove={onRemoveFollowup} />
-		<label for="prompt">Message</label>
+		<label for="prompt">{parsed.kind === "shell" ? "Shell command" : "Message"}</label>
 		<textarea
 			bind:this={textarea}
 			id="prompt"
@@ -507,6 +536,8 @@ function onKeydown(event: KeyboardEvent): void {
 			<p id="composer-help">
 				{#if interruptArmed}
 					Esc again to interrupt
+				{:else if parsed.kind === "shell"}
+					Enter runs the command in {cwd}. It is not sent to the agent.
 				{:else}
 					Enter to {running ? "steer" : "send"} · Shift+Enter for a new line{running ? " · Alt+Enter to queue" : ""}
 				{/if}

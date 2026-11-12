@@ -553,3 +553,73 @@ function waitForRead(reader: FileReader): Promise<void> {
 	reader.addEventListener("loadend", () => resolve());
 	return promise;
 }
+
+describe("shell mode", () => {
+	afterEach(cleanup);
+
+	test("a leading ! labels the field and shows the shell help line", async () => {
+		render(Composer, { props: { ...baseProps(), cwd: "/work" } });
+		const field = screen.getByRole("textbox", { name: "Message" });
+		await fireEvent.input(field, { target: { value: "!ls" } });
+		expect(screen.getByRole("textbox", { name: "Shell command" })).toBe(field);
+		expect(document.getElementById("composer-help")?.textContent?.trim()).toBe(
+			"Enter runs the command in /work. It is not sent to the agent.",
+		);
+	});
+
+	test("Enter runs the command and shows its output as a chip", async () => {
+		const onShell = vi.fn(() =>
+			Promise.resolve({
+				n: 1,
+				exitCode: 0,
+				lines: 1,
+				text: "Output of `ls` (exit 0):\n```\na.txt\n```",
+			}),
+		);
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onShell, onSend } });
+		const field = screen.getByRole("textbox", { name: "Message" });
+		await fireEvent.input(field, { target: { value: "!ls" } });
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(onShell).toHaveBeenCalledWith("ls");
+		expect(onSend).not.toHaveBeenCalled();
+		await waitFor(() => {
+			expect(screen.getByText("[Shell #1 exit 0, 1 line]")).toBeTruthy();
+		});
+	});
+
+	test("a shell line the session cannot run keeps the draft", async () => {
+		const onShell = vi.fn(() => null);
+		render(Composer, { props: { ...baseProps(), onShell } });
+		const field = screen.getByRole("textbox", { name: "Message" });
+		await fireEvent.input(field, { target: { value: "!ls" } });
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(onShell).toHaveBeenCalledWith("ls");
+		expect((field as HTMLTextAreaElement).value).toBe("!ls");
+	});
+
+	test("Alt+Enter on a shell line queues nothing and says shell commands run with Enter", async () => {
+		const onFollowup = vi.fn();
+		render(Composer, { props: { ...baseProps(), running: true, onFollowup } });
+		const field = screen.getByRole("textbox");
+		await fireEvent.input(field, { target: { value: "!ls" } });
+		await fireEvent.keyDown(field, { key: "Enter", altKey: true });
+		expect(onFollowup).not.toHaveBeenCalled();
+		expect(document.querySelector(".error")?.textContent).toBe(
+			"Shell commands run with Enter",
+		);
+		expect((field as HTMLTextAreaElement).value).toBe("!ls");
+	});
+
+	test("an empty shell line is refused and runs nothing", async () => {
+		const onShell = vi.fn();
+		render(Composer, { props: { ...baseProps(), onShell } });
+		const field = screen.getByRole("textbox", { name: "Message" });
+		await fireEvent.input(field, { target: { value: "!" } });
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(onShell).not.toHaveBeenCalled();
+		expect(document.querySelector(".error")?.textContent).toBe(
+			"Enter a command after !.",
+		);
+	});
+});

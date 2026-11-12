@@ -231,6 +231,8 @@ function onWindowKeydown(event: KeyboardEvent): void {
 				retrying={session.retryRemainingMs !== null}
 				acceptsImages={session.modelAcceptsImages}
 				onOpenPanel={(kind) => session.openPanel(kind)}
+				cwd={activeThread?.cwd ?? ""}
+				onShell={(command) => session.runShell(command)}
 			/>
 		</div>
 	</main>

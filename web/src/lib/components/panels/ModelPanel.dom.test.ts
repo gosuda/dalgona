@@ -101,7 +101,11 @@ async function openModels(setup: Setup): Promise<{
 	const ports: RecordingPort[] = [];
 	const dial = (_url: string, handlers: RpcHandlers): RpcPort => {
 		const port = new RecordingPort(handlers, {
-			initialize: () => ({ userAgent: "dalgona/0.1.0", platformOs: "linux" }),
+			initialize: () => ({
+				userAgent: "dalgona/0.1.0",
+				platformFamily: "unix",
+				platformOs: "linux",
+			}),
 			"model/list": () => setup.modelList,
 			"config/read": () => ({
 				config: { ...saved },

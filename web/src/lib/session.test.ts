@@ -37,6 +37,7 @@ function thread(id: string, turns: JsonValue): JsonValue {
 		updatedAt: 1,
 		status: { type: "idle" },
 		turns,
+		cwd: "/work",
 	};
 }
 
@@ -61,7 +62,11 @@ function resumeAnswer(runningThread: string): Answer {
 
 function answers(runningThread: string): Record<string, Answer> {
 	return {
-		initialize: () => ({ userAgent: "dalgona/0.1.0", platformOs: "linux" }),
+		initialize: () => ({
+			userAgent: "dalgona/0.1.0",
+			platformFamily: "linux",
+			platformOs: "linux",
+		}),
 		"thread/list": () => ({
 			data: [thread("t1", []), thread("t2", [])],
 			nextCursor: null,
@@ -769,6 +774,18 @@ describe("file search", () => {
 	});
 });
 
+function holdCommand(port: FakePort, gate: Promise<void>): void {
+	const call = port.call.bind(port);
+	port.call = <T>(
+		method: string,
+		params: JsonValue,
+		parse: (value: unknown) => T,
+	): Promise<T> =>
+		method === "command/exec"
+			? gate.then(() => call(method, params, parse))
+			: call(method, params, parse);
+}
+
 describe("recall history", () => {
 	beforeEach(() => {
 		vi.stubGlobal("history", { replaceState: vi.fn() });
@@ -802,6 +819,211 @@ describe("recall history", () => {
 			],
 		});
 		expect(session.history).toEqual(["first"]);
+		session.stop();
+	});
+});
+
+describe("shell mode", () => {
+	beforeEach(() => {
+		vi.stubGlobal("history", { replaceState: vi.fn() });
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	function withCwd(): Answer {
+		return () => ({
+			data: [
+				{
+					id: "t1",
+					updatedAt: 1,
+					status: { type: "idle" },
+					turns: [],
+					cwd: "/work",
+				},
+			],
+			nextCursor: null,
+		});
+	}
+
+	function withCwdOnBoth(): Answer {
+		return () => ({
+			data: [
+				{
+					id: "t1",
+					updatedAt: 1,
+					status: { type: "idle" },
+					turns: [],
+					cwd: "/work",
+				},
+				{
+					id: "t2",
+					updatedAt: 2,
+					status: { type: "idle" },
+					turns: [],
+					cwd: "/work",
+				},
+			],
+			nextCursor: null,
+		});
+	}
+
+	test("shell mode calls command/exec with the platform argv and shows the result", async () => {
+		const sent: JsonValue[] = [];
+		const { dial, ports } = fakeDial("none", {
+			"thread/list": withCwd(),
+			"command/exec": (params) => {
+				sent.push(params);
+				return { exitCode: 0, stdout: "hi\n", stderr: "" };
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+
+		const run = await session.runShell("echo hi");
+
+		expect(sent).toEqual([
+			{
+				command: ["sh", "-c", "echo hi"],
+				cwd: "/work",
+				timeoutMs: 120000,
+				outputBytesCap: 65536,
+			},
+		]);
+		expect(run).toEqual({
+			n: 1,
+			exitCode: 0,
+			lines: 1,
+			text: "Output of `echo hi` (exit 0):\n```\nhi\n```",
+		});
+		expect(ports[0]?.calls).not.toContain("turn/start");
+		expect(session.transcript.items.at(-1)).toMatchObject({
+			kind: "commandExecution",
+			command: "echo hi",
+			output: "hi",
+			status: "completed",
+			exitCode: 0,
+		});
+		session.stop();
+	});
+
+	test("shell mode runs cmd on windows", async () => {
+		const sent: JsonValue[] = [];
+		const { dial } = fakeDial("none", {
+			initialize: () => ({
+				userAgent: "dalgona/0.1.0",
+				platformFamily: "windows",
+				platformOs: "windows",
+			}),
+			"thread/list": withCwd(),
+			"command/exec": (params) => {
+				sent.push(params);
+				return { exitCode: 0, stdout: "", stderr: "" };
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+
+		await session.runShell("dir");
+
+		expect(sent[0]).toMatchObject({ command: ["cmd", "/C", "dir"] });
+		session.stop();
+	});
+
+	test("a command that finishes after another thread opened shows no row or chip there", async () => {
+		const { dial, ports } = fakeDial("none", {
+			"thread/list": withCwdOnBoth(),
+			"command/exec": () => ({ exitCode: 0, stdout: "late\n", stderr: "" }),
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port");
+		let release = (): void => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		holdCommand(port, gate);
+
+		const run = session.runShell("ls");
+		if (run === null) throw new Error("the command did not start");
+		await session.selectThread("t2");
+		release();
+
+		expect(await run).toBeNull();
+		expect(session.transcript.threadId).toBe("t2");
+		expect(
+			session.transcript.items.some((item) => item.kind === "commandExecution"),
+		).toBe(false);
+		session.stop();
+	});
+
+	test("a shell command with no open thread shows a notice, runs nothing and keeps no chip", () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial);
+
+		expect(session.runShell("ls")).toBeNull();
+		expect(session.notices.map((notice) => notice.text)).toContain(
+			"Open a thread before running a shell command",
+		);
+		expect(ports).toHaveLength(0);
+	});
+
+	test("a shell command in a thread with no working directory shows the same notice", async () => {
+		const bare = {
+			id: "t1",
+			updatedAt: 1,
+			status: { type: "idle" },
+			turns: [],
+		};
+		const { dial, ports } = fakeDial("none", {
+			"thread/list": () => ({ data: [bare], nextCursor: null }),
+			"thread/read": () => ({ thread: bare }),
+			"thread/resume": () => ({
+				thread: bare,
+				model: "gpt-test",
+				approvalsReviewer: "user",
+				modelProvider: "openai",
+				approvalPolicy: "on-request",
+				sandbox: "workspace-write",
+				cwd: "",
+			}),
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+
+		expect(session.runShell("ls")).toBeNull();
+		expect(session.notices.map((notice) => notice.text)).toContain(
+			"Open a thread before running a shell command",
+		);
+		expect(ports[0]?.calls).not.toContain("command/exec");
+		session.stop();
+	});
+
+	test("a shell command whose call fails shows a failed row and makes no chip", async () => {
+		const { dial } = fakeDial("none", {
+			"thread/list": withCwd(),
+			"command/exec": () => {
+				throw new Error("sandbox refused");
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+
+		expect(await session.runShell("rm x")).toBeNull();
+		expect(session.transcript.items.at(-1)).toMatchObject({
+			kind: "commandExecution",
+			command: "rm x",
+			output: "sandbox refused",
+			status: "failed",
+			exitCode: null,
+		});
 		session.stop();
 	});
 });

@@ -26,7 +26,19 @@ export interface ImageChip {
 	readonly dataUrl: string;
 }
 
-export type Chip = PasteChip | ImageChip;
+export interface ShellRun {
+	readonly n: number;
+	readonly exitCode: number;
+	readonly lines: number;
+	readonly text: string;
+}
+
+export interface ShellChip extends ShellRun {
+	readonly kind: "shell";
+	readonly id: number;
+}
+
+export type Chip = PasteChip | ImageChip | ShellChip;
 
 export interface Attachments {
 	readonly texts: readonly string[];
@@ -39,7 +51,7 @@ export function attachmentsOf(chips: readonly Chip[]): Attachments {
 	const texts: string[] = [];
 	const images: ImageChip[] = [];
 	for (const chip of chips) {
-		if (chip.kind === "paste") texts.push(chip.text);
+		if (chip.kind === "paste" || chip.kind === "shell") texts.push(chip.text);
 		else images.push(chip);
 	}
 	return { texts, images };
@@ -73,4 +85,28 @@ export function readDataUrl(file: Blob): Promise<string> {
 	);
 	reader.readAsDataURL(file);
 	return promise;
+}
+
+export function shellOutput(
+	stdout: string,
+	stderr: string,
+): { readonly output: string; readonly lines: number } {
+	const output = [stdout, stderr]
+		.map((part) => part.replace(/\n+$/, ""))
+		.filter((part) => part !== "")
+		.join("\n");
+	return { output, lines: output === "" ? 0 : output.split("\n").length };
+}
+
+export function shellText(
+	command: string,
+	exitCode: number,
+	output: string,
+): string {
+	const longest = Array.from(output.matchAll(/`+/g)).reduce(
+		(most, run) => Math.max(most, run[0].length),
+		0,
+	);
+	const fence = "`".repeat(Math.max(3, longest + 1));
+	return `Output of \`${command}\` (exit ${exitCode}):\n${fence}\n${output}\n${fence}`;
 }

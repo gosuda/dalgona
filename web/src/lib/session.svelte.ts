@@ -1,4 +1,11 @@
-import { type Attachments, messageInput, NO_ATTACHMENTS } from "./attachments";
+import {
+	type Attachments,
+	messageInput,
+	NO_ATTACHMENTS,
+	type ShellRun,
+	shellOutput,
+	shellText,
+} from "./attachments";
 import {
 	type PanelKind,
 	panelsRefusedWhileRunning,
@@ -70,6 +77,7 @@ import type {
 import type { SettingValue } from "./validation";
 import {
 	parseAdvisorStatusResponse,
+	parseCommandExecResponse,
 	parseConfigReadResponse,
 	parseFuzzyFileSearchResponse,
 	parseInitializeResponse,
@@ -116,6 +124,15 @@ function applyThemeToPage(setting: ThemeSetting): void {
 }
 
 const MAX_NOTICES = 5;
+
+const SHELL_TIMEOUT_MS = 120000;
+const SHELL_OUTPUT_BYTES = 65536;
+
+function shellArgv(command: string, platformFamily: string | null): string[] {
+	return platformFamily === "windows"
+		? ["cmd", "/C", command]
+		: ["sh", "-c", command];
+}
 
 type Decision = "accept" | "acceptForSession" | "decline" | "cancel";
 
@@ -175,6 +192,8 @@ export class Session {
 		search: "",
 	};
 	private client: RpcPort | undefined;
+	private platformFamily: string | null = null;
+	private shellCount = 0;
 	private connectionGeneration = 0;
 	private selectionGeneration = 0;
 	private openCwd: string | null = null;
@@ -613,6 +632,7 @@ export class Session {
 				parseInitializeResponse,
 			);
 			this.userAgent = info.userAgent;
+			this.platformFamily = info.platformFamily;
 			rpc.notify("initialized", {});
 			await Promise.all([
 				this.loadThreads(generation).catch((error) => {
@@ -986,6 +1006,83 @@ export class Session {
 				? { ...thread, preview: text }
 				: thread,
 		);
+	}
+
+	runShell(command: string): Promise<ShellRun | null> | null {
+		const threadId = this.activeThreadId;
+		const cwd = this.threads.find((thread) => thread.id === threadId)?.cwd;
+		if (threadId === null || !cwd) {
+			this.notify("info", "Open a thread before running a shell command");
+			return null;
+		}
+		return this.execShell(threadId, cwd, command);
+	}
+
+	private async execShell(
+		threadId: string,
+		cwd: string,
+		command: string,
+	): Promise<ShellRun | null> {
+		const n = ++this.shellCount;
+		const id = `shell-${n}`;
+		const started = Date.now();
+		try {
+			const result = await this.requireClient().call(
+				"command/exec",
+				{
+					command: shellArgv(command, this.platformFamily),
+					cwd,
+					timeoutMs: SHELL_TIMEOUT_MS,
+					outputBytesCap: SHELL_OUTPUT_BYTES,
+				},
+				parseCommandExecResponse,
+			);
+			const { output, lines } = shellOutput(result.stdout, result.stderr);
+			const shown = this.appendShellRow(threadId, {
+				id,
+				command,
+				output,
+				status: result.exitCode === 0 ? "completed" : "failed",
+				exitCode: result.exitCode,
+				durationMs: Date.now() - started,
+			});
+			if (!shown) return null;
+			return {
+				n,
+				exitCode: result.exitCode,
+				lines,
+				text: shellText(command, result.exitCode, output),
+			};
+		} catch (error) {
+			this.appendShellRow(threadId, {
+				id,
+				command,
+				output: error instanceof Error ? error.message : String(error),
+				status: "failed",
+				exitCode: null,
+				durationMs: Date.now() - started,
+			});
+			return null;
+		}
+	}
+
+	private appendShellRow(
+		threadId: string,
+		item: {
+			readonly id: string;
+			readonly command: string;
+			readonly output: string;
+			readonly status: string;
+			readonly exitCode: number | null;
+			readonly durationMs: number | null;
+		},
+	): boolean {
+		if (this.transcript.threadId !== threadId) return false;
+		this.transcript = {
+			...this.transcript,
+			items: [...this.transcript.items, { kind: "commandExecution", ...item }],
+		};
+		return true;
 	}
 
 	async steerMessage(text: string): Promise<void> {
