@@ -97,14 +97,19 @@ type walker struct {
 	root    string
 	ignores ignoreStack
 	entries []fileEntry
+	limit   int
 }
 
 func walkScope(cwd, scope string) ([]fileEntry, error) {
+	return walkScopeLimit(cwd, scope, 0)
+}
+
+func walkScopeLimit(cwd, scope string, limit int) ([]fileEntry, error) {
 	root, err := filepath.EvalSymlinks(cwd)
 	if err != nil {
 		return nil, fmt.Errorf("search: cannot inspect workspace: %w", err)
 	}
-	w := &walker{cwd: cwd, scope: scope, root: root, ignores: loadIgnore(cwd)}
+	w := &walker{cwd: cwd, scope: scope, root: root, ignores: loadIgnore(cwd), limit: limit}
 	w.ignores.loadScopeIgnores(cwd, scope)
 	if walkErr := filepath.WalkDir(scope, w.visit); walkErr != nil {
 		return nil, fmt.Errorf("search: cannot walk %s: %w", scope, walkErr)
@@ -122,9 +127,24 @@ func walkScope(cwd, scope string) ([]fileEntry, error) {
 	return w.entries, nil
 }
 
+func Files(root string, limit int) ([]string, error) {
+	entries, err := walkScopeLimit(root, root, limit)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, min(len(entries), limit))
+	for _, entry := range entries[:min(len(entries), limit)] {
+		paths = append(paths, entry.display)
+	}
+	return paths, nil
+}
+
 func (w *walker) visit(path string, entry fs.DirEntry, err error) error {
 	if err != nil {
 		return err
+	}
+	if w.limit > 0 && len(w.entries) >= w.limit {
+		return fs.SkipAll
 	}
 	if path == w.scope {
 		return nil

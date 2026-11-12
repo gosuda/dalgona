@@ -57,6 +57,7 @@ func init() {
 		"fs/copy":                        (*server).fsCopy,
 		"fs/watch":                       (*server).fsWatch,
 		"fs/unwatch":                     (*server).fsUnwatch,
+		"fuzzyFileSearch":                (*server).fuzzyFileSearch,
 		"dalgona/keywords/list":          (*server).keywordsList,
 		"dalgona/keywords/match":         (*server).keywordsMatch,
 		"dalgona/thread/tree":            (*server).threadTree,
@@ -80,6 +81,7 @@ type server struct {
 	procs      map[string]context.CancelFunc
 	pending    map[string]context.CancelFunc
 	logins     map[string]context.CancelFunc
+	searches   map[string]*fuzzySearch
 	watchers   sync.WaitGroup
 	tasks      sync.WaitGroup
 	fsWatches  map[string]*fsWatcher

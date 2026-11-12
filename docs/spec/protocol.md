@@ -91,6 +91,7 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `fs/getMetadata {path}`, `fs/readDirectory {path}` | `{isDirectory, isFile, isSymlink, createdAtMs, modifiedAtMs}`, `{entries: [{fileName, isDirectory, isFile}]}`. See File methods. |
 | `fs/remove {path, recursive?, force?}`, `fs/copy {sourcePath, destinationPath, recursive?}` | `{}`. See File methods. |
 | `fs/watch {watchId, path}`, `fs/unwatch {watchId}` | `{path}`, `{}`. The server sends `fs/changed` notifications for a watch. See File methods. |
+| `fuzzyFileSearch {query, roots, cancellationToken?}` | `{files: [{root, path, file_name, match_type, score, indices}]}`, at most 50 results. See Fuzzy file search in `search.md`. |
 | `dalgona/retry/wait {threadId, turnId, remainingMs}` | Notification, not a method. Sent once a second during an attended rate-limit wait, and once with `remainingMs` 0 when the wait ends. Not journaled. |
 
 `thread/revert`, `thread/fork`, `turn/start`, and `dalgona/thread/leaf/set` require an idle thread. A running thread MUST give `-32600` `thread <id> is running`.

@@ -396,6 +396,7 @@ var responseSchemas = map[string]string{
 	"fs/copy":                "v2/FsCopyResponse.json",
 	"fs/watch":               "v2/FsWatchResponse.json",
 	"fs/unwatch":             "v2/FsUnwatchResponse.json",
+	"fuzzyFileSearch":        "FuzzyFileSearchResponse.json",
 }
 
 var (
