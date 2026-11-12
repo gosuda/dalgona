@@ -124,3 +124,15 @@ A review that covered part of the edit MUST add the line `This review covered pa
 A clean verdict MUST add no block. Each earlier message MUST keep its bytes in the next request, so the provider prompt cache still matches.
 
 A rebuilt request MUST read the `spoken` ids from the journal, not from the current `feedback` setting.
+
+## Turn review
+
+A turn review MUST run once for each turn, before the turn ends, and only when an edit of that turn passed the pre-filter. It MUST NOT run during recovery, and it MUST NOT run for a turn without a task.
+
+A continuation turn MUST be judged as its own unit, with only the edits that it made. A turn id MUST have at most one turn review.
+
+The turn review MUST send the cumulative change of each path, with 0 context lines, so the request holds changed lines only. A diff over the request limit MUST be cut with a truncation marker. Each file MUST take the room left divided by the number of files not yet decided. A file whose diff fits its share MUST keep all of it. The unused share MUST pass to the files after it.
+
+A path whose last change has a post-image digest but no post-image blob MUST be listed in `skipped`. That path MUST NOT be judged. A deletion has no post-image by nature, so its last change MUST be judged. The path of a deletion MUST NOT be listed in `skipped`.
+
+The turn review MUST wait at most 8 seconds for its one request. The turn review MUST NOT speak when it is truncated, but it MUST still journal its verdict. A turn that the user interrupts MUST journal an error verdict and MUST NOT add a message.

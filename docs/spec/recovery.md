@@ -47,6 +47,8 @@ Sha values MUST be SHA-256 of the file bytes, as lowercase hex. An absent file M
 
 An edit that recovery runs, replays, or completes MUST NOT be judged.
 
+Recovery MUST NOT run the turn review.
+
 A Cursor in-band call is journaled only after its `assistant.message`. A crash before that message repeats the model request, and the in-band call MAY run again.
 
 After the calls are complete, recovery MUST continue the turn loop. The next model request MUST carry a result for every call.

@@ -31,6 +31,7 @@ type worker struct {
 	round         *reviewRound
 	eligible      bool
 	recovering    bool
+	reviewed      bool
 }
 
 func pathSettings(created event.SessionCreated, records []event.Seqd) Settings {
@@ -156,8 +157,7 @@ func (w *worker) loop(ctx context.Context) outcome {
 			if waited {
 				return outcome{status: statusCompleted, head: v.head()}
 			}
-			w.boundary(ctx, BoundaryAgentEnd, v.head())
-			waited = true
+			waited = w.closeReply(ctx, v)
 			continue
 		}
 		waited = false
@@ -169,6 +169,15 @@ func (w *worker) loop(ctx context.Context) outcome {
 			return failure(ctx, err)
 		}
 	}
+}
+
+func (w *worker) closeReply(ctx context.Context, v view) bool {
+	resume, head := w.turnReview(ctx, v)
+	if resume {
+		return false
+	}
+	w.boundary(ctx, BoundaryAgentEnd, head)
+	return true
 }
 
 func (w *worker) context(ctx context.Context) (view, []model.Message, error) {

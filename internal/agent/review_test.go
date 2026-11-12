@@ -276,13 +276,20 @@ func TestEditReviewStateNeverHoldsRawSecret(t *testing.T) {
 	}
 	h.write("a.txt", "one\n")
 	runRounds(t, h, []call{{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "SECRETVALUE"})}})
-	judge.mu.Lock()
-	defer judge.mu.Unlock()
-	if len(judge.states) != 1 {
-		t.Fatalf("judge states = %d, want 1", len(judge.states))
+	edits := editStatesOf(judge)
+	if len(edits) != 1 {
+		t.Fatalf("edit judge states = %d, want 1", len(edits))
 	}
-	if strings.Contains(judge.states[0], "SECRETVALUE") || !strings.Contains(judge.states[0], "{{secret:TOKEN}}") {
-		t.Fatalf("judge state = %s, want the placeholder and no raw secret", judge.states[0])
+	judge.mu.Lock()
+	states := slices.Clone(judge.states)
+	judge.mu.Unlock()
+	for _, state := range states {
+		if strings.Contains(state, "SECRETVALUE") {
+			t.Fatalf("judge state = %s, want no raw secret in any state", state)
+		}
+	}
+	if !strings.Contains(edits[0], "{{secret:TOKEN}}") {
+		t.Fatalf("edit judge state = %s, want the placeholder", edits[0])
 	}
 }
 
@@ -295,16 +302,15 @@ func TestEditReviewSeesEachEditOfSameFile(t *testing.T) {
 		[]call{{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}},
 		[]call{{id: "e2", name: "patch", args: patchArgs("a.txt", [2]string{"uno", "una"})}},
 	)
-	judge.mu.Lock()
-	defer judge.mu.Unlock()
-	if len(judge.states) != 2 {
-		t.Fatalf("judge states = %d, want 2", len(judge.states))
+	states := editStatesOf(judge)
+	if len(states) != 2 {
+		t.Fatalf("judge states = %d, want 2", len(states))
 	}
-	if !strings.Contains(judge.states[0], "+uno") || !strings.Contains(judge.states[0], "-one") {
-		t.Fatalf("first state = %s, want the one-to-uno diff", judge.states[0])
+	if !strings.Contains(states[0], "+uno") || !strings.Contains(states[0], "-one") {
+		t.Fatalf("first state = %s, want the one-to-uno diff", states[0])
 	}
-	if !strings.Contains(judge.states[1], "+una") || !strings.Contains(judge.states[1], "-uno") {
-		t.Fatalf("second state = %s, want the uno-to-una diff", judge.states[1])
+	if !strings.Contains(states[1], "+una") || !strings.Contains(states[1], "-uno") {
+		t.Fatalf("second state = %s, want the uno-to-una diff", states[1])
 	}
 }
 
@@ -655,12 +661,11 @@ func TestReviewStopsAtMaxParts(t *testing.T) {
 		h.write("a.go", file)
 		thread := runRounds(t, h, []call{{id: "e1", name: "patch", args: patchArgs("a.go", pairs...)}})
 		judged := judgedOf(h.events(thread.ID()))
-		if judge.count() != 8 || len(judged) != 1 || judged[0].Parts != 8 || !judged[0].Truncated {
-			t.Fatalf("judge calls = %d judged = %+v, want 8 requests and a truncated unit of 8 parts", judge.count(), judged)
+		edits := editStatesOf(judge)
+		if len(edits) != 8 || len(judged) != 1 || judged[0].Parts != 8 || !judged[0].Truncated {
+			t.Fatalf("judge calls = %d judged = %+v, want 8 requests and a truncated unit of 8 parts", len(edits), judged)
 		}
-		judge.mu.Lock()
-		defer judge.mu.Unlock()
-		for _, state := range judge.states {
+		for _, state := range edits {
 			if !strings.Contains(state, `"omitted_hunks":4`) || !strings.Contains(state, `"of":8`) {
 				t.Fatalf("state %s lacks omitted_hunks 4 and part of 8", state)
 			}
@@ -679,8 +684,8 @@ func TestEditReviewPartsStayWithinWorkerLimit(t *testing.T) {
 		judge.mu.Lock()
 		peak := judge.peak
 		judge.mu.Unlock()
-		if judge.count() != 8 || peak < 2 || peak > 4 {
-			t.Fatalf("judge requests = %d, peak in flight = %d, want 8 requests with a peak above 1 and at most 4", judge.count(), peak)
+		if edits := len(editStatesOf(judge)); edits != 8 || peak < 2 || peak > 4 {
+			t.Fatalf("judge requests = %d, peak in flight = %d, want 8 requests with a peak above 1 and at most 4", edits, peak)
 		}
 		for _, judged := range judgedOf(h.events(thread.ID())) {
 			if !slices.Contains([]string{reviewClean, reviewUncertain, reviewFlagged, reviewError}, judged.Verdict) {

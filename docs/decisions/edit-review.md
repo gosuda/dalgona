@@ -2,7 +2,7 @@
 
 ## Invariant
 
-The edit review MUST stay off unless `[edit_review] enabled` is true. The judge MUST NOT approve or reject an edit. A judge failure MUST NOT block an edit. Recovery MUST NOT judge. Raw secrets MUST NOT reach the judge. Each request MUST encode to at most 30000 bytes. The `sound` question MUST only gate speech. Each question MUST score on its own.
+The edit review MUST stay off unless `[edit_review] enabled` is true. The judge MUST NOT approve or reject an edit. A judge failure MUST NOT block an edit. Recovery MUST NOT judge. Raw secrets MUST NOT reach the judge. Each request MUST encode to at most 30000 bytes. The `sound` question MUST only gate speech. Each question MUST score on its own. At most one turn review MUST run per turn id.
 
 ## Scope
 
