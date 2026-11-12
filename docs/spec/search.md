@@ -106,6 +106,18 @@ A header row MAY be read with the `read` tool, from line START through line END.
 
 A definition longer than 2000 lines needs one `read` call for each 2000 lines.
 
+### Syntax
+
+The syntax mode MUST run a tree-sitter query on each file of the language named by `lang`.
+
+A query that does not compile MUST return the library message after the prefix `syntax: `.
+
+Each capture row MUST show the file, the line, the capture name, and the captured text.
+
+The `lang` argument MUST be set in the syntax mode, and it MUST NOT be set in any other mode.
+
+The syntax mode MUST NOT carry snapshot tags.
+
 ## Fuzzy file search
 
 The `fuzzyFileSearch` method MUST list regular files under each requested root and MUST NOT list directories.

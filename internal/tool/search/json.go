@@ -9,7 +9,9 @@ import (
 	"io"
 	"slices"
 	"strconv"
+	"strings"
 
+	"github.com/gosuda/dalgona/internal/syntax"
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 
@@ -21,6 +23,7 @@ type args struct {
 	Literal    bool
 	IgnoreCase bool
 	Kind       []string
+	Lang       string
 	Limit      int
 }
 
@@ -104,20 +107,39 @@ func validateArgs(out args) error {
 	if out.Limit < 1 || out.Limit > 1000 {
 		return errors.New("search: limit must be between 1 and 1000")
 	}
-	return validateKinds(out)
+	if err := validateKinds(out); err != nil {
+		return err
+	}
+	return validateLang(out)
 }
 
 var (
-	searchModes = []string{"find", "grep", "symbols", "definition"}
+	searchModes = []string{"find", "grep", "symbols", "definition", "syntax"}
 	kindModes   = []string{"symbols", "definition"}
 )
 
 func validateMode(out args) error {
 	if !slices.Contains(searchModes, out.Mode) {
-		return errors.New("search: mode must be find, grep, symbols, or definition")
+		return errors.New("search: mode must be find, grep, symbols, definition, or syntax")
 	}
 	if out.Pattern == "" && out.Mode != "symbols" {
 		return errors.New("search: pattern must not be empty")
+	}
+	return nil
+}
+
+func validateLang(out args) error {
+	if out.Mode != "syntax" {
+		if out.Lang != "" {
+			return errors.New("search: lang applies only to syntax mode")
+		}
+		return nil
+	}
+	if out.Lang == "" {
+		return errors.New("search: lang is required in syntax mode")
+	}
+	if _, ok := syntax.ByName(out.Lang); !ok {
+		return fmt.Errorf("search: unknown lang %s, use one of: %s", out.Lang, strings.Join(syntax.Names(), ", "))
 	}
 	return nil
 }
@@ -137,7 +159,7 @@ func validateKinds(out args) error {
 func setArg(out *args, name string, value jsontext.Value) error {
 	var err error
 	switch name {
-	case "mode", "pattern", "path", "glob":
+	case "mode", "pattern", "path", "glob", "lang":
 		err = setStringArg(out, name, value)
 	case "literal":
 		out.Literal, err = boolArg(value)
@@ -164,6 +186,8 @@ func setStringArg(out *args, name string, value jsontext.Value) error {
 	switch name {
 	case "mode":
 		out.Mode = text
+	case "lang":
+		out.Lang = text
 	case "pattern":
 		out.Pattern = text
 	case "path":

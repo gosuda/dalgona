@@ -1,6 +1,7 @@
 package search
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -155,16 +156,20 @@ func parseFiles(ctx context.Context, entries []fileEntry, args args, start time.
 	if err != nil {
 		return run, err
 	}
-	noteParses(run.jobs, run.results, &run.tally)
+	reports := make([]syntax.Report, len(run.results))
+	for i, result := range run.results {
+		reports[i] = result.report
+	}
+	noteParses(run.jobs, reports, &run.tally)
 	return run, nil
 }
 
-func noteParses(jobs []parseJob, results []parseResult, tally *callTally) {
+func noteParses(jobs []parseJob, reports []syntax.Report, tally *callTally) {
 	for i, job := range jobs {
 		switch {
-		case results[i].report.Stopped:
+		case reports[i].Stopped:
 			tally.parseNotes = append(tally.parseNotes, "[Parse: stopped, no rows: "+job.file.display+"]")
-		case results[i].report.SyntaxErrors:
+		case reports[i].SyntaxErrors:
 			tally.parseNotes = append(tally.parseNotes, "[Parse: syntax errors, rows kept: "+job.file.display+"]")
 		}
 	}
@@ -307,8 +312,8 @@ func candidateData(file fileEntry, matcher *regexp.Regexp) ([]byte, bool) {
 	return grepped.data, len(lines) > 0
 }
 
-func parseJobs(ctx context.Context, jobs []parseJob) ([]parseResult, error) {
-	results := make([]parseResult, len(jobs))
+func runJobs[T any](jobs []parseJob, parse func(*syntax.Parser, []byte) (T, error)) ([]T, error) {
+	results := make([]T, len(jobs))
 	errs := make([]error, len(jobs))
 	pending := make(chan int, len(jobs))
 	for i := range jobs {
@@ -326,7 +331,7 @@ func parseJobs(ctx context.Context, jobs []parseJob) ([]parseResult, error) {
 					parser = job.lang.NewParser()
 					parsers[job.lang.Name()] = parser
 				}
-				results[i].symbols, results[i].report, errs[i] = parser.Symbols(ctx, job.data)
+				results[i], errs[i] = parse(parser, job.data)
 			}
 		})
 	}
@@ -337,6 +342,93 @@ func parseJobs(ctx context.Context, jobs []parseJob) ([]parseResult, error) {
 		}
 	}
 	return results, nil
+}
+
+func parseJobs(ctx context.Context, jobs []parseJob) ([]parseResult, error) {
+	return runJobs(jobs, func(parser *syntax.Parser, data []byte) (parseResult, error) {
+		symbols, report, err := parser.Symbols(ctx, data)
+		return parseResult{symbols: symbols, report: report}, err
+	})
+}
+
+type captureResult struct {
+	captures []syntax.Capture
+	report   syntax.Report
+}
+
+func captureJobs(ctx context.Context, jobs []parseJob, query *syntax.Query) ([]captureResult, error) {
+	return runJobs(jobs, func(parser *syntax.Parser, data []byte) (captureResult, error) {
+		captures, report, err := parser.Captures(ctx, query, data)
+		return captureResult{captures: captures, report: report}, err
+	})
+}
+
+func syntaxMode(ctx context.Context, entries []fileEntry, args args, start time.Time, now func() time.Time) (outcome, error) {
+	lang, ok := syntax.ByName(args.Lang)
+	if !ok {
+		return outcome{}, fmt.Errorf("search: unknown lang %s", args.Lang)
+	}
+	query, err := lang.Compile(args.Pattern)
+	if err != nil {
+		return outcome{}, err
+	}
+	candidates, err := parseCandidates(ctx, entries, args.Glob, func(display string) bool {
+		found, ok := syntax.ForPath(display)
+		return ok && found.Name() == lang.Name()
+	})
+	if err != nil {
+		return outcome{}, err
+	}
+	var tally callTally
+	jobs := dispatchSymbols(candidates, nil, start, now, &tally)
+	results, err := captureJobs(ctx, jobs, query)
+	if err != nil {
+		return outcome{}, err
+	}
+	reports := make([]syntax.Report, len(results))
+	for i, result := range results {
+		reports[i] = result.report
+	}
+	noteParses(jobs, reports, &tally)
+	rows, truncated := captureRows(jobs, results, args.Limit)
+	if len(rows) == 0 {
+		rows = []string{emptySyntaxReply(args.Pattern, lang.Name(), len(candidates))}
+	}
+	return outcome{Text: finishReply(rows, tally, truncated, "captures")}, nil
+}
+
+func emptySyntaxReply(pattern, lang string, searched int) string {
+	return fmt.Sprintf("No matches for %s. Searched %d files of language %s.", pattern, searched, lang)
+}
+
+func captureRows(jobs []parseJob, results []captureResult, limit int) ([]string, int) {
+	var rows []string
+	truncated := 0
+	for i, job := range jobs {
+		for _, capture := range sortedCaptures(results[i].captures) {
+			if len(rows) < limit {
+				rows = append(rows, captureRow(job, capture))
+			} else {
+				truncated++
+			}
+		}
+	}
+	return rows, truncated
+}
+
+func sortedCaptures(captures []syntax.Capture) []syntax.Capture {
+	out := slices.Clone(captures)
+	slices.SortStableFunc(out, func(a, b syntax.Capture) int {
+		return cmp.Or(cmp.Compare(a.Line, b.Line), cmp.Compare(a.Column, b.Column))
+	})
+	return out
+}
+
+func captureRow(job parseJob, capture syntax.Capture) string {
+	text := string(job.data[capture.StartByte:capture.EndByte])
+	text, _, _ = strings.Cut(text, "\n")
+	cut, _ := cropMatch(text)
+	return fmt.Sprintf("%s:%d: %s: %s", job.file.display, capture.Line, capture.Name, cut)
 }
 
 func symbolRows(jobs []parseJob, results []parseResult, args args, matcher *regexp.Regexp) ([]string, int) {

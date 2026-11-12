@@ -55,6 +55,8 @@ func execute(cwd string, args args, dir string, clock freshness) (outcome, error
 		return symbolsMode(context.Background(), entries, args, start, time.Now)
 	case "definition":
 		return definitionMode(context.Background(), entries, args, start, time.Now)
+	case "syntax":
+		return syntaxMode(context.Background(), entries, args, start, time.Now)
 	}
 	return grep(entries, args, dir, clock)
 }

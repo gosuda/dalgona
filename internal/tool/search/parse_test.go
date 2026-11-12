@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/syntax"
 	"github.com/gosuda/dalgona/internal/tool"
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
@@ -493,5 +494,109 @@ func TestDefinitionRefusesAnchorExactText(t *testing.T) {
 	err := runToolError(t, `{"mode":"definition","pattern":"^Run$"}`)
 	if err == nil || err.Error() != anchorRefusal {
 		t.Fatalf("error = %v, want %q", err, anchorRefusal)
+	}
+}
+
+func TestSyntaxCapturesRows(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeSearchFixture(t, root, "src/a.go", "package a\n\nfunc Alpha() {}\n\nfunc Beta() {}\n")
+	got := runMain(t, `{"mode":"syntax","lang":"go","pattern":"(function_declaration name: (identifier) @name)","path":"src"}`).Text
+	want := "src/a.go:3: name: Alpha\nsrc/a.go:5: name: Beta"
+	if got != want {
+		t.Fatalf("syntax = %q, want %q", got, want)
+	}
+}
+
+func TestSyntaxCompileErrorUnchanged(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeSearchFixture(t, root, "a.go", "package a\n")
+	got := runMainError(t, `{"mode":"syntax","lang":"go","pattern":"(function_declaration"}`)
+	if !strings.HasPrefix(got, "syntax: ") || strings.Count(got, "syntax: ") != 1 {
+		t.Fatalf("error = %q, want one syntax: prefix", got)
+	}
+}
+
+func TestSyntaxRequiresLang(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	got := runMainError(t, `{"mode":"syntax","pattern":"(identifier) @name"}`)
+	if got != "search: lang is required in syntax mode" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestSyntaxUnknownLang(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	got := runMainError(t, `{"mode":"syntax","lang":"cobol","pattern":"(identifier) @name"}`)
+	want := "search: unknown lang cobol, use one of: bash, c, c_sharp, cpp, css, go, html, java, javascript, json, kotlin, lua, markdown, php, python, ruby, rust, svelte, swift, toml, tsx, typescript, yaml"
+	if got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestSyntaxSelectsByLang(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeSearchFixture(t, root, "src/a.go", "package a\n\nfunc A() {}\n")
+	writeSearchFixture(t, root, "src/b.py", "def f():\n    pass\n")
+	got := runMain(t, `{"mode":"syntax","lang":"python","pattern":"(function_definition name: (identifier) @n)","path":"src"}`).Text
+	if got != "src/b.py:1: n: f" {
+		t.Fatalf("syntax = %q, want only the python row", got)
+	}
+}
+
+func TestSyntaxCompileErrorExactText(t *testing.T) {
+	lang, ok := syntax.ByName("go")
+	if !ok {
+		t.Fatal("go grammar is not registered")
+	}
+	_, want := lang.Compile("(function_declaration")
+	err := runToolError(t, `{"mode":"syntax","lang":"go","pattern":"(function_declaration"}`)
+	if want == nil || err == nil || err.Error() != want.Error() {
+		t.Fatalf("error = %v, want %v", err, want)
+	}
+}
+
+func TestSyntaxHeaderSelectsC(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeSearchFixture(t, root, "src/a.h", "int f(void);\n")
+	writeSearchFixture(t, root, "src/a.cpp", "int g() {}\n")
+	got := runMain(t, `{"mode":"syntax","lang":"c","pattern":"(identifier) @n","path":"src"}`).Text
+	if want := "src/a.h:1: n: f"; got != want {
+		t.Fatalf("syntax = %q, want %q: the .h file must select c and the .cpp file must not", got, want)
+	}
+}
+
+func TestLangOnlyForSyntax(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	got := runMainError(t, `{"mode":"find","pattern":"*.go","lang":"go"}`)
+	if got != "search: lang applies only to syntax mode" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestSyntaxNoCapturesText(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeSearchFixture(t, root, "src/a.go", "package a\n\nfunc A() {}\n")
+	got := runMain(t, `{"mode":"syntax","lang":"go","pattern":"(function_declaration)","path":"src"}`).Text
+	if want := "No matches for (function_declaration). Searched 1 files of language go."; got != want {
+		t.Fatalf("syntax = %q, want %q", got, want)
+	}
+}
+
+func TestSyntaxLimitFooter(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeSearchFixture(t, root, "a.go", "package a\n\nfunc F1() {}\n\nfunc F2() {}\n\nfunc F3() {}\n")
+	got := runMain(t, `{"mode":"syntax","lang":"go","pattern":"(function_declaration name: (identifier) @n)","limit":2}`).Text
+	want := "a.go:3: n: F1\na.go:5: n: F2\n[Truncated: 1 more captures]"
+	if got != want {
+		t.Fatalf("syntax = %q, want %q", got, want)
 	}
 }

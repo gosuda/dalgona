@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/odvcencio/gotreesitter"
 )
 
 func TestForPathExtensionTable(t *testing.T) {
@@ -599,5 +601,69 @@ func TestExtensionsOfGo(t *testing.T) {
 	}
 	if got := lang.Extensions(); !slices.Equal(got, []string{".go"}) {
 		t.Fatalf("Extensions() = %v, want [.go]", got)
+	}
+}
+
+func TestCompileErrorMatchesLibrary(t *testing.T) {
+	t.Parallel()
+	lang, ok := ByName("go")
+	if !ok {
+		t.Fatal("go language missing")
+	}
+	_, err := lang.Compile("(function_declaration")
+	if err == nil {
+		t.Fatal("Compile returned no error for an unclosed query")
+	}
+	if _, libErr := gotreesitter.NewQuery("(function_declaration", lang.l.grammar()); libErr == nil {
+		t.Fatal("the library accepted an unclosed query")
+	} else if want := "syntax: " + libErr.Error(); err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+}
+
+func TestCaptureMatchIndexAdjacent(t *testing.T) {
+	t.Parallel()
+	lang, ok := ByName("go")
+	if !ok {
+		t.Fatal("go language missing")
+	}
+	query, err := lang.Compile("(type_spec name: (type_identifier) @name type: (_) @type)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := []byte("package a\n\ntype A struct{}\n\ntype B int\n")
+	captures, report, err := lang.NewParser().Captures(t.Context(), query, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SyntaxErrors {
+		t.Fatal("valid source reported syntax errors")
+	}
+	want := []Capture{
+		{Name: "name", Line: 3, Column: 6, StartByte: 16, EndByte: 17, Match: 0},
+		{Name: "type", Line: 3, Column: 8, StartByte: 18, EndByte: 26, Match: 0},
+		{Name: "name", Line: 5, Column: 6, StartByte: 33, EndByte: 34, Match: 1},
+		{Name: "type", Line: 5, Column: 8, StartByte: 35, EndByte: 38, Match: 1},
+	}
+	if !slices.Equal(captures, want) {
+		t.Fatalf("captures = %+v\nwant %+v", captures, want)
+	}
+}
+
+func TestCapturesRejectsCancelledContext(t *testing.T) {
+	t.Parallel()
+	lang, ok := ByName("go")
+	if !ok {
+		t.Fatal("go language missing")
+	}
+	query, err := lang.Compile("(function_declaration name: (identifier) @name)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, err = lang.NewParser().Captures(ctx, query, []byte("package a\n"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 }

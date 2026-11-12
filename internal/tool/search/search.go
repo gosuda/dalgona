@@ -27,8 +27,8 @@ func New() tool.Tool { return Tool{} }
 func (Tool) Spec() tool.Spec {
 	return tool.Spec{
 		Name:        "search",
-		Description: "Search the workspace. mode \"find\" lists files whose path matches the glob in pattern. A glob without / matches the file name at any depth. mode \"grep\" lists lines that match pattern, an RE2 regular expression, or plain text when literal is true. mode \"symbols\" lists the definitions of files as path, line range, kind and first line, and pattern is optional; kind limits the rows to the named kinds. mode \"definition\" prints the source lines of each definition whose name matches pattern. Search skips .git and every path that .gitignore or .git/info/exclude excludes. It does not follow symbolic links. It skips binary files and files over 16 MiB. find returns at most limit paths, sorted. grep returns at most limit matches as path:line:text and cuts lines at 500 characters. When results were cut, the last line starts with [Truncated:.",
-		Schema:      jsontext.Value(`{"type":"object","properties":{"mode":{"type":"string","enum":["find","grep","symbols","definition"]},"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"literal":{"type":"boolean"},"ignore_case":{"type":"boolean"},"kind":{"type":"array","items":{"type":"string","enum":["function","method","class","interface","type","enum","constant","variable","module","macro","section"]}},"limit":{"type":"integer","minimum":1,"maximum":1000}},"required":["mode"],"additionalProperties":false}`),
+		Description: "Search the workspace. mode \"find\" lists files whose path matches the glob in pattern. A glob without / matches the file name at any depth. mode \"grep\" lists lines that match pattern, an RE2 regular expression, or plain text when literal is true. mode \"symbols\" lists the definitions of files as path, line range, kind and first line, and pattern is optional; kind limits the rows to the named kinds. mode \"definition\" prints the source lines of each definition whose name matches pattern. mode \"syntax\" runs the tree-sitter query pattern on the files of the language named by lang and lists each capture as path:line: capture: text. Search skips .git and every path that .gitignore or .git/info/exclude excludes. It does not follow symbolic links. It skips binary files and files over 16 MiB. find returns at most limit paths, sorted. grep returns at most limit matches as path:line:text and cuts lines at 500 characters. When results were cut, the last line starts with [Truncated:.",
+		Schema:      jsontext.Value(`{"type":"object","properties":{"mode":{"type":"string","enum":["find","grep","symbols","definition","syntax"]},"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"literal":{"type":"boolean"},"ignore_case":{"type":"boolean"},"kind":{"type":"array","items":{"type":"string","enum":["function","method","class","interface","type","enum","constant","variable","module","macro","section"]}},"lang":{"type":"string","enum":["bash","c","c_sharp","cpp","css","go","html","java","javascript","json","kotlin","lua","markdown","php","python","ruby","rust","svelte","swift","toml","tsx","typescript","yaml"]},"limit":{"type":"integer","minimum":1,"maximum":1000}},"required":["mode"],"additionalProperties":false}`),
 		Keep:        tool.KeepHead,
 	}
 }
@@ -86,7 +86,7 @@ func searchArgs(raw jsontext.Value, ref indexRef, now time.Time) []string {
 }
 
 func parseContext(ctx context.Context, mode string) (context.Context, context.CancelFunc) {
-	if mode != "symbols" && mode != "definition" {
+	if mode != "symbols" && mode != "definition" && mode != "syntax" {
 		return ctx, func() {}
 	}
 	return context.WithTimeoutCause(ctx, parseDeadline, errParseDeadline)
