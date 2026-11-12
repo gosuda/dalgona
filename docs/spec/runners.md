@@ -46,6 +46,8 @@ Concurrent calls on one runner MUST share one bind. The lock MUST NOT be held du
 
 `Close` MUST close the exec stream. It MUST NOT destroy the box.
 
+The runner MUST make `Wait` on an exec stream return after `Close`, so the worker goroutine can exit.
+
 ## Archive
 
 `(*Binder).Archive(ctx, threadID)` MUST run as the archive hook, after `Host.Archive` journals `thread.archived`. If the archive hook fails, the server MUST unarchive the thread. A thread without `runner.bound` MUST succeed with no effect. Archived state MUST come from each thread's latest `thread.archived` record.
