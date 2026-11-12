@@ -10,6 +10,7 @@ function props(items: readonly TranscriptItem[]) {
 		turnStatus: "inProgress" as const,
 		error: null,
 		plan: null,
+		turnReview: null,
 		connected: true,
 		loading: false,
 		awaitingApproval: new Set<string>(),

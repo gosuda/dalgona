@@ -49,6 +49,11 @@ export type JsonValue =
 	| readonly JsonValue[]
 	| { readonly [key: string]: JsonValue };
 
+export interface EditReview {
+	readonly verdict: "clean" | "uncertain" | "flagged" | "error";
+	readonly summary: string;
+}
+
 export type TranscriptItem =
 	| {
 			readonly id: string;
@@ -77,6 +82,7 @@ export type TranscriptItem =
 			readonly kind: "fileChange";
 			readonly changes: readonly FileChange[];
 			readonly status: string;
+			readonly review: EditReview | null;
 	  }
 	| {
 			readonly id: string;
@@ -137,6 +143,7 @@ export interface TranscriptState {
 	readonly plan: TurnPlan | null;
 	readonly childThreadIds: readonly string[];
 	readonly turnStartedAtMs: number | null;
+	readonly turnReview: EditReview | null;
 }
 
 export type AdvisorStatus = "idle" | "reviewing" | "halted" | "disabled";
@@ -210,6 +217,18 @@ export type AppNotification =
 			readonly type: "childSpawned";
 			readonly threadId: string;
 			readonly childId: string;
+	  }
+	| {
+			readonly type: "toolJudged";
+			readonly threadId: string;
+			readonly itemId: string;
+			readonly review: EditReview;
+	  }
+	| {
+			readonly type: "turnJudged";
+			readonly threadId: string;
+			readonly turnId: string;
+			readonly review: EditReview;
 	  }
 	| { readonly type: "requestResolved"; readonly requestId: RequestId };
 

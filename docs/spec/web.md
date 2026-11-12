@@ -155,6 +155,8 @@ No advisor failure opens the error banner.
 - A diff card MUST show `Diff not shown.` when the server omits the diff.
 - Rows and diffs MUST be chosen by item kind, not by tool name.
 
+Each file change MUST show its edit review as one line under its diff cards, for every verdict. A review line MUST show the summary text that the server sends, such as `No problems found`. The turn review MUST show as one line after the last row, and MUST show only for the open turn. A `flagged` review MUST use the warning text role, an `error` review MUST use bold failed text, and other reviews MUST use dim text. Review lines MUST NOT use a background. Review lines are live only, so the history MUST NOT show a verdict.
+
 ### Markdown
 
 - The client MUST render model text with the renderer in `web/src/lib/markdown.ts`.

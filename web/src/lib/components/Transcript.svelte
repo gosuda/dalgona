@@ -16,6 +16,7 @@ import {
 	shouldAutoScrollForUpdate,
 } from "#lib/reducer.ts";
 import type {
+	EditReview,
 	ThreadSummary,
 	TranscriptItem,
 	TurnPlan,
@@ -28,6 +29,7 @@ interface Props {
 	turnStatus: TurnStatus | null;
 	error: string | null;
 	plan: TurnPlan | null;
+	turnReview: EditReview | null;
 	connected: boolean;
 	loading: boolean;
 	awaitingApproval: ReadonlySet<string>;
@@ -58,6 +60,7 @@ let {
 	turnStatus,
 	error,
 	plan,
+	turnReview,
 	connected,
 	loading,
 	awaitingApproval,
@@ -153,6 +156,9 @@ function trackFollowing(): void {
 			<SubagentBlock childIds={childThreadIds} {threads} onOpen={onOpenThread} />
 		{/if}
 
+		{#if turnReview !== null}
+			<p class="turn-review" data-verdict={turnReview.verdict}>{turnReview.summary}</p>
+		{/if}
 		<PlanPanel {plan} />
 
 		{#if running}
@@ -260,5 +266,20 @@ function trackFollowing(): void {
 		.from-user {
 			padding-inline-start: 0;
 		}
+	}
+
+	.turn-review {
+		margin: var(--space-4) 0 0;
+		color: var(--dim);
+		font-size: var(--size-small);
+	}
+
+	.turn-review[data-verdict="flagged"] {
+		color: var(--warning-text);
+	}
+
+	.turn-review[data-verdict="error"] {
+		color: var(--failed-text);
+		font-weight: var(--weight-strong);
 	}
 </style>

@@ -22,6 +22,9 @@ let { item, awaiting }: RowProps = $props();
 		{#each item.changes as change, index (`${index}:${change.path}`)}
 			<DiffCard {change} open={false} />
 		{/each}
+		{#if item.review !== null}
+			<p class="edit-review" data-verdict={item.review.verdict}>{item.review.summary}</p>
+		{/if}
 	</article>
 {/if}
 
@@ -57,4 +60,20 @@ let { item, awaiting }: RowProps = $props();
 		font-size: var(--size-caption);
 		font-variant-numeric: tabular-nums;
 	}
+
+	.edit-review {
+		margin: var(--space-2) 0 0;
+		color: var(--dim);
+		font-size: var(--size-small);
+	}
+
+	.edit-review[data-verdict="flagged"] {
+		color: var(--warning-text);
+	}
+
+	.edit-review[data-verdict="error"] {
+		color: var(--failed-text);
+		font-weight: var(--weight-strong);
+	}
+
 </style>

@@ -315,6 +315,7 @@ describe("file change validation", () => {
 						diffOmitted: false,
 					},
 				],
+				review: null,
 			},
 		});
 	});
@@ -370,5 +371,76 @@ describe("file change validation", () => {
 				},
 			]),
 		).toMatchObject({ item: { changes: [] } });
+	});
+});
+
+describe("edit review validation", () => {
+	it("parses dalgona/tool/judged into a tool verdict", () => {
+		expect(
+			parseNotification({
+				method: "dalgona/tool/judged",
+				params: {
+					threadId: "thread-1",
+					turnId: "turn-3",
+					itemId: "call-7",
+					verdict: "flagged",
+					summary: "Flagged: removed code",
+					paths: ["internal/model/retry.go"],
+				},
+			}),
+		).toEqual({
+			type: "toolJudged",
+			threadId: "thread-1",
+			itemId: "call-7",
+			review: { verdict: "flagged", summary: "Flagged: removed code" },
+		});
+	});
+
+	it("parses dalgona/turn/judged into a turn verdict", () => {
+		expect(
+			parseNotification({
+				method: "dalgona/turn/judged",
+				params: {
+					threadId: "thread-1",
+					turnId: "turn-3",
+					verdict: "uncertain",
+					summary: "Uncertain: incomplete",
+					paths: [],
+				},
+			}),
+		).toEqual({
+			type: "turnJudged",
+			threadId: "thread-1",
+			turnId: "turn-3",
+			review: { verdict: "uncertain", summary: "Uncertain: incomplete" },
+		});
+	});
+
+	it("rejects an unknown verdict", () => {
+		expect(
+			parseNotification({
+				method: "dalgona/tool/judged",
+				params: {
+					threadId: "thread-1",
+					turnId: "turn-3",
+					itemId: "call-7",
+					verdict: "ok",
+					summary: "ok",
+					paths: [],
+				},
+			}),
+		).toBeNull();
+		expect(
+			parseNotification({
+				method: "dalgona/turn/judged",
+				params: {
+					threadId: "thread-1",
+					turnId: "turn-3",
+					verdict: "ok",
+					summary: "ok",
+					paths: [],
+				},
+			}),
+		).toBeNull();
 	});
 });

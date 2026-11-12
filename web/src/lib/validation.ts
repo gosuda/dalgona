@@ -3,6 +3,7 @@ import type {
 	AdvisorStatus,
 	AppNotification,
 	ApprovalRequest,
+	EditReview,
 	FileChange,
 	InitializeInfo,
 	JsonValue,
@@ -366,6 +367,7 @@ function transcriptItem(
 			changes: fileChanges(item["changes"]),
 			status:
 				typeof item["status"] === "string" ? item["status"] : "inProgress",
+			review: null,
 		};
 	}
 	if (kind === "plan") {
@@ -809,6 +811,52 @@ function retryWaitNotice(params: Members): AppNotification | null {
 	};
 }
 
+const editVerdicts = ["clean", "uncertain", "flagged", "error"] as const;
+
+function parseReview(params: Members): EditReview | null {
+	const verdict =
+		editVerdicts.find((value) => value === params["verdict"]) ?? null;
+	const summary = params["summary"];
+	if (verdict === null || typeof summary !== "string") {
+		return null;
+	}
+	return { verdict, summary };
+}
+
+function toolJudgedNotice(params: Members): AppNotification | null {
+	const review = parseReview(params);
+	if (
+		typeof params["threadId"] !== "string" ||
+		typeof params["itemId"] !== "string" ||
+		review === null
+	) {
+		return null;
+	}
+	return {
+		type: "toolJudged",
+		threadId: params["threadId"],
+		itemId: params["itemId"],
+		review,
+	};
+}
+
+function turnJudgedNotice(params: Members): AppNotification | null {
+	const review = parseReview(params);
+	if (
+		typeof params["threadId"] !== "string" ||
+		typeof params["turnId"] !== "string" ||
+		review === null
+	) {
+		return null;
+	}
+	return {
+		type: "turnJudged",
+		threadId: params["threadId"],
+		turnId: params["turnId"],
+		review,
+	};
+}
+
 function threadNameNotice(params: Members): AppNotification | null {
 	if (typeof params["threadId"] !== "string") {
 		return null;
@@ -945,6 +993,14 @@ const notifications: Readonly<Record<string, NotificationSpec>> = {
 	"dalgona/retry/wait": {
 		required: ["remainingMs", "threadId", "turnId"],
 		parse: retryWaitNotice,
+	},
+	"dalgona/tool/judged": {
+		required: ["itemId", "paths", "summary", "threadId", "turnId", "verdict"],
+		parse: toolJudgedNotice,
+	},
+	"dalgona/turn/judged": {
+		required: ["paths", "summary", "threadId", "turnId", "verdict"],
+		parse: turnJudgedNotice,
 	},
 	"serverRequest/resolved": {
 		required: ["requestId", "threadId"],

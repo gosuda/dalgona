@@ -112,6 +112,8 @@ const reducerKinds = [
 	"error",
 	"plan",
 	"childSpawned",
+	"toolJudged",
+	"turnJudged",
 ] as const;
 
 type ReducerKind = (typeof reducerKinds)[number];

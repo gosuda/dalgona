@@ -17,6 +17,7 @@ function props(
 		turnStatus: "completed" as const,
 		error: null,
 		plan: null,
+		turnReview: null,
 		connected: true,
 		loading: false,
 		awaitingApproval: new Set<string>(),
@@ -64,6 +65,7 @@ describe("transcript rows", () => {
 						},
 					],
 					status: "completed",
+					review: null,
 				},
 				{
 					id: "t1",
@@ -215,6 +217,7 @@ describe("transcript rows", () => {
 					kind: "fileChange",
 					changes: [change, change],
 					status: "completed",
+					review: null,
 				},
 			]),
 		});
@@ -238,6 +241,7 @@ describe("transcript rows", () => {
 						},
 					],
 					status: "completed",
+					review: null,
 				},
 			]),
 		});
@@ -249,5 +253,28 @@ describe("transcript rows", () => {
 		expect(summary).toContain("+1 −1");
 		expect(rows[0]?.querySelector("del")?.textContent).toBe("-beta");
 		expect(rows[0]?.querySelector("ins")?.textContent).toBe("+gamma");
+	});
+
+	test("shows the edit review under a file change and the turn review after the rows", () => {
+		const { container } = render(Transcript, {
+			props: {
+				...props([
+					{
+						id: "f3",
+						kind: "fileChange",
+						changes: [],
+						status: "completed",
+						review: { verdict: "flagged", summary: "Flagged: removed code" },
+					},
+				]),
+				turnReview: { verdict: "uncertain", summary: "Uncertain: incomplete" },
+			},
+		});
+		const editReview = container.querySelector(".edit-review");
+		expect(editReview?.getAttribute("data-verdict")).toBe("flagged");
+		expect(editReview?.textContent).toBe("Flagged: removed code");
+		const turnReview = container.querySelector(".turn-review");
+		expect(turnReview?.getAttribute("data-verdict")).toBe("uncertain");
+		expect(turnReview?.textContent).toBe("Uncertain: incomplete");
 	});
 });

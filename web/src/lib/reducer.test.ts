@@ -614,3 +614,118 @@ describe("thread status order", () => {
 		});
 	});
 });
+
+describe("edit review", () => {
+	const review = {
+		verdict: "flagged" as const,
+		summary: "Flagged: removed code",
+	};
+	const turn = {
+		id: "turn-1",
+		status: "inProgress" as const,
+		items: [],
+		error: null,
+	};
+	const change: TranscriptItem = {
+		id: "call-7",
+		kind: "fileChange",
+		changes: [],
+		status: "completed",
+		review: null,
+	};
+
+	function openWithChange() {
+		const started = reduceNotification(emptyTranscript("thread-1"), {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn,
+		});
+		return reduceNotification(started, {
+			type: "itemCompleted",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			item: change,
+		});
+	}
+
+	test("toolJudged sets the review on its file change and ignores other threads", () => {
+		const state = openWithChange();
+		const judged = reduceNotification(state, {
+			type: "toolJudged",
+			threadId: "thread-1",
+			itemId: "call-7",
+			review,
+		});
+		expect(judged.items).toEqual([{ ...change, review }]);
+		expect(
+			reduceNotification(state, {
+				type: "toolJudged",
+				threadId: "thread-2",
+				itemId: "call-7",
+				review,
+			}),
+		).toBe(state);
+		expect(
+			reduceNotification(state, {
+				type: "toolJudged",
+				threadId: "thread-1",
+				itemId: "call-9",
+				review,
+			}),
+		).toBe(state);
+	});
+
+	test("turnJudged sets turnReview for the open turn only", () => {
+		const state = openWithChange();
+		const turnReview = {
+			verdict: "uncertain" as const,
+			summary: "Uncertain: incomplete",
+		};
+		const judged = reduceNotification(state, {
+			type: "turnJudged",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			review: turnReview,
+		});
+		expect(judged.turnReview).toEqual(turnReview);
+		expect(
+			reduceNotification(state, {
+				type: "turnJudged",
+				threadId: "thread-1",
+				turnId: "turn-9",
+				review: turnReview,
+			}),
+		).toBe(state);
+		expect(
+			reduceNotification(state, {
+				type: "turnJudged",
+				threadId: "thread-2",
+				turnId: "turn-1",
+				review: turnReview,
+			}),
+		).toBe(state);
+	});
+
+	test("turnStarted of a new turn clears turnReview", () => {
+		const judged = reduceNotification(openWithChange(), {
+			type: "turnJudged",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			review,
+		});
+		expect(
+			reduceNotification(judged, {
+				type: "turnStarted",
+				threadId: "thread-1",
+				turn,
+			}).turnReview,
+		).toEqual(review);
+		expect(
+			reduceNotification(judged, {
+				type: "turnStarted",
+				threadId: "thread-1",
+				turn: { ...turn, id: "turn-2" },
+			}).turnReview,
+		).toBeNull();
+	});
+});

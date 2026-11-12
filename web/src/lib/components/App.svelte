@@ -88,6 +88,7 @@ const openThreadFlags = $derived(
 			turnStatus={session.transcript.turnStatus}
 			error={session.transcript.error}
 			plan={session.transcript.plan}
+			turnReview={session.transcript.turnReview}
 			connected={session.connection === "connected"}
 			childThreadIds={session.transcript.childThreadIds}
 			threads={session.threads}

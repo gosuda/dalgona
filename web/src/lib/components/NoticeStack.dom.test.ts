@@ -246,6 +246,7 @@ function transcript(items: readonly TranscriptItem[], turnStatus: TurnStatus) {
 		turnStatus,
 		error: null,
 		plan: null,
+		turnReview: null,
 		connected: true,
 		childThreadIds: [],
 		threads: [],

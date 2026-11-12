@@ -1,6 +1,7 @@
 import type {
 	AppNotification,
 	ApprovalRequest,
+	EditReview,
 	RequestId,
 	ThreadDetail,
 	TranscriptItem,
@@ -32,6 +33,7 @@ export function emptyTranscript(threadId: string | null): TranscriptState {
 		plan: null,
 		childThreadIds: [],
 		turnStartedAtMs: null,
+		turnReview: null,
 	};
 }
 
@@ -63,6 +65,7 @@ export function transcriptForThread(
 		plan: null,
 		childThreadIds: [...preserved],
 		turnStartedAtMs,
+		turnReview: null,
 	};
 }
 
@@ -193,6 +196,23 @@ function applyDelta(
 	return withItems(state, next);
 }
 
+function withToolReview(
+	state: TranscriptState,
+	itemId: string,
+	review: EditReview,
+): TranscriptState {
+	const index = state.items.findIndex(
+		(entry) => entry.id === itemId && entry.kind === "fileChange",
+	);
+	const current = state.items[index];
+	if (current?.kind !== "fileChange") {
+		return state;
+	}
+	const next = state.items.slice();
+	next[index] = { ...current, review };
+	return withItems(state, next);
+}
+
 export function reduceNotification(
 	state: TranscriptState,
 	notification: AppNotification,
@@ -253,6 +273,8 @@ export function reduceNotification(
 				error: notification.turn.error,
 				plan: state.plan?.turnId === notification.turn.id ? state.plan : null,
 				turnStartedAtMs: notification.turn.startedAtMs ?? null,
+				turnReview:
+					state.turnId === notification.turn.id ? state.turnReview : null,
 			};
 		}
 		case "turnCompleted": {
@@ -317,6 +339,21 @@ export function reduceNotification(
 				turnStatus: notification.willRetry ? state.turnStatus : "failed",
 				error: notification.message,
 			};
+		}
+		case "toolJudged": {
+			if (!sameThread(state, notification.threadId)) {
+				return state;
+			}
+			return withToolReview(state, notification.itemId, notification.review);
+		}
+		case "turnJudged": {
+			if (
+				!sameThread(state, notification.threadId) ||
+				notification.turnId !== state.turnId
+			) {
+				return state;
+			}
+			return { ...state, turnReview: notification.review };
 		}
 		default:
 			return state;
