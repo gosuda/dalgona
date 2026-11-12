@@ -67,6 +67,7 @@ func (s *server) modelList(ctx context.Context, _ jsontext.Value) (jsontext.Valu
 			ID: m.ID, Model: m.ID, DisplayName: m.ID, IsDefault: m.ID == current,
 			DefaultReasoningEffort: defaultEffort(m.Efforts), SupportedReasoningEfforts: efforts,
 			ContextWindow: m.Context, Provider: provider(m.ID), Presets: presetRoles(m.ID),
+			InputModalities: inputModalities(m.Images),
 		})
 	}
 	return encode(response)
@@ -88,6 +89,13 @@ func presetRoles(id string) []string {
 		}
 	}
 	return roles
+}
+
+func inputModalities(images bool) []string {
+	if images {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
 }
 
 func defaultEffort(efforts []string) string {

@@ -266,10 +266,15 @@ func (h *Host) capabilities(ctx context.Context, registry *model.Registry, id st
 	}
 	preset, _ := model.Capabilities(provider, modelID)
 	reported := model.Model{ID: modelID, Context: preset.Context}
+	listed := false
 	for _, item := range h.providerModels(ctx, registry, provider) {
 		if item.ID == modelID || item.ID == id {
 			reported = item
+			listed = true
 		}
+	}
+	if !listed {
+		reported.Images = sendsImages(registry, provider)
 	}
 	if len(reported.Efforts) == 0 {
 		reported.Efforts = preset.Efforts

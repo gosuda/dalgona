@@ -140,6 +140,7 @@ type (
 		ContextWindow             int                     `json:"contextWindow"`
 		Provider                  string                  `json:"provider"`
 		Presets                   []string                `json:"presets"`
+		InputModalities           []string                `json:"inputModalities"`
 	}
 	ReasoningEffortOption struct {
 		ReasoningEffort string `json:"reasoningEffort"`

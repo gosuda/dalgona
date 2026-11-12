@@ -367,6 +367,7 @@ func (p *Provider) listedModel(config *wire.ClientModelConfig, seen map[string]b
 		ID:         id,
 		Context:    model.ContextWindow(id, reported, p.cfg.ContextWindows),
 		MaxOutput:  int(info.MaxOutputTokens),
+		Images:     config.SupportsImages,
 		ToolChoice: true,
 	}, true
 }

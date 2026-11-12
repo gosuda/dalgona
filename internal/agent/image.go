@@ -151,3 +151,12 @@ func checkImageRecord(image event.Image, mime string, size int) error {
 func blobMismatch(image event.Image) error {
 	return fmt.Errorf("agent: image blob %s does not match its journal record", image.Blob.Blob)
 }
+
+func sendsImages(registry *model.Registry, provider string) bool {
+	adapter, ok := registry.Provider(provider)
+	if !ok {
+		return false
+	}
+	sender, ok := adapter.(model.ImageSender)
+	return ok && sender.SendsImages()
+}

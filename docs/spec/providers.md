@@ -74,6 +74,8 @@ The stream MUST stop when its context is canceled. A consumer MAY use `Next` or 
 
 `Models` MUST use the provider list endpoint and MUST follow its pagination until the provider reports no further page. Anthropic MUST page with `after_id` set to `last_id` while `has_more` is true. Google MUST page with `nextPageToken`. A repeated page cursor MUST fail. Each capability record MUST include the model id, context window, output limit, effort levels, and tool-choice support when known. Unknown numeric limits MUST remain zero, except for the context default. The context window MUST use the configured value for the bare model id first, then the provider-reported input limit, then 128000. Anthropic MUST read `max_input_tokens`, `max_tokens`, and the levels under `capabilities.effort`. Chat-compatible lists MUST read `context_length`, then `top_provider.context_length`, and `top_provider.max_completion_tokens`. Google MUST read `inputTokenLimit` and `outputTokenLimit` and skip models without `generateContent`. Other list endpoints MUST leave effort levels nil.
 
+The Anthropic, OpenAI, and Google adapters MUST report images for each listed model. Every other adapter MUST report images for a model only when its provider metadata says that the model accepts images.
+
 Static role presets MUST match the decision table. Providers without a static preset MUST use their first offered model for `smol` and `slow`. An unavailable preset MUST return the thread model and this exact log line: `roles.<name> preset <id> is not offered; using <model>`.
 
 Effort clamping MUST choose the highest supported level at or below the request. It MUST choose the lowest supported level when every level exceeds the request. Nil effort support MUST omit the effort field.

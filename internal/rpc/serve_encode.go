@@ -171,6 +171,12 @@ func (m Model) write(o *out) {
 		o.text(role)
 	}
 	o.closeArray()
+	o.key("inputModalities")
+	o.openArray()
+	for _, modality := range m.InputModalities {
+		o.text(modality)
+	}
+	o.closeArray()
 	o.close()
 }
 

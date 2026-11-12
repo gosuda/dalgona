@@ -123,7 +123,7 @@ func decodeChatRequest(t *testing.T, body []byte) *wire.GetChatMessageRequest {
 
 func serveModels(w http.ResponseWriter) {
 	response := wire.GetCliModelConfigsResponse{Models: []wire.ClientModelConfig{
-		{ModelUIDView: []byte("swe-1-6"), LabelView: []byte("SWE-1.6"), ContextWindow: 200000, ModelInfo: &wire.ModelInfo{MaxOutputTokens: 64000}},
+		{ModelUIDView: []byte("swe-1-6"), LabelView: []byte("SWE-1.6"), ContextWindow: 200000, SupportsImages: true, ModelInfo: &wire.ModelInfo{MaxOutputTokens: 64000}},
 		{ModelUIDView: []byte("router"), ModelInfo: &wire.ModelInfo{ModelRouter: true}},
 		{ModelUIDView: []byte("old"), Disabled: true},
 		{ModelUIDView: []byte("swe-1-6"), ContextWindow: 1},
@@ -389,5 +389,20 @@ func TestMissingEnvironmentKey(t *testing.T) {
 	t.Setenv("DEVIN_API_KEY", "")
 	if _, err := devin.APIKeyFromEnv(t.Context()); err == nil || err.Error() != "DEVIN_API_KEY is not set" {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestListedModelCarriesSupportsImages(t *testing.T) {
+	var retries atomic.Int32
+	_, server := newFake(t, textTurn)
+	models, err := newProvider(server, &retries).Models(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %d, want 2", len(models))
+	}
+	if !models[0].Images || models[1].Images {
+		t.Fatalf("images = %v %v, want swe-1-6 true and swe-1-6-fast false", models[0].Images, models[1].Images)
 	}
 }
