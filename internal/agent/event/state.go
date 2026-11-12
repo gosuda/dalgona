@@ -38,9 +38,14 @@ type ApprovalState struct {
 	GrantPrefix string
 }
 
+type scriptEffectSeen struct {
+	Op      string
+	ArgsSHA string
+}
+
 type ScriptState struct {
 	NextEffect uint64
-	Seen       map[uint64]struct{}
+	Seen       map[uint64]scriptEffectSeen
 }
 
 type ChildState struct {
@@ -688,13 +693,16 @@ func foldScriptEffect(s *State, e ScriptEffect) error {
 	if !exists {
 		return fmt.Errorf("event: fold: unexpected script effect %s/%d", e.RunID, e.N)
 	}
-	if _, seen := run.Seen[e.N]; seen {
+	if seen, dup := run.Seen[e.N]; dup {
+		if seen.Op != e.Op || seen.ArgsSHA != e.ArgsSHA {
+			return fmt.Errorf("event: fold: script effect %s/%d mismatch", e.RunID, e.N)
+		}
 		return fmt.Errorf("event: fold: duplicate script effect %s/%d", e.RunID, e.N)
 	}
 	if run.Seen == nil {
-		run.Seen = make(map[uint64]struct{})
+		run.Seen = make(map[uint64]scriptEffectSeen)
 	}
-	run.Seen[e.N] = struct{}{}
+	run.Seen[e.N] = scriptEffectSeen{Op: e.Op, ArgsSHA: e.ArgsSHA}
 	run.NextEffect = max(run.NextEffect, e.N+1)
 	s.Scripts[e.RunID] = run
 	return nil
