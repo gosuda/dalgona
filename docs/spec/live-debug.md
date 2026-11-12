@@ -84,6 +84,8 @@ The command MUST allow 10 seconds for a client to send its request headers.
 `just live-up` MUST write one configuration for each product. The `dalgona` configuration MUST set `[edit_review] feedback` to `lost_code`.
 `just live-up` MUST start the scripted server on `127.0.0.1:18080` and record its requests to `/tmp/dg/requests.jsonl`.
 `just live-up` MUST start the daemon and `dalgona web` with isolated homes.
+The daemon and `dalgona web` MUST use `/tmp/dg/ws` as their working directory.
+A new web thread MUST therefore read the fixture workspace.
 `just live-up` MUST write the web address to `/tmp/dg/web.url` and the environment exports to `/tmp/dg/env`.
 `just live-check` MUST run `just live-up`, then one `read` turn through `dal` and one through `dalgona`.
 `just live-check` MUST pass only when two requests name the turn `t-read-2` and no request is unmatched.

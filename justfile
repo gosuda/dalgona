@@ -179,11 +179,11 @@ live-up:
     echo $! > "$w/llmstub.pid"
     for _ in $(seq 50); do grep -q '^llmstub: serving ' "$w/llmstub.log" && break; sleep 0.1; done
     grep -qx 'llmstub: serving http://127.0.0.1:18080/v1' "$w/llmstub.log" || { echo "live-up: llmstub did not start; see $w/llmstub.log" >&2; exit 1; }
-    "${base[@]}" nohup "$w/bin/dalgona" daemon >/dev/null 2>"$w/daemon.stderr" &
+    (cd "$w/ws" && exec "${base[@]}" "$w/bin/dalgona" daemon >/dev/null 2>"$w/daemon.stderr") &
     echo $! > "$w/daemon.pid"
     for _ in $(seq 50); do test -S "$w/dgh/dalgona.sock" && break; sleep 0.1; done
     test -S "$w/dgh/dalgona.sock" || { echo "live-up: daemon did not start; see $w/daemon.stderr" >&2; exit 1; }
-    "${base[@]}" nohup "$w/bin/dalgona" web >/dev/null 2>"$w/web.log" &
+    (cd "$w/ws" && exec "${base[@]}" "$w/bin/dalgona" web >/dev/null 2>"$w/web.log") &
     echo $! > "$w/web.pid"
     re='^http://127\.0\.0\.1:[0-9]+/#token=[A-Za-z0-9_-]+$'
     for _ in $(seq 100); do grep -Eq "$re" "$w/web.log" && break; sleep 0.1; done
