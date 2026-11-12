@@ -54,7 +54,7 @@ var (
 	errReviewMask         = errors.New("review: the judge state could not be masked")
 	errReviewSecret       = errors.New("review: the judge state held an unmasked secret")
 	errReviewNoPart       = errors.New("review: no part fits the request limit")
-	reviewBuiltInSpeakers = []string{}
+	reviewBuiltInSpeakers = speakersOf(reviewQuestions)
 	reviewConcurrency     = regexp.MustCompile(`\bgo\s+\w|\bchan\b|\bsync\.|\batomic\.|\bselect\s*\{|Mutex|WaitGroup|\basync\b|\bawait\b|Promise|\bWorker\b|\bspawn\b|Thread|threading|asyncio|tokio|\bArc<|setTimeout|setInterval`)
 	hunkHeader            = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 	allKinds              = []string{"code", "interface", "config", "text"}
@@ -64,6 +64,7 @@ type reviewQuestion struct {
 	id, label, feedback, instructions, yes, no string
 	kinds                                      []string
 	turn, concurrent, needsTask                bool
+	speaker                                    bool
 }
 
 var reviewQuestions = []reviewQuestion{
@@ -82,6 +83,16 @@ var reviewQuestions = []reviewQuestion{
 	{id: "off_token", label: "off-token style", feedback: "An added style may use a literal colour, font, spacing, or radius, add a gradient, or remove a focus outline.", instructions: "Do the added styles in `files[].diff` set literal values where the shown lines use variables, or add a gradient or remove a focus outline? Judge only the lines shown.", yes: "An added style sets a literal colour, font, spacing or radius where the shown lines of that file use variables for that kind of value, or it adds a gradient, or it removes a focus outline.", no: "Every added colour, font, spacing and radius uses a variable where the shown lines do, and no added style adds a gradient or removes a focus outline.", kinds: []string{"interface"}},
 	{id: "layout_motion", label: "layout or motion", feedback: "An added style may fix a size in pixels with no narrow-screen rule, or add motion with no reduced-motion rule.", instructions: "Do the added styles in `files[].diff` fix a container's size in pixels or hide overflow with no narrow-screen rule, or add motion with no reduced-motion rule? Judge only the lines shown.", yes: "An added style fixes a container's width or height in pixels or hides overflowing text with no rule for narrow screens in the shown lines, or it adds an animation or transition with no reduced-motion rule, or it transitions `all`.", no: "Every added size bends with its container or has a narrow-screen rule in the shown lines, and every added animation or transition names its properties and has a reduced-motion rule.", kinds: []string{"interface"}},
 	{id: "incomplete", label: "incomplete", feedback: "The task may name a change that the diff does not make, or leave a placeholder where the task needs working code.", instructions: "Does the diff in `files[].diff` leave a change that `task` names undone, or leave a placeholder where `task` needs working code? Judge only the lines shown.", yes: "`task` names a change, file, case or test that no hunk of the diff makes, or a hunk leaves a placeholder where `task` needs working code.", no: "Every change that `task` names appears in the diff as working code.", kinds: allKinds, turn: true, needsTask: true},
+}
+
+func speakersOf(table []reviewQuestion) []string {
+	var out []string
+	for _, q := range table {
+		if q.speaker {
+			out = append(out, q.id)
+		}
+	}
+	return out
 }
 
 type reviewRound struct {
@@ -388,7 +399,7 @@ func (w *worker) prepareUnit(ctx context.Context, task, name string, changes []e
 	if err != nil {
 		return unitInput{paths: paths, err: err}
 	}
-	parts, omitted, err := packMasked(h, task, name, diffs)
+	parts, omitted, err := packMasked(h.maskReview, task, name, diffs)
 	if err != nil {
 		return unitInput{paths: paths, err: err}
 	}
@@ -414,17 +425,25 @@ func maskReviewPaths(h *Host, changes []event.FileChange) ([]string, error) {
 	return paths, nil
 }
 
-func packMasked(h *Host, task, name string, diffs []fileDiff) ([]judgeInput, int, error) {
+func packMasked(mask func(string) (string, error), task, name string, diffs []fileDiff) ([]judgeInput, int, error) {
 	parts, omitted, err := packParts(task, name, diffs)
 	if err != nil {
 		return nil, 0, err
 	}
 	for _, part := range parts {
-		if err := requireMasked(h.maskReview, part.state); err != nil {
+		if err := requireMasked(mask, part.state); err != nil {
 			return nil, 0, err
 		}
 	}
 	return parts, omitted, nil
+}
+
+func buildReview(task, name string, files []reviewFile) ([]judgeInput, int, error) {
+	diffs, err := diffFiles(files, reviewContextLines)
+	if err != nil {
+		return nil, 0, err
+	}
+	return packParts(task, name, diffs)
 }
 
 func (w *worker) loadUnitFiles(ctx context.Context, changes []event.FileChange, paths []string) ([]reviewFile, unitInput, error) {

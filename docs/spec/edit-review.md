@@ -148,3 +148,73 @@ The `summary` of an `uncertain` verdict MUST start with `Uncertain:`. The `summa
 A review that covered part of the diff MUST add `part of the diff was not judged` to a `flagged` or `uncertain` summary.
 
 These notifications are live only. The server MUST NOT return them in thread history.
+
+## Measurement
+
+The corpus holds 472 cases in `internal/agent/testdata/editreview/cases.jsonl`. `ratchet.json` in the same directory records the SHA-256 of that file.
+
+The cases come from the history of this repository at commit `3c4b6f94`. Counted over every file of every sound commit, the history holds 24 interface-kind file changes. The sound-edit interface quota is therefore 24, not 36.
+
+| Group | Cases | Held out | Source |
+|---|---|---|---|
+| sound-edit | 108 | 54 | single-file edits that add lines: 60 code, 24 interface, 12 config, 12 text; multi-file commits fill the interface quota |
+| sound-turn | 30 | 15 | turns whose subject names a changed file |
+| multipart | 40 | 20 | edits that need two or more parts |
+| moved | 1 | 0 | the one history commit that meets the different-part packing rule for one top-level Go function |
+| 14 defect groups | 293 | 145 | one group for each question id except `sound`; eight groups hold 30 cases, and six short groups hold their pool size |
+
+In each group, the case ids sort by the SHA-256 of each id. Even positions are `dev`, and odd positions are `held_out`. The held-out split holds 234 cases: 89 sound cases and 145 defect cases.
+
+Each defect case takes one single-file sound edit, or one turn whose subject names a changed file, and applies one rule. A subject names a file when the file's base name occurs in the subject as a whole word. The builder is `internal/agent/review_corpus_build_test.go`.
+
+| Question | Rule |
+|---|---|
+| `broken_syntax` | delete the last added closing bracket, brace, parenthesis or `/>` |
+| `lost_code` | delete the first unchanged statement that no hunk touches |
+| `wrong_logic` | swap the first comparison or logical operator in an added code line |
+| `placeholder` | replace the first added non-blank line with a placeholder comment |
+| `off_task` | rename the first unchanged name that no added line uses |
+| `needless_layer` | add a wrapper that forwards the parameters of a function in the same file, and call it from the first added call |
+| `narration` | add a comment above the first added statement that repeats it |
+| `unguarded_state` | delete one unchanged lock or channel line from a concurrent code edit |
+| `wasted_work` | wrap the first added call in a three-pass loop |
+| `unsafe_input` | add a literal credential line to a code or config edit |
+| `unclear_contract` | rename the first added function to `handle` |
+| `off_token` | replace the first added CSS variable with a literal colour |
+| `layout_motion` | add `transition: all 0.3s;` to the first added CSS block |
+| `incomplete` | remove the file that the turn subject names from a turn |
+
+The defect pools were counted in one pass over the 1,640 non-merge commits of the history, with no quota cutoff. A defect rule takes one file of a single-file sound commit, and `incomplete` takes a turn. The pool is the number of commits where the rule finds a target.
+
+| Question | Plan quota | Pool | Used |
+|---|---|---|---|
+| `broken_syntax` | 30 | 279 | 30 |
+| `lost_code` | 30 | 82 | 30 |
+| `wrong_logic` | 30 | 196 | 30 |
+| `placeholder` | 30 | 563 | 30 |
+| `off_task` | 30 | 89 | 30 |
+| `needless_layer` | 30 | 7 | 7 |
+| `narration` | 30 | 500 | 30 |
+| `unguarded_state` | 30 | 2 | 2 |
+| `wasted_work` | 30 | 23 | 23 |
+| `unsafe_input` | 30 | 536 | 30 |
+| `unclear_contract` | 30 | 19 | 19 |
+| `off_token` | 30 | 0 | 0 |
+| `layout_motion` | 30 | 2 | 2 |
+| `incomplete` | 30 | 385 | 30 |
+
+`off_token` yields no case under this rule, because the history has no single-file interface edit that adds a `var(--...)` line. The held-out split holds 25 cases of the six short groups: 3 `needless_layer`, 1 `unguarded_state`, 11 `wasted_work`, 9 `unclear_contract` and 1 `layout_motion`.
+
+Counting one file of every multi-file sound commit as well would find more candidates. The counts are 89 for `needless_layer`, 38 for `unguarded_state`, 280 for `wasted_work`, 283 for `unclear_contract`, 11 for `layout_motion` and 3 for `off_token`. The rule keeps to single-file commits, so those commits are not cases.
+
+The held-out run sends one request for each part of each held-out case. It needs `DALGONA_EDIT_REVIEW_EVAL=decisions:typesafe/jev-1.14` and `OPENROUTER_API_KEY`, and it skips without them.
+
+The sound flag rate counts each part of each sound case, because each part can speak alone. Precision, recall and true flags count each case once. Recall is absent when no held-out case is a positive for the question. A case flags a question when any of its parts flags it.
+
+A unit whose parts all fail is one error. The test fails when more than 5 percent of held-out units error. The test logs, for each question, its true, false and missed flags, its precision and its recall, and the ids of the errored cases. The test logs the p95 latency of each part. A p95 above 4 seconds MUST set `reviewMaxParts` to 4 before the feature is on by default.
+
+A question MUST NOT speak until a measurement names it. A question names itself when its held-out precision is at least 0.9 and it has at least 5 held-out true flags.
+
+Before the feature is on by default, every question MUST have held-out precision of at least 0.9 and recall of at least 0.5. The sound flag rate MUST be at most 0.02. A question whose precision or recall is absent fails the gate. The ratchet check MUST compare every question that `ratchet.json` records, and a question missing from the run fails the check.
+
+No live run has been made. `OPENROUTER_API_KEY` was absent when the corpus was built. `ratchet.json` holds `measured: null`, so no speaker is measured. `reviewBuiltInSpeakers` derives from the `speaker` flag of each question in `reviewQuestions`, and every flag is unset.
