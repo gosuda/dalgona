@@ -1,7 +1,10 @@
 <script lang="ts">
+import { slashCommands } from "#lib/commands.ts";
 import ApprovalCard from "#lib/components/ApprovalCard.svelte";
 import Composer from "#lib/components/Composer.svelte";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
+import KeyListPanel from "#lib/components/panels/KeyListPanel.svelte";
+import Panel from "#lib/components/panels/Panel.svelte";
 import QuestionCard from "#lib/components/QuestionCard.svelte";
 import StateTag from "#lib/components/StateTag.svelte";
 import StatusBand from "#lib/components/StatusBand.svelte";
@@ -84,11 +87,32 @@ const subagentTitle = $derived.by(() => {
 	const thread = session.threads.find((entry) => entry.id === request.threadId);
 	return thread === undefined ? request.threadId : threadTitle(thread);
 });
+
+const genericTitle = $derived(
+	session.panel === null
+		? ""
+		: `/${slashCommands.find((command) => command.panel === session.panel)?.name ?? ""}`,
+);
+
+function isTyping(target: EventTarget | null): boolean {
+	return (
+		target instanceof HTMLElement &&
+		target.matches("input, textarea, select, [contenteditable]")
+	);
+}
+
+function onWindowKeydown(event: KeyboardEvent): void {
+	if (event.key !== "?" || event.defaultPrevented) return;
+	if (event.ctrlKey || event.metaKey || event.altKey) return;
+	if (session.panel !== null || isTyping(document.activeElement)) return;
+	session.openPanel("keys");
+}
 </script>
 
 <svelte:head>
 	<title>{titleText}</title>
 </svelte:head>
+<svelte:window onkeydown={onWindowKeydown} />
 
 <a class="skip-link" href="#transcript">Skip to transcript</a>
 
@@ -197,10 +221,20 @@ const subagentTitle = $derived.by(() => {
 				onFollowup={(text) => session.queueFollowup(text)}
 				onInterrupt={() => void session.interruptTurn()}
 				retrying={session.retryRemainingMs !== null}
+				onOpenPanel={(kind) => session.openPanel(kind)}
 			/>
 		</div>
 	</main>
 </div>
+
+<KeyListPanel open={session.panel === "keys"} onClose={() => session.closePanel()} />
+<Panel
+	title={genericTitle}
+	open={session.panel !== null && session.panel !== "keys"}
+	onClose={() => session.closePanel()}
+>
+	{#snippet children()}{/snippet}
+</Panel>
 
 <style>
 	.shell {

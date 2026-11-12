@@ -289,3 +289,34 @@ While a turn runs, the first Escape MUST show `Esc again to interrupt` in the he
 A second Escape within those two seconds MUST interrupt the turn.
 During a rate-limit wait, one Escape MUST interrupt the turn at once.
 Escape while no turn runs MUST do nothing.
+
+### Commands and panels
+
+A message that starts with `/` MUST open the command list.
+The command list MUST show each command whose name starts with the text after `/`. Once a space follows, the command list MUST show nothing, and Enter MUST open no panel and keep the message field.
+ArrowUp and ArrowDown MUST move the highlight through the list.
+Enter or Tab MUST open the panel of the highlighted command and MUST clear the message field.
+Escape MUST close the command list and MUST keep the message field.
+Recalling a message or editing a follow-up MUST reopen the command list when the text starts with `/`.
+A message that starts with `//` MUST be sent with one slash removed.
+A first word that holds a second slash, such as `/etc/hosts`, MUST be sent as text.
+Submit with a command name that no command has MUST NOT send the message.
+That submit MUST show `No command named /<name>. Start with // to send a message that begins with /.`
+
+| Command | Panel | Summary |
+|---|---|---|
+| `/model` | model | Choose a model or preset |
+| `/settings` | settings | Change theme, verbosity, approval, status items, edit review, and notifications |
+| `/login` | login | Log in to a provider |
+| `/resume` | resume | Open an earlier thread |
+| `/new` | new | Start a new thread |
+| `/compact` | compact | Compact this thread |
+| `/fork` | fork | Fork this thread at a turn |
+| `/tree` | tree | Move to another branch of this thread |
+| `/revert` | rewind | Rewind to before a turn |
+| `/advisor` | advisor | Show or change the advisor |
+| `/review` | review | Review changes |
+| `/help` | keys | Show keys |
+
+Pressing `?` while no field has focus MUST open the key list.
+Escape MUST close a panel and MUST return focus to the element that opened it.

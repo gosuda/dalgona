@@ -1,3 +1,4 @@
+import type { PanelKind } from "./commands";
 import { threadTitle } from "./labels";
 import { RpcError, rpcSocketUrl, tokenFromHash } from "./protocol";
 import { questionResponse, resolutionNotice } from "./question";
@@ -192,6 +193,7 @@ export class Session {
 	retryWait: RetryWait | null = $state(null);
 	completedThreadIds: ReadonlySet<string> = $state(new Set());
 	verbosity: Verbosity = $state("medium");
+	panel: PanelKind | null = $state(null);
 	private noticeSeq = 0;
 
 	running: boolean = $derived(this.transcript.turnStatus === "inProgress");
@@ -361,6 +363,14 @@ export class Session {
 
 	dismiss(id: number): void {
 		this.notices = this.notices.filter((notice) => notice.id !== id);
+	}
+
+	openPanel(kind: PanelKind): void {
+		this.panel = kind;
+	}
+
+	closePanel(): void {
+		this.panel = null;
 	}
 
 	private clearErrors(): void {

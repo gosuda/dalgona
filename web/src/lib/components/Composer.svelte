@@ -1,5 +1,11 @@
 <script lang="ts">
 import { onDestroy, tick } from "svelte";
+import {
+	type PanelKind,
+	parseComposerText,
+	slashCommands,
+} from "#lib/commands.ts";
+import CommandPalette from "#lib/components/CommandPalette.svelte";
 import FollowupQueue from "#lib/components/FollowupQueue.svelte";
 import { handoffFocus } from "#lib/focus.ts";
 import type { KeywordMatch } from "#lib/types.ts";
@@ -19,6 +25,7 @@ interface Props {
 	onFollowup: (text: string) => void;
 	onInterrupt: () => void;
 	retrying?: boolean;
+	onOpenPanel?: (kind: PanelKind) => void;
 }
 
 let {
@@ -34,6 +41,7 @@ let {
 	onFollowup,
 	onInterrupt,
 	retrying = false,
+	onOpenPanel,
 }: Props = $props();
 let text = $state("");
 let error = $state("");
@@ -46,11 +54,33 @@ let region = $state<HTMLElement>();
 let guardUntil = $state(0);
 let guardTimer: ReturnType<typeof setTimeout> | undefined;
 const interruptArmed = $derived(running && guardUntil > 0);
+const parsed = $derived(parseComposerText(text));
+const commandQuery = $derived(parsed.kind === "command" ? parsed.query : null);
+let paletteClosed = $state(false);
+let paletteActive = $state(0);
+const paletteOpen = $derived(commandQuery !== null && !paletteClosed);
+const paletteId = "command-palette";
 
 function disarm(): void {
 	clearTimeout(guardTimer);
 	guardTimer = undefined;
 	guardUntil = 0;
+}
+
+function openPanel(kind: PanelKind): void {
+	text = "";
+	browsing = null;
+	error = "";
+	onOpenPanel?.(kind);
+}
+
+function submitCommand(query: string): void {
+	const command = slashCommands.find((entry) => entry.name === query);
+	if (command === undefined) {
+		error = `No command named /${query}. Start with // to send a message that begins with /.`;
+		return;
+	}
+	openPanel(command.panel);
 }
 
 $effect(() => {
@@ -107,6 +137,10 @@ function validText(): string | null {
 }
 
 function submitPrimary(): void {
+	if (commandQuery !== null) {
+		submitCommand(commandQuery);
+		return;
+	}
 	const value = validText();
 	if (!value) return;
 	if (running) {
@@ -128,12 +162,16 @@ function queueFollowup(): void {
 
 function editFollowup(index: number): void {
 	const restored = onEditFollowup(index);
-	if (restored !== undefined) text = restored;
+	if (restored !== undefined) {
+		text = restored;
+		paletteClosed = false;
+	}
 	textarea?.focus();
 }
 
 function showRecall(value: string): void {
 	text = value;
+	paletteClosed = false;
 	void tick().then(() => textarea?.setSelectionRange(0, 0));
 }
 
@@ -168,6 +206,7 @@ function recallFromKey(event: KeyboardEvent): boolean {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+	if (event.defaultPrevented) return;
 	if (event.isComposing) return;
 	if (recallFromKey(event)) {
 		event.preventDefault();
@@ -205,9 +244,26 @@ function onKeydown(event: KeyboardEvent): void {
 			placeholder="Fix the failing test and verify the change"
 			aria-invalid={error ? "true" : "false"}
 			aria-describedby="composer-help composer-error"
+			role={paletteOpen ? "combobox" : undefined}
+			aria-expanded={paletteOpen ? "true" : undefined}
+			aria-controls={paletteOpen ? paletteId : undefined}
+			aria-activedescendant={paletteOpen ? `${paletteId}-${paletteActive}` : undefined}
 			onkeydown={onKeydown}
-			oninput={() => (browsing = null)}
+			oninput={() => {
+				browsing = null;
+				paletteClosed = false;
+			}}
 		></textarea>
+		{#if paletteOpen}
+			<CommandPalette
+				id={paletteId}
+				field={textarea}
+				query={commandQuery ?? ""}
+				bind:active={paletteActive}
+				onOpen={openPanel}
+				onClose={() => (paletteClosed = true)}
+			/>
+		{/if}
 		{#if matches.length > 0}
 			<p class="keywords">Keywords: {matches.map((match) => match.word).join(", ")}</p>
 		{/if}

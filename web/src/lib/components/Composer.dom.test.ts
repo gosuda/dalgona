@@ -231,3 +231,89 @@ describe("interrupt guard", () => {
 		);
 	});
 });
+
+describe("command palette", () => {
+	afterEach(cleanup);
+
+	test("Enter after a command's space keeps the argument and opens no panel", async () => {
+		const onOpenPanel = vi.fn();
+		render(Composer, { props: { ...baseProps(), onOpenPanel } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "/model foo" } });
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(onOpenPanel).not.toHaveBeenCalled();
+		expect(field.value).toBe("/model foo");
+	});
+
+	test("Escape closes the command list and keeps the message field", async () => {
+		render(Composer, { props: baseProps() });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "/mo" } });
+		expect(screen.getByRole("listbox", { name: "Commands" })).toBeTruthy();
+		await fireEvent.keyDown(field, { key: "Escape" });
+		expect(screen.queryByRole("listbox", { name: "Commands" })).toBeNull();
+		expect(field.value).toBe("/mo");
+	});
+
+	test("Enter with an unknown command does not send the message", async () => {
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "/zzz" } });
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(onSend).not.toHaveBeenCalled();
+		expect(
+			screen.getByText(
+				"No command named /zzz. Start with // to send a message that begins with /.",
+			),
+		).toBeTruthy();
+	});
+
+	test("Tab opens the highlighted command", async () => {
+		const onOpenPanel = vi.fn();
+		render(Composer, { props: { ...baseProps(), onOpenPanel } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "/mo" } });
+		await fireEvent.keyDown(field, { key: "Tab" });
+		expect(onOpenPanel).toHaveBeenCalledWith("model");
+	});
+
+	test("recalling a command reopens the command list after Escape", async () => {
+		render(Composer, { props: { ...baseProps(), history: ["/model"] } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "/mo" } });
+		await fireEvent.keyDown(field, { key: "Escape" });
+		field.setSelectionRange(0, 0);
+		await fireEvent.keyDown(field, { key: "ArrowUp" });
+		expect(field.value).toBe("/model");
+		expect(screen.getByRole("listbox", { name: "Commands" })).toBeTruthy();
+	});
+
+	test("editing a follow-up command reopens the command list after Escape", async () => {
+		render(Composer, {
+			props: {
+				...baseProps(),
+				followups: ["/model"],
+				onEditFollowup: vi.fn(() => "/model"),
+			},
+		});
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "/mo" } });
+		await fireEvent.keyDown(field, { key: "Escape" });
+		await fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+		expect(field.value).toBe("/model");
+		expect(screen.getByRole("listbox", { name: "Commands" })).toBeTruthy();
+	});
+});
