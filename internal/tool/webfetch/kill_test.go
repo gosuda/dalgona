@@ -85,11 +85,37 @@ func TestRemoteExitWaitReportsTimeout(t *testing.T) {
 	if !errors.Is(runErr, errKillTestRead) {
 		t.Fatalf("error lost the read cause: %v", runErr)
 	}
-	if !errors.Is(runErr, errRemoteExitTimeout) {
+	if !errors.Is(runErr, runner.ErrExitTimeout) {
 		t.Fatalf("error lost the exit timeout: %v", runErr)
 	}
 	if !slices.Contains(wrapped.signals, runner.SignalKill) {
 		t.Fatalf("kill signal missing, got %v", wrapped.signals)
+	}
+}
+
+type cancelOnSignalRunner struct {
+	*failReadRemoteRunner
+	cancel context.CancelCauseFunc
+}
+
+func (r *cancelOnSignalRunner) Signal(ctx context.Context, id string, signal runner.Signal) error {
+	r.cancel(context.Canceled)
+	return r.failReadRemoteRunner.Signal(ctx, id, signal)
+}
+
+func TestRemoteExitWaitEndsWithTheCallerContext(t *testing.T) {
+	steady := &remoteRunner{output: runner.Output{Alive: true}}
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	wrapped := &cancelOnSignalRunner{failReadRemoteRunner: &failReadRemoteRunner{Runner: steady, remaining: 1}, cancel: cancel}
+	env := tool.Env{Runner: wrapped, Cwd: t.TempDir()}
+	call := tool.Call{ID: "fetch-cancel", Args: []byte(`{"url":"https://example.test/doc","max_bytes":4096}`)}
+	_, runErr := New().Run(ctx, call, env)
+	if !errors.Is(runErr, errKillTestRead) {
+		t.Fatalf("error lost the read cause: %v", runErr)
+	}
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("exit wait ignored the caller context: %v", runErr)
 	}
 }
 

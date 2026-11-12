@@ -27,8 +27,6 @@ const defaultMaxBytes int64 = 1048576
 
 var errFetchTimeout = errors.New("remote fetch timed out")
 
-var errRemoteExitTimeout = errors.New("web_fetch: subprocess did not exit")
-
 type Tool struct {
 	client *http.Client
 	allow  func(net.IP) bool
@@ -394,8 +392,8 @@ func executeRemote(ctx context.Context, id string, args arguments, env tool.Env)
 		if killErr := killRemote(remoteCtx, env.Runner, id); killErr != nil {
 			return tool.Result{}, errors.Join(err, killErr)
 		}
-		if waitErr := waitRemoteExit(env.Runner, id); waitErr != nil {
-			return tool.Result{}, errors.Join(err, waitErr)
+		if waitErr := runner.AwaitExit(ctx, env.Runner, id, 5*time.Second); waitErr != nil {
+			return tool.Result{}, errors.Join(err, fmt.Errorf("web_fetch: wait for subprocess exit: %w", waitErr))
 		}
 		return tool.Result{}, err
 	}
@@ -449,27 +447,6 @@ func waitRemote(ctx context.Context) error {
 		return fmt.Errorf("web_fetch: wait for subprocess: %w", context.Cause(ctx))
 	case <-timer.C:
 		return nil
-	}
-}
-
-const remoteExitGrace = 5 * time.Second
-
-func waitRemoteExit(run runner.Runner, id string) error {
-	deadline := time.Now().Add(remoteExitGrace)
-	for {
-		readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		out, readErr := run.Read(readCtx, id, 0)
-		cancel()
-		if readErr == nil && out.Exit != nil {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			if readErr != nil {
-				return fmt.Errorf("web_fetch: wait for subprocess exit: %w", readErr)
-			}
-			return errRemoteExitTimeout
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 
