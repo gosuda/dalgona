@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
@@ -147,8 +148,22 @@ func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "esc":
 		return m.escape()
 	default:
-		return m.updateComposer(msg)
+		return m.composerKey(msg, key)
 	}
+}
+
+func (m *model) composerKey(msg tea.KeyPressMsg, key string) tea.Cmd {
+	switch key {
+	case "up":
+		if m.recallOlder() {
+			return nil
+		}
+	case "down":
+		if m.recallNewer() {
+			return nil
+		}
+	}
+	return m.updateComposer(msg)
 }
 
 func (m *model) guardKey(key string) (tea.Cmd, bool) {
@@ -170,7 +185,34 @@ func (m *model) exitKey() tea.Cmd {
 		m.quit()
 		return nil
 	}
+	if draft := m.input.composer.Value(); strings.TrimSpace(draft) != "" {
+		m.input.history.add(draft, "")
+		m.input.composer.SetValue("")
+		return m.setHint("Draft saved to history · Ctrl+C again to exit", "exit")
+	}
 	return m.setHint("Ctrl+C again to exit", "exit")
+}
+
+func (m *model) recallOlder() bool {
+	if !m.input.composer.onFirstRow(&m.screen) {
+		return false
+	}
+	text, ok := m.input.history.older(m.input.composer.Value())
+	if ok {
+		m.input.composer.SetValue(text)
+	}
+	return ok
+}
+
+func (m *model) recallNewer() bool {
+	if !m.input.composer.onLastRow(&m.screen) {
+		return false
+	}
+	text, ok := m.input.history.newer()
+	if ok {
+		m.input.composer.SetValue(text)
+	}
+	return ok
 }
 
 func (m *model) escape() tea.Cmd {

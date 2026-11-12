@@ -129,12 +129,15 @@ Enter MUST send the prompt, except after a backslash.
 Enter after a backslash MUST replace the backslash with a newline.
 Shift+Enter and Ctrl+J MUST insert a newline.
 Alt+Enter MUST queue the draft as a follow-up.
-Up and Down MUST move the caret between wrapped rows.
+Up MUST move the caret between wrapped rows. On the first row, Up MUST recall the previous history entry.
+Down MUST move the caret between wrapped rows. On the last row, Down MUST recall the next entry, and past the newest entry it MUST restore the draft.
 Home and End MUST move the caret to the start or end of its line.
 Alt+Left and Alt+Right MUST move the caret by word.
 Ctrl+W MUST delete the word before the caret.
 Ctrl+U MUST delete from the start of the line to the caret.
 Ctrl+K MUST delete from the caret to the end of the line.
+The history MUST hold the 200 newest prompts. It MUST skip a prompt equal to the one before it, and it MUST NOT hold a `/login` line.
+Ctrl+C with a non-empty draft MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
 
 ## Keys and commands
@@ -146,7 +149,7 @@ The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor 
 | Enter, empty composer | Starts the oldest held follow-up when no turn runs |
 | Alt+Enter | Queues a follow-up, at most 32 |
 | Esc | Closes a selector. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row, and a second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
-| Ctrl+C twice | Quits. The first press shows `Ctrl+C again to exit` in the live row, and a second press within 2000 ms quits |
+| Ctrl+C twice | Quits. With an empty draft, the first press shows `Ctrl+C again to exit` in the live row. With a non-empty draft, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. A second press within 2000 ms quits |
 | `/model [id]` | `model/list` selector, or `config/value/write` key `model` |
 | `/resume [id]` | `thread/list` selector, or `thread/resume` then `thread/read` |
 | `/new` | `thread/start` |

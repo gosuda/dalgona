@@ -269,6 +269,9 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 		return nil
 	}
 	final := sanitizeItem(event.Item)
+	if final.Type == "userMessage" {
+		m.input.history.add(final.Text, m.thread.turnID)
+	}
 	live := m.liveItem(event.Item.ID)
 	answer := cmp.Or(final.Type, live.Type) == "agentMessage"
 	if answer {

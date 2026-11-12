@@ -197,6 +197,7 @@ func (m *model) submitPrompt() tea.Cmd {
 }
 
 func (m *model) sendPrompt(text string) tea.Cmd {
+	m.input.history.add(text, "")
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(text)}
 	result := new(rpc.TurnStartResponse)
@@ -204,6 +205,7 @@ func (m *model) sendPrompt(text string) tea.Cmd {
 }
 
 func (m *model) sendSteer(text string) tea.Cmd {
+	m.input.history.add(text, m.thread.turnID)
 	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: textInput(text)}
 	return m.call("steer", "turn/steer", params, new(rpc.TurnSteerResponse), text)
 }
@@ -236,6 +238,7 @@ func (m *model) startQueuedFollowup() tea.Cmd {
 	}
 	text := m.queue[0]
 	m.queue = m.queue[1:]
+	m.input.history.add(text, "")
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(text)}
 	result := new(rpc.TurnStartResponse)
@@ -483,6 +486,9 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	m.commit(threadKey(m.thread.id, m.out.loads), head)
 	var turn string
 	for _, entry := range items {
+		if entry.item.Type == "userMessage" {
+			m.input.history.add(entry.item.Text, entry.turn)
+		}
 		if entry.turn != turn {
 			m.flushGroup()
 			turn = entry.turn
@@ -548,6 +554,7 @@ func (m *model) applyTurnAccepted(value any) tea.Cmd {
 		return nil
 	}
 	m.thread.turnID = response.Turn.ID
+	m.input.history.startTurn(response.Turn.ID)
 	m.setState(stateRunning)
 	return nil
 }

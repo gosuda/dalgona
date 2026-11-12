@@ -138,6 +138,15 @@ func (c editor) layout(s *screenState, width int, spans []keywordSpan, t theme) 
 	return lines, row, c.cellsBefore(s, rows[row], at)
 }
 
+func (c editor) onFirstRow(s *screenState) bool {
+	return caretRow(c.rows(s, c.width), c.byteCursor()) == 0
+}
+
+func (c editor) onLastRow(s *screenState) bool {
+	rows := c.rows(s, c.width)
+	return caretRow(rows, c.byteCursor()) == len(rows)-1
+}
+
 func (c *editor) continueLine() bool {
 	if c.cursor == 0 || c.text[c.cursor-1] != '\\' {
 		return false
