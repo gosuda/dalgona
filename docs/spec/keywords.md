@@ -13,7 +13,7 @@ A `Keyword` MUST contain a word, a hue range, an optional required-tool list, an
 | `workflowz` | `[30, 150]` | `eval`, `task` | `default` |
 | `orchestrate` | `[150, 280]` | `task` | `default` |
 
-The package MUST embed every notice from `notices/*.md`. Every built-in MUST start enabled for its supported product.
+The package MUST embed every notice from `notices/*.md`. Every built-in MUST start enabled for its supported product. Each built-in MUST read `notices/<word>.md`. A missing or empty notice MUST stop the program when the table is built. Every file in `notices/` MUST belong to a built-in.
 
 ## Custom keywords
 

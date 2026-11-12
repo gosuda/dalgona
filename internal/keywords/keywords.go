@@ -23,10 +23,10 @@ var noticeFiles embed.FS
 
 func builtinTable(product string) []Keyword {
 	return []Keyword{
-		{Word: "ultrathink", Hue: [2]int{0, 330}, Effort: "max", Notice: notice("ultrathink.md"), Enabled: true},
-		{Word: "jevify", Hue: [2]int{300, 420}, Requires: []string{"eval"}, Effort: "default", Notice: notice("jevify.md"), Enabled: product == "dalgona"},
-		{Word: "workflowz", Hue: [2]int{30, 150}, Requires: []string{"eval", "task"}, Effort: "default", Notice: notice("workflowz.md"), Enabled: product == "dalgona"},
-		{Word: "orchestrate", Hue: [2]int{150, 280}, Requires: []string{"task"}, Effort: "default", Notice: notice("orchestrate.md"), Enabled: product == "dalgona"},
+		{Word: "ultrathink", Hue: [2]int{0, 330}, Effort: "max", Notice: notice("ultrathink"), Enabled: true},
+		{Word: "jevify", Hue: [2]int{300, 420}, Requires: []string{"eval"}, Effort: "default", Notice: notice("jevify"), Enabled: product == "dalgona"},
+		{Word: "workflowz", Hue: [2]int{30, 150}, Requires: []string{"eval", "task"}, Effort: "default", Notice: notice("workflowz"), Enabled: product == "dalgona"},
+		{Word: "orchestrate", Hue: [2]int{150, 280}, Requires: []string{"task"}, Effort: "default", Notice: notice("orchestrate"), Enabled: product == "dalgona"},
 	}
 }
 
@@ -163,12 +163,16 @@ func Previewable(table []Keyword) []Keyword {
 	return result
 }
 
-func notice(name string) string {
-	data, err := noticeFiles.ReadFile("notices/" + name)
+func notice(word string) string {
+	data, err := noticeFiles.ReadFile("notices/" + word + ".md")
 	if err != nil {
-		return ""
+		panic("keywords: missing notice notices/" + word + ".md: " + err.Error())
 	}
-	return strings.TrimSpace(string(data))
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		panic("keywords: empty notice notices/" + word + ".md")
+	}
+	return text
 }
 
 func requirementsMet(requirements []string, available map[string]struct{}) bool {
