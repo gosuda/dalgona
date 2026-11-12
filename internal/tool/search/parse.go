@@ -76,11 +76,11 @@ func supportedPath(display string) bool {
 }
 
 func parseCandidates(ctx context.Context, entries []fileEntry, glob string, accept func(display string) bool) ([]fileEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	kept := make([]fileEntry, 0, len(entries))
 	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
 		if accept(entry.display) {
 			kept = append(kept, entry)
 		}
