@@ -336,9 +336,11 @@ export interface ApprovalRequest {
 	readonly reason: string | null;
 }
 
+export type ServerRequest = ApprovalRequest;
+
 export interface RpcHandlers {
 	readonly onNotification: (notification: AppNotification) => void;
-	readonly onRequest: (request: ApprovalRequest) => void;
+	readonly onRequest: (request: ServerRequest) => void;
 	readonly onStateChange: (state: ConnectionState) => void;
 	readonly onError: (message: string) => void;
 }

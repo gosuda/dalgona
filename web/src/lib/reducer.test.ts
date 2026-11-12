@@ -2,16 +2,16 @@ import { describe, expect, test } from "vitest";
 import { advisorLabel, itemStatusLabel, kindLabel } from "./labels";
 import {
 	acceptThreadStatus,
-	activeApproval,
+	activeRequest,
 	applyOpenThreadNotification,
 	dropSentFollowup,
 	emptyTranscript,
 	itemDisplayStatus,
 	itemsAwaitingApproval,
 	reduceNotification,
-	resolveApprovalRequest,
+	resolveRequest,
 	shouldAutoScrollForUpdate,
-	trackApprovalRequest,
+	trackRequest,
 	transcriptForThread,
 } from "./reducer";
 import type {
@@ -293,15 +293,15 @@ describe("approval tracking", () => {
 	}
 
 	test("labels the requested item as waiting until the request resolves", () => {
-		const pending = trackApprovalRequest([], request);
+		const pending = trackRequest([], request);
 		expect(statusLabel(pending, "cmd-1")).toBe("Waiting");
 		expect(statusLabel(pending, "cmd-2")).toBe("Working");
-		const resolved = resolveApprovalRequest(pending, request.id);
+		const resolved = resolveRequest(pending, request.id);
 		expect(statusLabel(resolved, "cmd-1")).toBe("Working");
 	});
 
 	test("keeps finished items and other threads on their own status", () => {
-		const pending = trackApprovalRequest([], {
+		const pending = trackRequest([], {
 			...request,
 			method: "item/fileChange/requestApproval",
 		});
@@ -327,13 +327,22 @@ describe("active approval filtering", () => {
 	const other: ApprovalRequest = { ...first, id: 8, threadId: "thread-2" };
 
 	test("shows the approval that belongs to the active thread", () => {
-		expect(activeApproval([other, first], "thread-1", [])).toBe(first);
-		expect(activeApproval([other, first], "thread-2", [])).toBe(other);
+		expect(activeRequest([other, first], "thread-1", [])).toBe(first);
+		expect(activeRequest([other, first], "thread-2", [])).toBe(other);
+	});
+
+	test("a re-delivered request keeps its place in the queue", () => {
+		const younger: ApprovalRequest = { ...first, id: 9, itemId: "cmd-2" };
+		const redelivered: ApprovalRequest = { ...first, detail: "ls -la" };
+		const queue = trackRequest(trackRequest([], first), younger);
+		const again = trackRequest(queue, redelivered);
+		expect(again).toStrictEqual([redelivered, younger]);
+		expect(activeRequest(again, "thread-1", [])).toBe(redelivered);
 	});
 
 	test("shows nothing when no approval belongs to the active thread", () => {
-		expect(activeApproval([other], "thread-1", [])).toBeNull();
-		expect(activeApproval([other], null, [])).toBeNull();
+		expect(activeRequest([other], "thread-1", [])).toBeNull();
+		expect(activeRequest([other], null, [])).toBeNull();
 	});
 });
 

@@ -22,7 +22,7 @@ interface Props {
 
 let { session }: Props = $props();
 const waitingThreadIds = $derived(
-	new Set(session.approvals.map((request) => request.threadId)),
+	new Set(session.requests.map((request) => request.threadId)),
 );
 const activeThread = $derived(
 	session.threads.find((thread) => thread.id === session.activeThreadId),
@@ -59,22 +59,22 @@ const titleText = $derived(
 const elsewhere = $derived(
 	new Set(
 		requestsElsewhere(
-			session.approvals,
+			session.requests,
 			session.activeThreadId,
 			session.transcript.childThreadIds,
 		),
 	),
 );
-const openApprovals = $derived(
-	session.approvals.filter((request) => !elsewhere.has(request)),
+const openRequests = $derived(
+	session.requests.filter((request) => !elsewhere.has(request)),
 );
 const shownPosition = $derived(
-	session.currentApproval === null
+	session.currentRequest === null
 		? 0
-		: openApprovals.indexOf(session.currentApproval) + 1,
+		: openRequests.indexOf(session.currentRequest) + 1,
 );
 const subagentTitle = $derived.by(() => {
-	const request = session.currentApproval;
+	const request = session.currentRequest;
 	if (request === null || request.threadId === session.activeThreadId) {
 		return null;
 	}
@@ -112,7 +112,7 @@ const subagentTitle = $derived.by(() => {
 					startedAtMs={session.transcript.turnStartedAtMs}
 					retryRemainingMs={session.retryRemainingMs}
 					tick={session.transcriptRevision}
-					point={session.running && session.currentApproval === null}
+					point={session.running && session.currentRequest === null}
 				/>
 			</div>
 			<StatusBand
@@ -161,12 +161,12 @@ const subagentTitle = $derived.by(() => {
 				awaitingApproval={session.awaitingApproval}
 			/>
 
-			{#if session.currentApproval !== null}
+			{#if session.currentRequest !== null}
 				<ApprovalCard
-					request={session.currentApproval}
+					request={session.currentRequest}
 					changes={session.approvalChanges}
 					position={shownPosition}
-					total={openApprovals.length}
+					total={openRequests.length}
 					subagent={subagentTitle}
 					onDecision={(request, decision) => session.respondApproval(request, decision)}
 				/>

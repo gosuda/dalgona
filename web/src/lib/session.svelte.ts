@@ -2,7 +2,7 @@ import { threadTitle } from "./labels";
 import { RpcError, rpcSocketUrl, tokenFromHash } from "./protocol";
 import {
 	acceptThreadStatus,
-	activeApproval,
+	activeRequest,
 	applyOpenThreadNotification,
 	dropSentFollowup,
 	emptyTranscript,
@@ -16,8 +16,8 @@ import {
 	recordPatchChanges,
 	recordThreadTurn,
 	requestsElsewhere,
-	resolveApprovalRequest,
-	trackApprovalRequest,
+	resolveRequest,
+	trackRequest,
 	transcriptForThread,
 } from "./reducer";
 import { turnSteerParams } from "./requests";
@@ -43,6 +43,7 @@ import type {
 	RequestId,
 	RetryWait,
 	RpcHandlers,
+	ServerRequest,
 	StatusInfo,
 	ThreadDetail,
 	ThreadSummary,
@@ -175,7 +176,7 @@ export class Session {
 	userAgent: string | null = $state(null);
 	keywords: readonly KeywordDefinition[] = $state([]);
 	advisor: AdvisorSummary = $state({ kind: "unknown" });
-	approvals: readonly ApprovalRequest[] = $state([]);
+	requests: readonly ServerRequest[] = $state([]);
 	patchChanges: PatchChanges = $state({});
 	knownChildren: KnownChildThreads = $state({});
 	queuedFollowups: readonly string[] = $state([]);
@@ -201,16 +202,16 @@ export class Session {
 		}
 		return wait.remainingMs;
 	});
-	currentApproval: ApprovalRequest | null = $derived(
-		activeApproval(
-			this.approvals,
+	currentRequest: ServerRequest | null = $derived(
+		activeRequest(
+			this.requests,
 			this.activeThreadId,
 			this.transcript.childThreadIds,
 		),
 	);
 	waitingElsewhere: WaitingElsewhere = $derived.by(() => {
 		const waiting = requestsElsewhere(
-			this.approvals,
+			this.requests,
 			this.activeThreadId,
 			this.transcript.childThreadIds,
 		);
@@ -218,22 +219,22 @@ export class Session {
 	});
 	awaitingApproval: ReadonlySet<string> = $derived(
 		itemsAwaitingApproval(
-			this.approvals,
+			this.requests,
 			this.activeThreadId,
 			this.transcript.childThreadIds,
 		),
 	);
 	approvalChanges: readonly FileChange[] = $derived.by(() => {
-		const approval = this.currentApproval;
-		if (approval === null) return [];
+		const request = this.currentRequest;
+		if (request === null) return [];
 		const changes = patchChangesFor(
 			this.patchChanges,
-			approval.threadId,
-			approval.itemId,
+			request.threadId,
+			request.itemId,
 		);
 		if (changes !== null) return changes;
 		const item = this.transcript.items.find(
-			(entry) => entry.id === approval.itemId,
+			(entry) => entry.id === request.itemId,
 		);
 		return item?.kind === "fileChange" ? item.changes : [];
 	});
@@ -301,10 +302,10 @@ export class Session {
 				}
 			},
 			requestResolved: (notification) => {
-				const approval = this.approvals.find(
+				const request = this.requests.find(
 					(entry) => entry.id === notification.requestId,
 				);
-				if (approval !== undefined) this.settleApproval(approval);
+				if (request !== undefined) this.settleRequest(request);
 			},
 			fileChangesUpdated: (notification) => {
 				this.patchChanges = recordPatchChanges(
@@ -348,7 +349,7 @@ export class Session {
 	async connect(): Promise<void> {
 		const generation = ++this.connectionGeneration;
 		this.client?.close();
-		this.approvals = [];
+		this.requests = [];
 		this.clearErrors();
 		const hashed = tokenFromHash(this.location.hash);
 		if (hashed !== "") {
@@ -376,7 +377,7 @@ export class Session {
 			},
 			onRequest: (request) => {
 				if (generation === this.connectionGeneration) {
-					this.approvals = trackApprovalRequest(this.approvals, request);
+					this.requests = trackRequest(this.requests, request);
 				}
 			},
 			onStateChange: (state) => {
@@ -651,7 +652,7 @@ export class Session {
 				this.queuedFollowups = [];
 				this.patchChanges = keepPendingPatchChanges(
 					this.patchChanges,
-					this.approvals,
+					this.requests,
 				);
 			}
 			this.activeThreadId = threadId;
@@ -838,11 +839,11 @@ export class Session {
 
 	respondApproval(request: ApprovalRequest, decision: Decision): void {
 		this.requireClient().respond(request.id, { decision });
-		this.settleApproval(request);
+		this.settleRequest(request);
 	}
 
-	private settleApproval(request: ApprovalRequest): void {
-		this.approvals = resolveApprovalRequest(this.approvals, request.id);
+	private settleRequest(request: ServerRequest): void {
+		this.requests = resolveRequest(this.requests, request.id);
 		this.patchChanges = forgetPatchChanges(this.patchChanges, request);
 	}
 

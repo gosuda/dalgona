@@ -1,9 +1,9 @@
 import type {
 	AppNotification,
-	ApprovalRequest,
 	EditReview,
 	FileChange,
 	RequestId,
+	ServerRequest,
 	ThreadDetail,
 	TranscriptItem,
 	TranscriptState,
@@ -393,18 +393,21 @@ export function applyOpenThreadNotification(
 	return { transcript, knownChildren, sendFollowup };
 }
 
-export function trackApprovalRequest(
-	approvals: readonly ApprovalRequest[],
-	request: ApprovalRequest,
-): readonly ApprovalRequest[] {
-	return [...approvals.filter((entry) => entry.id !== request.id), request];
+export function trackRequest(
+	requests: readonly ServerRequest[],
+	request: ServerRequest,
+): readonly ServerRequest[] {
+	if (!requests.some((entry) => entry.id === request.id)) {
+		return [...requests, request];
+	}
+	return requests.map((entry) => (entry.id === request.id ? request : entry));
 }
 
-export function resolveApprovalRequest(
-	approvals: readonly ApprovalRequest[],
+export function resolveRequest(
+	requests: readonly ServerRequest[],
 	requestId: RequestId,
-): readonly ApprovalRequest[] {
-	return approvals.filter((entry) => entry.id !== requestId);
+): readonly ServerRequest[] {
+	return requests.filter((entry) => entry.id !== requestId);
 }
 
 export type PatchChanges = Readonly<
@@ -436,35 +439,31 @@ export function patchChangesFor(
 
 export function forgetPatchChanges(
 	patches: PatchChanges,
-	approval: ApprovalRequest,
+	request: ServerRequest,
 ): PatchChanges {
-	if (patchChangesFor(patches, approval.threadId, approval.itemId) === null) {
+	if (patchChangesFor(patches, request.threadId, request.itemId) === null) {
 		return patches;
 	}
 	const byItem: Readonly<Record<string, readonly FileChange[]>> =
-		patches[approval.threadId] ?? {};
+		patches[request.threadId] ?? {};
 	const kept = Object.fromEntries(
-		Object.entries(byItem).filter(([itemId]) => itemId !== approval.itemId),
+		Object.entries(byItem).filter(([itemId]) => itemId !== request.itemId),
 	);
-	return { ...patches, [approval.threadId]: kept };
+	return { ...patches, [request.threadId]: kept };
 }
 
 export function keepPendingPatchChanges(
 	patches: PatchChanges,
-	approvals: readonly ApprovalRequest[],
+	requests: readonly ServerRequest[],
 ): PatchChanges {
 	let kept: PatchChanges = {};
-	for (const approval of approvals) {
-		const changes = patchChangesFor(
-			patches,
-			approval.threadId,
-			approval.itemId,
-		);
+	for (const request of requests) {
+		const changes = patchChangesFor(patches, request.threadId, request.itemId);
 		if (changes !== null) {
 			kept = recordPatchChanges(
 				kept,
-				approval.threadId,
-				approval.itemId,
+				request.threadId,
+				request.itemId,
 				changes,
 			);
 		}
@@ -472,7 +471,7 @@ export function keepPendingPatchChanges(
 	return kept;
 }
 
-function isOpenApproval(
+function isOpenRequest(
 	threadId: string | null,
 	childThreadIds: readonly string[],
 	entryThreadId: string,
@@ -483,25 +482,25 @@ function isOpenApproval(
 	);
 }
 
-export function activeApproval(
-	approvals: readonly ApprovalRequest[],
+export function activeRequest(
+	requests: readonly ServerRequest[],
 	threadId: string | null,
 	childThreadIds: readonly string[],
-): ApprovalRequest | null {
+): ServerRequest | null {
 	return (
-		approvals.find((entry) =>
-			isOpenApproval(threadId, childThreadIds, entry.threadId),
+		requests.find((entry) =>
+			isOpenRequest(threadId, childThreadIds, entry.threadId),
 		) ?? null
 	);
 }
 
 export function requestsElsewhere(
-	approvals: readonly ApprovalRequest[],
+	requests: readonly ServerRequest[],
 	threadId: string | null,
 	childThreadIds: readonly string[],
-): readonly ApprovalRequest[] {
-	return approvals.filter(
-		(entry) => !isOpenApproval(threadId, childThreadIds, entry.threadId),
+): readonly ServerRequest[] {
+	return requests.filter(
+		(entry) => !isOpenRequest(threadId, childThreadIds, entry.threadId),
 	);
 }
 
@@ -526,14 +525,14 @@ export function shouldAutoScrollForUpdate(
 }
 
 export function itemsAwaitingApproval(
-	approvals: readonly ApprovalRequest[],
+	requests: readonly ServerRequest[],
 	threadId: string | null,
 	childThreadIds: readonly string[],
 ): ReadonlySet<string> {
 	return new Set(
-		approvals
+		requests
 			.filter((entry) =>
-				isOpenApproval(threadId, childThreadIds, entry.threadId),
+				isOpenRequest(threadId, childThreadIds, entry.threadId),
 			)
 			.map((entry) => entry.itemId),
 	);

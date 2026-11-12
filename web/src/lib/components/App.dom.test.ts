@@ -36,7 +36,7 @@ function sessionWithRequestElsewhere(): Session {
 		detail: "ls",
 		reason: null,
 	};
-	session.approvals = [request];
+	session.requests = [request];
 	return session;
 }
 
@@ -328,5 +328,89 @@ describe("file-change approval diff", () => {
 		expect(screen.getByText("+gamma")).toBeTruthy();
 		expect(screen.queryByText("+delta")).toBeNull();
 		session.stop();
+	});
+});
+function commandApproval(id: string, itemId: string): ApprovalRequest {
+	return {
+		id,
+		method: "item/commandExecution/requestApproval",
+		threadId: "thread-1",
+		turnId: "turn-1",
+		itemId,
+		title: "Run command?",
+		detail: "ls",
+		reason: null,
+	};
+}
+
+function fileApproval(id: string, itemId: string): ApprovalRequest {
+	return {
+		id,
+		method: "item/fileChange/requestApproval",
+		threadId: "thread-1",
+		turnId: "turn-1",
+		itemId,
+		title: "Apply file changes?",
+		detail: "",
+		reason: null,
+	};
+}
+
+describe("request queue", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	test("shows the oldest request and holds the next until it resolves", async () => {
+		const { session, handlers } = sessionWithHandler();
+		session.activeThreadId = "thread-1";
+		handlers.onRequest(commandApproval("req-1", "cmd-1"));
+		handlers.onRequest(fileApproval("req-2", "file-1"));
+		render(App, { props: { session } });
+		await tick();
+		expect(
+			screen.getByRole("heading", { name: "Run this command?" }),
+		).toBeTruthy();
+		expect(
+			screen.queryByRole("heading", { name: "Apply these changes?" }),
+		).toBeNull();
+		expect(screen.getByText("Approval required · 1 of 2")).toBeTruthy();
+
+		handlers.onNotification(
+			parsed("serverRequest/resolved", {
+				threadId: "thread-1",
+				requestId: "req-1",
+			}),
+		);
+		await tick();
+		expect(
+			screen.getByRole("heading", { name: "Apply these changes?" }),
+		).toBeTruthy();
+	});
+
+	test("a sandbox choice waits behind an approval", async () => {
+		const { session, handlers } = sessionWithHandler();
+		session.activeThreadId = "thread-1";
+		handlers.onRequest(fileApproval("req-1", "file-1"));
+		handlers.onRequest(commandApproval("req-2", "cmd-1"));
+		render(App, { props: { session } });
+		await tick();
+		expect(
+			screen.getByRole("heading", { name: "Apply these changes?" }),
+		).toBeTruthy();
+		expect(
+			screen.queryByRole("heading", { name: "Run this command?" }),
+		).toBeNull();
+
+		handlers.onNotification(
+			parsed("serverRequest/resolved", {
+				threadId: "thread-1",
+				requestId: "req-1",
+			}),
+		);
+		await tick();
+		expect(
+			screen.getByRole("heading", { name: "Run this command?" }),
+		).toBeTruthy();
 	});
 });
