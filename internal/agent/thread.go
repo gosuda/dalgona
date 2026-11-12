@@ -67,6 +67,8 @@ type actor struct {
 	busy         bool
 	cancel       context.CancelCauseFunc
 	approvals    map[string]chan Reply
+	questions    map[string]*pendingQuestion
+	questionSeq  uint64
 	autoContinue bool
 	hook         BoundaryHook
 }
@@ -132,7 +134,7 @@ func (h *Host) openLocked(ctx context.Context, loaded loadedSession, overrides O
 	h.mu.Unlock()
 	a := &actor{
 		t: t, records: loaded.records, sizes: loaded.sizes, state: loaded.state, damage: loaded.damage,
-		subs: make(map[chan Update]struct{}), approvals: make(map[string]chan Reply), autoContinue: !endedByInterrupt(loaded.records),
+		subs: make(map[chan Update]struct{}), approvals: make(map[string]chan Reply), questions: make(map[string]*pendingQuestion), autoContinue: !endedByInterrupt(loaded.records),
 	}
 	if loaded.state.TurnID != "" && loaded.damage == nil {
 		a.spawn(func(ctx context.Context) { (&worker{t: t, turnID: loaded.state.TurnID}).recoverTurn(ctx) })
@@ -489,13 +491,7 @@ func (a *actor) prepareAppend(events []event.Event) (event.State, [][]byte, erro
 
 func (a *actor) publish(update Update) {
 	for ch := range a.subs {
-		select {
-		case ch <- update:
-		default:
-			close(ch)
-			delete(a.subs, ch)
-			a.t.host.log.Warn("agent: closing slow subscriber", "thread", a.t.id)
-		}
+		a.sendUpdate(ch, update)
 	}
 }
 
@@ -508,7 +504,7 @@ func (t *Thread) publish(update Update) {
 
 func (t *Thread) Subscribe() <-chan Update {
 	ch := make(chan Update, subscriberBuffer)
-	if err := t.do(func(a *actor) { a.subs[ch] = struct{}{} }); err != nil {
+	if err := t.do(func(a *actor) { a.subscribe(ch) }); err != nil {
 		close(ch)
 	}
 	return ch
@@ -526,6 +522,9 @@ func (a *actor) unsubscribe(target <-chan Update) {
 			close(ch)
 			delete(a.subs, ch)
 		}
+	}
+	if len(a.subs) == 0 {
+		a.declineQuestions()
 	}
 }
 
@@ -545,7 +544,7 @@ func (t *Thread) Status() (Status, error) {
 	return ask(t, func(a *actor) Status {
 		return Status{
 			State: a.state.Status, Busy: a.busy, AutoContinue: a.autoContinue, Head: a.head(),
-			Turn: a.state.TurnID, Subscribers: len(a.subs), OutputDropped: a.t.output.dropped.Load(),
+			Turn: a.state.TurnID, Subscribers: len(a.subs), Questions: len(a.questions), OutputDropped: a.t.output.dropped.Load(),
 		}
 	})
 }

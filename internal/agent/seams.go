@@ -55,5 +55,6 @@ type Status struct {
 	Head          uint64
 	Turn          string
 	Subscribers   int
+	Questions     int
 	OutputDropped uint64
 }

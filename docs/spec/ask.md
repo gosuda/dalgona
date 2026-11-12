@@ -123,3 +123,23 @@ The fixed result texts MUST be these.
 | Interrupted | interrupted: the user interrupted the turn before answering | no |
 | Host restarted | interrupted: the host restarted before the user answered | no |
 | Other failure | declined: followed by the failure detail | no |
+
+## Host path
+
+The host MUST offer each question to every subscribed client.
+
+A question with no subscribed client MUST end at once with the no-client result.
+
+A subscriber that joins MUST receive every open question, oldest first.
+
+When the last subscriber leaves, the host MUST end every open question with the no-client result.
+
+The first answer to a question MUST decide it. A later answer MUST fail with an unknown request error.
+
+An interrupt of the turn MUST end the question as interrupted.
+
+The host MUST mask the header, question, label, description and preview of each question before it offers the question.
+
+The host MUST NOT journal a question or its answer.
+
+The thread status MUST count the open questions.

@@ -13,6 +13,7 @@ import (
 	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
+	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
@@ -154,6 +155,7 @@ const (
 	UpdateApproval
 	UpdateExecOutput
 	UpdateRetryWait
+	UpdateQuestion
 )
 
 type ApprovalPrompt struct {
@@ -169,6 +171,14 @@ type ApprovalPrompt struct {
 	Resolved  bool
 }
 
+type QuestionPrompt struct {
+	RequestID  string
+	CallID     string
+	Questions  []asktool.Question
+	Resolved   bool
+	Resolution asktool.Outcome
+}
+
 type Update struct {
 	Kind     UpdateKind
 	Thread   string
@@ -180,6 +190,7 @@ type Update struct {
 	Approval ApprovalPrompt
 	Turn     string
 	Wait     time.Duration
+	Question QuestionPrompt
 }
 
 type ThreadInfo struct {
