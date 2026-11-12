@@ -442,3 +442,11 @@ func TestSpecNames(t *testing.T) {
 		}
 	}
 }
+
+func TestLightDescriptionStatesRemExemption(t *testing.T) {
+	description := New(string(HashlineLight)).Spec().Description
+	const sentence = "REM does not require every line to have been delivered."
+	if !strings.Contains(description, sentence) {
+		t.Fatalf("light description lacks the REM exemption %q", sentence)
+	}
+}
