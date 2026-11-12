@@ -127,3 +127,7 @@ The client records subagent threads from `dalgona/thread/childSpawned`. An appro
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
 - Other request failures read `<action>: <detail>. Reconnect and try again.`
 - In the approval dialog, Decline and Cancel use the quiet style. The composer's `Interrupt turn` button has the danger style.
+
+### Focus
+
+A control that disappears while focused hands focus to the message field. The submit control keeps its element and changes only its label.

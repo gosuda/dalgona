@@ -1,5 +1,6 @@
 <script lang="ts">
 import KeywordText from "#lib/components/KeywordText.svelte";
+import { handoffFocus } from "#lib/focus.ts";
 import { findKeywords } from "#lib/keywords.ts";
 import type { KeywordDefinition } from "#lib/types.ts";
 
@@ -111,12 +112,10 @@ function onKeydown(event: KeyboardEvent): void {
 		<p id="composer-error" class="error" role="alert">{error}</p>
 
 		<div class="actions">
+			<button class={running ? "quiet" : "primary"} type="submit" disabled={disabled}>{running ? "Steer" : "Send"}</button>
 			{#if running}
-				<button class="primary" type="submit" disabled={disabled}>Steer turn</button>
-				<button type="button" disabled={disabled} onclick={queueFollowup}>Queue follow-up</button>
-				<button class="quiet danger" type="button" disabled={disabled} onclick={onInterrupt}>Interrupt turn</button>
-			{:else}
-				<button class="primary" type="submit" disabled={disabled}>Send message</button>
+				<button type="button" disabled={disabled} onclick={queueFollowup} {@attach handoffFocus(() => textarea)}>Queue follow-up</button>
+				<button class="quiet danger" type="button" disabled={disabled} onclick={onInterrupt} {@attach handoffFocus(() => textarea)}>Interrupt turn</button>
 			{/if}
 		</div>
 	</form>

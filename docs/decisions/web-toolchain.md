@@ -6,6 +6,17 @@ The web UI MUST pin TypeScript 6.0.3. It MUST NOT use TypeScript 7.0.2 with the 
 
 Scope: `web/package.json` and `web/pnpm-lock.yaml`. Enforcement: `just web` installs dependencies with `pnpm --frozen-lockfile` and builds the assets. `just web-check` runs Biome, Vitest, and svelte-check with the installed tools.
 
+## Grounded pins
+
+Grounded on 2026-11-12. Each row gives an exact devDependency pin in `web/package.json`. The release date is the `time` entry of that version in `https://registry.npmjs.org/<package>`. The OSV column holds the result of `POST https://api.osv.dev/v1/query` for that package and version, run on 2026-11-12.
+
+|Package|Pin|Released|Use|OSV 2026-11-12|
+|---|---|---|---|---|
+|happy-dom|21.0.4|2026-10-20|DOM environment of the `dom` Vitest project|none|
+|@testing-library/svelte|5.4.2|2026-06-23|renders Svelte components in tests, with its `svelteTesting` Vite plugin|none|
+|@testing-library/dom|10.4.2|2026-09-13|queries that `@testing-library/svelte` uses|none|
+|@testing-library/user-event|14.6.9|2026-11-10|user input in component tests|none|
+
 ## Pins on 2026-11-11
 
 Grounded on 2026-11-11. Each row gives the exact pin in the repository. Each pin equals the latest stable release, except pnpm and TypeScript. pnpm stays at 12.18.0 while the npm stable tag names it. TypeScript stays at 6.0.3 by the invariant above. The OSV column holds the result of `POST https://api.osv.dev/v1/querybatch` for each npm pin, run on 2026-11-12. The Node.js row is not an npm package and was not sent to that query.
