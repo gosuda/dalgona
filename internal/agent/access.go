@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/agent/prompt"
@@ -59,21 +60,12 @@ func (h *Host) Models(ctx context.Context) ([]model.Model, error) {
 	var out []model.Model
 	var errs []error
 	for _, provider := range h.cfg.ProviderIDs {
-		adapter, ok := registry.Provider(provider)
-		if !ok {
-			errs = append(errs, fmt.Errorf("agent: provider %s is not registered", provider))
-			continue
-		}
-		models, err := adapter.Models(ctx)
+		models, err := h.listModels(ctx, registry, provider)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("agent: list %s models: %w", provider, err))
+			errs = append(errs, err)
 			continue
 		}
-		for _, item := range models {
-			capability := h.capabilities(ctx, registry, provider+"/"+item.ID)
-			capability.ID = provider + "/" + item.ID
-			out = append(out, capability)
-		}
+		out = append(out, models...)
 	}
 	if len(out) == 0 {
 		return nil, errors.Join(errs...)
@@ -83,6 +75,51 @@ func (h *Host) Models(ctx context.Context) ([]model.Model, error) {
 	}
 	return out, nil
 }
+
+func (h *Host) listModels(ctx context.Context, registry *model.Registry, provider string) ([]model.Model, error) {
+	models, err := adapterModels(ctx, registry, provider)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.Model, 0, len(models))
+	for _, item := range models {
+		id := provider + "/" + item.ID
+		capability := h.capabilities(ctx, registry, id)
+		capability.ID = id
+		out = append(out, capability)
+	}
+	return out, nil
+}
+
+func adapterModels(ctx context.Context, registry *model.Registry, provider string) ([]model.Model, error) {
+	adapter, ok := registry.Provider(provider)
+	if !ok {
+		return nil, fmt.Errorf("agent: provider %s is not registered", provider)
+	}
+	models, err := adapter.Models(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("agent: list %s models: %w", provider, err)
+	}
+	return models, nil
+}
+
+func (h *Host) VerifyAPIKey(ctx context.Context, provider, key string) error {
+	if h.cfg.ProvidersWithKey == nil {
+		return errors.New("agent: API key check is not configured")
+	}
+	registry, err := h.cfg.ProvidersWithKey(provider, key)
+	if err != nil {
+		return fmt.Errorf("agent: providers: %w", err)
+	}
+	ctx, cancel := context.WithTimeoutCause(ctx, keyVerifyTimeout, errKeyVerifyTimeout)
+	defer cancel()
+	_, err = adapterModels(ctx, registry, provider)
+	return err
+}
+
+const keyVerifyTimeout = 20 * time.Second
+
+var errKeyVerifyTimeout = errors.New("agent: API key check timed out")
 
 func (h *Host) Blob(ref *event.BlobRef) ([]byte, error) {
 	if ref == nil {

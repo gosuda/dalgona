@@ -230,8 +230,8 @@ func (env CLIEnv) parseLogin(args []string) (loginRequest, error) {
 }
 
 func (r loginRequest) check() error {
-	if r.apiKey != "" && !slices.Contains(apiKeyLoginTargets(), r.provider) {
-		return fmt.Errorf("login %s: --api-key works only for %s", r.provider, strings.Join(apiKeyLoginTargets(), ", "))
+	if r.apiKey != "" && !slices.Contains(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), r.provider) {
+		return fmt.Errorf("login %s: --api-key works only for %s", r.provider, strings.Join(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), ", "))
 	}
 	return nil
 }
@@ -262,7 +262,7 @@ func (env CLIEnv) localLogin(ctx context.Context, request loginRequest) error {
 }
 
 func (env CLIEnv) listProviders(signedIn map[string]bool) {
-	for _, id := range Providers() {
+	for _, id := range auth.Providers() {
 		mark := ""
 		if signedIn[id] {
 			mark = " (logged in)"
@@ -302,17 +302,17 @@ func (env CLIEnv) remoteLoginParams(request loginRequest) (rpc.AccountLoginStart
 	switch {
 	case request.provider == "":
 		return rpc.AccountLoginStartParams{}, nil
-	case slices.Contains(apiKeyLoginTargets(), request.provider):
+	case slices.Contains(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), request.provider):
 		key, err := env.readAPIKey(request)
 		return rpc.AccountLoginStartParams{Type: "apiKey", Provider: request.provider, APIKey: key}, err
 	case request.provider == "chatgpt":
 		return rpc.AccountLoginStartParams{Type: "chatgptDeviceCode"}, nil
-	case slices.Contains(oauthProviders, request.provider):
+	case slices.Contains(auth.OAuthProviders, request.provider):
 		return rpc.AccountLoginStartParams{}, fmt.Errorf(
 			"login %s cannot run inside remote %s; run `%s login %s` here, then `%s cloud up %s --copy-auth`",
 			request.provider, env.Remote, env.Product, request.provider, env.Product, env.Remote)
 	}
-	return rpc.AccountLoginStartParams{}, fmt.Errorf("unknown provider %q; known providers: %s", request.provider, strings.Join(Providers(), ", "))
+	return rpc.AccountLoginStartParams{}, fmt.Errorf("unknown provider %q; known providers: %s", request.provider, strings.Join(auth.Providers(), ", "))
 }
 
 func (env CLIEnv) readAPIKey(request loginRequest) (string, error) {

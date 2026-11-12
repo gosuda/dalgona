@@ -39,3 +39,7 @@ ChatGPT MUST use its donor device endpoints instead of the RFC grant. The initia
 `CursorPoll` MUST generate a PKCE verifier and a random RFC 4122 version 4 UUID. The deep link MUST contain `challenge`, `uuid`, `mode=login`, and `redirectTarget=cli`. The verifier MUST NOT appear in the deep link.
 
 The poll MUST be a GET to `PollURL` with `uuid` and `verifier`. HTTP 404 MUST mean pending. The initial delay MUST be one second. Each pending response MUST multiply the delay by 1.2, up to ten seconds. Polling MUST stop after 150 attempts. Three consecutive transport, HTTP, or decoding failures MUST fail the flow. A successful response MUST read `accessToken` and `refreshToken`.
+
+## Terminal login
+
+The `account/login/start` method MUST refuse an OAuth provider other than `chatgpt`. The error MUST read `login for <provider> runs in the terminal: <product> login <provider>`, where `<product>` is the product name of the host, `dal` or `dalgona`.

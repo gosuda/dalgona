@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/account/providers/list result",
+  "type": "object",
+  "required": ["providers"],
+  "properties": {
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "login", "signedIn"],
+        "properties": {
+          "id": {"type": "string"},
+          "login": {"enum": ["apiKey", "browser", "terminal"]},
+          "signedIn": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

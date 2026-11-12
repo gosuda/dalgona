@@ -60,22 +60,23 @@ type Extension interface {
 type ExtensionFactory func(t *Thread) Extension
 
 type HostConfig struct {
-	Journal        *journal.Store
-	Config         config.Config
-	EditFeedback   []string
-	Auth           *auth.Store
-	Providers      ProviderFactory
-	Tools          ToolSet
-	Runner         RunnerFactory
-	Decider        Decider
-	Extension      ExtensionFactory
-	OnChildStarted func(child *Thread, req task.Request)
-	Product        config.Product
-	Clock          func() time.Time
-	Logger         *slog.Logger
-	Skills         SkillSet
-	ToolNotes      []string
-	ProviderIDs    []string
+	Journal          *journal.Store
+	Config           config.Config
+	EditFeedback     []string
+	Auth             *auth.Store
+	Providers        ProviderFactory
+	ProvidersWithKey func(provider, key string) (*model.Registry, error)
+	Tools            ToolSet
+	Runner           RunnerFactory
+	Decider          Decider
+	Extension        ExtensionFactory
+	OnChildStarted   func(child *Thread, req task.Request)
+	Product          config.Product
+	Clock            func() time.Time
+	Logger           *slog.Logger
+	Skills           SkillSet
+	ToolNotes        []string
+	ProviderIDs      []string
 }
 
 type Overrides struct {

@@ -159,6 +159,7 @@ func (n AccountLoginCompletedNotification) write(o *out) {
 	o.optStr("loginId", n.LoginID)
 	o.boolean("success", n.Success)
 	o.optStr("error", n.Error)
+	o.optStr("provider", n.Provider)
 	o.close()
 }
 

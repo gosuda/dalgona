@@ -7,7 +7,9 @@ import (
 	"encoding/json/jsontext"
 	"runtime"
 	"slices"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/auth"
@@ -278,7 +280,7 @@ func (s *server) loginStart(ctx context.Context, params jsontext.Value) (jsontex
 	}
 	switch loginFlow(p) {
 	case "apiKey":
-		return s.loginKey(p)
+		return s.loginKey(ctx, p)
 	case "chatgpt":
 		return s.loginBrowser(ctx)
 	case "chatgptDeviceCode":
@@ -288,7 +290,7 @@ func (s *server) loginStart(ctx context.Context, params jsontext.Value) (jsontex
 	if name == "" {
 		return nil, invalidParams("account/login/start needs a type or a provider")
 	}
-	return nil, invalidParams("login for " + name + " runs in the terminal: dal login " + name)
+	return nil, invalidParams("login for " + name + " runs in the terminal: " + string(s.host.Config().Product) + " login " + name)
 }
 
 func loginFlow(p AccountLoginStartParams) string {
@@ -304,19 +306,39 @@ func loginFlow(p AccountLoginStartParams) string {
 	return p.Type
 }
 
-func (s *server) loginKey(p AccountLoginStartParams) (jsontext.Value, error) {
+func (s *server) loginKey(ctx context.Context, p AccountLoginStartParams) (jsontext.Value, error) {
 	name := cmp.Or(p.Provider, "openai")
-	if p.APIKey == "" {
+	key := strings.TrimSpace(p.APIKey)
+	if key == "" {
 		return nil, invalidParams("provider " + name + " needs an apiKey")
+	}
+	if strings.IndexFunc(key, unicode.IsSpace) >= 0 {
+		return nil, invalidParams("the API key must be one line")
+	}
+	if !slices.Contains(auth.APIKeyProviders, name) && !slices.Contains(auth.RunnerServices, name) {
+		return nil, invalidParams("provider " + name + " does not take an API key")
 	}
 	store, err := s.credentials()
 	if err != nil {
 		return nil, err
 	}
-	if err := store.SetAPIKey(name, p.APIKey); err != nil {
+	if slices.Contains(auth.APIKeyProviders, name) {
+		if err = s.host.VerifyAPIKey(ctx, name, key); err != nil {
+			rejected := name + " did not accept the API key; it was not saved"
+			s.notifyLogin(name, rejected)
+			return nil, invalidParams(rejected)
+		}
+	}
+	if err = store.SetAPIKey(name, key); err != nil {
+		s.notifyLogin(name, err.Error())
 		return nil, invalidParams(err.Error())
 	}
+	s.notifyLogin(name, "")
 	return encode(LoginAccountResponse{Type: "apiKey"})
+}
+
+func (s *server) notifyLogin(provider, text string) {
+	s.send("account/login/completed", AccountLoginCompletedNotification{Success: text == "", Provider: provider, Error: text})
 }
 
 func (s *server) startLogin(ctx context.Context, flow func(context.Context) (oauth.Token, error)) (string, error) {
@@ -346,7 +368,7 @@ func (s *server) finishLogin(id string, token oauth.Token, err error) {
 			Type: "oauth", Access: token.Access, Refresh: token.Refresh, Expires: token.Expires.UTC().Format(time.RFC3339), Account: token.Account,
 		})
 	}
-	note := AccountLoginCompletedNotification{LoginID: id, Success: err == nil}
+	note := AccountLoginCompletedNotification{LoginID: id, Success: err == nil, Provider: "chatgpt"}
 	if err != nil {
 		note.Error = err.Error()
 	}

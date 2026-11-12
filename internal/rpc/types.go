@@ -330,9 +330,10 @@ type (
 		RequestID string `json:"requestId"`
 	}
 	AccountLoginCompletedNotification struct {
-		LoginID string `json:"loginId,omitzero"`
-		Success bool   `json:"success"`
-		Error   string `json:"error,omitzero"`
+		LoginID  string `json:"loginId,omitzero"`
+		Success  bool   `json:"success"`
+		Error    string `json:"error,omitzero"`
+		Provider string `json:"provider,omitzero"`
 	}
 	ChildSpawnedNotification struct {
 		ThreadID string `json:"threadId"`

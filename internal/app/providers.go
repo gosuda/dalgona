@@ -165,13 +165,33 @@ func credentialFrom(token oauth.Token) auth.Credential {
 }
 
 func (c *credentials) registry(cfg config.Config, onRetry agent.RetryFunc) (*model.Registry, error) {
+	return c.build(cfg, onRetry, keyOverride{})
+}
+
+func (c *credentials) registryWithKey(cfg config.Config, provider, key string) (*model.Registry, error) {
+	return c.build(cfg, nil, keyOverride{provider: provider, key: key})
+}
+
+type keyOverride struct {
+	provider string
+	key      string
+}
+
+func (o keyOverride) apiKey(c *credentials, provider, env string) func(context.Context) (string, error) {
+	if o.key == "" || provider != o.provider {
+		return c.apiKey(provider, env)
+	}
+	return func(context.Context) (string, error) { return o.key, nil }
+}
+
+func (c *credentials) build(cfg config.Config, onRetry agent.RetryFunc, override keyOverride) (*model.Registry, error) {
 	retry := model.DefaultRetryOptions()
 	retry.StartTimeout, retry.IdleTimeout, retry.OnRetry = cfg.StreamStartTimeout, cfg.StreamIdleTimeout, onRetry
 	windows := contextWindows(cfg.Models)
 	providers := map[string]model.Provider{
-		"openai":      openai.New(openai.Config{APIKey: c.apiKey("openai", ""), Retry: retry, ContextWindows: windows["openai"]}),
-		"anthropic":   anthropic.New(anthropic.Config{APIKey: c.apiKey("anthropic", ""), Retry: retry, ContextWindows: windows["anthropic"]}),
-		"google":      google.New(google.Config{APIKey: c.apiKey("google", ""), Retry: retry, ContextWindows: windows["google"]}),
+		"openai":      openai.New(openai.Config{APIKey: override.apiKey(c, "openai", ""), Retry: retry, ContextWindows: windows["openai"]}),
+		"anthropic":   anthropic.New(anthropic.Config{APIKey: override.apiKey(c, "anthropic", ""), Retry: retry, ContextWindows: windows["anthropic"]}),
+		"google":      google.New(google.Config{APIKey: override.apiKey(c, "google", ""), Retry: retry, ContextWindows: windows["google"]}),
 		"chatgpt":     chatgpt.New(chatgpt.Config{Token: func(ctx context.Context) (oauth.Token, error) { return c.token(ctx, "chatgpt") }, Retry: retry, ContextWindows: windows["chatgpt"]}),
 		"antigravity": antigravity.New(antigravity.Config{Token: c.access("antigravity"), Retry: retry, ContextWindows: windows["antigravity"]}),
 		"cursor":      cursor.New(cursor.Config{Token: c.access("cursor"), Retry: retry, ContextWindows: windows["cursor"]}),
@@ -181,7 +201,7 @@ func (c *credentials) registry(cfg config.Config, onRetry agent.RetryFunc) (*mod
 	for id, spec := range cfg.Providers {
 		envs[id] = spec.APIKeyEnv
 		providers[id] = chatcompat.New(chatcompat.Config{
-			BaseURL: spec.BaseURL, APIKey: c.apiKey(id, spec.APIKeyEnv), APIKeyEnv: spec.APIKeyEnv,
+			BaseURL: spec.BaseURL, APIKey: override.apiKey(c, id, spec.APIKeyEnv), APIKeyEnv: spec.APIKeyEnv,
 			Retry: retry, ContextWindows: windows[id],
 		})
 	}
@@ -189,7 +209,7 @@ func (c *credentials) registry(cfg config.Config, onRetry agent.RetryFunc) (*mod
 	var errs []error
 	for _, id := range slices.Sorted(maps.Keys(providers)) {
 		provider := providers[id]
-		if !c.usable(id, envs[id]) {
+		if id != override.provider && !c.usable(id, envs[id]) {
 			provider = unlisted{Provider: provider, id: id, log: c.log}
 		}
 		errs = append(errs, registry.Register(id, provider))

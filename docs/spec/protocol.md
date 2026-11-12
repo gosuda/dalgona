@@ -71,9 +71,10 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `config/batchWrite {edits: [{keyPath, value, mergeStrategy}], filePath?, expectedVersion?, reloadUserConfig?}` | Applies every edit through `Host.WriteSettings`, or none when one edit is invalid. `mergeStrategy` MUST be `replace` or `upsert`, and each edit sets its key. `filePath`, when set, MUST equal the settings path. `expectedVersion`, when set, MUST equal the SHA-256 of the current file, or the server answers `-32600`. `reloadUserConfig` has no effect. Result `{filePath, status: "ok", version}`. |
 | `dalgona/settings/read {}` | `{settings: [{key, value, defaultValue, options}]}` in this order: `approval`, `verbosity`, `theme`, `icons`, `statusHide`, `editReview`, `notifications`. Writes use the same keys with `config/batchWrite`. |
 | `account/read` | `chatgpt` when a ChatGPT OAuth credential exists, else `apiKey` when any credential exists, else `null`. `requiresOpenaiAuth` is `false`. |
-| `account/login/start {type, apiKey?, provider?}` | `apiKey` stores the key for `provider` (default `openai`). `chatgpt` and `chatgptDeviceCode` run the ChatGPT OAuth flow and send `account/login/completed`. Other OAuth providers MUST log in through the terminal (`dal login <provider>`). |
+| `account/login/start {type, apiKey?, provider?}` | `apiKey` checks the key with the model list of `provider` and stores the key only when the provider accepts it. A provider with no configured endpoint stores the key without a check. The key MUST be one line. A rejected key gives `-32602` `<provider> did not accept the API key; it was not saved` and changes no stored credential. `chatgpt` and `chatgptDeviceCode` run the ChatGPT OAuth flow and send `account/login/completed`. Other OAuth providers MUST log in through the terminal (`<product> login <provider>`). |
 | `account/login/cancel {loginId}` | `{status: canceled|notFound}`. |
 | `account/logout {provider?}` | `{}`. Without `provider`, exactly one credential MUST exist. |
+| `dalgona/account/providers/list {}` | `{providers: [{id, login, signedIn}]}`, sorted by `id`. `login` is `apiKey` for the API-key providers and the runner services, `browser` for `chatgpt`, and `terminal` for the other OAuth providers. |
 | `skills/list` | One entry with the host skills. `dal` returns `{"data":[]}`. |
 | `dalgona/keywords/list` | `[{word, hue:[a,b]}]` for enabled keywords. |
 | `dalgona/thread/tree {threadId}` | `{turns:[{turnId, parentTurnId, preview, active}]}`. `parentTurnId` is `null` for a first turn. |
@@ -85,6 +86,8 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `dalgona/retry/wait {threadId, turnId, remainingMs}` | Notification, not a method. Sent once a second during an attended rate-limit wait, and once with `remainingMs` 0 when the wait ends. Not journaled. |
 
 `thread/revert`, `thread/fork`, `turn/start`, and `dalgona/thread/leaf/set` require an idle thread. A running thread MUST give `-32600` `thread <id> is running`.
+
+A client MUST handle `account/login/completed` as follows. On `success` true, it MUST close the login panel, show `Signed in to <provider>`, and request `model/list` again. On `success` false, it MUST keep the panel open and show `error` beside the key field. A client MUST NOT promise that a turn resumes after a login.
 
 A product MAY add methods. Built-in methods take precedence over added methods. A product MAY run an archive hook on an idle thread. The hook MUST run after `Host.Archive` journals `thread.archived`. If the hook fails, the server MUST unarchive the thread. The server MUST return error `-32603` with the message `archive hook: <cause>`.
 

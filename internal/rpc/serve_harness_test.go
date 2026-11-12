@@ -54,6 +54,7 @@ type fakeLLM struct {
 	mu     sync.Mutex
 	queue  []llmReply
 	count  int
+	bodies []string
 }
 
 func newFakeLLM(t *testing.T) *fakeLLM {
@@ -61,7 +62,11 @@ func newFakeLLM(t *testing.T) *fakeLLM {
 	f := &fakeLLM{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /responses", f.respond)
-	mux.HandleFunc("GET /models", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /models", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer rejected-key" {
+			http.Error(w, `{"error":{"message":"invalid api key"}}`, http.StatusUnauthorized)
+			return
+		}
 		_, _ = io.WriteString(w, `{"data":[{"id":"gpt-test"}]}`)
 	})
 	f.server = httptest.NewServer(mux)
@@ -88,10 +93,14 @@ func (f *fakeLLM) next() llmReply {
 }
 
 func (f *fakeLLM) respond(w http.ResponseWriter, r *http.Request) {
-	if _, err := io.Copy(io.Discard, r.Body); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	f.mu.Lock()
+	f.bodies = append(f.bodies, string(raw))
+	f.mu.Unlock()
 	reply := f.next()
 	if reply.gate != nil {
 		select {
@@ -166,7 +175,8 @@ func newRig(t *testing.T, approval config.Approval) *rig {
 			Home: r.home, Cwd: r.cwd, Model: "openai/gpt-test", Approval: approval, Sandbox: config.SandboxOff,
 			Product: config.ProductDal, Reasoning: config.ReasoningDefault,
 		},
-		Providers: r.providers,
+		Providers:        r.providers,
+		ProvidersWithKey: r.providersWithKey,
 		Tools: func(context.Context, string, string) ([]tool.Tool, error) {
 			return []tool.Tool{read.New(), exec.New()}, nil
 		},
@@ -199,6 +209,20 @@ func (r *rig) providers(onRetry agent.RetryFunc) (*model.Registry, error) {
 		APIKey: func(context.Context) (string, error) { return "test-key", nil },
 	})
 	return registry, registry.Register("openai", provider)
+}
+
+func (r *rig) providersWithKey(provider, key string) (*model.Registry, error) {
+	registry := model.NewRegistry()
+	if provider != "openai" {
+		return registry, nil
+	}
+	retry := model.DefaultRetryOptions()
+	retry.Sleep = func(context.Context, time.Duration) error { return nil }
+	adapter := openai.New(openai.Config{
+		BaseURL: r.llm.server.URL, Client: r.llm.server.Client(), Retry: retry,
+		APIKey: func(context.Context) (string, error) { return key, nil },
+	})
+	return registry, registry.Register("openai", adapter)
 }
 
 type message struct {

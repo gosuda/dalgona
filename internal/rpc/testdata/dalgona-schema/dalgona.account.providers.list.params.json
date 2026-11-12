@@ -1,0 +1,5 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/account/providers/list params",
+  "type": "object"
+}
