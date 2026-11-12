@@ -1046,7 +1046,12 @@ function requestResolvedNotice(params: Members): AppNotification | null {
 	if (typeof requestId !== "string" && typeof requestId !== "number") {
 		return null;
 	}
-	return { type: "requestResolved", requestId };
+	const resolution = params["resolution"];
+	return {
+		type: "requestResolved",
+		requestId,
+		resolution: typeof resolution === "string" ? resolution : null,
+	};
 }
 
 function fileChangesNotice(params: Members): AppNotification | null {

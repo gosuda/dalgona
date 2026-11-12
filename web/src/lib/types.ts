@@ -257,7 +257,11 @@ export type AppNotification =
 			readonly itemId: string;
 			readonly changes: readonly FileChange[];
 	  }
-	| { readonly type: "requestResolved"; readonly requestId: RequestId };
+	| {
+			readonly type: "requestResolved";
+			readonly requestId: RequestId;
+			readonly resolution: string | null;
+	  };
 
 export interface ModelOption {
 	readonly id: string;
@@ -336,11 +340,41 @@ export interface ApprovalRequest {
 	readonly reason: string | null;
 }
 
-export type ServerRequest = ApprovalRequest;
+export interface QuestionOption {
+	readonly label: string;
+	readonly description: string;
+	readonly preview: string | null;
+}
+
+export interface QuestionItem {
+	readonly id: string;
+	readonly header: string;
+	readonly question: string;
+	readonly options: readonly QuestionOption[];
+	readonly multiSelect: boolean;
+	readonly isOther: boolean;
+}
+
+export interface QuestionRequest {
+	readonly id: RequestId;
+	readonly method: "item/tool/requestUserInput";
+	readonly threadId: string;
+	readonly turnId: string;
+	readonly itemId: string;
+	readonly questions: readonly QuestionItem[];
+}
+
+export interface QuestionSelection {
+	readonly picked: readonly string[];
+	readonly other: string;
+}
+
+export type ServerRequest = ApprovalRequest | QuestionRequest;
 
 export interface RpcHandlers {
 	readonly onNotification: (notification: AppNotification) => void;
-	readonly onRequest: (request: ServerRequest) => void;
+	readonly onRequest: (request: ApprovalRequest) => void;
+	readonly onQuestion: (request: QuestionRequest) => void;
 	readonly onStateChange: (state: ConnectionState) => void;
 	readonly onError: (message: string) => void;
 }

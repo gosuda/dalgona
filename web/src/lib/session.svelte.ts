@@ -1,5 +1,6 @@
 import { threadTitle } from "./labels";
 import { RpcError, rpcSocketUrl, tokenFromHash } from "./protocol";
+import { questionResponse, resolutionNotice } from "./question";
 import {
 	acceptThreadStatus,
 	activeRequest,
@@ -40,6 +41,8 @@ import type {
 	NoticeAction,
 	NoticeTone,
 	OutputPage,
+	QuestionRequest,
+	QuestionSelection,
 	RequestId,
 	RetryWait,
 	RpcHandlers,
@@ -305,7 +308,10 @@ export class Session {
 				const request = this.requests.find(
 					(entry) => entry.id === notification.requestId,
 				);
-				if (request !== undefined) this.settleRequest(request);
+				if (request === undefined) return;
+				this.settleRequest(request);
+				const text = resolutionNotice(notification.resolution);
+				if (text !== null) this.notify("info", text);
 			},
 			fileChangesUpdated: (notification) => {
 				this.patchChanges = recordPatchChanges(
@@ -376,6 +382,11 @@ export class Session {
 					this.handleNotification(notification);
 			},
 			onRequest: (request) => {
+				if (generation === this.connectionGeneration) {
+					this.requests = trackRequest(this.requests, request);
+				}
+			},
+			onQuestion: (request) => {
 				if (generation === this.connectionGeneration) {
 					this.requests = trackRequest(this.requests, request);
 				}
@@ -839,6 +850,22 @@ export class Session {
 
 	respondApproval(request: ApprovalRequest, decision: Decision): void {
 		this.requireClient().respond(request.id, { decision });
+		this.settleRequest(request);
+	}
+
+	answerQuestion(
+		request: QuestionRequest,
+		selections: readonly QuestionSelection[],
+	): void {
+		this.requireClient().respond(
+			request.id,
+			questionResponse(request, selections),
+		);
+		this.settleRequest(request);
+	}
+
+	cancelQuestion(request: QuestionRequest): void {
+		this.requireClient().respond(request.id, { answers: {} });
 		this.settleRequest(request);
 	}
 

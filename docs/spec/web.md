@@ -225,6 +225,20 @@ A file-change approval shows the diffs carried in the request.
 
 The dock shows one request at a time, the oldest of the open thread. Approvals, questions and the sandbox choice share that order.
 
+### Questions
+
+The question card MUST show `Question required`, the header and the question of each question, and its options. The kicker MUST add `· <n> of <total>` when more than one request is open.
+
+The card MUST mark the first option `Recommended`. A question with options MUST accept one choice, or several when `multiSelect` is true. A question with `isOther` MUST also show a text field for an answer of its own.
+
+A question without options MUST show a text field only. The preview of the chosen option MUST appear in monospace below the options.
+
+The request details MUST scroll inside their own region. The actions MUST stay outside that region. `Submit` MUST be the card's one solid fill.
+
+Submit MUST send each answer as its option labels in option order, then the typed text. The typed text MUST be trimmed and capped at 2000 characters. Skip MUST send every question with an empty list. Dismiss and Escape MUST send `{"answers": {}}`.
+
+The card MUST move focus to its title when it appears. A `serverRequest/resolved` for a request this window still shows MUST show its notice in the notice stack.
+
 ### Empty states and errors
 
 - With no open thread the transcript says `Pick a thread or start a new one`. When connected, it says that earlier threads are in the list. When not connected, it says to connect to dalgona.

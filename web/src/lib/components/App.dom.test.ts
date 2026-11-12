@@ -7,6 +7,7 @@ import { type RpcPort, Session } from "#lib/session.svelte.ts";
 import type {
 	ApprovalRequest,
 	JsonValue,
+	QuestionRequest,
 	RpcHandlers,
 	ThreadActivity,
 	ThreadSummary,
@@ -356,6 +357,37 @@ function fileApproval(id: string, itemId: string): ApprovalRequest {
 	};
 }
 
+function sandboxQuestion(id: string, itemId: string): QuestionRequest {
+	return {
+		id,
+		method: "item/tool/requestUserInput",
+		threadId: "thread-1",
+		turnId: "turn-1",
+		itemId,
+		questions: [
+			{
+				id: "sandbox",
+				header: "Sandbox",
+				question: "How should commands in this thread run?",
+				isOther: false,
+				multiSelect: false,
+				options: [
+					{
+						label: "Accept",
+						description: "Run without a sandbox.",
+						preview: null,
+					},
+					{
+						label: "Dangerously accept",
+						description: "Run without a sandbox under approval mode auto.",
+						preview: null,
+					},
+				],
+			},
+		],
+	};
+}
+
 describe("request queue", () => {
 	afterEach(() => {
 		cleanup();
@@ -392,14 +424,14 @@ describe("request queue", () => {
 		const { session, handlers } = sessionWithHandler();
 		session.activeThreadId = "thread-1";
 		handlers.onRequest(fileApproval("req-1", "file-1"));
-		handlers.onRequest(commandApproval("req-2", "cmd-1"));
+		handlers.onQuestion(sandboxQuestion("req-2", "sandbox-1"));
 		render(App, { props: { session } });
 		await tick();
 		expect(
 			screen.getByRole("heading", { name: "Apply these changes?" }),
 		).toBeTruthy();
 		expect(
-			screen.queryByRole("heading", { name: "Run this command?" }),
+			screen.queryByRole("heading", { name: "Answer this question" }),
 		).toBeNull();
 
 		handlers.onNotification(
@@ -410,7 +442,7 @@ describe("request queue", () => {
 		);
 		await tick();
 		expect(
-			screen.getByRole("heading", { name: "Run this command?" }),
+			screen.getByRole("heading", { name: "Answer this question" }),
 		).toBeTruthy();
 	});
 });

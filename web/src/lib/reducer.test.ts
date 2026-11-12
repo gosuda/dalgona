@@ -17,6 +17,7 @@ import {
 import type {
 	AppNotification,
 	ApprovalRequest,
+	ServerRequest,
 	ThreadDetail,
 	TranscriptItem,
 } from "./types";
@@ -280,7 +281,7 @@ describe("approval tracking", () => {
 	};
 
 	function statusLabel(
-		approvals: readonly ApprovalRequest[],
+		approvals: readonly ServerRequest[],
 		itemId: string,
 	): string {
 		return itemStatusLabel(

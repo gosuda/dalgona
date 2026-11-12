@@ -2,6 +2,7 @@
 import ApprovalCard from "#lib/components/ApprovalCard.svelte";
 import Composer from "#lib/components/Composer.svelte";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
+import QuestionCard from "#lib/components/QuestionCard.svelte";
 import StateTag from "#lib/components/StateTag.svelte";
 import StatusBand from "#lib/components/StatusBand.svelte";
 import ThreadList from "#lib/components/ThreadList.svelte";
@@ -12,6 +13,7 @@ import {
 	stateWords,
 	threadTitle,
 } from "#lib/labels.ts";
+import { isQuestionRequest } from "#lib/question.ts";
 import { requestsElsewhere } from "#lib/reducer.ts";
 import type { Session } from "#lib/session.svelte.ts";
 import type { TurnStatus } from "#lib/types.ts";
@@ -161,7 +163,16 @@ const subagentTitle = $derived.by(() => {
 				awaitingApproval={session.awaitingApproval}
 			/>
 
-			{#if session.currentRequest !== null}
+			{#if session.currentRequest !== null && isQuestionRequest(session.currentRequest)}
+				<QuestionCard
+					request={session.currentRequest}
+					position={shownPosition}
+					total={openRequests.length}
+					subagent={subagentTitle}
+					onSubmit={(request, selections) => session.answerQuestion(request, selections)}
+					onDismiss={(request) => session.cancelQuestion(request)}
+				/>
+			{:else if session.currentRequest !== null && !isQuestionRequest(session.currentRequest)}
 				<ApprovalCard
 					request={session.currentRequest}
 					changes={session.approvalChanges}

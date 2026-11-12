@@ -423,6 +423,7 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 	ServerRequestResolvedNotification: {
 		type: "requestResolved",
 		requestId: "req-1",
+		resolution: null,
 	},
 	CommandExecutionRequestApprovalParams: {
 		id: "req-1",
