@@ -167,6 +167,9 @@ func toolCallValue(e ToolCall) jsontext.Value {
 	fields = optionalRaw(fields, "args", e.Args)
 	fields = optionalBlobField(fields, "args_blob", e.ArgsBlob)
 	fields = optionalString(fields, "signature", e.Signature)
+	if len(e.RedactedThinking) > 0 {
+		fields = append(fields, field("redacted_thinking", arrayValue(e.RedactedThinking, stringValue)))
+	}
 	return objectValue(fields...)
 }
 

@@ -130,9 +130,15 @@ func decodeToolCall(raw jsontext.Value) (ToolCall, error) {
 	}
 	r := objectReader{fields: fields}
 	args, argsBlob := r.rawPayload("args")
+	var redacted []string
+	r.array("redacted_thinking", func(raw jsontext.Value) error {
+		value, err := decodeString(raw)
+		redacted = append(redacted, value)
+		return err
+	})
 	value := ToolCall{
 		ID: r.str("id"), Name: r.str("name"), Args: args, ArgsBlob: argsBlob,
-		Freeform: r.boolean("freeform"), Resolved: r.boolean("resolved"), Signature: r.str("signature"),
+		Freeform: r.boolean("freeform"), Resolved: r.boolean("resolved"), Signature: r.str("signature"), RedactedThinking: redacted,
 	}
 	return value, r.err
 }

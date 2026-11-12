@@ -33,12 +33,13 @@ type ReasoningDelta struct{ Text string }
 func (ReasoningDelta) event() {}
 
 type ToolCall struct {
-	ID        string
-	Name      string
-	Args      jsontext.Value
-	Freeform  bool
-	Resolved  bool
-	Signature string
+	ID               string
+	Name             string
+	Args             jsontext.Value
+	Freeform         bool
+	Resolved         bool
+	Signature        string
+	RedactedThinking []string
 }
 
 func (ToolCall) event() {}

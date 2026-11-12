@@ -205,16 +205,22 @@ func encodeMessage(encoder *model.JSONEncoder, message model.Message, cache bool
 }
 
 func encodeAssistant(encoder *model.JSONEncoder, message model.Message, reasoning string) {
-	signature, replay := thinkingBlock(message, thinkingEnabled(reasoning))
-	if message.Text == "" && len(message.ToolCalls) == 0 && !replay {
+	signature, redacted := replayFor(message, reasoning)
+	if message.Text == "" && len(message.ToolCalls) == 0 && signature == "" && len(redacted) == 0 {
 		return
 	}
 	encoder.BeginObject()
 	encoder.StringKey("role", "assistant")
 	encoder.Key("content")
 	encoder.BeginArray()
-	if replay {
+	if signature != "" {
 		encodeThinkingBlock(encoder, message.Reasoning, signature)
+	}
+	for _, data := range redacted {
+		encoder.BeginObject()
+		encoder.StringKey("type", "redacted_thinking")
+		encoder.StringKey("data", data)
+		encoder.EndObject()
 	}
 	if message.Text != "" {
 		encodeTextBlock(encoder, message.Text, false)
@@ -226,16 +232,21 @@ func encodeAssistant(encoder *model.JSONEncoder, message model.Message, reasonin
 	encoder.EndObject()
 }
 
-func thinkingBlock(message model.Message, thinking bool) (string, bool) {
-	if !thinking || message.Reasoning == "" {
-		return "", false
+func replayFor(message model.Message, reasoning string) (string, []string) {
+	if !thinkingEnabled(reasoning) {
+		return "", nil
 	}
+	var signature string
+	var redacted []string
 	for _, call := range message.ToolCalls {
-		if call.Signature != "" {
-			return call.Signature, true
+		if signature == "" && message.Reasoning != "" {
+			signature = call.Signature
+		}
+		if len(redacted) == 0 {
+			redacted = call.RedactedThinking
 		}
 	}
-	return "", false
+	return signature, redacted
 }
 
 func encodeThinkingBlock(encoder *model.JSONEncoder, reasoning, signature string) {

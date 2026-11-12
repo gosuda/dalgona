@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -116,5 +117,34 @@ func TestToolCallSignatureRoundTrip(t *testing.T) {
 	}
 	if bytes.Contains(encoded, []byte(`"signature"`)) {
 		t.Fatalf("encoded %s emits an empty signature", encoded)
+	}
+}
+
+func TestToolCallRedactedThinkingRoundTrip(t *testing.T) {
+	t.Parallel()
+	original := event.AssistantMessage{
+		ItemID: "a", TurnID: "t",
+		ToolCalls:  []event.ToolCall{{ID: "c", Name: "exec", Args: jsontext.Value(`{"command":"ls"}`), RedactedThinking: []string{"enc-1", "enc-2"}}},
+		Usage:      event.Usage{Input: 1},
+		StopReason: "tool_calls",
+	}
+	encoded, err := event.Encode(original)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"redacted_thinking":["enc-1","enc-2"]`)) {
+		t.Fatalf("encoded %s omits redacted_thinking", encoded)
+	}
+	decoded, err := event.Decode(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, event.Event(original)) {
+		t.Fatalf("round trip mismatch: %#v", decoded)
+	}
+	empty := original
+	empty.ToolCalls = []event.ToolCall{{ID: "c", Name: "exec", Args: jsontext.Value(`{"command":"ls"}`), RedactedThinking: []string{""}}}
+	if err := empty.Validate(); err == nil || !strings.Contains(err.Error(), "redacted_thinking[0] must not be empty") {
+		t.Fatalf("validate empty redacted_thinking: %v", err)
 	}
 }

@@ -60,13 +60,14 @@ type Mention struct {
 }
 
 type ToolCall struct {
-	ID        string
-	Name      string
-	Args      jsontext.Value
-	ArgsBlob  *BlobRef
-	Freeform  bool
-	Resolved  bool
-	Signature string
+	ID               string
+	Name             string
+	Args             jsontext.Value
+	ArgsBlob         *BlobRef
+	Freeform         bool
+	Resolved         bool
+	Signature        string
+	RedactedThinking []string
 }
 
 type Usage struct {
@@ -289,14 +290,26 @@ func (e AssistantMessage) Validate() error {
 		return err
 	}
 	for i, call := range e.ToolCalls {
-		if call.ID == "" || call.Name == "" {
-			return fmt.Errorf("tool_calls[%d]: id and name must not be empty", i)
-		}
-		if err := requiredRawPayload("tool_calls args", call.Args, call.ArgsBlob); err != nil {
-			return fmt.Errorf("tool_calls[%d]: %w", i, err)
+		if err := validateToolCall(i, call); err != nil {
+			return err
 		}
 	}
 	return e.Usage.Validate()
+}
+
+func validateToolCall(i int, call ToolCall) error {
+	if call.ID == "" || call.Name == "" {
+		return fmt.Errorf("tool_calls[%d]: id and name must not be empty", i)
+	}
+	if err := requiredRawPayload("tool_calls args", call.Args, call.ArgsBlob); err != nil {
+		return fmt.Errorf("tool_calls[%d]: %w", i, err)
+	}
+	for j, data := range call.RedactedThinking {
+		if data == "" {
+			return fmt.Errorf("tool_calls[%d]: redacted_thinking[%d] must not be empty", i, j)
+		}
+	}
+	return nil
 }
 
 func (u Usage) Validate() error {

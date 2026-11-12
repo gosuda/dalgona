@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/gosuda/dalgona/internal/model"
 )
@@ -16,6 +17,7 @@ type responseState struct {
 	freeform   map[string]bool
 	tools      map[int]*model.ToolCall
 	signature  string
+	redacted   []string
 	usage      usage
 	sawTool    bool
 	sawContent bool
@@ -44,6 +46,7 @@ type block struct {
 	ID    string
 	Name  string
 	Input jsontext.Value
+	Data  string
 }
 
 type delta struct {
@@ -128,6 +131,10 @@ func (s *responseState) handleContent(value responseEvent) error {
 }
 
 func (s *responseState) startBlock(index int, block block) {
+	if block.Type == "redacted_thinking" {
+		s.redacted = append(s.redacted, block.Data)
+		return
+	}
 	if block.Type != "tool_use" {
 		return
 	}
@@ -188,6 +195,7 @@ func (s *responseState) finishTool(index int) error {
 		tool.Args = input
 	}
 	tool.Signature = s.signature
+	tool.RedactedThinking = slices.Clone(s.redacted)
 	s.stream.Emit(*tool)
 	delete(s.tools, index)
 	return nil
@@ -330,6 +338,8 @@ func readBlock(decoder *jsontext.Decoder, block *block) error {
 			block.Name, err = model.ReadString(decoder)
 		case "input":
 			block.Input, err = model.ReadValue(decoder)
+		case "data":
+			block.Data, err = model.ReadString(decoder)
 		default:
 			err = decoder.SkipValue()
 		}

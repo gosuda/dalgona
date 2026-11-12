@@ -197,7 +197,7 @@ func (b *transcript) assistant(e event.AssistantMessage) {
 		b.keep(err)
 		message.ToolCalls = append(message.ToolCalls, model.ToolCall{
 			ID: call.ID, Name: call.Name, Args: args, Freeform: call.Freeform, Resolved: call.Resolved,
-			Signature: call.Signature,
+			Signature: call.Signature, RedactedThinking: call.RedactedThinking,
 		})
 		b.outstanding[call.ID] = true
 		b.names[call.ID] = call.Name
