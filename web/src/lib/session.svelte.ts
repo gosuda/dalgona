@@ -183,6 +183,7 @@ export class Session {
 	patchChanges: PatchChanges = $state({});
 	knownChildren: KnownChildThreads = $state({});
 	queuedFollowups: readonly string[] = $state([]);
+	sentTexts: readonly string[] = $state([]);
 	loadingThreads: boolean = $state(false);
 	loadingTranscript: boolean = $state(false);
 	startingThread: boolean = $state(false);
@@ -246,6 +247,20 @@ export class Session {
 			(entry) => entry.id === this.activeThreadId,
 		);
 		return thread === undefined ? "No thread selected" : threadTitle(thread);
+	});
+
+	history: readonly string[] = $derived.by(() => {
+		const texts: string[] = [];
+		const prompts = this.transcript.items.flatMap((item) =>
+			item.kind === "userMessage" ? [item.text] : [],
+		);
+		for (const text of prompts) {
+			if (texts[texts.length - 1] !== text) texts.push(text);
+		}
+		for (const text of this.sentTexts) {
+			if (!texts.includes(text)) texts.push(text);
+		}
+		return texts;
 	});
 
 	constructor(
@@ -767,6 +782,7 @@ export class Session {
 			);
 			this.transcript = started.transcript;
 			this.recordPreview(threadId, text);
+			this.sentTexts = [...this.sentTexts, text];
 			return true;
 		} catch (error) {
 			this.reportFailure(
@@ -796,6 +812,7 @@ export class Session {
 				turnSteerParams(threadId, turnId, text),
 				parseTurnSteerResponse,
 			);
+			this.sentTexts = [...this.sentTexts, text];
 		} catch (error) {
 			this.reportFailure(
 				"Unable to steer turn",

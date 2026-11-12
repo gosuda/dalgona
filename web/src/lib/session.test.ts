@@ -214,6 +214,20 @@ function resolvedNotice(threadId: string, requestId: string): AppNotification {
 	return parsed;
 }
 
+function userItem(id: string, text: string): AppNotification {
+	const parsed = parseNotification({
+		method: "item/completed",
+		params: {
+			completedAtMs: 1,
+			item: { id, type: "userMessage", content: [{ type: "text", text }] },
+			threadId: "t1",
+			turnId: "turn-1",
+		},
+	});
+	if (parsed === null) throw new Error("user item did not parse");
+	return parsed;
+}
+
 function fileApproval(
 	id: string,
 	threadId: string,
@@ -271,6 +285,23 @@ describe("session", () => {
 		});
 		await waitForThread(session, "t1");
 		expect(session.queuedFollowups).toEqual(["later"]);
+		session.stop();
+	});
+
+	test("lists each sent message once in the history", async () => {
+		const { dial, ports } = fakeDial("none", {
+			"turn/start": () => ({
+				turn: { id: "turn-1", status: "inProgress", items: [] },
+			}),
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		await session.sendMessage("first");
+		await session.sendMessage("second");
+		ports[0]?.deliver(userItem("u-1", "first"));
+		ports[0]?.deliver(userItem("u-2", "second"));
+		expect(session.history).toEqual(["first", "second"]);
 		session.stop();
 	});
 

@@ -8,6 +8,7 @@ function baseProps() {
 		disabled: false,
 		running: false,
 		followups: [] as readonly string[],
+		history: [] as readonly string[],
 		onEditFollowup: vi.fn(() => undefined),
 		onRemoveFollowup: vi.fn(),
 		onSend: vi.fn(),
@@ -111,5 +112,63 @@ describe("follow-up queue", () => {
 			screen.getAllByRole("button", { name: "Remove" })[1] as HTMLElement,
 		);
 		expect(onRemoveFollowup).toHaveBeenCalledWith(1);
+	});
+});
+
+describe("composer history", () => {
+	afterEach(cleanup);
+
+	test("ArrowUp at the start recalls the last message and ArrowDown restores the draft", async () => {
+		render(Composer, {
+			props: { ...baseProps(), history: ["first message", "last message"] },
+		});
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "dr" } });
+		field.setSelectionRange(0, 0);
+		await fireEvent.keyDown(field, { key: "ArrowUp" });
+		expect(field.value).toBe("last message");
+		field.setSelectionRange(0, 0);
+		await fireEvent.keyDown(field, { key: "ArrowUp" });
+		expect(field.value).toBe("first message");
+		field.setSelectionRange(field.value.length, field.value.length);
+		await fireEvent.keyDown(field, { key: "ArrowDown" });
+		expect(field.value).toBe("last message");
+		field.setSelectionRange(field.value.length, field.value.length);
+		await fireEvent.keyDown(field, { key: "ArrowDown" });
+		expect(field.value).toBe("dr");
+	});
+
+	test("ArrowUp recalls again after a recall without moving the caret", async () => {
+		render(Composer, {
+			props: { ...baseProps(), history: ["first message", "last message"] },
+		});
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		field.setSelectionRange(0, 0);
+		await fireEvent.keyDown(field, { key: "ArrowUp" });
+		expect(field.value).toBe("last message");
+		await fireEvent.keyDown(field, { key: "ArrowUp" });
+		expect(field.value).toBe("first message");
+	});
+
+	test("typing into a recalled message makes the edited text the draft", async () => {
+		render(Composer, {
+			props: { ...baseProps(), history: ["old"] },
+		});
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		field.setSelectionRange(0, 0);
+		await fireEvent.keyDown(field, { key: "ArrowUp" });
+		expect(field.value).toBe("old");
+		await fireEvent.input(field, { target: { value: "old edited" } });
+		field.setSelectionRange(0, 0);
+		await fireEvent.keyDown(field, { key: "ArrowUp" });
+		expect(field.value).toBe("old");
+		await fireEvent.keyDown(field, { key: "ArrowDown" });
+		expect(field.value).toBe("old edited");
 	});
 });

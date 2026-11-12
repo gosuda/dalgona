@@ -275,3 +275,12 @@ While a turn runs, Alt+Enter MUST queue the message as a follow-up. Enter MUST s
 The queue MUST list each follow-up by its first line, above the message field.
 Edit MUST put the follow-up's text into the message field and remove the follow-up from the queue.
 Remove MUST drop only the follow-up that it names.
+
+ArrowUp MUST recall the previous message when the caret is at the start of the message field and nothing is selected.
+ArrowDown MUST recall the next message when the caret is at the end or while you browse. It MUST restore the draft after the newest message.
+Typing into a recalled message MUST make the edited text the draft. The caret MUST move to the start of the message field after each recall.
+
+| Key | Caret and selection | Effect |
+|---|---|---|
+| ArrowUp | At the start, nothing selected | Recalls the previous message you sent. |
+| ArrowDown | At the end, or while browsing, with nothing selected | Recalls the next message, or restores the draft. |

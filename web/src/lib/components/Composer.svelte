@@ -1,4 +1,5 @@
 <script lang="ts">
+import { tick } from "svelte";
 import FollowupQueue from "#lib/components/FollowupQueue.svelte";
 import { handoffFocus } from "#lib/focus.ts";
 import type { KeywordMatch } from "#lib/types.ts";
@@ -7,6 +8,7 @@ interface Props {
 	disabled: boolean;
 	running: boolean;
 	followups: readonly string[];
+	history: readonly string[];
 	onEditFollowup: (index: number) => string | undefined;
 	onRemoveFollowup: (index: number) => void;
 	onMatch?: (text: string) => Promise<readonly KeywordMatch[]>;
@@ -20,6 +22,7 @@ let {
 	disabled,
 	running,
 	followups,
+	history,
 	onEditFollowup,
 	onRemoveFollowup,
 	onMatch,
@@ -31,6 +34,8 @@ let {
 let text = $state("");
 let error = $state("");
 let matches = $state<readonly KeywordMatch[]>([]);
+let browsing: number | null = null;
+let savedDraft = "";
 let matchSeq = 0;
 let textarea = $state<HTMLTextAreaElement>();
 
@@ -71,6 +76,7 @@ function submitPrimary(): void {
 		onSend(value);
 	}
 	text = "";
+	browsing = null;
 }
 
 function queueFollowup(): void {
@@ -78,6 +84,7 @@ function queueFollowup(): void {
 	if (!value) return;
 	onFollowup(value);
 	text = "";
+	browsing = null;
 }
 
 function editFollowup(index: number): void {
@@ -86,8 +93,48 @@ function editFollowup(index: number): void {
 	textarea?.focus();
 }
 
+function showRecall(value: string): void {
+	text = value;
+	void tick().then(() => textarea?.setSelectionRange(0, 0));
+}
+
+function recallOlder(field: HTMLTextAreaElement): boolean {
+	const older = browsing === null ? history.length - 1 : browsing - 1;
+	if (older < 0) return false;
+	if (browsing === null) savedDraft = field.value;
+	browsing = older;
+	showRecall(history[older] ?? "");
+	return true;
+}
+
+function recallNewer(): boolean {
+	if (browsing === null) return false;
+	const newer = browsing + 1;
+	browsing = newer < history.length ? newer : null;
+	showRecall(browsing === null ? savedDraft : (history[newer] ?? ""));
+	return true;
+}
+
+function recallFromKey(event: KeyboardEvent): boolean {
+	const field = event.currentTarget as HTMLTextAreaElement;
+	if (field.selectionStart !== field.selectionEnd) return false;
+	if (event.key === "ArrowUp" && field.selectionStart === 0)
+		return recallOlder(field);
+	if (
+		event.key === "ArrowDown" &&
+		(browsing !== null || field.selectionStart === text.length)
+	)
+		return recallNewer();
+	return false;
+}
+
 function onKeydown(event: KeyboardEvent): void {
-	if (event.isComposing || event.key !== "Enter") return;
+	if (event.isComposing) return;
+	if (recallFromKey(event)) {
+		event.preventDefault();
+		return;
+	}
+	if (event.key !== "Enter") return;
 	if (event.altKey && running) {
 		event.preventDefault();
 		queueFollowup();
@@ -118,6 +165,7 @@ function onKeydown(event: KeyboardEvent): void {
 			aria-invalid={error ? "true" : "false"}
 			aria-describedby="composer-help composer-error"
 			onkeydown={onKeydown}
+			oninput={() => (browsing = null)}
 		></textarea>
 		{#if matches.length > 0}
 			<p class="keywords">Keywords: {matches.map((match) => match.word).join(", ")}</p>

@@ -188,6 +188,7 @@ const subagentTitle = $derived.by(() => {
 				disabled={session.connection !== "connected" || session.activeThreadId === null || session.loadingTranscript}
 				running={session.running}
 				followups={session.queuedFollowups}
+				history={session.history}
 				onEditFollowup={(index) => session.editFollowup(index)}
 				onRemoveFollowup={(index) => session.removeFollowup(index)}
 				onMatch={(text) => session.matchKeywords(text)}
