@@ -222,6 +222,9 @@ func (b *transcript) assistant(e event.AssistantMessage) {
 	for index, call := range e.ToolCalls {
 		b.order[call.ID] = index
 		args, err := b.host.loadRaw(call.Args, call.ArgsBlob)
+		if err == nil && call.Freeform {
+			args, err = freeformInput(args)
+		}
 		b.keep(err)
 		message.ToolCalls = append(message.ToolCalls, model.ToolCall{
 			ID: call.ID, Name: call.Name, Args: args, Freeform: call.Freeform, Resolved: call.Resolved,
