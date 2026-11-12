@@ -42,7 +42,7 @@ func (m *model) executeThreadCommand(name string) tea.Cmd {
 		result := new(rpc.ThreadForkResponse)
 		return m.call("fork", "thread/fork", params, result, "")
 	default:
-		m.notice = "unknown command; use /model /resume /new /compact /login /tree /revert /fork /advisor"
+		m.noticef("unknown command; use /model /resume /new /compact /login /tree /revert /fork /advisor")
 		return nil
 	}
 }
@@ -57,7 +57,7 @@ func (m *model) advisorCommand(argument string) tea.Cmd {
 	case "reset":
 		return m.call("advisorReset", "dalgona/advisor/reset", params, nil, "")
 	default:
-		m.notice = "usage: /advisor to turn the advisor on or off, /advisor status, or /advisor reset"
+		m.noticef("usage: /advisor to turn the advisor on or off, /advisor status, or /advisor reset")
 		return nil
 	}
 }
@@ -102,7 +102,7 @@ func (m *model) resumeThread(id string) tea.Cmd {
 
 func (m *model) loginCommand(provider string) tea.Cmd {
 	if provider == "" {
-		m.notice = "usage: /login <provider>; for example /login openai or /login chatgpt"
+		m.noticef("usage: /login <provider>; for example /login openai or /login chatgpt")
 		return nil
 	}
 	params := rpc.AccountLoginStartParams{Provider: provider}

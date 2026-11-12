@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/gosuda/dalgona/internal/rpc"
 )
@@ -23,7 +22,7 @@ func (m *model) applyRequest(msg serverRequestMsg) {
 	request, err := decodeApproval(msg.method, msg.params)
 	if err != nil {
 		msg.answer <- requestAnswer{err: err}
-		m.notice = fmt.Sprintf("approval request failed: %v; reconnect and retry the turn", err)
+		m.errorf("approval request failed: %v; reconnect and retry the turn", err)
 		return
 	}
 	request.answer = msg.answer
@@ -73,13 +72,13 @@ func (m *model) renderApproval() string {
 	if current.reason != "" {
 		lines = append(lines, "reason: "+sanitizeText(current.reason))
 	}
-	lines = append(lines, approvalChoices(m.screen.width)...)
+	lines = append(lines, approvalChoices(&m.screen, m.screen.width)...)
 	return wrapTerminal(strings.Join(lines, "\n"), m.screen.width)
 }
 
-func approvalChoices(width int) []string {
+func approvalChoices(screen *screenState, width int) []string {
 	choices := []string{"[y] accept", "[a] accept for session", "[n] decline", "[esc] cancel and interrupt"}
-	if line := strings.Join(choices, "  "); lipgloss.Width(line) <= width {
+	if line := strings.Join(choices, "  "); screen.cells(line) <= width {
 		return []string{line}
 	}
 	return choices

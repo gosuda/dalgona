@@ -19,6 +19,7 @@ func TestSanitizeTextStripsControlsAndEscapes(t *testing.T) {
 		{"bad\x00null\x1b[2Jok", "badnullok"},
 		{"\x1b(Bcharset", "charset"},
 		{"trunc\x1b[3", "trunc"},
+		{"x\x9b31my\x9d52;c\x07", "x\uFFFD31my\uFFFD52;c"},
 	}
 	for _, tc := range cases {
 		if got := sanitizeText(tc.in); got != tc.want {

@@ -15,7 +15,7 @@ import (
 func (m *model) applyNotification(msg notificationMsg) tea.Cmd {
 	m.pendingCommand = nil
 	if err := m.applyDecodedNotification(msg); err != nil {
-		m.notice = fmt.Sprintf("protocol error in %s: %v; reconnect with %s or use /new", msg.method, err, m.resumeHint())
+		m.errorf("protocol error in %s: %v; reconnect with %s or use /new", msg.method, err, m.resumeHint())
 		return nil
 	}
 	m.emitStatus()
@@ -50,7 +50,7 @@ func (m *model) applyThreadNotification(msg notificationMsg) error {
 	case "thread/name/updated":
 		return m.applyThreadName(msg.params)
 	default:
-		m.notice = "files changed by later turns are not reverted"
+		m.noticef("files changed by later turns are not reverted")
 		return nil
 	}
 }
@@ -109,7 +109,7 @@ func (m *model) applyThreadName(params jsontext.Value) error {
 		return err
 	}
 	if m.acceptThread(event.ThreadID) {
-		m.thread.title = cmp.Or(event.ThreadName, event.ThreadID)
+		m.thread.title = sanitizeText(cmp.Or(event.ThreadName, event.ThreadID))
 	}
 	return nil
 }
@@ -145,7 +145,7 @@ func (m *model) applyTurnStarted(params jsontext.Value) error {
 		return nil
 	}
 	m.thread.turnID = event.Turn.ID
-	m.notice = ""
+	m.noticef("")
 	m.setState(stateRunning)
 	return nil
 }
@@ -166,7 +166,7 @@ func (m *model) applyTurnCompleted(params jsontext.Value) error {
 	m.setState(turnState(event.Turn.Status))
 	if m.thread.state != stateIdle {
 		if len(m.queue) > 0 {
-			m.notice = fmt.Sprintf("turn %s; %d follow-up held, press Enter on an empty composer to send it", m.thread.state, len(m.queue))
+			m.noticef("turn %s; %d follow-up held, press Enter on an empty composer to send it", m.thread.state, len(m.queue))
 		}
 		return nil
 	}
@@ -183,7 +183,7 @@ func (m *model) applyItemStarted(params jsontext.Value) error {
 		return nil
 	}
 	live := m.liveItem(event.Item.ID)
-	live.Item = mergeItem(event.Item, live.Item)
+	live.Item = mergeItem(sanitizeItem(event.Item), live.Item)
 	return nil
 }
 
@@ -195,7 +195,7 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 	if !m.acceptThread(event.ThreadID) {
 		return nil
 	}
-	item := m.liveItem(event.Item.ID).settle(event.Item)
+	item := m.liveItem(event.Item.ID).settle(sanitizeItem(event.Item))
 	m.live.items = slices.DeleteFunc(m.live.items, func(live liveItem) bool { return live.ID == item.ID })
 	if !isAdvisorItem(item) {
 		m.pendingCommand = tea.Println(m.renderSettledItem(item))
@@ -231,9 +231,9 @@ func (m *model) applyDelta(method string, params jsontext.Value) error {
 	item := m.liveItem(delta.itemID)
 	item.Type = deltaType(method)
 	if item.Type == "commandExecution" {
-		item.output = append(item.output, delta.text...)
+		item.output = appendSanitized(item.output, delta.text)
 	} else {
-		item.text = append(item.text, delta.text...)
+		item.text = appendSanitized(item.text, delta.text)
 	}
 	return nil
 }
@@ -262,7 +262,7 @@ func (m *model) applyPlan(params jsontext.Value) error {
 	for _, step := range event.Plan {
 		lines = append(lines, fmt.Sprintf("[%s] %s", planStatus(step.Status), step.Step))
 	}
-	m.notice = strings.Join(lines, "\n")
+	m.noticef("%s", strings.Join(lines, "\n"))
 	return nil
 }
 
@@ -286,11 +286,11 @@ func (m *model) applyError(params jsontext.Value) error {
 		return nil
 	}
 	if event.WillRetry {
-		m.notice = fmt.Sprintf("error: %s; retrying the turn, no action needed", event.Error.Message)
+		m.noticef("error: %s; retrying the turn, no action needed", event.Error.Message)
 		return nil
 	}
 	m.setState(stateFailed)
-	m.notice = fmt.Sprintf("error: %s; retry the turn, %s, or /new", event.Error.Message, m.resumeHint())
+	m.errorf("error: %s; retry the turn, %s, or /new", event.Error.Message, m.resumeHint())
 	return nil
 }
 
@@ -320,9 +320,9 @@ func (m *model) resumeHint() string {
 
 func threadTitle(thread rpc.Thread) string {
 	if thread.Name == "" {
-		return thread.ID
+		return sanitizeText(thread.ID)
 	}
-	return thread.Name
+	return sanitizeText(thread.Name)
 }
 
 func threadState(status rpc.ThreadStatus) string {

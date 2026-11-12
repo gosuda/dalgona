@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -31,6 +32,7 @@ type model struct {
 	screen         screenState
 	out            outState
 	notice         string
+	noticeError    bool
 	queue          []string
 	ctrlCArmed     bool
 	pendingCommand tea.Cmd
@@ -71,11 +73,13 @@ type inputState struct {
 type screenState struct {
 	width   int
 	focused bool
+	method  ansi.Method
 }
 
 type outState struct {
 	markdown map[int]*glamour.TermRenderer
 }
+
 type notificationMsg struct {
 	method string
 	params jsontext.Value

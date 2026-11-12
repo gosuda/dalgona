@@ -63,7 +63,7 @@ func (c composer) cursorView() string {
 func (c composer) Update(msg tea.Msg) (composer, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
-		c.insert([]rune(msg.Content))
+		c.insert([]rune(sanitizeText(msg.Content)))
 	case tea.KeyPressMsg:
 		c.updateKey(msg)
 	}
@@ -84,7 +84,7 @@ func (c *composer) updateKey(msg tea.KeyPressMsg) {
 		c.navigate(key)
 	default:
 		if msg.Text != "" {
-			c.insert([]rune(msg.Text))
+			c.insert([]rune(sanitizeText(msg.Text)))
 		}
 	}
 }

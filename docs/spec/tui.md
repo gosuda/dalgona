@@ -117,6 +117,29 @@ Every error notice MUST name a recovery action.
 - A failed keyword list MUST NOT block prompting.
 - An interrupt result for an earlier turn MUST NOT change the current state.
 
+## Untrusted text
+
+The client MUST pass every server, model, paste, and command text through one sanitizer before it reaches the screen.
+The sanitizer MUST remove escape sequences and control bytes, except newline and tab.
+It MUST also remove DEL, C1 controls, bidirectional controls, and private-use runes from U+F0000 to U+FFFFD.
+The sanitizer MUST replace each byte that is not valid UTF-8 with U+FFFD. A raw byte from 0x80 to 0x9F MUST NOT pass as a C1 control.
+
+- Each delta of agent message, reasoning, and command output text, as it is appended.
+- The text, command, working directory, tool, server, status, file change path, and diff of an item, when it starts or completes.
+- The thread name, title, and id.
+- Each plan step.
+- Each error message.
+- Each advisor note, with its advisor name and severity.
+- The display name of a model, the title of a thread, and the preview of a turn, in a picker.
+- The thread id, command, and reason of an approval request.
+- Pasted text and typed text in the composer.
+- The URL and code of a login.
+
+## Width
+
+The client MUST measure text with the width method of its renderer.
+A user whose terminal draws East Asian Ambiguous characters two cells wide MUST set `RUNEWIDTH_EASTASIAN=1`.
+
 ## Keyword glow
 
 The TUI reimplements the `internal/keywords` matcher. A keyword matches only as an exact lowercase word in prose. Fenced code, inline code, HTML comments, and XML or HTML elements with their contents are masked first.

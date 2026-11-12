@@ -94,10 +94,10 @@ func (m *model) applyModels(value any) tea.Cmd {
 		if item.Hidden {
 			continue
 		}
-		choices = append(choices, choice{id: item.ID, label: item.ID, detail: item.DisplayName, active: item.ID == m.thread.modelName})
+		choices = append(choices, choice{id: sanitizeText(item.ID), label: sanitizeText(item.ID), detail: sanitizeText(item.DisplayName), active: item.ID == m.thread.modelName})
 	}
 	if len(choices) == 0 {
-		m.notice = "no models are available; run /login <provider> and retry /model"
+		m.noticef("no models are available; run /login <provider> and retry /model")
 		return nil
 	}
 	m.selector = &selector{kind: "model", title: "choose a model", choices: choices}
@@ -111,10 +111,10 @@ func (m *model) applyThreads(value any) tea.Cmd {
 	}
 	choices := make([]choice, 0, len(response.Data))
 	for _, item := range response.Data {
-		choices = append(choices, choice{id: item.ID, label: threadTitle(item), detail: threadState(item.Status), active: item.ID == m.thread.id})
+		choices = append(choices, choice{id: sanitizeText(item.ID), label: threadTitle(item), detail: threadState(item.Status), active: item.ID == m.thread.id})
 	}
 	if len(choices) == 0 {
-		m.notice = "no threads are available; use /new to start one"
+		m.noticef("no threads are available; use /new to start one")
 		return nil
 	}
 	m.selector = &selector{kind: "resume", title: "resume a thread", choices: choices}
@@ -137,10 +137,10 @@ func (m *model) applyTree(op string, value any) tea.Cmd {
 		if op == "revertTree" && !turn.Active {
 			continue
 		}
-		choices = append(choices, choice{id: turn.TurnID, label: turn.Preview, detail: turn.TurnID, active: turn.Active})
+		choices = append(choices, choice{id: sanitizeText(turn.TurnID), label: sanitizeText(turn.Preview), detail: sanitizeText(turn.TurnID), active: turn.Active})
 	}
 	if len(choices) == 0 {
-		m.notice = "no turns are available on this path; send a prompt first"
+		m.noticef("no turns are available on this path; send a prompt first")
 		return nil
 	}
 	m.selector = &selector{kind: kind, title: title, choices: choices}

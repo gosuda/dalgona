@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func (m model) Init() tea.Cmd {
@@ -25,6 +26,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BlurMsg:
 		m.screen.focused = false
 		m.input.composer.focused = false
+	case tea.ModeReportMsg:
+		m.applyModeReport(msg)
 	case notificationMsg, serverRequestMsg, resultMsg, shimmerMsg, disconnectedMsg:
 		command = m.updateAsync(msg)
 	default:
@@ -48,7 +51,7 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 		return m.advanceShimmer()
 	case disconnectedMsg:
 		m.setState(stateDisconnected)
-		m.notice = fmt.Sprintf("connection lost: %v; restart the TUI, then %s", msg.err, m.resumeHint())
+		m.errorf("connection lost: %v; restart the TUI, then %s", msg.err, m.resumeHint())
 	}
 	return nil
 }
@@ -81,7 +84,7 @@ func (m *model) confirmExit() tea.Cmd {
 		return tea.Quit
 	}
 	m.ctrlCArmed = true
-	m.notice = "press Ctrl+C again to exit; Esc interrupts the active turn"
+	m.noticef("press Ctrl+C again to exit; Esc interrupts the active turn")
 	return nil
 }
 
@@ -96,4 +99,23 @@ func (m model) View() tea.View {
 	view.AltScreen = false
 	view.ReportFocus = true
 	return view
+}
+
+func (m *model) noticef(format string, args ...any) {
+	m.notice = sanitizeText(fmt.Sprintf(format, args...))
+	m.noticeError = false
+}
+
+func (m *model) errorf(format string, args ...any) {
+	m.noticef(format, args...)
+	m.noticeError = true
+}
+
+func (m *model) applyModeReport(msg tea.ModeReportMsg) {
+	if msg.Mode != ansi.ModeUnicodeCore {
+		return
+	}
+	if msg.Value == ansi.ModeReset || msg.Value == ansi.ModeSet || msg.Value == ansi.ModePermanentlySet {
+		m.screen.method = ansi.GraphemeWidth
+	}
 }

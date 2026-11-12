@@ -123,7 +123,7 @@ func (m *model) submitPrompt() tea.Cmd {
 		return m.executeSlash(text)
 	}
 	if m.thread.id == "" {
-		m.notice = "thread is not ready; wait for startup or use /new to retry"
+		m.noticef("thread is not ready; wait for startup or use /new to retry")
 		m.input.composer.SetValue(text)
 		return nil
 	}
@@ -155,12 +155,12 @@ func (m *model) queueFollowup() tea.Cmd {
 		return nil
 	}
 	if len(m.queue) >= maxFollowups {
-		m.notice = fmt.Sprintf("follow-up queue is full (%d); wait for the active turn or press Esc", maxFollowups)
+		m.noticef("follow-up queue is full (%d); wait for the active turn or press Esc", maxFollowups)
 		return nil
 	}
 	m.queue = append(m.queue, text)
 	m.input.composer.SetValue("")
-	m.notice = fmt.Sprintf("queued follow-up %d of %d", len(m.queue), maxFollowups)
+	m.noticef("queued follow-up %d of %d", len(m.queue), maxFollowups)
 	if m.thread.state == stateIdle {
 		return m.startQueuedFollowup()
 	}
@@ -185,7 +185,7 @@ func (m *model) interrupt() tea.Cmd {
 		return nil
 	}
 	if m.thread.state != stateRunning && m.thread.state != stateAwaitingApproval {
-		m.notice = "idle; nothing to interrupt"
+		m.noticef("idle; nothing to interrupt")
 		return nil
 	}
 	params := rpc.TurnInterruptParams{ThreadID: m.thread.id, TurnID: m.thread.turnID}
@@ -232,7 +232,7 @@ func (m *model) applyDataResult(msg resultMsg) tea.Cmd {
 
 func (m *model) applyAdvisorResult(msg resultMsg) tea.Cmd {
 	if msg.err != nil {
-		m.notice = advisorFailure(msg.err)
+		m.errorf("%s", advisorFailure(msg.err))
 		return nil
 	}
 	states, _ := msg.value.(*[]rpc.AdvisorState)
@@ -244,14 +244,14 @@ func (m *model) applyAdvisorResult(msg resultMsg) tea.Cmd {
 		if msg.op == "advisorToggle" {
 			return m.toggleAdvisor(*states)
 		}
-		m.notice = advisorStatusText(*states)
+		m.noticef("%s", advisorStatusText(*states))
 	case "advisorSet":
-		m.notice = "advisor off; run /advisor to turn it back on"
+		m.noticef("advisor off; run /advisor to turn it back on")
 		if msg.text == "true" {
-			m.notice = "advisor on; it reviews after each turn"
+			m.noticef("advisor on; it reviews after each turn")
 		}
 	case "advisorReset":
-		m.notice = "advisor reset; it reviews the current branch at the next turn"
+		m.noticef("advisor reset; it reviews the current branch at the next turn")
 	}
 	return nil
 }
@@ -288,20 +288,20 @@ func (m *model) applyConfirmation(msg resultMsg) tea.Cmd {
 			return nil
 		}
 		m.setState(stateInterrupted)
-		m.notice = "interrupt requested; wait for turn completion before sending"
+		m.noticef("interrupt requested; wait for turn completion before sending")
 	case "compact":
-		m.notice = "compaction started; wait for the context compaction item"
+		m.noticef("compaction started; wait for the context compaction item")
 	case "revert":
-		m.notice = "files changed by later turns are not reverted"
+		m.noticef("files changed by later turns are not reverted")
 	case "leaf":
-		m.notice = "active branch changed; files changed by later turns are not reverted"
+		m.noticef("active branch changed; files changed by later turns are not reverted")
 	case "modelSet":
 		m.thread.modelName = msg.text
-		m.notice = "model set to " + msg.text
+		m.noticef("%s", "model set to "+msg.text)
 	case "login":
 		return m.applyLogin(msg.value)
 	case "steer":
-		m.notice = "steering message accepted"
+		m.noticef("steering message accepted")
 	}
 	return nil
 }
@@ -317,10 +317,10 @@ func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 		m.setState(stateFailed)
 	}
 	if msg.op == "keywords" {
-		m.notice = fmt.Sprintf("keyword highlighting unavailable: %v; prompting is ready, restart to retry", msg.err)
+		m.errorf("keyword highlighting unavailable: %v; prompting is ready, restart to retry", msg.err)
 		return nil
 	}
-	m.notice = fmt.Sprintf("%s failed: %v; retry, %s, or /new", msg.op, msg.err, m.resumeHint())
+	m.errorf("%s failed: %v; retry, %s, or /new", msg.op, msg.err, m.resumeHint())
 	return nil
 }
 
@@ -335,7 +335,7 @@ func (m *model) restoreComposer(text string) {
 func (m *model) applyKeywords(value any) tea.Cmd {
 	keywords, ok := value.(*[]Keyword)
 	if !ok {
-		m.notice = "keyword list has an unexpected shape; restart the TUI to retry"
+		m.errorf("keyword list has an unexpected shape; restart the TUI to retry")
 		return nil
 	}
 	m.input.keywords = *keywords
@@ -416,19 +416,20 @@ func (m *model) applyLogin(value any) tea.Cmd {
 	if !ok {
 		return m.unexpectedResult("login")
 	}
-	url := cmp.Or(response.AuthURL, response.VerificationURL)
+	url := sanitizeText(cmp.Or(response.AuthURL, response.VerificationURL))
 	if url == "" {
-		m.notice = "login started; follow the provider instructions or run /login again to retry"
+		m.noticef("login started; follow the provider instructions or run /login again to retry")
 		return nil
 	}
-	m.notice = "login: open " + url + " in a browser; the TUI will resume when login completes"
+	notice := "login: open " + url + " in a browser; the TUI will resume when login completes"
 	if response.UserCode != "" {
-		m.notice += "; enter code " + response.UserCode
+		notice += "; enter code " + response.UserCode
 	}
+	m.noticef("%s", notice)
 	return nil
 }
 
 func (m *model) unexpectedResult(name string) tea.Cmd {
-	m.notice = name + " response has an unexpected shape; reconnect and retry"
+	m.errorf("%s", name+" response has an unexpected shape; reconnect and retry")
 	return nil
 }

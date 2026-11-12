@@ -26,6 +26,10 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |charm.land/bubbletea/v2|v2.1.1|2026-10-28|TUI|none|
 |charm.land/glamour/v2|v2.0.1|2026-06-12|TUI markdown|none|
 |charm.land/lipgloss/v2|v2.1.0|2026-11-09|TUI|none|
+|github.com/aymanbagabas/go-udiff|v0.4.1|2026-03-08|unified line diffs in `internal/textdiff`. Licence: BSD-3-Clause and MIT, per `LICENSE-BSD` and `LICENSE-MIT` at v0.4.1. Pinned 2026-11-11.|none|
+|github.com/charmbracelet/x/ansi|v0.11.9|2026-10-08|TUI text width and truncation, the method of the Bubble Tea renderer.|none|
+|github.com/charmbracelet/x/ansi|v0.11.9|2026-10-08|TUI measure and truncation|none|
+|github.com/charmbracelet/x/vt|v0.1.0|2026-10-12|test-only terminal emulator for the print test, MIT licence. Pinned 2026-11-11.|none|
 |github.com/coder/websocket|v1.8.15|2026-06-15|websocket|none|
 |github.com/containerd/errdefs|v1.0.0|2024-10-08|Docker runner error types|none|
 |github.com/landlock-lsm/go-landlock|v0.11.2|2026-11-10|Linux write confinement|none|
