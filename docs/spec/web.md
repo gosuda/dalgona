@@ -91,6 +91,7 @@ The page holds one `Session`, which owns the connection and the page state.
 - The open thread has an inline-start bar and a strong title as well as its fill, so it stays distinct under forced colours.
 - At 320px nothing MUST clip or scroll sideways.
 - The transcript follows new output only while the reader is within 32px of its end. It follows the transcript at wide widths and the window at narrow widths. Opening a thread follows its end.
+- The transcript MUST show a Jump to latest button while a turn runs and the reader is away from the end. The button MUST show the count of items that arrive while the reader is away as `· N new`. Activating the button MUST scroll to the end and move focus to the last row.
 - The skip link MUST name the transcript and target `#transcript`.
 
 ### Theme

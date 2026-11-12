@@ -69,3 +69,60 @@ describe("welcome start button", () => {
 		expect(onStart).not.toHaveBeenCalled();
 	});
 });
+
+describe("jump to latest", () => {
+	function stubScroller(): HTMLElement {
+		const transcript = document.getElementById("transcript");
+		if (transcript === null) throw new Error("transcript section missing");
+		Object.defineProperty(transcript, "scrollHeight", {
+			configurable: true,
+			value: 2000,
+		});
+		Object.defineProperty(transcript, "clientHeight", {
+			configurable: true,
+			value: 500,
+		});
+		Object.defineProperty(transcript, "scrollTop", {
+			configurable: true,
+			writable: true,
+			value: 0,
+		});
+		Object.defineProperty(transcript, "scrollTo", {
+			configurable: true,
+			value: vi.fn(),
+		});
+		return transcript;
+	}
+
+	test("offers the button after the reader scrolls away and returns to the end", async () => {
+		const { container } = render(Transcript, {
+			props: props([reply("m1", "partial answer", false)]),
+		});
+		const transcript = stubScroller();
+		await fireEvent.scroll(transcript);
+		const button = screen.getByRole("button", { name: /Jump to latest/ });
+		const scrollTo = transcript.scrollTo as unknown as ReturnType<typeof vi.fn>;
+		await fireEvent.click(button);
+		expect(scrollTo).toHaveBeenCalledWith({ top: 2000, behavior: "auto" });
+		expect(document.activeElement).toBe(
+			container.querySelector(".items > li[tabindex='-1']"),
+		);
+		expect(screen.queryByRole("button", { name: /Jump to latest/ })).toBeNull();
+		transcript.scrollTop = 1500;
+		await fireEvent.scroll(transcript);
+		expect(screen.queryByRole("button", { name: /Jump to latest/ })).toBeNull();
+	});
+
+	test("counts items that arrive while the reader is away", async () => {
+		const first = reply("m1", "first", true);
+		const { rerender } = render(Transcript, {
+			props: props([first]),
+		});
+		const transcript = stubScroller();
+		await fireEvent.scroll(transcript);
+		await rerender({ ...props([first, reply("m2", "second", false)]) });
+		expect(
+			screen.getByRole("button", { name: "Jump to latest · 1 new" }),
+		).not.toBeNull();
+	});
+});

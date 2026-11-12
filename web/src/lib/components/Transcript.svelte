@@ -1,5 +1,5 @@
 <script lang="ts">
-import type { Component } from "svelte";
+import { type Component, untrack } from "svelte";
 import Mark from "#lib/components/Mark.svelte";
 import ReviewView from "#lib/components/ReviewView.svelte";
 import AdvisorNote from "#lib/components/rows/AdvisorNote.svelte";
@@ -12,6 +12,7 @@ import TextRow from "#lib/components/rows/TextRow.svelte";
 import ThinkingRow from "#lib/components/rows/ThinkingRow.svelte";
 import ToolCard from "#lib/components/rows/ToolCard.svelte";
 import type { RowProps } from "#lib/components/rows/types.ts";
+import { handoffFocus } from "#lib/focus.ts";
 import {
 	type ScrollSnapshot,
 	shouldAutoScrollForUpdate,
@@ -92,7 +93,9 @@ let running = $derived(turnStatus === "inProgress");
 const entries = $derived(groupTools(items, verbosity));
 let reviewTarget = $state<TranscriptEntry | null>(null);
 let followedThread: string | null = null;
-let following = true;
+let following = $state(true);
+let unseen = $state(0);
+const showJump = $derived((running && !following) || unseen > 0);
 let scrollQueued = false;
 let scrolledSnapshot: ScrollSnapshot = { count: 0, lastId: null };
 
@@ -105,9 +108,11 @@ function scroller(): Element | null {
 
 $effect(() => {
 	const currentItems = items;
-	if (threadId !== followedThread) {
+	const switched = threadId !== followedThread;
+	if (switched) {
 		followedThread = threadId;
 		following = true;
+		unseen = 0;
 		scrolledSnapshot = { count: 0, lastId: null };
 	}
 	const nextSnapshot: ScrollSnapshot = {
@@ -116,9 +121,13 @@ $effect(() => {
 	};
 	const previousSnapshot = scrolledSnapshot;
 	scrolledSnapshot = nextSnapshot;
+	const followed = untrack(() => following);
+	if (!switched && !followed) {
+		unseen += Math.max(0, nextSnapshot.count - previousSnapshot.count);
+	}
 	if (!shouldAutoScrollForUpdate(running, previousSnapshot, nextSnapshot))
 		return;
-	if (!following) return;
+	if (!followed) return;
 	if (scrollQueued) return;
 	scrollQueued = true;
 	requestAnimationFrame(() => {
@@ -135,6 +144,7 @@ function trackFollowing(): void {
 	if (!target) return;
 	const distance = target.scrollHeight - target.scrollTop - target.clientHeight;
 	following = distance < 32;
+	if (following) unseen = 0;
 }
 
 function entryKey(entry: TranscriptEntry): string {
@@ -157,6 +167,21 @@ function openLatestReview(event: KeyboardEvent): void {
 	if (latest === undefined) return;
 	event.preventDefault();
 	openReview(latest);
+}
+
+function lastRow(): HTMLElement | undefined {
+	const rows = viewport?.querySelectorAll<HTMLElement>(".items > li");
+	const row = rows?.[rows.length - 1];
+	if (row) row.tabIndex = -1;
+	return row;
+}
+
+function jumpToLatest(): void {
+	following = true;
+	unseen = 0;
+	const target = scroller();
+	if (target) target.scrollTo({ top: target.scrollHeight, behavior: "auto" });
+	lastRow()?.focus();
 }
 </script>
 
@@ -223,6 +248,10 @@ function openLatestReview(event: KeyboardEvent): void {
 			<p class="turn-outcome">Turn interrupted. Send a message to continue.</p>
 		{/if}
 	</div>
+
+	{#if showJump}
+		<button class="jump" type="button" onclick={jumpToLatest} {@attach handoffFocus(lastRow)}>Jump to latest{unseen > 0 ? ` · ${unseen} new` : ""}</button>
+	{/if}
 		<ReviewView target={reviewTarget} {readOutput} onClose={() => (reviewTarget = null)} />
 </section>
 
@@ -339,4 +368,20 @@ function openLatestReview(event: KeyboardEvent): void {
 		font-size: var(--size-small);
 	}
 
+	.jump {
+		position: sticky;
+		inset-block-end: var(--space-3);
+		display: block;
+		width: fit-content;
+		margin: var(--space-3) auto 0;
+	}
+
+	@media (max-width: 52rem) {
+		.jump {
+			position: fixed;
+			inset-inline: 0;
+			inset-block-end: calc(var(--space-3) + var(--dock-height, 6rem));
+			margin-inline: auto;
+		}
+	}
 </style>
