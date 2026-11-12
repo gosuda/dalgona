@@ -84,6 +84,13 @@ func (t *serverTool) Spec() tool.Spec {
 	return t.spec
 }
 
+func LocalToolName(t tool.Tool) string {
+	if server, ok := t.(*serverTool); ok {
+		return server.name
+	}
+	return t.Spec().Name
+}
+
 func (t *serverTool) Class() tool.Class {
 	return tool.ClassRemote
 }

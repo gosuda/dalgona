@@ -375,6 +375,7 @@ var responseSchemas = map[string]string{
 	"account/login/cancel": "v2/CancelLoginAccountResponse.json",
 	"account/logout":       "v2/LogoutAccountResponse.json",
 	"skills/list":          "v2/SkillsListResponse.json",
+	"mcpServerStatus/list": "v2/ListMcpServerStatusResponse.json",
 }
 
 var (

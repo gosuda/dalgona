@@ -52,6 +52,13 @@ func (h *Host) Skills(cwd string) ([]prompt.Skill, error) {
 	return h.cfg.Skills(cwd)
 }
 
+func (h *Host) MCPStatus(ctx context.Context, cwd string) []MCPServerStatus {
+	if h.cfg.MCPStatus == nil {
+		return nil
+	}
+	return h.cfg.MCPStatus(ctx, cwd)
+}
+
 func (h *Host) Models(ctx context.Context) ([]model.Model, error) {
 	registry, err := h.cfg.Providers(nil)
 	if err != nil {

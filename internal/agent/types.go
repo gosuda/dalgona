@@ -24,6 +24,18 @@ type ToolSet func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error)
 
 type SkillSet func(cwd string) ([]prompt.Skill, error)
 
+type MCPServerStatus struct {
+	Name   string
+	Status string
+	Error  string
+	Tools  []MCPToolStatus
+}
+
+type MCPToolStatus struct {
+	Name string
+	Spec tool.Spec
+}
+
 type RunnerFactory func(ctx context.Context, threadID, runnerName string) (runner.Runner, error)
 
 type HookVerdict struct {
@@ -75,6 +87,7 @@ type HostConfig struct {
 	Clock            func() time.Time
 	Logger           *slog.Logger
 	Skills           SkillSet
+	MCPStatus        func(ctx context.Context, cwd string) []MCPServerStatus
 	ToolNotes        []string
 	ProviderIDs      []string
 }

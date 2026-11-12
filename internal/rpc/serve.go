@@ -45,6 +45,7 @@ func init() {
 		"dalgona/account/providers/list": (*server).accountProviders,
 		"account/logout":                 (*server).logout,
 		"skills/list":                    (*server).skillsList,
+		"mcpServerStatus/list":           (*server).mcpServerStatusList,
 		"dalgona/keywords/list":          (*server).keywordsList,
 		"dalgona/keywords/match":         (*server).keywordsMatch,
 		"dalgona/thread/tree":            (*server).threadTree,

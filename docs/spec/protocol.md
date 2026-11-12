@@ -77,6 +77,7 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `account/logout {provider?}` | `{}`. Without `provider`, exactly one credential MUST exist. |
 | `dalgona/account/providers/list {}` | `{providers: [{id, login, signedIn}]}`, sorted by `id`. `login` is `apiKey` for the API-key providers and the runner services, `browser` for `chatgpt`, and `terminal` for the other OAuth providers. |
 | `skills/list` | One entry with the host skills. `dal` returns `{"data":[]}`. |
+| `mcpServerStatus/list {cursor?, limit?, serverName?, threadId?}` | `{data: [{name, authStatus, tools, resources, resourceTemplates, runtimeStatus, toolsError?}], nextCursor?}`. `limit` defaults to 100 and MUST be at most 1000. `threadId` selects the workspace of that thread. Tool names drop the `<server>__` prefix. |
 | `dalgona/keywords/list` | `[{word, hue:[a,b]}]` for enabled keywords. |
 | `dalgona/thread/tree {threadId}` | `{turns:[{turnId, parentTurnId, preview, active}]}`. `parentTurnId` is `null` for a first turn. |
 | `dalgona/thread/leaf/set {threadId, turnId}` | `{}`. |

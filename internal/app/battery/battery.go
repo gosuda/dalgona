@@ -74,6 +74,7 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 		Tools: projects.tools, Skills: projects.skills, Runner: d.binder.Runner,
 		Extension: scripthost.New(d.Scripts),
 		Attach:    func(h *agent.Host) { d.binder.SetRecorder(h) }, Close: projects.close,
+		MCPStatus: projects.status,
 	}, nil
 }
 
@@ -133,6 +134,19 @@ func (p *projects) skills(cwd string) ([]prompt.Skill, error) {
 
 func (p *projects) tools(ctx context.Context, cwd string) []tool.Tool {
 	return append(p.native.tools(), p.serversFor(ctx, config.CanonicalWorkspace(cwd)).tools()...)
+}
+
+func (p *projects) status(_ context.Context, cwd string) []agent.MCPServerStatus {
+	cwd = config.CanonicalWorkspace(cwd)
+	p.mu.Lock()
+	workspace := p.byCwd[cwd]
+	p.mu.Unlock()
+	out := p.native.statuses()
+	if workspace != nil {
+		out = append(out, workspace.statuses()...)
+	}
+	slices.SortStableFunc(out, func(a, b agent.MCPServerStatus) int { return cmp.Compare(a.Name, b.Name) })
+	return out
 }
 
 func (p *projects) serversFor(ctx context.Context, cwd string) *servers {
@@ -360,6 +374,11 @@ func nativeServer(name string, spec config.MCPServerSpec) discovery.MCPServer {
 	return discovery.MCPServer{Name: name, Command: spec.Command, Args: spec.Args, Env: env, URL: spec.URL}
 }
 
+type serverState struct {
+	Status string
+	Error  string
+}
+
 type servers struct {
 	cancel  context.CancelFunc
 	started sync.WaitGroup
@@ -367,23 +386,27 @@ type servers struct {
 	clients []*mcp.Client
 	byName  map[string][]tool.Tool
 	order   []string
+	states  map[string]serverState
 }
 
 func startServers(ctx context.Context, found []discovery.MCPServer, logger *slog.Logger) *servers {
 	ctx, cancel := context.WithCancel(ctx)
-	s := &servers{cancel: cancel, byName: make(map[string][]tool.Tool, len(found))}
+	s := &servers{cancel: cancel, byName: make(map[string][]tool.Tool, len(found)), states: make(map[string]serverState, len(found))}
 	for _, server := range found {
 		s.order = append(s.order, server.Name)
+		s.states[server.Name] = serverState{Status: "starting"}
 		s.started.Go(func() {
 			client, tools, err := connect(ctx, server)
-			if err != nil {
-				logger.Warn("mcp: server skipped", "server", server.Name, "error", err)
-				return
-			}
 			s.mu.Lock()
 			defer s.mu.Unlock()
+			if err != nil {
+				logger.Warn("mcp: server skipped", "server", server.Name, "error", err)
+				s.states[server.Name] = serverState{Status: "failed", Error: err.Error()}
+				return
+			}
 			s.clients = append(s.clients, client)
 			s.byName[server.Name] = tools
+			s.states[server.Name] = serverState{Status: "connected"}
 		})
 	}
 	return s
@@ -396,6 +419,21 @@ func (s *servers) tools() []tool.Tool {
 	var out []tool.Tool
 	for _, name := range s.order {
 		out = append(out, s.byName[name]...)
+	}
+	return out
+}
+
+func (s *servers) statuses() []agent.MCPServerStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]agent.MCPServerStatus, 0, len(s.states))
+	for _, name := range slices.Sorted(maps.Keys(s.states)) {
+		state := s.states[name]
+		status := agent.MCPServerStatus{Name: name, Status: state.Status, Error: state.Error}
+		for _, t := range s.byName[name] {
+			status.Tools = append(status.Tools, agent.MCPToolStatus{Name: mcp.LocalToolName(t), Spec: t.Spec()})
+		}
+		out = append(out, status)
 	}
 	return out
 }

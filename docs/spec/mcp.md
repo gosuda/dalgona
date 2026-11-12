@@ -12,6 +12,8 @@ The server MUST negotiate protocol version `2025-11-25`. The client MUST reject 
 
 Each JSON-RPC request MUST use a new numeric identifier. The client MUST ignore notifications and responses with other identifiers while it waits for the matching response.
 
+The host MUST report `runtimeStatus` for each started server. A server that is still connecting MUST report `starting`. A connected server MUST report `connected`. A server whose connection or tool discovery failed MUST report `failed`, with its cause in `toolsError`. The host MUST NOT list a server that it has not started for the workspace.
+
 ## stdio transport
 
 The client MUST start the configured command in its own process group (a job object on Windows) with its configured arguments. The child environment MUST contain the caller environment followed by the configured entries.

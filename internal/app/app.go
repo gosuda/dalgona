@@ -54,6 +54,7 @@ type Batteries struct {
 	Runner    agent.RunnerFactory
 	Attach    func(*agent.Host)
 	Close     func() error
+	MCPStatus func(ctx context.Context, cwd string) []agent.MCPServerStatus
 }
 
 func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, error) {
@@ -91,6 +92,7 @@ func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, erro
 		ProvidersWithKey: func(provider, key string) (*model.Registry, error) { return creds.registryWithKey(cfg, provider, key) },
 		ProviderIDs:      providerIDs(cfg), Decider: judges.decider(), Extension: extra.Extension, EditFeedback: cfg.EditReview.Feedback,
 		Runner: extra.Runner, Product: product, Logger: opts.Logger, Skills: extra.Skills,
+		MCPStatus:      extra.MCPStatus,
 		OnChildStarted: advisors.attach,
 	})
 	if err != nil {
