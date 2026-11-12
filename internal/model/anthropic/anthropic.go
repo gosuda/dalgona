@@ -435,7 +435,6 @@ type effortCapabilities struct {
 	Max       effortSupport `json:"max"`
 }
 
-// source: https://platform.claude.com/docs/en/api/models/list
 type modelListPage struct {
 	Data []struct {
 		ID           string `json:"id"`
