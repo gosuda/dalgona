@@ -239,11 +239,16 @@ const shown = $derived({
 		.status-band {
 			justify-items: stretch;
 			margin-inline-start: 0;
+			min-width: 0;
+			width: 100%;
+			max-width: 100%;
 		}
 
 		.band {
 			container: band / inline-size;
 			width: 100%;
+			min-width: 0;
+			grid-template-columns: minmax(0, 1fr);
 		}
 
 		.item.model .model-button {

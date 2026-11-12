@@ -273,6 +273,8 @@ function onWindowKeydown(event: KeyboardEvent): void {
 
 	.thread-head {
 		display: flex;
+		min-width: 0;
+		max-width: 100%;
 		align-items: flex-start;
 		flex-wrap: wrap;
 		gap: var(--space-3) var(--space-6);

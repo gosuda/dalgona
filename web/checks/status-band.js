@@ -14,7 +14,9 @@
 	}
 	const shell = document.querySelector(".shell");
 	if (shell && shell.scrollWidth > window.innerWidth) {
-		failures.push(`shell: scrollWidth ${shell.scrollWidth} above ${window.innerWidth}`);
+		failures.push(
+			`shell: scrollWidth ${shell.scrollWidth} above ${window.innerWidth}`,
+		);
 	}
 	return { ok: failures.length === 0, failures };
-})()
+})();

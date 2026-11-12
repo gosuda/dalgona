@@ -118,6 +118,7 @@ function onKeydown(event: KeyboardEvent): void {
 
 	h2 {
 		margin: 0;
+		overflow-wrap: anywhere;
 		font-family: var(--face-title);
 		font-size: var(--size-title);
 		font-weight: var(--weight-title);

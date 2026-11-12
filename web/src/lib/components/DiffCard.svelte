@@ -62,6 +62,8 @@ const counted = $derived(change.additions !== undefined);
 
 	.file-change summary {
 		display: flex;
+		min-width: 0;
+		max-width: 100%;
 		flex-wrap: wrap;
 		align-items: baseline;
 		gap: var(--space-2);

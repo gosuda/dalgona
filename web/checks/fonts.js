@@ -17,7 +17,8 @@
 
 	const loaded = (family) =>
 		[...document.fonts].filter(
-			(face) => face.family.replaceAll('"', "") === family && face.status === "loaded",
+			(face) =>
+				face.family.replaceAll('"', "") === family && face.status === "loaded",
 		);
 	for (const family of [
 		"Hanken Grotesk Variable",
@@ -25,7 +26,8 @@
 		"Pretendard Variable",
 		"Symbols Nerd Subset",
 	]) {
-		if (loaded(family).length === 0) failures.push(`${family}: no face is loaded`);
+		if (loaded(family).length === 0)
+			failures.push(`${family}: no face is loaded`);
 	}
 
 	const hangul = [0xac00, 0xd7a3];
@@ -40,7 +42,9 @@
 		});
 	for (const face of loaded("Pretendard Variable")) {
 		if (!coversHangul(face.unicodeRange))
-			failures.push(`Pretendard Variable face covers no Hangul: ${face.unicodeRange}`);
+			failures.push(
+				`Pretendard Variable face covers no Hangul: ${face.unicodeRange}`,
+			);
 	}
 	return { ok: failures.length === 0, failures };
-})()
+})();

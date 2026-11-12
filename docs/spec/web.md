@@ -89,7 +89,7 @@ The page holds one `Session`, which owns the connection and the page state.
 - Above 52rem the page has two columns, the thread list and the workspace. The workspace holds the thread header with its status band, the transcript, and the composer. The transcript scrolls inside its own column.
 - At 52rem or narrower the page stacks the parts and the document scrolls. At 52rem or narrower the thread list (not the sidebar) keeps a maximum height of 18rem and scrolls.
 - The open thread has an inline-start bar and a strong title as well as its fill, so it stays distinct under forced colours.
-- At 320px nothing MUST clip or scroll sideways.
+- At 320px nothing MUST clip or scroll sideways. Long tokens wrap anywhere.
 - The transcript follows new output only while the reader is within 32px of its end. It follows the transcript at wide widths and the window at narrow widths. Opening a thread follows its end.
 - The transcript MUST show a Jump to latest button while a turn runs and the reader is away from the end. The button MUST show the count of items that arrive while the reader is away as `· N new`. Activating the button MUST scroll to the end and move focus to the last row.
 - At 52rem or narrower the Jump to latest button MUST sit above the dock, whatever the dock's height. The client MUST measure the dock and publish its height to the button.

@@ -198,6 +198,7 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 
 	ul {
 		display: grid;
+		grid-template-columns: minmax(0, 1fr);
 		gap: var(--space-2);
 		list-style: none;
 		margin: 0;
@@ -207,6 +208,7 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 	.thread {
 		display: grid;
 		width: 100%;
+		min-width: 0;
 		min-height: 0;
 		gap: var(--space-2);
 		border-color: transparent;
@@ -249,6 +251,7 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 		display: flex;
 		align-items: baseline;
 		justify-content: space-between;
+		min-width: 0;
 		gap: var(--space-2);
 	}
 
@@ -269,7 +272,7 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 
 	.thread-topline strong {
 		min-width: 0;
-		overflow-wrap: break-word;
+		overflow-wrap: anywhere;
 		font-size: var(--size-small);
 		font-weight: 650;
 		line-height: 1.4;
@@ -281,6 +284,8 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 		color: var(--dim);
 		font-size: var(--size-caption);
 		font-weight: 400;
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 
 	time {
@@ -292,6 +297,7 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 		display: flex;
 		align-items: baseline;
 		gap: var(--space-2);
+		min-width: 0;
 	}
 
 	.preview {

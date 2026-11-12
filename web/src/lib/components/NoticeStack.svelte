@@ -87,6 +87,7 @@ function focusMessage(): HTMLElement | undefined {
 
 	.notice {
 		display: flex;
+		min-width: 0;
 		align-items: center;
 		justify-content: space-between;
 		flex-wrap: wrap;
