@@ -143,6 +143,18 @@ No advisor failure opens the error banner.
 - A turn that is retrying after an error shows `Retrying after an error: <message>`.
 - An interrupted turn shows `Turn interrupted. Send a message to continue.`
 
+### Markdown
+
+- The client MUST render model text with the renderer in `web/src/lib/markdown.ts`.
+- The renderer MUST shift each heading down two levels, so `#` renders as `h3`.
+- The renderer MUST highlight code blocks in bash, css, diff, dockerfile, go, ini, javascript, json, markdown, python, rust, sql, typescript, xml and yaml.
+- The renderer MUST accept `sh` and `shell` as bash, `toml` as ini, `html` as xml, `ts` as typescript and `js` as javascript.
+- The renderer MUST show raw HTML as escaped text.
+- The renderer MUST keep a link only when its target starts with `http:`, `https:` or `mailto:`. Any other link MUST show its text alone.
+- Each kept link MUST open in a new tab with `rel="noopener noreferrer nofollow"`.
+- The renderer MUST NOT render images. An image MUST show its alternative text as `image: <text>`.
+- The sanitizer MUST drop every tag and attribute that the renderer does not produce.
+
 ### Motion
 
 A live thread shows one breathing dot and one elapsed counter. Both MUST stop under `prefers-reduced-motion: reduce`.

@@ -185,3 +185,30 @@ dd,
 		border-inline-start: 2px solid CanvasText;
 	}
 }
+
+.markdown pre {
+	background: var(--tone);
+	white-space: pre-wrap;
+}
+
+.hljs-keyword {
+	color: var(--accent-text);
+}
+
+.hljs-string {
+	color: var(--added-text);
+}
+
+.hljs-number {
+	color: var(--warning-text);
+}
+
+.hljs-title,
+.hljs-type {
+	color: var(--text);
+}
+
+.hljs-comment,
+.hljs-meta {
+	color: var(--dim);
+}

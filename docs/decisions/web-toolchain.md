@@ -20,6 +20,9 @@ Grounded on 2026-11-12. Each row gives an exact devDependency pin in `web/packag
 |@fontsource-variable/bricolage-grotesque|5.3.0|2026-07-19|Bricolage Grotesque for titles and control labels|none|
 |@fontsource-variable/hanken-grotesk|5.3.0|2026-07-19|Hanken Grotesk for body text|none|
 |pretendard|1.3.9|2023-11-05|Hangul fallback, loaded by unicode-range subset|none|
+|marked|18.2.0|2026-11-09|Markdown rendering of model text|none|
+|dompurify|3.4.17|2026-10-12|sanitizer for rendered Markdown|none|
+|highlight.js|11.12.0|2026-08-12|syntax highlighting of code blocks, core build with a fixed language set|none|
 
 ## Pins on 2026-11-11
 
