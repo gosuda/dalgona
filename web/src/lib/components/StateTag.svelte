@@ -77,6 +77,11 @@ let retry = $derived(
 		background: var(--point);
 		color: var(--on-point);
 	}
+	@media (forced-colors: active) {
+		.tag.point {
+			border: 1px solid CanvasText;
+		}
+	}
 
 	.elapsed {
 		display: inline-block;

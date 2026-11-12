@@ -395,3 +395,20 @@ The review panel MUST send `review/start` with the chosen target and MUST NOT se
 Each user message MUST show a Rewind to here control that opens the rewind panel on that turn.
 While a turn runs, `/new`, `/compact`, `/fork`, `/tree`, and `/revert` MUST NOT open a panel.
 That refusal MUST show `/<name> is unavailable while a turn is working; wait for it to finish or interrupt it first` with Interrupt and Close actions.
+
+### Accessibility
+
+Text MUST meet a contrast ratio of 4.5 to 1 against its ground, and interface parts MUST meet 3 to 1. The contrast test in `web/src/lib/theme/contrast.test.ts` checks each theme.
+
+Each focusable control MUST show a 2 px focus ring. The keyboard paths test in `web/src/lib/components/App.dom.test.ts` MUST pass for each path.
+Each keyboard path MUST send a message, accept an approval, open and close each panel, or open the review with Ctrl+O.
+
+Each visible control MUST be at least 24 by 24 CSS pixels. A button MUST be at least `--control-height` tall, and at least `--control-height-coarse` tall under a coarse pointer. `web/checks/target-size.js` checks these rules.
+
+Form text MUST be at least 16 pixels. `web/checks/input-size.js` checks this rule.
+
+Under `prefers-reduced-motion: reduce`, animations MUST stop, and the elapsed text MUST NOT change without a new item. `web/checks/reduced-motion.js` checks this rule.
+
+Under forced colours, each state tag and the point button MUST keep a visible border. `web/checks/forced-colors.js` checks this rule.
+
+The page MUST have one status region and one alert region. The transcript MUST NOT be a live region.

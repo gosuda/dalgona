@@ -1,7 +1,8 @@
-import { cleanup, render, screen } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { slashCommands } from "#lib/commands.ts";
 import App from "#lib/components/App.svelte";
 import { type RpcPort, Session } from "#lib/session.svelte.ts";
 import type {
@@ -22,6 +23,9 @@ function idlePort(): RpcPort {
 		open: () => Promise.resolve(),
 		close: (): void => undefined,
 	};
+}
+function pendingPort(): RpcPort {
+	return { ...idlePort(), open: () => new Promise<void>(() => undefined) };
 }
 
 function sessionWithRequestElsewhere(): Session {
@@ -60,11 +64,14 @@ describe("requests elsewhere", () => {
 	});
 });
 
-function sessionWithHandler(): { session: Session; handlers: RpcHandlers } {
+function sessionWithHandler(port: () => RpcPort = idlePort): {
+	session: Session;
+	handlers: RpcHandlers;
+} {
 	let handlers: RpcHandlers | undefined;
 	const session = new Session((_url, incoming) => {
 		handlers = incoming;
-		return idlePort();
+		return port();
 	});
 	session.start({
 		hash: "#token=abc",
@@ -446,6 +453,243 @@ describe("request queue", () => {
 		).toBeTruthy();
 	});
 });
+
+describe("keyboard paths", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	test("reaches each control in order with Tab", async () => {
+		const { session, handlers } = connectedSession();
+		render(App, { props: { session } });
+		handlers.onNotification(
+			parsed("thread/started", {
+				thread: {
+					id: "thread-1",
+					updatedAt: 1,
+					status: { type: "idle" },
+					turns: [],
+				},
+			}),
+		);
+		handlers.onNotification(
+			parsed("turn/started", {
+				threadId: "thread-1",
+				turn: { id: "turn-2", status: "inProgress", items: [] },
+			}),
+		);
+		handlers.onNotification(
+			parsed("item/completed", {
+				threadId: "thread-1",
+				turnId: "turn-2",
+				completedAtMs: 2,
+				item: {
+					type: "commandExecution",
+					id: "run-1",
+					command: "seq 3",
+					aggregatedOutput: "1\n2\n3",
+					status: "completed",
+					exitCode: 0,
+				},
+			}),
+		);
+		handlers.onRequest(commandApproval("req-1", "cmd-1"));
+		await tick();
+		await fireEvent.scroll(stubTranscriptScroll());
+		await tick();
+		const user = userEvent.setup();
+		const stops: HTMLElement[] = [];
+		for (let index = 0; index < 40; index++) {
+			await user.tab();
+			if (document.activeElement instanceof HTMLElement) {
+				stops.push(document.activeElement);
+			}
+		}
+		const expected: readonly [string, (el: HTMLElement) => boolean][] = [
+			["skip link", (el) => el.classList.contains("skip-link")],
+			["Start thread", (el) => el.textContent?.trim() === "Start thread"],
+			["thread", (el) => el.closest("nav") !== null && el.tagName === "BUTTON"],
+			[
+				"transcript",
+				(el) =>
+					el.closest("#transcript") !== null &&
+					el.tagName === "BUTTON" &&
+					!el.classList.contains("jump"),
+			],
+			["Jump to latest", (el) => el.classList.contains("jump")],
+			[
+				"Accept",
+				(el) =>
+					el.textContent?.trim() === "Accept" &&
+					el.closest(".request-card") !== null,
+			],
+			["prompt", (el) => el.id === "prompt"],
+			[
+				"send",
+				(el) =>
+					el.closest(".composer") !== null &&
+					el.getAttribute("type") === "submit",
+			],
+		];
+		let cursor = -1;
+		for (const [name, matches] of expected) {
+			const index = stops.findIndex((el, at) => at > cursor && matches(el));
+			expect(index, name).toBeGreaterThan(cursor);
+			cursor = index;
+		}
+	});
+
+	test("sends a message with Enter", () => {
+		const { session } = connectedSession();
+		const send = vi.spyOn(session, "sendMessage").mockResolvedValue(true);
+		render(App, { props: { session } });
+		typeInPrompt("ship it");
+		fireEvent.keyDown(promptField(), { key: "Enter" });
+		expect(send.mock.calls[0]?.[0]).toBe("ship it");
+	});
+
+	test("accepts an approval with Tab and Enter", async () => {
+		const { session, handlers } = connectedSession();
+		const respond = vi
+			.spyOn(session, "respondApproval")
+			.mockImplementation(() => undefined);
+		render(App, { props: { session } });
+		const request = commandApproval("req-1", "cmd-1");
+		handlers.onRequest(request);
+		await tick();
+		const user = userEvent.setup();
+		for (let index = 0; index < 40; index++) {
+			await user.tab();
+			const el = document.activeElement;
+			if (
+				el instanceof HTMLElement &&
+				el.textContent?.trim() === "Accept" &&
+				el.closest(".request-card") !== null
+			) {
+				break;
+			}
+		}
+		await user.keyboard("{Enter}");
+		expect(respond).toHaveBeenCalledWith(request, "accept");
+	});
+
+	test("opens and closes every panel from the keyboard", () => {
+		const { session } = connectedSession();
+		render(App, { props: { session } });
+		fireEvent.keyDown(document.body, { key: "?" });
+		expect(openDialogs()).toBe(1);
+		fireEvent.keyDown(dialog(), { key: "Escape" });
+		expect(openDialogs()).toBe(0);
+		for (const command of slashCommands) {
+			promptField().focus();
+			typeInPrompt(`/${command.name}`);
+			fireEvent.keyDown(promptField(), { key: "Enter" });
+			expect(openDialogs(), command.name).toBe(1);
+			fireEvent.keyDown(dialog(), { key: "Escape" });
+			expect(openDialogs(), command.name).toBe(0);
+		}
+	});
+
+	test("opens the review with Ctrl+O and closes it with Escape", async () => {
+		const { session, handlers } = connectedSession();
+		render(App, { props: { session } });
+		handlers.onNotification(
+			parsed("thread/started", {
+				thread: {
+					id: "thread-1",
+					updatedAt: 1,
+					status: { type: "idle" },
+					turns: [],
+				},
+			}),
+		);
+		handlers.onNotification(
+			parsed("turn/started", {
+				threadId: "thread-1",
+				turn: { id: "turn-2", status: "inProgress", items: [] },
+			}),
+		);
+		handlers.onNotification(
+			parsed("item/completed", {
+				threadId: "thread-1",
+				turnId: "turn-2",
+				completedAtMs: 2,
+				item: {
+					type: "commandExecution",
+					id: "run-1",
+					command: "seq 30",
+					aggregatedOutput: "line 1\nline 2",
+					status: "completed",
+					exitCode: 0,
+				},
+			}),
+		);
+		await tick();
+		promptField().focus();
+		fireEvent.keyDown(promptField(), { key: "o", ctrlKey: true });
+		expect(openDialogs()).toBe(1);
+		expect(dialog().textContent).toContain("seq 30");
+		fireEvent.keyDown(dialog(), { key: "Escape" });
+		expect(openDialogs()).toBe(0);
+	});
+});
+
+function connectedSession(): { session: Session; handlers: RpcHandlers } {
+	const { session, handlers } = sessionWithHandler(pendingPort);
+	session.connection = "connected";
+	session.activeThreadId = "thread-1";
+	session.threads = [threadSummary("idle", [])];
+	return { session, handlers };
+}
+
+function promptField(): HTMLTextAreaElement {
+	const field = document.getElementById("prompt");
+	if (!(field instanceof HTMLTextAreaElement)) {
+		throw new Error("no prompt field");
+	}
+	return field;
+}
+
+function typeInPrompt(text: string): void {
+	const field = promptField();
+	field.focus();
+	fireEvent.input(field, { target: { value: text } });
+}
+
+function dialog(): HTMLDialogElement {
+	const found = document.querySelector("dialog[open]");
+	if (!(found instanceof HTMLDialogElement)) {
+		throw new Error("no open dialog");
+	}
+	return found;
+}
+
+function openDialogs(): number {
+	return document.querySelectorAll("dialog[open]").length;
+}
+
+function stubTranscriptScroll(): HTMLElement {
+	const transcript = document.getElementById("transcript");
+	if (transcript === null) throw new Error("transcript section missing");
+	Object.defineProperty(transcript, "scrollHeight", {
+		configurable: true,
+		value: 2000,
+	});
+	Object.defineProperty(transcript, "clientHeight", {
+		configurable: true,
+		value: 500,
+	});
+	Object.defineProperty(transcript, "scrollTop", {
+		configurable: true,
+		writable: true,
+		value: 0,
+	});
+	Object.defineProperty(transcript, "scrollTo", {
+		configurable: true,
+		value: vi.fn(),
+	});
+	return transcript;
+}
 
 describe("dock height", () => {
 	afterEach(() => {
