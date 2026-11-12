@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"cmp"
 	json "encoding/json/v2"
 	"slices"
 	"strings"
@@ -51,12 +52,17 @@ func (l *liveItem) settle(final rpc.Item) rpc.Item {
 
 func (l *liveItem) tail() string {
 	if l.Type == "commandExecution" {
-		if last := lastLine(l.Output + string(l.output)); last != "" {
-			return "$ " + l.Command + " · " + last
-		}
-		return "$ " + l.Command
+		return lastLine(l.Output + string(l.output))
 	}
 	return lastLine(l.Text + string(l.text))
+}
+
+func (l *liveItem) activity() string {
+	tail := l.tail()
+	if l.Type != "commandExecution" {
+		return cmp.Or(tail, activityLabel(l.Item))
+	}
+	return strings.Join(slices.DeleteFunc([]string{activityLabel(l.Item), tail}, func(s string) bool { return s == "" }), " · ")
 }
 
 func lastLine(text string) string {

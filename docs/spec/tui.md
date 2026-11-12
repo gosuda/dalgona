@@ -22,7 +22,7 @@ Startup runs these steps in order: `initialize` with client name `dalgona`, the 
 
 The TUI MUST run inline. It MUST NOT use the alternate screen. A completed item MUST print once to scrollback with `tea.Println`. Completed assistant text MUST render as Markdown through Glamour.
 
-The dock holds, from the top, the composer, an open panel, the live row, and the status row. The live row shows the state, the notice, and the newest live text, each cut to one row:
+The dock holds, from the top, the composer, an open panel, the live row, and the status row. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the notice, else the newest live text.
 
 ```
 <model> · <approval> · <sandbox> · <thread title>
@@ -33,6 +33,10 @@ Sandbox `off` MUST show as `no sandbox`. The status row MUST show the sandbox th
 The composer shows `› `, the typed text, and the cursor `▏`. When the composer is empty, the cursor comes first and the placeholder follows it in faint text. The placeholder never shows a keyword mark.
 
 States are `idle`, `running`, `awaiting approval`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. Live text MUST be cut to one row, and a cut text MUST end with `...`. At 40 columns no line may exceed 39 cells.
+
+The state words are `Working`, `Waiting`, `Stopped`, `Failed`, `Offline`, `Ready`, and `Done`. `running` shows `Working`, `awaiting approval` and `awaiting input` show `Waiting`, `interrupted` shows `Stopped`, `disconnected` shows `Offline`, and `idle` is named `Ready`, or `Done` after a completed turn. An idle live row MUST show no state word.
+
+A notice that does not fit the free text of the live row MUST also print once as a row, with the full text.
 
 A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` selector shows each thread's mapped state.
 
@@ -195,8 +199,21 @@ Without colour, Markdown MUST use the no-TTY style.
 Emphasis MUST keep its `*` markers, strong text its `**` markers, and inline code no marker.
 The client MUST paint text in the text, dim, accent-text, and failed-text roles.
 An error notice MUST be bold in the failed-text role.
+The client MUST paint the `Offline` state word in the warning-text role.
+The client MUST paint the `Failed` state word in the live tag in bold failed-text, with no fill.
 A row written before the theme is known MUST NOT use a colour.
 A theme change MUST NOT rewrite a written row.
+
+## Motion
+
+The client MUST run one tick chain for motion. The chain MUST run only while a turn is live or a rate-limit wait is open.
+The live dot MUST alternate between U+25AA and U+25AB every 500 milliseconds.
+With `DAL_NO_MOTION` set to a non-empty value, the client MUST keep the dot on U+25AA and MUST tick once a second.
+The elapsed time MUST update once a second, also with `DAL_NO_MOTION` set.
+A rate-limit wait MUST show `rate limited · retrying in <m>m <ss>s · esc stops`, updated each second.
+Elapsed text MUST keep its cells, so a change of value moves no other field.
+
+The elapsed time MUST show `<n> ms` under one second, `<s>s` under one minute, `<m>m <ss>s` under one hour, and `<h>h <mm>m` from one hour. Above 99 hours and 59 minutes it MUST show `99h 59m`.
 
 ## Keyword mark
 

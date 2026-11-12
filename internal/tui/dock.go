@@ -4,9 +4,13 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/gosuda/dalgona/internal/rpc"
 )
 
 const composerMaxRows = 6
@@ -66,29 +70,223 @@ func (m *model) editorRows(width, limit int) []string {
 	return rows[start : start+limit]
 }
 
-func (m *model) liveRow() string {
-	parts := []string{"state: " + m.thread.state}
-	if m.notice != "" {
-		notice := strings.ReplaceAll(m.notice, "\n", " · ")
-		if m.noticeError {
-			notice = m.screen.dockTheme().paintBold(roleFailedText, notice)
-		}
-		parts = append(parts, notice)
-	}
-	if tail := m.liveTail(); tail != "" {
-		parts = append(parts, tail)
-	}
-	return m.screen.fit(strings.Join(parts, " · "), terminalWidth(m.screen.width))
+const (
+	liveTagCells   = 10
+	liveStateCells = 8
+	elapsedCells   = 7
+	liveCallsCells = 7
+	livePlanCells  = 12
+	liveQueueCells = 10
+)
+
+type liveField struct {
+	text  string
+	cells int
 }
 
-func (m *model) liveTail() string {
+func stateWord(state string, lastTurn time.Duration) string {
+	switch state {
+	case stateRunning:
+		return "Working"
+	case stateAwaitingApproval, "awaiting input":
+		return "Waiting"
+	case stateInterrupted:
+		return "Stopped"
+	case stateFailed:
+		return "Failed"
+	case stateDisconnected:
+		return "Offline"
+	case stateIdle:
+		if lastTurn > 0 {
+			return "Done"
+		}
+		return "Ready"
+	}
+	return ""
+}
+
+func (m *model) liveRow() string {
+	width := terminalWidth(m.screen.width)
+	var row strings.Builder
+	for _, field := range m.liveFields(width) {
+		row.WriteString(field.text)
+	}
+	row.WriteString(m.liveText())
+	return m.screen.fit(row.String(), width)
+}
+
+func (m *model) liveFields(width int) []liveField {
+	fields := []liveField{
+		{text: m.liveTag(), cells: liveTagCells},
+		{text: m.liveElapsed(), cells: elapsedCells},
+		{text: m.liveCalls(), cells: liveCallsCells},
+		{text: m.livePlan(), cells: livePlanCells},
+		{text: m.liveQueued(), cells: liveQueueCells},
+	}
+	for _, index := range []int{4, 3, 2} {
+		if fieldsWidth(fields) <= width {
+			break
+		}
+		fields = slices.Delete(fields, index, index+1)
+	}
+	return fields
+}
+
+func fieldsWidth(fields []liveField) int {
+	total := 0
+	for _, field := range fields {
+		total += field.cells
+	}
+	return total
+}
+
+func (m *model) liveFreeWidth() int {
+	width := terminalWidth(m.screen.width)
+	return width - fieldsWidth(m.liveFields(width))
+}
+
+func (s *screenState) pad(text string, n int) string {
+	return text + strings.Repeat(" ", max(0, n-s.cells(text)))
+}
+
+func (s *screenState) padLeft(text string, n int) string {
+	return strings.Repeat(" ", max(0, n-s.cells(text))) + text
+}
+
+func (m *model) liveTag() string {
+	word := stateWord(m.thread.state, m.thread.lastTurn)
+	if m.thread.state == stateIdle || word == "" {
+		return strings.Repeat(" ", liveTagCells)
+	}
+	theme := m.screen.dockTheme()
+	padded := m.screen.pad(m.screen.fit(word, liveStateCells), liveStateCells)
+	if m.thread.state == stateRunning && len(m.approvals) == 0 {
+		return theme.liveTag(threadHue(m.thread.id), m.screen.spin.View()+" "+padded)
+	}
+	switch m.thread.state {
+	case stateFailed:
+		return "  " + theme.paintBold(roleFailedText, padded)
+	case stateDisconnected:
+		return "  " + theme.paint(roleWarningText, padded)
+	default:
+		return "  " + theme.paint(roleDim, padded)
+	}
+}
+
+func (m *model) liveElapsed() string {
+	if !m.turnLive() || m.thread.turnStartedAt.IsZero() {
+		return strings.Repeat(" ", elapsedCells)
+	}
+	text := formatElapsed(m.now().Sub(m.thread.turnStartedAt))
+	return m.screen.padLeft(m.screen.dockTheme().paint(roleDim, text), elapsedCells)
+}
+
+func (m *model) liveCalls() string {
+	count := 0
+	for _, item := range m.live.items {
+		if isToolItem(item.Item) {
+			count++
+		}
+	}
+	if count == 0 {
+		return strings.Repeat(" ", liveCallsCells)
+	}
+	return m.screen.pad(m.screen.dockTheme().paint(roleDim, countText(count, "run")), liveCallsCells)
+}
+
+func (m *model) livePlan() string {
+	if len(m.live.plan) == 0 {
+		return strings.Repeat(" ", livePlanCells)
+	}
+	done := 0
+	for _, step := range m.live.plan {
+		if step.Status == "completed" {
+			done++
+		}
+	}
+	text := numberText(done) + "/" + numberText(len(m.live.plan)) + " plan"
+	return m.screen.pad(m.screen.dockTheme().paint(roleDim, text), livePlanCells)
+}
+
+func (m *model) liveQueued() string {
+	if len(m.queue) == 0 {
+		return strings.Repeat(" ", liveQueueCells)
+	}
+	return m.screen.pad(m.screen.dockTheme().paint(roleDim, countText(len(m.queue), "queued")), liveQueueCells)
+}
+
+func countText(n int, word string) string {
+	return numberText(n) + " " + word
+}
+
+func numberText(n int) string {
+	if n > 99 {
+		return "99+"
+	}
+	return strconv.Itoa(n)
+}
+
+func isToolItem(item rpc.Item) bool {
+	switch item.Type {
+	case "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall":
+		return !isAdvisorItem(item)
+	}
+	return false
+}
+
+func (m *model) liveText() string {
+	switch {
+	case m.hint.text != "":
+		return m.screen.dockTheme().paint(roleDim, m.hint.text)
+	case m.notice != "":
+		notice := m.noticeLine()
+		if m.noticeError {
+			return m.screen.dockTheme().paintBold(roleFailedText, notice)
+		}
+		return notice
+	}
+	return m.activity()
+}
+
+func (m *model) noticeLine() string {
+	return strings.ReplaceAll(m.notice, "\n", " · ")
+}
+
+func (m *model) activity() string {
+	if len(m.approvals) > 0 || m.thread.state == stateAwaitingApproval {
+		return "Waiting for your approval"
+	}
+	if left, ok := m.retryRemaining(); ok {
+		return retryLine(left)
+	}
 	for i := len(m.live.items) - 1; i >= 0; i-- {
-		if isAdvisorItem(m.live.items[i].Item) {
-			continue
+		if !isAdvisorItem(m.live.items[i].Item) {
+			return m.live.items[i].activity()
 		}
-		if tail := m.live.items[i].tail(); tail != "" {
-			return tail
+	}
+	return ""
+}
+
+func activityLabel(item rpc.Item) string {
+	switch item.Type {
+	case "reasoning":
+		return "Thinking"
+	case "agentMessage":
+		return "Writing"
+	case "commandExecution":
+		return "Running " + strings.SplitN(item.Command, "\n", 2)[0]
+	case "fileChange":
+		if len(item.Changes) == 0 {
+			return "Editing files"
 		}
+		return "Editing " + item.Changes[0].Path
+	case "mcpToolCall":
+		return "Calling " + item.Server + "/" + item.Tool
+	case "dynamicToolCall":
+		if item.Tool == "task" {
+			return "Subagent"
+		}
+		return item.Tool
 	}
 	return ""
 }

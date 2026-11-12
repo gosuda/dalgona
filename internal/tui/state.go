@@ -4,11 +4,15 @@ import (
 	"cmp"
 	"context"
 	"encoding/json/jsontext"
+	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/gosuda/dalgona/internal/rpc"
 )
 
 const (
@@ -19,6 +23,23 @@ const (
 	stateFailed           = "failed"
 	stateDisconnected     = "disconnected"
 )
+
+type hintState struct {
+	text    string
+	id      int
+	pending string
+}
+
+type hintExpiredMsg struct {
+	id int
+}
+
+func (m *model) setHint(text, pending string) tea.Cmd {
+	m.hint.id++
+	m.hint.text, m.hint.pending = text, pending
+	id := m.hint.id
+	return tea.Tick(hintWindow, func(time.Time) tea.Msg { return hintExpiredMsg{id: id} })
+}
 
 type caller interface {
 	Call(context.Context, string, any, any) error
@@ -34,6 +55,8 @@ type model struct {
 	out         outState
 	notice      string
 	noticeError bool
+	noticeN     int
+	hint        hintState
 	queue       []string
 	ctrlCArmed  bool
 	approvals   []approval
@@ -46,6 +69,7 @@ type connInfo struct {
 	client caller
 	opts   Options
 	done   <-chan struct{}
+	clock  func() time.Time
 }
 
 type threadInfo struct {
@@ -58,11 +82,15 @@ type threadInfo struct {
 	modelName      string
 	approvalMode   string
 	sandbox        string
+	turnStartedAt  time.Time
+	lastTurn       time.Duration
 }
 
 type liveState struct {
-	items  []liveItem
-	deltas *deltaDecoder
+	items      []liveItem
+	deltas     *deltaDecoder
+	plan       []rpc.TurnPlanStep
+	retryUntil time.Time
 }
 
 type inputState struct {
@@ -83,6 +111,9 @@ type screenState struct {
 	profile      colorprofile.Profile
 	dark         bool
 	hasDark      bool
+	motion       bool
+	spin         spinner.Model
+	ticking      bool
 }
 
 type outState struct {
@@ -136,9 +167,9 @@ func newModel(client caller, opts Options, done <-chan struct{}) model {
 		sandbox = "off"
 	}
 	return model{
-		conn:   connInfo{client: client, opts: opts, done: done},
+		conn:   connInfo{client: client, opts: opts, done: done, clock: time.Now},
 		input:  inputState{composer: newComposer()},
-		screen: screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII},
+		screen: screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII, motion: true, spin: newSpinner(true)},
 		out:    outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{})},
 		live:   liveState{deltas: new(deltaDecoder)},
 		thread: threadInfo{state: stateIdle, title: "new thread", modelName: opts.Model, approvalMode: approvalMode, sandbox: sandbox},

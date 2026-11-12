@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -26,7 +27,7 @@ func (m *model) applyDecodedNotification(msg notificationMsg) (tea.Cmd, error) {
 	switch msg.method {
 	case "thread/started", "thread/status/changed", "thread/name/updated", "thread/reverted":
 		return nil, m.applyThreadNotification(msg)
-	case "turn/started", "turn/completed", "turn/plan/updated":
+	case "turn/started", "turn/completed", "turn/plan/updated", "dalgona/retry/wait":
 		return m.applyTurnNotification(msg)
 	case "item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/textDelta", "item/commandExecution/outputDelta":
 		return nil, m.applyItemNotification(msg)
@@ -63,6 +64,8 @@ func (m *model) applyTurnNotification(msg notificationMsg) (tea.Cmd, error) {
 		return nil, m.applyTurnStarted(msg.params)
 	case "turn/completed":
 		return m.applyTurnCompleted(msg.params)
+	case "dalgona/retry/wait":
+		return nil, m.applyRetryWait(msg.params)
 	default:
 		return nil, m.applyPlan(msg.params)
 	}
@@ -162,6 +165,10 @@ func (m *model) applyTurnStarted(params jsontext.Value) error {
 		return nil
 	}
 	m.thread.turnID = event.Turn.ID
+	m.thread.turnStartedAt = m.now()
+	if event.Turn.StartedAt != 0 {
+		m.thread.turnStartedAt = time.Unix(event.Turn.StartedAt, 0)
+	}
 	m.noticef("")
 	m.setState(stateRunning)
 	return nil
@@ -180,6 +187,12 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 		m.thread.completedTurns = map[string]struct{}{}
 	}
 	m.thread.completedTurns[event.Turn.ID] = struct{}{}
+	m.thread.lastTurn = time.Duration(event.Turn.DurationMs) * time.Millisecond
+	if m.thread.lastTurn == 0 && !m.thread.turnStartedAt.IsZero() {
+		m.thread.lastTurn = m.now().Sub(m.thread.turnStartedAt)
+	}
+	m.live.plan = nil
+	m.live.retryUntil = time.Time{}
 	m.setState(turnState(event.Turn.Status))
 	if m.thread.state != stateIdle {
 		if len(m.queue) > 0 {
@@ -278,7 +291,23 @@ func (m *model) applyPlan(params jsontext.Value) error {
 	for _, step := range event.Plan {
 		lines = append(lines, fmt.Sprintf("[%s] %s", planStatus(step.Status), step.Step))
 	}
+	m.live.plan = event.Plan
 	m.noticef("%s", strings.Join(lines, "\n"))
+	return nil
+}
+
+func (m *model) applyRetryWait(params jsontext.Value) error {
+	var event rpc.RetryWaitNotification
+	if err := decodeParams(params, &event); err != nil {
+		return err
+	}
+	if !m.acceptThread(event.ThreadID) {
+		return nil
+	}
+	m.live.retryUntil = time.Time{}
+	if event.RemainingMS > 0 {
+		m.live.retryUntil = m.now().Add(time.Duration(event.RemainingMS) * time.Millisecond)
+	}
 	return nil
 }
 
@@ -325,6 +354,10 @@ func (m *model) setThread(id string) {
 	m.thread.turnID = ""
 	m.thread.seq = 0
 	m.thread.completedTurns = nil
+	m.thread.lastTurn = 0
+	m.thread.turnStartedAt = time.Time{}
+	m.live.plan = nil
+	m.live.retryUntil = time.Time{}
 }
 
 func (m *model) noticeMoved(title string) {

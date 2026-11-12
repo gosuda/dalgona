@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/gosuda/dalgona/internal/rpc"
@@ -91,7 +92,8 @@ func TestModelAppliesSchemaExactTurnNotifications(t *testing.T) {
 		`{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":{"type":"commandExecution","id":"c1","command":"go test ./...","commandActions":[],"cwd":"/work","status":"inProgress","aggregatedOutput":null}}`)
 	m = schemaNotification(t, m, "item/commandExecution/outputDelta", "CommandExecutionOutputDeltaNotification",
 		`{"threadId":"t1","turnId":"turn-1","itemId":"c1","delta":"ok  internal/tui"}`)
-	assertContains(t, m.View().Content, "$ go test ./...", "ok  internal/tui")
+	m, _ = drive(t, m, press(tea.KeyLeft, 0, ""))
+	assertContains(t, m.View().Content, "Running go test ./...", "ok  internal/tui")
 	m, text := schemaSettled(t, m, `{"threadId":"t1","turnId":"turn-1","completedAtMs":2,"item":{"type":"commandExecution","id":"c1",`+
 		`"command":"go test ./...","commandActions":[],"cwd":"/work","status":"completed","aggregatedOutput":"ok  internal/tui\nPASS","exitCode":0}}`)
 	assertContains(t, text, "$ go test ./...", "PASS")

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -15,11 +16,16 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var command tea.Cmd
 	before := m.input.composer.Value()
+	notice := m.notice
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		command = m.updateKey(msg)
 	case notificationMsg, serverRequestMsg, resultMsg, disconnectedMsg:
 		command = m.updateAsync(msg)
+	case spinner.TickMsg:
+		command = m.updateTick(msg)
+	case hintExpiredMsg:
+		m.expireHint(msg)
 	default:
 		if !m.updateTerminal(msg) {
 			command = m.updateComposer(msg)
@@ -28,9 +34,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.input.composer.Value() != before {
 		command = tea.Batch(command, m.matchKeywords())
 	}
+	if m.notice != notice {
+		m.commitOverflowNotice()
+	}
 	settle := m.settle()
 	printCommand := m.drain()
-	return m, tea.Batch(command, settle, printCommand)
+	tick := m.scheduleTick()
+	return m, tea.Batch(command, tick, settle, printCommand)
 }
 
 func (m *model) updateTerminal(msg tea.Msg) bool {
@@ -80,6 +90,7 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 }
 
 func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
+	m.noticef("")
 	if msg.String() == "ctrl+c" {
 		return m.confirmExit()
 	}
@@ -142,6 +153,18 @@ func (m *model) noticef(format string, args ...any) {
 func (m *model) errorf(format string, args ...any) {
 	m.noticef(format, args...)
 	m.noticeError = true
+}
+
+func (m *model) commitOverflowNotice() {
+	if m.notice == "" {
+		return
+	}
+	width := terminalWidth(m.screen.width)
+	if m.screen.cells(m.noticeLine()) <= m.liveFreeWidth() {
+		return
+	}
+	m.commit(fmt.Sprintf("note:%d", m.noticeN), m.screen.wrap(m.notice, width))
+	m.noticeN++
 }
 
 func (m *model) applyModeReport(msg tea.ModeReportMsg) {

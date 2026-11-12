@@ -63,7 +63,8 @@ func TestModelShowsConnectionLoss(t *testing.T) {
 	m.thread.id = "t1"
 	m, _ = drive(t, m, disconnectedMsg{err: errors.New("EOF")})
 	m, _ = drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"x","items":[],"status":"completed"}}`)})
-	assertContains(t, strings.Join(strings.Fields(m.View().Content), " "), "state: disconnected", "connection lost: EOF; restart the TUI, then /resume t1")
+	assertContains(t, strings.Join(strings.Fields(m.View().Content), " "), "Offline")
+	assertShown(t, m, "connection lost: EOF; restart the TUI, then /resume t1")
 }
 
 func drive(t *testing.T, m model, msg tea.Msg) (model, tea.Cmd) {
@@ -92,14 +93,14 @@ func press(code rune, mod tea.KeyMod, text string) tea.KeyPressMsg {
 func TestModelStreamsItemsAndShowsStates(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
-	m.screen.width = 40
-	m.input.composer.SetWidth(40)
+	m.screen.width = 80
+	m.input.composer.SetWidth(80)
 	m, _ = drive(t, m, notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)})
 	m, _ = drive(t, m, notificationMsg{method: "item/started", params: []byte(`{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":{"type":"agentMessage","id":"a1","text":""}}`)})
 	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"hel"}`)})
 	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"lo"}`)})
 	view := m.View().Content
-	for _, want := range []string{"hello", "state: running", "default · auto · workspace-write · demo"} {
+	for _, want := range []string{"hello", "Working", "default · auto · workspace-write · demo"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("streaming view missing %q:\n%s", want, view)
 		}
@@ -109,13 +110,13 @@ func TestModelStreamsItemsAndShowsStates(t *testing.T) {
 		t.Fatal("completed item did not schedule tea.Println")
 	}
 	m, _ = drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"interrupted"}}`)})
-	if !strings.Contains(m.View().Content, "state: interrupted") {
+	if !strings.Contains(m.View().Content, "Stopped") {
 		t.Fatalf("interrupted state is not visible:\n%s", m.View().Content)
 	}
 	m.thread.sandbox = "off"
 	m, _ = drive(t, m, notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":"provider unavailable"}}`)})
 	view = strings.Join(strings.Fields(m.View().Content), " ")
-	for _, want := range []string{"state: failed", "no sandbox"} {
+	for _, want := range []string{"Failed", "no sandbox"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("failure view missing %q:\n%s", want, view)
 		}
@@ -163,7 +164,7 @@ func TestModelApprovalPromptAndDecision(t *testing.T) {
 				answer: answer,
 			}
 			m, _ = drive(t, m, request)
-			assertContains(t, m.View().Content, "approval required", "go test ./...", "[y] accept", "[a] accept for session", "[n] decline", "state: awaiting approval")
+			assertContains(t, m.View().Content, "approval required", "go test ./...", "[y] accept", "[a] accept for session", "[n] decline", "Waiting")
 			m, _ = drive(t, m, press(test.key, 0, string(test.key)))
 			response := <-answer
 			decision, ok := response.value.(rpc.CommandExecutionRequestApprovalResponse)
@@ -300,7 +301,7 @@ func TestModelSelectorActions(t *testing.T) {
 	if last.method != "thread/revert" || !ok || params.BeforeTurnID != "turn-9" {
 		t.Fatalf("revert call = %#v", last)
 	}
-	assertContains(t, m.View().Content, "files changed by later turns are not re")
+	assertShown(t, m, "files changed by later turns are not reverted")
 	assertContains(t, m.notice, "files changed by later turns are not reverted")
 }
 
@@ -318,7 +319,7 @@ func TestModelTreeSelectionSetsLeaf(t *testing.T) {
 	if last.method != "dalgona/thread/leaf/set" || !ok || params.TurnID != "turn-8" {
 		t.Fatalf("leaf call = %#v", last)
 	}
-	assertContains(t, m.View().Content, "files changed by later turns are not re")
+	assertShown(t, m, "files changed by later turns are not reverted")
 	assertContains(t, m.notice, "files changed by later turns are not reverted")
 }
 
@@ -362,12 +363,13 @@ func TestModelHoldsFollowupAfterInterruptedTurn(t *testing.T) {
 	m.thread.turnID = "turn-1"
 	m.thread.state = stateRunning
 	m.queue = []string{"later"}
-	m, command := drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"interrupted"}}`)})
-	if command != nil || len(caller.calls) != 0 {
+	m, _ = drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"interrupted"}}`)})
+	if len(caller.calls) != 0 {
 		t.Fatalf("interrupted turn released follow-up: calls %#v", caller.calls)
 	}
-	assertContains(t, strings.Join(strings.Fields(m.View().Content), " "), "state: interrupted", "1 follow-up held")
-	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+	assertContains(t, strings.Join(strings.Fields(m.View().Content), " "), "Stopped")
+	assertShown(t, m, "1 follow-up held")
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
 	runCommand(t, m, command, "empty Enter did not release the held follow-up")
 	params, ok := caller.calls[0].params.(rpc.TurnStartParams)
 	if !ok || params.Input[0].Text != "later" {
@@ -382,11 +384,11 @@ func TestModelDoubleCtrlCAndNarrowWrap(t *testing.T) {
 	m.input.composer.SetWidth(40)
 	m.thread.title = "a thread with a long visible title"
 	m.live.items = []liveItem{{Item: rpc.Item{ID: "a1", Type: "agentMessage", Text: strings.Repeat("wrappable ", 20)}}}
-	m, command := drive(t, m, press('c', tea.ModCtrl, ""))
-	if command != nil || !strings.Contains(m.notice, "again") {
-		t.Fatalf("first Ctrl+C command = %v, notice %q", command, m.notice)
+	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+	if !strings.Contains(m.notice, "again") {
+		t.Fatalf("first Ctrl+C notice %q", m.notice)
 	}
-	_, command = drive(t, m, press('c', tea.ModCtrl, ""))
+	_, command := drive(t, m, press('c', tea.ModCtrl, ""))
 	if command == nil {
 		t.Fatal("second Ctrl+C did not quit")
 	}

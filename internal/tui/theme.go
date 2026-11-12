@@ -192,6 +192,7 @@ func (m *model) applyEnv(msg tea.EnvMsg) {
 	if !m.screen.color {
 		m.screen.profile = colorprofile.ASCII
 	}
+	m.applyMotion(msg)
 	m.screen.setTheme()
 }
 
