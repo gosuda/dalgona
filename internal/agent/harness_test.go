@@ -227,15 +227,16 @@ func (l *logBuffer) String() string {
 }
 
 type harness struct {
-	t       *testing.T
-	home    string
-	cwd     string
-	journal *journal.Store
-	model   *fakeModel
-	cfg     HostConfig
-	logs    *logBuffer
-	host    *Host
-	sleep   func(context.Context, time.Duration) error
+	t          *testing.T
+	home       string
+	cwd        string
+	journal    *journal.Store
+	model      *fakeModel
+	cfg        HostConfig
+	logs       *logBuffer
+	host       *Host
+	sleep      func(context.Context, time.Duration) error
+	extraTools []tool.Tool
 }
 
 func newHarness(t *testing.T, configure ...func(*harness)) *harness {
@@ -294,7 +295,7 @@ func (h *harness) providers(onRetry RetryFunc) (*model.Registry, error) {
 }
 
 func (h *harness) tools(context.Context, string, string) ([]tool.Tool, error) {
-	return []tool.Tool{read.New(), search.New(), patch.New("replace"), exec.New()}, nil
+	return append([]tool.Tool{read.New(), search.New(), patch.New("replace"), exec.New()}, h.extraTools...), nil
 }
 
 func (h *harness) runner(_ context.Context, id, _ string) (runner.Runner, error) {
