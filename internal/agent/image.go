@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -159,4 +160,27 @@ func sendsImages(registry *model.Registry, provider string) bool {
 	}
 	sender, ok := adapter.(model.ImageSender)
 	return ok && sender.SendsImages()
+}
+
+const omittedImageNotice = "[image omitted: this model does not accept images]"
+
+func turnHasImages(v view, turnID string) bool {
+	for _, item := range v.records {
+		message, ok := item.Event.(event.UserMessage)
+		if ok && message.TurnID == turnID && len(message.Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func withoutImages(messages []model.Message) []model.Message {
+	out := slices.Clone(messages)
+	for i := range out {
+		for range out[i].Images {
+			out[i].Text += "\n\n" + omittedImageNotice
+		}
+		out[i].Images = nil
+	}
+	return out
 }

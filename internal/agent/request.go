@@ -115,6 +115,12 @@ func (w *worker) request(ctx context.Context, v view, messages []model.Message) 
 	}
 	caps := w.t.host.capabilities(ctx, w.registry, w.settings.Model)
 	w.contextWindow = caps.Context
+	if !caps.Images {
+		if turnHasImages(v, w.turnID) {
+			return model.Request{}, errors.New("this model does not accept images")
+		}
+		messages = withoutImages(messages)
+	}
 	return model.Request{
 		Model: modelID, System: w.t.system, Messages: messages, Tools: w.tools.specs,
 		Reasoning: model.ClampEffort(w.effort(v), caps.Efforts),

@@ -148,6 +148,7 @@ func storedImageMessage(t *testing.T, h *harness, id string) event.UserMessage {
 
 type requestRecorder struct {
 	provider model.Provider
+	images   bool
 	mu       sync.Mutex
 	requests []model.Request
 }
@@ -160,7 +161,11 @@ func (r *requestRecorder) Stream(ctx context.Context, req model.Request) (model.
 }
 
 func (r *requestRecorder) Models(ctx context.Context) ([]model.Model, error) {
-	return r.provider.Models(ctx)
+	models, err := r.provider.Models(ctx)
+	for i := range models {
+		models[i].Images = r.images
+	}
+	return models, err
 }
 
 func (r *requestRecorder) snapshot() []model.Request {
@@ -169,16 +174,24 @@ func (r *requestRecorder) snapshot() []model.Request {
 	return slices.Clone(r.requests)
 }
 
+func openaiProvider(h *harness, onRetry RetryFunc) (model.Provider, error) {
+	inner, err := h.providers(onRetry)
+	if err != nil {
+		return nil, err
+	}
+	provider, ok := inner.Provider("openai")
+	if !ok {
+		return nil, errors.New("openai provider is not registered")
+	}
+	return provider, nil
+}
+
 func recordRequests(h *harness) *requestRecorder {
-	rec := &requestRecorder{}
+	rec := &requestRecorder{images: true}
 	h.cfg.Providers = func(onRetry RetryFunc) (*model.Registry, error) {
-		inner, err := h.providers(onRetry)
+		provider, err := openaiProvider(h, onRetry)
 		if err != nil {
 			return nil, err
-		}
-		provider, ok := inner.Provider("openai")
-		if !ok {
-			return nil, errors.New("openai provider is not registered")
 		}
 		rec.provider = provider
 		registry := model.NewRegistry()
@@ -327,4 +340,79 @@ func TestImageRecordCheckedOnCacheHit(t *testing.T) {
 			t.Errorf("%s mismatch on a cache hit: err = %v, want a journal record mismatch", tc.name, err)
 		}
 	}
+}
+
+func TestTextOnlyModelRefusesCurrentTurnImage(t *testing.T) {
+	h := newHarness(t)
+	thread := h.start()
+	err := thread.Submit(t.Context(), Input{
+		Kind: InputPrompt, Text: "what is this",
+		Images: []Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\nabc")}},
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	h.waitIdle(thread)
+	turn := lastTurn(h.events(thread.ID()))
+	want := "this model does not accept images"
+	if turn.Status != statusFailed || turn.Error != want {
+		t.Fatalf("turn = %q %q, want failed with %q", turn.Status, turn.Error, want)
+	}
+	if n := h.model.count(); n != 0 {
+		t.Fatalf("refused turn sent %d model requests, want 0", n)
+	}
+}
+
+func TestTextOnlyModelOmitsHistoryImage(t *testing.T) {
+	visionRec := &requestRecorder{images: true}
+	plainRec := &requestRecorder{}
+	h := newHarness(t, func(h *harness) {
+		h.cfg.ProviderIDs = []string{"openai", "vision"}
+		h.cfg.Providers = func(onRetry RetryFunc) (*model.Registry, error) {
+			provider, err := openaiProvider(h, onRetry)
+			if err != nil {
+				return nil, err
+			}
+			visionRec.provider, plainRec.provider = provider, provider
+			registry := model.NewRegistry()
+			if err := registry.Register("vision", visionRec); err != nil {
+				return nil, err
+			}
+			return registry, registry.Register("openai", plainRec)
+		}
+	})
+	thread := h.start()
+	submit := func(in Input) {
+		t.Helper()
+		if err := thread.Submit(t.Context(), in); err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+		h.waitIdle(thread)
+	}
+	png := []byte("\x89PNG\r\n\x1a\nabc")
+	submit(Input{Kind: InputPrompt, Text: "what is this", Model: "vision/gpt-test", Images: []Image{{Mime: "image/png", Data: png}}})
+	submit(Input{Kind: InputPrompt, Text: "and now", Model: "openai/gpt-test"})
+	if len(visionRec.snapshot()) == 0 {
+		t.Fatal("image turn sent no request to the vision model")
+	}
+	requests := plainRec.snapshot()
+	if len(requests) == 0 {
+		t.Fatal("text-only turn sent no model request")
+	}
+	last := requests[len(requests)-1]
+	if !imagesOmittedWithNotice(t, last.Messages) {
+		t.Fatalf("text-only request holds no omitted-image notice: %+v", last.Messages)
+	}
+}
+
+func imagesOmittedWithNotice(t *testing.T, messages []model.Message) bool {
+	t.Helper()
+	noticed := false
+	for _, message := range messages {
+		if len(message.Images) > 0 {
+			t.Fatalf("text-only request carries %d images", len(message.Images))
+		}
+		noticed = noticed || strings.Contains(message.Text, "[image omitted: this model does not accept images]")
+	}
+	return noticed
 }

@@ -80,6 +80,8 @@ Static role presets MUST match the decision table. Providers without a static pr
 
 Effort clamping MUST choose the highest supported level at or below the request. It MUST choose the lowest supported level when every level exceeds the request. Nil effort support MUST omit the effort field.
 
+A provider that does not implement image input MUST refuse a turn that carries an image. The server MUST refuse with `this model does not accept images`. The server MUST replace the images of earlier turns with a text notice for such a model.
+
 ## Retry and timeouts
 
 Transport failures, 408, 429, and 5xx responses MUST be retryable. An HTTP 200 body or stream error with a numeric 429 or 5xx code MUST be retryable unless it names a quota code. Context-length errors MUST return `Overflow`. 401 and 403 MUST return `Auth`. Usage-limit and other errors MUST be terminal. A 429 whose body names a quota code as a JSON string MUST be terminal. The quota codes are `insufficient_quota`, `credit_balance_exhausted`, `organization_spend_limit_exceeded`, `project_spend_limit_exceeded`, `organization_usage_limit_exceeded`, `usage_limit_reached`, and `usage_not_included`. A 402 MUST be terminal. Transient phrases such as `timeout` MUST be matched only against local transport error text, never against a provider body. Model text in a refusal therefore cannot cause a retry.
