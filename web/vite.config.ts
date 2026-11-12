@@ -38,7 +38,7 @@ const config: UserConfig = defineConfig({
 					css: {
 						include: [
 							/NoticeStack\.svelte/,
-							/ApprovalDialog\.svelte/,
+							/ApprovalCard\.svelte/,
 							/ThreadList\.svelte/,
 							/app\.css$/,
 						],

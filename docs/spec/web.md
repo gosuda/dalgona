@@ -209,16 +209,28 @@ A finished row MUST NOT tick.
 
 ### Approvals
 
-The client records subagent threads from `dalgona/thread/childSpawned`. An approval from a subagent of the open thread MUST appear in the approval dialog of the open thread. The answer MUST carry the subagent request id. An approval from any other thread MUST count as waiting on another thread. The client MUST keep subagent links per parent thread id when it rebuilds the transcript from `thread/resume` or `thread/read`. It MUST NOT apply links from another thread.
+The client records subagent threads from `dalgona/thread/childSpawned`. An approval from a subagent of the open thread MUST appear in the approval card of the open thread. The answer MUST carry the subagent request id. An approval from any other thread MUST count as waiting on another thread. The client MUST keep subagent links per parent thread id when it rebuilds the transcript from `thread/resume` or `thread/read`. It MUST NOT apply links from another thread.
+
+The approval card MUST show `Approval required`, a title, the request details, and the decision actions. The title MUST read `Run this command?` for a command and `Apply these changes?` for a file change. The kicker MUST add `· <n> of <total>` when more than one approval is open.
+
+The request details MUST scroll inside their own region. The decision actions MUST stay outside that region. The card MUST offer `Accept`, `Accept for session`, `Decline`, and `Cancel and interrupt`.
+
+While the card has focus, `y` MUST accept, `a` MUST accept for the session, `n` MUST decline, and Escape MUST cancel and interrupt the turn. Escape MUST answer the card at once, and the two-press guard of the composer MUST NOT apply to it.
+
+The card MUST move focus to its title when it appears. When the card closes and no other control has focus, focus MUST move to the message field.
 
 Requests from other threads appear as one notice inside the workspace with an Open thread action.
+
+A file-change approval shows the diffs carried in the request.
+
+The dock shows one request at a time, the oldest of the open thread. Approvals, questions and the sandbox choice share that order.
 
 ### Empty states and errors
 
 - With no open thread the transcript says `Pick a thread or start a new one`. When connected, it says that earlier threads are in the list. When not connected, it says to connect to dalgona.
 - With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a title shows its preview. A thread with neither shows `Untitled thread`.
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
-- In the approval dialog, Decline and Cancel use the quiet style. The composer's `Interrupt turn` button has the danger style.
+- In the approval card, Decline and Cancel use the quiet style. The composer's `Interrupt turn` button has the danger style.
 
 ### Notices
 

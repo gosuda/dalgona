@@ -1,14 +1,20 @@
 <script lang="ts">
-import ApprovalDialog from "#lib/components/ApprovalDialog.svelte";
+import ApprovalCard from "#lib/components/ApprovalCard.svelte";
 import Composer from "#lib/components/Composer.svelte";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
 import StateTag from "#lib/components/StateTag.svelte";
 import StatusBand from "#lib/components/StatusBand.svelte";
 import ThreadList from "#lib/components/ThreadList.svelte";
 import Transcript from "#lib/components/Transcript.svelte";
-import { type StateKey, stateKey, stateWords } from "#lib/labels.ts";
+import {
+	type StateKey,
+	stateKey,
+	stateWords,
+	threadTitle,
+} from "#lib/labels.ts";
+import { requestsElsewhere } from "#lib/reducer.ts";
 import type { Session } from "#lib/session.svelte.ts";
-import type { ApprovalRequest, TurnStatus } from "#lib/types.ts";
+import type { TurnStatus } from "#lib/types.ts";
 
 interface Props {
 	session: Session;
@@ -50,6 +56,31 @@ const headerState: StateKey = $derived(
 const titleText = $derived(
 	`dalgona · ${session.activeTitle} · ${stateWords[headerState]}`,
 );
+const elsewhere = $derived(
+	new Set(
+		requestsElsewhere(
+			session.approvals,
+			session.activeThreadId,
+			session.transcript.childThreadIds,
+		),
+	),
+);
+const openApprovals = $derived(
+	session.approvals.filter((request) => !elsewhere.has(request)),
+);
+const shownPosition = $derived(
+	session.currentApproval === null
+		? 0
+		: openApprovals.indexOf(session.currentApproval) + 1,
+);
+const subagentTitle = $derived.by(() => {
+	const request = session.currentApproval;
+	if (request === null || request.threadId === session.activeThreadId) {
+		return null;
+	}
+	const thread = session.threads.find((entry) => entry.id === request.threadId);
+	return thread === undefined ? request.threadId : threadTitle(thread);
+});
 </script>
 
 <svelte:head>
@@ -97,18 +128,6 @@ const titleText = $derived(
 			/>
 		</header>
 
-		<NoticeStack
-			notices={session.notices}
-			waiting={session.waitingElsewhere}
-			onDismiss={(id) => session.dismiss(id)}
-			onOpenWaiting={(threadId) => void session.selectThread(threadId)}
-			turnStatus={session.transcript.turnStatus}
-			turnError={session.transcript.error}
-			loadingTranscript={session.loadingTranscript}
-			retryRemainingMs={session.retryRemainingMs}
-			awaitingApproval={session.awaitingApproval}
-		/>
-
 		<Transcript
 			threadId={session.activeThreadId}
 			items={session.transcript.items}
@@ -129,24 +148,43 @@ const titleText = $derived(
 			readOutput={(itemId, offset) => session.readItemOutput(itemId, offset)}
 		/>
 
-		<Composer
-			disabled={session.connection !== "connected" || session.activeThreadId === null || session.loadingTranscript}
-			running={session.running}
-			queuedCount={session.queuedFollowups.length}
-			onMatch={(text) => session.matchKeywords(text)}
-			onSend={(text) => void session.sendMessage(text)}
-			onSteer={(text) => void session.steerMessage(text)}
-			onFollowup={(text) => session.queueFollowup(text)}
-			onInterrupt={() => void session.interruptTurn()}
-		/>
+		<div class="dock">
+			<NoticeStack
+				notices={session.notices}
+				waiting={session.waitingElsewhere}
+				onDismiss={(id) => session.dismiss(id)}
+				onOpenWaiting={(threadId) => void session.selectThread(threadId)}
+				turnStatus={session.transcript.turnStatus}
+				turnError={session.transcript.error}
+				loadingTranscript={session.loadingTranscript}
+				retryRemainingMs={session.retryRemainingMs}
+				awaitingApproval={session.awaitingApproval}
+			/>
+
+			{#if session.currentApproval !== null}
+				<ApprovalCard
+					request={session.currentApproval}
+					changes={session.approvalChanges}
+					position={shownPosition}
+					total={openApprovals.length}
+					subagent={subagentTitle}
+					onDecision={(request, decision) => session.respondApproval(request, decision)}
+				/>
+			{/if}
+
+			<Composer
+				disabled={session.connection !== "connected" || session.activeThreadId === null || session.loadingTranscript}
+				running={session.running}
+				queuedCount={session.queuedFollowups.length}
+				onMatch={(text) => session.matchKeywords(text)}
+				onSend={(text) => void session.sendMessage(text)}
+				onSteer={(text) => void session.steerMessage(text)}
+				onFollowup={(text) => session.queueFollowup(text)}
+				onInterrupt={() => void session.interruptTurn()}
+			/>
+		</div>
 	</main>
 </div>
-
-<ApprovalDialog
-	request={session.currentApproval}
-	changes={session.approvalChanges}
-	onDecision={(request: ApprovalRequest, decision) => session.respondApproval(request, decision)}
-/>
 
 <style>
 	.shell {
@@ -190,6 +228,12 @@ const titleText = $derived(
 		font-weight: 650;
 		line-height: 1.25;
 		text-wrap: balance;
+	}
+
+	.dock {
+		display: flex;
+		min-width: 0;
+		flex-direction: column;
 	}
 
 	:global(.transcript) {
