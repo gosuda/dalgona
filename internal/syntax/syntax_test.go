@@ -39,8 +39,8 @@ func TestForPathExtensionTable(t *testing.T) {
 	if _, ok := ByName("nope"); ok {
 		t.Fatal("ByName(nope) found")
 	}
-	if got := Names(); !slices.Equal(got, []string{"go"}) {
-		t.Fatalf("Names() = %v, want [go]", got)
+	if got := Names(); !slices.Equal(got, []string{"go", "javascript", "python", "rust", "tsx", "typescript"}) {
+		t.Fatalf("Names() = %v, want the six registry names", got)
 	}
 }
 
@@ -157,4 +157,85 @@ func TestSymbolsStoppedWithTimeout(t *testing.T) {
 	if len(symbols) != 0 {
 		t.Fatalf("symbols = %d, want none after a stopped parse", len(symbols))
 	}
+}
+
+func assertFixtureSymbols(t *testing.T, langName, path string, want []Symbol) {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lang, ok := ByName(langName)
+	if !ok {
+		t.Fatalf("%s language missing", langName)
+	}
+	symbols, report, err := lang.NewParser().Symbols(t.Context(), src)
+	if err != nil {
+		t.Fatalf("Symbols: %v", err)
+	}
+	if report.Stopped || report.SyntaxErrors {
+		t.Fatalf("report = %+v, want clean parse", report)
+	}
+	if !slices.Equal(symbols, want) {
+		t.Fatalf("symbols =\n%v\nwant\n%v", symbols, want)
+	}
+}
+
+func TestSymbolsFixtureTypeScript(t *testing.T) {
+	t.Parallel()
+	assertFixtureSymbols(t, "typescript", "testdata/typescript/definitions.ts", []Symbol{
+		{Kind: "function", Name: "greet", Start: 1, End: 3, Depth: 0},
+		{Kind: "class", Name: "Box", Start: 5, End: 8, Depth: 0},
+		{Kind: "method", Name: "open", Start: 6, End: 6, Depth: 1},
+		{Kind: "method", Name: "seal", Start: 7, End: 7, Depth: 1},
+		{Kind: "class", Name: "Base", Start: 10, End: 12, Depth: 0},
+		{Kind: "interface", Name: "Shape", Start: 14, End: 16, Depth: 0},
+		{Kind: "enum", Name: "Color", Start: 18, End: 20, Depth: 0},
+		{Kind: "type", Name: "Pair", Start: 22, End: 22, Depth: 0},
+		{Kind: "function", Name: "twice", Start: 24, End: 24, Depth: 0},
+		{Kind: "module", Name: "Util", Start: 26, End: 28, Depth: 0},
+	})
+}
+
+func TestSymbolsFixtureTSX(t *testing.T) {
+	t.Parallel()
+	assertFixtureSymbols(t, "tsx", "testdata/tsx/definitions.tsx", []Symbol{
+		{Kind: "function", Name: "Card", Start: 1, End: 3, Depth: 0},
+		{Kind: "function", Name: "Button", Start: 5, End: 5, Depth: 0},
+		{Kind: "interface", Name: "CardProps", Start: 7, End: 9, Depth: 0},
+	})
+}
+
+func TestSymbolsFixtureJavaScript(t *testing.T) {
+	t.Parallel()
+	assertFixtureSymbols(t, "javascript", "testdata/javascript/definitions.js", []Symbol{
+		{Kind: "function", Name: "add", Start: 1, End: 3, Depth: 0},
+		{Kind: "class", Name: "Counter", Start: 5, End: 10, Depth: 0},
+		{Kind: "method", Name: "bump", Start: 6, End: 8, Depth: 1},
+		{Kind: "method", Name: "#hide", Start: 9, End: 9, Depth: 1},
+		{Kind: "function", Name: "scale", Start: 12, End: 12, Depth: 0},
+		{Kind: "function", Name: "gen", Start: 14, End: 16, Depth: 0},
+	})
+}
+
+func TestSymbolsFixturePython(t *testing.T) {
+	t.Parallel()
+	assertFixtureSymbols(t, "python", "testdata/python/definitions.py", []Symbol{
+		{Kind: "function", Name: "load", Start: 1, End: 2, Depth: 0},
+		{Kind: "class", Name: "Store", Start: 5, End: 9, Depth: 0},
+		{Kind: "method", Name: "get", Start: 6, End: 9, Depth: 1},
+		{Kind: "function", Name: "fetch", Start: 11, End: 13, Depth: 0},
+	})
+}
+
+func TestSymbolsFixtureRust(t *testing.T) {
+	t.Parallel()
+	assertFixtureSymbols(t, "rust", "testdata/rust/definitions.rs", []Symbol{
+		{Kind: "function", Name: "start", Start: 1, End: 1, Depth: 0},
+		{Kind: "type", Name: "Config", Start: 3, End: 5, Depth: 0},
+		{Kind: "enum", Name: "Mode", Start: 7, End: 9, Depth: 0},
+		{Kind: "interface", Name: "Runner", Start: 11, End: 13, Depth: 0},
+		{Kind: "method", Name: "run", Start: 12, End: 12, Depth: 1},
+		{Kind: "method", Name: "new", Start: 16, End: 18, Depth: 0},
+	})
 }

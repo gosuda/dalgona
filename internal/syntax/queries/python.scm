@@ -1,0 +1,8 @@
+(module (function_definition name: (identifier) @name) @definition.function)
+(module (class_definition name: (identifier) @name) @definition.class)
+(module (decorated_definition definition: (function_definition name: (identifier) @name)) @definition.function)
+(module (decorated_definition definition: (class_definition name: (identifier) @name)) @definition.class)
+(class_definition body: (block (function_definition name: (identifier) @name) @definition.method))
+(class_definition body: (block (decorated_definition definition: (function_definition name: (identifier) @name)) @definition.method))
+(class_definition body: (block (class_definition name: (identifier) @name) @definition.class))
+(class_definition body: (block (decorated_definition definition: (class_definition name: (identifier) @name)) @definition.class))

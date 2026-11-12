@@ -13,7 +13,12 @@ import (
 
 	"github.com/odvcencio/gotreesitter"
 	golang "github.com/odvcencio/gotreesitter/grammars/go"
+	javascript "github.com/odvcencio/gotreesitter/grammars/javascript"
+	python "github.com/odvcencio/gotreesitter/grammars/python"
 	grammarruntime "github.com/odvcencio/gotreesitter/grammars/runtime"
+	rust "github.com/odvcencio/gotreesitter/grammars/rust"
+	tsx "github.com/odvcencio/gotreesitter/grammars/tsx"
+	typescript "github.com/odvcencio/gotreesitter/grammars/typescript"
 )
 
 const (
@@ -26,6 +31,21 @@ const (
 
 //go:embed queries/go.scm
 var goQuery string
+
+//go:embed queries/typescript.scm
+var typescriptQuery string
+
+//go:embed queries/tsx.scm
+var tsxQuery string
+
+//go:embed queries/javascript.scm
+var javascriptQuery string
+
+//go:embed queries/python.scm
+var pythonQuery string
+
+//go:embed queries/rust.scm
+var rustQuery string
 
 type language struct {
 	name       string
@@ -49,6 +69,11 @@ func (l *language) syntaxOnly() bool {
 
 var registry = []*language{
 	newLanguage("go", []string{".go"}, golang.Language, goQuery),
+	newLanguage("javascript", []string{".js", ".jsx", ".mjs", ".cjs"}, javascript.Language, javascriptQuery),
+	newLanguage("python", []string{".py"}, python.Language, pythonQuery),
+	newLanguage("rust", []string{".rs"}, rust.Language, rustQuery),
+	newLanguage("tsx", []string{".tsx"}, tsx.Language, tsxQuery),
+	newLanguage("typescript", []string{".ts", ".mts", ".cts"}, typescript.Language, typescriptQuery),
 }
 
 type Language struct {
