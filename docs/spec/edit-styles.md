@@ -41,7 +41,7 @@ Every edit MUST address the original payload image. Edits on one file MUST NOT o
 
 ### Hashline
 
-`[PATH#TAG]` opens an existing file. The tag MUST contain four uppercase hexadecimal characters. `[PATH#NEW]` opens a new file. `PUT N`, `PUT N-M`, and `PUT N.=M` replace source lines. `PUT <N`, `PUT >N`, and `PUT >$` insert at source gaps. `CUT` removes lines. `REM` deletes a file. `MV DEST` renames after content edits.
+`[PATH#TAG]` opens an existing file. The tag MUST contain four uppercase hexadecimal characters. `[PATH#NEW]` opens a new file. `PUT N:`, `PUT N-M:`, and `PUT N.=M:` replace source lines. `PUT <N:`, `PUT >N:`, and `PUT >$:` insert at source gaps. `CUT` removes lines. `REM` deletes a file. `MV DEST` renames after content edits.
 
 Every `PUT` body MUST have at least one `+` row. The parser MUST remove exactly one leading `+`. Empty `PUT` bodies MUST fail. New files MUST have exactly one `PUT >$` operation. `REM` MUST NOT share a section with another operation.
 
@@ -49,7 +49,7 @@ Every `PUT` body MUST have at least one `+` row. The parser MUST remove exactly 
 
 Existing files MUST use `[PATH@ReadRef]`. New files MUST use `[PATH#NEW]`. Legacy tags, tagless headers, `latest`, and inferred references MUST fail. Quoted paths and quoted `MV` destinations MUST use one JSON string decoder.
 
-A read reference MUST be `r<32 lowercase hex>.<nonzero base-36>`. It MUST identify an immutable captured buffer and its path. A new store MUST reject an unknown reference. A store rebuilt from result metadata MUST restore the same reference, buffer, path, and shown ranges.
+A read reference MUST be `r<32 lowercase hex>.<nonzero base-36>`. It MUST identify an immutable snapshot and its path. A new store MUST reject an unknown reference. A store rebuilt from result metadata MUST restore the same reference, snapshot, path, and shown ranges.
 
 Light permits an effective edit over unseen rows. Enhanced MUST require every affected source row in the shown ranges. Explicit `REM` is exempt from row coverage. Pure gap insertion is exempt unless it changes an unterminated final row. A valid no-op MUST NOT require new row coverage.
 
@@ -57,15 +57,15 @@ The grammar for `PUT`, `CUT`, `REM`, and `MV` follows hashline. For NEW, body ro
 
 ### Apply patch
 
-Input MUST begin with `*** Begin Patch` and end with `*** End Patch`. File operations MUST be `*** Add File`, `*** Delete File`, or `*** Update File`. An update MAY include `*** Move to`. Hunks MUST start with `@@`. Hunk rows MUST start with space, `+`, or `-`. Added files MUST have at least one `+` row. `*** End of File` restricts the match to EOF.
+Input MUST begin with `*** Begin Patch` and end with `*** End Patch`. File operations MUST be `*** Add File`, `*** Delete File`, or `*** Update File`. An update MAY include `*** Move to: <path>`. Hunks MUST start with `@@`. Hunk rows MUST start with space, `+`, or `-`. Added files MUST have at least one `+` row. `*** End of File` restricts the match to EOF.
 
 Update chunks MUST resolve in payload order. Pure additions append at EOF. Other chunks replace quoted text after the previous chunk.
 
 ## References and lineage
 
-A snapshot MUST contain complete source bytes, a SHA-256 digest, and complete shown line intervals. Read and search output and metadata MUST come from the same buffer. Truncated rows MUST NOT receive shown coverage.
+A snapshot MUST contain complete source bytes, a SHA-256 digest, and complete shown line intervals. Read and search output and metadata MUST come from the same snapshot. Truncated rows MUST NOT receive shown coverage.
 
-Snapshot metadata MUST be the object `{"ref","path","blob","shown","revision","epoch"}`, where `shown` is a list of `[first,last]` line pairs. A `read` result carries one such object. A `search` result carries `{"captures":[...]}` with at most 64 KiB of metadata, and its output MUST print `[PATH#TAG]`, `[PATH#VERSION]`, and `[PATH@ReadRef]` only for the captures in that list. Restore MUST reject unknown, duplicate, or missing keys, trailing data, a blob that does not match the bytes, shown lines outside the bytes, and a zero revision or epoch. Restore MUST NOT move a path head to an older revision or epoch, and the next issued reference MUST be greater than every restored one.
+Snapshot metadata MUST be the object `{"ref","path","blob","shown","revision","epoch"}`, where `shown` is a list of `[first,last]` line pairs. A `read` result carries one such object. A `search` result carries `{"captures":[...]}` with at most 64 KiB of metadata. The `search` output MUST print `[PATH#TAG]`, `[PATH#VERSION]`, and `[PATH@ReadRef]` only for each capture in the `captures` array. Restore MUST reject metadata with unknown, duplicate, or missing keys. Restore MUST reject trailing data. Restore MUST reject a blob that does not match the bytes. Restore MUST reject shown lines outside the bytes. Restore MUST reject a zero revision or epoch. Restore MUST NOT move a path head to an older revision or epoch. The next issued reference MUST be greater than every restored one.
 
 The store MUST issue monotonic references. It MUST NOT reuse a reference after eviction or counter exhaustion. Equal captures MUST have distinct references. Unchanged captures MAY share a revision.
 
@@ -88,19 +88,25 @@ A refused call MUST name the file and the line, and MUST write nothing.
 
 ## Planning and recovery
 
-`Plan` MUST calculate every pre-image and post-image before any write. It MUST set `PreSHA` and `PostSHA` to SHA-256 hex. An absent file MUST have an empty pre-state. A deleted file MUST have an empty post-state. `Pre` MUST contain exact pre-image bytes.
+`Plan` MUST calculate every pre-image and post-image before any write. It MUST set `PreSHA` and `PostSHA` to SHA-256 hex. An absent file MUST have an empty pre-image. A deleted file MUST have an empty post-image. `Pre` MUST contain exact pre-image bytes.
 
-All parse, binding, coverage, shape, overlap, and path checks MUST finish before the first write. Valid no-ops MUST return `no_change`. Mixed batches MUST apply only effective edits. A plan that fails after preparation MUST release its pinned directory handles, and a second release MUST succeed.
+All parse, binding, coverage, shape, overlap, and path checks MUST finish before the first write. Valid no-ops MUST return `no_change`. Mixed batches MUST apply only effective edits. A plan that fails after preparation MUST release its pinned directory handles. A second release MUST succeed.
 
-`Plan` MUST unmask secret placeholders after parsing and before resolution. It MUST unmask only locator text, apply_patch context, and new content. It MUST NOT unmask paths, rename destinations, tags, or references. A placeholder with no known value MUST stay as written.
+A call MUST contain at least one edit. A call MUST NOT contain more than 64 edits. A call MUST NOT contain more than 8 MiB of input.
+
+`Plan` MUST unmask secret placeholders after parsing and before resolution. It MUST unmask only locator text, apply_patch context, and new content. It MUST NOT unmask paths, rename destinations, tags, or references. A placeholder with no known value MUST fail the call. The error MUST name the placeholder.
 
 ## Writer
 
-The writer MUST recheck every source digest and every required absence before publication. It MUST stage complete post-images and pre-image backups in sibling temporary files. Publication MUST use a temporary file and atomic rename for replacement. Creation and rename destinations MUST use no-replace publication where the runner supports it. Other runners MUST return `no_replace_unavailable` for those operations.
+The writer MUST recheck every source digest and every required absence before publication. It MUST stage complete post-images and pre-image backups in sibling temporary files. Publication MUST use a temporary file and atomic rename for replacement. Creation and rename destinations MUST use no-replace publication where the runner supports it. Other runners MUST return an error whose text contains `no_replace_unavailable` for those operations.
+
+A call MUST NOT stage more than 64 MiB of file content.
 
 A mid-commit failure MUST attempt reverse-order restoration of every completed effect. The error MUST name every affected source and destination path. A rollback failure MUST name each failed restoration and every retained backup. The writer MUST NOT report `nothing was written` after a completed write and successful restore.
 
 Cancellation before the first target mutation MUST leave every target unchanged. Cancellation after the first mutation MUST NOT interrupt commit or rollback between effect boundaries.
+
+A successful apply MUST print `[PATH#DELETED]` for each deleted file.
 
 Existing file modes MUST survive updates. Renames MUST carry the source mode. New files MUST use mode `0644`, subject to the process umask.
 
