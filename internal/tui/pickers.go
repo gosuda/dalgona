@@ -80,7 +80,7 @@ func (m *model) listPanelView() panelView {
 	if list.err != "" {
 		actions = []string{list.err}
 	}
-	return panelView{kind: list.kind, layout: panelList, title: list.title, body: body, actions: actions, cursor: list.cursor}
+	return panelView{kind: list.kind, layout: panelList, title: list.title, body: body, actions: actions, cursor: list.cursor, scroll: list.scroll}
 }
 
 func (m *model) listLine(item listItem) string {
@@ -112,6 +112,27 @@ func (m *model) moveList(delta int) {
 		return
 	}
 	m.list.cursor = (m.list.cursor + delta%count + count) % count
+}
+
+const listWheelRows = 3
+
+func (m *model) wheelList(msg tea.MouseWheelMsg) {
+	if msg.Button != tea.MouseWheelUp && msg.Button != tea.MouseWheelDown {
+		return
+	}
+	delta := listWheelRows
+	if msg.Button == tea.MouseWheelUp {
+		delta = -listWheelRows
+	}
+	count := len(m.list.visible(m.input.field.value()))
+	if count == 0 {
+		return
+	}
+	rows := m.listRows()
+	start, _ := bodySpan(m.listPanelView(), rows)
+	m.list.scroll = min(max(start+delta, 0), max(count-rows, 0))
+	last := min(m.list.scroll+rows, count) - 1
+	m.list.cursor = min(max(m.list.cursor, m.list.scroll), last)
 }
 
 func (m *model) listKey(msg tea.KeyPressMsg) tea.Cmd {

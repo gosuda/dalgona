@@ -56,6 +56,7 @@ type listPanel struct {
 	title         string
 	items         []listItem
 	cursor        int
+	scroll        int
 	err           string
 	efforts       map[string]effortPick
 	pendingEffort string

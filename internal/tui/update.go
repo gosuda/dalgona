@@ -48,6 +48,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(command, tick, settle, printCommand, quit, suspend)
 }
 
+func (m *model) wheel(msg tea.MouseWheelMsg) {
+	switch {
+	case m.review != nil:
+		m.scrollReview(msg)
+	case m.list != nil:
+		m.wheelList(msg)
+	}
+}
+
 func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -62,7 +71,7 @@ func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 		m.screen.focused = false
 		m.input.composer.focused = false
 	case tea.MouseWheelMsg:
-		m.scrollReview(msg)
+		m.wheel(msg)
 	case tea.ModeReportMsg:
 		m.applyModeReport(msg)
 	default:
@@ -355,27 +364,28 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 }
 
 func (m model) View() tea.View {
-	if m.out.printing {
-		return m.out.frozen
-	}
-	if m.leaving {
-		view := tea.NewView(" ")
+	var view tea.View
+	switch {
+	case m.out.printing:
+		view = m.out.frozen
+	case m.leaving:
+		view = tea.NewView(" ")
 		view.ProgramStatus = &tea.ProgramStatus{State: tea.ProgramStateIdle}
-		return view
-	}
-	if !m.out.started {
-		view := tea.NewView("")
+	case !m.out.started:
+		view = tea.NewView("")
 		view.ReportFocus = true
-		return view
-	}
-	if m.review != nil {
-		view := tea.NewView(m.screen.emit(m.reviewView()))
+	case m.review != nil:
+		view = tea.NewView(m.screen.emit(m.reviewView()))
 		view.AltScreen = true
 		view.ReportFocus = true
-		return view
+	default:
+		view = m.dockView()
+		view.Content = m.screen.emit(view.Content)
 	}
-	view := m.dockView()
-	view.Content = m.screen.emit(view.Content)
+	view.MouseMode = tea.MouseModeNone
+	if !m.leaving && (m.review != nil || m.list != nil) {
+		view.MouseMode = tea.MouseModeCellMotion
+	}
 	return view
 }
 

@@ -184,6 +184,14 @@ Rows that finish while the review is open MUST wait, and they MUST print after t
 The review header MUST show the count of waiting rows. The footer MUST name the scroll keys and the entry keys.
 The client MUST keep the last 1000 committed rows for the review and MUST drop the oldest first.
 
+## Mouse
+
+The client MUST enable mouse reporting only while the review or a list panel is open. Otherwise the terminal keeps its own selection and scrollback.
+The wheel MUST scroll the review. With a list panel open, the wheel MUST move its window three rows.
+A list panel MUST move its cursor to the nearest visible row when the wheel leaves that row out of view.
+Other panels MUST ignore the wheel.
+A click MUST select nothing, because the client cannot learn the screen row of the dock.
+
 ## Editor
 
 The composer MUST wrap text to the window width minus three cells.
