@@ -129,14 +129,14 @@ The reply MUST be:
 | Mode | Model-visible tools | Default allow list |
 | --- | --- | --- |
 | `normal` | every tool | empty |
-| `eval-first` | `read`, `search`, `patch` or `apply_patch`, `exec`, `eval`, in this order | the folded tools |
-| `eval-only` | `eval` | every tool except `eval` |
+| `eval-first` | `read`, `search`, `patch` or `apply_patch`, `exec`, `ask`, `eval`, in this order | the folded tools |
+| `eval-only` | `ask`, `eval`, in this order | every tool except `eval` and `ask` |
 
-`ModelTools` MUST return the visible list. `FoldedTools` MUST return the other tools. The `eval` description MUST end with one line `<name>: <first description line>` per folded tool. `CheckDirect` MUST fail a direct call to a hidden tool with `tool <name> is not available in tool_mode <mode>; call it from eval`. Every tool MUST stay reachable inside cells.
+`ModelTools` MUST return the visible list. `FoldedTools` MUST return the other tools. The `eval` description MUST end with one line `<name>: <first description line>` per folded tool. `CheckDirect` MUST fail a direct call to a hidden tool with `tool <name> is not available in tool_mode <mode>; call it from eval`. Every tool except `eval` and `ask` MUST stay reachable inside cells. A cell call to `ask` MUST be refused with status `denied` and code `scope_exceeded`. The message MUST be `tool ask needs the user and runs only as a direct call`.
 
 ## Workflows
 
-`RunWorkflow` MUST run a file as a durable run. It MUST predeclare `ctx`, `tools`, and `args`, the decoded JSON arguments or `None`. Every tool MUST be reachable and allowed. The engine calls `Completed` with the returned `Outcome`. `Outcome.Reply` MUST encode the reply shape above.
+`RunWorkflow` MUST run a file as a durable run. It MUST predeclare `ctx`, `tools`, and `args`, the decoded JSON arguments or `None`. Every tool except `ask` MUST be reachable and allowed. The engine calls `Completed` with the returned `Outcome`. `Outcome.Reply` MUST encode the reply shape above.
 
 A workflow whose `args` cannot decode MUST fail with status `failed`, code `invalid_args`, and stage `args`.
 

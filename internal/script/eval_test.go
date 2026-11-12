@@ -167,3 +167,34 @@ func TestEvalFirstFoldsToolsIntoEval(t *testing.T) {
 		t.Fatalf("eval-first default allow list let a listed tool run in a cell: %+v", exec)
 	}
 }
+
+func TestAskStaysDirectInEveryToolMode(t *testing.T) {
+	all := specs("read", "exec", "ask", "web_fetch", "eval")
+	cases := []struct {
+		mode    config.ToolMode
+		visible []string
+	}{
+		{config.ToolModeEvalFirst, []string{"read", "exec", "ask", "eval"}},
+		{config.ToolModeEvalOnly, []string{"ask", "eval"}},
+	}
+	for _, c := range cases {
+		if got := names(script.ModelTools(c.mode, all)); !slices.Equal(got, c.visible) {
+			t.Errorf("%s visible = %v, want %v", c.mode, got, c.visible)
+		}
+		if slices.Contains(names(script.FoldedTools(c.mode, all)), "ask") {
+			t.Errorf("%s folded the direct ask tool", c.mode)
+		}
+		if slices.Contains(script.DefaultUses(c.mode, all), "ask") {
+			t.Errorf("%s default allow list includes ask", c.mode)
+		}
+	}
+}
+
+func TestScriptCannotCallAsk(t *testing.T) {
+	j := newJournal(echoTool)
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeNormal, Tools: specs("ask", "eval"), Config: config.EvalConfig{Uses: []string{"ask"}, Set: true}})
+	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools.ask(questions = [])"}`)
+	if got.Status != "denied" || errorCode(got) != "scope_exceeded" || got.Error.Message != "tool ask needs the user and runs only as a direct call" {
+		t.Fatalf("reply = %+v error = %+v", got, got.Error)
+	}
+}

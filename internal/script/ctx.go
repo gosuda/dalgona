@@ -13,6 +13,8 @@ import (
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
+
+	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 )
 
 const (
@@ -117,6 +119,9 @@ func (t *toolsValue) bind(name string) *starlark.Builtin {
 }
 
 func (r *run) prepareTool(name string, kwargs []starlark.Tuple) (Slot, effectFunc, error) {
+	if name == asktool.Name {
+		return Slot{}, nil, r.halt(&stopError{status: StatusDenied, code: codeScope, msg: "tool ask needs the user and runs only as a direct call"})
+	}
 	if !r.cfg.allow.has(name) {
 		return Slot{}, nil, r.halt(&stopError{status: StatusDenied, code: codeScope, msg: fmt.Sprintf("tool %s is not in this script's uses", name)})
 	}

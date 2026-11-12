@@ -6,11 +6,12 @@ import (
 
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/tool"
+	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 )
 
 const EvalName = "eval"
 
-var evalFirstNames = []string{"read", "search", "patch", "apply_patch", "exec", EvalName}
+var evalFirstNames = []string{"read", "search", "patch", "apply_patch", "exec", asktool.Name, EvalName}
 
 func visibleNames(mode config.ToolMode) []string {
 	switch mode {
@@ -19,7 +20,7 @@ func visibleNames(mode config.ToolMode) []string {
 	case config.ToolModeEvalFirst:
 		return evalFirstNames
 	case config.ToolModeEvalOnly:
-		return []string{EvalName}
+		return []string{asktool.Name, EvalName}
 	}
 	return nil
 }
@@ -64,7 +65,7 @@ func DefaultUses(mode config.ToolMode, all []tool.Spec) []string {
 	}
 	uses := make([]string, 0, len(source))
 	for _, spec := range source {
-		if spec.Name != EvalName {
+		if spec.Name != EvalName && spec.Name != asktool.Name {
 			uses = append(uses, spec.Name)
 		}
 	}
