@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -436,7 +437,7 @@ func (env CLIEnv) interactive(ctx context.Context, f cliFlags) error {
 }
 
 func closeQuiet(conn io.Closer) error {
-	if err := conn.Close(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+	if err := conn.Close(); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
 		return err
 	}
 	return nil

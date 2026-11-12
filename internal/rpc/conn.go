@@ -203,14 +203,18 @@ func (c *Conn) readLoop() {
 		}
 		c.dispatch(e)
 	}
-	if err := s.Err(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
-		slog.Error("rpc: read failure", "error", err, "remote", c.remote)
-	}
+	c.logReadFailure(s.Err())
 	if c.handler != nil {
 		c.drainAfterRead()
 	}
 	if err := c.Close(); err != nil {
 		slog.Debug("rpc: close after read failure", "error", err)
+	}
+}
+
+func (c *Conn) logReadFailure(err error) {
+	if err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
+		slog.Error("rpc: read failure", "error", err, "remote", c.remote)
 	}
 }
 
