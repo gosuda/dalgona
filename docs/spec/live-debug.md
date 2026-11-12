@@ -55,3 +55,23 @@ A `finish` step MUST send a frame with `finish_reason` and `usage`, then `data: 
 A `drop` step MUST end the response without `data: [DONE]`.
 
 A `delay_ms` step MUST end when the client cancels the request.
+
+## Command
+
+The command `internal/llmstub/cmd/llmstub` MUST accept the flags `-listen`, `-script`, `-key`, and `-record`.
+
+The `-listen` flag MUST default to `127.0.0.1:18080`.
+
+The `-script` and `-key` flags MUST be set. The `-key` value MUST NOT be empty.
+
+The `-record` flag MUST name a file that the command appends to. The command MUST create a missing file with mode 0600.
+
+After it listens, the command MUST write `llmstub: serving http://<address>/v1` to standard error. It MUST write nothing to standard output.
+
+A flag error MUST exit with status 2 and print `llmstub: <error>` to standard error.
+
+A script, record, or listen error MUST exit with status 1.
+
+On SIGINT or SIGTERM, the command MUST stop serving. It MUST wait at most 5 seconds for active requests. If the wait completes, the command MUST exit with status 0. If it does not, the command MUST exit with status 1.
+
+The command MUST allow 10 seconds for a client to send its request headers.
