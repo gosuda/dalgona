@@ -23,6 +23,8 @@ type (
 
 func SocketPath(home string) string { return filepath.Join(home, "dalgona.sock") }
 
+var listenFunc = listen
+
 func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc) (err error) {
 	if limitErr := checkSocketPathLimit(home); limitErr != nil {
 		return limitErr
@@ -37,7 +39,7 @@ func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc)
 		return err
 	}
 	defer func() { err = errors.Join(err, closeHost()) }()
-	listener, err := listen(home)
+	listener, err := listenFunc(home)
 	if err != nil {
 		return err
 	}

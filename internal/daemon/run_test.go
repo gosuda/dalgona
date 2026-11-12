@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,41 +43,45 @@ func greet(_ context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
 	return err
 }
 
+func observeListen(t *testing.T) <-chan struct{} {
+	t.Helper()
+	listening := make(chan struct{})
+	once := sync.OnceFunc(func() { close(listening) })
+	inner := listenFunc
+	listenFunc = func(home string) (net.Listener, error) {
+		listener, err := inner(home)
+		if err == nil {
+			once()
+		}
+		return listener, err
+	}
+	t.Cleanup(func() { listenFunc = inner })
+	return listening
+}
+
 func startRun(t *testing.T, home string) (context.CancelFunc, <-chan error) {
 	t.Helper()
+	listening := observeListen(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- Run(ctx, home, appHost, greet) }()
-	waitForGreeting(t, home, done)
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned before it listened: %v", err)
+	case <-listening:
+	}
+	if got := greeting(home); got != "ok" {
+		t.Fatalf("daemon greeting = %q, want ok", got)
+	}
 	return cancel, done
 }
 
-func waitForGreeting(t *testing.T, home string, done <-chan error) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case err := <-done:
-			t.Fatalf("Run returned early: %v", err)
-		default:
-		}
-		if greeting(home) == "ok" {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("daemon never accepted a connection")
-}
-
 func greeting(home string) string {
-	conn, err := net.DialTimeout("unix", SocketPath(home), 200*time.Millisecond)
+	conn, err := net.Dial("unix", SocketPath(home))
 	if err != nil {
 		return ""
 	}
 	defer func() { _ = conn.Close() }()
-	if deadlineErr := conn.SetDeadline(time.Now().Add(2 * time.Second)); deadlineErr != nil {
-		return ""
-	}
 	data, err := io.ReadAll(conn)
 	if err != nil {
 		return ""
