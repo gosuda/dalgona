@@ -41,8 +41,9 @@ type stagedFile struct {
 }
 
 type stagedBatch struct {
-	style Style
-	files []*stagedFile
+	style   Style
+	files   []*stagedFile
+	summary string
 }
 
 type fileGroup struct {
@@ -90,10 +91,10 @@ func stageGroups(ctx context.Context, style Style, groups []fileGroup, env tool.
 			continue
 		}
 		stagedBytes += len(file.before) + len(file.after)
-		if stagedBytes > 64<<20 {
+		if err = checkStagedBytes(stagedBytes); err != nil {
 			file.closePins()
 			closeFiles(files)
-			return nil, errors.New("patch: this call stages over 64 MiB; split it into several calls")
+			return nil, err
 		}
 		if file.pin, err = pinVerifiedComponents(env, group.display, group.absolute); err != nil {
 			file.closePins()
@@ -103,6 +104,13 @@ func stageGroups(ctx context.Context, style Style, groups []fileGroup, env tool.
 		files = append(files, file)
 	}
 	return files, nil
+}
+
+func checkStagedBytes(total int) error {
+	if total > 64<<20 {
+		return errors.New("patch: this call stages over 64 MiB; split it into several calls")
+	}
+	return nil
 }
 
 func groupEdits(ctx context.Context, env tool.Env, edits []edit) ([]fileGroup, error) {
