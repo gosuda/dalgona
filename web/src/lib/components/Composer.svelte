@@ -1,16 +1,35 @@
 <script lang="ts">
-import { onDestroy, tick } from "svelte";
+import { onDestroy, tick, untrack } from "svelte";
 import {
 	type PanelKind,
 	parseComposerText,
 	slashCommands,
 } from "#lib/commands.ts";
 import CommandPalette from "#lib/components/CommandPalette.svelte";
+import CompletionList from "#lib/components/CompletionList.svelte";
 import FollowupQueue from "#lib/components/FollowupQueue.svelte";
 import { handoffFocus } from "#lib/focus.ts";
-import type { KeywordMatch } from "#lib/types.ts";
+import type { FileMatch, KeywordMatch } from "#lib/types.ts";
 
 const INTERRUPT_GUARD_MS = 2000;
+const FILE_SEARCH_DEBOUNCE_MS = 120;
+const FILE_LIMIT = 20;
+
+interface Mention {
+	readonly start: number;
+	readonly end: number;
+	readonly query: string;
+}
+
+function mentionAt(text: string, caret: number): Mention | null {
+	const head = text.slice(0, caret).match(/\S*$/)?.[0] ?? "";
+	const tail = text.slice(caret).match(/^\S*/)?.[0] ?? "";
+	const start = caret - head.length;
+	const end = caret + tail.length;
+	const token = text.slice(start, end);
+	if (!token.startsWith("@")) return null;
+	return { start, end, query: token.slice(1) };
+}
 
 interface Props {
 	disabled: boolean;
@@ -20,6 +39,7 @@ interface Props {
 	onEditFollowup: (index: number) => string | undefined;
 	onRemoveFollowup: (index: number) => void;
 	onMatch?: (text: string) => Promise<readonly KeywordMatch[]>;
+	onFileSearch?: (query: string) => Promise<readonly FileMatch[]>;
 	onSend: (text: string) => void;
 	onSteer: (text: string) => void;
 	onFollowup: (text: string) => void;
@@ -36,6 +56,7 @@ let {
 	onEditFollowup,
 	onRemoveFollowup,
 	onMatch,
+	onFileSearch,
 	onSend,
 	onSteer,
 	onFollowup,
@@ -60,6 +81,37 @@ let paletteClosed = $state(false);
 let paletteActive = $state(0);
 const paletteOpen = $derived(commandQuery !== null && !paletteClosed);
 const paletteId = "command-palette";
+let caret = $state(0);
+let mentionClosed = $state(false);
+let fileMatches = $state<readonly FileMatch[]>([]);
+let fileActive = $state(0);
+let fileQuery = $state<string | null>(null);
+let fileSeq = 0;
+const fileListId = "file-completion";
+const mention = $derived(mentionAt(text, Math.min(caret, text.length)));
+const mentionQuery = $derived(mention?.query ?? null);
+const fileOpen = $derived(
+	!paletteOpen && mention !== null && !mentionClosed && fileMatches.length > 0,
+);
+const filePending = $derived(
+	!paletteOpen &&
+		mention !== null &&
+		!mentionClosed &&
+		onFileSearch !== undefined &&
+		mention.query !== "" &&
+		fileQuery !== mention.query,
+);
+const fileItems = $derived(
+	fileMatches.slice(0, FILE_LIMIT).map((match) => ({
+		id: match.path,
+		primary: match.fileName,
+		secondary: match.path,
+	})),
+);
+const completionId = $derived(
+	paletteOpen ? paletteId : fileOpen ? fileListId : undefined,
+);
+const activeCompletion = $derived(paletteOpen ? paletteActive : fileActive);
 
 function disarm(): void {
 	clearTimeout(guardTimer);
@@ -124,6 +176,68 @@ $effect(() => {
 		},
 	);
 });
+
+$effect(() => {
+	const query = mentionQuery;
+	const seq = ++fileSeq;
+	fileMatches = [];
+	fileActive = 0;
+	fileQuery = null;
+	const search = untrack(() => onFileSearch);
+	if (!search || query === null || query === "") return;
+	const timer = setTimeout(() => {
+		search(query).then(
+			(found) => {
+				if (seq !== fileSeq) return;
+				fileMatches = found;
+				fileActive = 0;
+				fileQuery = query;
+			},
+			() => {
+				if (seq !== fileSeq) return;
+				fileMatches = [];
+				fileQuery = query;
+			},
+		);
+	}, FILE_SEARCH_DEBOUNCE_MS);
+	return () => clearTimeout(timer);
+});
+
+function syncCaret(field: HTMLTextAreaElement): void {
+	caret = field.selectionStart;
+}
+
+function onFileKey(event: KeyboardEvent): boolean {
+	const count = fileMatches.length;
+	if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+		if (count === 0) return false;
+		const step = event.key === "ArrowDown" ? 1 : -1;
+		fileActive = (fileActive + step + count) % count;
+		return true;
+	}
+	if (event.key === "Escape") {
+		if (!fileOpen) return false;
+		mentionClosed = true;
+		return true;
+	}
+	const accepts =
+		(event.key === "Enter" || event.key === "Tab") &&
+		!event.shiftKey &&
+		!event.altKey;
+	if (!accepts) return false;
+	insertFile(fileMatches[fileActive]);
+	return true;
+}
+
+function insertFile(match: FileMatch | undefined): void {
+	const current = mention;
+	if (match === undefined || current === null) return;
+	const insert = `@${match.path} `;
+	text = text.slice(0, current.start) + insert + text.slice(current.end);
+	const position = current.start + insert.length;
+	caret = position;
+	void tick().then(() => textarea?.setSelectionRange(position, position));
+}
 
 function validText(): string | null {
 	const value = text.trim();
@@ -208,6 +322,10 @@ function recallFromKey(event: KeyboardEvent): boolean {
 function onKeydown(event: KeyboardEvent): void {
 	if (event.defaultPrevented) return;
 	if (event.isComposing) return;
+	if ((fileOpen || filePending) && onFileKey(event)) {
+		event.preventDefault();
+		return;
+	}
 	if (recallFromKey(event)) {
 		event.preventDefault();
 		return;
@@ -244,15 +362,19 @@ function onKeydown(event: KeyboardEvent): void {
 			placeholder="Fix the failing test and verify the change"
 			aria-invalid={error ? "true" : "false"}
 			aria-describedby="composer-help composer-error"
-			role={paletteOpen ? "combobox" : undefined}
-			aria-expanded={paletteOpen ? "true" : undefined}
-			aria-controls={paletteOpen ? paletteId : undefined}
-			aria-activedescendant={paletteOpen ? `${paletteId}-${paletteActive}` : undefined}
+			role={completionId === undefined ? undefined : "combobox"}
+			aria-expanded={completionId === undefined ? undefined : "true"}
+			aria-controls={completionId}
+			aria-activedescendant={completionId === undefined ? undefined : `${completionId}-${activeCompletion}`}
 			onkeydown={onKeydown}
-			oninput={() => {
+			oninput={(event) => {
+				syncCaret(event.currentTarget);
 				browsing = null;
 				paletteClosed = false;
+				mentionClosed = false;
 			}}
+			onkeyup={(event) => syncCaret(event.currentTarget)}
+			onclick={(event) => syncCaret(event.currentTarget)}
 		></textarea>
 		{#if paletteOpen}
 			<CommandPalette
@@ -263,6 +385,9 @@ function onKeydown(event: KeyboardEvent): void {
 				onOpen={openPanel}
 				onClose={() => (paletteClosed = true)}
 			/>
+		{/if}
+		{#if fileOpen}
+			<CompletionList id={fileListId} label="Files" items={fileItems} active={fileActive} />
 		{/if}
 		{#if matches.length > 0}
 			<p class="keywords">Keywords: {matches.map((match) => match.word).join(", ")}</p>

@@ -39,6 +39,7 @@ import type {
 	ApprovalRequest,
 	ConnectionState,
 	FileChange,
+	FileMatch,
 	JsonValue,
 	KeywordDefinition,
 	KeywordMatch,
@@ -69,6 +70,7 @@ import type { SettingValue } from "./validation";
 import {
 	parseAdvisorStatusResponse,
 	parseConfigReadResponse,
+	parseFuzzyFileSearchResponse,
 	parseInitializeResponse,
 	parseKeywordMatches,
 	parseKeywordsResponse,
@@ -174,6 +176,7 @@ export class Session {
 	private client: RpcPort | undefined;
 	private connectionGeneration = 0;
 	private selectionGeneration = 0;
+	private openCwd: string | null = null;
 	private accessToken = "";
 	private readonly effects: Effects;
 
@@ -790,6 +793,16 @@ export class Session {
 		);
 	}
 
+	async searchFiles(query: string): Promise<readonly FileMatch[]> {
+		const root = this.openCwd;
+		if (!root) return [];
+		return this.requireClient().call(
+			"fuzzyFileSearch",
+			{ query, roots: [root], cancellationToken: "composer" },
+			parseFuzzyFileSearchResponse,
+		);
+	}
+
 	private upsertThread(thread: ThreadDetail): void {
 		this.completedThreadIds = recordThreadTurn(
 			this.completedThreadIds,
@@ -844,6 +857,7 @@ export class Session {
 				);
 			}
 			this.activeThreadId = threadId;
+			this.openCwd = result.thread.summary.cwd;
 			this.transcript = transcriptForThread(result.thread, this.knownChildren);
 			this.advisor = { kind: "unknown" };
 			this.clearErrors();
@@ -895,6 +909,7 @@ export class Session {
 			this.loadingTranscript = false;
 			this.upsertThread(result.thread);
 			this.activeThreadId = result.thread.summary.id;
+			this.openCwd = result.thread.summary.cwd;
 			this.transcript = transcriptForThread(result.thread);
 			this.status = result.status;
 			if (result.usage !== null)

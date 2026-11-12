@@ -223,6 +223,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 				onEditFollowup={(index) => session.editFollowup(index)}
 				onRemoveFollowup={(index) => session.removeFollowup(index)}
 				onMatch={(text) => session.matchKeywords(text)}
+				onFileSearch={(query) => session.searchFiles(query)}
 				onSend={(text) => void session.sendMessage(text)}
 				onSteer={(text) => void session.steerMessage(text)}
 				onFollowup={(text) => session.queueFollowup(text)}

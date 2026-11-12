@@ -5,6 +5,7 @@ import {
 	parseAdvisorStatusResponse,
 	parseApprovalRequest,
 	parseConfigReadResponse,
+	parseFuzzyFileSearchResponse,
 	parseKeywordsResponse,
 	parseModelListResponse,
 	parseNotification,
@@ -311,6 +312,22 @@ const codexCases: readonly CodexCase[] = [
 		{ config: {}, origins: {} },
 		parseConfigReadResponse,
 	),
+	response(
+		"FuzzyFileSearchResponse",
+		{
+			files: [
+				{
+					file_name: "model.go",
+					indices: null,
+					match_type: "file",
+					path: "pkg/model.go",
+					root: "/work",
+					score: 42,
+				},
+			],
+		},
+		parseFuzzyFileSearchResponse,
+	),
 ];
 
 const helloThread = {
@@ -462,6 +479,9 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 	ThreadStartResponse: threadStartValue,
 	ThreadResumeResponse: threadStartValue,
 	ThreadReadResponse: helloThread,
+	FuzzyFileSearchResponse: [
+		{ fileName: "model.go", path: "pkg/model.go", root: "/work" },
+	],
 	TurnStartResponse: { turn: completedTurn },
 	TurnSteerResponse: { turnId: "turn-1" },
 	ThreadTokenUsageUpdatedNotification: {

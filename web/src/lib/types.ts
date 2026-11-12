@@ -383,6 +383,12 @@ export interface KeywordMatch {
 	readonly byteRange: { readonly start: number; readonly end: number };
 }
 
+export interface FileMatch {
+	readonly fileName: string;
+	readonly path: string;
+	readonly root: string;
+}
+
 export interface ApprovalRequest {
 	readonly id: RequestId;
 	readonly method:

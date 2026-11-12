@@ -291,6 +291,17 @@ A second Escape within those two seconds MUST interrupt the turn.
 During a rate-limit wait, one Escape MUST interrupt the turn at once.
 Escape while no turn runs MUST do nothing.
 
+An `@` that starts a word MUST start a file search for the text after it, up to the next whitespace.
+The file search MUST wait 120 milliseconds after the last keystroke and MUST NOT run for an empty query.
+The file search MUST use the open thread's working directory as its only root, even when the thread is not listed.
+With no working directory known, the file search MUST send no request and MUST show no files.
+The file list MUST show up to 20 files, each with its file name and its path.
+Enter or Tab MUST insert the highlighted path as `@<path>` followed by a space, and MUST NOT send the message.
+A change to the text after `@` MUST clear the file list at once.
+Enter or Tab MUST NOT send the message while a search for the current text is pending.
+A caret move inside the same `@` word MUST NOT start another search.
+Escape MUST close the file list and MUST keep the message field.
+
 ### Commands and panels
 
 A message that starts with `/` MUST open the command list.

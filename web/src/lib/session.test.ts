@@ -721,3 +721,50 @@ describe("completed turns", () => {
 		session.stop();
 	});
 });
+
+describe("file search", () => {
+	beforeEach(() => {
+		vi.stubGlobal("history", { replaceState: vi.fn() });
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	test("searches under the open thread's cwd when the thread is missing from the list", async () => {
+		const searches: JsonValue[] = [];
+		const { dial, ports } = fakeDial("none", {
+			fuzzyFileSearch: (params) => {
+				searches.push(params);
+				return { files: [] };
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		session.threads = [];
+
+		await session.searchFiles("mod");
+
+		expect(searches).toEqual([
+			{ query: "mod", roots: ["/work"], cancellationToken: "composer" },
+		]);
+		expect(ports[0]?.calls).toContain("fuzzyFileSearch");
+		session.stop();
+	});
+
+	test("sends no search when no thread is open", async () => {
+		const { dial, ports } = fakeDial("none", {
+			"thread/list": () => ({ data: [], nextCursor: null }),
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.connection).toBe("connected");
+		});
+
+		expect(await session.searchFiles("mod")).toEqual([]);
+		expect(ports[0]?.calls).not.toContain("fuzzyFileSearch");
+		session.stop();
+	});
+});

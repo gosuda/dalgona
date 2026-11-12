@@ -317,3 +317,82 @@ describe("command palette", () => {
 		expect(screen.getByRole("listbox", { name: "Commands" })).toBeTruthy();
 	});
 });
+
+describe("file mention", () => {
+	afterEach(cleanup);
+
+	test("@ opens file completion and Enter inserts the path", async () => {
+		const onSend = vi.fn();
+		const onFileSearch = vi.fn(() =>
+			Promise.resolve([
+				{ fileName: "model.go", path: "pkg/model.go", root: "/work" },
+			]),
+		);
+		render(Composer, { props: { ...baseProps(), onSend, onFileSearch } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "@mod" } });
+		await waitFor(() => {
+			expect(
+				screen.getByRole("listbox", { name: "Files" }).textContent,
+			).toContain("pkg/model.go");
+		});
+		expect(onFileSearch).toHaveBeenCalledWith("mod");
+		await fireEvent.keyDown(field, { key: "Enter" });
+		await waitFor(() => {
+			expect(field.value).toBe("@pkg/model.go ");
+		});
+		expect(onSend).not.toHaveBeenCalled();
+	});
+
+	test("Enter after the query changes inserts nothing and sends nothing until the new search answers", async () => {
+		const onSend = vi.fn();
+		const onFileSearch = vi.fn((query: string) =>
+			query === "mod"
+				? Promise.resolve([
+						{ fileName: "model.go", path: "pkg/model.go", root: "/work" },
+					])
+				: new Promise<never>(() => undefined),
+		);
+		render(Composer, { props: { ...baseProps(), onSend, onFileSearch } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "@mod" } });
+		await waitFor(() => {
+			expect(
+				screen.getByRole("listbox", { name: "Files" }).textContent,
+			).toContain("pkg/model.go");
+		});
+		await fireEvent.input(field, { target: { value: "@modx" } });
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(field.value).toBe("@modx");
+		expect(onSend).not.toHaveBeenCalled();
+	});
+
+	test("moving the caret inside the same mention does not search again", async () => {
+		vi.useFakeTimers();
+		try {
+			const onFileSearch = vi.fn(() =>
+				Promise.resolve([
+					{ fileName: "model.go", path: "pkg/model.go", root: "/work" },
+				]),
+			);
+			render(Composer, { props: { ...baseProps(), onFileSearch } });
+			const field = screen.getByRole("textbox", {
+				name: "Message",
+			}) as HTMLTextAreaElement;
+			await fireEvent.input(field, { target: { value: "@mod" } });
+			await vi.advanceTimersByTimeAsync(200);
+			await tick();
+			expect(onFileSearch).toHaveBeenCalledTimes(1);
+			field.setSelectionRange(2, 2);
+			await fireEvent.keyUp(field);
+			await vi.advanceTimersByTimeAsync(200);
+			expect(onFileSearch).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});

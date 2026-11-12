@@ -5,6 +5,7 @@ import type {
 	ApprovalRequest,
 	EditReview,
 	FileChange,
+	FileMatch,
 	InitializeInfo,
 	JsonValue,
 	KeywordDefinition,
@@ -655,6 +656,23 @@ export function parseKeywordsResponse(
 
 export function parseKeywordMatches(value: unknown): readonly KeywordMatch[] {
 	return keywordMatches(object(value, "keyword matches")["matches"]);
+}
+
+export function parseFuzzyFileSearchResponse(
+	value: unknown,
+): readonly FileMatch[] {
+	const files = object(value, "file search")["files"];
+	if (!Array.isArray(files)) {
+		fail("file search");
+	}
+	return files.map((entry) => {
+		const file = object(entry, "file match");
+		return {
+			fileName: requiredString(file, "file_name", "file match"),
+			path: requiredString(file, "path", "file match"),
+			root: requiredString(file, "root", "file match"),
+		};
+	});
 }
 
 function keywordMatches(value: unknown): readonly KeywordMatch[] {
