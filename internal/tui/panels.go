@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 type panelKind int
@@ -34,6 +36,70 @@ type panelView struct {
 	actions  []string
 	cursor   int
 	scroll   int
+}
+
+type listItem struct {
+	id     string
+	label  string
+	detail string
+	active bool
+}
+
+type effortPick struct {
+	levels  []string
+	base    string
+	current string
+}
+
+type listPanel struct {
+	kind          string
+	title         string
+	items         []listItem
+	cursor        int
+	err           string
+	efforts       map[string]effortPick
+	pendingEffort string
+}
+
+func (p *listPanel) visible(query string) []int {
+	type ranked struct{ index, score int }
+	ranks := make([]ranked, 0, len(p.items))
+	for i, item := range p.items {
+		if score := fuzzyScore(query, item.label); score > 0 {
+			ranks = append(ranks, ranked{index: i, score: score})
+		}
+	}
+	slices.SortStableFunc(ranks, func(a, b ranked) int { return cmp.Compare(b.score, a.score) })
+	indexes := make([]int, len(ranks))
+	for i, r := range ranks {
+		indexes[i] = r.index
+	}
+	return indexes
+}
+
+func fuzzyScore(query, text string) int {
+	q := strings.ToLower(query)
+	t := strings.ToLower(text)
+	switch {
+	case strings.HasPrefix(t, q):
+		return 3
+	case strings.Contains(t, q):
+		return 2
+	case isSubsequence(q, t):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func isSubsequence(query, text string) bool {
+	rest := []rune(query)
+	for _, r := range text {
+		if len(rest) > 0 && r == rest[0] {
+			rest = rest[1:]
+		}
+	}
+	return len(rest) == 0
 }
 
 func framePanel(s *screenState, p panelView, rows int) []string {

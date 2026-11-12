@@ -67,7 +67,7 @@ type model struct {
 	quitting    bool
 	suspending  bool
 	approvals   []approval
-	selector    *selector
+	list        *listPanel
 	confirm     *confirmation
 	matchSeq    int
 	review      *reviewState
@@ -117,6 +117,8 @@ type inputState struct {
 	keywords []Keyword
 	marks    []keywordSpan
 	marksFor string
+	field    textField
+	mode     inputMode
 }
 
 type screenState struct {

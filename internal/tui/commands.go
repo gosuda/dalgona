@@ -246,8 +246,8 @@ func (m *model) startQueuedFollowup() tea.Cmd {
 }
 
 func (m *model) interrupt() tea.Cmd {
-	if m.selector != nil {
-		m.selector = nil
+	if m.list != nil {
+		m.closeList()
 		return nil
 	}
 	if m.thread.state != stateRunning && m.thread.state != stateAwaitingApproval {
@@ -408,9 +408,8 @@ func (m *model) applyConfirmation(msg resultMsg) tea.Cmd {
 		m.noticef("files changed by later turns are not reverted")
 	case "leaf":
 		m.noticef("active branch changed; files changed by later turns are not reverted")
-	case "modelSet":
-		m.thread.modelName = msg.text
-		m.noticef("%s", "model set to "+msg.text)
+	case "modelSet", "modelEffort":
+		return m.applyModelResult(msg)
 	case "login":
 		return m.applyLogin(msg.value)
 	case "steer":
@@ -420,6 +419,9 @@ func (m *model) applyConfirmation(msg resultMsg) tea.Cmd {
 }
 
 func (m *model) applyResultError(msg resultMsg) tea.Cmd {
+	if m.saveFailed(msg) {
+		return nil
+	}
 	if msg.op == "send" || msg.op == "steer" {
 		m.restoreComposer(msg.text)
 	}

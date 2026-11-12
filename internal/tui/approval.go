@@ -27,6 +27,7 @@ func (m *model) applyRequest(msg serverRequestMsg) {
 		return
 	}
 	request.answer = msg.answer
+	m.input.field = textField{}
 	m.approvals = append(m.approvals, request)
 	if m.acceptThread(request.threadID) {
 		m.setState(stateAwaitingApproval)

@@ -202,7 +202,7 @@ func TestSelectorBoundedToWindow(t *testing.T) {
 		models[i] = rpc.Model{ID: fmt.Sprintf("model-%03d", i)}
 	}
 	m, _ = drive(t, m, resultMsg{op: "models", value: &rpc.ModelListResponse{Data: models}})
-	m.selector.cursor = 250
+	m.list.cursor = 250
 	lines := strings.Split(m.View().Content, "\n")
 	assertFrame(t, lines, 60, 24)
 	assertContains(t, strings.Join(lines, "\n"), "model-250")
@@ -212,11 +212,11 @@ func TestSelectorDockSteady(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{}, nil)
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 60, Height: 24})
-	choices := make([]choice, 40)
-	for i := range choices {
-		choices[i] = choice{id: fmt.Sprint(i), label: fmt.Sprint(i)}
+	items := make([]listItem, 40)
+	for i := range items {
+		items[i] = listItem{id: fmt.Sprint(i), label: fmt.Sprint(i)}
 	}
-	m.selector = &selector{title: "models", choices: choices}
+	m.list = &listPanel{title: "models", items: items}
 	keys := make([]tea.KeyPressMsg, 50)
 	for i := range keys {
 		keys[i] = tea.KeyPressMsg{Code: tea.KeyDown}
@@ -229,11 +229,11 @@ func TestDockLeavesOneRow(t *testing.T) {
 	for _, height := range []int{4, 8, 24} {
 		m := newTestModel(nil, Options{}, nil)
 		m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: height})
-		m.selector = &selector{title: "settings", choices: []choice{{id: "a", label: "a"}}}
+		m.list = &listPanel{title: "settings", items: []listItem{{id: "a", label: "a"}}}
 		if got := len(m.dockLines()); got > height-1 {
 			t.Errorf("height %d: dock has %d lines with a panel open", height, got)
 		}
-		m.selector = nil
+		m.list = nil
 		m.input.composer.SetValue(strings.Repeat("draft line\n", 20))
 		if got := len(m.dockLines()); got > height-1 {
 			t.Errorf("height %d: dock has %d lines with a long draft", height, got)
@@ -295,7 +295,7 @@ func TestViewIsFrozenWhilePrintInFlight(t *testing.T) {
 	if !m.out.printing {
 		t.Fatal("completed item did not start a print")
 	}
-	m.selector = &selector{title: "models", choices: []choice{{id: "a", label: "a"}}}
+	m.list = &listPanel{title: "models", items: []listItem{{id: "a", label: "a"}}}
 	m = rawUpdate(t, m, tea.FocusMsg{})
 	if got := len(strings.Split(m.View().Content, "\n")); got != frame {
 		t.Fatalf("frozen view has %d rows during the print, want %d", got, frame)
@@ -337,7 +337,7 @@ func TestCommitInGeometryChangeWaitsForSettle(t *testing.T) {
 	m = settleFrames(m)
 	m.commit("thread:t1:1", []string{"started demo"})
 	m = settleFrames(m)
-	m.selector = &selector{title: "models", choices: []choice{{id: "a", label: "a"}}}
+	m.list = &listPanel{title: "models", items: []listItem{{id: "a", label: "a"}}}
 	m.commit("k1", []string{"row"})
 	m = rawUpdate(t, m, tea.FocusMsg{})
 	if m.out.printing || !m.out.settling {

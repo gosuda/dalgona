@@ -17,6 +17,7 @@ type confirmation struct {
 
 func (m *model) openRevert(turnID, preview string) {
 	m.confirm = &confirmation{turnID: turnID, preview: preview}
+	m.input.field = textField{}
 }
 
 func (m *model) confirmPanel() panelView {

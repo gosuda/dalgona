@@ -34,7 +34,7 @@ The state words are `Working`, `Waiting`, `Stopped`, `Failed`, `Offline`, `Ready
 
 A notice that does not fit the free text of the live row MUST also print once as a row, with the full text.
 
-A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` selector shows each thread's mapped state.
+The `/resume` list panel shows each thread's mapped state.
 
 The TUI follows one thread. The first thread it sees, from a response or a notification, becomes the TUI's thread. `/new`, `/resume`, and `/fork` replace it. Notifications whose `threadId` names another thread, such as a spawned child, MUST NOT change the title, state, live items, or thread. When a `/new`, `/resume`, or `/fork` load applies, the TUI MUST keep the follow-up queue. It MUST show `<n> follow-ups moved to <title>; press Enter on an empty prompt to send the next` when that load applies and the queue holds at least one follow-up.
 
@@ -92,6 +92,47 @@ When the dock is too tall, the client MUST drop the status band first, then the 
 
 Every dock row MUST be at most the window width minus one cell.
 
+## Panels
+
+A list panel MUST show its title in the first row and its hint in the last row.
+A list panel MUST show at most its panel height minus two item rows.
+The list MUST filter its items by the text of the input line.
+The list MUST order matching items by match: a prefix, then a substring, then a subsequence.
+Printable keys MUST add to the filter while a list panel is open.
+Up and Down MUST move the cursor. PgUp and PgDn MUST move it by a page.
+Enter MUST choose the highlighted item. Enter MUST do nothing when no item matches.
+Esc MUST clear a non-empty filter. Esc MUST close the panel when the filter is empty.
+A list panel MUST lose its filter when another panel opens above it.
+The input line MUST show the filter while a list panel is open.
+The input line MUST show the first line of the draft while another panel is open, with the caret at its end.
+
+The input line MUST show the mode of the top panel, as the table below gives.
+
+| Mode | Label | Typed text | Enter | Esc |
+|---|---|---|---|---|
+| inputPrompt | `› ` | The prompt draft | Sends the prompt | Follows the Keys table |
+| inputShell | `! ` | A shell command | Runs the command | Leaves shell mode |
+| inputFilter | `filter: ` | The list filter | Chooses the highlighted item | Clears the filter, then closes the list panel |
+| inputTarget | `target: ` | A branch, a commit, or custom instructions | Sends the review | Clears the text and the pending target. The list stays open |
+| inputAnswer | `answer: ` | The Other text or a free-text answer | Keeps the text and moves on | Returns to the option rows, or dismisses a free-text question |
+| inputAPIKey | `API key: ` | The key, shown as one `*` for each rune | Sends `account/login/start` | Clears the key and returns to the method rows |
+
+| Kind | Rows |
+|---|---|
+| popup | 8 |
+| list | 12 |
+| confirm | 6 |
+| approval | 9 |
+| ask | 13 |
+| settings | 17 |
+| login | 12 |
+| help | 14 |
+
+The model picker MUST list the preset models first, as `default`, `smol`, and `slow` rows, then every visible model.
+Tab and Shift+Tab MUST cycle the effort of the highlighted model.
+Enter MUST write `model` with `config/value/write`, and MUST write `model_reasoning_effort` after it when the effort changed.
+A failed write MUST keep the model picker open and MUST show `Could not save` in its hint row.
+
 ## Print
 
 The client MUST call `tea.Println` only from `drain`, and MUST have at most one print in flight.
@@ -148,14 +189,14 @@ The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor 
 | Enter, running or awaiting approval | `turn/steer` with the composer text |
 | Enter, empty composer | Starts the oldest held follow-up when no turn runs |
 | Alt+Enter | Queues a follow-up, at most 32 |
-| Esc | Closes a selector. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row, and a second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
+| Esc | Clears a non-empty list filter first. With an empty filter, closes the list panel. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row, and a second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
 | Ctrl+C twice | Quits. With an empty draft, the first press shows `Ctrl+C again to exit` in the live row. With a non-empty draft, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. A second press within 2000 ms quits |
-| `/model [id]` | `model/list` selector, or `config/value/write` key `model` |
-| `/resume [id]` | `thread/list` selector, or `thread/resume` then `thread/read` |
+| `/model [id]` | `model/list` list panel, or `config/value/write` key `model` |
+| `/resume [id]` | `thread/list` list panel, or `thread/resume` then `thread/read` |
 | `/new` | `thread/start` |
 | `/compact` | `thread/compact/start` |
 | `/login <provider>` | `account/login/start`. It shows the returned URL and user code |
-| `/tree` | `dalgona/thread/tree` selector. Enter calls `dalgona/thread/leaf/set` |
+| `/tree` | `dalgona/thread/tree` list panel. Enter calls `dalgona/thread/leaf/set` |
 | `/revert` | Active-path turns from `dalgona/thread/tree`. Enter opens a confirm panel, and its Enter calls `thread/revert`. Esc keeps the turn |
 | `/fork` | `thread/fork`, then resumes the new thread |
 | `/advisor` | `dalgona/advisor/status`, then `dalgona/advisor/set` with `enabled` true when no advisor is active and false otherwise. The notice says `advisor on` or `advisor off` |

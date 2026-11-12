@@ -19,10 +19,7 @@ func (m *model) dock() ([]string, int, int) {
 	}
 	panel := m.panelLines()
 	editorLimit := min(composerMaxRows, max(1, m.screen.height-3))
-	if m.panelOpen() {
-		editorLimit = 1
-	}
-	rows, row, col := m.editorRows(m.screen.width, editorLimit)
+	rows, row, col := m.inputRows(m.screen.width, editorLimit)
 	budget := m.screen.height - 1
 	showBand, showLive := true, true
 	count := func() int {
@@ -58,7 +55,92 @@ func (m *model) dockLines() []string {
 }
 
 func (m *model) panelOpen() bool {
-	return len(m.approvals) > 0 || m.confirm != nil || m.selector != nil
+	return len(m.approvals) > 0 || m.confirm != nil || m.list != nil
+}
+
+func (m *model) inputRows(width, limit int) ([]string, int, int) {
+	if !m.panelOpen() {
+		return m.editorRows(width, limit)
+	}
+	line, col := m.panelInputLine(width)
+	return []string{line}, 0, col
+}
+
+func (m *model) textMode() inputMode {
+	if len(m.approvals) == 0 && m.confirm == nil && m.list != nil {
+		return inputFilter
+	}
+	return m.input.mode
+}
+
+func (m *model) panelInputLine(width int) (string, int) {
+	switch mode := m.textMode(); mode {
+	case inputPrompt, inputShell:
+		return m.draftLine(width)
+	case inputFilter, inputTarget, inputAnswer, inputAPIKey:
+		return m.fieldLine(mode, width)
+	}
+	return m.draftLine(width)
+}
+
+func (m *model) draftLine(width int) (string, int) {
+	first, _, _ := strings.Cut(m.input.composer.Value(), "\n")
+	prompt := m.screen.dockTheme().hueText(threadHue(m.thread.id), promptText)
+	line := m.screen.fit(prompt+first, terminalWidth(width))
+	return line, min(promptCells+m.screen.cells(first), terminalWidth(width))
+}
+
+func (m *model) fieldLine(mode inputMode, width int) (string, int) {
+	label := inputLabel(mode)
+	text := m.input.field.text
+	if mode == inputAPIKey {
+		text = []rune(strings.Repeat("*", len(text)))
+	}
+	room := terminalWidth(width) - m.screen.cells(label)
+	window, caret := fieldWindow(&m.screen, text, m.input.field.cursor, room)
+	return m.screen.fit(label+window, terminalWidth(width)), m.screen.cells(label) + caret
+}
+
+func fieldWindow(s *screenState, text []rune, cursor, room int) (string, int) {
+	if s.cells(string(text)) <= room {
+		return string(text), s.cells(string(text[:cursor]))
+	}
+	left, right := growWindow(s, text, cursor, room)
+	prefix, suffix := "", ""
+	if left > 0 {
+		prefix = "..."
+	}
+	if right < len(text) {
+		suffix = "..."
+	}
+	return prefix + string(text[left:right]) + suffix, len(prefix) + s.cells(string(text[left:cursor]))
+}
+
+func growWindow(s *screenState, text []rune, cursor, room int) (int, int) {
+	left, right := cursor, cursor
+	for grown := true; grown; {
+		grown = false
+		if right < len(text) && windowCells(s, text, left, right+1) <= room {
+			right++
+			grown = true
+		}
+		if left > 0 && windowCells(s, text, left-1, right) <= room {
+			left--
+			grown = true
+		}
+	}
+	return left, right
+}
+
+func windowCells(s *screenState, text []rune, left, right int) int {
+	n := s.cells(string(text[left:right]))
+	if left > 0 {
+		n += 3
+	}
+	if right < len(text) {
+		n += 3
+	}
+	return n
 }
 
 func (m *model) editorRows(width, limit int) ([]string, int, int) {
@@ -304,8 +386,8 @@ func (m *model) panelLines() []string {
 		return framePanel(&m.screen, m.approvalPanel(), panelRows(panelApproval, m.screen.height))
 	case m.confirm != nil:
 		return framePanel(&m.screen, m.confirmPanel(), panelRows(panelConfirm, m.screen.height))
-	case m.selector != nil:
-		return framePanel(&m.screen, m.selectorPanel(), panelRows(panelList, m.screen.height))
+	case m.list != nil:
+		return framePanel(&m.screen, m.listPanelView(), panelRows(panelList, m.screen.height))
 	default:
 		return nil
 	}

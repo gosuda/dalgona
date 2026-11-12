@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -14,6 +15,82 @@ const (
 	promptText      = "› "
 	promptCells     = 2
 )
+
+type inputMode int
+
+const (
+	inputPrompt inputMode = iota
+	inputShell
+	inputFilter
+	inputTarget
+	inputAnswer
+	inputAPIKey
+)
+
+type textField struct {
+	text   []rune
+	cursor int
+}
+
+func (f textField) value() string {
+	return string(f.text)
+}
+
+func (f *textField) pasteLine(text string) bool {
+	first, _, _ := strings.Cut(text, "\n")
+	return f.insert(first)
+}
+
+func (f *textField) insert(text string) bool {
+	runes := []rune(sanitizeText(text))
+	if len(runes) == 0 {
+		return false
+	}
+	f.text = slices.Insert(f.text, f.cursor, runes...)
+	f.cursor += len(runes)
+	return true
+}
+
+func (f *textField) edit(key string) bool {
+	switch key {
+	case "backspace":
+		if f.cursor == 0 {
+			return false
+		}
+		f.text = slices.Delete(f.text, f.cursor-1, f.cursor)
+		f.cursor--
+		return true
+	case "delete":
+		if f.cursor == len(f.text) {
+			return false
+		}
+		f.text = slices.Delete(f.text, f.cursor, f.cursor+1)
+		return true
+	case "left":
+		f.cursor = max(0, f.cursor-1)
+	case "right":
+		f.cursor = min(len(f.text), f.cursor+1)
+	}
+	return false
+}
+
+func inputLabel(mode inputMode) string {
+	switch mode {
+	case inputPrompt:
+		return promptText
+	case inputShell:
+		return "! "
+	case inputFilter:
+		return "filter: "
+	case inputTarget:
+		return "target: "
+	case inputAnswer:
+		return "answer: "
+	case inputAPIKey:
+		return "API key: "
+	}
+	return promptText
+}
 
 type editor struct {
 	text        []rune
