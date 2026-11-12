@@ -34,7 +34,13 @@ const config: UserConfig = defineConfig({
 				test: {
 					name: "dom",
 					environment: "happy-dom",
-					css: { include: [/NoticeStack\.svelte/] },
+					css: {
+						include: [
+							/NoticeStack\.svelte/,
+							/ApprovalDialog\.svelte/,
+							/app\.css$/,
+						],
+					},
 					include: ["src/lib/**/*.dom.test.ts"],
 				},
 			},

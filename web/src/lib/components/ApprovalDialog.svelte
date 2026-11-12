@@ -66,7 +66,7 @@ function decide(decision: Decision): void {
 			{/each}
 			<p class="thread-reference">Thread <bdi>{request.threadId}</bdi></p>
 			<div class="approval-actions">
-				<button class="primary" onclick={() => decide("accept")}>Accept action</button>
+				<button class="point" onclick={() => decide("accept")}>Accept action</button>
 				<button onclick={() => decide("acceptForSession")}>Accept for session</button>
 				<button class="quiet" onclick={() => decide("decline")}>Decline action</button>
 				<button class="quiet" onclick={() => decide("cancel")}>Cancel</button>
@@ -77,30 +77,30 @@ function decide(decision: Decision): void {
 
 <style>
 	dialog {
-		width: min(calc(100% - var(--space-6)), 36rem);
-		max-height: calc(100dvh - var(--space-6));
+		width: min(calc(100% - var(--space-8)), 36rem);
+		max-height: calc(100dvh - var(--space-8));
 		margin: auto;
 		overflow-y: auto;
 		overscroll-behavior: contain;
-		border: 1px solid var(--color-border-strong);
-		border-radius: var(--radius-large);
-		background: var(--color-bg-surface);
-		color: var(--color-text);
+		border: 1px solid var(--strong);
+		border-radius: var(--radius-card);
+		background: var(--surface);
+		color: var(--text);
 		padding: 0;
 	}
 
 	dialog::backdrop {
-		background: oklch(0.19 0.018 65 / 0.55);
+		background: color-mix(in srgb, var(--canvas) 55%, transparent);
 	}
 
 	.approval-content {
-		padding: var(--space-5);
+		padding: var(--space-6);
 	}
 
 	.kicker {
 		margin: 0 0 var(--space-2);
-		color: var(--color-accent);
-		font-size: var(--text-caption);
+		color: var(--point);
+		font-size: var(--size-caption);
 		font-weight: 650;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
@@ -108,7 +108,7 @@ function decide(decision: Decision): void {
 
 	h2 {
 		margin: 0;
-		font-size: var(--text-heading);
+		font-size: var(--size-heading);
 		line-height: 1.25;
 		text-wrap: balance;
 	}
@@ -116,8 +116,8 @@ function decide(decision: Decision): void {
 	#approval-description,
 	.reason,
 	.thread-reference {
-		color: var(--color-text-secondary);
-		font-size: var(--text-body-small);
+		color: var(--dim);
+		font-size: var(--size-small);
 		text-wrap: pretty;
 	}
 
@@ -125,22 +125,22 @@ function decide(decision: Decision): void {
 		max-height: 16rem;
 		margin-block: var(--space-4);
 		overflow: auto;
-		border-radius: var(--radius-small);
-		background: var(--color-bg-inset);
+		border-radius: var(--radius-control);
+		background: var(--tone);
 		padding: var(--space-3);
-		font-size: var(--text-caption);
+		font-size: var(--size-caption);
 		line-height: 1.5;
 	}
 
 	.thread-reference {
 		overflow-wrap: break-word;
-		font-size: var(--text-caption);
+		font-size: var(--size-caption);
 	}
 
 	.approval-actions {
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--space-3);
-		margin-block-start: var(--space-5);
+		margin-block-start: var(--space-6);
 	}
 </style>

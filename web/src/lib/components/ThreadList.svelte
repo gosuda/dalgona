@@ -38,7 +38,7 @@ function activityLabel(thread: ThreadSummary): string {
 			<p class="eyebrow">Agent workbench</p>
 			<h1>dalgona<span aria-hidden="true">/</span></h1>
 		</div>
-		<button class="primary" onclick={onNew} disabled={disabled}>New thread</button>
+		<button class="point" onclick={onNew} disabled={disabled}>New thread</button>
 	</header>
 
 	<div class="thread-heading">
@@ -97,9 +97,9 @@ function activityLabel(thread: ThreadSummary): string {
 		min-height: 0;
 		overflow-y: auto;
 		overscroll-behavior: contain;
-		padding: var(--space-5) var(--space-4);
-		background: var(--color-bg-sidebar);
-		border-inline-end: 1px solid var(--color-border);
+		padding: var(--space-6) var(--space-4);
+		background: var(--tone);
+		border-inline-end: 1px solid var(--line);
 	}
 
 	.brand {
@@ -107,13 +107,13 @@ function activityLabel(thread: ThreadSummary): string {
 		align-items: end;
 		justify-content: space-between;
 		gap: var(--space-3);
-		margin-block-end: var(--space-6);
+		margin-block-end: var(--space-8);
 	}
 
 	.eyebrow {
 		margin: 0 0 var(--space-1);
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-weight: 600;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
@@ -121,14 +121,14 @@ function activityLabel(thread: ThreadSummary): string {
 
 	h1 {
 		margin: 0;
-		font-size: var(--text-title);
+		font-size: var(--size-title);
 		font-weight: 650;
 		letter-spacing: -0.02em;
 		line-height: 1.1;
 	}
 
 	h1 span {
-		color: var(--color-accent);
+		color: var(--accent-text);
 		margin-inline-start: var(--space-1);
 	}
 
@@ -136,27 +136,27 @@ function activityLabel(thread: ThreadSummary): string {
 		display: flex;
 		align-items: baseline;
 		justify-content: space-between;
-		border-block-end: 1px solid var(--color-border);
+		border-block-end: 1px solid var(--line);
 		padding-block-end: var(--space-2);
 	}
 
 	.thread-heading h2 {
 		margin: 0;
-		font-size: var(--text-body-small);
+		font-size: var(--size-small);
 		font-weight: 650;
 	}
 
 	.thread-heading span {
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-variant-numeric: tabular-nums;
 	}
 
 	.loading {
 		min-height: 1.5em;
 		margin: var(--space-2) 0;
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 	}
 
 	ul {
@@ -183,8 +183,8 @@ function activityLabel(thread: ThreadSummary): string {
 	}
 
 	.thread.selected {
-		border-color: var(--color-accent);
-		background: var(--color-bg-selected);
+		border-color: var(--strong);
+		background: var(--tone);
 	}
 
 	.thread-topline {
@@ -197,7 +197,7 @@ function activityLabel(thread: ThreadSummary): string {
 	.thread-topline strong {
 		min-width: 0;
 		overflow-wrap: break-word;
-		font-size: var(--text-body-small);
+		font-size: var(--size-small);
 		font-weight: 650;
 		line-height: 1.4;
 	}
@@ -205,8 +205,8 @@ function activityLabel(thread: ThreadSummary): string {
 	time,
 	.meta,
 	.preview {
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-weight: 400;
 	}
 
@@ -228,14 +228,14 @@ function activityLabel(thread: ThreadSummary): string {
 	}
 
 	.meta .working {
-		color: var(--color-success);
+		color: var(--added-text);
 		font-weight: 650;
 	}
 
 	.empty {
-		padding-block: var(--space-5);
-		color: var(--color-text-secondary);
-		font-size: var(--text-body-small);
+		padding-block: var(--space-6);
+		color: var(--dim);
+		font-size: var(--size-small);
 	}
 
 	.empty p {
@@ -243,7 +243,7 @@ function activityLabel(thread: ThreadSummary): string {
 	}
 
 	.empty p:first-child {
-		color: var(--color-text);
+		color: var(--text);
 		font-weight: 650;
 	}
 
@@ -254,7 +254,7 @@ function activityLabel(thread: ThreadSummary): string {
 	@media (max-width: 52rem) {
 		.sidebar {
 			border-inline-end: 0;
-			border-block-end: 1px solid var(--color-border);
+			border-block-end: 1px solid var(--line);
 			padding: var(--space-4);
 		}
 

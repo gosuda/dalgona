@@ -91,6 +91,15 @@ The page holds one `Session`, which owns the connection and the page state.
 - At 320px nothing MUST clip or scroll sideways.
 - The transcript follows new output only while the reader is within 32px of its end. It follows the transcript at wide widths and the window at narrow widths. Opening a thread follows its end.
 
+### Theme
+
+The `theme` setting takes `auto`, `auto-soft`, `night`, `soft-night`, `day`, or `soft-day`. Any other value MUST read as `auto`.
+`auto` MUST follow the system colour scheme and use `night` or `day`. `auto-soft` MUST follow the system colour scheme and use `soft-night` or `soft-day`.
+The client MUST cache the setting under the browser key `dalgona.theme` and apply it before the first render.
+Each theme MUST use only the colour roles of `DESIGN.md`. The client MUST NOT paint a gradient.
+Every text role MUST meet 4.5:1 against its ground. Control edges and the focus ring MUST meet 3:1 against their ground. The ink on the point MUST meet 4.5:1.
+Under forced colours, every button edge and focus ring MUST keep a visible border.
+
 ### Status bar
 
 The status bar shows the connection state as text. The turn state follows it as text: `Working`, `Turn completed`, `Turn interrupted`, or `Turn failed`.

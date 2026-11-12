@@ -71,6 +71,23 @@ function answers(runningThread: string): Record<string, Answer> {
 		"thread/resume": resumeAnswer(runningThread),
 		"thread/read": (params) => ({ thread: thread(threadIdOf(params), []) }),
 		"dalgona/advisor/status": () => [],
+		"dalgona/settings/read": () => ({
+			settings: [
+				{
+					key: "theme",
+					value: "soft-night",
+					defaultValue: "auto",
+					options: [
+						"auto",
+						"auto-soft",
+						"night",
+						"soft-night",
+						"day",
+						"soft-day",
+					],
+				},
+			],
+		}),
 	};
 }
 
@@ -155,6 +172,17 @@ describe("session", () => {
 
 	afterEach(() => {
 		vi.unstubAllGlobals();
+	});
+
+	test("applies the theme the server reports", async () => {
+		const applied: string[] = [];
+		const { dial } = fakeDial("t1");
+		const session = new Session(dial, (setting) => applied.push(setting));
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(applied).toEqual(["soft-night"]);
+		});
+		session.stop();
 	});
 
 	test("reconnect keeps queued follow-ups", async () => {

@@ -121,20 +121,20 @@ let { session }: Props = $props();
 		justify-content: space-between;
 		flex-wrap: wrap;
 		gap: var(--space-3);
-		padding: var(--space-4) var(--space-5);
+		padding: var(--space-4) var(--space-6);
 	}
 
 	.workspace-heading p {
 		margin: 0 0 var(--space-1);
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 	}
 
 	.workspace-heading h2 {
 		max-width: 48rem;
 		margin: 0;
 		overflow-wrap: break-word;
-		font-size: var(--text-heading);
+		font-size: var(--size-heading);
 		font-weight: 650;
 		line-height: 1.25;
 		text-wrap: balance;

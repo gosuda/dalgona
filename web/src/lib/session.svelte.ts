@@ -16,6 +16,11 @@ import {
 	transcriptForThread,
 } from "./reducer";
 import { turnSteerParams } from "./requests";
+import {
+	applyTheme,
+	parseThemeSetting,
+	type ThemeSetting,
+} from "./theme/theme";
 import type {
 	AdvisorSummary,
 	AppNotification,
@@ -38,6 +43,7 @@ import {
 	parseInitializeResponse,
 	parseKeywordsResponse,
 	parseModelListResponse,
+	parseSettingsReadResponse,
 	parseThreadListResponse,
 	parseThreadReadResponse,
 	parseThreadStartResponse,
@@ -64,6 +70,11 @@ export interface SessionLocation {
 	readonly pathname: string;
 	readonly protocol: string;
 	readonly search: string;
+}
+
+function applyThemeToPage(setting: ThemeSetting): void {
+	if (typeof document === "undefined") return;
+	applyTheme(setting, document, localStorage);
 }
 
 type Decision = "accept" | "acceptForSession" | "decline" | "cancel";
@@ -109,6 +120,7 @@ function isEffectKind(type: AppNotification["type"]): type is EffectKind {
 
 export class Session {
 	private readonly dial: (url: string, handlers: RpcHandlers) => RpcPort;
+	private readonly applyThemeSetting: (setting: ThemeSetting) => void;
 	private location: SessionLocation = {
 		hash: "",
 		host: "",
@@ -180,8 +192,12 @@ export class Session {
 		return thread === undefined ? "No thread selected" : threadTitle(thread);
 	});
 
-	constructor(dial: (url: string, handlers: RpcHandlers) => RpcPort) {
+	constructor(
+		dial: (url: string, handlers: RpcHandlers) => RpcPort,
+		applyThemeSetting: (setting: ThemeSetting) => void = applyThemeToPage,
+	) {
 		this.dial = dial;
+		this.applyThemeSetting = applyThemeSetting;
 		this.effects = {
 			threadStarted: (notification) => {
 				this.upsertThread(notification.thread);
@@ -323,6 +339,13 @@ export class Session {
 						error instanceof Error ? error : String(error),
 					),
 				),
+				this.loadSettings(generation).catch((error) =>
+					this.reportFailure(
+						generation,
+						"Unable to load settings",
+						error instanceof Error ? error : String(error),
+					),
+				),
 			]);
 		} catch (error) {
 			if (generation === this.connectionGeneration) {
@@ -400,6 +423,18 @@ export class Session {
 		if (generation !== this.connectionGeneration) return;
 		this.status = result;
 		if (result.model) this.selectedModel = result.model;
+	}
+
+	private async loadSettings(generation: number): Promise<void> {
+		const settings = await this.requireClient().call(
+			"dalgona/settings/read",
+			{},
+			parseSettingsReadResponse,
+		);
+		if (generation !== this.connectionGeneration) return;
+		const theme = settings.find((setting) => setting.key === "theme");
+		if (theme !== undefined)
+			this.applyThemeSetting(parseThemeSetting(theme.value));
 	}
 
 	private async loadKeywords(generation: number): Promise<void> {

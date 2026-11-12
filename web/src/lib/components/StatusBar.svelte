@@ -78,10 +78,10 @@ const turnLabels: Record<TurnStatus, string> = {
 		display: flex;
 		align-items: center;
 		flex-wrap: wrap;
-		gap: var(--space-3) var(--space-5);
-		border-block-end: 1px solid var(--color-border);
-		background: var(--color-bg-surface);
-		padding: var(--space-3) var(--space-5);
+		gap: var(--space-3) var(--space-6);
+		border-block-end: 1px solid var(--line);
+		background: var(--surface);
+		padding: var(--space-3) var(--space-6);
 	}
 
 	.connection {
@@ -89,7 +89,7 @@ const turnLabels: Record<TurnStatus, string> = {
 		align-items: center;
 		flex-wrap: wrap;
 		gap: var(--space-2);
-		font-size: var(--text-body-small);
+		font-size: var(--size-small);
 		font-weight: 600;
 	}
 
@@ -97,22 +97,22 @@ const turnLabels: Record<TurnStatus, string> = {
 		width: 8px;
 		height: 8px;
 		border-radius: 50%;
-		background: var(--color-danger);
+		background: var(--failed-text);
 	}
 
 	.connection-mark.online {
-		background: var(--color-success);
+		background: var(--added-text);
 	}
 
 	.working {
-		color: var(--color-success);
+		color: var(--added-text);
 	}
 
 	dl {
 		display: flex;
 		flex: 1;
 		flex-wrap: wrap;
-		gap: var(--space-2) var(--space-5);
+		gap: var(--space-2) var(--space-6);
 		margin: 0;
 	}
 
@@ -124,20 +124,20 @@ const turnLabels: Record<TurnStatus, string> = {
 	}
 
 	dt {
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 	}
 
 	dd {
 		margin: 0;
 		overflow-wrap: break-word;
-		font-size: var(--text-caption);
+		font-size: var(--size-caption);
 		font-weight: 600;
 	}
 
 	.status-bar button {
 		min-height: 32px;
 		padding: var(--space-1) var(--space-3);
-		font-size: var(--text-caption);
+		font-size: var(--size-caption);
 	}
 </style>

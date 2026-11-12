@@ -228,18 +228,18 @@ function argumentsText(value: JsonValue): string {
 		min-height: 0;
 		overflow-y: auto;
 		overscroll-behavior: contain;
-		scroll-padding-block-start: var(--space-5);
+		scroll-padding-block-start: var(--space-6);
 	}
 
 	.transcript-inner {
 		width: min(100%, 56rem);
 		margin-inline: auto;
-		padding: var(--space-6) var(--space-5);
+		padding: var(--space-8) var(--space-6);
 	}
 
 	.items {
 		display: grid;
-		gap: var(--space-5);
+		gap: var(--space-6);
 		list-style: none;
 		margin: 0;
 		padding: 0;
@@ -250,23 +250,23 @@ function argumentsText(value: JsonValue): string {
 	}
 
 	.from-user {
-		padding-inline-start: var(--space-6);
+		padding-inline-start: var(--space-8);
 	}
 
 	.item-label {
 		display: block;
 		margin-block-end: var(--space-2);
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-weight: 650;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
 	}
 
 	.user-message {
-		border-inline-start: 2px solid var(--color-accent);
+		border-inline-start: 2px solid var(--accent-text);
 		padding: var(--space-2) var(--space-4);
-		background: var(--color-bg-selected);
+		background: var(--tone);
 	}
 
 	.user-message p,
@@ -285,15 +285,15 @@ function argumentsText(value: JsonValue): string {
 	}
 
 	.streaming {
-		color: var(--color-accent);
+		color: var(--accent-text);
 		margin-inline-start: var(--space-1);
 	}
 
 	.tool-item {
 		min-width: 0;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-medium);
-		background: var(--color-bg-surface);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-tag);
+		background: var(--surface);
 		padding: var(--space-4);
 	}
 
@@ -306,21 +306,21 @@ function argumentsText(value: JsonValue): string {
 	}
 
 	.item-status {
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-variant-numeric: tabular-nums;
 	}
 
 	.item-status.awaiting {
-		color: var(--color-accent);
+		color: var(--accent-text);
 		font-weight: 650;
 	}
 
 	.command {
-		border-radius: var(--radius-small);
-		background: var(--color-bg-inset);
+		border-radius: var(--radius-control);
+		background: var(--tone);
 		padding: var(--space-3);
-		font-size: var(--text-body-small);
+		font-size: var(--size-small);
 		line-height: 1.5;
 	}
 
@@ -329,8 +329,8 @@ function argumentsText(value: JsonValue): string {
 		margin-block-start: var(--space-3);
 		overflow: auto;
 		overscroll-behavior: contain;
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		line-height: 1.55;
 	}
 
@@ -338,14 +338,14 @@ function argumentsText(value: JsonValue): string {
 	.file-change,
 	.tool-item details {
 		max-width: 70ch;
-		color: var(--color-text-secondary);
-		font-size: var(--text-body-small);
+		color: var(--dim);
+		font-size: var(--size-small);
 	}
 
 	.reasoning summary,
 	.file-change summary,
 	.tool-item summary {
-		color: var(--color-text);
+		color: var(--text);
 		cursor: pointer;
 		font-weight: 600;
 	}
@@ -360,26 +360,26 @@ function argumentsText(value: JsonValue): string {
 	}
 
 	.plan {
-		border-block: 1px solid var(--color-border);
+		border-block: 1px solid var(--line);
 		padding-block: var(--space-3);
 	}
 
 	.advisor-note {
 		max-width: 70ch;
-		border-inline-start: 2px solid var(--color-border-strong);
+		border-inline-start: 2px solid var(--strong);
 		padding: var(--space-1) var(--space-3);
-		color: var(--color-text-secondary);
-		font-size: var(--text-body-small);
+		color: var(--dim);
+		font-size: var(--size-small);
 		overflow-wrap: break-word;
 		white-space: pre-wrap;
 	}
 
 	.advisor-note[data-severity="concern"] {
-		border-inline-start-color: var(--color-accent);
+		border-inline-start-color: var(--accent-text);
 	}
 
 	.advisor-note[data-severity="blocker"] {
-		border-inline-start-color: var(--color-danger);
+		border-inline-start-color: var(--failed-text);
 	}
 
 	.advisor-label {
@@ -388,13 +388,13 @@ function argumentsText(value: JsonValue): string {
 
 	.turn-plan {
 		max-width: 70ch;
-		margin-block-start: var(--space-5);
-		font-size: var(--text-body-small);
+		margin-block-start: var(--space-6);
+		font-size: var(--size-small);
 	}
 
 	.turn-plan p {
 		margin: 0 0 var(--space-2);
-		color: var(--color-text-secondary);
+		color: var(--dim);
 	}
 
 	.turn-plan ol {
@@ -413,8 +413,8 @@ function argumentsText(value: JsonValue): string {
 	}
 
 	.plan-status {
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-weight: 600;
 	}
 
@@ -423,45 +423,45 @@ function argumentsText(value: JsonValue): string {
 	}
 
 	.turn-plan li[data-status="completed"] > span:last-child {
-		color: var(--color-text-secondary);
+		color: var(--dim);
 	}
 
 	.compaction {
 		margin: 0;
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		text-align: center;
 	}
 
 	.turn-outcome {
 		max-width: 70ch;
-		margin: var(--space-5) 0 0;
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		margin: var(--space-6) 0 0;
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-weight: 600;
 		overflow-wrap: break-word;
 	}
 
 	.turn-outcome.working {
-		color: var(--color-success);
+		color: var(--added-text);
 	}
 
 	.turn-outcome.failed {
-		border-inline-start: 2px solid var(--color-danger);
-		background: var(--color-danger-surface);
-		color: var(--color-text);
+		border-inline-start: 2px solid var(--failed-text);
+		background: var(--surface);
+		color: var(--text);
 		padding: var(--space-2) var(--space-3);
 	}
 
 	.empty-state {
 		max-width: 38rem;
-		padding-block-start: var(--space-6);
+		padding-block-start: var(--space-8);
 	}
 
 	.kicker {
 		margin: 0 0 var(--space-3);
-		color: var(--color-accent);
-		font-size: var(--text-caption);
+		color: var(--accent-text);
+		font-size: var(--size-caption);
 		font-weight: 650;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
@@ -479,14 +479,14 @@ function argumentsText(value: JsonValue): string {
 	.empty-state p:last-child {
 		max-width: 55ch;
 		margin: var(--space-4) 0 0;
-		color: var(--color-text-secondary);
+		color: var(--dim);
 		line-height: 1.6;
 		text-wrap: pretty;
 	}
 
 	@media (max-width: 40rem) {
 		.transcript-inner {
-			padding: var(--space-5) var(--space-4);
+			padding: var(--space-6) var(--space-4);
 		}
 
 		.from-user {

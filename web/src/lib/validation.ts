@@ -538,6 +538,27 @@ export function parseKeywordsResponse(
 	});
 }
 
+export interface SettingValue {
+	readonly key: string;
+	readonly value: JsonValue;
+}
+
+export function parseSettingsReadResponse(
+	value: unknown,
+): readonly SettingValue[] {
+	const body = object(value, "dalgona/settings/read");
+	if (!hasMembers(body, ["settings"])) fail("dalgona/settings/read");
+	const settings = body["settings"];
+	if (!Array.isArray(settings)) fail("dalgona/settings/read");
+	return settings.map((entry) => {
+		const row = object(entry, "setting");
+		if (!hasMembers(row, ["key", "value"])) fail("setting");
+		const parsed = parseJsonValue(row["value"]);
+		if (parsed === undefined) fail("setting");
+		return { key: requiredString(row, "key", "setting"), value: parsed };
+	});
+}
+
 export function parseInitializeResponse(value: unknown): InitializeInfo {
 	const body = object(value, "initialize");
 	return {

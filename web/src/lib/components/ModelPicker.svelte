@@ -38,19 +38,19 @@ let { models, value, disabled, onChange }: Props = $props();
 	}
 
 	label {
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-weight: 600;
 	}
 
 	select {
 		max-width: 20rem;
 		min-width: 0;
-		border: 1px solid var(--color-border-strong);
-		border-radius: var(--radius-small);
-		background: var(--color-bg-surface);
-		color: var(--color-text);
+		border: 1px solid var(--strong);
+		border-radius: var(--radius-control);
+		background: var(--surface);
+		color: var(--text);
 		padding: var(--space-2) var(--space-3);
-		font-size: var(--text-body-small);
+		font-size: var(--size-small);
 	}
 </style>

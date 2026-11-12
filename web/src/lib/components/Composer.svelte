@@ -112,7 +112,7 @@ function onKeydown(event: KeyboardEvent): void {
 		<p id="composer-error" class="error" role="alert">{error}</p>
 
 		<div class="actions">
-			<button class={running ? "quiet" : "primary"} type="submit" disabled={disabled}>{running ? "Steer" : "Send"}</button>
+			<button class={running ? "quiet" : "point"} type="submit" disabled={disabled}>{running ? "Steer" : "Send"}</button>
 			{#if running}
 				<button type="button" disabled={disabled} onclick={queueFollowup} {@attach handoffFocus(() => textarea)}>Queue follow-up</button>
 				<button class="quiet danger" type="button" disabled={disabled} onclick={onInterrupt} {@attach handoffFocus(() => textarea)}>Interrupt turn</button>
@@ -123,9 +123,9 @@ function onKeydown(event: KeyboardEvent): void {
 
 <style>
 	.composer {
-		border-block-start: 1px solid var(--color-border);
-		background: var(--color-bg-surface);
-		padding: var(--space-4) var(--space-5) var(--space-5);
+		border-block-start: 1px solid var(--line);
+		background: var(--surface);
+		padding: var(--space-4) var(--space-6) var(--space-6);
 	}
 
 	form,
@@ -137,7 +137,7 @@ function onKeydown(event: KeyboardEvent): void {
 	label {
 		display: block;
 		margin-block-end: var(--space-2);
-		font-size: var(--text-body-small);
+		font-size: var(--size-small);
 		font-weight: 650;
 	}
 
@@ -147,18 +147,18 @@ function onKeydown(event: KeyboardEvent): void {
 		min-height: 6rem;
 		max-height: 16rem;
 		resize: vertical;
-		border: 1px solid var(--color-border-strong);
-		border-radius: var(--radius-medium);
-		background: var(--color-bg-page);
-		color: var(--color-text);
-		caret-color: var(--color-accent);
+		border: 1px solid var(--strong);
+		border-radius: 14px;
+		background: var(--canvas);
+		color: var(--text);
+		caret-color: var(--accent-text);
 		padding: var(--space-3);
-		font-size: var(--text-body);
+		font-size: var(--size-body);
 		line-height: 1.5;
 	}
 
 	textarea[aria-invalid="true"] {
-		border-color: var(--color-danger);
+		border-color: var(--failed-text);
 	}
 
 	.composer-meta {
@@ -171,8 +171,8 @@ function onKeydown(event: KeyboardEvent): void {
 	.composer-meta p,
 	.error {
 		margin: var(--space-2) 0 0;
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 	}
 
 	.queued {
@@ -181,7 +181,7 @@ function onKeydown(event: KeyboardEvent): void {
 
 	.error {
 		min-height: 1.5em;
-		color: var(--color-danger);
+		color: var(--failed-text);
 	}
 
 	.actions {
@@ -198,8 +198,8 @@ function onKeydown(event: KeyboardEvent): void {
 		flex-wrap: wrap;
 		gap: var(--space-2);
 		margin-block-end: var(--space-3);
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 	}
 
 	.keyword-chip {

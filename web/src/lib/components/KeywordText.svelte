@@ -73,8 +73,8 @@ const parts = $derived(pieces(text, keywords));
 <style>
 	.keyword-surface {
 		display: inline-block;
-		border-radius: var(--radius-small);
-		background: var(--color-keyword-surface);
+		border-radius: var(--radius-control);
+		background: var(--tone);
 		padding: 0 var(--space-1);
 	}
 
