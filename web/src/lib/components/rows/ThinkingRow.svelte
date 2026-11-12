@@ -1,14 +1,29 @@
 <script lang="ts">
 import type { RowProps } from "#lib/components/rows/types.ts";
+import { fullPresentation, lastLines, lineSummary } from "#lib/verbosity.ts";
 
-let { item, running }: RowProps = $props();
+let {
+	item,
+	running,
+	presentation = fullPresentation,
+	onOpen,
+}: RowProps = $props();
 </script>
 
 {#if item.kind === "reasoning"}
-	<details class="reasoning" open={!item.complete && running}>
-		<summary>Thinking</summary>
-		<p>{item.text}</p>
-	</details>
+	{#if presentation.mode === "line"}
+		<p class="summary">{lineSummary(item)}</p>
+	{:else if presentation.mode === "tail"}
+		<p class="tail">{lastLines(item.text, presentation.tailLines).text}</p>
+	{:else}
+		<details class="reasoning" open={!item.complete && running}>
+			<summary>Thinking</summary>
+			<p>{item.text}</p>
+		</details>
+	{/if}
+	{#if presentation.mode !== "full" && onOpen}
+		<button type="button" aria-label="Open full text" onclick={onOpen}>Open</button>
+	{/if}
 {/if}
 
 <style>

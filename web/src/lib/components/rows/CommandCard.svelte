@@ -4,8 +4,14 @@ import StateTag from "#lib/components/StateTag.svelte";
 import { formatDuration } from "#lib/format.ts";
 import { stateKey } from "#lib/labels.ts";
 import { itemDisplayStatus } from "#lib/reducer.ts";
+import { fullPresentation, lastLines } from "#lib/verbosity.ts";
 
-let { item, awaiting }: RowProps = $props();
+let {
+	item,
+	awaiting,
+	presentation = fullPresentation,
+	onOpen,
+}: RowProps = $props();
 </script>
 
 {#if item.kind === "commandExecution"}
@@ -27,8 +33,15 @@ let { item, awaiting }: RowProps = $props();
 				{/if}
 			</span>
 		</header>
-		{#if item.output}
-			<pre class="output">{item.output}</pre>
+		{#if presentation.mode !== "line" && presentation.mode !== "hidden" && item.output}
+			{@const shown = presentation.mode === "tail" ? lastLines(item.output, presentation.tailLines) : null}
+			<pre class="output">{shown ? shown.text : item.output}</pre>
+			{#if shown && shown.total > presentation.tailLines}
+				<p class="cut">Showing the last {presentation.tailLines} of {shown.total} lines. <button type="button" onclick={onOpen}>Show all</button></p>
+			{/if}
+		{/if}
+		{#if presentation.mode !== "full" && onOpen}
+			<button type="button" aria-label="Open full text" onclick={onOpen}>Open</button>
 		{/if}
 	</article>
 {/if}
@@ -75,7 +88,6 @@ let { item, awaiting }: RowProps = $props();
 	}
 
 	.output {
-		max-height: 24rem;
 		margin-block-start: var(--space-3);
 		overflow: auto;
 		overscroll-behavior: contain;

@@ -5,8 +5,14 @@ import { formatDuration } from "#lib/format.ts";
 import { stateKey } from "#lib/labels.ts";
 import { itemDisplayStatus } from "#lib/reducer.ts";
 import type { JsonValue } from "#lib/types.ts";
+import { fullPresentation, lastLines, lineSummary } from "#lib/verbosity.ts";
 
-let { item, awaiting }: RowProps = $props();
+let {
+	item,
+	awaiting,
+	presentation = fullPresentation,
+	onOpen,
+}: RowProps = $props();
 
 function argumentsText(value: JsonValue): string {
 	return JSON.stringify(value, null, 2) ?? "";
@@ -29,12 +35,25 @@ function argumentsText(value: JsonValue): string {
 				{/if}
 			</span>
 		</header>
-		<details>
-			<summary>Arguments</summary>
-			<pre class="output">{argumentsText(item.arguments)}</pre>
-		</details>
-		{#if item.output}
-			<pre class="output">{item.output}</pre>
+		{#if presentation.mode === "line"}
+			<p class="summary">{lineSummary(item)}</p>
+		{:else}
+			{#if presentation.mode === "full"}
+				<details>
+					<summary>Arguments</summary>
+					<pre class="output">{argumentsText(item.arguments)}</pre>
+				</details>
+			{/if}
+			{#if item.output}
+				{@const shown = presentation.mode === "tail" ? lastLines(item.output, presentation.tailLines) : null}
+				<pre class="output">{shown ? shown.text : item.output}</pre>
+				{#if shown && shown.total > presentation.tailLines}
+					<p class="cut">Showing the last {presentation.tailLines} of {shown.total} lines. <button type="button" onclick={onOpen}>Show all</button></p>
+				{/if}
+			{/if}
+		{/if}
+		{#if presentation.mode !== "full" && onOpen}
+			<button type="button" aria-label="Open full text" onclick={onOpen}>Open</button>
 		{/if}
 	</article>
 {/if}
@@ -92,7 +111,6 @@ function argumentsText(value: JsonValue): string {
 	}
 
 	.output {
-		max-height: 24rem;
 		margin-block-start: var(--space-3);
 		overflow: auto;
 		overscroll-behavior: contain;

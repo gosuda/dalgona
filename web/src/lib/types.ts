@@ -54,6 +54,19 @@ export interface EditReview {
 	readonly summary: string;
 }
 
+export interface OutputSpill {
+	readonly path: string;
+	readonly bytes: number;
+	readonly sha256: string;
+}
+
+export interface OutputPage {
+	readonly text: string;
+	readonly offset: number;
+	readonly next: number;
+	readonly total: number;
+}
+
 export type TranscriptItem =
 	| {
 			readonly id: string;
@@ -76,6 +89,7 @@ export type TranscriptItem =
 			readonly status: string;
 			readonly exitCode: number | null;
 			readonly durationMs: number | null;
+			readonly spill?: OutputSpill;
 	  }
 	| {
 			readonly id: string;
@@ -92,6 +106,7 @@ export type TranscriptItem =
 			readonly output: string;
 			readonly status: string;
 			readonly durationMs: number | null;
+			readonly spill?: OutputSpill;
 	  }
 	| { readonly id: string; readonly kind: "plan"; readonly text: string }
 	| {

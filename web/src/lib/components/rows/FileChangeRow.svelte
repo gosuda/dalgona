@@ -4,8 +4,14 @@ import type { RowProps } from "#lib/components/rows/types.ts";
 import StateTag from "#lib/components/StateTag.svelte";
 import { stateKey } from "#lib/labels.ts";
 import { itemDisplayStatus } from "#lib/reducer.ts";
+import { fullPresentation } from "#lib/verbosity.ts";
 
-let { item, awaiting }: RowProps = $props();
+let {
+	item,
+	awaiting,
+	presentation = fullPresentation,
+	onOpen,
+}: RowProps = $props();
 </script>
 
 {#if item.kind === "fileChange"}
@@ -20,8 +26,11 @@ let { item, awaiting }: RowProps = $props();
 			{/if}
 		</header>
 		{#each item.changes as change, index (`${index}:${change.path}`)}
-			<DiffCard {change} open={false} />
+			<DiffCard {change} open={false} tail={item.status === "failed"} limit={presentation.mode === "full" ? Number.POSITIVE_INFINITY : presentation.tailLines} />
 		{/each}
+		{#if presentation.mode !== "full" && onOpen}
+			<button type="button" aria-label="Open full text" onclick={onOpen}>Open</button>
+		{/if}
 		{#if item.review !== null}
 			<p class="edit-review" data-verdict={item.review.verdict}>{item.review.summary}</p>
 		{/if}

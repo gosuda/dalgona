@@ -20,6 +20,7 @@ function props(items: readonly TranscriptItem[]) {
 		starting: false,
 		onOpenThread: vi.fn(),
 		onStart: vi.fn(),
+		readOutput: vi.fn(),
 	};
 }
 

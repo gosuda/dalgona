@@ -98,6 +98,8 @@ const openThreadFlags = $derived(
 			onStart={() => void session.createThread()}
 			loading={session.loadingTranscript}
 			awaitingApproval={session.awaitingApproval}
+			verbosity={session.verbosity}
+			readOutput={(itemId, offset) => session.readItemOutput(itemId, offset)}
 		/>
 
 		<Composer

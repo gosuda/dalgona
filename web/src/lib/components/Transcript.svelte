@@ -1,6 +1,7 @@
 <script lang="ts">
 import type { Component } from "svelte";
 import Mark from "#lib/components/Mark.svelte";
+import ReviewView from "#lib/components/ReviewView.svelte";
 import AdvisorNote from "#lib/components/rows/AdvisorNote.svelte";
 import CommandCard from "#lib/components/rows/CommandCard.svelte";
 import FileChangeRow from "#lib/components/rows/FileChangeRow.svelte";
@@ -17,11 +18,22 @@ import {
 } from "#lib/reducer.ts";
 import type {
 	EditReview,
+	OutputPage,
 	ThreadSummary,
 	TranscriptItem,
 	TurnPlan,
 	TurnStatus,
 } from "#lib/types.ts";
+import {
+	groupTools,
+	isFinishedEntry,
+	isLiveItem,
+	isToolGroup,
+	presentRow,
+	type TranscriptEntry,
+	toolGroupSummary,
+	type Verbosity,
+} from "#lib/verbosity.ts";
 
 interface Props {
 	threadId: string | null;
@@ -39,6 +51,8 @@ interface Props {
 	starting: boolean;
 	onOpenThread: (threadId: string) => void;
 	onStart: () => void;
+	verbosity?: Verbosity;
+	readOutput: (itemId: string, offset: number) => Promise<OutputPage>;
 }
 
 const rowComponents: Record<TranscriptItem["kind"], Component<RowProps>> = {
@@ -70,9 +84,13 @@ let {
 	starting,
 	onOpenThread,
 	onStart,
+	verbosity = "medium",
+	readOutput,
 }: Props = $props();
 let viewport = $state<HTMLElement>();
 let running = $derived(turnStatus === "inProgress");
+const entries = $derived(groupTools(items, verbosity));
+let reviewTarget = $state<TranscriptEntry | null>(null);
 let followedThread: string | null = null;
 let following = true;
 let scrollQueued = false;
@@ -118,9 +136,31 @@ function trackFollowing(): void {
 	const distance = target.scrollHeight - target.scrollTop - target.clientHeight;
 	following = distance < 32;
 }
+
+function entryKey(entry: TranscriptEntry): string {
+	return isToolGroup(entry) ? `group:${entry.items[0]?.id ?? ""}` : entry.id;
+}
+
+function openReview(target: TranscriptEntry): void {
+	reviewTarget = target;
+}
+
+function openLatestReview(event: KeyboardEvent): void {
+	if (reviewTarget !== null) return;
+	if (!event.ctrlKey || event.key.toLowerCase() !== "o") return;
+	const focused = document.activeElement;
+	const inTranscript =
+		viewport !== undefined && focused !== null && viewport.contains(focused);
+	const inComposer = focused !== null && focused.id === "prompt";
+	if (!inTranscript && !inComposer) return;
+	const latest = [...entries].reverse().find(isFinishedEntry);
+	if (latest === undefined) return;
+	event.preventDefault();
+	openReview(latest);
+}
 </script>
 
-<svelte:window onscroll={trackFollowing} />
+<svelte:window onscroll={trackFollowing} onkeydown={openLatestReview} />
 
 <section id="transcript" class="transcript" aria-label="Transcript" tabindex="-1" bind:this={viewport} onscroll={trackFollowing}>
 	<div class="transcript-inner">
@@ -143,11 +183,21 @@ function trackFollowing(): void {
 			</section>
 		{:else}
 			<ol class="items">
-				{#each items as item (item.id)}
-					{@const Row = rowComponents[item.kind]}
-					<li class:from-user={item.kind === "userMessage"}>
-						<Row {item} {running} awaiting={awaitingApproval} />
-					</li>
+				{#each entries as entry (entryKey(entry))}
+					{#if isToolGroup(entry)}
+						<li class="tool-group-row">
+							<p class="tool-group">{toolGroupSummary(entry)}</p>
+							<button type="button" aria-label="Open full text" onclick={() => openReview(entry)}>Open</button>
+						</li>
+					{:else}
+						{@const Row = rowComponents[entry.kind]}
+						{@const presentation = presentRow(entry, verbosity, isLiveItem(entry))}
+						{#if presentation.mode !== "hidden"}
+							<li class:from-user={entry.kind === "userMessage"}>
+								<Row item={entry} {running} awaiting={awaitingApproval} {presentation} onOpen={() => openReview(entry)} />
+							</li>
+						{/if}
+					{/if}
 				{/each}
 			</ol>
 		{/if}
@@ -173,6 +223,7 @@ function trackFollowing(): void {
 			<p class="turn-outcome">Turn interrupted. Send a message to continue.</p>
 		{/if}
 	</div>
+		<ReviewView target={reviewTarget} {readOutput} onClose={() => (reviewTarget = null)} />
 </section>
 
 <style>
@@ -282,4 +333,10 @@ function trackFollowing(): void {
 		color: var(--failed-text);
 		font-weight: var(--weight-strong);
 	}
+	.tool-group {
+		margin: 0;
+		color: var(--dim);
+		font-size: var(--size-small);
+	}
+
 </style>

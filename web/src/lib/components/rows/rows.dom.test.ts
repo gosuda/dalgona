@@ -27,6 +27,7 @@ function props(
 		starting: false,
 		onOpenThread: extra.onOpenThread ?? vi.fn(),
 		onStart: vi.fn(),
+		readOutput: vi.fn(),
 	};
 }
 
@@ -276,5 +277,36 @@ describe("transcript rows", () => {
 		const turnReview = container.querySelector(".turn-review");
 		expect(turnReview?.getAttribute("data-verdict")).toBe("uncertain");
 		expect(turnReview?.textContent).toBe("Uncertain: incomplete");
+	});
+
+	test("a failed file change keeps the last ten diff lines", () => {
+		const body = Array.from({ length: 25 }, (_, index) => `+line ${index + 1}`);
+		const { container } = render(Transcript, {
+			props: props([
+				{
+					id: "f4",
+					kind: "fileChange",
+					changes: [
+						{
+							path: "long.txt",
+							kind: "add",
+							diff: `@@ -0,0 +1,25 @@\n${body.join("\n")}\n`,
+							additions: 25,
+							deletions: 0,
+							diffOmitted: false,
+						},
+					],
+					status: "failed",
+					review: null,
+				},
+			]),
+		});
+		const text =
+			container.querySelector(".file-change pre.diff")?.textContent ?? "";
+		const rows = text.split("\n");
+		expect(rows).toHaveLength(11);
+		expect(rows[0]).toBe("… 16 more lines");
+		expect(rows[1]).toBe("+line 16");
+		expect(rows[10]).toBe("+line 25");
 	});
 });

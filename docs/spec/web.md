@@ -138,7 +138,7 @@ No advisor failure opens the error banner.
 - A `dynamicToolCall` item with tool `advisor` shows as a note card: `advisor · <severity>: <note>`. The note is the text of `contentItems`. The severity is always text. The card's inline-start border marks the severity as a second cue.
 - Other dynamic tools show their `contentItems` text as output.
 - `turn/plan/updated` shows the latest plan of the current turn as a checklist. Each step has a text status: `Done`, `Working`, or `Pending`. The step in progress carries `aria-current="step"`. A new turn clears the plan.
-- The reasoning row reads `Thinking` and is open while the turn runs.
+- The reasoning row reads `Thinking`. At `high`, it is open while the turn runs. At `medium` and `low`, it is one line (see Verbosity).
 - Each command row MUST read `$ <command>`, show its state word, and show `exit <code>` and its duration when the server reports them.
 - Each nested call MUST be its own row, placed directly after its `eval` row.
 - A user message MUST underline each keyword that the server reports, and MUST list those keywords on a `Keywords:` line.
@@ -151,11 +151,27 @@ No advisor failure opens the error banner.
 - A diff card MUST show its line counts as text when the server sends `additions`.
 - The kind word MUST read `Added`, `Changed`, or `Deleted`.
 - A diff card MUST mark each added line and each removed line with its own element, and MUST keep the prefix character.
-- A diff card MUST show at most 60 lines and MUST say how many lines it hides.
+- A diff card MUST follow the line limit and hidden-line note of its verbosity level, as Verbosity states.
 - A diff card MUST show `Diff not shown.` when the server omits the diff.
 - Rows and diffs MUST be chosen by item kind, not by tool name.
 
 Each file change MUST show its edit review as one line under its diff cards, for every verdict. A review line MUST show the summary text that the server sends, such as `No problems found`. The turn review MUST show as one line after the last row, and MUST show only for the open turn. A `flagged` review MUST use the warning text role, an `error` review MUST use bold failed text, and other reviews MUST use dim text. Review lines MUST NOT use a background. Review lines are live only, so the history MUST NOT show a verdict.
+
+### Verbosity
+
+- The setting `verbosity` takes `low`, `medium`, or `high`. The client MUST read it from `dalgona/settings/read`, and the default MUST be `medium`.
+- At `high`, every row MUST show its full text.
+- At `medium`, an `eval` row MUST show one line, such as `Eval · 2 lines of code · Done`.
+- At `medium`, a reasoning row MUST show one line, such as `Thinking · 3 lines · ctrl+o`. While the text streams, it MUST show its last line only.
+- At `medium`, a command row MUST show its last 10 lines and MUST say how many lines it hides.
+- At `medium`, a diff card MUST show at most 60 lines of each file.
+- At `low`, consecutive tool rows MUST join one tool group, which MUST show one summary line, such as `Ran 2 commands · called 3 tools`.
+- A failed tool row MUST show its last 10 lines at every level, and it MUST end its tool group.
+- The `Open full text` control of a row MUST open the review, which MUST show the full text of the row or group.
+- `Ctrl+O` MUST open the review for the latest finished row when focus is in the transcript or the composer.
+- The review MUST close on Escape and MUST return focus to the control that opened it.
+- The review MUST load spilled command output one page at a time from `dalgona/item/output/read`.
+- The rules and the summary text MUST follow the terminal workstream, Step 16.
 
 ### Markdown
 

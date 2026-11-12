@@ -254,6 +254,7 @@ function transcript(items: readonly TranscriptItem[], turnStatus: TurnStatus) {
 		starting: false,
 		onOpenThread: () => undefined,
 		onStart: () => undefined,
+		readOutput: vi.fn(),
 		loading: false,
 		awaitingApproval: new Set<string>(),
 	};

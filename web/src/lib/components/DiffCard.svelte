@@ -1,15 +1,21 @@
 <script lang="ts">
-import { parseDiff } from "#lib/diff.ts";
+import { type DiffLine, parseDiff } from "#lib/diff.ts";
 import type { FileChange } from "#lib/types.ts";
 
 interface Props {
 	readonly change: FileChange;
 	readonly open: boolean;
+	readonly limit?: number;
+	readonly tail?: boolean;
 }
 
-let { change, open }: Props = $props();
+interface DiffRow {
+	readonly kind: DiffLine["kind"] | "more";
+	readonly text: string;
+}
 
-const diffLineLimit = 60;
+let { change, open, limit = 60, tail = false }: Props = $props();
+
 const kindWords: Readonly<Record<string, string>> = {
 	add: "Added",
 	update: "Changed",
@@ -17,8 +23,16 @@ const kindWords: Readonly<Record<string, string>> = {
 };
 const kindWord = $derived(kindWords[change.kind] ?? change.kind);
 const lines = $derived(parseDiff(change.diff));
-const shown = $derived(lines.slice(0, diffLineLimit));
-const hidden = $derived(lines.length - shown.length);
+const kept = $derived(
+	tail ? lines.slice(Math.max(0, lines.length - limit)) : lines.slice(0, limit),
+);
+const hidden = $derived(lines.length - kept.length);
+const note = $derived(`… ${hidden} more ${hidden === 1 ? "line" : "lines"}`);
+const rows = $derived.by((): readonly DiffRow[] => {
+	if (hidden === 0) return kept;
+	const more: DiffRow = { kind: "more", text: note };
+	return tail ? [more, ...kept] : [...kept, more];
+});
 const counted = $derived(change.additions !== undefined);
 </script>
 
@@ -33,7 +47,7 @@ const counted = $derived(change.additions !== undefined);
 	{#if change.diffOmitted}
 		<p class="omitted">Diff not shown.</p>
 	{:else}
-		<pre class="diff">{#each shown as line, index (index)}{#if line.kind === "add"}<ins>{line.text}</ins>{:else if line.kind === "del"}<del>{line.text}</del>{:else if line.kind === "hunk"}<span class="hunk">{line.text}</span>{:else}{line.text}{/if}{#if index < shown.length - 1 || hidden > 0}{"\n"}{/if}{/each}{#if hidden > 0}<span class="more">… {hidden} more {hidden === 1 ? "line" : "lines"}</span>{/if}</pre>
+		<pre class="diff">{#each rows as row, index (index)}{#if index > 0}{"\n"}{/if}{#if row.kind === "add"}<ins>{row.text}</ins>{:else if row.kind === "del"}<del>{row.text}</del>{:else if row.kind === "hunk"}<span class="hunk">{row.text}</span>{:else if row.kind === "more"}<span class="more">{row.text}</span>{:else}{row.text}{/if}{/each}</pre>
 	{/if}
 </details>
 

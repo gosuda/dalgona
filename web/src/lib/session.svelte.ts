@@ -34,6 +34,7 @@ import type {
 	Notice,
 	NoticeAction,
 	NoticeTone,
+	OutputPage,
 	RequestId,
 	RetryWait,
 	RpcHandlers,
@@ -50,6 +51,7 @@ import {
 	parseKeywordMatches,
 	parseKeywordsResponse,
 	parseModelListResponse,
+	parseOutputReadResponse,
 	parseSettingsReadResponse,
 	parseThreadListResponse,
 	parseThreadReadResponse,
@@ -58,6 +60,7 @@ import {
 	parseTurnSteerResponse,
 	parseVoidResponse,
 } from "./validation";
+import { parseVerbosity, type Verbosity } from "./verbosity";
 
 export interface RpcPort {
 	call<T>(
@@ -172,6 +175,7 @@ export class Session {
 	statusSeq: Readonly<Record<string, number>> = $state({});
 	retryWait: RetryWait | null = $state(null);
 	completedThreadIds: ReadonlySet<string> = $state(new Set());
+	verbosity: Verbosity = $state("medium");
 	private noticeSeq = 0;
 
 	running: boolean = $derived(this.transcript.turnStatus === "inProgress");
@@ -512,6 +516,16 @@ export class Session {
 		if (result.model) this.selectedModel = result.model;
 	}
 
+	async readItemOutput(itemId: string, offset: number): Promise<OutputPage> {
+		const threadId = this.activeThreadId;
+		if (threadId === null) throw new Error("No thread is open.");
+		return this.requireClient().call(
+			"dalgona/item/output/read",
+			{ threadId, itemId, offset },
+			parseOutputReadResponse,
+		);
+	}
+
 	private async loadSettings(generation: number): Promise<void> {
 		const settings = await this.requireClient().call(
 			"dalgona/settings/read",
@@ -522,6 +536,9 @@ export class Session {
 		const theme = settings.find((setting) => setting.key === "theme");
 		if (theme !== undefined)
 			this.applyThemeSetting(parseThemeSetting(theme.value));
+		const verbosity = settings.find((setting) => setting.key === "verbosity");
+		if (verbosity !== undefined)
+			this.verbosity = parseVerbosity(verbosity.value);
 	}
 
 	private async loadKeywords(generation: number): Promise<void> {

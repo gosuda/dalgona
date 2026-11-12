@@ -316,6 +316,27 @@ function durationValue(item: {
 	return typeof item["durationMs"] === "number" ? item["durationMs"] : null;
 }
 
+function spillMember(item: { readonly [key: string]: unknown }): {
+	readonly spill?: {
+		readonly path: string;
+		readonly bytes: number;
+		readonly sha256: string;
+	};
+} {
+	const spill = item["outputSpill"];
+	if (!isObject(spill)) return {};
+	const path = spill["path"];
+	const bytes = spill["bytes"];
+	const sha256 = spill["sha256"];
+	if (
+		typeof path !== "string" ||
+		typeof bytes !== "number" ||
+		typeof sha256 !== "string"
+	)
+		return {};
+	return { spill: { path, bytes, sha256 } };
+}
+
 function transcriptItem(
 	value: unknown,
 	completion: "complete" | "pending",
@@ -358,6 +379,7 @@ function transcriptItem(
 				typeof item["status"] === "string" ? item["status"] : "inProgress",
 			exitCode: typeof item["exitCode"] === "number" ? item["exitCode"] : null,
 			durationMs: durationValue(item),
+			...spillMember(item),
 		};
 	}
 	if (kind === "fileChange") {
@@ -399,6 +421,7 @@ function transcriptItem(
 			status:
 				typeof item["status"] === "string" ? item["status"] : "inProgress",
 			durationMs: durationValue(item),
+			...spillMember(item),
 		};
 	}
 	if (kind === "functionCallOutput") {
@@ -615,6 +638,27 @@ export function parseSettingsReadResponse(
 	});
 }
 
+export function parseOutputReadResponse(value: unknown): {
+	readonly text: string;
+	readonly offset: number;
+	readonly next: number;
+	readonly total: number;
+} {
+	const label = "dalgona/item/output/read";
+	const body = object(value, label);
+	if (!hasMembers(body, ["text", "offset", "next", "total"])) fail(label);
+	const offset = body["offset"];
+	const next = body["next"];
+	const total = body["total"];
+	if (
+		typeof offset !== "number" ||
+		typeof next !== "number" ||
+		typeof total !== "number"
+	)
+		fail(label);
+	return { text: requiredString(body, "text", label), offset, next, total };
+}
+
 export function parseInitializeResponse(value: unknown): InitializeInfo {
 	const body = object(value, "initialize");
 	return {
@@ -649,6 +693,7 @@ function dynamicToolItem(
 		output,
 		status: typeof item["status"] === "string" ? item["status"] : "inProgress",
 		durationMs: durationValue(item),
+		...spillMember(item),
 	};
 }
 
