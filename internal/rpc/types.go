@@ -66,6 +66,23 @@ type (
 		Tool       string
 		Arguments  jsontext.Value
 		DurationMs *int64
+		Spill      *OutputSpill
+	}
+	OutputSpill struct {
+		Path   string `json:"path"`
+		Bytes  int64  `json:"bytes"`
+		SHA256 string `json:"sha256"`
+	}
+	OutputReadParams struct {
+		ThreadID string
+		ItemID   string
+		Offset   int64
+	}
+	OutputReadResponse struct {
+		Text   string `json:"text"`
+		Offset int64  `json:"offset"`
+		Next   int64  `json:"next"`
+		Total  int64  `json:"total"`
 	}
 	FileChange struct {
 		Path        string `json:"path"`

@@ -327,6 +327,7 @@ func (t *tracker) toolCompleted(_ uint64, ev event.Event) {
 		it.Status = statusFailed
 	}
 	it.Output, it.ExitCode = e.Output, e.ExitCode
+	it.Spill = outputSpill(e.Spill)
 	t.finishDuration(it, e.CallID, e.CompletedAt)
 	turnID := t.currentTurn()
 	t.sink.item(methodItemCompleted, turnID, it)

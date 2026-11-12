@@ -76,6 +76,7 @@ func (it Item) writeCommand(o *out) {
 		o.int("exitCode", int64(*it.ExitCode))
 	}
 	it.writeDuration(o)
+	it.writeSpill(o)
 }
 
 func (it Item) writeFileChange(o *out) {
@@ -111,6 +112,7 @@ func (it Item) writeMCP(o *out) {
 	o.raw("arguments", it.Arguments)
 	o.str("status", toolStatus(it.Status))
 	it.writeDuration(o)
+	it.writeSpill(o)
 	switch it.Status {
 	case statusCompleted:
 		o.key("result")
@@ -136,6 +138,7 @@ func (it Item) writeDynamic(o *out) {
 	o.raw("arguments", it.Arguments)
 	o.str("status", toolStatus(it.Status))
 	it.writeDuration(o)
+	it.writeSpill(o)
 	if it.Status == statusInProgress {
 		return
 	}
@@ -153,6 +156,18 @@ func (it Item) writeDuration(o *out) {
 	if it.DurationMs != nil {
 		o.int("durationMs", *it.DurationMs)
 	}
+}
+
+func (it Item) writeSpill(o *out) {
+	if it.Spill == nil {
+		return
+	}
+	o.key("outputSpill")
+	o.open()
+	o.str("path", it.Spill.Path)
+	o.int("bytes", it.Spill.Bytes)
+	o.str("sha256", it.Spill.SHA256)
+	o.close()
 }
 
 func toolStatus(status string) string {
@@ -269,6 +284,8 @@ func (s *itemDecoder) number(name string, d *jsontext.Decoder) (bool, error) {
 		return true, s.it.readExit(d)
 	case "durationMs":
 		return true, s.it.readDuration(d)
+	case "outputSpill":
+		return true, s.it.readSpill(d)
 	}
 	return false, nil
 }
@@ -317,6 +334,32 @@ func (it *Item) readDuration(d *jsontext.Decoder) error {
 	ms, err := readInt(d)
 	value := int64(ms)
 	it.DurationMs = &value
+	return err
+}
+
+func (it *Item) readSpill(d *jsontext.Decoder) error {
+	if d.PeekKind() == 'n' {
+		_, err := d.ReadToken()
+		return err
+	}
+	var spill OutputSpill
+	err := readMembers(d, func(name string, d *jsontext.Decoder) error {
+		var err error
+		switch name {
+		case "path":
+			spill.Path, err = readString(d)
+		case "bytes":
+			var n int
+			n, err = readInt(d)
+			spill.Bytes = int64(n)
+		case "sha256":
+			spill.SHA256, err = readString(d)
+		default:
+			err = d.SkipValue()
+		}
+		return err
+	})
+	it.Spill = &spill
 	return err
 }
 

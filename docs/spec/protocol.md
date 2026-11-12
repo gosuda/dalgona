@@ -78,6 +78,7 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `dalgona/thread/leaf/set {threadId, turnId}` | `{}`. |
 | `dalgona/advisor/status {threadId}` | `[{name, model, status: idle|reviewing|halted|disabled, notes, usage:{inputTokens, outputTokens}}]`. |
 | `dalgona/advisor/set {threadId, enabled}`, `dalgona/advisor/reset {threadId}` | `{}`. |
+| `dalgona/item/output/read {threadId, itemId, offset?}` | `{text, offset, next, total}`. `next` equals `total` at the end of the output. A call without a spill MUST give `-32602` `call <id> has no spilled output`. |
 | `dalgona/retry/wait {threadId, turnId, remainingMs}` | Notification, not a method. Sent once a second during an attended rate-limit wait, and once with `remainingMs` 0 when the wait ends. Not journaled. |
 
 `thread/revert`, `thread/fork`, `turn/start`, and `dalgona/thread/leaf/set` require an idle thread. A running thread MUST give `-32600` `thread <id> is running`.
@@ -129,6 +130,8 @@ The tool class sets the item kind. Class `exec` gives `commandExecution`. Class 
 A file change carries a unified diff of its journaled pre-image and post-image, with three lines of context. `additions` and `deletions` count the added and removed lines. A file without a pre-image is `add`. A file without a post-image is `delete`.
 
 A file change MUST set `diffOmitted` to `true` when either image is over 1 MiB. It MUST also do so when an image has a digest but no blob, or when its blob cannot be loaded. An update record written before post blobs existed has a post digest and no post blob. Such a change MUST have an empty `diff` and no counts.
+
+`commandExecution`, `mcpToolCall`, and `dynamicToolCall` items MUST carry `outputSpill` when their output is spilled. `outputSpill` MUST hold `path`, `bytes`, and `sha256`, and the client MUST read the rest of the output with `dalgona/item/output/read`. A page MUST hold at most 1 MiB of source bytes, and it MUST end at a line break when one lies in its window. Without a line break, a page MUST end at a UTF-8 rune start, or at the byte limit if none exists.
 
 When a subscription closes because the subscriber was slow, the server MUST subscribe again and replay the missed events from the journal in sequence order. An event with a sequence number at or below the last delivered one MUST NOT be sent twice.
 
