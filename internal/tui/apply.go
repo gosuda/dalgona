@@ -229,7 +229,7 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 	item := m.liveItem(event.Item.ID).settle(sanitizeItem(event.Item))
 	m.live.items = slices.DeleteFunc(m.live.items, func(live liveItem) bool { return live.ID == item.ID })
 	if !isAdvisorItem(item) {
-		m.commit("item:"+event.ThreadID+":"+item.ID, strings.Split(m.renderSettledItem(item), "\n"))
+		m.commit("item:"+event.ThreadID+":"+item.ID, m.renderSettledItem(item))
 	}
 	return nil
 }

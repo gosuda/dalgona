@@ -96,13 +96,13 @@ func TestModelAppliesSchemaExactTurnNotifications(t *testing.T) {
 	assertContains(t, m.View().Content, "Running go test ./...", "ok  internal/tui")
 	m, text := schemaSettled(t, m, `{"threadId":"t1","turnId":"turn-1","completedAtMs":2,"item":{"type":"commandExecution","id":"c1",`+
 		`"command":"go test ./...","commandActions":[],"cwd":"/work","status":"completed","aggregatedOutput":"ok  internal/tui\nPASS","exitCode":0}}`)
-	assertContains(t, text, "$ go test ./...", "PASS")
+	assertContains(t, text, "go test ./...", "PASS")
 	m, text = schemaSettled(t, m, `{"threadId":"t1","turnId":"turn-1","completedAtMs":3,"item":{"type":"userMessage","id":"u1",`+
 		`"clientId":null,"content":[{"type":"text","text":"steer toward the decoder","text_elements":[]}]}}`)
-	assertContains(t, text, "you", "steer toward the decoder")
+	assertContains(t, text, "steer toward the decoder")
 	_, text = schemaSettled(t, m, `{"threadId":"t1","turnId":"turn-1","completedAtMs":4,"item":{"content":[{"type":"text",`+
 		`"text":"content before type","text_elements":[]}],"clientId":null,"id":"u2","type":"userMessage"}}`)
-	assertContains(t, text, "you", "content before type")
+	assertContains(t, text, "content before type")
 }
 
 func TestModelKeepsStreamedTextOnCompletion(t *testing.T) {
@@ -163,10 +163,10 @@ func TestModelRendersSchemaExactResponses(t *testing.T) {
 		t.Fatalf("resumed: command %v id %q title %q state %q", command, m.thread.id, m.thread.title, m.thread.state)
 	}
 	text := stripANSI(strings.Join([]string{
-		m.renderSettledItem(read.Thread.Turns[0].Items[0]),
-		m.renderSettledItem(read.Thread.Turns[0].Items[1]),
+		settledText(&m, read.Thread.Turns[0].Items[0]),
+		settledText(&m, read.Thread.Turns[0].Items[1]),
 	}, "\n"))
-	assertContains(t, text, "earlier prompt", "$ go vet ./...", "vet clean")
+	assertContains(t, text, "earlier prompt", "go vet ./...", "vet clean")
 
 	var list rpc.ThreadListResponse
 	if err := json.Unmarshal(schemaValue(t, "ThreadListResponse", `{"data":[`+schemaThread+`],"nextCursor":null}`), &list); err != nil {

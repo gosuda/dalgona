@@ -90,7 +90,8 @@ func TestComposerAndSentMessageKeywordGlow(t *testing.T) {
 	if got := strings.ReplaceAll(underlinedRunes(view), "\n", ""); got != "ultrathink" {
 		t.Fatalf("wrapped composer lost its keyword mark: %q\n%q", got, view)
 	}
-	settled := m.renderSettledItem(rpc.Item{
+	m.screen.width = 40
+	settled := settledText(&m, rpc.Item{
 		Type:     "userMessage",
 		Text:     "ultrathink, please",
 		Keywords: []rpc.KeywordMatch{{ByteRange: rpc.ByteRange{Start: 0, End: 10}}},

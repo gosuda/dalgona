@@ -133,7 +133,7 @@ func (t theme) codes(r role) []string {
 
 func (t theme) paint(r role, s string) string {
 	codes := t.codes(r)
-	if len(codes) == 0 {
+	if len(codes) == 0 || s == "" {
 		return s
 	}
 	return sgr(codes) + s + reset
@@ -151,6 +151,13 @@ func (t theme) liveTag(hue int, s string) string {
 	codes := append([]string{"1"}, rgbCodes("38", pair[1])...)
 	codes = append(codes, rgbCodes("48", pair[0])...)
 	return sgr(codes) + s + reset
+}
+
+func (t theme) hueText(hue int, s string) string {
+	if !t.known || !t.color {
+		return s
+	}
+	return sgr(rgbCodes("38", hues[t.name][hue][0])) + s + reset
 }
 
 func (s *screenState) setTheme() {

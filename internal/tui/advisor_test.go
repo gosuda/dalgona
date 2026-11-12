@@ -45,9 +45,9 @@ func TestModelRendersResumedAdvisorItemAsCard(t *testing.T) {
 		Type: "dynamicToolCall", ID: "adv1", Tool: "advisor", Status: "completed", Output: note,
 		Arguments: []byte(`{"advisor":"watch","severity":"blocker","delivery":"steer"}`),
 	}
-	assertContains(t, stripANSI(m.renderSettledItem(item)), "advisor watch · blocker: "+note)
+	assertContains(t, stripANSI(settledText(&m, item)), "advisor watch · blocker: "+note)
 	item.Arguments = []byte(`[]`)
-	assertContains(t, stripANSI(m.renderSettledItem(item)), "advisor [completed]", note)
+	assertContains(t, stripANSI(settledText(&m, item)), "Advisor", "Done", note)
 }
 
 func TestModelAdvisorCommands(t *testing.T) {

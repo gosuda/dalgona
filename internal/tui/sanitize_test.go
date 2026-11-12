@@ -33,14 +33,14 @@ func TestRenderSettledItemStripsEscapes(t *testing.T) {
 	m := newModel(nil, Options{}, nil)
 	m.screen.width = 80
 	item := rpc.Item{Type: "commandExecution", Command: "\x1b[8mrm -rf /\x1b[0m", Output: "esc\x1b]0;pwn\x07aped"}
-	rendered := m.renderSettledItem(item)
+	rendered := settledText(&m, item)
 	if strings.ContainsAny(rendered, "\x1b\x07") {
 		t.Fatalf("settled command item kept escapes: %q", rendered)
 	}
 	if !strings.Contains(rendered, "rm -rf /") {
 		t.Fatalf("command text lost: %q", rendered)
 	}
-	agent := m.renderSettledItem(rpc.Item{Type: "agentMessage", Text: "\x1b[8mconcealed\x1b[0m visible"})
+	agent := settledText(&m, rpc.Item{Type: "agentMessage", Text: "\x1b[8mconcealed\x1b[0m visible"})
 	if !strings.Contains(sanitizeText(agent), "concealed visible") {
 		t.Fatalf("agent message text lost after sanitize: %q", agent)
 	}

@@ -233,8 +233,27 @@ The client MUST paint text in the text, dim, accent-text, and failed-text roles.
 An error notice MUST be bold in the failed-text role.
 The client MUST paint the `Offline` state word in the warning-text role.
 The client MUST paint the `Failed` state word in the live tag in bold failed-text, with no fill.
+The client MUST paint added diff lines in the added-text role, and removed diff lines in the failed-text role.
 A row written before the theme is known MUST NOT use a colour.
 A theme change MUST NOT rewrite a written row.
+
+## Transcript rows
+
+A finished item MUST print once as a row, and a row MUST NOT print again.
+An agent message MUST print as Markdown, with no row.
+The state column MUST be 10 cells: a mark or two blank cells, then the state word in 8 cells.
+The label MUST be at most 9 cells, and one space MUST follow it.
+The meta field MUST be 9 cells, and the duration MUST be 8 cells, right aligned.
+The subject MUST follow the label and its space, or the state column when no label shows.
+Body lines MUST start under the subject and wrap inside the rest of the row.
+A row MUST end with one blank line.
+The state word MUST be `Done` for `completed`, `Failed` for `failed`, `Declined` for `declined`, and `Working` for `inProgress`.
+A failed row MUST show `Failed` in bold failed-text, with no background.
+A successful `todo` call MUST NOT print a tool row.
+A nested tool call MUST print its own row under its `<run>/<n>` item ID.
+An `eval` item MUST print one line with its code line count and its state word.
+A file change MUST print one row for each file, with its added and removed counts.
+A file change whose diff the server omitted MUST show `diff omitted` in place of its counts.
 
 ## Motion
 

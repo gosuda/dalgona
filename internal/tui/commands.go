@@ -471,7 +471,7 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	m.out.loads++
 	m.commit(threadKey(m.thread.id, m.out.loads), head)
 	for _, item := range items {
-		m.commit("item:"+m.thread.id+":"+item.ID, strings.Split(m.renderSettledItem(item), "\n"))
+		m.commit("item:"+m.thread.id+":"+item.ID, m.renderSettledItem(item))
 	}
 	return nil
 }
