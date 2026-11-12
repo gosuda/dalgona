@@ -12,7 +12,6 @@ import (
 	"github.com/gosuda/dalgona/internal/model/openai"
 )
 
-// source: .references/pi/packages/ai/src/api/openai-codex-responses.ts
 const (
 	DefaultBaseURL      = "https://chatgpt.com/backend-api/codex"
 	defaultInstructions = "You are a helpful assistant."
@@ -44,7 +43,6 @@ var (
 	legacyEffort = []string{"low", "medium", "high", "xhigh"}
 )
 
-// source: .references/codex/codex-rs/models-manager/models.json
 var staticModels = []staticModel{
 	{id: "gpt-6.1-sol", context: 272000, efforts: fullEfforts, images: true},
 	{id: "gpt-6-astra", context: 272000, efforts: fullEfforts, images: true},

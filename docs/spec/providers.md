@@ -28,6 +28,8 @@ The `chatgpt` provider MUST send the OpenAI Responses request to `https://chatgp
 
 The account id comes from the ID token. It is the `chatgpt_account_id` claim under `https://api.openai.com/auth` when present. Otherwise it is the `email` claim, or the `sub` claim when no `email` claim exists.
 
+The default `chatgpt` base URL MUST be `pi`'s `DEFAULT_CODEX_BASE_URL` with `/codex` appended. The static Codex model list MUST come from `codex-rs/models-manager/models.json` in the Codex repository.
+
 The `antigravity` provider MUST send `POST /v1internal:streamGenerateContent?alt=sse` to `https://daily-cloudcode-pa.googleapis.com`. The body MUST be the envelope `{project, requestId, request, model, userAgent:"antigravity"}`. `request` MUST be the Google request body. `requestId` MUST have the form `agent/<id>/<unix ms>/<id>/<step>`, where `<step>` is the message count and at least 1. The `User-Agent` header MUST be `antigravity/hub/<version> (aidev_client; os_type=<os>; arch=<arch>; cl=<changelist>)`. Each SSE event MUST carry the Google response under `response`. An event without `response` MUST decode as a Google response. Decoding MUST follow the Google rules.
 
 The Antigravity client headers MUST follow oh-my-pi's `packages/catalog/src/wire/gemini-headers.ts`, with the offline fallback version `2.26.0`. The `requestId` form MUST follow `buildAntigravityRequestEnvelope` in oh-my-pi's `packages/ai/src/providers/google-gemini-cli.ts`. The static Antigravity list MUST name the `google-antigravity` models with thinking mode `google-level` in oh-my-pi's `packages/catalog/src/models.json`. The onboarding tier and timeout MUST follow oh-my-pi's `packages/ai/src/registry/oauth/google-antigravity.ts`.
