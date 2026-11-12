@@ -419,8 +419,8 @@ func TestWriteSetting_rejectsInvalidOutputWithoutReplacingFile(t *testing.T) {
 		home := t.TempDir()
 		original := []byte("model = \"settings/model\"\n")
 		writeConfigFile(t, home, "settings.toml", string(original))
-		if err := config.WriteSetting(home, test.key, test.value); err == nil {
-			t.Fatalf("WriteSetting(%q) succeeded", test.key)
+		if err := config.WriteSettings(home, config.SettingEdit{Key: test.key, Value: test.value}); err == nil {
+			t.Fatalf("WriteSettings(%q) succeeded", test.key)
 		}
 		raw, err := os.ReadFile(filepath.Join(home, "settings.toml"))
 		if err != nil {
@@ -433,7 +433,7 @@ func TestWriteSetting_rejectsInvalidOutputWithoutReplacingFile(t *testing.T) {
 func TestWriteSetting_roundTripsRemotes(t *testing.T) {
 	home := t.TempDir()
 	writeConfigFile(t, home, "config.toml", "[remotes.work]\nservice = \"docker\"\nimage = \"dalgona-box:dev\"\nbox_id = \"old\"\n")
-	if err := config.WriteSetting(home, "remotes.work", map[string]any{"box_id": "abc123"}); err != nil {
+	if err := config.WriteSettings(home, config.SettingEdit{Key: "remotes.work", Value: map[string]any{"box_id": "abc123"}}); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DALGONA_HOME", home)
@@ -445,7 +445,7 @@ func TestWriteSetting_roundTripsRemotes(t *testing.T) {
 	if got := cfg.Remotes["work"]; got != want {
 		t.Fatalf("remotes.work = %+v, want %+v", got, want)
 	}
-	if err = config.WriteSetting(home, "remotes.work.box_id", ""); err != nil {
+	if err = config.WriteSettings(home, config.SettingEdit{Key: "remotes.work.box_id", Value: ""}); err != nil {
 		t.Fatal(err)
 	}
 	if cfg, err = config.Load(config.ProductDalgona, t.TempDir(), config.Flags{}); err != nil || cfg.Remotes["work"].BoxID != "" {
@@ -457,7 +457,7 @@ func TestWriteSetting_preservesEditStyleOrder(t *testing.T) {
 	home := t.TempDir()
 	body := "[edit_style]\ndefault = \"anchor\"\n\"openai/*\" = \"replace\"\n\"openai/gpt-?\" = \"hashline\"\n"
 	writeConfigFile(t, home, "settings.toml", body)
-	if err := config.WriteSetting(home, "model", "openai/gpt-6"); err != nil {
+	if err := config.WriteSettings(home, config.SettingEdit{Key: "model", Value: "openai/gpt-6"}); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DALGONA_HOME", home)
@@ -475,7 +475,7 @@ func TestWriteSetting_updatesOnlySettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeConfigFile(t, home, "settings.toml", "model = \"settings/model\"\n")
-	if err := config.WriteSetting(home, "approval_decider.threshold", 0.75); err != nil {
+	if err := config.WriteSettings(home, config.SettingEdit{Key: "approval_decider.threshold", Value: 0.75}); err != nil {
 		t.Fatal(err)
 	}
 	gotConfig, err := os.ReadFile(filepath.Join(home, "config.toml"))

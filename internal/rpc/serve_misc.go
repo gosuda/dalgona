@@ -161,7 +161,7 @@ func (s *server) configValueWrite(_ context.Context, params jsontext.Value) (jso
 		return nil, err
 	}
 	cfg := s.host.Config()
-	if writeErr := config.WriteSetting(cfg.Home, key, setting); writeErr != nil {
+	if writeErr := config.WriteSettings(cfg.Home, config.SettingEdit{Key: key, Value: setting}); writeErr != nil {
 		return nil, invalidParams(writeErr.Error())
 	}
 	overridesOf(s.host).set(key, setting)

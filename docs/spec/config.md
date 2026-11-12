@@ -36,6 +36,18 @@ feedback = ["lost_code", "placeholder", "incomplete"]
 
 An absent `feedback` MUST select the built-in speaker set. An empty `feedback` MUST select no speaker. The `sound` question MUST NOT be a speaker.
 
+The interactive settings MUST use the keys in the table below.
+
+| Key | Values | Default | Wire name |
+|---|---|---|---|
+| `verbosity` | `low`, `medium`, `high` | `medium` | `verbosity` |
+| `theme` | `auto`, `auto-soft`, `night`, `soft-night`, `day`, `soft-day` | `auto` | `theme` |
+| `icons` | `auto`, `unicode`, `nerd` | `auto` | `icons` |
+| `status_hide` | `effort`, `approval`, `sandbox`, `folder`, `queue`, `context`, `mark` | `[]` | `statusHide` |
+| `notifications` | `true`, `false` | `true` | `notifications` |
+
+The `auto` theme MUST follow the system and use `night` or `day`. The `auto-soft` theme MUST follow the system and use `soft-night` or `soft-day`. The `status_hide` key MUST NOT name `model`.
+
 When no layer sets `[approval_decider] threshold`, its value MUST be `0.9`.
 
 The loader MUST validate approval, sandbox, reasoning, tool mode, durations, and runner options. Durations MUST use Go duration syntax. Invalid durations MUST fail loading. A sandbox0 runner MUST use a template and MUST NOT set an image.
@@ -46,9 +58,9 @@ Edit styles MUST be one of anchor, replace, hashline, hashline-light, hashline-e
 
 A custom keyword name MUST match `^[a-z][a-z0-9_-]{1,31}$`. A custom keyword MUST set exactly one of `notice` or `text`. A notice path MUST be relative to the product home and MUST name an existing regular file. A built-in keyword override MAY set only selected fields, including `enabled = false`.
 
-`WriteSetting` MUST update only `settings.toml`. It MUST preserve `config.toml`. It MUST preserve the source order of existing `edit_style` rows. It MUST decode and validate the new document before replacing the file. Invalid keys and values MUST leave the prior file unchanged. It MUST write through a temporary file and rename it into place.
+`WriteSettings` MUST update only `settings.toml`. It MUST apply all of its edits, or none. It MUST preserve `config.toml`. It MUST preserve the source order of existing `edit_style` rows. It MUST decode and validate the new document before replacing the file. Invalid keys and values MUST leave the prior file unchanged. It MUST write through a temporary file and rename it into place.
 
-Workspace trust MUST persist as the top-level `mcp_trusted_workspaces` list of workspace paths in `settings.toml`. Only `WriteSetting` and `TrustWorkspace` write this key. An empty list means no workspace is trusted. Every entry MUST be a nonempty workspace path. `TrustWorkspace` MUST store the workspace it adds in canonical form (`filepath.Abs` plus `EvalSymlinks`, falling back to `Clean`). `dal` MUST reject the key as dalgona-only.
+Workspace trust MUST persist as the top-level `mcp_trusted_workspaces` list of workspace paths in `settings.toml`. Only `WriteSettings` and `TrustWorkspace` write this key. An empty list means no workspace is trusted. Every entry MUST be a nonempty workspace path. `TrustWorkspace` MUST store the workspace it adds in canonical form (`filepath.Abs` plus `EvalSymlinks`, falling back to `Clean`). `dal` MUST reject the key as dalgona-only.
 
 ```toml
 mcp_trusted_workspaces = ["/work/repo"]

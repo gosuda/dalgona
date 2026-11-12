@@ -11,7 +11,7 @@ import (
 
 func TestWriteSetting_durableWrite(t *testing.T) {
 	home := t.TempDir()
-	if err := config.WriteSetting(home, "model", "m"); err != nil {
+	if err := config.WriteSettings(home, config.SettingEdit{Key: "model", Value: "m"}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	path := filepath.Join(home, "settings.toml")

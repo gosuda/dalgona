@@ -195,7 +195,7 @@ func (b *Binder) setRemote(name string, spec config.RemoteSpec) error {
 			table[key] = value
 		}
 	}
-	if err := config.WriteSetting(b.opts.Config.Home, "remotes."+name, table); err != nil {
+	if err := config.WriteSettings(b.opts.Config.Home, config.SettingEdit{Key: "remotes." + name, Value: table}); err != nil {
 		return fmt.Errorf("remote: record [remotes.%s]: %w", name, err)
 	}
 	b.mu.Lock()

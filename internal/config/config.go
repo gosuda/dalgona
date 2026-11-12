@@ -100,6 +100,33 @@ const (
 	ApprovalAsk  Approval = "ask"
 )
 
+type Verbosity string
+
+const (
+	VerbosityLow    Verbosity = "low"
+	VerbosityMedium Verbosity = "medium"
+	VerbosityHigh   Verbosity = "high"
+)
+
+type Theme string
+
+const (
+	ThemeAuto      Theme = "auto"
+	ThemeAutoSoft  Theme = "auto-soft"
+	ThemeNight     Theme = "night"
+	ThemeSoftNight Theme = "soft-night"
+	ThemeDay       Theme = "day"
+	ThemeSoftDay   Theme = "soft-day"
+)
+
+type Icons string
+
+const (
+	IconsAuto    Icons = "auto"
+	IconsUnicode Icons = "unicode"
+	IconsNerd    Icons = "nerd"
+)
+
 type SandboxMode string
 
 const (
@@ -229,6 +256,11 @@ type Config struct {
 	ToolMode                              ToolMode
 	Sandbox                               SandboxMode
 	SandboxWritableRoots                  []string
+	Verbosity                             Verbosity
+	Theme                                 Theme
+	Icons                                 Icons
+	StatusHide                            []string
+	Notifications                         bool
 	EditStyle                             EditStyleSpec
 	CompactionThreshold                   float64
 	CompactionKeepTokens                  int
@@ -263,6 +295,7 @@ func defaultConfigWithHome(product Product, home, cwd string) Config {
 		Home: home, Product: product, Cwd: cwd,
 		Reasoning: ReasoningDefault, Approval: ApprovalAuto, ToolMode: ToolModeNormal,
 		Sandbox: SandboxWorkspaceWrite, Runner: "local",
+		Verbosity: VerbosityMedium, Theme: ThemeAuto, Icons: IconsAuto, StatusHide: []string{}, Notifications: true,
 		EditStyle: EditStyleSpec{Default: "anchor"}, CompactionThreshold: .8,
 		CompactionKeepTokens: 20000, StreamStartTimeout: time.Minute,
 		StreamIdleTimeout: 5 * time.Minute, ApprovalDecider: ApprovalDeciderConfig{Threshold: .9},

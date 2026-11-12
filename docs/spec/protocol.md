@@ -67,7 +67,7 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `turn/interrupt {threadId, turnId}` | `{}`. |
 | `model/list` | Models of every configured provider. `id` is `<provider>/<model>`. |
 | `config/read` | `{config: {model, model_provider, approval_policy, sandbox_mode, model_reasoning_effort}, origins: {}}` from the current settings. |
-| `config/value/write {keyPath, value}` | Writes `settings.toml` through `config.WriteSetting`. Codex keys `approval_policy`, `sandbox_mode`, and `model_reasoning_effort` map to `approval`, `sandbox`, and `reasoning`. Direct keys `model`, `approval`, `sandbox`, and `reasoning` pass through with the same value checks. Other keys give `-32602`. `version` is the SHA-256 of the written file. |
+| `config/value/write {keyPath, value}` | Writes `settings.toml` through `config.WriteSettings`. Codex keys `approval_policy`, `sandbox_mode`, and `model_reasoning_effort` map to `approval`, `sandbox`, and `reasoning`. Direct keys `model`, `approval`, `sandbox`, and `reasoning` pass through with the same value checks. Other keys give `-32602`. `version` is the SHA-256 of the written file. |
 | `account/read` | `chatgpt` when a ChatGPT OAuth credential exists, else `apiKey` when any credential exists, else `null`. `requiresOpenaiAuth` is `false`. |
 | `account/login/start {type, apiKey?, provider?}` | `apiKey` stores the key for `provider` (default `openai`). `chatgpt` and `chatgptDeviceCode` run the ChatGPT OAuth flow and send `account/login/completed`. Other OAuth providers MUST log in through the terminal (`dal login <provider>`). |
 | `account/login/cancel {loginId}` | `{status: canceled|notFound}`. |

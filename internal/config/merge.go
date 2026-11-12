@@ -26,6 +26,11 @@ type fileDoc struct {
 	ApprovalValue        *string                `toml:"approval"`
 	ToolMode             *string                `toml:"tool_mode"`
 	Sandbox              *string                `toml:"sandbox"`
+	Verbosity            *string                `toml:"verbosity"`
+	Theme                *string                `toml:"theme"`
+	Icons                *string                `toml:"icons"`
+	StatusHide           *[]string              `toml:"status_hide"`
+	Notifications        *bool                  `toml:"notifications"`
 	SandboxWritableRoots []string               `toml:"sandbox_writable_roots"`
 	EditStyle            editStyleDoc           `toml:"edit_style"`
 	CompactionThreshold  *float64               `toml:"compaction_threshold"`
@@ -238,6 +243,11 @@ func (c *Config) mergeScalars(current layer) error {
 	setString(doc.ApprovalValue, (*string)(&c.Approval))
 	setString(doc.ToolMode, (*string)(&c.ToolMode))
 	setString(doc.Sandbox, (*string)(&c.Sandbox))
+	setString(doc.Verbosity, (*string)(&c.Verbosity))
+	setString(doc.Theme, (*string)(&c.Theme))
+	setString(doc.Icons, (*string)(&c.Icons))
+	setStrings(doc.StatusHide, &c.StatusHide)
+	setBool(doc.Notifications, &c.Notifications)
 	setString(doc.Runner, &c.Runner)
 	setString(doc.Remote, &c.Remote)
 	if doc.SandboxWritableRoots != nil {
@@ -259,6 +269,12 @@ func (c *Config) mergeScalars(current layer) error {
 }
 
 func setString(source *string, target *string) {
+	if source != nil {
+		*target = *source
+	}
+}
+
+func setStrings(source *[]string, target *[]string) {
 	if source != nil {
 		*target = *source
 	}
@@ -402,6 +418,7 @@ func (c *Config) validate() error {
 	errs = append(errs, c.validateRunners()...)
 	errs = append(errs, c.validateKeywords()...)
 	errs = append(errs, c.validateAdvisors()...)
+	errs = append(errs, c.validateStatusHideList()...)
 	return errors.Join(errs...)
 }
 
@@ -419,7 +436,20 @@ func (c *Config) validateEnums() []error {
 	if !one(string(c.ToolMode), "normal", "eval-first", "eval-only") {
 		errs = append(errs, c.valueError("tool_mode", "tool_mode must be one of normal, eval-first, eval-only"))
 	}
+	for _, choice := range []struct{ key, value string }{{"verbosity", string(c.Verbosity)}, {"theme", string(c.Theme)}, {"icons", string(c.Icons)}} {
+		options := optionsOf(choice.key)
+		if !one(choice.value, options...) {
+			errs = append(errs, c.valueError(choice.key, choice.key+" must be one of "+strings.Join(options, ", ")))
+		}
+	}
 	return errs
+}
+
+func (c *Config) validateStatusHideList() []error {
+	if err := validateStatusHide(c.StatusHide); err != nil {
+		return []error{c.valueError("status_hide", err.Error())}
+	}
+	return nil
 }
 
 func (c *Config) validateApprovalDecider() []error {
@@ -595,16 +625,12 @@ func tomlKeyLine(raw []byte, node *unstable.Node) int {
 	return 1 + bytes.Count(raw[:offset], []byte{'\n'})
 }
 
-func WriteSetting(home, key string, value any) error {
+func WriteSettings(home string, edits ...SettingEdit) error {
 	unlock, err := auth.LockHome(home)
 	if err != nil {
 		return fmt.Errorf("lock settings write: %w", err)
 	}
 	defer func() { _ = unlock() }()
-	parts, err := splitSettingKey(key)
-	if err != nil {
-		return err
-	}
 	path := filepath.Join(home, "settings.toml")
 	raw, err := readSettingsFile(path)
 	if err != nil {
@@ -614,7 +640,13 @@ func WriteSetting(home, key string, value any) error {
 	if err != nil {
 		return err
 	}
-	setNested(doc, parts, value)
+	for _, edit := range edits {
+		parts, splitErr := splitSettingKey(edit.Key)
+		if splitErr != nil {
+			return splitErr
+		}
+		setNested(doc, parts, edit.Value)
+	}
 	output, err := encodeSettingsDocument(doc, original)
 	if err != nil {
 		return err
@@ -654,7 +686,7 @@ func TrustWorkspace(home, cwd string) error {
 	if slices.Contains(trusted, clean) {
 		return nil
 	}
-	return WriteSetting(home, "mcp_trusted_workspaces", append(trusted, clean))
+	return WriteSettings(home, SettingEdit{Key: "mcp_trusted_workspaces", Value: append(trusted, clean)})
 }
 
 func splitSettingKey(key string) ([]string, error) {

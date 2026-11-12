@@ -123,7 +123,7 @@ func TestRolesConfig_Configured(t *testing.T) {
 
 func TestWriteSetting_togglesAdvisor(t *testing.T) {
 	home := t.TempDir()
-	if err := config.WriteSetting(home, "advisor.enabled", true); err != nil {
+	if err := config.WriteSettings(home, config.SettingEdit{Key: "advisor.enabled", Value: true}); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DALGONA_HOME", home)
@@ -134,7 +134,7 @@ func TestWriteSetting_togglesAdvisor(t *testing.T) {
 	if !cfg.Advisor.Enabled {
 		t.Fatal("advisor.enabled setting not applied")
 	}
-	if err := config.WriteSetting(home, "advisor.sync", "sometimes"); err == nil {
+	if err := config.WriteSettings(home, config.SettingEdit{Key: "advisor.sync", Value: "sometimes"}); err == nil {
 		t.Fatal("invalid advisor.sync was written")
 	}
 }

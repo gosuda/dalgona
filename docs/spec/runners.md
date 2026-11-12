@@ -83,7 +83,7 @@ Pull MUST NOT move the baseline. A second pull MUST diff against the same baseli
 
 ## Mode B: the daemon in a box
 
-`[remotes.<name>]` in `settings.toml` MUST hold `service`, `box_id`, and the optional `image`, `template`, and `url`. The binder MUST write the whole table in one `config.WriteSetting` call. A name without `[remotes.<name>]` MUST fall back to `[runners.<name>]`.
+`[remotes.<name>]` in `settings.toml` MUST hold `service`, `box_id`, and the optional `image`, `template`, and `url`. The binder MUST write the whole table in one `config.WriteSettings` call. A name without `[remotes.<name>]` MUST fall back to `[runners.<name>]`.
 
 `cloudflare` MUST be refused by `cloud up`, `cloud down`, `cloud pull`, and `--remote` with:
 
