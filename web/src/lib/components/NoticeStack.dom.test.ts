@@ -2,7 +2,14 @@ import { cleanup, render, screen, within } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
-import type { Notice, NoticeTone, WaitingElsewhere } from "#lib/types.ts";
+import Transcript from "#lib/components/Transcript.svelte";
+import type {
+	Notice,
+	NoticeTone,
+	TranscriptItem,
+	TurnStatus,
+	WaitingElsewhere,
+} from "#lib/types.ts";
 
 const none: WaitingElsewhere = { count: 0, threadId: null };
 
@@ -121,3 +128,137 @@ describe("notice regions", () => {
 		);
 	});
 });
+
+describe("turn announcement", () => {
+	afterEach(cleanup);
+
+	test("the transcript adds no status region of its own", () => {
+		render(NoticeStack, { props: stack({ turnStatus: "inProgress" }) });
+		render(Transcript, {
+			props: transcript([reply("m1", "partial answer", false)], "inProgress"),
+		});
+		expect(screen.getAllByRole("status")).toHaveLength(1);
+	});
+
+	test("announces a turn change once", async () => {
+		const stackView = render(NoticeStack, {
+			props: stack({ turnStatus: "inProgress" }),
+		});
+		const transcriptView = render(Transcript, {
+			props: transcript([reply("m1", "one", false)], "inProgress"),
+		});
+		const seen = [announced()];
+		for (const text of [
+			"one two",
+			"one two three",
+			"one two three four",
+			"one two three four five",
+			"one two three four five six",
+		]) {
+			await transcriptView.rerender(
+				transcript([reply("m1", text, false)], "inProgress"),
+			);
+			seen.push(announced());
+		}
+		expect(new Set(seen)).toEqual(new Set(["Working"]));
+
+		await stackView.rerender(stack({ turnStatus: "completed" }));
+		expect(announced()).toBe("Done");
+	});
+
+	test("a retry countdown is announced once", async () => {
+		const view = render(NoticeStack, {
+			props: stack({ turnStatus: "inProgress", retryRemainingMs: 90000 }),
+		});
+		const seen = [announced()];
+		for (const ms of [89000, 88000, 60000]) {
+			await view.rerender(
+				stack({ turnStatus: "inProgress", retryRemainingMs: ms }),
+			);
+			seen.push(announced());
+		}
+		expect(new Set(seen)).toEqual(new Set(["Rate limited, retrying"]));
+
+		await view.rerender(
+			stack({ turnStatus: "inProgress", retryRemainingMs: 0 }),
+		);
+		expect(announced()).toBe("Working");
+	});
+
+	test.each([
+		{
+			name: "a retry wait",
+			input: { turnStatus: "inProgress" as const, retryRemainingMs: 90000 },
+			want: "Rate limited, retrying",
+		},
+		{
+			name: "a waiting request",
+			input: {
+				turnStatus: "inProgress" as const,
+				awaitingApproval: new Set(["m1"]),
+			},
+			want: "Waiting for your reply",
+		},
+		{
+			name: "a failed turn",
+			input: { turnStatus: "failed" as const, turnError: "upstream reset" },
+			want: "Failed: upstream reset",
+		},
+		{
+			name: "an interrupted turn",
+			input: { turnStatus: "interrupted" as const },
+			want: "Stopped",
+		},
+		{
+			name: "a loading transcript",
+			input: { loadingTranscript: true },
+			want: "Loading transcript…",
+		},
+		{ name: "no turn", input: {}, want: "" },
+	])("announces $name", ({ input, want }) => {
+		render(NoticeStack, { props: stack(input) });
+		expect(announced()).toBe(want);
+	});
+});
+
+interface TurnInput {
+	turnStatus?: TurnStatus | null;
+	turnError?: string | null;
+	loadingTranscript?: boolean;
+	retryRemainingMs?: number | null;
+	awaitingApproval?: ReadonlySet<string>;
+}
+
+function stack(input: TurnInput) {
+	return {
+		notices: [],
+		waiting: none,
+		onDismiss: vi.fn(),
+		onOpenWaiting: vi.fn(),
+		...input,
+	};
+}
+
+function transcript(items: readonly TranscriptItem[], turnStatus: TurnStatus) {
+	return {
+		threadId: "thread-1",
+		items,
+		turnStatus,
+		error: null,
+		plan: null,
+		connected: true,
+		keywords: [],
+		loading: false,
+		awaitingApproval: new Set<string>(),
+	};
+}
+
+function reply(id: string, text: string, complete: boolean): TranscriptItem {
+	return { id, kind: "agentMessage", text, complete };
+}
+
+function announced(): string | null {
+	return (
+		screen.getByRole("status").querySelector(".sr-only")?.textContent ?? null
+	);
+}

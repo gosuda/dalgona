@@ -1,16 +1,43 @@
 <script lang="ts">
 import { handoffFocus } from "#lib/focus.ts";
 import { countLabel } from "#lib/labels.ts";
-import type { Notice, WaitingElsewhere } from "#lib/types.ts";
+import type { Notice, TurnStatus, WaitingElsewhere } from "#lib/types.ts";
 
 interface Props {
 	notices: readonly Notice[];
 	waiting: WaitingElsewhere;
 	onDismiss: (id: number) => void;
 	onOpenWaiting: (threadId: string) => void;
+	turnStatus?: TurnStatus | null;
+	turnError?: string | null;
+	loadingTranscript?: boolean;
+	retryRemainingMs?: number | null;
+	awaitingApproval?: ReadonlySet<string>;
 }
 
-let { notices, waiting, onDismiss, onOpenWaiting }: Props = $props();
+let {
+	notices,
+	waiting,
+	onDismiss,
+	onOpenWaiting,
+	turnStatus = null,
+	turnError = null,
+	loadingTranscript = false,
+	retryRemainingMs = null,
+	awaitingApproval = new Set<string>(),
+}: Props = $props();
+let announcement = $derived.by(() => {
+	if (loadingTranscript) return "Loading transcript…";
+	if (turnStatus === "failed")
+		return turnError ? `Failed: ${turnError}` : "Failed";
+	if (turnStatus === "completed") return "Done";
+	if (turnStatus === "interrupted") return "Stopped";
+	if (retryRemainingMs !== null && retryRemainingMs > 0)
+		return "Rate limited, retrying";
+	if (awaitingApproval.size > 0) return "Waiting for your reply";
+	if (turnStatus === "inProgress") return "Working";
+	return "";
+});
 let errors = $derived(notices.filter((notice) => notice.tone === "error"));
 let others = $derived(notices.filter((notice) => notice.tone !== "error"));
 let waitingText = $derived(
@@ -28,6 +55,7 @@ function focusMessage(): HTMLElement | undefined {
 	{/each}
 </div>
 <div class="notices" role="status">
+	<p class="sr-only">{announcement}</p>
 	{#if waiting.count > 0}
 		<div class="notice notice-info">
 			<p>{waitingText}</p>

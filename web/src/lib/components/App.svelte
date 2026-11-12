@@ -27,7 +27,7 @@ const openThreadFlags = $derived(
 	<title>{session.activeTitle} · dalgona</title>
 </svelte:head>
 
-<a class="skip-link" href="#main-content">Skip to transcript</a>
+<a class="skip-link" href="#transcript">Skip to transcript</a>
 
 <div class="shell">
 	<ThreadList
@@ -75,6 +75,11 @@ const openThreadFlags = $derived(
 			waiting={session.waitingElsewhere}
 			onDismiss={(id) => session.dismiss(id)}
 			onOpenWaiting={(threadId) => void session.selectThread(threadId)}
+			turnStatus={session.transcript.turnStatus}
+			turnError={session.transcript.error}
+			loadingTranscript={session.loadingTranscript}
+			retryRemainingMs={session.retryRemainingMs}
+			awaitingApproval={session.awaitingApproval}
 		/>
 
 		<Transcript

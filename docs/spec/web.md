@@ -91,6 +91,7 @@ The page holds one `Session`, which owns the connection and the page state.
 - The open thread has an inline-start bar and a strong title as well as its fill, so it stays distinct under forced colours.
 - At 320px nothing MUST clip or scroll sideways.
 - The transcript follows new output only while the reader is within 32px of its end. It follows the transcript at wide widths and the window at narrow widths. Opening a thread follows its end.
+- The skip link MUST name the transcript and target `#transcript`.
 
 ### Theme
 
@@ -130,6 +131,8 @@ No advisor failure opens the error banner.
 
 ### Transcript
 
+- The transcript is not a live region. One status region announces turn changes and waiting requests.
+- While a transcript loads, the status region announces `Loading transcript…`.
 - Item statuses read `Working`, `Done`, `Failed`, `Declined`, or `Waiting`. Other statuses show their raw value.
 - Unknown item kinds show their type in plain words, such as `Web search`.
 - A `dynamicToolCall` item with tool `advisor` shows as a note card: `advisor · <severity>: <note>`. The note is the text of `contentItems`. The severity is always text. The card's inline-start border marks the severity as a second cue.

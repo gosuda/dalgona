@@ -37,7 +37,7 @@ let {
 	loading,
 	awaitingApproval,
 }: Props = $props();
-let viewport = $state<HTMLDivElement>();
+let viewport = $state<HTMLElement>();
 let running = $derived(turnStatus === "inProgress");
 let followedThread: string | null = null;
 let following = true;
@@ -92,10 +92,8 @@ function argumentsText(value: JsonValue): string {
 
 <svelte:window onscroll={trackFollowing} />
 
-<div class="transcript" bind:this={viewport} role="log" aria-label="Thread transcript" onscroll={trackFollowing}>
+<section id="transcript" class="transcript" aria-label="Transcript" tabindex="-1" bind:this={viewport} onscroll={trackFollowing}>
 	<div class="transcript-inner">
-		<p class="sr-only" role="status">{loading ? "Loading transcript…" : ""}</p>
-
 		{#if !threadId}
 			<section class="empty-state" aria-labelledby="empty-title">
 				<p class="kicker">No thread open</p>
@@ -220,7 +218,7 @@ function argumentsText(value: JsonValue): string {
 			<p class="turn-outcome">Turn interrupted. Send a message to continue.</p>
 		{/if}
 	</div>
-</div>
+</section>
 
 <style>
 	.transcript {
