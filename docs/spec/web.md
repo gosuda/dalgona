@@ -180,3 +180,5 @@ The header MUST show `Offline` while the connection is down.
 ### Focus
 
 A control that disappears while focused hands focus to the message field. The submit control keeps its element and changes only its label.
+
+Start thread stays focusable and reports `aria-disabled` while a start is in flight.

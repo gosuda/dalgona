@@ -1,5 +1,5 @@
 import "../../app.css";
-import { cleanup, render } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import ThreadList from "#lib/components/ThreadList.svelte";
 import { threadHue } from "#lib/hue.ts";
@@ -29,6 +29,7 @@ function props(
 		loading: false,
 		connected: true,
 		disabled: false,
+		starting: false,
 		waitingThreadIds: extra.waitingThreadIds ?? new Set<string>(),
 		completedThreadIds: extra.completedThreadIds ?? new Set<string>(),
 		onNew: vi.fn(),
@@ -123,5 +124,33 @@ describe("thread list states", () => {
 		expect(
 			tag.compareDocumentPosition(date) & Node.DOCUMENT_POSITION_FOLLOWING,
 		).toBeTruthy();
+	});
+});
+
+describe("thread list start", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	test("keeps focus on Start thread while a thread starts", async () => {
+		const base = props([thread]);
+		const view = render(ThreadList, { props: base });
+		const start = screen.getByRole("button", { name: "Start thread" });
+		start.focus();
+		await view.rerender({ starting: true });
+		expect(screen.getByRole("button", { name: "Start thread" })).toBe(start);
+		expect(document.activeElement).toBe(start);
+		expect(start.getAttribute("aria-disabled")).toBe("true");
+		expect(start.hasAttribute("disabled")).toBe(false);
+		await fireEvent.click(start);
+		expect(base.onNew).not.toHaveBeenCalled();
+	});
+
+	test("does not select a thread while a thread starts", async () => {
+		const base = props([thread]);
+		render(ThreadList, { props: { ...base, starting: true } });
+		const row = document.querySelector("button.thread");
+		await fireEvent.click(row as Element);
+		expect(base.onSelect).not.toHaveBeenCalled();
 	});
 });

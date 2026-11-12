@@ -10,6 +10,7 @@ interface Props {
 	loading: boolean;
 	connected: boolean;
 	disabled: boolean;
+	starting: boolean;
 	waitingThreadIds: ReadonlySet<string>;
 	completedThreadIds: ReadonlySet<string>;
 	onNew: () => void;
@@ -22,6 +23,7 @@ let {
 	loading,
 	connected,
 	disabled,
+	starting,
 	waitingThreadIds,
 	completedThreadIds,
 	onNew,
@@ -50,7 +52,13 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 			<p class="eyebrow">Agent workbench</p>
 			<h1>dalgona<span aria-hidden="true">/</span></h1>
 		</div>
-		<button class="point" onclick={onNew} disabled={disabled}>New thread</button>
+		<button
+			class="point"
+			aria-disabled={starting ? "true" : undefined}
+			onclick={() => {
+				if (!starting && connected) onNew();
+			}}
+		>Start thread</button>
 	</header>
 
 	<div class="thread-heading">
@@ -80,7 +88,7 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 						<button
 							class="thread"
 							aria-current={thread.id === activeId ? "true" : undefined}
-							disabled={disabled}
+							disabled={disabled || starting}
 							onclick={() => onSelect(thread.id)}
 						>
 							<span class="thread-topline">

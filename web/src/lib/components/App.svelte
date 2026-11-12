@@ -35,7 +35,8 @@ const openThreadFlags = $derived(
 		activeId={session.activeThreadId}
 		loading={session.loadingThreads}
 		connected={session.connection === "connected"}
-		disabled={session.connection !== "connected" || session.startingThread}
+		disabled={session.connection !== "connected"}
+		starting={session.startingThread}
 		waitingThreadIds={waitingThreadIds}
 		completedThreadIds={session.completedThreadIds}
 		onNew={() => void session.createThread()}
