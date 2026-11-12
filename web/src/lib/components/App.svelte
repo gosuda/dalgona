@@ -4,6 +4,7 @@ import ApprovalCard from "#lib/components/ApprovalCard.svelte";
 import Composer from "#lib/components/Composer.svelte";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
 import KeyListPanel from "#lib/components/panels/KeyListPanel.svelte";
+import LoginPanel from "#lib/components/panels/LoginPanel.svelte";
 import Panel from "#lib/components/panels/Panel.svelte";
 import SettingsPanel from "#lib/components/panels/SettingsPanel.svelte";
 import QuestionCard from "#lib/components/QuestionCard.svelte";
@@ -229,9 +230,10 @@ function onWindowKeydown(event: KeyboardEvent): void {
 </div>
 
 <KeyListPanel open={session.panel === "keys"} onClose={() => session.closePanel()} />
+<LoginPanel {session} open={session.panel === "login"} onClose={() => session.closePanel()} />
 <Panel
 	title={genericTitle}
-	open={session.panel !== null && session.panel !== "keys" && session.panel !== "settings"}
+	open={session.panel !== null && session.panel !== "keys" && session.panel !== "settings" && session.panel !== "login"}
 	onClose={() => session.closePanel()}
 >
 	{#snippet children()}{/snippet}

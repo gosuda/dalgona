@@ -9,6 +9,8 @@ import type {
 	JsonValue,
 	KeywordDefinition,
 	KeywordMatch,
+	LoginProvider,
+	LoginStart,
 	ModelOption,
 	PlanStep,
 	RequestId,
@@ -1054,6 +1056,75 @@ function requestResolvedNotice(params: Members): AppNotification | null {
 	};
 }
 
+function loginCompletedNotice(params: Members): AppNotification | null {
+	const success = params["success"];
+	if (typeof success !== "boolean") {
+		return null;
+	}
+	const loginId = params["loginId"];
+	const error = params["error"];
+	const provider = params["provider"];
+	return {
+		type: "loginCompleted",
+		loginId: typeof loginId === "string" ? loginId : null,
+		success,
+		error: typeof error === "string" ? error : null,
+		provider: typeof provider === "string" ? provider : null,
+	};
+}
+
+export function parseLoginProvidersResponse(
+	value: unknown,
+): readonly LoginProvider[] {
+	const label = "dalgona/account/providers/list";
+	const body = object(value, label);
+	const rows = body["providers"];
+	if (!Array.isArray(rows)) {
+		fail(label);
+	}
+	return rows.map((entry) => {
+		const row = object(entry, label);
+		const login = requiredString(row, "login", label);
+		const signedIn = row["signedIn"];
+		if (
+			(login !== "apiKey" && login !== "browser" && login !== "terminal") ||
+			typeof signedIn !== "boolean"
+		) {
+			fail(label);
+		}
+		return {
+			id: requiredString(row, "id", label),
+			login,
+			signedIn,
+		};
+	});
+}
+
+export function parseLoginStartResponse(value: unknown): LoginStart {
+	const label = "account/login/start";
+	const body = object(value, label);
+	const type = requiredString(body, "type", label);
+	if (type === "apiKey") {
+		return { type: "apiKey" };
+	}
+	if (type === "chatgpt") {
+		return {
+			type: "chatgpt",
+			loginId: requiredString(body, "loginId", label),
+			authUrl: requiredString(body, "authUrl", label),
+		};
+	}
+	if (type === "chatgptDeviceCode") {
+		return {
+			type: "chatgptDeviceCode",
+			loginId: requiredString(body, "loginId", label),
+			verificationUrl: requiredString(body, "verificationUrl", label),
+			userCode: requiredString(body, "userCode", label),
+		};
+	}
+	fail(label);
+}
+
 function fileChangesNotice(params: Members): AppNotification | null {
 	const threadId = params["threadId"];
 	const itemId = params["itemId"];
@@ -1145,6 +1216,10 @@ const notifications: Readonly<Record<string, NotificationSpec>> = {
 	"serverRequest/resolved": {
 		required: ["requestId", "threadId"],
 		parse: requestResolvedNotice,
+	},
+	"account/login/completed": {
+		required: ["success"],
+		parse: loginCompletedNotice,
 	},
 };
 

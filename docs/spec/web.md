@@ -326,3 +326,12 @@ The Settings panel MUST send the key paths `approval`, `verbosity`, `theme`, `st
 An empty or unknown choice MUST NOT be saved, and the panel MUST show `Choose a <label>.` in its body.
 After a save, the client MUST apply the theme at once and MUST reload the settings.
 A save that changes `approval` MUST show `saved; open threads keep their approval and sandbox`.
+
+The login panel MUST list each provider from `dalgona/account/providers/list`.
+An API key MUST be sent with `account/login/start` only after the user types it.
+A failed API-key login MUST keep the panel open and MUST show the error under the key field.
+A browser or device-code login MUST wait for `account/login/completed` with its `loginId`.
+A successful login MUST show `Signed in to <provider>`, reload the models, and close the panel.
+A failed browser or device-code login MUST show `Login failed` with a Try again action.
+Closing the login panel or opening another panel MUST cancel a pending browser or device-code login with `account/login/cancel`.
+A start response that arrives after the cancel MUST be cancelled with the `loginId` it returns.

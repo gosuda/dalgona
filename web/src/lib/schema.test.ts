@@ -267,6 +267,12 @@ const codexCases: readonly CodexCase[] = [
 		requestId: "req-1",
 		threadId: "thread-1",
 	}),
+	notification("account/login/completed", "AccountLoginCompletedNotification", {
+		error: "openai did not accept the API key; it was not saved",
+		loginId: "login-1",
+		provider: "openai",
+		success: false,
+	}),
 	request(
 		"item/commandExecution/requestApproval",
 		"CommandExecutionRequestApprovalParams",
@@ -424,6 +430,13 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 		type: "requestResolved",
 		requestId: "req-1",
 		resolution: null,
+	},
+	AccountLoginCompletedNotification: {
+		type: "loginCompleted",
+		loginId: "login-1",
+		success: false,
+		error: "openai did not accept the API key; it was not saved",
+		provider: "openai",
 	},
 	CommandExecutionRequestApprovalParams: {
 		id: "req-1",

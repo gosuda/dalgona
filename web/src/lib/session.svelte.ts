@@ -38,6 +38,9 @@ import type {
 	JsonValue,
 	KeywordDefinition,
 	KeywordMatch,
+	LoginFlow,
+	LoginMethod,
+	LoginProvider,
 	ModelOption,
 	Notice,
 	NoticeAction,
@@ -63,6 +66,8 @@ import {
 	parseInitializeResponse,
 	parseKeywordMatches,
 	parseKeywordsResponse,
+	parseLoginProvidersResponse,
+	parseLoginStartResponse,
 	parseModelListResponse,
 	parseOutputReadResponse,
 	parseSettingsReadResponse,
@@ -117,6 +122,7 @@ const effectKinds = [
 	"retryWait",
 	"tokenUsage",
 	"fileChangesUpdated",
+	"loginCompleted",
 ] as const;
 
 type EffectKind = (typeof effectKinds)[number];
@@ -197,6 +203,8 @@ export class Session {
 	verbosity: Verbosity = $state("medium");
 	settingValues: readonly SettingValue[] = $state([]);
 	panel: PanelKind | null = $state(null);
+	loginProviders: readonly LoginProvider[] = $state([]);
+	login: LoginFlow | null = $state.raw(null);
 	private noticeSeq = 0;
 
 	running: boolean = $derived(this.transcript.turnStatus === "inProgress");
@@ -333,6 +341,9 @@ export class Session {
 				const text = resolutionNotice(notification.resolution);
 				if (text !== null) this.notify("info", text);
 			},
+			loginCompleted: (notification) => {
+				this.loginCompleted(notification);
+			},
 			fileChangesUpdated: (notification) => {
 				this.patchChanges = recordPatchChanges(
 					this.patchChanges,
@@ -369,10 +380,21 @@ export class Session {
 	}
 
 	openPanel(kind: PanelKind): void {
+		if (this.panel === "login" && kind !== "login") this.cancelLogin();
 		this.panel = kind;
+		if (kind === "login") {
+			this.loadLoginProviders().catch((error: unknown) =>
+				this.reportFailure(
+					"Unable to load login providers",
+					error instanceof Error ? error : String(error),
+					() => this.openPanel("login"),
+				),
+			);
+		}
 	}
 
 	closePanel(): void {
+		if (this.panel === "login") this.cancelLogin();
 		this.panel = null;
 	}
 
@@ -933,6 +955,142 @@ export class Session {
 			);
 		this.closePanel();
 		return true;
+	}
+
+	async loadLoginProviders(): Promise<void> {
+		const generation = this.connectionGeneration;
+		const providers = await this.requireClient().call(
+			"dalgona/account/providers/list",
+			{},
+			parseLoginProvidersResponse,
+		);
+		if (generation !== this.connectionGeneration) return;
+		this.loginProviders = providers;
+	}
+
+	async startLogin(
+		provider: string,
+		method: LoginMethod,
+		apiKey = "",
+	): Promise<void> {
+		const flow: LoginFlow = {
+			provider,
+			method,
+			loginId: null,
+			authUrl: null,
+			verificationUrl: null,
+			userCode: null,
+			error: null,
+			pending: true,
+		};
+		this.login = flow;
+		try {
+			const start = await this.requireClient().call(
+				"account/login/start",
+				this.loginStartParams(method, provider, apiKey),
+				parseLoginStartResponse,
+			);
+			if (start.type === "apiKey") {
+				if (this.login === flow) this.login = { ...flow, pending: false };
+				return;
+			}
+			if (this.login !== flow) {
+				this.sendLoginCancel(start.loginId);
+				return;
+			}
+			this.login = {
+				...flow,
+				pending: false,
+				loginId: start.loginId,
+				authUrl: start.type === "chatgpt" ? start.authUrl : null,
+				verificationUrl:
+					start.type === "chatgptDeviceCode" ? start.verificationUrl : null,
+				userCode: start.type === "chatgptDeviceCode" ? start.userCode : null,
+			};
+		} catch (error) {
+			if (this.login !== flow) return;
+			const text = error instanceof Error ? error.message : String(error);
+			if (method === "apiKey") {
+				this.login = { ...flow, pending: false, error: text };
+				return;
+			}
+			this.login = null;
+			this.notify("error", `Login failed: ${text}; run /login again`, [
+				{
+					label: "Try again",
+					run: () => void this.startLogin(provider, method),
+				},
+			]);
+		}
+	}
+
+	cancelLogin(): void {
+		const loginId = this.login?.loginId ?? null;
+		this.login = null;
+		if (loginId !== null) this.sendLoginCancel(loginId);
+	}
+
+	private sendLoginCancel(loginId: string): void {
+		this.client
+			?.call("account/login/cancel", { loginId }, parseVoidResponse)
+			.catch(() => undefined);
+	}
+
+	private loginCompleted(
+		notification: Extract<AppNotification, { readonly type: "loginCompleted" }>,
+	): void {
+		const flow = this.login;
+		if (flow === null) return;
+		const ours =
+			notification.loginId !== null
+				? notification.loginId === flow.loginId
+				: notification.provider === flow.provider;
+		if (!ours) return;
+		if (!notification.success) {
+			if (flow.method === "apiKey") {
+				this.login = {
+					...flow,
+					pending: false,
+					error: notification.error ?? "login failed",
+				};
+				return;
+			}
+			this.login = null;
+			this.notify(
+				"error",
+				`Login failed: ${notification.error ?? "unknown error"}; run /login again`,
+				[
+					{
+						label: "Try again",
+						run: () => void this.startLogin(flow.provider, flow.method),
+					},
+				],
+			);
+			return;
+		}
+		this.login = null;
+		this.reloadModels();
+		this.notify("info", `Signed in to ${flow.provider}`);
+		if (this.panel === "login") this.closePanel();
+	}
+
+	private reloadModels(): void {
+		this.loadModels(this.connectionGeneration).catch((error: unknown) =>
+			this.reportFailure(
+				"Unable to load models",
+				error instanceof Error ? error : String(error),
+				() => this.reloadModels(),
+			),
+		);
+	}
+
+	private loginStartParams(
+		method: LoginMethod,
+		provider: string,
+		apiKey: string,
+	): JsonValue {
+		if (method === "apiKey") return { type: "apiKey", provider, apiKey };
+		return { type: method === "browser" ? "chatgpt" : "chatgptDeviceCode" };
 	}
 
 	respondApproval(request: ApprovalRequest, decision: Decision): void {

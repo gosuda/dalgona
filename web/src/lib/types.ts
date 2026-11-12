@@ -261,7 +261,47 @@ export type AppNotification =
 			readonly type: "requestResolved";
 			readonly requestId: RequestId;
 			readonly resolution: string | null;
+	  }
+	| {
+			readonly type: "loginCompleted";
+			readonly loginId: string | null;
+			readonly success: boolean;
+			readonly error: string | null;
+			readonly provider: string | null;
 	  };
+
+export type LoginMethod = "apiKey" | "browser" | "device";
+
+export interface LoginProvider {
+	readonly id: string;
+	readonly login: "apiKey" | "browser" | "terminal";
+	readonly signedIn: boolean;
+}
+
+export type LoginStart =
+	| { readonly type: "apiKey" }
+	| {
+			readonly type: "chatgpt";
+			readonly loginId: string;
+			readonly authUrl: string;
+	  }
+	| {
+			readonly type: "chatgptDeviceCode";
+			readonly loginId: string;
+			readonly verificationUrl: string;
+			readonly userCode: string;
+	  };
+
+export interface LoginFlow {
+	readonly provider: string;
+	readonly method: LoginMethod;
+	readonly loginId: string | null;
+	readonly authUrl: string | null;
+	readonly verificationUrl: string | null;
+	readonly userCode: string | null;
+	readonly error: string | null;
+	readonly pending: boolean;
+}
 
 export interface ModelOption {
 	readonly id: string;
