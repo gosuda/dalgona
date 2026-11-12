@@ -4,6 +4,17 @@ Use [the project README](../README.md) for installation and the product command 
 
 The specifications define required behavior. They do not certify that each command or integration has passed its acceptance checks. The decisions state invariants, scope, and enforcement. RFC 2119 keywords such as MUST and SHOULD carry their normative meaning in these documents.
 
+## Terms
+
+Use one name for each thing in user-facing text and new specifications.
+
+- Thread: one conversation with its journal, turns, and settings. Write thread, not session. The storage names `session.created` and `sessions/` stay.
+- Follow-up: a prompt queued while a turn runs; it starts the next turn. `followup` is only the `user.message` kind.
+- Thinking and reasoning: interfaces show thinking; the wire, journal, and config field is `reasoning`.
+- Subagent: a thread that a tool call starts under another thread. `child.spawned` and `parent` are its journal names.
+- Interrupt: the user stops the running turn, which ends with status `interrupted`. `cancel` is only an approval decision.
+- Mode: the per-thread approval mode and sandbox mode, and the tool mode set in configuration. Name the remote shapes thread boxes and the daemon in a box.
+
 ## Specifications
 
 ### State and execution
