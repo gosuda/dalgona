@@ -4,7 +4,7 @@
 
 A `Keyword` MUST contain a word, a hue range, an optional required-tool list, an effort, a notice, and an enabled state.
 
-`Builtins("dal")` MUST return only `ultrathink`. `Builtins("dalgona")` MUST return all four built-ins in this order.
+`Builtins("dal")` MUST return `ultrathink`, `decide` and `simplify`. `Builtins("dalgona")` MUST return every built-in in table order.
 
 | Word | Hue | Required tools | Effort |
 | --- | --- | --- | --- |
@@ -12,6 +12,8 @@ A `Keyword` MUST contain a word, a hue range, an optional required-tool list, an
 | `jevify` | `[300, 420]` | `eval` | `default` |
 | `workflowz` | `[30, 150]` | `eval`, `task` | `default` |
 | `orchestrate` | `[150, 280]` | `task` | `default` |
+| `decide` | `[200, 250]` | none | `default` |
+| `simplify` | `[90, 140]` | none | `default` |
 
 The package MUST embed every notice from `notices/*.md`. Every built-in MUST start enabled for its supported product. Each built-in MUST read `notices/<word>.md`. A missing or empty notice MUST stop the program when the table is built. Every file in `notices/` MUST belong to a built-in.
 
@@ -57,3 +59,5 @@ Each sentence MUST use plain verbs and carry one instruction or fact. The notice
 - `jevify`: freeze the rubric before reading data, pre-filter, judge the batch, read flagged or uncertain items, and report counts and confirmed items. Settled judgments MUST replay from the journal.
 - `workflowz`: write durable `eval` phases, fan out, join subagents, contain item failures, and resume recorded effects without dispatching them again.
 - `orchestrate`: decompose into `task` calls, require `yield`, verify each phase, and continue until no work remains.
+- `decide`: name the options, recommend one with the deciding reason, and state what would change the recommendation.
+- `simplify`: delete first, and keep validation, error paths and evidence.

@@ -27,6 +27,8 @@ func builtinTable(product string) []Keyword {
 		{Word: "jevify", Hue: [2]int{300, 420}, Requires: []string{"eval"}, Effort: "default", Notice: notice("jevify"), Enabled: product == "dalgona"},
 		{Word: "workflowz", Hue: [2]int{30, 150}, Requires: []string{"eval", "task"}, Effort: "default", Notice: notice("workflowz"), Enabled: product == "dalgona"},
 		{Word: "orchestrate", Hue: [2]int{150, 280}, Requires: []string{"task"}, Effort: "default", Notice: notice("orchestrate"), Enabled: product == "dalgona"},
+		{Word: "decide", Hue: [2]int{200, 250}, Effort: "default", Notice: notice("decide"), Enabled: true},
+		{Word: "simplify", Hue: [2]int{90, 140}, Effort: "default", Notice: notice("simplify"), Enabled: true},
 	}
 }
 

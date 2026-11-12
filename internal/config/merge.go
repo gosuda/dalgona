@@ -543,7 +543,7 @@ func one(value string, allowed ...string) bool {
 
 var keywordWordRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,31}$`)
 
-var builtinKeywords = map[string]bool{"ultrathink": true, "jevify": true, "workflowz": true, "orchestrate": true}
+var builtinKeywords = map[string]bool{"ultrathink": true, "jevify": true, "workflowz": true, "orchestrate": true, "decide": true, "simplify": true}
 
 func validateKeyword(home, originFile, word string, keyword KeywordSpec) error {
 	if !keywordWordRe.MatchString(word) {

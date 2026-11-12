@@ -20,6 +20,8 @@ func TestDefaultEnabled(t *testing.T) {
 		{"dal", "jevify", false},
 		{"dal", "workflowz", false},
 		{"dal", "orchestrate", false},
+		{"dal", "decide", true},
+		{"dal", "simplify", true},
 		{"dalgona", "jevify", true},
 		{"dalgona", "workflowz", true},
 		{"dalgona", "orchestrate", true},
