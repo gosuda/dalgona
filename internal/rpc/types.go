@@ -68,6 +68,7 @@ type (
 		DurationMs *int64
 		Spill      *OutputSpill
 		Keywords   []KeywordMatch
+		Images     []ItemImage
 	}
 	OutputSpill struct {
 		Path   string `json:"path"`
@@ -92,6 +93,13 @@ type (
 		Additions   int    `json:"additions"`
 		Deletions   int    `json:"deletions"`
 		DiffOmitted bool   `json:"-"`
+	}
+	ItemImage struct {
+		Type  string
+		URL   string
+		Mime  string
+		Bytes int64
+		Path  string
 	}
 	SandboxPolicy struct {
 		Type string `json:"type"`

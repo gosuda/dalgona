@@ -28,19 +28,26 @@ const (
 
 func (it Item) MarshalJSONTo(enc *jsontext.Encoder) error { return marshalTo(enc, it) }
 
+func (it Item) writeUserContent(o *out) {
+	o.key("content")
+	o.openArray()
+	o.open()
+	o.str("type", "text")
+	o.str("text", it.Text)
+	o.close()
+	for _, image := range it.Images {
+		image.write(o)
+	}
+	o.closeArray()
+}
+
 func (it Item) write(o *out) {
 	o.open()
 	o.str("type", it.Type)
 	o.str("id", it.ID)
 	switch it.Type {
 	case kindUser:
-		o.key("content")
-		o.openArray()
-		o.open()
-		o.str("type", "text")
-		o.str("text", it.Text)
-		o.close()
-		o.closeArray()
+		it.writeUserContent(o)
 		it.writeKeywords(o)
 	case kindAgent:
 		o.str("text", it.Text)

@@ -1,7 +1,10 @@
 package rpc
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	json "encoding/json/v2"
 	"fmt"
 	"os"
 	"os/exec"
@@ -215,4 +218,49 @@ func TestImageSizeNamesItsIndex(t *testing.T) {
 	}
 	input := []map[string]string{{"type": "localImage", "path": small}, {"type": "localImage", "path": large}}
 	c.fails("turn/start", map[string]any{"threadId": threadID, "input": input}, codeInvalidParams, "image 2 is 5242881 bytes; the limit is 5242880 bytes (5 MiB)")
+}
+
+func userItemContent(t *testing.T, notes []message) []map[string]any {
+	t.Helper()
+	for _, m := range notes {
+		if m.Method != "item/completed" || fieldOf(t, m.Params, "item", "type") != kindUser {
+			continue
+		}
+		var envelope struct {
+			Item struct {
+				Content []map[string]any `json:"content"`
+			} `json:"item"`
+		}
+		if err := json.Unmarshal(m.Params, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return envelope.Item.Content
+	}
+	t.Fatal("no userMessage item/completed")
+	return nil
+}
+
+func TestUserMessageItemEchoesImage(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	c := r.connect()
+	threadID := startThread(t, r, c, nil)
+	path := writeImage(t, "shot.png", pngSample)
+	input := []map[string]any{{"type": "text", "text": "what is this"}, {"type": "localImage", "path": path}}
+	var response TurnStartResponse
+	c.ok("turn/start", map[string]any{"threadId": threadID, "input": input}, &response)
+	content := userItemContent(t, c.collect("turn/completed"))
+	if len(content) != 2 || fmt.Sprint(content[0]["text"]) != "what is this" {
+		t.Fatalf("user content = %+v, want the text and one image", content)
+	}
+	digest := sha256.Sum256([]byte(pngSample))
+	image := content[1]
+	want := map[string]string{"type": "image", "url": "dalgona-blob:" + hex.EncodeToString(digest[:]), "mime": "image/png", "path": path}
+	for key, value := range want {
+		if fmt.Sprint(image[key]) != value {
+			t.Fatalf("image %s = %v, want %s", key, image[key], value)
+		}
+	}
+	if fmt.Sprint(image["bytes"]) != "12" || len(image) != 5 {
+		t.Fatalf("image = %+v, want exactly type, url, mime, bytes and path", image)
+	}
 }

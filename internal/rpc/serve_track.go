@@ -144,7 +144,7 @@ func (t *tracker) turnCompleted(_ uint64, ev event.Event) {
 func (t *tracker) userMessage(_ uint64, ev event.Event) {
 	e, _ := ev.(event.UserMessage)
 	text := t.text(e.Text, e.TextBlob)
-	item := &Item{Type: kindUser, ID: e.ItemID, Text: text, Keywords: t.noticeMatches(e, text)}
+	item := &Item{Type: kindUser, ID: e.ItemID, Text: text, Keywords: t.noticeMatches(e, text), Images: itemImages(e.Images)}
 	t.startComplete(e.TurnID, item)
 }
 

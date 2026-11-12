@@ -160,7 +160,7 @@ Turn objects carry `startedAt` and `completedAt` as Unix seconds, and `durationM
 |---|---|
 | `turn.started` | `turn/started`, `thread/status/changed` active |
 | `turn.completed` | `error` when the turn failed, `turn/completed`, `thread/status/changed` idle |
-| `user.message` | `item/started` and `item/completed` with a `userMessage` |
+| `user.message` | `item/started` and `item/completed` with a `userMessage`. The server MUST echo each image of a user message as an `image` input item. The echoed image item MUST NOT carry image bytes. The echoed image item MUST name the blob with the `dalgona-blob:` prefix. |
 | text delta | `item/started` once, then `item/agentMessage/delta` |
 | reasoning delta | `item/started` once, then `item/reasoning/textDelta` for item `<item>-reasoning` |
 | `assistant.message` | `item/completed` for the `agentMessage` and the `reasoning` item, `thread/tokenUsage/updated` |

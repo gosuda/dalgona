@@ -136,3 +136,23 @@ func (p *turnParams) checkedImages() ([]agent.Image, error) {
 	}
 	return p.images, nil
 }
+
+const blobURLPrefix = "dalgona-blob:"
+
+func itemImages(images []event.Image) []ItemImage {
+	out := make([]ItemImage, len(images))
+	for index, image := range images {
+		out[index] = ItemImage{Type: "image", URL: blobURLPrefix + image.Blob.Blob, Mime: image.Mime, Bytes: image.Blob.Bytes, Path: image.Path}
+	}
+	return out
+}
+
+func (img ItemImage) write(o *out) {
+	o.open()
+	o.str("type", img.Type)
+	o.str("url", img.URL)
+	o.str("mime", img.Mime)
+	o.int("bytes", img.Bytes)
+	o.optStr("path", img.Path)
+	o.close()
+}
