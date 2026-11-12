@@ -10,10 +10,15 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/compact"
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/agent/prompts"
 	"github.com/gosuda/dalgona/internal/config"
 )
 
 const overflowBody = `{"error":{"code":"context_length_exceeded","message":"input is too long"}}`
+
+func textWithInput(body string, input int) response {
+	return response{body: strings.Replace(sseText(body), `"input_tokens":20`, `"input_tokens":`+strconv.Itoa(input), 1)}
+}
 
 func TestOverflowPrunesCompactsAndRetriesOnce(t *testing.T) {
 	t.Parallel()
@@ -28,7 +33,7 @@ func TestOverflowPrunesCompactsAndRetriesOnce(t *testing.T) {
 		h.write(name, big)
 		reads = append(reads, call{id: "r" + strconv.Itoa(i), name: "read", args: `{"path":"` + name + `"}`})
 	}
-	h.model.push(calls(reads...), text("read all"), failing(400, overflowBody), text("SUMMARY: four files of x"), text("ok"))
+	h.model.push(calls(reads...), text("read all"), failing(400, overflowBody), text("SUMMARY: four files of x"), textWithInput("ok", 20000))
 	thread := h.start()
 	h.submit(thread, "read the files")
 	h.waitIdle(thread)
@@ -230,4 +235,99 @@ func orphanCall(item event.Event, kept map[string]bool) bool {
 		return !kept[value.CallID]
 	}
 	return false
+}
+
+func TestManualCompactionThatDoesNotShrinkAppendsNoMarker(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, func(h *harness) { h.cfg.Config.CompactionKeepTokens = 1 })
+	h.model.push(text("first"), text("second"), text(strings.Repeat("s", 40000)))
+	thread := h.start()
+	h.submit(thread, "one")
+	h.waitIdle(thread)
+	h.submit(thread, "two")
+	h.waitIdle(thread)
+	if err := thread.Compact(t.Context()); !errors.Is(err, ErrCompactionNotSmaller) {
+		t.Fatalf("manual compaction err = %v", err)
+	}
+	if markers := compactionMarkers(h.events(thread.ID())); markers != 0 {
+		t.Fatalf("compaction markers = %d, want 0", markers)
+	}
+}
+
+func TestAutoCompactionThatDoesNotShrinkKeepsTheTurn(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, func(h *harness) {
+		h.cfg.Config.CompactionKeepTokens = 1
+		h.cfg.Config.CompactionThreshold = 1e-9
+		h.cfg.Config.Models = map[string]config.ModelSpec{"openai/gpt-test": {ContextWindow: 100_000_000}}
+	})
+	h.model.push(text(strings.Repeat("s", 40000)), text("first"))
+	thread := h.start()
+	h.submit(thread, "one")
+	h.waitIdle(thread)
+	events := h.events(thread.ID())
+	if turn := lastTurn(events); turn.Status != statusCompleted {
+		t.Fatalf("turn = %+v", turn)
+	}
+	if markers := compactionMarkers(events); markers != 0 {
+		t.Fatalf("compaction markers = %d, want 0", markers)
+	}
+	if h.model.count() != 2 {
+		t.Fatalf("requests = %d, want 2", h.model.count())
+	}
+	if !strings.Contains(h.logs.String(), `msg="compaction: the summary is not smaller than the context it replaces"`) {
+		t.Fatalf("logs = %s", h.logs.String())
+	}
+}
+
+func TestAutoCompactionDoesNotRepeatSummarizer(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, func(h *harness) {
+		h.cfg.Config.CompactionKeepTokens = 1
+		h.cfg.Config.CompactionThreshold = 1e-9
+		h.cfg.Config.Models = map[string]config.ModelSpec{"openai/gpt-test": {ContextWindow: 100_000_000}}
+	})
+	h.write("a.txt", "hello\n")
+	h.model.push(
+		text(strings.Repeat("s", 40000)),
+		calls(call{id: "r1", name: "read", args: `{"path":"a.txt"}`}),
+		text(strings.Repeat("s", 40000)),
+		text("done"),
+	)
+	thread := h.start()
+	h.submit(thread, "one")
+	h.waitIdle(thread)
+	events := h.events(thread.ID())
+	if turn := lastTurn(events); turn.Status != statusCompleted {
+		t.Fatalf("turn = %+v", turn)
+	}
+	if markers := compactionMarkers(events); markers != 0 {
+		t.Fatalf("compaction markers = %d, want 0", markers)
+	}
+	if got := summarizerRequests(h); got != 1 {
+		t.Fatalf("summarizer requests = %d, want 1", got)
+	}
+	if h.model.count() != 3 {
+		t.Fatalf("requests = %d, want 3", h.model.count())
+	}
+}
+
+func summarizerRequests(h *harness) int {
+	n := 0
+	for i := range h.model.count() {
+		if h.model.request(i)["instructions"] == prompts.Compaction {
+			n++
+		}
+	}
+	return n
+}
+
+func compactionMarkers(events []event.Seqd) int {
+	markers := 0
+	for _, item := range events {
+		if _, ok := item.Event.(event.Compaction); ok {
+			markers++
+		}
+	}
+	return markers
 }

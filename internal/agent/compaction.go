@@ -31,6 +31,10 @@ const (
 
 var ErrNothingToSummarize = errors.New(nothingToSummarizeText)
 
+const notSmallerText = "compaction: the summary is not smaller than the context it replaces"
+
+var ErrCompactionNotSmaller = errors.New(notSmallerText)
+
 type compactionView struct {
 	path       []event.Seqd
 	entries    []compact.Entry
@@ -119,15 +123,27 @@ func usedTokens(cv compactionView) int {
 	return (len(cv.summary) + tail) / 4
 }
 
+type skippedCompaction struct {
+	marker uint64
+}
+
+func (s *skippedCompaction) matches(cv compactionView) bool {
+	return s != nil && s.marker == cv.lastMarker
+}
+
 func (w *worker) autoCompact(ctx context.Context, v view) (bool, error) {
 	caps := w.t.host.capabilities(ctx, w.registry, w.settings.Model)
 	cv := w.t.compactionView(v)
 	threshold := cmp.Or(w.t.host.cfg.Config.CompactionThreshold, defaultThreshold)
-	if !compact.ShouldCompact(caps.Context, usedTokens(cv), threshold) {
+	if !compact.ShouldCompact(caps.Context, usedTokens(cv), threshold) || w.t.skipped.matches(cv) {
 		return false, nil
 	}
 	err := w.compact(ctx, compactAuto)
-	if errors.Is(err, ErrNothingToSummarize) {
+	switch {
+	case errors.Is(err, ErrCompactionNotSmaller):
+		w.t.skipped = &skippedCompaction{marker: cv.lastMarker}
+		return false, nil
+	case errors.Is(err, ErrNothingToSummarize):
 		return false, nil
 	}
 	return err == nil, err
@@ -175,6 +191,10 @@ func (w *worker) compact(ctx context.Context, method string) error {
 	after := len(summary) / 4
 	for _, entry := range cv.entries[cut:] {
 		after += entry.Bytes / 4
+	}
+	if after >= before {
+		w.t.host.logOnce(fmt.Sprintf("%s\x00%s\x00%d", notSmallerText, w.t.id, cv.lastMarker), notSmallerText, "thread", w.t.id, "tokens_before", before, "tokens_after", after)
+		return fmt.Errorf("%w (%d tokens before, %d after)", ErrCompactionNotSmaller, before, after)
 	}
 	marker := event.Compaction{FirstKeptSeq: cv.entries[cut].Seq, Summary: summary, Method: method, TokensBefore: before, TokensAfter: after}
 	_, err = w.t.appendEvents(ctx, marker)

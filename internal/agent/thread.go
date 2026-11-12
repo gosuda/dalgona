@@ -53,6 +53,7 @@ type Thread struct {
 	closeErr  error
 	workers   sync.WaitGroup
 	output    outputRelay
+	skipped   *skippedCompaction
 }
 
 type actor struct {
