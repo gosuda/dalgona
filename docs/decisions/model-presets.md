@@ -4,7 +4,7 @@
 
 The program MUST NOT ship a default thread model. The user MUST select the thread model. A role preset MUST NOT grant access to a model that the provider does not offer.
 
-`internal/model/presets.go` MUST hold the native provider identifiers in one table:
+`internal/model/presets.go` MUST hold the native provider identifiers in two tables: `Presets` for the role presets, and `presetCapabilities` for the capabilities of each identifier:
 
 | Provider | default selection hint | smol | slow |
 | --- | --- | --- | --- |
