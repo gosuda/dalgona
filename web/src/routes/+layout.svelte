@@ -1,5 +1,6 @@
 <script lang="ts">
 import "../app.css";
+import "#lib/theme/fonts.css";
 import {
 	applyTheme,
 	installTokens,

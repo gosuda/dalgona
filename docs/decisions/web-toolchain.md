@@ -17,6 +17,9 @@ Grounded on 2026-11-12. Each row gives an exact devDependency pin in `web/packag
 |@testing-library/dom|10.4.2|2026-09-13|queries that `@testing-library/svelte` uses|none|
 |@testing-library/user-event|14.6.9|2026-11-10|user input in component tests|none|
 |ajv|8.20.0|2026-04-24|JSON Schema check of the parsers in the schema test|none|
+|@fontsource-variable/bricolage-grotesque|5.3.0|2026-07-19|Bricolage Grotesque for titles and control labels|none|
+|@fontsource-variable/hanken-grotesk|5.3.0|2026-07-19|Hanken Grotesk for body text|none|
+|pretendard|1.3.9|2023-11-05|Hangul fallback, loaded by unicode-range subset|none|
 
 ## Pins on 2026-11-11
 

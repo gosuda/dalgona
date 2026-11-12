@@ -100,6 +100,17 @@ Each theme MUST use only the colour roles of `DESIGN.md`. The client MUST NOT pa
 Every text role MUST meet 4.5:1 against its ground. Control edges and the focus ring MUST meet 3:1 against their ground. The ink on the point MUST meet 4.5:1.
 Under forced colours, every button edge and focus ring MUST keep a visible border.
 
+### Type
+
+Titles and control labels MUST use Bricolage Grotesque.
+Body text MUST use Hanken Grotesk, and Hangul text MUST fall back to Pretendard Variable.
+Code and terminal text MUST use the reader's own monospace face.
+Pretendard MUST load only the subsets that a page uses.
+Prose MUST use `word-break: keep-all` and `overflow-wrap: anywhere`.
+Elapsed time, counts, and percentages MUST use tabular figures.
+Nerd Font glyphs MUST come from the `Symbols Nerd Subset` font that `web/src/lib/theme/fonts.css` declares.
+The licence texts of the fonts and the icon subset MUST ship in `web/static/licenses`.
+
 ### Status bar
 
 The status bar shows the connection state as text. The turn state follows it as text: `Working`, `Turn completed`, `Turn interrupted`, or `Turn failed`.

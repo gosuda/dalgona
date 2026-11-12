@@ -43,7 +43,7 @@ function activityLabel(thread: ThreadSummary): string {
 
 	<div class="thread-heading">
 		<h2>Threads</h2>
-		<span>{threads.length}</span>
+		<span class="count">{threads.length}</span>
 	</div>
 
 	<p class="loading" role="status">{loading ? "Loading threads…" : ""}</p>
@@ -77,7 +77,7 @@ function activityLabel(thread: ThreadSummary): string {
 								</time>
 							</span>
 							{#if thread.preview && thread.preview !== threadTitle(thread)}
-								<span class="preview">{thread.preview}</span>
+								<span class="preview prose">{thread.preview}</span>
 							{/if}
 							<span class="meta">
 								<span class:working={thread.status === "active"}>{activityLabel(thread)}</span>
@@ -142,8 +142,11 @@ function activityLabel(thread: ThreadSummary): string {
 
 	.thread-heading h2 {
 		margin: 0;
-		font-size: var(--size-small);
-		font-weight: 650;
+		color: var(--dim);
+		font-size: var(--size-caption);
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
 	}
 
 	.thread-heading span {
@@ -217,7 +220,6 @@ function activityLabel(thread: ThreadSummary): string {
 
 	.preview {
 		line-height: 1.45;
-		overflow-wrap: break-word;
 	}
 
 	.meta {

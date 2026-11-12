@@ -1,6 +1,7 @@
 export const scale = {
-	faceTitle: '"Bricolage Grotesque", sans-serif',
-	faceText: '"Hanken Grotesk", "Pretendard Subset", sans-serif',
+	faceTitle:
+		'"Bricolage Grotesque Variable", "Pretendard Variable", sans-serif',
+	faceText: '"Hanken Grotesk Variable", "Pretendard Variable", sans-serif',
 	faceMono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
 	sizeCaption: "12px",
 	sizeSmall: "13px",

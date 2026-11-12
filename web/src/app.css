@@ -8,6 +8,13 @@ html {
 	-moz-osx-font-smoothing: grayscale;
 }
 
+h1,
+h2,
+h3 {
+	font-family: var(--face-title);
+	font-weight: var(--weight-title);
+}
+
 body {
 	margin: 0;
 	background: var(--canvas);
@@ -37,6 +44,12 @@ button {
 	font-weight: 600;
 	padding: var(--space-2) var(--space-4);
 	text-box: trim-both cap alphabetic;
+}
+
+button,
+.tag,
+.point {
+	font-family: var(--face-title);
 }
 
 button:disabled,
@@ -88,6 +101,16 @@ pre {
 	overflow-x: auto;
 	white-space: pre-wrap;
 	overflow-wrap: break-word;
+}
+
+.prose {
+	word-break: keep-all;
+	overflow-wrap: anywhere;
+}
+
+dd,
+.count {
+	font-variant-numeric: tabular-nums;
 }
 
 .skip-link {

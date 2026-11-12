@@ -119,12 +119,12 @@ function argumentsText(value: JsonValue): string {
 						{#if item.kind === "userMessage"}
 							<article class="user-message">
 								<span class="item-label">You</span>
-								<p><KeywordText text={item.text} {keywords} /></p>
+								<p class="prose"><KeywordText text={item.text} {keywords} /></p>
 							</article>
 						{:else if item.kind === "agentMessage"}
 							<article class="agent-message">
 								<span class="item-label">dalgona</span>
-								<p>{item.text}{#if !item.complete && running}<span class="streaming" aria-hidden="true">▋</span>{/if}</p>
+								<p class="prose">{item.text}{#if !item.complete && running}<span class="streaming" aria-hidden="true">▋</span>{/if}</p>
 							</article>
 						{:else if item.kind === "reasoning"}
 							<details class="reasoning" open={!item.complete && running}>
@@ -469,7 +469,7 @@ function argumentsText(value: JsonValue): string {
 
 	.empty-state h2 {
 		margin: 0;
-		font-size: clamp(1.75rem, 4vw, 2.5rem);
+		font-size: var(--size-title);
 		font-weight: 600;
 		letter-spacing: -0.02em;
 		line-height: 1.15;
