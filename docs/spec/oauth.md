@@ -8,17 +8,17 @@ The OAuth package MUST expose provider-neutral authorization flows. It MUST NOT 
 
 `PKCE` MUST generate a random verifier with at least 256 bits of entropy. It MUST derive the challenge as unpadded base64url of SHA-256 of the verifier. It MUST send `code_challenge_method=S256`. It MUST generate a random state. Claude MUST use the verifier as the state, as its donor requires.
 
-The callback listener MUST bind the configured host and primary port. It MUST try the configured fallback port when the primary bind fails. Claude MUST try an ephemeral port as its fallback. The advertised redirect URI MUST use `RedirectHost`, the bound port, and `RedirectPath`. ChatGPT MUST use `/auth/callback`.
+The callback listener MUST bind the configured host and primary port. It MUST try the configured fallback port when the primary bind fails. Claude MUST try an ephemeral port as its fallback. The advertised redirect URI MUST use `RedirectHost`, the bound port, and `RedirectPath`. ChatGPT MUST use `/auth/callback`. If every callback port fails to bind, the flow MUST fail with an `oauth callback listen` error.
 
-The package MUST open the authorization URL after the listener starts. The loopback callback MUST require an exact state match. A mismatch MUST fail with `OAuth state mismatch`. The callback MUST NOT exchange a code after a mismatch. A successful callback MUST return plain text `Login complete. You can close this tab.`.
+The package MUST open the authorization URL after the listener starts. The loopback callback MUST require an exact state match. The loopback callback MUST answer a state mismatch with HTTP 400 `invalid oauth callback`. The loopback callback MUST keep waiting after a mismatch. The paste path MUST fail a state mismatch with `OAuth state mismatch`. The callback MUST NOT exchange a code after a mismatch. A successful callback MUST return plain text `Login complete. You can close this tab.`.
 
 The paste path MUST accept a complete redirect URL, a `code#state` value, a query string, or a bare code. A pasted state MUST match when present. A bare code carries no state and MUST follow the donor's manual-code path. An empty pasted code MUST fail. The authorization wait MUST time out after two minutes. Context cancellation MUST stop the wait and the callback server.
 
 ## Token responses
 
-`Token` contains access and refresh tokens, an expiry time, and an account identifier. A refresh response without a refresh token MUST retain the previous refresh token. An `expires_in` value MUST set the expiry relative to the exchange time. Cursor and Devin tokens MAY use the JWT `exp` claim when no `expires_in` field exists.
+`Token` contains access and refresh tokens, an expiry time, and an account identifier. A refresh response without a refresh token MUST retain the previous refresh token. An `expires_in` value MUST set the expiry relative to the exchange time. A token without an `expires_in` field MAY take its expiry from the JWT `exp` claim.
 
-ChatGPT account extraction MUST read `chatgpt_account_id` below the `https://api.openai.com/auth` claim in the ID token payload. The package MAY decode the unsigned JWT payload with base64url and `jsontext`. This read extracts metadata only. It MUST NOT count as signature, issuer, audience, or expiry validation. The provider access token remains the authority.
+ChatGPT account extraction MUST read `chatgpt_account_id` below the `https://api.openai.com/auth` claim in the ID token payload. The package MAY decode the unsigned JWT payload with base64url and `jsontext`. This read extracts metadata only. It MUST NOT count as signature, issuer, audience, or expiry validation. The provider access token remains the authority. For a token without `chatgpt_account_id`, the account MUST fall back to the ID token `email` claim, then to `sub`.
 
 Token exchanges MUST reject non-success HTTP status codes, malformed JSON, non-object JSON, trailing JSON values, missing access tokens, and responses larger than 1 MiB. Each HTTP request MUST time out after 30 seconds. TLS certificate verification MUST remain enabled.
 
