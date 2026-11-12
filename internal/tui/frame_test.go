@@ -3,8 +3,12 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
@@ -375,4 +379,121 @@ func TestFailedInitializeCommitsErrorRow(t *testing.T) {
 		t.Fatal("a failed start printed no row")
 	}
 	assertContains(t, lastEntry(t, m), "Could not start: dial failed retry later. Press ctrl+c to exit.")
+}
+
+const invThreadStarted = `{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`
+
+const invTurnStarted = `{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`
+
+const invCommandDone = `{"threadId":"t1","turnId":"turn-1","completedAtMs":4,"item":{"type":"commandExecution","id":"c1","command":"seq 3","commandActions":[],"cwd":"/work","status":"completed","aggregatedOutput":"1\n2\n3","exitCode":0}}`
+
+func invNotify(method, params string) notificationMsg {
+	return notificationMsg{method: method, params: []byte(params)}
+}
+
+func invFixed(msg tea.Msg) func(model) tea.Msg {
+	return func(model) tea.Msg { return msg }
+}
+
+func invExtends(prev, cur []entry) bool {
+	return len(cur) >= len(prev) && slices.Equal(prev, cur[:len(prev)])
+}
+
+func TestInvI1PrintedRowsOnlyGrow(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{}, nil)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	steps := []func(model) tea.Msg{
+		invFixed(invNotify("thread/started", invThreadStarted)),
+		invFixed(invNotify("turn/started", invTurnStarted)),
+		invFixed(invNotify("item/started", `{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":{"type":"agentMessage","id":"a1","text":""}}`)),
+		invFixed(invNotify("item/agentMessage/delta", `{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"# Plan\n\nA paragraph of the answer.\n\n"}`)),
+		invFixed(invNotify("item/completed", `{"threadId":"t1","turnId":"turn-1","completedAtMs":2,"item":{"type":"agentMessage","id":"a1","text":""}}`)),
+		invFixed(invNotify("item/started", `{"threadId":"t1","turnId":"turn-1","startedAtMs":3,"item":{"type":"commandExecution","id":"c1","command":"seq 3","commandActions":[],"cwd":"/work","status":"inProgress","aggregatedOutput":null}}`)),
+		invFixed(invNotify("item/commandExecution/outputDelta", `{"threadId":"t1","turnId":"turn-1","itemId":"c1","delta":"1\n2\n3\n"}`)),
+		invFixed(invNotify("item/completed", invCommandDone)),
+		invFixed(invNotify("error", `{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"stream reset"}}`)),
+		invFixed(press('a', 0, "a")),
+		func(m model) tea.Msg { return m.screen.spin.Tick() },
+		invFixed(invNotify("turn/completed", `{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`)),
+	}
+	var prev []entry
+	for i, step := range steps {
+		m, _ = drive(t, m, step(m))
+		if !invExtends(prev, m.out.entries) {
+			t.Fatalf("message %d changed a printed row:\nbefore %+v\nafter  %+v", i+1, prev, m.out.entries)
+		}
+		prev = slices.Clone(m.out.entries)
+	}
+	if len(m.out.entries) < 3 {
+		t.Fatalf("the scripted session printed %d rows, want at least 3", len(m.out.entries))
+	}
+}
+
+func TestInvI7NarrowingPrintsNothing(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{}, nil)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	m, _ = drive(t, m, invNotify("thread/started", invThreadStarted))
+	m, _ = drive(t, m, invNotify("turn/started", invTurnStarted))
+	printed := maps.Clone(m.out.printed)
+	m = rawUpdate(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	if m.out.printing {
+		t.Fatal("a row started printing while the narrowed frame settles")
+	}
+	if !m.out.settling {
+		t.Fatal("the narrowed frame does not settle before a row can print")
+	}
+	if !maps.Equal(printed, m.out.printed) {
+		t.Fatalf("printed rows changed on narrowing: before %v, after %v", printed, m.out.printed)
+	}
+	m = rawUpdate(t, m, invNotify("item/completed", invCommandDone))
+	if m.out.printing {
+		t.Fatal("a completed row printed while the narrowed frame settles")
+	}
+	if len(m.out.pending) == 0 {
+		t.Fatal("the completed row is not held for the settled frame")
+	}
+}
+
+func TestInvI8TickChangesOnlyFixedFields(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	clock := start
+	m := newTestModel(nil, Options{}, nil)
+	m.conn.clock = func() time.Time { return clock }
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	m, _ = drive(t, m, invNotify("thread/started", invThreadStarted))
+	m, _ = drive(t, m, invNotify("turn/started", invTurnStarted))
+	clock = start.Add(2 * time.Second)
+	before := ansi.Strip(m.View().Content)
+	clock = start.Add(3 * time.Second)
+	m, _ = drive(t, m, m.screen.spin.Tick())
+	after := ansi.Strip(m.View().Content)
+	if before == after {
+		t.Fatal("the tick changed nothing, but the elapsed field should move")
+	}
+	normalize := strings.NewReplacer(liveOnGlyph, "D", liveOffGlyph, "D", "2s", "E", "3s", "E")
+	if normalize.Replace(before) != normalize.Replace(after) {
+		t.Fatalf("a tick changed more than the dot and the elapsed field:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	t.Run("idle tick writes no bytes", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			out := new(recordedOutput)
+			run := startRecorded(100, 24, out)
+			defer run.stop()
+			run.send(commandDone("seq 3"))
+			waitModel(t, run, "row printed and frame settled", func(m model) bool {
+				return m.out.started && !m.out.settling && !m.out.printing
+			})
+			synctest.Wait()
+			written := out.String()
+			run.send(run.read(func(m model) any { return m.screen.spin.Tick() }))
+			time.Sleep(time.Second)
+			synctest.Wait()
+			if got := out.String(); got != written {
+				t.Fatalf("an idle tick wrote %d bytes", len(got)-len(written))
+			}
+		})
+	})
 }

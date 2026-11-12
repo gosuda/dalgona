@@ -9,6 +9,9 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/gosuda/dalgona/internal/rpc"
 )
 
 type recordedOutput struct {
@@ -111,5 +114,31 @@ func TestInvI4NoClearOrResetBytes(t *testing.T) {
 		synctest.Wait()
 		run.stop()
 		assertClientBytes(t, out.String())
+	})
+}
+
+func TestInvI5EachItemPrintedOnce(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		out := new(recordedOutput)
+		run := startRecorded(100, 24, out)
+		defer run.stop()
+		run.send(commandDone("seq 3"))
+		waitModel(t, run, "first row printed", func(m model) bool {
+			return m.out.started && !m.out.settling && !m.out.printing
+		})
+		run.send(commandDone("seq 3"))
+		item := rpc.Item{Type: "commandExecution", ID: "c-seq-3", Command: "seq 3", Status: "completed", Output: "ok"}
+		thread := rpc.Thread{ID: "t1", Name: "demo", Turns: []rpc.Turn{{ID: "turn-1", Status: "completed", Items: []rpc.Item{item}}}}
+		run.send(resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: rpc.ThreadReadResponse{Thread: thread}}})
+		waitModel(t, run, "resume replay settled", func(m model) bool {
+			return !m.out.settling && !m.out.printing && len(m.out.pending) == 0
+		})
+		time.Sleep(time.Second)
+		synctest.Wait()
+		run.stop()
+		if n := strings.Count(ansi.Strip(out.String()), "seq 3"); n != 1 {
+			t.Fatalf("the command row was written %d times, want once", n)
+		}
 	})
 }
