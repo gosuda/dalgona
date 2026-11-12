@@ -27,6 +27,8 @@ web: listening on <addr> needs [web] token (32+ characters)
 A loopback address MUST use the configured token when one is set.
 Otherwise it MUST use a new token for each start. The token MUST be 32 bytes from `crypto/rand`, encoded as unpadded base64url.
 
+A configured token with any other character MUST fail startup with `web: [web] token must contain only [A-Za-z0-9_-]; '+' and '&' cannot survive the URL fragment`.
+
 The server MUST compare SHA-256 digests of the presented token and the expected token with `crypto/subtle.ConstantTimeCompare`.
 
 ## TLS
@@ -44,12 +46,14 @@ All output goes to the caller's writer. Each message is one line.
 The server MUST write `http://<addr>/#token=<token>`, or `https://<addr>/#token=<token>` with TLS.
 In both lines `<addr>` is the bound listener address. The token stays in the URL fragment, so a browser does not send it in page requests.
 
+If the listener cannot bind, startup MUST fail with `web: listen on <addr>: <error>`.
+
 ## RPC relay
 
 `/rpc` MUST require the query parameter `token`. A missing or wrong token MUST get status 401. The server MUST NOT dial the daemon for a rejected request.
 
 For an accepted token, the server MUST dial the daemon with a 10 second limit before the websocket upgrade.
-A dial failure MUST get status 502 and MUST write `web: dial daemon: <error>`.
+A dial failure MUST get status 502 and MUST write `web: dial daemon: <error>`. A dial failure MUST return the body `daemon unavailable`.
 The upgrade MUST use `github.com/coder/websocket` with its default origin check.
 
 The relay MUST NOT decode, re-encode, or change message bytes.
@@ -57,6 +61,7 @@ The relay MUST NOT decode, re-encode, or change message bytes.
 - Browser to daemon: each websocket text message MUST become one line: the message bytes followed by one `\n`, in one write.
 - Daemon to browser: each `\n`-terminated line MUST become one websocket text message without the `\n`. A line longer than the 64 KiB read buffer MUST be streamed as one message.
 - A browser message MUST be at most 16 MiB minus 1 byte, which is the daemon line limit without the newline.
+- A browser message larger than that limit MUST close the websocket.
 
 Failure behavior:
 
@@ -68,7 +73,7 @@ Failure behavior:
 
 ## Server limits and shutdown
 
-The HTTP server MUST set a 10 second header read timeout, a 30 second read timeout, a 60 second write timeout, and a 120 second idle timeout. A websocket connection is not subject to these limits after the upgrade.
+The HTTP server MUST set a 10 second header read timeout. The HTTP server MUST set a 30 second read timeout. The HTTP server MUST set a 60 second write timeout. The HTTP server MUST set a 120 second idle timeout. A websocket connection is not subject to these limits after the upgrade.
 
 When the context ends, the server MUST stop accepting, end every live relay, close every daemon connection, and only then return.
 A clean shutdown MUST return `nil`. Shutdown waits at most 5 seconds for open page requests.
@@ -100,12 +105,12 @@ No advisor failure opens the error banner.
 
 ### Transcript
 
-- Item statuses read `Running`, `Done`, `Failed`, or `Declined`.
+- Item statuses read `Running`, `Done`, `Failed`, `Declined`, or `Waiting for approval`. Other statuses show their raw value.
 - Unknown item kinds show their type in plain words, such as `Web search`.
 - A `dynamicToolCall` item with tool `advisor` shows as a note card: `advisor · <severity>: <note>`. The note is the text of `contentItems`. The severity is always text. The card's inline-start border marks the severity as a second cue.
 - Other dynamic tools show their `contentItems` text as output.
 - `turn/plan/updated` shows the latest plan of the current turn as a checklist. Each step has a text status: `Done`, `In progress`, or `Pending`. The step in progress carries `aria-current="step"`. A new turn clears the plan.
-- The streaming cursor and "Reasoning in progress" show only while the turn runs.
+- The streaming cursor shows only while the turn runs. The reasoning label reads `Reasoning in progress` while the turn runs and `Reasoning` otherwise.
 - A failed turn ends with `The turn failed: <message>. Send your message again to retry, or start a new thread.`
 - A turn that is retrying after an error shows `Retrying after an error: <message>`.
 - An interrupted turn shows `Turn interrupted. Send a message to continue.`
@@ -117,8 +122,8 @@ The client records child threads from `dalgona/thread/childSpawned`. An approval
 ### Empty states and errors
 
 - With no open thread the transcript says `Pick a thread or start a new one`. When connected, it adds that earlier threads are in the list. When not connected, it says to connect to dalgona.
-- With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a name shows its preview once.
+- With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a title shows its preview. A thread with neither shows `Untitled thread`.
 - A failed connection reads `Unable to connect to dalgona: <detail>. Check that dalgona web is still running, then select Reconnect.`
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
 - Other request failures read `<action>: <detail>. Reconnect and try again.`
-- In the approval dialog, Decline uses the quiet style. The danger hue marks only Interrupt.
+- In the approval dialog, Decline and Cancel use the quiet style. The composer's `Interrupt turn` button has the danger style.
