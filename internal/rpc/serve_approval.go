@@ -23,7 +23,7 @@ type approvalAsk struct {
 func (s *server) ask(ctx context.Context, w *watch, ch <-chan agent.Update, update agent.Update) {
 	prompt := update.Approval
 	if prompt.Resolved {
-		s.resolved(update.Thread, prompt.RequestID)
+		s.resolved(update.Thread, prompt.RequestID, prompt.Resolution)
 		return
 	}
 	turnID := w.tracker.currentTurn()
@@ -111,9 +111,9 @@ func (s *server) settle(requestID string) {
 	}
 }
 
-func (s *server) resolved(threadID, requestID string) {
+func (s *server) resolved(threadID, requestID, resolution string) {
 	s.settle(requestID)
-	s.send("serverRequest/resolved", ServerRequestResolvedNotification{ThreadID: threadID, RequestID: requestID})
+	s.send("serverRequest/resolved", ServerRequestResolvedNotification{ThreadID: threadID, RequestID: requestID, Resolution: resolution})
 }
 
 func (s *server) request(serveCtx, askCtx context.Context, a approvalAsk) {

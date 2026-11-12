@@ -25,11 +25,11 @@ func (m *model) applyNotification(msg notificationMsg) tea.Cmd {
 
 func (m *model) applyDecodedNotification(msg notificationMsg) (tea.Cmd, error) {
 	switch msg.method {
-	case "thread/started", "thread/status/changed", "thread/name/updated", "thread/reverted", "thread/tokenUsage/updated":
+	case "thread/started", "thread/status/changed", "thread/name/updated", "thread/reverted", "thread/tokenUsage/updated", "serverRequest/resolved":
 		return nil, m.applyThreadNotification(msg)
 	case "turn/started", "turn/completed", "turn/plan/updated", "dalgona/retry/wait":
 		return m.applyTurnNotification(msg)
-	case "item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/textDelta", "item/commandExecution/outputDelta":
+	case "item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/textDelta", "item/commandExecution/outputDelta", "item/fileChange/patchUpdated":
 		return nil, m.applyItemNotification(msg)
 	case "error":
 		return nil, m.applyError(msg.params)
@@ -58,6 +58,8 @@ func (m *model) applyDalgonaNotification(msg notificationMsg) error {
 
 func (m *model) applyThreadNotification(msg notificationMsg) error {
 	switch msg.method {
+	case "serverRequest/resolved":
+		return m.applyRequestResolved(msg.params)
 	case "thread/started":
 		return m.applyThreadStarted(msg.params)
 	case "thread/status/changed":
@@ -87,6 +89,8 @@ func (m *model) applyTurnNotification(msg notificationMsg) (tea.Cmd, error) {
 
 func (m *model) applyItemNotification(msg notificationMsg) error {
 	switch msg.method {
+	case "item/fileChange/patchUpdated":
+		return m.applyPatchUpdated(msg.params)
 	case "item/started":
 		return m.applyItemStarted(msg.params)
 	case "item/completed":

@@ -447,7 +447,7 @@ func (t *tracker) approvalResolved(_ uint64, ev event.Event) {
 		t.declined[callID] = true
 	}
 	t.sink.notify("serverRequest/resolved", func() writer {
-		return ServerRequestResolvedNotification{ThreadID: t.threadID, RequestID: e.RequestID}
+		return ServerRequestResolvedNotification{ThreadID: t.threadID, RequestID: e.RequestID, Resolution: agent.ApprovalResolution(e.Decision, e.Reason)}
 	})
 	if t.turn != "" {
 		t.setStatus("active")

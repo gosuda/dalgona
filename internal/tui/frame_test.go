@@ -183,7 +183,7 @@ func TestApprovalCardKeepsTitleAndActionsInSmallWindow(t *testing.T) {
 			})
 			lines := strings.Split(m.View().Content, "\n")
 			assertFrame(t, lines, size.width, size.height)
-			assertContains(t, strings.Join(lines, "\n"), "approval required", "[n] decline")
+			assertContains(t, strings.Join(lines, "\n"), "Approval · Run command", "[n] decline")
 			before := strings.Join(lines, "\n")
 			m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 			if strings.Join(strings.Split(m.View().Content, "\n"), "\n") == before {

@@ -113,6 +113,7 @@ type liveState struct {
 	groupN     int
 	planN      int
 	planTurn   string
+	patches    map[patchKey][]rpc.FileChange
 }
 
 type inputState struct {
@@ -169,9 +170,10 @@ type notificationMsg struct {
 }
 
 type serverRequestMsg struct {
-	method string
-	params jsontext.Value
-	answer chan requestAnswer
+	method    string
+	requestID string
+	params    jsontext.Value
+	answer    chan requestAnswer
 }
 
 type requestAnswer struct {

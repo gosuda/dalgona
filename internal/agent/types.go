@@ -160,17 +160,18 @@ const (
 )
 
 type ApprovalPrompt struct {
-	RequestID string
-	CallID    string
-	Tool      string
-	Class     tool.Class
-	Summary   string
-	Reason    string
-	Command   string
-	Commands  []string
-	Paths     []string
-	Files     []ApprovalFile
-	Resolved  bool
+	RequestID  string
+	CallID     string
+	Tool       string
+	Class      tool.Class
+	Summary    string
+	Reason     string
+	Command    string
+	Commands   []string
+	Paths      []string
+	Files      []ApprovalFile
+	Resolved   bool
+	Resolution string
 }
 
 type ApprovalFile struct {

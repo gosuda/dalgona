@@ -211,11 +211,11 @@ func TestPrintAfterDockShrinkLeavesNoDockInHistory(t *testing.T) {
 		run.send(commandDone("seq 30"))
 		run.waitFor(t, "first row printed", func(h, s string) bool { return rowCount(h, s, "seq 30") == 1 })
 		run.send(approvalRequest("make all"))
-		run.waitFor(t, "approval card open", func(_, s string) bool { return strings.Contains(s, "approval required") })
+		run.waitFor(t, "approval card open", func(_, s string) bool { return strings.Contains(s, "Approval · Run command") })
 		openDock := run.dock()
 		run.send(commandOutput("seq 20", numberedOutput(20)))
 		run.waitFor(t, "rows printed and approval closed", func(h, s string) bool {
-			return rowCount(h, s, "out-20") == 1 && !strings.Contains(s, "approval required")
+			return rowCount(h, s, "out-20") == 1 && !strings.Contains(s, "Approval · Run command")
 		})
 		if !inject.printing.Load() {
 			t.Fatal("the approval closed when no print was in flight")
@@ -242,7 +242,7 @@ func TestDockGrowDuringPrintKeepsHistoryClean(t *testing.T) {
 		run.waitFor(t, "first row printed", func(h, s string) bool { return rowCount(h, s, "seq 30") == 1 })
 		run.send(commandOutput("seq 20", numberedOutput(20)))
 		run.waitFor(t, "approval card open during a print", func(h, s string) bool {
-			return inject.printing.Load() && strings.Contains(s, "approval required")
+			return inject.printing.Load() && strings.Contains(s, "Approval · Run command")
 		})
 		openDock := run.dock()
 		run.stop()

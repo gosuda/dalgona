@@ -319,6 +319,7 @@ type clientReq struct {
 
 func (c *Conn) dispatchClientRequest(e envelope) {
 	ctx, cancel := context.WithCancel(c.ctx)
+	ctx = context.WithValue(ctx, requestIDKey{}, e.ID)
 	key := string(e.ID)
 	entry := &clientReq{cancel: cancel}
 	c.clientReqMu.Lock()
@@ -777,4 +778,13 @@ func writeJSONToken(encoder *jsontext.Encoder, token jsontext.Token) error {
 		return fmt.Errorf("write JSON token: %w", err)
 	}
 	return nil
+}
+
+type requestIDKey struct{}
+
+func ClientRequestID(ctx context.Context) (string, error) {
+	raw, _ := ctx.Value(requestIDKey{}).(jsontext.Value)
+	var id string
+	err := json.Unmarshal(raw, &id)
+	return id, err
 }

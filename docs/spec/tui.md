@@ -242,21 +242,28 @@ A follow-up starts after `turn/completed` only when the turn ends idle. After an
 
 ## Approvals
 
-`item/commandExecution/requestApproval` and `item/fileChange/requestApproval` open the approval dialog. Requests queue in arrival order, and the dialog shows the oldest one. The dialog shows:
+`item/commandExecution/requestApproval` and `item/fileChange/requestApproval` open the approval card. Requests queue in arrival order, and the card shows the oldest one. The title is `Approval · Run command` or `Approval · Apply file changes`, followed by ` (1 of <n>)` when more requests wait, and the word `Waiting`.
 
-- `approval required`, followed by ` (1 of <n>)` when more requests wait.
-- `thread <id>` when the request comes from another thread.
-- The command when present.
+The body holds at most six rows and scrolls with `up` and `down`. It shows:
+
+- `From thread <id>` when the request comes from another thread.
+- `$ <command>` when the request has a command, and `cwd <cwd>` when it names a working directory.
 - `reason: <reason>` when the request has a reason.
-- The labels `[y] accept`, `[a] accept for session`, `[n] decline`, and `[esc] cancel and interrupt`. They share one line when it fits the width. Otherwise each label gets its own line.
+- For a file change, one line `<label> <path> +<added> −<deleted>` for each file, then its diff from the first hunk on. The diff comes from `item/fileChange/patchUpdated` for the same item. A change with `diffOmitted` shows `diff omitted, larger than 1 MiB` instead of its diff.
 
-The keys answer `accept`, `acceptForSession`, and `decline`. Esc answers `cancel` and interrupts the turn. Each request MUST block until a key answers it, the TUI exits, or the RPC context ends. A new request MUST NOT replace one that waits. Other server requests MUST fail with an error.
+The two action rows are `[y] accept  [a] accept for session` and `[n] decline  [esc] cancel and interrupt`. `[y] accept` carries the one fill of the view, in the thread hue.
+
+Ctrl+O opens the full review of the card, with the same lines and the full diff.
+
+When another window settles a request, the TUI MUST remove the card. It MUST show `Approval answered in another window` for `answered`, `Approval dismissed in another window` for `cancelled`, and `Approval closed: the turn was interrupted` for `interrupted`. Any other resolution MUST show `Approval closed: the agent continues without an answer`.
+
+The keys answer `accept`, `acceptForSession`, and `decline`. `n` declines at once, and the response carries no reason. Esc answers `cancel` and interrupts the turn. Each request MUST block until a key answers it, the TUI exits, or the RPC context ends. A new request MUST NOT replace one that waits. Other server requests MUST fail with an error.
 
 A server request whose parameters do not decode MUST receive an error answer. The TUI MUST show `approval request failed: <cause>; reconnect and retry the turn`.
 
 ## Notifications
 
-The TUI applies these notifications: `thread/started`, `thread/status/changed`, `thread/tokenUsage/updated`, `thread/name/updated` (`threadName`), `thread/reverted`, `turn/started`, `turn/completed`, `turn/plan/updated`, `item/started`, `item/completed`, the three delta notifications, `error`, `dalgona/thread/childSpawned`, and `dalgona/advisor/note`. The TUI also applies `dalgona/tool/judged`, `dalgona/turn/judged`, and `account/login/completed`. `account/login/completed` shows `Signed in to <provider>. Run /model to choose a model` on success, and `Login failed: <error>; run /login again` on failure. It ignores `serverRequest/resolved` and unknown methods. The TUI MUST ignore a `thread/status/changed` whose `seq` is lower than the last seen `seq`. `turn/started` clears the notice line.
+The TUI applies these notifications: `thread/started`, `thread/status/changed`, `thread/tokenUsage/updated`, `thread/name/updated` (`threadName`), `thread/reverted`, `turn/started`, `turn/completed`, and `turn/plan/updated`. It also applies `item/started`, `item/completed`, the three delta notifications, `item/fileChange/patchUpdated`, `serverRequest/resolved`, `error`, `dalgona/thread/childSpawned`, and `dalgona/advisor/note`. The TUI also applies `dalgona/tool/judged`, `dalgona/turn/judged`, and `account/login/completed`. `account/login/completed` shows `Signed in to <provider>. Run /model to choose a model` on success, and `Login failed: <error>; run /login again` on failure. It ignores unknown methods. The TUI MUST ignore a `thread/status/changed` whose `seq` is lower than the last seen `seq`. `turn/started` clears the notice line.
 
 A `/login` response without a URL or a code MUST NOT change the notice line. Its outcome arrives in `account/login/completed`.
 A failed login without error text MUST show `Login failed: unknown error; run /login again`.

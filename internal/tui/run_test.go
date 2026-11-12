@@ -96,7 +96,7 @@ func TestRunStreamsTurnAndAnswersApproval(t *testing.T) {
 	serverResult := make(chan error, 1)
 	go func() { serverResult <- serveTurn(server) }()
 
-	output.waitFor(ctx, t, "approval required", "go test ./...")
+	output.waitFor(ctx, t, "Approval · Run command", "go test ./...")
 	waitStatus(ctx, t, statuses, stateAwaitingApproval, "t1")
 	if _, err := keyboard.Write([]byte("y")); err != nil {
 		t.Fatalf("write approval key: %v", err)

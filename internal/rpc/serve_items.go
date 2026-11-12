@@ -516,3 +516,28 @@ func (it *Item) readChange(d *jsontext.Decoder) error {
 	it.Changes = append(it.Changes, change)
 	return err
 }
+
+func (n *FileChangePatchUpdatedNotification) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	var holder Item
+	err := readMembers(d, func(name string, d *jsontext.Decoder) error {
+		switch name {
+		case "threadId":
+			v, err := readString(d)
+			n.ThreadID = v
+			return err
+		case "turnId":
+			v, err := readString(d)
+			n.TurnID = v
+			return err
+		case "itemId":
+			v, err := readString(d)
+			n.ItemID = v
+			return err
+		case "changes":
+			return readArray(d, func() error { return holder.readChange(d) })
+		}
+		return d.SkipValue()
+	})
+	n.Changes = holder.Changes
+	return err
+}

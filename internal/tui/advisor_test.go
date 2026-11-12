@@ -94,7 +94,7 @@ func TestModelQueuesApprovalsAndIgnoresOtherThreads(t *testing.T) {
 		params: []byte(`{"threadId":"child-1","turnId":"turn-2","itemId":"f1","startedAtMs":2}`),
 	})
 	view := m.View().Content
-	assertContains(t, view, "approval required (1 of 2)", "reason: verify the fix", "[esc] cancel and interrupt")
+	assertContains(t, view, "Approval · Run command (1 of 2)", "reason: verify the fix", "[n] decline")
 	for line := range strings.SplitSeq(view, "\n") {
 		if lipgloss.Width(line) > 40 {
 			t.Errorf("approval line wider than 40: %q", line)
@@ -104,7 +104,7 @@ func TestModelQueuesApprovalsAndIgnoresOtherThreads(t *testing.T) {
 	if answer := <-first; answer.value != (rpc.CommandExecutionRequestApprovalResponse{Decision: "accept"}) {
 		t.Fatalf("first answer = %#v", answer)
 	}
-	assertContains(t, m.View().Content, "approval required", "thread child-1")
+	assertContains(t, m.View().Content, "Approval · Apply file changes", "thread child-1")
 	m, _ = drive(t, m, press('n', 0, "n"))
 	if answer := <-second; answer.value != (rpc.CommandExecutionRequestApprovalResponse{Decision: "decline"}) {
 		t.Fatalf("second answer = %#v", answer)

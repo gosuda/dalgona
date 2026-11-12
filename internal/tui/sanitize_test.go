@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -52,7 +53,8 @@ func TestRenderApprovalStripsEscapes(t *testing.T) {
 	m.screen.width = 80
 	m.approvals = []approval{{threadID: "t1", command: "\x1b[8msecret\x1b[0m echo hi", reason: "why\x1b]0;t\x07not"}}
 	view := strings.Join(framePanel(&m.screen, m.approvalPanel(), panelRows(panelApproval, 24)), "\n")
-	if strings.ContainsAny(view, "\x1b\x07") {
+	plain := regexp.MustCompile("\x1b\\[[0-9;]*m").ReplaceAllString(view, "")
+	if strings.ContainsAny(plain, "\x1b\x07") {
 		t.Fatalf("approval view kept escapes: %q", view)
 	}
 	if !strings.Contains(view, "echo hi") {

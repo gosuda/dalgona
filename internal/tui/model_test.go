@@ -165,7 +165,7 @@ func TestModelApprovalPromptAndDecision(t *testing.T) {
 				answer: answer,
 			}
 			m, _ = drive(t, m, request)
-			assertContains(t, m.View().Content, "approval required", "go test ./...", "[y] accept", "[a] accept for session", "[n] decline", "Waiting")
+			assertContains(t, m.View().Content, "Approval · Run command", "go test ./...", "[y] accept", "[a] accept for session", "[n] decline", "Waiting")
 			m, _ = drive(t, m, press(test.key, 0, string(test.key)))
 			response := <-answer
 			decision, ok := response.value.(rpc.CommandExecutionRequestApprovalResponse)

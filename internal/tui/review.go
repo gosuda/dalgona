@@ -50,14 +50,7 @@ func (m *model) closeReview() {
 func (m *model) liveEntry() *entry {
 	if len(m.approvals) > 0 {
 		open := m.approvals[0]
-		var lines []string
-		if open.command != "" {
-			lines = append(lines, "$ "+open.command)
-		}
-		if open.reason != "" {
-			lines = append(lines, open.reason)
-		}
-		snapshot := newEntry("approval:"+open.itemID, lines)
+		snapshot := newEntry("approval:"+open.itemID, m.approvalLines(open))
 		return &snapshot
 	}
 	if len(m.live.items) == 0 {

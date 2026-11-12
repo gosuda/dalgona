@@ -13,15 +13,11 @@ func TestApprovalChoicesMeasureWithRendererMethod(t *testing.T) {
 	if got, want := screen.cells(family), ansi.WcWidth.StringWidth(family); got != want {
 		t.Fatalf("cells(family) = %d, want the renderer method width %d", got, want)
 	}
-	one := approvalChoices(&screen, 1000)
-	if len(one) != 1 {
-		t.Fatalf("wide window gave %d rows, want one", len(one))
+	rows := approvalChoices(&screen, 0)
+	if len(rows) != 2 {
+		t.Fatalf("approval actions gave %d rows, want two", len(rows))
 	}
-	width := screen.cells(one[0])
-	if got := approvalChoices(&screen, width); len(got) != 1 {
-		t.Fatalf("exact width gave %d rows, want one", len(got))
-	}
-	if got := approvalChoices(&screen, width-1); len(got) != 4 {
-		t.Fatalf("one cell short gave %d rows, want four", len(got))
+	if got := screen.cells(rows[1]); got != ansi.WcWidth.StringWidth(rows[1]) {
+		t.Fatalf("second action row measures %d, want the renderer width", got)
 	}
 }

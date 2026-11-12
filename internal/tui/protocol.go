@@ -95,7 +95,7 @@ func decodeApproval(method string, params jsontext.Value) (approval, error) {
 		err := decodeParams(params, &request)
 		return approval{
 			method: method, threadID: sanitizeText(request.ThreadID), itemID: request.ItemID,
-			command: sanitizeText(request.Command), reason: sanitizeText(request.Reason),
+			command: sanitizeText(request.Command), cwd: sanitizeText(request.Cwd), reason: sanitizeText(request.Reason),
 		}, err
 	case "item/fileChange/requestApproval":
 		var request rpc.FileChangeRequestApprovalParams

@@ -358,7 +358,7 @@ func (a *actor) newInputSince(head uint64) bool {
 }
 
 func (a *actor) settle(status string) {
-	reason := "the turn was interrupted"
+	reason := interruptedReason
 	if status == statusFailed {
 		reason = "the turn failed"
 	}

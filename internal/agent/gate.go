@@ -269,6 +269,7 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 	}
 	if forwarded {
 		prompt.Resolved = true
+		prompt.Resolution = ApprovalResolution(v.decision, v.reason)
 		w.t.forwardApproval(prompt, nil)
 		w.t.discardApproval(prompt.RequestID)
 	}
@@ -301,7 +302,7 @@ func awaitReply(ctx context.Context, replies <-chan Reply) verdict {
 	case reply := <-replies:
 		return replyVerdict(reply)
 	case <-ctx.Done():
-		return verdict{decision: "cancel", by: "user", reason: "the turn was interrupted"}
+		return verdict{decision: "cancel", by: "user", reason: interruptedReason}
 	}
 }
 
@@ -342,7 +343,7 @@ func replyVerdict(reply Reply) verdict {
 	case ReplyAcceptSession:
 		return verdict{allow: true, decision: "accept_session", by: "user", reason: "allowed for this session"}
 	case ReplyCancel:
-		return verdict{decision: "cancel", by: "user", reason: "cancelled by user", cancel: true}
+		return verdict{decision: "cancel", by: "user", reason: cancelledReason, cancel: true}
 	case ReplyDecline:
 		return decline("user", "declined by user")
 	}
