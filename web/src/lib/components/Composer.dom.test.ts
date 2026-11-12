@@ -1,5 +1,6 @@
 import { waitFor } from "@testing-library/dom";
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import Composer from "#lib/components/Composer.svelte";
 
@@ -170,5 +171,63 @@ describe("composer history", () => {
 		expect(field.value).toBe("old");
 		await fireEvent.keyDown(field, { key: "ArrowDown" });
 		expect(field.value).toBe("old edited");
+	});
+});
+
+describe("interrupt guard", () => {
+	afterEach(() => {
+		cleanup();
+		vi.useRealTimers();
+	});
+
+	test("one Esc arms and shows the hint; a second Esc within the window interrupts", async () => {
+		const onInterrupt = vi.fn();
+		render(Composer, { props: { ...baseProps(), running: true, onInterrupt } });
+		const field = screen.getByRole("textbox", { name: "Message" });
+		await fireEvent.keyDown(field, { key: "Escape" });
+		expect(onInterrupt).not.toHaveBeenCalled();
+		expect(document.getElementById("composer-help")?.textContent).toBe(
+			"Esc again to interrupt",
+		);
+		await fireEvent.keyDown(field, { key: "Escape" });
+		expect(onInterrupt).toHaveBeenCalledTimes(1);
+	});
+
+	test("the hint clears after the window", async () => {
+		vi.useFakeTimers();
+		render(Composer, { props: { ...baseProps(), running: true } });
+		const field = screen.getByRole("textbox", { name: "Message" });
+		await fireEvent.keyDown(field, { key: "Escape" });
+		expect(document.getElementById("composer-help")?.textContent).toBe(
+			"Esc again to interrupt",
+		);
+		await vi.advanceTimersByTimeAsync(2000);
+		await tick();
+		expect(document.getElementById("composer-help")?.textContent).toContain(
+			"Enter to steer",
+		);
+	});
+
+	test("one Esc interrupts at once during a rate-limit wait", async () => {
+		const onInterrupt = vi.fn();
+		render(Composer, {
+			props: { ...baseProps(), running: true, retrying: true, onInterrupt },
+		});
+		await fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), {
+			key: "Escape",
+		});
+		expect(onInterrupt).toHaveBeenCalledTimes(1);
+	});
+
+	test("Esc while idle does nothing", async () => {
+		const onInterrupt = vi.fn();
+		render(Composer, { props: { ...baseProps(), onInterrupt } });
+		await fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), {
+			key: "Escape",
+		});
+		expect(onInterrupt).not.toHaveBeenCalled();
+		expect(document.getElementById("composer-help")?.textContent).toContain(
+			"Enter to send",
+		);
 	});
 });

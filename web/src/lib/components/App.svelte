@@ -196,6 +196,7 @@ const subagentTitle = $derived.by(() => {
 				onSteer={(text) => void session.steerMessage(text)}
 				onFollowup={(text) => session.queueFollowup(text)}
 				onInterrupt={() => void session.interruptTurn()}
+				retrying={session.retryRemainingMs !== null}
 			/>
 		</div>
 	</main>

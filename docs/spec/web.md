@@ -284,3 +284,8 @@ Typing into a recalled message MUST make the edited text the draft. The caret MU
 |---|---|---|
 | ArrowUp | At the start, nothing selected | Recalls the previous message you sent. |
 | ArrowDown | At the end, or while browsing, with nothing selected | Recalls the next message, or restores the draft. |
+
+While a turn runs, the first Escape MUST show `Esc again to interrupt` in the help line for two seconds.
+A second Escape within those two seconds MUST interrupt the turn.
+During a rate-limit wait, one Escape MUST interrupt the turn at once.
+Escape while no turn runs MUST do nothing.

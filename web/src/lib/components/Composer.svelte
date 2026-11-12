@@ -1,8 +1,10 @@
 <script lang="ts">
-import { tick } from "svelte";
+import { onDestroy, tick } from "svelte";
 import FollowupQueue from "#lib/components/FollowupQueue.svelte";
 import { handoffFocus } from "#lib/focus.ts";
 import type { KeywordMatch } from "#lib/types.ts";
+
+const INTERRUPT_GUARD_MS = 2000;
 
 interface Props {
 	disabled: boolean;
@@ -16,6 +18,7 @@ interface Props {
 	onSteer: (text: string) => void;
 	onFollowup: (text: string) => void;
 	onInterrupt: () => void;
+	retrying?: boolean;
 }
 
 let {
@@ -30,6 +33,7 @@ let {
 	onSteer,
 	onFollowup,
 	onInterrupt,
+	retrying = false,
 }: Props = $props();
 let text = $state("");
 let error = $state("");
@@ -38,6 +42,41 @@ let browsing: number | null = null;
 let savedDraft = "";
 let matchSeq = 0;
 let textarea = $state<HTMLTextAreaElement>();
+let region = $state<HTMLElement>();
+let guardUntil = $state(0);
+let guardTimer: ReturnType<typeof setTimeout> | undefined;
+const interruptArmed = $derived(running && guardUntil > 0);
+
+function disarm(): void {
+	clearTimeout(guardTimer);
+	guardTimer = undefined;
+	guardUntil = 0;
+}
+
+$effect(() => {
+	if (!running) disarm();
+});
+
+onDestroy(() => clearTimeout(guardTimer));
+
+function pressEscape(): void {
+	if (!running) return;
+	if (retrying || Date.now() < guardUntil) {
+		disarm();
+		onInterrupt();
+		return;
+	}
+	guardUntil = Date.now() + INTERRUPT_GUARD_MS;
+	guardTimer = setTimeout(disarm, INTERRUPT_GUARD_MS);
+}
+
+function onWindowKeydown(event: KeyboardEvent): void {
+	if (event.key !== "Escape" || event.defaultPrevented) return;
+	const focused = document.activeElement;
+	if (focused && focused !== document.body && !region?.contains(focused))
+		return;
+	pressEscape();
+}
 
 $effect(() => {
 	const draft = text;
@@ -145,7 +184,9 @@ function onKeydown(event: KeyboardEvent): void {
 }
 </script>
 
-<section class="composer" aria-label="Message composer">
+<svelte:window onkeydown={onWindowKeydown} />
+
+<section class="composer" aria-label="Message composer" bind:this={region}>
 	<form
 		onsubmit={(event) => {
 			event.preventDefault();
@@ -172,7 +213,11 @@ function onKeydown(event: KeyboardEvent): void {
 		{/if}
 		<div class="composer-meta">
 			<p id="composer-help">
-				Enter to {running ? "steer" : "send"} · Shift+Enter for a new line{running ? " · Alt+Enter to queue" : ""}
+				{#if interruptArmed}
+					Esc again to interrupt
+				{:else}
+					Enter to {running ? "steer" : "send"} · Shift+Enter for a new line{running ? " · Alt+Enter to queue" : ""}
+				{/if}
 			</p>
 		</div>
 		<p id="composer-error" class="error" role="alert">{error}</p>
