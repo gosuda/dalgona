@@ -22,13 +22,17 @@ const (
 )
 
 func (m *model) commandContext() (context.Context, context.CancelFunc) {
+	return requestContext(m.conn.done)
+}
+
+func requestContext(done <-chan struct{}) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-	if m.conn.done == nil {
+	if done == nil {
 		return ctx, cancel
 	}
 	go func() {
 		select {
-		case <-m.conn.done:
+		case <-done:
 			cancel()
 		case <-ctx.Done():
 		}

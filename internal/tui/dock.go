@@ -56,7 +56,7 @@ func (m *model) panelOpen() bool {
 
 func (m *model) editorRows(width, limit int) []string {
 	c := m.input.composer
-	text := glowKeywords(c.textView(), m.input.keywords, m.composerPhase()) + c.placeholderView()
+	text := c.draftView(m.draftSpans(), m.screen.theme) + c.placeholderView()
 	rows := m.screen.wrap(text, width)
 	if len(rows) <= limit {
 		return rows

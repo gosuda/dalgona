@@ -169,7 +169,7 @@ func (m *model) renderSettledItem(item rpc.Item) string {
 	item = sanitizeItem(item)
 	switch item.Type {
 	case "userMessage":
-		return "you\n" + glowKeywords(item.Text, m.input.keywords, 0)
+		return "you\n" + markKeywords(item.Text, spansOf(item.Keywords), m.screen.theme)
 	case "agentMessage":
 		return m.renderMarkdown(item.Text)
 	case "reasoning":

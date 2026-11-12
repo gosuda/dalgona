@@ -14,18 +14,19 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var command tea.Cmd
+	before := m.input.composer.Value()
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		command = m.updateKey(msg)
-	case notificationMsg, serverRequestMsg, resultMsg, shimmerMsg, disconnectedMsg:
+	case notificationMsg, serverRequestMsg, resultMsg, disconnectedMsg:
 		command = m.updateAsync(msg)
 	default:
 		if !m.updateTerminal(msg) {
 			command = m.updateComposer(msg)
 		}
 	}
-	if _, ok := msg.(shimmerMsg); !ok {
-		command = tea.Batch(command, m.scheduleShimmer())
+	if m.input.composer.Value() != before {
+		command = tea.Batch(command, m.matchKeywords())
 	}
 	settle := m.settle()
 	printCommand := m.drain()
@@ -66,9 +67,11 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 	case serverRequestMsg:
 		m.applyRequest(msg)
 	case resultMsg:
+		if msg.op == "keywordMatch" {
+			m.applyKeywordMatch(msg)
+			return nil
+		}
 		return m.applyResult(msg)
-	case shimmerMsg:
-		return m.advanceShimmer()
 	case disconnectedMsg:
 		m.setState(stateDisconnected)
 		m.errorf("connection lost: %v; restart the TUI, then %s", msg.err, m.resumeHint())

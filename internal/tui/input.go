@@ -1,10 +1,6 @@
 package tui
 
-import (
-	"strings"
-
-	tea "charm.land/bubbletea/v2"
-)
+import tea "charm.land/bubbletea/v2"
 
 type composer struct {
 	text        []rune
@@ -36,14 +32,11 @@ func (c *composer) Focus() tea.Cmd {
 	return nil
 }
 
-func (c composer) textView() string {
-	var out strings.Builder
-	out.Grow(len(c.text) + 8)
-	out.WriteString("› ")
-	out.WriteString(string(c.text[:c.cursor]))
-	out.WriteString(c.cursorView())
-	out.WriteString(string(c.text[c.cursor:]))
-	return out.String()
+func (c composer) draftView(spans []keywordSpan, t theme) string {
+	prefix := "› "
+	cut := len(prefix) + len(string(c.text[:c.cursor]))
+	text, marked := insertCursor(prefix+c.Value(), shiftSpans(spans, len(prefix)), cut, c.cursorView())
+	return markKeywords(text, marked, t)
 }
 
 func (c composer) placeholderView() string {

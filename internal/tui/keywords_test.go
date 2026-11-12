@@ -1,121 +1,170 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
-
-	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 
-func TestMatchKeywordsBoundariesAndMasking(t *testing.T) {
+type failingKeywordCaller struct {
+	fakeCaller
+}
+
+func (f *failingKeywordCaller) Call(ctx context.Context, method string, params, result any) error {
+	if method == "dalgona/keywords/match" {
+		return &rpc.RPCError{Code: -32601, Message: "method not found"}
+	}
+	return f.fakeCaller.Call(ctx, method, params, result)
+}
+
+func keywordReplyMsg(seq int, text string, ranges ...[2]int) resultMsg {
+	reply := new(keywordReply)
+	for _, r := range ranges {
+		reply.Matches = append(reply.Matches, keywordReplyMatch{ByteRange: keywordRange{Start: r[0], End: r[1]}})
+	}
+	return resultMsg{op: "keywordMatch", value: reply, seq: seq, text: text}
+}
+
+func underlinedRunes(text string) string {
+	var out strings.Builder
+	under, last := false, 0
+	for _, loc := range sgrPattern.FindAllStringSubmatchIndex(text, -1) {
+		if under {
+			out.WriteString(text[last:loc[0]])
+		}
+		under = underlineAfter(under, text[loc[2]:loc[3]])
+		last = loc[1]
+	}
+	if under {
+		out.WriteString(text[last:])
+	}
+	return out.String()
+}
+
+func underlineAfter(under bool, params string) bool {
+	for param := range strings.SplitSeq(params, ";") {
+		switch param {
+		case "4":
+			under = true
+		case "", "0", "24":
+			under = false
+		}
+	}
+	return under
+}
+
+func TestKeywordMarkUnderlinedUnderNoColor(t *testing.T) {
 	t.Parallel()
-	table := []Keyword{{Word: "ultrathink", Hue: [2]int{0, 330}}}
-	tests := []struct {
-		name   string
-		prompt string
-		want   bool
+	text := "use ultrathink now"
+	spans := []keywordSpan{{start: 4, end: 14}}
+	for _, tc := range []struct {
+		name  string
+		theme theme
+		open  string
 	}{
-		{name: "standalone", prompt: "ultrathink", want: true},
-		{name: "comma", prompt: "ultrathink,", want: true},
-		{name: "uppercase", prompt: "ULTRATHINK"},
-		{name: "suffix", prompt: "ultrathinking"},
-		{name: "property", prompt: "x.ultrathink"},
-		{name: "method", prompt: "ultrathink()"},
-		{name: "path", prompt: "/ultrathink"},
-		{name: "sentence period", prompt: "ultrathink.", want: true},
-		{name: "extension", prompt: "ultrathink.md"},
-		{name: "one colon", prompt: "x:ultrathink", want: true},
-		{name: "namespace", prompt: "x::ultrathink"},
-		{name: "inline code", prompt: "`ultrathink`"},
-		{name: "double inline code", prompt: "``ultrathink``"},
-		{name: "fenced code", prompt: "```\nultrathink\n```"},
-		{name: "tilde fence", prompt: "~~~text\nultrathink\n~~~"},
-		{name: "indented fence", prompt: "   ```go\nultrathink\n   ```"},
-		{name: "xml", prompt: "<system>ultrathink</system>"},
-		{name: "nested xml", prompt: "<x>before <x>ultrathink</x></x>"},
-		{name: "html comment", prompt: "<!-- ultrathink -->"},
-		{name: "after code", prompt: "`code` ultrathink", want: true},
-		{name: "unicode before", prompt: "éultrathink"},
-		{name: "unicode separated", prompt: "é ultrathink", want: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			got := len(matchKeywords(test.prompt, table)) == 1
-			if got != test.want {
-				t.Errorf("matchKeywords(%q) = %v, want %v", test.prompt, got, test.want)
-			}
-		})
-	}
-}
-
-func TestKeywordGlowUsesGradientAndPhase(t *testing.T) {
-	t.Parallel()
-	table := []Keyword{{Word: "ultrathink", Hue: [2]int{0, 330}}}
-	static := glowKeywords("ultrathink, please", table, 0)
-	shifted := glowKeywords("ultrathink, please", table, 1.0/14.0)
-	if static == shifted {
-		t.Fatal("shimmer phase did not change the gradient")
-	}
-	if got := stripANSI(static); got != "ultrathink, please" {
-		t.Fatalf("glow changed visible text to %q", got)
-	}
-	if !strings.Contains(static, "\x1b[38;2;245;71;71mu") {
-		t.Fatalf("gradient color is reset before the first rune: %q", static)
-	}
-	if strings.Contains(glowKeywords("`ultrathink`", table, 0), "\x1b[") {
-		t.Fatal("inline code received keyword colors")
-	}
-	if len(keywordPalette(table[0].Hue)) != 14 {
-		t.Fatal("keyword palette does not have 14 stops")
-	}
-}
-
-func TestModelSchedulesShimmerOnlyForVisibleMatch(t *testing.T) {
-	t.Parallel()
-	m := newModel(nil, Options{}, nil)
-	m.input.keywords = []Keyword{{Word: "ultrathink", Hue: [2]int{0, 330}}}
-	m.input.composer.SetValue("plain prompt")
-	m, command := drive(t, m, tea.PasteMsg{Content: " still plain"})
-	if command != nil {
-		t.Fatal("plain composer scheduled a shimmer tick")
-	}
-	m.input.composer.SetValue("ultrathink")
-	m, command = drive(t, m, tea.PasteMsg{Content: ""})
-	if command == nil {
-		t.Fatal("visible keyword did not schedule a shimmer tick")
-	}
-	m, command = drive(t, m, tea.BlurMsg{})
-	if command != nil {
-		t.Fatal("blurred composer scheduled a new shimmer tick")
-	}
-	m.input.shimmerActive = true
-	m, command = drive(t, m, shimmerMsg{})
-	if command != nil || m.input.shimmerActive {
-		t.Fatal("blurred composer kept the shimmer timer active")
+		{name: "before the theme is known", theme: theme{}, open: "\x1b[1m"},
+		{name: "known theme without colour", theme: newTheme(themeNight, false), open: "\x1b[1;4m"},
+	} {
+		out := markKeywords(text, spans, tc.theme)
+		if segment := tc.open + "ultrathink" + reset; !strings.Contains(out, segment) {
+			t.Fatalf("%s: mark is %q, want %q", tc.name, out, segment)
+		}
+		if got := stripANSI(out); got != text {
+			t.Fatalf("mark changed visible text to %q", got)
+		}
 	}
 }
 
 func TestComposerAndSentMessageKeywordGlow(t *testing.T) {
 	t.Parallel()
-	table := []Keyword{{Word: "ultrathink", Hue: [2]int{0, 330}}}
 	m := newTestModel(nil, Options{}, nil)
+	m.screen.theme = newTheme(themeNight, false)
 	m.screen.width = 8
 	m.input.composer.SetWidth(8)
-	m.input.keywords = table
 	m.input.composer.SetValue("ultrathink")
+	m.input.marks = []keywordSpan{{start: 0, end: 10}}
+	m.input.marksFor = "ultrathink"
 	view := m.View().Content
-	if !strings.Contains(view, "\x1b[38;2;245;71;71mu") {
-		t.Fatalf("composer broken across lines lost keyword color:\n%q", view)
+	if got := strings.ReplaceAll(underlinedRunes(view), "\n", ""); got != "ultrathink" {
+		t.Fatalf("wrapped composer lost its keyword mark: %q\n%q", got, view)
 	}
-	if got := strings.ReplaceAll(stripANSI(view), "\n", ""); !strings.Contains(got, "ultrathink") {
-		t.Fatalf("wrapped composer lost keyword text:\n%s", got)
+	settled := m.renderSettledItem(rpc.Item{
+		Type:     "userMessage",
+		Text:     "ultrathink, please",
+		Keywords: []rpc.KeywordMatch{{ByteRange: rpc.ByteRange{Start: 0, End: 10}}},
+	})
+	if got := underlinedRunes(settled); got != "ultrathink" {
+		t.Fatalf("settled user message lost its keyword mark: %q", settled)
 	}
-	settled := m.renderSettledItem(rpc.Item{Type: "userMessage", Text: "ultrathink, please"})
-	if !strings.Contains(settled, "\x1b[38;2;") {
-		t.Fatalf("settled user message lost keyword color: %q", settled)
+}
+
+func TestComposerMarksComeFromServerReply(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{}, nil)
+	m.screen.theme = newTheme(themeNight, false)
+	m.input.composer.SetValue("please ultrathink")
+	if got := underlinedRunes(m.View().Content); got != "" {
+		t.Fatalf("composer marked %q before any reply", got)
+	}
+	_ = m.matchKeywords()
+	m, _ = drive(t, m, keywordReplyMsg(m.matchSeq, "please ultrathink", [2]int{7, 17}))
+	if got := underlinedRunes(m.View().Content); got != "ultrathink" {
+		t.Fatalf("server reply marked %q, want ultrathink", got)
+	}
+}
+
+func TestStaleKeywordReplyIsDropped(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{}, nil)
+	m.screen.theme = newTheme(themeNight, false)
+	m.input.composer.SetValue("x ultrathink")
+	_ = m.matchKeywords()
+	first := m.matchSeq
+	m.input.composer.SetValue("ultrathink")
+	_ = m.matchKeywords()
+	second := m.matchSeq
+	m, _ = drive(t, m, keywordReplyMsg(second, "ultrathink", [2]int{0, 10}))
+	m, _ = drive(t, m, keywordReplyMsg(first, "x ultrathink", [2]int{2, 12}))
+	if got := underlinedRunes(m.View().Content); got != "ultrathink" {
+		t.Fatalf("stale reply changed the marks: %q", got)
+	}
+
+	fresh := newTestModel(nil, Options{}, nil)
+	fresh.input.composer.SetValue("ultrathink")
+	_ = fresh.matchKeywords()
+	fresh, _ = drive(t, fresh, keywordReplyMsg(first, "x ultrathink", [2]int{2, 12}))
+	if got := underlinedRunes(fresh.View().Content); got != "" {
+		t.Fatalf("stale reply marked %q on a new draft", got)
+	}
+}
+
+func TestKeywordMatchErrorIsSilent(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(&failingKeywordCaller{}, Options{}, nil)
+	m.input.composer.SetValue("ultrathink")
+	command := m.matchKeywords()
+	m, _ = drive(t, m, command())
+	if m.notice != "" || m.noticeError {
+		t.Fatalf("a server without keyword matching raised a notice: %q", m.notice)
+	}
+}
+
+func TestComposerMarkWithCursorInsideWord(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{}, nil)
+	m.screen.theme = newTheme(themeNight, false)
+	m.input.composer.SetValue("ultrathink")
+	m.input.composer.cursor = 5
+	m.input.marks = []keywordSpan{{start: 0, end: 10}}
+	m.input.marksFor = "ultrathink"
+	view := m.View().Content
+	if got := stripANSI(view); !strings.Contains(got, "› ultra▏think") {
+		t.Fatalf("cursor inside the word broke the composer: %q", got)
+	}
+	if got := underlinedRunes(view); got != "ultrathink" {
+		t.Fatalf("mark does not cover both parts around the cursor: %q", got)
 	}
 }
 

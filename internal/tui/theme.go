@@ -166,6 +166,14 @@ func (s *screenState) dockTheme() theme {
 	return newTheme(resolveTheme(s.themeSetting, true), s.color)
 }
 
+func (t theme) mark(s string) string {
+	attrs := []string{"1"}
+	if t.known {
+		attrs = append(attrs, "4")
+	}
+	return sgr(append(attrs, t.codes(roleAccentText)...)) + s + reset
+}
+
 func downsample(text string, profile colorprofile.Profile) string {
 	var out strings.Builder
 	writer := colorprofile.Writer{Forward: &out, Profile: profile}

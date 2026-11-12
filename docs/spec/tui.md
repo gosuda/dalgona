@@ -30,7 +30,7 @@ The dock holds, from the top, the composer, an open panel, the live row, and the
 
 Sandbox `off` MUST show as `no sandbox`. The status row MUST show the sandbox that the server reports in `thread/start`. When the harness sandbox is unavailable, the server reports `dangerFullAccess`. The TUI then shows `no sandbox`, even if the local option is `workspace-write`. A non-empty follow-up queue appends ` · <n> follow-up queued`.
 
-The composer shows `› `, the typed text, and the cursor `▏`. When the composer is empty, the cursor comes first and the placeholder follows it in faint text. The placeholder never glows.
+The composer shows `› `, the typed text, and the cursor `▏`. When the composer is empty, the cursor comes first and the placeholder follows it in faint text. The placeholder never shows a keyword mark.
 
 States are `idle`, `running`, `awaiting approval`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. Live text MUST be cut to one row, and a cut text MUST end with `...`. At 40 columns no line may exceed 39 cells.
 
@@ -198,13 +198,12 @@ An error notice MUST be bold in the failed-text role.
 A row written before the theme is known MUST NOT use a colour.
 A theme change MUST NOT rewrite a written row.
 
-## Keyword glow
+## Keyword mark
 
-The TUI reimplements the `internal/keywords` matcher. A keyword matches only as an exact lowercase word in prose. Fenced code, inline code, HTML comments, and XML or HTML elements with their contents are masked first.
+The server finds keywords. The TUI MUST NOT match keywords itself. The rules are in [keywords.md](keywords.md).
 
-- The previous rune MUST NOT be a letter, a digit, `_`, `.`, `/`, `\`, or `-`. The two previous runes MUST NOT be `::`.
-- The next rune MUST NOT be a letter, a digit, `_`, `/`, `\`, `-`, or `(`. It MUST NOT be `.` followed by a letter, a digit, `_`, or `-`.
+The composer MUST show marks only for the draft that the newest accepted `dalgona/keywords/match` reply matched. A reply MUST be dropped when it is not the newest request or its text differs from the draft.
 
-Each matched rune takes a color from a 14-stop gradient. Stop `i` has hue `a + (b - a) * i / 14` from the keyword's `hue: [a, b]`, saturation 90%, and lightness 62%. Rune `j` of an `n`-rune word uses stop `floor(((j / n + phase) mod 1) * 14)`. The glow adds SGR sequences only. The visible text MUST NOT change.
+A keyword mark is bold. It is also underlined once the theme is known. It MUST take the accent color only when color is on. The mark MUST NOT change the visible text, and it MUST NOT depend on color alone.
 
-The composer and completed user messages glow. Completed messages use phase 0. The composer matcher runs on the rendered composer text, so a cursor inside a word hides that match. While the composer has focus and shows a match, a 100 ms tick MUST advance the phase by 1/14. When focus leaves or no match shows, the TUI MUST NOT schedule another tick.
+A completed user message MUST show the marks listed in its `keywords` member. A cursor inside a marked word MUST split the mark around the cursor. The mark has no animation and schedules no tick.

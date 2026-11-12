@@ -39,6 +39,7 @@ type model struct {
 	approvals   []approval
 	selector    *selector
 	confirm     *confirmation
+	matchSeq    int
 }
 
 type connInfo struct {
@@ -65,10 +66,10 @@ type liveState struct {
 }
 
 type inputState struct {
-	composer      composer
-	keywords      []Keyword
-	phase         float64
-	shimmerActive bool
+	composer composer
+	keywords []Keyword
+	marks    []keywordSpan
+	marksFor string
 }
 
 type screenState struct {
@@ -119,11 +120,10 @@ type resultMsg struct {
 	op     string
 	value  any
 	text   string
+	seq    int
 	turnID string
 	err    error
 }
-
-type shimmerMsg struct{}
 
 type disconnectedMsg struct {
 	err error
