@@ -11,7 +11,6 @@ import json
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,7 +301,6 @@ def main() -> None:
         ],
     }
     data = (json.dumps(report, indent=2) + "\n").encode("utf-8")
-    Path(__file__).with_name("verification.json").write_bytes(data)
     sys.stdout.buffer.write(data)
 
 
