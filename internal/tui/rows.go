@@ -11,13 +11,10 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gosuda/dalgona/internal/rpc"
 )
-
-var faint = lipgloss.NewStyle().Faint(true)
 
 const (
 	settleDelay     = 3 * time.Second / framesPerSecond

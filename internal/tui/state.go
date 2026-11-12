@@ -112,7 +112,7 @@ type liveState struct {
 }
 
 type inputState struct {
-	composer composer
+	composer editor
 	keywords []Keyword
 	marks    []keywordSpan
 	marksFor string
@@ -192,7 +192,7 @@ func newModel(client caller, opts Options, done <-chan struct{}) model {
 	}
 	return model{
 		conn:   connInfo{client: client, opts: opts, done: done, clock: time.Now},
-		input:  inputState{composer: newComposer()},
+		input:  inputState{composer: newEditor()},
 		screen: screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII, motion: true, spin: newSpinner(true)},
 		out:    outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{})},
 		live:   liveState{deltas: new(deltaDecoder)},

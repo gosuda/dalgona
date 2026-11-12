@@ -26,7 +26,7 @@ Streamed text MUST print each final block once, and the live row MUST show one t
 
 The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the notice, else the newest live text.
 
-The composer shows `› `, the typed text, and the cursor `▏`. When the composer is empty, the cursor comes first and the placeholder follows it in faint text. The placeholder never shows a keyword mark.
+The composer shows `› ` in the thread hue, then the typed text. The terminal cursor marks the insertion point. When the composer is empty, the placeholder follows the prompt in dim text. The placeholder never shows a keyword mark.
 
 States are `idle`, `running`, `awaiting approval`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. Live text MUST be cut to one row, and a cut text MUST end with `...`. At 40 columns no line may exceed 39 cells.
 
@@ -121,6 +121,21 @@ The review MUST close only on `esc`, `q`, or `ctrl+o`. A quit or suspend key MUS
 Rows that finish while the review is open MUST wait, and they MUST print after the review closes.
 The review header MUST show the count of waiting rows. The footer MUST name the scroll keys and the entry keys.
 The client MUST keep the last 1000 committed rows for the review and MUST drop the oldest first.
+
+## Editor
+
+The composer MUST wrap text to the window width minus three cells.
+Enter MUST send the prompt, except after a backslash.
+Enter after a backslash MUST replace the backslash with a newline.
+Shift+Enter and Ctrl+J MUST insert a newline.
+Alt+Enter MUST queue the draft as a follow-up.
+Up and Down MUST move the caret between wrapped rows.
+Home and End MUST move the caret to the start or end of its line.
+Alt+Left and Alt+Right MUST move the caret by word.
+Ctrl+W MUST delete the word before the caret.
+Ctrl+U MUST delete from the start of the line to the caret.
+Ctrl+K MUST delete from the caret to the end of the line.
+The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
 
 ## Keys and commands
 

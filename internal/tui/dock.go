@@ -13,20 +13,20 @@ import (
 
 const composerMaxRows = 6
 
-func (m *model) dockLines() []string {
+func (m *model) dock() ([]string, int, int) {
 	if m.screen.height < 2 {
-		return nil
+		return nil, 0, 0
 	}
 	panel := m.panelLines()
 	editorLimit := min(composerMaxRows, max(1, m.screen.height-3))
 	if m.panelOpen() {
 		editorLimit = 1
 	}
-	editor := m.editorRows(terminalWidth(m.screen.width), editorLimit)
+	rows, row, col := m.editorRows(m.screen.width, editorLimit)
 	budget := m.screen.height - 1
 	showBand, showLive := true, true
 	count := func() int {
-		n := len(editor) + len(panel)
+		n := len(rows) + len(panel)
 		if showLive {
 			n++
 		}
@@ -41,7 +41,7 @@ func (m *model) dockLines() []string {
 	if count() > budget {
 		showLive = false
 	}
-	lines := slices.Clone(editor)
+	lines := slices.Clone(rows)
 	lines = append(lines, panel...)
 	if showLive {
 		lines = append(lines, m.liveRow())
@@ -49,6 +49,11 @@ func (m *model) dockLines() []string {
 	if showBand {
 		lines = append(lines, m.bandRow())
 	}
+	return lines, row, col
+}
+
+func (m *model) dockLines() []string {
+	lines, _, _ := m.dock()
 	return lines
 }
 
@@ -56,16 +61,20 @@ func (m *model) panelOpen() bool {
 	return len(m.approvals) > 0 || m.confirm != nil || m.selector != nil
 }
 
-func (m *model) editorRows(width, limit int) []string {
-	c := m.input.composer
-	text := c.draftView(m.draftSpans(), m.screen.theme) + c.placeholderView()
-	rows := m.screen.wrap(text, width)
-	if len(rows) <= limit {
-		return rows
+func (m *model) editorRows(width, limit int) ([]string, int, int) {
+	lines, row, col := m.input.composer.layout(&m.screen, width, m.draftSpans(), m.screen.dockTheme())
+	start := max(0, row-limit+1)
+	end := min(len(lines), start+limit)
+	prompt := m.screen.dockTheme().hueText(threadHue(m.thread.id), promptText)
+	rows := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		lead := strings.Repeat(" ", promptCells)
+		if i == 0 {
+			lead = prompt
+		}
+		rows = append(rows, lead+lines[i])
 	}
-	caret := len(m.screen.wrap("› "+string(c.text[:c.cursor]), width)) - 1
-	start := min(max(0, caret-limit+1), len(rows)-limit)
-	return rows[start : start+limit]
+	return rows, row - start, col + promptCells
 }
 
 const (
@@ -303,7 +312,10 @@ func (m *model) panelLines() []string {
 }
 
 func (m model) dockView() tea.View {
-	view := tea.NewView(strings.Join(m.dockLines(), "\n"))
+	lines, row, col := m.dock()
+	view := tea.NewView(strings.Join(lines, "\n"))
 	view.ReportFocus = true
+	view.Cursor = tea.NewCursor(col, row)
+	view.Cursor.Blink = m.screen.motion
 	return view
 }

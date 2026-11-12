@@ -138,6 +138,9 @@ func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	switch key {
 	case "enter":
+		if m.input.composer.continueLine() {
+			return nil
+		}
 		return m.submitPrompt()
 	case "alt+enter":
 		return m.queueFollowup()
@@ -221,7 +224,7 @@ func (m *model) finishSuspend() tea.Cmd {
 }
 
 func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
-	updated, command := m.input.composer.Update(msg)
+	updated, command := m.input.composer.Update(&m.screen, msg)
 	m.input.composer = updated
 	return command
 }

@@ -359,7 +359,7 @@ func TestEditorRowsKeepCaretRow(t *testing.T) {
 	}
 	m.input.composer.SetValue(strings.Join(lines, "\n"))
 	m.input.composer.cursor = 0
-	rows := m.editorRows(39, 3)
+	rows, _, _ := m.editorRows(40, 3)
 	if len(rows) != 3 || !strings.Contains(rows[0], "line 00") {
 		t.Fatalf("editor rows with the caret on line 00 = %q", rows)
 	}

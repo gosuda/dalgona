@@ -94,32 +94,6 @@ func spansOf(matches []rpc.KeywordMatch) []keywordSpan {
 	return spans
 }
 
-func shiftSpans(spans []keywordSpan, by int) []keywordSpan {
-	out := make([]keywordSpan, 0, len(spans))
-	for _, span := range spans {
-		out = append(out, keywordSpan{start: span.start + by, end: span.end + by})
-	}
-	return out
-}
-
-func insertCursor(text string, spans []keywordSpan, at int, glyph string) (string, []keywordSpan) {
-	if glyph == "" {
-		return text, spans
-	}
-	out := make([]keywordSpan, 0, len(spans)+1)
-	for _, span := range spans {
-		switch {
-		case span.end <= at:
-			out = append(out, span)
-		case span.start >= at:
-			out = append(out, keywordSpan{start: span.start + len(glyph), end: span.end + len(glyph)})
-		default:
-			out = append(out, keywordSpan{start: span.start, end: at}, keywordSpan{start: at + len(glyph), end: span.end + len(glyph)})
-		}
-	}
-	return text[:at] + glyph + text[at:], out
-}
-
 func markKeywords(text string, spans []keywordSpan, t theme) string {
 	var out strings.Builder
 	last := 0

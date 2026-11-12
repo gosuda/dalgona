@@ -161,8 +161,11 @@ func TestComposerMarkWithCursorInsideWord(t *testing.T) {
 	m.input.marks = []keywordSpan{{start: 0, end: 10}}
 	m.input.marksFor = "ultrathink"
 	view := m.View().Content
-	if got := stripANSI(view); !strings.Contains(got, "› ultra▏think") {
+	if got := stripANSI(view); !strings.Contains(got, "› ultrathink") {
 		t.Fatalf("cursor inside the word broke the composer: %q", got)
+	}
+	if cursor := m.View().Cursor; cursor == nil || cursor.X != 7 {
+		t.Fatalf("terminal cursor is not after the fifth letter: %+v", cursor)
 	}
 	if got := underlinedRunes(view); got != "ultrathink" {
 		t.Fatalf("mark does not cover both parts around the cursor: %q", got)

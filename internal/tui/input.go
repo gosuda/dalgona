@@ -1,8 +1,21 @@
 package tui
 
-import tea "charm.land/bubbletea/v2"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
-type composer struct {
+	tea "charm.land/bubbletea/v2"
+	"golang.org/x/text/unicode/norm"
+)
+
+const (
+	placeholderText = "Send a prompt · / commands · ? keys"
+	promptText      = "› "
+	promptCells     = 2
+)
+
+type editor struct {
 	text        []rune
 	cursor      int
 	width       int
@@ -10,92 +23,264 @@ type composer struct {
 	placeholder string
 }
 
-func newComposer() composer {
-	return composer{width: 80, focused: true, placeholder: "Send a prompt; / for commands"}
+func newEditor() editor {
+	return editor{width: 80, focused: true, placeholder: placeholderText}
 }
 
-func (c composer) Value() string {
+type editorRow struct {
+	text       string
+	start, end int
+}
+
+func (c editor) Value() string {
 	return string(c.text)
 }
 
-func (c *composer) SetValue(value string) {
+func (c *editor) SetValue(value string) {
 	c.text = []rune(value)
 	c.cursor = len(c.text)
 }
 
-func (c *composer) SetWidth(width int) {
+func (c *editor) SetWidth(width int) {
 	c.width = width
 }
 
-func (c *composer) Focus() tea.Cmd {
+func (c *editor) Focus() tea.Cmd {
 	c.focused = true
 	return nil
 }
 
-func (c composer) draftView(spans []keywordSpan, t theme) string {
-	prefix := "› "
-	cut := len(prefix) + len(string(c.text[:c.cursor]))
-	text, marked := insertCursor(prefix+c.Value(), shiftSpans(spans, len(prefix)), cut, c.cursorView())
-	return markKeywords(text, marked, t)
+func editorCells(width int) int {
+	return max(1, terminalWidth(width)-promptCells)
 }
 
-func (c composer) placeholderView() string {
-	if len(c.text) > 0 {
-		return ""
+func (c editor) rows(s *screenState, width int) []editorRow {
+	var rows []editorRow
+	offset := 0
+	for line := range strings.SplitSeq(c.Value(), "\n") {
+		rows = append(rows, c.lineRows(s, line, offset, editorCells(width))...)
+		offset += len(line) + 1
 	}
-	return faint.Render(c.placeholder)
+	return rows
 }
 
-func (c composer) cursorView() string {
-	if !c.focused {
-		return ""
+func (c editor) lineRows(s *screenState, line string, offset, cell int) []editorRow {
+	parts := s.wrap(line, cell)
+	rows := make([]editorRow, 0, len(parts))
+	pos := 0
+	for _, part := range parts {
+		end := partEnd(line, pos, part)
+		rows = append(rows, editorRow{text: line[pos:end], start: offset + pos, end: offset + end})
+		pos = end
 	}
-	return "▏"
+	return rows
 }
 
-func (c composer) Update(msg tea.Msg) (composer, tea.Cmd) {
+func partEnd(line string, pos int, part string) int {
+	if strings.HasPrefix(line[pos:], part) {
+		return pos + len(part)
+	}
+	for end := pos + 1; end <= len(line); end++ {
+		if end == len(line) || utf8.RuneStart(line[end]) {
+			if norm.NFC.String(line[pos:end]) == part {
+				return end
+			}
+		}
+	}
+	return len(line)
+}
+
+func (c editor) byteCursor() int {
+	return len(string(c.text[:c.cursor]))
+}
+
+func caretRow(rows []editorRow, at int) int {
+	chosen := 0
+	for i, row := range rows {
+		if row.start > at {
+			break
+		}
+		chosen = i
+		if at <= row.end {
+			return i
+		}
+	}
+	return chosen
+}
+
+func (c editor) cellsBefore(s *screenState, row editorRow, at int) int {
+	n := min(max(at-row.start, 0), len(row.text))
+	return s.cells(row.text[:n])
+}
+
+func localSpans(spans []keywordSpan, row editorRow) []keywordSpan {
+	var out []keywordSpan
+	for _, span := range spans {
+		start, end := max(span.start, row.start), min(span.end, row.end)
+		if start < end {
+			out = append(out, keywordSpan{start: start - row.start, end: end - row.start})
+		}
+	}
+	return out
+}
+
+func (c editor) layout(s *screenState, width int, spans []keywordSpan, t theme) ([]string, int, int) {
+	rows := c.rows(s, width)
+	at := c.byteCursor()
+	row := caretRow(rows, at)
+	lines := make([]string, len(rows))
+	for i, r := range rows {
+		lines[i] = norm.NFC.String(markKeywords(r.text, localSpans(spans, r), t))
+	}
+	if c.Value() == "" {
+		lines[0] = t.paint(roleDim, s.fit(c.placeholder, editorCells(width)))
+	}
+	return lines, row, c.cellsBefore(s, rows[row], at)
+}
+
+func (c *editor) continueLine() bool {
+	if c.cursor == 0 || c.text[c.cursor-1] != '\\' {
+		return false
+	}
+	c.text[c.cursor-1] = '\n'
+	return true
+}
+
+func (c editor) Update(s *screenState, msg tea.Msg) (editor, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
 		c.insert([]rune(sanitizeText(msg.Content)))
 	case tea.KeyPressMsg:
-		c.updateKey(msg)
+		c.updateKey(s, msg)
 	}
 	return c, nil
 }
 
-func (c *composer) updateKey(msg tea.KeyPressMsg) {
+func (c *editor) updateKey(s *screenState, msg tea.KeyPressMsg) {
 	key := msg.String()
+	if c.editKey(key) || c.navigate(s, key) {
+		return
+	}
+	if msg.Text != "" {
+		c.insert([]rune(sanitizeText(msg.Text)))
+	}
+}
+
+func (c *editor) editKey(key string) bool {
 	switch key {
 	case "backspace":
 		c.backspace()
 	case "delete":
 		c.delete()
+	case "shift+enter", "ctrl+j":
+		c.insert([]rune{'\n'})
 	case "ctrl+u":
-		c.text = c.text[c.cursor:]
-		c.cursor = 0
-	case "left", "right", "home", "ctrl+a", "end", "ctrl+e":
-		c.navigate(key)
+		c.killLineStart()
+	case "ctrl+k":
+		c.killLineEnd()
+	case "ctrl+w":
+		c.deleteWord()
 	default:
-		if msg.Text != "" {
-			c.insert([]rune(sanitizeText(msg.Text)))
-		}
+		return false
 	}
+	return true
 }
 
-func (c *composer) navigate(key string) {
+func (c *editor) navigate(s *screenState, key string) bool {
 	switch key {
 	case "left":
 		c.moveLeft()
 	case "right":
 		c.moveRight()
-	case "home", "ctrl+a":
-		c.cursor = 0
-	case "end", "ctrl+e":
-		c.cursor = len(c.text)
+	case "up":
+		c.moveRow(s, -1)
+	case "down":
+		c.moveRow(s, 1)
+	default:
+		return c.jump(key)
 	}
+	return true
 }
 
-func (c *composer) insert(text []rune) {
+func (c *editor) jump(key string) bool {
+	switch key {
+	case "home", "ctrl+a":
+		c.cursor = c.lineStart()
+	case "end", "ctrl+e":
+		c.cursor = c.lineEnd()
+	case "alt+left":
+		c.cursor = c.wordStart()
+	case "alt+right":
+		c.cursor = c.wordEnd()
+	default:
+		return false
+	}
+	return true
+}
+
+func (c *editor) moveRow(s *screenState, delta int) {
+	rows := c.rows(s, c.width)
+	at := c.byteCursor()
+	row := caretRow(rows, at)
+	target := row + delta
+	if target < 0 || target >= len(rows) {
+		return
+	}
+	c.cursor = c.runeAt(s, rows[target], c.cellsBefore(s, rows[row], at))
+}
+
+func (c editor) runeAt(s *screenState, row editorRow, col int) int {
+	offset, width := 0, 0
+	for _, r := range row.text {
+		cells := s.cells(string(r))
+		if width+cells > col {
+			break
+		}
+		width += cells
+		offset += utf8.RuneLen(r)
+	}
+	return utf8.RuneCountInString(c.Value()[:row.start+offset])
+}
+
+func (c editor) lineStart() int {
+	i := c.cursor
+	for i > 0 && c.text[i-1] != '\n' {
+		i--
+	}
+	return i
+}
+
+func (c editor) lineEnd() int {
+	i := c.cursor
+	for i < len(c.text) && c.text[i] != '\n' {
+		i++
+	}
+	return i
+}
+
+func (c editor) wordStart() int {
+	i := c.cursor
+	for i > 0 && unicode.IsSpace(c.text[i-1]) {
+		i--
+	}
+	for i > 0 && !unicode.IsSpace(c.text[i-1]) {
+		i--
+	}
+	return i
+}
+
+func (c editor) wordEnd() int {
+	i := c.cursor
+	for i < len(c.text) && unicode.IsSpace(c.text[i]) {
+		i++
+	}
+	for i < len(c.text) && !unicode.IsSpace(c.text[i]) {
+		i++
+	}
+	return i
+}
+
+func (c *editor) insert(text []rune) {
 	if len(text) == 0 {
 		return
 	}
@@ -107,7 +292,7 @@ func (c *composer) insert(text []rune) {
 	c.cursor += len(text)
 }
 
-func (c *composer) backspace() {
+func (c *editor) backspace() {
 	if c.cursor == 0 {
 		return
 	}
@@ -115,20 +300,37 @@ func (c *composer) backspace() {
 	c.cursor--
 }
 
-func (c *composer) delete() {
+func (c *editor) delete() {
 	if c.cursor >= len(c.text) {
 		return
 	}
 	c.text = append(c.text[:c.cursor], c.text[c.cursor+1:]...)
 }
 
-func (c *composer) moveLeft() {
+func (c *editor) killLineStart() {
+	start := c.lineStart()
+	c.text = append(c.text[:start], c.text[c.cursor:]...)
+	c.cursor = start
+}
+
+func (c *editor) killLineEnd() {
+	end := c.lineEnd()
+	c.text = append(c.text[:c.cursor], c.text[end:]...)
+}
+
+func (c *editor) deleteWord() {
+	start := c.wordStart()
+	c.text = append(c.text[:start], c.text[c.cursor:]...)
+	c.cursor = start
+}
+
+func (c *editor) moveLeft() {
 	if c.cursor > 0 {
 		c.cursor--
 	}
 }
 
-func (c *composer) moveRight() {
+func (c *editor) moveRight() {
 	if c.cursor < len(c.text) {
 		c.cursor++
 	}
