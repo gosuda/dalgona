@@ -122,7 +122,11 @@ func (m *model) applyThreadStatus(params jsontext.Value) error {
 		return nil
 	}
 	m.thread.seq = max(m.thread.seq, event.Seq)
-	m.setState(threadState(event.Status))
+	state := threadState(event.Status)
+	if state == stateIdle && endedTurnState(m.thread.state) {
+		return nil
+	}
+	m.setState(state)
 	return nil
 }
 
@@ -241,6 +245,9 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 	m.live.retryUntil = time.Time{}
 	m.setState(turnState(event.Turn.Status))
 	notify := m.notify(m.notifyLine(turnWord(event.Turn.Status)))
+	if m.thread.state == stateInterrupted {
+		m.noticef("")
+	}
 	if m.thread.state != stateIdle {
 		if len(m.queue) > 0 {
 			m.noticef("Held · %d · Enter on an empty prompt sends the next", len(m.queue))
@@ -471,6 +478,10 @@ func threadTitle(thread rpc.Thread) string {
 		return sanitizeText(thread.ID)
 	}
 	return sanitizeText(thread.Name)
+}
+
+func endedTurnState(state string) bool {
+	return state == stateInterrupted || state == stateFailed
 }
 
 func threadState(status rpc.ThreadStatus) string {

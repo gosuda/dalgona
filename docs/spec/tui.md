@@ -38,6 +38,8 @@ A notice that does not fit the free text of the live row MUST also print once as
 
 A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. `active` with the flag `waitingOnUserInput` gives `awaiting input`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` list panel shows each thread's mapped state.
 
+An idle status that follows an interrupted or failed turn MUST keep that state until the next turn starts.
+
 The TUI follows one thread. The first thread it sees, from a response or a notification, becomes the TUI's thread. `/new`, `/resume`, and `/fork` replace it. Notifications whose `threadId` names another thread, such as a spawned child, MUST NOT change the title, state, live items, or thread. When a `/new`, `/resume`, or `/fork` load applies, the TUI MUST keep the follow-up queue. It MUST show `<n> follow-ups moved to <title>; press Enter on an empty prompt to send the next` when that load applies and the queue holds at least one follow-up.
 
 A `/resume` or `/fork` load of another thread MUST print a separator row, `── <title> ──`, under the key `thread:<threadId>:<n>`. A `/new` load MUST print the row `started <title>` under the same key form. Earlier items of a long thread MUST print their cut note under the key `earlier:<threadId>:<n>`.
@@ -282,6 +284,8 @@ While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tr
 When the queue holds 32 follow-ups, Alt+Enter MUST show `follow-up queue is full (32); wait for the active turn or press Esc`. After a follow-up is queued, the notice MUST show `queued follow-up <n> of 32`. An unknown slash command MUST stay in the editor and MUST show `unknown command /<name>; start with // to send it as a prompt`. After `/advisor reset`, the notice MUST show `advisor reset; it reviews the current branch at the next turn`.
 
 A follow-up starts after `turn/completed` only when the turn ends idle. After an interrupted or failed turn, the queue MUST stay held and the notice MUST say how to release it. After a revert, a leaf change, or `thread/reverted`, the TUI MUST show `files changed by later turns are not reverted`.
+
+The interrupt notice MUST end when an interrupted turn ends.
 
 ## Approvals
 
