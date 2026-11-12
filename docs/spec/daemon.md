@@ -68,6 +68,12 @@ The dalgona host MUST bind `[runners.<name>]` runners through the remote binder 
 
 `--config <key>=<value>`, `--config=<key>=<value>`, and `-c <key>=<value>` pairs MAY come before the `app-server` subcommand, as the Codex clients send them. When the first argument after these pairs is `app-server`, the pairs MUST reach the app-server command unchanged. In every other case, `-c` keeps its client meaning.
 
+The `--config` argument MUST split at its first `=`. A `--config` argument without `=`, or with an empty key, MUST fail with exit status 2. A `--config` value MUST lose its surrounding whitespace and quote characters. A `--config` key or value that dalgona does not map MUST be ignored with a note. A later mapped `--config` value for a key MUST replace an earlier one. The `--config` split MUST follow the Codex rule in `codex-rs/utils/cli/src/config_override.rs`.
+
+The app-server `--listen` value MUST be `stdio://` or `ws://IP:PORT`. The WebSocket address MUST be a literal IP address with a port. Any other `--listen` value MUST fail with exit status 2 before the listener starts. A non-loopback address MUST fail even when WebSocket authentication is configured. The loopback rule MUST follow Codex `codex-rs/app-server-transport/src/transport/websocket.rs`.
+
+The app-server WebSocket listener MUST refuse a request with a non-empty `Origin` header with HTTP 403. It MUST answer a request without a valid `Authorization: Bearer <token>` header with HTTP 401. It MUST compare the bearer token digest in constant time. It MUST answer HTTP 503 while it shuts down, and HTTP 503 when it cannot dial the daemon. It MUST NOT upgrade a request that the daemon dial refused. The Origin refusal MUST follow Codex `codex-rs/app-server-transport/src/transport/websocket.rs`.
+
 `dalgona service install|uninstall` MUST install or remove the platform user service. `dalgona codex install|uninstall|status` MUST manage or inspect the desktop override. `dalgona codex record --real <path> [args...]` MUST run the selected Codex executable and record protocol metadata in `<home>/census/<unix-seconds>.jsonl`. Without forwarded arguments, it MUST run `app-server`.
 
 `dalgona run <file.star> [--arg k=v ...]` MUST run a durable Starlark workflow as defined in [starlark.md](starlark.md).
