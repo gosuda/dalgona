@@ -1,6 +1,6 @@
 # Hashline Enhanced v1
 
-Status: implemented in `internal/tool/patch` as edit style `hashline-enhanced`; not selected by default.
+Status: implemented as an explicit edit style. The default style is `anchor`.
 Identifier: `hashline-enhanced`. Contract version: 1.
 Required base: [Shared specification](hashline-common-v1.md).
 
@@ -16,21 +16,23 @@ Unique equal text in another location is not occurrence identity.
 
 ## E02. Acceptance condition
 
-For each effective replacement or CUT, including source-node operations:
+For each effective replacement or CUT:
 
 ```text
 EnhancedEligible(edit) = SharedChecks(edit) AND PriorCoverage(edit)
 ```
 
 Every existing cell in the effective destructive footprint must have been fully
-delivered to this consumer before its request cutoff. Coverage belongs to the
-same snapshot/lineage and consumer and transfers only through exact preserved
+delivered to this caller before its request cutoff. Coverage belongs to the
+same snapshot/history and caller and transfers only through exact preserved
 cells. Host-internal reads, other agents' reads, truncated output, and future
 previews cannot satisfy it.
 
 For the same effective destructive operation, Enhanced eligibility is a subset
 of Light eligibility. Only prior coverage differs. Permission, target protection,
 resource rules, and commit behavior do not.
+
+Each thread keeps its own snapshot store. Each read mints a new reference, so a patch counts only rows delivered under its own reference.
 
 ## E03. Explicit exceptions
 
@@ -40,15 +42,17 @@ existing cell, that cell belongs to the footprint and requires coverage.
 
 REM retains the source plan's explicit-file-delete exception in both profiles.
 It requires an unchanged complete source reference and normal authorization, but
-not every line displayed. Do not advertise Enhanced as preventing every deletion
-of unseen text; explicit REM is an intentional exception.
+not every line delivered. Do not advertise Enhanced as preventing every deletion
+of unseen text. Explicit REM is an intentional exception.
 
 A valid exact no-op has no effective footprint and returns no_change after
 reference/target validation. This is not a guess that a previous call already ran.
 
+The parser refuses source-node (`N*`) operations with a parse error.
+
 ## E04. Examples
 
-Snapshot S includes fully displayed source lines 40-45. A cooperating patch inserts
+Snapshot S includes fully delivered source lines 40-45. A cooperating patch inserts
 ten lines before line 5. The host maps S:40-45 to current 50-55 and may prepare the
 edit without another whole-file read.
 
@@ -68,14 +72,13 @@ results do not count as model observations unless separately delivered there.
 
 ## E05. Recovery
 
-For a known target with unseen rows, return needs_context/unobserved_range with
-no target writes. Show a current bound header and missing complete rows within
-shared limits, or exact remaining read ranges. A later explicit request may use
-the new delivery. Never upgrade the pending request after an internal fetch.
+For a known target with unseen rows, the request fails with this error:
+`patch: changes[N]: lines A-B of PATH need prior observation. Read them, then resend`.
+The request writes no target. A later explicit request may use the new delivery.
+Never upgrade the pending request after an internal fetch.
 
-For missing history, mark current diagnostic coordinates as mapping=unknown.
-The caller must identify the target again. Do not offer a retag-only repair that
-silently reuses old unverified coordinates.
+For missing history, the request fails with `patch: reference REF for PATH is stale: snapshot: stale reference. Read again`.
+The caller must read the file again. Do not offer a retag-only repair that silently reuses old unverified coordinates.
 
 ## E06. Canonical model-facing description
 
@@ -103,16 +106,16 @@ to Light to bypass refusal. Never blind-retry an uncertain commit.
 | ID | Given | Required result |
 |---|---|---|
 | E-01 | Fully observed intact target before cutoff | Preparation succeeds. |
-| E-02 | Folded or truncated middle rows | needs_context/unobserved_range. |
+| E-02 | Folded or truncated middle rows | Error ends with `need prior observation. Read them, then resend`. No target is written. |
 | E-03 | Complete missing rows delivered before a new request | New request may succeed. |
 | E-04 | Missing rows delivered after this request began | Pending call still lacks coverage. |
 | E-05 | Another subagent observed the same bytes | No coverage for this consumer. |
 | E-06 | Intact target moved through known prefix insertion | Map and prepare. |
 | E-07 | Original changes while equal text survives elsewhere | Reject; never retarget. |
 | E-08 | Known edit-then-undo restores equal bytes | Reject; no revival. |
-| E-09 | Concurrent insertion occupies the same gap | conflict/gap_changed. |
-| E-10 | Node moved but its attachment/extent changed | conflict/node_changed. |
-| E-11 | REM, unchanged full-file reference, approval, partial display | Eligible under explicit REM exception. |
+| E-09 | Concurrent insertion occupies the same gap | Error ends with `is stale: snapshot: gap changed. Read again`. No target is written. |
+| E-10 | Source-node operation `N*` | Error: `patch: line N: block ops (N*) are not supported; use a line range`. |
+| E-11 | REM, unchanged full-file reference, approval, partial delivery | Eligible under explicit REM exception. |
 | E-12 | Valid no-op on unseen body | no_change; no invented coverage. |
 | E-13 | EOF edit changes an unobserved neighbor's terminator | Missing-coverage refusal for actual footprint. |
 | E-14 | Replay returns a historical preview | No fresh reference or observation credit. |
