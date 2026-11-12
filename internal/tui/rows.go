@@ -286,6 +286,40 @@ func chunkText(rows []string) string {
 	return text
 }
 
+func (m *model) renderReviewRow(verdict, summary string, paths []string) []string {
+	s := &m.screen
+	cleaned := make([]string, len(paths))
+	for i, path := range paths {
+		cleaned[i] = sanitizeText(path)
+	}
+	text := "review  " + sanitizeText(summary)
+	if len(cleaned) > 0 {
+		text += "  " + strings.Join(cleaned, ", ")
+	}
+	var out []string
+	for _, line := range s.wrap(text, terminalWidth(s.width)) {
+		out = append(out, reviewPaint(s.theme, verdict, line))
+	}
+	return out
+}
+
+func reviewPaint(t theme, verdict, line string) string {
+	switch verdict {
+	case "error":
+		return t.paintBold(roleFailedText, line)
+	case "flagged":
+		return t.paint(roleWarningText, line)
+	}
+	return t.paint(roleDim, line)
+}
+
+func (m *model) printReview(key, verdict, summary string, paths []string) {
+	if verdict == "clean" || (verdict == "uncertain" && m.screen.level() != verbosityHigh) {
+		return
+	}
+	m.commit(key, m.renderReviewRow(verdict, summary, paths))
+}
+
 func (m *model) renderAdvisorCard(advisor, severity, note string) string {
 	advisor, severity, note = sanitizeText(advisor), sanitizeText(severity), sanitizeText(note)
 	label := "advisor"

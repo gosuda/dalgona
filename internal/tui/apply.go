@@ -35,13 +35,25 @@ func (m *model) applyDecodedNotification(msg notificationMsg) (tea.Cmd, error) {
 		return nil, m.applyError(msg.params)
 	case "dalgona/thread/childSpawned":
 		return nil, m.applyChildSpawned(msg.params)
-	case "dalgona/advisor/note":
-		return nil, m.applyAdvisorNote(msg.params)
+	case "dalgona/advisor/note", "dalgona/tool/judged", "dalgona/turn/judged":
+		return nil, m.applyDalgonaNotification(msg)
 	case "account/login/completed":
 		return nil, m.applyLoginCompleted(msg.params)
 	default:
 		return nil, nil
 	}
+}
+
+func (m *model) applyDalgonaNotification(msg notificationMsg) error {
+	switch msg.method {
+	case "dalgona/advisor/note":
+		return m.applyAdvisorNote(msg.params)
+	case "dalgona/tool/judged":
+		return m.applyToolJudged(msg.params)
+	case "dalgona/turn/judged":
+		return m.applyTurnJudged(msg.params)
+	}
+	return nil
 }
 
 func (m *model) applyThreadNotification(msg notificationMsg) error {
@@ -141,6 +153,28 @@ func (m *model) applyAdvisorNote(params jsontext.Value) error {
 		m.out.seq++
 		key := fmt.Sprintf("advisor:%s:%d", event.ThreadID, m.out.seq)
 		m.commit(key, strings.Split(m.renderAdvisorCard(event.Advisor, event.Severity, event.Note), "\n"))
+	}
+	return nil
+}
+
+func (m *model) applyToolJudged(params jsontext.Value) error {
+	var event rpc.ToolJudgedNotification
+	if err := decodeParams(params, &event); err != nil {
+		return err
+	}
+	if m.acceptThread(event.ThreadID) {
+		m.printReview("review:"+event.ThreadID+":"+event.ItemID, event.Verdict, event.Summary, event.Paths)
+	}
+	return nil
+}
+
+func (m *model) applyTurnJudged(params jsontext.Value) error {
+	var event rpc.TurnJudgedNotification
+	if err := decodeParams(params, &event); err != nil {
+		return err
+	}
+	if m.acceptThread(event.ThreadID) {
+		m.printReview("review:"+event.ThreadID+":"+event.TurnID, event.Verdict, event.Summary, event.Paths)
 	}
 	return nil
 }
