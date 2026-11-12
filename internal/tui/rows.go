@@ -2,6 +2,7 @@ package tui
 
 import (
 	"cmp"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
 	"slices"
@@ -60,6 +61,7 @@ type liveItem struct {
 	split      blockSplitter
 	blocks     int
 	streamTail string
+	children   []string
 }
 
 func (l *liveItem) settle(final rpc.Item) rpc.Item {
@@ -129,23 +131,23 @@ func (s *screenState) level() string {
 	return cmp.Or(s.verbosity, verbosityMedium)
 }
 
-func (m *model) settleItem(key string, item rpc.Item) {
+func (m *model) settleItem(key string, item rpc.Item, children []string) {
 	if _, seen := m.out.printed[key]; seen || silentTodo(item) {
 		return
 	}
 	item = sanitizeItem(item)
 	level := m.screen.level()
 	if level == verbosityLow && groupedItem(item) {
-		if m.keepEntry(key, m.renderItem(item, verbosityHigh)) {
+		if m.keepEntry(key, m.renderSettled(item, children, verbosityHigh)) {
 			m.live.group = append(m.live.group, item)
 		}
 		return
 	}
 	m.flushGroup()
-	printed := m.renderItem(item, level)
+	printed := m.renderSettled(item, children, level)
 	full := printed
 	if level != verbosityHigh && levelSensitive(item) {
-		full = m.renderItem(item, verbosityHigh)
+		full = m.renderSettled(item, children, verbosityHigh)
 	}
 	m.commitFull(key, printed, full)
 }
@@ -640,6 +642,9 @@ func (m *model) renderDynamic(item rpc.Item, level string) []string {
 	if item.Tool == evalTool {
 		return m.evalLines(item, level)
 	}
+	if item.Tool == subagentTool {
+		return m.renderSubagent(item, nil, level)
+	}
 	return m.renderRow(row{label: toolLabel(item.Tool), subject: toolSubject(item), state: statusWord(item.Status), duration: durationText(item.DurationMs), body: levelBody(item, itemBody(item), level)})
 }
 
@@ -663,6 +668,60 @@ func (m *model) renderItem(item rpc.Item, level string) []string {
 	default:
 		return m.renderOtherItem(item, level)
 	}
+}
+
+const subagentTool = "task"
+
+func (m *model) attachChild(id string) {
+	for i := len(m.live.items) - 1; i >= 0; i-- {
+		item := &m.live.items[i]
+		if item.Type == "dynamicToolCall" && item.Tool == subagentTool && item.Status == "inProgress" {
+			item.children = append(item.children, id)
+			return
+		}
+	}
+}
+
+func (m *model) renderSettled(item rpc.Item, children []string, level string) []string {
+	if item.Type == "dynamicToolCall" && item.Tool == subagentTool {
+		return m.renderSubagent(item, children, level)
+	}
+	return m.renderItem(item, level)
+}
+
+func (m *model) renderSubagent(item rpc.Item, children []string, level string) []string {
+	body := make([]string, 0, len(children)+1)
+	for _, id := range children {
+		body = append(body, "child "+id+" · /resume "+id)
+	}
+	body = append(body, subagentResult(item)...)
+	return m.renderRow(row{label: "Subagent", subject: toolSubject(item), state: statusWord(item.Status), duration: durationText(item.DurationMs), body: levelBody(item, body, level)})
+}
+
+func subagentResult(item rpc.Item) []string {
+	var result struct {
+		Data  jsontext.Value `json:"data"`
+		Error string         `json:"error"`
+	}
+	text := cmp.Or(item.Output, item.Text)
+	if json.Unmarshal([]byte(text), &result) != nil {
+		return itemBody(item)
+	}
+	if result.Error != "" {
+		return []string{"error: " + firstLine(sanitizeText(result.Error))}
+	}
+	if len(result.Data) == 0 {
+		return nil
+	}
+	return []string{firstLine(sanitizeText(subagentData(result.Data)))}
+}
+
+func subagentData(data jsontext.Value) string {
+	var text string
+	if json.Unmarshal(data, &text) == nil {
+		return text
+	}
+	return string(data)
 }
 
 func (m *model) renderOtherItem(item rpc.Item, level string) []string {

@@ -87,7 +87,7 @@ func TestModelAppliesSchemaExactTurnNotifications(t *testing.T) {
 	}
 	m = schemaNotification(t, m, "turn/plan/updated", "TurnPlanUpdatedNotification",
 		`{"threadId":"t1","turnId":"turn-1","plan":[{"step":"read the test","status":"completed"},{"step":"fix the decoder","status":"inProgress"}]}`)
-	assertContains(t, m.notice, "[done] read the test", "[in progress] fix the decoder")
+	assertContains(t, lastEntry(t, m), "Done read the test", "Working fix the decoder")
 	m = schemaNotification(t, m, "item/started", "ItemStartedNotification",
 		`{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":{"type":"commandExecution","id":"c1","command":"go test ./...","commandActions":[],"cwd":"/work","status":"inProgress","aggregatedOutput":null}}`)
 	m = schemaNotification(t, m, "item/commandExecution/outputDelta", "CommandExecutionOutputDeltaNotification",

@@ -174,9 +174,21 @@ The TUI applies these notifications: `thread/started`, `thread/status/changed`, 
 A `/login` response without a URL or a code MUST NOT change the notice line. Its outcome arrives in `account/login/completed`.
 A failed login without error text MUST show `Login failed: unknown error; run /login again`.
 
-`turn/plan/updated` shows the plan in the notice line. The first line is `plan`, then one line per step: `[done] <step>`, `[in progress] <step>`, or `[pending] <step>`.
+`turn/plan/updated` MUST print one plan row for each change. The row key MUST be `plan:<turnId>:<n>`, where `n` counts the plan rows of the turn from zero.
+The row MUST start with `Plan`, then one line for each step: `Done <step>`, `Working <step>`, or `Pending <step>`.
+The row MUST show at most five steps, followed by `+N more` when more steps exist.
+The live row MUST show the plan progress as a field, and `turn/completed` MUST clear that field.
 
 Deltas append to the live item with the same id. `item/started` and `item/completed` MUST keep text and output already streamed.
+
+## Subagents
+
+A running `task` call MUST show `Subagent` as its activity, and the calls field MUST count it.
+The `dalgona/thread/childSpawned` notification carries no call id, so the client MUST attach the child ID to the newest running `task` call. A finished `task` call MUST NOT receive a child ID.
+At `medium` and `high`, a finished `task` call MUST print one `Subagent` row, and the row MUST list each child as `child <id> · /resume <id>`.
+At `low`, the `task` call MUST be counted in the open group line instead.
+The row MUST show the first line of the `data` member, or `error: <text>` from the `error` member, of the call result.
+Rows loaded from thread history MUST NOT list child IDs, because the thread read carries none.
 
 Decoding works as follows:
 

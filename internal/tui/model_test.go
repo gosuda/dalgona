@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -502,5 +503,39 @@ func TestModelFailurePreservesComposerAndSteerState(t *testing.T) {
 	}
 	if m.thread.state != stateRunning {
 		t.Fatalf("steer failure changed state to %q", m.thread.state)
+	}
+}
+
+func TestNestedTaskRowIsSubagent(t *testing.T) {
+	t.Parallel()
+	m := notifyTurn(t, rowModel(t, 80), "turn/started", "inProgress")
+	m = notifyItem(t, m, "item/started", subagentItem("e1/3", "inProgress", ""))
+	assertContains(t, strings.Join(m.dockLines(), "\n"), "1 run")
+	m = notifyItem(t, m, "item/completed", subagentItem("e1/3", "completed", `{"data":"done"}`))
+	count := 0
+	for _, key := range entryKeys(m) {
+		if key == "item:t1:e1/3" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("subagent call committed %d rows, want 1", count)
+	}
+	assertContains(t, entryText(t, m, "item:t1:e1/3"), "Subagent")
+}
+
+func TestNestedTodoWritesPlanRowOnly(t *testing.T) {
+	t.Parallel()
+	m := notifyTurn(t, rowModel(t, 80), "turn/started", "inProgress")
+	m = notifyItem(t, m, "item/completed", `{"type":"dynamicToolCall","id":"e1/2","tool":"todo","arguments":{"items":[{"text":"read the test","status":"completed"}]},"status":"completed"}`)
+	if slices.Contains(entryKeys(m), "item:t1:e1/2") {
+		t.Fatal("a successful nested todo committed its tool row")
+	}
+	m = planUpdate(t, m, `[{"step":"read the test","status":"completed"}]`)
+	if got, want := planKeys(m), []string{"plan:turn-1:0"}; !slices.Equal(got, want) {
+		t.Fatalf("plan keys = %v, want %v", got, want)
+	}
+	if first, _, _ := strings.Cut(entryText(t, m, "plan:turn-1:0"), "\n"); first != "Plan" {
+		t.Fatalf("plan row starts with %q, want Plan", first)
 	}
 }

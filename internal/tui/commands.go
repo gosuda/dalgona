@@ -488,7 +488,7 @@ func (m *model) applyResumed(value any) tea.Cmd {
 			turn = entry.turn
 			m.thread.turnID = turn
 		}
-		m.settleItem("item:"+m.thread.id+":"+entry.item.ID, entry.item)
+		m.settleItem("item:"+m.thread.id+":"+entry.item.ID, entry.item, nil)
 	}
 	m.flushGroup()
 	m.thread.turnID = ""

@@ -107,6 +107,8 @@ type liveState struct {
 	retryUntil time.Time
 	group      []rpc.Item
 	groupN     int
+	planN      int
+	planTurn   string
 }
 
 type inputState struct {

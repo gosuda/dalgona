@@ -138,8 +138,11 @@ func (m *model) applyChildSpawned(params jsontext.Value) error {
 	if err := decodeParams(params, &event); err != nil {
 		return err
 	}
-	if m.acceptThread(event.ThreadID) && m.conn.opts.OnChildSpawned != nil {
-		m.conn.opts.OnChildSpawned(event.ChildID, event.Cwd)
+	if m.acceptThread(event.ThreadID) {
+		m.attachChild(sanitizeText(event.ChildID))
+		if m.conn.opts.OnChildSpawned != nil {
+			m.conn.opts.OnChildSpawned(event.ChildID, event.Cwd)
+		}
 	}
 	return nil
 }
@@ -206,6 +209,7 @@ func (m *model) applyTurnStarted(params jsontext.Value) error {
 		m.thread.turnStartedAt = time.Unix(event.Turn.StartedAt, 0)
 	}
 	m.noticef("")
+	m.live.planN = 0
 	m.setState(stateRunning)
 	return nil
 }
@@ -271,10 +275,11 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 		m.flushGroup()
 		m.finishAnswer(event.ThreadID, live, final.Text)
 	}
+	children := live.children
 	item := live.settle(final)
 	m.live.items = slices.DeleteFunc(m.live.items, func(candidate liveItem) bool { return candidate.ID == item.ID })
 	if !answer && !isAdvisorItem(item) {
-		m.settleItem("item:"+event.ThreadID+":"+item.ID, item)
+		m.settleItem("item:"+event.ThreadID+":"+item.ID, item, children)
 	}
 	return nil
 }
@@ -338,13 +343,13 @@ func (m *model) applyPlan(params jsontext.Value) error {
 	if !m.acceptThread(event.ThreadID) {
 		return nil
 	}
-	lines := make([]string, 0, len(event.Plan)+1)
-	lines = append(lines, "plan")
-	for _, step := range event.Plan {
-		lines = append(lines, fmt.Sprintf("[%s] %s", planStatus(step.Status), step.Step))
+	if event.TurnID != m.live.planTurn {
+		m.live.planTurn = event.TurnID
+		m.live.planN = 0
 	}
 	m.live.plan = event.Plan
-	m.noticef("%s", strings.Join(lines, "\n"))
+	m.commit(fmt.Sprintf("plan:%s:%d", event.TurnID, m.live.planN), planLines(event.Plan))
+	m.live.planN++
 	return nil
 }
 
@@ -365,13 +370,25 @@ func (m *model) applyRetryWait(params jsontext.Value) error {
 
 func planStatus(status string) string {
 	switch status {
-	case "inProgress":
-		return "in progress"
 	case "completed":
-		return "done"
-	default:
-		return status
+		return "Done"
+	case "inProgress":
+		return "Working"
 	}
+	return "Pending"
+}
+
+const planVisibleSteps = 5
+
+func planLines(plan []rpc.TurnPlanStep) []string {
+	lines := []string{"Plan"}
+	for i, step := range plan {
+		if i == planVisibleSteps {
+			return append(lines, fmt.Sprintf("+%d more", len(plan)-planVisibleSteps))
+		}
+		lines = append(lines, planStatus(step.Status)+" "+firstLine(sanitizeText(step.Step)))
+	}
+	return lines
 }
 
 func (m *model) applyError(params jsontext.Value) error {
