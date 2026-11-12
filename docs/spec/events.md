@@ -100,5 +100,6 @@ The agent MUST build each model request from the active path after the latest `c
 - An `aside` note MUST render inside the next rendered user message.
 - An advisor note MUST render as `<advisory advisor="<name>" severity="<severity>">note</advisory>`, with `&`, `<`, `>`, `"`, and `'` HTML-escaped in every value.
 - Tool results MUST render in call order. A pruned call MUST render the output `[output pruned to fit the context window]`.
+- An image of a `user.message` MUST render in the same model message as the text of that message.
 
 The model MUST be called again when the rendered context ends with user content.

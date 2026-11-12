@@ -16,25 +16,31 @@ const prunedOutput = "[output pruned to fit the context window]"
 
 type transcript struct {
 	host        *Host
+	thread      *Thread
 	pruned      map[string]bool
 	names       map[string]string
 	order       map[string]int
 	messages    []model.Message
 	outstanding map[string]bool
 	results     []model.ToolResult
-	deferred    []string
-	followups   []string
+	deferred    []userTurn
+	followups   []userTurn
 	asides      []string
 	held        []event.Event
 	toolFree    bool
 	err         error
 }
 
+type userTurn struct {
+	text   string
+	images []model.Image
+}
+
 func (t *Thread) messages(v view) ([]model.Message, error) {
 	path := event.ActivePath(v.records)
 	kept, summary := afterCompaction(path)
 	b := &transcript{
-		host: t.host, pruned: prunedCalls(path), names: make(map[string]string), order: make(map[string]int),
+		host: t.host, thread: t, pruned: prunedCalls(path), names: make(map[string]string), order: make(map[string]int),
 		outstanding: make(map[string]bool),
 	}
 	if summary != "" {
@@ -130,12 +136,18 @@ func (b *transcript) add(e event.Event) {
 }
 
 func (b *transcript) user(e event.UserMessage) {
-	text := b.renderUser(e)
+	turn := userTurn{text: b.renderUser(e), images: b.images(e.Images)}
 	if e.Kind == string(InputFollowup) && !b.toolFree {
-		b.followups = append(b.followups, text)
+		b.followups = append(b.followups, turn)
 		return
 	}
-	b.emitUser(text)
+	b.emitUser(turn)
+}
+
+func (b *transcript) images(images []event.Image) []model.Image {
+	out, err := b.thread.imageParts(images)
+	b.keep(err)
+	return out
 }
 
 func (b *transcript) renderUser(e event.UserMessage) string {
@@ -165,22 +177,22 @@ func (b *transcript) note(e event.AdvisorNote) {
 		b.asides = append(b.asides, e.Render())
 		return
 	}
-	b.emitUser(e.Render())
+	b.emitUser(userTurn{text: e.Render()})
 }
 
-func (b *transcript) emitUser(text string) {
+func (b *transcript) emitUser(turn userTurn) {
 	if len(b.outstanding) > 0 {
-		b.deferred = append(b.deferred, text)
+		b.deferred = append(b.deferred, turn)
 		return
 	}
-	b.messages = append(b.messages, model.Message{Role: "user", Text: text})
+	b.messages = append(b.messages, model.Message{Role: "user", Text: turn.text, Images: turn.images})
 }
 
 func (b *transcript) emitFollowups() {
 	followups := b.followups
 	b.followups = nil
-	for _, text := range followups {
-		b.emitUser(text)
+	for _, turn := range followups {
+		b.emitUser(turn)
 	}
 }
 
@@ -232,8 +244,8 @@ func (b *transcript) flushResults() {
 	clear(b.outstanding)
 	deferred := b.deferred
 	b.deferred = nil
-	for _, text := range deferred {
-		b.emitUser(text)
+	for _, turn := range deferred {
+		b.emitUser(turn)
 	}
 }
 

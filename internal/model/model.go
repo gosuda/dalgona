@@ -74,6 +74,12 @@ type Message struct {
 	Reasoning   string
 	ToolCalls   []ToolCall
 	ToolResults []ToolResult
+	Images      []Image
+}
+
+type Image struct {
+	Mime string
+	Data []byte
 }
 type ToolResult struct {
 	ID      string

@@ -58,3 +58,10 @@ Recovery MUST start at most one worker per thread. A second resume of a thread t
 - A journal append failure during recovery MUST end the turn with status `failed` and the error text.
 - An interrupt during recovery MUST end the turn with status `interrupted`. Unfinished calls MUST complete as `skipped` or `interrupted` before `turn.completed`.
 - Recovery MUST NOT drop or rewrite a committed event.
+
+## Image input
+
+- Recovery MUST read each image of a turn from its blob.
+- Recovery MUST NOT open the path of an image.
+- A blob MUST match its SHA-256, its byte count, and its image type before the server sends it.
+- A failed blob check MUST fail the turn with `agent: image blob <sha> does not match its journal record`.

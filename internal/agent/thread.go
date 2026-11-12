@@ -54,6 +54,7 @@ type Thread struct {
 	workers   sync.WaitGroup
 	output    outputRelay
 	skipped   *skippedCompaction
+	images    verifiedImages
 }
 
 type actor struct {
