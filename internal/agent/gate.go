@@ -154,7 +154,7 @@ func staticRule(gc gateCall) (verdict, bool) {
 
 func staticRemoteRule(gc gateCall) (verdict, bool) {
 	for _, value := range remoteStrings(string(gc.args)) {
-		if name, part, ok := rules.CheckValue(value); ok {
+		if name, part, ok := rules.CheckRemoteValue(value); ok {
 			return decline("rule:"+name, "declined by rule "+name+": "+part), true
 		}
 	}

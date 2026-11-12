@@ -52,6 +52,9 @@ Writable roots are the thread working directory, `os.TempDir()`, `os.UserCacheDi
 - An error, a timeout of 8 s, or a missing or out-of-range answer MUST decline with `declined by decider <model>: <error>`.
 - An escalated `exec` call (`escalate=true`) MUST be decided with `sandboxed=false` and its justification. When allowed, it runs without the harness sandbox.
 
+`NewFactoryDecider` MUST resolve its decide client for the thread being judged on each action, then score through the same `Decide` path.
+A `ClientFactory` MUST return the decide client and model for the thread it receives.
+
 ## Thread grants
 
 A user `accept_session` resolution MUST create a thread grant once the fold knows the call class from `approval.requested`. When the resolution is journaled before the class is known, the fold carries the grant prefix forward. The fold creates the thread grant from the later `tool.started` record.

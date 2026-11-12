@@ -161,8 +161,7 @@ func Check(command string) (string, string, bool) {
 	return "", "", false
 }
 
-// CheckValue reports whether one decoded remote argument value is denied.
-func CheckValue(value string) (string, string, bool) {
+func CheckRemoteValue(value string) (string, string, bool) {
 	for _, part := range Split(value) {
 		normal := normalize(part)
 		if name, ok := matchRisky(risky[2:], part, normal); ok {

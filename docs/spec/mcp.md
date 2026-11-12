@@ -66,3 +66,6 @@ Opening a thread MUST NOT ask for workspace trust. Discovery that needs approval
 A trust prompt that a client can answer MUST wait until the client answers or the request context ends.
 When no thread is available for the approval channel, the host MUST cancel the trust request. The next turn MUST ask again.
 When a trust request ends without an answer, the host MUST discard its pending approval. A later answer for that request MUST fail as an unknown approval request.
+
+A workspace trust caller MUST refuse the workspace when the request returns an error, unless the reply is cancel.
+A workspace trust request MUST decline when no client subscribes to the thread.
