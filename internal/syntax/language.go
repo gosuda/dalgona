@@ -16,9 +16,12 @@ import (
 	c "github.com/odvcencio/gotreesitter/grammars/c"
 	csharp "github.com/odvcencio/gotreesitter/grammars/c_sharp"
 	cpp "github.com/odvcencio/gotreesitter/grammars/cpp"
+	css "github.com/odvcencio/gotreesitter/grammars/css"
 	golang "github.com/odvcencio/gotreesitter/grammars/go"
+	html "github.com/odvcencio/gotreesitter/grammars/html"
 	java "github.com/odvcencio/gotreesitter/grammars/java"
 	javascript "github.com/odvcencio/gotreesitter/grammars/javascript"
+	json "github.com/odvcencio/gotreesitter/grammars/json"
 	kotlin "github.com/odvcencio/gotreesitter/grammars/kotlin"
 	lua "github.com/odvcencio/gotreesitter/grammars/lua"
 	markdown "github.com/odvcencio/gotreesitter/grammars/markdown"
@@ -27,9 +30,12 @@ import (
 	ruby "github.com/odvcencio/gotreesitter/grammars/ruby"
 	grammarruntime "github.com/odvcencio/gotreesitter/grammars/runtime"
 	rust "github.com/odvcencio/gotreesitter/grammars/rust"
+	svelte "github.com/odvcencio/gotreesitter/grammars/svelte"
 	swift "github.com/odvcencio/gotreesitter/grammars/swift"
+	toml "github.com/odvcencio/gotreesitter/grammars/toml"
 	tsx "github.com/odvcencio/gotreesitter/grammars/tsx"
 	typescript "github.com/odvcencio/gotreesitter/grammars/typescript"
+	yaml "github.com/odvcencio/gotreesitter/grammars/yaml"
 )
 
 const (
@@ -116,9 +122,12 @@ var registry = []*language{
 	newLanguage("c", []string{".c", ".h"}, c.Language, cQuery),
 	newLanguage("c_sharp", []string{".cs"}, csharp.Language, csharpQuery),
 	newLanguage("cpp", []string{".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}, cpp.Language, cppQuery),
+	newLanguage("css", []string{".css"}, css.Language, ""),
 	newLanguage("go", []string{".go"}, golang.Language, goQuery),
+	newLanguage("html", []string{".html", ".htm"}, html.Language, ""),
 	newLanguage("java", []string{".java"}, java.Language, javaQuery),
 	newLanguage("javascript", []string{".js", ".jsx", ".mjs", ".cjs"}, javascript.Language, javascriptQuery),
+	newLanguage("json", []string{".json"}, json.Language, ""),
 	newLanguage("kotlin", []string{".kt", ".kts"}, kotlin.Language, kotlinQuery),
 	newLanguage("lua", []string{".lua"}, lua.Language, luaQuery),
 	newLanguage("markdown", []string{".md"}, markdown.Language, markdownQuery),
@@ -126,9 +135,12 @@ var registry = []*language{
 	newLanguage("python", []string{".py"}, python.Language, pythonQuery),
 	newLanguage("ruby", []string{".rb"}, ruby.Language, rubyQuery),
 	newLanguage("rust", []string{".rs"}, rust.Language, rustQuery),
+	newLanguage("svelte", []string{".svelte"}, svelte.Language, ""),
 	newLanguage("swift", []string{".swift"}, swift.Language, swiftQuery),
+	newLanguage("toml", []string{".toml"}, toml.Language, ""),
 	newLanguage("tsx", []string{".tsx"}, tsx.Language, tsxQuery),
 	newLanguage("typescript", []string{".ts", ".mts", ".cts"}, typescript.Language, typescriptQuery),
+	newLanguage("yaml", []string{".yaml", ".yml"}, yaml.Language, ""),
 }
 
 type Language struct {

@@ -39,8 +39,96 @@ func TestForPathExtensionTable(t *testing.T) {
 	if _, ok := ByName("nope"); ok {
 		t.Fatal("ByName(nope) found")
 	}
-	if got := Names(); !slices.Equal(got, []string{"bash", "c", "c_sharp", "cpp", "go", "java", "javascript", "kotlin", "lua", "markdown", "php", "python", "ruby", "rust", "swift", "tsx", "typescript"}) {
-		t.Fatalf("Names() = %v, want the seventeen registry names", got)
+}
+
+func TestNamesListsAllLanguages(t *testing.T) {
+	t.Parallel()
+	want := []string{"bash", "c", "c_sharp", "cpp", "css", "go", "html", "java", "javascript", "json", "kotlin", "lua", "markdown", "php", "python", "ruby", "rust", "svelte", "swift", "toml", "tsx", "typescript", "yaml"}
+	if got := Names(); !slices.Equal(got, want) {
+		t.Fatalf("Names() = %v, want the 23 registry names", got)
+	}
+}
+
+func TestForPathEveryExtension(t *testing.T) {
+	t.Parallel()
+	cases := map[string][]string{
+		"bash":       {".sh"},
+		"c":          {".c", ".h"},
+		"c_sharp":    {".cs"},
+		"cpp":        {".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"},
+		"css":        {".css"},
+		"go":         {".go"},
+		"html":       {".html", ".htm"},
+		"java":       {".java"},
+		"javascript": {".js", ".jsx", ".mjs", ".cjs"},
+		"json":       {".json"},
+		"kotlin":     {".kt", ".kts"},
+		"lua":        {".lua"},
+		"markdown":   {".md"},
+		"php":        {".php"},
+		"python":     {".py"},
+		"ruby":       {".rb"},
+		"rust":       {".rs"},
+		"svelte":     {".svelte"},
+		"swift":      {".swift"},
+		"toml":       {".toml"},
+		"tsx":        {".tsx"},
+		"typescript": {".ts", ".mts", ".cts"},
+		"yaml":       {".yaml", ".yml"},
+	}
+	for name, exts := range cases {
+		for _, ext := range exts {
+			lang, ok := ForPath("file" + ext)
+			if !ok {
+				t.Fatalf("ForPath(file%s) found no language; want %q", ext, name)
+			}
+			if lang.Name() != name {
+				t.Fatalf("ForPath(file%s) = %q; want %q", ext, lang.Name(), name)
+			}
+		}
+	}
+}
+
+func TestSyntaxOnlyGrammarsParse(t *testing.T) {
+	t.Parallel()
+	samples := map[string]string{
+		"svelte": "testdata/svelte/sample.svelte",
+		"html":   "testdata/html/sample.html",
+		"css":    "testdata/css/sample.css",
+		"json":   "testdata/json/sample.json",
+		"yaml":   "testdata/yaml/sample.yaml",
+		"toml":   "testdata/toml/sample.toml",
+	}
+	for name, path := range samples {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lang, ok := ByName(name)
+		if !ok {
+			t.Fatalf("%s language missing", name)
+		}
+		tree, report, err := lang.NewParser().parse(t.Context(), src)
+		if err != nil || report.Stopped || report.SyntaxErrors {
+			t.Fatalf("%s parse = %+v, %v; want clean", name, report, err)
+		}
+		tree.Release()
+	}
+}
+
+func TestSyntaxOnlySymbolsRefused(t *testing.T) {
+	t.Parallel()
+	lang, ok := ByName("svelte")
+	if !ok {
+		t.Fatal("svelte language missing")
+	}
+	src, err := os.ReadFile("testdata/svelte/sample.svelte")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = lang.NewParser().Symbols(t.Context(), src)
+	if err == nil || err.Error() != "syntax: no definition query for svelte" {
+		t.Fatalf("Symbols error = %v, want syntax: no definition query for svelte", err)
 	}
 }
 
