@@ -109,7 +109,7 @@ export function itemStatusLabel(status: string): string {
 
 const planStatusLabels: Record<PlanStepStatus, string> = {
 	pending: "Pending",
-	inProgress: "In progress",
+	inProgress: "Working",
 	completed: "Done",
 };
 

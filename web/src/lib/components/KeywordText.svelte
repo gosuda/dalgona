@@ -1,117 +1,72 @@
 <script lang="ts">
-import {
-	findKeywords,
-	type KeywordMatch,
-	keywordGradient,
-} from "../keywords.js";
-import type { KeywordDefinition } from "../types.js";
+import type { KeywordMatch } from "#lib/types.ts";
 
 interface Props {
 	readonly text: string;
-	readonly keywords: readonly KeywordDefinition[];
-	readonly active?: boolean;
+	readonly matches: readonly KeywordMatch[];
 }
 
 interface Piece {
 	readonly key: string;
 	readonly value: string;
-	readonly match: KeywordMatch | undefined;
+	readonly marked: boolean;
 }
 
-let { text, keywords, active = false }: Props = $props();
+let { text, matches }: Props = $props();
 
 function pieces(
 	source: string,
-	table: readonly KeywordDefinition[],
+	found: readonly KeywordMatch[],
 ): readonly Piece[] {
-	const points = Array.from(source);
-	const hits = findKeywords(source, table);
+	const bytes = new TextEncoder().encode(source);
+	const decoder = new TextDecoder();
 	const out: Piece[] = [];
 	let cursor = 0;
-	for (const hit of hits) {
-		if (hit.start > cursor) {
+	for (const match of found) {
+		const { start, end } = match.byteRange;
+		if (start < cursor || end <= start || end > bytes.length) continue;
+		if (start > cursor) {
 			out.push({
 				key: `t${cursor}`,
-				value: points.slice(cursor, hit.start).join(""),
-				match: undefined,
+				value: decoder.decode(bytes.slice(cursor, start)),
+				marked: false,
 			});
 		}
 		out.push({
-			key: `k${hit.start}`,
-			value: points.slice(hit.start, hit.end).join(""),
-			match: hit,
+			key: `k${start}`,
+			value: decoder.decode(bytes.slice(start, end)),
+			marked: true,
 		});
-		cursor = hit.end;
+		cursor = end;
 	}
-	if (cursor < points.length) {
+	if (cursor < bytes.length) {
 		out.push({
 			key: `t${cursor}`,
-			value: points.slice(cursor).join(""),
-			match: undefined,
+			value: decoder.decode(bytes.slice(cursor)),
+			marked: false,
 		});
 	}
 	return out;
 }
 
-const parts = $derived(pieces(text, keywords));
+const parts = $derived(pieces(text, matches));
 </script>
 
 {#each parts as part (part.key)}
-	{#if part.match}
-		<span class="keyword-surface">
-			<span
-				class="keyword"
-				class:active={active}
-				style:background-image={keywordGradient(part.match.hue)}
-			>{part.value}</span>
-		</span>
+	{#if part.marked}
+		<mark class="keyword">{part.value}</mark>
 	{:else}
 		{part.value}
 	{/if}
 {/each}
 
 <style>
-	.keyword-surface {
-		display: inline-block;
-		border-radius: var(--radius-control);
-		background: var(--tone);
-		padding: 0 var(--space-1);
-	}
-
 	.keyword {
-		background-clip: text;
-		-webkit-background-clip: text;
-		-webkit-text-fill-color: transparent;
-		color: transparent;
-		background-size: 200% 100%;
-		background-position: 0% 50%;
-	}
-
-	@media (prefers-reduced-motion: no-preference) {
-		.keyword.active {
-			animation: keyword-glow 1200ms ease-out 1;
-		}
-	}
-
-	@media (forced-colors: active) {
-		.keyword-surface {
-			border: 1px solid CanvasText;
-			background: Canvas;
-		}
-
-		.keyword {
-			background-image: none;
-			color: CanvasText;
-			-webkit-text-fill-color: CanvasText;
-		}
-	}
-
-	@keyframes keyword-glow {
-		from {
-			background-position: 0% 50%;
-		}
-		to {
-			background-position: 100% 50%;
-		}
+		background: none;
+		color: inherit;
+		font-weight: 650;
+		text-decoration: underline;
+		text-decoration-thickness: 2px;
+		text-underline-offset: 0.2em;
 	}
 </style>

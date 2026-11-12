@@ -1,14 +1,22 @@
 <script lang="ts">
-import KeywordText from "#lib/components/KeywordText.svelte";
-import { itemStatusLabel, kindLabel, planStatusLabel } from "#lib/labels.ts";
+import type { Component } from "svelte";
+import Mark from "#lib/components/Mark.svelte";
+import AdvisorNote from "#lib/components/rows/AdvisorNote.svelte";
+import CommandCard from "#lib/components/rows/CommandCard.svelte";
+import FileChangeRow from "#lib/components/rows/FileChangeRow.svelte";
+import MessageRow from "#lib/components/rows/MessageRow.svelte";
+import PlanPanel from "#lib/components/rows/PlanPanel.svelte";
+import SubagentBlock from "#lib/components/rows/SubagentBlock.svelte";
+import TextRow from "#lib/components/rows/TextRow.svelte";
+import ThinkingRow from "#lib/components/rows/ThinkingRow.svelte";
+import ToolCard from "#lib/components/rows/ToolCard.svelte";
+import type { RowProps } from "#lib/components/rows/types.ts";
 import {
-	itemDisplayStatus,
 	type ScrollSnapshot,
 	shouldAutoScrollForUpdate,
 } from "#lib/reducer.ts";
 import type {
-	JsonValue,
-	KeywordDefinition,
+	ThreadSummary,
 	TranscriptItem,
 	TurnPlan,
 	TurnStatus,
@@ -21,10 +29,28 @@ interface Props {
 	error: string | null;
 	plan: TurnPlan | null;
 	connected: boolean;
-	keywords: readonly KeywordDefinition[];
 	loading: boolean;
 	awaitingApproval: ReadonlySet<string>;
+	childThreadIds: readonly string[];
+	threads: readonly ThreadSummary[];
+	userAgent: string | null;
+	starting: boolean;
+	onOpenThread: (threadId: string) => void;
+	onStart: () => void;
 }
+
+const rowComponents: Record<TranscriptItem["kind"], Component<RowProps>> = {
+	userMessage: MessageRow,
+	agentMessage: MessageRow,
+	reasoning: ThinkingRow,
+	commandExecution: CommandCard,
+	fileChange: FileChangeRow,
+	toolCall: ToolCard,
+	plan: TextRow,
+	advisorNote: AdvisorNote,
+	contextCompaction: TextRow,
+	unsupported: TextRow,
+};
 
 let {
 	threadId,
@@ -33,9 +59,14 @@ let {
 	error,
 	plan,
 	connected,
-	keywords,
 	loading,
 	awaitingApproval,
+	childThreadIds,
+	threads,
+	userAgent,
+	starting,
+	onOpenThread,
+	onStart,
 }: Props = $props();
 let viewport = $state<HTMLElement>();
 let running = $derived(turnStatus === "inProgress");
@@ -84,10 +115,6 @@ function trackFollowing(): void {
 	const distance = target.scrollHeight - target.scrollTop - target.clientHeight;
 	following = distance < 32;
 }
-
-function argumentsText(value: JsonValue): string {
-	return JSON.stringify(value, null, 2) ?? "";
-}
 </script>
 
 <svelte:window onscroll={trackFollowing} />
@@ -96,12 +123,13 @@ function argumentsText(value: JsonValue): string {
 	<div class="transcript-inner">
 		{#if !threadId}
 			<section class="empty-state" aria-labelledby="empty-title">
+				<Mark />
 				<p class="kicker">No thread open</p>
 				<h2 id="empty-title">Pick a thread or start a new one</h2>
-				{#if connected}
-					<p>Earlier threads are in the list. Start a thread to give the agent a task.</p>
-				{:else}
-					<p>Connect to dalgona to see your threads.</p>
+				<p>{connected ? "Start a thread or pick one from the list." : "Connect to dalgona to see your threads."}</p>
+				<button class="primary" type="button" aria-disabled={!connected || starting ? "true" : undefined} onclick={() => { if (connected && !starting) onStart(); }}>Start thread</button>
+				{#if userAgent}
+					<p class="version">{userAgent}</p>
 				{/if}
 			</section>
 		{:else if !loading && items.length === 0}
@@ -113,98 +141,19 @@ function argumentsText(value: JsonValue): string {
 		{:else}
 			<ol class="items">
 				{#each items as item (item.id)}
+					{@const Row = rowComponents[item.kind]}
 					<li class:from-user={item.kind === "userMessage"}>
-						{#if item.kind === "userMessage"}
-							<article class="user-message">
-								<span class="item-label">You</span>
-								<p class="prose"><KeywordText text={item.text} {keywords} /></p>
-							</article>
-						{:else if item.kind === "agentMessage"}
-							<article class="agent-message">
-								<span class="item-label">dalgona</span>
-								<p class="prose">{item.text}{#if !item.complete && running}<span class="streaming" aria-hidden="true">▋</span>{/if}</p>
-							</article>
-						{:else if item.kind === "reasoning"}
-							<details class="reasoning" open={!item.complete && running}>
-								<summary>Reasoning{#if !item.complete && running} in progress{/if}</summary>
-								<p>{item.text}</p>
-							</details>
-						{:else if item.kind === "commandExecution"}
-							{@const status = itemDisplayStatus(item.status, item.id, awaitingApproval)}
-							<article class="tool-item">
-								<header>
-									<span class="item-label">Command</span>
-									<span class="item-status" class:awaiting={status === "awaitingApproval"}>{itemStatusLabel(status)}{item.exitCode === null ? "" : ` · exit ${item.exitCode}`}</span>
-								</header>
-								<pre class="command">{item.command}</pre>
-								{#if item.output}
-									<pre class="output">{item.output}</pre>
-								{/if}
-							</article>
-						{:else if item.kind === "fileChange"}
-							{@const status = itemDisplayStatus(item.status, item.id, awaitingApproval)}
-							<article class="tool-item">
-								<header>
-									<span class="item-label">File changes</span>
-									<span class="item-status" class:awaiting={status === "awaitingApproval"}>{itemStatusLabel(status)}</span>
-								</header>
-								{#each item.changes as change (`${change.path}:${change.kind}`)}
-									<details class="file-change">
-										<summary><span class="file-path">{change.path}</span> · {change.kind}</summary>
-										<pre class="output">{change.diff}</pre>
-									</details>
-								{/each}
-							</article>
-						{:else if item.kind === "toolCall"}
-							<article class="tool-item">
-								<header>
-									<span class="item-label">{item.name}</span>
-									<span class="item-status">{itemStatusLabel(item.status)}</span>
-								</header>
-								<details>
-									<summary>Arguments</summary>
-									<pre class="output">{argumentsText(item.arguments)}</pre>
-								</details>
-								{#if item.output}
-									<pre class="output">{item.output}</pre>
-								{/if}
-							</article>
-						{:else if item.kind === "plan"}
-							<article class="plan">
-								<span class="item-label">Plan</span>
-								<p>{item.text}</p>
-							</article>
-						{:else if item.kind === "advisorNote"}
-							<aside class="advisor-note" data-severity={item.severity} aria-label="Advisor note">
-								<span class="advisor-label">{item.advisor === "advisor" ? "advisor" : `advisor ${item.advisor}`} · {item.severity}:</span>
-								{item.note}
-							</aside>
-						{:else if item.kind === "contextCompaction"}
-							<p class="compaction">Context compacted · earlier turns remain in the journal</p>
-						{:else if item.kind === "unsupported"}
-							<p class="compaction">{kindLabel(item.label)}</p>
-						{/if}
+						<Row {item} {running} awaiting={awaitingApproval} />
 					</li>
 				{/each}
 			</ol>
 		{/if}
 
-		{#if plan}
-			<section class="turn-plan" aria-label="Plan">
-				<span class="item-label">Plan</span>
-				{#if plan.explanation}
-					<p>{plan.explanation}</p>
-				{/if}
-				<ol>
-					{#each plan.steps as step, index (index)}
-						<li data-status={step.status} aria-current={step.status === "inProgress" ? "step" : undefined}>
-							<span class="plan-status">{planStatusLabel(step.status)}</span>
-							<span>{step.step}</span>
-						</li>
-					{/each}
-				</ol>
-			</section>
+		{#if childThreadIds.length > 0}
+			<SubagentBlock childIds={childThreadIds} {threads} onOpen={onOpenThread} />
 		{/if}
+
+		<PlanPanel {plan} />
 
 		{#if running}
 			<p class="turn-outcome">
@@ -249,186 +198,6 @@ function argumentsText(value: JsonValue): string {
 
 	.from-user {
 		padding-inline-start: var(--space-8);
-	}
-
-	.item-label {
-		display: block;
-		margin-block-end: var(--space-2);
-		color: var(--dim);
-		font-size: var(--size-caption);
-		font-weight: 650;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-	}
-
-	.user-message {
-		border-inline-start: 2px solid var(--accent-text);
-		padding: var(--space-2) var(--space-4);
-		background: var(--tone);
-	}
-
-	.user-message p,
-	.agent-message p,
-	.plan p {
-		max-width: 70ch;
-		margin: 0;
-		line-height: 1.6;
-		overflow-wrap: break-word;
-		white-space: pre-wrap;
-		text-wrap: pretty;
-	}
-
-	.agent-message {
-		padding-block: var(--space-2);
-	}
-
-	.streaming {
-		color: var(--accent-text);
-		margin-inline-start: var(--space-1);
-	}
-
-	.tool-item {
-		min-width: 0;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-tag);
-		background: var(--surface);
-		padding: var(--space-4);
-	}
-
-	.tool-item header {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-	}
-
-	.item-status {
-		color: var(--dim);
-		font-size: var(--size-caption);
-		font-variant-numeric: tabular-nums;
-	}
-
-	.item-status.awaiting {
-		color: var(--accent-text);
-		font-weight: 650;
-	}
-
-	.command {
-		border-radius: var(--radius-control);
-		background: var(--tone);
-		padding: var(--space-3);
-		font-size: var(--size-small);
-		line-height: 1.5;
-	}
-
-	.output {
-		max-height: 24rem;
-		margin-block-start: var(--space-3);
-		overflow: auto;
-		overscroll-behavior: contain;
-		color: var(--dim);
-		font-size: var(--size-caption);
-		line-height: 1.55;
-	}
-
-	.reasoning,
-	.file-change,
-	.tool-item details {
-		max-width: 70ch;
-		color: var(--dim);
-		font-size: var(--size-small);
-	}
-
-	.reasoning summary,
-	.file-change summary,
-	.tool-item summary {
-		color: var(--text);
-		cursor: pointer;
-		font-weight: 600;
-	}
-
-	.reasoning p {
-		margin-block: var(--space-3) 0;
-		white-space: pre-wrap;
-	}
-
-	.file-change {
-		margin-block-start: var(--space-3);
-	}
-
-	.plan {
-		border-block: 1px solid var(--line);
-		padding-block: var(--space-3);
-	}
-
-	.advisor-note {
-		max-width: 70ch;
-		border-inline-start: 2px solid var(--strong);
-		padding: var(--space-1) var(--space-3);
-		color: var(--dim);
-		font-size: var(--size-small);
-		overflow-wrap: break-word;
-		white-space: pre-wrap;
-	}
-
-	.advisor-note[data-severity="concern"] {
-		border-inline-start-color: var(--accent-text);
-	}
-
-	.advisor-note[data-severity="blocker"] {
-		border-inline-start-color: var(--failed-text);
-	}
-
-	.advisor-label {
-		font-weight: 650;
-	}
-
-	.turn-plan {
-		max-width: 70ch;
-		margin-block-start: var(--space-6);
-		font-size: var(--size-small);
-	}
-
-	.turn-plan p {
-		margin: 0 0 var(--space-2);
-		color: var(--dim);
-	}
-
-	.turn-plan ol {
-		display: grid;
-		gap: var(--space-1);
-		list-style: none;
-		margin: 0;
-		padding: 0;
-	}
-
-	.turn-plan li {
-		display: grid;
-		grid-template-columns: 6rem minmax(0, 1fr);
-		gap: var(--space-2);
-		overflow-wrap: break-word;
-	}
-
-	.plan-status {
-		color: var(--dim);
-		font-size: var(--size-caption);
-		font-weight: 600;
-	}
-
-	.turn-plan li[data-status="inProgress"] {
-		font-weight: 650;
-	}
-
-	.turn-plan li[data-status="completed"] > span:last-child {
-		color: var(--dim);
-	}
-
-	.compaction {
-		margin: 0;
-		color: var(--dim);
-		font-size: var(--size-caption);
-		text-align: center;
 	}
 
 	.turn-outcome {
@@ -476,6 +245,11 @@ function argumentsText(value: JsonValue): string {
 		color: var(--dim);
 		line-height: 1.6;
 		text-wrap: pretty;
+	}
+
+	.version {
+		color: var(--dim);
+		font-size: var(--size-caption);
 	}
 
 	@media (max-width: 40rem) {

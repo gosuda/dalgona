@@ -572,23 +572,16 @@ describe("dalgona schema conformance", () => {
 		).toThrow("invalid advisor status");
 	});
 
-	it("rejects a keyword row without a hue", () => {
-		expect(() => parseKeywordsResponse([{ word: "x" }])).toThrow(
-			"invalid keyword",
-		);
+	it("reads the word of a keyword row and ignores its hue", () => {
+		expect(parseKeywordsResponse([{ hue: [0, 330], word: "x" }])).toEqual([
+			{ word: "x" },
+		]);
 	});
 
-	it("rejects a keyword row missing any required member", () => {
-		const row: JsonObject = { hue: [0, 330], word: "ultrathink" };
-		const required =
-			schemaTitled(dalgonaSchemas, "dalgona/keywords/list result").items
-				?.required ?? [];
-		expect(required.length).toBeGreaterThan(0);
-		for (const key of required) {
-			expect(() => parseKeywordsResponse([without(row, key)]), key).toThrow(
-				"invalid keyword",
-			);
-		}
+	it("rejects a keyword row without a word", () => {
+		expect(() => parseKeywordsResponse([{ hue: [0, 330] }])).toThrow(
+			"invalid keyword",
+		);
 	});
 
 	it("rejects an advisor status row missing any required member", () => {

@@ -247,7 +247,12 @@ function transcript(items: readonly TranscriptItem[], turnStatus: TurnStatus) {
 		error: null,
 		plan: null,
 		connected: true,
-		keywords: [],
+		childThreadIds: [],
+		threads: [],
+		userAgent: null,
+		starting: false,
+		onOpenThread: () => undefined,
+		onStart: () => undefined,
 		loading: false,
 		awaitingApproval: new Set<string>(),
 	};

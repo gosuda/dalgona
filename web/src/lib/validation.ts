@@ -7,6 +7,7 @@ import type {
 	InitializeInfo,
 	JsonValue,
 	KeywordDefinition,
+	KeywordMatch,
 	ModelOption,
 	PlanStep,
 	RequestId,
@@ -288,6 +289,12 @@ function toolOutput(value: unknown): string {
 	return JSON.stringify(parsed);
 }
 
+function durationValue(item: {
+	readonly [key: string]: unknown;
+}): number | null {
+	return typeof item["durationMs"] === "number" ? item["durationMs"] : null;
+}
+
 function transcriptItem(
 	value: unknown,
 	completion: "complete" | "pending",
@@ -296,7 +303,13 @@ function transcriptItem(
 	const id = requiredString(item, "id", "item");
 	const kind = item["type"];
 	if (kind === "userMessage") {
-		return { id, kind: "userMessage", text: userText(item["content"]) };
+		return {
+			id,
+			kind: "userMessage",
+			text: userText(item["content"]),
+			turnId: "",
+			keywords: keywordMatches(item["keywords"]),
+		};
 	}
 	if (kind === "agentMessage") {
 		return {
@@ -323,6 +336,7 @@ function transcriptItem(
 			status:
 				typeof item["status"] === "string" ? item["status"] : "inProgress",
 			exitCode: typeof item["exitCode"] === "number" ? item["exitCode"] : null,
+			durationMs: durationValue(item),
 		};
 	}
 	if (kind === "fileChange") {
@@ -362,6 +376,7 @@ function transcriptItem(
 			output,
 			status:
 				typeof item["status"] === "string" ? item["status"] : "inProgress",
+			durationMs: durationValue(item),
 		};
 	}
 	if (kind === "functionCallOutput") {
@@ -372,6 +387,7 @@ function transcriptItem(
 			arguments: null,
 			output: outputText(item["output"]),
 			status: "completed",
+			durationMs: null,
 		};
 	}
 	return {
@@ -531,21 +547,29 @@ export function parseKeywordsResponse(
 	if (!Array.isArray(value)) {
 		fail("keywords");
 	}
-	return value.map((entry) => {
-		const row = object(entry, "keyword");
-		const hue = row["hue"];
-		if (!Array.isArray(hue)) fail("keyword");
-		const start = hue[0];
-		const end = hue[1];
-		if (
-			hue.length !== 2 ||
-			typeof start !== "number" ||
-			typeof end !== "number"
-		) {
-			fail("keyword");
-		}
-		return { word: requiredString(row, "word", "keyword"), hue: [start, end] };
-	});
+	return value.map((entry) => ({
+		word: requiredString(object(entry, "keyword"), "word", "keyword"),
+	}));
+}
+
+export function parseKeywordMatches(value: unknown): readonly KeywordMatch[] {
+	return keywordMatches(object(value, "keyword matches")["matches"]);
+}
+
+function keywordMatches(value: unknown): readonly KeywordMatch[] {
+	if (!Array.isArray(value)) return [];
+	const matches: KeywordMatch[] = [];
+	for (const entry of value) {
+		if (!isObject(entry)) continue;
+		const word = entry["word"];
+		const range = entry["byteRange"];
+		if (typeof word !== "string" || !isObject(range)) continue;
+		const start = range["start"];
+		const end = range["end"];
+		if (typeof start !== "number" || typeof end !== "number") continue;
+		matches.push({ word, byteRange: { start, end } });
+	}
+	return matches;
 }
 
 export interface SettingValue {
@@ -602,6 +626,7 @@ function dynamicToolItem(
 		arguments: args,
 		output,
 		status: typeof item["status"] === "string" ? item["status"] : "inProgress",
+		durationMs: durationValue(item),
 	};
 }
 

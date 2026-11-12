@@ -50,7 +50,7 @@ export function transcriptForThread(
 		turnStartedAtMs = turn.startedAtMs ?? null;
 		error = turn.error;
 		for (const item of turn.items) {
-			items.push(item);
+			items.push(placedItem(item, turn.id));
 		}
 	}
 	const preserved: readonly string[] = knownChildren[thread.summary.id] ?? [];
@@ -64,6 +64,10 @@ export function transcriptForThread(
 		childThreadIds: [...preserved],
 		turnStartedAtMs,
 	};
+}
+
+function placedItem(item: TranscriptItem, turnId: string): TranscriptItem {
+	return item.kind === "userMessage" ? { ...item, turnId } : item;
 }
 
 function sameThread(state: TranscriptState, threadId: string): boolean {
@@ -150,6 +154,7 @@ function placeholder(
 		return {
 			id: itemId,
 			kind: "commandExecution",
+			durationMs: null,
 			command: "",
 			output: delta,
 			status: "inProgress",
@@ -268,7 +273,13 @@ export function reduceNotification(
 				return state;
 			}
 			return {
-				...withItems(state, appendItem(state.items, notification.item)),
+				...withItems(
+					state,
+					appendItem(
+						state.items,
+						placedItem(notification.item, notification.turnId),
+					),
+				),
 				turnId: notification.turnId,
 			};
 		}
@@ -277,7 +288,13 @@ export function reduceNotification(
 				return state;
 			}
 			return {
-				...withItems(state, replaceItem(state.items, notification.item)),
+				...withItems(
+					state,
+					replaceItem(
+						state.items,
+						placedItem(notification.item, notification.turnId),
+					),
+				),
 				turnId: notification.turnId,
 			};
 		}

@@ -47,7 +47,13 @@ export type JsonValue =
 	| { readonly [key: string]: JsonValue };
 
 export type TranscriptItem =
-	| { readonly id: string; readonly kind: "userMessage"; readonly text: string }
+	| {
+			readonly id: string;
+			readonly kind: "userMessage";
+			readonly text: string;
+			readonly turnId: string;
+			readonly keywords: readonly KeywordMatch[];
+	  }
 	| {
 			readonly id: string;
 			readonly kind: "agentMessage" | "reasoning";
@@ -61,6 +67,7 @@ export type TranscriptItem =
 			readonly output: string;
 			readonly status: string;
 			readonly exitCode: number | null;
+			readonly durationMs: number | null;
 	  }
 	| {
 			readonly id: string;
@@ -75,6 +82,7 @@ export type TranscriptItem =
 			readonly arguments: JsonValue;
 			readonly output: string;
 			readonly status: string;
+			readonly durationMs: number | null;
 	  }
 	| { readonly id: string; readonly kind: "plan"; readonly text: string }
 	| {
@@ -241,7 +249,11 @@ export interface InitializeInfo {
 
 export interface KeywordDefinition {
 	readonly word: string;
-	readonly hue: readonly [number, number];
+}
+
+export interface KeywordMatch {
+	readonly word: string;
+	readonly byteRange: { readonly start: number; readonly end: number };
 }
 
 export interface ApprovalRequest {

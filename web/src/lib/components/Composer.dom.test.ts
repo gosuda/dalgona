@@ -1,15 +1,13 @@
 import { waitFor } from "@testing-library/dom";
-import { cleanup, render, screen } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import Composer from "#lib/components/Composer.svelte";
-import type { KeywordDefinition } from "#lib/types.ts";
 
 function baseProps() {
 	return {
 		disabled: false,
 		running: false,
 		queuedCount: 0,
-		keywords: [] as readonly KeywordDefinition[],
 		onSend: vi.fn(),
 		onSteer: vi.fn(),
 		onFollowup: vi.fn(),
@@ -41,5 +39,22 @@ describe("composer focus", () => {
 				screen.getByRole("textbox", { name: "Message" }),
 			);
 		});
+	});
+
+	test("lists the server's keyword matches for the draft as words", async () => {
+		const onMatch = vi.fn(() =>
+			Promise.resolve([
+				{ word: "ultrathink", byteRange: { start: 0, end: 10 } },
+			]),
+		);
+		render(Composer, { props: { ...baseProps(), onMatch } });
+		const field = screen.getByRole("textbox", { name: "Message" });
+		await fireEvent.input(field, { target: { value: "ultrathink" } });
+		await waitFor(() => {
+			expect(document.querySelector(".keywords")?.textContent).toBe(
+				"Keywords: ultrathink",
+			);
+		});
+		expect(onMatch).toHaveBeenCalledWith("ultrathink");
 	});
 });

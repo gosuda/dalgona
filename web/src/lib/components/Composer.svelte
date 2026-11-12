@@ -1,14 +1,12 @@
 <script lang="ts">
-import KeywordText from "#lib/components/KeywordText.svelte";
 import { handoffFocus } from "#lib/focus.ts";
-import { findKeywords } from "#lib/keywords.ts";
-import type { KeywordDefinition } from "#lib/types.ts";
+import type { KeywordMatch } from "#lib/types.ts";
 
 interface Props {
 	disabled: boolean;
 	running: boolean;
 	queuedCount: number;
-	keywords: readonly KeywordDefinition[];
+	onMatch?: (text: string) => Promise<readonly KeywordMatch[]>;
 	onSend: (text: string) => void;
 	onSteer: (text: string) => void;
 	onFollowup: (text: string) => void;
@@ -19,17 +17,34 @@ let {
 	disabled,
 	running,
 	queuedCount,
-	keywords,
+	onMatch,
 	onSend,
 	onSteer,
 	onFollowup,
 	onInterrupt,
 }: Props = $props();
 let text = $state("");
-let focused = $state(false);
 let error = $state("");
+let matches = $state<readonly KeywordMatch[]>([]);
+let matchSeq = 0;
 let textarea = $state<HTMLTextAreaElement>();
-let matches = $derived(findKeywords(text, keywords));
+
+$effect(() => {
+	const draft = text;
+	const seq = ++matchSeq;
+	if (!onMatch || draft.trim() === "") {
+		matches = [];
+		return;
+	}
+	onMatch(draft).then(
+		(found) => {
+			if (seq === matchSeq) matches = found;
+		},
+		() => {
+			if (seq === matchSeq) matches = [];
+		},
+	);
+});
 
 function validText(): string | null {
 	const value = text.trim();
@@ -73,15 +88,6 @@ function onKeydown(event: KeyboardEvent): void {
 </script>
 
 <section class="composer" aria-label="Message composer">
-	{#if matches.length > 0}
-		<div class="keyword-row" aria-label="Active keywords">
-			<span>Keywords</span>
-			{#each matches as match, index (`${match.word}:${match.start}:${index}`)}
-				<span class="keyword-chip"><KeywordText text={match.word} {keywords} active={focused} /></span>
-			{/each}
-		</div>
-	{/if}
-
 	<form
 		onsubmit={(event) => {
 			event.preventDefault();
@@ -100,9 +106,10 @@ function onKeydown(event: KeyboardEvent): void {
 			aria-invalid={error ? "true" : "false"}
 			aria-describedby="composer-help composer-error"
 			onkeydown={onKeydown}
-			onfocus={() => (focused = true)}
-			onblur={() => (focused = false)}
 		></textarea>
+		{#if matches.length > 0}
+			<p class="keywords">Keywords: {matches.map((match) => match.word).join(", ")}</p>
+		{/if}
 		<div class="composer-meta">
 			<p id="composer-help">
 				Enter to {running ? "steer" : "send"} · Shift+Enter for a new line{running ? " · Ctrl+Enter to queue" : ""}
@@ -128,8 +135,7 @@ function onKeydown(event: KeyboardEvent): void {
 		padding: var(--space-4) var(--space-6) var(--space-6);
 	}
 
-	form,
-	.keyword-row {
+	form {
 		width: min(100%, 52rem);
 		margin-inline: auto;
 	}
@@ -161,6 +167,12 @@ function onKeydown(event: KeyboardEvent): void {
 		border-color: var(--failed-text);
 	}
 
+	.keywords {
+		margin: var(--space-2) 0 0;
+		color: var(--dim);
+		font-size: var(--size-caption);
+	}
+
 	.composer-meta {
 		display: flex;
 		justify-content: space-between;
@@ -190,20 +202,6 @@ function onKeydown(event: KeyboardEvent): void {
 		flex-wrap: wrap;
 		gap: var(--space-3);
 		margin-block-start: var(--space-3);
-	}
-
-	.keyword-row {
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-		margin-block-end: var(--space-3);
-		color: var(--dim);
-		font-size: var(--size-caption);
-	}
-
-	.keyword-chip {
-		font-weight: 650;
 	}
 
 	@media (max-width: 40rem) {

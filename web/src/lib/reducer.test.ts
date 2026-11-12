@@ -33,6 +33,7 @@ function command(id: string, output: string): TranscriptItem {
 		output,
 		status: "inProgress",
 		exitCode: null,
+		durationMs: null,
 	};
 }
 
@@ -189,6 +190,7 @@ describe("transcript reducer", () => {
 				output: "hi",
 				status: "inProgress",
 				exitCode: null,
+				durationMs: null,
 			},
 		]);
 		const grown = reduceNotification(next, {
@@ -211,6 +213,7 @@ describe("transcript reducer", () => {
 				output: "",
 				status: "inProgress",
 				exitCode: null,
+				durationMs: null,
 			},
 		});
 		expect(started.items).toEqual([
@@ -221,6 +224,7 @@ describe("transcript reducer", () => {
 				output: "hi!",
 				status: "inProgress",
 				exitCode: null,
+				durationMs: null,
 			},
 		]);
 	});

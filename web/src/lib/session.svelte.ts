@@ -29,6 +29,7 @@ import type {
 	FileChange,
 	JsonValue,
 	KeywordDefinition,
+	KeywordMatch,
 	ModelOption,
 	Notice,
 	NoticeAction,
@@ -46,6 +47,7 @@ import {
 	parseAdvisorStatusResponse,
 	parseConfigReadResponse,
 	parseInitializeResponse,
+	parseKeywordMatches,
 	parseKeywordsResponse,
 	parseModelListResponse,
 	parseSettingsReadResponse,
@@ -155,6 +157,7 @@ export class Session {
 		sandbox: "workspace-write",
 		runner: "local",
 	});
+	userAgent: string | null = $state(null);
 	keywords: readonly KeywordDefinition[] = $state([]);
 	advisor: AdvisorSummary = $state({ kind: "unknown" });
 	approvals: readonly ApprovalRequest[] = $state([]);
@@ -361,7 +364,7 @@ export class Session {
 		try {
 			await rpc.open();
 			if (generation !== this.connectionGeneration) return;
-			await rpc.call(
+			const info = await rpc.call(
 				"initialize",
 				{
 					clientInfo: {
@@ -373,6 +376,7 @@ export class Session {
 				},
 				parseInitializeResponse,
 			);
+			this.userAgent = info.userAgent;
 			rpc.notify("initialized", {});
 			await Promise.all([
 				this.loadThreads(generation).catch((error) => {
@@ -526,6 +530,18 @@ export class Session {
 		);
 		if (generation !== this.connectionGeneration) return;
 		this.keywords = result;
+	}
+
+	async matchKeywords(text: string): Promise<readonly KeywordMatch[]> {
+		const params: JsonValue =
+			this.activeThreadId === null
+				? { text, kind: "prompt" }
+				: { threadId: this.activeThreadId, text, kind: "prompt" };
+		return this.requireClient().call(
+			"dalgona/keywords/match",
+			params,
+			parseKeywordMatches,
+		);
 	}
 
 	private upsertThread(thread: ThreadDetail): void {

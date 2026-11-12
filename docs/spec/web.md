@@ -137,8 +137,13 @@ No advisor failure opens the error banner.
 - Unknown item kinds show their type in plain words, such as `Web search`.
 - A `dynamicToolCall` item with tool `advisor` shows as a note card: `advisor · <severity>: <note>`. The note is the text of `contentItems`. The severity is always text. The card's inline-start border marks the severity as a second cue.
 - Other dynamic tools show their `contentItems` text as output.
-- `turn/plan/updated` shows the latest plan of the current turn as a checklist. Each step has a text status: `Done`, `In progress`, or `Pending`. The step in progress carries `aria-current="step"`. A new turn clears the plan.
-- The streaming cursor shows only while the turn runs. The reasoning label reads `Reasoning in progress` while the turn runs and `Reasoning` otherwise.
+- `turn/plan/updated` shows the latest plan of the current turn as a checklist. Each step has a text status: `Done`, `Working`, or `Pending`. The step in progress carries `aria-current="step"`. A new turn clears the plan.
+- The reasoning row reads `Thinking` and is open while the turn runs.
+- Each command row MUST read `$ <command>`, show its state word, and show `exit <code>` and its duration when the server reports them.
+- Each nested call MUST be its own row, placed directly after its `eval` row.
+- A user message MUST underline each keyword that the server reports, and MUST list those keywords on a `Keywords:` line.
+- The composer MUST list the keywords of the draft as words on a `Keywords:` line.
+- A subagent of the open thread MUST appear in a subagent block with an `Open` button.
 - A failed turn ends with `The turn failed: <message>. Send your message again to retry, or start a new thread.`
 - A turn that is retrying after an error shows `Retrying after an error: <message>`.
 - An interrupted turn shows `Turn interrupted. Send a message to continue.`

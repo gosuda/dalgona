@@ -1,5 +1,5 @@
-import { cleanup, render } from "@testing-library/svelte";
-import { afterEach, describe, expect, test } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import Transcript from "#lib/components/Transcript.svelte";
 import type { TranscriptItem } from "#lib/types.ts";
 
@@ -11,9 +11,14 @@ function props(items: readonly TranscriptItem[]) {
 		error: null,
 		plan: null,
 		connected: true,
-		keywords: [],
 		loading: false,
 		awaitingApproval: new Set<string>(),
+		childThreadIds: [],
+		threads: [],
+		userAgent: null,
+		starting: false,
+		onOpenThread: vi.fn(),
+		onStart: vi.fn(),
 	};
 }
 
@@ -33,5 +38,32 @@ describe("transcript live regions", () => {
 		expect(
 			message?.closest("[role=log],[role=status],[role=alert],[aria-live]"),
 		).toBeNull();
+	});
+});
+
+describe("welcome start button", () => {
+	test("is shown offline and does not start a thread when clicked", async () => {
+		const onStart = vi.fn();
+		render(Transcript, {
+			props: { ...props([]), threadId: null, connected: false, onStart },
+		});
+		const button = screen.getByRole("button", { name: "Start thread" });
+		expect(button.getAttribute("aria-disabled")).toBe("true");
+		await fireEvent.click(button);
+		expect(onStart).not.toHaveBeenCalled();
+	});
+
+	test("keeps focus while a start is in flight", async () => {
+		const onStart = vi.fn();
+		render(Transcript, {
+			props: { ...props([]), threadId: null, starting: true, onStart },
+		});
+		const button = screen.getByRole("button", { name: "Start thread" });
+		button.focus();
+		expect(button.hasAttribute("disabled")).toBe(false);
+		expect(button.getAttribute("aria-disabled")).toBe("true");
+		expect(document.activeElement).toBe(button);
+		await fireEvent.click(button);
+		expect(onStart).not.toHaveBeenCalled();
 	});
 });

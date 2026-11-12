@@ -89,7 +89,12 @@ const openThreadFlags = $derived(
 			error={session.transcript.error}
 			plan={session.transcript.plan}
 			connected={session.connection === "connected"}
-			keywords={session.keywords}
+			childThreadIds={session.transcript.childThreadIds}
+			threads={session.threads}
+			userAgent={session.userAgent}
+			starting={session.startingThread}
+			onOpenThread={(threadId) => void session.selectThread(threadId)}
+			onStart={() => void session.createThread()}
 			loading={session.loadingTranscript}
 			awaitingApproval={session.awaitingApproval}
 		/>
@@ -98,7 +103,7 @@ const openThreadFlags = $derived(
 			disabled={session.connection !== "connected" || session.activeThreadId === null || session.loadingTranscript}
 			running={session.running}
 			queuedCount={session.queuedFollowups.length}
-			keywords={session.keywords}
+			onMatch={(text) => session.matchKeywords(text)}
 			onSend={(text) => void session.sendMessage(text)}
 			onSteer={(text) => void session.steerMessage(text)}
 			onFollowup={(text) => session.queueFollowup(text)}
