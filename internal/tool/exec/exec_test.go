@@ -115,10 +115,19 @@ func createMarkerThenWaitCommand() string {
 }
 
 func TestExecTimeoutTerminates(t *testing.T) {
-	env, closeRunner := testEnv(t)
-	defer closeRunner()
+	runsDir := filepath.Join(t.TempDir(), "runs")
+	runs, newErr := runner.NewLocal(runsDir)
+	if newErr != nil {
+		t.Fatal(newErr)
+	}
+	defer func() {
+		_ = runs.Close()
+	}()
+	cwd := t.TempDir()
+	env := tool.Env{Runner: runs, Cwd: cwd, Sandbox: runner.Sandbox{Mode: runner.SandboxWorkspaceWrite, WritableRoots: []string{cwd}}}
 	toolExec := New()
 	toolExec.grace = 300 * time.Millisecond
+	toolExec.killWait = 30 * time.Second
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-3", Args: jsontext.Value(`{"command":` + strconv.Quote(waitThenPrintLateCommand()) + `,"timeout_ms":2000}`)}, env)
 	if err == nil {
 		t.Fatal("timeout run returned no error")
@@ -130,7 +139,8 @@ func TestExecTimeoutTerminates(t *testing.T) {
 		t.Fatal("timed out call reported success")
 	}
 	if result.ExitCode == nil {
-		t.Fatal("timed out call settled without an exit record")
+		runDir := filepath.Join(runsDir, "run-3")
+		t.Fatalf("timed out call settled without an exit record; run directory %s holds: %s", runDir, runDirListing(runDir))
 	}
 	if !strings.Contains(string(result.Output), "early") {
 		t.Fatalf("output before the timeout is missing: %q", result.Output)
@@ -138,6 +148,18 @@ func TestExecTimeoutTerminates(t *testing.T) {
 	if strings.Contains(string(result.Output), "late") {
 		t.Fatalf("output survived the timeout: %q", result.Output)
 	}
+}
+
+func runDirListing(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "unreadable: " + err.Error()
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return strings.Join(names, ", ")
 }
 
 func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
