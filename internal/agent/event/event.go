@@ -36,6 +36,7 @@ const (
 	TypeAdvisorNote       = "advisor.note"
 	TypeThreadNamed       = "thread.named"
 	TypeThreadArchived    = "thread.archived"
+	TypeSandboxChosen     = "sandbox.chosen"
 )
 
 const MaxInlineBytes = 64 << 10
@@ -919,6 +920,27 @@ type ThreadArchived struct{ Archived bool }
 
 func (ThreadArchived) Type() string { return TypeThreadArchived }
 func (ThreadArchived) Validate() error {
+	return nil
+}
+
+const (
+	SandboxChoiceAccept    = "accept"
+	SandboxChoiceDangerous = "dangerously_accept"
+)
+
+type SandboxChosen struct{ RequestID, Choice, Cause string }
+
+func (SandboxChosen) Type() string { return TypeSandboxChosen }
+func (e SandboxChosen) Validate() error {
+	if err := required(map[string]string{"request_id": e.RequestID, "cause": e.Cause}); err != nil {
+		return err
+	}
+	if e.Choice != "accept" && e.Choice != "dangerously_accept" {
+		return fmt.Errorf("sandbox choice %q must be accept or dangerously_accept", e.Choice)
+	}
+	if len(e.Cause) > 1<<10 {
+		return errors.New("sandbox cause must be at most 1 KiB")
+	}
 	return nil
 }
 

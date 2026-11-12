@@ -187,6 +187,7 @@ func randomEvents(r *rand.Rand) []event.Event {
 		event.ScriptStarted{RunID: text(r), SourceBlob: blob(r), Entry: text(r), Args: raw(r), Seed: r.Uint64()},
 		randomScriptEffect(r),
 		randomScriptCompleted(r),
+		event.SandboxChosen{RequestID: text(r), Choice: pick(r, event.SandboxChoiceAccept, event.SandboxChoiceDangerous), Cause: text(r)},
 	}
 }
 

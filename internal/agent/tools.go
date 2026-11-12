@@ -405,7 +405,7 @@ func (w *worker) run(ctx context.Context, p *prepared) (tool.Result, error) {
 
 func (w *worker) env(v verdict) tool.Env {
 	mode := runner.SandboxWorkspaceWrite
-	if v.unsandboxed || w.settings.Sandbox == config.SandboxOff {
+	if v.unsandboxed || w.settings.Sandbox == config.SandboxOff || w.sandboxChoice() == event.SandboxChoiceDangerous {
 		mode = runner.SandboxOff
 	}
 	roots := append([]string{w.t.created.Cwd}, w.t.host.roots...)

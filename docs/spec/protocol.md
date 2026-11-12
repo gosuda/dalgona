@@ -158,6 +158,8 @@ A client MUST answer `{"answers": {}}` to dismiss the questions. Any other error
 
 The server MUST decline a question with the no-client result when every attached window cannot answer. The first answer MUST decide the question, and every subscriber receives `serverRequest/resolved` with a `resolution` of `answered`, `cancelled`, `interrupted` or `declined`.
 
+The sandbox choice uses `item/tool/requestUserInput` with the header `Sandbox`, the options `Accept` and `Dangerously accept`, and no Other row. The server sends a `warning` notification before the question. A cancelled question MUST decline the command, and the next command MUST ask again. After a choice is journaled, the server MUST send `dalgona/sandbox/chosen` with `threadId`, `cause`, and `choice`.
+
 ## Notifications and items
 
 `waitingOnUserInput` is an active flag that the server sets while a question is open. It carries no journal event.

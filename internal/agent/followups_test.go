@@ -127,6 +127,7 @@ func (r recordingRunner) Start(ctx context.Context, spec runner.ProcessSpec) err
 func withRecordingRunner(mu *sync.Mutex, modes *[]runner.SandboxMode) func(*harness) {
 	return func(h *harness) {
 		h.cfg.Config.Sandbox = config.SandboxWorkspaceWrite
+		h.cfg.SandboxCause = func() string { return "" }
 		h.cfg.Runner = func(ctx context.Context, id, name string) (runner.Runner, error) {
 			inner, err := h.runner(ctx, id, name)
 			return recordingRunner{Runner: inner, mu: mu, modes: modes}, err

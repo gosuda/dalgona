@@ -18,7 +18,7 @@ func eventMembers(e Event) ([]member, error) {
 		return stateMembers(e)
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
 		return scriptMembers(e)
-	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived:
+	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return metadataMembers(e)
 	default:
 		return nil, fmt.Errorf("event: unknown event type %q", e.Type())
@@ -88,6 +88,8 @@ func metadataMembers(e Event) ([]member, error) {
 		return []member{field("name", stringValue(value.Name))}, nil
 	case ThreadArchived:
 		return []member{field("archived", boolValue(value.Archived))}, nil
+	case SandboxChosen:
+		return []member{field("request_id", stringValue(value.RequestID)), field("choice", stringValue(value.Choice)), field("cause", stringValue(value.Cause))}, nil
 	default:
 		return nil, fmt.Errorf("event: %T does not match type %s", e, e.Type())
 	}

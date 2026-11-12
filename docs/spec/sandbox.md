@@ -33,7 +33,7 @@ The shim MUST apply this policy before it execs the command:
 landlock.V3.BestEffort().RestrictPaths(landlock.RODirs("/"), landlock.RWDirs(roots...), landlock.RWDirs("/dev"))
 ```
 
-`Available()` MUST report whether the Landlock ABI exists. When the go-landlock v0.11.2 ABI query reports no ABI, the command MUST run without Landlock. That case MUST NOT fail the command. Linux denies no socket path. On Linux the daemon refuses a sandboxed peer instead.
+`UnavailableCause()` MUST name the reason when the Landlock ABI is missing, and MUST return an empty string when it exists. When the go-landlock v0.11.2 ABI query reports no ABI, the command MUST run without Landlock. That case MUST NOT fail the command. Linux denies no socket path. On Linux the daemon refuses a sandboxed peer instead.
 
 ## macOS
 
@@ -47,7 +47,7 @@ The agent MUST add the daemon socket to the denied list for each `workspace-writ
 
 ## No harness sandbox
 
-Windows MUST always run without a harness sandbox. Linux MUST do the same when `Available()` is false. The decider state MUST carry `sandboxed=false`. The status band MUST show the `off` sandbox glyph in place of the sandbox setting. The runner MUST NOT raise an error for this fallback. It MUST NOT report a process with no harness sandbox as confined.
+Windows, Linux without Landlock, and macOS without `/usr/bin/sandbox-exec` have no harness sandbox. `runner.UnavailableCause()` names the reason. On a local-runner thread whose sandbox is `workspace-write`, the first `exec` call that would run confined MUST NOT start before the user chooses. The server sends `warning` and then the sandbox question. `Accept` MUST send every later exec call of the thread that reaches this choice to the human approval path, without session grants. `Dangerously accept` MUST run exec calls without confinement under the thread's approval mode. A plugin hook or a static rule decides an exec call before this choice. The choice does not apply to that call. The agent MUST journal the choice as `sandbox.chosen` and MUST reuse it. Recovery MUST NOT ask again. Without a subscribed client the call MUST be declined with `declined: no client could choose how to run without a sandbox (<cause>); set sandbox = \"off\" to run without one`. A sandbox set to `off`, and approval mode `yolo`, MUST never ask. `command/exec` is a user command and MUST NOT ask. The runner MUST NOT report an unsandboxed process as confined.
 
 ## Remote
 

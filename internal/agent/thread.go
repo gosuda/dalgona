@@ -33,17 +33,19 @@ type loadedSession struct {
 }
 
 type Thread struct {
-	host       *Host
-	id         string
-	created    event.SessionCreated
-	fixedTools []tool.Tool
-	toolsMu    sync.Mutex
-	toolset    *toolset
-	ext        Extension
-	system     string
-	runner     runner.Runner
-	snapshots  *snapshot.Store
-	release    func() error
+	host           *Host
+	id             string
+	created        event.SessionCreated
+	fixedTools     []tool.Tool
+	toolsMu        sync.Mutex
+	sandboxMu      sync.Mutex
+	sandboxPending *sandboxAsk
+	toolset        *toolset
+	ext            Extension
+	system         string
+	runner         runner.Runner
+	snapshots      *snapshot.Store
+	release        func() error
 
 	children  chan struct{}
 	inbox     chan func(*actor)

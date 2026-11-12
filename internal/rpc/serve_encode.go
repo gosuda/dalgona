@@ -97,6 +97,10 @@ func (r ThreadStartResponse) write(o *out) {
 		o.key("tokenUsage")
 		r.TokenUsage.write(o)
 	}
+	if r.SandboxFallback != nil {
+		o.key("sandboxFallback")
+		r.SandboxFallback.write(o)
+	}
 	o.key("thread")
 	r.Thread.write(o)
 	o.close()

@@ -300,3 +300,30 @@ func (n RetryWaitNotification) write(o *out) {
 	o.token(jsontext.Int(n.RemainingMS))
 	o.close()
 }
+
+func (n WarningNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("message", n.Message)
+	o.close()
+}
+
+func (n SandboxChosenNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("cause", n.Cause)
+	o.str("choice", n.Choice)
+	o.close()
+}
+
+func (f SandboxFallback) write(o *out) {
+	o.open()
+	o.str("cause", f.Cause)
+	o.key("choice")
+	if f.Choice == nil {
+		o.null()
+	} else {
+		o.text(*f.Choice)
+	}
+	o.close()
+}

@@ -20,6 +20,7 @@ A field MUST NOT contain both an inline value and a blob reference. `tool.comple
 |---|---|---|
 |`session.created`|`id`, `cwd`, `model`, `approval`, `sandbox`, `runner`|`parent`, `fork_of`, `effort`, `instructions_blob`, `advisor`, `created_at`. Approval is `auto`, `yolo`, or `ask`. Sandbox is `workspace-write` or `off`. `effort` is `low`, `medium`, `high`, `xhigh`, or `max` and is the thread default for turns without their own effort. `advisor` names an advisor child thread and MUST come with `parent`. `created_at` is an RFC 3339 timestamp that the encoder writes in UTC|
 |`runner.bound`|`runner`, `service`, `box_id`, `baseline`|None|
+|`sandbox.chosen`|`request_id`, `choice`, `cause`|None. `choice` is `accept` or `dangerously_accept`. `cause` is non-empty and at most 1 KiB. The newest event sets the choice. The event MAY appear inside or outside a turn.|
 |`turn.started`|`turn_id`|`started_at`, an RFC 3339 UTC timestamp that the server stamps at append|
 |`turn.completed`|`turn_id`, `status`|`error`. Status is `completed`, `interrupted`, or `failed`. `completed_at`, an RFC 3339 UTC timestamp that the server stamps at append|
 |`turn.judged`|`turn_id`, `by`, `verdict`, `paths`, `elapsed_ms`|`scores`, `flags`, `spoken`, `feedback`, `skipped`, `truncated`, `error`. Verdict is `clean`, `uncertain`, `flagged`, or `error`. `error` MUST be present for an `error` verdict and absent otherwise. `paths` holds at most 64 masked paths. `scores` names `sound` and `incomplete`. `feedback` is true exactly when `spoken` is not empty. Each `skipped` path is in `paths`
@@ -71,6 +72,7 @@ The state MUST track:
 - delivered advisor notes, keyed by advisor, `review_seq`, and note text.
 - edit calls judged in the open turn.
 - turn judged.
+- the newest sandbox choice of the thread, from `sandbox.chosen`.
 
 The fold MUST set `Preview` to the first 80 Unicode characters of the first user message of kind `prompt` with inline text. Until `Preview` is set, the fold sets `PreviewBlob` to the text blob of the first user message of kind `prompt` that has one.
 

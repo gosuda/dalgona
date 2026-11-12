@@ -577,7 +577,7 @@ func (c *wireClient) checkResponse(method string, m message) {
 }
 
 func effectiveWorkspaceWriteType() string {
-	if runner.Available() {
+	if runner.UnavailableCause() == "" {
 		return "workspaceWrite"
 	}
 	return "dangerFullAccess"

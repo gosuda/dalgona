@@ -30,7 +30,6 @@ type ToolState struct {
 	Args     jsontext.Value
 	ArgsBlob *BlobRef
 }
-
 type ApprovalState struct {
 	CallID      string
 	Summary     string
@@ -86,6 +85,7 @@ type State struct {
 	Notes           map[string]uint64
 	Name            string
 	Archived        bool
+	SandboxChoice   SandboxChosen
 }
 type modelMark struct {
 	seq    uint64
@@ -187,7 +187,7 @@ func foldEvent(s *State, seq uint64, e Event) error {
 		return foldStateEvent(s, seq, e)
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
 		return foldScriptEvent(s, e)
-	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived:
+	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return foldMetadata(s, seq, e)
 	default:
 		return fmt.Errorf("event: fold: unknown type %q", e.Type())
@@ -773,6 +773,9 @@ func foldMetadata(s *State, seq uint64, e Event) error {
 		return nil
 	case ThreadArchived:
 		s.Archived = value.Archived
+		return nil
+	case SandboxChosen:
+		s.SandboxChoice = value
 		return nil
 	default:
 		return foldAdvisorNote(s, seq, e)

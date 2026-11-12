@@ -51,6 +51,7 @@ type Question struct {
 	Text        string
 	Options     []Option
 	MultiSelect bool
+	NoOther     bool
 }
 
 type Outcome int

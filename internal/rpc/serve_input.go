@@ -156,7 +156,7 @@ func userInputParams(threadID, turnID string, prompt agent.QuestionPrompt) ToolR
 	for i, question := range prompt.Questions {
 		item := ToolRequestUserInputQuestion{
 			ID: asktool.QuestionID(i), Header: question.Header, Question: question.Text,
-			IsOther: len(question.Options) > 0, MultiSelect: question.MultiSelect,
+			IsOther: len(question.Options) > 0 && !question.NoOther, MultiSelect: question.MultiSelect,
 		}
 		for _, option := range question.Options {
 			item.Options = append(item.Options, ToolRequestUserInputOption{

@@ -11,7 +11,6 @@ import (
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/agent/rules"
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -100,6 +99,9 @@ func (w *worker) decide(ctx context.Context, gc gateCall, requestID string) verd
 		return v
 	}
 	if v, ok := staticRule(gc); ok {
+		return v
+	}
+	if v, ok := w.sandboxFallback(ctx, gc, requestID); ok {
 		return v
 	}
 	if approval == config.ApprovalAsk {
@@ -225,7 +227,7 @@ func (w *worker) action(gc gateCall) Action {
 }
 
 func (w *worker) sandboxed(gc gateCall) bool {
-	return !gc.escalate && w.settings.Sandbox != config.SandboxOff && runner.Available()
+	return !gc.escalate && w.settings.Sandbox != config.SandboxOff && w.t.host.cfg.SandboxCause() == "" && w.sandboxChoice() != event.SandboxChoiceDangerous
 }
 
 func (w *worker) task() string {
@@ -256,6 +258,17 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 	if prefix := w.matchingGrant(gc); prefix != "" {
 		return accept("grant:" + prefix)
 	}
+	return w.askUser(ctx, gc, requestID)
+}
+
+func (w *worker) humanSkippingGrants(ctx context.Context, gc gateCall, requestID string) verdict {
+	if w.t.created.Advisor != "" {
+		return w.automated(ctx, gc)
+	}
+	return w.askUser(ctx, gc, requestID)
+}
+
+func (w *worker) askUser(ctx context.Context, gc gateCall, requestID string) verdict {
 	replies := make(chan Reply, 1)
 	prompt, ok := w.approvalPrompt(gc, requestID)
 	if !ok {

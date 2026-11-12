@@ -79,6 +79,7 @@ var eventHandlers = map[string]eventHandler{
 	event.TypeBranch:            (*tracker).branch,
 	event.TypeToolJudged:        (*tracker).toolJudged,
 	event.TypeTurnJudged:        (*tracker).turnJudged,
+	event.TypeSandboxChosen:     (*tracker).sandboxChosen,
 }
 
 func (t *tracker) apply(seq uint64, ev event.Event) {
@@ -260,6 +261,17 @@ func (t *tracker) execOutput(callID, delta string) {
 func (t *tracker) retryWait(turnID string, wait time.Duration) {
 	t.sink.notify("dalgona/retry/wait", func() writer {
 		return RetryWaitNotification{ThreadID: t.threadID, TurnID: turnID, RemainingMS: wait.Milliseconds()}
+	})
+}
+
+func (t *tracker) sandboxChosen(_ uint64, ev event.Event) {
+	e, _ := ev.(event.SandboxChosen)
+	choice := "accept"
+	if e.Choice == event.SandboxChoiceDangerous {
+		choice = "dangerouslyAccept"
+	}
+	t.sink.notify("dalgona/sandbox/chosen", func() writer {
+		return SandboxChosenNotification{ThreadID: t.threadID, Cause: e.Cause, Choice: choice}
 	})
 }
 

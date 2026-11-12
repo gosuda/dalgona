@@ -9,7 +9,7 @@ import (
 )
 
 func TestRemote_ignoresHarnessSandbox(t *testing.T) {
-	if !Available() {
+	if UnavailableCause() != "" {
 		t.Skip("Landlock ABI is 0")
 	}
 	dir := t.TempDir()

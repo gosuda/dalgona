@@ -74,7 +74,7 @@ func swapSocketCase(t *testing.T, sock string) (string, bool) {
 }
 
 func TestLocal_darwinDeniesDaemonSocket(t *testing.T) {
-	if !Available() {
+	if UnavailableCause() != "" {
 		t.Skip("sandbox-exec is missing")
 	}
 	dir := t.TempDir()

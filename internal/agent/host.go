@@ -46,11 +46,19 @@ type Host struct {
 	reviewMask    func(string) (string, error)
 }
 
+func sandboxCauseOf(cause func() string) func() string {
+	if cause == nil {
+		return runner.UnavailableCause
+	}
+	return cause
+}
+
 func NewHost(cfg HostConfig) (*Host, error) {
 	if cfg.Journal == nil || cfg.Providers == nil || cfg.Tools == nil || cfg.Runner == nil {
 		return nil, errors.New("agent: host needs a journal, providers, a tool set, and a runner factory")
 	}
 	cfg.Product = cmp.Or(cfg.Product, cfg.Config.Product, config.ProductDalgona)
+	cfg.SandboxCause = sandboxCauseOf(cfg.SandboxCause)
 	h := &Host{
 		cfg: cfg, live: cfg.Config, journal: cfg.Journal, log: cmp.Or(cfg.Logger, slog.Default()), clock: cfg.Clock,
 		threads: make(map[string]*Thread), sessions: make(map[string]ThreadInfo),

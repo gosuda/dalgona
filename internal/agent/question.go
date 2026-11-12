@@ -76,7 +76,7 @@ func (h *Host) maskQuestions(questions []asktool.Question) ([]asktool.Question, 
 	}
 	out := make([]asktool.Question, 0, len(questions))
 	for _, question := range questions {
-		masked := asktool.Question{Header: mask(question.Header), Text: mask(question.Text), MultiSelect: question.MultiSelect}
+		masked := asktool.Question{Header: mask(question.Header), Text: mask(question.Text), MultiSelect: question.MultiSelect, NoOther: question.NoOther}
 		for _, option := range question.Options {
 			masked.Options = append(masked.Options, asktool.Option{
 				Label: mask(option.Label), Description: mask(option.Description), Preview: mask(option.Preview),

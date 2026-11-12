@@ -197,14 +197,30 @@ func (s *server) session(thread *agent.Thread, snap snapshot) (ThreadStartRespon
 	if resolved, resolveErr := thread.EffectiveSandbox(); resolveErr == nil {
 		effective = resolved
 	}
+	cause, choice, err := thread.SandboxFallback()
+	if err != nil {
+		return ThreadStartResponse{}, hostError(err, thread.ID(), "")
+	}
 	return ThreadStartResponse{
 		ApprovalPolicy: policyName(string(current.Approval)), ApprovalsReviewer: "user",
 		Cwd: snap.created.Cwd, Model: current.Model, ModelProvider: provider(current.Model),
 		Sandbox:         sandboxPolicy(string(effective)),
 		ReasoningEffort: cmp.Or(effortName(current.Effort), effortName(s.host.Config().Reasoning)),
 		TokenUsage:      snap.usage,
+		SandboxFallback: sandboxFallbackOf(cause, choice),
 		Thread:          s.threadObject(info, threadStatus(thread), snap.turns),
 	}, nil
+}
+
+func sandboxFallbackOf(cause, choice string) *SandboxFallback {
+	if cause == "" {
+		return nil
+	}
+	fallback := SandboxFallback{Cause: cause}
+	if choice != "" {
+		fallback.Choice = &choice
+	}
+	return &fallback
 }
 
 func (s *server) threadStart(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {

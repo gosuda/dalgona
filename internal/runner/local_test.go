@@ -287,7 +287,7 @@ func startTestProcess(t *testing.T, local *Local, spec ProcessSpec) {
 }
 
 func TestLocal_sandboxConfinesWrites(t *testing.T) {
-	if !Available() {
+	if UnavailableCause() != "" {
 		t.Skip("landlock ABI is 0")
 	}
 	dir := t.TempDir()
@@ -316,7 +316,7 @@ func TestLocal_sandboxConfinesWrites(t *testing.T) {
 }
 
 func TestLocal_sandboxDeniesWriteThroughSymlink(t *testing.T) {
-	if !Available() {
+	if UnavailableCause() != "" {
 		t.Skip("landlock ABI is 0")
 	}
 	fixture := setupSymlinkEscape(t)

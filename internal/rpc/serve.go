@@ -353,19 +353,29 @@ func (s *server) drain(ctx context.Context, w *watch, ch <-chan agent.Update) {
 		switch update.Kind {
 		case agent.UpdateEvent:
 			s.applyUpdate(w, update)
-		case agent.UpdateTextDelta:
-			w.tracker.agentDelta(update.ItemID, update.Delta)
-		case agent.UpdateReasoningDelta:
-			w.tracker.reasoningDelta(update.ItemID, update.Delta)
 		case agent.UpdateApproval:
 			s.ask(ctx, w, ch, update)
-		case agent.UpdateExecOutput:
-			w.tracker.execOutput(update.CallID, update.Delta)
-		case agent.UpdateRetryWait:
-			w.tracker.retryWait(update.Turn, update.Wait)
 		case agent.UpdateQuestion:
 			s.question(ctx, w, ch, update)
+		case agent.UpdateWarning:
+			s.send("warning", WarningNotification{ThreadID: update.Thread, Message: update.Warning})
+		case agent.UpdateTextDelta, agent.UpdateReasoningDelta, agent.UpdateExecOutput, agent.UpdateRetryWait:
+			w.trackDelta(update)
 		}
+	}
+}
+
+func (w *watch) trackDelta(update agent.Update) {
+	switch update.Kind {
+	case agent.UpdateTextDelta:
+		w.tracker.agentDelta(update.ItemID, update.Delta)
+	case agent.UpdateReasoningDelta:
+		w.tracker.reasoningDelta(update.ItemID, update.Delta)
+	case agent.UpdateExecOutput:
+		w.tracker.execOutput(update.CallID, update.Delta)
+	case agent.UpdateRetryWait:
+		w.tracker.retryWait(update.Turn, update.Wait)
+	case agent.UpdateEvent, agent.UpdateApproval, agent.UpdateQuestion, agent.UpdateWarning:
 	}
 }
 

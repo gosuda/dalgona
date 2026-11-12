@@ -15,6 +15,7 @@ var dalgonaNotifications = []string{
 	"dalgona/retry/wait",
 	"dalgona/tool/judged",
 	"dalgona/turn/judged",
+	"dalgona/sandbox/chosen",
 }
 
 func dalgonaSchemaName(method, suffix string) string {

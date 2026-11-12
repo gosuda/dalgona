@@ -90,6 +90,7 @@ type HostConfig struct {
 	Logger           *slog.Logger
 	Skills           SkillSet
 	MCPStatus        func(ctx context.Context, cwd string) []MCPServerStatus
+	SandboxCause     func() string
 	ToolNotes        []string
 	ProviderIDs      []string
 }
@@ -157,6 +158,7 @@ const (
 	UpdateExecOutput
 	UpdateRetryWait
 	UpdateQuestion
+	UpdateWarning
 )
 
 type ApprovalPrompt struct {
@@ -202,6 +204,7 @@ type Update struct {
 	Approval ApprovalPrompt
 	Turn     string
 	Wait     time.Duration
+	Warning  string
 	Question QuestionPrompt
 }
 

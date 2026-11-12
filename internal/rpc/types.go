@@ -123,6 +123,7 @@ type (
 		Sandbox           SandboxPolicy     `json:"sandbox"`
 		ReasoningEffort   string            `json:"reasoningEffort,omitzero"`
 		TokenUsage        *ThreadTokenUsage `json:"tokenUsage,omitzero"`
+		SandboxFallback   *SandboxFallback  `json:"sandboxFallback,omitzero"`
 		Thread            Thread            `json:"thread"`
 	}
 	ThreadResumeResponse = ThreadStartResponse
@@ -413,6 +414,19 @@ type (
 		ThreadID    string `json:"threadId"`
 		TurnID      string `json:"turnId"`
 		RemainingMS int64  `json:"remainingMs"`
+	}
+	WarningNotification struct {
+		ThreadID string `json:"threadId"`
+		Message  string `json:"message"`
+	}
+	SandboxChosenNotification struct {
+		ThreadID string `json:"threadId"`
+		Cause    string `json:"cause"`
+		Choice   string `json:"choice"`
+	}
+	SandboxFallback struct {
+		Cause  string  `json:"cause"`
+		Choice *string `json:"choice"`
 	}
 	CommandExecutionRequestApprovalParams struct {
 		ThreadID    string `json:"threadId"`
