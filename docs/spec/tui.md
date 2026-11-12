@@ -98,6 +98,8 @@ The client cannot see a failed write to the terminal. A write that fails is ther
 | `/advisor status` | `dalgona/advisor/status`. It writes one notice line per advisor with its name, status, model, notes, and token usage |
 | `/advisor reset` | `dalgona/advisor/reset` |
 
+While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, and `/revert` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
+
 `turn/steer` sends `expectedTurnId` set to the active turn.
 
 When the queue holds 32 follow-ups, Alt+Enter MUST show `follow-up queue is full (32); wait for the active turn or press Esc`. After a follow-up is queued, the notice MUST show `queued follow-up <n> of 32`. An unknown slash command MUST show `unknown command; use /model /resume /new /compact /login /tree /revert /fork /advisor`. After `/advisor reset`, the notice MUST show `advisor reset; it reviews the current branch at the next turn`.

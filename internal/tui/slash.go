@@ -26,7 +26,12 @@ func (m *model) executeSlash(input string) tea.Cmd {
 	}
 }
 
+var busyThreadCommands = map[string]bool{"new": true, "compact": true, "tree": true, "revert": true, "fork": true}
+
 func (m *model) executeThreadCommand(name string) tea.Cmd {
+	if busyThreadCommands[name] && m.busyRefusal(name) {
+		return nil
+	}
 	switch name {
 	case "new":
 		return m.newThread()
@@ -76,6 +81,9 @@ func (m *model) setModel(id string) tea.Cmd {
 }
 
 func (m *model) resumeCommand(argument string) tea.Cmd {
+	if m.busyRefusal("resume") {
+		return nil
+	}
 	if argument != "" {
 		return m.resumeThread(argument)
 	}
@@ -114,4 +122,26 @@ func (m *model) treeCommand(op string) tea.Cmd {
 	params := rpc.ThreadTreeParams{ThreadID: m.thread.id}
 	result := new(rpc.ThreadTreeResponse)
 	return m.call(op, "dalgona/thread/tree", params, result, "")
+}
+
+func (m *model) busyRefusal(name string) bool {
+	word := busyWord(m.thread.state)
+	if word == "" {
+		return false
+	}
+	m.noticef("/%s is unavailable while a turn is %s; wait for it to finish or interrupt it first", name, word)
+	return true
+}
+
+func busyWord(state string) string {
+	switch state {
+	case stateRunning:
+		return "working"
+	case stateAwaitingApproval:
+		return "waiting for approval"
+	case "awaiting input":
+		return "waiting for an answer"
+	default:
+		return ""
+	}
 }
