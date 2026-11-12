@@ -1,6 +1,16 @@
 package ratchet
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
+
+type goal struct {
+	Target     string            `json:"target"`
+	Direction  string            `json:"direction"`
+	Hold       []string          `json:"hold"`
+	Directions map[string]string `json:"directions"`
+}
 
 type stopRule struct {
 	Plateau int `json:"plateau"`
@@ -14,10 +24,28 @@ type round struct {
 	Reruns   int    `json:"reruns"`
 }
 
+type approval struct {
+	SHA string    `json:"sha"`
+	At  time.Time `json:"at"`
+}
+
 type state struct {
-	Stop       stopRule `json:"stop"`
-	Rounds     []round  `json:"rounds"`
-	FlatRounds int      `json:"flat_rounds"`
+	Flow         string              `json:"flow"`
+	CasesPaths   []string            `json:"cases_paths"`
+	HarnessPaths []string            `json:"harness_paths"`
+	ChangePaths  []string            `json:"change_paths"`
+	OffLimits    []string            `json:"off_limits"`
+	Goal         goal                `json:"goal"`
+	Reps         int                 `json:"reps"`
+	Command      string              `json:"command"`
+	TrainIDs     []string            `json:"train_ids"`
+	TestIDs      []string            `json:"test_ids"`
+	SplitSeed    uint64              `json:"split_seed"`
+	TestFraction float64             `json:"test_fraction"`
+	Approvals    map[string]approval `json:"approvals"`
+	Stop         stopRule            `json:"stop"`
+	Rounds       []round             `json:"rounds"`
+	FlatRounds   int                 `json:"flat_rounds"`
 }
 
 func (s *state) advance(decision string) {
@@ -61,4 +89,13 @@ func (s *state) gatedRounds() int {
 		}
 	}
 	return count
+}
+
+func (s *state) hasBaseline() bool {
+	for _, r := range s.Rounds {
+		if r.Variant == "baseline" {
+			return true
+		}
+	}
+	return false
 }

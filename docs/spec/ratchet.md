@@ -48,3 +48,68 @@ A rerun round MUST leave the count of reverts since the last keep unchanged.
 
 The flow MUST NOT stop while its last round is a rerun.
 
+## Flow directory
+
+A flow MUST keep its state in `.dalgona/ratchet/<flow>/state.json` under the workspace.
+
+A flow name MUST match `^[a-z0-9][a-z0-9_-]{0,63}$`.
+
+The host MUST read and write flow files through an `os.Root` opened at the workspace.
+
+The host MUST write `state.json` through a temporary file and a rename.
+
+A case, harness, change, or off-limits path MUST stay outside `.dalgona/ratchet`.
+
+The gate MUST detect a changed case file, harness file, or plan. The gate MUST NOT protect `state.json` against a change by the model.
+
+## Setup
+
+`init` MUST refuse an empty list of case, harness, or change paths.
+
+Every case, harness, and change path MUST name an existing file or directory inside the workspace.
+
+An off-limits path MUST stay inside the workspace.
+
+A change path MUST NOT overlap a case, harness, or off-limits path. Two paths overlap when one equals the other or names a directory that contains it.
+
+`plan` MUST refuse a hold list of more than 8 metrics, or a hold list that includes the target.
+
+`plan` MUST refuse reps outside 1 to 20, and MUST refuse fewer reps after a baseline round.
+
+`plan` MUST refuse a plateau outside 2 to 10, or a round limit outside 1 to 50.
+
+A runner command MUST contain `{variant}`.
+
+A metric MUST default to `lower` for `latency_s` and `cost_usd`, and to `higher` otherwise.
+
+`plan` MUST default reps to 2, plateau to 3, and rounds to 10 when the flow has no value.
+
+## Split
+
+`split` MUST refuse fewer than 4 cases, and MUST refuse a test fraction outside 0.1 to 0.9.
+
+`split` MUST refuse a case id that does not match `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`.
+
+`split` MUST refuse a call after the baseline round is gated.
+
+`split` MUST assign each stratum to test by rounding its size times the test fraction.
+
+`split` MUST move one case when the train side or the test side is empty.
+
+The same seed and strata MUST give the same train and test ids.
+
+## Approvals
+
+An approval MUST bind the digest of its stage at the time of approval.
+
+The inputs digest MUST cover every case path, and the grader digest MUST cover every harness path.
+
+The plan digest MUST cover the goal, the reps, the stop rule, the command, the change and off-limits paths, and the split.
+
+A directory digest MUST list each regular file by its slash path and its content.
+
+A digest MUST refuse a directory that holds more than 10000 files.
+
+A missing path MUST contribute its name to the digest, marked as missing.
+
+An approval MUST report `stale` when its digest differs from the current digest, and `missing` when none exists.
