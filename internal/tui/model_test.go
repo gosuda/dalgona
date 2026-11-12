@@ -577,6 +577,33 @@ func TestNewThreadShowsServerModel(t *testing.T) {
 	assertContains(t, dockText(m), "local/qwen-test")
 }
 
+func TestTurnStartCarriesPickedModel(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.thread.id = "t1"
+	m.thread.modelName = "local/qwen-small"
+	runCommand(t, m, m.sendPrompt("hi", nil), "send produced no command")
+	params, ok := caller.calls[0].params.(rpc.TurnStartParams)
+	if !ok || params.Model != "local/qwen-small" {
+		t.Fatalf("turn/start params = %#v, want model local/qwen-small", caller.calls[0].params)
+	}
+}
+
+func TestFollowupCarriesPickedModel(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.thread.id = "t1"
+	m.thread.modelName = "local/qwen-small"
+	m.queue = []string{"then this"}
+	runCommand(t, m, m.startQueuedFollowup(), "follow-up produced no command")
+	params, ok := caller.calls[0].params.(rpc.TurnStartParams)
+	if !ok || params.Model != "local/qwen-small" {
+		t.Fatalf("turn/start params = %#v, want model local/qwen-small", caller.calls[0].params)
+	}
+}
+
 func TestResumedThreadShowsServerModel(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
