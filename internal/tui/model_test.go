@@ -254,7 +254,8 @@ func TestModelSlashCommands(t *testing.T) {
 			caller := new(fakeCaller)
 			m := newModel(caller, Options{}, nil)
 			m.thread.id = "t1"
-			command := m.executeSlash(test.input)
+			name, argument, _ := parseSlash(test.input)
+			command := m.executeSlash(name, argument)
 			if command == nil {
 				t.Fatal("slash command produced no RPC command")
 			}

@@ -97,12 +97,13 @@ The client cannot see a failed write to the terminal. A write that fails is ther
 | `/advisor` | `dalgona/advisor/status`, then `dalgona/advisor/set` with `enabled` true when no advisor is active and false otherwise. The notice says `advisor on` or `advisor off` |
 | `/advisor status` | `dalgona/advisor/status`. It writes one notice line per advisor with its name, status, model, notes, and token usage |
 | `/advisor reset` | `dalgona/advisor/reset` |
+| `//text` | Sends `/text` as a prompt. A first token that holds a second `/`, such as a path, sends the whole text as a prompt |
 
 While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, and `/revert` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
 
 `turn/steer` sends `expectedTurnId` set to the active turn.
 
-When the queue holds 32 follow-ups, Alt+Enter MUST show `follow-up queue is full (32); wait for the active turn or press Esc`. After a follow-up is queued, the notice MUST show `queued follow-up <n> of 32`. An unknown slash command MUST show `unknown command; use /model /resume /new /compact /login /tree /revert /fork /advisor`. After `/advisor reset`, the notice MUST show `advisor reset; it reviews the current branch at the next turn`.
+When the queue holds 32 follow-ups, Alt+Enter MUST show `follow-up queue is full (32); wait for the active turn or press Esc`. After a follow-up is queued, the notice MUST show `queued follow-up <n> of 32`. An unknown slash command MUST stay in the editor and MUST show `unknown command /<name>; start with // to send it as a prompt`. After `/advisor reset`, the notice MUST show `advisor reset; it reviews the current branch at the next turn`.
 
 A follow-up starts after `turn/completed` only when the turn ends idle. After an interrupted or failed turn, the queue MUST stay held and the notice MUST say how to release it. After a revert, a leaf change, or `thread/reverted`, the TUI MUST show `files changed by later turns are not reverted`.
 

@@ -28,7 +28,7 @@ func assertRefused(t *testing.T, name, state, word string) {
 	m := newModel(caller, Options{}, nil)
 	m.thread.id = "t1"
 	m.thread.state = state
-	if command := m.executeSlash("/" + name); command != nil {
+	if command := m.executeSlash(name, ""); command != nil {
 		t.Fatalf("/%s produced an RPC command while a turn is %s", name, word)
 	}
 	if len(caller.calls) != 0 {
@@ -45,7 +45,7 @@ func TestThreadCommandsAllowedWhenIdle(t *testing.T) {
 	caller := new(fakeCaller)
 	m := newModel(caller, Options{}, nil)
 	m.thread.id = "t1"
-	if command := m.executeSlash("/new"); command == nil {
+	if command := m.executeSlash("new", ""); command == nil {
 		t.Fatal("/new produced no RPC command while idle")
 	}
 	if m.notice != "" {

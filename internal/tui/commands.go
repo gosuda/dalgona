@@ -120,7 +120,17 @@ func (m *model) submitPrompt() tea.Cmd {
 	}
 	m.input.composer.SetValue("")
 	if strings.HasPrefix(text, "/") {
-		return m.executeSlash(text)
+		name, arg, kind := parseSlash(text)
+		switch kind {
+		case slashCommand:
+			return m.executeSlash(name, arg)
+		case slashUnknown:
+			m.input.composer.SetValue(text)
+			m.noticef("unknown command /%s; start with // to send it as a prompt", name)
+			return nil
+		case slashPrompt:
+			text = arg
+		}
 	}
 	if m.thread.id == "" {
 		m.noticef("thread is not ready; wait for startup or use /new to retry")

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -9,9 +10,7 @@ import (
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 
-func (m *model) executeSlash(input string) tea.Cmd {
-	name, argument, _ := strings.Cut(strings.TrimPrefix(input, "/"), " ")
-	argument = strings.TrimSpace(argument)
+func (m *model) executeSlash(name, argument string) tea.Cmd {
 	switch name {
 	case "model":
 		return m.modelCommand(argument)
@@ -47,7 +46,6 @@ func (m *model) executeThreadCommand(name string) tea.Cmd {
 		result := new(rpc.ThreadForkResponse)
 		return m.call("fork", "thread/fork", params, result, "")
 	default:
-		m.noticef("unknown command; use /model /resume /new /compact /login /tree /revert /fork /advisor")
 		return nil
 	}
 }
@@ -143,5 +141,46 @@ func busyWord(state string) string {
 		return "waiting for an answer"
 	default:
 		return ""
+	}
+}
+
+type command struct {
+	name    string
+	args    string
+	summary string
+}
+
+var commands = []command{
+	{name: "model", args: "[id]", summary: "Choose a model, or set one by id"},
+	{name: "resume", args: "[id]", summary: "Open an earlier thread, or pick one from the list"},
+	{name: "new", summary: "Start a new thread"},
+	{name: "compact", summary: "Compact the context of this thread"},
+	{name: "login", args: "[provider]", summary: "Sign in to a provider"},
+	{name: "tree", summary: "Show the turns of this thread and move to one"},
+	{name: "revert", summary: "Revert this thread to before a turn"},
+	{name: "fork", summary: "Fork this thread at the last turn"},
+	{name: "advisor", args: "[status|reset]", summary: "Turn the advisor on or off, show its status, or reset it"},
+}
+
+type slashKind int
+
+const (
+	slashCommand slashKind = iota
+	slashPrompt
+	slashUnknown
+)
+
+func parseSlash(text string) (name, arg string, kind slashKind) {
+	if prompt, ok := strings.CutPrefix(text, "//"); ok {
+		return "", "/" + prompt, slashPrompt
+	}
+	name, arg, _ = strings.Cut(strings.TrimPrefix(text, "/"), " ")
+	switch {
+	case strings.Contains(name, "/"):
+		return "", text, slashPrompt
+	case slices.ContainsFunc(commands, func(c command) bool { return c.name == name }):
+		return name, strings.TrimSpace(arg), slashCommand
+	default:
+		return name, "", slashUnknown
 	}
 }
