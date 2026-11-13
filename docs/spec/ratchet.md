@@ -122,6 +122,8 @@ A row MUST carry `case_id`, `rep`, and `status`. The `status` MUST be `ok` or `t
 
 A row MUST carry `grade`, which MUST be a number, a boolean, or an object of numbers and booleans.
 
+A truncated row MUST satisfy the same grade contract, but its grade MUST NOT contribute quality metrics or replace numeric runtime metrics.
+
 A failed attempt MUST go to `errors.jsonl` with `case_id`, `rep`, and a non-empty `class`.
 
 A train case MAY write a trace named `traces/<case>_rep<k>.json`. A test case MUST NOT write a trace.

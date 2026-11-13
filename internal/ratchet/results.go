@@ -185,10 +185,13 @@ func decodeRow(line []byte) (resultRow, error) {
 		return resultRow{}, err
 	}
 	metrics := numberMetrics(fields)
-	if status != "truncated" {
-		if err = addGrade(metrics, fields); err != nil {
-			return resultRow{}, err
-		}
+	gradeMetrics := metrics
+	if status == "truncated" {
+		delete(metrics, "grade")
+		gradeMetrics = nil
+	}
+	if err = addGrade(gradeMetrics, fields); err != nil {
+		return resultRow{}, err
 	}
 	return resultRow{CaseID: caseID, Rep: rep, Status: status, Raw: bytes.Clone(line), Fields: fields, Metrics: metrics}, nil
 }
@@ -279,14 +282,18 @@ func addGrade(metrics map[string]float64, fields map[string]jsontext.Value) erro
 		if !ok {
 			return errors.New(gradeShape)
 		}
-		metrics["score"] = n
+		if metrics != nil {
+			metrics["score"] = n
+		}
 		return nil
 	}
 	members, err := gradeObject(grade)
 	if err != nil {
 		return err
 	}
-	maps.Copy(metrics, members)
+	if metrics != nil {
+		maps.Copy(metrics, members)
+	}
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package ratchet
 
 import (
+	"bytes"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -167,7 +168,18 @@ func gateWithFirstRow(fx *fixture, first string) error {
 	rows := rowsFor(0, allGrade(true), noExtra)
 	rows[0] = first
 	fx.writeResults("v1", rows...)
-	_, err := fx.gate("v1")
+	before, err := fx.f.root.ReadFile(filepath.Join(fx.f.dir, "state.json"))
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	_, err = fx.gate("v1")
+	after, readErr := fx.f.root.ReadFile(filepath.Join(fx.f.dir, "state.json"))
+	if readErr != nil {
+		fx.t.Fatal(readErr)
+	}
+	if !bytes.Equal(before, after) {
+		fx.t.Fatal("refused gate changed state.json")
+	}
 	return err
 }
 
@@ -180,6 +192,63 @@ func allGrade(v bool) func(string) bool {
 func rerunGrade(id string) bool { return id != "d" }
 
 func trainTrue(id string) bool { return id < "e" }
+
+func TestGateTruncatedGradeExcludesQualityAndKeepsRuntimeMetrics(t *testing.T) {
+	t.Parallel()
+	for _, grade := range []string{`false`, `0`, `{"score":false,"latency_s":99}`} {
+		t.Run(grade, func(t *testing.T) {
+			t.Parallel()
+			fx := newFixture(t, "latency_s")
+			extra := func(string) string { return `,"latency_s":1` }
+			fx.baseline(rowsFor(0, allGrade(false), extra))
+			fx.changeP("two\n")
+			fx.check("v1")
+			rows := rowsFor(0, allGrade(true), extra)
+			rows[0] = fmt.Sprintf(`{"case_id":"a","rep":0,"status":"truncated","grade":%s,"latency_s":1}`, grade)
+			fx.writeResults("v1", rows...)
+			result := fx.mustGate("v1")
+			if score := result.Train["score"]; score.N != 3 || score.Mean == nil || *score.Mean != 1 {
+				t.Fatalf("train score = %+v, want 3 cases with mean 1", score)
+			}
+			if latency := result.Train["latency_s"]; latency.N != 4 || latency.Mean == nil || *latency.Mean != 1 {
+				t.Fatalf("train latency = %+v, want 4 cases with mean 1", latency)
+			}
+			if !slices.Contains(result.Warnings, "1 truncated rows excluded from quality means") {
+				t.Fatalf("warnings = %v, want truncated quality exclusion", result.Warnings)
+			}
+		})
+	}
+}
+
+func TestGateTruncatedNumericGradeExcludesGradeMetric(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t, "grade", "latency_s")
+	baseline := make([]string, len(fixtureIDs))
+	rows := make([]string, len(fixtureIDs))
+	for i, id := range fixtureIDs {
+		baseline[i] = fmt.Sprintf(`{"case_id":%q,"rep":0,"status":"ok","grade":0,"latency_s":1}`, id)
+		rows[i] = fmt.Sprintf(`{"case_id":%q,"rep":0,"status":"ok","grade":1,"latency_s":1}`, id)
+	}
+	fx.baseline(baseline)
+	fx.changeP("two\n")
+	fx.check("v1")
+	rows[0] = `{"case_id":"a","rep":0,"status":"truncated","grade":0,"latency_s":1}`
+	fx.writeResults("v1", rows...)
+	result := fx.mustGate("v1")
+	for _, check := range []struct {
+		name string
+		got  summary
+		want int
+	}{
+		{"train grade", result.Train["grade"], 3},
+		{"test grade", result.Test["grade"], 4},
+		{"train latency", result.Train["latency_s"], 4},
+	} {
+		if check.got.N != check.want || check.got.Mean == nil || *check.got.Mean != 1 {
+			t.Fatalf("%s = %+v, want %d cases with mean 1", check.name, check.got, check.want)
+		}
+	}
+}
 
 func TestGateClimb(t *testing.T) {
 	t.Parallel()
@@ -398,6 +467,18 @@ func TestGateRefusals(t *testing.T) {
 		}, "v1/results.jsonl line 1: grade must be a number, a boolean, or an object of numbers and booleans"},
 		{"grade member is text", func(fx *fixture) error {
 			return gateWithFirstRow(fx, `{"case_id":"a","rep":0,"status":"ok","grade":{"pass":"yes"}}`)
+		}, "v1/results.jsonl line 1: grade member pass must be a number or a boolean"},
+		{"truncated row without grade", func(fx *fixture) error {
+			return gateWithFirstRow(fx, `{"case_id":"a","rep":0,"status":"truncated"}`)
+		}, "v1/results.jsonl line 1: grade is missing; it must be a number, a boolean, or an object of numbers and booleans"},
+		{"truncated grade is text", func(fx *fixture) error {
+			return gateWithFirstRow(fx, `{"case_id":"a","rep":0,"status":"truncated","grade":"pass"}`)
+		}, "v1/results.jsonl line 1: grade must be a number, a boolean, or an object of numbers and booleans"},
+		{"truncated grade is null", func(fx *fixture) error {
+			return gateWithFirstRow(fx, `{"case_id":"a","rep":0,"status":"truncated","grade":null}`)
+		}, "v1/results.jsonl line 1: grade must be a number, a boolean, or an object of numbers and booleans"},
+		{"truncated grade member is text", func(fx *fixture) error {
+			return gateWithFirstRow(fx, `{"case_id":"a","rep":0,"status":"truncated","grade":{"pass":"yes"}}`)
 		}, "v1/results.jsonl line 1: grade member pass must be a number or a boolean"},
 		{"change edited after check", func(fx *fixture) error {
 			fx.baseline(rowsFor(0, allGrade(false), noExtra))
