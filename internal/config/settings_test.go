@@ -46,7 +46,7 @@ func TestInteractiveSettingsDefaultsAndValidation(t *testing.T) {
 }
 
 func TestConfigWithAppliesAndRejectsSettings(t *testing.T) {
-	cfg, err := config.Config{}.With(
+	cfg, err := (config.Config{Product: config.ProductDalgona}).With(
 		config.SettingEdit{Key: "verbosity", Value: "low"},
 		config.SettingEdit{Key: "status_hide", Value: []string{"folder", "queue"}},
 		config.SettingEdit{Key: "edit_review.enabled", Value: true},
@@ -77,6 +77,31 @@ func TestConfigWithAppliesAndRejectsSettings(t *testing.T) {
 		if err == nil || err.Error() != test.want {
 			t.Fatalf("With(%s) error = %v, want %q", test.edit.Key, err, test.want)
 		}
+	}
+}
+
+func TestConfigWithRejectsDalgonaRootsForDal(t *testing.T) {
+	for _, root := range []string{"runner", "remote", "runners", "remotes", "mcp_servers", "mcp_trusted_workspaces", "discovery", "herdr", "web", "edit_review"} {
+		t.Run(root, func(t *testing.T) {
+			for _, edit := range []config.SettingEdit{
+				{Key: root, Value: true},
+				{Key: root, Value: false},
+				{Key: root + ".enabled", Value: true},
+				{Key: root + ".enabled", Value: false},
+			} {
+				cfg := config.Config{Product: config.ProductDal, Theme: config.ThemeAuto}
+				_, err := cfg.With(
+					config.SettingEdit{Key: "theme", Value: "night"},
+					edit,
+				)
+				if err == nil || err.Error() != root+" is a dalgona setting" {
+					t.Fatalf("With(%s, %v) error = %v", edit.Key, edit.Value, err)
+				}
+				if cfg.Theme != config.ThemeAuto {
+					t.Fatalf("rejected batch changed the original config: %+v", cfg)
+				}
+			}
+		})
 	}
 }
 

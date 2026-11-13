@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -93,6 +95,7 @@ func judgeFor(j *judgeStub) ClientFactory {
 func judgedHarness(t *testing.T, j *judgeStub, feedback []string) *harness {
 	return newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
 		h.cfg.EditJudge = judgeFor(j)
+		h.cfg.Config.EditReview.Enabled = true
 		h.cfg.EditFeedback = feedback
 	})
 }
@@ -212,7 +215,10 @@ func TestEditReviewFailsOpen(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
-				h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) { h.cfg.EditJudge = row.factory })
+				h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
+					h.cfg.EditJudge = row.factory
+					h.cfg.Config.EditReview.Enabled = true
+				})
 				if row.timeout > 0 {
 					h.host.reviewTimeout = row.timeout
 				}
@@ -855,6 +861,7 @@ func TestEditReviewFactoryHangFailsOpen(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
+			h.cfg.Config.EditReview.Enabled = true
 			h.cfg.EditJudge = func(ctx context.Context, _ string) (decide.Client, string, error) {
 				<-ctx.Done()
 				return nil, "", ctx.Err()
@@ -931,5 +938,98 @@ func TestReviewSummary(t *testing.T) {
 				t.Fatalf("ReviewSummary = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEditReviewSavedToggleControlsOpenThread(t *testing.T) {
+	judge := &judgeStub{}
+	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
+		h.cfg.EditJudge = judgeFor(judge)
+		h.cfg.Config.EditReview.Enabled = false
+	})
+	h.write("a.txt", "zero\n")
+	thread := h.start()
+	steps := []struct {
+		enabled bool
+		before  string
+		after   string
+		judged  int
+	}{
+		{false, "zero", "one", 0},
+		{true, "one", "two", 1},
+		{false, "two", "three", 1},
+		{true, "three", "four", 2},
+	}
+	for i, step := range steps {
+		if err := h.host.WriteSettings(config.SettingEdit{Key: "edit_review.enabled", Value: step.enabled}); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := os.ReadFile(filepath.Join(h.home, "settings.toml"))
+		if err != nil || !strings.Contains(string(settings), fmt.Sprintf("enabled = %t", step.enabled)) {
+			t.Fatalf("saved settings = %q, %v", settings, err)
+		}
+		id := fmt.Sprintf("edit-%d", i)
+		h.model.push(calls(call{id: id, name: "patch", args: patchArgs("a.txt", [2]string{step.before, step.after})}), text("done"))
+		h.submit(thread, "change the value")
+		h.waitIdle(thread)
+		events := h.events(thread.ID())
+		requireCompletedOK(t, events, id)
+		content, err := os.ReadFile(filepath.Join(h.cwd, "a.txt"))
+		if err != nil || string(content) != step.after+"\n" {
+			t.Fatalf("edit %s wrote %q, %v", id, content, err)
+		}
+		requireReviewCounts(t, events, judge, step.judged, step.judged)
+	}
+}
+
+func TestAdmittedEditReviewDrainsAfterSavedOff(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	admitted := sync.OnceFunc(func() { close(entered) })
+	judge := &judgeStub{}
+	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
+		h.cfg.Config.EditReview.Enabled = true
+		h.cfg.EditJudge = func(ctx context.Context, id string) (decide.Client, string, error) {
+			admitted()
+			select {
+			case <-release:
+				return judgeFor(judge)(ctx, id)
+			case <-ctx.Done():
+				return nil, "", ctx.Err()
+			}
+		}
+	})
+	h.write("a.txt", "one\n")
+	h.model.push(calls(call{id: "edit", name: "patch", args: patchArgs("a.txt", [2]string{"one", "two"})}), text("done"))
+	thread := h.start()
+	h.submit(thread, "change the value")
+	select {
+	case <-entered:
+	case <-t.Context().Done():
+		t.Fatal(t.Context().Err())
+	}
+	if err := h.host.WriteSettings(config.SettingEdit{Key: "edit_review.enabled", Value: false}); err != nil {
+		t.Fatal(err)
+	}
+	unblock()
+	h.waitIdle(thread)
+	events := h.events(thread.ID())
+	requireCompletedOK(t, events, "edit")
+	content, err := os.ReadFile(filepath.Join(h.cwd, "a.txt"))
+	if err != nil || string(content) != "two\n" {
+		t.Fatalf("edit wrote %q, %v", content, err)
+	}
+	requireReviewCounts(t, events, judge, 1, 0)
+}
+
+func requireReviewCounts(t *testing.T, events []event.Seqd, judge *judgeStub, wantEdits, wantTurns int) {
+	t.Helper()
+	if edits, turns := len(judgedOf(events)), len(turnJudgedOf(events)); edits != wantEdits || turns != wantTurns {
+		t.Fatalf("edit and turn verdicts = %d, %d, want %d, %d", edits, turns, wantEdits, wantTurns)
+	}
+	if edits, turns := len(editStatesOf(judge)), len(turnStatesOf(judge)); edits != wantEdits || turns != wantTurns {
+		t.Fatalf("edit and turn requests = %d, %d, want %d, %d", edits, turns, wantEdits, wantTurns)
 	}
 }

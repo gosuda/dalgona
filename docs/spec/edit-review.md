@@ -8,6 +8,13 @@ The edit review judges the edit calls of every thread of a dalgona host when `[e
 
 A call is judged only when its tool has edit class, it completed with `ok` true, and it changed a file. The judge runs in the background during the round, and the round waits for every judge before it ends.
 
+Each edit and turn review MUST read the current saved `enabled` value when it admits work.
+A missing judge factory MUST mean that review capability is absent.
+Saving `enabled = false` MUST bar later edit and turn reviews, including in open threads.
+An admitted review MUST finish normally after review is disabled.
+Saving `enabled = true` MUST allow later reviews without restarting the host.
+Saved changes MUST NOT remove historical verdicts or their feedback.
+
 The review MUST NOT judge a call that recovery runs or replays.
 
 ## Diff

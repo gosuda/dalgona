@@ -58,6 +58,7 @@ func clientFor(c decide.Client) ClientFactory {
 func turnHarness(t *testing.T, c decide.Client, feedback []string) *harness {
 	return newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
 		h.cfg.EditJudge = clientFor(c)
+		h.cfg.Config.EditReview.Enabled = true
 		h.cfg.EditFeedback = feedback
 	})
 }
@@ -598,6 +599,7 @@ func TestTurnReviewMasksPaths(t *testing.T) {
 	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
 		h.cfg.Auth = store
 		h.cfg.EditJudge = judgeFor(judge)
+		h.cfg.Config.EditReview.Enabled = true
 	})
 	const secret = "token-abcdefgh12"
 	h.write(secret+"/a.txt", "one\n")

@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	json "encoding/json/v2"
@@ -133,6 +134,7 @@ func TestBatchWriteRefusesEmptyEdits(t *testing.T) {
 
 func TestSettingsReadListsInteractiveSettings(t *testing.T) {
 	r := newRig(t, config.ApprovalAsk)
+	r.cfg.Config.Product = config.ProductDalgona
 	setDefaultSettings(t, r)
 	c := r.connect()
 	var result settingsReadResult
@@ -159,4 +161,72 @@ func TestSettingsReadListsInteractiveSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	validateSchema(t, "dalgona-schema", "dalgona.settings.read.result.json", raw)
+}
+
+func TestDalSettingWritesRejectEditReviewBeforePersistence(t *testing.T) {
+	r := newRig(t, config.ApprovalAuto)
+	r.cfg.Config.Product = config.ProductDal
+	setDefaultSettings(t, r)
+	c := r.connect()
+	path := filepath.Join(r.home, "settings.toml")
+	c.ok("config/value/write", batchEdit("theme", "night"), nil)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{true, false} {
+		c.fails("config/value/write", batchEdit("editReview", enabled), codeInvalidParams, "edit_review is a dalgona setting")
+		c.fails("config/batchWrite", map[string]any{"edits": []any{
+			batchEdit("editReview", enabled),
+		}}, codeInvalidParams, "edit_review is a dalgona setting")
+		c.fails("config/batchWrite", map[string]any{"edits": []any{
+			batchEdit("theme", "day"),
+			batchEdit("editReview", enabled),
+		}}, codeInvalidParams, "edit_review is a dalgona setting")
+		after, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatalf("rejected edit changed settings.toml: %q", after)
+		}
+		expectVerbosityAndTheme(t, c, "medium", "night")
+		if r.host.Config().EditReview.Enabled {
+			t.Fatal("rejected edit enabled live edit review")
+		}
+		cfg, loadErr := config.Load(config.ProductDal, r.cwd, config.Flags{})
+		if loadErr != nil {
+			t.Fatalf("reload dal settings: %v", loadErr)
+		}
+		if cfg.Theme != config.ThemeNight || cfg.EditReview.Enabled {
+			t.Fatalf("reloaded dal settings = %+v", cfg)
+		}
+	}
+}
+
+func TestDalgonaSettingWritesAcceptEditReviewToggle(t *testing.T) {
+	r := newRig(t, config.ApprovalAuto)
+	r.cfg.Config.Product = config.ProductDalgona
+	t.Setenv("DALGONA_HOME", r.home)
+	setDefaultSettings(t, r)
+	c := r.connect()
+	for _, enabled := range []bool{true, false} {
+		c.ok("config/value/write", batchEdit("editReview", enabled), nil)
+		if got := readSettings(t, c)["editReview"]; got != enabled {
+			t.Fatalf("live editReview = %v, want %t", got, enabled)
+		}
+		cfg, err := config.Load(config.ProductDalgona, r.cwd, config.Flags{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.EditReview.Enabled != enabled {
+			t.Fatalf("persisted edit review = %t, want %t", cfg.EditReview.Enabled, enabled)
+		}
+		c.ok("config/batchWrite", map[string]any{"edits": []any{
+			batchEdit("editReview", !enabled),
+		}}, nil)
+		if got := readSettings(t, c)["editReview"]; got != !enabled {
+			t.Fatalf("batch editReview = %v, want %t", got, !enabled)
+		}
+	}
 }

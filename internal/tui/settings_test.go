@@ -215,3 +215,70 @@ func TestSettingsDockSteady(t *testing.T) {
 		t.Fatalf("dock has %d rows, want 20 (input 1, settings 17, live 1, band 1)", got)
 	}
 }
+
+func TestDalSettingsSkipsReviewAndSavesNotifications(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newTestModel(caller, Options{}, nil)
+	m.conn.product = "dal"
+	m = openSettingsPanel(t, m, "auto")
+	if strings.Contains(dockText(m), "Edit review") {
+		t.Fatalf("DAL offers edit review:\n%s", dockText(m))
+	}
+	for range 4 {
+		m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	assertContains(t, dockText(m), "Status")
+	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyDown}, tea.KeyPressMsg{Code: tea.KeySpace})
+	if m.focusedRow().key != "notifications" {
+		t.Fatalf("row after Status = %q, want notifications", m.focusedRow().key)
+	}
+	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.focusedRow().key != "notifications" {
+		t.Fatalf("last row = %q, want notifications", m.focusedRow().key)
+	}
+	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+	if m.focusedRow().key != "statusHide" {
+		t.Fatalf("row before Notifications = %q, want statusHide", m.focusedRow().key)
+	}
+	if got := len(m.dockLines()); got != 20 {
+		t.Fatalf("DAL settings dock has %d rows, want 20", got)
+	}
+	m.settings.preview["editReview"] = "on"
+	m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	runPickCommand(t, m, command)
+	edits := batchEdits(caller)
+	if !reflect.DeepEqual(edits, []settingEdit{{KeyPath: "notifications", Value: false, MergeStrategy: "replace"}}) {
+		t.Fatalf("DAL batch edits = %#v, want only notifications=false", edits)
+	}
+}
+
+func TestDalgonaSettingsKeepsReviewAndNotifications(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newTestModel(caller, Options{}, nil)
+	m.conn.product = "dalgona"
+	m = openSettingsPanel(t, m, "auto")
+	for range 5 {
+		m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if m.focusedRow().key != "editReview" {
+		t.Fatalf("sixth row = %q, want editReview", m.focusedRow().key)
+	}
+	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeySpace}, tea.KeyPressMsg{Code: tea.KeyDown}, tea.KeyPressMsg{Code: tea.KeySpace})
+	if m.focusedRow().key != "notifications" {
+		t.Fatalf("seventh row = %q, want notifications", m.focusedRow().key)
+	}
+	if got := len(m.dockLines()); got != 20 {
+		t.Fatalf("dalgona settings dock has %d rows, want 20", got)
+	}
+	m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	runPickCommand(t, m, command)
+	edits := batchEdits(caller)
+	if !reflect.DeepEqual(edits, []settingEdit{
+		{KeyPath: "editReview", Value: true, MergeStrategy: "replace"},
+		{KeyPath: "notifications", Value: false, MergeStrategy: "replace"},
+	}) {
+		t.Fatalf("dalgona batch edits = %#v, want editReview=true then notifications=false", edits)
+	}
+}

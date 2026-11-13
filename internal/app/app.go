@@ -87,11 +87,15 @@ func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, erro
 	}
 	advisors := newAdvisors(opts.Advisors, opts.Logger)
 	release := func() error { return errors.Join(extra.Close(), journalStore.Close()) }
+	var editJudge agent.ClientFactory
+	if product == config.ProductDalgona {
+		editJudge = judges.resolve
+	}
 	host, err := agent.NewHost(agent.HostConfig{
 		Journal: journalStore, Config: cfg, Auth: store, Tools: toolSet(cfg, extra.Tools),
 		Providers:        func(onRetry agent.RetryFunc) (*model.Registry, error) { return creds.registry(cfg, onRetry) },
 		ProvidersWithKey: func(provider, key string) (*model.Registry, error) { return creds.registryWithKey(cfg, provider, key) },
-		ProviderIDs:      providerIDs(cfg), Decider: judges.decider(), EditJudge: judges.editJudge(), Extension: extra.Extension, EditFeedback: cfg.EditReview.Feedback,
+		ProviderIDs:      providerIDs(cfg), Decider: judges.decider(), EditJudge: editJudge, Extension: extra.Extension, EditFeedback: cfg.EditReview.Feedback,
 		Runner: extra.Runner, Product: product, Logger: opts.Logger, Skills: extra.Skills,
 		MCPStatus:      extra.MCPStatus,
 		OnChildStarted: advisors.attach,

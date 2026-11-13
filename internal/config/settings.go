@@ -119,6 +119,10 @@ func flagSetting(key string, set func(*Config, bool)) settingSetter {
 func (c Config) With(edits ...SettingEdit) (Config, error) {
 	next := c
 	for _, edit := range edits {
+		root := strings.SplitN(edit.Key, ".", 2)[0]
+		if c.Product == ProductDal && dalgonaOnlyKeys[root] {
+			return Config{}, fmt.Errorf("%s is a dalgona setting", root)
+		}
 		setter, ok := settingSetters[edit.Key]
 		if !ok {
 			return Config{}, fmt.Errorf("unsupported setting %s", edit.Key)

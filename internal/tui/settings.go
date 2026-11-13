@@ -36,6 +36,7 @@ var settingRows = []settingRow{
 var statusItemIDs = []string{"effort", "approval", "sandbox", "folder", "queue", "context", "mark"}
 
 type settingsPanel struct {
+	rows       []settingRow
 	focus      int
 	statusItem int
 	saved      map[string]string
@@ -54,12 +55,12 @@ type settingsBatch struct {
 }
 
 func (p *settingsPanel) clone() *settingsPanel {
-	return &settingsPanel{saved: maps.Clone(p.saved), preview: maps.Clone(p.preview)}
+	return &settingsPanel{rows: p.rows, saved: maps.Clone(p.saved), preview: maps.Clone(p.preview)}
 }
 
 func (p *settingsPanel) edits() []settingEdit {
 	var edits []settingEdit
-	for _, row := range settingRows {
+	for _, row := range p.rows {
 		if p.preview[row.key] == p.saved[row.key] {
 			continue
 		}
@@ -138,7 +139,11 @@ func (m *model) savedSettings() map[string]string {
 
 func (m *model) openSettings() {
 	values := m.savedSettings()
-	m.settings = &settingsPanel{saved: values, preview: maps.Clone(values)}
+	rows := settingRows
+	if m.conn.product == "dal" {
+		rows = slices.DeleteFunc(slices.Clone(rows), func(row settingRow) bool { return row.key == "editReview" })
+	}
+	m.settings = &settingsPanel{rows: rows, saved: values, preview: maps.Clone(values)}
 }
 
 func (m *model) showSetting(key, text string) {
@@ -175,7 +180,7 @@ func (m *model) settingsKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "up":
 		p.focus = max(p.focus-1, 0)
 	case "down":
-		p.focus = min(p.focus+1, len(settingRows)-1)
+		p.focus = min(p.focus+1, len(p.rows)-1)
 	case "left":
 		m.stepSetting(-1)
 	case "right":
@@ -191,7 +196,7 @@ func (m *model) settingsKey(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (m *model) focusedRow() settingRow {
-	return settingRows[m.settings.focus]
+	return m.settings.rows[m.settings.focus]
 }
 
 func (m *model) stepSetting(step int) {
@@ -280,8 +285,8 @@ func (m *model) settingsFailed(msg resultMsg) bool {
 
 func (m *model) settingsView() panelView {
 	p := m.settings
-	body := make([]string, 0, len(settingRows)+1+detailRows)
-	for _, row := range settingRows {
+	body := make([]string, 0, len(p.rows)+1+detailRows)
+	for _, row := range p.rows {
 		body = append(body, settingLine(row, p.preview[row.key]))
 	}
 	body = append(body, "")

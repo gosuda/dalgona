@@ -49,6 +49,7 @@ The interactive settings MUST use the keys in the table below.
 The `auto` theme MUST follow the system and use `night` or `day`. The `auto-soft` theme MUST follow the system and use `soft-night` or `soft-day`. The `status_hide` key MUST NOT name `model`.
 
 `Host.WriteSettings` MUST apply each interactive setting to the running host at once. A rejected edit MUST leave the running settings and `settings.toml` unchanged. A saved `approval` or `sandbox` MUST NOT change a thread that is already running. Each thread keeps the values that its journal records.
+Live setting writes MUST apply the same product restrictions as file loading. `dal` MUST reject dalgona-only roots before persistence, including `edit_review.enabled`.
 
 When no layer sets `[approval_decider] threshold`, its value MUST be `0.9`.
 

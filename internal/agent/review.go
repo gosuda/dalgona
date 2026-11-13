@@ -199,7 +199,7 @@ func (h *Host) maskReview(text string) (string, error) {
 }
 
 func (w *worker) startReview(ctx context.Context, p *prepared, completed event.ToolCompleted) {
-	if w.round == nil || w.t.host.cfg.EditJudge == nil || p.class != tool.ClassEdit || !completed.OK || len(p.files) == 0 {
+	if w.round == nil || w.t.host.cfg.EditJudge == nil || !w.t.host.Config().EditReview.Enabled || p.class != tool.ClassEdit || !completed.OK || len(p.files) == 0 {
 		return
 	}
 	task := w.task()
@@ -1202,7 +1202,7 @@ func (w *worker) turnReview(ctx context.Context, v view) (bool, uint64) {
 }
 
 func (w *worker) turnReviewWanted(v view) (string, bool) {
-	if w.t.host.cfg.EditJudge == nil || !w.eligible || w.recovering || w.reviewed {
+	if w.t.host.cfg.EditJudge == nil || !w.t.host.Config().EditReview.Enabled || !w.eligible || w.recovering || w.reviewed {
 		return "", false
 	}
 	if _, judged := v.state.JudgedTurns[w.turnID]; judged {

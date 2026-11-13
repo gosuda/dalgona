@@ -141,6 +141,9 @@ func (s *server) settingsRead(context.Context, jsontext.Value) (jsontext.Value, 
 func settingsReadResponse(cfg config.Config) SettingsReadResponse {
 	response := SettingsReadResponse{Settings: make([]Setting, 0, len(config.InteractiveSettings))}
 	for _, spec := range config.InteractiveSettings {
+		if cfg.Product == config.ProductDal && spec.Key == "edit_review.enabled" {
+			continue
+		}
 		response.Settings = append(response.Settings, Setting{
 			Key: wireName(spec.Key), Value: cfg.Setting(spec.Key), Default: spec.Default, Options: spec.Options,
 		})
