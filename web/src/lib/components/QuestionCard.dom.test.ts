@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, type Mock, test, vi } from "vitest";
 import App from "#lib/components/App.svelte";
 import QuestionCard from "#lib/components/QuestionCard.svelte";
 import { type RpcPort, Session } from "#lib/session.svelte.ts";
@@ -103,6 +103,22 @@ function port(respond: (id: RequestId, result: JsonValue) => void): RpcPort {
 	};
 }
 
+function mockScrolling(details: HTMLElement) {
+	const scrollBy = vi.fn();
+	const scrollTo = vi.fn();
+	const metrics = { scrollBy, scrollTo, scrollHeight: 1000, clientHeight: 200 };
+	for (const [name, value] of Object.entries(metrics)) {
+		Object.defineProperty(details, name, { value, configurable: true });
+	}
+	return { scrollBy, scrollTo };
+}
+
+function lastTop(scroll: Mock): number {
+	const options = scroll.mock.lastCall?.[0] as { top: number } | undefined;
+	if (options === undefined) throw new Error("the details did not scroll");
+	return options.top;
+}
+
 describe("question card", () => {
 	test("keeps the actions outside the scrolling details", () => {
 		render(QuestionCard, {
@@ -111,6 +127,65 @@ describe("question card", () => {
 		const details = screen.getByRole("region", { name: "Question details" });
 		const submit = screen.getByRole("button", { name: "Submit" });
 		expect(details.contains(submit)).toBe(false);
+	});
+
+	test("scrolls the details from the title and the actions with the keyboard", async () => {
+		render(QuestionCard, {
+			props: props(databaseRequest, vi.fn(), vi.fn()),
+		});
+		const { scrollBy, scrollTo } = mockScrolling(
+			screen.getByRole("region", { name: "Question details" }),
+		);
+		const title = screen.getByRole("heading", { name: "Answer this question" });
+		const submit = screen.getByRole("button", { name: "Submit" });
+		const dismiss = screen.getByRole("button", { name: "Dismiss" });
+
+		expect(await fireEvent.keyDown(title, { key: "ArrowDown" })).toBe(false);
+		const line = lastTop(scrollBy);
+		expect(line).toBeGreaterThan(0);
+		expect(await fireEvent.keyDown(title, { key: "ArrowUp" })).toBe(false);
+		expect(lastTop(scrollBy)).toBe(-line);
+
+		expect(await fireEvent.keyDown(submit, { key: "PageDown" })).toBe(false);
+		const page = lastTop(scrollBy);
+		expect(page).toBeGreaterThan(line);
+		expect(page).toBeLessThanOrEqual(200);
+		expect(await fireEvent.keyDown(dismiss, { key: "PageUp" })).toBe(false);
+		expect(lastTop(scrollBy)).toBe(-page);
+
+		expect(await fireEvent.keyDown(title, { key: "Home" })).toBe(false);
+		expect(lastTop(scrollTo)).toBe(0);
+		expect(await fireEvent.keyDown(dismiss, { key: "End" })).toBe(false);
+		expect(lastTop(scrollTo)).toBe(1000);
+	});
+
+	test("leaves scrolling keys to a radio and a text field in the details", async () => {
+		const [first] = databaseRequest.questions;
+		if (first === undefined) throw new Error("no question in the fixture");
+		render(QuestionCard, {
+			props: props(
+				{ ...databaseRequest, questions: [{ ...first, isOther: true }] },
+				vi.fn(),
+				vi.fn(),
+			),
+		});
+		const { scrollBy, scrollTo } = mockScrolling(
+			screen.getByRole("region", { name: "Question details" }),
+		);
+		const radio = screen.getByRole("radio", { name: /SQLite/ });
+		const field = screen.getByRole("textbox", {
+			name: "Other answer for Database",
+		});
+		const title = screen.getByRole("heading", { name: "Answer this question" });
+
+		expect(await fireEvent.keyDown(radio, { key: "ArrowDown" })).toBe(true);
+		expect(await fireEvent.keyDown(field, { key: "Home" })).toBe(true);
+		expect(await fireEvent.keyDown(field, { key: "PageDown" })).toBe(true);
+		expect(
+			await fireEvent.keyDown(title, { key: "PageDown", metaKey: true }),
+		).toBe(true);
+		expect(scrollBy).not.toHaveBeenCalled();
+		expect(scrollTo).not.toHaveBeenCalled();
 	});
 
 	test("Escape dismisses with the cancel shape", async () => {
@@ -168,7 +243,9 @@ describe("question card", () => {
 		});
 		await tick();
 		await user.tab();
-		await user.tab();
+		expect(document.activeElement).toBe(
+			screen.getByRole("radio", { name: /SQLite/ }),
+		);
 		await user.keyboard("{ArrowDown}");
 		const submit = screen.getByRole("button", { name: "Submit" });
 		for (let step = 0; step < 10 && document.activeElement !== submit; step++) {

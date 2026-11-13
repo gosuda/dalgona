@@ -74,6 +74,7 @@ export const stateWords: Readonly<Record<StateKey, string>> = {
 const stateKeys: Readonly<Record<string, StateKey>> = {
 	active: "inProgress",
 	idle: "idle",
+	notLoaded: "idle",
 	systemError: "failed",
 	inProgress: "inProgress",
 	awaitingApproval: "awaitingApproval",

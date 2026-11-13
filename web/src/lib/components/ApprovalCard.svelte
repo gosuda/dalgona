@@ -18,12 +18,28 @@ let { request, changes, position, total, subagent, onDecision }: Props =
 	$props();
 let card = $state<HTMLElement>();
 let heading = $state<HTMLElement>();
+let details = $state<HTMLElement>();
 
 const shortcuts: Readonly<Record<string, Decision>> = {
 	y: "accept",
 	a: "acceptForSession",
 	n: "decline",
 	Escape: "cancel",
+};
+
+const lineStep = 48;
+
+function pageStep(body: HTMLElement): number {
+	return Math.max(lineStep, body.clientHeight - lineStep);
+}
+
+const scrolls: Readonly<Record<string, (body: HTMLElement) => void>> = {
+	ArrowUp: (body) => body.scrollBy({ top: -lineStep, behavior: "auto" }),
+	ArrowDown: (body) => body.scrollBy({ top: lineStep, behavior: "auto" }),
+	PageUp: (body) => body.scrollBy({ top: -pageStep(body), behavior: "auto" }),
+	PageDown: (body) => body.scrollBy({ top: pageStep(body), behavior: "auto" }),
+	Home: (body) => body.scrollTo({ top: 0, behavior: "auto" }),
+	End: (body) => body.scrollTo({ top: body.scrollHeight, behavior: "auto" }),
 };
 
 const title = $derived(
@@ -48,12 +64,24 @@ function isEditable(target: EventTarget | null): boolean {
 	);
 }
 
+function scrollDetails(event: KeyboardEvent, target: Node): void {
+	const scroll = scrolls[event.key];
+	if (scroll === undefined || details === undefined) return;
+	if (details.contains(target)) return;
+	if (details.scrollHeight <= details.clientHeight) return;
+	event.preventDefault();
+	scroll(details);
+}
+
 function onKeydown(event: KeyboardEvent): void {
 	if (!(event.target instanceof Node) || !card?.contains(event.target)) return;
 	if (event.ctrlKey || event.metaKey || event.altKey) return;
 	if (isEditable(event.target)) return;
 	const decision = shortcuts[event.key];
-	if (decision === undefined) return;
+	if (decision === undefined) {
+		scrollDetails(event, event.target);
+		return;
+	}
 	event.preventDefault();
 	decide(decision);
 }
@@ -71,8 +99,12 @@ function onKeydown(event: KeyboardEvent): void {
 		Approval required{total > 1 ? ` · ${position} of ${total}` : ""}
 	</p>
 	<h2 id="request-title" tabindex="-1" bind:this={heading}>{title}</h2>
-	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-	<div class="request-body" role="region" aria-label="Request details" tabindex="0">
+	<div
+		class="request-body"
+		role="region"
+		aria-label="Request details"
+		bind:this={details}
+	>
 		{#if request.detail}
 			<pre class="command">{request.detail}</pre>
 		{/if}
@@ -97,7 +129,9 @@ function onKeydown(event: KeyboardEvent): void {
 <style>
 	.request-card {
 		display: flex;
+		flex: 0 0 auto;
 		min-width: 0;
+		min-height: 0;
 		flex-direction: column;
 		margin: var(--space-4) var(--space-6) 0;
 		border: var(--border-width) solid var(--line);
@@ -127,16 +161,14 @@ function onKeydown(event: KeyboardEvent): void {
 	}
 
 	.request-body {
+		flex: 1 0 auto;
+		height: min(18dvh, 12rem);
 		max-height: min(60dvh, 40rem);
+		min-height: calc(var(--control-height) + var(--control-height) + var(--space-6));
 		min-width: 0;
 		margin-block-start: var(--space-4);
 		overflow-y: auto;
 		overscroll-behavior: contain;
-	}
-
-	.request-body:focus-visible {
-		outline: 2px solid var(--text);
-		outline-offset: 2px;
 	}
 
 	.command {
@@ -174,5 +206,24 @@ function onKeydown(event: KeyboardEvent): void {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: var(--space-2);
 		margin-block-start: var(--space-6);
+	}
+
+	@media (max-width: 52rem) {
+		.request-card {
+			margin: var(--space-2) var(--space-4) 0;
+			padding: var(--space-3);
+		}
+
+		h2 {
+			font-size: var(--size-heading);
+		}
+
+		.request-body {
+			margin-block-start: var(--space-2);
+		}
+
+		.request-actions {
+			margin-block-start: var(--space-2);
+		}
 	}
 </style>

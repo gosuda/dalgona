@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, within } from "@testing-library/svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, type Mock, test, vi } from "vitest";
 import ApprovalCard from "#lib/components/ApprovalCard.svelte";
 import type { ApprovalRequest, FileChange } from "#lib/types.ts";
 
@@ -45,6 +45,30 @@ function props(request: ApprovalRequest, changes: readonly FileChange[] = []) {
 		subagent: null,
 		onDecision: vi.fn(),
 	};
+}
+
+function requestDetails(container: HTMLElement): HTMLElement {
+	const details = container.querySelector<HTMLElement>(
+		'[aria-label="Request details"]',
+	);
+	if (details === null) throw new Error("no request details region");
+	return details;
+}
+
+function mockScrolling(details: HTMLElement) {
+	const scrollBy = vi.fn();
+	const scrollTo = vi.fn();
+	const metrics = { scrollBy, scrollTo, scrollHeight: 1000, clientHeight: 200 };
+	for (const [name, value] of Object.entries(metrics)) {
+		Object.defineProperty(details, name, { value, configurable: true });
+	}
+	return { scrollBy, scrollTo };
+}
+
+function lastTop(scroll: Mock): number {
+	const options = scroll.mock.lastCall?.[0] as { top: number } | undefined;
+	if (options === undefined) throw new Error("the details did not scroll");
+	return options.top;
 }
 
 describe("approval card", () => {
@@ -96,6 +120,60 @@ describe("approval card", () => {
 			expect(notHandled, modifier).toBe(true);
 		}
 		expect(onDecision).not.toHaveBeenCalled();
+	});
+
+	test("scrolls the details from the title and the actions with the keyboard", async () => {
+		const { container } = render(ApprovalCard, {
+			props: props(commandRequest),
+		});
+		const { scrollBy, scrollTo } = mockScrolling(requestDetails(container));
+		const title = container.querySelector("h2");
+		if (title === null) throw new Error("no approval title");
+		const accept = within(container).getByRole("button", { name: "Accept" });
+		const cancel = within(container).getByRole("button", {
+			name: "Cancel and interrupt",
+		});
+
+		expect(await fireEvent.keyDown(title, { key: "ArrowDown" })).toBe(false);
+		const line = lastTop(scrollBy);
+		expect(line).toBeGreaterThan(0);
+		expect(await fireEvent.keyDown(title, { key: "ArrowUp" })).toBe(false);
+		expect(lastTop(scrollBy)).toBe(-line);
+
+		expect(await fireEvent.keyDown(accept, { key: "PageDown" })).toBe(false);
+		const page = lastTop(scrollBy);
+		expect(page).toBeGreaterThan(line);
+		expect(page).toBeLessThanOrEqual(200);
+		expect(await fireEvent.keyDown(cancel, { key: "PageUp" })).toBe(false);
+		expect(lastTop(scrollBy)).toBe(-page);
+
+		expect(await fireEvent.keyDown(title, { key: "Home" })).toBe(false);
+		expect(lastTop(scrollTo)).toBe(0);
+		expect(await fireEvent.keyDown(cancel, { key: "End" })).toBe(false);
+		expect(lastTop(scrollTo)).toBe(1000);
+	});
+
+	test("leaves scrolling keys to the browser inside the details, with a modifier, and without overflow", async () => {
+		const { container } = render(ApprovalCard, {
+			props: props(commandRequest),
+		});
+		const details = requestDetails(container);
+		const { scrollBy, scrollTo } = mockScrolling(details);
+		const title = container.querySelector("h2");
+		const command = details.querySelector("pre");
+		if (title === null || command === null) throw new Error("no approval card");
+
+		expect(await fireEvent.keyDown(command, { key: "PageDown" })).toBe(true);
+		expect(
+			await fireEvent.keyDown(title, { key: "PageDown", ctrlKey: true }),
+		).toBe(true);
+		Object.defineProperty(details, "scrollHeight", {
+			value: 200,
+			configurable: true,
+		});
+		expect(await fireEvent.keyDown(title, { key: "End" })).toBe(true);
+		expect(scrollBy).not.toHaveBeenCalled();
+		expect(scrollTo).not.toHaveBeenCalled();
 	});
 
 	test("shows a nested exec approval with its command and no eval name", () => {

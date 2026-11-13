@@ -1,4 +1,6 @@
 <script lang="ts">
+import { untrack } from "svelte";
+import { MediaQuery } from "svelte/reactivity";
 import { formatDuration, formatRetryWait } from "#lib/format.ts";
 import { type StateKey, stateWords } from "#lib/labels.ts";
 
@@ -18,20 +20,18 @@ let {
 	retryRemainingMs = null,
 }: Props = $props();
 
-const reduceMotion =
-	typeof matchMedia === "function" &&
-	matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reducedMotion = new MediaQuery("(prefers-reduced-motion: reduce)");
 
 let clock = $state(Date.now());
 
 $effect(() => {
-	if (key !== "inProgress" || !reduceMotion) return;
 	void tick;
+	if (key !== "inProgress" || !untrack(() => reducedMotion.current)) return;
 	clock = Date.now();
 });
 
 $effect(() => {
-	if (key !== "inProgress" || reduceMotion) return;
+	if (key !== "inProgress" || reducedMotion.current) return;
 	clock = Date.now();
 	const timer = setInterval(() => {
 		clock = Date.now();

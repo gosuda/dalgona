@@ -166,6 +166,114 @@ describe("elapsed counter under reduced motion", () => {
 		);
 		session.stop();
 	});
+
+	test("keeps the turn start when the turn/start response follows the turn/started notification", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(1_700_000_000_000));
+		vi.stubGlobal("matchMedia", (query: string) => ({
+			matches: query.includes("reduce"),
+			media: query,
+			addEventListener: () => {},
+			removeEventListener: () => {},
+		}));
+		let responseTurn = "turn-2";
+		let beforeResponse: () => void = () => undefined;
+		const { session, handlers } = sessionWithHandler(() => ({
+			...pendingPort(),
+			call: <T>(
+				method: string,
+				_params: JsonValue,
+				parse: (value: unknown) => T,
+			): Promise<T> => {
+				if (method !== "turn/start") {
+					return Promise.reject(new Error(`unexpected call ${method}`));
+				}
+				beforeResponse();
+				return Promise.resolve(
+					parse({
+						turn: { id: responseTurn, items: [], status: "inProgress" },
+					}),
+				);
+			},
+		}));
+		session.activeThreadId = "thread-1";
+		handlers.onNotification(
+			parsed("thread/started", {
+				thread: {
+					id: "thread-1",
+					updatedAt: 1,
+					status: { type: "idle" },
+					turns: [],
+				},
+			}),
+		);
+		beforeResponse = () =>
+			handlers.onNotification(
+				parsed("turn/started", {
+					threadId: "thread-1",
+					turn: {
+						id: "turn-2",
+						items: [],
+						status: "inProgress",
+						startedAt: 1_700_000_000,
+					},
+				}),
+			);
+		await session.sendMessage("hello");
+		const { container } = render(App, { props: { session } });
+		await tick();
+		const elapsed = () =>
+			container.querySelector(".thread-head .tag.live .elapsed")?.textContent;
+		expect(elapsed()).toBe("0 ms");
+
+		vi.setSystemTime(new Date(1_700_000_003_000));
+		handlers.onNotification(
+			parsed("item/agentMessage/delta", {
+				threadId: "thread-1",
+				turnId: "turn-2",
+				itemId: "message-1",
+				delta: "working",
+			}),
+		);
+		await tick();
+		expect(elapsed()).toBe("3s");
+
+		handlers.onNotification(
+			parsed("turn/completed", {
+				threadId: "thread-1",
+				turn: {
+					id: "turn-2",
+					items: [],
+					status: "completed",
+					startedAt: 1_700_000_000,
+					completedAt: 1_700_000_004,
+					durationMs: 4000,
+				},
+			}),
+		);
+		await tick();
+		vi.setSystemTime(new Date(1_700_000_010_000));
+		responseTurn = "turn-3";
+		beforeResponse = () => undefined;
+		await session.sendMessage("again");
+		await tick();
+		expect(elapsed()).toBe("");
+
+		handlers.onNotification(
+			parsed("turn/started", {
+				threadId: "thread-1",
+				turn: {
+					id: "turn-3",
+					items: [],
+					status: "inProgress",
+					startedAt: 1_700_000_010,
+				},
+			}),
+		);
+		await tick();
+		expect(elapsed()).toBe("0 ms");
+		session.stop();
+	});
 });
 
 describe("thread header state", () => {
@@ -671,6 +779,7 @@ function openDialogs(): number {
 function stubTranscriptScroll(): HTMLElement {
 	const transcript = document.getElementById("transcript");
 	if (transcript === null) throw new Error("transcript section missing");
+	transcript.style.overflowY = "auto";
 	Object.defineProperty(transcript, "scrollHeight", {
 		configurable: true,
 		value: 2000,

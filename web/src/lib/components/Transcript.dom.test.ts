@@ -71,9 +71,10 @@ describe("welcome start button", () => {
 });
 
 describe("jump to latest", () => {
-	function stubScroller(): HTMLElement {
-		const transcript = document.getElementById("transcript");
+	function stubScroller(target?: HTMLElement): HTMLElement {
+		const transcript = target ?? document.getElementById("transcript");
 		if (transcript === null) throw new Error("transcript section missing");
+		transcript.style.overflowY = "auto";
 		Object.defineProperty(transcript, "scrollHeight", {
 			configurable: true,
 			value: 2000,
@@ -89,7 +90,9 @@ describe("jump to latest", () => {
 		});
 		Object.defineProperty(transcript, "scrollTo", {
 			configurable: true,
-			value: vi.fn(),
+			value: vi.fn(({ top }: ScrollToOptions) => {
+				transcript.scrollTop = Math.min(Number(top), 1500);
+			}),
 		});
 		return transcript;
 	}
@@ -124,5 +127,81 @@ describe("jump to latest", () => {
 		expect(
 			screen.getByRole("button", { name: "Jump to latest · 1 new" }),
 		).not.toBeNull();
+	});
+
+	test("observes an ancestor scroll box and preserves the reader's place across streaming", async () => {
+		const target = document.createElement("div");
+		document.body.append(target);
+		const ancestor = stubScroller(target);
+		const { container, rerender, unmount } = render(Transcript, {
+			target,
+			props: props([reply("m1", "partial", false)]),
+		});
+		ancestor.scrollTop = 1100;
+		await fireEvent.scroll(ancestor);
+		expect(
+			screen.getByRole("button", { name: /Jump to latest/ }),
+		).not.toBeNull();
+		await rerender(props([reply("m1", "more streamed text", false)]));
+		expect(ancestor.scrollTop).toBe(1100);
+		await rerender({
+			...props([reply("m1", "finished", true), reply("m2", "last row", true)]),
+			turnStatus: "completed",
+		});
+		await fireEvent.click(
+			screen.getByRole("button", { name: "Jump to latest · 1 new" }),
+		);
+		expect(ancestor.scrollTop).toBe(1500);
+		expect(document.activeElement).toBe(
+			container.querySelector(".items > li:last-child"),
+		);
+		expect(screen.queryByRole("button", { name: /Jump to latest/ })).toBeNull();
+		unmount();
+		target.remove();
+	});
+
+	async function checkAwayAfterTurnFinished(
+		stubOwner: (host: HTMLElement) => HTMLElement,
+	): Promise<void> {
+		const target = document.createElement("div");
+		const outside = document.createElement("button");
+		document.body.append(target, outside);
+		const jump = () => screen.queryByRole("button", { name: /Jump to latest/ });
+		try {
+			const { container, unmount } = render(Transcript, {
+				target,
+				props: {
+					...props([reply("m1", "all of the answer", true)]),
+					turnStatus: "completed",
+				},
+			});
+			const scroller = stubOwner(target);
+			outside.focus();
+			scroller.scrollTop = 548;
+			await fireEvent.scroll(scroller);
+			expect(jump()?.textContent).toBe("Jump to latest");
+			expect(document.activeElement).toBe(outside);
+			await fireEvent.click(jump() as HTMLElement);
+			expect(scroller.scrollTop).toBe(1500);
+			expect(document.activeElement).toBe(
+				container.querySelector(".items > li:last-child"),
+			);
+			expect(jump()).toBeNull();
+			scroller.scrollTop = 300;
+			await fireEvent.scroll(scroller);
+			expect(jump()).not.toBeNull();
+			unmount();
+		} finally {
+			target.remove();
+			outside.remove();
+		}
+	}
+
+	test("offers the button after the turn finished when the transcript itself scrolls", async () => {
+		await checkAwayAfterTurnFinished(() => stubScroller());
+	});
+
+	test("offers the button after the turn finished when a scrolling ancestor owns the scroll", async () => {
+		await checkAwayAfterTurnFinished((host) => stubScroller(host));
 	});
 });

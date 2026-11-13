@@ -423,6 +423,7 @@ describe("edit review validation", () => {
 		).toEqual({
 			type: "toolJudged",
 			threadId: "thread-1",
+			turnId: "turn-3",
 			itemId: "call-7",
 			review: { verdict: "flagged", summary: "Flagged: removed code" },
 		});

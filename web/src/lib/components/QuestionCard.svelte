@@ -23,6 +23,7 @@ let { request, position, total, subagent, onSubmit, onDismiss }: Props =
 	$props();
 let card = $state<HTMLElement>();
 let heading = $state<HTMLElement>();
+let details = $state<HTMLElement>();
 let selections = $state<readonly QuestionSelection[]>([]);
 
 const empty: QuestionSelection = { picked: [], other: "" };
@@ -31,6 +32,21 @@ const title = $derived(
 		? "Answer these questions"
 		: "Answer this question",
 );
+
+const lineStep = 48;
+
+function pageStep(body: HTMLElement): number {
+	return Math.max(lineStep, body.clientHeight - lineStep);
+}
+
+const scrolls: Readonly<Record<string, (body: HTMLElement) => void>> = {
+	ArrowUp: (body) => body.scrollBy({ top: -lineStep, behavior: "auto" }),
+	ArrowDown: (body) => body.scrollBy({ top: lineStep, behavior: "auto" }),
+	PageUp: (body) => body.scrollBy({ top: -pageStep(body), behavior: "auto" }),
+	PageDown: (body) => body.scrollBy({ top: pageStep(body), behavior: "auto" }),
+	Home: (body) => body.scrollTo({ top: 0, behavior: "auto" }),
+	End: (body) => body.scrollTo({ top: body.scrollHeight, behavior: "auto" }),
+};
 
 $effect(() => {
 	void request.id;
@@ -95,9 +111,22 @@ function dismiss(): void {
 	onDismiss(request);
 }
 
+function scrollDetails(event: KeyboardEvent, target: Node): void {
+	const scroll = scrolls[event.key];
+	if (scroll === undefined || details === undefined) return;
+	if (event.ctrlKey || event.metaKey || event.altKey) return;
+	if (details.contains(target)) return;
+	if (details.scrollHeight <= details.clientHeight) return;
+	event.preventDefault();
+	scroll(details);
+}
+
 function onKeydown(event: KeyboardEvent): void {
-	if (event.key !== "Escape") return;
 	if (!(event.target instanceof Node) || !card?.contains(event.target)) return;
+	if (event.key !== "Escape") {
+		scrollDetails(event, event.target);
+		return;
+	}
 	event.preventDefault();
 	dismiss();
 }
@@ -115,8 +144,12 @@ function onKeydown(event: KeyboardEvent): void {
 		Question required{total > 1 ? ` · ${position} of ${total}` : ""}
 	</p>
 	<h2 id="question-title" tabindex="-1" bind:this={heading}>{title}</h2>
-	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-	<div class="question-body" role="region" aria-label="Question details" tabindex="0">
+	<div
+		class="question-body"
+		role="region"
+		aria-label="Question details"
+		bind:this={details}
+	>
 		{#if subagent !== null}
 			<p class="subagent">From subagent {subagent}</p>
 		{/if}
@@ -212,11 +245,6 @@ function onKeydown(event: KeyboardEvent): void {
 		margin-block-start: var(--space-4);
 		overflow-y: auto;
 		overscroll-behavior: contain;
-	}
-
-	.question-body:focus-visible {
-		outline: 2px solid var(--text);
-		outline-offset: 2px;
 	}
 
 	.subagent {

@@ -67,7 +67,7 @@ export interface OutputPage {
 	readonly total: number;
 }
 
-export type TranscriptItem =
+export type TranscriptItem = { readonly turnId?: string } & (
 	| {
 			readonly id: string;
 			readonly kind: "userMessage";
@@ -121,7 +121,8 @@ export type TranscriptItem =
 			readonly id: string;
 			readonly kind: "unsupported";
 			readonly label: string;
-	  };
+	  }
+);
 
 export interface TurnSnapshot {
 	readonly id: string;
@@ -249,6 +250,7 @@ export type AppNotification =
 	| {
 			readonly type: "toolJudged";
 			readonly threadId: string;
+			readonly turnId: string;
 			readonly itemId: string;
 			readonly review: EditReview;
 	  }
@@ -357,6 +359,7 @@ export interface ThreadListResult {
 }
 
 export interface ThreadStartResult {
+	readonly cwd: string;
 	readonly thread: ThreadDetail;
 	readonly status: StatusInfo;
 	readonly usage: TokenUsage | null;

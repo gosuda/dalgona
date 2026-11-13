@@ -896,7 +896,7 @@ export class Session {
 				);
 			}
 			this.activeThreadId = threadId;
-			this.openCwd = result.thread.summary.cwd;
+			this.openCwd = result.cwd;
 			this.transcript = transcriptForThread(result.thread, this.knownChildren);
 			this.advisor = { kind: "unknown" };
 			this.clearErrors();
@@ -948,7 +948,7 @@ export class Session {
 			this.loadingTranscript = false;
 			this.upsertThread(result.thread);
 			this.activeThreadId = result.thread.summary.id;
-			this.openCwd = result.thread.summary.cwd;
+			this.openCwd = result.cwd;
 			this.transcript = transcriptForThread(result.thread);
 			this.status = result.status;
 			if (result.usage !== null)

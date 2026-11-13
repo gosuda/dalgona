@@ -15,7 +15,7 @@ import type {
 	RequestId,
 	RpcHandlers,
 } from "./types";
-import { parseNotification } from "./validation";
+import { parseNotification, parseThreadStartResponse } from "./validation";
 
 type Answer = (params: JsonValue) => JsonValue;
 
@@ -747,6 +747,20 @@ describe("file search", () => {
 	test("searches under the open thread's cwd when the thread is missing from the list", async () => {
 		const searches: JsonValue[] = [];
 		const { dial, ports } = fakeDial("none", {
+			"thread/resume": () => ({
+				thread: {
+					id: "t1",
+					updatedAt: 1,
+					status: { type: "idle" },
+					turns: [],
+				},
+				model: "gpt-test",
+				approvalsReviewer: "user",
+				modelProvider: "openai",
+				approvalPolicy: "on-request",
+				sandbox: "workspace-write",
+				cwd: "/work",
+			}),
 			fuzzyFileSearch: (params) => {
 				searches.push(params);
 				return { files: [] };
@@ -764,6 +778,44 @@ describe("file search", () => {
 		]);
 		expect(ports[0]?.calls).toContain("fuzzyFileSearch");
 		session.stop();
+	});
+
+	test("searches under a newly started thread's response cwd", async () => {
+		const searches: JsonValue[] = [];
+		const { dial } = fakeDial("none", {
+			"thread/start": () => ({
+				thread: thread("new-thread", []),
+				model: "gpt-test",
+				approvalsReviewer: "user",
+				modelProvider: "openai",
+				approvalPolicy: "on-request",
+				sandbox: "workspace-write",
+				cwd: "/new-work",
+			}),
+			fuzzyFileSearch: (params) => {
+				searches.push(params);
+				return { files: [] };
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await waitForThread(session, "t1");
+		await session.createThread();
+		session.threads = [];
+
+		await session.searchFiles("mod");
+
+		expect(searches).toEqual([
+			{ query: "mod", roots: ["/new-work"], cancellationToken: "composer" },
+		]);
+		session.stop();
+	});
+
+	test("rejects a null response cwd", () => {
+		const response = resumeAnswer("none")({ threadId: "t1" });
+		expect(() =>
+			parseThreadStartResponse({ ...(response as object), cwd: null }),
+		).toThrow("invalid thread/start");
 	});
 
 	test("sends no search when no thread is open", async () => {

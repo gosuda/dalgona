@@ -2,15 +2,30 @@ import { cleanup, render } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import StateTag from "#lib/components/StateTag.svelte";
-import StateTagStage from "#lib/components/StateTagStage.svelte";
 
-function stubMotion(reduced: boolean): void {
-	vi.stubGlobal("matchMedia", (query: string) => ({
-		matches: reduced && query.includes("reduce"),
-		media: query,
-		addEventListener: () => {},
-		removeEventListener: () => {},
-	}));
+class MotionPreference extends EventTarget {
+	readonly media = "(prefers-reduced-motion: reduce)";
+	matches: boolean;
+
+	constructor(reduced: boolean) {
+		super();
+		this.matches = reduced;
+	}
+
+	prefer(reduced: boolean): void {
+		this.matches = reduced;
+		this.dispatchEvent(new Event("change"));
+	}
+}
+
+function stubMotion(reduced: boolean): MotionPreference {
+	const preference = new MotionPreference(reduced);
+	vi.stubGlobal("matchMedia", () => preference);
+	return preference;
+}
+
+function elapsed(container: HTMLElement): string {
+	return container.querySelector(".elapsed")?.textContent ?? "";
 }
 
 describe("StateTag", () => {
@@ -58,26 +73,65 @@ describe("StateTag", () => {
 
 	test("the counter does not tick under reduced motion", async () => {
 		stubMotion(true);
-		const start = Date.now();
 		const { container } = render(StateTag, {
-			props: { state: "inProgress", startedAtMs: start, point: false },
+			props: { state: "inProgress", startedAtMs: Date.now(), point: false },
 		});
+		await tick();
 		vi.advanceTimersByTime(3000);
-		expect(container.textContent).toContain("0 ms");
-		expect(container.textContent).not.toContain("3s");
+		await tick();
+		expect(elapsed(container)).toBe("0 ms");
 	});
 
-	test("under reduced motion the counter reads the clock again when tick changes", async () => {
-		stubMotion(true);
-		const start = Date.now();
-		const { container } = render(StateTagStage, {
-			props: { startedAtMs: start },
+	test("the counter follows a motion preference that changes after it mounts", async () => {
+		const motion = stubMotion(false);
+		const { container } = render(StateTag, {
+			props: {
+				state: "inProgress",
+				startedAtMs: Date.now() - 500,
+				point: false,
+			},
 		});
 		await tick();
-		vi.setSystemTime(start + 3000);
-		container.querySelector("button")?.click();
+		expect(elapsed(container)).toBe("500 ms");
+		vi.advanceTimersByTime(2900);
 		await tick();
-		expect(container.textContent).toContain("3s");
+		expect(elapsed(container)).toBe("2s");
+
+		motion.prefer(true);
+		await tick();
+		expect(elapsed(container)).toBe("2s");
+		vi.advanceTimersByTime(2000);
+		await tick();
+		expect(elapsed(container)).toBe("2s");
+
+		motion.prefer(false);
+		await tick();
+		expect(elapsed(container)).toBe("5s");
+		vi.advanceTimersByTime(2000);
+		await tick();
+		expect(elapsed(container)).toBe("7s");
+	});
+
+	test("a new item refreshes the held counter after the preference turns to reduce", async () => {
+		const motion = stubMotion(false);
+		const view = render(StateTag, {
+			props: {
+				state: "inProgress",
+				startedAtMs: Date.now(),
+				tick: 0,
+				point: false,
+			},
+		});
+		await tick();
+		motion.prefer(true);
+		await tick();
+		vi.advanceTimersByTime(3000);
+		await tick();
+		expect(elapsed(view.container)).toBe("0 ms");
+
+		await view.rerender({ tick: 1 });
+		await tick();
+		expect(elapsed(view.container)).toBe("3s");
 	});
 
 	test("shows the rate-limit countdown in place of the elapsed time", async () => {

@@ -97,16 +97,31 @@ let reviewTarget = $state<TranscriptEntry | null>(null);
 let followedThread: string | null = null;
 let following = $state(true);
 let unseen = $state(0);
-const showJump = $derived((running && !following) || unseen > 0);
+const showJump = $derived(!following);
 let scrollQueued = false;
 let scrolledSnapshot: ScrollSnapshot = { count: 0, lastId: null };
 
 function scroller(): Element | null {
-	if (!viewport) return null;
-	return viewport.scrollHeight > viewport.clientHeight
-		? viewport
-		: document.scrollingElement;
+	for (
+		let element = viewport;
+		element;
+		element = element.parentElement ?? undefined
+	) {
+		const overflow = getComputedStyle(element).overflowY;
+		if (
+			(overflow === "auto" || overflow === "scroll") &&
+			element.scrollHeight > element.clientHeight
+		) {
+			return element;
+		}
+	}
+	return document.scrollingElement;
 }
+
+$effect(() => {
+	document.addEventListener("scroll", trackFollowing, true);
+	return () => document.removeEventListener("scroll", trackFollowing, true);
+});
 
 $effect(() => {
 	const currentItems = items;
@@ -150,7 +165,12 @@ function trackFollowing(): void {
 }
 
 function entryKey(entry: TranscriptEntry): string {
-	return isToolGroup(entry) ? `group:${entry.items[0]?.id ?? ""}` : entry.id;
+	const item = isToolGroup(entry) ? entry.items[0] : entry;
+	return JSON.stringify([
+		isToolGroup(entry) ? "group" : "item",
+		item?.turnId,
+		item?.id,
+	]);
 }
 
 function openReview(target: TranscriptEntry): void {
@@ -183,13 +203,13 @@ function jumpToLatest(): void {
 	unseen = 0;
 	const target = scroller();
 	if (target) target.scrollTo({ top: target.scrollHeight, behavior: "auto" });
-	lastRow()?.focus();
+	lastRow()?.focus({ preventScroll: true });
 }
 </script>
 
-<svelte:window onscroll={trackFollowing} onkeydown={openLatestReview} />
+<svelte:window onkeydown={openLatestReview} />
 
-<section id="transcript" class="transcript" aria-label="Transcript" tabindex="-1" bind:this={viewport} onscroll={trackFollowing}>
+<section id="transcript" class="transcript" aria-label="Transcript" tabindex="-1" bind:this={viewport}>
 	<div class="transcript-inner">
 		{#if !threadId}
 			<section class="empty-state" aria-labelledby="empty-title">
@@ -379,6 +399,11 @@ function jumpToLatest(): void {
 	}
 
 	@media (max-width: 52rem) {
+		.transcript {
+			overflow-y: visible;
+			overscroll-behavior: auto;
+		}
+
 		.jump {
 			position: fixed;
 			inset-inline: 0;

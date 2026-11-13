@@ -23,12 +23,13 @@ import type {
 } from "./types";
 
 function agent(id: string, text: string, complete: boolean): TranscriptItem {
-	return { id, kind: "agentMessage", text, complete };
+	return { id, turnId: "turn-1", kind: "agentMessage", text, complete };
 }
 
 function command(id: string, output: string): TranscriptItem {
 	return {
 		id,
+		turnId: "turn-1",
 		kind: "commandExecution",
 		command: "ls",
 		output,
@@ -54,6 +55,99 @@ function thread(turns: ThreadDetail["turns"]): ThreadDetail {
 }
 
 describe("transcript reducer", () => {
+	test("keeps repeated tool ids distinct by turn during resume and live updates", () => {
+		const first = command("call-patch", "first");
+		const second = command("call-patch", "second");
+		const resumed = transcriptForThread(
+			thread([
+				{ id: "turn-1", status: "completed", items: [first], error: null },
+				{ id: "turn-2", status: "inProgress", items: [second], error: null },
+			]),
+		);
+		expect(resumed.items.map((item) => item.turnId)).toEqual([
+			"turn-1",
+			"turn-2",
+		]);
+		const streamed = reduceNotification(resumed, {
+			type: "delta",
+			channel: "command",
+			threadId: "thread-1",
+			turnId: "turn-2",
+			itemId: "call-patch",
+			delta: " output",
+		});
+		expect(streamed.items).toEqual([
+			{ ...first, turnId: "turn-1" },
+			{ ...second, turnId: "turn-2", output: "second output" },
+		]);
+		const completed = {
+			...second,
+			status: "completed",
+			output: "final",
+		};
+		const notification: AppNotification = {
+			type: "itemCompleted",
+			threadId: "thread-1",
+			turnId: "turn-2",
+			item: completed,
+		};
+		const done = reduceNotification(
+			reduceNotification(streamed, notification),
+			notification,
+		);
+		expect(done.items).toEqual([
+			{ ...first, turnId: "turn-1" },
+			{ ...completed, turnId: "turn-2" },
+		]);
+		const next = reduceNotification(done, {
+			type: "itemStarted",
+			threadId: "thread-1",
+			turnId: "turn-3",
+			item: command("call-patch", ""),
+		});
+		expect(next.items).toHaveLength(3);
+		expect(next.items[0]).toEqual(done.items[0]);
+		expect(next.items[1]).toEqual(done.items[1]);
+		expect(next.items[2]?.turnId).toBe("turn-3");
+		const change: TranscriptItem = {
+			id: "call-patch",
+			kind: "fileChange",
+			changes: [],
+			status: "completed",
+			review: null,
+		};
+		const history = transcriptForThread(
+			thread([
+				{ id: "turn-1", status: "completed", items: [change], error: null },
+				{ id: "turn-2", status: "completed", items: [change], error: null },
+			]),
+		);
+		const review = {
+			verdict: "flagged" as const,
+			summary: "Flagged: removed code",
+		};
+		const judged = reduceNotification(history, {
+			type: "toolJudged",
+			threadId: "thread-1",
+			turnId: "turn-2",
+			itemId: "call-patch",
+			review,
+		});
+		expect(judged.items).toEqual([
+			{ ...change, turnId: "turn-1" },
+			{ ...change, turnId: "turn-2", review },
+		]);
+		const older = reduceNotification(judged, {
+			type: "toolJudged",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			itemId: "call-patch",
+			review,
+		});
+		expect(older.items[0]).toEqual({ ...change, turnId: "turn-1", review });
+		expect(older.items[1]).toBe(judged.items[1]);
+	});
+
 	test("concatenates deltas onto the matching item without mutating the previous list", () => {
 		const start = emptyTranscript("thread-1");
 		const seeded = reduceNotification(start, {
@@ -186,6 +280,7 @@ describe("transcript reducer", () => {
 		expect(next.items).toEqual([
 			{
 				id: "cmd-1",
+				turnId: "turn-1",
 				kind: "commandExecution",
 				command: "",
 				output: "hi",
@@ -220,6 +315,7 @@ describe("transcript reducer", () => {
 		expect(started.items).toEqual([
 			{
 				id: "cmd-1",
+				turnId: "turn-1",
 				kind: "commandExecution",
 				command: "pwd",
 				output: "hi!",
@@ -638,6 +734,7 @@ describe("edit review", () => {
 	};
 	const change: TranscriptItem = {
 		id: "call-7",
+		turnId: "turn-1",
 		kind: "fileChange",
 		changes: [],
 		status: "completed",
@@ -663,6 +760,7 @@ describe("edit review", () => {
 		const judged = reduceNotification(state, {
 			type: "toolJudged",
 			threadId: "thread-1",
+			turnId: "turn-1",
 			itemId: "call-7",
 			review,
 		});
@@ -671,6 +769,7 @@ describe("edit review", () => {
 			reduceNotification(state, {
 				type: "toolJudged",
 				threadId: "thread-2",
+				turnId: "turn-1",
 				itemId: "call-7",
 				review,
 			}),
@@ -679,6 +778,7 @@ describe("edit review", () => {
 			reduceNotification(state, {
 				type: "toolJudged",
 				threadId: "thread-1",
+				turnId: "turn-1",
 				itemId: "call-9",
 				review,
 			}),

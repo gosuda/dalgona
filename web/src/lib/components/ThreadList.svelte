@@ -53,7 +53,7 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 			<h1>dalgona<span aria-hidden="true">/</span></h1>
 		</div>
 		<button
-			class="point"
+			class="quiet"
 			aria-disabled={starting ? "true" : undefined}
 			onclick={() => {
 				if (!starting && connected) onNew();
@@ -79,8 +79,7 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 			<p>Start a thread to give the agent a task.</p>
 		</div>
 	{:else}
-		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-		<nav aria-label="Conversation threads" tabindex="0">
+		<nav aria-label="Conversation threads">
 			<ul>
 				{#each threads as thread (thread.id)}
 					{@const key = rowKey(thread)}

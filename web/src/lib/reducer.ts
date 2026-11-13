@@ -71,7 +71,7 @@ export function transcriptForThread(
 }
 
 function placedItem(item: TranscriptItem, turnId: string): TranscriptItem {
-	return item.kind === "userMessage" ? { ...item, turnId } : item;
+	return { ...item, turnId };
 }
 
 function sameThread(state: TranscriptState, threadId: string): boolean {
@@ -110,7 +110,9 @@ function appendItem(
 	items: readonly TranscriptItem[],
 	item: TranscriptItem,
 ): TranscriptItem[] {
-	const index = items.findIndex((entry) => entry.id === item.id);
+	const index = items.findIndex(
+		(entry) => entry.id === item.id && entry.turnId === item.turnId,
+	);
 	if (index < 0) return [...items, item];
 	const next = items.slice();
 	const existing = next[index];
@@ -123,7 +125,9 @@ function replaceItem(
 	items: readonly TranscriptItem[],
 	item: TranscriptItem,
 ): TranscriptItem[] {
-	const index = items.findIndex((entry) => entry.id === item.id);
+	const index = items.findIndex(
+		(entry) => entry.id === item.id && entry.turnId === item.turnId,
+	);
 	if (index < 0) {
 		return [...items, item];
 	}
@@ -176,15 +180,19 @@ function applyDelta(
 	notification: Extract<AppNotification, { type: "delta" }>,
 ): TranscriptState {
 	const index = state.items.findIndex(
-		(entry) => entry.id === notification.itemId,
+		(entry) =>
+			entry.id === notification.itemId && entry.turnId === notification.turnId,
 	);
 	if (index < 0) {
 		return withItems(state, [
 			...state.items,
-			placeholder(
-				notification.channel,
-				notification.itemId,
-				notification.delta,
+			placedItem(
+				placeholder(
+					notification.channel,
+					notification.itemId,
+					notification.delta,
+				),
+				notification.turnId,
 			),
 		]);
 	}
@@ -200,10 +208,14 @@ function applyDelta(
 function withToolReview(
 	state: TranscriptState,
 	itemId: string,
+	turnId: string,
 	review: EditReview,
 ): TranscriptState {
 	const index = state.items.findIndex(
-		(entry) => entry.id === itemId && entry.kind === "fileChange",
+		(entry) =>
+			entry.id === itemId &&
+			entry.turnId === turnId &&
+			entry.kind === "fileChange",
 	);
 	const current = state.items[index];
 	if (current?.kind !== "fileChange") {
@@ -273,7 +285,11 @@ export function reduceNotification(
 				turnStatus: notification.turn.status,
 				error: notification.turn.error,
 				plan: state.plan?.turnId === notification.turn.id ? state.plan : null,
-				turnStartedAtMs: notification.turn.startedAtMs ?? null,
+				turnStartedAtMs:
+					notification.turn.startedAtMs ??
+					(state.turnId === notification.turn.id
+						? state.turnStartedAtMs
+						: null),
 				turnReview:
 					state.turnId === notification.turn.id ? state.turnReview : null,
 			};
@@ -345,7 +361,12 @@ export function reduceNotification(
 			if (!sameThread(state, notification.threadId)) {
 				return state;
 			}
-			return withToolReview(state, notification.itemId, notification.review);
+			return withToolReview(
+				state,
+				notification.itemId,
+				notification.turnId,
+				notification.review,
+			);
 		}
 		case "turnJudged": {
 			if (

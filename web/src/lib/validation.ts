@@ -569,6 +569,7 @@ export function parseThreadStartResponse(value: unknown): ThreadStartResult {
 		fail("thread/start");
 	}
 	return {
+		cwd: requiredString(body, "cwd", "thread/start"),
 		thread: threadDetail(body["thread"]),
 		status: statusInfo(
 			body["model"],
@@ -1006,6 +1007,7 @@ function toolJudgedNotice(params: Members): AppNotification | null {
 	const review = parseReview(params);
 	if (
 		typeof params["threadId"] !== "string" ||
+		typeof params["turnId"] !== "string" ||
 		typeof params["itemId"] !== "string" ||
 		review === null
 	) {
@@ -1014,6 +1016,7 @@ function toolJudgedNotice(params: Members): AppNotification | null {
 	return {
 		type: "toolJudged",
 		threadId: params["threadId"],
+		turnId: params["turnId"],
 		itemId: params["itemId"],
 		review,
 	};

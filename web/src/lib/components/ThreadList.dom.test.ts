@@ -115,6 +115,16 @@ describe("thread list states", () => {
 		);
 	});
 
+	test("shows Ready instead of the raw notLoaded thread status", () => {
+		const { container } = render(ThreadList, {
+			props: props([{ ...thread, status: "notLoaded" }]),
+		});
+		expect(container.querySelector("button.thread .tag")?.textContent).toBe(
+			"Ready",
+		);
+		expect(screen.queryByText("notLoaded")).toBeNull();
+	});
+
 	test("shows the date after the state tag, not above it", () => {
 		const { container } = render(ThreadList, { props: props([thread]) });
 		const row = container.querySelector("button.thread") as HTMLElement;

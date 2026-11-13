@@ -88,10 +88,12 @@ The page holds one `Session`, which owns the connection and the page state.
 
 - Above 52rem the page has two columns, the thread list and the workspace. The workspace holds the thread header with its status band, the transcript, and the composer. The transcript scrolls inside its own column.
 - At 52rem or narrower the page stacks the parts and the document scrolls. At 52rem or narrower the thread list (not the sidebar) keeps a maximum height of 18rem and scrolls.
+- At 52rem or narrower the transcript MUST NOT be a scroll container. Wheel input MUST scroll the document.
 - The open thread has an inline-start bar and a strong title as well as its fill, so it stays distinct under forced colours.
 - At 320px nothing MUST clip or scroll sideways. Long tokens wrap anywhere.
-- The transcript follows new output only while the reader is within 32px of its end. It follows the transcript at wide widths and the window at narrow widths. Opening a thread follows its end.
-- The transcript MUST show a Jump to latest button while a turn runs and the reader is away from the end. The button MUST show the count of items that arrive while the reader is away as `· N new`. Activating the button MUST scroll to the end and move focus to the last row.
+- The transcript follows new output only while the reader is within 32px of its end. Opening a thread follows its end.
+- The client MUST observe the actual scroll container: the transcript when it overflows, else its nearest scrolling ancestor, else the document. The client MUST resolve it on each scroll, so content that overflows only after it arrives is observed. Streaming MUST preserve the reader's position after scrolling away.
+- The transcript MUST show Jump to latest whenever the reader is over 32px from the end, whether or not a turn runs. The button MUST show appended items as `· N new`. Activating it MUST scroll to the end and focus the last row without changing that scroll position. Showing the button MUST NOT move focus.
 - At 52rem or narrower the Jump to latest button MUST sit above the dock, whatever the dock's height. The client MUST measure the dock and publish its height to the button.
 - The skip link MUST name the transcript and target `#transcript`.
 - At 52rem or narrower the dock (notices, request card, composer) stays at the bottom of the viewport. Form text is at least 16px.
@@ -120,6 +122,7 @@ The licence texts of the fonts and the icon subset MUST ship in `web/static/lice
 ### Thread header and status band
 
 The thread header shows the open thread title and its state tag. The state tag is `Working`, `Waiting` while the open thread waits for the user, `Done`, `Stopped`, or `Failed`. The tag shows `Ready` when the thread is idle, and `Offline` when the connection is down.
+The client MUST map thread status `notLoaded` to idle and display `Ready` when no completed turn is known.
 A `turn/started` notification for a turn already shown as `Done`, `Stopped`, or `Failed` MUST NOT replace that status or clear its error.
 
 The client MUST keep the highest applied `seq` for each thread. It MUST ignore a `thread/status/changed` whose `seq` is lower, as `docs/spec/protocol.md` requires.
@@ -157,6 +160,8 @@ The document title MUST be `dalgona · <title> · <state>`, with the same state 
 - The reasoning row reads `Thinking`. At `high`, it is open while the turn runs. At `medium` and `low`, it is one line (see Verbosity).
 - Each command row MUST read `$ <command>`, show its state word, and show `exit <code>` and its duration when the server reports them.
 - Each nested call MUST be its own row, placed directly after its `eval` row.
+- The browser MUST identify each transcript item by its turn id and item id together.
+- Repeated item ids in different turns MUST keep distinct rows. Notifications MUST update only the item in their named turn.
 - A user message MUST underline each keyword that the server reports, and MUST list those keywords on a `Keywords:` line.
 - The composer MUST list the keywords of the draft as words on a `Keywords:` line.
 - A subagent of the open thread MUST appear in a subagent block with an `Open` button.
@@ -204,8 +209,11 @@ Each file change MUST show its edit review as one line under its diff cards, for
 ### Motion
 
 A live thread shows one breathing dot and one elapsed counter. Both MUST stop under `prefers-reduced-motion: reduce`.
-Under `prefers-reduced-motion: reduce` the counter MUST NOT tick on a timer. It MUST update only when the transcript changes.
+Under `prefers-reduced-motion: reduce` the counter MUST NOT tick on a timer. It MUST keep its value until the transcript changes.
+A turn that starts under that preference MUST show a fresh counter.
+The counter MUST follow a change of that preference while the page is open. A change to reduce MUST NOT change the counter. When motion is allowed again, it MUST show the real elapsed time at once and tick every second.
 The elapsed counter MUST read in the duration form of `web/src/lib/format.ts`: `0 ms`, `1s`, `1m 00s`, and `1h 00m`.
+The counter MUST start from the turn start that the server reports, in `turn/started` or in a resumed turn. A `turn/start` response without a start for the open turn MUST NOT clear the start. A different turn MUST NOT inherit the start of an earlier turn. The counter MUST stay empty until the server reports a start.
 A thread that waits for a user answer or an approval MUST show `Waiting`.
 During a rate-limit wait the tag MUST show `rate limited · retrying in <m>m <ss>s · esc stops` in place of the counter until `dalgona/retry/wait` reports zero.
 A finished row MUST NOT tick.
@@ -217,6 +225,8 @@ The client records subagent threads from `dalgona/thread/childSpawned`. An appro
 The approval card MUST show `Approval required`, a title, the request details, and the decision actions. The title MUST read `Run this command?` for a command and `Apply these changes?` for a file change. The kicker MUST add `· <n> of <total>` when more than one approval is open.
 
 The request details MUST scroll inside their own region. The decision actions MUST stay outside that region. The card MUST offer `Accept`, `Accept for session`, `Decline`, and `Cancel and interrupt`.
+The dock MUST fit within the viewport. Approval details MUST shrink and scroll without hiding the card header or actions.
+Approval details MUST retain a readable scroll region. The card header, actions, and composer MUST NOT overlap.
 
 While the card has focus, `y` MUST accept, `a` MUST accept for the session, `n` MUST decline, and Escape MUST cancel and interrupt the turn. Escape MUST answer the card at once, and the two-press guard of the composer MUST NOT apply to it.
 
@@ -282,6 +292,11 @@ A control that disappears while focused hands focus to the message field. The su
 
 Start thread stays focusable and reports `aria-disabled` while a start is in flight.
 
+Only one control in one view MUST carry the point fill. The holder is the primary action of an open request.
+With no request open, it is the live state tag of a running open thread.
+With no running turn, it is `Send` in the message field of an idle open thread.
+On the empty view, it is the main `Start thread` button. The sidebar `Start thread` button MUST NOT carry the point fill.
+
 ### Composer
 
 While a turn runs, Alt+Enter MUST queue the message as a follow-up. Enter MUST steer the turn instead.
@@ -327,6 +342,7 @@ Escape while no turn runs MUST do nothing.
 An `@` that starts a word MUST start a file search for the text after it, up to the next whitespace.
 The file search MUST wait 120 milliseconds after the last keystroke and MUST NOT run for an empty query.
 The file search MUST use the open thread's working directory as its only root, even when the thread is not listed.
+The client MUST take that directory from the required top-level `cwd` of the `thread/start` or `thread/resume` response.
 With no working directory known, the file search MUST send no request and MUST show no files.
 The file list MUST show up to 20 files, each with its file name and its path.
 Enter or Tab MUST insert the highlighted path as `@<path>` followed by a space, and MUST NOT send the message.
@@ -403,6 +419,11 @@ Text MUST meet a contrast ratio of 4.5 to 1 against its ground, and interface pa
 
 Each focusable control MUST show a 2 px focus ring. The keyboard paths test in `web/src/lib/components/App.dom.test.ts` MUST pass for each path.
 Each keyboard path MUST send a message, accept an approval, open and close each panel, or open the review with Ctrl+O.
+
+A scrolling region MUST NOT take a tab stop of its own.
+While the title or an action of a request card has focus, ArrowUp, ArrowDown, PageUp, PageDown, Home, and End MUST scroll its details.
+Inside the details, those keys MUST keep their native meaning.
+Each thread button MUST be a native button, so Tab reaches it and the browser scrolls the thread list to it.
 
 Each visible control MUST be at least 24 by 24 CSS pixels. A button MUST be at least `--control-height` tall, and at least `--control-height-coarse` tall under a coarse pointer. `web/checks/target-size.js` checks these rules.
 

@@ -366,6 +366,7 @@ const agentMessage = {
 };
 
 const threadStartValue = {
+	cwd: "/work",
 	thread: helloThread,
 	status: {
 		model: "gpt-test",

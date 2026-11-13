@@ -182,7 +182,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 			onRewind={(turnId) => session.openPanel("rewind", turnId)}
 		/>
 
-		<div class="dock" bind:clientHeight={dockHeight}>
+		<div class="dock" class:deciding={session.currentRequest !== null} bind:clientHeight={dockHeight}>
 			<NoticeStack
 				notices={session.notices}
 				waiting={session.waitingElsewhere}
@@ -216,6 +216,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 			{/if}
 
 			<Composer
+				deciding={session.currentRequest !== null}
 				disabled={session.connection !== "connected" || session.activeThreadId === null || session.loadingTranscript}
 				running={session.running}
 				followups={session.queuedFollowups}
@@ -303,8 +304,15 @@ function onWindowKeydown(event: KeyboardEvent): void {
 
 	.dock {
 		display: flex;
+		max-height: 100dvh;
 		min-width: 0;
 		flex-direction: column;
+	}
+
+	.dock.deciding {
+		flex: 0 0 auto;
+		overflow-y: auto;
+		overscroll-behavior: contain;
 	}
 
 	:global(.transcript) {

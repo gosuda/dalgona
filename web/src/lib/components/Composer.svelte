@@ -59,6 +59,7 @@ interface Props {
 	onFollowup: (text: string) => void;
 	onInterrupt: () => void;
 	retrying?: boolean;
+	deciding?: boolean;
 	onOpenPanel?: (kind: PanelKind) => void;
 	acceptsImages?: boolean;
 	cwd?: string;
@@ -79,6 +80,7 @@ let {
 	onFollowup,
 	onInterrupt,
 	retrying = false,
+	deciding = false,
 	onOpenPanel,
 	acceptsImages = true,
 	cwd = "",
@@ -481,7 +483,7 @@ function onKeydown(event: KeyboardEvent): void {
 
 <svelte:window onkeydown={onWindowKeydown} />
 
-<section class="composer" aria-label="Message composer" bind:this={region}>
+<section class="composer" class:deciding aria-label="Message composer" bind:this={region}>
 	<form
 		onsubmit={(event) => {
 			event.preventDefault();
@@ -494,7 +496,7 @@ function onKeydown(event: KeyboardEvent): void {
 			bind:this={textarea}
 			id="prompt"
 			name="prompt"
-			rows="3"
+			rows={deciding ? 1 : 3}
 			bind:value={text}
 			disabled={disabled}
 			placeholder="Fix the failing test and verify the change"
@@ -546,7 +548,7 @@ function onKeydown(event: KeyboardEvent): void {
 		<p id="composer-error" class="error" role="alert">{error}</p>
 
 		<div class="actions">
-			<button class={running ? "quiet" : "point"} type="submit" disabled={disabled}>{running ? "Steer" : "Send"}</button>
+			<button class={running || deciding ? "quiet" : "point"} type="submit" disabled={disabled}>{running ? "Steer" : "Send"}</button>
 			{#if running}
 				<button type="button" disabled={disabled} onclick={queueFollowup} {@attach handoffFocus(() => textarea)}>Queue follow-up</button>
 				<button class="quiet danger" type="button" disabled={disabled} onclick={onInterrupt} {@attach handoffFocus(() => textarea)}>Interrupt turn</button>
@@ -624,6 +626,30 @@ function onKeydown(event: KeyboardEvent): void {
 		flex-wrap: wrap;
 		gap: var(--space-3);
 		margin-block-start: var(--space-3);
+	}
+
+	.composer.deciding {
+		flex: 0 0 auto;
+		max-height: 40dvh;
+		overflow-y: auto;
+		padding: var(--space-2) var(--space-4);
+	}
+
+	.deciding textarea {
+		height: var(--control-height);
+		min-height: var(--control-height);
+		max-height: var(--control-height-coarse);
+		resize: none;
+		padding: var(--space-1) var(--space-2);
+	}
+
+	.deciding label {
+		margin-block-end: var(--space-1);
+	}
+
+	.deciding .actions {
+		gap: var(--space-2);
+		margin-block-start: var(--space-2);
 	}
 
 	@media (max-width: 40rem) {
