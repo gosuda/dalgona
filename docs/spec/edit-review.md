@@ -143,6 +143,8 @@ A continuation turn MUST be judged as its own unit, with only the edits that it 
 
 The turn review MUST send the cumulative change of each path, with 0 context lines, so the request holds changed lines only. A diff over the request limit MUST be cut with a truncation marker. Each file MUST take the room left divided by the number of files not yet decided. A file whose diff fits its share MUST keep all of it. The unused share MUST pass to the files after it.
 
+The turn review MUST size its base request with the longest boolean metadata encoding before it shares diff room.
+
 A path whose last change has a post-image digest but no post-image blob MUST be listed in `skipped`. That path MUST NOT be judged. A deletion has no post-image by nature, so its last change MUST be judged. The path of a deletion MUST NOT be listed in `skipped`.
 
 The turn review MUST wait at most 8 seconds for its one request. The turn review MUST NOT speak when it is truncated, but it MUST still journal its verdict. A turn that the user interrupts MUST journal an error verdict and MUST NOT add a message.

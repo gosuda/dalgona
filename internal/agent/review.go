@@ -1382,7 +1382,7 @@ func turnRequest(task string, files []fileDiff) (judgeInput, int, error) {
 	for i := range files {
 		f := &files[i]
 		added += f.added
-		base = append(base, judgeFile{Path: f.path, Kind: f.kind, Change: f.change, Added: f.added, Removed: f.removed, Truncated: true})
+		base = append(base, judgeFile{Path: f.path, Kind: f.kind, Change: f.change, Added: f.added, Removed: f.removed, Truncated: false})
 		texts = append(texts, fileText(f, f.hunks))
 	}
 	questions := turnQuestionSet()
