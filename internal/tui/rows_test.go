@@ -4,6 +4,7 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -58,6 +59,10 @@ func notifyItem(t *testing.T, m model, method, item string) model {
 	t.Helper()
 	params := []byte(`{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":` + item + `}`)
 	return rawUpdate(t, m, notificationMsg{method: method, params: params})
+}
+
+func fixtureItemKey(id string) string {
+	return itemKey("t1", "turn-1", id)
 }
 
 func entryText(t *testing.T, m model, key string) string {
@@ -118,13 +123,52 @@ func TestCommitSplitsByHeight(t *testing.T) {
 	}
 }
 
+type rowStateCase struct {
+	name    string
+	item    rpc.Item
+	columns []string
+}
+
+func rowStateCases() []rowStateCase {
+	statuses := []struct{ status, word string }{{"completed", "Done"}, {"failed", "Failed"}, {"declined", "Declined"}, {"inProgress", "Working"}}
+	var cases []rowStateCase
+	for _, s := range statuses {
+		command := rpc.Item{Type: "commandExecution", Command: strings.Repeat("a", 200), Status: s.status}
+		change := rpc.Item{Type: "fileChange", Status: s.status, Changes: []rpc.FileChange{{Path: "a.go", Kind: "update", Additions: 1, Deletions: 1}}}
+		cases = append(cases,
+			rowStateCase{"command " + s.word, command, []string{"$", s.word, "a"}},
+			rowStateCase{"file change " + s.word, change, []string{s.word, "Edited", "a.go"}},
+		)
+	}
+	return cases
+}
+
+func assertRowSeparatesColumns(t *testing.T, m *model, tc rowStateCase, width int) {
+	t.Helper()
+	lines := m.renderItem(tc.item, verbosityMedium)
+	for _, line := range lines {
+		if cells := m.screen.cells(line); cells > width-1 {
+			t.Fatalf("%s at %d columns is %d cells, want at most %d: %q", tc.name, width, cells, width-1, line)
+		}
+	}
+	header := stripANSI(lines[0])
+	fields := strings.Fields(header)
+	if len(fields) < len(tc.columns) {
+		t.Fatalf("%s at %d columns has %d fields in %q, want at least %d", tc.name, width, len(fields), header, len(tc.columns))
+	}
+	last := len(tc.columns) - 1
+	if !slices.Equal(fields[:last], tc.columns[:last]) || !strings.HasPrefix(fields[last], tc.columns[last]) {
+		t.Fatalf("%s at %d columns reads %q, want the fields %q kept apart", tc.name, width, header, tc.columns)
+	}
+}
+
 func TestRowFitsOneCellShort(t *testing.T) {
 	t.Parallel()
-	m := newModel(nil, Options{}, nil)
-	m.screen.width = 40
-	for _, line := range m.renderItem(rpc.Item{Type: "commandExecution", Command: strings.Repeat("a", 200), Status: "completed"}, verbosityMedium) {
-		if cells := m.screen.cells(line); cells > 39 {
-			t.Fatalf("row is %d cells, want at most 39: %q", cells, line)
+	for _, width := range []int{40, 100} {
+		m := newModel(nil, Options{}, nil)
+		m.screen.width = width
+		for _, tc := range rowStateCases() {
+			assertRowSeparatesColumns(t, &m, tc, width)
 		}
 	}
 }
@@ -157,21 +201,21 @@ func TestNestedReadRowKeepsSlashID(t *testing.T) {
 	m = notifyItem(t, m, "item/started", `{"type":"dynamicToolCall","id":"e1","tool":"eval","arguments":{"code":"tools.read(path = 'a.go')"},"status":"inProgress"}`)
 	m = notifyItem(t, m, "item/started", `{"type":"dynamicToolCall","id":"e1/1","tool":"read","arguments":{"path":"a.go"},"status":"inProgress"}`)
 	m = notifyItem(t, m, "item/completed", `{"type":"dynamicToolCall","id":"e1/1","tool":"read","arguments":{"path":"a.go"},"status":"completed"}`)
-	assertContains(t, entryText(t, m, "item:t1:e1/1"), "Read a.go")
+	assertContains(t, entryText(t, m, fixtureItemKey("e1/1")), "Read a.go")
 }
 
 func TestNestedWebFetchRowShowsURL(t *testing.T) {
 	t.Parallel()
 	m := rowModel(t, 100)
 	m = notifyItem(t, m, "item/completed", `{"type":"dynamicToolCall","id":"e1/4","tool":"web_fetch","arguments":{"url":"https://example.com"},"status":"completed"}`)
-	assertContains(t, entryText(t, m, "item:t1:e1/4"), "Web_fetch", "https://example.com")
+	assertContains(t, entryText(t, m, fixtureItemKey("e1/4")), "Web_fetch", "https://example.com")
 }
 
 func TestNestedExecRowIsCommand(t *testing.T) {
 	t.Parallel()
 	m := rowModel(t, 100)
 	m = notifyItem(t, m, "item/completed", `{"type":"commandExecution","id":"e1/6","command":"go test ./...","status":"completed","aggregatedOutput":"","exitCode":0}`)
-	text := entryText(t, m, "item:t1:e1/6")
+	text := entryText(t, m, fixtureItemKey("e1/6"))
 	if !strings.HasPrefix(text, "$") {
 		t.Fatalf("nested exec row does not start with $: %q", text)
 	}
@@ -182,7 +226,7 @@ func TestNestedPatchRowIsEdit(t *testing.T) {
 	t.Parallel()
 	m := rowModel(t, 100)
 	m = notifyItem(t, m, "item/completed", `{"type":"fileChange","id":"e1/7","status":"completed","changes":[{"path":"a.go","kind":{"type":"update"},"diff":"@@\n-old\n+new","additions":1,"deletions":1}]}`)
-	assertContains(t, entryText(t, m, "item:t1:e1/7"), "Edited a.go", "+1 −1", "-old", "+new")
+	assertContains(t, entryText(t, m, fixtureItemKey("e1/7")), "Edited a.go", "+1 −1", "-old", "+new")
 }
 
 func TestEvalRowAtMediumIsOneLine(t *testing.T) {
@@ -200,7 +244,7 @@ func TestNestedTodoWritesNoToolRow(t *testing.T) {
 	m := rowModel(t, 100)
 	m = notifyItem(t, m, "item/completed", `{"type":"dynamicToolCall","id":"e1/2","tool":"todo","arguments":{"items":[]},"status":"completed"}`)
 	for _, entry := range m.out.entries {
-		if entry.key == "item:t1:e1/2" && entry.text != "" {
+		if entry.key == fixtureItemKey("e1/2") && entry.text != "" {
 			t.Fatalf("successful todo wrote a tool row: %q", entry.text)
 		}
 	}
@@ -251,7 +295,7 @@ func TestEmptyAgentMessageAndNilCommitPrintNothing(t *testing.T) {
 	if got := m.renderItem(rpc.Item{Type: "agentMessage", Text: ""}, verbosityMedium); len(got) != 0 {
 		t.Fatalf("empty agent message rendered %q, want no rows", got)
 	}
-	m.commit("item:t1:empty", nil)
+	m.commit(fixtureItemKey("empty"), nil)
 	if len(m.out.entries) != 0 || len(m.out.pending) != 0 {
 		t.Fatalf("empty commit recorded entries %d and pending %q", len(m.out.entries), m.out.pending)
 	}

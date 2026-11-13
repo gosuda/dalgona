@@ -138,5 +138,14 @@ func TestApprovalResolvedByAnotherWindowCloses(t *testing.T) {
 	if len(m.approvals) != 0 {
 		t.Fatal("approval still open after another window answered it")
 	}
-	assertContains(t, m.View().Content, "Approval answered in another")
+	const notice = "Approval answered in another window"
+	var notices int
+	for _, entry := range m.out.entries {
+		if stripANSI(entry.text) == notice {
+			notices++
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("full resolution notice committed %d times, want once: %+v", notices, m.out.entries)
+	}
 }

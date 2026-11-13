@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
+	"math/bits"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -253,14 +254,14 @@ func (c *questionCard) view(s *screenState, hue, rows, width int) []string {
 	q := c.index
 	question := c.params.Questions[q]
 	title := s.fit("┌ "+fmt.Sprintf("Question %d of %d · %s", q+1, len(c.params.Questions), question.Header), width)
-	hint := s.fit("└─ ↑/↓ move · 1-7 pick · Space toggle · Enter choose · Tab next · "+s.theme.liveTag(hue, "s submit")+" · Esc dismiss", width)
 	if rows == 1 {
 		return []string{title}
 	}
+	footer := c.hintLines(s, hue, width, max(rows-2, 1))
 	if rows == 2 {
-		return []string{title, hint}
+		return []string{title, footer[0]}
 	}
-	avail := rows - 2
+	avail := rows - 1 - len(footer)
 	questionLines := rail(s.wrap(question.Question, max(width-2, 1)), "│ ", width, s)
 	options := c.optionLines(s, width)
 	preview := c.previewLines(s, width)
@@ -277,10 +278,110 @@ func (c *questionCard) view(s *screenState, hue, rows, width int) []string {
 	}
 	lines := []string{title}
 	lines = append(lines, body...)
-	for len(lines) < rows-1 {
+	for len(lines) < rows-len(footer) {
 		lines = append(lines, s.fit("│", width))
 	}
-	return append(lines, hint)
+	return append(lines, footer...)
+}
+
+const (
+	hintMove = iota
+	hintPick
+	hintToggle
+	hintChoose
+	hintNext
+	questionHintCount
+)
+
+const (
+	questionSegments   = questionHintCount + 1
+	questionHintRail   = "└─ "
+	questionHintIndent = "   "
+	questionHintJoin   = " · "
+	questionSubmit     = "s submit"
+	questionActions    = questionSubmit + questionHintJoin + "Esc dismiss"
+)
+
+func (c *questionCard) hintPriority() [questionHintCount]int {
+	if c.multi() {
+		return [questionHintCount]int{hintToggle, hintMove, hintChoose, hintPick, hintNext}
+	}
+	return [questionHintCount]int{hintMove, hintChoose, hintPick, hintNext, hintToggle}
+}
+
+func hintBreaks(widths [questionSegments]int, shown, join, room int) (starts, lines int) {
+	used := 0
+	lines = 1
+	for i, width := range widths {
+		if shown&(1<<i) == 0 {
+			continue
+		}
+		if used > 0 && used+join+width > room {
+			starts |= 1 << i
+			lines++
+			used = 0
+		}
+		if used > 0 {
+			used += join
+		}
+		used += width
+	}
+	return starts, lines
+}
+
+func (c *questionCard) hintShown(widths [questionSegments]int, join, room, maxLines int) int {
+	shown := 1 << questionHintCount
+	for _, i := range c.hintPriority() {
+		if _, lines := hintBreaks(widths, shown|1<<i, join, room); lines <= maxLines {
+			shown |= 1 << i
+		}
+	}
+	return shown
+}
+
+func (c *questionCard) hintLines(s *screenState, hue, width, maxLines int) []string {
+	texts := [questionSegments]string{
+		hintMove:          "↑/↓ move",
+		hintPick:          "1-7 pick",
+		hintToggle:        "Space toggle",
+		hintChoose:        "Enter choose",
+		hintNext:          "Tab next",
+		questionHintCount: s.dockTheme().liveTag(hue, questionSubmit) + questionHintJoin + "Esc dismiss",
+	}
+	var widths [questionSegments]int
+	for i := range questionHintCount {
+		widths[i] = s.cells(texts[i])
+	}
+	widths[questionHintCount] = s.cells(questionActions)
+	join := s.cells(questionHintJoin)
+	room := width - s.cells(questionHintRail)
+	shown := c.hintShown(widths, join, room, maxLines)
+	starts, _ := hintBreaks(widths, shown, join, room)
+	return renderHints(s, texts, shown, starts, width)
+}
+
+func renderHints(s *screenState, texts [questionSegments]string, shown, starts, width int) []string {
+	out := make([]string, 0, bits.OnesCount(uint(starts))+1)
+	var line strings.Builder
+	for i, text := range texts {
+		if shown&(1<<i) == 0 {
+			continue
+		}
+		if starts&(1<<i) != 0 {
+			out = append(out, s.fit(line.String(), width))
+			line.Reset()
+		}
+		switch {
+		case line.Len() > 0:
+			line.WriteString(questionHintJoin)
+		case len(out) == 0:
+			line.WriteString(questionHintRail)
+		default:
+			line.WriteString(questionHintIndent)
+		}
+		line.WriteString(text)
+	}
+	return append(out, s.fit(line.String(), width))
 }
 
 func rail(lines []string, prefix string, width int, s *screenState) []string {

@@ -199,8 +199,8 @@ Each table gives the part, its geometry, its type and its colour role. Browser s
 |Prompt mark|The character `›` (U+203A, East Asian Width `N`).|Bold|Point colour of the thread hue|
 |Answer line|Columns: a gutter, then the text in the free column.|System monospace|`text`|
 |Spacer|Blank rows between blocks.|n/a|n/a|
-|Tool row|Height 1 row. Columns: two blank cells and the status word in 8 cells (the same 10 cells as the live tag), verb, target in the free column, meta, time.|Verb bold|Status word `dim`. Verb `text`. Target `text`. Meta `dim`, tabular numbers. Time `dim`, right aligned, tabular numbers|
-|Failed word|In the 8-cell status field.|Bold|`failed-text`. No fill|
+|Tool row|Height 1 row. Columns: a mark or two blank cells, a state-word field of at least 8 cells ending with a space, verb, target in the free column, meta, time.|Verb bold|Status word `dim`. Verb `text`. Target `text`. Meta `dim`, tabular numbers. Time `dim`, right aligned, tabular numbers|
+|Failed word|In the state-word field.|Bold|`failed-text`. No fill|
 |Live tag|Width 10 cells: the dot, one space, and the state word in 8 cells. Height 1 row.|Bold|Point fill while a turn runs and no decision is open. Dot and label point ink. No fill in every other state|
 |Live dot|The first cell of the live tag. Alternates between U+25AA and U+25AB every 500 ms. Under `DAL_NO_MOTION` it stays on U+25AA.|n/a|Point ink|
 |Diff line|Columns: the line number, then the code in the free column.|Monospace|Line number `dim`. Added `added-text`. Removed `failed-text`, normal weight|
@@ -241,7 +241,7 @@ In the browser, reduced motion stops the dot and the elapsed time. In the termin
 
 A duration has one form. Under one second in a finished row: `<n> ms`. Under one minute: `<s>s`. Under one hour: `<m>m <ss>s`. From one hour: `<h>h <mm>m`. A ticking duration sits in a field of 7 cells, right-aligned. Token counts are not shown. The one exception is the refusal text of a rate-limit wait, which reads `rate limited for <s> s, over the <limit> s wait limit`.
 
-The state words are written in sentence case. Each has at most 7 cells, so each fits the terminal's state field of 8 cells. Both clients use the same words.
+The state words are written in sentence case. The terminal's state-word field MUST be at least 8 cells wide. It MUST fit the word and a trailing space. Both clients use the same words.
 
 |Word|Colour and form|
 |---|---|

@@ -204,5 +204,5 @@ func (m *model) approvalChangeLines(change rpc.FileChange) []string {
 }
 
 func approvalChoices(screen *screenState, hue int) []string {
-	return []string{screen.theme.liveTag(hue, "[y] accept") + "  [a] accept for session", "[n] decline  [esc] cancel and interrupt"}
+	return []string{screen.dockTheme().liveTag(hue, "[y] accept") + "  [a] accept for session", "[n] decline  [esc] cancel and interrupt"}
 }

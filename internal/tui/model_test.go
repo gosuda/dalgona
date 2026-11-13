@@ -540,21 +540,21 @@ func TestNestedTaskRowIsSubagent(t *testing.T) {
 	m = notifyItem(t, m, "item/completed", subagentItem("e1/3", "completed", `{"data":"done"}`))
 	count := 0
 	for _, key := range entryKeys(m) {
-		if key == "item:t1:e1/3" {
+		if key == fixtureItemKey("e1/3") {
 			count++
 		}
 	}
 	if count != 1 {
 		t.Fatalf("subagent call committed %d rows, want 1", count)
 	}
-	assertContains(t, entryText(t, m, "item:t1:e1/3"), "Subagent")
+	assertContains(t, entryText(t, m, fixtureItemKey("e1/3")), "Subagent")
 }
 
 func TestNestedTodoWritesPlanRowOnly(t *testing.T) {
 	t.Parallel()
 	m := notifyTurn(t, rowModel(t, 80), "turn/started", "inProgress")
 	m = notifyItem(t, m, "item/completed", `{"type":"dynamicToolCall","id":"e1/2","tool":"todo","arguments":{"items":[{"text":"read the test","status":"completed"}]},"status":"completed"}`)
-	if slices.Contains(entryKeys(m), "item:t1:e1/2") {
+	if slices.Contains(entryKeys(m), fixtureItemKey("e1/2")) {
 		t.Fatal("a successful nested todo committed its tool row")
 	}
 	m = planUpdate(t, m, `[{"step":"read the test","status":"completed"}]`)

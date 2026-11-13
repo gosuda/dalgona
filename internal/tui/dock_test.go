@@ -114,6 +114,111 @@ func TestLiveRowFieldWidths(t *testing.T) {
 	}
 }
 
+func TestLiveRowSeparatesOrdinaryFields(t *testing.T) {
+	t.Parallel()
+	for _, width := range []int{40, 100} {
+		t.Run(fmt.Sprintf("width%d", width), func(t *testing.T) {
+			t.Parallel()
+			now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+			m := liveModel(t, &now)
+			m.screen.width = width
+			now = now.Add(time.Second)
+			m.live.items = []liveItem{{Item: rpc.Item{ID: "c1", Type: "commandExecution", Command: "x", Status: "inProgress"}}}
+			row := stripANSI(m.liveRow())
+			prefix, _, found := strings.Cut(row, "1s")
+			if !found || cellCount(m, prefix) != 15 {
+				t.Fatalf("elapsed field moved within the live row: %q", row)
+			}
+			if !strings.Contains(row, "1s 1 run") {
+				t.Fatalf("live row lacks one space between elapsed and calls: %q", row)
+			}
+			if got := cellCount(m, row); got > width-1 {
+				t.Fatalf("live row is %d cells at %d columns: %q", got, width, row)
+			}
+		})
+	}
+}
+
+func TestLiveRowSaturatedFieldsSeparate(t *testing.T) {
+	t.Parallel()
+	for _, width := range []int{40, 100} {
+		t.Run(fmt.Sprintf("width%d", width), func(t *testing.T) {
+			t.Parallel()
+			assertSaturatedLiveRow(t, width)
+		})
+	}
+}
+
+func assertSaturatedLiveRow(t *testing.T, width int) {
+	t.Helper()
+	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	m := liveModel(t, &now)
+	m.screen.width = width
+	saturateLiveRow(&m)
+	m.thread.turnStartedAt = now.Add(-100 * time.Hour)
+	row := stripANSI(m.liveRow())
+	assertElapsedField(t, m, row)
+	assertContains(t, row, "59m 99+ run", "run 99+/99+ plan")
+	assertQueuedField(t, width, row)
+	if got := cellCount(m, row); got > width-1 {
+		t.Fatalf("live row is %d cells at %d columns: %q", got, width, row)
+	}
+}
+
+func saturateLiveRow(m *model) {
+	for i := range 100 {
+		m.live.items = append(m.live.items, liveItem{Item: rpc.Item{ID: fmt.Sprintf("c%d", i), Type: "commandExecution", Command: "x", Status: "inProgress"}})
+	}
+	m.queue = strings.Fields(strings.Repeat("next ", 32))
+	for range 120 {
+		m.live.plan = append(m.live.plan, rpc.TurnPlanStep{Step: "s", Status: "pending"})
+	}
+	for i := range 100 {
+		m.live.plan[i].Status = "completed"
+	}
+}
+
+func assertElapsedField(t *testing.T, m model, row string) {
+	t.Helper()
+	prefix, _, found := strings.Cut(row, "99h 59m")
+	if !found || cellCount(m, prefix) != 10 {
+		t.Fatalf("elapsed field moved within the live row: %q", row)
+	}
+}
+
+func assertQueuedField(t *testing.T, width int, row string) {
+	t.Helper()
+	if width == 100 {
+		assertContains(t, row, "plan 32 queued")
+		return
+	}
+	if strings.Contains(row, "queued") {
+		t.Fatalf("queued field must drop at %d columns: %q", width, row)
+	}
+}
+
+func TestLiveRowTinyFreeTextKeepsFixedFields(t *testing.T) {
+	t.Parallel()
+	for _, free := range []int{0, 1, 2, 3} {
+		t.Run(fmt.Sprintf("free%d", free), func(t *testing.T) {
+			t.Parallel()
+			now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+			m := liveModel(t, &now)
+			m.screen.width = liveTagCells + elapsedCells + free + 1
+			now = now.Add(time.Second)
+			m.notice = "한글 ▪ \U000f0873 long notice"
+			row := stripANSI(m.liveRow())
+			prefix, _, found := strings.Cut(row, "1s")
+			if !found || cellCount(m, prefix) != 15 {
+				t.Fatalf("elapsed field moved with %d free cells: %q", free, row)
+			}
+			if got := cellCount(m, row); got > m.screen.width-1 {
+				t.Fatalf("live row is %d cells with %d free cells: %q", got, free, row)
+			}
+		})
+	}
+}
+
 func TestLiveRowBelowFortyColumns(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)

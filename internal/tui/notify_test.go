@@ -176,7 +176,7 @@ func TestLoadThreadPrintsSeparatorOnly(t *testing.T) {
 	m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: rpc.ThreadReadResponse{Thread: rpc.Thread{ID: "t1", Name: "Plan", Turns: []rpc.Turn{{ID: "turn-1", Items: items, Status: "completed"}}}}}})
 	before := len(m.out.entries)
 	m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: rpc.ThreadReadResponse{Thread: rpc.Thread{ID: "t2", Name: "Plan"}}}})
-	for _, key := range []string{"thread:t1:1", "item:t1:c1", "item:t1:c2", "thread:t2:2"} {
+	for _, key := range []string{"thread:t1:1", fixtureItemKey("c1"), fixtureItemKey("c2"), "thread:t2:2"} {
 		if _, ok := m.out.printed[key]; !ok {
 			t.Fatalf("key %s not printed; printed %v", key, m.out.printed)
 		}

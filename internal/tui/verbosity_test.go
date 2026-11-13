@@ -113,7 +113,7 @@ func TestFailedItemFlushesGroupFirst(t *testing.T) {
 	m = notifyItem(t, m, "item/completed", commandItem("c1", "completed", 3))
 	m = notifyItem(t, m, "item/completed", commandItem("c2", "failed", 30))
 	keys := entryKeys(m)
-	if len(keys) != 3 || keys[1] != "group:turn-1:1" || keys[2] != "item:t1:c2" {
+	if len(keys) != 3 || keys[1] != "group:turn-1:1" || keys[2] != fixtureItemKey("c2") {
 		t.Fatalf("entry order %q, want the group line before the failed row", keys)
 	}
 	text := strings.Join(m.out.pending, "\n")
@@ -178,7 +178,7 @@ func TestDiffKeepsSixtyLinesAtMedium(t *testing.T) {
 	high := rowModel(t, 80)
 	high.screen.verbosity = "high"
 	full := notifyItem(t, high, "item/completed", item)
-	if strings.Contains(entryText(t, full, "item:t1:f1"), "more lines") {
+	if strings.Contains(entryText(t, full, fixtureItemKey("f1")), "more lines") {
 		t.Fatalf("high verbosity cut the diff")
 	}
 }
@@ -188,7 +188,7 @@ func TestEvalRowAtHighShowsCodeLine(t *testing.T) {
 	item := `{"type":"dynamicToolCall","id":"e1","tool":"eval","arguments":{"code":"tools.read(path = 'a')\nprint(1)"},"status":"completed","aggregatedOutput":"ok"}`
 	high := rowModel(t, 100)
 	high.screen.verbosity = "high"
-	assertContains(t, entryText(t, notifyItem(t, high, "item/completed", item), "item:t1:e1"), "Eval", "tools.read(path = 'a')", "ok")
+	assertContains(t, entryText(t, notifyItem(t, high, "item/completed", item), fixtureItemKey("e1")), "Eval", "tools.read(path = 'a')", "ok")
 	medium := notifyItem(t, holdPrints(rowModel(t, 100)), "item/completed", item)
 	assertContains(t, stripANSI(strings.Join(medium.out.pending, "\n")), "Eval · 2 lines of code · Done")
 }
@@ -224,21 +224,21 @@ func TestDeclinedCommandAtLowPrintsOwnRow(t *testing.T) {
 	m = notifyItem(t, m, "item/completed", commandItem("c2", "declined", 3))
 	text := stripANSI(strings.Join(m.out.pending, "\n"))
 	assertContains(t, text, "Ran 1 command", "Declined")
-	assertContains(t, entryText(t, m, "item:t1:c2"), "Declined")
+	assertContains(t, entryText(t, m, fixtureItemKey("c2")), "Declined")
 }
 
 func TestReviewEntryKeepsFullTextAtEveryLevel(t *testing.T) {
 	t.Parallel()
 	medium := notifyItem(t, verbosityModel(t, "medium"), "item/completed", commandItem("c1", "completed", 30))
-	assertContains(t, entryText(t, medium, "item:t1:c1"), "line 15", "line 30")
+	assertContains(t, entryText(t, medium, fixtureItemKey("c1")), "line 15", "line 30")
 	if strings.Contains(strings.Join(medium.out.pending, "\n"), "line 15") {
 		t.Fatalf("medium printed the full output instead of its last 10 lines")
 	}
 	low := notifyItem(t, verbosityModel(t, "low"), "item/completed", commandItem("c1", "completed", 30))
-	assertContains(t, entryText(t, low, "item:t1:c1"), "line 15", "line 30")
+	assertContains(t, entryText(t, low, fixtureItemKey("c1")), "line 15", "line 30")
 	evalItem := `{"type":"dynamicToolCall","id":"e1","tool":"eval","arguments":{"code":"tools.read(path = 'a')\nprint(1)"},"status":"completed","aggregatedOutput":` + strconv.Quote(numberedLines(15)) + `}`
 	evalMedium := notifyItem(t, verbosityModel(t, "medium"), "item/completed", evalItem)
-	assertContains(t, entryText(t, evalMedium, "item:t1:e1"), "tools.read(path = 'a')", "line 15")
+	assertContains(t, entryText(t, evalMedium, fixtureItemKey("e1")), "tools.read(path = 'a')", "line 15")
 }
 
 func TestFailedItemKeepsLastLinesAtLow(t *testing.T) {

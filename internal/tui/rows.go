@@ -149,6 +149,10 @@ func (m *model) settleItem(key string, item rpc.Item, children []string) {
 	m.commitFull(key, printed, full)
 }
 
+func itemKey(threadID, turnID, itemID string) string {
+	return "item:" + threadID + ":" + turnID + ":" + itemID
+}
+
 func silentTodo(item rpc.Item) bool {
 	return item.Type == "dynamicToolCall" && item.Tool == "todo" && item.Status == "completed"
 }
@@ -360,9 +364,10 @@ func (m *model) renderRow(r row) []string {
 	s := &m.screen
 	width := terminalWidth(s.width)
 	label := m.rowLabel(r.label)
-	lead := rowLeadWidth + s.cells(label)
+	state := m.rowState(r.state)
+	lead := rowLeadCells + s.cells(state) + s.cells(label)
 	subjectWidth := max(0, width-lead-rowRightCells)
-	line := s.pad(r.mark, rowLeadCells) + m.rowState(r.state) + label +
+	line := s.pad(r.mark, rowLeadCells) + state + label +
 		s.pad(s.fit(r.subject, subjectWidth), subjectWidth) +
 		s.pad(s.theme.paint(roleDim, s.fit(r.meta, rowMetaCells)), rowMetaCells) +
 		s.padLeft(s.theme.paint(roleDim, s.fit(r.duration, rowDurationCells)), rowDurationCells)
@@ -397,7 +402,8 @@ func (m *model) rowState(word string) string {
 	if word == "" {
 		return strings.Repeat(" ", rowStateCells)
 	}
-	return m.screen.pad(m.stateText(m.screen.fit(word, rowStateCells)), rowStateCells)
+	shown := m.screen.fit(word, rowStateCells)
+	return m.screen.pad(m.stateText(shown), max(rowStateCells, m.screen.cells(shown)+1))
 }
 
 func (m *model) stateText(word string) string {

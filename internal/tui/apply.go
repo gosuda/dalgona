@@ -295,7 +295,7 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 	item := live.settle(final)
 	m.live.items = slices.DeleteFunc(m.live.items, func(candidate liveItem) bool { return candidate.ID == item.ID })
 	if !answer && !isAdvisorItem(item) {
-		m.settleItem("item:"+event.ThreadID+":"+item.ID, item, children)
+		m.settleItem(itemKey(event.ThreadID, event.TurnID, item.ID), item, children)
 	}
 	return nil
 }

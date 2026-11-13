@@ -169,8 +169,12 @@ func commandDone(command string) notificationMsg {
 }
 
 func commandOutput(command, output string) notificationMsg {
+	return commandOutputIn("turn-1", command, output)
+}
+
+func commandOutputIn(turn, command, output string) notificationMsg {
 	id := "c-" + strings.ReplaceAll(command, " ", "-")
-	return notificationMsg{method: "item/completed", params: []byte(fmt.Sprintf(`{"threadId":"t1","turnId":"turn-1","completedAtMs":4,"item":{"type":"commandExecution","id":%q,"command":%q,"commandActions":[],"cwd":"/work","status":"completed","aggregatedOutput":%q,"exitCode":0}}`, id, command, output))}
+	return notificationMsg{method: "item/completed", params: []byte(fmt.Sprintf(`{"threadId":"t1","turnId":%q,"completedAtMs":4,"item":{"type":"commandExecution","id":%q,"command":%q,"commandActions":[],"cwd":"/work","status":"completed","aggregatedOutput":%q,"exitCode":0}}`, turn, id, command, output))}
 }
 
 func numberedOutput(lines int) string {

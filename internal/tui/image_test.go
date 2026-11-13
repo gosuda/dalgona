@@ -113,15 +113,48 @@ func TestClipboardToolMissingNotice(t *testing.T) {
 	}
 }
 
+func writeClipboardUtilities(t *testing.T, dir string) {
+	t.Helper()
+	const utility = "#!/bin/sh\nprintf invoked > \"$CLIPBOARD_TEST_MARKER\"\n/bin/cat \"$CLIPBOARD_TEST_IMAGE\"\n"
+	for _, name := range []string{"wl-paste", "pngpaste"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(utility), 0o700); err != nil {
+			t.Fatalf("write clipboard utility: %v", err)
+		}
+	}
+}
+
 func TestImageRefusedWithoutImageModality(t *testing.T) {
-	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("the clipboard utility fixture needs a POSIX shell")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "invoked")
+	image := writePNG(t, filepath.Join(dir, "clipboard.png"), 3, 2, 0)
+	t.Setenv("PATH", dir)
+	t.Setenv("WAYLAND_DISPLAY", "clipboard-test")
+	t.Setenv("DISPLAY", "")
+	t.Setenv("CLIPBOARD_TEST_MARKER", marker)
+	t.Setenv("CLIPBOARD_TEST_IMAGE", image)
+	writeClipboardUtilities(t, dir)
 	m := imageModel(t, new(fakeCaller), "text")
 	m, command := drive(t, m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	if command != nil {
-		t.Fatal("ctrl+v started a clipboard read for a text-only model")
+		m = runCommand(t, m, command, "")
 	}
 	if want := "this model does not accept images"; m.notice != want {
 		t.Fatalf("notice = %q, want %q", m.notice, want)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("text-only clipboard invocation marker: %v, want file absent", err)
+	}
+	m = imageModel(t, new(fakeCaller), "text", "image")
+	m, command = drive(t, m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
+	m = runCommand(t, m, command, "image-capable clipboard paste started no command")
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "invoked" {
+		t.Fatalf("image-capable clipboard marker = %q, %v; want invoked", got, err)
+	}
+	if !strings.Contains(dockText(m), "[Image #1 3x2]") {
+		t.Fatalf("clipboard image made no chip; notice %q; dock:\n%s", m.notice, dockText(m))
 	}
 }
 

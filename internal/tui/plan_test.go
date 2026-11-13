@@ -86,7 +86,7 @@ func TestSubagentRowAtEnd(t *testing.T) {
 	}
 	m = childSpawned(t, m, "child-1")
 	m = notifyItem(t, m, "item/completed", subagentItem("task-1", "completed", `{"data":"5 files"}`))
-	text := wrappedText(entryText(t, m, "item:t1:task-1"))
+	text := wrappedText(entryText(t, m, fixtureItemKey("task-1")))
 	assertContains(t, text, "Subagent", "child child-1 · /resume child-1", "5 files")
 	assertFrame(t, m.dockLines(), 40, 24)
 }
@@ -96,7 +96,7 @@ func TestSubagentErrorRowShowsError(t *testing.T) {
 	m := notifyTurn(t, rowModel(t, 80), "turn/started", "inProgress")
 	m = notifyItem(t, m, "item/started", subagentItem("task-2", "inProgress", ""))
 	m = notifyItem(t, m, "item/completed", subagentItem("task-2", "completed", `{"error":"no model"}`))
-	assertContains(t, entryText(t, m, "item:t1:task-2"), "error: no model")
+	assertContains(t, entryText(t, m, fixtureItemKey("task-2")), "error: no model")
 }
 
 func TestChildAttachesToRunningTaskCall(t *testing.T) {
@@ -107,8 +107,8 @@ func TestChildAttachesToRunningTaskCall(t *testing.T) {
 	m = notifyItem(t, m, "item/completed", subagentItem("task-1", "completed", `{"data":"first"}`))
 	m = childSpawned(t, m, "child-2")
 	m = notifyItem(t, m, "item/completed", subagentItem("task-2", "completed", `{"data":"second"}`))
-	assertContains(t, wrappedText(entryText(t, m, "item:t1:task-2")), "child child-2 · /resume child-2")
-	if text := wrappedText(entryText(t, m, "item:t1:task-1")); strings.Contains(text, "child-2") {
+	assertContains(t, wrappedText(entryText(t, m, fixtureItemKey("task-2"))), "child child-2 · /resume child-2")
+	if text := wrappedText(entryText(t, m, fixtureItemKey("task-1"))); strings.Contains(text, "child-2") {
 		t.Fatalf("finished task-1 row lists child-2: %q", text)
 	}
 }

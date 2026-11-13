@@ -223,10 +223,14 @@ func stateWord(state string, lastTurn time.Duration) string {
 func (m *model) liveRow() string {
 	width := terminalWidth(m.screen.width)
 	var row strings.Builder
-	for _, field := range m.liveFields(width) {
+	fields := m.liveFields(width)
+	for index, field := range fields {
+		if index > 1 {
+			row.WriteByte(' ')
+		}
 		row.WriteString(field.text)
 	}
-	row.WriteString(m.liveText())
+	row.WriteString(m.screen.fit(m.liveText(), max(0, width-fieldsWidth(fields))))
 	return m.screen.fit(row.String(), width)
 }
 
@@ -248,7 +252,7 @@ func (m *model) liveFields(width int) []liveField {
 }
 
 func fieldsWidth(fields []liveField) int {
-	total := 0
+	total := max(len(fields)-2, 0)
 	for _, field := range fields {
 		total += field.cells
 	}

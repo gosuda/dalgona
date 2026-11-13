@@ -102,7 +102,7 @@ func TestBlockSplitterCloseFlushesPartialLine(t *testing.T) {
 func TestStreamingMarkdownRendersClosedBlocks(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{}, nil)
-	m.screen.width = 60
+	m.screen.width = 100
 	m, _ = drive(t, m, tea.ColorProfileMsg{Profile: colorprofile.TrueColor})
 	m, _ = drive(t, m, tea.BackgroundColorMsg{Color: color.Black})
 	m, _ = drive(t, m, notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)})
@@ -118,6 +118,9 @@ func TestStreamingMarkdownRendersClosedBlocks(t *testing.T) {
 	}
 	if !strings.Contains(printed, "some text") {
 		t.Fatalf("closed paragraph not printed as text: %q", printed)
+	}
+	if strings.Contains(printed, "partial **bo") {
+		t.Fatalf("unfinished tail printed before its block closed: %q", printed)
 	}
 	keys := entryKeys(m)
 	first, second := slices.Index(keys, "block:t1:a1:0"), slices.Index(keys, "block:t1:a1:1")

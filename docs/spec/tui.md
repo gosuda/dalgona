@@ -26,7 +26,7 @@ The TUI MUST run inline, except for the review. The review is the only view that
 
 Streamed text MUST print each final block once, and the live row MUST show one tail row.
 
-The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. Its free text shows the hint, else the settings error. Otherwise it shows the rate-limit countdown while a retry wait runs, else the notice, else the activity.
+The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. One space MUST separate each field after the elapsed time from the field before it. Free text MUST fit the cells left after the fixed fields, without cutting those fields. Its free text shows the hint, else the settings error. Otherwise it shows the rate-limit countdown while a retry wait runs, else the notice, else the activity.
 
 The composer shows `› ` in the thread hue, then the typed text. The terminal cursor marks the insertion point. When the composer is empty, the placeholder follows the prompt in dim text. The placeholder never shows a keyword mark.
 
@@ -300,7 +300,7 @@ The body holds at most six rows and scrolls with `up` and `down`. It shows:
 - `reason: <reason>` when the request has a reason.
 - For a file change, one line `<label> <path> +<added> −<deleted>` for each file, then its diff from the first hunk on. The diff comes from `item/fileChange/patchUpdated` for the same item. A change with `diffOmitted` shows `diff omitted, larger than 1 MiB` instead of its diff.
 
-The two action rows are `[y] accept  [a] accept for session` and `[n] decline  [esc] cancel and interrupt`. `[y] accept` carries the one fill of the view, in the thread hue.
+The two action rows are `[y] accept  [a] accept for session` and `[n] decline  [esc] cancel and interrupt`. `[y] accept` carries the one fill of the view, in the thread hue. Before the terminal reports its background, the fill MUST use the night theme, or the soft night theme for `auto-soft`. With colour off, `[y] accept` MUST be bold reverse video with no colour.
 
 Ctrl+O opens the full review of the card, with the same lines and the full diff.
 
@@ -417,9 +417,13 @@ A theme change MUST NOT rewrite a written row.
 
 ## Transcript rows
 
-A finished item MUST print once as a row, and a row MUST NOT print again.
+A finished item MUST print once as a row.
+The client MUST identify an item by its thread, turn, and item ID.
+The same item ID in a later turn MUST print as a new row.
+A replay of a printed turn and item MUST NOT print again.
 An agent message MUST print as Markdown, with no row.
-The state column MUST be 10 cells: a mark or two blank cells, then the state word in 8 cells.
+The state column MUST start with a mark or two blank cells.
+The state-word field MUST be at least 8 cells wide and end with a space.
 The label MUST be at most 9 cells, and one space MUST follow it.
 The meta field MUST be 9 cells, and the duration MUST be 8 cells, right aligned.
 The subject MUST follow the label and its space, or the state column when no label shows.
@@ -483,7 +487,9 @@ Rows mode moves with `up`, `k`, `down`, and `j`. `tab`, `right`, and `l` move to
 
 The Other row opens typing. Typing uses the input line with the label `answer: `. `enter` stores the typed text and advances. `esc` leaves typing, or dismisses a free-text question.
 
-With two or more rows, the card keeps its title and its hint row. With one row it shows the title alone. At window height 4 or less the card is not drawn. The preview drops first, then the question text, then the options scroll.
+With two or more rows, the card keeps its title and its hint rows. With one row it shows the title alone. At window height 4 or less the card is not drawn. The hint rows list `↑/↓ move`, `1-7 pick`, `Space toggle`, `Enter choose`, and `Tab next`, then `s submit · Esc dismiss`. The hint rows MUST wrap at whole hints and MUST keep `s submit · Esc dismiss` on one row. They MUST take their rows before the body and MUST leave the title and the option under the cursor. After that, the preview drops first, then the question text, then the options scroll. If the rows left cannot hold every hint, the card MUST drop whole hints and MUST keep both actions. A single-select question drops `Space toggle` first. A multi-select question drops `Space toggle` last.
+
+The `s submit` hint carries the one fill of the view, in the thread hue. Before the terminal reports its background, the fill MUST use the night theme, or the soft night theme for `auto-soft`. With colour off, it MUST be bold reverse video with no colour.
 
 A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<itemId>`. A question closed by another window writes no row.
 
