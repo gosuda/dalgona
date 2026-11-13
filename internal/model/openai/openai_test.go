@@ -81,13 +81,7 @@ func assertFixtureUsage(t *testing.T, summary streamSummary) {
 
 func TestRequestBody(t *testing.T) {
 	t.Parallel()
-	var body []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write(successFixture())
-	}))
-	t.Cleanup(server.Close)
+	server, requestBody := requestBodyServer(t)
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	request := model.Request{
 		Model:  "gpt-test",
@@ -114,7 +108,11 @@ func TestRequestBody(t *testing.T) {
 		Reasoning: "high",
 	}
 	_ = drainStream(t, provider, request)
-	assertRequestBody(t, body)
+	captured := requestBody()
+	if captured.err != nil {
+		t.Fatalf("read request body: %v", captured.err)
+	}
+	assertRequestBody(t, captured.body)
 }
 
 func TestBaseURLFromEnvironment(t *testing.T) {
@@ -525,22 +523,38 @@ func TestEncodeRequestKeepsImagesWithToolResults(t *testing.T) {
 	sameJSON(t, input[1], `{"type":"function_call_output","call_id":"call-1","output":"done"}`)
 }
 
-func userInput(t *testing.T, message model.Message) []jsontext.Value {
+type requestBodyResult struct {
+	body []byte
+	err  error
+}
+
+func requestBodyServer(t *testing.T) (*httptest.Server, func() requestBodyResult) {
 	t.Helper()
-	var body []byte
+	results := make(chan requestBodyResult, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ = io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
+		results <- requestBodyResult{body: body, err: err}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(successFixture())
 	}))
 	t.Cleanup(server.Close)
+	return server, func() requestBodyResult { return <-results }
+}
+
+func userInput(t *testing.T, message model.Message) []jsontext.Value {
+	t.Helper()
+	server, requestBody := requestBodyServer(t)
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	_ = drainStream(t, provider, model.Request{Model: "gpt-test", Messages: []model.Message{message}})
+	captured := requestBody()
+	if captured.err != nil {
+		t.Fatalf("read request body: %v", captured.err)
+	}
 	var value struct {
 		Input []jsontext.Value `json:"input"`
 	}
-	if err := json.Unmarshal(body, &value); err != nil {
-		t.Fatalf("request JSON: %v\n%s", err, body)
+	if err := json.Unmarshal(captured.body, &value); err != nil {
+		t.Fatalf("request JSON: %v\n%s", err, captured.body)
 	}
 	return value.Input
 }
