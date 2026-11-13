@@ -34,10 +34,6 @@ var skipPaths = []string{"internal/webui/dist", "web/src/lib/codex"}
 
 var scanned = map[string]bool{".go": true, ".ts": true, ".svelte": true, ".py": true}
 
-var svelteIgnore = regexp.MustCompile(`^<!-- svelte-ignore [a-z0-9_ ,-]+ -->$`)
-
-var pythonDirective = regexp.MustCompile(`^# (noqa|type:|pragma:)`)
-
 func scanGo(path string, src []byte) []finding {
 	fset := token.NewFileSet()
 	file := fset.AddFile(path, -1, len(src))
@@ -85,14 +81,14 @@ func tsProse(_ int, text string) bool {
 }
 
 func svelteProse(_ int, text string) bool {
-	return !svelteIgnore.MatchString(text) && hasAnyPrefix(text, "//", "/*", "<!--")
+	return hasAnyPrefix(text, "//", "/*", "<!--")
 }
 
 func pythonProse(line int, text string) bool {
 	if line == 1 && strings.HasPrefix(text, "#!") {
 		return false
 	}
-	return !pythonDirective.MatchString(text) && hasAnyPrefix(text, "#", `"""`)
+	return hasAnyPrefix(text, "#", `"""`)
 }
 
 func hasAnyPrefix(text string, prefixes ...string) bool {
@@ -239,14 +235,22 @@ func TestScanLines(t *testing.T) {
 			want:   []finding{{"h.svelte", 1, "<!-- note -->"}},
 		},
 		{
-			name:   "svelte-ignore directive stays",
+			name:   "svelte-ignore directive is a comment",
 			file:   "i.svelte",
 			source: []string{"<!-- svelte-ignore a11y_no_noninteractive_tabindex -->", "<div tabindex=\"0\"></div>"},
+			want:   []finding{{"i.svelte", 1, "<!-- svelte-ignore a11y_no_noninteractive_tabindex -->"}},
 		},
 		{
-			name:   "python directives stay",
+			name:   "python directive prefixes are comments",
 			file:   "d.py",
-			source: []string{"x = 1  # noqa: E501", "# noqa", "# type: ignore[attr-defined]", "# pragma: no cover"},
+			source: []string{"# noqa", "# type: ignore[attr-defined]", "# pragma: no cover", "# noqualification needed", "# pragma: explanatory prose"},
+			want: []finding{
+				{"d.py", 1, "# noqa"},
+				{"d.py", 2, "# type: ignore[attr-defined]"},
+				{"d.py", 3, "# pragma: no cover"},
+				{"d.py", 4, "# noqualification needed"},
+				{"d.py", 5, "# pragma: explanatory prose"},
+			},
 		},
 		{
 			name:   "typescript code line",
