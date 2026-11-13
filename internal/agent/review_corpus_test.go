@@ -187,6 +187,11 @@ func checkCaseShape(t *testing.T, c corpusCase, split string) {
 	if c.Source == "" || c.Task == "" || len(c.Files) == 0 {
 		t.Errorf("case %s: source, task or files empty", c.ID)
 	}
+	if c.Unit == "turn" {
+		if _, err := maskedParts(func(s string) (string, error) { return s, nil }, c.Task, corpusReviewFiles(c), c.Unit); err != nil {
+			t.Errorf("case %s: %v", c.ID, err)
+		}
+	}
 	checkCaseGroup(t, c)
 }
 

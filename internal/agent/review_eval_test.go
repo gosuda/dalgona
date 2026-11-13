@@ -25,6 +25,8 @@ const (
 	gateSoundFlagRate = 0.02
 )
 
+var errTurnIneligible = errors.New("review measurement: ineligible turn input: no added lines")
+
 type questionTally struct {
 	tp, fp, fn int
 }
@@ -43,6 +45,11 @@ type caseResult struct {
 	latencies []time.Duration
 }
 
+type preparedCase struct {
+	parts []judgeInput
+	err   error
+}
+
 func askJudgePart(ctx context.Context, client decide.Client, part judgeInput) judgment {
 	answers, err := client.Ask(ctx, part.state, part.questions)
 	if err != nil {
@@ -56,30 +63,58 @@ func askJudgePart(ctx context.Context, client decide.Client, part judgeInput) ju
 	return judgment{scores: scores, verdict: verdict, flags: flags, spoken: reviewSpoken(scores, flags, nil)}
 }
 
-func judgeCase(ctx context.Context, client decide.Client, c corpusCase, mask func(string) (string, error)) caseResult {
+func prepareCase(c corpusCase, mask func(string) (string, error)) ([]judgeInput, error) {
 	files, err := maskedCorpusFiles(c, mask)
 	if err != nil {
-		return caseResult{unit: judgment{err: err}}
+		return nil, err
 	}
 	task, err := mask(c.Task)
 	if err != nil {
-		return caseResult{unit: judgment{err: errReviewMask}}
+		return nil, errReviewMask
 	}
-	parts, err := maskedParts(mask, task, files)
+	parts, err := maskedParts(mask, task, files, c.Unit)
 	if err != nil {
-		return caseResult{unit: judgment{err: err}}
+		return nil, err
 	}
 	if len(parts) == 0 {
-		return caseResult{unit: judgment{err: errReviewNoPart}}
+		return nil, errReviewNoPart
 	}
+	return parts, nil
+}
+
+func judgeCase(ctx context.Context, client decide.Client, c corpusCase, mask func(string) (string, error)) caseResult {
+	parts, err := prepareCase(c, mask)
+	return preparedCase{parts: parts, err: err}.judge(ctx, client, c)
+}
+
+func (p preparedCase) judge(ctx context.Context, client decide.Client, c corpusCase) caseResult {
+	if p.err != nil {
+		return caseResult{unit: judgment{err: p.err}}
+	}
+	return judgePreparedCase(ctx, client, c, p.parts)
+}
+
+func judgePreparedCase(ctx context.Context, client decide.Client, c corpusCase, parts []judgeInput) caseResult {
 	res := caseResult{parts: make([]judgment, 0, len(parts))}
 	for _, part := range parts {
 		start := time.Now()
-		res.parts = append(res.parts, askJudgePart(ctx, client, part))
+		j := askJudgePart(ctx, client, part)
+		if c.Unit == "turn" && part.truncated {
+			j = truncatedTurnJudgment(j)
+		}
+		res.parts = append(res.parts, j)
 		res.latencies = append(res.latencies, time.Since(start))
 	}
 	res.unit = combineParts(res.parts)
 	return res
+}
+
+func truncatedTurnJudgment(j judgment) judgment {
+	j.spoken = nil
+	if j.err == nil && j.verdict == reviewClean {
+		j.verdict = reviewUncertain
+	}
+	return j
 }
 
 func maskedCorpusFiles(c corpusCase, mask func(string) (string, error)) ([]reviewFile, error) {
@@ -110,10 +145,30 @@ func maskedFile(f corpusFile, mask func(string) (string, error)) (corpusFile, er
 	return corpusFile{Path: path, Kind: f.Kind, Pre: pre, Post: post}, nil
 }
 
-func maskedParts(mask func(string) (string, error), task string, files []reviewFile) ([]judgeInput, error) {
-	diffs, err := diffFiles(files, reviewContextLines)
+func maskedParts(mask func(string) (string, error), task string, files []reviewFile, unit string) ([]judgeInput, error) {
+	contextLines := reviewContextLines
+	if unit == "turn" {
+		contextLines = 0
+	}
+	diffs, err := diffFiles(files, contextLines)
 	if err != nil {
 		return nil, err
+	}
+	if unit == "turn" {
+		part, added, requestErr := turnRequest(task, diffs)
+		if requestErr != nil {
+			return nil, requestErr
+		}
+		if added == 0 {
+			return nil, errTurnIneligible
+		}
+		if maskErr := requireMasked(mask, part.state); maskErr != nil {
+			return nil, maskErr
+		}
+		for _, file := range files {
+			part.truncated = part.truncated || file.skip == "large"
+		}
+		return []judgeInput{part}, nil
 	}
 	parts, _, err := packMasked(mask, task, corpusTool, diffs)
 	return parts, err
@@ -298,17 +353,36 @@ func heldOutClient(model, key string) decide.Client {
 	})
 }
 
-func measureHeldOut(ctx context.Context, client decide.Client, mask func(string) (string, error), cases []corpusCase) *evalTotals {
+func prepareHeldOut(mask func(string) (string, error), cases []corpusCase) ([]preparedCase, error) {
+	prepared := make([]preparedCase, len(cases))
+	for i, c := range cases {
+		if c.Split != corpusSplitHeld {
+			continue
+		}
+		parts, err := prepareCase(c, mask)
+		if errors.Is(err, errTurnIneligible) {
+			return nil, fmt.Errorf("case %s: %w", c.ID, err)
+		}
+		prepared[i] = preparedCase{parts: parts, err: err}
+	}
+	return prepared, nil
+}
+
+func measureHeldOut(ctx context.Context, client decide.Client, mask func(string) (string, error), cases []corpusCase) (*evalTotals, error) {
+	prepared, err := prepareHeldOut(mask, cases)
+	if err != nil {
+		return nil, err
+	}
 	totals := &evalTotals{tally: map[string]*questionTally{}}
 	for _, q := range reviewQuestions {
 		totals.tally[q.id] = &questionTally{}
 	}
-	for _, c := range cases {
+	for i, c := range cases {
 		if c.Split == corpusSplitHeld {
-			totals.add(c, judgeCase(ctx, client, c, mask))
+			totals.add(c, prepared[i].judge(ctx, client, c))
 		}
 	}
-	return totals
+	return totals, nil
 }
 
 func reportLatency(t *testing.T, totals *evalTotals) {
@@ -350,7 +424,10 @@ func TestEditReviewHeldOutPrecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("masker: %v", err)
 	}
-	totals := measureHeldOut(t.Context(), heldOutClient(model, key), store.MaskWithError, readCorpus(t))
+	totals, err := measureHeldOut(t.Context(), heldOutClient(model, key), store.MaskWithError, readCorpus(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := totals.measured()
 	reportLatency(t, totals)
 	reportTallies(t, totals)

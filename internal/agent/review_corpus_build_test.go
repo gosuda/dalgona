@@ -728,14 +728,14 @@ func mutLayoutMotion(m *mutation) bool {
 
 func incompleteFiles(t testing.TB, files []repoFile, subject string) ([]repoFile, bool) {
 	t.Helper()
-	var out []repoFile
+	out := slices.Clone(files)
 	hit := false
-	for _, f := range files {
-		if !hit && namesFile(subject, fileBase(f.path)) {
+	for i := range out {
+		if !hit && namesFile(subject, fileBase(out[i].path)) {
 			hit = true
-			continue
+			out[i].post = bytes.Clone(out[i].pre)
+			out[i].change = corpusChange(corpusFile{Pre: string(out[i].pre), Post: string(out[i].post)})
 		}
-		out = append(out, f)
 	}
 	return out, hit && len(out) > 0 && soundFiles(t, out)
 }
@@ -879,7 +879,7 @@ func writeRatchet(t testing.TB, corpus []byte) {
 	r := ratchetFile{CorpusSHA256: hex.EncodeToString(sum[:]), Judge: corpusJudge, Threshold: corpusThreshold}
 	if raw, err := os.ReadFile(corpusRatchetPath); err == nil {
 		var prev ratchetFile
-		if json.Unmarshal(raw, &prev) == nil {
+		if json.Unmarshal(raw, &prev) == nil && prev.CorpusSHA256 == r.CorpusSHA256 && prev.Judge == r.Judge && prev.Threshold == r.Threshold {
 			r.Measured = prev.Measured
 		}
 	}

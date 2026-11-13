@@ -165,7 +165,10 @@ These notifications are live only. The server MUST NOT return them in thread his
 
 The corpus holds 472 cases in `internal/agent/testdata/editreview/cases.jsonl`. `ratchet.json` in the same directory records the SHA-256 of that file.
 
-The cases come from the history of this repository at commit `3c4b6f94`. Counted over every file of every sound commit, the history holds 24 interface-kind file changes. The sound-edit interface quota is therefore 24, not 36.
+The cases come from the history of this repository at commit `3c4b6f94`.
+The current corpus does not meet the required 620 cases or the required group quotas.
+The history contains two eligible single-file interface edits. Another 22 interface changes belong to multi-file commits.
+Those multi-file changes do not meet the single-file source rule. The required interface quota remains 36.
 
 | Group | Cases | Held out | Source |
 |---|---|---|---|
@@ -194,9 +197,13 @@ Each defect case takes one single-file sound edit, or one turn whose subject nam
 | `unclear_contract` | rename the first added function to `handle` |
 | `off_token` | replace the first added CSS variable with a literal colour |
 | `layout_motion` | add `transition: all 0.3s;` to the first added CSS block |
-| `incomplete` | remove the file that the turn subject names from a turn |
+| `incomplete` | restore the first file named by the turn subject to its pre-image, retaining its path and position |
 
 The defect pools were counted in one pass over the 1,640 non-merge commits of the history, with no quota cutoff. A defect rule takes one file of a single-file sound commit, and `incomplete` takes a turn. The pool is the number of commits where the rule finds a target.
+
+The incomplete rule MUST retain every file and its pre-image in the original order. It MUST set the named file's post-image to its pre-image.
+The rule MUST recompute that file's change kind and MUST NOT mutate the original inputs. Remaining files MUST still add work for the case to qualify.
+The recorded pool counts await a census with this corrected rule.
 
 | Question | Plan quota | Pool | Used |
 |---|---|---|---|
@@ -213,7 +220,7 @@ The defect pools were counted in one pass over the 1,640 non-merge commits of th
 | `unclear_contract` | 30 | 19 | 19 |
 | `off_token` | 30 | 0 | 0 |
 | `layout_motion` | 30 | 2 | 2 |
-| `incomplete` | 30 | 385 | 30 |
+| `incomplete` | 30 | Not measured with the corrected rule | 30 |
 
 `off_token` yields no case under this rule, because the history has no single-file interface edit that adds a `var(--...)` line. The held-out split holds 25 cases of the six short groups: 3 `needless_layer`, 1 `unguarded_state`, 11 `wasted_work`, 9 `unclear_contract` and 1 `layout_motion`.
 
@@ -221,9 +228,23 @@ Counting one file of every multi-file sound commit as well would find more candi
 
 The held-out run sends one request for each part of each held-out case. It needs `DALGONA_EDIT_REVIEW_EVAL=decisions:typesafe/jev-1.14` and `OPENROUTER_API_KEY`, and it skips without them.
 
+The evaluator MUST prepare every held-out request before any judge call or tally.
+A turn input MUST have positive additions after masking and diff construction.
+An ineligible turn input MUST fail preflight and return no measurement, not a service error or a skipped case.
+Any other preparation failure MUST count as one errored unit and MUST send no request.
+An errored unit MUST count toward the 5 percent limit.
+An unchanged named file MUST stay in the corpus input and MUST NOT appear in the changed-lines request.
+Preparation MUST build each request only once.
+
 The sound flag rate counts each part of each sound case, because each part can speak alone. Precision, recall and true flags count each case once. Recall is absent when no held-out case is a positive for the question. A case flags a question when any of its parts flags it.
 
 A unit whose parts all fail is one error. The test fails when more than 5 percent of held-out units error. The test logs, for each question, its true, false and missed flags, its precision and its recall, and the ids of the errored cases. The test logs the p95 latency of each part. A p95 above 4 seconds MUST set `reviewMaxParts` to 4 before the feature is on by default.
+
+Corpus rebuilding MUST preserve measurements only when the corpus SHA-256, judge identifier, and threshold are identical.
+A change to any identity field MUST reset `measured` to `null`.
+The held-out evaluator MUST send turn cases through the production turn request.
+It MUST send changed lines only in one bounded request.
+Truncated turns MUST NOT speak.
 
 A question MUST NOT speak until a measurement names it. A question names itself when its held-out precision is at least 0.9 and it has at least 5 held-out true flags.
 
