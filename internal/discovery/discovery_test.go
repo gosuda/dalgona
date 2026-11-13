@@ -215,6 +215,25 @@ func TestDiscoverDeclaredPluginMCPFileMustExist(t *testing.T) {
 	}
 }
 
+func TestPluginMCPStringSymlinkOutsideRootIsRejected(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	plugin := filepath.Join(home, "plugins", "linked")
+	outside := filepath.Join(root, "outside.json")
+	writeJSON(t, outside, map[string]any{"plain": map[string]any{"command": "outside"}})
+	writeJSON(t, filepath.Join(plugin, ".claude-plugin", "plugin.json"), map[string]any{
+		"mcpServers": "link.json",
+	})
+	if err := os.Symlink(outside, filepath.Join(plugin, "link.json")); err != nil {
+		t.Skipf("file symlinks are unavailable: %v", err)
+	}
+	writePluginRegistry(t, home, "linked@market", plugin, nil)
+	_, err := discovery.Discover(home, t.TempDir(), []string{"claude-plugins"}, discovery.Native{})
+	if err == nil || !strings.Contains(err.Error(), `plugin path "link.json" escapes plugin root`) {
+		t.Fatalf("got error %v, want plugin path escape", err)
+	}
+}
+
 func TestDiscoverFollowsSkillDirectorySymlink(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
@@ -234,6 +253,29 @@ func TestDiscoverFollowsSkillDirectorySymlink(t *testing.T) {
 	want := []discovery.Skill{{Name: "linked", Description: "target", Path: filepath.Join(link, "SKILL.md")}}
 	if !reflect.DeepEqual(got.Skills, want) {
 		t.Fatalf("got %#v, want linked skill %#v", got.Skills, want)
+	}
+}
+
+func TestInstructionSymlinkOutsideRootIsIgnored(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	secret := filepath.Join(root, "secret", "AGENTS.md")
+	writeFixture(t, secret, "secret")
+	link := filepath.Join(home, ".codex", "AGENTS.md")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("file symlinks are unavailable: %v", err)
+	}
+	got, err := discovery.Discover(home, t.TempDir(), []string{"codex"}, discovery.Native{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range got.Instructions {
+		if item.Path == link || item.Text == "secret" {
+			t.Fatalf("instruction read through a link outside its root: %#v", item)
+		}
 	}
 }
 

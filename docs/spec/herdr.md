@@ -4,6 +4,7 @@
 
 The herdr reporter is OPTIONAL. It is active only inside a herdr pane.
 The reporter MUST NOT block a turn when herdr is unavailable.
+The reporter MUST bound each herdr command with a 5 s timeout.
 
 ## Activation
 
@@ -41,16 +42,16 @@ The command result MUST contain the string field `.result.pane.pane_id`.
 The reporter MUST then run:
 
 ```text
-herdr pane run <child-pane> "dalgona --resume <child-thread>"
+herdr pane run <subagent-pane> "dalgona --resume <subagent-thread>"
 ```
 
-The child command MUST be one argument after the pane ID.
+The subagent command MUST be one argument after the pane ID.
 
 ## Failure behavior
 
-A command failure MUST be logged with `log/slog`.
+The reporter MUST log each command failure with `log/slog`.
 The reporter MUST log at most one failure for its lifetime.
-A failed report, release, split, or child-pane command MUST return control to the caller without an error.
+A failed report, release, split, or subagent pane command MUST return control to the caller without an error.
 A malformed split response MUST count as a command failure.
 Cancellation MUST stop the command and MUST follow the same failure rule.
 

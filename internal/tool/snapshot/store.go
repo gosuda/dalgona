@@ -485,10 +485,6 @@ func rangesCover(ranges []Range, first, last int) bool {
 	return false
 }
 
-func rangesEqual(left, right []Range) bool {
-	return slices.Equal(left, right)
-}
-
 func soundSplices(before []byte, splices []Splice) bool {
 	if len(splices) == 0 {
 		return false

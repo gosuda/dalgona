@@ -4,17 +4,18 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/jsontext"
-	"os"
 	"runtime"
 	"slices"
+	"strings"
 	"time"
+	"unicode"
 
+	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/model"
 )
 
 func platform() (family, name string) {
@@ -55,7 +56,7 @@ func (s *server) modelList(ctx context.Context, _ jsontext.Value) (jsontext.Valu
 	if err != nil {
 		return nil, internalError(err)
 	}
-	current := s.currentConfig().Model
+	current := s.host.Config().Model
 	response := ModelListResponse{Data: make([]Model, 0, len(models))}
 	for _, m := range models {
 		efforts := make([]ReasoningEffortOption, 0, len(m.Efforts))
@@ -65,9 +66,36 @@ func (s *server) modelList(ctx context.Context, _ jsontext.Value) (jsontext.Valu
 		response.Data = append(response.Data, Model{
 			ID: m.ID, Model: m.ID, DisplayName: m.ID, IsDefault: m.ID == current,
 			DefaultReasoningEffort: defaultEffort(m.Efforts), SupportedReasoningEfforts: efforts,
+			ContextWindow: m.Context, Provider: provider(m.ID), Presets: presetRoles(m.ID),
+			InputModalities: inputModalities(m.Images),
 		})
 	}
 	return encode(response)
+}
+
+func presetRoles(id string) []string {
+	providerID, modelID, err := model.ParseModelID(id)
+	if err != nil {
+		return nil
+	}
+	preset, ok := model.PresetFor(providerID)
+	if !ok {
+		return nil
+	}
+	var roles []string
+	for _, role := range []struct{ name, id string }{{"default", preset.Default}, {"smol", preset.Smol}, {"slow", preset.Slow}} {
+		if role.id == modelID {
+			roles = append(roles, role.name)
+		}
+	}
+	return roles
+}
+
+func inputModalities(images bool) []string {
+	if images {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
 }
 
 func defaultEffort(efforts []string) string {
@@ -81,7 +109,7 @@ func defaultEffort(efforts []string) string {
 }
 
 func (s *server) configRead(context.Context, jsontext.Value) (jsontext.Value, error) {
-	cfg := s.currentConfig()
+	cfg := s.host.Config()
 	return encode(ConfigReadResponse{
 		Config: ConfigValues{
 			Model: cfg.Model, ModelProvider: provider(cfg.Model), ApprovalPolicy: policyName(string(cfg.Approval)),
@@ -97,8 +125,60 @@ func settingKey(keyPath string, value any) (string, any, error) {
 		return mappedSettingKey(keyPath, value)
 	case "model", "approval", "sandbox", "reasoning":
 		return directSettingKey(keyPath, value)
+	case "verbosity", "theme", "icons":
+		return choiceSettingKey(keyPath, value)
+	case "statusHide":
+		return statusHideSettingKey(value)
+	case "editReview":
+		return flagSettingKey("edit_review.enabled", "editReview", value)
+	case "notifications":
+		return flagSettingKey("notifications", "notifications", value)
 	}
 	return "", nil, invalidParams("unsupported keyPath " + keyPath)
+}
+
+func choiceSettingKey(key string, value any) (string, any, error) {
+	text, ok := value.(string)
+	if !ok {
+		return "", nil, invalidParams(key + " must be a string")
+	}
+	if !interactiveOption(key, text) {
+		return "", nil, invalidParams("unsupported " + key + " " + text)
+	}
+	return key, text, nil
+}
+
+func interactiveOption(key, text string) bool {
+	for _, spec := range config.InteractiveSettings {
+		if spec.Key == key {
+			return slices.ContainsFunc(spec.Options, func(option any) bool { return option == any(text) })
+		}
+	}
+	return false
+}
+
+func statusHideSettingKey(value any) (string, any, error) {
+	items, ok := value.([]any)
+	if !ok {
+		return "status_hide", value, nil
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		text, isText := item.(string)
+		if !isText {
+			return "", nil, invalidParams("statusHide must be a list of strings")
+		}
+		ids = append(ids, text)
+	}
+	return "status_hide", ids, nil
+}
+
+func flagSettingKey(key, wire string, value any) (string, any, error) {
+	flag, ok := value.(bool)
+	if !ok {
+		return "", nil, invalidParams(wire + " must be a boolean")
+	}
+	return key, flag, nil
 }
 
 func mappedSettingKey(keyPath string, value any) (string, any, error) {
@@ -159,18 +239,12 @@ func (s *server) configValueWrite(_ context.Context, params jsontext.Value) (jso
 	if err != nil {
 		return nil, err
 	}
-	cfg := s.host.Config()
-	if writeErr := config.WriteSetting(cfg.Home, key, setting); writeErr != nil {
-		return nil, invalidParams(writeErr.Error())
-	}
-	overridesOf(s.host).set(key, setting)
-	path := cfg.SettingsPath()
-	data, err := os.ReadFile(path)
+	version, err := s.writeEdits("", config.SettingEdit{Key: key, Value: setting})
 	if err != nil {
-		return nil, internalError(err)
+		return nil, err
 	}
-	sum := sha256.Sum256(data)
-	return encode(ConfigWriteResponse{FilePath: path, Status: "ok", Version: hex.EncodeToString(sum[:])})
+	cfg := s.host.Config()
+	return encode(ConfigWriteResponse{FilePath: cfg.SettingsPath(), Status: "ok", Version: version})
 }
 
 func (s *server) authStore() *auth.Store { return s.host.Auth() }
@@ -214,7 +288,7 @@ func (s *server) loginStart(ctx context.Context, params jsontext.Value) (jsontex
 	}
 	switch loginFlow(p) {
 	case "apiKey":
-		return s.loginKey(p)
+		return s.loginKey(ctx, p)
 	case "chatgpt":
 		return s.loginBrowser(ctx)
 	case "chatgptDeviceCode":
@@ -224,7 +298,7 @@ func (s *server) loginStart(ctx context.Context, params jsontext.Value) (jsontex
 	if name == "" {
 		return nil, invalidParams("account/login/start needs a type or a provider")
 	}
-	return nil, invalidParams("login for " + name + " runs in the terminal: dal login " + name)
+	return nil, invalidParams("login for " + name + " runs in the terminal: " + string(s.host.Config().Product) + " login " + name)
 }
 
 func loginFlow(p AccountLoginStartParams) string {
@@ -240,19 +314,39 @@ func loginFlow(p AccountLoginStartParams) string {
 	return p.Type
 }
 
-func (s *server) loginKey(p AccountLoginStartParams) (jsontext.Value, error) {
+func (s *server) loginKey(ctx context.Context, p AccountLoginStartParams) (jsontext.Value, error) {
 	name := cmp.Or(p.Provider, "openai")
-	if p.APIKey == "" {
+	key := strings.TrimSpace(p.APIKey)
+	if key == "" {
 		return nil, invalidParams("provider " + name + " needs an apiKey")
+	}
+	if strings.IndexFunc(key, unicode.IsSpace) >= 0 {
+		return nil, invalidParams("the API key must be one line")
+	}
+	if !slices.Contains(auth.APIKeyProviders, name) && !slices.Contains(auth.RunnerServices, name) {
+		return nil, invalidParams("provider " + name + " does not take an API key")
 	}
 	store, err := s.credentials()
 	if err != nil {
 		return nil, err
 	}
-	if err := store.SetAPIKey(name, p.APIKey); err != nil {
+	if slices.Contains(auth.APIKeyProviders, name) {
+		if err = s.host.VerifyAPIKey(ctx, name, key); err != nil {
+			rejected := name + " did not accept the API key; it was not saved"
+			s.notifyLogin(name, rejected)
+			return nil, invalidParams(rejected)
+		}
+	}
+	if err = store.SetAPIKey(name, key); err != nil {
+		s.notifyLogin(name, err.Error())
 		return nil, invalidParams(err.Error())
 	}
+	s.notifyLogin(name, "")
 	return encode(LoginAccountResponse{Type: "apiKey"})
+}
+
+func (s *server) notifyLogin(provider, text string) {
+	s.send("account/login/completed", AccountLoginCompletedNotification{Success: text == "", Provider: provider, Error: text})
 }
 
 func (s *server) startLogin(ctx context.Context, flow func(context.Context) (oauth.Token, error)) (string, error) {
@@ -282,7 +376,7 @@ func (s *server) finishLogin(id string, token oauth.Token, err error) {
 			Type: "oauth", Access: token.Access, Refresh: token.Refresh, Expires: token.Expires.UTC().Format(time.RFC3339), Account: token.Account,
 		})
 	}
-	note := AccountLoginCompletedNotification{LoginID: id, Success: err == nil}
+	note := AccountLoginCompletedNotification{LoginID: id, Success: err == nil, Provider: "chatgpt"}
 	if err != nil {
 		note.Error = err.Error()
 	}
@@ -423,4 +517,30 @@ func (s *server) keywordsList(context.Context, jsontext.Value) (jsontext.Value, 
 		}
 	}
 	return encode(list)
+}
+
+const maxKeywordText = 64 << 10
+
+func (s *server) keywordsMatch(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
+	var p KeywordsMatchParams
+	if err := decodeParams(params, stringMembers(map[string]*string{"threadId": &p.ThreadID, "text": &p.Text, "kind": &p.Kind})); err != nil {
+		return nil, err
+	}
+	if len(p.Text) > maxKeywordText {
+		return nil, invalidParams("text exceeds 64 KiB")
+	}
+	kind := agent.InputKind(cmp.Or(p.Kind, string(agent.InputPrompt)))
+	if kind != agent.InputPrompt && kind != agent.InputSteer {
+		return nil, invalidParams("unsupported kind " + string(kind))
+	}
+	matches := s.host.KeywordMatches(p.ThreadID, p.Text, kind)
+	response := KeywordsMatchResponse{Matches: make([]KeywordMatch, 0, len(matches))}
+	for _, match := range matches {
+		response.Matches = append(response.Matches, keywordMatchOf(match))
+	}
+	return encode(response)
+}
+
+func keywordMatchOf(match agent.KeywordMatch) KeywordMatch {
+	return KeywordMatch{Word: match.Word, ByteRange: ByteRange{Start: match.Start, End: match.End}, Hue: match.Hue, Effort: match.Effort, Summary: match.Summary}
 }

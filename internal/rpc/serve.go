@@ -20,49 +20,72 @@ var methods map[string]method
 
 func init() {
 	methods = map[string]method{
-		"initialize":              (*server).initialize,
-		"thread/start":            (*server).threadStart,
-		"thread/resume":           (*server).threadResume,
-		"thread/list":             (*server).threadList,
-		"thread/read":             (*server).threadRead,
-		"thread/name/set":         (*server).threadNameSet,
-		"thread/archive":          (*server).threadArchive,
-		"thread/unarchive":        (*server).threadUnarchive,
-		"thread/compact/start":    (*server).threadCompact,
-		"thread/revert":           (*server).threadRevert,
-		"thread/fork":             (*server).threadFork,
-		"turn/start":              (*server).turnStart,
-		"turn/steer":              (*server).turnSteer,
-		"turn/interrupt":          (*server).turnInterrupt,
-		"model/list":              (*server).modelList,
-		"config/read":             (*server).configRead,
-		"config/value/write":      (*server).configValueWrite,
-		"account/read":            (*server).accountRead,
-		"account/login/start":     (*server).loginStart,
-		"account/login/cancel":    (*server).loginCancel,
-		"account/logout":          (*server).logout,
-		"skills/list":             (*server).skillsList,
-		"dalgona/keywords/list":   (*server).keywordsList,
-		"dalgona/thread/tree":     (*server).threadTree,
-		"dalgona/thread/leaf/set": (*server).leafSet,
-		"dalgona/advisor/status":  (*server).advisorStatus,
-		"dalgona/advisor/set":     (*server).advisorSet,
-		"dalgona/advisor/reset":   (*server).advisorReset,
+		"initialize":                     (*server).initialize,
+		"thread/start":                   (*server).threadStart,
+		"thread/resume":                  (*server).threadResume,
+		"thread/list":                    (*server).threadList,
+		"thread/read":                    (*server).threadRead,
+		"thread/name/set":                (*server).threadNameSet,
+		"thread/archive":                 (*server).threadArchive,
+		"thread/unarchive":               (*server).threadUnarchive,
+		"thread/compact/start":           (*server).threadCompact,
+		"thread/revert":                  (*server).threadRevert,
+		"thread/fork":                    (*server).threadFork,
+		"turn/start":                     (*server).turnStart,
+		"turn/steer":                     (*server).turnSteer,
+		"turn/interrupt":                 (*server).turnInterrupt,
+		"review/start":                   (*server).reviewStart,
+		"model/list":                     (*server).modelList,
+		"config/read":                    (*server).configRead,
+		"config/value/write":             (*server).configValueWrite,
+		"config/batchWrite":              (*server).configBatchWrite,
+		"account/read":                   (*server).accountRead,
+		"account/login/start":            (*server).loginStart,
+		"account/login/cancel":           (*server).loginCancel,
+		"dalgona/account/providers/list": (*server).accountProviders,
+		"account/logout":                 (*server).logout,
+		"skills/list":                    (*server).skillsList,
+		"mcpServerStatus/list":           (*server).mcpServerStatusList,
+		"command/exec":                   (*server).commandExec,
+		"command/exec/terminate":         (*server).commandExecTerminate,
+		"fs/readFile":                    (*server).fsReadFile,
+		"fs/writeFile":                   (*server).fsWriteFile,
+		"fs/createDirectory":             (*server).fsCreateDirectory,
+		"fs/getMetadata":                 (*server).fsGetMetadata,
+		"fs/readDirectory":               (*server).fsReadDirectory,
+		"fs/remove":                      (*server).fsRemove,
+		"fs/copy":                        (*server).fsCopy,
+		"fs/watch":                       (*server).fsWatch,
+		"fs/unwatch":                     (*server).fsUnwatch,
+		"fuzzyFileSearch":                (*server).fuzzyFileSearch,
+		"dalgona/keywords/list":          (*server).keywordsList,
+		"dalgona/keywords/match":         (*server).keywordsMatch,
+		"dalgona/thread/tree":            (*server).threadTree,
+		"dalgona/thread/leaf/set":        (*server).leafSet,
+		"dalgona/advisor/status":         (*server).advisorStatus,
+		"dalgona/advisor/set":            (*server).advisorSet,
+		"dalgona/advisor/reset":          (*server).advisorReset,
+		"dalgona/settings/read":          (*server).settingsRead,
+		"dalgona/item/output/read":       (*server).itemOutputRead,
 	}
 }
 
 type server struct {
-	host     *agent.Host
-	opts     ServeOptions
-	closing  bool
-	conn     *Conn
-	log      *slog.Logger
-	mu       sync.Mutex
-	watches  map[string]*watch
-	pending  map[string]context.CancelFunc
-	logins   map[string]context.CancelFunc
-	watchers sync.WaitGroup
-	tasks    sync.WaitGroup
+	host       *agent.Host
+	opts       ServeOptions
+	closing    bool
+	conn       *Conn
+	log        *slog.Logger
+	mu         sync.Mutex
+	watches    map[string]*watch
+	procs      map[string]context.CancelFunc
+	pending    map[string]context.CancelFunc
+	logins     map[string]context.CancelFunc
+	searches   map[string]*fuzzySearch
+	watchers   sync.WaitGroup
+	tasks      sync.WaitGroup
+	fsWatches  map[string]*fsWatcher
+	fsWatchers sync.WaitGroup
 }
 
 type watch struct {
@@ -96,6 +119,7 @@ func ServeWith(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host, o
 	s := &server{
 		host: host, log: cmp.Or(opts.Logger, slog.Default()), opts: opts,
 		watches: map[string]*watch{}, pending: map[string]context.CancelFunc{}, logins: map[string]context.CancelFunc{},
+		fsWatches: map[string]*fsWatcher{},
 	}
 	s.conn = newConnection(ctx, conn, s.handle)
 	s.conn.start()
@@ -117,6 +141,9 @@ func (s *server) shutdown() {
 	for _, stop := range s.logins {
 		stop()
 	}
+	for _, cancel := range s.procs {
+		cancel()
+	}
 	s.mu.Unlock()
 	s.tasks.Wait()
 	s.mu.Lock()
@@ -129,6 +156,7 @@ func (s *server) shutdown() {
 		w.stop()
 	}
 	s.watchers.Wait()
+	s.stopFsWatches()
 }
 
 func (s *server) handle(ctx context.Context, name string, params jsontext.Value) (jsontext.Value, error) {
@@ -191,7 +219,7 @@ func (s *server) watching(id string) bool {
 }
 
 func (s *server) newTracker(id string) *tracker {
-	return newTracker(id, s.host.Blob, s.childCwd, s.log)
+	return newTracker(id, s.host.Blob, s.childCwd, s.host.KeywordMatches, s.log)
 }
 
 func (s *server) childCwd(id string) string {
@@ -202,6 +230,7 @@ func (s *server) childCwd(id string) string {
 type snapshot struct {
 	created event.SessionCreated
 	turns   []Turn
+	usage   *ThreadTokenUsage
 }
 
 func (s *server) attach(ctx context.Context, thread *agent.Thread) (snapshot, error) {
@@ -285,7 +314,7 @@ func (s *server) fill(thread *agent.Thread, tr *tracker) (snapshot, uint64, erro
 	if len(records) > 0 {
 		head = records[len(records)-1].Seq
 	}
-	return snapshot{created: tr.created, turns: c.result()}, head, nil
+	return snapshot{created: tr.created, turns: c.result(), usage: tr.usageSnapshot()}, head, nil
 }
 
 func (s *server) run(ctx context.Context, w *watch) {
@@ -324,15 +353,29 @@ func (s *server) drain(ctx context.Context, w *watch, ch <-chan agent.Update) {
 		switch update.Kind {
 		case agent.UpdateEvent:
 			s.applyUpdate(w, update)
-		case agent.UpdateTextDelta:
-			w.tracker.agentDelta(update.ItemID, update.Delta)
-		case agent.UpdateReasoningDelta:
-			w.tracker.reasoningDelta(update.ItemID, update.Delta)
 		case agent.UpdateApproval:
-			s.ask(ctx, w, update)
-		case agent.UpdateExecOutput:
-			w.tracker.execOutput(update.CallID, update.Delta)
+			s.ask(ctx, w, ch, update)
+		case agent.UpdateQuestion:
+			s.question(ctx, w, ch, update)
+		case agent.UpdateWarning:
+			s.send("warning", WarningNotification{ThreadID: update.Thread, Message: update.Warning})
+		case agent.UpdateTextDelta, agent.UpdateReasoningDelta, agent.UpdateExecOutput, agent.UpdateRetryWait:
+			w.trackDelta(update)
 		}
+	}
+}
+
+func (w *watch) trackDelta(update agent.Update) {
+	switch update.Kind {
+	case agent.UpdateTextDelta:
+		w.tracker.agentDelta(update.ItemID, update.Delta)
+	case agent.UpdateReasoningDelta:
+		w.tracker.reasoningDelta(update.ItemID, update.Delta)
+	case agent.UpdateExecOutput:
+		w.tracker.execOutput(update.CallID, update.Delta)
+	case agent.UpdateRetryWait:
+		w.tracker.retryWait(update.Turn, update.Wait)
+	case agent.UpdateEvent, agent.UpdateApproval, agent.UpdateQuestion, agent.UpdateWarning:
 	}
 }
 
@@ -372,6 +415,7 @@ func (c *collector) turn(method string, turn Turn) {
 	}
 	if b := c.find(turn.ID); b != nil {
 		b.turn.Status, b.turn.Error = turn.Status, turn.Error
+		b.turn.CompletedAt, b.turn.DurationMs = turn.CompletedAt, turn.DurationMs
 	}
 }
 

@@ -66,6 +66,12 @@ func (t Turn) write(o *out) {
 	if t.StartedAt != 0 {
 		o.int("startedAt", t.StartedAt)
 	}
+	if t.CompletedAt != 0 {
+		o.int("completedAt", t.CompletedAt)
+	}
+	if t.DurationMs != 0 {
+		o.int("durationMs", t.DurationMs)
+	}
 	o.close()
 }
 
@@ -87,6 +93,14 @@ func (r ThreadStartResponse) write(o *out) {
 	o.str("type", r.Sandbox.Type)
 	o.close()
 	o.optStr("reasoningEffort", r.ReasoningEffort)
+	if r.TokenUsage != nil {
+		o.key("tokenUsage")
+		r.TokenUsage.write(o)
+	}
+	if r.SandboxFallback != nil {
+		o.key("sandboxFallback")
+		r.SandboxFallback.write(o)
+	}
 	o.key("thread")
 	r.Thread.write(o)
 	o.close()
@@ -151,6 +165,20 @@ func (m Model) write(o *out) {
 		o.str("reasoningEffort", effort.ReasoningEffort)
 		o.str("description", effort.Description)
 		o.close()
+	}
+	o.closeArray()
+	o.int("contextWindow", int64(m.ContextWindow))
+	o.str("provider", m.Provider)
+	o.key("presets")
+	o.openArray()
+	for _, role := range m.Presets {
+		o.text(role)
+	}
+	o.closeArray()
+	o.key("inputModalities")
+	o.openArray()
+	for _, modality := range m.InputModalities {
+		o.text(modality)
 	}
 	o.closeArray()
 	o.close()
@@ -262,6 +290,37 @@ func (k keywordList) write(o *out) {
 		o.close()
 	}
 	o.closeArray()
+}
+
+func (m KeywordMatch) write(o *out) {
+	o.open()
+	o.str("word", m.Word)
+	o.key("byteRange")
+	o.open()
+	o.int("start", int64(m.ByteRange.Start))
+	o.int("end", int64(m.ByteRange.End))
+	o.close()
+	o.key("hue")
+	o.openArray()
+	o.token(jsontext.Int(int64(m.Hue[0])))
+	o.token(jsontext.Int(int64(m.Hue[1])))
+	o.closeArray()
+	if m.Effort != "" {
+		o.str("effort", m.Effort)
+	}
+	o.str("summary", m.Summary)
+	o.close()
+}
+
+func (r KeywordsMatchResponse) write(o *out) {
+	o.open()
+	o.key("matches")
+	o.openArray()
+	for _, match := range r.Matches {
+		match.write(o)
+	}
+	o.closeArray()
+	o.close()
 }
 
 func (r ThreadTreeResponse) write(o *out) {

@@ -3,6 +3,7 @@ package google
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
@@ -174,16 +175,31 @@ func encodeContent(encoder *model.JSONEncoder, message model.Message, names map[
 		}
 		return
 	}
-	if message.Text != "" {
+	if message.Text != "" || len(message.Images) != 0 {
 		encoder.BeginObject()
 		encoder.StringKey("role", "user")
 		encoder.Key("parts")
 		encoder.BeginArray()
-		encodeTextPart(encoder, message.Text, false)
+		for _, image := range message.Images {
+			encodeImagePart(encoder, image)
+		}
+		if message.Text != "" {
+			encodeTextPart(encoder, message.Text, false)
+		}
 		encoder.EndArray()
 		encoder.EndObject()
 	}
 	encodeToolResults(encoder, message.ToolResults, names)
+}
+
+func encodeImagePart(encoder *model.JSONEncoder, image model.Image) {
+	encoder.BeginObject()
+	encoder.Key("inlineData")
+	encoder.BeginObject()
+	encoder.StringKey("mimeType", image.Mime)
+	encoder.StringKey("data", base64.StdEncoding.EncodeToString(image.Data))
+	encoder.EndObject()
+	encoder.EndObject()
 }
 
 func encodeModelContent(encoder *model.JSONEncoder, message model.Message) {
@@ -528,10 +544,13 @@ func (p *Provider) appendModels(models []model.Model, page modelListPage) []mode
 			Context:    model.ContextWindow(id, item.Input, p.cfg.ContextWindows),
 			MaxOutput:  item.Output,
 			ToolChoice: true,
+			Images:     true,
 		})
 	}
 	return models
 }
+
+func (p *Provider) SendsImages() bool { return true }
 
 func supportsGenerateContent(methods []string) bool {
 	if len(methods) == 0 {

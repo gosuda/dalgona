@@ -37,11 +37,28 @@ func writeAsk(encoder *jsontext.Encoder, modelID string, state jsontext.Value, q
 	if err := encoder.WriteToken(jsontext.BeginObject); err != nil {
 		return err
 	}
-	if modelID != "" {
-		if err := writeNameToken(encoder, "model", jsontext.String(modelID)); err != nil {
-			return err
-		}
+	if err := writeNameToken(encoder, "model", jsontext.String(modelID)); err != nil {
+		return err
 	}
+	return writeAskMembers(encoder, state, questions)
+}
+
+func RequestSize(state jsontext.Value, questions map[string]Question) (int, error) {
+	if err := validateState(state); err != nil {
+		return 0, err
+	}
+	var out bytes.Buffer
+	encoder := jsontext.NewEncoder(&out)
+	if err := encoder.WriteToken(jsontext.BeginObject); err != nil {
+		return 0, fmt.Errorf("decide: encode request: %w", err)
+	}
+	if err := writeAskMembers(encoder, state, questions); err != nil {
+		return 0, fmt.Errorf("decide: encode request: %w", err)
+	}
+	return out.Len(), nil
+}
+
+func writeAskMembers(encoder *jsontext.Encoder, state jsontext.Value, questions map[string]Question) error {
 	if err := writeNameValue(encoder, "state", state); err != nil {
 		return err
 	}

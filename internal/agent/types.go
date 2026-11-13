@@ -13,6 +13,7 @@ import (
 	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
+	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
@@ -23,6 +24,18 @@ type ProviderFactory func(onRetry RetryFunc) (*model.Registry, error)
 type ToolSet func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error)
 
 type SkillSet func(cwd string) ([]prompt.Skill, error)
+
+type MCPServerStatus struct {
+	Name   string
+	Status string
+	Error  string
+	Tools  []MCPToolStatus
+}
+
+type MCPToolStatus struct {
+	Name string
+	Spec tool.Spec
+}
 
 type RunnerFactory func(ctx context.Context, threadID, runnerName string) (runner.Runner, error)
 
@@ -60,21 +73,26 @@ type Extension interface {
 type ExtensionFactory func(t *Thread) Extension
 
 type HostConfig struct {
-	Journal        *journal.Store
-	Config         config.Config
-	Auth           *auth.Store
-	Providers      ProviderFactory
-	Tools          ToolSet
-	Runner         RunnerFactory
-	Decider        Decider
-	Extension      ExtensionFactory
-	OnChildStarted func(child *Thread, req task.Request)
-	Product        config.Product
-	Clock          func() time.Time
-	Logger         *slog.Logger
-	Skills         SkillSet
-	ToolNotes      []string
-	ProviderIDs    []string
+	Journal          *journal.Store
+	Config           config.Config
+	EditJudge        ClientFactory
+	EditFeedback     []string
+	Auth             *auth.Store
+	Providers        ProviderFactory
+	ProvidersWithKey func(provider, key string) (*model.Registry, error)
+	Tools            ToolSet
+	Runner           RunnerFactory
+	Decider          Decider
+	Extension        ExtensionFactory
+	OnChildStarted   func(child *Thread, req task.Request)
+	Product          config.Product
+	Clock            func() time.Time
+	Logger           *slog.Logger
+	Skills           SkillSet
+	MCPStatus        func(ctx context.Context, cwd string) []MCPServerStatus
+	SandboxCause     func() string
+	ToolNotes        []string
+	ProviderIDs      []string
 }
 
 type Overrides struct {
@@ -110,6 +128,7 @@ type Input struct {
 	Approval       config.Approval
 	Sandbox        config.SandboxMode
 	Verbatim       bool
+	Images         []Image
 	ExpectedTurnID string
 }
 
@@ -137,19 +156,41 @@ const (
 	UpdateReasoningDelta
 	UpdateApproval
 	UpdateExecOutput
+	UpdateRetryWait
+	UpdateQuestion
+	UpdateWarning
 )
 
 type ApprovalPrompt struct {
-	RequestID string
-	CallID    string
-	Tool      string
-	Class     tool.Class
-	Summary   string
-	Reason    string
-	Command   string
-	Commands  []string
-	Paths     []string
-	Resolved  bool
+	RequestID  string
+	CallID     string
+	Tool       string
+	Class      tool.Class
+	Summary    string
+	Reason     string
+	Command    string
+	Commands   []string
+	Paths      []string
+	Files      []ApprovalFile
+	Resolved   bool
+	Resolution string
+}
+
+type ApprovalFile struct {
+	Path     string
+	Pre      []byte
+	Post     []byte
+	Added    bool
+	Deleted  bool
+	TooLarge bool
+}
+
+type QuestionPrompt struct {
+	RequestID  string
+	CallID     string
+	Questions  []asktool.Question
+	Resolved   bool
+	Resolution asktool.Outcome
 }
 
 type Update struct {
@@ -161,6 +202,10 @@ type Update struct {
 	CallID   string
 	Delta    string
 	Approval ApprovalPrompt
+	Turn     string
+	Wait     time.Duration
+	Warning  string
+	Question QuestionPrompt
 }
 
 type ThreadInfo struct {

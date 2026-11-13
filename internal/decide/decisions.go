@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/jsontext"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,18 +45,18 @@ func NewDecisions(config DecisionsConfig) *Decisions {
 }
 
 func (d *Decisions) Ask(ctx context.Context, state jsontext.Value, questions map[string]Question) (map[string]Answer, error) {
+	if d.model == "" {
+		return nil, errors.New("decisions: model identifier is required")
+	}
 	requestCtx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
 	payload, err := encodeAsk(d.model, state, questions)
 	if err != nil {
 		return nil, err
 	}
-	if d.token == nil {
-		return nil, fmt.Errorf("decisions: token function is required")
-	}
-	token, err := d.token(requestCtx)
+	token, err := d.bearerToken(requestCtx)
 	if err != nil {
-		return nil, fmt.Errorf("decisions: token: %w", err)
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, d.endpoint, bytes.NewReader(payload))
 	if err != nil {
@@ -79,6 +80,17 @@ func (d *Decisions) Ask(ctx context.Context, state jsontext.Value, questions map
 	return answers, nil
 }
 
+func (d *Decisions) bearerToken(ctx context.Context) (string, error) {
+	if d.token == nil {
+		return "", fmt.Errorf("decisions: token function is required")
+	}
+	token, err := d.token(ctx)
+	if err != nil {
+		return "", fmt.Errorf("decisions: token: %w", err)
+	}
+	return token, nil
+}
+
 func decisionsHTTPError(resp *http.Response) error {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -96,7 +108,6 @@ type wireAnswer struct {
 	confidence    float64
 }
 
-// source: https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request.md
 func decodeDecisionAnswers(reader io.Reader, questions map[string]Question) (map[string]Answer, error) {
 	decoder := jsontext.NewDecoder(reader)
 	if err := readKind(decoder, jsontext.KindBeginObject); err != nil {

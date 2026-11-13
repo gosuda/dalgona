@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/sandbox/chosen",
+  "type": "object",
+  "required": ["threadId", "cause", "choice"],
+  "properties": {
+    "threadId": {"type": "string"},
+    "cause": {"type": "string", "minLength": 1},
+    "choice": {"type": "string", "enum": ["accept", "dangerouslyAccept"]}
+  }
+}

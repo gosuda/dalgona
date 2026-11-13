@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,8 +27,8 @@ func New() tool.Tool { return Tool{} }
 func (Tool) Spec() tool.Spec {
 	return tool.Spec{
 		Name:        "search",
-		Description: "Search the workspace. mode \"find\" lists files whose path matches the glob in pattern. A glob without / matches the file name at any depth. mode \"grep\" lists lines that match pattern, an RE2 regular expression, or plain text when literal is true. Search skips .git and every path that .gitignore or .git/info/exclude excludes. It does not follow symbolic links. It skips binary files and files over 16 MiB. find returns at most limit paths, sorted. grep returns at most limit matches as path:line:text and cuts lines at 500 characters. When results were cut, the last line starts with [Truncated:.",
-		Schema:      jsontext.Value(`{"type":"object","properties":{"mode":{"type":"string","enum":["find","grep"]},"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"literal":{"type":"boolean"},"ignore_case":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":1000}},"required":["mode","pattern"],"additionalProperties":false}`),
+		Description: "Search the workspace. mode \"find\" lists files whose path matches the glob in pattern. A glob without / matches the file name at any depth. mode \"grep\" lists lines that match pattern, an RE2 regular expression, or plain text when literal is true. mode \"symbols\" lists the definitions of files as path, line range, kind and first line, and pattern is optional; kind limits the rows to the named kinds. mode \"definition\" prints the source lines of each definition whose name matches pattern. mode \"syntax\" runs the tree-sitter query pattern on the files of the language named by lang and lists each capture as path:line: capture: text. Search skips .git and every path that .gitignore or .git/info/exclude excludes. It does not follow symbolic links. It skips binary files and files over 16 MiB. find returns at most limit paths, sorted. grep returns at most limit matches as path:line:text and cuts lines at 500 characters. When results were cut, the last line starts with [Truncated:.",
+		Schema:      jsontext.Value(`{"type":"object","properties":{"mode":{"type":"string","enum":["find","grep","symbols","definition","syntax"]},"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"literal":{"type":"boolean"},"ignore_case":{"type":"boolean"},"kind":{"type":"array","items":{"type":"string","enum":["function","method","class","interface","type","enum","constant","variable","module","macro","section"]}},"lang":{"type":"string","enum":["bash","c","c_sharp","cpp","css","go","html","java","javascript","json","kotlin","lua","markdown","php","python","ruby","rust","svelte","swift","toml","tsx","typescript","yaml"]},"limit":{"type":"integer","minimum":1,"maximum":1000}},"required":["mode"],"additionalProperties":false}`),
 		Keep:        tool.KeepHead,
 	}
 }
@@ -34,41 +36,151 @@ func (Tool) Spec() tool.Spec {
 func (Tool) Class() tool.Class { return tool.ClassRead }
 
 func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result, error) {
-	if _, err := parseArgs(call.Args); err != nil {
+	parsed, err := parseArgs(call.Args)
+	if err != nil {
 		return tool.Result{}, err
 	}
 	id := call.ID
 	if id == "" {
-		var random [16]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			return tool.Result{}, fmt.Errorf("search: allocate process id: %w", err)
+		if id, err = newProcessID("search-"); err != nil {
+			return tool.Result{}, err
 		}
-		id = "search-" + hex.EncodeToString(random[:])
 	}
+	var result outcome
+	if parsed.Mode == "grep" {
+		result, err = runGrep(ctx, env, id, call.Args)
+	} else {
+		runCtx, cancel := parseContext(ctx, parsed.Mode)
+		defer cancel()
+		result, err = runSearch(runCtx, env, id, call.Args, indexRef{})
+	}
+	if err != nil {
+		return tool.Result{}, err
+	}
+	return makeResult(result, env.Snapshots), nil
+}
+
+type exitError struct {
+	code   int
+	output []byte
+}
+
+func (e exitError) Error() string {
+	return fmt.Sprintf("search: subprocess exited %d: %s", e.code, e.output)
+}
+
+func newProcessID(prefix string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("search: allocate process id: %w", err)
+	}
+	return prefix + hex.EncodeToString(random[:]), nil
+}
+
+func searchArgs(raw jsontext.Value, ref indexRef, now time.Time) []string {
+	argv := []string{"@self", "__search", string(raw)}
+	if ref.gen == "" {
+		return argv
+	}
+	return append(argv, ref.root, ref.gen, strconv.FormatInt(now.UnixNano(), 10), strconv.FormatInt(racyWindow.Nanoseconds(), 10))
+}
+
+func parseContext(ctx context.Context, mode string) (context.Context, context.CancelFunc) {
+	if mode != "symbols" && mode != "definition" && mode != "syntax" {
+		return ctx, func() {}
+	}
+	return context.WithTimeoutCause(ctx, parseDeadline, errParseDeadline)
+}
+
+func runSearch(ctx context.Context, env tool.Env, id string, raw jsontext.Value, ref indexRef) (outcome, error) {
 	spec := runner.ProcessSpec{
-		ID: id, Argv: []string{"@self", "__search", string(call.Args)},
+		ID: id, Argv: searchArgs(raw, ref, time.Now()),
 		Dir: env.Cwd, Sandbox: env.Sandbox,
 	}
 	if err := env.Runner.Start(ctx, spec); err != nil {
-		return tool.Result{}, fmt.Errorf("search: start subprocess: %w", err)
+		return outcome{}, fmt.Errorf("search: start subprocess: %w", err)
 	}
 	data, err := collect(ctx, env.Runner, id)
 	if err != nil {
-		killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
-		defer cancel()
-		if killErr := env.Runner.Signal(killCtx, id, runner.SignalKill); killErr != nil {
-			return tool.Result{}, errors.Join(err, fmt.Errorf("search: kill subprocess: %w", killErr))
-		}
-		if waitErr := waitExit(env.Runner, id); waitErr != nil {
-			return tool.Result{}, errors.Join(err, waitErr)
-		}
-		return tool.Result{}, err
+		return outcome{}, childFailure(ctx, env.Runner, id, err)
 	}
 	result, err := decodeOutcome(data)
 	if err != nil {
-		return tool.Result{}, errors.New(string(data))
+		return outcome{}, errors.New(string(data))
 	}
-	return makeResult(result, env.Snapshots), nil
+	return result, nil
+}
+
+const refusalStatus = 2
+
+func childFailure(ctx context.Context, run runner.Runner, id string, err error) error {
+	if exit, ok := errors.AsType[exitError](err); ok {
+		if exit.code == refusalStatus {
+			return errors.New(string(exit.output))
+		}
+		return exit
+	}
+	cleanup := killAndAwait(ctx, run, id)
+	if errors.Is(context.Cause(ctx), errParseDeadline) {
+		return errors.Join(errParseDeadline, cleanup)
+	}
+	return errors.Join(err, cleanup)
+}
+
+func killAndAwait(ctx context.Context, run runner.Runner, id string) error {
+	waitCtx := ctx
+	if errors.Is(context.Cause(ctx), errParseDeadline) {
+		waitCtx = context.WithoutCancel(ctx)
+	}
+	killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	if err := run.Signal(killCtx, id, runner.SignalKill); err != nil {
+		return fmt.Errorf("search: kill subprocess: %w", err)
+	}
+	if err := runner.AwaitExit(waitCtx, run, id, 5*time.Second); err != nil {
+		return fmt.Errorf("search: wait for subprocess exit: %w", err)
+	}
+	return nil
+}
+
+func runGrep(ctx context.Context, env tool.Env, id string, raw jsontext.Value) (outcome, error) {
+	return grepWithIndex(ctx, env, indexFor(env), id, raw)
+}
+
+func grepWithIndex(ctx context.Context, env tool.Env, ref indexRef, id string, raw jsontext.Value) (outcome, error) {
+	result, err := runSearch(ctx, env, id, raw, ref)
+	if err != nil && ref.gen != "" && isIndexFailure(err) {
+		result, err = retryWithoutIndex(ctx, env, ref, raw, err)
+	}
+	if err == nil && ref.root != "" && int64(result.Unindexed) >= indexRebuildBytes {
+		startBuild(ref.root, env)
+	}
+	return result, err
+}
+
+func retryWithoutIndex(ctx context.Context, env tool.Env, ref indexRef, raw jsontext.Value, cause error) (outcome, error) {
+	slog.Default().Warn("search: index failed, retrying without it", "root", ref.root, "generation", ref.gen, "error", cause)
+	if err := forgetGeneration(ref.root, ref.gen); err != nil {
+		slog.Default().Warn("search: could not remove the failed index", "root", ref.root, "generation", ref.gen, "error", err)
+	}
+	if err := recordIndexFailure(ref.root, time.Now()); err != nil {
+		slog.Default().Warn("search: could not record the index failure", "root", ref.root, "error", err)
+	}
+	id, err := newProcessID("search-")
+	if err != nil {
+		return outcome{}, err
+	}
+	return runSearch(ctx, env, id, raw, indexRef{})
+}
+
+const corruptIndexText = "corrupt index"
+
+func isIndexFailure(err error) bool {
+	exit, ok := errors.AsType[exitError](err)
+	if !ok || exit.code != indexFailedStatus {
+		return false
+	}
+	return bytes.Contains(exit.output, []byte(errIndex.Error())) || bytes.Contains(exit.output, []byte(corruptIndexText))
 }
 
 func collect(ctx context.Context, run runner.Runner, id string) ([]byte, error) {
@@ -83,7 +195,7 @@ func collect(ctx context.Context, run runner.Runner, id string) ([]byte, error) 
 		offset = out.Next
 		if out.Exit != nil {
 			if out.Exit.Code != 0 {
-				return nil, fmt.Errorf("search: subprocess exited %d: %s", out.Exit.Code, data)
+				return nil, exitError{code: out.Exit.Code, output: data}
 			}
 			return data, nil
 		}
@@ -97,27 +209,6 @@ func collect(ctx context.Context, run runner.Runner, id string) ([]byte, error) 
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
-	}
-}
-
-const exitGrace = 5 * time.Second
-
-func waitExit(run runner.Runner, id string) error {
-	deadline := time.Now().Add(exitGrace)
-	for {
-		readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		state, readErr := run.Read(readCtx, id, 0)
-		cancel()
-		if readErr == nil && state.Exit != nil {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			if readErr != nil {
-				return fmt.Errorf("search: wait for subprocess exit: %w", readErr)
-			}
-			return errors.New("search: subprocess did not exit")
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -151,11 +242,16 @@ func makeResult(result outcome, store *snapshot.Store) tool.Result {
 }
 
 func Main(argv []string, stdout io.Writer) int {
-	if len(argv) != 1 {
-		_, _ = fmt.Fprint(stdout, "usage: __search <json-arguments>")
+	if len(argv) != 1 && len(argv) != 5 {
+		_, _ = fmt.Fprint(stdout, "usage: __search <json-arguments> [<root> <generation> <now-ns> <racy-ns>]")
 		return 2
 	}
 	parsed, err := parseArgs(jsontext.Value(argv[0]))
+	if err != nil {
+		_, _ = fmt.Fprint(stdout, err)
+		return 2
+	}
+	dir, clock, err := parseIndexArgs(argv[1:])
 	if err != nil {
 		_, _ = fmt.Fprint(stdout, err)
 		return 2
@@ -165,13 +261,16 @@ func Main(argv []string, stdout io.Writer) int {
 		_, _ = fmt.Fprint(stdout, err)
 		return 2
 	}
-	result, err := execute(cwd, parsed)
+	result, err := execute(cwd, parsed, dir, clock)
 	if err != nil {
 		_, _ = fmt.Fprint(stdout, err)
+		if errors.Is(err, errIndex) {
+			return indexFailedStatus
+		}
 		return 2
 	}
 	if _, err := stdout.Write(encodeOutcome(result)); err != nil {
-		return 1
+		return 2
 	}
 	return 0
 }

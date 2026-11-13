@@ -31,7 +31,7 @@ func TestLocal_survivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := waitForExit(t, reopened, "survival", 8*time.Second)
+	state := waitForExit(t, reopened, "survival")
 	if state.Exit.Code != 0 || state.Alive || !strings.Contains(string(state.Data), "done") {
 		t.Fatalf("unexpected recovered state: %+v", state)
 	}
@@ -46,7 +46,7 @@ func TestLocal_startIsIdempotent(t *testing.T) {
 	if err := local.Start(t.Context(), spec); err != nil {
 		t.Fatal(err)
 	}
-	waitForExit(t, local, "same", 5*time.Second)
+	waitForExit(t, local, "same")
 	data, err := os.ReadFile(counter)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestLocal_environmentDefaults(t *testing.T) {
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
 	env := []string{"PATH=" + os.Getenv("PATH"), "CI=custom", "PAGER=less"}
 	startTestProcess(t, local, ProcessSpec{ID: "env", Argv: []string{"sh", "-c", "env"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
-	state := waitForExit(t, local, "env", 5*time.Second)
+	state := waitForExit(t, local, "env")
 	values := map[string]string{}
 	for line := range strings.SplitSeq(string(state.Data), "\n") {
 		key, value, ok := strings.Cut(line, "=")
@@ -126,7 +126,7 @@ func TestLocal_resolvesSelf(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
 	startTestProcess(t, local, ProcessSpec{ID: "self", Argv: []string{"@self", "__self-test"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
-	state := waitForExit(t, local, "self", 5*time.Second)
+	state := waitForExit(t, local, "self")
 	want := "/proc/self/exe"
 	if runtime.GOOS != "linux" {
 		executable, err := os.Executable()
@@ -143,8 +143,11 @@ func TestLocal_resolvesSelf(t *testing.T) {
 func TestLocal_rejectsMismatchedProcessIdentity(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
-	startTestProcess(t, local, ProcessSpec{ID: "identity", Argv: []string{"sleep", "30"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
-	waitForAlive(t, local, "identity", 5*time.Second)
+	gate := startGatedProcess(t, local, ProcessSpec{ID: "identity", Argv: []string{"sleep", "30"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}}, "start")
+	gate.await(t)
+	if !aliveState(t, local, "identity") {
+		t.Fatal("process reported dead before its identity was changed")
+	}
 	path := filepath.Join(dir, "runs", "identity", "pid")
 	original, err := os.ReadFile(path)
 	if err != nil {
@@ -157,16 +160,22 @@ func TestLocal_rejectsMismatchedProcessIdentity(t *testing.T) {
 	if writeErr := os.WriteFile(path, []byte(fields[0]+" 0\n"), 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	state, err := local.Read(t.Context(), "identity", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Alive {
+	if aliveState(t, local, "identity") {
 		t.Fatal("mismatched process start time reported alive")
 	}
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	gate.release()
+}
+
+func aliveState(t *testing.T, local *Local, id string) bool {
+	t.Helper()
+	state, err := local.Read(t.Context(), id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state.Alive
 }
 
 func TestWriteSpawnPID_rejectsUnavailableStartTime(t *testing.T) {
@@ -185,12 +194,13 @@ func TestWriteSpawnPID_rejectsUnavailableStartTime(t *testing.T) {
 func TestLocal_signalPreservesExitRecord(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
-	startTestProcess(t, local, ProcessSpec{ID: "signal", Argv: []string{"sleep", "30"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
-	waitForAlive(t, local, "signal", 5*time.Second)
+	gate := startGatedProcess(t, local, ProcessSpec{ID: "signal", Argv: []string{"sleep", "30"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}}, "group")
+	gate.await(t)
 	if err := local.Signal(t.Context(), "signal", SignalTerm); err != nil {
 		t.Fatal(err)
 	}
-	state := waitForExit(t, local, "signal", 5*time.Second)
+	gate.release()
+	state := waitForExit(t, local, "signal")
 	if state.Exit.Code == 0 || state.Exit.Signal == "" {
 		t.Fatalf("signaled exit = %+v", state.Exit)
 	}
@@ -199,8 +209,8 @@ func TestLocal_signalPreservesExitRecord(t *testing.T) {
 func TestLocal_signalBeforePIDPreventsStart(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
-	env := append(os.Environ(), shimPauseEnvironment+"=pid:300ms")
-	startTestProcess(t, local, ProcessSpec{ID: "early", Argv: []string{"sh", "-c", "touch started; sleep 30"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
+	gate := startGatedProcess(t, local, ProcessSpec{ID: "early", Argv: []string{"sh", "-c", "touch started; sleep 30"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}}, "pid")
+	gate.await(t)
 	runDir := filepath.Join(dir, "runs", "early")
 	if _, err := os.Stat(filepath.Join(runDir, "pid")); err != nil {
 		t.Fatalf("parent did not write pid before the signal: %v", err)
@@ -208,7 +218,8 @@ func TestLocal_signalBeforePIDPreventsStart(t *testing.T) {
 	if err := local.Signal(t.Context(), "early", SignalTerm); err != nil {
 		t.Fatal(err)
 	}
-	state := waitForExit(t, local, "early", 5*time.Second)
+	gate.release()
+	state := waitForExit(t, local, "early")
 	if state.Exit.Code == 0 || state.Exit.Signal != syscall.SIGTERM.String() {
 		t.Fatalf("canceled exit = %+v", state.Exit)
 	}
@@ -223,18 +234,17 @@ func TestLocal_signalBeforePIDPreventsStart(t *testing.T) {
 func TestLocal_signalBeforeGroupReturnsNilAndEndsTerminated(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
-	env := append(os.Environ(), shimPauseEnvironment+"=start:5s")
-	startTestProcess(t, local, ProcessSpec{ID: "starting", Argv: []string{"sh", "-c", "sleep 30 & wait"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
+	gate := startGatedProcess(t, local, ProcessSpec{ID: "starting", Argv: []string{"sh", "-c", "sleep 30 & wait"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}}, "start")
+	gate.await(t)
 	runDir := filepath.Join(dir, "runs", "starting")
-	waitForFile(t, filepath.Join(runDir, "pid"), 10*time.Second)
-	time.Sleep(200 * time.Millisecond)
 	if _, err := os.Stat(filepath.Join(runDir, "pgid")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("pgid existed before the signal: %v", err)
 	}
 	if err := local.Signal(t.Context(), "starting", SignalTerm); err != nil {
 		t.Fatal(err)
 	}
-	state := waitForExit(t, local, "starting", 30*time.Second)
+	gate.release()
+	state := waitForExit(t, local, "starting")
 	if state.Exit.Code == 0 || state.Exit.Signal != syscall.SIGTERM.String() {
 		t.Fatalf("signaled exit = %+v", state.Exit)
 	}
@@ -242,29 +252,8 @@ func TestLocal_signalBeforeGroupReturnsNilAndEndsTerminated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command never started: %v", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("process group %d outlived the signal", pgid)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func waitForFile(t *testing.T, path string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s did not appear", path)
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !processGroupStopped(pgid) {
+		t.Fatalf("process group %d outlived the signal", pgid)
 	}
 }
 
@@ -283,28 +272,22 @@ func startTestProcess(t *testing.T, local *Local, spec ProcessSpec) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		for {
-			state, err := local.Read(ctx, spec.ID, 0)
-			if err == nil && (state.Exit != nil || !state.Alive) {
-				return
-			}
-			err = local.Signal(ctx, spec.ID, SignalKill)
-			if errors.Is(err, ErrProcessNotFound) {
-				return
-			}
-			if ctx.Err() != nil {
-				t.Errorf("cleanup process %s: %v", spec.ID, err)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+		err := local.Signal(context.Background(), spec.ID, SignalKill)
+		if errors.Is(err, ErrProcessNotFound) {
+			return
+		}
+		if err != nil {
+			t.Errorf("cleanup process %s: %v", spec.ID, err)
+			return
+		}
+		if err := waitShimExit(local, spec.ID); err != nil {
+			t.Errorf("cleanup process %s: %v", spec.ID, err)
 		}
 	})
 }
 
 func TestLocal_sandboxConfinesWrites(t *testing.T) {
-	if !Available() {
+	if UnavailableCause() != "" {
 		t.Skip("landlock ABI is 0")
 	}
 	dir := t.TempDir()
@@ -317,7 +300,7 @@ func TestLocal_sandboxConfinesWrites(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(outside) })
 	script := `touch ./inside && touch "$1"; rc=$?; echo rc=$rc`
 	startTestProcess(t, local, ProcessSpec{ID: "sandbox", Argv: []string{"sh", "-c", script, "_", outside}, Dir: dir, Sandbox: Sandbox{Mode: SandboxWorkspaceWrite, WritableRoots: []string{dir}}})
-	state := waitForExit(t, local, "sandbox", 8*time.Second)
+	state := waitForExit(t, local, "sandbox")
 	if state.Exit.Code != 0 {
 		t.Fatalf("sandboxed script failed: %+v output %s", state.Exit, state.Data)
 	}
@@ -333,14 +316,14 @@ func TestLocal_sandboxConfinesWrites(t *testing.T) {
 }
 
 func TestLocal_sandboxDeniesWriteThroughSymlink(t *testing.T) {
-	if !Available() {
+	if UnavailableCause() != "" {
 		t.Skip("landlock ABI is 0")
 	}
 	fixture := setupSymlinkEscape(t)
 	local := newTestLocal(t, filepath.Join(fixture.dir, "runs"))
 	script := `touch ./inside-ok; if echo pwned >> "$1"; then echo link-ok; else echo link-denied; fi`
 	startTestProcess(t, local, ProcessSpec{ID: "symlink", Argv: []string{"sh", "-c", script, "_", fixture.link}, Dir: fixture.workspace, Env: fixture.env, Sandbox: Sandbox{Mode: SandboxWorkspaceWrite, WritableRoots: []string{fixture.workspace}}})
-	state := waitForExit(t, local, "symlink", 8*time.Second)
+	state := waitForExit(t, local, "symlink")
 	if state.Exit.Code != 0 {
 		t.Fatalf("sandboxed script failed: %+v output %s", state.Exit, state.Data)
 	}
@@ -393,42 +376,27 @@ func setupSymlinkEscape(t *testing.T) symlinkFixture {
 	return symlinkFixture{dir: dir, workspace: workspace, link: link, outside: outside, env: env}
 }
 
-func waitForExit(t *testing.T, local *Local, id string, timeout time.Duration) Output {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		state, err := local.Read(t.Context(), id, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if state.Exit != nil {
-			return state
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("process %s did not exit", id)
-		}
-		time.Sleep(10 * time.Millisecond)
+func waitShimExit(local *Local, id string) error {
+	identity, err := readIdentity(filepath.Join(local.dir, id, "pid"))
+	if err != nil {
+		return err
 	}
+	return waitProcessExit(identity.pid, identity.start)
 }
 
-func waitForAlive(t *testing.T, local *Local, id string, timeout time.Duration) {
+func waitForExit(t *testing.T, local *Local, id string) Output {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		state, err := local.Read(t.Context(), id, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if state.Alive {
-			if _, err := readProcessGroup(filepath.Join(local.dir, id)); err == nil {
-				return
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("process %s did not become alive", id)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := waitShimExit(local, id); err != nil {
+		t.Fatalf("wait for shim %s: %v", id, err)
 	}
+	state, err := local.Read(t.Context(), id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Exit == nil {
+		t.Fatalf("shim %s exited without an exit record: %+v", id, state)
+	}
+	return state
 }
 
 func TestLocal_readDrainsTailAfterExit(t *testing.T) {

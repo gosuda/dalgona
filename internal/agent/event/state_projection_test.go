@@ -1,10 +1,27 @@
 package event_test
 
 import (
+	"encoding/json/jsontext"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 )
+
+func TestFoldScriptEffectReportsMismatch(t *testing.T) {
+	t.Parallel()
+	_, err := foldEvents(t, event.State{},
+		event.TurnStarted{TurnID: "t1"},
+		event.ScriptStarted{RunID: "r1", SourceBlob: event.BlobRef{Blob: digest, Bytes: 1}, Entry: "main", Args: jsontext.Value(`{}`), Seed: 9},
+		event.ScriptEffect{RunID: "r1", N: 0, Op: "read", ArgsSHA: digest, Result: jsontext.Value(`1`)},
+		event.ScriptEffect{RunID: "r1", N: 0, Op: "write", ArgsSHA: digest, Result: jsontext.Value(`1`)},
+	)
+	if err == nil {
+		t.Fatal("fold accepted a changed script effect replay")
+	}
+	if err.Error() != "event: fold: script effect r1/0 mismatch" {
+		t.Fatalf("mismatch error = %q", err.Error())
+	}
+}
 
 func createdWithModel(model string) event.SessionCreated {
 	return event.SessionCreated{

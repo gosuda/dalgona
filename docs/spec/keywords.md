@@ -4,7 +4,7 @@
 
 A `Keyword` MUST contain a word, a hue range, an optional required-tool list, an effort, a notice, and an enabled state.
 
-`Builtins("dal")` MUST return only `ultrathink`. `Builtins("dalgona")` MUST return all four built-ins in this order.
+`Builtins("dal")` MUST return `ultrathink`, `decide` and `simplify`. `Builtins("dalgona")` MUST return every built-in in table order.
 
 | Word | Hue | Required tools | Effort |
 | --- | --- | --- | --- |
@@ -12,8 +12,11 @@ A `Keyword` MUST contain a word, a hue range, an optional required-tool list, an
 | `jevify` | `[300, 420]` | `eval` | `default` |
 | `workflowz` | `[30, 150]` | `eval`, `task` | `default` |
 | `orchestrate` | `[150, 280]` | `task` | `default` |
+| `ratchet` | `[20, 70]` | `ratchet`, `exec`, `task` | `default` |
+| `decide` | `[200, 250]` | none | `default` |
+| `simplify` | `[90, 140]` | none | `default` |
 
-The package MUST embed every notice from `notices/*.md`. Every built-in MUST start enabled for its supported product.
+The package MUST embed every notice from `notices/*.md`. Every built-in MUST start enabled for its supported product. Each built-in MUST read `notices/<word>.md`. A missing or empty notice MUST stop the program when the table is built. Every file in `notices/` MUST belong to a built-in.
 
 ## Custom keywords
 
@@ -28,10 +31,18 @@ A disabled entry MUST NOT appear in the merged table. This rule MUST allow `[key
 The matcher MUST hide non-prose regions without changing rune positions. It MUST preserve newlines. It MUST support these regions:
 
 - Fenced code blocks with at least three backticks or tildes. A fence MAY have up to three leading spaces. A closing fence MUST use the same marker and at least the opening length. An unclosed fence MUST hide the rest of the prompt.
+- An opening backtick fence MUST NOT have a backtick in its info string.
+- A closing fence MUST contain only whitespace after its marker.
 - Inline code spans delimited by equal-length backtick runs. An unmatched run MUST remain literal text.
 - XML and HTML comments, tags, and balanced element sections. Tag names MUST match without case sensitivity. Quoted `>` characters MUST NOT close a tag. An unclosed element MUST hide only its opening tag. An unclosed comment MUST hide the rest of the prompt.
+- If another `<` appears before the tag ends, the first `<` MUST stay plain text.
 
-A keyword MUST NOT fire when any required tool is absent. The matcher MUST return each matching keyword at most once. Results MUST follow table order.
+`Match` MUST NOT return a keyword when a required tool is absent. `Match` MUST return each matching keyword at most once. Results MUST follow table order.
+
+`Usable` MUST return the keywords that are enabled, lowercase, and whose required tools are all present.
+`Previewable` MUST return the keywords that are enabled and lowercase, without checking required tools. A thread that has not resolved its tools MUST use `Previewable`.
+`Spans` MUST return every non-overlapping prose occurrence of each keyword it receives, sorted by start.
+Each span MUST give UTF-8 byte offsets, with the end offset exclusive.
 
 ## Boundaries
 
@@ -47,5 +58,8 @@ Each sentence MUST use plain verbs and carry one instruction or fact. The notice
 
 - `ultrathink`: reason step by step before answering.
 - `jevify`: freeze the rubric before reading data, pre-filter, judge the batch, read flagged or uncertain items, and report counts and confirmed items. Settled judgments MUST replay from the journal.
-- `workflowz`: write durable `eval` phases, fan out, join children, contain item failures, and resume recorded effects without dispatching them again.
+- `workflowz`: write durable `eval` phases, fan out, join subagents, contain item failures, and resume recorded effects without dispatching them again.
 - `orchestrate`: decompose into `task` calls, require `yield`, verify each phase, and continue until no work remains.
+- `ratchet`: build the eval through the `ratchet` actions in order, and get each approval from the user. Run the runner with `exec`, and give the analyzer only the train view through `tools.task(...)` in an `eval` cell. Follow each gate decision, and stop at `done`.
+- `decide`: name the options, recommend one with the deciding reason, and state what would change the recommendation.
+- `simplify`: delete first, and keep validation, error paths and evidence.

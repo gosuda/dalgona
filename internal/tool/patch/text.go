@@ -22,7 +22,7 @@ func decodeDocument(path string, raw []byte) (document, error) {
 	if len(raw) > 16<<20 {
 		return document{}, fmt.Errorf("patch: %s is over 16 MiB. Use exec", path)
 	}
-	if bytes.IndexByte(raw[:min(len(raw), 8192)], 0) >= 0 || !utf8.Valid(raw) {
+	if bytes.IndexByte(raw, 0) >= 0 || !utf8.Valid(raw) {
 		return document{}, fmt.Errorf("patch: %s is not a text file (binary or invalid UTF-8)", path)
 	}
 	doc := document{raw: raw, bom: bytes.HasPrefix(raw, []byte{0xef, 0xbb, 0xbf})}

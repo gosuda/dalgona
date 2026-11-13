@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"github.com/gosuda/dalgona/internal/model/cursor/wire"
 )
 
@@ -63,10 +64,10 @@ func (s *session) readFrames(ctx context.Context, gate *model.StartGate) error {
 			return fmt.Errorf("cursor: read stream: %w", err)
 		}
 		gate.FirstEvent()
-		if frame.Flags&wire.Compressed != 0 {
+		if frame.Flags&connectwire.Compressed != 0 {
 			return errors.New("cursor: compressed frames are not negotiated")
 		}
-		if frame.Flags&wire.EndStream != 0 {
+		if frame.Flags&connectwire.EndStream != 0 {
 			return s.endStream(frame.Payload)
 		}
 		ended, err := s.handle(ctx, frame.Payload)
@@ -81,7 +82,7 @@ func (s *session) readFrames(ctx context.Context, gate *model.StartGate) error {
 }
 
 func (s *session) endStream(payload []byte) error {
-	if err := wire.TrailerError(payload); err != nil {
+	if err := connectwire.TrailerError(payload); err != nil {
 		s.failed = bytes.Clone(payload)
 		return fmt.Errorf("cursor: stream: %w", err)
 	}

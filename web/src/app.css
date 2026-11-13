@@ -1,73 +1,26 @@
-:root {
-	--neutral-0: oklch(0.985 0.008 85);
-	--neutral-50: oklch(0.955 0.012 85);
-	--neutral-100: oklch(0.92 0.016 85);
-	--neutral-200: oklch(0.84 0.018 85);
-	--neutral-400: oklch(0.58 0.022 75);
-	--neutral-600: oklch(0.4 0.025 70);
-	--neutral-800: oklch(0.25 0.022 65);
-	--neutral-900: oklch(0.19 0.018 65);
-	--amber-500: oklch(0.56 0.15 48);
-	--amber-600: oklch(0.54 0.14 45);
-	--amber-100: oklch(0.91 0.055 65);
-	--green-600: oklch(0.48 0.11 155);
-	--red-600: oklch(0.5 0.16 25);
-	--red-100: oklch(0.92 0.04 25);
-
-	--color-bg-page: var(--neutral-50);
-	--color-bg-sidebar: var(--neutral-100);
-	--color-bg-surface: var(--neutral-0);
-	--color-bg-inset: var(--neutral-100);
-	--color-bg-selected: var(--amber-100);
-	--color-text: var(--neutral-900);
-	--color-text-secondary: var(--neutral-600);
-	--color-text-on-accent: var(--neutral-0);
-	--color-border: var(--neutral-200);
-	--color-border-strong: var(--neutral-400);
-	--color-accent: var(--amber-600);
-	--color-accent-hover: var(--amber-500);
-	--color-focus: var(--amber-600);
-	--color-success: var(--green-600);
-	--color-danger: var(--red-600);
-	--color-danger-surface: var(--red-100);
-	--color-keyword-surface: var(--neutral-800);
-
-	--font-interface: "Avenir Next", "Noto Sans", sans-serif;
-	--font-code: ui-monospace, "SFMono-Regular", Consolas, monospace;
-	--text-caption: 0.8125rem;
-	--text-body-small: 0.875rem;
-	--text-body: 1rem;
-	--text-heading: 1.25rem;
-	--text-title: 1.75rem;
-
-	--space-1: 4px;
-	--space-2: 8px;
-	--space-3: 12px;
-	--space-4: 16px;
-	--space-5: 24px;
-	--space-6: 32px;
-	--radius-small: 4px;
-	--radius-medium: 8px;
-	--radius-large: 12px;
-}
-
 * {
 	box-sizing: border-box;
 }
 
 html {
-	color-scheme: light;
-	font-family: var(--font-interface);
+	font-family: var(--face-text);
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
 }
 
+h1,
+h2,
+h3 {
+	font-family: var(--face-title);
+	font-weight: var(--weight-title);
+}
+
 body {
 	margin: 0;
-	background: var(--color-bg-page);
-	color: var(--color-text);
-	font-size: var(--text-body);
-	line-height: 1.55;
+	background: var(--canvas);
+	color: var(--text);
+	font-size: var(--size-body);
+	line-height: var(--leading-body);
 }
 
 button,
@@ -79,57 +32,73 @@ select {
 
 button,
 select {
-	min-height: 40px;
+	min-height: var(--control-height);
+}
+
+@media (pointer: coarse) {
+	button,
+	select {
+		min-height: var(--control-height-coarse);
+	}
 }
 
 button {
-	border: 1px solid var(--color-border-strong);
-	border-radius: var(--radius-small);
-	background: var(--color-bg-surface);
-	color: var(--color-text);
+	border: var(--border-width) solid var(--strong);
+	border-radius: var(--radius-control);
+	background: var(--tone);
+	color: var(--text);
 	cursor: pointer;
 	font-weight: 600;
 	padding: var(--space-2) var(--space-4);
 	text-box: trim-both cap alphabetic;
 }
 
+button,
+.tag,
+.point {
+	font-family: var(--face-title);
+}
+
 button:disabled,
 select:disabled,
 textarea:disabled {
 	cursor: not-allowed;
-	opacity: 0.55;
+	color: var(--dim);
+	border-color: var(--line);
 }
 
-button.primary {
-	border-color: var(--color-accent);
-	background: var(--color-accent);
-	color: var(--color-text-on-accent);
+button.point,
+.point {
+	border-color: var(--point);
+	background: var(--point);
+	color: var(--on-point);
 }
 
 button.quiet {
-	border-color: var(--color-border);
+	border-color: var(--strong);
 	background: transparent;
 }
 
 button.danger {
-	color: var(--color-danger);
+	border-color: var(--failed-text);
+	color: var(--failed-text);
 }
 
 :focus-visible {
-	outline: 2px solid var(--color-focus);
+	outline: 2px solid var(--text);
 	outline-offset: 2px;
 }
 
 ::selection {
-	background: var(--color-bg-selected);
-	color: var(--color-text);
+	background: var(--tone);
+	color: var(--text);
 }
 
 code,
 pre,
 .command,
 .file-path {
-	font-family: var(--font-code);
+	font-family: var(--face-mono);
 	font-variant-numeric: tabular-nums;
 }
 
@@ -138,7 +107,17 @@ pre {
 	max-width: 100%;
 	overflow-x: auto;
 	white-space: pre-wrap;
-	overflow-wrap: break-word;
+	overflow-wrap: anywhere;
+}
+
+.prose {
+	word-break: keep-all;
+	overflow-wrap: anywhere;
+}
+
+dd,
+.count {
+	font-variant-numeric: tabular-nums;
 }
 
 .skip-link {
@@ -146,8 +125,8 @@ pre {
 	inset-block-start: var(--space-3);
 	inset-inline-start: var(--space-3);
 	padding: var(--space-2) var(--space-4);
-	background: var(--color-bg-surface);
-	color: var(--color-text);
+	background: var(--surface);
+	color: var(--text);
 	z-index: 10;
 	transform: translateY(-200%);
 }
@@ -169,22 +148,18 @@ pre {
 }
 
 @media (hover: hover) {
-	button:not(:disabled):hover {
-		border-color: var(--color-border-strong);
-		background: var(--color-bg-inset);
-	}
-
-	button.primary:not(:disabled):hover {
-		border-color: var(--color-accent-hover);
-		background: var(--color-accent-hover);
+	button:not(:disabled):not(.point):hover {
+		border-color: var(--strong);
+		background: var(--tone);
 	}
 }
 
 @media (prefers-reduced-motion: no-preference) {
 	button {
 		transition-property: background-color, border-color, color, scale;
-		transition-duration: 120ms, 120ms, 120ms, 150ms;
-		transition-timing-function: ease-out;
+		transition-duration:
+			var(--motion-quick), var(--motion-quick), var(--motion-quick), 150ms;
+		transition-timing-function: var(--ease);
 	}
 
 	button:not(:disabled):active {
@@ -192,16 +167,53 @@ pre {
 	}
 }
 
-@media (max-width: 40rem) {
-	input,
-	textarea,
-	select {
-		font-size: 1rem;
-	}
+input,
+textarea,
+select {
+	font-size: max(1rem, var(--size-body));
 }
 
 @media (forced-colors: active) {
 	button {
 		border-color: ButtonText;
 	}
+
+	button.point {
+		border: 2px solid ButtonText;
+	}
+
+	.tag {
+		border: 1px solid CanvasText;
+	}
+
+	.notices p {
+		border-inline-start: 2px solid CanvasText;
+	}
+}
+
+.markdown pre {
+	background: var(--tone);
+	white-space: pre-wrap;
+}
+
+.hljs-keyword {
+	color: var(--accent-text);
+}
+
+.hljs-string {
+	color: var(--added-text);
+}
+
+.hljs-number {
+	color: var(--warning-text);
+}
+
+.hljs-title,
+.hljs-type {
+	color: var(--text);
+}
+
+.hljs-comment,
+.hljs-meta {
+	color: var(--dim);
 }

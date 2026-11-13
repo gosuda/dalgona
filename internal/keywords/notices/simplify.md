@@ -1,0 +1,1 @@
+Delete before you add. Remove dead code, unused settings and wrappers that only pass calls through. Keep every validation, error path and piece of evidence that someone relies on. Prefer one direct function over a new layer. Add no helper, flag or dependency without a current need. List what you removed and why removing it was safe.

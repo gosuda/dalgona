@@ -40,6 +40,7 @@ type prepared struct {
 	args    jsontext.Value
 	repairs int
 	plan    *tool.Plan
+	files   []event.FileChange
 	verdict verdict
 }
 
@@ -130,6 +131,9 @@ func (w *worker) runCall(ctx context.Context, call event.ToolCall, requestID str
 		return err
 	}
 	_, err = w.t.appendEvents(context.WithoutCancel(ctx), completed)
+	if err == nil {
+		w.startReview(ctx, p, completed)
+	}
 	return err
 }
 
@@ -274,6 +278,7 @@ func (w *worker) gateCall(ctx context.Context, p *prepared, requestID string) (g
 		return gc, err
 	}
 	p.plan = &plan
+	gc.files = plan.Files
 	for _, file := range plan.Files {
 		gc.paths = append(gc.paths, file.Path)
 	}
@@ -312,8 +317,27 @@ func (w *worker) start(ctx context.Context, p *prepared) error {
 	if err != nil {
 		return err
 	}
-	_, err = w.t.appendEvents(ctx, started)
-	return err
+	if _, err = w.t.appendEvents(ctx, started); err != nil {
+		return err
+	}
+	p.files = started.Files
+	return nil
+}
+
+func (h *Host) maskedBlob(data []byte) (*event.BlobRef, error) {
+	masked := data
+	if h.cfg.Auth != nil {
+		text, err := h.cfg.Auth.MaskWithError(string(data))
+		if err != nil {
+			return nil, fmt.Errorf("agent: secret masking failed: %w", err)
+		}
+		masked = []byte(text)
+	}
+	sha, err := h.journal.PutBlob(masked)
+	if err != nil {
+		return nil, fmt.Errorf("agent: store blob: %w", err)
+	}
+	return &event.BlobRef{Blob: sha, Bytes: int64(len(masked))}, nil
 }
 
 func (w *worker) started(p *prepared, files []tool.FileChange) (event.ToolStarted, error) {
@@ -328,19 +352,18 @@ func (w *worker) started(p *prepared, files []tool.FileChange) (event.ToolStarte
 	for _, file := range files {
 		change := event.FileChange{Path: file.Path, PreSHA: file.PreSHA, PostSHA: file.PostSHA}
 		if file.PreSHA != "" {
-			masked := file.Pre
-			if w.t.host.cfg.Auth != nil {
-				text, maskErr := w.t.host.cfg.Auth.MaskWithError(string(file.Pre))
-				if maskErr != nil {
-					return event.ToolStarted{}, fmt.Errorf("agent: secret masking failed: %w", maskErr)
-				}
-				masked = []byte(text)
-			}
-			sha, err := w.t.host.journal.PutBlob(masked)
+			ref, err := w.t.host.maskedBlob(file.Pre)
 			if err != nil {
-				return event.ToolStarted{}, fmt.Errorf("agent: store pre-image of %s: %w", file.Path, err)
+				return event.ToolStarted{}, fmt.Errorf("agent: pre-image of %s: %w", file.Path, err)
 			}
-			change.PreBlob = &event.BlobRef{Blob: sha, Bytes: int64(len(masked))}
+			change.PreBlob = ref
+		}
+		if file.PostSHA != "" {
+			ref, err := w.t.host.maskedBlob(file.Post)
+			if err != nil {
+				return event.ToolStarted{}, fmt.Errorf("agent: post-image of %s: %w", file.Path, err)
+			}
+			change.PostBlob = ref
 		}
 		started.Files = append(started.Files, change)
 	}
@@ -382,13 +405,14 @@ func (w *worker) run(ctx context.Context, p *prepared) (tool.Result, error) {
 
 func (w *worker) env(v verdict) tool.Env {
 	mode := runner.SandboxWorkspaceWrite
-	if v.unsandboxed || w.settings.Sandbox == config.SandboxOff {
+	if v.unsandboxed || w.settings.Sandbox == config.SandboxOff || w.sandboxChoice() == event.SandboxChoiceDangerous {
 		mode = runner.SandboxOff
 	}
 	roots := append([]string{w.t.created.Cwd}, w.t.host.roots...)
+	home := w.t.host.Config().Home
 	return tool.Env{
-		Runner: w.t.runner, Cwd: w.t.created.Cwd, Home: w.t.host.cfg.Config.Home,
-		Sandbox: deniedSocketSandbox(mode, roots, w.t.host.cfg.Config.Home), Masker: w.t.host.masker(), Snapshots: w.t.snapshots,
+		Runner: w.t.runner, Cwd: w.t.created.Cwd, Home: home,
+		Sandbox: deniedSocketSandbox(mode, roots, home), Masker: w.t.host.masker(), Snapshots: w.t.snapshots,
 	}
 }
 

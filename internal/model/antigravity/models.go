@@ -25,7 +25,6 @@ func flashRoutes(prefix string) map[string]string {
 	return map[string]string{"minimal": prefix + "-low", "low": prefix + "-low", "medium": prefix + "-medium", "high": prefix + "-high"}
 }
 
-// source: .references/oh-my-pi/packages/catalog/src/models.json provider google-antigravity, thinking mode google-level
 var staticModels = []staticModel{
 	{id: "gemini-4-argon", wire: "gemini-4-argon-low", context: 1048576, maxOutput: 65536, efforts: tierEfforts, routes: map[string]string{"low": "gemini-4-argon-low", "medium": "gemini-4-argon-medium", "high": "gemini-4-argon-high"}},
 	{id: "gemini-3.8-flash", wire: "gemini-3.8-flash-low", context: 1048576, maxOutput: 65536, efforts: levelEfforts, routes: flashRoutes("gemini-3.8-flash")},

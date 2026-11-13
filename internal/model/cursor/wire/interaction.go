@@ -1,6 +1,9 @@
 package wire
 
-import "google.golang.org/protobuf/encoding/protowire"
+import (
+	"github.com/gosuda/dalgona/internal/model/connectwire"
+	"google.golang.org/protobuf/encoding/protowire"
+)
 
 const (
 	ServerExecControlNumber         int32 = 5
@@ -27,24 +30,24 @@ type InteractionQuery struct {
 }
 
 func AppendInteractionQuery(dst []byte, m *InteractionQuery) []byte {
-	dst = appendUint32(dst, 1, m.ID)
+	dst = connectwire.AppendUint32(dst, 1, m.ID)
 	if m.QueryNumber < 2 {
 		return dst
 	}
-	return appendVariant(dst, protowire.Number(m.QueryNumber), m.QueryView)
+	return connectwire.AppendVariant(dst, protowire.Number(m.QueryNumber), m.QueryView)
 }
 
 func ConsumeInteractionQuery(b []byte, m *InteractionQuery) error {
 	*m = InteractionQuery{}
-	return consumeFields(b, "cursor interaction query", func(f field) error {
-		if f.number == 1 {
-			return setUint32(f, "cursor interaction query", &m.ID)
+	return connectwire.ConsumeFields(b, "cursor interaction query", func(f connectwire.Field) error {
+		if f.Number == 1 {
+			return connectwire.SetUint32(f, "cursor interaction query", &m.ID)
 		}
-		if f.kind != protowire.BytesType {
+		if f.Kind != protowire.BytesType {
 			return nil
 		}
-		m.QueryNumber = f.number
-		m.QueryView = bytesValue(f)
+		m.QueryNumber = f.Number
+		m.QueryView = connectwire.BytesValue(f)
 		return nil
 	})
 }
@@ -56,46 +59,46 @@ type InteractionResponse struct {
 }
 
 func AppendInteractionResponse(dst []byte, m *InteractionResponse) []byte {
-	dst = appendUint32(dst, 1, m.ID)
+	dst = connectwire.AppendUint32(dst, 1, m.ID)
 	if m.ResultNumber < 2 {
 		return dst
 	}
-	return appendVariant(dst, protowire.Number(m.ResultNumber), m.ResultView)
+	return connectwire.AppendVariant(dst, protowire.Number(m.ResultNumber), m.ResultView)
 }
 
 func ConsumeInteractionResponse(b []byte, m *InteractionResponse) error {
 	*m = InteractionResponse{}
-	return consumeFields(b, "cursor interaction response", func(f field) error {
-		if f.number == 1 {
-			return setUint32(f, "cursor interaction response", &m.ID)
+	return connectwire.ConsumeFields(b, "cursor interaction response", func(f connectwire.Field) error {
+		if f.Number == 1 {
+			return connectwire.SetUint32(f, "cursor interaction response", &m.ID)
 		}
-		if f.kind != protowire.BytesType {
+		if f.Kind != protowire.BytesType {
 			return nil
 		}
-		m.ResultNumber = f.number
-		m.ResultView = bytesValue(f)
+		m.ResultNumber = f.Number
+		m.ResultView = connectwire.BytesValue(f)
 		return nil
 	})
 }
 
 func AppendQueryRejected(dst, reason []byte) []byte {
-	return appendMessage(dst, 2, &reason, appendTextField)
+	return connectwire.AppendMessage(dst, 2, &reason, appendTextField)
 }
 
 func AppendAskQuestionRejected(dst, reason []byte) []byte {
-	return appendMessage(dst, 1, &reason, appendAskQuestionRejectedResult)
+	return connectwire.AppendMessage(dst, 1, &reason, appendAskQuestionRejectedResult)
 }
 
 func appendAskQuestionRejectedResult(dst []byte, reason *[]byte) []byte {
-	return appendMessage(dst, 3, reason, appendTextField)
+	return connectwire.AppendMessage(dst, 3, reason, appendTextField)
 }
 
 func AppendCreatePlanError(dst, message []byte) []byte {
-	return appendMessage(dst, 1, &message, appendCreatePlanErrorResult)
+	return connectwire.AppendMessage(dst, 1, &message, appendCreatePlanErrorResult)
 }
 
 func appendCreatePlanErrorResult(dst []byte, message *[]byte) []byte {
-	return appendMessage(dst, 2, message, appendTextField)
+	return connectwire.AppendMessage(dst, 2, message, appendTextField)
 }
 
 func appendTextField(dst []byte, text *[]byte) []byte {
@@ -111,28 +114,28 @@ func AppendExecServerControl(dst []byte, m *ExecServerControl) []byte {
 	if !m.Abort {
 		return dst
 	}
-	return appendMessage(dst, 1, &m.AbortID, appendAbortID)
+	return connectwire.AppendMessage(dst, 1, &m.AbortID, appendAbortID)
 }
 
 func appendAbortID(dst []byte, id *uint32) []byte {
-	return appendUint32(dst, 1, *id)
+	return connectwire.AppendUint32(dst, 1, *id)
 }
 
 func ConsumeExecServerControl(b []byte, m *ExecServerControl) error {
 	*m = ExecServerControl{}
-	return consumeFields(b, "cursor exec server control", func(f field) error {
-		if f.number != 1 {
+	return connectwire.ConsumeFields(b, "cursor exec server control", func(f connectwire.Field) error {
+		if f.Number != 1 {
 			return nil
 		}
-		if err := requireKind(f, protowire.BytesType, "cursor exec server control"); err != nil {
+		if err := connectwire.RequireKind(f, protowire.BytesType, "cursor exec server control"); err != nil {
 			return err
 		}
 		m.Abort = true
-		return consumeFields(bytesValue(f), "cursor exec server abort", func(inner field) error {
-			if inner.number != 1 {
+		return connectwire.ConsumeFields(connectwire.BytesValue(f), "cursor exec server abort", func(inner connectwire.Field) error {
+			if inner.Number != 1 {
 				return nil
 			}
-			return setUint32(inner, "cursor exec server abort", &m.AbortID)
+			return connectwire.SetUint32(inner, "cursor exec server abort", &m.AbortID)
 		})
 	})
 }

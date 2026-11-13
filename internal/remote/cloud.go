@@ -18,10 +18,6 @@ import (
 
 const cloudflareRefusal = "cloudflare boxes lose their files when the container stops; use sandbox0, modal, sprites, or docker for fully cloud mode"
 
-// CloudUp creates or attaches the Mode B box for [remotes.<name>] (falling
-// back to [runners.<name>]), records service and box_id in settings.toml,
-// uploads the workspace when the box has no baseline, and with copyAuth
-// copies auth.json into the box with mode 0600.
 func (b *Binder) CloudUp(ctx context.Context, name string, copyAuth bool) error {
 	spec, err := b.remoteSpec(name)
 	if err != nil {
@@ -86,8 +82,6 @@ func (b *Binder) seedWorkspace(ctx context.Context, r runner.Runner, boxID strin
 	return err
 }
 
-// CloudDown destroys the Mode B box with every thread in it after
-// Options.Confirm agrees, or at once when yes is set.
 func (b *Binder) CloudDown(ctx context.Context, name string, yes bool) error {
 	spec, svc, err := b.boxedRemote(ctx, name)
 	if err != nil {
@@ -109,8 +103,6 @@ func (b *Binder) CloudDown(ctx context.Context, name string, yes bool) error {
 	return b.setRemote(name, spec)
 }
 
-// CloudPull applies the Mode B box's changes since its baseline to the local
-// working directory, like Pull.
 func (b *Binder) CloudPull(ctx context.Context, name string) error {
 	spec, svc, err := b.boxedRemote(ctx, name)
 	if err != nil {
@@ -131,8 +123,6 @@ func (b *Binder) CloudPull(ctx context.Context, name string) error {
 	return b.pullInto(ctx, l.remote, strings.TrimSpace(string(baseline)), b.opts.Config.Cwd)
 }
 
-// Bridge dials the in-box daemon for --remote <name>. A replaced box (Modal)
-// updates [remotes.<name>] box_id before connecting.
 func (b *Binder) Bridge(ctx context.Context, name string) (io.ReadWriteCloser, error) {
 	spec, svc, err := b.boxedRemote(ctx, name)
 	if err != nil {
@@ -195,7 +185,7 @@ func (b *Binder) setRemote(name string, spec config.RemoteSpec) error {
 			table[key] = value
 		}
 	}
-	if err := config.WriteSetting(b.opts.Config.Home, "remotes."+name, table); err != nil {
+	if err := config.WriteSettings(b.opts.Config.Home, config.SettingEdit{Key: "remotes." + name, Value: table}); err != nil {
 		return fmt.Errorf("remote: record [remotes.%s]: %w", name, err)
 	}
 	b.mu.Lock()

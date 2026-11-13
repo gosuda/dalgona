@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/gosuda/dalgona/internal/tool"
 	"golang.org/x/sys/unix"
@@ -28,26 +27,7 @@ func pinVerifiedComponents(env tool.Env, display, absolute string) (*dirPin, err
 	if err != nil {
 		return nil, fmt.Errorf("patch: cannot hold %s: %w", env.Cwd, err)
 	}
-	pin := &dirPin{file: root}
-	rel, err := filepath.Rel(env.Cwd, absolute)
-	if err != nil {
-		pin.close()
-		return nil, fmt.Errorf("patch: resolve %s: %w", display, err)
-	}
-	dir, name := filepath.Split(filepath.ToSlash(rel))
-	if dir != "" {
-		if err := pin.openChain(strings.Split(strings.TrimSuffix(dir, "/"), "/"), display); err != nil {
-			pin.close()
-			return nil, err
-		}
-	}
-	if len(pin.missing) == 0 {
-		if err := pin.checkLeaf(name, display); err != nil {
-			pin.close()
-			return nil, err
-		}
-	}
-	return pin, nil
+	return holdPath(env, display, absolute, &dirPin{file: root})
 }
 
 func (p *dirPin) openChain(components []string, display string) error {
@@ -72,6 +52,9 @@ func (p *dirPin) openChain(components []string, display string) error {
 }
 
 func (p *dirPin) checkLeaf(name, display string) error {
+	if len(p.missing) > 0 {
+		return nil
+	}
 	var info unix.Stat_t
 	err := unix.Fstatat(int(p.file.Fd()), name, &info, unix.AT_SYMLINK_NOFOLLOW)
 	if err == nil {

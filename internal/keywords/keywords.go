@@ -1,10 +1,12 @@
 package keywords
 
 import (
+	"cmp"
 	"embed"
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 type Keyword struct {
@@ -21,10 +23,13 @@ var noticeFiles embed.FS
 
 func builtinTable(product string) []Keyword {
 	return []Keyword{
-		{Word: "ultrathink", Hue: [2]int{0, 330}, Effort: "max", Notice: notice("ultrathink.md"), Enabled: true},
-		{Word: "jevify", Hue: [2]int{300, 420}, Requires: []string{"eval"}, Effort: "default", Notice: notice("jevify.md"), Enabled: product == "dalgona"},
-		{Word: "workflowz", Hue: [2]int{30, 150}, Requires: []string{"eval", "task"}, Effort: "default", Notice: notice("workflowz.md"), Enabled: product == "dalgona"},
-		{Word: "orchestrate", Hue: [2]int{150, 280}, Requires: []string{"task"}, Effort: "default", Notice: notice("orchestrate.md"), Enabled: product == "dalgona"},
+		{Word: "ultrathink", Hue: [2]int{0, 330}, Effort: "max", Notice: notice("ultrathink"), Enabled: true},
+		{Word: "jevify", Hue: [2]int{300, 420}, Requires: []string{"eval"}, Effort: "default", Notice: notice("jevify"), Enabled: product == "dalgona"},
+		{Word: "workflowz", Hue: [2]int{30, 150}, Requires: []string{"eval", "task"}, Effort: "default", Notice: notice("workflowz"), Enabled: product == "dalgona"},
+		{Word: "orchestrate", Hue: [2]int{150, 280}, Requires: []string{"task"}, Effort: "default", Notice: notice("orchestrate"), Enabled: product == "dalgona"},
+		{Word: "ratchet", Hue: [2]int{20, 70}, Requires: []string{"ratchet", "exec", "task"}, Effort: "default", Notice: notice("ratchet"), Enabled: product == "dalgona"},
+		{Word: "decide", Hue: [2]int{200, 250}, Effort: "default", Notice: notice("decide"), Enabled: true},
+		{Word: "simplify", Hue: [2]int{90, 140}, Effort: "default", Notice: notice("simplify"), Enabled: true},
 	}
 }
 
@@ -78,15 +83,65 @@ func mergeKeyword(base, override Keyword) Keyword {
 	return override
 }
 
-func Match(prompt string, table []Keyword, tools []string) []Keyword {
-	masked := mask([]rune(prompt))
+type Span struct {
+	Keyword    Keyword
+	Start, End int
+}
+
+func Usable(table []Keyword, tools []string) []Keyword {
 	available := make(map[string]struct{}, len(tools))
 	for _, tool := range tools {
 		available[tool] = struct{}{}
 	}
 	result := make([]Keyword, 0, len(table))
 	for _, item := range table {
-		if matchable(item, available) && containsKeyword(masked, []rune(item.Word)) {
+		if matchable(item, available) {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func Spans(prompt string, table []Keyword) []Span {
+	masked := mask([]rune(prompt))
+	offsets := runeOffsets(prompt)
+	var spans []Span
+	for _, item := range table {
+		word := []rune(item.Word)
+		if len(word) == 0 {
+			continue
+		}
+		for start := 0; start+len(word) <= len(masked); {
+			end := start + len(word)
+			if slices.Equal(masked[start:end], word) && boundary(masked, start, end) {
+				spans = append(spans, Span{Keyword: item, Start: offsets[start], End: offsets[end]})
+				start = end
+				continue
+			}
+			start++
+		}
+	}
+	slices.SortStableFunc(spans, func(a, b Span) int { return cmp.Compare(a.Start, b.Start) })
+	return spans
+}
+
+func runeOffsets(text string) []int {
+	offsets := make([]int, 0, utf8.RuneCountInString(text)+1)
+	for i := range text {
+		offsets = append(offsets, i)
+	}
+	return append(offsets, len(text))
+}
+
+func Match(prompt string, table []Keyword, tools []string) []Keyword {
+	usable := Usable(table, tools)
+	matched := make(map[string]bool, len(usable))
+	for _, span := range Spans(prompt, usable) {
+		matched[span.Keyword.Word] = true
+	}
+	result := make([]Keyword, 0, len(usable))
+	for _, item := range usable {
+		if matched[item.Word] {
 			result = append(result, item)
 		}
 	}
@@ -94,25 +149,33 @@ func Match(prompt string, table []Keyword, tools []string) []Keyword {
 }
 
 func matchable(item Keyword, available map[string]struct{}) bool {
-	return item.Enabled && requirementsMet(item.Requires, available) && item.Word != "" && item.Word == strings.ToLower(item.Word)
+	return usableWord(item) && requirementsMet(item.Requires, available)
 }
 
-func containsKeyword(masked, word []rune) bool {
-	for start := 0; start+len(word) <= len(masked); start++ {
-		end := start + len(word)
-		if slices.Equal(masked[start:end], word) && boundary(masked, start, end) {
-			return true
+func usableWord(item Keyword) bool {
+	return item.Enabled && item.Word != "" && item.Word == strings.ToLower(item.Word)
+}
+
+func Previewable(table []Keyword) []Keyword {
+	result := make([]Keyword, 0, len(table))
+	for _, item := range table {
+		if usableWord(item) {
+			result = append(result, item)
 		}
 	}
-	return false
+	return result
 }
 
-func notice(name string) string {
-	data, err := noticeFiles.ReadFile("notices/" + name)
+func notice(word string) string {
+	data, err := noticeFiles.ReadFile("notices/" + word + ".md")
 	if err != nil {
-		return ""
+		panic("keywords: missing notice notices/" + word + ".md: " + err.Error())
 	}
-	return strings.TrimSpace(string(data))
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		panic("keywords: empty notice notices/" + word + ".md")
+	}
+	return text
 }
 
 func requirementsMet(requirements []string, available map[string]struct{}) bool {

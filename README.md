@@ -36,9 +36,9 @@ Start the terminal interface:
 dal
 ```
 
-In the terminal interface, run `/login <provider>` to sign in, then `/model` to select an offered model. Replace `<provider>` with your provider id, such as `openai` or `anthropic`. API-key providers can use their provider environment variables. No default thread model is shipped.
+In the terminal interface, run `/login <provider>` to open the sign-in panel for that provider, then `/model` to select an offered model. A ChatGPT account shows a browser link or a device code. An API-key provider such as `openai` or `anthropic` takes its key in the panel. A provider that signs in from a shell shows the command to run there. API-key providers can use their provider environment variables. No default thread model is shipped.
 
-Enter a task in the composer. Use `/resume` to select an existing session, `/new` to start another, and Esc to interrupt a turn. [The TUI contract](docs/spec/tui.md) lists the commands and keys.
+Enter a task in the composer. Use `/resume` to select an existing thread, `/new` to start another, and Esc twice to interrupt a turn. [The TUI contract](docs/spec/tui.md) lists the commands and keys.
 
 Dal uses `$DAL_HOME`, or `~/.dal` when the variable is unset. On Windows, dal sets a private access list on this directory for your user account, SYSTEM, and Administrators.
 
@@ -88,7 +88,7 @@ Use these table names and keys:
 
 | Scope | Keys |
 | --- | --- |
-| Both products, top level | `model`, `reasoning`, `approval`, `sandbox`, `sandbox_writable_roots`, `edit_style`, `compaction_threshold`, `compaction_keep_tokens`, `stream_start_timeout`, `stream_idle_timeout` |
+| Both products, top level | `model`, `reasoning`, `approval`, `tool_mode`, `sandbox`, `sandbox_writable_roots`, `edit_style`, `compaction_threshold`, `compaction_keep_tokens`, `stream_start_timeout`, `stream_idle_timeout` |
 | `[providers.<name>]` | `base_url`, `api_key_env` |
 | `[models.<name>]` | `context_window` |
 | `[approval_decider]` | `decider`, `threshold` |
@@ -97,16 +97,16 @@ Use these table names and keys:
 | `[advisors.<name>]` | `model`, `instructions`, `review`, `interval`, `sync`, `tools`, `subagents`, `enabled` |
 | `[secrets]` | `patterns` |
 | `[keywords.<name>]` | `notice`, `text`, `hue`, `effort`, `requires`, `enabled` |
-| Dalgona only, top level | `tool_mode`, `runner`, `remote` |
+| Dalgona only, top level | `runner`, `remote` |
 | `[runners.<name>]` (dalgona) | `service`, `image`, `template`, `url` |
 | `[remotes.<name>]` (dalgona) | `service`, `image`, `template`, `url`, `box_id` |
 | `[mcp_servers.<name>]` (dalgona) | `command`, `args`, `env`, `url` |
 | `[discovery]` (dalgona) | `sources` |
-| `[eval]` (dalgona) | `uses` |
+| `[eval]` | `uses` |
 | `[herdr]` (dalgona) | `subagent_panes` |
 | `[web]` (dalgona) | `listen`, `token`, `cert_file`, `key_file` |
 
-`edit_style` accepts a style name or a table of model globs with a required `default` entry. Styles are `anchor`, `replace`, `hashline`, `hashline-light`, `hashline-enhanced`, `apply_patch`, `simple`, `balanced`, and `strict`. Model globs match in declaration order. Dal rejects the dalgona-only settings.
+`edit_style` accepts a style name or a table of model globs with a required `default` entry. Styles are `anchor`, `replace`, `hashline`, `hashline-light`, `hashline-enhanced`, `apply_patch`, `simple`, `balanced`, and `strict`. Model globs match in declaration order. Dal rejects the dalgona-only settings. The default `tool_mode` is `eval-first` in both products. Set `tool_mode = "normal"` to restore the full tool list.
 
 ## Run inside an outer sandbox
 
@@ -156,7 +156,7 @@ dalgona cloud down <name>
 
 The named remote uses any service in [runners.md](docs/spec/runners.md) except Cloudflare. Cloudflare cannot host a durable whole-daemon home because its containers lose their files on stop.
 
-`cloud up` does not copy credentials unless you pass `--copy-auth`. Without credential copying, use `dalgona --remote <name> login` to authenticate in the box. Remote service and box identifiers live in `[remotes.<name>]` in `settings.toml`.
+`cloud up` does not copy credentials unless you pass `--copy-auth`. Without credential copying, use `dalgona --remote <name> login` for API-key providers and `chatgpt`. Sign in to `antigravity`, `cursor`, or `devin` here, then run `dalgona cloud up <name> --copy-auth`. Remote service and box identifiers live in `[remotes.<name>]` in `settings.toml`.
 
 `cloud down` destroys the box and its journal after confirmation. `--yes` skips that confirmation for scripts. Pull changes you need before deletion.
 
@@ -218,4 +218,4 @@ These commands are specific to dalgona:
 
 [The documentation index](docs/README.md) links every current specification and decision. Start with [journal](docs/spec/journal.md), [recovery](docs/spec/recovery.md), and [protocol](docs/spec/protocol.md) for the core contracts.
 
-Read [CONTRIBUTE.md](CONTRIBUTE.md) before changing code and [REVIEW.md](REVIEW.md) before reviewing it. [AGENTS.md](AGENTS.md) contains repository instructions for coding agents. [justfile](justfile) declares the available checks. `just verify` runs the Go, web, and Cloudflare checks. It also runs the hashline model check when `uv` is installed.
+Read [CONTRIBUTE.md](CONTRIBUTE.md) before changing code and [REVIEW.md](REVIEW.md) before reviewing it. [AGENTS.md](AGENTS.md) contains repository instructions for coding agents. [justfile](justfile) declares the available checks. `just verify` runs the Go, spec-style, web, and Cloudflare checks. It also runs the hashline model check when `uv` is installed.

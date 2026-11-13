@@ -19,9 +19,11 @@ func decodeSessionEvent(kind string, r *objectReader) (Event, error) {
 			Runner: r.str("runner"), Service: r.str("service"), BoxID: r.str("box_id"), Baseline: r.str("baseline"),
 		}, nil
 	case TypeTurnStarted:
-		return TurnStarted{TurnID: r.str("turn_id")}, nil
+		return TurnStarted{TurnID: r.str("turn_id"), StartedAt: r.timestamp("started_at")}, nil
 	case TypeTurnCompleted:
-		return TurnCompleted{TurnID: r.str("turn_id"), Status: r.str("status"), Error: r.str("error")}, nil
+		return TurnCompleted{TurnID: r.str("turn_id"), Status: r.str("status"), Error: r.str("error"), CompletedAt: r.timestamp("completed_at")}, nil
+	case TypeTurnJudged:
+		return decodeTurnJudged(r), nil
 	case TypeUserMessage:
 		return decodeUserMessage(r), nil
 	default:
@@ -32,6 +34,7 @@ func decodeSessionEvent(kind string, r *objectReader) (Event, error) {
 func decodeUserMessage(r *objectReader) UserMessage {
 	var notices []Notice
 	var mentions []Mention
+	var images []Image
 	r.array("notices", func(raw jsontext.Value) error {
 		value, err := decodeNotice(raw)
 		notices = append(notices, value)
@@ -42,10 +45,15 @@ func decodeUserMessage(r *objectReader) UserMessage {
 		mentions = append(mentions, value)
 		return err
 	})
+	r.array("images", func(raw jsontext.Value) error {
+		value, err := decodeImage(raw)
+		images = append(images, value)
+		return err
+	})
 	text, textBlob := r.textPayload("text")
 	return UserMessage{
 		ItemID: r.str("item_id"), TurnID: r.str("turn_id"), Text: text, TextBlob: textBlob, Kind: r.str("kind"),
-		Notices: notices, Mentions: mentions, Effort: r.str("effort"), Verbatim: r.boolean("verbatim"),
+		Notices: notices, Mentions: mentions, Images: images, Effort: r.str("effort"), Verbatim: r.boolean("verbatim"),
 		Model: r.str("model"), Approval: r.str("approval"), Sandbox: r.str("sandbox"),
 	}
 }
@@ -72,6 +80,68 @@ func decodeMention(raw jsontext.Value) (Mention, error) {
 	return value, r.err
 }
 
+func decodeImage(raw jsontext.Value) (Image, error) {
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return Image{}, err
+	}
+	r := objectReader{fields: fields}
+	value := Image{Mime: r.str("mime"), Path: r.str("path")}
+	if blob := r.blob("image"); blob != nil {
+		value.Blob = *blob
+	}
+	return value, r.err
+}
+
+func decodeTurnJudged(r *objectReader) TurnJudged {
+	r.require("turn_id")
+	r.require("by")
+	r.require("verdict")
+	r.require("elapsed_ms")
+	return TurnJudged{
+		TurnID: r.str("turn_id"), By: r.str("by"), Verdict: r.str("verdict"), Paths: r.stringList("paths"),
+		Scores: r.scores("scores"), Flags: r.stringList("flags"), Spoken: r.stringList("spoken"),
+		Skipped: r.stringList("skipped"), Feedback: r.boolean("feedback"), Truncated: r.boolean("truncated"),
+		Error: r.str("error"), ElapsedMS: r.int64("elapsed_ms"),
+	}
+}
+
+func decodeToolJudged(r *objectReader) ToolJudged {
+	r.require("call_id")
+	r.require("turn_id")
+	r.require("by")
+	r.require("verdict")
+	r.require("elapsed_ms")
+	return ToolJudged{
+		CallID: r.str("call_id"), TurnID: r.str("turn_id"), By: r.str("by"), Verdict: r.str("verdict"),
+		Paths: r.stringList("paths"), Scores: r.scores("scores"), Flags: r.stringList("flags"),
+		Spoken: r.stringList("spoken"), Feedback: r.boolean("feedback"), Truncated: r.boolean("truncated"),
+		Parts: r.count("parts", 2, 1), FailedParts: r.count("failed_parts", 1, 0),
+		Error: r.str("error"), ElapsedMS: r.int64("elapsed_ms"),
+	}
+}
+
+func (r *objectReader) stringList(name string) []string {
+	var values []string
+	r.array(name, func(raw jsontext.Value) error {
+		value, err := decodeString(raw)
+		values = append(values, value)
+		return err
+	})
+	return values
+}
+
+func (r *objectReader) count(name string, minimum, absent int) int {
+	if _, ok := r.fields[name]; !ok {
+		return absent
+	}
+	value := r.number(name)
+	if r.err == nil && value < minimum {
+		r.err = fmt.Errorf("%s must be %d or more when present", name, minimum)
+	}
+	return value
+}
+
 func decodeToolEvent(kind string, r *objectReader) (Event, error) {
 	switch kind {
 	case TypeAssistantMessage:
@@ -80,6 +150,8 @@ func decodeToolEvent(kind string, r *objectReader) (Event, error) {
 		return decodeToolStarted(r), nil
 	case TypeToolCompleted:
 		return decodeToolCompleted(r), nil
+	case TypeToolJudged:
+		return decodeToolJudged(r), nil
 	case TypeModelRetry:
 		r.require("status")
 		return ModelRetry{
@@ -119,7 +191,8 @@ func decodeAssistantMessage(r *objectReader) AssistantMessage {
 	return AssistantMessage{
 		ItemID: r.str("item_id"), TurnID: r.str("turn_id"), Text: text, TextBlob: textBlob,
 		Reasoning: reasoning, ReasoningBlob: reasoningBlob, ToolCalls: calls, Usage: usage, StopReason: r.str("stop_reason"),
-		ContextSeq: r.uint64("context_seq"),
+		ContextSeq:    r.uint64("context_seq"),
+		ContextWindow: r.number("context_window"),
 	}
 }
 
@@ -130,9 +203,15 @@ func decodeToolCall(raw jsontext.Value) (ToolCall, error) {
 	}
 	r := objectReader{fields: fields}
 	args, argsBlob := r.rawPayload("args")
+	var redacted []string
+	r.array("redacted_thinking", func(raw jsontext.Value) error {
+		value, err := decodeString(raw)
+		redacted = append(redacted, value)
+		return err
+	})
 	value := ToolCall{
 		ID: r.str("id"), Name: r.str("name"), Args: args, ArgsBlob: argsBlob,
-		Freeform: r.boolean("freeform"), Resolved: r.boolean("resolved"), Signature: r.str("signature"),
+		Freeform: r.boolean("freeform"), Resolved: r.boolean("resolved"), Signature: r.str("signature"), RedactedThinking: redacted,
 	}
 	return value, r.err
 }
@@ -164,6 +243,7 @@ func decodeToolStarted(r *objectReader) ToolStarted {
 	return ToolStarted{
 		CallID: r.str("call_id"), TurnID: r.str("turn_id"), Tool: r.str("tool"), Args: args, ArgsBlob: argsBlob,
 		Class: r.str("class"), Repairs: r.number("repairs"), Files: files,
+		StartedAt: r.timestamp("started_at"),
 	}
 }
 
@@ -174,7 +254,7 @@ func decodeFileChange(raw jsontext.Value) (FileChange, error) {
 	}
 	r := objectReader{fields: fields}
 	value := FileChange{
-		Path: r.str("path"), PreSHA: r.str("pre_sha"), PostSHA: r.str("post_sha"), PreBlob: r.blob("pre_blob"),
+		Path: r.str("path"), PreSHA: r.str("pre_sha"), PostSHA: r.str("post_sha"), PreBlob: r.blob("pre_blob"), PostBlob: r.blob("post_blob"),
 	}
 	return value, r.err
 }
@@ -194,6 +274,7 @@ func decodeToolCompleted(r *objectReader) ToolCompleted {
 	return ToolCompleted{
 		CallID: r.str("call_id"), OK: r.boolean("ok"), Output: r.str("output"), Spill: spill,
 		ExitCode: exitCode, Recovered: r.str("recovered"), Meta: r.raw("meta"),
+		CompletedAt: r.timestamp("completed_at"),
 	}
 }
 
@@ -252,6 +333,7 @@ func decodeScriptEvent(kind string, r *objectReader) (Event, error) {
 		value, valueBlob := r.rawPayload("value")
 		return ScriptCompleted{
 			RunID: r.str("run_id"), OK: r.boolean("ok"), Value: value, ValueBlob: valueBlob, Error: r.str("error"),
+			Status: r.str("status"), Code: r.str("code"), Stage: r.str("stage"),
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported script event %q", kind)

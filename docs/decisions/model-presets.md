@@ -4,7 +4,7 @@
 
 The program MUST NOT ship a default thread model. The user MUST select the thread model. A role preset MUST NOT grant access to a model that the provider does not offer.
 
-`internal/model/presets.go` MUST hold the native provider identifiers in one table:
+`internal/model/presets.go` MUST hold the native provider identifiers in two tables: `Presets` for the role presets, and `presetCapabilities` for the capabilities of each identifier:
 
 | Provider | default selection hint | smol | slow |
 | --- | --- | --- | --- |
@@ -19,9 +19,11 @@ An explicit `[roles]` value MUST override the preset. An unavailable role preset
 
 This decision applies to model selection and role resolution, not provider entitlement. [providers.md](../spec/providers.md) and [advisor.md](../spec/advisor.md) define runtime behavior. The `default` column is a model-picker hint, not a configured thread model.
 
+`model/list` MUST report the preset roles that name each model, in the order `default`, `smol`, and `slow`. This report exposes the preset tables on the wire. It MUST NOT grant access to a model that the provider does not offer.
+
 ## Selection evidence
 
-The approved selection record dated 2026-11-08 cites the native model guides for [OpenAI](https://developers.openai.com/api/docs/guides/latest-model.md), [Anthropic](https://platform.claude.com/docs/en/models/overview.md), and [Google](https://ai.google.dev/gemini-api/docs/models). It selected Sol over Astra for the same recorded Terminal-Bench score at a lower price. It selected Opus over Fable for the default role. These are the recorded design inputs, not new measurements from this repository.
+The approved selection record dated 2026-11-08 cites the native model guides for [OpenAI](https://developers.openai.com/api/docs/guides/latest-model.md), [Anthropic](https://platform.claude.com/docs/en/models/overview.md), and [Google](https://ai.google.dev/gemini-api/docs/models). It selects Sol over Astra for the same recorded Terminal-Bench score at a lower price. It selects Opus over Fable for the default role. These are the recorded design inputs, not new measurements from this repository.
 
 | Recorded comparison | Selection evidence |
 | --- | --- |
@@ -30,7 +32,7 @@ The approved selection record dated 2026-11-08 cites the native model guides for
 | [SWE-bench Verified](https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/) | The record excludes this benchmark after OpenAI stopped reporting it on 2026-02-23 because of contamination. |
 | [OpenRouter programming usage](https://openrouter.ai/collections/programming/), data through 2026-11-07 | DeepSeek V4.1 Flash: 26.4%. GLM 5.3 Flash: 6.3%. Step 5 Preview: 6.1%. These figures measure traffic, not quality. |
 
-The record cross-checked native names against [OpenRouter's catalog](https://openrouter.ai/api/v1/models). OpenRouter identifiers MUST NOT replace native identifiers on a provider wire. Subscription availability MUST still follow the provider's offered list. The record cites [ChatGPT model documentation](https://learn.chatgpt.com/docs/models/) and [Claude Code model aliases](https://code.claude.com/docs/en/model-config/), not an endpoint allowlist.
+The record cross-checks native names against [OpenRouter's catalog](https://openrouter.ai/api/v1/models). OpenRouter identifiers MUST NOT replace native identifiers on a provider wire. Subscription availability MUST still follow the provider's offered list. The record cites [ChatGPT model documentation](https://learn.chatgpt.com/docs/models/) and [Claude Code model aliases](https://code.claude.com/docs/en/model-config/), not an endpoint allowlist.
 
 ## Enforcement
 

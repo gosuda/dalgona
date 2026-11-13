@@ -13,28 +13,16 @@ import (
 	"github.com/gosuda/dalgona/internal/auth/oauth"
 )
 
-var (
-	apiKeyProviders = []string{"anthropic", "google", "openai", "openrouter"}
-	oauthProviders  = []string{"antigravity", "chatgpt", "cursor", "devin"}
-	runnerServices  = []string{"cloudflare", "sandbox0", "sprites"}
-)
-
-func apiKeyLoginTargets() []string { return slices.Concat(apiKeyProviders, runnerServices) }
-
-func Providers() []string {
-	return slices.Sorted(slices.Values(slices.Concat(apiKeyProviders, oauthProviders)))
-}
-
 func Login(ctx context.Context, store *auth.Store, provider string, in io.Reader, out io.Writer) error {
 	lines := bufio.NewReader(in)
 	switch {
-	case slices.Contains(oauthProviders, provider):
+	case slices.Contains(auth.OAuthProviders, provider):
 		token, err := oauthLogin(ctx, provider, lines, out)
 		if err != nil {
 			return fmt.Errorf("login %s: %w", provider, err)
 		}
 		return store.SetCredential(provider, credentialFrom(token))
-	case slices.Contains(apiKeyProviders, provider):
+	case slices.Contains(auth.APIKeyProviders, provider):
 		fmt.Fprintf(out, "Paste the %s API key: ", provider)
 		key, err := lines.ReadString('\n')
 		key = strings.TrimSpace(key)
@@ -43,8 +31,23 @@ func Login(ctx context.Context, store *auth.Store, provider string, in io.Reader
 		}
 		return store.SetAPIKey(provider, key)
 	default:
-		return fmt.Errorf("unknown provider %q; known providers: %s", provider, strings.Join(Providers(), ", "))
+		return fmt.Errorf("unknown provider %q; known providers: %s", provider, strings.Join(auth.Providers(), ", "))
 	}
+}
+
+func LoginDevice(ctx context.Context, store *auth.Store, provider string, out io.Writer) error {
+	definition, _ := oauth.ProviderByID(provider)
+	token, err := oauth.DeviceCode(ctx, definition, func(code, url string) {
+		printDeviceCode(out, provider, url, code)
+	})
+	if err != nil {
+		return fmt.Errorf("login %s: %w", provider, err)
+	}
+	return store.SetCredential(provider, credentialFrom(token))
+}
+
+func printDeviceCode(out io.Writer, provider, url, code string) {
+	fmt.Fprintf(out, "Open %s and enter the code %s to log in to %s.\n", url, code, provider)
 }
 
 func ignoreEOF(err error) error {

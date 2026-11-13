@@ -37,9 +37,6 @@ const (
 	probeScript    = `uname -m; ~/.dalgona/bin/dalgona --version 2>&1`
 )
 
-// Stream is a command pipe. Wait must return after Close: waitStream
-// closes the stream on cancel and again after the grace period, and the
-// worker goroutine exits only when Wait returns.
 type Stream interface {
 	io.ReadWriteCloser
 	Wait() (exitCode int, err error)
@@ -625,8 +622,6 @@ var runnerKillGrace = 2 * time.Second
 
 const runnerRedialBudget = 2 * time.Second
 
-// Redialer supplies a fresh connection for process teardown when the
-// current stream is dead.
 type Redialer interface {
 	Redial(ctx context.Context) (Runner, error)
 }

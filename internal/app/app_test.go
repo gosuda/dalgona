@@ -22,6 +22,7 @@ import (
 	"github.com/gosuda/dalgona/internal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/scripthost"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -328,6 +329,22 @@ func TestToolSetAppendsBatteryToolsForEveryModel(t *testing.T) {
 	}
 }
 
+func TestToolSetListsRewriteAfterPatch(t *testing.T) {
+	set := toolSet(config.Config{EditStyle: config.EditStyleSpec{Default: "anchor"}}, func(context.Context, string) []tool.Tool { return nil })
+	tools, err := set(t.Context(), "gpt-test", "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(tools))
+	for _, item := range tools {
+		names = append(names, item.Spec().Name)
+	}
+	at := slices.Index(names, "patch")
+	if at < 0 || at+1 >= len(names) || names[at+1] != "rewrite" {
+		t.Fatalf("tool set %q lists rewrite after patch in no position", names)
+	}
+}
+
 func TestDeciderUsesTheActionThreadModel(t *testing.T) {
 	t.Setenv("DALGONA_HOME", t.TempDir())
 	host, closeHost, err := NewHost(t.Context(), Options{Product: config.ProductDalgona, Cwd: t.TempDir()})
@@ -349,5 +366,36 @@ func TestDeciderUsesTheActionThreadModel(t *testing.T) {
 	}
 	if got := roles.threadModel("missing", "openai/fallback"); got != "openai/fallback" {
 		t.Fatalf("unknown thread model = %q", got)
+	}
+}
+
+func TestDefaultToolModeShowsOnlyTheEvalFirstList(t *testing.T) {
+	for _, product := range []config.Product{config.ProductDal, config.ProductDalgona} {
+		home := "DALGONA_HOME"
+		if product == config.ProductDal {
+			home = "DAL_HOME"
+		}
+		t.Setenv(home, t.TempDir())
+		cfg, err := config.Load(product, t.TempDir(), config.Flags{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		builtin, err := toolSet(cfg, func(context.Context, string) []tool.Tool { return nil })(t.Context(), "openai/gpt-test", t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ext := scripthost.New(scripthost.Config{Mode: cfg.ToolMode})(nil)
+		tools := ext.Tools(builtin)
+		specs := make([]tool.Spec, 0, len(tools))
+		for _, item := range tools {
+			specs = append(specs, item.Spec())
+		}
+		var names []string
+		for _, spec := range ext.Visible(specs) {
+			names = append(names, spec.Name)
+		}
+		if want := []string{"read", "search", "patch", "exec", "eval"}; !slices.Equal(names, want) {
+			t.Fatalf("%s visible tools = %v, want %v", product, names, want)
+		}
 	}
 }

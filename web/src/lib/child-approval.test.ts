@@ -1,13 +1,12 @@
 import { describe, expect, test } from "vitest";
 import {
-	activeApproval,
+	activeRequest,
 	emptyTranscript,
 	itemsAwaitingApproval,
 	type KnownChildThreads,
-	otherThreadApprovalCount,
 	recordChildThread,
 	reduceNotification,
-	trackApprovalRequest,
+	trackRequest,
 	transcriptForThread,
 } from "./reducer";
 import type { ApprovalRequest, ThreadDetail } from "./types";
@@ -75,21 +74,14 @@ describe("child approvals", () => {
 	});
 
 	test("shows a child approval in the open parent thread", () => {
-		const approvals = trackApprovalRequest([], childRequest);
+		const approvals = trackRequest([], childRequest);
 		const transcript = reduceNotification(
 			emptyTranscript("thread-1"),
 			spawned("thread-1", "child-9"),
 		);
 		expect(
-			activeApproval(approvals, "thread-1", transcript.childThreadIds),
+			activeRequest(approvals, "thread-1", transcript.childThreadIds),
 		).toStrictEqual(childRequest);
-		expect(
-			otherThreadApprovalCount(
-				approvals,
-				"thread-1",
-				transcript.childThreadIds,
-			),
-		).toBe(0);
 		expect(
 			itemsAwaitingApproval(
 				approvals,
@@ -100,31 +92,21 @@ describe("child approvals", () => {
 	});
 
 	test("still hides approvals from unrelated threads", () => {
-		const approvals = trackApprovalRequest([], {
+		const approvals = trackRequest([], {
 			...childRequest,
 			threadId: "thread-2",
 		});
-		expect(activeApproval(approvals, "thread-1", ["child-9"])).toBeNull();
-		expect(otherThreadApprovalCount(approvals, "thread-1", ["child-9"])).toBe(
-			1,
-		);
+		expect(activeRequest(approvals, "thread-1", ["child-9"])).toBeNull();
 	});
 
 	test("keeps a child approval visible after the parent reopens", () => {
 		let known: KnownChildThreads = {};
 		known = recordChildThread(known, "thread-1", "child-9");
-		const approvals = trackApprovalRequest([], childRequest);
+		const approvals = trackRequest([], childRequest);
 		const reopened = transcriptForThread(parentDetail("thread-1"), known);
 		expect(
-			activeApproval(approvals, reopened.threadId, reopened.childThreadIds),
+			activeRequest(approvals, reopened.threadId, reopened.childThreadIds),
 		).toStrictEqual(childRequest);
-		expect(
-			otherThreadApprovalCount(
-				approvals,
-				reopened.threadId,
-				reopened.childThreadIds,
-			),
-		).toBe(0);
 		expect(
 			itemsAwaitingApproval(
 				approvals,

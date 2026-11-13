@@ -317,14 +317,6 @@ func hexOfSum(sum [32]byte) string {
 	return string(out[:])
 }
 
-func sha256Sum(data []byte) [32]byte {
-	return sha256.Sum256(data)
-}
-
-func hexString(data []byte) string {
-	return hex.EncodeToString(data)
-}
-
 func hexDecode(value string) ([]byte, error) {
 	out := make([]byte, hex.DecodedLen(len(value)))
 	_, err := hex.Decode(out, []byte(value))

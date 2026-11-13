@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -86,7 +87,7 @@ func TestSecretsAreMaskedInJournalAndUnmaskedInExec(t *testing.T) {
 	const secret = "sk-test-123456789"
 	t.Setenv("OPENAI_API_KEY", secret)
 	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
-		store, err := auth.New(h.home)
+		store, err := auth.Load(h.home)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -315,19 +316,21 @@ func (r rendezvousAgent) Run(ctx context.Context, call tool.Call, _ tool.Env) (t
 
 func TestConsecutiveAgentCallsRunTogether(t *testing.T) {
 	t.Parallel()
-	var arrived sync.WaitGroup
-	arrived.Add(2)
-	h := newHarness(t, func(h *harness) {
-		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
-			return []tool.Tool{rendezvousAgent{arrived: &arrived}}, nil
+	synctest.Test(t, func(t *testing.T) {
+		var arrived sync.WaitGroup
+		arrived.Add(2)
+		h := newHarness(t, func(h *harness) {
+			h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
+				return []tool.Tool{rendezvousAgent{arrived: &arrived}}, nil
+			}
+		})
+		h.model.push(calls(call{id: "k1", name: "fanout", args: `{}`}, call{id: "k2", name: "fanout", args: `{}`}), text("done"))
+		h.idleThread("spawn two")
+		results := callOutputs(h.model.request(1))
+		if results["k1"] != "child k1" || results["k2"] != "child k2" {
+			t.Fatalf("agent calls did not run together: %v", results)
 		}
 	})
-	h.model.push(calls(call{id: "k1", name: "fanout", args: `{}`}, call{id: "k2", name: "fanout", args: `{}`}), text("done"))
-	h.idleThread("spawn two")
-	results := callOutputs(h.model.request(1))
-	if results["k1"] != "child k1" || results["k2"] != "child k2" {
-		t.Fatalf("agent calls did not run together: %v", results)
-	}
 }
 
 type denyExec struct{ baseExtension }

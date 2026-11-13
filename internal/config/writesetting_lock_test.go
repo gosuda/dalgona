@@ -18,8 +18,8 @@ func TestWriteSetting_concurrentWritesKeepBothKeys(t *testing.T) {
 		for _, item := range []struct{ key, value string }{{"model", "a"}, {"runner", "b"}} {
 			go func(key, value string) {
 				defer done.Done()
-				if err := config.WriteSetting(home, key, value); err != nil {
-					t.Errorf("WriteSetting(%s): %v", key, err)
+				if err := config.WriteSettings(home, config.SettingEdit{Key: key, Value: value}); err != nil {
+					t.Errorf("WriteSettings(%s): %v", key, err)
 				}
 			}(item.key, item.value)
 		}

@@ -324,13 +324,13 @@ func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	body := wire.AppendGetCliModelConfigsRequest(nil, &wire.GetCliModelConfigsRequest{Metadata: discoveryMetadata(key)})
+	body := wire.AppendModelConfigRequest(nil, &wire.GetCliModelConfigsRequest{Metadata: discoveryMetadata(key)})
 	payload, err := p.unary(ctx, modelsPath, body)
 	if err != nil {
 		return nil, err
 	}
 	var response wire.GetCliModelConfigsResponse
-	if err := wire.ConsumeGetCliModelConfigsResponse(payload, &response); err != nil {
+	if err := wire.ConsumeModelConfigResponse(payload, &response); err != nil {
 		return nil, fmt.Errorf("devin: decode model configs: %w", err)
 	}
 	models := make([]model.Model, 0, len(response.Models))
@@ -367,6 +367,7 @@ func (p *Provider) listedModel(config *wire.ClientModelConfig, seen map[string]b
 		ID:         id,
 		Context:    model.ContextWindow(id, reported, p.cfg.ContextWindows),
 		MaxOutput:  int(info.MaxOutputTokens),
+		Images:     config.SupportsImages,
 		ToolChoice: true,
 	}, true
 }

@@ -35,3 +35,13 @@ func TestLoad_explicitEnabledWinsAcrossLayers(t *testing.T) {
 		t.Fatal("explicit settings enabled=true was dropped")
 	}
 }
+
+func TestLoad_disablesTasteBuiltinByName(t *testing.T) {
+	cfg, err := loadConfig(t, config.ProductDalgona, "[keywords.decide]\nenabled = false\n", "", config.Flags{})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Keywords["decide"].Enabled {
+		t.Fatal("disabling the decide built-in by name was ignored")
+	}
+}

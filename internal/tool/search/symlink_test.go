@@ -31,7 +31,7 @@ func TestSearchScopeFileSymlinkRejected(t *testing.T) {
 	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(cwd, "link.txt")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := execute(cwd, args{Mode: "grep", Pattern: "needle", Path: "link.txt", Limit: 100})
+	_, err := execute(cwd, args{Mode: "grep", Pattern: "needle", Path: "link.txt", Limit: 100}, "", freshness{})
 	if err == nil || !strings.Contains(err.Error(), "escapes the workspace via symlink") {
 		t.Fatalf("scope file symlink err = %v, want workspace escape rejection", err)
 	}
@@ -42,7 +42,7 @@ func TestSearchScopeNestedSymlinkRejected(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(cwd, "notes")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := execute(cwd, args{Mode: "grep", Pattern: "needle", Path: "notes/sub", Limit: 100})
+	_, err := execute(cwd, args{Mode: "grep", Pattern: "needle", Path: "notes/sub", Limit: 100}, "", freshness{})
 	if err == nil || !strings.Contains(err.Error(), "escapes the workspace via symlink") {
 		t.Fatalf("nested symlink scope err = %v, want workspace escape rejection", err)
 	}
@@ -53,7 +53,7 @@ func TestSearchScanSkipsSymlinkFile(t *testing.T) {
 	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(cwd, "link.txt")); err != nil {
 		t.Fatal(err)
 	}
-	result, err := execute(cwd, args{Mode: "grep", Pattern: "needle", Limit: 100})
+	result, err := execute(cwd, args{Mode: "grep", Pattern: "needle", Limit: 100}, "", freshness{})
 	if err != nil {
 		t.Fatal(err)
 	}

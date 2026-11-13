@@ -33,17 +33,19 @@ type loadedSession struct {
 }
 
 type Thread struct {
-	host       *Host
-	id         string
-	created    event.SessionCreated
-	fixedTools []tool.Tool
-	toolsMu    sync.Mutex
-	toolset    *toolset
-	ext        Extension
-	system     string
-	runner     runner.Runner
-	snapshots  *snapshot.Store
-	release    func() error
+	host           *Host
+	id             string
+	created        event.SessionCreated
+	fixedTools     []tool.Tool
+	toolsMu        sync.Mutex
+	sandboxMu      sync.Mutex
+	sandboxPending *sandboxAsk
+	toolset        *toolset
+	ext            Extension
+	system         string
+	runner         runner.Runner
+	snapshots      *snapshot.Store
+	release        func() error
 
 	children  chan struct{}
 	inbox     chan func(*actor)
@@ -53,6 +55,8 @@ type Thread struct {
 	closeErr  error
 	workers   sync.WaitGroup
 	output    outputRelay
+	skipped   *skippedCompaction
+	images    verifiedImages
 }
 
 type actor struct {
@@ -64,7 +68,9 @@ type actor struct {
 	subs         map[chan Update]struct{}
 	busy         bool
 	cancel       context.CancelCauseFunc
-	approvals    map[string]chan Reply
+	approvals    map[string]*pendingApproval
+	questions    map[string]*pendingQuestion
+	questionSeq  uint64
 	autoContinue bool
 	hook         BoundaryHook
 }
@@ -130,7 +136,7 @@ func (h *Host) openLocked(ctx context.Context, loaded loadedSession, overrides O
 	h.mu.Unlock()
 	a := &actor{
 		t: t, records: loaded.records, sizes: loaded.sizes, state: loaded.state, damage: loaded.damage,
-		subs: make(map[chan Update]struct{}), approvals: make(map[string]chan Reply), autoContinue: !endedByInterrupt(loaded.records),
+		subs: make(map[chan Update]struct{}), approvals: make(map[string]*pendingApproval), questions: make(map[string]*pendingQuestion), autoContinue: !endedByInterrupt(loaded.records),
 	}
 	if loaded.state.TurnID != "" && loaded.damage == nil {
 		a.spawn(func(ctx context.Context) { (&worker{t: t, turnID: loaded.state.TurnID}).recoverTurn(ctx) })
@@ -264,7 +270,7 @@ func (t *Thread) buildTools(ctx context.Context, modelID string) ([]tool.Tool, e
 	if err != nil {
 		return nil, fmt.Errorf("agent: build tools: %w", err)
 	}
-	return t.ext.Tools(t.withSubagentTools(built)), nil
+	return t.ext.Tools(t.withThreadTools(built)), nil
 }
 
 func (t *Thread) newToolset(modelID string, tools []tool.Tool) *toolset {
@@ -311,8 +317,6 @@ func shellName() string {
 	return cmp.Or(os.Getenv("SHELL"), "sh")
 }
 
-func instructionsText(home, cwd string) string { return prompt.Instructions(home, cwd) }
-
 func (t *Thread) restoreSnapshots(state event.State) error {
 	snapshots := make([]event.Snapshot, 0, len(state.Snapshots))
 	for _, item := range state.Snapshots {
@@ -352,6 +356,8 @@ func snapshotMetaWithDigest(item event.Snapshot, digest string) []byte {
 }
 
 func (t *Thread) ID() string { return t.id }
+
+func (t *Thread) TopLevel() bool { return t.created.Parent == "" && t.created.Advisor == "" }
 
 func (a *actor) loop() {
 	defer close(a.t.stopped)
@@ -444,6 +450,7 @@ func (a *actor) appendCtx(ctx context.Context, events ...event.Event) (uint64, e
 	if len(events) == 0 {
 		return a.head(), nil
 	}
+	events = stampTimes(events, a.t.host.clock().UTC())
 	state, raws, err := a.prepareAppend(events)
 	if err != nil {
 		return a.head(), err
@@ -488,13 +495,7 @@ func (a *actor) prepareAppend(events []event.Event) (event.State, [][]byte, erro
 
 func (a *actor) publish(update Update) {
 	for ch := range a.subs {
-		select {
-		case ch <- update:
-		default:
-			close(ch)
-			delete(a.subs, ch)
-			a.t.host.log.Warn("agent: closing slow subscriber", "thread", a.t.id)
-		}
+		a.sendUpdate(ch, update)
 	}
 }
 
@@ -507,7 +508,7 @@ func (t *Thread) publish(update Update) {
 
 func (t *Thread) Subscribe() <-chan Update {
 	ch := make(chan Update, subscriberBuffer)
-	if err := t.do(func(a *actor) { a.subs[ch] = struct{}{} }); err != nil {
+	if err := t.do(func(a *actor) { a.subscribe(ch) }); err != nil {
 		close(ch)
 	}
 	return ch
@@ -522,10 +523,11 @@ func (t *Thread) Unsubscribe(ch <-chan Update) {
 func (a *actor) unsubscribe(target <-chan Update) {
 	for ch := range a.subs {
 		if ch == target {
-			close(ch)
-			delete(a.subs, ch)
+			a.drop(ch)
 		}
 	}
+	a.settleQuestions()
+	a.settleApprovals()
 }
 
 type view struct {
@@ -544,7 +546,7 @@ func (t *Thread) Status() (Status, error) {
 	return ask(t, func(a *actor) Status {
 		return Status{
 			State: a.state.Status, Busy: a.busy, AutoContinue: a.autoContinue, Head: a.head(),
-			Turn: a.state.TurnID, Subscribers: len(a.subs), OutputDropped: a.t.output.dropped.Load(),
+			Turn: a.state.TurnID, Subscribers: len(a.subs), Questions: len(a.questions), OutputDropped: a.t.output.dropped.Load(),
 		}
 	})
 }

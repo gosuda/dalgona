@@ -2,8 +2,11 @@
 
 ## Box tokens
 
-The Go client sends `DALGONA_TOKEN` to the worker. The worker checks
-it in constant time and accepts only that value. Each box gets its own
+The Go client sends the worker secret, which is the value of
+`DALGONA_TOKEN` on the worker, as the bearer token. It reads that value
+from `DALGONA_CLOUDFLARE_TOKEN`, or else from the `cloudflare` entry in
+`auth.json`. The worker checks it in constant time and accepts only that
+value. Each box gets its own
 token. The token is HMAC-SHA256 over the box name keyed by
 `DALGONA_TOKEN`. The durable object reads the box name from
 `ctx.id.name` and fails with 500 when it is missing. It sets

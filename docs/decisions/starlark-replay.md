@@ -12,4 +12,4 @@ This decision applies to `internal/script`, the eval tool, workflows, plugins, a
 
 ## Enforcement
 
-`internal/agent/event/state_test.go` checks the fold of out-of-order script effects. `internal/script/stdlib/stdlib_test.go` checks injected time and random sources and the required dialect. These tests do not prove runtime replay. Runtime integration MUST test a crash after an effect, a restart without a second effect, and refusal on an operation or argument mismatch before this decision can be reported as enforced end to end.
+`internal/agent/event/state_test.go` checks the fold of out-of-order script effects. `internal/script/stdlib/stdlib_test.go` checks injected time and random sources and the required dialect. `internal/scripthost/scripthost_test.go` checks a crash after an effect (`TestScriptReplaysRecordedEffectsAfterCrash`) and recovery of a recorded outcome without a second effect (`TestRecoveredEvalReturnsRecordedOutcome`). `internal/scripthost/effects_runid_test.go` checks a reused run id with different code (`TestReusedRunIDWithinTurnIsRefused`) and the recorded outcome of a repeated call (`TestRepeatedEvalWithinTurnReturnsRecordedOutcome`).

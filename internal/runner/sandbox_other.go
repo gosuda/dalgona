@@ -5,9 +5,10 @@ package runner
 import (
 	"fmt"
 	"os/exec"
+	"runtime"
 )
 
-func Available() bool { return false }
+func UnavailableCause() string { return runtime.GOOS + " has no harness sandbox" }
 
 func configureSandbox(cmd *exec.Cmd, dir string, sandbox Sandbox) error { return nil }
 

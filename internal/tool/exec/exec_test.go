@@ -5,12 +5,14 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,10 +115,19 @@ func createMarkerThenWaitCommand() string {
 }
 
 func TestExecTimeoutTerminates(t *testing.T) {
-	env, closeRunner := testEnv(t)
-	defer closeRunner()
+	runsDir := filepath.Join(t.TempDir(), "runs")
+	runs, newErr := runner.NewLocal(runsDir)
+	if newErr != nil {
+		t.Fatal(newErr)
+	}
+	defer func() {
+		_ = runs.Close()
+	}()
+	cwd := t.TempDir()
+	env := tool.Env{Runner: runs, Cwd: cwd, Sandbox: runner.Sandbox{Mode: runner.SandboxWorkspaceWrite, WritableRoots: []string{cwd}}}
 	toolExec := New()
 	toolExec.grace = 300 * time.Millisecond
+	toolExec.killWait = 30 * time.Second
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-3", Args: jsontext.Value(`{"command":` + strconv.Quote(waitThenPrintLateCommand()) + `,"timeout_ms":2000}`)}, env)
 	if err == nil {
 		t.Fatal("timeout run returned no error")
@@ -128,7 +139,8 @@ func TestExecTimeoutTerminates(t *testing.T) {
 		t.Fatal("timed out call reported success")
 	}
 	if result.ExitCode == nil {
-		t.Fatal("timed out call settled without an exit record")
+		runDir := filepath.Join(runsDir, "run-3")
+		t.Fatalf("timed out call settled without an exit record; run directory %s holds: %s", runDir, runDirListing(runDir))
 	}
 	if !strings.Contains(string(result.Output), "early") {
 		t.Fatalf("output before the timeout is missing: %q", result.Output)
@@ -138,8 +150,21 @@ func TestExecTimeoutTerminates(t *testing.T) {
 	}
 }
 
+func runDirListing(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "unreadable: " + err.Error()
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return strings.Join(names, ", ")
+}
+
 func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
-	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:2s")
+	gate := listenShimGate(t)
+	t.Setenv("DALGONA_SHIM_TEST_PAUSE", "pid:"+gate.path)
 	runsDir := filepath.Join(t.TempDir(), "runs")
 	runs, newErr := runner.NewLocal(runsDir)
 	if newErr != nil {
@@ -159,8 +184,10 @@ func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
 		finished <- execOutcome{result: result, runErr: runErr}
 	}()
 	runDir := filepath.Join(runsDir, "run-early")
-	waitForRunDir(t, runDir, cancel)
+	parked := gate.awaitShim(t)
 	cancel()
+	waitForPath(t, filepath.Join(runDir, "cancel"), cancel)
+	_ = parked.Close()
 	settled := awaitExecOutcome(t, finished)
 	if settled.runErr == nil || settled.result.OK {
 		t.Fatalf("interrupted run ok=%v err=%v", settled.result.OK, settled.runErr)
@@ -176,16 +203,50 @@ func TestExecInterruptBeforeShimPIDSettlesWithExit(t *testing.T) {
 	}
 }
 
-func waitForRunDir(t *testing.T, runDir string, cancel context.CancelFunc) {
+type shimGate struct {
+	path     string
+	listener *net.UnixListener
+}
+
+func listenShimGate(t *testing.T) shimGate {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dgx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return shimGate{path: path, listener: listener}
+}
+
+func (g shimGate) awaitShim(t *testing.T) net.Conn {
+	t.Helper()
+	if err := g.listener.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := g.listener.Accept()
+	if err != nil {
+		t.Fatalf("shim never reached the pid pause: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+func waitForPath(t *testing.T, path string, cancel context.CancelFunc) {
 	t.Helper()
 	appear := time.Now().Add(10 * time.Second)
 	for {
-		if _, statErr := os.Stat(runDir); statErr == nil {
+		if _, statErr := os.Stat(path); statErr == nil {
 			return
 		}
 		if time.Now().After(appear) {
 			cancel()
-			t.Fatal("run directory did not appear")
+			t.Fatalf("%s did not appear", path)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -357,5 +418,70 @@ func TestExecUsesLinuxShellForRemote(t *testing.T) {
 	}
 	if got := shellArgvForHost(nil, "linux", "echo hi"); !slices.Equal(got, want) {
 		t.Fatalf("local shell on linux host = %q, want %q", got, want)
+	}
+}
+
+type exitAfterKillRunner struct {
+	runner.Runner
+	mu     sync.Mutex
+	killed bool
+	reads  int
+	after  int
+}
+
+func (f *exitAfterKillRunner) Start(context.Context, runner.ProcessSpec) error { return nil }
+
+func (f *exitAfterKillRunner) Signal(_ context.Context, _ string, signal runner.Signal) error {
+	if signal == runner.SignalKill {
+		f.mu.Lock()
+		f.killed = true
+		f.mu.Unlock()
+	}
+	return nil
+}
+
+func (f *exitAfterKillRunner) Read(context.Context, string, int64) (runner.Output, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := runner.Output{Path: "runs/exit-after-kill/out"}
+	if !f.killed {
+		return out, nil
+	}
+	f.reads++
+	if f.after > 0 && f.reads >= f.after {
+		out.Exit = &runner.Exit{Code: 137}
+	}
+	return out, nil
+}
+
+func TestExecKilledCallPollsForExitRecord(t *testing.T) {
+	fake := &exitAfterKillRunner{after: 3}
+	env := tool.Env{Runner: fake, Cwd: t.TempDir(), Sandbox: runner.Sandbox{Mode: runner.SandboxOff}}
+	toolExec := New()
+	toolExec.grace = 300 * time.Millisecond
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "kill-poll", Args: jsontext.Value(`{"command":"true","timeout_ms":100}`)}, env)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %v, want the timeout", err)
+	}
+	if result.OK {
+		t.Fatal("killed call reported success")
+	}
+	if result.ExitCode == nil || *result.ExitCode != 137 {
+		t.Fatalf("killed call settled without the exit record it polled for: exit=%v", result.ExitCode)
+	}
+}
+
+func TestExecKilledCallWithoutExitReportsError(t *testing.T) {
+	fake := &exitAfterKillRunner{}
+	env := tool.Env{Runner: fake, Cwd: t.TempDir(), Sandbox: runner.Sandbox{Mode: runner.SandboxOff}}
+	toolExec := New()
+	toolExec.grace = 300 * time.Millisecond
+	toolExec.killWait = 300 * time.Millisecond
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "kill-silent", Args: jsontext.Value(`{"command":"true","timeout_ms":100}`)}, env)
+	if err == nil || !strings.Contains(err.Error(), "did not report an exit") {
+		t.Fatalf("error = %v, want the missing exit report", err)
+	}
+	if result.ExitCode != nil {
+		t.Fatalf("silent kill reported an exit code: %d", *result.ExitCode)
 	}
 }

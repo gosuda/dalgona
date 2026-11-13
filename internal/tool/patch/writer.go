@@ -61,7 +61,7 @@ func applyBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Resu
 	}
 	cleanupStates(context.WithoutCancel(ctx), env, states)
 	refs := recordSnapshots(env, batch.files)
-	return tool.Result{Output: appliedOutput(batch.files, refs), OK: true}, nil
+	return tool.Result{Output: appliedOutput(batch.summary, batch.files, refs), OK: true}, nil
 }
 
 func verifyBatch(ctx context.Context, env tool.Env, files []*stagedFile) error {
@@ -437,9 +437,13 @@ func recordSnapshots(env tool.Env, files []*stagedFile) map[string]string {
 	return refs
 }
 
-func appliedOutput(files []*stagedFile, refs map[string]string) []byte {
+func appliedOutput(summary string, files []*stagedFile, refs map[string]string) []byte {
 	var out strings.Builder
-	fmt.Fprintf(&out, "patch: applied %d file(s)\n", len(files))
+	if summary == "" {
+		fmt.Fprintf(&out, "patch: applied %d file(s)\n", len(files))
+	} else {
+		out.WriteString(summary)
+	}
 	for _, file := range files {
 		path := file.path
 		if file.renameTo != "" {

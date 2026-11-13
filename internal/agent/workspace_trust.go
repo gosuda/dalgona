@@ -8,7 +8,6 @@ import (
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
-// WorkspaceServer describes one workspace MCP server for approval.
 type WorkspaceServer struct {
 	Name    string
 	Command string
@@ -17,7 +16,6 @@ type WorkspaceServer struct {
 	URL     string
 }
 
-// WorkspaceApprovalRequest asks the user to trust one workspace.
 type WorkspaceApprovalRequest struct {
 	Cwd     string
 	Servers []WorkspaceServer
@@ -25,9 +23,6 @@ type WorkspaceApprovalRequest struct {
 
 const workspaceApprovalTool = "mcp_workspace"
 
-// RequestWorkspaceApproval prompts the user through the existing approval
-// channel and waits for a reply. It returns ReplyDecline when no client
-// subscribes. Callers treat any error as denial.
 func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceApprovalRequest) (Reply, error) {
 	requestID := newID("req-")
 	replies := make(chan Reply, 1)
@@ -44,7 +39,7 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 	if err != nil {
 		return ReplyDecline, err
 	}
-	forwarded, linked := t.forwardApproval(prompt)
+	forwarded, linked := t.forwardApproval(prompt, replies)
 	if !forwarded && (!offered || linked) {
 		t.discardApproval(requestID)
 		return ReplyDecline, nil
@@ -53,14 +48,14 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 	case reply := <-replies:
 		if forwarded {
 			prompt.Resolved = true
-			t.forwardApproval(prompt)
+			t.forwardApproval(prompt, nil)
 		}
 		return reply, nil
 	case <-ctx.Done():
 		t.discardApproval(requestID)
 		if forwarded {
 			prompt.Resolved = true
-			t.forwardApproval(prompt)
+			t.forwardApproval(prompt, nil)
 		}
 		return ReplyCancel, ctx.Err()
 	}
@@ -73,8 +68,6 @@ func (t *Thread) discardApproval(requestID string) {
 	})
 }
 
-// FormatWorkspacePrompt renders the workspace path with each server command,
-// args, and env for the approval channel.
 func FormatWorkspacePrompt(cwd string, servers []WorkspaceServer) string {
 	ordered := slices.Clone(servers)
 	slices.SortFunc(ordered, func(a, b WorkspaceServer) int { return strings.Compare(a.Name, b.Name) })
@@ -86,12 +79,10 @@ func FormatWorkspacePrompt(cwd string, servers []WorkspaceServer) string {
 	return strings.Join(lines, "\n")
 }
 
-// FormatWorkspaceServer renders one server with command, args, url, and env.
 func FormatWorkspaceServer(server WorkspaceServer) string {
 	return server.Name + ": " + describeWorkspaceServer(server)
 }
 
-// WorkspaceCommands returns one command line per server for the approval channel.
 func WorkspaceCommands(servers []WorkspaceServer) []string {
 	ordered := slices.Clone(servers)
 	slices.SortFunc(ordered, func(a, b WorkspaceServer) int { return strings.Compare(a.Name, b.Name) })
@@ -141,12 +132,10 @@ func redactWorkspaceEnv(env []string) []string {
 
 type threadContextKey struct{}
 
-// ContextWithThread carries the requesting thread for workspace approval.
 func ContextWithThread(ctx context.Context, t *Thread) context.Context {
 	return context.WithValue(ctx, threadContextKey{}, t)
 }
 
-// ThreadFromContext returns the thread carried for workspace approval.
 func ThreadFromContext(ctx context.Context) (*Thread, bool) {
 	t, ok := ctx.Value(threadContextKey{}).(*Thread)
 	return t, ok && t != nil

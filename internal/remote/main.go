@@ -9,14 +9,11 @@ import (
 	"strings"
 )
 
-// IO carries a command's standard streams.
 type IO struct {
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
 }
 
-// PullMain runs `dalgona pull <thread>`. It returns 1 and lists the files on
-// conflicts.
 func PullMain(ctx context.Context, opts Options, args []string, stdio IO) int {
 	if len(args) != 1 {
 		_, _ = fmt.Fprintln(stdio.Stderr, "usage: dalgona pull <thread>")
@@ -25,7 +22,6 @@ func PullMain(ctx context.Context, opts Options, args []string, stdio IO) int {
 	return report(stdio.Stderr, cliBinder(opts, stdio).Pull(ctx, args[0]))
 }
 
-// RunnerMain runs `dalgona runner gc`.
 func RunnerMain(ctx context.Context, opts Options, args []string, stdio IO) int {
 	if len(args) != 1 || args[0] != "gc" {
 		_, _ = fmt.Fprintln(stdio.Stderr, "usage: dalgona runner gc")
@@ -38,8 +34,6 @@ func RunnerMain(ctx context.Context, opts Options, args []string, stdio IO) int 
 	return report(stdio.Stderr, err)
 }
 
-// CloudMain runs `dalgona cloud up <name> [--copy-auth]`,
-// `dalgona cloud down <name> [--yes]`, and `dalgona cloud pull <name>`.
 func CloudMain(ctx context.Context, opts Options, args []string, stdio IO) int {
 	command, ok := parseCloud(args)
 	if !ok {

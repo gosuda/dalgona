@@ -19,7 +19,7 @@ import (
 type scriptedFault struct {
 	failAt     int
 	writes     int
-	writeDelay time.Duration
+	hold       <-chan struct{}
 	dropRemove bool
 	firstWrite chan struct{}
 	writeOnce  sync.Once
@@ -37,8 +37,8 @@ func (f *scriptedFault) stall(msg rpcMessage) bool {
 				close(f.firstWrite)
 			}
 		})
-		if f.writeDelay > 0 {
-			time.Sleep(f.writeDelay)
+		if f.hold != nil {
+			<-f.hold
 		}
 		return false
 	}
@@ -89,18 +89,30 @@ func newScriptedRemote(t *testing.T, local *Local, failWriteAt int) *Remote {
 	return serveFaultRemote(t, local, &scriptedFault{failAt: failWriteAt})
 }
 
-func newStallRemote(t *testing.T, local *Local, writeDelay time.Duration) (*Remote, <-chan struct{}) {
-	t.Helper()
-	firstWrite := make(chan struct{})
-	remote := serveFaultRemote(t, local, &scriptedFault{writeDelay: writeDelay, firstWrite: firstWrite})
-	return remote, firstWrite
+type uploadStall struct {
+	firstWrite <-chan struct{}
+	release    func()
 }
 
-func newHungRemoveRemote(t *testing.T, local *Local, writeDelay time.Duration) (*Remote, <-chan struct{}) {
+func newStallRemote(t *testing.T, local *Local) (*Remote, uploadStall) {
 	t.Helper()
-	firstWrite := make(chan struct{})
-	remote := serveFaultRemote(t, local, &scriptedFault{writeDelay: writeDelay, dropRemove: true, firstWrite: firstWrite})
-	return remote, firstWrite
+	return serveStallRemote(t, local, &scriptedFault{})
+}
+
+func newHungRemoveRemote(t *testing.T, local *Local) (*Remote, uploadStall) {
+	t.Helper()
+	return serveStallRemote(t, local, &scriptedFault{dropRemove: true})
+}
+
+func serveStallRemote(t *testing.T, local *Local, fault *scriptedFault) (*Remote, uploadStall) {
+	t.Helper()
+	fault.firstWrite = make(chan struct{})
+	hold := make(chan struct{})
+	fault.hold = hold
+	remote := serveFaultRemote(t, local, fault)
+	release := sync.OnceFunc(func() { close(hold) })
+	t.Cleanup(release)
+	return remote, uploadStall{firstWrite: fault.firstWrite, release: release}
 }
 
 func scriptedReply(ctx context.Context, local *Local, writer rpcWriter, fault *scriptedFault, msg rpcMessage) error {
@@ -257,7 +269,7 @@ func TestRemoteWriteFileLongBasename(t *testing.T) {
 	assertNoStagedFiles(t, dir)
 }
 
-func cancelMidUpload(t *testing.T, remote *Remote, firstWrite <-chan struct{}, dest string, data []byte) error {
+func cancelMidUpload(t *testing.T, remote *Remote, stall uploadStall, dest string, data []byte) error {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -265,8 +277,9 @@ func cancelMidUpload(t *testing.T, remote *Remote, firstWrite <-chan struct{}, d
 	go func() {
 		done <- remote.WriteFile(ctx, dest, data, 0o600)
 	}()
-	<-firstWrite
+	<-stall.firstWrite
 	cancel()
+	stall.release()
 	select {
 	case writeErr := <-done:
 		return writeErr
@@ -282,10 +295,10 @@ func TestRemoteWriteFileCancelledUploadReturnsWithinBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	remote, firstWrite := newHungRemoveRemote(t, local, 500*time.Millisecond)
+	remote, stall := newHungRemoveRemote(t, local)
 	dest := filepath.Join(dir, "target.txt")
 	data := bytes.Repeat([]byte("n"), 2*readPageSize+16)
-	writeErr := cancelMidUpload(t, remote, firstWrite, dest, data)
+	writeErr := cancelMidUpload(t, remote, stall, dest, data)
 	if writeErr == nil {
 		t.Fatal("WriteFile succeeded after cancellation")
 	}
@@ -300,10 +313,10 @@ func TestRemoteWriteFileCancelledUploadRemovesStaged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	remote, firstWrite := newStallRemote(t, local, 500*time.Millisecond)
+	remote, stall := newStallRemote(t, local)
 	dest := filepath.Join(dir, "target.txt")
 	data := bytes.Repeat([]byte("n"), 2*readPageSize+16)
-	if writeErr := cancelMidUpload(t, remote, firstWrite, dest, data); writeErr == nil {
+	if writeErr := cancelMidUpload(t, remote, stall, dest, data); writeErr == nil {
 		t.Fatal("WriteFile succeeded after cancellation")
 	}
 	assertNoStagedFiles(t, dir)

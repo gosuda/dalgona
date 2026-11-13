@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,6 +120,7 @@ func startCommand(dir string, argv []string, out *os.File) (*exec.Cmd, func(), e
 		cleanup()
 		return nil, nil, abandonCommand(cmd, resumeErr)
 	}
+	pauseShim("group")
 	return cmd, cleanup, nil
 }
 
@@ -142,13 +144,16 @@ func cancelShim(dir string, out *os.File, signal Signal) error {
 }
 
 func pauseShim(phase string) {
-	name, value, ok := strings.Cut(os.Getenv(shimPauseEnvironment), ":")
+	name, gate, ok := strings.Cut(os.Getenv(shimPauseEnvironment), ":")
 	if !ok || name != phase {
 		return
 	}
-	if delay, err := time.ParseDuration(value); err == nil {
-		time.Sleep(delay)
+	conn, err := net.Dial("unix", gate) //nolint:gosec // the gate path comes from the test that starts this shim
+	if err != nil {
+		return
 	}
+	_, _ = io.Copy(io.Discard, conn)
+	_ = conn.Close()
 }
 
 func commandForShim(argv []string) (*exec.Cmd, error) {

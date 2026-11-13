@@ -1,34 +1,268 @@
 <script lang="ts">
-import KeywordText from "#lib/components/KeywordText.svelte";
-import { findKeywords } from "#lib/keywords.ts";
-import type { KeywordDefinition } from "#lib/types.ts";
+import { onDestroy, tick, untrack } from "svelte";
+import {
+	type Attachments,
+	attachmentsOf,
+	type Chip,
+	IMAGE_TYPES,
+	MAX_IMAGE_BYTES,
+	MAX_IMAGES,
+	MAX_MESSAGE_BYTES,
+	messageBytes,
+	PASTE_CHIP_LINES,
+	readDataUrl,
+	type ShellRun,
+} from "#lib/attachments.ts";
+import {
+	type PanelKind,
+	parseComposerText,
+	slashCommands,
+} from "#lib/commands.ts";
+import AttachmentChips from "#lib/components/AttachmentChips.svelte";
+import CommandPalette from "#lib/components/CommandPalette.svelte";
+import CompletionList from "#lib/components/CompletionList.svelte";
+import FollowupQueue from "#lib/components/FollowupQueue.svelte";
+import { handoffFocus } from "#lib/focus.ts";
+import type { FileMatch, KeywordMatch } from "#lib/types.ts";
+
+const INTERRUPT_GUARD_MS = 2000;
+const FILE_SEARCH_DEBOUNCE_MS = 120;
+const FILE_LIMIT = 20;
+
+interface Mention {
+	readonly start: number;
+	readonly end: number;
+	readonly query: string;
+}
+
+function mentionAt(text: string, caret: number): Mention | null {
+	const head = text.slice(0, caret).match(/\S*$/)?.[0] ?? "";
+	const tail = text.slice(caret).match(/^\S*/)?.[0] ?? "";
+	const start = caret - head.length;
+	const end = caret + tail.length;
+	const token = text.slice(start, end);
+	if (!token.startsWith("@")) return null;
+	return { start, end, query: token.slice(1) };
+}
 
 interface Props {
 	disabled: boolean;
 	running: boolean;
-	queuedCount: number;
-	keywords: readonly KeywordDefinition[];
-	onSend: (text: string) => void;
+	followups: readonly string[];
+	history: readonly string[];
+	onEditFollowup: (index: number) => string | undefined;
+	onRemoveFollowup: (index: number) => void;
+	onMatch?: (text: string) => Promise<readonly KeywordMatch[]>;
+	onFileSearch?: (query: string) => Promise<readonly FileMatch[]>;
+	onSend: (text: string, attachments: Attachments) => void;
 	onSteer: (text: string) => void;
 	onFollowup: (text: string) => void;
 	onInterrupt: () => void;
+	retrying?: boolean;
+	deciding?: boolean;
+	onOpenPanel?: (kind: PanelKind) => void;
+	acceptsImages?: boolean;
+	cwd?: string;
+	onShell?: (command: string) => Promise<ShellRun | null> | null;
 }
 
 let {
 	disabled,
 	running,
-	queuedCount,
-	keywords,
+	followups,
+	history,
+	onEditFollowup,
+	onRemoveFollowup,
+	onMatch,
+	onFileSearch,
 	onSend,
 	onSteer,
 	onFollowup,
 	onInterrupt,
+	retrying = false,
+	deciding = false,
+	onOpenPanel,
+	acceptsImages = true,
+	cwd = "",
+	onShell,
 }: Props = $props();
 let text = $state("");
-let focused = $state(false);
 let error = $state("");
+let matches = $state<readonly KeywordMatch[]>([]);
+let browsing: number | null = null;
+let savedDraft = "";
+let matchSeq = 0;
 let textarea = $state<HTMLTextAreaElement>();
-let matches = $derived(findKeywords(text, keywords));
+let region = $state<HTMLElement>();
+let guardUntil = $state(0);
+let guardTimer: ReturnType<typeof setTimeout> | undefined;
+let chips = $state<readonly Chip[]>([]);
+let nextChipId = 0;
+let pendingReads = 0;
+const interruptArmed = $derived(running && guardUntil > 0);
+const parsed = $derived(parseComposerText(text));
+const commandQuery = $derived(parsed.kind === "command" ? parsed.query : null);
+let paletteClosed = $state(false);
+let paletteActive = $state(0);
+const paletteOpen = $derived(commandQuery !== null && !paletteClosed);
+const paletteId = "command-palette";
+let caret = $state(0);
+let mentionClosed = $state(false);
+let fileMatches = $state<readonly FileMatch[]>([]);
+let fileActive = $state(0);
+let fileQuery = $state<string | null>(null);
+let fileSeq = 0;
+const fileListId = "file-completion";
+const mention = $derived(mentionAt(text, Math.min(caret, text.length)));
+const mentionQuery = $derived(mention?.query ?? null);
+const fileOpen = $derived(
+	!paletteOpen && mention !== null && !mentionClosed && fileMatches.length > 0,
+);
+const filePending = $derived(
+	!paletteOpen &&
+		mention !== null &&
+		!mentionClosed &&
+		onFileSearch !== undefined &&
+		mention.query !== "" &&
+		fileQuery !== mention.query,
+);
+const fileItems = $derived(
+	fileMatches.slice(0, FILE_LIMIT).map((match) => ({
+		id: match.path,
+		primary: match.fileName,
+		secondary: match.path,
+	})),
+);
+const completionId = $derived(
+	paletteOpen ? paletteId : fileOpen ? fileListId : undefined,
+);
+const activeCompletion = $derived(paletteOpen ? paletteActive : fileActive);
+
+function disarm(): void {
+	clearTimeout(guardTimer);
+	guardTimer = undefined;
+	guardUntil = 0;
+}
+
+function openPanel(kind: PanelKind): void {
+	text = "";
+	browsing = null;
+	error = "";
+	onOpenPanel?.(kind);
+}
+
+function submitCommand(query: string): void {
+	const command = slashCommands.find((entry) => entry.name === query);
+	if (command === undefined) {
+		error = `No command named /${query}. Start with // to send a message that begins with /.`;
+		return;
+	}
+	openPanel(command.panel);
+}
+
+$effect(() => {
+	if (!running) disarm();
+});
+
+onDestroy(() => clearTimeout(guardTimer));
+
+function pressEscape(): void {
+	if (!running) return;
+	if (retrying || Date.now() < guardUntil) {
+		disarm();
+		onInterrupt();
+		return;
+	}
+	guardUntil = Date.now() + INTERRUPT_GUARD_MS;
+	guardTimer = setTimeout(disarm, INTERRUPT_GUARD_MS);
+}
+
+function onWindowKeydown(event: KeyboardEvent): void {
+	if (event.key !== "Escape" || event.defaultPrevented) return;
+	const focused = document.activeElement;
+	if (focused && focused !== document.body && !region?.contains(focused))
+		return;
+	pressEscape();
+}
+
+$effect(() => {
+	const draft = text;
+	const seq = ++matchSeq;
+	if (!onMatch || draft.trim() === "") {
+		matches = [];
+		return;
+	}
+	onMatch(draft).then(
+		(found) => {
+			if (seq === matchSeq) matches = found;
+		},
+		() => {
+			if (seq === matchSeq) matches = [];
+		},
+	);
+});
+
+$effect(() => {
+	const query = mentionQuery;
+	const seq = ++fileSeq;
+	fileMatches = [];
+	fileActive = 0;
+	fileQuery = null;
+	const search = untrack(() => onFileSearch);
+	if (!search || query === null || query === "") return;
+	const timer = setTimeout(() => {
+		search(query).then(
+			(found) => {
+				if (seq !== fileSeq) return;
+				fileMatches = found;
+				fileActive = 0;
+				fileQuery = query;
+			},
+			() => {
+				if (seq !== fileSeq) return;
+				fileMatches = [];
+				fileQuery = query;
+			},
+		);
+	}, FILE_SEARCH_DEBOUNCE_MS);
+	return () => clearTimeout(timer);
+});
+
+function syncCaret(field: HTMLTextAreaElement): void {
+	caret = field.selectionStart;
+}
+
+function onFileKey(event: KeyboardEvent): boolean {
+	const count = fileMatches.length;
+	if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+		if (count === 0) return false;
+		const step = event.key === "ArrowDown" ? 1 : -1;
+		fileActive = (fileActive + step + count) % count;
+		return true;
+	}
+	if (event.key === "Escape") {
+		if (!fileOpen) return false;
+		mentionClosed = true;
+		return true;
+	}
+	const accepts =
+		(event.key === "Enter" || event.key === "Tab") &&
+		!event.shiftKey &&
+		!event.altKey;
+	if (!accepts) return false;
+	insertFile(fileMatches[fileActive]);
+	return true;
+}
+
+function insertFile(match: FileMatch | undefined): void {
+	const current = mention;
+	if (match === undefined || current === null) return;
+	const insert = `@${match.path} `;
+	text = text.slice(0, current.start) + insert + text.slice(current.end);
+	const position = current.start + insert.length;
+	caret = position;
+	void tick().then(() => textarea?.setSelectionRange(position, position));
+}
 
 function validText(): string | null {
 	const value = text.trim();
@@ -41,27 +275,203 @@ function validText(): string | null {
 	return null;
 }
 
-function submitPrimary(): void {
-	const value = validText();
-	if (!value) return;
-	if (running) {
-		onSteer(value);
-	} else {
-		onSend(value);
-	}
+function clearDraft(): void {
 	text = "";
+	browsing = null;
+}
+
+function imageCount(): number {
+	return chips.filter((chip) => chip.kind === "image").length;
+}
+
+function removeChip(id: number): void {
+	chips = chips.filter((chip) => chip.id !== id);
+}
+
+async function attachImage(file: File): Promise<void> {
+	if (!acceptsImages) {
+		error = "this model does not accept images";
+		return;
+	}
+	if (!IMAGE_TYPES.includes(file.type)) {
+		error = `unsupported image type ${file.type}; send PNG, JPEG or GIF`;
+		return;
+	}
+	if (file.size > MAX_IMAGE_BYTES) {
+		error = "Image is larger than 5 MiB.";
+		return;
+	}
+	if (imageCount() + pendingReads >= MAX_IMAGES) {
+		error = "At most 10 images per message.";
+		return;
+	}
+	error = "";
+	pendingReads += 1;
+	try {
+		const dataUrl = await readDataUrl(file);
+		chips = [
+			...chips,
+			{
+				kind: "image",
+				id: ++nextChipId,
+				name: file.name,
+				mime: file.type,
+				size: file.size,
+				dataUrl,
+			},
+		];
+	} catch (failure) {
+		error = `Cannot read image: ${failure instanceof Error ? failure.message : String(failure)}`;
+	} finally {
+		pendingReads -= 1;
+	}
+}
+
+function onPaste(event: ClipboardEvent): void {
+	const data = event.clipboardData;
+	if (!data) return;
+	const images = Array.from(data.files).filter((file) =>
+		file.type.startsWith("image/"),
+	);
+	if (images.length > 0) {
+		event.preventDefault();
+		for (const file of images) void attachImage(file);
+		return;
+	}
+	const pasted = data.getData("text/plain").replace(/\r\n?/g, "\n");
+	const body = pasted.endsWith("\n") ? pasted.slice(0, -1) : pasted;
+	const lines = body.split("\n").length;
+	if (lines < PASTE_CHIP_LINES) return;
+	event.preventDefault();
+	chips = [...chips, { kind: "paste", id: ++nextChipId, text: pasted, lines }];
+}
+
+function sendDraft(): void {
+	const typed = text.trim();
+	const attachments = attachmentsOf(chips);
+	if (
+		typed === "" &&
+		attachments.texts.length === 0 &&
+		attachments.images.length === 0
+	) {
+		validText();
+		return;
+	}
+	if (messageBytes(typed, attachments) > MAX_MESSAGE_BYTES) {
+		error =
+			"The message and images are too large to send together. Remove an image.";
+		return;
+	}
+	error = "";
+	onSend(typed, attachments);
+	clearDraft();
+	chips = [];
+}
+
+function runShell(command: string): void {
+	if (command === "") {
+		error = "Enter a command after !.";
+		return;
+	}
+	error = "";
+	const run = onShell?.(command);
+	if (run === undefined || run === null) return;
+	clearDraft();
+	void run.then((finished) => {
+		if (finished !== null) {
+			chips = [...chips, { kind: "shell", id: ++nextChipId, ...finished }];
+		}
+	});
+}
+
+function submitPrimary(): void {
+	if (parsed.kind === "shell") {
+		void runShell(parsed.command);
+		return;
+	}
+	if (commandQuery !== null) {
+		submitCommand(commandQuery);
+		return;
+	}
+	if (running) {
+		const value = validText();
+		if (!value) return;
+		onSteer(value);
+		clearDraft();
+		return;
+	}
+	sendDraft();
 }
 
 function queueFollowup(): void {
+	if (parsed.kind === "shell") {
+		error = "Shell commands run with Enter";
+		return;
+	}
 	const value = validText();
 	if (!value) return;
 	onFollowup(value);
-	text = "";
+	clearDraft();
+}
+
+function editFollowup(index: number): void {
+	const restored = onEditFollowup(index);
+	if (restored !== undefined) {
+		text = restored;
+		paletteClosed = false;
+	}
+	textarea?.focus();
+}
+
+function showRecall(value: string): void {
+	text = value;
+	paletteClosed = false;
+	void tick().then(() => textarea?.setSelectionRange(0, 0));
+}
+
+function recallOlder(field: HTMLTextAreaElement): boolean {
+	const older = browsing === null ? history.length - 1 : browsing - 1;
+	if (older < 0) return false;
+	if (browsing === null) savedDraft = field.value;
+	browsing = older;
+	showRecall(history[older] ?? "");
+	return true;
+}
+
+function recallNewer(): boolean {
+	if (browsing === null) return false;
+	const newer = browsing + 1;
+	browsing = newer < history.length ? newer : null;
+	showRecall(browsing === null ? savedDraft : (history[newer] ?? ""));
+	return true;
+}
+
+function recallFromKey(event: KeyboardEvent): boolean {
+	const field = event.currentTarget as HTMLTextAreaElement;
+	if (field.selectionStart !== field.selectionEnd) return false;
+	if (event.key === "ArrowUp" && field.selectionStart === 0)
+		return recallOlder(field);
+	if (
+		event.key === "ArrowDown" &&
+		(browsing !== null || field.selectionStart === text.length)
+	)
+		return recallNewer();
+	return false;
 }
 
 function onKeydown(event: KeyboardEvent): void {
-	if (event.isComposing || event.key !== "Enter") return;
-	if ((event.metaKey || event.ctrlKey) && running) {
+	if (event.defaultPrevented) return;
+	if (event.isComposing) return;
+	if ((fileOpen || filePending) && onFileKey(event)) {
+		event.preventDefault();
+		return;
+	}
+	if (recallFromKey(event)) {
+		event.preventDefault();
+		return;
+	}
+	if (event.key !== "Enter") return;
+	if (event.altKey && running) {
 		event.preventDefault();
 		queueFollowup();
 	} else if (!event.shiftKey) {
@@ -71,52 +481,77 @@ function onKeydown(event: KeyboardEvent): void {
 }
 </script>
 
-<section class="composer" aria-label="Message composer">
-	{#if matches.length > 0}
-		<div class="keyword-row" aria-label="Active keywords">
-			<span>Keywords</span>
-			{#each matches as match, index (`${match.word}:${match.start}:${index}`)}
-				<span class="keyword-chip"><KeywordText text={match.word} {keywords} active={focused} /></span>
-			{/each}
-		</div>
-	{/if}
+<svelte:window onkeydown={onWindowKeydown} />
 
+<section class="composer" class:deciding aria-label="Message composer" bind:this={region}>
 	<form
 		onsubmit={(event) => {
 			event.preventDefault();
 			submitPrimary();
 		}}
 	>
-		<label for="prompt">Message</label>
+		<FollowupQueue items={followups} onEdit={editFollowup} onRemove={onRemoveFollowup} />
+		<label for="prompt">{parsed.kind === "shell" ? "Shell command" : "Message"}</label>
 		<textarea
 			bind:this={textarea}
 			id="prompt"
 			name="prompt"
-			rows="3"
+			rows={deciding ? 1 : 3}
 			bind:value={text}
 			disabled={disabled}
 			placeholder="Fix the failing test and verify the change"
 			aria-invalid={error ? "true" : "false"}
 			aria-describedby="composer-help composer-error"
+			role={completionId === undefined ? undefined : "combobox"}
+			aria-expanded={completionId === undefined ? undefined : "true"}
+			aria-controls={completionId}
+			aria-activedescendant={completionId === undefined ? undefined : `${completionId}-${activeCompletion}`}
 			onkeydown={onKeydown}
-			onfocus={() => (focused = true)}
-			onblur={() => (focused = false)}
+			onpaste={onPaste}
+			oninput={(event) => {
+				syncCaret(event.currentTarget);
+				browsing = null;
+				paletteClosed = false;
+				mentionClosed = false;
+			}}
+			onkeyup={(event) => syncCaret(event.currentTarget)}
+			onclick={(event) => syncCaret(event.currentTarget)}
 		></textarea>
+		{#if paletteOpen}
+			<CommandPalette
+				id={paletteId}
+				field={textarea}
+				query={commandQuery ?? ""}
+				bind:active={paletteActive}
+				onOpen={openPanel}
+				onClose={() => (paletteClosed = true)}
+			/>
+		{/if}
+		{#if fileOpen}
+			<CompletionList id={fileListId} label="Files" items={fileItems} active={fileActive} />
+		{/if}
+		<AttachmentChips {chips} onRemove={removeChip} />
+		{#if matches.length > 0}
+			<p class="keywords">Keywords: {matches.map((match) => match.word).join(", ")}</p>
+		{/if}
 		<div class="composer-meta">
 			<p id="composer-help">
-				Enter to {running ? "steer" : "send"} · Shift+Enter for a new line{running ? " · Ctrl+Enter to queue" : ""}
+				{#if interruptArmed}
+					Esc again to interrupt
+				{:else if parsed.kind === "shell"}
+					Enter runs the command in {cwd}. It is not sent to the agent.
+				{:else}
+					Enter to {running ? "steer" : "send"} · Shift+Enter for a new line{running ? " · Alt+Enter to queue" : ""}
+				{/if}
 			</p>
-			<p class="queued" role="status">{queuedCount > 0 ? `${queuedCount} follow-up${queuedCount === 1 ? "" : "s"} queued` : ""}</p>
 		</div>
 		<p id="composer-error" class="error" role="alert">{error}</p>
 
 		<div class="actions">
+			<button class={running || deciding ? "quiet" : "point"} type="submit" disabled={disabled}>{running ? "Steer" : "Send"}</button>
 			{#if running}
-				<button class="primary" type="submit" disabled={disabled}>Steer turn</button>
-				<button type="button" disabled={disabled} onclick={queueFollowup}>Queue follow-up</button>
-				<button class="quiet danger" type="button" disabled={disabled} onclick={onInterrupt}>Interrupt turn</button>
-			{:else}
-				<button class="primary" type="submit" disabled={disabled}>Send message</button>
+				<button type="button" disabled={disabled} onclick={queueFollowup} {@attach handoffFocus(() => textarea)}>Queue follow-up</button>
+				<button class="quiet danger" type="button" disabled={disabled} onclick={onInterrupt} {@attach handoffFocus(() => textarea)}>Interrupt turn</button>
 			{/if}
 		</div>
 	</form>
@@ -124,13 +559,12 @@ function onKeydown(event: KeyboardEvent): void {
 
 <style>
 	.composer {
-		border-block-start: 1px solid var(--color-border);
-		background: var(--color-bg-surface);
-		padding: var(--space-4) var(--space-5) var(--space-5);
+		border-block-start: 1px solid var(--line);
+		background: var(--surface);
+		padding: var(--space-4) var(--space-6) var(--space-6);
 	}
 
-	form,
-	.keyword-row {
+	form {
 		width: min(100%, 52rem);
 		margin-inline: auto;
 	}
@@ -138,7 +572,7 @@ function onKeydown(event: KeyboardEvent): void {
 	label {
 		display: block;
 		margin-block-end: var(--space-2);
-		font-size: var(--text-body-small);
+		font-size: var(--size-small);
 		font-weight: 650;
 	}
 
@@ -148,18 +582,23 @@ function onKeydown(event: KeyboardEvent): void {
 		min-height: 6rem;
 		max-height: 16rem;
 		resize: vertical;
-		border: 1px solid var(--color-border-strong);
-		border-radius: var(--radius-medium);
-		background: var(--color-bg-page);
-		color: var(--color-text);
-		caret-color: var(--color-accent);
+		border: 1px solid var(--strong);
+		border-radius: 14px;
+		background: var(--canvas);
+		color: var(--text);
+		caret-color: var(--accent-text);
 		padding: var(--space-3);
-		font-size: var(--text-body);
 		line-height: 1.5;
 	}
 
 	textarea[aria-invalid="true"] {
-		border-color: var(--color-danger);
+		border-color: var(--failed-text);
+	}
+
+	.keywords {
+		margin: var(--space-2) 0 0;
+		color: var(--dim);
+		font-size: var(--size-caption);
 	}
 
 	.composer-meta {
@@ -172,17 +611,13 @@ function onKeydown(event: KeyboardEvent): void {
 	.composer-meta p,
 	.error {
 		margin: var(--space-2) 0 0;
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
-	}
-
-	.queued {
-		font-variant-numeric: tabular-nums;
+		color: var(--dim);
+		font-size: var(--size-caption);
 	}
 
 	.error {
 		min-height: 1.5em;
-		color: var(--color-danger);
+		color: var(--failed-text);
 	}
 
 	.actions {
@@ -193,18 +628,28 @@ function onKeydown(event: KeyboardEvent): void {
 		margin-block-start: var(--space-3);
 	}
 
-	.keyword-row {
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-		margin-block-end: var(--space-3);
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+	.composer.deciding {
+		flex: 0 0 auto;
+		max-height: 40dvh;
+		overflow-y: auto;
+		padding: var(--space-2) var(--space-4);
 	}
 
-	.keyword-chip {
-		font-weight: 650;
+	.deciding textarea {
+		height: var(--control-height);
+		min-height: var(--control-height);
+		max-height: var(--control-height-coarse);
+		resize: none;
+		padding: var(--space-1) var(--space-2);
+	}
+
+	.deciding label {
+		margin-block-end: var(--space-1);
+	}
+
+	.deciding .actions {
+		gap: var(--space-2);
+		margin-block-start: var(--space-2);
 	}
 
 	@media (max-width: 40rem) {

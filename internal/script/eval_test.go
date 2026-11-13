@@ -135,6 +135,13 @@ func TestToolModeLists(t *testing.T) {
 	}
 }
 
+func TestEvalFirstListsRatchet(t *testing.T) {
+	all := specs("read", "exec", "ratchet", "eval")
+	if got, want := names(script.ModelTools(config.ToolModeEvalFirst, all)), []string{"read", "exec", "ratchet", "eval"}; !slices.Equal(got, want) {
+		t.Fatalf("eval-first visible = %v, want %v", got, want)
+	}
+}
+
 func TestCheckDirectRejectsFoldedTools(t *testing.T) {
 	err := script.CheckDirect(config.ToolModeEvalFirst, "web_fetch")
 	if err == nil || err.Error() != "tool web_fetch is not available in tool_mode eval-first; call it from eval" {
@@ -162,8 +169,112 @@ func TestEvalFirstFoldsToolsIntoEval(t *testing.T) {
 	if string(got.Value) != `"web_fetch"` {
 		t.Fatalf("folded call reply = %+v", got)
 	}
-	exec := runEval(t.Context(), t, eval, "call-2", `{"code":"tools.exec(command = 'ls')"}`)
-	if errorCode(exec) != "scope_exceeded" {
-		t.Fatalf("eval-first default allow list let a listed tool run in a cell: %+v", exec)
+	exec := runEval(t.Context(), t, eval, "call-2", `{"code":"tools.exec(command = 'ls')['tool']"}`)
+	if string(exec.Value) != `"exec"` {
+		t.Fatalf("eval-first cell did not reach the listed exec tool: %+v", exec)
+	}
+}
+
+func TestAskStaysDirectInEveryToolMode(t *testing.T) {
+	all := specs("read", "exec", "ask", "web_fetch", "eval")
+	cases := []struct {
+		mode    config.ToolMode
+		visible []string
+	}{
+		{config.ToolModeEvalFirst, []string{"read", "exec", "ask", "eval"}},
+		{config.ToolModeEvalOnly, []string{"ask", "eval"}},
+	}
+	for _, c := range cases {
+		if got := names(script.ModelTools(c.mode, all)); !slices.Equal(got, c.visible) {
+			t.Errorf("%s visible = %v, want %v", c.mode, got, c.visible)
+		}
+		if slices.Contains(names(script.FoldedTools(c.mode, all)), "ask") {
+			t.Errorf("%s folded the direct ask tool", c.mode)
+		}
+	}
+}
+
+func TestScriptCannotCallAsk(t *testing.T) {
+	j := newJournal(echoTool)
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeNormal, Tools: specs("ask", "eval"), Config: config.EvalConfig{Uses: []string{"ask"}, Set: true}})
+	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools.ask(questions = [])"}`)
+	if got.Status != "denied" || errorCode(got) != "scope_exceeded" || got.Error.Message != "tool ask needs the user and runs only as a direct call" {
+		t.Fatalf("reply = %+v error = %+v", got, got.Error)
+	}
+}
+
+func TestNormalCellReachesEveryToolWithoutUses(t *testing.T) {
+	eval := script.NewEval(newJournal(echoTool), script.EvalOptions{Mode: config.ToolModeNormal, Tools: threadTools})
+	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools.read(path = 'a.txt')['tool']"}`)
+	if string(got.Value) != `"read"` {
+		t.Fatalf("normal cell reply = %+v error = %+v", got, got.Error)
+	}
+}
+
+func TestCellsDoNotReachYield(t *testing.T) {
+	eval := script.NewEval(newJournal(echoTool), script.EvalOptions{Mode: config.ToolModeNormal, Tools: specs("read", "yield", "eval")})
+	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools['yield'](data = 1)"}`)
+	if got.Status != "failed" || errorCode(got) != "error" || !strings.Contains(got.Error.Message, "tool yield is not reachable from this script") {
+		t.Fatalf("reply = %+v error = %+v", got, got.Error)
+	}
+}
+
+func TestCellsRefuseUserCallsAsDirectOnly(t *testing.T) {
+	tools := specs("ask", "ratchet", "read", "eval")
+	refused := []struct{ name, code, message string }{
+		{"ask", `tools.ask(questions = [])`, "tool ask needs the user and runs only as a direct call"},
+		{"ratchet approve", `tools.ratchet(action = 'approve', flow = 'x')`, "tool ratchet approve needs the user and runs only as a direct call"},
+	}
+	for _, c := range refused {
+		eval := script.NewEval(newJournal(echoTool), script.EvalOptions{Mode: config.ToolModeNormal, Tools: tools})
+		got := runEval(t.Context(), t, eval, "call-1", `{"code":"`+c.code+`"}`)
+		if got.Status != "denied" || errorCode(got) != "scope_exceeded" || got.Error.Message != c.message {
+			t.Fatalf("%s: reply = %+v error = %+v", c.name, got, got.Error)
+		}
+	}
+	eval := script.NewEval(newJournal(echoTool), script.EvalOptions{Mode: config.ToolModeNormal, Tools: tools})
+	status := runEval(t.Context(), t, eval, "call-2", `{"code":"tools.ratchet(action = 'status', flow = 'x')['tool']"}`)
+	if string(status.Value) != `"ratchet"` {
+		t.Fatalf("ratchet status reply = %+v error = %+v", status, status.Error)
+	}
+}
+
+func TestYieldStaysDirect(t *testing.T) {
+	cases := []struct {
+		mode    config.ToolMode
+		all     []tool.Spec
+		visible []string
+	}{
+		{config.ToolModeEvalFirst, specs("read", "search", "patch", "exec", "todo", "web_fetch", "yield", "eval"), []string{"read", "search", "patch", "exec", "yield", "eval"}},
+		{config.ToolModeEvalOnly, specs("read", "yield", "eval"), []string{"yield", "eval"}},
+	}
+	for _, c := range cases {
+		if got := names(script.ModelTools(c.mode, c.all)); !slices.Equal(got, c.visible) {
+			t.Errorf("%s visible = %v, want %v", c.mode, got, c.visible)
+		}
+		if err := script.CheckDirect(c.mode, "yield"); err != nil {
+			t.Errorf("%s refused a direct yield: %v", c.mode, err)
+		}
+	}
+}
+
+func TestCellCallCapStopsRunawayLoop(t *testing.T) {
+	j := newJournal(echoTool)
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeNormal, Tools: threadTools})
+	got := runEval(t.Context(), t, eval, "call-1", `{"code":"for i in range(1025):\n    tools.read(path = 'x')"}`)
+	if got.Status != "limit_exceeded" || errorCode(got) != "limit_exceeded" {
+		t.Fatalf("reply = %+v error = %+v", got, got.Error)
+	}
+	if executed, _ := j.counts(); executed != 1024 {
+		t.Fatalf("executed %d tool calls, want 1024", executed)
+	}
+}
+
+func TestRewriteIsReachableFromCells(t *testing.T) {
+	j := newJournal(echoTool)
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeEvalFirst, Tools: specs("rewrite", "eval")})
+	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools.rewrite(lang = 'go', pattern = 'x', target = 'x', replace = 'y')['tool']"}`)
+	if string(got.Value) != `"rewrite"` {
+		t.Fatalf("cell call to rewrite = %+v", got)
 	}
 }

@@ -66,7 +66,6 @@ const (
 )
 
 var Providers = map[string]Provider{
-	// source: .references/codex/codex-rs/login/src/server.rs
 	"chatgpt": {
 		ID: "chatgpt", AuthorizeURL: "https://auth.openai.com/oauth/authorize", TokenURL: openAIEndpoint,
 		ClientID: chatGPTPublicID, Scopes: []string{"openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"},
@@ -75,14 +74,12 @@ var Providers = map[string]Provider{
 		DeviceVerificationURL: "https://auth.openai.com/codex/device", DeviceRedirectURL: "https://auth.openai.com/deviceauth/callback",
 		ExtraAuthParams: map[string]string{"id_token_add_organizations": "true", "codex_cli_simplified_flow": "true", "originator": "codex_cli_rs"},
 	},
-	// source: .references/pi/packages/ai/src/auth/oauth/anthropic.ts
 	"anthropic": {
 		ID: "anthropic", AuthorizeURL: "https://claude.ai/oauth/authorize", TokenURL: claudeEndpoint,
 		ClientID: anthropicPublicID, Scopes: []string{"org:create_api_key", "user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload"},
 		RedirectHost: "localhost", BindHost: "127.0.0.1", RedirectPort: 53692, AllowPortFallback: true, RedirectPath: "/callback",
 		ExtraAuthParams: map[string]string{"code": "true"},
 	},
-	// source: .references/oh-my-pi/packages/catalog/src/compat/rules/auth/google-antigravity.kdl
 	"antigravity": {
 		ID: "antigravity", AuthorizeURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: googleEndpoint,
 		ClientID: antigravityPublicID, ClientSecret: antigravityPublicKey,
@@ -90,12 +87,10 @@ var Providers = map[string]Provider{
 		RedirectHost: "127.0.0.1", RedirectPort: 51121, RedirectPath: "/oauth-callback",
 		ExtraAuthParams: map[string]string{"access_type": "offline", "prompt": "consent"},
 	},
-	// source: .references/oh-my-pi/packages/catalog/src/compat/rules/auth/devin.kdl
 	"devin": {
 		ID: "devin", AuthorizeURL: "https://app.devin.ai/auth/cli/continue", TokenURL: devinEndpoint,
 		RedirectHost: "127.0.0.1", RedirectPort: 59653, RedirectPath: "/callback", ExtraAuthParams: map[string]string{"prompt": "select_account"},
 	},
-	// source: .references/oh-my-pi/packages/ai/src/registry/oauth/cursor.ts
 	"cursor": {
 		ID: "cursor", AuthorizeURL: "https://cursor.com/loginDeepControl", ClientID: cursorPublicID,
 		PollURL: "https://api2.cursor.sh/auth/poll", RefreshURL: "https://api2.cursor.sh/oauth/token", ExtraAuthParams: map[string]string{},

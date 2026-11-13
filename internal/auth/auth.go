@@ -65,8 +65,6 @@ type (
 
 func Load(home string) (*Store, error) { return NewWithPatterns(home, nil) }
 
-func New(home string) (*Store, error) { return Load(home) }
-
 func NewWithPatterns(home string, patterns []string) (*Store, error) {
 	store := &Store{
 		dir: home, data: map[string]Credential{}, raw: map[string]jsontext.Value{},
@@ -357,9 +355,6 @@ func (s *Store) SetCredential(provider string, c Credential) error {
 	return nil
 }
 
-// SetCredentialIfUnchanged stores next only while the stored credential for
-// provider still equals previous, reloading auth.json under the file lock so
-// the comparison sees concurrent writers. It reports whether it wrote.
 func (s *Store) SetCredentialIfUnchanged(provider string, previous, next Credential) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

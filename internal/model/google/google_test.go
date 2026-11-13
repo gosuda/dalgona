@@ -185,8 +185,8 @@ func TestModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []model.Model{
-		{ID: "large", Context: 1000000, MaxOutput: 65536, ToolChoice: true},
-		{ID: "configured", Context: 64000, ToolChoice: true},
+		{ID: "large", Context: 1000000, MaxOutput: 65536, ToolChoice: true, Images: true},
+		{ID: "configured", Context: 64000, ToolChoice: true, Images: true},
 	}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("models = %+v, want %+v", models, want)
@@ -454,5 +454,31 @@ func assertFunctionResponse(t *testing.T, response *struct {
 	t.Helper()
 	if response == nil || response.Name != "read" || response.Response.Output != "done" {
 		t.Fatalf("response = %+v", response)
+	}
+}
+
+func TestEncodeContentsSendsInlineData(t *testing.T) {
+	t.Parallel()
+	body, err := EncodeRequest(model.Request{Messages: []model.Message{{
+		Role:   "user",
+		Text:   "What is this?",
+		Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		Contents []any `json:"contents"`
+	}
+	if err := json.Unmarshal(body, &value); err != nil {
+		t.Fatalf("request JSON: %v\n%s", err, body)
+	}
+	const want = `{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="}},{"text":"What is this?"}]}`
+	var expected any
+	if err := json.Unmarshal([]byte(want), &expected); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Contents) != 1 || !reflect.DeepEqual(value.Contents[0], expected) {
+		t.Fatalf("contents = %v, want %s", value.Contents, want)
 	}
 }

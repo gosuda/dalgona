@@ -10,7 +10,6 @@ import (
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
-// source: https://modelcontextprotocol.io/specification/2025-11-25/server/tools
 type serverTool struct {
 	client *Client
 	name   string
@@ -73,7 +72,7 @@ func (c *Client) adaptTool(raw []byte) (tool.Tool, error) {
 		client: c,
 		name:   name,
 		spec: tool.Spec{
-			Name:        c.cfg.Name + "__" + name,
+			Name:        toolName(c.cfg.Name, name),
 			Description: description,
 			Schema:      schema,
 		},
@@ -82,6 +81,13 @@ func (c *Client) adaptTool(raw []byte) (tool.Tool, error) {
 
 func (t *serverTool) Spec() tool.Spec {
 	return t.spec
+}
+
+func LocalToolName(t tool.Tool) string {
+	if server, ok := t.(*serverTool); ok {
+		return server.name
+	}
+	return t.Spec().Name
 }
 
 func (t *serverTool) Class() tool.Class {

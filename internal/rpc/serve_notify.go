@@ -24,10 +24,8 @@ func (n ThreadStatusChangedNotification) write(o *out) {
 	o.str("threadId", n.ThreadID)
 	o.key("status")
 	n.Status.write(o)
-	if n.Seq > 0 {
-		o.key("seq")
-		o.token(jsontext.Uint(n.Seq))
-	}
+	o.key("seq")
+	o.token(jsontext.Uint(n.Seq))
 	o.close()
 }
 
@@ -43,15 +41,19 @@ func (n ThreadTokenUsageUpdatedNotification) write(o *out) {
 	o.str("threadId", n.ThreadID)
 	o.str("turnId", n.TurnID)
 	o.key("tokenUsage")
+	n.TokenUsage.write(o)
+	o.close()
+}
+
+func (u ThreadTokenUsage) write(o *out) {
 	o.open()
 	o.key("last")
-	n.TokenUsage.Last.write(o)
+	u.Last.write(o)
 	o.key("total")
-	n.TokenUsage.Total.write(o)
-	if n.TokenUsage.ModelContextWindow > 0 {
-		o.int("modelContextWindow", int64(n.TokenUsage.ModelContextWindow))
+	u.Total.write(o)
+	if u.ModelContextWindow > 0 {
+		o.int("modelContextWindow", int64(u.ModelContextWindow))
 	}
-	o.close()
 	o.close()
 }
 
@@ -149,6 +151,51 @@ func (n ServerRequestResolvedNotification) write(o *out) {
 	o.open()
 	o.str("threadId", n.ThreadID)
 	o.str("requestId", n.RequestID)
+	o.optStr("resolution", n.Resolution)
+	o.close()
+}
+
+func (p ToolRequestUserInputParams) write(o *out) {
+	o.open()
+	o.str("threadId", p.ThreadID)
+	o.str("turnId", p.TurnID)
+	o.str("itemId", p.ItemID)
+	o.boolean("isBlocking", p.IsBlocking)
+	o.key("questions")
+	o.openArray()
+	for _, question := range p.Questions {
+		question.write(o)
+	}
+	o.closeArray()
+	o.close()
+}
+
+func (q ToolRequestUserInputQuestion) write(o *out) {
+	o.open()
+	o.str("id", q.ID)
+	o.str("header", q.Header)
+	o.str("question", q.Question)
+	o.boolean("isOther", q.IsOther)
+	o.boolean("isSecret", q.IsSecret)
+	o.boolean("multiSelect", q.MultiSelect)
+	o.key("options")
+	if q.Options == nil {
+		o.null()
+	} else {
+		o.openArray()
+		for _, option := range q.Options {
+			option.write(o)
+		}
+		o.closeArray()
+	}
+	o.close()
+}
+
+func (p ToolRequestUserInputOption) write(o *out) {
+	o.open()
+	o.str("label", p.Label)
+	o.str("description", p.Description)
+	o.optStr("preview", p.Preview)
 	o.close()
 }
 
@@ -157,6 +204,7 @@ func (n AccountLoginCompletedNotification) write(o *out) {
 	o.optStr("loginId", n.LoginID)
 	o.boolean("success", n.Success)
 	o.optStr("error", n.Error)
+	o.optStr("provider", n.Provider)
 	o.close()
 }
 
@@ -178,6 +226,36 @@ func (n AdvisorNoteNotification) write(o *out) {
 	o.close()
 }
 
+func (n ToolJudgedNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("turnId", n.TurnID)
+	o.str("itemId", n.ItemID)
+	o.str("verdict", n.Verdict)
+	o.str("summary", n.Summary)
+	writePaths(o, n.Paths)
+	o.close()
+}
+
+func (n TurnJudgedNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("turnId", n.TurnID)
+	o.str("verdict", n.Verdict)
+	o.str("summary", n.Summary)
+	writePaths(o, n.Paths)
+	o.close()
+}
+
+func writePaths(o *out, paths []string) {
+	o.key("paths")
+	o.openArray()
+	for _, path := range paths {
+		o.text(path)
+	}
+	o.closeArray()
+}
+
 func (p CommandExecutionRequestApprovalParams) write(o *out) {
 	o.open()
 	o.str("threadId", p.ThreadID)
@@ -197,5 +275,55 @@ func (p FileChangeRequestApprovalParams) write(o *out) {
 	o.str("itemId", p.ItemID)
 	o.int("startedAtMs", p.StartedAtMs)
 	o.optStr("reason", p.Reason)
+	o.close()
+}
+
+func (n FileChangePatchUpdatedNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("turnId", n.TurnID)
+	o.str("itemId", n.ItemID)
+	o.key("changes")
+	o.openArray()
+	for _, change := range n.Changes {
+		change.write(o)
+	}
+	o.closeArray()
+	o.close()
+}
+
+func (n RetryWaitNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("turnId", n.TurnID)
+	o.key("remainingMs")
+	o.token(jsontext.Int(n.RemainingMS))
+	o.close()
+}
+
+func (n WarningNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("message", n.Message)
+	o.close()
+}
+
+func (n SandboxChosenNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("cause", n.Cause)
+	o.str("choice", n.Choice)
+	o.close()
+}
+
+func (f SandboxFallback) write(o *out) {
+	o.open()
+	o.str("cause", f.Cause)
+	o.key("choice")
+	if f.Choice == nil {
+		o.null()
+	} else {
+		o.text(*f.Choice)
+	}
 	o.close()
 }

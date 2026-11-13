@@ -116,15 +116,15 @@ func decodeObject(raw []byte) (map[string]jsontext.Value, error) {
 
 func decodeByType(kind string, reader *objectReader) (Event, error) {
 	switch kind {
-	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeUserMessage:
+	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeTurnJudged, TypeUserMessage:
 		return decodeSessionEvent(kind, reader)
-	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
+	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
 		return decodeToolEvent(kind, reader)
 	case TypeCompaction, TypeContextPruned, TypeChildSpawned, TypeBranch:
 		return decodeStateEvent(kind, reader)
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
 		return decodeScriptEvent(kind, reader)
-	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived:
+	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return decodeMetadataEvent(kind, reader), nil
 	default:
 		return nil, fmt.Errorf("unknown event type %q", kind)
@@ -137,6 +137,8 @@ func decodeMetadataEvent(kind string, reader *objectReader) Event {
 		return ThreadNamed{Name: reader.str("name")}
 	case TypeThreadArchived:
 		return ThreadArchived{Archived: reader.boolean("archived")}
+	case TypeSandboxChosen:
+		return SandboxChosen{RequestID: reader.str("request_id"), Choice: reader.str("choice"), Cause: reader.str("cause")}
 	default:
 		return AdvisorNote{
 			Advisor: reader.str("advisor"), Severity: reader.str("severity"), Note: reader.str("note"),

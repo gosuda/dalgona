@@ -181,12 +181,12 @@ func (r *Runtime) boundary(b agent.Boundary) agent.Wait {
 
 func phaseOf(status agent.Status) Phase {
 	switch {
+	case !status.AutoContinue:
+		return PhaseInterrupted
 	case status.Busy:
 		return PhaseRunning
-	case status.AutoContinue:
-		return PhaseIdle
 	default:
-		return PhaseInterrupted
+		return PhaseIdle
 	}
 }
 

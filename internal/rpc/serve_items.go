@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/json/jsontext"
-	"path/filepath"
 	"strings"
 )
 
@@ -29,19 +28,27 @@ const (
 
 func (it Item) MarshalJSONTo(enc *jsontext.Encoder) error { return marshalTo(enc, it) }
 
+func (it Item) writeUserContent(o *out) {
+	o.key("content")
+	o.openArray()
+	o.open()
+	o.str("type", "text")
+	o.str("text", it.Text)
+	o.close()
+	for _, image := range it.Images {
+		image.write(o)
+	}
+	o.closeArray()
+}
+
 func (it Item) write(o *out) {
 	o.open()
 	o.str("type", it.Type)
 	o.str("id", it.ID)
 	switch it.Type {
 	case kindUser:
-		o.key("content")
-		o.openArray()
-		o.open()
-		o.str("type", "text")
-		o.str("text", it.Text)
-		o.close()
-		o.closeArray()
+		it.writeUserContent(o)
+		it.writeKeywords(o)
 	case kindAgent:
 		o.str("text", it.Text)
 	case kindReasoning:
@@ -76,23 +83,35 @@ func (it Item) writeCommand(o *out) {
 	if it.ExitCode != nil {
 		o.int("exitCode", int64(*it.ExitCode))
 	}
+	it.writeDuration(o)
+	it.writeSpill(o)
 }
 
 func (it Item) writeFileChange(o *out) {
 	o.key("changes")
 	o.openArray()
 	for _, change := range it.Changes {
-		o.open()
-		o.str("path", change.Path)
-		o.key("kind")
-		o.open()
-		o.str("type", change.Kind)
-		o.close()
-		o.str("diff", change.Diff)
-		o.close()
+		change.write(o)
 	}
 	o.closeArray()
 	o.str("status", it.Status)
+}
+
+func (c FileChange) write(o *out) {
+	o.open()
+	o.str("path", c.Path)
+	o.key("kind")
+	o.open()
+	o.str("type", c.Kind)
+	o.close()
+	o.str("diff", c.Diff)
+	if c.DiffOmitted {
+		o.boolean("diffOmitted", true)
+	} else {
+		o.int("additions", int64(c.Additions))
+		o.int("deletions", int64(c.Deletions))
+	}
+	o.close()
 }
 
 func (it Item) writeMCP(o *out) {
@@ -100,6 +119,8 @@ func (it Item) writeMCP(o *out) {
 	o.str("tool", it.Tool)
 	o.raw("arguments", it.Arguments)
 	o.str("status", toolStatus(it.Status))
+	it.writeDuration(o)
+	it.writeSpill(o)
 	switch it.Status {
 	case statusCompleted:
 		o.key("result")
@@ -124,6 +145,8 @@ func (it Item) writeDynamic(o *out) {
 	o.str("tool", it.Tool)
 	o.raw("arguments", it.Arguments)
 	o.str("status", toolStatus(it.Status))
+	it.writeDuration(o)
+	it.writeSpill(o)
 	if it.Status == statusInProgress {
 		return
 	}
@@ -134,6 +157,36 @@ func (it Item) writeDynamic(o *out) {
 	o.str("type", "inputText")
 	o.str("text", it.Output)
 	o.close()
+	o.closeArray()
+}
+
+func (it Item) writeDuration(o *out) {
+	if it.DurationMs != nil {
+		o.int("durationMs", *it.DurationMs)
+	}
+}
+
+func (it Item) writeSpill(o *out) {
+	if it.Spill == nil {
+		return
+	}
+	o.key("outputSpill")
+	o.open()
+	o.str("path", it.Spill.Path)
+	o.int("bytes", it.Spill.Bytes)
+	o.str("sha256", it.Spill.SHA256)
+	o.close()
+}
+
+func (it Item) writeKeywords(o *out) {
+	if len(it.Keywords) == 0 {
+		return
+	}
+	o.key("keywords")
+	o.openArray()
+	for _, match := range it.Keywords {
+		match.write(o)
+	}
 	o.closeArray()
 }
 
@@ -184,66 +237,6 @@ func argString(args jsontext.Value, key string) string {
 	return value
 }
 
-func patchText(args jsontext.Value) string {
-	trimmed := bytes.TrimSpace(args)
-	if len(trimmed) > 0 && trimmed[0] == '"' {
-		d := jsontext.NewDecoder(bytes.NewReader(trimmed))
-		if text, err := readString(d); err == nil {
-			return text
-		}
-	}
-	for _, key := range [...]string{"input", "patch"} {
-		if text := argString(args, key); text != "" {
-			return text
-		}
-	}
-	return string(args)
-}
-
-var patchHeaders = [...]string{"*** Add File: ", "*** Update File: ", "*** Delete File: "}
-
-func patchSection(text, path string) string {
-	start, ok := sectionStart(text, path)
-	if !ok {
-		return text
-	}
-	section := text[start:]
-	_, body, _ := strings.Cut(section, "\n")
-	for offset := len(section) - len(body); offset < len(section); {
-		line, rest, _ := strings.Cut(section[offset:], "\n")
-		if _, header := fileHeader(line); header || strings.HasPrefix(line, "*** End Patch") {
-			return section[:offset]
-		}
-		offset = len(section) - len(rest)
-	}
-	return section
-}
-
-func sectionStart(text, path string) (int, bool) {
-	for offset := 0; offset < len(text); {
-		line, rest, _ := strings.Cut(text[offset:], "\n")
-		if header, ok := fileHeader(line); ok && samePath(header, path) {
-			return offset, true
-		}
-		offset = len(text) - len(rest)
-	}
-	return 0, false
-}
-
-func fileHeader(line string) (string, bool) {
-	for _, prefix := range patchHeaders {
-		if path, ok := strings.CutPrefix(line, prefix); ok {
-			return strings.TrimSpace(path), true
-		}
-	}
-	return "", false
-}
-
-func samePath(header, path string) bool {
-	header, path = filepath.ToSlash(filepath.Clean(header)), filepath.ToSlash(filepath.Clean(path))
-	return header == path || strings.HasSuffix(path, "/"+header)
-}
-
 type itemDecoder struct {
 	it      *Item
 	content []string
@@ -283,9 +276,10 @@ func (s *itemDecoder) member(name string, d *jsontext.Decoder) error {
 		*target = v
 		return err
 	}
+	if handled, err := s.typed(name, d); handled {
+		return err
+	}
 	switch name {
-	case "exitCode":
-		return s.it.readExit(d)
 	case "arguments":
 		v, err := d.ReadValue()
 		s.it.Arguments = jsontext.Value(bytes.Clone(v))
@@ -302,6 +296,20 @@ func (s *itemDecoder) member(name string, d *jsontext.Decoder) error {
 		return readMembers(d, s.it.textMember("message"))
 	}
 	return d.SkipValue()
+}
+
+func (s *itemDecoder) typed(name string, d *jsontext.Decoder) (bool, error) {
+	switch name {
+	case "exitCode":
+		return true, s.it.readExit(d)
+	case "durationMs":
+		return true, s.it.readDuration(d)
+	case "outputSpill":
+		return true, s.it.readSpill(d)
+	case "keywords":
+		return true, s.it.readKeywords(d)
+	}
+	return false, nil
 }
 
 func (s *itemDecoder) resultMember(name string, d *jsontext.Decoder) error {
@@ -337,6 +345,103 @@ func (it *Item) readExit(d *jsontext.Decoder) error {
 	}
 	code, err := readInt(d)
 	it.ExitCode = &code
+	return err
+}
+
+func (it *Item) readDuration(d *jsontext.Decoder) error {
+	if d.PeekKind() == 'n' {
+		_, err := d.ReadToken()
+		return err
+	}
+	ms, err := readInt(d)
+	value := int64(ms)
+	it.DurationMs = &value
+	return err
+}
+
+func (it *Item) readSpill(d *jsontext.Decoder) error {
+	if d.PeekKind() == 'n' {
+		_, err := d.ReadToken()
+		return err
+	}
+	var spill OutputSpill
+	err := readMembers(d, func(name string, d *jsontext.Decoder) error {
+		var err error
+		switch name {
+		case "path":
+			spill.Path, err = readString(d)
+		case "bytes":
+			var n int
+			n, err = readInt(d)
+			spill.Bytes = int64(n)
+		case "sha256":
+			spill.SHA256, err = readString(d)
+		default:
+			err = d.SkipValue()
+		}
+		return err
+	})
+	it.Spill = &spill
+	return err
+}
+
+func (it *Item) readKeywords(d *jsontext.Decoder) error {
+	if d.PeekKind() == 'n' {
+		_, err := d.ReadToken()
+		return err
+	}
+	return readArray(d, func() error {
+		var match KeywordMatch
+		err := readMembers(d, func(name string, d *jsontext.Decoder) error {
+			return readKeywordMember(name, d, &match)
+		})
+		it.Keywords = append(it.Keywords, match)
+		return err
+	})
+}
+
+func readKeywordMember(name string, d *jsontext.Decoder, match *KeywordMatch) error {
+	var err error
+	switch name {
+	case "word":
+		match.Word, err = readString(d)
+	case "byteRange":
+		err = readByteRange(d, &match.ByteRange)
+	case "hue":
+		err = readHue(d, &match.Hue)
+	case "effort":
+		match.Effort, err = readString(d)
+	case "summary":
+		match.Summary, err = readString(d)
+	default:
+		err = d.SkipValue()
+	}
+	return err
+}
+
+func readByteRange(d *jsontext.Decoder, r *ByteRange) error {
+	return readMembers(d, func(name string, d *jsontext.Decoder) error {
+		var err error
+		switch name {
+		case "start":
+			r.Start, err = readInt(d)
+		case "end":
+			r.End, err = readInt(d)
+		default:
+			err = d.SkipValue()
+		}
+		return err
+	})
+}
+
+func readHue(d *jsontext.Decoder, hue *[2]int) error {
+	var values []int
+	err := readArray(d, func() error {
+		n, err := readInt(d)
+		values = append(values, n)
+		return err
+	})
+	copy(hue[:], values)
 	return err
 }
 
@@ -384,6 +489,18 @@ func (it *Item) readChange(d *jsontext.Decoder) error {
 			v, err := readString(d)
 			change.Diff = v
 			return err
+		case "additions":
+			v, err := readInt(d)
+			change.Additions = v
+			return err
+		case "deletions":
+			v, err := readInt(d)
+			change.Deletions = v
+			return err
+		case "diffOmitted":
+			v, err := readBool(d)
+			change.DiffOmitted = v
+			return err
 		case "kind":
 			return readMembers(d, func(name string, d *jsontext.Decoder) error {
 				if name != "type" {
@@ -397,5 +514,30 @@ func (it *Item) readChange(d *jsontext.Decoder) error {
 		return d.SkipValue()
 	})
 	it.Changes = append(it.Changes, change)
+	return err
+}
+
+func (n *FileChangePatchUpdatedNotification) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	var holder Item
+	err := readMembers(d, func(name string, d *jsontext.Decoder) error {
+		switch name {
+		case "threadId":
+			v, err := readString(d)
+			n.ThreadID = v
+			return err
+		case "turnId":
+			v, err := readString(d)
+			n.TurnID = v
+			return err
+		case "itemId":
+			v, err := readString(d)
+			n.ItemID = v
+			return err
+		case "changes":
+			return readArray(d, func() error { return holder.readChange(d) })
+		}
+		return d.SkipValue()
+	})
+	n.Changes = holder.Changes
 	return err
 }

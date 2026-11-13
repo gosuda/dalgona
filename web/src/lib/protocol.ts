@@ -1,3 +1,4 @@
+import { parseQuestionRequest } from "./question";
 import type {
 	ApprovalRequest,
 	JsonValue,
@@ -14,6 +15,8 @@ interface PendingCall {
 	readonly accept: (value: unknown) => void;
 	readonly reject: (error: Error) => void;
 }
+
+const questionMethod = "item/tool/requestUserInput";
 
 interface RpcFields {
 	readonly jsonrpc: JsonValue | undefined;
@@ -242,11 +245,21 @@ export class RpcClient {
 			this.handlers.onError("rpc request id is invalid");
 			return;
 		}
+		if (method === questionMethod) {
+			const question = parseQuestionRequest(id, params);
+			if (question === null) {
+				this.reject(id, -32602, "invalid params");
+				this.handlers.onError("invalid question request");
+				return;
+			}
+			this.handlers.onQuestion(question);
+			return;
+		}
 		let request: ApprovalRequest | null;
 		try {
 			request = parseApprovalRequest(method, id, params);
 		} catch (error) {
-			this.respondError(id, -32602, "invalid params");
+			this.reject(id, -32602, "invalid params");
 			this.handlers.onError(
 				error instanceof Error ? error.message : "invalid request",
 			);
@@ -259,14 +272,14 @@ export class RpcClient {
 		const knownMethod =
 			method === "item/commandExecution/requestApproval" ||
 			method === "item/fileChange/requestApproval";
-		this.respondError(
+		this.reject(
 			id,
 			knownMethod ? -32602 : -32601,
 			knownMethod ? "invalid params" : "method not found",
 		);
 	}
 
-	private respondError(id: RequestId, code: number, message: string): void {
+	reject(id: RequestId, code: number, message: string): void {
 		this.send({ jsonrpc: "2.0", id, error: { code, message } });
 	}
 

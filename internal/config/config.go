@@ -78,7 +78,6 @@ func newConfig(product Product, cwd string) (Config, error) {
 type (
 	Flags struct {
 		Model, Reasoning, Approval, ToolMode, Sandbox, Runner, Remote, Cwd string
-		Advisor                                                            bool
 	}
 	Reasoning string
 )
@@ -98,6 +97,33 @@ const (
 	ApprovalAuto Approval = "auto"
 	ApprovalYolo Approval = "yolo"
 	ApprovalAsk  Approval = "ask"
+)
+
+type Verbosity string
+
+const (
+	VerbosityLow    Verbosity = "low"
+	VerbosityMedium Verbosity = "medium"
+	VerbosityHigh   Verbosity = "high"
+)
+
+type Theme string
+
+const (
+	ThemeAuto      Theme = "auto"
+	ThemeAutoSoft  Theme = "auto-soft"
+	ThemeNight     Theme = "night"
+	ThemeSoftNight Theme = "soft-night"
+	ThemeDay       Theme = "day"
+	ThemeSoftDay   Theme = "soft-day"
+)
+
+type Icons string
+
+const (
+	IconsAuto    Icons = "auto"
+	IconsUnicode Icons = "unicode"
+	IconsNerd    Icons = "nerd"
 )
 
 type SandboxMode string
@@ -201,6 +227,10 @@ type (
 		Decider   string
 		Threshold float64
 	}
+	EditReviewConfig struct {
+		Enabled  bool
+		Feedback []string
+	}
 	EvalConfig struct {
 		Uses []string
 		Set  bool
@@ -225,6 +255,11 @@ type Config struct {
 	ToolMode                              ToolMode
 	Sandbox                               SandboxMode
 	SandboxWritableRoots                  []string
+	Verbosity                             Verbosity
+	Theme                                 Theme
+	Icons                                 Icons
+	StatusHide                            []string
+	Notifications                         bool
 	EditStyle                             EditStyleSpec
 	CompactionThreshold                   float64
 	CompactionKeepTokens                  int
@@ -237,6 +272,7 @@ type Config struct {
 	MCPServers                            map[string]MCPServerSpec
 	Discovery                             DiscoveryConfig
 	ApprovalDecider                       ApprovalDeciderConfig
+	EditReview                            EditReviewConfig
 	Eval                                  EvalConfig
 	Secrets                               SecretsConfig
 	Keywords                              map[string]KeywordSpec
@@ -256,8 +292,9 @@ func defaultConfig(product Product, cwd string) Config {
 func defaultConfigWithHome(product Product, home, cwd string) Config {
 	return Config{
 		Home: home, Product: product, Cwd: cwd,
-		Reasoning: ReasoningDefault, Approval: ApprovalAuto, ToolMode: ToolModeNormal,
+		Reasoning: ReasoningDefault, Approval: ApprovalAuto, ToolMode: ToolModeEvalFirst,
 		Sandbox: SandboxWorkspaceWrite, Runner: "local",
+		Verbosity: VerbosityMedium, Theme: ThemeAuto, Icons: IconsAuto, StatusHide: []string{}, Notifications: true,
 		EditStyle: EditStyleSpec{Default: "anchor"}, CompactionThreshold: .8,
 		CompactionKeepTokens: 20000, StreamStartTimeout: time.Minute,
 		StreamIdleTimeout: 5 * time.Minute, ApprovalDecider: ApprovalDeciderConfig{Threshold: .9},
@@ -284,6 +321,9 @@ func Load(product Product, cwd string, flags Flags) (Config, error) {
 		if err := validateProductLayer(product, layer); err != nil {
 			return Config{}, err
 		}
+		if err := validateTrustedWorkspaces(layer); err != nil {
+			return Config{}, err
+		}
 		if err := cfg.merge(layer); err != nil {
 			return Config{}, err
 		}
@@ -294,6 +334,15 @@ func Load(product Product, cwd string, flags Flags) (Config, error) {
 	}
 	cfg.resolveAdvisors()
 	return cfg, nil
+}
+
+func validateTrustedWorkspaces(l layer) error {
+	for _, workspace := range l.doc.MCPTrustedWorkspaces {
+		if workspace == "" {
+			return fmt.Errorf("%s: mcp_trusted_workspaces entry must be a nonempty path", filepath.Base(l.path))
+		}
+	}
+	return nil
 }
 
 type layer struct {

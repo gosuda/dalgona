@@ -1,5 +1,6 @@
 import adapter from "@sveltejs/adapter-static";
 import { sveltekit } from "@sveltejs/kit/vite";
+import { svelteTesting } from "@testing-library/svelte/vite";
 import type { UserConfig } from "vite";
 import { defineConfig } from "vitest/config";
 
@@ -15,9 +16,37 @@ const config: UserConfig = defineConfig({
 				runes: true,
 			},
 		}),
+		svelteTesting(),
 	],
 	test: {
-		include: ["src/lib/**/*.test.ts"],
+		projects: [
+			{
+				extends: true,
+				test: {
+					name: "unit",
+					environment: "node",
+					include: ["src/lib/**/*.test.ts"],
+					exclude: ["src/lib/**/*.dom.test.ts"],
+				},
+			},
+			{
+				extends: true,
+				test: {
+					name: "dom",
+					environment: "happy-dom",
+					setupFiles: ["src/dom-setup.ts"],
+					css: {
+						include: [
+							/NoticeStack\.svelte/,
+							/ApprovalCard\.svelte/,
+							/ThreadList\.svelte/,
+							/app\.css$/,
+						],
+					},
+					include: ["src/lib/**/*.dom.test.ts"],
+				},
+			},
+		],
 	},
 });
 

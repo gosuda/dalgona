@@ -3,6 +3,7 @@ package devin
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json/jsontext"
 	"fmt"
@@ -14,7 +15,6 @@ import (
 	"github.com/gosuda/dalgona/internal/model/devin/wire"
 )
 
-// source: git show f2cb47b8:engine/dal-provider/src/family/devin/request.rs
 const (
 	ideName          = "devin-cli"
 	ideType          = "chisel"
@@ -192,6 +192,7 @@ func (b *promptBuilder) add(index int, message model.Message) error {
 			MessageIDView: []byte(messageID(b.cascade, index, "user")),
 			Source:        sourceUser,
 			PromptView:    []byte(message.Text),
+			Images:        devinImages(message.Images),
 		})
 	}
 	return nil
@@ -235,6 +236,14 @@ func callArguments(call model.ToolCall) ([]byte, error) {
 		return nil, fmt.Errorf("devin: encode freeform call %s: %w", call.Name, err)
 	}
 	return append(args, '}'), nil
+}
+
+func devinImages(images []model.Image) []wire.ImageData {
+	out := make([]wire.ImageData, len(images))
+	for index, image := range images {
+		out[index] = wire.ImageData{Base64DataView: []byte(base64.StdEncoding.EncodeToString(image.Data)), MimeTypeView: []byte(image.Mime)}
+	}
+	return out
 }
 
 func messageID(cascade string, index int, role string) string {

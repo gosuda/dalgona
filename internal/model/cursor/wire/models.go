@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -10,17 +11,17 @@ type ModelParameter struct {
 }
 
 func AppendModelParameter(dst []byte, m *ModelParameter) []byte {
-	dst = appendRaw(dst, 1, m.IDView)
-	return appendRaw(dst, 2, m.ValueView)
+	dst = connectwire.AppendRaw(dst, 1, m.IDView)
+	return connectwire.AppendRaw(dst, 2, m.ValueView)
 }
 
 func ConsumeModelParameter(b []byte, m *ModelParameter) error {
-	return consumeFields(b, "cursor model parameter", func(f field) error {
-		switch f.number {
+	return connectwire.ConsumeFields(b, "cursor model parameter", func(f connectwire.Field) error {
+		switch f.Number {
 		case 1:
-			return setBytes(f, "cursor model parameter", &m.IDView)
+			return connectwire.SetBytes(f, "cursor model parameter", &m.IDView)
 		case 2:
-			return setBytes(f, "cursor model parameter", &m.ValueView)
+			return connectwire.SetBytes(f, "cursor model parameter", &m.ValueView)
 		default:
 			return nil
 		}
@@ -36,36 +37,36 @@ type RequestedModel struct {
 }
 
 func AppendRequestedModel(dst []byte, m *RequestedModel) []byte {
-	dst = appendRaw(dst, 1, m.ModelIDView)
-	dst = appendBool(dst, 2, m.MaxMode)
+	dst = connectwire.AppendRaw(dst, 1, m.ModelIDView)
+	dst = connectwire.AppendBool(dst, 2, m.MaxMode)
 	for i := range m.Parameters {
-		dst = appendMessage(dst, 3, &m.Parameters[i], AppendModelParameter)
+		dst = connectwire.AppendMessage(dst, 3, &m.Parameters[i], AppendModelParameter)
 	}
 	if m.CredentialNumber != 0 {
-		dst = appendVariant(dst, protowire.Number(m.CredentialNumber), m.CredentialsView)
+		dst = connectwire.AppendVariant(dst, protowire.Number(m.CredentialNumber), m.CredentialsView)
 	}
 	return dst
 }
 
 func ConsumeRequestedModel(b []byte, m *RequestedModel) error {
-	return consumeFields(b, "cursor requested model", func(f field) error {
-		switch f.number {
+	return connectwire.ConsumeFields(b, "cursor requested model", func(f connectwire.Field) error {
+		switch f.Number {
 		case 1:
-			return setBytes(f, "cursor requested model", &m.ModelIDView)
+			return connectwire.SetBytes(f, "cursor requested model", &m.ModelIDView)
 		case 2:
-			return setBool(f, "cursor requested model", &m.MaxMode)
+			return connectwire.SetBool(f, "cursor requested model", &m.MaxMode)
 		case 3:
-			if err := requireKind(f, protowire.BytesType, "cursor requested model"); err != nil {
+			if err := connectwire.RequireKind(f, protowire.BytesType, "cursor requested model"); err != nil {
 				return err
 			}
 			var p ModelParameter
-			if err := ConsumeModelParameter(bytesValue(f), &p); err != nil {
+			if err := ConsumeModelParameter(connectwire.BytesValue(f), &p); err != nil {
 				return err
 			}
 			m.Parameters = append(m.Parameters, p)
 		case 4, 5, 6:
-			m.CredentialNumber = f.number
-			return setBytes(f, "cursor requested model", &m.CredentialsView)
+			m.CredentialNumber = f.Number
+			return connectwire.SetBytes(f, "cursor requested model", &m.CredentialsView)
 		}
 		return nil
 	})
@@ -84,57 +85,57 @@ type ModelDetails struct {
 }
 
 func AppendModelDetails(dst []byte, m *ModelDetails) []byte {
-	dst = appendRaw(dst, 1, m.ModelIDView)
-	dst = appendRaw(dst, 2, m.ThinkingDetailsView)
-	dst = appendRaw(dst, 3, m.DisplayModelIDView)
-	dst = appendRaw(dst, 4, m.DisplayNameView)
-	dst = appendRaw(dst, 5, m.DisplayShortView)
-	dst = appendRepeatedBytes(dst, 6, m.Aliases)
-	dst = appendBool(dst, 7, m.MaxMode)
+	dst = connectwire.AppendRaw(dst, 1, m.ModelIDView)
+	dst = connectwire.AppendRaw(dst, 2, m.ThinkingDetailsView)
+	dst = connectwire.AppendRaw(dst, 3, m.DisplayModelIDView)
+	dst = connectwire.AppendRaw(dst, 4, m.DisplayNameView)
+	dst = connectwire.AppendRaw(dst, 5, m.DisplayShortView)
+	dst = connectwire.AppendRepeatedBytes(dst, 6, m.Aliases)
+	dst = connectwire.AppendBool(dst, 7, m.MaxMode)
 	if m.CredentialNumber != 0 {
-		dst = appendVariant(dst, protowire.Number(m.CredentialNumber), m.CredentialsView)
+		dst = connectwire.AppendVariant(dst, protowire.Number(m.CredentialNumber), m.CredentialsView)
 	}
 	return dst
 }
 
 func ConsumeModelDetails(b []byte, m *ModelDetails) error {
-	return consumeFields(b, "cursor model details", func(f field) error {
-		if f.number <= 5 {
+	return connectwire.ConsumeFields(b, "cursor model details", func(f connectwire.Field) error {
+		if f.Number <= 5 {
 			return consumeModelIdentity(f, m)
 		}
 		return consumeModelOptions(f, m)
 	})
 }
 
-func consumeModelIdentity(f field, m *ModelDetails) error {
-	switch f.number {
+func consumeModelIdentity(f connectwire.Field, m *ModelDetails) error {
+	switch f.Number {
 	case 1:
-		return setBytes(f, "cursor model details", &m.ModelIDView)
+		return connectwire.SetBytes(f, "cursor model details", &m.ModelIDView)
 	case 2:
-		return setBytes(f, "cursor model details", &m.ThinkingDetailsView)
+		return connectwire.SetBytes(f, "cursor model details", &m.ThinkingDetailsView)
 	case 3:
-		return setBytes(f, "cursor model details", &m.DisplayModelIDView)
+		return connectwire.SetBytes(f, "cursor model details", &m.DisplayModelIDView)
 	case 4:
-		return setBytes(f, "cursor model details", &m.DisplayNameView)
+		return connectwire.SetBytes(f, "cursor model details", &m.DisplayNameView)
 	case 5:
-		return setBytes(f, "cursor model details", &m.DisplayShortView)
+		return connectwire.SetBytes(f, "cursor model details", &m.DisplayShortView)
 	default:
 		return nil
 	}
 }
 
-func consumeModelOptions(f field, m *ModelDetails) error {
-	switch f.number {
+func consumeModelOptions(f connectwire.Field, m *ModelDetails) error {
+	switch f.Number {
 	case 6:
-		if err := requireKind(f, protowire.BytesType, "cursor model details"); err != nil {
+		if err := connectwire.RequireKind(f, protowire.BytesType, "cursor model details"); err != nil {
 			return err
 		}
-		m.Aliases = append(m.Aliases, bytesValue(f))
+		m.Aliases = append(m.Aliases, connectwire.BytesValue(f))
 	case 7:
-		return setBool(f, "cursor model details", &m.MaxMode)
+		return connectwire.SetBool(f, "cursor model details", &m.MaxMode)
 	case 8, 9, 10:
-		m.CredentialNumber = f.number
-		return setBytes(f, "cursor model details", &m.CredentialsView)
+		m.CredentialNumber = f.Number
+		return connectwire.SetBytes(f, "cursor model details", &m.CredentialsView)
 	}
 	return nil
 }
@@ -144,18 +145,18 @@ type GetUsableModelsRequest struct {
 }
 
 func AppendGetUsableModelsRequest(dst []byte, m *GetUsableModelsRequest) []byte {
-	return appendRepeatedBytes(dst, 1, m.CustomModelIDs)
+	return connectwire.AppendRepeatedBytes(dst, 1, m.CustomModelIDs)
 }
 
 func ConsumeGetUsableModelsRequest(b []byte, m *GetUsableModelsRequest) error {
-	return consumeFields(b, "cursor usable models request", func(f field) error {
-		if f.number != 1 {
+	return connectwire.ConsumeFields(b, "cursor usable models request", func(f connectwire.Field) error {
+		if f.Number != 1 {
 			return nil
 		}
-		if err := requireKind(f, protowire.BytesType, "cursor usable models request"); err != nil {
+		if err := connectwire.RequireKind(f, protowire.BytesType, "cursor usable models request"); err != nil {
 			return err
 		}
-		m.CustomModelIDs = append(m.CustomModelIDs, bytesValue(f))
+		m.CustomModelIDs = append(m.CustomModelIDs, connectwire.BytesValue(f))
 		return nil
 	})
 }
@@ -166,21 +167,21 @@ type GetUsableModelsResponse struct {
 
 func AppendGetUsableModelsResponse(dst []byte, m *GetUsableModelsResponse) []byte {
 	for i := range m.Models {
-		dst = appendMessage(dst, 1, &m.Models[i], AppendModelDetails)
+		dst = connectwire.AppendMessage(dst, 1, &m.Models[i], AppendModelDetails)
 	}
 	return dst
 }
 
 func ConsumeGetUsableModelsResponse(b []byte, m *GetUsableModelsResponse) error {
-	return consumeFields(b, "cursor usable models response", func(f field) error {
-		if f.number != 1 {
+	return connectwire.ConsumeFields(b, "cursor usable models response", func(f connectwire.Field) error {
+		if f.Number != 1 {
 			return nil
 		}
-		if err := requireKind(f, protowire.BytesType, "cursor usable models response"); err != nil {
+		if err := connectwire.RequireKind(f, protowire.BytesType, "cursor usable models response"); err != nil {
 			return err
 		}
 		var model ModelDetails
-		if err := ConsumeModelDetails(bytesValue(f), &model); err != nil {
+		if err := ConsumeModelDetails(connectwire.BytesValue(f), &model); err != nil {
 			return err
 		}
 		m.Models = append(m.Models, model)

@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/retry/wait",
+  "type": "object",
+  "required": ["threadId", "turnId", "remainingMs"],
+  "properties": {
+    "threadId": {"type": "string"},
+    "turnId": {"type": "string"},
+    "remainingMs": {"type": "integer", "minimum": 0}
+  }
+}

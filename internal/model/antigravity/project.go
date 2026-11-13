@@ -16,7 +16,6 @@ import (
 	"github.com/gosuda/dalgona/internal/model"
 )
 
-// source: .references/oh-my-pi/packages/ai/src/registry/oauth/google-antigravity.ts
 const (
 	freeTier          = "free-tier"
 	onboardTimeout    = 30 * time.Second

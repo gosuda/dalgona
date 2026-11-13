@@ -49,7 +49,7 @@ func BenchmarkGrepManyFiles(b *testing.B) {
 	parsed := args{Mode: "grep", Pattern: "hit", Path: ".", Limit: 1000}
 	b.ResetTimer()
 	for b.Loop() {
-		res, resErr := execute(root, parsed)
+		res, resErr := execute(root, parsed, "", freshness{})
 		if resErr != nil {
 			b.Fatal(resErr)
 		}

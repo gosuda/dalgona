@@ -4,7 +4,9 @@
 
 Raw secret values covered by the masker MUST NOT enter the journal or a model request. Reversible placeholders MUST enter those surfaces instead. Values shorter than eight bytes are outside the masking contract.
 
-Exec and patch MUST restore known placeholders at the execution or edit-resolution boundary. Other tools MUST NOT gain a general unmask step. Unknown placeholders MUST remain unchanged. Pattern mappings MUST persist before masked text leaves the masker. A persistence failure MUST return an error, not a raw secret or an unrecoverable placeholder.
+Exec and patch MUST restore known placeholders at the execution or edit-resolution boundary. Other tools MUST NOT gain a general unmask step. Text that does not match a secret placeholder format MUST remain unchanged, and a well-formed placeholder that cannot be restored MUST return an error. Pattern mappings MUST persist before masked text leaves the masker. A persistence failure MUST return an error, not a raw secret or an unrecoverable placeholder.
+
+Recovery restores pre-edit file images and snapshot blobs through the strict unmask step.
 
 ## Scope
 

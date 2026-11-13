@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent"
@@ -127,6 +126,9 @@ func threadStatus(thread *agent.Thread) ThreadStatus {
 	}
 	switch status.State {
 	case event.StatusTurnRunning:
+		if status.Questions > 0 {
+			return ThreadStatus{Type: "active", ActiveFlags: []string{"waitingOnUserInput"}}
+		}
 		return ThreadStatus{Type: "active", ActiveFlags: []string{}}
 	case event.StatusAwaitingApproval:
 		return ThreadStatus{Type: "active", ActiveFlags: []string{"waitingOnApproval"}}
@@ -195,58 +197,30 @@ func (s *server) session(thread *agent.Thread, snap snapshot) (ThreadStartRespon
 	if resolved, resolveErr := thread.EffectiveSandbox(); resolveErr == nil {
 		effective = resolved
 	}
+	cause, choice, err := thread.SandboxFallback()
+	if err != nil {
+		return ThreadStartResponse{}, hostError(err, thread.ID(), "")
+	}
 	return ThreadStartResponse{
 		ApprovalPolicy: policyName(string(current.Approval)), ApprovalsReviewer: "user",
 		Cwd: snap.created.Cwd, Model: current.Model, ModelProvider: provider(current.Model),
 		Sandbox:         sandboxPolicy(string(effective)),
-		ReasoningEffort: cmp.Or(effortName(current.Effort), effortName(s.currentConfig().Reasoning)),
+		ReasoningEffort: cmp.Or(effortName(current.Effort), effortName(s.host.Config().Reasoning)),
+		TokenUsage:      snap.usage,
+		SandboxFallback: sandboxFallbackOf(cause, choice),
 		Thread:          s.threadObject(info, threadStatus(thread), snap.turns),
 	}, nil
 }
 
-type settingOverrides struct {
-	mu     sync.Mutex
-	values map[string]any
-}
-
-var hostSettings sync.Map
-
-func overridesOf(host *agent.Host) *settingOverrides {
-	value, _ := hostSettings.LoadOrStore(host, &settingOverrides{values: map[string]any{}})
-	overrides, _ := value.(*settingOverrides)
-	return overrides
-}
-
-func (o *settingOverrides) set(key string, value any) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.values[key] = value
-}
-
-func (o *settingOverrides) apply(cfg config.Config) config.Config {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	for key, value := range o.values {
-		text, ok := value.(string)
-		if !ok {
-			continue
-		}
-		switch key {
-		case "model":
-			cfg.Model = text
-		case "approval":
-			cfg.Approval = config.Approval(text)
-		case "sandbox":
-			cfg.Sandbox = config.SandboxMode(text)
-		case "reasoning":
-			cfg.Reasoning = config.Reasoning(text)
-		}
+func sandboxFallbackOf(cause, choice string) *SandboxFallback {
+	if cause == "" {
+		return nil
 	}
-	return cfg
-}
-
-func (s *server) currentConfig() config.Config {
-	return overridesOf(s.host).apply(s.host.Config())
+	fallback := SandboxFallback{Cause: cause}
+	if choice != "" {
+		fallback.Choice = &choice
+	}
+	return &fallback
 }
 
 func (s *server) threadStart(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
@@ -286,7 +260,7 @@ func (s *server) spec(p ThreadStartParams) (agent.ThreadSpec, error) {
 			return agent.ThreadSpec{}, invalidParams("cwd: " + err.Error())
 		}
 	}
-	current := s.currentConfig()
+	current := s.host.Config()
 	return agent.ThreadSpec{
 		Cwd: cwd, Model: qualifiedModel(p.Model, p.ModelProvider, current.Model),
 		Approval: cmp.Or(approval, current.Approval), Sandbox: cmp.Or(sandbox, current.Sandbox),

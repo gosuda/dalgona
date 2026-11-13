@@ -263,7 +263,6 @@ func noteIgnoredArgument(notes io.Writer, arg string) {
 	fmt.Fprintf(notes, "%signoring argument %s\n", appServerPrefix, arg)
 }
 
-// source: .references/codex/codex-rs/utils/cli/src/config_override.rs
 func (a *appServerArgs) addConfig(raw string, notes io.Writer) error {
 	key, value, ok := strings.Cut(raw, "=")
 	key = strings.TrimSpace(key)
@@ -288,7 +287,6 @@ func (a *appServerArgs) addConfig(raw string, notes io.Writer) error {
 	return nil
 }
 
-// source: .references/codex/codex-rs/app-server-transport/src/transport/websocket.rs
 func parseListen(raw string) (string, error) {
 	if raw == "stdio://" {
 		return "", nil
@@ -469,7 +467,6 @@ func (r *webSocketRelay) shutdown() {
 	r.active.Wait()
 }
 
-// source: .references/codex/codex-rs/app-server-transport/src/transport/websocket.rs
 func (r *webSocketRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.Header.Get("Origin") != "" {
 		http.Error(w, "websocket requests with an Origin header are refused", http.StatusForbidden)

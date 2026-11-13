@@ -4,7 +4,7 @@
 
 Each finding MUST name the defect, its location, the affected consumer, and the consequence. It MUST quote or cite the evidence. Severity MUST describe the harm in plain words. A review MUST NOT invent a failure or claim that an unrun check passed.
 
-A finding SHOULD include a test that fails on the defect. It MUST use a declared check from [justfile](justfile), a focused Go test, or a web script from [web/package.json](web/package.json). A saved-output pin or source-text assertion MUST NOT count as proof.
+A finding SHOULD include a test that fails on the defect. It MUST use a declared check from [justfile](justfile), a focused Go test, or a web script from [web/package.json](web/package.json). A saved-output pin or source-text assertion MUST NOT count as proof. The one exception is the comment gate that `CONTRIBUTE.md` names.
 
 ## Check the authority boundaries
 

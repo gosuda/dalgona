@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/journal"
 	"github.com/gosuda/dalgona/internal/keywords"
+	"github.com/gosuda/dalgona/internal/runner"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -33,6 +35,22 @@ type Host struct {
 	logged      map[string]bool
 	models      map[string]modelCache
 	modelsGroup singleflight.Group
+	execMu      sync.Mutex
+	exec        *runner.Local
+
+	settingsMu sync.Mutex
+	live       config.Config
+
+	reviewTimeout time.Duration
+	reviewSlots   chan struct{}
+	reviewMask    func(string) (string, error)
+}
+
+func sandboxCauseOf(cause func() string) func() string {
+	if cause == nil {
+		return runner.UnavailableCause
+	}
+	return cause
 }
 
 func NewHost(cfg HostConfig) (*Host, error) {
@@ -40,16 +58,21 @@ func NewHost(cfg HostConfig) (*Host, error) {
 		return nil, errors.New("agent: host needs a journal, providers, a tool set, and a runner factory")
 	}
 	cfg.Product = cmp.Or(cfg.Product, cfg.Config.Product, config.ProductDalgona)
+	cfg.SandboxCause = sandboxCauseOf(cfg.SandboxCause)
 	h := &Host{
-		cfg: cfg, journal: cfg.Journal, log: cmp.Or(cfg.Logger, slog.Default()), clock: cfg.Clock,
+		cfg: cfg, live: cfg.Config, journal: cfg.Journal, log: cmp.Or(cfg.Logger, slog.Default()), clock: cfg.Clock,
 		threads: make(map[string]*Thread), sessions: make(map[string]ThreadInfo),
 		logged: make(map[string]bool), models: make(map[string]modelCache),
+		reviewTimeout: reviewTimeout, reviewSlots: make(chan struct{}, reviewHostRequests),
 	}
 	if h.clock == nil {
 		h.clock = time.Now
 	}
 	table, err := customKeywords(cfg.Config)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkReviewFeedback(cfg.EditFeedback); err != nil {
 		return nil, err
 	}
 	h.keywords = keywords.Merge(keywords.Builtins(string(cfg.Product)), table)
@@ -90,9 +113,7 @@ func writableRoots(cfg config.Config) []string {
 		if root == "" {
 			continue
 		}
-		if real, err := filepath.EvalSymlinks(root); err == nil {
-			root = real
-		}
+		root = resolveExisting(root)
 		resolved = append(resolved, filepath.Clean(root))
 	}
 	return resolved
@@ -139,7 +160,7 @@ func (h *Host) sessionInfo(head journal.SessionHead) (ThreadInfo, error) {
 		return ThreadInfo{}, fmt.Errorf("agent: session %s has no session.created", head.ID)
 	}
 	h.projectInfo(&info, state)
-	if stat, err := os.Stat(filepath.Join(h.cfg.Config.Home, "sessions", head.ID, "journal.jsonl")); err == nil {
+	if stat, err := os.Stat(filepath.Join(h.Config().Home, "sessions", head.ID, "journal.jsonl")); err == nil {
 		info.Updated = stat.ModTime().UTC()
 	}
 	return info, nil
@@ -252,7 +273,7 @@ func (h *Host) startSession(ctx context.Context, spec ThreadSpec, id string) (*T
 }
 
 func (h *Host) sessionCreated(spec ThreadSpec, id string) (event.SessionCreated, error) {
-	cfg := h.cfg.Config
+	cfg := h.Config()
 	created := event.SessionCreated{
 		ID: id, Parent: spec.Parent, Advisor: spec.Advisor, CreatedAt: h.clock().UTC(),
 		Cwd:      cmp.Or(spec.Cwd, cfg.Cwd),
@@ -274,7 +295,7 @@ func (h *Host) sessionCreated(spec ThreadSpec, id string) (event.SessionCreated,
 	if spec.System != "" {
 		return created, nil
 	}
-	instructions := instructionsText(cfg.Home, created.Cwd)
+	instructions := prompt.Instructions(cfg.Home, created.Cwd)
 	if instructions == "" {
 		return created, nil
 	}

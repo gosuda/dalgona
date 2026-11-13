@@ -32,8 +32,6 @@ const (
 	rpcFileMissing    = -32002
 )
 
-// ErrSandboxDowngrade reports a box-channel request that weakens the
-// sandbox below the server start mode.
 var ErrSandboxDowngrade = errors.New("runner: sandbox downgrade refused")
 
 var (

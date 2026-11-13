@@ -21,6 +21,11 @@ import (
 
 func newDalgonaRig(t *testing.T) *rig {
 	t.Helper()
+	return newDalgonaRigWithTools(t, exec.New())
+}
+
+func newDalgonaRigWithTools(t *testing.T, tools ...tool.Tool) *rig {
+	t.Helper()
 	r := &rig{t: t, home: t.TempDir(), cwd: t.TempDir(), llm: newFakeLLM(t)}
 	t.Setenv("DAL_HOME", r.home)
 	if resolved, err := filepath.EvalSymlinks(r.cwd); err == nil {
@@ -31,7 +36,7 @@ func newDalgonaRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	credentials, err := auth.New(r.home)
+	credentials, err := auth.Load(r.home)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +47,7 @@ func newDalgonaRig(t *testing.T) *rig {
 			Product: config.ProductDalgona, Reasoning: config.ReasoningDefault,
 		},
 		Providers: r.providers,
-		Tools:     func(context.Context, string, string) ([]tool.Tool, error) { return []tool.Tool{exec.New()}, nil },
+		Tools:     func(context.Context, string, string) ([]tool.Tool, error) { return tools, nil },
 		Runner: func(_ context.Context, id, _ string) (runner.Runner, error) {
 			return runner.NewLocal(filepath.Join(r.home, "sessions", id, "runs"))
 		},
@@ -93,6 +98,7 @@ func TestServeChildApprovalResolvedReachesParentConnection(t *testing.T) {
 		return fieldOf(t, m.Params, "requestId") == requestID
 	})
 	expect(t, fieldOf(t, resolved.Params, "threadId") == childID, "serverRequest/resolved thread", string(resolved.Params))
+	expect(t, fieldOf(t, resolved.Params, "resolution") == "answered", "child approval resolution", string(resolved.Params))
 	log := readTurn(t, c.collect("turn/completed"))
 	expect(t, log.status == statusCompleted, "parent turn status", log.status)
 	got := childResolution(t, r, childID)

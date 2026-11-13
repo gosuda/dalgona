@@ -2,13 +2,13 @@
 
 ## Invariant
 
-JSONL MUST be the event authority. SQLite MUST remain a repairable mirror. A successful JSONL append MUST NOT disappear because a mirror write fails. The store MUST validate the sequence, CRC, and hash chain before replay.
+JSONL MUST be the event authority. The mirror MUST remain repairable from JSONL. A successful JSONL append MUST NOT disappear because a mirror write fails. The store MUST validate the sequence, CRC, and hash chain before replay.
 
-Repair MUST use verified records. A damaged session MUST retain its valid prefix and remain read-only. The store MUST quarantine damaged bytes. It MUST NOT discard a committed event without reporting the damage.
+Repair MUST use verified records. A damaged thread MUST retain its valid prefix and remain read-only. The store MUST quarantine damaged bytes. It MUST NOT discard a committed event without reporting the damage.
 
 ## Scope
 
-This decision applies to `internal/journal` and all state derived from its events. [journal.md](../spec/journal.md) defines the record, append, repair, backup, and lock rules. [recovery.md](../spec/recovery.md) defines tool recovery. SQLite is not an independent source of session truth.
+This decision applies to `internal/journal` and all state derived from its events. [journal.md](../spec/journal.md) defines the record, append, repair, backup, and lock rules. [recovery.md](../spec/recovery.md) defines tool recovery. The mirror is not an independent source of thread truth.
 
 ## Enforcement
 

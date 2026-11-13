@@ -3,10 +3,14 @@ package rpc
 import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"log/slog"
 	"math/rand/v2"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gosuda/dalgona/internal/agent/event"
 )
 
 var itemKinds = []string{kindUser, kindAgent, kindReasoning, kindCommand, kindFileChange, kindMCP, kindCompaction, kindDynamic}
@@ -101,15 +105,55 @@ func TestItemDecodeIgnoresMemberOrder(t *testing.T) {
 	}
 }
 
-func TestPatchSectionSelectsFile(t *testing.T) {
-	patch := "*** Begin Patch\n*** Update File: a.go\n@@\n-x\n+y\n*** Add File: dir/b.go\n+new\n*** End Patch\n"
-	if got := patchSection(patch, "/repo/a.go"); got != "*** Update File: a.go\n@@\n-x\n+y\n" {
-		t.Fatalf("a.go section %q", got)
+type planSink struct {
+	items   []string
+	methods []string
+	notes   []func() writer
+}
+
+func (s *planSink) turn(string, Turn) {}
+func (s *planSink) item(method, _ string, it *Item) {
+	if method == methodItemStarted {
+		s.items = append(s.items, it.ID+" "+it.Type)
 	}
-	if got := patchSection(patch, "/repo/dir/b.go"); got != "*** Add File: dir/b.go\n+new\n" {
-		t.Fatalf("b.go section %q", got)
+}
+
+func (s *planSink) notify(method string, build func() writer) {
+	s.methods = append(s.methods, method)
+	s.notes = append(s.notes, build)
+}
+
+func newPlanTracker(sink *planSink) *tracker {
+	tr := newTracker("t1", nil, nil, nil, slog.New(slog.DiscardHandler))
+	tr.sink = sink
+	return tr
+}
+
+func TestNestedCallWireKindAndID(t *testing.T) {
+	t.Parallel()
+	sink := &planSink{}
+	tr := newPlanTracker(sink)
+	tr.apply(1, event.ToolStarted{CallID: "e1", TurnID: "turn-1", Tool: "eval", Class: "script", Args: jsontext.Value(`{"code":"1"}`)})
+	tr.apply(2, event.ToolStarted{CallID: "e1/1", TurnID: "turn-1", Tool: "read", Class: "read", Args: jsontext.Value(`{"path":"a.go"}`)})
+	tr.apply(3, event.ToolStarted{CallID: "e1/5", TurnID: "turn-1", Tool: "exec", Class: "exec", Args: jsontext.Value(`{"command":"ls"}`)})
+	want := []string{"e1 dynamicToolCall", "e1/1 dynamicToolCall", "e1/5 commandExecution"}
+	if !slices.Equal(sink.items, want) {
+		t.Fatalf("items = %v, want %v", sink.items, want)
 	}
-	if got := patchSection(patch, "/repo/c.go"); got != patch {
-		t.Fatalf("unknown file section %q", got)
+}
+
+func TestNestedTodoEmitsPlanUpdate(t *testing.T) {
+	t.Parallel()
+	sink := &planSink{}
+	tr := newPlanTracker(sink)
+	tr.apply(1, event.ToolStarted{CallID: "e1/2", TurnID: "turn-1", Tool: "todo", Class: "read", Args: jsontext.Value(`{"items":[{"text":"read the test","status":"in_progress"}]}`)})
+	tr.apply(2, event.ToolCompleted{CallID: "e1/2", OK: true})
+	index := slices.Index(sink.methods, "turn/plan/updated")
+	if index < 0 {
+		t.Fatalf("notifications = %v, want turn/plan/updated", sink.methods)
+	}
+	plan, ok := sink.notes[index]().(TurnPlanUpdatedNotification)
+	if !ok || len(plan.Plan) != 1 || plan.Plan[0].Status != statusInProgress {
+		t.Fatalf("plan notification = %#v, want one inProgress step", plan)
 	}
 }

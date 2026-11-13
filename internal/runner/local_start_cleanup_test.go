@@ -18,7 +18,7 @@ func rerunOnce(t *testing.T, local *Local, dir string, id string, counter string
 	if retryErr != nil {
 		t.Fatal(retryErr)
 	}
-	state := waitForExit(t, local, id, 5*time.Second)
+	state := waitForExit(t, local, id)
 	if state.Exit == nil || state.Exit.Code != 0 {
 		t.Fatalf("second Start exit = %+v", state.Exit)
 	}
@@ -65,17 +65,17 @@ func TestLocal_spawnFailureKillsCommand(t *testing.T) {
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
 	id := "spawn-failure"
 	runDir := filepath.Join(dir, "runs", id)
-	started := filepath.Join(dir, "started")
+	gate := newShimGate(t, "group")
 	var target int
 	oldWriteSpawnPID := writeSpawnPIDFunc
 	writeSpawnPIDFunc = func(d string, _ int) error {
-		waitForFile(t, filepath.Join(d, "pgid"), 10*time.Second)
-		waitForFile(t, started, 10*time.Second)
+		gate.await(t)
 		group, err := readProcessGroup(d)
 		if err != nil {
 			t.Fatal(err)
 		}
 		target = group
+		gate.release()
 		return errTestSpawnFailure
 	}
 	defer func() { writeSpawnPIDFunc = oldWriteSpawnPID }()
@@ -84,16 +84,12 @@ func TestLocal_spawnFailureKillsCommand(t *testing.T) {
 			_ = signalProcess(0, target, SignalKill)
 		}
 	})
-	spec := ProcessSpec{ID: id, Argv: []string{"sh", "-c", `touch "$1"; sleep 30`, "_", started}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}}
+	spec := ProcessSpec{ID: id, Argv: []string{"sleep", "30"}, Dir: dir, Env: gate.env(nil), Sandbox: Sandbox{Mode: SandboxOff}}
 	if err := local.Start(t.Context(), spec); !errors.Is(err, errTestSpawnFailure) {
 		t.Fatalf("Start error = %v, want test spawn failure", err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for !processGroupStopped(target) {
-		if time.Now().After(deadline) {
-			t.Fatalf("process group %d outlived the failed start", target)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !processGroupStopped(target) {
+		t.Fatalf("process group %d outlived the failed start", target)
 	}
 	if _, err := os.Stat(runDir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("run directory remains after failed Start")

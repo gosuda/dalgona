@@ -148,7 +148,7 @@ func TestAcceptRefusesSandboxedPeer(t *testing.T) {
 	}
 	refuseNNPChild(t, sock, refused)
 	t.Run("landlock", func(t *testing.T) {
-		if !runner.Available() {
+		if runner.UnavailableCause() != "" {
 			t.Skip("Landlock ABI is 0")
 		}
 		refuseLandlockHelper(t, sock, refused)

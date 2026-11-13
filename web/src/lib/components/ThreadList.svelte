@@ -1,5 +1,7 @@
 <script lang="ts">
-import { threadTitle } from "#lib/labels.ts";
+import StateTag from "#lib/components/StateTag.svelte";
+import { threadHue } from "#lib/hue.ts";
+import { type StateKey, stateKey, threadTitle } from "#lib/labels.ts";
 import type { ThreadSummary } from "#lib/types.ts";
 
 interface Props {
@@ -8,6 +10,9 @@ interface Props {
 	loading: boolean;
 	connected: boolean;
 	disabled: boolean;
+	starting: boolean;
+	waitingThreadIds: ReadonlySet<string>;
+	completedThreadIds: ReadonlySet<string>;
 	onNew: () => void;
 	onSelect: (threadId: string) => void;
 }
@@ -18,6 +23,9 @@ let {
 	loading,
 	connected,
 	disabled,
+	starting,
+	waitingThreadIds,
+	completedThreadIds,
 	onNew,
 	onSelect,
 }: Props = $props();
@@ -27,8 +35,14 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 	day: "numeric",
 });
 
-function activityLabel(thread: ThreadSummary): string {
-	return thread.status === "active" ? "Working" : "Idle";
+function rowKey(thread: ThreadSummary): StateKey | null {
+	if (waitingThreadIds.has(thread.id)) {
+		return "awaitingApproval";
+	}
+	const key = stateKey(thread.status, thread.activeFlags);
+	return key === "idle" && completedThreadIds.has(thread.id)
+		? "completed"
+		: key;
 }
 </script>
 
@@ -38,12 +52,18 @@ function activityLabel(thread: ThreadSummary): string {
 			<p class="eyebrow">Agent workbench</p>
 			<h1>dalgona<span aria-hidden="true">/</span></h1>
 		</div>
-		<button class="primary" onclick={onNew} disabled={disabled}>New thread</button>
+		<button
+			class="quiet"
+			aria-disabled={starting ? "true" : undefined}
+			onclick={() => {
+				if (!starting && connected) onNew();
+			}}
+		>Start thread</button>
 	</header>
 
 	<div class="thread-heading">
 		<h2>Threads</h2>
-		<span>{threads.length}</span>
+		<span class="count">{threads.length}</span>
 	</div>
 
 	<p class="loading" role="status">{loading ? "Loading threads…" : ""}</p>
@@ -62,25 +82,38 @@ function activityLabel(thread: ThreadSummary): string {
 		<nav aria-label="Conversation threads">
 			<ul>
 				{#each threads as thread (thread.id)}
+					{@const key = rowKey(thread)}
 					<li>
 						<button
 							class="thread"
-							class:selected={thread.id === activeId}
-							aria-current={thread.id === activeId ? "page" : undefined}
-							disabled={disabled}
+							aria-current={thread.id === activeId ? "true" : undefined}
+							disabled={disabled || starting}
 							onclick={() => onSelect(thread.id)}
 						>
 							<span class="thread-topline">
-								<strong>{threadTitle(thread)}</strong>
-								<time datetime={new Date(thread.updatedAt * 1000).toISOString()}>
-									{dateFormatter.format(new Date(thread.updatedAt * 1000))}
-								</time>
+								<span class="name">
+									<span
+										class="hue-dot"
+										data-hue={threadHue(thread.id)}
+										aria-hidden="true"
+									></span>
+									<strong class="title">{threadTitle(thread)}</strong>
+								</span>
 							</span>
 							{#if thread.preview && thread.preview !== threadTitle(thread)}
-								<span class="preview">{thread.preview}</span>
+								<span class="preview prose">{thread.preview}</span>
 							{/if}
 							<span class="meta">
-								<span class:working={thread.status === "active"}>{activityLabel(thread)}</span>
+								<span class="state-line">
+									{#if key === null}
+										<span>{thread.status}</span>
+									{:else}
+										<StateTag state={key} />
+									{/if}
+									<time datetime={new Date(thread.updatedAt * 1000).toISOString()}>
+										{dateFormatter.format(new Date(thread.updatedAt * 1000))}
+									</time>
+								</span>
 								<span>{thread.model ?? "Default model"}</span>
 							</span>
 						</button>
@@ -97,9 +130,9 @@ function activityLabel(thread: ThreadSummary): string {
 		min-height: 0;
 		overflow-y: auto;
 		overscroll-behavior: contain;
-		padding: var(--space-5) var(--space-4);
-		background: var(--color-bg-sidebar);
-		border-inline-end: 1px solid var(--color-border);
+		padding: var(--space-6) var(--space-4);
+		background: var(--tone);
+		border-inline-end: 1px solid var(--line);
 	}
 
 	.brand {
@@ -107,13 +140,13 @@ function activityLabel(thread: ThreadSummary): string {
 		align-items: end;
 		justify-content: space-between;
 		gap: var(--space-3);
-		margin-block-end: var(--space-6);
+		margin-block-end: var(--space-8);
 	}
 
 	.eyebrow {
 		margin: 0 0 var(--space-1);
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-weight: 600;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
@@ -121,14 +154,14 @@ function activityLabel(thread: ThreadSummary): string {
 
 	h1 {
 		margin: 0;
-		font-size: var(--text-title);
+		font-size: var(--size-title);
 		font-weight: 650;
 		letter-spacing: -0.02em;
 		line-height: 1.1;
 	}
 
 	h1 span {
-		color: var(--color-accent);
+		color: var(--accent-text);
 		margin-inline-start: var(--space-1);
 	}
 
@@ -136,31 +169,35 @@ function activityLabel(thread: ThreadSummary): string {
 		display: flex;
 		align-items: baseline;
 		justify-content: space-between;
-		border-block-end: 1px solid var(--color-border);
+		border-block-end: 1px solid var(--line);
 		padding-block-end: var(--space-2);
 	}
 
 	.thread-heading h2 {
 		margin: 0;
-		font-size: var(--text-body-small);
-		font-weight: 650;
+		color: var(--dim);
+		font-size: var(--size-caption);
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
 	}
 
 	.thread-heading span {
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-variant-numeric: tabular-nums;
 	}
 
 	.loading {
 		min-height: 1.5em;
 		margin: var(--space-2) 0;
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 	}
 
 	ul {
 		display: grid;
+		grid-template-columns: minmax(0, 1fr);
 		gap: var(--space-2);
 		list-style: none;
 		margin: 0;
@@ -170,11 +207,14 @@ function activityLabel(thread: ThreadSummary): string {
 	.thread {
 		display: grid;
 		width: 100%;
+		min-width: 0;
 		min-height: 0;
 		gap: var(--space-2);
 		border-color: transparent;
+		border-inline-start: 0 solid var(--text);
 		background: transparent;
 		padding: var(--space-3);
+		padding-inline-start: calc(var(--space-3) + 2px);
 		text-align: start;
 	}
 
@@ -182,22 +222,57 @@ function activityLabel(thread: ThreadSummary): string {
 		opacity: 0.55;
 	}
 
-	.thread.selected {
-		border-color: var(--color-accent);
-		background: var(--color-bg-selected);
+	.thread[aria-current="true"] {
+		border-inline-start-width: 2px;
+		padding-inline-start: var(--space-3);
+		background: var(--tone);
+	}
+
+	.thread[aria-current="true"] .title {
+		font-weight: var(--weight-strong);
+	}
+
+	@media (hover: hover) {
+		.thread[aria-current="true"]:not(:disabled):hover {
+			border-color: transparent;
+			border-inline-start-color: var(--text);
+			background: var(--tone);
+		}
+	}
+
+	@media (forced-colors: active) {
+		.thread[aria-current="true"] {
+			border-inline-start-color: Highlight;
+		}
 	}
 
 	.thread-topline {
 		display: flex;
 		align-items: baseline;
 		justify-content: space-between;
+		min-width: 0;
 		gap: var(--space-2);
+	}
+
+	.name {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		min-width: 0;
+	}
+
+	.hue-dot {
+		flex: none;
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--point);
 	}
 
 	.thread-topline strong {
 		min-width: 0;
-		overflow-wrap: break-word;
-		font-size: var(--text-body-small);
+		overflow-wrap: anywhere;
+		font-size: var(--size-small);
 		font-weight: 650;
 		line-height: 1.4;
 	}
@@ -205,9 +280,11 @@ function activityLabel(thread: ThreadSummary): string {
 	time,
 	.meta,
 	.preview {
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-weight: 400;
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 
 	time {
@@ -215,9 +292,15 @@ function activityLabel(thread: ThreadSummary): string {
 		font-variant-numeric: tabular-nums;
 	}
 
+	.state-line {
+		display: flex;
+		align-items: baseline;
+		gap: var(--space-2);
+		min-width: 0;
+	}
+
 	.preview {
 		line-height: 1.45;
-		overflow-wrap: break-word;
 	}
 
 	.meta {
@@ -227,15 +310,10 @@ function activityLabel(thread: ThreadSummary): string {
 		gap: var(--space-2);
 	}
 
-	.meta .working {
-		color: var(--color-success);
-		font-weight: 650;
-	}
-
 	.empty {
-		padding-block: var(--space-5);
-		color: var(--color-text-secondary);
-		font-size: var(--text-body-small);
+		padding-block: var(--space-6);
+		color: var(--dim);
+		font-size: var(--size-small);
 	}
 
 	.empty p {
@@ -243,7 +321,7 @@ function activityLabel(thread: ThreadSummary): string {
 	}
 
 	.empty p:first-child {
-		color: var(--color-text);
+		color: var(--text);
 		font-weight: 650;
 	}
 
@@ -254,8 +332,14 @@ function activityLabel(thread: ThreadSummary): string {
 	@media (max-width: 52rem) {
 		.sidebar {
 			border-inline-end: 0;
-			border-block-end: 1px solid var(--color-border);
+			border-block-end: 1px solid var(--line);
 			padding: var(--space-4);
+		}
+
+		nav {
+			max-height: 18rem;
+			overflow-y: auto;
+			overscroll-behavior: contain;
 		}
 
 		.brand {

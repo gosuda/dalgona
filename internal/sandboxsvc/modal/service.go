@@ -156,17 +156,30 @@ func (s *Service) Destroy(ctx context.Context, id string) error {
 	}
 	box, err := s.api.FromID(ctx, sandboxID)
 	if err != nil {
-		if isModalGone(err) {
-			return fmt.Errorf("modal: attach %s: %w", id, sandboxsvc.ErrGone)
+		if !isModalGone(err) {
+			return fmt.Errorf("modal: attach %s: %w", id, err)
 		}
-		return fmt.Errorf("modal: attach %s: %w", id, err)
+		if err := s.deleteVolume(ctx, volume); err != nil {
+			return err
+		}
+		return nil
 	}
 	if err := box.Terminate(ctx); err != nil {
 		if isModalGone(err) {
-			return fmt.Errorf("modal: terminate %s: %w", id, sandboxsvc.ErrGone)
+			if err = s.deleteVolume(ctx, volume); err != nil {
+				return err
+			}
+			return nil
 		}
 		return fmt.Errorf("modal: terminate %s: %w", id, err)
 	}
+	if err := s.deleteVolume(ctx, volume); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) deleteVolume(ctx context.Context, volume string) error {
 	if err := s.api.DeleteVolume(ctx, volume); err != nil {
 		return fmt.Errorf("modal: delete volume %s: %w", volume, err)
 	}

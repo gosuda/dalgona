@@ -14,13 +14,16 @@ import (
 
 const sandboxExec = "/usr/bin/sandbox-exec"
 
-func Available() bool {
+func UnavailableCause() string {
 	info, err := os.Stat(sandboxExec)
-	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
+	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		return "/usr/bin/sandbox-exec is missing"
+	}
+	return ""
 }
 
 func configureSandbox(cmd *exec.Cmd, dir string, sandbox Sandbox) error {
-	if sandbox.Mode != SandboxWorkspaceWrite || !Available() {
+	if sandbox.Mode != SandboxWorkspaceWrite || UnavailableCause() != "" {
 		return nil
 	}
 	roots, err := resolveRoots(sandbox.WritableRoots)

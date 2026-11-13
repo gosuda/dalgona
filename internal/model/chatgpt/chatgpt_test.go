@@ -174,3 +174,19 @@ func TestModelsUseStaticCatalogAndOverrides(t *testing.T) {
 		t.Fatalf("luna = %+v", byID["gpt-6-luna"])
 	}
 }
+
+func TestStaticModelsAcceptImages(t *testing.T) {
+	t.Parallel()
+	models, err := chatgpt.New(chatgpt.Config{}).Models(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 9 {
+		t.Fatalf("models = %d, want 9", len(models))
+	}
+	for _, item := range models {
+		if !item.Images {
+			t.Fatalf("%s does not report image input", item.ID)
+		}
+	}
+}

@@ -11,7 +11,6 @@ import (
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/agent/rules"
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -29,6 +28,7 @@ type gateCall struct {
 	escalate      bool
 	justification string
 	paths         []string
+	files         []tool.FileChange
 	outside       []string
 	requestID     string
 }
@@ -101,6 +101,9 @@ func (w *worker) decide(ctx context.Context, gc gateCall, requestID string) verd
 	if v, ok := staticRule(gc); ok {
 		return v
 	}
+	if v, ok := w.sandboxFallback(ctx, gc, requestID); ok {
+		return v
+	}
 	if approval == config.ApprovalAsk {
 		return w.human(ctx, gc, requestID)
 	}
@@ -151,7 +154,7 @@ func staticRule(gc gateCall) (verdict, bool) {
 
 func staticRemoteRule(gc gateCall) (verdict, bool) {
 	for _, value := range remoteStrings(string(gc.args)) {
-		if name, part, ok := rules.CheckValue(value); ok {
+		if name, part, ok := rules.CheckRemoteValue(value); ok {
 			return decline("rule:"+name, "declined by rule "+name+": "+part), true
 		}
 	}
@@ -224,7 +227,7 @@ func (w *worker) action(gc gateCall) Action {
 }
 
 func (w *worker) sandboxed(gc gateCall) bool {
-	return !gc.escalate && w.settings.Sandbox != config.SandboxOff && runner.Available()
+	return !gc.escalate && w.settings.Sandbox != config.SandboxOff && w.t.host.cfg.SandboxCause() == "" && w.sandboxChoice() != event.SandboxChoiceDangerous
 }
 
 func (w *worker) task() string {
@@ -255,7 +258,38 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 	if prefix := w.matchingGrant(gc); prefix != "" {
 		return accept("grant:" + prefix)
 	}
+	return w.askUser(ctx, gc, requestID)
+}
+
+func (w *worker) humanSkippingGrants(ctx context.Context, gc gateCall, requestID string) verdict {
+	if w.t.created.Advisor != "" {
+		return w.automated(ctx, gc)
+	}
+	return w.askUser(ctx, gc, requestID)
+}
+
+func (w *worker) askUser(ctx context.Context, gc gateCall, requestID string) verdict {
 	replies := make(chan Reply, 1)
+	prompt, ok := w.approvalPrompt(gc, requestID)
+	if !ok {
+		return decline("mode:ask", "declined: secret masking failed")
+	}
+	offered, err := ask(w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
+	forwarded, linked := w.t.forwardApproval(prompt, replies)
+	v := decline("mode:ask", declineNoClient)
+	if err == nil && (forwarded || (offered && !linked)) {
+		v = awaitReply(ctx, replies)
+	}
+	if forwarded {
+		prompt.Resolved = true
+		prompt.Resolution = ApprovalResolution(v.decision, v.reason)
+		w.t.forwardApproval(prompt, nil)
+		w.t.discardApproval(prompt.RequestID)
+	}
+	return v
+}
+
+func (w *worker) approvalPrompt(gc gateCall, requestID string) (ApprovalPrompt, bool) {
 	prompt := ApprovalPrompt{
 		RequestID: requestID, CallID: gc.call.ID, Tool: gc.call.Name, Class: gc.class, Summary: summary(gc), Paths: gc.paths,
 		Reason: gc.justification,
@@ -265,17 +299,15 @@ func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdi
 		prompt.Command = gc.command
 		prompt.Commands = rules.Split(gc.command)
 	}
-	offered, err := ask(w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
-	forwarded, linked := w.t.forwardApproval(prompt)
-	v := decline("mode:ask", declineNoClient)
-	if err == nil && (forwarded || (offered && !linked)) {
-		v = awaitReply(ctx, replies)
+	if gc.class != tool.ClassEdit {
+		return prompt, true
 	}
-	if forwarded {
-		prompt.Resolved = true
-		w.t.forwardApproval(prompt)
+	files, err := w.approvalFiles(gc.files)
+	if err != nil {
+		return prompt, false
 	}
-	return v
+	prompt.Files = files
+	return prompt, true
 }
 
 func awaitReply(ctx context.Context, replies <-chan Reply) verdict {
@@ -283,24 +315,36 @@ func awaitReply(ctx context.Context, replies <-chan Reply) verdict {
 	case reply := <-replies:
 		return replyVerdict(reply)
 	case <-ctx.Done():
-		return verdict{decision: "cancel", by: "user", reason: "the turn was interrupted"}
+		return verdict{decision: "cancel", by: "user", reason: interruptedReason}
 	}
 }
 
 func (a *actor) offerApproval(prompt ApprovalPrompt, replies chan Reply) bool {
-	a.approvals[prompt.RequestID] = replies
+	a.approvals[prompt.RequestID] = newPendingApproval(replies)
 	a.publish(Update{Kind: UpdateApproval, Thread: a.t.id, Approval: prompt})
 	return len(a.subs) > 0
 }
 
-func (t *Thread) forwardApproval(prompt ApprovalPrompt) (reached, linked bool) {
+func (t *Thread) forwardApproval(prompt ApprovalPrompt, replies chan Reply) (reached, linked bool) {
 	parent, open := t.host.loadedThread(t.created.Parent)
 	if !open || t.created.Advisor != "" {
 		return false, false
 	}
 	reached, err := ask(parent, func(a *actor) bool {
+		if prompt.Resolved {
+			delete(a.approvals, prompt.RequestID)
+			a.publish(Update{Kind: UpdateApproval, Thread: t.id, Approval: prompt})
+			return false
+		}
+		if len(a.subs) > 0 {
+			a.approvals[prompt.RequestID] = newPendingApproval(replies)
+		}
 		a.publish(Update{Kind: UpdateApproval, Thread: t.id, Approval: prompt})
-		return len(a.subs) > 0
+		kept := len(a.subs) > 0
+		if !kept {
+			delete(a.approvals, prompt.RequestID)
+		}
+		return kept
 	})
 	return err == nil && reached, true
 }
@@ -312,7 +356,7 @@ func replyVerdict(reply Reply) verdict {
 	case ReplyAcceptSession:
 		return verdict{allow: true, decision: "accept_session", by: "user", reason: "allowed for this session"}
 	case ReplyCancel:
-		return verdict{decision: "cancel", by: "user", reason: "cancelled by user", cancel: true}
+		return verdict{decision: "cancel", by: "user", reason: cancelledReason, cancel: true}
 	case ReplyDecline:
 		return decline("user", "declined by user")
 	}

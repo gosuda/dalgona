@@ -14,13 +14,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func Available() bool {
+func UnavailableCause() string {
 	version, err := landsyscall.LandlockGetABIVersion()
-	return err == nil && version > 0
+	if err == nil && version > 0 {
+		return ""
+	}
+	return "Landlock is not available on this kernel"
 }
 
 func configureSandbox(cmd *exec.Cmd, dir string, sandbox Sandbox) error {
-	if sandbox.Mode != SandboxWorkspaceWrite || !Available() {
+	if sandbox.Mode != SandboxWorkspaceWrite || UnavailableCause() != "" {
 		return nil
 	}
 	self, err := selfExe()
@@ -47,7 +50,7 @@ func execSandboxed(dir string, argv []string) error {
 }
 
 func applySandbox(sandbox Sandbox) error {
-	if sandbox.Mode != SandboxWorkspaceWrite || !Available() {
+	if sandbox.Mode != SandboxWorkspaceWrite || UnavailableCause() != "" {
 		return nil
 	}
 	roots, err := resolveRoots(sandbox.WritableRoots)

@@ -1,7 +1,6 @@
 # Reviewed Hashline specifications
 
-Reviewed proposal, 2026-09-28. These files specify two optional new profiles for
-dal's existing patch engine. They do not implement the feature or change defaults.
+Reviewed 2026-09-28 and adopted 2026-11-08. These files specify the `hashline-light` and `hashline-enhanced` edit styles that `internal/tool/patch` implements. Neither is a default.
 
 **Light relaxes prior observation. Enhanced requires prior observation. Both
 identify the source snapshot and reject unsupported target changes.**
@@ -22,17 +21,18 @@ The review identifies its exact checksum and relevant physical line ranges.
 
 [verify_model.py](verify_model.py) and [verification.json](verification.json) contain
 reproducible bounded range/gap checks: 109,673 cases plus eight logical regressions.
-Run with `uv run --no-project --python 3.12 verify_model.py`.
+Run `uv run --no-project --python 3.12 verify_model.py` from `docs/spec/hashline`.
+
+`just hashline-model` fails when the verifier output differs from `verification.json`. When `CI` is `true` and `uv` is missing, `just hashline-model` fails. Otherwise, when `uv` is missing, `just hashline-model` prints `hashline-model: skipped, uv is not installed`. It then exits with status 0.
 
 This is not a filesystem implementation, unrestricted proof, performance benchmark,
 or claim that the product tests pass. The conformance document distinguishes
 executed checks from required implementation work.
 
-[package-checks.json](package-checks.json) records document/link/source-hash checks.
-[SHA256SUMS](SHA256SUMS) records the packaged file checksums, excluding itself.
+The model checker MUST NOT stand in for the parser, journal, observation transport, or production patch engine. The model MUST give each line of the base file its own identity, even when its text repeats.
 
 ## Adoption rule
 
 Keep legacy styles, aliases, and defaults. Enable the new profiles explicitly.
-Never downgrade Enhanced automatically after refusal. Changing a product default
-requires the stated conformance and measured edit-evaluation gates.
+Enhanced MUST NOT downgrade automatically after refusal. A change to a product default
+MUST pass the stated conformance and measured edit-evaluation gates.

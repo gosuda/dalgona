@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -76,29 +77,32 @@ func requireSteerRejected(t *testing.T, submitted <-chan error, updates <-chan U
 
 func requireNoTrustPrompt(t *testing.T, updates <-chan Update) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case update := <-updates:
 		t.Fatalf("rejected steer published unexpected update kind %d tool %q", update.Kind, update.Approval.Tool)
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 }
 
 func TestRejectedSteerSkipsWorkspaceTrust(t *testing.T) {
 	t.Parallel()
-	var calls atomic.Int32
-	h := newHarness(t, func(h *harness) {
-		h.cfg.Tools = approvingTools(&calls)
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		h := newHarness(t, func(h *harness) {
+			h.cfg.Tools = approvingTools(&calls)
+		})
+		thread := h.start()
+		updates := thread.Subscribe()
+		defer thread.Unsubscribe(updates)
+		submitted := make(chan error, 1)
+		go func() {
+			submitted <- thread.Submit(t.Context(), Input{Kind: InputSteer, Text: "stray steer", ExpectedTurnID: "turn-does-not-run"})
+		}()
+		requireSteerRejected(t, submitted, updates)
+		if got := calls.Load(); got != 0 {
+			t.Fatalf("tool builds during rejected steer = %d, want none before the rejection", got)
+		}
+		requireNoTrustPrompt(t, updates)
 	})
-	thread := h.start()
-	updates := thread.Subscribe()
-	defer thread.Unsubscribe(updates)
-	submitted := make(chan error, 1)
-	go func() {
-		submitted <- thread.Submit(t.Context(), Input{Kind: InputSteer, Text: "stray steer", ExpectedTurnID: "turn-does-not-run"})
-	}()
-	requireSteerRejected(t, submitted, updates)
-	if got := calls.Load(); got != 0 {
-		t.Fatalf("tool builds during rejected steer = %d, want none before the rejection", got)
-	}
-	requireNoTrustPrompt(t, updates)
 }

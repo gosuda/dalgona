@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
+	"strings"
 
+	"github.com/gosuda/dalgona/internal/syntax"
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 
@@ -19,6 +22,8 @@ type args struct {
 	Glob       string
 	Literal    bool
 	IgnoreCase bool
+	Kind       []string
+	Lang       string
 	Limit      int
 }
 
@@ -29,8 +34,9 @@ type capture struct {
 }
 
 type outcome struct {
-	Text     string
-	Captures []capture
+	Text      string
+	Captures  []capture
+	Unindexed int
 }
 
 func eachField(raw jsontext.Value, visit func(key string, value jsontext.Value) error) error {
@@ -95,14 +101,57 @@ func parseArgs(raw jsontext.Value) (args, error) {
 }
 
 func validateArgs(out args) error {
-	if out.Mode != "find" && out.Mode != "grep" {
-		return errors.New("search: mode must be \"find\" or \"grep\"")
-	}
-	if out.Pattern == "" {
-		return errors.New("search: pattern must not be empty")
+	if err := validateMode(out); err != nil {
+		return err
 	}
 	if out.Limit < 1 || out.Limit > 1000 {
 		return errors.New("search: limit must be between 1 and 1000")
+	}
+	if err := validateKinds(out); err != nil {
+		return err
+	}
+	return validateLang(out)
+}
+
+var (
+	searchModes = []string{"find", "grep", "symbols", "definition", "syntax"}
+	kindModes   = []string{"symbols", "definition"}
+)
+
+func validateMode(out args) error {
+	if !slices.Contains(searchModes, out.Mode) {
+		return errors.New("search: mode must be find, grep, symbols, definition, or syntax")
+	}
+	if out.Pattern == "" && out.Mode != "symbols" {
+		return errors.New("search: pattern must not be empty")
+	}
+	return nil
+}
+
+func validateLang(out args) error {
+	if out.Mode != "syntax" {
+		if out.Lang != "" {
+			return errors.New("search: lang applies only to syntax mode")
+		}
+		return nil
+	}
+	if out.Lang == "" {
+		return errors.New("search: lang is required in syntax mode")
+	}
+	if _, ok := syntax.ByName(out.Lang); !ok {
+		return fmt.Errorf("search: unknown lang %s, use one of: %s", out.Lang, strings.Join(syntax.Names(), ", "))
+	}
+	return nil
+}
+
+func validateKinds(out args) error {
+	for _, kind := range out.Kind {
+		if !slices.Contains(symbolKinds, kind) {
+			return fmt.Errorf("search: unknown kind %s", kind)
+		}
+	}
+	if len(out.Kind) > 0 && !slices.Contains(kindModes, out.Mode) {
+		return errors.New("search: kind applies only to symbols and definition")
 	}
 	return nil
 }
@@ -110,12 +159,14 @@ func validateArgs(out args) error {
 func setArg(out *args, name string, value jsontext.Value) error {
 	var err error
 	switch name {
-	case "mode", "pattern", "path", "glob":
+	case "mode", "pattern", "path", "glob", "lang":
 		err = setStringArg(out, name, value)
 	case "literal":
 		out.Literal, err = boolArg(value)
 	case "ignore_case":
 		out.IgnoreCase, err = boolArg(value)
+	case "kind":
+		out.Kind, err = stringsArg(value)
 	case "limit":
 		out.Limit, err = intArg(value)
 	default:
@@ -135,6 +186,8 @@ func setStringArg(out *args, name string, value jsontext.Value) error {
 	switch name {
 	case "mode":
 		out.Mode = text
+	case "lang":
+		out.Lang = text
 	case "pattern":
 		out.Pattern = text
 	case "path":
@@ -152,6 +205,19 @@ func soleToken(value jsontext.Value) (string, jsontext.Kind, error) {
 		return "", 0, err
 	}
 	return token.String(), token.Kind(), nil
+}
+
+func stringsArg(value jsontext.Value) ([]string, error) {
+	var out []string
+	err := eachItem(value, func(item jsontext.Value) error {
+		text, err := stringArg(item)
+		if err != nil {
+			return err
+		}
+		out = append(out, text)
+		return nil
+	})
+	return out, err
 }
 
 func stringArg(value jsontext.Value) (string, error) {
@@ -216,7 +282,10 @@ func encodeOutcome(result outcome) []byte {
 		}
 		out = append(out, `]}`...)
 	}
-	out = append(out, `]}`...)
+	out = append(out, ']')
+	out = append(out, `,"unindexed":`...)
+	out = strconv.AppendInt(out, int64(result.Unindexed), 10)
+	out = append(out, '}')
 	return out
 }
 
@@ -229,6 +298,8 @@ func decodeOutcome(data []byte) (outcome, error) {
 			result.Text, fieldErr = stringArg(value)
 		case "captures":
 			result.Captures, fieldErr = decodeCaptures(value)
+		case "unindexed":
+			result.Unindexed, fieldErr = intArg(value)
 		default:
 			fieldErr = fmt.Errorf("unknown field %q", key)
 		}

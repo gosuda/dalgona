@@ -1,38 +1,41 @@
 import { describe, expect, test } from "vitest";
 import { advisorLabel, itemStatusLabel, kindLabel } from "./labels";
 import {
-	activeApproval,
+	acceptThreadStatus,
+	activeRequest,
 	applyOpenThreadNotification,
 	dropSentFollowup,
 	emptyTranscript,
 	itemDisplayStatus,
 	itemsAwaitingApproval,
-	otherThreadApprovalCount,
 	reduceNotification,
-	resolveApprovalRequest,
+	resolveRequest,
 	shouldAutoScrollForUpdate,
-	trackApprovalRequest,
+	trackRequest,
 	transcriptForThread,
 } from "./reducer";
 import type {
 	AppNotification,
 	ApprovalRequest,
+	ServerRequest,
 	ThreadDetail,
 	TranscriptItem,
 } from "./types";
 
 function agent(id: string, text: string, complete: boolean): TranscriptItem {
-	return { id, kind: "agentMessage", text, complete };
+	return { id, turnId: "turn-1", kind: "agentMessage", text, complete };
 }
 
 function command(id: string, output: string): TranscriptItem {
 	return {
 		id,
+		turnId: "turn-1",
 		kind: "commandExecution",
 		command: "ls",
 		output,
 		status: "inProgress",
 		exitCode: null,
+		durationMs: null,
 	};
 }
 
@@ -51,9 +54,100 @@ function thread(turns: ThreadDetail["turns"]): ThreadDetail {
 	};
 }
 
-import { isSentFollowupAtHead, requeueFailedFollowup } from "./reducer";
-
 describe("transcript reducer", () => {
+	test("keeps repeated tool ids distinct by turn during resume and live updates", () => {
+		const first = command("call-patch", "first");
+		const second = command("call-patch", "second");
+		const resumed = transcriptForThread(
+			thread([
+				{ id: "turn-1", status: "completed", items: [first], error: null },
+				{ id: "turn-2", status: "inProgress", items: [second], error: null },
+			]),
+		);
+		expect(resumed.items.map((item) => item.turnId)).toEqual([
+			"turn-1",
+			"turn-2",
+		]);
+		const streamed = reduceNotification(resumed, {
+			type: "delta",
+			channel: "command",
+			threadId: "thread-1",
+			turnId: "turn-2",
+			itemId: "call-patch",
+			delta: " output",
+		});
+		expect(streamed.items).toEqual([
+			{ ...first, turnId: "turn-1" },
+			{ ...second, turnId: "turn-2", output: "second output" },
+		]);
+		const completed = {
+			...second,
+			status: "completed",
+			output: "final",
+		};
+		const notification: AppNotification = {
+			type: "itemCompleted",
+			threadId: "thread-1",
+			turnId: "turn-2",
+			item: completed,
+		};
+		const done = reduceNotification(
+			reduceNotification(streamed, notification),
+			notification,
+		);
+		expect(done.items).toEqual([
+			{ ...first, turnId: "turn-1" },
+			{ ...completed, turnId: "turn-2" },
+		]);
+		const next = reduceNotification(done, {
+			type: "itemStarted",
+			threadId: "thread-1",
+			turnId: "turn-3",
+			item: command("call-patch", ""),
+		});
+		expect(next.items).toHaveLength(3);
+		expect(next.items[0]).toEqual(done.items[0]);
+		expect(next.items[1]).toEqual(done.items[1]);
+		expect(next.items[2]?.turnId).toBe("turn-3");
+		const change: TranscriptItem = {
+			id: "call-patch",
+			kind: "fileChange",
+			changes: [],
+			status: "completed",
+			review: null,
+		};
+		const history = transcriptForThread(
+			thread([
+				{ id: "turn-1", status: "completed", items: [change], error: null },
+				{ id: "turn-2", status: "completed", items: [change], error: null },
+			]),
+		);
+		const review = {
+			verdict: "flagged" as const,
+			summary: "Flagged: removed code",
+		};
+		const judged = reduceNotification(history, {
+			type: "toolJudged",
+			threadId: "thread-1",
+			turnId: "turn-2",
+			itemId: "call-patch",
+			review,
+		});
+		expect(judged.items).toEqual([
+			{ ...change, turnId: "turn-1" },
+			{ ...change, turnId: "turn-2", review },
+		]);
+		const older = reduceNotification(judged, {
+			type: "toolJudged",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			itemId: "call-patch",
+			review,
+		});
+		expect(older.items[0]).toEqual({ ...change, turnId: "turn-1", review });
+		expect(older.items[1]).toBe(judged.items[1]);
+	});
+
 	test("concatenates deltas onto the matching item without mutating the previous list", () => {
 		const start = emptyTranscript("thread-1");
 		const seeded = reduceNotification(start, {
@@ -111,6 +205,33 @@ describe("transcript reducer", () => {
 		expect(started.turnStatus).toBe("inProgress");
 	});
 
+	test("keeps the start of the open turn for the live counter", () => {
+		const started = reduceNotification(emptyTranscript("thread-1"), {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn: {
+				id: "turn-1",
+				status: "inProgress",
+				items: [],
+				error: null,
+				startedAtMs: 5000,
+			},
+		});
+		expect(started.turnStartedAtMs).toBe(5000);
+		const completed = reduceNotification(started, {
+			type: "turnCompleted",
+			threadId: "thread-1",
+			turn: {
+				id: "turn-1",
+				status: "completed",
+				items: [],
+				error: null,
+				startedAtMs: 5000,
+			},
+		});
+		expect(completed.turnStartedAtMs).toBe(5000);
+	});
+
 	test("hydrates turns in order and keeps the last turn status", () => {
 		const state = transcriptForThread(
 			thread([
@@ -159,11 +280,13 @@ describe("transcript reducer", () => {
 		expect(next.items).toEqual([
 			{
 				id: "cmd-1",
+				turnId: "turn-1",
 				kind: "commandExecution",
 				command: "",
 				output: "hi",
 				status: "inProgress",
 				exitCode: null,
+				durationMs: null,
 			},
 		]);
 		const grown = reduceNotification(next, {
@@ -186,16 +309,19 @@ describe("transcript reducer", () => {
 				output: "",
 				status: "inProgress",
 				exitCode: null,
+				durationMs: null,
 			},
 		});
 		expect(started.items).toEqual([
 			{
 				id: "cmd-1",
+				turnId: "turn-1",
 				kind: "commandExecution",
 				command: "pwd",
 				output: "hi!",
 				status: "inProgress",
 				exitCode: null,
+				durationMs: null,
 			},
 		]);
 	});
@@ -251,7 +377,7 @@ describe("approval tracking", () => {
 	};
 
 	function statusLabel(
-		approvals: readonly ApprovalRequest[],
+		approvals: readonly ServerRequest[],
 		itemId: string,
 	): string {
 		return itemStatusLabel(
@@ -264,15 +390,15 @@ describe("approval tracking", () => {
 	}
 
 	test("labels the requested item as waiting until the request resolves", () => {
-		const pending = trackApprovalRequest([], request);
-		expect(statusLabel(pending, "cmd-1")).toBe("Waiting for approval");
-		expect(statusLabel(pending, "cmd-2")).toBe("Running");
-		const resolved = resolveApprovalRequest(pending, request.id);
-		expect(statusLabel(resolved, "cmd-1")).toBe("Running");
+		const pending = trackRequest([], request);
+		expect(statusLabel(pending, "cmd-1")).toBe("Waiting");
+		expect(statusLabel(pending, "cmd-2")).toBe("Working");
+		const resolved = resolveRequest(pending, request.id);
+		expect(statusLabel(resolved, "cmd-1")).toBe("Working");
 	});
 
 	test("keeps finished items and other threads on their own status", () => {
-		const pending = trackApprovalRequest([], {
+		const pending = trackRequest([], {
 			...request,
 			method: "item/fileChange/requestApproval",
 		});
@@ -298,18 +424,22 @@ describe("active approval filtering", () => {
 	const other: ApprovalRequest = { ...first, id: 8, threadId: "thread-2" };
 
 	test("shows the approval that belongs to the active thread", () => {
-		expect(activeApproval([other, first], "thread-1", [])).toBe(first);
-		expect(activeApproval([other, first], "thread-2", [])).toBe(other);
+		expect(activeRequest([other, first], "thread-1", [])).toBe(first);
+		expect(activeRequest([other, first], "thread-2", [])).toBe(other);
+	});
+
+	test("a re-delivered request keeps its place in the queue", () => {
+		const younger: ApprovalRequest = { ...first, id: 9, itemId: "cmd-2" };
+		const redelivered: ApprovalRequest = { ...first, detail: "ls -la" };
+		const queue = trackRequest(trackRequest([], first), younger);
+		const again = trackRequest(queue, redelivered);
+		expect(again).toStrictEqual([redelivered, younger]);
+		expect(activeRequest(again, "thread-1", [])).toBe(redelivered);
 	});
 
 	test("shows nothing when no approval belongs to the active thread", () => {
-		expect(activeApproval([other], "thread-1", [])).toBeNull();
-		expect(activeApproval([other], null, [])).toBeNull();
-	});
-
-	test("counts approvals waiting on other threads", () => {
-		expect(otherThreadApprovalCount([first, other], "thread-1", [])).toBe(1);
-		expect(otherThreadApprovalCount([first, other], "thread-3", [])).toBe(2);
+		expect(activeRequest([other], "thread-1", [])).toBeNull();
+		expect(activeRequest([other], null, [])).toBeNull();
 	});
 });
 
@@ -378,26 +508,10 @@ describe("labels", () => {
 	});
 
 	test("names statuses and item kinds in plain words", () => {
-		expect(itemStatusLabel("inProgress")).toBe("Running");
+		expect(itemStatusLabel("inProgress")).toBe("Working");
 		expect(itemStatusLabel("custom")).toBe("custom");
 		expect(kindLabel("webSearch")).toBe("Web search");
 		expect(kindLabel("imageGeneration")).toBe("Image generation");
-	});
-});
-
-describe("followup queue snapshot", () => {
-	test("commits only when the sent item is still at the head", () => {
-		expect(isSentFollowupAtHead(["first", "second"], "first")).toBe(true);
-		expect(isSentFollowupAtHead(["other"], "first")).toBe(false);
-		expect(isSentFollowupAtHead([], "first")).toBe(false);
-	});
-
-	test("requeues a failed direct send", () => {
-		expect(requeueFailedFollowup(["queued"], "failed")).toEqual([
-			"queued",
-			"failed",
-		]);
-		expect(requeueFailedFollowup([], "failed")).toEqual(["failed"]);
 	});
 });
 
@@ -585,5 +699,143 @@ describe("open thread notification", () => {
 		expect(update.knownChildren).toEqual({ "thread-2": ["child-9"] });
 		expect(update.transcript).toBe(transcript);
 		expect(update.sendFollowup).toBe(false);
+	});
+});
+
+describe("thread status order", () => {
+	test("ignores a status with a lower seq than one already applied", () => {
+		expect(acceptThreadStatus({ "thread-1": 5 }, "thread-1", 3)).toBeNull();
+	});
+
+	test("applies a status without seq", () => {
+		expect(acceptThreadStatus({ "thread-1": 5 }, "thread-1", 0)).toEqual({
+			"thread-1": 5,
+		});
+	});
+
+	test("keeps one seq per thread", () => {
+		expect(acceptThreadStatus({ "thread-1": 5 }, "thread-2", 2)).toEqual({
+			"thread-1": 5,
+			"thread-2": 2,
+		});
+	});
+});
+
+describe("edit review", () => {
+	const review = {
+		verdict: "flagged" as const,
+		summary: "Flagged: removed code",
+	};
+	const turn = {
+		id: "turn-1",
+		status: "inProgress" as const,
+		items: [],
+		error: null,
+	};
+	const change: TranscriptItem = {
+		id: "call-7",
+		turnId: "turn-1",
+		kind: "fileChange",
+		changes: [],
+		status: "completed",
+		review: null,
+	};
+
+	function openWithChange() {
+		const started = reduceNotification(emptyTranscript("thread-1"), {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn,
+		});
+		return reduceNotification(started, {
+			type: "itemCompleted",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			item: change,
+		});
+	}
+
+	test("toolJudged sets the review on its file change and ignores other threads", () => {
+		const state = openWithChange();
+		const judged = reduceNotification(state, {
+			type: "toolJudged",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			itemId: "call-7",
+			review,
+		});
+		expect(judged.items).toEqual([{ ...change, review }]);
+		expect(
+			reduceNotification(state, {
+				type: "toolJudged",
+				threadId: "thread-2",
+				turnId: "turn-1",
+				itemId: "call-7",
+				review,
+			}),
+		).toBe(state);
+		expect(
+			reduceNotification(state, {
+				type: "toolJudged",
+				threadId: "thread-1",
+				turnId: "turn-1",
+				itemId: "call-9",
+				review,
+			}),
+		).toBe(state);
+	});
+
+	test("turnJudged sets turnReview for the open turn only", () => {
+		const state = openWithChange();
+		const turnReview = {
+			verdict: "uncertain" as const,
+			summary: "Uncertain: incomplete",
+		};
+		const judged = reduceNotification(state, {
+			type: "turnJudged",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			review: turnReview,
+		});
+		expect(judged.turnReview).toEqual(turnReview);
+		expect(
+			reduceNotification(state, {
+				type: "turnJudged",
+				threadId: "thread-1",
+				turnId: "turn-9",
+				review: turnReview,
+			}),
+		).toBe(state);
+		expect(
+			reduceNotification(state, {
+				type: "turnJudged",
+				threadId: "thread-2",
+				turnId: "turn-1",
+				review: turnReview,
+			}),
+		).toBe(state);
+	});
+
+	test("turnStarted of a new turn clears turnReview", () => {
+		const judged = reduceNotification(openWithChange(), {
+			type: "turnJudged",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			review,
+		});
+		expect(
+			reduceNotification(judged, {
+				type: "turnStarted",
+				threadId: "thread-1",
+				turn,
+			}).turnReview,
+		).toEqual(review);
+		expect(
+			reduceNotification(judged, {
+				type: "turnStarted",
+				threadId: "thread-1",
+				turn: { ...turn, id: "turn-2" },
+			}).turnReview,
+		).toBeNull();
 	});
 });

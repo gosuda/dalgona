@@ -114,6 +114,13 @@ func (w *worker) request(ctx context.Context, v view, messages []model.Message) 
 		return model.Request{}, err
 	}
 	caps := w.t.host.capabilities(ctx, w.registry, w.settings.Model)
+	w.contextWindow = caps.Context
+	if !caps.Images {
+		if turnHasImages(v, w.turnID) {
+			return model.Request{}, errors.New("this model does not accept images")
+		}
+		messages = withoutImages(messages)
+	}
 	return model.Request{
 		Model: modelID, System: w.t.system, Messages: messages, Tools: w.tools.specs,
 		Reasoning: model.ClampEffort(w.effort(v), caps.Efforts),
@@ -121,7 +128,7 @@ func (w *worker) request(ctx context.Context, v view, messages []model.Message) 
 }
 
 func (w *worker) effort(v view) string {
-	configured := cmp.Or(string(w.settings.Effort), string(w.t.host.cfg.Config.Reasoning))
+	configured := cmp.Or(string(w.settings.Effort), string(w.t.host.Config().Reasoning))
 	if configured == string(config.ReasoningDefault) {
 		configured = ""
 	}
@@ -195,9 +202,13 @@ func (w *worker) apply(result *reply, next model.Event) error {
 		result.reasoning.WriteString(value.Text)
 		w.t.publish(Update{Kind: UpdateReasoningDelta, ItemID: result.itemID, Delta: value.Text})
 	case model.ToolCall:
+		args, err := eventArgs(value)
+		if err != nil {
+			return err
+		}
 		result.calls = append(result.calls, event.ToolCall{
-			ID: cmp.Or(value.ID, newID("call-")), Name: value.Name, Args: value.Args, Freeform: value.Freeform, Resolved: value.Resolved,
-			Signature: value.Signature,
+			ID: cmp.Or(value.ID, newID("call-")), Name: value.Name, Args: args, Freeform: value.Freeform, Resolved: value.Resolved,
+			Signature: value.Signature, RedactedThinking: value.RedactedThinking,
 		})
 	case model.Usage:
 		result.usage = value
@@ -237,7 +248,7 @@ func (w *worker) journalAssistant(ctx context.Context, result *reply) error {
 	}
 	message := event.AssistantMessage{
 		ItemID: result.itemID, TurnID: w.turnID, Text: text, TextBlob: textBlob, Reasoning: reasoning, ReasoningBlob: reasoningBlob,
-		ToolCalls: calls, StopReason: cmp.Or(result.stop, stop), ContextSeq: result.contextSeq,
+		ToolCalls: calls, StopReason: cmp.Or(result.stop, stop), ContextSeq: result.contextSeq, ContextWindow: w.contextWindow,
 		Usage: event.Usage{Input: result.usage.Input, Output: result.usage.Output, CacheRead: result.usage.CacheRead, CacheWrite: result.usage.CacheWrite},
 	}
 	_, err = w.t.appendEvents(ctx, message)
@@ -265,10 +276,15 @@ func (h *Host) capabilities(ctx context.Context, registry *model.Registry, id st
 	}
 	preset, _ := model.Capabilities(provider, modelID)
 	reported := model.Model{ID: modelID, Context: preset.Context}
+	listed := false
 	for _, item := range h.providerModels(ctx, registry, provider) {
 		if item.ID == modelID || item.ID == id {
 			reported = item
+			listed = true
 		}
+	}
+	if !listed {
+		reported.Images = sendsImages(registry, provider)
 	}
 	if len(reported.Efforts) == 0 {
 		reported.Efforts = preset.Efforts
@@ -337,8 +353,9 @@ func (h *Host) cacheModels(provider string, models []model.Model, expires time.T
 }
 
 func (h *Host) contextOverrides() map[string]int {
-	overrides := make(map[string]int, len(h.cfg.Config.Models))
-	for id, spec := range h.cfg.Config.Models {
+	models := h.Config().Models
+	overrides := make(map[string]int, len(models))
+	for id, spec := range models {
 		overrides[id] = spec.ContextWindow
 	}
 	return overrides
@@ -347,9 +364,9 @@ func (h *Host) contextOverrides() map[string]int {
 func (h *Host) ResolveRole(ctx context.Context, role, threadModel string) (string, error) {
 	switch role {
 	case "smol":
-		role = cmp.Or(h.cfg.Config.Roles.Smol, role)
+		role = cmp.Or(h.Config().Roles.Smol, role)
 	case "slow":
-		role = cmp.Or(h.cfg.Config.Roles.Slow, role)
+		role = cmp.Or(h.Config().Roles.Slow, role)
 	}
 	provider, _, err := model.ParseModelID(threadModel)
 	if err != nil {

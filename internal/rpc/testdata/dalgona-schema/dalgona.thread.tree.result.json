@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/thread/tree result",
+  "type": "object",
+  "required": ["turns"],
+  "properties": {
+    "turns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["turnId", "parentTurnId", "preview", "active"],
+        "properties": {
+          "turnId": {"type": "string"},
+          "parentTurnId": {"type": ["string", "null"]},
+          "preview": {"type": "string"},
+          "active": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

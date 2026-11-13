@@ -1,7 +1,9 @@
 import type {
 	AppNotification,
-	ApprovalRequest,
+	EditReview,
+	FileChange,
 	RequestId,
+	ServerRequest,
 	ThreadDetail,
 	TranscriptItem,
 	TranscriptState,
@@ -31,6 +33,8 @@ export function emptyTranscript(threadId: string | null): TranscriptState {
 		error: null,
 		plan: null,
 		childThreadIds: [],
+		turnStartedAtMs: null,
+		turnReview: null,
 	};
 }
 
@@ -42,12 +46,14 @@ export function transcriptForThread(
 	let turnId: string | null = null;
 	let turnStatus: TurnStatus | null = null;
 	let error: string | null = null;
+	let turnStartedAtMs: number | null = null;
 	for (const turn of thread.turns) {
 		turnId = turn.id;
 		turnStatus = turn.status;
+		turnStartedAtMs = turn.startedAtMs ?? null;
 		error = turn.error;
 		for (const item of turn.items) {
-			items.push(item);
+			items.push(placedItem(item, turn.id));
 		}
 	}
 	const preserved: readonly string[] = knownChildren[thread.summary.id] ?? [];
@@ -59,7 +65,13 @@ export function transcriptForThread(
 		error,
 		plan: null,
 		childThreadIds: [...preserved],
+		turnStartedAtMs,
+		turnReview: null,
 	};
+}
+
+function placedItem(item: TranscriptItem, turnId: string): TranscriptItem {
+	return { ...item, turnId };
 }
 
 function sameThread(state: TranscriptState, threadId: string): boolean {
@@ -98,7 +110,9 @@ function appendItem(
 	items: readonly TranscriptItem[],
 	item: TranscriptItem,
 ): TranscriptItem[] {
-	const index = items.findIndex((entry) => entry.id === item.id);
+	const index = items.findIndex(
+		(entry) => entry.id === item.id && entry.turnId === item.turnId,
+	);
 	if (index < 0) return [...items, item];
 	const next = items.slice();
 	const existing = next[index];
@@ -111,7 +125,9 @@ function replaceItem(
 	items: readonly TranscriptItem[],
 	item: TranscriptItem,
 ): TranscriptItem[] {
-	const index = items.findIndex((entry) => entry.id === item.id);
+	const index = items.findIndex(
+		(entry) => entry.id === item.id && entry.turnId === item.turnId,
+	);
 	if (index < 0) {
 		return [...items, item];
 	}
@@ -146,6 +162,7 @@ function placeholder(
 		return {
 			id: itemId,
 			kind: "commandExecution",
+			durationMs: null,
 			command: "",
 			output: delta,
 			status: "inProgress",
@@ -163,15 +180,19 @@ function applyDelta(
 	notification: Extract<AppNotification, { type: "delta" }>,
 ): TranscriptState {
 	const index = state.items.findIndex(
-		(entry) => entry.id === notification.itemId,
+		(entry) =>
+			entry.id === notification.itemId && entry.turnId === notification.turnId,
 	);
 	if (index < 0) {
 		return withItems(state, [
 			...state.items,
-			placeholder(
-				notification.channel,
-				notification.itemId,
-				notification.delta,
+			placedItem(
+				placeholder(
+					notification.channel,
+					notification.itemId,
+					notification.delta,
+				),
+				notification.turnId,
 			),
 		]);
 	}
@@ -181,6 +202,27 @@ function applyDelta(
 	}
 	const next = state.items.slice();
 	next[index] = appendDelta(current, notification.channel, notification.delta);
+	return withItems(state, next);
+}
+
+function withToolReview(
+	state: TranscriptState,
+	itemId: string,
+	turnId: string,
+	review: EditReview,
+): TranscriptState {
+	const index = state.items.findIndex(
+		(entry) =>
+			entry.id === itemId &&
+			entry.turnId === turnId &&
+			entry.kind === "fileChange",
+	);
+	const current = state.items[index];
+	if (current?.kind !== "fileChange") {
+		return state;
+	}
+	const next = state.items.slice();
+	next[index] = { ...current, review };
 	return withItems(state, next);
 }
 
@@ -243,6 +285,13 @@ export function reduceNotification(
 				turnStatus: notification.turn.status,
 				error: notification.turn.error,
 				plan: state.plan?.turnId === notification.turn.id ? state.plan : null,
+				turnStartedAtMs:
+					notification.turn.startedAtMs ??
+					(state.turnId === notification.turn.id
+						? state.turnStartedAtMs
+						: null),
+				turnReview:
+					state.turnId === notification.turn.id ? state.turnReview : null,
 			};
 		}
 		case "turnCompleted": {
@@ -255,6 +304,7 @@ export function reduceNotification(
 				turnStatus: notification.turn.status,
 				error: notification.turn.error,
 				plan: state.plan?.turnId === notification.turn.id ? state.plan : null,
+				turnStartedAtMs: notification.turn.startedAtMs ?? state.turnStartedAtMs,
 			};
 		}
 		case "itemStarted": {
@@ -262,7 +312,13 @@ export function reduceNotification(
 				return state;
 			}
 			return {
-				...withItems(state, appendItem(state.items, notification.item)),
+				...withItems(
+					state,
+					appendItem(
+						state.items,
+						placedItem(notification.item, notification.turnId),
+					),
+				),
 				turnId: notification.turnId,
 			};
 		}
@@ -271,7 +327,13 @@ export function reduceNotification(
 				return state;
 			}
 			return {
-				...withItems(state, replaceItem(state.items, notification.item)),
+				...withItems(
+					state,
+					replaceItem(
+						state.items,
+						placedItem(notification.item, notification.turnId),
+					),
+				),
 				turnId: notification.turnId,
 			};
 		}
@@ -294,6 +356,26 @@ export function reduceNotification(
 				turnStatus: notification.willRetry ? state.turnStatus : "failed",
 				error: notification.message,
 			};
+		}
+		case "toolJudged": {
+			if (!sameThread(state, notification.threadId)) {
+				return state;
+			}
+			return withToolReview(
+				state,
+				notification.itemId,
+				notification.turnId,
+				notification.review,
+			);
+		}
+		case "turnJudged": {
+			if (
+				!sameThread(state, notification.threadId) ||
+				notification.turnId !== state.turnId
+			) {
+				return state;
+			}
+			return { ...state, turnReview: notification.review };
 		}
 		default:
 			return state;
@@ -332,21 +414,85 @@ export function applyOpenThreadNotification(
 	return { transcript, knownChildren, sendFollowup };
 }
 
-export function trackApprovalRequest(
-	approvals: readonly ApprovalRequest[],
-	request: ApprovalRequest,
-): readonly ApprovalRequest[] {
-	return [...approvals.filter((entry) => entry.id !== request.id), request];
+export function trackRequest(
+	requests: readonly ServerRequest[],
+	request: ServerRequest,
+): readonly ServerRequest[] {
+	if (!requests.some((entry) => entry.id === request.id)) {
+		return [...requests, request];
+	}
+	return requests.map((entry) => (entry.id === request.id ? request : entry));
 }
 
-export function resolveApprovalRequest(
-	approvals: readonly ApprovalRequest[],
+export function resolveRequest(
+	requests: readonly ServerRequest[],
 	requestId: RequestId,
-): readonly ApprovalRequest[] {
-	return approvals.filter((entry) => entry.id !== requestId);
+): readonly ServerRequest[] {
+	return requests.filter((entry) => entry.id !== requestId);
 }
 
-function isOpenApproval(
+export type PatchChanges = Readonly<
+	Record<string, Readonly<Record<string, readonly FileChange[]>>>
+>;
+
+export function recordPatchChanges(
+	patches: PatchChanges,
+	threadId: string,
+	itemId: string,
+	changes: readonly FileChange[],
+): PatchChanges {
+	return {
+		...patches,
+		[threadId]: { ...patches[threadId], [itemId]: changes },
+	};
+}
+
+export function patchChangesFor(
+	patches: PatchChanges,
+	threadId: string,
+	itemId: string,
+): readonly FileChange[] | null {
+	if (!Object.hasOwn(patches, threadId)) return null;
+	const byItem = patches[threadId];
+	if (byItem === undefined || !Object.hasOwn(byItem, itemId)) return null;
+	return byItem[itemId] ?? null;
+}
+
+export function forgetPatchChanges(
+	patches: PatchChanges,
+	request: ServerRequest,
+): PatchChanges {
+	if (patchChangesFor(patches, request.threadId, request.itemId) === null) {
+		return patches;
+	}
+	const byItem: Readonly<Record<string, readonly FileChange[]>> =
+		patches[request.threadId] ?? {};
+	const kept = Object.fromEntries(
+		Object.entries(byItem).filter(([itemId]) => itemId !== request.itemId),
+	);
+	return { ...patches, [request.threadId]: kept };
+}
+
+export function keepPendingPatchChanges(
+	patches: PatchChanges,
+	requests: readonly ServerRequest[],
+): PatchChanges {
+	let kept: PatchChanges = {};
+	for (const request of requests) {
+		const changes = patchChangesFor(patches, request.threadId, request.itemId);
+		if (changes !== null) {
+			kept = recordPatchChanges(
+				kept,
+				request.threadId,
+				request.itemId,
+				changes,
+			);
+		}
+	}
+	return kept;
+}
+
+function isOpenRequest(
 	threadId: string | null,
 	childThreadIds: readonly string[],
 	entryThreadId: string,
@@ -357,26 +503,26 @@ function isOpenApproval(
 	);
 }
 
-export function activeApproval(
-	approvals: readonly ApprovalRequest[],
+export function activeRequest(
+	requests: readonly ServerRequest[],
 	threadId: string | null,
 	childThreadIds: readonly string[],
-): ApprovalRequest | null {
+): ServerRequest | null {
 	return (
-		approvals.find((entry) =>
-			isOpenApproval(threadId, childThreadIds, entry.threadId),
+		requests.find((entry) =>
+			isOpenRequest(threadId, childThreadIds, entry.threadId),
 		) ?? null
 	);
 }
 
-export function otherThreadApprovalCount(
-	approvals: readonly ApprovalRequest[],
+export function requestsElsewhere(
+	requests: readonly ServerRequest[],
 	threadId: string | null,
 	childThreadIds: readonly string[],
-): number {
-	return approvals.filter(
-		(entry) => !isOpenApproval(threadId, childThreadIds, entry.threadId),
-	).length;
+): readonly ServerRequest[] {
+	return requests.filter(
+		(entry) => !isOpenRequest(threadId, childThreadIds, entry.threadId),
+	);
 }
 
 export function dropSentFollowup(queue: readonly string[]): readonly string[] {
@@ -400,14 +546,14 @@ export function shouldAutoScrollForUpdate(
 }
 
 export function itemsAwaitingApproval(
-	approvals: readonly ApprovalRequest[],
+	requests: readonly ServerRequest[],
 	threadId: string | null,
 	childThreadIds: readonly string[],
 ): ReadonlySet<string> {
 	return new Set(
-		approvals
+		requests
 			.filter((entry) =>
-				isOpenApproval(threadId, childThreadIds, entry.threadId),
+				isOpenRequest(threadId, childThreadIds, entry.threadId),
 			)
 			.map((entry) => entry.itemId),
 	);
@@ -423,16 +569,36 @@ export function itemDisplayStatus(
 		: status;
 }
 
-export function isSentFollowupAtHead(
-	queue: readonly string[],
-	sent: string,
-): boolean {
-	return queue[0] === sent;
+export function acceptThreadStatus(
+	applied: Readonly<Record<string, number>>,
+	threadId: string,
+	seq: number,
+): Readonly<Record<string, number>> | null {
+	const previous = applied[threadId] ?? 0;
+	if (seq > 0 && seq < previous) {
+		return null;
+	}
+	return { ...applied, [threadId]: Math.max(seq, previous) };
 }
 
-export function requeueFailedFollowup(
-	queue: readonly string[],
-	text: string,
-): readonly string[] {
-	return [...queue, text];
+export function recordThreadTurn(
+	completed: ReadonlySet<string>,
+	threadId: string,
+	status: TurnStatus | null,
+): ReadonlySet<string> {
+	const done = status === "completed";
+	if (completed.has(threadId) === done) {
+		return completed;
+	}
+	const next = new Set(completed);
+	if (done) {
+		next.add(threadId);
+	} else {
+		next.delete(threadId);
+	}
+	return next;
+}
+
+export function lastTurnStatus(thread: ThreadDetail): TurnStatus | null {
+	return thread.turns[thread.turns.length - 1]?.status ?? null;
 }

@@ -81,13 +81,7 @@ func assertFixtureUsage(t *testing.T, summary streamSummary) {
 
 func TestRequestBody(t *testing.T) {
 	t.Parallel()
-	var body []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write(successFixture())
-	}))
-	t.Cleanup(server.Close)
+	server, requestBody := requestBodyServer(t)
 	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
 	request := model.Request{
 		Model:  "gpt-test",
@@ -114,7 +108,11 @@ func TestRequestBody(t *testing.T) {
 		Reasoning: "high",
 	}
 	_ = drainStream(t, provider, request)
-	assertRequestBody(t, body)
+	captured := requestBody()
+	if captured.err != nil {
+		t.Fatalf("read request body: %v", captured.err)
+	}
+	assertRequestBody(t, captured.body)
 }
 
 func TestBaseURLFromEnvironment(t *testing.T) {
@@ -169,6 +167,54 @@ func TestRetryInBandRateLimit(t *testing.T) {
 	_ = drainStream(t, provider, model.Request{Model: "gpt-test"})
 	if retries != 1 {
 		t.Fatalf("retries = %d, want 1", retries)
+	}
+}
+
+func TestRetryAfterOverLimitStopsTheRequest(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(server.Close)
+	var retries int
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry(func(int, model.Verdict, int, time.Duration) { retries++ })})
+	stream, err := provider.Stream(t.Context(), model.Request{Model: "gpt-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure, ok := lastEvent(t, stream).(model.Error)
+	if !ok {
+		t.Fatal("last event is not model.Error")
+	}
+	if failure.Message != "rate limited for 120 s, over the 60 s wait limit" || failure.Status != http.StatusTooManyRequests || retries != 0 || requests.Load() != 1 {
+		t.Fatalf("message = %q, status = %d, retries = %d, requests = %d", failure.Message, failure.Status, retries, requests.Load())
+	}
+}
+
+func TestQuotaRateLimitDoesNotRetry(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"You exceeded your current quota","type":"insufficient_quota","code":"insufficient_quota"}}`))
+	}))
+	t.Cleanup(server.Close)
+	var retries int
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry(func(int, model.Verdict, int, time.Duration) { retries++ })})
+	stream, err := provider.Stream(t.Context(), model.Request{Model: "gpt-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure, ok := lastEvent(t, stream).(model.Error)
+	if !ok {
+		t.Fatal("last event is not model.Error")
+	}
+	if failure.Status != http.StatusTooManyRequests || retries != 0 || requests.Load() != 1 {
+		t.Fatalf("status = %d, retries = %d, requests = %d; want 429, 0, 1", failure.Status, retries, requests.Load())
 	}
 }
 
@@ -318,7 +364,7 @@ func TestModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []model.Model{{ID: "known", Context: 64000, ToolChoice: true}, {ID: "other", Context: 128000, ToolChoice: true}}
+	want := []model.Model{{ID: "known", Context: 64000, ToolChoice: true, Images: true}, {ID: "other", Context: 128000, ToolChoice: true, Images: true}}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("models = %+v, want %+v", models, want)
 	}
@@ -446,5 +492,83 @@ func assertRequestReasoning(t *testing.T, body []byte, effort, summary string) {
 	t.Helper()
 	if effort != "high" || summary != "auto" || !bytes.Contains(body, []byte(`"include":["reasoning.encrypted_content"]`)) {
 		t.Fatalf("reasoning effort = %q, summary = %q", effort, summary)
+	}
+}
+
+func TestEncodeRequestSendsInputImage(t *testing.T) {
+	t.Parallel()
+	input := userInput(t, model.Message{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
+	if len(input) != 1 {
+		t.Fatalf("input = %d items, want 1: %s", len(input), input)
+	}
+	sameJSON(t, input[0], `{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"auto"},{"type":"input_text","text":"What is this?"}]}`)
+}
+
+func TestEncodeRequestOmitsEmptyTextWithImage(t *testing.T) {
+	t.Parallel()
+	input := userInput(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
+	if len(input) != 1 {
+		t.Fatalf("input = %d items, want 1: %s", len(input), input)
+	}
+	sameJSON(t, input[0], `{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"auto"}]}`)
+}
+
+func TestEncodeRequestKeepsImagesWithToolResults(t *testing.T) {
+	t.Parallel()
+	input := userInput(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}, ToolResults: []model.ToolResult{{ID: "call-1", Output: jsontext.Value(`"done"`)}}})
+	if len(input) != 2 {
+		t.Fatalf("input = %d items, want 2: %s", len(input), input)
+	}
+	sameJSON(t, input[0], `{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"auto"}]}`)
+	sameJSON(t, input[1], `{"type":"function_call_output","call_id":"call-1","output":"done"}`)
+}
+
+type requestBodyResult struct {
+	body []byte
+	err  error
+}
+
+func requestBodyServer(t *testing.T) (*httptest.Server, func() requestBodyResult) {
+	t.Helper()
+	results := make(chan requestBodyResult, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		results <- requestBodyResult{body: body, err: err}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(successFixture())
+	}))
+	t.Cleanup(server.Close)
+	return server, func() requestBodyResult { return <-results }
+}
+
+func userInput(t *testing.T, message model.Message) []jsontext.Value {
+	t.Helper()
+	server, requestBody := requestBodyServer(t)
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
+	_ = drainStream(t, provider, model.Request{Model: "gpt-test", Messages: []model.Message{message}})
+	captured := requestBody()
+	if captured.err != nil {
+		t.Fatalf("read request body: %v", captured.err)
+	}
+	var value struct {
+		Input []jsontext.Value `json:"input"`
+	}
+	if err := json.Unmarshal(captured.body, &value); err != nil {
+		t.Fatalf("request JSON: %v\n%s", err, captured.body)
+	}
+	return value.Input
+}
+
+func sameJSON(t *testing.T, got jsontext.Value, want string) {
+	t.Helper()
+	var g, w any
+	if err := json.Unmarshal(got, &g); err != nil {
+		t.Fatalf("item %s: %v", got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &w); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(g, w) {
+		t.Fatalf("item = %s, want %s", got, want)
 	}
 }

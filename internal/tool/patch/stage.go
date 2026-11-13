@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -40,8 +41,9 @@ type stagedFile struct {
 }
 
 type stagedBatch struct {
-	style Style
-	files []*stagedFile
+	style   Style
+	files   []*stagedFile
+	summary string
 }
 
 type fileGroup struct {
@@ -60,6 +62,10 @@ func stage(ctx context.Context, style Style, edits []edit, env tool.Env) (staged
 	}
 	files, err := stageGroups(ctx, style, groups, env)
 	if err != nil {
+		return stagedBatch{}, err
+	}
+	if err := checkOmissions(files); err != nil {
+		closeFiles(files)
 		return stagedBatch{}, err
 	}
 	if len(files) == 0 && !style.profile() {
@@ -85,10 +91,10 @@ func stageGroups(ctx context.Context, style Style, groups []fileGroup, env tool.
 			continue
 		}
 		stagedBytes += len(file.before) + len(file.after)
-		if stagedBytes > 64<<20 {
+		if err = checkStagedBytes(stagedBytes); err != nil {
 			file.closePins()
 			closeFiles(files)
-			return nil, errors.New("patch: this call stages over 64 MiB; split it into several calls")
+			return nil, err
 		}
 		if file.pin, err = pinVerifiedComponents(env, group.display, group.absolute); err != nil {
 			file.closePins()
@@ -98,6 +104,13 @@ func stageGroups(ctx context.Context, style Style, groups []fileGroup, env tool.
 		files = append(files, file)
 	}
 	return files, nil
+}
+
+func checkStagedBytes(total int) error {
+	if total > 64<<20 {
+		return errors.New("patch: this call stages over 64 MiB; split it into several calls")
+	}
+	return nil
 }
 
 func groupEdits(ctx context.Context, env tool.Env, edits []edit) ([]fileGroup, error) {
@@ -181,7 +194,7 @@ func resolvePatchPath(cwd, raw string) (string, string, error) {
 	if raw == "" {
 		return "", "", errors.New("patch: path must not be empty")
 	}
-	if filepath.IsAbs(raw) || strings.IndexByte(raw, 0) >= 0 {
+	if rootedOrVolume.MatchString(raw) || strings.IndexByte(raw, 0) >= 0 {
 		return "", "", fmt.Errorf("patch: %s is outside the workspace %s", raw, cwd)
 	}
 	clean := filepath.Clean(raw)
@@ -190,6 +203,8 @@ func resolvePatchPath(cwd, raw string) (string, string, error) {
 	}
 	return filepath.ToSlash(clean), filepath.Join(cwd, clean), nil
 }
+
+var rootedOrVolume = regexp.MustCompile(`^(?:[A-Za-z]:|[/\\])`)
 
 func stageFile(ctx context.Context, style Style, group fileGroup, env tool.Env) (*stagedFile, error) {
 	if len(group.edits) == 1 && group.edits[0].kind == editCreate {
@@ -355,13 +370,17 @@ func (b stagedBatch) changes() []tool.FileChange {
 	var out []tool.FileChange
 	for _, file := range b.files {
 		postPresent := !file.deleted && file.renameTo == ""
+		var post []byte
+		if postPresent {
+			post = file.after
+		}
 		out = append(out, tool.FileChange{
 			Path: file.path, PreSHA: fileSHA(file.before, file.exists),
-			PostSHA: fileSHA(file.after, postPresent), Pre: file.before,
+			PostSHA: fileSHA(file.after, postPresent), Pre: file.before, Post: post,
 		})
 		if file.renameTo != "" {
 			out = append(out, tool.FileChange{
-				Path: file.renameTo, PostSHA: snapshot.Digest(file.after),
+				Path: file.renameTo, PostSHA: snapshot.Digest(file.after), Post: file.after,
 			})
 		}
 	}

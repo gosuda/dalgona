@@ -22,6 +22,7 @@ import (
 	"github.com/gosuda/dalgona/internal/tool/exec"
 	"github.com/gosuda/dalgona/internal/tool/patch"
 	"github.com/gosuda/dalgona/internal/tool/read"
+	"github.com/gosuda/dalgona/internal/tool/rewrite"
 	"github.com/gosuda/dalgona/internal/tool/search"
 	"github.com/gosuda/dalgona/internal/tool/task"
 	"github.com/gosuda/dalgona/internal/tool/todo"
@@ -54,6 +55,7 @@ type Batteries struct {
 	Runner    agent.RunnerFactory
 	Attach    func(*agent.Host)
 	Close     func() error
+	MCPStatus func(ctx context.Context, cwd string) []agent.MCPServerStatus
 }
 
 func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, error) {
@@ -85,11 +87,17 @@ func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, erro
 	}
 	advisors := newAdvisors(opts.Advisors, opts.Logger)
 	release := func() error { return errors.Join(extra.Close(), journalStore.Close()) }
+	var editJudge agent.ClientFactory
+	if product == config.ProductDalgona {
+		editJudge = judges.resolve
+	}
 	host, err := agent.NewHost(agent.HostConfig{
 		Journal: journalStore, Config: cfg, Auth: store, Tools: toolSet(cfg, extra.Tools),
-		Providers:   func(onRetry agent.RetryFunc) (*model.Registry, error) { return creds.registry(cfg, onRetry) },
-		ProviderIDs: providerIDs(cfg), Decider: judges.decider(), Extension: extra.Extension,
+		Providers:        func(onRetry agent.RetryFunc) (*model.Registry, error) { return creds.registry(cfg, onRetry) },
+		ProvidersWithKey: func(provider, key string) (*model.Registry, error) { return creds.registryWithKey(cfg, provider, key) },
+		ProviderIDs:      providerIDs(cfg), Decider: judges.decider(), EditJudge: editJudge, Extension: extra.Extension, EditFeedback: cfg.EditReview.Feedback,
 		Runner: extra.Runner, Product: product, Logger: opts.Logger, Skills: extra.Skills,
+		MCPStatus:      extra.MCPStatus,
 		OnChildStarted: advisors.attach,
 	})
 	if err != nil {
@@ -147,7 +155,7 @@ func withDefaults(extra Batteries, local agent.RunnerFactory) Batteries {
 func toolSet(cfg config.Config, extra func(ctx context.Context, cwd string) []tool.Tool) agent.ToolSet {
 	return func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error) {
 		tools := []tool.Tool{
-			read.New(), search.New(), patch.New(cfg.EditStyle.EditStyle(modelID)),
+			read.New(), search.New(), patch.New(cfg.EditStyle.EditStyle(modelID)), rewrite.New(),
 			exec.New(), todo.New(), webfetch.New(),
 		}
 		return append(tools, extra(ctx, cwd)...), nil

@@ -12,6 +12,8 @@ import (
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 
+const framesPerSecond = 60
+
 type Status struct {
 	State    string
 	Seq      uint64
@@ -65,7 +67,7 @@ func Run(ctx context.Context, conn io.ReadWriteCloser, opts Options) error {
 }
 
 func programOptions(ctx context.Context, opts Options) []tea.ProgramOption {
-	options := []tea.ProgramOption{tea.WithContext(ctx)}
+	options := []tea.ProgramOption{tea.WithContext(ctx), tea.WithFPS(framesPerSecond)}
 	if opts.Input != nil {
 		options = append(options, tea.WithInput(opts.Input))
 	}
@@ -104,7 +106,11 @@ func (h *programHandler) Request(ctx context.Context, method string, params json
 		return nil, fmt.Errorf("approval request: %w", ctx.Err())
 	}
 	answer := make(chan requestAnswer, 1)
-	h.program.Send(serverRequestMsg{method: method, params: params.Clone(), answer: answer})
+	requestID, err := rpc.ClientRequestID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("approval request id: %w", err)
+	}
+	h.program.Send(serverRequestMsg{method: method, requestID: requestID, params: params.Clone(), answer: answer})
 	select {
 	case response := <-answer:
 		return response.value, response.err

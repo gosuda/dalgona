@@ -3,7 +3,6 @@
 package runner
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -11,14 +10,8 @@ import (
 func TestLocalReadAfterStartReportsLive(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
-	env := append(os.Environ(), shimPauseEnvironment+"=pid:5s")
-	spec := ProcessSpec{ID: "pid-race", Argv: []string{"sleep", "30"}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}}
-	if err := local.Start(t.Context(), spec); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = local.Signal(t.Context(), "pid-race", SignalKill)
-	})
+	gate := startGatedProcess(t, local, ProcessSpec{ID: "pid-race", Argv: []string{"sleep", "30"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}}, "pid")
+	gate.await(t)
 	state, err := local.Read(t.Context(), "pid-race", 0)
 	if err != nil {
 		t.Fatal(err)

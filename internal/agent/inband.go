@@ -115,9 +115,13 @@ func (w *worker) inBandEvents(ctx context.Context, call model.ToolCall) (event.T
 	if err := ctx.Err(); err != nil {
 		return event.ToolCompleted{}, err
 	}
+	args, err := eventArgs(call)
+	if err != nil {
+		return event.ToolCompleted{}, err
+	}
 	if w.inBand.takeCancel() {
 		w.inBand.markCancel()
-		toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: call.Args, Freeform: call.Freeform}
+		toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: args, Freeform: call.Freeform}
 		class := tool.ClassRemote
 		if w.tools != nil {
 			if item, ok := w.tools.byName[call.Name]; ok {
@@ -127,7 +131,7 @@ func (w *worker) inBandEvents(ctx context.Context, call model.ToolCall) (event.T
 		return w.denyInBand(ctx, toolCall, newID("req-"), inBandDenial{class: class, verdict: verdict{decision: "cancel", by: "user", reason: "cancelled by user", cancel: true}})
 	}
 
-	toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: call.Args, Freeform: call.Freeform}
+	toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: args, Freeform: call.Freeform}
 	requestID := newID("req-")
 	guard, err := w.prepareGuard(ctx, toolCall, requestID)
 	if err != nil {

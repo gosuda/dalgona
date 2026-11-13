@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/item/output/read params",
+  "type": "object",
+  "required": ["threadId", "itemId"],
+  "properties": {
+    "threadId": {"type": "string"},
+    "itemId": {"type": "string"},
+    "offset": {"type": "integer", "minimum": 0}
+  }
+}

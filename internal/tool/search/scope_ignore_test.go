@@ -31,7 +31,7 @@ func writeTreeFile(t *testing.T, path, body string) {
 
 func grepHits(t *testing.T, cwd, scope string) string {
 	t.Helper()
-	result, err := execute(cwd, args{Mode: "grep", Pattern: "needle", Path: scope, Limit: 100})
+	result, err := execute(cwd, args{Mode: "grep", Pattern: "needle", Path: scope, Limit: 100}, "", freshness{})
 	if err != nil {
 		t.Fatalf("grep failed: %v", err)
 	}

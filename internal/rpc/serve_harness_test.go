@@ -39,12 +39,23 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "__shim" {
 		os.Exit(runner.ShimMain(os.Args[2:]))
 	}
+	if value, ok := os.LookupEnv("RPC_TEST_PRINT"); ok {
+		_, _ = os.Stdout.WriteString(value)
+		os.Exit(3)
+	}
+	if os.Getenv("RPC_TEST_SLEEP") != "" {
+		_, _ = os.Stdout.WriteString("ready")
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
 }
 
 type llmReply struct {
-	body string
-	gate <-chan struct{}
+	body       string
+	gate       <-chan struct{}
+	status     int
+	retryAfter string
 }
 
 type fakeLLM struct {
@@ -52,6 +63,7 @@ type fakeLLM struct {
 	mu     sync.Mutex
 	queue  []llmReply
 	count  int
+	bodies []string
 }
 
 func newFakeLLM(t *testing.T) *fakeLLM {
@@ -59,7 +71,11 @@ func newFakeLLM(t *testing.T) *fakeLLM {
 	f := &fakeLLM{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /responses", f.respond)
-	mux.HandleFunc("GET /models", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /models", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer rejected-key" {
+			http.Error(w, `{"error":{"message":"invalid api key"}}`, http.StatusUnauthorized)
+			return
+		}
 		_, _ = io.WriteString(w, `{"data":[{"id":"gpt-test"}]}`)
 	})
 	f.server = httptest.NewServer(mux)
@@ -86,10 +102,14 @@ func (f *fakeLLM) next() llmReply {
 }
 
 func (f *fakeLLM) respond(w http.ResponseWriter, r *http.Request) {
-	if _, err := io.Copy(io.Discard, r.Body); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	f.mu.Lock()
+	f.bodies = append(f.bodies, string(raw))
+	f.mu.Unlock()
 	reply := f.next()
 	if reply.gate != nil {
 		select {
@@ -98,7 +118,14 @@ func (f *fakeLLM) respond(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
+	if reply.retryAfter != "" {
+		w.Header().Set("Retry-After", reply.retryAfter)
+	}
+	if reply.status != 0 {
+		w.WriteHeader(reply.status)
+	} else {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
 	_, _ = io.WriteString(w, reply.body)
 }
 
@@ -147,7 +174,7 @@ func newRig(t *testing.T, approval config.Approval) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	credentials, err := auth.New(r.home)
+	credentials, err := auth.Load(r.home)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +184,8 @@ func newRig(t *testing.T, approval config.Approval) *rig {
 			Home: r.home, Cwd: r.cwd, Model: "openai/gpt-test", Approval: approval, Sandbox: config.SandboxOff,
 			Product: config.ProductDal, Reasoning: config.ReasoningDefault,
 		},
-		Providers: r.providers,
+		Providers:        r.providers,
+		ProvidersWithKey: r.providersWithKey,
 		Tools: func(context.Context, string, string) ([]tool.Tool, error) {
 			return []tool.Tool{read.New(), exec.New()}, nil
 		},
@@ -192,6 +220,20 @@ func (r *rig) providers(onRetry agent.RetryFunc) (*model.Registry, error) {
 	return registry, registry.Register("openai", provider)
 }
 
+func (r *rig) providersWithKey(provider, key string) (*model.Registry, error) {
+	registry := model.NewRegistry()
+	if provider != "openai" {
+		return registry, nil
+	}
+	retry := model.DefaultRetryOptions()
+	retry.Sleep = func(context.Context, time.Duration) error { return nil }
+	adapter := openai.New(openai.Config{
+		BaseURL: r.llm.server.URL, Client: r.llm.server.Client(), Retry: retry,
+		APIKey: func(context.Context) (string, error) { return key, nil },
+	})
+	return registry, registry.Register("openai", adapter)
+}
+
 type message struct {
 	ID     jsontext.Value `json:"id,omitzero"`
 	Method string         `json:"method,omitzero"`
@@ -208,9 +250,12 @@ type wireClient struct {
 	next     int
 	waiting  map[string]chan message
 	methods  map[string]string
+	seqs     map[string]uint64
+	order    []string
 	notes    chan message
 	requests chan message
 	served   chan error
+	arrivals []message
 }
 
 func (r *rig) connect() *wireClient { return r.connectWith(ServeOptions{}) }
@@ -220,6 +265,7 @@ func (r *rig) connectWith(opts ServeOptions) *wireClient {
 	left, right := net.Pipe()
 	c := &wireClient{
 		t: r.t, conn: right, waiting: map[string]chan message{}, methods: map[string]string{},
+		seqs:  map[string]uint64{},
 		notes: make(chan message, 100000), requests: make(chan message, 64), served: make(chan error, 1),
 	}
 	go func() { c.served <- ServeWith(r.t.Context(), left, r.host, opts) }()
@@ -255,20 +301,24 @@ func (c *wireClient) read() {
 }
 
 func (c *wireClient) route(line []byte, m message) {
+	c.mu.Lock()
+	c.arrivals = append(c.arrivals, m)
+	c.mu.Unlock()
 	switch {
 	case m.Method != "" && len(m.ID) > 0:
 		validateLine(c.t, "ServerRequest.json", line)
+		c.arrived(m.Method)
 		c.requests <- m
 	case m.Method != "":
-		if !strings.HasPrefix(m.Method, "dalgona/") {
-			validateLine(c.t, "ServerNotification.json", line)
-		}
+		c.checkNotification(line, m)
+		c.arrived(m.Method)
 		c.notes <- m
 	default:
 		c.mu.Lock()
 		ch := c.waiting[string(m.ID)]
 		method := c.methods[string(m.ID)]
 		c.mu.Unlock()
+		c.arrived(method)
 		c.checkResponse(method, m)
 		if ch != nil {
 			ch <- m
@@ -276,29 +326,81 @@ func (c *wireClient) route(line []byte, m message) {
 	}
 }
 
+func (c *wireClient) arrived(method string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.order = append(c.order, method)
+}
+
+func (c *wireClient) checkNotification(line []byte, m message) {
+	if strings.HasPrefix(m.Method, "dalgona/") {
+		validateSchema(c.t, "dalgona-schema", dalgonaSchemaName(m.Method, ".json"), m.Params)
+		return
+	}
+	validateLine(c.t, "ServerNotification.json", line)
+	if m.Method == "thread/status/changed" {
+		c.checkStatusSeq(m.Params)
+	}
+}
+
+func (c *wireClient) checkStatusSeq(params jsontext.Value) {
+	var status struct {
+		ThreadID string `json:"threadId"`
+		Seq      uint64 `json:"seq"`
+	}
+	if err := json.Unmarshal(params, &status); err != nil {
+		c.t.Errorf("decode thread/status/changed %s: %v", params, err)
+		return
+	}
+	c.mu.Lock()
+	last := c.seqs[status.ThreadID]
+	if status.Seq > last {
+		c.seqs[status.ThreadID] = status.Seq
+	}
+	c.mu.Unlock()
+	if status.Seq <= last {
+		c.t.Errorf("status seq %d after %d for %s", status.Seq, last, status.ThreadID)
+	}
+}
+
 var responseSchemas = map[string]string{
-	"initialize":           "v1/InitializeResponse.json",
-	"thread/start":         "v2/ThreadStartResponse.json",
-	"thread/resume":        "v2/ThreadResumeResponse.json",
-	"thread/fork":          "v2/ThreadForkResponse.json",
-	"thread/list":          "v2/ThreadListResponse.json",
-	"thread/read":          "v2/ThreadReadResponse.json",
-	"thread/name/set":      "v2/ThreadSetNameResponse.json",
-	"thread/archive":       "v2/ThreadArchiveResponse.json",
-	"thread/unarchive":     "v2/ThreadUnarchiveResponse.json",
-	"thread/compact/start": "v2/ThreadCompactStartResponse.json",
-	"thread/revert":        "v2/ThreadRevertResponse.json",
-	"turn/start":           "v2/TurnStartResponse.json",
-	"turn/steer":           "v2/TurnSteerResponse.json",
-	"turn/interrupt":       "v2/TurnInterruptResponse.json",
-	"model/list":           "v2/ModelListResponse.json",
-	"config/read":          "v2/ConfigReadResponse.json",
-	"config/value/write":   "v2/ConfigWriteResponse.json",
-	"account/read":         "v2/GetAccountResponse.json",
-	"account/login/start":  "v2/LoginAccountResponse.json",
-	"account/login/cancel": "v2/CancelLoginAccountResponse.json",
-	"account/logout":       "v2/LogoutAccountResponse.json",
-	"skills/list":          "v2/SkillsListResponse.json",
+	"initialize":             "v1/InitializeResponse.json",
+	"thread/start":           "v2/ThreadStartResponse.json",
+	"thread/resume":          "v2/ThreadResumeResponse.json",
+	"thread/fork":            "v2/ThreadForkResponse.json",
+	"thread/list":            "v2/ThreadListResponse.json",
+	"thread/read":            "v2/ThreadReadResponse.json",
+	"thread/name/set":        "v2/ThreadSetNameResponse.json",
+	"thread/archive":         "v2/ThreadArchiveResponse.json",
+	"thread/unarchive":       "v2/ThreadUnarchiveResponse.json",
+	"thread/compact/start":   "v2/ThreadCompactStartResponse.json",
+	"thread/revert":          "v2/ThreadRevertResponse.json",
+	"turn/start":             "v2/TurnStartResponse.json",
+	"turn/steer":             "v2/TurnSteerResponse.json",
+	"turn/interrupt":         "v2/TurnInterruptResponse.json",
+	"review/start":           "v2/ReviewStartResponse.json",
+	"model/list":             "v2/ModelListResponse.json",
+	"config/read":            "v2/ConfigReadResponse.json",
+	"config/value/write":     "v2/ConfigWriteResponse.json",
+	"config/batchWrite":      "v2/ConfigWriteResponse.json",
+	"account/read":           "v2/GetAccountResponse.json",
+	"account/login/start":    "v2/LoginAccountResponse.json",
+	"account/login/cancel":   "v2/CancelLoginAccountResponse.json",
+	"account/logout":         "v2/LogoutAccountResponse.json",
+	"skills/list":            "v2/SkillsListResponse.json",
+	"mcpServerStatus/list":   "v2/ListMcpServerStatusResponse.json",
+	"command/exec":           "v2/CommandExecResponse.json",
+	"command/exec/terminate": "v2/CommandExecTerminateResponse.json",
+	"fs/readFile":            "v2/FsReadFileResponse.json",
+	"fs/writeFile":           "v2/FsWriteFileResponse.json",
+	"fs/createDirectory":     "v2/FsCreateDirectoryResponse.json",
+	"fs/getMetadata":         "v2/FsGetMetadataResponse.json",
+	"fs/readDirectory":       "v2/FsReadDirectoryResponse.json",
+	"fs/remove":              "v2/FsRemoveResponse.json",
+	"fs/copy":                "v2/FsCopyResponse.json",
+	"fs/watch":               "v2/FsWatchResponse.json",
+	"fs/unwatch":             "v2/FsUnwatchResponse.json",
+	"fuzzyFileSearch":        "FuzzyFileSearchResponse.json",
 }
 
 var (
@@ -308,17 +410,23 @@ var (
 
 func validateLine(t *testing.T, path string, raw []byte) {
 	t.Helper()
+	validateSchema(t, "codex-schema", path, raw)
+}
+
+func validateSchema(t *testing.T, dir, path string, raw []byte) {
+	t.Helper()
+	key := filepath.Join(dir, path)
 	schemaMu.Lock()
-	sch, ok := schemaCache[path]
+	sch, ok := schemaCache[key]
 	if !ok {
 		var err error
-		sch, err = jsonschema.NewCompiler().Compile(filepath.Join("testdata", "codex-schema", path))
+		sch, err = jsonschema.NewCompiler().Compile(filepath.Join("testdata", dir, path))
 		if err != nil {
 			schemaMu.Unlock()
-			t.Errorf("compile %s: %v", path, err)
+			t.Errorf("compile %s: %v", key, err)
 			return
 		}
-		schemaCache[path] = sch
+		schemaCache[key] = sch
 	}
 	schemaMu.Unlock()
 	value, err := jsonschema.UnmarshalJSON(strings.NewReader(string(raw)))
@@ -327,7 +435,7 @@ func validateLine(t *testing.T, path string, raw []byte) {
 		return
 	}
 	if err := sch.Validate(value); err != nil {
-		t.Errorf("%s does not validate against %s: %v", raw, path, err)
+		t.Errorf("%s does not validate against %s: %v", raw, key, err)
 	}
 }
 
@@ -453,7 +561,11 @@ func fieldOf(t *testing.T, raw jsontext.Value, path ...string) string {
 }
 
 func (c *wireClient) checkResponse(method string, m message) {
-	if m.Error != nil || strings.HasPrefix(method, "dalgona/") {
+	if m.Error != nil {
+		return
+	}
+	if strings.HasPrefix(method, "dalgona/") {
+		validateSchema(c.t, "dalgona-schema", dalgonaSchemaName(method, ".result.json"), m.Result)
 		return
 	}
 	schema, ok := responseSchemas[method]
@@ -465,7 +577,7 @@ func (c *wireClient) checkResponse(method string, m message) {
 }
 
 func effectiveWorkspaceWriteType() string {
-	if runner.Available() {
+	if runner.UnavailableCause() == "" {
 		return "workspaceWrite"
 	}
 	return "dangerFullAccess"

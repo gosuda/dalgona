@@ -96,7 +96,7 @@ func TestRunStreamsTurnAndAnswersApproval(t *testing.T) {
 	serverResult := make(chan error, 1)
 	go func() { serverResult <- serveTurn(server) }()
 
-	output.waitFor(ctx, t, "approval required", "go test ./...")
+	output.waitFor(ctx, t, "Approval · Run command", "go test ./...")
 	waitStatus(ctx, t, statuses, stateAwaitingApproval, "t1")
 	if _, err := keyboard.Write([]byte("y")); err != nil {
 		t.Fatalf("write approval key: %v", err)
@@ -141,16 +141,26 @@ func waitStatus(ctx context.Context, t *testing.T, statuses <-chan Status, state
 	}
 }
 
-func serveTurn(conn net.Conn) error {
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
+func answerStartup(conn net.Conn, reader *bufio.Reader) error {
 	if err := answerRequest(conn, reader, "initialize", `{"userAgent":"dalgona/test","codexHome":"/tmp","platformFamily":"unix","platformOs":"linux"}`); err != nil {
 		return err
 	}
 	if err := readNotification(reader, "initialized"); err != nil {
 		return err
 	}
+	if err := answerRequest(conn, reader, "dalgona/settings/read", `{"settings":[]}`); err != nil {
+		return err
+	}
 	if err := answerRequest(conn, reader, "dalgona/keywords/list", `[]`); err != nil {
+		return err
+	}
+	return answerRequest(conn, reader, "model/list", `{"data":[]}`)
+}
+
+func serveTurn(conn net.Conn) error {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	if err := answerStartup(conn, reader); err != nil {
 		return err
 	}
 	threadStart := `{"approvalPolicy":"on-request","approvalsReviewer":"user","cwd":"/work","model":"gpt-test",` +

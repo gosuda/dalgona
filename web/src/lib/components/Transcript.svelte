@@ -1,18 +1,40 @@
 <script lang="ts">
-import KeywordText from "#lib/components/KeywordText.svelte";
-import { itemStatusLabel, kindLabel, planStatusLabel } from "#lib/labels.ts";
+import { type Component, untrack } from "svelte";
+import Mark from "#lib/components/Mark.svelte";
+import ReviewView from "#lib/components/ReviewView.svelte";
+import AdvisorNote from "#lib/components/rows/AdvisorNote.svelte";
+import CommandCard from "#lib/components/rows/CommandCard.svelte";
+import FileChangeRow from "#lib/components/rows/FileChangeRow.svelte";
+import MessageRow from "#lib/components/rows/MessageRow.svelte";
+import PlanPanel from "#lib/components/rows/PlanPanel.svelte";
+import SubagentBlock from "#lib/components/rows/SubagentBlock.svelte";
+import TextRow from "#lib/components/rows/TextRow.svelte";
+import ThinkingRow from "#lib/components/rows/ThinkingRow.svelte";
+import ToolCard from "#lib/components/rows/ToolCard.svelte";
+import type { RowProps } from "#lib/components/rows/types.ts";
+import { handoffFocus } from "#lib/focus.ts";
 import {
-	itemDisplayStatus,
 	type ScrollSnapshot,
 	shouldAutoScrollForUpdate,
 } from "#lib/reducer.ts";
 import type {
-	JsonValue,
-	KeywordDefinition,
+	EditReview,
+	OutputPage,
+	ThreadSummary,
 	TranscriptItem,
 	TurnPlan,
 	TurnStatus,
 } from "#lib/types.ts";
+import {
+	groupTools,
+	isFinishedEntry,
+	isLiveItem,
+	isToolGroup,
+	presentRow,
+	type TranscriptEntry,
+	toolGroupSummary,
+	type Verbosity,
+} from "#lib/verbosity.ts";
 
 interface Props {
 	threadId: string | null;
@@ -20,11 +42,33 @@ interface Props {
 	turnStatus: TurnStatus | null;
 	error: string | null;
 	plan: TurnPlan | null;
+	turnReview: EditReview | null;
 	connected: boolean;
-	keywords: readonly KeywordDefinition[];
 	loading: boolean;
 	awaitingApproval: ReadonlySet<string>;
+	childThreadIds: readonly string[];
+	threads: readonly ThreadSummary[];
+	userAgent: string | null;
+	starting: boolean;
+	onOpenThread: (threadId: string) => void;
+	onStart: () => void;
+	verbosity?: Verbosity;
+	readOutput: (itemId: string, offset: number) => Promise<OutputPage>;
+	onRewind?: (turnId: string) => void;
 }
+
+const rowComponents: Record<TranscriptItem["kind"], Component<RowProps>> = {
+	userMessage: MessageRow,
+	agentMessage: MessageRow,
+	reasoning: ThinkingRow,
+	commandExecution: CommandCard,
+	fileChange: FileChangeRow,
+	toolCall: ToolCard,
+	plan: TextRow,
+	advisorNote: AdvisorNote,
+	contextCompaction: TextRow,
+	unsupported: TextRow,
+};
 
 let {
 	threadId,
@@ -32,30 +76,60 @@ let {
 	turnStatus,
 	error,
 	plan,
+	turnReview,
 	connected,
-	keywords,
 	loading,
 	awaitingApproval,
+	childThreadIds,
+	threads,
+	userAgent,
+	starting,
+	onOpenThread,
+	onStart,
+	verbosity = "medium",
+	readOutput,
+	onRewind,
 }: Props = $props();
-let viewport = $state<HTMLDivElement>();
+let viewport = $state<HTMLElement>();
 let running = $derived(turnStatus === "inProgress");
+const entries = $derived(groupTools(items, verbosity));
+let reviewTarget = $state<TranscriptEntry | null>(null);
 let followedThread: string | null = null;
-let following = true;
+let following = $state(true);
+let unseen = $state(0);
+const showJump = $derived(!following);
 let scrollQueued = false;
 let scrolledSnapshot: ScrollSnapshot = { count: 0, lastId: null };
 
 function scroller(): Element | null {
-	if (!viewport) return null;
-	return viewport.scrollHeight > viewport.clientHeight
-		? viewport
-		: document.scrollingElement;
+	for (
+		let element = viewport;
+		element;
+		element = element.parentElement ?? undefined
+	) {
+		const overflow = getComputedStyle(element).overflowY;
+		if (
+			(overflow === "auto" || overflow === "scroll") &&
+			element.scrollHeight > element.clientHeight
+		) {
+			return element;
+		}
+	}
+	return document.scrollingElement;
 }
 
 $effect(() => {
+	document.addEventListener("scroll", trackFollowing, true);
+	return () => document.removeEventListener("scroll", trackFollowing, true);
+});
+
+$effect(() => {
 	const currentItems = items;
-	if (threadId !== followedThread) {
+	const switched = threadId !== followedThread;
+	if (switched) {
 		followedThread = threadId;
 		following = true;
+		unseen = 0;
 		scrolledSnapshot = { count: 0, lastId: null };
 	}
 	const nextSnapshot: ScrollSnapshot = {
@@ -64,9 +138,13 @@ $effect(() => {
 	};
 	const previousSnapshot = scrolledSnapshot;
 	scrolledSnapshot = nextSnapshot;
+	const followed = untrack(() => following);
+	if (!switched && !followed) {
+		unseen += Math.max(0, nextSnapshot.count - previousSnapshot.count);
+	}
 	if (!shouldAutoScrollForUpdate(running, previousSnapshot, nextSnapshot))
 		return;
-	if (!following) return;
+	if (!followed) return;
 	if (scrollQueued) return;
 	scrollQueued = true;
 	requestAnimationFrame(() => {
@@ -83,27 +161,65 @@ function trackFollowing(): void {
 	if (!target) return;
 	const distance = target.scrollHeight - target.scrollTop - target.clientHeight;
 	following = distance < 32;
+	if (following) unseen = 0;
 }
 
-function argumentsText(value: JsonValue): string {
-	return JSON.stringify(value, null, 2) ?? "";
+function entryKey(entry: TranscriptEntry): string {
+	const item = isToolGroup(entry) ? entry.items[0] : entry;
+	return JSON.stringify([
+		isToolGroup(entry) ? "group" : "item",
+		item?.turnId,
+		item?.id,
+	]);
+}
+
+function openReview(target: TranscriptEntry): void {
+	reviewTarget = target;
+}
+
+function openLatestReview(event: KeyboardEvent): void {
+	if (reviewTarget !== null) return;
+	if (!event.ctrlKey || event.key.toLowerCase() !== "o") return;
+	const focused = document.activeElement;
+	const inTranscript =
+		viewport !== undefined && focused !== null && viewport.contains(focused);
+	const inComposer = focused !== null && focused.id === "prompt";
+	if (!inTranscript && !inComposer) return;
+	const latest = [...entries].reverse().find(isFinishedEntry);
+	if (latest === undefined) return;
+	event.preventDefault();
+	openReview(latest);
+}
+
+function lastRow(): HTMLElement | undefined {
+	const rows = viewport?.querySelectorAll<HTMLElement>(".items > li");
+	const row = rows?.[rows.length - 1];
+	if (row) row.tabIndex = -1;
+	return row;
+}
+
+function jumpToLatest(): void {
+	following = true;
+	unseen = 0;
+	const target = scroller();
+	if (target) target.scrollTo({ top: target.scrollHeight, behavior: "auto" });
+	lastRow()?.focus({ preventScroll: true });
 }
 </script>
 
-<svelte:window onscroll={trackFollowing} />
+<svelte:window onkeydown={openLatestReview} />
 
-<div class="transcript" bind:this={viewport} role="log" aria-label="Thread transcript" onscroll={trackFollowing}>
+<section id="transcript" class="transcript" aria-label="Transcript" tabindex="-1" bind:this={viewport}>
 	<div class="transcript-inner">
-		<p class="sr-only" role="status">{loading ? "Loading transcript…" : ""}</p>
-
 		{#if !threadId}
 			<section class="empty-state" aria-labelledby="empty-title">
+				<Mark />
 				<p class="kicker">No thread open</p>
 				<h2 id="empty-title">Pick a thread or start a new one</h2>
-				{#if connected}
-					<p>Earlier threads are in the list. Start a thread to give the agent a task.</p>
-				{:else}
-					<p>Connect to dalgona to see your threads.</p>
+				<p>{connected ? "Start a thread or pick one from the list." : "Connect to dalgona to see your threads."}</p>
+				<button class="primary" type="button" aria-disabled={!connected || starting ? "true" : undefined} onclick={() => { if (connected && !starting) onStart(); }}>Start thread</button>
+				{#if userAgent}
+					<p class="version">{userAgent}</p>
 				{/if}
 			</section>
 		{:else if !loading && items.length === 0}
@@ -114,102 +230,36 @@ function argumentsText(value: JsonValue): string {
 			</section>
 		{:else}
 			<ol class="items">
-				{#each items as item (item.id)}
-					<li class:from-user={item.kind === "userMessage"}>
-						{#if item.kind === "userMessage"}
-							<article class="user-message">
-								<span class="item-label">You</span>
-								<p><KeywordText text={item.text} {keywords} /></p>
-							</article>
-						{:else if item.kind === "agentMessage"}
-							<article class="agent-message">
-								<span class="item-label">dalgona</span>
-								<p>{item.text}{#if !item.complete && running}<span class="streaming" aria-hidden="true">▋</span>{/if}</p>
-							</article>
-						{:else if item.kind === "reasoning"}
-							<details class="reasoning" open={!item.complete && running}>
-								<summary>Reasoning{#if !item.complete && running} in progress{/if}</summary>
-								<p>{item.text}</p>
-							</details>
-						{:else if item.kind === "commandExecution"}
-							{@const status = itemDisplayStatus(item.status, item.id, awaitingApproval)}
-							<article class="tool-item">
-								<header>
-									<span class="item-label">Command</span>
-									<span class="item-status" class:awaiting={status === "awaitingApproval"}>{itemStatusLabel(status)}{item.exitCode === null ? "" : ` · exit ${item.exitCode}`}</span>
-								</header>
-								<pre class="command">{item.command}</pre>
-								{#if item.output}
-									<pre class="output">{item.output}</pre>
-								{/if}
-							</article>
-						{:else if item.kind === "fileChange"}
-							{@const status = itemDisplayStatus(item.status, item.id, awaitingApproval)}
-							<article class="tool-item">
-								<header>
-									<span class="item-label">File changes</span>
-									<span class="item-status" class:awaiting={status === "awaitingApproval"}>{itemStatusLabel(status)}</span>
-								</header>
-								{#each item.changes as change (`${change.path}:${change.kind}`)}
-									<details class="file-change">
-										<summary><span class="file-path">{change.path}</span> · {change.kind}</summary>
-										<pre class="output">{change.diff}</pre>
-									</details>
-								{/each}
-							</article>
-						{:else if item.kind === "toolCall"}
-							<article class="tool-item">
-								<header>
-									<span class="item-label">{item.name}</span>
-									<span class="item-status">{itemStatusLabel(item.status)}</span>
-								</header>
-								<details>
-									<summary>Arguments</summary>
-									<pre class="output">{argumentsText(item.arguments)}</pre>
-								</details>
-								{#if item.output}
-									<pre class="output">{item.output}</pre>
-								{/if}
-							</article>
-						{:else if item.kind === "plan"}
-							<article class="plan">
-								<span class="item-label">Plan</span>
-								<p>{item.text}</p>
-							</article>
-						{:else if item.kind === "advisorNote"}
-							<aside class="advisor-note" data-severity={item.severity} aria-label="Advisor note">
-								<span class="advisor-label">{item.advisor === "advisor" ? "advisor" : `advisor ${item.advisor}`} · {item.severity}:</span>
-								{item.note}
-							</aside>
-						{:else if item.kind === "contextCompaction"}
-							<p class="compaction">Context compacted · earlier turns remain in the journal</p>
-						{:else if item.kind === "unsupported"}
-							<p class="compaction">{kindLabel(item.label)}</p>
+				{#each entries as entry (entryKey(entry))}
+					{#if isToolGroup(entry)}
+						<li class="tool-group-row">
+							<p class="tool-group">{toolGroupSummary(entry)}</p>
+							<button type="button" aria-label="Open full text" onclick={() => openReview(entry)}>Open</button>
+						</li>
+					{:else}
+						{@const Row = rowComponents[entry.kind]}
+						{@const presentation = presentRow(entry, verbosity, isLiveItem(entry))}
+						{#if presentation.mode !== "hidden"}
+							<li class:from-user={entry.kind === "userMessage"}>
+								<Row item={entry} {running} awaiting={awaitingApproval} {presentation} onOpen={() => openReview(entry)} {onRewind} />
+							</li>
 						{/if}
-					</li>
+					{/if}
 				{/each}
 			</ol>
 		{/if}
 
-		{#if plan}
-			<section class="turn-plan" aria-label="Plan">
-				<span class="item-label">Plan</span>
-				{#if plan.explanation}
-					<p>{plan.explanation}</p>
-				{/if}
-				<ol>
-					{#each plan.steps as step, index (index)}
-						<li data-status={step.status} aria-current={step.status === "inProgress" ? "step" : undefined}>
-							<span class="plan-status">{planStatusLabel(step.status)}</span>
-							<span>{step.step}</span>
-						</li>
-					{/each}
-				</ol>
-			</section>
+		{#if childThreadIds.length > 0}
+			<SubagentBlock childIds={childThreadIds} {threads} onOpen={onOpenThread} />
 		{/if}
 
+		{#if turnReview !== null}
+			<p class="turn-review" data-verdict={turnReview.verdict}>{turnReview.summary}</p>
+		{/if}
+		<PlanPanel {plan} />
+
 		{#if running}
-			<p class="turn-outcome working">
+			<p class="turn-outcome">
 				{error ? `Retrying after an error: ${error}` : "Working · new output appears here"}
 			</p>
 		{:else if turnStatus === "failed"}
@@ -220,7 +270,12 @@ function argumentsText(value: JsonValue): string {
 			<p class="turn-outcome">Turn interrupted. Send a message to continue.</p>
 		{/if}
 	</div>
-</div>
+
+	{#if showJump}
+		<button class="jump" type="button" onclick={jumpToLatest} {@attach handoffFocus(lastRow)}>Jump to latest{unseen > 0 ? ` · ${unseen} new` : ""}</button>
+	{/if}
+		<ReviewView target={reviewTarget} {readOutput} onClose={() => (reviewTarget = null)} />
+</section>
 
 <style>
 	.transcript {
@@ -228,18 +283,18 @@ function argumentsText(value: JsonValue): string {
 		min-height: 0;
 		overflow-y: auto;
 		overscroll-behavior: contain;
-		scroll-padding-block-start: var(--space-5);
+		scroll-padding-block-start: var(--space-6);
 	}
 
 	.transcript-inner {
 		width: min(100%, 56rem);
 		margin-inline: auto;
-		padding: var(--space-6) var(--space-5);
+		padding: var(--space-8) var(--space-6);
 	}
 
 	.items {
 		display: grid;
-		gap: var(--space-5);
+		gap: var(--space-6);
 		list-style: none;
 		margin: 0;
 		padding: 0;
@@ -250,218 +305,34 @@ function argumentsText(value: JsonValue): string {
 	}
 
 	.from-user {
-		padding-inline-start: var(--space-6);
-	}
-
-	.item-label {
-		display: block;
-		margin-block-end: var(--space-2);
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
-		font-weight: 650;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-	}
-
-	.user-message {
-		border-inline-start: 2px solid var(--color-accent);
-		padding: var(--space-2) var(--space-4);
-		background: var(--color-bg-selected);
-	}
-
-	.user-message p,
-	.agent-message p,
-	.plan p {
-		max-width: 70ch;
-		margin: 0;
-		line-height: 1.6;
-		overflow-wrap: break-word;
-		white-space: pre-wrap;
-		text-wrap: pretty;
-	}
-
-	.agent-message {
-		padding-block: var(--space-2);
-	}
-
-	.streaming {
-		color: var(--color-accent);
-		margin-inline-start: var(--space-1);
-	}
-
-	.tool-item {
-		min-width: 0;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-medium);
-		background: var(--color-bg-surface);
-		padding: var(--space-4);
-	}
-
-	.tool-item header {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-	}
-
-	.item-status {
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
-		font-variant-numeric: tabular-nums;
-	}
-
-	.item-status.awaiting {
-		color: var(--color-accent);
-		font-weight: 650;
-	}
-
-	.command {
-		border-radius: var(--radius-small);
-		background: var(--color-bg-inset);
-		padding: var(--space-3);
-		font-size: var(--text-body-small);
-		line-height: 1.5;
-	}
-
-	.output {
-		max-height: 24rem;
-		margin-block-start: var(--space-3);
-		overflow: auto;
-		overscroll-behavior: contain;
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
-		line-height: 1.55;
-	}
-
-	.reasoning,
-	.file-change,
-	.tool-item details {
-		max-width: 70ch;
-		color: var(--color-text-secondary);
-		font-size: var(--text-body-small);
-	}
-
-	.reasoning summary,
-	.file-change summary,
-	.tool-item summary {
-		color: var(--color-text);
-		cursor: pointer;
-		font-weight: 600;
-	}
-
-	.reasoning p {
-		margin-block: var(--space-3) 0;
-		white-space: pre-wrap;
-	}
-
-	.file-change {
-		margin-block-start: var(--space-3);
-	}
-
-	.plan {
-		border-block: 1px solid var(--color-border);
-		padding-block: var(--space-3);
-	}
-
-	.advisor-note {
-		max-width: 70ch;
-		border-inline-start: 2px solid var(--color-border-strong);
-		padding: var(--space-1) var(--space-3);
-		color: var(--color-text-secondary);
-		font-size: var(--text-body-small);
-		overflow-wrap: break-word;
-		white-space: pre-wrap;
-	}
-
-	.advisor-note[data-severity="concern"] {
-		border-inline-start-color: var(--color-accent);
-	}
-
-	.advisor-note[data-severity="blocker"] {
-		border-inline-start-color: var(--color-danger);
-	}
-
-	.advisor-label {
-		font-weight: 650;
-	}
-
-	.turn-plan {
-		max-width: 70ch;
-		margin-block-start: var(--space-5);
-		font-size: var(--text-body-small);
-	}
-
-	.turn-plan p {
-		margin: 0 0 var(--space-2);
-		color: var(--color-text-secondary);
-	}
-
-	.turn-plan ol {
-		display: grid;
-		gap: var(--space-1);
-		list-style: none;
-		margin: 0;
-		padding: 0;
-	}
-
-	.turn-plan li {
-		display: grid;
-		grid-template-columns: 6rem minmax(0, 1fr);
-		gap: var(--space-2);
-		overflow-wrap: break-word;
-	}
-
-	.plan-status {
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
-		font-weight: 600;
-	}
-
-	.turn-plan li[data-status="inProgress"] {
-		font-weight: 650;
-	}
-
-	.turn-plan li[data-status="completed"] > span:last-child {
-		color: var(--color-text-secondary);
-	}
-
-	.compaction {
-		margin: 0;
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
-		text-align: center;
+		padding-inline-start: var(--space-8);
 	}
 
 	.turn-outcome {
 		max-width: 70ch;
-		margin: var(--space-5) 0 0;
-		color: var(--color-text-secondary);
-		font-size: var(--text-caption);
+		margin: var(--space-6) 0 0;
+		color: var(--dim);
+		font-size: var(--size-caption);
 		font-weight: 600;
 		overflow-wrap: break-word;
 	}
 
-	.turn-outcome.working {
-		color: var(--color-success);
-	}
-
 	.turn-outcome.failed {
-		border-inline-start: 2px solid var(--color-danger);
-		background: var(--color-danger-surface);
-		color: var(--color-text);
+		border-inline-start: 2px solid var(--failed-text);
+		background: var(--surface);
+		color: var(--text);
 		padding: var(--space-2) var(--space-3);
 	}
 
 	.empty-state {
 		max-width: 38rem;
-		padding-block-start: var(--space-6);
+		padding-block-start: var(--space-8);
 	}
 
 	.kicker {
 		margin: 0 0 var(--space-3);
-		color: var(--color-accent);
-		font-size: var(--text-caption);
+		color: var(--accent-text);
+		font-size: var(--size-caption);
 		font-weight: 650;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
@@ -469,7 +340,7 @@ function argumentsText(value: JsonValue): string {
 
 	.empty-state h2 {
 		margin: 0;
-		font-size: clamp(1.75rem, 4vw, 2.5rem);
+		font-size: var(--size-title);
 		font-weight: 600;
 		letter-spacing: -0.02em;
 		line-height: 1.15;
@@ -479,18 +350,65 @@ function argumentsText(value: JsonValue): string {
 	.empty-state p:last-child {
 		max-width: 55ch;
 		margin: var(--space-4) 0 0;
-		color: var(--color-text-secondary);
+		color: var(--dim);
 		line-height: 1.6;
 		text-wrap: pretty;
 	}
 
+	.version {
+		color: var(--dim);
+		font-size: var(--size-caption);
+	}
+
 	@media (max-width: 40rem) {
 		.transcript-inner {
-			padding: var(--space-5) var(--space-4);
+			padding: var(--space-6) var(--space-4);
 		}
 
 		.from-user {
 			padding-inline-start: 0;
+		}
+	}
+
+	.turn-review {
+		margin: var(--space-4) 0 0;
+		color: var(--dim);
+		font-size: var(--size-small);
+	}
+
+	.turn-review[data-verdict="flagged"] {
+		color: var(--warning-text);
+	}
+
+	.turn-review[data-verdict="error"] {
+		color: var(--failed-text);
+		font-weight: var(--weight-strong);
+	}
+	.tool-group {
+		margin: 0;
+		color: var(--dim);
+		font-size: var(--size-small);
+	}
+
+	.jump {
+		position: sticky;
+		inset-block-end: var(--space-3);
+		display: block;
+		width: fit-content;
+		margin: var(--space-3) auto 0;
+	}
+
+	@media (max-width: 52rem) {
+		.transcript {
+			overflow-y: visible;
+			overscroll-behavior: auto;
+		}
+
+		.jump {
+			position: fixed;
+			inset-inline: 0;
+			inset-block-end: calc(var(--space-3) + var(--dock-height, 6rem));
+			margin-inline: auto;
 		}
 	}
 </style>

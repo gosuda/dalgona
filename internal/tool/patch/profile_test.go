@@ -355,6 +355,23 @@ func TestMoveAfterEditInvalidatesOldPath(t *testing.T) {
 	}
 }
 
+func TestHashlineRejectsSymbolOperations(t *testing.T) {
+	source := "one\ntwo\nthree\n"
+	for _, style := range []Style{Hashline, HashlineLight, HashlineEnhanced} {
+		for _, op := range []string{"PUT 2*:\n+x\n", "CUT 2*\n", "PUT >2*:\n+x\n"} {
+			env, cwd := editTestEnv(t)
+			writeFixture(t, cwd, "f.txt", source)
+			proof := styleProofFor(env, style, source)
+			if _, err := runPatch(t, env, style, renderHashline("f.txt", nil, proof.ref)+op); err == nil {
+				t.Fatalf("%s with %q: symbol op accepted", style, op)
+			}
+			if actual := readFixture(t, cwd, "f.txt"); actual != source {
+				t.Fatalf("%s with %q: fixture changed to %q", style, op, actual)
+			}
+		}
+	}
+}
+
 func TestApprovalGapDriftRejectsPreparedPlan(t *testing.T) {
 	env, cwd := editTestEnv(t)
 	writeFixture(t, cwd, "f.txt", "before\n")
@@ -366,6 +383,8 @@ func TestApprovalGapDriftRejectsPreparedPlan(t *testing.T) {
 	writeFixture(t, cwd, "f.txt", "drift\n")
 	if _, err := plan.Apply(t.Context()); err == nil {
 		t.Fatal("approval-gap drift committed")
+	} else if err.Error() != "patch: f.txt changed while you were approving. Nothing was written. Try again" {
+		t.Fatalf("approval-gap drift error %q", err.Error())
 	}
 	if actual := readFixture(t, cwd, "f.txt"); actual != "drift\n" {
 		t.Fatalf("drift overwritten %q", actual)
@@ -421,5 +440,13 @@ func TestSpecNames(t *testing.T) {
 		if strings.Contains(spec.Description, "N*") {
 			t.Fatalf("%s description advertises removed symbol grammar", style)
 		}
+	}
+}
+
+func TestLightDescriptionStatesRemExemption(t *testing.T) {
+	description := New(string(HashlineLight)).Spec().Description
+	const sentence = "REM does not require every line to have been delivered."
+	if !strings.Contains(description, sentence) {
+		t.Fatalf("light description lacks the REM exemption %q", sentence)
 	}
 }

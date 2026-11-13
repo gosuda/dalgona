@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func serveDarwinListener(t *testing.T, sock string) {
@@ -56,7 +55,7 @@ func runDarwinDial(t *testing.T, local *Local, dial darwinDial) Output {
 		},
 	}
 	startTestProcess(t, local, spec)
-	return waitForExit(t, local, dial.id, 30*time.Second)
+	return waitForExit(t, local, dial.id)
 }
 
 func swapSocketCase(t *testing.T, sock string) (string, bool) {
@@ -75,7 +74,7 @@ func swapSocketCase(t *testing.T, sock string) (string, bool) {
 }
 
 func TestLocal_darwinDeniesDaemonSocket(t *testing.T) {
-	if !Available() {
+	if UnavailableCause() != "" {
 		t.Skip("sandbox-exec is missing")
 	}
 	dir := t.TempDir()

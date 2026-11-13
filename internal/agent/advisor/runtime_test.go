@@ -412,3 +412,22 @@ func requireTurnHeldWhileReviewRuns(t *testing.T, completed func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+func TestPhaseOfBusyWithoutAutoContinueIsInterrupted(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		status agent.Status
+		want   Phase
+	}{
+		{name: "busy with auto-continue is running", status: agent.Status{Busy: true, AutoContinue: true}, want: PhaseRunning},
+		{name: "busy after an interrupt is interrupted", status: agent.Status{Busy: true}, want: PhaseInterrupted},
+		{name: "idle with auto-continue", status: agent.Status{AutoContinue: true}, want: PhaseIdle},
+		{name: "idle after an interrupt", status: agent.Status{}, want: PhaseInterrupted},
+	}
+	for _, test := range cases {
+		if got := phaseOf(test.status); got != test.want {
+			t.Errorf("%s: phaseOf() = %v, want %v", test.name, got, test.want)
+		}
+	}
+}

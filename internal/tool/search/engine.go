@@ -3,6 +3,7 @@ package search
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
@@ -36,7 +38,8 @@ type grepFile struct {
 	starts []int
 }
 
-func execute(cwd string, args args) (outcome, error) {
+func execute(cwd string, args args, dir string, clock freshness) (outcome, error) {
+	start := time.Now()
 	scope, err := resolveScope(cwd, args.Path)
 	if err != nil {
 		return outcome{}, err
@@ -45,10 +48,17 @@ func execute(cwd string, args args) (outcome, error) {
 	if err != nil {
 		return outcome{}, err
 	}
-	if args.Mode == "find" {
+	switch args.Mode {
+	case "find":
 		return find(entries, args)
+	case "symbols":
+		return symbolsMode(context.Background(), entries, args, start, time.Now)
+	case "definition":
+		return definitionMode(context.Background(), entries, args, start, time.Now)
+	case "syntax":
+		return syntaxMode(context.Background(), entries, args, start, time.Now)
 	}
-	return grep(entries, args)
+	return grep(entries, args, dir, clock)
 }
 
 func resolveScope(cwd, raw string) (string, error) {
@@ -97,14 +107,19 @@ type walker struct {
 	root    string
 	ignores ignoreStack
 	entries []fileEntry
+	limit   int
 }
 
 func walkScope(cwd, scope string) ([]fileEntry, error) {
+	return walkScopeLimit(cwd, scope, 0)
+}
+
+func walkScopeLimit(cwd, scope string, limit int) ([]fileEntry, error) {
 	root, err := filepath.EvalSymlinks(cwd)
 	if err != nil {
 		return nil, fmt.Errorf("search: cannot inspect workspace: %w", err)
 	}
-	w := &walker{cwd: cwd, scope: scope, root: root, ignores: loadIgnore(cwd)}
+	w := &walker{cwd: cwd, scope: scope, root: root, ignores: loadIgnore(cwd), limit: limit}
 	w.ignores.loadScopeIgnores(cwd, scope)
 	if walkErr := filepath.WalkDir(scope, w.visit); walkErr != nil {
 		return nil, fmt.Errorf("search: cannot walk %s: %w", scope, walkErr)
@@ -122,9 +137,24 @@ func walkScope(cwd, scope string) ([]fileEntry, error) {
 	return w.entries, nil
 }
 
+func Files(root string, limit int) ([]string, error) {
+	entries, err := walkScopeLimit(root, root, limit)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, min(len(entries), limit))
+	for _, entry := range entries[:min(len(entries), limit)] {
+		paths = append(paths, entry.display)
+	}
+	return paths, nil
+}
+
 func (w *walker) visit(path string, entry fs.DirEntry, err error) error {
 	if err != nil {
 		return err
+	}
+	if w.limit > 0 && len(w.entries) >= w.limit {
+		return fs.SkipAll
 	}
 	if path == w.scope {
 		return nil
@@ -203,7 +233,7 @@ func find(entries []fileEntry, args args) (outcome, error) {
 	return outcome{Text: strings.Join(paths, "\n")}, nil
 }
 
-func grep(entries []fileEntry, args args) (outcome, error) {
+func grep(entries []fileEntry, args args, dir string, clock freshness) (outcome, error) {
 	matcher, err := grepRegexp(args)
 	if err != nil {
 		return outcome{}, err
@@ -212,8 +242,15 @@ func grep(entries []fileEntry, args args) (outcome, error) {
 	if err != nil {
 		return outcome{}, err
 	}
+	filter, err := openTrigramFilter(dir, grepPattern(args), clock)
+	if err != nil {
+		return outcome{}, err
+	}
+	files, counted := planReads(files, filter)
 	scanned, kept, total := collectMatches(files, matcher, args.Limit)
-	return renderGrep(scanned, kept, total, args.Pattern), nil
+	out := renderGrep(scanned, kept, total, args.Pattern)
+	out.Unindexed = counted
+	return out, nil
 }
 
 const grepWorkers = 8
@@ -255,7 +292,7 @@ func collectMatches(files []fileEntry, matcher *regexp.Regexp, limit int) ([]gre
 	return scanned, kept, total
 }
 
-func grepRegexp(args args) (*regexp.Regexp, error) {
+func grepPattern(args args) string {
 	pattern := args.Pattern
 	if args.Literal {
 		pattern = regexp.QuoteMeta(pattern)
@@ -263,7 +300,11 @@ func grepRegexp(args args) (*regexp.Regexp, error) {
 	if args.IgnoreCase {
 		pattern = "(?i)" + pattern
 	}
-	re, err := regexp.Compile(pattern)
+	return pattern
+}
+
+func grepRegexp(args args) (*regexp.Regexp, error) {
+	re, err := regexp.Compile(grepPattern(args))
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
@@ -288,8 +329,8 @@ func scanFile(entry fileEntry, matcher *regexp.Regexp) (grepFile, []int) {
 	if !searchableFile(entry.absolute) {
 		return grepFile{}, nil
 	}
-	data, err := readCapped(entry.absolute)
-	if err != nil || !searchableText(data) {
+	data, ok := readSearchable(entry.absolute)
+	if !ok {
 		return grepFile{}, nil
 	}
 	starts := splitStarts(data)
@@ -307,7 +348,19 @@ func scanFile(entry fileEntry, matcher *regexp.Regexp) (grepFile, []int) {
 
 func searchableFile(path string) bool {
 	info, err := os.Lstat(path)
-	return err == nil && info.Mode().IsRegular() && info.Size() <= maxSearchFileBytes
+	return err == nil && searchableInfo(info)
+}
+
+func searchableInfo(info fs.FileInfo) bool {
+	return info.Mode().IsRegular() && info.Size() <= maxSearchFileBytes
+}
+
+func readSearchable(path string) ([]byte, bool) {
+	data, err := readCapped(path)
+	if err != nil || !searchableText(data) {
+		return nil, false
+	}
+	return data, true
 }
 
 func searchableText(data []byte) bool {
@@ -401,6 +454,9 @@ func cropMatch(line string) (string, bool) {
 }
 
 func appendShown(ranges []snapshot.Range, line int) []snapshot.Range {
+	if len(ranges) > 0 && line <= ranges[len(ranges)-1].End {
+		return ranges
+	}
 	if len(ranges) > 0 && ranges[len(ranges)-1].End+1 == line {
 		ranges[len(ranges)-1].End = line
 		return ranges

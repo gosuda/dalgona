@@ -1,8 +1,8 @@
 # Harness sandbox
 
-Run dalgona inside a lightweight outer sandbox (container, microVM, or a cloud sandbox runner). The harness sandbox only keeps commands from writing outside the workspace by accident; it is not a security boundary.
+Run dalgona inside a lightweight outer sandbox (container, microVM, or a cloud sandbox runner). The harness sandbox only keeps commands from writing outside the workspace by accident. It is not a security boundary.
 
-The harness sandbox applies only to the Local runner.
+The harness sandbox applies only to the local runner.
 
 ## Modes
 
@@ -12,16 +12,18 @@ The harness sandbox applies only to the Local runner.
 
 A command MAY read any path. Network access MUST stay allowed. A command MAY write only under these roots:
 
-- the session working directory
+- the thread working directory
 - `os.TempDir()`
 - `os.UserCacheDir()`
 - each path in `sandbox_writable_roots`
 
 The runner MUST pass every root through `filepath.EvalSymlinks` before it applies the policy.
 
+If a writable root does not resolve, the command MUST fail without starting.
+
 ## Working directory
 
-An `exec` call MUST resolve a relative `cwd` against the thread working directory to an absolute path before the runner starts. When the mode is `workspace-write`, the resolved directory MUST sit inside the writable roots above (the thread working directory counts), otherwise the call MUST fail without starting. In `off` (including an approved escalation) a relative `cwd` MUST still resolve once against the thread working directory, and the command runs there. The runner MUST NOT add the command directory to the writable roots: only the caller-declared roots confine the command.
+An `exec` call MUST resolve a relative `cwd` against the thread working directory to an absolute path before the runner starts. When the mode is `workspace-write`, the resolved directory MUST sit inside the writable roots above. The thread working directory counts as a writable root. Otherwise, the call MUST fail without starting. In `off` (including an approved escalation) a relative `cwd` MUST still resolve once against the thread working directory, and the command runs there. The runner MUST NOT add the command directory to the writable roots: only the caller-declared roots confine the command.
 
 ## Linux
 
@@ -31,31 +33,33 @@ The shim MUST apply this policy before it execs the command:
 landlock.V3.BestEffort().RestrictPaths(landlock.RODirs("/"), landlock.RWDirs(roots...), landlock.RWDirs("/dev"))
 ```
 
-`Available()` MUST report whether the Landlock ABI exists. When the go-landlock v0.11.0 ABI query reports no ABI, the command MUST run without Landlock. That case MUST NOT fail the command. Linux denies no socket path. On Linux the daemon refuses a sandboxed peer instead.
+`UnavailableCause()` MUST name the reason when the Landlock ABI is missing, and MUST return an empty string when it exists. When the go-landlock v0.11.2 ABI query reports no ABI, the command MUST run without Landlock. That case MUST NOT fail the command. Linux denies no socket path. On Linux the daemon refuses a sandboxed peer instead.
 
 ## macOS
 
-The shim MUST exec `/usr/bin/sandbox-exec -p <profile> -- argv...`. The profile MUST be:
+On macOS, the runner MUST start the command as `/usr/bin/sandbox-exec -p <profile> -- argv...`. The profile MUST be:
 
 ```
-(version 1) (allow default) (deny network-outbound (remote unix-socket (path-literal "<denied>"))...) (deny file-write*) (allow file-write* (subpath "<root>")...) (allow file-write* (literal "/dev/null") (literal "/dev/zero") (regex #"^/dev/tty") (regex #"^/dev/fd/"))
+(version 1) (allow default) (deny network-outbound (remote unix-socket (path-literal "<denied>")))... (deny file-write*) (allow file-write* (subpath "<root>"))... (allow file-write* (literal "/dev/null") (literal "/dev/zero") (regex #"^/dev/tty") (regex #"^/dev/fd/"))
 ```
 
 The agent MUST add the daemon socket to the denied list for each `workspace-write` exec call. The runner MUST apply the denied list on macOS. The runner MUST pass no denied list when the mode is `off`. For each denied socket the profile MUST deny both the cleaned path and the resolved path when they differ. A missing socket MUST resolve through its real parent directory. The call MUST fail when the parent directory does not resolve. Each denied path MUST escape `"` and `\` the same way a writable root does. A denied path with a control character MUST fail the command.
 
 ## No harness sandbox
 
-Windows MUST always run without a harness sandbox. Linux MUST do the same when `Available()` is false. The decider state MUST carry `sandboxed=false`. The status row MUST show `auto (no sandbox)`. The runner MUST NOT raise an error for this fallback. It MUST NOT report an unsandboxed process as confined.
+Windows, Linux without Landlock, and macOS without `/usr/bin/sandbox-exec` have no harness sandbox. `runner.UnavailableCause()` names the reason. On a local-runner thread whose sandbox is `workspace-write`, the first `exec` call that would run confined MUST NOT start before the user chooses. The server sends `warning` and then the sandbox question. `Accept` MUST send every later exec call of the thread that reaches this choice to the human approval path, without session grants. `Dangerously accept` MUST run exec calls without confinement under the thread's approval mode. A plugin hook or a static rule decides an exec call before this choice. The choice does not apply to that call. The agent MUST journal the choice as `sandbox.chosen` and MUST reuse it. Recovery MUST NOT ask again. Without a subscribed client the call MUST be declined with `declined: no client could choose how to run without a sandbox (<cause>); set sandbox = \"off\" to run without one`. A sandbox set to `off`, and approval mode `yolo`, MUST never ask. `command/exec` is a user command and MUST NOT ask. The runner MUST NOT report an unsandboxed process as confined.
 
 ## Remote
 
-A remote box MUST ignore the sandbox mode. The box is the sandbox. A request that reaches the exec server over the websocket box channel MUST NOT weaken the sandbox below the server start mode, and the server MUST fail the request closed with `-32602` when it does. Remote and box runners carry no deny list: no daemon socket exists in a box.
+A remote box MUST ignore the sandbox mode. The box is the sandbox. A request that reaches the exec server over the websocket box channel MUST NOT weaken the sandbox below the server start mode. The server MUST fail such a request closed with `-32602`. Remote and box runners carry no deny list: no daemon socket exists in a box.
+
+On the box channel, the exec server MUST accept any requested sandbox mode when `DALGONA_SANDBOX_MODE` is unset or `off`. An unknown `DALGONA_SANDBOX_MODE` value MUST set the server start mode to `workspace-write`.
 
 ## Daemon socket visibility
 
-The daemon socket (`<home>/dalgona.sock`, mode `0600`) MUST stay out of sandboxed child environments: the runner MUST strip `DALGONA_HOME` and `DAL_HOME` from them, so the child cannot read the socket path from its environment. `off` MUST keep the parent environment unchanged.
+The daemon socket (`<home>/dalgona.sock`, mode `0600`) MUST stay out of sandboxed child environments. The runner MUST strip `DALGONA_HOME` and `DAL_HOME` from sandboxed child environments. The child cannot read the socket path from its environment. With mode `off`, the runner MUST keep `DALGONA_HOME` and `DAL_HOME` in the child environment.
 
-This hiding is best-effort, not a boundary. Landlock filesystem rules do not mediate `connect(2)` to an existing pathname unix socket: under this policy a denied write outside the roots still leaves a connect to a pathname socket there working. Landlock scoping covers abstract unix sockets only, and the daemon socket is a pathname socket. `HOME` stays in the child environment, so `$HOME/.dalgona/dalgona.sock` remains guessable, and reads are allowed on every path. A sandboxed child of the same uid can therefore still dial the socket. On Linux the daemon MUST refuse to serve that peer (see [daemon.md](daemon.md)). On macOS the seatbelt profile MUST deny the connect itself.
+This hiding is best-effort, not a boundary. Landlock filesystem rules do not mediate `connect(2)` to an existing pathname unix socket. Under this policy, a denied write outside the roots does not stop a connect to a pathname socket there. Landlock scoping covers abstract unix sockets only, and the daemon socket is a pathname socket. `HOME` stays in the child environment, so `$HOME/.dalgona/dalgona.sock` remains guessable, and reads are allowed on every path. A sandboxed child of the same uid can therefore still dial the socket. On Linux the daemon MUST refuse to serve that peer (see [daemon.md](daemon.md)). On macOS the seatbelt profile MUST deny the connect itself.
 
 The local sandbox limits file writes. A sandboxed command can still reach other services of the same user (for example the systemd user manager or a container daemon). It is not a boundary against a hostile process. A process outside the sandbox that hands an open daemon connection to a sandboxed command is out of scope.
 

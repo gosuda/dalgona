@@ -1,12 +1,14 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,7 +203,7 @@ func (s *replacingService) Attach(ctx context.Context, id string) (string, error
 
 func TestTokenIgnoresProviderAPIKeyEnvironment(t *testing.T) {
 	home := t.TempDir()
-	store, err := auth.New(home)
+	store, err := auth.Load(home)
 	must(t, err)
 	must(t, store.SetAPIKey("cloudflare", "worker-secret"))
 	t.Setenv("CLOUDFLARE_API_KEY", "account-key")
@@ -302,6 +304,26 @@ func TestBoxPathMapsThreadCwdToWorkspace(t *testing.T) {
 		if got := l.boxPath(in); got != want {
 			t.Errorf("boxPath(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestCloudMainRefusesCloudflareUp(t *testing.T) {
+	cfg := config.Config{
+		Home:    t.TempDir(),
+		Runners: map[string]config.RunnerSpec{"edge": {Service: "cloudflare", URL: "https://worker.example"}},
+	}
+	var stdout, stderr bytes.Buffer
+	code := CloudMain(t.Context(), Options{Config: cfg}, []string{"up", "edge"}, IO{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
+	if code != 1 {
+		t.Fatalf("CloudMain exit = %d, want 1", code)
+	}
+	wantErr := cloudflareRefusal + "\n"
+	if stderr.String() != wantErr {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), wantErr)
+	}
+	wantOut := "sign in inside the box with `dalgona --remote edge login`\n"
+	if stdout.String() != wantOut {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), wantOut)
 	}
 }
 

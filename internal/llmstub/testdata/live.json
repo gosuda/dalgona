@@ -1,0 +1,1998 @@
+{
+ "models": [
+  {
+   "id": "qwen-test",
+   "context_length": 32000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image"
+    ]
+   }
+  },
+  {
+   "id": "qwen-small",
+   "context_length": 8000
+  }
+ ],
+ "turns": [
+  {
+   "id": "t-judge",
+   "when": {
+    "any_text": "\"off_task\""
+   },
+   "steps": [
+    {
+     "text": "{\"sound\":0.04,\"lost_code\":0.97,\"placeholder\":0.02,\"off_task\":0.01}"
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-judge-turn",
+   "when": {
+    "any_text": "\"incomplete\""
+   },
+   "steps": [
+    {
+     "text": "{\"sound\":0.04,\"incomplete\":0.03}"
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-edit-review-continue",
+   "when": {
+    "user": "<edit-review call="
+   },
+   "steps": [
+    {
+     "text": "Reviewed the changed lines. Edited notes.md."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-compact",
+   "when": {
+    "any_text": "ummar"
+   },
+   "once": true,
+   "steps": [
+    {
+     "text": "Summary: the user read a.txt and edited notes.md."
+    },
+    {
+     "finish": "stop",
+     "usage": {
+      "prompt_tokens": 900,
+      "completion_tokens": 30
+     }
+    }
+   ]
+  },
+  {
+   "id": "t-md",
+   "when": {
+    "user": "show markdown"
+   },
+   "steps": [
+    {
+     "reasoning": "Planning the answer."
+    },
+    {
+     "delay_ms": 300
+    },
+    {
+     "reasoning": "Planning the answer."
+    },
+    {
+     "delay_ms": 300
+    },
+    {
+     "reasoning": "Planning the answer."
+    },
+    {
+     "text": "## Heading\n\n- one\n- two\n- three\n\n```go\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tx := 1\n\tfmt.Println(\"hello\", x)\n}\n```\n\n| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n\nabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij\n\n달고나 테스트 문장입니다\n\n\u001b]0;pwned\u0007\u001b[2Jafter\n"
+    },
+    {
+     "finish": "stop",
+     "usage": {
+      "prompt_tokens": 1200,
+      "completion_tokens": 340
+     }
+    }
+   ]
+  },
+  {
+   "id": "t-read",
+   "when": {
+    "user": "read a.txt"
+   },
+   "steps": [
+    {
+     "reasoning": "Look at the file."
+    },
+    {
+     "text": "checking"
+    },
+    {
+     "tool_call": {
+      "id": "call-read",
+      "name": "read",
+      "arguments": {
+       "path": "a.txt"
+      },
+      "chunks": 3
+     }
+    },
+    {
+     "finish": "tool_calls",
+     "usage": {
+      "prompt_tokens": 1200,
+      "completion_tokens": 40
+     }
+    }
+   ]
+  },
+  {
+   "id": "t-read-2",
+   "when": {
+    "tool_result": "call-read"
+   },
+   "steps": [
+    {
+     "text": "a.txt says hello."
+    },
+    {
+     "finish": "stop",
+     "usage": {
+      "prompt_tokens": 1300,
+      "completion_tokens": 12
+     }
+    }
+   ]
+  },
+  {
+   "id": "t-exec",
+   "when": {
+    "user": "run the counter"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-exec",
+      "name": "exec",
+      "arguments": {
+       "command": "seq 1 40"
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-exec-2",
+   "when": {
+    "tool_result": "call-exec"
+   },
+   "steps": [
+    {
+     "text": "40 lines."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-exec-fail",
+   "when": {
+    "user": "run a failing command"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-fail",
+      "name": "exec",
+      "arguments": {
+       "command": "./fail-output.sh"
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-exec-fail-2",
+   "when": {
+    "tool_result": "call-fail"
+   },
+   "steps": [
+    {
+     "text": "It failed with exit 3."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-long-cmd",
+   "when": {
+    "user": "approve a long command"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-long",
+      "name": "exec",
+      "arguments": {
+      "command": "printf '%s\\n' 'line 1'\nprintf '%s\\n' 'line 2'\nprintf '%s\\n' 'line 3'\nprintf '%s\\n' 'line 4'\nprintf '%s\\n' 'line 5'\nprintf '%s\\n' 'line 6'\nprintf '%s\\n' 'line 7'\nprintf '%s\\n' 'line 8'\nprintf '%s\\n' 'line 9'\nprintf '%s\\n' 'line 10'\nprintf '%s\\n' 'line 11'\nprintf '%s\\n' 'line 12'\nprintf '%s\\n' 'line 13'\nprintf '%s\\n' 'line 14'\nprintf '%s\\n' 'line 15'\nprintf '%s\\n' 'line 16'\nprintf '%s\\n' 'line 17'\nprintf '%s\\n' 'line 18'\nprintf '%s\\n' 'line 19'\nprintf '%s\\n' 'line 20'\nprintf '%s\\n' 'line 21'\nprintf '%s\\n' 'line 22'\nprintf '%s\\n' 'line 23'\nprintf '%s\\n' 'line 24'\nprintf '%s\\n' 'line 25'\nprintf '%s\\n' 'line 26'\nprintf '%s\\n' 'line 27'\nprintf '%s\\n' 'line 28'\nprintf '%s\\n' 'line 29'\nprintf '%s\\n' 'line 30'\nprintf '%s\\n' 'line 31'\nprintf '%s\\n' 'line 32'\nprintf '%s\\n' 'line 33'\nprintf '%s\\n' 'line 34'\nprintf '%s\\n' 'line 35'\nprintf '%s\\n' 'line 36'\nprintf '%s\\n' 'line 37'\nprintf '%s\\n' 'line 38'\nprintf '%s\\n' 'line 39'\nprintf '%s\\n' 'line 40'\nprintf '%s\\n' 'line 41'\nprintf '%s\\n' 'line 42'\nprintf '%s\\n' 'line 43'\nprintf '%s\\n' 'line 44'\nprintf '%s\\n' 'line 45'\nprintf '%s\\n' 'line 46'\nprintf '%s\\n' 'line 47'\nprintf '%s\\n' 'line 48'\nprintf '%s\\n' 'line 49'\nprintf '%s\\n' 'line 50'"
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-long-cmd-2",
+   "when": {
+    "tool_result": "call-long"
+   },
+   "steps": [
+    {
+     "text": "ok"
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-patch",
+   "when": {
+    "user": "edit notes"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-patch",
+      "name": "apply_patch",
+      "arguments": {
+       "input": "*** Begin Patch\n*** Update File: notes.md\n@@\n-old line\n+new line\n*** End Patch\n"
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-patch-2",
+   "when": {
+    "tool_result": "call-patch"
+   },
+   "steps": [
+    {
+     "text": "Edited notes.md."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-plan",
+   "when": {
+    "user": "make a plan"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-plan",
+      "name": "eval",
+      "arguments": {
+       "code": "tools.todo(items = [{'text': 'Read the code', 'status': 'done'}, {'text': 'Write the fix', 'status': 'in_progress'}, {'text': 'Run the tests', 'status': 'pending'}])"
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-plan-2",
+   "when": {
+    "tool_result": "call-plan"
+   },
+   "steps": [
+    {
+     "text": "Plan set."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-sub",
+   "when": {
+    "user": "spawn a helper"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-sub",
+      "name": "eval",
+      "arguments": {
+       "code": "tools.task(prompt = 'helper task: count files')"
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-sub-2",
+   "when": {
+    "tool_result": "call-sub"
+   },
+   "steps": [
+    {
+     "text": "The helper counted 5 files."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-ask",
+   "when": {
+    "user": "ask me"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-ask",
+      "name": "ask",
+      "arguments": {
+       "questions": [
+        {
+         "header": "Colour",
+         "question": "Which colour?",
+         "options": [
+          {
+           "label": "Orange",
+           "description": "Warm.",
+           "preview": "orange"
+          },
+          {
+           "label": "Slate",
+           "description": "Cool."
+          }
+         ]
+        },
+        {
+         "header": "Files",
+         "question": "Which files?",
+         "multi_select": true,
+         "options": [
+          {
+           "label": "a.txt",
+           "description": "The notes file."
+          },
+          {
+           "label": "notes.md",
+           "description": "The markdown file."
+          },
+          {
+           "label": "src/main.go",
+           "description": "The program."
+          }
+         ]
+        }
+       ]
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-ask-2",
+   "when": {
+    "tool_result": "call-ask"
+   },
+   "steps": [
+    {
+     "text": "Thanks."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-slow",
+   "when": {
+    "user": "take your time"
+   },
+   "steps": [
+    {
+     "text": "Starting."
+    },
+    {
+     "delay_ms": 30000
+    },
+    {
+     "text": "Finished."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-429",
+   "when": {
+    "user": "rate limit short"
+   },
+   "once": true,
+   "status": 429,
+   "retry_after": "2",
+   "body": {
+    "error": {
+     "code": "rate_limit",
+     "message": "slow down"
+    }
+   }
+  },
+  {
+   "id": "t-429-ok",
+   "when": {
+    "user": "rate limit short"
+   },
+   "steps": [
+    {
+     "text": "Recovered."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-429-long",
+   "when": {
+    "user": "rate limit long"
+   },
+   "status": 429,
+   "retry_after": "120",
+   "body": {
+    "error": {
+     "code": "rate_limit",
+     "message": "slow down"
+    }
+   }
+  },
+  {
+   "id": "t-429-over",
+   "when": {
+    "user": "rate limit over"
+   },
+   "status": 429,
+   "retry_after": "301",
+   "body": {
+    "error": {
+     "code": "rate_limit",
+     "message": "slow down"
+    }
+   }
+  },
+  {
+   "id": "t-402",
+   "when": {
+    "user": "quota please"
+   },
+   "status": 402,
+   "body": {
+    "error": {
+     "code": "insufficient_quota",
+     "message": "quota exhausted"
+    }
+   }
+  },
+  {
+   "id": "t-midfail",
+   "when": {
+    "user": "break the stream"
+   },
+   "steps": [
+    {
+     "text": "partial"
+    },
+    {
+     "error_frame": {
+      "code": "server_error",
+      "message": "upstream reset"
+     }
+    }
+   ]
+  },
+  {
+   "id": "t-drop",
+   "when": {
+    "user": "drop the stream"
+   },
+   "steps": [
+    {
+     "text": "partial"
+    },
+    {
+     "drop": true
+    }
+   ]
+  },
+  {
+   "id": "t-ultra",
+   "when": {
+    "user": "ultrathink about it"
+   },
+   "steps": [
+    {
+     "text": "Thought hard."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-long",
+   "when": {
+    "user": "long output"
+   },
+   "steps": [
+    {
+     "text": "line 1\n"
+    },
+    {
+     "text": "line 2\n"
+    },
+    {
+     "text": "line 3\n"
+    },
+    {
+     "text": "line 4\n"
+    },
+    {
+     "text": "line 5\n"
+    },
+    {
+     "text": "line 6\n"
+    },
+    {
+     "text": "line 7\n"
+    },
+    {
+     "text": "line 8\n"
+    },
+    {
+     "text": "line 9\n"
+    },
+    {
+     "text": "line 10\n"
+    },
+    {
+     "text": "line 11\n"
+    },
+    {
+     "text": "line 12\n"
+    },
+    {
+     "text": "line 13\n"
+    },
+    {
+     "text": "line 14\n"
+    },
+    {
+     "text": "line 15\n"
+    },
+    {
+     "text": "line 16\n"
+    },
+    {
+     "text": "line 17\n"
+    },
+    {
+     "text": "line 18\n"
+    },
+    {
+     "text": "line 19\n"
+    },
+    {
+     "text": "line 20\n"
+    },
+    {
+     "text": "line 21\n"
+    },
+    {
+     "text": "line 22\n"
+    },
+    {
+     "text": "line 23\n"
+    },
+    {
+     "text": "line 24\n"
+    },
+    {
+     "text": "line 25\n"
+    },
+    {
+     "text": "line 26\n"
+    },
+    {
+     "text": "line 27\n"
+    },
+    {
+     "text": "line 28\n"
+    },
+    {
+     "text": "line 29\n"
+    },
+    {
+     "text": "line 30\n"
+    },
+    {
+     "text": "line 31\n"
+    },
+    {
+     "text": "line 32\n"
+    },
+    {
+     "text": "line 33\n"
+    },
+    {
+     "text": "line 34\n"
+    },
+    {
+     "text": "line 35\n"
+    },
+    {
+     "text": "line 36\n"
+    },
+    {
+     "text": "line 37\n"
+    },
+    {
+     "text": "line 38\n"
+    },
+    {
+     "text": "line 39\n"
+    },
+    {
+     "text": "line 40\n"
+    },
+    {
+     "text": "line 41\n"
+    },
+    {
+     "text": "line 42\n"
+    },
+    {
+     "text": "line 43\n"
+    },
+    {
+     "text": "line 44\n"
+    },
+    {
+     "text": "line 45\n"
+    },
+    {
+     "text": "line 46\n"
+    },
+    {
+     "text": "line 47\n"
+    },
+    {
+     "text": "line 48\n"
+    },
+    {
+     "text": "line 49\n"
+    },
+    {
+     "text": "line 50\n"
+    },
+    {
+     "delay_ms": 20
+    },
+    {
+     "text": "line 51\n"
+    },
+    {
+     "text": "line 52\n"
+    },
+    {
+     "text": "line 53\n"
+    },
+    {
+     "text": "line 54\n"
+    },
+    {
+     "text": "line 55\n"
+    },
+    {
+     "text": "line 56\n"
+    },
+    {
+     "text": "line 57\n"
+    },
+    {
+     "text": "line 58\n"
+    },
+    {
+     "text": "line 59\n"
+    },
+    {
+     "text": "line 60\n"
+    },
+    {
+     "text": "line 61\n"
+    },
+    {
+     "text": "line 62\n"
+    },
+    {
+     "text": "line 63\n"
+    },
+    {
+     "text": "line 64\n"
+    },
+    {
+     "text": "line 65\n"
+    },
+    {
+     "text": "line 66\n"
+    },
+    {
+     "text": "line 67\n"
+    },
+    {
+     "text": "line 68\n"
+    },
+    {
+     "text": "line 69\n"
+    },
+    {
+     "text": "line 70\n"
+    },
+    {
+     "text": "line 71\n"
+    },
+    {
+     "text": "line 72\n"
+    },
+    {
+     "text": "line 73\n"
+    },
+    {
+     "text": "line 74\n"
+    },
+    {
+     "text": "line 75\n"
+    },
+    {
+     "text": "line 76\n"
+    },
+    {
+     "text": "line 77\n"
+    },
+    {
+     "text": "line 78\n"
+    },
+    {
+     "text": "line 79\n"
+    },
+    {
+     "text": "line 80\n"
+    },
+    {
+     "text": "line 81\n"
+    },
+    {
+     "text": "line 82\n"
+    },
+    {
+     "text": "line 83\n"
+    },
+    {
+     "text": "line 84\n"
+    },
+    {
+     "text": "line 85\n"
+    },
+    {
+     "text": "line 86\n"
+    },
+    {
+     "text": "line 87\n"
+    },
+    {
+     "text": "line 88\n"
+    },
+    {
+     "text": "line 89\n"
+    },
+    {
+     "text": "line 90\n"
+    },
+    {
+     "text": "line 91\n"
+    },
+    {
+     "text": "line 92\n"
+    },
+    {
+     "text": "line 93\n"
+    },
+    {
+     "text": "line 94\n"
+    },
+    {
+     "text": "line 95\n"
+    },
+    {
+     "text": "line 96\n"
+    },
+    {
+     "text": "line 97\n"
+    },
+    {
+     "text": "line 98\n"
+    },
+    {
+     "text": "line 99\n"
+    },
+    {
+     "text": "line 100\n"
+    },
+    {
+     "delay_ms": 20
+    },
+    {
+     "text": "line 101\n"
+    },
+    {
+     "text": "line 102\n"
+    },
+    {
+     "text": "line 103\n"
+    },
+    {
+     "text": "line 104\n"
+    },
+    {
+     "text": "line 105\n"
+    },
+    {
+     "text": "line 106\n"
+    },
+    {
+     "text": "line 107\n"
+    },
+    {
+     "text": "line 108\n"
+    },
+    {
+     "text": "line 109\n"
+    },
+    {
+     "text": "line 110\n"
+    },
+    {
+     "text": "line 111\n"
+    },
+    {
+     "text": "line 112\n"
+    },
+    {
+     "text": "line 113\n"
+    },
+    {
+     "text": "line 114\n"
+    },
+    {
+     "text": "line 115\n"
+    },
+    {
+     "text": "line 116\n"
+    },
+    {
+     "text": "line 117\n"
+    },
+    {
+     "text": "line 118\n"
+    },
+    {
+     "text": "line 119\n"
+    },
+    {
+     "text": "line 120\n"
+    },
+    {
+     "text": "line 121\n"
+    },
+    {
+     "text": "line 122\n"
+    },
+    {
+     "text": "line 123\n"
+    },
+    {
+     "text": "line 124\n"
+    },
+    {
+     "text": "line 125\n"
+    },
+    {
+     "text": "line 126\n"
+    },
+    {
+     "text": "line 127\n"
+    },
+    {
+     "text": "line 128\n"
+    },
+    {
+     "text": "line 129\n"
+    },
+    {
+     "text": "line 130\n"
+    },
+    {
+     "text": "line 131\n"
+    },
+    {
+     "text": "line 132\n"
+    },
+    {
+     "text": "line 133\n"
+    },
+    {
+     "text": "line 134\n"
+    },
+    {
+     "text": "line 135\n"
+    },
+    {
+     "text": "line 136\n"
+    },
+    {
+     "text": "line 137\n"
+    },
+    {
+     "text": "line 138\n"
+    },
+    {
+     "text": "line 139\n"
+    },
+    {
+     "text": "line 140\n"
+    },
+    {
+     "text": "line 141\n"
+    },
+    {
+     "text": "line 142\n"
+    },
+    {
+     "text": "line 143\n"
+    },
+    {
+     "text": "line 144\n"
+    },
+    {
+     "text": "line 145\n"
+    },
+    {
+     "text": "line 146\n"
+    },
+    {
+     "text": "line 147\n"
+    },
+    {
+     "text": "line 148\n"
+    },
+    {
+     "text": "line 149\n"
+    },
+    {
+     "text": "line 150\n"
+    },
+    {
+     "delay_ms": 20
+    },
+    {
+     "text": "line 151\n"
+    },
+    {
+     "text": "line 152\n"
+    },
+    {
+     "text": "line 153\n"
+    },
+    {
+     "text": "line 154\n"
+    },
+    {
+     "text": "line 155\n"
+    },
+    {
+     "text": "line 156\n"
+    },
+    {
+     "text": "line 157\n"
+    },
+    {
+     "text": "line 158\n"
+    },
+    {
+     "text": "line 159\n"
+    },
+    {
+     "text": "line 160\n"
+    },
+    {
+     "text": "line 161\n"
+    },
+    {
+     "text": "line 162\n"
+    },
+    {
+     "text": "line 163\n"
+    },
+    {
+     "text": "line 164\n"
+    },
+    {
+     "text": "line 165\n"
+    },
+    {
+     "text": "line 166\n"
+    },
+    {
+     "text": "line 167\n"
+    },
+    {
+     "text": "line 168\n"
+    },
+    {
+     "text": "line 169\n"
+    },
+    {
+     "text": "line 170\n"
+    },
+    {
+     "text": "line 171\n"
+    },
+    {
+     "text": "line 172\n"
+    },
+    {
+     "text": "line 173\n"
+    },
+    {
+     "text": "line 174\n"
+    },
+    {
+     "text": "line 175\n"
+    },
+    {
+     "text": "line 176\n"
+    },
+    {
+     "text": "line 177\n"
+    },
+    {
+     "text": "line 178\n"
+    },
+    {
+     "text": "line 179\n"
+    },
+    {
+     "text": "line 180\n"
+    },
+    {
+     "text": "line 181\n"
+    },
+    {
+     "text": "line 182\n"
+    },
+    {
+     "text": "line 183\n"
+    },
+    {
+     "text": "line 184\n"
+    },
+    {
+     "text": "line 185\n"
+    },
+    {
+     "text": "line 186\n"
+    },
+    {
+     "text": "line 187\n"
+    },
+    {
+     "text": "line 188\n"
+    },
+    {
+     "text": "line 189\n"
+    },
+    {
+     "text": "line 190\n"
+    },
+    {
+     "text": "line 191\n"
+    },
+    {
+     "text": "line 192\n"
+    },
+    {
+     "text": "line 193\n"
+    },
+    {
+     "text": "line 194\n"
+    },
+    {
+     "text": "line 195\n"
+    },
+    {
+     "text": "line 196\n"
+    },
+    {
+     "text": "line 197\n"
+    },
+    {
+     "text": "line 198\n"
+    },
+    {
+     "text": "line 199\n"
+    },
+    {
+     "text": "line 200\n"
+    },
+    {
+     "delay_ms": 20
+    },
+    {
+     "text": "line 201\n"
+    },
+    {
+     "text": "line 202\n"
+    },
+    {
+     "text": "line 203\n"
+    },
+    {
+     "text": "line 204\n"
+    },
+    {
+     "text": "line 205\n"
+    },
+    {
+     "text": "line 206\n"
+    },
+    {
+     "text": "line 207\n"
+    },
+    {
+     "text": "line 208\n"
+    },
+    {
+     "text": "line 209\n"
+    },
+    {
+     "text": "line 210\n"
+    },
+    {
+     "text": "line 211\n"
+    },
+    {
+     "text": "line 212\n"
+    },
+    {
+     "text": "line 213\n"
+    },
+    {
+     "text": "line 214\n"
+    },
+    {
+     "text": "line 215\n"
+    },
+    {
+     "text": "line 216\n"
+    },
+    {
+     "text": "line 217\n"
+    },
+    {
+     "text": "line 218\n"
+    },
+    {
+     "text": "line 219\n"
+    },
+    {
+     "text": "line 220\n"
+    },
+    {
+     "text": "line 221\n"
+    },
+    {
+     "text": "line 222\n"
+    },
+    {
+     "text": "line 223\n"
+    },
+    {
+     "text": "line 224\n"
+    },
+    {
+     "text": "line 225\n"
+    },
+    {
+     "text": "line 226\n"
+    },
+    {
+     "text": "line 227\n"
+    },
+    {
+     "text": "line 228\n"
+    },
+    {
+     "text": "line 229\n"
+    },
+    {
+     "text": "line 230\n"
+    },
+    {
+     "text": "line 231\n"
+    },
+    {
+     "text": "line 232\n"
+    },
+    {
+     "text": "line 233\n"
+    },
+    {
+     "text": "line 234\n"
+    },
+    {
+     "text": "line 235\n"
+    },
+    {
+     "text": "line 236\n"
+    },
+    {
+     "text": "line 237\n"
+    },
+    {
+     "text": "line 238\n"
+    },
+    {
+     "text": "line 239\n"
+    },
+    {
+     "text": "line 240\n"
+    },
+    {
+     "text": "line 241\n"
+    },
+    {
+     "text": "line 242\n"
+    },
+    {
+     "text": "line 243\n"
+    },
+    {
+     "text": "line 244\n"
+    },
+    {
+     "text": "line 245\n"
+    },
+    {
+     "text": "line 246\n"
+    },
+    {
+     "text": "line 247\n"
+    },
+    {
+     "text": "line 248\n"
+    },
+    {
+     "text": "line 249\n"
+    },
+    {
+     "text": "line 250\n"
+    },
+    {
+     "delay_ms": 20
+    },
+    {
+     "text": "line 251\n"
+    },
+    {
+     "text": "line 252\n"
+    },
+    {
+     "text": "line 253\n"
+    },
+    {
+     "text": "line 254\n"
+    },
+    {
+     "text": "line 255\n"
+    },
+    {
+     "text": "line 256\n"
+    },
+    {
+     "text": "line 257\n"
+    },
+    {
+     "text": "line 258\n"
+    },
+    {
+     "text": "line 259\n"
+    },
+    {
+     "text": "line 260\n"
+    },
+    {
+     "text": "line 261\n"
+    },
+    {
+     "text": "line 262\n"
+    },
+    {
+     "text": "line 263\n"
+    },
+    {
+     "text": "line 264\n"
+    },
+    {
+     "text": "line 265\n"
+    },
+    {
+     "text": "line 266\n"
+    },
+    {
+     "text": "line 267\n"
+    },
+    {
+     "text": "line 268\n"
+    },
+    {
+     "text": "line 269\n"
+    },
+    {
+     "text": "line 270\n"
+    },
+    {
+     "text": "line 271\n"
+    },
+    {
+     "text": "line 272\n"
+    },
+    {
+     "text": "line 273\n"
+    },
+    {
+     "text": "line 274\n"
+    },
+    {
+     "text": "line 275\n"
+    },
+    {
+     "text": "line 276\n"
+    },
+    {
+     "text": "line 277\n"
+    },
+    {
+     "text": "line 278\n"
+    },
+    {
+     "text": "line 279\n"
+    },
+    {
+     "text": "line 280\n"
+    },
+    {
+     "text": "line 281\n"
+    },
+    {
+     "text": "line 282\n"
+    },
+    {
+     "text": "line 283\n"
+    },
+    {
+     "text": "line 284\n"
+    },
+    {
+     "text": "line 285\n"
+    },
+    {
+     "text": "line 286\n"
+    },
+    {
+     "text": "line 287\n"
+    },
+    {
+     "text": "line 288\n"
+    },
+    {
+     "text": "line 289\n"
+    },
+    {
+     "text": "line 290\n"
+    },
+    {
+     "text": "line 291\n"
+    },
+    {
+     "text": "line 292\n"
+    },
+    {
+     "text": "line 293\n"
+    },
+    {
+     "text": "line 294\n"
+    },
+    {
+     "text": "line 295\n"
+    },
+    {
+     "text": "line 296\n"
+    },
+    {
+     "text": "line 297\n"
+    },
+    {
+     "text": "line 298\n"
+    },
+    {
+     "text": "line 299\n"
+    },
+    {
+     "text": "line 300\n"
+    },
+    {
+     "delay_ms": 20
+    },
+    {
+     "text": "line 301\n"
+    },
+    {
+     "text": "line 302\n"
+    },
+    {
+     "text": "line 303\n"
+    },
+    {
+     "text": "line 304\n"
+    },
+    {
+     "text": "line 305\n"
+    },
+    {
+     "text": "line 306\n"
+    },
+    {
+     "text": "line 307\n"
+    },
+    {
+     "text": "line 308\n"
+    },
+    {
+     "text": "line 309\n"
+    },
+    {
+     "text": "line 310\n"
+    },
+    {
+     "text": "line 311\n"
+    },
+    {
+     "text": "line 312\n"
+    },
+    {
+     "text": "line 313\n"
+    },
+    {
+     "text": "line 314\n"
+    },
+    {
+     "text": "line 315\n"
+    },
+    {
+     "text": "line 316\n"
+    },
+    {
+     "text": "line 317\n"
+    },
+    {
+     "text": "line 318\n"
+    },
+    {
+     "text": "line 319\n"
+    },
+    {
+     "text": "line 320\n"
+    },
+    {
+     "text": "line 321\n"
+    },
+    {
+     "text": "line 322\n"
+    },
+    {
+     "text": "line 323\n"
+    },
+    {
+     "text": "line 324\n"
+    },
+    {
+     "text": "line 325\n"
+    },
+    {
+     "text": "line 326\n"
+    },
+    {
+     "text": "line 327\n"
+    },
+    {
+     "text": "line 328\n"
+    },
+    {
+     "text": "line 329\n"
+    },
+    {
+     "text": "line 330\n"
+    },
+    {
+     "text": "line 331\n"
+    },
+    {
+     "text": "line 332\n"
+    },
+    {
+     "text": "line 333\n"
+    },
+    {
+     "text": "line 334\n"
+    },
+    {
+     "text": "line 335\n"
+    },
+    {
+     "text": "line 336\n"
+    },
+    {
+     "text": "line 337\n"
+    },
+    {
+     "text": "line 338\n"
+    },
+    {
+     "text": "line 339\n"
+    },
+    {
+     "text": "line 340\n"
+    },
+    {
+     "text": "line 341\n"
+    },
+    {
+     "text": "line 342\n"
+    },
+    {
+     "text": "line 343\n"
+    },
+    {
+     "text": "line 344\n"
+    },
+    {
+     "text": "line 345\n"
+    },
+    {
+     "text": "line 346\n"
+    },
+    {
+     "text": "line 347\n"
+    },
+    {
+     "text": "line 348\n"
+    },
+    {
+     "text": "line 349\n"
+    },
+    {
+     "text": "line 350\n"
+    },
+    {
+     "delay_ms": 20
+    },
+    {
+     "text": "line 351\n"
+    },
+    {
+     "text": "line 352\n"
+    },
+    {
+     "text": "line 353\n"
+    },
+    {
+     "text": "line 354\n"
+    },
+    {
+     "text": "line 355\n"
+    },
+    {
+     "text": "line 356\n"
+    },
+    {
+     "text": "line 357\n"
+    },
+    {
+     "text": "line 358\n"
+    },
+    {
+     "text": "line 359\n"
+    },
+    {
+     "text": "line 360\n"
+    },
+    {
+     "text": "line 361\n"
+    },
+    {
+     "text": "line 362\n"
+    },
+    {
+     "text": "line 363\n"
+    },
+    {
+     "text": "line 364\n"
+    },
+    {
+     "text": "line 365\n"
+    },
+    {
+     "text": "line 366\n"
+    },
+    {
+     "text": "line 367\n"
+    },
+    {
+     "text": "line 368\n"
+    },
+    {
+     "text": "line 369\n"
+    },
+    {
+     "text": "line 370\n"
+    },
+    {
+     "text": "line 371\n"
+    },
+    {
+     "text": "line 372\n"
+    },
+    {
+     "text": "line 373\n"
+    },
+    {
+     "text": "line 374\n"
+    },
+    {
+     "text": "line 375\n"
+    },
+    {
+     "text": "line 376\n"
+    },
+    {
+     "text": "line 377\n"
+    },
+    {
+     "text": "line 378\n"
+    },
+    {
+     "text": "line 379\n"
+    },
+    {
+     "text": "line 380\n"
+    },
+    {
+     "text": "line 381\n"
+    },
+    {
+     "text": "line 382\n"
+    },
+    {
+     "text": "line 383\n"
+    },
+    {
+     "text": "line 384\n"
+    },
+    {
+     "text": "line 385\n"
+    },
+    {
+     "text": "line 386\n"
+    },
+    {
+     "text": "line 387\n"
+    },
+    {
+     "text": "line 388\n"
+    },
+    {
+     "text": "line 389\n"
+    },
+    {
+     "text": "line 390\n"
+    },
+    {
+     "text": "line 391\n"
+    },
+    {
+     "text": "line 392\n"
+    },
+    {
+     "text": "line 393\n"
+    },
+    {
+     "text": "line 394\n"
+    },
+    {
+     "text": "line 395\n"
+    },
+    {
+     "text": "line 396\n"
+    },
+    {
+     "text": "line 397\n"
+    },
+    {
+     "text": "line 398\n"
+    },
+    {
+     "text": "line 399\n"
+    },
+    {
+     "text": "line 400\n"
+    },
+    {
+     "delay_ms": 20
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-exec-300",
+   "when": {
+    "user": "count to 300"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-exec300",
+      "name": "exec",
+      "arguments": {
+       "command": "seq 1 300"
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-exec-300-2",
+   "when": {
+    "tool_result": "call-exec300"
+   },
+   "steps": [
+    {
+     "text": "300 lines."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-ratchet",
+   "when": {
+    "user": "start a ratchet"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-ratchet",
+      "name": "ratchet",
+      "arguments": {
+       "action": "init",
+       "flow": "live",
+       "cases": [
+        "a.txt"
+       ],
+       "harness": [
+        "src/main.go"
+       ],
+       "change": [
+        "notes.md"
+       ]
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-ratchet-2",
+   "when": {
+    "tool_result": "call-ratchet"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-ratchet-approve",
+      "name": "ratchet",
+      "arguments": {
+       "action": "approve",
+       "flow": "live",
+       "stage": "inputs",
+       "question": "Approve the live fixture inputs?",
+       "preview": "a.txt: hello from a.txt"
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-ratchet-approved",
+   "when": {
+    "tool_result": "call-ratchet-approve"
+   },
+   "steps": [
+    {
+     "text": "Ratchet approval response received."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-image",
+   "when": {
+    "user": "describe the image"
+   },
+   "steps": [
+    {
+     "text": "A single pixel."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-followup",
+   "when": {
+    "user": "and then this"
+   },
+   "steps": [
+    {
+     "text": "Noted."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-slash",
+   "when": {
+    "user": "/etc/hosts is a path"
+   },
+   "steps": [
+    {
+     "text": "Path noted."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-paste",
+   "when": {
+    "any_text": "PASTE-MARK-30"
+   },
+   "steps": [
+    {
+     "text": "Got 30 lines."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-multi",
+   "when": {
+    "any_text": "first line\nsecond line"
+   },
+   "steps": [
+    {
+     "text": "Got two lines."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
+   "id": "t-sub-child",
+   "when": {
+    "any_text": "helper task: count files"
+   },
+   "steps": [
+    {
+     "tool_call": {
+      "id": "call-child-yield",
+      "name": "yield",
+      "arguments": {
+       "data": "There are 5 files."
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  }
+ ]
+}

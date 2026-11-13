@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -26,6 +28,11 @@ type fileDoc struct {
 	ApprovalValue        *string                `toml:"approval"`
 	ToolMode             *string                `toml:"tool_mode"`
 	Sandbox              *string                `toml:"sandbox"`
+	Verbosity            *string                `toml:"verbosity"`
+	Theme                *string                `toml:"theme"`
+	Icons                *string                `toml:"icons"`
+	StatusHide           *[]string              `toml:"status_hide"`
+	Notifications        *bool                  `toml:"notifications"`
 	SandboxWritableRoots []string               `toml:"sandbox_writable_roots"`
 	EditStyle            editStyleDoc           `toml:"edit_style"`
 	CompactionThreshold  *float64               `toml:"compaction_threshold"`
@@ -42,6 +49,7 @@ type fileDoc struct {
 	MCPTrustedWorkspaces []string               `toml:"mcp_trusted_workspaces"`
 	Discovery            discoveryDoc           `toml:"discovery"`
 	ApprovalDecider      approvalDeciderDoc     `toml:"approval_decider"`
+	EditReview           editReviewDoc          `toml:"edit_review"`
 	Eval                 *evalDoc               `toml:"eval"`
 	Secrets              secretsDoc             `toml:"secrets"`
 	Keywords             map[string]keywordDoc  `toml:"keywords"`
@@ -183,6 +191,10 @@ type (
 		Decider   *string  `toml:"decider"`
 		Threshold *float64 `toml:"threshold"`
 	}
+	editReviewDoc struct {
+		Enabled  *bool    `toml:"enabled"`
+		Feedback []string `toml:"feedback"`
+	}
 	evalDoc struct {
 		Uses []string `toml:"uses"`
 	}
@@ -233,6 +245,11 @@ func (c *Config) mergeScalars(current layer) error {
 	setString(doc.ApprovalValue, (*string)(&c.Approval))
 	setString(doc.ToolMode, (*string)(&c.ToolMode))
 	setString(doc.Sandbox, (*string)(&c.Sandbox))
+	setString(doc.Verbosity, (*string)(&c.Verbosity))
+	setString(doc.Theme, (*string)(&c.Theme))
+	setString(doc.Icons, (*string)(&c.Icons))
+	setStrings(doc.StatusHide, &c.StatusHide)
+	setBool(doc.Notifications, &c.Notifications)
 	setString(doc.Runner, &c.Runner)
 	setString(doc.Remote, &c.Remote)
 	if doc.SandboxWritableRoots != nil {
@@ -254,6 +271,12 @@ func (c *Config) mergeScalars(current layer) error {
 }
 
 func setString(source *string, target *string) {
+	if source != nil {
+		*target = *source
+	}
+}
+
+func setStrings(source *[]string, target *[]string) {
 	if source != nil {
 		*target = *source
 	}
@@ -335,6 +358,12 @@ func (c *Config) mergeTables(doc *fileDoc) {
 	if doc.ApprovalDecider.Threshold != nil {
 		c.ApprovalDecider.Threshold = *doc.ApprovalDecider.Threshold
 	}
+	if doc.EditReview.Enabled != nil {
+		c.EditReview.Enabled = *doc.EditReview.Enabled
+	}
+	if doc.EditReview.Feedback != nil {
+		c.EditReview.Feedback = doc.EditReview.Feedback
+	}
 	if doc.Eval != nil {
 		c.Eval = EvalConfig{Uses: doc.Eval.Uses, Set: true}
 	}
@@ -366,9 +395,6 @@ func (c *Config) applyFlags(flags Flags) {
 	c.setFlag(flags.Runner, &c.Runner, "runner")
 	c.setFlag(flags.Remote, &c.Remote, "remote")
 	c.setFlag(flags.Cwd, &c.Cwd, "cwd")
-	if flags.Advisor {
-		c.Advisor.Enabled = true
-	}
 }
 
 func (c *Config) setFlag(source string, target *string, key string) {
@@ -391,6 +417,7 @@ func (c *Config) validate() error {
 	errs = append(errs, c.validateRunners()...)
 	errs = append(errs, c.validateKeywords()...)
 	errs = append(errs, c.validateAdvisors()...)
+	errs = append(errs, c.validateStatusHideList()...)
 	return errors.Join(errs...)
 }
 
@@ -408,7 +435,20 @@ func (c *Config) validateEnums() []error {
 	if !one(string(c.ToolMode), "normal", "eval-first", "eval-only") {
 		errs = append(errs, c.valueError("tool_mode", "tool_mode must be one of normal, eval-first, eval-only"))
 	}
+	for _, choice := range []struct{ key, value string }{{"verbosity", string(c.Verbosity)}, {"theme", string(c.Theme)}, {"icons", string(c.Icons)}} {
+		options := optionsOf(choice.key)
+		if !one(choice.value, options...) {
+			errs = append(errs, c.valueError(choice.key, choice.key+" must be one of "+strings.Join(options, ", ")))
+		}
+	}
 	return errs
+}
+
+func (c *Config) validateStatusHideList() []error {
+	if err := validateStatusHide(c.StatusHide); err != nil {
+		return []error{c.valueError("status_hide", err.Error())}
+	}
+	return nil
 }
 
 func (c *Config) validateApprovalDecider() []error {
@@ -500,7 +540,7 @@ func one(value string, allowed ...string) bool {
 
 var keywordWordRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,31}$`)
 
-var builtinKeywords = map[string]bool{"ultrathink": true, "jevify": true, "workflowz": true, "orchestrate": true}
+var builtinKeywords = map[string]bool{"ultrathink": true, "jevify": true, "workflowz": true, "orchestrate": true, "ratchet": true, "decide": true, "simplify": true}
 
 func validateKeyword(home, originFile, word string, keyword KeywordSpec) error {
 	if !keywordWordRe.MatchString(word) {
@@ -527,7 +567,7 @@ func keywordNoticeExists(home, notice string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-var dalgonaOnlyKeys = map[string]bool{"tool_mode": true, "runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "eval": true, "herdr": true, "web": true}
+var dalgonaOnlyKeys = map[string]bool{"runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "herdr": true, "web": true, "edit_review": true}
 
 func validateProductLayer(product Product, current layer) error {
 	if product != ProductDal {
@@ -584,31 +624,62 @@ func tomlKeyLine(raw []byte, node *unstable.Node) int {
 	return 1 + bytes.Count(raw[:offset], []byte{'\n'})
 }
 
-func WriteSetting(home, key string, value any) error {
+var ErrSettingsChanged = errors.New("settings.toml changed")
+
+func WriteSettings(home string, edits ...SettingEdit) error {
+	_, err := WriteSettingsIf(home, "", edits...)
+	return err
+}
+
+func WriteSettingsIf(home, expectedVersion string, edits ...SettingEdit) (string, error) {
 	unlock, err := auth.LockHome(home)
 	if err != nil {
-		return fmt.Errorf("lock settings write: %w", err)
+		return "", fmt.Errorf("lock settings write: %w", err)
 	}
 	defer func() { _ = unlock() }()
-	parts, err := splitSettingKey(key)
-	if err != nil {
-		return err
-	}
 	path := filepath.Join(home, "settings.toml")
 	raw, err := readSettingsFile(path)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if expectedVersion != "" && digestSettings(raw) != expectedVersion {
+		return "", fmt.Errorf("%w; expected version %s", ErrSettingsChanged, expectedVersion)
 	}
 	original, doc, err := decodeSettingsDocument(path, raw)
 	if err != nil {
-		return err
+		return "", err
 	}
-	setNested(doc, parts, value)
+	if err := applySettingEdits(doc, edits); err != nil {
+		return "", err
+	}
+	return persistSettingsDocument(home, path, doc, original)
+}
+
+func applySettingEdits(doc map[string]any, edits []SettingEdit) error {
+	for _, edit := range edits {
+		parts, err := splitSettingKey(edit.Key)
+		if err != nil {
+			return err
+		}
+		setNested(doc, parts, edit.Value)
+	}
+	return nil
+}
+
+func persistSettingsDocument(home, path string, doc map[string]any, original *fileDoc) (string, error) {
 	output, err := encodeSettingsDocument(doc, original)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return persistSettings(home, path, output)
+	if err := persistSettings(home, path, output); err != nil {
+		return "", err
+	}
+	return digestSettings(output), nil
+}
+
+func digestSettings(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func TrustedWorkspaces(home string) ([]string, error) {
@@ -643,7 +714,7 @@ func TrustWorkspace(home, cwd string) error {
 	if slices.Contains(trusted, clean) {
 		return nil
 	}
-	return WriteSetting(home, "mcp_trusted_workspaces", append(trusted, clean))
+	return WriteSettings(home, SettingEdit{Key: "mcp_trusted_workspaces", Value: append(trusted, clean)})
 }
 
 func splitSettingKey(key string) ([]string, error) {

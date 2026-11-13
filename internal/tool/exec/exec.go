@@ -20,7 +20,8 @@ import (
 )
 
 type Tool struct {
-	grace time.Duration
+	grace    time.Duration
+	killWait time.Duration
 }
 
 func New() *Tool { return &Tool{grace: 5 * time.Second} }
@@ -319,6 +320,8 @@ func (t *Tool) terminate(run runner.Runner, id string, state waitState, cause er
 	return result, errors.Join(cause, termErr, waitErr)
 }
 
+var errNoExit = errors.New("exec: process did not report an exit after SIGKILL")
+
 func (t *Tool) awaitExit(run runner.Runner, id string, offset int64, termErr error) (runner.Output, error) {
 	grace := cmp.Or(t.grace, 5*time.Second)
 	deadline := time.Now().Add(grace)
@@ -327,13 +330,25 @@ func (t *Tool) awaitExit(run runner.Runner, id string, offset int64, termErr err
 		if readErr == nil && current.Exit != nil {
 			return current, nil
 		}
-		if termErr == nil && time.Now().Before(deadline) {
-			time.Sleep(20 * time.Millisecond)
-			continue
+		if termErr != nil || !time.Now().Before(deadline) {
+			return t.killAndAwait(run, id, offset)
 		}
-		killErr := signalProcess(run, id, runner.SignalKill)
-		current, readErr = readOnce(run, id, offset)
-		return current, errors.Join(killErr, readErr)
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func (t *Tool) killAndAwait(run runner.Runner, id string, offset int64) (runner.Output, error) {
+	killErr := signalProcess(run, id, runner.SignalKill)
+	deadline := time.Now().Add(cmp.Or(t.killWait, 5*time.Second))
+	for {
+		current, readErr := readOnce(run, id, offset)
+		if readErr == nil && current.Exit != nil {
+			return current, killErr
+		}
+		if !time.Now().Before(deadline) {
+			return current, errors.Join(killErr, readErr, errNoExit)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

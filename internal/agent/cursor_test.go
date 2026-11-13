@@ -13,6 +13,7 @@ import (
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"github.com/gosuda/dalgona/internal/model/cursor"
 	"github.com/gosuda/dalgona/internal/model/cursor/wire"
 )
@@ -24,7 +25,7 @@ type cursorConn struct {
 }
 
 func (c *cursorConn) send(message *wire.AgentServerMessage) {
-	if _, err := c.writer.Write(wire.AppendFrame(nil, 0, wire.AppendAgentServerMessage(nil, message))); err != nil {
+	if _, err := c.writer.Write(connectwire.AppendFrame(nil, 0, wire.AppendAgentServerMessage(nil, message))); err != nil {
 		c.t.Errorf("write cursor frame: %v", err)
 	}
 	c.writer.(http.Flusher).Flush()
@@ -64,7 +65,7 @@ type fakeCursorServer struct {
 func (f *fakeCursorServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/GetUsableModels") {
 		response := wire.GetUsableModelsResponse{Models: []wire.ModelDetails{{ModelIDView: []byte("gpt-5.5")}}}
-		_, _ = w.Write(wire.AppendFrame(nil, 0, wire.AppendGetUsableModelsResponse(nil, &response)))
+		_, _ = w.Write(connectwire.AppendFrame(nil, 0, wire.AppendGetUsableModelsResponse(nil, &response)))
 		return
 	}
 	conn := &cursorConn{t: f.t, writer: w, inbound: make(chan *wire.AgentClientMessage, 64)}
@@ -82,7 +83,7 @@ func (f *fakeCursorServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func readCursorClient(body io.Reader, inbound chan<- *wire.AgentClientMessage) {
 	defer close(inbound)
 	for {
-		frame, err := wire.ReadFrame(body, nil, 1<<24)
+		frame, err := connectwire.ReadFrame(body, nil, 1<<24)
 		if err != nil {
 			return
 		}

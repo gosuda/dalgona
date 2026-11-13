@@ -10,15 +10,15 @@ import (
 
 func eventMembers(e Event) ([]member, error) {
 	switch e.Type() {
-	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeUserMessage:
+	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeTurnJudged, TypeUserMessage:
 		return sessionMembers(e)
-	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
+	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
 		return toolMembers(e)
 	case TypeCompaction, TypeContextPruned, TypeChildSpawned, TypeBranch:
 		return stateMembers(e)
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
 		return scriptMembers(e)
-	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived:
+	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return metadataMembers(e)
 	default:
 		return nil, fmt.Errorf("event: unknown event type %q", e.Type())
@@ -35,10 +35,13 @@ func sessionMembers(e Event) ([]member, error) {
 			field("box_id", stringValue(value.BoxID)), field("baseline", stringValue(value.Baseline)),
 		}, nil
 	case TurnStarted:
-		return []member{field("turn_id", stringValue(value.TurnID))}, nil
+		fields := []member{field("turn_id", stringValue(value.TurnID))}
+		return timeField(fields, "started_at", value.StartedAt), nil
 	case TurnCompleted:
 		fields := []member{field("turn_id", stringValue(value.TurnID)), field("status", stringValue(value.Status))}
-		return optionalString(fields, "error", value.Error), nil
+		return timeField(optionalString(fields, "error", value.Error), "completed_at", value.CompletedAt), nil
+	case TurnJudged:
+		return turnJudgedMembers(value), nil
 	case UserMessage:
 		return userMessageMembers(value), nil
 	default:
@@ -85,6 +88,8 @@ func metadataMembers(e Event) ([]member, error) {
 		return []member{field("name", stringValue(value.Name))}, nil
 	case ThreadArchived:
 		return []member{field("archived", boolValue(value.Archived))}, nil
+	case SandboxChosen:
+		return []member{field("request_id", stringValue(value.RequestID)), field("choice", stringValue(value.Choice)), field("cause", stringValue(value.Cause))}, nil
 	default:
 		return nil, fmt.Errorf("event: %T does not match type %s", e, e.Type())
 	}
@@ -101,6 +106,9 @@ func userMessageMembers(e UserMessage) []member {
 	}
 	if len(e.Mentions) > 0 {
 		fields = append(fields, field("mentions", arrayValue(e.Mentions, mentionValue)))
+	}
+	if len(e.Images) > 0 {
+		fields = append(fields, field("images", arrayValue(e.Images, imageValue)))
 	}
 	if e.Verbatim {
 		fields = append(fields, field("verbatim", boolValue(true)))
@@ -121,6 +129,64 @@ func mentionValue(e Mention) jsontext.Value {
 	return objectValue(optionalBlobField(fields, "text_blob", e.TextBlob)...)
 }
 
+func imageValue(e Image) jsontext.Value {
+	fields := []member{field("mime", stringValue(e.Mime))}
+	fields = optionalString(fields, "path", e.Path)
+	return objectValue(optionalBlobField(fields, "image", &e.Blob)...)
+}
+
+func turnJudgedMembers(e TurnJudged) []member {
+	fields := []member{
+		field("turn_id", stringValue(e.TurnID)), field("by", stringValue(e.By)),
+		field("verdict", stringValue(e.Verdict)), field("paths", arrayValue(e.Paths, stringValue)),
+	}
+	fields = judgedFields(fields, e.Scores, e.Flags, e.Spoken, e.Feedback)
+	if len(e.Skipped) > 0 {
+		fields = append(fields, field("skipped", arrayValue(e.Skipped, stringValue)))
+	}
+	if e.Truncated {
+		fields = append(fields, field("truncated", boolValue(true)))
+	}
+	fields = optionalString(fields, "error", e.Error)
+	return append(fields, field("elapsed_ms", int64Value(e.ElapsedMS)))
+}
+
+func toolJudgedMembers(e ToolJudged) []member {
+	fields := []member{
+		field("call_id", stringValue(e.CallID)), field("turn_id", stringValue(e.TurnID)),
+		field("by", stringValue(e.By)), field("verdict", stringValue(e.Verdict)),
+		field("paths", arrayValue(e.Paths, stringValue)),
+	}
+	fields = judgedFields(fields, e.Scores, e.Flags, e.Spoken, e.Feedback)
+	if e.Truncated {
+		fields = append(fields, field("truncated", boolValue(true)))
+	}
+	if e.Parts > 1 {
+		fields = append(fields, field("parts", intValue(e.Parts)))
+	}
+	if e.FailedParts > 0 {
+		fields = append(fields, field("failed_parts", intValue(e.FailedParts)))
+	}
+	fields = optionalString(fields, "error", e.Error)
+	return append(fields, field("elapsed_ms", int64Value(e.ElapsedMS)))
+}
+
+func judgedFields(fields []member, scores map[string]float64, flags, spoken []string, feedback bool) []member {
+	if len(scores) > 0 {
+		fields = append(fields, field("scores", scoresValue(scores)))
+	}
+	if len(flags) > 0 {
+		fields = append(fields, field("flags", arrayValue(flags, stringValue)))
+	}
+	if len(spoken) > 0 {
+		fields = append(fields, field("spoken", arrayValue(spoken, stringValue)))
+	}
+	if feedback {
+		fields = append(fields, field("feedback", boolValue(true)))
+	}
+	return fields
+}
+
 func toolMembers(e Event) ([]member, error) {
 	switch value := e.(type) {
 	case AssistantMessage:
@@ -129,6 +195,8 @@ func toolMembers(e Event) ([]member, error) {
 		return toolStartedMembers(value), nil
 	case ToolCompleted:
 		return toolCompletedMembers(value), nil
+	case ToolJudged:
+		return toolJudgedMembers(value), nil
 	case ModelRetry:
 		return modelRetryMembers(value), nil
 	case ApprovalRequested:
@@ -156,6 +224,9 @@ func assistantMessageMembers(e AssistantMessage) []member {
 	if e.ContextSeq != 0 {
 		fields = append(fields, field("context_seq", uint64Value(e.ContextSeq)))
 	}
+	if e.ContextWindow != 0 {
+		fields = append(fields, field("context_window", intValue(e.ContextWindow)))
+	}
 	return fields
 }
 
@@ -167,6 +238,9 @@ func toolCallValue(e ToolCall) jsontext.Value {
 	fields = optionalRaw(fields, "args", e.Args)
 	fields = optionalBlobField(fields, "args_blob", e.ArgsBlob)
 	fields = optionalString(fields, "signature", e.Signature)
+	if len(e.RedactedThinking) > 0 {
+		fields = append(fields, field("redacted_thinking", arrayValue(e.RedactedThinking, stringValue)))
+	}
 	return objectValue(fields...)
 }
 
@@ -188,7 +262,7 @@ func toolStartedMembers(e ToolStarted) []member {
 	if len(e.Files) > 0 {
 		fields = append(fields, field("files", arrayValue(e.Files, fileChangeValue)))
 	}
-	return fields
+	return timeField(fields, "started_at", e.StartedAt)
 }
 
 func fileChangeValue(e FileChange) jsontext.Value {
@@ -198,6 +272,9 @@ func fileChangeValue(e FileChange) jsontext.Value {
 	}
 	if e.PreBlob != nil {
 		fields = append(fields, field("pre_blob", blobValue(e.PreBlob)))
+	}
+	if e.PostBlob != nil {
+		fields = append(fields, field("post_blob", blobValue(e.PostBlob)))
 	}
 	return objectValue(fields...)
 }
@@ -213,7 +290,14 @@ func toolCompletedMembers(e ToolCompleted) []member {
 	if e.ExitCode != nil {
 		fields = append(fields, field("exit_code", intValue(*e.ExitCode)))
 	}
-	return optionalRaw(fields, "meta", e.Meta)
+	return timeField(optionalRaw(fields, "meta", e.Meta), "completed_at", e.CompletedAt)
+}
+
+func timeField(fields []member, name string, at time.Time) []member {
+	if at.IsZero() {
+		return fields
+	}
+	return append(fields, field(name, stringValue(at.UTC().Format(time.RFC3339Nano))))
 }
 
 func spillValue(e Spill) jsontext.Value {
@@ -305,7 +389,11 @@ func scriptMembers(e Event) ([]member, error) {
 		fields := []member{field("run_id", stringValue(value.RunID)), field("ok", boolValue(value.OK))}
 		fields = optionalRaw(fields, "value", value.Value)
 		fields = optionalBlobField(fields, "value_blob", value.ValueBlob)
-		return optionalString(fields, "error", value.Error), nil
+		fields = optionalString(fields, "error", value.Error)
+		fields = optionalString(fields, "status", value.Status)
+		fields = optionalString(fields, "code", value.Code)
+		fields = optionalString(fields, "stage", value.Stage)
+		return fields, nil
 	default:
 		return nil, fmt.Errorf("event: %T does not match type %s", e, e.Type())
 	}

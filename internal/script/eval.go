@@ -40,14 +40,14 @@ func NewEval(fx Effects, opts EvalOptions) *Eval {
 	tools := make([]tool.Spec, 0, len(opts.Tools))
 	names := make([]string, 0, len(opts.Tools))
 	for _, spec := range opts.Tools {
-		if spec.Name != EvalName {
+		if inCells(spec.Name) {
 			tools = append(tools, spec)
 			names = append(names, spec.Name)
 		}
 	}
-	allow := opts.Config.Uses
-	if !opts.Config.Set {
-		allow = DefaultUses(opts.Mode, tools)
+	allow := names
+	if opts.Config.Set {
+		allow = opts.Config.Uses
 	}
 	return &Eval{
 		fx:    fx,
@@ -82,9 +82,12 @@ func (e *Eval) Run(ctx context.Context, call tool.Call, _ tool.Env) (tool.Result
 	if outcome.Status != "" {
 		return replyResult(call.ID, outcome)
 	}
-	start, err := e.fx.Started(RunStart{ID: call.ID, Entry: EvalName, Source: []byte(req.code), Args: call.Args, Seed: newSeed()})
+	start, done, err := e.fx.Started(RunStart{ID: call.ID, Entry: EvalName, Source: []byte(req.code), Args: call.Args, Seed: newSeed()})
 	if err != nil {
 		return tool.Result{}, fmt.Errorf("eval %s: start run: %w", call.ID, err)
+	}
+	if done != nil {
+		return replyResult(call.ID, *done)
 	}
 	outcome, err = complete(e.fx, start.ID, e.started(ctx, start))
 	if err != nil {

@@ -1,0 +1,6 @@
+{
+  "corpus_sha256": "069b7088128037891cb34bb0b4a830b254eaf8739aaf432e9cee78d6146e295d",
+  "judge": "decisions:typesafe/jev-1.14",
+  "threshold": 0.9,
+  "measured": null
+}

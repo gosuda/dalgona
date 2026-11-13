@@ -59,7 +59,7 @@ func (m *history) apply(step int) {
 	case 2:
 		m.note(step)
 	case 3:
-		if err := m.thread.Compact(m.t.Context()); err != nil && !errors.Is(err, agent.ErrNothingToSummarize) {
+		if err := m.thread.Compact(m.t.Context()); err != nil && !errors.Is(err, agent.ErrNothingToSummarize) && !errors.Is(err, agent.ErrCompactionNotSmaller) {
 			m.t.Fatal(err)
 		}
 		m.record()

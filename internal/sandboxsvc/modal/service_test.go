@@ -12,6 +12,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	sdk "github.com/modal-labs/modal-client/go"
 )
 
 type fakeProcess struct {
@@ -47,6 +48,7 @@ type fakeAPI struct {
 	boxes    map[string]*fakeBox
 	requests []CreateRequest
 	deleted  []string
+	goneIDs  map[string]bool
 }
 
 func newFakeAPI() *fakeAPI {
@@ -62,6 +64,9 @@ func (a *fakeAPI) Create(_ context.Context, request CreateRequest) (Box, string,
 }
 
 func (a *fakeAPI) FromID(_ context.Context, id string) (Box, error) {
+	if a.goneIDs[id] {
+		return nil, sdk.NotFoundError{}
+	}
 	box := a.boxes[id]
 	if box == nil {
 		return nil, errors.New("unknown sandbox")
@@ -174,6 +179,18 @@ func TestServiceTerminatesReplacementWhenBootstrapFails(t *testing.T) {
 	}
 	if len(api.deleted) != 0 {
 		t.Fatal("replacement cleanup deleted the persistent volume")
+	}
+}
+
+func TestServiceDestroyDeletesVolumeWhenSandboxIsGone(t *testing.T) {
+	api := newFakeAPI()
+	api.goneIDs = map[string]bool{"sandbox-1": true}
+	service := &Service{api: api}
+	if err := service.Destroy(t.Context(), "sandbox-1/dalgona-test"); err != nil {
+		t.Fatalf("Destroy error = %v, want nil", err)
+	}
+	if !reflect.DeepEqual(api.deleted, []string{"dalgona-test"}) {
+		t.Fatalf("deleted volumes = %#v", api.deleted)
 	}
 }
 

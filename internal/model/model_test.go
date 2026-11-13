@@ -23,6 +23,13 @@ func TestClassify(t *testing.T) {
 		{name: "forbidden", status: 403, want: Auth},
 		{name: "bad request", status: 400, body: "bad", want: Terminal},
 		{name: "usage limit", status: 200, body: `{"error":{"code":"usage_limit_reached"}}`, want: Terminal},
+		{name: "quota rate limit", status: 429, body: `{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}`, want: Terminal},
+		{name: "codex usage limit", status: 429, body: `{"error":{"type":"usage_limit_reached"}}`, want: Terminal},
+		{name: "in-band quota", status: 200, body: `{"error":{"code":429,"type":"insufficient_quota"}}`, want: Terminal},
+		{name: "quota code on 503 stays retryable", status: 503, body: `{"error":{"type":"insufficient_quota"}}`, want: Retry},
+		{name: "payment required", status: 402, body: `{"type":"error","error":{"type":"billing_error"}}`, want: Terminal},
+		{name: "quota word in prose", status: 429, body: `{"error":{"message":"see insufficient_quota docs"}}`, want: Retry},
+		{name: "workspace limit is not a quota code", status: 429, body: `{"error":{"type":"workspace_owner_usage_limit_reached"}}`, want: Retry},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

@@ -3,6 +3,7 @@ package anthropic
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -170,7 +171,7 @@ func lastUserMessage(messages []model.Message) int {
 }
 
 func toolResultsOnly(message model.Message) bool {
-	return message.Role == "user" && message.Text == "" && len(message.ToolCalls) == 0 && len(message.ToolResults) != 0
+	return message.Role == "user" && message.Text == "" && len(message.ToolCalls) == 0 && len(message.ToolResults) != 0 && len(message.Images) == 0
 }
 
 func toolResultGroupEnd(messages []model.Message, start int) int {
@@ -189,32 +190,65 @@ func encodeMessage(encoder *model.JSONEncoder, message model.Message, cache bool
 		}
 		return
 	}
-	if message.Text == "" && len(message.ToolResults) == 0 {
+	if message.Text == "" && len(message.ToolResults) == 0 && len(message.Images) == 0 {
 		return
 	}
 	encoder.BeginObject()
 	encoder.StringKey("role", "user")
 	encoder.Key("content")
 	encoder.BeginArray()
-	if message.Text != "" {
-		encodeTextBlock(encoder, message.Text, cache && len(message.ToolResults) == 0)
-	}
-	encodeResults(encoder, message.ToolResults, cache)
+	encodeUserContent(encoder, message, cache)
 	encoder.EndArray()
 	encoder.EndObject()
 }
 
+func encodeUserContent(encoder *model.JSONEncoder, message model.Message, cache bool) {
+	final := cache && len(message.ToolResults) == 0
+	if final && message.Text == "" {
+		encodeCachedImages(encoder, message.Images)
+	} else {
+		encodeImages(encoder, message.Images)
+	}
+	if message.Text != "" {
+		encodeTextBlock(encoder, message.Text, final)
+	}
+	encodeResults(encoder, message.ToolResults, cache)
+}
+
+func encodeImages(encoder *model.JSONEncoder, images []model.Image) {
+	for _, image := range images {
+		encodeImageBlock(encoder, image)
+	}
+}
+
+func encodeCachedImages(encoder *model.JSONEncoder, images []model.Image) {
+	last := len(images) - 1
+	for index, image := range images {
+		if index == last {
+			encodeCachedImageBlock(encoder, image)
+			continue
+		}
+		encodeImageBlock(encoder, image)
+	}
+}
+
 func encodeAssistant(encoder *model.JSONEncoder, message model.Message, reasoning string) {
-	signature, replay := thinkingBlock(message, thinkingEnabled(reasoning))
-	if message.Text == "" && len(message.ToolCalls) == 0 && !replay {
+	signature, redacted := replayFor(message, reasoning)
+	if message.Text == "" && len(message.ToolCalls) == 0 && signature == "" && len(redacted) == 0 {
 		return
 	}
 	encoder.BeginObject()
 	encoder.StringKey("role", "assistant")
 	encoder.Key("content")
 	encoder.BeginArray()
-	if replay {
+	if signature != "" {
 		encodeThinkingBlock(encoder, message.Reasoning, signature)
+	}
+	for _, data := range redacted {
+		encoder.BeginObject()
+		encoder.StringKey("type", "redacted_thinking")
+		encoder.StringKey("data", data)
+		encoder.EndObject()
 	}
 	if message.Text != "" {
 		encodeTextBlock(encoder, message.Text, false)
@@ -226,16 +260,21 @@ func encodeAssistant(encoder *model.JSONEncoder, message model.Message, reasonin
 	encoder.EndObject()
 }
 
-func thinkingBlock(message model.Message, thinking bool) (string, bool) {
-	if !thinking || message.Reasoning == "" {
-		return "", false
+func replayFor(message model.Message, reasoning string) (string, []string) {
+	if !thinkingEnabled(reasoning) {
+		return "", nil
 	}
+	var signature string
+	var redacted []string
 	for _, call := range message.ToolCalls {
-		if call.Signature != "" {
-			return call.Signature, true
+		if signature == "" && message.Reasoning != "" {
+			signature = call.Signature
+		}
+		if len(redacted) == 0 {
+			redacted = call.RedactedThinking
 		}
 	}
-	return "", false
+	return signature, redacted
 }
 
 func encodeThinkingBlock(encoder *model.JSONEncoder, reasoning, signature string) {
@@ -251,6 +290,29 @@ func encodeTextBlock(encoder *model.JSONEncoder, text string, cache bool) {
 	encoder.StringKey("type", "text")
 	encoder.StringKey("text", text)
 	encodeCacheControl(encoder, cache)
+	encoder.EndObject()
+}
+
+func encodeImageBlock(encoder *model.JSONEncoder, image model.Image) {
+	encoder.BeginObject()
+	writeImageFields(encoder, image)
+	encoder.EndObject()
+}
+
+func encodeCachedImageBlock(encoder *model.JSONEncoder, image model.Image) {
+	encoder.BeginObject()
+	writeImageFields(encoder, image)
+	encodeCacheControl(encoder, true)
+	encoder.EndObject()
+}
+
+func writeImageFields(encoder *model.JSONEncoder, image model.Image) {
+	encoder.StringKey("type", "image")
+	encoder.Key("source")
+	encoder.BeginObject()
+	encoder.StringKey("type", "base64")
+	encoder.StringKey("media_type", image.Mime)
+	encoder.StringKey("data", base64.StdEncoding.EncodeToString(image.Data))
 	encoder.EndObject()
 }
 
@@ -353,8 +415,8 @@ func anthropicEffort(reasoning string) string {
 	switch reasoning {
 	case "minimal", "low":
 		return "low"
-	case "medium":
-		return "medium"
+	case "medium", "high", "xhigh", "max":
+		return reasoning
 	default:
 		return "high"
 	}
@@ -373,7 +435,6 @@ type effortCapabilities struct {
 	Max       effortSupport `json:"max"`
 }
 
-// source: https://platform.claude.com/docs/en/api/models/list
 type modelListPage struct {
 	Data []struct {
 		ID           string `json:"id"`
@@ -410,6 +471,8 @@ func supportedEfforts(capabilities effortCapabilities) []string {
 	return efforts
 }
 
+func (p *Provider) SendsImages() bool { return true }
+
 func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
 	var models []model.Model
 	seen := make(map[string]bool)
@@ -426,6 +489,7 @@ func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
 				MaxOutput:  item.MaxOutput,
 				Efforts:    supportedEfforts(item.Capabilities.Effort),
 				ToolChoice: true,
+				Images:     true,
 			})
 		}
 		if !page.HasMore || page.LastID == "" {

@@ -30,7 +30,6 @@ type ToolState struct {
 	Args     jsontext.Value
 	ArgsBlob *BlobRef
 }
-
 type ApprovalState struct {
 	CallID      string
 	Summary     string
@@ -38,9 +37,14 @@ type ApprovalState struct {
 	GrantPrefix string
 }
 
+type scriptEffectSeen struct {
+	Op      string
+	ArgsSHA string
+}
+
 type ScriptState struct {
 	NextEffect uint64
-	Seen       map[uint64]struct{}
+	Seen       map[uint64]scriptEffectSeen
 }
 
 type ChildState struct {
@@ -76,9 +80,12 @@ type State struct {
 	Grants          map[string]string
 	Snapshots       map[string]Snapshot
 	CompletedTurns  map[string]uint64
+	JudgedCalls     map[string]struct{}
+	JudgedTurns     map[string]struct{}
 	Notes           map[string]uint64
 	Name            string
 	Archived        bool
+	SandboxChoice   SandboxChosen
 }
 type modelMark struct {
 	seq    uint64
@@ -110,6 +117,8 @@ func (s State) Clone() State {
 	s.Grants = maps.Clone(s.Grants)
 	s.Snapshots = maps.Clone(s.Snapshots)
 	s.CompletedTurns = maps.Clone(s.CompletedTurns)
+	s.JudgedCalls = maps.Clone(s.JudgedCalls)
+	s.JudgedTurns = maps.Clone(s.JudgedTurns)
 	s.Notes = maps.Clone(s.Notes)
 	s.Todos = slices.Clone(s.Todos)
 	s.TodoBlob = cloneBlob(s.TodoBlob)
@@ -170,15 +179,15 @@ func (s State) deriveStatus() Status {
 
 func foldEvent(s *State, seq uint64, e Event) error {
 	switch e.Type() {
-	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeUserMessage:
+	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeTurnJudged, TypeUserMessage:
 		return foldSessionEvent(s, seq, e)
-	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
+	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
 		return foldToolEvent(s, seq, e)
 	case TypeCompaction, TypeContextPruned, TypeChildSpawned, TypeBranch:
 		return foldStateEvent(s, seq, e)
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
 		return foldScriptEvent(s, e)
-	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived:
+	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return foldMetadata(s, seq, e)
 	default:
 		return fmt.Errorf("event: fold: unknown type %q", e.Type())
@@ -188,13 +197,7 @@ func foldEvent(s *State, seq uint64, e Event) error {
 func foldSessionEvent(s *State, seq uint64, e Event) error {
 	switch value := e.(type) {
 	case SessionCreated:
-		if s.SessionID != "" || s.TurnID != "" {
-			return errors.New("event: fold: duplicate session.created")
-		}
-		s.SessionID = value.ID
-		s.Parent, s.ForkOf, s.Advisor = value.Parent, value.ForkOf, value.Advisor
-		s.Cwd, s.SessionModel, s.Model, s.CreatedAt = value.Cwd, value.Model, value.Model, value.CreatedAt
-		return nil
+		return foldSessionCreated(s, value)
 	case RunnerBound:
 		copy := value
 		s.Runner = &copy
@@ -203,11 +206,23 @@ func foldSessionEvent(s *State, seq uint64, e Event) error {
 		return startTurn(s, value.TurnID)
 	case TurnCompleted:
 		return completeTurn(s, seq, value)
+	case TurnJudged:
+		return foldTurnJudged(s, value)
 	case UserMessage:
 		return noteSessionMessage(s, seq, value)
 	default:
 		return fmt.Errorf("event: fold: %T does not match %s", e, e.Type())
 	}
+}
+
+func foldSessionCreated(s *State, value SessionCreated) error {
+	if s.SessionID != "" || s.TurnID != "" {
+		return errors.New("event: fold: duplicate session.created")
+	}
+	s.SessionID = value.ID
+	s.Parent, s.ForkOf, s.Advisor = value.Parent, value.ForkOf, value.Advisor
+	s.Cwd, s.SessionModel, s.Model, s.CreatedAt = value.Cwd, value.Model, value.Model, value.CreatedAt
+	return nil
 }
 
 func noteSessionMessage(s *State, seq uint64, value UserMessage) error {
@@ -263,6 +278,7 @@ func completeTurn(s *State, seq uint64, e TurnCompleted) error {
 		s.CompletedTurns = make(map[string]uint64)
 	}
 	s.CompletedTurns[e.TurnID] = seq
+	s.JudgedCalls = nil
 	s.TurnID = ""
 	return nil
 }
@@ -274,6 +290,39 @@ func requireTurn(s *State, turnID string) error {
 	return nil
 }
 
+func foldToolJudged(s *State, e ToolJudged) error {
+	if err := requireTurn(s, e.TurnID); err != nil {
+		return err
+	}
+	_, pending := s.PendingCalls[e.CallID]
+	_, running := s.InFlight[e.CallID]
+	if pending || running {
+		return fmt.Errorf("event: fold: tool.judged before tool.completed: %s", e.CallID)
+	}
+	if _, judged := s.JudgedCalls[e.CallID]; judged {
+		return fmt.Errorf("event: fold: duplicate tool.judged %s", e.CallID)
+	}
+	if s.JudgedCalls == nil {
+		s.JudgedCalls = make(map[string]struct{})
+	}
+	s.JudgedCalls[e.CallID] = struct{}{}
+	return nil
+}
+
+func foldTurnJudged(s *State, e TurnJudged) error {
+	if err := requireTurn(s, e.TurnID); err != nil {
+		return err
+	}
+	if _, judged := s.JudgedTurns[e.TurnID]; judged {
+		return fmt.Errorf("event: fold: duplicate turn.judged %s", e.TurnID)
+	}
+	if s.JudgedTurns == nil {
+		s.JudgedTurns = make(map[string]struct{})
+	}
+	s.JudgedTurns[e.TurnID] = struct{}{}
+	return nil
+}
+
 func foldToolEvent(s *State, seq uint64, e Event) error {
 	switch value := e.(type) {
 	case AssistantMessage:
@@ -282,6 +331,8 @@ func foldToolEvent(s *State, seq uint64, e Event) error {
 		return foldToolStarted(s, value)
 	case ToolCompleted:
 		return foldToolCompleted(s, value)
+	case ToolJudged:
+		return foldToolJudged(s, value)
 	case ModelRetry:
 		return requireTurn(s, value.TurnID)
 	case ApprovalRequested:
@@ -688,13 +739,16 @@ func foldScriptEffect(s *State, e ScriptEffect) error {
 	if !exists {
 		return fmt.Errorf("event: fold: unexpected script effect %s/%d", e.RunID, e.N)
 	}
-	if _, seen := run.Seen[e.N]; seen {
+	if seen, dup := run.Seen[e.N]; dup {
+		if seen.Op != e.Op || seen.ArgsSHA != e.ArgsSHA {
+			return fmt.Errorf("event: fold: script effect %s/%d mismatch", e.RunID, e.N)
+		}
 		return fmt.Errorf("event: fold: duplicate script effect %s/%d", e.RunID, e.N)
 	}
 	if run.Seen == nil {
-		run.Seen = make(map[uint64]struct{})
+		run.Seen = make(map[uint64]scriptEffectSeen)
 	}
-	run.Seen[e.N] = struct{}{}
+	run.Seen[e.N] = scriptEffectSeen{Op: e.Op, ArgsSHA: e.ArgsSHA}
 	run.NextEffect = max(run.NextEffect, e.N+1)
 	s.Scripts[e.RunID] = run
 	return nil
@@ -719,6 +773,9 @@ func foldMetadata(s *State, seq uint64, e Event) error {
 		return nil
 	case ThreadArchived:
 		s.Archived = value.Archived
+		return nil
+	case SandboxChosen:
+		s.SandboxChoice = value
 		return nil
 	default:
 		return foldAdvisorNote(s, seq, e)

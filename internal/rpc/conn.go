@@ -203,14 +203,18 @@ func (c *Conn) readLoop() {
 		}
 		c.dispatch(e)
 	}
-	if err := s.Err(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
-		slog.Error("rpc: read failure", "error", err, "remote", c.remote)
-	}
+	c.logReadFailure(s.Err())
 	if c.handler != nil {
 		c.drainAfterRead()
 	}
 	if err := c.Close(); err != nil {
 		slog.Debug("rpc: close after read failure", "error", err)
+	}
+}
+
+func (c *Conn) logReadFailure(err error) {
+	if err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
+		slog.Error("rpc: read failure", "error", err, "remote", c.remote)
 	}
 }
 
@@ -319,6 +323,7 @@ type clientReq struct {
 
 func (c *Conn) dispatchClientRequest(e envelope) {
 	ctx, cancel := context.WithCancel(c.ctx)
+	ctx = context.WithValue(ctx, requestIDKey{}, e.ID)
 	key := string(e.ID)
 	entry := &clientReq{cancel: cancel}
 	c.clientReqMu.Lock()
@@ -777,4 +782,13 @@ func writeJSONToken(encoder *jsontext.Encoder, token jsontext.Token) error {
 		return fmt.Errorf("write JSON token: %w", err)
 	}
 	return nil
+}
+
+type requestIDKey struct{}
+
+func ClientRequestID(ctx context.Context) (string, error) {
+	raw, _ := ctx.Value(requestIDKey{}).(jsontext.Value)
+	var id string
+	err := json.Unmarshal(raw, &id)
+	return id, err
 }

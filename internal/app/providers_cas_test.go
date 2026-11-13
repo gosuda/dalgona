@@ -13,7 +13,7 @@ import (
 func newSaveTestCredentials(t *testing.T, stored auth.Credential) (*credentials, *sourceEntry, string) {
 	t.Helper()
 	home := t.TempDir()
-	store, err := auth.New(home)
+	store, err := auth.Load(home)
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestCredentialsSavePersistsRefresh(t *testing.T) {
 	if entry.stored != fresh {
 		t.Fatalf("entry.stored = %+v, want %+v", entry.stored, fresh)
 	}
-	reloaded, err := auth.New(home)
+	reloaded, err := auth.Load(home)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestCredentialsSaveKeepsNewerLogin(t *testing.T) {
 	if entry.stored != fresh {
 		t.Fatalf("stale save mutated entry.stored to %+v", entry.stored)
 	}
-	reloaded, err := auth.New(home)
+	reloaded, err := auth.Load(home)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}

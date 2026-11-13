@@ -20,13 +20,18 @@ const (
 )
 
 type worker struct {
-	t            *Thread
-	turnID       string
-	continuation bool
-	registry     *model.Registry
-	inBand       *inBandCalls
-	settings     Settings
-	tools        *toolset
+	t             *Thread
+	turnID        string
+	continuation  bool
+	registry      *model.Registry
+	inBand        *inBandCalls
+	settings      Settings
+	tools         *toolset
+	contextWindow int
+	round         *reviewRound
+	eligible      bool
+	recovering    bool
+	reviewed      bool
 }
 
 func pathSettings(created event.SessionCreated, records []event.Seqd) Settings {
@@ -138,6 +143,7 @@ func (w *worker) onRetry(attempt int, verdict model.Verdict, status int, delay t
 }
 
 func (w *worker) loop(ctx context.Context) outcome {
+	ctx = model.WithRetryWatch(ctx, w.retryWatch())
 	waited := false
 	for {
 		if ctx.Err() != nil {
@@ -151,8 +157,7 @@ func (w *worker) loop(ctx context.Context) outcome {
 			if waited {
 				return outcome{status: statusCompleted, head: v.head()}
 			}
-			w.boundary(ctx, BoundaryAgentEnd, v.head())
-			waited = true
+			waited = w.closeReply(ctx, v)
 			continue
 		}
 		waited = false
@@ -164,6 +169,15 @@ func (w *worker) loop(ctx context.Context) outcome {
 			return failure(ctx, err)
 		}
 	}
+}
+
+func (w *worker) closeReply(ctx context.Context, v view) bool {
+	resume, head := w.turnReview(ctx, v)
+	if resume {
+		return false
+	}
+	w.boundary(ctx, BoundaryAgentEnd, head)
+	return true
 }
 
 func (w *worker) context(ctx context.Context) (view, []model.Message, error) {
@@ -217,8 +231,14 @@ func (w *worker) callRound(ctx context.Context, calls []event.ToolCall) error {
 		return err
 	}
 	w.consumeInBandCancel()
-	if err = w.runCalls(ctx, pending); err != nil {
+	w.round = &reviewRound{}
+	err = w.runCalls(ctx, pending)
+	joinErr := w.joinReviews(ctx)
+	if err != nil {
 		return err
+	}
+	if joinErr != nil {
+		return joinErr
 	}
 	v, err := w.t.view()
 	if err != nil {
@@ -338,7 +358,7 @@ func (a *actor) newInputSince(head uint64) bool {
 }
 
 func (a *actor) settle(status string) {
-	reason := "the turn was interrupted"
+	reason := interruptedReason
 	if status == statusFailed {
 		reason = "the turn failed"
 	}

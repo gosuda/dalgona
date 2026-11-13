@@ -1,0 +1,12 @@
+@import "@fontsource-variable/bricolage-grotesque/index.css";
+@import "@fontsource-variable/hanken-grotesk/index.css";
+@import "@fontsource-variable/hanken-grotesk/wght-italic.css";
+@import "pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css";
+
+@font-face {
+	font-family: "Symbols Nerd Subset";
+	src: url("./symbols-nerd-subset.woff2") format("woff2");
+	font-display: block;
+	font-style: normal;
+	font-weight: 400;
+}

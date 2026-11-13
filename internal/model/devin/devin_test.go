@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"github.com/gosuda/dalgona/internal/model/devin"
 	"github.com/gosuda/dalgona/internal/model/devin/wire"
 )
@@ -101,8 +102,8 @@ func (f *fakeDevin) serveChat(w http.ResponseWriter, r *http.Request, body []byt
 
 func decodeChatRequest(t *testing.T, body []byte) *wire.GetChatMessageRequest {
 	t.Helper()
-	frame, err := wire.ReadFrame(bytes.NewReader(body), nil, 1<<24)
-	if err != nil || frame.Flags != wire.Compressed {
+	frame, err := connectwire.ReadFrame(bytes.NewReader(body), nil, 1<<24)
+	if err != nil || frame.Flags != connectwire.Compressed {
 		t.Fatalf("chat frame flags = %d, err = %v", frame.Flags, err)
 	}
 	reader, err := gzip.NewReader(bytes.NewReader(frame.Payload))
@@ -122,17 +123,17 @@ func decodeChatRequest(t *testing.T, body []byte) *wire.GetChatMessageRequest {
 
 func serveModels(w http.ResponseWriter) {
 	response := wire.GetCliModelConfigsResponse{Models: []wire.ClientModelConfig{
-		{ModelUIDView: []byte("swe-1-6"), LabelView: []byte("SWE-1.6"), ContextWindow: 200000, ModelInfo: &wire.ModelInfo{MaxOutputTokens: 64000}},
+		{ModelUIDView: []byte("swe-1-6"), LabelView: []byte("SWE-1.6"), ContextWindow: 200000, SupportsImages: true, ModelInfo: &wire.ModelInfo{MaxOutputTokens: 64000}},
 		{ModelUIDView: []byte("router"), ModelInfo: &wire.ModelInfo{ModelRouter: true}},
 		{ModelUIDView: []byte("old"), Disabled: true},
 		{ModelUIDView: []byte("swe-1-6"), ContextWindow: 1},
 		{ModelUIDView: []byte("swe-1-6-fast")},
 	}}
-	_, _ = w.Write(wire.AppendGetCliModelConfigsResponse(nil, &response))
+	_, _ = w.Write(wire.AppendModelConfigResponse(nil, &response))
 }
 
 func frame(message *wire.GetChatMessageResponse) []byte {
-	return wire.AppendFrame(nil, 0, wire.AppendGetChatMessageResponse(nil, message))
+	return connectwire.AppendFrame(nil, 0, wire.AppendGetChatMessageResponse(nil, message))
 }
 
 func gzipFrame(message *wire.GetChatMessageResponse) []byte {
@@ -140,11 +141,11 @@ func gzipFrame(message *wire.GetChatMessageResponse) []byte {
 	writer := gzip.NewWriter(&buffer)
 	_, _ = writer.Write(wire.AppendGetChatMessageResponse(nil, message))
 	_ = writer.Close()
-	return wire.AppendFrame(nil, wire.Compressed, buffer.Bytes())
+	return connectwire.AppendFrame(nil, connectwire.Compressed, buffer.Bytes())
 }
 
 func endFrame(trailer string) []byte {
-	return wire.AppendFrame(nil, wire.EndStream, []byte(trailer))
+	return connectwire.AppendFrame(nil, connectwire.EndStream, []byte(trailer))
 }
 
 func toolTurn(w http.ResponseWriter) {
@@ -301,6 +302,24 @@ func checkPrompts(t *testing.T, prompts []wire.ChatMessagePrompt) {
 	}
 }
 
+func TestBuildPromptsCarriesImages(t *testing.T) {
+	var retries atomic.Int32
+	fake, server := newFake(t, textTurn)
+	png := []byte("\x89PNG\r\n\x1a\n")
+	req := model.Request{Model: "swe-1-6", Messages: []model.Message{{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: png}}}}}
+	drain(t, newProvider(server, &retries), req)
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	prompts := fake.chats[0].prompts
+	if len(prompts) != 1 || len(prompts[0].Images) != 1 {
+		t.Fatalf("prompts = %+v, want one prompt with one image", prompts)
+	}
+	image := prompts[0].Images[0]
+	if string(image.MimeTypeView) != "image/png" || string(image.Base64DataView) != base64.StdEncoding.EncodeToString(png) {
+		t.Fatalf("image = %q %q, want image/png and the base64 of the PNG bytes", image.MimeTypeView, image.Base64DataView)
+	}
+}
+
 func TestJWTIsCachedThenRenewedAfterExpiryAndRejection(t *testing.T) {
 	var retries atomic.Int32
 	fake, server := newFake(t, textTurn)
@@ -388,5 +407,20 @@ func TestMissingEnvironmentKey(t *testing.T) {
 	t.Setenv("DEVIN_API_KEY", "")
 	if _, err := devin.APIKeyFromEnv(t.Context()); err == nil || err.Error() != "DEVIN_API_KEY is not set" {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestListedModelCarriesSupportsImages(t *testing.T) {
+	var retries atomic.Int32
+	_, server := newFake(t, textTurn)
+	models, err := newProvider(server, &retries).Models(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %d, want 2", len(models))
+	}
+	if !models[0].Images || models[1].Images {
+		t.Fatalf("images = %v %v, want swe-1-6 true and swe-1-6-fast false", models[0].Images, models[1].Images)
 	}
 }

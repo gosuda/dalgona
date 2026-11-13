@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/tool/judged",
+  "type": "object",
+  "required": ["threadId", "turnId", "itemId", "verdict", "summary", "paths"],
+  "additionalProperties": false,
+  "properties": {
+    "threadId": {"type": "string"},
+    "turnId": {"type": "string"},
+    "itemId": {"type": "string"},
+    "verdict": {"enum": ["clean", "uncertain", "flagged", "error"]},
+    "summary": {"type": "string"},
+    "paths": {"type": "array", "items": {"type": "string"}}
+  }
+}

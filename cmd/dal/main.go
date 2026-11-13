@@ -44,6 +44,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return runner.ShimMain(args[1:])
 		case "__search":
 			return search.Main(args[1:], stdout)
+		case "__search-index":
+			return search.BuildMain(args[1:], stdout)
 		case "--version":
 			fmt.Fprintf(stdout, "%s %s\n", binary, config.Version())
 			return 0
@@ -109,7 +111,7 @@ func startHost(ctx context.Context, home string) (localHost, error) {
 		return localHost{}, err
 	}
 	advisors := advisor.NewRegistry()
-	host, closeHost, err := app.NewHost(ctx, app.Options{Product: config.ProductDal, Cwd: cwd, Logger: logger, Advisors: advisors})
+	host, closeHost, err := app.NewHost(ctx, app.Options{Product: config.ProductDal, Cwd: cwd, Logger: logger, Advisors: advisors, Batteries: evalBatteries})
 	if err != nil {
 		return localHost{}, errors.Join(err, closeLog())
 	}

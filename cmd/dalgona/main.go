@@ -86,9 +86,10 @@ func leadingConfig(args []string) ([]string, []string) {
 }
 
 var hidden = map[string]func([]string, stdio) int{
-	"__shim":   func(args []string, _ stdio) int { return runner.ShimMain(args) },
-	"__search": func(args []string, std stdio) int { return search.Main(args, std.out) },
-	"__fetch":  func(args []string, std stdio) int { return webfetch.Main(args, std.out) },
+	"__shim":         func(args []string, _ stdio) int { return runner.ShimMain(args) },
+	"__search":       func(args []string, std stdio) int { return search.Main(args, std.out) },
+	"__search-index": func(args []string, std stdio) int { return search.BuildMain(args, std.out) },
+	"__fetch":        func(args []string, std stdio) int { return webfetch.Main(args, std.out) },
 }
 
 var commands = map[string]func(context.Context, []string, stdio) int{

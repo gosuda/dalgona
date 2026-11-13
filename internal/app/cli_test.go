@@ -8,6 +8,10 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -93,6 +97,13 @@ func newServedBox(t *testing.T) *servedBox {
 	t.Helper()
 	box := &servedBox{home: t.TempDir()}
 	t.Setenv("DALGONA_HOME", box.home)
+	models := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"id":"gpt-test"}]}`)
+	}))
+	t.Cleanup(models.Close)
+	if err := os.WriteFile(filepath.Join(box.home, "config.toml"), []byte("[providers.openai]\nbase_url = \""+models.URL+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	host, closeHost, err := NewHost(t.Context(), Options{Product: config.ProductDalgona, Cwd: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)

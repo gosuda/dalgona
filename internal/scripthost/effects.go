@@ -42,19 +42,21 @@ type toolTrace struct {
 }
 
 type effectCache struct {
-	mu      sync.Mutex
-	head    int
-	turn    string
-	starts  map[string]event.ScriptStarted
-	effects map[effectKey]event.ScriptEffect
-	tools   map[string]toolTrace
+	mu          sync.Mutex
+	head        int
+	turn        string
+	starts      map[string]event.ScriptStarted
+	completions map[string]event.ScriptCompleted
+	effects     map[effectKey]event.ScriptEffect
+	tools       map[string]toolTrace
 }
 
 func newEffectCache() *effectCache {
 	return &effectCache{
-		starts:  map[string]event.ScriptStarted{},
-		effects: map[effectKey]event.ScriptEffect{},
-		tools:   map[string]toolTrace{},
+		starts:      map[string]event.ScriptStarted{},
+		completions: map[string]event.ScriptCompleted{},
+		effects:     map[effectKey]event.ScriptEffect{},
+		tools:       map[string]toolTrace{},
 	}
 }
 
@@ -80,6 +82,7 @@ func (c *effectCache) ensureTurn(records []event.Seqd) {
 	turn, pos := turnStart(records)
 	if c.turn != turn {
 		c.starts = map[string]event.ScriptStarted{}
+		c.completions = map[string]event.ScriptCompleted{}
 		c.effects = map[effectKey]event.ScriptEffect{}
 		c.tools = map[string]toolTrace{}
 		c.turn = turn
@@ -118,29 +121,70 @@ func effectIndex(n int) uint64 {
 	return uint64(n)
 }
 
-func (fx effects) Started(start script.RunStart) (script.RunStart, error) {
+func (fx effects) Started(start script.RunStart) (script.RunStart, *script.Outcome, error) {
 	records, state, err := fx.t.Records()
 	if err != nil {
-		return script.RunStart{}, err
+		return script.RunStart{}, nil, err
 	}
 	if started, ok := fx.idx.start(records, start.ID); ok {
-		if _, open := state.Scripts[start.ID]; !open {
-			return script.RunStart{}, fmt.Errorf("scripthost: duplicate run id %s", start.ID)
-		}
-		return fx.pinned(started)
+		return fx.resumeStarted(records, state, started, start)
 	}
 	source, err := fx.t.PutBlob(start.Source)
 	if err != nil {
-		return script.RunStart{}, err
+		return script.RunStart{}, nil, err
 	}
 	args, argsBlob, err := fx.t.StoreRaw(orNull(start.Args))
 	if err != nil {
-		return script.RunStart{}, err
+		return script.RunStart{}, nil, err
 	}
 	err = fx.t.Append(context.Background(), event.ScriptStarted{
 		RunID: start.ID, SourceBlob: source, Entry: start.Entry, Args: args, ArgsBlob: argsBlob, Seed: uint64(max(start.Seed, 0)),
 	})
-	return start, err
+	return start, nil, err
+}
+
+func (fx effects) resumeStarted(records []event.Seqd, state event.State, started event.ScriptStarted, start script.RunStart) (script.RunStart, *script.Outcome, error) {
+	if _, open := state.Scripts[start.ID]; open {
+		pinned, err := fx.pinned(started)
+		if err != nil {
+			return script.RunStart{}, nil, err
+		}
+		return pinned, nil, nil
+	}
+	done, ok := fx.idx.completed(records, start.ID)
+	if !ok {
+		return script.RunStart{}, nil, fmt.Errorf("scripthost: duplicate run id %s", start.ID)
+	}
+	pinned, err := fx.pinned(started)
+	if err != nil {
+		return script.RunStart{}, nil, err
+	}
+	if !sameRequest(pinned, start) {
+		return script.RunStart{}, nil, fmt.Errorf("scripthost: duplicate run id %s", start.ID)
+	}
+	outcome, err := fx.recordedOutcome(done)
+	if err != nil {
+		return script.RunStart{}, nil, fmt.Errorf("scripthost: outcome of %s: %w", start.ID, err)
+	}
+	return script.RunStart{}, &outcome, nil
+}
+
+func sameRequest(pinned, start script.RunStart) bool {
+	return pinned.Entry == start.Entry && bytes.Equal(pinned.Source, start.Source) && bytes.Equal(pinned.Args, orNull(start.Args))
+}
+
+func (fx effects) recordedOutcome(done event.ScriptCompleted) (script.Outcome, error) {
+	if done.OK {
+		value, err := fx.t.LoadRaw(done.Value, done.ValueBlob)
+		if err != nil {
+			return script.Outcome{}, err
+		}
+		return script.Outcome{Status: script.StatusCompleted, Value: value}, nil
+	}
+	if done.Status == "" {
+		return script.Outcome{Status: script.StatusFailed, Error: script.Failure{Message: done.Error}}, nil
+	}
+	return script.Outcome{Status: script.Status(done.Status), Error: script.Failure{Code: done.Code, Message: done.Error, Stage: done.Stage}}, nil
 }
 
 func (fx effects) pinned(started event.ScriptStarted) (script.RunStart, error) {
@@ -204,6 +248,8 @@ func (c *effectCache) observe(records []event.Seqd) {
 			if _, ok := c.starts[value.RunID]; !ok {
 				c.starts[value.RunID] = value
 			}
+		case event.ScriptCompleted:
+			c.completions[value.RunID] = value
 		case event.ScriptEffect:
 			c.effects[effectKey{run: value.RunID, n: value.N}] = value
 		case event.ToolStarted:
@@ -231,6 +277,27 @@ func (c *effectCache) start(records []event.Seqd, run string) (event.ScriptStart
 	c.observe(records)
 	started, ok := c.starts[run]
 	return started, ok
+}
+
+func (c *effectCache) completed(records []event.Seqd, run string) (event.ScriptCompleted, bool) {
+	if c == nil {
+		return scanCompleted(records, run)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureTurn(records)
+	c.observe(records)
+	done, ok := c.completions[run]
+	return done, ok
+}
+
+func scanCompleted(records []event.Seqd, run string) (event.ScriptCompleted, bool) {
+	for _, item := range scopedRecords(records) {
+		if done, ok := item.Event.(event.ScriptCompleted); ok && done.RunID == run {
+			return done, true
+		}
+	}
+	return event.ScriptCompleted{}, false
 }
 
 func scanStart(records []event.Seqd, run string) (event.ScriptStarted, bool) {
@@ -326,7 +393,7 @@ func (fx effects) Completed(run string, outcome script.Outcome) error {
 	if _, open := state.Scripts[run]; !open {
 		return nil
 	}
-	done := event.ScriptCompleted{RunID: run, OK: outcome.Status == script.StatusCompleted}
+	done := event.ScriptCompleted{RunID: run, OK: outcome.Status == script.StatusCompleted, Status: string(outcome.Status), Code: outcome.Error.Code, Stage: outcome.Error.Stage}
 	if done.OK {
 		done.Value, done.ValueBlob, err = fx.t.StoreRaw(orNull(outcome.Value))
 		if err != nil {

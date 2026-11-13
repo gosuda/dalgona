@@ -23,9 +23,11 @@ func TestCodexSchemasCompileAndValidate(t *testing.T) {
 		{"ThreadRevertParams", "v2/ThreadRevertParams.json", ThreadRevertParams{ThreadID: "thread", BeforeTurnID: "turn"}},
 		{"ThreadForkParams", "v2/ThreadForkParams.json", ThreadForkParams{ThreadID: "thread"}},
 		{"TurnInterruptParams", "v2/TurnInterruptParams.json", TurnInterruptParams{ThreadID: "thread", TurnID: "turn"}},
+		{"ReviewStartParams", "v2/ReviewStartParams.json", map[string]any{"threadId": "thread", "target": map[string]any{"type": "custom", "instructions": "check"}}},
 		{"ModelListParams", "v2/ModelListParams.json", ModelListParams{}},
 		{"ConfigReadParams", "v2/ConfigReadParams.json", ConfigReadParams{}},
 		{"ConfigValueWriteParams", "v2/ConfigValueWriteParams.json", ConfigValueWriteParams{KeyPath: "model", MergeStrategy: "replace", Value: "openai/gpt"}},
+		{"ConfigBatchWriteParams", "v2/ConfigBatchWriteParams.json", map[string]any{"edits": []map[string]any{{"keyPath": "verbosity", "mergeStrategy": "replace", "value": "low"}}}},
 		{"SkillsListParams", "v2/SkillsListParams.json", SkillsListParams{}},
 		{"CommandExecutionRequestApprovalParams", "CommandExecutionRequestApprovalParams.json", CommandExecutionRequestApprovalParams{ThreadID: "thread", TurnID: "turn", ItemID: "item", StartedAtMs: 1, Command: "echo hi"}},
 		{"FileChangeRequestApprovalParams", "FileChangeRequestApprovalParams.json", FileChangeRequestApprovalParams{ThreadID: "thread", TurnID: "turn", ItemID: "item", StartedAtMs: 1}},
@@ -56,4 +58,25 @@ func validateCodexSchema(t *testing.T, path string, input any) {
 	if err := sch.Validate(value); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestCodexSchemasValidateUserInput(t *testing.T) {
+	params := ToolRequestUserInputParams{
+		ThreadID: "thread", TurnID: "turn", ItemID: "call", IsBlocking: true,
+		Questions: []ToolRequestUserInputQuestion{
+			{
+				ID: "q1", Header: "Database", Question: "Which?", IsOther: true, MultiSelect: true,
+				Options: []ToolRequestUserInputOption{{Label: "Postgres", Description: "A server.", Preview: "image: postgres"}},
+			},
+			{ID: "q2", Header: "Name", Question: "What?"},
+		},
+	}
+	encoded, err := encode(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join("testdata", "codex-schema")
+	validateCodexSchema(t, filepath.Join(root, "ToolRequestUserInputParams.json"), encoded)
+	response := ToolRequestUserInputResponse{Answers: map[string]ToolRequestUserInputAnswer{"q1": {Answers: []string{"Postgres"}}}}
+	validateCodexSchema(t, filepath.Join(root, "ToolRequestUserInputResponse.json"), response)
 }

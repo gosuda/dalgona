@@ -14,8 +14,14 @@ func TestBuiltinsProductMetadata(t *testing.T) {
 	t.Parallel()
 
 	dal := keywords.Builtins("dal")
-	if len(dal) != 1 || dal[0].Word != "ultrathink" {
-		t.Fatalf("Builtins(dal) = %#v, want only ultrathink", dal)
+	wantDal := []string{"ultrathink", "decide", "simplify"}
+	if len(dal) != len(wantDal) {
+		t.Fatalf("Builtins(dal) returned %d keywords, want %d", len(dal), len(wantDal))
+	}
+	for i := range wantDal {
+		if dal[i].Word != wantDal[i] {
+			t.Fatalf("Builtins(dal)[%d] = %q, want %q", i, dal[i].Word, wantDal[i])
+		}
 	}
 
 	all := keywords.Builtins("dalgona")
@@ -24,6 +30,9 @@ func TestBuiltinsProductMetadata(t *testing.T) {
 		{word: "jevify", hue: [2]int{300, 420}, tools: []string{"eval"}, effort: "default"},
 		{word: "workflowz", hue: [2]int{30, 150}, tools: []string{"eval", "task"}, effort: "default"},
 		{word: "orchestrate", hue: [2]int{150, 280}, tools: []string{"task"}, effort: "default"},
+		{word: "ratchet", hue: [2]int{20, 70}, tools: []string{"ratchet", "exec", "task"}, effort: "default"},
+		{word: "decide", hue: [2]int{200, 250}, effort: "default"},
+		{word: "simplify", hue: [2]int{90, 140}, effort: "default"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("Builtins(dalgona) returned %d keywords, want %d", len(all), len(want))
@@ -65,6 +74,9 @@ func TestBuiltinsNotices(t *testing.T) {
 		"jevify":      {"ctx.judge_batch", "rubric", "journal"},
 		"workflowz":   {"eval", "ctx.spawn", "ctx.scope", "ctx.wait", "journal"},
 		"orchestrate": {"task", "yield", "Verify"},
+		"ratchet":     {"ratchet", "approve", "gate", "exec", "task", "held-out"},
+		"decide":      {"option", "Recommend", "change your recommendation"},
+		"simplify":    {"Delete", "validation", "error path", "evidence"},
 	}
 	for _, keyword := range all {
 		for _, part := range noticeParts[keyword.Word] {

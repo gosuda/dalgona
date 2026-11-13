@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -13,25 +14,27 @@ import (
 
 func TestStartChildBoundsConcurrentSpawns(t *testing.T) {
 	t.Parallel()
-	release := make(chan struct{})
-	fire := sync.OnceFunc(func() { close(release) })
-	entered := make(chan struct{}, 16)
-	h := newHarness(t, func(h *harness) {
-		h.cfg.OnChildStarted = func(*Thread, task.Request) { entered <- struct{}{}; <-release }
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		fire := sync.OnceFunc(func() { close(release) })
+		entered := make(chan struct{}, 16)
+		h := newHarness(t, func(h *harness) {
+			h.cfg.OnChildStarted = func(*Thread, task.Request) { entered <- struct{}{}; <-release }
+		})
+		for range 16 {
+			h.model.push(text("child done"))
+		}
+		parent := h.start()
+		seedAgentCalls(t, h, parent)
+		var wg sync.WaitGroup
+		startChildren(t, h, parent, &wg)
+		drainEntries(t, entered, 8, "fewer than 8 spawns reached the child")
+		expectCapped(t, entered, fire)
+		fire()
+		drainEntries(t, entered, 8, "remaining spawns never reached the child")
+		wg.Wait()
+		checkAllSpawned(t, h, parent)
 	})
-	for range 16 {
-		h.model.push(text("child done"))
-	}
-	parent := h.start()
-	seedAgentCalls(t, h, parent)
-	var wg sync.WaitGroup
-	startChildren(t, h, parent, &wg)
-	drainEntries(t, entered, 8, "fewer than 8 spawns reached the child")
-	expectCapped(t, entered, fire)
-	fire()
-	drainEntries(t, entered, 8, "remaining spawns never reached the child")
-	wg.Wait()
-	checkAllSpawned(t, h, parent)
 }
 
 func seedAgentCalls(t *testing.T, h *harness, parent *Thread) {
@@ -69,11 +72,12 @@ func drainEntries(t *testing.T, entered <-chan struct{}, n int, msg string) {
 
 func expectCapped(t *testing.T, entered <-chan struct{}, fire func()) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case <-entered:
 		fire()
 		t.Fatal("more than 8 concurrent script spawns; StartChild bypasses the children cap")
-	case <-time.After(500 * time.Millisecond):
+	default:
 	}
 }
 

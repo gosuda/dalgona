@@ -17,45 +17,48 @@ type approvalAsk struct {
 	requestID string
 	method    string
 	params    writer
+	window    <-chan agent.Update
 }
 
-func (s *server) ask(ctx context.Context, w *watch, update agent.Update) {
+func (s *server) ask(ctx context.Context, w *watch, ch <-chan agent.Update, update agent.Update) {
 	prompt := update.Approval
 	if prompt.Resolved {
-		s.resolved(update.Thread, prompt.RequestID)
+		s.resolved(update.Thread, prompt.RequestID, prompt.Resolution)
 		return
 	}
 	turnID := w.tracker.currentTurn()
-	cwd := approvalCwd(prompt, w)
 	threadID := update.Thread
 	if threadID != w.thread.ID() {
 		turnID = ""
 	}
-	a := approvalAsk{thread: w.thread, requestID: prompt.RequestID}
-	if prompt.Class == tool.ClassEdit {
-		a.method = "item/fileChange/requestApproval"
-		a.params = FileChangeRequestApprovalParams{
-			ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, StartedAtMs: nowMillis(), Reason: prompt.Summary,
-		}
-	} else {
-		a.method = "item/commandExecution/requestApproval"
-		a.params = CommandExecutionRequestApprovalParams{
-			ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, StartedAtMs: nowMillis(),
-			Command: cmdText(prompt), Cwd: cwd, Reason: prompt.Reason,
-		}
-	}
+	method, params := approvalParams(prompt, threadID, turnID, approvalCwd(prompt, w))
+	a := approvalAsk{thread: w.thread, requestID: prompt.RequestID, method: method, params: params, window: ch}
+	note := approvalNotice(prompt, threadID, turnID)
 	askCtx, cancel := context.WithCancel(ctx)
-	started, dup := s.spawnApproval(prompt.RequestID, cancel, func() {
+	started, dup := s.spawnRequest(prompt.RequestID, cancel, func() {
 		defer s.settle(prompt.RequestID)
+		if note != nil {
+			s.send("item/fileChange/patchUpdated", *note)
+		}
 		s.request(ctx, askCtx, a)
 	})
-	if dup {
+	if dup || !started {
 		cancel()
-		return
 	}
-	if !started {
-		cancel()
-		s.declineIfAlone(a)
+	if note != nil && started && !dup {
+		recordApprovalChanges(w, threadID, *note)
+	}
+}
+
+func approvalParams(prompt agent.ApprovalPrompt, threadID, turnID, cwd string) (string, writer) {
+	if prompt.Class == tool.ClassEdit {
+		return "item/fileChange/requestApproval", FileChangeRequestApprovalParams{
+			ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, StartedAtMs: nowMillis(), Reason: prompt.Summary,
+		}
+	}
+	return "item/commandExecution/requestApproval", CommandExecutionRequestApprovalParams{
+		ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, StartedAtMs: nowMillis(),
+		Command: cmdText(prompt), Cwd: cwd, Reason: prompt.Reason,
 	}
 }
 
@@ -80,7 +83,7 @@ func (s *server) spawn(register, task func()) bool {
 	return true
 }
 
-func (s *server) spawnApproval(requestID string, cancel context.CancelFunc, task func()) (started, dup bool) {
+func (s *server) spawnRequest(requestID string, cancel context.CancelFunc, task func()) (started, dup bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closing {
@@ -108,9 +111,9 @@ func (s *server) settle(requestID string) {
 	}
 }
 
-func (s *server) resolved(threadID, requestID string) {
+func (s *server) resolved(threadID, requestID, resolution string) {
 	s.settle(requestID)
-	s.send("serverRequest/resolved", ServerRequestResolvedNotification{ThreadID: threadID, RequestID: requestID})
+	s.send("serverRequest/resolved", ServerRequestResolvedNotification{ThreadID: threadID, RequestID: requestID, Resolution: resolution})
 }
 
 func (s *server) request(serveCtx, askCtx context.Context, a approvalAsk) {
@@ -126,20 +129,17 @@ func (s *server) request(serveCtx, askCtx context.Context, a approvalAsk) {
 	case err == nil:
 		s.answer(a, decisionReply(response))
 	case serveCtx.Err() != nil, errors.Is(err, io.ErrClosedPipe):
-		s.declineIfAlone(a)
 	case askCtx.Err() != nil:
 	default:
-		s.log.Info("rpc: approval request failed; declining", "request", a.requestID, "error", err)
-		s.answer(a, agent.ReplyDecline)
+		s.cannotAnswerApproval(a, err)
 	}
 }
 
-func (s *server) declineIfAlone(a approvalAsk) {
-	status, err := a.thread.Status()
-	if err != nil || status.Subscribers > 1 {
-		return
+func (s *server) cannotAnswerApproval(a approvalAsk, cause error) {
+	s.log.Info("rpc: approval request failed; this window cannot answer", "request", a.requestID, "error", cause)
+	if err := a.thread.CannotAnswerApproval(a.requestID, a.window); err != nil && !errors.Is(err, agent.ErrUnknownRequest) {
+		s.log.Warn("rpc: report unanswerable approval", "request", a.requestID, "error", err)
 	}
-	s.answer(a, agent.ReplyDecline)
 }
 
 func (s *server) answer(a approvalAsk, reply agent.Reply) {
@@ -176,4 +176,41 @@ func replyFor(decision string) agent.Reply {
 		return agent.ReplyCancel
 	}
 	return agent.ReplyDecline
+}
+
+func approvalNotice(prompt agent.ApprovalPrompt, threadID, turnID string) *FileChangePatchUpdatedNotification {
+	if prompt.Class != tool.ClassEdit {
+		return nil
+	}
+	note := FileChangePatchUpdatedNotification{ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, Changes: approvalChanges(prompt.Files)}
+	return &note
+}
+
+func recordApprovalChanges(w *watch, threadID string, note FileChangePatchUpdatedNotification) {
+	if item, ok := w.tracker.items[note.ItemID]; ok && threadID == w.thread.ID() {
+		item.Changes = note.Changes
+	}
+}
+
+func approvalChanges(files []agent.ApprovalFile) []FileChange {
+	changes := make([]FileChange, 0, len(files))
+	for _, file := range files {
+		kind := approvalKind(file)
+		if file.TooLarge {
+			changes = append(changes, omittedChange(file.Path, kind))
+			continue
+		}
+		changes = append(changes, diffChange(file.Path, kind, file.Pre, file.Post))
+	}
+	return changes
+}
+
+func approvalKind(file agent.ApprovalFile) string {
+	switch {
+	case file.Added:
+		return kindAdd
+	case file.Deleted:
+		return kindDelete
+	}
+	return kindUpdate
 }

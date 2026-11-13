@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
+	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/textdiff"
 )
 
 const (
@@ -29,24 +32,29 @@ type tracker struct {
 	created   event.SessionCreated
 	load      func(*event.BlobRef) ([]byte, error)
 	childCwd  func(id string) string
+	keywords  func(threadID, text string, kind agent.InputKind) []agent.KeywordMatch
 	log       *slog.Logger
 	sink      sink
 	turn      string
 	lastTurn  string
+	turnAt    time.Time
 	items     map[string]*Item
 	calls     map[string]event.ToolCall
 	classes   map[string]string
 	approvals map[string]string
 	declined  map[string]bool
-	total     TokenUsageBreakdown
+	callAt    map[string]time.Time
+	usage     ThreadTokenUsage
 	seq       uint64
+	statusSeq uint64
 }
 
-func newTracker(threadID string, load func(*event.BlobRef) ([]byte, error), childCwd func(string) string, log *slog.Logger) *tracker {
+func newTracker(threadID string, load func(*event.BlobRef) ([]byte, error), childCwd func(string) string, keywords func(threadID, text string, kind agent.InputKind) []agent.KeywordMatch, log *slog.Logger) *tracker {
 	return &tracker{
-		threadID: threadID, load: load, childCwd: childCwd, log: log,
+		threadID: threadID, load: load, childCwd: childCwd, keywords: keywords, log: log,
 		items: map[string]*Item{}, calls: map[string]event.ToolCall{}, classes: map[string]string{},
 		approvals: map[string]string{}, declined: map[string]bool{},
+		callAt: map[string]time.Time{},
 	}
 }
 
@@ -69,6 +77,9 @@ var eventHandlers = map[string]eventHandler{
 	event.TypeThreadNamed:       (*tracker).threadNamed,
 	event.TypeThreadArchived:    (*tracker).threadArchived,
 	event.TypeBranch:            (*tracker).branch,
+	event.TypeToolJudged:        (*tracker).toolJudged,
+	event.TypeTurnJudged:        (*tracker).turnJudged,
+	event.TypeSandboxChosen:     (*tracker).sandboxChosen,
 }
 
 func (t *tracker) apply(seq uint64, ev event.Event) {
@@ -100,7 +111,12 @@ func (t *tracker) args(args jsontext.Value, blob *event.BlobRef) jsontext.Value 
 }
 
 func (t *tracker) setStatus(kind string, flags ...string) {
-	status, seq := ThreadStatus{Type: kind, ActiveFlags: flags}, t.seq
+	seq := t.seq
+	if seq <= t.statusSeq {
+		seq = t.statusSeq + 1
+	}
+	t.statusSeq = seq
+	status := ThreadStatus{Type: kind, ActiveFlags: flags}
 	t.sink.notify("thread/status/changed", func() writer {
 		return ThreadStatusChangedNotification{ThreadID: t.threadID, Status: status, Seq: seq}
 	})
@@ -113,14 +129,14 @@ func (t *tracker) startComplete(turnID string, it *Item) {
 
 func (t *tracker) turnStarted(_ uint64, ev event.Event) {
 	e, _ := ev.(event.TurnStarted)
-	t.turn, t.lastTurn = e.TurnID, e.TurnID
-	t.sink.turn(methodTurnStarted, Turn{ID: e.TurnID, Status: statusInProgress})
+	t.turn, t.lastTurn, t.turnAt = e.TurnID, e.TurnID, e.StartedAt
+	t.sink.turn(methodTurnStarted, Turn{ID: e.TurnID, Status: statusInProgress, StartedAt: unixSeconds(e.StartedAt)})
 	t.setStatus("active")
 }
 
 func (t *tracker) turnCompleted(_ uint64, ev event.Event) {
 	e, _ := ev.(event.TurnCompleted)
-	turn := Turn{ID: e.TurnID, Status: e.Status}
+	turn := Turn{ID: e.TurnID, Status: e.Status, StartedAt: unixSeconds(t.turnAt), CompletedAt: unixSeconds(e.CompletedAt), DurationMs: durationMs(t.turnAt, e.CompletedAt)}
 	if e.Error != "" {
 		turn.Error = &TurnError{Message: e.Error}
 		t.sink.notify("error", func() writer {
@@ -128,6 +144,7 @@ func (t *tracker) turnCompleted(_ uint64, ev event.Event) {
 		})
 	}
 	t.turn = ""
+	t.turnAt = time.Time{}
 	clear(t.items)
 	t.sink.turn(methodTurnCompleted, turn)
 	t.setStatus("idle")
@@ -135,7 +152,24 @@ func (t *tracker) turnCompleted(_ uint64, ev event.Event) {
 
 func (t *tracker) userMessage(_ uint64, ev event.Event) {
 	e, _ := ev.(event.UserMessage)
-	t.startComplete(e.TurnID, &Item{Type: kindUser, ID: e.ItemID, Text: t.text(e.Text, e.TextBlob)})
+	text := t.text(e.Text, e.TextBlob)
+	item := &Item{Type: kindUser, ID: e.ItemID, Text: text, Keywords: t.noticeMatches(e, text), Images: itemImages(e.Images)}
+	t.startComplete(e.TurnID, item)
+}
+
+func (t *tracker) noticeMatches(e event.UserMessage, text string) []KeywordMatch {
+	kind := agent.InputKind(cmp.Or(e.Kind, string(agent.InputPrompt)))
+	journaled := make(map[string]bool, len(e.Notices))
+	for _, notice := range e.Notices {
+		journaled[notice.Word] = true
+	}
+	var out []KeywordMatch
+	for _, match := range t.keywords(t.threadID, text, kind) {
+		if journaled[match.Word] {
+			out = append(out, keywordMatchOf(match))
+		}
+	}
+	return out
 }
 
 func (t *tracker) assistantMessage(_ uint64, ev event.Event) {
@@ -146,6 +180,9 @@ func (t *tracker) assistantMessage(_ uint64, ev event.Event) {
 		call.Args = t.args(call.Args, call.ArgsBlob)
 		t.calls[call.ID] = call
 	}
+	if e.ContextWindow > 0 {
+		t.usage.ModelContextWindow = e.ContextWindow
+	}
 	if e.Usage == (event.Usage{}) {
 		return
 	}
@@ -153,11 +190,20 @@ func (t *tracker) assistantMessage(_ uint64, ev event.Event) {
 		InputTokens: e.Usage.Input, CachedInputTokens: e.Usage.CacheRead, CacheWriteInputTokens: e.Usage.CacheWrite,
 		OutputTokens: e.Usage.Output, TotalTokens: e.Usage.Input + e.Usage.Output,
 	}
-	t.total = t.total.add(last)
-	total := t.total
+	t.usage.Last = last
+	t.usage.Total = t.usage.Total.add(last)
+	usage := t.usage
 	t.sink.notify("thread/tokenUsage/updated", func() writer {
-		return ThreadTokenUsageUpdatedNotification{ThreadID: t.threadID, TurnID: e.TurnID, TokenUsage: ThreadTokenUsage{Last: last, Total: total}}
+		return ThreadTokenUsageUpdatedNotification{ThreadID: t.threadID, TurnID: e.TurnID, TokenUsage: usage}
 	})
+}
+
+func (t *tracker) usageSnapshot() *ThreadTokenUsage {
+	if t.usage.Last == (TokenUsageBreakdown{}) && t.usage.ModelContextWindow == 0 {
+		return nil
+	}
+	usage := t.usage
+	return &usage
 }
 
 func (t *tracker) finishStream(turnID, kind, id, text string) {
@@ -212,6 +258,23 @@ func (t *tracker) execOutput(callID, delta string) {
 	})
 }
 
+func (t *tracker) retryWait(turnID string, wait time.Duration) {
+	t.sink.notify("dalgona/retry/wait", func() writer {
+		return RetryWaitNotification{ThreadID: t.threadID, TurnID: turnID, RemainingMS: wait.Milliseconds()}
+	})
+}
+
+func (t *tracker) sandboxChosen(_ uint64, ev event.Event) {
+	e, _ := ev.(event.SandboxChosen)
+	choice := "accept"
+	if e.Choice == event.SandboxChoiceDangerous {
+		choice = "dangerouslyAccept"
+	}
+	t.sink.notify("dalgona/sandbox/chosen", func() writer {
+		return SandboxChosenNotification{ThreadID: t.threadID, Cause: e.Cause, Choice: choice}
+	})
+}
+
 func (t *tracker) toolItem(callID, tool, class string, args jsontext.Value, files []event.FileChange) *Item {
 	it := &Item{Type: toolKind(tool, class), ID: callID, Tool: tool, Arguments: args, Status: statusInProgress}
 	switch it.Type {
@@ -219,15 +282,14 @@ func (t *tracker) toolItem(callID, tool, class string, args jsontext.Value, file
 		it.Command = argString(args, "command")
 		it.Cwd = cmp.Or(argString(args, "cwd"), t.created.Cwd)
 	case kindFileChange:
-		it.Changes = fileChanges(args, files)
+		it.Changes = t.fileChanges(files)
 	case kindMCP:
 		it.Server, it.Tool, _ = strings.Cut(tool, "__")
 	}
 	return it
 }
 
-func fileChanges(args jsontext.Value, files []event.FileChange) []FileChange {
-	text := patchText(args)
+func (t *tracker) fileChanges(files []event.FileChange) []FileChange {
 	changes := make([]FileChange, 0, len(files))
 	for _, file := range files {
 		kind := kindUpdate
@@ -237,9 +299,33 @@ func fileChanges(args jsontext.Value, files []event.FileChange) []FileChange {
 		case file.PostSHA == "":
 			kind = kindDelete
 		}
-		changes = append(changes, FileChange{Path: file.Path, Kind: kind, Diff: patchSection(text, file.Path)})
+		changes = append(changes, t.fileChange(file, kind))
 	}
 	return changes
+}
+
+func (t *tracker) fileChange(file event.FileChange, kind string) FileChange {
+	pre, preOK := t.image(file.Path, file.PreSHA, file.PreBlob)
+	post, postOK := t.image(file.Path, file.PostSHA, file.PostBlob)
+	if !preOK || !postOK || len(pre) > textdiff.Limit || len(post) > textdiff.Limit {
+		return omittedChange(file.Path, kind)
+	}
+	return diffChange(file.Path, kind, pre, post)
+}
+
+func (t *tracker) image(path, sha string, blob *event.BlobRef) ([]byte, bool) {
+	if sha == "" {
+		return nil, true
+	}
+	if blob == nil {
+		return nil, false
+	}
+	data, err := t.load(blob)
+	if err != nil {
+		t.log.Warn("file change image unreadable", "path", path, "error", err)
+		return nil, false
+	}
+	return data, true
 }
 
 func (t *tracker) openCall(callID string) *Item {
@@ -256,6 +342,9 @@ func (t *tracker) openCall(callID string) *Item {
 func (t *tracker) toolStarted(_ uint64, ev event.Event) {
 	e, _ := ev.(event.ToolStarted)
 	fresh := t.toolItem(e.CallID, e.Tool, e.Class, t.args(e.Args, e.ArgsBlob), e.Files)
+	if !e.StartedAt.IsZero() {
+		t.callAt[e.CallID] = e.StartedAt
+	}
 	if it, ok := t.items[e.CallID]; ok {
 		*it = *fresh
 		return
@@ -277,6 +366,8 @@ func (t *tracker) toolCompleted(_ uint64, ev event.Event) {
 		it.Status = statusFailed
 	}
 	it.Output, it.ExitCode = e.Output, e.ExitCode
+	it.Spill = outputSpill(e.Spill)
+	t.finishDuration(it, e.CallID, e.CompletedAt)
 	turnID := t.currentTurn()
 	t.sink.item(methodItemCompleted, turnID, it)
 	if it.Tool == "todo" && e.OK {
@@ -286,6 +377,23 @@ func (t *tracker) toolCompleted(_ uint64, ev event.Event) {
 	delete(t.calls, e.CallID)
 	delete(t.classes, e.CallID)
 	delete(t.declined, e.CallID)
+}
+
+func durationMs(from, to time.Time) int64 {
+	if from.IsZero() || to.IsZero() {
+		return 0
+	}
+	return to.Sub(from).Milliseconds()
+}
+
+func (t *tracker) finishDuration(it *Item, callID string, completed time.Time) {
+	started, ok := t.callAt[callID]
+	delete(t.callAt, callID)
+	if !ok || completed.IsZero() {
+		return
+	}
+	ms := completed.Sub(started).Milliseconds()
+	it.DurationMs = &ms
 }
 
 func (t *tracker) plan(turnID string, args jsontext.Value) {
@@ -351,7 +459,7 @@ func (t *tracker) approvalResolved(_ uint64, ev event.Event) {
 		t.declined[callID] = true
 	}
 	t.sink.notify("serverRequest/resolved", func() writer {
-		return ServerRequestResolvedNotification{ThreadID: t.threadID, RequestID: e.RequestID}
+		return ServerRequestResolvedNotification{ThreadID: t.threadID, RequestID: e.RequestID, Resolution: agent.ApprovalResolution(e.Decision, e.Reason)}
 	})
 	if t.turn != "" {
 		t.setStatus("active")
@@ -394,6 +502,26 @@ func (t *tracker) advisorNote(seq uint64, ev event.Event) {
 	})
 	t.sink.notify("dalgona/advisor/note", func() writer {
 		return AdvisorNoteNotification{ThreadID: t.threadID, Advisor: e.Advisor, Severity: e.Severity, Note: e.Note, Delivery: e.Delivery}
+	})
+}
+
+func (t *tracker) toolJudged(_ uint64, ev event.Event) {
+	e, _ := ev.(event.ToolJudged)
+	t.sink.notify("dalgona/tool/judged", func() writer {
+		return ToolJudgedNotification{
+			ThreadID: t.threadID, TurnID: e.TurnID, ItemID: e.CallID, Verdict: e.Verdict,
+			Summary: agent.ReviewSummary(agent.ReviewOutcome{Verdict: e.Verdict, Scores: e.Scores, Flags: e.Flags, Spoken: e.Spoken, Error: e.Error, Truncated: e.Truncated}), Paths: e.Paths,
+		}
+	})
+}
+
+func (t *tracker) turnJudged(_ uint64, ev event.Event) {
+	e, _ := ev.(event.TurnJudged)
+	t.sink.notify("dalgona/turn/judged", func() writer {
+		return TurnJudgedNotification{
+			ThreadID: t.threadID, TurnID: e.TurnID, Verdict: e.Verdict,
+			Summary: agent.ReviewSummary(agent.ReviewOutcome{Verdict: e.Verdict, Scores: e.Scores, Flags: e.Flags, Spoken: e.Spoken, Error: e.Error, Truncated: e.Truncated}), Paths: e.Paths,
+		}
 	})
 }
 

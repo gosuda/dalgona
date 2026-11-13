@@ -53,13 +53,23 @@ func TestLoad_defaults(t *testing.T) {
 	requireConfigValue(t, cfg.Model, "")
 	requireConfigValue(t, cfg.Reasoning, config.ReasoningDefault)
 	requireConfigValue(t, cfg.Approval, config.ApprovalAuto)
-	requireConfigValue(t, cfg.ToolMode, config.ToolModeNormal)
+	requireConfigValue(t, cfg.ToolMode, config.ToolModeEvalFirst)
 	requireConfigValue(t, cfg.Sandbox, config.SandboxWorkspaceWrite)
 	requireConfigValue(t, cfg.Runner, "local")
 	requireConfigValue(t, cfg.EditStyle.EditStyle("any/model"), "anchor")
 	requireConfigValue(t, cfg.StreamStartTimeout, time.Minute)
 	requireConfigValue(t, cfg.StreamIdleTimeout, 5*time.Minute)
 	requireConfigValue(t, cfg.ApprovalDecider.Threshold, 0.9)
+}
+
+func TestLoad_defaultToolModeIsEvalFirst(t *testing.T) {
+	for _, product := range []config.Product{config.ProductDal, config.ProductDalgona} {
+		cfg, err := loadConfig(t, product, "", "", config.Flags{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireConfigValue(t, cfg.ToolMode, config.ToolModeEvalFirst)
+	}
 }
 
 func TestLoad_modelPrecedence(t *testing.T) {
@@ -215,20 +225,70 @@ func TestLoad_approvalDecider(t *testing.T) {
 	requireConfigError(t, err, "config.toml:2: [approval_decider] threshold must be in (0, 1]")
 }
 
+func TestLoad_editReview(t *testing.T) {
+	cfg, err := loadConfig(t, config.ProductDalgona, "", "", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireConfigValue(t, cfg.EditReview.Enabled, false)
+	if cfg.EditReview.Feedback != nil {
+		t.Fatalf("default feedback = %v, want nil", cfg.EditReview.Feedback)
+	}
+
+	cfg, err = loadConfig(t, config.ProductDalgona, "[edit_review]\nenabled = true\n", "", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireConfigValue(t, cfg.EditReview.Enabled, true)
+
+	cfg, err = loadConfig(t, config.ProductDalgona, "[edit_review]\nenabled = true\n", "[edit_review]\nenabled = false\n", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireConfigValue(t, cfg.EditReview.Enabled, false)
+
+	_, err = loadConfig(t, config.ProductDalgona, "[edit_review]\nenabled = \"yes\"\n", "", config.Flags{})
+	if err == nil {
+		t.Fatal("enabled = \"yes\" loaded, want an error")
+	}
+}
+
+func TestLoad_editReviewFeedback(t *testing.T) {
+	cfg, err := loadConfig(t, config.ProductDalgona, "[edit_review]\nfeedback = [\"lost_code\", \"wrong_logic\"]\n", "", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.EditReview.Feedback) != 2 || cfg.EditReview.Feedback[0] != "lost_code" || cfg.EditReview.Feedback[1] != "wrong_logic" {
+		t.Fatalf("feedback = %v, want [lost_code wrong_logic]", cfg.EditReview.Feedback)
+	}
+
+	cfg, err = loadConfig(t, config.ProductDalgona, "[edit_review]\nfeedback = []\n", "", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EditReview.Feedback == nil || len(cfg.EditReview.Feedback) != 0 {
+		t.Fatalf("empty feedback = %#v, want non-nil empty list", cfg.EditReview.Feedback)
+	}
+
+	_, err = loadConfig(t, config.ProductDalgona, "[edit_review]\nfeedback = \"lost_code\"\n", "", config.Flags{})
+	if err == nil {
+		t.Fatal("feedback as a string loaded, want an error")
+	}
+}
+
 func TestLoad_dalRejectsDalgonaSettings(t *testing.T) {
 	tests := []struct {
 		key  string
 		body string
 	}{
-		{key: "tool_mode", body: "tool_mode = \"normal\"\n"},
 		{key: "runner", body: "runner = \"local\"\n"},
 		{key: "remote", body: "remote = \"\"\n"},
 		{key: "runners", body: "[runners]\n"},
 		{key: "remotes", body: "[remotes]\n"},
 		{key: "mcp_servers", body: "[mcp_servers]\n"},
 		{key: "discovery", body: "[discovery]\n"},
-		{key: "eval", body: "[eval]\nuses = []\n"},
 		{key: "herdr", body: "[herdr]\nsubagent_panes = false\n"},
+		{key: "edit_review", body: "[edit_review]\nenabled = false\n"},
 		{key: "web", body: "[web]\nlisten = \"127.0.0.1:7437\"\n"},
 	}
 	for _, test := range tests {
@@ -237,6 +297,23 @@ func TestLoad_dalRejectsDalgonaSettings(t *testing.T) {
 			requireConfigError(t, err, "config.toml:1: "+test.key+" is a dalgona setting")
 		})
 	}
+}
+
+func TestLoad_dalAcceptsToolModeAndEval(t *testing.T) {
+	cfg, err := loadConfig(t, config.ProductDal, "tool_mode = \"eval-only\"\n[eval]\nuses = [\"read\"]\n", "", config.Flags{})
+	if err != nil {
+		t.Fatalf("dal rejected tool_mode and [eval]: %v", err)
+	}
+	requireConfigValue(t, cfg.ToolMode, config.ToolModeEvalOnly)
+	requireConfigValue(t, cfg.Eval.Set, true)
+	if len(cfg.Eval.Uses) != 1 || cfg.Eval.Uses[0] != "read" {
+		t.Fatalf("Eval.Uses = %v, want [read]", cfg.Eval.Uses)
+	}
+}
+
+func TestLoad_rejectsEmptyTrustedWorkspace(t *testing.T) {
+	_, err := loadConfig(t, config.ProductDalgona, "", "mcp_trusted_workspaces = [\"\"]\n", config.Flags{})
+	requireConfigError(t, err, "settings.toml: mcp_trusted_workspaces entry must be a nonempty path")
 }
 
 func TestLoad_rejectsInvalidDuration(t *testing.T) {
@@ -362,8 +439,8 @@ func TestWriteSetting_rejectsInvalidOutputWithoutReplacingFile(t *testing.T) {
 		home := t.TempDir()
 		original := []byte("model = \"settings/model\"\n")
 		writeConfigFile(t, home, "settings.toml", string(original))
-		if err := config.WriteSetting(home, test.key, test.value); err == nil {
-			t.Fatalf("WriteSetting(%q) succeeded", test.key)
+		if err := config.WriteSettings(home, config.SettingEdit{Key: test.key, Value: test.value}); err == nil {
+			t.Fatalf("WriteSettings(%q) succeeded", test.key)
 		}
 		raw, err := os.ReadFile(filepath.Join(home, "settings.toml"))
 		if err != nil {
@@ -376,7 +453,7 @@ func TestWriteSetting_rejectsInvalidOutputWithoutReplacingFile(t *testing.T) {
 func TestWriteSetting_roundTripsRemotes(t *testing.T) {
 	home := t.TempDir()
 	writeConfigFile(t, home, "config.toml", "[remotes.work]\nservice = \"docker\"\nimage = \"dalgona-box:dev\"\nbox_id = \"old\"\n")
-	if err := config.WriteSetting(home, "remotes.work", map[string]any{"box_id": "abc123"}); err != nil {
+	if err := config.WriteSettings(home, config.SettingEdit{Key: "remotes.work", Value: map[string]any{"box_id": "abc123"}}); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DALGONA_HOME", home)
@@ -388,7 +465,7 @@ func TestWriteSetting_roundTripsRemotes(t *testing.T) {
 	if got := cfg.Remotes["work"]; got != want {
 		t.Fatalf("remotes.work = %+v, want %+v", got, want)
 	}
-	if err = config.WriteSetting(home, "remotes.work.box_id", ""); err != nil {
+	if err = config.WriteSettings(home, config.SettingEdit{Key: "remotes.work.box_id", Value: ""}); err != nil {
 		t.Fatal(err)
 	}
 	if cfg, err = config.Load(config.ProductDalgona, t.TempDir(), config.Flags{}); err != nil || cfg.Remotes["work"].BoxID != "" {
@@ -400,7 +477,7 @@ func TestWriteSetting_preservesEditStyleOrder(t *testing.T) {
 	home := t.TempDir()
 	body := "[edit_style]\ndefault = \"anchor\"\n\"openai/*\" = \"replace\"\n\"openai/gpt-?\" = \"hashline\"\n"
 	writeConfigFile(t, home, "settings.toml", body)
-	if err := config.WriteSetting(home, "model", "openai/gpt-6"); err != nil {
+	if err := config.WriteSettings(home, config.SettingEdit{Key: "model", Value: "openai/gpt-6"}); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DALGONA_HOME", home)
@@ -418,7 +495,7 @@ func TestWriteSetting_updatesOnlySettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeConfigFile(t, home, "settings.toml", "model = \"settings/model\"\n")
-	if err := config.WriteSetting(home, "approval_decider.threshold", 0.75); err != nil {
+	if err := config.WriteSettings(home, config.SettingEdit{Key: "approval_decider.threshold", Value: 0.75}); err != nil {
 		t.Fatal(err)
 	}
 	gotConfig, err := os.ReadFile(filepath.Join(home, "config.toml"))

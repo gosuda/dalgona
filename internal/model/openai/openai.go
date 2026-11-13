@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -159,8 +160,8 @@ func customToolCallIDs(req model.Request) map[string]bool {
 func encodeMessage(encoder *model.JSONEncoder, message model.Message, customIDs map[string]bool) {
 	if message.Role == "assistant" {
 		encodeAssistant(encoder, message)
-	} else if message.Text != "" || len(message.ToolResults) == 0 && message.Role != "" {
-		encodeTextMessage(encoder, message.Role, message.Text, "input_text")
+	} else if message.Text != "" || len(message.Images) > 0 || len(message.ToolResults) == 0 && message.Role != "" {
+		encodeTextMessage(encoder, message.Role, message.Text, "input_text", message.Images)
 	}
 	for _, result := range message.ToolResults {
 		encoder.BeginObject()
@@ -198,16 +199,29 @@ func encodeAssistant(encoder *model.JSONEncoder, message model.Message) {
 	}
 }
 
-func encodeTextMessage(encoder *model.JSONEncoder, role, text, kind string) {
+func encodeTextMessage(encoder *model.JSONEncoder, role, text, kind string, images []model.Image) {
 	encoder.BeginObject()
 	encoder.StringKey("role", role)
 	encoder.Key("content")
 	encoder.BeginArray()
-	encoder.BeginObject()
-	encoder.StringKey("type", kind)
-	encoder.StringKey("text", text)
-	encoder.EndObject()
+	for _, image := range images {
+		encodeInputImage(encoder, image)
+	}
+	if text != "" || len(images) == 0 {
+		encoder.BeginObject()
+		encoder.StringKey("type", kind)
+		encoder.StringKey("text", text)
+		encoder.EndObject()
+	}
 	encoder.EndArray()
+	encoder.EndObject()
+}
+
+func encodeInputImage(encoder *model.JSONEncoder, image model.Image) {
+	encoder.BeginObject()
+	encoder.StringKey("type", "input_image")
+	encoder.StringKey("image_url", "data:"+image.Mime+";base64,"+base64.StdEncoding.EncodeToString(image.Data))
+	encoder.StringKey("detail", "auto")
 	encoder.EndObject()
 }
 
@@ -264,6 +278,8 @@ func encodeReasoning(encoder *model.JSONEncoder, effort string) {
 	encoder.EndArray()
 }
 
+func (p *Provider) SendsImages() bool { return true }
+
 func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
 	key, err := p.key(ctx)
 	if err != nil {
@@ -293,7 +309,7 @@ func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
 	}
 	models := make([]model.Model, 0, len(payload.Data))
 	for _, item := range payload.Data {
-		models = append(models, model.Model{ID: item.ID, Context: model.ContextWindow(item.ID, 0, p.cfg.ContextWindows), ToolChoice: true})
+		models = append(models, model.Model{ID: item.ID, Context: model.ContextWindow(item.ID, 0, p.cfg.ContextWindows), ToolChoice: true, Images: true})
 	}
 	return models, nil
 }

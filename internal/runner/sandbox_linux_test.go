@@ -8,11 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestLocal_linuxSandbox(t *testing.T) {
-	if !Available() {
+	if UnavailableCause() != "" {
 		t.Skip("Landlock ABI is 0")
 	}
 	dir := t.TempDir()
@@ -32,7 +31,7 @@ func TestLocal_linuxSandbox(t *testing.T) {
 	command := `if touch "$HOME/outside-runner"; then echo outside-ok; else echo outside-denied; fi; touch ./inside`
 	spec := ProcessSpec{ID: "sandbox", Argv: []string{"sh", "-c", command}, Dir: workspace, Env: env, Sandbox: Sandbox{Mode: SandboxWorkspaceWrite, WritableRoots: []string{workspace}}}
 	startTestProcess(t, local, spec)
-	state := waitForExit(t, local, "sandbox", 5*time.Second)
+	state := waitForExit(t, local, "sandbox")
 	if state.Exit.Code != 0 {
 		t.Fatalf("sandbox command exit = %d, output %s", state.Exit.Code, state.Data)
 	}

@@ -17,6 +17,16 @@ type (
 		ThreadID string `json:"threadId"`
 		Enabled  bool   `json:"enabled"`
 	}
+	ReviewStartParams struct {
+		ThreadID string       `json:"threadId"`
+		Target   ReviewTarget `json:"target"`
+	}
+	ReviewTarget struct {
+		Type         string `json:"type"`
+		Branch       string `json:"branch,omitzero"`
+		SHA          string `json:"sha,omitzero"`
+		Instructions string `json:"instructions,omitzero"`
+	}
 
 	ThreadStatus struct {
 		Type        string   `json:"type"`
@@ -41,46 +51,80 @@ type (
 		Turns          []Turn       `json:"turns"`
 	}
 	Turn struct {
-		ID        string     `json:"id"`
-		Items     []Item     `json:"items"`
-		Status    string     `json:"status"`
-		Error     *TurnError `json:"error,omitzero"`
-		StartedAt int64      `json:"startedAt,omitzero"`
+		ID          string     `json:"id"`
+		Items       []Item     `json:"items"`
+		Status      string     `json:"status"`
+		Error       *TurnError `json:"error,omitzero"`
+		StartedAt   int64      `json:"startedAt,omitzero"`
+		CompletedAt int64      `json:"completedAt,omitzero"`
+		DurationMs  int64      `json:"durationMs,omitzero"`
 	}
 	TurnError struct {
 		Message string `json:"message"`
 	}
 	Item struct {
-		Type      string
-		ID        string
-		Text      string
-		Command   string
-		Cwd       string
-		Status    string
-		Output    string
-		ExitCode  *int
-		Changes   []FileChange
-		Server    string
-		Tool      string
-		Arguments jsontext.Value
+		Type       string
+		ID         string
+		Text       string
+		Command    string
+		Cwd        string
+		Status     string
+		Output     string
+		ExitCode   *int
+		Changes    []FileChange
+		Server     string
+		Tool       string
+		Arguments  jsontext.Value
+		DurationMs *int64
+		Spill      *OutputSpill
+		Keywords   []KeywordMatch
+		Images     []ItemImage
+	}
+	OutputSpill struct {
+		Path   string `json:"path"`
+		Bytes  int64  `json:"bytes"`
+		SHA256 string `json:"sha256"`
+	}
+	OutputReadParams struct {
+		ThreadID string
+		ItemID   string
+		Offset   int64
+	}
+	OutputReadResponse struct {
+		Text   string `json:"text"`
+		Offset int64  `json:"offset"`
+		Next   int64  `json:"next"`
+		Total  int64  `json:"total"`
 	}
 	FileChange struct {
-		Path string `json:"path"`
-		Kind string `json:"kind"`
-		Diff string `json:"diff"`
+		Path        string `json:"path"`
+		Kind        string `json:"kind"`
+		Diff        string `json:"diff"`
+		Additions   int    `json:"additions"`
+		Deletions   int    `json:"deletions"`
+		DiffOmitted bool   `json:"-"`
+	}
+	ItemImage struct {
+		Type  string
+		URL   string
+		Mime  string
+		Bytes int64
+		Path  string
 	}
 	SandboxPolicy struct {
 		Type string `json:"type"`
 	}
 	ThreadStartResponse struct {
-		ApprovalPolicy    string        `json:"approvalPolicy"`
-		ApprovalsReviewer string        `json:"approvalsReviewer"`
-		Cwd               string        `json:"cwd"`
-		Model             string        `json:"model"`
-		ModelProvider     string        `json:"modelProvider"`
-		Sandbox           SandboxPolicy `json:"sandbox"`
-		ReasoningEffort   string        `json:"reasoningEffort,omitzero"`
-		Thread            Thread        `json:"thread"`
+		ApprovalPolicy    string            `json:"approvalPolicy"`
+		ApprovalsReviewer string            `json:"approvalsReviewer"`
+		Cwd               string            `json:"cwd"`
+		Model             string            `json:"model"`
+		ModelProvider     string            `json:"modelProvider"`
+		Sandbox           SandboxPolicy     `json:"sandbox"`
+		ReasoningEffort   string            `json:"reasoningEffort,omitzero"`
+		TokenUsage        *ThreadTokenUsage `json:"tokenUsage,omitzero"`
+		SandboxFallback   *SandboxFallback  `json:"sandboxFallback,omitzero"`
+		Thread            Thread            `json:"thread"`
 	}
 	ThreadResumeResponse = ThreadStartResponse
 	ThreadForkResponse   = ThreadStartResponse
@@ -112,6 +156,10 @@ type (
 		IsDefault                 bool                    `json:"isDefault"`
 		DefaultReasoningEffort    string                  `json:"defaultReasoningEffort"`
 		SupportedReasoningEfforts []ReasoningEffortOption `json:"supportedReasoningEfforts"`
+		ContextWindow             int                     `json:"contextWindow"`
+		Provider                  string                  `json:"provider"`
+		Presets                   []string                `json:"presets"`
+		InputModalities           []string                `json:"inputModalities"`
 	}
 	ReasoningEffortOption struct {
 		ReasoningEffort string `json:"reasoningEffort"`
@@ -171,6 +219,25 @@ type (
 		Word string `json:"word"`
 		Hue  [2]int `json:"hue"`
 	}
+	KeywordsMatchParams struct {
+		ThreadID string
+		Text     string
+		Kind     string
+	}
+	KeywordsMatchResponse struct {
+		Matches []KeywordMatch
+	}
+	KeywordMatch struct {
+		Word      string
+		ByteRange ByteRange
+		Hue       [2]int
+		Effort    string
+		Summary   string
+	}
+	ByteRange struct {
+		Start int
+		End   int
+	}
 	ThreadTreeResponse struct {
 		Turns []TreeTurn `json:"turns"`
 	}
@@ -209,7 +276,7 @@ type (
 	ThreadStatusChangedNotification struct {
 		ThreadID string       `json:"threadId"`
 		Status   ThreadStatus `json:"status"`
-		Seq      uint64       `json:"seq,omitzero"`
+		Seq      uint64       `json:"seq"`
 	}
 	ThreadNameUpdatedNotification struct {
 		ThreadID   string `json:"threadId"`
@@ -279,13 +346,42 @@ type (
 	}
 	CommandExecutionOutputDeltaNotification = AgentMessageDeltaNotification
 	ServerRequestResolvedNotification       struct {
-		ThreadID  string `json:"threadId"`
-		RequestID string `json:"requestId"`
+		ThreadID   string `json:"threadId"`
+		RequestID  string `json:"requestId"`
+		Resolution string `json:"resolution,omitzero"`
+	}
+	ToolRequestUserInputParams struct {
+		ThreadID   string                         `json:"threadId"`
+		TurnID     string                         `json:"turnId"`
+		ItemID     string                         `json:"itemId"`
+		IsBlocking bool                           `json:"isBlocking"`
+		Questions  []ToolRequestUserInputQuestion `json:"questions"`
+	}
+	ToolRequestUserInputQuestion struct {
+		ID          string                       `json:"id"`
+		Header      string                       `json:"header"`
+		Question    string                       `json:"question"`
+		IsOther     bool                         `json:"isOther"`
+		IsSecret    bool                         `json:"isSecret"`
+		MultiSelect bool                         `json:"multiSelect"`
+		Options     []ToolRequestUserInputOption `json:"options"`
+	}
+	ToolRequestUserInputOption struct {
+		Label       string `json:"label"`
+		Description string `json:"description"`
+		Preview     string `json:"preview,omitzero"`
+	}
+	ToolRequestUserInputResponse struct {
+		Answers map[string]ToolRequestUserInputAnswer `json:"answers"`
+	}
+	ToolRequestUserInputAnswer struct {
+		Answers []string `json:"answers"`
 	}
 	AccountLoginCompletedNotification struct {
-		LoginID string `json:"loginId,omitzero"`
-		Success bool   `json:"success"`
-		Error   string `json:"error,omitzero"`
+		LoginID  string `json:"loginId,omitzero"`
+		Success  bool   `json:"success"`
+		Error    string `json:"error,omitzero"`
+		Provider string `json:"provider,omitzero"`
 	}
 	ChildSpawnedNotification struct {
 		ThreadID string `json:"threadId"`
@@ -298,6 +394,39 @@ type (
 		Severity string `json:"severity"`
 		Note     string `json:"note"`
 		Delivery string `json:"delivery"`
+	}
+	ToolJudgedNotification struct {
+		ThreadID string   `json:"threadId"`
+		TurnID   string   `json:"turnId"`
+		ItemID   string   `json:"itemId"`
+		Verdict  string   `json:"verdict"`
+		Summary  string   `json:"summary"`
+		Paths    []string `json:"paths"`
+	}
+	TurnJudgedNotification struct {
+		ThreadID string   `json:"threadId"`
+		TurnID   string   `json:"turnId"`
+		Verdict  string   `json:"verdict"`
+		Summary  string   `json:"summary"`
+		Paths    []string `json:"paths"`
+	}
+	RetryWaitNotification struct {
+		ThreadID    string `json:"threadId"`
+		TurnID      string `json:"turnId"`
+		RemainingMS int64  `json:"remainingMs"`
+	}
+	WarningNotification struct {
+		ThreadID string `json:"threadId"`
+		Message  string `json:"message"`
+	}
+	SandboxChosenNotification struct {
+		ThreadID string `json:"threadId"`
+		Cause    string `json:"cause"`
+		Choice   string `json:"choice"`
+	}
+	SandboxFallback struct {
+		Cause  string  `json:"cause"`
+		Choice *string `json:"choice"`
 	}
 	CommandExecutionRequestApprovalParams struct {
 		ThreadID    string `json:"threadId"`
@@ -318,7 +447,13 @@ type (
 	CommandExecutionRequestApprovalResponse struct {
 		Decision string `json:"decision"`
 	}
-	FileChangeRequestApprovalResponse = CommandExecutionRequestApprovalResponse
+	FileChangeRequestApprovalResponse  = CommandExecutionRequestApprovalResponse
+	FileChangePatchUpdatedNotification struct {
+		ThreadID string
+		TurnID   string
+		ItemID   string
+		Changes  []FileChange
+	}
 )
 
 func (e *RPCError) Error() string { return e.Message }

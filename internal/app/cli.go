@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -34,15 +35,12 @@ type CLIEnv struct {
 	TUI            TUIBackend
 }
 
-// Status reports presentation progress without naming a presentation
-// package, so core orchestration stays independent of terminal widgets.
 type Status struct {
 	State    string
 	Seq      uint64
 	ThreadID string
 }
 
-// TUIOptions carries everything the interactive presentation layer needs.
 type TUIOptions struct {
 	OnStatus       func(Status)
 	OnChildSpawned func(childID, cwd string)
@@ -55,8 +53,6 @@ type TUIOptions struct {
 	Cwd            string
 }
 
-// TUIBackend launches the interactive presentation layer. Command entry
-// points wire it, so this package never imports a presentation package.
 type TUIBackend func(ctx context.Context, conn io.ReadWriteCloser, opts TUIOptions) error
 
 type cliFlags struct {
@@ -192,6 +188,7 @@ func sandboxName(mode string) string {
 type loginRequest struct {
 	provider string
 	apiKey   string
+	device   bool
 }
 
 func (env CLIEnv) login(ctx context.Context, args []string) error {
@@ -216,22 +213,26 @@ func (env CLIEnv) parseLogin(args []string) (loginRequest, error) {
 	fs := flag.NewFlagSet(string(env.Product)+" login", flag.ContinueOnError)
 	fs.SetOutput(env.Stderr)
 	fs.StringVar(&request.apiKey, "api-key", "", "store `key` for an API-key provider without a prompt")
+	fs.BoolVar(&request.device, "device-auth", false, "sign in to chatgpt with a device code on a host without a browser")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return request, err
 		}
 		return request, errUsage
 	}
-	if fs.NArg() > 0 || (request.apiKey != "" && request.provider == "") {
-		fmt.Fprintf(env.Stderr, "usage: %s login [provider] [--api-key key]\n", env.Product)
+	if fs.NArg() > 0 || ((request.apiKey != "" || request.device) && request.provider == "") {
+		fmt.Fprintf(env.Stderr, "usage: %s login [provider] [--api-key key] [--device-auth]\n", env.Product)
 		return request, errUsage
 	}
 	return request, nil
 }
 
 func (r loginRequest) check() error {
-	if r.apiKey != "" && !slices.Contains(apiKeyLoginTargets(), r.provider) {
-		return fmt.Errorf("login %s: --api-key works only for %s", r.provider, strings.Join(apiKeyLoginTargets(), ", "))
+	if r.apiKey != "" && !slices.Contains(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), r.provider) {
+		return fmt.Errorf("login %s: --api-key works only for %s", r.provider, strings.Join(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), ", "))
+	}
+	if r.device && r.provider != "chatgpt" {
+		return fmt.Errorf("login %s: --device-auth works only for chatgpt", r.provider)
 	}
 	return nil
 }
@@ -249,9 +250,12 @@ func (env CLIEnv) localLogin(ctx context.Context, request loginRequest) error {
 		env.listProviders(signedIn)
 		return nil
 	}
-	if request.apiKey != "" {
+	switch {
+	case request.apiKey != "":
 		err = store.SetAPIKey(request.provider, request.apiKey)
-	} else {
+	case request.device:
+		err = LoginDevice(ctx, store, request.provider, env.Stdout)
+	default:
 		err = Login(ctx, store, request.provider, env.Stdin, env.Stdout)
 	}
 	if err != nil {
@@ -262,7 +266,7 @@ func (env CLIEnv) localLogin(ctx context.Context, request loginRequest) error {
 }
 
 func (env CLIEnv) listProviders(signedIn map[string]bool) {
-	for _, id := range Providers() {
+	for _, id := range auth.Providers() {
 		mark := ""
 		if signedIn[id] {
 			mark = " (logged in)"
@@ -302,17 +306,17 @@ func (env CLIEnv) remoteLoginParams(request loginRequest) (rpc.AccountLoginStart
 	switch {
 	case request.provider == "":
 		return rpc.AccountLoginStartParams{}, nil
-	case slices.Contains(apiKeyLoginTargets(), request.provider):
+	case slices.Contains(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), request.provider):
 		key, err := env.readAPIKey(request)
 		return rpc.AccountLoginStartParams{Type: "apiKey", Provider: request.provider, APIKey: key}, err
 	case request.provider == "chatgpt":
 		return rpc.AccountLoginStartParams{Type: "chatgptDeviceCode"}, nil
-	case slices.Contains(oauthProviders, request.provider):
+	case slices.Contains(auth.OAuthProviders, request.provider):
 		return rpc.AccountLoginStartParams{}, fmt.Errorf(
 			"login %s cannot run inside remote %s; run `%s login %s` here, then `%s cloud up %s --copy-auth`",
 			request.provider, env.Remote, env.Product, request.provider, env.Product, env.Remote)
 	}
-	return rpc.AccountLoginStartParams{}, fmt.Errorf("unknown provider %q; known providers: %s", request.provider, strings.Join(Providers(), ", "))
+	return rpc.AccountLoginStartParams{}, fmt.Errorf("unknown provider %q; known providers: %s", request.provider, strings.Join(auth.Providers(), ", "))
 }
 
 func (env CLIEnv) readAPIKey(request loginRequest) (string, error) {
@@ -329,7 +333,7 @@ func (env CLIEnv) readAPIKey(request loginRequest) (string, error) {
 
 func (env CLIEnv) printLoginPrompt(provider string, started rpc.LoginAccountResponse) {
 	if started.UserCode != "" {
-		fmt.Fprintf(env.Stdout, "Open %s and enter the code %s to log in to %s.\n", started.VerificationURL, started.UserCode, provider)
+		printDeviceCode(env.Stdout, provider, started.VerificationURL, started.UserCode)
 		return
 	}
 	fmt.Fprintf(env.Stdout, "Open this URL to log in to %s:\n%s\n", provider, started.AuthURL)
@@ -433,7 +437,7 @@ func (env CLIEnv) interactive(ctx context.Context, f cliFlags) error {
 }
 
 func closeQuiet(conn io.Closer) error {
-	if err := conn.Close(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+	if err := conn.Close(); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
 		return err
 	}
 	return nil
@@ -732,6 +736,9 @@ func (b *turnBook) signal() {
 }
 
 func (b *turnBook) Request(_ context.Context, method string, params jsontext.Value) (any, error) {
+	if method == "item/tool/requestUserInput" {
+		return nil, b.refuseQuestion(params)
+	}
 	if !strings.HasSuffix(method, "/requestApproval") {
 		return nil, fmt.Errorf("unsupported server request %s", method)
 	}
@@ -741,6 +748,21 @@ func (b *turnBook) Request(_ context.Context, method string, params jsontext.Val
 	}
 	fmt.Fprintf(b.stderr, "declined %s: no interactive client\n", cmp.Or(ask.Command, ask.Reason, ask.ItemID))
 	return rpc.CommandExecutionRequestApprovalResponse{Decision: "decline"}, nil
+}
+
+var errNoInteractiveClient = errors.New("no interactive client")
+
+func (b *turnBook) refuseQuestion(params jsontext.Value) error {
+	var ask rpc.ToolRequestUserInputParams
+	if err := json.Unmarshal(params, &ask); err != nil {
+		return err
+	}
+	header := ""
+	if len(ask.Questions) > 0 {
+		header = ask.Questions[0].Header
+	}
+	fmt.Fprintf(b.stderr, "declined question %s: no interactive client\n", header)
+	return errNoInteractiveClient
 }
 
 func (b *turnBook) wait(ctx context.Context, turnID string) (turnResult, error) {

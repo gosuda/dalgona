@@ -86,16 +86,12 @@ func setUserVersion(db *sql.DB, version int) error {
 func applyMigration(db *sql.DB, target int) error {
 	switch target {
 	case 1:
-		return migrateToV1(db)
+		return setUserVersion(db, 1)
 	case 2:
 		return migrateToV2(db)
 	default:
 		return fmt.Errorf("journal: unknown schema version %d", target)
 	}
-}
-
-func migrateToV1(db *sql.DB) error {
-	return setUserVersion(db, 1)
 }
 
 func migrateToV2(db *sql.DB) error {

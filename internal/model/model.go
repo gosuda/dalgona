@@ -15,6 +15,8 @@ type Provider interface {
 	Models(context.Context) ([]Model, error)
 }
 
+type ImageSender interface{ SendsImages() bool }
+
 type Stream interface {
 	Next(context.Context) (Event, error)
 	Events() <-chan Event
@@ -33,12 +35,13 @@ type ReasoningDelta struct{ Text string }
 func (ReasoningDelta) event() {}
 
 type ToolCall struct {
-	ID        string
-	Name      string
-	Args      jsontext.Value
-	Freeform  bool
-	Resolved  bool
-	Signature string
+	ID               string
+	Name             string
+	Args             jsontext.Value
+	Freeform         bool
+	Resolved         bool
+	Signature        string
+	RedactedThinking []string
 }
 
 func (ToolCall) event() {}
@@ -73,6 +76,12 @@ type Message struct {
 	Reasoning   string
 	ToolCalls   []ToolCall
 	ToolResults []ToolResult
+	Images      []Image
+}
+
+type Image struct {
+	Mime string
+	Data []byte
 }
 type ToolResult struct {
 	ID      string
@@ -101,6 +110,7 @@ type Model struct {
 	MaxOutput  int
 	Efforts    []string
 	ToolChoice bool
+	Images     bool
 }
 
 func ContextWindow(modelID string, reported int, overrides map[string]int) int {

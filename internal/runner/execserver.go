@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 )
@@ -51,7 +52,7 @@ func ExecServerMainWithBridge(args []string, stdin io.Reader, stdout io.Writer, 
 		_, _ = fmt.Fprintln(stdout, err)
 		return 2
 	}
-	if strings.HasPrefix(cfg.listen, "ws://") && len(os.Getenv(boxEnvironmentKey)) < 32 {
+	if strings.HasPrefix(cfg.listen, "ws://") && utf8.RuneCountInString(os.Getenv(boxEnvironmentKey)) < 32 {
 		_, _ = fmt.Fprintln(stdout, "exec-server: ws listen needs DALGONA_BOX_TOKEN (32+ characters)")
 		return 1
 	}
