@@ -45,6 +45,20 @@
    ]
   },
   {
+   "id": "t-edit-review-continue",
+   "when": {
+    "user": "<edit-review call="
+   },
+   "steps": [
+    {
+     "text": "Reviewed the changed lines. Edited notes.md."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
    "id": "t-compact",
    "when": {
     "any_text": "ummar"
@@ -190,7 +204,7 @@
       "id": "call-fail",
       "name": "exec",
       "arguments": {
-       "command": "sh -c 'seq 1 30; echo boom >&2; exit 3'"
+       "command": "./fail-output.sh"
       }
      }
     },
@@ -224,7 +238,7 @@
       "id": "call-long",
       "name": "exec",
       "arguments": {
-       "command": "seq 1 50|sed 's/^/line /'"
+      "command": "printf '%s\\n' 'line 1'\nprintf '%s\\n' 'line 2'\nprintf '%s\\n' 'line 3'\nprintf '%s\\n' 'line 4'\nprintf '%s\\n' 'line 5'\nprintf '%s\\n' 'line 6'\nprintf '%s\\n' 'line 7'\nprintf '%s\\n' 'line 8'\nprintf '%s\\n' 'line 9'\nprintf '%s\\n' 'line 10'\nprintf '%s\\n' 'line 11'\nprintf '%s\\n' 'line 12'\nprintf '%s\\n' 'line 13'\nprintf '%s\\n' 'line 14'\nprintf '%s\\n' 'line 15'\nprintf '%s\\n' 'line 16'\nprintf '%s\\n' 'line 17'\nprintf '%s\\n' 'line 18'\nprintf '%s\\n' 'line 19'\nprintf '%s\\n' 'line 20'\nprintf '%s\\n' 'line 21'\nprintf '%s\\n' 'line 22'\nprintf '%s\\n' 'line 23'\nprintf '%s\\n' 'line 24'\nprintf '%s\\n' 'line 25'\nprintf '%s\\n' 'line 26'\nprintf '%s\\n' 'line 27'\nprintf '%s\\n' 'line 28'\nprintf '%s\\n' 'line 29'\nprintf '%s\\n' 'line 30'\nprintf '%s\\n' 'line 31'\nprintf '%s\\n' 'line 32'\nprintf '%s\\n' 'line 33'\nprintf '%s\\n' 'line 34'\nprintf '%s\\n' 'line 35'\nprintf '%s\\n' 'line 36'\nprintf '%s\\n' 'line 37'\nprintf '%s\\n' 'line 38'\nprintf '%s\\n' 'line 39'\nprintf '%s\\n' 'line 40'\nprintf '%s\\n' 'line 41'\nprintf '%s\\n' 'line 42'\nprintf '%s\\n' 'line 43'\nprintf '%s\\n' 'line 44'\nprintf '%s\\n' 'line 45'\nprintf '%s\\n' 'line 46'\nprintf '%s\\n' 'line 47'\nprintf '%s\\n' 'line 48'\nprintf '%s\\n' 'line 49'\nprintf '%s\\n' 'line 50'"
       }
      }
     },
@@ -1839,7 +1853,7 @@
         "a.txt"
        ],
        "harness": [
-        "notes.md"
+        "src/main.go"
        ],
        "change": [
         "notes.md"
@@ -1859,7 +1873,31 @@
    },
    "steps": [
     {
-     "text": "Ratchet round done."
+     "tool_call": {
+      "id": "call-ratchet-approve",
+      "name": "ratchet",
+      "arguments": {
+       "action": "approve",
+       "flow": "live",
+       "stage": "inputs",
+       "question": "Approve the live fixture inputs?",
+       "preview": "a.txt: hello from a.txt"
+      }
+     }
+    },
+    {
+     "finish": "tool_calls"
+    }
+   ]
+  },
+  {
+   "id": "t-ratchet-approved",
+   "when": {
+    "tool_result": "call-ratchet-approve"
+   },
+   "steps": [
+    {
+     "text": "Ratchet approval response received."
     },
     {
      "finish": "stop"

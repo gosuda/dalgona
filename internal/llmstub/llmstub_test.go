@@ -6,10 +6,15 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gosuda/dalgona/internal/ratchet"
+	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/tool"
 )
 
 const (
@@ -245,4 +250,112 @@ func streamUntilStart(t *testing.T, url string) {
 			return
 		}
 	}
+}
+
+func TestLiveEditReviewContinuationKeepsJudgeRouting(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("testdata/live.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := mustParse(t, string(raw))
+	h := &handler{script: script, spent: make(map[string]bool)}
+	feedback := `<edit-review call="call-patch" paths="notes.md">`
+	for _, tc := range []struct {
+		last  lastMessage
+		texts []string
+		want  string
+	}{
+		{lastMessage{Role: "user", Text: feedback}, []string{feedback}, "t-edit-review-continue"},
+		{lastMessage{Role: "user", Text: `{"off_task":0}`}, []string{feedback, `{"off_task":0}`}, "t-judge"},
+		{lastMessage{Role: "user", Text: `{"incomplete":0}`}, []string{feedback, `{"incomplete":0}`}, "t-judge-turn"},
+	} {
+		turn, ok := h.pick(requestView{Last: tc.last, Texts: tc.texts})
+		if !ok || turn.ID != tc.want {
+			t.Fatalf("picked %q, matched %t, want %q", turn.ID, ok, tc.want)
+		}
+		if len(turn.Steps) != 2 || turn.Steps[1].Finish != "stop" {
+			t.Fatalf("%s does not end with a normal reply: %+v", turn.ID, turn.Steps)
+		}
+	}
+	if turn, ok := h.pick(requestView{Last: lastMessage{Role: "user", Text: "unrelated feedback"}}); ok {
+		t.Fatalf("unrelated feedback matched %s", turn.ID)
+	}
+}
+
+func TestLiveRatchetRequestsDirectApproval(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("testdata/live.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &handler{script: mustParse(t, string(raw)), spent: make(map[string]bool)}
+	env := liveRatchetEnv(t)
+	asker := &liveRatchetAsker{t: t}
+	editor := ratchet.New(asker)
+	for _, tc := range []struct {
+		last lastMessage
+		want string
+		tool string
+	}{
+		{lastMessage{Role: "user", Text: "start a ratchet"}, "t-ratchet", "call-ratchet"},
+		{lastMessage{Role: "tool", ToolCallID: "call-ratchet"}, "t-ratchet-2", "call-ratchet-approve"},
+		{lastMessage{Role: "tool", ToolCallID: "call-ratchet-approve"}, "t-ratchet-approved", ""},
+	} {
+		turn, ok := h.pick(requestView{Last: tc.last})
+		if !ok || turn.ID != tc.want {
+			t.Fatalf("picked %q, matched %t, want %q", turn.ID, ok, tc.want)
+		}
+		if tc.tool == "" {
+			if turn.Steps[len(turn.Steps)-1].Finish != "stop" {
+				t.Fatal("approval response does not end the turn")
+			}
+			continue
+		}
+		runLiveRatchetCall(t, editor, env, turn, tc.tool)
+	}
+	if asker.calls != 1 {
+		t.Fatalf("approval questions = %d, want 1", asker.calls)
+	}
+}
+
+func liveRatchetEnv(t *testing.T) tool.Env {
+	t.Helper()
+	local, err := runner.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := tool.Env{Cwd: t.TempDir(), Runner: local}
+	if err := os.CopyFS(env.Cwd, os.DirFS("testdata/workspace")); err != nil {
+		t.Fatal(err)
+	}
+	return env
+}
+
+func runLiveRatchetCall(t *testing.T, editor ratchet.Tool, env tool.Env, turn Turn, callID string) {
+	t.Helper()
+	call := turn.Steps[0].ToolCall
+	if call == nil || call.Name != "ratchet" || call.ID != callID {
+		t.Fatalf("expected direct ratchet call %s, got %+v", callID, call)
+	}
+	result, err := editor.Run(t.Context(), tool.Call{ID: call.ID, Name: call.Name, Args: call.Arguments}, env)
+	if err != nil || !result.OK {
+		t.Fatalf("%s: result %+v, error %v", call.ID, result, err)
+	}
+	if call.ID == "call-ratchet-approve" && !bytes.Contains(result.Output, []byte(`"approved":true`)) {
+		t.Fatalf("approval result = %s", result.Output)
+	}
+}
+
+type liveRatchetAsker struct {
+	t     *testing.T
+	calls int
+}
+
+func (a *liveRatchetAsker) Ask(_ context.Context, _ string, q ratchet.Question) (ratchet.Answer, error) {
+	a.calls++
+	if len(q.Options) != 3 || q.Options[0].Label != "Approve" || q.Options[1].Label != "Revise" || q.Options[2].Label != "Abort" {
+		a.t.Fatalf("approval options = %+v", q.Options)
+	}
+	return ratchet.Answer{Label: "Approve"}, nil
 }
