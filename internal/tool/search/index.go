@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,10 +44,20 @@ func indexRoot(home, cwd string) (string, error) {
 }
 
 func indexDir(env tool.Env) (string, bool) {
-	if !tool.IsLocalRunner(env.Runner) || !filepath.IsAbs(env.Home) || !ctimeSupported || runner.UnavailableCause() != "" {
+	if runtime.GOOS == "darwin" {
+		return "", false
+	}
+	if !tool.IsLocalRunner(env.Runner) || !ctimeSupported || runner.UnavailableCause() != "" {
 		return "", false
 	}
 	if env.Sandbox.Mode != "" && env.Sandbox.Mode != runner.SandboxWorkspaceWrite {
+		return "", false
+	}
+	return protectedIndexRoot(env)
+}
+
+func protectedIndexRoot(env tool.Env) (string, bool) {
+	if !filepath.IsAbs(env.Home) {
 		return "", false
 	}
 	root, err := indexRoot(env.Home, env.Cwd)

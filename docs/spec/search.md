@@ -24,6 +24,8 @@ Only the parent MUST publish a generation, by an atomic rename of `CURRENT`, aft
 
 On platforms without change times, including Windows, the index MUST NOT be built or used. The builder MUST run in the sandbox of the search call.
 
+On macOS, Search MUST scan without an index until native sandbox runtime checks pass. Search MUST NOT start an index build there.
+
 A grep call with an index MUST return the same output as a grep call without one. The index MUST let the search skip a file only when its trigram query cannot match the file.
 
 A file MUST count as covered only when its size, modification time and change time equal its manifest record. A covered file MUST have both times more than 2 seconds older than the build start.

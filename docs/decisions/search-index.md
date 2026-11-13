@@ -10,6 +10,8 @@ The index MUST NOT be built or used where the sandbox does not enforce its writa
 
 The index belongs to the grep mode of the search tool in `internal/tool/search`. It covers the workspace root only. The builder runs as a hidden command, `__search-index`, in both products. The library is `github.com/google/codesearch` at v1.2.0, licensed under BSD-3-Clause. It has no module requirements.
 
+On macOS, `indexDir` returns no index root, so grep scans every eligible file and starts no background index build. Native macOS sandbox runtime checks have not been proven. This scan-only fallback stays until those checks pass. It does not change output byte identity or the platform's change-time support.
+
 ## Enforcement
 
 `TestIndexedGrepEqualsScan` and `FuzzTrigramCandidates` in `internal/tool/search` check that an indexed grep returns the scan's output and names every file that can match. `TestCoveredFileWithRestoredMtimeIsRead` and `TestRacyFileIsReadEvenWhenStatMatches` check the freshness rule. `TestChildWritesNothingToStderrOnSuccess` and the exit-status tests in `query_exit_test.go` check the child's contract.
