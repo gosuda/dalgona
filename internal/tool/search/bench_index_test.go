@@ -21,7 +21,18 @@ func benchBuildIndex(b *testing.B, ws string) {
 		}
 		last = dir
 	})
-	m, err := readManifest(filepath.Join(last, manifestFile))
+	rejected := benchRejectedFiles(b, last)
+	info, err := os.Stat(filepath.Join(last, trigramFile))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportMetric(float64(info.Size()), "index_bytes")
+	b.ReportMetric(float64(rejected), "rejected_files")
+}
+
+func benchRejectedFiles(b *testing.B, dir string) int {
+	b.Helper()
+	m, err := readManifest(filepath.Join(dir, manifestFile))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -31,12 +42,7 @@ func benchBuildIndex(b *testing.B, ws string) {
 			rejected++
 		}
 	}
-	info, err := os.Stat(filepath.Join(last, trigramFile))
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ReportMetric(float64(info.Size()), "index_bytes")
-	b.ReportMetric(float64(rejected), "rejected_files")
+	return rejected
 }
 
 func BenchmarkBuildIndexWorkloadA(b *testing.B) {
@@ -82,8 +88,15 @@ func BenchmarkGrepRareLiteral(b *testing.B) {
 	}
 	start := time.Now().Add(time.Hour)
 	dir := benchBuiltGeneration(b, ws, start)
-	b.Run("scan", func(b *testing.B) { benchGrep(b, ws, "", freshness{}, "needle-7f3a") })
-	b.Run("indexed", func(b *testing.B) { benchGrep(b, ws, dir, clockAt(start), "needle-7f3a") })
+	rejected := benchRejectedFiles(b, dir)
+	b.Run("scan", func(b *testing.B) {
+		benchGrep(b, ws, "", freshness{}, "needle-7f3a")
+		b.ReportMetric(float64(rejected), "rejected_files")
+	})
+	b.Run("indexed", func(b *testing.B) {
+		benchGrep(b, ws, dir, clockAt(start), "needle-7f3a")
+		b.ReportMetric(float64(rejected), "rejected_files")
+	})
 }
 
 func BenchmarkGrepRareLiteralWorkloadB(b *testing.B) {
@@ -91,8 +104,15 @@ func BenchmarkGrepRareLiteralWorkloadB(b *testing.B) {
 	ws := corpusDir(b)
 	start := time.Now().Add(time.Hour)
 	dir := benchBuiltGeneration(b, ws, start)
-	b.Run("scan", func(b *testing.B) { benchGrep(b, ws, "", freshness{}, "needle-7f3a") })
-	b.Run("indexed", func(b *testing.B) { benchGrep(b, ws, dir, clockAt(start), "needle-7f3a") })
+	rejected := benchRejectedFiles(b, dir)
+	b.Run("scan", func(b *testing.B) {
+		benchGrep(b, ws, "", freshness{}, "needle-7f3a")
+		b.ReportMetric(float64(rejected), "rejected_files")
+	})
+	b.Run("indexed", func(b *testing.B) {
+		benchGrep(b, ws, dir, clockAt(start), "needle-7f3a")
+		b.ReportMetric(float64(rejected), "rejected_files")
+	})
 }
 
 func BenchmarkGrepMatchAll(b *testing.B) {

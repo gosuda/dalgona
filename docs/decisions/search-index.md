@@ -22,6 +22,8 @@ A grep call that counts at least 32 MiB of uncovered bytes starts one background
 
 The 4 GB sweep of `BenchmarkThresholdSweep` has not run on this host, so the value stays at 32 MiB until its output exists. The final value is the smallest uncovered size whose indexed p95 is below its scan p95, or 4 GiB when no size qualifies.
 
+`rejected_files` counts manifest records whose `Indexed` value is false. `BenchmarkBuildIndexWorkloadA` and `BenchmarkBuildIndexWorkloadB` report this count for the built generation. Both the scan and indexed sub-benchmarks of `BenchmarkGrepRareLiteral` and `BenchmarkGrepRareLiteralWorkloadB` report the same generation's count. The manifest is read and counted outside the timed loop. This metric describes index coverage, not the number of files scanned by a call.
+
 ## Rejected alternatives
 
 - `github.com/sourcegraph/zoekt` as the engine. It adds 58 direct requirements, and its default cuts file content above 2 MiB.
