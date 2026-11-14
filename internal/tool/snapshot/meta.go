@@ -18,8 +18,19 @@ func (e Entry) Meta() jsontext.Value {
 	out = AppendJSONString(out, e.Path)
 	out = append(out, `,"blob":`...)
 	out = AppendJSONString(out, e.Blob)
-	out = append(out, `,"shown":[`...)
-	for i, item := range e.Shown {
+	out = append(out, `,"shown":`...)
+	out = appendShownRanges(out, e.Shown)
+	out = append(out, `,"revision":`...)
+	out = strconv.AppendUint(out, e.Revision, 10)
+	out = append(out, `,"epoch":`...)
+	out = strconv.AppendUint(out, e.Epoch, 10)
+	out = append(out, '}')
+	return jsontext.Value(out)
+}
+
+func appendShownRanges(out []byte, shown []Range) []byte {
+	out = append(out, '[')
+	for i, item := range shown {
 		if i > 0 {
 			out = append(out, ',')
 		}
@@ -29,12 +40,7 @@ func (e Entry) Meta() jsontext.Value {
 		out = strconv.AppendInt(out, int64(item.End), 10)
 		out = append(out, ']')
 	}
-	out = append(out, `],"revision":`...)
-	out = strconv.AppendUint(out, e.Revision, 10)
-	out = append(out, `,"epoch":`...)
-	out = strconv.AppendUint(out, e.Epoch, 10)
-	out = append(out, '}')
-	return jsontext.Value(out)
+	return append(out, ']')
 }
 
 func (s *Store) Restore(meta jsontext.Value, data []byte) error {
@@ -163,10 +169,6 @@ func readField(decoder *jsontext.Decoder, entry *Entry, seen map[string]bool) er
 	if err != nil {
 		return fmt.Errorf("snapshot: decode metadata value: %w", err)
 	}
-	return applyField(entry, seen, key, value)
-}
-
-func applyField(entry *Entry, seen map[string]bool, key string, value jsontext.Value) error {
 	if seen[key] {
 		return fmt.Errorf("snapshot: duplicate metadata key %q", key)
 	}
