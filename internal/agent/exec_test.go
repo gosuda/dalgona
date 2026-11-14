@@ -14,10 +14,11 @@ type readFailingRunner struct {
 	runner.Runner
 	mu      sync.Mutex
 	signals []runner.Signal
+	readErr error
 }
 
 func (f *readFailingRunner) Read(context.Context, string, int64) (runner.Output, error) {
-	return runner.Output{Alive: true}, errors.New("read failed")
+	return runner.Output{Alive: true}, f.readErr
 }
 
 func (f *readFailingRunner) Signal(_ context.Context, _ string, s runner.Signal) error {
@@ -28,10 +29,11 @@ func (f *readFailingRunner) Signal(_ context.Context, _ string, s runner.Signal)
 }
 
 func TestCollectExecKillsWhenReadFailsWhileAlive(t *testing.T) {
-	run := &readFailingRunner{}
+	readErr := errors.New("read failed")
+	run := &readFailingRunner{readErr: readErr}
 	_, err := collectExec(t.Context(), run, "exec-1", ExecSpec{})
-	if err == nil {
-		t.Fatal("collectExec returned no error for a failed read")
+	if !errors.Is(err, readErr) {
+		t.Fatalf("collectExec error = %v, want wrapped read error %v", err, readErr)
 	}
 	run.mu.Lock()
 	defer run.mu.Unlock()

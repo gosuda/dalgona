@@ -1,21 +1,17 @@
 package rpc
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/config"
 )
-
-func streamCommand(before, after string) string {
-	if runtime.GOOS == "windows" {
-		return "echo " + before + " & ping -n 2 127.0.0.1 >nul & echo " + after
-	}
-	return "echo " + before + "; sleep 0.3; echo " + after
-}
 
 func splitSecretCommand() string {
 	if runtime.GOOS == "windows" {
@@ -27,10 +23,64 @@ func splitSecretCommand() string {
 const outputDeltaMethod = "item/commandExecution/outputDelta"
 
 type execRun struct {
-	threadID string
-	turnID   string
-	deltas   []string
-	command  Item
+	deltas  []string
+	command Item
+}
+
+type execObserver struct {
+	threadID  string
+	turnID    string
+	deltas    []string
+	command   Item
+	completed bool
+}
+
+func (o *execObserver) observe(t *testing.T, m message) {
+	t.Helper()
+	switch {
+	case m.Method == outputDeltaMethod:
+		o.observeOutputDelta(t, m)
+	case m.Method == methodItemCompleted && itemOf(t, m).ID == "call-x":
+		o.completed = true
+		o.command = itemOf(t, m)
+	}
+}
+
+func (o *execObserver) observeOutputDelta(t *testing.T, m message) {
+	t.Helper()
+	expect(t, !o.completed, "outputDelta after item/completed", string(m.Params))
+	validateLine(t, "v2/CommandExecutionOutputDeltaNotification.json", m.Params)
+	expect(t, fieldOf(t, m.Params, "threadId") == o.threadID && fieldOf(t, m.Params, "turnId") == o.turnID &&
+		fieldOf(t, m.Params, "itemId") == "call-x", "outputDelta ids", string(m.Params))
+	o.deltas = append(o.deltas, fieldOf(t, m.Params, "delta"))
+}
+
+func (o *execObserver) observeBeforeFirstOutputDelta(t *testing.T, m message) {
+	t.Helper()
+	if (m.Method == methodItemCompleted && itemOf(t, m).ID == "call-x") || m.Method == "turn/completed" {
+		t.Fatalf("%s arrived before the first outputDelta", m.Method)
+	}
+	o.observe(t, m)
+}
+
+func (o *execObserver) lastDelta() string {
+	if len(o.deltas) == 0 {
+		return ""
+	}
+	return o.deltas[len(o.deltas)-1]
+}
+
+func awaitFirstOutputDelta(t *testing.T, notes <-chan message, obs *execObserver) string {
+	t.Helper()
+	for obs.lastDelta() == "" {
+		select {
+		case m := <-notes:
+			obs.observeBeforeFirstOutputDelta(t, m)
+		case <-time.After(waitLimit):
+			t.Fatal("no outputDelta while the command waited on the gate")
+		}
+	}
+	return obs.lastDelta()
 }
 
 func runExec(t *testing.T, command string) execRun {
@@ -38,39 +88,47 @@ func runExec(t *testing.T, command string) execRun {
 	r := newRig(t, config.ApprovalYolo)
 	r.llm.push(llmReply{body: sseCall("call-x", "exec", `{"command":`+strconv.Quote(command)+`}`)}, llmReply{body: sseText("done")})
 	c := r.connect()
-	run := execRun{threadID: startThread(t, r, c, nil)}
-	run.turnID = startTurn(t, c, run.threadID, "stream it")
-	completed := false
+	threadID := startThread(t, r, c, nil)
+	turnID := startTurn(t, c, threadID, "stream it")
+	obs := &execObserver{threadID: threadID, turnID: turnID}
 	for _, m := range c.collect() {
-		switch {
-		case m.Method == outputDeltaMethod:
-			expect(t, !completed, "outputDelta after item/completed", string(m.Params))
-			validateLine(t, "v2/CommandExecutionOutputDeltaNotification.json", m.Params)
-			expect(t, fieldOf(t, m.Params, "threadId") == run.threadID && fieldOf(t, m.Params, "turnId") == run.turnID &&
-				fieldOf(t, m.Params, "itemId") == "call-x", "outputDelta ids", string(m.Params))
-			run.deltas = append(run.deltas, fieldOf(t, m.Params, "delta"))
-		case m.Method == methodItemCompleted && itemOf(t, m).ID == "call-x":
-			completed = true
-			run.command = itemOf(t, m)
-		}
+		obs.observe(t, m)
 	}
-	expect(t, completed && run.command.Status == statusCompleted, "command item", run.command)
+	run := execRun{deltas: obs.deltas, command: obs.command}
+	expect(t, obs.completed && run.command.Status == statusCompleted, "command item", run.command)
 	return run
 }
 
-func TestServeExecStreamsOutputDeltasBeforeCompletion(t *testing.T) {
-	run := runExec(t, streamCommand("a", "b"))
-	expect(t, len(run.deltas) > 0, "outputDelta count", run.deltas)
-	expect(t, strings.Join(run.deltas, "") == run.command.Output, "deltas equal aggregatedOutput", run)
-	expect(t, slices.Equal(strings.Fields(run.command.Output), []string{"a", "b"}), "streamed output", run.command.Output)
-}
+func TestServeExecStreamsOutputDeltaBeforeCompletion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the gate command needs a POSIX shell")
+	}
+	gate := filepath.Join(t.TempDir(), "release")
+	release := func() { _ = os.WriteFile(gate, []byte("release\n"), 0o600) }
+	t.Cleanup(release)
 
-func TestServeExecStreamsCompletedLinesWhileRunning(t *testing.T) {
-	run := runExec(t, streamCommand("a", "b"))
-	expect(t, len(run.deltas) >= 2, "first line streamed before the command ended", run.deltas)
-	expect(t, slices.Equal(strings.Fields(run.deltas[0]), []string{"a"}), "first delta is the first line", run.deltas)
-	expect(t, strings.Join(run.deltas, "") == run.command.Output, "deltas equal aggregatedOutput", run)
-	expect(t, slices.Equal(strings.Fields(run.command.Output), []string{"a", "b"}), "streamed output", run.command.Output)
+	r := newRig(t, config.ApprovalYolo)
+	command := "printf 'first\\n'; while [ ! -e '" + gate + "' ]; do sleep 0.02; done; printf 'second\\n'"
+	r.llm.push(llmReply{body: sseCall("call-x", "exec", `{"command":`+strconv.Quote(command)+`}`)}, llmReply{body: sseText("done")})
+	c := r.connect()
+	threadID := startThread(t, r, c, nil)
+	turnID := startTurn(t, c, threadID, "stream it")
+
+	obs := &execObserver{threadID: threadID, turnID: turnID}
+	firstDelta := awaitFirstOutputDelta(t, c.notes, obs)
+	expect(t, slices.Equal(strings.Fields(firstDelta), []string{"first"}), "first delta is the first line", firstDelta)
+
+	release()
+
+	seen := c.collect()
+	for _, m := range seen {
+		obs.observe(t, m)
+	}
+	expect(t, obs.completed && obs.command.Status == statusCompleted, "command item", obs.command)
+	expect(t, fieldOf(t, seen[len(seen)-1].Params, "turn", "status") == statusCompleted, "turn/completed status", string(seen[len(seen)-1].Params))
+	expect(t, len(obs.deltas) >= 2, "deltas streamed around the gate", obs.deltas)
+	expect(t, strings.Join(obs.deltas, "") == obs.command.Output, "deltas equal aggregatedOutput", obs.deltas)
+	expect(t, slices.Equal(strings.Fields(obs.command.Output), []string{"first", "second"}), "streamed output", obs.command.Output)
 }
 
 func TestServeExecDeltasMaskSecretSplitAcrossReads(t *testing.T) {

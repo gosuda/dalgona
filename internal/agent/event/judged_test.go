@@ -2,12 +2,21 @@ package event_test
 
 import (
 	"encoding/json/jsontext"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 )
+
+func judgedPaths(n int) []string {
+	paths := make([]string, n)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("pkg/path_%d.go", i)
+	}
+	return paths
+}
 
 const flaggedToolJSON = `{"type":"tool.judged","call_id":"call_7","turn_id":"turn-3","by":"judge:typesafe/jev-1.14","verdict":"flagged","paths":["internal/model/retry.go","web/src/lib/Retry.svelte","config/retry.toml"],"scores":{"broken_syntax":0.02,"layout_motion":0.04,"lost_code":0.94,"narration":0.05,"needless_layer":0.03,"off_task":0.11,"off_token":0.02,"placeholder":0.03,"sound":0.31,"unclear_contract":0.06,"unguarded_state":0.12,"unsafe_input":0.01,"wasted_work":0.04,"wrong_logic":0.62},"flags":["lost_code"],"spoken":["lost_code"],"feedback":true,"parts":2,"elapsed_ms":1840}`
 
@@ -104,6 +113,23 @@ func TestToolJudgedRoundTripAndValidation(t *testing.T) {
 			}
 		})
 	}
+	t.Run("64 paths accepted", func(t *testing.T) {
+		t.Parallel()
+		judged := flaggedToolJudged()
+		judged.Paths = judgedPaths(event.MaxJudgedPaths)
+		if err := judged.Validate(); err != nil {
+			t.Fatalf("Validate rejected %d paths: %v", event.MaxJudgedPaths, err)
+		}
+	})
+	t.Run("max error bytes accepted", func(t *testing.T) {
+		t.Parallel()
+		judged := flaggedToolJudged()
+		judged.Verdict, judged.Scores, judged.Flags, judged.Spoken, judged.Feedback = "error", nil, nil, nil, false
+		judged.Error = strings.Repeat("x", event.MaxJudgeErrorBytes)
+		if err := judged.Validate(); err != nil {
+			t.Fatalf("Validate rejected %d bytes error: %v", event.MaxJudgeErrorBytes, err)
+		}
+	})
 }
 
 func TestToolJudgedPartsRoundTrip(t *testing.T) {
@@ -120,6 +146,7 @@ func TestToolJudgedPartsRoundTrip(t *testing.T) {
 	}
 	onePart := flaggedToolJudged()
 	onePart.Parts = 1
+	assertRoundTrip(t, 0, onePart)
 	encoded, err = event.Encode(onePart)
 	if err != nil {
 		t.Fatalf("encode one part: %v", err)
@@ -217,6 +244,25 @@ func TestTurnJudgedRoundTripAndValidation(t *testing.T) {
 			}
 		})
 	}
+	t.Run("64 paths accepted", func(t *testing.T) {
+		t.Parallel()
+		judged := flaggedTurnJudged()
+		paths := judgedPaths(event.MaxJudgedPaths)
+		paths[0] = "config/retry.toml"
+		judged.Paths = paths
+		if err := judged.Validate(); err != nil {
+			t.Fatalf("Validate rejected %d paths: %v", event.MaxJudgedPaths, err)
+		}
+	})
+	t.Run("max error bytes accepted", func(t *testing.T) {
+		t.Parallel()
+		judged := flaggedTurnJudged()
+		judged.Verdict, judged.Scores, judged.Flags, judged.Spoken, judged.Feedback = "error", nil, nil, nil, false
+		judged.Error = strings.Repeat("x", event.MaxJudgeErrorBytes)
+		if err := judged.Validate(); err != nil {
+			t.Fatalf("Validate rejected %d bytes error: %v", event.MaxJudgeErrorBytes, err)
+		}
+	})
 }
 
 func foldJudgedEvents(events ...event.Event) error {

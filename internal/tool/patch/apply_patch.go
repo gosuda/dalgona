@@ -210,7 +210,7 @@ func appendPatchLine(target *strings.Builder, line string) {
 }
 
 func chunkEdit(index int, path string, chunk patchChunk) edit {
-	base := edit{kind: editChange, index: index, path: path, action: actionReplace, guard: guard{kind: guardQuoted}, body: chunk.newBody, window: afterPrevious}
+	base := edit{kind: editChange, index: index, path: path, action: actionReplace, guard: guard{kind: guardQuoted}, body: chunk.newBody}
 	if chunk.old == "" && chunk.newBody != "" {
 		base.locator = locator{kind: locatorGap, before: tailGap}
 		base.action = actionInsertAfter

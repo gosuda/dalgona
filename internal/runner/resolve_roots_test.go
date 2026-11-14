@@ -61,6 +61,29 @@ func TestResolveRoots_cleansDotDot(t *testing.T) {
 	if !found {
 		t.Fatalf("resolveRoots = %q, want entry %q", got, want)
 	}
+	requirePhysicalParentRoot(t, dir)
+}
+
+func requirePhysicalParentRoot(t *testing.T, dir string) {
+	t.Helper()
+	deep := filepath.Join(dir, "deep")
+	physical := filepath.Join(deep, "sub")
+	if err := os.MkdirAll(physical, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(deep, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(deep, "x"), filepath.Join(dir, "other")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveRoots([]string{dir + "/other/../sub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || got[0] != physical {
+		t.Fatalf("physical parent root = %q, want first entry %q", got, physical)
+	}
 }
 
 func TestResolveRoots_rejectsMissingRoot(t *testing.T) {

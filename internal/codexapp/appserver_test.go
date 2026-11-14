@@ -631,4 +631,24 @@ func TestAppServerWebSocketCapabilityTokenSHA256(t *testing.T) {
 	h.send(ws, websocket.MessageText, `{"id":1,"method":"initialize"}`)
 	h.expectLine(daemon, `{"id":1,"method":"initialize"}`)
 	_ = ws.CloseNow()
+	for _, candidate := range []string{"wrong-token", sum} {
+		t.Run(candidate, func(t *testing.T) {
+			ws, response, err := websocket.Dial(t.Context(), h.url, &websocket.DialOptions{
+				HTTPHeader: http.Header{"Authorization": {"Bearer " + candidate}},
+			})
+			if err == nil {
+				_ = ws.CloseNow()
+				t.Fatal("invalid digest-mode credential dial succeeded")
+			}
+			if response == nil || response.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("response = %v, err = %v", response, err)
+			}
+			_ = response.Body.Close()
+			select {
+			case <-h.daemons:
+				t.Fatal("rejected digest-mode request dialed the daemon")
+			default:
+			}
+		})
+	}
 }

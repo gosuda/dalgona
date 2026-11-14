@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -311,6 +312,11 @@ func TestRemotePagesLargePayloads(t *testing.T) {
 	want := bytes.Repeat([]byte("abcdefg1"), size/8)
 	t.Run("file", func(t *testing.T) {
 		pipeFileRoundTrip(t, ctx, newPiped, local, want)
+		for _, boundary := range []int{0, int(readPageSize) - 1, int(readPageSize), int(readPageSize) + 1, 2 * int(readPageSize)} {
+			t.Run(fmt.Sprintf("size%d", boundary), func(t *testing.T) {
+				pipeFileRoundTrip(t, ctx, newPiped, local, bytes.Repeat([]byte("x"), boundary))
+			})
+		}
 	})
 	t.Run("processRead", func(t *testing.T) {
 		spec := ProcessSpec{

@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -253,6 +254,36 @@ func TestBoundedRender_keepsNewestEventsWithinBudget(t *testing.T) {
 	if !strings.HasSuffix(got, Render(events[39:])) || !strings.HasPrefix(got, "[") || !strings.Contains(got, "earlier events omitted]") {
 		t.Fatalf("bounded render lost the newest event or the omission marker:\n%.200s", got)
 	}
+	assertBoundedRenderBudgetEdges(t)
+}
+
+func assertBoundedRenderBudgetEdges(t *testing.T) {
+	t.Helper()
+	const eventWrapperLen = 26
+	ev2Text := strings.Repeat("b", 2000)
+	ev2Len := len(ev2Text) + eventWrapperLen
+	ev1Text := strings.Repeat("a", inputBudget-ev2Len-eventWrapperLen)
+	fitEvents := []event.Seqd{
+		{Seq: 1, Event: event.AssistantMessage{Text: ev1Text}},
+		{Seq: 2, Event: event.AssistantMessage{Text: ev2Text}},
+	}
+	fitFull := Render(fitEvents)
+	if len(fitFull) != inputBudget {
+		t.Fatalf("fitEvents rendered length = %d, want exactly %d", len(fitFull), inputBudget)
+	}
+	if gotFit := boundedRender(fitEvents); gotFit != fitFull || strings.Contains(gotFit, "omitted") {
+		t.Fatalf("exact-fit input was clipped or lost: len=%d", len(gotFit))
+	}
+
+	nearBudget := strings.Repeat("c", inputBudget-20-eventWrapperLen)
+	dropEvents := []event.Seqd{
+		{Seq: 1, Event: event.AssistantMessage{Text: "old small event"}},
+		{Seq: 2, Event: event.AssistantMessage{Text: nearBudget}},
+	}
+	gotDrop := boundedRender(dropEvents)
+	if !strings.HasPrefix(gotDrop, "[1 earlier events omitted]\n") || strings.Contains(gotDrop, "old small event") {
+		t.Fatalf("expected 1 earlier event omitted, got: %.100s", gotDrop)
+	}
 }
 
 func TestBoundedRender_clipsOneOversizedElementKeepingItsTags(t *testing.T) {
@@ -260,6 +291,9 @@ func TestBoundedRender_clipsOneOversizedElementKeepingItsTags(t *testing.T) {
 	clipped := boundedRender(huge)
 	if len(clipped) > inputBudget || !strings.HasPrefix(clipped, "<assistant>\nhead") || !strings.HasSuffix(clipped, "tail\n</assistant>\n") || !strings.Contains(clipped, "bytes omitted]") {
 		t.Fatalf("clipped element lost its tags or exceeds the budget: %d bytes", len(clipped))
+	}
+	if !utf8.ValidString(clipped) {
+		t.Fatal("clipped element contains invalid UTF-8")
 	}
 	if len(reviewPrompt(1<<40, clipped)) > event.MaxInlineBytes {
 		t.Fatal("review prompt exceeds the inline journal limit")
@@ -273,8 +307,19 @@ func TestReviewSeq_roundTrip(t *testing.T) {
 			t.Fatalf("parseReviewSeq = %d, %v, want %d", got, ok, seq)
 		}
 	}
-	if _, ok := parseReviewSeq("plain prompt"); ok {
-		t.Fatal("plain prompt parsed as a review")
+	malformed := []string{
+		"plain prompt",
+		`<review seq="abc">hi</review>`,
+		`<review seq="18446744073709551616">overflow</review>`,
+		`<review seq="">empty</review>`,
+		`<review seq="-1">negative</review>`,
+		`<review seq=7>unquoted</review>`,
+		`review seq="7">missing open angle`,
+	}
+	for _, bad := range malformed {
+		if got, ok := parseReviewSeq(bad); ok {
+			t.Fatalf("parseReviewSeq(%q) succeeded with %d, want false", bad, got)
+		}
 	}
 }
 
@@ -294,5 +339,16 @@ func TestGuard_withdrawRestoresThePreviousAdmission(t *testing.T) {
 	fresh.Withdraw(fresh.Admit("x", SeverityConcern))
 	if dup := fresh.Admit("x", SeverityNit); dup.Verdict != VerdictAccepted {
 		t.Fatalf("withdrawn concern still blocks a nit: %s", dup.Verdict)
+	}
+	lifoGuard := NewGuard(3)
+	n := lifoGuard.Admit("clean key", SeverityNit)
+	b := lifoGuard.Admit("clean key", SeverityBlocker)
+	lifoGuard.Withdraw(b)
+	if dup := lifoGuard.Admit("clean key", SeverityNit); dup.Verdict != VerdictDuplicate {
+		t.Fatalf("withdrawing blocker must restore seen to nit, got verdict %s", dup.Verdict)
+	}
+	lifoGuard.Withdraw(n)
+	if fresh := lifoGuard.Admit("clean key", SeverityNit); fresh.Verdict != VerdictAccepted {
+		t.Fatalf("withdrawing nit must restore seen to zero, got verdict %s", fresh.Verdict)
 	}
 }

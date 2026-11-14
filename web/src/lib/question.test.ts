@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
 import {
-	MAX_ANSWER,
 	parseQuestionRequest,
 	questionResponse,
 	resolutionNotice,
@@ -124,7 +123,6 @@ describe("question request", () => {
 				q2: { answers: [] },
 			},
 		});
-		expect(MAX_ANSWER).toBe(2000);
 	});
 
 	test("maps each resolution to its notice", () => {

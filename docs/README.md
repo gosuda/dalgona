@@ -14,7 +14,7 @@ Use one name for each thing in user-facing text and new specifications.
 - Thinking and reasoning: interfaces show thinking; the wire, journal, and config field is `reasoning`.
 - Subagent: a thread that a tool call starts under another thread. `child.spawned` and `parent` are its journal names.
 - Interrupt: the user stops the running turn, which ends with status `interrupted`. `cancel` is only an approval decision.
-- Mode: the per-thread approval mode, the sandbox mode, and the tool mode set in configuration. For remote runners, name the shapes thread boxes and the daemon in a box.
+- Mode: the per-thread approval mode, the sandbox mode, and the tool mode set in configuration. For remote runners, name thread boxes and the daemon in a box as [runners.md](spec/runners.md) and [config.md](spec/config.md) define them.
 - Generation: one built search index of a workspace, in a directory named for its build start. `CURRENT` names the published generation.
 - Manifest: the file in a generation that lists each eligible file with its size, its times, and whether the index holds it.
 - Trigram: a three-byte sequence that the search index uses to name candidate files.
@@ -69,10 +69,10 @@ Use one name for each thing in user-facing text and new specifications.
 - [MCP client](spec/mcp.md): tool discovery, calls, and transports.
 - [Discovery](spec/discovery.md): opt-in imports of instructions, skills, and server config.
 - [herdr integration](spec/herdr.md): pane reports and subagent panes.
-- [Live debugging](spec/live-debug.md): scripted model server, script format, and stream framing.
+- [Live debugging](spec/live-debug.md): local scripted-server contract, setup and cleanup runbook, and manual terminal and browser acceptance matrix. It distinguishes planned probes from recorded live or test evidence.
 - [Cloudflare deployment](../deploy/cloudflare/README.md): worker tokens, image release, digest pins, and box cleanup.
 
-`just spec-style` checks sentence length, semicolons and dashes in `docs/spec`.
+`just spec-style` checks sentence length, semicolons, em dashes, and lower-case `should` in `docs/spec`.
 
 ## Decisions
 

@@ -34,7 +34,6 @@ type staticModel struct {
 	id      string
 	context int
 	efforts []string
-	images  bool
 }
 
 var (
@@ -44,15 +43,15 @@ var (
 )
 
 var staticModels = []staticModel{
-	{id: "gpt-6.1-sol", context: 272000, efforts: fullEfforts, images: true},
-	{id: "gpt-6-astra", context: 272000, efforts: fullEfforts, images: true},
-	{id: "gpt-6-sol", context: 272000, efforts: fullEfforts, images: true},
-	{id: "gpt-6-luna", context: 272000, efforts: lunaEfforts, images: true},
-	{id: "gpt-5.6-sol", context: 272000, efforts: fullEfforts, images: true},
-	{id: "gpt-6.1-terra", context: 500000, efforts: fullEfforts, images: true},
-	{id: "gpt-5.6-terra", context: 272000, efforts: fullEfforts, images: true},
-	{id: "gpt-5.6-luna", context: 272000, efforts: lunaEfforts, images: true},
-	{id: "gpt-5.5", context: 272000, efforts: legacyEffort, images: true},
+	{id: "gpt-6.1-sol", context: 272000, efforts: fullEfforts},
+	{id: "gpt-6-astra", context: 272000, efforts: fullEfforts},
+	{id: "gpt-6-sol", context: 272000, efforts: fullEfforts},
+	{id: "gpt-6-luna", context: 272000, efforts: lunaEfforts},
+	{id: "gpt-5.6-sol", context: 272000, efforts: fullEfforts},
+	{id: "gpt-6.1-terra", context: 500000, efforts: fullEfforts},
+	{id: "gpt-5.6-terra", context: 272000, efforts: fullEfforts},
+	{id: "gpt-5.6-luna", context: 272000, efforts: lunaEfforts},
+	{id: "gpt-5.5", context: 272000, efforts: legacyEffort},
 }
 
 func New(cfg Config) *Provider {
@@ -110,7 +109,7 @@ func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
 			Context:    model.ContextWindow(item.id, item.context, p.contextWindows),
 			Efforts:    item.efforts,
 			ToolChoice: true,
-			Images:     item.images,
+			Images:     true,
 		}
 	}
 	return models, nil

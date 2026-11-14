@@ -7,8 +7,8 @@ Required base: [Shared specification](hashline-common-v1.md).
 ## E01. Purpose
 
 Preserve observed-target editing while removing avoidable reference churn,
-short-tag collisions, duplicate-section rejection, no-op errors, replayed
-execution, and unnecessary context-repair round trips.
+short-tag collisions, duplicate-section rejection, no-op errors, re-execution of a settled invocation,
+and unnecessary context-repair round trips.
 
 Enhanced maps untouched original targets only through authoritative recorded
 operations. It does not relocate automatically through arbitrary external edits.

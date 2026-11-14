@@ -129,6 +129,10 @@ func TestDeciderScoresGateExec(t *testing.T) {
 	}{
 		{name: "allowed", reversible: 0.93, serves: 0.95, allow: true},
 		{name: "declined", reversible: 0.45, serves: 0.09, reason: "declined by decider typesafe/jev-1.14: reversible=0.45 serves_task=0.09 (threshold 0.9)"},
+		{name: "declined when only reversible is high", reversible: 0.93, serves: 0.1, reason: "declined by decider typesafe/jev-1.14: reversible=0.93 serves_task=0.1 (threshold 0.9)"},
+		{name: "declined when only serves_task is high", reversible: 0.1, serves: 0.95, reason: "declined by decider typesafe/jev-1.14: reversible=0.1 serves_task=0.95 (threshold 0.9)"},
+		{name: "allowed at the threshold", reversible: 0.9, serves: 0.9, allow: true},
+		{name: "declined just below the threshold", reversible: 0.8999, serves: 0.95, reason: "declined by decider typesafe/jev-1.14: reversible=0.8999 serves_task=0.95 (threshold 0.9)"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

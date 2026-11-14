@@ -51,3 +51,22 @@ func TestSpansBoundariesAndMasking(t *testing.T) {
 		})
 	}
 }
+
+func TestSpansEveryOccurrenceInPromptOrder(t *testing.T) {
+	t.Parallel()
+	table := []Keyword{{Word: "beta"}, {Word: "alpha"}}
+	got := Spans("alpha beta alpha", table)
+	want := []Span{
+		{Keyword: table[1], Start: 0, End: 5},
+		{Keyword: table[0], Start: 6, End: 10},
+		{Keyword: table[1], Start: 11, End: 16},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Spans = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].Keyword.Word != want[i].Keyword.Word || got[i].Start != want[i].Start || got[i].End != want[i].End {
+			t.Fatalf("Spans[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}

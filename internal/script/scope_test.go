@@ -88,6 +88,13 @@ func TestScopeRejectsLimitOutsideRange(t *testing.T) {
 			t.Fatalf("limit %d: %v %+v", limit, err, outcome)
 		}
 	}
+	for _, limit := range []int{1, 64} {
+		src := fmt.Sprintf("s = ctx.scope(limit = %d)\ns.tools.echo(i = 7)\ns.all()", limit)
+		outcome, err := script.RunWorkflow(t.Context(), newJournal(echoTool), script.Workflow{ID: "s", Entry: "s.star", Source: []byte(src)})
+		if err != nil || outcome.Status != script.StatusCompleted || string(outcome.Value) != `[{"tool":"echo","args":{"i":7}}]` {
+			t.Fatalf("accepted limit %d: %v %+v", limit, err, outcome)
+		}
+	}
 }
 
 const judgeBatchWorkflow = `

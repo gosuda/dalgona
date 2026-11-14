@@ -87,6 +87,10 @@ func publishIndexFor(t *testing.T, ws, root string) string {
 	return gen
 }
 
+func explicitRef(root string) indexRef {
+	return indexRef{root: root, gen: currentGeneration(root)}
+}
+
 var (
 	outputRef = regexp.MustCompile(`@r[0-9a-f]+\.[0-9a-z]+`)
 	metaRef   = regexp.MustCompile(`"ref":"r[0-9a-f]+\.[0-9a-z]+"`)
@@ -185,12 +189,11 @@ func TestRemoteRunnerGetsNoIndexArguments(t *testing.T) {
 }
 
 func TestLocalGrepPassesGeneration(t *testing.T) {
-	env, root := indexedEnv(t, map[string]string{"a.txt": "needle\n"})
-	gen := currentGeneration(root)
+	_, root := indexedEnv(t, map[string]string{"a.txt": "needle\n"})
 	raw := jsontext.Value(`{"mode":"grep","pattern":"needle"}`)
-	ref := indexFor(env)
-	if ref.root != root || ref.gen != gen {
-		t.Fatalf("indexFor = %+v, want root %q and generation %q", ref, root, gen)
+	ref := explicitRef(root)
+	if ref.gen == "" {
+		t.Fatal("the fixture published no generation")
 	}
 	before := time.Now()
 	argv := searchArgs(raw, ref, time.Now())
@@ -295,6 +298,9 @@ func requireRetryMatchesScan(t *testing.T, damage func(trigram string)) {
 	t.Helper()
 	env, root := indexedEnv(t, map[string]string{"a.txt": "needle here\n", "b.txt": "other\n"})
 	gen := currentGeneration(root)
+	if gen == "" {
+		t.Fatal("the fixture published no generation")
+	}
 	damage(filepath.Join(root, gen, trigramFile))
 	raw := jsontext.Value(`{"mode":"grep","pattern":"needle","limit":100}`)
 	parsed, err := parseArgs(raw)
@@ -305,16 +311,17 @@ func requireRetryMatchesScan(t *testing.T, damage func(trigram string)) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := New().Run(t.Context(), tool.Call{ID: "call-1", Args: raw}, env)
+	got, err := grepWithIndex(t.Context(), env, explicitRef(root), "call-1", raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantResult := makeResult(want, snapshot.New())
-	if normalizeRefs(got.Output) != normalizeRefs(wantResult.Output) {
-		t.Fatalf("retry output %q, want %q", got.Output, wantResult.Output)
+	gotResult := makeResult(got, snapshot.New())
+	if normalizeRefs(gotResult.Output) != normalizeRefs(wantResult.Output) {
+		t.Fatalf("retry output %q, want %q", gotResult.Output, wantResult.Output)
 	}
-	if normalizeRefs(got.Meta) != normalizeRefs(wantResult.Meta) {
-		t.Fatalf("retry meta %s, want %s", got.Meta, wantResult.Meta)
+	if normalizeRefs(gotResult.Meta) != normalizeRefs(wantResult.Meta) {
+		t.Fatalf("retry meta %s, want %s", gotResult.Meta, wantResult.Meta)
 	}
 	if currentGeneration(root) != "" {
 		t.Fatal("CURRENT still names the failed generation")

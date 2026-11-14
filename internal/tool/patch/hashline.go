@@ -195,7 +195,7 @@ func (s *hashSection) change(loc locator, act action, body string) {
 	}
 	s.edits = append(s.edits, edit{
 		kind: editChange, index: s.next(), path: s.path, locator: loc,
-		action: act, guard: proof, body: body, window: beforePayload,
+		action: act, guard: proof, body: body,
 	})
 }
 

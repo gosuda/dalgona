@@ -88,7 +88,6 @@ func TestForkSharesBoxAndArchiveDestroysOnLastThread(t *testing.T) {
 
 	startFork(t, store, "thread-b", "thread-a")
 	fork := openRunner(ctx, t, b, "thread-b")
-	must(t, appendEvents(ctx, store, "thread-b", want))
 	data, err := fork.ReadFile(ctx, shared)
 	if err != nil || string(data) != "from a" {
 		t.Fatalf("thread-b read %q, %v", data, err)

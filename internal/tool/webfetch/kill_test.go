@@ -134,6 +134,9 @@ func TestRemoteExitWaitEndsWithTheCallerContext(t *testing.T) {
 	if !errors.Is(runErr, context.Canceled) {
 		t.Fatalf("exit wait ignored the caller context: %v", runErr)
 	}
+	if errors.Is(runErr, runner.ErrExitTimeout) {
+		t.Fatalf("exit wait reported timeout instead of caller cancellation: %v", runErr)
+	}
 }
 
 func waitFetchExit(t *testing.T, run runner.Runner, id string) runner.Output {

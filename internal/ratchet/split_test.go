@@ -49,8 +49,27 @@ func checkSplitCase(t *testing.T, tc splitCase, s state) {
 			t.Fatalf("tag %s reached the test side", tag)
 		}
 	}
+	checkSplitMembership(t, tc, s)
+}
+
+func checkSplitMembership(t *testing.T, tc splitCase, s state) {
+	t.Helper()
 	if len(tc.strata) != len(s.TrainIDs)+len(s.TestIDs) {
 		t.Fatalf("split lost or duplicated cases")
+	}
+	counts := make(map[string]int, len(tc.strata))
+	for _, ids := range [][]string{s.TrainIDs, s.TestIDs} {
+		for _, id := range ids {
+			if _, ok := tc.strata[id]; !ok {
+				t.Fatalf("split contains unknown case %q", id)
+			}
+			counts[id]++
+		}
+	}
+	for id := range tc.strata {
+		if counts[id] != 1 {
+			t.Fatalf("case %q occurs %d times across split, want exactly once", id, counts[id])
+		}
 	}
 }
 

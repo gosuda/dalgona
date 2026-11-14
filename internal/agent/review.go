@@ -356,14 +356,6 @@ func packMasked(mask func(string) (string, error), task, name string, diffs []fi
 	return parts, omitted, nil
 }
 
-func buildReview(task, name string, files []reviewFile) ([]judgeInput, int, error) {
-	diffs, err := diffFiles(files, reviewContextLines)
-	if err != nil {
-		return nil, 0, err
-	}
-	return packParts(task, name, diffs)
-}
-
 func (w *worker) loadUnitFiles(ctx context.Context, changes []event.FileChange, paths []string) ([]reviewFile, unitInput, error) {
 	var unit unitInput
 	files := make([]reviewFile, 0, len(changes))

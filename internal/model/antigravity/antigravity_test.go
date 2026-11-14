@@ -247,12 +247,23 @@ func TestModelsCarryCatalogLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	foundPro, foundArgon := false, false
 	for _, item := range models {
-		if item.ID == "gemini-3-pro" && (item.Context != 200000 || item.MaxOutput != 65535 || len(item.Efforts) != 2) {
-			t.Fatalf("gemini-3-pro = %+v", item)
-		}
-		if item.ID == "gemini-4-argon" && item.Context != 1048576 {
-			t.Fatalf("gemini-4-argon = %+v", item)
-		}
+		foundPro = foundPro || item.ID == "gemini-3-pro"
+		foundArgon = foundArgon || item.ID == "gemini-4-argon"
+		assertCatalogModelLimits(t, item)
+	}
+	if !foundPro || !foundArgon {
+		t.Fatalf("required models missing: gemini-3-pro = %v, gemini-4-argon = %v", foundPro, foundArgon)
+	}
+}
+
+func assertCatalogModelLimits(t *testing.T, item model.Model) {
+	t.Helper()
+	if item.ID == "gemini-3-pro" && (item.Context != 200000 || item.MaxOutput != 65535 || len(item.Efforts) != 2) {
+		t.Fatalf("gemini-3-pro = %+v", item)
+	}
+	if item.ID == "gemini-4-argon" && item.Context != 1048576 {
+		t.Fatalf("gemini-4-argon = %+v", item)
 	}
 }

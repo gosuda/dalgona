@@ -63,3 +63,5 @@ If the worker answers 404 to Destroy, Destroy MUST return an error that wraps `s
 The worker MUST accept only `DALGONA_TOKEN` on worker routes. It MUST compare the bearer in constant time. A box token MUST NOT pass worker authorization. The client MUST send the worker secret, which is the value of `DALGONA_TOKEN` on the worker, as the bearer token. The client reads that value from `DALGONA_CLOUDFLARE_TOKEN`, or else from the `cloudflare` entry in `auth.json`.
 
 The durable object MUST read the box name from `ctx.id.name`. A missing box name MUST fail with 500. It MUST derive the box token with HMAC-SHA256 over the box name keyed by `DALGONA_TOKEN`. It MUST set `DALGONA_BOX_TOKEN` to the box token. It MUST replace the Authorization header with the box token when it proxies into the container.
+
+The worker MUST delete a client-sent `X-Dalgona-Lifecycle` header before it proxies a websocket GET into the durable object. A client-sent lifecycle header MUST NOT start or destroy a box.

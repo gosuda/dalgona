@@ -12,4 +12,4 @@ This decision applies to primary, subagent, script-inner, remote-tool, and advis
 
 ## Enforcement
 
-`internal/agent/approval_test.go` checks score thresholds, static refusals, decider timeouts, `yolo`, thread grants, and `ask` without a client. `internal/config/config_test.go` checks mode validation and rejects the old approval table. `just test` runs these tests.
+`internal/agent/approval_test.go` checks score thresholds, static refusals, decider timeouts, `yolo`, thread grants, and `ask` without a client. `internal/config/config_test.go` checks mode validation. Its `TestLoad_rejectsLegacyApprovalTable` checks that loading fails for a fixture with both an `approval` scalar and an `[approval]` table. `just test` runs these tests.

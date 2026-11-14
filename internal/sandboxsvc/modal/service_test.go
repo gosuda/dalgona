@@ -158,6 +158,15 @@ func TestServiceRejectsMalformedID(t *testing.T) {
 	if _, err := service.Attach(t.Context(), "missing-volume"); err == nil {
 		t.Fatal("Attach accepted an id without a volume")
 	}
+	api := newFakeAPI()
+	api.boxes["sandbox-1"] = &fakeBox{}
+	service = New(api, nil)
+	if err := service.Destroy(t.Context(), "sandbox-1/a/b"); err == nil {
+		t.Fatal("Destroy accepted an id with an extra path component")
+	}
+	if len(api.deleted) != 0 {
+		t.Fatalf("malformed id deleted volumes: %q", api.deleted)
+	}
 }
 
 func TestServiceTerminatesReplacementWhenBootstrapFails(t *testing.T) {

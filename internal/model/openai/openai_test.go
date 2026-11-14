@@ -20,10 +20,11 @@ import (
 )
 
 type requestTool struct {
-	Type       string         `json:"type"`
-	Name       string         `json:"name"`
-	Strict     bool           `json:"strict"`
-	Parameters jsontext.Value `json:"parameters"`
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Strict      bool           `json:"strict"`
+	Parameters  jsontext.Value `json:"parameters"`
 }
 
 type requestReasoning struct {
@@ -434,13 +435,19 @@ func lastEvent(t *testing.T, stream model.Stream) model.Event {
 }
 
 type requestItem struct {
-	Type      string `json:"type"`
-	Role      string `json:"role"`
-	CallID    string `json:"call_id"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-	Input     string `json:"input"`
-	Output    string `json:"output"`
+	Type      string           `json:"type"`
+	Role      string           `json:"role"`
+	Content   []requestContent `json:"content"`
+	CallID    string           `json:"call_id"`
+	Name      string           `json:"name"`
+	Arguments string           `json:"arguments"`
+	Input     string           `json:"input"`
+	Output    string           `json:"output"`
+}
+
+type requestContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 func assertRequestBody(t *testing.T, body []byte) {
@@ -452,6 +459,7 @@ func assertRequestBody(t *testing.T, body []byte) {
 		Input        []requestItem    `json:"input"`
 		Tools        []requestTool    `json:"tools"`
 		Reasoning    requestReasoning `json:"reasoning"`
+		Include      []string         `json:"include"`
 	}
 	if err := json.Unmarshal(body, &value); err != nil {
 		t.Fatalf("request JSON: %v\n%s", err, body)
@@ -461,37 +469,38 @@ func assertRequestBody(t *testing.T, body []byte) {
 	}
 	assertHistory(t, value.Input)
 	assertRequestTools(t, value.Tools)
-	assertRequestReasoning(t, body, value.Reasoning.Effort, value.Reasoning.Summary)
+	assertRequestReasoning(t, value.Include, value.Reasoning.Effort, value.Reasoning.Summary)
 }
 
 func assertHistory(t *testing.T, items []requestItem) {
 	t.Helper()
 	want := []requestItem{
-		{Type: "message", Role: "assistant"},
+		{Type: "message", Role: "assistant", Content: []requestContent{{Type: "output_text", Text: "prior"}}},
 		{Type: "function_call", CallID: "call-1", Name: "read", Arguments: `{"path":"a"}`},
 		{Type: "custom_tool_call", CallID: "call-2", Name: "apply_patch", Input: "patch"},
 		{Type: "function_call_output", CallID: "call-1", Output: "done"},
 		{Type: "custom_tool_call_output", CallID: "call-2", Output: "patched"},
 	}
-	if !slices.Equal(items, want) {
+	if !reflect.DeepEqual(items, want) {
 		t.Fatalf("input items = %+v, want %+v", items, want)
 	}
 }
 
 func assertRequestTools(t *testing.T, tools []requestTool) {
 	t.Helper()
-	if len(tools) != 2 || tools[0].Type != "function" || tools[0].Name != "read" || tools[0].Strict {
+	if len(tools) != 2 || tools[0].Type != "function" || tools[0].Name != "read" || tools[0].Description != "Read" || tools[0].Strict {
 		t.Fatalf("function tool = %+v", tools)
 	}
+	sameJSON(t, tools[0].Parameters, `{"type":"object"}`)
 	if tools[1].Type != "custom" || tools[1].Name != "apply_patch" || len(tools[1].Parameters) != 0 {
 		t.Fatalf("custom tool = %+v", tools[1])
 	}
 }
 
-func assertRequestReasoning(t *testing.T, body []byte, effort, summary string) {
+func assertRequestReasoning(t *testing.T, include []string, effort, summary string) {
 	t.Helper()
-	if effort != "high" || summary != "auto" || !bytes.Contains(body, []byte(`"include":["reasoning.encrypted_content"]`)) {
-		t.Fatalf("reasoning effort = %q, summary = %q", effort, summary)
+	if effort != "high" || summary != "auto" || !slices.Equal(include, []string{"reasoning.encrypted_content"}) {
+		t.Fatalf("reasoning effort = %q, summary = %q, include = %v", effort, summary, include)
 	}
 }
 

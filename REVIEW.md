@@ -16,7 +16,7 @@ A protocol change MUST preserve request ids, item ids, notification order, and t
 
 An approval change MUST preserve the gate order in [approvals.md](docs/spec/approvals.md). A static refusal MUST NOT reach the automated decider. An advisor note MUST NOT approve an action. Use [advisor.md](docs/spec/advisor.md) for the advisor boundary.
 
-A secret-handling change MUST keep raw secret values out of model input and the journal. It MUST preserve restart-safe placeholder mappings. Unmasking MUST remain at the exec and patch boundary. Use [secrets.md](docs/spec/secrets.md).
+A secret-handling change MUST keep raw secret values out of model input and the journal. It MUST preserve restart-safe placeholder mappings. Unmasking MUST remain at the exec, patch, and rewrite boundary. Use [secrets.md](docs/spec/secrets.md).
 
 The local harness sandbox MUST NOT be described as a security boundary. An unavailable sandbox MUST NOT be reported as active. Use [sandbox.md](docs/spec/sandbox.md).
 

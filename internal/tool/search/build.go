@@ -225,12 +225,3 @@ func removeOtherGenerations(root, keep string) error {
 	}
 	return errors.Join(errs...)
 }
-
-func syncDir(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	syncErr := dir.Sync()
-	return errors.Join(syncErr, dir.Close())
-}

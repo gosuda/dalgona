@@ -148,7 +148,7 @@ func (p *anchorParser) change(loc locator, act action, body string) {
 	}
 	p.edits = append(p.edits, edit{
 		kind: editChange, index: len(p.edits), path: p.path, locator: loc,
-		action: act, guard: proof, body: body, window: beforePayload,
+		action: act, guard: proof, body: body,
 	})
 }
 

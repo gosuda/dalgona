@@ -183,6 +183,16 @@ func testPasteMismatch(t *testing.T) {
 func TestPKCEPasteInput(t *testing.T) {
 	t.Run("full redirect URL", func(t *testing.T) { runPKCEPasteCase(t, pastedFullURL) })
 	t.Run("bare code", func(t *testing.T) { runPKCEPasteCase(t, pastedBareCode) })
+	t.Run("code hash state", func(t *testing.T) {
+		runPKCEPasteCase(t, func(authURL *url.URL) string {
+			return "pasted-code#" + authURL.Query().Get("state")
+		})
+	})
+	t.Run("query string", func(t *testing.T) {
+		runPKCEPasteCase(t, func(authURL *url.URL) string {
+			return "code=pasted-code&state=" + url.QueryEscape(authURL.Query().Get("state"))
+		})
+	})
 }
 
 func runPKCEPasteCase(t *testing.T, input func(*url.URL) string) {
@@ -309,25 +319,42 @@ func TestRefresh(t *testing.T) {
 }
 
 func TestChatGPTRefreshReadsAccountClaim(t *testing.T) {
-	server := scopedServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		body, err := io.ReadAll(request.Body)
-		if err != nil {
-			t.Errorf("read JSON refresh: %v", err)
-		}
-		if !strings.Contains(string(body), `"grant_type":"refresh_token"`) {
-			t.Errorf("JSON refresh body = %s", body)
-		}
-		payload := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_account_id":"account-123"}}`))
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(writer, `{"access_token":"new-access","id_token":"x.%s.x"}`, payload)
-	}))
-	defer server.Close()
-	token, err := oauth.Refresh(context.Background(), oauth.Provider{ID: "chatgpt", TokenURL: server.URL}, "old")
-	if err != nil {
-		t.Fatalf("ChatGPT refresh: %v", err)
+	for _, test := range []struct {
+		name    string
+		claims  string
+		account string
+	}{
+		{"account claim", `{"https://api.openai.com/auth":{"chatgpt_account_id":"account-123"}}`, "account-123"},
+		{"email before sub", `{"email":"email@example.test","sub":"subject"}`, "email@example.test"},
+		{"sub only", `{"sub":"subject"}`, "subject"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := scopedServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				assertJSONRefresh(t, request)
+				payload := base64.RawURLEncoding.EncodeToString([]byte(test.claims))
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(writer, `{"access_token":"new-access","id_token":"x.%s.x"}`, payload)
+			}))
+			defer server.Close()
+			token, err := oauth.Refresh(context.Background(), oauth.Provider{ID: "chatgpt", TokenURL: server.URL}, "old")
+			if err != nil {
+				t.Fatalf("ChatGPT refresh: %v", err)
+			}
+			if token.Account != test.account {
+				t.Fatalf("account = %q", token.Account)
+			}
+		})
 	}
-	if token.Account != "account-123" {
-		t.Fatalf("account = %q", token.Account)
+}
+
+func assertJSONRefresh(t *testing.T, request *http.Request) {
+	t.Helper()
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		t.Errorf("read JSON refresh: %v", err)
+	}
+	if !strings.Contains(string(body), `"grant_type":"refresh_token"`) {
+		t.Errorf("JSON refresh body = %s", body)
 	}
 }
 

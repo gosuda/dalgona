@@ -101,9 +101,17 @@ func TestCursorRefreshUsesSeparateJSONEndpoint(t *testing.T) {
 	var pollEndpointCalls atomic.Int32
 	pollServer := scopedServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		pollEndpointCalls.Add(1)
-		writer.WriteHeader(http.StatusInternalServerError)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"access_token":"renewed-access"}`)
 	}))
 	defer pollServer.Close()
+	var tokenEndpointCalls atomic.Int32
+	tokenServer := scopedServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		tokenEndpointCalls.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"access_token":"renewed-access"}`)
+	}))
+	defer tokenServer.Close()
 	refreshServer := scopedServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, err := io.ReadAll(request.Body)
 		if err != nil {
@@ -119,7 +127,7 @@ func TestCursorRefreshUsesSeparateJSONEndpoint(t *testing.T) {
 		_, _ = io.WriteString(writer, `{"access_token":"renewed-access"}`)
 	}))
 	defer refreshServer.Close()
-	provider := oauth.Provider{ID: "cursor", TokenURL: pollServer.URL, RefreshURL: refreshServer.URL, ClientID: "cursor-client"}
+	provider := oauth.Provider{ID: "cursor", PollURL: pollServer.URL, TokenURL: tokenServer.URL, RefreshURL: refreshServer.URL, ClientID: "cursor-client"}
 	token, err := oauth.Refresh(context.Background(), provider, "stored-refresh")
 	if err != nil {
 		t.Fatalf("Cursor refresh: %v", err)
@@ -130,17 +138,35 @@ func TestCursorRefreshUsesSeparateJSONEndpoint(t *testing.T) {
 	if pollEndpointCalls.Load() != 0 {
 		t.Fatalf("refresh called poll endpoint")
 	}
+	if tokenEndpointCalls.Load() != 0 {
+		t.Fatalf("refresh called token endpoint")
+	}
 }
 
 func TestCursorRefreshRejectsEndedSession(t *testing.T) {
-	server := scopedServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"access_token":"","shouldLogout":true}`)
-	}))
-	defer server.Close()
-	_, err := oauth.Refresh(context.Background(), oauth.Provider{ID: "cursor", RefreshURL: server.URL}, "old")
-	if err == nil || err.Error() != "invalid_grant: Cursor ended this session; run /login cursor again" {
-		t.Fatalf("ended-session error = %v", err)
+	for _, test := range []struct {
+		ended  bool
+		access string
+	}{
+		{true, ""},
+		{true, "still-valid"},
+		{false, "still-valid"},
+	} {
+		t.Run(fmt.Sprintf("shouldLogout=%t/access=%s", test.ended, test.access), func(t *testing.T) {
+			server := scopedServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(writer, `{"access_token":%q,"shouldLogout":%t}`, test.access, test.ended)
+			}))
+			defer server.Close()
+			token, err := oauth.Refresh(context.Background(), oauth.Provider{ID: "cursor", RefreshURL: server.URL}, "old")
+			if test.ended {
+				if err == nil || err.Error() != "invalid_grant: Cursor ended this session; run /login cursor again" || token != (oauth.Token{}) {
+					t.Fatalf("ended-session token = %+v, error = %v", token, err)
+				}
+			} else if err != nil || token.Access != "still-valid" {
+				t.Fatalf("active-session token = %+v, error = %v", token, err)
+			}
+		})
 	}
 }
 

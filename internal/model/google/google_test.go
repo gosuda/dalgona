@@ -146,9 +146,10 @@ func TestPromptBlockFails(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n"))
 	})
-	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: fastRetry()})
+	retry := fastRetry()
 	var retries int
-	provider.cfg.Retry.OnRetry = func(int, model.Verdict, int, time.Duration) { retries++ }
+	retry.OnRetry = func(int, model.Verdict, int, time.Duration) { retries++ }
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: retry})
 	summary := collectStream(t, provider, model.Request{Model: "gemini-test"})
 	if summary.failure == nil || summary.stop != "" || retries != 0 || !bytes.Contains(summary.failure.Body, []byte("SAFETY")) {
 		t.Fatalf("summary = %+v, retries = %d", summary, retries)
@@ -190,6 +191,38 @@ func TestModels(t *testing.T) {
 	}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("models = %+v, want %+v", models, want)
+	}
+}
+
+func TestModelsRepeatedPageToken(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1beta/models", func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"models":[],"nextPageToken":"next"}`))
+	})
+	server := newProviderOnlyServer(t, http.MethodGet, "/v1beta/models", mux)
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
+	_, err := provider.Models(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "repeated token") {
+		t.Fatalf("err = %v, want repeated page token error", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests = %d, want 2 (stop at the repeated token)", got)
+	}
+}
+
+func TestModelsHTTPError(t *testing.T) {
+	t.Parallel()
+	server := newProviderOnlyServer(t, http.MethodGet, "/v1beta/models", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("upstream boom"))
+	}))
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
+	_, err := provider.Models(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "500") || !strings.Contains(err.Error(), "upstream boom") {
+		t.Fatalf("err = %v, want http 500 with body", err)
 	}
 }
 
@@ -279,9 +312,9 @@ func runRetryScenario(t *testing.T, scenario retryScenario) {
 	server := newStreamServer(t, scenario.handler)
 	retry := fastRetry()
 	retry.StartTimeout = scenario.startTimeout
-	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: retry})
 	var retries int
-	provider.cfg.Retry.OnRetry = func(int, model.Verdict, int, time.Duration) { retries++ }
+	retry.OnRetry = func(int, model.Verdict, int, time.Duration) { retries++ }
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey, Retry: retry})
 	summary := collectStream(t, provider, model.Request{Model: "gemini-test"})
 	if retries != scenario.wantRetries || (summary.failure != nil) != scenario.wantError {
 		t.Fatalf("retries = %d, failure = %+v; want %d, error %v", retries, summary.failure, scenario.wantRetries, scenario.wantError)
@@ -425,6 +458,9 @@ func assertContents(t *testing.T, contents []struct {
 	t.Helper()
 	if len(contents) != 2 || contents[0].Role != "model" || contents[1].Role != "user" {
 		t.Fatalf("contents = %+v", contents)
+	}
+	if len(contents[0].Parts) == 0 || !contents[0].Parts[0].Thought || contents[0].Parts[0].Text != "why" {
+		t.Fatalf("reasoning part = %+v", contents[0].Parts)
 	}
 	call := contents[0].Parts[len(contents[0].Parts)-1].FunctionCall
 	response := contents[1].Parts[0].FunctionResponse

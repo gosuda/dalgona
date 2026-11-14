@@ -88,6 +88,38 @@ func TestServiceInstallPinsDALGONAHomeWhenSet(t *testing.T) {
 	})
 }
 
+func TestInstallServicePinsDALGONAHomeFromEnv(t *testing.T) {
+	run := func(context.Context, string, ...string) error { return nil }
+	home := shortHome(t)
+	lookup := func(key string) string {
+		if key == "DALGONA_HOME" {
+			return "/env home"
+		}
+		return ""
+	}
+	if err := InstallService(ServiceEnv{Home: home, GOOS: "linux", Run: run, Env: lookup}, "/abs/dalgona"); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := os.ReadFile(filepath.Join(home, ".config", "systemd", "user", "dalgona.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `Environment="DALGONA_HOME=/env home"`; !strings.Contains(string(unit), want) {
+		t.Fatalf("unit %q lacks %q", unit, want)
+	}
+	empty := shortHome(t)
+	if err = InstallService(ServiceEnv{Home: empty, GOOS: "linux", Run: run, Env: func(string) string { return "" }}, "/abs/dalgona"); err != nil {
+		t.Fatal(err)
+	}
+	unit, err = os.ReadFile(filepath.Join(empty, ".config", "systemd", "user", "dalgona.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(unit), "DALGONA_HOME") {
+		t.Fatalf("unit pins DALGONA_HOME when the environment lookup returns empty: %q", unit)
+	}
+}
+
 func TestUninstallRemovesTheServiceFileWhenTheServiceIsNotLoaded(t *testing.T) {
 	for _, tc := range []struct{ name, goos, notLoaded string }{
 		{"linux", "linux", "Failed to disable unit: Unit file dalgona.service not found."},

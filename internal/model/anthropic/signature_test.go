@@ -1,7 +1,6 @@
 package anthropic
 
 import (
-	"bytes"
 	"encoding/json/jsontext"
 	"io"
 	"net/http"
@@ -9,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	json "encoding/json/v2"
 
 	"github.com/gosuda/dalgona/internal/model"
 )
@@ -34,6 +35,43 @@ func TestStreamCapturesSignatureDelta(t *testing.T) {
 	}
 }
 
+type signatureContentBlock struct {
+	Type      string `json:"type"`
+	Thinking  string `json:"thinking"`
+	Signature string `json:"signature"`
+	Data      string `json:"data"`
+	Text      string `json:"text"`
+}
+
+type signatureRequestMessage struct {
+	Role    string                  `json:"role"`
+	Content []signatureContentBlock `json:"content"`
+}
+
+type signatureRequestPayload struct {
+	Messages []signatureRequestMessage `json:"messages"`
+}
+
+func decodeSignatureRequest(t *testing.T, body []byte) signatureRequestPayload {
+	t.Helper()
+	var payload signatureRequestPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("request JSON: %v\n%s", err, body)
+	}
+	return payload
+}
+
+func assistantContent(t *testing.T, payload signatureRequestPayload) []signatureContentBlock {
+	t.Helper()
+	for _, message := range payload.Messages {
+		if message.Role == "assistant" {
+			return message.Content
+		}
+	}
+	t.Fatalf("request has no assistant message: %+v", payload.Messages)
+	return nil
+}
+
 func TestEncodeReplaysThinkingBlockBeforeToolUse(t *testing.T) {
 	t.Parallel()
 	var body []byte
@@ -51,16 +89,29 @@ func TestEncodeReplaysThinkingBlockBeforeToolUse(t *testing.T) {
 		Tools:     []model.Tool{{Name: "read", Parameters: jsontext.Value(`{"type":"object"}`)}},
 		Reasoning: "high",
 	}
-	_ = collectStream(t, provider, request)
-	want := `{"type":"thinking","thinking":"why","signature":"sig-9"}`
-	if !bytes.Contains(body, []byte(want)) {
-		t.Fatalf("request body %s misses %s", body, want)
+	summary := collectStream(t, provider, request)
+	if summary.failure != nil {
+		t.Fatalf("stream error: %v", summary.failure.Err)
 	}
-	if strings.Contains(string(body), `{"type":"text","text":"why"}`) {
-		t.Fatalf("request body %s replays reasoning as visible text", body)
+	content := assistantContent(t, decodeSignatureRequest(t, body))
+	if len(content) != 2 {
+		t.Fatalf("assistant content = %+v, want [thinking, tool_use]", content)
 	}
-	if bytes.Index(body, []byte(want)) > bytes.Index(body, []byte(`"type":"tool_use"`)) {
-		t.Fatalf("request body %s puts the thinking block after tool_use", body)
+	if content[0].Type != "thinking" || content[0].Thinking != "why" || content[0].Signature != "sig-9" {
+		t.Fatalf("first block = %+v, want thinking block with signature sig-9", content[0])
+	}
+	if content[1].Type != "tool_use" {
+		t.Fatalf("second block = %+v, want tool_use", content[1])
+	}
+	assertReasoningNotVisible(t, content, body)
+}
+
+func assertReasoningNotVisible(t *testing.T, content []signatureContentBlock, body []byte) {
+	t.Helper()
+	for _, block := range content {
+		if block.Type == "text" && block.Text == "why" {
+			t.Fatalf("request body %s replays reasoning as visible text", body)
+		}
 	}
 }
 
@@ -131,21 +182,20 @@ func TestStreamKeepsRedactedThinking(t *testing.T) {
 
 func TestEncodeReplaysRedactedThinkingUnchanged(t *testing.T) {
 	t.Parallel()
-	redacted := `{"type":"redacted_thinking","data":"enc-1"}`
 	cases := []struct {
 		name      string
 		message   model.Message
-		wantFirst string
+		wantTypes []string
 	}{
 		{
 			name:      "redacted only",
 			message:   model.Message{Role: "assistant", ToolCalls: []model.ToolCall{{ID: "call-1", Name: "read", Args: jsontext.Value(`{"path":"a"}`), RedactedThinking: []string{"enc-1"}}}},
-			wantFirst: redacted,
+			wantTypes: []string{"redacted_thinking", "tool_use"},
 		},
 		{
 			name:      "signed thinking first",
 			message:   model.Message{Role: "assistant", Reasoning: "why", ToolCalls: []model.ToolCall{{ID: "call-1", Name: "read", Args: jsontext.Value(`{"path":"a"}`), Signature: "sig-9", RedactedThinking: []string{"enc-1"}}}},
-			wantFirst: `{"type":"thinking","thinking":"why","signature":"sig-9"}`,
+			wantTypes: []string{"thinking", "redacted_thinking", "tool_use"},
 		},
 	}
 	for _, tc := range cases {
@@ -166,14 +216,47 @@ func TestEncodeReplaysRedactedThinkingUnchanged(t *testing.T) {
 				Tools:     []model.Tool{{Name: "read", Parameters: jsontext.Value(`{"type":"object"}`)}},
 				Reasoning: "high",
 			}
-			_ = collectStream(t, provider, request)
-			first := bytes.Index(body, []byte(tc.wantFirst))
-			redactedAt := bytes.Index(body, []byte(redacted))
-			toolUse := bytes.Index(body, []byte(`"type":"tool_use"`))
-			if first < 0 || redactedAt < 0 || first > redactedAt || redactedAt > toolUse {
-				t.Fatalf("request body %s misorders thinking, redacted_thinking, and tool_use", body)
+			summary := collectStream(t, provider, request)
+			if summary.failure != nil {
+				t.Fatalf("stream error: %v", summary.failure.Err)
 			}
+			content := assistantContent(t, decodeSignatureRequest(t, body))
+			assertRedactedReplayContent(t, content, tc.wantTypes)
 		})
+	}
+}
+
+func assertRedactedReplayContent(t *testing.T, content []signatureContentBlock, wantTypes []string) {
+	t.Helper()
+	if len(content) != len(wantTypes) {
+		t.Fatalf("assistant content = %+v, want %d blocks", content, len(wantTypes))
+	}
+	redactedCount := 0
+	for i, block := range content {
+		if block.Type != wantTypes[i] {
+			t.Fatalf("assistant content[%d] = %q, want %q; full content = %+v", i, block.Type, wantTypes[i], content)
+		}
+		if block.Type == "redacted_thinking" {
+			redactedCount++
+		}
+		assertReplayedThinkingFields(t, block)
+	}
+	if redactedCount != 1 {
+		t.Fatalf("redacted_thinking count = %d, want 1", redactedCount)
+	}
+}
+
+func assertReplayedThinkingFields(t *testing.T, block signatureContentBlock) {
+	t.Helper()
+	if block.Type == "redacted_thinking" {
+		if block.Data != "enc-1" {
+			t.Fatalf("redacted_thinking data = %q, want enc-1", block.Data)
+		}
+	}
+	if block.Type == "thinking" {
+		if block.Thinking != "why" || block.Signature != "sig-9" {
+			t.Fatalf("thinking block = %+v, want thinking=why signature=sig-9", block)
+		}
 	}
 }
 

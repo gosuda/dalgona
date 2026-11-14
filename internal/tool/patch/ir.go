@@ -42,13 +42,6 @@ const (
 	guardExists
 )
 
-type window uint8
-
-const (
-	beforePayload window = iota + 1
-	afterPrevious
-)
-
 type locator struct {
 	kind     locatorKind
 	old      string
@@ -85,7 +78,6 @@ type edit struct {
 	action    action
 	guard     guard
 	body      string
-	window    window
 	reference string
 }
 

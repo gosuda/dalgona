@@ -81,6 +81,7 @@ describe("command palette", () => {
 
 	test("Escape closes the list and keeps the draft", () => {
 		const node = field();
+		node.value = "draft";
 		const onClose = vi.fn();
 		const onOpen = vi.fn();
 		render(CommandPalette, {
@@ -93,9 +94,14 @@ describe("command palette", () => {
 				onClose,
 			},
 		});
-		node.dispatchEvent(
-			new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-		);
+		const event = new KeyboardEvent("keydown", {
+			key: "Escape",
+			bubbles: true,
+			cancelable: true,
+		});
+		node.dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(true);
+		expect(node.value).toBe("draft");
 		expect(onClose).toHaveBeenCalledOnce();
 		expect(onOpen).not.toHaveBeenCalled();
 	});

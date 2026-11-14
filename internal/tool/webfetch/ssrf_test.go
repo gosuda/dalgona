@@ -1,11 +1,13 @@
 package webfetch
 
 import (
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -124,8 +126,9 @@ func TestDialGuardDefersPublicNamesToDNS(t *testing.T) {
 	if err == nil {
 		t.Fatal("dialGuard resolved an invalid name")
 	}
-	if strings.Contains(err.Error(), "blocked") {
-		t.Fatalf("dialGuard misreported unresolvable name as blocked: %v", err)
+	dnsErr, ok := errors.AsType[*net.DNSError](err)
+	if !ok || dnsErr.Name != "nonexistent.invalid" {
+		t.Fatalf("dialGuard error = %v, want DNS error for nonexistent.invalid", err)
 	}
 }
 
@@ -173,8 +176,16 @@ func TestDialPlanSkipsBlockedAddrs(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	var attempted []string
+	wantAddress := net.JoinHostPort("127.0.0.1", port)
 	plan := dialPlan{
-		dialer:  &net.Dialer{Timeout: 5 * time.Second},
+		dialer: &net.Dialer{Timeout: 5 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
+			attempted = append(attempted, address)
+			if address != wantAddress {
+				return errors.New("test refuses non-loopback dial")
+			}
+			return nil
+		}},
 		network: "tcp",
 		host:    "example",
 		port:    port,
@@ -184,6 +195,12 @@ func TestDialPlanSkipsBlockedAddrs(t *testing.T) {
 	conn, err := plan.connect(t.Context())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(attempted) != 1 || attempted[0] != wantAddress {
+		t.Errorf("dial attempts = %v, want [%s]", attempted, wantAddress)
+	}
+	if conn.RemoteAddr().String() != wantAddress {
+		t.Errorf("remote address = %s, want %s", conn.RemoteAddr(), wantAddress)
 	}
 	_ = conn.Close()
 }

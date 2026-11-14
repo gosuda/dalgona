@@ -118,14 +118,20 @@ func TestAdvisorResetNeedsConfirmation(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
 	m := advisorPanelOpen(t, panelPicker(t, caller), []rpc.AdvisorState{{Name: "advisor", Status: "idle"}})
-	m, _ = drive(t, m, press('r', tea.ModCtrl, ""))
-	assertContains(t, m.View().Content, "Reset the advisor?", "[enter] reset")
 	before := len(caller.calls)
-	_, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	m, command := drive(t, m, press('r', tea.ModCtrl, ""))
+	if command != nil {
+		m, _ = drive(t, m, command())
+	}
+	assertContains(t, m.View().Content, "Reset the advisor?", "[enter] reset")
 	if len(caller.calls) != before {
 		t.Fatal("ctrl+r must open the reset confirm before it sends a request")
 	}
+	_, command = drive(t, m, press(tea.KeyEnter, 0, ""))
 	runCommand(t, m, command, "reset confirm produced no command")
+	if len(caller.calls) != before+1 {
+		t.Fatalf("confirmed reset made %d calls, want 1", len(caller.calls)-before)
+	}
 	if last := caller.calls[len(caller.calls)-1]; last.method != "dalgona/advisor/reset" {
 		t.Fatalf("reset called %s, want dalgona/advisor/reset", last.method)
 	}

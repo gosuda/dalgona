@@ -7,10 +7,9 @@ import type {
 	RequestId,
 	ServerRequest,
 } from "./types";
+import { QUESTION_METHOD } from "./types";
 
 export const MAX_ANSWER = 2000;
-
-const questionMethod = "item/tool/requestUserInput";
 
 interface Members {
 	readonly [key: string]: unknown;
@@ -114,7 +113,7 @@ export function parseQuestionRequest(
 	}
 	return {
 		id,
-		method: questionMethod,
+		method: QUESTION_METHOD,
 		threadId,
 		turnId,
 		itemId,
@@ -125,7 +124,7 @@ export function parseQuestionRequest(
 export function isQuestionRequest(
 	request: ServerRequest,
 ): request is QuestionRequest {
-	return request.method === questionMethod;
+	return request.method === QUESTION_METHOD;
 }
 
 function answerTexts(

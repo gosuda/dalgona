@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	json "encoding/json/v2"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -118,7 +117,7 @@ func TestWriteRatchetPreservesOnlyIdenticalMeasurementIdentity(t *testing.T) {
 			prev := ratchetFile{CorpusSHA256: tc.corpusSHA, Judge: tc.judge, Threshold: tc.threshold, Measured: measurement}
 			writeCorpusContractRatchet(t, prev)
 			writeRatchet(t, corpus)
-			got := readCorpusContractRatchet(t)
+			got := readRatchet(t)
 			if got.CorpusSHA256 != sha || got.Judge != corpusJudge || got.Threshold != corpusThreshold {
 				t.Fatalf("wrong measurement identity: %+v", got)
 			}
@@ -139,18 +138,4 @@ func writeCorpusContractRatchet(t *testing.T, value ratchetFile) {
 	if writeErr != nil {
 		t.Fatal(writeErr)
 	}
-}
-
-func readCorpusContractRatchet(t *testing.T) ratchetFile {
-	t.Helper()
-	raw, err := os.ReadFile(corpusRatchetPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got ratchetFile
-	decodeErr := json.Unmarshal(raw, &got)
-	if decodeErr != nil {
-		t.Fatal(decodeErr)
-	}
-	return got
 }

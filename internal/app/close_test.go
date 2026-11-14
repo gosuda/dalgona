@@ -4,17 +4,16 @@ import (
 	"context"
 	"io"
 	"net"
-	"path/filepath"
 	"testing"
 )
 
 func TestInteractiveEndsCleanlyWhenTUIClosedTheConnection(t *testing.T) {
-	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "daemon.sock"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	conn, err := net.Dial("unix", listener.Addr().String())
+	conn, err := net.Dial("tcp", listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -51,10 +52,12 @@ func TestWelcomeLinesNameProductModelAndDirectory(t *testing.T) {
 }
 
 func TestWelcomeShowsHomeAsTilde(t *testing.T) {
-	t.Setenv("HOME", "/home/u")
-	m := initializedModel(t, "/home/u/proj")
+	home := filepath.Clean("/home/u")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	m := initializedModel(t, filepath.Join(home, "proj"))
 	welcome := entriesWithKey(m, "welcome")
-	if len(welcome) != 1 || !strings.Contains(ansi.Strip(welcome[0].text), "~/proj") {
+	if len(welcome) != 1 || !strings.Contains(ansi.Strip(welcome[0].text), filepath.Join("~", "proj")) {
 		t.Fatalf("welcome row does not show the home directory as ~: %+v", welcome)
 	}
 }

@@ -70,7 +70,7 @@ func TestInterruptEndsRetryWait(t *testing.T) {
 	awaitUpdate(t, updates, func(u Update) bool { return u.Kind == UpdateRetryWait && u.Wait > 0 })
 	started := time.Now()
 	thread.Interrupt()
-	last := awaitUpdate(t, updates, func(u Update) bool { return u.Kind == UpdateRetryWait && u.Wait == 0 })
+	awaitUpdate(t, updates, func(u Update) bool { return u.Kind == UpdateRetryWait && u.Wait == 0 })
 	h.waitIdle(thread)
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("interrupt took %v to end the wait, want under 2s", elapsed)
@@ -80,8 +80,5 @@ func TestInterruptEndsRetryWait(t *testing.T) {
 	}
 	if got := h.model.count(); got != 1 {
 		t.Fatalf("model requests = %d, want 1 before the interrupt", got)
-	}
-	if last.Wait != 0 {
-		t.Fatalf("last wait = %v, want 0", last.Wait)
 	}
 }

@@ -1,9 +1,11 @@
 <script lang="ts">
 import DiffCard from "#lib/components/DiffCard.svelte";
 import { handoffFocus } from "#lib/focus.ts";
-import type { ApprovalRequest, FileChange } from "#lib/types.ts";
-
-type Decision = "accept" | "acceptForSession" | "decline" | "cancel";
+import type {
+	ApprovalDecision,
+	ApprovalRequest,
+	FileChange,
+} from "#lib/types.ts";
 
 interface Props {
 	request: ApprovalRequest;
@@ -11,7 +13,7 @@ interface Props {
 	position: number;
 	total: number;
 	subagent: string | null;
-	onDecision: (request: ApprovalRequest, decision: Decision) => void;
+	onDecision: (request: ApprovalRequest, decision: ApprovalDecision) => void;
 }
 
 let { request, changes, position, total, subagent, onDecision }: Props =
@@ -20,7 +22,7 @@ let card = $state<HTMLElement>();
 let heading = $state<HTMLElement>();
 let details = $state<HTMLElement>();
 
-const shortcuts: Readonly<Record<string, Decision>> = {
+const shortcuts: Readonly<Record<string, ApprovalDecision>> = {
 	y: "accept",
 	a: "acceptForSession",
 	n: "decline",
@@ -53,7 +55,7 @@ $effect(() => {
 	heading?.focus();
 });
 
-function decide(decision: Decision): void {
+function decide(decision: ApprovalDecision): void {
 	onDecision(request, decision);
 }
 

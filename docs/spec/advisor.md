@@ -116,7 +116,7 @@ The advisor MUST have the `advise` tool with arguments `{note, severity}`, where
 
 The `advise` result MUST be exactly one word: the guard verdict, or `discarded` when the review output is unsafe (see Failures). An accepted `blocker` MUST go to the primary before the tool returns. An accepted `nit` or `concern` MUST stay pending until the review ends. At the end of a completed review, the runtime MUST deliver the pending notes in order. The runtime MUST compute them from the advisor journal: the accepted `advise` results of this review, applied in order through a fresh guard. A pending note that a later admission names in `Displaced` MUST be dropped. Because `Thread.Deliver` journals each (advisor, review_seq, note) once, a repeated delivery after a crash MUST NOT add an event.
 
-An `advise` call whose arguments exceed 64 KiB MUST fail with the error `advise: note is too long`.
+An `advise` call whose arguments exceed `event.MaxInlineBytes` (64 KiB) MUST fail with the error `advise: note is too long`.
 
 ### Emission guard
 
@@ -163,11 +163,11 @@ An idle primary MUST start at most one continuation per batch of notes. After th
 
 ### Sync
 
-`sync = "off"` MUST NOT make the primary wait. `sync = "final"` MUST make the primary wait at each `agent-end` boundary until every review requested so far has ended, before it reports the turn completed. `sync = "strict"` MUST also make the primary wait at every boundary that requested a review. A wait MUST end when the review ends with any outcome. A wait MUST also end when the advisor halts or is disabled. A wait MUST also end when the primary turn is interrupted or the runtime closes.
+`sync = "off"` MUST NOT make the primary wait. `sync = "final"` MUST make the primary wait at each `agent-end` boundary until every review requested so far has ended, before it reports the turn completed. `sync = "strict"` MUST also make the primary wait at every boundary that requested a review. No sync mode waits at the `agent-end` boundary of a failed or interrupted turn. A wait MUST end when the review ends with any outcome. A wait MUST also end when the advisor halts or is disabled. A wait MUST also end when the primary turn is interrupted or the runtime closes.
 
 ### Failures
 
-Reviews MUST use the shared retry rules. A review fails when the advisor turn does not complete, when its output is unsafe, or when a delivery fails. After 3 failed reviews in a row, the advisor MUST stop with status `halted`. It MUST stay halted until `Runtime.Reset` (`/advisor reset`) or a restart. A successful review MUST reset the count. A failed review MUST NOT move the cursor.
+Reviews MUST use the shared retry rules of [providers.md](providers.md). A review fails when the advisor turn does not complete, when its output is unsafe, or when a delivery fails. It also fails when preparing, submitting, or completing the review returns an error. After 3 failed reviews in a row, the advisor MUST stop with status `halted`. It MUST stay halted until `Runtime.Reset` (`/advisor reset`) or a restart. A successful review MUST reset the count. A failed review MUST NOT move the cursor.
 
 The output of a review is unsafe when an assistant text of the review contains a destructive shell directive. A directive that the review input also contains does not make the output unsafe. The rule set MUST come from `internal/agent/rules`: `rules.Check` with the rules `recursive-delete`, `git-destructive`, `publish`, and `deploy`. Candidates MUST be each text line, with backticks removed and a leading `$` removed, and each backtick span. An assistant text stored as a blob MUST count as unsafe. A `blocker` MUST be delivered only when the review output up to its call is safe and the advisor is enabled. Otherwise its result MUST be `discarded`. A review whose output cannot be read MUST also give `discarded`, with no error. An unsafe review MUST deliver none of its pending notes. A blocker that was delivered before later unsafe output MUST stay delivered. When a live blocker delivery fails, the guard MUST forget that admission, so that a re-raise can be accepted.
 

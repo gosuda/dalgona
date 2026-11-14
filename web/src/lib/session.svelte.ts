@@ -53,6 +53,7 @@ import {
 import type {
 	AdvisorSummary,
 	AppNotification,
+	ApprovalDecision,
 	ApprovalRequest,
 	ConnectionState,
 	FileChange,
@@ -142,8 +143,6 @@ function shellArgv(command: string, platformFamily: string | null): string[] {
 		? ["cmd", "/C", command]
 		: ["sh", "-c", command];
 }
-
-type Decision = "accept" | "acceptForSession" | "decline" | "cancel";
 
 type Effect<K extends AppNotification["type"]> = (
 	notification: Extract<AppNotification, { readonly type: K }>,
@@ -1356,7 +1355,7 @@ export class Session {
 		return { type: method === "browser" ? "chatgpt" : "chatgptDeviceCode" };
 	}
 
-	respondApproval(request: ApprovalRequest, decision: Decision): void {
+	respondApproval(request: ApprovalRequest, decision: ApprovalDecision): void {
 		this.requireClient().respond(request.id, { decision });
 		this.settleRequest(request);
 	}

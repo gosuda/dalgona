@@ -120,12 +120,32 @@ func TestExecRPC_terminateReportsRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fieldBool(fields, "running"); err != nil {
-		t.Fatal(err)
+	if _, fieldErr := fieldBool(fields, "running"); fieldErr != nil {
+		t.Fatal(fieldErr)
 	}
 	state := waitForExit(t, local, spec.ID)
 	if state.Exit == nil || state.Alive {
 		t.Fatalf("terminated state = %+v", state)
+	}
+	requireExecTerminateRunning(t, local, params)
+}
+
+func requireExecTerminateRunning(t *testing.T, local *Local, params []byte) {
+	t.Helper()
+	result, err := callMethod(t.Context(), local, "process/terminate", params, trustedExecPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, err := objectFields(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err := fieldBool(fields, "running")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if running {
+		t.Fatal("terminate reported an exited process as running")
 	}
 }
 
@@ -260,6 +280,13 @@ func assertUploaded(t *testing.T, path string, payload []byte) {
 	if sha256.Sum256(uploaded) != sha256.Sum256(payload) {
 		t.Fatal("uploaded binary SHA-256 differs from source")
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o111 != 0o111 {
+		t.Fatalf("uploaded binary mode = %v, want all executable bits", info.Mode())
+	}
 }
 
 type termOnCloseStream struct{ shell *shellStream }
@@ -321,7 +348,7 @@ func TestBootstrap_skipsMatchingVersion(t *testing.T) {
 		if len(argv) != 3 || argv[2] != probeScript {
 			t.Fatalf("unexpected command after a matching probe: %q", argv)
 		}
-		return &staticStream{reader: strings.NewReader("x86_64\ndalgona " + localVersion() + "\n")}, nil
+		return &staticStream{reader: strings.NewReader("x86_64\ndalgona " + binaryVersion() + "\n")}, nil
 	}
 	if err := Bootstrap(t.Context(), "current-box", run); err != nil {
 		t.Fatal(err)
@@ -547,8 +574,12 @@ func assertUploadedWorkspace(t *testing.T, source, workspace, baseline string) {
 func TestUploadEnumeration_skipsExistingBaseline(t *testing.T) {
 	cwd := t.TempDir()
 	writeTestFile(t, filepath.Join(cwd, ".dalgona-baseline"), []byte("stale"), 0o644)
+	writeTestFile(t, filepath.Join(cwd, "keep.txt"), []byte("keep"), 0o640)
 	calls := 0
-	emit := func(uploadJob) error {
+	emit := func(job uploadJob) error {
+		if job.local != filepath.Join(cwd, "keep.txt") || job.remote != "/workspace/keep.txt" || job.perm != 0o640 {
+			t.Fatalf("unexpected upload job: %+v", job)
+		}
 		calls++
 		return nil
 	}
@@ -558,8 +589,8 @@ func TestUploadEnumeration_skipsExistingBaseline(t *testing.T) {
 	if err := enumerate(t.Context(), cwd, emit); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 0 {
-		t.Fatalf("baseline emitted %d times", calls)
+	if calls != 1 {
+		t.Fatalf("keep.txt emitted %d times, want exactly once", calls)
 	}
 }
 

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json/jsontext"
 	"errors"
@@ -39,14 +38,6 @@ func turnWorker(ctx context.Context) (*worker, error) {
 		return nil, ErrNoTurn
 	}
 	return w, nil
-}
-
-func quoteJSON(text string) jsontext.Value {
-	out, err := jsontext.AppendQuote(nil, text)
-	if err != nil {
-		out, _ = jsontext.AppendQuote(nil, string(bytes.ToValidUTF8([]byte(text), []byte("\uFFFD"))))
-	}
-	return out
 }
 
 func (t *Thread) Records() ([]event.Seqd, event.State, error) {

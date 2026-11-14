@@ -610,6 +610,7 @@ func TestResumedThreadShowsServerModel(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
 	m := newModel(caller, Options{}, nil)
+	m.thread.modelName = "local/qwen-small"
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, m.resumeThread("t1")())
 	if m.thread.modelName != "local/qwen-test" {

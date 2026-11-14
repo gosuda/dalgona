@@ -1,6 +1,6 @@
 # Approvals
 
-This specification defines the approval gate of the agent core. Approvals are automated. User prompts occur only in approval mode `ask`.
+This specification defines the approval gate of the agent core. Modes `yolo` and `auto` automate approval decisions except for the sandbox fallback in step 5. Outside that fallback, user approval prompts occur only in mode `ask`. The sandbox choice prompt records a thread-level choice, not approval of a call. The thread can repeat the prompt until the user records a choice.
 
 The modes are ordered `yolo` < `auto` < `ask`. A protocol client MAY raise the mode of a turn. A per-turn approval mode MUST NOT lower the thread mode: the effective mode is the stricter of the thread mode and the turn mode. A thread in `ask` therefore keeps user prompts when a client sends `on-request` for a turn.
 
@@ -59,7 +59,7 @@ A `ClientFactory` MUST return the decide client and model for the thread it rece
 
 A user `accept_session` resolution MUST create a thread grant once the fold knows the call class from `approval.requested`. When the resolution is journaled before the class is known, the fold carries the grant prefix forward. The fold creates the thread grant from the later `tool.started` record.
 
-- `exec`: the thread grant is the first two argv words from `rules.GrantPrefix`, with a flag in second position kept. A compound command MUST NOT create a thread grant. The thread grant records whether the accepted call was escalated, and a later command matches only when escalation agrees and `rules.MatchesGrant` holds.
+- `exec`: the thread grant is the first argv word from `rules.GrantPrefix`. When a second argv word exists, the grant also contains that word, including a flag. A compound command MUST NOT create a thread grant. The thread grant records whether the accepted call was escalated, and a later command matches only when escalation agrees and `rules.MatchesGrant` holds.
 - `edit` and `remote`: the thread grant is `tool:<name>`.
 - Other classes MUST NOT create thread grants.
 - A `grant:<prefix>` resolution MUST NOT create a new thread grant.

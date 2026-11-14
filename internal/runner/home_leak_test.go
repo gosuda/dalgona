@@ -1,52 +1,59 @@
 package runner
 
 import (
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 )
 
+func childEnvironment(t *testing.T, env []string) []string {
+	t.Helper()
+	cmd := exec.Command("env")
+	cmd.Env = env
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(output)), "\n")
+}
+
 func TestRunnerEnvironment_stripsHomeWhenSandboxed(t *testing.T) {
 	base := []string{"PATH=/usr/bin", "DALGONA_HOME=/secret/home", "DAL_HOME=/secret/dal", "HOME=/root"}
 	env := runnerEnvironment(base, "/tmp/work", Sandbox{Mode: SandboxWorkspaceWrite, WritableRoots: []string{"/tmp/work"}})
-	for _, item := range env {
+	child := childEnvironment(t, env)
+	for _, item := range child {
 		if strings.HasPrefix(item, "DALGONA_HOME=") || strings.HasPrefix(item, "DAL_HOME=") {
-			t.Fatalf("home leaked into sandboxed child environment: %q", item)
+			t.Fatalf("home leaked into sandboxed child: %q", item)
 		}
 	}
-	found := false
-	for _, item := range env {
-		if item == "HOME=/root" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("HOME must stay in sandboxed child environment: %q", env)
+	if !slices.Contains(child, "HOME=/root") {
+		t.Fatalf("HOME must stay in sandboxed child environment: %q", child)
 	}
 }
 
 func TestRunnerEnvironment_keepsHomeWhenUnsandboxed(t *testing.T) {
-	base := []string{"PATH=/usr/bin", "DALGONA_HOME=/secret/home"}
-	env := runnerEnvironment(base, "/tmp/work", Sandbox{Mode: SandboxOff})
-	found := false
-	for _, item := range env {
-		if item == "DALGONA_HOME=/secret/home" {
-			found = true
+	base := []string{"PATH=/usr/bin", "DALGONA_HOME=/secret/home", "DAL_HOME=/secret/dal"}
+	child := childEnvironment(t, runnerEnvironment(base, "/tmp/work", Sandbox{Mode: SandboxOff}))
+	for _, want := range []string{"DALGONA_HOME=/secret/home", "DAL_HOME=/secret/dal"} {
+		if !slices.Contains(child, want) {
+			t.Fatalf("off-mode child lost %q: %q", want, child)
 		}
-	}
-	if !found {
-		t.Fatalf("off-mode child lost DALGONA_HOME: %q", env)
 	}
 }
 
 func TestStripDeniedEnvironment_hidesSocketFromCommand(t *testing.T) {
 	base := []string{"PATH=/usr/bin", "DALGONA_HOME=/secret/home", "HOME=/root"}
 	env := runnerEnvironment(base, "/tmp/work", Sandbox{Mode: SandboxWorkspaceWrite, WritableRoots: []string{"/tmp/work"}, DeniedSockets: []string{"/secret/home/dalgona.sock"}})
-	for _, item := range stripDeniedEnvironment(env) {
-		if strings.HasPrefix(item, "DALGONA_SANDBOX_DENIED=") {
-			t.Fatalf("denied socket variable leaked into command environment: %q", item)
+	child := childEnvironment(t, stripDeniedEnvironment(env))
+	for _, want := range []string{"PATH=/usr/bin", "HOME=/root"} {
+		if !slices.Contains(child, want) {
+			t.Fatalf("child lost %q: %q", want, child)
 		}
-		if strings.Contains(item, "dalgona.sock") {
-			t.Fatalf("socket path leaked into command environment: %q", item)
+	}
+	for _, item := range child {
+		if strings.HasPrefix(item, "DALGONA_SANDBOX_DENIED=") || strings.Contains(item, "dalgona.sock") {
+			t.Fatalf("denied socket leaked into child: %q", item)
 		}
 	}
 }

@@ -7,12 +7,20 @@ describe("composer text", () => {
 			kind: "message",
 			text: "/etc is odd",
 		});
+		expect(parseComposerText("//")).toEqual({
+			kind: "message",
+			text: "/",
+		});
 	});
 
 	test("/mod is a command query", () => {
 		expect(parseComposerText("/mod")).toEqual({
 			kind: "command",
 			query: "mod",
+		});
+		expect(parseComposerText("/")).toEqual({
+			kind: "command",
+			query: "",
 		});
 	});
 

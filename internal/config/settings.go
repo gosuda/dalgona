@@ -20,6 +20,11 @@ type SettingEdit struct {
 
 var statusItems = []string{"effort", "approval", "sandbox", "folder", "queue", "context", "mark"}
 
+var (
+	reasoningOptions = []string{"default", "low", "medium", "high", "xhigh", "max"}
+	sandboxOptions   = []string{"workspace-write", "off"}
+)
+
 var InteractiveSettings = []SettingSpec{
 	{Key: "approval", Default: "auto", Options: anys("auto", "yolo", "ask")},
 	{Key: "verbosity", Default: "medium", Options: anys("low", "medium", "high")},
@@ -68,9 +73,9 @@ type settingSetter func(c *Config, value any) error
 
 var settingSetters = map[string]settingSetter{
 	"model":               textSetting("model", nil, func(c *Config, v string) { c.Model = v }),
-	"reasoning":           textSetting("reasoning", []string{"default", "low", "medium", "high", "xhigh", "max"}, func(c *Config, v string) { c.Reasoning = Reasoning(v) }),
+	"reasoning":           textSetting("reasoning", reasoningOptions, func(c *Config, v string) { c.Reasoning = Reasoning(v) }),
 	"approval":            textSetting("approval", optionsOf("approval"), func(c *Config, v string) { c.Approval = Approval(v) }),
-	"sandbox":             textSetting("sandbox", []string{"workspace-write", "off"}, func(c *Config, v string) { c.Sandbox = SandboxMode(v) }),
+	"sandbox":             textSetting("sandbox", sandboxOptions, func(c *Config, v string) { c.Sandbox = SandboxMode(v) }),
 	"verbosity":           textSetting("verbosity", optionsOf("verbosity"), func(c *Config, v string) { c.Verbosity = Verbosity(v) }),
 	"theme":               textSetting("theme", optionsOf("theme"), func(c *Config, v string) { c.Theme = Theme(v) }),
 	"icons":               textSetting("icons", optionsOf("icons"), func(c *Config, v string) { c.Icons = Icons(v) }),

@@ -36,7 +36,15 @@ func TestReadSSE(t *testing.T) {
 
 func TestReadSSEWithTimeoutsStartDeadlineEndsAtFirstEvent(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		body := io.NopCloser(strings.NewReader("data: first\n\ndata: second\n\n"))
+		body, writer := io.Pipe()
+		t.Cleanup(func() { _ = body.Close(); _ = writer.Close() })
+		go func() {
+			defer writer.Close()
+			if _, err := io.WriteString(writer, "data: first\n\n"); err != nil {
+				return
+			}
+			_, _ = io.WriteString(writer, "data: second\n\n")
+		}()
 		var values []string
 		start := time.Now()
 		err := ReadSSEWithTimeouts(t.Context(), body, SSEOptions{StartTimeout: 20 * time.Millisecond}, func(_, data []byte) error {

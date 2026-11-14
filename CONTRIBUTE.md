@@ -4,7 +4,7 @@
 
 State the required behavior, the failure your change prevents, and the affected consumer. Do not add an interface, option, dependency, or helper for a possible future need.
 
-When you replace an implementation, migrate all callers in the same change and remove the old code. Do not leave compatibility shims, unused exports, duplicate routes, or commented-out implementations. The `unused`, `staticcheck`, `ineffassign`, and `godox` checks in [.golangci.yml](.golangci.yml) enforce part of this rule. Review the parts that lint cannot detect.
+When you replace an implementation, migrate all callers in the same change and remove the old code. Do not leave compatibility shims, unused exports, duplicate routes, or commented-out implementations. The `unused`, `staticcheck`, and `ineffassign` checks, and the `godox` keyword check (TODO, FIXME, XXX, HACK markers), in [.golangci.yml](.golangci.yml) catch part of this rule. Review the parts that lint cannot detect, including shims, exported symbols, and commented-out code.
 
 ## Keep the implementation direct
 

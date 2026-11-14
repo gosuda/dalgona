@@ -106,7 +106,7 @@ func TestTurnImageErrors(t *testing.T) {
 		{"declared type", map[string]string{"type": "image", "url": "data:image/jpeg;base64," + png}, "image type image/png does not match the data URL type image/jpeg"},
 		{"too large", map[string]string{"type": "localImage", "path": large}, "image 1 is 5242881 bytes; the limit is 5242880 bytes (5 MiB)"},
 		{"bad base64", map[string]string{"type": "image", "url": "data:image/png;base64,!!!"}, "image data is not valid base64"},
-		{"long path", map[string]string{"type": "localImage", "path": "/" + strings.Repeat("a", 4096)}, "image path is longer than 4096 bytes"},
+		{"long path", map[string]string{"type": "localImage", "path": filepath.Join(dir, strings.Repeat("a", 4096))}, "image path is longer than 4096 bytes"},
 	} {
 		c.fails("turn/start", map[string]any{"threadId": threadID, "input": []map[string]string{tc.item}}, codeInvalidParams, tc.text)
 	}

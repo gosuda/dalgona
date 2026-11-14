@@ -1,6 +1,7 @@
 package sandbox0
 
 import (
+	"encoding/json/v2"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -81,10 +82,19 @@ func TestCreateWorkspaceFailureUsesExactErrorAndDeletesBox(t *testing.T) {
 
 func assertClaimBody(t *testing.T, body string) {
 	t.Helper()
-	for _, fragment := range []string{`"ttl":1800`, `"hard_ttl":0`, `"auto_resume":false`, `"template":"broken"`} {
-		if !strings.Contains(body, fragment) {
-			t.Errorf("claim body %s does not contain %s", body, fragment)
-		}
+	var claim struct {
+		Config struct {
+			TTL        *int  `json:"ttl"`
+			HardTTL    *int  `json:"hard_ttl"`
+			AutoResume *bool `json:"auto_resume"`
+		} `json:"config"`
+		Template string `json:"template"`
+	}
+	if err := json.Unmarshal([]byte(body), &claim); err != nil {
+		t.Fatalf("decode claim body: %v", err)
+	}
+	if claim.Config.TTL == nil || *claim.Config.TTL != 1800 || claim.Config.HardTTL == nil || *claim.Config.HardTTL != 0 || claim.Config.AutoResume == nil || *claim.Config.AutoResume || claim.Template != "broken" {
+		t.Errorf("unexpected claim body: %s", body)
 	}
 }
 

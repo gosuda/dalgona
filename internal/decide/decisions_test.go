@@ -170,6 +170,9 @@ func checkDecisionsRequest(t *testing.T, captured capturedRequest) {
 	if got := captured.header.Get("Content-Type"); got != "application/json" {
 		t.Errorf("Content-Type = %q", got)
 	}
+	if got := captured.header.Get("Accept"); got != "application/json" {
+		t.Errorf("Accept = %q", got)
+	}
 	request := decodeObject(t, captured.bodyReader())
 	if got := decodeString(t, request["model"]); got != "typesafe/jev-1.14" {
 		t.Errorf("model = %q", got)

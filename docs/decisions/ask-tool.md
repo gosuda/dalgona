@@ -2,15 +2,19 @@
 
 ## Invariant
 
-`ask` is a read-class core tool for top-level threads of both products. It reaches the user only through `item/tool/requestUserInput`. It adds no journal event. It has no timeout: a wait ends on an answer, a dismiss, an interrupt, or the last window leaving.
+`ask` is a read-class core tool for top-level threads of both products. It reaches the user only through `item/tool/requestUserInput`. It adds no journal event. It has no timeout: a wait ends on an answer, a dismissal, an interrupt, or the last subscriber leaving.
 
 ## Scope
 
 The package `internal/tool/ask` holds the tool, its argument parser, its cleaning rules, and its result text. This decision permits the imports `internal/agent` to `internal/tool/ask`, `internal/rpc` to `internal/tool/ask`, and `internal/script` to `internal/tool/ask`. The package itself imports only `internal/tool` and `internal/model`.
 
+The `core` depguard rule is a deny list, not an allow list for these imports.
+
 ## Enforcement
 
 The `core` depguard rule in `.golangci.yml` keeps `internal/tool/ask` free of interface and battery packages. `internal/tool/ask/ask_test.go` checks the argument limits, the cleaning rules, the answer normalisation, and the result texts against `docs/spec/ask.md`.
+
+`TestAskToolOnlyOnTopLevelThreads` and `TestAskToolInDal` in `internal/agent/ask_tool_test.go` check the top-level tool scope.
 
 ## Rejected alternatives
 

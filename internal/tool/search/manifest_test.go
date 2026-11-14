@@ -95,12 +95,16 @@ func TestManifestRejectsTruncatedEntry(t *testing.T) {
 
 func TestManifestLookup(t *testing.T) {
 	m := sampleManifest()
-	entry, ok := m.lookup("b/c.txt")
-	if !ok || entry.CtimeNS != 6 {
-		t.Fatalf("lookup b/c.txt = %+v, %t; want ctime 6", entry, ok)
+	for _, want := range m.Entries {
+		entry, ok := m.lookup(want.Path)
+		if !ok || entry != want {
+			t.Fatalf("lookup %q = %+v, %t; want %+v", want.Path, entry, ok, want)
+		}
 	}
-	if _, ok := m.lookup("missing"); ok {
-		t.Fatal("lookup missing found an entry")
+	for _, path := range []string{"0", "a.gz", "missing", "z"} {
+		if entry, ok := m.lookup(path); ok {
+			t.Fatalf("lookup %q found %+v", path, entry)
+		}
 	}
 }
 

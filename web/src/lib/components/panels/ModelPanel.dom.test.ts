@@ -236,7 +236,7 @@ describe("model panel", () => {
 		expect(session.panel).toBe("model");
 	});
 
-	test("a thread switch while the panel is open keeps the pending model", async () => {
+	test("a selectedModel change while the panel is open keeps the pending pick", async () => {
 		const { session, ports } = await openModels({
 			modelList: models,
 			effort: "medium",
@@ -255,11 +255,16 @@ describe("model panel", () => {
 			expect(batchCalls(ports[0])).toHaveLength(1);
 		});
 		expect(batchCalls(ports[0])).toEqual([
-			expect.objectContaining({
-				edits: expect.arrayContaining([
+			{
+				edits: [
 					{ keyPath: "model", value: "gpt-b", mergeStrategy: "replace" },
-				]),
-			}),
+					{
+						keyPath: "model_reasoning_effort",
+						value: "medium",
+						mergeStrategy: "replace",
+					},
+				],
+			},
 		]);
 	});
 });

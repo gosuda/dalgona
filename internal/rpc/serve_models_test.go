@@ -36,12 +36,23 @@ func TestModelListCarriesInputModalities(t *testing.T) {
 	}
 	r.connect().ok("model/list", map[string]any{}, &list)
 	want := map[string][]string{"openai/text-only": {"text"}, "openai/vision": {"text", "image"}}
-	if len(list.Data) != len(want) {
-		t.Fatalf("model/list returned %d models, want %d", len(list.Data), len(want))
-	}
+	seen := make(map[string]bool, len(list.Data))
 	for _, item := range list.Data {
-		if !slices.Equal(item.InputModalities, want[item.ID]) {
-			t.Fatalf("%s inputModalities = %v, want %v", item.ID, item.InputModalities, want[item.ID])
+		wantModalities, ok := want[item.ID]
+		if !ok {
+			t.Fatalf("model/list returned unexpected model %q", item.ID)
+		}
+		if seen[item.ID] {
+			t.Fatalf("model/list returned model %q more than once", item.ID)
+		}
+		seen[item.ID] = true
+		if !slices.Equal(item.InputModalities, wantModalities) {
+			t.Fatalf("%s inputModalities = %v, want %v", item.ID, item.InputModalities, wantModalities)
+		}
+	}
+	for id := range want {
+		if !seen[id] {
+			t.Fatalf("model/list is missing model %q", id)
 		}
 	}
 }

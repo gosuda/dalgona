@@ -55,4 +55,20 @@ func TestFactoryDeciderScoresThroughClientDecider(t *testing.T) {
 	if !got.Allow || got.By != "decider:stub-model" {
 		t.Fatalf("decision = %+v, want an allow by decider:stub-model", got)
 	}
+	for _, tc := range []struct {
+		score float64
+		allow bool
+	}{
+		{0.9, true},
+		{0.8999, false},
+	} {
+		stub.noul = tc.score
+		got, err := d.Decide(t.Context(), Action{Thread: "thread-x"})
+		if err != nil {
+			t.Fatalf("Decide at score %v: %v", tc.score, err)
+		}
+		if got.Allow != tc.allow {
+			t.Fatalf("score %v: Allow = %v, want %v", tc.score, got.Allow, tc.allow)
+		}
+	}
 }

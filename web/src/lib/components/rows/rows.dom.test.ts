@@ -93,6 +93,21 @@ describe("transcript rows", () => {
 		expect(text).toContain("read the code");
 		expect(text).toContain("Context compacted");
 		expect(container.querySelector(".failed")?.textContent).toBe("Failed");
+		const rows = container.querySelectorAll(".items > li");
+		expect(rows).toHaveLength(7);
+		expect(rows[0]?.textContent).toContain("list files");
+		expect(rows[1]?.textContent).toContain("Thinking");
+		expect(rows[2]?.querySelector(".command")?.textContent).toBe("$ ls");
+		expect(rows[2]?.textContent).toContain("exit 0");
+		expect(rows[2]?.textContent).toContain("1s");
+		expect(rows[2]?.textContent).toContain("Done");
+		expect(rows[3]?.textContent).toContain("File changes");
+		expect(rows[4]?.textContent).toContain("web_fetch");
+		expect(rows[4]?.querySelector(".failed")?.textContent).toBe("Failed");
+		expect(rows[5]?.textContent).toContain("read the code");
+		expect(rows[6]?.querySelector(".compaction")?.textContent).toContain(
+			"Context compacted",
+		);
 	});
 
 	test("keyword matches carry an underline mark and are listed as words", () => {
@@ -263,7 +278,16 @@ describe("transcript rows", () => {
 					{
 						id: "f3",
 						kind: "fileChange",
-						changes: [],
+						changes: [
+							{
+								path: "a.txt",
+								diff: "@@ -1 +1 @@\n-old\n+new\n",
+								kind: "update",
+								additions: 1,
+								deletions: 1,
+								diffOmitted: false,
+							},
+						],
 						status: "completed",
 						review: { verdict: "flagged", summary: "Flagged: removed code" },
 					},
@@ -277,6 +301,19 @@ describe("transcript rows", () => {
 		const turnReview = container.querySelector(".turn-review");
 		expect(turnReview?.getAttribute("data-verdict")).toBe("uncertain");
 		expect(turnReview?.textContent).toBe("Uncertain: incomplete");
+		const article = container
+			.querySelector(".file-change")
+			?.closest("article.tool-item");
+		expect(article).toBeTruthy();
+		expect(article?.contains(editReview)).toBe(true);
+		const items = container.querySelector(".items");
+		expect(items).toBeTruthy();
+		if (items === null || turnReview === null)
+			throw new Error("Missing transcript or turn review");
+		expect(
+			items.compareDocumentPosition(turnReview) &
+				Node.DOCUMENT_POSITION_FOLLOWING,
+		).toBeTruthy();
 	});
 
 	test("a failed file change keeps the last ten diff lines", () => {

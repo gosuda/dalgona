@@ -264,7 +264,9 @@ func checkAccount(t *testing.T, c *wireClient) {
 	c.ok("account/read", map[string]any{}, &account)
 	expect(t, account.Account != nil && account.Account.Type == "apiKey", "account after login", account.Account)
 	c.ok("account/logout", map[string]any{}, nil)
-	c.ok("account/login/cancel", map[string]any{"loginId": "none"}, nil)
+	var cancelled CancelLoginAccountResponse
+	c.ok("account/login/cancel", map[string]any{"loginId": "none"}, &cancelled)
+	expect(t, cancelled.Status == "notFound", "unknown login cancel", cancelled)
 }
 
 func TestServeArchiveHookRunsOnlyForIdleThreads(t *testing.T) {
@@ -420,6 +422,8 @@ func TestServeTurnApprovalNeverLowersThread(t *testing.T) {
 
 func turnApprovalReachesClient(t *testing.T, threadParams map[string]any, turnPolicy string) {
 	r := newRig(t, config.ApprovalAuto)
+	r.cfg.SandboxCause = func() string { return "" }
+	reopen(t, r)
 	r.llm.push(llmReply{body: sseCall("call-t", "exec", `{"command":"echo turn"}`)}, llmReply{body: sseText("after")})
 	c := r.connect()
 	threadID := startThread(t, r, c, threadParams)

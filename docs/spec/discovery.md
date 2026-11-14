@@ -10,7 +10,7 @@ Within one source, home entries MUST come before workspace entries.
 
 ## Codex
 
-The `codex` source MUST read these files when they exist. Files under the home directory define home servers. Files under the current working directory define workspace servers and MUST carry the workspace mark:
+The `codex` source MUST read these files when they exist. Files under the home directory define home servers. Files under the current working directory define workspace servers and MUST set `Workspace` to true:
 
 - `~/.codex/AGENTS.md` and `<cwd>/.codex/AGENTS.md`.
 - `~/.codex/config.toml` and `<cwd>/.codex/config.toml`, under `mcp_servers`.
@@ -18,7 +18,7 @@ The `codex` source MUST read these files when they exist. Files under the home d
 
 ## Claude
 
-The `claude` source MUST read these files when they exist. Files under the home directory define home servers. Files under the current working directory define workspace servers and MUST carry the workspace mark:
+The `claude` source MUST read these files when they exist. Files under the home directory define home servers. Files under the current working directory define workspace servers and MUST set `Workspace` to true:
 
 - `~/.claude/CLAUDE.md` and `<cwd>/.claude/CLAUDE.md`.
 - `~/.claude.json`, `~/.claude/mcp.json`, `<cwd>/.claude/mcp.json`, and `<cwd>/.mcp.json`, under `mcpServers`.

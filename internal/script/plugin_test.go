@@ -132,8 +132,11 @@ func TestPluginCommandAndInvalidHookResult(t *testing.T) {
 	if err != nil || string(outcome.Value) != `"hello ana"` || len(j.logs) != 1 {
 		t.Fatalf("command outcome = %+v, %v, logs %v", outcome, err, j.logs)
 	}
-	_, err = plugins.ToolCall(t.Context(), j, "c4", tool.Call{ID: "c4", Name: "exec", Args: jsontext.Value(`{"command":"ls"}`)})
+	decision, err := plugins.ToolCall(t.Context(), j, "c4", tool.Call{ID: "c4", Name: "exec", Args: jsontext.Value(`{"command":"ls"}`)})
 	if err == nil || !strings.Contains(err.Error(), "hook:zz.star:bad") {
 		t.Fatalf("deny without reason error = %v", err)
+	}
+	if decision != (script.HookDecision{}) {
+		t.Fatalf("invalid hook returned a decision: %+v", decision)
 	}
 }

@@ -133,6 +133,14 @@ func caseParts(t testing.TB, c corpusCase) []judgeInput {
 	return parts
 }
 
+func buildReview(task, name string, files []reviewFile) ([]judgeInput, int, error) {
+	diffs, err := diffFiles(files, reviewContextLines)
+	if err != nil {
+		return nil, 0, err
+	}
+	return packParts(task, name, diffs)
+}
+
 func readCorpus(t testing.TB) []corpusCase {
 	t.Helper()
 	raw, err := os.ReadFile(corpusCasesPath)

@@ -124,6 +124,10 @@ func TestHistoryRecallKeepsFrameInWindow(t *testing.T) {
 	m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
 	frame := strings.Split(m.View().Content, "\n")
 	assertFrame(t, frame, 40, 8)
+	if got, want := m.input.composer.Value(), strings.Join(lines, "\n"); got != want {
+		t.Fatalf("recalled draft = %q, want %q", got, want)
+	}
+	assertContains(t, m.View().Content, "line 19")
 }
 
 func TestHistoryHoldsSentPromptsWithTurn(t *testing.T) {

@@ -149,21 +149,32 @@ func TestBuildRespectsByteLimit(t *testing.T) {
 	requireChangeTimes(t)
 	ws := t.TempDir()
 	writeBuildFiles(t, ws, map[string]string{
-		"a.txt": "xxxxxxxxxx\n",
-		"b.txt": "yyyyyyyyyy\n",
+		"a.txt": "012345678\n",
+		"b.txt": "012345678\n",
+		"c.txt": "012345678\n",
 	})
 	m := readBuildManifest(t, buildTestIndex(t, ws, time.Now(), 20))
+	a, b, c := requireByteLimitRecords(t, m)
+	if !a.Indexed || a.Size != 10 {
+		t.Fatalf("a.txt = %+v, want indexed with size 10", a)
+	}
+	if !b.Indexed || b.Size != 10 {
+		t.Fatalf("b.txt = %+v, want indexed within limit at equality (total == limit)", b)
+	}
+	if c.Indexed || c.Size != 10 {
+		t.Fatalf("c.txt = %+v, want unindexed past limit", c)
+	}
+}
+
+func requireByteLimitRecords(t *testing.T, m manifest) (manifestEntry, manifestEntry, manifestEntry) {
+	t.Helper()
 	a, okA := m.lookup("a.txt")
 	b, okB := m.lookup("b.txt")
-	if !okA || !okB {
-		t.Fatalf("records a.txt %v, b.txt %v; want both recorded", okA, okB)
+	c, okC := m.lookup("c.txt")
+	if !okA || !okB || !okC {
+		t.Fatalf("records a.txt %v, b.txt %v, c.txt %v; want all three recorded", okA, okB, okC)
 	}
-	if !a.Indexed {
-		t.Fatal("a.txt is not indexed, want indexed within the limit")
-	}
-	if b.Indexed {
-		t.Fatal("b.txt is indexed, want it left unread past the limit")
-	}
+	return a, b, c
 }
 
 func TestBuildKeepsReadingPastAFileOverTheLimit(t *testing.T) {

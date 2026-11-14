@@ -223,4 +223,29 @@ func TestDecodeScalarRejectsWrongKinds(t *testing.T) {
 	if _, err := decodeInt([]byte(`1.5`)); err == nil {
 		t.Fatal("decoded a fraction as an integer")
 	}
+	assertDecodeScalarBoundaries(t)
+}
+
+func assertDecodeScalarBoundaries(t *testing.T) {
+	t.Helper()
+	if value, err := decodeUint([]byte(`0`)); err != nil || value != 0 {
+		t.Fatalf("decode unsigned zero = %d, %v", value, err)
+	}
+	if value, err := decodeUint([]byte(`18446744073709551615`)); err != nil || value != 18446744073709551615 {
+		t.Fatalf("decode maximum unsigned integer = %d, %v", value, err)
+	}
+	if _, err := decodeUint([]byte(`18446744073709551616`)); err == nil {
+		t.Fatal("decoded overflowing unsigned integer")
+	}
+	assertDecodeSignedAndBoolBoundaries(t)
+}
+
+func assertDecodeSignedAndBoolBoundaries(t *testing.T) {
+	t.Helper()
+	if value, err := decodeInt([]byte(`-9223372036854775808`)); err != nil || value != -9223372036854775808 {
+		t.Fatalf("decode minimum signed integer = %d, %v", value, err)
+	}
+	if value, err := decodeBool([]byte(`true`)); err != nil || !value {
+		t.Fatalf("decode true = %v, %v", value, err)
+	}
 }

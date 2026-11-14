@@ -52,14 +52,7 @@ func TestScanFileEmptyHasNoLines(t *testing.T) {
 func BenchmarkScanFileLarge(b *testing.B) {
 	dir := b.TempDir()
 	path := filepath.Join(dir, "large.txt")
-	body := make([]byte, 0, 8<<20)
-	for i := range 200000 {
-		body = append(body, "line content with filler words to widen rows"...)
-		if i%50 == 0 {
-			body = append(body, " hit"...)
-		}
-		body = append(body, '\n')
-	}
+	body := largeBody()
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		b.Fatal(err)
 	}
