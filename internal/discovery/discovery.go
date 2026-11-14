@@ -23,11 +23,6 @@ type (
 		MCPServers   []MCPServer
 		Skills       []Skill
 	}
-	Native struct {
-		Instructions []Instruction
-		MCPServers   []MCPServer
-		Skills       []Skill
-	}
 	merger struct {
 		result Result
 		mcp    map[string]struct{}
@@ -35,7 +30,7 @@ type (
 	}
 )
 
-func Discover(home, cwd string, sources []string, n Native) (Result, error) {
+func Discover(home, cwd string, sources []string, n Result) (Result, error) {
 	enabled, err := enabledSources(sources)
 	if err != nil {
 		return Result{}, err
@@ -80,7 +75,7 @@ func loadSource(source, home, cwd string) (Result, error) {
 	}
 }
 
-func newMerger(n Native) merger {
+func newMerger(n Result) merger {
 	m := merger{
 		result: Result{
 			Instructions: slices.Clone(n.Instructions),

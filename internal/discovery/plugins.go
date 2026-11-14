@@ -258,7 +258,7 @@ func pluginServerDocs(root string, raw jsontext.Value) (map[string]mcpDoc, error
 	if err != nil {
 		return nil, err
 	}
-	return requiredPluginServerFile(path)
+	return readPluginServerFile(path)
 }
 
 func optionalPluginServerFile(path string) (map[string]mcpDoc, error) {
@@ -267,10 +267,6 @@ func optionalPluginServerFile(path string) (map[string]mcpDoc, error) {
 		return nil, nil
 	}
 	return servers, err
-}
-
-func requiredPluginServerFile(path string) (map[string]mcpDoc, error) {
-	return readPluginServerFile(path)
 }
 
 func readPluginServerFile(path string) (map[string]mcpDoc, error) {

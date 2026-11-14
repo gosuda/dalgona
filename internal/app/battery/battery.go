@@ -105,7 +105,7 @@ func (p *projects) discover(cwd string) (discovery.Result, error) {
 	if err != nil {
 		return discovery.Result{}, fmt.Errorf("skills: %w", err)
 	}
-	native := discovery.Native{Skills: make([]discovery.Skill, 0, len(listed))}
+	native := discovery.Result{Skills: make([]discovery.Skill, 0, len(listed))}
 	for _, skill := range listed {
 		native.Skills = append(native.Skills, discovery.Skill(skill))
 	}
@@ -393,9 +393,13 @@ type servers struct {
 func startServers(ctx context.Context, found []discovery.MCPServer, logger *slog.Logger) *servers {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &servers{cancel: cancel, byName: make(map[string][]tool.Tool, len(found)), states: make(map[string]serverState, len(found))}
+	s.mu.Lock()
 	for _, server := range found {
 		s.order = append(s.order, server.Name)
 		s.states[server.Name] = serverState{Status: "starting"}
+	}
+	s.mu.Unlock()
+	for _, server := range found {
 		s.started.Go(func() {
 			client, tools, err := connect(ctx, server)
 			s.mu.Lock()

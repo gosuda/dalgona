@@ -18,7 +18,7 @@ func TestDiscoverDisabledByDefaultAndRejectsUnknownSource(t *testing.T) {
 	writeFixture(t, filepath.Join(home, ".codex", "config.toml"), "[mcp_servers")
 	writeFixture(t, filepath.Join(home, ".claude.json"), "{")
 	writeFixture(t, filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), "{")
-	native := discovery.Native{
+	native := discovery.Result{
 		Instructions: []discovery.Instruction{{Path: "native.md", Text: "native"}},
 		MCPServers:   []discovery.MCPServer{{Name: "native", Command: "run"}},
 		Skills:       []discovery.Skill{{Name: "native", Description: "built in"}},
@@ -27,11 +27,11 @@ func TestDiscoverDisabledByDefaultAndRejectsUnknownSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("disabled sources were read: %v", err)
 	}
-	want := discovery.Result(native)
+	want := native
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want native result %#v", got, want)
 	}
-	_, err = discovery.Discover(home, cwd, []string{"unknown"}, discovery.Native{})
+	_, err = discovery.Discover(home, cwd, []string{"unknown"}, discovery.Result{})
 	if err == nil || err.Error() != `discovery: unknown source "unknown"` {
 		t.Fatalf("got error %v, want unknown source", err)
 	}
@@ -40,7 +40,7 @@ func TestDiscoverDisabledByDefaultAndRejectsUnknownSource(t *testing.T) {
 func TestDiscoverSourcesAndPrecedence(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
-	native := discovery.Native{
+	native := discovery.Result{
 		Instructions: []discovery.Instruction{{Path: "native.md", Text: "native"}},
 		MCPServers:   []discovery.MCPServer{{Name: "shared", Command: "native"}},
 		Skills:       []discovery.Skill{{Name: "native-skill", Description: "native"}},
@@ -179,7 +179,7 @@ func TestDiscoverPluginManifestFormsAndEnablement(t *testing.T) {
 		},
 	})
 
-	got, err := discovery.Discover(home, cwd, []string{"claude-plugins"}, discovery.Native{})
+	got, err := discovery.Discover(home, cwd, []string{"claude-plugins"}, discovery.Result{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestDiscoverDeclaredPluginMCPFileMustExist(t *testing.T) {
 		"mcpServers": "missing.json",
 	})
 	writePluginRegistry(t, home, "broken@market", plugin, nil)
-	_, err := discovery.Discover(home, t.TempDir(), []string{"claude-plugins"}, discovery.Native{})
+	_, err := discovery.Discover(home, t.TempDir(), []string{"claude-plugins"}, discovery.Result{})
 	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "missing.json") {
 		t.Fatalf("got error %v, want missing declared MCP file", err)
 	}
@@ -228,7 +228,7 @@ func TestPluginMCPStringSymlinkOutsideRootIsRejected(t *testing.T) {
 		t.Skipf("file symlinks are unavailable: %v", err)
 	}
 	writePluginRegistry(t, home, "linked@market", plugin, nil)
-	_, err := discovery.Discover(home, t.TempDir(), []string{"claude-plugins"}, discovery.Native{})
+	_, err := discovery.Discover(home, t.TempDir(), []string{"claude-plugins"}, discovery.Result{})
 	if err == nil || !strings.Contains(err.Error(), `plugin path "link.json" escapes plugin root`) {
 		t.Fatalf("got error %v, want plugin path escape", err)
 	}
@@ -246,7 +246,7 @@ func TestDiscoverFollowsSkillDirectorySymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("directory symlinks are unavailable: %v", err)
 	}
-	got, err := discovery.Discover(home, t.TempDir(), []string{"codex"}, discovery.Native{})
+	got, err := discovery.Discover(home, t.TempDir(), []string{"codex"}, discovery.Result{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestInstructionSymlinkOutsideRootIsIgnored(t *testing.T) {
 	if err := os.Symlink(secret, link); err != nil {
 		t.Skipf("file symlinks are unavailable: %v", err)
 	}
-	got, err := discovery.Discover(home, t.TempDir(), []string{"codex"}, discovery.Native{})
+	got, err := discovery.Discover(home, t.TempDir(), []string{"codex"}, discovery.Result{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestDiscoverRejectsMalformedSources(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
 			path := test.setup(t, home, t.TempDir())
-			_, err := discovery.Discover(home, t.TempDir(), []string{test.source}, discovery.Native{})
+			_, err := discovery.Discover(home, t.TempDir(), []string{test.source}, discovery.Result{})
 			if err == nil || !strings.Contains(err.Error(), path) {
 				t.Fatalf("got error %v, want path %s", err, path)
 			}
