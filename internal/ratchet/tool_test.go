@@ -287,7 +287,7 @@ func TestToolFlowEndToEnd(t *testing.T) {
 		t.Fatalf("v1 gate = %s, want decision keep", got)
 	}
 	status := mustCall(t, tl, env, "c11", `{"action":"status","flow":"x"}`)
-	for _, want := range []string{`"inputs":"current"`, `"grader":"current"`, `"plan":"current"`, "v1 (best)"} {
+	for _, want := range []string{`"inputs":"current"`, `"grader":"current"`, `"plan":"current"`, "v1 (best)", "| keep |"} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("status = %s, want %s", status, want)
 		}

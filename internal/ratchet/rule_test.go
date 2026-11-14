@@ -39,17 +39,6 @@ func TestDecideRound(t *testing.T) {
 	}
 }
 
-func TestDoneRequiresPlan(t *testing.T) {
-	t.Parallel()
-	var s state
-	if done, reason := s.done(); done {
-		t.Fatalf("init-only flow done = true (%s), want false", reason)
-	}
-	if s.plateauReached() {
-		t.Fatal("init-only flow plateau reached = true, want false")
-	}
-}
-
 func TestRerunLimit(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

@@ -626,16 +626,6 @@ func TestTrainHidesTest(t *testing.T) {
 	}
 }
 
-func TestRenderTableMarksBest(t *testing.T) {
-	t.Parallel()
-	fx := newFixture(t)
-	fx.keepV1()
-	table := renderTable(fx.s)
-	if !strings.Contains(table, "v1 (best)") || !strings.Contains(table, "| keep |") {
-		t.Fatalf("table = %q, want v1 (best) and keep", table)
-	}
-}
-
 func TestGateUnmeasuredGuardrailRefused(t *testing.T) {
 	t.Parallel()
 	fx := newFixture(t, "cost_usd")
