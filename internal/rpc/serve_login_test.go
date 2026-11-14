@@ -130,7 +130,7 @@ func TestAPIKeyNeverReachesLogsJournalOrModel(t *testing.T) {
 		t.Fatal("the API key reached the logs")
 	}
 	assertKeyAbsentFromModel(t, r)
-	assertKeyAbsentFromHome(t, r.home)
+	assertKeyAbsentFromHome(t, r)
 }
 
 func assertKeyAbsentFromModel(t *testing.T, r *rig) {
@@ -148,16 +148,23 @@ func assertKeyAbsentFromModel(t *testing.T, r *rig) {
 	}
 }
 
-func assertKeyAbsentFromHome(t *testing.T, home string) {
+func assertKeyAbsentFromHome(t *testing.T, r *rig) {
 	t.Helper()
-	root, err := os.OpenRoot(home)
+	if err := errors.Join(r.host.Close(), r.cfg.Journal.Close()); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(r.home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = root.Close() }()
 	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Name() == "auth.json" || entry.Name() == "secrets.json" {
+		if err != nil || entry.IsDir() {
 			return err
+		}
+		switch entry.Name() {
+		case "auth.json", "secrets.json":
+			return nil
 		}
 		raw, err := fs.ReadFile(root.FS(), path)
 		if err != nil {
