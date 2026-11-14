@@ -18,6 +18,7 @@ func TestRenamePlanRecordsSourceAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Discard()
 	if len(plan.Files) != 2 {
 		t.Fatalf("rename plan files %+v", plan.Files)
 	}
