@@ -14,7 +14,7 @@ import (
 	"github.com/odvcencio/gotreesitter"
 	bash "github.com/odvcencio/gotreesitter/grammars/bash"
 	c "github.com/odvcencio/gotreesitter/grammars/c"
-	csharp "github.com/odvcencio/gotreesitter/grammars/c_sharp"
+	"github.com/odvcencio/gotreesitter/grammars/c_sharp"
 	cpp "github.com/odvcencio/gotreesitter/grammars/cpp"
 	css "github.com/odvcencio/gotreesitter/grammars/css"
 	golang "github.com/odvcencio/gotreesitter/grammars/go"
@@ -120,7 +120,7 @@ func (l *language) syntaxOnly() bool {
 var registry = []*language{
 	newLanguage("bash", []string{".sh"}, bash.Language, bashQuery),
 	newLanguage("c", []string{".c", ".h"}, c.Language, cQuery),
-	newLanguage("c_sharp", []string{".cs"}, csharp.Language, csharpQuery),
+	newLanguage("c_sharp", []string{".cs"}, c_sharp.Language, csharpQuery),
 	newLanguage("cpp", []string{".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}, cpp.Language, cppQuery),
 	newLanguage("css", []string{".css"}, css.Language, ""),
 	newLanguage("go", []string{".go"}, golang.Language, goQuery),
@@ -201,7 +201,8 @@ type Parser struct {
 func newParser(lang *language, timeout time.Duration) *Parser {
 	grammar := lang.grammar()
 	parser := gotreesitter.NewParser(grammar)
-	parser.SetTimeoutMicros(uint64(timeout / time.Microsecond)) //nolint:gosec // parseTimeout is a positive constant
+	micros := max(0, timeout) / time.Microsecond
+	parser.SetTimeoutMicros(uint64(micros))
 	parser.SetMemoryBudgetBytes(parseMemoryBudgetBytes)
 	parser.SetParseWorkLimits(gotreesitter.ParseWorkLimits{
 		IterationLimit:  parseIterationLimit,

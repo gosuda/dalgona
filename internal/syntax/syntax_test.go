@@ -390,14 +390,14 @@ func TestSymbolsFixtureKotlin(t *testing.T) {
 	})
 }
 
-func symbolsWithin(t *testing.T, langName string, src []byte) ([]Symbol, Report, error) {
+func symbolsWithinGo(t *testing.T, src []byte) ([]Symbol, Report, error) {
 	t.Helper()
-	lang, ok := ByName(langName)
+	lang, ok := ByName("go")
 	if !ok {
-		t.Fatalf("%s language missing", langName)
+		t.Fatalf("go language missing")
 	}
 	if _, err := lang.l.outliner(); err != nil {
-		t.Fatalf("outliner %s: %v", langName, err)
+		t.Fatalf("outliner go: %v", err)
 	}
 	return symbolsFrom(t, lang.NewParser(), src)
 }
@@ -444,7 +444,7 @@ func TestSymbolsCPPIssue1558(t *testing.T) {
 func TestSymbolsOneMiBSingleLine(t *testing.T) {
 	t.Parallel()
 	src := "package p\nvar s = \"" + strings.Repeat("a", 1<<20)
-	_, report, err := symbolsWithin(t, "go", []byte(src))
+	_, report, err := symbolsWithinGo(t, []byte(src))
 	if err != nil {
 		t.Fatalf("Symbols: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestSymbolsOneMiBSingleLine(t *testing.T) {
 func TestSymbolsDeeplyNestedBrackets(t *testing.T) {
 	t.Parallel()
 	src := "package p\n" + strings.Repeat("(", 200_000)
-	_, report, err := symbolsWithin(t, "go", []byte(src))
+	_, report, err := symbolsWithinGo(t, []byte(src))
 	if err != nil {
 		t.Fatalf("Symbols: %v", err)
 	}
@@ -573,7 +573,7 @@ func TestCaptureNamesSortedDistinct(t *testing.T) {
 
 func TestErrorLineOfBrokenGo(t *testing.T) {
 	t.Parallel()
-	_, report, err := symbolsWithin(t, "go", []byte("package a\n\nfunc Bad( {\n"))
+	_, report, err := symbolsWithinGo(t, []byte("package a\n\nfunc Bad( {\n"))
 	if err != nil {
 		t.Fatalf("Symbols: %v", err)
 	}
@@ -584,7 +584,7 @@ func TestErrorLineOfBrokenGo(t *testing.T) {
 
 func TestErrorLineZeroOnValidGo(t *testing.T) {
 	t.Parallel()
-	_, report, err := symbolsWithin(t, "go", []byte("package a\n\nfunc Good() {}\n"))
+	_, report, err := symbolsWithinGo(t, []byte("package a\n\nfunc Good() {}\n"))
 	if err != nil {
 		t.Fatalf("Symbols: %v", err)
 	}
