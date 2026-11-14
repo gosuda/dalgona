@@ -294,7 +294,7 @@ func (c *Config) mergeDurations(current layer) error {
 		}
 		value, err := time.ParseDuration(*item.raw)
 		if err != nil {
-			location := lineLocation(current.path, current.raw, item.key)
+			location := lineMap(current.path, current.raw)[item.key]
 			return fmt.Errorf("%s:%d: %s: %w", location.file, location.line, item.key, err)
 		}
 		*item.target = value
@@ -421,14 +421,18 @@ func (c *Config) validate() error {
 
 func (c *Config) validateEnums() []error {
 	var errs []error
-	if !one(string(c.Approval), "auto", "yolo", "ask") {
-		errs = append(errs, c.valueError("approval", "approval must be one of auto, yolo, ask"))
-	}
-	if !one(string(c.Sandbox), "workspace-write", "off") {
-		errs = append(errs, c.valueError("sandbox", "sandbox must be one of workspace-write, off"))
-	}
-	if !one(string(c.Reasoning), "default", "low", "medium", "high", "xhigh", "max") {
-		errs = append(errs, c.valueError("reasoning", "reasoning must be one of default, low, medium, high, xhigh, max"))
+	for _, choice := range []struct {
+		key     string
+		value   string
+		options []string
+	}{
+		{"approval", string(c.Approval), optionsOf("approval")},
+		{"sandbox", string(c.Sandbox), sandboxOptions},
+		{"reasoning", string(c.Reasoning), reasoningOptions},
+	} {
+		if !one(choice.value, choice.options...) {
+			errs = append(errs, c.valueError(choice.key, choice.key+" must be one of "+strings.Join(choice.options, ", ")))
+		}
 	}
 	if !one(string(c.ToolMode), "normal", "eval-first", "eval-only") {
 		errs = append(errs, c.valueError("tool_mode", "tool_mode must be one of normal, eval-first, eval-only"))
@@ -465,21 +469,25 @@ func (c *Config) validateEditStyle() []error {
 		return []error{exactError(c.originFile("edit_style") + ": edit_style table needs a default entry.")}
 	}
 	if !validEditStyle(c.EditStyle.Default) {
-		return []error{exactError(c.originFile("edit_style") + ": edit_style must be one of anchor, replace, hashline, hashline-light, hashline-enhanced, apply_patch, simple, balanced, strict.")}
+		return []error{exactError(c.originFile("edit_style") + ": " + editStyleError)}
 	}
 	for _, row := range c.EditStyle.Rows {
 		if row.Glob == "" {
 			return []error{exactError(c.originFile("edit_style") + ": edit_style keys must not be empty.")}
 		}
 		if !validEditStyle(row.Style) {
-			return []error{exactError(c.originFile("edit_style") + ": edit_style must be one of anchor, replace, hashline, hashline-light, hashline-enhanced, apply_patch, simple, balanced, strict.")}
+			return []error{exactError(c.originFile("edit_style") + ": " + editStyleError)}
 		}
 	}
 	return nil
 }
 
+var editStyleOptions = []string{"anchor", "replace", "hashline", "hashline-light", "hashline-enhanced", "apply_patch", "simple", "balanced", "strict"}
+
+var editStyleError = "edit_style must be one of " + strings.Join(editStyleOptions, ", ") + "."
+
 func validEditStyle(style string) bool {
-	return one(style, "anchor", "replace", "hashline", "hashline-light", "hashline-enhanced", "apply_patch", "simple", "balanced", "strict")
+	return one(style, editStyleOptions...)
 }
 
 func (c *Config) validateRunners() []error {
@@ -579,10 +587,6 @@ func validateProductLayer(product Product, current layer) error {
 		return nil
 	}
 	return fmt.Errorf("%s:%d: %s is a dalgona setting", found.file, found.line, foundKey)
-}
-
-func lineLocation(path string, raw []byte, key string) origin {
-	return lineMap(path, raw)[key]
 }
 
 func lineMap(path string, raw []byte) map[string]origin {
