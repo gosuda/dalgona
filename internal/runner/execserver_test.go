@@ -321,7 +321,7 @@ func TestBootstrap_skipsMatchingVersion(t *testing.T) {
 		if len(argv) != 3 || argv[2] != probeScript {
 			t.Fatalf("unexpected command after a matching probe: %q", argv)
 		}
-		return &staticStream{reader: strings.NewReader("x86_64\ndalgona " + localVersion() + "\n")}, nil
+		return &staticStream{reader: strings.NewReader("x86_64\ndalgona " + binaryVersion() + "\n")}, nil
 	}
 	if err := Bootstrap(t.Context(), "current-box", run); err != nil {
 		t.Fatal(err)

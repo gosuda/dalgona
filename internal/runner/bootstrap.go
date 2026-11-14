@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,7 +71,7 @@ func Bootstrap(ctx context.Context, boxID string, run RunFunc) error {
 	if err != nil {
 		return fmt.Errorf("runner: %w", err)
 	}
-	if remote == localVersion() {
+	if remote == binaryVersion() {
 		return probeExit(boxID, code)
 	}
 	if err := requireBase64(ctx, run, boxID); err != nil {
@@ -86,14 +85,6 @@ func probeExit(boxID string, code int) error {
 		return nil
 	}
 	return fmt.Errorf("runner: box %s: version probe exited %d", boxID, code)
-}
-
-func localVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok || info == nil || info.Main.Version == "" {
-		return "(devel)"
-	}
-	return info.Main.Version
 }
 
 func parseProbe(boxID string, out []byte) (string, string, error) {
