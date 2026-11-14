@@ -89,18 +89,6 @@ func turnBoundary(entries []Entry, cut int) int {
 	return cut
 }
 
-func safeCut(entries []Entry, cut int) bool {
-	if !isBoundary(entries[cut].Kind) {
-		return false
-	}
-	first := scopeFirst(entries)
-	earliest := len(entries)
-	for i := len(entries) - 1; i >= cut; i-- {
-		earliest = earliestScope(first, entries[i], earliest)
-	}
-	return earliest >= cut
-}
-
 func scopeFirst(entries []Entry) map[string]int {
 	first := make(map[string]int)
 	for i, entry := range entries {

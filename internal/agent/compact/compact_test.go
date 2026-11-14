@@ -229,17 +229,47 @@ func TestCutKeepsNestedScriptFamily(t *testing.T) {
 		{Kind: ToolCompleted, Bytes: 20, CallID: "e"},
 		{Kind: UserMessage, Bytes: 20},
 	}
-	cut, ok := Cut(entries, 11, 0)
-	if !ok {
-		t.Fatal("Cut() reported no boundary")
+	for _, tc := range []struct {
+		name       string
+		keepTokens int
+		wantCut    int
+		wantOK     bool
+	}{
+		{"whole history fits keep target", 50, 0, false},
+		{"cut lands on family head", 45, 1, true},
+		{"cut inside family walks back to head", 40, 1, true},
+		{"cut on run entry walks back to head", 35, 1, true},
+		{"nested call entry walks back to head", 30, 1, true},
+		{"user message boundary inside family walks back to head", 25, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cut, ok := Cut(entries, tc.keepTokens, 0)
+			if ok != tc.wantOK || cut != tc.wantCut {
+				t.Fatalf("Cut() = %d, %t; want %d, %t", cut, ok, tc.wantCut, tc.wantOK)
+			}
+			if !tc.wantOK {
+				return
+			}
+			assertCutRetainsFamilyIssuer(t, entries, cut)
+			assertNoFamilyScopeBeforeCut(t, entries, cut)
+		})
 	}
-	if cut != 1 {
-		t.Fatalf("Cut() = %d, want the assistant call at 1", cut)
+}
+
+func assertCutRetainsFamilyIssuer(t *testing.T, entries []Entry, cut int) {
+	t.Helper()
+	if entries[cut].Kind != AssistantMessage || len(entries[cut].CallIDs) != 1 || entries[cut].CallIDs[0] != "e" {
+		t.Fatalf("cut %d does not retain the family issuer: %+v", cut, entries[cut])
 	}
-	if !safeCut(entries, 1) {
-		t.Fatal("safeCut() rejected the assistant call that keeps the family")
-	}
-	if safeCut(entries, 5) {
-		t.Fatal("safeCut() allowed a cut inside a nested script family")
+}
+
+func assertNoFamilyScopeBeforeCut(t *testing.T, entries []Entry, cut int) {
+	t.Helper()
+	for i := range cut {
+		for _, id := range entryIDs(entries[i]) {
+			if testRoot(id) == "e" {
+				t.Fatalf("entry %d drops family scope %q retained from cut %d", i, id, cut)
+			}
+		}
 	}
 }
