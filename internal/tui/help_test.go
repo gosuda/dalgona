@@ -18,7 +18,7 @@ func helpModel(t *testing.T) model {
 
 func TestHelpOverlayListsKeysAndCloses(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, press('?', 0, "?"))
 	assertContains(t, m.View().Content, "Compose", "sends the prompt")
@@ -102,7 +102,7 @@ func TestHelpKeyColumnHasSpace(t *testing.T) {
 
 func TestHelpNotOpenedInShellMode(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, press('!', 0, "!"))
 	m, _ = drive(t, m, press('?', 0, "?"))

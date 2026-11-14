@@ -10,7 +10,7 @@ import (
 
 func TestWriteWorkloadShape(t *testing.T) {
 	root := t.TempDir()
-	paths := writeWorkload(t, root, 2000, 10000, 1)
+	paths := writeWorkload(t, root, 2000, 10000)
 	if len(paths) != 2000 {
 		t.Fatalf("paths = %d, want 2000", len(paths))
 	}
@@ -35,8 +35,8 @@ func TestWriteWorkloadShape(t *testing.T) {
 
 func TestWriteWorkloadIsSeeded(t *testing.T) {
 	first, second := t.TempDir(), t.TempDir()
-	paths := writeWorkload(t, first, 3, 64, 1)
-	again := writeWorkload(t, second, 3, 64, 1)
+	paths := writeWorkload(t, first, 3, 64)
+	again := writeWorkload(t, second, 3, 64)
 	if !slices.Equal(paths, again) {
 		t.Fatalf("paths differ: %v and %v", paths, again)
 	}

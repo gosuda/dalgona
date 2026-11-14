@@ -49,10 +49,6 @@ func stripOuterFence(input string) string {
 	return body
 }
 
-func stripBeginEnd(input string) string {
-	return stripEnvelope(input)
-}
-
 func stripMatchedBeginEnd(input string) string {
 	begin := strings.HasPrefix(input, "*** Begin Patch\n")
 	end := strings.HasSuffix(input, "*** End Patch\n") || strings.HasSuffix(input, "*** End Patch")

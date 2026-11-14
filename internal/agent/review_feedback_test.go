@@ -112,7 +112,7 @@ func TestFeedbackBuiltFromJournaledSpoken(t *testing.T) {
 	t.Parallel()
 	judge := &judgeStub{}
 	h := judgedHarness(t, judge, []string{"placeholder"})
-	h.seed(append(seededEdit(h),
+	h.seed(append(seededEdit(),
 		event.ToolCompleted{CallID: "e1", OK: true, Output: "patched", Recovered: "none"},
 		event.ToolJudged{
 			CallID: "e1", TurnID: "t", By: "judge:stub-judge", Verdict: reviewFlagged, Paths: []string{"a.txt"},

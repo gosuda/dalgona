@@ -14,26 +14,29 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(m.input.composer.Focus(), tea.RequestBackgroundColor, start)
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var command tea.Cmd
-	before := m.input.composer.Value()
-	notice := m.notice
+func (m *model) handleMsg(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		command = m.updateKey(msg)
+		return m.updateKey(msg)
 	case notificationMsg, serverRequestMsg, resultMsg, disconnectedMsg, debounceMsg, searchResultMsg, shellResultMsg, imageMsg:
-		command = m.updateAsync(msg)
+		return m.updateAsync(msg)
 	case spinner.TickMsg:
-		command = m.updateTick(msg)
+		return m.updateTick(msg)
 	case hintExpiredMsg:
 		m.expireHint(msg)
+		return nil
 	default:
-		var handled bool
-		command, handled = m.updateTerminal(msg)
-		if !handled {
-			command = m.updateComposer(msg)
+		if command, handled := m.updateTerminal(msg); handled {
+			return command
 		}
+		return m.updateComposer(msg)
 	}
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	before := m.input.composer.Value()
+	notice := m.notice
+	command := m.handleMsg(msg)
 	if m.input.composer.Value() != before {
 		command = tea.Batch(command, m.matchKeywords())
 	}
@@ -143,7 +146,8 @@ func (m *model) overlayKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	key := msg.String()
 	switch {
 	case m.review != nil:
-		return m.reviewKey(msg), true
+		m.reviewKey(msg)
+		return nil, true
 	case key == "ctrl+o":
 		m.openReview()
 		return nil, true
@@ -158,7 +162,8 @@ func (m *model) overlayKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	case m.login != nil:
 		return m.loginKey(msg), true
 	case m.help != nil:
-		return m.helpKey(key), true
+		m.helpKey(key)
+		return nil, true
 	}
 	return nil, false
 }
@@ -186,8 +191,8 @@ func (m *model) keyCommand(msg tea.KeyPressMsg) tea.Cmd {
 	if command, handled := m.overlayKey(msg); handled {
 		return command
 	}
-	if command, handled := m.followupKey(msg); handled {
-		return command
+	if m.followupKey(msg) {
+		return nil
 	}
 	if command, handled := m.shellKey(key, msg); handled {
 		return command
@@ -223,17 +228,18 @@ func (m *model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	return tea.Batch(command, m.syncPopup(false))
 }
 
-func (m *model) followupKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
+func (m *model) followupKey(msg tea.KeyPressMsg) bool {
 	switch msg.String() {
 	case "alt+q":
 		m.openQueue()
-		return nil, true
+		return true
 	case "alt+up":
 		if m.input.composer.Value() == "" && len(m.queue) > 0 {
-			return m.dequeueFollowup(), true
+			m.dequeueFollowup()
+			return true
 		}
 	}
-	return nil, false
+	return false
 }
 
 func (m *model) guardKey(key string) (tea.Cmd, bool) {
@@ -385,25 +391,32 @@ func (m model) View() tea.View {
 	return view
 }
 
-func (m model) frame() tea.View {
-	var view tea.View
+func (m model) rawFrame() tea.View {
 	switch {
 	case m.out.printing:
-		view = m.out.frozen
+		return m.out.frozen
 	case m.leaving:
-		view = tea.NewView(" ")
+		view := tea.NewView(" ")
 		view.ProgramStatus = &tea.ProgramStatus{State: tea.ProgramStateIdle}
+		return view
 	case !m.out.started:
-		view = tea.NewView("")
+		view := tea.NewView("")
 		view.ReportFocus = true
+		return view
 	case m.review != nil:
-		view = tea.NewView(m.screen.emit(m.reviewView()))
+		view := tea.NewView(m.screen.emit(m.reviewView()))
 		view.AltScreen = true
 		view.ReportFocus = true
+		return view
 	default:
-		view = m.dockView()
+		view := m.dockView()
 		view.Content = m.screen.emit(view.Content)
+		return view
 	}
+}
+
+func (m model) frame() tea.View {
+	view := m.rawFrame()
 	view.MouseMode = tea.MouseModeNone
 	if !m.leaving && (m.review != nil || m.list != nil) {
 		view.MouseMode = tea.MouseModeCellMotion

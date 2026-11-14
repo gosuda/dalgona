@@ -348,6 +348,7 @@ func TestUserMessageImageValidate(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			message := event.UserMessage{ItemID: "item-01", TurnID: "turn-01", Text: "x", Kind: "prompt", Images: tc.images}
 			err := message.Validate()
 			if err == nil || err.Error() != tc.err {

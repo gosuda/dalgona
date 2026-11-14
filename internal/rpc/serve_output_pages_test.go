@@ -20,7 +20,7 @@ func TestOutputReadErrorsMapToInvalidParams(t *testing.T) {
 	c := r.connect()
 	threadID := startThread(t, r, c, nil)
 	startTurn(t, c, threadID, "print twice")
-	c.collect("turn/completed")
+	c.collect()
 	read := func(item string, offset int64, text string) {
 		t.Helper()
 		c.fails("dalgona/item/output/read", map[string]any{"threadId": threadID, "itemId": item, "offset": offset}, codeInvalidParams, text)

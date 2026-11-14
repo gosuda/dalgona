@@ -36,7 +36,7 @@ func TestApprovalErrorWaitsForOtherWindow(t *testing.T) {
 	first.send(message{ID: firstRequest.ID, Error: &RPCError{Code: -32603, Message: "window cannot answer"}})
 	first.call("thread/read", map[string]any{"threadId": threadID})
 	second.respond(secondRequest.ID, `{"decision":"accept"}`)
-	log := readTurn(t, first.collect("turn/completed"))
+	log := readTurn(t, first.collect())
 	expect(t, log.status == statusCompleted, "turn status", log.status)
 	item := findItem(log.completed, "call-exec")
 	expect(t, item.Status == statusCompleted && strings.Contains(item.Output, "held"),
@@ -54,7 +54,7 @@ func TestApprovalErrorDeclinesWhenAlone(t *testing.T) {
 	startTurn(t, c, threadID, "run it")
 	request := awaitApprovalRequest(t, c)
 	c.send(message{ID: request.ID, Error: &RPCError{Code: -32603, Message: "window cannot answer"}})
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	item := findItem(log.completed, "call-exec")
 	expect(t, item.Status == statusDeclined && !strings.Contains(item.Output, "held"),
 		"exec item declined when the only window errors", item)
@@ -76,7 +76,7 @@ func TestApprovalErrorFromEveryWindowDeclines(t *testing.T) {
 	secondRequest := awaitApprovalRequest(t, second)
 	first.send(message{ID: firstRequest.ID, Error: &RPCError{Code: -32603, Message: "window cannot answer"}})
 	second.send(message{ID: secondRequest.ID, Error: &RPCError{Code: -32603, Message: "window cannot answer"}})
-	log := readTurn(t, first.collect("turn/completed"))
+	log := readTurn(t, first.collect())
 	item := findItem(log.completed, "call-exec")
 	expect(t, item.Status == statusDeclined && !strings.Contains(item.Output, "held"),
 		"exec item declined when every attached window errors", item)

@@ -583,10 +583,7 @@ func walkEntry(cwd, path string, d fs.DirEntry, emit func(uploadJob) error) erro
 
 func chmodExec(ctx context.Context, r Runner, paths []string) error {
 	for len(paths) > 0 {
-		n := chmodBatchSize
-		if n > len(paths) {
-			n = len(paths)
-		}
+		n := min(chmodBatchSize, len(paths))
 		if err := chmodBatch(ctx, r, paths[:n]); err != nil {
 			return err
 		}

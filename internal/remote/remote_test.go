@@ -81,7 +81,7 @@ func TestForkSharesBoxAndArchiveDestroysOnLastThread(t *testing.T) {
 	shared := filepath.Join(t.TempDir(), "f")
 	want := event.RunnerBound{Runner: "box", Service: "fake", BoxID: "dalgona-thread-a", Baseline: "baseline-1"}
 
-	startThread(t, store, "thread-a", t.TempDir(), "box")
+	startThread(t, store, "thread-a", t.TempDir())
 	a := openRunner(ctx, t, b, "thread-a")
 	must(t, a.WriteFile(ctx, shared, []byte("from a"), 0o644))
 	requireBindings(t, store, "thread-a", want)
@@ -113,14 +113,14 @@ func TestForkInheritsParentBoxBoundAfterTheFork(t *testing.T) {
 	store := openJournal(t)
 	_, box := newFakeBinder(t, store)
 
-	startThread(t, store, "thread-p", t.TempDir(), "box")
+	startThread(t, store, "thread-p", t.TempDir())
 	startFork(t, store, "thread-f", "thread-p")
 	box.use(ctx, t, "thread-p")
 	box.use(ctx, t, "thread-f")
 	parent := bindings(t, store, "thread-p")
 	requireBindings(t, store, "thread-f", parent...)
 
-	startThread(t, store, "thread-q", t.TempDir(), "box")
+	startThread(t, store, "thread-q", t.TempDir())
 	startFork(t, store, "thread-g", "thread-q")
 	box.use(ctx, t, "thread-g")
 	child := bindings(t, store, "thread-g")
@@ -140,7 +140,7 @@ func TestCreateRecoversBoxLeftByCrash(t *testing.T) {
 	b.newSvc = func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) {
 		return duplicateRefusing{box.svc}, nil
 	}
-	startThread(t, store, "thread-c", t.TempDir(), "box")
+	startThread(t, store, "thread-c", t.TempDir())
 	box.use(ctx, t, "thread-c")
 	requireBindings(t, store, "thread-c", event.RunnerBound{Runner: "box", Service: "fake", BoxID: "dalgona-thread-c", Baseline: "baseline-1"})
 	if box.svc.CreateCount() != 1 {
@@ -167,7 +167,7 @@ func TestReplacementUpdatesEveryThreadOnTheBox(t *testing.T) {
 	b.newSvc = func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) { return replacing, nil }
 	old := event.RunnerBound{Runner: "box", Service: "fake", BoxID: "box-x", Baseline: "base"}
 	for _, thread := range []string{"thread-a", "thread-b", "thread-c"} {
-		startThread(t, store, thread, t.TempDir(), "box")
+		startThread(t, store, thread, t.TempDir())
 		must(t, appendEvents(ctx, store, thread, old))
 	}
 	box.recorder.closed["thread-c"] = true
@@ -248,7 +248,7 @@ func TestRunnerRecoversAfterRestart(t *testing.T) {
 	ctx := t.Context()
 	store := openJournal(t)
 	b, box := newFakeBinder(t, store)
-	startThread(t, store, "thread-r", t.TempDir(), "box")
+	startThread(t, store, "thread-r", t.TempDir())
 	first := openRunner(ctx, t, b, "thread-r")
 	spec := runner.ProcessSpec{ID: "call-1", Argv: []string{"sh", "-c", "sleep 0.3; echo done"}, Dir: t.TempDir()}
 	must(t, first.Start(ctx, spec))
@@ -270,7 +270,7 @@ func TestGCDestroysConfirmedUnboundBoxes(t *testing.T) {
 	ctx := t.Context()
 	store := openJournal(t)
 	b, box := newFakeBinder(t, store)
-	startThread(t, store, "thread-g", t.TempDir(), "box")
+	startThread(t, store, "thread-g", t.TempDir())
 	box.use(ctx, t, "thread-g")
 	must(t, appendEvents(ctx, store, "thread-g", event.ThreadArchived{Archived: true}))
 

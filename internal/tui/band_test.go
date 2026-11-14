@@ -13,7 +13,7 @@ import (
 )
 
 func bandModel(cwd string) model {
-	m := newTestModel(nil, Options{Cwd: cwd}, nil)
+	m := newTestModel(nil, Options{Cwd: cwd})
 	m.thread.id = "t1"
 	m.thread.modelName = "gpt-test"
 	m.thread.effort = "high"
@@ -164,7 +164,7 @@ func TestKittyQueryNeedsKittyAndAutoIcons(t *testing.T) {
 		envStep := func(m *model) tea.Cmd { return m.applyEnvMsg(tc.env) }
 		settingsStep := func(m *model) tea.Cmd { return m.applySettings(setting) }
 		for _, order := range [][2]func(*model) tea.Cmd{{envStep, settingsStep}, {settingsStep, envStep}} {
-			m := newTestModel(nil, Options{}, nil)
+			m := newTestModel(nil, Options{})
 			first, second := order[0], order[1]
 			sent := kittyQueryCount(first(&m), second(&m), first(&m), second(&m))
 			if sent != tc.wantSent {
@@ -176,7 +176,7 @@ func TestKittyQueryNeedsKittyAndAutoIcons(t *testing.T) {
 
 func TestUnrelatedCapabilityKeepsNerdChoice(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.applyCapability(tea.CapabilityMsg{Content: "kitty-query-font_family=JetBrainsMono Nerd Font Mono"})
 	m.applyCapability(tea.CapabilityMsg{Content: "Tc"})
 	if !m.screen.kittyNerd {
@@ -310,7 +310,7 @@ func TestEffortItemNeedsTwoLevels(t *testing.T) {
 
 func TestInitializeSetsProductForStatusBand(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{Cwd: "/work/ws"}, nil)
+	m := newTestModel(nil, Options{Cwd: "/work/ws"})
 	m, _ = drive(t, m, resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/1.2.3", PlatformFamily: "unix"}})
 	if m.conn.product != "dalgona" || m.conn.version != "1.2.3" || m.conn.platformFamily != "unix" {
 		t.Fatalf("product %q version %q platform %q", m.conn.product, m.conn.version, m.conn.platformFamily)

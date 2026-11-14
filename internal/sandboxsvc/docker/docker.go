@@ -54,7 +54,7 @@ func (s *Service) Create(ctx context.Context, spec sandboxsvc.Spec) (string, err
 	}
 	if _, startErr := s.client.ContainerStart(ctx, result.ID, client.ContainerStartOptions{}); startErr != nil {
 		startFailure := fmt.Errorf("docker: start container %s: %w", result.ID, startErr)
-		_, cleanupErr := s.client.ContainerRemove(context.Background(), result.ID, client.ContainerRemoveOptions{Force: true})
+		_, cleanupErr := s.client.ContainerRemove(context.WithoutCancel(ctx), result.ID, client.ContainerRemoveOptions{Force: true})
 		if cleanupErr != nil {
 			cleanupFailure := fmt.Errorf("docker: remove container %s after start failure: %w", result.ID, cleanupErr)
 			return "", errors.Join(startFailure, cleanupFailure)
@@ -125,11 +125,7 @@ func (s *Service) Destroy(ctx context.Context, id string) error {
 }
 
 func (s *Service) Connect(ctx context.Context, id string, endpoint sandboxsvc.Endpoint) (io.ReadWriteCloser, error) {
-	argv := []string{"sh", "-c", `exec "$HOME/.dalgona/bin/dalgona" exec-server --listen stdio:// --root /workspace`}
-	if endpoint == sandboxsvc.Bridge {
-		argv = []string{"sh", "-c", `exec "$HOME/.dalgona/bin/dalgona" bridge`}
-	}
-	return s.exec(ctx, id, argv)
+	return s.exec(ctx, id, endpoint.Argv())
 }
 
 func (s *Service) exec(ctx context.Context, id string, argv []string) (runner.Stream, error) {

@@ -64,9 +64,8 @@ func decodeNotice(raw jsontext.Value) (Notice, error) {
 		return Notice{}, err
 	}
 	r := objectReader{fields: fields}
-	text, textBlob := r.textPayload("text")
-	value := Notice{Word: r.str("word"), Text: text, TextBlob: textBlob}
-	return value, r.err
+	word, text, textBlob := r.textItem("word")
+	return Notice{Word: word, Text: text, TextBlob: textBlob}, r.err
 }
 
 func decodeMention(raw jsontext.Value) (Mention, error) {
@@ -75,9 +74,8 @@ func decodeMention(raw jsontext.Value) (Mention, error) {
 		return Mention{}, err
 	}
 	r := objectReader{fields: fields}
-	text, textBlob := r.textPayload("text")
-	value := Mention{Path: r.str("path"), Text: text, TextBlob: textBlob}
-	return value, r.err
+	path, text, textBlob := r.textItem("path")
+	return Mention{Path: path, Text: text, TextBlob: textBlob}, r.err
 }
 
 func decodeImage(raw jsontext.Value) (Image, error) {

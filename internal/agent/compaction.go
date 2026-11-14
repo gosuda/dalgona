@@ -6,11 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/agent/compact"
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/agent/prompts"
+	"github.com/gosuda/dalgona/internal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/model"
 )
 
@@ -211,7 +212,7 @@ func (w *worker) summarize(ctx context.Context, cv compactionView, cut int, stat
 		return "", err
 	}
 	input := w.renderSpan(cv, cut)
-	req := model.Request{Model: modelID, System: prompts.Compaction, Messages: []model.Message{{Role: "user", Text: input}}}
+	req := model.Request{Model: modelID, System: prompt.Compaction, Messages: []model.Message{{Role: "user", Text: input}}}
 	stream, err := w.registry.Stream(ctx, provider, req)
 	if err != nil {
 		return "", err
@@ -308,12 +309,7 @@ func trackFiles(item event.Event, read, changed []string) ([]string, []string) {
 }
 
 func appendUnique(list []string, value string) []string {
-	for _, existing := range list {
-		if existing == value {
-			return list
-		}
-	}
-	if len(list) >= fileListLimit {
+	if slices.Contains(list, value) || len(list) >= fileListLimit {
 		return list
 	}
 	return append(list, value)

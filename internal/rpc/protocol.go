@@ -118,11 +118,6 @@ type (
 		Provider string `json:"provider,omitzero"`
 	}
 	SkillsListParams struct{}
-	ScriptRunParams  struct {
-		ThreadID string   `json:"threadId"`
-		Path     string   `json:"path"`
-		Args     []string `json:"args,omitzero"`
-	}
 	ThreadTreeParams struct {
 		ThreadID string `json:"threadId"`
 	}
@@ -147,26 +142,6 @@ func (c *Conn) ThreadStart(ctx context.Context, p ThreadStartParams, out any) er
 	return c.Call(ctx, "thread/start", p, out)
 }
 
-func (c *Conn) ThreadResume(ctx context.Context, p ThreadResumeParams, out any) error {
-	return c.Call(ctx, "thread/resume", p, out)
-}
-
-func (c *Conn) ThreadList(ctx context.Context, p ThreadListParams, out any) error {
-	return c.Call(ctx, "thread/list", p, out)
-}
-
-func (c *Conn) ThreadRead(ctx context.Context, p ThreadReadParams, out any) error {
-	return c.Call(ctx, "thread/read", p, out)
-}
-
 func (c *Conn) TurnStart(ctx context.Context, p TurnStartParams, out any) error {
 	return c.Call(ctx, "turn/start", p, out)
-}
-
-func (c *Conn) TurnSteer(ctx context.Context, p TurnSteerParams, out any) error {
-	return c.Call(ctx, "turn/steer", p, out)
-}
-
-func (c *Conn) TurnInterrupt(ctx context.Context, p TurnInterruptParams, out any) error {
-	return c.Call(ctx, "turn/interrupt", p, out)
 }

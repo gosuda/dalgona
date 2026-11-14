@@ -55,19 +55,9 @@ func APIKeyFromEnv(name string) func(context.Context) (string, error) {
 }
 
 func (p *Provider) Stream(ctx context.Context, req model.Request) (model.Stream, error) {
-	stream := model.NewEventStream(ctx, 64)
-	go p.run(stream.Context(ctx), stream, req)
-	return stream, nil
-}
-
-func (p *Provider) run(ctx context.Context, stream *model.EventStream, req model.Request) {
-	result := model.RunRetries(ctx, p.cfg.Retry, func(ctx context.Context) model.AttemptResult {
-		return p.attempt(ctx, stream, req)
+	return model.LaunchStream(ctx, p.cfg.Retry, func(attemptCtx context.Context, stream *model.EventStream) model.AttemptResult {
+		return p.attempt(attemptCtx, stream, req)
 	})
-	if result.Err != nil {
-		stream.Emit(model.Error{Err: result.Err, Message: result.Err.Error(), Status: result.Status, Body: result.Body})
-	}
-	stream.Finish(nil)
 }
 
 func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, req model.Request) model.AttemptResult {
@@ -95,23 +85,10 @@ func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, req m
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return httpFailure(resp)
+		return model.HTTPFailure("chatcompat", resp)
 	}
 	state := responseState{stream: stream, freeform: model.FreeformToolNames(req.Tools)}
 	return state.consume(gateCtx, gate, resp.Body, p.cfg.Retry)
-}
-
-func httpFailure(resp *http.Response) model.AttemptResult {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return model.AttemptResult{Status: resp.StatusCode, Err: fmt.Errorf("chatcompat: read error response: %w", err)}
-	}
-	return model.AttemptResult{
-		Status:     resp.StatusCode,
-		RetryAfter: model.RetryAfter(resp.Header.Get("Retry-After")),
-		Body:       body,
-		Err:        fmt.Errorf("chatcompat: http %d: %s", resp.StatusCode, bytes.TrimSpace(body)),
-	}
 }
 
 func (p *Provider) key(ctx context.Context) (string, error) {

@@ -10,7 +10,7 @@ import (
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 
-type Keyword struct {
+type keyword struct {
 	Word string `json:"word"`
 }
 

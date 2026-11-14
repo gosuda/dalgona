@@ -13,7 +13,7 @@ import (
 
 func TestFollowupNoticeKeepsDockHeight(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Thread: rpc.Thread{ID: "t1"}}})
 	m.queue = []string{"a", "b"}
 	before := len(m.dockLines())
@@ -39,7 +39,7 @@ func assertShown(t *testing.T, m model, text string) {
 func liveModel(t *testing.T, now *time.Time) model {
 	t.Helper()
 	caller := new(fakeCaller)
-	m := newTestModel(caller, Options{}, nil)
+	m := newTestModel(caller, Options{})
 	m.conn.clock = func() time.Time { return *now }
 	m, _ = drive(t, m, notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)})
 	return m
@@ -84,7 +84,7 @@ func TestLiveRowFieldWidths(t *testing.T) {
 	m := liveModel(t, &now)
 	m.screen.width = 100
 	for i := range 100 {
-		m.live.items = append(m.live.items, liveItem{Item: rpc.Item{ID: fmt.Sprintf("c%d", i), Type: "commandExecution", Command: "x", Status: "inProgress"}})
+		m.live.items = append(m.live.items, liveItem{ID: fmt.Sprintf("c%d", i), Type: "commandExecution", Command: "x", Status: "inProgress"})
 	}
 	m.queue = make([]string, 150)
 	for range 120 {
@@ -123,7 +123,7 @@ func TestLiveRowSeparatesOrdinaryFields(t *testing.T) {
 			m := liveModel(t, &now)
 			m.screen.width = width
 			now = now.Add(time.Second)
-			m.live.items = []liveItem{{Item: rpc.Item{ID: "c1", Type: "commandExecution", Command: "x", Status: "inProgress"}}}
+			m.live.items = []liveItem{{ID: "c1", Type: "commandExecution", Command: "x", Status: "inProgress"}}
 			row := stripANSI(m.liveRow())
 			prefix, _, found := strings.Cut(row, "1s")
 			if !found || cellCount(m, prefix) != 15 {
@@ -167,7 +167,7 @@ func assertSaturatedLiveRow(t *testing.T, width int) {
 
 func saturateLiveRow(m *model) {
 	for i := range 100 {
-		m.live.items = append(m.live.items, liveItem{Item: rpc.Item{ID: fmt.Sprintf("c%d", i), Type: "commandExecution", Command: "x", Status: "inProgress"}})
+		m.live.items = append(m.live.items, liveItem{ID: fmt.Sprintf("c%d", i), Type: "commandExecution", Command: "x", Status: "inProgress"})
 	}
 	m.queue = strings.Fields(strings.Repeat("next ", 32))
 	for range 120 {
@@ -224,7 +224,7 @@ func TestLiveRowBelowFortyColumns(t *testing.T) {
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	m := liveModel(t, &now)
 	m.screen.width = 30
-	m.live.items = []liveItem{{Item: rpc.Item{ID: "a1", Type: "agentMessage", Text: strings.Repeat("tail ", 20)}}}
+	m.live.items = []liveItem{{ID: "a1", Type: "agentMessage", Text: strings.Repeat("tail ", 20)}}
 	for _, line := range m.dockLines() {
 		if got := cellCount(m, line); got > 29 {
 			t.Fatalf("dock line is %d cells at 30 columns: %q", got, line)
@@ -251,7 +251,7 @@ func TestNoticeShowsDuringTurn(t *testing.T) {
 
 func TestNoticeRowFitsOneCellShort(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.screen.width = 40
 	m.noticef("%s", strings.Repeat("n", 300))
 	if got := cellCount(m, m.liveRow()); got > 39 {
@@ -261,7 +261,7 @@ func TestNoticeRowFitsOneCellShort(t *testing.T) {
 
 func TestIdleLiveRowIsBlank(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	if got := strings.TrimSpace(stripANSI(m.liveRow())); got != "" {
 		t.Fatalf("idle live row = %q, want blank", got)
 	}
@@ -273,7 +273,7 @@ func TestIdleLiveRowIsBlank(t *testing.T) {
 
 func TestAwaitingInputShowsWaiting(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.thread.state = "awaiting input"
 	if !strings.Contains(stripANSI(m.liveRow()), "Waiting") {
 		t.Fatalf("awaiting input live row lacks Waiting: %q", m.liveRow())
@@ -282,7 +282,7 @@ func TestAwaitingInputShowsWaiting(t *testing.T) {
 
 func TestHintExpiresWithItsWindow(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	_ = m.setHint("Esc again to interrupt", "interrupt")
 	stale := m.hint.id
 	_ = m.setHint("Esc again to rewind", "rewind")
@@ -298,7 +298,7 @@ func TestHintExpiresWithItsWindow(t *testing.T) {
 
 func TestMultiLineNoticeCutInLiveRowIsCommitted(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.screen.width = 40
 	m.noticef("%s", "a\nb")
 	if cells := cellCount(m, m.liveText()); cells <= m.liveFreeWidth() {
@@ -315,16 +315,16 @@ func TestMultiLineNoticeCutInLiveRowIsCommitted(t *testing.T) {
 
 func TestActivityNamesCommandAndFileChange(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
-	m.live.items = []liveItem{{Item: rpc.Item{ID: "c1", Type: "commandExecution", Command: "go test ./...\nexit"}}}
+	m := newTestModel(nil, Options{})
+	m.live.items = []liveItem{{ID: "c1", Type: "commandExecution", Command: "go test ./...\nexit"}}
 	if got := m.activity(); got != "Running go test ./..." {
 		t.Fatalf("command activity = %q, want %q", got, "Running go test ./...")
 	}
-	m.live.items = []liveItem{{Item: rpc.Item{ID: "c1", Type: "commandExecution", Command: "go test ./..."}, output: []byte("ok\nPASS\n")}}
+	m.live.items = []liveItem{{ID: "c1", Type: "commandExecution", Command: "go test ./...", output: []byte("ok\nPASS\n")}}
 	if got := m.activity(); got != "Running go test ./... · PASS" {
 		t.Fatalf("command activity with output = %q, want %q", got, "Running go test ./... · PASS")
 	}
-	m.live.items = []liveItem{{Item: rpc.Item{ID: "f1", Type: "fileChange", Changes: []rpc.FileChange{{Path: "notes.md"}}}}}
+	m.live.items = []liveItem{{ID: "f1", Type: "fileChange", Changes: []rpc.FileChange{{Path: "notes.md"}}}}
 	if got := m.activity(); got != "Editing notes.md" {
 		t.Fatalf("file change activity = %q, want %q", got, "Editing notes.md")
 	}
@@ -332,7 +332,7 @@ func TestActivityNamesCommandAndFileChange(t *testing.T) {
 
 func TestHintUsesLiveRowAndAddsNoRow(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m = rawUpdate(t, m, tea.WindowSizeMsg{Width: 40, Height: 8})
 	before := len(m.dockLines())
 	m.setHint("Esc again to interrupt", "interrupt")

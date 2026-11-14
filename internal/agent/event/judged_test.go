@@ -96,6 +96,7 @@ func TestToolJudgedRoundTripAndValidation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			judged := flaggedToolJudged()
 			tc.mutate(&judged)
 			if err := judged.Validate(); err == nil {
@@ -208,6 +209,7 @@ func TestTurnJudgedRoundTripAndValidation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			judged := flaggedTurnJudged()
 			tc.mutate(&judged)
 			if err := judged.Validate(); err == nil {
@@ -217,21 +219,21 @@ func TestTurnJudgedRoundTripAndValidation(t *testing.T) {
 	}
 }
 
-func foldJudgedEvents(events ...event.Event) (event.State, error) {
+func foldJudgedEvents(events ...event.Event) error {
 	var state event.State
 	for i, e := range events {
 		next, err := event.Fold(state, uint64(i+1), e)
 		if err != nil {
-			return next, err
+			return err
 		}
 		state = next
 	}
-	return state, nil
+	return nil
 }
 
-func judgedCall(turn, call string) event.ToolJudged {
+func judgedCall(turn string) event.ToolJudged {
 	return event.ToolJudged{
-		CallID: call, TurnID: turn, By: "judge", Verdict: "clean", Paths: []string{"a.go"},
+		CallID: "c1", TurnID: turn, By: "judge", Verdict: "clean", Paths: []string{"a.go"},
 		Scores: map[string]float64{"sound": 0.02}, Parts: 1, ElapsedMS: 5,
 	}
 }
@@ -251,22 +253,23 @@ func TestFoldToolJudged(t *testing.T) {
 		events []event.Event
 		err    string
 	}{
-		{"call in flight", []event.Event{open, start, judgedCall("t1", "c1")}, "event: fold: tool.judged before tool.completed: c1"},
-		{"call pending", []event.Event{open, call, judgedCall("t1", "c1")}, "event: fold: tool.judged before tool.completed: c1"},
-		{"call completed", []event.Event{open, start, done, judgedCall("t1", "c1")}, ""},
-		{"repeat for one call", []event.Event{open, start, done, judgedCall("t1", "c1"), judgedCall("t1", "c1")}, "event: fold: duplicate tool.judged c1"},
-		{"turn not open", []event.Event{open, start, done, judgedCall("t2", "c1")}, "event: fold: event turn t2 does not match open turn t1"},
+		{"call in flight", []event.Event{open, start, judgedCall("t1")}, "event: fold: tool.judged before tool.completed: c1"},
+		{"call pending", []event.Event{open, call, judgedCall("t1")}, "event: fold: tool.judged before tool.completed: c1"},
+		{"call completed", []event.Event{open, start, done, judgedCall("t1")}, ""},
+		{"repeat for one call", []event.Event{open, start, done, judgedCall("t1"), judgedCall("t1")}, "event: fold: duplicate tool.judged c1"},
+		{"turn not open", []event.Event{open, start, done, judgedCall("t2")}, "event: fold: event turn t2 does not match open turn t1"},
 		{"call id repeats in a later turn", []event.Event{
-			open, start, done, judgedCall("t1", "c1"), end,
+			open, start, done, judgedCall("t1"), end,
 			event.TurnStarted{TurnID: "t2"},
 			event.ToolStarted{CallID: "c1", TurnID: "t2", Tool: "patch", Class: "edit", Args: jsontext.Value(`{}`)},
 			event.ToolCompleted{CallID: "c1", OK: true, Recovered: "none"},
-			judgedCall("t2", "c1"),
+			judgedCall("t2"),
 		}, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := foldJudgedEvents(tc.events...)
+			t.Parallel()
+			err := foldJudgedEvents(tc.events...)
 			checkFoldError(t, err, tc.err)
 		})
 	}
@@ -302,7 +305,8 @@ func TestFoldTurnJudged(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := foldJudgedEvents(tc.events...)
+			t.Parallel()
+			err := foldJudgedEvents(tc.events...)
 			checkFoldError(t, err, tc.err)
 		})
 	}

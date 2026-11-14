@@ -74,11 +74,13 @@ func serve(ctx context.Context, cfg config, stderr io.Writer) (err error) {
 	if err != nil {
 		return err
 	}
-	record, closeRecord, err := openRecord(cfg.record)
+	record, err := openRecord(cfg.record)
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, closeRecord()) }()
+	if record != nil {
+		defer func() { err = errors.Join(err, record.Close()) }()
+	}
 	listener, err := net.Listen("tcp", cfg.listen)
 	if err != nil {
 		return err
@@ -99,15 +101,11 @@ func loadScript(path string) (llmstub.Script, error) {
 	return llmstub.Parse(path, raw)
 }
 
-func openRecord(path string) (io.Writer, func() error, error) {
+func openRecord(path string) (io.WriteCloser, error) {
 	if path == "" {
-		return nil, func() error { return nil }, nil
+		return nil, nil
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return nil, nil, err
-	}
-	return file, file.Close, nil
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 }
 
 func wait(ctx context.Context, server *http.Server, listener net.Listener) error {
@@ -118,7 +116,7 @@ func wait(ctx context.Context, server *http.Server, listener net.Listener) error
 		return err
 	case <-ctx.Done():
 	}
-	shutdown, cancel := context.WithTimeout(context.Background(), shutdownLimit)
+	shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownLimit)
 	defer cancel()
 	return server.Shutdown(shutdown)
 }

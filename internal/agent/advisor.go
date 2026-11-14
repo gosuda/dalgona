@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 )
@@ -90,15 +91,15 @@ func (a *actor) readAfter(seq uint64) Read {
 }
 
 func afterCompactionMarker(path []event.Seqd) []event.Seqd {
-	for i := len(path) - 1; i >= 0; i-- {
-		marker, ok := path[i].Event.(event.Compaction)
+	for _, item := range slices.Backward(path) {
+		marker, ok := item.Event.(event.Compaction)
 		if !ok {
 			continue
 		}
 		kept := make([]event.Seqd, 0, len(path))
-		for _, item := range path {
-			if item.Seq >= marker.FirstKeptSeq {
-				kept = append(kept, item)
+		for _, it := range path {
+			if it.Seq >= marker.FirstKeptSeq {
+				kept = append(kept, it)
 			}
 		}
 		return kept

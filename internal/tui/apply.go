@@ -101,8 +101,8 @@ func (m *model) applyItemNotification(msg notificationMsg) error {
 }
 
 func (m *model) applyThreadStarted(params jsontext.Value) error {
-	var event rpc.ThreadStartedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.ThreadStartedNotification](params)
+	if err != nil {
 		return err
 	}
 	if !m.acceptThread(event.Thread.ID) {
@@ -114,8 +114,8 @@ func (m *model) applyThreadStarted(params jsontext.Value) error {
 }
 
 func (m *model) applyThreadStatus(params jsontext.Value) error {
-	var event rpc.ThreadStatusChangedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.ThreadStatusChangedNotification](params)
+	if err != nil {
 		return err
 	}
 	if !m.acceptThread(event.ThreadID) || event.Seq > 0 && event.Seq < m.thread.seq {
@@ -131,8 +131,8 @@ func (m *model) applyThreadStatus(params jsontext.Value) error {
 }
 
 func (m *model) applyThreadName(params jsontext.Value) error {
-	var event rpc.ThreadNameUpdatedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.ThreadNameUpdatedNotification](params)
+	if err != nil {
 		return err
 	}
 	if m.acceptThread(event.ThreadID) {
@@ -142,8 +142,8 @@ func (m *model) applyThreadName(params jsontext.Value) error {
 }
 
 func (m *model) applyChildSpawned(params jsontext.Value) error {
-	var event rpc.ChildSpawnedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.ChildSpawnedNotification](params)
+	if err != nil {
 		return err
 	}
 	if m.acceptThread(event.ThreadID) {
@@ -156,8 +156,8 @@ func (m *model) applyChildSpawned(params jsontext.Value) error {
 }
 
 func (m *model) applyAdvisorNote(params jsontext.Value) error {
-	var event rpc.AdvisorNoteNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.AdvisorNoteNotification](params)
+	if err != nil {
 		return err
 	}
 	if m.acceptThread(event.ThreadID) {
@@ -168,31 +168,41 @@ func (m *model) applyAdvisorNote(params jsontext.Value) error {
 	return nil
 }
 
+type judgedReport struct {
+	threadID string
+	targetID string
+	verdict  string
+	summary  string
+	paths    []string
+}
+
+func (m *model) applyJudged(r judgedReport) {
+	if m.acceptThread(r.threadID) {
+		m.printReview("review:"+r.threadID+":"+r.targetID, r.verdict, r.summary, r.paths)
+	}
+}
+
 func (m *model) applyToolJudged(params jsontext.Value) error {
-	var event rpc.ToolJudgedNotification
-	if err := decodeParams(params, &event); err != nil {
+	e, err := decodeParams[rpc.ToolJudgedNotification](params)
+	if err != nil {
 		return err
 	}
-	if m.acceptThread(event.ThreadID) {
-		m.printReview("review:"+event.ThreadID+":"+event.ItemID, event.Verdict, event.Summary, event.Paths)
-	}
+	m.applyJudged(judgedReport{e.ThreadID, e.ItemID, e.Verdict, e.Summary, e.Paths})
 	return nil
 }
 
 func (m *model) applyTurnJudged(params jsontext.Value) error {
-	var event rpc.TurnJudgedNotification
-	if err := decodeParams(params, &event); err != nil {
+	e, err := decodeParams[rpc.TurnJudgedNotification](params)
+	if err != nil {
 		return err
 	}
-	if m.acceptThread(event.ThreadID) {
-		m.printReview("review:"+event.ThreadID+":"+event.TurnID, event.Verdict, event.Summary, event.Paths)
-	}
+	m.applyJudged(judgedReport{e.ThreadID, e.TurnID, e.Verdict, e.Summary, e.Paths})
 	return nil
 }
 
 func (m *model) applyLoginCompleted(params jsontext.Value) error {
-	var event rpc.AccountLoginCompletedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.AccountLoginCompletedNotification](params)
+	if err != nil {
 		return err
 	}
 	m.closeWaitingLogin()
@@ -205,8 +215,8 @@ func (m *model) applyLoginCompleted(params jsontext.Value) error {
 }
 
 func (m *model) applyTurnStarted(params jsontext.Value) error {
-	var event rpc.TurnStartedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.TurnStartedNotification](params)
+	if err != nil {
 		return err
 	}
 	if !m.acceptThread(event.ThreadID) {
@@ -224,8 +234,8 @@ func (m *model) applyTurnStarted(params jsontext.Value) error {
 }
 
 func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
-	var event rpc.TurnCompletedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.TurnCompletedNotification](params)
+	if err != nil {
 		return nil, err
 	}
 	if !m.acceptThread(event.ThreadID) {
@@ -258,8 +268,8 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 }
 
 func (m *model) applyItemStarted(params jsontext.Value) error {
-	var event rpc.ItemStartedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.ItemStartedNotification](params)
+	if err != nil {
 		return err
 	}
 	if !m.acceptThread(event.ThreadID) {
@@ -274,8 +284,8 @@ func (m *model) applyItemStarted(params jsontext.Value) error {
 }
 
 func (m *model) applyItemCompleted(params jsontext.Value) error {
-	var event rpc.ItemCompletedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.ItemCompletedNotification](params)
+	if err != nil {
 		return err
 	}
 	if !m.acceptThread(event.ThreadID) {
@@ -303,7 +313,9 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 func (m *model) liveItem(id string) *liveItem {
 	index := slices.IndexFunc(m.live.items, func(item liveItem) bool { return item.ID == id })
 	if index < 0 {
-		m.live.items = append(m.live.items, liveItem{Item: rpc.Item{ID: id}})
+		var item liveItem
+		item.ID = id
+		m.live.items = append(m.live.items, item)
 		index = len(m.live.items) - 1
 	}
 	return &m.live.items[index]
@@ -352,8 +364,8 @@ func deltaType(method string) string {
 }
 
 func (m *model) applyPlan(params jsontext.Value) error {
-	var event rpc.TurnPlanUpdatedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.TurnPlanUpdatedNotification](params)
+	if err != nil {
 		return err
 	}
 	if !m.acceptThread(event.ThreadID) {
@@ -370,8 +382,8 @@ func (m *model) applyPlan(params jsontext.Value) error {
 }
 
 func (m *model) applyRetryWait(params jsontext.Value) error {
-	var event rpc.RetryWaitNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.RetryWaitNotification](params)
+	if err != nil {
 		return err
 	}
 	if !m.acceptThread(event.ThreadID) {
@@ -408,8 +420,8 @@ func planLines(plan []rpc.TurnPlanStep) []string {
 }
 
 func (m *model) applyError(params jsontext.Value) error {
-	var event rpc.ErrorNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.ErrorNotification](params)
+	if err != nil {
 		return err
 	}
 	if !m.acceptThread(event.ThreadID) {
@@ -449,8 +461,8 @@ func (m *model) setThread(id string) {
 }
 
 func (m *model) applyTokenUsage(params jsontext.Value) error {
-	var event rpc.ThreadTokenUsageUpdatedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.ThreadTokenUsageUpdatedNotification](params)
+	if err != nil {
 		return err
 	}
 	if !m.acceptThread(event.ThreadID) {

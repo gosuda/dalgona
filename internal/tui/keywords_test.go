@@ -79,7 +79,7 @@ func TestKeywordMarkUnderlinedUnderNoColor(t *testing.T) {
 
 func TestComposerAndSentMessageKeywordGlow(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.screen.theme = newTheme(themeNight, false)
 	m.screen.width = 8
 	m.input.composer.SetWidth(8)
@@ -103,7 +103,7 @@ func TestComposerAndSentMessageKeywordGlow(t *testing.T) {
 
 func TestComposerMarksComeFromServerReply(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.screen.theme = newTheme(themeNight, false)
 	m.input.composer.SetValue("please ultrathink")
 	if got := underlinedRunes(m.View().Content); got != "" {
@@ -118,7 +118,7 @@ func TestComposerMarksComeFromServerReply(t *testing.T) {
 
 func TestStaleKeywordReplyIsDropped(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.screen.theme = newTheme(themeNight, false)
 	m.input.composer.SetValue("x ultrathink")
 	_ = m.matchKeywords()
@@ -132,7 +132,7 @@ func TestStaleKeywordReplyIsDropped(t *testing.T) {
 		t.Fatalf("stale reply changed the marks: %q", got)
 	}
 
-	fresh := newTestModel(nil, Options{}, nil)
+	fresh := newTestModel(nil, Options{})
 	fresh.input.composer.SetValue("ultrathink")
 	_ = fresh.matchKeywords()
 	fresh, _ = drive(t, fresh, keywordReplyMsg(first, "x ultrathink", [2]int{2, 12}))
@@ -143,7 +143,7 @@ func TestStaleKeywordReplyIsDropped(t *testing.T) {
 
 func TestKeywordMatchErrorIsSilent(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(&failingKeywordCaller{}, Options{}, nil)
+	m := newTestModel(&failingKeywordCaller{}, Options{})
 	m.input.composer.SetValue("ultrathink")
 	command := m.matchKeywords()
 	m, _ = drive(t, m, command())
@@ -154,7 +154,7 @@ func TestKeywordMatchErrorIsSilent(t *testing.T) {
 
 func TestComposerMarkWithCursorInsideWord(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.screen.theme = newTheme(themeNight, false)
 	m.input.composer.SetValue("ultrathink")
 	m.input.composer.cursor = 5

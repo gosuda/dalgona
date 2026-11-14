@@ -7,40 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"sync/atomic"
-	"time"
 
-	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/model/connectwire"
 )
 
 const maxFramePayload = 16 << 20
 
-var connectHTTPStatus = map[string]int{
-	"canceled":            499,
-	"unknown":             http.StatusInternalServerError,
-	"invalid_argument":    http.StatusBadRequest,
-	"deadline_exceeded":   http.StatusGatewayTimeout,
-	"not_found":           http.StatusNotFound,
-	"already_exists":      http.StatusConflict,
-	"permission_denied":   http.StatusForbidden,
-	"resource_exhausted":  http.StatusTooManyRequests,
-	"failed_precondition": http.StatusBadRequest,
-	"aborted":             http.StatusConflict,
-	"out_of_range":        http.StatusBadRequest,
-	"unimplemented":       http.StatusNotImplemented,
-	"internal":            http.StatusInternalServerError,
-	"unavailable":         http.StatusServiceUnavailable,
-	"data_loss":           http.StatusInternalServerError,
-	"unauthenticated":     http.StatusUnauthorized,
-}
-
 func connectStatus(err error, fallback int) int {
-	if connectErr, ok := errors.AsType[*connectwire.ConnectError](err); ok {
-		if status, known := connectHTTPStatus[connectErr.Code]; known {
-			return status
-		}
+	if status := connectwire.ErrorStatus(err); status != 0 {
+		return status
 	}
 	return fallback
 }
@@ -81,6 +56,7 @@ func gzipFrame(payload []byte) ([]byte, error) {
 	buffer.Write([]byte{connectwire.Compressed, 0, 0, 0, 0})
 	writer := gzip.NewWriter(&buffer)
 	if _, err := writer.Write(payload); err != nil {
+		_ = writer.Close()
 		return nil, fmt.Errorf("gzip request: %w", err)
 	}
 	if err := writer.Close(); err != nil {
@@ -93,41 +69,4 @@ func gzipFrame(payload []byte) ([]byte, error) {
 	}
 	binary.BigEndian.PutUint32(frame[1:5], uint32(size))
 	return frame, nil
-}
-
-type idleBody struct {
-	body    io.ReadCloser
-	idle    time.Duration
-	timer   *time.Timer
-	expired atomic.Bool
-}
-
-func watchIdle(body io.ReadCloser, idle time.Duration) *idleBody {
-	watched := &idleBody{body: body, idle: idle}
-	if idle > 0 {
-		watched.timer = time.AfterFunc(idle, watched.expire)
-	}
-	return watched
-}
-
-func (w *idleBody) expire() {
-	w.expired.Store(true)
-	_ = w.body.Close()
-}
-
-func (w *idleBody) Read(p []byte) (int, error) {
-	n, err := w.body.Read(p)
-	if n > 0 && w.timer != nil {
-		w.timer.Reset(w.idle)
-	}
-	if err != nil && w.expired.Load() {
-		return n, model.ErrStreamIdleTimeout
-	}
-	return n, err
-}
-
-func (w *idleBody) stop() {
-	if w.timer != nil {
-		w.timer.Stop()
-	}
 }

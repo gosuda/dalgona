@@ -118,7 +118,7 @@ func (m *model) reviewView() string {
 	}, "\n")
 }
 
-func (m *model) reviewKey(msg tea.KeyPressMsg) tea.Cmd {
+func (m *model) reviewKey(msg tea.KeyPressMsg) {
 	switch msg.String() {
 	case "esc", "q", "ctrl+o":
 		m.closeReview()
@@ -133,7 +133,6 @@ func (m *model) reviewKey(msg tea.KeyPressMsg) tea.Cmd {
 	default:
 		m.scrollReview(msg)
 	}
-	return nil
 }
 
 func (m *model) scrollReview(msg tea.Msg) {

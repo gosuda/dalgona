@@ -26,7 +26,7 @@ func TestRetryWaitNotification(t *testing.T) {
 	var turn TurnStartResponse
 	c.ok("turn/start", map[string]any{"threadId": started.Thread.ID, "input": []InputItem{{Type: "text", Text: "wait"}}}, &turn)
 	var waits []retryWaitParams
-	for _, m := range c.collect("turn/completed") {
+	for _, m := range c.collect() {
 		if m.Method != "dalgona/retry/wait" {
 			continue
 		}

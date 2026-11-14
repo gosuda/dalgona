@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -337,10 +338,8 @@ func Load(product Product, cwd string, flags Flags) (Config, error) {
 }
 
 func validateTrustedWorkspaces(l layer) error {
-	for _, workspace := range l.doc.MCPTrustedWorkspaces {
-		if workspace == "" {
-			return fmt.Errorf("%s: mcp_trusted_workspaces entry must be a nonempty path", filepath.Base(l.path))
-		}
+	if slices.Contains(l.doc.MCPTrustedWorkspaces, "") {
+		return fmt.Errorf("%s: mcp_trusted_workspaces entry must be a nonempty path", filepath.Base(l.path))
 	}
 	return nil
 }

@@ -32,9 +32,9 @@ func (s *steerFlagOnTurnEnd) TurnEnd(_ context.Context, _, _ string) error {
 }
 
 func lastAgentEnd(bounds []Boundary) (Boundary, bool) {
-	for i := len(bounds) - 1; i >= 0; i-- {
-		if bounds[i].Kind == BoundaryAgentEnd {
-			return bounds[i], true
+	for _, bound := range slices.Backward(bounds) {
+		if bound.Kind == BoundaryAgentEnd {
+			return bound, true
 		}
 	}
 	return Boundary{}, false

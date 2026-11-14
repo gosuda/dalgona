@@ -266,6 +266,7 @@ func TestModelSlashCommands(t *testing.T) {
 	}
 	for _, test := range direct {
 		t.Run(test.input, func(t *testing.T) {
+			t.Parallel()
 			caller, m := slashModel()
 			name, argument, _ := parseSlash(test.input)
 			checkCallResult(t, caller, m.executeSlash(name, argument), test.method)
@@ -280,6 +281,7 @@ func TestModelSlashCommands(t *testing.T) {
 	}
 	for _, test := range confirmed {
 		t.Run(test.input, func(t *testing.T) {
+			t.Parallel()
 			caller, m := slashModel()
 			name, argument, _ := parseSlash(test.input)
 			command := m.executeSlash(name, argument)
@@ -387,7 +389,7 @@ func TestComposerAcceptsShiftedText(t *testing.T) {
 func TestModelSessionOptionsDriveStatusAndThreadStart(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
-	m := newTestModel(caller, Options{Model: "openai/gpt-test", Approval: "yolo", Sandbox: "workspace-write", Cwd: "/repo/checkout"}, nil)
+	m := newTestModel(caller, Options{Model: "openai/gpt-test", Approval: "yolo", Sandbox: "workspace-write", Cwd: "/repo/checkout"})
 	assertContains(t, m.View().Content, "openai/gpt-test ! ⊘ ▸ checkout")
 	m.startThread()()
 	params, ok := caller.calls[0].params.(rpc.ThreadStartParams)
@@ -424,7 +426,7 @@ func TestModelDoubleCtrlCAndNarrowWrap(t *testing.T) {
 	m.screen.width = 40
 	m.input.composer.SetWidth(40)
 	m.thread.title = "a thread with a long visible title"
-	m.live.items = []liveItem{{Item: rpc.Item{ID: "a1", Type: "agentMessage", Text: strings.Repeat("wrappable ", 20)}}}
+	m.live.items = []liveItem{{ID: "a1", Type: "agentMessage", Text: strings.Repeat("wrappable ", 20)}}
 	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
 	if !strings.Contains(m.hint.text, "again") {
 		t.Fatalf("first Ctrl+C hint %q", m.hint.text)

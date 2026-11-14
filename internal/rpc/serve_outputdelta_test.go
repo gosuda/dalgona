@@ -41,7 +41,7 @@ func runExec(t *testing.T, command string) execRun {
 	run := execRun{threadID: startThread(t, r, c, nil)}
 	run.turnID = startTurn(t, c, run.threadID, "stream it")
 	completed := false
-	for _, m := range c.collect("turn/completed") {
+	for _, m := range c.collect() {
 		switch {
 		case m.Method == outputDeltaMethod:
 			expect(t, !completed, "outputDelta after item/completed", string(m.Params))

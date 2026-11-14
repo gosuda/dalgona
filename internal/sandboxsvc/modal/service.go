@@ -196,11 +196,7 @@ func (s *Service) Connect(ctx context.Context, id string, endpoint sandboxsvc.En
 	if err != nil {
 		return nil, fmt.Errorf("modal: attach %s: %w", id, err)
 	}
-	argv := []string{"sh", "-c", `exec "$HOME/.dalgona/bin/dalgona" exec-server --listen stdio:// --root /workspace`}
-	if endpoint == sandboxsvc.Bridge {
-		argv = []string{"sh", "-c", `exec "$HOME/.dalgona/bin/dalgona" bridge`}
-	}
-	return s.start(ctx, box, argv)
+	return s.start(ctx, box, endpoint.Argv())
 }
 
 func (s *Service) start(ctx context.Context, box Box, argv []string) (runner.Stream, error) {

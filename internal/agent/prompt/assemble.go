@@ -4,8 +4,6 @@ import (
 	"cmp"
 	"runtime"
 	"strings"
-
-	"github.com/gosuda/dalgona/internal/agent/prompts"
 )
 
 type Skill struct {
@@ -26,7 +24,7 @@ type Input struct {
 
 func Assemble(in Input) string {
 	sections := make([]string, 0, 5)
-	base := cmp.Or(strings.TrimSpace(in.Base), strings.TrimSpace(prompts.System))
+	base := cmp.Or(strings.TrimSpace(in.Base), strings.TrimSpace(System))
 	sections = append(sections, base)
 	if notes := joinNonEmpty(in.ToolNotes); notes != "" {
 		sections = append(sections, "## Tool notes\n\n"+notes)

@@ -60,8 +60,8 @@ func rawUpdate(t *testing.T, m model, msg tea.Msg) model {
 	return next
 }
 
-func newTestModel(client caller, opts Options, done <-chan struct{}) model {
-	return playTerminal(newModel(client, opts, done))
+func newTestModel(client caller, opts Options) model {
+	return playTerminal(newModel(client, opts, nil))
 }
 
 func lastEntry(t *testing.T, m model) string {
@@ -123,7 +123,7 @@ func TestDockBoundsOverScriptedTurn(t *testing.T) {
 	for _, size := range []struct{ width, height int }{{40, 8}, {100, 24}} {
 		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
 			t.Parallel()
-			m := newTestModel(nil, Options{}, nil)
+			m := newTestModel(nil, Options{})
 			m, _ = drive(t, m, tea.WindowSizeMsg{Width: size.width, Height: size.height})
 			assertFrame(t, strings.Split(m.View().Content, "\n"), size.width, size.height)
 			m = scriptedTurn(t, m)
@@ -134,7 +134,7 @@ func TestDockBoundsOverScriptedTurn(t *testing.T) {
 
 func TestDockHeightChangesOnlyOnKeys(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	height := len(m.dockLines())
 	m, _ = drive(t, m, notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)})
@@ -154,7 +154,7 @@ func TestDockHeightChangesOnlyOnKeys(t *testing.T) {
 
 func TestNoticeIsOneRowAndKeepsDockHeight(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
 	before := len(m.dockLines())
 	m.noticef("%s", strings.Repeat("notice ", 40))
@@ -165,10 +165,10 @@ func TestNoticeIsOneRowAndKeepsDockHeight(t *testing.T) {
 
 func TestNoticeAndLiveTailBounded(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 8})
 	m.noticef("%s", strings.Repeat("long notice ", 30))
-	m.live.items = []liveItem{{Item: rpc.Item{ID: "a1", Type: "agentMessage", Text: strings.Repeat("tail ", 60)}}}
+	m.live.items = []liveItem{{ID: "a1", Type: "agentMessage", Text: strings.Repeat("tail ", 60)}}
 	assertFrame(t, strings.Split(m.View().Content, "\n"), 40, 8)
 }
 
@@ -177,7 +177,7 @@ func TestApprovalCardKeepsTitleAndActionsInSmallWindow(t *testing.T) {
 	for _, size := range []struct{ width, height int }{{40, 12}, {100, 24}} {
 		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
 			t.Parallel()
-			m := newTestModel(nil, Options{}, nil)
+			m := newTestModel(nil, Options{})
 			m, _ = drive(t, m, tea.WindowSizeMsg{Width: size.width, Height: size.height})
 			long := strings.Repeat("go test ./internal/tui/... -run TestFrame -count=1\n", 100)
 			m, _ = drive(t, m, serverRequestMsg{
@@ -199,7 +199,7 @@ func TestApprovalCardKeepsTitleAndActionsInSmallWindow(t *testing.T) {
 
 func TestSelectorBoundedToWindow(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 60, Height: 24})
 	models := make([]rpc.Model, 300)
 	for i := range models {
@@ -214,7 +214,7 @@ func TestSelectorBoundedToWindow(t *testing.T) {
 
 func TestSelectorDockSteady(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 60, Height: 24})
 	items := make([]listItem, 40)
 	for i := range items {
@@ -231,7 +231,7 @@ func TestSelectorDockSteady(t *testing.T) {
 func TestDockLeavesOneRow(t *testing.T) {
 	t.Parallel()
 	for _, height := range []int{4, 8, 24} {
-		m := newTestModel(nil, Options{}, nil)
+		m := newTestModel(nil, Options{})
 		m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: height})
 		m.list = &listPanel{title: "settings", items: []listItem{{id: "a", label: "a"}}}
 		if got := len(m.dockLines()); got > height-1 {
@@ -355,7 +355,7 @@ func TestCommitInGeometryChangeWaitsForSettle(t *testing.T) {
 
 func TestEditorRowsKeepCaretRow(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.screen.width = 40
 	var lines []string
 	for i := range 20 {
@@ -401,7 +401,7 @@ func invExtends(prev, cur []entry) bool {
 
 func TestInvI1PrintedRowsOnlyGrow(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	steps := []func(model) tea.Msg{
 		invFixed(invNotify("thread/started", invThreadStarted)),
@@ -432,7 +432,7 @@ func TestInvI1PrintedRowsOnlyGrow(t *testing.T) {
 
 func TestInvI7NarrowingPrintsNothing(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	m, _ = drive(t, m, invNotify("thread/started", invThreadStarted))
 	m, _ = drive(t, m, invNotify("turn/started", invTurnStarted))
@@ -460,7 +460,7 @@ func TestInvI8TickChangesOnlyFixedFields(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	clock := start
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.conn.clock = func() time.Time { return clock }
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	m, _ = drive(t, m, invNotify("thread/started", invThreadStarted))
@@ -478,6 +478,7 @@ func TestInvI8TickChangesOnlyFixedFields(t *testing.T) {
 		t.Fatalf("a tick changed more than the dot and the elapsed field:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 	t.Run("idle tick writes no bytes", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			out := new(recordedOutput)
 			run := startRecorded(100, 24, out)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"slices"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/runner"
@@ -50,10 +51,8 @@ func TestBoxRun_cleansUpAfterStartError(t *testing.T) {
 	if _, _, err := boxRun(t.Context(), f, "sh", "-c", "true"); err == nil {
 		t.Fatal("boxRun error = nil, want start error")
 	}
-	for _, s := range f.signals {
-		if s == runner.SignalKill {
-			return
-		}
+	if slices.Contains(f.signals, runner.SignalKill) {
+		return
 	}
 	t.Fatalf("signals = %v, want cleanup through KILL after Start error", f.signals)
 }

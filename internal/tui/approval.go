@@ -48,8 +48,8 @@ func (m *model) applyRequest(msg serverRequestMsg) tea.Cmd {
 }
 
 func (m *model) applyPatchUpdated(params jsontext.Value) error {
-	var event rpc.FileChangePatchUpdatedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.FileChangePatchUpdatedNotification](params)
+	if err != nil {
 		return err
 	}
 	if m.live.patches == nil {
@@ -60,8 +60,8 @@ func (m *model) applyPatchUpdated(params jsontext.Value) error {
 }
 
 func (m *model) applyRequestResolved(params jsontext.Value) error {
-	var event rpc.ServerRequestResolvedNotification
-	if err := decodeParams(params, &event); err != nil {
+	event, err := decodeParams[rpc.ServerRequestResolvedNotification](params)
+	if err != nil {
 		return err
 	}
 	index := slices.IndexFunc(m.approvals, func(open approval) bool { return open.requestID == event.RequestID })
@@ -156,22 +156,25 @@ func (m *model) approvalLines(current approval) []string {
 	if current.threadID != m.thread.id {
 		lines = append(lines, "From thread "+current.threadID)
 	}
+	lines = append(lines, approvalDetails(current)...)
+	for _, change := range m.approvalChanges(current) {
+		lines = append(lines, m.approvalChangeLines(change)...)
+	}
+	return lines
+}
+
+func approvalDetails(current approval) []string {
+	var lines []string
 	if current.command != "" {
-		for i, line := range strings.Split(sanitizeText(current.command), "\n") {
-			if i == 0 {
-				line = "$ " + line
-			}
-			lines = append(lines, line)
-		}
+		cmdLines := strings.Split(sanitizeText(current.command), "\n")
+		cmdLines[0] = "$ " + cmdLines[0]
+		lines = append(lines, cmdLines...)
 	}
 	if current.cwd != "" {
 		lines = append(lines, "cwd "+sanitizeText(current.cwd))
 	}
 	if current.reason != "" {
 		lines = append(lines, "reason: "+sanitizeText(current.reason))
-	}
-	for _, change := range m.approvalChanges(current) {
-		lines = append(lines, m.approvalChangeLines(change)...)
 	}
 	return lines
 }

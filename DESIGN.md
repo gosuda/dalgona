@@ -118,7 +118,7 @@ Each non-colour token has one value. The browser reads these tokens from `web/sr
 |`motionQuick`|`--motion-quick`|120ms|Button colour and border transitions; reduced-motion reset|
 |`ease`|`--ease`|ease-out|Button transition timing|
 
-A component row keeps its own literal value when no token has that value. So the 14 px labels of buttons and options, the weight 650 of buttons and tags, the 14 px radius of the composer field, and the 7 px and 8 px radii stay as their rows give them. Bold text, such as the word Failed, uses `weightStrong`. The target-size check reads `targetMin`.
+A component row keeps its own literal value when no token has that value. So the 14 px labels of buttons and options, the weight 650 of buttons and tags, the 14 px radius of the composer field, and the 7 px and 8 px radii stay as their rows give them. Bold text, such as the word Failed, uses `weightStrong`. The optional target-size check reads control height custom properties and checks the 24 px minimum.
 
 ### Components
 
@@ -310,9 +310,9 @@ The mark is a crescent moon with a small smiling rabbit. The rabbit rests its ch
 
 |File|Use|
 |---|---|
-|`assets/brand/dalgona.svg`|`dalgona` at 24 px and above. App icon, start screen and README.|
+|`assets/brand/dalgona.svg`|`dalgona` at 24 px and above. App icon and start screen.|
 |`assets/brand/dalgona-small.svg`|`dalgona` below 24 px. Favicon and status band.|
-|`assets/brand/dal.svg`|`dal` at 24 px and above. README.|
+|`assets/brand/dal.svg`|`dal` at 24 px and above.|
 |`assets/brand/dal-small.svg`|`dal` below 24 px. Favicon and status band.|
 
 The candy uses fixed brand colours in every theme. Face #DA702C. Rim #9D4310. Highlight #FFFCF0 at 45 % opacity. The `dal` mark uses `currentColor`, which takes the `text` role. `dalgona` always shows the candy mark. `dal` always shows its one-colour mark. The `dal` favicon carries its own `prefers-color-scheme` rule: #100F0F on light, #CECDC3 on dark.
@@ -331,7 +331,7 @@ The SVG files hold the geometry. The construction values are:
 
 Below 24 px, use the small files. They carry the small cut.
 
-The name 고나 appears only in this file, in the README and in image alternative text. The interface shows no text about the rabbit.
+The name 고나 appears only in this file and in image alternative text. The interface shows no text about the rabbit.
 
 |Mark|Alternative text|
 |---|---|

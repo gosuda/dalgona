@@ -30,7 +30,7 @@ Live debugging: `just live-up`, then follow [live-debug.md](docs/spec/live-debug
 
 Use the versions pinned in [go.mod](go.mod) and [web/package.json](web/package.json). Do not weaken a gate, raise a limit, or exclude a failing test to make a change pass.
 
-[justfile](justfile) declares `fmt-check`, `vet`, `lint`, `test`, `vuln`, `hashline-model`, `spec-style`, `web-check`, and `cf-check`. Run them together with `just verify`. `test` uses the race detector. `hashline-model` and `spec-style` skip when `uv` is absent; do not report those skips as a pass.
+[justfile](justfile) declares `fmt-check`, `vet`, `lint`, `test`, `vuln`, `hashline-model`, `spec-style`, `web-check`, and `cf-check`. Run them together with `just verify`. `test` uses the race detector. `hashline-model` and `spec-style` run when `uv` is available. Without `uv`, they skip locally and fail when `CI=true`. Do not report those skips as a pass.
 
 Use `just web` to install the locked web dependencies and build the assets. `web-check` uses the installed web tools. `cf-check` installs the locked Cloudflare dependencies before its checks. `just build` builds both binaries for the host into `bin/`; `just dal` and `just dalgona` run them from source and pass their arguments through. `just dist` builds release binaries, and `just box-image` builds the remote box image.
 
@@ -39,5 +39,7 @@ Report the checks you ran, their results, and any untested requirement. Distingu
 ## Keep the delivery bounded
 
 Ship real behavior, not stubs, placeholder implementations, debug output, or deferred required paths. Write documentation that explains a contract, an action, or a decision the reader needs. Do not add process records without a durable use.
+
+Keep headings in sentence case and actions verb-first. Errors name what happened and how to fix it. Use no exclamation marks or moon puns in errors and status text. Keep any moon motif to at most one visual mark on a user-facing surface.
 
 A contribution does not authorize a push, publication, deployment, credential transfer, or cloud resource deletion. Get separate authorization for each action.

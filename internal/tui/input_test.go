@@ -13,7 +13,7 @@ import (
 
 func TestEditorNewlineKeys(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.input.composer.SetValue("a")
 	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
 	m, _ = drive(t, m, tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
@@ -32,7 +32,7 @@ func TestEditorNewlineKeys(t *testing.T) {
 
 func TestEditorCursorPosition(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 8})
 	m.input.composer.SetValue("ab")
 	m.input.composer.cursor = 1
@@ -47,10 +47,10 @@ func TestEditorCursorPosition(t *testing.T) {
 
 func TestEditorWrapsAtWidthMinusOne(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 12})
 	m.input.composer.SetValue(strings.Repeat("a", 100))
-	for _, line := range strings.Split(stripANSI(m.View().Content), "\n") {
+	for line := range strings.SplitSeq(stripANSI(m.View().Content), "\n") {
 		if got := m.screen.cells(line); got > 39 {
 			t.Fatalf("editor row is %d cells at 40 columns: %q", got, line)
 		}
@@ -59,7 +59,7 @@ func TestEditorWrapsAtWidthMinusOne(t *testing.T) {
 
 func TestEditorScrollsInsideBeyondCap(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 8})
 	var lines []string
 	var heights []int
@@ -103,7 +103,7 @@ func TestEditorLineKeys(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			m := newTestModel(nil, Options{}, nil)
+			m := newTestModel(nil, Options{})
 			m.input.composer.SetValue(test.text)
 			m.input.composer.cursor = test.cursor
 			m, _ = drive(t, m, test.key)
@@ -119,7 +119,7 @@ func TestEditorLineKeys(t *testing.T) {
 
 func TestEditorUpAndDownMoveBetweenWrappedRows(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 12})
 	m.input.composer.SetValue(strings.Repeat("a", 100))
 	m.input.composer.cursor = 40
@@ -149,7 +149,7 @@ func TestEditorDecomposedTextWrapsAsComposed(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			render := func(text string, caret int) (string, *tea.Cursor) {
-				m := newTestModel(nil, Options{}, nil)
+				m := newTestModel(nil, Options{})
 				m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 12})
 				m.input.composer.SetValue(text)
 				m.input.composer.cursor = caret
@@ -174,7 +174,7 @@ func TestEditorDecomposedTextWrapsAsComposed(t *testing.T) {
 func TestEditorFollowsRendererWidthMode(t *testing.T) {
 	t.Parallel()
 	const family = "\U0001F468\u200D\U0001F469\u200D\U0001F467"
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 12})
 	m.input.composer.SetValue(family)
 	before := m.View().Cursor
@@ -239,7 +239,7 @@ func TestChipPromptIsSentUnchangedWhenSlashLike(t *testing.T) {
 
 func TestChipDeletesAsUnit(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(12)})
 	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
@@ -253,7 +253,7 @@ func TestChipDeletesAsUnit(t *testing.T) {
 
 func TestOversizePasteRefused(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, tea.PasteMsg{Content: strings.Repeat("a", 1<<20+1)})
 	want := "Paste is 1048577 bytes, over the 1 MiB limit; save it to a file and mention it with @path"
@@ -276,7 +276,7 @@ func TestPasteIntoFilterKeepsFirstLine(t *testing.T) {
 
 func TestChipRowDoesNotGrowComposer(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	before := len(m.dockLines())
 	m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(40)})

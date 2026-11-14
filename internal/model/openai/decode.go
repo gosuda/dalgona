@@ -30,7 +30,7 @@ type responseEvent struct {
 	Arguments   string
 	Input       string
 	Response    responseDone
-	Error       *providerError
+	Error       *model.ProviderError
 	Code        string
 	Message     string
 }
@@ -44,17 +44,12 @@ type responseItem struct {
 	Input     string
 }
 
-type providerError struct {
-	Code    string
-	Message string
-}
-
 type responseDone struct {
 	Status           string
 	IncompleteReason string
 	Usage            responseUsage
 	HasUsage         bool
-	Error            *providerError
+	Error            *model.ProviderError
 }
 
 type responseUsage struct {
@@ -65,14 +60,10 @@ type responseUsage struct {
 }
 
 func (s *responseState) consume(ctx context.Context, gate *model.StartGate, body io.ReadCloser, options model.RetryOptions) model.AttemptResult {
-	err := model.ReadSSEWithTimeouts(ctx, body, model.SSEOptions{IdleTimeout: options.IdleTimeout, Control: s.stream.Timers()}, func(event, data []byte) error {
-		gate.FirstEvent()
-		return s.handle(event, data)
-	})
+	err := gate.ConsumeSSE(ctx, body, s.stream.Timers(), options.IdleTimeout, s.handle)
 	if errors.Is(err, errTerminalEvent) {
 		err = nil
 	}
-	err = gate.Error(ctx, err)
 	if err == nil {
 		err = s.finish()
 	}
@@ -308,7 +299,7 @@ func readResponseNestedField(decoder *jsontext.Decoder, key string, value *respo
 	case "response":
 		err = readResponseDone(decoder, &value.Response)
 	case "error":
-		value.Error, err = readProviderError(decoder)
+		value.Error, err = model.ReadProviderError(decoder)
 	default:
 		err = decoder.SkipValue()
 	}
@@ -338,26 +329,6 @@ func readResponseItem(decoder *jsontext.Decoder, item *responseItem) error {
 	})
 }
 
-func readProviderError(decoder *jsontext.Decoder) (*providerError, error) {
-	if decoder.PeekKind() == 'n' {
-		return nil, decoder.SkipValue()
-	}
-	value := &providerError{}
-	err := model.ReadObjectFields(decoder, func(key string) error {
-		var err error
-		switch key {
-		case "code":
-			value.Code, err = model.ReadScalar(decoder)
-		case "message":
-			value.Message, err = model.ReadString(decoder)
-		default:
-			err = decoder.SkipValue()
-		}
-		return err
-	})
-	return value, err
-}
-
 func readResponseDone(decoder *jsontext.Decoder, response *responseDone) error {
 	return model.ReadObjectFields(decoder, func(key string) error {
 		var err error
@@ -370,7 +341,7 @@ func readResponseDone(decoder *jsontext.Decoder, response *responseDone) error {
 			response.HasUsage = true
 			err = readResponseUsage(decoder, &response.Usage)
 		case "error":
-			response.Error, err = readProviderError(decoder)
+			response.Error, err = model.ReadProviderError(decoder)
 		default:
 			err = decoder.SkipValue()
 		}

@@ -393,13 +393,13 @@ func backupDBFiles(db *sql.DB, dir string, dirSync func(string) error) (retErr e
 	defer func() { retErr = errors.Join(retErr, release()) }()
 	tmp := filepath.Join(dir, "state.db.bak.tmp")
 	final := filepath.Join(dir, "state.db.bak")
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) { //nolint:gosec // backup temp path is validated
 		return fmt.Errorf("journal: remove stale backup: %w", err)
 	}
 	if _, err := db.Exec("VACUUM INTO ?", tmp); err != nil {
 		return fmt.Errorf("journal: backup state.db: %w", err)
 	}
-	if err := os.Rename(tmp, final); err != nil {
+	if err := os.Rename(tmp, final); err != nil { //nolint:gosec // backup path is validated
 		return fmt.Errorf("journal: install state.db.bak: %w", err)
 	}
 	if err := dirSync(dir); err != nil {

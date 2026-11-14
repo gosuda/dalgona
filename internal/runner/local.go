@@ -61,10 +61,10 @@ func removeRunDir(dir string) {
 }
 
 func checkKeptRun(runDir string, id string) error {
-	if _, statErr := os.Stat(filepath.Join(runDir, "aborted")); statErr != nil {
-		return nil
+	if _, err := os.Stat(filepath.Join(runDir, "aborted")); err == nil {
+		return fmt.Errorf("runner: start %s: run directory kept after unconfirmed stop: %s", id, runDir)
 	}
-	return fmt.Errorf("runner: start %s: run directory kept after unconfirmed stop: %s", id, runDir)
+	return nil
 }
 
 func validateProcessSpec(spec ProcessSpec) error {
@@ -433,7 +433,7 @@ func readProcessGroup(runDir string) (int, error) {
 }
 
 func readCancel(runDir string) (Signal, bool) {
-	data, err := os.ReadFile(filepath.Join(runDir, "cancel"))
+	data, err := os.ReadFile(filepath.Join(runDir, "cancel")) //nolint:gosec // cancel path is inside the managed run directory
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, false
 	}
@@ -659,7 +659,7 @@ func writeAtomic(path string, data []byte, perm fs.FileMode) error {
 		return fmt.Errorf("create temporary file: %w", err)
 	}
 	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }()
+	defer func() { _ = os.Remove(name) }() //nolint:gosec // temporary file path was created by CreateTemp
 	if err := tmp.Chmod(perm); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("set temporary mode: %w", err)

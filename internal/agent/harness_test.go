@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -431,8 +432,8 @@ func completedOutputs(events []event.Seqd) map[string]event.ToolCompleted {
 }
 
 func lastTurn(events []event.Seqd) event.TurnCompleted {
-	for i := len(events) - 1; i >= 0; i-- {
-		if value, ok := events[i].Event.(event.TurnCompleted); ok {
+	for _, item := range slices.Backward(events) {
+		if value, ok := item.Event.(event.TurnCompleted); ok {
 			return value
 		}
 	}

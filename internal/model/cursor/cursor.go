@@ -57,25 +57,15 @@ func (p *Provider) StreamWith(ctx context.Context, req model.Request, options St
 	if err != nil {
 		return nil, err
 	}
-	stream := model.NewEventStream(ctx, 64)
-	go p.run(stream.Context(ctx), stream, turn{req: req, options: options, conv: conv})
-	return stream, nil
+	return model.LaunchStream(ctx, p.cfg.Retry, func(attemptCtx context.Context, stream *model.EventStream) model.AttemptResult {
+		return p.attempt(attemptCtx, stream, turn{req: req, options: options, conv: conv})
+	})
 }
 
 type turn struct {
 	req     model.Request
 	options StreamOptions
 	conv    *conversation
-}
-
-func (p *Provider) run(ctx context.Context, stream *model.EventStream, current turn) {
-	result := model.RunRetries(ctx, p.cfg.Retry, func(ctx context.Context) model.AttemptResult {
-		return p.attempt(ctx, stream, current)
-	})
-	if result.Err != nil {
-		stream.Emit(model.Error{Err: result.Err, Message: result.Err.Error(), Status: result.Status, Body: result.Body})
-	}
-	stream.Finish(nil)
 }
 
 func (p *Provider) token(ctx context.Context) (string, error) {
@@ -128,10 +118,10 @@ func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, curre
 		stopBeats()
 	}()
 	if resp.StatusCode != http.StatusOK {
-		return httpFailure(resp)
+		return model.HTTPFailure("cursor", resp)
 	}
 	run := &session{stream: stream, conv: current.conv, inBand: current.options.InBand, tools: tools, writer: writer}
-	return run.consume(gateCtx, gate, watchIdle(resp.Body, p.cfg.Retry.IdleTimeout))
+	return run.consume(gateCtx, gate, model.WatchIdle(resp.Body, p.cfg.Retry.IdleTimeout))
 }
 
 func (p *Provider) newRequest(ctx context.Context, path string, body io.Reader, token string) (*http.Request, error) {
@@ -150,19 +140,6 @@ func (p *Provider) newRequest(ctx context.Context, path string, body io.Reader, 
 	httpReq.Header.Set("X-Cursor-Client-Type", "cli")
 	httpReq.Header.Set("X-Request-Id", requestID)
 	return httpReq, nil
-}
-
-func httpFailure(resp *http.Response) model.AttemptResult {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return model.AttemptResult{Status: resp.StatusCode, Err: fmt.Errorf("cursor: read error response: %w", err)}
-	}
-	return model.AttemptResult{
-		Status:     resp.StatusCode,
-		RetryAfter: model.RetryAfter(resp.Header.Get("Retry-After")),
-		Body:       body,
-		Err:        fmt.Errorf("cursor: http %d: %s", resp.StatusCode, bytes.TrimSpace(body)),
-	}
 }
 
 type requestBody struct {

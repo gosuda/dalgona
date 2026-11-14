@@ -1,5 +1,5 @@
 <script lang="ts">
-export interface CompletionItem {
+interface CompletionItem {
 	readonly id: string;
 	readonly primary: string;
 	readonly secondary: string;

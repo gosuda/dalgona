@@ -123,6 +123,7 @@ func TestUsageFallback(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = w.Write([]byte(test.body))
@@ -232,6 +233,7 @@ func TestRetryContract(t *testing.T) {
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
 			runRetryScenario(t, scenario)
 		})
 	}

@@ -36,13 +36,16 @@ func countDuplicateDeliveries(t *testing.T, c *wireClient, id jsontext.Value, qu
 	t.Helper()
 	duplicates := 0
 	end := time.Now().Add(quiet)
+	timer := time.NewTimer(50 * time.Millisecond)
+	defer timer.Stop()
 	for time.Now().Before(end) {
+		timer.Reset(50 * time.Millisecond)
 		select {
 		case m := <-c.requests:
 			if string(m.ID) == string(id) {
 				duplicates++
 			}
-		case <-time.After(50 * time.Millisecond):
+		case <-timer.C:
 		}
 	}
 	return duplicates
@@ -73,6 +76,6 @@ func TestServeChildApprovalSentOncePerConnection(t *testing.T) {
 		t.Fatalf("duplicate approval request %s delivered %d extra times", second.ID, duplicates)
 	}
 	c.respond(second.ID, `{"decision":"accept"}`)
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "parent turn status", log.status)
 }

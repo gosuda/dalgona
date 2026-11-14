@@ -56,7 +56,7 @@ func TestTurnStartLocalImagePath(t *testing.T) {
 	input := []map[string]string{{"type": "text", "text": "what is this"}, {"type": "localImage", "path": path}}
 	var response TurnStartResponse
 	c.ok("turn/start", map[string]any{"threadId": threadID, "input": input}, &response)
-	c.collect("turn/completed")
+	c.collect()
 	messages := userMessages(t, r, threadID)
 	if len(messages) != 1 || len(messages[0].Images) != 1 {
 		t.Fatalf("user messages %+v, want one message with one image", messages)
@@ -74,7 +74,7 @@ func TestTurnStartImageDataURL(t *testing.T) {
 	input := []map[string]string{{"type": "image", "url": "data:image/png;base64,iVBORw0KGgo=", "detail": "high"}}
 	var response TurnStartResponse
 	c.ok("turn/start", map[string]any{"threadId": threadID, "input": input}, &response)
-	c.collect("turn/completed")
+	c.collect()
 	messages := userMessages(t, r, threadID)
 	if len(messages) != 1 || len(messages[0].Images) != 1 || messages[0].Images[0].Blob.Bytes != 8 {
 		t.Fatalf("user messages %+v, want one 8-byte image", messages)
@@ -124,7 +124,7 @@ func TestTurnSteerAcceptsImage(t *testing.T) {
 	input := []map[string]string{{"type": "localImage", "path": path}}
 	c.ok("turn/steer", map[string]any{"threadId": threadID, "expectedTurnId": turnID, "input": input}, &steer)
 	close(gate)
-	c.collect("turn/completed")
+	c.collect()
 	messages := userMessages(t, r, threadID)
 	last := messages[len(messages)-1]
 	if string(last.Kind) != "steer" || len(last.Images) != 1 || last.Images[0].Blob.Bytes != int64(len(pngSample)) {
@@ -248,7 +248,7 @@ func TestUserMessageItemEchoesImage(t *testing.T) {
 	input := []map[string]any{{"type": "text", "text": "what is this"}, {"type": "localImage", "path": path}}
 	var response TurnStartResponse
 	c.ok("turn/start", map[string]any{"threadId": threadID, "input": input}, &response)
-	content := userItemContent(t, c.collect("turn/completed"))
+	content := userItemContent(t, c.collect())
 	if len(content) != 2 || fmt.Sprint(content[0]["text"]) != "what is this" {
 		t.Fatalf("user content = %+v, want the text and one image", content)
 	}

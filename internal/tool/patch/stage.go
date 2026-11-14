@@ -2,6 +2,7 @@ package patch
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -131,7 +132,7 @@ func groupEdits(ctx context.Context, env tool.Env, edits []edit) ([]fileGroup, e
 	for _, group := range byPath {
 		groups = append(groups, *group)
 	}
-	slices.SortFunc(groups, func(a, b fileGroup) int { return strings.Compare(a.display, b.display) })
+	slices.SortFunc(groups, func(a, b fileGroup) int { return cmp.Compare(a.display, b.display) })
 	return groups, nil
 }
 
@@ -173,12 +174,11 @@ func checkPathComponents(ctx context.Context, env tool.Env, display, absolute st
 }
 
 func namedFile(entries []runner.FileInfo, name string) (runner.FileInfo, bool) {
-	for _, entry := range entries {
-		if entry.Name == name {
-			return entry, true
-		}
+	idx := slices.IndexFunc(entries, func(e runner.FileInfo) bool { return e.Name == name })
+	if idx < 0 {
+		return runner.FileInfo{}, false
 	}
-	return runner.FileInfo{}, false
+	return entries[idx], true
 }
 
 func hasParentComponent(path string) bool {
@@ -220,7 +220,7 @@ func stageUpdate(ctx context.Context, style Style, group fileGroup, env tool.Env
 	if err := validateChangeShapes(group); err != nil {
 		return nil, err
 	}
-	before, info, err := readTarget(ctx, env, group.absolute, group.display)
+	before, mode, err := readTarget(ctx, env, group.absolute, group.display)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +230,7 @@ func stageUpdate(ctx context.Context, style Style, group fileGroup, env tool.Env
 	}
 	file := &stagedFile{
 		path: group.display, absolute: group.absolute, before: before,
-		exists: true, mode: info.mode, sound: true,
+		exists: true, mode: mode, sound: true,
 	}
 	resolver := fileResolver{style: style, group: group, env: env, file: file}
 	if err := resolver.stageContent(ctx, doc); err != nil {
@@ -260,7 +260,7 @@ func stageCreate(ctx context.Context, group fileGroup, env tool.Env) (*stagedFil
 
 func stageDelete(ctx context.Context, group fileGroup, env tool.Env) (*stagedFile, error) {
 	item := group.edits[0]
-	before, info, err := readTarget(ctx, env, group.absolute, group.display)
+	before, mode, err := readTarget(ctx, env, group.absolute, group.display)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +271,7 @@ func stageDelete(ctx context.Context, group fileGroup, env tool.Env) (*stagedFil
 	}
 	return &stagedFile{
 		path: group.display, absolute: group.absolute, before: before,
-		exists: true, deleted: true, mode: info.mode, sound: true,
+		exists: true, deleted: true, mode: mode, sound: true,
 	}, nil
 }
 
@@ -307,22 +307,20 @@ func checkShape(display string, item edit, last bool) error {
 	return fmt.Errorf("patch: changes[%d]: create or delete cannot combine with other operations for %s", item.index, display)
 }
 
-func readTarget(ctx context.Context, env tool.Env, absolute, display string) ([]byte, targetInfo, error) {
+func readTarget(ctx context.Context, env tool.Env, absolute, display string) ([]byte, fs.FileMode, error) {
 	info, err := env.Runner.Stat(ctx, absolute)
 	if err != nil {
-		return nil, targetInfo{}, fmt.Errorf("patch: %s could not be read: %w", display, err)
+		return nil, 0, fmt.Errorf("patch: %s could not be read: %w", display, err)
 	}
 	if !info.Mode.IsRegular() {
-		return nil, targetInfo{}, fmt.Errorf("patch: %s is not a regular file", display)
+		return nil, 0, fmt.Errorf("patch: %s is not a regular file", display)
 	}
 	data, err := env.Runner.ReadFile(ctx, absolute)
 	if err != nil {
-		return nil, targetInfo{}, fmt.Errorf("patch: %s could not be read: %w", display, err)
+		return nil, 0, fmt.Errorf("patch: %s could not be read: %w", display, err)
 	}
-	return data, targetInfo{mode: info.Mode.Perm()}, nil
+	return data, info.Mode.Perm(), nil
 }
-
-type targetInfo struct{ mode fs.FileMode }
 
 func checkRenameTargets(files []*stagedFile) error {
 	claimed := make(map[string]string)

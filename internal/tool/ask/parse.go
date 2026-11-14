@@ -72,18 +72,22 @@ func readArguments(raw jsontext.Value) ([]rawQuestion, error) {
 	return questions, nil
 }
 
-func readQuestions(decoder *jsontext.Decoder) ([]rawQuestion, error) {
-	if err := rejectNull(decoder, "questions"); err != nil {
+func readList[T any](decoder *jsontext.Decoder, name string, readItem func(*jsontext.Decoder, *T) error) ([]T, error) {
+	if err := rejectNull(decoder, name); err != nil {
 		return nil, err
 	}
-	var questions []rawQuestion
+	var items []T
 	err := model.ReadArrayItems(decoder, func(int) error {
-		var question rawQuestion
-		err := readQuestion(decoder, &question)
-		questions = append(questions, question)
+		var item T
+		err := readItem(decoder, &item)
+		items = append(items, item)
 		return err
 	})
-	return questions, err
+	return items, err
+}
+
+func readQuestions(decoder *jsontext.Decoder) ([]rawQuestion, error) {
+	return readList(decoder, "questions", readQuestion)
 }
 
 func readQuestion(decoder *jsontext.Decoder, question *rawQuestion) error {
@@ -110,17 +114,7 @@ func readQuestion(decoder *jsontext.Decoder, question *rawQuestion) error {
 }
 
 func readOptions(decoder *jsontext.Decoder) ([]rawOption, error) {
-	if err := rejectNull(decoder, "options"); err != nil {
-		return nil, err
-	}
-	var options []rawOption
-	err := model.ReadArrayItems(decoder, func(int) error {
-		var option rawOption
-		err := readOption(decoder, &option)
-		options = append(options, option)
-		return err
-	})
-	return options, err
+	return readList(decoder, "options", readOption)
 }
 
 func readOption(decoder *jsontext.Decoder, option *rawOption) error {

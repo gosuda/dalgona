@@ -187,7 +187,7 @@ func (b *Binder) ledgerPath() string { return filepath.Join(b.opts.Config.Home, 
 
 func (b *Binder) readLedger() (ledger, error) {
 	books := ledger{destroyed: map[boxKey]bool{}, replaced: map[boxKey]string{}}
-	file, err := os.Open(b.ledgerPath())
+	file, err := os.Open(b.ledgerPath()) //nolint:gosec // ledger path is under validated config home
 	if errors.Is(err, os.ErrNotExist) {
 		return books, nil
 	}
@@ -214,7 +214,7 @@ func (l ledger) add(fields []string) {
 func (b *Binder) appendLedger(fields ...string) error {
 	b.ledgerMu.Lock()
 	defer b.ledgerMu.Unlock()
-	file, err := os.OpenFile(b.ledgerPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(b.ledgerPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // ledger path is under validated config home
 	if err != nil {
 		return fmt.Errorf("remote: open box ledger: %w", err)
 	}

@@ -92,9 +92,9 @@ func TestCallIDSendsIDAndRoutesResponse(t *testing.T) {
 func TestDeltaQueueMerges(t *testing.T) {
 	q := newOutQueue()
 	for range 1024 {
-		pushTestMessage(t, q, "item/agentMessage/delta", AgentMessageDeltaNotification{ThreadID: "thread", ItemID: "item", Delta: "x"}, true)
+		pushTestMessage(t, q, "item/agentMessage/delta", AgentMessageDeltaNotification{ThreadID: "thread", ItemID: "item", Delta: "x"})
 	}
-	pushTestMessage(t, q, "item/agentMessage/delta", AgentMessageDeltaNotification{ThreadID: "thread", ItemID: "item", Delta: "z"}, true)
+	pushTestMessage(t, q, "item/agentMessage/delta", AgentMessageDeltaNotification{ThreadID: "thread", ItemID: "item", Delta: "z"})
 	if len(q.items) != 1024 {
 		t.Fatalf("queued=%d, want 1024", len(q.items))
 	}
@@ -141,11 +141,11 @@ func TestDeltaQueuePreservesDistinctAndInvalidMessages(t *testing.T) {
 	q := newOutQueue()
 	params := jsontext.Value(`{"itemId":"a","delta":"x"}`)
 	for range 1024 {
-		pushTestMessage(t, q, "item/agentMessage/delta", params, true)
+		pushTestMessage(t, q, "item/agentMessage/delta", params)
 	}
 	other := jsontext.Value(`{"itemId":"b","delta":"z"}`)
-	pushTestMessage(t, q, "item/agentMessage/delta", other, true)
-	pushTestMessage(t, q, "turn/started", jsontext.Value(`{"turnId":"t"}`), true)
+	pushTestMessage(t, q, "item/agentMessage/delta", other)
+	pushTestMessage(t, q, "turn/started", jsontext.Value(`{"turnId":"t"}`))
 	invalid := jsontext.Value(`{"itemId":`)
 	if err := q.push(invalid, "item/agentMessage/delta", invalid, true, func() error { return nil }); err != nil {
 		t.Fatal(err)
@@ -326,7 +326,7 @@ func requireSlowDeltaText(t *testing.T, peer net.Conn, count int) {
 	}
 }
 
-func pushTestMessage(t *testing.T, q *outQueue, method string, params any, delta bool) {
+func pushTestMessage(t *testing.T, q *outQueue, method string, params any) {
 	t.Helper()
 	rawParams, err := json.Marshal(params)
 	if err != nil {
@@ -336,7 +336,7 @@ func pushTestMessage(t *testing.T, q *outQueue, method string, params any, delta
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := q.push(body, method, rawParams, delta, func() error { return nil }); err != nil {
+	if err := q.push(body, method, rawParams, true, func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 }

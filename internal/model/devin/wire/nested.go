@@ -96,19 +96,23 @@ func AppendMetadata(dst []byte, m *Metadata) []byte {
 
 func ConsumeMetadata(b []byte, m *Metadata) error {
 	return connectwire.ConsumeFields(b, "devin metadata", func(f connectwire.Field) error {
-		switch {
-		case f.Number <= 7:
-			return consumeMetadataClient(f, m)
-		case f.Number <= 14:
-			return consumeMetadataRequest(f, m)
-		case f.Number <= 22:
-			return consumeMetadataAuth(f, m)
-		case f.Number <= 28:
-			return consumeMetadataAccount(f, m)
-		default:
-			return consumeMetadataTenant(f, m)
-		}
+		return consumeMetadataField(f, m)
 	})
+}
+
+func consumeMetadataField(f connectwire.Field, m *Metadata) error {
+	switch {
+	case f.Number <= 6:
+		return consumeMetadataClient(f, m)
+	case f.Number <= 12:
+		return consumeMetadataEnvironment(f, m)
+	case f.Number <= 17:
+		return consumeMetadataNetwork(f, m)
+	case f.Number <= 26:
+		return consumeMetadataUser(f, m)
+	default:
+		return consumeMetadataAccount(f, m)
+	}
 }
 
 func consumeMetadataClient(f connectwire.Field, m *Metadata) error {
@@ -125,14 +129,15 @@ func consumeMetadataClient(f connectwire.Field, m *Metadata) error {
 		return connectwire.SetBytes(f, "devin metadata", &m.OSView)
 	case 6:
 		return connectwire.SetBool(f, "devin metadata", &m.DisableTelemetry)
-	case 7:
-		return connectwire.SetBytes(f, "devin metadata", &m.IdeVersionView)
+	default:
+		return nil
 	}
-	return nil
 }
 
-func consumeMetadataRequest(f connectwire.Field, m *Metadata) error {
+func consumeMetadataEnvironment(f connectwire.Field, m *Metadata) error {
 	switch f.Number {
+	case 7:
+		return connectwire.SetBytes(f, "devin metadata", &m.IdeVersionView)
 	case 8:
 		return connectwire.SetBytes(f, "devin metadata", &m.HardwareView)
 	case 9:
@@ -143,50 +148,53 @@ func consumeMetadataRequest(f connectwire.Field, m *Metadata) error {
 		return connectwire.SetBytes(f, "devin metadata", &m.SourceAddressView)
 	case 12:
 		return connectwire.SetBytes(f, "devin metadata", &m.ExtensionNameView)
+	default:
+		return nil
+	}
+}
+
+func consumeMetadataNetwork(f connectwire.Field, m *Metadata) error {
+	switch f.Number {
 	case 13:
 		return connectwire.SetBytes(f, "devin metadata", &m.UserAgentView)
 	case 14:
 		return connectwire.SetBytes(f, "devin metadata", &m.URLView)
-	}
-	return nil
-}
-
-func consumeMetadataAuth(f connectwire.Field, m *Metadata) error {
-	switch f.Number {
 	case 15:
 		return connectwire.SetInt32(f, "devin metadata", &m.AuthSource)
 	case 16:
 		return connectwire.ConsumeNested(f, "devin metadata", &m.LSTimestamp, ConsumeTimestamp)
 	case 17:
 		return connectwire.SetBytes(f, "devin metadata", &m.ExtensionPathView)
+	default:
+		return nil
+	}
+}
+
+func consumeMetadataUser(f connectwire.Field, m *Metadata) error {
+	switch f.Number {
 	case 20:
 		return connectwire.SetBytes(f, "devin metadata", &m.UserIDView)
 	case 21:
 		return connectwire.SetBytes(f, "devin metadata", &m.UserJWTView)
 	case 22:
 		return connectwire.SetBytes(f, "devin metadata", &m.ForceTeamIDView)
-	}
-	return nil
-}
-
-func consumeMetadataAccount(f connectwire.Field, m *Metadata) error {
-	switch f.Number {
 	case 24:
 		return connectwire.SetBytes(f, "devin metadata", &m.DeviceFingerprintView)
 	case 25:
 		return connectwire.SetBytes(f, "devin metadata", &m.TriggerIDView)
 	case 26:
 		return connectwire.SetBytes(f, "devin metadata", &m.PlanNameView)
+	default:
+		return nil
+	}
+}
+
+func consumeMetadataAccount(f connectwire.Field, m *Metadata) error {
+	switch f.Number {
 	case 27:
 		return connectwire.SetBytes(f, "devin metadata", &m.IDView)
 	case 28:
 		return connectwire.SetBytes(f, "devin metadata", &m.IdeTypeView)
-	}
-	return nil
-}
-
-func consumeMetadataTenant(f connectwire.Field, m *Metadata) error {
-	switch f.Number {
 	case 29:
 		return connectwire.SetBytes(f, "devin metadata", &m.ImpersonateTierView)
 	case 30:
@@ -195,8 +203,9 @@ func consumeMetadataTenant(f connectwire.Field, m *Metadata) error {
 		return connectwire.SetBytes(f, "devin metadata", &m.FView)
 	case 32:
 		return connectwire.SetBytes(f, "devin metadata", &m.TeamIDView)
+	default:
+		return nil
 	}
-	return nil
 }
 
 func consumeModelDisplay(f connectwire.Field, m *Metadata) error {
@@ -261,18 +270,17 @@ func AppendCompletionConfiguration(dst []byte, m *CompletionConfiguration) []byt
 
 func ConsumeCompletionConfiguration(b []byte, m *CompletionConfiguration) error {
 	return connectwire.ConsumeFields(b, "devin completion config", func(f connectwire.Field) error {
-		switch {
-		case f.Number <= 8:
-			return consumeConfigNumbers(f, m)
-		case f.Number <= 12:
-			return consumeConfigPatterns(f, m)
-		default:
-			return consumeConfigFlags(f, m)
+		if f.Number <= 6 {
+			return consumeCompletionSampling(f, m)
 		}
+		if f.Number <= 11 {
+			return consumeCompletionThresholds(f, m)
+		}
+		return consumeCompletionScoring(f, m)
 	})
 }
 
-func consumeConfigNumbers(f connectwire.Field, m *CompletionConfiguration) error {
+func consumeCompletionSampling(f connectwire.Field, m *CompletionConfiguration) error {
 	switch f.Number {
 	case 1:
 		return connectwire.SetUint64(f, "devin completion config", &m.NumCompletions)
@@ -286,33 +294,32 @@ func consumeConfigNumbers(f connectwire.Field, m *CompletionConfiguration) error
 		return setFloat64(f, "devin completion config", &m.Temperature)
 	case 6:
 		return setFloat64(f, "devin completion config", &m.FirstTemperature)
+	default:
+		return nil
+	}
+}
+
+func consumeCompletionThresholds(f connectwire.Field, m *CompletionConfiguration) error {
+	switch f.Number {
 	case 7:
 		return connectwire.SetUint64(f, "devin completion config", &m.TopK)
 	case 8:
 		return setFloat64(f, "devin completion config", &m.TopP)
-	}
-	return nil
-}
-
-func consumeConfigPatterns(f connectwire.Field, m *CompletionConfiguration) error {
-	switch f.Number {
 	case 9:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin completion config"); err != nil {
-			return err
-		}
-		m.StopPatterns = append(m.StopPatterns, connectwire.BytesValue(f))
+		return connectwire.AppendBytesField(f, "devin completion config", &m.StopPatterns)
 	case 10:
 		return connectwire.SetUint64(f, "devin completion config", &m.Seed)
 	case 11:
 		return setFloat64(f, "devin completion config", &m.FimEOTProbThreshold)
-	case 12:
-		return connectwire.SetBool(f, "devin completion config", &m.UseFimEOTThreshold)
+	default:
+		return nil
 	}
-	return nil
 }
 
-func consumeConfigFlags(f connectwire.Field, m *CompletionConfiguration) error {
+func consumeCompletionScoring(f connectwire.Field, m *CompletionConfiguration) error {
 	switch f.Number {
+	case 12:
+		return connectwire.SetBool(f, "devin completion config", &m.UseFimEOTThreshold)
 	case 13:
 		return connectwire.SetBool(f, "devin completion config", &m.DoNotScoreStopTokens)
 	case 14:
@@ -323,8 +330,9 @@ func consumeConfigFlags(f connectwire.Field, m *CompletionConfiguration) error {
 		return connectwire.SetBool(f, "devin completion config", &m.ReturnLogprob)
 	case 17:
 		return connectwire.SetBytes(f, "devin completion config", &m.ServiceTierView)
+	default:
+		return nil
 	}
-	return nil
 }
 
 type ImageData struct {

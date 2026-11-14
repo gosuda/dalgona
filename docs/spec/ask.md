@@ -1,6 +1,6 @@
 # Ask tool
 
-This topic specifies the `ask` tool, which lets the working model put questions to the user and wait for the answers.
+The `ask` tool lets the working model put questions to the user and wait for the answers.
 
 ## Tool
 

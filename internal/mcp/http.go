@@ -45,27 +45,27 @@ func (t *httpTransport) notify(ctx context.Context, method string) error {
 }
 
 func (t *httpTransport) post(ctx context.Context, message []byte, expectedID *uint64) (jsontext.Value, error) {
-	response, closeBody, err := t.send(ctx, message)
+	response, err := t.send(ctx, message)
 	if err != nil {
 		return nil, err
 	}
-	defer closeBody()
+	defer func() { _ = response.Body.Close() }()
 	return t.receive(response, expectedID)
 }
 
-func (t *httpTransport) send(ctx context.Context, message []byte) (*http.Response, func(), error) {
+func (t *httpTransport) send(ctx context.Context, message []byte) (*http.Response, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, t.url, bytes.NewReader(message))
 	if err != nil {
-		return nil, nil, fmt.Errorf("create HTTP request: %w", err)
+		return nil, fmt.Errorf("create HTTP request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json, text/event-stream")
 	t.setHeaders(request)
 	response, err := t.client.Do(request)
 	if err != nil {
-		return nil, nil, fmt.Errorf("send HTTP request: %w", err)
+		return nil, fmt.Errorf("send HTTP request: %w", err)
 	}
-	return response, func() { _ = response.Body.Close() }, nil
+	return response, nil
 }
 
 func (t *httpTransport) receive(response *http.Response, expectedID *uint64) (jsontext.Value, error) {

@@ -22,6 +22,8 @@ func endlessSSE() io.ReadCloser {
 }
 
 func TestInterruptedSSEStreamJoinsReaderBeforeFinish(t *testing.T) {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
 	for round := range 200 {
 		ctx, cancel := context.WithCancel(t.Context())
 		stream := NewEventStream(ctx, 1)
@@ -43,9 +45,16 @@ func TestInterruptedSSEStreamJoinsReaderBeforeFinish(t *testing.T) {
 		cancel()
 		for range stream.Events() {
 		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(5 * time.Second)
 		select {
 		case <-finished:
-		case <-time.After(5 * time.Second):
+		case <-timer.C:
 			t.Fatalf("round %d: stream did not finish after cancel", round)
 		}
 	}

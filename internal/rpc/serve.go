@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 
 	"github.com/gosuda/dalgona/internal/agent"
@@ -400,9 +401,9 @@ type turnBuild struct {
 }
 
 func (c *collector) find(id string) *turnBuild {
-	for i := len(c.turns) - 1; i >= 0; i-- {
-		if c.turns[i].turn.ID == id {
-			return c.turns[i]
+	for _, b := range slices.Backward(c.turns) {
+		if b.turn.ID == id {
+			return b
 		}
 	}
 	return nil

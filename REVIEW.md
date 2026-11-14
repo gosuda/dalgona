@@ -8,7 +8,7 @@ A finding SHOULD include a test that fails on the defect. It MUST use a declared
 
 ## Check the authority boundaries
 
-A journal change MUST preserve raw event bytes, sequence order, CRC, and the hash chain. It MUST NOT silently discard a committed event. A damaged session MUST remain read-only. Use [journal.md](docs/spec/journal.md) and the tests in `internal/journal`.
+A journal change MUST preserve raw event bytes, sequence order, CRC, and the hash chain. It MUST NOT silently discard a committed event. A damaged thread MUST remain read-only. Use [journal.md](docs/spec/journal.md) and the tests in `internal/journal`.
 
 A recovery change MUST classify each pending tool call under [recovery.md](docs/spec/recovery.md). It MUST NOT rerun an unknown command outcome as if the command never ran. A repeated runner call id MUST NOT create a second process. Use [runner.md](docs/spec/runner.md) and the recovery tests in `internal/agent`.
 

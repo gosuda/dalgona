@@ -36,11 +36,11 @@ func startInBandTurn(t *testing.T, thread *Thread) {
 	}
 }
 
-func inBandHarness(t *testing.T, fail error) (*harness, *Thread, *worker) {
+func inBandHarness(t *testing.T) (*harness, *Thread, *worker) {
 	t.Helper()
 	h := newHarness(t, func(h *harness) {
 		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
-			return []tool.Tool{durableStub{fail: fail}}, nil
+			return []tool.Tool{durableStub{}}, nil
 		}
 	})
 	thread := h.start()
@@ -62,29 +62,36 @@ func inBandHarness(t *testing.T, fail error) (*harness, *Thread, *worker) {
 func callTypes(events []event.Seqd, callID string) map[string]int {
 	out := map[string]int{}
 	for _, item := range events {
-		switch value := item.Event.(type) {
-		case event.ApprovalRequested:
-			if value.CallID == callID {
-				out["requested"]++
-			}
-		case event.ApprovalResolved:
-			out["resolved"]++
-		case event.ToolStarted:
-			if value.CallID == callID {
-				out["started"]++
-			}
-		case event.ToolCompleted:
-			if value.CallID == callID {
-				out["completed"]++
-			}
+		if kind := callKind(item.Event, callID); kind != "" {
+			out[kind]++
 		}
 	}
 	return out
 }
 
+func callKind(e event.Event, callID string) string {
+	switch value := e.(type) {
+	case event.ApprovalRequested:
+		if value.CallID == callID {
+			return "requested"
+		}
+	case event.ApprovalResolved:
+		return "resolved"
+	case event.ToolStarted:
+		if value.CallID == callID {
+			return "started"
+		}
+	case event.ToolCompleted:
+		if value.CallID == callID {
+			return "completed"
+		}
+	}
+	return ""
+}
+
 func TestInBandRecordsDurableBeforeExecute(t *testing.T) {
 	t.Parallel()
-	h, thread, w := inBandHarness(t, nil)
+	h, thread, w := inBandHarness(t)
 	if _, err := w.inBandEvents(t.Context(), model.ToolCall{ID: "c1", Name: "durable", Args: jsontext.Value(`{}`)}); err != nil {
 		t.Fatalf("agent: in-band events: %v", err)
 	}
@@ -105,7 +112,7 @@ func TestInBandRecordsDurableBeforeExecute(t *testing.T) {
 
 func TestInBandStartedSurvivesFailedFollowupAppend(t *testing.T) {
 	t.Parallel()
-	h, thread, w := inBandHarness(t, nil)
+	h, thread, w := inBandHarness(t)
 	if _, err := w.inBandEvents(t.Context(), model.ToolCall{ID: "c1", Name: "durable", Args: jsontext.Value(`{}`)}); err != nil {
 		t.Fatalf("agent: in-band events: %v", err)
 	}
@@ -128,7 +135,7 @@ func TestInBandStartedSurvivesFailedFollowupAppend(t *testing.T) {
 
 func TestInBandHonorsCancel(t *testing.T) {
 	t.Parallel()
-	_, _, w := inBandHarness(t, nil)
+	_, _, w := inBandHarness(t)
 	ctx, cancel := context.WithCancelCause(t.Context())
 	cancel(context.Canceled)
 	if _, err := w.inBandEvents(ctx, model.ToolCall{ID: "c1", Name: "durable", Args: jsontext.Value(`{}`)}); err == nil {

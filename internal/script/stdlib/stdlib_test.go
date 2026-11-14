@@ -366,9 +366,40 @@ func TestPredeclared_rejectsNegativeSleep(t *testing.T) {
 
 func TestFileOptions_enablesRequiredDialect(t *testing.T) {
 	t.Parallel()
-	opts := stdlib.FileOptions()
-	if !opts.Set || !opts.While || !opts.TopLevelControl || !opts.GlobalReassign || !opts.Recursion {
-		t.Fatalf("dialect options = %+v", opts)
+	const source = `base = 0
+if True:
+    base = 1
+base = 3
+
+def fact(n):
+    if n <= 1:
+        return 1
+    return n * fact(n - 1)
+
+def compute():
+    s = set()
+    i = 0
+    while i < 4:
+        s.add(fact(i) + base)
+        i += 1
+    total = 0
+    for v in s:
+        total += v
+    return total
+
+ans = compute()`
+
+	globals, err := execStarlark(source, stdlib.Hooks{})
+	if err != nil {
+		t.Fatalf("execStarlark: %v", err)
+	}
+	intVal, ok := globals["ans"].(starlark.Int)
+	if !ok {
+		t.Fatalf("ans type = %T, want starlark.Int", globals["ans"])
+	}
+	got, ok := intVal.Int64()
+	if !ok || got != 18 {
+		t.Fatalf("ans = %v, want 18", globals["ans"])
 	}
 }
 
@@ -387,6 +418,7 @@ func TestPredeclared_rejectsCyclesAndInvalidGroups(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := execStarlark(tc.source, stdlib.Hooks{})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want substring %q", err, tc.want)

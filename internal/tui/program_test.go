@@ -151,7 +151,7 @@ func TestInvI5EachItemPrintedOnce(t *testing.T) {
 			{ID: "turn-3", Status: "completed", Items: []rpc.Item{reused("third-turn-output")}},
 		}
 		thread := rpc.Thread{ID: "t1", Name: "demo", Turns: turns}
-		run.send(resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: rpc.ThreadReadResponse{Thread: thread}}})
+		run.send(resultMsg{op: "resumed", value: &resumedThread{Thread: thread}})
 		waitModel(t, run, "resume replay settled", settled)
 		time.Sleep(time.Second)
 		synctest.Wait()

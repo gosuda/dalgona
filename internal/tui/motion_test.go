@@ -12,7 +12,7 @@ func TestRetryWaitShowsCountdownAndEscStops(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	caller := new(fakeCaller)
-	m := newTestModel(caller, Options{}, nil)
+	m := newTestModel(caller, Options{})
 	m.conn.clock = func() time.Time { return now }
 	m.screen.width = 120
 	m, _ = drive(t, m, notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)})
@@ -31,7 +31,7 @@ func TestRetryWaitShowsCountdownAndEscStops(t *testing.T) {
 func TestRetryWaitCountdownShowsOverRetryNotice(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
-	m := newTestModel(new(fakeCaller), Options{}, nil)
+	m := newTestModel(new(fakeCaller), Options{})
 	m.conn.clock = func() time.Time { return now }
 	m.screen.width = 120
 	m, _ = drive(t, m, notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)})
@@ -59,7 +59,7 @@ func TestTickRunsOnlyWhileLive(t *testing.T) {
 
 func TestTickRunsInAwaitingInput(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.thread.state = "awaiting input"
 	if m.scheduleTick() == nil {
 		t.Fatal("awaiting input did not schedule the tick chain")
@@ -94,7 +94,7 @@ func TestNoMotionTicksOncePerSecond(t *testing.T) {
 
 func TestKeywordMarkStartsNoTick(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	for _, r := range "ultrathink" {
 		m, _ = drive(t, m, press(r, 0, string(r)))
 	}

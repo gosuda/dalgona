@@ -80,19 +80,9 @@ func (p *Provider) Stream(ctx context.Context, req model.Request) (model.Stream,
 	if err != nil {
 		return nil, err
 	}
-	stream := model.NewEventStream(ctx, 64)
-	go p.run(stream.Context(ctx), stream, req, cascade)
-	return stream, nil
-}
-
-func (p *Provider) run(ctx context.Context, stream *model.EventStream, req model.Request, cascade string) {
-	result := model.RunRetries(ctx, p.cfg.Retry, func(ctx context.Context) model.AttemptResult {
-		return p.attempt(ctx, stream, req, cascade)
+	return model.LaunchStream(ctx, p.cfg.Retry, func(attemptCtx context.Context, stream *model.EventStream) model.AttemptResult {
+		return p.attempt(attemptCtx, stream, req, cascade)
 	})
-	if result.Err != nil {
-		stream.Emit(model.Error{Err: result.Err, Message: result.Err.Error(), Status: result.Status, Body: result.Body})
-	}
-	stream.Finish(nil)
 }
 
 func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, req model.Request, cascade string) model.AttemptResult {
@@ -148,15 +138,17 @@ func (p *Provider) chat(ctx context.Context, stream *model.EventStream, req mode
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return httpFailure(resp)
+		return model.HTTPFailure("devin", resp)
 	}
 	state := newChatState(stream, req.Tools)
-	return state.consume(gateCtx, gate, watchIdle(resp.Body, p.cfg.Retry.IdleTimeout))
+	return state.consume(gateCtx, gate, model.WatchIdle(resp.Body, p.cfg.Retry.IdleTimeout))
 }
 
 func (p *Provider) maxTokens(id string) int {
 	if value, ok := p.outputs.Load(id); ok {
-		return value.(int)
+		if n, ok := value.(int); ok {
+			return n
+		}
 	}
 	return defaultMaxTokens
 }
@@ -170,19 +162,6 @@ func (p *Provider) newRequest(ctx context.Context, path string, body []byte, con
 	httpReq.Header.Set("Connect-Protocol-Version", "1")
 	httpReq.Header.Set("User-Agent", connectUserAgent)
 	return httpReq, nil
-}
-
-func httpFailure(resp *http.Response) model.AttemptResult {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return model.AttemptResult{Status: resp.StatusCode, Err: fmt.Errorf("devin: read error response: %w", err)}
-	}
-	return model.AttemptResult{
-		Status:     resp.StatusCode,
-		RetryAfter: model.RetryAfter(resp.Header.Get("Retry-After")),
-		Body:       body,
-		Err:        fmt.Errorf("devin: http %d: %s", resp.StatusCode, bytes.TrimSpace(body)),
-	}
 }
 
 type unaryError struct {

@@ -527,15 +527,11 @@ func (r *Remote) deliver(line []byte) error {
 	if msg.method != "" || !msg.hasID {
 		return nil
 	}
-	id, err := valueInt(msg.id)
-	if err != nil {
-		return nil
+	if id, err := valueInt(msg.id); err == nil {
+		if ch := r.take(id); ch != nil {
+			ch <- rpcResult{value: msg.result, err: clientError(msg)}
+		}
 	}
-	ch := r.take(id)
-	if ch == nil {
-		return nil
-	}
-	ch <- rpcResult{value: msg.result, err: clientError(msg)}
 	return nil
 }
 

@@ -139,7 +139,7 @@ func TestGroupFlushesBeforeThreadSwitch(t *testing.T) {
 	m := verbosityModel(t, "low")
 	m = notifyItem(t, m, "item/completed", commandItem("c1", "completed", 3))
 	m = notifyItem(t, m, "item/completed", commandItem("c2", "completed", 3))
-	m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: rpc.ThreadReadResponse{Thread: rpc.Thread{ID: "t2", Name: "other"}}}})
+	m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{Thread: rpc.Thread{ID: "t2", Name: "other"}}})
 	keys := entryKeys(m)
 	group := slices.Index(keys, "group:turn-1:1")
 	header := slices.IndexFunc(keys, func(key string) bool { return strings.HasPrefix(key, "thread:t2:") })

@@ -272,6 +272,12 @@ func (r *objectReader) textPayload(name string) (string, *BlobRef) {
 	return r.str(name), r.blob(name + "_blob")
 }
 
+func (r *objectReader) textItem(name string) (string, string, *BlobRef) {
+	kind := r.str(name)
+	text, blob := r.textPayload("text")
+	return kind, text, blob
+}
+
 func (r *objectReader) rawPayload(name string) (jsontext.Value, *BlobRef) {
 	return r.raw(name), r.blob(name + "_blob")
 }

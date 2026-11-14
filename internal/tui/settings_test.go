@@ -50,7 +50,7 @@ func batchEdits(client *fakeCaller) []settingEdit {
 
 func TestSettingsRowsInOrder(t *testing.T) {
 	t.Parallel()
-	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}, nil), "auto")
+	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}), "auto")
 	text := dockText(m)
 	if !strings.Contains(text, "Settings") {
 		t.Fatalf("settings panel did not open:\n%s", text)
@@ -68,7 +68,7 @@ func TestSettingsRowsInOrder(t *testing.T) {
 func TestSettingsPanelSavesChangedRows(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
-	m := openSettingsPanel(t, newTestModel(caller, Options{}, nil), "ask")
+	m := openSettingsPanel(t, newTestModel(caller, Options{}), "ask")
 	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 	m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	runPickCommand(t, m, command)
@@ -81,7 +81,7 @@ func TestSettingsPanelSavesChangedRows(t *testing.T) {
 func TestSettingsPanelKeepsOpenOnError(t *testing.T) {
 	t.Parallel()
 	caller := new(failingSaveCaller)
-	m := openSettingsPanel(t, newTestModel(caller, Options{}, nil), "ask")
+	m := openSettingsPanel(t, newTestModel(caller, Options{}), "ask")
 	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 	m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = runPickCommand(t, m, command)
@@ -94,7 +94,7 @@ func TestSettingsPanelKeepsOpenOnError(t *testing.T) {
 func TestSettingsSaveErrorSurvivesKeyPress(t *testing.T) {
 	t.Parallel()
 	caller := new(failingSaveCaller)
-	m := openSettingsPanel(t, newTestModel(caller, Options{}, nil), "ask")
+	m := openSettingsPanel(t, newTestModel(caller, Options{}), "ask")
 	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 	m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = runPickCommand(t, m, command)
@@ -105,7 +105,7 @@ func TestSettingsSaveErrorSurvivesKeyPress(t *testing.T) {
 func TestSettingsSecondEnterWhileSavingSendsNothing(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
-	m := openSettingsPanel(t, newTestModel(caller, Options{}, nil), "ask")
+	m := openSettingsPanel(t, newTestModel(caller, Options{}), "ask")
 	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 	m, first := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, second := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -129,7 +129,7 @@ func TestSettingsSecondEnterWhileSavingSendsNothing(t *testing.T) {
 
 func TestSettingsEscRevertsPreview(t *testing.T) {
 	t.Parallel()
-	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}, nil), "auto")
+	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}), "auto")
 	before := m.screen.dockTheme().name
 	m = pressKeys(t, m,
 		tea.KeyPressMsg{Code: tea.KeyDown},
@@ -152,7 +152,7 @@ func TestSettingsEscRevertsPreview(t *testing.T) {
 func TestSettingsSavesIconsAndStatusHide(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
-	m := openSettingsPanel(t, newTestModel(caller, Options{}, nil), "auto")
+	m := openSettingsPanel(t, newTestModel(caller, Options{}), "auto")
 	m = pressKeys(t, m,
 		tea.KeyPressMsg{Code: tea.KeyDown},
 		tea.KeyPressMsg{Code: tea.KeyDown},
@@ -185,7 +185,7 @@ func TestSettingsSavesIconsAndStatusHide(t *testing.T) {
 
 func TestSettingsApprovalNotice(t *testing.T) {
 	t.Parallel()
-	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}, nil), "ask")
+	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}), "ask")
 	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 	m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = runPickCommand(t, m, command)
@@ -196,7 +196,7 @@ func TestSettingsApprovalNotice(t *testing.T) {
 
 func TestSettingsDockSteady(t *testing.T) {
 	t.Parallel()
-	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}, nil), "auto")
+	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}), "auto")
 	m = pressKeys(t, m,
 		tea.KeyPressMsg{Code: tea.KeyDown},
 		tea.KeyPressMsg{Code: tea.KeyDown},
@@ -219,7 +219,7 @@ func TestSettingsDockSteady(t *testing.T) {
 func TestDalSettingsSkipsReviewAndSavesNotifications(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
-	m := newTestModel(caller, Options{}, nil)
+	m := newTestModel(caller, Options{})
 	m.conn.product = "dal"
 	m = openSettingsPanel(t, m, "auto")
 	if strings.Contains(dockText(m), "Edit review") {
@@ -256,7 +256,7 @@ func TestDalSettingsSkipsReviewAndSavesNotifications(t *testing.T) {
 func TestDalgonaSettingsKeepsReviewAndNotifications(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
-	m := newTestModel(caller, Options{}, nil)
+	m := newTestModel(caller, Options{})
 	m.conn.product = "dalgona"
 	m = openSettingsPanel(t, m, "auto")
 	for range 5 {

@@ -44,7 +44,7 @@ func BenchmarkIgnoredFileDirOnlyRules(b *testing.B) {
 	paths := ignoreBenchPaths(root, 200000)
 	p50 := benchSamples(b, nil, func() {
 		for _, p := range paths {
-			_ = stack.ignored(root, p, false)
+			_ = stack.ignored(p, false)
 		}
 	})
 	b.ReportMetric(p50/float64(len(paths)), "ns/path")
@@ -82,7 +82,7 @@ func BenchmarkIgnoredRuleStack(b *testing.B) {
 			}
 			p50 := benchSamples(b, nil, func() {
 				for _, p := range paths {
-					_ = stack.ignored(root, p, false)
+					_ = stack.ignored(p, false)
 				}
 			})
 			b.ReportMetric(p50/float64(len(paths)), "ns/path")

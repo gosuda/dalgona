@@ -41,72 +41,67 @@ func AppendConversationState(dst []byte, m *ConversationState) []byte {
 
 func ConsumeConversationState(b []byte, m *ConversationState) error {
 	return connectwire.ConsumeFields(b, "cursor conversation", func(f connectwire.Field) error {
-		switch {
-		case f.Number <= 5:
-			return consumeConversationBase(f, m)
-		case f.Number <= 9:
-			return consumeConversationTurns(f, m)
-		default:
-			return consumeConversationExtra(f, m)
-		}
+		return consumeConversationStateField(f, m)
 	})
 }
 
-func consumeConversationBase(f connectwire.Field, m *ConversationState) error {
+func consumeConversationStateField(f connectwire.Field, m *ConversationState) error {
+	if f.Number <= 4 {
+		return consumeConversationPrompts(f, m)
+	}
+	if f.Number <= 10 {
+		return consumeConversationViews(f, m)
+	}
+	return consumeConversationSummaries(f, m)
+}
+
+func consumeConversationPrompts(f connectwire.Field, m *ConversationState) error {
 	switch f.Number {
 	case 1:
-		return appendConversationBytes(f, &m.RootPromptMessages)
+		return connectwire.AppendBytesField(f, "cursor conversation", &m.RootPromptMessages)
 	case 2:
-		return appendConversationBytes(f, &m.TurnsOld)
+		return connectwire.AppendBytesField(f, "cursor conversation", &m.TurnsOld)
 	case 3:
-		return appendConversationBytes(f, &m.Todos)
+		return connectwire.AppendBytesField(f, "cursor conversation", &m.Todos)
 	case 4:
-		return appendConversationBytes(f, &m.PendingToolCalls)
-	case 5:
-		return connectwire.SetBytes(f, "cursor conversation", &m.TokenDetailsView)
+		return connectwire.AppendBytesField(f, "cursor conversation", &m.PendingToolCalls)
 	default:
 		return nil
 	}
 }
 
-func consumeConversationTurns(f connectwire.Field, m *ConversationState) error {
+func consumeConversationViews(f connectwire.Field, m *ConversationState) error {
 	switch f.Number {
+	case 5:
+		return connectwire.SetBytes(f, "cursor conversation", &m.TokenDetailsView)
 	case 6:
 		return connectwire.SetBytes(f, "cursor conversation", &m.SummaryView)
 	case 7:
 		return connectwire.SetBytes(f, "cursor conversation", &m.PlanView)
 	case 8:
-		return appendConversationBytes(f, &m.Turns)
+		return connectwire.AppendBytesField(f, "cursor conversation", &m.Turns)
 	case 9:
-		return appendConversationBytes(f, &m.PreviousWorkspaces)
+		return connectwire.AppendBytesField(f, "cursor conversation", &m.PreviousWorkspaces)
+	case 10:
+		return connectwire.SetInt32(f, "cursor conversation", &m.Mode)
 	default:
 		return nil
 	}
 }
 
-func consumeConversationExtra(f connectwire.Field, m *ConversationState) error {
+func consumeConversationSummaries(f connectwire.Field, m *ConversationState) error {
 	switch f.Number {
-	case 10:
-		return connectwire.SetInt32(f, "cursor conversation", &m.Mode)
 	case 11:
 		return connectwire.SetBytes(f, "cursor conversation", &m.SummaryArchiveView)
 	case 13:
-		return appendConversationBytes(f, &m.SummaryArchives)
+		return connectwire.AppendBytesField(f, "cursor conversation", &m.SummaryArchives)
 	case 17:
 		return connectwire.SetUint32(f, "cursor conversation", &m.SelfSummaryCount)
 	case 18:
-		return appendConversationBytes(f, &m.ReadPaths)
+		return connectwire.AppendBytesField(f, "cursor conversation", &m.ReadPaths)
 	default:
 		return nil
 	}
-}
-
-func appendConversationBytes(f connectwire.Field, out *[][]byte) error {
-	if err := connectwire.RequireKind(f, protowire.BytesType, "cursor conversation"); err != nil {
-		return err
-	}
-	*out = append(*out, connectwire.BytesValue(f))
-	return nil
 }
 
 type UserMessage struct {

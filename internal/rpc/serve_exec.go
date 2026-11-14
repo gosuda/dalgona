@@ -283,6 +283,9 @@ func (s *server) commandExec(ctx context.Context, params jsontext.Value) (jsonte
 	if err != nil {
 		return nil, internalError(err)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, internalError(err)
+	}
 	if p.streamStdoutStderr {
 		if result.CapReached {
 			s.send("command/exec/outputDelta", commandOutputDelta{processID: p.processID, capReached: true})

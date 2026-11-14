@@ -75,20 +75,20 @@ func optionalString(object map[string]jsontext.Value, name string) (string, bool
 	return text, true, err
 }
 
-func optionalBool(object map[string]jsontext.Value, name string) (bool, bool, error) {
+func optionalBool(object map[string]jsontext.Value, name string) (bool, error) {
 	value, ok := object[name]
 	if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-		return false, false, nil
+		return false, nil
 	}
 	decoder := jsontext.NewDecoder(bytes.NewReader(value))
 	token, err := decoder.ReadToken()
 	if err != nil {
-		return false, true, err
+		return false, err
 	}
 	if token.Kind() != 't' && token.Kind() != 'f' {
-		return false, true, errors.New("expected boolean")
+		return false, errors.New("expected boolean")
 	}
-	return token.Bool(), true, nil
+	return token.Bool(), nil
 }
 
 func optionalInt(object map[string]jsontext.Value, name string) (int, bool, error) {

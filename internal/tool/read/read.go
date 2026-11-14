@@ -57,11 +57,8 @@ func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result,
 	if err != nil {
 		return tool.Result{}, err
 	}
-	path, display, err := resolvePath(env.Cwd, env.Home, parsed.Path)
+	path, display, err := resolveTarget(env, parsed.Path)
 	if err != nil {
-		return tool.Result{}, err
-	}
-	if err = checkWorkspacePath(env, parsed.Path, path, display); err != nil {
 		return tool.Result{}, err
 	}
 	if testHookReadSwap != nil {
@@ -322,11 +319,17 @@ func resolvePath(cwd, home, raw string) (string, string, error) {
 	return filepath.Join(cwd, clean), filepath.ToSlash(clean), nil
 }
 
-func checkWorkspacePath(env tool.Env, raw, path, display string) error {
-	if filepath.IsAbs(raw) || !tool.IsLocalRunner(env.Runner) {
-		return nil
+func resolveTarget(env tool.Env, raw string) (string, string, error) {
+	path, display, err := resolvePath(env.Cwd, env.Home, raw)
+	if err != nil {
+		return "", "", err
 	}
-	return ensureWithinWorkspace(env.Cwd, path, display)
+	if !filepath.IsAbs(raw) && tool.IsLocalRunner(env.Runner) {
+		if err := ensureWithinWorkspace(env.Cwd, path, display); err != nil {
+			return "", "", err
+		}
+	}
+	return path, display, nil
 }
 
 var spillPattern = regexp.MustCompile(`^(?:blobs/[0-9a-f]{64}|runs/[^/]+/out|sessions/[^/]+/runs/[^/]+/out)$`)

@@ -4,13 +4,13 @@
 
 `dal` (달, "moon") is the minimal agent and terminal interface. `dalgona` (달고나, the Korean sugar candy) is the batteries-included harness built on the same core. One brand family, two products.
 
-Use lowercase `dal` and `dalgona` in running text. The executable names are `dal` and `dalgona`. Keep headings in sentence case and actions verb-first. Errors name what happened and how to fix it. Use no exclamation marks or moon puns in errors and status text. Keep any moon motif to at most one visual mark on a user-facing surface.
+Use lowercase `dal` and `dalgona` in running text. The executable names are `dal` and `dalgona`.
 
 ## Choose a product
 
 Use dal for the agent and terminal interface without a daemon. Use dalgona for a per-user daemon, durable Starlark workflows, remote runners, MCP tools, a web interface, and Codex desktop integration. Both use the same agent core and Codex-compatible client protocol. An optional advisor reviews a thread and sends notes. It does not approve actions.
 
-Sessions use an append-only JSONL journal with a SQLite mirror. Recovery follows recorded tool outcomes rather than assuming that an interrupted command did nothing. See [recovery](docs/spec/recovery.md) for the cases that can resume and those that must report interruption.
+Threads use an append-only JSONL journal with a SQLite mirror. Recovery follows recorded tool outcomes rather than assuming that an interrupted command did nothing. See [recovery](docs/spec/recovery.md) for the cases that can resume and those that must report interruption.
 
 ## Build from this checkout
 
@@ -218,4 +218,4 @@ These commands are specific to dalgona:
 
 [The documentation index](docs/README.md) links every current specification and decision. Start with [journal](docs/spec/journal.md), [recovery](docs/spec/recovery.md), and [protocol](docs/spec/protocol.md) for the core contracts.
 
-Read [CONTRIBUTE.md](CONTRIBUTE.md) before changing code and [REVIEW.md](REVIEW.md) before reviewing it. [AGENTS.md](AGENTS.md) contains repository instructions for coding agents. [justfile](justfile) declares the available checks. `just verify` runs the Go, spec-style, web, and Cloudflare checks. It also runs the hashline model check when `uv` is installed.
+Read [CONTRIBUTE.md](CONTRIBUTE.md) before changing code and [REVIEW.md](REVIEW.md) before reviewing it. [AGENTS.md](AGENTS.md) contains repository instructions for coding agents. [justfile](justfile) declares the available checks. `just verify` includes Go, web, and Cloudflare checks; `hashline-model` and `spec-style` run when `uv` is available. Without `uv`, they skip locally and fail when `CI=true`.

@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -40,12 +41,7 @@ func (h *dispatchProbe) Request(ctx context.Context, method string, params jsont
 func (h *dispatchProbe) saw(method string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, m := range h.methods {
-		if m == method {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(h.methods, method)
 }
 
 func (h *dispatchProbe) ctxErr() error {

@@ -50,7 +50,7 @@ export const panelsRefusedWhileRunning: Partial<Record<PanelKind, true>> = {
 	rewind: true,
 };
 
-export type ComposerInput =
+type ComposerInput =
 	| { readonly kind: "message"; readonly text: string }
 	| { readonly kind: "command"; readonly query: string }
 	| { readonly kind: "shell"; readonly command: string };

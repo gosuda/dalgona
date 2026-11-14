@@ -10,8 +10,6 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/tool"
 	asktool "github.com/gosuda/dalgona/internal/tool/ask"
-	"github.com/gosuda/dalgona/internal/tool/task"
-	"github.com/gosuda/dalgona/internal/tool/yield"
 )
 
 const (
@@ -42,16 +40,16 @@ func (t *Thread) withThreadTools(tools []tool.Tool) []tool.Tool {
 		return tools
 	}
 	if t.created.Parent != "" {
-		return append(tools, yield.New())
+		return append(tools, yieldTool{})
 	}
 	tools = append(tools, asktool.New(t))
 	if t.host.cfg.Product == config.ProductDalgona {
-		return append(tools, task.New(t))
+		return append(tools, taskTool{t: t})
 	}
 	return tools
 }
 
-func (t *Thread) Spawn(ctx context.Context, callID string, req task.Request) (tool.Result, error) {
+func (t *Thread) spawnChild(ctx context.Context, callID string, req TaskRequest) (tool.Result, error) {
 	select {
 	case t.children <- struct{}{}:
 	case <-ctx.Done():
@@ -69,7 +67,7 @@ func (t *Thread) Spawn(ctx context.Context, callID string, req task.Request) (to
 	return result, err
 }
 
-func (t *Thread) childFor(ctx context.Context, callID string, req task.Request) (*Thread, error) {
+func (t *Thread) childFor(ctx context.Context, callID string, req TaskRequest) (*Thread, error) {
 	raw, err := url.PathUnescape(callID)
 	if err == nil {
 		callID = raw
@@ -94,7 +92,7 @@ func (t *Thread) childFor(ctx context.Context, callID string, req task.Request) 
 	return child, err
 }
 
-func (t *Thread) notifyChildStarted(child *Thread, req task.Request, err error) {
+func (t *Thread) notifyChildStarted(child *Thread, req TaskRequest, err error) {
 	if err != nil || t.host.cfg.OnChildStarted == nil {
 		return
 	}
@@ -127,7 +125,7 @@ func childOf(state event.State, callID string) (string, bool) {
 	return "", false
 }
 
-func (t *Thread) childSpec(ctx context.Context, req task.Request, current Settings) (ThreadSpec, error) {
+func (t *Thread) childSpec(ctx context.Context, req TaskRequest, current Settings) (ThreadSpec, error) {
 	spec := ThreadSpec{
 		Cwd: t.created.Cwd, Model: current.Model, Approval: current.Approval,
 		Sandbox: current.Sandbox, Runner: cmp.Or(req.Runner, t.created.Runner), Parent: t.id,
@@ -242,7 +240,7 @@ func (h *childHistory) add(e event.Event) {
 	case event.AssistantMessage:
 		h.last = value
 	case event.ToolStarted:
-		if value.Tool == yield.Name {
+		if value.Tool == tool.YieldName {
 			h.yields[value.CallID] = value
 		}
 	case event.ToolCompleted:
@@ -255,16 +253,16 @@ func (h *childHistory) add(e event.Event) {
 func (t *Thread) yieldResult(started event.ToolStarted) tool.Result {
 	args, err := t.host.loadRaw(started.Args, started.ArgsBlob)
 	if err != nil {
-		return tool.Result{Output: []byte(task.ErrorText(err.Error()))}
+		return tool.Result{Output: []byte(taskErrorText(err.Error()))}
 	}
-	parsed, err := yield.Parse(args)
+	parsed, err := parseYield(args)
 	switch {
 	case err != nil:
-		return tool.Result{Output: []byte(task.ErrorText(err.Error()))}
+		return tool.Result{Output: []byte(taskErrorText(err.Error()))}
 	case parsed.IsError:
-		return tool.Result{Output: []byte(task.ErrorText(parsed.Error))}
+		return tool.Result{Output: []byte(taskErrorText(parsed.Error))}
 	default:
-		return tool.Result{Output: []byte(task.DataText(parsed.Data)), OK: true}
+		return tool.Result{Output: []byte(taskDataText(parsed.Data)), OK: true}
 	}
 }
 
@@ -281,7 +279,7 @@ func yieldedIn(v view, calls []event.ToolCall) bool {
 		}
 	}
 	for _, call := range calls {
-		if call.Name == yield.Name && outputs[call.ID] {
+		if call.Name == tool.YieldName && outputs[call.ID] {
 			return true
 		}
 	}

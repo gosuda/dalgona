@@ -10,7 +10,7 @@ export const IMAGE_TYPES: readonly string[] = [
 	"image/gif",
 ];
 
-export interface PasteChip {
+interface PasteChip {
 	readonly kind: "paste";
 	readonly id: number;
 	readonly text: string;
@@ -33,7 +33,7 @@ export interface ShellRun {
 	readonly text: string;
 }
 
-export interface ShellChip extends ShellRun {
+interface ShellChip extends ShellRun {
 	readonly kind: "shell";
 	readonly id: number;
 }

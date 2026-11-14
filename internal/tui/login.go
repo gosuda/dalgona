@@ -323,6 +323,21 @@ func (m *model) applyLoginResult(msg resultMsg) (tea.Cmd, bool) {
 	return nil, true
 }
 
+func (p *loginPanel) setProviders(response *rpc.AccountProvidersResponse) bool {
+	p.providers = response.Providers
+	p.cursor = 0
+	if p.want == "" {
+		return false
+	}
+	index := slices.IndexFunc(p.providers, func(prov rpc.AccountProvider) bool { return prov.ID == p.want })
+	if index < 0 {
+		p.err = "unknown provider " + p.want + "; choose one below"
+		return false
+	}
+	p.cursor = index
+	return true
+}
+
 func (m *model) applyProviders(msg resultMsg) {
 	panel := m.login
 	if panel == nil {
@@ -338,18 +353,9 @@ func (m *model) applyProviders(msg resultMsg) {
 		panel.err = "providers response has an unexpected shape; reconnect and retry"
 		return
 	}
-	panel.providers = response.Providers
-	panel.cursor = 0
-	if panel.want == "" {
-		return
+	if panel.setProviders(response) {
+		m.openMethods()
 	}
-	index := slices.IndexFunc(panel.providers, func(p rpc.AccountProvider) bool { return p.ID == panel.want })
-	if index < 0 {
-		panel.err = "unknown provider " + panel.want + "; choose one below"
-		return
-	}
-	panel.cursor = index
-	m.openMethods()
 }
 
 func (m *model) applyKeyResult(msg resultMsg) {

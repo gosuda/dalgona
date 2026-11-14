@@ -132,7 +132,7 @@ func TestDecisionPointFollowsDockTheme(t *testing.T) {
 			for _, tc := range pointCases {
 				t.Run(tc.name, func(t *testing.T) {
 					t.Parallel()
-					m := newTestModel(nil, Options{}, nil)
+					m := newTestModel(nil, Options{})
 					m.screen.themeSetting = tc.setting
 					m.screen.setTheme()
 					for _, msg := range tc.terminal {
@@ -154,7 +154,7 @@ const featuresQuestionJSON = `{"threadId":"t1","turnId":"turn-1","itemId":"call-
 
 func questionViewAt(t *testing.T, data string, width, height int) string {
 	t.Helper()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: width, Height: height})
 	m, _ = drive(t, m, notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)})
 	m, _ = drive(t, m, questionRequest(make(chan requestAnswer, 1), data))

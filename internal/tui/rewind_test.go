@@ -36,7 +36,7 @@ func rewindTree() rpc.ThreadTreeResponse {
 }
 
 func idleRewindModel(caller caller) model {
-	m := newTestModel(caller, Options{}, nil)
+	m := newTestModel(caller, Options{})
 	m.thread.id = "t1"
 	m.thread.state = stateIdle
 	return m
@@ -133,7 +133,7 @@ func TestEscAfterEndedTurnDoesNotRewind(t *testing.T) {
 func TestRewindWithoutThreadDoesNothing(t *testing.T) {
 	t.Parallel()
 	caller := &treeCaller{tree: rewindTree()}
-	m := newTestModel(caller, Options{}, nil)
+	m := newTestModel(caller, Options{})
 	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
 	if m.hint.pending == "rewind" {
 		t.Fatalf("esc with no thread set the rewind hint %q", m.hint.text)

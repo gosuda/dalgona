@@ -88,8 +88,8 @@ func (c *credentials) apiKey(provider, env string) func(context.Context) (string
 	}
 }
 
-func (c *credentials) token(ctx context.Context, provider string) (oauth.Token, error) {
-	return c.source(ctx, provider).Token(ctx)
+func (c *credentials) chatgptToken(ctx context.Context) (oauth.Token, error) {
+	return c.source(ctx, "chatgpt").Token(ctx)
 }
 
 func (c *credentials) access(provider string) func(context.Context) (string, error) {
@@ -192,7 +192,7 @@ func (c *credentials) build(cfg config.Config, onRetry agent.RetryFunc, override
 		"openai":      openai.New(openai.Config{APIKey: override.apiKey(c, "openai", ""), Retry: retry, ContextWindows: windows["openai"]}),
 		"anthropic":   anthropic.New(anthropic.Config{APIKey: override.apiKey(c, "anthropic", ""), Retry: retry, ContextWindows: windows["anthropic"]}),
 		"google":      google.New(google.Config{APIKey: override.apiKey(c, "google", ""), Retry: retry, ContextWindows: windows["google"]}),
-		"chatgpt":     chatgpt.New(chatgpt.Config{Token: func(ctx context.Context) (oauth.Token, error) { return c.token(ctx, "chatgpt") }, Retry: retry, ContextWindows: windows["chatgpt"]}),
+		"chatgpt":     chatgpt.New(chatgpt.Config{Token: c.chatgptToken, Retry: retry, ContextWindows: windows["chatgpt"]}),
 		"antigravity": antigravity.New(antigravity.Config{Token: c.access("antigravity"), Retry: retry, ContextWindows: windows["antigravity"]}),
 		"cursor":      cursor.New(cursor.Config{Token: c.access("cursor"), Retry: retry, ContextWindows: windows["cursor"]}),
 		"devin":       devin.New(devin.Config{APIKey: c.devinKey, Retry: retry, ContextWindows: windows["devin"]}),

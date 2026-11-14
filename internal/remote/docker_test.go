@@ -24,7 +24,7 @@ func TestDockerBindRecoverAndPull(t *testing.T) {
 	store := openJournal(t)
 	cwd := gitWorkspace(t)
 	thread := "docker-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	startThread(t, store, thread, cwd, "box")
+	startThread(t, store, thread, cwd)
 	cfg := config.Config{Home: t.TempDir(), Runners: map[string]config.RunnerSpec{
 		"box": {Service: "docker", Image: "docker.io/library/buildpack-deps:stable"},
 	}}

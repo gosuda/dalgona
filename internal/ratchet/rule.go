@@ -17,20 +17,28 @@ type guard struct {
 	pair
 }
 
-//nolint:revive // the six inputs of one round decision are fixed by the ratchet plan
-func decideRound(target string, t pair, guards []guard, ref, variant string, reruns int) (string, string) {
-	decision, reason := judgeRound(target, t, guards, ref, variant)
-	if decision == "rerun" && reruns >= maxReruns {
-		return "revert", fmt.Sprintf("rerun limit reached: %s was rerun %d times", variant, maxReruns)
+type roundInput struct {
+	Target  string
+	Pair    pair
+	Guards  []guard
+	Ref     string
+	Variant string
+	Reruns  int
+}
+
+func decideRound(in roundInput) (string, string) {
+	decision, reason := judgeRound(in)
+	if decision == "rerun" && in.Reruns >= maxReruns {
+		return "revert", fmt.Sprintf("rerun limit reached: %s was rerun %d times", in.Variant, maxReruns)
 	}
 	return decision, reason
 }
 
-func judgeRound(target string, t pair, guards []guard, ref, variant string) (string, string) {
-	if regressed := regressedGuards(guards); len(regressed) > 0 {
-		return "revert", "guardrail regressed vs " + ref + ": " + strings.Join(regressed, ", ")
+func judgeRound(in roundInput) (string, string) {
+	if regressed := regressedGuards(in.Guards); len(regressed) > 0 {
+		return "revert", "guardrail regressed vs " + in.Ref + ": " + strings.Join(regressed, ", ")
 	}
-	return judgeTarget(target, t, ref, variant)
+	return judgeTarget(in.Target, in.Pair, in.Ref, in.Variant)
 }
 
 func regressedGuards(guards []guard) []string {

@@ -74,9 +74,9 @@ func openJournal(t *testing.T) *journal.Store {
 	return store
 }
 
-func startThread(t *testing.T, store *journal.Store, id, cwd, runnerName string) {
+func startThread(t *testing.T, store *journal.Store, id, cwd string) {
 	t.Helper()
-	appendCreated(t, store, event.SessionCreated{ID: id, Cwd: cwd, Runner: runnerName})
+	appendCreated(t, store, event.SessionCreated{ID: id, Cwd: cwd, Runner: "box"})
 }
 
 func startFork(t *testing.T, store *journal.Store, id, parent string) {

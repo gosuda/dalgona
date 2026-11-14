@@ -86,7 +86,7 @@ func clientVersion() string {
 }
 
 func (m *model) loadKeywords() tea.Cmd {
-	var keywords []Keyword
+	var keywords []keyword
 	return m.call("keywords", "dalgona/keywords/list", rpc.DalgonaKeywordsListParams{}, &keywords, "")
 }
 
@@ -289,13 +289,12 @@ func (m *model) queueFollowup() tea.Cmd {
 	return nil
 }
 
-func (m *model) dequeueFollowup() tea.Cmd {
+func (m *model) dequeueFollowup() {
 	last := len(m.queue) - 1
 	text := m.queue[last]
 	m.queue = m.queue[:last]
 	m.syncQueue()
 	m.input.composer.SetValue(text)
-	return nil
 }
 
 func (m *model) startQueuedFollowup() tea.Cmd {
@@ -584,7 +583,7 @@ func (m *model) restoreComposer(text string) {
 }
 
 func (m *model) applyKeywords(value any) tea.Cmd {
-	keywords, ok := value.(*[]Keyword)
+	keywords, ok := value.(*[]keyword)
 	if !ok {
 		m.errorf("keyword list has an unexpected shape; restart the TUI to retry")
 		return nil

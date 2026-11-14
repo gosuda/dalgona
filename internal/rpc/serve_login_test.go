@@ -125,7 +125,7 @@ func TestAPIKeyNeverReachesLogsJournalOrModel(t *testing.T) {
 	c.ok("thread/start", map[string]any{"cwd": r.cwd, "model": "gpt-test"}, &started)
 	c.await("thread/started", nil)
 	startTurn(t, c, started.Thread.ID, "my key is "+loginKeyText)
-	c.collect("turn/completed")
+	c.collect()
 	if strings.Contains(logs.String(), loginKeyText) {
 		t.Fatal("the API key reached the logs")
 	}

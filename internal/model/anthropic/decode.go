@@ -34,7 +34,7 @@ type responseEvent struct {
 	Delta        delta
 	Usage        usage
 	HasUsage     bool
-	Error        *providerError
+	Error        *model.ProviderError
 }
 
 type messageStart struct {
@@ -58,12 +58,6 @@ type delta struct {
 	StopReason string
 }
 
-type providerError struct {
-	Type    string
-	Code    string
-	Message string
-}
-
 type usage struct {
 	Input      int
 	Output     int
@@ -76,11 +70,7 @@ type usage struct {
 }
 
 func (s *responseState) consume(ctx context.Context, gate *model.StartGate, body io.ReadCloser, options model.RetryOptions) model.AttemptResult {
-	err := model.ReadSSEWithTimeouts(ctx, body, model.SSEOptions{IdleTimeout: options.IdleTimeout, Control: s.stream.Timers()}, func(event, data []byte) error {
-		gate.FirstEvent()
-		return s.handle(event, data)
-	})
-	err = gate.Error(ctx, err)
+	err := gate.ConsumeSSE(ctx, body, s.stream.Timers(), options.IdleTimeout, s.handle)
 	if err == nil {
 		err = s.finish()
 	}
@@ -228,7 +218,7 @@ func anthropicStopReason(reason string) (string, error) {
 	}
 }
 
-func errorMessage(value *providerError) string {
+func errorMessage(value *model.ProviderError) string {
 	if value == nil {
 		return "anthropic: provider error"
 	}
@@ -310,7 +300,7 @@ func readResponseNestedField(decoder *jsontext.Decoder, key string, value *respo
 		value.HasUsage = true
 		err = readUsage(decoder, &value.Usage)
 	case "error":
-		value.Error, err = readProviderError(decoder)
+		value.Error, err = model.ReadProviderError(decoder)
 	default:
 		err = decoder.SkipValue()
 	}
@@ -368,28 +358,6 @@ func readDelta(decoder *jsontext.Decoder, delta *delta) error {
 		}
 		return err
 	})
-}
-
-func readProviderError(decoder *jsontext.Decoder) (*providerError, error) {
-	if decoder.PeekKind() == 'n' {
-		return nil, decoder.SkipValue()
-	}
-	value := &providerError{}
-	err := model.ReadObjectFields(decoder, func(key string) error {
-		var err error
-		switch key {
-		case "type":
-			value.Type, err = model.ReadString(decoder)
-		case "code":
-			value.Code, err = model.ReadScalar(decoder)
-		case "message":
-			value.Message, err = model.ReadString(decoder)
-		default:
-			err = decoder.SkipValue()
-		}
-		return err
-	})
-	return value, err
 }
 
 func readUsage(decoder *jsontext.Decoder, usage *usage) error {

@@ -37,7 +37,7 @@ func TestChildEditApprovalSentOncePerConnection(t *testing.T) {
 		t.Fatalf("item/fileChange/patchUpdated for call-patch sent %d times, want 1", sent)
 	}
 	c.respond(second.ID, `{"decision":"accept"}`)
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "parent turn status", log.status)
 }
 

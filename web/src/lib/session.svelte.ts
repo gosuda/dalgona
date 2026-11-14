@@ -119,7 +119,7 @@ export interface RpcPort {
 	close(): void;
 }
 
-export interface SessionLocation {
+interface SessionLocation {
 	readonly hash: string;
 	readonly host: string;
 	readonly pathname: string;
@@ -178,7 +178,7 @@ const reducerKinds = [
 
 type ReducerKind = (typeof reducerKinds)[number];
 
-export const everyNotificationListed: [
+const _everyNotificationListed: [
 	Exclude<AppNotification["type"], EffectKind | ReducerKind>,
 ] extends [never]
 	? true
@@ -647,47 +647,28 @@ export class Session {
 			this.userAgent = info.userAgent;
 			this.platformFamily = info.platformFamily;
 			rpc.notify("initialized", {});
+			const safeLoad = (title: string, load: () => Promise<void>) =>
+				load().catch((error) => {
+					if (generation === this.connectionGeneration) {
+						this.reportFailure(
+							title,
+							error instanceof Error ? error : String(error),
+							() => void safeLoad(title, load),
+						);
+					}
+				});
 			await Promise.all([
-				this.loadThreads(generation).catch((error) => {
-					if (generation === this.connectionGeneration)
-						this.reportFailure(
-							"Unable to load threads",
-							error instanceof Error ? error : String(error),
-							() => void this.loadThreads(generation),
-						);
-				}),
-				this.loadModels(generation).catch((error) => {
-					if (generation === this.connectionGeneration)
-						this.reportFailure(
-							"Unable to load models",
-							error instanceof Error ? error : String(error),
-							() => void this.loadModels(generation),
-						);
-				}),
-				this.loadConfig(generation).catch((error) => {
-					if (generation === this.connectionGeneration)
-						this.reportFailure(
-							"Unable to load configuration",
-							error instanceof Error ? error : String(error),
-							() => void this.loadConfig(generation),
-						);
-				}),
-				this.loadKeywords(generation).catch((error) => {
-					if (generation === this.connectionGeneration)
-						this.reportFailure(
-							"Unable to load keywords",
-							error instanceof Error ? error : String(error),
-							() => void this.loadKeywords(generation),
-						);
-				}),
-				this.loadSettings(generation).catch((error) => {
-					if (generation === this.connectionGeneration)
-						this.reportFailure(
-							"Unable to load settings",
-							error instanceof Error ? error : String(error),
-							() => void this.loadSettings(generation),
-						);
-				}),
+				safeLoad("Unable to load threads", () => this.loadThreads(generation)),
+				safeLoad("Unable to load models", () => this.loadModels(generation)),
+				safeLoad("Unable to load configuration", () =>
+					this.loadConfig(generation),
+				),
+				safeLoad("Unable to load keywords", () =>
+					this.loadKeywords(generation),
+				),
+				safeLoad("Unable to load settings", () =>
+					this.loadSettings(generation),
+				),
 			]);
 		} catch (error) {
 			if (generation === this.connectionGeneration) {
@@ -1253,7 +1234,7 @@ export class Session {
 	async startLogin(
 		provider: string,
 		method: LoginMethod,
-		apiKey = "",
+		apiKey: string = "",
 	): Promise<void> {
 		const flow: LoginFlow = {
 			provider,

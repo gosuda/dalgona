@@ -10,9 +10,9 @@ import (
 	"github.com/gosuda/dalgona/internal/auth"
 )
 
-func newPatternMaskStore(t *testing.T, home, pattern string) *auth.Store {
+func newPatternMaskStore(t *testing.T, home string) *auth.Store {
 	t.Helper()
-	store, err := auth.NewWithPatterns(home, []string{pattern})
+	store, err := auth.NewWithPatterns(home, []string{`token-[a-z0-9]{8,}`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,9 +37,8 @@ func checkMaskUnmask(t *testing.T, store *auth.Store, masked, want, label string
 
 func TestStore_MaskConcurrentPatternSecretsKeepBoth(t *testing.T) {
 	home := t.TempDir()
-	const pattern = `token-[a-z0-9]{8,}`
-	storeA := newPatternMaskStore(t, home, pattern)
-	storeB := newPatternMaskStore(t, home, pattern)
+	storeA := newPatternMaskStore(t, home)
+	storeB := newPatternMaskStore(t, home)
 	const secretA = "token-aaaaaaaa"
 	const secretB = "token-bbbbbbbb"
 	var maskedA, maskedB string
@@ -63,7 +62,7 @@ func TestStore_MaskConcurrentPatternSecretsKeepBoth(t *testing.T) {
 	}
 	checkMaskUnmask(t, storeA, maskedB, secretB, "storeA unmask")
 	checkMaskUnmask(t, storeB, maskedA, secretA, "storeB unmask")
-	reloaded := newPatternMaskStore(t, home, pattern)
+	reloaded := newPatternMaskStore(t, home)
 	checkMaskUnmask(t, reloaded, maskedA, secretA, "reloaded unmask A")
 	checkMaskUnmask(t, reloaded, maskedB, secretB, "reloaded unmask B")
 }

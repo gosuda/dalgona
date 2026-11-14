@@ -573,7 +573,11 @@ func BenchmarkFirstUse(b *testing.B) {
 
 func benchFirstUseSample(b *testing.B, name string) time.Duration {
 	b.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestFirstUseProbe$", "-test.count=1") //nolint:gosec // re-executes this test binary with the probe test only
+	exe, err := os.Executable()
+	if err != nil {
+		b.Fatalf("executable: %v", err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestFirstUseProbe$", "-test.count=1")
 	cmd.Env = append(os.Environ(), "DALGONA_SYNTAX_PROBE="+name)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

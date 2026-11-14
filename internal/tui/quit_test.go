@@ -35,7 +35,7 @@ func hasMsg[T tea.Msg](msgs []tea.Msg) bool {
 }
 
 func runningModel(client caller) model {
-	m := newTestModel(client, Options{}, nil)
+	m := newTestModel(client, Options{})
 	m.thread.id = "t1"
 	m.thread.turnID = "turn-1"
 	m.thread.state = stateRunning
@@ -89,7 +89,7 @@ func TestRateLimitWaitInterruptsOnFirstEsc(t *testing.T) {
 
 func TestCtrlCWindow(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
 	if m.quitting {
 		t.Fatal("first Ctrl+C quit")
@@ -105,7 +105,7 @@ func TestCtrlCWindow(t *testing.T) {
 
 func TestCtrlCWindowExpires(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
 	m, _ = drive(t, m, hintExpiredMsg{id: m.hint.id})
 	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
@@ -174,10 +174,10 @@ func TestQuitCommandWaitsForPrintedRows(t *testing.T) {
 
 func TestLeavingViewIsOneBlankRow(t *testing.T) {
 	t.Parallel()
-	quitting := newTestModel(nil, Options{}, nil)
+	quitting := newTestModel(nil, Options{})
 	quitting = rawUpdate(t, quitting, press('c', tea.ModCtrl, ""))
 	quitting = rawUpdate(t, quitting, press('c', tea.ModCtrl, ""))
-	suspending := rawUpdate(t, newTestModel(nil, Options{}, nil), press('z', tea.ModCtrl, ""))
+	suspending := rawUpdate(t, newTestModel(nil, Options{}), press('z', tea.ModCtrl, ""))
 	for name, m := range map[string]model{"quit": quitting, "suspend": suspending} {
 		view := m.View()
 		if view.Content != " " {
@@ -208,7 +208,7 @@ func TestSuspendWithoutSizeReturnsAtOnce(t *testing.T) {
 
 func TestResumeClearsLeaving(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.suspend()
 	m = rawUpdate(t, m, tea.ResumeMsg{})
 	if m.leaving {

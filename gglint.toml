@@ -1,0 +1,17 @@
+# Go exports runtime.fastrand64 through legacy_fastrand64.
+[[exclude]]
+paths = ['^cmd/dalgona/battery\.go$']
+rules = ["checklinkname"]
+text = '^remote symbol "fastrand64" not defined in package "runtime"$'
+
+# Native lint owns this required package-boundary directive.
+[[exclude]]
+paths = ['^internal/tool/search/build\.go$']
+rules = ["nolint"]
+text = '^unknown nolint rule "depguard"$'
+
+# Native lint checks these gosec directives; gglint omits their rules.
+[[exclude]]
+paths = ['^internal/(daemon/(run|socketperm_test)|ratchet/setup|rpc/serve_fuzzy|script/stdlib/random|tool/search/manifest|webui/webui_test)\.go$']
+rules = ["nolint"]
+text = '^unused nolint directive for gosec$'

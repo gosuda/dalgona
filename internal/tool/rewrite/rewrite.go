@@ -84,7 +84,6 @@ func (Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Plan
 	if err := json.Unmarshal(call.Args, &a, json.RejectUnknownMembers(true)); err != nil {
 		return tool.Plan{}, fmt.Errorf("rewrite: invalid arguments: %w", err)
 	}
-	shown := a.Pattern
 	pattern, replace, err := unmaskArgs(env, a.Pattern, a.Replace)
 	if err != nil {
 		return tool.Plan{}, err
@@ -103,9 +102,9 @@ func (Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Plan
 		return tool.Plan{}, err
 	}
 	if len(files) == 0 {
-		return noMatch(shown), nil
+		return noMatch(a.Pattern), nil
 	}
-	if err = checkLimits(files); err != nil {
+	if err := checkLimits(files); err != nil {
 		return tool.Plan{}, err
 	}
 	summary, replaced := summarise(files)
@@ -164,7 +163,7 @@ func collect(ctx context.Context, env tool.Env, a args, spec query) ([]changed, 
 		return nil, cancelled(ctx, err)
 	}
 	if len(paths) > rewriteMaxScanned {
-		return nil, fmt.Errorf("rewrite: %d files match; the limit is %d. Narrow path or glob.", len(paths), rewriteMaxScanned) //nolint:staticcheck // the planned refusal keeps its final period
+		return nil, refusalError(fmt.Sprintf("rewrite: %d files match; the limit is %d. Narrow path or glob.", len(paths), rewriteMaxScanned))
 	}
 	sc := scanner{env: env, parser: spec.lang.NewParser(), spec: spec, target: a.Target}
 	var out []changed
@@ -214,7 +213,7 @@ func (sc scanner) read(ctx context.Context, path string) ([]byte, error) {
 		return nil, cancelled(ctx, err)
 	}
 	if info.Size > rewriteMaxFileBytes {
-		return nil, fmt.Errorf("rewrite: %s is over %d bytes; narrow path or glob.", path, rewriteMaxFileBytes) //nolint:staticcheck // the planned refusal keeps its final period
+		return nil, refusalError(fmt.Sprintf("rewrite: %s is over %d bytes; narrow path or glob.", path, rewriteMaxFileBytes))
 	}
 	src, err := sc.env.Runner.ReadFile(ctx, absolute)
 	if err != nil {
@@ -246,28 +245,28 @@ func (sc scanner) check(ctx context.Context, path string, src, post []byte, edit
 		return changed{}, false, err
 	}
 	if after.SyntaxErrors {
-		return changed{}, false, fmt.Errorf("rewrite: %s has a syntax error at line %d after the rewrite; nothing was written.", path, after.ErrorLine) //nolint:staticcheck // the planned refusal keeps its final period
+		return changed{}, false, refusalError(fmt.Sprintf("rewrite: %s has a syntax error at line %d after the rewrite; nothing was written.", path, after.ErrorLine))
 	}
 	return changed{path: path, src: src, post: post, edits: edits}, true, nil
 }
 
 func checkStopped(path string, report syntax.Report) error {
 	if report.Stopped {
-		return fmt.Errorf("rewrite: parse stopped for %s; nothing was written.", path) //nolint:staticcheck // the planned refusal keeps its final period
+		return refusalError(fmt.Sprintf("rewrite: parse stopped for %s; nothing was written.", path))
 	}
 	return nil
 }
 
 func checkLimits(files []changed) error {
 	if len(files) > rewriteMaxFiles {
-		return fmt.Errorf("rewrite: %d files would change; the limit is %d. Narrow path or glob.", len(files), rewriteMaxFiles) //nolint:staticcheck // the planned refusal keeps its final period
+		return refusalError(fmt.Sprintf("rewrite: %d files would change; the limit is %d. Narrow path or glob.", len(files), rewriteMaxFiles))
 	}
 	total := 0
 	for _, file := range files {
 		total += len(file.edits)
 	}
 	if total > rewriteMaxEdits {
-		return fmt.Errorf("rewrite: %d replacements would change; the limit is %d. Narrow path or glob.", total, rewriteMaxEdits) //nolint:staticcheck // the planned refusal keeps its final period
+		return refusalError(fmt.Sprintf("rewrite: %d replacements would change; the limit is %d. Narrow path or glob.", total, rewriteMaxEdits))
 	}
 	return nil
 }
@@ -302,3 +301,7 @@ func cancelled(ctx context.Context, err error) error {
 	}
 	return err
 }
+
+type refusalError string
+
+func (e refusalError) Error() string { return string(e) }

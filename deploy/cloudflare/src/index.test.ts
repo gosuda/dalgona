@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { createHmac } from "node:crypto";
 import { test } from "node:test";
 import worker, { Box, boxToken } from "./index.ts";
 
@@ -22,6 +23,10 @@ type FakeEnv = {
 };
 
 const MASTER_TOKEN = "test-master-token";
+
+function expectedBoxToken(token: string, box: string): string {
+	return createHmac("sha256", token).update(box).digest("hex");
+}
 
 function createStub(): Stub {
 	const seen: SeenRequest[] = [];
@@ -277,7 +282,9 @@ test("destroys the box container on DELETE", async () => {
 test("derives the same token for the same box", async () => {
 	const first = await boxToken(MASTER_TOKEN, "alpha");
 	const second = await boxToken(MASTER_TOKEN, "alpha");
-	assert.equal(first, second);
+	const expected = expectedBoxToken(MASTER_TOKEN, "alpha");
+	assert.equal(first, expected);
+	assert.equal(second, expected);
 });
 
 test("derives different tokens for different boxes", async () => {
@@ -294,7 +301,7 @@ test("derives a box token that differs from the master token", async () => {
 
 test("rejects the token for one box on another box route", async () => {
 	const { env, stubs } = createEnv();
-	const token = await boxToken(MASTER_TOKEN, "alpha");
+	const token = expectedBoxToken(MASTER_TOKEN, "alpha");
 	const response = await worker.fetch(
 		request("/box/beta", { bearer: token, method: "POST" }),
 		env,
@@ -305,7 +312,7 @@ test("rejects the token for one box on another box route", async () => {
 
 test("rejects a box token on its own box route", async () => {
 	const { env, stubs } = createEnv();
-	const token = await boxToken(MASTER_TOKEN, "alpha");
+	const token = expectedBoxToken(MASTER_TOKEN, "alpha");
 	const response = await worker.fetch(
 		request("/box/alpha", {
 			bearer: token,
@@ -398,7 +405,7 @@ test("Box answers 500 and forwards nothing without a box name", async () => {
 
 test("Box forwards the derived box token instead of the worker token", async () => {
 	const { box, seen } = createBox("alpha");
-	const expected = await boxToken(MASTER_TOKEN, "alpha");
+	const expected = expectedBoxToken(MASTER_TOKEN, "alpha");
 	const response = await box.fetch(
 		new Request("https://worker.test/", {
 			headers: { Authorization: `Bearer ${MASTER_TOKEN}` },
@@ -419,11 +426,12 @@ test("Box forwards the derived box token instead of the worker token", async () 
 
 test("Box exposes the derived token as DALGONA_BOX_TOKEN", async () => {
 	const { box, seen } = createBox("alpha");
-	const expected = await boxToken(MASTER_TOKEN, "alpha");
+	const expected = expectedBoxToken(MASTER_TOKEN, "alpha");
 	const response = await box.fetch(new Request("https://worker.test/"));
 	assert.equal(response.status, 200);
-	assert.equal(seen.envVars?.["DALGONA_BOX_TOKEN"], expected);
-	assert.notEqual(seen.envVars?.["DALGONA_BOX_TOKEN"], MASTER_TOKEN);
+	const { DALGONA_BOX_TOKEN: token } = seen.envVars ?? {};
+	assert.equal(token, expected);
+	assert.notEqual(token, MASTER_TOKEN);
 });
 
 test("Boxes for different names forward different tokens", async () => {
@@ -444,7 +452,7 @@ test("Boxes for different names forward different tokens", async () => {
 	}
 	const firstAuth = firstForwarded.headers.get("Authorization");
 	const secondAuth = secondForwarded.headers.get("Authorization");
-	assert.equal(firstAuth, `Bearer ${await boxToken(MASTER_TOKEN, "alpha")}`);
-	assert.equal(secondAuth, `Bearer ${await boxToken(MASTER_TOKEN, "beta")}`);
+	assert.equal(firstAuth, `Bearer ${expectedBoxToken(MASTER_TOKEN, "alpha")}`);
+	assert.equal(secondAuth, `Bearer ${expectedBoxToken(MASTER_TOKEN, "beta")}`);
 	assert.notEqual(firstAuth, secondAuth);
 });

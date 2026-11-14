@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/runner"
@@ -307,8 +308,7 @@ func publishAbsent(ctx context.Context, env tool.Env, state *writeState, target 
 
 func rollback(ctx context.Context, env tool.Env, effects []*writeEffect) []string {
 	var failures []string
-	for i := len(effects) - 1; i >= 0; i-- {
-		effect := effects[i]
+	for _, effect := range slices.Backward(effects) {
 		if err := restoreEffect(ctx, env, effect); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v (backup %s)", effect.target, err, effect.state.backup))
 		}

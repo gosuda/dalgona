@@ -714,6 +714,7 @@ func TestEditReviewTruncatedUnitVerdict(t *testing.T) {
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
 			judge := &judgeStub{scores: row.scores}
 			h := judgedHarness(t, judge, []string{"lost_code"})
 			file, pairs := blockEdits(20)
@@ -836,7 +837,7 @@ func TestRequireMaskedRejectsChangedState(t *testing.T) {
 	}
 }
 
-func seededEdit(h *harness) []event.Event {
+func seededEdit() []event.Event {
 	args := patchArgs("a.txt", [2]string{"one", "uno"})
 	return append(openTurn("fix it"),
 		assistantCall("e1", "patch", args),
@@ -849,7 +850,7 @@ func TestRecoveryNeverJudgesCompletedEdit(t *testing.T) {
 	judge := &judgeStub{}
 	h := judgedHarness(t, judge, nil)
 	h.write("a.txt", "uno\n")
-	h.seed(append(seededEdit(h), event.ToolCompleted{CallID: "e1", OK: true, Output: "patched", Recovered: "none"})...)
+	h.seed(append(seededEdit(), event.ToolCompleted{CallID: "e1", OK: true, Output: "patched", Recovered: "none"})...)
 	h.model.push(text("done"))
 	events := h.recoverSession()
 	if judge.count() != 0 || len(judgedOf(events)) != 0 {

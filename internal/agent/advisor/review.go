@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -233,7 +234,7 @@ func (a *advisor) input(cursor uint64) (reviewInput, error) {
 	if err != nil {
 		return reviewInput{}, fmt.Errorf("advisor: read primary: %w", err)
 	}
-	return reviewInput{text: boundedRender(read.Events, inputBudget), head: read.Head, reset: read.Reset}, nil
+	return reviewInput{text: boundedRender(read.Events), head: read.Head, reset: read.Reset}, nil
 }
 
 func (a *advisor) submit(ctx context.Context, in reviewInput) error {
@@ -567,30 +568,32 @@ func (a *advisor) reset() {
 
 func (a *advisor) status(primary []event.Seqd) (Status, error) {
 	a.mu.Lock()
-	out := Status{Name: a.name, Model: a.model, State: a.stateLocked()}
+	name, model, state := a.name, a.model, a.stateLocked()
 	child := a.child
 	a.mu.Unlock()
+	notes := 0
 	for _, item := range primary {
-		if note, ok := item.Event.(event.AdvisorNote); ok && note.Advisor == a.name {
-			out.Notes++
+		if note, ok := item.Event.(event.AdvisorNote); ok && note.Advisor == name {
+			notes++
 		}
 	}
 	if child == nil {
-		return out, nil
+		return Status{Name: name, Model: model, State: state, Notes: notes}, nil
 	}
 	read, err := child.ReadAfter(0)
 	if err != nil {
-		return out, fmt.Errorf("advisor: read %s: %w", a.name, err)
+		return Status{Name: name, Model: model, State: state, Notes: notes}, fmt.Errorf("advisor: read %s: %w", name, err)
 	}
+	var usage event.Usage
 	for _, item := range read.Events {
 		if message, ok := item.Event.(event.AssistantMessage); ok {
-			out.Usage.Input += message.Usage.Input
-			out.Usage.Output += message.Usage.Output
-			out.Usage.CacheRead += message.Usage.CacheRead
-			out.Usage.CacheWrite += message.Usage.CacheWrite
+			usage.Input += message.Usage.Input
+			usage.Output += message.Usage.Output
+			usage.CacheRead += message.Usage.CacheRead
+			usage.CacheWrite += message.Usage.CacheWrite
 		}
 	}
-	return out, nil
+	return Status{Name: name, Model: model, State: state, Notes: notes, Usage: usage}, nil
 }
 
 func (a *advisor) stateLocked() State {
@@ -606,7 +609,8 @@ func (a *advisor) stateLocked() State {
 	}
 }
 
-func boundedRender(events []event.Seqd, budget int) string {
+func boundedRender(events []event.Seqd) string {
+	budget := inputBudget
 	parts := make([]string, 0, min(len(events), 64))
 	remaining, first := budget, len(events)
 	for first > 0 {
@@ -627,8 +631,8 @@ func boundedRender(events []event.Seqd, budget int) string {
 	if first > 0 {
 		out.WriteString("[" + strconv.Itoa(first) + " earlier events omitted]\n")
 	}
-	for i := len(parts) - 1; i >= 0; i-- {
-		out.WriteString(parts[i])
+	for _, part := range slices.Backward(parts) {
+		out.WriteString(part)
 	}
 	return out.String()
 }

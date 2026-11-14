@@ -27,26 +27,27 @@ func (b *Binder) CloudUp(ctx context.Context, name string, copyAuth bool) error 
 	if err != nil {
 		return err
 	}
-	if spec, err = b.recordedBox(ctx, svc, name, spec); err != nil {
+	recorded, err := b.recordedBox(ctx, svc, name, spec)
+	if err != nil {
 		return err
 	}
-	current, l, err := connect(ctx, svc, spec.BoxID)
+	current, l, err := connect(ctx, svc, recorded.BoxID)
 	if err != nil {
 		return err
 	}
 	defer l.close()
-	if err = b.trackReplacement(name, spec, current); err != nil {
-		return err
+	if trackErr := b.trackReplacement(name, recorded, current); trackErr != nil {
+		return trackErr
 	}
-	if err = b.seedWorkspace(ctx, newRedialRunner(l, svc, current), current); err != nil {
-		return err
+	if seedErr := b.seedWorkspace(ctx, newRedialRunner(l, svc, current), current); seedErr != nil {
+		return seedErr
 	}
 	if copyAuth {
-		if err = b.copyAuth(ctx, l.remote); err != nil {
-			return err
+		if authErr := b.copyAuth(ctx, l.remote); authErr != nil {
+			return authErr
 		}
 	}
-	b.note("remote %s: %s box %s", name, spec.Service, current)
+	b.note("remote %s: %s box %s", name, recorded.Service, current)
 	return nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -70,8 +71,8 @@ func (w *worker) recoverCalls(ctx context.Context) error {
 }
 
 func lastCalls(v view) []event.ToolCall {
-	for i := len(v.records) - 1; i >= 0; i-- {
-		switch value := v.records[i].Event.(type) {
+	for _, item := range slices.Backward(v.records) {
+		switch value := item.Event.(type) {
 		case event.AssistantMessage:
 			return value.ToolCalls
 		case event.TurnStarted:
@@ -120,12 +121,12 @@ func approvalFor(v view, callID string) approvalRecord {
 	return record
 }
 
-func (w *worker) finishRecovered(ctx context.Context, p *prepared, recovered string) error {
+func (w *worker) finishRecovered(ctx context.Context, p *prepared) error {
 	completed, err := w.execute(ctx, p)
 	if err != nil {
 		return err
 	}
-	completed.Recovered = recovered
+	completed.Recovered = recoveredReplay
 	_, err = w.t.appendEvents(ctx, completed)
 	return err
 }
@@ -154,7 +155,7 @@ func (w *worker) recoverStarted(ctx context.Context, v view, state event.ToolSta
 	case tool.ClassScript:
 		return w.recoverScript(ctx, v, p)
 	case tool.ClassRead, tool.ClassAgent:
-		return w.finishRecovered(ctx, p, recoveredReplay)
+		return w.finishRecovered(ctx, p)
 	}
 	return w.completeRecovered(ctx, state.CallID, remoteInterrupt, recoveredStopped)
 }
@@ -163,7 +164,7 @@ func (w *worker) recoverScript(ctx context.Context, v view, p *prepared) error {
 	if err := w.recoverNested(ctx, v, p.call.ID+"/"); err != nil {
 		return err
 	}
-	return w.finishRecovered(ctx, p, recoveredReplay)
+	return w.finishRecovered(ctx, p)
 }
 
 func (w *worker) recoverNested(ctx context.Context, v view, prefix string) error {
@@ -198,7 +199,7 @@ func (w *worker) recoverExec(ctx context.Context, p *prepared) error {
 		return w.completeRecovered(ctx, p.call.ID, execInterrupted+"\n"+err.Error(), recoveredStopped)
 	}
 	if out.Alive && out.Exit == nil {
-		return w.finishRecovered(ctx, p, recoveredReplay)
+		return w.finishRecovered(ctx, p)
 	}
 	projected, _ := tool.Project(data, tool.KeepTail, out.Path)
 	result := tool.Result{Output: []byte(projected), Path: out.Path}
@@ -272,14 +273,14 @@ func startedFiles(v view, callID string) []event.FileChange {
 func (w *worker) replanEdit(ctx context.Context, p *prepared) error {
 	editor, ok := p.tool.(tool.Editor)
 	if !ok {
-		return w.finishRecovered(ctx, p, recoveredReplay)
+		return w.finishRecovered(ctx, p)
 	}
 	plan, err := editor.Plan(ctx, p.toolCall(), w.env(p.verdict))
 	if err != nil {
 		return w.completeRecovered(ctx, p.call.ID, err.Error(), recoveredReplay)
 	}
 	p.plan = &plan
-	return w.finishRecovered(ctx, p, recoveredReplay)
+	return w.finishRecovered(ctx, p)
 }
 
 func (w *worker) fileSHA(ctx context.Context, path string) (string, error) {

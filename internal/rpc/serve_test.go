@@ -97,7 +97,7 @@ func TestServeTurnEmitsSchemaValidItems(t *testing.T) {
 	expect(t, strings.HasPrefix(hello.UserAgent, "dal/") && hello.CodexHome == r.home, "initialize", hello)
 	threadID := startThread(t, r, c, nil)
 	turnID := startTurn(t, c, threadID, "run it")
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted && log.turnID == turnID, "turn/completed", log)
 	kinds := make([]string, 0, len(log.completed))
 	for _, it := range log.completed {
@@ -200,7 +200,7 @@ func TestServeRunningThreadErrors(t *testing.T) {
 	c.ok("turn/steer", map[string]any{"threadId": threadID, "expectedTurnId": turnID, "input": []textInput{{Type: "text", Text: "also"}}}, &steer)
 	expect(t, steer.TurnID == turnID, "turn/steer turn", steer.TurnID)
 	close(gate)
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "turn status", log.status)
 }
 
@@ -231,7 +231,7 @@ func approvalRoundTrip(t *testing.T, decision, status string) {
 	var id string
 	err := json.Unmarshal(request.ID, &id)
 	expect(t, err == nil && fieldOf(t, resolved.Params, "requestId") == id, "serverRequest/resolved", string(resolved.Params))
-	command := findItem(readTurn(t, c.collect("turn/completed")).completed, "call-a")
+	command := findItem(readTurn(t, c.collect()).completed, "call-a")
 	expect(t, command.Status == status, "command item status", command)
 }
 
@@ -322,7 +322,7 @@ func TestServeQualifiesBareCodexModel(t *testing.T) {
 	expect(t, started.Model == "openai/gpt-test" && started.ModelProvider == "openai", "bare model start", started)
 	c.await("thread/started", nil)
 	startTurn(t, c, started.Thread.ID, "hi")
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "turn with bare model", log.status)
 	c.ok("thread/start", map[string]any{"cwd": r.cwd, "model": "gpt-x", "modelProvider": "anthropic"}, &started)
 	expect(t, started.Model == "anthropic/gpt-x", "explicit modelProvider", started.Model)
@@ -346,7 +346,7 @@ func TestServeArchiveHookBlocksTurnsAndRollsBack(t *testing.T) {
 	c.ok("thread/list", map[string]any{"archived": true}, &list)
 	expect(t, len(list.Data) == 0, "archived threads after a failed hook", list.Data)
 	startTurn(t, c, threadID, "after rollback")
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "turn after rollback", log.status)
 }
 
@@ -436,7 +436,7 @@ func turnApprovalReachesClient(t *testing.T, threadParams map[string]any, turnPo
 	}
 	expect(t, request.Method == "item/commandExecution/requestApproval" && fieldOf(t, request.Params, "itemId") == "call-t", "approval request", string(request.Params))
 	c.respond(request.ID, `{"decision":"accept"}`)
-	command := findItem(readTurn(t, c.collect("turn/completed")).completed, "call-t")
+	command := findItem(readTurn(t, c.collect()).completed, "call-t")
 	expect(t, command.Status == statusCompleted, "command after approval", command)
 }
 

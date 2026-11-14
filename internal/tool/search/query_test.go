@@ -221,10 +221,27 @@ func TestMainRejectsGenerationOutsideRoot(t *testing.T) {
 	}
 }
 
+func testExecutable(tb testing.TB) string {
+	tb.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	abs, err := filepath.Abs(resolved)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return abs
+}
+
 func runIndexedChild(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	var outBuf, errBuf bytes.Buffer
-	cmd := exec.Command(os.Args[0], args...) //nolint:gosec // re-executes this test binary with arguments the test builds
+	cmd := exec.Command(testExecutable(t), args...)
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 	err := cmd.Run()

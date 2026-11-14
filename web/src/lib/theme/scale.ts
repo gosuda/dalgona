@@ -32,5 +32,3 @@ export const scale = {
 	motionQuick: "120ms",
 	ease: "ease-out",
 } as const;
-
-export type ScaleToken = keyof typeof scale;

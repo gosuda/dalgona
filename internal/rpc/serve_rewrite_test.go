@@ -60,7 +60,7 @@ func TestRewriteCompletesAsFileChange(t *testing.T) {
 	c := r.connect()
 	threadID := startThread(t, r, c, nil)
 	startTurn(t, c, threadID, "rename")
-	live := liveItem(t, c.collect("turn/completed"), "r")
+	live := liveItem(t, c.collect(), "r")
 	expect(t, live.Type == "fileChange" && len(live.Changes) == 1, "live item", live)
 	requireRenameChange(t, live.Changes[0])
 	resumed := resumedItem(t, r, threadID, "r")

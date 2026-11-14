@@ -14,7 +14,6 @@ import (
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
 	asktool "github.com/gosuda/dalgona/internal/tool/ask"
-	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
 type RetryFunc func(attempt int, verdict model.Verdict, status int, delay time.Duration)
@@ -84,7 +83,7 @@ type HostConfig struct {
 	Runner           RunnerFactory
 	Decider          Decider
 	Extension        ExtensionFactory
-	OnChildStarted   func(child *Thread, req task.Request)
+	OnChildStarted   func(child *Thread, req TaskRequest)
 	Product          config.Product
 	Clock            func() time.Time
 	Logger           *slog.Logger

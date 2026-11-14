@@ -58,6 +58,8 @@ func start(t *testing.T, cfg Config, site fstest.MapFS, dial Dialer) *running {
 	ctx, cancel := context.WithCancel(t.Context())
 	r := &running{lines: make(lineSink, 8), stop: cancel, done: make(chan error, 1)}
 	go func() { r.done <- serve(ctx, cfg, site, dial, r.lines) }()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
 	for {
 		select {
 		case line := <-r.lines:
@@ -70,7 +72,7 @@ func start(t *testing.T, cfg Config, site fstest.MapFS, dial Dialer) *running {
 			return r
 		case err := <-r.done:
 			t.Fatalf("serve returned before announcing: %v", err)
-		case <-time.After(5 * time.Second):
+		case <-timer.C:
 			t.Fatal("serve did not announce a URL")
 		}
 	}

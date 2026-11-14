@@ -12,7 +12,7 @@ import (
 
 func paletteModel(t *testing.T) model {
 	t.Helper()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	return m
 }
@@ -214,7 +214,7 @@ func runFileSearch(t *testing.T, m model, command tea.Cmd) model {
 func TestAtFileCompletionInsertsPath(t *testing.T) {
 	t.Parallel()
 	caller := &fileSearchCaller{hits: []fileHit{{Path: "pkg/model.go"}}}
-	m := newTestModel(caller, Options{Cwd: "/work"}, nil)
+	m := newTestModel(caller, Options{Cwd: "/work"})
 	m, command := typeCommand(t, m, "@modl")
 	m = runFileSearch(t, m, command)
 	assertContains(t, dockText(m), "pkg/model.go")
@@ -226,7 +226,7 @@ func TestAtFileCompletionInsertsPath(t *testing.T) {
 
 func TestFileSearchStaleResultIgnored(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(&fileSearchCaller{}, Options{Cwd: "/work"}, nil)
+	m := newTestModel(&fileSearchCaller{}, Options{Cwd: "/work"})
 	m, _ = typeCommand(t, m, "@a")
 	first := m.input.popup.seq
 	m, _ = typeCommand(t, m, "b")
@@ -259,7 +259,7 @@ func TestFilePopupSteady(t *testing.T) {
 func TestFileSearchUnavailableShowsOnce(t *testing.T) {
 	t.Parallel()
 	caller := &fileSearchCaller{err: &rpc.RPCError{Code: -32601, Message: "method not found"}}
-	m := newTestModel(caller, Options{Cwd: "/work"}, nil)
+	m := newTestModel(caller, Options{Cwd: "/work"})
 	m, command := typeCommand(t, m, "@x")
 	m = runFileSearch(t, m, command)
 	assertContains(t, dockText(m), "File search is unavailable on this server")
@@ -274,7 +274,7 @@ func TestFileSearchUnavailableShowsOnce(t *testing.T) {
 func TestFilePaletteDropsRowsWhenQueryChanges(t *testing.T) {
 	t.Parallel()
 	caller := &fileSearchCaller{hits: []fileHit{{Path: "pkg/model.go"}}}
-	m := newTestModel(caller, Options{Cwd: "/work"}, nil)
+	m := newTestModel(caller, Options{Cwd: "/work"})
 	m, command := typeCommand(t, m, "@mod")
 	m = runFileSearch(t, m, command)
 	assertContains(t, dockText(m), "pkg/model.go")
@@ -288,9 +288,10 @@ func TestFilePaletteDropsRowsWhenQueryChanges(t *testing.T) {
 
 func TestFilePaletteTabIgnoresOlderHits(t *testing.T) {
 	t.Parallel()
-	caller := &fileSearchCaller{hits: []fileHit{{Path: "pkg/model.go"}}}
 	t.Run("deleted character", func(t *testing.T) {
-		m := newTestModel(caller, Options{Cwd: "/work"}, nil)
+		t.Parallel()
+		caller := &fileSearchCaller{hits: []fileHit{{Path: "pkg/model.go"}}}
+		m := newTestModel(caller, Options{Cwd: "/work"})
 		m, command := typeCommand(t, m, "@mod")
 		m = runFileSearch(t, m, command)
 		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
@@ -300,7 +301,9 @@ func TestFilePaletteTabIgnoresOlderHits(t *testing.T) {
 		}
 	})
 	t.Run("typed character", func(t *testing.T) {
-		m := newTestModel(caller, Options{Cwd: "/work"}, nil)
+		t.Parallel()
+		caller := &fileSearchCaller{hits: []fileHit{{Path: "pkg/model.go"}}}
+		m := newTestModel(caller, Options{Cwd: "/work"})
 		m, command := typeCommand(t, m, "@mod")
 		m = runFileSearch(t, m, command)
 		m, _ = typeCommand(t, m, "e")
@@ -314,7 +317,7 @@ func TestFilePaletteTabIgnoresOlderHits(t *testing.T) {
 func TestFilePaletteEnterWithoutRowsKeepsDraft(t *testing.T) {
 	t.Parallel()
 	caller := &fileSearchCaller{hits: []fileHit{{Path: "pkg/model.go"}}}
-	m := newTestModel(caller, Options{Cwd: "/work"}, nil)
+	m := newTestModel(caller, Options{Cwd: "/work"})
 	m.thread.id = "t1"
 	m, _ = typeCommand(t, m, "@mod")
 	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})

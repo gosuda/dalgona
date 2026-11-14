@@ -125,7 +125,7 @@ func TestOAuthRefreshIsSavedThroughTheHostStore(t *testing.T) {
 	if setErr := store.SetCredential("chatgpt", expired); setErr != nil {
 		t.Fatal(setErr)
 	}
-	token, err := newCredentials(store, config.ProductDalgona, nil).token(t.Context(), "chatgpt")
+	token, err := newCredentials(store, config.ProductDalgona, nil).chatgptToken(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,14 +173,14 @@ func TestOAuthReloginInAnotherProcessReplacesCachedToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	creds := newCredentials(store, config.ProductDalgona, nil)
-	if token, err := creds.token(t.Context(), "chatgpt"); err != nil || token.Access != "first-access" {
+	if token, err := creds.chatgptToken(t.Context()); err != nil || token.Access != "first-access" {
 		t.Fatalf("first token = %+v, %v", token, err)
 	}
 	second := auth.Credential{Type: "oauth", Access: "second-access", Refresh: "second-refresh", Account: "acct-2"}
 	if err := loadStore(t, home).SetCredential("chatgpt", second); err != nil {
 		t.Fatal(err)
 	}
-	if token, err := creds.token(t.Context(), "chatgpt"); err != nil || token.Access != "second-access" || token.Account != "acct-2" {
+	if token, err := creds.chatgptToken(t.Context()); err != nil || token.Access != "second-access" || token.Account != "acct-2" {
 		t.Fatalf("token after relogin = %+v, %v", token, err)
 	}
 }

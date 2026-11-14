@@ -64,28 +64,33 @@ func sameSize(old []byte, body string) string {
 	return body[:len(old)]
 }
 
+func mutatePropertyFile(t *testing.T, rng *rand.Rand, ws, name string) {
+	t.Helper()
+	path := filepath.Join(ws, filepath.FromSlash(name))
+	switch rng.IntN(5) {
+	case 0:
+		old, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeBuildFiles(t, ws, map[string]string{name: sameSize(old, propertyContent(rng))})
+	case 1:
+		writeBuildFiles(t, ws, map[string]string{name: propertyContent(rng)})
+	case 2:
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	case 3:
+		if err := os.Rename(path, path+".moved"); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func mutatePropertyTree(t *testing.T, rng *rand.Rand, ws string, names []string) {
 	t.Helper()
 	for _, name := range names {
-		path := filepath.Join(ws, filepath.FromSlash(name))
-		switch rng.IntN(5) {
-		case 0:
-			old, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			writeBuildFiles(t, ws, map[string]string{name: sameSize(old, propertyContent(rng))})
-		case 1:
-			writeBuildFiles(t, ws, map[string]string{name: propertyContent(rng)})
-		case 2:
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
-			}
-		case 3:
-			if err := os.Rename(path, path+".moved"); err != nil {
-				t.Fatal(err)
-			}
-		}
+		mutatePropertyFile(t, rng, ws, name)
 	}
 	writeBuildFiles(t, ws, map[string]string{"racy/new.txt": propertyContent(rng)})
 }

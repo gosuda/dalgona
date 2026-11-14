@@ -186,7 +186,7 @@ func (w *walker) excluded(path string, entry fs.DirEntry) bool {
 	if entry.IsDir() {
 		w.ignores.loadDir(w.cwd, path)
 	}
-	return w.ignores.ignored(w.cwd, path, entry.IsDir())
+	return w.ignores.ignored(path, entry.IsDir())
 }
 
 func skipEntry(entry fs.DirEntry) error {

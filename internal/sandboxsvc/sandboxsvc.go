@@ -13,6 +13,13 @@ const (
 	Bridge
 )
 
+func (e Endpoint) Argv() []string {
+	if e == Bridge {
+		return []string{"sh", "-c", `exec "$HOME/.dalgona/bin/dalgona" bridge`}
+	}
+	return []string{"sh", "-c", `exec "$HOME/.dalgona/bin/dalgona" exec-server --listen stdio:// --root /workspace`}
+}
+
 type Spec struct {
 	Name     string
 	Image    string

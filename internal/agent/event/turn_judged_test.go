@@ -59,7 +59,8 @@ func TestTurnJudgedFoldMessages(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := foldJudgedEvents(tc.events...)
+			t.Parallel()
+			err := foldJudgedEvents(tc.events...)
 			checkFoldError(t, err, tc.err)
 		})
 	}

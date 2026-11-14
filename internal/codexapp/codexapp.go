@@ -28,9 +28,7 @@ type Env struct {
 type Mechanism struct {
 	Name      string
 	Path      string
-	Value     string
 	Current   string
-	Expected  string
 	Installed bool
 	Matches   bool
 }
@@ -269,25 +267,23 @@ func restoreEnvironment(env Env, rec installRecord, mechanism *environmentMechan
 func fileStatus(env Env, exe string, mechanism fileMechanism) Mechanism {
 	path := mechanism.path(env)
 	expected := mechanism.expected(exe)
-	result := Mechanism{Name: mechanism.name, Path: path, Expected: expected}
+	result := Mechanism{Name: mechanism.name, Path: path}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return result
 	}
-	result.Value = string(data)
-	result.Current = result.Value
+	result.Current = string(data)
 	result.Installed = bytes.Contains(data, []byte(expected))
 	result.Matches = result.Installed
 	return result
 }
 
 func environmentStatus(env Env, exe string, mechanism environmentMechanism) Mechanism {
-	result := Mechanism{Name: mechanism.name, Expected: exe}
+	result := Mechanism{Name: mechanism.name}
 	value, found, err := mechanism.current(env)
 	if err != nil {
 		return result
 	}
-	result.Value = value
 	result.Current = value
 	result.Installed = found && value == exe
 	result.Matches = result.Installed

@@ -94,7 +94,7 @@ func checkInBandCancel(t *testing.T, h *harness, thread *Thread, stdout <-chan s
 
 func TestInBandSecondCallDeclinedAfterCancel(t *testing.T) {
 	t.Parallel()
-	h, thread, w := inBandHarness(t, nil)
+	h, thread, w := inBandHarness(t)
 	ctx := t.Context()
 	first, err := w.inBandEvents(ctx, model.ToolCall{ID: "c1", Name: "durable", Args: jsontext.Value(`{}`)})
 	if err != nil {

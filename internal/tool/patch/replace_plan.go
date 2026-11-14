@@ -67,7 +67,7 @@ func stageReplaced(ctx context.Context, env tool.Env, item ReplacedFile) (*stage
 	if err != nil {
 		return nil, err
 	}
-	current, info, err := readTarget(ctx, env, absolute, display)
+	current, mode, err := readTarget(ctx, env, absolute, display)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +79,6 @@ func stageReplaced(ctx context.Context, env tool.Env, item ReplacedFile) (*stage
 	}
 	return &stagedFile{
 		path: display, absolute: absolute, before: current, after: item.After,
-		exists: true, mode: info.mode, splices: item.Splices, sound: true,
+		exists: true, mode: mode, splices: item.Splices, sound: true,
 	}, nil
 }

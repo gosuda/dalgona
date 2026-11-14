@@ -193,30 +193,56 @@ func readWireAnswer(decoder *jsontext.Decoder) (wireAnswer, error) {
 }
 
 func readAnswerField(decoder *jsontext.Decoder, name string, answer *wireAnswer) error {
-	var err error
 	switch name {
 	case "type":
-		answer.typeName, err = readStringToken(decoder)
+		val, err := readStringToken(decoder)
+		answer.typeName = val
+		return err
 	case "choice":
-		var value string
-		value, err = readStringToken(decoder)
-		answer.choice = &value
-	case "noul":
-		var value float64
-		value, err = readNumberToken(decoder)
-		answer.noul = &value
-	case "score":
-		var value float64
-		value, err = readNumberToken(decoder)
-		answer.score = &value
+		val, err := readStringToken(decoder)
+		if err != nil {
+			return err
+		}
+		answer.choice = &val
+		return nil
 	case "probabilities":
-		answer.probabilities, err = readProbabilities(decoder)
-	case "confidence":
-		answer.confidence, err = readNumberToken(decoder)
+		probs, err := readProbabilities(decoder)
+		if err != nil {
+			return err
+		}
+		answer.probabilities = probs
+		return nil
 	default:
-		err = decoder.SkipValue()
+		return readAnswerNumericField(decoder, name, answer)
 	}
-	return err
+}
+
+func readAnswerNumericField(decoder *jsontext.Decoder, name string, answer *wireAnswer) error {
+	switch name {
+	case "noul":
+		val, err := readNumberToken(decoder)
+		if err != nil {
+			return err
+		}
+		answer.noul = &val
+		return nil
+	case "score":
+		val, err := readNumberToken(decoder)
+		if err != nil {
+			return err
+		}
+		answer.score = &val
+		return nil
+	case "confidence":
+		val, err := readNumberToken(decoder)
+		if err != nil {
+			return err
+		}
+		answer.confidence = val
+		return nil
+	default:
+		return decoder.SkipValue()
+	}
 }
 
 func readProbabilities(decoder *jsontext.Decoder) (map[string]float64, error) {

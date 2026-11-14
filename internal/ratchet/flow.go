@@ -89,14 +89,10 @@ func repoPath(p string) (string, error) {
 	if clean == "." {
 		return "", fmt.Errorf("path must name a file or directory below the workspace root: %s", p)
 	}
-	if overlapsFlowRoot(clean) {
+	if overlaps(clean, flowRoot) {
 		return "", fmt.Errorf("path must stay outside %s: %s", flowRoot, p)
 	}
 	return clean, nil
-}
-
-func overlapsFlowRoot(clean string) bool {
-	return clean == flowRoot || strings.HasPrefix(clean, flowRoot+"/") || strings.HasPrefix(flowRoot, clean+"/")
 }
 
 func repoPaths(list []string) ([]string, error) {

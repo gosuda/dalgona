@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 )
 
 const (
@@ -172,4 +173,34 @@ func readTrailerString(d *jsontext.Decoder, key string, out *ConnectError) error
 		out.Message = t.String()
 	}
 	return nil
+}
+
+var connectHTTPStatus = map[string]int{
+	"canceled":            499,
+	"unknown":             http.StatusInternalServerError,
+	"invalid_argument":    http.StatusBadRequest,
+	"deadline_exceeded":   http.StatusGatewayTimeout,
+	"not_found":           http.StatusNotFound,
+	"already_exists":      http.StatusConflict,
+	"permission_denied":   http.StatusForbidden,
+	"resource_exhausted":  http.StatusTooManyRequests,
+	"failed_precondition": http.StatusBadRequest,
+	"aborted":             http.StatusConflict,
+	"out_of_range":        http.StatusBadRequest,
+	"unimplemented":       http.StatusNotImplemented,
+	"internal":            http.StatusInternalServerError,
+	"unavailable":         http.StatusServiceUnavailable,
+	"data_loss":           http.StatusInternalServerError,
+	"unauthenticated":     http.StatusUnauthorized,
+}
+
+func CodeStatus(code string) int {
+	return connectHTTPStatus[code]
+}
+
+func ErrorStatus(err error) int {
+	if connectErr, ok := errors.AsType[*ConnectError](err); ok {
+		return CodeStatus(connectErr.Code)
+	}
+	return 0
 }

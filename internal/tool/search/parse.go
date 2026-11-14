@@ -112,15 +112,7 @@ func isAnchor(op regexpsyntax.Op) bool {
 }
 
 func hasAnchor(re *regexpsyntax.Regexp) bool {
-	if isAnchor(re.Op) {
-		return true
-	}
-	for _, sub := range re.Sub {
-		if hasAnchor(sub) {
-			return true
-		}
-	}
-	return false
+	return isAnchor(re.Op) || slices.ContainsFunc(re.Sub, hasAnchor)
 }
 
 type parseRun struct {

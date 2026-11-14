@@ -24,7 +24,6 @@ import (
 	"github.com/gosuda/dalgona/internal/tool/read"
 	"github.com/gosuda/dalgona/internal/tool/rewrite"
 	"github.com/gosuda/dalgona/internal/tool/search"
-	"github.com/gosuda/dalgona/internal/tool/task"
 	"github.com/gosuda/dalgona/internal/tool/todo"
 	"github.com/gosuda/dalgona/internal/tool/webfetch"
 )
@@ -133,15 +132,11 @@ func loadBatteries(ctx context.Context, opts Options, base Base) (Batteries, err
 		}
 		extra = loaded
 	}
-	return withDefaults(extra, base.Local), nil
-}
-
-func withDefaults(extra Batteries, local agent.RunnerFactory) Batteries {
 	if extra.Tools == nil {
 		extra.Tools = func(context.Context, string) []tool.Tool { return nil }
 	}
 	if extra.Runner == nil {
-		extra.Runner = local
+		extra.Runner = base.Local
 	}
 	if extra.Attach == nil {
 		extra.Attach = func(*agent.Host) {}
@@ -149,7 +144,7 @@ func withDefaults(extra Batteries, local agent.RunnerFactory) Batteries {
 	if extra.Close == nil {
 		extra.Close = func() error { return nil }
 	}
-	return extra
+	return extra, nil
 }
 
 func toolSet(cfg config.Config, extra func(ctx context.Context, cwd string) []tool.Tool) agent.ToolSet {
@@ -184,7 +179,7 @@ func newAdvisors(registry *advisor.Registry, logger *slog.Logger) *advisors {
 	return &advisors{registry: registry, log: cmp.Or(logger, slog.Default())}
 }
 
-func (a *advisors) attach(child *agent.Thread, req task.Request) {
+func (a *advisors) attach(child *agent.Thread, req agent.TaskRequest) {
 	host := a.host.Load()
 	if host == nil {
 		return

@@ -188,7 +188,7 @@ func childExit(ctx context.Context, waitErr, relayErr error) (int, error) {
 		return exitErr.ExitCode(), nil
 	}
 	if ctx.Err() != nil {
-		return 1, nil
+		return 1, ctx.Err()
 	}
 	return 1, fmt.Errorf("wait for real binary: %w", waitErr)
 }

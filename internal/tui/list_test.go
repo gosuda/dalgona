@@ -35,7 +35,7 @@ func listModels() []rpc.Model {
 
 func openModelPicker(t *testing.T, client caller) model {
 	t.Helper()
-	m := newTestModel(client, Options{}, nil)
+	m := newTestModel(client, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, resultMsg{op: "models", value: &rpc.ModelListResponse{Data: listModels()}})
 	if m.list == nil {
@@ -129,7 +129,7 @@ func TestPickerEscClearsFilterThenCloses(t *testing.T) {
 
 func TestResumePickerFilters(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(&fakeCaller{}, Options{}, nil)
+	m := newTestModel(&fakeCaller{}, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	threads := rpc.ThreadListResponse{Data: []rpc.Thread{{ID: "t-demo", Name: "demo session"}, {ID: "t-other", Name: "other work"}}}
 	m, _ = drive(t, m, resultMsg{op: "threads", value: &threads})
@@ -161,7 +161,7 @@ func TestListDockSteady(t *testing.T) {
 
 func TestListOpenAndCloseChangeHeightOnce(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(&fakeCaller{}, Options{}, nil)
+	m := newTestModel(&fakeCaller{}, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	closed := len(m.dockLines())
 	m, _ = drive(t, m, resultMsg{op: "threads", value: &rpc.ThreadListResponse{Data: []rpc.Thread{{ID: "t1"}}}})

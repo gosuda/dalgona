@@ -8,5 +8,5 @@ import (
 )
 
 func publishReplace(tmp, dst string, _ fs.FileMode) error {
-	return os.Rename(tmp, dst)
+	return os.Rename(tmp, dst) //nolint:gosec // paths are managed by the runner caller
 }

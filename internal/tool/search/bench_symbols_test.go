@@ -114,9 +114,10 @@ func BenchmarkSymbolsChildPeakRSS(b *testing.B) {
 	root := b.TempDir()
 	writeGoCorpus(b, root, 64, 256<<10)
 	const argv = `{"mode":"symbols","path":"."}`
+	exe := testExecutable(b)
 	var peak, notParsed int64
 	for range b.N {
-		cmd := exec.Command(os.Args[0], "__search", argv) //nolint:gosec // re-executes this test binary as the search child with a fixed argument list
+		cmd := exec.Command(exe, "__search", argv)
 		cmd.Dir = root
 		out, err := cmd.Output()
 		if err != nil {

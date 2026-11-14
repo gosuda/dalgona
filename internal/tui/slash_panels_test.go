@@ -12,7 +12,7 @@ import (
 
 func panelPicker(t *testing.T, client caller) model {
 	t.Helper()
-	m := newTestModel(client, Options{}, nil)
+	m := newTestModel(client, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.thread.id = "t1"
 	return m

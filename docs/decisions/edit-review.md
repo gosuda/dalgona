@@ -10,7 +10,7 @@ The edit unit and its judge goroutine live in `internal/agent/review.go`. The ju
 
 ## Enforcement
 
-`internal/agent/review_test.go` tests the verdict, the failure modes, the packing and the masking. `TestRecoveryDoesNotJudgeReapprovedEdit` and `TestRecoveryNeverJudgesCompletedEdit` hold recovery to no judge call. `internal/app/edit_judge_test.go` tests the switch. `internal/decide` tests the request size.
+`internal/agent/review_test.go` tests the verdict, the failure modes, the packing, the masking, and the switch. `TestRecoveryDoesNotJudgeReapprovedEdit` and `TestRecoveryNeverJudgesCompletedEdit` hold recovery to no judge call. The 30000-byte review limit is enforced through `reviewRequestLimit` in `internal/agent/review.go` and `internal/agent/review_diff.go`, with assertions in `internal/agent/review_test.go` (lines 516-521). `internal/decide` tests `RequestSize` accounting against the posted body.
 
 ## Rejected alternatives
 

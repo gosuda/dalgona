@@ -117,8 +117,8 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 	if matched {
 		name = turn.ID
 	}
-	if err = h.record(raw, name); err != nil {
-		h.writeError(w, http.StatusInternalServerError, "llmstub_record", err.Error())
+	if recErr := h.record(raw, name); recErr != nil {
+		h.writeError(w, http.StatusInternalServerError, "llmstub_record", recErr.Error())
 		return
 	}
 	if !matched {
@@ -131,8 +131,8 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	if err = streamTurn(r.Context(), w, turn); err != nil {
-		h.logf("llmstub: %s stream: %v\n", turn.ID, err)
+	if streamErr := streamTurn(r.Context(), w, turn); streamErr != nil {
+		h.logf("llmstub: %s stream: %v\n", turn.ID, streamErr)
 	}
 }
 

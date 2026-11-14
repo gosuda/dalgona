@@ -275,7 +275,7 @@ func TestServeAskToolEndToEnd(t *testing.T) {
 	startTurn(t, c, threadID, "ask me")
 	req := awaitInputRequest(t, c)
 	c.respond(req.ID, `{"answers":{"q1":{"answers":["Postgres"]}}}`)
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "turn status", log.status)
 	item := findItem(log.completed, "call-q")
 	want := "User answers:\n- Database (Which database?): Postgres"

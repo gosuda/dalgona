@@ -50,9 +50,9 @@ func newChatState(stream *model.EventStream, tools []model.Tool) *chatState {
 	return &chatState{stream: stream, freeform: model.FreeformToolNames(tools), active: -1}
 }
 
-func (s *chatState) consume(ctx context.Context, gate *model.StartGate, idle *idleBody) model.AttemptResult {
+func (s *chatState) consume(ctx context.Context, gate *model.StartGate, idle *model.IdleBody) model.AttemptResult {
 	err := s.readFrames(gate, idle)
-	idle.stop()
+	idle.Stop()
 	err = gate.Error(ctx, err)
 	if err != nil {
 		return model.AttemptResult{Status: connectStatus(err, http.StatusOK), SawTool: s.sawTool, SawContent: s.sawContent, Body: s.failed, Err: err}

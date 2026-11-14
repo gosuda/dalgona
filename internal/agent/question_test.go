@@ -26,10 +26,10 @@ func testQuestions() []asktool.Question {
 	}}
 }
 
-func askAsync(ctx context.Context, thread *Thread, callID string, questions []asktool.Question) <-chan questionResult {
+func askAsync(ctx context.Context, thread *Thread, questions []asktool.Question) <-chan questionResult {
 	out := make(chan questionResult, 1)
 	go func() {
-		reply, err := thread.Ask(ctx, callID, questions)
+		reply, err := thread.Ask(ctx, "call-1", questions)
 		out <- questionResult{reply: reply, err: err}
 	}()
 	return out
@@ -71,7 +71,7 @@ func TestAskReachesSubscriberAndReturnsAnswer(t *testing.T) {
 	t.Parallel()
 	thread := newHarness(t).start()
 	updates := thread.Subscribe()
-	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	results := askAsync(t.Context(), thread, testQuestions())
 	prompt := nextQuestionUpdate(t, updates, false)
 	if prompt.CallID != "call-1" || len(prompt.Questions) != 1 {
 		t.Fatalf("question = %+v, want call-1 with one question", prompt)
@@ -105,7 +105,7 @@ func TestAskDeclinesWhenLastSubscriberLeaves(t *testing.T) {
 	t.Parallel()
 	thread := newHarness(t).start()
 	updates := thread.Subscribe()
-	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	results := askAsync(t.Context(), thread, testQuestions())
 	nextQuestionUpdate(t, updates, false)
 	thread.Unsubscribe(updates)
 	if reply := waitQuestionResult(t, results); reply.Outcome != asktool.OutcomeNoClient {
@@ -118,7 +118,7 @@ func TestAskStaysOpenWhileAnotherSubscriberRemains(t *testing.T) {
 	thread := newHarness(t).start()
 	first := thread.Subscribe()
 	second := thread.Subscribe()
-	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	results := askAsync(t.Context(), thread, testQuestions())
 	prompt := nextQuestionUpdate(t, first, false)
 	thread.Unsubscribe(first)
 	if _, err := thread.Status(); err != nil {
@@ -142,7 +142,7 @@ func TestAskReplaysOpenQuestionToNewSubscriber(t *testing.T) {
 	t.Parallel()
 	thread := newHarness(t).start()
 	first := thread.Subscribe()
-	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	results := askAsync(t.Context(), thread, testQuestions())
 	prompt := nextQuestionUpdate(t, first, false)
 	second := thread.Subscribe()
 	replayed := nextQuestionUpdate(t, second, false)
@@ -161,7 +161,7 @@ func TestAskInterruptResolvesInterrupted(t *testing.T) {
 	updates := thread.Subscribe()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	results := askAsync(ctx, thread, "call-1", testQuestions())
+	results := askAsync(ctx, thread, testQuestions())
 	nextQuestionUpdate(t, updates, false)
 	cancel()
 	if reply := waitQuestionResult(t, results); reply.Outcome != asktool.OutcomeInterrupted {
@@ -176,7 +176,7 @@ func TestAnswerQuestionFirstAnswerWins(t *testing.T) {
 	t.Parallel()
 	thread := newHarness(t).start()
 	updates := thread.Subscribe()
-	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	results := askAsync(t.Context(), thread, testQuestions())
 	prompt := nextQuestionUpdate(t, updates, false)
 	first := asktool.Reply{Outcome: asktool.OutcomeAnswered, Answers: [][]string{{"Postgres"}}}
 	if err := thread.AnswerQuestion(prompt.RequestID, first); err != nil {
@@ -198,7 +198,7 @@ func TestStatusCountsOpenQuestions(t *testing.T) {
 	t.Parallel()
 	thread := newHarness(t).start()
 	updates := thread.Subscribe()
-	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	results := askAsync(t.Context(), thread, testQuestions())
 	prompt := nextQuestionUpdate(t, updates, false)
 	status, err := thread.Status()
 	if err != nil {
@@ -225,7 +225,7 @@ func TestQuestionDeclinesWhenEveryWindowCannotAnswer(t *testing.T) {
 	thread := newHarness(t).start()
 	first := thread.Subscribe()
 	second := thread.Subscribe()
-	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	results := askAsync(t.Context(), thread, testQuestions())
 	prompt := nextQuestionUpdate(t, first, false)
 	nextQuestionUpdate(t, second, false)
 	if err := thread.CannotAnswerQuestion(prompt.RequestID, first); err != nil {
@@ -244,7 +244,7 @@ func TestRefusalFromOneWindowCountsOnce(t *testing.T) {
 	thread := newHarness(t).start()
 	first := thread.Subscribe()
 	second := thread.Subscribe()
-	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	results := askAsync(t.Context(), thread, testQuestions())
 	prompt := nextQuestionUpdate(t, first, false)
 	nextQuestionUpdate(t, second, false)
 	for range 2 {
@@ -272,7 +272,7 @@ func TestRefusingWindowLeavingDoesNotDecline(t *testing.T) {
 	thread := newHarness(t).start()
 	first := thread.Subscribe()
 	second := thread.Subscribe()
-	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	results := askAsync(t.Context(), thread, testQuestions())
 	prompt := nextQuestionUpdate(t, first, false)
 	nextQuestionUpdate(t, second, false)
 	if err := thread.CannotAnswerQuestion(prompt.RequestID, first); err != nil {
@@ -293,7 +293,7 @@ func TestRefusalDoesNotDoubleCountAfterSlowClose(t *testing.T) {
 	thread := newHarness(t).start()
 	first := thread.Subscribe()
 	second := thread.Subscribe()
-	results := askAsync(t.Context(), thread, "call-1", testQuestions())
+	results := askAsync(t.Context(), thread, testQuestions())
 	prompt := nextQuestionUpdate(t, first, false)
 	nextQuestionUpdate(t, second, false)
 	if err := thread.CannotAnswerQuestion(prompt.RequestID, first); err != nil {
@@ -324,7 +324,7 @@ func TestOfferKeepsQuestionWhenItClosesSoleWindowAsSlow(t *testing.T) {
 		for range subscriberBuffer {
 			thread.publish(Update{Kind: UpdateExecOutput, CallID: "flood"})
 		}
-		results := askAsync(t.Context(), thread, "call-1", testQuestions())
+		results := askAsync(t.Context(), thread, testQuestions())
 		synctest.Wait()
 		resubscribed := thread.Subscribe()
 		prompt := nextQuestionUpdate(t, resubscribed, false)

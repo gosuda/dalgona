@@ -8,21 +8,9 @@ import (
 
 var windowsEnvironment = environmentMechanism{
 	name:    "registry",
-	current: currentWindowsEnvironment,
-	set:     setWindowsEnvironment,
-	restore: restoreWindowsEnvironment,
-}
-
-func currentWindowsEnvironment(_ Env) (string, bool, error) {
-	return registryValue()
-}
-
-func setWindowsEnvironment(_ Env, exe string) error {
-	return setRegistry(exe)
-}
-
-func restoreWindowsEnvironment(_ Env, value string, found bool) error {
-	return restoreRegistry(value, found)
+	current: func(Env) (string, bool, error) { return registryValue() },
+	set:     func(_ Env, exe string) error { return setRegistry(exe) },
+	restore: func(_ Env, value string, found bool) error { return restoreRegistry(value, found) },
 }
 
 func runCommand(env Env, name string, args ...string) error {

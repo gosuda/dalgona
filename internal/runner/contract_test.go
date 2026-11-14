@@ -210,9 +210,11 @@ func testContractSignal(t *testing.T, r Runner) {
 
 func readContractOutput(t *testing.T, r Runner, id string) Output {
 	t.Helper()
+	var result Output
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	var result Output
+	timer := time.NewTimer(10 * time.Millisecond)
+	defer timer.Stop()
 	for {
 		state, err := r.Read(ctx, id, result.Next)
 		if err != nil {
@@ -226,10 +228,11 @@ func readContractOutput(t *testing.T, r Runner, id string) Output {
 		if state.Exit != nil {
 			return result
 		}
+		timer.Reset(10 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
-		case <-time.After(10 * time.Millisecond):
+		case <-timer.C:
 		}
 	}
 }
@@ -238,6 +241,8 @@ func waitContractAlive(t *testing.T, r Runner, id string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+	timer := time.NewTimer(10 * time.Millisecond)
+	defer timer.Stop()
 	for {
 		state, err := r.Read(ctx, id, 0)
 		if err != nil {
@@ -246,10 +251,11 @@ func waitContractAlive(t *testing.T, r Runner, id string) {
 		if state.Alive {
 			return
 		}
+		timer.Reset(10 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
-		case <-time.After(10 * time.Millisecond):
+		case <-timer.C:
 		}
 	}
 }
@@ -336,6 +342,7 @@ func drainRemoteProcess(t *testing.T, remote Runner, ctx context.Context, id str
 		}
 		state.Data = append(state.Data, page.Data...)
 		state.Next = page.Next
+		state.Exit = page.Exit
 		if page.Exit != nil {
 			return state
 		}

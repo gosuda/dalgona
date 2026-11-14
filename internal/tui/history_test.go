@@ -113,7 +113,7 @@ func TestCtrlCSavesDraft(t *testing.T) {
 
 func TestHistoryRecallKeepsFrameInWindow(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(new(fakeCaller), Options{}, nil)
+	m := newTestModel(new(fakeCaller), Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 8})
 	m.thread.id = "t1"
 	var lines []string

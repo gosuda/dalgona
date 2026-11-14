@@ -148,33 +148,39 @@ func readNamedLLMAnswer(decoder *jsontext.Decoder, questions map[string]Question
 }
 
 func readLLMAnswer(decoder *jsontext.Decoder, question Question) (Answer, error) {
-	var answer Answer
 	switch question.Type {
 	case TypeChoice:
 		choice, err := readStringToken(decoder)
-		answer.Choice = choice
-		return answer, err
+		if err != nil {
+			return Answer{}, err
+		}
+		return Answer{Choice: choice}, nil
 	case TypeNoul:
-		value, err := readNumberToken(decoder)
-		answer.Noul = &value
-		return answer, err
+		val, err := readNumberToken(decoder)
+		if err != nil {
+			return Answer{}, err
+		}
+		return Answer{Noul: &val}, nil
 	case TypeScore:
-		value, err := readNumberToken(decoder)
-		if err != nil {
-			return answer, err
-		}
-		limit, err := scoreCriteriaLength(question.Criteria)
-		if err != nil {
-			return answer, err
-		}
-		if value < 0 || value > float64(limit-1) {
-			return answer, fmt.Errorf("score %v is outside 0..%d", value, limit-1)
-		}
-		answer.Score = &value
-		return answer, nil
+		return readLLMScoreAnswer(decoder, question)
 	default:
-		return answer, fmt.Errorf("unsupported question type %q", question.Type)
+		return Answer{}, fmt.Errorf("unsupported question type %q", question.Type)
 	}
+}
+
+func readLLMScoreAnswer(decoder *jsontext.Decoder, question Question) (Answer, error) {
+	val, err := readNumberToken(decoder)
+	if err != nil {
+		return Answer{}, err
+	}
+	limit, err := scoreCriteriaLength(question.Criteria)
+	if err != nil {
+		return Answer{}, err
+	}
+	if val < 0 || val > float64(limit-1) {
+		return Answer{}, fmt.Errorf("score %v is outside 0..%d", val, limit-1)
+	}
+	return Answer{Score: &val}, nil
 }
 
 var _ Client = (*LLM)(nil)

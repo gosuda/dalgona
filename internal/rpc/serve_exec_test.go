@@ -133,14 +133,17 @@ func TestCommandExecLimitCountsEveryCommand(t *testing.T) {
 		}()
 	}
 	refused := 0
+	timer := time.NewTimer(waitLimit)
+	defer timer.Stop()
 	for range commands {
+		timer.Reset(waitLimit)
 		select {
 		case m := <-answers:
 			if m.Error != nil {
 				expect(t, m.Error.Message == "too many running commands", "refused command/exec", m.Error.Message)
 				refused++
 			}
-		case <-time.After(waitLimit):
+		case <-timer.C:
 			t.Fatal("command/exec did not answer")
 		}
 	}

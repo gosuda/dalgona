@@ -27,7 +27,7 @@ func TestActivePathMatchesIndependentTurnTree(t *testing.T) {
 				turn := fmt.Sprintf("t%d", nextTurn)
 				nextTurn++
 				parents[turn] = leaf
-				appendTurn(&journal, completed, turn, leaf)
+				appendTurn(&journal, completed, turn)
 				leaf = turn
 				continue
 			}
@@ -84,7 +84,7 @@ func TestTreePreviewUsesEightyUnicodeCharacters(t *testing.T) {
 	}
 }
 
-func appendTurn(journal *[]event.Seqd, completed map[string]uint64, turn, parent string) {
+func appendTurn(journal *[]event.Seqd, completed map[string]uint64, turn string) {
 	start := nextSeq(*journal)
 	*journal = append(*journal,
 		event.Seqd{Seq: start, Event: event.TurnStarted{TurnID: turn}},

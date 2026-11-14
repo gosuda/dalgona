@@ -232,9 +232,7 @@ func (c *Config) merge(current layer) error {
 	c.mergeMaps(current.doc)
 	c.mergeTables(current.doc)
 	c.mergeAdvisor(current.doc)
-	for key, location := range lineMap(current.path, current.raw) {
-		c.lines[key] = location
-	}
+	maps.Copy(c.lines, lineMap(current.path, current.raw))
 	return nil
 }
 
@@ -530,12 +528,7 @@ func (c *Config) valueError(key, message string) error {
 }
 
 func one(value string, allowed ...string) bool {
-	for _, candidate := range allowed {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(allowed, value)
 }
 
 var keywordWordRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,31}$`)
@@ -576,7 +569,7 @@ func validateProductLayer(product Product, current layer) error {
 	var found *origin
 	foundKey := ""
 	for key, location := range lineMap(current.path, current.raw) {
-		root := strings.SplitN(key, ".", 2)[0]
+		root, _, _ := strings.Cut(key, ".")
 		if dalgonaOnlyKeys[root] && (found == nil || location.line < found.line) {
 			found = &location
 			foundKey = root

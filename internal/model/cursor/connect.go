@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/model"
@@ -22,81 +21,14 @@ const (
 
 var errStreamCut = errors.New("cursor: stream ended before turnEnded")
 
-var connectHTTPStatus = map[string]int{
-	"canceled":            499,
-	"unknown":             http.StatusInternalServerError,
-	"invalid_argument":    http.StatusBadRequest,
-	"deadline_exceeded":   http.StatusGatewayTimeout,
-	"not_found":           http.StatusNotFound,
-	"already_exists":      http.StatusConflict,
-	"permission_denied":   http.StatusForbidden,
-	"resource_exhausted":  http.StatusTooManyRequests,
-	"failed_precondition": http.StatusBadRequest,
-	"aborted":             http.StatusConflict,
-	"out_of_range":        http.StatusBadRequest,
-	"unimplemented":       http.StatusNotImplemented,
-	"internal":            http.StatusInternalServerError,
-	"unavailable":         http.StatusServiceUnavailable,
-	"data_loss":           http.StatusInternalServerError,
-	"unauthenticated":     http.StatusUnauthorized,
-}
-
 func failureStatus(err error) int {
 	if errors.Is(err, errStreamCut) {
 		return http.StatusServiceUnavailable
 	}
-	if connectErr, ok := errors.AsType[*connectwire.ConnectError](err); ok {
-		if status, known := connectHTTPStatus[connectErr.Code]; known {
-			return status
-		}
+	if status := connectwire.ErrorStatus(err); status != 0 {
+		return status
 	}
 	return http.StatusOK
-}
-
-type idleBody struct {
-	body    io.ReadCloser
-	idle    time.Duration
-	timer   *time.Timer
-	expired atomic.Bool
-	paused  atomic.Bool
-}
-
-func watchIdle(body io.ReadCloser, idle time.Duration) *idleBody {
-	watched := &idleBody{body: body, idle: idle}
-	if idle > 0 {
-		watched.timer = time.AfterFunc(idle, watched.expire)
-	}
-	return watched
-}
-
-func (w *idleBody) expire() {
-	w.expired.Store(true)
-	_ = w.body.Close()
-}
-
-func (w *idleBody) Read(p []byte) (int, error) {
-	n, err := w.body.Read(p)
-	if n > 0 && w.timer != nil && !w.paused.Load() {
-		w.timer.Reset(w.idle)
-	}
-	if err != nil && w.expired.Load() {
-		return n, model.ErrStreamIdleTimeout
-	}
-	return n, err
-}
-
-func (w *idleBody) pause() {
-	w.paused.Store(true)
-	if w.timer != nil {
-		w.timer.Stop()
-	}
-}
-
-func (w *idleBody) resume() {
-	w.paused.Store(false)
-	if w.timer != nil {
-		w.timer.Reset(w.idle)
-	}
 }
 
 type frameRead struct {
@@ -105,14 +37,14 @@ type frameRead struct {
 }
 
 type frameReader struct {
-	body    *idleBody
+	body    *model.IdleBody
 	current []byte
 	spare   []byte
 	queued  []frameRead
 	ahead   chan frameRead
 }
 
-func newFrameReader(body *idleBody) *frameReader {
+func newFrameReader(body *model.IdleBody) *frameReader {
 	return &frameReader{body: body, current: make([]byte, 0, 32<<10)}
 }
 
@@ -164,7 +96,7 @@ func (r *frameReader) stop() {
 	if r.ahead == nil {
 		return
 	}
-	_ = r.body.body.Close()
+	_ = r.body.Close()
 	<-r.ahead
 	r.ahead = nil
 }

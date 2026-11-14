@@ -63,7 +63,7 @@ func shellCalls(caller *shellCaller) []string {
 func TestBangRunsCommandExecAndAddsChip(t *testing.T) {
 	t.Parallel()
 	caller := &shellCaller{result: rpc.CommandExecResponse{Stdout: "hi\n"}}
-	m := newTestModel(caller, Options{Cwd: "/work"}, nil)
+	m := newTestModel(caller, Options{Cwd: "/work"})
 	m = shellSubmit(t, shellType(t, m, "!echo hi"))
 	calls := shellCalls(caller)
 	if len(calls) != 1 {
@@ -93,7 +93,7 @@ func (f *deadlineCaller) Call(ctx context.Context, method string, params, result
 func TestShellCommandDeadlineOutlastsItsTimeout(t *testing.T) {
 	t.Parallel()
 	caller := &deadlineCaller{}
-	m := newTestModel(caller, Options{Cwd: "/work"}, nil)
+	m := newTestModel(caller, Options{Cwd: "/work"})
 	shellSubmit(t, shellType(t, m, "!sleep 100"))
 	if remaining := time.Until(caller.deadline); remaining <= shellTimeoutMS*time.Millisecond {
 		t.Fatalf("command/exec deadline is %v from now, want more than the %d ms command timeout", remaining, shellTimeoutMS)
@@ -116,7 +116,7 @@ func TestShellExpansionFencesAndSpans(t *testing.T) {
 func TestShellEscOnEmptyLineLeavesMode(t *testing.T) {
 	t.Parallel()
 	caller := &shellCaller{}
-	m := newTestModel(caller, Options{Cwd: "/work"}, nil)
+	m := newTestModel(caller, Options{Cwd: "/work"})
 	m, _ = drive(t, m, press('!', 0, "!"))
 	if m.input.mode != inputShell {
 		t.Fatalf("mode after ! = %v, want shell", m.input.mode)
@@ -133,7 +133,7 @@ func TestShellEscOnEmptyLineLeavesMode(t *testing.T) {
 func TestShellFailedCommandShowsFailedRowAndChipOutput(t *testing.T) {
 	t.Parallel()
 	caller := &shellCaller{result: rpc.CommandExecResponse{ExitCode: 3, Stdout: "a\n", Stderr: "boom\n"}}
-	m := newTestModel(caller, Options{Cwd: "/work"}, nil)
+	m := newTestModel(caller, Options{Cwd: "/work"})
 	m = shellSubmit(t, shellType(t, m, "!make x"))
 	row := lastEntry(t, m)
 	for _, want := range []string{"Failed", "exit 3", "make x"} {

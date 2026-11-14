@@ -16,7 +16,7 @@ func startDetached(ctx context.Context, self string, args []string, spec Process
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("runner: detached start: %w", err)
 	}
-	cmd := exec.Command(self, args...)
+	cmd := exec.CommandContext(context.WithoutCancel(ctx), self, args...)
 	cmd.Dir = spec.Dir
 	cmd.Env = spec.Env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -156,7 +156,7 @@ func exitDetails(waitErr error) (int, string) {
 }
 
 func syncDir(path string) error {
-	dir, err := os.Open(path)
+	dir, err := os.Open(path) //nolint:gosec // directory path is managed by the runner
 	if err != nil {
 		return fmt.Errorf("open directory: %w", err)
 	}

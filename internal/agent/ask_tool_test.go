@@ -117,7 +117,7 @@ func TestAskQuestionTextIsMasked(t *testing.T) {
 			{Label: "none", Description: "no key"},
 		},
 	}}
-	results := askAsync(t.Context(), thread, "call-1", questions)
+	results := askAsync(t.Context(), thread, questions)
 	prompt := nextQuestionUpdate(t, updates, false)
 	if strings.Contains(prompt.Questions[0].Header, secret) || !strings.Contains(prompt.Questions[0].Header, "{{secret:") {
 		t.Fatalf("header = %q, want only a placeholder", prompt.Questions[0].Header)

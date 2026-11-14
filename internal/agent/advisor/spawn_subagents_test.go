@@ -12,7 +12,6 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/journal"
 	"github.com/gosuda/dalgona/internal/runner"
-	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
 func hookedHarness(t *testing.T, configure func(*config.Config)) (*harness, *Registry) {
@@ -55,7 +54,7 @@ func hookedHarness(t *testing.T, configure func(*config.Config)) (*harness, *Reg
 			return runner.NewLocal(filepath.Join(h.home, "sessions", id, "runs"))
 		},
 		Logger: slog.New(slog.DiscardHandler),
-		OnChildStarted: func(child *agent.Thread, req task.Request) {
+		OnChildStarted: func(child *agent.Thread, req agent.TaskRequest) {
 			attach := registry.Attach
 			if req.Advisor {
 				attach = registry.AttachChild
@@ -73,7 +72,7 @@ func hookedHarness(t *testing.T, configure func(*config.Config)) (*harness, *Reg
 	return h, registry
 }
 
-func spawnChild(t *testing.T, h *harness, callID string, req task.Request) string {
+func spawnChild(t *testing.T, h *harness, callID string, req agent.TaskRequest) string {
 	t.Helper()
 	parent := startThread(t, h, agent.ThreadSpec{})
 	seedTaskCall(t, parent, callID)
@@ -98,7 +97,7 @@ func TestSpawnedChildWithGlobalOptInGetsReview(t *testing.T) {
 		cfg.Advisor.Subagents = true
 	})
 	h.model.push(roleAdvisor, calls(advise("n1", "check the error path", "nit")), text("done"))
-	child := spawnChild(t, h, "call-1", task.Request{Prompt: "do the work"})
+	child := spawnChild(t, h, "call-1", agent.TaskRequest{Prompt: "do the work"})
 	rt := registry.Get(child)
 	if rt == nil {
 		t.Fatal("advisor runtime is missing for a globally opted-in subagent child")
@@ -116,7 +115,7 @@ func TestSpawnedChildWithEntryOptInGetsReview(t *testing.T) {
 		cfg.Advisors = subagentsRoster()
 	})
 	h.model.push(roleAdvisor, calls(advise("n1", "check the error path", "nit")), text("done"))
-	child := spawnChild(t, h, "call-1", task.Request{Prompt: "do the work"})
+	child := spawnChild(t, h, "call-1", agent.TaskRequest{Prompt: "do the work"})
 	rt := registry.Get(child)
 	if rt == nil {
 		t.Fatal("advisor runtime is missing for an entry opted-in subagent child")
@@ -136,7 +135,7 @@ func TestSpawnedChildWithEntryOptInGetsReview(t *testing.T) {
 func TestSpawnedChildWithoutOptInGetsNoAdvisor(t *testing.T) {
 	t.Parallel()
 	h, registry := hookedHarness(t, nil)
-	child := spawnChild(t, h, "call-1", task.Request{Prompt: "do the work"})
+	child := spawnChild(t, h, "call-1", agent.TaskRequest{Prompt: "do the work"})
 	if rt := registry.Get(child); rt != nil {
 		t.Fatalf("advisor runtime %+v attached without any subagent opt-in", rt)
 	}

@@ -13,7 +13,7 @@ func TestSnapshotKeepsHistoryAcrossCompaction(t *testing.T) {
 	threadID := startThread(t, r, c, nil)
 	r.llm.push(llmReply{body: sseText("done")})
 	turnID := startTurn(t, c, threadID, "hello")
-	c.collect("turn/completed")
+	c.collect()
 	compactInsideTurn(t, r, threadID, turnID)
 	assertSnapshotTurns(t, c, r, threadID, turnID)
 }
@@ -72,7 +72,7 @@ func TestSnapshotKeepsSessionCreatedAfterRevertToRoot(t *testing.T) {
 	threadID := startThread(t, r, c, nil)
 	r.llm.push(llmReply{body: sseText("done")})
 	turnID := startTurn(t, c, threadID, "hello")
-	c.collect("turn/completed")
+	c.collect()
 	c.ok("thread/revert", map[string]any{"threadId": threadID, "beforeTurnId": turnID}, nil)
 	c.await("thread/reverted", nil)
 	var read ThreadReadResponse

@@ -13,7 +13,7 @@ func TestFoldDeferredBlobbedExecUsesCarriedPrefix(t *testing.T) {
 		ToolCalls:  []event.ToolCall{{ID: "c", Name: "exec", ArgsBlob: &event.BlobRef{Blob: digest, Bytes: 70000}}},
 		StopReason: "tool_calls",
 	}
-	state, err := foldEvents(t, event.State{},
+	state, err := foldEvents(t,
 		event.TurnStarted{TurnID: "t"},
 		assistant,
 		event.ApprovalRequested{RequestID: "r", CallID: "c", Summary: "big", GrantPrefix: "git"},
@@ -35,7 +35,7 @@ func TestFoldDeferredBlobbedExecWithoutPrefixGrantsNothing(t *testing.T) {
 		ToolCalls:  []event.ToolCall{{ID: "c", Name: "exec", ArgsBlob: &event.BlobRef{Blob: digest, Bytes: 70000}}},
 		StopReason: "tool_calls",
 	}
-	state, err := foldEvents(t, event.State{},
+	state, err := foldEvents(t,
 		event.TurnStarted{TurnID: "t"},
 		assistant,
 		event.ApprovalRequested{RequestID: "r", CallID: "c", Summary: "big"},

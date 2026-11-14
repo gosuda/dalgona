@@ -18,11 +18,11 @@ func TestQueueCountIsFixedField(t *testing.T) {
 	m.notice = "free text"
 	column := func(m model) int {
 		row := ansi.Strip(m.liveRow())
-		index := strings.Index(row, "free text")
-		if index < 0 {
+		before, _, ok := strings.Cut(row, "free text")
+		if !ok {
 			t.Fatalf("live row %q has no free text", row)
 		}
-		return ansi.StringWidth(row[:index])
+		return ansi.StringWidth(before)
 	}
 	m.queue = []string{"one"}
 	one := column(m)

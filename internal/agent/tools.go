@@ -210,25 +210,25 @@ func (w *worker) prepare(ctx context.Context, call event.ToolCall, requestID str
 	by := "mode:" + string(w.settings.Approval)
 	item, ok := w.tools.byName[call.Name]
 	if !ok {
-		return nil, w.declineCall(ctx, call, requestID, decline(by, "Tool "+call.Name+" not found"), nil)
+		return nil, w.declineCall(ctx, call, requestID, decline(by, "Tool "+call.Name+" not found"))
 	}
 	if err := w.t.ext.Direct(call.Name); err != nil {
-		return nil, w.declineCall(ctx, call, requestID, decline(by, err.Error()), nil)
+		return nil, w.declineCall(ctx, call, requestID, decline(by, err.Error()))
 	}
 	raw, err := w.t.host.loadRaw(call.Args, call.ArgsBlob)
 	if err != nil {
 		return nil, err
 	}
-	args, repairs, err := repairArgs(item.Spec(), raw)
-	if err != nil {
-		return nil, w.declineCall(ctx, call, requestID, decline(by, "invalid arguments for "+call.Name+": "+err.Error()), nil)
+	args, repairs, fail := repairArgs(item.Spec(), raw)
+	if fail != "" {
+		return nil, w.declineCall(ctx, call, requestID, decline(by, "invalid arguments for "+call.Name+": "+fail))
 	}
 	repeated, err := w.repeated(call.Name, args)
 	if err != nil {
 		return nil, err
 	}
 	if repeated {
-		return nil, w.declineCall(ctx, call, requestID, decline("rule:loop-guard", loopGuardMessage), nil)
+		return nil, w.declineCall(ctx, call, requestID, decline("rule:loop-guard", loopGuardMessage))
 	}
 	p := &prepared{call: call, tool: item, class: item.Class(), args: args, repairs: repairs}
 	return w.admit(ctx, p, requestID)
@@ -286,10 +286,7 @@ func (w *worker) gateCall(ctx context.Context, p *prepared, requestID string) (g
 	return gc, nil
 }
 
-func (w *worker) declineCall(ctx context.Context, call event.ToolCall, requestID string, v verdict, plan *tool.Plan) error {
-	if plan != nil && plan.Discard != nil {
-		plan.Discard()
-	}
+func (w *worker) declineCall(ctx context.Context, call event.ToolCall, requestID string, v verdict) error {
 	events := make([]event.Event, 0, 3)
 	if requestID == "" {
 		requestID = newID("req-")
@@ -305,7 +302,7 @@ func (w *worker) declineCall(ctx context.Context, call event.ToolCall, requestID
 
 func (w *worker) failBeforeRun(ctx context.Context, p *prepared, requestID string, cause error) error {
 	p.discardPlan()
-	return w.declineCall(ctx, p.call, requestID, decline("mode:"+string(w.settings.Approval), cause.Error()), nil)
+	return w.declineCall(ctx, p.call, requestID, decline("mode:"+string(w.settings.Approval), cause.Error()))
 }
 
 func (w *worker) start(ctx context.Context, p *prepared) error {
@@ -370,11 +367,15 @@ func (w *worker) started(p *prepared, files []tool.FileChange) (event.ToolStarte
 	return started, nil
 }
 
-func repairArgs(spec tool.Spec, raw jsontext.Value) (jsontext.Value, int, error) {
+func repairArgs(spec tool.Spec, raw jsontext.Value) (jsontext.Value, int, string) {
 	if spec.Freeform || len(spec.Schema) == 0 {
-		return raw, 0, nil
+		return raw, 0, ""
 	}
-	return tool.Repair(spec.Schema, raw)
+	repaired, count, err := tool.Repair(spec.Schema, raw)
+	if err != nil {
+		return raw, 0, err.Error()
+	}
+	return repaired, count, ""
 }
 
 func (w *worker) execute(ctx context.Context, p *prepared) (event.ToolCompleted, error) {

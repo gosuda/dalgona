@@ -9,7 +9,6 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/tool"
-	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
 var ErrNoTurn = errors.New("agent: a nested call ran outside a turn")
@@ -103,7 +102,7 @@ func (t *Thread) RunNestedCall(ctx context.Context, call event.ToolCall) error {
 func (w *worker) runNestedCall(ctx context.Context, call event.ToolCall, requestID string) error {
 	item, ok := w.tools.lookup(call.Name)
 	if !ok {
-		return w.declineCall(ctx, call, requestID, decline("mode:"+string(w.settings.Approval), "Tool "+call.Name+" not found"), nil)
+		return w.declineCall(ctx, call, requestID, decline("mode:"+string(w.settings.Approval), "Tool "+call.Name+" not found"))
 	}
 	p, err := w.admit(ctx, &prepared{call: call, tool: item, class: item.Class(), args: call.Args}, requestID)
 	if err != nil || p == nil {
@@ -117,7 +116,7 @@ func (w *worker) runNestedCall(ctx context.Context, call event.ToolCall, request
 	return err
 }
 
-func (t *Thread) StartChild(ctx context.Context, callID string, req task.Request) (string, error) {
+func (t *Thread) StartChild(ctx context.Context, callID string, req TaskRequest) (string, error) {
 	select {
 	case t.children <- struct{}{}:
 	case <-ctx.Done():
