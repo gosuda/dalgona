@@ -94,6 +94,14 @@ func collectExec(ctx context.Context, run runner.Runner, id string, spec ExecSpe
 	reads := context.WithoutCancel(ctx)
 	var result ExecResult
 	var offset int64
+	timer := time.NewTimer(execPoll)
+	defer timer.Stop()
+	var grace *time.Timer
+	defer func() {
+		if grace != nil {
+			grace.Stop()
+		}
+	}()
 	for {
 		out, err := run.Read(reads, id, offset)
 		if err != nil {
@@ -103,14 +111,46 @@ func collectExec(ctx context.Context, run runner.Runner, id string, spec ExecSpe
 		offset = out.Next
 		result.keep(out.Data, spec.OutputCap, spec.OnOutput)
 		if out.Exit != nil {
-			result.ExitCode = out.Exit.Code
-			result.TimedOut = timedOut.Load()
-			if result.TimedOut {
-				result.ExitCode = execExitTimeout
-			}
-			return result, nil
+			return finishExec(result, out.Exit.Code, timedOut), nil
 		}
-		<-time.After(execPoll)
+		if err := awaitPoll(ctx, timer, &grace); err != nil {
+			_ = run.Signal(reads, id, runner.SignalKill)
+			return result, err
+		}
+	}
+}
+
+func finishExec(result ExecResult, exitCode int, timedOut *atomic.Bool) ExecResult {
+	result.ExitCode = exitCode
+	if timedOut.Load() {
+		result.TimedOut = true
+		result.ExitCode = execExitTimeout
+	}
+	return result
+}
+
+func awaitPoll(ctx context.Context, timer *time.Timer, grace **time.Timer) error {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(execPoll)
+	if *grace != nil {
+		select {
+		case <-timer.C:
+			return nil
+		case <-(*grace).C:
+			return ctx.Err()
+		}
+	}
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		*grace = time.NewTimer(execStopGrace + time.Second)
+		return nil
 	}
 }
 
