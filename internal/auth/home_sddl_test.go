@@ -14,8 +14,8 @@ func privateSDDL(user string) string {
 	return "O:" + user + "G:" + user + "D:P(A;OICI;GA;;;" + user + ")(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
 }
 
-func checkHomeSDDL(dir, sddl, user string) error {
-	return checkHomeSDDLAllow(dir, sddl, stringAllow(user))
+func checkHomeSDDL(sddl string) error {
+	return checkHomeSDDLAllow(testHome, sddl, stringAllow(testUser))
 }
 
 func stringAllow(user string) func(string) (bool, string) {
@@ -44,20 +44,20 @@ func canonicalTestSID(principal string) string {
 
 func TestCheckHomeSDDLRefusesEveryone(t *testing.T) {
 	sddl := "O:" + testUser + "G:" + testUser + "D:P(A;OICI;GA;;;" + testUser + ")(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICI;GA;;;WD)"
-	if err := checkHomeSDDL(testHome, sddl, testUser); err == nil || !strings.Contains(err.Error(), "S-1-1-0") {
+	if err := checkHomeSDDL(sddl); err == nil || !strings.Contains(err.Error(), "S-1-1-0") {
 		t.Fatalf("checkHomeSDDL = %v, want refusal naming S-1-1-0", err)
 	}
 }
 
 func TestCheckHomeSDDLAcceptsPrivateHome(t *testing.T) {
-	if err := checkHomeSDDL(testHome, privateSDDL(testUser), testUser); err != nil {
+	if err := checkHomeSDDL(privateSDDL(testUser)); err != nil {
 		t.Fatalf("checkHomeSDDL = %v", err)
 	}
 }
 
 func TestCheckHomeSDDLRefusesInheritedDACL(t *testing.T) {
 	sddl := "O:" + testUser + "G:" + testUser + "D:AI(A;OICI;GA;;;" + testUser + ")(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
-	if err := checkHomeSDDL(testHome, sddl, testUser); err == nil || !strings.Contains(err.Error(), "inherits") {
+	if err := checkHomeSDDL(sddl); err == nil || !strings.Contains(err.Error(), "inherits") {
 		t.Fatalf("checkHomeSDDL = %v, want inheritance refusal", err)
 	}
 }
@@ -67,7 +67,7 @@ func TestCheckHomeSDDLRefusesNullDACL(t *testing.T) {
 		"O:" + testUser + "G:" + testUser,
 		"O:" + testUser + "G:" + testUser + "D:NO_ACCESS_CONTROL",
 	} {
-		if err := checkHomeSDDL(testHome, sddl, testUser); err == nil || !strings.Contains(err.Error(), "everyone") {
+		if err := checkHomeSDDL(sddl); err == nil || !strings.Contains(err.Error(), "everyone") {
 			t.Fatalf("checkHomeSDDL(%q) = %v, want refusal granting everyone", sddl, err)
 		}
 	}
@@ -75,49 +75,49 @@ func TestCheckHomeSDDLRefusesNullDACL(t *testing.T) {
 
 func TestCheckHomeSDDLIgnoresDenyEntries(t *testing.T) {
 	sddl := "O:" + testUser + "G:" + testUser + "D:P(D;OICI;GA;;;WD)(A;OICI;GA;;;" + testUser + ")(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
-	if err := checkHomeSDDL(testHome, sddl, testUser); err != nil {
+	if err := checkHomeSDDL(sddl); err != nil {
 		t.Fatalf("checkHomeSDDL = %v", err)
 	}
 }
 
 func TestCheckHomeSDDLRefusesEmptyDACL(t *testing.T) {
 	sddl := "O:" + testUser + "G:" + testUser + "D:P"
-	if err := checkHomeSDDL(testHome, sddl, testUser); err == nil || !strings.Contains(err.Error(), "empty") {
+	if err := checkHomeSDDL(sddl); err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("checkHomeSDDL = %v, want empty refusal", err)
 	}
 }
 
 func TestCheckHomeSDDLRefusesInheritOnlyEveryone(t *testing.T) {
 	sddl := "O:" + testUser + "G:" + testUser + "D:P(A;OICI;GA;;;" + testUser + ")(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICIIO;GA;;;WD)"
-	if err := checkHomeSDDL(testHome, sddl, testUser); err == nil || !strings.Contains(err.Error(), "S-1-1-0") {
+	if err := checkHomeSDDL(sddl); err == nil || !strings.Contains(err.Error(), "S-1-1-0") {
 		t.Fatalf("checkHomeSDDL = %v, want refusal naming S-1-1-0", err)
 	}
 }
 
 func TestCheckHomeSDDLRefusesObjectAllowEveryone(t *testing.T) {
 	sddl := "O:" + testUser + "G:" + testUser + "D:P(A;OICI;GA;;;" + testUser + ")(OA;OICI;GA;;;SY)(OA;OICI;GA;;;BA)(OA;OICI;GA;;;WD)"
-	if err := checkHomeSDDL(testHome, sddl, testUser); err == nil || !strings.Contains(err.Error(), "S-1-1-0") {
+	if err := checkHomeSDDL(sddl); err == nil || !strings.Contains(err.Error(), "S-1-1-0") {
 		t.Fatalf("checkHomeSDDL = %v, want refusal naming S-1-1-0", err)
 	}
 }
 
 func TestCheckHomeSDDLRefusesConditionalAllowEveryone(t *testing.T) {
 	sddl := "O:" + testUser + "G:" + testUser + "D:P(A;OICI;GA;;;" + testUser + ")(XA;OICI;FA;;;SY;(Member_of {SID(SY)}))(XA;OICI;FA;;;WD;(Member_of {SID(WD)}))"
-	if err := checkHomeSDDL(testHome, sddl, testUser); err == nil || !strings.Contains(err.Error(), "S-1-1-0") {
+	if err := checkHomeSDDL(sddl); err == nil || !strings.Contains(err.Error(), "S-1-1-0") {
 		t.Fatalf("checkHomeSDDL = %v, want refusal naming S-1-1-0", err)
 	}
 }
 
 func TestCheckHomeSDDLIgnoresAuditAndDenyObjectEntries(t *testing.T) {
 	sddl := "O:" + testUser + "G:" + testUser + "D:P(AU;OICI;FA;;;WD)(OD;OICI;GA;;;WD)(XD;OICI;FA;;;WD;(Member_of {SID(WD)}))(A;OICI;GA;;;" + testUser + ")(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
-	if err := checkHomeSDDL(testHome, sddl, testUser); err != nil {
+	if err := checkHomeSDDL(sddl); err != nil {
 		t.Fatalf("checkHomeSDDL = %v", err)
 	}
 }
 
 func TestCheckHomeSDDLRefusesUnknownType(t *testing.T) {
 	sddl := "O:" + testUser + "G:" + testUser + "D:P(A;OICI;GA;;;" + testUser + ")(XX;OICI;GA;;;SY)"
-	if err := checkHomeSDDL(testHome, sddl, testUser); err == nil || !strings.Contains(err.Error(), "unknown ACE type") {
+	if err := checkHomeSDDL(sddl); err == nil || !strings.Contains(err.Error(), "unknown ACE type") {
 		t.Fatalf("checkHomeSDDL = %v, want unknown type refusal", err)
 	}
 }

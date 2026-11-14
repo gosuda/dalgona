@@ -511,27 +511,23 @@ func (s *Store) credentialReplacements() []replacement {
 }
 
 func providerReplacements(provider string, credential Credential) []replacement {
-	var items []replacement
 	base := "{{secret:auth:" + provider
-	baseUsed := false
+	keySuff, accSuff, refSuff := "}}", ":access}}", ":refresh}}"
+	if credential.Key == "" {
+		accSuff = "}}"
+	}
+	if credential.Key == "" && credential.Access == "" {
+		refSuff = "}}"
+	}
+	var items []replacement
 	if credential.Key != "" {
-		items = appendSecret(items, replacement{from: credential.Key, to: base + "}}"})
-		baseUsed = true
+		items = appendSecret(items, replacement{from: credential.Key, to: base + keySuff})
 	}
 	if credential.Access != "" {
-		placeholder := base + "}}"
-		if baseUsed {
-			placeholder = base + ":access}}"
-		}
-		items = appendSecret(items, replacement{from: credential.Access, to: placeholder})
-		baseUsed = true
+		items = appendSecret(items, replacement{from: credential.Access, to: base + accSuff})
 	}
 	if credential.Refresh != "" {
-		placeholder := base + "}}"
-		if baseUsed {
-			placeholder = base + ":refresh}}"
-		}
-		items = appendSecret(items, replacement{from: credential.Refresh, to: placeholder})
+		items = appendSecret(items, replacement{from: credential.Refresh, to: base + refSuff})
 	}
 	return items
 }

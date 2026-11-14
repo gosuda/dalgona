@@ -23,7 +23,7 @@ func breakPatternHome(t *testing.T, dir string) {
 
 func TestStore_MaskWithErrorFailsClosed(t *testing.T) {
 	home := t.TempDir()
-	store := newPatternMaskStore(t, home, `token-[a-z0-9]{8,}`)
+	store := newPatternMaskStore(t, home)
 	masked, err := store.MaskWithError("prefix token-abcdefgh suffix")
 	if err != nil {
 		t.Fatalf("MaskWithError = %q, %v, want masked text", masked, err)
@@ -43,7 +43,7 @@ func TestStore_MaskWithErrorFailsClosed(t *testing.T) {
 
 func TestStore_MaskWithErrorConcurrentFailure(t *testing.T) {
 	home := t.TempDir()
-	store := newPatternMaskStore(t, home, `token-[a-z0-9]{8,}`)
+	store := newPatternMaskStore(t, home)
 	breakPatternHome(t, home)
 	const callers = 8
 	errs := make([]error, callers)

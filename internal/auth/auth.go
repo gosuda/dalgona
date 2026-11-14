@@ -19,25 +19,13 @@ import (
 
 var ErrNoCredential = errors.New("auth: no credential")
 
-type Product string
-
-const (
-	ProductDal     Product = "dal"
-	ProductDalgona Product = "dalgona"
-)
-
-type ProviderDef struct {
-	ID, EnvKey string
-	Products   []Product
-}
-
-var providerDefs = map[string]ProviderDef{
-	"openai":     {ID: "openai", EnvKey: "OPENAI_API_KEY", Products: []Product{ProductDal, ProductDalgona}},
-	"anthropic":  {ID: "anthropic", EnvKey: "ANTHROPIC_API_KEY", Products: []Product{ProductDal, ProductDalgona}},
-	"google":     {ID: "google", EnvKey: "GEMINI_API_KEY", Products: []Product{ProductDal, ProductDalgona}},
-	"openrouter": {ID: "openrouter", EnvKey: "OPENROUTER_API_KEY", Products: []Product{ProductDal, ProductDalgona}},
-	"devin":      {ID: "devin", EnvKey: "DEVIN_API_KEY", Products: []Product{ProductDal, ProductDalgona}},
-	"sandbox0":   {ID: "sandbox0", EnvKey: "SANDBOX0_TOKEN", Products: []Product{ProductDalgona}},
+var providerEnvKeys = map[string]string{
+	"openai":     "OPENAI_API_KEY",
+	"anthropic":  "ANTHROPIC_API_KEY",
+	"google":     "GEMINI_API_KEY",
+	"openrouter": "OPENROUTER_API_KEY",
+	"devin":      "DEVIN_API_KEY",
+	"sandbox0":   "SANDBOX0_TOKEN",
 }
 
 type (
@@ -223,41 +211,33 @@ func readObject(raw []byte, visit func(string, jsontext.Value) error) error {
 	return nil
 }
 
-var credentialFieldNames = []string{"type", "key", "access", "refresh", "expires", "account"}
-
-func credentialField(credential *Credential, name string) *string {
-	switch name {
-	case "type":
-		return &credential.Type
-	case "key":
-		return &credential.Key
-	case "access":
-		return &credential.Access
-	case "refresh":
-		return &credential.Refresh
-	case "expires":
-		return &credential.Expires
-	case "account":
-		return &credential.Account
-	}
-	return nil
-}
-
 func decodeCredential(raw jsontext.Value) (Credential, error) {
-	var credential Credential
+	var c Credential
 	err := readObject(raw, func(name string, value jsontext.Value) error {
-		field := credentialField(&credential, name)
-		if field == nil {
-			return nil
+		switch name {
+		case "type", "key", "access", "refresh", "expires", "account":
+			text, err := jsonString(value)
+			if err != nil {
+				return fmt.Errorf("field %q: %w", name, err)
+			}
+			switch name {
+			case "type":
+				c.Type = text
+			case "key":
+				c.Key = text
+			case "access":
+				c.Access = text
+			case "refresh":
+				c.Refresh = text
+			case "expires":
+				c.Expires = text
+			case "account":
+				c.Account = text
+			}
 		}
-		text, err := jsonString(value)
-		if err != nil {
-			return fmt.Errorf("field %q: %w", name, err)
-		}
-		*field = text
 		return nil
 	})
-	return credential, err
+	return c, err
 }
 
 func jsonString(raw jsontext.Value) (string, error) {
@@ -332,8 +312,8 @@ func envKey(provider, custom string) string {
 	if custom != "" {
 		return custom
 	}
-	if definition, ok := providerDefs[provider]; ok {
-		return definition.EnvKey
+	if env, ok := providerEnvKeys[provider]; ok {
+		return env
 	}
 	return strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(provider)) + "_API_KEY"
 }
@@ -437,20 +417,26 @@ func writeAuthValue(encoder *jsontext.Encoder, raw jsontext.Value, credential Cr
 	return nil
 }
 
-func writeCredential(encoder *jsontext.Encoder, credential Credential) error {
+func writeCredential(encoder *jsontext.Encoder, c Credential) error {
 	if err := encoder.WriteToken(jsontext.BeginObject); err != nil {
 		return fmt.Errorf("write credential: %w", err)
 	}
-	mutable := credential
-	for _, name := range credentialFieldNames {
-		value := *credentialField(&mutable, name)
-		if value == "" {
+	fields := []struct{ name, val string }{
+		{"type", c.Type},
+		{"key", c.Key},
+		{"access", c.Access},
+		{"refresh", c.Refresh},
+		{"expires", c.Expires},
+		{"account", c.Account},
+	}
+	for _, f := range fields {
+		if f.val == "" {
 			continue
 		}
-		if err := encoder.WriteToken(jsontext.String(name)); err != nil {
+		if err := encoder.WriteToken(jsontext.String(f.name)); err != nil {
 			return fmt.Errorf("write credential field: %w", err)
 		}
-		if err := encoder.WriteToken(jsontext.String(value)); err != nil {
+		if err := encoder.WriteToken(jsontext.String(f.val)); err != nil {
 			return fmt.Errorf("write credential value: %w", err)
 		}
 	}

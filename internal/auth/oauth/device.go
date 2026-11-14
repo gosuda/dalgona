@@ -37,10 +37,10 @@ func DeviceCode(ctx context.Context, provider Provider, show func(string, string
 }
 
 func rfcDeviceCode(ctx context.Context, provider Provider, show func(string, string)) (Token, error) {
-	response, err := postForm(ctx, provider.DeviceURL, url.Values{
+	response, reqErr := postForm(ctx, provider.DeviceURL, url.Values{
 		"client_id": {provider.ClientID}, "scope": {strings.Join(provider.Scopes, " ")},
 	})
-	grant, err := requestDeviceGrant(provider, response, err, "device_code")
+	grant, err := requestDeviceGrant(provider, response, reqErr, "device_code")
 	if err != nil {
 		return Token{}, err
 	}
@@ -62,10 +62,11 @@ func rfcDeviceCode(ctx context.Context, provider Provider, show func(string, str
 		if code == "" {
 			return token, nil
 		}
-		grant.interval, err = nextDeviceInterval(code, grant.interval)
-		if err != nil {
-			return Token{}, err
+		interval, intervalErr := nextDeviceInterval(code, grant.interval)
+		if intervalErr != nil {
+			return Token{}, intervalErr
 		}
+		grant.interval = interval
 	}
 }
 
