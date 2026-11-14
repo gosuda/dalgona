@@ -1,0 +1,8 @@
+# Deliberate journal-event to agent.ReviewOutcome boundary conversions
+# in internal/rpc/serve_review_notifications.go (toolJudged and turnJudged notifications).
+# Inline sloplint directives (// sloplint-allow) are rejected by internal/commentgate,
+# and nolint wrapper comments are rejected by gglint's unknown-nolint checks.
+[project]
+extend_exclude = [
+    "internal/rpc/serve_review_notifications.go",
+]
