@@ -447,6 +447,8 @@ func googleEffort(reasoning string) string {
 	}
 }
 
+func (p *Provider) SendsImages() bool { return true }
+
 func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
 	var models []model.Model
 	seen := make(map[string]bool)

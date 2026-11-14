@@ -89,7 +89,7 @@ The Anthropic model list decoder MUST read the fields of the List Models API at 
 
 The chat-compatible model list MUST decode the response shape of `pi`'s `packages/ai/src/providers/openrouter-api.ts`.
 
-The Anthropic, OpenAI, and Google adapters MUST report images for each listed model. Every other adapter MUST report images for a model only when its provider metadata says that the model accepts images. A chat-compatible model MUST report images only when its list says that its input modalities include `image`.
+The Anthropic, OpenAI, and Google adapters MUST report images for each listed model. Every other adapter MUST report images for a model only when its provider metadata says that the model accepts images. A chat-compatible model MUST report images only when its list says that its input modalities include `image`. The Anthropic, OpenAI, and Google adapters MUST still report image support when catalog requests fail. They MUST also report it when the selected model is absent.
 
 Static role presets MUST match the decision table. Providers without a static preset MUST use their first offered model for `smol` and `slow`. An unavailable preset MUST return the thread model and this exact log line: `roles.<name> preset <id> is not offered; using <model>`.
 
