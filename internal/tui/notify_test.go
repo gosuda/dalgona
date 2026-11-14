@@ -173,9 +173,9 @@ func TestLoadThreadPrintsSeparatorOnly(t *testing.T) {
 	m := playTerminal(newModel(nil, Options{}, nil))
 	m.screen.width = 80
 	items := []rpc.Item{{ID: "c1", Type: "commandExecution", Command: "ls", Status: "completed"}, {ID: "c2", Type: "commandExecution", Command: "pwd", Status: "completed"}}
-	m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: rpc.ThreadReadResponse{Thread: rpc.Thread{ID: "t1", Name: "Plan", Turns: []rpc.Turn{{ID: "turn-1", Items: items, Status: "completed"}}}}}})
+	m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{Thread: rpc.Thread{ID: "t1", Name: "Plan", Turns: []rpc.Turn{{ID: "turn-1", Items: items, Status: "completed"}}}}})
 	before := len(m.out.entries)
-	m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: rpc.ThreadReadResponse{Thread: rpc.Thread{ID: "t2", Name: "Plan"}}}})
+	m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{Thread: rpc.Thread{ID: "t2", Name: "Plan"}}})
 	for _, key := range []string{"thread:t1:1", fixtureItemKey("c1"), fixtureItemKey("c2"), "thread:t2:2"} {
 		if _, ok := m.out.printed[key]; !ok {
 			t.Fatalf("key %s not printed; printed %v", key, m.out.printed)
@@ -194,7 +194,7 @@ func TestThreadRowKeysCountLoads(t *testing.T) {
 	m := playTerminal(newModel(nil, Options{}, nil))
 	m.screen.width = 80
 	for _, id := range []string{"t1", "t2", "t1"} {
-		m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: rpc.ThreadReadResponse{Thread: rpc.Thread{ID: id, Name: "Plan"}}}})
+		m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{Thread: rpc.Thread{ID: id, Name: "Plan"}}})
 	}
 	for _, key := range []string{"thread:t1:1", "thread:t2:2", "thread:t1:3"} {
 		if got := threadRowText(m, key); got != "── Plan ──" {
@@ -204,7 +204,7 @@ func TestThreadRowKeysCountLoads(t *testing.T) {
 	m = playTerminal(newModel(nil, Options{}, nil))
 	m.screen.width = 80
 	for _, id := range []string{"t1", "t1"} {
-		m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: rpc.ThreadReadResponse{Thread: rpc.Thread{ID: id, Name: "Plan"}}}})
+		m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{Thread: rpc.Thread{ID: id, Name: "Plan"}}})
 	}
 	if _, ok := m.out.printed["thread:t1:1"]; !ok {
 		t.Fatal("first load of t1 printed no thread row")

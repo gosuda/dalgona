@@ -7,7 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-func interruptedRunningModel(t *testing.T) (model, *fakeCaller) {
+func interruptedRunningModel(t *testing.T) model {
 	t.Helper()
 	caller := new(fakeCaller)
 	m := newModel(caller, Options{}, nil)
@@ -17,12 +17,12 @@ func interruptedRunningModel(t *testing.T) (model, *fakeCaller) {
 	m = firstEscArms(t, m, caller)
 	m, command := drive(t, m, press(tea.KeyEscape, 0, ""))
 	m = runCommand(t, m, command, "Esc did not interrupt the active turn")
-	return m, caller
+	return m
 }
 
 func TestIdleStatusAfterInterruptKeepsStopped(t *testing.T) {
 	t.Parallel()
-	m, _ := interruptedRunningModel(t)
+	m := interruptedRunningModel(t)
 	m, _ = drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"interrupted"}}`)})
 	m, _ = drive(t, m, notificationMsg{method: "thread/status/changed", params: []byte(`{"threadId":"t1","status":{"type":"idle"},"seq":3}`)})
 	if got := stripANSI(m.liveRow()); !strings.Contains(got, "Stopped") {
@@ -32,7 +32,7 @@ func TestIdleStatusAfterInterruptKeepsStopped(t *testing.T) {
 
 func TestInterruptNoticeEndsWithTurn(t *testing.T) {
 	t.Parallel()
-	m, _ := interruptedRunningModel(t)
+	m := interruptedRunningModel(t)
 	if m.notice == "" {
 		t.Fatal("interrupt set no notice, so the test cannot see it end")
 	}

@@ -14,7 +14,7 @@ func reviewThreadStarted() notificationMsg {
 
 func reviewModel(t *testing.T, width, lines int) model {
 	t.Helper()
-	m := newTestModel(new(fakeCaller), Options{}, nil)
+	m := newTestModel(new(fakeCaller), Options{})
 	m = rawUpdate(t, m, tea.WindowSizeMsg{Width: width, Height: 24})
 	m = rawUpdate(t, m, reviewThreadStarted())
 	m = rawUpdate(t, m, commandOutput("seq", numberedOutput(lines)))
@@ -53,7 +53,7 @@ func TestReviewFrameBounded(t *testing.T) {
 
 func TestReviewHoldsRowsUntilClose(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(new(fakeCaller), Options{}, nil)
+	m := newTestModel(new(fakeCaller), Options{})
 	m = rawUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = rawUpdate(t, m, reviewThreadStarted())
 	m = rawUpdate(t, m, settledMsg{n: m.out.settleN})
@@ -112,6 +112,7 @@ func TestReviewOfApprovalShowsCommandOnlyWhenPresent(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			m := reviewModel(t, 80, 3)
 			m = rawUpdate(t, m, serverRequestMsg{method: tc.method, answer: make(chan requestAnswer, 1), params: []byte(tc.params)})
 			m = rawUpdate(t, m, press('o', tea.ModCtrl, ""))
@@ -144,7 +145,8 @@ func TestReviewHeaderCountsHeldRows(t *testing.T) {
 	m = rawUpdate(t, m, press('o', tea.ModCtrl, ""))
 	m.commit("held:1", []string{"one"})
 	m.commit("held:2", []string{"two"})
-	if header := strings.Split(m.reviewView(), "\n")[0]; !strings.Contains(header, "· 2 waiting") {
+	header, _, _ := strings.Cut(m.reviewView(), "\n")
+	if !strings.Contains(header, "· 2 waiting") {
 		t.Fatalf("the review header does not count the two held rows: %q", header)
 	}
 }
@@ -244,7 +246,7 @@ func TestReviewRowVerbosity(t *testing.T) {
 
 func TestReviewRowErrorIsBold(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(new(fakeCaller), Options{}, nil)
+	m := newTestModel(new(fakeCaller), Options{})
 	m.screen.width = 120
 	m.screen.theme = newTheme(themeNight, true)
 	failed := strings.Join(m.renderReviewRow("error", "Failed: boom", []string{"a.go"}), "\n")

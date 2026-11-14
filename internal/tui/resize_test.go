@@ -9,7 +9,7 @@ import (
 
 func TestNarrowingKeepsComposerRowsInsideWindow(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(new(fakeCaller), Options{}, nil)
+	m := newTestModel(new(fakeCaller), Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	m = typeText(t, m, strings.Repeat("x", 130))
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
@@ -18,7 +18,7 @@ func TestNarrowingKeepsComposerRowsInsideWindow(t *testing.T) {
 
 func TestNarrowingKeepsThreeComposerLinesInsideWindow(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(new(fakeCaller), Options{}, nil)
+	m := newTestModel(new(fakeCaller), Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	m = typeText(t, m, "first")
 	m, _ = drive(t, m, press('j', tea.ModCtrl, ""))

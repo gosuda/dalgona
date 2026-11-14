@@ -26,7 +26,7 @@ func commandApprovalRequest(answer chan requestAnswer) serverRequestMsg {
 
 func TestFileApprovalShowsPathsAndDiff(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, notificationMsg{
 		method: "item/fileChange/patchUpdated",
@@ -38,7 +38,7 @@ func TestFileApprovalShowsPathsAndDiff(t *testing.T) {
 
 func TestApprovalCtrlOOpensReview(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, commandApprovalRequest(make(chan requestAnswer, 1)))
 	m, _ = drive(t, m, press('o', tea.ModCtrl, ""))
@@ -47,7 +47,7 @@ func TestApprovalCtrlOOpensReview(t *testing.T) {
 
 func TestChildFileApprovalShowsDiff(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)})
 	m, _ = drive(t, m, notificationMsg{
@@ -64,7 +64,7 @@ func TestChildFileApprovalShowsDiff(t *testing.T) {
 
 func TestApprovalNDeclinesAtOnce(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	answer := make(chan requestAnswer, 1)
 	m, _ = drive(t, m, commandApprovalRequest(answer))
 	m, _ = drive(t, m, press('n', 0, "n"))
@@ -90,7 +90,7 @@ func TestApprovalNDeclinesAtOnce(t *testing.T) {
 
 func TestApprovalNOpensNoTextMode(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, commandApprovalRequest(make(chan requestAnswer, 1)))
 	m, _ = drive(t, m, press('n', 0, "n"))
 	if m.list != nil || m.confirm != nil {
@@ -103,7 +103,7 @@ func TestApprovalNOpensNoTextMode(t *testing.T) {
 
 func TestApprovalCardSteady(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	long, err := json.Marshal(strings.Repeat("go test ./... -count=1\n", 60))
 	if err != nil {
@@ -123,7 +123,7 @@ func TestApprovalCardSteady(t *testing.T) {
 
 func TestApprovalResolvedByAnotherWindowCloses(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, serverRequestMsg{
 		method:    "item/commandExecution/requestApproval",

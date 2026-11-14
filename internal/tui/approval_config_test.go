@@ -35,7 +35,7 @@ func bandItem(m model, id string) string {
 func TestNewThreadLeavesApprovalToConfig(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
-	m := newTestModel(caller, Options{}, nil)
+	m := newTestModel(caller, Options{})
 	m.startThread()()
 	params, ok := caller.calls[0].params.(rpc.ThreadStartParams)
 	if !ok || params.ApprovalPolicy != "" {
@@ -45,7 +45,7 @@ func TestNewThreadLeavesApprovalToConfig(t *testing.T) {
 
 func TestNewThreadShowsServerApproval(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(new(fakeCaller), Options{}, nil)
+	m := newTestModel(new(fakeCaller), Options{})
 	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{ApprovalPolicy: "untrusted", Thread: rpc.Thread{ID: "t1"}}})
 	if got := bandItem(m, "approval"); got != "?" {
 		t.Fatalf("approval item = %q, want ? for the configured ask mode", got)
@@ -54,7 +54,7 @@ func TestNewThreadShowsServerApproval(t *testing.T) {
 
 func TestResumedThreadShowsServerApproval(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(&policyCaller{policy: "never"}, Options{}, nil)
+	m := newTestModel(&policyCaller{policy: "never"}, Options{})
 	m, _ = drive(t, m, m.resumeThread("t1")())
 	if got := bandItem(m, "approval"); got != "!" {
 		t.Fatalf("approval item = %q, want ! for the configured yolo mode", got)

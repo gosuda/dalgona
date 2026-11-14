@@ -27,7 +27,7 @@ func assertMouseMode(t *testing.T, m model, want tea.MouseMode, when string) {
 
 func TestMouseModeOnlyWithOverlay(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(&fakeCaller{}, Options{}, nil)
+	m := newTestModel(&fakeCaller{}, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, resultMsg{op: "threads", value: &rpc.ThreadListResponse{Data: []rpc.Thread{{ID: "t1"}}}})
 	assertMouseMode(t, m, tea.MouseModeCellMotion, "resume list open")
@@ -48,7 +48,7 @@ func TestMouseModeOnlyWithOverlay(t *testing.T) {
 
 func TestWheelScrollsPicker(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(&fakeCaller{}, Options{}, nil)
+	m := newTestModel(&fakeCaller{}, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.openList(longList(300))
 	m, _ = drive(t, m, tea.MouseWheelMsg{Button: tea.MouseWheelDown})
@@ -63,7 +63,7 @@ func TestWheelScrollsPicker(t *testing.T) {
 
 func TestClickSelectsNothing(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(&fakeCaller{}, Options{}, nil)
+	m := newTestModel(&fakeCaller{}, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.openList(longList(300))
 	before := *m.list

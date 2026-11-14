@@ -9,11 +9,12 @@ import (
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 
-func decodeParams(params jsontext.Value, out any) error {
-	if err := json.Unmarshal(params, out); err != nil {
-		return fmt.Errorf("decode params: %w", err)
+func decodeParams[T any](params jsontext.Value) (T, error) {
+	var out T
+	if err := json.Unmarshal(params, &out); err != nil {
+		return out, fmt.Errorf("decode params: %w", err)
 	}
-	return nil
+	return out, nil
 }
 
 type deltaDecoder struct {
@@ -91,15 +92,13 @@ func (d *deltaDecoder) readDelta() error {
 func decodeApproval(method string, params jsontext.Value) (approval, error) {
 	switch method {
 	case "item/commandExecution/requestApproval":
-		var request rpc.CommandExecutionRequestApprovalParams
-		err := decodeParams(params, &request)
+		request, err := decodeParams[rpc.CommandExecutionRequestApprovalParams](params)
 		return approval{
 			method: method, threadID: sanitizeText(request.ThreadID), itemID: request.ItemID,
 			command: sanitizeText(request.Command), cwd: sanitizeText(request.Cwd), reason: sanitizeText(request.Reason),
 		}, err
 	case "item/fileChange/requestApproval":
-		var request rpc.FileChangeRequestApprovalParams
-		err := decodeParams(params, &request)
+		request, err := decodeParams[rpc.FileChangeRequestApprovalParams](params)
 		return approval{method: method, threadID: sanitizeText(request.ThreadID), itemID: request.ItemID, reason: sanitizeText(request.Reason)}, err
 	default:
 		return approval{}, fmt.Errorf("unsupported server request %s", method)

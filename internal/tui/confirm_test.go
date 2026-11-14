@@ -11,7 +11,7 @@ import (
 
 func revertPicker(t *testing.T, client caller, preview string) model {
 	t.Helper()
-	m := newTestModel(client, Options{}, nil)
+	m := newTestModel(client, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
 	m.thread.id = "t1"
 	m, _ = drive(t, m, resultMsg{op: "revertTree", value: &rpc.ThreadTreeResponse{Turns: []rpc.TreeTurn{{TurnID: "turn-9", Preview: preview, Active: true}}}})

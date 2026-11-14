@@ -75,7 +75,7 @@ func (m *model) questionKey(msg tea.KeyPressMsg, key string) tea.Cmd {
 	return m.composerKey(msg, key)
 }
 
-func (m *model) helpKey(key string) tea.Cmd {
+func (m *model) helpKey(key string) {
 	switch key {
 	case "up":
 		m.help.scroll--
@@ -87,10 +87,9 @@ func (m *model) helpKey(key string) tea.Cmd {
 		m.help.scroll += helpPage
 	case "esc", "?":
 		m.help = nil
-		return nil
+		return
 	}
 	m.clampHelp()
-	return nil
 }
 
 func (m *model) clampHelp() {

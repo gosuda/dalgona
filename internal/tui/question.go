@@ -474,8 +474,8 @@ func scrollOptions(options []string, cursor, avail int, s *screenState, width in
 }
 
 func decodeQuestion(params jsontext.Value) (rpc.ToolRequestUserInputParams, error) {
-	var request rpc.ToolRequestUserInputParams
-	if err := decodeParams(params, &request); err != nil {
+	request, err := decodeParams[rpc.ToolRequestUserInputParams](params)
+	if err != nil {
 		return request, fmt.Errorf("decode question: %w", err)
 	}
 	if len(request.Questions) == 0 {

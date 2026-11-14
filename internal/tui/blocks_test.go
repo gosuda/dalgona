@@ -101,7 +101,7 @@ func TestBlockSplitterCloseFlushesPartialLine(t *testing.T) {
 
 func TestStreamingMarkdownRendersClosedBlocks(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.screen.width = 100
 	m, _ = drive(t, m, tea.ColorProfileMsg{Profile: colorprofile.TrueColor})
 	m, _ = drive(t, m, tea.BackgroundColorMsg{Color: color.Black})
@@ -134,7 +134,7 @@ func TestStreamingMarkdownRendersClosedBlocks(t *testing.T) {
 
 func answerThread(t *testing.T) model {
 	t.Helper()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.screen.width = 60
 	m, _ = drive(t, m, tea.ColorProfileMsg{Profile: colorprofile.TrueColor})
 	m, _ = drive(t, m, tea.BackgroundColorMsg{Color: color.Black})
@@ -180,7 +180,7 @@ func feedAll(s *blockSplitter, deltas ...string) ([]block, string) {
 func TestDockHeightStableWhileAnswerStreams(t *testing.T) {
 	t.Parallel()
 	for _, size := range []tea.WindowSizeMsg{{Width: 40, Height: 8}, {Width: 100, Height: 24}} {
-		m := newTestModel(nil, Options{}, nil)
+		m := newTestModel(nil, Options{})
 		m, _ = drive(t, m, size)
 		m, _ = drive(t, m, notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)})
 		m, _ = drive(t, m, notificationMsg{method: "item/started", params: []byte(`{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":{"type":"agentMessage","id":"a1","text":""}}`)})

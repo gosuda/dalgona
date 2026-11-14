@@ -13,7 +13,7 @@ import (
 
 func initializedModel(t *testing.T, cwd string) model {
 	t.Helper()
-	m := newTestModel(nil, Options{Cwd: cwd}, nil)
+	m := newTestModel(nil, Options{Cwd: cwd})
 	return rawUpdate(t, m, resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/1.2.3"}})
 }
 

@@ -24,7 +24,7 @@ func TestSameThreadResumeNoticesHeldFollowups(t *testing.T) {
 	m := newModel(nil, Options{}, nil)
 	m.thread.id = "t1"
 	m.queue = []string{"a", "b"}
-	m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: rpc.ThreadReadResponse{Thread: rpc.Thread{ID: "t1"}}}})
+	m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{Thread: rpc.Thread{ID: "t1"}}})
 	assertContains(t, m.notice, "2 follow-ups moved to")
 	if len(m.queue) != 2 {
 		t.Fatalf("followups after a same-thread resume = %q, want both kept", m.queue)

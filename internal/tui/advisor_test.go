@@ -118,7 +118,7 @@ func TestModelQueuesApprovalsAndIgnoresOtherThreads(t *testing.T) {
 
 func TestComposerPlaceholderFollowsCursor(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	assertContains(t, stripANSI(m.View().Content), "› Send a prompt · / commands · ? keys")
 	m.input.composer.SetValue("typed")
 	view := stripANSI(m.View().Content)

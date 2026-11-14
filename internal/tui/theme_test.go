@@ -55,7 +55,7 @@ func backgroundFor(dark bool) color.Color {
 
 func TestNoColorFrameHasNoColourSequences(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.screen.width = 60
 	m, _ = drive(t, m, tea.EnvMsg([]string{"NO_COLOR=1", "TERM=xterm-256color"}))
 	m, _ = drive(t, m, tea.ColorProfileMsg{Profile: colorprofile.TrueColor})
@@ -101,7 +101,7 @@ func TestThemeFrameWidths(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"day", "soft-day", "night", "soft-night"} {
 		for _, width := range []int{40, 100} {
-			m := newTestModel(nil, Options{}, nil)
+			m := newTestModel(nil, Options{})
 			m.screen.width = width
 			m.input.composer.SetWidth(width)
 			m.screen.themeSetting = name

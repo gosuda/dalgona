@@ -63,7 +63,7 @@ func TestUntrustedTextIsSanitizedAtEveryEntry(t *testing.T) {
 
 func TestUntrustedThreadNameIsSanitizedInState(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m.thread.id = "t1"
 	m, _ = drive(t, m, notificationMsg{method: "thread/name/updated", params: []byte(`{"threadId":"t1","threadName":"x\u001b]0;pwn\u0007y\u202e"}`)})
 	if m.thread.title != "xy" {

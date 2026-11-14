@@ -121,7 +121,7 @@ type liveState struct {
 type inputState struct {
 	composer    editor
 	history     history
-	keywords    []Keyword
+	keywords    []keyword
 	marks       []keywordSpan
 	marksFor    string
 	field       textField

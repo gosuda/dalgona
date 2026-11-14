@@ -350,7 +350,7 @@ func TestDynamicAndMCPRowsShowDuration(t *testing.T) {
 		{"mcp tool call", rpc.Item{Type: "mcpToolCall", Server: "docs", Tool: "lookup", Status: "completed", DurationMs: &threeSeconds}, "3s"},
 	}
 	for _, tc := range cases {
-		header := strings.Split(stripANSI(settledText(&m, tc.item)), "\n")[0]
+		header, _, _ := strings.Cut(stripANSI(settledText(&m, tc.item)), "\n")
 		if !strings.HasSuffix(strings.TrimRight(header, " "), tc.want) {
 			t.Fatalf("%s: row %q does not end with duration %q", tc.name, header, tc.want)
 		}

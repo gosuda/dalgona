@@ -80,7 +80,7 @@ func providerList() *rpc.AccountProvidersResponse {
 
 func openLoginPanel(t *testing.T, client caller, argument string) model {
 	t.Helper()
-	m := newTestModel(client, Options{}, nil)
+	m := newTestModel(client, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.executeSlash("login", argument)
 	m, _ = drive(t, m, resultMsg{op: "providers", value: providerList()})

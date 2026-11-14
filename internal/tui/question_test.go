@@ -24,7 +24,7 @@ func questionRequest(answer chan requestAnswer, data string) serverRequestMsg {
 func openQuestion(t *testing.T, data string) (model, chan requestAnswer) {
 	t.Helper()
 	answer := make(chan requestAnswer, 1)
-	m := newTestModel(nil, Options{}, nil)
+	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, questionRequest(answer, data))
 	if len(m.approvals) != 1 || m.approvals[0].card == nil {
@@ -286,7 +286,7 @@ func TestWaitingOnUserInputState(t *testing.T) {
 
 func TestQuestionNotificationOSC99(t *testing.T) {
 	t.Parallel()
-	m := playTerminal(newTestModel(nil, Options{}, nil))
+	m := playTerminal(newTestModel(nil, Options{}))
 	m.conn.product = "dalgona"
 	m.thread.title = "demo"
 	m.screen.notifications = true
