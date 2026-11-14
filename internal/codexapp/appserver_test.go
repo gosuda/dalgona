@@ -37,6 +37,7 @@ func replyDaemon(conn net.Conn) {
 			return
 		}
 	}
+	_ = lines.Err()
 }
 
 func TestAppServerStdioRoundTrip(t *testing.T) {

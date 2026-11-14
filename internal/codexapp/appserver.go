@@ -159,7 +159,8 @@ func (a *appServerArgs) consume(args []string, i int, notes io.Writer) (int, err
 		if err != nil {
 			return i, err
 		}
-		return next, a.setWSAuth(name, raw)
+		a.setWSAuth(name, raw)
+		return next, nil
 	case args[i] == "app-server" && !a.subcommandSeen:
 		a.subcommandSeen = true
 	default:
@@ -189,7 +190,7 @@ func (a *appServerArgs) consumeListen(args []string, i int, name, value string, 
 	return next, err
 }
 
-func (a *appServerArgs) setWSAuth(name, raw string) error {
+func (a *appServerArgs) setWSAuth(name, raw string) {
 	switch name {
 	case "--ws-auth":
 		a.ws.mode = raw
@@ -198,7 +199,6 @@ func (a *appServerArgs) setWSAuth(name, raw string) error {
 	default:
 		a.ws.tokenSHA256 = raw
 	}
-	return nil
 }
 
 func (a *appServerArgs) validateWSAuth() error {
@@ -225,19 +225,11 @@ func (a wsAuthArgs) validateCapabilityToken() error {
 		return errors.New("--ws-token-file or --ws-token-sha256 is required when --ws-auth capability-token is set")
 	}
 	if a.tokenFile != "" {
-		return a.validateTokenFilePath()
+		if !filepath.IsAbs(a.tokenFile) {
+			return fmt.Errorf("--ws-token-file must be an absolute path: %q", a.tokenFile)
+		}
+		return nil
 	}
-	return a.validateTokenSum()
-}
-
-func (a wsAuthArgs) validateTokenFilePath() error {
-	if !filepath.IsAbs(a.tokenFile) {
-		return fmt.Errorf("--ws-token-file must be an absolute path: %q", a.tokenFile)
-	}
-	return nil
-}
-
-func (a wsAuthArgs) validateTokenSum() error {
 	sum, err := hex.DecodeString(a.tokenSHA256)
 	if err != nil || len(sum) != sha256.Size {
 		return fmt.Errorf("--ws-token-sha256 must be 64-character hex of the token SHA-256: %q", a.tokenSHA256)
@@ -272,7 +264,7 @@ func (a *appServerArgs) addConfig(raw string, notes io.Writer) error {
 	value = strings.Trim(strings.TrimSpace(value), `"'`)
 	setting, known := configSettings[key]
 	if !known {
-		fmt.Fprintf(notes, "%signoring config key %s\n", appServerPrefix, key)
+		_, _ = fmt.Fprintf(notes, "%signoring config key %s\n", appServerPrefix, key)
 		return nil
 	}
 	mapped := value
@@ -280,7 +272,7 @@ func (a *appServerArgs) addConfig(raw string, notes io.Writer) error {
 		mapped = setting.values[value]
 	}
 	if mapped == "" {
-		fmt.Fprintf(notes, "%signoring config %s=%q\n", appServerPrefix, key, value)
+		_, _ = fmt.Fprintf(notes, "%signoring config %s=%q\n", appServerPrefix, key, value)
 		return nil
 	}
 	a.defaults[setting.field] = mapped
@@ -437,7 +429,7 @@ func writeDefaultWSToken(stderr io.Writer, home string) ([sha256.Size]byte, erro
 	if err := os.Rename(tmp, path); err != nil {
 		return none, fmt.Errorf("publish ws token file: %w", err)
 	}
-	fmt.Fprintf(stderr, "%stoken file %s\n", appServerPrefix, path)
+	_, _ = fmt.Fprintf(stderr, "%stoken file %s\n", appServerPrefix, path)
 	return sha256.Sum256([]byte(token)), nil
 }
 
@@ -589,206 +581,4 @@ func readRawLine(reader *bufio.Reader, spill *[]byte) ([]byte, error) {
 func trimLineEnd(line []byte) []byte {
 	line = bytes.TrimSuffix(line, []byte{'\n'})
 	return bytes.TrimSuffix(line, []byte{'\r'})
-}
-
-type paramInjector struct {
-	defaults sessionDefaults
-	reader   bytes.Reader
-	decoder  *jsontext.Decoder
-	encoder  *jsontext.Encoder
-	out      bytes.Buffer
-	name     []byte
-}
-
-func newParamInjector(defaults sessionDefaults) *paramInjector {
-	injector := &paramInjector{defaults: defaults}
-	injector.decoder = jsontext.NewDecoder(&injector.reader)
-	injector.encoder = jsontext.NewEncoder(&injector.out)
-	return injector
-}
-
-func (p *paramInjector) line(raw []byte) []byte {
-	if rewritten, ok := p.rewrite(trimLineEnd(raw)); ok {
-		return rewritten
-	}
-	return raw
-}
-
-func (p *paramInjector) rewrite(message []byte) ([]byte, bool) {
-	if p.defaults == (sessionDefaults{}) || !bytes.Contains(message, []byte(quotedThreadStart)) || !p.startsThread(message) {
-		return nil, false
-	}
-	if err := p.inject(message); err != nil {
-		return nil, false
-	}
-	return p.out.Bytes(), true
-}
-
-func (p *paramInjector) restart(message []byte) {
-	p.reader.Reset(message)
-	p.decoder.Reset(&p.reader)
-}
-
-func (p *paramInjector) startsThread(message []byte) bool {
-	p.restart(message)
-	if token, err := p.decoder.ReadToken(); err != nil || token.Kind() != jsontext.KindBeginObject {
-		return false
-	}
-	for p.decoder.PeekKind() == jsontext.KindString {
-		name, err := p.decoder.ReadValue()
-		if err != nil {
-			return false
-		}
-		if string(name) == `"method"` {
-			method, err := p.decoder.ReadValue()
-			return err == nil && string(method) == quotedThreadStart
-		}
-		if p.decoder.SkipValue() != nil {
-			return false
-		}
-	}
-	return false
-}
-
-func (p *paramInjector) inject(message []byte) error {
-	p.restart(message)
-	p.out.Reset()
-	p.encoder.Reset(&p.out)
-	if err := p.copyToken(); err != nil {
-		return err
-	}
-	sawParams, err := p.copyRequestMembers()
-	if err != nil {
-		return err
-	}
-	if !sawParams {
-		if err := errors.Join(p.encoder.WriteToken(jsontext.String("params")), p.writeDefaultsObject()); err != nil {
-			return err
-		}
-	}
-	if err := p.copyToken(); err != nil {
-		return err
-	}
-	if _, err := p.decoder.ReadToken(); !errors.Is(err, io.EOF) {
-		return fmt.Errorf("trailing data after message: %w", err)
-	}
-	return nil
-}
-
-func (p *paramInjector) copyRequestMembers() (bool, error) {
-	sawParams := false
-	for p.decoder.PeekKind() == jsontext.KindString {
-		isParams, err := p.copyName(`"params"`)
-		if err == nil && isParams {
-			sawParams = true
-			err = p.copyParams()
-		} else if err == nil {
-			err = p.copyValue()
-		}
-		if err != nil {
-			return false, err
-		}
-	}
-	return sawParams, nil
-}
-
-func (p *paramInjector) copyToken() error {
-	token, err := p.decoder.ReadToken()
-	if err != nil {
-		return err
-	}
-	return p.encoder.WriteToken(token)
-}
-
-func (p *paramInjector) copyValue() error {
-	value, err := p.decoder.ReadValue()
-	if err != nil {
-		return err
-	}
-	return p.encoder.WriteValue(value)
-}
-
-func (p *paramInjector) copyName(wanted string) (bool, error) {
-	name, err := p.decoder.ReadValue()
-	if err != nil {
-		return false, err
-	}
-	matched := string(name) == wanted
-	return matched, p.encoder.WriteValue(name)
-}
-
-func (p *paramInjector) copyParams() error {
-	kind := p.decoder.PeekKind()
-	if kind == jsontext.KindNull {
-		if _, err := p.decoder.ReadToken(); err != nil {
-			return err
-		}
-		return p.writeDefaultsObject()
-	}
-	if kind != jsontext.KindBeginObject {
-		return p.copyValue()
-	}
-	if err := p.copyToken(); err != nil {
-		return err
-	}
-	var present [sessionFieldCount]bool
-	for p.decoder.PeekKind() == jsontext.KindString {
-		if err := p.copyParamsMember(&present); err != nil {
-			return err
-		}
-	}
-	if err := p.writeMissingDefaults(present); err != nil {
-		return err
-	}
-	return p.copyToken()
-}
-
-func (p *paramInjector) copyParamsMember(present *[sessionFieldCount]bool) error {
-	name, err := p.decoder.ReadValue()
-	if err != nil {
-		return err
-	}
-	p.name = append(p.name[:0], name...)
-	field, isSessionField := sessionFieldNamed(p.name)
-	if isSessionField && p.defaults[field] != "" && p.decoder.PeekKind() == jsontext.KindNull {
-		_, err := p.decoder.ReadToken()
-		return err
-	}
-	if isSessionField {
-		present[field] = true
-	}
-	if err := p.encoder.WriteValue(p.name); err != nil {
-		return err
-	}
-	return p.copyValue()
-}
-
-func sessionFieldNamed(name []byte) (sessionField, bool) {
-	for field, quoted := range quotedSessionFieldNames {
-		if string(name) == quoted {
-			return sessionField(field), true
-		}
-	}
-	return 0, false
-}
-
-func (p *paramInjector) writeDefaultsObject() error {
-	return errors.Join(
-		p.encoder.WriteToken(jsontext.BeginObject),
-		p.writeMissingDefaults([sessionFieldCount]bool{}),
-		p.encoder.WriteToken(jsontext.EndObject),
-	)
-}
-
-func (p *paramInjector) writeMissingDefaults(present [sessionFieldCount]bool) error {
-	var err error
-	for field, value := range p.defaults {
-		if value == "" || present[field] {
-			continue
-		}
-		err = errors.Join(err,
-			p.encoder.WriteToken(jsontext.String(sessionFieldNames[field])),
-			p.encoder.WriteToken(jsontext.String(value)))
-	}
-	return err
 }
