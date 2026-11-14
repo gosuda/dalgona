@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
 type spawnResult struct {
@@ -118,7 +117,7 @@ func TestStartChildBoundsRunningChildren(t *testing.T) {
 	for i := range 16 {
 		go func() {
 			started <- struct{}{}
-			id, err := parent.StartChild(t.Context(), fmt.Sprintf("bound-%d", i), task.Request{Prompt: "child"})
+			id, err := parent.StartChild(t.Context(), fmt.Sprintf("bound-%d", i), TaskRequest{Prompt: "child"})
 			done <- spawnResult{id: id, err: err}
 		}()
 	}
@@ -209,7 +208,7 @@ func fillChildren(t *testing.T, parent *Thread, prefix string, n int) []string {
 	t.Helper()
 	ids := make([]string, 0, n)
 	for i := range n {
-		id, err := parent.StartChild(t.Context(), fmt.Sprintf("%s-%d", prefix, i), task.Request{Prompt: "child"})
+		id, err := parent.StartChild(t.Context(), fmt.Sprintf("%s-%d", prefix, i), TaskRequest{Prompt: "child"})
 		if err != nil {
 			t.Fatalf("StartChild %s-%d: %v", prefix, i, err)
 		}
@@ -233,7 +232,7 @@ func startSignaledChild(t *testing.T, parent *Thread, callID string, out chan<- 
 	t.Helper()
 	go func() {
 		close(entered)
-		id, err := parent.StartChild(t.Context(), callID, task.Request{Prompt: "child"})
+		id, err := parent.StartChild(t.Context(), callID, TaskRequest{Prompt: "child"})
 		out <- spawnResult{id: id, err: err}
 	}()
 }

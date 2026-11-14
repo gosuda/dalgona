@@ -24,7 +24,6 @@ import (
 	"github.com/gosuda/dalgona/internal/tool/read"
 	"github.com/gosuda/dalgona/internal/tool/rewrite"
 	"github.com/gosuda/dalgona/internal/tool/search"
-	"github.com/gosuda/dalgona/internal/tool/task"
 	"github.com/gosuda/dalgona/internal/tool/todo"
 	"github.com/gosuda/dalgona/internal/tool/webfetch"
 )
@@ -180,7 +179,7 @@ func newAdvisors(registry *advisor.Registry, logger *slog.Logger) *advisors {
 	return &advisors{registry: registry, log: cmp.Or(logger, slog.Default())}
 }
 
-func (a *advisors) attach(child *agent.Thread, req task.Request) {
+func (a *advisors) attach(child *agent.Thread, req agent.TaskRequest) {
 	host := a.host.Load()
 	if host == nil {
 		return

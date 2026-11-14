@@ -19,6 +19,8 @@ const (
 	ClassRemote
 )
 
+const YieldName = "yield"
+
 type Keep int
 
 const (

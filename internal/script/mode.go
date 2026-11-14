@@ -7,14 +7,13 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/tool"
 	asktool "github.com/gosuda/dalgona/internal/tool/ask"
-	"github.com/gosuda/dalgona/internal/tool/yield"
 )
 
 const EvalName = "eval"
 
 const ratchetName = "ratchet"
 
-var evalFirstNames = []string{"read", "search", "patch", "apply_patch", "exec", asktool.Name, ratchetName, yield.Name, EvalName}
+var evalFirstNames = []string{"read", "search", "patch", "apply_patch", "exec", asktool.Name, ratchetName, tool.YieldName, EvalName}
 
 func visibleNames(mode config.ToolMode) []string {
 	switch mode {
@@ -23,7 +22,7 @@ func visibleNames(mode config.ToolMode) []string {
 	case config.ToolModeEvalFirst:
 		return evalFirstNames
 	case config.ToolModeEvalOnly:
-		return []string{asktool.Name, yield.Name, EvalName}
+		return []string{asktool.Name, tool.YieldName, EvalName}
 	}
 	return nil
 }
@@ -57,7 +56,7 @@ func FoldedTools(mode config.ToolMode, all []tool.Spec) []tool.Spec {
 }
 
 func inCells(name string) bool {
-	return name != EvalName && name != yield.Name
+	return name != EvalName && name != tool.YieldName
 }
 
 func waitsForUser(name, action string) bool {

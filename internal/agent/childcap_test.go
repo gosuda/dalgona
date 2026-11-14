@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
 func TestStartChildBoundsConcurrentSpawns(t *testing.T) {
@@ -19,7 +18,7 @@ func TestStartChildBoundsConcurrentSpawns(t *testing.T) {
 		fire := sync.OnceFunc(func() { close(release) })
 		entered := make(chan struct{}, 16)
 		h := newHarness(t, func(h *harness) {
-			h.cfg.OnChildStarted = func(*Thread, task.Request) { entered <- struct{}{}; <-release }
+			h.cfg.OnChildStarted = func(*Thread, TaskRequest) { entered <- struct{}{}; <-release }
 		})
 		for range 16 {
 			h.model.push(text("child done"))
@@ -52,7 +51,7 @@ func startChildren(t *testing.T, h *harness, parent *Thread, wg *sync.WaitGroup)
 	t.Helper()
 	for i := range 16 {
 		wg.Go(func() {
-			if _, err := parent.StartChild(h.t.Context(), fmt.Sprintf("sc-%d", i), task.Request{Prompt: "child", Advisor: true}); err != nil {
+			if _, err := parent.StartChild(h.t.Context(), fmt.Sprintf("sc-%d", i), TaskRequest{Prompt: "child", Advisor: true}); err != nil {
 				t.Errorf("StartChild sc-%d: %v", i, err)
 			}
 		})

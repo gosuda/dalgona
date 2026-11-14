@@ -15,7 +15,6 @@ import (
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
 	"github.com/gosuda/dalgona/internal/tool/read"
-	"github.com/gosuda/dalgona/internal/tool/task"
 )
 
 func newAdvisorRig(t *testing.T, registry *advisor.Registry) *rig {
@@ -42,7 +41,7 @@ func newAdvisorRig(t *testing.T, registry *advisor.Registry) *rig {
 			return runner.NewLocal(filepath.Join(r.home, "sessions", id, "runs"))
 		},
 		Logger: slog.New(slog.DiscardHandler),
-		OnChildStarted: func(child *agent.Thread, req task.Request) {
+		OnChildStarted: func(child *agent.Thread, req agent.TaskRequest) {
 			attach := registry.Attach
 			if req.Advisor {
 				attach = registry.AttachChild
