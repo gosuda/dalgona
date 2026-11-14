@@ -130,7 +130,7 @@ func lowerReplacement(index int, change replacementChange) (edit, error) {
 	if actions := change.actionCount(); actions != 1 {
 		return edit{}, replacementActionError(index, actions, change)
 	}
-	base := edit{index: index, path: change.path, window: beforePayload}
+	base := edit{index: index, path: change.path}
 	switch {
 	case change.create != nil:
 		base.kind, base.body = editCreate, *change.create
