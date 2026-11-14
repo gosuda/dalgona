@@ -30,6 +30,7 @@ func TestClassify(t *testing.T) {
 		{name: "payment required", status: 402, body: `{"type":"error","error":{"type":"billing_error"}}`, want: Terminal},
 		{name: "quota word in prose", status: 429, body: `{"error":{"message":"see insufficient_quota docs"}}`, want: Retry},
 		{name: "workspace limit is not a quota code", status: 429, body: `{"error":{"type":"workspace_owner_usage_limit_reached"}}`, want: Retry},
+		{name: "overflow precedence over 429", status: 429, body: `{"error":{"code":"context_length_exceeded"}}`, want: Overflow},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -43,7 +44,7 @@ func TestClassify(t *testing.T) {
 
 func TestContextWindow(t *testing.T) {
 	t.Parallel()
-	overrides := map[string]int{"configured": 64000}
+	overrides := map[string]int{"configured": 64000, "zeroed": 0}
 	cases := []struct {
 		name     string
 		modelID  string
@@ -53,6 +54,7 @@ func TestContextWindow(t *testing.T) {
 		{name: "configured overrides report", modelID: "configured", reported: 200000, want: 64000},
 		{name: "reported fallback", modelID: "reported", reported: 200000, want: 200000},
 		{name: "default fallback", modelID: "unknown", want: 128000},
+		{name: "zero override falls back to report", modelID: "zeroed", reported: 200000, want: 200000},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -99,6 +101,7 @@ func TestResolveRole(t *testing.T) {
 		wantLine string
 	}{
 		{name: "static preset", role: "smol", thread: "anthropic/claude-opus-5-5", offered: []string{"claude-haiku-5-5"}, want: "anthropic/claude-haiku-5-5"},
+		{name: "offered entries carry provider prefix", role: "smol", thread: "anthropic/claude-opus-5-5", offered: []string{"anthropic/claude-haiku-5-5"}, want: "anthropic/claude-haiku-5-5"},
 		{name: "missing preset", role: "smol", thread: "anthropic/claude-opus-5-5", want: "anthropic/claude-opus-5-5", wantLine: "roles.smol preset anthropic/claude-haiku-5-5 is not offered; using anthropic/claude-opus-5-5"},
 		{name: "slow preset", role: "slow", thread: "openai/gpt-6.1-sol", offered: []string{"gpt-6-astra"}, want: "openai/gpt-6-astra"},
 		{name: "advisor resolves like slow", role: "advisor", thread: "anthropic/claude-opus-5-5", offered: []string{"claude-haiku-5-5", "claude-fable-5-1"}, want: "anthropic/claude-fable-5-1"},
