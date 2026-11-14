@@ -77,12 +77,16 @@ func requirePhysicalParentRoot(t *testing.T, dir string) {
 	if err := os.Symlink(filepath.Join(deep, "x"), filepath.Join(dir, "other")); err != nil {
 		t.Fatal(err)
 	}
+	want, err := filepath.EvalSymlinks(physical)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, err := resolveRoots([]string{dir + "/other/../sub"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) == 0 || got[0] != physical {
-		t.Fatalf("physical parent root = %q, want first entry %q", got, physical)
+	if got[0] != want {
+		t.Fatalf("physical parent root = %q, want first entry %q", got, want)
 	}
 }
 

@@ -27,26 +27,29 @@ func TestWindowsShimPassesQuotedArgumentVerbatim(t *testing.T) {
 	if err := runShim(dir, WindowsShellArgv(`echo "a b"`)); err != nil {
 		t.Fatal(err)
 	}
-	out, exit := readWindowsShimResult(t, dir)
+	out, _ := readWindowsShimResult(t, dir)
 	if got := strings.TrimSpace(out); got != `"a b"` {
 		t.Fatalf("output = %q, want %q", got, `"a b"`)
 	}
-	if !strings.Contains(out, `"a b"`) {
-		t.Fatalf("output missing quoted text: %q", out)
-	}
-	if strings.Contains(out, `\`) {
-		t.Fatalf("output carries escape backslashes: %q", out)
-	}
-	exitRecord := readWindowsShimExit(t, dir)
-	if exitRecord == nil || exitRecord.Code != 0 || exitRecord.Signal != "" || exitRecord.EndedAt.IsZero() {
-		t.Fatalf("exit record = %+v, want clean code 0", exitRecord)
-	}
-	if !strings.Contains(exit, `"code":0`) {
-		t.Fatalf("exit record is not success: %s", exit)
-	}
+	requireWindowsShimExit(t, dir, 0)
 }
 
 func TestWindowsShimRunsQuotedPathWithSpace(t *testing.T) {
+	target := copySelfIntoSpacedDirectory(t)
+	t.Setenv(windowsShimHelperEnv, "marker")
+	dir := t.TempDir()
+	if err := runShim(dir, WindowsShellArgv(`"`+target+`"`)); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := readWindowsShimResult(t, dir)
+	if got := strings.TrimSpace(out); got != windowsShimMarker {
+		t.Fatalf("output = %q, want %q", got, windowsShimMarker)
+	}
+	requireWindowsShimExit(t, dir, 0)
+}
+
+func copySelfIntoSpacedDirectory(t *testing.T) string {
+	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -63,24 +66,30 @@ func TestWindowsShimRunsQuotedPathWithSpace(t *testing.T) {
 	if err := os.WriteFile(target, source, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(windowsShimHelperEnv, "marker")
-	dir := t.TempDir()
-	if err := runShim(dir, WindowsShellArgv(`"`+target+`"`)); err != nil {
-		t.Fatal(err)
+	return target
+}
+
+func requireWindowsShimExit(t *testing.T, dir string, code int) {
+	t.Helper()
+	_, raw := readWindowsShimResult(t, dir)
+	record := readWindowsShimExit(t, dir)
+	if record == nil || record.Code != code || record.Signal != "" || record.EndedAt.IsZero() {
+		t.Fatalf("exit record = %+v, want code %d with empty signal", record, code)
 	}
-	out, exit := readWindowsShimResult(t, dir)
-	if got := strings.TrimSpace(out); got != windowsShimMarker {
-		t.Fatalf("output = %q, want %q", got, windowsShimMarker)
+	if want := fmt.Sprintf(`"code":%d`, code); !strings.Contains(raw, want) {
+		t.Fatalf("exit record %s lacks %s", raw, want)
 	}
-	if !strings.Contains(out, windowsShimMarker) {
-		t.Fatalf("output missing marker: %q", out)
-	}
-	exitRecord := readWindowsShimExit(t, dir)
-	if exitRecord == nil || exitRecord.Code != 0 || exitRecord.Signal != "" || exitRecord.EndedAt.IsZero() {
-		t.Fatalf("exit record = %+v, want clean code 0", exitRecord)
-	}
-	if !strings.Contains(exit, `"code":0`) {
-		t.Fatalf("exit record is not success: %s", exit)
+}
+
+func waitWindowsShimDone(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("shim did not exit after job kill")
 	}
 }
 
@@ -160,39 +169,20 @@ func TestWindowsShimKillsGrandchildThroughJob(t *testing.T) {
 	if err := signalProcess(shimPID, pgid, SignalKill); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(60 * time.Second):
-		t.Fatal("shim did not exit after job kill")
-	}
-	_, exit := readWindowsShimResult(t, dir)
-	exitRecord := readWindowsShimExit(t, dir)
-	if exitRecord == nil || exitRecord.Code != 137 || exitRecord.Signal != "" || exitRecord.EndedAt.IsZero() {
-		t.Fatalf("exit record = %+v, want code 137 with empty signal", exitRecord)
-	}
-	if !strings.Contains(exit, `"code":137`) {
-		t.Fatalf("exit record is not the job kill: %s", exit)
-	}
+	waitWindowsShimDone(t, done)
+	requireWindowsShimExit(t, dir, 137)
 	waitWindowsProcessGone(t, grandchild)
 }
 
 func TestWindowsShimFastExitRecordsZero(t *testing.T) {
 	for i := range 20 {
-		dir := t.TempDir()
-		if err := runShim(dir, WindowsShellArgv("exit 0")); err != nil {
-			t.Fatal(err)
-		}
-		_, exit := readWindowsShimResult(t, dir)
-		exitRecord := readWindowsShimExit(t, dir)
-		if exitRecord == nil || exitRecord.Code != 0 || exitRecord.Signal != "" || exitRecord.EndedAt.IsZero() {
-			t.Fatalf("iteration %d: exit record = %+v, want clean code 0", i, exitRecord)
-		}
-		if !strings.Contains(exit, `"code":0`) {
-			t.Fatalf("iteration %d: exit record is not success: %s", i, exit)
-		}
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			dir := t.TempDir()
+			if err := runShim(dir, WindowsShellArgv("exit 0")); err != nil {
+				t.Fatal(err)
+			}
+			requireWindowsShimExit(t, dir, 0)
+		})
 	}
 }
 
