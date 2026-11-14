@@ -47,7 +47,7 @@ func TestReplayedDenialInsideTryCallHaltsDenied(t *testing.T) {
 	if outcome := runDenialWorkflow(t, j, src); outcome.Status != script.StatusCompleted {
 		t.Fatalf("first run status = %s, error = %+v", outcome.Status, outcome.Error)
 	}
-	j.rewrite("run-1", 1, func(rec *script.Recorded) {
+	j.rewrite(1, func(rec *script.Recorded) {
 		rec.Result = nil
 		rec.Error = "hooks forbid exec"
 		rec.Denied = true
@@ -68,7 +68,7 @@ func TestReplayedDeniedDirectCallHaltsDenied(t *testing.T) {
 	if outcome := runDenialWorkflow(t, j, src); outcome.Status != script.StatusCompleted {
 		t.Fatalf("first run status = %s, error = %+v", outcome.Status, outcome.Error)
 	}
-	j.rewrite("run-1", 1, func(rec *script.Recorded) {
+	j.rewrite(1, func(rec *script.Recorded) {
 		rec.Result = nil
 		rec.Error = "hooks forbid exec"
 		rec.Denied = true

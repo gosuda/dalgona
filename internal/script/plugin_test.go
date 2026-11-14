@@ -128,7 +128,7 @@ func TestPluginCommandAndInvalidHookResult(t *testing.T) {
 		"zz.star":      "def bad(ctx, event):\n    return {\"decision\": \"deny\"}\non('tool_call', bad)\n",
 	})
 	j := newJournal(echoTool)
-	outcome, err := plugins.RunCommand(t.Context(), j, "cmd-1", "greet", "ana")
+	outcome, err := plugins.RunCommand(t.Context(), j, script.CommandCall{RunID: "cmd-1", Name: "greet", Args: "ana"})
 	if err != nil || string(outcome.Value) != `"hello ana"` || len(j.logs) != 1 {
 		t.Fatalf("command outcome = %+v, %v, logs %v", outcome, err, j.logs)
 	}

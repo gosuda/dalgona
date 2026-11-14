@@ -149,12 +149,12 @@ func (j *journal) counts() (executed, judged int) {
 	return j.executed, j.judged
 }
 
-func (j *journal) rewrite(run string, n int, edit func(*script.Recorded)) {
+func (j *journal) rewrite(n int, edit func(*script.Recorded)) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	rec := j.records[run][n]
+	rec := j.records["run-1"][n]
 	edit(&rec)
-	j.records[run][n] = rec
+	j.records["run-1"][n] = rec
 }
 
 type reply struct {

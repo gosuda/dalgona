@@ -107,7 +107,7 @@ func TestRecoveredWorkflowReplaysJournalAndRunsOneNewExec(t *testing.T) {
 
 func TestSwappedJournalOpReportsNondeterminism(t *testing.T) {
 	j := killedAfterSecondEffect(t)
-	j.rewrite("run-1", 2, func(rec *script.Recorded) { rec.Op = script.OpTime })
+	j.rewrite(2, func(rec *script.Recorded) { rec.Op = script.OpTime })
 
 	outcome := runReplayWorkflow(t.Context(), t, j)
 	want := "nondeterminism at effect 2: recorded time, got tool:exec"
@@ -121,7 +121,7 @@ func TestSwappedJournalOpReportsNondeterminism(t *testing.T) {
 
 func TestChangedArgumentsReportNondeterminism(t *testing.T) {
 	j := killedAfterSecondEffect(t)
-	j.rewrite("run-1", 1, func(rec *script.Recorded) { rec.ArgsSHA = script.ArgsSHA(jsontext.Value(`{"command":"true"}`)) })
+	j.rewrite(1, func(rec *script.Recorded) { rec.ArgsSHA = script.ArgsSHA(jsontext.Value(`{"command":"true"}`)) })
 
 	outcome := runReplayWorkflow(t.Context(), t, j)
 	if outcome.Error.Message != "nondeterminism at effect 1: recorded tool:exec, got tool:exec" {

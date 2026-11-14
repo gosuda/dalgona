@@ -14,7 +14,7 @@ type randomSource struct {
 
 func randomModule(seed int64) starlark.Value {
 	//nolint:gosec // Replay requires a deterministic seeded PRNG, not cryptographic randomness.
-	source := &randomSource{rng: rand.New(rand.NewPCG(unsignedInt64(seed), unsignedInt64(seed)^0x9e3779b97f4a7c15))}
+	source := &randomSource{rng: rand.New(rand.NewPCG(uint64(seed), uint64(seed)^0x9e3779b97f4a7c15))}
 	return &starlarkstruct.Module{Name: "random", Members: starlark.StringDict{
 		"random":  starlark.NewBuiltin("random.random", source.random),
 		"randint": starlark.NewBuiltin("random.randint", source.randint),
@@ -39,30 +39,16 @@ func (s *randomSource) randint(_ *starlark.Thread, b *starlark.Builtin, args sta
 	if high < low {
 		return nil, errors.New("empty range for randint")
 	}
-	span := unsignedInt64(high) - unsignedInt64(low) + 1
+	//nolint:gosec // intentional modular signed-range arithmetic
+	span := uint64(high) - uint64(low) + 1
 	var offset uint64
 	if span == 0 {
 		offset = s.rng.Uint64()
 	} else {
 		offset = s.rng.Uint64N(span)
 	}
-	return starlark.MakeInt64(signedInt64(unsignedInt64(low) + offset)), nil
-}
-
-func unsignedInt64(value int64) uint64 {
-	if value >= 0 {
-		return uint64(value)
-	}
-	//nolint:gosec // Negative values retain their two's-complement bit pattern.
-	return ^uint64(-(value + 1))
-}
-
-func signedInt64(value uint64) int64 {
-	if value <= uint64(1<<63-1) {
-		return int64(value)
-	}
-	//nolint:gosec // The branch bounds the converted magnitude to MaxInt64.
-	return -int64(^value) - 1
+	//nolint:gosec // intentional modular signed-range arithmetic
+	return starlark.MakeInt64(int64(uint64(low) + offset)), nil
 }
 
 func (s *randomSource) uniform(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

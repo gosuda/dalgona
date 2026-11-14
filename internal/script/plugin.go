@@ -49,6 +49,11 @@ type Command struct {
 	Description string
 }
 
+type CommandCall struct {
+	RunID string
+	Name  string
+	Args  string
+}
 type HookDecision struct {
 	Decision string
 	Reason   string
@@ -277,13 +282,13 @@ func (p *Plugins) Commands() []Command {
 	return commands
 }
 
-func (p *Plugins) RunCommand(ctx context.Context, fx Effects, runID, name, args string) (Outcome, error) {
-	file, reg, ok := p.find(kindCommand, name)
+func (p *Plugins) RunCommand(ctx context.Context, fx Effects, call CommandCall) (Outcome, error) {
+	file, reg, ok := p.find(kindCommand, call.Name)
 	if !ok {
-		return Outcome{}, fmt.Errorf("unknown command %s", name)
+		return Outcome{}, fmt.Errorf("unknown command %s", call.Name)
 	}
-	return p.invoke(ctx, fx, invocation{runID: runID, file: file, reg: reg, args: stringJSON(args), call: func(r *run, impl starlark.Callable) (starlark.Value, error) {
-		return starlark.Call(r.thread, impl, starlark.Tuple{r.ctxValue(), starlark.String(args)}, nil)
+	return p.invoke(ctx, fx, invocation{runID: call.RunID, file: file, reg: reg, args: stringJSON(call.Args), call: func(r *run, impl starlark.Callable) (starlark.Value, error) {
+		return starlark.Call(r.thread, impl, starlark.Tuple{r.ctxValue(), starlark.String(call.Args)}, nil)
 	}})
 }
 

@@ -387,6 +387,7 @@ func TestPredeclared_rejectsCyclesAndInvalidGroups(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := execStarlark(tc.source, stdlib.Hooks{})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want substring %q", err, tc.want)
