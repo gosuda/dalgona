@@ -10,7 +10,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/compact"
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/agent/prompts"
+	"github.com/gosuda/dalgona/internal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/config"
 )
 
@@ -315,7 +315,7 @@ func TestAutoCompactionDoesNotRepeatSummarizer(t *testing.T) {
 func summarizerRequests(h *harness) int {
 	n := 0
 	for i := range h.model.count() {
-		if h.model.request(i)["instructions"] == prompts.Compaction {
+		if h.model.request(i)["instructions"] == prompt.Compaction {
 			n++
 		}
 	}

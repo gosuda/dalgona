@@ -11,7 +11,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/compact"
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/agent/prompts"
+	"github.com/gosuda/dalgona/internal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/model"
 )
 
@@ -212,7 +212,7 @@ func (w *worker) summarize(ctx context.Context, cv compactionView, cut int, stat
 		return "", err
 	}
 	input := w.renderSpan(cv, cut)
-	req := model.Request{Model: modelID, System: prompts.Compaction, Messages: []model.Message{{Role: "user", Text: input}}}
+	req := model.Request{Model: modelID, System: prompt.Compaction, Messages: []model.Message{{Role: "user", Text: input}}}
 	stream, err := w.registry.Stream(ctx, provider, req)
 	if err != nil {
 		return "", err
