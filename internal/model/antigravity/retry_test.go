@@ -93,7 +93,7 @@ func TestStreamAuthOnForbiddenDiscovery(t *testing.T) {
 		t.Fatalf("stream attempts = %d, want 0", streamAttempts)
 	}
 	failure := collectFailure(events)
-	if failure.Status != http.StatusForbidden || !strings.Contains(failure.Message, "403") {
+	if failure.Status != http.StatusForbidden || !strings.Contains(failure.Message, "PERMISSION_DENIED") {
 		t.Fatalf("failure = %+v, want status 403 with the provider body", failure)
 	}
 }
