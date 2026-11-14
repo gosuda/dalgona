@@ -159,8 +159,6 @@ func (s EditStyleSpec) EditStyle(model string) string {
 	return s.Default
 }
 
-func (s EditStyleSpec) ForModel(model string) string { return s.EditStyle(model) }
-
 func globMatch(pattern, value string) bool {
 	patternRunes := []rune(strings.ToLower(pattern))
 	valueRunes := []rune(value)
