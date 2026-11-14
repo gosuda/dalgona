@@ -259,6 +259,74 @@ test("proxies a websocket GET to the bridge path", async () => {
 	assert.equal(firstSeen(stubFor(stubs, "alpha")).pathname, "/bridge");
 });
 
+test("strips a spoofed destroy header from a websocket GET to the bridge", async () => {
+	const { env, stubs } = createEnv();
+	const response = await worker.fetch(
+		request("/box/alpha/bridge", {
+			bearer: MASTER_TOKEN,
+			headers: { Upgrade: "websocket", "X-Dalgona-Lifecycle": "destroy" },
+		}),
+		env,
+	);
+	assert.equal(response.status, 200);
+	const seen = firstSeen(stubFor(stubs, "alpha"));
+	assert.equal(seen.method, "GET");
+	assert.equal(seen.pathname, "/bridge");
+	assert.equal(seen.lifecycle, null);
+});
+
+test("strips a spoofed start header from a websocket GET to the bridge", async () => {
+	const { env, stubs } = createEnv();
+	const response = await worker.fetch(
+		request("/box/alpha/bridge", {
+			bearer: MASTER_TOKEN,
+			headers: { Upgrade: "websocket", "X-Dalgona-Lifecycle": "start" },
+		}),
+		env,
+	);
+	assert.equal(response.status, 200);
+	const seen = firstSeen(stubFor(stubs, "alpha"));
+	assert.equal(seen.method, "GET");
+	assert.equal(seen.pathname, "/bridge");
+	assert.equal(seen.lifecycle, null);
+});
+
+test("keeps a spoofed lifecycle header away from the container on a websocket GET", async () => {
+	const { box, seen } = createBox("alpha");
+	const boxes = new Map<string, Stub>();
+	const getByName = (name: string): Stub => {
+		const existing = boxes.get(name);
+		if (existing !== undefined) {
+			return existing;
+		}
+		const stub: Stub = { fetch: (request) => box.fetch(request), seen: [] };
+		boxes.set(name, stub);
+		return stub;
+	};
+	const env = workerEnvFor({ BOX: { getByName }, DALGONA_TOKEN: MASTER_TOKEN });
+	const response = await worker.fetch(
+		request("/box/alpha/bridge", {
+			bearer: MASTER_TOKEN,
+			headers: { Upgrade: "websocket", "X-Dalgona-Lifecycle": "destroy" },
+		}),
+		env,
+	);
+	assert.equal(response.status, 200);
+	assert.equal(seen.forwarded.length, 1);
+	const forwarded = seen.forwarded[0];
+	if (forwarded === undefined) {
+		throw new Error("test setup: container received no request");
+	}
+	assert.equal(forwarded.url, "https://worker.test/bridge");
+	assert.equal(forwarded.method, "GET");
+	assert.equal(forwarded.headers.get("Upgrade"), "websocket");
+	assert.equal(forwarded.headers.get("X-Dalgona-Lifecycle"), null);
+	assert.equal(
+		forwarded.headers.get("Authorization"),
+		`Bearer ${expectedBoxToken(MASTER_TOKEN, "alpha")}`,
+	);
+});
+
 test("starts the box container on POST", async () => {
 	const { env, stubs } = createEnv();
 	const response = await worker.fetch(

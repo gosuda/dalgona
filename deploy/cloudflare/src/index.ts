@@ -30,7 +30,9 @@ function authorized(request: Request, token: string): boolean {
 function routedRequest(request: Request, path: "/" | "/bridge"): Request {
 	const source = new URL(request.url);
 	source.pathname = path;
-	return new Request(source, request);
+	const routed = new Request(source, request);
+	routed.headers.delete("X-Dalgona-Lifecycle");
+	return routed;
 }
 
 export async function boxToken(token: string, box: string): Promise<string> {
