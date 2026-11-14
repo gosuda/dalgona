@@ -9,7 +9,7 @@ import (
 
 func TestListenSetsOwnerOnlyPermissions(t *testing.T) {
 	home := shortHome(t)
-	if err := os.Chmod(home, 0o755); err != nil { //nolint:gosec // deliberately loose to prove the daemon tightens it
+	if err := os.Chmod(home, 0o755); err != nil { //nolint:gosec // deliberate loose permissions to test tightening
 		t.Fatal(err)
 	}
 	if err := tightenHome(home); err != nil {
