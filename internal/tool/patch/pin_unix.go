@@ -152,20 +152,7 @@ func (p *dirPin) leafExistsAfterChain(base, display string) (bool, error) {
 }
 
 func (p *dirPin) publishOver(base string, data []byte, perm fs.FileMode) error {
-	suffix, err := tempSuffix()
-	if err != nil {
-		return err
-	}
-	temp := base + ".dalgona-publish-" + suffix
-	if err := p.writeFileAt(temp, data, perm); err != nil {
-		_ = p.unlinkFileAt(temp)
-		return err
-	}
-	if err := p.renameFileAt(temp, base); err != nil {
-		_ = p.unlinkFileAt(temp)
-		return err
-	}
-	return nil
+	return publishOverPin(p, base, data, perm)
 }
 
 func (p *dirPin) renameFileAt(oldBase, newBase string) error {

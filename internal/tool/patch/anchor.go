@@ -34,7 +34,7 @@ type anchorParser struct {
 }
 
 func parseAnchor(input string) ([]edit, error) {
-	lines := splitFramed(stripBeginEnd(stripOuterFence(input)))
+	lines := splitFramed(stripEnvelope(stripOuterFence(input)))
 	if len(lines) == 0 {
 		return nil, errors.New("patch: input must start with a *** File:, *** New File:, *** Delete File:, or *** Move: header")
 	}
@@ -185,22 +185,21 @@ func parseAnchorFile(value string, line int) (string, string, error) {
 	return path, tag, nil
 }
 
-func collectFindBody(lines []framedLine, cursor int) (string, int) {
+func collectBodyWhile(lines []framedLine, cursor int, match func(anchorMarker) bool) (string, int) {
 	var body strings.Builder
-	for cursor < len(lines) && classifyAnchor(lines[cursor].text).kind != markerAction {
+	for cursor < len(lines) && match(classifyAnchor(lines[cursor].text).kind) {
 		body.WriteString(lines[cursor].raw)
 		cursor++
 	}
 	return body.String(), cursor
 }
 
+func collectFindBody(lines []framedLine, cursor int) (string, int) {
+	return collectBodyWhile(lines, cursor, func(kind anchorMarker) bool { return kind != markerAction })
+}
+
 func collectAnchorBody(lines []framedLine, cursor int) (string, int) {
-	var body strings.Builder
-	for cursor < len(lines) && classifyAnchor(lines[cursor].text).kind == markerNone {
-		body.WriteString(lines[cursor].raw)
-		cursor++
-	}
-	return body.String(), cursor
+	return collectBodyWhile(lines, cursor, func(kind anchorMarker) bool { return kind == markerNone })
 }
 
 func anchorLocator(selector, quoted string, index int) (locator, error) {

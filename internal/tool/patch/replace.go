@@ -97,7 +97,7 @@ func decodeReplacementFields(object map[string]jsontext.Value, out *replacementC
 	} else if ok {
 		out.line = &value
 	}
-	if value, _, err := optionalBool(object, "all"); err != nil {
+	if value, err := optionalBool(object, "all"); err != nil {
 		return fmt.Errorf("all must be a boolean: %w", err)
 	} else {
 		out.all = value
@@ -118,7 +118,7 @@ func decodeReplacementActions(object map[string]jsontext.Value, out *replacement
 			*item.dest = &value
 		}
 	}
-	value, _, err := optionalBool(object, "delete")
+	value, err := optionalBool(object, "delete")
 	if err != nil {
 		return fmt.Errorf("delete must be a boolean: %w", err)
 	}

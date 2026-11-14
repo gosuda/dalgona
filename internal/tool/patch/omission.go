@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -26,20 +27,14 @@ func checkOmissions(files []*stagedFile) error {
 			continue
 		}
 		if line, text, found := omissionLine(file.before, file.after); found {
-			return fmt.Errorf("patch: %s line %d: %q stands in for omitted code; write the complete text. Nothing was written.", file.path, line, text) //nolint:staticcheck // the planned refusal keeps its final period
+			return refusalError(fmt.Sprintf("patch: %s line %d: %q stands in for omitted code; write the complete text. Nothing was written.", file.path, line, text))
 		}
 	}
 	return nil
 }
 
 func isProseFile(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	for _, prose := range proseExtensions {
-		if ext == prose {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(proseExtensions[:], strings.ToLower(filepath.Ext(path)))
 }
 
 func omissionLine(before, after []byte) (int, string, bool) {
@@ -104,3 +99,7 @@ func commentText(trimmed string) (string, bool) {
 	}
 	return "", false
 }
+
+type refusalError string
+
+func (e refusalError) Error() string { return string(e) }

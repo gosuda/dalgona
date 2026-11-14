@@ -89,8 +89,7 @@ type referenceEdit struct {
 
 func referenceApply(lines []string, edits []referenceEdit) []string {
 	out := slices.Clone(lines)
-	for i := len(edits) - 1; i >= 0; i-- {
-		item := edits[i]
+	for _, item := range slices.Backward(edits) {
 		next := make([]string, 0, len(out)-(item.end-item.start)+len(item.body))
 		next = append(next, out[:item.start]...)
 		next = append(next, item.body...)

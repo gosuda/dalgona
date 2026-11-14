@@ -32,7 +32,7 @@ type hashParser struct {
 }
 
 func parseHashline(input string, style Style) ([]edit, error) {
-	strip, split := stripBeginEnd, splitFramed
+	strip, split := stripEnvelope, splitFramed
 	if style.profile() {
 		strip, split = stripMatchedBeginEnd, splitFramedCRLF
 	}

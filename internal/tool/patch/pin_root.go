@@ -191,7 +191,13 @@ func (p *rootPin) leafExistsAfterChain(base, display string) (bool, error) {
 	return pin.leafExists(base)
 }
 
-func (p *rootPin) publishOver(base string, data []byte, perm fs.FileMode) error {
+type pinFileOps interface {
+	writeFileAt(base string, data []byte, perm fs.FileMode) error
+	renameFileAt(oldBase, newBase string) error
+	unlinkFileAt(base string) error
+}
+
+func publishOverPin(p pinFileOps, base string, data []byte, perm fs.FileMode) error {
 	suffix, err := tempSuffix()
 	if err != nil {
 		return err
@@ -206,6 +212,10 @@ func (p *rootPin) publishOver(base string, data []byte, perm fs.FileMode) error 
 		return err
 	}
 	return nil
+}
+
+func (p *rootPin) publishOver(base string, data []byte, perm fs.FileMode) error {
+	return publishOverPin(p, base, data, perm)
 }
 
 func (p *rootPin) renameFileAt(oldBase, newBase string) error {
