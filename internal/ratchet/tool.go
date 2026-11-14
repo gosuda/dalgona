@@ -88,20 +88,10 @@ func (Tool) Spec() tool.Spec {
 func (Tool) Class() tool.Class { return tool.ClassRead }
 
 type args struct {
-	Action       string            `json:"action"`
-	Flow         string            `json:"flow"`
-	Cases        []string          `json:"cases"`
-	Harness      []string          `json:"harness"`
-	Change       []string          `json:"change"`
-	OffLimits    []string          `json:"off_limits"`
-	Target       string            `json:"target"`
-	Direction    string            `json:"direction"`
-	Hold         []string          `json:"hold"`
-	Directions   map[string]string `json:"directions"`
-	Reps         *int              `json:"reps"`
-	Plateau      *int              `json:"plateau"`
-	Rounds       *int              `json:"rounds"`
-	Command      string            `json:"command"`
+	Action string `json:"action"`
+	Flow   string `json:"flow"`
+	initArgs
+	planArgs
 	Strata       map[string]string `json:"strata"`
 	TestFraction *float64          `json:"test_fraction"`
 	Seed         *uint64           `json:"seed"`
@@ -224,7 +214,7 @@ func initFlow(f *flow, a args) (tool.Result, error) {
 		return tool.Result{}, fmt.Errorf("flow %q already exists", f.name)
 	}
 	s := &state{}
-	if err := f.init(s, initArgs{Cases: a.Cases, Harness: a.Harness, Change: a.Change, OffLimits: a.OffLimits}); err != nil {
+	if err := f.init(s, a.initArgs); err != nil {
 		return tool.Result{}, err
 	}
 	if err := f.save(s); err != nil {
@@ -245,17 +235,7 @@ func planFlow(f *flow, a args) (tool.Result, error) {
 	if err != nil {
 		return tool.Result{}, err
 	}
-	plan := planArgs{
-		Target:     a.Target,
-		Direction:  a.Direction,
-		Hold:       a.Hold,
-		Directions: a.Directions,
-		Reps:       a.Reps,
-		Plateau:    a.Plateau,
-		Rounds:     a.Rounds,
-		Command:    a.Command,
-	}
-	if err := s.applyPlan(plan); err != nil {
+	if err := s.applyPlan(a.planArgs); err != nil {
 		return tool.Result{}, err
 	}
 	if err := f.save(s); err != nil {

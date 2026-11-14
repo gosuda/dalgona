@@ -1,7 +1,6 @@
 package ratchet
 
 import (
-	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"maps"
@@ -41,13 +40,6 @@ type gateResult struct {
 	Train        map[string]summary `json:"train"`
 	Variant      string             `json:"variant"`
 	Warnings     []string           `json:"warnings"`
-}
-
-type trainView struct {
-	History map[string]map[string]*float64 `json:"history"`
-	Rows    []jsontext.Value               `json:"rows"`
-	Traces  []string                       `json:"traces"`
-	Variant string                         `json:"variant"`
 }
 
 type outcome struct {
@@ -232,23 +224,23 @@ func (f *flow) gateInputs(s *state, variant string, data variantData) (gateInput
 	if err != nil {
 		return gateInput{}, err
 	}
-	if err = f.requireApprovals(s); err != nil {
+	if err := f.requireApprovals(s); err != nil {
 		return gateInput{}, err
 	}
-	erroredOnly, err := checkSlots(s, variant, data)
-	if err != nil {
-		return gateInput{}, err
+	erroredOnly, slotsErr := checkSlots(s, variant, data)
+	if slotsErr != nil {
+		return gateInput{}, slotsErr
 	}
-	if err = checkLeaks(s, variant, data); err != nil {
+	if err := checkLeaks(s, variant, data); err != nil {
 		return gateInput{}, err
 	}
 	known := idSet(slices.Concat(s.TrainIDs, s.TestIDs))
 	rows := filterRows(data.Rows, known)
 	sc := s.score(rows)
-	if err = requireTarget(s, sc); err != nil {
+	if err := requireTarget(s, sc); err != nil {
 		return gateInput{}, err
 	}
-	if err = requireMeasured(s, sc, variant); err != nil {
+	if err := requireMeasured(s, sc, variant); err != nil {
 		return gateInput{}, err
 	}
 	return gateInput{known: known, rows: rows, erroredOnly: erroredOnly, sc: sc, changeSum: changeSum, changed: changed}, nil
@@ -370,7 +362,7 @@ func (f *flow) climb(s *state, variant string, in gateInput) (outcome, error) {
 	for _, m := range s.Goal.Hold {
 		guards = append(guards, guard{Metric: m, pair: deltas[m]})
 	}
-	decision, reason := decideRound(s.Goal.Target, deltas[s.Goal.Target], guards, reference, variant, s.rerunsOf(variant))
+	decision, reason := decideRound(roundInput{Target: s.Goal.Target, Pair: deltas[s.Goal.Target], Guards: guards, Ref: reference, Variant: variant, Reruns: s.rerunsOf(variant)})
 	return outcome{decision: decision, reasons: []string{reason}, deltas: deltas}, nil
 }
 
@@ -528,144 +520,6 @@ func (s *state) result(r round) gateResult {
 	}
 }
 
-func checkSlots(s *state, variant string, data variantData) ([]string, error) {
-	results := resultCounts(data.Rows)
-	if dups := duplicateSlots(results); len(dups) > 0 {
-		return nil, fmt.Errorf("%s/results.jsonl has duplicate (case, rep) rows (%s); keep one row per slot and gate again", variant, listed(dups))
-	}
-	missing, erroredOnly := classifySlots(s, results, data.Errors)
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("%s is incomplete: %d (case, rep) slots have no result or error row (%s)", variant, len(missing), listed(missing))
-	}
-	if variant == "baseline" && len(erroredOnly) > 0 {
-		return nil, fmt.Errorf("baseline has %d slots that only errored (%s); fix the harness and resume the run until every slot is scored", len(erroredOnly), listed(erroredOnly))
-	}
-	return erroredOnly, nil
-}
-
-func resultCounts(rows []resultRow) map[string]int {
-	counts := make(map[string]int, len(rows))
-	for _, row := range rows {
-		counts[slot(row.CaseID, row.Rep)]++
-	}
-	return counts
-}
-
-func duplicateSlots(counts map[string]int) []string {
-	var dups []string
-	for key, n := range counts {
-		if n > 1 {
-			dups = append(dups, key)
-		}
-	}
-	slices.Sort(dups)
-	return dups
-}
-
-func classifySlots(s *state, results map[string]int, errs []errorRow) (missing, erroredOnly []string) {
-	errored := make(map[string]bool, len(errs))
-	for _, e := range errs {
-		errored[slot(e.CaseID, e.Rep)] = true
-	}
-	for _, id := range slices.Concat(s.TrainIDs, s.TestIDs) {
-		for rep := range s.Reps {
-			key := slot(id, rep)
-			switch {
-			case results[key] > 0:
-			case errored[key]:
-				erroredOnly = append(erroredOnly, key)
-			default:
-				missing = append(missing, key)
-			}
-		}
-	}
-	return missing, erroredOnly
-}
-
-func slot(id string, rep int) string {
-	return fmt.Sprintf("%s#%d", id, rep)
-}
-
-func checkLeaks(s *state, variant string, data variantData) error {
-	if err := checkTraces(s, variant, data); err != nil {
-		return err
-	}
-	return checkTestText(s, data.Rows)
-}
-
-func checkTraces(s *state, variant string, data variantData) error {
-	test := idSet(s.TestIDs)
-	var leaked []string
-	for _, name := range data.Traces {
-		m := traceName.FindStringSubmatch(name)
-		switch {
-		case m == nil:
-			return fmt.Errorf("%s/traces holds a file that is not <case>_rep<k>.json: %s", variant, name)
-		case test[m[1]]:
-			leaked = append(leaked, name)
-		}
-	}
-	if len(leaked) > 0 {
-		return fmt.Errorf("%s/traces holds transcripts for test cases (%s); write traces for train cases only, delete these, and run again", variant, strings.Join(leaked, ", "))
-	}
-	return nil
-}
-
-func checkTestText(s *state, rows []resultRow) error {
-	test := idSet(s.TestIDs)
-	for _, row := range rows {
-		if !test[row.CaseID] {
-			continue
-		}
-		if key, ok := textField(row); ok {
-			return fmt.Errorf("test row %s carries text field %s; keep output text of test cases out of results.jsonl", slot(row.CaseID, row.Rep), key)
-		}
-	}
-	return nil
-}
-
-func textField(row resultRow) (string, bool) {
-	for _, key := range slices.Sorted(maps.Keys(row.Fields)) {
-		if key == "case_id" || key == "status" || key == "model" {
-			continue
-		}
-		if row.Fields[key].Kind() == '"' {
-			return key, true
-		}
-	}
-	return "", false
-}
-
-func dataWarnings(data variantData, known map[string]bool) []string {
-	strays := make(map[string]bool)
-	for _, row := range data.Rows {
-		if !known[row.CaseID] {
-			strays[row.CaseID] = true
-		}
-	}
-	var warnings []string
-	if n := len(strays); n > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d result ids are outside the split and were ignored", n))
-	}
-	if n := countTruncated(filterRows(data.Rows, known)); n > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d truncated rows excluded from quality means", n))
-	}
-	if n := len(data.Errors); n > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d infra error rows recorded in errors.jsonl", n))
-	}
-	return warnings
-}
-
-func countTruncated(rows []resultRow) int {
-	n := 0
-	for _, row := range rows {
-		if row.Status == "truncated" {
-			n++
-		}
-	}
-	return n
-}
-
 func changedFiles(previous, current []fileSHA) []string {
 	before := make(map[string]string, len(previous))
 	for _, f := range previous {
@@ -675,24 +529,20 @@ func changedFiles(previous, current []fileSHA) []string {
 	for _, f := range current {
 		after[f.Path] = f.SHA
 	}
+	all := make(map[string]struct{}, len(before)+len(after))
+	for p := range before {
+		all[p] = struct{}{}
+	}
+	for p := range after {
+		all[p] = struct{}{}
+	}
 	var out []string
-	for _, p := range slices.Sorted(maps.Keys(union(before, after))) {
+	for _, p := range slices.Sorted(maps.Keys(all)) {
 		if before[p] != after[p] {
 			out = append(out, p)
 		}
 	}
 	return out
-}
-
-func union(a, b map[string]string) map[string]bool {
-	keys := make(map[string]bool, len(a)+len(b))
-	for key := range a {
-		keys[key] = true
-	}
-	for key := range b {
-		keys[key] = true
-	}
-	return keys
 }
 
 func filePaths(files []fileSHA) []string {
@@ -719,104 +569,4 @@ func (s *state) variants() []string {
 		}
 	}
 	return out
-}
-
-func (f *flow) train(s *state, variant string) (trainView, error) {
-	if !s.gated(variant) {
-		return trainView{}, fmt.Errorf("train needs a gated round for %s", variant)
-	}
-	data, err := f.readVariant(variant)
-	if err != nil {
-		return trainView{}, err
-	}
-	train := idSet(s.TrainIDs)
-	view := trainView{
-		Variant: variant,
-		Rows:    trainRows(data.Rows, train),
-		Traces:  f.trainTraces(variant, data.Traces, train),
-	}
-	view.History, err = f.trainHistory(s, train)
-	if err != nil {
-		return trainView{}, err
-	}
-	return view, nil
-}
-
-func trainRows(rows []resultRow, train map[string]bool) []jsontext.Value {
-	out := []jsontext.Value{}
-	for _, row := range rows {
-		if train[row.CaseID] {
-			out = append(out, row.Raw)
-		}
-	}
-	return out
-}
-
-func (f *flow) trainTraces(variant string, names []string, train map[string]bool) []string {
-	out := []string{}
-	for _, name := range names {
-		if m := traceName.FindStringSubmatch(name); m != nil && train[m[1]] {
-			out = append(out, filepath.ToSlash(filepath.Join(f.dir, variant, "traces", name)))
-		}
-	}
-	return out
-}
-
-func (f *flow) trainHistory(s *state, train map[string]bool) (map[string]map[string]*float64, error) {
-	history := make(map[string]map[string]*float64, len(s.TrainIDs))
-	for _, id := range s.TrainIDs {
-		history[id] = make(map[string]*float64, len(s.Rounds))
-	}
-	for _, v := range s.variants() {
-		data, err := f.readVariant(v)
-		if err != nil {
-			return nil, err
-		}
-		means := meansByCase(filterRows(data.Rows, train), s.Goal.Target)
-		for _, id := range s.TrainIDs {
-			var value *float64
-			if mean, ok := means[id]; ok {
-				value = new(mean)
-			}
-			history[id][v] = value
-		}
-	}
-	return history, nil
-}
-
-func renderTable(s *state) string {
-	target := s.Goal.Target
-	cols := []string{"round", "variant", "change", "decision", "train " + target, "test " + target}
-	for _, m := range s.Goal.Hold {
-		cols = append(cols, "train "+m, "test "+m)
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "| %s |\n", strings.Join(cols, " | "))
-	fmt.Fprintf(&b, "|%s\n", strings.Repeat("---|", len(cols)))
-	for _, r := range s.Rounds {
-		cells := []string{fmt.Sprint(r.Round), variantCell(s, r.Variant), strings.ReplaceAll(r.Change, "|", `\|`), r.Decision}
-		cells = append(cells, summaryCell(r.Train[target]), summaryCell(r.Test[target]))
-		for _, m := range s.Goal.Hold {
-			cells = append(cells, summaryCell(r.Train[m]), summaryCell(r.Test[m]))
-		}
-		fmt.Fprintf(&b, "| %s |\n", strings.Join(cells, " | "))
-	}
-	return b.String()
-}
-
-func variantCell(s *state, variant string) string {
-	if s.Best != nil && s.Best.Variant == variant {
-		return variant + " (best)"
-	}
-	return variant
-}
-
-func summaryCell(s summary) string {
-	switch {
-	case s.Mean == nil:
-		return "–"
-	case s.Half == nil:
-		return fmt.Sprintf("%.3f", *s.Mean)
-	}
-	return fmt.Sprintf("%.3f ±%.3f", *s.Mean, *s.Half)
 }

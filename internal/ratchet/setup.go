@@ -20,21 +20,21 @@ const (
 var lowerByDefault = map[string]bool{"cost_usd": true, "latency_s": true}
 
 type initArgs struct {
-	Cases     []string
-	Harness   []string
-	Change    []string
-	OffLimits []string
+	Cases     []string `json:"cases"`
+	Harness   []string `json:"harness"`
+	Change    []string `json:"change"`
+	OffLimits []string `json:"off_limits"`
 }
 
 type planArgs struct {
-	Target     string
-	Direction  string
-	Hold       []string
-	Directions map[string]string
-	Reps       *int
-	Plateau    *int
-	Rounds     *int
-	Command    string
+	Target     string            `json:"target"`
+	Direction  string            `json:"direction"`
+	Hold       []string          `json:"hold"`
+	Directions map[string]string `json:"directions"`
+	Reps       *int              `json:"reps"`
+	Plateau    *int              `json:"plateau"`
+	Rounds     *int              `json:"rounds"`
+	Command    string            `json:"command"`
 }
 
 func (f *flow) init(s *state, in initArgs) error {

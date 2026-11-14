@@ -19,6 +19,7 @@ func TestHashPaths(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got, _, err := f.hashPaths(tc.paths)
 			if err != nil {
 				t.Fatal(err)

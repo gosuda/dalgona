@@ -31,7 +31,7 @@ func TestDecideRound(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			guards := []guard{{Metric: "latency_s", pair: tc.guard}}
-			got, reason := decideRound("score", tc.target, guards, "baseline", "v1", 0)
+			got, reason := decideRound(roundInput{Target: "score", Pair: tc.target, Guards: guards, Ref: "baseline", Variant: "v1", Reruns: 0})
 			if got != tc.want || reason != tc.reason {
 				t.Fatalf("decideRound = %q %q, want %q %q", got, reason, tc.want, tc.reason)
 			}
@@ -67,7 +67,7 @@ func TestRerunLimit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			guards := []guard{{Metric: "latency_s", pair: mk("flat", "flat")}}
-			got, reason := decideRound("score", tc.target, guards, "baseline", "v1", tc.reruns)
+			got, reason := decideRound(roundInput{Target: "score", Pair: tc.target, Guards: guards, Ref: "baseline", Variant: "v1", Reruns: tc.reruns})
 			if got != tc.want || reason != tc.reason {
 				t.Fatalf("decideRound = %q %q, want %q %q", got, reason, tc.want, tc.reason)
 			}
