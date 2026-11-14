@@ -72,7 +72,12 @@ func TestBuildKeepsGenerationWhenKillUnconfirmed(t *testing.T) {
 	buildWG.Add(1)
 	runBuild(failingRunner{Runner: local, readFailed: new(atomic.Bool), signalErr: errors.New("signal refused")}, t.TempDir(), root, runner.Sandbox{Mode: runner.SandboxWorkspaceWrite})
 	spec := <-log.specs
-	t.Cleanup(func() { _ = local.Signal(context.Background(), spec.ID, runner.SignalKill) })
+	t.Cleanup(func() {
+		_ = local.Signal(context.Background(), spec.ID, runner.SignalKill)
+		if err := runner.AwaitExit(context.Background(), local, spec.ID, 5*time.Second); err != nil {
+			t.Errorf("build shim did not exit after the kill: %v", err)
+		}
+	})
 	if currentGeneration(root) != "" {
 		t.Fatal("a build whose kill was not confirmed was published")
 	}
