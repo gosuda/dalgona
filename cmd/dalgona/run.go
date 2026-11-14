@@ -38,7 +38,7 @@ func runWorkflow(ctx context.Context, args []string, std stdio) int {
 		fmt.Fprintf(std.errOut, "%s: %v\n", binary, err)
 		return usage(std, runUsage)
 	}
-	source, err := os.ReadFile(args[0])
+	source, err := os.ReadFile(args[0]) //nolint:gosec // user-specified workflow script path from CLI argument
 	if err != nil {
 		return fail(std, 1, fmt.Errorf("read workflow: %w", err))
 	}
