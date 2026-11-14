@@ -1,4 +1,4 @@
-export const colorRoles = [
+const colorRoles = [
 	"canvas",
 	"surface",
 	"tone",
@@ -89,7 +89,7 @@ export const palette: Readonly<
 
 export type HuePair = "night" | "day";
 
-export interface HueColours {
+interface HueColours {
 	readonly point: Hex;
 	readonly onPoint: Hex;
 }
@@ -127,7 +127,7 @@ export function huePair(theme: ConcreteTheme): HuePair {
 	return theme === "night" || theme === "soft-night" ? "night" : "day";
 }
 
-export interface ContrastRule {
+interface ContrastRule {
 	readonly fg: ColorRole;
 	readonly bg: ColorRole;
 	readonly min: number;

@@ -2,7 +2,7 @@ import { themeSettings } from "./theme/theme";
 import type { JsonValue } from "./types";
 import type { SettingValue } from "./validation";
 
-export interface ChoiceOption {
+interface ChoiceOption {
 	readonly value: string;
 	readonly label: string;
 }
@@ -106,7 +106,7 @@ export function draftProblem(draft: SettingsDraft): string | null {
 }
 
 function sortedItems(items: readonly string[]): string {
-	return [...items].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).join("\n");
+	return [...items].sort((a, b) => a.localeCompare(b)).join("\n");
 }
 
 export function settingEdits(

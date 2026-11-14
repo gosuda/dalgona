@@ -5,7 +5,7 @@ function channel(value: number): number {
 	return scaled <= 0.03928 ? scaled / 12.92 : ((scaled + 0.055) / 1.055) ** 2.4;
 }
 
-export function relativeLuminance(hex: Hex): number {
+function relativeLuminance(hex: Hex): number {
 	const red = channel(Number.parseInt(hex.slice(1, 3), 16));
 	const green = channel(Number.parseInt(hex.slice(3, 5), 16));
 	const blue = channel(Number.parseInt(hex.slice(5, 7), 16));

@@ -1,7 +1,7 @@
 import { countLabel, itemStatusLabel } from "#lib/labels.ts";
 import type { JsonValue, TranscriptItem } from "#lib/types.ts";
 
-export const verbosityLevels = ["low", "medium", "high"] as const;
+const verbosityLevels = ["low", "medium", "high"] as const;
 
 export type Verbosity = (typeof verbosityLevels)[number];
 
@@ -10,7 +10,7 @@ export interface RowPresentation {
 	readonly tailLines: number;
 }
 
-export interface ToolGroup {
+interface ToolGroup {
 	readonly items: readonly TranscriptItem[];
 }
 
@@ -63,7 +63,7 @@ export function presentRow(
 	level: Verbosity,
 	live: boolean,
 ): RowPresentation {
-	if (isToolItem(item) && failed(item)) return tailOf(commandTailLines);
+	if (failed(item)) return tailOf(commandTailLines);
 	if (level === "high") return fullPresentation;
 	if (item.kind === "reasoning") {
 		return live ? tailOf(1) : linePresentation;

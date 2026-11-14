@@ -14,10 +14,6 @@ const advisorStatusLabels: Record<AdvisorStatus, string> = {
 
 const plural = new Intl.PluralRules("en");
 
-function noteCount(count: number): string {
-	return `${count} ${plural.select(count) === "one" ? "note" : "notes"}`;
-}
-
 export function countLabel(n: number, one: string, many: string): string {
 	return `${n} ${plural.select(n) === "one" ? one : many}`;
 }
@@ -34,7 +30,7 @@ export function advisorLabel(summary: AdvisorSummary): string | null {
 			const [only, ...rest] = summary.advisors;
 			if (only === undefined) return "none";
 			if (rest.length === 0) {
-				return `${advisorStatusLabels[only.status]} · ${noteCount(only.notes)}`;
+				return `${advisorStatusLabels[only.status]} · ${countLabel(only.notes, "note", "notes")}`;
 			}
 			const reviewing = summary.advisors.filter(
 				(entry) => entry.status === "reviewing",

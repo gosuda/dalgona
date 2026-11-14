@@ -382,13 +382,13 @@ export function reduceNotification(
 	}
 }
 
-export interface OpenThreadState {
+interface OpenThreadState {
 	readonly transcript: TranscriptState;
 	readonly knownChildren: KnownChildThreads;
 	readonly activeThreadId: string | null;
 }
 
-export interface OpenThreadUpdate {
+interface OpenThreadUpdate {
 	readonly transcript: TranscriptState;
 	readonly knownChildren: KnownChildThreads;
 	readonly sendFollowup: boolean;

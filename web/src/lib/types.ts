@@ -54,7 +54,7 @@ export interface EditReview {
 	readonly summary: string;
 }
 
-export interface OutputSpill {
+interface OutputSpill {
 	readonly path: string;
 	readonly bytes: number;
 	readonly sha256: string;
