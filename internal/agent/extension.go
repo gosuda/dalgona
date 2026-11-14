@@ -103,7 +103,7 @@ func (t *Thread) RunNestedCall(ctx context.Context, call event.ToolCall) error {
 func (w *worker) runNestedCall(ctx context.Context, call event.ToolCall, requestID string) error {
 	item, ok := w.tools.lookup(call.Name)
 	if !ok {
-		return w.declineCall(ctx, call, requestID, decline("mode:"+string(w.settings.Approval), "Tool "+call.Name+" not found"), nil)
+		return w.declineCall(ctx, call, requestID, decline("mode:"+string(w.settings.Approval), "Tool "+call.Name+" not found"))
 	}
 	p, err := w.admit(ctx, &prepared{call: call, tool: item, class: item.Class(), args: call.Args}, requestID)
 	if err != nil || p == nil {

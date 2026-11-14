@@ -110,7 +110,7 @@ func TestLoopGuardSuccessExecResets(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	thread := h.start()
-	appendGuardHistory(t, thread, startedCall("e1", "exec", "exec", `{"command":"echo hi"}`), some(true))
+	appendGuardHistory(t, thread, startedCall("e1", "exec", "exec", `{"command":"echo hi"}`), new(true))
 	w := guardWorker(t, thread)
 	repeated, err := w.repeated("read", jsontext.Value(`{"path":"a"}`))
 	if err != nil {
@@ -125,7 +125,7 @@ func TestLoopGuardReadDoesNotReset(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	thread := h.start()
-	appendGuardHistory(t, thread, startedCall("b1", "read", "read", `{"path":"b"}`), some(true))
+	appendGuardHistory(t, thread, startedCall("b1", "read", "read", `{"path":"b"}`), new(true))
 	w := guardWorker(t, thread)
 	repeated, err := w.repeated("read", jsontext.Value(`{"path":"a"}`))
 	if err != nil {
@@ -140,7 +140,7 @@ func TestLoopGuardFailedPatchDoesNotReset(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	thread := h.start()
-	appendGuardHistory(t, thread, startedCall("p1", "patch", "edit", `{"path":"a"}`), some(false))
+	appendGuardHistory(t, thread, startedCall("p1", "patch", "edit", `{"path":"a"}`), new(false))
 	w := guardWorker(t, thread)
 	repeated, err := w.repeated("read", jsontext.Value(`{"path":"a"}`))
 	if err != nil {
@@ -150,5 +150,3 @@ func TestLoopGuardFailedPatchDoesNotReset(t *testing.T) {
 		t.Fatal("failed patch reset the loop guard")
 	}
 }
-
-func some(v bool) *bool { return &v }

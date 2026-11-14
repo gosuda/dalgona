@@ -157,8 +157,8 @@ func (h *Host) lockSession(id string) (func() error, error) {
 }
 
 func endedByInterrupt(records []event.Seqd) bool {
-	for i := len(records) - 1; i >= 0; i-- {
-		switch value := records[i].Event.(type) {
+	for _, item := range slices.Backward(records) {
+		switch value := item.Event.(type) {
 		case event.UserMessage:
 			return false
 		case event.TurnCompleted:

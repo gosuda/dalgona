@@ -48,9 +48,9 @@ func sandboxChoices(events []event.Seqd) []event.SandboxChosen {
 	return out
 }
 
-func answerSandbox(t *testing.T, thread *Thread, prompt QuestionPrompt, label string) {
+func answerSandbox(t *testing.T, thread *Thread, prompt QuestionPrompt) {
 	t.Helper()
-	reply := asktool.Reply{Outcome: asktool.OutcomeAnswered, Answers: [][]string{{label}}}
+	reply := asktool.Reply{Outcome: asktool.OutcomeAnswered, Answers: [][]string{{sandboxAccept}}}
 	if err := thread.AnswerQuestion(prompt.RequestID, reply); err != nil {
 		t.Fatalf("AnswerQuestion: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestUnavailableSandboxAsksOnceAndRecordsTheChoice(t *testing.T) {
 	if !isSandboxQuestion(prompt) {
 		t.Fatalf("first question = %+v, want the sandbox choice", prompt.Questions)
 	}
-	answerSandbox(t, thread, prompt, sandboxAccept)
+	answerSandbox(t, thread, prompt)
 	for range 2 {
 		approval := nextApprovalPrompt(t, updates)
 		if err := thread.Answer(approval.RequestID, ReplyDecline); err != nil {
@@ -104,7 +104,7 @@ func TestAcceptSendsEveryCommandToApproval(t *testing.T) {
 	thread := h.start()
 	updates := thread.Subscribe()
 	h.submit(thread, "run the same command twice")
-	answerSandbox(t, thread, nextQuestionUpdate(t, updates, false), sandboxAccept)
+	answerSandbox(t, thread, nextQuestionUpdate(t, updates, false))
 	first := nextApprovalPrompt(t, updates)
 	if err := thread.Answer(first.RequestID, ReplyAcceptSession); err != nil {
 		t.Fatalf("Answer accept for session: %v", err)
@@ -168,7 +168,7 @@ func TestSandboxCancelDeclinesAndAsksAgain(t *testing.T) {
 	if second.RequestID == first.RequestID {
 		t.Fatalf("cancelled question asked again under the same request id %s", first.RequestID)
 	}
-	answerSandbox(t, thread, second, sandboxAccept)
+	answerSandbox(t, thread, second)
 	approval := nextApprovalPrompt(t, updates)
 	if err := thread.Answer(approval.RequestID, ReplyDecline); err != nil {
 		t.Fatalf("Answer: %v", err)
@@ -201,7 +201,7 @@ func TestSiblingsShareOneSandboxQuestion(t *testing.T) {
 		if len(asked) != 1 {
 			t.Fatalf("sandbox questions = %d, want one shared question", len(asked))
 		}
-		answerSandbox(t, thread, asked[0], sandboxAccept)
+		answerSandbox(t, thread, asked[0])
 		for range 2 {
 			if reply := <-replies; reply.Outcome != asktool.OutcomeAnswered {
 				t.Fatalf("sibling reply = %+v, want the shared answer", reply)
@@ -228,7 +228,7 @@ func TestChildrenShareOneSandboxQuestionThroughTheGate(t *testing.T) {
 		if len(asked) != 1 {
 			t.Fatalf("parent sandbox questions = %d, want one shared question", len(asked))
 		}
-		answerSandbox(t, parent, asked[0], sandboxAccept)
+		answerSandbox(t, parent, asked[0])
 		for range 2 {
 			approval := nextApprovalPrompt(t, updates)
 			if err := parent.Answer(approval.RequestID, ReplyDecline); err != nil {

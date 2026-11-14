@@ -35,10 +35,19 @@ func seedSpawnCalls(t *testing.T, h *harness, parent *Thread, prefix string, n i
 
 func awaitArrivals(t *testing.T, h *harness, n int) {
 	t.Helper()
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
 	for range n {
 		select {
 		case <-h.model.arrived:
-		case <-time.After(10 * time.Second):
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(10 * time.Second)
+		case <-timer.C:
 			t.Fatalf("model arrivals timed out waiting for %d", n)
 		}
 	}

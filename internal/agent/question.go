@@ -22,8 +22,10 @@ func (t *Thread) Ask(ctx context.Context, callID string, questions []asktool.Que
 	if raw, err := url.PathUnescape(callID); err == nil {
 		callID = raw
 	}
-	if ctx.Err() != nil {
+	select {
+	case <-ctx.Done():
 		return asktool.Reply{Outcome: asktool.OutcomeInterrupted}, nil
+	default:
 	}
 	masked, err := t.host.maskQuestions(questions)
 	if err != nil {

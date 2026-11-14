@@ -61,10 +61,19 @@ func startChildren(t *testing.T, h *harness, parent *Thread, wg *sync.WaitGroup)
 
 func drainEntries(t *testing.T, entered <-chan struct{}, n int, msg string) {
 	t.Helper()
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
 	for range n {
 		select {
 		case <-entered:
-		case <-time.After(10 * time.Second):
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(10 * time.Second)
+		case <-timer.C:
 			t.Fatal(msg)
 		}
 	}

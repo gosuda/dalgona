@@ -64,8 +64,8 @@ func findCut(entries []Entry, target int) (int, bool) {
 		return cut, true
 	}
 	total := 0
-	for i := len(entries) - 1; i >= 0; i-- {
-		total = addBytes(total, entries[i].Bytes)
+	for i, entry := range slices.Backward(entries) {
+		total = addBytes(total, entry.Bytes)
 		if total >= target {
 			return i, true
 		}
@@ -169,7 +169,7 @@ func pruneCandidates(entries []Entry, protected []bool, minBytes int) []int {
 }
 
 func selectPrune(entries []Entry, candidates []int, maxCount, target int) []string {
-	selected := make([]string, 0, minInt(maxCount, len(candidates)))
+	selected := make([]string, 0, min(maxCount, len(candidates)))
 	saved := 0
 	for _, index := range candidates {
 		selected = append(selected, entries[index].CallID)
@@ -219,11 +219,4 @@ func protectedOutputs(entries []Entry, protectBytes int) []bool {
 		remaining -= entries[i].OutputBytes
 	}
 	return protected
-}
-
-func minInt(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
 }

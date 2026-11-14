@@ -6,6 +6,7 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -236,8 +237,8 @@ func (w *worker) task() string {
 		return ""
 	}
 	path := event.ActivePath(v.records)
-	for i := len(path) - 1; i >= 0; i-- {
-		message, ok := path[i].Event.(event.UserMessage)
+	for _, item := range slices.Backward(path) {
+		message, ok := item.Event.(event.UserMessage)
 		if !ok {
 			continue
 		}

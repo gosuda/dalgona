@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/agent/compact"
@@ -308,12 +309,7 @@ func trackFiles(item event.Event, read, changed []string) ([]string, []string) {
 }
 
 func appendUnique(list []string, value string) []string {
-	for _, existing := range list {
-		if existing == value {
-			return list
-		}
-	}
-	if len(list) >= fileListLimit {
+	if slices.Contains(list, value) || len(list) >= fileListLimit {
 		return list
 	}
 	return append(list, value)

@@ -196,7 +196,7 @@ func TestTurnReviewRecoveryDoesNotReview(t *testing.T) {
 	judge := &judgeStub{}
 	h := judgedHarness(t, judge, nil)
 	h.write("a.txt", "uno\n")
-	h.seed(append(seededEdit(h), event.ToolCompleted{CallID: "e1", OK: true, Output: "patched", Recovered: "none"})...)
+	h.seed(append(seededEdit(), event.ToolCompleted{CallID: "e1", OK: true, Output: "patched", Recovered: "none"})...)
 	h.model.push(calls(call{id: "e2", name: "patch", args: patchArgs("a.txt", [2]string{"uno", "dos"})}), text("done"))
 	events := h.recoverSession()
 	if n := len(judgedOf(events)); n != 1 {

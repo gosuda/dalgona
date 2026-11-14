@@ -176,7 +176,7 @@ func (l *loginLater) Models(ctx context.Context) ([]model.Model, error) {
 func TestRoleResolutionSeesModelsListedAfterAnEmptyList(t *testing.T) {
 	t.Parallel()
 	const thread = "anthropic/claude-opus-5-5"
-	provider := &loginLater{modelList: modelList{ids: []string{"claude-opus-5-5", "claude-haiku-5-5"}}}
+	provider := &loginLater{ids: []string{"claude-opus-5-5", "claude-haiku-5-5"}}
 	h := newHarness(t, func(h *harness) {
 		h.cfg.Providers = func(RetryFunc) (*model.Registry, error) {
 			registry := model.NewRegistry()

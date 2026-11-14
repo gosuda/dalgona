@@ -225,9 +225,9 @@ func (w *worker) prepareInBand(toolCall event.ToolCall) (*prepared, *inBandDenia
 	if err := w.t.ext.Direct(toolCall.Name); err != nil {
 		return nil, &inBandDenial{item.Class(), "", decline(by, err.Error())}, nil
 	}
-	args, repairs, err := repairArgs(item.Spec(), toolCall.Args)
-	if err != nil {
-		return nil, &inBandDenial{item.Class(), "", decline(by, "invalid arguments for "+toolCall.Name+": "+err.Error())}, nil
+	args, repairs, fail := repairArgs(item.Spec(), toolCall.Args)
+	if fail != "" {
+		return nil, &inBandDenial{item.Class(), "", decline(by, "invalid arguments for "+toolCall.Name+": "+fail)}, nil
 	}
 	repeated, err := w.repeated(toolCall.Name, args)
 	if err != nil {

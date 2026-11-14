@@ -66,15 +66,15 @@ func needsModel(messages []model.Message) bool {
 }
 
 func afterCompaction(path []event.Seqd) ([]event.Seqd, string) {
-	for i := len(path) - 1; i >= 0; i-- {
-		compaction, ok := path[i].Event.(event.Compaction)
+	for _, item := range slices.Backward(path) {
+		compaction, ok := item.Event.(event.Compaction)
 		if !ok {
 			continue
 		}
 		kept := make([]event.Seqd, 0, len(path))
-		for _, item := range path {
-			if _, marker := item.Event.(event.Compaction); !marker && item.Seq >= compaction.FirstKeptSeq {
-				kept = append(kept, item)
+		for _, it := range path {
+			if _, marker := it.Event.(event.Compaction); !marker && it.Seq >= compaction.FirstKeptSeq {
+				kept = append(kept, it)
 			}
 		}
 		return kept, compaction.Summary

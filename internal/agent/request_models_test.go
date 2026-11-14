@@ -126,17 +126,40 @@ func (s *blockingModelLister) Stream(context.Context, model.Request) (model.Stre
 	return nil, errStubStream
 }
 
+func resetModelTimer(timer *time.Timer, d time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d)
+}
+
+func assertSingleModel(t *testing.T, got []model.Model) {
+	t.Helper()
+	if len(got) != 1 {
+		t.Fatalf("agent: providerModels = %v, want one model", got)
+	}
+}
+
+func collectOneModel(t *testing.T, done <-chan []model.Model, timer *time.Timer) {
+	t.Helper()
+	select {
+	case got := <-done:
+		assertSingleModel(t, got)
+		resetModelTimer(timer, 5*time.Second)
+	case <-timer.C:
+		t.Fatal("agent: concurrent lookup did not return")
+	}
+}
+
 func collectModels(t *testing.T, done chan []model.Model, callers int) {
 	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
 	for range callers {
-		select {
-		case got := <-done:
-			if len(got) != 1 {
-				t.Fatalf("agent: providerModels = %v, want one model", got)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("agent: concurrent lookup did not return")
-		}
+		collectOneModel(t, done, timer)
 	}
 }
 
