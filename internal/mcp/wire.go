@@ -10,7 +10,22 @@ import (
 
 type messageWriter struct {
 	encoder *jsontext.Encoder
+	out     *bytes.Buffer
 	err     error
+}
+
+func newMessageWriter(out *bytes.Buffer) messageWriter {
+	w := messageWriter{encoder: jsontext.NewEncoder(out), out: out}
+	w.token(jsontext.BeginObject)
+	return w
+}
+
+func (w *messageWriter) finish() ([]byte, error) {
+	w.token(jsontext.EndObject)
+	if w.err != nil {
+		return nil, w.err
+	}
+	return bytes.TrimSuffix(w.out.Bytes(), []byte{'\n'}), nil
 }
 
 func (w *messageWriter) token(value jsontext.Token) {
@@ -42,8 +57,7 @@ func encodeMessage(id *uint64, method string, params jsontext.Value) ([]byte, er
 	}
 	var out bytes.Buffer
 	out.Grow(len(params) + len(method) + 64)
-	writer := messageWriter{encoder: jsontext.NewEncoder(&out)}
-	writer.token(jsontext.BeginObject)
+	writer := newMessageWriter(&out)
 	writer.stringMember("jsonrpc", "2.0")
 	if id != nil {
 		writer.token(jsontext.String("id"))
@@ -54,25 +68,16 @@ func encodeMessage(id *uint64, method string, params jsontext.Value) ([]byte, er
 		writer.token(jsontext.String("params"))
 		writer.value(params)
 	}
-	writer.token(jsontext.EndObject)
-	if writer.err != nil {
-		return nil, writer.err
-	}
-	return bytes.TrimSuffix(out.Bytes(), []byte{'\n'}), nil
+	return writer.finish()
 }
 
 func encodeListParams(cursor string) (jsontext.Value, error) {
 	var out bytes.Buffer
-	writer := messageWriter{encoder: jsontext.NewEncoder(&out)}
-	writer.token(jsontext.BeginObject)
+	writer := newMessageWriter(&out)
 	if cursor != "" {
 		writer.stringMember("cursor", cursor)
 	}
-	writer.token(jsontext.EndObject)
-	if writer.err != nil {
-		return nil, writer.err
-	}
-	return bytes.TrimSuffix(out.Bytes(), []byte{'\n'}), nil
+	return writer.finish()
 }
 
 func encodeCallParams(name string, args jsontext.Value) (jsontext.Value, error) {
@@ -84,22 +89,16 @@ func encodeCallParams(name string, args jsontext.Value) (jsontext.Value, error) 
 	}
 	var out bytes.Buffer
 	out.Grow(len(args) + len(name) + 32)
-	writer := messageWriter{encoder: jsontext.NewEncoder(&out)}
-	writer.token(jsontext.BeginObject)
+	writer := newMessageWriter(&out)
 	writer.stringMember("name", name)
 	writer.token(jsontext.String("arguments"))
 	writer.value(args)
-	writer.token(jsontext.EndObject)
-	if writer.err != nil {
-		return nil, writer.err
-	}
-	return bytes.TrimSuffix(out.Bytes(), []byte{'\n'}), nil
+	return writer.finish()
 }
 
 func encodeInitializeParams() (jsontext.Value, error) {
 	var out bytes.Buffer
-	writer := messageWriter{encoder: jsontext.NewEncoder(&out)}
-	writer.token(jsontext.BeginObject)
+	writer := newMessageWriter(&out)
 	writer.stringMember("protocolVersion", protocolVersion)
 	writer.objectMember("capabilities")
 	writer.token(jsontext.String("clientInfo"))
@@ -107,11 +106,7 @@ func encodeInitializeParams() (jsontext.Value, error) {
 	writer.stringMember("name", clientName)
 	writer.stringMember("version", clientVersion())
 	writer.token(jsontext.EndObject)
-	writer.token(jsontext.EndObject)
-	if writer.err != nil {
-		return nil, writer.err
-	}
-	return bytes.TrimSuffix(out.Bytes(), []byte{'\n'}), nil
+	return writer.finish()
 }
 
 func decodeObject(raw []byte) (map[string]jsontext.Value, error) {

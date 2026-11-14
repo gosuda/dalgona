@@ -41,14 +41,14 @@ func (c *Client) listToolsPage(ctx context.Context, cursor string) ([]tool.Tool,
 		}
 		tools = append(tools, decoded)
 	}
-	next := ""
 	if rawNext, ok := fields["nextCursor"]; ok {
-		next, err = decodeString(rawNext)
-		if err != nil {
-			return nil, "", fmt.Errorf("mcp: tools/list nextCursor: %w", err)
+		next, nextErr := decodeString(rawNext)
+		if nextErr != nil {
+			return nil, "", fmt.Errorf("mcp: tools/list nextCursor: %w", nextErr)
 		}
+		return tools, next, nil
 	}
-	return tools, next, nil
+	return tools, "", nil
 }
 
 func (c *Client) adaptTool(raw []byte) (tool.Tool, error) {
@@ -128,14 +128,14 @@ func decodeToolResult(raw []byte) ([]byte, bool, error) {
 			return nil, false, blockErr
 		}
 	}
-	isError := false
 	if rawError, ok := fields["isError"]; ok {
-		isError, err = decodeBool(rawError)
-		if err != nil {
-			return nil, false, fmt.Errorf("isError: %w", err)
+		isError, boolErr := decodeBool(rawError)
+		if boolErr != nil {
+			return nil, false, fmt.Errorf("isError: %w", boolErr)
 		}
+		return output.Bytes(), !isError, nil
 	}
-	return output.Bytes(), !isError, nil
+	return output.Bytes(), true, nil
 }
 
 func appendContentBlock(output *bytes.Buffer, raw []byte) error {

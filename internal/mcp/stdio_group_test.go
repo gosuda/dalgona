@@ -18,7 +18,7 @@ import (
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
-func writeGroupServerScript(t *testing.T, script, pidFile string) {
+func writeGroupServerScript(t *testing.T, script string) {
 	t.Helper()
 	scriptBody := "#!/bin/sh\n" +
 		"sleep 30 &\n" +
@@ -120,7 +120,7 @@ func TestStdioCloseKillsGrandchildHoldingStdout(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "group-server.sh")
 	pidFile := filepath.Join(dir, "grandchild.pid")
-	writeGroupServerScript(t, script, pidFile)
+	writeGroupServerScript(t, script)
 	client := startGroupServerClient(t, script, pidFile)
 	tools, err := client.Tools(context.Background())
 	if err != nil {
