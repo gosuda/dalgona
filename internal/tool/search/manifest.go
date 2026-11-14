@@ -214,7 +214,7 @@ func writeManifest(path string, m manifest) error {
 }
 
 func readManifest(path string) (manifest, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // manifest path within verified generation directory
 	if err != nil {
 		return manifest{}, err
 	}

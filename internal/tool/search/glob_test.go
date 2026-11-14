@@ -29,10 +29,10 @@ func TestRootAnchoredIgnoreRule(t *testing.T) {
 		t.Fatal("rule rejected")
 	}
 	stack.rules = append(stack.rules, rule)
-	if !stack.ignored(root, filepath.Join(root, "drop.log"), false) {
+	if !stack.ignored(filepath.Join(root, "drop.log"), false) {
 		t.Fatal("root file was not ignored")
 	}
-	if stack.ignored(root, filepath.Join(root, "sub", "drop.log"), false) {
+	if stack.ignored(filepath.Join(root, "sub", "drop.log"), false) {
 		t.Fatal("anchored rule ignored nested file")
 	}
 }

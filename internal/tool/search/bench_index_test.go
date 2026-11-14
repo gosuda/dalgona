@@ -48,7 +48,7 @@ func benchRejectedFiles(b *testing.B, dir string) int {
 func BenchmarkBuildIndexWorkloadA(b *testing.B) {
 	requireChangeTimes(b)
 	ws := b.TempDir()
-	writeWorkload(b, ws, 2000, 10000, 1)
+	writeWorkload(b, ws, 2000, 10000)
 	benchBuildIndex(b, ws)
 }
 
@@ -82,7 +82,7 @@ func benchBuiltGeneration(b *testing.B, ws string, start time.Time) string {
 func BenchmarkGrepRareLiteral(b *testing.B) {
 	requireChangeTimes(b)
 	ws := b.TempDir()
-	names := writeWorkload(b, ws, 2000, 10000, 1)
+	names := writeWorkload(b, ws, 2000, 10000)
 	if err := os.WriteFile(filepath.Join(ws, filepath.FromSlash(names[1000])), []byte("needle-7f3a\n"), 0o600); err != nil {
 		b.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func BenchmarkGrepRareLiteralWorkloadB(b *testing.B) {
 func BenchmarkGrepMatchAll(b *testing.B) {
 	requireChangeTimes(b)
 	ws := b.TempDir()
-	writeWorkload(b, ws, 2000, 10000, 1)
+	writeWorkload(b, ws, 2000, 10000)
 	start := time.Now().Add(time.Hour)
 	dir := benchBuiltGeneration(b, ws, start)
 	b.Run("scan", func(b *testing.B) { benchGrep(b, ws, "", freshness{}, "e") })
@@ -127,7 +127,7 @@ func BenchmarkGrepMatchAll(b *testing.B) {
 
 func BenchmarkWalkStatPassPlanReads(b *testing.B) {
 	ws := b.TempDir()
-	writeWorkload(b, ws, 2000, 10000, 1)
+	writeWorkload(b, ws, 2000, 10000)
 	entries, err := walkScope(ws, ws)
 	if err != nil {
 		b.Fatal(err)

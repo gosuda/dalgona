@@ -65,7 +65,7 @@ func loadGeneration(dir string) (manifest, error) {
 	if err != nil {
 		return manifest{}, fmt.Errorf("%w: %w", errIndex, err)
 	}
-	info, err := os.Stat(filepath.Join(dir, trigramFile))
+	info, err := os.Stat(filepath.Join(dir, trigramFile)) //nolint:gosec // trigram index path within verified generation directory
 	if err != nil {
 		return manifest{}, fmt.Errorf("%w: %w", errIndex, err)
 	}
@@ -77,7 +77,7 @@ func loadGeneration(dir string) (manifest, error) {
 
 func generationPresent(dir string) (bool, error) {
 	for _, name := range []string{manifestFile, trigramFile} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil { //nolint:gosec // generation files checked within verified directory
 			if errors.Is(err, fs.ErrNotExist) {
 				return false, nil
 			}

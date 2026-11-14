@@ -82,14 +82,14 @@ func parseIgnoreRule(base, text string) (ignoreRule, bool) {
 	return rule, true
 }
 
-func (s ignoreStack) ignored(root, path string, dir bool) bool {
+func (s ignoreStack) ignored(path string, dir bool) bool {
 	ignored := false
 	for _, rule := range s.rules {
 		rel, err := filepath.Rel(rule.base, path)
 		if err != nil || rel == "." || outside(rel) {
 			continue
 		}
-		if rule.dirOnly && !dir && !hasIgnoredParent(rule, root, path) {
+		if rule.dirOnly && !dir && !hasIgnoredParent(rule, path) {
 			continue
 		}
 		if rule.matcher.match(filepath.ToSlash(rel)) {
@@ -99,7 +99,7 @@ func (s ignoreStack) ignored(root, path string, dir bool) bool {
 	return ignored
 }
 
-func hasIgnoredParent(rule ignoreRule, root, path string) bool {
+func hasIgnoredParent(rule ignoreRule, path string) bool {
 	rel, err := filepath.Rel(rule.base, path)
 	if err != nil {
 		return false

@@ -15,9 +15,9 @@ const (
 	workloadLetters = "abcdefghijklmnopqrstuvwxyz "
 )
 
-func writeWorkload(tb testing.TB, root string, files, bytesEach int, seed uint64) []string {
+func writeWorkload(tb testing.TB, root string, files, bytesEach int) []string {
 	tb.Helper()
-	rng := rand.New(rand.NewPCG(seed, 2))
+	rng := rand.New(rand.NewPCG(1, 2))
 	paths := make([]string, 0, files)
 	body := make([]byte, bytesEach)
 	for i := range files {
@@ -73,7 +73,7 @@ func corpusDir(b *testing.B) string {
 	}
 	marker := filepath.Join(dir, ".corpus-ready")
 	if _, err := os.Stat(marker); err != nil {
-		writeWorkload(b, dir, 200000, 20000, 1)
+		writeWorkload(b, dir, 200000, 20000)
 		if err := os.WriteFile(marker, nil, 0o644); err != nil {
 			b.Fatal(err)
 		}

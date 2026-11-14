@@ -82,7 +82,7 @@ func benchWalk(b *testing.B, root string) {
 func BenchmarkWalkStatPass(b *testing.B) {
 	b.Run("walk/A", func(b *testing.B) {
 		root := b.TempDir()
-		writeWorkload(b, root, 2000, 10000, 1)
+		writeWorkload(b, root, 2000, 10000)
 		benchWalk(b, root)
 	})
 	b.Run("walk/B", func(b *testing.B) {

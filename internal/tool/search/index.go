@@ -105,7 +105,7 @@ func currentGeneration(root string) string {
 	if !singlePathElement(gen) {
 		return ""
 	}
-	info, err := os.Stat(filepath.Join(root, gen))
+	info, err := os.Stat(filepath.Join(root, gen)) //nolint:gosec // generation name is validated by singlePathElement
 	if err != nil || !info.IsDir() {
 		return ""
 	}
