@@ -142,8 +142,6 @@ linters:
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/mcp"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/skills"
-              desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/discovery"
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/webui"
@@ -197,8 +195,6 @@ linters:
             - pkg: "github.com/gosuda/dalgona/internal/sandboxsvc"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/mcp"
-              desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/skills"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/discovery"
               desc: dal must stay free of dalgona batteries

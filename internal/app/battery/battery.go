@@ -22,7 +22,6 @@ import (
 	"github.com/gosuda/dalgona/internal/remote"
 	"github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/scripthost"
-	"github.com/gosuda/dalgona/internal/skills"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -101,15 +100,11 @@ type projects struct {
 }
 
 func (p *projects) discover(cwd string) (discovery.Result, error) {
-	listed, err := skills.List(p.cfg.Home, cwd, nil)
+	listed, err := discovery.NativeSkills(p.cfg.Home, cwd, nil)
 	if err != nil {
 		return discovery.Result{}, fmt.Errorf("skills: %w", err)
 	}
-	native := discovery.Result{Skills: make([]discovery.Skill, 0, len(listed))}
-	for _, skill := range listed {
-		native.Skills = append(native.Skills, discovery.Skill(skill))
-	}
-	native.MCPServers = p.nativeList
+	native := discovery.Result{Skills: listed, MCPServers: p.nativeList}
 	return discovery.Discover(p.userHome, cwd, p.cfg.Discovery.Sources, native)
 }
 
