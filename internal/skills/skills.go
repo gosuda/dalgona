@@ -16,10 +16,6 @@ type Skill struct {
 
 func List(home, cwd string, extra []string) ([]Skill, error) {
 	roots := append([]string{filepath.Join(home, "skills"), filepath.Join(cwd, ".dalgona", "skills")}, extra...)
-	return listRoots(roots)
-}
-
-func listRoots(roots []string) ([]Skill, error) {
 	out := make([]Skill, 0)
 	seen := make(map[string]struct{})
 	for _, root := range roots {
@@ -33,6 +29,24 @@ func listRoots(roots []string) ([]Skill, error) {
 }
 
 func scanRoot(root string, seen map[string]struct{}) ([]Skill, error) {
+	entries, err := rootEntries(root)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Skill, 0)
+	for _, entry := range entries {
+		skill, ok, err := skillFromEntry(root, entry)
+		if err != nil {
+			return nil, err
+		}
+		if ok && !recordSkill(seen, skill.Name) {
+			out = append(out, skill)
+		}
+	}
+	return out, nil
+}
+
+func rootEntries(root string) ([]os.DirEntry, error) {
 	info, err := os.Stat(root)
 	if errors.Is(err, os.ErrNotExist) || (err == nil && !info.IsDir()) {
 		return nil, nil
@@ -44,24 +58,15 @@ func scanRoot(root string, seen map[string]struct{}) ([]Skill, error) {
 	if err != nil {
 		return nil, fmt.Errorf("skills: read %s: %w", root, err)
 	}
-	return scanEntries(root, entries, seen)
+	return entries, nil
 }
 
-func scanEntries(root string, entries []os.DirEntry, seen map[string]struct{}) ([]Skill, error) {
-	out := make([]Skill, 0)
-	for _, entry := range entries {
-		skill, ok, err := skillFromEntry(root, entry)
-		if err != nil {
-			return nil, err
-		}
-		_, exists := seen[skill.Name]
-		if !ok || exists {
-			continue
-		}
-		seen[skill.Name] = struct{}{}
-		out = append(out, skill)
+func recordSkill(seen map[string]struct{}, name string) bool {
+	if _, exists := seen[name]; exists {
+		return true
 	}
-	return out, nil
+	seen[name] = struct{}{}
+	return false
 }
 
 func skillFromEntry(root string, entry os.DirEntry) (Skill, bool, error) {
@@ -116,24 +121,12 @@ func parse(path string) (Skill, error) {
 func frontmatter(path, body string) (string, string, error) {
 	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
 	if len(lines) == 0 || lines[0] != "---" {
-		return "", "", malformed(path)
+		return "", "", fmt.Errorf("skills: malformed frontmatter: %s", path)
 	}
-	name, description, closed := fields(lines[1:])
-	if !closed {
-		return "", "", malformed(path)
-	}
-	return name, description, nil
-}
-
-func malformed(path string) error {
-	return fmt.Errorf("skills: malformed frontmatter: %s", path)
-}
-
-func fields(lines []string) (string, string, bool) {
 	var name, description string
-	for _, line := range lines {
+	for _, line := range lines[1:] {
 		if line == "---" {
-			return name, description, true
+			return name, description, nil
 		}
 		key, value, ok := strings.Cut(line, ":")
 		if !ok {
@@ -146,24 +139,13 @@ func fields(lines []string) (string, string, bool) {
 			description = unquote(value)
 		}
 	}
-	return name, description, false
+	return "", "", fmt.Errorf("skills: malformed frontmatter: %s", path)
 }
 
 func unquote(value string) string {
 	value = strings.TrimSpace(value)
-	if matchingQuote(value) {
+	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
 		return value[1 : len(value)-1]
 	}
 	return value
-}
-
-func matchingQuote(value string) bool {
-	if len(value) < 2 {
-		return false
-	}
-	quote := value[0]
-	if quote != '"' && quote != '\'' {
-		return false
-	}
-	return value[len(value)-1] == quote
 }
