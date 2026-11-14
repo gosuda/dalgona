@@ -90,11 +90,7 @@ func (s *Service) Connect(ctx context.Context, id string, endpoint sandboxsvc.En
 	if err != nil {
 		return nil, fmt.Errorf("sprites: attach %s: %w", id, err)
 	}
-	argv := []string{"sh", "-c", `exec "$HOME/.dalgona/bin/dalgona" exec-server --listen stdio:// --root /workspace`}
-	if endpoint == sandboxsvc.Bridge {
-		argv = []string{"sh", "-c", `exec "$HOME/.dalgona/bin/dalgona" bridge`}
-	}
-	return s.exec(ctx, sprite, argv)
+	return s.exec(ctx, sprite, endpoint.Argv())
 }
 
 func (s *Service) exec(ctx context.Context, sprite *flysprites.Sprite, argv []string) (runner.Stream, error) {

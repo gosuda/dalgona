@@ -125,11 +125,7 @@ func (s *Service) Destroy(ctx context.Context, id string) error {
 }
 
 func (s *Service) Connect(ctx context.Context, id string, endpoint sandboxsvc.Endpoint) (io.ReadWriteCloser, error) {
-	argv := []string{"sh", "-c", `exec "$HOME/.dalgona/bin/dalgona" exec-server --listen stdio:// --root /workspace`}
-	if endpoint == sandboxsvc.Bridge {
-		argv = []string{"sh", "-c", `exec "$HOME/.dalgona/bin/dalgona" bridge`}
-	}
-	return s.exec(ctx, id, argv)
+	return s.exec(ctx, id, endpoint.Argv())
 }
 
 func (s *Service) exec(ctx context.Context, id string, argv []string) (runner.Stream, error) {
