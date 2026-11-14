@@ -34,14 +34,18 @@ type Model struct {
 	InputModalities []string
 }
 
+type turnHead struct {
+	ID         string         `json:"id"`
+	When       When           `json:"when"`
+	Once       bool           `json:"once,omitzero"`
+	Status     int            `json:"status,omitzero"`
+	RetryAfter string         `json:"retry_after,omitzero"`
+	Body       jsontext.Value `json:"body,omitzero"`
+}
+
 type Turn struct {
-	ID         string
-	When       When
-	Once       bool
-	Status     int
-	RetryAfter string
-	Body       jsontext.Value
-	Steps      []Step
+	turnHead
+	Steps []Step
 }
 
 type When struct {
@@ -99,13 +103,8 @@ type modelFile struct {
 }
 
 type turnFile struct {
-	ID         string         `json:"id"`
-	When       When           `json:"when"`
-	Once       bool           `json:"once,omitzero"`
-	Status     int            `json:"status,omitzero"`
-	RetryAfter string         `json:"retry_after,omitzero"`
-	Body       jsontext.Value `json:"body,omitzero"`
-	Steps      []stepFile     `json:"steps,omitzero"`
+	turnHead
+	Steps []stepFile `json:"steps,omitzero"`
 }
 
 type stepFile struct {
@@ -233,27 +232,26 @@ func validateReply(t turnFile) error {
 	if t.Status != 0 && (t.Status < 400 || t.Status > 599) {
 		return errors.New("status must be 0 or 400 to 599")
 	}
-	if t.Status == 0 {
-		return validateTextReply(t)
-	}
-	return validateStatusReply(t)
-}
-
-func validateTextReply(t turnFile) error {
-	if len(t.Body) > 0 {
-		return errors.New("body needs status")
+	if err := validateBodySteps(t); err != nil {
+		return err
 	}
 	return validateRetryAfter(t)
 }
 
-func validateStatusReply(t turnFile) error {
+func validateBodySteps(t turnFile) error {
+	if t.Status == 0 {
+		if len(t.Body) > 0 {
+			return errors.New("body needs status")
+		}
+		return nil
+	}
 	if len(t.Steps) > 0 {
 		return errors.New("a status turn takes no steps")
 	}
 	if len(t.Body) == 0 || !t.Body.IsValid() {
 		return errors.New("a status turn needs a valid body")
 	}
-	return validateRetryAfter(t)
+	return nil
 }
 
 func validateRetryAfter(t turnFile) error {
@@ -298,14 +296,19 @@ func isTerminal(kind string) bool {
 }
 
 func presentKinds(s stepFile) []string {
-	names := []string{"text", "reasoning", "tool_call", "delay_ms", "finish", "error_frame", "drop"}
-	present := []bool{s.Text != nil, s.Reasoning != nil, s.ToolCall != nil, s.DelayMS != nil, s.Finish != nil, s.ErrorFrame != nil, s.Drop != nil}
-	var kinds []string
-	for i, ok := range present {
+	kinds := make([]string, 0, 1)
+	add := func(ok bool, name string) {
 		if ok {
-			kinds = append(kinds, names[i])
+			kinds = append(kinds, name)
 		}
 	}
+	add(s.Text != nil, "text")
+	add(s.Reasoning != nil, "reasoning")
+	add(s.ToolCall != nil, "tool_call")
+	add(s.DelayMS != nil, "delay_ms")
+	add(s.Finish != nil, "finish")
+	add(s.ErrorFrame != nil, "error_frame")
+	add(s.Drop != nil, "drop")
 	return kinds
 }
 
@@ -329,9 +332,13 @@ func validateKind(kind string, s stepFile) error {
 	case "finish":
 		return validateFinish(*s.Finish)
 	case "error_frame":
-		return validateErrorFrame(*s.ErrorFrame)
+		if s.ErrorFrame.Code == "" {
+			return errors.New("error_frame needs a code")
+		}
 	case "drop":
-		return validateDrop(*s.Drop)
+		if !*s.Drop {
+			return errors.New("drop must be true")
+		}
 	}
 	return nil
 }
@@ -339,20 +346,6 @@ func validateKind(kind string, s stepFile) error {
 func validateDelay(delay int) error {
 	if delay < 0 || delay > maxDelay {
 		return errors.New("delay_ms must be 0 to 120000")
-	}
-	return nil
-}
-
-func validateErrorFrame(frame ErrorFrame) error {
-	if frame.Code == "" {
-		return errors.New("error_frame needs a code")
-	}
-	return nil
-}
-
-func validateDrop(drop bool) error {
-	if !drop {
-		return errors.New("drop must be true")
 	}
 	return nil
 }
@@ -402,7 +395,7 @@ func convertModel(m modelFile) Model {
 }
 
 func convertTurn(t turnFile) Turn {
-	turn := Turn{ID: t.ID, When: t.When, Once: t.Once, Status: t.Status, RetryAfter: t.RetryAfter, Body: t.Body}
+	turn := Turn{turnHead: t.turnHead, Steps: make([]Step, 0, len(t.Steps))}
 	for _, step := range t.Steps {
 		turn.Steps = append(turn.Steps, convertStep(step))
 	}
@@ -411,23 +404,19 @@ func convertTurn(t turnFile) Turn {
 
 func convertStep(s stepFile) Step {
 	step := Step{Usage: s.Usage, ErrorFrame: s.ErrorFrame}
-	if s.ToolCall != nil {
+	switch {
+	case s.ToolCall != nil:
 		step.ToolCall = convertToolCall(*s.ToolCall)
-	}
-	if s.Text != nil {
+	case s.Text != nil:
 		step.Text = *s.Text
-	}
-	if s.Reasoning != nil {
+	case s.Reasoning != nil:
 		step.Reasoning = *s.Reasoning
-	}
-	if s.DelayMS != nil {
+	case s.DelayMS != nil:
 		step.DelayMS = *s.DelayMS
-	}
-	if s.Finish != nil {
+	case s.Finish != nil:
 		step.Finish = *s.Finish
 		step.Usage = finishUsage(s.Usage)
-	}
-	if s.Drop != nil {
+	case s.Drop != nil:
 		step.Drop = *s.Drop
 	}
 	return step
