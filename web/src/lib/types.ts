@@ -400,6 +400,12 @@ export interface FileMatch {
 	readonly root: string;
 }
 
+export type ApprovalDecision =
+	| "accept"
+	| "acceptForSession"
+	| "decline"
+	| "cancel";
+
 export interface ApprovalRequest {
 	readonly id: RequestId;
 	readonly method:
@@ -428,9 +434,11 @@ export interface QuestionItem {
 	readonly isOther: boolean;
 }
 
+export const QUESTION_METHOD = "item/tool/requestUserInput" as const;
+
 export interface QuestionRequest {
 	readonly id: RequestId;
-	readonly method: "item/tool/requestUserInput";
+	readonly method: typeof QUESTION_METHOD;
 	readonly threadId: string;
 	readonly turnId: string;
 	readonly itemId: string;

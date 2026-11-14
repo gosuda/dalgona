@@ -5,6 +5,7 @@ import type {
 	RequestId,
 	RpcHandlers,
 } from "./types";
+import { QUESTION_METHOD } from "./types";
 import {
 	parseApprovalRequest,
 	parseJsonValue,
@@ -15,8 +16,6 @@ interface PendingCall {
 	readonly accept: (value: unknown) => void;
 	readonly reject: (error: Error) => void;
 }
-
-const questionMethod = "item/tool/requestUserInput";
 
 interface RpcFields {
 	readonly jsonrpc: JsonValue | undefined;
@@ -245,7 +244,7 @@ export class RpcClient {
 			this.handlers.onError("rpc request id is invalid");
 			return;
 		}
-		if (method === questionMethod) {
+		if (method === QUESTION_METHOD) {
 			const question = parseQuestionRequest(id, params);
 			if (question === null) {
 				this.reject(id, -32602, "invalid params");
