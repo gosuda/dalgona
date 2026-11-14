@@ -25,7 +25,7 @@ func PlanReplace(ctx context.Context, env tool.Env, summary string, replaced []R
 		closeFiles(files)
 		return tool.Plan{}, err
 	}
-	batch := stagedBatch{style: Replace, files: files, summary: summary}
+	batch := stagedBatch{files: files, summary: summary}
 	return tool.Plan{
 		Files: batch.changes(),
 		Apply: func(ctx context.Context) (tool.Result, error) {

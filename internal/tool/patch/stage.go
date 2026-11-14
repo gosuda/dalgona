@@ -42,7 +42,6 @@ type stagedFile struct {
 }
 
 type stagedBatch struct {
-	style   Style
 	files   []*stagedFile
 	summary string
 }
@@ -76,7 +75,7 @@ func stage(ctx context.Context, style Style, edits []edit, env tool.Env) (staged
 		closeFiles(files)
 		return stagedBatch{}, err
 	}
-	return stagedBatch{style: style, files: files}, nil
+	return stagedBatch{files: files}, nil
 }
 
 func stageGroups(ctx context.Context, style Style, groups []fileGroup, env tool.Env) ([]*stagedFile, error) {
