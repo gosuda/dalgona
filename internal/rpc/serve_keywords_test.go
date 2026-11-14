@@ -38,7 +38,7 @@ func TestKeywordMatchReportsRangeAndEffect(t *testing.T) {
 	r.llm.push(llmReply{body: sseText("done")})
 	threadID := startThread(t, r, c, nil)
 	startTurn(t, c, threadID, "ultrathink now")
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	user := log.completed[0]
 	expect(t, len(user.Keywords) == 1 && user.Keywords[0].ByteRange.Start == 0 && user.Keywords[0].ByteRange.End == 10, "userMessage keywords", user.Keywords)
 }

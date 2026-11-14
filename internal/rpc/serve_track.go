@@ -220,14 +220,13 @@ func (t *tracker) finishStream(turnID, kind, id, text string) {
 	t.sink.item(methodItemCompleted, turnID, it)
 }
 
-func (t *tracker) stream(kind, id string) *Item {
-	if it, ok := t.items[id]; ok {
-		return it
+func (t *tracker) stream(kind, id string) {
+	if _, ok := t.items[id]; ok {
+		return
 	}
 	it := &Item{Type: kind, ID: id}
 	t.items[id] = it
 	t.sink.item(methodItemStarted, t.currentTurn(), it)
-	return it
 }
 
 func (t *tracker) agentDelta(itemID, delta string) {
@@ -502,26 +501,6 @@ func (t *tracker) advisorNote(seq uint64, ev event.Event) {
 	})
 	t.sink.notify("dalgona/advisor/note", func() writer {
 		return AdvisorNoteNotification{ThreadID: t.threadID, Advisor: e.Advisor, Severity: e.Severity, Note: e.Note, Delivery: e.Delivery}
-	})
-}
-
-func (t *tracker) toolJudged(_ uint64, ev event.Event) {
-	e, _ := ev.(event.ToolJudged)
-	t.sink.notify("dalgona/tool/judged", func() writer {
-		return ToolJudgedNotification{
-			ThreadID: t.threadID, TurnID: e.TurnID, ItemID: e.CallID, Verdict: e.Verdict,
-			Summary: agent.ReviewSummary(agent.ReviewOutcome{Verdict: e.Verdict, Scores: e.Scores, Flags: e.Flags, Spoken: e.Spoken, Error: e.Error, Truncated: e.Truncated}), Paths: e.Paths,
-		}
-	})
-}
-
-func (t *tracker) turnJudged(_ uint64, ev event.Event) {
-	e, _ := ev.(event.TurnJudged)
-	t.sink.notify("dalgona/turn/judged", func() writer {
-		return TurnJudgedNotification{
-			ThreadID: t.threadID, TurnID: e.TurnID, Verdict: e.Verdict,
-			Summary: agent.ReviewSummary(agent.ReviewOutcome{Verdict: e.Verdict, Scores: e.Scores, Flags: e.Flags, Spoken: e.Spoken, Error: e.Error, Truncated: e.Truncated}), Paths: e.Paths,
-		}
 	})
 }
 

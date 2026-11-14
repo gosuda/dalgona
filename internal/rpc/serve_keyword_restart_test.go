@@ -30,7 +30,7 @@ func TestUserMessageKeywordSurvivesRestart(t *testing.T) {
 	c := r.connect()
 	threadID := startThread(t, r, c, nil)
 	startTurn(t, c, threadID, "probe this")
-	c.collect("turn/completed")
+	c.collect()
 	reopen(t, r)
 	var resumed restartResume
 	r.connect().ok("thread/resume", map[string]any{"threadId": threadID}, &resumed)

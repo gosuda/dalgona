@@ -17,7 +17,7 @@ func TestSpilledOutputCarriesSpillAndReadsBack(t *testing.T) {
 	c := r.connect()
 	threadID := startThread(t, r, c, nil)
 	startTurn(t, c, threadID, "print it")
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	item := findItem(log.completed, "call-1")
 	if item.Spill == nil || item.Spill.Bytes != 70000 {
 		t.Fatalf("commandExecution spill = %+v, want 70000 bytes", item.Spill)

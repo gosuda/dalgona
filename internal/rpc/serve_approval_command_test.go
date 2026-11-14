@@ -25,6 +25,6 @@ func TestServeApprovalShowsExactCommand(t *testing.T) {
 		t.Fatalf("approval command %q, want exact %q", got, exact)
 	}
 	c.respond(req.ID, `{"decision":"accept"}`)
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "turn status", log.status)
 }

@@ -15,7 +15,7 @@ func effortTurn(t *testing.T, c *wireClient, threadID, effort, text string) {
 	var response TurnStartResponse
 	c.ok("turn/start", params, &response)
 	expect(t, response.Turn.ID != "" && response.Turn.Status == statusInProgress, "turn/start", response.Turn)
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "turn status", log.status)
 }
 

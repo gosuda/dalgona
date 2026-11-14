@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -632,9 +633,9 @@ func isDeltaMethod(method string) bool {
 }
 
 func mergeDelta(items []queued, method string, next *queuedDelta) bool {
-	for i := len(items) - 1; i >= 0; i-- {
-		current := items[i].stream
-		if items[i].method != method || current == nil || current.itemID != next.itemID {
+	for _, item := range slices.Backward(items) {
+		current := item.stream
+		if item.method != method || current == nil || current.itemID != next.itemID {
 			continue
 		}
 		current.text = append(current.text, next.text...)

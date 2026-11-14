@@ -71,7 +71,7 @@ func TestReviewStartRunsAReviewTurn(t *testing.T) {
 	var response ReviewStartResponse
 	c.ok("review/start", map[string]any{"threadId": threadID, "target": map[string]any{"type": "uncommittedChanges"}}, &response)
 	expect(t, response.ReviewThreadID == threadID && response.Turn.ID != "" && response.Turn.Status == statusInProgress, "review/start", response)
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "turn status", log.status)
 	expect(t, strings.Contains(bodies.last(), "Review the uncommitted changes in this workspace: staged, unstaged, and untracked files."),
 		"review prompt in the model request", bodies.last())

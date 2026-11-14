@@ -99,7 +99,7 @@ func TestServeChildApprovalResolvedReachesParentConnection(t *testing.T) {
 	})
 	expect(t, fieldOf(t, resolved.Params, "threadId") == childID, "serverRequest/resolved thread", string(resolved.Params))
 	expect(t, fieldOf(t, resolved.Params, "resolution") == "answered", "child approval resolution", string(resolved.Params))
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "parent turn status", log.status)
 	got := childResolution(t, r, childID)
 	expect(t, got.RequestID == requestID && got.Decision == "accept", "child resolution", got)

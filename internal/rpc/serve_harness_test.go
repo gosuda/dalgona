@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -298,6 +299,9 @@ func (c *wireClient) read() {
 		}
 		c.route(line, m)
 	}
+	if err := scanner.Err(); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
+		c.t.Errorf("wireClient read error: %v", err)
+	}
 }
 
 func (c *wireClient) route(line []byte, m message) {
@@ -511,7 +515,7 @@ func (c *wireClient) await(method string, match func(message) bool) message {
 	}
 }
 
-func (c *wireClient) collect(until string) []message {
+func (c *wireClient) collect() []message {
 	c.t.Helper()
 	var seen []message
 	deadline := time.After(waitLimit)
@@ -519,11 +523,11 @@ func (c *wireClient) collect(until string) []message {
 		select {
 		case m := <-c.notes:
 			seen = append(seen, m)
-			if m.Method == until {
+			if m.Method == "turn/completed" {
 				return seen
 			}
 		case <-deadline:
-			c.t.Fatalf("no %s notification after %d notifications", until, len(seen))
+			c.t.Fatalf("no turn/completed notification after %d notifications", len(seen))
 			return nil
 		}
 	}

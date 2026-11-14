@@ -21,7 +21,7 @@ func TestDurationsComeFromTheJournal(t *testing.T) {
 	c := r.connect()
 	threadID := startThread(t, r, c, nil)
 	startTurn(t, c, threadID, "run it")
-	wireTurnMs, wireExecMs := wireDurations(t, c.collect("turn/completed"))
+	wireTurnMs, wireExecMs := wireDurations(t, c.collect())
 	journalTurnMs, journalExecMs := journalDurations(t, r, threadID)
 	if wireTurnMs <= 0 || wireExecMs <= 0 {
 		t.Fatalf("durations not positive: turn %d, exec %d", wireTurnMs, wireExecMs)

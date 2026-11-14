@@ -123,7 +123,7 @@ func overrideTurn(t *testing.T, c *wireClient, params any) string {
 	var response TurnStartResponse
 	c.ok("turn/start", schemaParams(t, "v2/TurnStartParams.json", params), &response)
 	expect(t, response.Turn.ID != "" && response.Turn.Status == statusInProgress, "turn/start", response.Turn)
-	log := readTurn(t, c.collect("turn/completed"))
+	log := readTurn(t, c.collect())
 	expect(t, log.status == statusCompleted, "turn status", log.status)
 	return response.Turn.ID
 }
@@ -198,7 +198,7 @@ func TestThreadStartGranularApprovalAsks(t *testing.T) {
 	}
 	expect(t, request.Method == "item/commandExecution/requestApproval", "granular approval request", request.Method)
 	c.respond(request.ID, `{"decision":"decline"}`)
-	command := findItem(readTurn(t, c.collect("turn/completed")).completed, "call-g")
+	command := findItem(readTurn(t, c.collect()).completed, "call-g")
 	expect(t, command.Status == statusDeclined, "declined command", command)
 }
 
