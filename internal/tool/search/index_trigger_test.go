@@ -67,9 +67,9 @@ func newBuildLog(t *testing.T, start func(runner.Runner, runner.ProcessSpec) err
 
 func (b *buildLog) count() int { return len(b.specs) }
 
-func grepOnce(t *testing.T, env tool.Env) outcome {
+func grepOnce(t *testing.T, env tool.Env, root string) outcome {
 	t.Helper()
-	result, err := runGrep(t.Context(), env, "call-1", grepArgs)
+	result, err := grepWithIndex(t.Context(), env, explicitRef(root), "call-1", grepArgs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestBuildStartsAboveThreshold(t *testing.T) {
 	env, root := buildEnv(t, map[string]string{"big1.txt": text, "big2.txt": text, "big3.txt": text})
 	log := newBuildLog(t, nil)
 	t.Cleanup(buildWG.Wait)
-	result := grepOnce(t, env)
+	result := grepOnce(t, env, root)
 	buildWG.Wait()
 	if result.Unindexed != 3*bigFileBytes {
 		t.Fatalf("unindexed bytes = %d, want %d", result.Unindexed, 3*bigFileBytes)
@@ -99,9 +99,9 @@ func TestBuildStartsAboveThreshold(t *testing.T) {
 }
 
 func TestBuildNotStartedBelowThreshold(t *testing.T) {
-	env, _ := buildEnv(t, map[string]string{"small.txt": "needle\n"})
+	env, root := buildEnv(t, map[string]string{"small.txt": "needle\n"})
 	log := newBuildLog(t, nil)
-	grepOnce(t, env)
+	grepOnce(t, env, root)
 	buildWG.Wait()
 	if log.count() != 0 {
 		t.Fatalf("build starts = %d, want 0", log.count())
@@ -112,10 +112,10 @@ func TestFailedBuildIsNotStartedAgainInProcess(t *testing.T) {
 	setRebuildThreshold(t, bigFileBytes)
 	setBuildBackoff(t, 0)
 	text := bigText()
-	env, _ := buildEnv(t, map[string]string{"big1.txt": text, "big2.txt": text})
+	env, root := buildEnv(t, map[string]string{"big1.txt": text, "big2.txt": text})
 	log := newBuildLog(t, func(runner.Runner, runner.ProcessSpec) error { return errors.New("build refused") })
-	grepOnce(t, env)
-	grepOnce(t, env)
+	grepOnce(t, env, root)
+	grepOnce(t, env, root)
 	buildWG.Wait()
 	if log.count() != 1 {
 		t.Fatalf("build starts = %d, want 1", log.count())
@@ -129,7 +129,7 @@ func TestBuildRunsInSearchSandbox(t *testing.T) {
 	env.Sandbox = runner.Sandbox{Mode: runner.SandboxWorkspaceWrite, DeniedSockets: []string{denied}}
 	log := newBuildLog(t, nil)
 	t.Cleanup(buildWG.Wait)
-	grepOnce(t, env)
+	grepOnce(t, env, root)
 	buildWG.Wait()
 	if log.count() != 1 {
 		t.Fatalf("build starts = %d, want 1", log.count())
@@ -154,7 +154,9 @@ func TestNoBuildForRemoteRunner(t *testing.T) {
 	env, _ := buildEnv(t, map[string]string{"big.txt": bigText()})
 	env.Runner = remoteLike{env.Runner}
 	log := newBuildLog(t, nil)
-	grepOnce(t, env)
+	if _, err := runGrep(t.Context(), env, "call-1", grepArgs); err != nil {
+		t.Fatal(err)
+	}
 	buildWG.Wait()
 	if log.count() != 0 {
 		t.Fatalf("build starts = %d, want 0", log.count())
@@ -166,7 +168,9 @@ func TestNoBuildWithoutSandbox(t *testing.T) {
 	env, _ := buildEnv(t, map[string]string{"big.txt": bigText()})
 	env.Sandbox = runner.Sandbox{Mode: runner.SandboxOff}
 	log := newBuildLog(t, nil)
-	grepOnce(t, env)
+	if _, err := runGrep(t.Context(), env, "call-1", grepArgs); err != nil {
+		t.Fatal(err)
+	}
 	buildWG.Wait()
 	if log.count() != 0 {
 		t.Fatalf("build starts = %d, want 0", log.count())
@@ -175,12 +179,12 @@ func TestNoBuildWithoutSandbox(t *testing.T) {
 
 func TestCountedBytesOnlyTriggerBuild(t *testing.T) {
 	setRebuildThreshold(t, bigFileBytes)
-	env, _ := indexedEnv(t, map[string]string{
+	env, root := indexedEnv(t, map[string]string{
 		"a.txt":    "needle\n",
 		"long.txt": strings.Repeat("y", 2*bigFileBytes) + "\n",
 	})
 	log := newBuildLog(t, nil)
-	grepOnce(t, env)
+	grepOnce(t, env, root)
 	buildWG.Wait()
 	if log.count() != 0 {
 		t.Fatalf("build starts = %d, want 0: a file the index rejected was counted", log.count())
@@ -189,7 +193,7 @@ func TestCountedBytesOnlyTriggerBuild(t *testing.T) {
 
 func TestSearchReturnsBeforeBuildStarts(t *testing.T) {
 	setRebuildThreshold(t, bigFileBytes)
-	env, _ := buildEnv(t, map[string]string{"big.txt": bigText()})
+	env, root := buildEnv(t, map[string]string{"big.txt": bigText()})
 	gate := make(chan struct{})
 	release := sync.OnceFunc(func() { close(gate) })
 	t.Cleanup(buildWG.Wait)
@@ -200,7 +204,7 @@ func TestSearchReturnsBeforeBuildStarts(t *testing.T) {
 	})
 	done := make(chan error, 1)
 	go func() {
-		_, err := runGrep(t.Context(), env, "call-1", grepArgs)
+		_, err := grepWithIndex(t.Context(), env, explicitRef(root), "call-1", grepArgs)
 		done <- err
 	}()
 	select {
@@ -297,7 +301,7 @@ func TestRetryRecordsQuarantine(t *testing.T) {
 	if err := os.Truncate(filepath.Join(root, currentGeneration(root), trigramFile), 0); err != nil {
 		t.Fatal(err)
 	}
-	grepOnce(t, env)
+	grepOnce(t, env, root)
 	if !buildBlocked(root, time.Now()) {
 		t.Fatal("the quarantined index did not start a backoff")
 	}

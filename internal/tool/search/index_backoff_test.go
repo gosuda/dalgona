@@ -96,13 +96,13 @@ func TestFailedBuildRetriesInNewProcess(t *testing.T) {
 	text := bigText()
 	env, root := buildEnv(t, map[string]string{"big1.txt": text, "big2.txt": text})
 	log := newBuildLog(t, func(runner.Runner, runner.ProcessSpec) error { return errors.New("build refused") })
-	grepOnce(t, env)
+	grepOnce(t, env, root)
 	buildWG.Wait()
 	if log.count() != 1 {
 		t.Fatalf("build starts = %d, want 1", log.count())
 	}
 	builds.Delete(root)
-	grepAs(t, env, "call-2")
+	grepAs(t, env, root, "call-2")
 	buildWG.Wait()
 	if log.count() != 2 {
 		t.Fatalf("build starts in a new process = %d, want 2: a failed build blocked the next process", log.count())
@@ -116,19 +116,19 @@ func TestUnusableIndexBacksOffNewProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := newBuildLog(t, nil)
-	grepOnce(t, env)
+	grepOnce(t, env, root)
 	buildWG.Wait()
 	builds.Delete(root)
-	grepAs(t, env, "call-2")
+	grepAs(t, env, root, "call-2")
 	buildWG.Wait()
 	if log.count() != 0 {
 		t.Fatalf("build starts after an unusable index in a new process = %d, want 0", log.count())
 	}
 }
 
-func grepAs(t *testing.T, env tool.Env, id string) outcome {
+func grepAs(t *testing.T, env tool.Env, root string, id string) outcome {
 	t.Helper()
-	result, err := runGrep(t.Context(), env, id, grepArgs)
+	result, err := grepWithIndex(t.Context(), env, explicitRef(root), id, grepArgs)
 	if err != nil {
 		t.Fatal(err)
 	}
