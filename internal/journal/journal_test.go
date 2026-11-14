@@ -96,6 +96,7 @@ func journalFile(dir string) string {
 }
 
 func TestJournalTruncatedTail(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewPCG(42, 42))
 	fixtures := make(map[int]string, 12)
 	for count := 1; count <= 12; count++ {

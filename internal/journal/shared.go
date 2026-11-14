@@ -158,7 +158,7 @@ func (s *Store) isCurrent(sid string) (bool, error) {
 	s.mu.Lock()
 	st := s.sessions[sid]
 	s.mu.Unlock()
-	info, err := os.Stat(s.journalPath(sid))
+	info, err := os.Stat(s.journalPath(sid)) //nolint:gosec // session journal path is validated
 	if errors.Is(err, fs.ErrNotExist) {
 		return st == nil || st.seq == 0, nil
 	}
@@ -193,7 +193,7 @@ func (s *Store) loadSession(sid string) error {
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(s.journalPath(sid))
+	info, err := os.Stat(s.journalPath(sid)) //nolint:gosec // session journal path is validated
 	if err != nil {
 		return fmt.Errorf("journal: stat %s: %w", sid, err)
 	}
@@ -215,7 +215,7 @@ func (st *sessionState) observe(file *os.File) {
 }
 
 func openLockFile(path string) (*os.File, error) {
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // lock path is validated
 	if err != nil {
 		return nil, fmt.Errorf("journal: open %s: %w", path, err)
 	}
@@ -231,7 +231,7 @@ func sessionDirForSync(dir, session string, dirSync func(string) error) (string,
 		return "", fmt.Errorf("journal: invalid session id %q", session)
 	}
 	sdir := filepath.Join(dir, "sessions", session)
-	if err := os.MkdirAll(sdir, 0o700); err != nil {
+	if err := os.MkdirAll(sdir, 0o700); err != nil { //nolint:gosec // session directory path is validated
 		return "", fmt.Errorf("journal: create %s: %w", sdir, err)
 	}
 	if err := dirSync(filepath.Dir(sdir)); err != nil {

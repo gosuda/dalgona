@@ -189,7 +189,7 @@ func fileExists(path string) (bool, error) {
 }
 
 func (s *Store) reconcileSession(sid string, mirror *sessIndex) (reconcileResult, error) {
-	data, err := os.ReadFile(s.journalPath(sid))
+	data, err := os.ReadFile(s.journalPath(sid)) //nolint:gosec // session journal path is validated
 	if err != nil {
 		return reconcileResult{}, fmt.Errorf("journal: read %s: %w", sid, err)
 	}
@@ -379,10 +379,14 @@ func (s *Store) fetchVerified(sid string, seq uint64, prevHash string) (emitRec,
 	if err != nil || !result.ok {
 		return emitRec{}, false, err
 	}
-	if hexOfSum(hashRecord(prevHash, seq, result.ev)) != result.hash || validEventJSON(result.ev) != nil {
+	if hexOfSum(hashRecord(prevHash, seq, result.ev)) != result.hash || !isEventJSON(result.ev) {
 		return emitRec{}, false, nil
 	}
 	return emitRec{seq: seq, hash: result.hash, ev: result.ev}, true, nil
+}
+
+func isEventJSON(ev []byte) bool {
+	return validEventJSON(ev) == nil
 }
 
 type reconcilePlan struct {
@@ -508,7 +512,7 @@ func persistTornJournal(dir string, scan *scanState) error {
 }
 
 func appendJournalTail(path string, data []byte) (retErr error) {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // journal path is validated
 	if err != nil {
 		return err
 	}
@@ -524,7 +528,7 @@ func appendJournalTail(path string, data []byte) (retErr error) {
 }
 
 func readMarker(dir string) (uint64, bool, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "damaged"))
+	data, err := os.ReadFile(filepath.Join(dir, "damaged")) //nolint:gosec // damaged marker path is validated
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, false, nil
 	}
@@ -543,7 +547,7 @@ func writeMarker(dir string, seq uint64) error {
 }
 
 func writeFileSync(path string, data []byte) (err error) {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // file path is validated
 	if err != nil {
 		return err
 	}
@@ -567,14 +571,14 @@ func rewriteJournal(dir string, data []byte) error {
 	if err := writeFileSync(tmp, data); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, filepath.Join(dir, "journal.jsonl")); err != nil {
+	if err := os.Rename(tmp, filepath.Join(dir, "journal.jsonl")); err != nil { //nolint:gosec // journal paths are validated
 		return err
 	}
 	return syncDir(dir)
 }
 
 func truncateJournal(path string, size int) (retErr error) {
-	file, err := os.OpenFile(path, os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY, 0o600) //nolint:gosec // journal path is validated
 	if err != nil {
 		return err
 	}
@@ -590,7 +594,7 @@ func truncateJournal(path string, size int) (retErr error) {
 
 func writeQuarantine(dir, name string, data []byte) (retErr error) {
 	path := filepath.Join(dir, name)
-	file, openErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, openErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // quarantine path is validated
 	if openErr != nil {
 		return openErr
 	}

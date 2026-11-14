@@ -377,10 +377,10 @@ func (s *Store) appendFile(session string, st *sessionState) (*os.File, error) {
 		return st.file, nil
 	}
 	dir := s.sessionDir(session)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil { //nolint:gosec // session directory path is validated
 		return nil, err
 	}
-	file, err := os.OpenFile(s.journalPath(session), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	file, err := os.OpenFile(s.journalPath(session), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600) //nolint:gosec // session journal path is validated
 	if err != nil {
 		return nil, fmt.Errorf("journal: open %s: %w", s.journalPath(session), err)
 	}

@@ -8,7 +8,7 @@ import (
 )
 
 func syncDir(dir string) (err error) {
-	file, err := os.Open(dir)
+	file, err := os.Open(dir) //nolint:gosec // directory path is validated
 	if err != nil {
 		return err
 	}

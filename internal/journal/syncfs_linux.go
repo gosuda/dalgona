@@ -10,7 +10,7 @@ import (
 )
 
 func syncfsDir(path string) (retErr error) {
-	d, err := os.Open(path)
+	d, err := os.Open(path) //nolint:gosec // root path is validated
 	if err != nil {
 		return err
 	}
