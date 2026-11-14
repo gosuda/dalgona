@@ -8,7 +8,7 @@ Scope: `web/package.json` and `web/pnpm-lock.yaml`. Enforcement: `just web` inst
 
 ## Grounded pins
 
-Grounded on 2026-11-12. Each row gives an exact devDependency pin in `web/package.json`. The release date is the `time` entry of that version in `https://registry.npmjs.org/<package>`. The OSV column holds the result of `POST https://api.osv.dev/v1/query` for that package and version, run on 2026-11-12.
+Grounded on 2026-11-12. Each row gives an exact dependency or devDependency pin in `web/package.json`. The release date is the `time` entry of that version in `https://registry.npmjs.org/<package>`. The OSV column holds the result of `POST https://api.osv.dev/v1/query` for that package and version, run on 2026-11-12.
 
 |Package|Pin|Released|Use|OSV 2026-11-12|
 |---|---|---|---|---|

@@ -14,7 +14,7 @@ Use one name for each thing in user-facing text and new specifications.
 - Thinking and reasoning: interfaces show thinking; the wire, journal, and config field is `reasoning`.
 - Subagent: a thread that a tool call starts under another thread. `child.spawned` and `parent` are its journal names.
 - Interrupt: the user stops the running turn, which ends with status `interrupted`. `cancel` is only an approval decision.
-- Mode: the per-thread approval mode and sandbox mode, and the tool mode set in configuration. Name the remote shapes thread boxes and the daemon in a box.
+- Mode: the per-thread approval mode, the sandbox mode, and the tool mode set in configuration. For remote runners, name the shapes thread boxes and the daemon in a box.
 - Generation: one built search index of a workspace, in a directory named for its build start. `CURRENT` names the published generation.
 - Manifest: the file in a generation that lists each eligible file with its size, its times, and whether the index holds it.
 - Trigram: a three-byte sequence that the search index uses to name candidate files.
@@ -34,6 +34,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [Search](spec/search.md): size ceiling and regular-file scans.
 - [Edit styles](spec/edit-styles.md): parser, resolver, writer, and refusal contracts.
 - [Rewrite](spec/rewrite.md): structural replacement by tree-sitter capture, its bounds, and its refusals.
+- [Edit review](spec/edit-review.md): judge each edit on one diff, turn reviews, and diff hunks.
 - [Hashline profiles](spec/hashline/README.md): shared, Light, Enhanced, conformance, and review documents. This imported set distinguishes proposal requirements from its bounded model-check evidence.
 - [Hashline shared contract](spec/hashline/hashline-common-v1.md): syntax, edit evidence, mapping, lifecycle, and authorization.
 - [Hashline Light](spec/hashline/hashline-light-v1.md): snapshot-bound edits without a prior-observation requirement.
@@ -69,6 +70,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [Discovery](spec/discovery.md): opt-in imports of instructions, skills, and server config.
 - [herdr integration](spec/herdr.md): pane reports and subagent panes.
 - [Live debugging](spec/live-debug.md): scripted model server, script format, and stream framing.
+- [Cloudflare deployment](../deploy/cloudflare/README.md): worker tokens, image release, digest pins, and box cleanup.
 
 `just spec-style` checks sentence length, semicolons and dashes in `docs/spec`.
 
@@ -90,7 +92,10 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [Web toolchain](decisions/web-toolchain.md): TypeScript compatibility with the Svelte tools.
 - [Connect wire](decisions/connect-wire.md): one framing and field-helper package for the Connect providers.
 - [Edit styles](decisions/edit-styles.md): anchor default, explicit hashline profiles, and no symbol locators.
+- [Edit review](decisions/edit-review.md): optional review of edit diffs without approval authority.
 - [Ask tool](decisions/ask-tool.md): model questions answered by the user through the client wire.
 - [Ratchet](decisions/ratchet.md): host-owned eval gate in the dalgona battery.
 - [llmstub test support](decisions/llmstub-test-support.md): scripted chat-completions server for tests and live sessions.
 - [Search index](decisions/search-index.md): the grep index, its trust rule, and its rejected engines.
+- [RPC file search](decisions/rpc-file-search.md): workspace file listing through search tool walker.
+- [Syntax package](decisions/syntax-package.md): tree-sitter library confinement and query rules.

@@ -1,6 +1,6 @@
 # Recovery
 
-This specification defines how the agent core recovers a thread after a halt, Ctrl-C, SIGKILL, or host reboot. The journal is the authority. Recovery MUST read only the journal, the blob store, the runner, and the workspace files.
+The agent core recovers a thread after a halt, Ctrl-C, SIGKILL, or host reboot. The journal is the authority. Recovery MUST read only the journal, the blob store, the runner, and the workspace files.
 
 ## When recovery runs
 

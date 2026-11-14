@@ -38,7 +38,7 @@ Subagent threads change step 7. A subagent MUST also publish its `UpdateApproval
 
 A client error on an approval request MUST mean that the client cannot answer. The app-server MUST decline the request when every attached subscriber has reported that it cannot answer. The app-server MUST decline the request when the last subscriber leaves. For a subagent request, the attached subscribers are the parent's subscribers. Otherwise the request MUST stay open for the other subscribers. The first answer MUST win.
 
-Writable roots are the thread working directory, `os.TempDir()`, `os.UserCacheDir()`, and `sandbox_writable_roots`. Each root and path MUST pass through `filepath.EvalSymlinks` for its longest existing prefix.
+Writable roots are the thread working directory, `os.TempDir()`, `os.UserCacheDir()`, and `sandbox_writable_roots`. The runner requires every writable root itself to resolve with `filepath.EvalSymlinks`, or fails without starting. The agent gate resolves each candidate edit path and host root to its longest existing prefix using `filepath.EvalSymlinks`. This determines whether candidate paths fall inside the writable roots. Longest-existing-prefix resolution is also used on macOS for denied socket paths, but never to permit an unresolved writable root to start.
 
 ## Decider adapter
 
