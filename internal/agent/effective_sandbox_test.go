@@ -8,16 +8,30 @@ import (
 
 func TestEffectiveSandboxReportsNoHarness(t *testing.T) {
 	t.Parallel()
+	h := newHarness(t, withUnavailableSandbox(config.ApprovalAsk))
+	thread := h.start()
+	mode, err := thread.EffectiveSandbox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != config.SandboxOff {
+		t.Fatalf("effective sandbox = %q, want %q", mode, config.SandboxOff)
+	}
+}
+
+func TestEffectiveSandboxReportsWorkspaceWrite(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, func(h *harness) {
 		h.cfg.Config.Sandbox = config.SandboxWorkspaceWrite
+		h.cfg.SandboxCause = func() string { return "" }
 	})
 	thread := h.start()
 	mode, err := thread.EffectiveSandbox()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode != config.SandboxWorkspaceWrite && mode != config.SandboxOff {
-		t.Fatalf("effective sandbox = %q, want workspace-write or off", mode)
+	if mode != config.SandboxWorkspaceWrite {
+		t.Fatalf("effective sandbox = %q, want %q", mode, config.SandboxWorkspaceWrite)
 	}
 }
 
