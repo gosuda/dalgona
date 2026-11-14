@@ -81,15 +81,31 @@ type arguments struct {
 }
 
 func parseArgs(raw jsontext.Value) (arguments, error) {
-	entries, err := readObject(raw)
+	decoder := jsontext.NewDecoder(bytes.NewReader(raw))
+	start, err := decoder.ReadToken()
 	if err != nil {
-		return arguments{}, err
+		return arguments{}, fmt.Errorf("exec: read arguments: %w", err)
+	}
+	if start.Kind() != '{' {
+		return arguments{}, errors.New("exec: arguments must be an object")
 	}
 	result := arguments{timeout: 600 * time.Second}
-	for _, entry := range entries {
-		if err := setArgument(&result, entry); err != nil {
-			return arguments{}, fmt.Errorf("exec: invalid %s: %w", entry.name, err)
+	for decoder.PeekKind() != '}' {
+		nameTok, err := decoder.ReadToken()
+		if err != nil {
+			return arguments{}, fmt.Errorf("exec: read argument name: %w", err)
 		}
+		name := nameTok.String()
+		val, err := decoder.ReadValue()
+		if err != nil {
+			return arguments{}, fmt.Errorf("exec: read argument value: %w", err)
+		}
+		if err := applyArgField(name, val, &result); err != nil {
+			return arguments{}, err
+		}
+	}
+	if _, err := decoder.ReadToken(); err != nil {
+		return arguments{}, fmt.Errorf("exec: read argument end: %w", err)
 	}
 	if result.command == "" {
 		return arguments{}, errors.New("exec: command is required")
@@ -97,29 +113,52 @@ func parseArgs(raw jsontext.Value) (arguments, error) {
 	return result, nil
 }
 
-func setArgument(result *arguments, entry entry) error {
-	value := bytes.TrimSpace(entry.value)
-	switch entry.name {
-	case "command":
-		text, err := stringValue(value)
-		result.command = text
-		return err
-	case "cwd":
-		text, err := stringValue(value)
-		result.cwd = text
-		return err
-	case "timeout_ms":
-		return setTimeout(result, value)
-	case "escalate":
-		flag, err := parseBool(value)
-		result.escalate = flag
-		return err
-	case "justification":
-		_, err := stringValue(value)
-		return err
-	default:
-		return nil
+func applyArgField(name string, val []byte, result *arguments) error {
+	switch name {
+	case "command", "cwd", "timeout_ms":
+		return applyExecutionField(name, val, result)
+	case "escalate", "justification":
+		return applyEscalationField(name, val, result)
 	}
+	return nil
+}
+
+func applyExecutionField(name string, val []byte, result *arguments) error {
+	switch name {
+	case "command":
+		text, err := stringValue(val)
+		if err != nil {
+			return fmt.Errorf("exec: invalid command: %w", err)
+		}
+		result.command = text
+	case "cwd":
+		text, err := stringValue(val)
+		if err != nil {
+			return fmt.Errorf("exec: invalid cwd: %w", err)
+		}
+		result.cwd = text
+	case "timeout_ms":
+		if err := setTimeout(result, val); err != nil {
+			return fmt.Errorf("exec: invalid timeout_ms: %w", err)
+		}
+	}
+	return nil
+}
+
+func applyEscalationField(name string, val []byte, result *arguments) error {
+	switch name {
+	case "escalate":
+		flag, err := parseBool(val)
+		if err != nil {
+			return fmt.Errorf("exec: invalid escalate: %w", err)
+		}
+		result.escalate = flag
+	case "justification":
+		if _, err := stringValue(val); err != nil {
+			return fmt.Errorf("exec: invalid justification: %w", err)
+		}
+	}
+	return nil
 }
 
 func setTimeout(result *arguments, value []byte) error {
@@ -402,39 +441,6 @@ func shellArgvForHost(run runner.Runner, hostGOOS, command string) []string {
 		return runner.WindowsShellArgv(command)
 	}
 	return []string{"sh", "-c", command}
-}
-
-type entry struct {
-	name  string
-	value jsontext.Value
-}
-
-func readObject(raw jsontext.Value) ([]entry, error) {
-	decoder := jsontext.NewDecoder(bytes.NewReader(raw))
-	start, err := decoder.ReadToken()
-	if err != nil {
-		return nil, fmt.Errorf("exec: read arguments: %w", err)
-	}
-	if start.Kind() != '{' {
-		return nil, errors.New("exec: arguments must be an object")
-	}
-	entries := make([]entry, 0, 6)
-	for decoder.PeekKind() != '}' {
-		name, err := decoder.ReadToken()
-		if err != nil {
-			return nil, fmt.Errorf("exec: read argument name: %w", err)
-		}
-		nameText := name.String()
-		value, err := decoder.ReadValue()
-		if err != nil {
-			return nil, fmt.Errorf("exec: read argument value: %w", err)
-		}
-		entries = append(entries, entry{name: nameText, value: value.Clone()})
-	}
-	if _, err := decoder.ReadToken(); err != nil {
-		return nil, fmt.Errorf("exec: read argument end: %w", err)
-	}
-	return entries, nil
 }
 
 func stringValue(value []byte) (string, error) {
