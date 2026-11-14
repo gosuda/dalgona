@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"slices"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/runner"
@@ -49,10 +50,8 @@ func (f *termFailRunner) Close() error                         { return nil }
 func TestStopProcess_killsAfterTermFailure(t *testing.T) {
 	f := &termFailRunner{}
 	stopProcess(f, "p1")
-	for _, s := range f.signals {
-		if s == runner.SignalKill {
-			return
-		}
+	if slices.Contains(f.signals, runner.SignalKill) {
+		return
 	}
 	t.Fatalf("signals = %v, want KILL despite TERM failure", f.signals)
 }

@@ -187,6 +187,7 @@ func TestCreateRejectsInvalidBoxName(t *testing.T) {
 	}
 	for _, caller := range callers {
 		t.Run(caller.name, func(t *testing.T) {
+			t.Parallel()
 			server, log := newLifecycleServer(t)
 			service := New(server.URL, "token")
 			for _, name := range invalid {

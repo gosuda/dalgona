@@ -82,10 +82,10 @@ func runShim(dir string, argv []string) error {
 }
 
 func openShimOutput(dir string) (*os.File, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil { //nolint:gosec // shim directory path is supplied by the runner host
 		return nil, fmt.Errorf("runner: create shim directory: %w", err)
 	}
-	out, err := os.OpenFile(filepath.Join(dir, "out"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	out, err := os.OpenFile(filepath.Join(dir, "out"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // shim output path is inside the runner-managed directory
 	if err != nil {
 		return nil, fmt.Errorf("runner: open shim output: %w", err)
 	}
@@ -378,7 +378,7 @@ func exitEntries(data []byte) (map[string]string, error) {
 		return nil, errors.New("runner: invalid exit record")
 	}
 	result := make(map[string]string, 3)
-	for _, field := range strings.Split(text[1:len(text)-1], ",") {
+	for field := range strings.SplitSeq(text[1:len(text)-1], ",") {
 		name, value, ok := strings.Cut(field, ":")
 		if !ok {
 			return nil, errors.New("runner: invalid exit record field")

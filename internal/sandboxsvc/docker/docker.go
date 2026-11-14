@@ -54,7 +54,7 @@ func (s *Service) Create(ctx context.Context, spec sandboxsvc.Spec) (string, err
 	}
 	if _, startErr := s.client.ContainerStart(ctx, result.ID, client.ContainerStartOptions{}); startErr != nil {
 		startFailure := fmt.Errorf("docker: start container %s: %w", result.ID, startErr)
-		_, cleanupErr := s.client.ContainerRemove(context.Background(), result.ID, client.ContainerRemoveOptions{Force: true})
+		_, cleanupErr := s.client.ContainerRemove(context.WithoutCancel(ctx), result.ID, client.ContainerRemoveOptions{Force: true})
 		if cleanupErr != nil {
 			cleanupFailure := fmt.Errorf("docker: remove container %s after start failure: %w", result.ID, cleanupErr)
 			return "", errors.Join(startFailure, cleanupFailure)

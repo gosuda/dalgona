@@ -72,7 +72,10 @@ func (s *Service) Connect(ctx context.Context, id string, endpoint sandboxsvc.En
 	if s.token != "" {
 		header.Set("Authorization", "Bearer "+s.token)
 	}
-	conn, _, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPHeader: header})
+	conn, resp, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPHeader: header})
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare: connect %s: %w", id, err)
 	}
@@ -142,7 +145,12 @@ func (s *Service) boxURL(id string, elem ...string) (string, error) {
 	if !boxName.MatchString(id) {
 		return "", fmt.Errorf("cloudflare: invalid box name %q: must match %s", id, boxName)
 	}
-	u, err := url.JoinPath(s.baseURL, append([]string{"box", id}, elem...)...)
+	parts := make([]string, 0, 2+len(elem))
+	parts = append(parts, "box", url.PathEscape(id))
+	for _, e := range elem {
+		parts = append(parts, url.PathEscape(strings.TrimPrefix(e, "/")))
+	}
+	u, err := url.JoinPath(s.baseURL, parts...) //nolint:gosec // box name is validated by regex and path elements are escaped
 	if err != nil {
 		return "", fmt.Errorf("cloudflare: build URL: %w", err)
 	}
