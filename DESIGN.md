@@ -4,7 +4,7 @@
 
 This file sets one visual system for both interfaces of dalgona: the terminal interface in `internal/tui` and the web interface in `web/`. Both interfaces use the same themes, colours, type, components, motion, words, icons and marks. Read this file before you add or change a colour, a type size, a component, a glyph, a motion, a status item or a mark.
 
-To change the system, get the owner's approval first. One commit changes both interfaces, so they do not drift apart. When the owner rejects an option, record the option and the reason in `docs/decisions/`.
+To change the system, follow [How to change this file](#how-to-change-this-file).
 
 ### Principles
 
@@ -76,8 +76,8 @@ In the browser, the hue fills the point and an 8 px dot beside each thread in th
 
 |Use|Face|Stack|
 |---|---|---|
-|Titles and control labels|Bricolage Grotesque|`"Bricolage Grotesque", sans-serif`|
-|Text, and Hangul through the fallback|Hanken Grotesk, then Pretendard|`"Hanken Grotesk", "Pretendard Subset", sans-serif`|
+|Titles and control labels|Bricolage Grotesque|`"Bricolage Grotesque Variable", "Pretendard Variable", sans-serif`|
+|Text, and Hangul through the fallback|Hanken Grotesk, then Pretendard|`"Hanken Grotesk Variable", "Pretendard Variable", sans-serif`|
 |Code and terminal text|System monospace|`ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`|
 |Nerd Font glyphs|Symbols Nerd Font Mono 3.5.1, subset|CSS family `"Symbols Nerd Subset"`. Used only for the glyphs in Icons.|
 
@@ -293,7 +293,7 @@ In the terminal, `auto` starts with `unicode`. When `KITTY_WINDOW_ID` is set, th
 |Approval|auto|`md-robot_outline`|U+F167A|✓|U+2713|
 |Approval|yolo|`md-fire`|U+F0238|!|U+0021|
 |Sandbox|workspace-write|`md-package_variant_closed`|U+F03D7|⊡|U+22A1|
-|Sandbox|none|`md-alert_outline`|U+F002A|⊘|U+2298|
+|Sandbox|off|`md-alert_outline`|U+F002A|⊘|U+2298|
 |Folder|any|`md-folder_outline`|U+F0256|▸|U+25B8|
 |Queue|count above 0|`md-timer_sand`, then the count|U+F051F|`+`, then the count|U+002B|
 |Context|fraction f|Moon gauge: 15 glyphs U+E38D to U+E39B, index round(f × 14). The percent follows.|U+E38D to U+E39B|The percent alone, with no glyph|n/a|

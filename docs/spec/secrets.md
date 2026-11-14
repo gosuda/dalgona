@@ -1,6 +1,6 @@
 # Secret masking
 
-Credentials and configured secret-pattern matches MUST be masked before tool output or prompts enter the journal or a model request. Values shorter than eight bytes MUST NOT be masked. Workspace MCP approval prompts MUST show only env keys as `KEY=<redacted>` with no raw values in the summary, reason, commands, or RPC log (see `mcp.md`).
+Credentials and configured secret-pattern matches MUST be masked before tool output or prompts enter the journal or a model request. Values shorter than eight bytes MUST NOT be masked. Workspace MCP approval prompts MUST show only env keys as `KEY=<redacted>` with no raw values in the summary, reason, commands, or RPC log (see [mcp.md](mcp.md)).
 
 Masking MUST use reversible placeholders. Environment values use `{{secret:<ENV_NAME>}}`. The environment source includes every variable whose name ends in `_API_KEY`, `_TOKEN`, `_SECRET`, or `_PASSWORD`.
 
@@ -22,6 +22,6 @@ Image bytes MUST NOT pass through the masker. An image path MUST be masked befor
 
 When `MaskError` reports a failure, the host MUST fail the submit or tool call and MUST NOT journal or send the failure sentence. The host MUST reject prompts before journaling. The host MUST fail the tool call with `OK=false` or return an error, and it MUST NOT return the failure sentence as output.
 
-`auth.json` MUST be a regular file with mode 0600. The exact refusal error is `auth.json must be a regular file with mode 0600`. On Windows the loader MUST check the regular-file requirement of the file. The home directory MUST carry a protected DACL that grants access only to the current user, SYSTEM, and Administrators. Writes MUST use a unique temporary file, mode 0600, and an atomic rename. Unknown provider entries and their unknown fields MUST survive a load and write cycle without modification.
+`auth.json` MUST be a regular file with mode 0600. The exact refusal error is `auth.json must be a regular file with mode 0600`. The Windows rules in the `secrets.json` paragraph apply to `auth.json`. Writes MUST use a unique temporary file, mode 0600, and an atomic rename. Unknown provider entries and their unknown fields MUST survive a load and write cycle without modification.
 
 Credential and secret files MUST use streaming `jsontext` encoders and decoders. Reflection-based JSON encoding MUST NOT be used.

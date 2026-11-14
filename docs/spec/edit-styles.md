@@ -82,7 +82,7 @@ A comment is also a placeholder when its text starts with a listed phrase. A spa
 The phrases are `rest of`, `existing code`, `existing implementation`, `existing methods`, `remaining code`, `remaining implementation`, `remaining methods`, `unchanged`, and `previous code`.
 The phrases are also `same as before`, `code omitted`, `implementation omitted`, `omitted`, `other methods`, `keep existing`, `keep the rest`, and `etc`.
 The comment prefixes MUST be `//`, `#`, `--`, `;`, `/*`, `(*`, or `<!--`.
-A placeholder MUST be refused only when the old file holds fewer copies of the same line.
+A placeholder MUST be refused only when the old file holds fewer copies of the same line after trimming leading and trailing whitespace.
 Files with the extensions `.md`, `.markdown`, `.mdx`, `.rst`, `.txt`, and `.adoc` MUST NOT be checked.
 A refused call MUST name the file and the line, and MUST write nothing.
 

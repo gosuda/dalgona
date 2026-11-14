@@ -13,7 +13,7 @@ The program MUST NOT ship a default thread model. The user MUST select the threa
 | `google` | `gemini-3.8-flash` | `gemini-3.5-flash-lite` | `gemini-4-argon` |
 | Other providers | First offered id | First offered id | First offered id |
 
-An explicit `[roles]` value MUST override the preset. An unavailable role preset MUST fall back to the thread model and log `roles.<name> preset <id> is not offered; using <model>`. The `advisor` role MUST resolve through its explicit role, the explicit `slow` role, the provider slow preset, and then the thread model. Advisor effort MUST be `medium`, clamped to the model's supported effort levels.
+An explicit `[roles]` value MUST override the preset. An unavailable role preset MUST fall back to the thread model and log `roles.<name> preset <id> is not offered; using <model>`. The `advisor` role MUST resolve through its explicit role, the explicit `slow` role, the provider slow preset, and then the thread model. Advisor effort MUST be `medium`, clamped according to [providers.md](../spec/providers.md#capabilities-and-roles).
 
 ## Scope
 
@@ -36,4 +36,4 @@ The record cross-checks native names against [OpenRouter's catalog](https://open
 
 ## Enforcement
 
-`TestResolveRole` and `TestClampEffort` in `internal/model/model_test.go` check fallback and effort handling. `TestRoleResolutionUsesPresetsAndFallsBack` in `internal/agent/misc_test.go` checks host role resolution. `internal/config/advisor_test.go` checks advisor role inheritance. `just test` runs these tests. None of these tests proves that a live account offers a preset.
+`TestResolveRole` and `TestClampEffort` in `internal/model/model_test.go` check fallback and effort handling. `TestCapabilitiesCoverEveryPresetModel` in the same file checks preset capability coverage. `TestRoleResolutionUsesPresetsAndFallsBack` in `internal/agent/misc_test.go` checks host role resolution. `TestRolesConfig_Configured` in `internal/config/advisor_test.go` checks advisor role inheritance. `just test` runs these tests. None of these tests proves that a live account offers a preset.

@@ -71,7 +71,7 @@ The file kind comes from the extension of the path. Each extension MUST belong t
 | `off_task` | all | the task is not empty |
 | `needless_layer` | code, interface | none |
 | `narration` | code, interface | none |
-| `unguarded_state` | code, interface | an added line matches the concurrency pattern |
+| `unguarded_state` | code, interface | `hasConcurrentLine` matches an added line |
 | `wasted_work` | code, interface | none |
 | `unsafe_input` | code, interface, config | none |
 | `unclear_contract` | code, interface | none |
@@ -101,7 +101,7 @@ The `truncated` member MUST be true when the unit omits hunks, leaves out a larg
 
 A judge error, a timeout, a missing answer, or an out-of-range answer MUST fail its part. A failed part MUST NOT fail the edit call, and the call MUST keep its `ok` result.
 
-A factory error MUST give an error verdict for the unit. A unit MUST be an error only when every part fails.
+A factory error MUST give an error verdict for the unit.
 
 ## Feedback
 
@@ -131,7 +131,7 @@ A review that covered part of the edit MUST add the line `This review covered pa
 
 A clean verdict MUST add no block. Each earlier message MUST keep its bytes in the next request, so the provider prompt cache still matches.
 
-A rebuilt request MUST read the `spoken` ids from the journal, not from the current `feedback` setting.
+A rebuilt request MUST read the `spoken` ids from the journal, not from the current [`[edit_review] feedback`](config.md) setting.
 
 ## Turn review
 

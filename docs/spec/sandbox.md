@@ -27,7 +27,7 @@ An `exec` call MUST resolve a relative `cwd` against the thread working director
 
 ## Linux
 
-The shim MUST apply this policy before it execs the command:
+The shim (the internal `dalgona __shim` re-exec) MUST apply this policy before it execs the command:
 
 ```
 landlock.V3.BestEffort().RestrictPaths(landlock.RODirs("/"), landlock.RWDirs(roots...), landlock.RWDirs("/dev"))
@@ -43,7 +43,7 @@ On macOS, the runner MUST start the command as `/usr/bin/sandbox-exec -p <profil
 (version 1) (allow default) (deny network-outbound (remote unix-socket (path-literal "<denied>")))... (deny file-write*) (allow file-write* (subpath "<root>"))... (allow file-write* (literal "/dev/null") (literal "/dev/zero") (regex #"^/dev/tty") (regex #"^/dev/fd/"))
 ```
 
-The agent MUST add the daemon socket to the denied list for each `workspace-write` exec call. The runner MUST apply the denied list on macOS. The runner MUST pass no denied list when the mode is `off`. For each denied socket the profile MUST deny both the cleaned path and the resolved path when they differ. A missing socket MUST resolve through its real parent directory. The call MUST fail when the parent directory does not resolve. Each denied path MUST escape `"` and `\` the same way a writable root does. A denied path with a control character MUST fail the command.
+The agent MUST add the daemon socket to the denied list for each `workspace-write` exec call. The runner MUST apply the denied list on macOS. The runner MUST pass no denied list when the mode is `off`. For each denied socket the profile MUST deny the cleaned path, the resolved path, and the canonical real-parent spelling (matches `resolveDeniedSockets`). A missing socket MUST resolve through its real parent directory. The call MUST fail when the parent directory does not resolve. Each denied path MUST escape `"` and `\` the same way a writable root does. A denied path with a control character MUST fail the command.
 
 ## No harness sandbox
 

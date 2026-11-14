@@ -24,7 +24,7 @@ Recovery MUST walk the tool calls of the last `assistant.message` of the open tu
 |Turn open, no call pending|Rebuild the request from the folded active path and call the model again. Recovery discards streamed text that was not journaled.|
 |Call with `tool.completed`, other than the next row|No action.|
 |`tool.completed` of an edit call, no `tool.judged`|No action. Recovery MUST NOT call the decision model and MUST NOT journal `tool.judged`.|
-|`approval.requested` without `approval.resolved`|Decide again. `auto`: static rules, then the decider. `ask`: ask the clients again. With no subscribed client, decline with `declined: no client could approve this call`. Recovery MUST reuse the existing request id.|
+|`approval.requested` without `approval.resolved`|Decide again. `auto`: static rules, then the [decider](approvals.md). `ask`: ask the clients again. With no subscribed client, decline with `declined: no client could approve this call`. Recovery MUST reuse the existing request id.|
 |`approval.resolved` with `decline` or `cancel`, no `tool.completed`|Journal `tool.completed` with `ok=false`, `recovered=none`, and the decline reason as output.|
 |`approval.resolved` with `accept` or `accept_session`, no `tool.started`|Journal `tool.completed` with `ok=false`, `recovered=skipped`, output `skipped: the host restarted before this call ran`. The call MUST NOT run. A thread grant from `accept_session` stays in force because the fold records it at `approval.resolved`.|
 |Assistant call with no approval and no `tool.started`|Same as the previous row: `recovered=skipped`, output `skipped: the host restarted before this call ran`.|
@@ -49,7 +49,7 @@ Sha values MUST be SHA-256 of the file bytes, as lowercase hex. An absent file M
 
 An edit that recovery runs, replays, or completes MUST NOT be judged.
 
-Recovery MUST NOT run the turn review.
+Recovery MUST NOT run the [turn review](edit-review.md).
 
 A Cursor in-band call is journaled only after its `assistant.message`. A crash before that message repeats the model request, and the in-band call MAY run again.
 

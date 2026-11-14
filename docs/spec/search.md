@@ -42,7 +42,7 @@ Search MUST use an index only for grep calls, only with a local runner, and only
 
 The index root MUST be the product home, plus `search`, plus a 16-digit hash of the canonical workspace path. Search MUST NOT use an index when the index root lies inside the workspace, the temp directory, the user cache, or a writable root.
 
-Search MUST pass the index root, the generation name, its clock, and the racy window to the search child as arguments. The model MUST NOT be able to choose the index root or the generation.
+Search MUST pass the index root, the generation name, its clock, and the racy window to the search child as arguments. The model MUST NOT be able to choose the index root or the generation. A generation is the directory that `CURRENT` names. The trigram file and manifest are files inside it. The racy window is the 2-second freshness margin. A file is covered only when its modification and change times are more than that long before the build start.
 
 An index failure is exit status 1 whose output names an unusable index or a corrupt index. After an index failure, Search MUST remove `CURRENT` only when it still names the failed generation. Removing `CURRENT` reads the file and then removes it, so a publish between those two steps is removed too. The search then runs without an index until the next build, and its output does not change. Search MUST run the same call again without an index, under a new process id. Search MUST log an index failure at warn level, and the model MUST NOT receive it.
 
@@ -80,13 +80,15 @@ The symbols mode MUST parse at most 256 files and 1 MiB of source in one call.
 
 A file over 256 KiB MUST NOT be parsed.
 
-Each parse MUST stop after 2 seconds. A call MUST stop starting new files after 10 seconds, and it MUST count each remaining file of a supported language as not parsed.
+Each parse MUST stop after 2 seconds. A call MUST stop starting new files after 10 seconds, and it MUST count each remaining file of a supported language as stopped.
 
 The search child MUST stop after 30 seconds, and the search MUST return an error that names the deadline.
 
 A file whose parse stopped MUST give no rows, and it MUST appear in a `[Parse: stopped, no rows:]` line.
 
 A file whose tree has syntax errors MUST keep its rows, and it MUST appear in a `[Parse: syntax errors, rows kept:]` line.
+
+The call MUST print `[Stopped: N files not parsed. Narrow path or glob.]` when the start budget stops dispatch. The call MUST print `[Not parsed: N files. Narrow path or glob.]` when files overflow the parse budgets. The call MUST print `[Syntax only: N files. Use mode syntax with lang.]` for files whose language has no definition query.
 
 Symbol rows MUST be sorted by path and then by start line.
 
@@ -122,7 +124,7 @@ The syntax mode MUST NOT carry snapshot tags.
 
 ## Fuzzy file search
 
-The `fuzzyFileSearch` method MUST list regular files under each requested root and MUST NOT list directories.
+The `fuzzyFileSearch` method, defined in [protocol.md](protocol.md), MUST list regular files under each requested root and MUST NOT list directories.
 
 The method MUST skip `.git` and every path that `.gitignore` excludes. It MUST NOT follow symbolic links.
 

@@ -166,7 +166,7 @@ The sandbox choice uses `item/tool/requestUserInput` with the header `Sandbox`, 
 
 Each connection subscribes to every thread that it starts, resumes, or changes. The server translates journal events and stream deltas:
 
-`thread/status/changed` carries the extension member `seq`: the journal sequence number of the event that changed the status. A status without a journal event MUST carry the latest applied journal `seq`, or the last sent `seq` plus one when greater. A client MUST ignore a status with a lower `seq` than one it already applied.
+`thread/status/changed` carries the extension member `seq`: the journal sequence number of the event that changed the status. A status without a journal event MUST carry the larger of the latest applied journal `seq` and the last sent `seq` plus one. The client rule is defined in [Client guarantees](#client-guarantees).
 
 Turn objects carry `startedAt` and `completedAt` as Unix seconds, and `durationMs` in milliseconds on `turn/completed`. A `commandExecution`, `mcpToolCall`, or `dynamicToolCall` item MUST carry `durationMs` when the journal holds both of its times. The server computes each duration from the journal times `started_at` and `completed_at`, so a replay shows the same values as the live stream.
 

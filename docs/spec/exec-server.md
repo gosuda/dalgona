@@ -91,7 +91,7 @@ runner: box <id> has no base64; use an image with coreutils
 
 `Upload` MUST enumerate `git ls-files -co --exclude-standard -z` in a git work tree. Outside a work tree it MUST walk regular files and skip `.git`. Both paths MUST skip `.dalgona-baseline`.
 
-- At most 16 file writes MAY be in flight.
+- The client MUST keep at most 16 file writes in flight.
 - Remote paths MUST be `/workspace/<slash-relative-path>`.
 - Files MUST retain their permission bits. Files with mode 0755 MUST also pass through the prescribed `chmod +x` batch.
 - The server MUST run `git init -q && git add -A && git write-tree` in `/workspace` and require exit code zero.

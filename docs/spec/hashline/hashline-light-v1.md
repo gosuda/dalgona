@@ -84,7 +84,7 @@ PUT N: or PUT N-M: replaces original lines using + body rows. CUT N or
 CUT N-M removes them. PUT <N:, PUT >N:, and PUT >$: insert in original
 snapshot gaps.
 [PATH#NEW] plus PUT >$: creates a file. REM explicitly deletes; MV DEST
-renames after edits. REM/MV require the unchanged complete source file.
+renames after edits. REM/MV require the unchanged complete source file. REM does not require every line to have been delivered.
 All operations use the referenced before-image. Light permits replacement
 of lines not fully displayed, but rejects changed targets, missing history,
 invalid paths and stale approval. Known unrelated edits can move an untouched

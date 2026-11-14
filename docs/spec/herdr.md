@@ -4,7 +4,7 @@
 
 The herdr reporter is OPTIONAL. It is active only inside a herdr pane.
 The reporter MUST NOT block a turn when herdr is unavailable.
-The reporter MUST bound each herdr command with a 5 s timeout.
+The herdr caller MUST pass a context with a 5 s timeout to each reporter operation. `SubagentPane` MUST use that context for both commands.
 
 ## Activation
 
@@ -49,10 +49,10 @@ The subagent command MUST be one argument after the pane ID.
 
 ## Failure behavior
 
-The reporter MUST log each command failure with `log/slog`.
-The reporter MUST log at most one failure for its lifetime.
+The reporter MUST log the first command failure with `log/slog`.
+The reporter MUST NOT log any later failure for its lifetime.
 A failed report, release, split, or subagent pane command MUST return control to the caller without an error.
 A malformed split response MUST count as a command failure.
-Cancellation MUST stop the command and MUST follow the same failure rule.
+The reporter MUST stop the command when its context ends. The reporter MUST apply the same failure rule to that command.
 
 The reporter MUST parse the split response with a token decoder. It MUST NOT use reflection-based JSON decoding on this path.
