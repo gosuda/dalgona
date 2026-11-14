@@ -133,15 +133,11 @@ func loadBatteries(ctx context.Context, opts Options, base Base) (Batteries, err
 		}
 		extra = loaded
 	}
-	return withDefaults(extra, base.Local), nil
-}
-
-func withDefaults(extra Batteries, local agent.RunnerFactory) Batteries {
 	if extra.Tools == nil {
 		extra.Tools = func(context.Context, string) []tool.Tool { return nil }
 	}
 	if extra.Runner == nil {
-		extra.Runner = local
+		extra.Runner = base.Local
 	}
 	if extra.Attach == nil {
 		extra.Attach = func(*agent.Host) {}
@@ -149,7 +145,7 @@ func withDefaults(extra Batteries, local agent.RunnerFactory) Batteries {
 	if extra.Close == nil {
 		extra.Close = func() error { return nil }
 	}
-	return extra
+	return extra, nil
 }
 
 func toolSet(cfg config.Config, extra func(ctx context.Context, cwd string) []tool.Tool) agent.ToolSet {
