@@ -81,10 +81,10 @@ func (f *fakeModel) push(role string, responses ...response) {
 	f.queues[role] = append(f.queues[role], responses...)
 }
 
-func (f *fakeModel) setFallback(role string, next response) {
+func (f *fakeModel) setFallback(next response) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.fallback[role] = next
+	f.fallback[roleAdvisor] = next
 }
 
 func (f *fakeModel) respond(w http.ResponseWriter, r *http.Request) {
@@ -132,10 +132,10 @@ func (f *fakeModel) listModels(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, `{"data":[`+strings.Join(items, ",")+`]}`)
 }
 
-func (f *fakeModel) count(role string) int {
+func (f *fakeModel) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.requests[role])
+	return len(f.requests[roleAdvisor])
 }
 
 func (f *fakeModel) waitRequests(role string, n int) {

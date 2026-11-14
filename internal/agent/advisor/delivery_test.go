@@ -88,7 +88,7 @@ func checkDelivery(t *testing.T, h *harness, rt *Runtime, i int, test deliveryCa
 	rt.mu.Unlock()
 	a := rt.advisors[0]
 	text := "note " + strconv.Itoa(i) + " " + test.severity.String()
-	if err := a.deliver(t.Context(), pendingNote{key: Normalize(text), text: text, advice: advice{note: text, severity: test.severity}}); err != nil {
+	if err := a.deliver(t.Context(), pendingNote{key: Normalize(text), text: text, note: text, severity: test.severity}); err != nil {
 		t.Fatal(err)
 	}
 	notes := notesIn(journalEvents(t, h.store, rt.primary.ID()))
@@ -113,7 +113,7 @@ func TestDeliver_immuneWindowCountsBoundariesAfterSteer(t *testing.T) {
 			rt.boundary(agent.Boundary{Thread: thread.ID(), Kind: agent.BoundaryTurn})
 		}
 		text := "concern " + strconv.Itoa(i)
-		if err := a.deliver(t.Context(), pendingNote{key: Normalize(text), text: text, advice: advice{note: text, severity: SeverityConcern}}); err != nil {
+		if err := a.deliver(t.Context(), pendingNote{key: Normalize(text), text: text, note: text, severity: SeverityConcern}); err != nil {
 			t.Fatal(err)
 		}
 		notes := notesIn(journalEvents(t, h.store, thread.ID()))
@@ -128,7 +128,7 @@ func TestDeliver_oneContinuationPerBatch(t *testing.T) {
 	thread, rt := h.start()
 	a := rt.advisors[0]
 	for _, text := range []string{"first blocker", "second blocker"} {
-		if err := a.deliver(t.Context(), pendingNote{key: Normalize(text), text: text, advice: advice{note: text, severity: SeverityBlocker}}); err != nil {
+		if err := a.deliver(t.Context(), pendingNote{key: Normalize(text), text: text, note: text, severity: SeverityBlocker}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -243,10 +243,10 @@ func TestBoundedRender_keepsNewestEventsWithinBudget(t *testing.T) {
 		events = append(events, event.Seqd{Seq: uint64(i + 1), Event: event.AssistantMessage{Text: strings.Repeat("x", 3000) + strconv.Itoa(i)}})
 	}
 	full := Render(events)
-	if got := boundedRender(events[:3], inputBudget); got != Render(events[:3]) {
+	if got := boundedRender(events[:3]); got != Render(events[:3]) {
 		t.Fatalf("small input changed: %q", got)
 	}
-	got := boundedRender(events, inputBudget)
+	got := boundedRender(events)
 	if len(got) > inputBudget+64 || len(full) <= inputBudget {
 		t.Fatalf("bounded length %d, full %d, budget %d", len(got), len(full), inputBudget)
 	}
@@ -257,7 +257,7 @@ func TestBoundedRender_keepsNewestEventsWithinBudget(t *testing.T) {
 
 func TestBoundedRender_clipsOneOversizedElementKeepingItsTags(t *testing.T) {
 	huge := []event.Seqd{{Seq: 1, Event: event.AssistantMessage{Text: "head " + strings.Repeat("é", inputBudget) + " tail"}}}
-	clipped := boundedRender(huge, inputBudget)
+	clipped := boundedRender(huge)
 	if len(clipped) > inputBudget || !strings.HasPrefix(clipped, "<assistant>\nhead") || !strings.HasSuffix(clipped, "tail\n</assistant>\n") || !strings.Contains(clipped, "bytes omitted]") {
 		t.Fatalf("clipped element lost its tags or exceeds the budget: %d bytes", len(clipped))
 	}

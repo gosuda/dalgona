@@ -158,7 +158,7 @@ func TestRuntime_haltsAfterThreeFailedReviewsAndReleasesWaits(t *testing.T) {
 	h := newHarness(t, func(cfg *config.Config) {
 		cfg.Advisor.Review, cfg.Advisor.Sync = config.AdvisorReviewAgentEnd, config.AdvisorSyncFinal
 	})
-	h.model.setFallback(roleAdvisor, response{status: 400, body: `{"error":{"message":"bad request"}}`})
+	h.model.setFallback(response{status: 400, body: `{"error":{"message":"bad request"}}`})
 	thread, rt := h.start()
 	for i := range 3 {
 		h.submit(thread, "step "+string(rune('a'+i)))
@@ -168,17 +168,17 @@ func TestRuntime_haltsAfterThreeFailedReviewsAndReleasesWaits(t *testing.T) {
 	h.waitFor("halted status", func() bool { return advisorState(t, rt) == StateHalted })
 	h.submit(thread, "step d")
 	h.waitIdle(thread)
-	if got := h.model.count(roleAdvisor); got != 3 {
+	if got := h.model.count(); got != 3 {
 		t.Fatalf("a halted advisor made %d requests, want 3", got)
 	}
 	rt.Reset()
 	if state := advisorState(t, rt); state != StateIdle {
 		t.Fatalf("state after reset = %s, want idle", state)
 	}
-	h.model.setFallback(roleAdvisor, text("ok"))
+	h.model.setFallback(text("ok"))
 	h.submit(thread, "step e")
 	h.waitIdle(thread)
-	if got := h.model.count(roleAdvisor); got != 4 {
+	if got := h.model.count(); got != 4 {
 		t.Fatalf("advisor requests after reset = %d, want 4", got)
 	}
 }
@@ -244,7 +244,7 @@ func TestRuntime_intervalReviewsEveryNthBoundaryWithSkippedEvents(t *testing.T) 
 	thread, _ := h.start()
 	h.submit(thread, "read both files")
 	h.waitFor("turn.completed", func() bool { return len(turnEnds(journalEvents(t, h.store, thread.ID()))) == 1 })
-	if got := h.model.count(roleAdvisor); got != 1 {
+	if got := h.model.count(); got != 1 {
 		t.Fatalf("advisor requests = %d, want 1 for three boundaries at interval 2", got)
 	}
 	input := strings.Join(userTexts(h.model.request(roleAdvisor, 0)), "\n")
@@ -327,8 +327,8 @@ func TestRuntime_enableMidSessionSeedsCursorAtHead(t *testing.T) {
 	if strings.Contains(input, "first prompt") || !strings.Contains(input, "second prompt") {
 		t.Fatalf("review input after enabling:\n%s", input)
 	}
-	if h.model.count(roleAdvisor) != 1 {
-		t.Fatalf("a disabled advisor reviewed: %d requests", h.model.count(roleAdvisor))
+	if h.model.count() != 1 {
+		t.Fatalf("a disabled advisor reviewed: %d requests", h.model.count())
 	}
 }
 
@@ -373,7 +373,7 @@ func TestRuntime_failedRecoveredReviewKeepsItsRangeForTheNextReview(t *testing.T
 
 	crashed := t.TempDir()
 	copyRegularFiles(t, h.home, crashed)
-	h.model.setFallback(roleAdvisor, response{status: 400, body: `{"error":{"message":"bad request"}}`})
+	h.model.setFallback(response{status: 400, body: `{"error":{"message":"bad request"}}`})
 	store, host := h.open(crashed)
 	primary, err := host.Resume(t.Context(), thread.ID())
 	if err != nil {
@@ -384,7 +384,7 @@ func TestRuntime_failedRecoveredReviewKeepsItsRangeForTheNextReview(t *testing.T
 		ends := turnEnds(journalEvents(t, store, childID))
 		return len(ends) == 2 && ends[1].Status != statusDone
 	})
-	h.model.setFallback(roleAdvisor, text("ok"))
+	h.model.setFallback(text("ok"))
 	h.submit(primary, "third prompt after the restart")
 	h.model.waitRequests(roleAdvisor, 4)
 	texts := userTexts(h.model.request(roleAdvisor, 3))
