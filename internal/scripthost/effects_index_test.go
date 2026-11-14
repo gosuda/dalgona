@@ -80,3 +80,26 @@ func BenchmarkTraceCachedIndex(b *testing.B) {
 		}
 	}
 }
+
+func traceEffect(records []event.Seqd, run string, n int) effectTrace {
+	id := callID(run, n)
+	index := effectIndex(n)
+	var trace effectTrace
+	for _, item := range scopedRecords(records) {
+		switch value := item.Event.(type) {
+		case event.ScriptEffect:
+			if value.RunID == run && value.N == index {
+				trace.effect = &value
+			}
+		case event.ToolStarted:
+			if value.CallID == id {
+				trace.started = &value
+			}
+		case event.ToolCompleted:
+			if value.CallID == id {
+				trace.completed = &value
+			}
+		}
+	}
+	return trace
+}

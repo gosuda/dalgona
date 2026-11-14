@@ -218,29 +218,6 @@ type effectTrace struct {
 	completed *event.ToolCompleted
 }
 
-func traceEffect(records []event.Seqd, run string, n int) effectTrace {
-	id := callID(run, n)
-	index := effectIndex(n)
-	var trace effectTrace
-	for _, item := range scopedRecords(records) {
-		switch value := item.Event.(type) {
-		case event.ScriptEffect:
-			if value.RunID == run && value.N == index {
-				trace.effect = &value
-			}
-		case event.ToolStarted:
-			if value.CallID == id {
-				trace.started = &value
-			}
-		case event.ToolCompleted:
-			if value.CallID == id {
-				trace.completed = &value
-			}
-		}
-	}
-	return trace
-}
-
 func (c *effectCache) observe(records []event.Seqd) {
 	for _, item := range records[min(c.head, len(records)):] {
 		switch value := item.Event.(type) {
@@ -268,9 +245,6 @@ func (c *effectCache) observe(records []event.Seqd) {
 }
 
 func (c *effectCache) start(records []event.Seqd, run string) (event.ScriptStarted, bool) {
-	if c == nil {
-		return scanStart(records, run)
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureTurn(records)
@@ -280,9 +254,6 @@ func (c *effectCache) start(records []event.Seqd, run string) (event.ScriptStart
 }
 
 func (c *effectCache) completed(records []event.Seqd, run string) (event.ScriptCompleted, bool) {
-	if c == nil {
-		return scanCompleted(records, run)
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureTurn(records)
@@ -291,28 +262,7 @@ func (c *effectCache) completed(records []event.Seqd, run string) (event.ScriptC
 	return done, ok
 }
 
-func scanCompleted(records []event.Seqd, run string) (event.ScriptCompleted, bool) {
-	for _, item := range scopedRecords(records) {
-		if done, ok := item.Event.(event.ScriptCompleted); ok && done.RunID == run {
-			return done, true
-		}
-	}
-	return event.ScriptCompleted{}, false
-}
-
-func scanStart(records []event.Seqd, run string) (event.ScriptStarted, bool) {
-	for _, item := range scopedRecords(records) {
-		if started, ok := item.Event.(event.ScriptStarted); ok && started.RunID == run {
-			return started, true
-		}
-	}
-	return event.ScriptStarted{}, false
-}
-
 func (c *effectCache) trace(records []event.Seqd, run string, n int) effectTrace {
-	if c == nil {
-		return traceEffect(records, run, n)
-	}
 	id := callID(run, n)
 	index := effectIndex(n)
 	c.mu.Lock()
