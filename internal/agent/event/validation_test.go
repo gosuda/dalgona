@@ -148,7 +148,7 @@ func TestValidateRejectsInlinePayloadsOverLimit(t *testing.T) {
 	candidates := []event.Event{
 		event.UserMessage{ItemID: "i", TurnID: "t", Text: large, Kind: "prompt"},
 		event.ToolCompleted{CallID: "c", Output: large, Recovered: "none"},
-		event.ToolStarted{CallID: "c", TurnID: "t", Tool: "read", Class: "read", Args: jsontext.Value(large)},
+		event.ToolStarted{CallID: "c", TurnID: "t", Tool: "read", Class: "read", Args: jsontext.Value(`"` + strings.Repeat("x", event.MaxInlineBytes-1) + `"`)},
 	}
 	for _, candidate := range candidates {
 		if err := candidate.Validate(); err == nil {

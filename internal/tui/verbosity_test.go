@@ -175,6 +175,9 @@ func TestDiffKeepsSixtyLinesAtMedium(t *testing.T) {
 	item := fmt.Sprintf(`{"type":"fileChange","id":"f1","status":"completed","changes":[{"path":"a.go","kind":{"type":"update"},"diff":%s,"additions":70,"deletions":0}]}`, strconv.Quote(diff.String()))
 	medium := notifyItem(t, holdPrints(rowModel(t, 80)), "item/completed", item)
 	assertContains(t, stripANSI(strings.Join(medium.out.pending, "\n")), "… 10 more lines · ctrl+o")
+	if got := strings.Count(stripANSI(strings.Join(medium.out.pending, "\n")), "+line "); got != 60 {
+		t.Fatalf("medium prints %d diff lines, want 60", got)
+	}
 	high := rowModel(t, 80)
 	high.screen.verbosity = "high"
 	full := notifyItem(t, high, "item/completed", item)

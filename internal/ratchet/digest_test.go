@@ -61,6 +61,35 @@ func TestPlanDigestNeedsPlan(t *testing.T) {
 	if _, err := f.digest(&state{Goal: goal{Target: "score"}}, "plan"); err == nil || err.Error() != "plan needs a target, a command and a split first" {
 		t.Fatalf("plan digest without a split = %v, want the plan refusal", err)
 	}
+	for _, missing := range []string{"target", "command", "train", "test", "none"} {
+		t.Run(missing, func(t *testing.T) {
+			t.Parallel()
+			s := &state{Goal: goal{Target: "score"}, Command: "run {variant}", TrainIDs: []string{"a"}, TestIDs: []string{"b"}}
+			switch missing {
+			case "target":
+				s.Goal.Target = ""
+			case "command":
+				s.Command = ""
+			case "train":
+				s.TrainIDs = nil
+			case "test":
+				s.TestIDs = nil
+			}
+			digest, err := f.digest(s, "plan")
+			checkPlanDigestCase(t, missing, digest, err)
+		})
+	}
+}
+
+func checkPlanDigestCase(t *testing.T, missing, digest string, err error) {
+	t.Helper()
+	if missing == "none" {
+		if err != nil || digest == "" {
+			t.Fatalf("minimal plan digest = %q, error = %v", digest, err)
+		}
+	} else if err == nil || digest != "" {
+		t.Fatalf("plan missing %s: digest = %q, error = %v; want refusal and empty digest", missing, digest, err)
+	}
 }
 
 func TestApprovalGoesStale(t *testing.T) {

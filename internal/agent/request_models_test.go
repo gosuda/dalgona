@@ -22,13 +22,14 @@ type stubModelLister struct {
 	calls    atomic.Int64
 	models   []model.Model
 	err      error
-	deadline atomic.Bool
+	deadline atomic.Int64
 }
 
 func (s *stubModelLister) Models(ctx context.Context) ([]model.Model, error) {
 	s.calls.Add(1)
-	_, ok := ctx.Deadline()
-	s.deadline.Store(ok)
+	if deadline, ok := ctx.Deadline(); ok {
+		s.deadline.Store(deadline.UnixNano())
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.models, s.err
@@ -63,12 +64,19 @@ func TestProviderModelsCachesFailures(t *testing.T) {
 	if calls := lister.calls.Load(); calls != 1 {
 		t.Fatalf("agent: provider models calls = %d, want 1 cached failure", calls)
 	}
-	now = now.Add(2 * negativeModelsTTL)
+	now = now.Add(negativeModelsTTL - time.Nanosecond)
+	if got := h.host.providerModels(t.Context(), registry, "stub"); len(got) != 0 {
+		t.Fatalf("agent: providerModels = %v, want empty", got)
+	}
+	if calls := lister.calls.Load(); calls != 1 {
+		t.Fatalf("agent: provider models calls = %d, want 1 cached failure before TTL", calls)
+	}
+	now = now.Add(time.Nanosecond)
 	if got := h.host.providerModels(t.Context(), registry, "stub"); len(got) != 0 {
 		t.Fatalf("agent: providerModels = %v, want empty", got)
 	}
 	if calls := lister.calls.Load(); calls != 2 {
-		t.Fatalf("agent: provider models calls = %d, want refresh after TTL", calls)
+		t.Fatalf("agent: provider models calls = %d, want refresh at TTL", calls)
 	}
 }
 
@@ -80,8 +88,10 @@ func TestProviderModelsBoundsLookup(t *testing.T) {
 	if got := h.host.providerModels(t.Context(), registry, "stub"); len(got) != 1 {
 		t.Fatalf("agent: providerModels = %v, want one model", got)
 	}
-	if !lister.deadline.Load() {
-		t.Fatal("agent: provider models lookup ran without a timeout")
+	deadline := time.Unix(0, lister.deadline.Load())
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > providerModelsTimeout {
+		t.Fatalf("agent: provider models lookup deadline = %v from now, want within (0, %v]", remaining, providerModelsTimeout)
 	}
 	if got := h.host.providerModels(t.Context(), registry, "stub"); len(got) != 1 {
 		t.Fatalf("agent: providerModels = %v, want one model", got)

@@ -34,12 +34,22 @@ func bandItem(m model, id string) string {
 
 func TestNewThreadLeavesApprovalToConfig(t *testing.T) {
 	t.Parallel()
-	caller := new(fakeCaller)
-	m := newTestModel(caller, Options{})
-	m.startThread()()
-	params, ok := caller.calls[0].params.(rpc.ThreadStartParams)
-	if !ok || params.ApprovalPolicy != "" {
-		t.Fatalf("thread/start approvalPolicy = %q, want empty so the configured approval applies", params.ApprovalPolicy)
+	for _, tc := range []struct{ mode, policy string }{
+		{"", ""},
+		{"ask", "untrusted"},
+		{"auto", "on-request"},
+		{"yolo", "never"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := newTestModel(caller, Options{Approval: tc.mode})
+			m.startThread()()
+			params, ok := caller.calls[0].params.(rpc.ThreadStartParams)
+			if !ok || params.ApprovalPolicy != tc.policy {
+				t.Fatalf("thread/start approvalPolicy = %q, want %q for mode %q", params.ApprovalPolicy, tc.policy, tc.mode)
+			}
+		})
 	}
 }
 

@@ -121,6 +121,7 @@ func TestFuzzyScoreRule(t *testing.T) {
 		{"deeper path scores lower", "serve", "internal/rpc/serve.go", 102979, []uint32{13, 14, 15, 16, 17}, true},
 		{"case insensitive", "SERVE", "docs/Serve.md", 102987, []uint32{5, 6, 7, 8, 9}, true},
 		{"not a subsequence", "sv", "ignored/xyz", 0, nil, false},
+		{"earlier window on tie", "ab", "ab/ab", 101995, []uint32{0, 1}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

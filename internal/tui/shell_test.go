@@ -69,14 +69,29 @@ func TestBangRunsCommandExecAndAddsChip(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("command/exec calls = %d, want 1: %v", len(calls), calls)
 	}
-	if !strings.Contains(calls[0], `"command":["sh","-c","echo hi"]`) {
-		t.Fatalf("command/exec params = %s, want argv sh -c echo hi", calls[0])
-	}
+	assertShellExecParams(t, calls[0])
 	if got := m.input.composer.firstLine(); got != "[Shell #1 exit 0, 1 line]" {
 		t.Fatalf("prompt = %q, want the shell chip", got)
 	}
 	if m.input.mode != inputShell {
 		t.Fatalf("mode after Enter = %v, want shell: only esc leaves shell mode", m.input.mode)
+	}
+}
+
+func assertShellExecParams(t *testing.T, call string) {
+	t.Helper()
+	var params struct {
+		Command []string `json:"command"`
+		Cwd     string   `json:"cwd"`
+	}
+	if err := json.Unmarshal([]byte(call), &params); err != nil {
+		t.Fatalf("decode command/exec params: %v", err)
+	}
+	if len(params.Command) != 3 || params.Command[0] != "sh" || params.Command[1] != "-c" || params.Command[2] != "echo hi" {
+		t.Fatalf("command/exec argv = %q, want sh -c echo hi", params.Command)
+	}
+	if params.Cwd != "/work" {
+		t.Fatalf("command/exec cwd = %q, want /work", params.Cwd)
 	}
 }
 

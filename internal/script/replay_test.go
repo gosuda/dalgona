@@ -111,7 +111,7 @@ func TestSwappedJournalOpReportsNondeterminism(t *testing.T) {
 
 	outcome := runReplayWorkflow(t.Context(), t, j)
 	want := "nondeterminism at effect 2: recorded time, got tool:exec"
-	if outcome.Status != script.StatusFailed || outcome.Error.Message != want {
+	if outcome.Status != script.StatusFailed || outcome.Error.Code != "nondeterminism" || outcome.Error.Message != want {
 		t.Fatalf("outcome = %s %+v, want failed %q", outcome.Status, outcome.Error, want)
 	}
 	if executed, _ := j.counts(); executed != 2 {
@@ -124,7 +124,7 @@ func TestChangedArgumentsReportNondeterminism(t *testing.T) {
 	j.rewrite(1, func(rec *script.Recorded) { rec.ArgsSHA = script.ArgsSHA(jsontext.Value(`{"command":"true"}`)) })
 
 	outcome := runReplayWorkflow(t.Context(), t, j)
-	if outcome.Error.Message != "nondeterminism at effect 1: recorded tool:exec, got tool:exec" {
+	if outcome.Status != script.StatusFailed || outcome.Error.Code != "nondeterminism" || outcome.Error.Message != "nondeterminism at effect 1: recorded tool:exec, got tool:exec" {
 		t.Fatalf("outcome = %s %+v", outcome.Status, outcome.Error)
 	}
 }
@@ -132,7 +132,9 @@ func TestChangedArgumentsReportNondeterminism(t *testing.T) {
 func TestSleepRecordsAbsoluteDeadline(t *testing.T) {
 	j := newJournal(clockTool())
 	src := []byte("ctx.sleep(0.05)\ntime.sleep(0)\n")
+	before := time.Now()
 	outcome, err := script.RunWorkflow(t.Context(), j, script.Workflow{ID: "sleepy", Entry: "s.star", Source: src})
+	after := time.Now()
 	if err != nil || outcome.Status != script.StatusCompleted {
 		t.Fatalf("run: %v %+v", err, outcome)
 	}
@@ -141,10 +143,23 @@ func TestSleepRecordsAbsoluteDeadline(t *testing.T) {
 		t.Fatalf("sleep effect = %+v, %v", rec, ok)
 	}
 	deadline, err := strconv.ParseInt(string(rec.Result), 10, 64)
-	if err != nil || deadline < time.Now().Add(-time.Minute).UnixNano() {
-		t.Fatalf("deadline %s is not an absolute unix time: %v", rec.Result, err)
+	if err != nil || deadline < before.Add(50*time.Millisecond).UnixNano() || deadline > after.Add(50*time.Millisecond).UnixNano() {
+		t.Fatalf("deadline %s outside requested wake interval: %v", rec.Result, err)
 	}
-	if _, ok := j.Lookup("sleepy", 2); !ok {
-		t.Fatal("time.sleep did not record a durable effect")
+	if after.Sub(before) < 50*time.Millisecond {
+		t.Fatal("sleep returned before its requested duration")
+	}
+	assertZeroSleepDeadline(t, j, before, after)
+}
+
+func assertZeroSleepDeadline(t *testing.T, j *journal, before, after time.Time) {
+	t.Helper()
+	second, ok := j.Lookup("sleepy", 2)
+	if !ok || second.Op != script.OpSleep {
+		t.Fatalf("time.sleep effect = %+v, %v", second, ok)
+	}
+	zeroDeadline, err := strconv.ParseInt(string(second.Result), 10, 64)
+	if err != nil || zeroDeadline < before.UnixNano() || zeroDeadline > after.UnixNano() {
+		t.Fatalf("zero sleep deadline %s outside run interval: %v", second.Result, err)
 	}
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json/jsontext"
+	"strings"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/tool"
@@ -25,7 +26,22 @@ func (s searchTool) Run(context.Context, tool.Call, tool.Env) (tool.Result, erro
 	return tool.Result{Output: []byte("found"), OK: true}, nil
 }
 
-func remoteHarness(t *testing.T, counter *countingDecider, runs *int) *harness {
+type gateRemoteRecordingDecider struct {
+	actions chan Action
+}
+
+func (d gateRemoteRecordingDecider) Decide(ctx context.Context, action Action) (Decision, error) {
+	select {
+	case <-ctx.Done():
+		return Decision{}, ctx.Err()
+	case d.actions <- action:
+		return Decision{Allow: true, By: "decider:recording"}, nil
+	default:
+		return Decision{Reason: "recording queue full"}, nil
+	}
+}
+
+func remoteHarness(t *testing.T, counter Decider, runs *int) *harness {
 	t.Helper()
 	return newHarness(t, func(h *harness) {
 		h.cfg.Decider = counter
@@ -37,12 +53,24 @@ func remoteHarness(t *testing.T, counter *countingDecider, runs *int) *harness {
 
 func TestRemoteJSONArgsReachDecider(t *testing.T) {
 	t.Parallel()
-	counter := &countingDecider{}
+	actions := make(chan Action, 2)
+	counter := gateRemoteRecordingDecider{actions: actions}
 	var runs int
 	h := remoteHarness(t, counter, &runs)
 	events := runCalls(t, h, call{id: "x", name: "srv__search", args: `{"query":"x"}`})
-	if counter.calls.Load() != 1 {
-		t.Fatalf("decider calls = %d, want 1 (remote call: %+v)", counter.calls.Load(), resolutions(events)["x"])
+	if len(actions) != 1 {
+		t.Fatalf("decider calls = %d, want 1", len(actions))
+	}
+	action := <-actions
+	if action.Tool != "srv__search" || action.Class != tool.ClassRemote || !strings.Contains(action.Text, `"query":"x"`) {
+		t.Fatalf("remote decision action = %+v, want remote search with query argument", action)
+	}
+	if runs != 1 {
+		t.Fatalf("remote runs = %d, want 1", runs)
+	}
+	completed := completedOutputs(events)["x"]
+	if !completed.OK || completed.Output != "found" {
+		t.Fatalf("remote completion = %+v, want successful found output", completed)
 	}
 	if !started(events, "x") {
 		t.Fatalf("remote call did not start: %+v", resolutions(events)["x"])

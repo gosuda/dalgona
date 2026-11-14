@@ -20,6 +20,9 @@ func TestMissingJSONRPCAndUnknownMethod(t *testing.T) {
 	left, right := net.Pipe()
 	c := NewConn(t.Context(), left, nil)
 	closeRPCPair(t, c, right)
+	if err := right.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := right.Write([]byte(`{"id":1,"method":"missing","params":{}}` + "\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -28,12 +31,20 @@ func TestMissingJSONRPCAndUnknownMethod(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Error wireError `json:"error"`
+		JSONRPC string    `json:"jsonrpc"`
+		ID      int       `json:"id"`
+		Error   wireError `json:"error"`
 	}
 	if err := json.Unmarshal(line, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Error.Code != -32601 {
+	if got.JSONRPC != "2.0" {
+		t.Fatalf("jsonrpc=%q, want 2.0", got.JSONRPC)
+	}
+	if got.ID != 1 {
+		t.Fatalf("id=%d, want 1", got.ID)
+	}
+	if got.Error.Code != -32601 || got.Error.Message != "Method not found" {
 		t.Fatalf("error=%+v", got.Error)
 	}
 }
@@ -48,7 +59,9 @@ func TestHandlerRPCErrorCodeReachesClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	closeRPCPair(t, server, right)
-	callErr := client.Call(t.Context(), "turn/start", nil, nil)
+	callCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	callErr := client.Call(callCtx, "turn/start", nil, nil)
 	coded, ok := errors.AsType[*RPCError](callErr)
 	if !ok || coded.Code != -32600 || !strings.Contains(coded.Message, "thread t1 is running") {
 		t.Fatalf("err=%v", callErr)
@@ -67,6 +80,28 @@ func TestCallIDSendsIDAndRoutesResponse(t *testing.T) {
 	go func() {
 		done <- c.CallID(t.Context(), "approval-7", "item/commandExecution/requestApproval", map[string]string{}, &got)
 	}()
+	requireApprovalCallRequest(t, right)
+	if _, err := right.Write([]byte(`{"id":"other","result":{"decision":"decline"}}` + "\n" + `{"id":"approval-7","result":{"decision":"accept"}}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for CallID to complete")
+	}
+	if got.Decision != "accept" {
+		t.Fatalf("decision=%q", got.Decision)
+	}
+}
+
+func requireApprovalCallRequest(t *testing.T, right net.Conn) {
+	t.Helper()
+	if err := right.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	line, err := bufio.NewReader(right).ReadBytes('\n')
 	if err != nil {
 		t.Fatal(err)
@@ -78,14 +113,8 @@ func TestCallIDSendsIDAndRoutesResponse(t *testing.T) {
 	if string(request.ID) != `"approval-7"` || request.Method != "item/commandExecution/requestApproval" {
 		t.Fatalf("request=%s", line)
 	}
-	if _, err := right.Write([]byte(`{"id":"other","result":{"decision":"decline"}}` + "\n" + `{"id":"approval-7","result":{"decision":"accept"}}` + "\n")); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if got.Decision != "accept" {
-		t.Fatalf("decision=%q", got.Decision)
+	if request.JSONRPC != "2.0" {
+		t.Fatalf("jsonrpc=%q, want 2.0", request.JSONRPC)
 	}
 }
 
@@ -121,16 +150,31 @@ func TestMergedDeltaLinePreservesUnknownMembers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	requireMergedDeltaMembers(t, line)
+}
+
+func requireMergedDeltaMembers(t *testing.T, line []byte) {
+	t.Helper()
 	var got struct {
-		Params struct {
-			Delta  string `json:"delta"`
-			Future struct {
+		JSONRPC string `json:"jsonrpc"`
+		Method  string `json:"method"`
+		Params  struct {
+			ThreadID string `json:"threadId"`
+			ItemID   string `json:"itemId"`
+			Delta    string `json:"delta"`
+			Future   struct {
 				Keep bool `json:"keep"`
 			} `json:"future"`
 		} `json:"params"`
 	}
 	if err := json.Unmarshal(line, &got); err != nil {
 		t.Fatal(err)
+	}
+	if got.JSONRPC != "2.0" || got.Method != "item/agentMessage/delta" {
+		t.Fatalf("unexpected envelope: jsonrpc=%q method=%q", got.JSONRPC, got.Method)
+	}
+	if got.Params.ThreadID != "thread" || got.Params.ItemID != "item" {
+		t.Fatalf("identity members lost: threadId=%q itemId=%q", got.Params.ThreadID, got.Params.ItemID)
 	}
 	if got.Params.Delta != "a\n\"b\t" || !got.Params.Future.Keep {
 		t.Fatalf("merged params=%+v", got.Params)
@@ -244,6 +288,9 @@ func TestResponseEncodeFailureClosesConnection(t *testing.T) {
 		return jsontext.Value(`{"broken":`), nil
 	})
 	closeRPCPair(t, c, right)
+	if err := right.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := right.Write([]byte(`{"id":1,"method":"broken"}` + "\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -260,14 +307,22 @@ func TestPendingCallReturnsClosedPipe(t *testing.T) {
 	closeRPCPair(t, c, right)
 	result := make(chan error, 1)
 	go func() { result <- c.Call(t.Context(), "work", nil, nil) }()
+	if err := right.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := bufio.NewReader(right).ReadBytes('\n'); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-result; !errors.Is(err, io.ErrClosedPipe) {
-		t.Fatalf("call error=%v, want io.ErrClosedPipe", err)
+	select {
+	case err := <-result:
+		if !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("call error=%v, want io.ErrClosedPipe", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("call did not unblock after connection close")
 	}
 }
 
@@ -309,6 +364,13 @@ func requireFastCompletion(t *testing.T, fast *Conn, peer net.Conn) {
 	}
 	if message.Method != "turn/completed" {
 		t.Fatalf("fast method=%q", message.Method)
+	}
+	var got TurnCompletedNotification
+	if err := json.Unmarshal(message.Params, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ThreadID != "thread" || got.Turn.ID != "turn" || got.Turn.Status != "completed" {
+		t.Fatalf("notification params=%+v", got)
 	}
 }
 
@@ -423,16 +485,21 @@ func closeRPCPair(t *testing.T, c *Conn, peer net.Conn) {
 
 func readReply(t *testing.T, right net.Conn) []byte {
 	t.Helper()
-	reply := make(chan []byte, 1)
+	type res struct {
+		line []byte
+		err  error
+	}
+	reply := make(chan res, 1)
 	go func() {
 		line, err := bufio.NewReader(right).ReadBytes('\n')
-		if err == nil {
-			reply <- line
-		}
+		reply <- res{line: line, err: err}
 	}()
 	select {
-	case line := <-reply:
-		return line
+	case r := <-reply:
+		if r.err != nil {
+			t.Fatalf("read reply: %v", r.err)
+		}
+		return r.line
 	case <-time.After(5 * time.Second):
 		t.Fatal("no reply for malformed envelope")
 		return nil
@@ -449,15 +516,20 @@ func TestWrongTypeRequestGetsInvalidRequest(t *testing.T) {
 	}
 	line := readReply(t, right)
 	var got struct {
-		ID    int `json:"id"`
-		Error *struct {
-			Code int `json:"code"`
+		JSONRPC string `json:"jsonrpc"`
+		ID      int    `json:"id"`
+		Error   *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(line, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != 3 || got.Error == nil || got.Error.Code != -32600 {
+	if got.JSONRPC != "2.0" {
+		t.Fatalf("jsonrpc=%q, want 2.0", got.JSONRPC)
+	}
+	if got.ID != 3 || got.Error == nil || got.Error.Code != -32600 || got.Error.Message != "Invalid request" {
 		t.Fatalf("reply=%s", line)
 	}
 }
@@ -472,15 +544,20 @@ func TestInvalidJSONGetsParseError(t *testing.T) {
 	}
 	line := readReply(t, right)
 	var got struct {
-		ID    *int `json:"id"`
-		Error *struct {
-			Code int `json:"code"`
+		JSONRPC string `json:"jsonrpc"`
+		ID      *int   `json:"id"`
+		Error   *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(line, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Error == nil || got.Error.Code != -32700 {
+	if got.JSONRPC != "2.0" {
+		t.Fatalf("jsonrpc=%q, want 2.0", got.JSONRPC)
+	}
+	if got.Error == nil || got.Error.Code != -32700 || got.Error.Message != "Parse error" {
 		t.Fatalf("reply=%s", line)
 	}
 	if got.ID != nil {

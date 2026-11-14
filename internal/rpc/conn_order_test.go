@@ -9,6 +9,7 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type appliedProbe struct{ applied *atomic.Bool }
@@ -47,6 +48,8 @@ func TestResponseAppliesBeforeFollowingNotification(t *testing.T) {
 	}
 	closeRPCPair(t, client, right)
 	reader := bufio.NewReader(right)
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
 	for i := range iterations {
 		callDone := make(chan error, 1)
 		go func() {
@@ -59,11 +62,28 @@ func TestResponseAppliesBeforeFollowingNotification(t *testing.T) {
 		if _, err := fmt.Fprintf(right, "{\"id\":%s,\"result\":\"ok\"}\n{\"method\":\"test/after\",\"params\":{\"n\":%d}}\n", request.ID, i); err != nil {
 			t.Fatal(err)
 		}
-		if applied := <-handler.observed; !applied {
-			t.Fatalf("iteration %d: notification handler ran before the response reached its call", i)
+		handler.awaitResponseApplication(t, callDone, timer, i)
+	}
+}
+
+func (h *orderHandler) awaitResponseApplication(t *testing.T, callDone <-chan error, timer *time.Timer, iteration int) {
+	t.Helper()
+	timer.Reset(5 * time.Second)
+	select {
+	case applied := <-h.observed:
+		if !applied {
+			t.Fatalf("iteration %d: notification handler ran before the response reached its call", iteration)
 		}
-		if err := <-callDone; err != nil {
+	case <-timer.C:
+		t.Fatalf("iteration %d: timed out waiting for notification handler", iteration)
+	}
+	timer.Reset(5 * time.Second)
+	select {
+	case err := <-callDone:
+		if err != nil {
 			t.Fatal(err)
 		}
+	case <-timer.C:
+		t.Fatalf("iteration %d: timed out waiting for call to finish", iteration)
 	}
 }

@@ -594,13 +594,21 @@ func TestErrorLineZeroOnValidGo(t *testing.T) {
 }
 
 func TestExtensionsOfGo(t *testing.T) {
-	t.Parallel()
 	lang, ok := ByName("go")
 	if !ok {
 		t.Fatal("go language missing")
 	}
 	if got := lang.Extensions(); !slices.Equal(got, []string{".go"}) {
 		t.Fatalf("Extensions() = %v, want [.go]", got)
+	}
+	extensions := lang.Extensions()
+	defer func() { extensions[0] = ".go" }()
+	extensions[0] = ".zzz"
+	if got := lang.Extensions(); !slices.Equal(got, []string{".go"}) {
+		t.Fatalf("Extensions() after caller mutation = %v, want [.go]", got)
+	}
+	if got, ok := ForPath("x.go"); !ok || got.Name() != "go" {
+		t.Fatalf("ForPath(x.go) after caller mutation = %v, %v", got, ok)
 	}
 }
 

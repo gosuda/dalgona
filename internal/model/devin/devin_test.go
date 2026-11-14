@@ -408,6 +408,10 @@ func TestMissingEnvironmentKey(t *testing.T) {
 	if _, err := devin.APIKeyFromEnv(t.Context()); err == nil || err.Error() != "DEVIN_API_KEY is not set" {
 		t.Fatalf("err = %v", err)
 	}
+	t.Setenv("DEVIN_API_KEY", "k")
+	if key, err := devin.APIKeyFromEnv(t.Context()); err != nil || key != "k" {
+		t.Fatalf("configured key = %q, error = %v; want k and nil", key, err)
+	}
 }
 
 func TestListedModelCarriesSupportsImages(t *testing.T) {

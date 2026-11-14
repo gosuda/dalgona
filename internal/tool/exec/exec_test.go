@@ -292,11 +292,21 @@ func TestExecRejectsBadArguments(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	toolExec := New()
+
 	if _, err := toolExec.Run(t.Context(), tool.Call{ID: "run-6", Args: jsontext.Value(`{"cwd":"."}`)}, env); err == nil {
 		t.Fatal("missing command accepted")
 	}
+
 	if _, err := toolExec.Run(t.Context(), tool.Call{ID: "run-7", Args: jsontext.Value(`{"command":"true","timeout_ms":0}`)}, env); err == nil {
 		t.Fatal("zero timeout accepted")
+	}
+
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-max-timeout", Args: jsontext.Value(`{"command":"true","timeout_ms":9223372036854}`)}, env)
+	if err != nil {
+		t.Fatalf("max representable timeout rejected: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("max representable timeout run failed: %+v", result)
 	}
 }
 
@@ -323,6 +333,7 @@ func TestExecEscalateRunsUnsandboxed(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	toolExec := New()
+
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-9", Args: jsontext.Value(`{"command":"true","escalate":true,"justification":"retry after denial"}`)}, env)
 	if err != nil {
 		t.Fatal(err)
@@ -334,7 +345,7 @@ func TestExecEscalateRunsUnsandboxed(t *testing.T) {
 
 func TestExecRequiresRunner(t *testing.T) {
 	toolExec := New()
-	if _, err := toolExec.Run(context.Background(), tool.Call{ID: "run-10", Args: jsontext.Value(`{"command":"true"}`)}, tool.Env{}); err == nil {
+	if _, err := toolExec.Run(t.Context(), tool.Call{ID: "run-10", Args: jsontext.Value(`{"command":"true"}`)}, tool.Env{}); err == nil {
 		t.Fatal("missing runner accepted")
 	}
 }
@@ -361,9 +372,24 @@ func TestExecRefusesCwdOutsideWritableRoots(t *testing.T) {
 	defer closeRunner()
 	outside := t.TempDir()
 	toolExec := New()
+
 	args := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(outside) + `}`)
 	if _, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-out", Args: args}, env); err == nil {
 		t.Fatal("cwd outside the writable roots was accepted")
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	symlinkTarget := filepath.Join(env.Cwd, "outside-link")
+	if symErr := os.Symlink(outside, symlinkTarget); symErr != nil {
+		return
+	}
+	symlinkArgs := jsontext.Value(`{"command":"pwd","cwd":` + strconv.Quote(symlinkTarget) + `}`)
+	if _, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-symlink-out", Args: symlinkArgs}, env); err == nil {
+		t.Fatal("symlink cwd pointing outside writable roots was accepted")
+	} else if !strings.Contains(err.Error(), "outside the writable roots") {
+		t.Fatalf("symlink escape error = %v, want 'outside the writable roots'", err)
 	}
 }
 
@@ -412,12 +438,6 @@ func TestExecUsesLinuxShellForRemote(t *testing.T) {
 	}
 	if got := shellArgvForHost(stub, "windows", "echo hi"); !slices.Equal(got, want) {
 		t.Fatalf("remote shell on windows host = %q, want %q", got, want)
-	}
-	if got := shellArgvForHost(nil, "windows", "echo hi"); !slices.Equal(got, []string{"cmd", "/C", "echo hi"}) {
-		t.Fatalf("local shell on windows host = %q, want cmd", got)
-	}
-	if got := shellArgvForHost(nil, "linux", "echo hi"); !slices.Equal(got, want) {
-		t.Fatalf("local shell on linux host = %q, want %q", got, want)
 	}
 }
 

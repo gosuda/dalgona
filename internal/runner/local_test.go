@@ -83,6 +83,31 @@ func TestLimitedWriter_cap(t *testing.T) {
 	if bytes.Count(data, []byte("[dalgona: output beyond 1 GiB discarded]")) != 1 {
 		t.Fatal("cap notice count differs from one")
 	}
+	for _, total := range []int{63, 64, 65, 80} {
+		requireLimitedWriterPartial(t, total)
+	}
+}
+
+func requireLimitedWriterPartial(t *testing.T, total int) {
+	t.Helper()
+	var partial bytes.Buffer
+	writer := &limitedWriter{w: &partial, limit: 64}
+	payload := bytes.Repeat([]byte("x"), total)
+	for offset := 0; offset < total; {
+		end := min(offset+40, total)
+		n, err := writer.Write(payload[offset:end])
+		if err != nil || n != end-offset {
+			t.Fatalf("total %d Write = %d, %v", total, n, err)
+		}
+		offset = end
+	}
+	want := string(payload[:min(total, 64)])
+	if total > 64 {
+		want += "\n[dalgona: output beyond 1 GiB discarded]\n"
+	}
+	if partial.String() != want {
+		t.Fatalf("total %d output = %q, want %q", total, partial.String(), want)
+	}
 }
 
 func TestLimitedWriter_exactCap(t *testing.T) {
@@ -447,5 +472,8 @@ func TestLocal_readDrainsMultiPageTerminal(t *testing.T) {
 	}
 	if !bytes.Equal(state.Data, want) || state.Exit == nil {
 		t.Fatalf("terminal read = %d bytes exit %+v, want %d with exit", len(state.Data), state.Exit, len(want))
+	}
+	if state.Next != int64(len(want)) {
+		t.Fatalf("terminal cursor = %d, want %d", state.Next, len(want))
 	}
 }

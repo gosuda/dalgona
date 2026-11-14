@@ -12,11 +12,34 @@ func TestReserveAndShouldCompact(t *testing.T) {
 	if got := Reserve(200000); got != 30000 {
 		t.Fatalf("Reserve() = %d", got)
 	}
+	assertCompactReserveFloor(t)
 	if !ShouldCompact(200000, 170000, 0.8) {
 		t.Fatal("expected compaction")
 	}
 	if ShouldCompact(200000, 130000, 0.8) {
 		t.Fatal("unexpected compaction")
+	}
+	if !ShouldCompact(200000, 136001, 0.8) {
+		t.Fatal("missed compaction one token past the threshold")
+	}
+	if ShouldCompact(200000, 136000, 0.8) {
+		t.Fatal("compacted at exactly the threshold")
+	}
+	if ShouldCompact(200000, 135999, 0.8) {
+		t.Fatal("compacted one token under the threshold")
+	}
+	if ShouldCompact(0, 170000, 0.8) {
+		t.Fatal("non-positive window compacted")
+	}
+}
+
+func assertCompactReserveFloor(t *testing.T) {
+	t.Helper()
+	if got := Reserve(100000); got != 16384 {
+		t.Fatalf("Reserve() = %d, want the 16384 floor", got)
+	}
+	if got := Reserve(0); got != 16384 {
+		t.Fatalf("Reserve(0) = %d, want the 16384 floor", got)
 	}
 }
 
@@ -35,6 +58,9 @@ func TestCutKeepsTurnBoundary(t *testing.T) {
 	}
 	if _, ok := Cut(entries, 100, 0); ok {
 		t.Fatal("compacted history shorter than keep target")
+	}
+	if _, ok := Cut(entries, 11, 1); ok {
+		t.Fatal("compacted at or before the previous compaction boundary")
 	}
 }
 
@@ -92,6 +118,58 @@ func TestPruneSelectLargestOlderOutputs(t *testing.T) {
 	}
 	got := PruneSelect(entries, 10000, 2000, 20, 5000)
 	if len(got) != 1 || got[0] != "old-large" {
+		t.Fatalf("PruneSelect() = %#v", got)
+	}
+	assertPruneSelectionLimits(t, entries)
+	assertPruneSelectionThresholds(t, entries)
+}
+
+func assertPruneSelectionLimits(t *testing.T, entries []Entry) {
+	t.Helper()
+	if got := PruneSelect(entries, 10000, 2000, 20, 5001); len(got) != 2 || got[0] != "old-large" || got[1] != "old-small" {
+		t.Fatalf("PruneSelect() = %#v", got)
+	}
+	if got := PruneSelect(entries, 10000, 2000, 1, 5001); len(got) != 1 || got[0] != "old-large" {
+		t.Fatalf("PruneSelect() = %#v", got)
+	}
+	if got := PruneSelect(entries, 1, 2000, 20, 5001); len(got) != 2 || got[0] != "old-large" || got[1] != "old-small" {
+		t.Fatalf("PruneSelect() = %#v", got)
+	}
+}
+
+func assertPruneSelectionThresholds(t *testing.T, entries []Entry) {
+	t.Helper()
+	if got := PruneSelect(entries, 0, 2000, 20, 5001); len(got) != 1 || got[0] != "newest" {
+		t.Fatalf("PruneSelect() = %#v", got)
+	}
+	if got := PruneSelect(entries, 10000, 9001, 20, 5001); len(got) != 1 || got[0] != "old-large" {
+		t.Fatalf("PruneSelect() = %#v", got)
+	}
+	if got := PruneSelect(entries, 10000, 9000, 20, 5001); len(got) != 2 || got[0] != "old-large" || got[1] != "old-small" {
+		t.Fatalf("PruneSelect() = %#v", got)
+	}
+	assertPruneDisabledLimits(t, entries)
+}
+
+func assertPruneDisabledLimits(t *testing.T, entries []Entry) {
+	t.Helper()
+	if got := PruneSelect(entries, 10000, 2000, 0, 5001); got != nil {
+		t.Fatalf("PruneSelect() = %#v, want nil", got)
+	}
+	if got := PruneSelect(entries, 10000, 2000, 20, 0); got != nil {
+		t.Fatalf("PruneSelect() = %#v, want nil", got)
+	}
+}
+
+func TestPruneSelectSkipsUnprunableOutputs(t *testing.T) {
+	entries := []Entry{
+		{Kind: ToolCompleted, CallID: "too-small", OutputBytes: 1999},
+		{Kind: ToolCompleted, CallID: "", OutputBytes: 25000},
+		{Kind: Other, CallID: "not-a-tool", OutputBytes: 30000},
+		{Kind: ToolCompleted, CallID: "prunable", OutputBytes: 5000},
+	}
+	got := PruneSelect(entries, 0, 2000, 20, 5001)
+	if len(got) != 1 || got[0] != "prunable" {
 		t.Fatalf("PruneSelect() = %#v", got)
 	}
 }
@@ -253,6 +331,22 @@ func TestCutKeepsNestedScriptFamily(t *testing.T) {
 			assertCutRetainsFamilyIssuer(t, entries, cut)
 			assertNoFamilyScopeBeforeCut(t, entries, cut)
 		})
+	}
+}
+
+func TestCutRefusesCutThatSplitsRunScope(t *testing.T) {
+	entries := []Entry{
+		{Kind: UserMessage, Bytes: 20},
+		{Kind: Other, Bytes: 20, RunID: "s-root"},
+		{Kind: AssistantMessage, Bytes: 20},
+		{Kind: ToolStarted, Bytes: 20, CallID: "s-root/1"},
+		{Kind: ToolCompleted, Bytes: 20, CallID: "s-root/1"},
+		{Kind: UserMessage, Bytes: 20},
+		{Kind: AssistantMessage, Bytes: 20},
+	}
+	cut, ok := Cut(entries, 15, 0)
+	if ok {
+		t.Fatalf("Cut() = %d, %t; want no cut when every boundary would split the run scope", cut, ok)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -101,9 +102,20 @@ func TestFreeformToolRoundTrip(t *testing.T) {
 	if summary.failure != nil || len(summary.calls) != 1 || !summary.calls[0].Freeform || string(summary.calls[0].Args) != "patch" {
 		t.Fatalf("summary = %+v", summary)
 	}
-	if !bytes.Contains(body, []byte(`"input_schema":{"type":"object"`)) || !bytes.Contains(body, []byte(`"input":{"input":"patch"}`)) {
+	var payload struct {
+		Tools []struct {
+			InputSchema jsontext.Value `json:"input_schema"`
+		} `json:"tools"`
+		Messages []requestMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Tools) != 1 || len(payload.Messages) != 1 || len(payload.Messages[0].Content) != 1 {
 		t.Fatalf("freeform request = %s", body)
 	}
+	sameJSON(t, payload.Tools[0].InputSchema, `{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`)
+	sameJSON(t, payload.Messages[0].Content[0].Input, `{"input":"patch"}`)
 }
 
 func TestUsageMergeIgnoresNull(t *testing.T) {
@@ -143,6 +155,19 @@ func TestModels(t *testing.T) {
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("models = %+v, want %+v", models, want)
 	}
+	t.Run("repeated cursor", func(t *testing.T) {
+		t.Parallel()
+		server := newProviderOnlyServer(t, http.MethodGet, "/models", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"data":[{"id":"first"}],"has_more":true,"last_id":"first"}`))
+		}))
+		provider := New(Config{BaseURL: server.URL, APIKey: testKey})
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		_, err := provider.Models(ctx)
+		if err == nil || !strings.Contains(err.Error(), "repeated cursor") {
+			t.Fatalf("models error = %v, want repeated cursor", err)
+		}
+	})
 }
 
 func TestMalformedEventRetainsBody(t *testing.T) {

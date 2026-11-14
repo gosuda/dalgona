@@ -93,8 +93,33 @@ func TestModelPickerFilterAndEffort(t *testing.T) {
 	if got := configWriteKeys(client); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("config writes = %v, want %v", got, want)
 	}
+	assertModelPickerWriteValues(t, client)
 	if m.list != nil {
 		t.Fatal("model picker stayed open after both writes succeeded")
+	}
+	unchanged := &fakeCaller{}
+	m = openModelPicker(t, unchanged)
+	m, command = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	runPickCommand(t, m, command)
+	if got := configWriteKeys(unchanged); strings.Join(got, ",") != "model" {
+		t.Fatalf("config writes without effort change = %v, want [model]", got)
+	}
+}
+
+func assertModelPickerWriteValues(t *testing.T, client *fakeCaller) {
+	t.Helper()
+	for _, call := range client.calls {
+		params, ok := call.params.(rpc.ConfigValueWriteParams)
+		if !ok || call.method != "config/value/write" {
+			continue
+		}
+		wantValue := "openai/gpt-test"
+		if params.KeyPath == "model_reasoning_effort" {
+			wantValue = "high"
+		}
+		if params.Value != wantValue {
+			t.Fatalf("config write %s value = %v, want %s", params.KeyPath, params.Value, wantValue)
+		}
 	}
 }
 

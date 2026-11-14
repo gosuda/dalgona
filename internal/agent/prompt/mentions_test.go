@@ -37,19 +37,27 @@ func TestMentionsRejectOutsidePath(t *testing.T) {
 	if got := prompt.Mentions("explain @../outside.txt", cwd); len(got) != 0 {
 		t.Fatalf("outside path produced mentions: %#v", got)
 	}
+	absoluteOutside := filepath.Join(base, "outside.txt")
+	if got := prompt.Mentions("explain @"+absoluteOutside, cwd); len(got) != 0 {
+		t.Fatalf("absolute outside path produced mentions: %#v", got)
+	}
 }
 
 func TestMentionsRejectEscapingSymlink(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
 	cwd := filepath.Join(base, "cwd")
+	writeTestFile(t, filepath.Join(cwd, "inside.txt"), "inside")
 	outside := filepath.Join(base, "outside.txt")
 	writeTestFile(t, outside, "outside")
-	if err := os.MkdirAll(cwd, 0o755); err != nil {
-		t.Fatalf("create cwd: %v", err)
+	if err := os.Symlink(filepath.Join(cwd, "inside.txt"), filepath.Join(cwd, "inlink.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 	if err := os.Symlink(outside, filepath.Join(cwd, "link.txt")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := prompt.Mentions("explain @inlink.txt", cwd); len(got) != 1 || got[0].Text != "inside" {
+		t.Fatalf("in-workspace symlink produced mentions: %#v", got)
 	}
 	if got := prompt.Mentions("explain @link.txt", cwd); len(got) != 0 {
 		t.Fatalf("escaping symlink produced mentions: %#v", got)

@@ -114,6 +114,15 @@ func TestWaitStream_cancelWithFailedWaitReportsCancel(t *testing.T) {
 	}
 }
 
+func TestWaitStream_failedWaitWithoutCancelReportsWaitError(t *testing.T) {
+	boom := errors.New("wait failed")
+	st := newWaitFake(0, boom, 0)
+	_, err := waitStream(t.Context(), st)
+	if !errors.Is(err, boom) || errors.Is(err, context.Canceled) {
+		t.Fatalf("waitStream error = %v, want wait failure and not cancellation", err)
+	}
+}
+
 func TestWaitStream_cancelWithoutCompletionTimesOut(t *testing.T) {
 	old := waitCancelGrace
 	waitCancelGrace = 50 * time.Millisecond

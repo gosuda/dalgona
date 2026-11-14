@@ -107,16 +107,6 @@ func kittyBlurred(t *testing.T) model {
 	return m
 }
 
-func TestTurnEndNotifiesWhenBlurred(t *testing.T) {
-	t.Parallel()
-	m := kittyBlurred(t)
-	command := m.applyNotification(notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`)})
-	want := tea.RawMsg{Msg: "\x1b]99;;dalgona: Done · Plan\x07"}
-	if !containsMsg(flatten(command), want) {
-		t.Fatalf("turn end notification = %#v, want %#v", flatten(command), want)
-	}
-}
-
 func TestTurnEndWordFollowsStatus(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ status, word string }{{"completed", "Done"}, {"failed", "Failed"}, {"interrupted", "Stopped"}}

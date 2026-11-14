@@ -264,7 +264,9 @@ func checkAccount(t *testing.T, c *wireClient) {
 	c.ok("account/read", map[string]any{}, &account)
 	expect(t, account.Account != nil && account.Account.Type == "apiKey", "account after login", account.Account)
 	c.ok("account/logout", map[string]any{}, nil)
-	c.ok("account/login/cancel", map[string]any{"loginId": "none"}, nil)
+	var cancelled CancelLoginAccountResponse
+	c.ok("account/login/cancel", map[string]any{"loginId": "none"}, &cancelled)
+	expect(t, cancelled.Status == "notFound", "unknown login cancel", cancelled)
 }
 
 func TestServeArchiveHookRunsOnlyForIdleThreads(t *testing.T) {

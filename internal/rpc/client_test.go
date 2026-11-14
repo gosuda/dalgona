@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -49,7 +50,7 @@ func waitClientOutcome(t *testing.T, outcome <-chan clientServerOutcome) clientS
 			t.Fatal(result.err)
 		}
 		return result
-	case <-time.After(5 * time.Second):
+	case <-time.After(waitLimit):
 		t.Fatal("client server did not finish")
 		return clientServerOutcome{}
 	}
@@ -59,7 +60,7 @@ func waitClientRequest(t *testing.T, handler *orderedClientHandler) {
 	t.Helper()
 	select {
 	case <-handler.done:
-	case <-time.After(time.Second):
+	case <-time.After(waitLimit):
 		t.Fatal("client request was not handled")
 	}
 	if handler.err != nil {
@@ -140,7 +141,7 @@ func runClientServer(conn net.Conn) clientServerOutcome {
 	if err := writeClientMessage(conn, request); err != nil {
 		return clientServerOutcome{err: err}
 	}
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(waitLimit)); err != nil {
 		return clientServerOutcome{err: fmt.Errorf("set server deadline: %w", err)}
 	}
 	response, err := readEnvelope(bufio.NewReader(conn))
@@ -169,27 +170,56 @@ func (codedErrorHandler) Request(context.Context, string, jsontext.Value) (any, 
 }
 
 func TestClientRequestPreservesErrorCode(t *testing.T) {
+	line, got := exchangeClientError(t, codedErrorHandler{}, `{"id":1,"method":"test/method"}`+"\n")
+	if got.JSONRPC != "2.0" || got.ID != 1 || got.Error == nil || got.Error.Code != -32001 || got.Error.Message != "no runtime" {
+		t.Fatalf("reply=%s, want jsonrpc=2.0 id=1 code=-32001 message=%q", line, "no runtime")
+	}
+}
+
+type genericErrorHandler struct{}
+
+func (genericErrorHandler) Notification(string, jsontext.Value) {}
+func (genericErrorHandler) Request(context.Context, string, jsontext.Value) (any, error) {
+	return nil, errors.New("unexpected handler failure")
+}
+
+func TestClientRequestMapsGenericErrorToInternalCode(t *testing.T) {
+	line, got := exchangeClientError(t, genericErrorHandler{}, `{"id":2,"method":"test/method"}`+"\n")
+	if got.JSONRPC != "2.0" || got.ID != 2 || got.Error == nil || got.Error.Code != -32603 || got.Error.Message != "unexpected handler failure" {
+		t.Fatalf("reply=%s, want jsonrpc=2.0 id=2 code=-32603 message=%q", line, "unexpected handler failure")
+	}
+}
+
+type clientErrorReply struct {
+	JSONRPC string `json:"jsonrpc"`
+	ID      int    `json:"id"`
+	Error   *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func exchangeClientError(t *testing.T, handler ClientHandler, request string) ([]byte, clientErrorReply) {
+	t.Helper()
 	left, right := net.Pipe()
-	client, err := Dial(right, codedErrorHandler{})
+	client, err := Dial(right, handler)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
-	defer func() { _ = left.Close() }()
-	if _, werr := left.Write([]byte(`{"id":1,"method":"test/method"}` + "\n")); werr != nil {
+	closeRPCPair(t, client, left)
+	if err := left.SetDeadline(time.Now().Add(waitLimit)); err != nil {
+		t.Fatal(err)
+	}
+	if _, werr := left.Write([]byte(request)); werr != nil {
 		t.Fatal(werr)
 	}
 	line, rerr := bufio.NewReader(left).ReadBytes('\n')
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
-	var got struct {
-		Error *wireError `json:"error"`
-	}
+	var got clientErrorReply
 	if uerr := json.Unmarshal(line, &got); uerr != nil {
 		t.Fatal(uerr)
 	}
-	if got.Error == nil || got.Error.Code != -32001 {
-		t.Fatalf("code=%+v, want -32001", got.Error)
-	}
+	return line, got
 }

@@ -407,6 +407,9 @@ func TestCancellationBeforeFirstMutation(t *testing.T) {
 	if actual := readFixture(t, cwd, "f.txt"); actual != "before\n" {
 		t.Fatalf("cancelled write changed %q", actual)
 	}
+	if residue, err := filepath.Glob(filepath.Join(cwd, "*.dalgona-*")); err != nil || len(residue) != 0 {
+		t.Fatalf("cancelled write left staging residue %v: %v", residue, err)
+	}
 }
 
 func TestUnchangedFileMode(t *testing.T) {

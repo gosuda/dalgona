@@ -23,10 +23,8 @@ func splitSecretCommand() string {
 const outputDeltaMethod = "item/commandExecution/outputDelta"
 
 type execRun struct {
-	threadID string
-	turnID   string
-	deltas   []string
-	command  Item
+	deltas  []string
+	command Item
 }
 
 type execObserver struct {
@@ -90,13 +88,13 @@ func runExec(t *testing.T, command string) execRun {
 	r := newRig(t, config.ApprovalYolo)
 	r.llm.push(llmReply{body: sseCall("call-x", "exec", `{"command":`+strconv.Quote(command)+`}`)}, llmReply{body: sseText("done")})
 	c := r.connect()
-	run := execRun{threadID: startThread(t, r, c, nil)}
-	run.turnID = startTurn(t, c, run.threadID, "stream it")
-	obs := &execObserver{threadID: run.threadID, turnID: run.turnID}
+	threadID := startThread(t, r, c, nil)
+	turnID := startTurn(t, c, threadID, "stream it")
+	obs := &execObserver{threadID: threadID, turnID: turnID}
 	for _, m := range c.collect() {
 		obs.observe(t, m)
 	}
-	run.deltas, run.command = obs.deltas, obs.command
+	run := execRun{deltas: obs.deltas, command: obs.command}
 	expect(t, obs.completed && run.command.Status == statusCompleted, "command item", run.command)
 	return run
 }

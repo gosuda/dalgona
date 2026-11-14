@@ -67,3 +67,32 @@ func TestMirrorMigratesLegacyVersion(t *testing.T) {
 		t.Fatalf("Status = %+v, want head 2 ok", head)
 	}
 }
+
+func TestMirrorRejectsFutureVersion(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpen(t, dir)
+	events := appendEvents(t, store, "s", 2)
+	closeStore(t, store)
+	raw := openRaw(t, dir)
+	execAll(t, raw, []string{"PRAGMA user_version = 3"})
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw state.db: %v", err)
+	}
+	reopened := mustOpen(t, dir)
+	defer closeStore(t, reopened)
+	if version := queryUserVersion(t, reopened.db); version != 2 {
+		t.Fatalf("user_version = %d, want 2 after rejecting future version", version)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "quarantine", "state-*.db"))
+	if err != nil || len(matches) == 0 {
+		t.Fatalf("future-version state.db was not quarantined: %v, %v", matches, err)
+	}
+	head, err := reopened.Status("s")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if head.HeadSeq != 2 || head.Status != SessionOK {
+		t.Fatalf("Status = %+v, want head 2 ok", head)
+	}
+	requireEvents(t, replayEvents(t, reopened, "s"), events)
+}

@@ -139,29 +139,58 @@ func TestUsageFallback(t *testing.T) {
 
 func TestUsageCachePrecedence(t *testing.T) {
 	t.Parallel()
-	body := "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":4,\"cache_write_tokens\":1},\"cached_tokens\":9}}\n\n"
-	server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(body))
-	})
-	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
-	summary := collectStream(t, provider, model.Request{Model: "test-model"})
-	want := model.Usage{Input: 15, Output: 7, CacheRead: 4, CacheWrite: 1}
-	if summary.failure != nil || summary.usage != want {
-		t.Fatalf("summary = %+v, want usage %+v", summary, want)
+	cases := []struct {
+		name string
+		body string
+		want model.Usage
+	}{
+		{name: "details beat top-level cached tokens", body: "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":4,\"cache_write_tokens\":1},\"cached_tokens\":9}}\n\n", want: model.Usage{Input: 15, Output: 7, CacheRead: 4, CacheWrite: 1}},
+		{name: "cached tokens first still loses to details", body: "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":7,\"cached_tokens\":9,\"prompt_tokens_details\":{\"cached_tokens\":4,\"cache_write_tokens\":1}}}\n\n", want: model.Usage{Input: 15, Output: 7, CacheRead: 4, CacheWrite: 1}},
+		{name: "prompt cache hit beats top-level cached tokens", body: "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":7,\"cached_tokens\":9,\"prompt_cache_hit_tokens\":6}}\n\n", want: model.Usage{Input: 14, Output: 7, CacheRead: 6}},
+		{name: "details beat prompt cache hit", body: "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":7,\"prompt_cache_hit_tokens\":6,\"prompt_tokens_details\":{\"cached_tokens\":4,\"cache_write_tokens\":1}}}\n\n", want: model.Usage{Input: 15, Output: 7, CacheRead: 4, CacheWrite: 1}},
+		{name: "input floors at zero", body: "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":7,\"cached_tokens\":9}}\n\n", want: model.Usage{Input: 0, Output: 7, CacheRead: 9}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(test.body))
+			})
+			provider := New(Config{BaseURL: server.URL, APIKey: testKey})
+			summary := collectStream(t, provider, model.Request{Model: "test-model"})
+			if summary.failure != nil || summary.usage != test.want {
+				t.Fatalf("summary = %+v, want usage %+v", summary, test.want)
+			}
+		})
 	}
 }
 
 func TestReasoningPrecedenceSkipsNonStrings(t *testing.T) {
 	t.Parallel()
-	server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"\",\"reasoning\":{\"thinking\":\"nested\"},\"reasoning_text\":\"fallback\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
-	})
-	provider := New(Config{BaseURL: server.URL, APIKey: testKey})
-	summary := collectStream(t, provider, model.Request{Model: "test-model"})
-	if summary.failure != nil || summary.reasoning != "fallback" {
-		t.Fatalf("summary = %+v", summary)
+	cases := []struct {
+		name  string
+		delta string
+		want  string
+	}{
+		{name: "skips empty and non-string fields", delta: `{"reasoning_content":"","reasoning":{"thinking":"nested"},"reasoning_text":"fallback"}`, want: "fallback"},
+		{name: "reasoning content wins", delta: `{"reasoning_content":"primary","reasoning":"secondary","reasoning_text":"tertiary"}`, want: "primary"},
+		{name: "reasoning beats reasoning text", delta: `{"reasoning_content":"","reasoning":"mid","reasoning_text":"last"}`, want: "mid"},
+		{name: "non-string reasoning content skipped", delta: `{"reasoning_content":{"x":1},"reasoning":"mid","reasoning_text":"last"}`, want: "mid"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := newStreamServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":" + test.delta + ",\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+			})
+			provider := New(Config{BaseURL: server.URL, APIKey: testKey})
+			summary := collectStream(t, provider, model.Request{Model: "test-model"})
+			if summary.failure != nil || summary.reasoning != test.want {
+				t.Fatalf("summary = %+v, want reasoning %q", summary, test.want)
+			}
+		})
 	}
 }
 
@@ -182,18 +211,19 @@ func TestModels(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /models", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"data":[{"id":"large","context_length":200000,"top_provider":{"context_length":100000,"max_completion_tokens":8192}},{"id":"routed","context_length":null,"top_provider":{"context_length":32000,"max_completion_tokens":null}},{"id":"configured"},{"id":"basic"}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"large","context_length":200000,"top_provider":{"context_length":100000,"max_completion_tokens":8192},"architecture":{"input_modalities":["text","image"]}},{"id":"routed","context_length":null,"top_provider":{"context_length":32000,"max_completion_tokens":null},"architecture":{"input_modalities":["text"]}},{"id":"configured"},{"id":"pinned","context_length":999999,"top_provider":{"context_length":1,"max_completion_tokens":null}},{"id":"basic"}]}`))
 	})
 	server := newProviderOnlyServer(t, http.MethodGet, "/models", mux)
-	provider := New(Config{BaseURL: server.URL, APIKey: testKey, ContextWindows: map[string]int{"configured": 64000}})
+	provider := New(Config{BaseURL: server.URL, APIKey: testKey, ContextWindows: map[string]int{"configured": 64000, "pinned": 64000}})
 	models, err := provider.Models(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []model.Model{
-		{ID: "large", Context: 200000, MaxOutput: 8192, ToolChoice: true},
+		{ID: "large", Context: 200000, MaxOutput: 8192, ToolChoice: true, Images: true},
 		{ID: "routed", Context: 32000, ToolChoice: true},
 		{ID: "configured", Context: 64000, ToolChoice: true},
+		{ID: "pinned", Context: 64000, ToolChoice: true},
 		{ID: "basic", Context: 128000, ToolChoice: true},
 	}
 	if !reflect.DeepEqual(models, want) {

@@ -83,6 +83,9 @@ func TestRollbackFailureNamesPathsAndRetainedBackup(t *testing.T) {
 	if _, statErr := os.Stat(strings.TrimSpace(backup)); statErr != nil {
 		t.Fatalf("retained backup missing: %v", statErr)
 	}
+	if data, readErr := os.ReadFile(strings.TrimSpace(backup)); readErr != nil || string(data) != "a-before\n" {
+		t.Fatalf("retained backup = %q, err = %v, want %q", data, readErr, "a-before\n")
+	}
 	if actual := readFixture(t, cwd, "a.txt"); actual != "a-after\n" {
 		t.Fatalf("failed restore state %q", actual)
 	}

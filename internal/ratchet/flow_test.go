@@ -76,3 +76,38 @@ func checkLoaded(t *testing.T, out *state, at time.Time) {
 		t.Fatalf("loaded approval = %+v, want sha ab at %s", got, at)
 	}
 }
+
+func TestFlowSaveFailureKeepsPreviousState(t *testing.T) {
+	t.Parallel()
+	f := newWorkspace(t, nil)
+	s1 := &state{
+		Flow: "live",
+		Reps: 2,
+		Goal: goal{Target: "score", Direction: "higher"},
+	}
+	if err := f.save(s1); err != nil {
+		t.Fatalf("initial save = %v", err)
+	}
+
+	tmpPath := filepath.Join(f.dir, stateFile+".tmp")
+	if err := f.root.MkdirAll(tmpPath, 0o750); err != nil {
+		t.Fatalf("mkdir temp conflict: %v", err)
+	}
+
+	s2 := &state{
+		Flow: "live",
+		Reps: 5,
+		Goal: goal{Target: "score", Direction: "higher"},
+	}
+	if err := f.save(s2); err == nil {
+		t.Fatal("save over conflict directory succeeded, want write error")
+	}
+
+	recovered, err := f.load()
+	if err != nil {
+		t.Fatalf("load after failed save = %v, want previous state", err)
+	}
+	if recovered.Reps != 2 {
+		t.Fatalf("recovered reps = %d, want 2 (previous committed state preserved)", recovered.Reps)
+	}
+}

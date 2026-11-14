@@ -260,6 +260,17 @@ print(string_choice)`
 	}
 	assertShuffledIntegers(t, globals["xs"])
 	assertFloatRange(t, globals["floats"], 0, 1)
+	floats := globals["floats"].(*starlark.List)
+	distinct := false
+	for i := 1; i < floats.Len(); i++ {
+		if floats.Index(i) != floats.Index(0) {
+			distinct = true
+			break
+		}
+	}
+	if !distinct {
+		t.Fatalf("random.random produced only one value: %v", floats)
+	}
 	assertIntRange(t, globals["ints"], -3, 4)
 	assertFloatRange(t, globals["uniform"], -2, 3)
 	assertRandomChoices(t, globals)

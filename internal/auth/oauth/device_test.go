@@ -46,6 +46,10 @@ func pendingDeviceHandler(t *testing.T, polls *atomic.Int32) http.HandlerFunc {
 			checkDeviceClient(t, request)
 			_, _ = io.WriteString(writer, `{"device_code":"device","user_code":"user","verification_uri":"https://example.test/verify","interval":0}`)
 		case "/token":
+			checkDeviceClient(t, request)
+			if request.Form.Get("grant_type") != "urn:ietf:params:oauth:grant-type:device_code" || request.Form.Get("device_code") != "device" {
+				t.Errorf("device poll form = %v", request.Form)
+			}
 			if polls.Add(1) == 1 {
 				writer.WriteHeader(http.StatusBadRequest)
 				_, _ = io.WriteString(writer, `{"error":"authorization_pending"}`)

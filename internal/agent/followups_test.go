@@ -70,7 +70,7 @@ func TestRecordRunnerBoundOnceAndForkCarriesIt(t *testing.T) {
 		}
 	}
 	if err := h.host.RecordRunnerBound(t.Context(), "missing", bound); err == nil {
-		t.Fatal("binding a closed thread succeeded")
+		t.Fatal("binding a thread that is not open succeeded")
 	}
 	if count := countType(h.events(thread.ID()), event.TypeRunnerBound); count != 1 {
 		t.Fatalf("runner.bound count = %d", count)

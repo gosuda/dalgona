@@ -151,15 +151,15 @@ func TestSymbolsDeterminism(t *testing.T) {
 	for i := range 50 {
 		writeSearchFixture(t, root, fmt.Sprintf("d/f%02d.go", i), fmt.Sprintf("package p\n\nfunc F%02d() {}\n", i))
 	}
-	var first, second bytes.Buffer
-	if code := Main([]string{`{"mode":"symbols","path":"d"}`}, &first); code != 0 {
-		t.Fatalf("first call code %d", code)
+	var rows []string
+	for i := range 50 {
+		rows = append(rows, fmt.Sprintf("d/f%02d.go:3-3: function func F%02d() {}", i, i))
 	}
-	if code := Main([]string{`{"mode":"symbols","path":"d"}`}, &second); code != 0 {
-		t.Fatalf("second call code %d", code)
-	}
-	if !bytes.Equal(first.Bytes(), second.Bytes()) {
-		t.Fatal("two calls differ")
+	want := strings.Join(rows, "\n")
+	for i := range 3 {
+		if got := runMain(t, `{"mode":"symbols","path":"d"}`).Text; got != want {
+			t.Fatalf("call %d symbols = %q, want %q", i, got, want)
+		}
 	}
 }
 
@@ -324,7 +324,7 @@ func TestDefinitionKindFilter(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	writeSearchFixture(t, root, "src/c.ts", "export class C {\n  m(): void {}\n}\n")
-	got := runMain(t, `{"mode":"definition","pattern":"m","kind":["method"],"path":"src"}`).Text
+	got := runMain(t, `{"mode":"definition","pattern":"[Cm]","kind":["method"],"path":"src"}`).Text
 	want := "  src/c.ts:2-2: method m(): void {}\nsrc/c.ts:2:   m(): void {}"
 	if got != want {
 		t.Fatalf("definition = %q, want %q", got, want)

@@ -11,6 +11,7 @@ import (
 func TestRiskRules(t *testing.T) {
 	cases := []struct{ name, command, near string }{
 		{"substitution", `echo $(cat x)`, "echo $ x"},
+		{"substitution", "\\\nrm -rf x", `echo a\|b`},
 		{"shell-wrapper", `foo'bar`, "echo x"},
 		{"privilege", "sudo ls", "sudoku"},
 		{"nested-shell", "bash -c ls", "bashful"},
@@ -25,7 +26,7 @@ func TestRiskRules(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			name, _, ok := Check(tc.command)
 			if !ok || name != tc.name {
-				t.Fatalf("got %q, %v", name, ok)
+				t.Fatalf("Check(%q) = %q, %v", tc.command, name, ok)
 			}
 			if _, _, ok := Check(tc.near); ok {
 				t.Fatalf("near miss matched")
@@ -39,6 +40,9 @@ func TestNormalizedRiskCommands(t *testing.T) {
 		{"FOO=1 git push origin", "git-destructive"},
 		{"/usr/bin/env sudo ls", "privilege"},
 		{`\ sudo ls`, "privilege"},
+		{"nohup sudo ls", "privilege"},
+		{"command git push", "git-destructive"},
+		{"if true; then rm -rf x; fi", "recursive-delete"},
 	}
 	for _, tc := range cases {
 		name, _, ok := Check(tc.command)
@@ -50,8 +54,8 @@ func TestNormalizedRiskCommands(t *testing.T) {
 
 func TestSplitProperty(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
-	safe := []string{"go test ./...", `printf "%s" "a&&b"`, `echo a\|b`, "git status", `printf 'x;y|z'`}
-	operators := []string{"&&", "||", ";", "|"}
+	safe := []string{"go test ./...", `printf "%s" "a&&b"`, `echo a\|b`, "git status", `printf 'x;y|z'`, `printf "a\"&&b"`, "echo a\\\nb"}
+	operators := []string{"&&", "||", ";", "|", "\n"}
 	for range 500 {
 		parts := make([]string, 1+rng.IntN(8))
 		var command strings.Builder
@@ -166,13 +170,14 @@ func TestRecursiveDeleteFlagOrders(t *testing.T) {
 		"rm -Rf x",
 		"rm --recursive x",
 		"rm --force --recursive x",
+		"rm -rf -- x",
 	}
 	for _, command := range match {
 		if name, _, ok := Check(command); !ok || name != "recursive-delete" {
 			t.Errorf("Check(%q) = %q, %v; want recursive-delete", command, name, ok)
 		}
 	}
-	miss := []string{"rm -f file", "rm file", "rm riffraff", "rm --force file"}
+	miss := []string{"rm -f file", "rm file", "rm riffraff", "rm --force file", "rm -- -rf"}
 	for _, command := range miss {
 		if name, _, ok := Check(command); ok {
 			t.Errorf("Check(%q) = %q, %v; want no match", command, name, ok)

@@ -132,4 +132,151 @@ func TestExecBoundsOutputTrimsPartialRune(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireBoundedOutput(t, string(result.Output), boundedExpectation{data: data, total: total, head: "HEADMARK", tail: "TAILMARK", path: "runs/bound-2/out"}, string(data[11:]))
+
+	t.Run("ContinuationByte1", func(t *testing.T) {
+		tot := boundKeep + 9
+		d := make([]byte, tot)
+		for i := range d {
+			d[i] = 'z'
+		}
+		copy(d, "HEADMARK")
+		copy(d[8:], "\u20ac")
+		copy(d[tot-8:], "TAILMARK")
+		f := &pagedRunner{data: d, page: 20000, path: "runs/bound-2-c1/out"}
+		res, err := New().Run(t.Context(), tool.Call{ID: "bound-2-c1", Args: jsontext.Value(`{"command":"true"}`)}, tool.Env{Runner: f})
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireBoundedOutput(t, string(res.Output), boundedExpectation{data: d, total: tot, head: "HEADMARK", tail: "TAILMARK", path: "runs/bound-2-c1/out"}, string(d[11:]))
+	})
+
+	t.Run("ExactRuneBoundary", func(t *testing.T) {
+		tot := boundKeep + 8
+		d := make([]byte, tot)
+		for i := range d {
+			d[i] = 'z'
+		}
+		copy(d, "HEADMARK")
+		copy(d[8:], "\u20ac")
+		copy(d[tot-8:], "TAILMARK")
+		f := &pagedRunner{data: d, page: 20000, path: "runs/bound-2-exact/out"}
+		res, err := New().Run(t.Context(), tool.Call{ID: "bound-2-exact", Args: jsontext.Value(`{"command":"true"}`)}, tool.Env{Runner: f})
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireBoundedOutput(t, string(res.Output), boundedExpectation{data: d, total: tot, head: "HEADMARK", tail: "TAILMARK", path: "runs/bound-2-exact/out"}, string(d[8:]))
+	})
+}
+
+type outputBoundaryCase struct {
+	name      string
+	total     int
+	page      int
+	code      int
+	wantOK    bool
+	wantExit  int
+	wantTrunc bool
+	wantTail  int
+}
+
+func TestExecBoundsOutputBoundaries(t *testing.T) {
+	cases := []outputBoundaryCase{
+		{
+			name:      "below_bound_65535",
+			total:     boundKeep - 1,
+			page:      30000,
+			code:      0,
+			wantOK:    true,
+			wantExit:  0,
+			wantTrunc: false,
+			wantTail:  boundKeep - 1,
+		},
+		{
+			name:      "exact_bound_65536",
+			total:     boundKeep,
+			page:      30000,
+			code:      0,
+			wantOK:    true,
+			wantExit:  0,
+			wantTrunc: false,
+			wantTail:  boundKeep,
+		},
+		{
+			name:      "above_bound_65537",
+			total:     boundKeep + 1,
+			page:      30000,
+			code:      0,
+			wantOK:    true,
+			wantExit:  0,
+			wantTrunc: true,
+			wantTail:  boundKeep,
+		},
+		{
+			name:      "nonzero_exit_truncated",
+			total:     boundKeep + 100,
+			page:      30000,
+			code:      42,
+			wantOK:    false,
+			wantExit:  42,
+			wantTrunc: true,
+			wantTail:  boundKeep,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requireOutputBoundary(t, tc)
+		})
+	}
+}
+
+func requireOutputBoundary(t *testing.T, tc outputBoundaryCase) {
+	t.Helper()
+	data := make([]byte, tc.total)
+	for i := range data {
+		data[i] = byte('A' + i%26)
+	}
+	path := "runs/bound-" + tc.name + "/out"
+	fake := &pagedRunner{data: data, page: tc.page, path: path, code: tc.code}
+	result, err := New().Run(t.Context(), tool.Call{ID: tc.name, Args: jsontext.Value(`{"command":"true"}`)}, tool.Env{Runner: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK != tc.wantOK {
+		t.Fatalf("result.OK = %v, want %v", result.OK, tc.wantOK)
+	}
+	if result.ExitCode == nil || *result.ExitCode != tc.wantExit {
+		t.Fatalf("result.ExitCode = %+v, want %d", result.ExitCode, tc.wantExit)
+	}
+	if result.Path != path {
+		t.Fatalf("result.Path = %q, want %q", result.Path, path)
+	}
+	requireBoundaryBytes(t, tc, result, data)
+}
+
+func requireBoundaryBytes(t *testing.T, tc outputBoundaryCase, result tool.Result, data []byte) {
+	t.Helper()
+	if !tc.wantTrunc {
+		if string(result.Output) != string(data) {
+			t.Fatalf("untruncated output mismatch: got len %d, want len %d", len(result.Output), len(data))
+		}
+		if strings.Contains(string(result.Output), "[output truncated:") {
+			t.Fatal("unexpected truncation notice on output within bounds")
+		}
+		return
+	}
+	path := "runs/bound-" + tc.name + "/out"
+	wantNotice := "\n[output truncated: " + strconv.Itoa(tc.total) + " bytes total; full output: " + path + "; page it with read offset/limit]"
+	wantWindow := string(data[tc.total-tc.wantTail:])
+	got := string(result.Output)
+	if !utf8.ValidString(got) {
+		t.Fatal("bounded result kept part of a rune")
+	}
+	if !strings.HasSuffix(got, wantNotice) {
+		t.Fatalf("result misses notice %q, got: %q", wantNotice, got)
+	}
+	body := strings.TrimSuffix(got, wantNotice)
+	if body != wantWindow {
+		t.Fatalf("truncated body mismatch: got len %d, want len %d", len(body), len(wantWindow))
+	}
 }

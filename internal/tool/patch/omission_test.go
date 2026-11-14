@@ -67,6 +67,14 @@ func TestPatchKeepsPlaceholderAlreadyInFile(t *testing.T) {
 	if got := readFixture(t, cwd, "a.go"); got != want {
 		t.Fatalf("file = %q, want %q", got, want)
 	}
+	placeholder := "\t// " + dots + " existing code " + dots
+	_, err := runPatch(t, env, Replace, replaceArgs(t, "a.go", "return 1", placeholder+"\n\treturn 1"))
+	if err == nil || !strings.Contains(err.Error(), "stands in for omitted code") {
+		t.Fatalf("duplicate placeholder err = %v, want an omitted-code refusal", err)
+	}
+	if got := readFixture(t, cwd, "a.go"); got != want {
+		t.Fatalf("refused duplicate changed file to %q, want %q", got, want)
+	}
 }
 
 func TestPatchAcceptsOrdinaryEllipsisComments(t *testing.T) {

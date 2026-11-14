@@ -39,12 +39,13 @@ func TestClassifyAttemptRetriesOnlyTransportAtStatusZero(t *testing.T) {
 func TestRunRetriesStopsOnDeterministicStatusZero(t *testing.T) {
 	t.Parallel()
 	var attempts int
+	wantErr := errors.New("chatcompat: encode request: boom")
 	result := RunRetries(t.Context(), RetryOptions{Sleep: func(context.Context, time.Duration) error { return nil }}, func(context.Context) AttemptResult {
 		attempts++
-		return AttemptResult{Err: errors.New("chatcompat: encode request: boom")}
+		return AttemptResult{Err: wantErr}
 	})
-	if attempts != 1 || result.Err == nil {
-		t.Fatalf("attempts = %d, err = %v; want 1 attempt and an error", attempts, result.Err)
+	if attempts != 1 || !errors.Is(result.Err, wantErr) {
+		t.Fatalf("attempts = %d, err = %v; want 1 attempt and original error %v", attempts, result.Err, wantErr)
 	}
 }
 

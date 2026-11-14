@@ -76,9 +76,9 @@ func (fx *fixture) writeResults(variant string, lines ...string) {
 	fx.writeArtifact(variant, "results.jsonl", lines...)
 }
 
-func (fx *fixture) writeTrace(variant, name string) {
+func (fx *fixture) writeTrace(name string) {
 	fx.t.Helper()
-	dir := filepath.Join(fx.f.dir, variant, "traces")
+	dir := filepath.Join(fx.f.dir, "v1", "traces")
 	if err := fx.f.root.MkdirAll(dir, 0o750); err != nil {
 		fx.t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func TestGateRefusals(t *testing.T) {
 			fx.changeP("two\n")
 			fx.check("v1")
 			fx.writeResults("v1", rowsFor(0, allGrade(true), noExtra)...)
-			fx.writeTrace("v1", "e_rep0.json")
+			fx.writeTrace("e_rep0.json")
 			_, err := fx.gate("v1")
 			return err
 		}, "v1/traces holds transcripts for test cases (e_rep0.json); write traces for train cases only, delete these, and run again"},
@@ -419,7 +419,7 @@ func TestGateRefusals(t *testing.T) {
 			fx.changeP("two\n")
 			fx.check("v1")
 			fx.writeResults("v1", rowsFor(0, allGrade(true), noExtra)...)
-			fx.writeTrace("v1", "notes.txt")
+			fx.writeTrace("notes.txt")
 			_, err := fx.gate("v1")
 			return err
 		}, "v1/traces holds a file that is not <case>_rep<k>.json: notes.txt"},
@@ -606,6 +606,8 @@ func TestTrainHidesTest(t *testing.T) {
 	t.Parallel()
 	fx := newFixture(t)
 	fx.keepV1()
+	fx.writeTrace("e_rep0.json")
+	fx.writeTrace("a_rep0.json")
 	view, err := fx.f.train(fx.s, "v1")
 	if err != nil {
 		t.Fatal(err)
@@ -616,13 +618,21 @@ func TestTrainHidesTest(t *testing.T) {
 	if !slices.Equal(slices.Sorted(maps.Keys(view.History)), fx.s.TrainIDs) {
 		t.Fatalf("history cases = %v, want the train ids", slices.Sorted(maps.Keys(view.History)))
 	}
-	for _, name := range view.Traces {
+	checkTrainTraces(t, view.Traces, fx.f.dir)
+	if _, err := fx.f.train(fx.s, "v9"); err == nil || err.Error() != "train needs a gated round for v9" {
+		t.Fatalf("train of an ungated variant = %v, want the gated round refusal", err)
+	}
+}
+
+func checkTrainTraces(t *testing.T, traces []string, dir string) {
+	t.Helper()
+	for _, name := range traces {
 		if strings.Contains(name, "/e_") || strings.Contains(name, "/f_") {
 			t.Fatalf("trace %s names a test case", name)
 		}
 	}
-	if _, err := fx.f.train(fx.s, "v9"); err == nil || err.Error() != "train needs a gated round for v9" {
-		t.Fatalf("train of an ungated variant = %v, want the gated round refusal", err)
+	if !slices.Equal(traces, []string{filepath.Join(dir, "v1", "traces", "a_rep0.json")}) {
+		t.Fatalf("train traces = %v, want only a_rep0.json", traces)
 	}
 }
 

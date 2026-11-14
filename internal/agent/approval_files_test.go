@@ -61,15 +61,43 @@ func TestApprovalFilesMaskSecrets(t *testing.T) {
 }
 
 func TestApprovalFilesOmitLargeSide(t *testing.T) {
-	w := approvalFilesWorker(t)
-	files, err := w.approvalFiles([]tool.FileChange{
-		{Path: "big.txt", PreSHA: "a", PostSHA: "b", Pre: bytes.Repeat([]byte("a"), textdiff.Limit+1), Post: []byte("x")},
-	})
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name     string
+		preSize  int
+		postSize int
+		tooLarge bool
+	}{
+		{"pre at limit", textdiff.Limit, 1, false},
+		{"pre above limit", textdiff.Limit + 1, 1, true},
+		{"post at limit", 1, textdiff.Limit, false},
+		{"post above limit", 1, textdiff.Limit + 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := approvalFilesWorker(t)
+			pre := bytes.Repeat([]byte("a"), tc.preSize)
+			post := bytes.Repeat([]byte("x"), tc.postSize)
+			files, err := w.approvalFiles([]tool.FileChange{
+				{Path: "big.txt", PreSHA: "a", PostSHA: "b", Pre: pre, Post: post},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := files[0]
+			if got.TooLarge != tc.tooLarge {
+				t.Fatalf("TooLarge = %v, want %v", got.TooLarge, tc.tooLarge)
+			}
+			if tc.tooLarge {
+				assertApprovalBytesOmitted(t, got.Pre, got.Post)
+			} else if !bytes.Equal(got.Pre, pre) || !bytes.Equal(got.Post, post) {
+				t.Fatal("file at limit did not retain both approval sides")
+			}
+		})
 	}
-	big := files[0]
-	if !big.TooLarge || big.Pre != nil || big.Post != nil {
-		t.Fatalf("large file = %+v, want TooLarge with no bytes", big)
+}
+
+func assertApprovalBytesOmitted(t *testing.T, pre, post []byte) {
+	t.Helper()
+	if pre != nil || post != nil {
+		t.Fatal("oversized file retained approval bytes")
 	}
 }
