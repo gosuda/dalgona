@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -62,8 +63,8 @@ func newEffectCache() *effectCache {
 
 func callID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
 func turnStart(records []event.Seqd) (string, int) {
-	for i := len(records) - 1; i >= 0; i-- {
-		if started, ok := records[i].Event.(event.TurnStarted); ok {
+	for i, rec := range slices.Backward(records) {
+		if started, ok := rec.Event.(event.TurnStarted); ok {
 			return started.TurnID, i
 		}
 	}
