@@ -8,7 +8,6 @@ import (
 
 type steerOnTurnEnd struct {
 	baseExtension
-	thread *Thread
 	steer  func()
 	mu     sync.Mutex
 	counts map[string]int
@@ -28,7 +27,6 @@ func TestTurnEndHookRunsOncePerTurn(t *testing.T) {
 	h := newHarness(t, func(h *harness) {
 		h.cfg.Extension = func(th *Thread) Extension {
 			ext = &steerOnTurnEnd{
-				thread: th,
 				counts: make(map[string]int),
 				steer: sync.OnceFunc(func() {
 					_ = th.Submit(context.Background(), Input{Kind: InputSteer, Text: "follow up"})

@@ -13,7 +13,6 @@ import (
 
 type steerFlagOnTurnEnd struct {
 	baseExtension
-	thread *Thread
 	mu     sync.Mutex
 	bounds []Boundary
 	steer  func()
@@ -56,7 +55,7 @@ func lateSteerHarness(t *testing.T, steer func(*Thread), configure ...func(*harn
 	var ext *steerFlagOnTurnEnd
 	base := func(h *harness) {
 		h.cfg.Extension = func(th *Thread) Extension {
-			ext = &steerFlagOnTurnEnd{thread: th}
+			ext = &steerFlagOnTurnEnd{}
 			ext.steer = sync.OnceFunc(func() { steer(th) })
 			return ext
 		}
