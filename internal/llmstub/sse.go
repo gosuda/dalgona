@@ -87,7 +87,7 @@ func writeContent(w http.ResponseWriter, rc *http.ResponseController, key, text 
 }
 
 func writeFinish(w http.ResponseWriter, rc *http.ResponseController, s Step) error {
-	payload, err := marshal(envelope{Choices: []choice{{Delta: map[string]any{}, FinishReason: s.Finish}}, Usage: finishUsage(s.Usage)})
+	payload, err := marshal(envelope{Choices: []choice{{Delta: map[string]any{}, FinishReason: s.Finish}}, Usage: s.Usage})
 	if err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func writeTool(w http.ResponseWriter, rc *http.ResponseController, call ToolCall
 }
 
 func toolFrames(call ToolCall, index int) ([]jsontext.Value, error) {
-	pieces := splitChunks(string(call.Arguments), max(call.Chunks, 1))
+	pieces := splitChunks(string(call.Arguments), call.Chunks)
 	payloads := make([]jsontext.Value, 0, len(pieces))
 	for i, piece := range pieces {
 		function := map[string]any{"arguments": piece}
