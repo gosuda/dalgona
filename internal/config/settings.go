@@ -119,7 +119,7 @@ func flagSetting(key string, set func(*Config, bool)) settingSetter {
 func (c Config) With(edits ...SettingEdit) (Config, error) {
 	next := c
 	for _, edit := range edits {
-		root := strings.SplitN(edit.Key, ".", 2)[0]
+		root, _, _ := strings.Cut(edit.Key, ".")
 		if c.Product == ProductDal && dalgonaOnlyKeys[root] {
 			return Config{}, fmt.Errorf("%s is a dalgona setting", root)
 		}
