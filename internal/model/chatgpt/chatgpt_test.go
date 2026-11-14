@@ -165,6 +165,9 @@ func TestModelsUseStaticCatalogAndOverrides(t *testing.T) {
 	}
 	byID := make(map[string]model.Model, len(models))
 	for _, item := range models {
+		if !item.ToolChoice {
+			t.Fatalf("%s does not report tool choice", item.ID)
+		}
 		byID[item.ID] = item
 	}
 	if models[0].ID != "gpt-6.1-sol" || byID["gpt-6.1-terra"].Context != 500000 {
