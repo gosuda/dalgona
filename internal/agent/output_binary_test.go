@@ -10,7 +10,7 @@ func TestBinarySpillPagesAlwaysAdvance(t *testing.T) {
 	const size = 1100000
 	h := newHarness(t, withApproval(config.ApprovalYolo))
 	h.model.push(
-		calls(call{id: "call-1", name: "exec", args: `{"command":"head -c 1100000 /dev/zero | tr '\\0' '\\200'"}`}),
+		calls(call{id: "call-1", name: "exec", args: `{"command":"head -c 1100000 /dev/zero | LC_ALL=C tr '\\0' '\\200'"}`}),
 		text("done"),
 	)
 	thread := h.start()
