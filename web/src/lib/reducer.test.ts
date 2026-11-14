@@ -230,6 +230,12 @@ describe("transcript reducer", () => {
 			},
 		});
 		expect(completed.turnStartedAtMs).toBe(5000);
+		const withoutTimestamp = reduceNotification(started, {
+			type: "turnCompleted",
+			threadId: "thread-1",
+			turn: { id: "turn-1", status: "completed", items: [], error: null },
+		});
+		expect(withoutTimestamp.turnStartedAtMs).toBe(5000);
 	});
 
 	test("hydrates turns in order and keeps the last turn status", () => {

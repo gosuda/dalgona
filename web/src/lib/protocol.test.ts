@@ -20,5 +20,8 @@ describe("rpcSocketUrl", () => {
 		expect(rpcSocketUrl("example.com:8080", false, "abc")).toBe(
 			"ws://example.com:8080/rpc?token=abc",
 		);
+		expect(rpcSocketUrl("example.com", true, "a&b=c+d/e")).toBe(
+			"wss://example.com/rpc?token=a%26b%3Dc%2Bd%2Fe",
+		);
 	});
 });

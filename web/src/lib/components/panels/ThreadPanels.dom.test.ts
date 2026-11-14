@@ -126,7 +126,10 @@ describe("thread command panels", () => {
 		const user = userEvent.setup();
 		await user.click(screen.getByRole("button", { name: "Interrupt" }));
 		await tick();
-		expect(calls.map((call) => call.method)).toContain("turn/interrupt");
+		expect(calls).toContainEqual({
+			method: "turn/interrupt",
+			params: { threadId: "thread-1", turnId: "turn-1" },
+		});
 	});
 
 	test("review/start sends the chosen target", async () => {

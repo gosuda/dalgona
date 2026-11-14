@@ -158,6 +158,13 @@ describe("verbosity", () => {
 
 	test("the medium summaries name the eval code and the reasoning lines", () => {
 		expect(lineSummary(evalCall)).toBe("Eval · 2 lines of code · Done");
+		for (const [code, summary] of [
+			["x\n", "Eval · 1 line of code · Done"],
+			["x\ny\n", "Eval · 2 lines of code · Done"],
+			["", "Eval · 0 lines of code · Done"],
+		] as const) {
+			expect(lineSummary({ ...evalCall, arguments: { code } })).toBe(summary);
+		}
 		expect(
 			lineSummary({
 				id: "r1",

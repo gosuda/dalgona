@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from "@testing-library/svelte";
+import { cleanup, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
@@ -88,18 +88,21 @@ describe("notice regions", () => {
 				notices: [
 					notice(1, "error", "Failed to save."),
 					notice(2, "info", "Signed in."),
+					notice(3, "warning", "Turn interrupted."),
 				],
 				waiting: none,
 				onDismiss: vi.fn(),
 				onOpenWaiting: vi.fn(),
 			},
 		});
-		expect(
-			within(screen.getByRole("alert")).getByText("Failed to save."),
-		).toBeDefined();
-		expect(
-			within(screen.getByRole("status")).getByText("Signed in."),
-		).toBeDefined();
+		const alert = screen.getByRole("alert").textContent;
+		const status = screen.getByRole("status").textContent;
+		expect(alert).toContain("Failed to save.");
+		expect(alert).not.toContain("Turn interrupted.");
+		expect(alert).not.toContain("Signed in.");
+		expect(status).toContain("Turn interrupted.");
+		expect(status).toContain("Signed in.");
+		expect(status).not.toContain("Failed to save.");
 	});
 
 	test("each notice tone takes its Design-record text role", () => {

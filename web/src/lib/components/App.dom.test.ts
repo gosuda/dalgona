@@ -207,7 +207,7 @@ describe("elapsed counter under reduced motion", () => {
 				},
 			}),
 		);
-		beforeResponse = () =>
+		beforeResponse = () => {
 			handlers.onNotification(
 				parsed("turn/started", {
 					threadId: "thread-1",
@@ -219,12 +219,14 @@ describe("elapsed counter under reduced motion", () => {
 					},
 				}),
 			);
+			vi.setSystemTime(new Date(1_700_000_002_000));
+		};
 		await session.sendMessage("hello");
 		const { container } = render(App, { props: { session } });
 		await tick();
 		const elapsed = () =>
 			container.querySelector(".thread-head .tag.live .elapsed")?.textContent;
-		expect(elapsed()).toBe("0 ms");
+		expect(elapsed()).toBe("2s");
 
 		vi.setSystemTime(new Date(1_700_000_003_000));
 		handlers.onNotification(

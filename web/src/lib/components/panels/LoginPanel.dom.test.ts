@@ -319,8 +319,11 @@ describe("login panel", () => {
 		});
 		session.openPanel("settings");
 		await session.startLogin("chatgpt", "browser");
-		await session.saveSettings([{ keyPath: "verbosity", value: "high" }]);
+		expect(
+			await session.saveSettings([{ keyPath: "verbosity", value: "high" }]),
+		).toBe(true);
 		expect(cancelCalls(rpc)).toEqual([]);
+		expect(session.login?.loginId).toBe("login-1");
 	});
 
 	test("opening another panel cancels a pending browser login", async () => {
@@ -390,6 +393,10 @@ describe("login panel", () => {
 			provider: "chatgpt",
 		});
 		expect(modelCalls(rpc)).toHaveLength(1);
+		expect(session.login).toBeNull();
+		expect(
+			session.notices.some((notice) => notice.text.includes("denied")),
+		).toBe(true);
 	});
 
 	test("another flow's completion does not reload models or end this flow", async () => {

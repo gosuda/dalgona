@@ -36,5 +36,7 @@ describe("desktop notifications row", () => {
 			props: { value: "unsupported", onAllow: vi.fn() },
 		});
 		expect(container.querySelector("p")).toBeNull();
+		expect(container.textContent?.trim()).toBe("");
+		expect(screen.queryByRole("button")).toBeNull();
 	});
 });

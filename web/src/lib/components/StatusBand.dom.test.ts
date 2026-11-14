@@ -76,11 +76,21 @@ describe("StatusBand", () => {
 		cleanup();
 	});
 
-	test("shows effort and context as text", () => {
+	test("shows effort as a labelled glyph and context as a percent", () => {
 		const { container } = render(StatusBand, { props: props() });
 		expect(
 			container.querySelector('[aria-label="Effort high"]'),
 		).not.toBeNull();
+		const high =
+			container.querySelector('[aria-label="Effort high"]')?.textContent ?? "";
+		expect([...high]).toHaveLength(1);
+		const low =
+			render(StatusBand, {
+				props: props({ status: { ...status, effort: "low" } }),
+			}).container.querySelector('[aria-label="Effort low"]')?.textContent ??
+			"";
+		expect([...low]).toHaveLength(1);
+		expect(high).not.toBe(low);
 		expect(container.querySelector(".percent")?.textContent).toBe("25%");
 	});
 
