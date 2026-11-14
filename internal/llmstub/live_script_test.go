@@ -29,14 +29,6 @@ func loadLiveScript(t *testing.T) Script {
 	return script
 }
 
-func TestLiveScriptParses(t *testing.T) {
-	t.Parallel()
-	script := loadLiveScript(t)
-	if len(script.Models) != 2 || len(script.Turns) == 0 {
-		t.Fatalf("models = %d, turns = %d", len(script.Models), len(script.Turns))
-	}
-}
-
 var errRecorded = errors.New("llmstub test: request recorded")
 
 type recordingProvider struct {
@@ -97,7 +89,11 @@ func firstMatch(turns []Turn, view requestView) string {
 
 func TestLiveScriptRoutesScriptedRequests(t *testing.T) {
 	t.Parallel()
-	turns := loadLiveScript(t).Turns
+	script := loadLiveScript(t)
+	if len(script.Models) != 2 || len(script.Turns) == 0 {
+		t.Fatalf("models = %d, turns = %d", len(script.Models), len(script.Turns))
+	}
+	turns := script.Turns
 	editState := `{"task":"edit notes","tool":"apply_patch","files":[{"path":"notes.md","kind":"text","change":"update","added":1,"removed":1,"diff":"@@\n-old line\n+new line\n"}]}`
 	turnState := `{"task":"edit notes","files":[{"path":"notes.md","kind":"text","change":"update","added":1,"removed":1,"diff":"@@\n-old line\n+new line\n"}]}`
 	editQuestions := map[string]decide.Question{
