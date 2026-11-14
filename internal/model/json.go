@@ -71,6 +71,17 @@ func ReadString(decoder *jsontext.Decoder) (string, error) {
 	return token.String(), nil
 }
 
+func ReadNullableString(decoder *jsontext.Decoder, target *string) error {
+	if decoder.PeekKind() == 'n' {
+		return decoder.SkipValue()
+	}
+	value, err := ReadString(decoder)
+	if err == nil {
+		*target = value
+	}
+	return err
+}
+
 func ReadInt(decoder *jsontext.Decoder) (int, error) {
 	if decoder.PeekKind() == 'n' {
 		return 0, decoder.SkipValue()
@@ -131,6 +142,37 @@ func RequireJSONEOF(decoder *jsontext.Decoder) error {
 		return fmt.Errorf("model: decode trailing JSON: %w", err)
 	}
 	return errors.New("model: multiple JSON values")
+}
+
+type ProviderError struct {
+	Type    string
+	Code    string
+	Message string
+	Status  string
+}
+
+func ReadProviderError(decoder *jsontext.Decoder) (*ProviderError, error) {
+	if decoder.PeekKind() == 'n' {
+		return nil, decoder.SkipValue()
+	}
+	value := &ProviderError{}
+	err := ReadObjectFields(decoder, func(key string) error {
+		var err error
+		switch key {
+		case "type":
+			value.Type, err = ReadString(decoder)
+		case "code":
+			value.Code, err = ReadScalar(decoder)
+		case "message":
+			value.Message, err = ReadString(decoder)
+		case "status":
+			value.Status, err = ReadString(decoder)
+		default:
+			err = decoder.SkipValue()
+		}
+		return err
+	})
+	return value, err
 }
 
 type JSONEncoder struct {

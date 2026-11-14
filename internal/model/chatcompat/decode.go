@@ -28,7 +28,7 @@ type responseEvent struct {
 	Choices  []choice
 	Usage    usage
 	HasUsage bool
-	Error    *providerError
+	Error    *model.ProviderError
 }
 
 type choice struct {
@@ -73,17 +73,8 @@ type usage struct {
 	cacheReadSource cacheSource
 }
 
-type providerError struct {
-	Code    string
-	Message string
-}
-
 func (s *responseState) consume(ctx context.Context, gate *model.StartGate, body io.ReadCloser, options model.RetryOptions) model.AttemptResult {
-	err := model.ReadSSEWithTimeouts(ctx, body, model.SSEOptions{IdleTimeout: options.IdleTimeout, Control: s.stream.Timers()}, func(event, data []byte) error {
-		gate.FirstEvent()
-		return s.handle(event, data)
-	})
-	err = gate.Error(ctx, err)
+	err := gate.ConsumeSSE(ctx, body, s.stream.Timers(), options.IdleTimeout, s.handle)
 	if err == nil {
 		err = s.finish()
 	}
@@ -290,7 +281,7 @@ func decodeResponseEvent(data []byte) (responseEvent, error) {
 			value.HasUsage = true
 			err = readUsage(decoder, &value.Usage)
 		case "error":
-			value.Error, err = readProviderError(decoder)
+			value.Error, err = model.ReadProviderError(decoder)
 		default:
 			err = decoder.SkipValue()
 		}
@@ -328,7 +319,7 @@ func readChoice(decoder *jsontext.Decoder, choice *choice) error {
 		case "delta":
 			err = readDelta(decoder, &choice.Delta)
 		case "finish_reason":
-			err = readNullableString(decoder, &choice.Finish)
+			err = model.ReadNullableString(decoder, &choice.Finish)
 		case "usage":
 			choice.HasUsage = true
 			err = readUsage(decoder, &choice.Usage)
@@ -344,7 +335,7 @@ func readDelta(decoder *jsontext.Decoder, delta *delta) error {
 		var err error
 		switch key {
 		case "content":
-			err = readNullableString(decoder, &delta.Content)
+			err = model.ReadNullableString(decoder, &delta.Content)
 		case "reasoning_content":
 			err = readReasoningString(decoder, &delta.ReasoningContent)
 		case "reasoning":
@@ -360,22 +351,11 @@ func readDelta(decoder *jsontext.Decoder, delta *delta) error {
 	})
 }
 
-func readNullableString(decoder *jsontext.Decoder, target *string) error {
-	if decoder.PeekKind() == 'n' {
-		return decoder.SkipValue()
-	}
-	value, err := model.ReadString(decoder)
-	if err == nil {
-		*target = value
-	}
-	return err
-}
-
 func readReasoningString(decoder *jsontext.Decoder, target *string) error {
 	if decoder.PeekKind() != '"' {
 		return decoder.SkipValue()
 	}
-	return readNullableString(decoder, target)
+	return model.ReadNullableString(decoder, target)
 }
 
 func readToolDeltas(decoder *jsontext.Decoder, calls *[]toolDelta) error {
@@ -501,24 +481,4 @@ func readCacheRead(decoder *jsontext.Decoder, usage *usage, source cacheSource) 
 		usage.cacheReadSource = source
 	}
 	return err
-}
-
-func readProviderError(decoder *jsontext.Decoder) (*providerError, error) {
-	if decoder.PeekKind() == 'n' {
-		return nil, decoder.SkipValue()
-	}
-	value := &providerError{}
-	err := model.ReadObjectFields(decoder, func(key string) error {
-		var err error
-		switch key {
-		case "code":
-			value.Code, err = model.ReadScalar(decoder)
-		case "message":
-			value.Message, err = model.ReadString(decoder)
-		default:
-			err = decoder.SkipValue()
-		}
-		return err
-	})
-	return value, err
 }

@@ -225,6 +225,7 @@ func TestRetryContract(t *testing.T) {
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
 			runRetryScenario(t, scenario)
 		})
 	}

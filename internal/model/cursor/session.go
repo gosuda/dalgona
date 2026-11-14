@@ -33,7 +33,7 @@ type session struct {
 	inBand     func(context.Context, model.ToolCall) (model.ToolResult, error)
 	tools      []wire.McpToolDefinition
 	writer     *frameWriter
-	body       *idleBody
+	body       *model.IdleBody
 	frames     *frameReader
 	sawTool    bool
 	sawContent bool
@@ -41,12 +41,12 @@ type session struct {
 	failed     []byte
 }
 
-func (s *session) consume(ctx context.Context, gate *model.StartGate, body *idleBody) model.AttemptResult {
+func (s *session) consume(ctx context.Context, gate *model.StartGate, body *model.IdleBody) model.AttemptResult {
 	s.body = body
 	s.frames = newFrameReader(body)
 	err := s.readFrames(ctx, gate)
 	s.frames.stop()
-	body.pause()
+	body.Pause()
 	err = gate.Error(ctx, err)
 	if err != nil {
 		return model.AttemptResult{Status: failureStatus(err), SawTool: s.sawTool, SawContent: s.sawContent, Body: s.failed, Err: err}
@@ -361,8 +361,8 @@ func (s *session) runInBand(ctx context.Context, execID uint32, call model.ToolC
 		return model.ToolResult{ID: call.ID, Name: call.Name, Output: output, IsError: true}, false, err
 	}
 	s.sawTool = true
-	s.body.pause()
-	defer s.body.resume()
+	s.body.Pause()
+	defer s.body.Resume()
 	stopBeats := repeat(ctx, execBeatPeriod, func() error { return s.writer.execControl(wire.ExecHeartbeat, execID, "") })
 	result, err := s.awaitInBand(ctx, execID, call)
 	stopBeats()

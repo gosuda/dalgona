@@ -6,6 +6,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/model/cursor/wire"
@@ -60,7 +61,7 @@ func splitActive(messages []model.Message) (string, []model.Message) {
 	}
 	history := messages[:len(messages)-1]
 	if len(last.ToolResults) != 0 {
-		history = append(history[:len(history):len(history)], model.Message{Role: last.Role, ToolResults: last.ToolResults})
+		history = append(slices.Clip(history), model.Message{Role: last.Role, ToolResults: last.ToolResults})
 	}
 	return last.Text, history
 }

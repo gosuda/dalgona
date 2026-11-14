@@ -105,20 +105,28 @@ func (c *conversation) saveCheckpoint(state []byte) error {
 	return writeAtomic(filepath.Join(c.dir, checkpointFile), c.checkpoint)
 }
 
-func writeAtomic(path string, data []byte) error {
+func writeAtomic(path string, data []byte) (err error) {
 	temp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("cursor: write %s: %w", filepath.Base(path), err)
 	}
 	name := temp.Name()
-	_, writeErr := temp.Write(data)
-	closeErr := temp.Close()
-	if err := errors.Join(writeErr, closeErr, os.Chmod(name, 0o600)); err != nil {
-		_ = os.Remove(name)
+	defer func() {
+		_ = temp.Close()
+		if err != nil {
+			_ = os.Remove(name)
+		}
+	}()
+	if _, err = temp.Write(data); err != nil {
 		return fmt.Errorf("cursor: write %s: %w", filepath.Base(path), err)
 	}
-	if err := os.Rename(name, path); err != nil {
-		_ = os.Remove(name)
+	if err = temp.Close(); err != nil {
+		return fmt.Errorf("cursor: write %s: %w", filepath.Base(path), err)
+	}
+	if err = os.Chmod(name, 0o600); err != nil {
+		return fmt.Errorf("cursor: write %s: %w", filepath.Base(path), err)
+	}
+	if err = os.Rename(name, path); err != nil {
 		return fmt.Errorf("cursor: write %s: %w", filepath.Base(path), err)
 	}
 	return nil

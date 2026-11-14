@@ -59,20 +59,24 @@ func AppendModelInfo(dst []byte, m *ModelInfo) []byte {
 
 func ConsumeModelInfo(b []byte, m *ModelInfo) error {
 	return connectwire.ConsumeFields(b, "devin model info", func(f connectwire.Field) error {
-		switch {
-		case f.Number <= 5:
-			return consumeModelInfoBase(f, m)
-		case f.Number <= 9:
-			return consumeModelInfoFeatures(f, m)
-		case f.Number <= 18:
-			return consumeModelInfoLimits(f, m)
-		default:
-			return consumeModelInfoRouting(f, m)
-		}
+		return consumeModelInfoField(f, m)
 	})
 }
 
-func consumeModelInfoBase(f connectwire.Field, m *ModelInfo) error {
+func consumeModelInfoField(f connectwire.Field, m *ModelInfo) error {
+	switch {
+	case f.Number <= 6:
+		return consumeModelIdentity(f, m)
+	case f.Number <= 12:
+		return consumeModelEndpoints(f, m)
+	case f.Number <= 18:
+		return consumeModelFormatting(f, m)
+	default:
+		return consumeModelDeployment(f, m)
+	}
+}
+
+func consumeModelIdentity(f connectwire.Field, m *ModelInfo) error {
 	switch f.Number {
 	case 1:
 		return connectwire.SetInt32(f, "devin model info", &m.ModelID)
@@ -84,32 +88,34 @@ func consumeModelInfoBase(f connectwire.Field, m *ModelInfo) error {
 		return connectwire.SetInt32(f, "devin model info", &m.MaxTokens)
 	case 5:
 		return connectwire.SetBytes(f, "devin model info", &m.TokenizerTypeView)
-	}
-	return nil
-}
-
-func consumeModelInfoFeatures(f connectwire.Field, m *ModelInfo) error {
-	switch f.Number {
 	case 6:
 		return connectwire.SetBytes(f, "devin model info", &m.ModelFeaturesView)
+	default:
+		return nil
+	}
+}
+
+func consumeModelEndpoints(f connectwire.Field, m *ModelInfo) error {
+	switch f.Number {
 	case 7:
 		return connectwire.SetInt32(f, "devin model info", &m.APIProvider)
 	case 8:
 		return connectwire.SetBytes(f, "devin model info", &m.ModelNameView)
 	case 9:
 		return connectwire.SetBool(f, "devin model info", &m.SupportsContext)
-	}
-	return nil
-}
-
-func consumeModelInfoLimits(f connectwire.Field, m *ModelInfo) error {
-	switch f.Number {
 	case 10:
 		return connectwire.SetInt32(f, "devin model info", &m.EmbedDim)
 	case 11:
 		return connectwire.SetBytes(f, "devin model info", &m.BaseURLView)
 	case 12:
 		return connectwire.SetBytes(f, "devin model info", &m.ChatModelNameView)
+	default:
+		return nil
+	}
+}
+
+func consumeModelFormatting(f connectwire.Field, m *ModelInfo) error {
+	switch f.Number {
 	case 13:
 		return connectwire.SetInt32(f, "devin model info", &m.MaxOutputTokens)
 	case 14:
@@ -120,17 +126,15 @@ func consumeModelInfoLimits(f connectwire.Field, m *ModelInfo) error {
 		return connectwire.SetBytes(f, "devin model info", &m.ModelUIDView)
 	case 18:
 		return connectwire.SetBytes(f, "devin model info", &m.InferenceServerURLView)
+	default:
+		return nil
 	}
-	return nil
 }
 
-func consumeModelInfoRouting(f connectwire.Field, m *ModelInfo) error {
+func consumeModelDeployment(f connectwire.Field, m *ModelInfo) error {
 	switch f.Number {
 	case 20:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin model info"); err != nil {
-			return err
-		}
-		m.HarnessUIDs = append(m.HarnessUIDs, connectwire.BytesValue(f))
+		return connectwire.AppendBytesField(f, "devin model info", &m.HarnessUIDs)
 	case 21:
 		return connectwire.SetBytes(f, "devin model info", &m.ArenaConfigView)
 	case 22:
@@ -141,8 +145,9 @@ func consumeModelInfoRouting(f connectwire.Field, m *ModelInfo) error {
 		return connectwire.SetBytes(f, "devin model info", &m.InferenceConfigView)
 	case 25:
 		return connectwire.SetBool(f, "devin model info", &m.ModelRouter)
+	default:
+		return nil
 	}
-	return nil
 }
 
 type ClientModelConfig struct {
@@ -215,24 +220,26 @@ func AppendClientModelConfig(dst []byte, m *ClientModelConfig) []byte {
 
 func ConsumeClientModelConfig(b []byte, m *ClientModelConfig) error {
 	return connectwire.ConsumeFields(b, "devin model config", func(f connectwire.Field) error {
-		switch {
-		case f.Number <= 5:
-			return consumeModelConfigIdentity(f, m)
-		case f.Number <= 10:
-			return consumeModelConfigBase(f, m)
-		case f.Number <= 16:
-			return consumeModelConfigFlags(f, m)
-		case f.Number <= 20:
-			return consumeModelConfigLimits(f, m)
-		case f.Number <= 27:
-			return consumeModelConfigMetadata(f, m)
-		default:
-			return consumeModelConfigExtra(f, m)
-		}
+		return consumeClientModelConfigField(f, m)
 	})
 }
 
-func consumeModelConfigIdentity(f connectwire.Field, m *ClientModelConfig) error {
+func consumeClientModelConfigField(f connectwire.Field, m *ClientModelConfig) error {
+	switch {
+	case f.Number <= 6:
+		return consumeClientModelCore(f, m)
+	case f.Number <= 12:
+		return consumeClientModelTier(f, m)
+	case f.Number <= 18:
+		return consumeClientModelRollout(f, m)
+	case f.Number <= 24:
+		return consumeClientModelAvailability(f, m)
+	default:
+		return consumeClientModelFamily(f, m)
+	}
+}
+
+func consumeClientModelCore(f connectwire.Field, m *ClientModelConfig) error {
 	switch f.Number {
 	case 1:
 		return connectwire.SetBytes(f, "devin model config", &m.LabelView)
@@ -244,14 +251,15 @@ func consumeModelConfigIdentity(f connectwire.Field, m *ClientModelConfig) error
 		return connectwire.SetBool(f, "devin model config", &m.Disabled)
 	case 5:
 		return connectwire.SetBool(f, "devin model config", &m.SupportsImages)
-	}
-	return nil
-}
-
-func consumeModelConfigBase(f connectwire.Field, m *ClientModelConfig) error {
-	switch f.Number {
 	case 6:
 		return connectwire.SetBool(f, "devin model config", &m.SupportsLegacy)
+	default:
+		return nil
+	}
+}
+
+func consumeClientModelTier(f connectwire.Field, m *ClientModelConfig) error {
+	switch f.Number {
 	case 7:
 		return connectwire.SetBool(f, "devin model config", &m.Premium)
 	case 8:
@@ -260,16 +268,17 @@ func consumeModelConfigBase(f connectwire.Field, m *ClientModelConfig) error {
 		return connectwire.SetBool(f, "devin model config", &m.Beta)
 	case 10:
 		return connectwire.SetInt32(f, "devin model config", &m.Provider)
-	}
-	return nil
-}
-
-func consumeModelConfigFlags(f connectwire.Field, m *ClientModelConfig) error {
-	switch f.Number {
 	case 11:
 		return connectwire.SetBool(f, "devin model config", &m.Recommended)
 	case 12:
 		return consumeAllowedTier(f, m)
+	default:
+		return nil
+	}
+}
+
+func consumeClientModelRollout(f connectwire.Field, m *ClientModelConfig) error {
+	switch f.Number {
 	case 13:
 		return connectwire.SetInt32(f, "devin model config", &m.PricingType)
 	case 14:
@@ -278,22 +287,51 @@ func consumeModelConfigFlags(f connectwire.Field, m *ClientModelConfig) error {
 		return connectwire.SetBool(f, "devin model config", &m.New)
 	case 16:
 		return connectwire.SetBool(f, "devin model config", &m.PartialRollout)
-	}
-	return nil
-}
-
-func consumeModelConfigLimits(f connectwire.Field, m *ClientModelConfig) error {
-	switch f.Number {
 	case 17:
 		return setFloat32(f, "devin model config", &m.RolloutFraction)
 	case 18:
 		return connectwire.SetInt32(f, "devin model config", &m.ContextWindow)
+	default:
+		return nil
+	}
+}
+
+func consumeClientModelAvailability(f connectwire.Field, m *ClientModelConfig) error {
+	switch f.Number {
 	case 19:
 		return connectwire.SetBytes(f, "devin model config", &m.PromoStatusView)
 	case 20:
 		return connectwire.SetBool(f, "devin model config", &m.CapacityLimited)
+	case 21:
+		return connectwire.SetBytes(f, "devin model config", &m.FastStatusView)
+	case 22:
+		return connectwire.SetBytes(f, "devin model config", &m.ModelUIDView)
+	case 23:
+		return connectwire.ConsumeNested(f, "devin model config", &m.ModelInfo, ConsumeModelInfo)
+	case 24:
+		return connectwire.SetInt32(f, "devin model config", &m.ModelCostTier)
+	default:
+		return nil
 	}
-	return nil
+}
+
+func consumeClientModelFamily(f connectwire.Field, m *ClientModelConfig) error {
+	switch f.Number {
+	case 27:
+		return connectwire.SetBytes(f, "devin model config", &m.DescriptionView)
+	case 29:
+		return connectwire.SetBytes(f, "devin model config", &m.SmartFriendModelUIDView)
+	case 30:
+		return connectwire.SetBytes(f, "devin model config", &m.ModelFamilyMetadataView)
+	case 31:
+		return connectwire.SetBool(f, "devin model config", &m.DefaultModelInFamily)
+	case 32:
+		return connectwire.AppendBytesField(f, "devin model config", &m.ModelDimensions)
+	case 33:
+		return connectwire.SetBytes(f, "devin model config", &m.DisabledReasonView)
+	default:
+		return nil
+	}
 }
 
 func consumeAllowedTier(f connectwire.Field, m *ClientModelConfig) error {
@@ -312,45 +350,6 @@ func consumeAllowedTier(f connectwire.Field, m *ClientModelConfig) error {
 		}
 		m.AllowedTiers = append(m.AllowedTiers, connectwire.Signed32(connectwire.Field{Raw: packed[:size]}))
 		packed = packed[size:]
-	}
-	return nil
-}
-
-func consumeModelConfigMetadata(f connectwire.Field, m *ClientModelConfig) error {
-	switch f.Number {
-	case 21:
-		return connectwire.SetBytes(f, "devin model config", &m.FastStatusView)
-	case 22:
-		return connectwire.SetBytes(f, "devin model config", &m.ModelUIDView)
-	case 23:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin model config"); err != nil {
-			return err
-		}
-		m.ModelInfo = new(ModelInfo)
-		return ConsumeModelInfo(connectwire.BytesValue(f), m.ModelInfo)
-	case 24:
-		return connectwire.SetInt32(f, "devin model config", &m.ModelCostTier)
-	case 27:
-		return connectwire.SetBytes(f, "devin model config", &m.DescriptionView)
-	}
-	return nil
-}
-
-func consumeModelConfigExtra(f connectwire.Field, m *ClientModelConfig) error {
-	switch f.Number {
-	case 29:
-		return connectwire.SetBytes(f, "devin model config", &m.SmartFriendModelUIDView)
-	case 30:
-		return connectwire.SetBytes(f, "devin model config", &m.ModelFamilyMetadataView)
-	case 31:
-		return connectwire.SetBool(f, "devin model config", &m.DefaultModelInFamily)
-	case 32:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin model config"); err != nil {
-			return err
-		}
-		m.ModelDimensions = append(m.ModelDimensions, connectwire.BytesValue(f))
-	case 33:
-		return connectwire.SetBytes(f, "devin model config", &m.DisabledReasonView)
 	}
 	return nil
 }
@@ -392,18 +391,12 @@ func ConsumeModelConfigResponse(b []byte, m *ModelConfigResponse) error {
 	return connectwire.ConsumeFields(b, "devin model config response", func(f connectwire.Field) error {
 		switch f.Number {
 		case 1:
-			if err := connectwire.RequireKind(f, protowire.BytesType, "devin model config response"); err != nil {
-				return err
-			}
-			var model ClientModelConfig
-			if err := ConsumeClientModelConfig(connectwire.BytesValue(f), &model); err != nil {
-				return err
-			}
-			m.Models = append(m.Models, model)
+			return connectwire.ConsumeRepeated(f, "devin model config response", &m.Models, ConsumeClientModelConfig)
 		case 3:
 			return connectwire.SetBytes(f, "devin model config response", &m.DefaultOverrideConfigView)
+		default:
+			return nil
 		}
-		return nil
 	})
 }
 

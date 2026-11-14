@@ -251,18 +251,7 @@ func AppendInt64(dst []byte, n protowire.Number, v int64) []byte {
 }
 
 func AppendSigned32(dst []byte, v int32) []byte {
-	if v >= 0 {
-		for v >= 0x80 {
-			dst = append(dst, byte(v&0x7f)|0x80)
-			v >>= 7
-		}
-		return append(dst, byte(v&0x7f))
-	}
-	for range 9 {
-		dst = append(dst, byte(v&0x7f)|0x80)
-		v >>= 7
-	}
-	return append(dst, 1)
+	return AppendSigned64(dst, int64(v))
 }
 
 func AppendSigned64(dst []byte, v int64) []byte {

@@ -36,7 +36,7 @@ type responseEvent struct {
 	Candidates  []candidate
 	Usage       usage
 	HasUsage    bool
-	Error       *providerError
+	Error       *model.ProviderError
 	BlockReason string
 }
 
@@ -70,18 +70,8 @@ type usage struct {
 	Thoughts int
 }
 
-type providerError struct {
-	Code    string
-	Message string
-	Status  string
-}
-
 func (s *Decoder) consume(ctx context.Context, gate *model.StartGate, body io.ReadCloser, options model.RetryOptions) model.AttemptResult {
-	err := model.ReadSSEWithTimeouts(ctx, body, model.SSEOptions{IdleTimeout: options.IdleTimeout, Control: s.stream.Timers()}, func(event, data []byte) error {
-		gate.FirstEvent()
-		return s.handle(event, data)
-	})
-	err = gate.Error(ctx, err)
+	err := gate.ConsumeSSE(ctx, body, s.stream.Timers(), options.IdleTimeout, s.handle)
 	if err == nil {
 		err = s.Finish()
 	}
@@ -239,7 +229,7 @@ func decodeResponseEvent(decoder *jsontext.Decoder) (responseEvent, error) {
 		case "promptFeedback":
 			err = readPromptFeedback(decoder, &value.BlockReason)
 		case "error":
-			value.Error, err = readProviderError(decoder)
+			value.Error, err = model.ReadProviderError(decoder)
 		default:
 			err = decoder.SkipValue()
 		}
@@ -269,23 +259,12 @@ func readCandidate(decoder *jsontext.Decoder, candidate *candidate) error {
 		case "content":
 			err = readContent(decoder, &candidate.Content)
 		case "finishReason":
-			err = readNullableString(decoder, &candidate.Finish)
+			err = model.ReadNullableString(decoder, &candidate.Finish)
 		default:
 			err = decoder.SkipValue()
 		}
 		return err
 	})
-}
-
-func readNullableString(decoder *jsontext.Decoder, target *string) error {
-	if decoder.PeekKind() == 'n' {
-		return decoder.SkipValue()
-	}
-	value, err := model.ReadString(decoder)
-	if err == nil {
-		*target = value
-	}
-	return err
 }
 
 func readContent(decoder *jsontext.Decoder, content *content) error {
@@ -319,11 +298,11 @@ func readPart(decoder *jsontext.Decoder, part *part) error {
 		var err error
 		switch key {
 		case "text":
-			err = readNullableString(decoder, &part.Text)
+			err = model.ReadNullableString(decoder, &part.Text)
 		case "thought":
 			part.Thought, err = model.ReadBool(decoder)
 		case "thoughtSignature":
-			err = readNullableString(decoder, &part.ThoughtSignature)
+			err = model.ReadNullableString(decoder, &part.ThoughtSignature)
 		case "functionCall":
 			part.FunctionCall, err = readFunctionCall(decoder)
 		default:
@@ -376,28 +355,6 @@ func readPromptFeedback(decoder *jsontext.Decoder, blockReason *string) error {
 		if key != "blockReason" {
 			return decoder.SkipValue()
 		}
-		return readNullableString(decoder, blockReason)
+		return model.ReadNullableString(decoder, blockReason)
 	})
-}
-
-func readProviderError(decoder *jsontext.Decoder) (*providerError, error) {
-	if decoder.PeekKind() == 'n' {
-		return nil, decoder.SkipValue()
-	}
-	value := &providerError{}
-	err := model.ReadObjectFields(decoder, func(key string) error {
-		var err error
-		switch key {
-		case "code":
-			value.Code, err = model.ReadScalar(decoder)
-		case "message":
-			value.Message, err = model.ReadString(decoder)
-		case "status":
-			value.Status, err = model.ReadString(decoder)
-		default:
-			err = decoder.SkipValue()
-		}
-		return err
-	})
-	return value, err
 }

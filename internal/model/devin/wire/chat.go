@@ -96,20 +96,24 @@ func AppendChatMessagePrompt(dst []byte, m *ChatMessagePrompt) []byte {
 
 func ConsumeChatMessagePrompt(b []byte, m *ChatMessagePrompt) error {
 	return connectwire.ConsumeFields(b, "devin chat prompt", func(f connectwire.Field) error {
-		switch {
-		case f.Number <= 5:
-			return consumeChatPromptBase(f, m)
-		case f.Number <= 7:
-			return consumeChatPromptTools(f, m)
-		case f.Number <= 13:
-			return consumeChatPromptResult(f, m)
-		default:
-			return consumeChatPromptMetadata(f, m)
-		}
+		return consumeChatMessagePromptField(f, m)
 	})
 }
 
-func consumeChatPromptBase(f connectwire.Field, m *ChatMessagePrompt) error {
+func consumeChatMessagePromptField(f connectwire.Field, m *ChatMessagePrompt) error {
+	switch {
+	case f.Number <= 5:
+		return consumeChatMessageContent(f, m)
+	case f.Number <= 10:
+		return consumeChatMessageTooling(f, m)
+	case f.Number <= 15:
+		return consumeChatMessageThinking(f, m)
+	default:
+		return consumeChatMessageSignatures(f, m)
+	}
+}
+
+func consumeChatMessageContent(f connectwire.Field, m *ChatMessagePrompt) error {
 	switch f.Number {
 	case 1:
 		return connectwire.SetBytes(f, "devin chat prompt", &m.MessageIDView)
@@ -121,51 +125,47 @@ func consumeChatPromptBase(f connectwire.Field, m *ChatMessagePrompt) error {
 		return connectwire.SetUint32(f, "devin chat prompt", &m.NumTokens)
 	case 5:
 		return connectwire.SetBool(f, "devin chat prompt", &m.SafeForCodeTelemetry)
+	default:
+		return nil
 	}
-	return nil
 }
 
-func consumeChatPromptTools(f connectwire.Field, m *ChatMessagePrompt) error {
+func consumeChatMessageTooling(f connectwire.Field, m *ChatMessagePrompt) error {
 	switch f.Number {
 	case 6:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin chat prompt"); err != nil {
-			return err
-		}
-		var call ChatToolCall
-		if err := ConsumeChatToolCall(connectwire.BytesValue(f), &call); err != nil {
-			return err
-		}
-		m.ToolCalls = append(m.ToolCalls, call)
+		return connectwire.ConsumeRepeated(f, "devin chat prompt", &m.ToolCalls, ConsumeChatToolCall)
 	case 7:
 		return connectwire.SetBytes(f, "devin chat prompt", &m.ToolCallIDView)
-	}
-	return nil
-}
-
-func consumeChatPromptResult(f connectwire.Field, m *ChatMessagePrompt) error {
-	switch f.Number {
 	case 8:
 		return connectwire.ConsumeNested(f, "devin chat prompt", &m.PromptCacheOptions, ConsumePromptCacheOptions)
 	case 9:
 		return connectwire.SetBool(f, "devin chat prompt", &m.ToolResultIsError)
 	case 10:
 		return connectwire.ConsumeRepeated(f, "devin chat prompt", &m.Images, ConsumeImageData)
+	default:
+		return nil
+	}
+}
+
+func consumeChatMessageThinking(f connectwire.Field, m *ChatMessagePrompt) error {
+	switch f.Number {
 	case 11:
 		return connectwire.SetBytes(f, "devin chat prompt", &m.ThinkingView)
 	case 12:
 		return connectwire.SetBytes(f, "devin chat prompt", &m.SignatureView)
 	case 13:
 		return connectwire.SetBool(f, "devin chat prompt", &m.ThinkingRedacted)
-	}
-	return nil
-}
-
-func consumeChatPromptMetadata(f connectwire.Field, m *ChatMessagePrompt) error {
-	switch f.Number {
 	case 14:
-		return appendPromptBytes(f, &m.Annotations)
+		return connectwire.AppendBytesField(f, "devin chat prompt", &m.Annotations)
 	case 15:
 		return connectwire.SetBytes(f, "devin chat prompt", &m.OutputIDView)
+	default:
+		return nil
+	}
+}
+
+func consumeChatMessageSignatures(f connectwire.Field, m *ChatMessagePrompt) error {
+	switch f.Number {
 	case 16:
 		return connectwire.SetBytes(f, "devin chat prompt", &m.ThinkingIDView)
 	case 17:
@@ -174,16 +174,9 @@ func consumeChatPromptMetadata(f connectwire.Field, m *ChatMessagePrompt) error 
 		return connectwire.SetBytes(f, "devin chat prompt", &m.SignatureTypeView)
 	case 19:
 		return connectwire.SetBytes(f, "devin chat prompt", &m.PhaseView)
+	default:
+		return nil
 	}
-	return nil
-}
-
-func appendPromptBytes(f connectwire.Field, out *[][]byte) error {
-	if err := connectwire.RequireKind(f, protowire.BytesType, "devin chat prompt"); err != nil {
-		return err
-	}
-	*out = append(*out, connectwire.BytesValue(f))
-	return nil
 }
 
 type ChatToolDefinition struct {
@@ -217,13 +210,13 @@ func AppendChatToolDefinition(dst []byte, m *ChatToolDefinition) []byte {
 func ConsumeChatToolDefinition(b []byte, m *ChatToolDefinition) error {
 	return connectwire.ConsumeFields(b, "devin tool definition", func(f connectwire.Field) error {
 		if f.Number <= 6 {
-			return consumeToolDefinitionBase(f, m)
+			return consumeChatToolSchema(f, m)
 		}
-		return consumeToolDefinitionOptions(f, m)
+		return consumeChatToolBehavior(f, m)
 	})
 }
 
-func consumeToolDefinitionBase(f connectwire.Field, m *ChatToolDefinition) error {
+func consumeChatToolSchema(f connectwire.Field, m *ChatToolDefinition) error {
 	switch f.Number {
 	case 1:
 		return connectwire.SetBytes(f, "devin tool definition", &m.NameView)
@@ -232,17 +225,15 @@ func consumeToolDefinitionBase(f connectwire.Field, m *ChatToolDefinition) error
 	case 3:
 		return connectwire.SetBytes(f, "devin tool definition", &m.JSONSchemaView)
 	case 5:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin tool definition"); err != nil {
-			return err
-		}
-		m.AttributionFieldNames = append(m.AttributionFieldNames, connectwire.BytesValue(f))
+		return connectwire.AppendBytesField(f, "devin tool definition", &m.AttributionFieldNames)
 	case 6:
 		return connectwire.SetBytes(f, "devin tool definition", &m.ServerNameView)
+	default:
+		return nil
 	}
-	return nil
 }
 
-func consumeToolDefinitionOptions(f connectwire.Field, m *ChatToolDefinition) error {
+func consumeChatToolBehavior(f connectwire.Field, m *ChatToolDefinition) error {
 	switch f.Number {
 	case 7:
 		return connectwire.SetBool(f, "devin tool definition", &m.ReadOnlyHint)
@@ -256,8 +247,9 @@ func consumeToolDefinitionOptions(f connectwire.Field, m *ChatToolDefinition) er
 		return connectwire.SetBytes(f, "devin tool definition", &m.CustomGrammarSyntaxView)
 	case 12:
 		return connectwire.SetBool(f, "devin tool definition", &m.Strict)
+	default:
+		return nil
 	}
-	return nil
 }
 
 type ChatToolChoice struct {
@@ -342,77 +334,59 @@ func AppendGetChatMessageRequest(dst []byte, m *GetChatMessageRequest) []byte {
 
 func ConsumeGetChatMessageRequest(b []byte, m *GetChatMessageRequest) error {
 	return connectwire.ConsumeFields(b, "devin chat request", func(f connectwire.Field) error {
-		switch {
-		case f.Number <= 5:
-			return consumeChatRequestBase(f, m)
-		case f.Number <= 9:
-			return consumeChatRequestConfiguration(f, m)
-		case f.Number <= 13:
-			return consumeChatRequestTools(f, m)
-		case f.Number <= 16:
-			return consumeChatRequestContext(f, m)
-		case f.Number <= 21:
-			return consumeChatRequestRouting(f, m)
-		default:
-			return consumeChatRequestAssignment(f, m)
-		}
+		return consumeGetChatMessageRequestField(f, m)
 	})
 }
 
-func consumeChatRequestBase(f connectwire.Field, m *GetChatMessageRequest) error {
+func consumeGetChatMessageRequestField(f connectwire.Field, m *GetChatMessageRequest) error {
+	switch {
+	case f.Number <= 7:
+		return consumeChatRequestPrompt(f, m)
+	case f.Number <= 13:
+		return consumeChatRequestConfig(f, m)
+	case f.Number <= 20:
+		return consumeChatRequestContext(f, m)
+	default:
+		return consumeChatRequestExecution(f, m)
+	}
+}
+
+func consumeChatRequestPrompt(f connectwire.Field, m *GetChatMessageRequest) error {
 	switch f.Number {
 	case 1:
 		return connectwire.ConsumeNested(f, "devin chat request", &m.Metadata, ConsumeMetadata)
 	case 2:
 		return connectwire.SetBytes(f, "devin chat request", &m.PromptView)
 	case 3:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin chat request"); err != nil {
-			return err
-		}
-		var prompt ChatMessagePrompt
-		if err := ConsumeChatMessagePrompt(connectwire.BytesValue(f), &prompt); err != nil {
-			return err
-		}
-		m.Prompts = append(m.Prompts, prompt)
+		return connectwire.ConsumeRepeated(f, "devin chat request", &m.Prompts, ConsumeChatMessagePrompt)
 	case 5:
 		return connectwire.SetBool(f, "devin chat request", &m.UseInternalChatModel)
-	}
-	return nil
-}
-
-func consumeChatRequestConfiguration(f connectwire.Field, m *GetChatMessageRequest) error {
-	switch f.Number {
 	case 6:
 		return connectwire.SetInt32(f, "devin chat request", &m.InternalChatModel)
 	case 7:
 		return connectwire.SetInt32(f, "devin chat request", &m.RequestType)
+	default:
+		return nil
+	}
+}
+
+func consumeChatRequestConfig(f connectwire.Field, m *GetChatMessageRequest) error {
+	switch f.Number {
 	case 8:
 		return connectwire.ConsumeNested(f, "devin chat request", &m.Configuration, ConsumeCompletionConfiguration)
 	case 9:
 		return connectwire.SetBytes(f, "devin chat request", &m.ExperimentConfigView)
-	}
-	return nil
-}
-
-func consumeChatRequestTools(f connectwire.Field, m *GetChatMessageRequest) error {
-	switch f.Number {
 	case 10:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin chat request"); err != nil {
-			return err
-		}
-		var definition ChatToolDefinition
-		if err := ConsumeChatToolDefinition(connectwire.BytesValue(f), &definition); err != nil {
-			return err
-		}
-		m.Tools = append(m.Tools, definition)
+		return connectwire.ConsumeRepeated(f, "devin chat request", &m.Tools, ConsumeChatToolDefinition)
 	case 11:
 		return connectwire.SetBool(f, "devin chat request", &m.DisableToolCalls)
 	case 12:
 		return connectwire.ConsumeNested(f, "devin chat request", &m.ToolChoice, ConsumeChatToolChoice)
 	case 13:
 		return connectwire.ConsumeNested(f, "devin chat request", &m.SystemPromptCache, ConsumePromptCacheOptions)
+	default:
+		return nil
 	}
-	return nil
 }
 
 func consumeChatRequestContext(f connectwire.Field, m *GetChatMessageRequest) error {
@@ -423,12 +397,6 @@ func consumeChatRequestContext(f connectwire.Field, m *GetChatMessageRequest) er
 		return connectwire.SetBytes(f, "devin chat request", &m.TrajectoryReferenceView)
 	case 16:
 		return connectwire.SetBytes(f, "devin chat request", &m.ConversationIDView)
-	}
-	return nil
-}
-
-func consumeChatRequestRouting(f connectwire.Field, m *GetChatMessageRequest) error {
-	switch f.Number {
 	case 17:
 		return connectwire.SetBytes(f, "devin chat request", &m.PromptIDView)
 	case 18:
@@ -437,14 +405,15 @@ func consumeChatRequestRouting(f connectwire.Field, m *GetChatMessageRequest) er
 		return connectwire.SetInt32(f, "devin chat request", &m.Language)
 	case 20:
 		return connectwire.SetInt32(f, "devin chat request", &m.PlannerMode)
-	case 21:
-		return connectwire.SetBytes(f, "devin chat request", &m.ChatModelUIDView)
+	default:
+		return nil
 	}
-	return nil
 }
 
-func consumeChatRequestAssignment(f connectwire.Field, m *GetChatMessageRequest) error {
+func consumeChatRequestExecution(f connectwire.Field, m *GetChatMessageRequest) error {
 	switch f.Number {
+	case 21:
+		return connectwire.SetBytes(f, "devin chat request", &m.ChatModelUIDView)
 	case 22:
 		return connectwire.SetBytes(f, "devin chat request", &m.ExecutionIDView)
 	case 24:
@@ -453,8 +422,9 @@ func consumeChatRequestAssignment(f connectwire.Field, m *GetChatMessageRequest)
 		return connectwire.SetBytes(f, "devin chat request", &m.ArenaAssignmentJWTView)
 	case 26:
 		return connectwire.SetBytes(f, "devin chat request", &m.ModelAssignmentJWTView)
+	default:
+		return nil
 	}
-	return nil
 }
 
 type ResponseHeader struct {
@@ -512,14 +482,14 @@ func AppendModelUsageStats(dst []byte, m *ModelUsageStats) []byte {
 
 func ConsumeModelUsageStats(b []byte, m *ModelUsageStats) error {
 	return connectwire.ConsumeFields(b, "devin usage", func(f connectwire.Field) error {
-		if f.Number <= 6 {
-			return consumeUsageNumbers(f, m)
+		if f.Number <= 5 {
+			return consumeUsageTokens(f, m)
 		}
-		return consumeUsageNames(f, m)
+		return consumeUsageRouting(f, m)
 	})
 }
 
-func consumeUsageNumbers(f connectwire.Field, m *ModelUsageStats) error {
+func consumeUsageTokens(f connectwire.Field, m *ModelUsageStats) error {
 	switch f.Number {
 	case 1:
 		return connectwire.SetInt32(f, "devin usage", &m.ModelDeprecated)
@@ -531,33 +501,28 @@ func consumeUsageNumbers(f connectwire.Field, m *ModelUsageStats) error {
 		return connectwire.SetUint64(f, "devin usage", &m.CacheWrite)
 	case 5:
 		return connectwire.SetUint64(f, "devin usage", &m.CacheRead)
-	case 6:
-		return connectwire.SetInt32(f, "devin usage", &m.APIProvider)
+	default:
+		return nil
 	}
-	return nil
 }
 
-func consumeUsageNames(f connectwire.Field, m *ModelUsageStats) error {
+func consumeUsageRouting(f connectwire.Field, m *ModelUsageStats) error {
 	switch f.Number {
+	case 6:
+		return connectwire.SetInt32(f, "devin usage", &m.APIProvider)
 	case 7:
 		return connectwire.SetBytes(f, "devin usage", &m.MessageIDView)
 	case 8:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin usage"); err != nil {
-			return err
-		}
-		var header ResponseHeader
-		if err := ConsumeResponseHeader(connectwire.BytesValue(f), &header); err != nil {
-			return err
-		}
-		m.ResponseHeaders = append(m.ResponseHeaders, header)
+		return connectwire.ConsumeRepeated(f, "devin usage", &m.ResponseHeaders, ConsumeResponseHeader)
 	case 9:
 		return connectwire.SetBytes(f, "devin usage", &m.ModelUIDView)
 	case 10:
 		return connectwire.SetBytes(f, "devin usage", &m.BillingUIDView)
 	case 11:
 		return connectwire.SetBytes(f, "devin usage", &m.RequestedUIDView)
+	default:
+		return nil
 	}
-	return nil
 }
 
 type GetChatMessageResponse struct {
@@ -628,22 +593,26 @@ func AppendGetChatMessageResponse(dst []byte, m *GetChatMessageResponse) []byte 
 
 func ConsumeGetChatMessageResponse(b []byte, m *GetChatMessageResponse) error {
 	return connectwire.ConsumeFields(b, "devin chat response", func(f connectwire.Field) error {
-		switch {
-		case f.Number <= 5:
-			return consumeChatResponseBase(f, m)
-		case f.Number <= 7:
-			return consumeChatResponseTools(f, m)
-		case f.Number <= 13:
-			return consumeChatResponseThinking(f, m)
-		case f.Number <= 21:
-			return consumeChatResponseBilling(f, m)
-		default:
-			return consumeChatResponseRouting(f, m)
-		}
+		return consumeGetChatMessageResponseField(f, m)
 	})
 }
 
-func consumeChatResponseBase(f connectwire.Field, m *GetChatMessageResponse) error {
+func consumeGetChatMessageResponseField(f connectwire.Field, m *GetChatMessageResponse) error {
+	switch {
+	case f.Number <= 6:
+		return consumeChatResponseDelta(f, m)
+	case f.Number <= 11:
+		return consumeChatResponseThinking(f, m)
+	case f.Number <= 17:
+		return consumeChatResponseTiming(f, m)
+	case f.Number <= 22:
+		return consumeChatResponseSignatures(f, m)
+	default:
+		return consumeChatResponseQuota(f, m)
+	}
+}
+
+func consumeChatResponseDelta(f connectwire.Field, m *GetChatMessageResponse) error {
 	switch f.Number {
 	case 1:
 		return connectwire.SetBytes(f, "devin chat response", &m.MessageIDView)
@@ -655,33 +624,17 @@ func consumeChatResponseBase(f connectwire.Field, m *GetChatMessageResponse) err
 		return connectwire.SetUint32(f, "devin chat response", &m.DeltaTokens)
 	case 5:
 		return connectwire.SetInt32(f, "devin chat response", &m.StopReason)
-	}
-	return nil
-}
-
-func consumeChatResponseTools(f connectwire.Field, m *GetChatMessageResponse) error {
-	switch f.Number {
 	case 6:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin chat response"); err != nil {
-			return err
-		}
-		var call ChatToolCall
-		if err := ConsumeChatToolCall(connectwire.BytesValue(f), &call); err != nil {
-			return err
-		}
-		m.ToolCalls = append(m.ToolCalls, call)
-	case 7:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin chat response"); err != nil {
-			return err
-		}
-		m.Usage = new(ModelUsageStats)
-		return ConsumeModelUsageStats(connectwire.BytesValue(f), m.Usage)
+		return connectwire.ConsumeRepeated(f, "devin chat response", &m.ToolCalls, ConsumeChatToolCall)
+	default:
+		return nil
 	}
-	return nil
 }
 
 func consumeChatResponseThinking(f connectwire.Field, m *GetChatMessageResponse) error {
 	switch f.Number {
+	case 7:
+		return connectwire.ConsumeNested(f, "devin chat response", &m.Usage, ConsumeModelUsageStats)
 	case 8:
 		return connectwire.SetBool(f, "devin chat response", &m.Redact)
 	case 9:
@@ -690,16 +643,17 @@ func consumeChatResponseThinking(f connectwire.Field, m *GetChatMessageResponse)
 		return connectwire.SetBytes(f, "devin chat response", &m.DeltaSignatureView)
 	case 11:
 		return connectwire.SetBool(f, "devin chat response", &m.ThinkingRedacted)
+	default:
+		return nil
+	}
+}
+
+func consumeChatResponseTiming(f connectwire.Field, m *GetChatMessageResponse) error {
+	switch f.Number {
 	case 12:
 		return setFloat64(f, "devin chat response", &m.Latency)
 	case 13:
 		return connectwire.SetBytes(f, "devin chat response", &m.CompletionProfileView)
-	}
-	return nil
-}
-
-func consumeChatResponseBilling(f connectwire.Field, m *GetChatMessageResponse) error {
-	switch f.Number {
 	case 14:
 		return connectwire.SetInt32(f, "devin chat response", &m.CreditCost)
 	case 15:
@@ -708,6 +662,13 @@ func consumeChatResponseBilling(f connectwire.Field, m *GetChatMessageResponse) 
 		return connectwire.SetBytes(f, "devin chat response", &m.ThinkingIDView)
 	case 17:
 		return connectwire.SetBytes(f, "devin chat response", &m.RequestIDView)
+	default:
+		return nil
+	}
+}
+
+func consumeChatResponseSignatures(f connectwire.Field, m *GetChatMessageResponse) error {
+	switch f.Number {
 	case 18:
 		return connectwire.SetInt32(f, "devin chat response", &m.CommittedCreditCost)
 	case 19:
@@ -716,14 +677,15 @@ func consumeChatResponseBilling(f connectwire.Field, m *GetChatMessageResponse) 
 		return connectwire.SetBytes(f, "devin chat response", &m.GeminiSignatureView)
 	case 21:
 		return connectwire.SetBytes(f, "devin chat response", &m.SignatureTypeView)
-	}
-	return nil
-}
-
-func consumeChatResponseRouting(f connectwire.Field, m *GetChatMessageResponse) error {
-	switch f.Number {
 	case 22:
 		return setFloat64(f, "devin chat response", &m.CommittedACUCost)
+	default:
+		return nil
+	}
+}
+
+func consumeChatResponseQuota(f connectwire.Field, m *GetChatMessageResponse) error {
+	switch f.Number {
 	case 23:
 		return connectwire.SetBytes(f, "devin chat response", &m.ActualModelUIDView)
 	case 24:
@@ -735,10 +697,8 @@ func consumeChatResponseRouting(f connectwire.Field, m *GetChatMessageResponse) 
 	case 27:
 		return connectwire.SetInt64(f, "devin chat response", &m.CommittedOverageCost)
 	case 28:
-		if err := connectwire.RequireKind(f, protowire.BytesType, "devin chat response"); err != nil {
-			return err
-		}
-		m.ResponseDimensionGroups = append(m.ResponseDimensionGroups, connectwire.BytesValue(f))
+		return connectwire.AppendBytesField(f, "devin chat response", &m.ResponseDimensionGroups)
+	default:
+		return nil
 	}
-	return nil
 }

@@ -44,10 +44,10 @@ type chatInput struct {
 	maxTokens int
 }
 
-func devinOS() string {
-	switch runtime.GOOS {
+func devinOS(goos string) string {
+	switch goos {
 	case "darwin", "windows":
-		return runtime.GOOS
+		return goos
 	default:
 		return "linux"
 	}
@@ -69,7 +69,7 @@ func metadata(wireKey, jwt string) *wire.Metadata {
 		ExtensionVersionView: []byte(ideVersion),
 		APIKeyView:           []byte(wireKey),
 		LocaleView:           []byte("en"),
-		OSView:               []byte(devinOS()),
+		OSView:               []byte(devinOS(runtime.GOOS)),
 		UserJWTView:          []byte(jwt),
 	}
 }
@@ -82,7 +82,7 @@ func discoveryMetadata(key string) *wire.Metadata {
 		ExtensionVersionView:   []byte("0.0.0-dev"),
 		APIKeyView:             []byte(sessionToken(key)),
 		LocaleView:             []byte("en"),
-		OSView:                 []byte(devinOS()),
+		OSView:                 []byte(devinOS(runtime.GOOS)),
 		SupportedModelDisplays: discoveryDisplays,
 	}
 }
