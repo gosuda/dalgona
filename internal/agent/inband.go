@@ -102,7 +102,7 @@ func (w *worker) runInBand(ctx context.Context, call model.ToolCall) (model.Tool
 	if err != nil {
 		return model.ToolResult{}, err
 	}
-	return model.ToolResult{ID: call.ID, Name: call.Name, Output: quoteJSON(completed.Output), IsError: !completed.OK}, nil
+	return model.ToolResult{ID: call.ID, Name: call.Name, Output: jsonString(completed.Output), IsError: !completed.OK}, nil
 }
 
 type inBandDenial struct {
