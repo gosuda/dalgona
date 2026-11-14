@@ -420,6 +420,8 @@ func TestServeTurnApprovalNeverLowersThread(t *testing.T) {
 
 func turnApprovalReachesClient(t *testing.T, threadParams map[string]any, turnPolicy string) {
 	r := newRig(t, config.ApprovalAuto)
+	r.cfg.SandboxCause = func() string { return "" }
+	reopen(t, r)
 	r.llm.push(llmReply{body: sseCall("call-t", "exec", `{"command":"echo turn"}`)}, llmReply{body: sseText("after")})
 	c := r.connect()
 	threadID := startThread(t, r, c, threadParams)
