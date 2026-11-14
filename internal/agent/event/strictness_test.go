@@ -50,7 +50,7 @@ func TestFoldAcceptsFarOutOfOrderScriptEffects(t *testing.T) {
 	effect := func(n uint64) event.Event {
 		return event.ScriptEffect{RunID: "s", N: n, Op: "tool", ArgsSHA: digest, Result: jsontext.Value(`1`)}
 	}
-	state, err := foldEvents(t, event.State{}, event.TurnStarted{TurnID: "t"}, script, effect(0), effect(4096))
+	state, err := foldEvents(t, event.TurnStarted{TurnID: "t"}, script, effect(0), effect(4096))
 	if err != nil {
 		t.Fatalf("fold rejected a legal out-of-order effect: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestFoldAcceptSessionBlobbedExecCreatesGrant(t *testing.T) {
 		ToolCalls:  []event.ToolCall{{ID: "c", Name: "exec", ArgsBlob: &event.BlobRef{Blob: digest, Bytes: 70000}}},
 		StopReason: "tool_calls",
 	}
-	state, err := foldEvents(t, event.State{},
+	state, err := foldEvents(t,
 		event.TurnStarted{TurnID: "t"},
 		assistant,
 		event.ApprovalRequested{RequestID: "r", CallID: "c", Summary: "big", Class: "exec", GrantPrefix: "git"},

@@ -38,21 +38,21 @@ func TestFoldDoesNotMutateInput(t *testing.T) {
 	}
 }
 
-func replayTurns(base event.State, turns int) (event.State, error) {
+func replayTurns(base event.State, turns int) error {
 	acc := base.Clone()
 	seq := uint64(0)
 	for n := range turns {
 		id := "replay-turn-" + strconv.Itoa(n)
 		seq++
 		if err := acc.Apply(seq, event.TurnStarted{TurnID: id}); err != nil {
-			return acc, err
+			return err
 		}
 		seq++
 		if err := acc.Apply(seq, event.TurnCompleted{TurnID: id, Status: "completed"}); err != nil {
-			return acc, err
+			return err
 		}
 	}
-	return acc, nil
+	return nil
 }
 
 func replayAllocs(t *testing.T, base event.State, turns int) []float64 {
@@ -61,7 +61,7 @@ func replayAllocs(t *testing.T, base event.State, turns int) []float64 {
 	vals := make([]float64, 0, samples)
 	for range samples {
 		vals = append(vals, testing.AllocsPerRun(10, func() {
-			if _, err := replayTurns(base, turns); err != nil {
+			if err := replayTurns(base, turns); err != nil {
 				t.Fatalf("replay: %v", err)
 			}
 		}))
@@ -93,7 +93,7 @@ func BenchmarkFoldReplay(b *testing.B) {
 			base := event.State{}
 			b.ResetTimer()
 			for b.Loop() {
-				if _, err := replayTurns(base, turns); err != nil {
+				if err := replayTurns(base, turns); err != nil {
 					b.Fatal(err)
 				}
 			}

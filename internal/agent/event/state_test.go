@@ -64,7 +64,7 @@ func TestFoldRejectsIllegalTransitions(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := foldEvents(t, event.State{}, test.events...)
+			_, err := foldEvents(t, test.events...)
 			if err == nil {
 				t.Fatal("Fold accepted an illegal transition")
 			}
@@ -109,7 +109,7 @@ func TestFoldTracksRecoveryState(t *testing.T) {
 		event.Compaction{FirstKeptSeq: 2, Summary: "summary", Method: "auto", TokensBefore: 10, TokensAfter: 5},
 		event.TurnCompleted{TurnID: "t", Status: "completed"},
 	}
-	state, err := foldEvents(t, event.State{}, events...)
+	state, err := foldEvents(t, events...)
 	if err != nil {
 		t.Fatalf("Fold valid history: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestFoldCompletesSkippedAndDeclinedCalls(t *testing.T) {
 	prefix := []event.Event{event.TurnStarted{TurnID: "t"}, assistant}
 	skipped := completedCall("c", "skipped")
 	skipped.OK = false
-	_, err := foldEvents(t, event.State{}, append(prefix, skipped, event.TurnCompleted{TurnID: "t", Status: "interrupted"})...)
+	_, err := foldEvents(t, append(prefix, skipped, event.TurnCompleted{TurnID: "t", Status: "interrupted"})...)
 	if err != nil {
 		t.Fatalf("Fold skipped call: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestFoldCompletesSkippedAndDeclinedCalls(t *testing.T) {
 		event.ApprovalResolved{RequestID: "r", Decision: "decline", By: "rule:test", Reason: "denied"},
 		declined, event.TurnCompleted{TurnID: "t", Status: "completed"},
 	)
-	state, err := foldEvents(t, event.State{}, declinedEvents...)
+	state, err := foldEvents(t, declinedEvents...)
 	if err != nil || state.Status != event.StatusIdle {
 		t.Fatalf("Fold declined call: state=%#v err=%v", state, err)
 	}
@@ -189,7 +189,7 @@ func TestFoldTracksUserSessionGrants(t *testing.T) {
 				ItemID: "a", TurnID: "t", StopReason: "tool_calls",
 				ToolCalls: []event.ToolCall{{ID: "c", Name: test.tool, Args: test.args}},
 			}
-			resolved, err := foldEvents(t, event.State{},
+			resolved, err := foldEvents(t,
 				event.TurnStarted{TurnID: "t"}, assistant,
 				event.ApprovalRequested{RequestID: "r", CallID: "c", Summary: "run"},
 				event.ApprovalResolved{RequestID: "r", Decision: "accept_session", By: "user"},
@@ -221,7 +221,7 @@ func TestFoldGrantSurvivesCallSkippedAfterCrash(t *testing.T) {
 			ItemID: "a", TurnID: "t", StopReason: "tool_calls",
 			ToolCalls: []event.ToolCall{{ID: "c", Name: test.tool, Args: jsontext.Value(test.args)}},
 		}
-		state, err := foldEvents(t, event.State{},
+		state, err := foldEvents(t,
 			event.TurnStarted{TurnID: "t"}, assistant,
 			event.ApprovalRequested{RequestID: "r", CallID: "c", Summary: "run", Class: test.class},
 			event.ApprovalResolved{RequestID: "r", Decision: "accept_session", By: "user"},
@@ -261,7 +261,7 @@ func TestFoldAcceptsOutOfOrderScriptEffects(t *testing.T) {
 	effect := func(n uint64) event.Event {
 		return event.ScriptEffect{RunID: "s", N: n, Op: "tool", ArgsSHA: digest, Result: jsontext.Value(`1`)}
 	}
-	state, err := foldEvents(t, event.State{}, event.TurnStarted{TurnID: "t"}, script, effect(0), effect(2), effect(1))
+	state, err := foldEvents(t, event.TurnStarted{TurnID: "t"}, script, effect(0), effect(2), effect(1))
 	if err != nil {
 		t.Fatalf("out-of-order effects: %v", err)
 	}
@@ -304,9 +304,9 @@ func completedCall(id, recovered string) event.ToolCompleted {
 	return event.ToolCompleted{CallID: id, OK: true, Recovered: recovered}
 }
 
-func foldEvents(t *testing.T, initial event.State, events ...event.Event) (event.State, error) {
+func foldEvents(t *testing.T, events ...event.Event) (event.State, error) {
 	t.Helper()
-	state := initial
+	state := event.State{}
 	var err error
 	for i, current := range events {
 		state, err = event.Fold(state, uint64(i+1), current)

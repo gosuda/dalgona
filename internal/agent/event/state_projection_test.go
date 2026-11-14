@@ -9,7 +9,7 @@ import (
 
 func TestFoldScriptEffectReportsMismatch(t *testing.T) {
 	t.Parallel()
-	_, err := foldEvents(t, event.State{},
+	_, err := foldEvents(t,
 		event.TurnStarted{TurnID: "t1"},
 		event.ScriptStarted{RunID: "r1", SourceBlob: event.BlobRef{Blob: digest, Bytes: 1}, Entry: "main", Args: jsontext.Value(`{}`), Seed: 9},
 		event.ScriptEffect{RunID: "r1", N: 0, Op: "read", ArgsSHA: digest, Result: jsontext.Value(`1`)},
@@ -23,17 +23,17 @@ func TestFoldScriptEffectReportsMismatch(t *testing.T) {
 	}
 }
 
-func createdWithModel(model string) event.SessionCreated {
+func createdWithModel() event.SessionCreated {
 	return event.SessionCreated{
-		ID: "s", Cwd: "/w", Model: model,
+		ID: "s", Cwd: "/w", Model: "base/m",
 		Approval: "auto", Sandbox: "off", Runner: "local",
 	}
 }
 
 func twoTurns(t *testing.T) event.State {
 	t.Helper()
-	state, err := foldEvents(t, event.State{},
-		createdWithModel("base/m"),
+	state, err := foldEvents(t,
+		createdWithModel(),
 		event.TurnStarted{TurnID: "t1"},
 		event.UserMessage{ItemID: "m1", TurnID: "t1", Kind: "prompt", Text: "first prompt"},
 		event.TurnCompleted{TurnID: "t1", Status: "completed"},
@@ -88,8 +88,8 @@ func TestFoldRootBranchKeepsCreatedModel(t *testing.T) {
 
 func TestFoldModelReturnsToLeafBranch(t *testing.T) {
 	t.Parallel()
-	state, err := foldEvents(t, event.State{},
-		createdWithModel("base/m"),
+	state, err := foldEvents(t,
+		createdWithModel(),
 		event.TurnStarted{TurnID: "t1"},
 		event.UserMessage{ItemID: "m1", TurnID: "t1", Kind: "prompt", Text: "one", Model: "a/m"},
 		event.TurnCompleted{TurnID: "t1", Status: "completed"},
@@ -122,8 +122,8 @@ func TestFoldModelReturnsToLeafBranch(t *testing.T) {
 func TestFoldPreviewKeepsBlobRefForHost(t *testing.T) {
 	t.Parallel()
 	blob := &event.BlobRef{Blob: digest, Bytes: 8}
-	state, err := foldEvents(t, event.State{},
-		createdWithModel("base/m"),
+	state, err := foldEvents(t,
+		createdWithModel(),
 		event.TurnStarted{TurnID: "t1"},
 		event.UserMessage{ItemID: "m1", TurnID: "t1", Kind: "prompt", TextBlob: blob},
 	)
@@ -138,8 +138,8 @@ func TestFoldPreviewKeepsBlobRefForHost(t *testing.T) {
 func TestPreviewFallsThroughToLaterPrompt(t *testing.T) {
 	t.Parallel()
 	pending := &event.BlobRef{Blob: digest, Bytes: 8}
-	state, err := foldEvents(t, event.State{},
-		createdWithModel("base/m"),
+	state, err := foldEvents(t,
+		createdWithModel(),
 		event.TurnStarted{TurnID: "t1"},
 		event.UserMessage{ItemID: "m1", TurnID: "t1", Kind: "prompt", TextBlob: pending},
 		event.UserMessage{ItemID: "m2", TurnID: "t1", Kind: "prompt", Text: "second"},

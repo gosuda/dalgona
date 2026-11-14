@@ -118,7 +118,7 @@ func TestThreadMetadataRoundTripAndFold(t *testing.T) {
 	if (event.ThreadNamed{Name: strings.Repeat("n", event.MaxThreadNameBytes+1)}).Validate() == nil {
 		t.Fatal("oversized name accepted")
 	}
-	state, err := foldEvents(t, event.State{}, created, event.ThreadNamed{Name: "renamed"}, event.ThreadArchived{Archived: true})
+	state, err := foldEvents(t, created, event.ThreadNamed{Name: "renamed"}, event.ThreadArchived{Archived: true})
 	if err != nil || state.Name != "renamed" || !state.Archived {
 		t.Fatalf("state name=%q archived=%v err=%v", state.Name, state.Archived, err)
 	}
