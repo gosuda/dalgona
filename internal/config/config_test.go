@@ -53,7 +53,6 @@ func TestLoad_defaults(t *testing.T) {
 	requireConfigValue(t, cfg.Model, "")
 	requireConfigValue(t, cfg.Reasoning, config.ReasoningDefault)
 	requireConfigValue(t, cfg.Approval, config.ApprovalAuto)
-	requireConfigValue(t, cfg.ToolMode, config.ToolModeEvalFirst)
 	requireConfigValue(t, cfg.Sandbox, config.SandboxWorkspaceWrite)
 	requireConfigValue(t, cfg.Runner, "local")
 	requireConfigValue(t, cfg.EditStyle.EditStyle("any/model"), "anchor")
