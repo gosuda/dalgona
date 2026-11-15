@@ -181,7 +181,7 @@ func isEnvPlaceholder(inner string) bool {
 	if strings.ContainsAny(inner, ":{}") {
 		return false
 	}
-	if !secretEnvironmentName(inner) {
+	if !SecretEnvironmentName(inner) {
 		return false
 	}
 	return isEnvName(inner)
@@ -503,7 +503,7 @@ func (s *Store) credentialReplacements() []replacement {
 	}
 	for _, entry := range os.Environ() {
 		name, value, ok := strings.Cut(entry, "=")
-		if ok && secretEnvironmentName(name) {
+		if ok && SecretEnvironmentName(name) {
 			items = appendSecret(items, replacement{from: value, to: "{{secret:" + name + "}}"})
 		}
 	}
@@ -539,7 +539,7 @@ func appendSecret(items []replacement, item replacement) []replacement {
 	return append(items, item)
 }
 
-func secretEnvironmentName(name string) bool {
+func SecretEnvironmentName(name string) bool {
 	return strings.HasSuffix(name, "_API_KEY") || strings.HasSuffix(name, "_TOKEN") || strings.HasSuffix(name, "_SECRET") || strings.HasSuffix(name, "_PASSWORD")
 }
 

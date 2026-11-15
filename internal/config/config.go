@@ -134,6 +134,13 @@ const (
 	SandboxOff            SandboxMode = "off"
 )
 
+type ShellEnvMode string
+
+const (
+	ShellEnvSnapshot ShellEnvMode = "snapshot"
+	ShellEnvInherit  ShellEnvMode = "inherit"
+)
+
 type ToolMode string
 
 const (
@@ -254,6 +261,7 @@ type Config struct {
 	ToolMode                              ToolMode
 	Sandbox                               SandboxMode
 	SandboxWritableRoots                  []string
+	ShellEnv                              ShellEnvMode
 	Verbosity                             Verbosity
 	Theme                                 Theme
 	Icons                                 Icons
@@ -288,7 +296,7 @@ func defaultConfigWithHome(product Product, home, cwd string) Config {
 	return Config{
 		Home: home, Product: product, Cwd: cwd,
 		Reasoning: ReasoningDefault, Approval: ApprovalAuto, ToolMode: ToolModeEvalFirst,
-		Sandbox: SandboxWorkspaceWrite, Runner: "local",
+		Sandbox: SandboxWorkspaceWrite, Runner: "local", ShellEnv: ShellEnvSnapshot,
 		Verbosity: VerbosityMedium, Theme: ThemeAuto, Icons: IconsAuto, StatusHide: []string{}, Notifications: true,
 		EditStyle: EditStyleSpec{Default: "anchor"}, CompactionThreshold: .8,
 		CompactionKeepTokens: 20000, StreamStartTimeout: time.Minute,

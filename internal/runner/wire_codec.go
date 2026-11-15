@@ -234,6 +234,11 @@ func writeProcessFields(enc *jsontext.Encoder, spec ProcessSpec) error {
 	if err := writeEnv(enc, spec.Env); err != nil {
 		return err
 	}
+	if spec.EnvResolved {
+		if err := writeBool(enc, "envResolved", true); err != nil {
+			return err
+		}
+	}
 	return writeSandbox(enc, spec.Sandbox)
 }
 
@@ -322,11 +327,15 @@ func finishProcessSpec(fields map[string]jsontext.Value, id string, argv []strin
 	if err != nil {
 		return ProcessSpec{}, err
 	}
+	resolved, err := optionalBool(fields, "envResolved")
+	if err != nil {
+		return ProcessSpec{}, err
+	}
 	sandbox, err := optionalSandbox(fields)
 	if err != nil {
 		return ProcessSpec{}, err
 	}
-	return ProcessSpec{ID: id, Argv: argv, Dir: dir, Env: env, Sandbox: sandbox}, nil
+	return ProcessSpec{ID: id, Argv: argv, Dir: dir, Env: env, EnvResolved: resolved, Sandbox: sandbox}, nil
 }
 
 type readPageParams struct {

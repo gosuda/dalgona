@@ -8,6 +8,15 @@ The loader MUST reject unknown keys. The error MUST report the file and its 1-ba
 
 If a layer cannot be read or fails validation, `Load` MUST return an error.
 
+## Shell environment
+
+`shell_env` defaults to `snapshot` in both products.
+`inherit` disables login-shell capture and uses the current daemon environment.
+Other values MUST fail with `config: shell_env must be one of snapshot, inherit`.
+
+
+## Core defaults
+
 The default approval mode is `auto`. The default sandbox is `workspace-write`. The default tool mode is `eval-first` for both products. `tool_mode = "normal"` restores the full tool list. `tool_mode = "eval-only"` limits model-visible tools to `ask`, `yield`, and `eval`. The default runner is `local`. The default reasoning level is `default`.
 
 When no layer sets `edit_style`, every model MUST use the edit style `anchor`.

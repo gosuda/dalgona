@@ -63,6 +63,35 @@ The command environment MUST be the caller environment plus these defaults. Each
 - `npm_config_yes=true`
 - `PIP_NO_INPUT=1`
 
+
+### Login-shell environment
+
+Each host shares one login-shell snapshot across session runners and host commands.
+`NewLocal` inherits the daemon environment without capture.
+`NewLocalWithShellEnv` enables capture when its snapshot is not nil.
+The snapshot runs `$SHELL -lic env` with a five-second timeout and a 1 MiB output limit.
+An empty shell uses `/bin/sh` on Unix.
+Windows without a configured POSIX shell inherits the daemon environment.
+The cache holds only changed variables, excluding secret names and shell bookkeeping variables.
+Each resolution overlays this delta on a fresh daemon-environment copy.
+Explicit process variables override snapshot values.
+Host command overrides apply last, including deletions.
+Defaults fill only missing names.
+Startup-file creation, deletion, size changes, or modification-time changes refresh the cache.
+The fingerprint includes the shell path and HOME.
+Zsh checks `.zshenv`, `.zprofile`, `.zshrc`, and `.zlogin`.
+Bash checks `.bash_profile`, `.bash_login`, `.profile`, and `.bashrc`.
+Other shells check `.profile`.
+Refreshes run serially.
+Capture failures remain cached until the fingerprint changes.
+Failure, malformed records, overflow, or timeout discards the captured delta.
+The runner then returns a daemon-environment copy.
+Timeout cleanup sends TERM and allows two seconds before KILL.
+Warnings contain only a sanitized error class and optional exit status.
+`EnvResolved` prevents a second snapshot overlay after host overrides.
+Remote starts MUST reject this marker when true.
+Remote hosts capture their own environment.
+
 The shim MUST write `exit` by a temporary file and rename. `exit` MUST be JSON `{"code":N,"signal":"","ended_at":"RFC3339"}`. `code` MUST be the numeric exit code. `signal` MUST be the signal text, or empty. `ended_at` MUST be an RFC3339 timestamp.
 
 On Linux, if `DALGONA_SYNCFS` is set, the shim MUST call `syncfs` on that path after the `exit` rename. It MUST NOT call `syncfs` before the rename completes. On other systems the variable MUST have no effect.

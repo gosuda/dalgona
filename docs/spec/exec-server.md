@@ -53,6 +53,17 @@ The server MUST preserve the runner operation semantics. The client MUST preserv
 
 `ExecServerMain` accepts `--listen stdio://` or `--listen ws://IP:PORT`, plus `--root DIR` and optional `--data DIR`.
 
+The production entrypoint accepts `--shell-env snapshot|inherit` and defaults to `snapshot`.
+It supplies the shared secret-name predicate to the runner.
+One snapshot serves all processes on that remote host.
+`ExecServerMain` supplies no predicate and defaults to inherit for tests.
+Explicit snapshot mode without a predicate fails before listening with `exec-server: snapshot requires a secret-name predicate`.
+Invalid values fail with `exec-server: shell-env must be one of snapshot, inherit`.
+`process/start` accepts optional boolean `envResolved`, defaulting to false.
+A nonboolean marker MUST fail parameter validation.
+The remote client refuses true markers instead of sending a local resolved environment.
+
+
 The `--root` flag defaults to `/workspace`. An invalid command line MUST exit with status 2. A listen address other than `stdio://` or `ws://IP:PORT` MUST fail with `exec-server: listen must be stdio:// or ws://IP:PORT`.
 
 Websocket mode MUST require `DALGONA_BOX_TOKEN` with at least 32 characters. Startup without it MUST fail with:

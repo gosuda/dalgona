@@ -20,6 +20,7 @@ import (
 	"github.com/gosuda/dalgona/internal/agent/advisor"
 	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/app/battery"
+	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/daemon"
 	"github.com/gosuda/dalgona/internal/discovery"
@@ -305,7 +306,7 @@ func bridge(ctx context.Context, client io.ReadWriter) error {
 func runExecServer(_ context.Context, args []string, std stdio) int {
 	return runner.ExecServerMainWithBridge(args, std.in, std.out, func(ctx context.Context, conn io.ReadWriteCloser) error {
 		return bridge(ctx, conn)
-	})
+	}, auth.SecretEnvironmentName)
 }
 
 func splice(ctx context.Context, client io.ReadWriter, conn net.Conn) error {

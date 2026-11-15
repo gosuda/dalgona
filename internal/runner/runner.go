@@ -20,11 +20,12 @@ type Sandbox struct {
 }
 
 type ProcessSpec struct {
-	ID      string
-	Argv    []string
-	Dir     string
-	Env     []string
-	Sandbox Sandbox
+	ID          string
+	Argv        []string
+	Dir         string
+	Env         []string
+	EnvResolved bool
+	Sandbox     Sandbox
 }
 
 type Exit struct {

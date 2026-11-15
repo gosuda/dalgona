@@ -92,6 +92,7 @@ type HostConfig struct {
 	SandboxCause     func() string
 	ToolNotes        []string
 	ProviderIDs      []string
+	ShellEnv         *runner.ShellEnvSnapshot
 }
 
 type Overrides struct {

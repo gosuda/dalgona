@@ -28,6 +28,7 @@ type fileDoc struct {
 	ApprovalValue        *string                `toml:"approval"`
 	ToolMode             *string                `toml:"tool_mode"`
 	Sandbox              *string                `toml:"sandbox"`
+	ShellEnv             *string                `toml:"shell_env"`
 	Verbosity            *string                `toml:"verbosity"`
 	Theme                *string                `toml:"theme"`
 	Icons                *string                `toml:"icons"`
@@ -243,6 +244,7 @@ func (c *Config) mergeScalars(current layer) error {
 	set(doc.ApprovalValue, (*string)(&c.Approval))
 	set(doc.ToolMode, (*string)(&c.ToolMode))
 	set(doc.Sandbox, (*string)(&c.Sandbox))
+	set(doc.ShellEnv, (*string)(&c.ShellEnv))
 	set(doc.Verbosity, (*string)(&c.Verbosity))
 	set(doc.Theme, (*string)(&c.Theme))
 	set(doc.Icons, (*string)(&c.Icons))
@@ -422,6 +424,7 @@ func (c *Config) validateEnums() []error {
 	}{
 		{"approval", string(c.Approval), optionsOf("approval")},
 		{"sandbox", string(c.Sandbox), sandboxOptions},
+		{"shell_env", string(c.ShellEnv), []string{string(ShellEnvSnapshot), string(ShellEnvInherit)}},
 		{"reasoning", string(c.Reasoning), reasoningOptions},
 	} {
 		if !one(choice.value, choice.options...) {

@@ -44,8 +44,8 @@ func (h *Host) Exec(ctx context.Context, id string, spec ExecSpec) (ExecResult, 
 		return ExecResult{}, fmt.Errorf("agent: exec runner: %w", err)
 	}
 	process := runner.ProcessSpec{
-		ID: id, Argv: spec.Argv, Dir: spec.Dir, Env: execEnvironment(spec.Env),
-		Sandbox: deniedSocketSandbox(execSandboxMode(spec.Sandbox), append([]string{spec.Dir}, h.roots...), h.cfg.Config.Home),
+		ID: id, Argv: spec.Argv, Dir: spec.Dir, Env: execEnvironment(h.cfg.ShellEnv.Resolve(ctx, os.Environ()), spec.Env), EnvResolved: true,
+		Sandbox: deniedSocketSandbox(execSandboxMode(spec.Sandbox), append([]string{spec.Dir}, h.roots...), h.Config().Home),
 	}
 	if err := run.Start(ctx, process); err != nil {
 		return ExecResult{}, fmt.Errorf("agent: exec start: %w", err)
@@ -57,7 +57,7 @@ func (h *Host) execRunner() (*runner.Local, error) {
 	h.execMu.Lock()
 	defer h.execMu.Unlock()
 	if h.exec == nil {
-		local, err := runner.NewLocal(filepath.Join(h.cfg.Config.Home, "exec"))
+		local, err := runner.NewLocalWithShellEnv(filepath.Join(h.Config().Home, "exec"), h.cfg.ShellEnv)
 		if err != nil {
 			return nil, err
 		}
@@ -73,8 +73,8 @@ func execSandboxMode(mode config.SandboxMode) runner.SandboxMode {
 	return runner.SandboxWorkspaceWrite
 }
 
-func execEnvironment(overrides map[string]*string) []string {
-	env := os.Environ()
+func execEnvironment(base []string, overrides map[string]*string) []string {
+	env := slices.Clone(base)
 	for _, key := range slices.Sorted(maps.Keys(overrides)) {
 		env = slices.DeleteFunc(env, func(entry string) bool {
 			name, _, _ := strings.Cut(entry, "=")

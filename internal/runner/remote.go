@@ -127,7 +127,12 @@ func executorVersion(raw jsontext.Value) (string, error) {
 	return fieldString(nested, "executorVersion")
 }
 
+var ErrResolvedEnvironment = errors.New("runner: remote start: environment resolved on another host")
+
 func (r *Remote) Start(ctx context.Context, spec ProcessSpec) error {
+	if spec.EnvResolved {
+		return ErrResolvedEnvironment
+	}
 	spec.Sandbox = Sandbox{Mode: SandboxOff}
 	params, err := encodeProcessSpec(spec)
 	if err != nil {
