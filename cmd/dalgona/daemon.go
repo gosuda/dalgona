@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +13,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/advisor"
@@ -38,7 +43,68 @@ func ensure(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return daemon.Ensure(ctx, config.ProductDalgona.Home(), exe)
+	return ensureHome(ctx, config.ProductDalgona.Home(), exe)
+}
+
+func ensureHome(ctx context.Context, home, exe string) (net.Conn, error) {
+	for {
+		conn, err := daemon.Ensure(ctx, home, exe)
+		if err != nil {
+			return nil, err
+		}
+		restarted, checkErr := ensureBuild(ctx, home)
+		if checkErr != nil {
+			_ = conn.Close()
+			return nil, checkErr
+		}
+		if !restarted {
+			return conn, nil
+		}
+	}
+}
+
+func ensureBuild(ctx context.Context, home string) (bool, error) {
+	if stdinIsTerminal() {
+		return confirmBuildRestart(ctx, home, daemon.Build(), os.Stdin, os.Stdout)
+	}
+	return false, checkBuild(ctx, home, daemon.Build())
+}
+
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func checkBuild(ctx context.Context, home, own string) error {
+	if own == "" {
+		return nil
+	}
+	_, err := daemon.CheckBuild(ctx, home, own)
+	return err
+}
+
+func confirmBuildRestart(ctx context.Context, home, own string, in io.Reader, out io.Writer) (bool, error) {
+	if own == "" {
+		return false, nil
+	}
+	_, err := daemon.CheckBuild(ctx, home, own)
+	mismatch, ok := errors.AsType[*daemon.BuildMismatchError](err)
+	if !ok {
+		return false, err
+	}
+	fmt.Fprintf(out, "daemon %s runs build %s; this client is build %s. Restart the daemon? Running turns stop and recover. [y/N] ",
+		home, mismatch.Running, mismatch.Own)
+	answer, _ := bufio.NewReader(in).ReadString('\n')
+	if strings.TrimSpace(answer) != "y" {
+		return false, errors.New("daemon build mismatch: restart the daemon with dalgona restart")
+	}
+	if err := daemon.Retire(ctx, home); err != nil {
+		return false, err
+	}
+	if !daemon.WaitSocketGone(ctx, home) {
+		return false, errors.New("daemon did not stop after retire")
+	}
+	return true, nil
 }
 
 func runDaemon(ctx context.Context, args []string, std stdio) int {
@@ -59,9 +125,14 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 		})
 	}
 	remotes := remoteExtensions(batteries)
+	ctx, retireDaemon := context.WithCancel(ctx)
+	defer retireDaemon()
+	startedAt := time.Now()
 	serve := func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
 		extensions := maps.Clone(remotes)
 		extensions[methodScriptRun] = scriptExtension(host, batteries)
+		extensions[daemon.MethodIdentity] = identityExtension(startedAt)
+		extensions[daemon.MethodRetire] = retireExtension(retireDaemon)
 		options := rpc.ServeOptions{Extensions: extensions, BeforeArchive: batteries.Archive, Advisors: advisors}
 		return rpc.ServeWith(ctx, conn, host, options)
 	}
@@ -69,6 +140,88 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 		return fail(std, 1, err)
 	}
 	return 0
+}
+
+func identityExtension(startedAt time.Time) rpc.Extension {
+	return func(context.Context, jsontext.Value) (jsontext.Value, error) {
+		var out bytes.Buffer
+		encoder := jsontext.NewEncoder(&out)
+		tokens := []jsontext.Token{
+			jsontext.BeginObject,
+			jsontext.String("build"), jsontext.String(daemon.Build()),
+			jsontext.String("pid"), jsontext.Int(int64(os.Getpid())),
+			jsontext.String("version"), jsontext.String(config.Version()),
+			jsontext.String("startedAt"), jsontext.String(startedAt.Format(time.RFC3339Nano)),
+			jsontext.EndObject,
+		}
+		for _, token := range tokens {
+			if err := encoder.WriteToken(token); err != nil {
+				return nil, fmt.Errorf("encode daemon identity: %w", err)
+			}
+		}
+		return jsontext.Value(bytes.TrimSpace(out.Bytes())), nil
+	}
+}
+
+func retireExtension(cancel context.CancelFunc) rpc.Extension {
+	return func(context.Context, jsontext.Value) (jsontext.Value, error) {
+		cancel()
+		return jsontext.Value("{}"), nil
+	}
+}
+
+func runRestart(ctx context.Context, args []string, std stdio) int {
+	if len(args) != 0 {
+		return usage(std, "restart")
+	}
+	return restartDaemon(ctx, config.ProductDalgona.Home(), std)
+}
+
+func restartDaemon(ctx context.Context, home string, std stdio) int {
+	exe, err := executable()
+	if err != nil {
+		return fail(std, 1, err)
+	}
+	own := daemon.Build()
+	info, probe, err := daemon.ProbeDaemon(ctx, home)
+	if err != nil {
+		return fail(std, 1, err)
+	}
+	if err := refuseUnsafeProbe(probe, info); err != nil {
+		return fail(std, 1, err)
+	}
+	if err := stopRunningDaemon(ctx, probe, home); err != nil {
+		return fail(std, 1, err)
+	}
+	if _, err := daemon.Ensure(ctx, home, exe); err != nil {
+		return fail(std, 1, err)
+	}
+	if probe == daemon.ProbeAbsent {
+		fmt.Fprintf(std.out, "daemon started (build %s)\n", own)
+		return 0
+	}
+	fmt.Fprintf(std.out, "daemon restarted (build %s)\n", own)
+	return 0
+}
+
+func refuseUnsafeProbe(probe daemon.Probe, info daemon.Info) error {
+	if probe == daemon.ProbePreIdentity || probe == daemon.ProbeReady && !daemon.VerifiedPID(info.PID) {
+		return errors.New("cannot safely identify the old daemon; stop it manually and retry dalgona restart")
+	}
+	return nil
+}
+
+func stopRunningDaemon(ctx context.Context, probe daemon.Probe, home string) error {
+	if probe != daemon.ProbeReady {
+		return nil
+	}
+	if err := daemon.Retire(ctx, home); err != nil {
+		return err
+	}
+	if !daemon.WaitSocketGone(ctx, home) {
+		return errors.New("daemon did not stop after retire")
+	}
+	return nil
 }
 
 func workspaceTrustDecision(ctx context.Context, cwd string, servers []discovery.MCPServer) battery.TrustDecision {

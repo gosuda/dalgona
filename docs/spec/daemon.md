@@ -24,6 +24,28 @@ When the context ends, `Run` MUST stop accepting, close every open connection, a
 
 `Ensure` MUST reuse an accepting socket. If the socket is missing or stale, it MUST start `<executable> daemon` detached and append stdout and stderr to `daemon.log`. On Unix the child MUST run in a new session. On Windows it MUST use `DETACHED_PROCESS` and `CREATE_NEW_PROCESS_GROUP`. `Ensure` MUST retry for five seconds. On timeout it MUST return `daemon did not start: see <home>/daemon.log`.
 
+Each local dial MUST check the daemon build identity before it sends any other request. `daemon.Build()` MUST return the first 16 hex digits of the SHA-256 of the executable bytes. A read failure MUST return the empty string. An empty identity MUST NOT trigger a restart. A daemon that reports another known build MUST produce a mismatch.
+
+A terminal client MUST ask with this prompt:
+
+```text
+daemon <home> runs build <running>; this client is build <own>. Restart the daemon? Running turns stop and recover. [y/N]
+```
+
+The answer `y` MUST retire the daemon, wait up to five seconds for the socket to go, and run `Ensure` again. Any other answer MUST give this error:
+
+```text
+daemon build mismatch: restart the daemon with dalgona restart
+```
+
+A client without a terminal MUST give this error and exit 1:
+
+```text
+daemon runs build <running>, this client is build <own>; run dalgona restart
+```
+
+A daemon without the identity method MUST count as build `<unknown pre-identity build>`, not as compatible.
+
 `Ensure` and `Run` MUST reject a socket path of `<limit>` bytes or more before spawning or listening, with `daemon socket path <path> is <n> bytes; the limit is <limit>; use a shorter home directory`.
 
 The limit MUST be 104 on darwin and the BSDs and 108 on Linux and Windows.
@@ -62,6 +84,12 @@ With `--remote <name>`, `logout` MUST remove the provider credential inside the 
 
 A top-level dalgona thread MUST get the `ratchet` tool. Child and advisor threads MUST NOT get it.
 
+`dalgona restart` MUST retire a running daemon and start a new one. It MUST print `daemon restarted (build <own>)`. With no daemon running it MUST print `daemon started (build <own>)`. It MUST terminate only a daemon whose recorded pid, current-user ownership, and home association are verified. A daemon without the identity method MUST stay running, and the command MUST answer:
+
+```text
+cannot safely identify the old daemon; stop it manually and retry dalgona restart
+```
+
 The dalgona host MUST bind `[runners.<name>]` runners through the remote binder and MUST use the local runner for every other runner name. `dalgona pull <thread>` and `dalgona runner gc [--yes]` MUST run inside the daemon through the protocol extensions `dalgona/remote/pull {threadId}` and `dalgona/remote/gc {yes}`, because the daemon holds the journal lock. Each extension MUST answer `{"exitCode":<int>,"output":<text>}`. Without `--yes`, `runner gc` MUST answer no to every destroy question. `dalgona cloud up|down|pull` MUST run in the client process.
 
 `dalgona bridge` MUST splice standard input and output to a local `Ensure` connection. `dalgona exec-server` MUST serve the exec protocol and MUST use the same splice for its `/bridge` path. The TUI, `models`, `dalgona app-server`, `dalgona web`, `pull`, and `runner gc` MUST dial the local daemon through `Ensure`. When `--remote <name>` is given, or `remote` is set in configuration, they MUST dial the remote box daemon through the binder's bridge instead. The flag MUST win over the configuration. `bridge` and `exec-server` MUST NOT redirect their local listener with `--remote`.
@@ -71,6 +99,12 @@ The dalgona host MUST bind `[runners.<name>]` runners through the remote binder 
 The `--config` argument MUST split at its first `=`. A `--config` argument without `=`, or with an empty key, MUST fail with exit status 2. A `--config` value MUST lose its surrounding whitespace and quote characters. A `--config` key or value that dalgona does not map MUST be ignored with a note. A later mapped `--config` value for a key MUST replace an earlier one. The `--config` split MUST follow the Codex rule in `codex-rs/utils/cli/src/config_override.rs`.
 
 The app-server `--listen` value MUST be `stdio://` or `ws://IP:PORT`. The WebSocket address MUST be a literal IP address with a port. Any other `--listen` value MUST fail with exit status 2 before the listener starts. A non-loopback address MUST fail even when WebSocket authentication is configured. The loopback rule MUST follow Codex `codex-rs/app-server-transport/src/transport/websocket.rs`.
+
+On stdin EOF, the stdio app-server MUST close the daemon connection's write side.
+It MUST continue to forward daemon output until the daemon closes that connection.
+The daemon MUST drain admitted requests and flush replies when handlers finish within its 30-second drain limit.
+The app-server MUST then exit without stopping the shared daemon.
+The local daemon dialer MUST preserve the Unix socket's half-close capability.
 
 The app-server WebSocket listener MUST refuse a request with a non-empty `Origin` header with HTTP 403. It MUST answer a request without a valid `Authorization: Bearer <token>` header with HTTP 401. It MUST compare the bearer token digest in constant time. It MUST answer HTTP 503 while it shuts down, and HTTP 503 when it cannot dial the daemon. It MUST NOT upgrade a request that the daemon dial refused. The Origin refusal MUST follow Codex `codex-rs/app-server-transport/src/transport/websocket.rs`.
 
