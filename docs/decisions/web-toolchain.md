@@ -26,12 +26,12 @@ Grounded on 2026-11-12. Each row gives an exact dependency or devDependency pin 
 
 ## Pins on 2026-11-11
 
-Grounded on 2026-11-11. Each row gives the exact pin in the repository. Each pin equals the latest stable release, except pnpm and TypeScript. pnpm stays at 12.18.0 while the npm stable tag names it. TypeScript stays at 6.0.3 by the invariant above. The OSV column holds the result of `POST https://api.osv.dev/v1/querybatch` for each npm pin, run on 2026-11-12. The Node.js row is not an npm package and was not sent to that query.
+The original pins equalled the latest stable releases on that date, except pnpm and TypeScript. TypeScript stays at 6.0.3 by the invariant above. pnpm 12.21.0 is pinned in `web/package.json`, `deploy/cloudflare/package.json`, and `.github/workflows/ci.yml`. The npm `latest` tag names pnpm 12.21.0, read on 2026-11-15 and again on 2026-11-16. For unchanged npm pins, the OSV column retains the result of the `POST https://api.osv.dev/v1/querybatch` request of 2026-11-15. Rows marked `supplementary query` record the exact-version queries that the evidence section describes. The Node.js row is not an npm package and was not sent to either query.
 
-|Package|Pin|Released|Use|OSV batch 2026-11-12|
+|Package|Pin|Released|Use|OSV batch 2026-11-15|
 |---|---|---|---|---|
-|pnpm (`web/package.json`, `.github/workflows/ci.yml`)|12.18.0|not recorded|package manager and CI setup|none|
-|Node.js (`.github/workflows/ci.yml`)|26.13.1|2026-11-11|CI runtime. Raised from 26.13.0 on 2026-11-12 to the 26.x release that the Node.js security release page of 2026-11-11 lists as Latest LTS, with the 26.x fixes. The CVE IDs CVE-2026-105482, CVE-2026-105483, CVE-2026-106069 and CVE-2026-111497 are not on that page, so those IDs are not confirmed fixed.|not queried|
+|pnpm (`web/package.json`, `deploy/cloudflare/package.json`, `.github/workflows/ci.yml`)|12.21.0|2026-11-13|package manager and CI setup|none (supplementary query)|
+|Node.js (`.github/workflows/ci.yml`)|26.13.1|2026-11-10|CI runtime. `https://nodejs.org/dist/index.json` lists v26.13.1 as the newest 26.x release on 2026-11-15. The page of the 2026-11-11 Node.js security releases names v26.13.1 as the 26.x download. The CVE IDs CVE-2026-105482, CVE-2026-105483, CVE-2026-106069 and CVE-2026-111497 are not on that page, so those IDs are not confirmed fixed.|not queried|
 |svelte|5.57.3|2026-10-26|UI framework|none|
 |@sveltejs/kit|3.2.0|2026-11-10|app framework and build|none|
 |@sveltejs/adapter-static|4.0.1|2026-10-29|static build output|none|
@@ -44,3 +44,5 @@ Grounded on 2026-11-11. Each row gives the exact pin in the repository. Each pin
 ## Evidence
 
 Observed on 2026-11-08. SvelteKit 3.1.1 reads `ts.sys` at startup. TypeScript 7.0.2 does not expose `ts.sys`, so Vitest failed before it loaded a test. TypeScript 6.0.3 is the newest 6.x release that the SvelteKit 3.1.1 and svelte-check 4.7.8 peer ranges accept. OSV `POST https://api.osv.dev/v1/query` for npm `typescript` 6.0.3 returned `{}` on that date. TypeScript 7.0.2 MUST NOT be used with the pinned Svelte tooling.
+
+The [pnpm registry metadata](https://registry.npmjs.org/pnpm) gives `time["12.21.0"]` as `2026-11-13T21:01:11.515Z` (UTC). On 2026-11-15, an exact-version `POST` to the [OSV query API](https://api.osv.dev/v1/query) for pnpm 12.21.0 returned `{}`. Earlier empty OSV results for older pnpm pins do not cover 12.21.0, so this query ran for the new pin. On 2026-11-16, the npm `latest` tag names 12.21.0. This result covers the pinned package only and does not clear the dependency tree. The audit of this refresh reports one low advisory for `deepmerge` 4.3.1, which has no patched version.
