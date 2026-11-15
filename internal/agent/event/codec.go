@@ -116,7 +116,7 @@ func decodeObject(raw []byte) (map[string]jsontext.Value, error) {
 
 func decodeByType(kind string, reader *objectReader) (Event, error) {
 	switch kind {
-	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeTurnJudged, TypeUserMessage:
+	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnEffort, TypeTurnCompleted, TypeTurnRecovery, TypeTurnJudged, TypeUserMessage:
 		return decodeSessionEvent(kind, reader)
 	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
 		return decodeToolEvent(kind, reader)
@@ -126,6 +126,10 @@ func decodeByType(kind string, reader *objectReader) (Event, error) {
 		return decodeScriptEvent(kind, reader)
 	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return decodeMetadataEvent(kind, reader), nil
+	case TypeHashlineInvocationStarted, TypeHashlineInvocationSettled:
+		return decodeInvocationEvent(kind, reader), nil
+	case TypePromptBase, TypeMemoryUpdated, TypePromptBound:
+		return decodePromptEvent(kind, reader)
 	default:
 		return nil, fmt.Errorf("unknown event type %q", kind)
 	}
@@ -145,6 +149,34 @@ func decodeMetadataEvent(kind string, reader *objectReader) Event {
 			ReviewSeq: reader.uint64("review_seq"), Delivery: reader.str("delivery"),
 		}
 	}
+}
+
+func decodeInvocationEvent(kind string, reader *objectReader) Event {
+	switch kind {
+	case TypeHashlineInvocationStarted:
+		return HashlineInvocationStarted{
+			CallID: reader.str("call_id"), TurnID: reader.str("turn_id"), Identity: reader.str("identity"),
+			Fingerprint: reader.str("fingerprint"), Style: reader.str("style"),
+			ContractVersion: reader.number("contract_version"), Paths: reader.stringList("paths"),
+		}
+	default:
+		reader.require("ok")
+		reader.require("output")
+		return HashlineInvocationSettled{
+			Identity: reader.str("identity"), OK: reader.boolean("ok"), Output: reader.str("output"),
+			Spill: reader.spill(), Meta: reader.raw("meta"),
+		}
+	}
+}
+
+func (r *objectReader) spill() *Spill {
+	raw, ok := r.fields["spill"]
+	if !ok || r.err != nil {
+		return nil
+	}
+	value, err := decodeSpill(raw)
+	r.err = err
+	return &value
 }
 
 func (r *objectReader) timestamp(name string) time.Time {

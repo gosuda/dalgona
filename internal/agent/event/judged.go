@@ -17,6 +17,8 @@ const (
 type TurnJudged struct {
 	TurnID    string
 	By        string
+	Fallback  string
+	Judges    []JudgeAttribution
 	Verdict   string
 	Paths     []string
 	Scores    map[string]float64
@@ -49,8 +51,8 @@ func (e TurnJudged) Validate() error {
 
 func (e TurnJudged) shared() judgment {
 	return judgment{
-		Verdict: e.Verdict, Paths: e.Paths, Scores: e.Scores, Flags: e.Flags, Spoken: e.Spoken,
-		Feedback: e.Feedback, Error: e.Error, ElapsedMS: e.ElapsedMS,
+		Fallback: e.Fallback, Judges: e.Judges, Verdict: e.Verdict, Paths: e.Paths, Scores: e.Scores, Flags: e.Flags,
+		Spoken: e.Spoken, Feedback: e.Feedback, Error: e.Error, ElapsedMS: e.ElapsedMS,
 	}
 }
 
@@ -67,6 +69,8 @@ type ToolJudged struct {
 	CallID      string
 	TurnID      string
 	By          string
+	Fallback    string
+	Judges      []JudgeAttribution
 	Verdict     string
 	Paths       []string
 	Scores      map[string]float64
@@ -92,17 +96,28 @@ func (e ToolJudged) Validate() error {
 	if e.FailedParts < 0 || e.FailedParts > e.Parts {
 		return errors.New("tool.judged failed_parts must be from 0 to parts")
 	}
+	if len(e.Judges) > 0 && len(e.Judges) != e.Parts {
+		return errors.New("tool.judged judges must hold one entry for each part")
+	}
 	return e.shared().validate()
 }
 
 func (e ToolJudged) shared() judgment {
 	return judgment{
-		Verdict: e.Verdict, Paths: e.Paths, Scores: e.Scores, Flags: e.Flags, Spoken: e.Spoken,
-		Feedback: e.Feedback, Error: e.Error, ElapsedMS: e.ElapsedMS,
+		Fallback: e.Fallback, Judges: e.Judges, Verdict: e.Verdict, Paths: e.Paths, Scores: e.Scores, Flags: e.Flags,
+		Spoken: e.Spoken, Feedback: e.Feedback, Error: e.Error, ElapsedMS: e.ElapsedMS,
 	}
 }
 
+type JudgeAttribution struct {
+	Part     int
+	By       string
+	Fallback string
+}
+
 type judgment struct {
+	Fallback  string
+	Judges    []JudgeAttribution
 	Verdict   string
 	Paths     []string
 	Scores    map[string]float64
@@ -120,6 +135,9 @@ func (j judgment) validate() error {
 	if err := validatePaths(j.Paths); err != nil {
 		return err
 	}
+	if err := validateAttribution(j.Fallback, j.Judges); err != nil {
+		return err
+	}
 	if j.ElapsedMS < 0 {
 		return errors.New("elapsed_ms must not be negative")
 	}
@@ -127,6 +145,37 @@ func (j judgment) validate() error {
 		return j.validateError()
 	}
 	return j.validateAnswer()
+}
+
+func validateAttribution(fallback string, judges []JudgeAttribution) error {
+	if len(fallback) > MaxJudgeErrorBytes {
+		return fmt.Errorf("fallback must be at most %d bytes", MaxJudgeErrorBytes)
+	}
+	if len(judges) == 0 {
+		return nil
+	}
+	if len(judges) < 2 {
+		return errors.New("judges needs one entry for each of two or more parts")
+	}
+	for i, judge := range judges {
+		if err := judge.validate(i); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (j JudgeAttribution) validate(index int) error {
+	if j.Part != index {
+		return fmt.Errorf("judges[%d] part must be %d", index, index)
+	}
+	if j.By == "" {
+		return fmt.Errorf("judges[%d] by must not be empty", index)
+	}
+	if len(j.Fallback) > MaxJudgeErrorBytes {
+		return fmt.Errorf("judges[%d] fallback must be at most %d bytes", index, MaxJudgeErrorBytes)
+	}
+	return nil
 }
 
 func (j judgment) validateError() error {

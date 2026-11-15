@@ -13,6 +13,7 @@ const (
 	TypeSessionCreated    = "session.created"
 	TypeRunnerBound       = "runner.bound"
 	TypeTurnStarted       = "turn.started"
+	TypeTurnEffort        = "turn.effort"
 	TypeTurnCompleted     = "turn.completed"
 	TypeTurnJudged        = "turn.judged"
 	TypeUserMessage       = "user.message"
@@ -34,6 +35,12 @@ const (
 	TypeThreadNamed       = "thread.named"
 	TypeThreadArchived    = "thread.archived"
 	TypeSandboxChosen     = "sandbox.chosen"
+	TypeTurnRecovery      = "turn.recovery"
+)
+
+const (
+	TypeHashlineInvocationStarted = "hashline.invocation_started"
+	TypeHashlineInvocationSettled = "hashline.invocation_settled"
 )
 
 const MaxInlineBytes = 64 << 10
@@ -187,6 +194,16 @@ func (e TurnStarted) Validate() error {
 	return required(map[string]string{"turn_id": e.TurnID})
 }
 
+type TurnEffort struct {
+	TurnID string
+	Effort string
+}
+
+func (TurnEffort) Type() string { return TypeTurnEffort }
+func (e TurnEffort) Validate() error {
+	return required(map[string]string{"turn_id": e.TurnID})
+}
+
 type TurnCompleted struct {
 	TurnID      string
 	Status      string
@@ -200,6 +217,19 @@ func (e TurnCompleted) Validate() error {
 		return err
 	}
 	return oneOf("status", e.Status, "completed", "interrupted", "failed")
+}
+
+type TurnRecovery struct {
+	TurnID  string
+	Attempt int
+}
+
+func (TurnRecovery) Type() string { return TypeTurnRecovery }
+func (e TurnRecovery) Validate() error {
+	if e.TurnID == "" || e.Attempt < 1 {
+		return errors.New("turn.recovery needs turn_id and a positive attempt")
+	}
+	return nil
 }
 
 type UserMessage struct {
@@ -560,11 +590,27 @@ type ChildSpawned struct {
 	CallID  string
 	ChildID string
 	Runner  string
+	Tools   []string
 }
 
 func (ChildSpawned) Type() string { return TypeChildSpawned }
 func (e ChildSpawned) Validate() error {
-	return required(map[string]string{"call_id": e.CallID, "child_id": e.ChildID, "runner": e.Runner})
+	if err := required(map[string]string{"call_id": e.CallID, "child_id": e.ChildID, "runner": e.Runner}); err != nil {
+		return err
+	}
+	return sortedNames("tools", e.Tools)
+}
+
+func sortedNames(member string, names []string) error {
+	for i, name := range names {
+		switch {
+		case name == "":
+			return fmt.Errorf("%s[%d] must not be empty", member, i)
+		case i > 0 && name <= names[i-1]:
+			return fmt.Errorf("%s must be sorted and unique: %q follows %q", member, name, names[i-1])
+		}
+	}
+	return nil
 }
 
 type Branch struct{ ParentSeq uint64 }
@@ -719,6 +765,69 @@ func (e SandboxChosen) Validate() error {
 	}
 	if len(e.Cause) > 1<<10 {
 		return errors.New("sandbox cause must be at most 1 KiB")
+	}
+	return nil
+}
+
+type HashlineInvocationStarted struct {
+	CallID          string
+	TurnID          string
+	Identity        string
+	Fingerprint     string
+	Style           string
+	ContractVersion int
+	Paths           []string
+}
+
+func (HashlineInvocationStarted) Type() string { return TypeHashlineInvocationStarted }
+func (e HashlineInvocationStarted) Validate() error {
+	if err := required(map[string]string{"call_id": e.CallID, "turn_id": e.TurnID, "identity": e.Identity}); err != nil {
+		return err
+	}
+	if err := validSHA("fingerprint", e.Fingerprint); err != nil {
+		return err
+	}
+	if err := oneOf("style", e.Style, "hashline-light", "hashline-enhanced"); err != nil {
+		return err
+	}
+	if e.ContractVersion < 1 {
+		return errors.New("contract_version must be positive")
+	}
+	return validateInvocationPaths(e.Paths)
+}
+
+type HashlineInvocationSettled struct {
+	Identity string
+	OK       bool
+	Output   string
+	Spill    *Spill
+	Meta     jsontext.Value
+}
+
+func (HashlineInvocationSettled) Type() string { return TypeHashlineInvocationSettled }
+func (e HashlineInvocationSettled) Validate() error {
+	if err := required(map[string]string{"identity": e.Identity}); err != nil {
+		return err
+	}
+	if err := validateOutput(e.Output, e.Spill); err != nil {
+		return err
+	}
+	return optionalRawJSON("meta", e.Meta)
+}
+
+func validateInvocationPaths(paths []string) error {
+	if len(paths) == 0 {
+		return errors.New("paths must name at least one path")
+	}
+	total := 0
+	for i, path := range paths {
+		if path == "" {
+			return fmt.Errorf("paths[%d] must not be empty", i)
+		}
+		total += len(path)
+	}
+	if total > MaxInlineBytes {
+		return errors.New("paths exceed 64 KiB in total")
 	}
 	return nil
 }

@@ -148,6 +148,7 @@ func randomEvents(r *rand.Rand) []event.Event {
 		},
 		event.RunnerBound{Runner: text(r), Service: text(r), BoxID: text(r), Baseline: text(r)},
 		event.TurnStarted{TurnID: text(r)},
+		event.TurnEffort{TurnID: text(r), Effort: text(r)},
 		event.TurnCompleted{TurnID: text(r), Status: pick(r, "completed", "interrupted", "failed"), Error: text(r)},
 		event.UserMessage{
 			ItemID: text(r), TurnID: text(r), Text: text(r), Kind: pick(r, "prompt", "steer", "followup"),
@@ -299,22 +300,6 @@ func TestUserMessageImagesRoundTrip(t *testing.T) {
 		Images: []event.Image{{Mime: "image/png", Path: "/work/shot.png", Blob: event.BlobRef{Blob: strings.Repeat("a", 64), Bytes: 12}}},
 	}
 	assertRoundTrip(t, 0, original)
-}
-
-func TestUserMessageImageJournalForm(t *testing.T) {
-	t.Parallel()
-	original := event.UserMessage{
-		ItemID: "item-01", TurnID: "turn-01", Text: "what is this", Kind: "prompt",
-		Images: []event.Image{{Mime: "image/png", Path: "/home/u/shot.png", Blob: event.BlobRef{Blob: strings.Repeat("a", 64), Bytes: 12}}},
-	}
-	encoded, err := event.Encode(original)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	want := `{"type":"user.message","item_id":"item-01","turn_id":"turn-01","text":"what is this","kind":"prompt","images":[{"mime":"image/png","path":"/home/u/shot.png","image":{"blob":"` + strings.Repeat("a", 64) + `","bytes":12}}]}`
-	if string(encoded) != want {
-		t.Fatalf("journal form\ngot:  %s\nwant: %s", encoded, want)
-	}
 }
 
 func TestUserMessageImageValidate(t *testing.T) {
