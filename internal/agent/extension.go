@@ -108,54 +108,42 @@ func (w *worker) runNestedCall(ctx context.Context, call event.ToolCall, request
 }
 
 func (t *Thread) StartChild(ctx context.Context, callID string, req TaskRequest) (string, error) {
-	select {
-	case t.children <- struct{}{}:
-	case <-ctx.Done():
-		return "", context.Cause(ctx)
+	if t.created.Parent != "" {
+		return "", errNestedSpawn
 	}
-	child, err := t.childFor(ctx, callID, req)
+	if req.Prompt == "" {
+		return "", errors.New("task needs a prompt")
+	}
+	id, err := t.childID(callID)
 	if err != nil {
-		<-t.children
 		return "", err
 	}
-	report, err := ask(child, func(a *actor) childReport { return a.childReport() })
-	if err != nil {
-		<-t.children
+	slots := t.slots()
+	if err = slots.take(ctx, id); err != nil {
 		return "", err
 	}
-	if report.stage == stageNeedsPrompt {
-		if err := child.Submit(ctx, Input{Kind: InputPrompt, Text: req.Prompt}); err != nil {
-			<-t.children
-			return "", err
-		}
+	child, err := t.launchChild(ctx, callID, id, req)
+	if err != nil {
+		slots.give(id)
+		return "", err
 	}
-	go t.watchChild(child)
+	t.host.slots.releaseWhenIdle(slots, child)
 	return child.id, nil
 }
 
-func (t *Thread) watchChild(child *Thread) {
-	updates := child.Subscribe()
-	defer func() {
-		child.Unsubscribe(updates)
-		<-t.children
-	}()
-	for {
-		status, err := child.Status()
-		if err != nil {
-			return
-		}
-		if !status.Busy {
-			return
-		}
-		select {
-		case _, open := <-updates:
-			if !open {
-				updates = child.Subscribe()
-			}
-		case <-child.stopped:
-			return
-		}
+func (t *Thread) launchChild(ctx context.Context, callID, id string, req TaskRequest) (*Thread, error) {
+	child, err := t.childFor(ctx, callID, id, req)
+	if err != nil {
+		return nil, err
 	}
+	report, err := ask(child, func(a *actor) childReport { return a.childReport() })
+	if err != nil {
+		return nil, err
+	}
+	if report.stage == stageNeedsPrompt {
+		err = child.Submit(ctx, Input{Kind: InputPrompt, Text: req.Prompt})
+	}
+	return child, err
 }
 
 func (t *Thread) ChildText(ctx context.Context, childID string) (string, error) {

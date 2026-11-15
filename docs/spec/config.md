@@ -21,6 +21,10 @@ The default approval mode is `auto`. The default sandbox is `workspace-write`. T
 
 When no layer sets `edit_style`, every model MUST use the edit style `anchor`.
 
+`[limits].max_subagent_starts` MUST be a positive integer.
+Its default is 32 starts per root turn.
+A zero or negative value MUST fail configuration loading with the file and line.
+
 The approval mode MUST be the top-level scalar `approval`. Its allowed values are `auto`, `yolo`, and `ask`. The decider settings MUST use `[approval_decider]`:
 
 ```toml

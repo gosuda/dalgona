@@ -27,10 +27,10 @@ func TestStartChildBoundsConcurrentSpawns(t *testing.T) {
 		seedAgentCalls(t, h, parent)
 		var wg sync.WaitGroup
 		startChildren(t, h, parent, &wg)
-		drainEntries(t, entered, 8, "fewer than 8 spawns reached the child")
+		drainEntries(t, entered, 4, "fewer than 4 spawns reached the child")
 		expectCapped(t, entered, fire)
 		fire()
-		drainEntries(t, entered, 8, "remaining spawns never reached the child")
+		drainEntries(t, entered, 12, "remaining spawns never reached the child")
 		wg.Wait()
 		checkAllSpawned(t, h, parent)
 	})
@@ -84,7 +84,7 @@ func expectCapped(t *testing.T, entered <-chan struct{}, fire func()) {
 	select {
 	case <-entered:
 		fire()
-		t.Fatal("more than 8 concurrent script spawns; StartChild bypasses the children cap")
+		t.Fatal("more than 4 concurrent script spawns; StartChild bypasses the children cap")
 	default:
 	}
 }

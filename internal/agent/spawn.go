@@ -3,6 +3,7 @@ package agent
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 
@@ -12,8 +13,10 @@ import (
 	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 )
 
+var errNestedSpawn = errors.New("agent: subagents cannot spawn subagents")
+
 const (
-	maxChildren       = 8
+	maxChildren       = 4
 	yieldNudge        = "Call yield now: data on success, error on failure."
 	noYieldPrefix     = "subagent ended without yield; last message: "
 	lastMessageLength = 2000
@@ -50,28 +53,55 @@ func (t *Thread) withThreadTools(tools []tool.Tool) []tool.Tool {
 }
 
 func (t *Thread) spawnChild(ctx context.Context, callID string, req TaskRequest) (tool.Result, error) {
-	select {
-	case t.children <- struct{}{}:
-	case <-ctx.Done():
-		return tool.Result{}, context.Cause(ctx)
+	if t.created.Parent != "" {
+		return tool.Result{}, errNestedSpawn
 	}
-	defer func() { <-t.children }()
-	child, err := t.childFor(ctx, callID, req)
+	if req.Prompt == "" {
+		return tool.Result{}, errors.New("task needs a prompt")
+	}
+	id, err := t.childID(callID)
+	if err != nil {
+		return tool.Result{}, err
+	}
+	slots := t.slots()
+	if err = slots.take(ctx, id); err != nil {
+		return tool.Result{}, err
+	}
+	defer slots.give(id)
+	child, err := t.childFor(ctx, callID, id, req)
 	if err != nil {
 		return tool.Result{}, err
 	}
 	result, err := t.supervise(ctx, child, req.Prompt)
 	if err != nil && ctx.Err() != nil {
 		child.Interrupt()
+		if slots.share(id) {
+			t.host.slots.releaseWhenIdle(slots, child)
+		}
 	}
 	return result, err
 }
 
-func (t *Thread) childFor(ctx context.Context, callID string, req TaskRequest) (*Thread, error) {
-	raw, err := url.PathUnescape(callID)
-	if err == nil {
-		callID = raw
+func unescapedCall(callID string) string {
+	if raw, err := url.PathUnescape(callID); err == nil {
+		return raw
 	}
+	return callID
+}
+
+func (t *Thread) childID(callID string) (string, error) {
+	v, err := t.view()
+	if err != nil {
+		return "", err
+	}
+	if id, spawned := childOf(v.state, unescapedCall(callID)); spawned {
+		return id, nil
+	}
+	return t.host.newThreadID(), nil
+}
+
+func (t *Thread) childFor(ctx context.Context, callID, id string, req TaskRequest) (*Thread, error) {
+	callID = unescapedCall(callID)
 	v, err := t.view()
 	if err != nil {
 		return nil, err
@@ -80,16 +110,53 @@ func (t *Thread) childFor(ctx context.Context, callID string, req TaskRequest) (
 	if err != nil {
 		return nil, err
 	}
-	id, spawned := childOf(v.state, callID)
-	if !spawned {
-		id = t.host.newThreadID()
-		if _, err = t.appendEvents(ctx, event.ChildSpawned{CallID: callID, ChildID: id, Runner: spec.Runner}); err != nil {
-			return nil, err
-		}
+	id, err = t.journalChild(ctx, callID, id, spec)
+	if err != nil {
+		return nil, err
 	}
 	child, err := t.host.openChild(ctx, spec, id)
 	t.notifyChildStarted(child, req, err)
 	return child, err
+}
+
+func (t *Thread) journalChild(ctx context.Context, callID, id string, spec ThreadSpec) (string, error) {
+	tools, err := t.childTools(ctx)
+	if err != nil {
+		return "", err
+	}
+	result, err := ask(t, func(a *actor) childAdmission {
+		if existing, found := childOf(a.state, callID); found {
+			return childAdmission{id: existing}
+		}
+		if budgetErr := a.checkSubagentBudget(); budgetErr != nil {
+			return childAdmission{err: budgetErr}
+		}
+		_, appendErr := a.appendCtx(ctx, event.ChildSpawned{CallID: callID, ChildID: id, Runner: spec.Runner, Tools: tools})
+		return childAdmission{id: id, err: appendErr}
+	})
+	return result.id, errors.Join(err, result.err)
+}
+
+type childAdmission struct {
+	id  string
+	err error
+}
+
+func (a *actor) checkSubagentBudget() error {
+	used := 0
+	for _, record := range a.records {
+		switch record.Event.(type) {
+		case event.TurnStarted:
+			used = 0
+		case event.ChildSpawned:
+			used++
+		}
+	}
+	maximum := cmp.Or(a.t.host.cfg.Config.MaxSubagentStarts, 32)
+	if used >= maximum {
+		return fmt.Errorf("subagent budget exhausted: %d of %d starts used", used, maximum)
+	}
+	return nil
 }
 
 func (t *Thread) notifyChildStarted(child *Thread, req TaskRequest, err error) {

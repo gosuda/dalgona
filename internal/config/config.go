@@ -271,6 +271,7 @@ type Config struct {
 	EditStyle                             EditStyleSpec
 	CompactionThreshold                   float64
 	CompactionKeepTokens                  int
+	MaxSubagentStarts                     int
 	StreamStartTimeout, StreamIdleTimeout time.Duration
 	Runner, Remote                        string
 	Providers                             map[string]ProviderSpec
@@ -300,6 +301,7 @@ func defaultConfigWithHome(product Product, home, cwd string) Config {
 		Sandbox: SandboxWorkspaceWrite, Runner: "local", ShellEnv: ShellEnvSnapshot,
 		Verbosity: VerbosityMedium, Theme: ThemeAuto, Icons: IconsAuto, StatusHide: []string{}, Notifications: true,
 		EditStyle: EditStyleSpec{Default: "anchor"}, CompactionThreshold: .8,
+		MaxSubagentStarts:    32,
 		CompactionKeepTokens: 20000, StreamStartTimeout: time.Minute,
 		StreamIdleTimeout: 5 * time.Minute, ApprovalDecider: ApprovalDeciderConfig{Threshold: .9},
 		Web: WebConfig{Listen: "127.0.0.1:7437"}, Providers: map[string]ProviderSpec{},

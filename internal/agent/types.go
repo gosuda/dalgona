@@ -24,6 +24,8 @@ type ToolSet func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error)
 
 type SkillSet func(cwd string) ([]prompt.Skill, error)
 
+type MemorySource func(ctx context.Context, cwd string) (string, error)
+
 type MCPServerStatus struct {
 	Name   string
 	Status string
@@ -88,6 +90,7 @@ type HostConfig struct {
 	Clock            func() time.Time
 	Logger           *slog.Logger
 	Skills           SkillSet
+	MemorySource     MemorySource
 	MCPStatus        func(ctx context.Context, cwd string) []MCPServerStatus
 	SandboxCause     func() string
 	ToolNotes        []string

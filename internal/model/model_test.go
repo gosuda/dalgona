@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestClassify(t *testing.T) {
 	t.Parallel()
@@ -66,30 +69,6 @@ func TestContextWindow(t *testing.T) {
 	}
 }
 
-func TestClampEffort(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name      string
-		request   string
-		supported []string
-		want      string
-	}{
-		{name: "maximum clamps down", request: "max", supported: []string{"low", "high"}, want: "high"},
-		{name: "highest below request", request: "xhigh", supported: []string{"high", "low", "medium"}, want: "high"},
-		{name: "minimum clamps up", request: "low", supported: []string{"medium", "high"}, want: "medium"},
-		{name: "nil omits effort", request: "medium", want: ""},
-		{name: "default omits effort", request: "default", supported: []string{"low"}, want: ""},
-	}
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			if got := ClampEffort(test.request, test.supported); got != test.want {
-				t.Fatalf("ClampEffort(%q, %v) = %q, want %q", test.request, test.supported, got, test.want)
-			}
-		})
-	}
-}
-
 func TestResolveRole(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -134,7 +113,7 @@ func TestCapabilitiesCoverEveryPresetModel(t *testing.T) {
 		}
 	}
 	sol, _ := Capabilities("openai", "gpt-6.1-sol")
-	if ClampEffort("max", sol.Efforts) != "max" || ClampEffort("high", sol.Efforts) != "high" {
+	if !slices.Contains(sol.Efforts, "max") || !slices.Contains(sol.Efforts, "high") {
 		t.Fatalf("sol efforts = %v", sol.Efforts)
 	}
 	sol.Efforts[0] = "changed"

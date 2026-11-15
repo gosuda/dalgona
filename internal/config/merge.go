@@ -42,6 +42,7 @@ type fileDoc struct {
 	CompactionKeepTokens *int                   `toml:"compaction_keep_tokens"`
 	StreamStartTimeout   *string                `toml:"stream_start_timeout"`
 	StreamIdleTimeout    *string                `toml:"stream_idle_timeout"`
+	Limits               limitsDoc              `toml:"limits"`
 	Runner               *string                `toml:"runner"`
 	Remote               *string                `toml:"remote"`
 	TLSCAFile            *string                `toml:"tls_ca_file"`
@@ -62,6 +63,10 @@ type fileDoc struct {
 	Roles                rolesDoc               `toml:"roles"`
 	Advisor              advisorDoc             `toml:"advisor"`
 	Advisors             map[string]advisorsDoc `toml:"advisors"`
+}
+
+type limitsDoc struct {
+	MaxSubagentStarts *int `toml:"max_subagent_starts"`
 }
 
 type editStyleDoc struct {
@@ -232,6 +237,13 @@ type (
 func (c *Config) merge(current layer) error {
 	if err := c.mergeScalars(current); err != nil {
 		return err
+	}
+	if value := current.doc.Limits.MaxSubagentStarts; value != nil {
+		if *value < 1 {
+			source := lineMap(current.path, current.raw)["limits.max_subagent_starts"]
+			return fmt.Errorf("%s:%d: limits.max_subagent_starts must be positive", filepath.Base(current.path), source.line)
+		}
+		c.MaxSubagentStarts = *value
 	}
 	c.mergeMaps(current.doc)
 	c.mergeTables(current.doc)

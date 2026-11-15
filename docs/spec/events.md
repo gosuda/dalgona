@@ -102,6 +102,11 @@ An approval resolution MUST have a matching unresolved request. The fold MUST cr
 
 A script call has `call_id = "<run_id>/<n>"` for an open run. Its `approval.requested`, `tool.started`, `tool.completed`, and `child.spawned` MUST be accepted without an assistant call. A call that Cursor ran in band MUST appear in `assistant.message` with `resolved = true`. Its approval, `tool.started`, and `tool.completed` follow the message in one batch.
 
+`child.spawned.tools` records the sorted child tool ceiling.
+A durable `child.spawned` consumes one start in the current root turn.
+Reopening that child MUST NOT consume another start.
+The host MUST check the start budget and append `child.spawned` in one actor operation.
+
 `advisor.note` MAY occur inside or outside a turn. A second note with the same advisor, `review_seq`, and note text MUST be rejected.
 
 Read metadata MUST restore direct snapshot objects and snapshot objects inside `captures`. A successful `todo` completion MUST replace the todo list from its started arguments.

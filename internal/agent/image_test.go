@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json/jsontext"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,9 +19,12 @@ import (
 	"sync"
 	"testing"
 
+	json "encoding/json/v2"
+
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/model/chatcompat"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -63,6 +71,13 @@ func TestCheckImages(t *testing.T) {
 		err    string
 	}{
 		{name: "ten images pass", images: oneByte(10)},
+		{
+			name: "exact image and total limits pass",
+			images: []Image{
+				{Mime: "image/png", Data: make([]byte, event.MaxImageBytes)},
+				{Mime: "image/png", Data: make([]byte, event.MaxImageBytes)},
+			},
+		},
 		{name: "eleven images refused", images: oneByte(11), err: "a request takes at most 10 images, got 11"},
 		{
 			name:   "one image over the limit",
@@ -133,6 +148,24 @@ func TestSubmitImageStoresBlobAndMasksPath(t *testing.T) {
 	if image.Blob.Bytes != int64(len(data)) {
 		t.Fatalf("image bytes = %d, want %d", image.Blob.Bytes, len(data))
 	}
+	h.model.push(text("done"))
+	plain := h.start()
+	err = plain.Submit(t.Context(), Input{
+		Kind: InputPrompt,
+		Text: "plain",
+		Images: []Image{{
+			Path: "/tmp/shots/plain.png",
+			Mime: "image/png",
+			Data: data,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	h.waitIdle(plain)
+	if path := storedImageMessage(t, h, plain.ID()).Images[0].Path; path != "/tmp/shots/plain.png" {
+		t.Fatalf("nonsecret path = %q, want it unchanged", path)
+	}
 }
 
 func storedImageMessage(t *testing.T, h *harness, id string) event.UserMessage {
@@ -144,6 +177,172 @@ func storedImageMessage(t *testing.T, h *harness, id string) event.UserMessage {
 	}
 	t.Fatal("no user message with images in journal")
 	return event.UserMessage{}
+}
+
+func TestUserMessageImageJournalForm(t *testing.T) {
+	data := []byte("\x89PNG\r\n\x1a\nxyz")
+	h := newHarness(t)
+	h.model.push(text("done"), text("done"))
+	thread := h.start()
+	digest := requireImageJournalForm(t, h, thread, data)
+	requireStoredBlob(t, h, data, digest)
+	requireTextOnlyMessage(t, h, thread)
+	requireMissingBlobFails(t, data)
+}
+
+func requireImageJournalForm(t *testing.T, h *harness, thread *Thread, data []byte) string {
+	t.Helper()
+	err := thread.Submit(t.Context(), Input{Kind: InputPrompt, Text: "what is this", Images: []Image{{Mime: "image/png", Data: data}}})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	h.waitIdle(thread)
+	records := journalUserMessages(t, h, thread.ID())
+	if len(records) != 1 {
+		t.Fatalf("user messages = %d, want 1", len(records))
+	}
+	image := journalImage(t, records[0])
+	sum := sha256.Sum256(data)
+	digest := hex.EncodeToString(sum[:])
+	if image.mime != http.DetectContentType(data) || image.blob != digest || image.bytes != int64(len(data)) {
+		t.Fatalf("image = %+v, want %s at %s with %d bytes", image, http.DetectContentType(data), digest, len(data))
+	}
+	return digest
+}
+
+func requireStoredBlob(t *testing.T, h *harness, data []byte, digest string) {
+	t.Helper()
+	stored, err := os.ReadFile(filepath.Join(h.home, "blobs", digest))
+	if err != nil {
+		t.Fatalf("blob %s: %v", digest, err)
+	}
+	if !bytes.Equal(stored, data) {
+		t.Fatalf("blob bytes = %x, want the submitted bytes", stored)
+	}
+}
+
+func requireTextOnlyMessage(t *testing.T, h *harness, thread *Thread) {
+	t.Helper()
+	err := thread.Submit(t.Context(), Input{Kind: InputPrompt, Text: "plain"})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	h.waitIdle(thread)
+	records := journalUserMessages(t, h, thread.ID())
+	if len(records) != 2 {
+		t.Fatalf("user messages = %d, want 2", len(records))
+	}
+	last := records[len(records)-1]
+	if _, ok := last["images"]; ok {
+		t.Fatalf("text-only user message carries images: %v", last)
+	}
+	if last["text"] != "plain" {
+		t.Fatalf("text-only message = %v, want the submitted text", last)
+	}
+}
+
+func requireMissingBlobFails(t *testing.T, data []byte) {
+	t.Helper()
+	missing := strings.Repeat("b", 64)
+	var rec *requestRecorder
+	h2 := newHarness(t, func(h *harness) { rec = recordRequests(h) })
+	h2.seed(
+		event.TurnStarted{TurnID: "t"},
+		event.UserMessage{ItemID: "u", TurnID: "t", Text: "what is this", Kind: "prompt", Images: []event.Image{{
+			Mime: "image/png", Blob: event.BlobRef{Blob: missing, Bytes: int64(len(data))},
+		}}},
+	)
+	turn := lastTurn(h2.recoverSession())
+	prefix := "agent: load image blob " + missing + ":"
+	if turn.Status != statusFailed || !strings.HasPrefix(turn.Error, prefix) {
+		t.Fatalf("turn = %q %q, want failed with %q", turn.Status, turn.Error, prefix)
+	}
+	if requests := rec.snapshot(); len(requests) != 0 {
+		t.Fatalf("missing blob sent %d model requests, want 0", len(requests))
+	}
+}
+
+type journalImageRecord struct {
+	mime  string
+	blob  string
+	bytes int64
+}
+
+func journalImage(t *testing.T, record map[string]any) journalImageRecord {
+	t.Helper()
+	images, ok := record["images"].([]any)
+	if !ok || len(images) != 1 {
+		t.Fatalf("images = %v, want one entry", record["images"])
+	}
+	entry, ok := images[0].(map[string]any)
+	if !ok {
+		t.Fatalf("image entry = %v, want an object", images[0])
+	}
+	blob, ok := entry["image"].(map[string]any)
+	if !ok {
+		t.Fatalf("image entry = %v, want a blob reference", entry)
+	}
+	size, ok := blob["bytes"].(float64)
+	if !ok {
+		t.Fatalf("image bytes = %v, want a number", blob["bytes"])
+	}
+	return journalImageRecord{mime: fmt.Sprint(entry["mime"]), blob: fmt.Sprint(blob["blob"]), bytes: int64(size)}
+}
+
+func journalUserMessages(t *testing.T, h *harness, id string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	err := h.journal.Replay(id, func(_ uint64, raw []byte) error {
+		var record map[string]any
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return err
+		}
+		if record["type"] == "user.message" {
+			out = append(out, record)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestSubmitImageTypeMismatchRefused(t *testing.T) {
+	h := newHarness(t)
+	thread := h.start()
+	err := thread.Submit(t.Context(), Input{Kind: InputPrompt, Text: "look", Images: []Image{{Mime: "image/jpeg", Data: []byte("\x89PNG\r\n\x1a\nxyz")}}})
+	want := "image type image/png does not match its declared type image/jpeg"
+	if err == nil || err.Error() != want {
+		t.Fatalf("submit error = %v, want %q", err, want)
+	}
+	if messages := journalUserMessages(t, h, thread.ID()); len(messages) != 0 {
+		t.Fatalf("refused submit appended %d user messages, want 0", len(messages))
+	}
+}
+
+func TestSubmitImageMaskFailureFailsSubmit(t *testing.T) {
+	authHome := t.TempDir()
+	store, err := auth.NewWithPatterns(authHome, []string{`token-[a-z0-9]{8,}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, func(h *harness) { h.cfg.Auth = store })
+	thread := h.start()
+	breakAuthHome(t, authHome)
+	err = thread.Submit(t.Context(), Input{
+		Kind: InputPrompt, Text: "look",
+		Images: []Image{{Path: "/tmp/token-abcdefgh/shot.png", Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\nxyz")}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "secret masking failed") {
+		t.Fatalf("submit error = %v, want a masking failure", err)
+	}
+	if store.MaskError() == nil {
+		t.Fatal("store reports no mask error after the refused submit")
+	}
+	if messages := journalUserMessages(t, h, thread.ID()); len(messages) != 0 {
+		t.Fatalf("refused submit appended %d user messages, want 0", len(messages))
+	}
 }
 
 type requestRecorder struct {
@@ -251,7 +450,8 @@ func TestRecoveredTurnSendsImageFromBlob(t *testing.T) {
 }
 
 func TestImageBlobMismatchFailsTurn(t *testing.T) {
-	h := newHarness(t)
+	var rec *requestRecorder
+	h := newHarness(t, func(h *harness) { rec = recordRequests(h) })
 	data := []byte("\x89PNG\r\n\x1a\nabc")
 	sha, err := h.journal.PutBlob(data)
 	if err != nil {
@@ -271,6 +471,44 @@ func TestImageBlobMismatchFailsTurn(t *testing.T) {
 	want := "agent: image blob " + sha + " does not match its journal record"
 	if turn.Status != statusFailed || turn.Error != want {
 		t.Fatalf("turn = %q %q, want failed with %q", turn.Status, turn.Error, want)
+	}
+	if requests := rec.snapshot(); len(requests) != 0 {
+		t.Fatalf("corrupted blob sent %d model requests, want 0", len(requests))
+	}
+}
+
+func TestImageBlobRecordMismatchOnCacheMiss(t *testing.T) {
+	data := []byte("\x89PNG\r\n\x1a\nabc")
+	for _, tc := range []struct {
+		name  string
+		mime  string
+		bytes int64
+	}{
+		{"bytes", "image/png", int64(len(data)) + 1},
+		{"mime", "image/jpeg", int64(len(data))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec *requestRecorder
+			h := newHarness(t, func(h *harness) { rec = recordRequests(h) })
+			sha, err := h.journal.PutBlob(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.seed(
+				event.TurnStarted{TurnID: "t"},
+				event.UserMessage{ItemID: "u", TurnID: "t", Text: "what is this", Kind: "prompt", Images: []event.Image{{
+					Mime: tc.mime, Blob: event.BlobRef{Blob: sha, Bytes: tc.bytes},
+				}}},
+			)
+			turn := lastTurn(h.recoverSession())
+			want := "agent: image blob " + sha + " does not match its journal record"
+			if turn.Status != statusFailed || turn.Error != want {
+				t.Fatalf("turn = %q %q, want failed with %q", turn.Status, turn.Error, want)
+			}
+			if requests := rec.snapshot(); len(requests) != 0 {
+				t.Fatalf("mismatched record sent %d model requests, want 0", len(requests))
+			}
+		})
 	}
 }
 
@@ -401,27 +639,132 @@ func TestTextOnlyModelOmitsHistoryImage(t *testing.T) {
 	png := []byte("\x89PNG\r\n\x1a\nabc")
 	submit(Input{Kind: InputPrompt, Text: "what is this", Model: "vision/gpt-test", Images: []Image{{Mime: "image/png", Data: png}}})
 	submit(Input{Kind: InputPrompt, Text: "and now", Model: "openai/gpt-test"})
-	if len(visionRec.snapshot()) == 0 {
+	visionRequests := visionRec.snapshot()
+	if len(visionRequests) == 0 {
 		t.Fatal("image turn sent no request to the vision model")
 	}
-	requests := plainRec.snapshot()
+	if sent := imagesOf(visionRequests[0]); len(sent) != 1 || !bytes.Equal(sent[0].Data, png) || sent[0].Mime != "image/png" {
+		t.Fatalf("vision request images = %+v, want the submitted PNG", sent)
+	}
+	requireOmittedImageNotice(t, plainRec.snapshot())
+}
+
+func requireOmittedImageNotice(t *testing.T, requests []model.Request) {
+	t.Helper()
 	if len(requests) == 0 {
 		t.Fatal("text-only turn sent no model request")
 	}
 	last := requests[len(requests)-1]
-	if !imagesOmittedWithNotice(t, last.Messages) {
-		t.Fatalf("text-only request holds no omitted-image notice: %+v", last.Messages)
-	}
-}
-
-func imagesOmittedWithNotice(t *testing.T, messages []model.Message) bool {
-	t.Helper()
 	noticed := false
-	for _, message := range messages {
+	for _, message := range last.Messages {
 		if len(message.Images) > 0 {
 			t.Fatalf("text-only request carries %d images", len(message.Images))
 		}
 		noticed = noticed || strings.Contains(message.Text, "[image omitted: this model does not accept images]")
 	}
-	return noticed
+	if !noticed {
+		t.Fatalf("text-only request holds no omitted-image notice: %+v", last.Messages)
+	}
+}
+
+func TestChatCompatRefusesImageOutsideListing(t *testing.T) {
+	png := []byte("\x89PNG\r\n\x1a\nabc")
+	tests := []struct {
+		name    string
+		catalog string
+		images  bool
+	}{
+		{"model absent", `{"data":[{"id":"other-model","architecture":{"input_modalities":["text","image"]}}]}`, false},
+		{"text-only model", `{"data":[{"id":"gpt-test","architecture":{"input_modalities":["text"]}}]}`, false},
+		{"vision model", `{"data":[{"id":"gpt-test","architecture":{"input_modalities":["text","image"]}}]}`, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			serverURL, sent := chatCompatImageServer(t, tc.catalog)
+			h := chatCompatHarness(t, serverURL)
+			thread := h.start()
+			err := thread.Submit(t.Context(), Input{Kind: InputPrompt, Text: "what is this", Images: []Image{{Mime: "image/png", Data: png}}})
+			if err != nil {
+				t.Fatalf("submit: %v", err)
+			}
+			h.waitIdle(thread)
+			turn := lastTurn(h.events(thread.ID()))
+			if tc.images {
+				requireVisionTurnSentImage(t, turn, sent(), png)
+				return
+			}
+			requireImageRefusedOutsideListing(t, turn, sent())
+		})
+	}
+}
+
+func chatCompatImageServer(t *testing.T, catalog string) (string, func() [][]byte) {
+	t.Helper()
+	var mu sync.Mutex
+	var bodies [][]byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /models", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, catalog)
+	})
+	mux.HandleFunc("POST /chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read chat request: %v", err)
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server.URL, func() [][]byte {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(bodies)
+	}
+}
+
+func chatCompatHarness(t *testing.T, serverURL string) *harness {
+	t.Helper()
+	return newHarness(t, func(h *harness) {
+		h.cfg.Config.Model = "chat/gpt-test"
+		h.cfg.Providers = func(onRetry RetryFunc) (*model.Registry, error) {
+			retry := model.DefaultRetryOptions()
+			retry.Sleep = h.sleep
+			retry.OnRetry = onRetry
+			registry := model.NewRegistry()
+			return registry, registry.Register("chat", chatcompat.New(chatcompat.Config{
+				BaseURL: serverURL,
+				APIKey:  func(context.Context) (string, error) { return "test-key", nil },
+				Retry:   retry,
+			}))
+		}
+	})
+}
+
+func requireImageRefusedOutsideListing(t *testing.T, turn event.TurnCompleted, sent [][]byte) {
+	t.Helper()
+	want := "this model does not accept images"
+	if turn.Status != statusFailed || turn.Error != want {
+		t.Fatalf("turn = %q %q, want failed with %q", turn.Status, turn.Error, want)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("refused turn sent %d chat requests, want 0", len(sent))
+	}
+}
+
+func requireVisionTurnSentImage(t *testing.T, turn event.TurnCompleted, sent [][]byte, png []byte) {
+	t.Helper()
+	if turn.Status != statusCompleted {
+		t.Fatalf("turn = %q %q, want completed", turn.Status, turn.Error)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("vision turn sent %d chat requests, want 1", len(sent))
+	}
+	if !bytes.Contains(sent[0], []byte(base64.StdEncoding.EncodeToString(png))) {
+		t.Fatalf("vision request carries no submitted image: %s", sent[0])
+	}
 }
