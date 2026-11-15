@@ -63,7 +63,6 @@ The command environment MUST be the caller environment plus these defaults. Each
 - `npm_config_yes=true`
 - `PIP_NO_INPUT=1`
 
-
 ### Login-shell environment
 
 Each host shares one login-shell snapshot across session runners and host commands.

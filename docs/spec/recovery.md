@@ -56,6 +56,8 @@ Sha values MUST be SHA-256 of the file bytes, as lowercase hex. An absent file M
 
 An edit that recovery runs, replays, or completes MUST NOT be judged.
 
+A call with `hashline.invocation_started` and no `tool.completed` MUST match the table row of its other records. Recovery MUST NOT read the invocation records.
+
 Recovery MUST NOT run the [turn review](edit-review.md).
 
 A Cursor in-band call is journaled only after its `assistant.message`. A crash before that message repeats the model request, and the in-band call MAY run again.
