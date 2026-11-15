@@ -11,3 +11,7 @@
 (mod_item name: (identifier) @name) @definition.module
 (const_item name: (identifier) @name) @definition.constant
 (static_item name: (identifier) @name) @definition.variable
+(impl_item type: (type_identifier) @name) @definition.owner
+(impl_item type: (generic_type type: (type_identifier) @name)) @definition.owner
+(impl_item type: (scoped_type_identifier name: (type_identifier) @name)) @definition.owner
+(impl_item type: (generic_type type: (scoped_type_identifier name: (type_identifier) @name))) @definition.owner

@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/gosuda/dalgona/internal/syntax"
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
@@ -114,16 +116,36 @@ func validateArgs(out args) error {
 }
 
 var (
-	searchModes = []string{"find", "grep", "symbols", "definition", "syntax"}
+	searchModes = []string{"find", "grep", "symbols", "definition", "syntax", "references", "importers"}
 	kindModes   = []string{"symbols", "definition"}
+	bareName    = regexp.MustCompile(`^[\p{L}\p{N}_$]+$`)
 )
 
 func validateMode(out args) error {
 	if !slices.Contains(searchModes, out.Mode) {
-		return errors.New("search: mode must be find, grep, symbols, definition, or syntax")
+		return errors.New("search: mode must be find, grep, symbols, definition, syntax, references, or importers")
 	}
 	if out.Pattern == "" && out.Mode != "symbols" {
 		return errors.New("search: pattern must not be empty")
+	}
+	return validateGraphArgs(out)
+}
+
+func validateGraphArgs(out args) error {
+	switch out.Mode {
+	case "references":
+		if !bareName.MatchString(out.Pattern) {
+			return errors.New("search: references takes one bare name of letters, digits, _ and $. Write Run, not Server.Run")
+		}
+	case "importers":
+		if strings.ContainsFunc(out.Pattern, unicode.IsSpace) {
+			return errors.New("search: importers takes one import path without spaces")
+		}
+	default:
+		return nil
+	}
+	if out.Literal || out.IgnoreCase {
+		return fmt.Errorf("search: literal and ignore_case do not apply to %s", out.Mode)
 	}
 	return nil
 }

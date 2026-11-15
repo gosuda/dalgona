@@ -57,6 +57,8 @@ func execute(cwd string, args args, dir string, clock freshness) (outcome, error
 		return definitionMode(context.Background(), entries, args, start, time.Now)
 	case "syntax":
 		return syntaxMode(context.Background(), entries, args, start, time.Now)
+	case "references", "importers":
+		return graphMode(context.Background(), graphCall{entries: entries, args: args, start: start, now: time.Now})
 	}
 	return grep(entries, args, dir, clock)
 }

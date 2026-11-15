@@ -42,6 +42,10 @@ func (p *Parser) Captures(ctx context.Context, q *Query, src []byte) ([]Capture,
 		return nil, report, err
 	}
 	defer tree.Release()
+	return capturesTree(q, tree), report, nil
+}
+
+func capturesTree(q *Query, tree *gotreesitter.Tree) []Capture {
 	var out []Capture
 	for index, match := range q.q.Execute(tree) {
 		for _, item := range match.Captures {
@@ -59,5 +63,5 @@ func (p *Parser) Captures(ctx context.Context, q *Query, src []byte) ([]Capture,
 			})
 		}
 	}
-	return out, report, nil
+	return out
 }

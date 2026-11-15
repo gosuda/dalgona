@@ -1,0 +1,7 @@
+(call function: (identifier) @call)
+(call function: (attribute attribute: (identifier) @call))
+(type (identifier) @type)
+(class_definition superclasses: (argument_list (identifier) @type))
+(import_statement name: (dotted_name) @import)
+(import_statement name: (aliased_import name: (dotted_name) @import))
+(import_from_statement module_name: [(dotted_name) (relative_import)] @import)
