@@ -152,6 +152,8 @@ linters:
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/ratchet"
               desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/doctor"
+              desc: core must not import interfaces or batteries
         presentation:
           files:
             - "**/internal/app/**"
@@ -207,6 +209,8 @@ linters:
             - pkg: "github.com/gosuda/dalgona/internal/app/battery"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/ratchet"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/doctor"
               desc: dal must stay free of dalgona batteries
   exclusions:
     presets:

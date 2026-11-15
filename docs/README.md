@@ -65,6 +65,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [TUI](spec/tui.md): terminal behavior, slash commands, and status.
 - [Web UI server](spec/web.md): built assets, access tokens, TLS, and the daemon websocket relay.
 - [Daemon service](spec/daemon.md): socket, startup, and user-service lifecycle.
+- [Doctor](spec/doctor.md): the setup check command, its rows, and its offline and online modes.
 - [Codex app integration](spec/codex-app.md): desktop override installation and restoration.
 - [MCP client](spec/mcp.md): tool discovery, calls, and transports.
 - [Discovery](spec/discovery.md): opt-in imports of instructions, skills, and server config.

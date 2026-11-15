@@ -21,15 +21,15 @@ func TestDialPathAcceptsUpgradedHome(t *testing.T) {
 		t.Fatalf("tightenHomeRoot: %v", err)
 	}
 	grantEveryoneAccess(t, home)
-	refused := verifyHome(home)
+	refused := VerifyHome(home)
 	if refused == nil || !strings.Contains(refused.Error(), "S-1-1-0") {
-		t.Fatalf("verifyHome with legacy Everyone grant = %v, want refusal naming S-1-1-0", refused)
+		t.Fatalf("VerifyHome with legacy Everyone grant = %v, want refusal naming S-1-1-0", refused)
 	}
 	if err := tightenHomeRoot(home); err != nil {
 		t.Fatalf("tightenHomeRoot on upgraded home: %v", err)
 	}
-	if err := verifyHome(home); err != nil {
-		t.Fatalf("verifyHome after re-tighten: %v", err)
+	if err := VerifyHome(home); err != nil {
+		t.Fatalf("VerifyHome after re-tighten: %v", err)
 	}
 }
 
