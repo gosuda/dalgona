@@ -3,6 +3,7 @@ package chatcompat
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	"io"
 	"net/http"
@@ -452,37 +453,94 @@ func assertToolHistory(t *testing.T, messages []requestMessage) {
 	}
 }
 
-func TestEncodeRequestSendsImageURL(t *testing.T) {
-	t.Parallel()
-	body, err := encodeRequest(model.Request{Messages: []model.Message{{
-		Role:   "user",
-		Text:   "What is this?",
-		Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}},
-	}}})
+type chatcompatPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	ImageURL *struct {
+		URL string `json:"url"`
+	} `json:"image_url"`
+}
+
+func chatcompatUserContent(t *testing.T, message model.Message) jsontext.Value {
+	t.Helper()
+	body, err := encodeRequest(model.Request{Messages: []model.Message{message}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var value struct {
-		Messages []any `json:"messages"`
+		Messages []struct {
+			Role    string         `json:"role"`
+			Content jsontext.Value `json:"content"`
+		} `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &value); err != nil {
 		t.Fatalf("request JSON: %v\n%s", err, body)
 	}
-	const want = `{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}},{"type":"text","text":"What is this?"}]}`
-	var expected any
-	if err := json.Unmarshal([]byte(want), &expected); err != nil {
-		t.Fatal(err)
+	if len(value.Messages) != 1 || value.Messages[0].Role != "user" {
+		t.Fatalf("messages = %+v, want one user message: %s", value.Messages, body)
 	}
-	if len(value.Messages) != 1 || !reflect.DeepEqual(value.Messages[0], expected) {
-		t.Fatalf("messages = %v, want %s", value.Messages, want)
+	return value.Messages[0].Content
+}
+
+func TestEncodeRequestSendsImageURL(t *testing.T) {
+	t.Parallel()
+	png := []byte("\x89PNG\r\n\x1a\n")
+	content := chatcompatUserContent(t, model.Message{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: png}}})
+	var parts []chatcompatPart
+	if err := json.Unmarshal(content, &parts); err != nil {
+		t.Fatalf("content %s: %v", content, err)
+	}
+	if len(parts) != 2 || parts[0].Type != "image_url" || parts[0].ImageURL == nil {
+		t.Fatalf("parts = %+v, want an image_url part then a text part", parts)
+	}
+	requireImageDataURL(t, parts[0].ImageURL.URL, "data:image/png;base64,", png)
+	if parts[1].Type != "text" || parts[1].Text != "What is this?" {
+		t.Fatalf("text part = %+v, want the prompt after the image", parts[1])
+	}
+	plain := chatcompatUserContent(t, model.Message{Role: "user", Text: "What is this?"})
+	if string(plain) != `"What is this?"` {
+		t.Fatalf("text-only content = %s, want the plain string", plain)
+	}
+}
+
+func requireImageDataURL(t *testing.T, url, prefix string, want []byte) {
+	t.Helper()
+	payload, ok := strings.CutPrefix(url, prefix)
+	if !ok {
+		t.Fatalf("image url = %q, want a %s data URL", url, prefix)
+	}
+	data, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		t.Fatalf("image data %q is not standard base64: %v", payload, err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Fatalf("image bytes = %x, want the submitted bytes", data)
 	}
 }
 
 func TestEncodeRequestSendsImageAfterToolResults(t *testing.T) {
 	t.Parallel()
+	for _, text := range []string{"look", ""} {
+		t.Run("text="+text, func(t *testing.T) {
+			checkImageAfterToolResults(t, text)
+		})
+	}
+}
+
+func checkImageAfterToolResults(t *testing.T, text string) {
+	t.Helper()
+	messages := decodedImageAfterToolMessages(t, text)
+	if len(messages) != 2 || messages[0].Role != "tool" || messages[1].Role != "user" {
+		t.Fatalf("text %q: messages = %+v", text, messages)
+	}
+	checkImageContentParts(t, text, messages[1].Content)
+}
+
+func decodedImageAfterToolMessages(t *testing.T, text string) []requestMessage {
+	t.Helper()
 	body, err := encodeRequest(model.Request{Messages: []model.Message{{
 		Role:        "user",
-		Text:        "look",
+		Text:        text,
 		ToolResults: []model.ToolResult{{ID: "call-1", Output: jsontext.Value(`"done"`)}},
 		Images:      []model.Image{{Mime: "image/gif", Data: []byte("GIF89a")}},
 	}}})
@@ -495,11 +553,25 @@ func TestEncodeRequestSendsImageAfterToolResults(t *testing.T) {
 	if err := json.Unmarshal(body, &value); err != nil {
 		t.Fatalf("request JSON: %v\n%s", err, body)
 	}
-	if len(value.Messages) != 2 || value.Messages[0].Role != "tool" || value.Messages[1].Role != "user" {
-		t.Fatalf("messages = %+v", value.Messages)
+	return value.Messages
+}
+
+func checkImageContentParts(t *testing.T, text string, content jsontext.Value) {
+	t.Helper()
+	var parts []chatcompatPart
+	if err := json.Unmarshal(content, &parts); err != nil {
+		t.Fatal(err)
 	}
-	if !bytes.Contains(value.Messages[1].Content, []byte(`"image_url"`)) || !bytes.Contains(value.Messages[1].Content, []byte(`data:image/gif;base64,R0lGODlh`)) {
-		t.Fatalf("user content = %s", value.Messages[1].Content)
+	wantParts := 1
+	if text != "" {
+		wantParts++
+	}
+	if len(parts) != wantParts || parts[0].Type != "image_url" || parts[0].ImageURL == nil {
+		t.Fatalf("text %q: user parts = %+v", text, parts)
+	}
+	requireImageDataURL(t, parts[0].ImageURL.URL, "data:image/gif;base64,", []byte("GIF89a"))
+	if text != "" && (parts[1].Type != "text" || parts[1].Text != text) {
+		t.Fatalf("text part = %+v, want %q", parts[1], text)
 	}
 }
 
