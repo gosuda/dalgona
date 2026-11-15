@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -46,6 +48,9 @@ func Run(ctx context.Context, conn io.ReadWriteCloser, opts Options) error {
 	defer close(done)
 	handler := &programHandler{ready: ready, done: done}
 	client := rpc.Dial(watchedConn{ReadWriteCloser: conn, lost: handler.connectionLost}, handler)
+	output := cmp.Or[io.Writer](opts.Output, os.Stdout)
+	input := cmp.Or[io.Reader](opts.Input, os.Stdin)
+	opts.Output = newDockOutput(output, input, func(msg dockWrittenMsg) { handler.send(msg) })
 	program := tea.NewProgram(newModel(client, opts, done), programOptions(ctx, opts)...)
 	handler.program = program
 	close(ready)

@@ -167,6 +167,7 @@ type outState struct {
 	started  bool
 	settling bool
 	settleN  int
+	anchor   *dockAnchor
 	seq      int
 	loads    int
 }

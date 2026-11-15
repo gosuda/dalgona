@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
+
+	"github.com/gosuda/dalgona/internal/rpc"
 )
 
 const (
@@ -22,13 +25,15 @@ const (
 )
 
 type lockedNewline struct {
-	mu *sync.Mutex
-	em *vt.Emulator
+	mu  *sync.Mutex
+	em  *vt.Emulator
+	raw []byte
 }
 
-func (w lockedNewline) Write(p []byte) (int, error) {
+func (w *lockedNewline) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.raw = append(w.raw, p...)
 	text := bytes.ReplaceAll(p, []byte("\r\n"), []byte("\n"))
 	text = bytes.ReplaceAll(text, []byte("\n"), []byte("\r\n"))
 	if _, err := w.em.Write(text); err != nil {
@@ -82,23 +87,40 @@ type emulatedRun struct {
 	program *tea.Program
 	em      *vt.Emulator
 	mu      *sync.Mutex
+	wire    *lockedNewline
 	width   int
 	done    chan struct{}
 }
 
+func tmuxMode(em *vt.Emulator) {
+	em.RegisterCsiHandler(ansi.Command('?', 0, 'n'), func(ansi.Params) bool { return true })
+}
+
+func muteMode(em *vt.Emulator) {
+	tmuxMode(em)
+	em.RegisterCsiHandler('n', func(ansi.Params) bool { return true })
+}
+
 func startEmulated(width, height int, inject *injection) *emulatedRun {
+	return startEmulatedProgram(vt.NewEmulator(width, height), nil, inject)
+}
+
+func startEmulatedProgram(em *vt.Emulator, input io.Reader, inject *injection) *emulatedRun {
 	var mu sync.Mutex
-	em := vt.NewEmulator(width, height)
-	program := tea.NewProgram(
+	width, height := em.Width(), em.Height()
+	var program *tea.Program
+	wire := &lockedNewline{mu: &mu, em: em}
+	output := newDockOutput(wire, input, func(msg dockWrittenMsg) { program.Send(msg) })
+	program = tea.NewProgram(
 		noInit{model: newModel(new(fakeCaller), Options{}, nil), inject: inject},
-		tea.WithInput(nil),
-		tea.WithOutput(lockedNewline{mu: &mu, em: em}),
+		tea.WithInput(input),
+		tea.WithOutput(output),
 		tea.WithWindowSize(width, height),
 		tea.WithoutSignals(),
 		tea.WithoutSignalHandler(),
 		tea.WithFPS(framesPerSecond),
 	)
-	run := &emulatedRun{program: program, em: em, mu: &mu, width: width, done: make(chan struct{})}
+	run := &emulatedRun{program: program, em: em, mu: &mu, wire: wire, width: width, done: make(chan struct{})}
 	go func() {
 		defer close(run.done)
 		_, _ = program.Run()
@@ -139,7 +161,7 @@ func (r *emulatedRun) waitFor(t *testing.T, what string, ok func(history, screen
 func (r *emulatedRun) stop() {
 	r.program.Quit()
 	<-r.done
-	time.Sleep(time.Second)
+	time.Sleep(dockQueryTimeout)
 	synctest.Wait()
 }
 
@@ -158,10 +180,28 @@ func (r *emulatedRun) history() string {
 	return b.String()
 }
 
+func (r *emulatedRun) physicalRow(y int) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var row strings.Builder
+	for x := range r.em.Width() {
+		if cell := r.em.CellAt(x, y); cell != nil {
+			row.WriteString(cell.Content)
+		}
+	}
+	return row.String()
+}
+
 func (r *emulatedRun) screen() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.em.String()
+}
+
+func (r *emulatedRun) raw() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return string(r.wire.raw)
 }
 
 func commandDone(command string) notificationMsg {
@@ -225,6 +265,17 @@ func TestPrintAfterDockShrinkLeavesNoDockInHistory(t *testing.T) {
 			t.Fatal("the approval closed when no print was in flight")
 		}
 		closedDock := run.dock()
+		run.waitFor(t, "tail rows printed", func(h, s string) bool {
+			return rowCount(h, s, "out-20") == 1 && rowCount(h, s, earlierLinesSummary(10)) == 1
+		})
+		numberedTailOnce(t, run.history(), run.screen(), 20)
+		if len(openDock) != 12 {
+			t.Fatalf("open dock holds %d lines, want 12", len(openDock))
+		}
+		if len(closedDock) != 3 {
+			t.Fatalf("closed dock holds %d lines, want 3", len(closedDock))
+		}
+		dockLinesOnScreen(t, closedDock, run.screen())
 		run.stop()
 		history := run.history()
 		if line := leakedLine(history, openDock); line != "" {
@@ -249,6 +300,15 @@ func TestDockGrowDuringPrintKeepsHistoryClean(t *testing.T) {
 			return inject.printing.Load() && strings.Contains(s, "Approval · Run command")
 		})
 		openDock := run.dock()
+		run.waitFor(t, "tail rows printed", func(h, s string) bool {
+			return rowCount(h, s, "out-20") == 1 && rowCount(h, s, earlierLinesSummary(10)) == 1
+		})
+		numberedTailOnce(t, run.history(), run.screen(), 20)
+		want := 1 + panelRows(panelApproval, emuHeight) + 2
+		if len(openDock) != want {
+			t.Fatalf("open dock holds %d lines, want %d", len(openDock), want)
+		}
+		dockLinesOnScreen(t, openDock, run.screen())
 		run.stop()
 		history := run.history()
 		if line := leakedLine(history, openDock); line != "" {
@@ -289,6 +349,40 @@ func TestPrintOnAltScreenExitKeepsRows(t *testing.T) {
 	})
 }
 
+func earlierLinesSummary(n int) string {
+	return fmt.Sprintf("… %d earlier lines", n)
+}
+
+func numberedTailOnce(t *testing.T, history, screen string, rows int) {
+	t.Helper()
+	for i := 1; i <= rows; i++ {
+		want := 1
+		if i <= rows-outputTailLines {
+			want = 0
+		}
+		if got := rowCount(history, screen, fmt.Sprintf("out-%02d", i)); got != want {
+			t.Fatalf("row out-%02d appears %d times, want %d:\nhistory:\n%s\nscreen:\n%s", i, got, want, history, screen)
+		}
+	}
+	if got := rowCount(history, screen, earlierLinesSummary(rows-outputTailLines)); got != 1 {
+		t.Fatalf("earlier-lines summary appears %d times, want 1:\nhistory:\n%s\nscreen:\n%s", got, history, screen)
+	}
+}
+
+func dockLinesOnScreen(t *testing.T, dock []string, screen string) {
+	t.Helper()
+	plain := ansi.Strip(screen)
+	for i, line := range dock {
+		if len(dock) >= 2 && i == len(dock)-2 {
+			continue
+		}
+		text := strings.TrimSpace(ansi.Strip(line))
+		if text != "" && !strings.Contains(plain, text) {
+			t.Fatalf("dock line %q is not on the screen:\n%s", text, screen)
+		}
+	}
+}
+
 func waitSettled(run *emulatedRun) {
 	for run.read(func(m model) any { return m.out.settling }).(bool) {
 		time.Sleep(10 * time.Millisecond)
@@ -314,4 +408,255 @@ func (r *emulatedRun) altScreen() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.em.IsAltScreen()
+}
+
+func dockAtBottom(history, screen string, em *vt.Emulator, height int, run *emulatedRun) bool {
+	dock := run.dock()
+	if len(dock) == 0 {
+		return false
+	}
+	band := strings.TrimSpace(ansi.Strip(dock[len(dock)-1]))
+	run.mu.Lock()
+	cursor := em.CursorPosition()
+	run.mu.Unlock()
+	return band != "" && strings.Contains(run.physicalRow(height-1), "dalgona") &&
+		strings.Contains(run.physicalRow(height-1), band) &&
+		strings.Count(screen, band) == 1 &&
+		leakedLine(history, dock) == "" && cursor.Y == height-3 && cursor.X == 2
+}
+
+func commandPrintedOnce(history, screen string) bool {
+	return rowCount(history, screen, "anchor-proof") == 1
+}
+
+func TestDockAnchorsToPhysicalBottomAcrossResize(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		em := vt.NewEmulator(100, 24)
+		tmuxMode(em)
+		run := startEmulatedProgram(em, em, nil)
+		defer func() {
+			run.program.Quit()
+			_ = em.Close()
+			<-run.done
+			time.Sleep(dockQueryTimeout)
+			synctest.Wait()
+		}()
+		run.send(resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/test", PlatformFamily: "unix"}})
+		run.send(commandDone("anchor-proof"))
+		for _, size := range []tea.WindowSizeMsg{
+			{Width: 100, Height: 24},
+			{Width: 40, Height: 8},
+			{Width: 100, Height: 24},
+		} {
+			run.mu.Lock()
+			em.Resize(size.Width, size.Height)
+			run.width = size.Width
+			run.mu.Unlock()
+			run.send(size)
+			run.waitFor(t, "status band at physical bottom", func(history, screen string) bool {
+				return dockAtBottom(history, screen, em, size.Height, run) &&
+					commandPrintedOnce(history, screen)
+			})
+			run.mu.Lock()
+			cursor := em.CursorPosition()
+			run.mu.Unlock()
+			if cursor.X != 2 || cursor.Y != size.Height-3 {
+				t.Fatalf("cursor = %v at %dx%d, want (2,%d)", cursor, size.Width, size.Height, size.Height-3)
+			}
+		}
+	})
+}
+
+func bandAtBottom(t *testing.T, run *emulatedRun, em *vt.Emulator, height int, phase string) {
+	t.Helper()
+	run.waitFor(t, "status band at physical bottom during "+phase, func(history, screen string) bool {
+		return dockAtBottom(history, screen, em, height, run)
+	})
+	run.mu.Lock()
+	cursor := em.CursorPosition()
+	run.mu.Unlock()
+	if cursor.X != 2 || cursor.Y != height-3 {
+		t.Fatalf("cursor = %v during %s, want (2,%d)", cursor, phase, height-3)
+	}
+}
+
+type streamedPart struct {
+	key  string
+	rows []string
+}
+
+func streamPartOnce(t *testing.T, run *emulatedRun, em *vt.Emulator, part streamedPart) {
+	t.Helper()
+	run.send(func(m *model) { m.commit(part.key, part.rows) })
+	run.waitFor(t, part.key+" rows printed", func(history, screen string) bool {
+		for _, row := range part.rows {
+			if strings.TrimSpace(row) != "" && rowCount(history, screen, row) != 1 {
+				return false
+			}
+		}
+		return true
+	})
+	bandAtBottom(t, run, em, 24, part.key)
+}
+
+func streamedRowsPrintedOnce(t *testing.T, run *emulatedRun, turn []streamedPart) {
+	t.Helper()
+	history, screen := run.history(), run.screen()
+	for _, part := range turn {
+		for _, row := range part.rows {
+			if strings.TrimSpace(row) != "" && rowCount(history, screen, row) != 1 {
+				t.Fatalf("row %q appears %d times, want exactly once:\nhistory:\n%s\nscreen:\n%s", row, rowCount(history, screen, row), history, screen)
+			}
+		}
+	}
+}
+
+func rawOutputInvariant(t *testing.T, run *emulatedRun) {
+	t.Helper()
+	for _, forbidden := range []string{"\x1b[2J", "\x1b[3J", "\x1b[H"} {
+		if strings.Contains(run.raw(), forbidden) {
+			t.Fatalf("forbidden sequence %q in output:\n%q", forbidden, run.raw())
+		}
+	}
+	if got := strings.Count(run.raw(), ansi.RequestCursorPositionReport); got != 1 {
+		t.Fatalf("cursor queries at unchanged geometry = %d, want 1", got)
+	}
+	if got := strings.Count(run.raw(), ansi.RequestExtendedCursorPositionReport); got != 0 {
+		t.Fatalf("DECXCPR queries = %d, want 0", got)
+	}
+}
+
+func TestDockHoldsPhysicalBottomAcrossStreamedTurn(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		em := vt.NewEmulator(100, 24)
+		tmuxMode(em)
+		run := startEmulatedProgram(em, em, nil)
+		defer func() {
+			run.program.Quit()
+			_ = em.Close()
+			<-run.done
+			time.Sleep(dockQueryTimeout)
+			synctest.Wait()
+		}()
+		run.send(resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/test", PlatformFamily: "unix"}})
+		run.send(commandDone("anchor-turn"))
+		bandAtBottom(t, run, em, 24, "startup before any input")
+		run.send(func(m *model) { m.setState(stateRunning) })
+		turn := []streamedPart{
+			{key: "echo", rows: []string{"> pin the band", "", "queued"}},
+			{key: "chunk-1", rows: []string{"chunk one alpha", "chunk one beta"}},
+			{key: "chunk-2", rows: []string{"chunk two alpha", "chunk two beta"}},
+			{key: "chunk-3", rows: []string{"chunk three alpha", "chunk three beta"}},
+			{key: "final", rows: []string{"final row alpha", "final row beta", "final row gamma"}},
+		}
+		for _, part := range turn {
+			streamPartOnce(t, run, em, part)
+		}
+		run.send(func(m *model) { m.setState(stateIdle) })
+		streamedRowsPrintedOnce(t, run, turn)
+		rawOutputInvariant(t, run)
+		for index, size := range []tea.WindowSizeMsg{{Width: 40, Height: 8}, {Width: 100, Height: 24}} {
+			run.mu.Lock()
+			em.Resize(size.Width, size.Height)
+			run.width = size.Width
+			run.mu.Unlock()
+			run.send(size)
+			run.waitFor(t, "cursor-position query after resize", func(_, _ string) bool {
+				return strings.Count(run.raw(), ansi.RequestCursorPositionReport) == index+2
+			})
+			bandAtBottom(t, run, em, size.Height, fmt.Sprintf("resize to %dx%d", size.Width, size.Height))
+		}
+		if got := strings.Count(run.raw(), ansi.RequestCursorPositionReport); got != 3 {
+			t.Fatalf("cursor queries across resizes = %d, want 3", got)
+		}
+	})
+}
+
+func TestDockQueryTimeoutAbandonsArming(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		em := vt.NewEmulator(100, 24)
+		muteMode(em)
+		run := startEmulatedProgram(em, em, nil)
+		defer func() {
+			run.program.Quit()
+			_ = em.Close()
+			<-run.done
+			time.Sleep(dockQueryTimeout)
+			synctest.Wait()
+		}()
+		run.send(resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/test", PlatformFamily: "unix"}})
+		run.send(commandDone("timeout-proof"))
+		run.waitFor(t, "bottom-anchor query armed", func(string, string) bool {
+			state := run.read(func(m model) any { return *m.anchorState() }).(dockAnchor)
+			return state.querying && state.needed
+		})
+		run.waitFor(t, "unanswered query abandoned", func(string, string) bool {
+			state := run.read(func(m model) any { return *m.anchorState() }).(dockAnchor)
+			return !state.querying && !state.needed
+		})
+		if got := strings.Count(run.raw(), ansi.RequestCursorPositionReport); got != 1 {
+			t.Fatalf("cursor queries on a mute terminal = %d, want 1", got)
+		}
+		run.send(commandDone("after-timeout"))
+		run.waitFor(t, "printing continues after timeout", func(history, screen string) bool {
+			return rowCount(history, screen, "after-timeout") == 1
+		})
+		if got := strings.Count(run.raw(), ansi.RequestCursorPositionReport); got != 1 {
+			t.Fatalf("cursor queries after abandoned arming = %d, want 1", got)
+		}
+	})
+}
+
+func TestDockQueryTimeoutRejectsStaleGeneration(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m.screen.width, m.screen.height = 40, 8
+	m.out.geometry = m.currentGeometry()
+	m.anchorState().needed = true
+	if m.anchorDock() == nil {
+		t.Fatal("missing cursor query")
+	}
+	state := m.anchorState()
+	m.queryExpired(dockQueryTimeoutMsg{query: state.query + 1})
+	if !state.querying || !state.needed {
+		t.Fatal("a stale timeout abandoned a live query")
+	}
+	m.queryExpired(dockQueryTimeoutMsg{query: state.query})
+	if state.querying || state.needed {
+		t.Fatal("the matching timeout failed to abandon the arming")
+	}
+	if m.positionDock(tea.CursorPositionMsg{X: 2, Y: 5}) != nil {
+		t.Fatal("a reply after the timeout relocated the dock")
+	}
+}
+
+func TestDockRejectsRowOneReportAsModifiedF3(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m.screen.width, m.screen.height = 40, 8
+	m.out.geometry = m.currentGeometry()
+	m.anchorState().needed = true
+	m.anchorState().prints = 1
+	if m.anchorDock() == nil {
+		t.Fatal("missing cursor query")
+	}
+	if command := m.positionDock(tea.CursorPositionMsg{X: 2, Y: 0}); command != nil {
+		t.Fatal("a modified-F3 signature relocated the dock")
+	}
+	state := m.anchorState()
+	if state.querying {
+		t.Fatal("the phantom report left the query in flight")
+	}
+	if !state.needed {
+		t.Fatal("the phantom report abandoned the arming")
+	}
+	if m.anchorDock() == nil {
+		t.Fatal("the dock stopped re-arming after a phantom report")
+	}
+	if command := m.positionDock(tea.CursorPositionMsg{X: 2, Y: 2}); command == nil {
+		t.Fatal("a real cursor report stopped relocating the dock")
+	}
 }

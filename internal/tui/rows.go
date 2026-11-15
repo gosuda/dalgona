@@ -223,6 +223,7 @@ func (m *model) settle() tea.Cmd {
 		return nil
 	}
 	m.out.geometry = geometry
+	m.anchorState().needed = true
 	m.out.settling = true
 	m.out.settleN++
 	n := m.out.settleN
@@ -247,7 +248,7 @@ func lineCount(content string) int {
 }
 
 func (m *model) drain() tea.Cmd {
-	if m.out.printing || m.out.settling || m.review != nil || len(m.out.pending) == 0 {
+	if m.out.printing || m.out.settling || m.anchorState().moving || m.review != nil || len(m.out.pending) == 0 {
 		return nil
 	}
 	bound := m.screen.height - len(m.dockLines())
@@ -260,6 +261,7 @@ func (m *model) drain() tea.Cmd {
 	}
 	m.out.frozen = m.View()
 	m.out.printing = true
+	m.anchorState().prints++
 	printed := func() tea.Msg { return printedMsg{} }
 	return tea.Sequence(tea.Println(text), printed)
 }

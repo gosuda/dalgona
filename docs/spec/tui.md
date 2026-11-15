@@ -98,6 +98,22 @@ When the dock is too tall, the client MUST drop the status band first, then the 
 
 Every dock row MUST be at most the window width minus one cell.
 
+After a geometry change settles, the client MUST request the terminal cursor position.
+A valid reply MUST place the dock at the physical bottom with relative cursor moves and line erases.
+The client MUST NOT print blank history rows to place the dock.
+A stale reply or a changed frame MUST NOT move the dock.
+The client MUST request plain cursor-position reports (`ESC[6n`).
+After a committed print, the client MUST reject row-one reports and request the position again.
+Modified F3 key events MUST remain available to the composer.
+A relocation MUST finish its output write before the client prints another committed row.
+Private output markers MUST NOT reach the terminal.
+An unanswered query MUST NOT block input or committed output.
+A query MUST expire after one second without a reply.
+A geometry change during a pending query MUST remain eligible for placement after that query expires.
+If geometry stayed unchanged until expiry, the client MUST wait for a geometry change before another query.
+Physical-bottom placement requires a terminal that answers cursor-position queries.
+On a terminal that does not answer, input and output remain available, but physical-bottom acceptance is not proven.
+
 ## Panels
 
 A list panel MUST show its title in the first row and its hint in the last row.
