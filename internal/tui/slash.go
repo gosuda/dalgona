@@ -145,7 +145,7 @@ func (m *model) resumeThread(id string) tea.Cmd {
 		if m.conn.client == nil {
 			return resultMsg{op: "resumed", err: errors.New("rpc client is not connected")}
 		}
-		ctx, cancel := m.commandContext()
+		ctx, cancel := requestContext(m.conn.done)
 		defer cancel()
 		var resumed rpc.ThreadResumeResponse
 		if err := m.conn.client.Call(ctx, "thread/resume", rpc.ThreadResumeParams{ThreadID: id}, &resumed); err != nil {

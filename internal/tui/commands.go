@@ -25,10 +25,6 @@ const (
 	maxFollowups   = 32
 )
 
-func (m *model) commandContext() (context.Context, context.CancelFunc) {
-	return requestContext(m.conn.done)
-}
-
 func requestContext(done <-chan struct{}) (context.Context, context.CancelFunc) {
 	return boundedContext(done, requestTimeout)
 }
@@ -54,7 +50,7 @@ func (m *model) call(op, method string, params, result any, text string) tea.Cmd
 		if m.conn.client == nil {
 			return resultMsg{op: op, text: text, err: errors.New("rpc client is not connected")}
 		}
-		ctx, cancel := m.commandContext()
+		ctx, cancel := requestContext(m.conn.done)
 		defer cancel()
 		err := m.conn.client.Call(ctx, method, params, result)
 		return resultMsg{op: op, value: result, text: text, turnID: turnID, err: err}
@@ -66,7 +62,7 @@ func (m *model) initialize() tea.Cmd {
 		if m.conn.client == nil {
 			return resultMsg{op: "initialize", err: errors.New("rpc client is not connected")}
 		}
-		ctx, cancel := m.commandContext()
+		ctx, cancel := requestContext(m.conn.done)
 		defer cancel()
 		params := rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: "dalgona", Title: "dalgona TUI", Version: clientVersion()}}
 		var result rpc.InitializeResult
