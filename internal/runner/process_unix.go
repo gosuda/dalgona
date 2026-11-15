@@ -80,6 +80,31 @@ func ensureProcessGroupGone(pgid int, signal Signal) {
 	}
 }
 
+func killProcessGroupOnExit(pgid int) {
+	if pgid <= 0 || processGroupStopped(pgid) {
+		return
+	}
+	_ = signalProcess(os.Getpid(), pgid, SignalTerm)
+	termDeadline := time.Now().Add(groupExitSettle)
+	for !processGroupStopped(pgid) {
+		if time.Now().After(termDeadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if processGroupStopped(pgid) {
+		return
+	}
+	_ = signalProcess(os.Getpid(), pgid, SignalKill)
+	killDeadline := time.Now().Add(time.Second)
+	for !processGroupStopped(pgid) {
+		if time.Now().After(killDeadline) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func stopSpawnGroup(string, int) bool { return false }
 
 func killSpawnGroup(shimPID int, pgid int) bool {
@@ -140,17 +165,19 @@ func assignJob(cmd *exec.Cmd) (func(), error) {
 
 func resumeCommand(_ *exec.Cmd) error { return nil }
 
-func exitDetails(waitErr error) (int, string) {
+func exitDetails(cmd *exec.Cmd, waitErr error) (int, string) {
+	if cmd.ProcessState != nil {
+		if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return cmd.ProcessState.ExitCode(), status.Signal().String()
+		}
+		return cmd.ProcessState.ExitCode(), ""
+	}
 	if waitErr == nil {
 		return 0, ""
 	}
 	exitErr, ok := errors.AsType[*exec.ExitError](waitErr)
 	if !ok {
 		return 1, ""
-	}
-	status, ok := exitErr.Sys().(syscall.WaitStatus)
-	if ok && status.Signaled() {
-		return exitErr.ExitCode(), status.Signal().String()
 	}
 	return exitErr.ExitCode(), ""
 }

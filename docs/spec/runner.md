@@ -18,6 +18,11 @@ The shim MUST write `pid` before it starts the command. `pid` MUST store the pro
 
 The shim MUST start the command in a new process group on Unix. It MUST record the group id in `pgid`. A group whose members are all zombies MUST count as stopped. On Windows it MUST assign the command to a named job object. On Windows it MUST start the command suspended. It MUST assign the suspended command to the job object. It MUST resume the command after the assignment. The shim MUST start the command on Windows with `CREATE_NO_WINDOW`. On Windows the shim MUST run a `cmd /C <command>` argv verbatim as `cmd /S /C "<command>"`. The `/S` switch MUST make `cmd` strip exactly the outer quote pair. The parent MUST reap the shim without waiting for the command in the caller.
 
+
+On every exit path the shim MUST stop the remaining command process group members. It MUST send `SIGTERM`, wait up to two seconds, and then send `SIGKILL` to the group. On Windows the shim MUST set the kill-on-close limit on the job object. Closing the job handle MUST let the system stop the remaining children in the job.
+
+The shim MUST bound output draining at one second after the command exits. A drain timeout MUST NOT replace the command's own exit code or signal.
+
 `Read` MUST take a byte offset into `out`. It MUST return `Data`, `Next`, `Exit`, `Alive`, and `Path`. `Data` MUST be the bytes from the offset. `Next` MUST be the next unread offset. `Exit` MUST be the exit record when `exit` exists, otherwise unset. `Alive` MUST be true only when the stored pid and start time still name the shim. `Path` MUST name the `out` file. `Read` MUST check `exit` before taking the final output snapshot, and when `exit` appears after an empty check it MUST drain `out` again. A terminal response MUST carry every byte written before the exit record, across as many pages as that takes. For a call directory that `Start` kept after an unconfirmed stop, `Read` MUST report the stored bytes. It MUST set `Alive` to false and MUST NOT return an `Exit` record.
 
 On Windows the runner MUST retry a call-directory file open that fails with a sharing violation. It MUST retry for up to one second and then fail. The rename that publishes the file can fail a concurrent open with a sharing violation. A sharing violation MUST NOT count as a missing file.
