@@ -274,6 +274,10 @@ A dropped connection MUST show `Disconnected from dalgona.` with `Reconnect`.
 A failed connect MUST show `Unable to connect to dalgona: <detail>. Check that dalgona web is still running.` with `Reconnect`.
 A socket error MUST show `Connection error: <message>.` with `Reconnect`.
 The header MUST show `Offline` while the connection is down.
+For a local daemon, `dalgona web` MUST permit auto-start until its first successful daemon connection.
+After that connection, each relay connection MUST attach to an existing daemon without auto-start.
+This rule applies to all browser windows served by that `dalgona web` process.
+If the daemon stops, start it separately before reconnecting. Remote connections keep their configured bridge behavior.
 
 ### Notifications
 

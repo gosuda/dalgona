@@ -8,6 +8,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/codexapp"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/daemon"
 	"github.com/gosuda/dalgona/internal/webui"
 )
 
@@ -20,6 +21,27 @@ func daemonDialer(cfg config.Config, std stdio) (func(context.Context) (net.Conn
 		return remoteDialer(cfg, name, std)
 	}
 	return ensure, nil
+}
+
+func webDaemonDialer(home, exe string) func(context.Context) (net.Conn, error) {
+	gate := make(chan struct{}, 1)
+	started := false
+	return func(ctx context.Context) (net.Conn, error) {
+		select {
+		case gate <- struct{}{}:
+			defer func() { <-gate }()
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		}
+		if started {
+			return daemon.DialHome(home)
+		}
+		conn, err := ensureHome(ctx, home, exe)
+		if err == nil {
+			started = true
+		}
+		return conn, err
+	}
 }
 
 func runAppServer(ctx context.Context, args []string, std stdio) int {
@@ -45,6 +67,13 @@ func runWeb(ctx context.Context, args []string, std stdio) int {
 	dial, err := daemonDialer(cfg, std)
 	if err != nil {
 		return fail(std, 1, err)
+	}
+	if cmp.Or(std.remote, cfg.Remote) == "" {
+		exe, err := executable()
+		if err != nil {
+			return fail(std, 1, err)
+		}
+		dial = webDaemonDialer(cfg.Home, exe)
 	}
 	web := webui.Config{Listen: cfg.Web.Listen, Token: cfg.Web.Token, CertFile: cfg.Web.CertFile, KeyFile: cfg.Web.KeyFile}
 	if err := webui.Serve(ctx, web, dial, std.errOut); err != nil {
