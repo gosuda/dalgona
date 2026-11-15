@@ -172,7 +172,11 @@ type (
 		APIKeyEnv string `toml:"api_key_env"`
 	}
 	modelDoc struct {
-		ContextWindow *int `toml:"context_window"`
+		ContextWindow        *int     `toml:"context_window"`
+		InputUSDPerMTok      *float64 `toml:"input_usd_per_mtok"`
+		OutputUSDPerMTok     *float64 `toml:"output_usd_per_mtok"`
+		CacheReadUSDPerMTok  *float64 `toml:"cache_read_usd_per_mtok"`
+		CacheWriteUSDPerMTok *float64 `toml:"cache_write_usd_per_mtok"`
 	}
 	runnerDoc struct {
 		Service  string `toml:"service"`
@@ -321,13 +325,7 @@ func (c *Config) mergeMaps(doc *fileDoc) {
 	for name, value := range doc.Providers {
 		c.Providers[name] = ProviderSpec(value)
 	}
-	for name, value := range doc.Models {
-		model := ModelSpec{}
-		if value.ContextWindow != nil {
-			model.ContextWindow = *value.ContextWindow
-		}
-		c.Models[name] = model
-	}
+	c.mergeModels(doc)
 	c.mergeBoxes(doc)
 	for name, value := range doc.MCPServers {
 		c.MCPServers[name] = MCPServerSpec(value)
@@ -432,6 +430,7 @@ func (c *Config) validate() error {
 	errs = append(errs, c.validateAdvisors()...)
 	errs = append(errs, c.validateStatusHideList()...)
 	errs = append(errs, c.validateTLSCAFile()...)
+	errs = append(errs, c.validatePrices()...)
 	return errors.Join(errs...)
 }
 

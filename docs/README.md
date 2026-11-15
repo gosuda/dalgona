@@ -87,6 +87,7 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [Automated approval](decisions/automated-approval.md): static refusals and automatic decisions.
 - [Sandbox services](decisions/sandbox-services.md): service seam and persistence choices.
 - [Model presets](decisions/model-presets.md): native identifiers, fallback, and selection evidence.
+- [Model prices](decisions/model-prices.md): price rows, rounding, and the cost that derives from them.
 - [Secret masking](decisions/secret-masking.md): raw-secret exclusion and tool-boundary restoration.
 - [Advisor](decisions/advisor.md): optional review without approval authority.
 - [Dependencies](decisions/dependencies.md): codecs, import restrictions, and pins.

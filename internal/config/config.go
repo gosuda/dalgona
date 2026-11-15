@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/gosuda/dalgona/internal/model"
 )
 
 type Product string
@@ -218,10 +220,13 @@ type (
 		Requires     []string
 		Enabled      bool
 	}
-	RunnerSpec    struct{ Service, Image, Template, URL string }
-	RemoteSpec    struct{ Service, Image, Template, URL, BoxID string }
-	ProviderSpec  struct{ BaseURL, APIKeyEnv string }
-	ModelSpec     struct{ ContextWindow int }
+	RunnerSpec   struct{ Service, Image, Template, URL string }
+	RemoteSpec   struct{ Service, Image, Template, URL, BoxID string }
+	ProviderSpec struct{ BaseURL, APIKeyEnv string }
+	ModelSpec    struct {
+		ContextWindow int
+		Price         *model.Price
+	}
 	MCPServerSpec struct {
 		Command string
 		Args    []string
@@ -291,6 +296,7 @@ type Config struct {
 	Advisor                               AdvisorConfig
 	Advisors                              map[string]AdvisorSpec
 	advisorEntries                        map[string]advisorsDoc
+	priceEntries                          map[string]priceKeys
 	lines                                 map[string]origin
 }
 
@@ -307,7 +313,7 @@ func defaultConfigWithHome(product Product, home, cwd string) Config {
 		Web: WebConfig{Listen: "127.0.0.1:7437"}, Providers: map[string]ProviderSpec{},
 		Models: map[string]ModelSpec{}, Runners: map[string]RunnerSpec{}, Remotes: map[string]RemoteSpec{},
 		MCPServers: map[string]MCPServerSpec{}, Keywords: map[string]KeywordSpec{},
-		lines: map[string]origin{}, Advisor: defaultAdvisor(), advisorEntries: map[string]advisorsDoc{},
+		lines: map[string]origin{}, Advisor: defaultAdvisor(), advisorEntries: map[string]advisorsDoc{}, priceEntries: map[string]priceKeys{},
 	}
 }
 
@@ -339,6 +345,7 @@ func Load(product Product, cwd string, flags Flags) (Config, error) {
 		return Config{}, err
 	}
 	cfg.resolveAdvisors()
+	cfg.resolvePrices()
 	return cfg, nil
 }
 

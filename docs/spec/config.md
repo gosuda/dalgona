@@ -56,7 +56,7 @@ The interactive settings MUST use the keys in the table below.
 | `verbosity` | `low`, `medium`, `high` | `medium` | `verbosity` |
 | `theme` | `auto`, `auto-soft`, `night`, `soft-night`, `day`, `soft-day` | `auto` | `theme` |
 | `icons` | `auto`, `unicode`, `nerd` | `auto` | `icons` |
-| `status_hide` | `effort`, `approval`, `sandbox`, `folder`, `queue`, `context`, `mark` | `[]` | `statusHide` |
+| `status_hide` | `effort`, `approval`, `sandbox`, `folder`, `queue`, `cost`, `context`, `mark` | `[]` | `statusHide` |
 | `notifications` | `true`, `false` | `true` | `notifications` |
 
 The `auto` theme MUST follow the system and use `night` or `day`. The `auto-soft` theme MUST follow the system and use `soft-night` or `soft-day`. The `status_hide` key MUST NOT name `model`.
@@ -73,6 +73,12 @@ The top-level `tls_ca_file` key names a PEM file of certificate authorities. Its
 A local `login` for an OAuth provider or with `--device-auth` MUST install `tls_ca_file` before its first request. The `models` command sends its request through the host. The host MUST install the setting when it loads its configuration. A `logout` and an API-key `login` send no request and do not read the setting.
 
 A `[remotes.<name>]` table records a daemon in a box (Mode B, see `runners.md`). Its keys are `service`, `image`, `template`, `url`, and `box_id`. Each key MUST merge across layers on its own. A key present in a later layer MUST replace the earlier value, including an empty string. An absent key MUST keep the earlier value. Other keys inside the table MUST fail loading as unknown keys.
+
+A `[models."<provider>/<model>"]` table sets values for one model. Its keys are `context_window`, `input_usd_per_mtok`, `output_usd_per_mtok`, `cache_read_usd_per_mtok`, and `cache_write_usd_per_mtok`. Each key MUST merge across layers on its own. An absent key MUST keep the earlier value.
+
+The four price keys are TOML numbers in US dollars per million tokens. `Load` MUST round each price to a whole micro-USD per million tokens. A price MUST be between 0 and 10000. The error names the table and the key, as in `[models."<id>"] <key> must be between 0 and 10000`.
+
+`input_usd_per_mtok` and `output_usd_per_mtok` MUST be set together. A cache key without both MUST fail with `[models."<id>"] input_usd_per_mtok and output_usd_per_mtok must be set together`. An absent cache key MUST price those tokens at the input rate. Each price error reports the file and its 1-based line.
 
 Edit styles MUST be one of anchor, replace, hashline, hashline-light, hashline-enhanced, apply_patch, simple, balanced, or strict. A scalar style MUST apply to every model. A style table MUST contain `default`. Model patterns MUST match the full model name without regard to case. `*` matches any run and `?` matches one character. The first row in TOML source order wins.
 

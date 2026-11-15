@@ -21,6 +21,17 @@ func (h *Host) Config() config.Config {
 	return h.live
 }
 
+func (h *Host) PriceOf(modelID string) (model.Price, bool) {
+	h.settingsMu.Lock()
+	spec := h.live.Models[modelID]
+	h.settingsMu.Unlock()
+	var configured map[string]model.Price
+	if spec.Price != nil {
+		configured = map[string]model.Price{modelID: *spec.Price}
+	}
+	return model.PriceFor(modelID, configured)
+}
+
 func (h *Host) WriteSettings(edits ...config.SettingEdit) error {
 	_, err := h.WriteSettingsIf("", edits...)
 	return err

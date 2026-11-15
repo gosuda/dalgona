@@ -18,7 +18,7 @@ type SettingEdit struct {
 	Value any
 }
 
-var statusItems = []string{"effort", "approval", "sandbox", "folder", "queue", "context", "mark"}
+var statusItems = []string{"effort", "approval", "sandbox", "folder", "queue", "cost", "context", "mark"}
 
 var (
 	reasoningOptions = []string{"default", "low", "medium", "high", "xhigh", "max"}

@@ -18,6 +18,12 @@ Outside OpenAI, a freeform tool MUST remain a function tool. Its schema MUST con
 
 API keys MUST come from the caller callback or the provider environment variable. A configured base URL MUST replace the default endpoint.
 
+## TLS roots
+
+A non-empty `tls_ca_file` setting MUST install its PEM certificates into the process default HTTP transport before any client exists. The install happens once, right after the product loads its configuration. Model HTTP clients built with `NewHTTPClient(nil)` use the default transport. OAuth token requests, the MCP HTTP transport, the `chatgpt` transport, and the decision service follow the default transport. The Cloudflare service, the remote-bridge websocket dial, and `webfetch` follow it as well. The Docker client, the Modal client, and the web server certificate keep their own trust settings.
+
+The root pool comes from `x509.SystemCertPool` with the configured certificates appended. Appended roots add trust on Windows, macOS, and iOS, because platform verification keeps its authority over such a pool. An inherited `SSL_CERT_FILE` or `SSL_CERT_DIR` variable makes Go 1.27 read the platform roots from disk instead. Set `GODEBUG=x509sslcertoverrideplatform=0` to restore the platform roots.
+
 ## Subscription and IDE providers
 
 OAuth adapters MUST take their credential from a caller callback. `oauth.Source` MUST load the stored token once. It MUST refresh the token through `oauth.Refresh` when the token expires within 60 seconds. A token without an expiry MUST NOT refresh. Concurrent callers MUST share one refresh. A refresh MUST keep the previous account when the response carries none. The source MUST call `Save` after each successful refresh. A refresh failure MUST return an error and MUST keep the previous token for the next call. A save failure MUST return an error and MUST keep the refreshed token, because the refresh grant MAY have revoked the previous refresh token. The next call MUST retry the save without a new refresh.
@@ -95,9 +101,21 @@ Static role presets MUST match the preset table in [model-presets.md](../decisio
 
 Providers MUST take their static preset identifiers from the native model guides of OpenAI, Anthropic, and Google, as cited in `docs/decisions/model-presets.md`, dated 2026-11-08.
 
-Effort clamping MUST choose the highest supported level at or below the request. It MUST choose the lowest supported level when every level exceeds the request. Nil effort support MUST omit the effort field.
+An explicit reasoning effort MUST match a level of the model's `efforts` capability before any network call. A declared level that the model does not offer MUST fail the request of a top-level turn. The error MUST be `model <model_id> does not support reasoning effort <requested>; supported: [<levels>]`. A thread that is not top-level, such as an advisor or a subagent, MUST NOT fail for that reason. It MUST send the highest declared level below the requested level. It MUST send no effort level when no declared level is below the requested level. The level order is `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. A declared level outside that order is never a fallback. A model that declares no effort level leaves the capability unknown. An unknown capability MUST send the request without an effort level. An empty effort or `default` MUST send no effort level. The `effort` field of a turn MUST win over a keyword effort. A keyword effort `max` MUST apply only when the model declares `max`. An unsupported keyword effort MUST be ignored.
 
 A provider that does not implement image input MUST refuse a turn that carries an image. The server MUST refuse with `this model does not accept images`. The server MUST replace the images of earlier turns with a text notice for such a model.
+
+## Cost
+
+The server MUST price each `assistant.message` that carries usage. It MUST use the model of the thread at that message. That model starts as `session.created.model` and then follows each `user.message.model`.
+
+The price MUST come from `[models."<id>"]` in [config.md](config.md) first. Without that table, the price MUST come from the built-in table in [model-prices.md](../decisions/model-prices.md). A model with neither has no price.
+
+The cost of one message is the sum of its four token counts, each times its rate in micro-USD per million tokens. The sum MUST divide by 1000000 and round half up once. The result MUST saturate at the largest `int64`.
+
+The thread cost is the sum of its message costs. A message on a model with no price adds no cost. Such a message MUST set `costPartial` when another message has a price. [protocol.md](protocol.md) defines the wire members.
+
+The cost covers the assistant messages of the thread. It MUST NOT include advisor, decider, compaction, or subagent spend. The journal MUST NOT record a cost. The server computes the cost on read, so a new price table prices old threads again.
 
 ## Retry and timeouts
 

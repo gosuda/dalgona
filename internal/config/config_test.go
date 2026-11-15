@@ -120,6 +120,29 @@ func TestLoad_approvalValidation(t *testing.T) {
 	requireConfigError(t, err, "config.toml:1: approval must be one of auto, yolo, ask")
 }
 
+func TestLoad_shellEnvironment(t *testing.T) {
+	for _, product := range []config.Product{config.ProductDal, config.ProductDalgona} {
+		for _, row := range []struct {
+			body string
+			want config.ShellEnvMode
+		}{
+			{"", config.ShellEnvSnapshot},
+			{"shell_env = \"inherit\"\n", config.ShellEnvInherit},
+			{"shell_env = \"snapshot\"\n", config.ShellEnvSnapshot},
+		} {
+			cfg, err := loadConfig(t, product, row.body, "", config.Flags{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ShellEnv != row.want {
+				t.Fatalf("%s shell environment = %q, want %q", product, cfg.ShellEnv, row.want)
+			}
+		}
+	}
+	_, err := loadConfig(t, config.ProductDalgona, "shell_env = \"invalid\"\n", "", config.Flags{})
+	requireConfigError(t, err, "config.toml:1: shell_env must be one of snapshot, inherit")
+}
+
 func TestLoad_keywordValidation(t *testing.T) {
 	tests := []struct {
 		name string
