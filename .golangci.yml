@@ -130,6 +130,8 @@ linters:
             - "**/internal/keywords/**"
             - "**/internal/syntax/**"
           deny:
+            - pkg: "github.com/gosuda/dalgona/internal/acp"
+              desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/rpc"
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/tui"
@@ -165,6 +167,7 @@ linters:
             - "**/internal/tui/**"
             - "**/internal/webui/**"
             - "**/internal/herdr/**"
+            - "**/internal/acp/**"
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/journal"
               desc: clients reach the core only through internal/rpc
@@ -190,6 +193,8 @@ linters:
           files:
             - "**/cmd/dal/**"
           deny:
+            - pkg: "github.com/gosuda/dalgona/internal/acp"
+              desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/daemon"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/script$"
