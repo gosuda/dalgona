@@ -23,6 +23,7 @@ import CommandPalette from "#lib/components/CommandPalette.svelte";
 import CompletionList from "#lib/components/CompletionList.svelte";
 import FollowupQueue from "#lib/components/FollowupQueue.svelte";
 import { handoffFocus } from "#lib/focus.ts";
+import { isImeKey } from "#lib/ime.ts";
 import type { FileMatch, KeywordMatch } from "#lib/types.ts";
 
 const INTERRUPT_GUARD_MS = 2000;
@@ -178,7 +179,8 @@ function pressEscape(): void {
 }
 
 function onWindowKeydown(event: KeyboardEvent): void {
-	if (event.key !== "Escape" || event.defaultPrevented) return;
+	if (event.key !== "Escape" || event.defaultPrevented || isImeKey(event))
+		return;
 	const focused = document.activeElement;
 	if (focused && focused !== document.body && !region?.contains(focused))
 		return;
@@ -461,7 +463,7 @@ function recallFromKey(event: KeyboardEvent): boolean {
 
 function onKeydown(event: KeyboardEvent): void {
 	if (event.defaultPrevented) return;
-	if (event.isComposing) return;
+	if (isImeKey(event)) return;
 	if ((fileOpen || filePending) && onFileKey(event)) {
 		event.preventDefault();
 		return;

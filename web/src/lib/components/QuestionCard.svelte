@@ -1,5 +1,6 @@
 <script lang="ts">
 import { handoffFocus } from "#lib/focus.ts";
+import { isImeKey } from "#lib/ime.ts";
 import { MAX_ANSWER } from "#lib/question.ts";
 import type {
 	QuestionItem,
@@ -122,6 +123,7 @@ function scrollDetails(event: KeyboardEvent, target: Node): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+	if (isImeKey(event)) return;
 	if (!(event.target instanceof Node) || !card?.contains(event.target)) return;
 	if (event.key !== "Escape") {
 		scrollDetails(event, event.target);

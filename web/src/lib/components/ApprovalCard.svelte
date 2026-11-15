@@ -1,6 +1,7 @@
 <script lang="ts">
 import DiffCard from "#lib/components/DiffCard.svelte";
 import { handoffFocus } from "#lib/focus.ts";
+import { isImeKey } from "#lib/ime.ts";
 import type {
 	ApprovalDecision,
 	ApprovalRequest,
@@ -76,6 +77,7 @@ function scrollDetails(event: KeyboardEvent, target: Node): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+	if (isImeKey(event)) return;
 	if (!(event.target instanceof Node) || !card?.contains(event.target)) return;
 	if (event.ctrlKey || event.metaKey || event.altKey) return;
 	if (isEditable(event.target)) return;
