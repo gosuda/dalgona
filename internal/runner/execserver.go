@@ -254,7 +254,7 @@ func serveExecWebsocket(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if bridge != nil {
 		err = bridge(ctx, conn)
 	} else {
-		err = serveBoxChannel(ctx, conn, local, serverSandboxFloor())
+		err = serveExecRPC(ctx, conn, local, execPolicy{boxChannel: true, floor: serverSandboxFloor()})
 	}
 	if err != nil && ctx.Err() == nil {
 		slog.Debug("exec-server: websocket connection", "error", err)

@@ -21,10 +21,6 @@ type execPolicy struct {
 
 func trustedExecPolicy() execPolicy { return execPolicy{} }
 
-func serveBoxChannel(ctx context.Context, conn io.ReadWriteCloser, local *Local, floor SandboxMode) error {
-	return serveExecRPC(ctx, conn, local, execPolicy{boxChannel: true, floor: floor})
-}
-
 func serveExecRPC(ctx context.Context, conn io.ReadWriteCloser, local *Local, policy execPolicy) error {
 	closeConn := sync.OnceFunc(func() { _ = conn.Close() })
 	stop := context.AfterFunc(ctx, closeConn)
