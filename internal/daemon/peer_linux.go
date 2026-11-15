@@ -111,16 +111,16 @@ func logConfinedDaemon(daemonMarked bool) {
 }
 
 func annotateSandboxedClient(conn net.Conn) net.Conn {
-	return &sandboxedClientConn{Conn: conn}
+	return &sandboxedClientConn{UnixConn: conn.(*net.UnixConn)}
 }
 
 type sandboxedClientConn struct {
-	net.Conn
+	*net.UnixConn
 	noted atomic.Bool
 }
 
 func (c *sandboxedClientConn) Read(b []byte) (int, error) {
-	n, err := c.Conn.Read(b)
+	n, err := c.UnixConn.Read(b)
 	if err != nil {
 		return n, noteSandboxedClient(err, &c.noted)
 	}
@@ -128,7 +128,7 @@ func (c *sandboxedClientConn) Read(b []byte) (int, error) {
 }
 
 func (c *sandboxedClientConn) Write(b []byte) (int, error) {
-	n, err := c.Conn.Write(b)
+	n, err := c.UnixConn.Write(b)
 	if err != nil {
 		return n, noteSandboxedClient(err, &c.noted)
 	}
