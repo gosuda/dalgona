@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/codexapp"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/daemon"
@@ -13,7 +14,14 @@ import (
 )
 
 func loadConfig() (config.Config, error) {
-	return config.Load(config.ProductDalgona, "", config.Flags{})
+	cfg, err := config.Load(config.ProductDalgona, "", config.Flags{})
+	if err != nil {
+		return config.Config{}, err
+	}
+	if err := app.InstallTLSRoots(cfg); err != nil {
+		return config.Config{}, err
+	}
+	return cfg, nil
 }
 
 func daemonDialer(cfg config.Config, std stdio) (func(context.Context) (net.Conn, error), error) {

@@ -3,9 +3,11 @@ package config
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -42,6 +44,7 @@ type fileDoc struct {
 	StreamIdleTimeout    *string                `toml:"stream_idle_timeout"`
 	Runner               *string                `toml:"runner"`
 	Remote               *string                `toml:"remote"`
+	TLSCAFile            *string                `toml:"tls_ca_file"`
 	Providers            map[string]providerDoc `toml:"providers"`
 	Models               map[string]modelDoc    `toml:"models"`
 	Runners              map[string]runnerDoc   `toml:"runners"`
@@ -252,6 +255,10 @@ func (c *Config) mergeScalars(current layer) error {
 	set(doc.Notifications, &c.Notifications)
 	set(doc.Runner, &c.Runner)
 	set(doc.Remote, &c.Remote)
+	set(doc.TLSCAFile, &c.TLSCAFile)
+	if c.TLSCAFile != "" && !filepath.IsAbs(c.TLSCAFile) {
+		c.TLSCAFile = filepath.Join(c.Home, c.TLSCAFile)
+	}
 	if doc.SandboxWritableRoots != nil {
 		c.SandboxWritableRoots = doc.SandboxWritableRoots
 	}
@@ -412,7 +419,41 @@ func (c *Config) validate() error {
 	errs = append(errs, c.validateKeywords()...)
 	errs = append(errs, c.validateAdvisors()...)
 	errs = append(errs, c.validateStatusHideList()...)
+	errs = append(errs, c.validateTLSCAFile()...)
 	return errors.Join(errs...)
+}
+
+const tlsCAMaxBytes = 1048576
+
+func (c *Config) validateTLSCAFile() []error {
+	if c.TLSCAFile == "" {
+		return nil
+	}
+	info, err := os.Stat(c.TLSCAFile)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return []error{c.tlsCAFileError("no such file")}
+		}
+		return []error{err}
+	}
+	if !info.Mode().IsRegular() {
+		return []error{c.tlsCAFileError("not a regular file")}
+	}
+	if info.Size() > tlsCAMaxBytes {
+		return []error{c.tlsCAFileError("larger than 1048576 bytes")}
+	}
+	data, err := os.ReadFile(c.TLSCAFile)
+	if err != nil {
+		return []error{err}
+	}
+	if !x509.NewCertPool().AppendCertsFromPEM(data) {
+		return []error{c.tlsCAFileError("holds no PEM certificate")}
+	}
+	return nil
+}
+
+func (c *Config) tlsCAFileError(message string) error {
+	return c.valueError("tls_ca_file", "tls_ca_file "+c.TLSCAFile+": "+message)
 }
 
 func (c *Config) validateEnums() []error {

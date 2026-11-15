@@ -267,6 +267,7 @@ type Config struct {
 	Icons                                 Icons
 	StatusHide                            []string
 	Notifications                         bool
+	TLSCAFile                             string
 	EditStyle                             EditStyleSpec
 	CompactionThreshold                   float64
 	CompactionKeepTokens                  int

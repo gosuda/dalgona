@@ -116,7 +116,14 @@ func loadConfig(opts Options) (config.Config, error) {
 	if opts.Config != nil {
 		return *opts.Config, nil
 	}
-	return config.Load(opts.Product, opts.Cwd, opts.Flags)
+	cfg, err := config.Load(opts.Product, opts.Cwd, opts.Flags)
+	if err != nil {
+		return config.Config{}, err
+	}
+	if err := InstallTLSRoots(cfg); err != nil {
+		return config.Config{}, err
+	}
+	return cfg, nil
 }
 
 func openJournal(product config.Product, home string) (*journal.Store, error) {

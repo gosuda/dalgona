@@ -247,19 +247,30 @@ func (env CLIEnv) localLogin(ctx context.Context, request loginRequest) error {
 		env.listProviders(signedIn)
 		return nil
 	}
-	switch {
-	case request.apiKey != "":
-		err = store.SetAPIKey(request.provider, request.apiKey)
-	case request.device:
-		err = LoginDevice(ctx, store, request.provider, env.Stdout)
-	default:
-		err = Login(ctx, store, request.provider, env.Stdin, env.Stdout)
-	}
-	if err != nil {
+	if err = env.signIn(ctx, store, request); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(env.Stdout, "logged in to %s\n", request.provider)
 	return err
+}
+
+func (env CLIEnv) signIn(ctx context.Context, store *auth.Store, request loginRequest) error {
+	if request.apiKey != "" {
+		return store.SetAPIKey(request.provider, request.apiKey)
+	}
+	if request.reachesNetwork() {
+		if _, err := loadConfig(Options{Product: env.Product}); err != nil {
+			return err
+		}
+	}
+	if request.device {
+		return LoginDevice(ctx, store, request.provider, env.Stdout)
+	}
+	return Login(ctx, store, request.provider, env.Stdin, env.Stdout)
+}
+
+func (r loginRequest) reachesNetwork() bool {
+	return r.device || slices.Contains(auth.OAuthProviders, r.provider)
 }
 
 func (env CLIEnv) listProviders(signedIn map[string]bool) {

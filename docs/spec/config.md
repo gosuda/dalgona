@@ -64,6 +64,10 @@ When no layer sets `[approval_decider] threshold`, its value MUST be `0.9`.
 
 The loader MUST validate approval, sandbox, reasoning, tool mode, durations, and runner options. Durations MUST use Go duration syntax. Invalid durations MUST fail loading. A sandbox0 runner MUST use a template and MUST NOT set an image.
 
+The top-level `tls_ca_file` key names a PEM file of certificate authorities. Its default is the empty string. A relative path MUST resolve against the product home. Both products accept the key. `Load` MUST validate the file when the key is set. The file MUST exist, MUST be a regular file, MUST hold at most 1048576 bytes, and MUST hold a PEM certificate. The error MUST report the setting file, its 1-based line, and the resolved path. The message starts with `tls_ca_file` and the resolved path. It ends with `no such file`, `not a regular file`, `larger than 1048576 bytes`, or `holds no PEM certificate`.
+
+A local `login` for an OAuth provider or with `--device-auth` MUST install `tls_ca_file` before its first request. The `models` command sends its request through the host. The host MUST install the setting when it loads its configuration. A `logout` and an API-key `login` send no request and do not read the setting.
+
 A `[remotes.<name>]` table records a daemon in a box (Mode B, see `runners.md`). Its keys are `service`, `image`, `template`, `url`, and `box_id`. Each key MUST merge across layers on its own. A key present in a later layer MUST replace the earlier value, including an empty string. An absent key MUST keep the earlier value. Other keys inside the table MUST fail loading as unknown keys.
 
 Edit styles MUST be one of anchor, replace, hashline, hashline-light, hashline-enhanced, apply_patch, simple, balanced, or strict. A scalar style MUST apply to every model. A style table MUST contain `default`. Model patterns MUST match the full model name without regard to case. `*` matches any run and `?` matches one character. The first row in TOML source order wins.
