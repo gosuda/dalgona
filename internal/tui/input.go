@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -75,21 +76,51 @@ func (f *textField) edit(key string) bool {
 		if f.cursor == 0 {
 			return false
 		}
-		f.text = slices.Delete(f.text, f.cursor-1, f.cursor)
-		f.cursor--
+		start := prevClusterRuneIndex(f.text, f.cursor)
+		f.text = slices.Delete(f.text, start, f.cursor)
+		f.cursor = start
 		return true
 	case "delete":
 		if f.cursor == len(f.text) {
 			return false
 		}
-		f.text = slices.Delete(f.text, f.cursor, f.cursor+1)
+		end := nextClusterRuneIndex(f.text, f.cursor)
+		f.text = slices.Delete(f.text, f.cursor, end)
 		return true
 	case "left":
-		f.cursor = max(0, f.cursor-1)
+		f.cursor = prevClusterRuneIndex(f.text, f.cursor)
 	case "right":
-		f.cursor = min(len(f.text), f.cursor+1)
+		f.cursor = nextClusterRuneIndex(f.text, f.cursor)
 	}
 	return false
+}
+
+func prevClusterRuneIndex(text []rune, cursor int) int {
+	if cursor <= 0 {
+		return 0
+	}
+	prefix := string(text[:cursor])
+	pos, last := 0, 0
+	for pos < len(prefix) {
+		cluster, _ := ansi.FirstGraphemeCluster(prefix[pos:], ansi.GraphemeWidth)
+		if len(cluster) == 0 {
+			break
+		}
+		last = len(cluster)
+		pos += last
+	}
+	if last == 0 {
+		return cursor - 1
+	}
+	return cursor - utf8.RuneCountInString(prefix[pos-last:pos])
+}
+
+func nextClusterRuneIndex(text []rune, cursor int) int {
+	if cursor >= len(text) {
+		return len(text)
+	}
+	cluster, _ := ansi.FirstGraphemeCluster(string(text[cursor:]), ansi.GraphemeWidth)
+	return cursor + utf8.RuneCountInString(cluster)
 }
 
 func inputLabel(mode inputMode) string {
@@ -373,14 +404,17 @@ func (c editor) runeAt(s *screenState, row editorRow, col int) int {
 		}
 		return utf8.RuneCountInString(c.Value()[:row.end])
 	}
-	offset, width := 0, 0
-	for _, r := range row.text {
-		cells := s.cells(string(r))
-		if width+cells > col {
+	offset := 0
+	for offset < len(row.text) {
+		cluster, _ := ansi.FirstGraphemeCluster(row.text[offset:], s.method)
+		if len(cluster) == 0 {
 			break
 		}
-		width += cells
-		offset += utf8.RuneLen(r)
+		next := offset + len(cluster)
+		if s.cells(row.text[:next]) > col {
+			break
+		}
+		offset = next
 	}
 	return utf8.RuneCountInString(c.Value()[:row.start+offset])
 }
@@ -439,15 +473,17 @@ func (c *editor) backspace() {
 	if c.cursor == 0 {
 		return
 	}
-	c.text = append(c.text[:c.cursor-1], c.text[c.cursor:]...)
-	c.cursor--
+	start := prevClusterRuneIndex(c.text, c.cursor)
+	c.text = append(c.text[:start], c.text[c.cursor:]...)
+	c.cursor = start
 }
 
 func (c *editor) delete() {
 	if c.cursor >= len(c.text) {
 		return
 	}
-	c.text = append(c.text[:c.cursor], c.text[c.cursor+1:]...)
+	end := nextClusterRuneIndex(c.text, c.cursor)
+	c.text = append(c.text[:c.cursor], c.text[end:]...)
 }
 
 func (c *editor) killLineStart() {
@@ -468,15 +504,11 @@ func (c *editor) deleteWord() {
 }
 
 func (c *editor) moveLeft() {
-	if c.cursor > 0 {
-		c.cursor--
-	}
+	c.cursor = prevClusterRuneIndex(c.text, c.cursor)
 }
 
 func (c *editor) moveRight() {
-	if c.cursor < len(c.text) {
-		c.cursor++
-	}
+	c.cursor = nextClusterRuneIndex(c.text, c.cursor)
 }
 
 func chipAtom(index int) rune {
@@ -492,6 +524,9 @@ func chipLabel(number int, text string) string {
 }
 
 func (c editor) chipOf(r rune) (chip, bool) {
+	if r > 0xFFFFD {
+		return chip{}, false
+	}
 	index := int(r) - chipRuneBase - 1
 	if index < 0 || index >= len(c.chips) {
 		return chip{}, false

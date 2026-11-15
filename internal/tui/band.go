@@ -82,7 +82,7 @@ func (m *model) bandSegments() (left, right []segment) {
 		}
 		return append(list, segment{id: id, text: text, rank: rank})
 	}
-	left = []segment{{id: "model", text: cmp.Or(m.thread.modelName, "default")}}
+	left = []segment{{id: "model", text: cmp.Or(sanitizeText(m.thread.modelName), "default")}}
 	left = add(left, "effort", m.effortText(icons), 3)
 	left = add(left, "approval", icons.approval[m.thread.approvalMode], 0)
 	left = add(left, "sandbox", icons.sandbox[m.thread.sandbox], 0)

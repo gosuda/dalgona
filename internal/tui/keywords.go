@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gosuda/dalgona/internal/rpc"
 )
@@ -113,5 +114,23 @@ func validSpan(text string, span keywordSpan, last int) bool {
 	if span.start < last || span.start >= span.end || span.end > len(text) {
 		return false
 	}
-	return (span.start == len(text) || utf8.RuneStart(text[span.start])) && (span.end == len(text) || utf8.RuneStart(text[span.end]))
+	if !utf8.RuneStart(text[span.start]) || (span.end < len(text) && !utf8.RuneStart(text[span.end])) {
+		return false
+	}
+	return onClusterBoundary(text, span.start) && onClusterBoundary(text, span.end)
+}
+
+func onClusterBoundary(text string, offset int) bool {
+	if offset == 0 || offset == len(text) {
+		return true
+	}
+	pos := 0
+	for pos < offset {
+		cluster, _ := ansi.FirstGraphemeCluster(text[pos:], ansi.GraphemeWidth)
+		if cluster == "" {
+			return false
+		}
+		pos += len(cluster)
+	}
+	return pos == offset
 }
