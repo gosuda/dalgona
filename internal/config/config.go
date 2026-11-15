@@ -284,10 +284,6 @@ type Config struct {
 	lines                                 map[string]origin
 }
 
-func defaultConfig(product Product, cwd string) Config {
-	return defaultConfigWithHome(product, product.Home(), cwd)
-}
-
 func defaultConfigWithHome(product Product, home, cwd string) Config {
 	return Config{
 		Home: home, Product: product, Cwd: cwd,

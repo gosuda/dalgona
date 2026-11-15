@@ -238,18 +238,18 @@ func (c *Config) merge(current layer) error {
 
 func (c *Config) mergeScalars(current layer) error {
 	doc := current.doc
-	setString(doc.Model, &c.Model)
-	setString(doc.Reasoning, (*string)(&c.Reasoning))
-	setString(doc.ApprovalValue, (*string)(&c.Approval))
-	setString(doc.ToolMode, (*string)(&c.ToolMode))
-	setString(doc.Sandbox, (*string)(&c.Sandbox))
-	setString(doc.Verbosity, (*string)(&c.Verbosity))
-	setString(doc.Theme, (*string)(&c.Theme))
-	setString(doc.Icons, (*string)(&c.Icons))
-	setStrings(doc.StatusHide, &c.StatusHide)
-	setBool(doc.Notifications, &c.Notifications)
-	setString(doc.Runner, &c.Runner)
-	setString(doc.Remote, &c.Remote)
+	set(doc.Model, &c.Model)
+	set(doc.Reasoning, (*string)(&c.Reasoning))
+	set(doc.ApprovalValue, (*string)(&c.Approval))
+	set(doc.ToolMode, (*string)(&c.ToolMode))
+	set(doc.Sandbox, (*string)(&c.Sandbox))
+	set(doc.Verbosity, (*string)(&c.Verbosity))
+	set(doc.Theme, (*string)(&c.Theme))
+	set(doc.Icons, (*string)(&c.Icons))
+	set(doc.StatusHide, &c.StatusHide)
+	set(doc.Notifications, &c.Notifications)
+	set(doc.Runner, &c.Runner)
+	set(doc.Remote, &c.Remote)
 	if doc.SandboxWritableRoots != nil {
 		c.SandboxWritableRoots = doc.SandboxWritableRoots
 	}
@@ -268,13 +268,7 @@ func (c *Config) mergeScalars(current layer) error {
 	return nil
 }
 
-func setString(source *string, target *string) {
-	if source != nil {
-		*target = *source
-	}
-}
-
-func setStrings(source *[]string, target *[]string) {
+func set[T any](source *T, target *T) {
 	if source != nil {
 		*target = *source
 	}
@@ -339,11 +333,11 @@ func (c *Config) mergeBoxes(doc *fileDoc) {
 	}
 	for name, value := range doc.Remotes {
 		spec := c.Remotes[name]
-		setString(value.Service, &spec.Service)
-		setString(value.Image, &spec.Image)
-		setString(value.Template, &spec.Template)
-		setString(value.URL, &spec.URL)
-		setString(value.BoxID, &spec.BoxID)
+		set(value.Service, &spec.Service)
+		set(value.Image, &spec.Image)
+		set(value.Template, &spec.Template)
+		set(value.URL, &spec.URL)
+		set(value.BoxID, &spec.BoxID)
 		c.Remotes[name] = spec
 	}
 }
@@ -352,7 +346,7 @@ func (c *Config) mergeTables(doc *fileDoc) {
 	if doc.Discovery.Sources != nil {
 		c.Discovery.Sources = doc.Discovery.Sources
 	}
-	setString(doc.ApprovalDecider.Decider, &c.ApprovalDecider.Decider)
+	set(doc.ApprovalDecider.Decider, &c.ApprovalDecider.Decider)
 	if doc.ApprovalDecider.Threshold != nil {
 		c.ApprovalDecider.Threshold = *doc.ApprovalDecider.Threshold
 	}
@@ -372,16 +366,16 @@ func (c *Config) mergeTables(doc *fileDoc) {
 		c.Herdr.SubagentPanes = *doc.Herdr.SubagentPanes
 	}
 	mergeWeb(&c.Web, doc.Web)
-	setString(doc.Roles.Smol, &c.Roles.Smol)
-	setString(doc.Roles.Slow, &c.Roles.Slow)
-	setString(doc.Roles.Advisor, &c.Roles.Advisor)
+	set(doc.Roles.Smol, &c.Roles.Smol)
+	set(doc.Roles.Slow, &c.Roles.Slow)
+	set(doc.Roles.Advisor, &c.Roles.Advisor)
 }
 
 func mergeWeb(target *WebConfig, source webDoc) {
-	setString(source.Listen, &target.Listen)
-	setString(source.Token, &target.Token)
-	setString(source.CertFile, &target.CertFile)
-	setString(source.KeyFile, &target.KeyFile)
+	set(source.Listen, &target.Listen)
+	set(source.Token, &target.Token)
+	set(source.CertFile, &target.CertFile)
+	set(source.KeyFile, &target.KeyFile)
 }
 
 func (c *Config) applyFlags(flags Flags) {
@@ -815,7 +809,7 @@ func validateSettings(home, path string, raw []byte) error {
 	if parsed.err != nil {
 		return parsed.err
 	}
-	cfg := defaultConfig(ProductDalgona, "")
+	cfg := defaultConfigWithHome(ProductDalgona, "", "")
 	cfg.Home = home
 	if err := cfg.merge(parsed); err != nil {
 		return fmt.Errorf("validate settings.toml: %w", err)
