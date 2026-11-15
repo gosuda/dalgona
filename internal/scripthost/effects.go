@@ -314,10 +314,6 @@ func (fx effects) recordedTool(started event.ToolStarted, completed *event.ToolC
 }
 
 func (fx effects) Record(slot script.Slot, result jsontext.Value) error {
-	return fx.recordResult(slot, result)
-}
-
-func (fx effects) recordResult(slot script.Slot, result jsontext.Value) error {
 	value, blob, err := fx.t.StoreRaw(result)
 	if err != nil {
 		return err
@@ -394,7 +390,7 @@ func (fx effects) Spawn(ctx context.Context, slot script.Slot, prompt string, op
 	if err != nil {
 		return "", err
 	}
-	return id, fx.recordResult(slot, quoteJSON(id))
+	return id, fx.Record(slot, quoteJSON(id))
 }
 
 func (fx effects) Wait(ctx context.Context, ids []string) ([]string, error) {
