@@ -54,6 +54,15 @@ func (u ThreadTokenUsage) write(o *out) {
 	if u.ModelContextWindow > 0 {
 		o.int("modelContextWindow", int64(u.ModelContextWindow))
 	}
+	if u.EstimatedContextTokens != nil {
+		o.int("estimatedContextTokens", int64(*u.EstimatedContextTokens))
+	}
+	if u.CostUsdMicros != nil {
+		o.int("costUsdMicros", *u.CostUsdMicros)
+	}
+	if u.CostPartial {
+		o.boolean("costPartial", true)
+	}
 	o.close()
 }
 
@@ -244,6 +253,14 @@ func (n TurnJudgedNotification) write(o *out) {
 	o.str("verdict", n.Verdict)
 	o.str("summary", n.Summary)
 	writePaths(o, n.Paths)
+	o.close()
+}
+
+func (n TurnEffortNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("turnId", n.TurnID)
+	o.str("effort", n.Effort)
 	o.close()
 }
 

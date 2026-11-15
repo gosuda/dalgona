@@ -2,7 +2,9 @@ package rpc
 
 import (
 	json "encoding/json/v2"
+	"maps"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -17,6 +19,9 @@ func TestCodexSchemasCompileAndValidate(t *testing.T) {
 		{"InitializeParams", "v1/InitializeParams.json", InitializeParams{ClientInfo: ClientInfo{Name: "dalgona-test", Version: "0"}}},
 		{"ThreadStartParams", "v2/ThreadStartParams.json", ThreadStartParams{Cwd: "/tmp"}},
 		{"ThreadResumeParams", "v2/ThreadResumeParams.json", ThreadResumeParams{ThreadID: "thread"}},
+		{"ThreadResumeParamsExcludeTurns", "v2/ThreadResumeParams.json", ThreadResumeParams{ThreadID: "thread", ExcludeTurns: true}},
+		{"ThreadTurnsListParams", "v2/ThreadTurnsListParams.json", ThreadTurnsListParams{ThreadID: "thread", Cursor: "a7", Limit: 3, SortDirection: "asc", ItemsView: "notLoaded"}},
+		{"ThreadTurnsListParamsDefaults", "v2/ThreadTurnsListParams.json", ThreadTurnsListParams{ThreadID: "thread"}},
 		{"ThreadListParams", "v2/ThreadListParams.json", ThreadListParams{}},
 		{"ThreadReadParams", "v2/ThreadReadParams.json", ThreadReadParams{ThreadID: "thread"}},
 		{"ThreadNameSetParams", "v2/ThreadSetNameParams.json", ThreadNameSetParams{ThreadID: "thread", Name: "name"}},
@@ -79,4 +84,69 @@ func TestCodexSchemasValidateUserInput(t *testing.T) {
 	validateCodexSchema(t, filepath.Join(root, "ToolRequestUserInputParams.json"), encoded)
 	response := ToolRequestUserInputResponse{Answers: map[string]ToolRequestUserInputAnswer{"q1": {Answers: []string{"Postgres"}}}}
 	validateCodexSchema(t, filepath.Join(root, "ToolRequestUserInputResponse.json"), response)
+}
+
+func TestTurnsParamsUseSchemaKeys(t *testing.T) {
+	cases := []struct {
+		name  string
+		value any
+		keys  []string
+	}{
+		{"resume", ThreadResumeParams{ThreadID: "t", ExcludeTurns: true}, []string{"excludeTurns", "threadId"}},
+		{"resume omits false", ThreadResumeParams{ThreadID: "t"}, []string{"threadId"}},
+		{"list", ThreadTurnsListParams{ThreadID: "t", Cursor: "a1", Limit: 2, SortDirection: "asc", ItemsView: "full"}, []string{"cursor", "itemsView", "limit", "sortDirection", "threadId"}},
+		{"list omits empty", ThreadTurnsListParams{ThreadID: "t"}, []string{"threadId"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var members map[string]any
+			if err := json.Unmarshal(body, &members); err != nil {
+				t.Fatal(err)
+			}
+			got := slices.Sorted(maps.Keys(members))
+			if !slices.Equal(got, tc.keys) {
+				t.Fatalf("%s marshals the keys %v, want %v", body, got, tc.keys)
+			}
+		})
+	}
+}
+
+func TestTurnsListSchemaRejectsWhatTheServerRejects(t *testing.T) {
+	sch, err := jsonschema.NewCompiler().Compile(filepath.Join("testdata", "codex-schema", "v2", "ThreadTurnsListParams.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := map[string]any{"threadId": "t", "cursor": "a1", "limit": 3, "sortDirection": "desc", "itemsView": "full"}
+	bad := map[string]map[string]any{
+		"negative limit": {"limit": -1},
+		"sort direction": {"sortDirection": "up"},
+		"items view":     {"itemsView": "detailed"},
+		"numeric cursor": {"cursor": 7},
+		"fractional":     {"limit": 2.5},
+	}
+	check := func(members map[string]any) error {
+		body, err := json.Marshal(members)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value any
+		if err := json.Unmarshal(body, &value); err != nil {
+			t.Fatal(err)
+		}
+		return sch.Validate(value)
+	}
+	if err := check(valid); err != nil {
+		t.Fatalf("valid params rejected: %v", err)
+	}
+	for name, override := range bad {
+		members := maps.Clone(valid)
+		maps.Copy(members, override)
+		if check(members) == nil {
+			t.Fatalf("%s: the schema accepted %v", name, members)
+		}
+	}
 }

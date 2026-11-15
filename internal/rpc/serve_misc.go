@@ -217,7 +217,7 @@ func directSettingKey(keyPath string, value any) (string, any, error) {
 	return "model", text, nil
 }
 
-func (s *server) configValueWrite(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
+func (s *server) configValueWrite(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
 	var keyPath string
 	var value any
 	err := decodeParams(params, func(name string, d *jsontext.Decoder) error {
@@ -239,12 +239,38 @@ func (s *server) configValueWrite(_ context.Context, params jsontext.Value) (jso
 	if err != nil {
 		return nil, err
 	}
+	if key == "reasoning" {
+		if err = s.refuseUnsupportedEffort(ctx, s.host.Config().Model, setting.(string)); err != nil {
+			return nil, err
+		}
+	}
 	version, err := s.writeEdits("", config.SettingEdit{Key: key, Value: setting})
 	if err != nil {
 		return nil, err
 	}
 	cfg := s.host.Config()
 	return encode(ConfigWriteResponse{FilePath: cfg.SettingsPath(), Status: "ok", Version: version})
+}
+
+func (s *server) refuseUnsupportedEffort(ctx context.Context, modelID, effort string) error {
+	if effort == "" {
+		return nil
+	}
+	models, err := s.host.Models(ctx)
+	if err != nil {
+		s.log.Warn("rpc: effort check skipped a failed model list", "model", modelID, "error", err)
+		return nil
+	}
+	for _, item := range models {
+		if item.ID != modelID {
+			continue
+		}
+		if err := agent.ValidateReasoningEffort(effort, item.Efforts); err != nil {
+			return invalidParams("unsupported reasoning effort: " + effort)
+		}
+		return nil
+	}
+	return nil
 }
 
 func (s *server) authStore() *auth.Store { return s.host.Auth() }

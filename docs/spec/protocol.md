@@ -53,22 +53,23 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 
 | Method | Result |
 |---|---|
-| `thread/start {model?, modelProvider?, cwd?, approvalPolicy?, sandbox?, config?}` | `ThreadStartResponse`. The server also sends `thread/started`. A missing `model` takes the model from the current settings. A `model` without `/` is a Codex bare id: the server prefixes it with `modelProvider`, or else with the provider of the current settings model. A missing `approvalPolicy` or `sandbox` takes the current settings value. `config.model_reasoning_effort` sets the thread's default reasoning effort: every turn of the thread that sends no `effort` uses it, and a turn's own `effort` wins. It is journaled with the thread, so `thread/resume` and `thread/fork` keep it, and the response reports it as `reasoningEffort`. A non-empty value outside `low`, `medium`, `high`, `xhigh`, `max` MUST give `-32602` `unsupported model_reasoning_effort <value>`. |
-| `thread/resume {threadId}` | `ThreadResumeResponse` with all turns of the active path. The snapshot MUST replay the full active path, including history before a compaction marker. |
+| `thread/start {model?, modelProvider?, cwd?, approvalPolicy?, sandbox?, config?}` | `ThreadStartResponse`. The server also sends `thread/started`. A missing `model` takes the model from the current settings. A `model` without `/` is a Codex bare id: the server prefixes it with `modelProvider`, or else with the provider of the current settings model. A missing `approvalPolicy` or `sandbox` takes the current settings value. `config.model_reasoning_effort` sets the thread's default reasoning effort: every turn of the thread that sends no `effort` uses it, and a turn's own `effort` wins. It is journaled with the thread, so `thread/resume` and `thread/fork` keep it, and the response reports it as `reasoningEffort`. A non-empty value outside `low`, `medium`, `high`, `xhigh`, `max` MUST give `-32602` `unsupported model_reasoning_effort <value>`. A value outside the declared levels of the thread's model MUST give `-32602` `unsupported reasoning effort: <value>` before the server creates a thread. A model that declares no level MUST accept the value and send each request without one. |
+| `thread/resume {threadId, excludeTurns?}` | `ThreadResumeResponse` with all turns of the active path. The snapshot MUST replay the full active path, including history before a compaction marker. When `excludeTurns` is `true`, `thread.turns` MUST be `[]`. The `tokenUsage` member MUST still hold the totals of the full active path. |
 | `thread/list {cursor?, limit?, archived?}` | Threads ordered by `updatedAt`, newest first. `archived` selects archived threads. `limit` defaults to 50. `nextCursor` is the offset of the next page. |
 | `thread/read {threadId, includeTurns?}` | `{thread}`. Turns are present only with `includeTurns`. |
+| `thread/turns/list {threadId, cursor?, limit?, sortDirection?, itemsView?}` | `{data, nextCursor?, backwardsCursor?}`. `data` holds one page of turns of the active path. [Paged turns](#paged-turns) gives the rules. |
 | `thread/name/set {threadId, name}` | `{}`. Subscribers receive `thread/name/updated`. |
 | `thread/archive`, `thread/unarchive {threadId}` | `{}` and `{thread}`. Subscribers receive `thread/archived` or `thread/unarchived`. |
 | `thread/compact/start {threadId}` | `{}` after the compaction. |
 | `thread/revert {threadId, beforeTurnId}` | `{thread}` with no turns. Subscribers receive `thread/reverted`. |
 | `thread/fork {threadId, lastTurnId?}` | `ThreadForkResponse`. The server also sends `thread/started` for the fork. |
-| `turn/start {threadId, input, effort?, model?, approvalPolicy?, sandboxPolicy?}` | `{turn}` with status `inProgress`. `effort` overrides the reasoning effort for this turn only. `model`, `approvalPolicy`, and `sandboxPolicy` override this turn and later turns on the active path. A missing value keeps the thread value. A turn `approvalPolicy` MUST NOT lower the thread mode: the server applies the stricter of the thread mode and the mapped turn mode, in the order `yolo` < `auto` < `ask`. A bare `model` id takes the provider of the thread model. The server MUST accept an `image` input item only with a `data:` URL. The server MUST accept a `localImage` input item only with an absolute path. The server MUST ignore the `detail` member of an image input item. The server MUST read a local image file that the daemon user can read. The server MUST return `-32602` for an image that is missing or has the wrong type. |
+| `turn/start {threadId, input, effort?, model?, approvalPolicy?, sandboxPolicy?}` | `{turn}` with status `inProgress`. `effort` overrides the reasoning effort for this turn only. An `effort` outside the model's declared levels MUST give `-32602` `unsupported reasoning effort: <value>`. A model that declares no level MUST accept the `effort` and send the request without one. `model`, `approvalPolicy`, and `sandboxPolicy` override this turn and later turns on the active path. A missing value keeps the thread value. A turn `approvalPolicy` MUST NOT lower the thread mode. The server applies the stricter of the thread mode and the mapped turn mode. The order is `yolo` < `auto` < `ask`. A bare `model` id takes the provider of the thread model. The server MUST accept an `image` input item only with a `data:` URL. The server MUST accept a `localImage` input item only with an absolute path. The server MUST ignore the `detail` member of an image input item. The server MUST read a local image file that the daemon user can read. The server MUST return `-32602` for an image that is missing or has the wrong type. |
 | `turn/steer {threadId, expectedTurnId?, input}` | `{turnId}`. When `expectedTurnId` is set, it MUST name the running turn. The server MUST check the target atomically with submission. A steer for a turn that is not running MUST fail and MUST NOT start a turn. The server MUST reject such a steer before it resolves tools or asks for workspace trust. The server MUST accept the same image input items as `turn/start`. |
 | `turn/interrupt {threadId, turnId}` | `{}`. |
 | `review/start {threadId, target, delivery?}` | `{reviewThreadId, turn}`, with `turn.status` `inProgress`. `target.type` MUST be `uncommittedChanges`, `baseBranch` with `branch`, `commit` with `sha` and an optional `title`, or `custom` with `instructions`. Another `target.type` MUST give `-32602` `unsupported review target <type>`. The review runs as an ordinary turn on `threadId` with a fixed review prompt. `delivery` MUST be absent, null, or `inline`. Another `delivery` value, including the empty string, MUST give `-32602` `unsupported delivery <d>`. A branch MUST match `^[A-Za-z0-9._/][A-Za-z0-9._/-]*$`, and a sha MUST be 4 to 64 hex digits. A rejected request MUST NOT start a turn. |
 | `model/list` | Models of every configured provider. `id` is `<provider>/<model>`. Each model reports `contextWindow`, its `provider`, and `presets`: the roles `default`, `smol`, and `slow` whose preset names the model, in that order. Each model MUST report `inputModalities`. A model that accepts images MUST report `["text","image"]`. Every other model MUST report `["text"]`. |
 | `config/read` | `{config: {model, model_provider, approval_policy, sandbox_mode, model_reasoning_effort}, origins: {}}` from the current settings. |
-| `config/value/write {keyPath, value}` | Writes `settings.toml` through `Host.WriteSettings`, which applies the value to the running host at once. Codex keys `approval_policy`, `sandbox_mode`, and `model_reasoning_effort` map to `approval`, `sandbox`, and `reasoning`. Direct keys `model`, `approval`, `sandbox`, and `reasoning` pass through with the same value checks. The interactive keys of `dalgona/settings/read` pass through the same checks. Other keys give `-32602`. `version` is the SHA-256 of the written file. |
+| `config/value/write {keyPath, value}` | Writes `settings.toml` through `Host.WriteSettings`, which applies the value to the running host at once. Codex keys `approval_policy`, `sandbox_mode`, and `model_reasoning_effort` map to `approval`, `sandbox`, and `reasoning`. Direct keys `model`, `approval`, `sandbox`, and `reasoning` pass through with the same value checks. A `model_reasoning_effort` or `reasoning` value outside the current model's declared levels MUST give `-32602` `unsupported reasoning effort: <value>`. The interactive keys of `dalgona/settings/read` pass through the same checks. Other keys give `-32602`. `version` is the SHA-256 of the written file. |
 | `config/batchWrite {edits: [{keyPath, value, mergeStrategy}], filePath?, expectedVersion?, reloadUserConfig?}` | Applies every edit through `Host.WriteSettings`, or none when one edit is invalid. `mergeStrategy` MUST be `replace` or `upsert`, and each edit sets its key. `filePath`, when set, MUST equal the settings path. `expectedVersion`, when set, MUST equal the SHA-256 of the current file, or the server answers `-32600`. `reloadUserConfig` has no effect. Result `{filePath, status: "ok", version}`. |
 | `dalgona/settings/read {}` | `{settings: [{key, value, defaultValue, options}]}`. `dalgona` MUST list seven settings in this order: `approval`, `verbosity`, `theme`, `icons`, `statusHide`, `editReview`, `notifications`. `dal` MUST list the same order without `editReview`. Writes use the same keys with `config/batchWrite`. |
 | `account/read` | `chatgpt` when a ChatGPT OAuth credential exists, else `apiKey` when any credential exists, else `null`. `requiresOpenaiAuth` is `false`. |
@@ -99,6 +100,26 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 A client MUST handle `account/login/completed` as follows. On `success` true, it MUST close the login panel, show `Signed in to <provider>`, and request `model/list` again. On `success` false, it MUST keep the panel open and show `error` beside the key field. A client MUST NOT promise that a turn resumes after a login.
 
 A product MAY add methods. Built-in methods take precedence over added methods. A product MAY run an archive hook on an idle thread. The hook MUST run after `Host.Archive` journals `thread.archived`. If the hook fails, the server MUST unarchive the thread. The server MUST return error `-32603` with the message `archive hook: <cause>`.
+
+### Paged turns
+
+`thread/turns/list` pages the turns of the active path. The server builds a page from the events of the turns on that page only.
+
+`limit` defaults to 20. A `limit` above 100 means 100. A negative `limit` MUST give `-32602` `invalid limit <n>`.
+
+`sortDirection` defaults to `desc`, which lists the newest turn first. `asc` lists the oldest turn first. Another value MUST give `-32602` `unsupported sortDirection <value>`.
+
+`itemsView` `full`, `summary`, and an absent value send every item of each turn. The server treats `summary` as `full`. `notLoaded` sends `items` as `[]` and loads no blob. Another value MUST give `-32602` `unsupported itemsView <value>`.
+
+A cursor is `a` or `b` followed by `<seq>`. `<seq>` is the decimal journal sequence of a `turn.started` record on the active path. `a<seq>` starts after that turn in the sort direction. `b<seq>` starts at that turn.
+
+`nextCursor` is `a<seq>` of the last turn of the page. The server omits it when no turn follows. `backwardsCursor` is `b<seq>` of the first turn of the page. The server omits it when the page is empty. A client passes `backwardsCursor` with the opposite `sortDirection` to read that turn again and the turns after it.
+
+A malformed cursor MUST give `-32602` `invalid cursor <cursor>`. A cursor whose sequence names no `turn.started` record on the active path MUST give `-32602` `cursor <cursor> is not on the active path`.
+
+An unknown thread MUST give `-32602` `unknown thread <id>`. A running thread MAY be listed. Its running turn has status `inProgress`. A thread with no turn gives `data` as `[]` and no cursor.
+
+The server still reads the whole journal of the thread for each call. A page limits only the transfer. With `excludeTurns`, the server loads no blob for a turn that has ended.
 
 ### Input images
 
@@ -142,6 +163,12 @@ Any other OS failure MUST give `-32603` with the cause.
 
 `thread/start`, `thread/resume`, and `thread/fork` MUST carry `tokenUsage` once the thread has recorded usage. `tokenUsage.modelContextWindow` MUST be present when the context window of the model is known.
 
+`tokenUsage.estimatedContextTokens` MUST carry the context token estimate that the newest journal compaction recorded. The server MUST omit it when no compaction has run, and after the next assistant message reports provider usage. A known estimate of `0` MUST be sent as `0`. Absence means no estimate, not an empty context. The estimate comes from the journal. It is not a provider count, and it MUST NOT change `last`, `total`, or the cost members. These rules apply to `thread/tokenUsage/updated` and to the `tokenUsage` of `thread/start`, `thread/resume`, and `thread/fork`.
+
+`thread/resume` MUST include `turnEffort` only when the active turn has a resolved request effort. Its value MUST match the newest `turn.effort` of that turn. A resolved empty string MUST be present as `""`. An idle thread or an unresolved active turn MUST omit `turnEffort`. Replay MUST rebuild this state without sending a live effort notification. The `reasoningEffort` member remains the thread default.
+
+`tokenUsage.costUsdMicros` MUST be an integer that counts millionths of a US dollar. The server MUST omit it until one assistant message has a price. `tokenUsage.costPartial` MUST be `true` when a priced message and a message on a model with no price both exist. The server MUST omit `costPartial` otherwise. These rules apply to `thread/tokenUsage/updated` and to the `tokenUsage` of `thread/start`, `thread/resume`, and `thread/fork`. The price rules are in [providers.md](providers.md#cost). `costUsdMicros` and the `last` and `total` counts come from provider usage reports. A compaction MUST NOT change them.
+
 ## Server requests
 
 The server sends approval requests only for threads in approval mode `ask`, plus one workspace trust prompt per untrusted workspace. An exec call uses `item/commandExecution/requestApproval`. An edit call uses `item/fileChange/requestApproval`. A workspace trust prompt reuses `item/commandExecution/requestApproval`. It sets `cwd` to the workspace path. It sets `command` to the server commands and env, joined by newlines. It sets `reason` to the full workspace prompt. The request `id` is the approval request id of the journal. `itemId` is the tool call id, empty for workspace trust.
@@ -175,22 +202,25 @@ Turn objects carry `startedAt` and `completedAt` as Unix seconds, and `durationM
 | `turn.started` | `turn/started`, `thread/status/changed` active |
 | `turn.completed` | `error` when the turn failed, `turn/completed`, `thread/status/changed` idle |
 | `turn.judged` | `dalgona/turn/judged {threadId, turnId, verdict, summary, paths}`, live only |
+| `turn.effort` | `dalgona/turn/effort {threadId, turnId, effort}`, live only. All three members MUST be present. Empty `effort` is authoritative. |
 | `user.message` | `item/started` and `item/completed` with a `userMessage`. The server MUST echo each image of a user message as an `image` input item. The echoed image item MUST NOT carry image bytes. The echoed image item MUST name the blob with the `dalgona-blob:` prefix. |
 | text delta | `item/started` once, then `item/agentMessage/delta` |
 | reasoning delta | `item/started` once, then `item/reasoning/textDelta` for item `<item>-reasoning` |
 | `assistant.message` | `item/completed` for the `agentMessage` and the `reasoning` item, `thread/tokenUsage/updated` |
-| `approval.requested` | `item/started` for the call when not started, `thread/status/changed` with `waitingOnApproval` |
+| `approval.requested` | `item/started` for the call when it is not started and the journal knows its tool name, `thread/status/changed` with `waitingOnApproval`. A nested call whose tool name is not journaled yet MUST get no item here. |
 | `approval.resolved` | `serverRequest/resolved` |
-| `tool.started` | `item/started` |
+| `tool.started` | `item/started` once per call. This opens a nested call whose name was unknown at approval time. |
 | `tool.completed` | `item/completed`. For the `todo` tool, also `turn/plan/updated` |
 | `tool.judged` | `dalgona/tool/judged {threadId, turnId, itemId, verdict, summary, paths}`, live only |
-| `compaction` | `contextCompaction` item |
+| `compaction` | `contextCompaction` item, and `thread/tokenUsage/updated` with `estimatedContextTokens` |
 | `model.retry` | `error` with `willRetry: true` |
 | `thread.named` | `thread/name/updated` |
 | `thread.archived` | `thread/archived` or `thread/unarchived` |
 | `branch` | `thread/reverted` |
 | `child.spawned` | `dalgona/thread/childSpawned {threadId, childId, cwd}` |
 | `advisor.note` | a completed `dynamicToolCall` item with tool `advisor`, and `dalgona/advisor/note {threadId, advisor, severity, note, delivery}` |
+
+The effort notification MUST follow successful request resolution, not `turn/started`. The server MUST ignore an effort event for a different turn. The first resolution MUST notify, including an empty effort. Unchanged resolutions in later rounds MUST NOT notify again. Turn start and completion MUST clear the resolved effort.
 
 The tool class sets the item kind. Class `exec` gives `commandExecution`. Class `edit` gives `fileChange` with one change per file. Class `remote` gives `mcpToolCall` with the tool name `<server>__<tool>` after the MCP name rule. Any other tool gives `dynamicToolCall`. A call that completes without a start, with a `decline` or `cancel` decision, has status `declined` for `commandExecution` and `fileChange`. For other kinds, that call has status `failed`. Its output is the decline reason.
 

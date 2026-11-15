@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/turn/effort",
+  "type": "object",
+  "required": ["threadId", "turnId", "effort"],
+  "properties": {
+    "threadId": {"type": "string", "minLength": 1},
+    "turnId": {"type": "string", "minLength": 1},
+    "effort": {"type": "string"}
+  }
+}

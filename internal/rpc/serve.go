@@ -26,6 +26,7 @@ func init() {
 		"thread/resume":                  (*server).threadResume,
 		"thread/list":                    (*server).threadList,
 		"thread/read":                    (*server).threadRead,
+		"thread/turns/list":              (*server).threadTurnsList,
 		"thread/name/set":                (*server).threadNameSet,
 		"thread/archive":                 (*server).threadArchive,
 		"thread/unarchive":               (*server).threadUnarchive,
@@ -216,7 +217,9 @@ func (s *server) watching(id string) bool {
 }
 
 func (s *server) newTracker(id string) *tracker {
-	return newTracker(id, s.host.Blob, s.childCwd, s.host.KeywordMatches, s.log)
+	t := newTracker(id, s.host.Blob, s.childCwd, s.host.KeywordMatches, s.log)
+	t.price = s.host.PriceOf
+	return t
 }
 
 func (s *server) childCwd(id string) string {
@@ -225,20 +228,21 @@ func (s *server) childCwd(id string) string {
 }
 
 type snapshot struct {
-	created event.SessionCreated
-	turns   []Turn
-	usage   *ThreadTokenUsage
+	created    event.SessionCreated
+	turns      []Turn
+	usage      *ThreadTokenUsage
+	turnEffort *string
 }
 
-func (s *server) attach(ctx context.Context, thread *agent.Thread) (snapshot, error) {
-	snap, fresh, err := s.watch(ctx, thread)
+func (s *server) attach(ctx context.Context, thread *agent.Thread, replay replayer) (snapshot, error) {
+	snap, fresh, err := s.watch(ctx, thread, replay)
 	if err != nil || fresh {
 		return snap, err
 	}
-	return s.snapshot(thread)
+	return s.snapshot(thread, replay)
 }
 
-func (s *server) watch(ctx context.Context, thread *agent.Thread) (snapshot, bool, error) {
+func (s *server) watch(ctx context.Context, thread *agent.Thread, replay replayer) (snapshot, bool, error) {
 	id := thread.ID()
 	s.mu.Lock()
 	_, watched := s.watches[id]
@@ -256,7 +260,7 @@ func (s *server) watch(ctx context.Context, thread *agent.Thread) (snapshot, boo
 		return snapshot{}, false, io.ErrClosedPipe
 	}
 	w.tracker = s.newTracker(id)
-	snap, head, err := s.fill(thread, w.tracker)
+	snap, head, err := s.fill(thread, w.tracker, replay)
 	if err != nil {
 		w.stop()
 		s.forget(id)
@@ -287,31 +291,25 @@ func (s *server) forget(id string) {
 	s.mu.Unlock()
 }
 
-func (s *server) snapshot(thread *agent.Thread) (snapshot, error) {
-	snap, _, err := s.fill(thread, s.newTracker(thread.ID()))
+func (s *server) snapshot(thread *agent.Thread, replay replayer) (snapshot, error) {
+	snap, _, err := s.fill(thread, s.newTracker(thread.ID()), replay)
 	return snap, err
 }
 
-func (s *server) fill(thread *agent.Thread, tr *tracker) (snapshot, uint64, error) {
+func (s *server) fill(thread *agent.Thread, tr *tracker, replay replayer) (snapshot, uint64, error) {
 	records, _, err := thread.Records()
 	if err != nil {
 		return snapshot{}, 0, hostError(err, thread.ID(), "")
 	}
-	c := &collector{}
-	tr.sink = c
-	if len(records) > 0 {
-		if created, ok := records[0].Event.(event.SessionCreated); ok {
-			tr.created = created
-		}
+	if created, ok := sessionCreated(records); ok {
+		tr.created = created
 	}
-	for _, e := range event.ActivePath(records) {
-		tr.apply(e.Seq, e.Event)
-	}
+	turns := replay(tr, event.ActivePath(records))
 	var head uint64
 	if len(records) > 0 {
 		head = records[len(records)-1].Seq
 	}
-	return snapshot{created: tr.created, turns: c.result(), usage: tr.usageSnapshot()}, head, nil
+	return snapshot{created: tr.created, turns: turns, usage: tr.usageSnapshot(), turnEffort: tr.turnEffort}, head, nil
 }
 
 func (s *server) run(ctx context.Context, w *watch) {

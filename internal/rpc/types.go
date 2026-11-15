@@ -122,6 +122,7 @@ type (
 		ModelProvider     string            `json:"modelProvider"`
 		Sandbox           SandboxPolicy     `json:"sandbox"`
 		ReasoningEffort   string            `json:"reasoningEffort,omitzero"`
+		TurnEffort        *string           `json:"turnEffort,omitzero"`
 		TokenUsage        *ThreadTokenUsage `json:"tokenUsage,omitzero"`
 		SandboxFallback   *SandboxFallback  `json:"sandboxFallback,omitzero"`
 		Thread            Thread            `json:"thread"`
@@ -134,6 +135,11 @@ type (
 	}
 	ThreadReadResponse struct {
 		Thread Thread `json:"thread"`
+	}
+	ThreadTurnsListResponse struct {
+		Data            []Turn `json:"data"`
+		NextCursor      string `json:"nextCursor,omitzero"`
+		BackwardsCursor string `json:"backwardsCursor,omitzero"`
 	}
 	ThreadRevertResponse    = ThreadReadResponse
 	ThreadUnarchiveResponse = ThreadReadResponse
@@ -264,6 +270,11 @@ type (
 		Message string         `json:"message"`
 		Data    jsontext.Value `json:"data,omitzero"`
 	}
+	TurnEffortNotification struct {
+		ThreadID string `json:"threadId"`
+		TurnID   string `json:"turnId"`
+		Effort   string `json:"effort"`
+	}
 	ErrorNotification struct {
 		ThreadID  string    `json:"threadId"`
 		TurnID    string    `json:"turnId"`
@@ -288,9 +299,12 @@ type (
 		TokenUsage ThreadTokenUsage `json:"tokenUsage"`
 	}
 	ThreadTokenUsage struct {
-		Last               TokenUsageBreakdown `json:"last"`
-		Total              TokenUsageBreakdown `json:"total"`
-		ModelContextWindow int                 `json:"modelContextWindow,omitzero"`
+		Last                   TokenUsageBreakdown `json:"last"`
+		Total                  TokenUsageBreakdown `json:"total"`
+		ModelContextWindow     int                 `json:"modelContextWindow,omitzero"`
+		EstimatedContextTokens *int                `json:"estimatedContextTokens,omitzero"`
+		CostUsdMicros          *int64              `json:"costUsdMicros,omitzero"`
+		CostPartial            bool                `json:"costPartial,omitzero"`
 	}
 	TokenUsageBreakdown struct {
 		InputTokens           int `json:"inputTokens"`

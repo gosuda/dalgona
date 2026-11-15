@@ -45,7 +45,15 @@ type (
 		ModelReasoningEffort string `json:"model_reasoning_effort,omitzero"`
 	}
 	ThreadResumeParams struct {
-		ThreadID string `json:"threadId"`
+		ThreadID     string `json:"threadId"`
+		ExcludeTurns bool   `json:"excludeTurns,omitzero"`
+	}
+	ThreadTurnsListParams struct {
+		ThreadID      string `json:"threadId"`
+		Cursor        string `json:"cursor,omitzero"`
+		Limit         int    `json:"limit,omitzero"`
+		SortDirection string `json:"sortDirection,omitzero"`
+		ItemsView     string `json:"itemsView,omitzero"`
 	}
 	ThreadReadParams struct {
 		ThreadID     string `json:"threadId"`

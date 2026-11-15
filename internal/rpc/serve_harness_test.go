@@ -374,6 +374,7 @@ var responseSchemas = map[string]string{
 	"thread/fork":            "v2/ThreadForkResponse.json",
 	"thread/list":            "v2/ThreadListResponse.json",
 	"thread/read":            "v2/ThreadReadResponse.json",
+	"thread/turns/list":      "v2/ThreadTurnsListResponse.json",
 	"thread/name/set":        "v2/ThreadSetNameResponse.json",
 	"thread/archive":         "v2/ThreadArchiveResponse.json",
 	"thread/unarchive":       "v2/ThreadUnarchiveResponse.json",

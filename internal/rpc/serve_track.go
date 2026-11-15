@@ -5,11 +5,13 @@ import (
 	"encoding/json/jsontext"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/textdiff"
 )
 
@@ -28,25 +30,35 @@ type sink interface {
 }
 
 type tracker struct {
-	threadID  string
-	created   event.SessionCreated
-	load      func(*event.BlobRef) ([]byte, error)
-	childCwd  func(id string) string
-	keywords  func(threadID, text string, kind agent.InputKind) []agent.KeywordMatch
-	log       *slog.Logger
-	sink      sink
-	turn      string
-	lastTurn  string
-	turnAt    time.Time
-	items     map[string]*Item
-	calls     map[string]event.ToolCall
-	classes   map[string]string
-	approvals map[string]string
-	declined  map[string]bool
-	callAt    map[string]time.Time
-	usage     ThreadTokenUsage
-	seq       uint64
-	statusSeq uint64
+	threadID   string
+	created    event.SessionCreated
+	load       func(*event.BlobRef) ([]byte, error)
+	childCwd   func(id string) string
+	keywords   func(threadID, text string, kind agent.InputKind) []agent.KeywordMatch
+	log        *slog.Logger
+	sink       sink
+	turn       string
+	turnEffort *string
+	lastTurn   string
+	turnAt     time.Time
+	items      map[string]*Item
+	calls      map[string]event.ToolCall
+	classes    map[string]string
+	approvals  map[string]string
+	declined   map[string]bool
+	callAt     map[string]time.Time
+	usage      ThreadTokenUsage
+	price      func(modelID string) (model.Price, bool)
+	modelID    string
+	cost       costTally
+	seq        uint64
+	statusSeq  uint64
+}
+
+type costTally struct {
+	micros   int64
+	priced   bool
+	unpriced bool
 }
 
 func newTracker(threadID string, load func(*event.BlobRef) ([]byte, error), childCwd func(string) string, keywords func(threadID, text string, kind agent.InputKind) []agent.KeywordMatch, log *slog.Logger) *tracker {
@@ -63,6 +75,7 @@ type eventHandler func(t *tracker, seq uint64, ev event.Event)
 var eventHandlers = map[string]eventHandler{
 	event.TypeSessionCreated:    func(t *tracker, _ uint64, ev event.Event) { t.created, _ = ev.(event.SessionCreated) },
 	event.TypeTurnStarted:       (*tracker).turnStarted,
+	event.TypeTurnEffort:        (*tracker).resolvedEffort,
 	event.TypeTurnCompleted:     (*tracker).turnCompleted,
 	event.TypeUserMessage:       (*tracker).userMessage,
 	event.TypeAssistantMessage:  (*tracker).assistantMessage,
@@ -129,7 +142,7 @@ func (t *tracker) startComplete(turnID string, it *Item) {
 
 func (t *tracker) turnStarted(_ uint64, ev event.Event) {
 	e, _ := ev.(event.TurnStarted)
-	t.turn, t.lastTurn, t.turnAt = e.TurnID, e.TurnID, e.StartedAt
+	t.beginTurn(e)
 	t.sink.turn(methodTurnStarted, Turn{ID: e.TurnID, Status: statusInProgress, StartedAt: unixSeconds(e.StartedAt)})
 	t.setStatus("active")
 }
@@ -143,15 +156,37 @@ func (t *tracker) turnCompleted(_ uint64, ev event.Event) {
 			return ErrorNotification{ThreadID: t.threadID, TurnID: e.TurnID, Error: TurnError{Message: e.Error}}
 		})
 	}
-	t.turn = ""
-	t.turnAt = time.Time{}
-	clear(t.items)
+	t.endTurn()
 	t.sink.turn(methodTurnCompleted, turn)
 	t.setStatus("idle")
 }
 
+func (t *tracker) beginTurn(e event.TurnStarted) {
+	t.turn, t.lastTurn, t.turnAt = e.TurnID, e.TurnID, e.StartedAt
+	t.turnEffort = nil
+}
+
+func (t *tracker) resolvedEffort(_ uint64, ev event.Event) {
+	e, _ := ev.(event.TurnEffort)
+	if t.turn == "" || e.TurnID != t.turn || t.turnEffort != nil && *t.turnEffort == e.Effort {
+		return
+	}
+	t.turnEffort = &e.Effort
+	t.sink.notify("dalgona/turn/effort", func() writer {
+		return TurnEffortNotification{ThreadID: t.threadID, TurnID: e.TurnID, Effort: e.Effort}
+	})
+}
+
+func (t *tracker) endTurn() {
+	t.turn = ""
+	t.turnEffort = nil
+	t.turnAt = time.Time{}
+	clear(t.items)
+}
+
 func (t *tracker) userMessage(_ uint64, ev event.Event) {
 	e, _ := ev.(event.UserMessage)
+	t.modelID = cmp.Or(e.Model, t.modelID)
 	text := t.text(e.Text, e.TextBlob)
 	item := &Item{Type: kindUser, ID: e.ItemID, Text: text, Keywords: t.noticeMatches(e, text), Images: itemImages(e.Images)}
 	t.startComplete(e.TurnID, item)
@@ -180,26 +215,75 @@ func (t *tracker) assistantMessage(_ uint64, ev event.Event) {
 		call.Args = t.args(call.Args, call.ArgsBlob)
 		t.calls[call.ID] = call
 	}
+	if !t.addUsage(e) {
+		return
+	}
+	t.notifyUsage(e.TurnID)
+}
+
+func (t *tracker) notifyUsage(turnID string) {
+	usage := t.usage
+	t.sink.notify("thread/tokenUsage/updated", func() writer {
+		return ThreadTokenUsageUpdatedNotification{ThreadID: t.threadID, TurnID: turnID, TokenUsage: usage}
+	})
+}
+
+func (t *tracker) applyUsage(ev event.Event) {
+	switch e := ev.(type) {
+	case event.UserMessage:
+		t.modelID = cmp.Or(e.Model, t.modelID)
+	case event.AssistantMessage:
+		t.addUsage(e)
+	case event.Compaction:
+		t.usage.EstimatedContextTokens = &e.TokensAfter
+	}
+}
+
+func (t *tracker) addUsage(e event.AssistantMessage) bool {
 	if e.ContextWindow > 0 {
 		t.usage.ModelContextWindow = e.ContextWindow
 	}
 	if e.Usage == (event.Usage{}) {
-		return
+		return false
 	}
+	t.usage.EstimatedContextTokens = nil
 	last := TokenUsageBreakdown{
 		InputTokens: e.Usage.Input, CachedInputTokens: e.Usage.CacheRead, CacheWriteInputTokens: e.Usage.CacheWrite,
 		OutputTokens: e.Usage.Output, TotalTokens: e.Usage.Input + e.Usage.Output,
 	}
 	t.usage.Last = last
 	t.usage.Total = t.usage.Total.add(last)
-	usage := t.usage
-	t.sink.notify("thread/tokenUsage/updated", func() writer {
-		return ThreadTokenUsageUpdatedNotification{ThreadID: t.threadID, TurnID: e.TurnID, TokenUsage: usage}
-	})
+	t.priceMessage(e.Usage)
+	t.stampCost()
+	return true
+}
+
+func (t *tracker) priceMessage(usage event.Usage) {
+	var price model.Price
+	var ok bool
+	if t.price != nil {
+		price, ok = t.price(cmp.Or(t.modelID, t.created.Model))
+	}
+	if !ok {
+		t.cost.unpriced = true
+		return
+	}
+	counts := model.TokenCounts{Input: usage.Input, Output: usage.Output, CacheRead: usage.CacheRead, CacheWrite: usage.CacheWrite}
+	t.cost.micros += min(price.CostMicros(counts), math.MaxInt64-t.cost.micros)
+	t.cost.priced = true
+}
+
+func (t *tracker) stampCost() {
+	if !t.cost.priced {
+		return
+	}
+	micros := t.cost.micros
+	t.usage.CostUsdMicros = &micros
+	t.usage.CostPartial = t.cost.unpriced
 }
 
 func (t *tracker) usageSnapshot() *ThreadTokenUsage {
-	if t.usage.Last == (TokenUsageBreakdown{}) && t.usage.ModelContextWindow == 0 {
+	if t.usage.Last == (TokenUsageBreakdown{}) && t.usage.ModelContextWindow == 0 && t.usage.EstimatedContextTokens == nil {
 		return nil
 	}
 	usage := t.usage
@@ -333,6 +417,9 @@ func (t *tracker) openCall(callID string) *Item {
 	}
 	call := t.calls[callID]
 	it := t.toolItem(callID, call.Name, t.classes[callID], call.Args, nil)
+	if call.Name == "" {
+		return it
+	}
 	t.items[callID] = it
 	t.sink.item(methodItemStarted, t.currentTurn(), it)
 	return it
@@ -465,8 +552,12 @@ func (t *tracker) approvalResolved(_ uint64, ev event.Event) {
 	}
 }
 
-func (t *tracker) compaction(seq uint64, _ event.Event) {
-	t.startComplete(t.currentTurn(), &Item{Type: kindCompaction, ID: fmt.Sprintf("compaction-%d", seq)})
+func (t *tracker) compaction(seq uint64, ev event.Event) {
+	e, _ := ev.(event.Compaction)
+	t.applyUsage(e)
+	turnID := t.currentTurn()
+	t.startComplete(turnID, &Item{Type: kindCompaction, ID: fmt.Sprintf("compaction-%d", seq)})
+	t.notifyUsage(turnID)
 }
 
 func (t *tracker) modelRetry(_ uint64, ev event.Event) {
