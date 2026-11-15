@@ -754,5 +754,5 @@ func (h *Host) masker() tool.Masker {
 	if h.cfg.Auth == nil {
 		return identityMasker{}
 	}
-	return h.cfg.Auth.Masker()
+	return h.cfg.Auth
 }
