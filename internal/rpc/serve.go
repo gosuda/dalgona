@@ -100,10 +100,6 @@ type watch struct {
 
 type Extension func(ctx context.Context, params jsontext.Value) (jsontext.Value, error)
 
-func Serve(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
-	return ServeWith(ctx, conn, host, ServeOptions{})
-}
-
 type ServeOptions struct {
 	Extensions    map[string]Extension
 	BeforeArchive func(ctx context.Context, threadID string) error

@@ -5,8 +5,6 @@ import (
 	"encoding/json/jsontext"
 )
 
-type Client = Conn
-
 type (
 	ClientInfo struct {
 		Name    string `json:"name"`

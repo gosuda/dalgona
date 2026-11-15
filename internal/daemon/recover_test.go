@@ -140,10 +140,7 @@ func startExecTurn(t *testing.T, home, exe, work string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := rpc.Dial(conn, ignoreServer{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := rpc.Dial(conn, ignoreServer{})
 	defer func() { _ = client.Close() }()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()

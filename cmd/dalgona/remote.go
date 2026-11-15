@@ -149,10 +149,7 @@ func callRemote(ctx context.Context, std stdio, method string, params any) int {
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	client, err := rpc.Dial(conn, quietClient{})
-	if err != nil {
-		return fail(std, 1, errors.Join(err, conn.Close()))
-	}
+	client := rpc.Dial(conn, quietClient{})
 	defer func() { _ = client.Close() }()
 	var initialized rpc.InitializeResult
 	if err := client.Initialize(ctx, rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: binary, Version: config.Version()}}, &initialized); err != nil {

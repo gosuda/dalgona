@@ -451,7 +451,7 @@ func (env CLIEnv) latestThread(ctx context.Context) (string, error) {
 
 type cliSession struct {
 	conn   io.ReadWriteCloser
-	client *rpc.Client
+	client *rpc.Conn
 	book   *turnBook
 }
 
@@ -463,10 +463,7 @@ func (env CLIEnv) connect(ctx context.Context) (*cliSession, error) {
 	conn := &watchedConn{ReadWriteCloser: dialed, lost: make(chan struct{})}
 	book := newTurnBook(env.Stderr)
 	book.lost = conn.lost
-	client, err := rpc.Dial(conn, book)
-	if err != nil {
-		return nil, errors.Join(err, closeQuiet(conn))
-	}
+	client := rpc.Dial(conn, book)
 	s := &cliSession{conn: conn, client: client, book: book}
 	params := rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: string(env.Product), Version: "cli"}}
 	if err := client.Initialize(ctx, params, &rpc.InitializeResult{}); err != nil {

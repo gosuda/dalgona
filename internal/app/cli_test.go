@@ -115,7 +115,7 @@ func newServedBox(t *testing.T) *servedBox {
 		box.dials++
 		client, server := net.Pipe()
 		box.servers = append(box.servers, server)
-		served.Go(func() { _ = rpc.Serve(context.WithoutCancel(ctx), server, host) })
+		served.Go(func() { _ = rpc.ServeWith(context.WithoutCancel(ctx), server, host, rpc.ServeOptions{}) })
 		return client, nil
 	}
 	return box

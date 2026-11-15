@@ -45,10 +45,7 @@ func Run(ctx context.Context, conn io.ReadWriteCloser, opts Options) error {
 	done := make(chan struct{})
 	defer close(done)
 	handler := &programHandler{ready: ready, done: done}
-	client, err := rpc.Dial(watchedConn{ReadWriteCloser: conn, lost: handler.connectionLost}, handler)
-	if err != nil {
-		return fmt.Errorf("dial tui rpc: %w", err)
-	}
+	client := rpc.Dial(watchedConn{ReadWriteCloser: conn, lost: handler.connectionLost}, handler)
 	program := tea.NewProgram(newModel(client, opts, done), programOptions(ctx, opts)...)
 	handler.program = program
 	close(ready)

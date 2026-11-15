@@ -396,7 +396,7 @@ func serveUnix(t *testing.T, r *rig) (*net.UnixConn, <-chan error) {
 			served <- acceptErr
 			return
 		}
-		served <- Serve(t.Context(), conn, r.host)
+		served <- ServeWith(t.Context(), conn, r.host, ServeOptions{})
 	}()
 	client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: filepath.Join(dir, "s"), Net: "unix"})
 	if err != nil {
