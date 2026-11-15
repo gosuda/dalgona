@@ -31,15 +31,36 @@ func TestRetryWaitShowsCountdownAndEscStops(t *testing.T) {
 func TestRetryWaitCountdownShowsOverRetryNotice(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
-	m := newTestModel(new(fakeCaller), Options{})
+	caller := new(fakeCaller)
+	m := newTestModel(caller, Options{})
 	m.conn.clock = func() time.Time { return now }
 	m.screen.width = 120
 	m, _ = drive(t, m, notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)})
 	m, _ = drive(t, m, notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"model request failed (retry, status 429); retry 1 in 120000 ms"}}`)})
+	if got := stripANSI(m.liveRow()); !strings.Contains(got, "model request failed (retry, status 429)") {
+		t.Fatalf("live row with a retry notice and no wait = %q, want the retry notice", got)
+	}
 	m, _ = drive(t, m, notificationMsg{method: "dalgona/retry/wait", params: []byte(`{"threadId":"t1","turnId":"turn-1","remainingMs":120000}`)})
 	want := "rate limited · retrying in 2m 00s · esc stops"
 	if got := stripANSI(m.liveRow()); !strings.Contains(got, want) {
 		t.Fatalf("live row during a retry wait = %q, want %q", got, want)
+	}
+	now = now.Add(126 * time.Second)
+	if got := stripANSI(m.liveRow()); !strings.Contains(got, "rate limited · retrying in 0m 00s · esc stops") {
+		t.Fatalf("live row after the estimate passed = %q, want the zero countdown", got)
+	}
+	m, command := drive(t, m, press(tea.KeyEscape, 0, ""))
+	runCommand(t, m, command, "Esc did not send turn/interrupt")
+	if last := caller.calls[len(caller.calls)-1]; last.method != "turn/interrupt" {
+		t.Fatalf("Esc sent %q, want turn/interrupt", last.method)
+	}
+	m, _ = drive(t, m, notificationMsg{method: "dalgona/retry/wait", params: []byte(`{"threadId":"t1","turnId":"turn-1","remainingMs":0}`)})
+	got := stripANSI(m.liveRow())
+	if strings.Contains(got, "rate limited") {
+		t.Fatalf("live row after the zero report = %q, want no countdown", got)
+	}
+	if !strings.Contains(got, "Working") {
+		t.Fatalf("live row after the zero report = %q, want the live working row", got)
 	}
 }
 

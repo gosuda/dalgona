@@ -463,6 +463,7 @@ The live dot MUST alternate between U+25AA and U+25AB every 500 milliseconds.
 With `DAL_NO_MOTION` set to a non-empty value, the client MUST keep the dot on U+25AA and MUST tick once a second.
 The elapsed time MUST update once a second, also with `DAL_NO_MOTION` set.
 A rate-limit wait MUST show `rate limited · retrying in <m>m <ss>s · esc stops`, updated each second.
+The countdown MUST clamp at `0m 00s`, and only the matching zero report or the end of the turn MUST close the wait.
 Elapsed text MUST keep its cells, so a change of value moves no other field.
 
 The elapsed time MUST show `<n> ms` under one second, `<s>s` under one minute, `<m>m <ss>s` under one hour, and `<h>h <mm>m` from one hour. Above 99 hours and 59 minutes it MUST show `99h 59m`.

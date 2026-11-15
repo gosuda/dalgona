@@ -67,7 +67,10 @@ func (m *model) retryRemaining() (time.Duration, bool) {
 		return 0, false
 	}
 	left := m.live.retryUntil.Sub(m.now())
-	return left, left > 0
+	if left < 0 {
+		left = 0
+	}
+	return left, true
 }
 
 func retryLine(left time.Duration) string {
