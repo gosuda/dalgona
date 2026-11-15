@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -247,6 +248,11 @@ func runNNPProbe() int {
 	if os.Getenv("DALGONA_TEST_NNP_SEALED") == "" {
 		return sealAndReexec()
 	}
+	marked, err := peerSelfNoNewPrivs()
+	if err != nil || !marked {
+		_, _ = fmt.Fprintln(os.Stderr, "sandbox probe has no no_new_privs mark:", err)
+		return 2
+	}
 	sock, err := probeSockFromCwd()
 	if err != nil {
 		return 2
@@ -255,6 +261,8 @@ func runNNPProbe() int {
 }
 
 func sealAndReexec() int {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return 2
 	}
