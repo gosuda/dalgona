@@ -131,12 +131,25 @@ dist:
         done
     done
 
+box-dist:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p dist
+    cp THIRD_PARTY_NOTICES.md dist/
+    for arch in amd64 arm64; do
+        CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -o "dist/dalgona-linux-$arch" ./cmd/dalgona
+    done
+
 box_tag := `git describe --tags --exact-match HEAD 2>/dev/null || git rev-parse --short=12 HEAD`
 
-box-image: dist
+box-image: box-dist
     docker buildx build -f deploy/box/Dockerfile --platform linux/amd64,linux/arm64 -t dalgona-box:{{box_tag}} .
 
-verify: fmt-check vet lint test vuln hashline-model spec-style web-check cf-check
+verify-go: fmt-check vet lint test vuln
+
+verify-shared: hashline-model spec-style web-check cf-check
+
+verify: verify-go verify-shared
 
 live_root := "/tmp/dg"
 

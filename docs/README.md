@@ -71,6 +71,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [Discovery](spec/discovery.md): opt-in imports of instructions, skills, and server config.
 - [herdr integration](spec/herdr.md): pane reports and subagent panes.
 - [Live debugging](spec/live-debug.md): local scripted-server contract, setup and cleanup runbook, and manual terminal and browser acceptance matrix. It distinguishes planned probes from recorded live or test evidence.
+- [Continuous integration](spec/ci.md): verification groups, native platforms, shared assets, and box image builds.
 - [Cloudflare deployment](../deploy/cloudflare/README.md): worker tokens, image release, digest pins, and box cleanup.
 
 `just spec-style` checks sentence length, semicolons, em dashes, and lower-case `should` in `docs/spec`.
