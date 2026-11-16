@@ -504,7 +504,7 @@ The label MUST be at most 9 cells, and one space MUST follow it.
 The meta field MUST be 9 cells, and the duration MUST be 8 cells, right aligned.
 The subject MUST follow the label and its space, or the state column when no label shows.
 Body lines MUST start under the subject and wrap inside the rest of the row.
-A tool output line shaped `[<path>#<tag>]` or `[<path>@<ref>]` MUST NOT print.
+A tool output line shaped `[<path>#<tag>]` or `[<path>@<ref>]`, where `<tag>` is a hashline tag and `<ref>` is a snapshot reference, MUST NOT print.
 A row MUST end with one blank line.
 The state word MUST be `Done` for `completed`, `Failed` for `failed`, `Declined` for `declined`, and `Working` for `inProgress`.
 A failed row MUST show `Failed` in bold failed-text, with no background.

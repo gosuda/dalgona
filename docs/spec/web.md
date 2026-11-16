@@ -158,7 +158,7 @@ The document title MUST be `dalgona · <title> · <state>`, with the same state 
 - Item statuses read `Working`, `Done`, `Failed`, `Declined`, or `Waiting`. Other statuses show their raw value.
 - Unknown item kinds show their type in plain words, such as `Web search`.
 - A `dynamicToolCall` item with tool `advisor` shows as a note card: `advisor · <severity>: <note>`. The note is the text of `contentItems`. The severity is always text. The card's inline-start border marks the severity as a second cue.
-- Other dynamic tools show their `contentItems` text as output. An output line shaped `[<path>#<tag>]` or `[<path>@<ref>]` MUST NOT show.
+- Other dynamic tools show their `contentItems` text as output. An output line shaped `[<path>#<tag>]` or `[<path>@<ref>]`, where `<tag>` is a hashline tag and `<ref>` is a snapshot reference, MUST NOT show.
 - `turn/plan/updated` shows the latest plan of the current turn as a checklist. Each step has a text status: `Done`, `Working`, or `Pending`. The step in progress carries `aria-current="step"`. A new turn clears the plan.
 - The reasoning row reads `Thinking`. At `high`, it is open while the turn runs. At `medium` and `low`, it is one line (see Verbosity).
 - Each command row MUST read `$ <command>`, show its state word, and show `exit <code>` and its duration when the server reports them.

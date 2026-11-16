@@ -307,12 +307,15 @@ func TestToolOutputHidesAnchorLines(t *testing.T) {
 		"[a.txt#A6857783]",
 		"[a.txt#2886]",
 		"[a.txt@r2edca789eb3d58601a41d15ddf9aedd4.1]",
+		"[my notes.txt#A6857783]",
 		"[Showing lines 1-1 of 1.]",
+		"[notes#draft]",
+		"[user@example.com]",
 	}, "\n")
 	item := rpc.Item{Type: "dynamicToolCall", Tool: "read", Status: "completed", Arguments: []byte(`{"path":"a.txt"}`), Output: output}
 	text := stripANSI(settledText(&m, item))
-	assertContains(t, text, "1:hello from a.txt", "[Showing lines 1-1 of 1.]")
-	for _, anchor := range []string{"[a.txt#A6857783]", "[a.txt#2886]", "[a.txt@r2edca789eb3d58601a41d15ddf9aedd4.1]"} {
+	assertContains(t, text, "1:hello from a.txt", "[Showing lines 1-1 of 1.]", "[notes#draft]", "[user@example.com]")
+	for _, anchor := range []string{"[a.txt#A6857783]", "[a.txt#2886]", "[a.txt@r2edca789eb3d58601a41d15ddf9aedd4.1]", "[my notes.txt#A6857783]"} {
 		if strings.Contains(text, anchor) {
 			t.Fatalf("read row kept anchor line %q:\n%s", anchor, text)
 		}

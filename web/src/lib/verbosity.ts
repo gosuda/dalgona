@@ -176,7 +176,8 @@ export function lastLines(
 	return { text: lines.slice(-count).join("\n"), total: lines.length };
 }
 
-const anchorLine = /^\[[^\s\]]+[#@][^\s\]]+\]$/u;
+const anchorLine =
+	/^\[.*\S(?:#[0-9A-F]{4}(?:[0-9A-F]{4})?|@r[0-9a-f]{32}\.[0-9a-z]+)\]$/u;
 
 export function tailoredOutput(text: string): string {
 	return text
