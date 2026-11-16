@@ -286,7 +286,7 @@ func TestLoginRejectsUnknownAndEmpty(t *testing.T) {
 
 func TestProviderIDsIncludeConfiguredEndpoints(t *testing.T) {
 	ids := providerIDs(config.Config{Providers: map[string]config.ProviderSpec{"OpenRouter": {BaseURL: "https://openrouter.ai/api/v1"}, "openai": {}}})
-	want := []string{"anthropic", "antigravity", "chatgpt", "cursor", "devin", "google", "openai", "openrouter"}
+	want := []string{"anthropic", "antigravity", "chatgpt", "copilot", "cursor", "devin", "google", "openai", "openrouter"}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("provider ids = %q, want %q", ids, want)
 	}

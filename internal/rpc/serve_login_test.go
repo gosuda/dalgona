@@ -186,6 +186,7 @@ func TestOAuthLoginNamesProduct(t *testing.T) {
 	reopen(t, r)
 	c := r.connect()
 	c.fails("account/login/start", map[string]any{"type": "cursor"}, -32602, "login for cursor runs in the terminal: dalgona login cursor")
+	c.fails("account/login/start", map[string]any{"type": "copilot"}, -32602, "login for copilot runs in the terminal: dalgona login copilot")
 }
 
 func TestAccountProvidersListLoginModes(t *testing.T) {
@@ -203,7 +204,7 @@ func TestAccountProvidersListLoginModes(t *testing.T) {
 	}
 	want := map[string]string{
 		"anthropic": "apiKey", "google": "apiKey", "openai": "apiKey", "openrouter": "apiKey",
-		"chatgpt": "browser", "antigravity": "terminal", "cursor": "terminal", "devin": "terminal",
+		"chatgpt": "browser", "antigravity": "terminal", "copilot": "terminal", "cursor": "terminal", "devin": "terminal",
 		"cloudflare": "apiKey", "sandbox0": "apiKey", "sprites": "apiKey",
 	}
 	if !reflect.DeepEqual(modes, want) {

@@ -8,7 +8,7 @@ A request MUST contain a model id, messages, and optional tools. A model id MUST
 
 The OpenAI provider MUST use `POST /responses`. `OPENAI_BASE_URL` MAY override its base URL. OpenAI function tools MUST use `type:function` with `strict:false`. An OpenAI freeform tool MUST use `type:custom`. Function history MUST use `function_call` and `function_call_output` items. Custom history MUST use `custom_tool_call` with text input and `custom_tool_call_output` for its result. Reasoning effort MUST use `reasoning.effort`, with summary `auto` and `reasoning.encrypted_content` included. The OpenAI adapter MUST send each image as an `input_image` item with a data URL. The OpenAI adapter MUST send `detail` as `auto`.
 
-Anthropic MUST use `POST /messages`. Its system prompt MUST be an array of text blocks. The system block and the final block of the newest user message MUST carry `cache_control:{"type":"ephemeral"}`. The last tool definition MUST carry the same marker. Adaptive reasoning MUST use `thinking.type:adaptive`, display `summarized`, and `output_config.effort`. The agent MUST clamp the request to the model's advertised levels first. Effort MUST map minimal and low to `low` and MUST pass `medium`, `high`, `xhigh`, and `max` through unchanged. The Anthropic adapter MUST send each image as a base64 `image` block before the text block of its message.
+Anthropic MUST use `POST /messages`. Its system prompt MUST be an array of text blocks. The system block and the final block of the newest user message MUST carry `cache_control:{"type":"ephemeral"}`. The last tool definition MUST carry the same marker. Adaptive reasoning MUST use `thinking.type:adaptive`, display `summarized`, and `output_config.effort`. Effort MUST map minimal and low to `low` and MUST pass `medium`, `high`, `xhigh`, and `max` through unchanged. The Anthropic adapter MUST send each image as a base64 `image` block before the text block of its message.
 
 Chat-compatible providers MUST use `POST /chat/completions`. A non-empty request system prompt MUST be the leading `system` message. Assistant tool calls MUST precede their `tool` result messages. User text in a message that also carries tool results MUST follow those `tool` messages. Streaming requests MUST set `stream_options.include_usage:true`. Reasoning MUST use `reasoning_effort`. The chat-compatible adapter MUST send each image as an `image_url` part with a data URL.
 
@@ -30,11 +30,73 @@ OAuth adapters MUST take their credential from a caller callback. `oauth.Source`
 
 A token that expires without a refresh token MUST return the error `<provider> token expired and has no refresh token; log in again`.
 
-The `chatgpt` provider MUST send the OpenAI Responses request to `https://chatgpt.com/backend-api/codex/responses`. Each request MUST carry `Authorization: Bearer <access>`, `chatgpt-account-id`, `OpenAI-Beta: responses=experimental`, and `originator: codex_cli_rs`. A token without an account id MUST fail before the request is sent. An empty system prompt MUST become `You are a helpful assistant.`. Stream decoding MUST follow the OpenAI rules. `Models` MUST return the static Codex list in donor priority order, with donor context windows and effort levels. The ChatGPT adapter MUST send images through the OpenAI Responses encoder.
+### Copilot
+
+The `copilot` provider MUST use chat-compatible requests at `https://api.githubcopilot.com`.
+It MUST exchange the GitHub credential at `GET https://api.github.com/copilot_internal/v2/token`.
+The exchange MUST send `Authorization: Token <github>`.
+Concurrent callers MUST share one exchange.
+The cached token expires 60 seconds before `expires_at`.
+API requests MUST send `Authorization: Bearer <copilot token>`.
+Both editor headers MUST identify `dalgona/<version>`.
+`Copilot-Integration-Id` MUST be `vscode-chat`.
+`Openai-Intent` MUST be `conversation-panel`.
+Each request MUST have a fresh `X-Request-Id`.
+`X-Initiator` MUST be `agent` when the last message contains tool results.
+Otherwise it MUST be `user`.
+The model list MUST keep only unique ids with `model_picker_enabled` true.
+It MUST read context limits, output limits, and declared reasoning efforts.
+Copilot MUST report no image support.
+Missing context limits MUST use the configured limit or 128000.
+Copilot has no static role preset.
+Exchange refusals MUST NOT trigger login, credential rotation, identity changes, fallback, or restriction retries.
+An exchange 401 MUST ask the user to inspect the account.
+An exchange 403 or 404 MUST ask the user to check access and service availability.
+Errors MAY include a bounded, masked provider message.
+Live sign-in and acceptance of the editor identity remain Not proven.
+
+### Other subscription providers
+
+The `chatgpt` provider MUST send the OpenAI Responses request to `https://chatgpt.com/backend-api/codex/responses`. Each request MUST carry `Authorization: Bearer <access>`, `chatgpt-account-id`, `OpenAI-Beta: responses=experimental`, and `originator: codex_cli_rs`. A token without an account id MUST fail before the request is sent. An empty system prompt MUST become `You are a helpful assistant.`. Stream decoding MUST follow the OpenAI rules. The ChatGPT adapter MUST send images through the OpenAI Responses encoder.
 
 The ChatGPT account id follows the ChatGPT account extraction rule in [oauth.md](oauth.md).
 
-The default `chatgpt` base URL MUST be `pi`'s `DEFAULT_CODEX_BASE_URL` with `/codex` appended. The static Codex model list MUST come from `codex-rs/models-manager/models.json` in the Codex repository.
+The default `chatgpt` base URL MUST be `pi`'s `DEFAULT_CODEX_BASE_URL` with `/codex` appended.
+
+`Models` MUST discover the released client version from `https://registry.npmjs.org/@openai%2Fcodex/latest`.
+The version cache MUST retain `version`, `etag`, and `checked_at` in `codex-client-version.json`.
+A valid entry younger than four hours MUST avoid a registry request.
+A stale entry MUST send its ETag during revalidation.
+A 304 MUST renew only a valid cached entry.
+A 200 MUST supply three numeric version components and MUST NOT supply `0.0.0`.
+A failed lookup MUST retain a valid cached version.
+Without one, discovery MUST return `chatgpt: client version is unavailable: <cause>` before requesting models.
+Discovery failure MUST NOT change existing thread or model settings.
+
+`Models` MUST request `<base>/models?client_version=<version>` through the authenticated account transport.
+Each discovery request MUST have a five-second timeout and a one-MiB response limit.
+Discovery MUST NOT follow redirects.
+The list MUST retain unique, non-empty slugs with `visibility` equal to `list`.
+It MUST sort by ascending priority and preserve source order for ties.
+It MUST read context limits, output limits, and declared reasoning efforts.
+A valid effective context percentage MUST scale the reported context limit.
+Configured context limits MUST override discovered limits.
+Image support MUST be true when `input_modalities` contains `image` or is absent.
+Tool choice MUST be true.
+
+The catalog cache MUST use `codex-models.json` with mode 0600 and replacement through a temporary file.
+Its identity MUST combine the canonical provider endpoint and authenticated account id.
+It MUST NOT contain access tokens.
+Account changes MUST invalidate the in-memory catalog before discovery continues.
+Foreign or corrupt cached catalogs MUST be ignored.
+Transport failures and server 5xx responses MUST use the matching cache, or the static offline list.
+The offline list retains the Codex donor ids, context limits, effort levels, and image support.
+The static offline list MUST take its model values from Codex `codex-rs/models-manager/models.json`.
+An outage warning MUST appear at most once per hour for each identity.
+Authentication, access, quota, rate-limit, and account-restriction responses MUST return errors without catalog fallback.
+Discovery MUST NOT rotate credentials, switch providers, or retry restrictions.
+A missing catalog entry MUST NOT grant access or bypass a provider refusal.
+The `model/list` wire shape remains unchanged.
 
 The `antigravity` provider MUST send `POST /v1internal:streamGenerateContent?alt=sse` to `https://daily-cloudcode-pa.googleapis.com`. The body MUST be the envelope `{project, requestId, request, model, userAgent:"antigravity"}`. `request` MUST be the Google request body. `requestId` MUST have the form `agent/<id>/<unix ms>/<id>/<step>`, where `<step>` is the message count and at least 1. The `User-Agent` header MUST be `antigravity/hub/<version> (aidev_client; os_type=<os>; arch=<arch>; cl=<changelist>)`. Each SSE event MUST carry the Google response under `response`. An event without `response` MUST decode as a Google response. Decoding MUST follow the Google rules.
 

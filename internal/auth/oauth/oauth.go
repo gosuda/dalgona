@@ -61,6 +61,7 @@ const (
 	antigravityPublicID  = "1071006060591-tmhssin2h21lcre235vtdollojh4g403ep.apps.googleusercontent.com"
 	antigravityPublicKey = "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"
 	cursorPublicID       = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB"
+	copilotPublicID      = "Iv1.b507a08c87ecfe98"
 	openAIEndpoint       = "https://auth.openai.com/oauth/token"
 	claudeEndpoint       = "https://platform.claude.com/v1/oauth/token"
 	googleEndpoint       = "https://oauth2.googleapis.com/token"
@@ -97,6 +98,11 @@ var Providers = map[string]Provider{
 	"cursor": {
 		ID: "cursor", AuthorizeURL: "https://cursor.com/loginDeepControl", ClientID: cursorPublicID,
 		PollURL: "https://api2.cursor.sh/auth/poll", RefreshURL: "https://api2.cursor.sh/oauth/token", ExtraAuthParams: map[string]string{},
+	},
+	"copilot": { //nolint:gosec // G101: public OAuth client ID published by GitHub for Copilot CLI
+		ID: "copilot", ClientID: copilotPublicID, Scopes: []string{"read:user"},
+		DeviceURL: "https://github.com/login/device/code", DeviceVerificationURL: "https://github.com/login/device",
+		TokenURL: "https://github.com/login/oauth/access_token",
 	},
 }
 

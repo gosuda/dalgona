@@ -4,6 +4,9 @@ The `chatgpt` entry MUST take its client values from Codex `codex-rs/login/src/s
 
 The OAuth package (`internal/auth/oauth`) MUST expose provider-neutral authorization flows. It MUST NOT import `internal/auth`. The `Providers` table MUST include ChatGPT, Claude, Google Antigravity, Devin, and Cursor. Each entry MUST use the client identifiers, scopes, endpoints, and parameter names of its named donor.
 
+The table MUST also include Copilot.
+The `copilot` entry takes its client values from jcode's `crates/jcode-base/src/auth/copilot.rs`.
+
 `Provider` describes authorization, token, device, poll, and refresh endpoints. It also describes client credentials, scopes, loopback binding, advertised redirect URIs, port fallback, and extra authorization parameters. `PollURL` and `RefreshURL` MAY differ from `TokenURL`.
 
 ## Authorization code with PKCE
@@ -33,6 +36,16 @@ ChatGPT and Antigravity MUST use form-encoded authorization-code exchanges. Clau
 `DeviceCode` MUST call the user-supplied display function with the user code and verification URL. A missing provider verification URL MAY come from `DeviceVerificationURL`. Polling MUST stop on context cancellation. The whole flow MUST stop after 15 minutes.
 
 The standard device flow MUST use the RFC device-code grant. It MUST default to a five-second interval when the response omits `interval`. It MUST continue after `authorization_pending`. It MUST add five seconds to the interval after `slow_down`. It MUST accept pending and slow-down responses with non-success HTTP statuses. Any other OAuth error MUST fail the flow.
+
+Copilot MUST use the standard device flow with scope `read:user`.
+Its client id MUST be `Iv1.b507a08c87ecfe98`.
+Its device endpoint MUST be `https://github.com/login/device/code`.
+Its verification URL MUST be `https://github.com/login/device`.
+Its token endpoint MUST be `https://github.com/login/oauth/access_token`.
+Copilot login MUST print `Open <url> and enter the code <code> to log in to copilot.`.
+Copilot MUST NOT use PKCE.
+A GitHub token without an expiry MUST NOT refresh.
+The `--device-auth` flag remains exclusive to ChatGPT.
 
 ChatGPT MUST use its donor device endpoints instead of the RFC grant. The initial JSON request MUST contain `client_id`. The poll JSON request MUST contain `device_auth_id` and `user_code`. HTTP 403 and 404 poll responses MUST mean pending. A successful poll MUST supply an authorization code and verifier. The package MUST exchange them at `TokenURL` with `DeviceRedirectURL`.
 
