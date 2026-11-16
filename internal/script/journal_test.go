@@ -29,6 +29,7 @@ type journal struct {
 	killDuring int
 	kill       context.CancelFunc
 	logs       []string
+	spawns     []script.SpawnOpts
 	completed  map[string]script.Outcome
 }
 
@@ -112,7 +113,10 @@ func (j *journal) CallTool(ctx context.Context, slot script.Slot, name string, a
 	return value, err
 }
 
-func (j *journal) Spawn(_ context.Context, slot script.Slot, prompt string, _ script.SpawnOpts) (string, error) {
+func (j *journal) Spawn(_ context.Context, slot script.Slot, prompt string, opts script.SpawnOpts) (string, error) {
+	j.mu.Lock()
+	j.spawns = append(j.spawns, opts)
+	j.mu.Unlock()
 	id := "child-" + prompt
 	value, err := jsontext.AppendQuote(nil, id)
 	if err != nil {

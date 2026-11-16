@@ -12,9 +12,9 @@ import (
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
-const evalSchema = `{"type":"object","properties":{"code":{"type":"string","description":"Starlark cell. The last expression is the result."},"uses":{"type":"array","items":{"type":"string"},"description":"Tool names this cell may call. Each MUST be in the eval allow list. Omit to use the whole allow list."},"data":{"description":"Any JSON value. The cell reads it as data."}},"required":["code"],"additionalProperties":false}`
+const evalSchema = `{"type":"object","properties":{"code":{"type":"string","description":"Cell source. The last expression is the result."},"lang":{"type":"string","enum":["star","js"],"description":"Cell language: star (Starlark, the default) or js (JavaScript via QuickJS)."},"uses":{"type":"array","items":{"type":"string"},"description":"Tool names this cell may call. Each MUST be in the eval allow list. Omit to use the whole allow list."},"data":{"description":"Any JSON value. The cell reads it as data."}},"required":["code"],"additionalProperties":false}`
 
-const evalDescription = "Run one Starlark cell as a durable script. The cell sees `ctx`, `tools` (the same as `ctx.tools`), and `data` (the request `data`, or None). The last expression is the result. `print` lines are captured. Call a tool with `tools.<name>(arg = value)` or `tools[\"<name>\"](arg = value)`; only tools in the cell's uses run. A failed call stops the cell; `ctx.try_call(tools.<name>, arg = value)` returns `struct(ok, value, error)` instead. Run calls at the same time with `s = ctx.scope(limit)`, `s.tools.<name>(...)`, and `s.all()`, which returns results in submission order. Start children with `ctx.spawn(prompt)` and join them with `ctx.wait(ids)`. Judge with `ctx.judge(state, questions)` and `ctx.judge_batch(states, questions)`. A recovered cell replays recorded effects; a cell whose effect was interrupted ends with status `indeterminate`."
+const evalDescription = "Run one durable cell. Pass `lang` `star` (default) for Starlark or `js` for JavaScript (QuickJS, ES2023). The cell sees `ctx`, `tools` (the same as `ctx.tools`), and `data` (the request `data`, or None). The last expression is the result. In Starlark `print` writes lines, in JavaScript `console.log`; both are captured. Starlark cells call a tool with `tools.<name>(arg = value)` or `tools[\"<name>\"](arg = value)`; JavaScript cells call `tools.<name>({arg: value})`. Only tools in the cell's uses run. A failed call stops the cell; `ctx.try_call(tools.<name>, arg = value)` returns `struct(ok, value, error)` instead. Run calls at the same time with `s = ctx.scope(limit)`, `s.tools.<name>(...)`, and `s.all()`, which returns results in submission order. Start children with `ctx.spawn(prompt)` and join them with `ctx.wait(ids)`. Judge with `ctx.judge(state, questions)` and `ctx.judge_batch(states, questions)`. A recovered cell replays recorded effects; a cell whose effect was interrupted ends with status `indeterminate`."
 
 type EvalOptions struct {
 	Mode   config.ToolMode
@@ -31,6 +31,7 @@ type Eval struct {
 
 type evalRequest struct {
 	code    string
+	lang    string
 	uses    []string
 	usesSet bool
 	data    jsontext.Value
@@ -122,6 +123,9 @@ func (e *Eval) request(args jsontext.Value) (evalRequest, nameSet, Outcome) {
 
 func (e *Eval) execute(ctx context.Context, start RunStart, req evalRequest, allow nameSet) Outcome {
 	r := newRun(e.fx, start.ID, runConfig{reach: e.reach, allow: allow})
+	if req.lang == "js" {
+		return r.executeJS(ctx, start.Source, req.data, start.Seed)
+	}
 	env, end := r.begin(ctx, start.Seed)
 	defer end()
 	data, err := fromJSON(req.data)
@@ -168,6 +172,8 @@ func (req *evalRequest) readField(dec *jsontext.Decoder, key string, codeSet *bo
 		}
 		req.code, *codeSet = tok.String(), true
 		return nil
+	case "lang":
+		return req.readLang(dec)
 	case "uses":
 		uses, err := readStrings(dec)
 		if err != nil {
@@ -176,15 +182,31 @@ func (req *evalRequest) readField(dec *jsontext.Decoder, key string, codeSet *bo
 		req.uses, req.usesSet = uses, true
 		return nil
 	case "data":
-		value, err := dec.ReadValue()
-		if err != nil {
-			return fmt.Errorf("data: %w", err)
-		}
-		req.data = value.Clone()
-		return nil
+		return req.readData(dec)
 	default:
 		return fmt.Errorf("unknown field %q", key)
 	}
+}
+
+func (req *evalRequest) readData(dec *jsontext.Decoder) error {
+	value, err := dec.ReadValue()
+	if err != nil {
+		return fmt.Errorf("data: %w", err)
+	}
+	req.data = value.Clone()
+	return nil
+}
+
+func (req *evalRequest) readLang(dec *jsontext.Decoder) error {
+	tok, err := dec.ReadToken()
+	if err != nil || tok.Kind() != jsontext.KindString {
+		return errors.New("lang must be a string")
+	}
+	if tok.String() != "star" && tok.String() != "js" {
+		return errors.New("lang must be star or js")
+	}
+	req.lang = tok.String()
+	return nil
 }
 
 func readStrings(dec *jsontext.Decoder) ([]string, error) {

@@ -209,6 +209,9 @@ Each file change MUST show its edit review as one line under its diff cards, for
 - Each kept link MUST open in a new tab with `rel="noopener noreferrer nofollow"`.
 - The renderer MUST NOT render images. An image MUST show its alternative text as `image: <text>`.
 - The sanitizer MUST drop every tag and attribute that the renderer does not produce.
+- A fenced block with info `mermaid`, `d2`, `nomnoml` or `svg` MUST render to a sanitized SVG figure.
+- A failed diagram render MUST mark the block `diagram-error` and MUST keep the source text.
+- Diagram SVG MUST drop `style` elements and attributes and every element that loads a resource.
 
 ### Motion
 

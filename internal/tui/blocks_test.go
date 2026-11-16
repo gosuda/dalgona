@@ -331,3 +331,28 @@ func TestAnswerPendingStaysBoundedAfterHugeCompleteFragment(t *testing.T) {
 		t.Fatalf("live tail after huge control fragment = %q, want visible text", got)
 	}
 }
+
+func TestBlockSplitterDiagramFenceBuffers(t *testing.T) {
+	t.Parallel()
+	var s blockSplitter
+	final, tail := feedAll(&s, "```mermaid\ngraph LR\n a-->b\n")
+	if final != nil || tail != "" {
+		t.Fatalf("diagram fence buffers: final %#v tail %q", final, tail)
+	}
+	final, _ = feedAll(&s, "```\n")
+	want := []block{{text: "graph LR\n a-->b", code: true, diagram: "mermaid"}}
+	if !reflect.DeepEqual(final, want) {
+		t.Fatalf("diagram close: %#v", final)
+	}
+}
+
+func TestBlockSplitterUnclosedDiagramFenceShowsSource(t *testing.T) {
+	t.Parallel()
+	var s blockSplitter
+	final, _ := feedAll(&s, "```d2\nx -> y\n")
+	got := s.Close()
+	want := []block{{text: "```d2", code: true}, {text: "x -> y", code: true}}
+	if !reflect.DeepEqual(append(final, got...), want) {
+		t.Fatalf("unclosed diagram fence: %#v", append(final, got...))
+	}
+}

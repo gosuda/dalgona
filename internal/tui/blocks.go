@@ -8,8 +8,9 @@ import (
 )
 
 type block struct {
-	text string
-	code bool
+	text    string
+	code    bool
+	diagram string
 }
 
 type blockSplitter struct {
@@ -18,6 +19,8 @@ type blockSplitter struct {
 	kind       string
 	afterBlank bool
 	fence      string
+	fenceLang  string
+	fenceBuf   []string
 }
 
 const streamTailBytes = 64 << 10
@@ -63,6 +66,14 @@ func (s *blockSplitter) Close() []block {
 	if len(s.rest) > 0 {
 		final = append(final, s.line(string(s.rest))...)
 		s.rest = nil
+	}
+	if s.fenceBuf != nil {
+		for _, text := range s.fenceBuf {
+			final = append(final, block{text: text, code: true})
+		}
+		s.fenceBuf = nil
+		s.fence = ""
+		s.fenceLang = ""
 	}
 	return append(final, s.flush()...)
 }
@@ -111,6 +122,12 @@ func (s *blockSplitter) line(text string) []block {
 	}
 	if marker, ok := fenceOpener(text); ok {
 		s.fence = marker
+		lang := strings.Fields(strings.TrimSpace(text[strings.Index(text, marker)+len(marker):]))
+		if len(lang) > 0 && isDiagramLang(lang[0]) {
+			s.fenceLang = strings.ToLower(lang[0])
+			s.fenceBuf = []string{text}
+			return s.flush()
+		}
 		return append(s.flush(), block{text: text, code: true})
 	}
 	return s.join(text)
@@ -118,7 +135,20 @@ func (s *blockSplitter) line(text string) []block {
 
 func (s *blockSplitter) fenceLine(text string) []block {
 	trimmed := strings.TrimSpace(text)
-	if trimmed != "" && strings.Trim(trimmed, s.fence[:1]) == "" && len(trimmed) >= len(s.fence) {
+	closing := trimmed != "" && strings.Trim(trimmed, s.fence[:1]) == "" && len(trimmed) >= len(s.fence)
+	if s.fenceBuf != nil {
+		s.fenceBuf = append(s.fenceBuf, text)
+		if !closing {
+			return nil
+		}
+		source := strings.Join(s.fenceBuf[1:len(s.fenceBuf)-1], "\n")
+		out := block{text: source, code: true, diagram: s.fenceLang}
+		s.fence = ""
+		s.fenceLang = ""
+		s.fenceBuf = nil
+		return []block{out}
+	}
+	if closing {
 		s.fence = ""
 	}
 	return []block{{text: text, code: true}}

@@ -514,6 +514,14 @@ At `high`, an `eval` item MUST print its first code line as its subject and its 
 A file change MUST print one row for each file, with its added and removed counts.
 A file change whose diff the server omitted MUST show `diff omitted` in place of its counts.
 
+## Diagrams
+
+A fenced code block with info `mermaid`, `d2`, `nomnoml`, or `svg` MUST print as a diagram card, not as code lines.
+The fence MUST buffer until its closing marker before it prints.
+A mermaid, d2, or nomnoml card MUST render the source as text art under a `diagram <kind> · <n> rows` header.
+An `svg` fence or a failed render MUST print `diagram <kind>: render failed · source shown` followed by the source.
+A fenced block still open when the answer finishes MUST print its buffered lines as code.
+
 ## Verbosity
 
 The `verbosity` setting MUST be `low`, `medium`, or `high`, and its default MUST be `medium`.
