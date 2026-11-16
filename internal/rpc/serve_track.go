@@ -11,8 +11,8 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/dal/textdiff"
 	"github.com/gosuda/dalgona/internal/model"
-	"github.com/gosuda/dalgona/internal/textdiff"
 )
 
 const (

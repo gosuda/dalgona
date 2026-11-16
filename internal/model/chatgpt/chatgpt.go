@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/model/openai"
 )

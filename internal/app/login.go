@@ -9,8 +9,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/auth"
-	"github.com/gosuda/dalgona/internal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 )
 
 func Login(ctx context.Context, store *auth.Store, provider string, in io.Reader, out io.Writer) error {

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 )
 

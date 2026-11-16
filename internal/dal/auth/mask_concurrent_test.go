@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 func newPatternMaskStore(t *testing.T, home string) *auth.Store {

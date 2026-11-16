@@ -8,7 +8,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/agent/prompt"
-	"github.com/gosuda/dalgona/internal/keywords"
+	"github.com/gosuda/dalgona/internal/dal/keywords"
 )
 
 type preparedInput struct {

@@ -2,7 +2,7 @@ package agent
 
 import (
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/keywords"
+	"github.com/gosuda/dalgona/internal/dal/keywords"
 )
 
 type KeywordMatch struct {

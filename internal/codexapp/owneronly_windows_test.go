@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 func assertOwnerOnly(t *testing.T, path string) {

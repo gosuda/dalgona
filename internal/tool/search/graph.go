@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/syntax"
+	"github.com/gosuda/dalgona/internal/dal/syntax"
 )
 
 type graphCall struct {

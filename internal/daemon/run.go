@@ -13,7 +13,7 @@ import (
 	"sync"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 type (

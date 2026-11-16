@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 func TestWriteSettingsIfRejectsWriteThatLostTheRace(t *testing.T) {

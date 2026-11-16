@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 )
 
 func TestDeviceCodePendingThenSuccess(t *testing.T) {

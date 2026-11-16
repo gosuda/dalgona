@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/syntax"
+	"github.com/gosuda/dalgona/internal/dal/syntax"
 	"github.com/gosuda/dalgona/internal/tool"
 	"github.com/gosuda/dalgona/internal/tool/patch"
 	"github.com/gosuda/dalgona/internal/tool/search"

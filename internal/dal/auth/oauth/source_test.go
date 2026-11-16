@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 )
 
 func refreshServer(t *testing.T, calls *atomic.Int32, status *atomic.Int32) *httptest.Server {

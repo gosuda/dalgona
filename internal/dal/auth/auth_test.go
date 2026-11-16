@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 func writeAuthFile(t *testing.T, home, name, body string, mode os.FileMode) {

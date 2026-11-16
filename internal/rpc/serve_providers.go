@@ -5,7 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"slices"
 
-	"github.com/gosuda/dalgona/internal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 type AccountProvidersResponse struct {

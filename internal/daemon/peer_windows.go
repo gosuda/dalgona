@@ -5,7 +5,7 @@ package daemon
 import (
 	"net"
 
-	"github.com/gosuda/dalgona/internal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 func verifyAcceptedPeer(net.Conn, bool) error {

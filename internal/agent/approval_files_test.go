@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/auth"
-	"github.com/gosuda/dalgona/internal/textdiff"
+	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/textdiff"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 

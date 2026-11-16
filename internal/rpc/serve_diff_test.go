@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/textdiff"
+	"github.com/gosuda/dalgona/internal/dal/textdiff"
 )
 
 type wireChange struct {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 var builtinPlaceholder = regexp.MustCompile(`^\{\{secret:builtin\d+:\d+\}\}$`)

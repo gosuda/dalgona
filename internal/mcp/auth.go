@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/auth"
-	"github.com/gosuda/dalgona/internal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 )
 
 const (

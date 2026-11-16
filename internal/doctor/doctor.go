@@ -10,8 +10,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/runner"
 )
 

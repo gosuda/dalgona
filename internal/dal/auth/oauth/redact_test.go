@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 )
 
 func TestRequestErrorRedactsQuery(t *testing.T) {

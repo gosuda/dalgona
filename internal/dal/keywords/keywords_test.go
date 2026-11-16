@@ -7,7 +7,7 @@ import (
 	"testing"
 	"unicode"
 
-	"github.com/gosuda/dalgona/internal/keywords"
+	"github.com/gosuda/dalgona/internal/dal/keywords"
 )
 
 func TestBuiltinsProductMetadata(t *testing.T) {

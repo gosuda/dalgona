@@ -24,7 +24,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/gosuda/dalgona/internal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 const (

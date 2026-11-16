@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/textdiff"
+	"github.com/gosuda/dalgona/internal/dal/textdiff"
 )
 
 const corpusRepo = "../.."

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/gosuda/dalgona/internal/syntax"
+	"github.com/gosuda/dalgona/internal/dal/syntax"
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 

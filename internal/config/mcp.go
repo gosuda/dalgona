@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"slices"
 
-	"github.com/gosuda/dalgona/internal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 )
 
 const (

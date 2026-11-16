@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/daemon"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 

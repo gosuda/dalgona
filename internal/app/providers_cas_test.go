@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/auth"
-	"github.com/gosuda/dalgona/internal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 )
 
 func newSaveTestCredentials(t *testing.T, stored auth.Credential) (*credentials, *sourceEntry, string) {

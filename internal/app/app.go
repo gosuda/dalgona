@@ -13,8 +13,8 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/advisor"
-	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/decide"
 	"github.com/gosuda/dalgona/internal/journal"
 	"github.com/gosuda/dalgona/internal/model"

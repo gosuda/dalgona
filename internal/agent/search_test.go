@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 func searchThreadWithText(t *testing.T, h *harness, host *Host, prompt string) *Thread {

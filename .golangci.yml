@@ -98,10 +98,10 @@ linters:
               desc: reflection SDK; speak the provider wire with net/http and encoding/json/jsontext
         syntax:
           files:
-            - "!**/internal/syntax/**"
+            - "!**/internal/dal/syntax/**"
           deny:
             - pkg: "github.com/odvcencio/gotreesitter"
-              desc: only internal/syntax imports the tree-sitter library
+              desc: only internal/dal/syntax imports the tree-sitter library
         copyleft:
           files:
             - $all
@@ -121,14 +121,14 @@ linters:
             - "**/internal/journal/**"
             - "**/internal/agent/**"
             - "**/internal/model/**"
-            - "**/internal/auth/**"
+            - "**/internal/dal/auth/**"
             - "**/internal/tool/**"
             - "**/internal/runner/**"
             - "**/internal/config/**"
             - "**/internal/decide/**"
-            - "**/internal/textdiff/**"
-            - "**/internal/keywords/**"
-            - "**/internal/syntax/**"
+            - "**/internal/dal/textdiff/**"
+            - "**/internal/dal/keywords/**"
+            - "**/internal/dal/syntax/**"
             - "**/internal/shellargs/**"
             - "**/internal/secrets/**"
           deny:
@@ -177,7 +177,7 @@ linters:
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/model"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/auth"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/auth"
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/tool"
               desc: clients reach the core only through internal/rpc
@@ -187,7 +187,7 @@ linters:
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/decide"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/keywords"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/keywords"
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/script"
               desc: clients reach the core only through internal/rpc

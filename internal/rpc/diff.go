@@ -3,7 +3,7 @@ package rpc
 import (
 	"log/slog"
 
-	"github.com/gosuda/dalgona/internal/textdiff"
+	"github.com/gosuda/dalgona/internal/dal/textdiff"
 )
 
 func diffChange(path, kind string, pre, post []byte) FileChange {

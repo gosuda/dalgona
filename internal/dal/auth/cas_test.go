@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
 type casFixture struct {

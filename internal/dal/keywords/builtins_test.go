@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/keywords"
+	"github.com/gosuda/dalgona/internal/dal/keywords"
 )
 
 func TestDefaultEnabled(t *testing.T) {
