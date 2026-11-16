@@ -170,7 +170,7 @@ const shown = $derived({
 		display: grid;
 		justify-items: end;
 		flex: 1 1 0;
-		min-width: 0;
+		min-width: 8rem;
 		gap: var(--space-2);
 		margin-inline-start: auto;
 		container: band / inline-size;
@@ -245,6 +245,7 @@ const shown = $derived({
 	@media (max-width: 40rem) {
 		.status-band {
 			justify-items: stretch;
+			flex-basis: 100%;
 			margin-inline-start: 0;
 			width: 100%;
 			max-width: 100%;
