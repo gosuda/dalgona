@@ -126,7 +126,7 @@ func TestConfigTLSCAFileResolvesAndAccepts(t *testing.T) {
 	home := t.TempDir()
 	writeCACertificate(t, filepath.Join(home, "ca.pem"))
 	requireTLSCAFile(t, home, "tls_ca_file = \"ca.pem\"\n", filepath.Join(home, "ca.pem"))
-	requireTLSCAFile(t, home, "tls_ca_file = \""+filepath.Join(home, "ca.pem")+"\"\n", filepath.Join(home, "ca.pem"))
+	requireTLSCAFile(t, home, "tls_ca_file = '"+filepath.Join(home, "ca.pem")+"'\n", filepath.Join(home, "ca.pem"))
 	writePaddedCACertificate(t, home)
 	requireTLSCAFile(t, home, "tls_ca_file = \"exact.pem\"\n", filepath.Join(home, "exact.pem"))
 	requireTLSCAFile(t, home, "model = \"openai/gpt-test\"\n", "")

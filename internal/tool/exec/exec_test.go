@@ -77,11 +77,11 @@ func TestExecRunsCommand(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	toolExec := New()
-	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-1", Args: jsontext.Value(`{"command":"printf hello"}`)}, env)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-1", Args: jsontext.Value(`{"command":` + strconv.Quote(helloCommand()) + `}`)}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.OK || string(result.Output) != "hello" || result.ExitCode == nil || *result.ExitCode != 0 {
+	if !result.OK || strings.TrimSpace(string(result.Output)) != "hello" || result.ExitCode == nil || *result.ExitCode != 0 {
 		t.Fatalf("result ok=%v output=%q exit=%v", result.OK, result.Output, result.ExitCode)
 	}
 }
@@ -98,6 +98,27 @@ func TestExecUnmasksCommand(t *testing.T) {
 	if !result.OK || !strings.Contains(string(result.Output), "unmasked-secret-value") {
 		t.Fatalf("unmasked run ok=%v output=%q", result.OK, result.Output)
 	}
+}
+
+func helloCommand() string {
+	if runtime.GOOS == "windows" {
+		return "echo hello"
+	}
+	return "printf hello"
+}
+
+func okCommand() string {
+	if runtime.GOOS == "windows" {
+		return "ver"
+	}
+	return "true"
+}
+
+func floodCommand() string {
+	if runtime.GOOS == "windows" {
+		return "for /L %i in (1,1,100000) do @echo %i"
+	}
+	return "seq 1 100000"
 }
 
 func waitThenPrintLateCommand() string {
@@ -301,7 +322,7 @@ func TestExecRejectsBadArguments(t *testing.T) {
 		t.Fatal("zero timeout accepted")
 	}
 
-	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-max-timeout", Args: jsontext.Value(`{"command":"true","timeout_ms":9223372036854}`)}, env)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-max-timeout", Args: jsontext.Value(`{"command":` + strconv.Quote(okCommand()) + `,"timeout_ms":9223372036854}`)}, env)
 	if err != nil {
 		t.Fatalf("max representable timeout rejected: %v", err)
 	}
@@ -314,7 +335,7 @@ func TestExecKeepsTailOfLongOutput(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	toolExec := New()
-	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-8", Args: jsontext.Value(`{"command":"seq 1 100000"}`)}, env)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-8", Args: jsontext.Value(`{"command":` + strconv.Quote(floodCommand()) + `}`)}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +355,7 @@ func TestExecEscalateRunsUnsandboxed(t *testing.T) {
 	defer closeRunner()
 	toolExec := New()
 
-	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-9", Args: jsontext.Value(`{"command":"true","escalate":true,"justification":"retry after denial"}`)}, env)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-9", Args: jsontext.Value(`{"command":` + strconv.Quote(okCommand()) + `,"escalate":true,"justification":"retry after denial"}`)}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
