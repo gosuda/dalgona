@@ -151,3 +151,23 @@ Output projection for `exec` MUST use `tool.Project` with `Keep` `Tail`. Output 
 ```
 [output truncated: <N> bytes total; full output: <spill>; page it with read offset/limit]
 ```
+
+## Web fetch
+
+`web_fetch` is a read-class tool.
+Recovery replays the call and records `recovered=replayed`.
+The guarded HTTP client checks the destination and each redirect.
+HTML conversion makes no additional network requests.
+The response body limit applies before HTML parsing.
+The tool extracts the main article and converts it to Markdown.
+Links and image references resolve against the final response URL.
+Only HTTP and HTTPS references remain.
+The tool adds the article title when extracted headings do not contain it.
+Extraction and conversion failures return failed tool results.
+An executable script with fewer than 200 visible body characters identifies an application shell.
+Script, style, template, and noscript text do not count as visible text.
+An application shell returns `web_fetch: page needs a browser: <url>`.
+The error names the original requested URL.
+Plain text, JSON, and XML retain their bytes within the response limit.
+Binary responses return `[binary content <media_type>, <size> bytes]`.
+Truncation preserves UTF-8 boundaries and appends `\n[content truncated at <n> bytes]`.

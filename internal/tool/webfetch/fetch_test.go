@@ -14,17 +14,6 @@ import (
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
-func TestFetchHTML(t *testing.T) {
-	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = fmt.Fprint(writer, `<html><head><style>hidden-style</style><script>hidden-script</script><noscript>hidden-noscript</noscript></head><body><h1>Hello &amp; welcome</h1><p>Visible <strong>text</strong>.</p><div>Next<br>line</div></body></html>`)
-	}))
-	t.Cleanup(server.Close)
-	result := runLocal(t, server.URL, defaultMaxBytes)
-	requireFetchOutput(t, result, "Hello & welcome Visible text. Next line")
-}
-
 func TestFetchPlainText(t *testing.T) {
 	t.Parallel()
 	const text = "first  line\nsecond\tline\n"
@@ -79,7 +68,7 @@ func TestFetchReportsHTTPError(t *testing.T) {
 
 func TestMainBlocksLoopbackWhileToolAllows(t *testing.T) {
 	t.Parallel()
-	server := textServer(t, "text/html", `<p>A &amp; B</p><script>hidden</script>`)
+	server := textServer(t, "text/plain", "A & B")
 	direct := runLocal(t, server.URL, 1024)
 	if !direct.OK {
 		t.Fatalf("loopback fetch through test client failed: %q", direct.Output)
