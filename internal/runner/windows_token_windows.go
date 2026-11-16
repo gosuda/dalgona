@@ -70,14 +70,14 @@ func callCreateRestrictedToken(base windows.Token, entries []windows.SIDAndAttri
 		0,
 		0,
 		uintptr(len(entries)),
-		uintptr(unsafe.Pointer(&entries[0])),
-		uintptr(unsafe.Pointer(&restricted)),
+		uintptr(unsafe.Pointer(&entries[0])), //nolint:gosec // CreateRestrictedToken takes the SIDAndAttributes slice as a raw pointer
+		uintptr(unsafe.Pointer(&restricted)), //nolint:gosec // CreateRestrictedToken writes the token handle through a raw pointer
 	)
 	runtime.KeepAlive(entries)
 	if result != 0 {
 		return restricted, nil
 	}
-	if callErr != syscall.Errno(0) {
+	if !errors.Is(callErr, syscall.Errno(0)) {
 		return 0, fmt.Errorf("runner: CreateRestrictedToken: %w", callErr)
 	}
 	return 0, errors.New("runner: CreateRestrictedToken failed")
@@ -124,13 +124,13 @@ func tokenDefaultDacl(token windows.Token) (*windows.ACL, []byte, error) {
 	if err := windows.GetTokenInformation(token, windows.TokenDefaultDacl, &buffer[0], size, &size); err != nil {
 		return nil, nil, fmt.Errorf("runner: read token default DACL: %w", err)
 	}
-	info := (*tokenDefaultDaclInfo)(unsafe.Pointer(&buffer[0]))
+	info := (*tokenDefaultDaclInfo)(unsafe.Pointer(&buffer[0])) //nolint:gosec // GetTokenInformation writes the TOKEN_DEFAULT_DACL struct into buffer
 	return info.DefaultDacl, buffer, nil
 }
 
 func setTokenDefaultDacl(token windows.Token, dacl *windows.ACL) error {
 	info := tokenDefaultDaclInfo{DefaultDacl: dacl}
-	err := windows.SetTokenInformation(token, windows.TokenDefaultDacl, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+	err := windows.SetTokenInformation(token, windows.TokenDefaultDacl, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))) //nolint:gosec // SetTokenInformation takes the info struct as a raw pointer
 	runtime.KeepAlive(info)
 	runtime.KeepAlive(dacl)
 	if err != nil {
@@ -179,7 +179,7 @@ func copySID(sid *windows.SID) ([]byte, error) {
 }
 
 func sidFromBytes(value []byte) *windows.SID {
-	return (*windows.SID)(unsafe.Pointer(&value[0]))
+	return (*windows.SID)(unsafe.Pointer(&value[0])) //nolint:gosec // value holds marshalled SID bytes
 }
 
 func enableTokenPrivilege(token windows.Token, name string) error {
