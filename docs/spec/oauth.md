@@ -45,3 +45,28 @@ The poll MUST be a GET to `PollURL` with `uuid` and `verifier`. HTTP 404 MUST me
 ## Terminal login
 
 The `account/login/start` method MUST refuse an OAuth provider other than `chatgpt`. The error MUST read `login for <provider> runs in the terminal: <product> login <provider>`, where `<product>` is the product name of the host, `dal` or `dalgona`.
+
+## MCP discovery and resource binding
+
+MCP OAuth applies to dalgona HTTP servers only.
+`DiscoverResource` uses the `resource_metadata` challenge URL when present.
+Otherwise it tries the path-specific protected-resource metadata URL, then the root URL.
+The metadata resource MUST equal the canonical MCP URL.
+Discovery uses the first authorization server.
+HTTP endpoints MUST use HTTPS, except on loopback hosts.
+
+`DiscoverServer` tries OAuth authorization-server metadata before OpenID metadata.
+The returned issuer MUST equal the requested issuer.
+The server MUST advertise PKCE `S256`.
+Dynamic registration requests a public client named `dalgona` with authorization-code and refresh-token grants.
+Without a configured client identifier, a server without registration support MUST fail.
+
+The authorization request, code exchange, and refresh MUST carry the canonical resource URL.
+Configured scopes override resource metadata scopes.
+Neither source means that requests omit scope.
+MCP credentials use `mcp-<name>` in the auth store.
+Their account MUST equal the canonical resource URL.
+Registration metadata lives in `mcp-oauth.json` with mode 0600.
+Only login writes registration metadata.
+The token source reloads registration before token access and refresh.
+Resource and configured client mismatches MUST fail before credentials leave the host.

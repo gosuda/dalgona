@@ -38,6 +38,13 @@ type Provider struct {
 	PollURL               string
 	RefreshURL            string
 	ExtraAuthParams       map[string]string
+	Resource              string
+}
+
+func (p Provider) setResource(values url.Values) {
+	if p.Resource != "" {
+		values.Set("resource", p.Resource)
+	}
 }
 
 type Token struct {
@@ -248,6 +255,7 @@ func authorizationURL(provider Provider, redirect, challenge, state string) (str
 	if len(provider.Scopes) > 0 {
 		query.Set("scope", strings.Join(provider.Scopes, " "))
 	}
+	provider.setResource(query)
 	for key, value := range provider.ExtraAuthParams {
 		query.Set(key, value)
 	}
@@ -336,20 +344,7 @@ func parseInput(input string) (string, string) {
 }
 
 func exchange(ctx context.Context, provider Provider, grant authorization, verifier, redirect string) (Token, error) {
-	values := url.Values{"code": {grant.code}, "code_verifier": {verifier}}
-	if provider.ID != "devin" {
-		values.Set("grant_type", "authorization_code")
-		values.Set("redirect_uri", redirect)
-		if provider.ClientID != "" {
-			values.Set("client_id", provider.ClientID)
-		}
-		if provider.ClientSecret != "" {
-			values.Set("client_secret", provider.ClientSecret)
-		}
-	}
-	if grant.state != "" && provider.ID != "chatgpt" && provider.ID != "devin" {
-		values.Set("state", grant.state)
-	}
+	values := exchangeValues(provider, grant, verifier, redirect)
 	var response object
 	var err error
 	if jsonCodeExchange(provider.ID) {
@@ -363,6 +358,26 @@ func exchange(ctx context.Context, provider Provider, grant authorization, verif
 	return tokenFromObject(response, "")
 }
 
+func exchangeValues(provider Provider, grant authorization, verifier, redirect string) url.Values {
+	values := url.Values{"code": {grant.code}, "code_verifier": {verifier}}
+	if provider.ID == "devin" {
+		return values
+	}
+	values.Set("grant_type", "authorization_code")
+	values.Set("redirect_uri", redirect)
+	if provider.ClientID != "" {
+		values.Set("client_id", provider.ClientID)
+	}
+	if provider.ClientSecret != "" {
+		values.Set("client_secret", provider.ClientSecret)
+	}
+	provider.setResource(values)
+	if grant.state != "" && provider.ID != "chatgpt" && provider.Resource == "" {
+		values.Set("state", grant.state)
+	}
+	return values
+}
+
 func Refresh(ctx context.Context, provider Provider, refresh string) (Token, error) {
 	endpoint := cmp.Or(provider.RefreshURL, provider.TokenURL)
 	values := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}}
@@ -372,6 +387,7 @@ func Refresh(ctx context.Context, provider Provider, refresh string) (Token, err
 	if provider.ClientSecret != "" {
 		values.Set("client_secret", provider.ClientSecret)
 	}
+	provider.setResource(values)
 	var response object
 	var err error
 	if jsonRefresh(provider.ID) {

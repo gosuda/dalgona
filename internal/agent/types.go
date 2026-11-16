@@ -27,10 +27,11 @@ type SkillSet func(cwd string) ([]prompt.Skill, error)
 type MemorySource func(ctx context.Context, cwd string) (string, error)
 
 type MCPServerStatus struct {
-	Name   string
-	Status string
-	Error  string
-	Tools  []MCPToolStatus
+	Name       string
+	AuthStatus string
+	Status     string
+	Error      string
+	Tools      []MCPToolStatus
 }
 
 type MCPToolStatus struct {

@@ -106,7 +106,7 @@ func (r mcpStatusResponse) write(o *out) {
 func writeMCPServerStatus(o *out, status agent.MCPServerStatus) {
 	o.open()
 	o.str("name", status.Name)
-	o.str("authStatus", "unsupported")
+	o.str("authStatus", cmp.Or(status.AuthStatus, "unsupported"))
 	o.key("tools")
 	o.open()
 	for _, entry := range status.Tools {
@@ -116,7 +116,7 @@ func writeMCPServerStatus(o *out, status agent.MCPServerStatus) {
 	o.empty("resources")
 	o.empty("resourceTemplates")
 	o.str("runtimeStatus", status.Status)
-	if status.Status == "failed" && status.Error != "" {
+	if status.Error != "" {
 		o.str("toolsError", status.Error)
 	}
 	o.close()

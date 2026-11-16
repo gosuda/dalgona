@@ -16,6 +16,7 @@ import (
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/app"
+	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/discovery"
 	"github.com/gosuda/dalgona/internal/mcp"
@@ -56,9 +57,10 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 	}
 	life := context.WithoutCancel(ctx)
 	native := nativeServers(base.Config)
+	creds := mcpAuth{home: base.Config.Home, store: base.Auth}
 	projects := &projects{
 		cfg: base.Config, home: base.Config.Home, userHome: userHome, log: logger, life: life, nativeList: native,
-		native: startServers(life, native, logger), byCwd: make(map[string]*servers),
+		creds: creds, native: startServers(life, native, logger, creds), byCwd: make(map[string]*servers),
 		approver: d.WorkspaceApprover, trusted: map[string]bool{}, refused: map[string]bool{}, pending: map[string]chan struct{}{},
 	}
 	projects.trusted = loadTrusted(base.Config.Home, logger)
@@ -97,6 +99,7 @@ type projects struct {
 	trusted    map[string]bool
 	refused    map[string]bool
 	pending    map[string]chan struct{}
+	creds      mcpAuth
 }
 
 func (p *projects) discover(cwd string) (discovery.Result, error) {
@@ -204,7 +207,7 @@ func (p *projects) resolveOwned(ctx context.Context, cwd string) *servers {
 		close(done)
 		return &servers{}
 	}
-	started := startServers(p.life, allowed, p.log)
+	started := startServers(p.life, allowed, p.log, p.creds)
 	p.mu.Lock()
 	done := p.pending[cwd]
 	delete(p.pending, cwd)
@@ -367,12 +370,35 @@ func nativeServer(name string, spec config.MCPServerSpec) discovery.MCPServer {
 	for _, key := range slices.Sorted(maps.Keys(spec.Env)) {
 		env = append(env, key+"="+spec.Env[key])
 	}
-	return discovery.MCPServer{Name: name, Command: spec.Command, Args: spec.Args, Env: env, URL: spec.URL}
+	return discovery.MCPServer{
+		Name: name, Command: spec.Command, Args: spec.Args, Env: env, URL: spec.URL,
+		BearerTokenEnv: spec.BearerTokenEnv, OAuth: spec.OAuth, OAuthScopes: spec.OAuthScopes,
+		OAuthClientID: spec.OAuthClientID, OAuthCallbackPort: spec.OAuthCallbackPort,
+	}
 }
 
 type serverState struct {
 	Status string
 	Error  string
+}
+
+type mcpAuth struct {
+	home  string
+	store *auth.Store
+}
+
+func (a mcpAuth) options(server discovery.MCPServer) mcp.AuthOptions {
+	return mcp.AuthOptions{
+		Name: server.Name, URL: server.URL, BearerTokenEnv: server.BearerTokenEnv,
+		OAuth: server.OAuth, OAuthClientID: server.OAuthClientID, Home: a.home, Store: a.store,
+	}
+}
+
+func failedState(name string, err error) serverState {
+	if _, ok := errors.AsType[*mcp.LoginRequiredError](err); ok {
+		return serverState{Status: "authenticationRequired", Error: "login required: run dalgona mcp login " + name}
+	}
+	return serverState{Status: "failed", Error: err.Error()}
 }
 
 type servers struct {
@@ -383,25 +409,31 @@ type servers struct {
 	byName  map[string][]tool.Tool
 	order   []string
 	states  map[string]serverState
+	specs   map[string]discovery.MCPServer
+	creds   mcpAuth
 }
 
-func startServers(ctx context.Context, found []discovery.MCPServer, logger *slog.Logger) *servers {
+func startServers(ctx context.Context, found []discovery.MCPServer, logger *slog.Logger, creds mcpAuth) *servers {
 	ctx, cancel := context.WithCancel(ctx)
-	s := &servers{cancel: cancel, byName: make(map[string][]tool.Tool, len(found)), states: make(map[string]serverState, len(found))}
+	s := &servers{
+		cancel: cancel, byName: make(map[string][]tool.Tool, len(found)), states: make(map[string]serverState, len(found)),
+		specs: make(map[string]discovery.MCPServer, len(found)), creds: creds,
+	}
 	s.mu.Lock()
 	for _, server := range found {
 		s.order = append(s.order, server.Name)
+		s.specs[server.Name] = server
 		s.states[server.Name] = serverState{Status: "starting"}
 	}
 	s.mu.Unlock()
 	for _, server := range found {
 		s.started.Go(func() {
-			client, tools, err := connect(ctx, server)
+			client, tools, err := connect(ctx, server, creds)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			if err != nil {
 				logger.Warn("mcp: server skipped", "server", server.Name, "error", err)
-				s.states[server.Name] = serverState{Status: "failed", Error: err.Error()}
+				s.states[server.Name] = failedState(server.Name, err)
 				return
 			}
 			s.clients = append(s.clients, client)
@@ -429,7 +461,7 @@ func (s *servers) statuses() []agent.MCPServerStatus {
 	out := make([]agent.MCPServerStatus, 0, len(s.states))
 	for _, name := range slices.Sorted(maps.Keys(s.states)) {
 		state := s.states[name]
-		status := agent.MCPServerStatus{Name: name, Status: state.Status, Error: state.Error}
+		status := agent.MCPServerStatus{Name: name, AuthStatus: mcp.AuthStatus(s.creds.options(s.specs[name])), Status: state.Status, Error: state.Error}
 		for _, t := range s.byName[name] {
 			status.Tools = append(status.Tools, agent.MCPToolStatus{Name: mcp.LocalToolName(t), Spec: t.Spec()})
 		}
@@ -452,10 +484,18 @@ func (s *servers) close() error {
 	return errors.Join(errs...)
 }
 
-func connect(ctx context.Context, server discovery.MCPServer) (*mcp.Client, []tool.Tool, error) {
+func connect(ctx context.Context, server discovery.MCPServer, creds mcpAuth) (*mcp.Client, []tool.Tool, error) {
 	ctx, cancel := context.WithTimeout(ctx, mcpStartTimeout)
 	defer cancel()
-	client, err := mcp.New(ctx, mcp.Config{Name: server.Name, Command: server.Command, Args: server.Args, Env: server.Env, URL: server.URL})
+	options := creds.options(server)
+	if server.OAuth && mcp.AuthStatus(options) != mcp.AuthOAuth {
+		return nil, nil, &mcp.LoginRequiredError{Name: server.Name}
+	}
+	source, err := mcp.NewTokenSource(options)
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err := mcp.New(ctx, mcp.Config{Name: server.Name, Command: server.Command, Args: server.Args, Env: server.Env, URL: server.URL, Auth: source})
 	if err != nil {
 		return nil, nil, err
 	}

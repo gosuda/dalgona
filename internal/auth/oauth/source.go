@@ -47,6 +47,19 @@ func (s *Source) Access(ctx context.Context) (string, error) {
 	return token.Access, err
 }
 
+func (s *Source) Refresh(ctx context.Context) (Token, error) {
+	select {
+	case s.turn <- struct{}{}:
+	case <-ctx.Done():
+		return Token{}, fmt.Errorf("%s token: %w", s.provider.ID, ctx.Err())
+	}
+	defer func() { <-s.turn }()
+	if err := s.ensureLoaded(ctx); err != nil {
+		return Token{}, err
+	}
+	return s.refresh(ctx)
+}
+
 func (s *Source) ensureLoaded(ctx context.Context) error {
 	if s.loaded {
 		return nil

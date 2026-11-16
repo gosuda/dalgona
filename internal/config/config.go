@@ -228,10 +228,15 @@ type (
 		Price         *model.Price
 	}
 	MCPServerSpec struct {
-		Command string
-		Args    []string
-		Env     map[string]string
-		URL     string
+		Command           string
+		Args              []string
+		Env               map[string]string
+		URL               string
+		BearerTokenEnv    string
+		OAuth             bool
+		OAuthScopes       []string
+		OAuthClientID     string
+		OAuthCallbackPort int
 	}
 	DiscoveryConfig       struct{ Sources []string }
 	ApprovalDeciderConfig struct {

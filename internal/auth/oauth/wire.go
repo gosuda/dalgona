@@ -81,8 +81,11 @@ func get(ctx context.Context, endpoint string) (wireResponse, error) {
 }
 
 func do(request *http.Request) (wireResponse, error) {
-	client := http.Client{Timeout: 30 * time.Second}
-	response, err := client.Do(request)
+	return doWith(&http.Client{Timeout: 30 * time.Second}, request)
+}
+
+func doWith(client *http.Client, request *http.Request) (wireResponse, error) {
+	response, err := cmp.Or(client, http.DefaultClient).Do(request)
 	if err != nil {
 		return wireResponse{}, fmt.Errorf("send oauth request: %w", redactRequestQuery(err))
 	}

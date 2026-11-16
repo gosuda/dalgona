@@ -12,7 +12,7 @@ The server MUST negotiate protocol version `2025-11-25`. The client MUST reject 
 
 Each JSON-RPC request MUST use a new numeric identifier. The client MUST ignore notifications and responses with other identifiers while it waits for the matching response.
 
-The host MUST report `runtimeStatus` for each started server. A server that is still connecting MUST report `starting`. A connected server MUST report `connected`. A server whose connection or tool discovery failed MUST report `failed`, with its cause in `toolsError`. The host MUST NOT list a server that it has not started for the workspace.
+The host MUST report `runtimeStatus` for each started server. A server that is still connecting MUST report `starting`. A connected server MUST report `connected`. A server whose connection or tool discovery failed MUST report `failed`, with its cause in `toolsError`. A server that needs login MUST report `authenticationRequired`. The host MUST NOT list a server that it has not started for the workspace.
 
 ## stdio transport
 
@@ -43,6 +43,34 @@ An HTTP 404 response for an active session MUST start a replacement session and 
 Closing the HTTP client MUST send an HTTP DELETE with `Mcp-Session-Id` when a session exists. The client MUST wait at most two seconds for that DELETE and MUST ignore its failure.
 
 The error for a non-2xx response MUST contain at most the first 8192 bytes of the response body.
+
+## HTTP authentication
+
+Authentication applies to the Streamable HTTP transport only. A server MAY set `bearer_token_env` or `oauth`, but not both. The keys are in [Configuration](config.md).
+
+Discovery of Claude and Codex files MUST NOT read these keys. Only the native `[mcp_servers.<name>]` tables set them.
+
+A server with an authentication source MUST send `Authorization: Bearer <token>` on every request. The session DELETE MUST carry the same header.
+
+A redirect to another origin MUST drop the `Authorization` header. An origin is a scheme, a host, and a port.
+
+A bearer source MUST read its environment variable on every request. An empty variable MUST fail the request with `bearer_token_env <NAME> is not set`. That failure MUST send no HTTP request.
+
+A bearer source has no refresh grant. An HTTP 401 response MUST fail with `MCP server <name> rejected the token in bearer_token_env <NAME>`. The client MUST NOT retry unchanged credentials.
+
+An OAuth source MUST refresh its token once after an HTTP 401 response. The client MUST send the request again with the refreshed token. A second 401 response MUST return `MCP server <name> needs login: run dalgona mcp login <name>`. A failed refresh MUST return the same error.
+
+Any non-2xx response other than 401 MUST NOT refresh a token. It MUST NOT select another credential or another provider.
+
+An OAuth source MUST store its token in `auth.json` under the key `mcp-<name>`. The `account` value MUST be the canonical resource URL of the server. A token with another `account` value is no credential. The error MUST read `mcp-<name> token was issued for <account>, not <resource>; run dalgona mcp login <name>`.
+
+The registration MUST live in `<home>/mcp-oauth.json` as one object for each server name. Each entry MUST hold `resource`, `issuer`, `authorization_endpoint`, `token_endpoint`, `client_id`, and `scopes`. The file MUST be a regular file with mode 0600. Only `dalgona mcp login` writes it.
+
+The OAuth source MUST read the registration again on every token load and every refresh. It MUST refuse an entry for another resource before it sends a credential. It MUST refuse an entry whose `client_id` differs from a configured `oauth_client_id`. It MUST refuse an entry whose endpoints are neither https nor loopback.
+
+The host MUST report `authStatus` for each started server. The value is `unsupported` for a stdio server and for an HTTP server without authentication. The value is `bearerToken` when the bearer variable holds a value. The value is `oAuth` when a bound token and a valid registration exist. Otherwise the value is `notLoggedIn`.
+
+A server with `oauth` and without a bound token MUST start no network call. It MUST report `runtimeStatus` `authenticationRequired` and `toolsError` `login required: run dalgona mcp login <name>`. A server that returns 401 after a refresh MUST report the same two values. Such a server has no tools.
 
 ## Tool discovery
 

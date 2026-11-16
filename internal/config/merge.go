@@ -192,10 +192,15 @@ type (
 		BoxID    *string `toml:"box_id"`
 	}
 	mcpDoc struct {
-		Command string            `toml:"command"`
-		Args    []string          `toml:"args"`
-		Env     map[string]string `toml:"env"`
-		URL     string            `toml:"url"`
+		Command           string            `toml:"command"`
+		Args              []string          `toml:"args"`
+		Env               map[string]string `toml:"env"`
+		URL               string            `toml:"url"`
+		BearerTokenEnv    string            `toml:"bearer_token_env"`
+		OAuth             bool              `toml:"oauth"`
+		OAuthScopes       []string          `toml:"oauth_scopes"`
+		OAuthClientID     string            `toml:"oauth_client_id"`
+		OAuthCallbackPort int               `toml:"oauth_callback_port"`
 	}
 	discoveryDoc struct {
 		Sources []string `toml:"sources"`
@@ -251,6 +256,9 @@ func (c *Config) merge(current layer) error {
 		c.MaxSubagentStarts = *value
 	}
 	c.mergeMaps(current.doc)
+	if err := c.mergeMCPServers(current); err != nil {
+		return err
+	}
 	c.mergeTables(current.doc)
 	c.mergeAdvisor(current.doc)
 	maps.Copy(c.lines, lineMap(current.path, current.raw))
@@ -328,9 +336,6 @@ func (c *Config) mergeMaps(doc *fileDoc) {
 	}
 	c.mergeModels(doc)
 	c.mergeBoxes(doc)
-	for name, value := range doc.MCPServers {
-		c.MCPServers[name] = MCPServerSpec(value)
-	}
 	for word, value := range doc.Keywords {
 		keyword := KeywordSpec{Notice: value.Notice, Text: value.Text, Effort: value.Effort, Requires: value.Requires}
 		if len(value.Hue) == 2 {

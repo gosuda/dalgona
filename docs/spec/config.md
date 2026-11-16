@@ -9,12 +9,28 @@ The loader MUST reject unknown keys. The error MUST report the file and its 1-ba
 If a layer cannot be read or fails validation, `Load` MUST return an error.
 
 ## Shell environment
+## MCP HTTP authentication
 
 `shell_env` defaults to `snapshot` in both products.
 `inherit` disables login-shell capture and uses the current daemon environment.
 Other values MUST fail with `config: shell_env must be one of snapshot, inherit`.
+Each `[mcp_servers.<name>]` table MAY set these dalgona-only keys.
 
+| Key | Default | Meaning |
+|---|---|---|
+| `bearer_token_env` | `""` | Environment variable that holds a bearer token |
+| `oauth` | `false` | Enable resource-bound OAuth |
+| `oauth_scopes` | `[]` | Requested scopes instead of resource metadata scopes |
+| `oauth_client_id` | `""` | Registered client identifier instead of dynamic registration |
+| `oauth_callback_port` | `54871` | Loopback callback port |
 
+Authentication keys require an HTTP URL.
+`bearer_token_env` and `oauth` exclude each other.
+The environment variable name MUST use letters, digits, and underscores, without a leading digit.
+OAuth server names MUST contain 1 to 32 lowercase letters, digits, underscores, or hyphens.
+OAuth URLs MUST use HTTPS, except on loopback hosts.
+The callback port MUST be between 1024 and 65535.
+Validation errors MUST include the file, line, server table, and invalid key.
 ## Core defaults
 
 The default approval mode is `auto`. The default sandbox is `workspace-write`. The default tool mode is `eval-first` for both products. `tool_mode = "normal"` restores the full tool list. `tool_mode = "eval-only"` limits model-visible tools to `ask`, `yield`, and `eval`. The default runner is `local`. The default reasoning level is `default`.
