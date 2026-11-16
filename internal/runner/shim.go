@@ -100,6 +100,7 @@ func startCommand(dir string, argv []string, out *os.File) (*exec.Cmd, func(), e
 	if sandboxErr := configureSandbox(cmd, dir, currentSandbox()); sandboxErr != nil {
 		return nil, nil, fmt.Errorf("sandbox: %w", sandboxErr)
 	}
+	defer releaseCommandToken(cmd)
 	writer := &limitedWriter{w: out, limit: outputLimit}
 	cmd.Stdout = writer
 	cmd.Stderr = writer

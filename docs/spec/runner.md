@@ -65,6 +65,7 @@ The shim MUST write `pid` before it starts the command. `pid` MUST store the pro
 
 The shim MUST start the command in a new process group on Unix. It MUST record the group id in `pgid`. A group whose members are all zombies MUST count as stopped. On Windows it MUST assign the command to a named job object. On Windows it MUST start the command suspended. It MUST assign the suspended command to the job object. It MUST resume the command after the assignment. The shim MUST start the command on Windows with `CREATE_NO_WINDOW`. On Windows the shim MUST run a `cmd /C <command>` argv verbatim as `cmd /S /C "<command>"`. The `/S` switch MUST make `cmd` strip exactly the outer quote pair. The parent MUST reap the shim without waiting for the command in the caller.
 
+On Windows the shim MUST start a `workspace-write` command with the restricted token that [sandbox.md](sandbox.md) describes. The shim MUST create the token and apply the root grants before it starts the command. The shim MUST close the token handle when it assigns the started command to the job object. A failed process start leaves the handle open until the shim exits. The shim MUST NOT apply the token to a command in mode `off`.
 
 On every exit path the shim MUST stop the remaining command process group members. It MUST send `SIGTERM`, wait up to two seconds, and then send `SIGKILL` to the group. On Windows the shim MUST set the kill-on-close limit on the job object. Closing the job handle MUST let the system stop the remaining children in the job.
 
