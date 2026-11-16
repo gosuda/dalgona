@@ -143,6 +143,17 @@ The server MUST accept at most 10485760 bytes of image data in one request.
 The server MUST accept only PNG, JPEG and GIF image data.
 The server MUST detect the image type from the first bytes of the data.
 
+## MCP authentication status
+
+`authStatus` is `unsupported` for stdio servers and HTTP servers without authentication.
+It is `bearerToken` when the configured environment variable has a value.
+It is `oAuth` when a resource-bound OAuth credential exists.
+It is `notLoggedIn` when the environment variable is empty or the OAuth credential is absent or invalid.
+The server MUST NOT emit `unknown`.
+OAuth without a credential MUST make no connection request.
+It reports `runtimeStatus` as `authenticationRequired` with empty tools.
+Its `toolsError` is `login required: run dalgona mcp login <name>`.
+
 ## File methods
 
 The `fs/*` methods MUST take absolute paths. A relative path MUST give `-32602` `path must be absolute`. A path that does not exist MUST give `-32602` `no such file: <path>`.
