@@ -196,6 +196,22 @@ select {
 	white-space: pre-wrap;
 }
 
+.markdown .diagram-rendered {
+	max-width: 100%;
+	overflow-x: auto;
+}
+
+.markdown .diagram-rendered svg {
+	max-width: 100%;
+	height: auto;
+	display: block;
+	margin-inline: auto;
+}
+
+.markdown pre.diagram-error {
+	outline: 1px dashed var(--warning-text, currentColor);
+}
+
 .hljs-keyword {
 	color: var(--accent-text);
 }

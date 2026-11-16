@@ -110,3 +110,22 @@ describe("sanitiser seam", () => {
 		expect(element?.getAttribute("class")).toBe(kept);
 	});
 });
+
+describe("diagram fences", () => {
+	test.each(["mermaid", "d2", "nomnoml", "svg"])(
+		"emits a sanitized placeholder for %s",
+		(lang) => {
+			const root = parse("```" + lang + "\na --> b\n```");
+			const block = root.querySelector("pre.diagram");
+			expect(block).not.toBeNull();
+			expect(block?.className).toContain(`language-${lang}`);
+			expect(block?.textContent?.includes("a --> b")).toBe(true);
+		},
+	);
+
+	test("keeps other fences as highlighted code", () => {
+		const root = parse("```go\nx := 1\n```");
+		expect(root.querySelector("pre.diagram")).toBeNull();
+		expect(root.querySelector("code.language-go")).not.toBeNull();
+	});
+});

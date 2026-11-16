@@ -16,6 +16,7 @@ import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
 import { Marked, type RendererObject } from "marked";
+import { isDiagramLang } from "#lib/diagrams.ts";
 
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("css", css);
@@ -39,7 +40,8 @@ hljs.registerAliases(["ts"], { languageName: "typescript" });
 hljs.registerAliases(["js"], { languageName: "javascript" });
 
 const SAFE_LINK = /^(?:https?:|mailto:)/i;
-const SAFE_CLASS = /^(hljs(-[a-z]+)*|language-[a-z0-9+#-]+|md-image)$/;
+const SAFE_CLASS =
+	/^(hljs(-[a-z]+)*|language-[a-z0-9+#-]+|md-image|diagram(-rendered|-error)?)$/;
 
 function escapeHtml(text: string): string {
 	return text
@@ -57,6 +59,9 @@ const renderer: RendererObject = {
 	},
 	code({ text, lang }) {
 		const name = (lang ?? "").trim().split(/\s+/, 1)[0]?.toLowerCase() ?? "";
+		if (isDiagramLang(name)) {
+			return `<pre class="diagram language-${escapeHtml(name)}"><code>${escapeHtml(text)}</code></pre>\n`;
+		}
 		const highlighted = name && hljs.getLanguage(name);
 		const body = highlighted
 			? hljs.highlight(text, { language: name, ignoreIllegals: true }).value
