@@ -191,6 +191,7 @@ func assertConfiguredJudgeDecision(t *testing.T, recorder *judgeRecorder, got ag
 func unavailableJudgeServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "1")
 		http.Error(w, "judge primary unavailable", http.StatusServiceUnavailable)
 	}))
 	t.Cleanup(server.Close)
