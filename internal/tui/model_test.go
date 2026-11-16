@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gosuda/dalgona/internal/rpc"
 )
@@ -354,7 +355,7 @@ func TestModelTreeSelectionSetsLeaf(t *testing.T) {
 	m := newModel(caller, Options{}, nil)
 	m.thread.id = "t1"
 	m, _ = drive(t, m, resultMsg{op: "tree", value: &rpc.ThreadTreeResponse{Turns: []rpc.TreeTurn{{TurnID: "turn-8", Preview: "old"}, {TurnID: "turn-9", Preview: "work", Active: true}}}})
-	assertContains(t, m.View().Content, "choose the active branch", "old", "work (active)")
+	assertContains(t, ansi.Strip(m.View().Content), "choose the active branch", "old", "work (active)")
 	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
 	m = runCommand(t, m, command, "tree selection produced no command")
 	last := caller.calls[len(caller.calls)-1]

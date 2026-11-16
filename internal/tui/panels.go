@@ -20,10 +20,20 @@ const (
 	panelHelp
 )
 
+const panelBodyCells = 56
+
+const panelRailCells = 2
+
+const panelRowCells = panelRailCells + panelBodyCells
+
 var panelHeights = [...]int{8, 12, 6, 9, 13, 17, 12, 14}
 
 func panelRows(kind panelKind, windowHeight int) int {
 	return max(0, min(panelHeights[kind], windowHeight-4))
+}
+
+func panelRowWidth(s *screenState) int {
+	return min(terminalWidth(s.width), panelRowCells)
 }
 
 type panelView struct {
@@ -111,30 +121,36 @@ func framePanel(s *screenState, p panelView, rows int) []string {
 	if rows <= 0 {
 		return nil
 	}
-	width := terminalWidth(s.width)
+	rowTheme := s.dockTheme()
+	width := panelRowWidth(s)
 	actions := p.actions
 	if len(actions) > rows-1 {
 		actions = actions[len(actions)-(rows-1):]
 	}
 	bodyRows := rows - 1 - len(actions)
-	lines := []string{s.fit("┌ "+p.title, width)}
+	lines := []string{rowTheme.paint(roleFaint, "┌ ") + rowTheme.paintBold(roleText, s.fit(p.title, width-panelRailCells))}
 	start, shown := bodyWindow(p, bodyRows)
+	marked := p.cursor >= 0
 	for i, line := range shown {
-		prefix := "│ "
-		if start+i == p.cursor {
-			prefix = "┃ "
+		global := start + i
+		prefix := rowTheme.paint(roleFaint, "│ ")
+		marker := "  "
+		if marked && global == p.cursor {
+			prefix = rowTheme.paintBold(roleText, "┃ ")
+			marker = rowTheme.paintBold(roleAccentText, "● ")
 		}
-		lines = append(lines, s.fit(prefix+line, width))
+		lines = append(lines, s.fit(prefix+marker+line, width))
 	}
 	for len(lines) < rows-len(actions) {
-		lines = append(lines, s.fit("│", width))
+		lines = append(lines, s.fit(rowTheme.paint(roleFaint, "│"), width))
 	}
+	actionWidth := terminalWidth(s.width)
 	for i, action := range actions {
 		prefix := "   "
 		if i == 0 {
 			prefix = "└─ "
 		}
-		lines = append(lines, s.fit(prefix+action, width))
+		lines = append(lines, rowTheme.paint(roleFaint, prefix)+rowTheme.paint(roleDim, s.fit(action, actionWidth-s.cells(prefix))))
 	}
 	return lines
 }

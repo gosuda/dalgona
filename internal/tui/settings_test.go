@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -307,4 +308,82 @@ func TestSettingsPanelNamesReviewRecipient(t *testing.T) {
 	if got := len(m.dockLines()); got != 20 {
 		t.Fatalf("dock without review detail has %d rows, want 20", got)
 	}
+}
+
+func TestSettingsRowPaintsFocusAndChange(t *testing.T) {
+	t.Parallel()
+	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}), "auto")
+	row := m.settings.rows[0]
+	if row.key != "approval" {
+		t.Fatalf("first settings row = %q, want approval", row.key)
+	}
+	rowTheme := m.screen.dockTheme()
+	value := m.settingValue(row)
+	plainHead := fmt.Sprintf("%-14s", row.label)
+
+	got := m.settingLine(row, true, false)
+	want := rowTheme.paintBold(roleText, plainHead) + rowTheme.paintBold(roleText, value)
+	if got != want {
+		t.Fatalf("focused unchanged row = %q, want %q", got, want)
+	}
+
+	got = m.settingLine(row, false, true)
+	want = plainHead + rowTheme.paint(roleAccentText, value)
+	if got != want {
+		t.Fatalf("changed row = %q, want %q", got, want)
+	}
+
+	got = m.settingLine(row, false, false)
+	if got != plainHead+value {
+		t.Fatalf("plain row = %q, want %q", got, plainHead+value)
+	}
+}
+
+func TestSettingsStatusValueSummarizesHidden(t *testing.T) {
+	t.Parallel()
+	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}), "auto")
+	var row settingRow
+	for _, r := range m.settings.rows {
+		if r.key == "statusHide" {
+			row = r
+		}
+	}
+	if row.key == "" {
+		t.Fatal("settings rows have no statusHide row")
+	}
+	if got := m.settingValue(row); got != "all shown" {
+		t.Fatalf("statusHide value with nothing hidden = %q, want all shown", got)
+	}
+	m.settings.preview["statusHide"] = "folder,mark"
+	if got := m.settingValue(row); got != "2 hidden" {
+		t.Fatalf("statusHide value with two hidden = %q, want 2 hidden", got)
+	}
+}
+
+func TestSettingsPanelMarksCursorRow(t *testing.T) {
+	t.Parallel()
+	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}), "auto")
+	lines := strings.Split(strings.Join(m.dockLines(), "\n"), "\n")
+	approval := settingsRowLine(t, lines, "Approval")
+	verbosity := settingsRowLine(t, lines, "Verbosity")
+	if !strings.HasPrefix(stripANSI(approval), "┃ ● Approval") {
+		t.Fatalf("focused Approval row = %q, want the rail and marker", approval)
+	}
+	if !strings.Contains(approval, "\x1b[1;") {
+		t.Fatalf("focused Approval row is not bold: %q", approval)
+	}
+	if strings.HasPrefix(stripANSI(verbosity), "┃") || strings.Contains(verbosity, "\x1b[1;") {
+		t.Fatalf("unfocused Verbosity row carries focus marks: %q", verbosity)
+	}
+}
+
+func settingsRowLine(t *testing.T, lines []string, label string) string {
+	t.Helper()
+	for _, line := range lines {
+		if strings.Contains(stripANSI(line), label) {
+			return line
+		}
+	}
+	t.Fatalf("settings row %s missing from dock:\n%s", label, strings.Join(lines, "\n"))
+	return ""
 }

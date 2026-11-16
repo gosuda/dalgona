@@ -68,8 +68,8 @@ func (m *model) listPanelView() panelView {
 	list := m.list
 	indexes := list.visible(m.listQuery())
 	body := make([]string, 0, len(indexes))
-	for _, i := range indexes {
-		body = append(body, m.listLine(list.items[i]))
+	for pos, i := range indexes {
+		body = append(body, m.listLine(list.items[i], pos == list.cursor))
 	}
 	cursor := list.cursor
 	if len(list.items) == 0 && list.empty != "" {
@@ -90,36 +90,46 @@ func (m *model) listPanelView() panelView {
 	return panelView{kind: list.kind, layout: panelList, title: list.title, body: body, actions: actions, cursor: cursor, scroll: list.scroll}
 }
 
-func (m *model) listLine(item listItem) string {
+func (m *model) listLine(item listItem, selected bool) string {
 	if m.list != nil && m.list.kind == "resume" {
-		return m.resumeLine(item)
+		return m.resumeLine(item, selected)
 	}
-	line := item.label
+	rowTheme := m.screen.dockTheme()
+	label := rowTheme.paint(roleText, item.label)
+	if selected {
+		label = rowTheme.paintBold(roleText, item.label)
+	}
+	line := label
 	if item.active {
-		line += " (active)"
+		line += rowTheme.paint(roleDim, " (active)")
 	}
 	if item.detail != "" {
-		line += " — " + item.detail
+		line += rowTheme.paint(roleDim, " — "+item.detail)
 	}
 	if pick, ok := m.list.efforts[item.id]; ok {
-		line += "  effort " + pick.current
+		line += rowTheme.paint(roleDim, "  effort "+pick.current)
 	}
 	return line
 }
 
-func (m *model) resumeLine(item listItem) string {
+func (m *model) resumeLine(item listItem, selected bool) string {
 	title := item.label
 	if item.active {
 		title += " (active)"
 	}
-	line := m.screen.pad(title, m.resumeTitleCells())
+	rowTheme := m.screen.dockTheme()
+	head := rowTheme.paint(roleText, m.screen.pad(title, m.resumeTitleCells()))
+	if selected {
+		head = rowTheme.paintBold(roleText, m.screen.pad(title, m.resumeTitleCells()))
+	}
+	line := head
 	if item.date != "" {
-		line += "  " + m.screen.padLeft(m.screen.theme.paint(roleDim, item.date), resumeDateCells)
+		line += "  " + rowTheme.paint(roleDim, m.screen.padLeft(item.date, resumeDateCells))
 	} else {
 		line += "  " + strings.Repeat(" ", resumeDateCells)
 	}
 	if item.detail != "" {
-		line += "  " + item.detail
+		line += "  " + rowTheme.paint(roleDim, item.detail)
 	}
 	return line
 }

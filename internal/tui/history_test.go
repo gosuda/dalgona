@@ -200,7 +200,7 @@ func historyPanel(t *testing.T, prompts ...string) model {
 }
 
 func historyBody(m model) []string {
-	return m.listPanelView().body
+	return plainBody(m.listPanelView().body)
 }
 
 func historyTexts(m model) []string {
@@ -241,9 +241,9 @@ func TestPromptHistorySearch(t *testing.T) {
 	if got, want := historyBody(m), []string{"fix flaky test", "fix the decoder"}; !slices.Equal(got, want) {
 		t.Fatalf("rows after filter fix = %q, want %q", got, want)
 	}
-	assertContains(t, dockText(m), "┃ fix flaky test")
+	assertContains(t, dockText(m), "┃ ● fix flaky test")
 	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	assertContains(t, dockText(m), "┃ fix the decoder")
+	assertContains(t, dockText(m), "┃ ● fix the decoder")
 	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
 	if got := m.input.composer.Value(); got != "fix the decoder" {
 		t.Fatalf("composer = %q after Enter, want the highlighted prompt", got)
@@ -486,7 +486,7 @@ func TestCtrlROpensHistoryOnlyInPromptMode(t *testing.T) {
 func TestHelpListsHistorySearchUnderCompose(t *testing.T) {
 	t.Parallel()
 	m := helpModel(t)
-	body := m.helpBody()
+	body := plainBody(m.helpBody())
 	compose, turn := slices.Index(body, "Compose"), slices.Index(body, "Turn")
 	at := slices.IndexFunc(body, func(line string) bool { return strings.HasPrefix(line, "  ctrl+r") })
 	if compose < 0 || turn < 0 || at < compose || at > turn {

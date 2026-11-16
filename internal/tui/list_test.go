@@ -226,9 +226,9 @@ func TestResumeRowDates(t *testing.T) {
 	m, _ = drive(t, m, resultMsg{op: "threads", value: &threads})
 	view := m.View().Content
 	assertContains(t, view, "05-03", "2025-11", "01-02")
-	line1 := m.listLine(m.list.items[0])
-	line2 := m.listLine(m.list.items[1])
-	line3 := m.listLine(m.list.items[2])
+	line1 := m.listLine(m.list.items[0], false)
+	line2 := m.listLine(m.list.items[1], false)
+	line3 := m.listLine(m.list.items[2], false)
 	if strings.Contains(line3, "-") {
 		t.Fatalf("row without timestamps shows a date: %q", line3)
 	}

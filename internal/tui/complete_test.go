@@ -66,9 +66,9 @@ func TestPaletteHighlightMovesWithArrows(t *testing.T) {
 	t.Parallel()
 	m := typeKeys(t, paletteModel(t), "/")
 	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	assertContains(t, dockText(m), "┃ /resume")
+	assertContains(t, dockText(m), "┃ ● /resume")
 	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
-	assertContains(t, dockText(m), "┃ /model")
+	assertContains(t, dockText(m), "┃ ● /model")
 }
 
 func TestPaletteEscKeepsDraftAndTypingReopens(t *testing.T) {

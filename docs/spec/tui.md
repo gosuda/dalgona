@@ -21,6 +21,7 @@ Startup runs these requests in order: `initialize` with client name `dalgona`, t
 After `initialize` succeeds, the client MUST print one welcome row with the product, version, model, and working directory. A home directory MUST show as `~`. The welcome row MUST use only bold and dim text. When `initialize` fails, the client MUST print the welcome row with the error on one line. Quit MUST print one exit row. The exit row MUST name the thread and the `--resume` command, or say that no thread was started. The client MUST print the exit row before it returns `tea.Quit`, unless the window height is 0. While the client leaves, the view MUST be one blank row.
 
 The welcome output MUST start with the product mark when the terminal can show images. Detection MUST read only the terminal environment. `TMUX` or `STY` set selects no mark. An empty or `dumb` `TERM` selects no mark. Kitty or ghostty selects the kitty graphics protocol. An iTerm, WezTerm, or VS Code program selects inline images. A set `ITERM_SESSION_ID` also selects inline images. A `TERM` that contains `sixel` selects sixel. Every other environment MUST show no mark and MUST emit zero control bytes for it. The mark MUST come from the rasterized brand assets embedded in the binary, at 8 or 16 rows. An unknown product MUST show no mark.
+
 ## Screen
 
 The TUI MUST run inline, except for the review. The review is the only view that MUST use the alternate screen. A completed item MUST print once to scrollback with `tea.Println`. Completed assistant text MUST render as Markdown through Glamour.
@@ -185,11 +186,10 @@ Enter MUST write `model` with `config/value/write`, and MUST write `model_reason
 A failed write MUST keep the model picker open and MUST show `Could not save` in its hint row.
 
 The dalgona settings panel MUST list seven rows in this order: Approval, Verbosity, Theme, Icons, Status, Edit review, and Notifications.
-The welcome output MUST start with the product mark when the terminal can show images. Detection MUST read only the terminal environment. `TMUX` or `STY` set selects no mark. An empty or `dumb` `TERM` selects no mark. Kitty or ghostty selects the kitty graphics protocol. An iTerm, WezTerm, or VS Code program selects inline images. A set `ITERM_SESSION_ID` also selects inline images. A `TERM` that contains `sixel` selects sixel. Every other environment MUST show no mark and MUST emit zero control bytes for it. The mark MUST come from the rasterized brand assets embedded in the binary, at 8 or 16 rows. An unknown product MUST show no mark.
-
 The dal settings panel MUST omit Edit review from display, navigation, and saves. It MUST keep the other rows in that order.
 While the Edit review row has focus, the detail area MUST show `Sends each edit's masked diff to the decider model.`. It MUST show no detail on any other row.
 Both products MUST keep the settings panel at 17 rows.
+Each settings row MUST show its label in the first column and its value after it. The focused row MUST show its label and its value in bold. A value that differs from the saved value MUST use the accent colour. The Status row MUST show `all shown` or `<n> hidden` for its value. Detail lines MUST use dim text.
 Up and Down MUST move between rows. Left and Right MUST change the value of a row. On Status, they MUST move between the status items.
 The detail area of Status MUST list the status items in columns of seven rows. A new column MUST start when a column holds seven items.
 Space MUST toggle a status item on Status, and MUST change the value of any other row.

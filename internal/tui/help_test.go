@@ -16,6 +16,14 @@ func helpModel(t *testing.T) model {
 	return m
 }
 
+func plainBody(body []string) []string {
+	out := make([]string, len(body))
+	for i, line := range body {
+		out[i] = stripANSI(line)
+	}
+	return out
+}
+
 func TestHelpOverlayListsKeysAndCloses(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{})
@@ -42,7 +50,7 @@ func TestHelpStatusLegendPerShownItem(t *testing.T) {
 	if strings.Contains(view, "folder") {
 		t.Fatalf("hidden folder item has a legend line:\n%s", view)
 	}
-	body := m.helpBody()
+	body := plainBody(m.helpBody())
 	start := slices.Index(body, "Status")
 	if start < 0 {
 		t.Fatalf("help body has no Status header:\n%s", strings.Join(body, "\n"))
@@ -55,12 +63,12 @@ func TestHelpStatusLegendPerShownItem(t *testing.T) {
 func TestHelpStatusLegendNamesCost(t *testing.T) {
 	t.Parallel()
 	priced := costModel(12345000, true)
-	body := priced.helpBody()
+	body := plainBody(priced.helpBody())
 	if !slices.Contains(body, "cost $12.35+") {
 		t.Fatalf("help body has no legend line for the partial cost:\n%s", strings.Join(body, "\n"))
 	}
 	unpriced := bandModel("/work/ws")
-	for _, line := range unpriced.helpBody() {
+	for _, line := range plainBody(unpriced.helpBody()) {
 		if strings.HasPrefix(line, "cost ") {
 			t.Fatalf("help body names a cost that is unknown: %q", line)
 		}
@@ -104,7 +112,7 @@ func TestHelpDockKeepsInputLineWithPaste(t *testing.T) {
 func TestHelpKeyColumnHasSpace(t *testing.T) {
 	t.Parallel()
 	m := helpModel(t)
-	for _, line := range m.helpBody() {
+	for _, line := range plainBody(m.helpBody()) {
 		if strings.HasPrefix(line, "  up, ctrl+p, down, ctrl+n") {
 			if !strings.HasPrefix(line, "  up, ctrl+p, down, ctrl+n move the list cursor") {
 				t.Fatalf("key and action run together: %q", line)

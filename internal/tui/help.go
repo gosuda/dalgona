@@ -103,6 +103,7 @@ func (m *model) helpView() panelView {
 }
 
 func (m *model) helpBody() []string {
+	theme := m.screen.dockTheme()
 	body := make([]string, 0, len(keyTable)+helpPage)
 	group := ""
 	for _, row := range keyTable {
@@ -110,12 +111,12 @@ func (m *model) helpBody() []string {
 			if group != "" {
 				body = append(body, "")
 			}
-			body = append(body, row.group)
+			body = append(body, theme.paint(roleDim, row.group))
 			group = row.group
 		}
-		body = append(body, fmt.Sprintf("  %-24s %s", row.keys, row.action))
+		body = append(body, theme.paint(roleDim, fmt.Sprintf("  %-24s", row.keys))+" "+theme.paint(roleText, row.action))
 	}
-	body = append(body, "", "Status")
+	body = append(body, "", theme.paint(roleDim, "Status"))
 	return append(body, m.statusLegend()...)
 }
 
@@ -123,7 +124,7 @@ func (m *model) statusLegend() []string {
 	left, right := m.bandSegments()
 	lines := make([]string, 0, len(left)+len(right))
 	for _, seg := range slices.Concat(left, right) {
-		lines = append(lines, m.legendLine(seg))
+		lines = append(lines, m.screen.dockTheme().paint(roleDim, m.legendLine(seg)))
 	}
 	return lines
 }

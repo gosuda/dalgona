@@ -180,7 +180,7 @@ func TestQuestionActionsStayVisibleAcrossWidths(t *testing.T) {
 		keys, row           []string
 	}{
 		{name: "40 columns shows every hint", data: questionParamsJSON, title: "Question 1 of 2 · Database", option: "1. SQLite", width: 40, height: 12, keys: navigation},
-		{name: "100 columns keeps one footer row", data: questionParamsJSON, title: "Question 1 of 2 · Database", option: "1. SQLite", width: 100, height: 24, keys: navigation, row: navigation},
+		{name: "100 columns packs hints at the card width", data: questionParamsJSON, title: "Question 1 of 2 · Database", option: "1. SQLite", width: 100, height: 24, keys: navigation, row: []string{"s submit · Esc dismiss"}},
 		{name: "40 columns in a short window keeps the choosing keys", data: questionParamsJSON, title: "Question 1 of 2 · Database", option: "1. SQLite", width: 40, height: 8, keys: []string{"↑/↓ move", "Enter choose"}},
 		{name: "40 columns in a short window keeps Space for multi-select", data: featuresQuestionJSON, title: "Question 1 of 1 · Features", option: "1. Search", width: 40, height: 8, keys: []string{"↑/↓ move", "Space toggle"}},
 	}

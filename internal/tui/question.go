@@ -483,7 +483,7 @@ func renderHints(s *screenState, texts [questionSegments]string, shown, starts, 
 			continue
 		}
 		if starts&(1<<i) != 0 {
-			out = append(out, s.fit(line.String(), width))
+			out = append(out, s.dockTheme().paint(roleDim, s.fit(line.String(), width)))
 			line.Reset()
 		}
 		switch {
@@ -496,7 +496,7 @@ func renderHints(s *screenState, texts [questionSegments]string, shown, starts, 
 		}
 		line.WriteString(text)
 	}
-	return append(out, s.fit(line.String(), width))
+	return append(out, s.dockTheme().paint(roleDim, s.fit(line.String(), width)))
 }
 
 func rail(lines []string, prefix string, width int, s *screenState) []string {

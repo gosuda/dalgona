@@ -288,22 +288,46 @@ func (m *model) settingsFailed(msg resultMsg) bool {
 func (m *model) settingsView() panelView {
 	p := m.settings
 	body := make([]string, 0, len(p.rows)+1+detailRows)
-	for _, row := range p.rows {
-		body = append(body, settingLine(row, p.preview[row.key]))
+	for i, row := range p.rows {
+		body = append(body, m.settingLine(row, i == p.focus, p.preview[row.key] != p.saved[row.key]))
 	}
 	body = append(body, "")
-	body = append(body, m.settingsDetail()...)
+	for _, line := range m.settingsDetail() {
+		body = append(body, m.screen.dockTheme().paint(roleDim, line))
+	}
 	return panelView{kind: "settings", layout: panelSettings, title: "Settings", body: body, actions: []string{settingsHint}, cursor: p.focus}
 }
 
-func settingLine(row settingRow, value string) string {
-	if row.key == "statusHide" {
-		if value == "" {
-			value = "none"
-		}
-		return fmt.Sprintf("%-14s%s hidden", row.label, strings.ReplaceAll(value, ",", ", "))
+func (m *model) settingValue(row settingRow) string {
+	value := m.settings.preview[row.key]
+	if row.key != "statusHide" {
+		return value
 	}
-	return fmt.Sprintf("%-14s%s", row.label, value)
+	if len(hiddenIDs(value)) == 0 {
+		return "all shown"
+	}
+	return fmt.Sprintf("%d hidden", len(hiddenIDs(value)))
+}
+
+func (m *model) settingLine(row settingRow, focused, changed bool) string {
+	value := m.settingValue(row)
+	rowTheme := m.screen.dockTheme()
+	label := row.label
+	head := fmt.Sprintf("%-14s", label)
+	if focused {
+		head = rowTheme.paintBold(roleText, head)
+	}
+	colour := roleText
+	if changed {
+		colour = roleAccentText
+	}
+	if focused {
+		return head + rowTheme.paintBold(colour, value)
+	}
+	if changed {
+		return head + rowTheme.paint(colour, value)
+	}
+	return head + value
 }
 
 func (m *model) settingsDetail() []string {

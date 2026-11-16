@@ -54,11 +54,11 @@ func TestRenderApprovalStripsEscapes(t *testing.T) {
 	m.screen.theme = newTheme(themeNight, false)
 	m.approvals = []approval{{threadID: "t1", command: "\x1b[8msecret\x1b[0m echo hi", reason: "why\x1b]0;t\x07not"}}
 	view := strings.Join(framePanel(&m.screen, m.approvalPanel(), panelRows(panelApproval, 24)), "\n")
-	plain := regexp.MustCompile("\x1b\\[(0|2|1;7)m").ReplaceAllString(view, "")
+	plain := regexp.MustCompile("\x1b\\[[0-9;]*m").ReplaceAllString(view, "")
 	if strings.ContainsAny(plain, "\x1b\x07") {
 		t.Fatalf("approval view kept escapes: %q", view)
 	}
-	for _, want := range []string{"│ $ secret echo hi", "│ reason: whynot"} {
+	for _, want := range []string{"│   $ secret echo hi", "│   reason: whynot"} {
 		found := false
 		for line := range strings.SplitSeq(plain, "\n") {
 			if strings.TrimRight(line, " ") == want {
