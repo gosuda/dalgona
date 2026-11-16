@@ -87,8 +87,62 @@ func prepareRestrictedToken(token windows.Token, logon []byte) error {
 	if err := enableTokenPrivilege(token, "SeChangeNotifyPrivilege"); err != nil {
 		return err
 	}
-	return broadenTokenDefaultDacl(token, logon)
+	if err := broadenTokenDefaultDacl(token, logon); err != nil {
+		return err
+	}
+	return grantInteractiveObjects(logon)
 }
+
+func grantInteractiveObjects(logon []byte) error {
+	entries := []windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sidFromBytes(logon)),
+		},
+	}}
+	station, _, callErr := procGetProcessWindowStation.Call()
+	if station == 0 {
+		return fmt.Errorf("runner: GetProcessWindowStation: %w", callErr)
+	}
+	if err := grantObjectAccess(windows.Handle(station), entries); err != nil {
+		return fmt.Errorf("runner: grant window station: %w", err)
+	}
+	desktop, _, callErr := procGetThreadDesktop.Call(uintptr(windows.GetCurrentThreadId()))
+	if desktop == 0 {
+		return fmt.Errorf("runner: GetThreadDesktop: %w", callErr)
+	}
+	if err := grantObjectAccess(windows.Handle(desktop), entries); err != nil {
+		return fmt.Errorf("runner: grant desktop: %w", err)
+	}
+	runtime.KeepAlive(logon)
+	return nil
+}
+
+func grantObjectAccess(handle windows.Handle, entries []windows.EXPLICIT_ACCESS) error {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_WINDOW_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	current, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	merged, err := windows.ACLFromEntries(entries, current)
+	if err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(handle, windows.SE_WINDOW_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, merged, nil)
+}
+
+var (
+	user32dll                   = windows.NewLazySystemDLL("user32.dll")
+	procGetProcessWindowStation = user32dll.NewProc("GetProcessWindowStation")
+	procGetThreadDesktop        = user32dll.NewProc("GetThreadDesktop")
+)
 
 func broadenTokenDefaultDacl(token windows.Token, logon []byte) error {
 	current, buffer, err := tokenDefaultDacl(token)
