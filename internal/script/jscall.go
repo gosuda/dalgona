@@ -27,8 +27,15 @@ const data = JSON.parse(%s);
 const __j = (v) => JSON.stringify(v === undefined ? null : v);
 const tools = new Proxy({}, { get: (_t, n) => (a) => JSON.parse(__toolCall(String(n), __j(a === undefined ? {} : a))) });
 const __Date = Date;
-Date = class extends __Date { constructor(...a) { super(...(a.length ? a : [Math.round(__ctxNow() * 1000)])); } };
-Date.now = () => Math.round(__ctxNow() * 1000);
+Date = ((D) => {
+  function F(...a) {
+    if (new.target === undefined) { return new D(Math.round(__ctxNow() * 1000)).toString(); }
+    return a.length ? new D(...a) : new D(Math.round(__ctxNow() * 1000));
+  }
+  F.now = () => Math.round(__ctxNow() * 1000);
+  F.parse = D.parse; F.UTC = D.UTC; F.prototype = D.prototype;
+  return F;
+})(__Date);
 Math.random = (() => { let s = %d; return () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; })();
 const ctx = {
   tools: tools,
@@ -65,15 +72,18 @@ func (r *run) executeJS(parent context.Context, src, data jsontext.Value, seed i
 	defer vm.Close()
 	vm.SetMaxStackSize(jsStackSlots)
 	vm.SetMemoryLimit(jsMemLimit)
+	hostCtx, hostCancel := context.WithCancel(ctx)
+	defer hostCancel()
 	var budgetHit atomic.Bool
 	timer := time.AfterFunc(jsEvalBudget, func() {
 		budgetHit.Store(true)
 		vm.Interrupt()
+		hostCancel()
 	})
 	defer timer.Stop()
 	stop := context.AfterFunc(ctx, vm.Interrupt)
 	defer stop()
-	if bindErr := r.bindJS(vm, ctx); bindErr != nil {
+	if bindErr := r.bindJS(vm, hostCtx); bindErr != nil {
 		return stopped(StatusFailed, codeError, "js cell: "+bindErr.Error(), stageRun)
 	}
 	if _, compileErr := vm.Compile(string(src), 0); compileErr != nil {

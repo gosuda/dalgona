@@ -99,8 +99,9 @@ func TestJSCellUndefinedResultIsNull(t *testing.T) {
 
 func TestJSCellUnserializableResultIsNull(t *testing.T) {
 	eval := jsEval(t, newJournal(echoTool))
-	for _, code := range []string{"1n", "const x = {}; x.self = x; x"} {
-		got := runEval(t.Context(), t, eval, "call-1", `{"lang":"js","code":`+quoteArgs(code)+`}`)
+	for i, code := range []string{"1n", "const x = {}; x.self = x; x"} {
+		call := "call-" + string(rune('1'+i))
+		got := runEval(t.Context(), t, eval, call, `{"lang":"js","code":`+quoteArgs(code)+`}`)
 		if got.Status != "completed" || string(got.Value) != "null" {
 			t.Fatalf("code %q: reply = %+v error = %+v", code, got, got.Error)
 		}
@@ -126,6 +127,14 @@ func TestJSCellTimeAndRandomReplayIdentically(t *testing.T) {
 	got = runEval(t.Context(), t, eval, "call-1", args)
 	if got.Status != "completed" {
 		t.Fatalf("replay = %+v error = %+v; journaled time and seeded random must replay", got, got.Error)
+	}
+}
+
+func TestJSCellDateIsCallableAndConstructible(t *testing.T) {
+	eval := jsEval(t, newJournal(echoTool))
+	got := runEval(t.Context(), t, eval, "call-1", `{"lang":"js","code":"typeof Date() === 'string' && new Date() instanceof Date && typeof Date.now() === 'number'"}`)
+	if got.Status != "completed" || string(got.Value) != "true" {
+		t.Fatalf("reply = %+v error = %+v", got, got.Error)
 	}
 }
 
