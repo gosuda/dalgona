@@ -6,7 +6,7 @@ The harness sandbox applies only to the local runner.
 
 ## Modes
 
-`workspace-write` MUST be the default. `off` MUST disable harness confinement. Approval mode `yolo` MUST force `off`.
+`workspace-write` MUST be the default. `off` MUST disable harness confinement. Approval mode `yolo` disables confinement only after mandatory checks and sandbox choice.
 
 ## workspace-write
 
@@ -45,9 +45,31 @@ On macOS, the runner MUST start the command as `/usr/bin/sandbox-exec -p <profil
 
 The agent MUST add the daemon socket to the denied list for each `workspace-write` exec call. The runner MUST apply the denied list on macOS. The runner MUST pass no denied list when the mode is `off`. For each denied socket the profile MUST deny the cleaned path, the resolved path, and the canonical real-parent spelling (matches `resolveDeniedSockets`). A missing socket MUST resolve through its real parent directory. The call MUST fail when the parent directory does not resolve. Each denied path MUST escape `"` and `\` the same way a writable root does. A denied path with a control character MUST fail the command.
 
+## Windows
+
+On Windows, the shim MUST start a `workspace-write` command with an unelevated restricted token. The token MUST derive from the shim token through `CreateRestrictedToken`. The token MUST carry the flags `DISABLE_MAX_PRIVILEGE`, `LUA_TOKEN`, and `WRITE_RESTRICTED`. A command MAY read every path that the user can read. A write needs a grant to a restricting SID of the token.
+
+The restricting SIDs are the logon SID, one read-only capability SID, and one capability SID for each writable root. The token default DACL MUST also grant the logon SID read and write access. This lets the command use pipes that it creates. The writable roots are the roots of `workspace-write`. A mode with no writable root MUST grant no root.
+
+The runner MUST derive each capability SID with HMAC-SHA256 from a seed and the lower-case cleaned root path. The seed is 32 random bytes in the file `windows-sandbox-seed` under `os.UserConfigDir()` in the directory `dalgona`. The runner MUST create the seed once and MUST reuse it. A command can read the seed. The capability SIDs name no user and no group.
+
+Before it starts the command, the shim MUST add one allow entry for the capability SID to the DACL of each root. The entry MUST grant read, write, execute, and delete rights. The entry MUST inherit to files and subdirectories of a directory root. The shim MUST keep every existing entry of the DACL. The shim MUST skip a root whose DACL already holds the entry. A root with no DACL or a null DACL already grants every SID. The shim MUST skip such a root.
+
+The shim MUST open each root without following a reparse point. The shim MUST fail when the root is a reparse point. The shim MUST read and write the DACL through that one handle. The grants stay on the roots after the command exits. They name SIDs that no other token carries. The first grant to a large root can take long, because Windows copies the inheritable entry to every existing child.
+
+`UnavailableCause()` MUST return an empty string when the runner can create the restricted token. Otherwise it MUST name the failure. The shim MUST fail the command when it cannot read the seed, apply a grant, or create the token. The restricted token tier does not deny network access. A run that needs network denial MUST fail before it starts. The runner applies no denied socket list on Windows. The runner adds no device grant. The shim opens the standard handles before it applies the token. Programs that use MSYS2 or Cygwin runtimes can fail to start under this token. Programs that use Schannel for HTTPS can fail with `SEC_E_NO_CREDENTIALS`.
+
+The Windows filesystem MUST support persistent ACLs.
+An ACL operation failure MUST refuse the command before it starts.
+The workspace-write roots include the command directory, temporary directory, user cache directory, and configured writable roots.
+Read-only policy MUST ignore configured writable roots and grant no filesystem writes.
+The shim MUST close its token handle after each start attempt, including a failed start.
+Windows MUST refuse a nonempty denied socket list before token creation.
+Native Windows acceptance remains Not proven until the Windows tests run on a matching host.
+
 ## No harness sandbox
 
-Windows, Linux without Landlock, and macOS without `/usr/bin/sandbox-exec` have no harness sandbox. `runner.UnavailableCause()` names the reason. On a local-runner thread whose sandbox is `workspace-write`, the first `exec` call that would run confined MUST NOT start before the user chooses. This excludes advisor threads, which do not wait for user decisions and never ask for a sandbox choice. For child threads with an open parent, the sandbox question routes through the parent thread. The server sends `warning` and then the sandbox question. `Accept` MUST send every later exec call of the thread that reaches this choice to the human approval path, without thread grants. `Dangerously accept` MUST run exec calls without confinement under the thread's approval mode. A plugin hook or a static rule decides an exec call before this choice. The choice does not apply to that call. The agent MUST journal the choice as `sandbox.chosen` and MUST reuse it. Recovery MUST NOT ask again. Without a subscribed client the call MUST be declined with `declined: no client could choose how to run without a sandbox (<cause>); set sandbox = "off" to run without one`. A sandbox set to `off`, and approval mode `yolo`, MUST never ask. `command/exec` is a user command and MUST NOT ask. The runner MUST NOT report an unsandboxed process as confined.
+Linux without Landlock, macOS without `/usr/bin/sandbox-exec`, and Windows without restricted token support have no harness sandbox. `runner.UnavailableCause()` names the reason. On a local-runner thread whose sandbox is `workspace-write`, the first `exec` call that would run confined MUST NOT start before the user chooses. This excludes advisor threads, which do not wait for user decisions and never ask for a sandbox choice. For child threads with an open parent, the sandbox question routes through the parent thread. The server sends `warning` and then the sandbox question. `Accept` MUST send every later exec call of the thread that reaches this choice to the human approval path, without thread grants. `Dangerously accept` MUST run exec calls without confinement under the thread's approval mode. Static rules and hook denials decide an exec call before this choice. Hook allowance and yolo acceptance MUST NOT bypass this choice. The agent MUST journal the choice as `sandbox.chosen` and MUST reuse it. For `Accept`, the agent MUST journal `sandbox.chosen` after the user answers the approval request of the same call. For `Dangerously accept`, the agent MUST journal `sandbox.chosen` when the user answers the sandbox question. A cancelled, interrupted or timed-out question journals no `sandbox.chosen`. The next exec call then asks again. A restart before the journal holds `sandbox.chosen` makes recovery ask the question again. Recovery MUST NOT ask again when the journal holds `sandbox.chosen`. Without a subscribed client the call MUST be declined with `declined: no client could choose how to run without a sandbox (<cause>); set sandbox = "off" to run without one`. A sandbox set to `off` MUST never ask. `command/exec` is a user command and MUST NOT ask. The runner MUST NOT report an unsandboxed process as confined.
 
 ## Remote
 

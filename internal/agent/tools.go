@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strings"
 	"sync"
 	"unicode/utf8"
 
@@ -22,6 +24,7 @@ import (
 	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 
 const (
@@ -34,14 +37,15 @@ const (
 var instructionsPath = regexp.MustCompile(`<instructions path="([^"]*)">`)
 
 type prepared struct {
-	call    event.ToolCall
-	tool    tool.Tool
-	class   tool.Class
-	args    jsontext.Value
-	repairs int
-	plan    *tool.Plan
-	files   []event.FileChange
-	verdict verdict
+	call     event.ToolCall
+	tool     tool.Tool
+	class    tool.Class
+	args     jsontext.Value
+	repairs  int
+	plan     *tool.Plan
+	files    []event.FileChange
+	verdict  verdict
+	evidence snapshot.Evidence
 }
 
 func (p *prepared) processID() string {
@@ -130,8 +134,9 @@ func (w *worker) runCall(ctx context.Context, call event.ToolCall, requestID str
 		p.discardPlan()
 		return err
 	}
-	_, err = w.t.appendEvents(context.WithoutCancel(ctx), completed)
+	head, err := w.t.appendEvents(context.WithoutCancel(ctx), completed)
 	if err == nil {
+		w.deliver(completed, head)
 		w.startReview(ctx, p, completed)
 	}
 	return err
@@ -195,14 +200,19 @@ func discardFailed(ready []*prepared, errs []error) {
 }
 
 func (w *worker) appendResults(ctx context.Context, results []event.ToolCompleted) error {
+	kept := make([]event.ToolCompleted, 0, len(results))
 	events := make([]event.Event, 0, len(results))
 	for _, completed := range results {
 		if completed.CallID == "" {
 			continue
 		}
+		kept = append(kept, completed)
 		events = append(events, completed)
 	}
-	_, err := w.t.appendEvents(context.WithoutCancel(ctx), events...)
+	head, err := w.t.appendEvents(context.WithoutCancel(ctx), events...)
+	if err == nil {
+		w.deliverAll(kept, head)
+	}
 	return err
 }
 
@@ -273,7 +283,11 @@ func (w *worker) gateCall(ctx context.Context, p *prepared, requestID string) (g
 	if !ok {
 		return gc, nil
 	}
-	plan, err := editor.Plan(ctx, p.toolCall(), w.env(verdict{}))
+	env, err := w.envFor(p)
+	if err != nil {
+		return gc, err
+	}
+	plan, err := editor.Plan(ctx, p.toolCall(), env)
 	if err != nil {
 		return gc, err
 	}
@@ -393,7 +407,10 @@ func (w *worker) execute(ctx context.Context, p *prepared) (event.ToolCompleted,
 }
 
 func (w *worker) run(ctx context.Context, p *prepared) (tool.Result, error) {
-	env := w.env(p.verdict)
+	env, err := w.envFor(p)
+	if err != nil {
+		return tool.Result{}, err
+	}
 	if p.class != tool.ClassExec {
 		return p.tool.Run(withWorker(ctx, w), p.toolCall(), env)
 	}
@@ -415,6 +432,81 @@ func (w *worker) env(v verdict) tool.Env {
 		Runner: w.t.runner, Cwd: w.t.created.Cwd, Home: home,
 		Sandbox: deniedSocketSandbox(mode, roots, home), Masker: w.t.host.masker(), Snapshots: w.t.snapshots,
 	}
+}
+
+func (w *worker) envFor(p *prepared) (tool.Env, error) {
+	env := w.env(p.verdict)
+	if !p.evidence.Bounded() {
+		evidence, err := w.evidenceFor(p.call.ID)
+		if err != nil {
+			return tool.Env{}, err
+		}
+		p.evidence = evidence
+	}
+	env.Evidence = p.evidence
+	return env, nil
+}
+
+func (w *worker) evidenceFor(callID string) (snapshot.Evidence, error) {
+	v, err := w.t.view()
+	if err != nil {
+		return snapshot.Evidence{}, err
+	}
+	return snapshot.Evidence{Consumer: snapshot.ConsumerModel, Cutoff: cutoffOf(v, callID)}, nil
+}
+
+func cutoffOf(v view, callID string) uint64 {
+	for _, item := range slices.Backward(v.records) {
+		switch value := item.Event.(type) {
+		case event.AssistantMessage:
+			if slices.ContainsFunc(value.ToolCalls, func(c event.ToolCall) bool { return c.ID == callID }) {
+				return value.ContextSeq
+			}
+		case event.ToolCompleted:
+			if value.CallID == callID {
+				return v.head()
+			}
+		case event.TurnStarted:
+			return v.head()
+		}
+	}
+	return v.head()
+}
+
+func (w *worker) deliver(completed event.ToolCompleted, seq uint64) {
+	for _, ref := range deliveredRefs(completed.Output) {
+		w.t.snapshots.Bind(ref, snapshot.ConsumerModel, seq)
+	}
+}
+
+func (w *worker) deliverAll(results []event.ToolCompleted, head uint64) {
+	first := head - uint64(len(results)) + 1
+	for i, completed := range results {
+		w.deliver(completed, first+uint64(i))
+	}
+}
+
+func deliveredRefs(output string) []string {
+	var refs []string
+	for line := range strings.Lines(output) {
+		if ref, ok := headerRef(strings.TrimRight(line, "\r\n")); ok {
+			refs = append(refs, ref)
+		}
+	}
+	return refs
+}
+
+func headerRef(line string) (string, bool) {
+	body, ok := strings.CutPrefix(line, "[")
+	if !ok {
+		return "", false
+	}
+	body, ok = strings.CutSuffix(body, "]")
+	if !ok {
+		return "", false
+	}
+	_, ref, found := strings.CutLast(body, "@")
+	return ref, found && snapshot.ValidRef(ref)
 }
 
 func deniedSocketSandbox(mode runner.SandboxMode, roots []string, home string) runner.Sandbox {

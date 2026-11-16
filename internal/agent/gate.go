@@ -12,6 +12,7 @@ import (
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/agent/rules"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/shellargs"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -86,73 +87,6 @@ func truncate(text string, limit int) string {
 	return strings.ToValidUTF8(text[:limit], "")
 }
 
-func (w *worker) decide(ctx context.Context, gc gateCall, requestID string) verdict {
-	if v, ok := w.hookVerdict(ctx, gc); ok {
-		return v
-	}
-	approval := w.settings.Approval
-	if approval == config.ApprovalYolo {
-		v := accept("mode:yolo")
-		v.unsandboxed = true
-		return v
-	}
-	if v, ok := mechanical(gc, approval); ok {
-		return v
-	}
-	if v, ok := staticRule(gc); ok {
-		return v
-	}
-	if v, ok := w.sandboxFallback(ctx, gc, requestID); ok {
-		return v
-	}
-	if approval == config.ApprovalAsk {
-		return w.human(ctx, gc, requestID)
-	}
-	return w.automated(ctx, gc)
-}
-
-func (w *worker) hookVerdict(ctx context.Context, gc gateCall) (verdict, bool) {
-	call := tool.Call{ID: gc.call.ID, Name: gc.call.Name, Args: gc.args}
-	result, err := w.t.ext.ToolCall(withWorker(ctx, w), call)
-	if err != nil {
-		w.t.host.log.Warn("agent: tool_call hook", "thread", w.t.id, "tool", gc.call.Name, "error", err)
-	}
-	switch result.Decision {
-	case HookAllow:
-		return accept(result.By), true
-	case HookDeny:
-		return decline(result.By, cmp.Or(result.Reason, "declined by "+result.By)), true
-	}
-	return verdict{}, false
-}
-
-func mechanical(gc gateCall, approval config.Approval) (verdict, bool) {
-	by := "mode:" + string(approval)
-	switch gc.class {
-	case tool.ClassRead, tool.ClassAgent, tool.ClassScript:
-		return accept(by), true
-	case tool.ClassEdit:
-		return accept(by), approval == config.ApprovalAuto && len(gc.outside) == 0
-	case tool.ClassExec, tool.ClassRemote:
-		return verdict{}, false
-	}
-	return verdict{}, false
-}
-
-func staticRule(gc gateCall) (verdict, bool) {
-	if gc.class == tool.ClassRemote {
-		return staticRemoteRule(gc)
-	}
-	if gc.class != tool.ClassExec {
-		return verdict{}, false
-	}
-	name, part, matched := rules.Check(gc.command)
-	if !matched {
-		return verdict{}, false
-	}
-	return decline("rule:"+name, "declined by rule "+name+": "+part), true
-}
-
 func staticRemoteRule(gc gateCall) (verdict, bool) {
 	for _, value := range remoteStrings(string(gc.args)) {
 		if name, part, ok := rules.CheckRemoteValue(value); ok {
@@ -214,7 +148,7 @@ func (w *worker) action(gc gateCall) Action {
 	}
 	switch gc.class {
 	case tool.ClassExec:
-		a.Commands, a.Text = rules.Split(gc.command), gc.command
+		a.Commands, a.Text = shellargs.Split(gc.command), gc.command
 	case tool.ClassRemote:
 		a.Text = gc.call.Name + " " + string(gc.args)
 		a.Commands = []string{a.Text}
@@ -298,7 +232,7 @@ func (w *worker) approvalPrompt(gc gateCall, requestID string) (ApprovalPrompt, 
 	prompt.Summary = withRunContext(prompt.Summary, gc, w.t.created.Cwd)
 	if gc.class == tool.ClassExec {
 		prompt.Command = gc.command
-		prompt.Commands = rules.Split(gc.command)
+		prompt.Commands = shellargs.Split(gc.command)
 	}
 	if gc.class != tool.ClassEdit {
 		return prompt, true

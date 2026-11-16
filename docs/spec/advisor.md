@@ -53,7 +53,7 @@ A name MUST match `^[a-z][a-z0-9_-]{0,31}$`. When a name is invalid, the loader 
 3. The `slow` preset of the thread model's provider, when the provider offers it.
 4. The thread model.
 
-When the preset is not offered, the resolver MUST log `roles.advisor preset <id> is not offered; using <model>`. The advisor request MUST ask for effort `medium`, clamped to the efforts that the model supports.
+When the preset is not offered, the resolver MUST log `roles.advisor preset <id> is not offered; using <model>`. The advisor request MUST ask for effort `medium`. When the model declares effort levels and omits `medium`, the advisor request MUST send the highest declared level below `medium`. When no declared level is below `medium`, the advisor request MUST send no effort. A model that declares no effort levels MUST run the review with no effort.
 
 A provider with no static preset MUST use its first offered model as its `slow` preset.
 

@@ -2,6 +2,8 @@ package rpc
 
 import (
 	json "encoding/json/v2"
+	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -91,6 +93,8 @@ func TestSandboxChoiceOverTheWire(t *testing.T) {
 	threadID, question := startSandboxTurn(t, r, c)
 	c.await("warning", nil)
 	c.respond(question.ID, `{"answers":{"q1":{"answers":["Accept"]}}}`)
+	approval := awaitRequestNamed(t, c, "item/commandExecution/requestApproval")
+	c.respond(approval.ID, `{"decision":"decline"}`)
 	chosen := c.await("dalgona/sandbox/chosen", nil)
 	if got := fieldOf(t, chosen.Params, "threadId"); got != threadID {
 		t.Fatalf("chosen threadId = %q, want %q", got, threadID)
@@ -101,9 +105,17 @@ func TestSandboxChoiceOverTheWire(t *testing.T) {
 	if got := fieldOf(t, chosen.Params, "cause"); got != sandboxCause {
 		t.Fatalf("chosen cause = %q, want %q", got, sandboxCause)
 	}
-	approval := awaitRequestNamed(t, c, "item/commandExecution/requestApproval")
-	c.respond(approval.ID, `{"decision":"decline"}`)
+	requested := arrivalIndex(c, func(m message) bool { return m.Method == "item/commandExecution/requestApproval" })
+	notified := arrivalIndex(c, func(m message) bool { return m.Method == "dalgona/sandbox/chosen" })
+	if requested < 0 || notified <= requested {
+		t.Fatalf("arrival order: approval request %d, sandbox choice %d, want the choice after the request", requested, notified)
+	}
 	c.await("turn/completed", nil)
+	requireSandboxResume(t, r, threadID)
+}
+
+func requireSandboxResume(t *testing.T, r *rig, threadID string) {
+	t.Helper()
 	resume := r.connect()
 	var resumed ThreadResumeResponse
 	resume.ok("thread/resume", map[string]any{"threadId": threadID}, &resumed)
@@ -113,4 +125,17 @@ func TestSandboxChoiceOverTheWire(t *testing.T) {
 	if resumed.SandboxFallback.Choice == nil || *resumed.SandboxFallback.Choice != "accept" {
 		t.Fatalf("resume sandboxFallback choice = %+v, want accept", resumed.SandboxFallback.Choice)
 	}
+}
+
+func TestCommandExecNeverAsksForSandbox(t *testing.T) {
+	r := newSandboxRig(t)
+	c := r.connect()
+	var response CommandExecResponse
+	c.ok("command/exec", map[string]any{"command": []string{os.Args[0]}, "env": map[string]any{"RPC_TEST_PRINT": "hello"}}, &response)
+	expect(t, response.ExitCode == 3, "command/exec under an unavailable sandbox", response)
+	c.mu.Lock()
+	methods := slices.Clone(c.order)
+	c.mu.Unlock()
+	expect(t, !slices.Contains(methods, methodRequestUserInput), "command/exec asked the user", methods)
+	expect(t, !slices.Contains(methods, "dalgona/sandbox/chosen"), "command/exec journaled a sandbox choice", methods)
 }

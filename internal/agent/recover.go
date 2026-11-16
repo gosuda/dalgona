@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,6 +24,7 @@ const (
 	editReplayed     = "the edit was applied before the host restarted"
 	recoveredReplay  = "replayed"
 	recoveredStopped = "interrupted"
+	ratchetTool      = "ratchet"
 )
 
 type approvalRecord struct {
@@ -132,13 +134,10 @@ func (w *worker) finishRecovered(ctx context.Context, p *prepared) error {
 }
 
 func (w *worker) recoverStarted(ctx context.Context, v view, state event.ToolState) error {
-	if state.Tool == asktool.Name {
-		return w.completeRecovered(ctx, state.CallID, asktool.TextRestarted, recoveredStopped)
+	if done, err := w.completeUnresumableTool(ctx, state); done {
+		return err
 	}
-	item, ok := w.tools.byName[state.Tool]
-	if !ok {
-		return w.completeRecovered(ctx, state.CallID, remoteInterrupt, recoveredStopped)
-	}
+	item := w.tools.byName[state.Tool]
 	args, err := w.t.host.loadRaw(state.Args, state.ArgsBlob)
 	if err != nil {
 		return err
@@ -158,6 +157,30 @@ func (w *worker) recoverStarted(ctx context.Context, v view, state event.ToolSta
 		return w.finishRecovered(ctx, p)
 	}
 	return w.completeRecovered(ctx, state.CallID, remoteInterrupt, recoveredStopped)
+}
+
+func (w *worker) completeUnresumableTool(ctx context.Context, state event.ToolState) (bool, error) {
+	if state.Tool == asktool.Name {
+		return true, w.completeRecovered(ctx, state.CallID, asktool.TextRestarted, recoveredStopped)
+	}
+	if state.Tool == ratchetTool && ratchetApproval(w.t.host, state) {
+		return true, w.completeRecovered(ctx, state.CallID, asktool.TextRestarted, recoveredStopped)
+	}
+	if _, ok := w.tools.byName[state.Tool]; !ok {
+		return true, w.completeRecovered(ctx, state.CallID, remoteInterrupt, recoveredStopped)
+	}
+	return false, nil
+}
+
+func ratchetApproval(host *Host, state event.ToolState) bool {
+	raw, err := host.loadRaw(state.Args, state.ArgsBlob)
+	if err != nil {
+		return false
+	}
+	var args struct {
+		Action string `json:"action"`
+	}
+	return json.Unmarshal(raw, &args) == nil && args.Action == "approve"
 }
 
 func (w *worker) recoverScript(ctx context.Context, v view, p *prepared) error {

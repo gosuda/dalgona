@@ -4,7 +4,7 @@
 
 Where a harness sandbox is active, it MUST prevent accidental writes outside the allowed roots. It MUST NOT claim to isolate hostile code. [sandbox.md](../spec/sandbox.md) describes the outer sandbox.
 
-`workspace-write` MUST be the default local policy. Reads and network access MUST remain allowed. `off` MUST disable confinement. Approval mode `yolo` MUST force `off`. Windows and Linux without Landlock MUST report that no harness sandbox is active. Without a harness sandbox, an agent command MUST NOT run unconfined before the user chose so for that thread. A plugin hook that allows a command is outside this choice.
+`workspace-write` MUST be the default local policy. Reads and network access MUST remain allowed. `off` MUST disable confinement. Approval mode `yolo` disables confinement only after mandatory checks and sandbox choice. Windows and Linux without Landlock MUST report that no harness sandbox is active. Without a harness sandbox, an agent command MUST NOT run unconfined before the user chose so for that thread. A plugin hook allowance MUST NOT bypass this choice. Static denials precede hooks and yolo acceptance.
 
 On macOS, the harness sandbox is active when `/usr/bin/sandbox-exec` exists, is not a directory, and has an execute bit set.
 

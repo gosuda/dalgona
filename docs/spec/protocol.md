@@ -40,6 +40,7 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 - `item/started` MUST precede the deltas and `item/completed` of the same item.
 - `item/fileChange/patchUpdated` for an edit approval MUST precede its `item/fileChange/requestApproval`.
 - `warning` MUST precede the sandbox choice request.
+- `dalgona/sandbox/chosen` for `Accept` MUST follow the answer to the approval request of the same call.
 - A server request MUST close with `serverRequest/resolved` when another client or the server settles it.
 - Text, diffs, and outputs MUST be masked before they leave the server. The exceptions are `command/exec` output and `fs/readFile` data.
 
@@ -196,7 +197,7 @@ A client MUST answer `{"answers": {}}` to dismiss the questions. Any other error
 
 The server MUST decline a question with the no-client result when every attached window cannot answer. The first answer MUST decide the question, and every subscriber receives `serverRequest/resolved` with a `resolution` of `answered`, `cancelled`, `interrupted` or `declined`.
 
-The sandbox choice uses `item/tool/requestUserInput` with the header `Sandbox`, the options `Accept` and `Dangerously accept`, and no Other row. The server sends a `warning` notification before the question. A cancelled question MUST decline the command, and the next command MUST ask again. After a choice is journaled, the server MUST send `dalgona/sandbox/chosen` with `threadId`, `cause`, and `choice`.
+The sandbox choice uses `item/tool/requestUserInput` with the header `Sandbox`, the options `Accept` and `Dangerously accept`, and no Other row. The server sends a `warning` notification before the question. A cancelled question MUST decline the command, and the next command MUST ask again. After a choice is journaled, the server MUST send `dalgona/sandbox/chosen` with `threadId`, `cause`, and `choice`. `choice` is `accept` or `dangerouslyAccept`. For `Accept`, the notification MUST follow the answer to the approval request of the same call. For `Dangerously accept`, the notification MUST follow the answer to the sandbox question.
 
 ## Notifications and items
 
@@ -234,6 +235,8 @@ Turn objects carry `startedAt` and `completedAt` as Unix seconds, and `durationM
 The effort notification MUST follow successful request resolution, not `turn/started`. The server MUST ignore an effort event for a different turn. The first resolution MUST notify, including an empty effort. Unchanged resolutions in later rounds MUST NOT notify again. Turn start and completion MUST clear the resolved effort.
 
 The tool class sets the item kind. Class `exec` gives `commandExecution`. Class `edit` gives `fileChange` with one change per file. Class `remote` gives `mcpToolCall` with the tool name `<server>__<tool>` after the MCP name rule. Any other tool gives `dynamicToolCall`. A call that completes without a start, with a `decline` or `cancel` decision, has status `declined` for `commandExecution` and `fileChange`. For other kinds, that call has status `failed`. Its output is the decline reason.
+
+A tool spec carries a `Serial` flag. A call to a tool with `Serial` set MUST run alone, never in a batch with another call. The tools `todo`, `ask`, and `yield` set `Serial`. A tool that leaves `Serial` unset MAY run in a batch with adjacent read-class calls.
 
 A file change carries a unified diff of its journaled pre-image and post-image, with three lines of context. `additions` and `deletions` count the added and removed lines. A file without a pre-image is `add`. A file without a post-image is `delete`.
 
