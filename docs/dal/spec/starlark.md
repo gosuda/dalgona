@@ -1,6 +1,6 @@
 # Durable Starlark
 
-This specification defines package `internal/script`: the shared run engine, the `eval` tool, and tool modes. Battery-only adapters live in `internal/dalgona/script` for plugins and workflows and in `internal/dalgona/scripthost` for the agent extension. The shared host `internal/scripthost` exposes only `eval` through `NewEffects`. The standard library is defined by `internal/script/stdlib`.
+This specification defines package `internal/dal/script`: the shared run engine, the `eval` tool, and tool modes. Battery-only adapters live in `internal/dalgona/script` for plugins and workflows and in `internal/dalgona/scripthost` for the agent extension. The shared host `internal/dal/scripthost` exposes only `eval` through `NewEffects`. The standard library is defined by `internal/dal/script/stdlib`.
 
 ## Dialect
 

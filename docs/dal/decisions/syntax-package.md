@@ -2,19 +2,19 @@
 
 ## Invariant
 
-Only `internal/syntax` MUST import `github.com/odvcencio/gotreesitter`. Callers MUST see symbols, captures and reports, never trees, nodes or queries of the library. The package MUST import no grammar aggregate and no copyleft grammar. Parsing MUST run under a time limit, a memory budget and work limits, and every tree MUST be released after its rows are read.
+Only `internal/dal/syntax` MUST import `github.com/odvcencio/gotreesitter`. Callers MUST see symbols, captures and reports, never trees, nodes or queries of the library. The package MUST import no grammar aggregate and no copyleft grammar. Parsing MUST run under a time limit, a memory budget and work limits, and every tree MUST be released after its rows are read.
 
 ## Scope
 
-This decision applies to `internal/syntax`, its embedded queries under `internal/syntax/queries`, and the import rules `syntax` and `copyleft` in `.golangci.yml`. The search tool and the rewrite tool use the package through its exported API only. Each search mode that uses the package is specified in [search.md](../spec/search.md) by the step that adds that mode.
+This decision applies to `internal/dal/syntax`, its embedded queries under `internal/dal/syntax/queries`, and the import rules `syntax` and `copyleft` in `.golangci.yml`. The search tool and the rewrite tool use the package through its exported API only. Each search mode that uses the package is specified in [search.md](../spec/search.md) by the step that adds that mode.
 
 The `owner` kind is hidden. The outliner maps the `@definition.owner` capture suffix to it. A symbol of that kind gives no row, adds no depth, and names the owner of its children. The Go language row carries one owner rule that resolves a method receiver through `parameter_list`, `parameter_declaration`, `pointer_type` and `generic_type` to one `type_identifier`.
 
-The exported API includes `Graph`. It returns the symbols, the references and the imports of one file as plain values. It serves Go, TypeScript, Python, Rust and Java, and each of them has one graph query under `internal/syntax/queries`. `Graph` parses the file once. It reads the outline and the query captures from that one tree. A reference keeps the index of its innermost listed symbol, or `-1` at top level. The graph queries name their captures `call`, `type` and `import`.
+The exported API includes `Graph`. It returns the symbols, the references and the imports of one file as plain values. It serves Go, TypeScript, Python, Rust and Java, and each of them has one graph query under `internal/dal/syntax/queries`. `Graph` parses the file once. It reads the outline and the query captures from that one tree. A reference keeps the index of its innermost listed symbol, or `-1` at top level. The graph queries name their captures `call`, `type` and `import`.
 
 ## Enforcement
 
-`just lint` runs the `syntax` rule, which denies the library outside `internal/syntax`, and the `copyleft` rule, which denies the aggregate package and the copyleft grammars everywhere. `internal/syntax/syntax_test.go` checks the kind table, the extension table, the Go fixture rows, context cancellation and the stopped parse. `internal/syntax/graph_test.go` checks the references and the imports against `go/parser` and against generated programs in the five languages.
+`just lint` runs the `syntax` rule, which denies the library outside `internal/dal/syntax`, and the `copyleft` rule, which denies the aggregate package and the copyleft grammars everywhere. `internal/dal/syntax/syntax_test.go` checks the kind table, the extension table, the Go fixture rows, context cancellation and the stopped parse. `internal/dal/syntax/graph_test.go` checks the references and the imports against `go/parser` and against generated programs in the five languages.
 
 ## Measurements
 
@@ -25,7 +25,7 @@ Baseline linux/amd64 binaries before the package existed, built with go1.27.4 fr
 |`dal`|36598376|
 |`dalgona`|69772184|
 
-The baseline sizes are the build at commit `30f8f047`, which has no `internal/syntax` and is an ancestor of `f0768f03d`. The first commit that adds `internal/syntax` is `b84c08d5c`. The change below also includes the search index commits between the two commits, so it is not the cost of the package alone. The flags of the baseline build were not recorded. Built with go1.27.4 and the default build flags at commit `f0768f03d`, where the search tool links the 23 grammars:
+The baseline sizes are the build at commit `30f8f047`, which has no `internal/dal/syntax` and is an ancestor of `f0768f03d`. The first commit that adds `internal/dal/syntax` is `b84c08d5c`. The change below also includes the search index commits between the two commits, so it is not the cost of the package alone. The flags of the baseline build were not recorded. Built with go1.27.4 and the default build flags at commit `f0768f03d`, where the search tool links the 23 grammars:
 
 |Binary|Bytes|Change from baseline|
 |---|---|---|
@@ -38,7 +38,7 @@ Probe binaries, linux/amd64, go1.27.4, built from the same tree with one `main` 
 |---|---|
 |the library root package `gotreesitter`|3507686|
 |the Go grammar package `grammars/go` alone|4114522|
-|the 23 grammars through `internal/syntax`|8325807|
+|the 23 grammars through `internal/dal/syntax`|8325807|
 |the aggregate package `grammars`|22030362|
 
 The size estimates of the earlier design (2.4 MB, 17.7 MB, 22.7 MB and 36.9 MB) were not reproduced by these probes. The probe values above are the measured ones. The product delta is about twice the 23-grammar probe. This step did not split the rest of the delta.
@@ -49,12 +49,12 @@ The bounds of the symbols mode are unchanged by this record. Each value below is
 
 |Bound|Value|Where it is set|
 |---|---|---|
-|parse timeout|2 s|`parseTimeout`, `internal/syntax/language.go`|
+|parse timeout|2 s|`parseTimeout`, `internal/dal/syntax/language.go`|
 |parse memory budget|256 MiB|`parseMemoryBudgetBytes`|
 |parse iteration limit|200000|`parseIterationLimit`|
 |parse stack depth limit|8192|`parseStackDepthLimit`|
 |parse node limit|1000000|`parseNodeLimit`|
-|files per call|256|`parseMaxFiles`, `internal/tool/search/parse.go`|
+|files per call|256|`parseMaxFiles`, `internal/dal/tool/search/parse.go`|
 |bytes per file|256 KiB|`parseMaxFileBytes`|
 |bytes per call|1 MiB|`parseMaxBytes`|
 |call budget|10 s|`parseBudget`|
@@ -137,7 +137,7 @@ Setext headings give no symbol on gotreesitter v0.57.0. Observed on 2026-11-12 w
 
 - The row `(section (setext_heading heading_content: (paragraph) @name)) @definition.section` names the enclosing section of each setext heading. The setext heading is a child of the atx section that holds it, so that row and the atx row name the same node. The outliner reports `OmittedNameConflict` 2 and drops `Setup`, so the row is removed.
 - The row `(setext_heading heading_content: (paragraph) @name) @definition.section` avoids the conflict and gives `Heading text` at rows 8 to 10. Its span is the heading and its underline, so `definition` would print no body. It is not used. A Markdown heading's span MUST include the body of the heading, so that `definition` can print it.
-- `docs/spec/search.md`, Symbols and syntax, states that setext headings give no symbol.
+- `docs/dal/spec/search.md`, Symbols and syntax, states that setext headings give no symbol.
 
 ## Rejected alternatives
 

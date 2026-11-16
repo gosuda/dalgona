@@ -8,11 +8,11 @@ Each advisor MUST use its own durable child thread. Clients MUST NOT list it as 
 
 ## Scope
 
-This decision applies to `internal/agent/advisor`, advisor config, journal events, and protocol delivery. [advisor.md](../spec/advisor.md) defines cadence, model selection, tools, note guards, delivery, and recovery. [recovery.md](../spec/recovery.md) reserves advisor recovery for the advisor runtime.
+This decision applies to `internal/dal/agent/advisor`, advisor config, journal events, and protocol delivery. [advisor.md](../spec/advisor.md) defines cadence, model selection, tools, note guards, delivery, and recovery. [recovery.md](../spec/recovery.md) reserves advisor recovery for the advisor runtime.
 
 ## Enforcement
 
-Tests in `internal/agent/advisor/guard_test.go`, `render_test.go`, `route_test.go`, and `watchdog_test.go` check deduplication, note filtering, the delivery matrix, and advisor-only guidance. `internal/agent/event/advisor_test.go` checks event validation and duplicate delivery refusal. `internal/config/advisor_test.go` checks both product configs. These checks MUST NOT be treated as proof of crash recovery or end-to-end runtime delivery. Those paths require runtime integration tests. `just test` runs the existing tests.
+Tests in `internal/dal/agent/advisor/guard_test.go`, `render_test.go`, `route_test.go`, and `watchdog_test.go` check deduplication, note filtering, the delivery matrix, and advisor-only guidance. `internal/dal/agent/event/advisor_test.go` checks event validation and duplicate delivery refusal. `internal/dal/config/advisor_test.go` checks both product configs. These checks MUST NOT be treated as proof of crash recovery or end-to-end runtime delivery. Those paths require runtime integration tests. `just test` runs the existing tests.
 
 ## Rejected alternatives
 

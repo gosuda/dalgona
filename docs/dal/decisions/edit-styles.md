@@ -6,11 +6,11 @@
 
 ## Scope
 
-This decision applies to `internal/tool/patch` and the `edit_style` key in `internal/config`. [edit-styles.md](../spec/edit-styles.md) defines grammars and refusals. [The hashline README](../spec/hashline/README.md) lists the profile contracts.
+This decision applies to `internal/dal/tool/patch` and the `edit_style` key in `internal/dal/config`. [edit-styles.md](../spec/edit-styles.md) defines grammars and refusals. [The hashline README](../spec/hashline/README.md) lists the profile contracts.
 
 ## Enforcement
 
-`TestLoad_defaults` in `internal/config/config_test.go` and `TestStyleAliasesAndDefault` in `internal/tool/patch/property_test.go` check the `anchor` default. `TestPatchSchemaOffersNoStyleArgument` in `internal/tool/patch/profile_test.go` checks that no style schema takes a style argument. `TestHashlineRejectsSymbolOperations` in the same file checks rejection without a write. `TestEnhancedCoverageAndValidNoop` in the same file checks that a refused Enhanced edit writes nothing and does not fall back to Light. `just test` runs them.
+`TestLoad_defaults` in `internal/dal/config/config_test.go` and `TestStyleAliasesAndDefault` in `internal/dal/tool/patch/property_test.go` check the `anchor` default. `TestPatchSchemaOffersNoStyleArgument` in `internal/dal/tool/patch/profile_test.go` checks that no style schema takes a style argument. `TestHashlineRejectsSymbolOperations` in the same file checks rejection without a write. `TestEnhancedCoverageAndValidNoop` in the same file checks that a refused Enhanced edit writes nothing and does not fall back to Light. `just test` runs them.
 
 ## Rejected alternatives
 

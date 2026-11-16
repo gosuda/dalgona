@@ -29,12 +29,12 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |charm.land/lipgloss/v2|v2.1.0|2026-11-09|TUI|none|
 |codeberg.org/readeck/go-readability/v2|v2.1.3|2026-09-30|webfetch article extraction. MIT licence.|none|
 |github.com/JohannesKaufmann/html-to-markdown/v2|v2.5.2|2026-06-07|webfetch HTML to Markdown conversion. MIT licence.|none|
-|github.com/aymanbagabas/go-udiff|v0.4.1|2026-03-08|unified line diffs in `internal/textdiff`. Licence: BSD-3-Clause and MIT, per `LICENSE-BSD` and `LICENSE-MIT` at v0.4.1.|none|
+|github.com/aymanbagabas/go-udiff|v0.4.1|2026-03-08|unified line diffs in `internal/dal/textdiff`. Licence: BSD-3-Clause and MIT, per `LICENSE-BSD` and `LICENSE-MIT` at v0.4.1.|none|
 |github.com/charmbracelet/x/ansi|v0.11.9|2026-10-08|TUI measure, text width, and truncation, the method of the Bubble Tea renderer.|none|
 |github.com/charmbracelet/colorprofile|v0.4.3|2026-03-09|TUI colour downsampling to the terminal's profile, and the `NO_COLOR` rule.|none|
 |github.com/charmbracelet/x/term|v0.2.2|2025-10-31|terminal detection in TUI anchor output|none|
 |github.com/charmbracelet/x/vt|v0.1.0|2026-10-12|test-only terminal emulator for the print test, MIT licence.|none|
-|github.com/odvcencio/gotreesitter|v0.57.0|2026-11-08|syntax package for the symbols, definition, syntax and rewrite modes, with 23 grammars. Licence MIT, per `LICENSE` at v0.57.0. Decision in `docs/decisions/syntax-package.md`.|none|
+|github.com/odvcencio/gotreesitter|v0.57.0|2026-11-08|syntax package for the symbols, definition, syntax and rewrite modes, with 23 grammars. Licence MIT, per `LICENSE` at v0.57.0. Decision in `docs/dal/decisions/syntax-package.md`.|none|
 |github.com/coder/websocket|v1.8.15|2026-06-15|websocket|none|
 |github.com/coreequip/mermaidascii|v0.3.1|2026-11-09|mermaid fences render as text art in the TUI, a Go port of the beautiful-mermaid ASCII renderer. MIT licence.|none|
 |github.com/containerd/errdefs|v1.0.0|2024-10-08|Docker runner error types|none|
@@ -50,7 +50,7 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |golang.org/x/net|v0.62.0|2026-10-27|HTML tokenizing in web fetch|none|
 |golang.org/x/sync|v0.25.0|2026-10-15|errgroup and singleflight|none|
 |golang.org/x/sys|v0.50.0|2026-11-06|OS calls|none|
-|golang.org/x/text|v0.44.0|2026-11-09|Unicode normalization in advisor guard, alongside TUI normalization and width use in `internal/tui/input.go`, `width.go`, and `band_test.go`|none|
+|golang.org/x/text|v0.44.0|2026-11-09|Unicode normalization in advisor guard, alongside TUI normalization and width use in `internal/dal/tui/input.go`, `width.go`, and `band_test.go`|none|
 |google.golang.org/protobuf|v1.36.12|2026-08-10|encoding/protowire only|none|
 |modernc.org/quickjs|v0.27.0|2026-10-24|js eval cells and nomnoml diagram rendering, pure Go QuickJS|none|
 |modernc.org/sqlite|v1.62.0|2026-11-07|journal mirror, pure Go|none|

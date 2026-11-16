@@ -176,4 +176,4 @@ A call to `ask` in a subagent MUST complete with the error `Tool ask not found`.
 
 Recovery MUST NOT ask an open question again. It MUST complete the call as interrupted, as the recovery table of [recovery.md](recovery.md) states.
 
-The rule MUST be enforced by `withThreadTools` in `internal/agent/spawn.go`. `TestAskToolOnlyOnTopLevelThreads` and `TestAskToolInDal` in `internal/agent/ask_tool_test.go` check it.
+The rule MUST be enforced by `withThreadTools` in `internal/dal/agent/spawn.go`. `TestAskToolOnlyOnTopLevelThreads` and `TestAskToolInDal` in `internal/dal/agent/ask_tool_test.go` check it.

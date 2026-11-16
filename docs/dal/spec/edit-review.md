@@ -19,7 +19,7 @@ The review MUST NOT judge a call that recovery runs or replays.
 
 ## Diff
 
-The package `internal/textdiff` holds one function, `Unified`. `Unified(oldName, newName string, pre, post []byte, context int)` returns the diff text, a `Stats` value, and an error. `Stats` holds `Added` and `Removed`. `Added` counts the `+` lines of all hunks. `Removed` counts the `-` lines of all hunks.
+The package `internal/dal/textdiff` holds one function, `Unified`. `Unified(oldName, newName string, pre, post []byte, context int)` returns the diff text, a `Stats` value, and an error. `Stats` holds `Added` and `Removed`. `Added` counts the `+` lines of all hunks. `Removed` counts the `-` lines of all hunks.
 
 The package is built on `github.com/aymanbagabas/go-udiff v0.4.1`. The diff text starts with `--- <old label>` and `+++ <new label>`. Callers MUST pass `a/<path>`, `b/<path>`, or `/dev/null` as the labels. Each hunk starts with a `@@` header. Equal inputs return an empty text and a zero `Stats`.
 
@@ -179,7 +179,7 @@ These notifications are live only. The server MUST NOT return them in thread his
 
 ## Measurement
 
-The corpus holds 472 cases in `internal/agent/testdata/editreview/cases.jsonl`. `ratchet.json` in the same directory records the SHA-256 of that file.
+The corpus holds 472 cases in `internal/dal/agent/testdata/editreview/cases.jsonl`. `ratchet.json` in the same directory records the SHA-256 of that file.
 
 The cases come from the history of this repository at commit `3c4b6f94`.
 The current corpus does not meet the required 620 cases or the required group quotas.
@@ -196,7 +196,7 @@ Those multi-file changes do not meet the single-file source rule. The required i
 
 In each group, the case ids sort by the SHA-256 of each id. Even positions are `dev`, and odd positions are `held_out`. The held-out split holds 234 cases: 89 sound cases and 145 defect cases.
 
-Each defect case takes one single-file sound edit, or one turn whose subject names a changed file, and applies one rule. A subject names a file when the file's base name occurs in the subject as a whole word. The builder is `internal/agent/review_corpus_build_test.go`.
+Each defect case takes one single-file sound edit, or one turn whose subject names a changed file, and applies one rule. A subject names a file when the file's base name occurs in the subject as a whole word. The builder is `internal/dal/agent/review_corpus_build_test.go`.
 
 | Question | Rule |
 |---|---|

@@ -1,6 +1,6 @@
 # TUI
 
-The TUI is a protocol client. It MUST import only `internal/rpc` from this module.
+The TUI is a protocol client. It MUST import only `internal/dal/rpc` from this module.
 
 ## Entry point
 
@@ -412,7 +412,7 @@ Rows loaded from thread history MUST NOT list child IDs, because the thread read
 Decoding works as follows:
 
 - The three delta notifications are the hot path. They are read with `encoding/json/jsontext` tokens and unquoted into one reused buffer. The text is then appended to per-item byte buffers.
-- Other notifications and responses decode through the `internal/rpc` types with `encoding/json/v2`.
+- Other notifications and responses decode through the `internal/dal/rpc` types with `encoding/json/v2`.
 - Unknown fields MUST be ignored.
 
 Settled status labels show `inProgress` as `Working`. Other statuses show as sent.

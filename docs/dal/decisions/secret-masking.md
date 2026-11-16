@@ -14,4 +14,4 @@ This decision applies to credentials, configured secret patterns, prompts, tool 
 
 ## Enforcement
 
-`internal/auth/auth_test.go` checks longest matches, short values, placeholder stability, OAuth field separation, persistence, and failure retry. `TestSecretsAreMaskedInJournalAndUnmaskedInExec` in `internal/agent/misc_test.go` checks the journal and model boundary. `internal/tool/patch/property_test.go` checks locator and body restoration without path substitution. `just test` runs these checks.
+`internal/dal/auth/auth_test.go` checks longest matches, short values, placeholder stability, OAuth field separation, persistence, and failure retry. `TestSecretsAreMaskedInJournalAndUnmaskedInExec` in `internal/dal/agent/misc_test.go` checks the journal and model boundary. `internal/dal/tool/patch/property_test.go` checks locator and body restoration without path substitution. `just test` runs these checks.

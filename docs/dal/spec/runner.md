@@ -1,6 +1,6 @@
 # Local runner
 
-This document governs the local runner in package `internal/runner`.
+This document governs the local runner in package `internal/dal/runner`.
 
 The local runner MUST store one call directory for each call. The call directory MUST be `<dir>/<call_id>/`. It MUST contain the files `out`, `pid`, and `exit`. It MAY contain `pgid`, `cancel`, and `aborted`.
 
@@ -16,7 +16,7 @@ The parent MUST start the shim detached. The invocation MUST be `<self> __shim -
 
 `CheckProcessKillGuard(argv, daemonPID, parentPID)` MUST return nil for empty `argv`. It MUST return nil for a command that signals no protected process. When it refuses a command, it MUST return an error that wraps `ErrProcessKillGuard`.
 
-The guard MUST read the command in `argv`. For a shell call with `-c`, it MUST read the command string after the `-c` flag. It MUST cut the string with `shellargs.Split` and cut each part with `shellargs.Tokens`. It MUST remove leading assignments and wrappers with `shellargs.StripWrappers`. The runner MUST NOT import `internal/agent/rules`.
+The guard MUST read the command in `argv`. For a shell call with `-c`, it MUST read the command string after the `-c` flag. It MUST cut the string with `shellargs.Split` and cut each part with `shellargs.Tokens`. It MUST remove leading assignments and wrappers with `shellargs.StripWrappers`. The runner MUST NOT import `internal/dal/agent/rules`.
 
 The guard MUST also read these forms inside a command string:
 

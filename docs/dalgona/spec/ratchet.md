@@ -212,7 +212,7 @@ The `gate` action MUST require a summary of at most 200 characters, except for t
 
 The `status` action MUST return the approvals, the best round, the done state, and the round table.
 
-The tool MUST accept the arguments of the schema `schemaJSON` in `internal/ratchet/tool.go`.
+The tool MUST accept the arguments of the schema `schemaJSON` in `internal/dalgona/ratchet/tool.go`.
 
 The tool MUST accept the `action` and `flow` members for every action.
 

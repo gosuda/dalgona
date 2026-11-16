@@ -1,6 +1,6 @@
 # Runners and remote modes
 
-Package `internal/remote` binds threads to boxes. Mode A runs exec and subagents in a box while the orchestrator stays local. Mode B runs the whole daemon in a box. The service seam, bootstrap, and workspace upload are in `sandbox-services.md` and `exec-server.md`.
+Package `internal/dalgona/remote` binds threads to boxes. Mode A runs exec and subagents in a box while the orchestrator stays local. Mode B runs the whole daemon in a box. The service seam, bootstrap, and workspace upload are in `sandbox-services.md` and [exec-server.md](../../dal/spec/exec-server.md).
 
 ## Services
 

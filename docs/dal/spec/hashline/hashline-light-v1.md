@@ -76,7 +76,7 @@ table is part of this specification.
 
 ## L05. Canonical model-facing description
 
-The description is `lightDescription` in `internal/tool/patch/description.go`:
+The description is `lightDescription` in `internal/dal/tool/patch/description.go`:
 
 ```text
 Edit files from a read/search snapshot. Copy its [path@reference] header.

@@ -2,12 +2,12 @@
 
 ## Scope
 
-`internal/webui` serves the built web UI and relays JSON-RPC between a browser and the daemon.
+`internal/dalgona/webui` serves the built web UI and relays JSON-RPC between a browser and the daemon.
 The caller supplies the listen address, the token, the TLS files, a daemon dialer, and an output writer.
 
 ## Assets
 
-The package MUST embed `internal/webui/dist` with `//go:embed all:dist`.
+The package MUST embed `internal/dalgona/webui/dist` with `//go:embed all:dist`.
 If the root of `dist` holds no entry other than `.gitkeep`, every path except `/rpc` MUST return status 503 with the body `web UI not built; run just web`.
 Otherwise the server MUST serve the files in `dist`. `/` MUST serve `index.html`.
 
@@ -80,7 +80,7 @@ A clean shutdown MUST return `nil`. Shutdown waits at most 5 seconds for open pa
 
 ## Browser client
 
-The client in `web/` reads the token from the URL fragment and opens `/rpc`. It speaks the Codex v2 protocol. `web/src/lib/validation.ts` parses each payload the client reads. A parser MUST reject a payload that lacks a member that the schema in `internal/rpc/testdata/codex-schema` or `internal/rpc/testdata/dalgona-schema` requires. `web/src/lib/schema.test.ts` checks this for every Codex payload parser and for the dalgona result and notification parsers.
+The client in `web/` reads the token from the URL fragment and opens `/rpc`. It speaks the Codex v2 protocol. `web/src/lib/validation.ts` parses each payload the client reads. A parser MUST reject a payload that lacks a member that the schema in `internal/dal/rpc/testdata/codex-schema` or `internal/dal/rpc/testdata/dalgona-schema` requires. `web/src/lib/schema.test.ts` checks this for every Codex payload parser and for the dalgona result and notification parsers.
 
 The page holds one `Session`, which owns the connection and the page state.
 
@@ -127,7 +127,7 @@ The header MUST retain the full title as text and as a `title` attribute.
 The client MUST map thread status `notLoaded` to idle and display `Ready` when no completed turn is known.
 A `turn/started` notification for a turn already shown as `Done`, `Stopped`, or `Failed` MUST NOT replace that status or clear its error.
 
-The client MUST keep the highest applied `seq` for each thread. It MUST ignore a `thread/status/changed` whose `seq` is lower, as `docs/spec/protocol.md` requires.
+The client MUST keep the highest applied `seq` for each thread. It MUST ignore a `thread/status/changed` whose `seq` is lower, as `docs/dal/spec/protocol.md` requires.
 
 The status band sits at the end of the header. It shows these items in this order: model, effort, approval, sandbox, folder, queue, context, and mark.
 The client MUST NOT render an item whose id is in `statusHide`. The client MUST NOT hide `model`.
@@ -196,7 +196,7 @@ Each file change MUST show its edit review as one line under its diff cards, for
 - `Ctrl+O` MUST open the review for the latest finished row when focus is in the transcript or the composer.
 - The review MUST close on Escape and MUST return focus to the control that opened it.
 - The review MUST load spilled command output one page at a time from `dalgona/item/output/read`.
-- The rules and the summary text MUST match the Verbosity section of `docs/spec/tui.md`.
+- The rules and the summary text MUST match the Verbosity section of `docs/dal/spec/tui.md`.
 
 ### Markdown
 

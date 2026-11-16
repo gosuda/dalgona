@@ -8,8 +8,8 @@ Pure script evaluation MAY run again after a restart. Tool calls, waits, judgmen
 
 ## Scope
 
-This decision applies to `internal/script`, the eval tool, workflows, plugins, and hooks. [events.md](../spec/events.md) defines `script.started`, `script.effect`, and `script.completed`. [recovery.md](../spec/recovery.md) requires script-class tools to reopen their own durable runs under the same call id.
+This decision applies to `internal/dal/script`, the eval tool, workflows, plugins, and hooks. [events.md](../spec/events.md) defines `script.started`, `script.effect`, and `script.completed`. [recovery.md](../spec/recovery.md) requires script-class tools to reopen their own durable runs under the same call id.
 
 ## Enforcement
 
-`internal/agent/event/state_test.go` checks the fold of out-of-order script effects. `internal/script/stdlib/stdlib_test.go` checks injected time and random sources and the required dialect. `internal/scripthost/scripthost_test.go` checks a crash after an effect (`TestScriptReplaysRecordedEffectsAfterCrash`) and recovery of a recorded outcome without a second effect (`TestRecoveredEvalReturnsRecordedOutcome`). `internal/scripthost/effects_runid_test.go` checks a reused run id with different code (`TestReusedRunIDWithinTurnIsRefused`) and the recorded outcome of a repeated call (`TestRepeatedEvalWithinTurnReturnsRecordedOutcome`).
+`internal/dal/agent/event/state_test.go` checks the fold of out-of-order script effects. `internal/dal/script/stdlib/stdlib_test.go` checks injected time and random sources and the required dialect. `internal/dal/scripthost/scripthost_test.go` checks a crash after an effect (`TestScriptReplaysRecordedEffectsAfterCrash`) and recovery of a recorded outcome without a second effect (`TestRecoveredEvalReturnsRecordedOutcome`). `internal/dal/scripthost/effects_runid_test.go` checks a reused run id with different code (`TestReusedRunIDWithinTurnIsRefused`) and the recorded outcome of a repeated call (`TestRepeatedEvalWithinTurnReturnsRecordedOutcome`).

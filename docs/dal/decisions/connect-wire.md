@@ -6,8 +6,8 @@ One package MUST implement Connect envelope framing, trailer decoding, and proto
 
 ## Scope
 
-This decision applies to `internal/model/connectwire`, `internal/model/cursor`, and `internal/model/devin`. The float and packed-integer helpers that only the `devin` wire uses stay in `internal/model/devin/wire`.
+This decision applies to `internal/dal/model/connectwire`, `internal/dal/model/cursor`, and `internal/dal/model/devin`. The float and packed-integer helpers that only the `devin` wire uses stay in `internal/dal/model/devin/wire`.
 
 ## Enforcement
 
-`internal/model/connectwire/frame_test.go` checks frame splitting, the frame length limit, and trailer decoding. The `dupl` linter in `just lint` fails when the two wire packages repeat a block of helper code.
+`internal/dal/model/connectwire/frame_test.go` checks frame splitting, the frame length limit, and trailer decoding. The `dupl` linter in `just lint` fails when the two wire packages repeat a block of helper code.

@@ -82,7 +82,7 @@ The caller MUST read the file again. Do not offer a retag-only repair that silen
 
 ## E06. Canonical model-facing description
 
-The description is `enhancedDescription` in `internal/tool/patch/description.go`:
+The description is `enhancedDescription` in `internal/dal/tool/patch/description.go`:
 
 ```text
 Edit files from a read/search snapshot. Copy its [path@reference] header.

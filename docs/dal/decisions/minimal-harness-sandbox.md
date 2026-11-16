@@ -10,11 +10,11 @@ On macOS, the harness sandbox is active when `/usr/bin/sandbox-exec` exists, is 
 
 ## Scope
 
-This decision applies to local execution in `internal/runner`. It does not add a second sandbox inside a remote box. [sandbox.md](../spec/sandbox.md) defines roots, platform behavior, and failure handling.
+This decision applies to local execution in `internal/dal/runner`. It does not add a second sandbox inside a remote box. [sandbox.md](../spec/sandbox.md) defines roots, platform behavior, and failure handling.
 
 ## Enforcement
 
-Runner sandbox tests in `internal/runner` check policy construction and platform behavior. The shim MUST write a nonzero exit record when policy application fails. Review MUST reject any status or documentation that calls the harness policy a security boundary. `just test` runs the Go tests. Platform-specific behavior still requires the matching host.
+Runner sandbox tests in `internal/dal/runner` check policy construction and platform behavior. The shim MUST write a nonzero exit record when policy application fails. Review MUST reject any status or documentation that calls the harness policy a security boundary. `just test` runs the Go tests. Platform-specific behavior still requires the matching host.
 
 ## Rejected alternatives
 

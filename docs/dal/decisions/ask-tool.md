@@ -6,17 +6,17 @@
 
 ## Scope
 
-The package `internal/tool/ask` holds the tool, its argument parser, its cleaning rules, and its result text. This decision permits the imports `internal/agent` to `internal/tool/ask`, `internal/rpc` to `internal/tool/ask`, and `internal/script` to `internal/tool/ask`. The package itself imports only `internal/tool` and `internal/model`.
+The package `internal/dal/tool/ask` holds the tool, its argument parser, its cleaning rules, and its result text. This decision permits the imports `internal/dal/agent` to `internal/dal/tool/ask`, `internal/dal/rpc` to `internal/dal/tool/ask`, and `internal/dal/script` to `internal/dal/tool/ask`. The package itself imports only `internal/dal/tool` and `internal/dal/model`.
 
 The `core` depguard rule is a deny list, not an allow list for these imports.
 
 ## Enforcement
 
-The `core` depguard rule in `.golangci.yml` keeps `internal/tool/ask` free of interface and battery packages. `internal/tool/ask/ask_test.go` checks the argument limits, the cleaning rules, the answer normalisation, and the result texts against `docs/spec/ask.md`.
+The `core` depguard rule in `.golangci.yml` keeps `internal/dal/tool/ask` free of interface and battery packages. `internal/dal/tool/ask/ask_test.go` checks the argument limits, the cleaning rules, the answer normalisation, and the result texts against `docs/dal/spec/ask.md`.
 
-`TestAskToolOnlyOnTopLevelThreads` and `TestAskToolInDal` in `internal/agent/ask_tool_test.go` check the top-level tool scope. `TestScriptCannotCallAsk` in `internal/script/eval_test.go` checks the direct-call rule.
+`TestAskToolOnlyOnTopLevelThreads` and `TestAskToolInDal` in `internal/dal/agent/ask_tool_test.go` check the top-level tool scope. `TestScriptCannotCallAsk` in `internal/dal/script/eval_test.go` checks the direct-call rule.
 
-`TestQuestionTimesOutExactlyAtTimeout` in `internal/agent/question_timeout_test.go` checks the timeout length. `TestSandboxChoiceTimeoutMakesNoChoice` in the same file and `TestAnswerFromReplyTimedOut` in `internal/app/battery/ratchet_internal_test.go` check that a consent question takes no default.
+`TestQuestionTimesOutExactlyAtTimeout` in `internal/dal/agent/question_timeout_test.go` checks the timeout length. `TestSandboxChoiceTimeoutMakesNoChoice` in the same file and `TestAnswerFromReplyTimedOut` in `internal/dalgona/battery/ratchet_internal_test.go` check that a consent question takes no default.
 
 ## Rejected alternatives
 

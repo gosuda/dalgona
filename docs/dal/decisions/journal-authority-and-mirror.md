@@ -8,8 +8,8 @@ Repair MUST use verified records. A damaged thread MUST retain its valid prefix 
 
 ## Scope
 
-This decision applies to `internal/journal` and all state derived from its events. [journal.md](../spec/journal.md) defines the record, append, repair, backup, and lock rules. [recovery.md](../spec/recovery.md) defines tool recovery. The mirror is not an independent source of thread truth.
+This decision applies to `internal/dal/journal` and all state derived from its events. [journal.md](../spec/journal.md) defines the record, append, repair, backup, and lock rules. [recovery.md](../spec/recovery.md) defines tool recovery. The mirror is not an independent source of thread truth.
 
 ## Enforcement
 
-`internal/journal/journal_test.go` checks truncated tails, middle-record repair, damage without a usable mirror, corrupt SQLite, restored tails, and writer exclusion. Event-fold tests in `internal/agent/event/state_test.go` check derived state. `just test` runs these tests with the race detector.
+`internal/dal/journal/journal_test.go` checks truncated tails, middle-record repair, damage without a usable mirror, corrupt SQLite, restored tails, and writer exclusion. Event-fold tests in `internal/dal/agent/event/state_test.go` check derived state. `just test` runs these tests with the race detector.

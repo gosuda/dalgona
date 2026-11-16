@@ -8,8 +8,8 @@ The transport MUST carry one JSON object per line. It MUST preserve request iden
 
 ## Scope
 
-This decision applies to `internal/rpc` and its terminal, web, and desktop consumers. [protocol.md](../spec/protocol.md) defines framing and backpressure. The vendored schemas are under `internal/rpc/testdata/codex-schema`.
+This decision applies to `internal/dal/rpc` and its terminal, web, and desktop consumers. [protocol.md](../spec/protocol.md) defines framing and backpressure. The vendored schemas are under `internal/dal/rpc/testdata/codex-schema`.
 
 ## Enforcement
 
-`internal/rpc/schema_test.go` validates encoded protocol objects against the vendored Codex schemas. The `core` and `clients` depguard rules in [.golangci.yml](../../../.golangci.yml) enforce import direction. `just lint` and `just test` run these checks. A schema check MUST NOT be reported as a live Codex desktop test.
+`internal/dal/rpc/schema_test.go` validates encoded protocol objects against the vendored Codex schemas. The `core` and `clients` depguard rules in [.golangci.yml](../../../.golangci.yml) enforce import direction. `just lint` and `just test` run these checks. A schema check MUST NOT be reported as a live Codex desktop test.

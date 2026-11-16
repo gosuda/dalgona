@@ -141,16 +141,16 @@ Run all L-series and E-series cases in their profile specifications, plus:
 | COMPAT-03 | Old tolerant output receiver | Existing fields meaningful. New metadata ignored when unsupported. |
 | COMPAT-04 | Enhanced conflict | No automatic Light fallback or config change. |
 
-The owner has not set numeric ceilings for MEM-04 or MEM-07. The per-call staging ceiling in code is 64 MiB (`internal/tool/patch/stage.go`).
+The owner has not set numeric ceilings for MEM-04 or MEM-07. The per-call staging ceiling in code is 64 MiB (`internal/dal/tool/patch/stage.go`).
 
 ## T08. Integration order and owners
 
 | Order | Owner | Deliverable |
 |---|---|---|
-| 1 | Patch: internal/tool/snapshot/store.go, internal/tool/patch/ir.go, internal/tool/patch/resolve.go, internal/tool/patch/*_test.go | Reference/revision values, pure mapping/coverage, failing contract tests. |
+| 1 | Patch: internal/dal/tool/snapshot/store.go, internal/dal/tool/patch/ir.go, internal/dal/tool/patch/resolve.go, internal/dal/tool/patch/*_test.go | Reference/revision values, pure mapping/coverage, failing contract tests. |
 | 2 | Read/search plus runtime context | Same-buffer capture and final-delivery metadata. |
 | 3 | Agent/extension request and evaluator owners | Immutable cutoffs and consumer-bound evidence. |
-| 4 | Patch: internal/tool/patch/hashline.go, internal/tool/patch/ir.go | New profiles and section merge. |
+| 4 | Patch: internal/dal/tool/patch/hashline.go, internal/dal/tool/patch/ir.go | New profiles and section merge. |
 | 5 | Patch writer, store and dispatcher | Private prepared plans, truthful outcomes, invocation replay. |
 | 6 | CLI/config/docs/wire | Explicit style selection and new-style schemas/descriptions. |
 | 7 | Gate owner | Filesystem, fault, race, resource, and end-to-end evidence. |
@@ -163,7 +163,7 @@ Future product checks, not executed in this task:
 
 ```sh
 just verify
-go test -race -count=1 ./internal/tool/patch/...
+go test -race -count=1 ./internal/dal/tool/patch/...
 ```
 
 Run filesystem/fault tests on supported native platform lanes. The pure model is
@@ -172,7 +172,7 @@ not a substitute for those tests.
 ## V01. Executed bounded model
 
 [verify_model.py](verify_model.py) models range/gap mapping with unique occurrence
-IDs. Its report is [verification.json](verification.json). Run from `docs/spec/hashline`:
+IDs. Its report is [verification.json](verification.json). Run from `docs/dal/spec/hashline`:
 
 ```sh
 uv run --no-project --python 3.15 verify_model.py

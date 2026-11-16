@@ -10,19 +10,19 @@ The index covers the workspace tree only, so a grep scope inside the workspace u
 
 The index is advice. It names files that the search may skip, and the search keeps its own matcher and output.
 
-The index belongs to the grep mode of the search tool in `internal/tool/search`. The builder runs as a hidden command, `__search-index`, in both products. The library is `github.com/google/codesearch` at v1.2.0, licensed under BSD-3-Clause. It has no module requirements.
+The index belongs to the grep mode of the search tool in `internal/dal/tool/search`. The builder runs as a hidden command, `__search-index`, in both products. The library is `github.com/google/codesearch` at v1.2.0, licensed under BSD-3-Clause. It has no module requirements.
 
 On macOS, `indexDir` returns no index root, so grep scans every eligible file and starts no background index build. Native macOS sandbox runtime checks have not been proven. This scan-only fallback stays until those checks pass. It does not change output byte identity or the platform's change-time support.
 
 ## Enforcement
 
-`TestIndexedGrepEqualsScan` and `FuzzTrigramCandidates` in `internal/tool/search` check that an indexed grep returns the scan's output and names every file that can match. The property test builds an index, then changes, adds and removes files, and covers a build start before, at and after its clock. `TestCoveredFileWithRestoredMtimeIsRead` and `TestRacyFileIsReadEvenWhenStatMatches` check the freshness rule. `TestChildWritesNothingToStderrOnSuccess` and the exit-status tests in `query_exit_test.go` check the child's contract.
+`TestIndexedGrepEqualsScan` and `FuzzTrigramCandidates` in `internal/dal/tool/search` check that an indexed grep returns the scan's output and names every file that can match. The property test builds an index, then changes, adds and removes files, and covers a build start before, at and after its clock. `TestCoveredFileWithRestoredMtimeIsRead` and `TestRacyFileIsReadEvenWhenStatMatches` check the freshness rule. `TestChildWritesNothingToStderrOnSuccess` and the exit-status tests in `query_exit_test.go` check the child's contract.
 
 `TestGenerationRemovedBeforeTrigramReadFallsBackToScan` and `TestPinnedTrigramSurvivesRemovedGeneration` check the rule for a generation deleted during the call. The child opens the trigram file before it names candidates, and the library opens that file through the descriptor of the held file. A generation removed before the read yields the scan, and a removal after the read cannot end the child. A host without a descriptor path uses no index.
 
 ## Threshold
 
-A grep call that counts at least 32 MiB of uncovered bytes starts one background build. The value is `indexRebuildBytes` in `internal/tool/search/index.go`. An unusable index blocks new builds for 10 minutes in every process, through a backoff file in the index root. A failed build blocks further builds only in its own process. A build that runs longer than 10 minutes is killed.
+A grep call that counts at least 32 MiB of uncovered bytes starts one background build. The value is `indexRebuildBytes` in `internal/dal/tool/search/index.go`. An unusable index blocks new builds for 10 minutes in every process, through a backoff file in the index root. A failed build blocks further builds only in its own process. A build that runs longer than 10 minutes is killed.
 
 The 4 GB sweep of `BenchmarkThresholdSweep` has not run on this host, so the value stays at 32 MiB until its output exists. The final value is the smallest uncovered size whose indexed p95 is below its scan p95, or 4 GiB when no size qualifies.
 

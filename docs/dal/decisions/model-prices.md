@@ -8,7 +8,7 @@ A price MUST be a whole number of micro-USD per million tokens. The loader reads
 
 A configured price MUST win over a built-in price. A model with no price adds no cost. The thread cost is partial when a priced message and a message on an unpriced model both exist.
 
-`presetPrices` in `internal/model/price.go` MUST hold the built-in rows. A row MUST name a model of `presetCapabilities`. A preset with no verified price MUST have no row.
+`presetPrices` in `internal/dal/model/price.go` MUST hold the built-in rows. A row MUST name a model of `presetCapabilities`. A preset with no verified price MUST have no row.
 
 ## Scope
 
@@ -47,9 +47,9 @@ Two Google rows change on a known date. `google/gemini-4-argon` costs 4.00 input
 
 ## Enforcement
 
-`TestCostMicros`, `TestCostMicrosRoundsHalfUpOnce`, and `TestCostMicrosSaturatesInsteadOfWrapping` in `internal/model/price_test.go` check the arithmetic. `TestPresetPricesNameKnownPresetModels` in the same file checks that each row names a preset model.
+`TestCostMicros`, `TestCostMicrosRoundsHalfUpOnce`, and `TestCostMicrosSaturatesInsteadOfWrapping` in `internal/dal/model/price_test.go` check the arithmetic. `TestPresetPricesNameKnownPresetModels` in the same file checks that each row names a preset model.
 
-`TestConfigPriceErrors` and `TestConfigPriceAcceptsBoundariesAndLoadsMicros` in `internal/config/price_test.go` check the keys and the rounding. `TestUsageCostPartial` and `TestTokenUsageCarriesCostOnEveryWirePath` in `internal/rpc/serve_cost_test.go` check the wire. `just test` runs these tests.
+`TestConfigPriceErrors` and `TestConfigPriceAcceptsBoundariesAndLoadsMicros` in `internal/dal/config/price_test.go` check the keys and the rounding. `TestUsageCostPartial` and `TestTokenUsageCarriesCostOnEveryWirePath` in `internal/dal/rpc/serve_cost_test.go` check the wire. `just test` runs these tests.
 
 None of these tests proves that a built-in row matches a provider page today. The evidence table above is the only record of that match.
 

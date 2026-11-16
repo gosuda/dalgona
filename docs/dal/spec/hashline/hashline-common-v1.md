@@ -1,6 +1,6 @@
 # Hashline v1: shared specification
 
-Status: implemented in `internal/tool/patch` as the `hashline-light` and `hashline-enhanced` edit styles. Neither is a product default.
+Status: implemented in `internal/dal/tool/patch` as the `hashline-light` and `hashline-enhanced` edit styles. Neither is a product default.
 Date: 2026-09-28.
 Applies to: `hashline-light` and `hashline-enhanced`, contract version 1.
 Companions: [Light](hashline-light-v1.md), [Enhanced](hashline-enhanced-v1.md),
@@ -521,8 +521,8 @@ filesystem effects across crashes.
 
 ## C17. Implementation boundaries and invariants
 
-Keep the existing files `internal/tool/patch/ir.go`, `resolve.go`, `writer.go`, `hashline.go`, and `grammar.go`.
-Put reference bindings, deliveries, leases, and revision continuity only in `internal/tool/snapshot`.
+Keep the existing files `internal/dal/tool/patch/ir.go`, `resolve.go`, `writer.go`, `hashline.go`, and `grammar.go`.
+Put reference bindings, deliveries, leases, and revision continuity only in `internal/dal/tool/snapshot`.
 Extend a fixed
 profile enum. Do not add a dynamic ProofPolicy trait or per-line search database.
 

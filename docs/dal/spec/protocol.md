@@ -25,14 +25,14 @@ The wire supports concurrent requests in both directions. Request identifiers MU
 
 ## Schema
 
-Every response and notification in the Codex subset MUST validate against the vendored schema in `internal/rpc/testdata/codex-schema` (Codex commit `c9b4267c370a755da12ec1c8648c2451163212b7`). Extension methods and notifications under `dalgona/` MUST validate against `internal/rpc/testdata/dalgona-schema`. The server encodes every message with `encoding/json/jsontext` or `encoding/json/v2`.
+Every response and notification in the Codex subset MUST validate against the vendored schema in `internal/dal/rpc/testdata/codex-schema` (Codex commit `c9b4267c370a755da12ec1c8648c2451163212b7`). Extension methods and notifications under `dalgona/` MUST validate against `internal/dal/rpc/testdata/dalgona-schema`. The server encodes every message with `encoding/json/jsontext` or `encoding/json/v2`.
 
 ## Client guarantees
 
 A client MAY validate every message against the schemas. A client MUST ignore an unknown member and an unknown notification method.
 
-- Every response, notification, and server request in the Codex subset MUST validate against `internal/rpc/testdata/codex-schema`.
-- Every `dalgona/` message MUST validate against `internal/rpc/testdata/dalgona-schema`.
+- Every response, notification, and server request in the Codex subset MUST validate against `internal/dal/rpc/testdata/codex-schema`.
+- Every `dalgona/` message MUST validate against `internal/dal/rpc/testdata/dalgona-schema`.
 - Every `thread/status/changed` MUST carry `seq`, an integer of at least 1.
 - Per connection and thread, `seq` MUST strictly increase. This holds after a slow-subscriber catch-up.
 - A client MUST drop a status whose `seq` is lower than the last status it applied for that thread.
@@ -263,7 +263,7 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
 
 ## Clients
 
-`dal` and `dalgona` share one command line (`internal/app` `RunCLI`):
+`dal` and `dalgona` share one command line (`internal/dal/app` `RunCLI`):
 
 - `-p <prompt>` runs one turn and exits.
   Without `--json`, it prints the agent messages of the turn.
@@ -290,4 +290,4 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
 - In `-p` mode the client declines every approval request and refuses every question, so the model receives `declined: no client could answer this question`.
 - `login [provider] [--device-auth]`, `logout <provider>`, and `models` complete without the TUI. `login` without a provider lists the providers.
 
-`app.TUIOptions.OnStatus` MUST receive `app.Status` values that `cmd/internal/tuiwire` converts from `tui.Status`. `internal/app` MUST NOT import `internal/tui`, so command entry points set `CLIEnv.TUI`.
+`app.TUIOptions.OnStatus` MUST receive `app.Status` values that `cmd/internal/tuiwire` converts from `tui.Status`. `internal/dal/app` MUST NOT import `internal/dal/tui`, so command entry points set `CLIEnv.TUI`.

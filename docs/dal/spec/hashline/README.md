@@ -1,6 +1,6 @@
 # Reviewed Hashline specifications
 
-Reviewed 2026-09-28 and adopted 2026-11-08. These files specify the `hashline-light` and `hashline-enhanced` edit styles that `internal/tool/patch` implements. Neither is a default.
+Reviewed 2026-09-28 and adopted 2026-11-08. These files specify the `hashline-light` and `hashline-enhanced` edit styles that `internal/dal/tool/patch` implements. Neither is a default.
 
 **Light relaxes prior observation. Enhanced requires prior observation. Both
 identify the source snapshot and reject unsupported target changes.**
@@ -21,7 +21,7 @@ The review identifies its exact checksum and relevant physical line ranges.
 
 [verify_model.py](verify_model.py) and [verification.json](verification.json) contain
 reproducible bounded range/gap checks: 109,673 cases plus eight logical regressions.
-Run `uv run --no-project --python 3.15 verify_model.py` from `docs/spec/hashline`.
+Run `uv run --no-project --python 3.15 verify_model.py` from `docs/dal/spec/hashline`.
 
 `just hashline-model` fails when the verifier output differs from `verification.json`. When `CI` is `true` and `uv` is missing, `just hashline-model` fails. Otherwise, when `uv` is missing, `just hashline-model` prints `hashline-model: skipped, uv is not installed`. It then exits with status 0.
 

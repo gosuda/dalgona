@@ -4,7 +4,7 @@
 
 The program MUST NOT ship a default thread model. The user MUST select the thread model. A role preset MUST NOT grant access to a model that the provider does not offer.
 
-`internal/model/presets.go` MUST hold the native provider identifiers in two tables: `Presets` for the role presets, and `presetCapabilities` for the capabilities of each identifier:
+`internal/dal/model/presets.go` MUST hold the native provider identifiers in two tables: `Presets` for the role presets, and `presetCapabilities` for the capabilities of each identifier:
 
 | Provider | default selection hint | smol | slow |
 | --- | --- | --- | --- |
@@ -36,4 +36,4 @@ The record cross-checks native names against [OpenRouter's catalog](https://open
 
 ## Enforcement
 
-`TestResolveRole` in `internal/model/model_test.go` checks fallback. `TestChildThreadFallsBackToNearestLowerDeclaredEffort` and `TestTopLevelTurnRefusesUndeclaredMediumEffort` in `internal/agent/request_effort_test.go` check effort handling. `TestCapabilitiesCoverEveryPresetModel` in `internal/model/model_test.go` checks preset capability coverage. `TestRoleResolutionUsesPresetsAndFallsBack` in `internal/agent/misc_test.go` checks host role resolution. `TestRolesConfig_Configured` in `internal/config/advisor_test.go` checks advisor role inheritance. `just test` runs these tests. None of these tests proves that a live account offers a preset.
+`TestResolveRole` in `internal/dal/model/model_test.go` checks fallback. `TestChildThreadFallsBackToNearestLowerDeclaredEffort` and `TestTopLevelTurnRefusesUndeclaredMediumEffort` in `internal/dal/agent/request_effort_test.go` check effort handling. `TestCapabilitiesCoverEveryPresetModel` in `internal/dal/model/model_test.go` checks preset capability coverage. `TestRoleResolutionUsesPresetsAndFallsBack` in `internal/dal/agent/misc_test.go` checks host role resolution. `TestRolesConfig_Configured` in `internal/dal/config/advisor_test.go` checks advisor role inheritance. `just test` runs these tests. None of these tests proves that a live account offers a preset.
