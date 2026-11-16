@@ -2,7 +2,7 @@
 
 ## jcode (MIT)
 
-The Copilot device-login constants and token-exchange protocol in `internal/auth/oauth` and `internal/model/copilot` adapt `crates/jcode-base/src/auth/copilot.rs`.
+The Copilot device-login constants and token-exchange protocol in `internal/dal/auth/oauth` and `internal/dal/model/copilot` adapt `crates/jcode-base/src/auth/copilot.rs`.
 
 ```text
 MIT License
@@ -30,7 +30,7 @@ SOFTWARE.
 
 ## oh-my-pi (MIT)
 
-`internal/ratchet` adapts `packages/coding-agent/src/ratchet/ratchet.ts` from oh-my-pi (https://omp.sh), with changes. The license of oh-my-pi reads as follows.
+`internal/dalgona/ratchet` adapts `packages/coding-agent/src/ratchet/ratchet.ts` from oh-my-pi (https://omp.sh), with changes. The license of oh-my-pi reads as follows.
 
 ```text
 MIT License
@@ -60,9 +60,9 @@ SOFTWARE.
 
 ## zero (MIT)
 
-`internal/secrets/scanner.go` adapts `internal/secrets/scanner.go` from zero (https://github.com/Twigpine/zero), with changes. The license of zero reads as follows.
+`internal/dal/secrets/scanner.go` adapts `internal/secrets/scanner.go` from zero (https://github.com/Twigpine/zero), with changes. The license of zero reads as follows.
 
-`internal/runner/windows_token_windows.go` and `internal/runner/windows_acl_windows.go` adapt zero's Windows token and ACL sandbox implementation, with changes.
+`internal/dal/runner/windows_token_windows.go` and `internal/dal/runner/windows_acl_windows.go` adapt zero's Windows token and ACL sandbox implementation, with changes.
 
 ```text
 MIT License
@@ -880,7 +880,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 ## gotreesitter (MIT)
 
-The module `github.com/odvcencio/gotreesitter` v0.57.0 is required by go.mod and imported by `internal/syntax`. Its licence text follows.
+The module `github.com/odvcencio/gotreesitter` v0.57.0 is required by go.mod and imported by `internal/dal/syntax`. Its licence text follows.
 
 MIT License
 

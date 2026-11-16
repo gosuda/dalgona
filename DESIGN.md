@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file sets one visual system for both interfaces of dalgona: the terminal interface in `internal/tui` and the web interface in `web/`. Both interfaces use the same themes, colours, type, components, motion, words, icons and marks. Read this file before you add or change a colour, a type size, a component, a glyph, a motion, a status item or a mark.
+This file sets one visual system for both interfaces of dalgona: the terminal interface in `internal/dal/tui` and the web interface in `web/`. Both interfaces use the same themes, colours, type, components, motion, words, icons and marks. Read this file before you add or change a colour, a type size, a component, a glyph, a motion, a status item or a mark.
 
 To change the system, follow [How to change this file](#how-to-change-this-file).
 
@@ -356,6 +356,6 @@ The name 고나 appears only in this file and in image alternative text. The int
 ## How to change this file
 
 1. Get the owner's approval before you change a value, a component, a glyph, a motion, a status item or a mark.
-2. Change `internal/tui` and `web/` in the same commit, so that the two interfaces stay the same.
-3. Record each rejected option, with its reason, in `docs/decisions/`.
+2. Change `internal/dal/tui` and `web/` in the same commit, so that the two interfaces stay the same.
+3. Record each rejected option, with its reason, in `docs/dal/decisions/`.
 4. Check the accessibility gates in the section Accessibility before you commit.

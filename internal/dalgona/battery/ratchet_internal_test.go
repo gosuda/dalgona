@@ -131,7 +131,7 @@ func TestThreadAskerPreviewRoomIsTheAskLimit(t *testing.T) {
 	t.Parallel()
 	chars, lines := threadAsker{}.PreviewRoom()
 	if chars != 2000 || lines != 40 {
-		t.Fatalf("PreviewRoom = %d characters and %d lines, want 2000 and 40 from docs/spec/ask.md", chars, lines)
+		t.Fatalf("PreviewRoom = %d characters and %d lines, want 2000 and 40 from docs/dal/spec/ask.md", chars, lines)
 	}
 	cases := []struct {
 		name    string

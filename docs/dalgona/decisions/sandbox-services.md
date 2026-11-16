@@ -6,7 +6,7 @@ Remote execution MUST use the `Service` seam in `internal/sandboxsvc`. A service
 
 [runners.md](../spec/runners.md) lists the supported services. Exec and subagents MAY run in any listed box while the orchestrator stays local. A whole-daemon box MUST use a service that [runners.md](../spec/runners.md) allows for fully cloud mode.
 
-Modal replacement MUST retain the named volume. Sandbox0 MUST use a template, not an image. [sandbox-services.md](../spec/sandbox-services.md) defines these persistence contracts. [exec-server.md](../spec/exec-server.md) defines the common wire, bootstrap, and binary-version checks.
+Modal replacement MUST retain the named volume. Sandbox0 MUST use a template, not an image. [sandbox-services.md](../spec/sandbox-services.md) defines these persistence contracts. [exec-server.md](../../dal/spec/exec-server.md) defines the common wire, bootstrap, and binary-version checks.
 
 ## Scope
 

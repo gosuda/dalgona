@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-const liveSpecPath = "../../docs/spec/live-debug.md"
+const liveSpecPath = "../../docs/dal/spec/live-debug.md"
 
 var liveTurnReference = regexp.MustCompile(`(?:^|[^A-Za-z0-9_-])(t-[a-z0-9]+(?:-[a-z0-9]+)*)`)
 

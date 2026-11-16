@@ -81,7 +81,7 @@ The `providers` check MUST write one row for each provider that has a stored or 
 | `providers` | `fail providers: <id>: <error>` | The store cannot read the credential. |
 | `providers` | `warn providers: no credential found; run dalgona login <id>` | No provider has a credential. |
 
-A duration MUST follow the duration form of [DESIGN.md](../../DESIGN.md).
+A duration MUST follow the duration form of [DESIGN.md](../../../DESIGN.md).
 
 | Check | Row | Meaning |
 | --- | --- | --- |

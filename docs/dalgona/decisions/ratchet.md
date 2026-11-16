@@ -6,7 +6,7 @@ The host MUST own the split, the approvals, the completeness and leak checks, an
 
 ## Scope
 
-This decision covers `internal/ratchet`, the battery wiring in `internal/app/battery`, and the depguard rules in `.golangci.yml`. The statistic and decision rules are in [ratchet.md](../spec/ratchet.md). The ported rules keep their MIT notice in [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md).
+This decision covers `internal/ratchet`, the battery wiring in `internal/app/battery`, and the depguard rules in `.golangci.yml`. The statistic and decision rules are in [ratchet.md](../spec/ratchet.md). The ported rules keep their MIT notice in [THIRD_PARTY_NOTICES.md](../../../THIRD_PARTY_NOTICES.md).
 
 ## Enforcement
 

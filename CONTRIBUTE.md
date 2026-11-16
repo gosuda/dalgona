@@ -10,7 +10,7 @@ When you replace an implementation, migrate all callers in the same change and r
 
 Use names, types, and control flow to explain the implementation. Do not use comments to hide unclear logic. Write no prose comment in Go, hand-written TypeScript and JavaScript, Svelte, or Python source. Keep only these Go directives: `//go:build`, `//go:embed`, `//go:generate`, and `//nolint:<linters> // <reason>`. Non-Go directive comments are forbidden, for example `@ts-expect-error`, `biome-ignore`, `svelte-ignore`, and `noqa`. A legal notice that a license requires is legal metadata, not a prose comment, and stays where the license requires it. A third-party notice file does not replace a required source notice. Put the source of a non-obvious protocol rule in `docs/spec`, with the upstream project and file named.
 
-Use `encoding/json/jsontext` for wire, journal, and hot-path JSON. Use `protowire` for Protobuf. You can use `encoding/json/v2` for cold config-shaped data. Use HTTP and streaming codecs for provider adapters, not provider SDKs. [The dependency decision](docs/decisions/dependencies.md) and depguard in [.golangci.yml](.golangci.yml) define the import restrictions.
+Use `encoding/json/jsontext` for wire, journal, and hot-path JSON. Use `protowire` for Protobuf. You can use `encoding/json/v2` for cold config-shaped data. Use HTTP and streaming codecs for provider adapters, not provider SDKs. [The dependency decision](docs/dal/decisions/dependencies.md) and depguard in [.golangci.yml](.golangci.yml) define the import restrictions.
 
 Avoid an allocation or copy when a slice, reused buffer, or stream can do the same work. Add a package only when it hides a real decision, not when it only forwards calls.
 
@@ -22,9 +22,9 @@ Three named drift gates are the exceptions to the rule above on source text and 
 
 Prove that a new test detects its defect with a mutation probe: put that defect into the code, for example by dropping, duplicating, or reordering one step, watch the test fail, then restore the code. Never commit the probe.
 
-For persistence changes, test interruption and damaged input against [journal.md](docs/spec/journal.md) and [recovery.md](docs/spec/recovery.md). For protocol changes, preserve [protocol.md](docs/spec/protocol.md) and the vendored schema tests in `internal/rpc`. For edit changes, test refusal without partial writes under [edit-styles.md](docs/spec/edit-styles.md).
+For persistence changes, test interruption and damaged input against [journal.md](docs/dal/spec/journal.md) and [recovery.md](docs/dal/spec/recovery.md). For protocol changes, preserve [protocol.md](docs/dal/spec/protocol.md) and the vendored schema tests in `internal/dal/rpc`. For edit changes, test refusal without partial writes under [edit-styles.md](docs/dal/spec/edit-styles.md).
 
-Live debugging: `just live-up`, then follow [live-debug.md](docs/spec/live-debug.md); `just live-down` stops everything.
+Live debugging: `just live-up`, then follow [live-debug.md](docs/dal/spec/live-debug.md); `just live-down` stops everything.
 
 ## Use the declared tools
 

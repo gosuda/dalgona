@@ -39,8 +39,8 @@ hashline-model:
     fi
     out=$(mktemp)
     trap 'rm -f "$out"' EXIT
-    uv run --no-project --python 3.15 docs/spec/hashline/verify_model.py > "$out"
-    cmp "$out" docs/spec/hashline/verification.json
+    uv run --no-project --python 3.15 docs/dal/spec/hashline/verify_model.py > "$out"
+    cmp "$out" docs/dal/spec/hashline/verification.json
 
 spec-style:
     #!/usr/bin/env bash
@@ -56,8 +56,12 @@ spec-style:
         echo "spec-style: skipped, uv is not installed"
         exit 0
     fi
-    uv run --no-project --python 3.15 docs/spec/check_style.py docs/spec
-    uv run --no-project --python 3.15 docs/spec/check_style_test.py
+    uv run --no-project --python 3.15 docs/dal/spec/check_style.py docs/dal/spec
+    uv run --no-project --python 3.15 docs/dal/spec/check_style.py docs/dalgona/spec
+    uv run --no-project --python 3.15 docs/dal/spec/check_style_test.py
+
+docs-links:
+    python3 docs/check_links.py
 
 web:
     pnpm -C web install --frozen-lockfile
@@ -136,7 +140,7 @@ box_tag := `git describe --tags --exact-match HEAD 2>/dev/null || git rev-parse 
 box-image: dist
     docker buildx build -f deploy/box/Dockerfile --platform linux/amd64,linux/arm64 -t dalgona-box:{{box_tag}} .
 
-verify: fmt-check vet lint test vuln hashline-model spec-style web-check cf-check
+verify: fmt-check vet lint test vuln hashline-model spec-style docs-links web-check cf-check
 
 live_root := "/tmp/dg"
 

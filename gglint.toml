@@ -12,6 +12,6 @@ text = '^unknown nolint rule "depguard"$'
 
 # Native lint checks these gosec directives; gglint omits their rules.
 [[exclude]]
-paths = ['^internal/(dalgona/(daemon/(run|socketperm_test)|ratchet/setup|webui/webui_test)|dal/rpc/serve_fuzzy|dal/script/stdlib/random|dal/tool/search/manifest)\.go$']
+paths = ['^internal/(dalgona/(daemon/(run|socketperm_test)|ratchet/setup|webui/webui_test)|dal/(rpc/serve_fuzzy|script/stdlib/random|tool/search/manifest))\.go$']
 rules = ["nolint"]
 text = '^unused nolint directive for gosec$'

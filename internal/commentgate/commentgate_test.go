@@ -878,7 +878,7 @@ func TestRepoFilesSkipsIgnoredDirectories(t *testing.T) {
 			files: []string{
 				"a.go", "internal/b.go", ".references/c.go", "node_modules/d.ts", "web/node_modules/e.ts",
 				"web/.svelte-kit/f.ts", "dist/g.py", "internal/dalgona/webui/dist/h.ts", "web/src/lib/codex/i.ts",
-				"web/src/lib/j.ts", "local/k.py", "docs/spec/l.md",
+				"web/src/lib/j.ts", "local/k.py", "docs/dal/spec/l.md",
 			},
 			want: []string{"a.go", "internal/b.go", "web/src/lib/j.ts"},
 		},
@@ -929,7 +929,7 @@ func TestRepositoryHasNoProseComments(t *testing.T) {
 			found = scanLines(rel, src, legalNotices)
 		}
 		for _, f := range found {
-			t.Errorf("%s:%d: comment; restructure so a name or a type says it, or move its rule to docs/spec.", f.path, f.line)
+			t.Errorf("%s:%d: comment; restructure so a name or a type says it, or move its rule to docs/dal/spec.", f.path, f.line)
 		}
 	}
 }

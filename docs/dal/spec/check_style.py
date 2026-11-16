@@ -149,7 +149,7 @@ def findings(path):
 
 
 def main():
-    root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "docs/spec")
+    root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "docs/dal/spec")
     if not root.exists():
         print(f"style: target not found: {root}", file=sys.stderr)
         return 2

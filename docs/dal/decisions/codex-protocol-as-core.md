@@ -12,4 +12,4 @@ This decision applies to `internal/rpc` and its terminal, web, and desktop consu
 
 ## Enforcement
 
-`internal/rpc/schema_test.go` validates encoded protocol objects against the vendored Codex schemas. The `core` and `clients` depguard rules in [.golangci.yml](../../.golangci.yml) enforce import direction. `just lint` and `just test` run these checks. A schema check MUST NOT be reported as a live Codex desktop test.
+`internal/rpc/schema_test.go` validates encoded protocol objects against the vendored Codex schemas. The `core` and `clients` depguard rules in [.golangci.yml](../../../.golangci.yml) enforce import direction. `just lint` and `just test` run these checks. A schema check MUST NOT be reported as a live Codex desktop test.

@@ -46,7 +46,7 @@ The error for a non-2xx response MUST contain at most the first 8192 bytes of th
 
 ## HTTP authentication
 
-Authentication applies to the Streamable HTTP transport only. A server MAY set `bearer_token_env` or `oauth`, but not both. The keys are in [Configuration](config.md).
+Authentication applies to the Streamable HTTP transport only. A server MAY set `bearer_token_env` or `oauth`, but not both. The keys are in [Configuration](../../dal/spec/config.md).
 
 Discovery of Claude and Codex files MUST NOT read these keys. Only the native `[mcp_servers.<name>]` tables set them.
 
@@ -92,7 +92,7 @@ Text blocks MUST produce their text. Image blocks MUST produce `[image <mimeType
 
 A workspace MCP server is any discovered server whose configuration file lives under the current working directory. Home and product-level servers are not workspace servers. The host MUST NOT start a workspace server process until the user trusts that workspace.
 
-The host MUST ask once per workspace. The prompt MUST show the workspace path, every server command, its arguments, and its env keys. The host MUST send the prompt through the approval channel that asks about tool calls. Env entries reach the child process. The prompt MUST show the `PATH` and `LD_PRELOAD` keys when set. Every env value MUST appear only as `KEY=<redacted>`. The summary, reason, commands, and RPC log MUST NOT contain a raw env value. The `command` field MUST join one server line per server with newlines, not shell conjunctions. Workspace identity MUST use the canonical form defined for `mcp_trusted_workspaces` in [Configuration](config.md). The in-memory session map MUST use that form. An approval MUST persist the workspace in `mcp_trusted_workspaces` (see `config.md`) so a host restart keeps the trust. A refusal MUST hold for the session: the servers MUST stay stopped and the host MUST NOT ask again. While a workspace is untrusted, its servers MUST stay unstarted and their tools MUST stay absent. Home and product-level servers MUST start as before, without a trust prompt.
+The host MUST ask once per workspace. The prompt MUST show the workspace path, every server command, its arguments, and its env keys. The host MUST send the prompt through the approval channel that asks about tool calls. Env entries reach the child process. The prompt MUST show the `PATH` and `LD_PRELOAD` keys when set. Every env value MUST appear only as `KEY=<redacted>`. The summary, reason, commands, and RPC log MUST NOT contain a raw env value. The `command` field MUST join one server line per server with newlines, not shell conjunctions. Workspace identity MUST use the canonical form defined for `mcp_trusted_workspaces` in [Configuration](../../dal/spec/config.md). The in-memory session map MUST use that form. An approval MUST persist the workspace in `mcp_trusted_workspaces` (see `config.md`) so a host restart keeps the trust. A refusal MUST hold for the session: the servers MUST stay stopped and the host MUST NOT ask again. While a workspace is untrusted, its servers MUST stay unstarted and their tools MUST stay absent. Home and product-level servers MUST start as before, without a trust prompt.
 
 Opening a thread MUST NOT ask for workspace trust. Discovery that needs approval MUST wait for the first turn, when the actor loop runs and a client can answer the prompt.
 A trust prompt that a client can answer MUST wait until the client answers or the request context ends.
