@@ -136,4 +136,11 @@ func TestSplitSameSeedSameIDs(t *testing.T) {
 	if first.SplitSeed != 7 || first.TestFraction != 0.4 {
 		t.Fatalf("recorded seed %d fraction %v, want 7 and 0.4", first.SplitSeed, first.TestFraction)
 	}
+	var other state
+	if err := other.split(strata, 0.4, 8); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Equal(first.TestIDs, other.TestIDs) {
+		t.Fatalf("seeds 7 and 8 gave the same test ids %v; the seed must change the split", first.TestIDs)
+	}
 }

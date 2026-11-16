@@ -39,6 +39,10 @@ func (a threadAsker) Ask(ctx context.Context, callID string, q ratchet.Question)
 	return answerFrom(q, reply)
 }
 
+func (threadAsker) PreviewRoom() (int, int) {
+	return asktool.MaxPreview, asktool.MaxPreviewLines
+}
+
 func askQuestion(q ratchet.Question) (asktool.Question, error) {
 	if q.Text == "" {
 		return asktool.Question{}, errors.New("ratchet approval: question text is empty")

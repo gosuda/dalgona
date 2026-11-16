@@ -126,3 +126,42 @@ func TestAnswerFromReply(t *testing.T) {
 		})
 	}
 }
+
+func TestThreadAskerPreviewRoomIsTheAskLimit(t *testing.T) {
+	t.Parallel()
+	chars, lines := threadAsker{}.PreviewRoom()
+	if chars != 2000 || lines != 40 {
+		t.Fatalf("PreviewRoom = %d characters and %d lines, want 2000 and 40 from docs/spec/ask.md", chars, lines)
+	}
+	cases := []struct {
+		name    string
+		preview string
+		refused bool
+	}{
+		{"full characters", strings.Repeat("p", chars), false},
+		{"one character over", strings.Repeat("p", chars+1), true},
+		{"full lines", strings.Repeat("x\n", lines-1) + "x", false},
+		{"one line over", strings.Repeat("x\n", lines) + "x", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := askQuestion(ratchet.Question{Header: "h", Text: "t", Options: []ratchet.Option{{Label: "a", Preview: c.preview}}})
+			if (err != nil) != c.refused {
+				t.Fatalf("askQuestion error = %v, want refused %v", err, c.refused)
+			}
+		})
+	}
+}
+
+func TestAnswerFromReplyTimedOut(t *testing.T) {
+	t.Parallel()
+	question := ratchet.Question{Options: []ratchet.Option{{Label: "Approve"}, {Label: "Revise"}, {Label: "Abort"}}}
+	if _, err := answerFrom(question, asktool.Reply{Outcome: asktool.OutcomeTimedOut}); !errors.Is(err, ratchet.ErrCancelled) {
+		t.Fatalf("error = %v, want %v", err, ratchet.ErrCancelled)
+	}
+	got, err := answerFrom(question, asktool.Reply{Outcome: asktool.OutcomeAnswered, Answers: [][]string{{"Approve"}}})
+	if err != nil || got != (ratchet.Answer{Label: "Approve"}) {
+		t.Fatalf("answer = %+v, %v; want Approve", got, err)
+	}
+}

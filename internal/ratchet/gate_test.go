@@ -161,18 +161,13 @@ func gradeRows(rep int, grade string) []string {
 	return lines
 }
 
-func gateWithFirstRow(fx *fixture, first string) error {
-	fx.baseline(rowsFor(0, allGrade(false), noExtra))
-	fx.changeP("two\n")
-	fx.check("v1")
-	rows := rowsFor(0, allGrade(true), noExtra)
-	rows[0] = first
-	fx.writeResults("v1", rows...)
+func (fx *fixture) refuseGate(variant string) error {
+	fx.t.Helper()
 	before, err := fx.f.root.ReadFile(filepath.Join(fx.f.dir, "state.json"))
 	if err != nil {
 		fx.t.Fatal(err)
 	}
-	_, err = fx.gate("v1")
+	_, err = fx.f.gate(fx.s, variant, variant)
 	after, readErr := fx.f.root.ReadFile(filepath.Join(fx.f.dir, "state.json"))
 	if readErr != nil {
 		fx.t.Fatal(readErr)
@@ -181,6 +176,16 @@ func gateWithFirstRow(fx *fixture, first string) error {
 		fx.t.Fatal("refused gate changed state.json")
 	}
 	return err
+}
+
+func gateWithFirstRow(fx *fixture, first string) error {
+	fx.baseline(rowsFor(0, allGrade(false), noExtra))
+	fx.changeP("two\n")
+	fx.check("v1")
+	rows := rowsFor(0, allGrade(true), noExtra)
+	rows[0] = first
+	fx.writeResults("v1", rows...)
+	return fx.refuseGate("v1")
 }
 
 func noExtra(string) string { return "" }
@@ -197,26 +202,52 @@ func TestGateTruncatedGradeExcludesQualityAndKeepsRuntimeMetrics(t *testing.T) {
 	t.Parallel()
 	for _, grade := range []string{`false`, `0`, `{"score":false,"latency_s":99}`} {
 		t.Run(grade, func(t *testing.T) {
-			t.Parallel()
-			fx := newFixture(t, "latency_s")
-			extra := func(string) string { return `,"latency_s":1` }
-			fx.baseline(rowsFor(0, allGrade(false), extra))
-			fx.changeP("two\n")
-			fx.check("v1")
-			rows := rowsFor(0, allGrade(true), extra)
-			rows[0] = fmt.Sprintf(`{"case_id":"a","rep":0,"status":"truncated","grade":%s,"latency_s":1}`, grade)
-			fx.writeResults("v1", rows...)
-			result := fx.mustGate("v1")
-			if score := result.Train["score"]; score.N != 3 || score.Mean == nil || *score.Mean != 1 {
-				t.Fatalf("train score = %+v, want 3 cases with mean 1", score)
-			}
-			if latency := result.Train["latency_s"]; latency.N != 4 || latency.Mean == nil || *latency.Mean != 1 {
-				t.Fatalf("train latency = %+v, want 4 cases with mean 1", latency)
-			}
-			if !slices.Contains(result.Warnings, "1 truncated rows excluded from quality means") {
-				t.Fatalf("warnings = %v, want truncated quality exclusion", result.Warnings)
-			}
+			runTruncatedGradeCase(t, grade)
 		})
+	}
+	t.Run("ok grade false counts as quality", runOkGradeCountsAsQuality)
+}
+
+func runTruncatedGradeCase(t *testing.T, grade string) {
+	t.Helper()
+	t.Parallel()
+	fx := newFixture(t, "latency_s")
+	extra := func(string) string { return `,"latency_s":1` }
+	fx.baseline(rowsFor(0, allGrade(false), extra))
+	fx.changeP("two\n")
+	fx.check("v1")
+	rows := rowsFor(0, allGrade(true), extra)
+	rows[0] = fmt.Sprintf(`{"case_id":"a","rep":0,"status":"truncated","grade":%s,"latency_s":1}`, grade)
+	fx.writeResults("v1", rows...)
+	result := fx.mustGate("v1")
+	if score := result.Train["score"]; score.N != 3 || score.Mean == nil || *score.Mean != 1 {
+		t.Fatalf("train score = %+v, want 3 cases with mean 1", score)
+	}
+	if latency := result.Train["latency_s"]; latency.N != 4 || latency.Mean == nil || *latency.Mean != 1 {
+		t.Fatalf("train latency = %+v, want 4 cases with mean 1", latency)
+	}
+	if !slices.Contains(result.Warnings, "1 truncated rows excluded from quality means") {
+		t.Fatalf("warnings = %v, want truncated quality exclusion", result.Warnings)
+	}
+}
+
+func runOkGradeCountsAsQuality(t *testing.T) {
+	t.Helper()
+	t.Parallel()
+	fx := newFixture(t, "latency_s")
+	extra := func(string) string { return `,"latency_s":1` }
+	fx.baseline(rowsFor(0, allGrade(false), extra))
+	fx.changeP("two\n")
+	fx.check("v1")
+	rows := rowsFor(0, allGrade(true), extra)
+	rows[0] = rowLine("a", 0, false, `,"latency_s":1`)
+	fx.writeResults("v1", rows...)
+	result := fx.mustGate("v1")
+	if score := result.Train["score"]; score.N != 4 || score.Mean == nil || *score.Mean != 0.75 {
+		t.Fatalf("train score = %+v, want 4 cases with mean 0.75", score)
+	}
+	if slices.Contains(result.Warnings, "1 truncated rows excluded from quality means") {
+		t.Fatalf("warnings = %v, want no truncation warning", result.Warnings)
 	}
 }
 
@@ -394,16 +425,14 @@ func TestGateRefusals(t *testing.T) {
 			fx.changeP("two\n")
 			fx.check("v1")
 			fx.writeResults("v1", rowsFor(0, allGrade(true), noExtra)[:7]...)
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, "v1 is incomplete: 1 (case, rep) slots have no result or error row (h#0)"},
 		{"duplicate", func(fx *fixture) error {
 			fx.baseline(rowsFor(0, allGrade(false), noExtra))
 			fx.changeP("two\n")
 			fx.check("v1")
 			fx.writeResults("v1", append(rowsFor(0, allGrade(true), noExtra), rowLine("a", 0, true, ""))...)
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, "v1/results.jsonl has duplicate (case, rep) rows (a#0); keep one row per slot and gate again"},
 		{"transcript of a test case", func(fx *fixture) error {
 			fx.baseline(rowsFor(0, allGrade(false), noExtra))
@@ -411,8 +440,7 @@ func TestGateRefusals(t *testing.T) {
 			fx.check("v1")
 			fx.writeResults("v1", rowsFor(0, allGrade(true), noExtra)...)
 			fx.writeTrace("e_rep0.json")
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, "v1/traces holds transcripts for test cases (e_rep0.json); write traces for train cases only, delete these, and run again"},
 		{"stray trace file", func(fx *fixture) error {
 			fx.baseline(rowsFor(0, allGrade(false), noExtra))
@@ -420,8 +448,7 @@ func TestGateRefusals(t *testing.T) {
 			fx.check("v1")
 			fx.writeResults("v1", rowsFor(0, allGrade(true), noExtra)...)
 			fx.writeTrace("notes.txt")
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, "v1/traces holds a file that is not <case>_rep<k>.json: notes.txt"},
 		{"test row with text", func(fx *fixture) error {
 			fx.baseline(rowsFor(0, allGrade(false), noExtra))
@@ -434,24 +461,21 @@ func TestGateRefusals(t *testing.T) {
 				return ""
 			})
 			fx.writeResults("v1", rows...)
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, "test row e#0 carries text field explanation; keep output text of test cases out of results.jsonl"},
 		{"no score field", func(fx *fixture) error {
 			fx.baseline(rowsFor(0, allGrade(false), noExtra))
 			fx.changeP("two\n")
 			fx.check("v1")
 			fx.writeResults("v1", gradeRows(0, `{"pass":true}`)...)
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, `no train row carries the target metric "score"`},
 		{"no test row carries the target", func(fx *fixture) error {
 			fx.baseline(rowsFor(0, allGrade(false), noExtra))
 			fx.changeP("two\n")
 			fx.check("v1")
 			fx.writeResults("v1", append(rowsFor(0, allGrade(true), noExtra)[:4], gradeRows(0, `{"pass":true}`)[4:]...)...)
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, `no test row carries the target metric "score"`},
 		{"row without status", func(fx *fixture) error {
 			return gateWithFirstRow(fx, `{"case_id":"a","rep":0,"grade":true}`)
@@ -486,30 +510,26 @@ func TestGateRefusals(t *testing.T) {
 			fx.check("v1")
 			fx.changeP("three\n")
 			fx.writeResults("v1", rowsFor(0, allGrade(true), noExtra)...)
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, "the change paths changed after check(v1); call check again and run v1 again"},
 		{"gate without check", func(fx *fixture) error {
 			fx.baseline(rowsFor(0, allGrade(false), noExtra))
 			fx.writeResults("v1", rowsFor(0, allGrade(true), noExtra)...)
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, "call check(v1) before gate(v1)"},
 		{"row without rep", func(fx *fixture) error {
 			fx.baseline(rowsFor(0, allGrade(false), noExtra))
 			fx.changeP("two\n")
 			fx.check("v1")
 			fx.writeResults("v1", `{"case_id":"a","grade":true}`)
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, "v1/results.jsonl line 1: rep must be a non-negative integer"},
 		{"row with unknown status", func(fx *fixture) error {
 			fx.baseline(rowsFor(0, allGrade(false), noExtra))
 			fx.changeP("two\n")
 			fx.check("v1")
 			fx.writeResults("v1", `{"case_id":"a","rep":0,"status":"done","grade":true}`)
-			_, err := fx.gate("v1")
-			return err
+			return fx.refuseGate("v1")
 		}, "v1/results.jsonl line 1: status must be ok or truncated"},
 	}
 	for _, tc := range cases {

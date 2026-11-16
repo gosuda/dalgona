@@ -359,3 +359,7 @@ func (a *liveRatchetAsker) Ask(_ context.Context, _ string, q ratchet.Question) 
 	}
 	return ratchet.Answer{Label: "Approve"}, nil
 }
+
+func (liveRatchetAsker) PreviewRoom() (int, int) {
+	return 2000, 40
+}

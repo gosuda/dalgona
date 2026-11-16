@@ -64,6 +64,49 @@ func TestRerunLimit(t *testing.T) {
 	}
 }
 
+func TestDecideRoundNamesRegressedGuardsInHoldOrder(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		guards []guard
+		target pair
+		want   string
+		reason string
+	}{
+		{"both guards down in hold order", []guard{{Metric: "b", pair: mk("down", "flat")}, {Metric: "a", pair: mk("flat", "down")}}, mk("up", "up"), "revert", "guardrail regressed vs baseline: b, a"},
+		{"guardrail beats a regressed target", []guard{{Metric: "a", pair: mk("down", "flat")}}, mk("down", "up"), "revert", "guardrail regressed vs baseline: a"},
+		{"flat guards keep an improved target", []guard{{Metric: "b", pair: mk("flat", "flat")}, {Metric: "a", pair: mk("flat", "flat")}}, mk("up", "up"), "keep", "score improved on train and test vs baseline"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, reason := decideRound(roundInput{Target: "score", Pair: tc.target, Guards: tc.guards, Ref: "baseline", Variant: "v1"})
+			if got != tc.want || reason != tc.reason {
+				t.Fatalf("decideRound = %q %q, want %q %q", got, reason, tc.want, tc.reason)
+			}
+		})
+	}
+}
+
+func TestDoneRequiresPlan(t *testing.T) {
+	t.Parallel()
+	s := &state{FlatRounds: 3}
+	for i := 1; i <= 10; i++ {
+		s.Rounds = append(s.Rounds, round{Round: i, Variant: fmt.Sprintf("v%d", i), Decision: "revert"})
+	}
+	if done, reason := s.done(); done {
+		t.Fatalf("state without a plan done = %v %q, want false", done, reason)
+	}
+	if s.plateauReached() {
+		t.Fatal("state without a plan reached a plateau")
+	}
+	planned := &state{Stop: stopRule{Plateau: 3, Rounds: 10}, FlatRounds: 3, Rounds: s.Rounds}
+	done, reason := planned.done()
+	if !done || reason != "plateau after 3 reverts" {
+		t.Fatalf("planned state done = %v %q, want plateau after 3 reverts", done, reason)
+	}
+}
+
 func record(s *state, r round) {
 	if n := len(s.Rounds); n > 0 && s.Rounds[n-1].Decision == "rerun" && s.Rounds[n-1].Variant == r.Variant {
 		r.Round = s.Rounds[n-1].Round

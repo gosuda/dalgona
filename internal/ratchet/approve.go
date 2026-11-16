@@ -8,16 +8,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
 func (t Tool) approve(ctx context.Context, callID string, f *flow, a args, mu *sync.Mutex) (tool.Result, error) {
-	if !slices.Contains(stages, a.Stage) {
-		return tool.Result{}, fmt.Errorf("stage must be inputs, grader, or plan: %q", a.Stage)
-	}
-	if strings.TrimSpace(a.Question) == "" {
-		return tool.Result{}, errors.New("approve needs a question")
+	if err := checkApproveArgs(a); err != nil {
+		return tool.Result{}, err
 	}
 	s, sha, err := lockedDigest(mu, f, a.Stage)
 	if err != nil {
@@ -26,16 +24,52 @@ func (t Tool) approve(ctx context.Context, callID string, f *flow, a args, mu *s
 	if approvalCurrent(s, a.Stage, sha) {
 		return toolResult(map[string]any{"approved": true, "asked": false, "sha": sha, "stage": a.Stage})
 	}
+	if err = t.checkApprovalRoom(s, f.name, a, sha); err != nil {
+		return tool.Result{}, err
+	}
 	answer, err := t.asker.Ask(ctx, callID, approvalQuestion(s, f.name, a, sha))
-	switch {
-	case errors.Is(err, ErrNoClient):
-		return tool.Result{Output: []byte("declined: " + ErrNoClient.Error())}, nil
-	case errors.Is(err, ErrCancelled):
-		return tool.Result{Output: []byte("cancelled: the question was closed; nothing was recorded")}, nil
-	case err != nil:
+	if outcome, declined := declinedOutcome(err); declined {
+		return outcome, nil
+	}
+	if err != nil {
 		return tool.Result{}, err
 	}
 	return answered(mu, f, a.Stage, sha, answer)
+}
+
+func checkApproveArgs(a args) error {
+	if !slices.Contains(stages, a.Stage) {
+		return fmt.Errorf("stage must be inputs, grader, or plan: %q", a.Stage)
+	}
+	if strings.TrimSpace(a.Question) == "" {
+		return errors.New("approve needs a question")
+	}
+	return nil
+}
+
+func (t Tool) checkApprovalRoom(s *state, flowName string, a args, sha string) error {
+	roomChars, roomLines := t.asker.PreviewRoom()
+	block := hostBlock(s, flowName, a.Stage, sha)
+	blockLines, blockChars := measure(block)
+	if blockLines > roomLines || blockChars > roomChars {
+		return fmt.Errorf("the %s facts need %d lines and %d characters, and one question holds %d lines and %d characters; list directories in place of single files, or shorten the command", a.Stage, blockLines, blockChars, roomLines, roomChars)
+	}
+	lines, chars := measure(approvalPreview(block, a.Preview))
+	if lines > roomLines || chars > roomChars {
+		previewLines, previewChars := measure(a.Preview)
+		return fmt.Errorf("preview is %d lines and %d characters; the room after the host facts is %d lines and %d characters", previewLines, previewChars, max(0, roomLines-blockLines-1), max(0, roomChars-blockChars-2))
+	}
+	return nil
+}
+
+func declinedOutcome(err error) (tool.Result, bool) {
+	switch {
+	case errors.Is(err, ErrNoClient):
+		return tool.Result{Output: []byte("declined: " + ErrNoClient.Error())}, true
+	case errors.Is(err, ErrCancelled):
+		return tool.Result{Output: []byte("cancelled: the question was closed; nothing was recorded")}, true
+	}
+	return tool.Result{}, false
 }
 
 func answered(mu *sync.Mutex, f *flow, stage, sha string, answer Answer) (tool.Result, error) {
@@ -53,11 +87,12 @@ func answered(mu *sync.Mutex, f *flow, stage, sha string, answer Answer) (tool.R
 	return tool.Result{}, fmt.Errorf("unexpected answer %s", answer.Label)
 }
 
+func approvalPreview(block, preview string) string {
+	return block + "\n\n" + preview
+}
+
 func approvalQuestion(s *state, flowName string, a args, sha string) Question {
-	preview := hostBlock(s, flowName, a.Stage, sha)
-	if a.Preview != "" {
-		preview += "\n\n" + a.Preview
-	}
+	preview := approvalPreview(hostBlock(s, flowName, a.Stage, sha), a.Preview)
 	return Question{
 		Header: "Ratchet " + a.Stage,
 		Text:   a.Question,
@@ -153,4 +188,8 @@ func planLines(s *state) []string {
 		"Change paths: " + strings.Join(s.ChangePaths, ", "),
 		"Off limits: " + off,
 	}
+}
+
+func measure(text string) (lines, chars int) {
+	return strings.Count(text, "\n") + 1, utf8.RuneCountInString(text)
 }

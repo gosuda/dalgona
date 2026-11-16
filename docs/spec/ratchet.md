@@ -20,6 +20,8 @@ The gate MUST return `flat` in every other case, and when fewer than two values 
 
 For a metric where a lower value is better, the gain MUST be the negated mean.
 
+Above 30 degrees of freedom, 1.96 is narrower than the t value by about 4 percent at 31 and about 1 percent at 99.
+
 ## Decision
 
 A guardrail whose train or test verdict is `down` MUST revert the round.
@@ -185,6 +187,24 @@ The `approve` action MUST return `declined: ratchet approvals need an interactiv
 The `approve` action MUST return `cancelled: the question was closed; nothing was recorded` when the user cancels.
 
 The `approve` action MUST record nothing on abort, and MUST return the feedback text on revise.
+
+The preview of the `Approve` option MUST be the host facts, a blank line, and the model preview, in that order.
+
+The host MUST add that blank line when the model preview is empty.
+
+The check of the preview room MUST count the joined text, with its blank line, also when the model preview is empty.
+
+The `approve` action MUST refuse before it asks when the host facts alone exceed the preview room of one question.
+
+That refusal MUST name the lines and characters the facts need, and MUST tell the model to list directories or shorten the command.
+
+The `approve` action MUST refuse before it asks when the host facts, a blank line and the preview together exceed that room.
+
+That refusal MUST name the lines and characters of the preview and of the room left after the host facts.
+
+A cell call to `approve` MUST be denied with `tool ratchet approve needs the user and runs only as a direct call`.
+
+The test grades in `results.jsonl` MUST stay readable by the model through `read` in the same thread.
 
 The `split` action MUST derive its seed from the call id when the call gives no seed.
 
