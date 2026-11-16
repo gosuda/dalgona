@@ -34,6 +34,7 @@ type Spec struct {
 	Schema      jsontext.Value
 	Freeform    bool
 	Keep        Keep
+	Serial      bool
 }
 
 type Call struct {

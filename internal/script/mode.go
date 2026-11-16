@@ -22,7 +22,7 @@ func visibleNames(mode config.ToolMode) []string {
 	case config.ToolModeEvalFirst:
 		return evalFirstNames
 	case config.ToolModeEvalOnly:
-		return []string{asktool.Name, tool.YieldName, EvalName}
+		return []string{asktool.Name, ratchetName, tool.YieldName, EvalName}
 	}
 	return nil
 }

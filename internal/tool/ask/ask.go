@@ -87,7 +87,7 @@ func New(asker Asker) Tool { return Tool{asker: asker} }
 func QuestionID(index int) string { return "q" + strconv.Itoa(index+1) }
 
 func (Tool) Spec() tool.Spec {
-	return tool.Spec{Name: Name, Description: description, Schema: jsontext.Value(schema)}
+	return tool.Spec{Name: Name, Description: description, Schema: jsontext.Value(schema), Serial: true}
 }
 
 func (Tool) Class() tool.Class { return tool.ClassRead }

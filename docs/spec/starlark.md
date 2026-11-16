@@ -132,7 +132,7 @@ The reply MUST be:
 | --- | --- | --- |
 | `normal` | every tool | every tool except `eval` and `yield` |
 | `eval-first` | `read`, `search`, `patch` or `apply_patch`, `exec`, `ask`, `ratchet`, `yield`, `eval`, in this order, each where the thread registers it | every tool except `eval` and `yield` |
-| `eval-only` | `ask`, `yield`, `eval`, in this order, each where the thread registers it | every tool except `eval` and `yield` |
+| `eval-only` | `ask`, `ratchet`, `yield`, `eval`, in this order, each where the thread registers it | every tool except `eval` and `yield` |
 
 `ModelTools` MUST return the visible list. `FoldedTools` MUST return the other tools. The `eval` description MUST end with one line `<name>: <first description line>` per folded tool. `CheckDirect` MUST fail a direct call to a hidden tool with `tool <name> is not available in tool_mode <mode>; call it from eval`. Every tool except `eval` and `yield` MUST be reachable inside cells. A cell call to `ask`, or to `ratchet` with action `approve`, MUST be refused with status `denied` and code `scope_exceeded`. The message MUST be `tool <name> needs the user and runs only as a direct call`, where `<name>` is `ask`, or `ratchet approve`. `yield` MUST stay a direct call in every tool mode, because a nested `yield` ends a child before its cell returns.
 
