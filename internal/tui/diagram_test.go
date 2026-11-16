@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestRenderDiagramMermaid(t *testing.T) {
@@ -31,7 +30,11 @@ func TestRenderDiagramD2(t *testing.T) {
 
 func TestRenderDiagramNomnoml(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	budget := diagramBudget
+	if raceEnabled {
+		budget *= 4
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	art, err := renderNomnoml(ctx, "[A]->[B]\n")
 	if err != nil {
