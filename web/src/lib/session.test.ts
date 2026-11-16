@@ -517,12 +517,28 @@ describe("session", () => {
 			"thread/resume": (params) => {
 				if (threadIdOf(params) === "t2")
 					throw new RpcError(-32602, "unknown thread t2");
-				return resumeAnswer("none")(params);
+				return {
+					...resumeAnswer("none")(params),
+					thread: thread("t1", [
+						{
+							id: "turn-1",
+							status: "completed",
+							items: [
+								{
+									id: "i1",
+									type: "userMessage",
+									content: [{ type: "text", text: "hi" }],
+								},
+							],
+						},
+					]),
+				};
 			},
 		});
 		const session = new Session(dial);
 		session.start(location);
 		await openThread(session, "t1");
+		expect(session.transcript.items).toHaveLength(1);
 		await session.selectThread("t2");
 		await vi.waitFor(() => {
 			expect(session.activeThreadId).toBeNull();
