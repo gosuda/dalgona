@@ -15,14 +15,14 @@ type stubAskClient struct {
 	calls int
 }
 
-func (s *stubAskClient) Ask(_ context.Context, _ jsontext.Value, questions map[string]decide.Question) (map[string]decide.Answer, error) {
+func (s *stubAskClient) Ask(_ context.Context, _ jsontext.Value, questions map[string]decide.Question) (decide.Result, error) {
 	s.calls++
 	out := make(map[string]decide.Answer, len(questions))
 	for name := range questions {
 		value := s.noul
 		out[name] = decide.Answer{Noul: &value}
 	}
-	return out, nil
+	return decide.Result{Answers: out, Model: "stub-model"}, nil
 }
 
 func TestFactoryDeciderPropagatesResolutionError(t *testing.T) {
@@ -69,6 +69,46 @@ func TestFactoryDeciderScoresThroughClientDecider(t *testing.T) {
 		}
 		if got.Allow != tc.allow {
 			t.Fatalf("score %v: Allow = %v, want %v", tc.score, got.Allow, tc.allow)
+		}
+	}
+}
+
+type fallbackAskClient struct {
+	noul float64
+}
+
+func (s fallbackAskClient) Ask(_ context.Context, _ jsontext.Value, questions map[string]decide.Question) (decide.Result, error) {
+	out := make(map[string]decide.Answer, len(questions))
+	for name := range questions {
+		value := s.noul
+		out[name] = decide.Answer{Noul: &value}
+	}
+	return decide.Result{Answers: out, Model: "smol-model", Fallback: "llm:primary: decisions: http 429: rate limited"}, nil
+}
+
+func TestDeciderNamesFallbackModel(t *testing.T) {
+	for _, tc := range []struct {
+		noul   float64
+		verb   string
+		scores string
+	}{
+		{0.95, "allowed", "reversible=0.95 serves_task=0.95"},
+		{0.20, "declined", "reversible=0.2 serves_task=0.2"},
+	} {
+		d := NewDecider(fallbackAskClient{noul: tc.noul}, "llm:primary", 0.9, config.ProductDalgona)
+		got, err := d.Decide(t.Context(), Action{Thread: "thread-x", Task: "ship it"})
+		if err != nil {
+			t.Fatalf("Decide at %v: %v", tc.noul, err)
+		}
+		if got.Allow != (tc.verb == "allowed") {
+			t.Fatalf("score %v: Allow = %v", tc.noul, got.Allow)
+		}
+		if got.By != "decider:smol-model" {
+			t.Fatalf("By = %q, want decider:smol-model", got.By)
+		}
+		want := tc.verb + " by decider smol-model (fallback from llm:primary: decisions: http 429: rate limited): " + tc.scores + " (threshold 0.9)"
+		if got.Reason != want {
+			t.Fatalf("Reason = %q, want %q", got.Reason, want)
 		}
 	}
 }

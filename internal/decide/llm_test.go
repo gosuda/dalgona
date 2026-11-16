@@ -33,12 +33,18 @@ func TestLLMAskDecodesDirectAnswers(t *testing.T) {
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	provider := newChatProvider(server.URL, "test-token")
-	answers, err := decide.NewLLM(provider, "test-smol").Ask(t.Context(), jsontext.Value(`{"ticket":"Checkout fails"}`), testQuestions())
+	result, err := decide.NewLLM("test-smol", provider, "test-smol").Ask(t.Context(), jsontext.Value(`{"ticket":"Checkout fails"}`), testQuestions())
 	if err != nil {
 		t.Fatal(err)
 	}
+	if result.Model != "test-smol" {
+		t.Fatalf("result model = %q, want test-smol", result.Model)
+	}
+	if result.Fallback != "" {
+		t.Fatalf("result fallback = %q, want empty", result.Fallback)
+	}
 	checkChatRequest(t, <-requests)
-	checkLLMAnswers(t, answers)
+	checkLLMAnswers(t, result.Answers)
 }
 
 func TestLLMAskRejectsInvalidAnswers(t *testing.T) {
@@ -57,12 +63,15 @@ func TestLLMAskRejectsInvalidAnswers(t *testing.T) {
 			t.Parallel()
 			server := newChatServer(t, test.content)
 			provider := newChatProvider(server.URL, "token")
-			_, err := decide.NewLLM(provider, "test-smol").Ask(t.Context(), jsontext.Value(`{"ticket":"x"}`), testQuestions())
+			_, err := decide.NewLLM("test-smol", provider, "test-smol").Ask(t.Context(), jsontext.Value(`{"ticket":"x"}`), testQuestions())
 			if err == nil {
 				t.Fatal("Ask succeeded")
 			}
 			if !strings.Contains(err.Error(), "llm: invalid JSON") {
 				t.Fatalf("Ask error = %v", err)
+			}
+			if !errors.Is(err, decide.ErrAnswer) {
+				t.Fatalf("Ask error = %v, want decide: invalid answer", err)
 			}
 		})
 	}
@@ -82,7 +91,7 @@ func TestLLMAskHonorsConfiguredTimeout(t *testing.T) {
 	t.Cleanup(server.Close)
 	t.Cleanup(func() { close(release) })
 	provider := newChatProvider(server.URL, "token")
-	_, err := decide.NewLLMWithTimeout(provider, "test-smol", 25*time.Millisecond).Ask(t.Context(), jsontext.Value(`{"ticket":"x"}`), map[string]decide.Question{"is_bug": {Type: decide.TypeNoul}})
+	_, err := decide.NewLLMWithTimeout("test-smol", provider, "test-smol", 25*time.Millisecond).Ask(t.Context(), jsontext.Value(`{"ticket":"x"}`), map[string]decide.Question{"is_bug": {Type: decide.TypeNoul}})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Ask error = %v", err)
 	}

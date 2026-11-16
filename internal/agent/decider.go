@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	deciderTimeout     = 8 * time.Second
 	questionReversible = "Every command in `commands` only reads or changes files inside `project` and can be undone with git or by rerunning it. It does not push, publish, deploy, delete files outside the project, change system settings, or send data to a network service."
 	questionServesTask = "Running `commands` is a reasonable next step toward `task`."
 )
@@ -54,7 +53,7 @@ type clientDecider struct {
 }
 
 func NewDecider(client decide.Client, modelName string, threshold float64, product config.Product) Decider {
-	return clientDecider{client: client, model: modelName, threshold: threshold, product: product, timeout: deciderTimeout}
+	return clientDecider{client: client, model: modelName, threshold: threshold, product: product}
 }
 
 type ClientFactory func(ctx context.Context, threadID string) (decide.Client, string, error)
@@ -78,38 +77,64 @@ func (d factoryDecider) Decide(ctx context.Context, a Action) (Decision, error) 
 }
 
 func (d clientDecider) Decide(ctx context.Context, a Action) (Decision, error) {
-	by := "decider:" + d.model
 	state, err := d.state(a)
 	if err != nil {
 		return Decision{}, err
 	}
-	questions := map[string]decide.Question{"reversible": {Type: decide.TypeNoul, Instructions: questionReversible}}
-	if a.Task != "" {
-		questions["serves_task"] = decide.Question{Type: decide.TypeNoul, Instructions: questionServesTask}
-	}
-	askCtx, cancel := context.WithTimeoutCause(ctx, d.timeout, fmt.Errorf("decider timed out after %s", d.timeout))
-	defer cancel()
-	answers, err := d.client.Ask(askCtx, state, questions)
+	questions := deciderQuestions(a)
+	result, err := d.ask(ctx, state, questions)
 	if err != nil {
-		if cause := context.Cause(askCtx); cause != nil {
-			err = cause
-		}
-		return Decision{By: by, Reason: fmt.Sprintf("declined by decider %s: %v", d.model, err)}, nil
+		return Decision{By: "decider:" + d.model, Reason: fmt.Sprintf("declined by decider %s: %v", d.model, err)}, nil
 	}
-	scores, err := scoreAnswers(answers, questions)
+	scores, err := scoreAnswers(result.Answers, questions)
 	if err != nil {
-		return Decision{By: by, Reason: fmt.Sprintf("declined by decider %s: %v", d.model, err)}, nil
+		return Decision{By: "decider:" + result.Model, Reason: fmt.Sprintf("declined by decider %s: %v", result.Model, err)}, nil
 	}
-	allow := scores["reversible"] >= d.threshold
-	if _, asked := questions["serves_task"]; asked {
-		allow = allow && scores["serves_task"] >= d.threshold
-	}
+	allow := d.allows(scores, questions)
 	verb := "declined"
 	if allow {
 		verb = "allowed"
 	}
-	reason := fmt.Sprintf("%s by decider %s: %s (threshold %s)", verb, d.model, scoreText(scores), formatScore(d.threshold))
-	return Decision{Allow: allow, By: by, Reason: reason, Scores: scores}, nil
+	reason := fmt.Sprintf("%s by decider %s: %s (threshold %s)", verb, askAttribution(result), scoreText(scores), formatScore(d.threshold))
+	return Decision{Allow: allow, By: "decider:" + result.Model, Reason: reason, Scores: scores}, nil
+}
+
+func deciderQuestions(a Action) map[string]decide.Question {
+	questions := map[string]decide.Question{"reversible": {Type: decide.TypeNoul, Instructions: questionReversible}}
+	if a.Task != "" {
+		questions["serves_task"] = decide.Question{Type: decide.TypeNoul, Instructions: questionServesTask}
+	}
+	return questions
+}
+
+func (d clientDecider) ask(ctx context.Context, state jsontext.Value, questions map[string]decide.Question) (decide.Result, error) {
+	if d.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, d.timeout, fmt.Errorf("decider timed out after %s", d.timeout))
+		defer cancel()
+	}
+	result, err := d.client.Ask(ctx, state, questions)
+	if err != nil && d.timeout > 0 {
+		if cause := context.Cause(ctx); cause != nil {
+			err = cause
+		}
+	}
+	return result, err
+}
+
+func (d clientDecider) allows(scores map[string]float64, questions map[string]decide.Question) bool {
+	allow := scores["reversible"] >= d.threshold
+	if _, asked := questions["serves_task"]; asked {
+		allow = allow && scores["serves_task"] >= d.threshold
+	}
+	return allow
+}
+
+func askAttribution(result decide.Result) string {
+	if result.Fallback != "" {
+		return result.Model + " (fallback from " + result.Fallback + ")"
+	}
+	return result.Model
 }
 
 func scoreAnswers(answers map[string]decide.Answer, questions map[string]decide.Question) (map[string]float64, error) {

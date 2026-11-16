@@ -35,12 +35,18 @@ func TestDecisionsAskDecodesTypedAnswers(t *testing.T) {
 			return "test-token", nil
 		},
 	})
-	answers, err := client.Ask(t.Context(), jsontext.Value(`{"ticket":"Checkout fails"}`), testQuestions())
+	result, err := client.Ask(t.Context(), jsontext.Value(`{"ticket":"Checkout fails"}`), testQuestions())
 	if err != nil {
 		t.Fatal(err)
 	}
+	if result.Model != "typesafe/jev-1.14" {
+		t.Fatalf("result model = %q, want typesafe/jev-1.14", result.Model)
+	}
+	if result.Fallback != "" {
+		t.Fatalf("result fallback = %q, want empty", result.Fallback)
+	}
 	checkDecisionsRequest(t, <-requests)
-	checkDecisionsAnswers(t, answers)
+	checkDecisionsAnswers(t, result.Answers)
 }
 
 func TestDecisionsAskRejectsEmptyModel(t *testing.T) {
@@ -89,8 +95,12 @@ func TestDecisionsAskRejectsInvalidResponses(t *testing.T) {
 				Token:   func(context.Context) (string, error) { return "token", nil },
 			})
 			questions := map[string]decide.Question{"is_bug": {Type: decide.TypeNoul}}
-			if _, err := client.Ask(t.Context(), jsontext.Value(`{"ticket":"x"}`), questions); err == nil {
+			_, err := client.Ask(t.Context(), jsontext.Value(`{"ticket":"x"}`), questions)
+			if err == nil {
 				t.Fatal("Ask succeeded")
+			}
+			if !errors.Is(err, decide.ErrAnswer) {
+				t.Fatalf("Ask error = %v, want decide: invalid answer", err)
 			}
 		})
 	}
@@ -121,8 +131,12 @@ func TestDecisionsAskRejectsInvalidQuestions(t *testing.T) {
 				Token:   func(context.Context) (string, error) { return "token", nil },
 			})
 			questions := map[string]decide.Question{"question": test.question}
-			if _, err := client.Ask(t.Context(), jsontext.Value(`{"ticket":"x"}`), questions); err == nil {
+			_, err := client.Ask(t.Context(), jsontext.Value(`{"ticket":"x"}`), questions)
+			if err == nil {
 				t.Fatal("Ask succeeded")
+			}
+			if !errors.Is(err, decide.ErrRequest) {
+				t.Fatalf("Ask error = %v, want decide: invalid request", err)
 			}
 			if got := requests.Load(); got != 0 {
 				t.Fatalf("request count = %d", got)
@@ -150,6 +164,33 @@ func TestDecisionsAskHonorsConfiguredTimeout(t *testing.T) {
 	_, err := client.Ask(t.Context(), jsontext.Value(`{"ticket":"x"}`), map[string]decide.Question{"is_bug": {Type: decide.TypeNoul}})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Ask error = %v", err)
+	}
+}
+
+func TestDecisionsAskReturnsTypedHTTPError(t *testing.T) {
+	t.Parallel()
+	server := newDecisionsServer(t, "/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	})
+	client := decide.NewDecisions(decide.DecisionsConfig{
+		BaseURL: server.URL,
+		Model:   "typesafe/jev-1.14",
+		Token:   func(context.Context) (string, error) { return "token", nil },
+	})
+	_, err := client.Ask(t.Context(), jsontext.Value(`{"ticket":"x"}`), map[string]decide.Question{"is_bug": {Type: decide.TypeNoul}})
+	httpErr, ok := errors.AsType[*decide.HTTPError](err)
+	if !ok {
+		t.Fatalf("Ask error = %v, want *decide.HTTPError", err)
+	}
+	if httpErr.Status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", httpErr.Status)
+	}
+	if httpErr.RetryAfter != 120*time.Second {
+		t.Fatalf("retry after = %v, want 2m0s", httpErr.RetryAfter)
+	}
+	if want := "decisions: http 429: rate limited"; err.Error() != want {
+		t.Fatalf("error text = %q, want %q", err.Error(), want)
 	}
 }
 

@@ -16,14 +16,20 @@ import (
 	"github.com/gosuda/dalgona/internal/decide"
 )
 
-func TestDecideWithoutHostReportsNotReady(t *testing.T) {
+func TestDecideWithoutHostDeclinesThroughFallback(t *testing.T) {
 	j := &judges{
 		roles: &roleResolver{},
 		spec:  decide.Spec{Adapter: decide.AdapterLLM, Model: "smol"},
 	}
-	_, err := j.decider().Decide(t.Context(), agent.Action{Thread: "thread-x"})
-	if err == nil || !strings.Contains(err.Error(), "host is not ready") {
-		t.Fatalf("Decide without a host = %v, want host-not-ready", err)
+	got, err := j.decider().Decide(t.Context(), agent.Action{Thread: "thread-x"})
+	if err != nil {
+		t.Fatalf("Decide without a host = %v, want a decline", err)
+	}
+	if got.Allow {
+		t.Fatalf("decision = %+v, want a decline", got)
+	}
+	if want := "declined by decider smol: judge model smol: decider: host is not ready"; got.Reason != want {
+		t.Fatalf("reason = %q, want %q", got.Reason, want)
 	}
 }
 
@@ -179,5 +185,125 @@ func assertConfiguredJudgeDecision(t *testing.T, recorder *judgeRecorder, got ag
 	}
 	if auth := recorder.lastAuth(); auth != "Bearer secret-key" {
 		t.Fatalf("wire authorization = %q, want Bearer secret-key", auth)
+	}
+}
+
+func unavailableJudgeServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "judge primary unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func fallbackJudges(t *testing.T, decider, smol string) (*judges, string) {
+	t.Helper()
+	good := &judgeRecorder{score: 0.95}
+	goodServer := httptest.NewServer(good)
+	t.Cleanup(goodServer.Close)
+	brokenURL := unavailableJudgeServer(t).URL
+	home := t.TempDir()
+	t.Setenv("DALGONA_HOME", home)
+	t.Setenv("BROKEN_KEY", "broken-secret")
+	cfg := config.Config{
+		Home:    home,
+		Product: config.ProductDalgona,
+		Roles:   config.RolesConfig{Smol: smol},
+		ApprovalDecider: config.ApprovalDeciderConfig{
+			Threshold: 0.90,
+			Decider:   decider,
+		},
+		Providers: map[string]config.ProviderSpec{
+			"broken": {BaseURL: brokenURL, APIKeyEnv: "BROKEN_KEY"},
+			"local":  {BaseURL: goodServer.URL, APIKeyEnv: "LOCAL_KEY"},
+		},
+	}
+	t.Setenv("LOCAL_KEY", "local-secret")
+	host, closeHost, err := NewHost(t.Context(), Options{Product: config.ProductDalgona, Cwd: t.TempDir(), Config: &cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if closeErr := closeHost(); closeErr != nil {
+			t.Errorf("close host: %v", closeErr)
+		}
+	})
+	thread, err := host.Start(t.Context(), agent.ThreadSpec{
+		Cwd:   t.TempDir(),
+		Model: "local/working-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := &roleResolver{}
+	roles.set(host)
+	store, err := auth.NewWithPatterns(cfg.Home, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := newJudges(t.Context(), cfg, newCredentials(store, cfg.Product, nil), roles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j, thread.ID()
+}
+
+type judgeFallbackCase struct {
+	name     string
+	decider  string
+	smol     string
+	allow    bool
+	by       string
+	contains []string
+}
+
+func TestJudgeFallbackCatchesConstructionFailures(t *testing.T) {
+	for _, tc := range []judgeFallbackCase{
+		{
+			name: "unknown provider falls back to smol", decider: "llm:nope/judge-primary", smol: "local/qwen-small",
+			allow: true, by: "decider:local/qwen-small",
+			contains: []string{"fallback from llm:nope/judge-primary: judge model nope/judge-primary: unknown provider nope"},
+		},
+		{
+			name: "missing credential falls back to smol", decider: "decisions:typesafe/jev-1.14", smol: "local/qwen-small",
+			allow: true, by: "decider:local/qwen-small",
+			contains: []string{"fallback from decisions:typesafe/jev-1.14", "openrouter"},
+		},
+		{
+			name: "primary http failure falls back to smol", decider: "llm:broken/judge-primary", smol: "local/qwen-small",
+			allow: true, by: "decider:local/qwen-small",
+			contains: []string{"fallback from llm:broken/judge-primary", "503"},
+		},
+		{
+			name: "smol construction failure declines with both causes", decider: "llm:broken/judge-primary", smol: "missing/qwen-small",
+			allow: false, by: "decider:broken/judge-primary",
+			contains: []string{"503", "unknown provider missing", "fallback llm:missing/qwen-small"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j, threadID := fallbackJudges(t, tc.decider, tc.smol)
+			assertFallbackDecision(t, j, threadID, tc)
+		})
+	}
+}
+
+func assertFallbackDecision(t *testing.T, j *judges, threadID string, tc judgeFallbackCase) {
+	t.Helper()
+	action := agent.Action{Tool: "exec", Commands: []string{"git status"}, Project: t.TempDir()}
+	got, err := j.decider().Decide(t.Context(), agent.Action{Thread: threadID, Tool: action.Tool, Commands: action.Commands, Project: action.Project})
+	if err != nil {
+		t.Fatalf("Decide error = %v", err)
+	}
+	if got.Allow != tc.allow {
+		t.Fatalf("Allow = %v, want %v (reason %s)", got.Allow, tc.allow, got.Reason)
+	}
+	if got.By != tc.by {
+		t.Fatalf("By = %q, want %q", got.By, tc.by)
+	}
+	for _, want := range tc.contains {
+		if !strings.Contains(got.Reason, want) {
+			t.Fatalf("reason %q misses %q", got.Reason, want)
+		}
 	}
 }

@@ -9,8 +9,10 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/auth"
@@ -34,6 +36,7 @@ type questionTally struct {
 type evalTotals struct {
 	cases, errors, partErrors     int
 	soundParts, soundPartsFlagged int
+	movedCases                    int
 	latencies                     []time.Duration
 	tally                         map[string]*questionTally
 	erroredIDs                    []string
@@ -51,16 +54,21 @@ type preparedCase struct {
 }
 
 func askJudgePart(ctx context.Context, client decide.Client, part judgeInput) judgment {
-	answers, err := client.Ask(ctx, part.state, part.questions)
+	attempt, cancel := context.WithTimeoutCause(ctx, reviewTimeout, fmt.Errorf("review timed out after %s", reviewTimeout))
+	defer cancel()
+	result, err := client.Ask(attempt, part.state, part.questions)
 	if err != nil {
+		if ctx.Err() == nil && attempt.Err() != nil {
+			err = context.Cause(attempt)
+		}
 		return judgment{err: err}
 	}
-	scores, err := scoreAnswers(answers, part.questions)
+	scores, err := scoreAnswers(result.Answers, part.questions)
 	if err != nil {
 		return judgment{err: err}
 	}
 	verdict, flags := reviewVerdict(scores)
-	return judgment{scores: scores, verdict: verdict, flags: flags, spoken: reviewSpoken(scores, flags, nil)}
+	return judgment{by: answeringBy("eval", result), fallback: result.Fallback, scores: scores, verdict: verdict, flags: flags, spoken: reviewSpoken(scores, flags, nil)}
 }
 
 func prepareCase(c corpusCase, mask func(string) (string, error)) ([]judgeInput, error) {
@@ -215,6 +223,9 @@ func (e *evalTotals) add(c corpusCase, r caseResult) {
 		e.erroredIDs = append(e.erroredIDs, c.ID)
 		return
 	}
+	if c.Group == groupMoved && c.Split == corpusSplitHeld {
+		e.movedCases++
+	}
 	e.addTally(c, r.unit.flags)
 }
 
@@ -232,7 +243,7 @@ func (t *questionTally) row() ratchetQuestion {
 }
 
 func (e *evalTotals) measured() ratchetMeasured {
-	m := ratchetMeasured{Errors: e.errors, Questions: map[string]ratchetQuestion{}}
+	m := ratchetMeasured{Errors: e.errors, MovedCases: e.movedCases, Questions: map[string]ratchetQuestion{}}
 	if e.soundParts > 0 {
 		m.SoundFlagRate = float64(e.soundPartsFlagged) / float64(e.soundParts)
 	}
@@ -414,6 +425,46 @@ func checkErrorRate(t *testing.T, totals *evalTotals) {
 	}
 }
 
+func evalRuns() int {
+	if n, err := strconv.Atoi(os.Getenv("DALGONA_EDIT_REVIEW_RUNS")); err == nil && n > 0 {
+		return n
+	}
+	return 3
+}
+
+func worstOfRuns(runs []ratchetMeasured) ratchetMeasured {
+	worst := ratchetMeasured{Questions: map[string]ratchetQuestion{}, MovedCases: runs[0].MovedCases, Errors: runs[0].Errors}
+	for _, run := range runs {
+		worst.SoundFlagRate = max(worst.SoundFlagRate, run.SoundFlagRate)
+		worst.Errors = max(worst.Errors, run.Errors)
+		worst.MovedCases = min(worst.MovedCases, run.MovedCases)
+		for id, row := range run.Questions {
+			kept, ok := worst.Questions[id]
+			if !ok {
+				kept = row
+			} else {
+				kept = worstRow(kept, row)
+			}
+			worst.Questions[id] = kept
+		}
+	}
+	return worst
+}
+
+func worstRow(a, b ratchetQuestion) ratchetQuestion {
+	lowerPtr := func(x, y *float64) *float64 {
+		if x == nil || y == nil {
+			return nil
+		}
+		lower := *x
+		if *y < lower {
+			lower = *y
+		}
+		return &lower
+	}
+	return ratchetQuestion{Precision: lowerPtr(a.Precision, b.Precision), Recall: lowerPtr(a.Recall, b.Recall), TrueFlags: min(a.TrueFlags, b.TrueFlags)}
+}
+
 func TestEditReviewHeldOutPrecision(t *testing.T) {
 	model, key, ok := heldOutCredentials()
 	if !ok {
@@ -424,20 +475,34 @@ func TestEditReviewHeldOutPrecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("masker: %v", err)
 	}
-	totals, err := measureHeldOut(t.Context(), heldOutClient(model, key), store.MaskWithError, readCorpus(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := totals.measured()
-	reportLatency(t, totals)
-	reportTallies(t, totals)
+	got := worstOfRuns(measureHeldOutRuns(t, model, key, store))
 	for _, failure := range gateFailures(got) {
 		t.Logf("default-on gate: %s", failure)
 	}
-	checkErrorRate(t, totals)
 	if !checkRatchet(t, ratchet.Measured, got) || os.Getenv("DALGONA_EDIT_REVIEW_RATCHET") != "update" {
 		return
 	}
+	writeMeasuredRatchet(t, ratchet, got)
+}
+
+func measureHeldOutRuns(t *testing.T, model, key string, store *auth.Store) []ratchetMeasured {
+	t.Helper()
+	var runs []ratchetMeasured
+	for range evalRuns() {
+		totals, err := measureHeldOut(t.Context(), heldOutClient(model, key), store.MaskWithError, readCorpus(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reportLatency(t, totals)
+		reportTallies(t, totals)
+		checkErrorRate(t, totals)
+		runs = append(runs, totals.measured())
+	}
+	return runs
+}
+
+func writeMeasuredRatchet(t *testing.T, ratchet ratchetFile, got ratchetMeasured) {
+	t.Helper()
 	ratchet.Measured = &got
 	out, err := marshalRatchet(ratchet)
 	if err != nil {
@@ -445,6 +510,49 @@ func TestEditReviewHeldOutPrecision(t *testing.T) {
 	}
 	if err := os.WriteFile(corpusRatchetPath, out, 0o644); err != nil {
 		t.Fatalf("write ratchet: %v", err)
+	}
+}
+
+func TestWorstOfRunsKeepsTheFloorOfEveryMetric(t *testing.T) {
+	t.Parallel()
+	at := func(v float64) *float64 { return &v }
+	first := ratchetMeasured{SoundFlagRate: 0.01, Errors: 2, MovedCases: 6, Questions: map[string]ratchetQuestion{
+		"lost_code": {Precision: at(0.95), Recall: at(0.8), TrueFlags: 9},
+		"off_task":  {Precision: at(0.9), Recall: at(0.6), TrueFlags: 7},
+	}}
+	second := ratchetMeasured{SoundFlagRate: 0.02, Errors: 1, MovedCases: 5, Questions: map[string]ratchetQuestion{
+		"lost_code": {Precision: at(0.90), Recall: at(0.7), TrueFlags: 6},
+		"off_task":  {Precision: nil, Recall: at(0.55), TrueFlags: 4},
+	}}
+	worst := worstOfRuns([]ratchetMeasured{first, second})
+	requireWorstRunTotals(t, worst)
+	requireWorstLostCodeFloors(t, worst)
+	requireWorstOffTaskFloors(t, worst)
+	if one := worstOfRuns([]ratchetMeasured{first}); one.SoundFlagRate != 0.01 || one.Questions["lost_code"].TrueFlags != 9 {
+		t.Fatalf("a single run shrank: %+v", one)
+	}
+}
+
+func requireWorstRunTotals(t *testing.T, worst ratchetMeasured) {
+	t.Helper()
+	if worst.SoundFlagRate != 0.02 || worst.Errors != 2 || worst.MovedCases != 5 {
+		t.Fatalf("totals = %+v, want the highest rate and errors and the lowest moved cases", worst)
+	}
+}
+
+func requireWorstLostCodeFloors(t *testing.T, worst ratchetMeasured) {
+	t.Helper()
+	lost := worst.Questions["lost_code"]
+	if lost.Precision == nil || *lost.Precision != 0.90 || lost.Recall == nil || *lost.Recall != 0.7 || lost.TrueFlags != 6 {
+		t.Fatalf("lost_code = %+v, want the floor of both runs", lost)
+	}
+}
+
+func requireWorstOffTaskFloors(t *testing.T, worst ratchetMeasured) {
+	t.Helper()
+	off := worst.Questions["off_task"]
+	if off.Precision != nil || off.Recall == nil || *off.Recall != 0.55 || off.TrueFlags != 4 {
+		t.Fatalf("off_task = %+v, want a null precision with the floor of recall and true flags", off)
 	}
 }
 
@@ -588,4 +696,52 @@ func TestJudgeCaseMasksTheStateLikeTheLivePath(t *testing.T) {
 	if res := judgeCase(t.Context(), &judgeStub{}, c, broken); !errors.Is(res.unit.err, errReviewMask) {
 		t.Fatalf("a failing masker gives %v, want errReviewMask", res.unit.err)
 	}
+}
+
+func TestEvalRunsDefaultsToThree(t *testing.T) {
+	rows := []struct {
+		env  string
+		want int
+	}{
+		{env: "", want: 3},
+		{env: "5", want: 5},
+		{env: "1", want: 1},
+		{env: "0", want: 3},
+		{env: "many", want: 3},
+	}
+	for _, row := range rows {
+		t.Run("runs "+row.env, func(t *testing.T) {
+			t.Setenv("DALGONA_EDIT_REVIEW_RUNS", row.env)
+			if got := evalRuns(); got != row.want {
+				t.Fatalf("evalRuns = %d, want %d", got, row.want)
+			}
+		})
+	}
+}
+
+func TestHeldOutPartRunsUnderReviewTimeout(t *testing.T) {
+	t.Parallel()
+	c := corpusCase{ID: "slow", Group: groupSoundEdit, Unit: "edit", Task: "fix it", Files: []corpusFile{
+		{Path: "a.go", Kind: "code", Pre: "x := 1\n", Post: "x := 2\n"},
+	}}
+	mask := func(text string) (string, error) { return text, nil }
+	t.Run("a hung part errors at the review timeout", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			start := time.Now()
+			res := judgeCase(t.Context(), &judgeStub{block: true}, c, mask)
+			if want := "review timed out after " + reviewTimeout.String(); res.unit.err == nil || !strings.Contains(res.unit.err.Error(), want) {
+				t.Fatalf("unit error = %v, want %q", res.unit.err, want)
+			}
+			if elapsed := time.Since(start); elapsed != reviewTimeout {
+				t.Fatalf("part ran %s before it errored, want %s", elapsed, reviewTimeout)
+			}
+		})
+	})
+	t.Run("an answering part does not error", func(t *testing.T) {
+		t.Parallel()
+		if res := judgeCase(t.Context(), &judgeStub{}, c, mask); res.unit.err != nil {
+			t.Fatalf("answering part errored: %v", res.unit.err)
+		}
+	})
 }

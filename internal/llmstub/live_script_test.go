@@ -64,7 +64,7 @@ func noulQuestion(instructions, yes, no string) decide.Question {
 func judgeBody(t *testing.T, state string, questions map[string]decide.Question) []byte {
 	t.Helper()
 	provider := &recordingProvider{}
-	_, err := decide.NewLLM(provider, "qwen-test").Ask(t.Context(), jsontext.Value(state), questions)
+	_, err := decide.NewLLM("qwen-test", provider, "qwen-test").Ask(t.Context(), jsontext.Value(state), questions)
 	if !errors.Is(err, errRecorded) {
 		t.Fatalf("Ask error = %v, want the recorded request", err)
 	}

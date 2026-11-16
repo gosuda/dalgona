@@ -50,7 +50,7 @@ type Effects interface {
 - `CallTool` MUST run the tool through approvals and the thread's runner. It MUST journal `tool.started` and `tool.completed` with `call_id = "<run>/<n>"`. A later `Lookup` of that index MUST return the recorded value. A tool failure MUST return an error. A denial MUST wrap `script.ErrDenied`.
 - `Spawn` MUST journal `child.spawned` with `call_id = "<run>/<n>"`. A later `Lookup` MUST return the subagent id as a JSON string.
 - `Wait` MUST return the final text of each subagent, in input order.
-- `Judge` MUST ask the decider for `req.Model`, or for the resolved `[approval_decider] decider` when the model is empty. It MUST return an object that maps each question name to an object with `choice`, `noul`, `score`, `probabilities`, and `confidence` as the answer has them.
+- `Judge` MUST ask the decider for `req.Model`, or for the resolved `[approval_decider] decider` when the model is empty. It MUST return `{"answers": <question map>, "model": <answering model>, "fallback": <primary and failure>}`. `fallback` MUST be omitted when empty. Each answer has `choice`, `noul`, `score`, `probabilities`, and `confidence` as the answer has them.
 
 ## Effects and replay
 
@@ -83,12 +83,12 @@ Workflows and `eval` cells have `ctx` and `tools` (the same as `ctx.tools`). Plu
 - `ctx.tools.<name>(**kw)` and `ctx.tools["<name>"](**kw)` MUST call the tool. Positional arguments MUST fail. A failed call MUST stop the script.
 - `ctx.try_call(op, *args, **kw)` MUST return `struct(ok, value, error)`. It MUST NOT catch a denial, `scope_exceeded`, cancellation, nondeterminism, an interrupted effect, or a step limit.
 - `ctx.scope(limit)` MUST accept a limit from 1 to 64. `scope.tools.<name>(**kw)` MUST submit the call and return `None`. At most `limit` calls MUST run at the same time. `scope.all()` MUST wait for every submitted call and return the results in submission order. A failed call MUST raise the first failure in submission order. A scope MUST hold at most 4096 pending calls.
-- `ctx.spawn(prompt, runner = None, model = None)` MUST return the subagent id. At most 8 subagents MUST run at the same time. A spawn MUST wait while 8 subagents run. Closing a subagent MUST free its slot. A subagent MUST hold its slot until its turn ends or the subagent stops.
+- `ctx.spawn(prompt, runner = None, model = None)` MUST return the subagent id. At most 4 subagents MUST run at the same time. A spawn MUST wait while 4 subagents run. Closing a subagent MUST free its slot. A subagent MUST hold its slot until its turn ends or the subagent stops. A call from a subagent thread or an advisor thread MUST fail with `agent: subagents cannot spawn subagents`. That call MUST start no subagent.
 - `ctx.wait(ids)` MUST return a list of final texts.
 - `ctx.sleep(seconds)` MUST accept a non-negative finite number.
 - `ctx.log(msg)` MUST pass the message to `Log`.
-- `ctx.judge(state, questions, model = None)` MUST return a dict from question name to answer. The state MUST be a string, dict, or list. Each question MUST be a dict with `type` `choice`, `noul`, `bool`, or `score`. `bool` MUST be sent as `noul`. A `choice` answer is `struct(choice, probabilities, confidence)`. A `noul` answer is `struct(noul)`. A `score` answer is `struct(score, probabilities, confidence)`. A missing field MUST be `None`.
-- `ctx.judge_batch(states, questions, concurrency = 8, model = None)` MUST return one `struct(answers, error)` per state, in input order. `concurrency` MUST be from 1 to 64. An item failure MUST set `error` and MUST NOT raise. Invalid questions, an invalid concurrency, and each stop condition listed for `ctx.try_call` MUST raise. A batch MUST hold at most 4096 states.
+- `ctx.judge(state, questions, model = None)` MUST return `struct(answers, model, fallback)`. `answers` maps each question name to its answer. The state MUST be a string, dict, or list. Each question MUST be a dict with `type` `choice`, `noul`, `bool`, or `score`. `bool` MUST be sent as `noul`. A `choice` answer is `struct(choice, probabilities, confidence)`. A `noul` answer is `struct(noul)`. A `score` answer is `struct(score, probabilities, confidence)`. A missing field MUST be `None`. `model` MUST be the answering model. `fallback` MUST be the primary model and its failure, or an empty string.
+- `ctx.judge_batch(states, questions, concurrency = 8, model = None)` MUST return one `struct(answers, model, fallback, error)` per state, in input order. `concurrency` MUST be from 1 to 64. An item failure MUST set `error` to a string and `answers`, `model` and `fallback` to `None`. Invalid questions, an invalid concurrency, and each stop condition listed for `ctx.try_call` MUST raise. A batch MUST hold at most 4096 states.
 
 ## The eval tool
 

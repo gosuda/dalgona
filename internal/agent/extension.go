@@ -104,6 +104,9 @@ func (w *worker) runNestedCall(ctx context.Context, call event.ToolCall, request
 		return err
 	}
 	_, err = w.t.appendEvents(ctx, completed)
+	if err == nil {
+		w.startReview(w.turnCtx, p, completed)
+	}
 	return err
 }
 

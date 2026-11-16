@@ -52,7 +52,7 @@ func (r *run) judge(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 	if err != nil {
 		return nil, err
 	}
-	return answersValue(value, set.items)
+	return judgeValue(value, set.items)
 }
 
 func (r *run) judgeBatch(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -134,15 +134,20 @@ func (r *run) batchResults(futures []*future, items []question) (starlark.Value,
 }
 
 func batchItem(f *future, items []question) starlark.Value {
+	var judged *starlarkstruct.Struct
 	err := f.err
-	var answers starlark.Value = starlark.None
 	if err == nil {
-		answers, err = answersValue(f.value, items)
+		judged, err = judgeValue(f.value, items)
 	}
 	if err != nil {
-		return starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{"answers": starlark.None, "error": starlark.String(err.Error())})
+		return starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
+			"answers": starlark.None, "model": starlark.None, "fallback": starlark.None,
+			"error": starlark.String(err.Error()),
+		})
 	}
-	return starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{"answers": answers, "error": starlark.None})
+	members := starlark.StringDict{"error": starlark.None}
+	judged.ToStringDict(members)
+	return starlarkstruct.FromStringDict(starlarkstruct.Default, members)
 }
 
 func (r *run) prepareJudge(state jsontext.Value, set questionSet, model string) (Slot, effectFunc, error) {
@@ -270,14 +275,26 @@ func writeQuestionFields(enc *jsontext.Encoder, fields *starlark.Dict, kind stri
 	return enc.WriteToken(jsontext.EndObject)
 }
 
-func answersValue(raw jsontext.Value, items []question) (starlark.Value, error) {
+func judgeValue(raw jsontext.Value, items []question) (*starlarkstruct.Struct, error) {
 	decoded, err := fromJSON(raw)
 	if err != nil {
 		return nil, fmt.Errorf("judge answers: %w", err)
 	}
-	answers, ok := decoded.(*starlark.Dict)
+	envelope, ok := decoded.(*starlark.Dict)
 	if !ok {
 		return nil, errors.New("judge answers must be a JSON object")
+	}
+	answers, err := judgeAnswers(envelope)
+	if err != nil {
+		return nil, err
+	}
+	modelName, err := judgeModel(envelope)
+	if err != nil {
+		return nil, err
+	}
+	fallback, err := judgeFallback(envelope)
+	if err != nil {
+		return nil, err
 	}
 	out := starlark.NewDict(len(items))
 	for _, item := range items {
@@ -289,7 +306,39 @@ func answersValue(raw jsontext.Value, items []question) (starlark.Value, error) 
 			return nil, err
 		}
 	}
-	return out, nil
+	return starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
+		"answers": out, "model": starlark.String(modelName), "fallback": fallback,
+	}), nil
+}
+
+func judgeAnswers(envelope *starlark.Dict) (*starlark.Dict, error) {
+	rawAnswers, found, _ := envelope.Get(starlark.String("answers"))
+	answers, ok := rawAnswers.(*starlark.Dict)
+	if !found || !ok {
+		return nil, errors.New("judge answers must be a JSON object")
+	}
+	return answers, nil
+}
+
+func judgeModel(envelope *starlark.Dict) (string, error) {
+	rawModel, found, _ := envelope.Get(starlark.String("model"))
+	modelName, ok := rawModel.(starlark.String)
+	if !found || !ok || modelName == "" {
+		return "", errors.New("judge answers must name the answering model")
+	}
+	return string(modelName), nil
+}
+
+func judgeFallback(envelope *starlark.Dict) (starlark.String, error) {
+	rawFallback, found, _ := envelope.Get(starlark.String("fallback"))
+	if !found || rawFallback == starlark.None {
+		return "", nil
+	}
+	fallback, ok := rawFallback.(starlark.String)
+	if !ok {
+		return "", errors.New("judge answers fallback must be a string")
+	}
+	return fallback, nil
 }
 
 func answerStruct(answers *starlark.Dict, item question) (starlark.Value, error) {

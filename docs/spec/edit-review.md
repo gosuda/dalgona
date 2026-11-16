@@ -37,14 +37,16 @@ A unit MUST send its requests to the judge as parts. Each request MUST encode to
 
 The unit MUST pack whole hunks in call order. A hunk that does not fit an empty part MUST be cut at a blank line, and the pieces MUST recompute their headers. Hunks that do not fit in 8 parts MUST be omitted. A truncated unit MUST NOT be clean, so a clean result MUST be recorded as uncertain. A flagged result MUST stay flagged.
 
+A binary file MUST be one unit. A file with no hunk MUST be one unit with an empty `diff`.
+
 Each request MUST be answered for each question it asks. A missing or out-of-range answer MUST fail its part.
 
 A failed part MUST add no scores. A unit with some answered parts MUST take the worst verdict of the answered parts, and a clean verdict MUST become uncertain. A unit MUST be an error only when every part fails.
 
 A flag MUST speak only when its question is a speaker and the `sound` score of its part is below 0.5.
 
-The edit unit MUST wait at most 8 seconds for all its parts. A timeout MUST fail the parts that have not answered. The review MUST NOT block the edit.
-The 8 second bound MUST apply per round, so a turn can wait 8 seconds in each round with edits.
+Each part request MUST allow at most two attempts of 8 seconds each. The caller's cancellation MUST bound both attempts. A part MUST wait at most 8 seconds for a review slot. A slot timeout MUST fail its part and MUST name the wait. The review MUST NOT block the edit.
+A turn with edits in several rounds can wait for a review in each round.
 
 The masked state MUST hold no raw secret. The unit MUST mask the paths and the post-image before the judge sees them.
 
@@ -97,6 +99,16 @@ The `parts` member MUST count the requests of the unit. It MUST be absent when t
 
 The `truncated` member MUST be true when the unit omits hunks, leaves out a large file, or stops loading. It MUST be true when a part fails.
 
+A `tool.judged` or `turn.judged` event MUST carry `by`. `by` names the answering model as `judge:<model>`. It is `judge` when no request was sent. When the parts have different answering models, `by` MUST be `judge:mixed`.
+
+The `fallback` member MUST be present when the fallback model answered. It MUST name the primary model and its failure. The host MUST mask that text and MUST cut it at 1 KiB.
+
+A `tool.judged` event of two or more parts MUST carry `judges`. `judges` MUST hold one entry for each part, in part order. Each entry MUST hold `part`, `by`, and `fallback` when that part used the fallback model. A part that fails without an answer names the requested judge in `by`.
+
+A unit of one part MUST NOT carry `judges`. A turn review sends one request, so it writes no `judges`.
+
+An event without `fallback` and `judges` MUST decode and fold unchanged. The [recovery table](recovery.md#rules) row `Call with tool.completed, other than the next row` covers such a judged call. The row `Turn open, no call pending` covers such a judged turn.
+
 ## Failure
 
 A judge error, a timeout, a missing answer, or an out-of-range answer MUST fail its part. A failed part MUST NOT fail the edit call, and the call MUST keep its `ok` result.
@@ -143,15 +155,19 @@ A continuation turn MUST be judged as its own unit, with only the edits that it 
 
 The turn review MUST send the cumulative change of each path, with 0 context lines, so the request holds changed lines only. A diff over the request limit MUST be cut with a truncation marker. Each file MUST take the room left divided by the number of files not yet decided. A file whose diff fits its share MUST keep all of it. The unused share MUST pass to the files after it.
 
+The turn request MUST NOT list a file that has no changed line.
+
 The turn review MUST size its base request with the longest boolean metadata encoding before it shares diff room.
 
 A path whose last change has a post-image digest but no post-image blob MUST be listed in `skipped`. That path MUST NOT be judged. A deletion has no post-image by nature, so its last change MUST be judged. The path of a deletion MUST NOT be listed in `skipped`.
 
-The turn review MUST wait at most 8 seconds for its one request. The turn review MUST NOT speak when it is truncated, but it MUST still journal its verdict. A turn that the user interrupts MUST journal an error verdict and MUST NOT add a message.
+The one turn request MUST allow at most two attempts of 8 seconds each. The caller's cancellation MUST bound them. The turn review MUST wait at most 8 seconds for a review slot. The turn review MUST NOT speak when it is truncated, but it MUST still journal its verdict. A turn that the user interrupts MUST journal an error verdict and MUST NOT add a message.
 
 ## Clients
 
 The server MUST send `dalgona/tool/judged` for each judged edit call, and `dalgona/turn/judged` for each judged turn. Each notification MUST carry the verdict and a `summary`.
+
+Each notification MUST carry `by`, the answering model of the event. It MUST carry `fallback` and `judges` when the event carries them. Each `judges` entry has `part`, `by`, and optional `fallback`. The `summary` MUST NOT hold this attribution.
 
 The `summary` of a `clean` verdict MUST be `No problems found`. The `summary` of a `flagged` verdict MUST start with `Flagged:` and MUST list the labels of its flags. It MUST add ` (not sent to the model)` when no flag speaks.
 
@@ -172,11 +188,11 @@ Those multi-file changes do not meet the single-file source rule. The required i
 
 | Group | Cases | Held out | Source |
 |---|---|---|---|
-| sound-edit | 108 | 54 | single-file edits that add lines: 60 code, 24 interface, 12 config, 12 text; multi-file commits fill the interface quota |
+| sound-edit | 108 | 54 | single-file edits that add lines: 60 code, 24 interface, 12 config, 12 text. Multi-file commits fill the interface quota |
 | sound-turn | 30 | 15 | turns whose subject names a changed file |
 | multipart | 40 | 20 | edits that need two or more parts |
 | moved | 1 | 0 | the one history commit that meets the different-part packing rule for one top-level Go function |
-| 14 defect groups | 293 | 145 | one group for each question id except `sound`; eight groups hold 30 cases, and six short groups hold their pool size |
+| 14 defect groups | 293 | 145 | one group for each question id except `sound`. Eight groups hold 30 cases, and six short groups hold their pool size |
 
 In each group, the case ids sort by the SHA-256 of each id. Even positions are `dev`, and odd positions are `held_out`. The held-out split holds 234 cases: 89 sound cases and 145 defect cases.
 
@@ -247,6 +263,14 @@ It MUST send changed lines only in one bounded request.
 Truncated turns MUST NOT speak.
 
 A question MUST NOT speak until a measurement names it. A question names itself when its held-out precision is at least 0.9 and it has at least 5 held-out true flags.
+A `lost_code` question MUST have at least 5 held-out `moved` cases before it can be a speaker.
+`measured` MUST record the number of held-out `moved` cases as `moved_cases`.
+The evaluator MUST run the held-out measurement `DALGONA_EDIT_REVIEW_RUNS` times.
+The number of runs MUST default to 3.
+It MUST record the lowest precision, the lowest recall and the lowest true flags of each question.
+It MUST record the highest sound flag rate across the runs.
+Each part request MUST run under the review timeout.
+A part that exceeds the timeout MUST count as an error.
 
 Before the feature is on by default, every question MUST have held-out precision of at least 0.9 and recall of at least 0.5. The sound flag rate MUST be at most 0.02. A question whose precision or recall is absent fails the gate. The ratchet check MUST compare every question that `ratchet.json` records, and a question missing from the run fails the check.
 

@@ -321,12 +321,33 @@ func RetryAfter(header string) time.Duration {
 func HTTPFailure(provider string, resp *http.Response) AttemptResult {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return AttemptResult{Status: resp.StatusCode, Err: fmt.Errorf("%s: read error response: %w", provider, err)}
+		return AttemptResult{Status: resp.StatusCode, Err: &HTTPError{
+			Status: resp.StatusCode,
+			Err:    fmt.Errorf("%s: read error response: %w", provider, err),
+		}}
 	}
 	return AttemptResult{
 		Status:     resp.StatusCode,
 		RetryAfter: RetryAfter(resp.Header.Get("Retry-After")),
 		Body:       body,
-		Err:        fmt.Errorf("%s: status %d: %s", provider, resp.StatusCode, bytes.TrimSpace(body)),
+		Err: &HTTPError{
+			Status:     resp.StatusCode,
+			RetryAfter: RetryAfter(resp.Header.Get("Retry-After")),
+			Err:        fmt.Errorf("%s: status %d: %s", provider, resp.StatusCode, bytes.TrimSpace(body)),
+		},
 	}
+}
+
+type HTTPError struct {
+	Status     int
+	RetryAfter time.Duration
+	Err        error
+}
+
+func (e *HTTPError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *HTTPError) Unwrap() error {
+	return e.Err
 }

@@ -29,10 +29,12 @@ type worker struct {
 	settings       Settings
 	tools          *toolset
 	contextWindow  int
+	turnCtx        context.Context
 	round          *reviewRound
 	eligible       bool
 	recovering     bool
 	reviewed       bool
+	reviewFailures int
 	requestContext requestContext
 }
 
@@ -98,6 +100,7 @@ func (a *actor) idle() {
 }
 
 func (w *worker) runTurn(ctx context.Context) {
+	w.turnCtx = ctx
 	if err := w.prime(ctx); err != nil {
 		w.end(ctx, outcome{status: statusFailed, failure: err.Error()})
 		return
