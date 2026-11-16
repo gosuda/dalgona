@@ -150,7 +150,7 @@ func broadenTokenDefaultDacl(token windows.Token, logon []byte) error {
 		return err
 	}
 	access := windows.EXPLICIT_ACCESS{
-		AccessPermissions: windows.GENERIC_READ | windows.GENERIC_WRITE,
+		AccessPermissions: windows.GENERIC_ALL,
 		AccessMode:        windows.GRANT_ACCESS,
 		Inheritance:       windows.NO_INHERITANCE,
 		Trustee: windows.TRUSTEE{
