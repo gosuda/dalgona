@@ -9,6 +9,7 @@ function props(
 		readonly childThreadIds?: readonly string[];
 		readonly threads?: readonly ThreadSummary[];
 		readonly onOpenThread?: (threadId: string) => void;
+		readonly timedOutQuestions?: ReadonlySet<string>;
 	} = {},
 ) {
 	return {
@@ -21,6 +22,7 @@ function props(
 		connected: true,
 		loading: false,
 		awaitingApproval: new Set<string>(),
+		timedOutQuestions: extra.timedOutQuestions ?? new Set<string>(),
 		childThreadIds: extra.childThreadIds ?? [],
 		threads: extra.threads ?? [],
 		userAgent: null,
@@ -238,6 +240,39 @@ describe("transcript rows", () => {
 			]),
 		});
 		expect(container.querySelectorAll(".file-change")).toHaveLength(2);
+	});
+
+	test("shows the Timed out state word only on the timed-out ask row", () => {
+		const { container } = render(Transcript, {
+			props: props(
+				[
+					{
+						id: "q1",
+						kind: "toolCall",
+						name: "ask",
+						arguments: {},
+						output: "",
+						status: "inProgress",
+						durationMs: null,
+					},
+					{
+						id: "q2",
+						kind: "toolCall",
+						name: "ask",
+						arguments: {},
+						output: "",
+						status: "inProgress",
+						durationMs: null,
+					},
+				],
+				{ timedOutQuestions: new Set(["q1"]) },
+			),
+		});
+		const rows = container.querySelectorAll(".items > li");
+		expect(rows).toHaveLength(2);
+		expect(rows[0]?.textContent).toContain("Timed out");
+		expect(rows[1]?.textContent).not.toContain("Timed out");
+		expect(rows[0]?.querySelector(".tag")?.textContent).toBe("Timed out");
 	});
 
 	test("renders a rewrite change as a file-change row", () => {

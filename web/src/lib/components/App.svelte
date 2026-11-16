@@ -1,21 +1,18 @@
 <script lang="ts">
-import { slashCommands } from "#lib/commands.ts";
 import ApprovalCard from "#lib/components/ApprovalCard.svelte";
 import Composer from "#lib/components/Composer.svelte";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
 import KeyListPanel from "#lib/components/panels/KeyListPanel.svelte";
 import LoginPanel from "#lib/components/panels/LoginPanel.svelte";
 import ModelPanel from "#lib/components/panels/ModelPanel.svelte";
-import Panel from "#lib/components/panels/Panel.svelte";
 import SettingsPanel from "#lib/components/panels/SettingsPanel.svelte";
-import ThreadPanels, {
-	threadPanelKinds,
-} from "#lib/components/panels/ThreadPanels.svelte";
+import ThreadPanels from "#lib/components/panels/ThreadPanels.svelte";
 import QuestionCard from "#lib/components/QuestionCard.svelte";
 import StateTag from "#lib/components/StateTag.svelte";
 import StatusBand from "#lib/components/StatusBand.svelte";
 import ThreadList from "#lib/components/ThreadList.svelte";
 import Transcript from "#lib/components/Transcript.svelte";
+import { threadHue } from "#lib/hue.ts";
 import {
 	type StateKey,
 	stateKey,
@@ -33,11 +30,17 @@ interface Props {
 
 let { session }: Props = $props();
 let dockHeight = $state(0);
+let announcement = $state("");
 const waitingThreadIds = $derived(
 	new Set(session.requests.map((request) => request.threadId)),
 );
 const activeThread = $derived(
 	session.threads.find((thread) => thread.id === session.activeThreadId),
+);
+const openHue = $derived(
+	session.activeThreadId === null
+		? undefined
+		: threadHue(session.activeThreadId),
 );
 const openThreadFlags = $derived(activeThread?.activeFlags ?? []);
 const folder = $derived(
@@ -94,12 +97,6 @@ const subagentTitle = $derived.by(() => {
 	return thread === undefined ? request.threadId : threadTitle(thread);
 });
 
-const genericTitle = $derived(
-	session.panel === null
-		? ""
-		: `/${slashCommands.find((command) => command.panel === session.panel)?.name ?? ""}`,
-);
-
 function isTyping(target: EventTarget | null): boolean {
 	return (
 		target instanceof HTMLElement &&
@@ -136,10 +133,10 @@ function onWindowKeydown(event: KeyboardEvent): void {
 		onSelect={(threadId) => void session.selectThread(threadId)}
 	/>
 
-	<main id="main-content" class="workspace" tabindex="-1">
+	<main id="main-content" class="workspace" data-hue={openHue}>
 		<header class="thread-head">
 			<div class="thread-title">
-				<h2>{session.activeTitle}</h2>
+				<h2 title={session.activeTitle}>{session.activeTitle}</h2>
 				<StateTag
 					state={headerState}
 					startedAtMs={session.transcript.turnStartedAtMs}
@@ -177,9 +174,13 @@ function onWindowKeydown(event: KeyboardEvent): void {
 			onStart={() => void session.createThread()}
 			loading={session.loadingTranscript}
 			awaitingApproval={session.awaitingApproval}
+			timedOutQuestions={session.timedOutQuestions}
 			verbosity={session.verbosity}
 			readOutput={(itemId, offset) => session.readItemOutput(itemId, offset)}
 			onRewind={(turnId) => session.openPanel("rewind", turnId)}
+			retryRemainingMs={session.retryRemainingMs}
+			reviewNote={session.reviewNote}
+			onAnnounce={(text) => (announcement = text)}
 		/>
 
 		<div class="dock" class:deciding={session.currentRequest !== null} bind:clientHeight={dockHeight}>
@@ -188,11 +189,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 				waiting={session.waitingElsewhere}
 				onDismiss={(id) => session.dismiss(id)}
 				onOpenWaiting={(threadId) => void session.selectThread(threadId)}
-				turnStatus={session.transcript.turnStatus}
-				turnError={session.transcript.error}
-				loadingTranscript={session.loadingTranscript}
-				retryRemainingMs={session.retryRemainingMs}
-				awaitingApproval={session.awaitingApproval}
+				announcement={announcement}
 			/>
 
 			{#if session.currentRequest !== null && isQuestionRequest(session.currentRequest)}
@@ -216,6 +213,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 			{/if}
 
 			<Composer
+				threadOpen={session.activeThreadId !== null}
 				deciding={session.currentRequest !== null}
 				disabled={session.connection !== "connected" || session.activeThreadId === null || session.loadingTranscript}
 				running={session.running}
@@ -242,13 +240,6 @@ function onWindowKeydown(event: KeyboardEvent): void {
 <KeyListPanel open={session.panel === "keys"} onClose={() => session.closePanel()} />
 <LoginPanel {session} open={session.panel === "login"} onClose={() => session.closePanel()} />
 <ModelPanel {session} open={session.panel === "model"} onClose={() => session.closePanel()} />
-<Panel
-	title={genericTitle}
-	open={session.panel !== null && session.panel !== "keys" && session.panel !== "settings" && session.panel !== "login" && session.panel !== "model" && !threadPanelKinds.has(session.panel)}
-	onClose={() => session.closePanel()}
->
-	{#snippet children()}{/snippet}
-</Panel>
 <SettingsPanel
 	{session}
 	open={session.panel === "settings"}
@@ -293,9 +284,14 @@ function onWindowKeydown(event: KeyboardEvent): void {
 	}
 
 	.thread-title h2 {
+		display: -webkit-box;
 		max-width: 48rem;
 		margin: 0;
+		overflow: hidden;
 		overflow-wrap: anywhere;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
 		font-size: var(--size-heading);
 		font-weight: 650;
 		line-height: 1.25;
@@ -310,7 +306,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 	}
 
 	.dock.deciding {
-		flex: 0 0 auto;
+		flex: 0 1 auto;
 		overflow-y: auto;
 		overscroll-behavior: contain;
 	}

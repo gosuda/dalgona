@@ -141,22 +141,31 @@ describe("question card", () => {
 		const dismiss = screen.getByRole("button", { name: "Dismiss" });
 
 		expect(await fireEvent.keyDown(title, { key: "ArrowDown" })).toBe(false);
-		const line = lastTop(scrollBy);
-		expect(line).toBeGreaterThan(0);
+		expect(lastTop(scrollBy)).toBe(48);
 		expect(await fireEvent.keyDown(title, { key: "ArrowUp" })).toBe(false);
-		expect(lastTop(scrollBy)).toBe(-line);
+		expect(lastTop(scrollBy)).toBe(-48);
 
 		expect(await fireEvent.keyDown(submit, { key: "PageDown" })).toBe(false);
-		const page = lastTop(scrollBy);
-		expect(page).toBeGreaterThan(line);
-		expect(page).toBeLessThanOrEqual(200);
+		expect(lastTop(scrollBy)).toBe(152);
 		expect(await fireEvent.keyDown(dismiss, { key: "PageUp" })).toBe(false);
-		expect(lastTop(scrollBy)).toBe(-page);
+		expect(lastTop(scrollBy)).toBe(-152);
 
 		expect(await fireEvent.keyDown(title, { key: "Home" })).toBe(false);
 		expect(lastTop(scrollTo)).toBe(0);
 		expect(await fireEvent.keyDown(dismiss, { key: "End" })).toBe(false);
 		expect(lastTop(scrollTo)).toBe(1000);
+	});
+
+	test("names the question as the group description", () => {
+		render(QuestionCard, {
+			props: props(databaseRequest, vi.fn(), vi.fn()),
+		});
+		const group = screen.getByRole("group", {
+			name: "Database",
+			description: "Which database should the service use?",
+		});
+		const prompt = group.querySelector<HTMLElement>("p.prompt");
+		expect(prompt?.id).toBe(group.getAttribute("aria-describedby"));
 	});
 
 	test("leaves scrolling keys to a radio and a text field in the details", async () => {

@@ -5,6 +5,12 @@
 	const body = card.querySelector('[aria-label="Request details"]');
 	if (!body)
 		return { ok: false, failures: ["request details: region not found"] };
+	const viewport = `${innerWidth}x${innerHeight}`;
+	if (!["320x568", "375x812"].includes(viewport))
+		failures.push(`viewport: ${viewport} (want 320x568 or 375x812)`);
+	const diffs = card.querySelectorAll("details.file-change").length;
+	if (diffs < 3)
+		failures.push(`diffs: ${diffs} shown (want at least 3 long diffs)`);
 	const originalScroll = body.scrollTop;
 	const box = body.getBoundingClientRect();
 	if (body.clientHeight < 36 || box.height < 36)
@@ -52,6 +58,55 @@
 		failures.push("page: horizontal overflow");
 	if (document.querySelectorAll(".dock .point").length !== 1)
 		failures.push("dock: want one point");
+	for (const name of ["dock", "composer"]) {
+		const node = document.querySelector(`.${name}`);
+		if (!node) {
+			failures.push(`${name}: not found`);
+			continue;
+		}
+		if (node.scrollHeight > node.clientHeight + 1)
+			failures.push(
+				`${name}: scrollHeight ${node.scrollHeight} (want <= ${node.clientHeight} + 1)`,
+			);
+	}
+	const heading = card.querySelector("#request-title");
+	const step = Math.max(48, body.clientHeight - 48);
+	body.scrollTop = 0;
+	if (!heading) {
+		failures.push("request title: not found");
+	} else {
+		heading.focus();
+		heading.dispatchEvent(
+			new KeyboardEvent("keydown", {
+				key: "PageDown",
+				bubbles: true,
+				cancelable: true,
+			}),
+		);
+		await new Promise((resolve) => requestAnimationFrame(resolve));
+		if (Math.abs(body.scrollTop - step) > 1)
+			failures.push(
+				`request details: PageDown moved ${Math.round(body.scrollTop)} (want ${Math.round(step)})`,
+			);
+	}
+	body.scrollTop = 0;
+	const inside = body.querySelector("pre");
+	if (!inside) {
+		failures.push("pre: not found");
+	} else {
+		inside.dispatchEvent(
+			new KeyboardEvent("keydown", {
+				key: "PageDown",
+				bubbles: true,
+				cancelable: true,
+			}),
+		);
+		await new Promise((resolve) => requestAnimationFrame(resolve));
+		if (body.scrollTop !== 0)
+			failures.push(
+				`request details: PageDown on the inner pre moved ${Math.round(body.scrollTop)} (want 0)`,
+			);
+	}
 	body.scrollTop = originalScroll;
 	return { ok: failures.length === 0, failures };
 })();

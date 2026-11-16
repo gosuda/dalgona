@@ -133,7 +133,7 @@ function onKeydown(event: KeyboardEvent): void {
 <style>
 	.request-card {
 		display: flex;
-		flex: 0 0 auto;
+		flex: 0 1 auto;
 		min-width: 0;
 		min-height: 0;
 		flex-direction: column;
@@ -165,7 +165,7 @@ function onKeydown(event: KeyboardEvent): void {
 	}
 
 	.request-body {
-		flex: 1 0 auto;
+		flex: 1 1 auto;
 		height: min(18dvh, 12rem);
 		max-height: min(60dvh, 40rem);
 		min-height: calc(var(--control-height) + var(--control-height) + var(--space-6));
@@ -207,9 +207,12 @@ function onKeydown(event: KeyboardEvent): void {
 
 	.request-actions {
 		display: grid;
+		position: sticky;
+		inset-block-end: 0;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: var(--space-2);
 		margin-block-start: var(--space-6);
+		background: var(--surface);
 	}
 
 	@media (max-width: 52rem) {

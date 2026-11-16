@@ -20,5 +20,31 @@
 				`start button: top ${Math.round(box.top)} bottom ${Math.round(box.bottom)} outside 0..${window.innerHeight}`,
 			);
 	}
+	const buttons = [...nav.querySelectorAll("button.thread")];
+	if (buttons.length === 0) failures.push("thread buttons: none found");
+	for (const button of buttons) {
+		nav.scrollTop = 0;
+		if (document.activeElement instanceof HTMLElement)
+			document.activeElement.blur();
+		button.focus();
+		await new Promise((resolve) => requestAnimationFrame(resolve));
+		const buttonBox = button.getBoundingClientRect();
+		const navBox = nav.getBoundingClientRect();
+		if (buttonBox.top < navBox.top || buttonBox.bottom > navBox.bottom)
+			failures.push(
+				`thread button ${button.textContent.trim().slice(0, 30)}: ${Math.round(buttonBox.top)}..${Math.round(buttonBox.bottom)} outside nav ${Math.round(navBox.top)}..${Math.round(navBox.bottom)}`,
+			);
+	}
+	for (const button of buttons) {
+		nav.scrollTop = 0;
+		if (document.activeElement instanceof HTMLElement)
+			document.activeElement.blur();
+		button.focus({ preventScroll: true });
+		await new Promise((resolve) => requestAnimationFrame(resolve));
+		if (nav.scrollTop !== 0)
+			failures.push(
+				`nav: scrollTop ${nav.scrollTop} after focus with preventScroll (want 0)`,
+			);
+	}
 	return { ok: failures.length === 0, failures };
 })();

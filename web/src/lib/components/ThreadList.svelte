@@ -66,7 +66,7 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 		<span class="count">{threads.length}</span>
 	</div>
 
-	<p class="loading" role="status">{loading ? "Loading threads…" : ""}</p>
+	<p class="loading">{loading ? "Loading threads…" : ""}</p>
 
 	{#if !loading && threads.length === 0 && !connected}
 		<div class="empty">

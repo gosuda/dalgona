@@ -135,17 +135,14 @@ describe("approval card", () => {
 		});
 
 		expect(await fireEvent.keyDown(title, { key: "ArrowDown" })).toBe(false);
-		const line = lastTop(scrollBy);
-		expect(line).toBeGreaterThan(0);
+		expect(lastTop(scrollBy)).toBe(48);
 		expect(await fireEvent.keyDown(title, { key: "ArrowUp" })).toBe(false);
-		expect(lastTop(scrollBy)).toBe(-line);
+		expect(lastTop(scrollBy)).toBe(-48);
 
 		expect(await fireEvent.keyDown(accept, { key: "PageDown" })).toBe(false);
-		const page = lastTop(scrollBy);
-		expect(page).toBeGreaterThan(line);
-		expect(page).toBeLessThanOrEqual(200);
+		expect(lastTop(scrollBy)).toBe(152);
 		expect(await fireEvent.keyDown(cancel, { key: "PageUp" })).toBe(false);
-		expect(lastTop(scrollBy)).toBe(-page);
+		expect(lastTop(scrollBy)).toBe(-152);
 
 		expect(await fireEvent.keyDown(title, { key: "Home" })).toBe(false);
 		expect(lastTop(scrollTo)).toBe(0);
@@ -166,6 +163,9 @@ describe("approval card", () => {
 		expect(await fireEvent.keyDown(command, { key: "PageDown" })).toBe(true);
 		expect(
 			await fireEvent.keyDown(title, { key: "PageDown", ctrlKey: true }),
+		).toBe(true);
+		expect(
+			await fireEvent.keyDown(title, { key: "PageDown", altKey: true }),
 		).toBe(true);
 		Object.defineProperty(details, "scrollHeight", {
 			value: 200,

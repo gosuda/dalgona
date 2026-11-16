@@ -1,17 +1,3 @@
-<script module lang="ts">
-import type { PanelKind } from "#lib/commands.ts";
-
-export const threadPanelKinds: ReadonlySet<PanelKind> = new Set<PanelKind>([
-	"resume",
-	"new",
-	"compact",
-	"fork",
-	"tree",
-	"rewind",
-	"advisor",
-	"review",
-]);
-</script>
 
 <script lang="ts">
 import AdvisorPanel from "#lib/components/panels/AdvisorPanel.svelte";

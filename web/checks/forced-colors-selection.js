@@ -3,11 +3,18 @@
 	if (!matchMedia("(forced-colors: active)").matches) {
 		return { ok: false, failures: ["media: forced-colors is not active"] };
 	}
-	const rows = [
-		...document.querySelectorAll(
-			'nav[aria-label="Conversation threads"] button.thread',
-		),
-	];
+	const threads = 'nav[aria-label="Conversation threads"] button.thread';
+	const composer = () =>
+		document.querySelector('[aria-label="Message composer"] textarea');
+	const first = document.querySelector(threads);
+	const current = document.querySelector(`${threads}[aria-current="true"]`);
+	if (first && !current) {
+		first.click();
+		for (let i = 0; i < 100 && composer()?.disabled !== false; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	}
+	const rows = [...document.querySelectorAll(threads)];
 	if (rows.length < 2)
 		return {
 			ok: false,

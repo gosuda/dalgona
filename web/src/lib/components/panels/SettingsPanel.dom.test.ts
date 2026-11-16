@@ -218,6 +218,19 @@ describe("settings panel", () => {
 		]);
 	});
 
+	test("names the review recipient as the checkbox description", async () => {
+		await openSettings(baseline);
+		const review = screen.getByLabelText("Review edits");
+		const describedBy = review.getAttribute("aria-describedby") ?? "";
+		expect(describedBy).not.toBe("");
+		expect(document.getElementById(describedBy)?.textContent?.trim()).toBe(
+			"Sends each edit's masked diff to the decider model.",
+		);
+		expect(
+			screen.getByLabelText("Folder").getAttribute("aria-describedby"),
+		).toBeNull();
+	});
+
 	test("rejects an empty choice with a message", async () => {
 		const { ports } = await openSettings({ ...baseline, approval: "" });
 		await fireEvent.click(screen.getByRole("button", { name: "Save" }));

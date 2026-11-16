@@ -59,6 +59,7 @@ interface Props {
 	onSteer: (text: string) => void;
 	onFollowup: (text: string) => void;
 	onInterrupt: () => void;
+	threadOpen?: boolean;
 	retrying?: boolean;
 	deciding?: boolean;
 	onOpenPanel?: (kind: PanelKind) => void;
@@ -80,6 +81,7 @@ let {
 	onSteer,
 	onFollowup,
 	onInterrupt,
+	threadOpen = true,
 	retrying = false,
 	deciding = false,
 	onOpenPanel,
@@ -127,8 +129,9 @@ const filePending = $derived(
 		mention.query !== "" &&
 		fileQuery !== mention.query,
 );
+const shownFileMatches = $derived(fileMatches.slice(0, FILE_LIMIT));
 const fileItems = $derived(
-	fileMatches.slice(0, FILE_LIMIT).map((match) => ({
+	shownFileMatches.map((match) => ({
 		id: match.path,
 		primary: match.fileName,
 		secondary: match.path,
@@ -235,7 +238,7 @@ function syncCaret(field: HTMLTextAreaElement): void {
 }
 
 function onFileKey(event: KeyboardEvent): boolean {
-	const count = fileMatches.length;
+	const count = shownFileMatches.length;
 	if (event.key === "ArrowDown" || event.key === "ArrowUp") {
 		if (count === 0) return false;
 		const step = event.key === "ArrowDown" ? 1 : -1;
@@ -252,7 +255,7 @@ function onFileKey(event: KeyboardEvent): boolean {
 		!event.shiftKey &&
 		!event.altKey;
 	if (!accepts) return false;
-	insertFile(fileMatches[fileActive]);
+	insertFile(shownFileMatches[fileActive]);
 	return true;
 }
 
@@ -266,8 +269,13 @@ function insertFile(match: FileMatch | undefined): void {
 	void tick().then(() => textarea?.setSelectionRange(position, position));
 }
 
+function messageText(): string | null {
+	return parsed.kind === "message" ? parsed.text.trim() : null;
+}
+
 function validText(): string | null {
-	const value = text.trim();
+	const value = messageText();
+	if (value === null) return null;
 	if (value) {
 		error = "";
 		return value;
@@ -349,7 +357,8 @@ function onPaste(event: ClipboardEvent): void {
 }
 
 function sendDraft(): void {
-	const typed = text.trim();
+	const typed = messageText();
+	if (typed === null) return;
 	const attachments = attachmentsOf(chips);
 	if (
 		typed === "" &&
@@ -410,6 +419,7 @@ function queueFollowup(): void {
 		error = "Shell commands run with Enter";
 		return;
 	}
+	if (parsed.kind === "command") return;
 	const value = validText();
 	if (!value) return;
 	onFollowup(value);
@@ -550,10 +560,10 @@ function onKeydown(event: KeyboardEvent): void {
 		<p id="composer-error" class="error" role="alert">{error}</p>
 
 		<div class="actions">
-			<button class={running || deciding ? "quiet" : "point"} type="submit" disabled={disabled}>{running ? "Steer" : "Send"}</button>
+			<button class={running || deciding || !threadOpen ? "quiet" : "point"} type="submit" disabled={disabled}>{running ? "Steer" : "Send"}</button>
 			{#if running}
 				<button type="button" disabled={disabled} onclick={queueFollowup} {@attach handoffFocus(() => textarea)}>Queue follow-up</button>
-				<button class="quiet danger" type="button" disabled={disabled} onclick={onInterrupt} {@attach handoffFocus(() => textarea)}>Interrupt turn</button>
+				<button class="quiet danger" type="button" disabled={disabled} onclick={onInterrupt} {@attach handoffFocus(() => textarea)}>Interrupt</button>
 			{/if}
 		</div>
 	</form>

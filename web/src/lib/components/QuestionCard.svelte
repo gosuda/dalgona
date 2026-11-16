@@ -157,9 +157,9 @@ function onKeydown(event: KeyboardEvent): void {
 		{/if}
 		{#each request.questions as question, index (question.id)}
 			{@const selection = selectionAt(index)}
-			<fieldset class="question">
+			<fieldset class="question" aria-describedby={`question-prompt-${question.id}`}>
 				<legend>{question.header}</legend>
-				<p class="prompt">{question.question}</p>
+				<p class="prompt" id={`question-prompt-${question.id}`}>{question.question}</p>
 				{#each question.options as option, optionIndex (option.label)}
 					<div class="option" class:selected={selection.picked.includes(option.label)}>
 						<label>
