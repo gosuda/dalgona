@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRenderDiagramMermaid(t *testing.T) {
@@ -29,7 +31,9 @@ func TestRenderDiagramD2(t *testing.T) {
 
 func TestRenderDiagramNomnoml(t *testing.T) {
 	t.Parallel()
-	art, err := renderDiagram("nomnoml", "[A]->[B]\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	art, err := renderNomnoml(ctx, "[A]->[B]\n")
 	if err != nil {
 		t.Fatalf("nomnoml render: %v", err)
 	}
