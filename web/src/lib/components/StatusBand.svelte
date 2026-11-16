@@ -179,7 +179,7 @@ const shown = $derived({
 	.band {
 		display: grid;
 		grid-auto-flow: column;
-		grid-auto-columns: max-content;
+		grid-auto-columns: minmax(0, max-content);
 		justify-content: end;
 		width: 100%;
 		min-width: 0;
