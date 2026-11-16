@@ -49,9 +49,18 @@ export type JsonValue =
 	| readonly JsonValue[]
 	| { readonly [key: string]: JsonValue };
 
+export interface ReviewJudge {
+	readonly part: number;
+	readonly by: string;
+	readonly fallback?: string;
+}
+
 export interface EditReview {
 	readonly verdict: "clean" | "uncertain" | "flagged" | "error";
 	readonly summary: string;
+	readonly by?: string;
+	readonly fallback?: string;
+	readonly judges?: readonly ReviewJudge[];
 }
 
 interface OutputSpill {

@@ -17,6 +17,7 @@ import type {
 	ModelPreset,
 	PlanStep,
 	RequestId,
+	ReviewJudge,
 	StatusInfo,
 	ThreadActivity,
 	ThreadDetail,
@@ -1051,14 +1052,81 @@ function tokenUsageNotice(params: Members): AppNotification | null {
 
 const editVerdicts = ["clean", "uncertain", "flagged", "error"] as const;
 
+interface ReviewAttribution {
+	readonly by?: string;
+	readonly fallback?: string;
+	readonly judges?: readonly ReviewJudge[];
+}
+
+function optionalString(value: unknown): string | null | undefined {
+	if (value === undefined || typeof value === "string") {
+		return value;
+	}
+	return null;
+}
+
+function parseJudge(value: unknown): ReviewJudge | null {
+	if (!isObject(value)) {
+		return null;
+	}
+	const part = value["part"];
+	const by = value["by"];
+	const fallback = optionalString(value["fallback"]);
+	if (
+		typeof part !== "number" ||
+		!Number.isInteger(part) ||
+		part < 0 ||
+		typeof by !== "string" ||
+		fallback === null
+	) {
+		return null;
+	}
+	return fallback === undefined ? { part, by } : { part, by, fallback };
+}
+
+function parseJudges(
+	value: unknown,
+): readonly ReviewJudge[] | null | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!Array.isArray(value)) {
+		return null;
+	}
+	const judges: ReviewJudge[] = [];
+	for (const entry of value) {
+		const judge = parseJudge(entry);
+		if (judge === null) {
+			return null;
+		}
+		judges.push(judge);
+	}
+	return judges;
+}
+
+function parseAttribution(params: Members): ReviewAttribution | null {
+	const by = optionalString(params["by"]);
+	const fallback = optionalString(params["fallback"]);
+	const judges = parseJudges(params["judges"]);
+	if (by === null || fallback === null || judges === null) {
+		return null;
+	}
+	return {
+		...(by === undefined ? {} : { by }),
+		...(fallback === undefined ? {} : { fallback }),
+		...(judges === undefined ? {} : { judges }),
+	};
+}
+
 function parseReview(params: Members): EditReview | null {
 	const verdict =
 		editVerdicts.find((value) => value === params["verdict"]) ?? null;
 	const summary = params["summary"];
-	if (verdict === null || typeof summary !== "string") {
+	const attribution = parseAttribution(params);
+	if (verdict === null || typeof summary !== "string" || attribution === null) {
 		return null;
 	}
-	return { verdict, summary };
+	return { verdict, summary, ...attribution };
 }
 
 function toolJudgedNotice(params: Members): AppNotification | null {
