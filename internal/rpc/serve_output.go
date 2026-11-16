@@ -5,8 +5,8 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 
-	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent/event"
 )
 
 func outputSpill(spill *event.Spill) *OutputSpill {

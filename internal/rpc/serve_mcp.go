@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/gosuda/dalgona/internal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent"
 )
 
 const (

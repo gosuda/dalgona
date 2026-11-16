@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/dal/agent/event"
 )
 
 func indexTestRecords(filler int) []event.Seqd {

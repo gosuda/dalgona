@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/app/battery"
+	"github.com/gosuda/dalgona/internal/dal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 )

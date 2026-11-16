@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/dal/agent/event"
 )
 
 var itemKinds = []string{kindUser, kindAgent, kindReasoning, kindCommand, kindFileChange, kindMCP, kindCompaction, kindDynamic}

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/model"

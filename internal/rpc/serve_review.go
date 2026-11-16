@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent"
 )
 
 const (

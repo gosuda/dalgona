@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 

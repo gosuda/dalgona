@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/gosuda/dalgona/internal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent"
 	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 

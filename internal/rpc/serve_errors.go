@@ -3,7 +3,7 @@ package rpc
 import (
 	"errors"
 
-	"github.com/gosuda/dalgona/internal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent"
 )
 
 const (

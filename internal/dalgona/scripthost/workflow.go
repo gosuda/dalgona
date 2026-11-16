@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	corescript "github.com/gosuda/dalgona/internal/script"
 	corescripthost "github.com/gosuda/dalgona/internal/scripthost"
 

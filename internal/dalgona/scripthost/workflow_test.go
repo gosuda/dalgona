@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/agent/event"
+	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
 )

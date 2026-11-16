@@ -119,7 +119,7 @@ linters:
         core:
           files:
             - "**/internal/dal/journal/**"
-            - "**/internal/agent/**"
+            - "**/internal/dal/agent/**"
             - "**/internal/dal/model/**"
             - "**/internal/dal/auth/**"
             - "**/internal/dal/tool/**"
@@ -173,7 +173,7 @@ linters:
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/dal/journal"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/agent"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/agent"
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/dal/model"
               desc: clients reach the core only through internal/rpc

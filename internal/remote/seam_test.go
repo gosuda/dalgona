@@ -1,6 +1,6 @@
 package remote
 
-import "github.com/gosuda/dalgona/internal/agent"
+import "github.com/gosuda/dalgona/internal/dal/agent"
 
 var (
 	_ Recorder            = (*agent.Host)(nil)

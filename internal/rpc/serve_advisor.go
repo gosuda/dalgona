@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json/jsontext"
 
-	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/agent/advisor"
+	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent/advisor"
 )
 
 func advisorUnavailable() *RPCError {
