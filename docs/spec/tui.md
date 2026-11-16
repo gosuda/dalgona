@@ -320,6 +320,15 @@ A shell command MUST run in the open thread's directory. Before a thread opens, 
 The folder item, its help legend and the welcome details MUST show the open thread's directory.
 Before a thread opens, they MUST show the launch directory.
 
+## Trademark logo
+
+When the terminal supports an inline image protocol, the client MUST print the product's trademark logo above the welcome row.
+The client MUST use the kitty graphics protocol on kitty, ghostty, and WezTerm, and the iTerm2 inline image on iTerm2.
+A `dalgona` session MUST show `assets/brand/dalgona` and a `dal` session MUST show `assets/brand/dal` tinted to the accent colour.
+A terminal without image support MUST NOT print the logo row.
+Kitty emission MUST hold the cursor with `C=1` and chunk base64 at 4096 bytes.
+The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `width` and `height`.
+
 ## Keys and commands
 
 | Input | Effect |

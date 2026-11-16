@@ -188,6 +188,7 @@ func (m *model) commit(key string, lines []string) {
 }
 
 func (m *model) commitFull(key string, lines, full []string) {
+	full = slices.DeleteFunc(slices.Clone(full), func(s string) bool { return strings.HasPrefix(s, imgRowMark) })
 	if len(lines) == 0 || !m.keepEntry(key, full) {
 		return
 	}
@@ -353,6 +354,9 @@ func (m *model) nextChunk(bound int) (string, bool) {
 	if len(rows) == 0 {
 		return "", false
 	}
+	if len(rows) == 1 && strings.HasPrefix(rows[0], "\x1b_G") {
+		return rows[0], true
+	}
 	return m.screen.emit(chunkText(rows)), true
 }
 
@@ -360,6 +364,14 @@ func (m *model) takeChunk(bound int) []string {
 	var rows []string
 	width := terminalWidth(m.screen.width)
 	for len(m.out.pending) > 0 && len(rows) < bound {
+		if strings.HasPrefix(m.out.pending[0], imgRowMark) {
+			if len(rows) > 0 {
+				break
+			}
+			rows = append(rows, m.out.pending[0][len(imgRowMark):])
+			m.out.pending = m.out.pending[1:]
+			break
+		}
 		wrapped := m.screen.wrap(m.out.pending[0], width)
 		m.out.pending = m.out.pending[1:]
 		room := bound - len(rows)
