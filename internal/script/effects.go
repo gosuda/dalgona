@@ -124,7 +124,10 @@ type Outcome struct {
 	Prints Prints
 }
 
-func complete(fx Effects, run string, outcome Outcome) (Outcome, error) {
+func Complete(ctx context.Context, fx Effects, run string, outcome Outcome) (Outcome, error) {
+	if err := ctx.Err(); err != nil {
+		return Outcome{}, err
+	}
 	if err := fx.Completed(run, outcome); err != nil {
 		return Outcome{}, fmt.Errorf("run %s: complete: %w", run, err)
 	}

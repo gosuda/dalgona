@@ -8,6 +8,8 @@ Each product MUST use its own home. `dal` MUST use `$DAL_HOME` or `~/.dal`. `dal
 
 The `eval` tool and the tool modes MUST belong to both products. `dal` MUST reach the Starlark engine only through `internal/scripthost`. Plugins, workflows, hooks, MCP servers, skills discovery, remote runners, and the web client MUST stay with `dalgona`.
 
+The shared interpreter seam is the exported `Runtime` in `internal/script` with `NewRuntime`, `LoadCell`, `Call`, `ExecCell`, `WithContext`, `ContextValue`, and `Finish`. The battery-only adapters are `internal/dalgona/script` for plugin and workflow execution and `internal/dalgona/scripthost` for the agent extension. The shared host exposes only `eval` and the neutral extension result.
+
 A relative `$DAL_HOME` or `$DALGONA_HOME` is made absolute by `config.AnchorHome`, and `Load` rejects a relative home. If the user home directory is unknown, the home is the relative `.dal` or `.dalgona` directory.
 
 ## Scope

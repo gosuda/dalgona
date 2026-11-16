@@ -17,7 +17,7 @@ import (
 	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/daemon"
-	"github.com/gosuda/dalgona/internal/script"
+	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 )
 
 const notChecked = "not checked; the config did not load"
@@ -345,7 +345,7 @@ func (in *inspector) checkPlugins(context.Context) []row {
 	if err != nil {
 		return []row{failRow("plugins", fmt.Sprintf("list plugins: %v", err))}
 	}
-	_, loadErr := script.LoadPlugins(in.env.Home)
+	_, loadErr := batteryscript.LoadPlugins(in.env.Home)
 	failures := loadFailures(loadErr)
 	if len(failures) == 0 {
 		return []row{okRow("plugins", fmt.Sprintf("%d loaded", len(files)))}

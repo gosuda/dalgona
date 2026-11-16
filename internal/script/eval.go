@@ -81,20 +81,20 @@ func (e *Eval) Class() tool.Class { return tool.ClassScript }
 func (e *Eval) Run(ctx context.Context, call tool.Call, _ tool.Env) (tool.Result, error) {
 	req, _, outcome := e.request(call.Args)
 	if outcome.Status != "" {
-		return replyResult(call.ID, outcome)
+		return ReplyResult(call.ID, outcome)
 	}
-	start, done, err := e.fx.Started(RunStart{ID: call.ID, Entry: EvalName, Source: []byte(req.code), Args: call.Args, Seed: newSeed()})
+	start, done, err := e.fx.Started(RunStart{ID: call.ID, Entry: EvalName, Source: []byte(req.code), Args: call.Args, Seed: NewSeed()})
 	if err != nil {
 		return tool.Result{}, fmt.Errorf("eval %s: start run: %w", call.ID, err)
 	}
 	if done != nil {
-		return replyResult(call.ID, *done)
+		return ReplyResult(call.ID, *done)
 	}
-	outcome, err = complete(e.fx, start.ID, e.started(ctx, start))
+	outcome, err = Complete(context.WithoutCancel(ctx), e.fx, start.ID, e.started(ctx, start))
 	if err != nil {
 		return tool.Result{}, fmt.Errorf("eval %s: %w", call.ID, err)
 	}
-	return replyResult(call.ID, outcome)
+	return ReplyResult(call.ID, outcome)
 }
 
 func (e *Eval) started(ctx context.Context, start RunStart) Outcome {
@@ -128,14 +128,14 @@ func (e *Eval) execute(ctx context.Context, start RunStart, req evalRequest, all
 	}
 	env, end := r.begin(ctx, start.Seed)
 	defer end()
-	data, err := fromJSON(req.data)
+	data, err := FromJSON(req.data)
 	if err != nil {
 		return stopped(StatusFailed, codeInvalid, "eval: data: "+err.Error(), stageArgs)
 	}
-	env = r.withContext(env)
+	env = r.WithContext(env)
 	env["data"] = data
-	value, err := r.execCell(EvalName, start.Source, env)
-	return r.finish(ctx, value, err)
+	value, err := r.ExecCell(ctx, EvalName, start.Source, env)
+	return r.Finish(ctx, value, err)
 }
 
 func parseEvalArgs(args jsontext.Value) (evalRequest, error) {
@@ -153,9 +153,6 @@ func parseEvalArgs(args jsontext.Value) (evalRequest, error) {
 		if err := req.readField(dec, key.String(), &codeSet); err != nil {
 			return evalRequest{}, err
 		}
-	}
-	if _, err := dec.ReadToken(); err != nil {
-		return evalRequest{}, err
 	}
 	if !codeSet {
 		return evalRequest{}, errors.New("code is required")
@@ -227,7 +224,7 @@ func readStrings(dec *jsontext.Decoder) ([]string, error) {
 	return items, nil
 }
 
-func replyResult(id string, outcome Outcome) (tool.Result, error) {
+func ReplyResult(id string, outcome Outcome) (tool.Result, error) {
 	reply, err := outcome.Reply(id)
 	if err != nil {
 		return tool.Result{}, err

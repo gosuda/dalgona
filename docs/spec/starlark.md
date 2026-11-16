@@ -1,6 +1,6 @@
 # Durable Starlark
 
-This specification defines package `internal/script`: the run engine, the `eval` tool, tool modes, workflows, and plugins. The standard library is defined by `internal/script/stdlib`.
+This specification defines package `internal/script`: the shared run engine, the `eval` tool, and tool modes. Battery-only adapters live in `internal/dalgona/script` for plugins and workflows and in `internal/dalgona/scripthost` for the agent extension. The shared host `internal/scripthost` exposes only `eval` through `NewEffects`. The standard library is defined by `internal/script/stdlib`.
 
 ## Dialect
 
@@ -186,4 +186,4 @@ Each plugin call MUST be a durable run. Its source MUST be the defining file. Th
 
 `ToolCall` MUST run every `tool_call` hook in load order and MUST return every hook failure joined. A hook failure MUST count as no opinion for that hook only and MUST NOT skip later hooks. A hook MUST return `None`, `{"decision": "allow"}`, or `{"decision": "deny", "reason": str}`. The first `deny` MUST win. Otherwise the first `allow` MUST win. `HookDecision.By` MUST be `hook:<file>:<fn>`. The host MUST journal it as `approval.resolved` with that `by`. Any other result MUST fail with the hook name. `Emit` MUST run `session_start` and `turn_end` hooks and MUST return every hook failure.
 
-Each `tool_call` hook MUST run under its own deadline. The deadline MUST be 5 seconds unless `scripthost.Config.HookTimeout` sets another duration. A hook that runs past its deadline MUST stop. Its failure text MUST be `plugin <file> hook timed out after <duration>`. A timed-out hook MUST count as no opinion. The approval gate MUST log the failure and MUST continue with the next hook or gate step. A plugin tool and an `eval` cell MUST inherit the deadline of the tool call that runs them. They MUST NOT add a deadline of their own. A `turn_end` hook MUST keep the 30 second deadline of the turn.
+Each `tool_call` hook MUST run under its own deadline. The deadline MUST be 5 seconds unless `internal/dalgona/scripthost.Config.HookTimeout` sets another duration. A hook that runs past its deadline MUST stop. Its failure text MUST be `plugin <file> hook timed out after <duration>`. A timed-out hook MUST count as no opinion. The approval gate MUST log the failure and MUST continue with the next hook or gate step. A plugin tool and an `eval` cell MUST inherit the deadline of the tool call that runs them. They MUST NOT add a deadline of their own. A `turn_end` hook MUST keep the 30 second deadline of the turn.

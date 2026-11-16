@@ -8,9 +8,21 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/tool"
 )
+
+//nolint:revive // test helper threads caller context, test state, journal, run id, cell source, and cell tools.
+func runSharedCell(ctx context.Context, t *testing.T, j *journal, id, src string, tools ...string) reply {
+	t.Helper()
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeEvalOnly, Tools: specs(tools...)})
+	quoted, err := jsontext.AppendQuote([]byte(`{"code":`), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runEval(ctx, t, eval, id, string(append(quoted, '}')))
+}
 
 type toolFunc func(ctx context.Context, name string, args jsontext.Value) (jsontext.Value, error)
 

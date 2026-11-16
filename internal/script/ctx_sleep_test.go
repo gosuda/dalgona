@@ -14,7 +14,7 @@ const sleepRefusal = "ctx.sleep: seconds must be non-negative and finite"
 
 type sleepRun struct {
 	journal *journal
-	outcome script.Outcome
+	outcome reply
 	started time.Time
 	elapsed time.Duration
 }
@@ -23,11 +23,8 @@ func runSleepScript(t *testing.T, src string) sleepRun {
 	t.Helper()
 	j := newJournal(echoTool)
 	started := time.Now()
-	outcome, err := script.RunWorkflow(t.Context(), j, script.Workflow{ID: "sleep", Entry: "s.star", Source: []byte(src)})
-	if err != nil {
-		t.Fatalf("run workflow: %v", err)
-	}
-	return sleepRun{journal: j, outcome: outcome, started: started, elapsed: time.Since(started)}
+	got := runSharedCell(t.Context(), t, j, "sleep", src)
+	return sleepRun{journal: j, outcome: got, started: started, elapsed: time.Since(started)}
 }
 
 func TestCtxSleepAcceptsIntegerAndFloatSeconds(t *testing.T) {
@@ -54,7 +51,7 @@ func TestCtxSleepAcceptsIntegerAndFloatSeconds(t *testing.T) {
 
 func assertSlept(t *testing.T, got sleepRun, wait time.Duration) {
 	t.Helper()
-	if got.outcome.Status != script.StatusCompleted {
+	if got.outcome.Status != "completed" {
 		t.Fatalf("status = %s, error = %+v, want completed", got.outcome.Status, got.outcome.Error)
 	}
 	if got.elapsed != wait {
@@ -93,7 +90,7 @@ func TestCtxSleepRefusesWhatIsNotANonNegativeFiniteNumber(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				got := runSleepScript(t, tc.src)
 				failure := got.outcome.Error
-				if got.outcome.Status != script.StatusFailed || failure.Code != "error" || failure.Stage != "run" || failure.Message != tc.want {
+				if got.outcome.Status != "failed" || failure.Code != "error" || failure.Stage != "run" || failure.Message != tc.want {
 					t.Fatalf("outcome = %s %+v, want failed error at run with message %q", got.outcome.Status, failure, tc.want)
 				}
 				if got.elapsed != 0 {

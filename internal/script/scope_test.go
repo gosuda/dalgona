@@ -56,13 +56,10 @@ func scopeSubmissionOrder(t *testing.T, seed uint64) {
 		return args, nil
 	})
 	src := "s = ctx.scope(limit = 4)\nfor i in range(24):\n    s.tools.echo(i = i)\n[r['i'] for r in s.all()]\n"
-	outcome, err := script.RunWorkflow(t.Context(), j, script.Workflow{ID: "scope", Entry: "s.star", Source: []byte(src)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cell := runSharedCell(t.Context(), t, j, "scope", src, "echo")
 	var got []int
-	if err := json.Unmarshal(outcome.Value, &got); err != nil {
-		t.Fatalf("seed %d: outcome %+v: %v", seed, outcome, err)
+	if err := json.Unmarshal(cell.Value, &got); err != nil {
+		t.Fatalf("seed %d: outcome %+v: %v", seed, cell, err)
 	}
 	want := make([]int, 24)
 	for i := range want {
@@ -84,16 +81,16 @@ func scopeSubmissionOrder(t *testing.T, seed uint64) {
 func TestScopeRejectsLimitOutsideRange(t *testing.T) {
 	for _, limit := range []int{0, 65} {
 		src := fmt.Sprintf("ctx.scope(limit = %d)", limit)
-		outcome, err := script.RunWorkflow(t.Context(), newJournal(echoTool), script.Workflow{ID: "s", Entry: "s.star", Source: []byte(src)})
-		if err != nil || outcome.Status != script.StatusFailed {
-			t.Fatalf("limit %d: %v %+v", limit, err, outcome)
+		cell := runSharedCell(t.Context(), t, newJournal(echoTool), "s", src)
+		if cell.Status != "failed" {
+			t.Fatalf("limit %d: %+v", limit, cell)
 		}
 	}
 	for _, limit := range []int{1, 64} {
 		src := fmt.Sprintf("s = ctx.scope(limit = %d)\ns.tools.echo(i = 7)\ns.all()", limit)
-		outcome, err := script.RunWorkflow(t.Context(), newJournal(echoTool), script.Workflow{ID: "s", Entry: "s.star", Source: []byte(src)})
-		if err != nil || outcome.Status != script.StatusCompleted || string(outcome.Value) != `[{"tool":"echo","args":{"i":7}}]` {
-			t.Fatalf("accepted limit %d: %v %+v", limit, err, outcome)
+		cell := runSharedCell(t.Context(), t, newJournal(echoTool), "s", src, "echo")
+		if cell.Status != "completed" || string(cell.Value) != `[{"tool":"echo","args":{"i":7}}]` {
+			t.Fatalf("accepted limit %d: %+v", limit, cell)
 		}
 	}
 }
@@ -131,11 +128,7 @@ func judgeBatchOrder(t *testing.T) {
 	j := newJournal(echoTool)
 	j.judge = judgeByState(probe)
 	run := func() []any {
-		outcome, err := script.RunWorkflow(t.Context(), j, script.Workflow{ID: "judge-1", Entry: "j.star", Source: []byte(judgeBatchWorkflow)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return workflowValues(t, outcome)
+		return workflowValues(t, runSharedCell(t.Context(), t, j, "judge-1", judgeBatchWorkflow))
 	}
 	first := run()
 	want := `[["\"a\"",0.25,null],[null,null,"judge refused"],["{\"text\":\"c\"}",0.25,null],["[\"d\"]",0.25,null],[null,null,"state must be a string, dict, or list"]]`
@@ -165,11 +158,7 @@ out = ctx.judge_batch(["a"], q)
 [(x.model, x.fallback, x.answers["ok"].noul, x.error) for x in out]
 `
 	metaRun := func() []any {
-		outcome, err := script.RunWorkflow(t.Context(), meta, script.Workflow{ID: "judge-2", Entry: "j.star", Source: []byte(src)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return workflowValues(t, outcome)
+		return workflowValues(t, runSharedCell(t.Context(), t, meta, "judge-2", src))
 	}
 	firstMeta := metaRun()
 	if got, _ := json.Marshal(firstMeta); string(got) != `[["test/judge","",0.25,null]]` {
@@ -201,12 +190,9 @@ func TestJudgeRejectsMalformedEnvelope(t *testing.T) {
 			}
 			src := `a = ctx.judge("state", {"ok": {"type": "noul"}})
 a.answers["ok"].noul`
-			outcome, err := script.RunWorkflow(t.Context(), j, script.Workflow{ID: "judge-bad", Entry: "j.star", Source: []byte(src)})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if outcome.Status != script.StatusFailed || !strings.Contains(outcome.Error.Message, tc.want) {
-				t.Fatalf("outcome = %+v, want failure with %q", outcome, tc.want)
+			got := runSharedCell(t.Context(), t, j, "judge-bad", src)
+			if got.Status != "failed" || !strings.Contains(got.Error.Message, tc.want) {
+				t.Fatalf("outcome = %+v, want failure with %q", got, tc.want)
 			}
 		})
 	}
@@ -214,13 +200,10 @@ a.answers["ok"].noul`
 
 func TestSpawnAndWaitReplayChildIDs(t *testing.T) {
 	j := newJournal(echoTool)
-	src := []byte("ids = [ctx.spawn('one'), ctx.spawn('two', model = None)]\nctx.log('spawned')\nctx.wait(ids)\n")
-	outcome, err := script.RunWorkflow(t.Context(), j, script.Workflow{ID: "kids", Entry: "k.star", Source: src})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(outcome.Value) != `["final:child-one","final:child-two"]` {
-		t.Fatalf("outcome = %+v", outcome)
+	src := "ids = [ctx.spawn('one'), ctx.spawn('two', model = None)]\nctx.log('spawned')\nctx.wait(ids)\n"
+	got := runSharedCell(t.Context(), t, j, "kids", src)
+	if string(got.Value) != `["final:child-one","final:child-two"]` {
+		t.Fatalf("outcome = %+v", got)
 	}
 	if rec, _ := j.Lookup("kids", 2); rec.Op != script.OpSpawn || string(rec.Result) != `"child-two"` {
 		t.Fatalf("spawn effect 2 = %+v", rec)

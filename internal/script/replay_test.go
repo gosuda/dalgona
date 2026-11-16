@@ -27,25 +27,21 @@ func clockTool() toolFunc {
 	}
 }
 
-func workflowValues(t *testing.T, outcome script.Outcome) []any {
+func workflowValues(t *testing.T, got reply) []any {
 	t.Helper()
-	if outcome.Status != script.StatusCompleted {
-		t.Fatalf("status = %s, error = %+v", outcome.Status, outcome.Error)
+	if got.Status != "completed" {
+		t.Fatalf("status = %s, error = %+v", got.Status, got.Error)
 	}
 	var values []any
-	if err := json.Unmarshal(outcome.Value, &values); err != nil {
-		t.Fatalf("decode value %s: %v", outcome.Value, err)
+	if err := json.Unmarshal(got.Value, &values); err != nil {
+		t.Fatalf("decode value %s: %v", got.Value, err)
 	}
 	return values
 }
 
-func runReplayWorkflow(ctx context.Context, t *testing.T, j *journal) script.Outcome {
+func runReplayWorkflow(ctx context.Context, t *testing.T, j *journal) reply {
 	t.Helper()
-	outcome, err := script.RunWorkflow(ctx, j, script.Workflow{ID: "run-1", Entry: "replay.star", Source: []byte(replayWorkflow)})
-	if err != nil {
-		t.Fatalf("run workflow: %v", err)
-	}
-	return outcome
+	return runSharedCell(ctx, t, j, "run-1", replayWorkflow, "exec")
 }
 
 func killedAfterSecondEffect(t *testing.T) *journal {
@@ -54,9 +50,9 @@ func killedAfterSecondEffect(t *testing.T) *journal {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	j.killBefore, j.kill = 3, cancel
-	outcome := runReplayWorkflow(ctx, t, j)
-	if outcome.Status != script.StatusCancelled {
-		t.Fatalf("killed run status = %s, want cancelled", outcome.Status)
+	got := runReplayWorkflow(ctx, t, j)
+	if got.Status != "cancelled" {
+		t.Fatalf("killed run status = %s, want cancelled", got.Status)
 	}
 	if executed, _ := j.counts(); executed != 2 {
 		t.Fatalf("killed run executed %d calls, want 2", executed)
@@ -109,10 +105,10 @@ func TestSwappedJournalOpReportsNondeterminism(t *testing.T) {
 	j := killedAfterSecondEffect(t)
 	j.rewrite(2, func(rec *script.Recorded) { rec.Op = script.OpTime })
 
-	outcome := runReplayWorkflow(t.Context(), t, j)
+	got := runReplayWorkflow(t.Context(), t, j)
 	want := "nondeterminism at effect 2: recorded time, got tool:exec"
-	if outcome.Status != script.StatusFailed || outcome.Error.Code != "nondeterminism" || outcome.Error.Message != want {
-		t.Fatalf("outcome = %s %+v, want failed %q", outcome.Status, outcome.Error, want)
+	if got.Status != "failed" || got.Error.Code != "nondeterminism" || got.Error.Message != want {
+		t.Fatalf("outcome = %s %+v, want failed %q", got.Status, got.Error, want)
 	}
 	if executed, _ := j.counts(); executed != 2 {
 		t.Fatalf("divergent run executed %d calls, want none past the divergence", executed)
@@ -123,20 +119,20 @@ func TestChangedArgumentsReportNondeterminism(t *testing.T) {
 	j := killedAfterSecondEffect(t)
 	j.rewrite(1, func(rec *script.Recorded) { rec.ArgsSHA = script.ArgsSHA(jsontext.Value(`{"command":"true"}`)) })
 
-	outcome := runReplayWorkflow(t.Context(), t, j)
-	if outcome.Status != script.StatusFailed || outcome.Error.Code != "nondeterminism" || outcome.Error.Message != "nondeterminism at effect 1: recorded tool:exec, got tool:exec" {
-		t.Fatalf("outcome = %s %+v", outcome.Status, outcome.Error)
+	got := runReplayWorkflow(t.Context(), t, j)
+	if got.Status != "failed" || got.Error.Code != "nondeterminism" || got.Error.Message != "nondeterminism at effect 1: recorded tool:exec, got tool:exec" {
+		t.Fatalf("outcome = %s %+v", got.Status, got.Error)
 	}
 }
 
 func TestSleepRecordsAbsoluteDeadline(t *testing.T) {
 	j := newJournal(clockTool())
-	src := []byte("ctx.sleep(0.05)\ntime.sleep(0)\n")
+	src := "ctx.sleep(0.05)\ntime.sleep(0)\n"
 	before := time.Now()
-	outcome, err := script.RunWorkflow(t.Context(), j, script.Workflow{ID: "sleepy", Entry: "s.star", Source: src})
+	got := runSharedCell(t.Context(), t, j, "sleepy", src)
 	after := time.Now()
-	if err != nil || outcome.Status != script.StatusCompleted {
-		t.Fatalf("run: %v %+v", err, outcome)
+	if got.Status != "completed" {
+		t.Fatalf("run: %+v", got)
 	}
 	rec, ok := j.Lookup("sleepy", 1)
 	if !ok || rec.Op != script.OpSleep {

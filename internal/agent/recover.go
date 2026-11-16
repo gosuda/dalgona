@@ -36,7 +36,7 @@ type approvalRecord struct {
 
 func (w *worker) recoverTurn(ctx context.Context) {
 	w.recovering = true
-	if w.recoverScriptTurn(ctx) {
+	if w.recoverExternalTurn(ctx) {
 		return
 	}
 	if err := w.prime(ctx); err != nil {

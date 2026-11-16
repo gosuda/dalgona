@@ -18,11 +18,12 @@ import (
 	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/auth"
 	"github.com/gosuda/dalgona/internal/config"
+	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
+	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
 	"github.com/gosuda/dalgona/internal/discovery"
 	"github.com/gosuda/dalgona/internal/mcp"
 	"github.com/gosuda/dalgona/internal/remote"
-	"github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/scripthost"
+	corescripthost "github.com/gosuda/dalgona/internal/scripthost"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -30,7 +31,7 @@ var mcpStartTimeout = 30 * time.Second
 
 type Daemon struct {
 	Remote            remote.Options
-	Scripts           scripthost.Config
+	Scripts           batteryscripthost.Config
 	WorkspaceApprover WorkspaceApprover
 	binder            *remote.Binder
 }
@@ -51,7 +52,7 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 	if err != nil {
 		return app.Batteries{}, fmt.Errorf("user home: %w", err)
 	}
-	plugins, err := script.LoadPlugins(base.Config.Home)
+	plugins, err := batteryscript.LoadPlugins(base.Config.Home)
 	if err != nil {
 		logger.Error("plugins: some files did not load", "error", err)
 	}
@@ -66,15 +67,16 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 	projects.trusted = loadTrusted(base.Config.Home, logger)
 	d.Remote = remote.Options{Config: base.Config, Auth: base.Auth, Journal: base.Journal, Local: base.Local, Logger: logger}
 	d.binder = remote.NewBinder(d.Remote)
-	d.Scripts = scripthost.Config{
-		Plugins: plugins, Judge: base.Judge, Mode: base.Config.ToolMode, Eval: base.Config.Eval, Logger: logger,
+	d.Scripts = batteryscripthost.Config{
+		Core:    corescripthost.Config{Judge: base.Judge, Mode: base.Config.ToolMode, Eval: base.Config.Eval, Logger: logger},
+		Plugins: plugins,
 	}
 	return app.Batteries{
 		Tools: func(ctx context.Context, cwd string) []tool.Tool {
 			return append(projects.tools(ctx, cwd), ratchetTools(ctx)...)
 		},
 		Skills: projects.skills, Runner: d.binder.Runner,
-		Extension: scripthost.New(d.Scripts),
+		Extension: batteryscripthost.New(d.Scripts),
 		Attach:    func(h *agent.Host) { d.binder.SetRecorder(h) }, Close: projects.close,
 		MCPStatus: projects.status,
 	}, nil

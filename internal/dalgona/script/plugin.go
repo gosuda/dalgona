@@ -12,6 +12,7 @@ import (
 
 	"go.starlark.net/starlark"
 
+	corescript "github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -71,7 +72,7 @@ type invocation struct {
 	file  *pluginFile
 	reg   registration
 	args  jsontext.Value
-	call  func(r *run, impl starlark.Callable) (starlark.Value, error)
+	call  func(ctx context.Context, r *corescript.Runtime, impl starlark.Callable) (starlark.Value, error)
 }
 
 func LoadPlugins(home string) (*Plugins, error) {
@@ -108,10 +109,9 @@ func (p *Plugins) loadFile(path string) error {
 		return fmt.Errorf("read: %w", err)
 	}
 	name := filepath.Base(path)
-	r := newRun(nil, "load:"+name, runConfig{})
-	env, end := r.begin(context.Background(), 0)
+	r, env, end := corescript.NewRuntime(context.Background(), nil, "load:"+name, 0)
 	defer end()
-	regs, err := r.load(name, src, env)
+	regs, err := load(r, name, src, env)
 	if err != nil {
 		return err
 	}
@@ -136,18 +136,13 @@ func (p *Plugins) registered(reg registration) bool {
 	return false
 }
 
-func (r *run) load(name string, src []byte, env starlark.StringDict) ([]registration, error) {
+func load(r *corescript.Runtime, name string, src []byte, env starlark.StringDict) ([]registration, error) {
 	var regs []registration
 	add := func(reg registration) { regs = append(regs, reg) }
 	env["tool"] = starlark.NewBuiltin("tool", registerTool(add))
 	env["command"] = starlark.NewBuiltin("command", registerCommand(add))
 	env["on"] = starlark.NewBuiltin("on", registerHook(add))
-	r.loading = true
-	_, err := r.execCell(name, src, env)
-	r.loading = false
-	if stop := r.fatalStop(); stop != nil {
-		return nil, stop
-	}
+	_, err := r.LoadCell(context.Background(), name, src, env)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +159,7 @@ func registerTool(add func(registration)) builtinFunc {
 		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "name", &name, "description", &description, "params", &params, "impl", &impl); err != nil {
 			return nil, err
 		}
-		schema, err := toJSON(params)
+		schema, err := corescript.ToJSON(params)
 		if err != nil {
 			return nil, fmt.Errorf("tool %s: params: %w", name, err)
 		}
@@ -206,36 +201,35 @@ func registerHook(add func(registration)) builtinFunc {
 	}
 }
 
-func (p *Plugins) invoke(ctx context.Context, fx Effects, inv invocation) (Outcome, error) {
-	start, done, err := fx.Started(RunStart{ID: inv.runID, Entry: "plugins/" + inv.file.name, Source: inv.file.source, Args: inv.args, Seed: newSeed()})
+func (p *Plugins) invoke(ctx context.Context, fx corescript.Effects, inv invocation) (corescript.Outcome, error) {
+	start, done, err := fx.Started(corescript.RunStart{ID: inv.runID, Entry: "plugins/" + inv.file.name, Source: inv.file.source, Args: inv.args, Seed: corescript.NewSeed()})
 	if err != nil {
-		return Outcome{}, fmt.Errorf("plugin run %s: start run: %w", inv.runID, err)
+		return corescript.Outcome{}, fmt.Errorf("plugin run %s: start run: %w", inv.runID, err)
 	}
 	if done != nil {
 		return *done, nil
 	}
-	return complete(fx, start.ID, inv.run(ctx, fx, start))
+	return corescript.Complete(context.WithoutCancel(ctx), fx, start.ID, inv.run(ctx, fx, start))
 }
 
-func (inv invocation) run(ctx context.Context, fx Effects, start RunStart) Outcome {
-	r := newRun(fx, start.ID, runConfig{})
-	env, end := r.begin(ctx, start.Seed)
+func (inv invocation) run(ctx context.Context, fx corescript.Effects, start corescript.RunStart) corescript.Outcome {
+	r, env, end := corescript.NewRuntime(ctx, fx, start.ID, start.Seed)
 	defer end()
-	regs, err := r.load(inv.file.name, start.Source, env)
+	regs, err := load(r, inv.file.name, start.Source, env)
 	if err != nil {
-		return r.finish(ctx, nil, err)
+		return r.Finish(ctx, nil, err)
 	}
 	i := slices.IndexFunc(regs, func(reg registration) bool {
 		return reg.kind == inv.reg.kind && reg.name == inv.reg.name && reg.fn == inv.reg.fn
 	})
 	if i < 0 {
-		return stopped(StatusFailed, codeError, fmt.Sprintf("plugin %s no longer registers %s %s", inv.file.name, inv.reg.kind, inv.reg.name), stageRun)
+		return corescript.Outcome{Status: corescript.StatusFailed, Error: corescript.Failure{Code: "error", Message: fmt.Sprintf("plugin %s no longer registers %s %s", inv.file.name, inv.reg.kind, inv.reg.name), Stage: "run"}}
 	}
-	value, err := inv.call(r, regs[i].impl)
-	return r.finish(ctx, value, err)
+	value, err := inv.call(ctx, r, regs[i].impl)
+	return r.Finish(ctx, value, err)
 }
 
-func (p *Plugins) Tools(fx Effects) []tool.Tool {
+func (p *Plugins) Tools(fx corescript.Effects) []tool.Tool {
 	var tools []tool.Tool
 	for _, file := range p.files {
 		for _, reg := range file.regs {
@@ -249,7 +243,7 @@ func (p *Plugins) Tools(fx Effects) []tool.Tool {
 
 type PluginTool struct {
 	plugins *Plugins
-	fx      Effects
+	fx      corescript.Effects
 	file    *pluginFile
 	reg     registration
 }
@@ -263,19 +257,19 @@ func (t *PluginTool) Class() tool.Class { return tool.ClassScript }
 func (t *PluginTool) Run(ctx context.Context, call tool.Call, _ tool.Env) (tool.Result, error) {
 	kwargs, err := objectKwargs(call.Args)
 	if err != nil {
-		return replyResult(call.ID, stopped(StatusFailed, codeInvalid, fmt.Sprintf("%s: %v", t.reg.name, err), stageArgs))
+		return corescript.ReplyResult(call.ID, corescript.Outcome{Status: corescript.StatusFailed, Error: corescript.Failure{Code: "invalid_args", Message: fmt.Sprintf("%s: %v", t.reg.name, err), Stage: "args"}})
 	}
-	outcome, err := t.plugins.invoke(ctx, t.fx, invocation{runID: call.ID, file: t.file, reg: t.reg, args: call.Args, call: func(r *run, impl starlark.Callable) (starlark.Value, error) {
-		return starlark.Call(r.thread, impl, starlark.Tuple{r.ctxValue()}, kwargs)
+	outcome, err := t.plugins.invoke(ctx, t.fx, invocation{runID: call.ID, file: t.file, reg: t.reg, args: call.Args, call: func(ctx context.Context, r *corescript.Runtime, impl starlark.Callable) (starlark.Value, error) {
+		return r.Call(ctx, impl, starlark.Tuple{r.ContextValue()}, kwargs)
 	}})
 	if err != nil {
 		return tool.Result{}, err
 	}
-	return replyResult(call.ID, outcome)
+	return corescript.ReplyResult(call.ID, outcome)
 }
 
 func objectKwargs(args jsontext.Value) ([]starlark.Tuple, error) {
-	decoded, err := fromJSON(args)
+	decoded, err := corescript.FromJSON(args)
 	if err != nil {
 		return nil, err
 	}
@@ -301,13 +295,13 @@ func (p *Plugins) Commands() []Command {
 	return commands
 }
 
-func (p *Plugins) RunCommand(ctx context.Context, fx Effects, call CommandCall) (Outcome, error) {
+func (p *Plugins) RunCommand(ctx context.Context, fx corescript.Effects, call CommandCall) (corescript.Outcome, error) {
 	file, reg, ok := p.find(kindCommand, call.Name)
 	if !ok {
-		return Outcome{}, fmt.Errorf("unknown command %s", call.Name)
+		return corescript.Outcome{}, fmt.Errorf("unknown command %s", call.Name)
 	}
-	return p.invoke(ctx, fx, invocation{runID: call.RunID, file: file, reg: reg, args: stringJSON(call.Args), call: func(r *run, impl starlark.Callable) (starlark.Value, error) {
-		return starlark.Call(r.thread, impl, starlark.Tuple{r.ctxValue(), starlark.String(call.Args)}, nil)
+	return p.invoke(ctx, fx, invocation{runID: call.RunID, file: file, reg: reg, args: corescript.StringJSON(call.Args), call: func(ctx context.Context, r *corescript.Runtime, impl starlark.Callable) (starlark.Value, error) {
+		return r.Call(ctx, impl, starlark.Tuple{r.ContextValue(), starlark.String(call.Args)}, nil)
 	}})
 }
 
@@ -343,27 +337,27 @@ func (p *Plugins) hooks(event string) []hookTarget {
 	return targets
 }
 
-func (p *Plugins) hook(ctx context.Context, fx Effects, runID string, target hookTarget, payload jsontext.Value) (Outcome, error) {
-	event, err := fromJSON(payload)
+func (p *Plugins) hook(ctx context.Context, fx corescript.Effects, runID string, target hookTarget, payload jsontext.Value) (corescript.Outcome, error) {
+	event, err := corescript.FromJSON(payload)
 	if err != nil {
-		return Outcome{}, fmt.Errorf("%s: payload: %w", target.by(), err)
+		return corescript.Outcome{}, fmt.Errorf("%s: payload: %w", target.by(), err)
 	}
-	return p.invoke(ctx, fx, invocation{runID: runID + "/" + target.by(), file: target.file, reg: target.reg, args: payload, call: func(r *run, impl starlark.Callable) (starlark.Value, error) {
-		return starlark.Call(r.thread, impl, starlark.Tuple{r.ctxValue(), event}, nil)
+	return p.invoke(ctx, fx, invocation{runID: runID + "/" + target.by(), file: target.file, reg: target.reg, args: payload, call: func(ctx context.Context, r *corescript.Runtime, impl starlark.Callable) (starlark.Value, error) {
+		return r.Call(ctx, impl, starlark.Tuple{r.ContextValue(), event}, nil)
 	}})
 }
 
-func (h hookTarget) failure(outcome Outcome, err error) error {
+func (h hookTarget) failure(outcome corescript.Outcome, err error) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", h.by(), err)
 	}
-	if outcome.Status != StatusCompleted {
+	if outcome.Status != corescript.StatusCompleted {
 		return fmt.Errorf("%s: %s: %s", h.by(), outcome.Status, outcome.Error.Message)
 	}
 	return nil
 }
 
-func (h hookTarget) decision(outcome Outcome, err error) (HookDecision, error) {
+func (h hookTarget) decision(outcome corescript.Outcome, err error) (HookDecision, error) {
 	if failure := h.failure(outcome, err); failure != nil {
 		return HookDecision{}, failure
 	}
@@ -377,7 +371,7 @@ func (h hookTarget) decision(outcome Outcome, err error) (HookDecision, error) {
 	return decision, nil
 }
 
-func (p *Plugins) Emit(ctx context.Context, fx Effects, runID, event string, payload jsontext.Value) error {
+func (p *Plugins) Emit(ctx context.Context, fx corescript.Effects, runID, event string, payload jsontext.Value) error {
 	if event != EventSessionStart && event != EventTurnEnd {
 		return fmt.Errorf("emit: event must be %q or %q, got %q", EventSessionStart, EventTurnEnd, event)
 	}
@@ -388,7 +382,7 @@ func (p *Plugins) Emit(ctx context.Context, fx Effects, runID, event string, pay
 	return errors.Join(errs...)
 }
 
-func (p *Plugins) ToolCall(ctx context.Context, fx Effects, runID string, call tool.Call) (HookDecision, error) {
+func (p *Plugins) ToolCall(ctx context.Context, fx corescript.Effects, runID string, call tool.Call) (HookDecision, error) {
 	payload := toolCallPayload(call)
 	var allow, deny HookDecision
 	var errs []error
@@ -418,7 +412,7 @@ func (p *Plugins) ToolCall(ctx context.Context, fx Effects, runID string, call t
 	return HookDecision{}, errors.Join(errs...)
 }
 
-func (p *Plugins) toolCallDecision(ctx context.Context, fx Effects, runID string, target hookTarget, payload jsontext.Value) (HookDecision, error) {
+func (p *Plugins) toolCallDecision(ctx context.Context, fx corescript.Effects, runID string, target hookTarget, payload jsontext.Value) (HookDecision, error) {
 	limit := p.timeout()
 	hookCtx, cancel := context.WithTimeoutCause(ctx, limit, errHookTimeout)
 	defer cancel()
@@ -445,7 +439,7 @@ func toolCallPayload(call tool.Call) jsontext.Value {
 }
 
 func parseDecision(value jsontext.Value) (HookDecision, error) {
-	decoded, err := fromJSON(value)
+	decoded, err := corescript.FromJSON(value)
 	if err != nil || decoded == starlark.None {
 		return HookDecision{}, err
 	}

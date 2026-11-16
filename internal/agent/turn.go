@@ -203,6 +203,9 @@ func (w *worker) context(ctx context.Context) (view, []model.Message, error) {
 }
 
 func failure(ctx context.Context, err error) outcome {
+	if errors.Is(err, ErrExternalTurnInterrupted) {
+		return outcome{status: statusInterrupted}
+	}
 	if ctx.Err() != nil {
 		return outcome{status: statusInterrupted}
 	}

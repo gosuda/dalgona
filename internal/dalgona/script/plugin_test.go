@@ -7,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/script"
+	"github.com/gosuda/dalgona/internal/dalgona/script"
+	corescript "github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -92,7 +93,7 @@ func TestPluginToolRunsAsDurableScript(t *testing.T) {
 
 func requirePluginRunJournaled(t *testing.T, j *journal, id string) {
 	t.Helper()
-	if rec, ok := j.Lookup(id, 1); !ok || rec.Op != script.ToolOp("search") {
+	if rec, ok := j.Lookup(id, 1); !ok || rec.Op != corescript.ToolOp("search") {
 		t.Fatalf("inner call not journaled under the plugin run: %+v", rec)
 	}
 	if start := j.starts[id]; start.Entry != "plugins/quality.star" || string(start.Source) != qualityPlugin {
@@ -116,7 +117,7 @@ func TestToolCallHookDecisions(t *testing.T) {
 		if err != nil || got != c.want {
 			t.Fatalf("%s: decision = %+v, %v; want %+v", c.call.ID, got, err, c.want)
 		}
-		if done, ok := j.completed[c.call.ID+"/hook:quality.star:guard"]; !ok || done.Status != script.StatusCompleted {
+		if done, ok := j.completed[c.call.ID+"/hook:quality.star:guard"]; !ok || done.Status != corescript.StatusCompleted {
 			t.Fatalf("%s: hook run completion = %+v, %v", c.call.ID, done, ok)
 		}
 	}

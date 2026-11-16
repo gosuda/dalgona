@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 )
+
+const externalPrompt = "dalgona run "
 
 type resumingExtension struct {
 	baseExtension
@@ -16,11 +19,61 @@ type resumingExtension struct {
 	resumed *[]string
 }
 
-func (r resumingExtension) ResumeScript(ctx context.Context, runID string) error {
+func (r resumingExtension) MatchExternalTurn(ctx context.Context, turnID string) (bool, error) {
+	v, err := r.t.view()
+	if err != nil {
+		return false, err
+	}
+	matched := false
+	for _, item := range v.records {
+		if vetoedTurn(item, turnID) {
+			return false, nil
+		}
+		if hit, ok := r.promptedTurn(item, turnID); ok {
+			matched = hit
+		}
+	}
+	return matched, nil
+}
+
+func vetoedTurn(item event.Seqd, turnID string) bool {
+	value, ok := item.Event.(event.AssistantMessage)
+	return ok && value.TurnID == turnID
+}
+
+func (r resumingExtension) promptedTurn(item event.Seqd, turnID string) (bool, bool) {
+	value, ok := item.Event.(event.UserMessage)
+	if !ok || value.TurnID != turnID || value.Kind != string(InputPrompt) || !value.Verbatim {
+		return false, false
+	}
+	text, err := r.t.host.loadText(value.Text, value.TextBlob)
+	return err == nil && strings.HasPrefix(text, externalPrompt), true
+}
+
+func (r resumingExtension) ResumeExternalTurn(ctx context.Context) error {
+	w, err := turnWorker(ctx)
+	if err != nil {
+		return err
+	}
+	v, err := r.t.view()
+	if err != nil {
+		return err
+	}
+	if _, ok := v.state.Scripts[r.t.id]; !ok {
+		for _, item := range v.records {
+			if done, ok := item.Event.(event.ScriptCompleted); ok && done.RunID == r.t.id {
+				return nil
+			}
+		}
+		return ErrExternalTurnInterrupted
+	}
+	if err := w.recoverNested(ctx, v, r.t.id+"/"); err != nil {
+		return err
+	}
 	r.mu.Lock()
-	*r.resumed = append(*r.resumed, runID)
+	*r.resumed = append(*r.resumed, r.t.id)
 	r.mu.Unlock()
-	return r.t.Append(ctx, event.ScriptCompleted{RunID: runID, OK: true, Value: []byte("1")})
+	return r.t.Append(ctx, event.ScriptCompleted{RunID: r.t.id, OK: true, Value: []byte("1")})
 }
 
 func withResumer(mu *sync.Mutex, resumed *[]string) func(*harness) {
@@ -32,7 +85,7 @@ func withResumer(mu *sync.Mutex, resumed *[]string) func(*harness) {
 func workflowTurn() []event.Event {
 	return []event.Event{
 		event.TurnStarted{TurnID: "t"},
-		event.UserMessage{ItemID: "u", TurnID: "t", Text: scriptPrompt + "flow.star", Kind: "prompt", Verbatim: true},
+		event.UserMessage{ItemID: "u", TurnID: "t", Text: externalPrompt + "flow.star", Kind: "prompt", Verbatim: true},
 	}
 }
 

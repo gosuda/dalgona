@@ -29,7 +29,7 @@ var answerFields = map[string][]string{
 	"score":  {"score", "probabilities", "confidence"},
 }
 
-func (r *run) judge(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func (r *Runtime) judge(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var state starlark.Value
 	var questions *starlark.Dict
 	var model optString
@@ -55,7 +55,7 @@ func (r *run) judge(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 	return judgeValue(value, set.items)
 }
 
-func (r *run) judgeBatch(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func (r *Runtime) judgeBatch(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var states starlark.Iterable
 	var questions *starlark.Dict
 	var model optString
@@ -96,7 +96,7 @@ func boundedItems(states starlark.Iterable) ([]starlark.Value, error) {
 	return items, nil
 }
 
-func (r *run) submitJudges(ctx context.Context, sem chan struct{}, items []starlark.Value, set questionSet, model string) ([]*future, error) {
+func (r *Runtime) submitJudges(ctx context.Context, sem chan struct{}, items []starlark.Value, set questionSet, model string) ([]*future, error) {
 	futures := make([]*future, len(items))
 	for i, item := range items {
 		encoded, err := judgeState(item)
@@ -119,7 +119,7 @@ func failedFuture(err error) *future {
 	return f
 }
 
-func (r *run) batchResults(futures []*future, items []question) (starlark.Value, error) {
+func (r *Runtime) batchResults(futures []*future, items []question) (starlark.Value, error) {
 	for _, f := range futures {
 		<-f.done
 	}
@@ -150,7 +150,7 @@ func batchItem(f *future, items []question) starlark.Value {
 	return starlarkstruct.FromStringDict(starlarkstruct.Default, members)
 }
 
-func (r *run) prepareJudge(state jsontext.Value, set questionSet, model string) (Slot, effectFunc, error) {
+func (r *Runtime) prepareJudge(state jsontext.Value, set questionSet, model string) (Slot, effectFunc, error) {
 	payload := judgePayload(state, set.raw, model)
 	slot, err := r.submit(OpJudge, payload)
 	if err != nil {
@@ -181,7 +181,7 @@ func judgePayload(state, questions jsontext.Value, model string) jsontext.Value 
 }
 
 func judgeState(state starlark.Value) (jsontext.Value, error) {
-	encoded, err := toJSON(state)
+	encoded, err := ToJSON(state)
 	if err != nil {
 		return nil, fmt.Errorf("state: %w", err)
 	}
@@ -276,7 +276,7 @@ func writeQuestionFields(enc *jsontext.Encoder, fields *starlark.Dict, kind stri
 }
 
 func judgeValue(raw jsontext.Value, items []question) (*starlarkstruct.Struct, error) {
-	decoded, err := fromJSON(raw)
+	decoded, err := FromJSON(raw)
 	if err != nil {
 		return nil, fmt.Errorf("judge answers: %w", err)
 	}

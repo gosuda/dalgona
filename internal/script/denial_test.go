@@ -16,12 +16,12 @@ func TestTryCallFailureWithDeniedPrefixReplaysCompleted(t *testing.T) {
 		return nil, failure
 	})
 	src := "r = ctx.try_call(tools.exec, command = \"x\")\n[r.ok, r.error]"
-	live := runDenialWorkflow(t, j, src)
-	if live.Status != script.StatusCompleted {
+	live := runDenialCell(t, j, src)
+	if live.Status != "completed" {
 		t.Fatalf("live status = %s, error = %+v", live.Status, live.Error)
 	}
-	replayed := runDenialWorkflow(t, j, src)
-	if replayed.Status != script.StatusCompleted {
+	replayed := runDenialCell(t, j, src)
+	if replayed.Status != "completed" {
 		t.Fatalf("replayed status = %s, want completed; error = %+v", replayed.Status, replayed.Error)
 	}
 	if string(replayed.Value) != string(live.Value) {
@@ -32,20 +32,16 @@ func TestTryCallFailureWithDeniedPrefixReplaysCompleted(t *testing.T) {
 	}
 }
 
-func runDenialWorkflow(t *testing.T, j *journal, src string) script.Outcome {
+func runDenialCell(t *testing.T, j *journal, src string) reply {
 	t.Helper()
-	outcome, err := script.RunWorkflow(t.Context(), j, script.Workflow{ID: "run-1", Entry: "denial.star", Source: []byte(src)})
-	if err != nil {
-		t.Fatalf("run workflow: %v", err)
-	}
-	return outcome
+	return runSharedCell(t.Context(), t, j, "run-1", src, "exec")
 }
 
 func TestReplayedDenialInsideTryCallHaltsDenied(t *testing.T) {
 	j := newJournal(clockTool())
 	src := "r = ctx.try_call(tools.exec, command = \"x\")\n42"
-	if outcome := runDenialWorkflow(t, j, src); outcome.Status != script.StatusCompleted {
-		t.Fatalf("first run status = %s, error = %+v", outcome.Status, outcome.Error)
+	if got := runDenialCell(t, j, src); got.Status != "completed" {
+		t.Fatalf("first run status = %s, error = %+v", got.Status, got.Error)
 	}
 	j.rewrite(1, func(rec *script.Recorded) {
 		rec.Result = nil
@@ -53,20 +49,20 @@ func TestReplayedDenialInsideTryCallHaltsDenied(t *testing.T) {
 		rec.Denied = true
 	})
 
-	outcome := runDenialWorkflow(t, j, src)
-	if outcome.Status != script.StatusDenied {
-		t.Fatalf("replayed status = %s, want denied; error = %+v, value = %s", outcome.Status, outcome.Error, outcome.Value)
+	got := runDenialCell(t, j, src)
+	if got.Status != "denied" {
+		t.Fatalf("replayed status = %s, want denied; error = %+v, value = %s", got.Status, got.Error, got.Value)
 	}
-	if !strings.Contains(outcome.Error.Message, "hooks forbid exec") {
-		t.Fatalf("replayed error = %+v, want the recorded denial reason", outcome.Error)
+	if !strings.Contains(got.Error.Message, "hooks forbid exec") {
+		t.Fatalf("replayed error = %+v, want the recorded denial reason", got.Error)
 	}
 }
 
 func TestReplayedDeniedDirectCallHaltsDenied(t *testing.T) {
 	j := newJournal(clockTool())
 	src := "tools.exec(command = \"x\")"
-	if outcome := runDenialWorkflow(t, j, src); outcome.Status != script.StatusCompleted {
-		t.Fatalf("first run status = %s, error = %+v", outcome.Status, outcome.Error)
+	if got := runDenialCell(t, j, src); got.Status != "completed" {
+		t.Fatalf("first run status = %s, error = %+v", got.Status, got.Error)
 	}
 	j.rewrite(1, func(rec *script.Recorded) {
 		rec.Result = nil
@@ -74,8 +70,8 @@ func TestReplayedDeniedDirectCallHaltsDenied(t *testing.T) {
 		rec.Denied = true
 	})
 
-	outcome := runDenialWorkflow(t, j, src)
-	if outcome.Status != script.StatusDenied || outcome.Error.Code != "denied" {
-		t.Fatalf("replayed status = %s, code = %s, want denied/denied", outcome.Status, outcome.Error.Code)
+	got := runDenialCell(t, j, src)
+	if got.Status != "denied" || got.Error.Code != "denied" {
+		t.Fatalf("replayed status = %s, code = %s, want denied/denied", got.Status, got.Error.Code)
 	}
 }

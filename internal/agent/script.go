@@ -3,20 +3,21 @@ package agent
 import (
 	"cmp"
 	"context"
-	"strings"
+	"errors"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 )
 
-const scriptPrompt = "dalgona run "
-
-type ScriptResumer interface {
-	ResumeScript(ctx context.Context, runID string) error
+type ExternalTurnResumer interface {
+	MatchExternalTurn(ctx context.Context, turnID string) (bool, error)
+	ResumeExternalTurn(ctx context.Context) error
 }
 
-func (t *Thread) RunScript(ctx context.Context, entry string, run func(context.Context) error) error {
+var ErrExternalTurnInterrupted = errors.New("agent: external turn interrupted")
+
+func (t *Thread) RunExternalTurn(ctx context.Context, text string, run func(context.Context) error) error {
 	done := make(chan error, 1)
-	if err := askErr(t, func(a *actor) error { return a.startScript(scriptPrompt+entry, run, done) }); err != nil {
+	if err := askErr(t, func(a *actor) error { return a.startExternalTurn(text, run, done) }); err != nil {
 		return err
 	}
 	select {
@@ -28,7 +29,7 @@ func (t *Thread) RunScript(ctx context.Context, entry string, run func(context.C
 	}
 }
 
-func (a *actor) startScript(text string, run func(context.Context) error, done chan<- error) error {
+func (a *actor) startExternalTurn(text string, run func(context.Context) error, done chan<- error) error {
 	if a.state.Archived {
 		return archivedError(a.t.id)
 	}
@@ -49,11 +50,11 @@ func (a *actor) startScript(text string, run func(context.Context) error, done c
 		return err
 	}
 	a.autoContinue = false
-	a.spawn(func(ctx context.Context) { done <- (&worker{t: a.t, turnID: turnID}).runScript(ctx, run) })
+	a.spawn(func(ctx context.Context) { done <- (&worker{t: a.t, turnID: turnID}).runExternalTurn(ctx, run) })
 	return nil
 }
 
-func (w *worker) runScript(ctx context.Context, run func(context.Context) error) error {
+func (w *worker) runExternalTurn(ctx context.Context, run func(context.Context) error) error {
 	v, err := w.t.view()
 	if err == nil {
 		err = w.use(ctx, v)
@@ -73,51 +74,24 @@ func (w *worker) runScript(ctx context.Context, run func(context.Context) error)
 	return err
 }
 
-func (w *worker) recoverScriptTurn(ctx context.Context) bool {
-	v, err := w.t.view()
-	if err != nil || !w.scriptTurn(v) {
+func (w *worker) recoverExternalTurn(ctx context.Context) bool {
+	resumer, ok := w.t.ext.(ExternalTurnResumer)
+	if !ok {
 		return false
 	}
-	resumer, resumable := w.t.ext.(ScriptResumer)
-	if _, pinned := v.state.Scripts[w.t.id]; !resumable || !pinned {
-		w.end(ctx, outcome{status: settledScriptStatus(v, w.t.id), final: true})
+	match, err := resumer.MatchExternalTurn(ctx, w.turnID)
+	if err != nil {
+		w.end(ctx, outcome{status: statusFailed, failure: err.Error(), final: true})
 		return true
 	}
-	err = w.runScript(ctx, func(ctx context.Context) error {
-		if nestedErr := w.recoverNested(ctx, v, w.t.id+"/"); nestedErr != nil {
-			return nestedErr
-		}
-		return resumer.ResumeScript(ctx, w.t.id)
+	if !match {
+		return false
+	}
+	err = w.runExternalTurn(ctx, func(ctx context.Context) error {
+		return resumer.ResumeExternalTurn(ctx)
 	})
 	if err != nil {
-		w.t.host.log.Warn("agent: resume script turn", "thread", w.t.id, "turn", w.turnID, "error", err)
+		w.t.host.log.Warn("agent: resume external turn", "thread", w.t.id, "turn", w.turnID, "error", err)
 	}
 	return true
-}
-
-func settledScriptStatus(v view, runID string) string {
-	for _, item := range v.records {
-		if done, ok := item.Event.(event.ScriptCompleted); ok && done.RunID == runID {
-			return statusCompleted
-		}
-	}
-	return statusInterrupted
-}
-
-func (w *worker) scriptTurn(v view) bool {
-	script := false
-	for _, item := range v.records {
-		switch value := item.Event.(type) {
-		case event.AssistantMessage:
-			if value.TurnID == w.turnID {
-				return false
-			}
-		case event.UserMessage:
-			if value.TurnID == w.turnID && value.Kind == string(InputPrompt) && value.Verbatim {
-				text, err := w.t.host.loadText(value.Text, value.TextBlob)
-				script = err == nil && strings.HasPrefix(text, scriptPrompt)
-			}
-		}
-	}
-	return script
 }

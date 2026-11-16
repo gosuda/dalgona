@@ -40,6 +40,18 @@ func turnWorker(ctx context.Context) (*worker, error) {
 	return w, nil
 }
 
+func (t *Thread) RecoverNested(ctx context.Context, prefix string) error {
+	w, err := turnWorker(ctx)
+	if err != nil {
+		return err
+	}
+	v, err := t.view()
+	if err != nil {
+		return err
+	}
+	return w.recoverNested(ctx, v, prefix)
+}
+
 func (t *Thread) Records() ([]event.Seqd, event.State, error) {
 	v, err := t.view()
 	return v.records, v.state, err

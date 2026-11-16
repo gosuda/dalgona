@@ -9,8 +9,8 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/scripthost"
+	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
+	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
 )
 
 func TestWorkflowReplaysRecordedEffectsAfterCrash(t *testing.T) {
@@ -55,7 +55,7 @@ func crashWorkflow(t *testing.T, code string) (*harness, string, string) {
 		t.Fatal(err)
 	}
 	go func() {
-		_, _ = scripthost.RunWorkflow(t.Context(), thread, crashed.scripts, script.Workflow{ID: thread.ID(), Entry: "flow.star", Source: []byte(code)})
+		_, _ = batteryscripthost.RunWorkflow(t.Context(), thread, crashed.scripts, batteryscript.Workflow{ID: thread.ID(), Entry: "flow.star", Source: []byte(code)})
 	}()
 	crashed.await(thread.ID(), nestedDone(thread.ID()+"/2"))
 	home := t.TempDir()

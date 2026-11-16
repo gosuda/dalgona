@@ -22,7 +22,7 @@ func newEncoder(w io.Writer) *jsontext.Encoder {
 	return jsontext.NewEncoder(w, jsontext.AllowInvalidUTF8(true))
 }
 
-func toJSON(value starlark.Value) (jsontext.Value, error) {
+func ToJSON(value starlark.Value) (jsontext.Value, error) {
 	var buf bytes.Buffer
 	enc := newEncoder(&buf)
 	if err := writeValue(enc, value, 0); err != nil {
@@ -140,7 +140,7 @@ func writeIndexable(enc *jsontext.Encoder, seq starlark.Indexable, depth int) er
 	return enc.WriteToken(jsontext.EndArray)
 }
 
-func fromJSON(raw jsontext.Value) (starlark.Value, error) {
+func FromJSON(raw jsontext.Value) (starlark.Value, error) {
 	if len(raw) == 0 {
 		return starlark.None, nil
 	}
@@ -231,7 +231,7 @@ func readArray(dec *jsontext.Decoder) (starlark.Value, error) {
 	return starlark.NewList(items), nil
 }
 
-func stringJSON(text string) jsontext.Value {
+func StringJSON(text string) jsontext.Value {
 	value, _ := jsontext.AppendQuote(nil, text)
 	return value
 }

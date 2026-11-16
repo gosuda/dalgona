@@ -24,7 +24,6 @@ import (
 	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/model/openai"
 	"github.com/gosuda/dalgona/internal/runner"
-	"github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/scripthost"
 	"github.com/gosuda/dalgona/internal/tool"
 	"github.com/gosuda/dalgona/internal/tool/exec"
@@ -325,24 +324,6 @@ func decisions(events []event.Seqd) map[string]event.ApprovalResolved {
 		}
 	}
 	return out
-}
-
-func loadPlugins(t *testing.T, files map[string]string) *script.Plugins {
-	t.Helper()
-	home := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(home, "plugins"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for name, source := range files {
-		if err := os.WriteFile(filepath.Join(home, "plugins", name), []byte(source), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	plugins, err := script.LoadPlugins(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return plugins
 }
 
 func skipCrashCopy(name, rel string) bool {

@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/script"
+	"github.com/gosuda/dalgona/internal/dalgona/script"
+	corescript "github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
@@ -71,7 +72,7 @@ func hungHookStopsAtTheLimit(t *testing.T) {
 		if got.decision != (script.HookDecision{}) {
 			t.Fatalf("decision = %+v, want none", got.decision)
 		}
-		if done := got.journal.completed["c1/hook:hang.star:hang"]; done.Status != script.StatusCancelled {
+		if done := got.journal.completed["c1/hook:hang.star:hang"]; done.Status != corescript.StatusCancelled {
 			t.Fatalf("hook run outcome = %+v, want cancelled", done)
 		}
 	})
@@ -155,7 +156,7 @@ func callSlowPluginTool(ctx context.Context, t *testing.T, plugins *script.Plugi
 
 func callSlowCell(ctx context.Context, t *testing.T) timedReply {
 	t.Helper()
-	eval := script.NewEval(newJournal(echoTool), script.EvalOptions{Mode: config.ToolModeEvalOnly, Tools: threadTools})
+	eval := corescript.NewEval(newJournal(echoTool), corescript.EvalOptions{Mode: config.ToolModeEvalOnly, Tools: pluginThreadTools})
 	start := time.Now()
 	got := runEval(ctx, t, eval, "call-1", slowCell)
 	return timedReply{reply: got, elapsed: time.Since(start)}

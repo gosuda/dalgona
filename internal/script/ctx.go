@@ -38,7 +38,7 @@ func (s *optString) Unpack(value starlark.Value) error {
 	}
 }
 
-func (r *run) ctxValue() starlark.Value {
+func (r *Runtime) ContextValue() starlark.Value {
 	return starlarkstruct.FromStringDict(starlark.String("ctx"), starlark.StringDict{
 		"tools":       &toolsValue{r: r},
 		"try_call":    starlark.NewBuiltin("ctx.try_call", r.tryCall),
@@ -52,7 +52,7 @@ func (r *run) ctxValue() starlark.Value {
 	})
 }
 
-func (r *run) effectError(ctx context.Context, err error) error {
+func (r *Runtime) effectError(ctx context.Context, err error) error {
 	if stop, ok := errors.AsType[*stopError](err); ok {
 		return r.halt(stop)
 	}
@@ -66,7 +66,7 @@ func (r *run) effectError(ctx context.Context, err error) error {
 }
 
 type toolsValue struct {
-	r     *run
+	r     *Runtime
 	scope *scopeValue
 }
 
@@ -113,17 +113,40 @@ func (t *toolsValue) bind(name string) *starlark.Builtin {
 		if err != nil {
 			return nil, err
 		}
-		return fromJSON(value)
+		return FromJSON(value)
 	})
 }
 
-func (r *run) prepareTool(name string, kwargs []starlark.Tuple) (Slot, effectFunc, error) {
+func (r *Runtime) prepareTool(name string, kwargs []starlark.Tuple) (Slot, effectFunc, error) {
+	action := kwString(kwargs, "action")
+	if waitsForUser(name, action) {
+		label := name
+		if name == ratchetName {
+			label += " " + action
+		}
+		return Slot{}, nil, r.halt(&stopError{status: StatusDenied, code: codeScope, msg: fmt.Sprintf("tool %s needs the user and runs only as a direct call", label)})
+	}
+	if !r.cfg.allow.has(name) {
+		return Slot{}, nil, r.halt(&stopError{status: StatusDenied, code: codeScope, msg: fmt.Sprintf("tool %s is not in this script's uses", name)})
+	}
+	r.calls++
+	if r.calls > maxCalls {
+		return Slot{}, nil, r.halt(&stopError{status: StatusLimitExceeded, code: codeLimit, msg: fmt.Sprintf("the script exceeded %d tool calls", maxCalls)})
+	}
 	payload, err := kwargsJSON(kwargs)
 	if err != nil {
 		return Slot{}, nil, fmt.Errorf("tools.%s: %w", name, err)
 	}
-	return r.prepareToolCall(name, kwString(kwargs, "action"), payload)
+	slot, err := r.submit(ToolOp(name), payload)
+	if err != nil {
+		return Slot{}, nil, err
+	}
+	effect := func(ctx context.Context) (jsontext.Value, error) {
+		return r.fx.CallTool(ctx, slot, name, payload)
+	}
+	return slot, effect, nil
 }
+
 
 func (r *run) prepareToolCall(name, action string, payload jsontext.Value) (Slot, effectFunc, error) {
 	if waitsForUser(name, action) {
@@ -166,7 +189,7 @@ type future struct {
 	err   error
 }
 
-func (r *run) async(ctx context.Context, sem chan struct{}, slot Slot, effect effectFunc) *future {
+func (r *Runtime) async(ctx context.Context, sem chan struct{}, slot Slot, effect effectFunc) *future {
 	f := &future{done: make(chan struct{})}
 	r.inflight.Go(func() {
 		defer close(f.done)
@@ -191,7 +214,7 @@ func settle(pending []*future) ([]starlark.Value, error) {
 		if f.err != nil {
 			return nil, f.err
 		}
-		value, err := fromJSON(f.value)
+		value, err := FromJSON(f.value)
 		if err != nil {
 			return nil, err
 		}
@@ -201,7 +224,7 @@ func settle(pending []*future) ([]starlark.Value, error) {
 }
 
 type scopeValue struct {
-	r       *run
+	r       *Runtime
 	sem     chan struct{}
 	pending []*future
 }
@@ -252,7 +275,7 @@ func scopeLimit(limit int) (chan struct{}, error) {
 	return make(chan struct{}, limit), nil
 }
 
-func (r *run) scope(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func (r *Runtime) scope(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var limit int
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "limit", &limit); err != nil {
 		return nil, err
@@ -264,7 +287,7 @@ func (r *run) scope(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple
 	return &scopeValue{r: r, sem: sem}, nil
 }
 
-func (r *run) tryCall(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func (r *Runtime) tryCall(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("%s: missing op", b.Name())
 	}
@@ -289,7 +312,7 @@ func callResult(ok bool, value, failure starlark.Value) starlark.Value {
 	})
 }
 
-func (r *run) spawn(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func (r *Runtime) spawn(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var prompt string
 	var runnerName, modelName optString
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "prompt", &prompt, "runner?", &runnerName, "model?", &modelName); err != nil {
@@ -306,15 +329,15 @@ func (r *run) spawn(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 		if spawnErr != nil {
 			return nil, spawnErr
 		}
-		return stringJSON(id), nil
+		return StringJSON(id), nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return fromJSON(value)
+	return FromJSON(value)
 }
 
-func (r *run) wait(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func (r *Runtime) wait(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var ids starlark.Iterable
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "ids", &ids); err != nil {
 		return nil, err
@@ -350,7 +373,7 @@ func stringList(items starlark.Iterable) ([]string, error) {
 	return names, nil
 }
 
-func (r *run) sleep(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func (r *Runtime) sleep(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "seconds", &value); err != nil {
 		return nil, err
@@ -368,7 +391,7 @@ func (r *run) sleep(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 	return starlark.None, nil
 }
 
-func (r *run) sleepFor(ctx context.Context, d time.Duration) error {
+func (r *Runtime) sleepFor(ctx context.Context, d time.Duration) error {
 	slot, err := r.submit(OpSleep, strconv.AppendInt(nil, int64(d), 10))
 	if err != nil {
 		return err
@@ -393,7 +416,7 @@ func (r *run) sleepFor(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func (r *run) now(ctx context.Context) float64 {
+func (r *Runtime) now(ctx context.Context) float64 {
 	slot, err := r.submit(OpTime, jsontext.Value("null"))
 	if err != nil {
 		return 0
@@ -414,7 +437,7 @@ func (r *run) now(ctx context.Context) float64 {
 	return seconds
 }
 
-func (r *run) recordLive(slot Slot, produce func() jsontext.Value) effectFunc {
+func (r *Runtime) recordLive(slot Slot, produce func() jsontext.Value) effectFunc {
 	return func(context.Context) (jsontext.Value, error) {
 		value := produce()
 		if err := r.record(slot, value); err != nil {
@@ -424,7 +447,7 @@ func (r *run) recordLive(slot Slot, produce func() jsontext.Value) effectFunc {
 	}
 }
 
-func (r *run) log(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func (r *Runtime) log(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var msg string
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "msg", &msg); err != nil {
 		return nil, err

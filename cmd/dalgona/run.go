@@ -12,9 +12,10 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/app/battery"
+	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
+	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
 	"github.com/gosuda/dalgona/internal/rpc"
-	"github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/scripthost"
+	corescript "github.com/gosuda/dalgona/internal/script"
 )
 
 const (
@@ -97,27 +98,27 @@ func scriptExtension(host *agent.Host, d *battery.Daemon) rpc.Extension {
 	}
 }
 
-func runOnThread(ctx context.Context, host *agent.Host, scripts scripthost.Config, run scriptRun) (_ jsontext.Value, err error) {
+func runOnThread(ctx context.Context, host *agent.Host, scripts batteryscripthost.Config, run scriptRun) (_ jsontext.Value, err error) {
 	thread, err := host.Start(ctx, agent.ThreadSpec{Cwd: run.Cwd})
 	if err != nil {
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, thread.Close()) }()
-	workflow := script.Workflow{ID: thread.ID(), Entry: run.Entry, Source: []byte(run.Source), Args: run.Args}
-	outcome, err := scripthost.RunWorkflow(ctx, thread, scripts, workflow)
+	workflow := batteryscript.Workflow{ID: thread.ID(), Entry: run.Entry, Source: []byte(run.Source), Args: run.Args}
+	outcome, err := batteryscripthost.RunWorkflow(ctx, thread, scripts, workflow)
 	if err != nil {
 		return nil, err
 	}
 	return encodeResult(outcomeText(outcome))
 }
 
-func outcomeText(outcome script.Outcome) (int, string) {
+func outcomeText(outcome corescript.Outcome) (int, string) {
 	var out strings.Builder
 	for _, line := range outcome.Prints.Lines {
 		out.WriteString(line)
 		out.WriteByte('\n')
 	}
-	if outcome.Status != script.StatusCompleted {
+	if outcome.Status != corescript.StatusCompleted {
 		fmt.Fprintf(&out, "workflow %s: %s (%s at %s)\n", outcome.Status, outcome.Error.Message, outcome.Error.Code, outcome.Error.Stage)
 		return 1, out.String()
 	}
