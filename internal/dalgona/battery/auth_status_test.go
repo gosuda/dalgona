@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/app"
-	"github.com/gosuda/dalgona/internal/app/battery"
+	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dalgona/battery"
 	"github.com/gosuda/dalgona/internal/mcp"
 )
 

@@ -160,7 +160,7 @@ linters:
               desc: core must not import interfaces or batteries
         presentation:
           files:
-            - "**/internal/app/**"
+            - "**/internal/dal/app/**"
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/dal/tui"
               desc: presentation depends on core, core never imports presentation
@@ -213,7 +213,7 @@ linters:
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/codexapp"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/app/battery"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/battery"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/ratchet"
               desc: dal must stay free of dalgona batteries

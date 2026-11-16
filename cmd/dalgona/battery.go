@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/codexapp"
 	"github.com/gosuda/dalgona/internal/daemon"
+	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/webui"
 )

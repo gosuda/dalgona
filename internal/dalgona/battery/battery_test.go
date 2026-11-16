@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/app"
-	"github.com/gosuda/dalgona/internal/app/battery"
 	"github.com/gosuda/dalgona/internal/dal/agent/prompt"
+	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dalgona/battery"
 )
 
 func buildMCPServer(t *testing.T) string {

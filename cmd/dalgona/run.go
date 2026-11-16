@@ -10,10 +10,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/app/battery"
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 	corescript "github.com/gosuda/dalgona/internal/dal/script"
+	"github.com/gosuda/dalgona/internal/dalgona/battery"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
 )

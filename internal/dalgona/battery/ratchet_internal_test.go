@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
