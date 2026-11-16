@@ -52,7 +52,9 @@ function thread(id: string, turns: JsonValue): Record<string, JsonValue> {
 	};
 }
 
-function resumeAnswer(runningThread: string): Answer {
+function resumeAnswer(
+	runningThread: string,
+): (params: JsonValue) => Record<string, JsonValue> {
 	return (params) => {
 		const id = threadIdOf(params);
 		const turns: JsonValue =
