@@ -116,7 +116,7 @@ func TestRowsBeforeThemeUseOnlyDefaultDimBold(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
 	before := m.screen.theme
-	m.commit("row:before", []string{before.paintBold(roleFailedText, "Failed") + " " + before.paint(roleAccentText, "ultrathink") + " " + before.paint(roleAddedText, "+added line")})
+	m.commit("row:before", []string{before.paint(roleFailedText, "Failed") + " " + before.paint(roleAccentText, "ultrathink") + " " + before.paint(roleAddedText, "+added line")})
 	m.commit("row:markdown", []string{m.renderMarkdown("# Title\n\n*emph*, `code`, and [link](https://example.test).\n")})
 	for _, entry := range m.out.entries {
 		if colourSGR(t, entry.text) {
@@ -126,8 +126,15 @@ func TestRowsBeforeThemeUseOnlyDefaultDimBold(t *testing.T) {
 			t.Fatalf("row before the theme holds italic, underline or reverse: %q", entry.text)
 		}
 	}
-	if text := m.out.entries[0].text; !strings.HasPrefix(text, "\x1b[1m") {
+	text := m.out.entries[0].text
+	if !strings.HasPrefix(text, "\x1b[1mFailed\x1b[0m") {
 		t.Fatalf("failed word is not bold: %q", text)
+	}
+	if !strings.Contains(text, "\x1b[1multrathink\x1b[0m") {
+		t.Fatalf("keyword is not bold: %q", text)
+	}
+	if !strings.HasSuffix(text, " +added line") {
+		t.Fatalf("added line is not plain: %q", text)
 	}
 }
 
@@ -165,9 +172,32 @@ func TestMarkdownHeadingsUsePaletteOnly(t *testing.T) {
 	}
 }
 
-func TestPaintKeepsWeightSeparate(t *testing.T) {
+func TestPaintBeforeThemeIsBoldForAccentAndFailedOnly(t *testing.T) {
 	t.Parallel()
-	for _, th := range []theme{newTheme(themeNight, true), newTheme(themeNight, false), {}} {
+	var unknown theme
+	bold := func(s string) string { return "\x1b[1m" + s + "\x1b[0m" }
+	want := map[role]string{
+		roleText:        "x",
+		roleDim:         "\x1b[2mx\x1b[0m",
+		roleFaint:       "x",
+		roleAccentText:  bold("x"),
+		roleFailedText:  bold("x"),
+		roleAddedText:   "x",
+		roleWarningText: "x",
+	}
+	for r := range roleCount {
+		if got := unknown.paint(r, "x"); got != want[r] {
+			t.Fatalf("unknown theme paint(role %d) = %q, want %q", r, got, want[r])
+		}
+	}
+	if got := unknown.paint(roleFailedText, ""); got != "" {
+		t.Fatalf("empty text is painted: %q", got)
+	}
+}
+
+func TestPaintKeepsWeightSeparateOnceThemeIsKnown(t *testing.T) {
+	t.Parallel()
+	for _, th := range []theme{newTheme(themeNight, true), newTheme(themeNight, false)} {
 		if s := th.paint(roleFailedText, "x"); strings.Contains(s, "\x1b[1m") || strings.Contains(s, "\x1b[1;") {
 			t.Fatalf("paint(roleFailedText) under %+v is bold: %q", th, s)
 		}

@@ -72,6 +72,9 @@ func (m *model) applyRequestResolved(params jsontext.Value) error {
 	m.dropApproval(index)
 	if card != nil {
 		m.noticef("%s", questionResolvedNotice(event.Resolution))
+		if event.Resolution == "timedOut" {
+			m.commit(fmt.Sprintf("question:%s:%s:%s", card.threadID, card.params.TurnID, card.params.ItemID), card.closedLines("Timed out"))
+		}
 	} else {
 		m.noticef("%s", resolvedNotice(event.Resolution))
 	}
@@ -155,6 +158,9 @@ func (m *model) approvalLines(current approval) []string {
 	var lines []string
 	if current.threadID != m.thread.id {
 		lines = append(lines, "From thread "+current.threadID)
+	}
+	if current.card != nil {
+		lines = append(lines, current.card.reviewLines()...)
 	}
 	lines = append(lines, approvalDetails(current)...)
 	for _, change := range m.approvalChanges(current) {

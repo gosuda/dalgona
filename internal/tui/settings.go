@@ -15,6 +15,8 @@ import (
 const (
 	settingsHint = "↑/↓ row · ←/→ value · Space toggle · Enter save · Esc close"
 	detailRows   = 7
+
+	statusColumnCells = 16
 )
 
 type settingRow struct {
@@ -33,7 +35,7 @@ var settingRows = []settingRow{
 	{key: "notifications", label: "Notifications", options: []string{"on", "off"}},
 }
 
-var statusItemIDs = []string{"effort", "approval", "sandbox", "folder", "queue", "context", "mark"}
+var statusItemIDs = []string{"effort", "approval", "sandbox", "folder", "queue", "cost", "context", "mark"}
 
 type settingsPanel struct {
 	rows       []settingRow
@@ -310,6 +312,10 @@ func (m *model) settingsDetail() []string {
 		return iconDetail()
 	case "statusHide":
 		return m.statusDetail()
+	case "editReview":
+		rows := make([]string, detailRows)
+		rows[0] = "Sends each edit's masked diff to the decider model."
+		return rows
 	}
 	return make([]string, detailRows)
 }
@@ -329,7 +335,7 @@ func iconDetail() []string {
 
 func (m *model) statusDetail() []string {
 	hidden := hiddenIDs(m.settings.preview["statusHide"])
-	rows := make([]string, 0, len(statusItemIDs))
+	rows := make([]string, detailRows)
 	for i, id := range statusItemIDs {
 		mark := "[ ]"
 		if slices.Contains(hidden, id) {
@@ -339,7 +345,8 @@ func (m *model) statusDetail() []string {
 		if i == m.settings.statusItem {
 			prefix = "> "
 		}
-		rows = append(rows, prefix+mark+" "+id)
+		row := i % detailRows
+		rows[row] = fmt.Sprintf("%-*s", statusColumnCells*(i/detailRows), rows[row]) + prefix + mark + " " + id
 	}
 	return rows
 }

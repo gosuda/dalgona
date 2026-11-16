@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -207,5 +208,44 @@ func TestApprovalOverListShowsPromptLine(t *testing.T) {
 	}
 	if line := m.dockLines()[0]; strings.Contains(line, "filter: ") {
 		t.Fatalf("input line shows the list filter under an approval: %q", line)
+	}
+}
+
+func TestResumeRowDates(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	m := newTestModel(&fakeCaller{}, Options{})
+	m.conn.clock = func() time.Time { return now }
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	threads := rpc.ThreadListResponse{Data: []rpc.Thread{
+		{ID: "t1", Name: "Fix parser", Status: rpc.ThreadStatus{Type: "active"}, UpdatedAt: time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC).Unix()},
+		{ID: "t2", Name: "Add tests", Status: rpc.ThreadStatus{Type: "idle"}, CreatedAt: time.Date(2025, 11, 20, 9, 0, 0, 0, time.UTC).Unix()},
+		{ID: "t3", Name: "No dates", Status: rpc.ThreadStatus{Type: "idle"}},
+		{ID: "t4", Name: "Created fallback", Status: rpc.ThreadStatus{Type: "idle"}, CreatedAt: time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC).Unix()},
+	}}
+	m, _ = drive(t, m, resultMsg{op: "threads", value: &threads})
+	view := m.View().Content
+	assertContains(t, view, "05-03", "2025-11", "01-02")
+	line1 := m.listLine(m.list.items[0])
+	line2 := m.listLine(m.list.items[1])
+	line3 := m.listLine(m.list.items[2])
+	if strings.Contains(line3, "-") {
+		t.Fatalf("row without timestamps shows a date: %q", line3)
+	}
+	if !strings.Contains(stripANSI(line1), "  05-03  ") {
+		t.Fatalf("current-year date is not right aligned in its field: %q", line1)
+	}
+	if !strings.Contains(stripANSI(line2), "2025-11  ") {
+		t.Fatalf("earlier-year date does not fill its field: %q", line2)
+	}
+	detailOffset := func(line string) int { return m.screen.cells(line) - m.screen.cells("idle") }
+	if detailOffset(line2) != detailOffset(line3) {
+		t.Fatalf("blank date column moved the status: %q vs %q", line2, line3)
+	}
+	for _, width := range []int{40, 100} {
+		wm, _ := drive(t, m, tea.WindowSizeMsg{Width: width, Height: 24})
+		wview := wm.View().Content
+		assertContains(t, wview, "05-03", "2025-11")
+		m = wm
 	}
 }

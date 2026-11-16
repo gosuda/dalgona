@@ -41,6 +41,7 @@ type panelView struct {
 type listItem struct {
 	id     string
 	label  string
+	date   string
 	detail string
 	active bool
 }
@@ -61,6 +62,8 @@ type listPanel struct {
 	efforts       map[string]effortPick
 	pendingEffort string
 	pending       string
+	empty         string
+	revision      uint64
 }
 
 func (p *listPanel) visible(query string) []int {

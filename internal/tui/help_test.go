@@ -52,6 +52,21 @@ func TestHelpStatusLegendPerShownItem(t *testing.T) {
 	}
 }
 
+func TestHelpStatusLegendNamesCost(t *testing.T) {
+	t.Parallel()
+	priced := costModel(12345000, true)
+	body := priced.helpBody()
+	if !slices.Contains(body, "cost $12.35+") {
+		t.Fatalf("help body has no legend line for the partial cost:\n%s", strings.Join(body, "\n"))
+	}
+	unpriced := bandModel("/work/ws")
+	for _, line := range unpriced.helpBody() {
+		if strings.HasPrefix(line, "cost ") {
+			t.Fatalf("help body names a cost that is unknown: %q", line)
+		}
+	}
+}
+
 func TestHelpScrollReachesLastLine(t *testing.T) {
 	t.Parallel()
 	m := helpModel(t)

@@ -196,7 +196,7 @@ func (m *model) applyDebounce(msg debounceMsg) tea.Cmd {
 
 func (m *model) searchFiles(seq int, query string) tea.Cmd {
 	client, done := m.conn.client, m.conn.done
-	params := fileSearchParams{Query: query, Roots: []string{m.conn.opts.Cwd}}
+	params := fileSearchParams{Query: query, Roots: []string{m.workDir()}}
 	return func() tea.Msg {
 		if client == nil {
 			return searchResultMsg{seq: seq, err: errors.New("rpc client is not connected")}

@@ -6,6 +6,7 @@ import (
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/vt"
 )
 
 func reviewThreadStarted() notificationMsg {
@@ -156,25 +157,51 @@ func judgedToolNotification(verdict, summary string) notificationMsg {
 		`{"threadId":"t1","turnId":"turn-1","itemId":"call_7","verdict":"` + verdict + `","summary":"` + summary + `","paths":["a.go"]}`)}
 }
 
+func judgedToolNotificationIn(turn, item, verdict, summary string) notificationMsg {
+	return notificationMsg{method: "dalgona/tool/judged", params: []byte(
+		`{"threadId":"t1","turnId":"` + turn + `","itemId":"` + item + `","verdict":"` + verdict + `","summary":"` + summary + `","paths":["a.go"]}`)}
+}
+
 func judgedTurnNotification(verdict, summary string) notificationMsg {
 	return notificationMsg{method: "dalgona/turn/judged", params: []byte(
 		`{"threadId":"t1","turnId":"turn-1","verdict":"` + verdict + `","summary":"` + summary + `","paths":["a.go"]}`)}
 }
 
-func TestJudgedToolRowKeyIsItemScoped(t *testing.T) {
+func TestJudgedToolRowKeyIsTurnScoped(t *testing.T) {
 	t.Parallel()
 	m := schemaStartedModel(t)
 	m, _ = drive(t, m, judgedToolNotification("flagged", "Flagged: removed code"))
 	if len(m.out.entries) == 0 {
 		t.Fatal("flagged tool review printed no row")
 	}
-	if key := m.out.entries[len(m.out.entries)-1].key; key != "review:t1:call_7" {
-		t.Fatalf("tool review row key %q, want review:t1:call_7", key)
+	if key := m.out.entries[len(m.out.entries)-1].key; key != "review:t1:turn-1:call_7" {
+		t.Fatalf("tool review row key %q, want review:t1:turn-1:call_7", key)
 	}
 	before := len(m.out.entries)
 	m, _ = drive(t, m, judgedToolNotification("flagged", "Flagged: removed code"))
 	if len(m.out.entries) != before {
 		t.Fatalf("a repeated tool review added a row: %d entries, want %d", len(m.out.entries), before)
+	}
+}
+
+func TestReviewRowsShareCallIDAcrossTurns(t *testing.T) {
+	t.Parallel()
+	m := schemaStartedModel(t)
+	m, _ = drive(t, m, judgedToolNotificationIn("turn-1", "c1", "flagged", "Flagged: removed code"))
+	m, _ = drive(t, m, judgedToolNotificationIn("turn-2", "c1", "flagged", "Flagged: removed code"))
+	if len(m.out.entries) != 2 {
+		t.Fatalf("one call id in two turns printed %d rows, want 2", len(m.out.entries))
+	}
+	want := []string{"review:t1:turn-1:c1", "review:t1:turn-2:c1"}
+	for i, key := range want {
+		if m.out.entries[i].key != key {
+			t.Fatalf("row %d key %q, want %q", i, m.out.entries[i].key, key)
+		}
+	}
+	before := len(m.out.entries)
+	m, _ = drive(t, m, judgedToolNotificationIn("turn-1", "c1", "flagged", "Flagged: removed code"))
+	if len(m.out.entries) != before {
+		t.Fatalf("a repeated call id in one turn added a row: %d entries, want %d", len(m.out.entries), before)
 	}
 }
 
@@ -187,7 +214,7 @@ func TestToolJudgedPrintsFlaggedRow(t *testing.T) {
 	}
 	assertContains(t, lastEntry(t, m), "review", "Flagged: removed code", "a.go")
 	m.screen.width = 120
-	row := m.renderReviewRow("flagged", "Flagged: removed code", []string{"a.go"})
+	row := m.renderReviewRow("flagged", "Flagged: removed code", []string{"a.go"}, reviewAttribution{})
 	text := strings.Join(row, "\n")
 	first := strings.Index(text, "review")
 	second := strings.Index(text, "Flagged: removed code")
@@ -244,17 +271,46 @@ func TestReviewRowVerbosity(t *testing.T) {
 	}
 }
 
+func emulatedRowBold(t *testing.T, row string) bool {
+	t.Helper()
+	em := vt.NewEmulator(120, 3)
+	text := strings.ReplaceAll(row, "\n", "\r\n")
+	if _, err := em.Write([]byte("\x1b[1mB\x1b[m\r\n" + text)); err != nil {
+		t.Fatal(err)
+	}
+	bold := em.CellAt(0, 0).Style.Attrs
+	if bold == 0 {
+		t.Fatal("the bold reference cell carries no attributes")
+	}
+	for x := range 120 {
+		cell := em.CellAt(x, 1)
+		if cell == nil || strings.TrimSpace(cell.Content) == "" {
+			continue
+		}
+		if cell.Style.Attrs&bold != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func TestReviewRowErrorIsBold(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(new(fakeCaller), Options{})
 	m.screen.width = 120
 	m.screen.theme = newTheme(themeNight, true)
-	failed := strings.Join(m.renderReviewRow("error", "Failed: boom", []string{"a.go"}), "\n")
-	if !strings.Contains(failed, "\x1b[1;") {
-		t.Fatalf("error row is not bold: %q", failed)
+	failed := strings.Join(m.renderReviewRow("error", "Failed: boom", []string{"a.go"}, reviewAttribution{}), "\n")
+	if !strings.Contains(stripANSI(failed), "Failed: boom") {
+		t.Fatalf("error row lost its text: %q", failed)
 	}
-	flagged := strings.Join(m.renderReviewRow("flagged", "Flagged: removed code", []string{"a.go"}), "\n")
-	if strings.Contains(flagged, "\x1b[1;") || strings.Contains(flagged, "\x1b[1m") {
-		t.Fatalf("flagged row is bold: %q", flagged)
+	if !emulatedRowBold(t, failed) {
+		t.Fatalf("no bold cell on the error row: %q", failed)
+	}
+	flagged := strings.Join(m.renderReviewRow("flagged", "Flagged: removed code", []string{"a.go"}, reviewAttribution{}), "\n")
+	if !strings.Contains(stripANSI(flagged), "Flagged: removed code") {
+		t.Fatalf("flagged row lost its text: %q", flagged)
+	}
+	if emulatedRowBold(t, flagged) {
+		t.Fatalf("a bold cell is on the flagged row: %q", flagged)
 	}
 }

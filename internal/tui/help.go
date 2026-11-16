@@ -26,6 +26,7 @@ var keyTable = []keyHelp{
 	{"Compose", "\\ then enter", "replaces the backslash with a newline"},
 	{"Compose", "alt+enter", "queues the draft as a follow-up"},
 	{"Compose", "up, down", "move between wrapped rows; on the first or last line, recall history"},
+	{"Compose", "ctrl+r", "opens the prompt history search"},
 	{"Compose", "alt+up", "moves the newest queued text back into an empty editor"},
 	{"Compose", "alt+left, alt+right", "move by word"},
 	{"Compose", "ctrl+w, ctrl+k, ctrl+u", "delete a word back, kill to line end, kill to line start"},
@@ -48,7 +49,6 @@ var keyTable = []keyHelp{
 	{"Panels", "enter", "activates the highlighted row or confirms"},
 	{"Panels", "esc", "clears the filter, then closes the list; cancels a confirm; closes the help panel"},
 	{"Panels", "tab, shift+tab", "cycle the efforts of the highlighted model"},
-	{"Panels", "ctrl+r", "opens the advisor reset confirm"},
 	{"Panels", "y, a, n", "accept, accept for session, decline (approval card)"},
 	{"Panels", "up, down", "scroll the approval card, settings rows and help lines; move the popup highlight"},
 	{"Panels", "left, right, space", "settings: cycle a value, move between status items, toggle"},
@@ -136,8 +136,8 @@ func (m *model) legendLine(seg segment) string {
 func (m *model) legendIconValue(seg segment) (string, string) {
 	icons := m.iconSet()
 	switch seg.id {
-	case "model", "mark":
-		return "", seg.text
+	case "model", "mark", "cost":
+		return "", strings.TrimSpace(seg.text)
 	case "effort":
 		return seg.text, m.thread.effort
 	case "approval":
@@ -145,7 +145,7 @@ func (m *model) legendIconValue(seg segment) (string, string) {
 	case "sandbox":
 		return seg.text, m.thread.sandbox
 	case "folder":
-		return icons.folder, filepath.Base(m.conn.opts.Cwd)
+		return icons.folder, filepath.Base(m.workDir())
 	case "queue":
 		return icons.queue, strconv.Itoa(len(m.queue))
 	case "context":

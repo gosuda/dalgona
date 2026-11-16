@@ -534,6 +534,13 @@ func (c editor) chipOf(r rune) (chip, bool) {
 	return c.chips[index], true
 }
 
+func (c editor) hasTypedText() bool {
+	return slices.ContainsFunc(c.text, func(r rune) bool {
+		_, isChip := c.chipOf(r)
+		return !isChip
+	})
+}
+
 func (c editor) chipRow(row editorRow) (chip, bool) {
 	r, size := utf8.DecodeRuneInString(row.text)
 	if size == 0 || size != len(row.text) {
@@ -639,7 +646,7 @@ func (m *model) shellKey(key string, msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return nil, false
 	case key == "enter":
 		return m.runShell(), true
-	case key == "esc" && m.input.composer.Value() == "":
+	case key == "esc" && !m.input.composer.hasTypedText():
 		m.leaveShell()
 		return nil, true
 	}

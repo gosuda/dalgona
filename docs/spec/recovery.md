@@ -24,11 +24,12 @@ Recovery MUST walk the tool calls of the last `assistant.message` of the open tu
 |Turn open, no call pending|Rebuild the request from the folded active path and call the model again. Recovery discards streamed text that was not journaled.|
 |Call with `tool.completed`, other than the next row|No action.|
 |`tool.completed` of an edit call, no `tool.judged`|No action. Recovery MUST NOT call the decision model and MUST NOT journal `tool.judged`.|
-|`approval.requested` without `approval.resolved`|Decide again. `auto`: static rules, then the [decider](approvals.md). `ask`: ask the clients again. With no subscribed client, decline with `declined: no client could approve this call`. Recovery MUST reuse the existing request id.|
+|`approval.requested` without `approval.resolved`|Decide again. `auto`: static rules, then the [decider](approvals.md). `ask`: ask the clients again. If the sandbox is unavailable and the journal holds no `sandbox.chosen`, recovery asks the sandbox question first. With no subscribed client, that question declines the call as [the sandbox spec](sandbox.md) states. For every other call with no subscribed client, decline with `declined: no client could approve this call`. Recovery MUST reuse the existing request id.|
 |`approval.resolved` with `decline` or `cancel`, no `tool.completed`|Journal `tool.completed` with `ok=false`, `recovered=none`, and the decline reason as output.|
 |`approval.resolved` with `accept` or `accept_session`, no `tool.started`|Journal `tool.completed` with `ok=false`, `recovered=skipped`, output `skipped: the host restarted before this call ran`. The call MUST NOT run. A thread grant from `accept_session` stays in force because the fold records it at `approval.resolved`.|
 |Assistant call with no approval and no `tool.started`|Same as the previous row: `recovered=skipped`, output `skipped: the host restarted before this call ran`.|
 |`tool.started` for `ask`|Journal `ok=false`, `recovered=interrupted`, output `interrupted: the host restarted before the user answered`. The question MUST NOT be asked again.|
+|`tool.started` for `ratchet` with action `approve`|Journal `ok=false`, `recovered=interrupted`, output `interrupted: the host restarted before the user answered`. The approval MUST NOT be asked again.|
 |`tool.started`, class `read`|Run the call again. Journal `recovered=replayed`.|
 |`tool.started`, class `edit`, no `files`|Plan and apply the edit again. Journal `recovered=replayed`.|
 |`tool.started`, class `edit`, every file sha equals `post_sha`|Journal `ok=true`, `recovered=replayed`, output `the edit was applied before the host restarted`.|

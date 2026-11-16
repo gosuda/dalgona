@@ -14,6 +14,9 @@ import (
 )
 
 func (m *model) applyNotification(msg notificationMsg) tea.Cmd {
+	if m.holdPendingResume(msg) {
+		return nil
+	}
 	command, err := m.applyDecodedNotification(msg)
 	if err != nil {
 		m.errorf("protocol error in %s: %v; reconnect with %s or use /new", msg.method, err, m.resumeHint())
@@ -21,6 +24,72 @@ func (m *model) applyNotification(msg notificationMsg) tea.Cmd {
 	}
 	m.emitStatus()
 	return command
+}
+
+func (m *model) holdPendingResume(msg notificationMsg) bool {
+	p := m.pending
+	if p == nil || p.target == "" || p.failed {
+		return false
+	}
+	if notifyThreadID(msg.params) != p.target {
+		return false
+	}
+	if len(p.held) >= pendingResumeLimit {
+		p.failed = true
+		p.held = nil
+		m.errorf("resume to %s aborted: more than %d live notifications arrived before the snapshot; run /resume again", p.target, pendingResumeLimit)
+		return true
+	}
+	p.held = append(p.held, msg)
+	return true
+}
+
+type threadIDProbe struct {
+	ThreadID string `json:"threadId"`
+	Thread   struct {
+		ID string `json:"id"`
+	} `json:"thread"`
+}
+
+func notifyThreadID(params jsontext.Value) string {
+	probe, err := decodeParams[threadIDProbe](params)
+	if err != nil {
+		return ""
+	}
+	return cmp.Or(probe.ThreadID, probe.Thread.ID)
+}
+
+func (m *model) pendingState() *pendingResume {
+	if m.pending == nil {
+		m.pending = &pendingResume{}
+	}
+	return m.pending
+}
+
+func (m *model) resetPendingResume(target string) int {
+	p := m.pendingState()
+	p.seq++
+	p.target, p.held, p.failed = target, nil, false
+	return p.seq
+}
+
+func (m *model) clearPendingResume() {
+	if m.pending == nil {
+		return
+	}
+	m.pending.target, m.pending.held, m.pending.failed = "", nil, false
+}
+
+func (m *model) concludePendingResume(seq int) bool {
+	p := m.pending
+	if p == nil || seq == 0 {
+		return false
+	}
+	if seq != p.seq {
+		return true
+	}
+	m.clearPendingResume()
+	return false
 }
 
 func (m *model) applyDecodedNotification(msg notificationMsg) (tea.Cmd, error) {
@@ -31,12 +100,21 @@ func (m *model) applyDecodedNotification(msg notificationMsg) (tea.Cmd, error) {
 		return m.applyTurnNotification(msg)
 	case "item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/textDelta", "item/commandExecution/outputDelta", "item/fileChange/patchUpdated":
 		return nil, m.applyItemNotification(msg)
+	default:
+		return m.applyEventNotification(msg)
+	}
+}
+
+func (m *model) applyEventNotification(msg notificationMsg) (tea.Cmd, error) {
+	switch msg.method {
 	case "error":
 		return nil, m.applyError(msg.params)
 	case "dalgona/thread/childSpawned":
 		return nil, m.applyChildSpawned(msg.params)
 	case "dalgona/advisor/note", "dalgona/tool/judged", "dalgona/turn/judged":
 		return nil, m.applyDalgonaNotification(msg)
+	case "dalgona/turn/effort":
+		return nil, m.applyTurnEffort(msg.params)
 	case "account/login/completed":
 		return nil, m.applyLoginCompleted(msg.params)
 	default:
@@ -118,7 +196,7 @@ func (m *model) applyThreadStatus(params jsontext.Value) error {
 	if err != nil {
 		return err
 	}
-	if !m.acceptThread(event.ThreadID) || event.Seq > 0 && event.Seq < m.thread.seq {
+	if !m.acceptThread(event.ThreadID) || event.Seq < m.thread.seq {
 		return nil
 	}
 	m.thread.seq = max(m.thread.seq, event.Seq)
@@ -169,17 +247,24 @@ func (m *model) applyAdvisorNote(params jsontext.Value) error {
 }
 
 type judgedReport struct {
-	threadID string
-	targetID string
-	verdict  string
-	summary  string
-	paths    []string
+	threadID    string
+	turnID      string
+	targetID    string
+	verdict     string
+	summary     string
+	paths       []string
+	attribution reviewAttribution
 }
 
 func (m *model) applyJudged(r judgedReport) {
-	if m.acceptThread(r.threadID) {
-		m.printReview("review:"+r.threadID+":"+r.targetID, r.verdict, r.summary, r.paths)
+	if !m.acceptThread(r.threadID) {
+		return
 	}
+	key := "review:" + r.threadID + ":" + r.turnID
+	if r.targetID != "" {
+		key += ":" + r.targetID
+	}
+	m.printReview(key, r.verdict, r.summary, r.paths, r.attribution)
 }
 
 func (m *model) applyToolJudged(params jsontext.Value) error {
@@ -187,7 +272,7 @@ func (m *model) applyToolJudged(params jsontext.Value) error {
 	if err != nil {
 		return err
 	}
-	m.applyJudged(judgedReport{e.ThreadID, e.ItemID, e.Verdict, e.Summary, e.Paths})
+	m.applyJudged(judgedReport{e.ThreadID, e.TurnID, e.ItemID, e.Verdict, e.Summary, e.Paths, reviewAttribution{e.By, e.Fallback, e.Judges}})
 	return nil
 }
 
@@ -196,7 +281,7 @@ func (m *model) applyTurnJudged(params jsontext.Value) error {
 	if err != nil {
 		return err
 	}
-	m.applyJudged(judgedReport{e.ThreadID, e.TurnID, e.Verdict, e.Summary, e.Paths})
+	m.applyJudged(judgedReport{e.ThreadID, e.TurnID, "", e.Verdict, e.Summary, e.Paths, reviewAttribution{e.By, e.Fallback, e.Judges}})
 	return nil
 }
 
@@ -207,10 +292,22 @@ func (m *model) applyLoginCompleted(params jsontext.Value) error {
 	}
 	m.closeWaitingLogin()
 	if !event.Success {
-		m.errorf("Login failed: %s; run /login again", cmp.Or(event.Error, "unknown error"))
+		m.errorf("Login failed for %s: %s; run /login again", cmp.Or(event.Provider, "the provider"), cmp.Or(event.Error, "unknown error"))
 		return nil
 	}
 	m.noticef("Signed in to %s. Run /model to choose a model", event.Provider)
+	return nil
+}
+
+func (m *model) applyTurnEffort(params jsontext.Value) error {
+	e, err := decodeParams[rpc.TurnEffortNotification](params)
+	if err != nil {
+		return err
+	}
+	if e.ThreadID == m.thread.id && m.thread.turnID != "" && e.TurnID == m.thread.turnID {
+		m.thread.turnEffort = &e.Effort
+		m.thread.turnRevision++
+	}
 	return nil
 }
 
@@ -223,6 +320,8 @@ func (m *model) applyTurnStarted(params jsontext.Value) error {
 		return nil
 	}
 	m.thread.turnID = event.Turn.ID
+	m.thread.turnEffort = nil
+	m.thread.turnRevision++
 	m.thread.turnStartedAt = m.now()
 	if event.Turn.StartedAt != 0 {
 		m.thread.turnStartedAt = time.Unix(event.Turn.StartedAt, 0)
@@ -241,8 +340,13 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 	if !m.acceptThread(event.ThreadID) {
 		return nil, nil
 	}
+	if m.thread.turnID != "" && event.Turn.ID != m.thread.turnID {
+		return nil, nil
+	}
 	m.flushGroup()
 	m.thread.turnID = ""
+	m.thread.turnEffort = nil
+	m.thread.turnRevision++
 	if m.thread.completedTurns == nil {
 		m.thread.completedTurns = map[string]struct{}{}
 	}
@@ -258,13 +362,17 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 	if m.thread.state == stateInterrupted {
 		m.noticef("")
 	}
+	return m.turnDoneCmd(notify), nil
+}
+
+func (m *model) turnDoneCmd(notify tea.Cmd) tea.Cmd {
 	if m.thread.state != stateIdle {
 		if len(m.queue) > 0 {
 			m.noticef("Held · %d · Enter on an empty prompt sends the next", len(m.queue))
 		}
-		return notify, nil
+		return notify
 	}
-	return tea.Batch(notify, m.startQueuedFollowup()), nil
+	return tea.Batch(notify, m.startQueuedFollowup())
 }
 
 func (m *model) applyItemStarted(params jsontext.Value) error {
@@ -304,6 +412,7 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 	children := live.children
 	item := live.settle(final)
 	m.live.items = slices.DeleteFunc(m.live.items, func(candidate liveItem) bool { return candidate.ID == item.ID })
+	m.rebuildLiveIndex()
 	if !answer && !isAdvisorItem(item) {
 		m.settleItem(itemKey(event.ThreadID, event.TurnID, item.ID), item, children)
 	}
@@ -311,14 +420,24 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 }
 
 func (m *model) liveItem(id string) *liveItem {
-	index := slices.IndexFunc(m.live.items, func(item liveItem) bool { return item.ID == id })
-	if index < 0 {
-		var item liveItem
-		item.ID = id
-		m.live.items = append(m.live.items, item)
-		index = len(m.live.items) - 1
+	if m.live.byID == nil {
+		m.rebuildLiveIndex()
 	}
-	return &m.live.items[index]
+	if index, ok := m.live.byID[id]; ok {
+		return &m.live.items[index]
+	}
+	var item liveItem
+	item.ID = id
+	m.live.items = append(m.live.items, item)
+	m.live.byID[id] = len(m.live.items) - 1
+	return &m.live.items[len(m.live.items)-1]
+}
+
+func (m *model) rebuildLiveIndex() {
+	m.live.byID = make(map[string]int, len(m.live.items))
+	for i := range m.live.items {
+		m.live.byID[m.live.items[i].ID] = i
+	}
 }
 
 func mergeItem(item, live rpc.Item) rpc.Item {
@@ -337,6 +456,9 @@ func (m *model) applyDelta(method string, params jsontext.Value) error {
 	if !m.acceptThread(delta.threadID) {
 		return nil
 	}
+	if m.thread.turnID != "" && delta.turnID != "" && delta.turnID != m.thread.turnID {
+		return nil
+	}
 	item := m.liveItem(delta.itemID)
 	item.Type = deltaType(method)
 	if item.Type == "agentMessage" {
@@ -344,11 +466,14 @@ func (m *model) applyDelta(method string, params jsontext.Value) error {
 		m.streamAnswer(delta.threadID, item, delta.text)
 		return nil
 	}
+	frag := appendSanitized(nil, delta.text)
 	if item.Type == "commandExecution" {
-		item.output = appendSanitized(item.output, delta.text)
+		item.output = append(item.output, frag...)
 	} else {
-		item.text = appendSanitized(item.text, delta.text)
+		item.text = append(item.text, frag...)
 	}
+	item.tailMark = len(item.streamed())
+	item.noteTail(frag)
 	return nil
 }
 
@@ -387,6 +512,9 @@ func (m *model) applyRetryWait(params jsontext.Value) error {
 		return err
 	}
 	if !m.acceptThread(event.ThreadID) {
+		return nil
+	}
+	if m.thread.turnID != "" && event.TurnID != "" && event.TurnID != m.thread.turnID {
 		return nil
 	}
 	m.live.retryUntil = time.Time{}
@@ -450,6 +578,8 @@ func (m *model) setThread(id string) {
 	m.flushGroup()
 	m.thread.id = id
 	m.thread.turnID = ""
+	m.thread.turnEffort = nil
+	m.thread.turnRevision++
 	m.thread.seq = 0
 	m.thread.completedTurns = nil
 	m.thread.lastTurn = 0

@@ -38,6 +38,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	before := m.input.composer.Value()
 	notice := m.notice
 	command := m.handleMsg(msg)
+	m.syncHistory()
 	if m.input.composer.Value() != before {
 		command = tea.Batch(command, m.matchKeywords())
 	}
@@ -87,6 +88,9 @@ func (m *model) resizeTerminal(msg tea.WindowSizeMsg) {
 	m.screen.height = msg.Height
 	m.input.composer.SetWidth(msg.Width)
 	m.fitReview()
+	if m.out.printing {
+		m.out.frozen = m.presentedDock()
+	}
 }
 
 func (m *model) updateDockEvent(msg tea.Msg) {
@@ -242,6 +246,9 @@ func (m *model) promptKey(msg tea.KeyPressMsg, key string) tea.Cmd {
 		return m.queueFollowup()
 	case "ctrl+v":
 		return m.clipboardImage()
+	case "ctrl+r":
+		m.openHistorySearch()
+		return nil
 	case "?":
 		return m.questionKey(msg, key)
 	case "esc":
@@ -441,6 +448,18 @@ func (m model) rawFrame() tea.View {
 		view.Content = m.screen.emit(view.Content)
 		return view
 	}
+}
+
+func (m model) presentedDock() tea.View {
+	view := m.dockView()
+	view.Content = m.screen.emit(view.Content)
+	view.MouseMode = tea.MouseModeNone
+	if !m.leaving && (m.review != nil || m.list != nil) {
+		view.MouseMode = tea.MouseModeCellMotion
+	}
+	view.ReportFocus = true
+	view.WindowTitle = m.windowTitle()
+	return view
 }
 
 func (m model) frame() tea.View {

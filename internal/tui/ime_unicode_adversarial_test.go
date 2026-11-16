@@ -356,6 +356,16 @@ func TestBandSanitizesModelName(t *testing.T) {
 	}
 }
 
+func TestBandSanitizesFolder(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m.conn.opts.Cwd = "/tmp/evil\x1b[31mdir"
+	got := bandSegmentText(m, "folder")
+	if !strings.Contains(got, "evildir") || strings.Contains(got, "\x1b") {
+		t.Fatalf("folder segment = %q, want the sanitized directory name", got)
+	}
+}
+
 func TestLoginViewsSanitizeProviderID(t *testing.T) {
 	t.Parallel()
 	hostile := "evil\x1b]0;x\x07id"

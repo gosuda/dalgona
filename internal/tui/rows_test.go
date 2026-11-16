@@ -187,11 +187,32 @@ func TestFailedRowIsBoldTextNotFill(t *testing.T) {
 	m.screen.width = 100
 	m.screen.theme = newTheme(themeNight, true)
 	row := m.renderItem(rpc.Item{Type: "commandExecution", Command: "go test", Status: "failed"}, verbosityMedium)[0]
-	if !strings.Contains(row, "\x1b[1;38;2;232;112;95mFailed") {
-		t.Fatalf("failed word is not bold failed-text: %q", row)
+	if !strings.Contains(stripANSI(row), "Failed") {
+		t.Fatalf("failed row lost its text: %q", row)
+	}
+	if !emulatedRowBold(t, row) {
+		t.Fatalf("no bold cell on the failed row: %q", row)
 	}
 	if hasBackground(row) {
 		t.Fatalf("failed row paints a background: %q", row)
+	}
+}
+
+func TestReviewRowCapsPaths(t *testing.T) {
+	t.Parallel()
+	m := newModel(nil, Options{}, nil)
+	m.screen.width = 120
+	m.screen.theme = newTheme(themeNight, true)
+	four := strings.Join(m.renderReviewRow("flagged", "Flagged: removed code", []string{"a.go", "b.go", "c.go", "d.go"}, reviewAttribution{}), "\n")
+	text := stripANSI(four)
+	assertContains(t, text, "a.go", "b.go", "c.go", "+1 more")
+	if strings.Contains(text, "d.go") {
+		t.Fatalf("a fourth path is shown: %q", text)
+	}
+	three := stripANSI(strings.Join(m.renderReviewRow("flagged", "Flagged: removed code", []string{"a.go", "b.go", "c.go"}, reviewAttribution{}), "\n"))
+	assertContains(t, three, "a.go", "b.go", "c.go")
+	if strings.Contains(three, "more") {
+		t.Fatalf("three paths still show a more suffix: %q", three)
 	}
 }
 
@@ -354,5 +375,25 @@ func TestDynamicAndMCPRowsShowDuration(t *testing.T) {
 		if !strings.HasSuffix(strings.TrimRight(header, " "), tc.want) {
 			t.Fatalf("%s: row %q does not end with duration %q", tc.name, header, tc.want)
 		}
+	}
+}
+
+func TestLiveCommandTailKeepsNewestBeyondCap(t *testing.T) {
+	t.Parallel()
+	m := rowModel(t, 100)
+	m = notifyItem(t, m, "item/started", `{"type":"commandExecution","id":"c1","command":"seq","cwd":"/work","status":"inProgress"}`)
+	delta := func(text string) notificationMsg {
+		return notificationMsg{method: "item/commandExecution/outputDelta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"c1","delta":` + strconv.Quote(text) + `}`)}
+	}
+	m = rawUpdate(t, m, delta("HEAD-START-AAA\n"))
+	for range 70 {
+		m = rawUpdate(t, m, delta(strings.Repeat("x", 1024)+"\n"))
+	}
+	m = rawUpdate(t, m, delta("TAIL-END-9ZQ\n"))
+	if got := m.liveItem("c1").tail(); got != "TAIL-END-9ZQ" {
+		t.Fatalf("command live tail = %q, want the newest line", got)
+	}
+	if got := stripANSI(m.liveRow()); !strings.Contains(got, "TAIL-END-9ZQ") {
+		t.Fatalf("live row lacks the newest tail:\n%s", got)
 	}
 }

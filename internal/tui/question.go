@@ -2,7 +2,6 @@ package tui
 
 import (
 	"encoding/json/jsontext"
-	"errors"
 	"fmt"
 	"math/bits"
 	"slices"
@@ -28,14 +27,15 @@ const (
 )
 
 type questionCard struct {
-	threadID string
-	params   rpc.ToolRequestUserInputParams
-	answer   chan requestAnswer
-	index    int
-	cursor   []int
-	picked   [][]bool
-	typed    []string
-	typing   bool
+	threadID  string
+	params    rpc.ToolRequestUserInputParams
+	answer    chan requestAnswer
+	index     int
+	cursor    []int
+	picked    [][]bool
+	typed     []string
+	typing    bool
+	reviewTop int
 }
 
 func newQuestionCard(params rpc.ToolRequestUserInputParams, answer chan requestAnswer) *questionCard {
@@ -61,8 +61,16 @@ func newQuestionCard(params rpc.ToolRequestUserInputParams, answer chan requestA
 	return card
 }
 
+func (c *questionCard) isReview() bool {
+	return c.index == len(c.params.Questions)
+}
+
+func (c *questionCard) tabCount() int {
+	return len(c.params.Questions) + 1
+}
+
 func (c *questionCard) freeText() bool {
-	return len(c.params.Questions[c.index].Options) == 0
+	return !c.isReview() && len(c.params.Questions[c.index].Options) == 0
 }
 
 func (c *questionCard) rows(q int) int {
@@ -78,8 +86,14 @@ func (c *questionCard) key(msg tea.KeyPressMsg) cardAction {
 }
 
 func (c *questionCard) rowsKey(key string) cardAction {
+	if len(c.params.Questions) == 0 {
+		return cardDismiss
+	}
 	if c.navigate(key) {
 		return cardStay
+	}
+	if c.isReview() {
+		return reviewChoose(key)
 	}
 	return c.choose(key)
 }
@@ -87,9 +101,9 @@ func (c *questionCard) rowsKey(key string) cardAction {
 func (c *questionCard) navigate(key string) bool {
 	switch key {
 	case "up", "k":
-		c.cursor[c.index] = max(0, c.cursor[c.index]-1)
+		c.moveCursor(-1)
 	case "down", "j":
-		c.cursor[c.index] = min(c.rows(c.index)-1, c.cursor[c.index]+1)
+		c.moveCursor(1)
 	case "tab", "right", "l":
 		c.moveQuestion(1)
 	case "shift+tab", "left", "h":
@@ -100,9 +114,29 @@ func (c *questionCard) navigate(key string) bool {
 	return true
 }
 
+func (c *questionCard) moveCursor(delta int) {
+	if c.isReview() {
+		return
+	}
+	last := max(c.rows(c.index)-1, 0)
+	c.cursor[c.index] = min(max(c.cursor[c.index]+delta, 0), last)
+}
+
 func (c *questionCard) moveQuestion(delta int) {
-	c.index = min(max(c.index+delta, 0), len(c.params.Questions)-1)
+	tabs := c.tabCount()
+	c.index = (c.index + delta + tabs) % tabs
+	c.reviewTop = 0
 	c.typing = c.freeText()
+}
+
+func reviewChoose(key string) cardAction {
+	switch key {
+	case "s", "enter":
+		return cardSubmit
+	case "esc":
+		return cardDismiss
+	}
+	return cardStay
 }
 
 func (c *questionCard) choose(key string) cardAction {
@@ -136,7 +170,7 @@ func digitRow(key string) (int, bool) {
 }
 
 func (c *questionCard) multi() bool {
-	return c.params.Questions[c.index].MultiSelect
+	return !c.isReview() && c.params.Questions[c.index].MultiSelect
 }
 
 func (c *questionCard) enter() cardAction {
@@ -182,9 +216,6 @@ func (c *questionCard) pickAdvance(row int) cardAction {
 }
 
 func (c *questionCard) advance() cardAction {
-	if c.index+1 >= len(c.params.Questions) {
-		return cardSubmit
-	}
 	c.moveQuestion(1)
 	return cardStay
 }
@@ -232,12 +263,14 @@ func cancelledResponse() rpc.ToolRequestUserInputResponse {
 	return rpc.ToolRequestUserInputResponse{Answers: map[string]rpc.ToolRequestUserInputAnswer{}}
 }
 
-func (c *questionCard) answerLines(dismissed bool) []string {
+func (c *questionCard) closedLines(closedAs string) []string {
 	lines := make([]string, 0, len(c.params.Questions))
 	for i, q := range c.params.Questions {
+		if closedAs != "" {
+			lines = append(lines, q.Header+": "+closedAs)
+			continue
+		}
 		switch answers := c.answersOf(i); {
-		case dismissed:
-			lines = append(lines, q.Header+": dismissed")
 		case len(answers) == 0:
 			lines = append(lines, q.Header+": skipped")
 		default:
@@ -250,6 +283,9 @@ func (c *questionCard) answerLines(dismissed bool) []string {
 func (c *questionCard) view(s *screenState, hue, rows, width int) []string {
 	if rows <= 0 {
 		return nil
+	}
+	if c.isReview() {
+		return c.reviewView(s, hue, rows, width)
 	}
 	q := c.index
 	question := c.params.Questions[q]
@@ -276,12 +312,66 @@ func (c *questionCard) view(s *screenState, hue, rows, width int) []string {
 	default:
 		body = scrollOptions(options, c.cursor[q], avail, s, width)
 	}
-	lines := []string{title}
-	lines = append(lines, body...)
+	return s.padCard(append([]string{title}, body...), footer, rows, width)
+}
+
+func (s *screenState) padCard(lines, footer []string, rows, width int) []string {
 	for len(lines) < rows-len(footer) {
 		lines = append(lines, s.fit("│", width))
 	}
 	return append(lines, footer...)
+}
+
+var reviewFlatten = strings.NewReplacer("\n", " ", "\t", " ")
+
+func (c *questionCard) reviewTitle() string {
+	if len(c.params.Questions) == 1 {
+		return "Review · 1 question"
+	}
+	return fmt.Sprintf("Review · %d questions", len(c.params.Questions))
+}
+
+func (c *questionCard) reviewBody(s *screenState, width int) []string {
+	t := s.dockTheme()
+	lines := make([]string, 0, 2*len(c.params.Questions))
+	for i, q := range c.params.Questions {
+		lines = append(lines, s.fit("│ "+t.paintBold(roleText, reviewFlatten.Replace(q.Header)), width))
+		answer := t.paint(roleDim, "(no answer)")
+		if answers := c.answersOf(i); len(answers) > 0 {
+			answer = t.paint(roleText, reviewFlatten.Replace(strings.Join(answers, "; ")))
+		}
+		lines = append(lines, s.fit("│   "+answer, width))
+	}
+	return lines
+}
+
+func (c *questionCard) reviewFrame(s *screenState, hue, rows, width int) (body, footer []string) {
+	body = c.reviewBody(s, width)
+	maxLines := max(rows-2, 1)
+	footer = reviewHints(s, hue).lines(s, width, maxLines)
+	if len(body) > rows-1-len(footer) {
+		footer = reviewScrollHints(s, hue).lines(s, width, maxLines)
+	}
+	return body, footer
+}
+
+func (c *questionCard) reviewView(s *screenState, hue, rows, width int) []string {
+	title := s.fit("┌ "+c.reviewTitle(), width)
+	if rows == 1 {
+		return []string{title}
+	}
+	body, footer := c.reviewFrame(s, hue, rows, width)
+	if rows == 2 {
+		return []string{title, footer[0]}
+	}
+	avail := rows - 1 - len(footer)
+	top := min(c.reviewTop, max(len(body)-avail, 0))
+	return s.padCard(append([]string{title}, body[top:min(top+avail, len(body))]...), footer, rows, width)
+}
+
+func (c *questionCard) scrollReview(delta, total, avail int) {
+	limit := max(total-avail, 0)
+	c.reviewTop = min(max(min(c.reviewTop, limit)+delta, 0), limit)
 }
 
 const (
@@ -329,9 +419,14 @@ func hintBreaks(widths [questionSegments]int, shown, join, room int) (starts, li
 	return starts, lines
 }
 
-func (c *questionCard) hintShown(widths [questionSegments]int, join, room, maxLines int) int {
+type hintSet struct {
+	texts    [questionSegments]string
+	priority []int
+}
+
+func (h hintSet) shown(widths [questionSegments]int, join, room, maxLines int) int {
 	shown := 1 << questionHintCount
-	for _, i := range c.hintPriority() {
+	for _, i := range h.priority {
 		if _, lines := hintBreaks(widths, shown|1<<i, join, room); lines <= maxLines {
 			shown |= 1 << i
 		}
@@ -339,25 +434,45 @@ func (c *questionCard) hintShown(widths [questionSegments]int, join, room, maxLi
 	return shown
 }
 
+func (h hintSet) lines(s *screenState, width, maxLines int) []string {
+	var widths [questionSegments]int
+	for i := range questionHintCount {
+		widths[i] = s.cells(h.texts[i])
+	}
+	widths[questionHintCount] = s.cells(questionActions)
+	join := s.cells(questionHintJoin)
+	room := width - s.cells(questionHintRail)
+	shown := h.shown(widths, join, room, maxLines)
+	starts, _ := hintBreaks(widths, shown, join, room)
+	return renderHints(s, h.texts, shown, starts, width)
+}
+
 func (c *questionCard) hintLines(s *screenState, hue, width, maxLines int) []string {
-	texts := [questionSegments]string{
+	priority := c.hintPriority()
+	set := hintSet{priority: priority[:], texts: [questionSegments]string{
 		hintMove:          "↑/↓ move",
 		hintPick:          "1-7 pick",
 		hintToggle:        "Space toggle",
 		hintChoose:        "Enter choose",
 		hintNext:          "Tab next",
 		questionHintCount: s.dockTheme().liveTag(hue, questionSubmit) + questionHintJoin + "Esc dismiss",
-	}
-	var widths [questionSegments]int
-	for i := range questionHintCount {
-		widths[i] = s.cells(texts[i])
-	}
-	widths[questionHintCount] = s.cells(questionActions)
-	join := s.cells(questionHintJoin)
-	room := width - s.cells(questionHintRail)
-	shown := c.hintShown(widths, join, room, maxLines)
-	starts, _ := hintBreaks(widths, shown, join, room)
-	return renderHints(s, texts, shown, starts, width)
+	}}
+	return set.lines(s, width, maxLines)
+}
+
+func reviewHints(s *screenState, hue int) hintSet {
+	return hintSet{priority: []int{hintChoose, hintNext}, texts: [questionSegments]string{
+		hintChoose:        "Enter submit",
+		hintNext:          "Tab back",
+		questionHintCount: s.dockTheme().liveTag(hue, questionSubmit) + questionHintJoin + "Esc dismiss",
+	}}
+}
+
+func reviewScrollHints(s *screenState, hue int) hintSet {
+	set := reviewHints(s, hue)
+	set.texts[hintMove] = "↑/↓ scroll"
+	set.priority = []int{hintChoose, hintNext, hintMove}
+	return set
 }
 
 func renderHints(s *screenState, texts [questionSegments]string, shown, starts, width int) []string {
@@ -444,10 +559,36 @@ func (c *questionCard) previewLines(s *screenState, width int) []string {
 	description, preview := "", ""
 	if row := c.cursor[q]; row < len(options) {
 		description = options[row].Description
-		first, _, _ := strings.Cut(options[row].Preview, "\n")
-		preview = first
+		preview = options[row].Preview
 	}
-	return []string{s.fit("│ "+description, width), s.fit("│ "+cutRunes(preview, width-4), width)}
+	first, _, _ := strings.Cut(preview, "\n")
+	suffix := ""
+	if more := strings.Count(preview, "\n"); more > 0 {
+		suffix = fmt.Sprintf(" … %d more lines · ctrl+o", more)
+	}
+	room := max(width-utf8.RuneCountInString(suffix)-3, 1)
+	return []string{s.fit("│ "+description, width), s.fit("│ "+cutRunes(first, room)+suffix, width)}
+}
+
+func (c *questionCard) reviewLines() []string {
+	var lines []string
+	for i, q := range c.params.Questions {
+		lines = append(lines, fmt.Sprintf("Question %d of %d · %s", i+1, len(c.params.Questions), q.Header))
+		lines = append(lines, strings.Split(q.Question, "\n")...)
+		for j, o := range q.Options {
+			lines = append(lines, fmt.Sprintf("%d. %s", j+1, o.Label))
+			if o.Description != "" {
+				lines = append(lines, strings.Split(o.Description, "\n")...)
+			}
+			if o.Preview != "" {
+				lines = append(lines, strings.Split(o.Preview, "\n")...)
+			}
+		}
+		if q.IsOther {
+			lines = append(lines, fmt.Sprintf("%d. Other", len(q.Options)+1))
+		}
+	}
+	return lines
 }
 
 func cutRunes(text string, n int) string {
@@ -478,9 +619,6 @@ func decodeQuestion(params jsontext.Value) (rpc.ToolRequestUserInputParams, erro
 	if err != nil {
 		return request, fmt.Errorf("decode question: %w", err)
 	}
-	if len(request.Questions) == 0 {
-		return request, errors.New("decode question: no questions")
-	}
 	for i, question := range request.Questions {
 		if question.ID == "" {
 			return request, fmt.Errorf("decode question: question %d has no id", i+1)
@@ -494,6 +632,10 @@ func (m *model) applyQuestion(msg serverRequestMsg) tea.Cmd {
 	if err != nil {
 		msg.answer <- requestAnswer{err: err}
 		m.errorf("question request failed: %v; reconnect and retry the turn", err)
+		return nil
+	}
+	if len(params.Questions) == 0 {
+		msg.answer <- requestAnswer{value: cancelledResponse()}
 		return nil
 	}
 	card := newQuestionCard(params, msg.answer)
@@ -514,6 +656,8 @@ func questionResolvedNotice(resolution string) string {
 		return "Question dismissed in another window"
 	case "interrupted":
 		return "Question closed: the turn was interrupted"
+	case "timedOut":
+		return "Question timed out"
 	}
 	return "Question closed: the agent continues without an answer"
 }
@@ -531,6 +675,10 @@ func (m *model) answerQuestionKey(msg tea.KeyPressMsg) tea.Cmd {
 	if card.typing {
 		return m.typeQuestionKey(card, msg)
 	}
+	if delta := reviewScrollDelta(msg.String()); card.isReview() && delta != 0 {
+		m.scrollQuestionReview(card, delta)
+		return nil
+	}
 	wasTyping := card.typing
 	action := card.key(msg)
 	if !wasTyping && card.typing {
@@ -538,6 +686,22 @@ func (m *model) answerQuestionKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	m.applyCardAction(action)
 	return nil
+}
+
+func reviewScrollDelta(key string) int {
+	switch key {
+	case "up", "k":
+		return -1
+	case "down", "j":
+		return 1
+	}
+	return 0
+}
+
+func (m *model) scrollQuestionReview(card *questionCard, delta int) {
+	rows := panelRows(panelAsk, m.screen.height)
+	body, footer := card.reviewFrame(&m.screen, threadHue(m.thread.id), rows, terminalWidth(m.screen.width))
+	card.scrollReview(delta, len(body), max(rows-1-len(footer), 0))
 }
 
 func (m *model) typeQuestionKey(card *questionCard, msg tea.KeyPressMsg) tea.Cmd {
@@ -583,10 +747,12 @@ func (m *model) applyCardAction(action cardAction) {
 func (m *model) finishQuestion(dismissed bool) {
 	card := m.approvals[0].card
 	value := card.response()
+	status := ""
 	if dismissed {
 		value = cancelledResponse()
+		status = "dismissed"
 	}
 	card.answer <- requestAnswer{value: value}
-	m.commit(fmt.Sprintf("question:%s:%s", card.threadID, card.params.ItemID), card.answerLines(dismissed))
+	m.commit(fmt.Sprintf("question:%s:%s:%s", card.threadID, card.params.TurnID, card.params.ItemID), card.closedLines(status))
 	m.dropApproval(0)
 }

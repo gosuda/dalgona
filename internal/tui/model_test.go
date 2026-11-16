@@ -467,7 +467,7 @@ func TestModelOpensInitialThread(t *testing.T) {
 		methods  []string
 	}{
 		{name: "new", methods: []string{"thread/start"}},
-		{name: "resume", threadID: "t2", methods: []string{"thread/resume", "thread/read"}},
+		{name: "resume", threadID: "t2", methods: []string{"thread/resume"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

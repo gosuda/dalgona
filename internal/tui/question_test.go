@@ -54,7 +54,12 @@ func TestQuestionCardSingleSelect(t *testing.T) {
 		`{"id":"q1","header":"Database","question":"Which database?","isOther":true,"isSecret":false,"multiSelect":false,` +
 		`"options":[{"label":"SQLite","description":"One file."},{"label":"Postgres","description":"A server."}]}]}`
 	m, answer := openQuestion(t, single)
-	_, _ = drive(t, m, press('2', 0, "2"))
+	m, _ = drive(t, m, press('2', 0, "2"))
+	assertQuestionUnsent(t, answer)
+	if text := stripANSI(strings.Join(m.questionLines(80, 12), "\n")); !strings.Contains(text, "Review · 1 question") {
+		t.Fatalf("last answer did not open Review: %s", text)
+	}
+	_, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
 	if got := answerJSON(t, answer); !strings.Contains(got, `"q1":{"answers":["Postgres"]}`) {
 		t.Fatalf("answer = %s", got)
 	}
@@ -130,6 +135,42 @@ func TestQuestionCardClosedByResolvedNotification(t *testing.T) {
 	}
 	if m.notice != "Question answered in another window" {
 		t.Fatalf("notice = %q", m.notice)
+	}
+}
+
+func TestQuestionCardClosedByTimedOutNotification(t *testing.T) {
+	t.Parallel()
+	m, _ := openQuestion(t, questionParamsJSON)
+	m, _ = drive(t, m, notificationMsg{method: "serverRequest/resolved", params: []byte(`{"threadId":"t1","requestId":"req-1","resolution":"timedOut"}`)})
+	if len(m.approvals) != 0 {
+		t.Fatal("timed-out question stayed open")
+	}
+	if m.notice != "Question timed out" {
+		t.Fatalf("notice = %q", m.notice)
+	}
+	rows := m.out.entries
+	if len(rows) != 1 {
+		t.Fatalf("timed-out question printed %d rows, want 1", len(rows))
+	}
+	if key := rows[0].key; key != "question:t1:turn-1:call-q" {
+		t.Fatalf("row key %q, want question:t1:turn-1:call-q", key)
+	}
+	if got := rows[0].text; got != "Database: Timed out\nFeatures: Timed out" {
+		t.Fatalf("row text %q", got)
+	}
+	m.commit("question:t1:turn-1:call-q", []string{"again"})
+	if len(m.out.entries) != 1 {
+		t.Fatal("second commit with the same key was kept")
+	}
+}
+
+func TestQuestionAnsweredResolutionWritesNoRow(t *testing.T) {
+	t.Parallel()
+	m, _ := openQuestion(t, questionParamsJSON)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 24})
+	m, _ = drive(t, m, notificationMsg{method: "serverRequest/resolved", params: []byte(`{"threadId":"t1","requestId":"req-1","resolution":"answered"}`)})
+	if len(m.out.entries) != 0 {
+		t.Fatalf("answered resolution wrote %d rows, want 0", len(m.out.entries))
 	}
 }
 
@@ -255,10 +296,77 @@ func TestQuestionCardCommitsAnswerRow(t *testing.T) {
 	if len(m.out.pending) == 0 && len(m.out.entries) == 0 {
 		t.Fatal("answer row was not committed")
 	}
+	if key := m.out.entries[len(m.out.entries)-1].key; key != "question:t1:turn-1:call-q" {
+		t.Fatalf("answer row key %q, want question:t1:turn-1:call-q", key)
+	}
 	before := len(m.out.entries)
-	m.commit("question:t1:call-q", []string{"again"})
+	m.commit("question:t1:turn-1:call-q", []string{"again"})
 	if len(m.out.entries) != before {
 		t.Fatal("second commit with the same key was kept")
+	}
+}
+
+func TestQuestionAnswerRowsShareCallIDAcrossTurns(t *testing.T) {
+	t.Parallel()
+	m, _ := openQuestion(t, questionParamsJSON)
+	m, _ = drive(t, m, press('s', 0, "s"))
+	second := strings.Replace(questionParamsJSON, `"turnId":"turn-1"`, `"turnId":"turn-2"`, 1)
+	m, _ = drive(t, m, questionRequest(make(chan requestAnswer, 1), second))
+	m, _ = drive(t, m, press('s', 0, "s"))
+	if len(m.out.entries) != 2 {
+		t.Fatalf("one call id in two turns printed %d answer rows, want 2", len(m.out.entries))
+	}
+	want := []string{"question:t1:turn-1:call-q", "question:t1:turn-2:call-q"}
+	for i, key := range want {
+		if m.out.entries[i].key != key {
+			t.Fatalf("row %d key %q, want %q", i, m.out.entries[i].key, key)
+		}
+	}
+}
+
+func previewQuestion() string {
+	options := `{"label":"SQLite","description":"One file.","preview":"l1\nl2\nl3\nl4\nl5\nl6"},{"label":"Postgres","description":"A server."}`
+	return `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
+		`{"id":"q1","header":"Database","question":"Which database?","isOther":false,"isSecret":false,"multiSelect":false,"options":[` + options + `]}]}`
+}
+
+func TestQuestionPreviewRowPointsToReview(t *testing.T) {
+	t.Parallel()
+	m, _ := openQuestion(t, previewQuestion())
+	card := strings.Join(m.questionLines(60, 20), "\n")
+	assertContains(t, stripANSI(card), "l1", "5 more lines · ctrl+o")
+	for _, hidden := range []string{"l2", "l3", "l4", "l5", "l6"} {
+		if strings.Contains(stripANSI(card), hidden) {
+			t.Fatalf("preview line %q is on the card:\n%s", hidden, card)
+		}
+	}
+}
+
+func TestQuestionReviewShowsFullPreview(t *testing.T) {
+	t.Parallel()
+	m, answer := openQuestion(t, previewQuestion())
+	m, _ = drive(t, m, press('j', 0, "j"))
+	cursorRow := m.approvals[0].card.cursor[0]
+	m, _ = drive(t, m, press('o', tea.ModCtrl, ""))
+	if m.review == nil {
+		t.Fatal("ctrl+o did not open the review on the open question")
+	}
+	text := stripANSI(m.review.live.text)
+	assertContains(t, text, "Question 1 of 1 · Database", "1. SQLite", "2. Postgres", "l1", "l2", "l3", "l4", "l5", "l6")
+	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
+	if m.review != nil {
+		t.Fatal("esc did not close the review")
+	}
+	if len(m.approvals) != 1 || m.approvals[0].card == nil {
+		t.Fatal("esc closed the question card")
+	}
+	if got := m.approvals[0].card.cursor[0]; got != cursorRow {
+		t.Fatalf("cursor row moved from %d to %d", cursorRow, got)
+	}
+	select {
+	case got := <-answer:
+		t.Fatalf("esc in the review sent an answer: %#v", got)
+	default:
 	}
 }
 
@@ -344,5 +452,108 @@ func TestSandboxChoiceIsAskCard(t *testing.T) {
 	_, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if got := answerJSON(t, answer); got != `{"answers":{}}` {
 		t.Fatalf("answer = %s, want the cancel shape", got)
+	}
+}
+
+func assertQuestionUnsent(t *testing.T, answer chan requestAnswer) {
+	t.Helper()
+	select {
+	case got := <-answer:
+		t.Fatalf("question answered before submission: %#v", got)
+	default:
+	}
+}
+
+func TestQuestionReviewNavigationAndEditing(t *testing.T) {
+	t.Parallel()
+	m, answer := openQuestion(t, questionParamsJSON)
+	m, _ = drive(t, m, press(tea.KeyLeft, 0, ""))
+	text := stripANSI(strings.Join(m.questionLines(100, 12), "\n"))
+	assertContains(t, text, "Review · 2 questions", "Database", "Features", "(no answer)")
+	assertQuestionUnsent(t, answer)
+	m, _ = drive(t, m, press(tea.KeyTab, 0, ""))
+	m, _ = drive(t, m, press('1', 0, "1"))
+	m, _ = drive(t, m, press('1', 0, "1"))
+	m, _ = drive(t, m, press('3', 0, "3"))
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	text = stripANSI(strings.Join(m.questionLines(100, 12), "\n"))
+	assertContains(t, text, "Review · 2 questions", "SQLite", "Search; Sync")
+	assertQuestionUnsent(t, answer)
+	m, _ = drive(t, m, press(tea.KeyTab, 0, ""))
+	m, _ = drive(t, m, press('2', 0, "2"))
+	m, _ = drive(t, m, press(tea.KeyRight, 0, ""))
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	got := answerJSON(t, answer)
+	assertContains(t, got, `"q1":{"answers":["Postgres"]}`, `"q2":{"answers":["Search","Sync"]}`)
+	if strings.Contains(got, "SQLite") {
+		t.Fatalf("editing left the old answer: %s", got)
+	}
+}
+
+func TestQuestionReviewScrollStaysBounded(t *testing.T) {
+	t.Parallel()
+	params, err := decodeQuestion(jsontext.Value(questionParamsJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 8 {
+		q := params.Questions[0]
+		q.ID = string(rune('a' + i))
+		q.Header = "Header " + q.ID
+		params.Questions = append(params.Questions, q)
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, answer := openQuestion(t, string(data))
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 12})
+	m, _ = drive(t, m, press(tea.KeyLeft, 0, ""))
+	start := stripANSI(strings.Join(m.questionLines(80, 8), "\n"))
+	assertContains(t, start, "Database", "↑/↓ scroll")
+	for range 100 {
+		m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	}
+	end := stripANSI(strings.Join(m.questionLines(80, 8), "\n"))
+	m, _ = drive(t, m, press(tea.KeyTab, 0, ""))
+	m, _ = drive(t, m, press(tea.KeyLeft, 0, ""))
+	if got := stripANSI(strings.Join(m.questionLines(80, 8), "\n")); got != start {
+		t.Fatalf("reentering Review did not reset scrolling:\n%s", got)
+	}
+	assertContains(t, end, "Header h", "Enter submit")
+	if strings.Contains(end, "│ Database") {
+		t.Fatalf("review did not scroll: %s", end)
+	}
+	for range 100 {
+		m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+	}
+	if got := stripANSI(strings.Join(m.questionLines(80, 8), "\n")); got != start {
+		t.Fatalf("scroll did not return to start:\n%s", got)
+	}
+	assertQuestionUnsent(t, answer)
+}
+
+func TestQuestionReviewKeepsSTextAndDismissesEmptyRequest(t *testing.T) {
+	t.Parallel()
+	m, answer := openQuestion(t, lettersQuestion(1, "Pick.", ""))
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	_, _ = drive(t, m, press('s', 0, "s"))
+	assertContains(t, answerJSON(t, answer), `"answers":["La"]`)
+	free := `{"threadId":"t1","turnId":"turn-1","itemId":"free","questions":[{"id":"name","header":"Name","question":"Name?"}]}`
+	m, answer = openQuestion(t, free)
+	m, _ = drive(t, m, press('s', 0, "s"))
+	assertQuestionUnsent(t, answer)
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	assertContains(t, stripANSI(strings.Join(m.questionLines(80, 12), "\n")), "Review · 1 question", "│   s")
+	_, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	assertContains(t, answerJSON(t, answer), `"answers":["s"]`)
+	empty := make(chan requestAnswer, 1)
+	m = newTestModel(nil, Options{})
+	m, _ = drive(t, m, questionRequest(empty, `{"questions":[]}`))
+	if len(m.approvals) != 0 {
+		t.Fatal("empty request opened a card")
+	}
+	if got := answerJSON(t, empty); got != `{"answers":{}}` {
+		t.Fatalf("empty request = %s", got)
 	}
 }

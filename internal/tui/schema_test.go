@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -167,11 +168,11 @@ func TestModelRendersSchemaExactResponses(t *testing.T) {
 		settledText(&m, read.Thread.Turns[0].Items[1]),
 	}, "\n"))
 	assertContains(t, text, "earlier prompt", "go vet ./...", "vet clean")
-
 	var list rpc.ThreadListResponse
 	if err := json.Unmarshal(schemaValue(t, "ThreadListResponse", `{"data":[`+schemaThread+`],"nextCursor":null}`), &list); err != nil {
 		t.Fatalf("decode thread/list: %v", err)
 	}
+	m.conn.clock = func() time.Time { return time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC) }
 	m, _ = drive(t, m, resultMsg{op: "threads", value: &list})
-	assertContains(t, m.View().Content, "resume a thread", "demo (active) — idle")
+	assertContains(t, stripANSI(m.View().Content), "resume a thread", "demo (active)  1970-01  idle")
 }

@@ -14,11 +14,10 @@ const (
 )
 
 const (
-	confirmRevert       = "revert"
-	confirmRewind       = "rewind"
-	confirmNew          = "new"
-	confirmCompact      = "compact"
-	confirmAdvisorReset = "advisorReset"
+	confirmRevert  = "revert"
+	confirmRewind  = "rewind"
+	confirmNew     = "new"
+	confirmCompact = "compact"
 )
 
 type confirmation struct {
@@ -105,9 +104,6 @@ func (m *model) confirmed(c confirmation) tea.Cmd {
 	case confirmCompact:
 		params := rpc.ThreadCompactStartParams{ThreadID: m.thread.id}
 		return m.call("compact", "thread/compact/start", params, nil, "")
-	case confirmAdvisorReset:
-		params := rpc.DalgonaAdvisorStatusParams{ThreadID: m.thread.id}
-		return m.call("advisorReset", "dalgona/advisor/reset", params, nil, "")
 	}
 	return nil
 }
@@ -118,5 +114,8 @@ func contextFraction(usage rpc.ThreadTokenUsage) (float64, bool) {
 	}
 	last := usage.Last
 	used := last.InputTokens + last.CachedInputTokens + last.CacheWriteInputTokens + last.OutputTokens
+	if usage.EstimatedContextTokens != nil {
+		used = *usage.EstimatedContextTokens
+	}
 	return min(1, max(0, float64(used)/float64(usage.ModelContextWindow))), true
 }
