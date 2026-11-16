@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -511,7 +512,7 @@ func headerRef(line string) (string, bool) {
 
 func deniedSocketSandbox(mode runner.SandboxMode, roots []string, home string) runner.Sandbox {
 	sandbox := runner.Sandbox{Mode: mode, WritableRoots: roots}
-	if mode == runner.SandboxOff || home == "" {
+	if mode == runner.SandboxOff || home == "" || runtime.GOOS == "windows" {
 		return sandbox
 	}
 	sandbox.DeniedSockets = []string{filepath.Join(home, "dalgona.sock")}
