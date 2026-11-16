@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 
@@ -107,4 +108,33 @@ func TestRecoverModelTurnWithWorkflowPromptCallsTheModel(t *testing.T) {
 	if len(resumed) != 0 || h.model.count() == 0 {
 		t.Fatalf("resumed = %v, model requests = %d", resumed, h.model.count())
 	}
+}
+
+func TestNestedCellCallsStayOutOfModelRequests(t *testing.T) {
+	t.Parallel()
+	cell := &nestedCell{calls: cellCalls()}
+	h := cellHarness(t, cell, false, judgeFor(&judgeStub{}))
+	thread := h.start()
+	cell.thread = thread
+	h.submit(thread, "run the cell")
+	h.waitIdle(thread)
+	if h.model.count() != 2 {
+		t.Fatalf("requests = %d, want 2", h.model.count())
+	}
+	outputs := callOutputs(h.model.request(1))
+	if len(outputs) != 1 {
+		t.Fatalf("function call outputs = %v, want only the cell result", outputIDs(outputs))
+	}
+	if _, ok := outputs["run-1"]; !ok {
+		t.Fatalf("function call outputs = %v, want the cell result", outputIDs(outputs))
+	}
+}
+
+func outputIDs(outputs map[string]string) []string {
+	ids := make([]string, 0, len(outputs))
+	for id := range outputs {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
 }

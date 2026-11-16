@@ -241,6 +241,9 @@ func (b *transcript) assistant(e event.AssistantMessage) {
 }
 
 func (b *transcript) result(e event.ToolCompleted) {
+	if !b.outstanding[e.CallID] && strings.Contains(e.CallID, "/") {
+		return
+	}
 	output := e.Output
 	if b.pruned[e.CallID] {
 		output = prunedOutput
