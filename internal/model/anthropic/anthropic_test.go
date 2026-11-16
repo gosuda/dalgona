@@ -599,3 +599,37 @@ func sameJSON(t *testing.T, got jsontext.Value, want string) {
 		t.Fatalf("block = %s, want %s", got, want)
 	}
 }
+
+func TestAuthorizePrefersBearerToken(t *testing.T) {
+	t.Parallel()
+	static := func(value string) func(context.Context) (string, error) {
+		return func(context.Context) (string, error) { return value, nil }
+	}
+	rows := []struct {
+		name          string
+		token         string
+		key           string
+		authorization string
+		beta          string
+		apiKey        string
+	}{
+		{"oauth token takes the bearer path", "oauth-token", "sk-test", "Bearer oauth-token", oauthBetaHeader, ""},
+		{"api key keeps the key header", "", "sk-test", "", "", "sk-test"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			header := http.Header{}
+			provider := New(Config{Token: static(row.token), APIKey: static(row.key)})
+			if err := provider.authorize(t.Context(), header); err != nil {
+				t.Fatal(err)
+			}
+			if header.Get("Authorization") != row.authorization || header.Get("anthropic-beta") != row.beta || header.Get("x-api-key") != row.apiKey {
+				t.Fatalf("headers = %v", header)
+			}
+		})
+	}
+	if err := New(Config{Token: static(""), APIKey: static("")}).authorize(t.Context(), http.Header{}); err == nil {
+		t.Fatal("empty credential authorized")
+	}
+}

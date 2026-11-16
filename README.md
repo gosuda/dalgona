@@ -59,7 +59,7 @@ In the terminal interface:
 3. Enter `/model` and choose an offered model.
 4. Type a task and press Enter.
 
-No default thread model is configured. An API-key provider such as `openai` or `anthropic` accepts its key in the sign-in panel. ChatGPT offers a browser link or a device code. Providers that need a shell sign-in show the command to run.
+No default thread model is configured. An API-key provider such as `openai` accepts its key in the sign-in panel. `anthropic` accepts its key there and also signs in with OAuth in a shell with `dal login anthropic`. ChatGPT offers a browser link or a device code. Providers that need a shell sign-in show the command to run.
 
 API-key providers also accept their provider environment variables.
 

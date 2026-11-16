@@ -73,7 +73,7 @@ func (m *model) closeWaitingLogin() {
 
 func loginMethodsFor(mode string) []loginMethod {
 	switch mode {
-	case "apiKey":
+	case "apiKey", "hybrid":
 		return []loginMethod{{label: "API key", kind: "apiKey"}}
 	case "browser":
 		return []loginMethod{{label: "Browser", kind: "chatgpt"}, {label: "Device code", kind: "chatgptDeviceCode"}}
@@ -87,6 +87,8 @@ func loginModeText(mode string) string {
 		return "API key"
 	case "browser":
 		return "browser or device code"
+	case "hybrid":
+		return "terminal or API key"
 	}
 	return "terminal"
 }
@@ -147,7 +149,11 @@ func (m *model) loginMethodsView() panelView {
 	for _, method := range panel.methods {
 		view.body = append(view.body, method.label)
 	}
-	view.actions = loginActions(panel.err, loginMethodsHint)
+	hint := loginMethodsHint
+	if panel.provider.Login == "hybrid" {
+		hint = "OAuth sign-in runs in a shell: `" + cmp.Or(m.conn.product, "dalgona") + " login " + sanitizeText(panel.provider.ID) + "` · " + loginMethodsHint
+	}
+	view.actions = loginActions(panel.err, hint)
 	return view
 }
 

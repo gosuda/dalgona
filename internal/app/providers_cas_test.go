@@ -88,3 +88,66 @@ func TestSourceReusesEntryWithMatchingSave(t *testing.T) {
 		t.Fatal("source rebuilt while its save was in flight")
 	}
 }
+
+func seedAnthropicCredential(t *testing.T, credential auth.Credential) *credentials {
+	t.Helper()
+	store := loadStore(t, t.TempDir())
+	if err := store.SetCredential("anthropic", credential); err != nil {
+		t.Fatal(err)
+	}
+	return newCredentials(store, config.ProductDal, nil)
+}
+
+func TestAnthropicOAuthCredentialFeedsTokenSource(t *testing.T) {
+	clearProviderKeys(t)
+	c := seedAnthropicCredential(t, auth.Credential{Type: "oauth", Access: "at", Refresh: "rt", Expires: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+	token, err := c.anthropicToken(t.Context())
+	if err != nil || token != "at" {
+		t.Fatalf("token = %q, %v", token, err)
+	}
+	key, err := (keyOverride{}).anthropicKey(c)(t.Context())
+	if err != nil || key != "" {
+		t.Fatalf("key = %q, %v", key, err)
+	}
+}
+
+func TestAnthropicStoredKeyFeedsKeyPath(t *testing.T) {
+	clearProviderKeys(t)
+	c := seedAnthropicCredential(t, auth.Credential{Type: "api_key", Key: "sk-stored"})
+	token, err := c.anthropicToken(t.Context())
+	if err != nil || token != "" {
+		t.Fatalf("token = %q, %v", token, err)
+	}
+	key, err := (keyOverride{}).anthropicKey(c)(t.Context())
+	if err != nil || key != "sk-stored" {
+		t.Fatalf("key = %q, %v", key, err)
+	}
+}
+
+func TestAnthropicEnvKeyOverridesStore(t *testing.T) {
+	clearProviderKeys(t)
+	c := seedAnthropicCredential(t, auth.Credential{Type: "oauth", Access: "at", Refresh: "rt", Expires: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+	t.Setenv("ANTHROPIC_API_KEY", "sk-env")
+	token, err := c.anthropicToken(t.Context())
+	if err != nil || token != "" {
+		t.Fatalf("token = %q, %v", token, err)
+	}
+	key, err := (keyOverride{}).anthropicKey(c)(t.Context())
+	if err != nil || key != "sk-env" {
+		t.Fatalf("key = %q, %v", key, err)
+	}
+}
+
+func TestOverrideKeyDisablesAnthropicToken(t *testing.T) {
+	t.Parallel()
+	token := func(context.Context) (string, error) { return "at", nil }
+	if got := (keyOverride{}).tokenFor("anthropic", token); got == nil {
+		t.Fatal("token disabled without an override")
+	}
+	if got := (keyOverride{provider: "anthropic", key: "sk-candidate"}).tokenFor("anthropic", token); got != nil {
+		t.Fatal("override key left the stored token enabled")
+	}
+	if got := (keyOverride{provider: "openai", key: "sk-candidate"}).tokenFor("anthropic", token); got == nil {
+		t.Fatal("another provider override disabled the anthropic token")
+	}
+}

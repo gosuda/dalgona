@@ -1280,7 +1280,10 @@ export function parseLoginProvidersResponse(
 		const login = requiredString(row, "login", label);
 		const signedIn = row["signedIn"];
 		if (
-			(login !== "apiKey" && login !== "browser" && login !== "terminal") ||
+			(login !== "apiKey" &&
+				login !== "browser" &&
+				login !== "hybrid" &&
+				login !== "terminal") ||
 			typeof signedIn !== "boolean"
 		) {
 			fail(label);

@@ -298,7 +298,7 @@ export type LoginMethod = "apiKey" | "browser" | "device";
 
 export interface LoginProvider {
 	readonly id: string;
-	readonly login: "apiKey" | "browser" | "terminal";
+	readonly login: "apiKey" | "browser" | "hybrid" | "terminal";
 	readonly signedIn: boolean;
 }
 

@@ -20,6 +20,7 @@ import (
 type Config struct {
 	BaseURL        string
 	APIKey         func(context.Context) (string, error)
+	Token          func(context.Context) (string, error)
 	Client         *http.Client
 	Retry          model.RetryOptions
 	ContextWindows map[string]int
@@ -55,10 +56,6 @@ func (p *Provider) Stream(ctx context.Context, req model.Request) (model.Stream,
 }
 
 func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, req model.Request) model.AttemptResult {
-	key, err := p.key(ctx)
-	if err != nil {
-		return model.AttemptResult{Status: http.StatusUnauthorized, Err: err}
-	}
 	body, err := encodeRequest(req)
 	if err != nil {
 		return model.AttemptResult{Err: err}
@@ -70,7 +67,10 @@ func (p *Provider) attempt(ctx context.Context, stream *model.EventStream, req m
 	if err != nil {
 		return model.AttemptResult{Err: fmt.Errorf("anthropic: create request: %w", err)}
 	}
-	httpReq.Header.Set("x-api-key", key)
+	err = p.authorize(ctx, httpReq.Header)
+	if err != nil {
+		return model.AttemptResult{Status: http.StatusUnauthorized, Err: err}
+	}
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
@@ -91,6 +91,31 @@ func (p *Provider) key(ctx context.Context) (string, error) {
 		return p.cfg.APIKey(ctx)
 	}
 	return APIKeyFromEnv(ctx)
+}
+
+const oauthBetaHeader = "claude-code-20250219,oauth-2025-04-20"
+
+func (p *Provider) authorize(ctx context.Context, header http.Header) error {
+	if p.cfg.Token != nil {
+		token, err := p.cfg.Token(ctx)
+		if err != nil {
+			return err
+		}
+		if token != "" {
+			header.Set("Authorization", "Bearer "+token)
+			header.Set("anthropic-beta", oauthBetaHeader)
+			return nil
+		}
+	}
+	key, err := p.key(ctx)
+	if err != nil {
+		return err
+	}
+	if key == "" {
+		return errors.New("anthropic: credential has no key or token; run dal login anthropic")
+	}
+	header.Set("x-api-key", key)
+	return nil
 }
 
 func encodeRequest(req model.Request) ([]byte, error) {
@@ -482,10 +507,6 @@ func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
 
 func (p *Provider) modelsPage(ctx context.Context, afterID string) (modelListPage, error) {
 	var page modelListPage
-	key, err := p.key(ctx)
-	if err != nil {
-		return page, err
-	}
 	endpoint := strings.TrimRight(p.cfg.BaseURL, "/") + "/models"
 	if afterID != "" {
 		endpoint += "?after_id=" + url.QueryEscape(afterID)
@@ -494,7 +515,10 @@ func (p *Provider) modelsPage(ctx context.Context, afterID string) (modelListPag
 	if err != nil {
 		return page, fmt.Errorf("anthropic: create models request: %w", err)
 	}
-	req.Header.Set("x-api-key", key)
+	err = p.authorize(ctx, req.Header)
+	if err != nil {
+		return page, err
+	}
 	req.Header.Set("anthropic-version", "2023-06-01")
 	resp, err := p.client.Do(req)
 	if err != nil {

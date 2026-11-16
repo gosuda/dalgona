@@ -203,7 +203,7 @@ func TestAccountProvidersListLoginModes(t *testing.T) {
 		signedIn[provider.ID] = provider.SignedIn
 	}
 	want := map[string]string{
-		"anthropic": "apiKey", "google": "apiKey", "openai": "apiKey", "openrouter": "apiKey",
+		"anthropic": "hybrid", "google": "apiKey", "openai": "apiKey", "openrouter": "apiKey",
 		"chatgpt": "browser", "antigravity": "terminal", "copilot": "terminal", "cursor": "terminal", "devin": "terminal",
 		"cloudflare": "apiKey", "sandbox0": "apiKey", "sprites": "apiKey",
 	}

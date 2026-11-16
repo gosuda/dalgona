@@ -145,6 +145,33 @@ func (c *credentials) devinKey(ctx context.Context) (string, error) {
 	return c.source(ctx, "devin").Access(ctx)
 }
 
+func (c *credentials) anthropicToken(ctx context.Context) (string, error) {
+	credential, err := c.store.TokenWithEnv(ctx, "anthropic", "")
+	if err != nil {
+		if errors.Is(err, auth.ErrNoCredential) {
+			return "", nil
+		}
+		return "", err
+	}
+	if credential.Type != "oauth" || credential.Refresh == "" {
+		return "", nil
+	}
+	return c.source(ctx, "anthropic").Access(ctx)
+}
+
+func (o keyOverride) anthropicKey(c *credentials) func(context.Context) (string, error) {
+	if o.key != "" && o.provider == "anthropic" {
+		return func(context.Context) (string, error) { return o.key, nil }
+	}
+	return func(ctx context.Context) (string, error) {
+		credential, err := c.stored(ctx, "anthropic", "")
+		if err != nil {
+			return "", err
+		}
+		return credential.Key, nil
+	}
+}
+
 func tokenFrom(credential auth.Credential) (oauth.Token, error) {
 	token := oauth.Token{Access: cmp.Or(credential.Access, credential.Key), Refresh: credential.Refresh, Account: credential.Account}
 	if credential.Expires == "" {
@@ -179,6 +206,13 @@ type keyOverride struct {
 	key      string
 }
 
+func (o keyOverride) tokenFor(provider string, token func(context.Context) (string, error)) func(context.Context) (string, error) {
+	if o.key != "" && o.provider == provider {
+		return nil
+	}
+	return token
+}
+
 func (o keyOverride) apiKey(c *credentials, provider, env string) func(context.Context) (string, error) {
 	if o.key == "" || provider != o.provider {
 		return c.apiKey(provider, env)
@@ -193,7 +227,7 @@ func (c *credentials) build(cfg config.Config, onRetry agent.RetryFunc, override
 	cacheDir := filepath.Join(cfg.Home, "cache")
 	providers := map[string]model.Provider{
 		"openai":      openai.New(openai.Config{APIKey: override.apiKey(c, "openai", ""), Retry: retry, ContextWindows: windows["openai"]}),
-		"anthropic":   anthropic.New(anthropic.Config{APIKey: override.apiKey(c, "anthropic", ""), Retry: retry, ContextWindows: windows["anthropic"]}),
+		"anthropic":   anthropic.New(anthropic.Config{Token: override.tokenFor("anthropic", c.anthropicToken), APIKey: override.anthropicKey(c), Retry: retry, ContextWindows: windows["anthropic"]}),
 		"google":      google.New(google.Config{APIKey: override.apiKey(c, "google", ""), Retry: retry, ContextWindows: windows["google"]}),
 		"chatgpt":     chatgpt.New(chatgpt.Config{Token: c.chatgptToken, Retry: retry, ContextWindows: windows["chatgpt"], CacheDir: cacheDir, Logger: c.log}),
 		"copilot":     copilot.New(copilot.Config{Token: c.access("copilot"), Retry: retry, ContextWindows: windows["copilot"]}),

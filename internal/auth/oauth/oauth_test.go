@@ -397,3 +397,26 @@ func requestPage(endpoint string, result chan<- callbackPage) {
 	closeErr := response.Body.Close()
 	result <- callbackPage{body: string(body), err: errors.Join(readErr, closeErr)}
 }
+
+func TestClientSecretsDecodeFromDonors(t *testing.T) {
+	rows := []struct {
+		name    string
+		encoded string
+		got     string
+	}{
+		{"anthropic client id", "OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl", oauth.Providers["anthropic"].ClientID},
+		{"antigravity client secret", "R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY=", oauth.Providers["antigravity"].ClientSecret},
+		{"antigravity client id", "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dGRvbGxvamg0ZzQwM2VwLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t", oauth.Providers["antigravity"].ClientID},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			want, err := base64.StdEncoding.DecodeString(row.encoded)
+			if err != nil {
+				t.Fatalf("decode donor value: %v", err)
+			}
+			if row.got != string(want) {
+				t.Error("configured client value differs from the decoded donor")
+			}
+		})
+	}
+}

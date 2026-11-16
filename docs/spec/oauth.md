@@ -59,6 +59,8 @@ The poll MUST be a GET to `PollURL` with `uuid` and `verifier`. HTTP 404 MUST me
 
 The `account/login/start` method MUST refuse an OAuth provider other than `chatgpt`. The error MUST read `login for <provider> runs in the terminal: <product> login <provider>`, where `<product>` is the product name of the host, `dal` or `dalgona`.
 
+A provider in both provider lists MUST report login mode `hybrid`. The sign-in panel MUST offer the API key path and the OAuth shell command for a `hybrid` provider. Without `--api-key` and without `--remote`, `login anthropic` MUST run the OAuth code flow of the pi donor.
+
 ## MCP discovery and resource binding
 
 MCP OAuth applies to dalgona HTTP servers only.

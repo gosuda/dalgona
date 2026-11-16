@@ -11,7 +11,7 @@
         "required": ["id", "login", "signedIn"],
         "properties": {
           "id": {"type": "string"},
-          "login": {"enum": ["apiKey", "browser", "terminal"]},
+          "login": {"enum": ["apiKey", "browser", "hybrid", "terminal"]},
           "signedIn": {"type": "boolean"}
         }
       }

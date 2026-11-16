@@ -95,6 +95,8 @@ A conditional credential writer MUST reload `auth.json` under `<home>/auth.lock`
 
 The API-key login targets are `anthropic`, `google`, `openai`, `openrouter`, `cloudflare`, `sandbox0`, and `sprites`. With `--api-key <key>`, login MUST store the key without a prompt. The `--api-key` option works only for the API-key login targets. For another provider, login fails with `login <provider>: --api-key works only for <targets>`.
 
+Without `--api-key` and without `--remote`, `login anthropic` MUST start the OAuth code flow with PKCE in the client.
+
 `login chatgpt --device-auth` MUST sign in with the ChatGPT device code and print `Open <url> and enter the code <code> to log in to chatgpt.`. With any other provider, the flag MUST fail with `login <provider>: --device-auth works only for chatgpt`.
 
 With `--remote <name>`, `logout` MUST remove the provider credential inside the box through the daemon protocol. With `--remote <name>`, login without a provider MUST show the account of the box.

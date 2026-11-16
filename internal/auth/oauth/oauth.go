@@ -57,9 +57,9 @@ type Token struct {
 const (
 	maxResponseBytes     = 1 << 20
 	chatGPTPublicID      = "app_EMoamEEZ73f0CkXaXp7hrann"
-	anthropicPublicID    = "9d1c250a-e61b-44d9-88ed-594dd1962f5e"
-	antigravityPublicID  = "1071006060591-tmhssin2h21lcre235vtdollojh4g403ep.apps.googleusercontent.com"
-	antigravityPublicKey = "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"
+	anthropicPublicID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	antigravityPublicID  = "1071006060591-tmhssin2h21lcre235vtdollojh4g403ep.apps.googleusercontent.com" //nolint:gosec // G101: public Google OAuth client identifier, retained from the snapshot per the sign-in-ports contract
+	antigravityPublicKey = "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"
 	cursorPublicID       = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB"
 	copilotPublicID      = "Iv1.b507a08c87ecfe98"
 	openAIEndpoint       = "https://auth.openai.com/oauth/token"

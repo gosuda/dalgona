@@ -435,6 +435,7 @@ A save that changes `approval` MUST show `saved; open threads keep their approva
 
 The login panel MUST list each provider from `dalgona/account/providers/list`.
 An API key MUST be sent with `account/login/start` only after the user types it.
+A hybrid provider MUST show the API key field and the OAuth shell command.
 A failed API-key login MUST keep the panel open and MUST show the error under the key field.
 A browser or device-code login MUST wait for `account/login/completed` with its `loginId`.
 A successful login MUST show `Signed in to <provider>`, reload the models, and close the panel.

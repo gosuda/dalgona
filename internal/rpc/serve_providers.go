@@ -37,6 +37,8 @@ func loginMode(id string) string {
 	switch {
 	case id == "chatgpt":
 		return "browser"
+	case slices.Contains(auth.OAuthProviders, id) && slices.Contains(auth.APIKeyProviders, id):
+		return "hybrid"
 	case slices.Contains(auth.OAuthProviders, id):
 		return "terminal"
 	}

@@ -281,9 +281,13 @@ func TestLoginRejectsUnknownAndEmpty(t *testing.T) {
 	if err == nil || !strings.HasPrefix(err.Error(), `unknown provider "nope"; known providers: anthropic, antigravity, chatgpt`) {
 		t.Fatalf("unknown provider error = %v", err)
 	}
-	err = Login(t.Context(), store, "anthropic", strings.NewReader("\n"), io.Discard)
-	if err == nil || err.Error() != "login anthropic: no API key was entered" {
+	err = Login(t.Context(), store, "openai", strings.NewReader("\n"), io.Discard)
+	if err == nil || err.Error() != "login openai: no API key was entered" {
 		t.Fatalf("empty key error = %v", err)
+	}
+	err = Login(t.Context(), store, "anthropic", strings.NewReader("\n"), io.Discard)
+	if err == nil || err.Error() != "login anthropic: oauth paste returned no authorization code" {
+		t.Fatalf("empty anthropic login error = %v, want the OAuth paste failure", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(store.Dir(), "auth.json")); !os.IsNotExist(statErr) {
 		t.Fatalf("failed logins wrote auth.json: %v", statErr)
