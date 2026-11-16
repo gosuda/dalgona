@@ -158,7 +158,7 @@ The document title MUST be `dalgona · <title> · <state>`, with the same state 
 - Item statuses read `Working`, `Done`, `Failed`, `Declined`, or `Waiting`. Other statuses show their raw value.
 - Unknown item kinds show their type in plain words, such as `Web search`.
 - A `dynamicToolCall` item with tool `advisor` shows as a note card: `advisor · <severity>: <note>`. The note is the text of `contentItems`. The severity is always text. The card's inline-start border marks the severity as a second cue.
-- Other dynamic tools show their `contentItems` text as output.
+- Other dynamic tools show their `contentItems` text as output. An output line shaped `[<path>#<tag>]` or `[<path>@<ref>]`, where `<tag>` is a hashline tag and `<ref>` is a snapshot reference, MUST NOT show.
 - `turn/plan/updated` shows the latest plan of the current turn as a checklist. Each step has a text status: `Done`, `Working`, or `Pending`. The step in progress carries `aria-current="step"`. A new turn clears the plan.
 - The reasoning row reads `Thinking`. At `high`, it is open while the turn runs. At `medium` and `low`, it is one line (see Verbosity).
 - Each command row MUST read `$ <command>`, show its state word, and show `exit <code>` and its duration when the server reports them.
@@ -272,6 +272,7 @@ A `serverRequest/resolved` with `timedOut` closes the card and shows the notice 
 - With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a title shows its preview. A thread with neither shows `Untitled thread`.
 - The `thread/list` request MUST carry `limit` and `cursor` only. It MUST NOT carry `sortKey` or `sortDirection`.
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
+- A `thread/resume` that fails with `-32602` (unknown thread) MUST clear the open thread and its transcript.
 - A new connection MUST discard thread resumes still in flight from the previous connection.
 - In the approval card, Decline and Cancel use the quiet style. The composer's `Interrupt` button has the danger style.
 

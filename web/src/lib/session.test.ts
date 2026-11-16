@@ -7,6 +7,7 @@ import {
 	test,
 	vi,
 } from "vitest";
+import { RpcError } from "./protocol";
 import { type RpcPort, Session } from "./session.svelte";
 import type {
 	AppNotification,
@@ -508,6 +509,42 @@ describe("session", () => {
 		await session.selectThread("t2");
 		expect(session.activeThreadId).toBe("t2");
 		expect(session.queuedFollowups).toEqual([]);
+		session.stop();
+	});
+
+	test("clears the open thread and transcript when resume finds no thread", async () => {
+		const { dial } = fakeDial("none", {
+			"thread/resume": (params) => {
+				if (threadIdOf(params) === "t2")
+					throw new RpcError(-32602, "unknown thread t2");
+				return {
+					...resumeAnswer("none")(params),
+					thread: thread("t1", [
+						{
+							id: "turn-1",
+							status: "completed",
+							items: [
+								{
+									id: "i1",
+									type: "userMessage",
+									content: [{ type: "text", text: "hi" }],
+								},
+							],
+						},
+					]),
+				};
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await openThread(session, "t1");
+		expect(session.transcript.items).toHaveLength(1);
+		await session.selectThread("t2");
+		await vi.waitFor(() => {
+			expect(session.activeThreadId).toBeNull();
+			expect(session.transcript.threadId).toBeNull();
+			expect(session.transcript.items).toEqual([]);
+		});
 		session.stop();
 	});
 
