@@ -385,7 +385,11 @@ func (m *model) welcomeLines() []string {
 	dim := lipgloss.NewStyle().Faint(true)
 	details := slices.DeleteFunc([]string{m.conn.version, cmp.Or(m.thread.modelName, "default"), displayCwd(m.workDir())}, func(s string) bool { return s == "" })
 	name := lipgloss.NewStyle().Bold(true).Render(m.conn.product)
-	return []string{name + dim.Render(" "+sanitizeText(strings.Join(details, " · "))), dim.Render("Type a prompt · / commands · ? keys")}
+	lines := []string{name + dim.Render(" "+sanitizeText(strings.Join(details, " · "))), dim.Render("Type a prompt · / commands · ? keys")}
+	if mark := m.welcomeMark(); mark != "" {
+		lines = append([]string{mark}, lines...)
+	}
+	return lines
 }
 
 func (m *model) workDir() string {
