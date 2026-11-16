@@ -55,7 +55,7 @@ func splitRemoteFlag(args []string) (string, []string, error) {
 }
 
 func remoteOptions(cfg config.Config, std stdio) (remote.Options, error) {
-	store, err := auth.NewWithPatterns(cfg.Home, cfg.Secrets.Patterns)
+	store, err := auth.NewWithPatterns(cfg.Home, cfg.Secrets.Patterns, auth.WithBuiltinPatterns(cfg.Secrets.Builtin))
 	if err != nil {
 		return remote.Options{}, err
 	}

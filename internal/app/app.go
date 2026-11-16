@@ -66,7 +66,7 @@ func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, erro
 	if err != nil {
 		return nil, nil, err
 	}
-	store, err := auth.NewWithPatterns(cfg.Home, cfg.Secrets.Patterns)
+	store, err := auth.NewWithPatterns(cfg.Home, cfg.Secrets.Patterns, auth.WithBuiltinPatterns(cfg.Secrets.Builtin))
 	if err != nil {
 		return nil, nil, err
 	}
