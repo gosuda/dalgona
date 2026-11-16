@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json/jsontext"
 	"strings"
 	"testing"
 
@@ -96,4 +97,46 @@ func TestDenialReasonIsMasked(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestInBandDenialReasonIsMasked(t *testing.T) {
+	store, err := auth.NewWithPatterns(t.TempDir(), []string{`token-[a-z0-9]{8,}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, func(h *harness) {
+		h.cfg.Auth = store
+	})
+	thread := h.start()
+	if err := thread.Append(t.Context(), event.TurnStarted{TurnID: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	w := &worker{t: thread, turnID: "t", inBand: newInBandCalls()}
+	reason := "not allowed: token-abcdefgh1234"
+	denial := inBandDenial{text: "exec", verdict: verdict{decision: "decline", by: "rule", reason: reason}}
+	if _, err := w.denyInBand(t.Context(), event.ToolCall{ID: "call-deny", Name: "exec", Args: jsontext.Value(`{}`)}, "req-1", denial); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range h.events(thread.ID()) {
+		text, ok := maskedDenialText(item)
+		if !ok {
+			continue
+		}
+		if strings.Contains(text, "token-abcdefgh1234") || !strings.Contains(text, "{{secret:") {
+			t.Fatalf("inband denial not masked: %q", text)
+		}
+	}
+}
+
+func maskedDenialText(item event.Seqd) (string, bool) {
+	var text string
+	switch value := item.Event.(type) {
+	case event.ApprovalResolved:
+		text = value.Reason
+	case event.ToolCompleted:
+		text = value.Output
+	default:
+		return "", false
+	}
+	return text, text != ""
 }

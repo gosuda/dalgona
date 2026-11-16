@@ -262,7 +262,11 @@ func (w *worker) denyInBand(ctx context.Context, call event.ToolCall, requestID 
 	if _, err := w.t.appendEvents(ctx, requested); err != nil {
 		return event.ToolCompleted{}, err
 	}
-	resolved := event.ApprovalResolved{RequestID: requestID, Decision: denial.verdict.decision, By: denial.verdict.by, Reason: denial.verdict.reason}
+	masked, err := w.t.host.mask(denial.verdict.reason)
+	if err != nil {
+		return event.ToolCompleted{}, err
+	}
+	resolved := event.ApprovalResolved{RequestID: requestID, Decision: denial.verdict.decision, By: denial.verdict.by, Reason: masked}
 	if _, err := w.t.appendEvents(ctx, resolved); err != nil {
 		return event.ToolCompleted{}, err
 	}
@@ -270,7 +274,11 @@ func (w *worker) denyInBand(ctx context.Context, call event.ToolCall, requestID 
 }
 
 func (w *worker) completeInBandDeny(ctx context.Context, call event.ToolCall, v verdict) (event.ToolCompleted, error) {
-	completed := event.ToolCompleted{CallID: call.ID, Output: v.reason, Recovered: "none"}
+	masked, err := w.t.host.mask(v.reason)
+	if err != nil {
+		return event.ToolCompleted{}, err
+	}
+	completed := event.ToolCompleted{CallID: call.ID, Output: masked, Recovered: "none"}
 	if _, err := w.t.appendEvents(ctx, completed); err != nil {
 		return event.ToolCompleted{}, err
 	}
