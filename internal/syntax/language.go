@@ -242,9 +242,6 @@ func newParser(lang *language, timeout time.Duration) *Parser {
 	grammar := lang.grammar()
 	parser := gotreesitter.NewParser(grammar)
 	micros := max(0, timeout) / time.Microsecond
-	if timeout > 0 && micros == 0 {
-		micros = 1
-	}
 	parser.SetTimeoutMicros(uint64(micros))
 	parser.SetMemoryBudgetBytes(parseMemoryBudgetBytes)
 	parser.SetParseWorkLimits(gotreesitter.ParseWorkLimits{
