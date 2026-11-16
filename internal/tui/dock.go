@@ -281,18 +281,18 @@ func (m *model) liveTag() string {
 	if m.thread.state == stateIdle || word == "" {
 		return strings.Repeat(" ", liveTagCells)
 	}
-	theme := m.screen.dockTheme()
+	th := m.screen.dockTheme()
 	padded := m.screen.pad(m.screen.fit(word, liveStateCells), liveStateCells)
 	if m.thread.state == stateRunning && len(m.approvals) == 0 {
-		return theme.liveTag(threadHue(m.thread.id), m.screen.spin.View()+" "+padded)
+		return th.liveTag(threadHue(m.thread.id), m.screen.spin.View()+" "+padded)
 	}
 	switch m.thread.state {
 	case stateFailed:
-		return "  " + theme.paintBold(roleFailedText, padded)
+		return "  " + th.paintBold(roleFailedText, padded)
 	case stateDisconnected:
-		return "  " + theme.paint(roleWarningText, padded)
+		return "  " + th.paint(roleWarningText, padded)
 	default:
-		return "  " + theme.paint(roleDim, padded)
+		return "  " + th.paint(roleDim, padded)
 	}
 }
 

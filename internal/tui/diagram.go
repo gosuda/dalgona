@@ -53,9 +53,14 @@ func renderDiagram(kind, source string) (string, error) {
 	return "", fmt.Errorf("no text renderer for %s", kind)
 }
 
-var d2Ruler = sync.OnceValues(textmeasure.NewRuler)
+var (
+	d2Ruler    = sync.OnceValues(textmeasure.NewRuler)
+	d2RenderMu sync.Mutex
+)
 
 func renderD2(ctx context.Context, source string) (string, error) {
+	d2RenderMu.Lock()
+	defer d2RenderMu.Unlock()
 	ruler, err := d2Ruler()
 	if err != nil {
 		return "", err
