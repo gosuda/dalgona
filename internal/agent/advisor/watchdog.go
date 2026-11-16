@@ -53,7 +53,7 @@ func watchdogPaths(home, cwd string) []string {
 func projectDirectories(cwd string) []string {
 	dirs := []string{cwd}
 	for current := cwd; ; {
-		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
+		if isRepositoryRoot(current) {
 			slices.Reverse(dirs)
 			return dirs
 		}
@@ -64,4 +64,31 @@ func projectDirectories(cwd string) []string {
 		current = parent
 		dirs = append(dirs, current)
 	}
+}
+
+func isRepositoryRoot(dir string) bool {
+	git := filepath.Join(dir, ".git")
+	fi, err := os.Stat(git)
+	if err != nil {
+		return false
+	}
+	if fi.IsDir() {
+		if _, headErr := os.Lstat(filepath.Join(git, "HEAD")); headErr == nil {
+			return true
+		}
+		return false
+	}
+	if !fi.Mode().IsRegular() {
+		return false
+	}
+	data, err := os.ReadFile(git)
+	if err != nil {
+		return false
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	rest, ok := strings.CutPrefix(strings.TrimSpace(line), "gitdir:")
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(rest) != ""
 }

@@ -66,7 +66,7 @@ A provider with no static preset MUST use its first offered model as its `slow` 
 1. `<home>/WATCHDOG.md`.
 2. For each directory from the repository root down to `cwd`: `<dir>/WATCHDOG.md`, then `<dir>/.dalgona/WATCHDOG.md`.
 
-The repository root is the nearest ancestor of `cwd`, or `cwd` itself, that contains a `.git` directory or file. When no such ancestor exists, step 2 MUST use only `cwd`. A path MUST appear at most once. The first occurrence MUST keep its position. A candidate that is missing, unreadable, or not a regular file MUST be skipped without error. A FIFO or a directory named `WATCHDOG.md` MUST NOT block discovery.
+The repository root is the nearest ancestor of `cwd`, or `cwd` itself, that contains a valid `.git` marker. A `.git` directory is valid only when it contains `HEAD`. A `.git` file is valid only when its first line starts with `gitdir:` and names a path. An empty directory, a FIFO, or another irregular marker MUST NOT count as a repository root. When no valid ancestor exists, step 2 MUST use only `cwd`. A path MUST appear at most once. The first occurrence MUST keep its position. A candidate that is missing, unreadable, or not a regular file MUST be skipped without error. A FIFO or a directory named `WATCHDOG.md` MUST NOT block discovery.
 
 Each file MUST be wrapped as `<watchdog path="<path>">` + content + `</watchdog>`. The path MUST be HTML-escaped. The content MUST NOT be changed. Blocks MUST be joined with one blank line. When no file is read, the result MUST be the empty string.
 
