@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"golang.org/x/sys/windows"
@@ -14,8 +15,10 @@ import (
 
 const probeCapabilitySID = "S-1-5-21-1-2-3-4"
 
+var probeOnce = sync.OnceValue(probeRestrictedToken)
+
 func UnavailableCause() string {
-	if err := probeRestrictedToken(); err != nil {
+	if err := probeOnce(); err != nil {
 		return "windows restricted token is unavailable: " + err.Error()
 	}
 	return ""
@@ -30,18 +33,24 @@ func probeRestrictedToken() error {
 	if err != nil {
 		return err
 	}
-	return token.Close()
+	defer func() { _ = token.Close() }()
+	cmd := exec.Command("cmd", "/C", "ver")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(token), CreationFlags: windows.CREATE_NO_WINDOW}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("restricted child did not run: %w", err)
+	}
+	return nil
 }
 
 func configureSandbox(cmd *exec.Cmd, _ string, sandbox Sandbox) error {
 	if sandbox.Mode == SandboxOff || sandbox.Mode == "" {
 		return nil
 	}
+	if UnavailableCause() != "" {
+		return nil
+	}
 	if len(sandbox.DeniedSockets) != 0 {
 		return fmt.Errorf("runner: Windows network confinement is unavailable")
-	}
-	if cause := UnavailableCause(); cause != "" {
-		return fmt.Errorf("runner: %s", cause)
 	}
 	roots, err := windowsWritableRoots(cmd.Dir, sandbox)
 	if err != nil {
