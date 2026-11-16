@@ -233,7 +233,7 @@ func exitCodeArgv(code int) []string {
 
 func sleepArgv() []string {
 	if runtime.GOOS == "windows" {
-		return runner.WindowsShellArgv("ping -n 31 127.0.0.1 >nul")
+		return runner.WindowsShellArgv("powershell -NoProfile -Command Start-Sleep 30")
 	}
 	return []string{"sh", "-c", "sleep 30"}
 }
