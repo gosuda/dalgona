@@ -64,6 +64,7 @@ func init() {
 		"dalgona/keywords/match":         (*server).keywordsMatch,
 		"dalgona/thread/tree":            (*server).threadTree,
 		"dalgona/thread/leaf/set":        (*server).leafSet,
+		"dalgona/thread/search":          (*server).threadSearch,
 		"dalgona/advisor/status":         (*server).advisorStatus,
 		"dalgona/advisor/set":            (*server).advisorSet,
 		"dalgona/advisor/reset":          (*server).advisorReset,

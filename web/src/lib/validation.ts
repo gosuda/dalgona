@@ -553,6 +553,44 @@ export function parseThreadListResponse(value: unknown): ThreadListResult {
 	return { threads, nextCursor: typeof cursor === "string" ? cursor : null };
 }
 
+export interface ThreadSearchHit {
+	readonly threadId: string;
+	readonly name: string;
+	readonly preview: string;
+	readonly snippet: string;
+	readonly matches: number;
+}
+
+export function parseThreadSearchResponse(
+	value: unknown,
+): readonly ThreadSearchHit[] {
+	const label = "dalgona/thread/search";
+	const body = object(value, label);
+	if (!Array.isArray(body["data"])) fail(label);
+	return body["data"].map((entry) => {
+		const row = object(entry, label);
+		const matches = requiredNumber(row, "matches", label);
+		const seq = requiredNumber(row, "seq", label);
+		if (
+			!Number.isSafeInteger(matches) ||
+			matches < 1 ||
+			!Number.isSafeInteger(seq) ||
+			seq < 0
+		)
+			fail(label);
+		requiredString(row, "cwd", label);
+		requiredString(row, "kind", label);
+		requiredNumber(row, "updatedAt", label);
+		return {
+			threadId: requiredString(row, "threadId", label),
+			name: requiredString(row, "name", label),
+			preview: requiredString(row, "preview", label),
+			snippet: requiredString(row, "snippet", label),
+			matches,
+		};
+	});
+}
+
 export function parseThreadStartResponse(value: unknown): ThreadStartResult {
 	const body = object(value, "thread/start");
 	if (

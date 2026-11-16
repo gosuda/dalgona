@@ -84,6 +84,7 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `dalgona/keywords/list` | `[{word, hue:[a,b]}]` for enabled keywords. |
 | `dalgona/thread/tree {threadId}` | `{turns:[{turnId, parentTurnId, preview, active}]}`. `parentTurnId` is `null` for a first turn. |
 | `dalgona/thread/leaf/set {threadId, turnId}` | `{}`. |
+| `dalgona/thread/search {query, limit?, cursor?, archived?, cwd?}` | `{data:[{threadId, name, preview, cwd, updatedAt, seq, kind, snippet, matches}], nextCursor?}`. The server searches what was said in threads. `limit` defaults to 20 and MUST be at most 100. `cursor` is the offset as a decimal string. A missing or empty `query` MUST give `-32602` `query is required`. A term shorter than 3 characters MUST give `-32602` `query must hold at least 3 characters`. A mirror error MUST give `-32603` with the cause. See Thread search. |
 | `dalgona/advisor/status {threadId}` | `[{name, model, status: idle|reviewing|halted|disabled, notes, usage:{inputTokens, outputTokens}}]`. |
 | `dalgona/advisor/set {threadId, enabled}`, `dalgona/advisor/reset {threadId}` | `{}`. |
 | `dalgona/item/output/read {threadId, itemId, offset?}` | `{text, offset, next, total}`. `next` equals `total` at the end of the output. A call without a spill MUST give `-32602` `call <id> has no spilled output`. |
@@ -120,6 +121,16 @@ A malformed cursor MUST give `-32602` `invalid cursor <cursor>`. A cursor whose 
 An unknown thread MUST give `-32602` `unknown thread <id>`. A running thread MAY be listed. Its running turn has status `inProgress`. A thread with no turn gives `data` as `[]` and no cursor.
 
 The server still reads the whole journal of the thread for each call. A page limits only the transfer. With `excludeTurns`, the server loads no blob for a turn that has ended.
+
+### Thread search
+
+The server matches every term of the masked query, so the terms join with AND. It returns one row per thread, ranked by the best matching row. The server drops hits whose archived state differs from `archived`, and hits whose `cwd` differs when `cwd` is set.
+
+The server MUST NOT return a thread whose `session.created` event sets `ephemeral` to `true`. The journal search omits that thread before the server applies its page limit.
+
+The index holds the inline `text` of `user.message` and `assistant.message` events and the `name` of `thread.named` events. `kind` is `user`, `assistant` or `title`. `matches` is the number of query terms in the hit row. Text stored in a blob is never indexed.
+
+The server masks the query before it queries the index, and it masks each snippet again before it answers. A snippet holds at most 160 runes around the first term. Newlines become spaces, and a cut end gets `…`.
 
 ### Input images
 

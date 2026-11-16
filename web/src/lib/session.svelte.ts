@@ -84,7 +84,7 @@ import type {
 	TreeTurn,
 	WaitingElsewhere,
 } from "./types";
-import type { SettingValue } from "./validation";
+import type { SettingValue, ThreadSearchHit } from "./validation";
 import {
 	parseAdvisorStatusResponse,
 	parseCommandExecResponse,
@@ -100,6 +100,7 @@ import {
 	parseSettingsReadResponse,
 	parseThreadListResponse,
 	parseThreadReadResponse,
+	parseThreadSearchResponse,
 	parseThreadStartResponse,
 	parseThreadTreeResponse,
 	parseTurnStartResponse,
@@ -473,6 +474,23 @@ export class Session {
 			parseThreadListResponse,
 		);
 		return result.threads;
+	}
+
+	async searchThreads(
+		query: string,
+		signal: AbortSignal,
+	): Promise<readonly ThreadSearchHit[]> {
+		const generation = this.connectionGeneration;
+		signal.throwIfAborted();
+		const hits = await this.requireClient().call(
+			"dalgona/thread/search",
+			{ query, limit: 50 },
+			parseThreadSearchResponse,
+		);
+		signal.throwIfAborted();
+		if (generation !== this.connectionGeneration)
+			throw new Error("Connection changed");
+		return hits;
 	}
 
 	async threadTurns(): Promise<readonly TreeTurn[]> {

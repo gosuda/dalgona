@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/thread/search result",
+  "type": "object",
+  "required": ["data"],
+  "properties": {
+    "data": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["threadId", "name", "preview", "cwd", "updatedAt", "seq", "kind", "snippet", "matches"],
+        "properties": {
+          "threadId": {"type": "string"},
+          "name": {"type": "string"},
+          "preview": {"type": "string"},
+          "cwd": {"type": "string"},
+          "updatedAt": {"type": "integer"},
+          "seq": {"type": "integer", "minimum": 1},
+          "kind": {"enum": ["user", "assistant", "title"]},
+          "snippet": {"type": "string"},
+          "matches": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "nextCursor": {"type": "string"}
+  }
+}
