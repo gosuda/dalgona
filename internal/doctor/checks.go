@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/daemon"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dalgona/daemon"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 )
 

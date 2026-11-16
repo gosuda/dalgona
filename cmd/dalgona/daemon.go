@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/daemon"
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/agent/advisor"
 	"github.com/gosuda/dalgona/internal/dal/app"
@@ -25,6 +24,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 	"github.com/gosuda/dalgona/internal/dal/runner"
 	"github.com/gosuda/dalgona/internal/dalgona/battery"
+	"github.com/gosuda/dalgona/internal/dalgona/daemon"
 	"github.com/gosuda/dalgona/internal/dalgona/discovery"
 )
 

@@ -16,7 +16,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 	"github.com/gosuda/dalgona/internal/dalgona/battery"
-	"github.com/gosuda/dalgona/internal/remote"
+	"github.com/gosuda/dalgona/internal/dalgona/remote"
 )
 
 const (

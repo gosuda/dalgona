@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/gosuda/dalgona/internal/daemon"
+	"github.com/gosuda/dalgona/internal/dalgona/daemon"
 )
 
 type stdioPair struct {

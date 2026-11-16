@@ -22,9 +22,9 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/dalgona/discovery"
 	"github.com/gosuda/dalgona/internal/dalgona/mcp"
+	"github.com/gosuda/dalgona/internal/dalgona/remote"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
-	"github.com/gosuda/dalgona/internal/remote"
 )
 
 var mcpStartTimeout = 30 * time.Second

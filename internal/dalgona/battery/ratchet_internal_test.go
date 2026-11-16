@@ -10,7 +10,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
-	"github.com/gosuda/dalgona/internal/ratchet"
+	"github.com/gosuda/dalgona/internal/dalgona/ratchet"
 )
 
 const testModel = "openai/gpt-test"

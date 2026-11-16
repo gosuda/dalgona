@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/daemon"
 	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dalgona/daemon"
 )
 
 func TestMain(m *testing.M) {

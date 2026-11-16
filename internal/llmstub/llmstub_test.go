@@ -14,7 +14,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/runner"
 	"github.com/gosuda/dalgona/internal/dal/tool"
-	"github.com/gosuda/dalgona/internal/ratchet"
+	"github.com/gosuda/dalgona/internal/dalgona/ratchet"
 )
 
 const (

@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/daemon"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dalgona/daemon"
 )
 
 const own = "0123456789abcdef"

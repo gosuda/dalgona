@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/daemon"
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dalgona/daemon"
 )
 
 func servePipe(t *testing.T, extensions map[string]rpc.Extension) net.Conn {
