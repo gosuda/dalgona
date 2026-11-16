@@ -175,3 +175,12 @@ export function lastLines(
 	const lines = text.replace(/\n$/u, "").split("\n");
 	return { text: lines.slice(-count).join("\n"), total: lines.length };
 }
+
+const anchorLine = /^\[[^\s\]]+[#@][^\s\]]+\]$/u;
+
+export function tailoredOutput(text: string): string {
+	return text
+		.split("\n")
+		.filter((line) => !anchorLine.test(line))
+		.join("\n");
+}

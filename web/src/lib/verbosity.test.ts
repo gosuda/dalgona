@@ -5,6 +5,7 @@ import {
 	lineSummary,
 	parseVerbosity,
 	presentRow,
+	tailoredOutput,
 	toolGroupSummary,
 } from "#lib/verbosity.ts";
 
@@ -198,5 +199,20 @@ describe("verbosity", () => {
 			"hidden",
 			"hidden",
 		]);
+	});
+});
+
+describe("tailoredOutput", () => {
+	test("drops bracketed anchor lines and keeps notes", () => {
+		const output = [
+			"1:hello from a.txt",
+			"[a.txt#A6857783]",
+			"[a.txt#2886]",
+			"[a.txt@r2edca789eb3d58601a41d15ddf9aedd4.1]",
+			"[Showing lines 1-1 of 1.]",
+		].join("\n");
+		expect(tailoredOutput(output)).toBe(
+			"1:hello from a.txt\n[Showing lines 1-1 of 1.]",
+		);
 	});
 });
