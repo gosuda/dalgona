@@ -39,6 +39,7 @@ const usage: TokenUsage = {
 		reasoningOutputTokens: 0,
 	},
 	contextWindow: 200_000,
+	estimatedContextTokens: null,
 };
 
 function props(

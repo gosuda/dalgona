@@ -136,7 +136,7 @@ The client MUST NOT render an item whose id is in `statusHide`. The client MUST 
 - Approval and sandbox show one glyph each. Sandbox `off` shows the none glyph.
 - Folder shows one glyph, and its title is the folder name.
 - Queue shows one glyph and the count, only when a follow-up is queued.
-- Context shows a moon gauge and the percent of the context window in use. It MUST NOT show when the window is unknown. It MUST NOT show token counts.
+- Context shows a moon gauge and the percent of the context window in use. It MUST NOT show when the window is unknown. It MUST NOT show token counts. The percent MUST use the temporary context estimate while one is present, even at zero, until a provider usage report supersedes it.
 - Mark shows the small candy mark.
 
 Each icon MUST carry an `aria-label` that states its value in words. The browser draws Nerd glyphs from its own subset font, and it ignores the `icons` setting.

@@ -351,6 +351,7 @@ export interface TokenUsage {
 	readonly last: TokenBreakdown;
 	readonly total: TokenBreakdown;
 	readonly contextWindow: number | null;
+	readonly estimatedContextTokens: number | null;
 }
 
 export interface ThreadListResult {

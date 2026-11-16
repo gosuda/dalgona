@@ -84,6 +84,21 @@ function requiredNumber(
 	return value;
 }
 
+function optionalCount(
+	source: { readonly [key: string]: unknown },
+	key: string,
+	label: string,
+): number | null {
+	const value = source[key];
+	if (value === undefined || value === null) {
+		return null;
+	}
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+		fail(label);
+	}
+	return value;
+}
+
 function hasMembers(
 	source: { readonly [key: string]: unknown },
 	keys: readonly string[],
@@ -251,6 +266,11 @@ function tokenUsage(value: unknown, label: string): TokenUsage {
 		last: tokenBreakdown(source["last"], label),
 		total: tokenBreakdown(source["total"], label),
 		contextWindow: typeof contextWindow === "number" ? contextWindow : null,
+		estimatedContextTokens: optionalCount(
+			source,
+			"estimatedContextTokens",
+			label,
+		),
 	};
 }
 

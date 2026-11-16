@@ -21,12 +21,15 @@ export function contextFraction(usage: TokenUsage): number | null {
 	if (window === null || window <= 0) {
 		return null;
 	}
+	const estimated = usage.estimatedContextTokens;
 	const last = usage.last;
 	const used =
-		last.inputTokens +
-		last.cachedInputTokens +
-		last.cacheWriteInputTokens +
-		last.outputTokens;
+		estimated !== null
+			? estimated
+			: last.inputTokens +
+				last.cachedInputTokens +
+				last.cacheWriteInputTokens +
+				last.outputTokens;
 	return Math.min(1, Math.max(0, used / window));
 }
 
