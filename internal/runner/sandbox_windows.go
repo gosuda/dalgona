@@ -72,7 +72,6 @@ func windowsWritableRoots(cwd string, sandbox Sandbox) ([]string, error) {
 		return resolveRoots(input)
 	case SandboxOff, SandboxMode("read-only"):
 		return nil, nil
-	case SandboxOff:
 	}
 	return nil, fmt.Errorf("runner: unsupported Windows sandbox mode %q", sandbox.Mode)
 }
