@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/journal"
+	"github.com/gosuda/dalgona/internal/dal/journal"
 )
 
 type ThreadSearch struct {

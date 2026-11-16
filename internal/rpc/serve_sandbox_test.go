@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 const sandboxCause = "Landlock is not available on this kernel"

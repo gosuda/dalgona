@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/tool"
-	"github.com/gosuda/dalgona/internal/tool/exec"
-	"github.com/gosuda/dalgona/internal/tool/patch"
-	"github.com/gosuda/dalgona/internal/tool/read"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool/exec"
+	"github.com/gosuda/dalgona/internal/dal/tool/patch"
+	"github.com/gosuda/dalgona/internal/dal/tool/read"
 )
 
 type modelRequest struct {

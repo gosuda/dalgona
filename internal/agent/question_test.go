@@ -7,7 +7,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 type questionResult struct {

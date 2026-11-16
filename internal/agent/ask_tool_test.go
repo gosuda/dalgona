@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 const askFeatureArgs = `{"questions":[{"header":"Database","question":"Which database should the service use?","options":[{"label":"SQLite","description":"One file, no server to run."},{"label":"Postgres","description":"A server with replication.","preview":"services:\n  db:\n    image: postgres:17"}]},{"header":"Features","question":"Which features ship first?","multi_select":true,"options":[{"label":"Search","description":"Full-text search."},{"label":"Export","description":"CSV export."},{"label":"Sync","description":"Two-way sync."}]},{"header":"Name","question":"What should the service be called?"}]}`

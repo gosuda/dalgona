@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/mcp"
-	"github.com/gosuda/dalgona/internal/tool"
 )
 
 func TestStdioTools(t *testing.T) {

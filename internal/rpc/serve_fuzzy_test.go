@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/tool/search"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/tool/search"
 )
 
 type fuzzyFile struct {

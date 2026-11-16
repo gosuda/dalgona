@@ -17,7 +17,7 @@ import (
 	"testing/iotest"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 	"golang.org/x/sys/unix"
 )
 

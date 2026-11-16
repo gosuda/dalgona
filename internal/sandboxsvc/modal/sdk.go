@@ -11,7 +11,7 @@ import (
 
 	sdk "github.com/modal-labs/modal-client/go"
 
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 )
 
 type sdkAPI struct {

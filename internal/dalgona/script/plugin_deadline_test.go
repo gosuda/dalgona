@@ -8,10 +8,10 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/dalgona/script"
 	corescript "github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/tool"
 )
 
 const (

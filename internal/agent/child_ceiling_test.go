@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/tool"
-	readtool "github.com/gosuda/dalgona/internal/tool/read"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	readtool "github.com/gosuda/dalgona/internal/dal/tool/read"
 )
 
 type stubTool struct {

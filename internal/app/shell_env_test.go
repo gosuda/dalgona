@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 )
 
 func TestMain(m *testing.M) {

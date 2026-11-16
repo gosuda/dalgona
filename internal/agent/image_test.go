@@ -25,7 +25,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/model/chatcompat"
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 func TestImageMIME(t *testing.T) {

@@ -20,12 +20,12 @@ import (
 	"github.com/gosuda/dalgona/internal/agent/advisor"
 	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/app/battery"
-	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/daemon"
 	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 	"github.com/gosuda/dalgona/internal/discovery"
 	"github.com/gosuda/dalgona/internal/rpc"
-	"github.com/gosuda/dalgona/internal/runner"
 )
 
 func executable() (string, error) {

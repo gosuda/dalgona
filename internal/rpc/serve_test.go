@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 type textInput struct {

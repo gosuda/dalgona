@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 type searchTool struct{ runs *int }

@@ -11,11 +11,11 @@ import (
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/runner"
-	"github.com/gosuda/dalgona/internal/tool"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
-	"github.com/gosuda/dalgona/internal/tool/snapshot"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
+	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
 )
 
 const (

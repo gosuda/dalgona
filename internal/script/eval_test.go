@@ -10,13 +10,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	readtool "github.com/gosuda/dalgona/internal/dal/tool/read"
+	rewritetool "github.com/gosuda/dalgona/internal/dal/tool/rewrite"
+	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
 	"github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/tool"
-	readtool "github.com/gosuda/dalgona/internal/tool/read"
-	rewritetool "github.com/gosuda/dalgona/internal/tool/rewrite"
-	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 
 func specs(names ...string) []tool.Spec {

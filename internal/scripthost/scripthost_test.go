@@ -24,9 +24,9 @@ import (
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/app"
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/decide"
-	"github.com/gosuda/dalgona/internal/journal"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/decide"
+	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/scripthost"
 )

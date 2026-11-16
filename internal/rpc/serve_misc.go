@@ -12,9 +12,9 @@ import (
 	"unicode"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/model"
 )
 

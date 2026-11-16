@@ -14,10 +14,10 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/agent/prompt"
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/dal/keywords"
-	"github.com/gosuda/dalgona/internal/journal"
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 	"golang.org/x/sync/singleflight"
 )
 

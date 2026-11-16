@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/runner"
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 const initJSON = `{"action":"init","flow":"x","cases":["cases.txt"],"harness":["run.sh"],"change":["p.md"],"off_limits":["notes.md"]}`

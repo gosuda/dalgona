@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/dalgona/script"
 	corescript "github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/tool"
 )
 
 func writePlugin(t *testing.T, home, name, src string) {

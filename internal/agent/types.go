@@ -7,13 +7,13 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/agent/prompt"
-	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/dal/model"
-	"github.com/gosuda/dalgona/internal/journal"
-	"github.com/gosuda/dalgona/internal/runner"
-	"github.com/gosuda/dalgona/internal/tool"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 type RetryFunc func(attempt int, verdict model.Verdict, status int, delay time.Duration)

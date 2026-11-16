@@ -12,7 +12,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/model"
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 func infoModel(t *testing.T, host *Host, threadID string) string {

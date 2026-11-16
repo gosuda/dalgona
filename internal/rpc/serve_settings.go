@@ -5,7 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 type settingEditParams struct {

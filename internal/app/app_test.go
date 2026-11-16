@@ -21,15 +21,15 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/model"
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
 	"github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/scripthost"
-	"github.com/gosuda/dalgona/internal/tool"
-	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 
 type keyRecorder struct {

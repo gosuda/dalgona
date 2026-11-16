@@ -3,7 +3,7 @@ package rpc
 import (
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func TestTurnInterruptRejectsWrongTurn(t *testing.T) {

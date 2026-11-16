@@ -12,9 +12,9 @@ import (
 
 	"github.com/moby/moby/client"
 
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/journal"
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/journal"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 )
 
 func TestDockerBindRecoverAndPull(t *testing.T) {

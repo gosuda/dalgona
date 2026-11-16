@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 type searchRow struct {

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 )
 
 type readFailingRunner struct {

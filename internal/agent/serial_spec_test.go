@@ -3,12 +3,12 @@ package agent
 import (
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/tool"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
-	"github.com/gosuda/dalgona/internal/tool/read"
-	"github.com/gosuda/dalgona/internal/tool/search"
-	"github.com/gosuda/dalgona/internal/tool/todo"
-	"github.com/gosuda/dalgona/internal/tool/webfetch"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
+	"github.com/gosuda/dalgona/internal/dal/tool/read"
+	"github.com/gosuda/dalgona/internal/dal/tool/search"
+	"github.com/gosuda/dalgona/internal/dal/tool/todo"
+	"github.com/gosuda/dalgona/internal/dal/tool/webfetch"
 )
 
 func TestSpecSerialMarksOnlyStatefulReadTools(t *testing.T) {

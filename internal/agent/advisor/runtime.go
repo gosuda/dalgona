@@ -11,12 +11,12 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/tool"
-	"github.com/gosuda/dalgona/internal/tool/exec"
-	"github.com/gosuda/dalgona/internal/tool/read"
-	"github.com/gosuda/dalgona/internal/tool/search"
-	"github.com/gosuda/dalgona/internal/tool/webfetch"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool/exec"
+	"github.com/gosuda/dalgona/internal/dal/tool/read"
+	"github.com/gosuda/dalgona/internal/dal/tool/search"
+	"github.com/gosuda/dalgona/internal/dal/tool/webfetch"
 )
 
 type State string

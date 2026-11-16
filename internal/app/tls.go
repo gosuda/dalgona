@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func InstallTLSRoots(cfg config.Config) error {

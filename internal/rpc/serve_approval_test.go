@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func awaitApprovalRequest(t *testing.T, c *wireClient) message {

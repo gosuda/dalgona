@@ -10,8 +10,8 @@ import (
 	jsontext "encoding/json/jsontext"
 	json "encoding/json/v2"
 
+	"github.com/gosuda/dalgona/internal/dal/decide"
 	"github.com/gosuda/dalgona/internal/dal/model"
-	"github.com/gosuda/dalgona/internal/decide"
 )
 
 const liveScript = "testdata/live.json"

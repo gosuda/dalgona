@@ -5,8 +5,8 @@ import (
 	"encoding/json/jsontext"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 type flakyAgent struct{}

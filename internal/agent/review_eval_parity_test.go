@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/decide"
+	"github.com/gosuda/dalgona/internal/dal/decide"
 )
 
 func TestJudgeCaseTurnUsesTurnQuestionsAndChangedLines(t *testing.T) {

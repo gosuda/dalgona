@@ -8,9 +8,9 @@ import (
 	"slices"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/journal"
-	"github.com/gosuda/dalgona/internal/tool"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	"github.com/gosuda/dalgona/internal/dal/journal"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 var errCeilingUnavailable = errors.New("agent: child tool ceiling unavailable")

@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 const policyPlugin = "def deny(ctx, event):\n    if event['tool'] == 'exec':\n        return {'decision': 'deny', 'reason': 'hooks forbid exec'}\n    return None\non('tool_call', deny)\n"

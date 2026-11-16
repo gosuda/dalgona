@@ -5,10 +5,10 @@ import (
 	"log/slog"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/decide"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/decide"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/tool"
 )
 
 type JudgeFactory func(ctx context.Context, model, threadModel string) (decide.Client, error)

@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/model"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 	corescript "github.com/gosuda/dalgona/internal/script"
 	corescripthost "github.com/gosuda/dalgona/internal/scripthost"
-	"github.com/gosuda/dalgona/internal/tool"
 
 	"github.com/gosuda/dalgona/internal/dalgona/script"
 )

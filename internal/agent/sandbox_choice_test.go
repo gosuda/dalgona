@@ -7,8 +7,8 @@ import (
 	"testing/synctest"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/config"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 const sandboxCauseText = "Landlock is not available on this kernel"

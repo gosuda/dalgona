@@ -11,7 +11,7 @@ import (
 	"github.com/gosuda/dalgona/internal/agent/rules"
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/model/cursor"
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 type inBandCalls struct {

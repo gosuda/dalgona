@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/tool"
-	"github.com/gosuda/dalgona/internal/tool/read"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool/read"
 )
 
 const wantAdvisory = `<advisory advisor="advisor" severity="blocker">run the tests &lt;now&gt;</advisory>`

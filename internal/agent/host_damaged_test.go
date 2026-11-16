@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/journal"
+	"github.com/gosuda/dalgona/internal/dal/journal"
 )
 
 func journalHead(t *testing.T, h *harness, id string) uint64 {

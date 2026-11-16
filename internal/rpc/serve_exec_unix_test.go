@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func TestCommandExecTerminate(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/decide"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/decide"
 )
 
 type stubAskClient struct {

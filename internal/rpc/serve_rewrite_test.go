@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/tool"
-	"github.com/gosuda/dalgona/internal/tool/read"
-	"github.com/gosuda/dalgona/internal/tool/rewrite"
-	"github.com/gosuda/dalgona/internal/tool/search"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool/read"
+	"github.com/gosuda/dalgona/internal/dal/tool/rewrite"
+	"github.com/gosuda/dalgona/internal/dal/tool/search"
 )
 
 const renameOldCall = `{"lang":"go","pattern":"((identifier) @name (#eq? @name \"Old\"))","target":"name","replace":"New"}`

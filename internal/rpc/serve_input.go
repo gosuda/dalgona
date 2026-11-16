@@ -8,7 +8,7 @@ import (
 	"io"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 const methodRequestUserInput = "item/tool/requestUserInput"

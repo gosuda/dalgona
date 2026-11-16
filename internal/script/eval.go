@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 const evalSchema = `{"type":"object","properties":{"code":{"type":"string","description":"Cell source. The last expression is the result."},"lang":{"type":"string","enum":["star","js"],"description":"Cell language: star (Starlark, the default) or js (JavaScript via QuickJS)."},"uses":{"type":"array","items":{"type":"string"},"description":"Tool names this cell may call. Each MUST be in the eval allow list. Omit to use the whole allow list."},"data":{"description":"Any JSON value. The cell reads it as data."}},"required":["code"],"additionalProperties":false}`

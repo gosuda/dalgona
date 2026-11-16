@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 var ErrNoTurn = errors.New("agent: a nested call ran outside a turn")

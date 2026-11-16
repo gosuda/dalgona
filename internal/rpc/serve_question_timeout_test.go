@@ -15,8 +15,8 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/config"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 func waitThreadIdle(t *testing.T, thread *agent.Thread) {

@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/config"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 func openQuestion(t *testing.T, thread *Thread, updates <-chan Update) QuestionPrompt {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func TestEditApprovalSendsTheDiffFirst(t *testing.T) {

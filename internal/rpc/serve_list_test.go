@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func TestThreadListRejectsNegativeLimit(t *testing.T) {

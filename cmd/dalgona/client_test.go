@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/app"
-	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/daemon"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func fakeHerdr(t *testing.T) string {

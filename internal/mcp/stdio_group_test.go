@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/mcp"
-	"github.com/gosuda/dalgona/internal/tool"
 )
 
 func writeGroupServerScript(t *testing.T, script string) {

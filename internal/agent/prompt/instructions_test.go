@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/agent/prompt"
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func TestInstructionsWalkAndFallback(t *testing.T) {

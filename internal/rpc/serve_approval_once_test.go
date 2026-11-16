@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/tool/exec"
-	"github.com/gosuda/dalgona/internal/tool/patch"
+	"github.com/gosuda/dalgona/internal/dal/tool/exec"
+	"github.com/gosuda/dalgona/internal/dal/tool/patch"
 )
 
 func TestChildEditApprovalSentOncePerConnection(t *testing.T) {

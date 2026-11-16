@@ -6,7 +6,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/app/battery"
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func TestMCPStatusReportsFailedServer(t *testing.T) {

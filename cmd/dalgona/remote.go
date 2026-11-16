@@ -13,8 +13,8 @@ import (
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/app/battery"
-	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/remote"
 	"github.com/gosuda/dalgona/internal/rpc"
 )

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 )
 
 type boxKillRecorder struct {

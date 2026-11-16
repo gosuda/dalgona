@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/auth"
-	"github.com/gosuda/dalgona/internal/decide"
+	"github.com/gosuda/dalgona/internal/dal/decide"
 )
 
 const corpusErrorRate = 0.05

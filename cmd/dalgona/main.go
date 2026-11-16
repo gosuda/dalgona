@@ -10,10 +10,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/runner"
-	"github.com/gosuda/dalgona/internal/tool/search"
-	"github.com/gosuda/dalgona/internal/tool/webfetch"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/tool/search"
+	"github.com/gosuda/dalgona/internal/dal/tool/webfetch"
 )
 
 const binary = "dalgona"

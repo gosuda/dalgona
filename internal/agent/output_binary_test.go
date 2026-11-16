@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func TestBinarySpillPagesAlwaysAdvance(t *testing.T) {

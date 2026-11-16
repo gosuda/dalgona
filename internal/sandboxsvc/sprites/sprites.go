@@ -11,7 +11,7 @@ import (
 
 	flysprites "github.com/superfly/sprites-go"
 
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 	"github.com/gosuda/dalgona/internal/sandboxsvc"
 )
 

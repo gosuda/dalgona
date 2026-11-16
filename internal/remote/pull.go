@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 )
 
 const diffScript = `cd /workspace && git add -A && out="$HOME/.dalgona/pull.diff" && mkdir -p "$HOME/.dalgona" && git diff --no-ext-diff --no-color --binary --cached "$1" -- . ':(exclude).dalgona-baseline' > "$out" && printf '\n%s' "$out"`

@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func fixtureMCPAuthStatus(context.Context, string) []agent.MCPServerStatus {

@@ -1,6 +1,6 @@
 package agent
 
-import "github.com/gosuda/dalgona/internal/config"
+import "github.com/gosuda/dalgona/internal/dal/config"
 
 func (t *Thread) EffectiveSandbox() (config.SandboxMode, error) {
 	settings, err := t.Settings()

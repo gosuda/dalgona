@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/dal/model"
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 const taskName = "task"

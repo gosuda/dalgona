@@ -8,7 +8,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/auth"
-	"github.com/gosuda/dalgona/internal/tool/snapshot"
+	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
 )
 
 type placeholderSeed struct {

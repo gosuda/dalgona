@@ -11,7 +11,7 @@ import (
 	"github.com/gosuda/dalgona/internal/agent/compact"
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/agent/prompt"
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 const overflowBody = `{"error":{"code":"context_length_exceeded","message":"input is too long"}}`

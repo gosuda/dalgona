@@ -14,7 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/tool/search"
+	"github.com/gosuda/dalgona/internal/dal/tool/search"
 )
 
 const (

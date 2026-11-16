@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth"
-	"github.com/gosuda/dalgona/internal/decide"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/decide"
 )
 
 func TestDecideWithoutHostDeclinesThroughFallback(t *testing.T) {

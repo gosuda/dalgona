@@ -5,7 +5,7 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 )
 
 const (

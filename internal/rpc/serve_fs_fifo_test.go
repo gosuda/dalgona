@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func TestFsReadFileRefusesFIFO(t *testing.T) {

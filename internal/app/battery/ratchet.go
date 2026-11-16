@@ -10,9 +10,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/agent"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 	"github.com/gosuda/dalgona/internal/ratchet"
-	"github.com/gosuda/dalgona/internal/tool"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 )
 
 func ratchetTools(ctx context.Context) []tool.Tool {

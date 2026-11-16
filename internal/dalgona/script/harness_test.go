@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gosuda/dalgona/internal/dal/tool"
 	corescript "github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/tool"
 )
 
 type toolFunc func(ctx context.Context, name string, args jsontext.Value) (jsontext.Value, error)

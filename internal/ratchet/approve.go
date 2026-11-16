@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 func (t Tool) approve(ctx context.Context, callID string, f *flow, a args, mu *sync.Mutex) (tool.Result, error) {

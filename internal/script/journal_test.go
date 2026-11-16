@@ -8,9 +8,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/tool"
 )
 
 //nolint:revive // test helper threads caller context, test state, journal, run id, cell source, and cell tools.

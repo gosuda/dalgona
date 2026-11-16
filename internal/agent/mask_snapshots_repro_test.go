@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func TestReproSnapshotPreimageMasked(t *testing.T) {

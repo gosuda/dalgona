@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/sandboxsvc"
 	"github.com/gosuda/dalgona/internal/sandboxsvc/fake"
 )

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/gosuda/dalgona/internal/dal/decide"
 	"github.com/gosuda/dalgona/internal/dal/textdiff"
-	"github.com/gosuda/dalgona/internal/decide"
 )
 
 var (

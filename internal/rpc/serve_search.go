@@ -8,7 +8,7 @@ import (
 	"strconv"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/journal"
+	"github.com/gosuda/dalgona/internal/dal/journal"
 )
 
 const (

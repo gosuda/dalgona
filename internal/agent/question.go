@@ -9,7 +9,7 @@ import (
 	"slices"
 	"time"
 
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 type pendingQuestion struct {

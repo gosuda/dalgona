@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/runner"
 )
 
 type startFailRunner struct {

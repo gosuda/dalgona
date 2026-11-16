@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/tool"
-	asktool "github.com/gosuda/dalgona/internal/tool/ask"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 const questionArgs = `{"questions":[{"header":"Database","question":"Which database?","options":[{"label":"Postgres","description":"A server."},{"label":"SQLite","description":"One file."}]}]}`

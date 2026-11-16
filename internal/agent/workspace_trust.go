@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 type WorkspaceServer struct {

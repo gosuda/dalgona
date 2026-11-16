@@ -118,14 +118,14 @@ linters:
               desc: copyleft grammar under MPL-2.0 per licenses/grammars.json
         core:
           files:
-            - "**/internal/journal/**"
+            - "**/internal/dal/journal/**"
             - "**/internal/agent/**"
             - "**/internal/dal/model/**"
             - "**/internal/dal/auth/**"
-            - "**/internal/tool/**"
-            - "**/internal/runner/**"
-            - "**/internal/config/**"
-            - "**/internal/decide/**"
+            - "**/internal/dal/tool/**"
+            - "**/internal/dal/runner/**"
+            - "**/internal/dal/config/**"
+            - "**/internal/dal/decide/**"
             - "**/internal/dal/textdiff/**"
             - "**/internal/dal/keywords/**"
             - "**/internal/dal/syntax/**"
@@ -171,7 +171,7 @@ linters:
             - "**/internal/herdr/**"
             - "**/internal/acp/**"
           deny:
-            - pkg: "github.com/gosuda/dalgona/internal/journal"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/journal"
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/agent"
               desc: clients reach the core only through internal/rpc
@@ -179,13 +179,13 @@ linters:
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/dal/auth"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/tool"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/tool"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/runner"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/runner"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/config"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/config"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/decide"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/decide"
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/dal/keywords"
               desc: clients reach the core only through internal/rpc
