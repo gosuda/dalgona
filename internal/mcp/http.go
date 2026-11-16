@@ -38,6 +38,8 @@ func dropForeignAuthorization(request *http.Request, via []*http.Request) error 
 	}
 	if request.URL.Scheme != via[0].URL.Scheme || request.URL.Host != via[0].URL.Host {
 		request.Header.Del("Authorization")
+		request.Header.Del("Mcp-Session-Id")
+		request.Header.Del("MCP-Protocol-Version")
 	}
 	return nil
 }

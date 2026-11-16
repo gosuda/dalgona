@@ -514,6 +514,101 @@ func TestAuthorizationStaysOnItsOrigin(t *testing.T) {
 	}
 }
 
+type redirectHeaders struct {
+	authorization string
+	sessionID     string
+	protocol      string
+}
+
+func captureRedirectHeaders(writer http.ResponseWriter, request *http.Request, sink chan<- redirectHeaders) {
+	sink <- redirectHeaders{
+		authorization: request.Header.Get("Authorization"),
+		sessionID:     request.Header.Get("Mcp-Session-Id"),
+		protocol:      request.Header.Get("MCP-Protocol-Version"),
+	}
+	writer.WriteHeader(http.StatusAccepted)
+}
+
+func TestSessionHeadersStayOnTheirOrigin(t *testing.T) {
+	foreignSink := make(chan redirectHeaders, 4)
+	foreignServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		captureRedirectHeaders(writer, request, foreignSink)
+	}))
+	defer foreignServer.Close()
+	localSink := make(chan redirectHeaders, 4)
+	mux := http.NewServeMux()
+	answerInitialize := func(writer http.ResponseWriter, request *http.Request, message testRequest) {
+		writer.Header().Set("Mcp-Session-Id", "session-123")
+		writeHTTPJSON(t, writer, message.ID, initResult)
+	}
+	handlePost := func(redirect func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
+		return func(writer http.ResponseWriter, request *http.Request) {
+			message, err := decodeRequest(request.Body)
+			if err != nil {
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if message.Method == "initialize" {
+				answerInitialize(writer, request, message)
+				return
+			}
+			redirect(writer, request)
+		}
+	}
+	mux.HandleFunc("POST /session-foreign", handlePost(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, foreignServer.URL+"/sink", http.StatusTemporaryRedirect)
+	}))
+	mux.HandleFunc("POST /session-local", handlePost(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, "/session-local-sink", http.StatusTemporaryRedirect)
+	}))
+	mux.HandleFunc("POST /session-local-sink", func(writer http.ResponseWriter, request *http.Request) {
+		captureRedirectHeaders(writer, request, localSink)
+	})
+	mux.HandleFunc("DELETE /session-foreign", func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("DELETE /session-local", func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	})
+	origin := httptest.NewServer(mux)
+	defer origin.Close()
+
+	t.Run("cross-origin redirect drops session headers", func(t *testing.T) {
+		const name = "MCP_SESSION_FOREIGN_REDIRECT_TEST"
+		t.Setenv(name, "sentinel-foreign")
+		options := mcp.AuthOptions{Name: "web", URL: origin.URL + "/session-foreign", BearerTokenEnv: name}
+		client, err := connectWith(t, origin.URL+"/session-foreign", options)
+		if err != nil {
+			t.Fatalf("connect through a cross-origin redirect: %v", err)
+		}
+		defer func() { _ = client.Close() }()
+		got := <-foreignSink
+		if got != (redirectHeaders{}) {
+			t.Fatalf("cross-origin redirect carried headers %+v, want none", got)
+		}
+	})
+
+	t.Run("same-origin redirect keeps session headers", func(t *testing.T) {
+		const name = "MCP_SESSION_LOCAL_REDIRECT_TEST"
+		t.Setenv(name, "sentinel-local")
+		options := mcp.AuthOptions{Name: "web", URL: origin.URL + "/session-local", BearerTokenEnv: name}
+		client, err := connectWith(t, origin.URL+"/session-local", options)
+		if err != nil {
+			t.Fatalf("connect through a same-origin redirect: %v", err)
+		}
+		defer func() { _ = client.Close() }()
+		got := <-localSink
+		want := redirectHeaders{
+			authorization: "Bearer sentinel-local",
+			sessionID:     "session-123",
+			protocol:      "2025-11-25",
+		}
+		if got != want {
+			t.Fatalf("same-origin redirect headers = %+v, want %+v", got, want)
+		}
+	})
+}
+
 func TestTokenSourceReloadsRegistration(t *testing.T) {
 	server, _ := newAuthServer(t, acceptOnly("stored-access"))
 	tokenServer, endpoint := newTokenEndpoint(t, http.StatusOK)

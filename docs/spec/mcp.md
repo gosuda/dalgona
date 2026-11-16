@@ -52,7 +52,7 @@ Discovery of Claude and Codex files MUST NOT read these keys. Only the native `[
 
 A server with an authentication source MUST send `Authorization: Bearer <token>` on every request. The session DELETE MUST carry the same header.
 
-A redirect to another origin MUST drop the `Authorization` header. An origin is a scheme, a host, and a port.
+A redirect to another origin MUST drop the `Authorization`, `Mcp-Session-Id`, and `MCP-Protocol-Version` headers. An origin is a scheme, a host, and a port.
 
 A bearer source MUST read its environment variable on every request. An empty variable MUST fail the request with `bearer_token_env <NAME> is not set`. That failure MUST send no HTTP request.
 
