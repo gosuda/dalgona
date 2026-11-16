@@ -588,4 +588,7 @@ func TestDecodeModelsReadsInputModalities(t *testing.T) {
 	if !reflect.DeepEqual(got, []bool{false, true, false}) {
 		t.Fatalf("images = %v, want [false true false]", got)
 	}
+	if _, ok := any(New(Config{})).(model.ImageSender); ok {
+		t.Fatal("chat-compatible provider must not claim image input for a model outside its listing")
+	}
 }

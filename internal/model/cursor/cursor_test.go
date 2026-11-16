@@ -584,3 +584,23 @@ func TestModelsListsUsableModels(t *testing.T) {
 		t.Fatalf("models = %+v", models)
 	}
 }
+
+func TestModelsReportNoImageInput(t *testing.T) {
+	_, server := newServer(t, func(*fakeConn) {})
+	provider := newProvider(server, time.Second)
+	if _, ok := any(provider).(model.ImageSender); ok {
+		t.Fatal("cursor encodes no image, so it must not claim image input for a model outside its listing")
+	}
+	models, err := provider.Models(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %+v, want the two usable models", models)
+	}
+	for _, listed := range models {
+		if listed.Images {
+			t.Fatalf("model %s reports image input, but the cursor request has no image field", listed.ID)
+		}
+	}
+}
