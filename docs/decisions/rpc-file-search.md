@@ -10,7 +10,7 @@ This decision applies to the import of `internal/tool/search` by `internal/rpc`,
 
 ## Enforcement
 
-`TestFuzzyFileSearchRanksAndHonoursGitignore` checks that an ignored file is not listed. `TestFuzzyFileSearchReusesWalk` checks that two requests in one window walk a root once. `TestFuzzyScoreRule` checks the score of three cases by hand.
+`TestFuzzyFileSearchRanksAndHonoursGitignore` checks that an ignored file is not listed. `TestFuzzyFileSearchReusesWalk` checks that two requests in one window walk a root once. `TestFuzzyScoreRule` checks the score and the match positions of each case by hand. `TestFuzzyFileSearchOrdersByTheGreedyMatch` checks the result order against the greedy rule.
 
 ## Rejected alternatives
 

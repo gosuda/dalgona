@@ -234,7 +234,11 @@ The method MUST skip `.git` and every path that `.gitignore` excludes. It MUST N
 
 A root MUST hold at most 100000 file paths. A root list MUST be reused for 5 seconds after it is walked.
 
-A query MUST match a path when its characters occur in the path in order, ignoring case. The matcher MUST choose the window with the fewest gaps. On a tie, the matcher MUST choose the earlier window.
+A query MUST match a path when its characters occur in the path in order, ignoring case. The matcher MUST scan the path from left to right. It MUST match each query character to its first occurrence after the previous matched character.
+
+The `indices` member MUST list the matched positions, counted in characters of the path from 0.
+
+The number of gaps MUST be the last matched index, minus the first matched index, plus 1, minus the length of the query.
 
 The score MUST be 100000, minus 100 for each gap, minus the length of the path in characters. It MUST add 1000 when the last matched character lies in the base name. It MUST add 2000 when the base name starts with the query. A score below 0 MUST count as 0.
 
