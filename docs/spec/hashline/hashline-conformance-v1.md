@@ -175,7 +175,7 @@ not a substitute for those tests.
 IDs. Its report is [verification.json](verification.json). Run from `docs/spec/hashline`:
 
 ```sh
-uv run --no-project --python 3.12 verify_model.py
+uv run --no-project --python 3.15 verify_model.py
 ```
 
 Actual runs used available interpreters through `uv --python` in the conversation
@@ -194,8 +194,9 @@ Codexify. No product Rust suite was run.
 | Total | 109,673 | 35,840 |
 
 Eight additional checks cover exact equal-text/wrong-occurrence behavior, known
-edit-then-undo, range boundaries, protected gap neighbors, empty/EOF gaps, abstract
-request cutoffs, profile subset behavior, and expanded EOF footprints.
+edit-then-undo, range boundaries, protected gap neighbors, and empty/EOF gaps.
+They also cover abstract request cutoffs, profile subset behavior, and expanded
+EOF footprints.
 
 This bounded model assumes accurate recorded effective splices. It does not test
 real byte tokenization, filesystem identity, parser/AST behavior, crash journaling,

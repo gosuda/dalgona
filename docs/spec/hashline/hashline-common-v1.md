@@ -165,13 +165,13 @@ count only when lossless, unambiguously decodable, and bound by renderer metadat
 to the complete source line. BOM and EOL encoding MAY be metadata rather than
 printed characters.
 
-Before sending a model request, freeze its reference eligibility and evidence
-cutoff. Every returned tool call uses that same cutoff, including parallel calls.
-A preview from one call MUST NOT authorize another already-issued call. Only a
-later decision request can use the new delivery. Historical thread delivery is
-the coverage contract, not proof the model understood or still remembers it.
+Before sending a model request, freeze its reference eligibility and evidence cutoff. Every returned
+tool call uses that same cutoff, including parallel calls. A preview from one
+call MUST NOT authorize another already-issued call. Only a later decision
+request can use the new delivery. Historical thread delivery is the coverage
+contract, not proof the model understood or still remembers it.
 
-A sequential evaluator has a distinct consumer identity. A read returned to it
+The evaluator consumer identity is not implemented yet. A sequential evaluator has a distinct consumer identity. A read returned to it
 can precede its next nested evidence cutoff. An internal filesystem lookup by
 the patch planner is not such a delivery. Evaluator data does not silently become
 model-context evidence. An embedder unable to establish a reliable delivery
@@ -333,18 +333,23 @@ failure prevents all target writes. No valid prefix is applied. All-no-op return
 
 ## C12. Preparation and authorization
 
-Reserve the full evidence set and staging capacity as one admission unit. Never
-hold partial pins or path locks while waiting for missing resources. Acquire path
+Reserve the full evidence set and staging capacity as one admission unit. Evidence set reservation is not implemented yet.
+Never hold partial pins or path locks while waiting for missing resources. Acquire path
 locks in the existing total canonical order, including rename endpoints.
 
-Only the verified planner can construct the private `stagedBatch`. It
-contains complete before/after bytes, full digests, actual footprints, path/absence
-conditions, profile/version, evidence cutoff, observer findings, and invocation
-fingerprint. The writer accepts that value, not arbitrary spans and a public proof
-enum.
+Only the verified planner can construct the private `stagedBatch`.
+The struct holds staged files, a summary, profile/version, an immutable evidence cutoff, observer findings, and an invocation fingerprint.
+It MUST contain complete before/after bytes, full digests, actual footprints, and path/absence conditions.
+The planner validates every canonical file group's shape before it resolves evidence.
+Observers inspect the complete staged batch and retain findings without changing its bytes.
+The fingerprint hashes length-prefixed UTF-8 strings with SHA-256.
+Its tuple contains style, decimal contract version, workspace, consumer, and exact final payload, in that order.
+Each length is an unsigned 64-bit big-endian byte count.
+The writer accepts that value, not arbitrary spans and a public proof enum.
 
 Run existing staged observers before asking. They report or block, never rewrite.
-Approval binds this exact plan. Release path locks while a person decides. Retained
+Approval binds this exact plan. Release path locks while a person decides. The
+retained evidence/staging lease charge is not implemented yet. Retained
 immutable evidence/staging leases remain charged and release on timeout/cancellation.
 
 After approval, the writer rechecks every source digest and every required
@@ -355,8 +360,8 @@ Light never relaxes grants or approval (S-WRITE).
 
 ## C13. Commit and truthful outcomes
 
-Reuse the staged writer: create and sync complete temps, dirty affected search
-indexes before target mutation, execute ordered target operations, then clean up
+Reuse the staged writer. Create and sync complete temps, and dirty affected search
+indexes before target mutation. Execute ordered target operations, then clean up
 and sync under existing POSIX/Windows rules. After the first target operation,
 finish commit or rollback before honoring cancellation.
 
@@ -399,18 +404,18 @@ conservatively even when this double-counts shared data. Other runtime allocatio
 are outside these budgets. Total RSS is not promised to fit in 96 MiB.
 
 Retain source ceilings: input 8 MiB, 1-64 edits, 64 canonical paths, 16 MiB per file,
-64 MiB staged before-plus-after bytes per invocation. Check before allocation.
+64 MiB staged before-plus-after bytes per call. Check before allocation.
 These are individual ceilings, not a promise every combination can fit concurrently.
 Metadata can reduce usable capacity. The store has no limit per path or per consumer.
 Each thread store keeps at most 512 entries.
 
 The store evicts the oldest inserted entry first. Issuance counters are independent of retention.
-Eviction never reuses tokens. Acquire a call's entire evidence/staging lease set
+Eviction never reuses tokens. The evidence/staging lease set is not implemented yet. Acquire a call's entire evidence/staging lease set
 or return `resource_busy`, `resource_limit`, or `reference_expired`. No partial-pin
 waits, hidden copies, or unlimited pinning during model think time. The store does not
 pin evidence for a prepared call. A printed reference is not a retention promise.
 
-A requested evidence set that exceeds the pool MUST be split. Never weaken proof to
+Evidence set admission is not implemented yet. A requested evidence set that exceeds the pool MUST be split. Never weaken proof to
 fit it. If a successful commit cannot retain a fresh echo reference, report success
 and a reread instruction without an executable reference. Do not reclassify already
 written files as an edit rejection.
@@ -532,7 +537,7 @@ replay(invocation_identity, fingerprint)
     -> RecordedResult | RunningSubscription | New | Indeterminate | Mismatch
 ```
 
-`stagedBatch` construction is private. Leases release exactly once. The writer
+`stagedBatch` construction is private. The lease release rule is not implemented yet. Leases release exactly once. The writer
 cannot create observation credit or alter the profile. NeedsContext cannot be
 converted into `stagedBatch` without a subsequent eligible decision.
 
@@ -547,8 +552,8 @@ converted into `stagedBatch` without a subsequent eligible decision.
 | INV-PREPARED | Commit effects are exactly the authorized immutable plan. |
 | INV-NOWRITE | Pre-commit rejection has no target effects. |
 | INV-OUTCOME | Reported effects never exceed what is known. |
-| INV-REPLAY | Settled invocations are not executed again by replay. |
-| INV-BOUNDS | Accounted leases, buffers, and metadata stay within their budgets. |
+| INV-REPLAY | Settled invocations are not executed again by replay. Replay is not implemented yet. |
+| INV-BOUNDS | Accounted leases, buffers, and metadata stay within their budgets. Lease accounting is not implemented yet. |
 
 ## C18. Adoption
 

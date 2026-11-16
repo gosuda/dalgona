@@ -101,4 +101,6 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [llmstub test support](decisions/llmstub-test-support.md): scripted chat-completions server for tests and live sessions.
 - [Search index](decisions/search-index.md): the grep index, its trust rule, and its rejected engines.
 - [RPC file search](decisions/rpc-file-search.md): workspace file listing through search tool walker.
+- [RPC thread search](decisions/rpc-thread-search.md): thread text search through the journal mirror index.
 - [Syntax package](decisions/syntax-package.md): tree-sitter library confinement and query rules.
+- [Shell argument parser](decisions/shell-argument-parser.md): one neutral command splitter and token reader for core packages.

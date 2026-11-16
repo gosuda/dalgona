@@ -39,7 +39,7 @@ hashline-model:
     fi
     out=$(mktemp)
     trap 'rm -f "$out"' EXIT
-    uv run --no-project --python 3.12 docs/spec/hashline/verify_model.py > "$out"
+    uv run --no-project --python 3.15 docs/spec/hashline/verify_model.py > "$out"
     cmp "$out" docs/spec/hashline/verification.json
 
 spec-style:
@@ -56,7 +56,8 @@ spec-style:
         echo "spec-style: skipped, uv is not installed"
         exit 0
     fi
-    uv run --no-project --python 3.12 docs/spec/check_style.py docs/spec
+    uv run --no-project --python 3.15 docs/spec/check_style.py docs/spec
+    uv run --no-project --python 3.15 docs/spec/check_style_test.py
 
 web:
     pnpm -C web install --frozen-lockfile
@@ -159,6 +160,8 @@ live-up:
     if [ -e "$w/llmstub.pid" ] && kill -0 "$(cat "$w/llmstub.pid")" 2>/dev/null; then
         echo "live-up: $w is in use; run just live-down" >&2; exit 1
     fi
+    git config --global user.name >/dev/null 2>&1 || { echo "live-up: git global user.name is not set; run git config --global user.name <name>" >&2; exit 1; }
+    git config --global user.email >/dev/null 2>&1 || { echo "live-up: git global user.email is not set; run git config --global user.email <email>" >&2; exit 1; }
     rm -rf "$w"
     mkdir -p "$w/bin" "$w/dal" "$w/dgh" "$w/fakehome" "$w/ws"
     chmod 700 "$w/dal" "$w/dgh"
@@ -166,16 +169,17 @@ live-up:
     cp -R internal/llmstub/testdata/workspace/. "$w/ws/"
     git -C "$w/ws" init -q
     git -C "$w/ws" add -A
-    git -C "$w/ws" -c user.name=live -c user.email=live@localhost commit -qm seed
+    git -C "$w/ws" commit -qm seed
     printf '%s\n' 'model = "local/qwen-test"' 'approval = "ask"' 'edit_style = "apply_patch"' '' '[approval_decider]' 'decider = "llm:local/qwen-test"' '' '[providers.local]' \
-        'base_url = "http://127.0.0.1:18080/v1"' 'api_key_env = "LOCAL_LLM_KEY"' '' \
+        'base_url = "http://127.0.0.1:18080/v1"' 'api_key_env = "LOCAL_LLM_KEY"' \
+        '' '[providers.openai]' 'base_url = "http://127.0.0.1:18080/v1"' \
         '[models."local/qwen-test"]' 'context_window = 32000' > "$w/dal/config.toml"
     cp "$w/dal/config.toml" "$w/dgh/config.toml"
     printf '%s\n' '' '[edit_review]' 'feedback = ["lost_code"]' >> "$w/dgh/config.toml"
-    printf 'export HOME=%s DAL_HOME=%s DALGONA_HOME=%s LOCAL_LLM_KEY=dummy\n' "$w/fakehome" "$w/dal" "$w/dgh" > "$w/env"
-    base=(env -i PATH="$PATH" HOME="$w/fakehome" DAL_HOME="$w/dal" DALGONA_HOME="$w/dgh" LOCAL_LLM_KEY=dummy)
+    printf 'export HOME=%s DAL_HOME=%s DALGONA_HOME=%s LOCAL_LLM_KEY=sk-live-test\n' "$w/fakehome" "$w/dal" "$w/dgh" > "$w/env"
+    base=(env -i PATH="$PATH" HOME="$w/fakehome" DAL_HOME="$w/dal" DALGONA_HOME="$w/dgh" LOCAL_LLM_KEY=sk-live-test)
     nohup "$w/bin/llmstub" -listen 127.0.0.1:18080 -script internal/llmstub/testdata/live.json \
-        -key dummy -record "$w/requests.jsonl" >/dev/null 2>"$w/llmstub.log" &
+        -key sk-live-test -record "$w/requests.jsonl" >/dev/null 2>"$w/llmstub.log" &
     echo $! > "$w/llmstub.pid"
     for _ in $(seq 50); do grep -q '^llmstub: serving ' "$w/llmstub.log" && break; sleep 0.1; done
     grep -qx 'llmstub: serving http://127.0.0.1:18080/v1' "$w/llmstub.log" || { echo "live-up: llmstub did not start; see $w/llmstub.log" >&2; exit 1; }
@@ -221,8 +225,11 @@ live-check:
     trap 'exit 143' TERM
     just live-up
     source "$w/env"
-    (cd "$w/ws" && "$w/bin/dal" -p "read a.txt" --json) > "$w/check-dal.json"
-    (cd "$w/ws" && "$w/bin/dalgona" -p "read a.txt" --json) > "$w/check-dalgona.json"
+    (cd "$w/ws" && "$w/bin/dal" -p "read a.txt" --json </dev/null) > "$w/check-dal.json"
+    (cd "$w/ws" && "$w/bin/dalgona" -p "read a.txt" --json </dev/null) > "$w/check-dalgona.json"
+    for result in "$w/check-dal.json" "$w/check-dalgona.json"; do
+        jq -e -s 'length >= 2 and all(.[]; .schemaVersion == 1) and (.[-1] | .type == "result" and .status == "completed" and .stop_reason == "stop") and all(.[:-1][]; .type == "item" and (.item | type == "object"))' "$result" >/dev/null
+    done
     test "$(grep -c '"turn":"t-read-2"' "$w/requests.jsonl")" = 2
     test "$(grep -c 'hello from a.txt' "$w/requests.jsonl")" -ge 2
     ! grep -q '"turn":"unmatched"' "$w/requests.jsonl"

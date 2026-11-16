@@ -1,12 +1,12 @@
 # Design
 
-### Purpose
+## Purpose
 
 This file sets one visual system for both interfaces of dalgona: the terminal interface in `internal/tui` and the web interface in `web/`. Both interfaces use the same themes, colours, type, components, motion, words, icons and marks. Read this file before you add or change a colour, a type size, a component, a glyph, a motion, a status item or a mark.
 
 To change the system, follow [How to change this file](#how-to-change-this-file).
 
-### Principles
+## Principles
 
 - A little human warmth: the rabbit mark and plain words make the tool feel friendly. Keep that warmth small.
 - Restraint: use few colours, few sizes and few weights. Remove any element that carries no meaning.
@@ -21,7 +21,7 @@ The terminal follows four stability rules:
 - A value that changes with time keeps its place and its width.
 - The client never clears the screen.
 
-### Colour
+## Colour
 
 The setting `theme` takes six values.
 
@@ -55,7 +55,7 @@ Only `canvas`, `surface`, `tone` and the point are fills. The text roles `failed
 
 When the terminal shows fewer colours, or when `NO_COLOR` is set, every colour role drops to the terminal's default foreground. Bold and dim stay. Every state keeps its word.
 
-### The point and the thread hue
+## The point and the thread hue
 
 Each view has at most one solid accent fill, the point. The order is: the primary action of a pending decision; else the live tag; else Send in the browser. The terminal has no Send button, so an idle terminal view has no fill, and the prompt mark carries the thread hue as its text colour. The point takes its colours from the thread hue. The product mark is not the point.
 
@@ -72,7 +72,7 @@ Each thread has one hue: `fnv1a32(threadID) % 4`. `fnv1a32` is FNV-1a 32-bit ove
 
 In the browser, the hue fills the point and an 8 px dot beside each thread in the list. In the terminal, the hue fills the live tag and colours the prompt mark with the fill colour. The dot and the prompt mark carry no information that the text does not also carry.
 
-### Type for the web
+## Type for the web
 
 |Use|Face|Stack|
 |---|---|---|
@@ -83,7 +83,7 @@ In the browser, the hue fills the point and an 8 px dot beside each thread in th
 
 Elapsed time and percentages use `font-variant-numeric: tabular-nums`. Line heights are unitless.
 
-### Scale
+## Scale
 
 Each non-colour token has one value. The browser reads these tokens from `web/src/lib/theme/scale.ts`.
 
@@ -120,11 +120,11 @@ Each non-colour token has one value. The browser reads these tokens from `web/sr
 
 A component row keeps its own literal value when no token has that value. So the 14 px labels of buttons and options, the weight 650 of buttons and tags, the 14 px radius of the composer field, and the 7 px and 8 px radii stay as their rows give them. Bold text, such as the word Failed, uses `weightStrong`. The optional target-size check reads control height custom properties and checks the 24 px minimum.
 
-### Components
+## Components
 
 Each table gives the part, its geometry, its type and its colour role. Browser sizes are CSS pixels. Terminal sizes are cells and rows. Each value appears once in its table.
 
-#### Browser controls
+### Browser controls
 
 |Part|Geometry|Type|Colour|
 |---|---|---|---|
@@ -150,7 +150,7 @@ Each table gives the part, its geometry, its type and its colour role. Browser s
 |Note|Right aligned. No wrap.|12 px, line height 1.4|`dim`. Exit note `failed-text`, bold|
 |Time|Right aligned. No wrap. Tabular numbers.|13 px|`text`|
 
-#### Browser cards
+### Browser cards
 
 |Part|Geometry|Type|Colour|
 |---|---|---|---|
@@ -190,7 +190,7 @@ Each table gives the part, its geometry, its type and its colour role. Browser s
 |Removed line|n/a|Normal weight|`failed-text` on `surface`|
 |Open file button|Top margin auto. Aligned to the start. No fill. Bottom border 1 px. Padding 3 px 0.|Bricolage Grotesque, weight 600, 13 px|Label `text`. Underline `strong`|
 
-#### Terminal rows
+### Terminal rows
 
 |Part|Geometry|Type|Colour|
 |---|---|---|---|
@@ -210,7 +210,7 @@ Each table gives the part, its geometry, its type and its colour role. Browser s
 |Live row|One row, below the open panel and above the status band. Fields from the left: the live tag in 10 cells (the dot, one space, the state word in 8 cells), the elapsed time in 7 cells, the progress fields, then free text. Nothing is right-anchored.|As tool row|As tool row|
 |Status band|One row of fixed fields. The left group holds `model` and the icons. The right group holds `context` and `mark`.|n/a|`dim`|
 
-#### Terminal panels
+### Terminal panels
 
 |Part|Geometry|Type|Colour|
 |---|---|---|---|
@@ -225,7 +225,7 @@ Each table gives the part, its geometry, its type and its colour role. Browser s
 |Detail line|n/a|Regular|`dim`|
 |Key row|Key hints.|Regular|`dim`|
 
-### Motion and words
+## Motion and words
 
 The live tag and the Working rows each carry one breathing dot. The elapsed time on a Working row ticks once a second. The dot and the tick use these values.
 
@@ -254,7 +254,7 @@ The state words are written in sentence case. The terminal's state-word field MU
 |Stopped|`dim`. Shown for an interrupted turn.|
 |Offline|`warning-text`. Shown when the connection to the daemon is lost.|
 
-### Status band
+## Status band
 
 The status band shows these items, in this order.
 
@@ -277,7 +277,7 @@ Terminal layout: one row of fixed fields. `model` and the icons sit in the left 
 
 Browser layout: the thread header has the title at the left. A right-aligned margin column holds three rows: `model`; then `effort approval sandbox folder queue`; then `context mark`. Below 640 px, the margin column becomes one row under the title. The same drop order applies. Every icon has an `aria-label` that states its value in words.
 
-### Icons
+## Icons
 
 The setting `icons` takes `auto` (default), `unicode` or `nerd`. The browser always draws Nerd glyphs from its own subset font, `symbols-nerd-subset.woff2`. The subset comes from Symbols Nerd Font Mono 3.5.1. Its licences are MIT for the font, Apache-2.0 for Material Design Icons and SIL OFL 1.1 for Weather Icons. The browser ignores the `icons` setting.
 
@@ -304,7 +304,7 @@ Every Unicode glyph that the terminal puts in a fixed field or in the status ban
 
 The terminal key list (`?`) shows one legend line for each shown item, so that every icon has a text meaning.
 
-### Product marks
+## Product marks
 
 The mark is a crescent moon with a small smiling rabbit. The rabbit rests its chin on the inner curve of the moon. The rabbit is named 고나 (Gona). 달 (moon) + 고나 = 달고나 (dalgona), the caramel candy. `dalgona` is a caramel candy with the crescent and the rabbit pressed in as a line. Its highlight is one flat shape of the mark, not a gradient and not an effect that a component may copy. `dal` is the crescent and the rabbit alone, in one colour.
 
@@ -338,7 +338,7 @@ The name 고나 appears only in this file and in image alternative text. The int
 |`dalgona`|a caramel candy stamped with a crescent moon and the rabbit Gona|
 |`dal`|a crescent moon with the rabbit Gona|
 
-### Accessibility
+## Accessibility
 
 |Topic|Rule|
 |---|---|
@@ -353,7 +353,7 @@ The name 고나 appears only in this file and in image alternative text. The int
 |Minimum size|Controls have a minimum height of 36 px.|
 |Terminal colour|Under `NO_COLOR` or with fewer colours, every state keeps its word (see Colour).|
 
-### How to change this file
+## How to change this file
 
 1. Get the owner's approval before you change a value, a component, a glyph, a motion, a status item or a mark.
 2. Change `internal/tui` and `web/` in the same commit, so that the two interfaces stay the same.
