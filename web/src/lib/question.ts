@@ -20,6 +20,7 @@ const resolutionNotices: Readonly<Record<string, string>> = {
 	cancelled: "Question dismissed in another window",
 	interrupted: "Question closed: the turn was interrupted",
 	declined: "Question closed: the agent continues without an answer",
+	timedOut: "Question timed out",
 };
 
 function isMembers(value: unknown): value is Members {

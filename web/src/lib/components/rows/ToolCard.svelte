@@ -10,6 +10,7 @@ import { fullPresentation, lastLines, lineSummary } from "#lib/verbosity.ts";
 let {
 	item,
 	awaiting,
+	timedOutQuestions = new Set<string>(),
 	presentation = fullPresentation,
 	onOpen,
 }: RowProps = $props();
@@ -20,7 +21,9 @@ function argumentsText(value: JsonValue): string {
 </script>
 
 {#if item.kind === "toolCall"}
-	{@const state = stateKey(itemDisplayStatus(item.status, item.id, awaiting))}
+	{@const state = timedOutQuestions.has(item.id)
+		? "timedOut"
+		: stateKey(itemDisplayStatus(item.status, item.id, awaiting))}
 	<article class="tool-item">
 		<header>
 			<span class="item-label">{item.name}</span>

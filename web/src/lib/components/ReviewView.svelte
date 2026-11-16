@@ -3,7 +3,7 @@ import DiffCard from "#lib/components/DiffCard.svelte";
 import Markdown from "#lib/components/Markdown.svelte";
 import Panel from "#lib/components/panels/Panel.svelte";
 import { formatDuration } from "#lib/format.ts";
-import { itemStatusLabel } from "#lib/labels.ts";
+import { stateKey, stateWords } from "#lib/labels.ts";
 import type { JsonValue, OutputPage, TranscriptItem } from "#lib/types.ts";
 import { evalCode, isToolGroup, type TranscriptEntry } from "#lib/verbosity.ts";
 
@@ -75,9 +75,10 @@ function argumentsText(value: JsonValue): string {
 		{#each members as item (item.id)}
 			<section class="full-item">
 				{#if item.kind === "commandExecution"}
+					{@const state = stateKey(item.status)}
 					<p class="command">$ {item.command}</p>
 					<p class="meta">
-						{itemStatusLabel(item.status)}{item.exitCode !== null ? ` · exit ${item.exitCode}` : ""}{item.durationMs !== null ? ` · ${formatDuration(item.durationMs)}` : ""}
+						{state === null ? item.status : stateWords[state]}{item.exitCode !== null ? ` · exit ${item.exitCode}` : ""}{item.durationMs !== null ? ` · ${formatDuration(item.durationMs)}` : ""}
 					</p>
 					<pre>{outputOf(item)}</pre>
 				{:else if item.kind === "toolCall"}

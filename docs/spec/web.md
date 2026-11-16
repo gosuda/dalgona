@@ -252,10 +252,14 @@ Submit MUST send each answer as its option labels in option order, then the type
 
 The card MUST move focus to its title when it appears. A `serverRequest/resolved` for a request this window still shows MUST show its notice in the notice stack.
 
+A `serverRequest/resolved` with `timedOut` closes the card and shows the notice `Question timed out`. The transcript row of the question item shows `Timed out`.
+
 ### Empty states and errors
 
 - With no open thread the transcript says `Pick a thread or start a new one`. When connected, it says that earlier threads are in the list. When not connected, it says to connect to dalgona.
+- On a fresh load the client MUST NOT open a thread by itself.
 - With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a title shows its preview. A thread with neither shows `Untitled thread`.
+- The `thread/list` request MUST carry `limit` and `cursor` only. It MUST NOT carry `sortKey` or `sortDirection`.
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
 - A new connection MUST discard thread resumes still in flight from the previous connection.
 - In the approval card, Decline and Cancel use the quiet style. The composer's `Interrupt turn` button has the danger style.
@@ -270,14 +274,26 @@ A notice with the same text as a notice on the page MUST replace it.
 The page MUST keep at most five notices. It MUST remove the oldest first.
 A failed request MUST show `<action>: <detail>.`. While connected, the notice MUST offer `Try again`, which repeats the request. Otherwise it MUST offer `Reconnect`.
 A queued follow-up whose send fails MUST leave the queue. Its notice's `Try again` MUST send it once.
-A dropped connection MUST show `Disconnected from dalgona.` with `Reconnect`.
-A failed connect MUST show `Unable to connect to dalgona: <detail>. Check that dalgona web is still running.` with `Reconnect`.
+A dropped connection MUST show `Disconnected from dalgona.` with `Reconnect` once no attempts remain.
+A failed first or manual connect MUST show `Unable to connect to dalgona: <detail>. Check that dalgona web is still running.` with `Reconnect`.
 A socket error MUST show `Connection error: <message>.` with `Reconnect`.
 The header MUST show `Offline` while the connection is down.
+A connect that starts from a down connection MUST NOT show `connecting`. The header MUST show `Offline` until that connect reports `connected`.
 For a local daemon, `dalgona web` MUST permit auto-start until its first successful daemon connection.
 After that connection, each relay connection MUST attach to an existing daemon without auto-start.
 This rule applies to all browser windows served by that `dalgona web` process.
 If the daemon stops, start it separately before reconnecting. Remote connections keep their configured bridge behavior.
+After a drop, the client MUST start connects by itself. Each connect that the client starts is an attempt.
+The client MUST start at most 3 attempts in a row. They start 1 second, 2 seconds, and 4 seconds after the failure before them.
+Each attempt MUST fail after 30 seconds without an open socket.
+A manual connect is a connect that the user starts with `Reconnect`.
+A failure of a manual connect or of the first connect of a page load MUST NOT start attempts.
+While attempts remain, the notice MUST read `Reconnecting to dalgona (attempt <n> of 3).` with `Reconnect`.
+A drop or a failed attempt MUST remove the error notices. The header MUST keep `Offline` until an attempt connects.
+The client MUST ignore notifications, requests, and errors that arrive from the connection that it dropped.
+The attempt count MUST reset when a connection stays up for 20 seconds. A drop MUST cancel that wait.
+Selecting `Reconnect` MUST cancel the next attempt and connect at once.
+An attempt MUST resume the open thread as `Reconnect` does. It MUST NOT send a turn again, because the server owns running turns.
 
 ### Notifications
 
@@ -385,6 +401,16 @@ That submit MUST show `No command named /<name>. Start with // to send a message
 
 Pressing `?` while no field has focus MUST open the key list.
 Escape MUST close a panel and MUST return focus to the element that opened it.
+
+The resume panel filters thread titles, previews, and identifiers as the user types.
+A trimmed filter with at least three characters starts conversation search after a 300 ms pause.
+Each new keystroke cancels the pending search and discards its results.
+The client discards search results from an earlier connection.
+The `Matches in conversations` section shows each matching title and snippet.
+Selecting a match opens its thread and closes the panel.
+An empty search shows `No conversation mentions this text.`
+A failed search shows `Search failed: <cause>.` and a Try again button.
+
 The Settings panel MUST save only the settings whose values changed, in one `config/batchWrite` call.
 The Settings panel MUST send the key paths `approval`, `verbosity`, `theme`, `statusHide`, and `editReview`.
 An empty or unknown choice MUST NOT be saved, and the panel MUST show `Choose a <label>.` in its body.

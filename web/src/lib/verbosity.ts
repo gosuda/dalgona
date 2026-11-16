@@ -1,4 +1,4 @@
-import { countLabel, itemStatusLabel } from "#lib/labels.ts";
+import { countLabel, stateKey, stateWords } from "#lib/labels.ts";
 import type { JsonValue, TranscriptItem } from "#lib/types.ts";
 
 const verbosityLevels = ["low", "medium", "high"] as const;
@@ -161,7 +161,9 @@ export function lineSummary(item: TranscriptItem): string {
 	if (item.kind === "toolCall") {
 		const code = evalCode(item.arguments);
 		const lines = countLabel(lineCount(code), "line", "lines");
-		return `Eval · ${lines} of code · ${itemStatusLabel(item.status)}`;
+		const key = stateKey(item.status);
+		const status = key === null ? item.status : stateWords[key];
+		return `Eval · ${lines} of code · ${status}`;
 	}
 	return "";
 }

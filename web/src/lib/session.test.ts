@@ -12,9 +12,11 @@ import type {
 	AppNotification,
 	ApprovalRequest,
 	JsonValue,
+	QuestionRequest,
 	RequestId,
 	RpcHandlers,
 } from "./types";
+import { QUESTION_METHOD } from "./types";
 import { parseNotification, parseThreadStartResponse } from "./validation";
 
 type Answer = (params: JsonValue) => JsonValue;
@@ -39,7 +41,7 @@ function threadIdOf(params: JsonValue): string {
 	return typeof id === "string" ? id : "";
 }
 
-function thread(id: string, turns: JsonValue): JsonValue {
+function thread(id: string, turns: JsonValue): Record<string, JsonValue> {
 	return {
 		id,
 		updatedAt: 1,
@@ -105,14 +107,22 @@ function answers(runningThread: string): Record<string, Answer> {
 	};
 }
 
+type OpenMode = "open" | "refuse" | "hang";
+
 class FakePort implements RpcPort {
 	private readonly log: string[] = [];
 	private readonly handlers: RpcHandlers;
 	private readonly table: Record<string, Answer>;
+	private readonly mode: OpenMode;
 
-	constructor(handlers: RpcHandlers, table: Record<string, Answer>) {
+	constructor(
+		handlers: RpcHandlers,
+		table: Record<string, Answer>,
+		mode: OpenMode = "open",
+	) {
 		this.handlers = handlers;
 		this.table = table;
+		this.mode = mode;
 	}
 
 	get calls(): readonly string[] {
@@ -120,6 +130,13 @@ class FakePort implements RpcPort {
 	}
 
 	open(): Promise<void> {
+		if (this.mode === "hang") return Promise.withResolvers<void>().promise;
+		if (this.mode === "refuse") {
+			this.handlers.onStateChange("connecting");
+			this.handlers.onError("websocket error");
+			this.handlers.onStateChange("disconnected");
+			return Promise.reject(new Error("connection closed"));
+		}
 		this.handlers.onStateChange("connected");
 		return Promise.resolve();
 	}
@@ -145,6 +162,9 @@ class FakePort implements RpcPort {
 	request(request: ApprovalRequest): void {
 		this.handlers.onRequest(request);
 	}
+	question(request: QuestionRequest): void {
+		this.handlers.onQuestion(request);
+	}
 	respond(_id: RequestId, _result: JsonValue): void {}
 
 	close(): void {}
@@ -157,16 +177,21 @@ class FakePort implements RpcPort {
 function fakeDial(
 	runningThread: string,
 	overrides: Record<string, Answer> = {},
+	mode: (index: number) => OpenMode = () => "open",
 ): {
 	dial: (url: string, handlers: RpcHandlers) => RpcPort;
 	ports: FakePort[];
 } {
 	const ports: FakePort[] = [];
 	const dial = (_url: string, handlers: RpcHandlers): RpcPort => {
-		const port = new FakePort(handlers, {
-			...answers(runningThread),
-			...overrides,
-		});
+		const port = new FakePort(
+			handlers,
+			{
+				...answers(runningThread),
+				...overrides,
+			},
+			mode(ports.length),
+		);
 		ports.push(port);
 		return port;
 	};
@@ -181,6 +206,75 @@ async function waitForThread(
 		expect(session.activeThreadId).toBe(threadId);
 		expect(session.loadingTranscript).toBe(false);
 	});
+}
+
+async function openThread(session: Session, threadId: string): Promise<void> {
+	await vi.waitFor(() => {
+		expect(session.loadingThreads).toBe(false);
+		expect(session.threads.some((entry) => entry.id === threadId)).toBe(true);
+	});
+	await session.selectThread(threadId);
+	await waitForThread(session, threadId);
+}
+
+function configFixture(): { read: Answer; write: Answer } {
+	let model = "gpt-config";
+	let effort: string | null = "low";
+	const read: Answer = () => ({
+		config: {
+			model,
+			approval_policy: "never",
+			sandbox_mode: "workspace-write",
+			model_reasoning_effort: effort,
+		},
+		origins: {},
+	});
+	const write: Answer = (params) => {
+		const edits =
+			typeof params === "object" && params !== null && "edits" in params
+				? params["edits"]
+				: null;
+		if (Array.isArray(edits)) {
+			for (const edit of edits) {
+				if (typeof edit !== "object" || edit === null) continue;
+				if (!("keyPath" in edit) || !("value" in edit)) continue;
+				if (edit.keyPath === "model" && typeof edit.value === "string") {
+					model = edit.value;
+				}
+				if (edit.keyPath === "model_reasoning_effort") {
+					effort = typeof edit.value === "string" ? edit.value : null;
+				}
+			}
+		}
+		return {};
+	};
+	return { read, write };
+}
+
+function effectiveStatusResume(params: JsonValue): JsonValue {
+	const id = threadIdOf(params);
+	if (id === "t2") {
+		return {
+			thread: thread("t2", []),
+			model: "gpt-t2",
+			approvalsReviewer: "user",
+			modelProvider: "openai",
+			approvalPolicy: "on-request",
+			sandbox: "read-only",
+			reasoningEffort: "low",
+			cwd: "/work",
+		};
+	}
+	return {
+		thread: thread(id, []),
+		model: "gpt-thread",
+		approvalsReviewer: "user",
+		modelProvider: "openai",
+		approvalPolicy: "untrusted",
+		sandbox: "dangerFullAccess",
+		reasoningEffort: "medium",
+		cwd: "/work",
+	};
 }
 
 function statusNotice(seq: number, status: string): AppNotification {
@@ -218,10 +312,17 @@ function patchNotice(
 	return parsed;
 }
 
-function resolvedNotice(threadId: string, requestId: string): AppNotification {
+function resolvedNotice(
+	threadId: string,
+	requestId: string,
+	resolution?: string,
+): AppNotification {
 	const parsed = parseNotification({
 		method: "serverRequest/resolved",
-		params: { threadId, requestId },
+		params:
+			resolution === undefined
+				? { threadId, requestId }
+				: { threadId, requestId, resolution },
 	});
 	if (parsed === null) throw new Error("resolved notice did not parse");
 	return parsed;
@@ -282,11 +383,67 @@ describe("session", () => {
 		session.stop();
 	});
 
+	test("loads the list and opens no thread", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.threads.map((entry) => entry.id)).toEqual(["t1", "t2"]);
+			expect(ports[0]?.calls).toContain("dalgona/settings/read");
+		});
+		expect(session.activeThreadId).toBeNull();
+		expect(session.loadingTranscript).toBe(false);
+		expect(ports[0]?.calls).not.toContain("thread/resume");
+		expect(ports[0]?.calls).not.toContain("thread/read");
+		session.stop();
+	});
+
+	test("reopens the stored active thread", async () => {
+		const resumed: string[] = [];
+		const { dial, ports } = fakeDial("none", {
+			"thread/resume": (params) => {
+				resumed.push(threadIdOf(params));
+				return resumeAnswer("none")(params);
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await openThread(session, "t2");
+		expect(resumed).toEqual(["t2"]);
+
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(ports).toHaveLength(2);
+			expect(resumed).toEqual(["t2", "t2"]);
+		});
+		await waitForThread(session, "t2");
+		session.stop();
+	});
+
+	test("requests the thread list with only its limit", async () => {
+		const requests: JsonValue[] = [];
+		const { dial } = fakeDial("none", {
+			"thread/list": (params) => {
+				requests.push(params);
+				return { data: [thread("t1", [])], nextCursor: null };
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.threads).toHaveLength(1);
+		});
+		expect(requests).toEqual([{ limit: 100 }]);
+		expect(requests[0]).not.toHaveProperty("sortKey");
+		expect(requests[0]).not.toHaveProperty("sortDirection");
+		session.stop();
+	});
+
 	test("reconnect keeps queued follow-ups", async () => {
 		const { dial, ports } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		expect(session.running).toBe(true);
 		session.queueFollowup("later");
 		expect(session.queuedFollowups).toEqual(["later"]);
@@ -309,7 +466,7 @@ describe("session", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		await session.sendMessage("first");
 		await session.sendMessage("second");
 		ports[0]?.deliver(userItem("u-1", "first"));
@@ -322,7 +479,7 @@ describe("session", () => {
 		const { dial } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		for (const text of ["a", "b", "c"]) session.queueFollowup(text);
 		expect(session.editFollowup(1)).toBe("b");
 		expect(session.queuedFollowups).toEqual(["a", "c"]);
@@ -333,7 +490,7 @@ describe("session", () => {
 		const { dial } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		for (const text of ["a", "b", "c"]) session.queueFollowup(text);
 		session.removeFollowup(1);
 		expect(session.queuedFollowups).toEqual(["a", "c"]);
@@ -344,7 +501,7 @@ describe("session", () => {
 		const { dial } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		session.queueFollowup("later");
 		expect(session.queuedFollowups).toEqual(["later"]);
 
@@ -358,7 +515,7 @@ describe("session", () => {
 		const { dial, ports } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		const port = ports[0];
 		if (port === undefined) throw new Error("no port");
 		port.deliver(patchNotice("t1", "fc-9", "a.txt"));
@@ -370,11 +527,30 @@ describe("session", () => {
 		session.stop();
 	});
 
+	test("marks the transcript row Timed out when the question times out", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await openThread(session, "t1");
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port");
+		port.question(question("req-1"));
+		expect(session.requests).toHaveLength(1);
+		port.deliver(resolvedNotice("t1", "req-1", "timedOut"));
+		expect(session.requests).toHaveLength(0);
+		expect([...session.timedOutQuestions]).toEqual(["call-1"]);
+		expect(session.notices.at(-1)?.text).toBe("Question timed out");
+		port.question(question("req-2"));
+		port.deliver(resolvedNotice("t1", "req-2", "answered"));
+		expect([...session.timedOutQuestions]).toEqual(["call-1"]);
+		session.stop();
+	});
+
 	test("keeps a pending approval's diff across a thread switch", async () => {
 		const { dial, ports } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		const port = ports[0];
 		if (port === undefined) throw new Error("no port");
 		port.deliver(patchNotice("t1", "fc-9", "a.txt"));
@@ -389,7 +565,7 @@ describe("session", () => {
 		const { dial, ports } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		const port = ports[0];
 		if (port === undefined) throw new Error("no port");
 		port.deliver(patchNotice("t1", "fc-7", "stale.txt"));
@@ -404,7 +580,7 @@ describe("session", () => {
 		const { dial, ports } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		const port = ports[0];
 		if (port === undefined) throw new Error("no port was dialled");
 		port.deliver(statusNotice(5, "active"));
@@ -437,7 +613,7 @@ describe("session", () => {
 		const { dial, ports } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		const wait = (remainingMs: number): AppNotification => {
 			const parsed = parseNotification({
 				method: "dalgona/retry/wait",
@@ -451,6 +627,152 @@ describe("session", () => {
 		ports[0]?.deliver(wait(0));
 		expect(session.retryRemainingMs).toBeNull();
 		session.stop();
+	});
+
+	test("saving a model keeps the effective sandbox", async () => {
+		{
+			const config = configFixture();
+			const { dial } = fakeDial("t1", {
+				"config/read": config.read,
+				"config/batchWrite": config.write,
+				"thread/resume": effectiveStatusResume,
+			});
+			const session = new Session(dial);
+			session.start(location);
+			await openThread(session, "t1");
+			await session.saveModel("gpt-saved", "high");
+			expect(session.status).toEqual({
+				model: "gpt-saved",
+				approval: "ask",
+				sandbox: "off",
+				effort: "high",
+			});
+			session.stop();
+		}
+
+		{
+			const config = configFixture();
+			const { dial } = fakeDial("none", {
+				"config/read": config.read,
+				"config/batchWrite": config.write,
+				"thread/list": () => ({ data: [], nextCursor: null }),
+			});
+			const session = new Session(dial);
+			session.start(location);
+			await vi.waitFor(() => {
+				expect(session.status.model).toBe("gpt-config");
+			});
+			await session.saveModel("gpt-bare", "high");
+			expect(session.status).toEqual({
+				model: "gpt-bare",
+				approval: "yolo",
+				sandbox: "workspace-write",
+				effort: "high",
+			});
+			session.stop();
+		}
+
+		{
+			const config = configFixture();
+			let failRead = false;
+			const { dial } = fakeDial("t1", {
+				"config/read": (params) => {
+					if (failRead) {
+						failRead = false;
+						throw new Error("config read failed");
+					}
+					return config.read(params);
+				},
+				"config/batchWrite": config.write,
+				"thread/resume": effectiveStatusResume,
+			});
+			const session = new Session(dial);
+			session.start(location);
+			await openThread(session, "t1");
+			failRead = true;
+			await session.saveModel("gpt-retry", "high");
+			const notice = session.notices.find((item) =>
+				item.text.startsWith("Unable to load configuration"),
+			);
+			const retry = notice?.actions.find(
+				(action) => action.label === "Try again",
+			);
+			expect(retry).toBeDefined();
+			retry?.run();
+			await vi.waitFor(() => {
+				expect(session.status.model).toBe("gpt-retry");
+			});
+			expect(session.status).toEqual({
+				model: "gpt-retry",
+				approval: "ask",
+				sandbox: "off",
+				effort: "high",
+			});
+			session.stop();
+		}
+
+		{
+			const config = configFixture();
+			const { dial, ports } = fakeDial("t1", {
+				"config/read": config.read,
+				"config/batchWrite": config.write,
+				"thread/resume": effectiveStatusResume,
+			});
+			const session = new Session(dial);
+			session.start(location);
+			await openThread(session, "t1");
+			const port = ports[0];
+			if (port === undefined) throw new Error("no port");
+			let release = (): void => {};
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			holdMethod(port, "config/read", gate);
+			const saving = session.saveModel("gpt-held", "high");
+			await session.selectThread("t2");
+			release();
+			expect(await saving).toBe(true);
+			expect(session.status).toEqual({
+				model: "gpt-held",
+				approval: "auto",
+				sandbox: "read-only",
+				effort: "high",
+			});
+			session.stop();
+		}
+
+		{
+			const config = configFixture();
+			const { dial, ports } = fakeDial("t1", {
+				"config/read": config.read,
+				"config/batchWrite": config.write,
+				"thread/resume": effectiveStatusResume,
+			});
+			const session = new Session(dial);
+			session.start(location);
+			await openThread(session, "t1");
+			const port = ports[0];
+			if (port === undefined) throw new Error("no port");
+			let release = (): void => {};
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			holdMethod(port, "config/read", gate);
+			const saving = session.saveModel("gpt-again", "high");
+			session.start(location);
+			await vi.waitFor(() => {
+				expect(ports).toHaveLength(2);
+				expect(ports[1]?.calls).toContain("thread/read");
+				expect(session.loadingTranscript).toBe(false);
+			});
+			const status = session.status;
+			const selected = session.selectedModel;
+			release();
+			expect(await saving).toBe(true);
+			expect(session.status).toEqual(status);
+			expect(session.selectedModel).toBe(selected);
+			session.stop();
+		}
 	});
 });
 
@@ -467,7 +789,7 @@ describe("recovery actions", () => {
 		const { dial, ports } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		void session.saveModel("gpt-next", null);
 		await vi.waitFor(() => {
 			expect(session.notices.map((notice) => notice.text)).toContain(
@@ -492,10 +814,10 @@ describe("recovery actions", () => {
 		const { dial, ports } = fakeDial("t1");
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		ports[0]?.drop();
 		const notice = session.notices.find(
-			(item) => item.text === "Disconnected from dalgona.",
+			(item) => item.text === "Reconnecting to dalgona (attempt 1 of 3).",
 		);
 		const reconnect = notice?.actions.find(
 			(action) => action.label === "Reconnect",
@@ -505,6 +827,216 @@ describe("recovery actions", () => {
 		await vi.waitFor(() => {
 			expect(ports).toHaveLength(2);
 		});
+		session.stop();
+	});
+});
+
+function noticeTexts(session: Session): string[] {
+	return session.notices.map((notice) => notice.text);
+}
+
+function reconnecting(attempt: number): string {
+	return `Reconnecting to dalgona (attempt ${attempt} of 3).`;
+}
+
+function portAt(ports: readonly FakePort[], index: number): FakePort {
+	const port = ports[index];
+	if (port === undefined) throw new Error(`no port ${index}`);
+	return port;
+}
+
+async function startConnected(session: Session): Promise<void> {
+	session.start(location);
+	await vi.advanceTimersByTimeAsync(0);
+	expect(session.connection).toBe("connected");
+}
+
+describe("automatic reconnect", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.stubGlobal("history", { replaceState: vi.fn() });
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	test("reconnects with backoff and stops after three", async () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial);
+		await startConnected(session);
+		portAt(ports, 0).drop();
+		expect(session.connection).toBe("disconnected");
+		expect(noticeTexts(session)).toEqual([reconnecting(1)]);
+
+		await vi.advanceTimersByTimeAsync(999);
+		expect(ports).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(ports).toHaveLength(2);
+		portAt(ports, 1).drop();
+		expect(noticeTexts(session)).toEqual([reconnecting(2)]);
+
+		await vi.advanceTimersByTimeAsync(1999);
+		expect(ports).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(ports).toHaveLength(3);
+		portAt(ports, 2).drop();
+		expect(noticeTexts(session)).toEqual([reconnecting(3)]);
+
+		await vi.advanceTimersByTimeAsync(3999);
+		expect(ports).toHaveLength(3);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(ports).toHaveLength(4);
+		portAt(ports, 3).drop();
+		expect(noticeTexts(session)).toEqual(["Disconnected from dalgona."]);
+		const notice = session.notices[0];
+		expect(notice?.tone).toBe("error");
+		expect(notice?.actions.map((action) => action.label)).toEqual([
+			"Reconnect",
+		]);
+
+		await vi.advanceTimersByTimeAsync(60000);
+		expect(ports).toHaveLength(4);
+		session.stop();
+	});
+
+	test("a failed attempt counts and adds no error notice", async () => {
+		const { dial, ports } = fakeDial("none", {}, (index) =>
+			index === 0 ? "open" : "refuse",
+		);
+		const session = new Session(dial);
+		await startConnected(session);
+		portAt(ports, 0).drop();
+
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(ports).toHaveLength(2);
+		expect(noticeTexts(session)).toEqual([reconnecting(2)]);
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(ports).toHaveLength(3);
+		expect(noticeTexts(session)).toEqual([reconnecting(3)]);
+		await vi.advanceTimersByTimeAsync(4000);
+		expect(ports).toHaveLength(4);
+		expect(noticeTexts(session)).toEqual(["Disconnected from dalgona."]);
+		await vi.advanceTimersByTimeAsync(60000);
+		expect(ports).toHaveLength(4);
+		session.stop();
+	});
+
+	test("an attempt that never opens fails at the 30 second deadline", async () => {
+		const { dial, ports } = fakeDial("none", {}, (index) =>
+			index === 1 ? "hang" : "open",
+		);
+		const session = new Session(dial);
+		await startConnected(session);
+		portAt(ports, 0).drop();
+
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(ports).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(29999);
+		expect(noticeTexts(session)).toEqual([reconnecting(1)]);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(noticeTexts(session)).toEqual([reconnecting(2)]);
+		await vi.advanceTimersByTimeAsync(1999);
+		expect(ports).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(ports).toHaveLength(3);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(session.connection).toBe("connected");
+		expect(noticeTexts(session)).toEqual([]);
+		session.stop();
+	});
+
+	test("resets the budget after 20 seconds", async () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial);
+		await startConnected(session);
+		portAt(ports, 0).drop();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(ports).toHaveLength(2);
+		expect(session.connection).toBe("connected");
+		expect(noticeTexts(session)).toEqual([]);
+
+		await vi.advanceTimersByTimeAsync(20000);
+		portAt(ports, 1).drop();
+		expect(noticeTexts(session)).toEqual([reconnecting(1)]);
+		session.stop();
+	});
+
+	test("keeps the budget when the connection drops within 20 seconds", async () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial);
+		await startConnected(session);
+		portAt(ports, 0).drop();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(ports).toHaveLength(2);
+
+		await vi.advanceTimersByTimeAsync(19999);
+		portAt(ports, 1).drop();
+		expect(noticeTexts(session)).toEqual([reconnecting(2)]);
+
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(ports).toHaveLength(3);
+		portAt(ports, 2).drop();
+		expect(noticeTexts(session)).toEqual([reconnecting(3)]);
+		session.stop();
+	});
+
+	test("a manual reconnect cancels the schedule", async () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial);
+		await startConnected(session);
+		portAt(ports, 0).drop();
+		const notice = session.notices.find(
+			(entry) => entry.text === reconnecting(1),
+		);
+		const action = notice?.actions.find((entry) => entry.label === "Reconnect");
+		expect(action).toBeDefined();
+
+		await vi.advanceTimersByTimeAsync(500);
+		action?.run();
+		expect(ports).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(session.connection).toBe("connected");
+		expect(noticeTexts(session)).toEqual([]);
+
+		await vi.advanceTimersByTimeAsync(10000);
+		expect(ports).toHaveLength(2);
+		session.stop();
+	});
+
+	test("the first connect of a page load does not retry", async () => {
+		const { dial, ports } = fakeDial("none", {}, () => "refuse");
+		const session = new Session(dial);
+		session.start(location);
+		await vi.advanceTimersByTimeAsync(60000);
+		expect(ports).toHaveLength(1);
+		expect(session.connection).toBe("disconnected");
+		expect(noticeTexts(session)).toEqual([
+			"Connection error: websocket error.",
+			"Unable to connect to dalgona: connection closed. Check that dalgona web is still running.",
+		]);
+		session.stop();
+	});
+
+	test("a reconnect resumes the open thread, keeps queued follow-ups and starts no turn", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		await startConnected(session);
+		await session.selectThread("t1");
+		expect(session.running).toBe(true);
+		session.queueFollowup("later");
+		portAt(ports, 0).drop();
+
+		await vi.advanceTimersByTimeAsync(1000);
+		const second = portAt(ports, 1);
+		expect(second.calls).toContain("thread/resume");
+		expect(second.calls).not.toContain("turn/start");
+		expect(second.calls).not.toContain("turn/steer");
+		expect(session.activeThreadId).toBe("t1");
+		expect(session.loadingTranscript).toBe(false);
+		expect(session.queuedFollowups).toEqual(["later"]);
+		expect(noticeTexts(session)).toEqual([]);
 		session.stop();
 	});
 });
@@ -571,7 +1103,7 @@ describe("failed follow-up sends", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 
 		session.queueFollowup("later");
 		await vi.waitFor(() => {
@@ -598,7 +1130,7 @@ describe("failed follow-up sends", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 
 		session.queueFollowup("next");
 		expect(session.queuedFollowups).toEqual(["next"]);
@@ -768,7 +1300,7 @@ describe("file search", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		session.threads = [];
 
 		await session.searchFiles("mod");
@@ -799,7 +1331,7 @@ describe("file search", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		await session.createThread();
 		session.threads = [];
 
@@ -818,6 +1350,53 @@ describe("file search", () => {
 		).toThrow("invalid thread/start");
 	});
 
+	test("file search uses the cwd of the thread/start response", async () => {
+		const searches: JsonValue[] = [];
+		const { dial } = fakeDial("none", {
+			"thread/start": () => ({
+				thread: { ...thread("new-thread", []), cwd: "/other" },
+				model: "gpt-test",
+				approvalsReviewer: "user",
+				modelProvider: "openai",
+				approvalPolicy: "on-request",
+				sandbox: "workspace-write",
+				cwd: "/repo",
+			}),
+			fuzzyFileSearch: (params) => {
+				searches.push(params);
+				return { files: [] };
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await openThread(session, "t1");
+		await session.createThread();
+		session.threads = [];
+
+		await session.searchFiles("mod");
+
+		expect(searches).toEqual([
+			{ query: "mod", roots: ["/repo"], cancellationToken: "composer" },
+		]);
+		session.stop();
+	});
+
+	test("a thread/start response without cwd is an InvalidPayload", () => {
+		const response = resumeAnswer("none")({ threadId: "t1" }) as {
+			readonly [key: string]: JsonValue;
+		};
+		const { cwd: _cwd, ...withoutCwd } = response;
+		let caught: unknown;
+		try {
+			parseThreadStartResponse(withoutCwd);
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(Error);
+		expect((caught as Error).name).toBe("InvalidPayload");
+		expect((caught as Error).message).toBe("invalid thread/start");
+	});
+
 	test("sends no search when no thread is open", async () => {
 		const { dial, ports } = fakeDial("none", {
 			"thread/list": () => ({ data: [], nextCursor: null }),
@@ -834,17 +1413,146 @@ describe("file search", () => {
 	});
 });
 
-function holdCommand(port: FakePort, gate: Promise<void>): void {
+function holdMethod(port: FakePort, method: string, gate: Promise<void>): void {
 	const call = port.call.bind(port);
 	port.call = <T>(
-		method: string,
+		name: string,
 		params: JsonValue,
 		parse: (value: unknown) => T,
 	): Promise<T> =>
-		method === "command/exec"
-			? gate.then(() => call(method, params, parse))
-			: call(method, params, parse);
+		name === method
+			? gate.then(() => call(name, params, parse))
+			: call(name, params, parse);
 }
+
+function turnStarted(threadId: string, turnId: string): AppNotification {
+	const parsed = parseNotification({
+		method: "turn/started",
+		params: {
+			threadId,
+			turn: { id: turnId, status: "inProgress", items: [], error: null },
+		},
+	});
+	if (parsed === null) throw new Error("turn start did not parse");
+	return parsed;
+}
+
+function fileChangeCompleted(
+	threadId: string,
+	turnId: string,
+	itemId: string,
+): AppNotification {
+	const parsed = parseNotification({
+		method: "item/completed",
+		params: {
+			completedAtMs: 1,
+			item: {
+				id: itemId,
+				type: "fileChange",
+				status: "completed",
+				changes: [],
+			},
+			threadId,
+			turnId,
+		},
+	});
+	if (parsed === null) throw new Error("file change did not parse");
+	return parsed;
+}
+
+function toolJudged(verdict: string, summary: string): AppNotification {
+	const parsed = parseNotification({
+		method: "dalgona/tool/judged",
+		params: {
+			threadId: "t1",
+			turnId: "turn-1",
+			itemId: "call-7",
+			verdict,
+			summary,
+			paths: ["a.go"],
+		},
+	});
+	if (parsed === null) throw new Error("tool judged did not parse");
+	return parsed;
+}
+
+function turnJudged(verdict: string, summary: string): AppNotification {
+	const parsed = parseNotification({
+		method: "dalgona/turn/judged",
+		params: {
+			threadId: "t1",
+			turnId: "turn-1",
+			verdict,
+			summary,
+			paths: [],
+		},
+	});
+	if (parsed === null) throw new Error("turn judged did not parse");
+	return parsed;
+}
+
+describe("review note", () => {
+	beforeEach(() => {
+		vi.stubGlobal("history", { replaceState: vi.fn() });
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	async function openedSession(): Promise<{
+		session: Session;
+		port: FakePort;
+	}> {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial);
+		session.start(location);
+		await openThread(session, "t1");
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port was dialled");
+		return { session, port };
+	}
+
+	test("a flagged tool verdict sets the review note", async () => {
+		const { session, port } = await openedSession();
+		port.deliver(turnStarted("t1", "turn-1"));
+		port.deliver(fileChangeCompleted("t1", "turn-1", "call-7"));
+		port.deliver(toolJudged("flagged", "Flagged: removed code"));
+		expect(session.reviewNote).toBe("Flagged: removed code");
+		session.stop();
+	});
+
+	test("a clean tool verdict sets no review note", async () => {
+		const { session, port } = await openedSession();
+		port.deliver(turnStarted("t1", "turn-1"));
+		port.deliver(fileChangeCompleted("t1", "turn-1", "call-7"));
+		port.deliver(toolJudged("clean", "No problems found"));
+		expect(session.reviewNote).toBeNull();
+		session.stop();
+	});
+
+	test("an error turn verdict sets the review note", async () => {
+		const { session, port } = await openedSession();
+		port.deliver(turnStarted("t1", "turn-1"));
+		port.deliver(fileChangeCompleted("t1", "turn-1", "call-7"));
+		port.deliver(turnJudged("error", "Failed: judge unreachable"));
+		expect(session.reviewNote).toBe("Failed: judge unreachable");
+		session.stop();
+	});
+
+	test("a turnStatus change clears the review note", async () => {
+		const { session, port } = await openedSession();
+		port.deliver(turnStarted("t1", "turn-1"));
+		port.deliver(fileChangeCompleted("t1", "turn-1", "call-7"));
+		port.deliver(toolJudged("flagged", "Flagged: removed code"));
+		expect(session.reviewNote).toBe("Flagged: removed code");
+
+		port.deliver(completion("t1", "turn-1"));
+
+		expect(session.reviewNote).toBeNull();
+		session.stop();
+	});
+});
 
 describe("recall history", () => {
 	beforeEach(() => {
@@ -863,7 +1571,7 @@ describe("recall history", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		await session.sendMessage("first");
 		await session.sendMessage("", {
 			texts: [],
@@ -940,7 +1648,7 @@ describe("shell mode", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 
 		const run = await session.runShell("echo hi");
 
@@ -985,7 +1693,7 @@ describe("shell mode", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 
 		await session.runShell("dir");
 
@@ -1000,14 +1708,14 @@ describe("shell mode", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 		const port = ports[0];
 		if (port === undefined) throw new Error("no port");
 		let release = (): void => {};
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		holdCommand(port, gate);
+		holdMethod(port, "command/exec", gate);
 
 		const run = session.runShell("ls");
 		if (run === null) throw new Error("the command did not start");
@@ -1055,7 +1763,7 @@ describe("shell mode", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 
 		expect(session.runShell("ls")).toBeNull();
 		expect(session.notices.map((notice) => notice.text)).toContain(
@@ -1074,7 +1782,7 @@ describe("shell mode", () => {
 		});
 		const session = new Session(dial);
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 
 		expect(await session.runShell("rm x")).toBeNull();
 		expect(session.transcript.items.at(-1)).toMatchObject({
@@ -1154,6 +1862,33 @@ describe("desktop notifications", () => {
 		session.stop();
 	});
 
+	test("notifies on a waiting question only when hidden and granted", async () => {
+		const { dial, ports } = fakeDial("none");
+		const session = new Session(dial, () => {});
+		session.start(location);
+		await vi.waitFor(() => {
+			expect(session.threads).toHaveLength(2);
+		});
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port was dialled");
+
+		visibility = "visible";
+		port.question(question("req-1"));
+		expect(shown).toEqual([]);
+
+		visibility = "hidden";
+		permission = "default";
+		port.question(question("req-2"));
+		expect(shown).toEqual([]);
+
+		permission = "granted";
+		port.question(question("req-3"));
+		expect(shown).toEqual([
+			{ text: "Waiting for your reply", body: "Untitled thread", tag: "t1" },
+		]);
+		session.stop();
+	});
+
 	test("never asks for permission without a click", async () => {
 		permission = "default";
 		const { dial, ports } = fakeDial("none");
@@ -1214,7 +1949,7 @@ describe("desktop notifications", () => {
 		});
 		const session = new Session(dial, () => {});
 		session.start(location);
-		await waitForThread(session, "t1");
+		await openThread(session, "t1");
 
 		session.queueFollowup("next");
 		ports[0]?.deliver(completion("t1", "turn-1"));
@@ -1256,5 +1991,31 @@ function approval(id: string): ApprovalRequest {
 		title: "Run this command?",
 		detail: "ls",
 		reason: null,
+	};
+}
+
+function question(id: string): QuestionRequest {
+	return {
+		id,
+		method: QUESTION_METHOD,
+		threadId: "t1",
+		turnId: "turn-1",
+		itemId: "call-1",
+		questions: [
+			{
+				id: "q1",
+				header: "Database",
+				question: "Which database should the service use?",
+				options: [
+					{
+						label: "Postgres",
+						description: "Managed Postgres.",
+						preview: null,
+					},
+				],
+				multiSelect: false,
+				isOther: false,
+			},
+		],
 	};
 }

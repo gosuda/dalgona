@@ -138,6 +138,7 @@ describe("question request", () => {
 		expect(resolutionNotice("declined")).toBe(
 			"Question closed: the agent continues without an answer",
 		);
+		expect(resolutionNotice("timedOut")).toBe("Question timed out");
 		expect(resolutionNotice(null)).toBeNull();
 	});
 });
