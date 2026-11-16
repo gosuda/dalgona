@@ -48,14 +48,14 @@ func testEnv(t *testing.T) (tool.Env, func()) {
 	return env, func() { _ = runs.Close() }
 }
 
-func printCwdCommand(t *testing.T) string {
+func selfCommand(t *testing.T, mode string) string {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", filepath.Dir(exe)+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return filepath.Base(exe) + " __print-cwd"
+	return filepath.Base(exe) + " " + mode
 }
 
 func requireCwdOutput(t *testing.T, result tool.Result, dir string) {
@@ -121,13 +121,6 @@ func floodCommand() string {
 	return "seq 1 100000"
 }
 
-func waitThenPrintLateCommand() string {
-	if runtime.GOOS == "windows" {
-		return "echo early & powershell -NoProfile -Command Start-Sleep 30 & echo late"
-	}
-	return "echo early; sleep 30; echo late"
-}
-
 func createMarkerThenWaitCommand() string {
 	if runtime.GOOS == "windows" {
 		return "type nul > started & powershell -NoProfile -Command Start-Sleep 30"
@@ -149,7 +142,7 @@ func TestExecTimeoutTerminates(t *testing.T) {
 	toolExec := New()
 	toolExec.grace = 300 * time.Millisecond
 	toolExec.killWait = 30 * time.Second
-	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-3", Args: jsontext.Value(`{"command":` + strconv.Quote(waitThenPrintLateCommand()) + `,"timeout_ms":2000}`)}, env)
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-3", Args: jsontext.Value(`{"command":` + strconv.Quote(selfCommand(t, "__wait-then-print-late")) + `,"timeout_ms":2000}`)}, env)
 	if err == nil {
 		t.Fatal("timeout run returned no error")
 	}
@@ -301,7 +294,7 @@ func TestExecUsesWorkspaceDirectory(t *testing.T) {
 	env, closeRunner := testEnv(t)
 	defer closeRunner()
 	toolExec := New()
-	command := printCwdCommand(t)
+	command := selfCommand(t, "__print-cwd")
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-5", Args: jsontext.Value(`{"command":` + strconv.Quote(command) + `}`)}, env)
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +372,7 @@ func TestExecResolvesRelativeCwdAgainstWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	toolExec := New()
-	command := printCwdCommand(t)
+	command := selfCommand(t, "__print-cwd")
 	args := jsontext.Value(`{"command":` + strconv.Quote(command) + `,"cwd":"web"}`)
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-rel", Args: args}, env)
 	if err != nil {
@@ -419,7 +412,7 @@ func TestExecUnsandboxedRunsOutsideWritableRoots(t *testing.T) {
 	defer closeRunner()
 	outside := t.TempDir()
 	toolExec := New()
-	command := printCwdCommand(t)
+	command := selfCommand(t, "__print-cwd")
 	escalated := jsontext.Value(`{"command":` + strconv.Quote(command) + `,"cwd":` + strconv.Quote(outside) + `,"escalate":true,"justification":"retry"}`)
 	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-cwd-out-esc", Args: escalated}, env)
 	if err != nil {

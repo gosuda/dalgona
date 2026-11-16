@@ -520,7 +520,7 @@ describe("session", () => {
 				if (threadIdOf(params) === "t2")
 					throw new RpcError(-32602, "unknown thread t2");
 				return {
-					...(resumeAnswer("none")(params) as Record<string, JsonValue>),
+					...resumeAnswer("none")(params),
 					thread: thread("t1", [
 						{
 							id: "turn-1",
