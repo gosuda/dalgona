@@ -62,7 +62,7 @@ func answerFrom(q ratchet.Question, reply asktool.Reply) (ratchet.Answer, error)
 		return answerOf(q, reply.Answers), nil
 	case asktool.OutcomeNoClient:
 		return ratchet.Answer{}, ratchet.ErrNoClient
-	case asktool.OutcomeCancelled, asktool.OutcomeInterrupted:
+	case asktool.OutcomeCancelled, asktool.OutcomeInterrupted, asktool.OutcomeTimedOut:
 		return ratchet.Answer{}, ratchet.ErrCancelled
 	case asktool.OutcomeFailed:
 		return ratchet.Answer{}, fmt.Errorf("ratchet approval failed: %s", reply.Detail)

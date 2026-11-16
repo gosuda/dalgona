@@ -82,6 +82,7 @@ type server struct {
 	watches    map[string]*watch
 	procs      map[string]context.CancelFunc
 	pending    map[string]context.CancelFunc
+	refused    map[string]struct{}
 	logins     map[string]context.CancelFunc
 	searches   map[string]*fuzzySearch
 	watchers   sync.WaitGroup
@@ -116,7 +117,7 @@ func ServeWith(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host, o
 	defer cancel()
 	s := &server{
 		host: host, log: cmp.Or(opts.Logger, slog.Default()), opts: opts,
-		watches: map[string]*watch{}, pending: map[string]context.CancelFunc{}, logins: map[string]context.CancelFunc{},
+		watches: map[string]*watch{}, pending: map[string]context.CancelFunc{}, refused: map[string]struct{}{}, logins: map[string]context.CancelFunc{},
 		fsWatches: map[string]*fsWatcher{},
 	}
 	s.conn = newConnection(ctx, conn, s.handle)
@@ -199,6 +200,25 @@ func (w *watch) channel() <-chan agent.Update {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.ch
+}
+
+func (s *server) refuseRequest(requestID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refused[requestID] = struct{}{}
+}
+
+func (s *server) requestRefused(requestID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, refused := s.refused[requestID]
+	return refused
+}
+
+func (s *server) unrefuseRequest(requestID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.refused, requestID)
 }
 
 func (w *watch) stop() {

@@ -17,7 +17,7 @@ type approvalAsk struct {
 	requestID string
 	method    string
 	params    writer
-	window    <-chan agent.Update
+	watch     *watch
 }
 
 func (s *server) ask(ctx context.Context, w *watch, ch <-chan agent.Update, update agent.Update) {
@@ -26,13 +26,17 @@ func (s *server) ask(ctx context.Context, w *watch, ch <-chan agent.Update, upda
 		s.resolved(update.Thread, prompt.RequestID, prompt.Resolution)
 		return
 	}
+	if s.requestRefused(prompt.RequestID) {
+		s.refuseReplayedApproval(w, ch, prompt.RequestID)
+		return
+	}
 	turnID := w.tracker.currentTurn()
 	threadID := update.Thread
 	if threadID != w.thread.ID() {
 		turnID = ""
 	}
 	method, params := approvalParams(prompt, threadID, turnID, approvalCwd(prompt, w))
-	a := approvalAsk{thread: w.thread, requestID: prompt.RequestID, method: method, params: params, window: ch}
+	a := approvalAsk{thread: w.thread, requestID: prompt.RequestID, method: method, params: params, watch: w}
 	note := approvalNotice(prompt, threadID, turnID)
 	askCtx, cancel := context.WithCancel(ctx)
 	started, dup := s.spawnRequest(prompt.RequestID, cancel, func() {
@@ -45,9 +49,22 @@ func (s *server) ask(ctx context.Context, w *watch, ch <-chan agent.Update, upda
 	if dup || !started {
 		cancel()
 	}
-	if note != nil && started && !dup {
-		recordApprovalChanges(w, threadID, *note)
+	if started && !dup {
+		recordApprovalNote(w, threadID, note)
 	}
+}
+
+func (s *server) refuseReplayedApproval(w *watch, ch <-chan agent.Update, requestID string) {
+	if err := w.thread.CannotAnswerApproval(requestID, ch); err != nil && !errors.Is(err, agent.ErrUnknownRequest) {
+		s.log.Warn("rpc: report refused replayed approval", "request", requestID, "error", err)
+	}
+}
+
+func recordApprovalNote(w *watch, threadID string, note *FileChangePatchUpdatedNotification) {
+	if note == nil {
+		return
+	}
+	recordApprovalChanges(w, threadID, *note)
 }
 
 func approvalParams(prompt agent.ApprovalPrompt, threadID, turnID, cwd string) (string, writer) {
@@ -113,6 +130,7 @@ func (s *server) settle(requestID string) {
 
 func (s *server) resolved(threadID, requestID, resolution string) {
 	s.settle(requestID)
+	s.unrefuseRequest(requestID)
 	s.send("serverRequest/resolved", ServerRequestResolvedNotification{ThreadID: threadID, RequestID: requestID, Resolution: resolution})
 }
 
@@ -137,7 +155,8 @@ func (s *server) request(serveCtx, askCtx context.Context, a approvalAsk) {
 
 func (s *server) cannotAnswerApproval(a approvalAsk, cause error) {
 	s.log.Info("rpc: approval request failed; this window cannot answer", "request", a.requestID, "error", cause)
-	if err := a.thread.CannotAnswerApproval(a.requestID, a.window); err != nil && !errors.Is(err, agent.ErrUnknownRequest) {
+	s.refuseRequest(a.requestID)
+	if err := a.thread.CannotAnswerApproval(a.requestID, a.watch.channel()); err != nil && !errors.Is(err, agent.ErrUnknownRequest) {
 		s.log.Warn("rpc: report unanswerable approval", "request", a.requestID, "error", err)
 	}
 }

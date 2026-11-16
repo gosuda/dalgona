@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"strconv"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/tool"
 )
 
 const Name = "ask"
+
+const Timeout = 5 * time.Minute
 
 const (
 	MaxQuestions    = 4
@@ -36,7 +39,9 @@ const description = "Ask the user 1 to 4 questions and wait for the answers. " +
 	"Every question with options gets an Other row where the user can type an answer, so never add an option named Other. " +
 	"The result lists one line per question; a typed answer appears in quotes after `Other:`. " +
 	"When the user skips, dismisses, or cannot be reached, the result says so; " +
-	"continue with your best judgment and state the assumptions you made."
+	"continue with your best judgment and state the assumptions you made.\n\n" +
+	"If the user does not answer within 5 minutes, the result says so and uses the first option of each question that has options, " +
+	"so make the first option one that is safe to use without an answer."
 
 const schema = `{"type":"object","properties":{"questions":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","properties":{"header":{"type":"string","maxLength":30,"description":"Tab label of a few words."},"question":{"type":"string","maxLength":500,"description":"The question as one sentence."},"options":{"type":"array","minItems":2,"maxItems":6,"description":"2 to 6 choices, recommended first. Omit for a free-text question.","items":{"type":"object","properties":{"label":{"type":"string","maxLength":80},"description":{"type":"string","maxLength":300},"preview":{"type":"string","maxLength":2000}},"required":["label","description"],"additionalProperties":false}},"multi_select":{"type":"boolean","description":"Let the user pick several options."}},"required":["header","question"],"additionalProperties":false}}},"required":["questions"],"additionalProperties":false}`
 
@@ -62,6 +67,7 @@ const (
 	OutcomeNoClient
 	OutcomeInterrupted
 	OutcomeFailed
+	OutcomeTimedOut
 )
 
 type Reply struct {
