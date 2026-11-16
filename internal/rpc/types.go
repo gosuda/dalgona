@@ -409,20 +409,31 @@ type (
 		Note     string `json:"note"`
 		Delivery string `json:"delivery"`
 	}
+	JudgeAttribution struct {
+		Part     int    `json:"part"`
+		By       string `json:"by"`
+		Fallback string `json:"fallback,omitzero"`
+	}
 	ToolJudgedNotification struct {
-		ThreadID string   `json:"threadId"`
-		TurnID   string   `json:"turnId"`
-		ItemID   string   `json:"itemId"`
-		Verdict  string   `json:"verdict"`
-		Summary  string   `json:"summary"`
-		Paths    []string `json:"paths"`
+		ThreadID string             `json:"threadId"`
+		TurnID   string             `json:"turnId"`
+		ItemID   string             `json:"itemId"`
+		Verdict  string             `json:"verdict"`
+		Summary  string             `json:"summary"`
+		Paths    []string           `json:"paths"`
+		By       string             `json:"by"`
+		Fallback string             `json:"fallback,omitzero"`
+		Judges   []JudgeAttribution `json:"judges,omitzero"`
 	}
 	TurnJudgedNotification struct {
-		ThreadID string   `json:"threadId"`
-		TurnID   string   `json:"turnId"`
-		Verdict  string   `json:"verdict"`
-		Summary  string   `json:"summary"`
-		Paths    []string `json:"paths"`
+		ThreadID string             `json:"threadId"`
+		TurnID   string             `json:"turnId"`
+		Verdict  string             `json:"verdict"`
+		Summary  string             `json:"summary"`
+		Paths    []string           `json:"paths"`
+		By       string             `json:"by"`
+		Fallback string             `json:"fallback,omitzero"`
+		Judges   []JudgeAttribution `json:"judges,omitzero"`
 	}
 	RetryWaitNotification struct {
 		ThreadID    string `json:"threadId"`

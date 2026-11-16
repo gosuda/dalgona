@@ -212,7 +212,7 @@ Turn objects carry `startedAt` and `completedAt` as Unix seconds, and `durationM
 |---|---|
 | `turn.started` | `turn/started`, `thread/status/changed` active |
 | `turn.completed` | `error` when the turn failed, `turn/completed`, `thread/status/changed` idle |
-| `turn.judged` | `dalgona/turn/judged {threadId, turnId, verdict, summary, paths}`, live only |
+| `turn.judged` | `dalgona/turn/judged {threadId, turnId, verdict, summary, paths, by, fallback?, judges?}`, live only. `by` names the answering model. `fallback` names the primary model and its failure. |
 | `turn.effort` | `dalgona/turn/effort {threadId, turnId, effort}`, live only. All three members MUST be present. Empty `effort` is authoritative. |
 | `user.message` | `item/started` and `item/completed` with a `userMessage`. The server MUST echo each image of a user message as an `image` input item. The echoed image item MUST NOT carry image bytes. The echoed image item MUST name the blob with the `dalgona-blob:` prefix. |
 | text delta | `item/started` once, then `item/agentMessage/delta` |
@@ -222,7 +222,7 @@ Turn objects carry `startedAt` and `completedAt` as Unix seconds, and `durationM
 | `approval.resolved` | `serverRequest/resolved` |
 | `tool.started` | `item/started` once per call. This opens a nested call whose name was unknown at approval time. |
 | `tool.completed` | `item/completed`. For the `todo` tool, also `turn/plan/updated` |
-| `tool.judged` | `dalgona/tool/judged {threadId, turnId, itemId, verdict, summary, paths}`, live only |
+| `tool.judged` | `dalgona/tool/judged {threadId, turnId, itemId, verdict, summary, paths, by, fallback?, judges?}`, live only. `by` names the answering model. `fallback` names the primary model and its failure. `judges` holds `{part, by, fallback?}` for each part of a split unit. |
 | `compaction` | `contextCompaction` item, and `thread/tokenUsage/updated` with `estimatedContextTokens` |
 | `model.retry` | `error` with `willRetry: true` |
 | `thread.named` | `thread/name/updated` |
