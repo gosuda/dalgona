@@ -143,6 +143,10 @@ func runContext(thread *starlark.Thread) context.Context {
 }
 
 func (r *run) print(_ *starlark.Thread, msg string) {
+	r.addPrint(msg)
+}
+
+func (r *run) addPrint(msg string) {
 	for line := range strings.SplitSeq(msg, "\n") {
 		if len(r.prints.Lines) >= maxPrintLines || r.printed+len(line) > maxPrintBytes {
 			r.prints.Truncated = true

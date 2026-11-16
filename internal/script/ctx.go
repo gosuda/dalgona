@@ -118,7 +118,14 @@ func (t *toolsValue) bind(name string) *starlark.Builtin {
 }
 
 func (r *run) prepareTool(name string, kwargs []starlark.Tuple) (Slot, effectFunc, error) {
-	action := kwString(kwargs, "action")
+	payload, err := kwargsJSON(kwargs)
+	if err != nil {
+		return Slot{}, nil, fmt.Errorf("tools.%s: %w", name, err)
+	}
+	return r.prepareToolCall(name, kwString(kwargs, "action"), payload)
+}
+
+func (r *run) prepareToolCall(name, action string, payload jsontext.Value) (Slot, effectFunc, error) {
 	if waitsForUser(name, action) {
 		label := name
 		if name == ratchetName {
@@ -132,10 +139,6 @@ func (r *run) prepareTool(name string, kwargs []starlark.Tuple) (Slot, effectFun
 	r.calls++
 	if r.calls > maxCalls {
 		return Slot{}, nil, r.halt(&stopError{status: StatusLimitExceeded, code: codeLimit, msg: fmt.Sprintf("the script exceeded %d tool calls", maxCalls)})
-	}
-	payload, err := kwargsJSON(kwargs)
-	if err != nil {
-		return Slot{}, nil, fmt.Errorf("tools.%s: %w", name, err)
 	}
 	slot, err := r.submit(ToolOp(name), payload)
 	if err != nil {

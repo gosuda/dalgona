@@ -92,7 +92,9 @@ Workflows and `eval` cells have `ctx` and `tools` (the same as `ctx.tools`). Plu
 
 ## The eval tool
 
-`eval` has class `Script`. Its arguments MUST be `{"code": str, "uses"?: [str], "data"?: any}`. Another field MUST fail with code `invalid_args` and stage `args`.
+`eval` has class `Script`. Its arguments MUST be `{"code": str, "lang"?: "star"|"js", "uses"?: [str], "data"?: any}`. Another field MUST fail with code `invalid_args` and stage `args`.
+
+`lang` MUST default to `star`. A `lang` value outside `"star"` and `"js"` MUST fail with code `invalid_args` and stage `args`.
 
 A cell MUST see `ctx`, `tools`, and `data`. `data` MUST be `None` when absent. A cell MUST NOT keep globals for the next cell. Each call MUST be a durable run with `run_id = call_id`.
 
@@ -125,6 +127,20 @@ The reply MUST be:
 | `result` | `failed` | `result` |
 
 `tool.Result.OK` MUST be `true` only for `completed`.
+
+## JavaScript cells
+
+A `lang` of `"js"` MUST run `code` as ECMAScript 2023 on an embedded QuickJS engine. The run MUST journal the same effects as a Starlark cell. Starlark MUST remain the default eval language.
+
+A JavaScript cell MUST see `ctx`, `tools`, `data`, and `console`. `data` MUST be `null` when absent. The completion value of the source, as `eval` computes it, MUST be the result. A non-JSON result MUST encode as `null`.
+
+`console.log` MUST write print lines. `tools.<name>(arg)` MUST call the tool with `arg` as the one JSON argument object, defaulting to `{}`. `ctx.tools` MUST be `tools`. Every call MUST journal the `tool:<name>` effect and MUST replay it on recovery.
+
+The `ctx` surface MUST be `ctx.log(msg)`, `ctx.sleep(seconds)`, `ctx.spawn(prompt, opts?)`, `ctx.wait(ids)`, `ctx.judge(state, questions, model?)`, `ctx.judgeBatch(states, questions, model?)`, and `ctx.tryCall(fn, arg)`. `ctx.tryCall` MUST return `{ok, value, error}` and MUST rethrow a stop condition. JavaScript cells MUST NOT provide `ctx.scope`, and their calls MUST run serially.
+
+`ctx.judge` MUST take `questions` as a JSON object in the same shape Starlark requires. `ctx.judgeBatch` MUST return one `{answers, model, fallback, error}` object per state, in input order.
+
+A syntax error MUST fail with code `syntax` and stage `parse`. A source that cannot compile MUST fail the same way. The same statuses, codes, limits, `uses` checks, and `waitsForUser` denials MUST apply as for Starlark cells.
 
 ## Tool modes
 
