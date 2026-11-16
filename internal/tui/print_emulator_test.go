@@ -160,7 +160,17 @@ func (r *emulatedRun) waitFor(t *testing.T, what string, ok func(history, screen
 
 func (r *emulatedRun) stop() {
 	r.program.Quit()
+	if r.em != nil {
+		input, ok := r.em.InputPipe().(io.Closer)
+		if !ok {
+			panic("terminal input pipe cannot close")
+		}
+		_ = input.Close()
+	}
 	<-r.done
+	if r.em != nil {
+		_ = r.em.Close()
+	}
 	time.Sleep(dockQueryTimeout)
 	synctest.Wait()
 }
@@ -435,13 +445,7 @@ func TestDockAnchorsToPhysicalBottomAcrossResize(t *testing.T) {
 		em := vt.NewEmulator(100, 24)
 		tmuxMode(em)
 		run := startEmulatedProgram(em, em, nil)
-		defer func() {
-			run.program.Quit()
-			_ = em.Close()
-			<-run.done
-			time.Sleep(dockQueryTimeout)
-			synctest.Wait()
-		}()
+		defer run.stop()
 		run.send(resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/test", PlatformFamily: "unix"}})
 		run.send(commandDone("anchor-proof"))
 		for _, size := range []tea.WindowSizeMsg{
@@ -533,13 +537,7 @@ func TestDockHoldsPhysicalBottomAcrossStreamedTurn(t *testing.T) {
 		em := vt.NewEmulator(100, 24)
 		tmuxMode(em)
 		run := startEmulatedProgram(em, em, nil)
-		defer func() {
-			run.program.Quit()
-			_ = em.Close()
-			<-run.done
-			time.Sleep(dockQueryTimeout)
-			synctest.Wait()
-		}()
+		defer run.stop()
 		run.send(resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/test", PlatformFamily: "unix"}})
 		run.send(commandDone("anchor-turn"))
 		bandAtBottom(t, run, em, 24, "startup before any input")
@@ -580,13 +578,7 @@ func TestDockQueryTimeoutAbandonsArming(t *testing.T) {
 		em := vt.NewEmulator(100, 24)
 		muteMode(em)
 		run := startEmulatedProgram(em, em, nil)
-		defer func() {
-			run.program.Quit()
-			_ = em.Close()
-			<-run.done
-			time.Sleep(dockQueryTimeout)
-			synctest.Wait()
-		}()
+		defer run.stop()
 		run.send(resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/test", PlatformFamily: "unix"}})
 		run.send(commandDone("timeout-proof"))
 		run.waitFor(t, "bottom-anchor query armed", func(string, string) bool {
