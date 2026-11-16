@@ -184,6 +184,7 @@ const shown = $derived({
 		width: 100%;
 		min-width: 0;
 		overflow: hidden;
+		padding: 4px;
 		gap: var(--space-1) var(--space-3);
 		margin: 0;
 		font-size: var(--size-caption);
