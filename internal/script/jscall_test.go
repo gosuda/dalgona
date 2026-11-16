@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/script"
 )
 

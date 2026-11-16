@@ -58,7 +58,7 @@ const __r = eval(%s);
 (() => { try { return __j(__r) } catch (e) { return "null" } })()
 `
 
-func (r *run) executeJS(parent context.Context, src, data jsontext.Value, seed int64) Outcome {
+func (r *Runtime) executeJS(parent context.Context, src, data jsontext.Value, seed int64) Outcome {
 	ctx, cancel := context.WithCancelCause(parent)
 	r.cancel = cancel
 	defer func() {
@@ -109,7 +109,7 @@ func quoteJS(src string) string {
 	return string(quoted)
 }
 
-func (r *run) finishJS(parent context.Context, value jsontext.Value, err error, budget bool) Outcome {
+func (r *Runtime) finishJS(parent context.Context, value jsontext.Value, err error, budget bool) Outcome {
 	r.inflight.Wait()
 	if budget && err != nil && r.fatalStop() == nil && parent.Err() == nil {
 		return Outcome{Status: StatusLimitExceeded, Error: Failure{Code: codeLimit, Message: "js cell exceeded the eval time budget", Stage: stageRun}, Prints: r.prints}
@@ -123,9 +123,9 @@ func (r *run) finishJS(parent context.Context, value jsontext.Value, err error, 
 	return Outcome{Status: StatusCompleted, Value: value, Prints: r.prints}
 }
 
-func (r *run) bindJS(vm *quickjs.VM, ctx context.Context) error {
+func (r *Runtime) bindJS(vm *quickjs.VM, ctx context.Context) error {
 	funcs := map[string]quickjs.HostFunc{
-		"__print":    func(args []any) (any, error) { r.addPrint(fmt.Sprint(args...)); return nil, nil },
+		"__print":    func(args []any) (any, error) { r.print(nil, fmt.Sprint(args...)); return nil, nil },
 		"__toolCall": func(args []any) (any, error) { return r.jsToolCall(ctx, args) },
 		"__ctxLog": func(args []any) (any, error) {
 			r.fx.Log(r.id, fmt.Sprint(args...))
@@ -168,23 +168,32 @@ func jsStr(args []any, i int) string {
 	return text
 }
 
-func jsAction(payload jsontext.Value) string {
-	var fields struct {
-		Action string `json:"action"`
+func jsKwargs(payload jsontext.Value) ([]starlark.Tuple, error) {
+	decoded, err := FromJSON(payload)
+	if err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal([]byte(payload), &fields); err != nil {
-		return ""
+	if decoded == starlark.None {
+		return nil, nil
 	}
-	return fields.Action
+	dict, ok := decoded.(*starlark.Dict)
+	if !ok {
+		return nil, errors.New("tool arguments must be a JSON object")
+	}
+	return dict.Items(), nil
 }
 
-func (r *run) jsToolCall(ctx context.Context, args []any) (any, error) {
+func (r *Runtime) jsToolCall(ctx context.Context, args []any) (any, error) {
 	if len(args) == 0 {
 		return nil, errors.New("tool call needs a name")
 	}
 	name, _ := args[0].(string)
 	payload := jsArg(args, 1, "{}")
-	slot, effect, err := r.prepareToolCall(name, jsAction(payload), payload)
+	kwargs, err := jsKwargs(payload)
+	if err != nil {
+		return nil, err
+	}
+	slot, effect, err := r.prepareTool(name, kwargs)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +204,7 @@ func (r *run) jsToolCall(ctx context.Context, args []any) (any, error) {
 	return string(value), nil
 }
 
-func (r *run) jsSleep(ctx context.Context, args []any) error {
+func (r *Runtime) jsSleep(ctx context.Context, args []any) error {
 	seconds, ok := args[0].(float64)
 	if !ok || seconds < 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
 		return errors.New("ctx.sleep: seconds must be a non-negative finite number")
@@ -203,7 +212,7 @@ func (r *run) jsSleep(ctx context.Context, args []any) error {
 	return r.sleepFor(ctx, time.Duration(seconds*float64(time.Second)))
 }
 
-func (r *run) jsSpawn(ctx context.Context, args []any) (any, error) {
+func (r *Runtime) jsSpawn(ctx context.Context, args []any) (any, error) {
 	prompt := jsStr(args, 0)
 	var raw struct {
 		Runner string `json:"runner"`
@@ -223,7 +232,7 @@ func (r *run) jsSpawn(ctx context.Context, args []any) (any, error) {
 		if spawnErr != nil {
 			return nil, spawnErr
 		}
-		return stringJSON(id), nil
+		return StringJSON(id), nil
 	})
 	if err != nil {
 		return nil, err
@@ -235,7 +244,7 @@ func (r *run) jsSpawn(ctx context.Context, args []any) (any, error) {
 	return id, nil
 }
 
-func (r *run) jsWait(ctx context.Context, args []any) (any, error) {
+func (r *Runtime) jsWait(ctx context.Context, args []any) (any, error) {
 	var ids []string
 	if err := json.Unmarshal(jsArg(args, 0, "[]"), &ids); err != nil {
 		return nil, fmt.Errorf("ctx.wait: ids must be a string array: %w", err)
@@ -251,8 +260,8 @@ func (r *run) jsWait(ctx context.Context, args []any) (any, error) {
 	return string(out), nil
 }
 
-func (r *run) jsQuestionSet(raw jsontext.Value) (questionSet, error) {
-	value, err := fromJSON(raw)
+func (r *Runtime) jsQuestionSet(raw jsontext.Value) (questionSet, error) {
+	value, err := FromJSON(raw)
 	if err != nil {
 		return questionSet{}, err
 	}
@@ -263,7 +272,7 @@ func (r *run) jsQuestionSet(raw jsontext.Value) (questionSet, error) {
 	return parseQuestions(dict)
 }
 
-func (r *run) jsJudgeOne(ctx context.Context, state starlark.Value, set questionSet, model string) (jsontext.Value, error) {
+func (r *Runtime) jsJudgeOne(ctx context.Context, state starlark.Value, set questionSet, model string) (jsontext.Value, error) {
 	encoded, err := judgeState(state)
 	if err != nil {
 		return nil, err
@@ -280,15 +289,15 @@ func (r *run) jsJudgeOne(ctx context.Context, state starlark.Value, set question
 	if err != nil {
 		return nil, err
 	}
-	return toJSON(judged)
+	return ToJSON(judged)
 }
 
-func (r *run) jsJudge(ctx context.Context, args []any) (any, error) {
+func (r *Runtime) jsJudge(ctx context.Context, args []any) (any, error) {
 	set, err := r.jsQuestionSet(jsArg(args, 1, "{}"))
 	if err != nil {
 		return nil, fmt.Errorf("ctx.judge: %w", err)
 	}
-	state, err := fromJSON(jsArg(args, 0, "null"))
+	state, err := FromJSON(jsArg(args, 0, "null"))
 	if err != nil {
 		return nil, fmt.Errorf("ctx.judge: state: %w", err)
 	}
@@ -300,12 +309,12 @@ func (r *run) jsJudge(ctx context.Context, args []any) (any, error) {
 	return string(out), nil
 }
 
-func (r *run) jsJudgeBatch(ctx context.Context, args []any) (any, error) {
+func (r *Runtime) jsJudgeBatch(ctx context.Context, args []any) (any, error) {
 	set, err := r.jsQuestionSet(jsArg(args, 1, "{}"))
 	if err != nil {
 		return nil, fmt.Errorf("ctx.judge_batch: %w", err)
 	}
-	states, err := fromJSON(jsArg(args, 0, "[]"))
+	states, err := FromJSON(jsArg(args, 0, "[]"))
 	if err != nil {
 		return nil, fmt.Errorf("ctx.judge_batch: states: %w", err)
 	}
@@ -333,7 +342,7 @@ func (r *run) jsJudgeBatch(ctx context.Context, args []any) (any, error) {
 	return string(out), nil
 }
 
-func (r *run) jsBatchEntry(ctx context.Context, item starlark.Value, set questionSet, model string) (jsontext.Value, error) {
+func (r *Runtime) jsBatchEntry(ctx context.Context, item starlark.Value, set questionSet, model string) (jsontext.Value, error) {
 	value, err := r.jsJudgeOne(ctx, item, set, model)
 	if err == nil {
 		return mergeErrorField(value), nil

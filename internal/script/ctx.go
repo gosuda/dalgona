@@ -147,32 +147,6 @@ func (r *Runtime) prepareTool(name string, kwargs []starlark.Tuple) (Slot, effec
 	return slot, effect, nil
 }
 
-
-func (r *run) prepareToolCall(name, action string, payload jsontext.Value) (Slot, effectFunc, error) {
-	if waitsForUser(name, action) {
-		label := name
-		if name == ratchetName {
-			label += " " + action
-		}
-		return Slot{}, nil, r.halt(&stopError{status: StatusDenied, code: codeScope, msg: fmt.Sprintf("tool %s needs the user and runs only as a direct call", label)})
-	}
-	if !r.cfg.allow.has(name) {
-		return Slot{}, nil, r.halt(&stopError{status: StatusDenied, code: codeScope, msg: fmt.Sprintf("tool %s is not in this script's uses", name)})
-	}
-	r.calls++
-	if r.calls > maxCalls {
-		return Slot{}, nil, r.halt(&stopError{status: StatusLimitExceeded, code: codeLimit, msg: fmt.Sprintf("the script exceeded %d tool calls", maxCalls)})
-	}
-	slot, err := r.submit(ToolOp(name), payload)
-	if err != nil {
-		return Slot{}, nil, err
-	}
-	effect := func(ctx context.Context) (jsontext.Value, error) {
-		return r.fx.CallTool(ctx, slot, name, payload)
-	}
-	return slot, effect, nil
-}
-
 func kwString(kwargs []starlark.Tuple, key string) string {
 	for _, kv := range kwargs {
 		if name, _ := starlark.AsString(kv[0]); name == key {

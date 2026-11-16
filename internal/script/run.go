@@ -277,18 +277,6 @@ func (r *Runtime) ExecCell(ctx context.Context, entry string, src []byte, env st
 	return starlark.None, nil
 }
 
-
-func (r *run) addPrint(msg string) {
-	for line := range strings.SplitSeq(msg, "\n") {
-		if len(r.prints.Lines) >= maxPrintLines || r.printed+len(line) > maxPrintBytes {
-			r.prints.Truncated = true
-			return
-		}
-		r.printed += len(line)
-		r.prints.Lines = append(r.prints.Lines, line)
-	}
-}
-
 func captureLast(file *syntax.File) {
 	last := len(file.Stmts) - 1
 	if last < 0 {
