@@ -49,7 +49,7 @@ func cellCount(m model, text string) int {
 	return m.screen.cells(text)
 }
 
-func TestLiveRowShowsWorkingTagAndElapsed(t *testing.T) {
+func TestStatusRowShowsWorkingTagAndElapsed(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	m := liveModel(t, &now)
@@ -62,7 +62,7 @@ func TestLiveRowShowsWorkingTagAndElapsed(t *testing.T) {
 	}
 }
 
-func TestLiveRowFieldsKeepCells(t *testing.T) {
+func TestStatusRowFieldsKeepCells(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	m := liveModel(t, &now)
@@ -87,7 +87,7 @@ func liveColumn(t *testing.T, m model, row, field string) int {
 	return cellCount(m, row[:index])
 }
 
-func TestLiveRowFieldWidths(t *testing.T) {
+func TestStatusRowFieldWidths(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	m := liveModel(t, &now)
@@ -150,7 +150,7 @@ func requireLiveColumn(t *testing.T, m model, row, field string, want int) {
 	}
 }
 
-func TestLiveRowSeparatesOrdinaryFields(t *testing.T) {
+func TestStatusRowSeparatesOrdinaryFields(t *testing.T) {
 	t.Parallel()
 	for _, width := range []int{40, 100} {
 		t.Run(fmt.Sprintf("width%d", width), func(t *testing.T) {
@@ -175,7 +175,7 @@ func TestLiveRowSeparatesOrdinaryFields(t *testing.T) {
 	}
 }
 
-func TestLiveRowSaturatedFieldsSeparate(t *testing.T) {
+func TestStatusRowSaturatedFieldsSeparate(t *testing.T) {
 	t.Parallel()
 	for _, width := range []int{40, 100} {
 		t.Run(fmt.Sprintf("width%d", width), func(t *testing.T) {
@@ -233,7 +233,7 @@ func assertQueuedField(t *testing.T, width int, row string) {
 	}
 }
 
-func TestLiveRowTinyFreeTextKeepsFixedFields(t *testing.T) {
+func TestStatusRowTinyFreeTextKeepsFixedFields(t *testing.T) {
 	t.Parallel()
 	for _, free := range []int{0, 1, 2, 3} {
 		t.Run(fmt.Sprintf("free%d", free), func(t *testing.T) {
@@ -255,7 +255,7 @@ func TestLiveRowTinyFreeTextKeepsFixedFields(t *testing.T) {
 	}
 }
 
-func TestLiveRowBelowFortyColumns(t *testing.T) {
+func TestStatusRowBelowFortyColumns(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	m := liveModel(t, &now)
@@ -459,7 +459,7 @@ func decoderPlan() []rpc.TurnPlanStep {
 	}
 }
 
-func TestLiveRowShowsCurrentPlanStep(t *testing.T) {
+func TestStatusRowShowsCurrentPlanStep(t *testing.T) {
 	t.Parallel()
 	writing := liveItem{ID: "a1", Type: "agentMessage", streamTail: "streamed answer"}
 	m := planStepModel(t, 100, decoderPlan(), []liveItem{writing})
@@ -473,7 +473,7 @@ func TestLiveRowShowsCurrentPlanStep(t *testing.T) {
 	}
 }
 
-func TestLiveRowRunningToolOutranksPlanStep(t *testing.T) {
+func TestStatusRowRunningToolOutranksPlanStep(t *testing.T) {
 	t.Parallel()
 	writing := liveItem{ID: "a1", Type: "agentMessage", streamTail: "streamed answer"}
 	running := liveItem{ID: "c1", Type: "commandExecution", Command: "go test ./...", Status: "inProgress"}
@@ -497,7 +497,7 @@ func TestLiveRowRunningToolOutranksPlanStep(t *testing.T) {
 	}
 }
 
-func TestLiveRowPlanStepSelection(t *testing.T) {
+func TestStatusRowPlanStepSelection(t *testing.T) {
 	t.Parallel()
 	advisor := liveItem{ID: "v1", Type: "dynamicToolCall", Tool: "advisor", Status: "inProgress"}
 	silentTool := liveItem{ID: "d1", Type: "dynamicToolCall", Status: "inProgress"}
@@ -529,7 +529,7 @@ func TestLiveRowPlanStepSelection(t *testing.T) {
 	}
 }
 
-func TestLiveRowPlanStepStaysOneRow(t *testing.T) {
+func TestStatusRowPlanStepStaysOneRow(t *testing.T) {
 	t.Parallel()
 	plan := []rpc.TurnPlanStep{{Step: "Fix the decoder carefully\nthen run the tests", Status: "inProgress"}}
 	m := planStepModel(t, 60, plan, nil)
@@ -545,7 +545,7 @@ func TestLiveRowPlanStepStaysOneRow(t *testing.T) {
 	}
 }
 
-func TestLiveRowWaitsOutrankToolAndPlanStep(t *testing.T) {
+func TestStatusRowWaitsOutrankToolAndPlanStep(t *testing.T) {
 	t.Parallel()
 	running := liveItem{ID: "c1", Type: "commandExecution", Command: "go test ./...", Status: "inProgress"}
 	plan := []rpc.TurnPlanStep{{Step: "Fix the decoder", Status: "inProgress"}}
@@ -565,7 +565,7 @@ func TestLiveRowWaitsOutrankToolAndPlanStep(t *testing.T) {
 	}
 }
 
-func TestLiveRowPlanStepFollowsPlanNotifications(t *testing.T) {
+func TestStatusRowPlanStepFollowsPlanNotifications(t *testing.T) {
 	t.Parallel()
 	m := notifyTurn(t, rowModel(t, 100), "turn/started", "inProgress")
 	m = planUpdate(t, m, `[{"step":"Inspect the decoder","status":"completed"},{"step":"Fix the decoder","status":"inProgress"},{"step":"Check the decoder","status":"pending"}]`)

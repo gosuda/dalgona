@@ -1,0 +1,1 @@
+{"models":[{"id":"qwen-test","context_length":32000}],"turns":[{"id":"t-hello","when":{"user_exact":"hello"},"steps":[{"text":"hi"},{"finish":"stop"}]}]}

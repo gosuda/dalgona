@@ -24,7 +24,7 @@ Prove that a new test detects its defect with a mutation probe: put that defect 
 
 For persistence changes, test interruption and damaged input against [journal.md](docs/dal/spec/journal.md) and [recovery.md](docs/dal/spec/recovery.md). For protocol changes, preserve [protocol.md](docs/dal/spec/protocol.md) and the vendored schema tests in `internal/dal/rpc`. For edit changes, test refusal without partial writes under [edit-styles.md](docs/dal/spec/edit-styles.md).
 
-Live debugging: `just live-up`, then follow [live-debug.md](docs/dal/spec/live-debug.md); `just live-down` stops everything.
+Live debugging: `just live-up-dal` or `just live-up-dalgona`, then follow [live-debug.md](docs/dal/spec/live-debug.md); `just live-down-dal` or `just live-down-dalgona` stops that product.
 
 ## Use the declared tools
 

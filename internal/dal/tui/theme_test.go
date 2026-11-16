@@ -262,7 +262,7 @@ func TestThreadHueMatchesFNV(t *testing.T) {
 	}
 }
 
-func TestLiveTagFillAndNoColourReverse(t *testing.T) {
+func TestStatusTagFillAndNoColourReverse(t *testing.T) {
 	t.Parallel()
 	colour := newTheme(themeNight, true)
 	got := colour.liveTag(1, "Working")

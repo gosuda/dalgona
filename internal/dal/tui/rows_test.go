@@ -378,7 +378,7 @@ func TestDynamicAndMCPRowsShowDuration(t *testing.T) {
 	}
 }
 
-func TestLiveCommandTailKeepsNewestBeyondCap(t *testing.T) {
+func TestStatusCommandTailKeepsNewestBeyondCap(t *testing.T) {
 	t.Parallel()
 	m := rowModel(t, 100)
 	m = notifyItem(t, m, "item/started", `{"type":"commandExecution","id":"c1","command":"seq","cwd":"/work","status":"inProgress"}`)

@@ -28,8 +28,8 @@ func liveModelIDs(t *testing.T, serverURL, key string) ([]string, error) {
 
 func TestLiveModelListAnswersTheOpenAIKeyCheck(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(NewHandler(loadLiveScript(t), Options{Key: liveLoginKey}))
-	t.Cleanup(server.Close)
+	script := Script{Models: []Model{{ID: "qwen-test", ContextLength: 32000}, {ID: "qwen-small"}}}
+	server := httptest.NewServer(NewHandler(script, Options{Key: liveLoginKey}))
 	ids, err := liveModelIDs(t, server.URL, liveLoginKey)
 	if err != nil {
 		t.Fatal(err)
