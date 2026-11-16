@@ -14,7 +14,7 @@ func doctorHome(t *testing.T) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("the home mode check runs on unix only")
 	}
-	home := filepath.Join(t.TempDir(), "home")
+	home := filepath.Join(shortDaemonHome(t), "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}

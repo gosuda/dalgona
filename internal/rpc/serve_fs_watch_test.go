@@ -41,7 +41,10 @@ func expectNoChange(t *testing.T, c *wireClient, window time.Duration) {
 func TestFsWatchUnchangedPollAndUnwatchEndDelivery(t *testing.T) {
 	r := newRig(t, config.ApprovalYolo)
 	c := r.connect()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	file := filepath.Join(dir, "x.txt")
 	if err := os.WriteFile(file, []byte("one"), 0o644); err != nil {
 		t.Fatal(err)

@@ -138,7 +138,7 @@ func stopFakeDaemon(t *testing.T, cancel context.CancelFunc, done <-chan error) 
 const otherBuild = "ffeeddccbbaa0099"
 
 func TestEnsureRefusesOtherBuild(t *testing.T) {
-	home := t.TempDir()
+	home := shortDaemonHome(t)
 	cancel, done := startFakeDaemon(t, home, otherBuild, os.Getpid(), nil)
 	defer stopFakeDaemon(t, cancel, done)
 	err := checkBuild(t.Context(), home, daemon.Build())
@@ -153,7 +153,7 @@ func TestEnsureRefusesOtherBuild(t *testing.T) {
 }
 
 func TestEnsureDeclinedRestartRefuses(t *testing.T) {
-	home := t.TempDir()
+	home := shortDaemonHome(t)
 	cancel, done := startFakeDaemon(t, home, otherBuild, os.Getpid(), nil)
 	defer stopFakeDaemon(t, cancel, done)
 	out := &strings.Builder{}
@@ -172,7 +172,7 @@ func TestEnsureDeclinedRestartRefuses(t *testing.T) {
 }
 
 func TestEnsureAcceptedRestartRetiresDaemon(t *testing.T) {
-	home := t.TempDir()
+	home := shortDaemonHome(t)
 	retired := make(chan struct{})
 	var cancel context.CancelFunc
 	var done <-chan error
@@ -196,7 +196,7 @@ func TestEnsureAcceptedRestartRetiresDaemon(t *testing.T) {
 }
 
 func TestRestartRefusesPreIdentityDaemon(t *testing.T) {
-	home := t.TempDir()
+	home := shortDaemonHome(t)
 	cancel, done := startFakeDaemon(t, home, "", 0, nil)
 	defer stopFakeDaemon(t, cancel, done)
 	code := restartDaemon(t.Context(), home, stdio{in: strings.NewReader(""), out: io.Discard, errOut: io.Discard})
@@ -221,7 +221,7 @@ func deadPID(t *testing.T) int {
 }
 
 func TestRestartRefusesUnverifiedPID(t *testing.T) {
-	home := t.TempDir()
+	home := shortDaemonHome(t)
 	cancel, done := startFakeDaemon(t, home, otherBuild, deadPID(t), nil)
 	defer stopFakeDaemon(t, cancel, done)
 	code := restartDaemon(t.Context(), home, stdio{in: strings.NewReader(""), out: io.Discard, errOut: io.Discard})
