@@ -31,11 +31,31 @@ func TestStore_UnmaskStrictFailsOnMissingGrammar(t *testing.T) {
 		"{{secret:pattern0:0}}",
 		"{{secret:STRICT_SCOPE_TEST_API_KEY}}",
 		"{{secret:auth:openai}}",
+		"{{secret:builtin6:3}}",
+		"{{secret:keyword:2}}",
 	} {
 		if _, err := store.UnmaskStrict("prefix " + token + " suffix"); err == nil {
 			t.Fatalf("UnmaskStrict(%q) succeeded, want error", token)
 		} else if !strings.Contains(err.Error(), "cannot be restored") {
 			t.Fatalf("UnmaskStrict(%q) error = %q, want restore error", token, err)
+		}
+	}
+}
+
+func TestStore_UnmaskStrictIgnoresMalformedFamilies(t *testing.T) {
+	store, err := NewWithPatterns(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, literal := range []string{
+		"{{secret:builtin:3}}",
+		"{{secret:builtinx:3}}",
+		"{{secret:builtin6:}}",
+		"{{secret:keyword0:3}}",
+		"{{secret:keyword:}}",
+	} {
+		if got, err := store.UnmaskStrict(literal); err != nil || got != literal {
+			t.Fatalf("UnmaskStrict(%q) = %q, %v, want unchanged", literal, got, err)
 		}
 	}
 }

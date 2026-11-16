@@ -213,6 +213,7 @@ type (
 	}
 	secretsDoc struct {
 		Patterns []string `toml:"patterns"`
+		Builtin  *bool    `toml:"builtin"`
 	}
 	keywordDoc struct {
 		Notice   string   `toml:"notice"`
@@ -381,6 +382,7 @@ func (c *Config) mergeTables(doc *fileDoc) {
 	if doc.Secrets.Patterns != nil {
 		c.Secrets.Patterns = doc.Secrets.Patterns
 	}
+	set(doc.Secrets.Builtin, &c.Secrets.Builtin)
 	if doc.Herdr.SubagentPanes != nil {
 		c.Herdr.SubagentPanes = *doc.Herdr.SubagentPanes
 	}

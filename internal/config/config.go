@@ -246,11 +246,14 @@ type (
 		Uses []string
 		Set  bool
 	}
-	SecretsConfig struct{ Patterns []string }
-	HerdrConfig   struct{ SubagentPanes bool }
-	WebConfig     struct{ Listen, Token, CertFile, KeyFile string }
-	RolesConfig   struct{ Smol, Slow, Advisor string }
-	origin        struct {
+	SecretsConfig struct {
+		Patterns []string
+		Builtin  bool
+	}
+	HerdrConfig struct{ SubagentPanes bool }
+	WebConfig   struct{ Listen, Token, CertFile, KeyFile string }
+	RolesConfig struct{ Smol, Slow, Advisor string }
+	origin      struct {
 		file string
 		line int
 	}
@@ -310,7 +313,7 @@ func defaultConfigWithHome(product Product, home, cwd string) Config {
 		MaxSubagentStarts:    32,
 		CompactionKeepTokens: 20000, StreamStartTimeout: time.Minute,
 		StreamIdleTimeout: 5 * time.Minute, ApprovalDecider: ApprovalDeciderConfig{Threshold: .9},
-		Web: WebConfig{Listen: "127.0.0.1:7437"}, Providers: map[string]ProviderSpec{},
+		Web: WebConfig{Listen: "127.0.0.1:7437"}, Secrets: SecretsConfig{Builtin: true}, Providers: map[string]ProviderSpec{},
 		Models: map[string]ModelSpec{}, Runners: map[string]RunnerSpec{}, Remotes: map[string]RemoteSpec{},
 		MCPServers: map[string]MCPServerSpec{}, Keywords: map[string]KeywordSpec{},
 		lines: map[string]origin{}, Advisor: defaultAdvisor(), advisorEntries: map[string]advisorsDoc{}, priceEntries: map[string]priceKeys{},

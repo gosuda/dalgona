@@ -49,6 +49,14 @@ feedback = ["lost_code", "placeholder", "incomplete"]
 
 An absent `feedback` MUST select the built-in speaker set. An empty `feedback` MUST select no speaker. The `sound` question MUST NOT be a speaker.
 
+The `[secrets]` table MUST load in both products. Its key `patterns` MUST be a list of RE2 patterns. Its key `builtin` MUST be a boolean, and it defaults to `true`. The masking contract is in [secrets.md](secrets.md).
+
+```toml
+[secrets]
+patterns = ["token-[a-z0-9]{8,}"]
+builtin = false
+```
+
 The interactive settings MUST use the keys in the table below.
 
 | Key | Values | Default | Wire name |

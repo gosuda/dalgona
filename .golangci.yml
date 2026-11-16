@@ -129,6 +129,8 @@ linters:
             - "**/internal/textdiff/**"
             - "**/internal/keywords/**"
             - "**/internal/syntax/**"
+            - "**/internal/shellargs/**"
+            - "**/internal/secrets/**"
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/acp"
               desc: core must not import interfaces or batteries
