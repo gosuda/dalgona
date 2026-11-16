@@ -98,10 +98,10 @@ func aceGrants(ace *windows.ACCESS_ALLOWED_ACE, sid *windows.SID, inheritance ui
 	if ace.Mask&rootGrantMask != rootGrantMask {
 		return false
 	}
-	if ace.Header.AceFlags&uint8(inheritance) != uint8(inheritance) {
+	if uint32(ace.Header.AceFlags)&inheritance != inheritance {
 		return false
 	}
-	return (*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid)
+	return (*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid) //nolint:gosec // SidStart marks the inline SID bytes of the ACE
 }
 
 func openACLTarget(path string) (windows.Handle, uint32, error) {

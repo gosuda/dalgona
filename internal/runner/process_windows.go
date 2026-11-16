@@ -172,9 +172,9 @@ func assignJob(cmd *exec.Cmd) (func(), error) {
 	}
 	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 	limits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
+	if _, setErr := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); setErr != nil { //nolint:gosec // SetInformationJobObject takes the limits struct as a raw pointer
 		_ = windows.CloseHandle(job)
-		return nil, fmt.Errorf("runner: set job kill-on-close: %w", err)
+		return nil, fmt.Errorf("runner: set job kill-on-close: %w", setErr)
 	}
 	pid, ok := windowsPID(cmd.Process.Pid)
 	if !ok {
