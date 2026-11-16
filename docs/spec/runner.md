@@ -12,6 +12,53 @@ The parent MUST start the shim detached. The invocation MUST be `<self> __shim -
 
 `ProcessSpec.Argv[0]` equal to `@self` MUST resolve to the parent build: `/proc/self/exe` on Linux and `os.Executable()` on macOS and Windows. On a remote exec server it MUST resolve to the exec-server binary path.
 
+`Start` MUST check `ProcessSpec.Argv` with the process-kill guard before it creates a call directory. A refused `Start` MUST NOT create a call directory. It MUST NOT start the shim. `Local` MUST hold `protectedPIDs`, the daemon process id and its parent process id. `NewLocal` MUST set them to the current process id and its parent process id.
+
+`CheckProcessKillGuard(argv, daemonPID, parentPID)` MUST return nil for empty `argv`. It MUST return nil for a command that signals no protected process. When it refuses a command, it MUST return an error that wraps `ErrProcessKillGuard`.
+
+The guard MUST read the command in `argv`. For a shell call with `-c`, it MUST read the command string after the `-c` flag. It MUST cut the string with `shellargs.Split` and cut each part with `shellargs.Tokens`. It MUST remove leading assignments and wrappers with `shellargs.StripWrappers`. The runner MUST NOT import `internal/agent/rules`.
+
+The guard MUST also read these forms inside a command string:
+
+- A `bash`, `sh`, `zsh`, `dash`, `ksh`, `ash`, `mksh`, or `fish` call with `-c`.
+- An `eval` call.
+- A command substitution `$(...)` or a backtick pair outside single quotes.
+- The command that `xargs` runs.
+- Each action that follows `-exec`, `-execdir`, `-ok`, or `-okdir` in a `find` call.
+
+The guard MUST stop at eight nested levels. It MUST refuse a command that nests deeper.
+
+The guard MUST refuse a `kill` command in each of these cases:
+
+- The command has no PID operand.
+- A PID operand is not a plain decimal number, such as `$PPID`, `$$`, `$(...)`, a backtick pair, or `%1`.
+- A PID operand is zero, negative, or above 2147483647.
+- A PID operand names the daemon or its parent.
+
+The guard MUST read signal options separately from operands. The options are `-s SIG`, `-n NUM`, `-SIG`, `--signal=SIG`, and `--`. The guard MUST allow `kill -l` and `kill --help`. It MUST allow other positive PIDs, including `kill -0 <pid>`.
+
+The guard MUST refuse a `pkill` or `killall` command in each of these cases:
+
+- A pattern or name matches `dal`, `dalgona`, or the running binary name.
+- A pattern or name matches the process name or command line of the daemon or its parent. The guard reads them from `/proc` on Linux only.
+- A pattern is not a valid regular expression.
+- The command has no pattern, so it selects processes by attribute only.
+- The command inverts the match with `-v`.
+
+The guard MUST refuse a `kill`, `pkill`, or `killall` command that `xargs` or `find` supplies with its target. The guard cannot read that target. The guard MUST refuse a wrapper call that `shellargs.StripWrappers` cannot unwrap when any word of the call contains `kill`. The guard MUST refuse a part with unbalanced quotes when the part contains `kill`.
+
+Echoed text is data. A command such as `echo kill -9 4242` MUST pass the guard.
+
+The refusal text of the `exec` tool MUST be `refused: process-kill guard prevents signaling daemon or parent`. The tool MUST return that text with `ok` false and no exit code when `Start` returns an error that wraps `ErrProcessKillGuard`.
+
+The guard is a best-effort check. It is not confinement. These cases pass the guard:
+
+- A program that signals through a system call.
+- A script file that holds the kill command.
+- A shell that reads its commands from standard input.
+- A variable that holds a command name.
+- A wrapper that is not in the `shellargs.StripWrappers` list.
+
 `Start` MUST be idempotent. An existing call directory for the same call id MUST make `Start` return success. It MUST NOT start a second process. When the shim does not start, `Start` MUST remove the call directory, so a retry with the same call id starts the command. When `Start` fails after the shim starts, it MUST record `cancel` with `KILL`, stop the shim, and stop the recorded command group. When it confirms that the command group stopped, it MUST remove the call directory, so a retry with the same call id starts the command. When it cannot confirm that the command group stopped, it MUST keep the call directory and record `aborted` in it. A retry with the same call id MUST NOT start the command again. The next `Start` with that call id MUST fail with an error that names the call id and the kept directory.
 
 The shim MUST write `pid` before it starts the command. `pid` MUST store the process id and the process start time. Recovery and `Read` MUST accept a process only when both values match. A recycled process id MUST NOT count as the shim. `Start` MUST write `pid` before it returns. The parent MUST write the same values as the shim. On Windows, a write of at most 4 KiB MAY keep the existing regular file. It MAY do so only when the staged bytes and writable state equal that file. On Windows, a file replace that fails with a sharing violation or access denied MUST wait and retry for up to one second. After that second, it MUST fail. The first `Read` after `Start` MUST report a live process when no `exit` exists.

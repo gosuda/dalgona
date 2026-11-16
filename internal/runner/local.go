@@ -25,6 +25,7 @@ var ErrProcessNotFound = errors.New("runner: process not found")
 type Local struct {
 	dir           string
 	afterSnapshot func()
+	protectedPIDs [2]int
 	shellEnv      *ShellEnvSnapshot
 }
 
@@ -41,12 +42,15 @@ func NewLocalWithShellEnv(dir string, snapshot *ShellEnvSnapshot) (*Local, error
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("runner: create runs directory: %w", err)
 	}
-	return &Local{dir: dir, shellEnv: snapshot}, nil
+	return &Local{dir: dir, protectedPIDs: [2]int{os.Getpid(), os.Getppid()}, shellEnv: snapshot}, nil
 }
 
 func (l *Local) Start(ctx context.Context, spec ProcessSpec) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("runner: start: %w", err)
+	}
+	if err := CheckProcessKillGuard(spec.Argv, l.protectedPIDs[0], l.protectedPIDs[1]); err != nil {
+		return err
 	}
 	if err := validateProcessSpec(spec); err != nil {
 		return err

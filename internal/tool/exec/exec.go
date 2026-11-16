@@ -68,9 +68,16 @@ func (t *Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Resu
 		Sandbox: runner.Sandbox{Mode: mode, WritableRoots: env.Sandbox.WritableRoots, DeniedSockets: env.Sandbox.DeniedSockets},
 	}
 	if err := env.Runner.Start(ctx, spec); err != nil {
-		return tool.Result{}, fmt.Errorf("exec: start: %w", err)
+		return startFailure(err)
 	}
 	return t.wait(ctx, env.Runner, call.ID, args.timeout)
+}
+
+func startFailure(err error) (tool.Result, error) {
+	if errors.Is(err, runner.ErrProcessKillGuard) {
+		return tool.Result{OK: false, Output: []byte("refused: process-kill guard prevents signaling daemon or parent")}, nil
+	}
+	return tool.Result{}, fmt.Errorf("exec: start: %w", err)
 }
 
 type arguments struct {
