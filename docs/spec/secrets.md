@@ -50,6 +50,8 @@ Image bytes MUST NOT pass through the masker. An image path MUST be masked befor
 
 When `MaskError` reports a failure, the host MUST fail the submit or tool call and MUST NOT journal or send the failure sentence. The host MUST reject prompts before journaling. The host MUST fail the tool call with `OK=false` or return an error, and it MUST NOT return the failure sentence as output.
 
+Skipped, denied, and interrupted tool outputs MUST pass the mask before they enter the journal. A mask failure MUST stop the skip or denial event. Interruption MUST record the output `[output masking failed]` and log the failure, because the turn is already ending.
+
 `auth.json` MUST be a regular file with mode 0600. The exact refusal error is `auth.json must be a regular file with mode 0600`. The Windows rules in the `secrets.json` paragraph apply to `auth.json`. Writes MUST use a unique temporary file, mode 0600, and an atomic rename. Unknown provider entries and their unknown fields MUST survive a load and write cycle without modification.
 
 Credential and secret files MUST use streaming `jsontext` encoders and decoders. Reflection-based JSON encoding MUST NOT be used.

@@ -376,11 +376,21 @@ func (a *actor) settle(status string) {
 	for requestID := range a.state.Approvals {
 		events = append(events, event.ApprovalResolved{RequestID: requestID, Decision: "cancel", By: "user", Reason: reason})
 	}
+	interruptedOutput, err := a.t.host.mask("interrupted: " + reason)
+	if err != nil {
+		a.t.host.log.Error("agent: mask interrupted output", "thread", a.t.id, "error", err)
+		interruptedOutput = "[output masking failed]"
+	}
+	skippedOutput, err := a.t.host.mask("skipped: " + reason)
+	if err != nil {
+		a.t.host.log.Error("agent: mask skipped output", "thread", a.t.id, "error", err)
+		skippedOutput = "[output masking failed]"
+	}
 	for id := range a.state.InFlight {
-		events = append(events, event.ToolCompleted{CallID: id, Output: "interrupted: " + reason, Recovered: "interrupted"})
+		events = append(events, event.ToolCompleted{CallID: id, Output: interruptedOutput, Recovered: "interrupted"})
 	}
 	for id := range a.state.PendingCalls {
-		events = append(events, event.ToolCompleted{CallID: id, Output: "skipped: " + reason, Recovered: "skipped"})
+		events = append(events, event.ToolCompleted{CallID: id, Output: skippedOutput, Recovered: "skipped"})
 	}
 	for run := range a.state.Scripts {
 		events = append(events, event.ScriptCompleted{RunID: run, Error: "cancelled: " + reason})

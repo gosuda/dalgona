@@ -118,7 +118,11 @@ func (w *worker) agentRun(calls []event.ToolCall) int {
 func (w *worker) skip(ctx context.Context, calls []event.ToolCall, reason string) error {
 	events := make([]event.Event, 0, len(calls))
 	for _, call := range calls {
-		events = append(events, event.ToolCompleted{CallID: call.ID, Output: "skipped: " + reason, Recovered: "skipped"})
+		output, err := w.t.host.mask("skipped: " + reason)
+		if err != nil {
+			return err
+		}
+		events = append(events, event.ToolCompleted{CallID: call.ID, Output: output, Recovered: "skipped"})
 	}
 	_, err := w.t.appendEvents(context.WithoutCancel(ctx), events...)
 	return err
@@ -259,7 +263,11 @@ func (w *worker) admit(ctx context.Context, p *prepared, requestID string) (*pre
 	}
 	if !v.allow {
 		p.discardPlan()
-		_, err := w.t.appendEvents(ctx, event.ToolCompleted{CallID: p.call.ID, Output: v.reason, Recovered: "none"})
+		output, maskErr := w.t.host.mask(v.reason)
+		if maskErr != nil {
+			return nil, maskErr
+		}
+		_, err = w.t.appendEvents(ctx, event.ToolCompleted{CallID: p.call.ID, Output: output, Recovered: "none"})
 		return nil, err
 	}
 	p.verdict = v
@@ -301,16 +309,20 @@ func (w *worker) gateCall(ctx context.Context, p *prepared, requestID string) (g
 }
 
 func (w *worker) declineCall(ctx context.Context, call event.ToolCall, requestID string, v verdict) error {
+	masked, err := w.t.host.mask(v.reason)
+	if err != nil {
+		return err
+	}
 	events := make([]event.Event, 0, 3)
 	if requestID == "" {
 		requestID = newID("req-")
 		events = append(events, event.ApprovalRequested{RequestID: requestID, CallID: call.ID, Summary: truncate(call.Name, summaryLimit)})
 	}
 	events = append(events,
-		event.ApprovalResolved{RequestID: requestID, Decision: v.decision, By: v.by, Reason: v.reason},
-		event.ToolCompleted{CallID: call.ID, Output: v.reason, Recovered: "none"},
+		event.ApprovalResolved{RequestID: requestID, Decision: v.decision, By: v.by, Reason: masked},
+		event.ToolCompleted{CallID: call.ID, Output: masked, Recovered: "none"},
 	)
-	_, err := w.t.appendEvents(ctx, events...)
+	_, err = w.t.appendEvents(ctx, events...)
 	return err
 }
 

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
@@ -39,6 +40,60 @@ func TestHumanDeclinesWhenApprovalMaskingFails(t *testing.T) {
 			}
 		default:
 			drained = true
+		}
+	}
+}
+
+func TestDenialAndSkipOutputsAreMasked(t *testing.T) {
+	store, err := auth.NewWithPatterns(t.TempDir(), []string{`token-[a-z0-9]{8,}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, func(h *harness) {
+		h.cfg.Auth = store
+	})
+	thread := h.start()
+	if err := thread.Append(t.Context(), event.TurnStarted{TurnID: "t"}, startedCall("call-skip", "read", "read", `{}`), startedCall("call-deny", "exec", "exec", `{}`)); err != nil {
+		t.Fatal(err)
+	}
+	w := &worker{t: thread}
+	reason := "not allowed: token-abcdefgh1234"
+	if err := w.skip(t.Context(), []event.ToolCall{{ID: "call-skip", Name: "read"}}, reason); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.declineCall(t.Context(), event.ToolCall{ID: "call-deny", Name: "exec"}, "", verdict{decision: "decline", by: "rule", reason: reason}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"call-skip", "call-deny"} {
+		output := completedOutputs(h.events(thread.ID()))[id].Output
+		if strings.Contains(output, "token-abcdefgh1234") || !strings.Contains(output, "{{secret:") {
+			t.Fatalf("%s output not masked: %q", id, output)
+		}
+	}
+}
+
+func TestDenialReasonIsMasked(t *testing.T) {
+	store, err := auth.NewWithPatterns(t.TempDir(), []string{`token-[a-z0-9]{8,}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, func(h *harness) {
+		h.cfg.Auth = store
+	})
+	thread := h.start()
+	if err := thread.Append(t.Context(), event.TurnStarted{TurnID: "t"}, startedCall("call-deny", "exec", "exec", `{}`)); err != nil {
+		t.Fatal(err)
+	}
+	w := &worker{t: thread}
+	reason := "not allowed: token-abcdefgh1234"
+	if err := w.declineCall(t.Context(), event.ToolCall{ID: "call-deny", Name: "exec"}, "", verdict{decision: "decline", by: "rule", reason: reason}); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range h.events(thread.ID()) {
+		if resolved, ok := item.Event.(event.ApprovalResolved); ok && resolved.Reason != "" {
+			if strings.Contains(resolved.Reason, "token-abcdefgh1234") || !strings.Contains(resolved.Reason, "{{secret:") {
+				t.Fatalf("resolved reason not masked: %q", resolved.Reason)
+			}
 		}
 	}
 }
