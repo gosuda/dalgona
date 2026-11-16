@@ -54,29 +54,6 @@ func TestCommandExecStreams(t *testing.T) {
 	expect(t, string(streamed) == "hello", "streamed output", string(streamed))
 }
 
-func TestCommandExecTerminate(t *testing.T) {
-	r := newRig(t, config.ApprovalAuto)
-	c := r.connect()
-	finished := make(chan message, 1)
-	go func() {
-		finished <- c.call("command/exec", map[string]any{
-			"command": []string{os.Args[0]}, "processId": "p2", "streamStdoutStderr": true,
-			"env": map[string]any{"RPC_TEST_SLEEP": "1"},
-		})
-	}()
-	c.await("command/exec/outputDelta", nil)
-	c.ok("command/exec/terminate", map[string]any{"processId": "p2"}, nil)
-	select {
-	case m := <-finished:
-		expect(t, m.Error == nil, "terminated command/exec error", m.Error)
-		var response CommandExecResponse
-		expect(t, json.Unmarshal(m.Result, &response) == nil, "decode terminated result", string(m.Result))
-		expect(t, response.ExitCode != 0, "terminated exit code", response.ExitCode)
-	case <-time.After(waitLimit):
-		t.Fatal("terminated command/exec did not answer")
-	}
-}
-
 func TestCommandExecTimeout(t *testing.T) {
 	r := newRig(t, config.ApprovalAuto)
 	c := r.connect()

@@ -45,7 +45,11 @@ func TestMain(m *testing.M) {
 		os.Exit(3)
 	}
 	if os.Getenv("RPC_TEST_SLEEP") != "" {
-		_, _ = os.Stdout.WriteString("ready")
+		if os.Getenv("RPC_TEST_PRINT_PID") != "" {
+			_, _ = os.Stdout.WriteString("ready " + strconv.Itoa(os.Getpid()))
+		} else {
+			_, _ = os.Stdout.WriteString("ready")
+		}
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	}
