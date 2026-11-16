@@ -12,7 +12,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 const (

@@ -134,9 +134,9 @@ linters:
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/acp"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/rpc"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/rpc"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/tui"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/tui"
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/daemon"
               desc: core must not import interfaces or batteries
@@ -162,11 +162,11 @@ linters:
           files:
             - "**/internal/app/**"
           deny:
-            - pkg: "github.com/gosuda/dalgona/internal/tui"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/tui"
               desc: presentation depends on core, core never imports presentation
         clients:
           files:
-            - "**/internal/tui/**"
+            - "**/internal/dal/tui/**"
             - "**/internal/webui/**"
             - "**/internal/herdr/**"
             - "**/internal/acp/**"

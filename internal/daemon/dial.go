@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net"
 
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 func DialHome(home string) (net.Conn, error) {

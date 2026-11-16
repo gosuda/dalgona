@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 type scriptedNote struct {

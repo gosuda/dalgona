@@ -19,7 +19,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 const (

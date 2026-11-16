@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 func resultOf(turn rpc.Turn) turnResult {

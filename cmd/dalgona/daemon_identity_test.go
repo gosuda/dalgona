@@ -17,7 +17,7 @@ import (
 	"github.com/gosuda/dalgona/internal/daemon"
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 func servePipe(t *testing.T, extensions map[string]rpc.Extension) net.Conn {

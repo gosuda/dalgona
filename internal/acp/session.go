@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 const (

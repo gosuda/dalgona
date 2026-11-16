@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 const (

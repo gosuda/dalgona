@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 func TestInitializeNegotiatesProtocol(t *testing.T) {

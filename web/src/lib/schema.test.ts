@@ -26,14 +26,17 @@ interface Schema {
 type JsonObject = { readonly [key: string]: JsonValue };
 
 const codexSchemas = Object.values(
-	import.meta.glob("../../../internal/rpc/testdata/codex-schema/**/*.json", {
-		eager: true,
-		import: "default",
-	}),
+	import.meta.glob(
+		"../../../internal/dal/rpc/testdata/codex-schema/**/*.json",
+		{
+			eager: true,
+			import: "default",
+		},
+	),
 ) as Schema[];
 
 const dalgonaSchemas = Object.values(
-	import.meta.glob("../../../internal/rpc/testdata/dalgona-schema/*.json", {
+	import.meta.glob("../../../internal/dal/rpc/testdata/dalgona-schema/*.json", {
 		eager: true,
 		import: "default",
 	}),

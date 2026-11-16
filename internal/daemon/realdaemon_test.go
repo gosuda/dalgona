@@ -12,7 +12,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 const realDaemonEnv = "DALGONA_TEST_REAL_DAEMON"

@@ -37,7 +37,7 @@ var skipAtRoot = map[string]bool{
 	".build-target": true, ".ruff_cache": true, "bin": true, "dist": true,
 }
 
-var skipPaths = []string{"internal/tui/nomnomljs", "internal/webui/dist", "web/src/lib/codex"}
+var skipPaths = []string{"internal/dal/tui/nomnomljs", "internal/webui/dist", "web/src/lib/codex"}
 
 var scanned = map[string]bool{
 	".go": true, ".ts": true, ".svelte": true, ".py": true,

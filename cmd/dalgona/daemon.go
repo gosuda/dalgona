@@ -23,9 +23,9 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent/advisor"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 	"github.com/gosuda/dalgona/internal/dal/runner"
 	"github.com/gosuda/dalgona/internal/discovery"
-	"github.com/gosuda/dalgona/internal/rpc"
 )
 
 func executable() (string, error) {
