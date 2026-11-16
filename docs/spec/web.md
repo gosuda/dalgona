@@ -272,6 +272,7 @@ A `serverRequest/resolved` with `timedOut` closes the card and shows the notice 
 - With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a title shows its preview. A thread with neither shows `Untitled thread`.
 - The `thread/list` request MUST carry `limit` and `cursor` only. It MUST NOT carry `sortKey` or `sortDirection`.
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
+- A `thread/resume` that fails with `-32602` (unknown thread) MUST clear the open thread and its transcript.
 - A new connection MUST discard thread resumes still in flight from the previous connection.
 - In the approval card, Decline and Cancel use the quiet style. The composer's `Interrupt` button has the danger style.
 
