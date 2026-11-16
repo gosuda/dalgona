@@ -12,10 +12,10 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/model"
-	"github.com/gosuda/dalgona/internal/model/connectwire"
-	"github.com/gosuda/dalgona/internal/model/cursor"
-	"github.com/gosuda/dalgona/internal/model/cursor/wire"
+	"github.com/gosuda/dalgona/internal/dal/model"
+	"github.com/gosuda/dalgona/internal/dal/model/connectwire"
+	"github.com/gosuda/dalgona/internal/dal/model/cursor"
+	"github.com/gosuda/dalgona/internal/dal/model/cursor/wire"
 )
 
 type cursorConn struct {

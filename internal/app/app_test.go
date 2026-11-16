@@ -24,7 +24,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/scripthost"

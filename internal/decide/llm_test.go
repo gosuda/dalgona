@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gosuda/dalgona/internal/dal/model"
+	"github.com/gosuda/dalgona/internal/dal/model/chatcompat"
 	"github.com/gosuda/dalgona/internal/decide"
-	"github.com/gosuda/dalgona/internal/model"
-	"github.com/gosuda/dalgona/internal/model/chatcompat"
 )
 
 func TestLLMAskDecodesDirectAnswers(t *testing.T) {

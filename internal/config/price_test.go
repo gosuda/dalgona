@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 func TestConfigPriceErrors(t *testing.T) {

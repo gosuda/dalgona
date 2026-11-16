@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 

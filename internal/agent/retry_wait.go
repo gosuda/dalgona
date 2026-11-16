@@ -3,7 +3,7 @@ package agent
 import (
 	"time"
 
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 func (w *worker) retryWatch() model.RetryWatch {

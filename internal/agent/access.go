@@ -12,7 +12,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/keywords"
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 func (h *Host) Config() config.Config {

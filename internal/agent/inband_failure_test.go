@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/model/cursor/wire"
+	"github.com/gosuda/dalgona/internal/dal/model/cursor/wire"
 )
 
 func dropAfterInBandExec(c *cursorConn) {

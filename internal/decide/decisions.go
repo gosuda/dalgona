@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 const defaultDecisionsURL = "https://openrouter.ai/api/alpha/decisions"

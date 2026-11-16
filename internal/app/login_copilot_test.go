@@ -13,7 +13,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
-	"github.com/gosuda/dalgona/internal/model/copilot"
+	"github.com/gosuda/dalgona/internal/dal/model/copilot"
 )
 
 const (

@@ -13,7 +13,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 type Product string

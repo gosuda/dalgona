@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 type fixedModelLister struct{}

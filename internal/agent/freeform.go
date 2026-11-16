@@ -6,7 +6,7 @@ import (
 
 	json "encoding/json/v2"
 
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 func eventArgs(call model.ToolCall) (jsontext.Value, error) {

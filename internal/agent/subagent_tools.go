@@ -7,7 +7,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 

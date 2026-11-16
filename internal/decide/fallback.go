@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 type Named struct {

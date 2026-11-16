@@ -8,8 +8,8 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/model"
-	"github.com/gosuda/dalgona/internal/model/cursor/wire"
+	"github.com/gosuda/dalgona/internal/dal/model"
+	"github.com/gosuda/dalgona/internal/dal/model/cursor/wire"
 )
 
 func cancelExecScript(stdout chan<- string) func(*cursorConn) {

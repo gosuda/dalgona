@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 type askFunc func(ctx context.Context, call int32) (Result, error)

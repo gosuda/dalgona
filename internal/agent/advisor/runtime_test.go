@@ -11,8 +11,8 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/journal"
-	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/runner"
 )
 

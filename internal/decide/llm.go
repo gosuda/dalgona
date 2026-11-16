@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 const llmSystemPrompt = "Answer the questions about the supplied state. Return only one JSON object. Include every question name as a key and no other keys. For a choice question, the value is the selected criterion key as a string. For a noul question, the value is the probability of yes as a number from 0 to 1. For a score question, the value is a number from 0 to len(criteria)-1, the expected index into criteria. Do not return markdown, prose, explanations, probabilities objects, or confidence values."

@@ -8,7 +8,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 	corescript "github.com/gosuda/dalgona/internal/script"
 	corescripthost "github.com/gosuda/dalgona/internal/scripthost"
 	"github.com/gosuda/dalgona/internal/tool"

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 const rateLimitBody = `{"error":{"type":"rate_limit_error"}}`

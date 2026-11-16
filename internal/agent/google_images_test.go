@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/model"
-	"github.com/gosuda/dalgona/internal/model/google"
+	"github.com/gosuda/dalgona/internal/dal/model"
+	"github.com/gosuda/dalgona/internal/dal/model/google"
 )
 
 const googleTextReply = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":1}}\n\n"

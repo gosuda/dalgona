@@ -9,8 +9,8 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent/event"
 	"github.com/gosuda/dalgona/internal/agent/rules"
-	"github.com/gosuda/dalgona/internal/model"
-	"github.com/gosuda/dalgona/internal/model/cursor"
+	"github.com/gosuda/dalgona/internal/dal/model"
+	"github.com/gosuda/dalgona/internal/dal/model/cursor"
 	"github.com/gosuda/dalgona/internal/tool"
 )
 

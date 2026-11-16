@@ -6,8 +6,8 @@ import (
 	"encoding/json/jsontext"
 	"fmt"
 
+	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/decide"
-	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/script"
 )
 

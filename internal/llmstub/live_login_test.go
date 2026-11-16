@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/model/openai"
+	"github.com/gosuda/dalgona/internal/dal/model/openai"
 )
 
 const liveLoginKey = "sk-live-test"

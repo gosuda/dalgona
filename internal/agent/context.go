@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/agent/event"
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 const prunedOutput = "[output pruned to fit the context window]"

@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/dal/model"
 )
 
 const loginKeyText = "sk-live-7f3a9c"
