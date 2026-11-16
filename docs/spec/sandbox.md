@@ -49,7 +49,7 @@ The agent MUST add the daemon socket to the denied list for each `workspace-writ
 
 On Windows, the shim MUST start a `workspace-write` command with an unelevated restricted token. The token MUST derive from the shim token through `CreateRestrictedToken`. The token MUST carry the flags `DISABLE_MAX_PRIVILEGE`, `LUA_TOKEN`, and `WRITE_RESTRICTED`. A command MAY read every path that the user can read. A write needs a grant to a restricting SID of the token.
 
-The restricting SIDs are the logon SID, one read-only capability SID, and one capability SID for each writable root. The token default DACL MUST also grant the logon SID read and write access. This lets the command use pipes that it creates. The writable roots are the roots of `workspace-write`. A mode with no writable root MUST grant no root.
+The restricting SIDs are the logon SID, one read-only capability SID, and one capability SID for each writable root. The token default DACL MUST also grant the logon SID full access (`GENERIC_ALL`). This lets the command open pipes that it creates when initialization requests rights beyond read and write. The writable roots are the roots of `workspace-write`. A mode with no writable root MUST grant no root.
 
 The runner MUST derive each capability SID with HMAC-SHA256 from a seed and the lower-case cleaned root path. The seed is 32 random bytes in the file `windows-sandbox-seed` under `os.UserConfigDir()` in the directory `dalgona`. The runner MUST create the seed once and MUST reuse it. A command can read the seed. The capability SIDs name no user and no group.
 
