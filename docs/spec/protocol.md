@@ -96,6 +96,8 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `fs/watch {watchId, path}`, `fs/unwatch {watchId}` | `{path}`, `{}`. The server sends `fs/changed` notifications for a watch. See File methods. |
 | `fuzzyFileSearch {query, roots, cancellationToken?}` | `{files: [{root, path, file_name, match_type, score, indices}]}`, at most 50 results. See Fuzzy file search in `search.md`. |
 | `dalgona/retry/wait {threadId, turnId, remainingMs}` | Notification, not a method. Sent once a second during an attended rate-limit wait, and once with `remainingMs` 0 when the wait ends. Not journaled. |
+| `dalgona/daemon/identity` | `{build, pid, version, startedAt}`. The daemon answers it before `initialize`. `build` is the first 16 hex digits of the SHA-256 of the daemon executable. |
+| `dalgona/daemon/retire` | `{}`. The daemon cancels its run context and stops as on `SIGTERM`. The client counts the reply and the end of the stream as success. |
 
 `thread/revert`, `thread/fork`, `turn/start`, and `dalgona/thread/leaf/set` require an idle thread. A running thread MUST give `-32600` `thread <id> is running`.
 
