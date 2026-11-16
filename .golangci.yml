@@ -191,6 +191,10 @@ linters:
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/dal/script"
               desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/dal/failure"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/report"
+              desc: clients reach the core only through internal/rpc
         dal:
           files:
             - "**/cmd/dal/**"
