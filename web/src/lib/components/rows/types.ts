@@ -5,6 +5,7 @@ export interface RowProps {
 	readonly item: TranscriptItem;
 	readonly running: boolean;
 	readonly awaiting: ReadonlySet<string>;
+	readonly timedOutQuestions?: ReadonlySet<string>;
 	readonly presentation?: RowPresentation;
 	readonly onOpen?: () => void;
 	readonly onRewind?: ((turnId: string) => void) | undefined;

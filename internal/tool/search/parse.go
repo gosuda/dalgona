@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	regexpsyntax "regexp/syntax"
 	"slices"
@@ -33,10 +34,20 @@ var (
 )
 
 type callTally struct {
-	parseNotes []string
-	notParsed  int
-	syntaxOnly int
-	stopped    int
+	parseNotes   []string
+	notParsed    int
+	syntaxOnly   int
+	noGraph      int
+	noGraphLangs map[string]bool
+	stopped      int
+}
+
+func (c *callTally) noteNoGraph(lang string) {
+	c.noGraph++
+	if c.noGraphLangs == nil {
+		c.noGraphLangs = make(map[string]bool)
+	}
+	c.noGraphLangs[lang] = true
 }
 
 func (c callTally) footers() []string {
@@ -46,6 +57,10 @@ func (c callTally) footers() []string {
 	}
 	if c.syntaxOnly > 0 {
 		out = append(out, fmt.Sprintf("[Syntax only: %d files. Use mode syntax with lang.]", c.syntaxOnly))
+	}
+	if c.noGraph > 0 {
+		langs := strings.Join(slices.Sorted(maps.Keys(c.noGraphLangs)), ", ")
+		out = append(out, fmt.Sprintf("[No graph: %d files of %s. Use grep.]", c.noGraph, langs))
 	}
 	if c.stopped > 0 {
 		out = append(out, fmt.Sprintf("[Stopped: %d files not parsed. Narrow path or glob.]", c.stopped))
@@ -91,18 +106,96 @@ func parseCandidates(ctx context.Context, entries []fileEntry, glob string, acce
 	return matchingFiles(kept, glob)
 }
 
-func namePattern(args args) (*regexp.Regexp, error) {
+func namePattern(args args) (nameMatcher, error) {
+	var matcher nameMatcher
 	if args.Pattern == "" {
-		return nil, nil
+		return matcher, nil
 	}
-	parsed, err := regexpsyntax.Parse(grepPattern(args), regexpsyntax.Perl)
+	whole, err := compileNamePattern(args.Pattern, args)
+	if err != nil {
+		return matcher, err
+	}
+	matcher.whole = whole
+	ownerRaw, nameRaw, split := splitOwnerPattern(args.Pattern)
+	if !split {
+		return matcher, nil
+	}
+	owner, err := compileNamePattern(ownerRaw, args)
+	if err != nil {
+		return matcher, err
+	}
+	name, err := compileNamePattern(nameRaw, args)
+	if err != nil {
+		return matcher, err
+	}
+	matcher.owner = owner
+	matcher.name = name
+	return matcher, nil
+}
+
+func compileNamePattern(raw string, args args) (*regexp.Regexp, error) {
+	sub := args
+	sub.Pattern = raw
+	parsed, err := regexpsyntax.Parse(grepPattern(sub), regexpsyntax.Perl)
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
 	if hasAnchor(parsed) {
 		return nil, errors.New(anchorRefusal)
 	}
-	return grepRegexp(args)
+	return grepRegexp(sub)
+}
+
+var plainName = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)
+
+func splitOwnerPattern(raw string) (string, string, bool) {
+	owner, tail, found := strings.CutLast(raw, ".")
+	if !found || owner == "" || tail == "" {
+		return "", "", false
+	}
+	owner, _ = strings.CutSuffix(owner, `\`)
+	if owner == "" || !plainName.MatchString(tail) {
+		return "", "", false
+	}
+	return owner, tail, true
+}
+
+type nameMatcher struct {
+	whole *regexp.Regexp
+	owner *regexp.Regexp
+	name  *regexp.Regexp
+}
+
+func (m nameMatcher) empty() bool {
+	return m.whole == nil && m.owner == nil && m.name == nil
+}
+
+func (m nameMatcher) matchesSymbol(s syntax.Symbol) bool {
+	if m.empty() {
+		return true
+	}
+	if m.whole != nil && m.whole.MatchString(s.Name) {
+		return true
+	}
+	return m.owner != nil && m.name != nil && s.Owner != "" &&
+		m.owner.MatchString(s.Owner) && m.name.MatchString(s.Name)
+}
+
+func (m nameMatcher) selects(data []byte) bool {
+	if m.whole == nil && m.name == nil {
+		return true
+	}
+	starts := splitStarts(data)
+	for i := range starts {
+		line := lineBytes(data, starts, i+1)
+		if m.whole != nil && m.whole.Match(line) {
+			return true
+		}
+		if m.name != nil && m.name.Match(line) {
+			return true
+		}
+	}
+	return false
 }
 
 func isAnchor(op regexpsyntax.Op) bool {
@@ -116,7 +209,7 @@ func hasAnchor(re *regexpsyntax.Regexp) bool {
 }
 
 type parseRun struct {
-	matcher  *regexp.Regexp
+	matcher  nameMatcher
 	jobs     []parseJob
 	results  []parseResult
 	searched int
@@ -270,7 +363,7 @@ func emptySymbolsReply(pattern string, searched int) string {
 	return fmt.Sprintf("No matches for %s. Searched %d files of supported languages.", pattern, searched)
 }
 
-func dispatchSymbols(files []fileEntry, matcher *regexp.Regexp, start time.Time, now func() time.Time, tally *callTally) []parseJob {
+func dispatchSymbols(files []fileEntry, matcher nameMatcher, start time.Time, now func() time.Time, tally *callTally) []parseJob {
 	var jobs []parseJob
 	total := 0
 	for i, file := range files {
@@ -293,15 +386,18 @@ func dispatchSymbols(files []fileEntry, matcher *regexp.Regexp, start time.Time,
 	return jobs
 }
 
-func candidateData(file fileEntry, matcher *regexp.Regexp) ([]byte, bool) {
-	if matcher == nil {
+func candidateData(file fileEntry, matcher nameMatcher) ([]byte, bool) {
+	if matcher.empty() {
 		if !searchableFile(file.absolute) {
 			return nil, false
 		}
 		return readSearchable(file.absolute)
 	}
-	grepped, lines := scanFile(file, matcher)
-	return grepped.data, len(lines) > 0
+	data, ok := readSearchable(file.absolute)
+	if !ok {
+		return nil, false
+	}
+	return data, matcher.selects(data)
 }
 
 func runJobs[T any](jobs []parseJob, parse func(*syntax.Parser, []byte) (T, error)) ([]T, error) {
@@ -372,7 +468,7 @@ func syntaxMode(ctx context.Context, entries []fileEntry, args args, start time.
 		return outcome{}, err
 	}
 	var tally callTally
-	jobs := dispatchSymbols(candidates, nil, start, now, &tally)
+	jobs := dispatchSymbols(candidates, nameMatcher{}, start, now, &tally)
 	results, err := captureJobs(ctx, jobs, query)
 	if err != nil {
 		return outcome{}, err
@@ -423,7 +519,7 @@ func captureRow(job parseJob, capture syntax.Capture) string {
 	return fmt.Sprintf("%s:%d: %s: %s", job.file.display, capture.Line, capture.Name, cut)
 }
 
-func symbolRows(jobs []parseJob, results []parseResult, args args, matcher *regexp.Regexp) ([]string, int) {
+func symbolRows(jobs []parseJob, results []parseResult, args args, matcher nameMatcher) ([]string, int) {
 	var rows []string
 	truncated := 0
 	for i, job := range jobs {
@@ -441,11 +537,11 @@ func symbolRows(jobs []parseJob, results []parseResult, args args, matcher *rege
 	return rows, truncated
 }
 
-func symbolWanted(symbol syntax.Symbol, args args, matcher *regexp.Regexp) bool {
+func symbolWanted(symbol syntax.Symbol, args args, matcher nameMatcher) bool {
 	if len(args.Kind) > 0 && !slices.Contains(args.Kind, string(symbol.Kind)) {
 		return false
 	}
-	return matcher == nil || matcher.MatchString(symbol.Name)
+	return matcher.matchesSymbol(symbol)
 }
 
 func symbolRow(job parseJob, symbol syntax.Symbol) string {

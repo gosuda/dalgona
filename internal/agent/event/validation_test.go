@@ -13,23 +13,23 @@ import (
 func TestValidateRejectsInvalidEvents(t *testing.T) {
 	t.Parallel()
 	events := randomEvents(rand.New(rand.NewPCG(7, 9)))
-	session := as[event.SessionCreated](t, events[0])
-	runner := as[event.RunnerBound](t, events[1])
-	turnStarted := as[event.TurnStarted](t, events[2])
-	turnCompleted := as[event.TurnCompleted](t, events[3])
-	user := as[event.UserMessage](t, events[4])
-	assistant := as[event.AssistantMessage](t, events[5])
-	toolStarted := as[event.ToolStarted](t, events[6])
-	toolCompleted := as[event.ToolCompleted](t, events[7])
-	retry := as[event.ModelRetry](t, events[8])
-	approvalRequest := as[event.ApprovalRequested](t, events[9])
-	approvalResolved := as[event.ApprovalResolved](t, events[10])
-	compaction := as[event.Compaction](t, events[11])
-	pruned := as[event.ContextPruned](t, events[12])
-	child := as[event.ChildSpawned](t, events[13])
-	scriptStarted := as[event.ScriptStarted](t, events[15])
-	scriptEffect := as[event.ScriptEffect](t, events[16])
-	scriptCompleted := as[event.ScriptCompleted](t, events[17])
+	session := first[event.SessionCreated](t, events)
+	runner := first[event.RunnerBound](t, events)
+	turnStarted := first[event.TurnStarted](t, events)
+	turnCompleted := first[event.TurnCompleted](t, events)
+	user := first[event.UserMessage](t, events)
+	assistant := first[event.AssistantMessage](t, events)
+	toolStarted := first[event.ToolStarted](t, events)
+	toolCompleted := first[event.ToolCompleted](t, events)
+	retry := first[event.ModelRetry](t, events)
+	approvalRequest := first[event.ApprovalRequested](t, events)
+	approvalResolved := first[event.ApprovalResolved](t, events)
+	compaction := first[event.Compaction](t, events)
+	pruned := first[event.ContextPruned](t, events)
+	child := first[event.ChildSpawned](t, events)
+	scriptStarted := first[event.ScriptStarted](t, events)
+	scriptEffect := first[event.ScriptEffect](t, events)
+	scriptCompleted := first[event.ScriptCompleted](t, events)
 	invalid := []event.Event{
 		changed(session, func(e *event.SessionCreated) { e.ID = "" }),
 		changed(session, func(e *event.SessionCreated) { e.Cwd = "" }),
@@ -162,11 +162,14 @@ func changed[T any](value T, change func(*T)) T {
 	return value
 }
 
-func as[T any](t *testing.T, value any) T {
+func first[T event.Event](t *testing.T, events []event.Event) T {
 	t.Helper()
-	converted, ok := value.(T)
-	if !ok {
-		t.Fatalf("value has type %T, want %T", value, *new(T))
+	for _, candidate := range events {
+		if typed, ok := candidate.(T); ok {
+			return typed
+		}
 	}
-	return converted
+	var want T
+	t.Fatalf("no event of type %T among %d generated events", want, len(events))
+	return want
 }

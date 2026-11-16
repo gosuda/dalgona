@@ -46,7 +46,7 @@ func Ensure(ctx context.Context, home, exe string) (net.Conn, error) {
 	if err := tightenHomeRoot(home); err != nil {
 		return nil, err
 	}
-	if err := verifyHome(home); err != nil {
+	if err := VerifyHome(home); err != nil {
 		return nil, err
 	}
 	sock := SocketPath(home)

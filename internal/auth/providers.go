@@ -6,7 +6,7 @@ import (
 
 var APIKeyProviders = []string{"anthropic", "google", "openai", "openrouter"}
 
-var OAuthProviders = []string{"antigravity", "chatgpt", "cursor", "devin"}
+var OAuthProviders = []string{"antigravity", "chatgpt", "copilot", "cursor", "devin"}
 
 var RunnerServices = []string{"cloudflare", "sandbox0", "sprites"}
 

@@ -25,21 +25,34 @@ func rewriteTools(t *testing.T, r *rig) {
 	reopen(t, r)
 }
 
-func TestRewriteAskApprovalSendsDiff(t *testing.T) {
+const (
+	renameBefore = "package a\n\nfunc Old() {}\n"
+	renameAfter  = "package a\n\nfunc New() {}\n"
+	otherBefore  = "func Old() {}\n"
+)
+
+func awaitRewriteApproval(t *testing.T) (*rig, *wireClient, message) {
+	t.Helper()
 	r := newRig(t, config.ApprovalAsk)
 	rewriteTools(t, r)
-	writeWorkspaceFile(t, r, "a.go", "package a\n\nfunc Old() {}\n")
+	writeWorkspaceFile(t, r, "a.go", renameBefore)
+	writeWorkspaceFile(t, r, "notes.txt", otherBefore)
 	r.llm.push(llmReply{body: sseCall("r", "rewrite", renameOldCall)})
 	r.llm.push(llmReply{body: sseText("done")})
 	c := r.connect()
 	threadID := startThread(t, r, c, nil)
 	startTurn(t, c, threadID, "rename")
-	var request message
 	select {
-	case request = <-c.requests:
+	case request := <-c.requests:
+		return r, c, request
 	case <-time.After(waitLimit):
 		t.Fatal("no approval request")
 	}
+	return nil, nil, message{}
+}
+
+func TestRewriteAskApprovalSendsDiff(t *testing.T) {
+	r, c, request := awaitRewriteApproval(t)
 	expect(t, request.Method == "item/fileChange/requestApproval", "approval request", request.Method)
 	c.mu.Lock()
 	order := slices.Clone(c.order)
@@ -49,12 +62,26 @@ func TestRewriteAskApprovalSendsDiff(t *testing.T) {
 	expect(t, patch >= 0 && patch < approval, "patchUpdated before requestApproval", order)
 	change := patchChanges(t, c)
 	expect(t, len(change) == 1 && change[0].Additions != nil && *change[0].Additions == 1 && change[0].Deletions != nil && *change[0].Deletions == 1, "patchUpdated changes", change)
+	expect(t, readWorkspace(t, r, "a.go") == renameBefore, "a.go before the answer", readWorkspace(t, r, "a.go"))
+	c.respond(request.ID, `{"decision":"accept"}`)
+	c.await("turn/completed", nil)
+	expect(t, readWorkspace(t, r, "a.go") == renameAfter, "a.go after accept", readWorkspace(t, r, "a.go"))
+	expect(t, readWorkspace(t, r, "notes.txt") == otherBefore, "unselected notes.txt after accept", readWorkspace(t, r, "notes.txt"))
+}
+
+func TestDeclinedRewriteLeavesDiskUnchanged(t *testing.T) {
+	r, c, request := awaitRewriteApproval(t)
+	c.respond(request.ID, `{"decision":"decline"}`)
+	c.await("turn/completed", nil)
+	expect(t, readWorkspace(t, r, "a.go") == renameBefore, "a.go after decline", readWorkspace(t, r, "a.go"))
+	expect(t, readWorkspace(t, r, "notes.txt") == otherBefore, "unselected notes.txt after decline", readWorkspace(t, r, "notes.txt"))
 }
 
 func TestRewriteCompletesAsFileChange(t *testing.T) {
 	r := newRig(t, config.ApprovalAuto)
 	rewriteTools(t, r)
-	writeWorkspaceFile(t, r, "a.go", "package a\n\nfunc Old() {}\n")
+	writeWorkspaceFile(t, r, "a.go", renameBefore)
+	writeWorkspaceFile(t, r, "notes.txt", otherBefore)
 	r.llm.push(llmReply{body: sseCall("r", "rewrite", renameOldCall)})
 	r.llm.push(llmReply{body: sseText("done")})
 	c := r.connect()
@@ -67,6 +94,8 @@ func TestRewriteCompletesAsFileChange(t *testing.T) {
 	if !reflect.DeepEqual(live.Changes, resumed.Changes) {
 		t.Fatalf("live changes %+v differ from resumed %+v", live.Changes, resumed.Changes)
 	}
+	expect(t, readWorkspace(t, r, "a.go") == renameAfter, "a.go after the rewrite", readWorkspace(t, r, "a.go"))
+	expect(t, readWorkspace(t, r, "notes.txt") == otherBefore, "unselected notes.txt after the rewrite", readWorkspace(t, r, "notes.txt"))
 }
 
 func requireRenameChange(t *testing.T, change wireChange) {

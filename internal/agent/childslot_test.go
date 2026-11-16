@@ -74,6 +74,8 @@ func collectIDs(t *testing.T, out <-chan spawnResult, n int, ids map[string]bool
 	}
 }
 
+func runningChildren(parent *Thread) int { return len(parent.slots().free) }
+
 func TestStartChildBoundsRunningChildren(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -124,17 +126,17 @@ func TestStartChildBoundsRunningChildren(t *testing.T) {
 	for range 16 {
 		<-started
 	}
-	awaitArrivals(t, h, 8)
+	awaitArrivals(t, h, 4)
 	checkBoundSaturated(t, parent, done, &peak)
 	ids := make(map[string]bool, 16)
-	collectIDs(t, done, 8, ids)
-	for k := range 8 {
+	collectIDs(t, done, 4, ids)
+	for k := range 12 {
 		close(rel[k])
 		awaitArrivals(t, h, 1)
 		checkBoundPeak(t, &peak)
 	}
 	closeOpenRels(rel)
-	collectIDs(t, done, 8, ids)
+	collectIDs(t, done, 12, ids)
 	checkBoundComplete(t, ids, &peak)
 	checkSlotHeldAfterReturn(t, h)
 }
@@ -146,35 +148,35 @@ func checkSlotHeldAfterReturn(t *testing.T, h *harness) {
 	probeParent := h.start()
 	seedSpawnCalls(t, h, probeParent, "probe", 1)
 	_ = fillChildren(t, probeParent, "probe", 1)
-	if got := len(probeParent.children); got != 1 {
+	if got := runningChildren(probeParent); got != 1 {
 		t.Fatalf("running children = %d, want 1", got)
 	}
 }
 
 func checkBoundSaturated(t *testing.T, parent *Thread, done <-chan spawnResult, peak *atomic.Int64) {
 	t.Helper()
-	if got := peak.Load(); got != 8 {
-		t.Fatalf("concurrent children = %d, want 8", got)
+	if got := peak.Load(); got != 4 {
+		t.Fatalf("concurrent children = %d, want 4", got)
 	}
-	if got := len(parent.children); got != 8 {
-		t.Fatalf("running children = %d, want 8", got)
+	if got := runningChildren(parent); got != 4 {
+		t.Fatalf("running children = %d, want 4", got)
 	}
-	if got := len(done); got != 8 {
-		t.Fatalf("returned spawns = %d, want 8", got)
+	if got := len(done); got != 4 {
+		t.Fatalf("returned spawns = %d, want 4", got)
 	}
 }
 
 func checkBoundPeak(t *testing.T, peak *atomic.Int64) {
 	t.Helper()
-	if got := peak.Load(); got != 8 {
-		t.Fatalf("concurrent children = %d, want 8", got)
+	if got := peak.Load(); got != 4 {
+		t.Fatalf("concurrent children = %d, want 4", got)
 	}
 }
 
 func checkBoundComplete(t *testing.T, ids map[string]bool, peak *atomic.Int64) {
 	t.Helper()
-	if got := peak.Load(); got != 8 {
-		t.Fatalf("concurrent children = %d, want 8", got)
+	if got := peak.Load(); got != 4 {
+		t.Fatalf("concurrent children = %d, want 4", got)
 	}
 	if len(ids) != 16 {
 		t.Fatalf("children = %d, want 16", len(ids))
@@ -241,26 +243,26 @@ func TestStartChildCloseFreesSlot(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	gate := holdGate(t)
-	for range 9 {
+	for range 5 {
 		h.model.push(response{body: text("child done").body, gate: gate})
 	}
 	parent := h.start()
-	seedSpawnCalls(t, h, parent, "close", 9)
-	ids := fillChildren(t, parent, "close", 8)
-	awaitArrivals(t, h, 8)
-	if got := len(parent.children); got != 8 {
-		t.Fatalf("running children = %d, want 8", got)
+	seedSpawnCalls(t, h, parent, "close", 5)
+	ids := fillChildren(t, parent, "close", 4)
+	awaitArrivals(t, h, 4)
+	if got := runningChildren(parent); got != 4 {
+		t.Fatalf("running children = %d, want 4", got)
 	}
-	ninth := make(chan spawnResult, 1)
+	fifth := make(chan spawnResult, 1)
 	entered := make(chan struct{})
-	startSignaledChild(t, parent, "close-8", ninth, entered)
+	startSignaledChild(t, parent, "close-4", fifth, entered)
 	<-entered
-	if got := len(ninth); got != 0 {
-		t.Fatalf("ninth spawn returned before the close, want it blocked")
+	if got := len(fifth); got != 0 {
+		t.Fatalf("fifth spawn returned before the close, want it blocked")
 	}
 	closeChild(t, h, ids[0])
-	r := collectSpawn(t, ninth)
+	r := collectSpawn(t, fifth)
 	if r.err != nil || r.id == "" {
-		t.Fatalf("ninth spawn = %q, %v, want a child id", r.id, r.err)
+		t.Fatalf("fifth spawn = %q, %v, want a child id", r.id, r.err)
 	}
 }

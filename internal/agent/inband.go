@@ -245,9 +245,11 @@ func (w *worker) executeInBand(ctx context.Context, p *prepared) (event.ToolComp
 		p.discardPlan()
 		return event.ToolCompleted{}, err
 	}
-	if _, err := w.t.appendEvents(context.WithoutCancel(ctx), completed); err != nil {
+	head, err := w.t.appendEvents(context.WithoutCancel(ctx), completed)
+	if err != nil {
 		return event.ToolCompleted{}, err
 	}
+	w.deliver(completed, head)
 	w.inBand.put(p.call, nil)
 	return completed, nil
 }

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -15,6 +16,7 @@ import (
 func bandModel(cwd string) model {
 	m := newTestModel(nil, Options{Cwd: cwd})
 	m.thread.id = "t1"
+	m.thread.cwd = cwd
 	m.thread.modelName = "gpt-test"
 	m.thread.effort = "high"
 	m.thread.levels = map[string][]string{"gpt-test": {"low", "medium", "high"}}
@@ -106,13 +108,79 @@ func TestStatusBandStatusHide(t *testing.T) {
 	}
 }
 
+type contextStep struct {
+	name   string
+	note   string
+	want   string
+	absent string
+	stored func(*testing.T, rpc.ThreadTokenUsage)
+}
+
 func TestContextItemUpdatesFromUsage(t *testing.T) {
 	t.Parallel()
 	m := bandModel("/work/ws")
 	m.thread.usage = rpc.ThreadTokenUsage{}
-	m, _ = drive(t, m, notificationMsg{method: "thread/tokenUsage/updated", params: []byte(`{"threadId":"t1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":50000,"totalTokens":50000},"total":{"totalTokens":50000},"modelContextWindow":200000}}`)})
-	if row := bandRowOf(m); !strings.Contains(row, "25%") {
-		t.Fatalf("context not updated: %q", row)
+	for _, step := range []contextStep{
+		{
+			name: "first usage sets the share",
+			note: `{"threadId":"t1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":50000,"totalTokens":50000},"total":{"totalTokens":50000},"modelContextWindow":200000}}`,
+			want: "25%",
+		},
+		{
+			name:   "estimate wins over stale last",
+			note:   `{"threadId":"t1","turnId":"turn-2","tokenUsage":{"last":{"inputTokens":7032,"totalTokens":7032},"total":{"totalTokens":7032},"modelContextWindow":32000,"estimatedContextTokens":2179}}`,
+			want:   contextShare(2179, 32000),
+			absent: "22%",
+			stored: assertEstimateStored,
+		},
+		{
+			name:   "zero estimate wins too",
+			note:   `{"threadId":"t1","turnId":"turn-3","tokenUsage":{"last":{"inputTokens":7032,"totalTokens":7032},"total":{"totalTokens":7032},"modelContextWindow":32000,"estimatedContextTokens":0}}`,
+			want:   contextShare(0, 32000),
+			absent: "22%",
+		},
+		{
+			name:   "provider update restores the last sum",
+			note:   `{"threadId":"t1","turnId":"turn-4","tokenUsage":{"last":{"inputTokens":10000,"cachedInputTokens":2000,"outputTokens":4000,"totalTokens":16000},"total":{"inputTokens":10000,"cachedInputTokens":2000,"outputTokens":4000,"totalTokens":16000},"modelContextWindow":32000}}`,
+			want:   contextShare(16000, 32000),
+			stored: assertEstimateCleared,
+		},
+	} {
+		m, _ = drive(t, m, notificationMsg{method: "thread/tokenUsage/updated", params: []byte(step.note)})
+		row := bandRowOf(m)
+		if !strings.Contains(row, step.want) {
+			t.Fatalf("%s: share %q missing from row %q", step.name, step.want, row)
+		}
+		if step.absent != "" && strings.Contains(row, step.absent) {
+			t.Fatalf("%s: stale share %q survived in row %q", step.name, step.absent, row)
+		}
+		if step.stored != nil {
+			step.stored(t, m.thread.usage)
+		}
+	}
+}
+
+func contextShare(used, window int) string {
+	return fmt.Sprintf("%3d%%", int(math.Round(100*float64(used)/float64(window))))
+}
+
+func assertEstimateStored(t *testing.T, usage rpc.ThreadTokenUsage) {
+	t.Helper()
+	if usage.Last.InputTokens != 7032 || usage.Last.TotalTokens != 7032 || usage.Total.TotalTokens != 7032 {
+		t.Fatalf("provider fields overwritten: %+v", usage)
+	}
+	if estimate := usage.EstimatedContextTokens; estimate == nil || *estimate != 2179 {
+		t.Fatalf("estimate not stored: %+v", estimate)
+	}
+}
+
+func assertEstimateCleared(t *testing.T, usage rpc.ThreadTokenUsage) {
+	t.Helper()
+	if usage.EstimatedContextTokens != nil {
+		t.Fatalf("estimate not cleared: %d", *usage.EstimatedContextTokens)
+	}
+	if usage.Last.InputTokens != 10000 || usage.Last.CachedInputTokens != 2000 || usage.Last.OutputTokens != 4000 || usage.Last.TotalTokens != 16000 || usage.Total.TotalTokens != 16000 {
+		t.Fatalf("provider fields overwritten: %+v", usage)
 	}
 }
 
@@ -255,12 +323,27 @@ func TestBandGlyphsHaveNarrowWidth(t *testing.T) {
 	}
 	for _, glyph := range glyphs {
 		for _, r := range glyph {
-			switch kind := width.LookupRune(r).Kind(); kind {
-			case width.Neutral, width.EastAsianNarrow, width.EastAsianHalfwidth:
-			case width.EastAsianWide, width.EastAsianFullwidth, width.EastAsianAmbiguous:
-				t.Errorf("glyph %q (U+%04X) has width class %v", glyph, r, kind)
+			if !narrowRune(r) {
+				t.Errorf("glyph %q (U+%04X) is not narrow", glyph, r)
 			}
 		}
+	}
+	if narrowRune('\u2019') {
+		t.Error("U+2019 passes the narrow-class check, so the oracle cannot fail")
+	}
+	if narrowRune('\u6f22') {
+		t.Error("U+6F22 passes the narrow-class check, so the wide control cannot fail")
+	}
+}
+
+func narrowRune(r rune) bool {
+	switch width.LookupRune(r).Kind() {
+	case width.Neutral, width.EastAsianNarrow, width.EastAsianHalfwidth:
+		return true
+	case width.EastAsianAmbiguous, width.EastAsianWide, width.EastAsianFullwidth:
+		return false
+	default:
+		return false
 	}
 }
 
@@ -295,6 +378,58 @@ func TestEffortGlyphFollowsRank(t *testing.T) {
 	}
 }
 
+func TestEffortResumeEmptyAndStaleNotifications(t *testing.T) {
+	t.Parallel()
+	for _, effort := range []string{"max", ""} {
+		m := bandModel("/work")
+		m.thread.levels["gpt-test"] = []string{"low", "medium", "high", "max"}
+		m.applyResumed(resumedWithTurnEffort(effort))
+		want := resumedEffortGlyph(effort)
+		if got := m.effortText(unicodeIcons); got != want {
+			t.Fatalf("resumed effort %q glyph = %q, want %q", effort, got, want)
+		}
+		staleEffortsKeepGlyph(t, &m, want)
+		m.setThread("other")
+		if m.thread.turnEffort != nil {
+			t.Fatal("thread switch retained resolved effort")
+		}
+	}
+	m := bandModel("/work")
+	m.thread.turnID = "unresolved"
+	if got := m.effortText(unicodeIcons); got != "" {
+		t.Fatalf("unresolved active turn claimed a glyph: %q", got)
+	}
+}
+
+func resumedWithTurnEffort(effort string) *resumedThread {
+	return &resumedThread{
+		ThreadReadResponse: rpc.ThreadReadResponse{Thread: rpc.Thread{ID: "t1", Turns: []rpc.Turn{{ID: "active", Status: "inProgress"}}}},
+		effort:             "low", turnEffort: &effort, model: "gpt-test",
+	}
+}
+
+func resumedEffortGlyph(effort string) string {
+	if effort == "max" {
+		return "⣿"
+	}
+	return ""
+}
+
+func staleEffortsKeepGlyph(t *testing.T, m *model, want string) {
+	t.Helper()
+	for _, raw := range []string{
+		`{"threadId":"other","turnId":"active","effort":"high"}`,
+		`{"threadId":"t1","turnId":"stale","effort":"high"}`,
+	} {
+		if err := m.applyTurnEffort([]byte(raw)); err != nil {
+			t.Fatal(err)
+		}
+		if got := m.effortText(unicodeIcons); got != want {
+			t.Fatalf("stale effort changed glyph to %q, want %q", got, want)
+		}
+	}
+}
+
 func TestEffortItemNeedsTwoLevels(t *testing.T) {
 	t.Parallel()
 	m := bandModel("/work/ws")
@@ -317,5 +452,168 @@ func TestInitializeSetsProductForStatusBand(t *testing.T) {
 	}
 	if !strings.Contains(bandRowOf(m), "dalgona") {
 		t.Fatalf("mark missing after initialize: %q", bandRowOf(m))
+	}
+}
+
+func costModel(micros int64, partial bool) model {
+	m := bandModel("/work/ws")
+	m.screen.width = 100
+	m.thread.usage.CostUsdMicros = &micros
+	m.thread.usage.CostPartial = partial
+	return m
+}
+
+func TestFormatCost(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		micros  int64
+		partial bool
+		want    string
+	}{
+		{0, false, "$0.00"},
+		{4999, false, "$0.00"},
+		{5000, false, "$0.01"},
+		{11475, false, "$0.01"},
+		{12345000, false, "$12.35"},
+		{12345000, true, "$12.35+"},
+		{99994999, false, "$99.99"},
+		{99994999, true, "$99.99+"},
+		{99995000, false, "$100"},
+		{100000000, false, "$100"},
+		{100000000, true, "$100+"},
+		{9999994999, false, "$9999"},
+		{9999995000, false, "$9999+"},
+		{math.MaxInt64, false, "$9999+"},
+		{math.MaxInt64, true, "$9999+"},
+	} {
+		got := formatCost(tc.micros, tc.partial)
+		if got != tc.want {
+			t.Errorf("formatCost(%d, %v) = %q, want %q", tc.micros, tc.partial, got, tc.want)
+		}
+		if len(got) > costCells {
+			t.Errorf("formatCost(%d, %v) = %q is wider than %d cells", tc.micros, tc.partial, got, costCells)
+		}
+	}
+}
+
+func TestBandShowsCostWhenKnown(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		micros  int64
+		partial bool
+		want    string
+	}{
+		{11475, false, "$0.01"},
+		{12345000, false, "$12.35"},
+		{12345000, true, "$12.35+"},
+		{0, false, "$0.00"},
+	} {
+		row := bandRowOf(costModel(tc.micros, tc.partial))
+		if !strings.Contains(row, tc.want) {
+			t.Errorf("cost %d partial %v: row %q lacks %q", tc.micros, tc.partial, row, tc.want)
+		}
+		if !tc.partial && strings.Contains(row, tc.want+"+") {
+			t.Errorf("cost %d: row %q marks a complete cost as partial", tc.micros, row)
+		}
+	}
+	row := bandRowOf(costModel(12345000, false))
+	last := -1
+	for _, marker := range []string{"+  2", "$12.35", "25%", "dalgona"} {
+		at := strings.Index(row, marker)
+		if at <= last {
+			t.Fatalf("marker %q sits at byte %d in row %q, want queue, cost, context, mark in that order", marker, at, row)
+		}
+		last = at
+	}
+}
+
+func TestBandHidesCostWhenUnknown(t *testing.T) {
+	t.Parallel()
+	m := bandModel("/work/ws")
+	m.screen.width = 100
+	if row := bandRowOf(m); strings.Contains(row, "$") {
+		t.Fatalf("a thread with no priced message shows a cost: %q", row)
+	}
+	negative := int64(-1)
+	m.thread.usage.CostUsdMicros = &negative
+	if row := bandRowOf(m); strings.Contains(row, "$") {
+		t.Fatalf("a negative cost is shown: %q", row)
+	}
+	shown := costModel(12345000, false)
+	if row := bandRowOf(shown); !strings.Contains(row, "$12.35") {
+		t.Fatalf("a priced thread shows no cost: %q", row)
+	}
+	hidden, _ := drive(t, shown, resultMsg{op: "settings", value: &settingsReply{Settings: []settingValue{{Key: "statusHide", Value: []any{"cost"}}}}})
+	if row := bandRowOf(hidden); strings.Contains(row, "$") || !strings.Contains(row, "25%") {
+		t.Fatalf("statusHide cost left row %q", row)
+	}
+}
+
+func TestCostItemKeepsSevenCells(t *testing.T) {
+	t.Parallel()
+	for _, micros := range []int64{1000, 12345000} {
+		m := costModel(micros, false)
+		_, right := m.bandSegments()
+		if len(right) == 0 || right[0].id != "cost" {
+			t.Fatalf("right group = %+v, want cost first", right)
+		}
+		if cells := m.screen.cells(right[0].text); cells != costCells {
+			t.Errorf("cost %d fills %d cells, want %d", micros, cells, costCells)
+		}
+	}
+	for cols := 20; cols <= 60; cols++ {
+		short, long := costModel(1000, false), costModel(99990000, true)
+		short.screen.width, long.screen.width = cols, cols
+		for _, marker := range []string{"▸ ws", " +  2", "⣿", "dalgona"} {
+			a, b := strings.Contains(bandRowOf(short), marker), strings.Contains(bandRowOf(long), marker)
+			if a != b {
+				t.Errorf("width %d: %q shown = %v for $0.00 and %v for $99.99+", cols, marker, a, b)
+			}
+		}
+	}
+}
+
+func TestStatusBandDropsCostBetweenQueueAndEffort(t *testing.T) {
+	t.Parallel()
+	drops := []struct {
+		item   string
+		marker string
+		gone   int
+	}{
+		{"folder", "▸ ws", 45},
+		{"queue", "+  2", 40},
+		{"cost", "$12.35", 35},
+		{"effort", "⣿", 27},
+		{"mark", "dalgona", 25},
+	}
+	for cols := 20; cols <= 60; cols++ {
+		m := costModel(12345000, false)
+		m.screen.width = cols
+		row := bandRowOf(m)
+		for _, drop := range drops {
+			if got, want := strings.Contains(row, drop.marker), cols > drop.gone; got != want {
+				t.Errorf("width %d: %s shown = %v, want %v in %q", cols, drop.item, got, want, row)
+			}
+		}
+		for _, kept := range []string{"gpt-test", "✓", "⊡", "25%"} {
+			if !strings.Contains(row, kept) {
+				t.Errorf("width %d: protected %q left row %q", cols, kept, row)
+			}
+		}
+	}
+}
+
+func TestCostItemUpdatesFromUsage(t *testing.T) {
+	t.Parallel()
+	m := bandModel("/work/ws")
+	m.screen.width = 100
+	m.thread.usage = rpc.ThreadTokenUsage{}
+	m, _ = drive(t, m, notificationMsg{method: "thread/tokenUsage/updated", params: []byte(`{"threadId":"t1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":50000,"totalTokens":50000},"total":{"totalTokens":50000},"modelContextWindow":200000,"costUsdMicros":12345000,"costPartial":true}}`)})
+	if row := bandRowOf(m); !strings.Contains(row, "$12.35+") {
+		t.Fatalf("cost not updated: %q", row)
+	}
+	m, _ = drive(t, m, notificationMsg{method: "thread/tokenUsage/updated", params: []byte(`{"threadId":"t2","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":50000,"totalTokens":50000},"total":{"totalTokens":50000},"modelContextWindow":200000,"costUsdMicros":99000000}}`)})
+	if row := bandRowOf(m); strings.Contains(row, "$99.00") || !strings.Contains(row, "$12.35+") {
+		t.Fatalf("another thread's cost changed the band: %q", row)
 	}
 }

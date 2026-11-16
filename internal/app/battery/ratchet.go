@@ -39,6 +39,10 @@ func (a threadAsker) Ask(ctx context.Context, callID string, q ratchet.Question)
 	return answerFrom(q, reply)
 }
 
+func (threadAsker) PreviewRoom() (int, int) {
+	return asktool.MaxPreview, asktool.MaxPreviewLines
+}
+
 func askQuestion(q ratchet.Question) (asktool.Question, error) {
 	if q.Text == "" {
 		return asktool.Question{}, errors.New("ratchet approval: question text is empty")
@@ -62,7 +66,7 @@ func answerFrom(q ratchet.Question, reply asktool.Reply) (ratchet.Answer, error)
 		return answerOf(q, reply.Answers), nil
 	case asktool.OutcomeNoClient:
 		return ratchet.Answer{}, ratchet.ErrNoClient
-	case asktool.OutcomeCancelled, asktool.OutcomeInterrupted:
+	case asktool.OutcomeCancelled, asktool.OutcomeInterrupted, asktool.OutcomeTimedOut:
 		return ratchet.Answer{}, ratchet.ErrCancelled
 	case asktool.OutcomeFailed:
 		return ratchet.Answer{}, fmt.Errorf("ratchet approval failed: %s", reply.Detail)

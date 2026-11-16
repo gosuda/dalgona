@@ -20,6 +20,7 @@ type Input struct {
 	CWD          string
 	OS           string
 	Shell        string
+	Memory       string
 }
 
 func Assemble(in Input) string {
@@ -36,7 +37,7 @@ func Assemble(in Input) string {
 		sections = append(sections, "## Project instructions\n\n"+instructions)
 	}
 	sections = append(sections, renderEnvironment(in))
-	return strings.Join(sections, "\n\n") + "\n"
+	return AppendMemory(strings.Join(sections, "\n\n")+"\n", in.Memory)
 }
 
 func joinNonEmpty(parts []string) string {

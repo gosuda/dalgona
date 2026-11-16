@@ -1,5 +1,6 @@
 <script lang="ts">
 import type { Snippet } from "svelte";
+import { isImeKey } from "#lib/ime.ts";
 
 interface Props {
 	readonly title: string;
@@ -13,6 +14,7 @@ let { title, open, onClose, children, footer }: Props = $props();
 const titleId = $props.id();
 let dialog = $state<HTMLDialogElement>();
 let opener: HTMLElement | null = null;
+let composing = $state(false);
 
 $effect(() => {
 	const node = dialog;
@@ -36,13 +38,14 @@ $effect(() => {
 });
 
 function onKey(event: KeyboardEvent): void {
-	if (event.key !== "Escape") return;
+	if (event.key !== "Escape" || composing || isImeKey(event)) return;
 	event.preventDefault();
 	onClose();
 }
 
 function onCancel(event: Event): void {
 	event.preventDefault();
+	if (composing) return;
 	onClose();
 }
 </script>
@@ -53,6 +56,8 @@ function onCancel(event: Event): void {
 	aria-labelledby={titleId}
 	onkeydown={onKey}
 	oncancel={onCancel}
+	oncompositionstart={() => (composing = true)}
+	oncompositionend={() => (composing = false)}
 >
 	<header class="panel-head">
 		<h2 id={titleId}>{title}</h2>

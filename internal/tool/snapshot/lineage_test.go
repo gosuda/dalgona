@@ -221,7 +221,7 @@ func TestMissingHistoryEndsLineage(t *testing.T) {
 	before := []byte("a\n")
 	ref := store.Put("f.txt", before, nil)
 	_, err := store.ResolveSpan(ref, "f.txt", []byte("b\n"), Span{Start: 0, End: 1})
-	if !errors.Is(err, ErrStaleReference) {
+	if !errors.Is(err, ErrStaleReference) || errors.Is(err, ErrPathChanged) {
 		t.Fatalf("external change err %v", err)
 	}
 	newer := []byte("c\n")
@@ -233,7 +233,7 @@ func TestMissingHistoryEndsLineage(t *testing.T) {
 		t.Fatal(restoreErr)
 	}
 	_, err = store.ResolveSpan(ref, "f.txt", newer, Span{Start: 0, End: 1})
-	if !errors.Is(err, ErrStaleReference) {
+	if !errors.Is(err, ErrStaleReference) || errors.Is(err, ErrPathChanged) {
 		t.Fatalf("missing edge err %v", err)
 	}
 }

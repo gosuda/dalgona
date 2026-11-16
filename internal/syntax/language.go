@@ -97,18 +97,54 @@ var luaQuery string
 //go:embed queries/markdown.scm
 var markdownQuery string
 
+//go:embed queries/go.graph.scm
+var goGraph string
+
+//go:embed queries/typescript.graph.scm
+var typescriptGraph string
+
+//go:embed queries/python.graph.scm
+var pythonGraph string
+
+//go:embed queries/rust.graph.scm
+var rustGraph string
+
+//go:embed queries/java.graph.scm
+var javaGraph string
+
 type language struct {
 	name       string
 	extensions []string
 	grammar    func() *gotreesitter.Language
 	query      string
+	graph      string
 	outliner   func() (*gotreesitter.Outliner, error)
+	graphQuery func() (*Query, error)
 }
 
-func newLanguage(name string, extensions []string, grammar func() *gotreesitter.Language, query string) *language {
-	l := &language{name: name, extensions: extensions, grammar: grammar, query: query}
+type languageSpec struct {
+	name       string
+	extensions []string
+	grammar    func() *gotreesitter.Language
+	query      string
+	graph      string
+	ownerRules []gotreesitter.OutlineOwnerRule
+}
+
+var goOwnerRules = []gotreesitter.OutlineOwnerRule{{
+	NodeType:   "method_declaration",
+	OwnerField: "receiver",
+	Unwrap:     []string{"parameter_list", "parameter_declaration", "pointer_type", "generic_type", "parenthesized_type"},
+	NameTypes:  []string{"type_identifier"},
+}}
+
+func newLanguage(spec languageSpec) *language {
+	l := &language{name: spec.name, extensions: spec.extensions, grammar: spec.grammar, query: spec.query, graph: spec.graph}
 	l.outliner = sync.OnceValues(func() (*gotreesitter.Outliner, error) {
-		return gotreesitter.NewOutliner(grammar(), query)
+		return gotreesitter.NewOutliner(spec.grammar(), spec.query, gotreesitter.WithOutlineOwnerRules(spec.ownerRules))
+	})
+	l.graphQuery = sync.OnceValues(func() (*Query, error) {
+		return Language{l: l}.Compile(spec.graph)
 	})
 	return l
 }
@@ -118,29 +154,29 @@ func (l *language) syntaxOnly() bool {
 }
 
 var registry = []*language{
-	newLanguage("bash", []string{".sh"}, bash.Language, bashQuery),
-	newLanguage("c", []string{".c", ".h"}, c.Language, cQuery),
-	newLanguage("c_sharp", []string{".cs"}, c_sharp.Language, csharpQuery),
-	newLanguage("cpp", []string{".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}, cpp.Language, cppQuery),
-	newLanguage("css", []string{".css"}, css.Language, ""),
-	newLanguage("go", []string{".go"}, golang.Language, goQuery),
-	newLanguage("html", []string{".html", ".htm"}, html.Language, ""),
-	newLanguage("java", []string{".java"}, java.Language, javaQuery),
-	newLanguage("javascript", []string{".js", ".jsx", ".mjs", ".cjs"}, javascript.Language, javascriptQuery),
-	newLanguage("json", []string{".json"}, json.Language, ""),
-	newLanguage("kotlin", []string{".kt", ".kts"}, kotlin.Language, kotlinQuery),
-	newLanguage("lua", []string{".lua"}, lua.Language, luaQuery),
-	newLanguage("markdown", []string{".md"}, markdown.Language, markdownQuery),
-	newLanguage("php", []string{".php"}, php.Language, phpQuery),
-	newLanguage("python", []string{".py"}, python.Language, pythonQuery),
-	newLanguage("ruby", []string{".rb"}, ruby.Language, rubyQuery),
-	newLanguage("rust", []string{".rs"}, rust.Language, rustQuery),
-	newLanguage("svelte", []string{".svelte"}, svelte.Language, ""),
-	newLanguage("swift", []string{".swift"}, swift.Language, swiftQuery),
-	newLanguage("toml", []string{".toml"}, toml.Language, ""),
-	newLanguage("tsx", []string{".tsx"}, tsx.Language, tsxQuery),
-	newLanguage("typescript", []string{".ts", ".mts", ".cts"}, typescript.Language, typescriptQuery),
-	newLanguage("yaml", []string{".yaml", ".yml"}, yaml.Language, ""),
+	newLanguage(languageSpec{name: "bash", extensions: []string{".sh"}, grammar: bash.Language, query: bashQuery}),
+	newLanguage(languageSpec{name: "c", extensions: []string{".c", ".h"}, grammar: c.Language, query: cQuery}),
+	newLanguage(languageSpec{name: "c_sharp", extensions: []string{".cs"}, grammar: c_sharp.Language, query: csharpQuery}),
+	newLanguage(languageSpec{name: "cpp", extensions: []string{".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}, grammar: cpp.Language, query: cppQuery}),
+	newLanguage(languageSpec{name: "css", extensions: []string{".css"}, grammar: css.Language}),
+	newLanguage(languageSpec{name: "go", extensions: []string{".go"}, grammar: golang.Language, query: goQuery, graph: goGraph, ownerRules: goOwnerRules}),
+	newLanguage(languageSpec{name: "html", extensions: []string{".html", ".htm"}, grammar: html.Language}),
+	newLanguage(languageSpec{name: "java", extensions: []string{".java"}, grammar: java.Language, query: javaQuery, graph: javaGraph}),
+	newLanguage(languageSpec{name: "javascript", extensions: []string{".js", ".jsx", ".mjs", ".cjs"}, grammar: javascript.Language, query: javascriptQuery}),
+	newLanguage(languageSpec{name: "json", extensions: []string{".json"}, grammar: json.Language}),
+	newLanguage(languageSpec{name: "kotlin", extensions: []string{".kt", ".kts"}, grammar: kotlin.Language, query: kotlinQuery}),
+	newLanguage(languageSpec{name: "lua", extensions: []string{".lua"}, grammar: lua.Language, query: luaQuery}),
+	newLanguage(languageSpec{name: "markdown", extensions: []string{".md"}, grammar: markdown.Language, query: markdownQuery}),
+	newLanguage(languageSpec{name: "php", extensions: []string{".php"}, grammar: php.Language, query: phpQuery}),
+	newLanguage(languageSpec{name: "python", extensions: []string{".py"}, grammar: python.Language, query: pythonQuery, graph: pythonGraph}),
+	newLanguage(languageSpec{name: "ruby", extensions: []string{".rb"}, grammar: ruby.Language, query: rubyQuery}),
+	newLanguage(languageSpec{name: "rust", extensions: []string{".rs"}, grammar: rust.Language, query: rustQuery, graph: rustGraph}),
+	newLanguage(languageSpec{name: "svelte", extensions: []string{".svelte"}, grammar: svelte.Language}),
+	newLanguage(languageSpec{name: "swift", extensions: []string{".swift"}, grammar: swift.Language, query: swiftQuery}),
+	newLanguage(languageSpec{name: "toml", extensions: []string{".toml"}, grammar: toml.Language}),
+	newLanguage(languageSpec{name: "tsx", extensions: []string{".tsx"}, grammar: tsx.Language, query: tsxQuery}),
+	newLanguage(languageSpec{name: "typescript", extensions: []string{".ts", ".mts", ".cts"}, grammar: typescript.Language, query: typescriptQuery, graph: typescriptGraph}),
+	newLanguage(languageSpec{name: "yaml", extensions: []string{".yaml", ".yml"}, grammar: yaml.Language}),
 }
 
 type Language struct {
@@ -181,6 +217,10 @@ func (l Language) Name() string {
 
 func (l Language) HasDefinitions() bool {
 	return !l.l.syntaxOnly()
+}
+
+func (l Language) HasGraph() bool {
+	return l.l.graph != ""
 }
 
 func (l Language) Extensions() []string {

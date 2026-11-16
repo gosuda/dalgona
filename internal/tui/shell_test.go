@@ -145,6 +145,48 @@ func TestShellEscOnEmptyLineLeavesMode(t *testing.T) {
 	}
 }
 
+func shellAfterRun(t *testing.T) (model, *shellCaller) {
+	t.Helper()
+	caller := &shellCaller{result: rpc.CommandExecResponse{Stdout: "hi\n"}}
+	m := newTestModel(caller, Options{Cwd: "/work"})
+	return shellSubmit(t, shellType(t, m, "!echo hi")), caller
+}
+
+func TestShellEscOnChipOnlyLineLeavesModeAndKeepsChip(t *testing.T) {
+	t.Parallel()
+	m, caller := shellAfterRun(t)
+	if m.input.mode != inputShell || m.input.composer.Value() == "" {
+		t.Fatalf("after one run mode = %v and prompt = %q, want shell mode with a chip in the prompt", m.input.mode, m.input.composer.Value())
+	}
+	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
+	if m.input.mode != inputPrompt {
+		t.Fatalf("mode after esc on a chip-only line = %v, want prompt", m.input.mode)
+	}
+	if got := m.input.composer.firstLine(); got != "[Shell #1 exit 0, 1 line]" {
+		t.Fatalf("prompt after esc = %q, want the shell chip kept", got)
+	}
+	want := "Output of `echo hi` (exit 0):\n```\nhi\n```"
+	if got := m.input.composer.Expanded(); got != want {
+		t.Fatalf("expanded chip after esc = %q, want %q", got, want)
+	}
+	if calls := shellCalls(caller); len(calls) != 1 {
+		t.Fatalf("command/exec calls = %d, want 1: esc ran a command", len(calls))
+	}
+}
+
+func TestShellEscWithTypedTextAfterChipStaysInMode(t *testing.T) {
+	t.Parallel()
+	m, _ := shellAfterRun(t)
+	m = shellType(t, m, "x")
+	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
+	if m.input.mode != inputShell {
+		t.Fatalf("mode after esc with typed text = %v, want shell", m.input.mode)
+	}
+	if got := m.input.composer.firstLine(); got != "[Shell #1 exit 0, 1 line]x" {
+		t.Fatalf("prompt after esc = %q, want the chip and the typed text kept", got)
+	}
+}
+
 func TestShellFailedCommandShowsFailedRowAndChipOutput(t *testing.T) {
 	t.Parallel()
 	caller := &shellCaller{result: rpc.CommandExecResponse{ExitCode: 3, Stdout: "a\n", Stderr: "boom\n"}}

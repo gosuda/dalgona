@@ -50,7 +50,7 @@ type Effects interface {
 - `CallTool` MUST run the tool through approvals and the thread's runner. It MUST journal `tool.started` and `tool.completed` with `call_id = "<run>/<n>"`. A later `Lookup` of that index MUST return the recorded value. A tool failure MUST return an error. A denial MUST wrap `script.ErrDenied`.
 - `Spawn` MUST journal `child.spawned` with `call_id = "<run>/<n>"`. A later `Lookup` MUST return the subagent id as a JSON string.
 - `Wait` MUST return the final text of each subagent, in input order.
-- `Judge` MUST ask the decider for `req.Model`, or for the resolved `[approval_decider] decider` when the model is empty. It MUST return an object that maps each question name to an object with `choice`, `noul`, `score`, `probabilities`, and `confidence` as the answer has them.
+- `Judge` MUST ask the decider for `req.Model`, or for the resolved `[approval_decider] decider` when the model is empty. It MUST return `{"answers": <question map>, "model": <answering model>, "fallback": <primary and failure>}`. `fallback` MUST be omitted when empty. Each answer has `choice`, `noul`, `score`, `probabilities`, and `confidence` as the answer has them.
 
 ## Effects and replay
 
@@ -83,12 +83,12 @@ Workflows and `eval` cells have `ctx` and `tools` (the same as `ctx.tools`). Plu
 - `ctx.tools.<name>(**kw)` and `ctx.tools["<name>"](**kw)` MUST call the tool. Positional arguments MUST fail. A failed call MUST stop the script.
 - `ctx.try_call(op, *args, **kw)` MUST return `struct(ok, value, error)`. It MUST NOT catch a denial, `scope_exceeded`, cancellation, nondeterminism, an interrupted effect, or a step limit.
 - `ctx.scope(limit)` MUST accept a limit from 1 to 64. `scope.tools.<name>(**kw)` MUST submit the call and return `None`. At most `limit` calls MUST run at the same time. `scope.all()` MUST wait for every submitted call and return the results in submission order. A failed call MUST raise the first failure in submission order. A scope MUST hold at most 4096 pending calls.
-- `ctx.spawn(prompt, runner = None, model = None)` MUST return the subagent id. At most 8 subagents MUST run at the same time. A spawn MUST wait while 8 subagents run. Closing a subagent MUST free its slot. A subagent MUST hold its slot until its turn ends or the subagent stops.
+- `ctx.spawn(prompt, runner = None, model = None)` MUST return the subagent id. At most 4 subagents MUST run at the same time. A spawn MUST wait while 4 subagents run. Closing a subagent MUST free its slot. A subagent MUST hold its slot until its turn ends or the subagent stops. A call from a subagent thread or an advisor thread MUST fail with `agent: subagents cannot spawn subagents`. That call MUST start no subagent.
 - `ctx.wait(ids)` MUST return a list of final texts.
 - `ctx.sleep(seconds)` MUST accept a non-negative finite number.
 - `ctx.log(msg)` MUST pass the message to `Log`.
-- `ctx.judge(state, questions, model = None)` MUST return a dict from question name to answer. The state MUST be a string, dict, or list. Each question MUST be a dict with `type` `choice`, `noul`, `bool`, or `score`. `bool` MUST be sent as `noul`. A `choice` answer is `struct(choice, probabilities, confidence)`. A `noul` answer is `struct(noul)`. A `score` answer is `struct(score, probabilities, confidence)`. A missing field MUST be `None`.
-- `ctx.judge_batch(states, questions, concurrency = 8, model = None)` MUST return one `struct(answers, error)` per state, in input order. `concurrency` MUST be from 1 to 64. An item failure MUST set `error` and MUST NOT raise. Invalid questions, an invalid concurrency, and each stop condition listed for `ctx.try_call` MUST raise. A batch MUST hold at most 4096 states.
+- `ctx.judge(state, questions, model = None)` MUST return `struct(answers, model, fallback)`. `answers` maps each question name to its answer. The state MUST be a string, dict, or list. Each question MUST be a dict with `type` `choice`, `noul`, `bool`, or `score`. `bool` MUST be sent as `noul`. A `choice` answer is `struct(choice, probabilities, confidence)`. A `noul` answer is `struct(noul)`. A `score` answer is `struct(score, probabilities, confidence)`. A missing field MUST be `None`. `model` MUST be the answering model. `fallback` MUST be the primary model and its failure, or an empty string.
+- `ctx.judge_batch(states, questions, concurrency = 8, model = None)` MUST return one `struct(answers, model, fallback, error)` per state, in input order. `concurrency` MUST be from 1 to 64. An item failure MUST set `error` to a string and `answers`, `model` and `fallback` to `None`. Invalid questions, an invalid concurrency, and each stop condition listed for `ctx.try_call` MUST raise. A batch MUST hold at most 4096 states.
 
 ## The eval tool
 
@@ -132,7 +132,7 @@ The reply MUST be:
 | --- | --- | --- |
 | `normal` | every tool | every tool except `eval` and `yield` |
 | `eval-first` | `read`, `search`, `patch` or `apply_patch`, `exec`, `ask`, `ratchet`, `yield`, `eval`, in this order, each where the thread registers it | every tool except `eval` and `yield` |
-| `eval-only` | `ask`, `yield`, `eval`, in this order, each where the thread registers it | every tool except `eval` and `yield` |
+| `eval-only` | `ask`, `ratchet`, `yield`, `eval`, in this order, each where the thread registers it | every tool except `eval` and `yield` |
 
 `ModelTools` MUST return the visible list. `FoldedTools` MUST return the other tools. The `eval` description MUST end with one line `<name>: <first description line>` per folded tool. `CheckDirect` MUST fail a direct call to a hidden tool with `tool <name> is not available in tool_mode <mode>; call it from eval`. Every tool except `eval` and `yield` MUST be reachable inside cells. A cell call to `ask`, or to `ratchet` with action `approve`, MUST be refused with status `denied` and code `scope_exceeded`. The message MUST be `tool <name> needs the user and runs only as a direct call`, where `<name>` is `ask`, or `ratchet approve`. `yield` MUST stay a direct call in every tool mode, because a nested `yield` ends a child before its cell returns.
 
@@ -165,3 +165,5 @@ Each effect at load time MUST fail with `effects are not allowed at load time`. 
 Each plugin call MUST be a durable run. Its source MUST be the defining file. The engine MUST re-execute that source with load-time rules, then call the registered function with the same kind, name, and function name. A plugin tool MUST have class `Script` and `run_id = call_id`. A hook run MUST use `run_id = <runID>/hook:<file>:<fn>`.
 
 `ToolCall` MUST run every `tool_call` hook in load order and MUST return every hook failure joined. A hook failure MUST count as no opinion for that hook only and MUST NOT skip later hooks. A hook MUST return `None`, `{"decision": "allow"}`, or `{"decision": "deny", "reason": str}`. The first `deny` MUST win. Otherwise the first `allow` MUST win. `HookDecision.By` MUST be `hook:<file>:<fn>`. The host MUST journal it as `approval.resolved` with that `by`. Any other result MUST fail with the hook name. `Emit` MUST run `session_start` and `turn_end` hooks and MUST return every hook failure.
+
+Each `tool_call` hook MUST run under its own deadline. The deadline MUST be 5 seconds unless `scripthost.Config.HookTimeout` sets another duration. A hook that runs past its deadline MUST stop. Its failure text MUST be `plugin <file> hook timed out after <duration>`. A timed-out hook MUST count as no opinion. The approval gate MUST log the failure and MUST continue with the next hook or gate step. A plugin tool and an `eval` cell MUST inherit the deadline of the tool call that runs them. They MUST NOT add a deadline of their own. A `turn_end` hook MUST keep the 30 second deadline of the turn.

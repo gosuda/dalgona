@@ -1,8 +1,10 @@
 package ratchet
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/jsontext"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,10 +17,23 @@ import (
 const initJSON = `{"action":"init","flow":"x","cases":["cases.txt"],"harness":["run.sh"],"change":["p.md"],"off_limits":["notes.md"]}`
 
 type fakeAsker struct {
-	answer   Answer
-	err      error
-	calls    int
-	question Question
+	answer    Answer
+	err       error
+	calls     int
+	question  Question
+	roomChars int
+	roomLines int
+}
+
+func (a *fakeAsker) PreviewRoom() (chars, lines int) {
+	chars, lines = a.roomChars, a.roomLines
+	if chars == 0 {
+		chars = 2000
+	}
+	if lines == 0 {
+		lines = 40
+	}
+	return chars, lines
 }
 
 func (a *fakeAsker) Ask(_ context.Context, _ string, q Question) (Answer, error) {
@@ -223,6 +238,167 @@ func TestApprovePlanPreview(t *testing.T) {
 	if !strings.Contains(preview, "Split: 3 train, 1 test, seed 7") {
 		t.Fatalf("preview = %q, want the split line", preview)
 	}
+}
+
+func TestApprovePreviewJoinsHostBlockBlankLineAndModelPreview(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		preview string
+	}{
+		{"empty model preview keeps the blank line", ""},
+		{"model preview follows the blank line", "case a\ncase b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ws := makeWorkspace(t, initFiles())
+			env := toolEnv(t, ws)
+			asker := &fakeAsker{answer: Answer{Label: "Abort"}}
+			tl := New(asker)
+			mustCall(t, tl, env, "c1", initJSON)
+			mustCall(t, tl, env, "c2", fmt.Sprintf(`{"action":"approve","flow":"x","stage":"inputs","question":"Approve the cases?","preview":%q}`, tc.preview))
+			want := "Stage: inputs\nDigest: " + expectedDigest(t, ws, stageInputs) + "\nFlow: x\nFiles:\n- cases.txt\n\n" + tc.preview
+			if got := asker.question.Options[0].Preview; got != want {
+				t.Fatalf("Approve preview = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func casesInit(n int) (map[string]string, string) {
+	files := map[string]string{"run.sh": "r\n", "p.md": "one\n", "notes.md": "n\n"}
+	quoted := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		name := fmt.Sprintf("c%02d.txt", i)
+		files[name] = "c\n"
+		quoted = append(quoted, fmt.Sprintf("%q", name))
+	}
+	return files, `{"action":"init","flow":"x","cases":[` + strings.Join(quoted, ",") + `],"harness":["run.sh"],"change":["p.md"],"off_limits":["notes.md"]}`
+}
+
+func TestApproveCountsTheJoinWhenPreviewIsEmpty(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		paths   int
+		wantErr string
+	}{
+		{"facts leave no line for the join", 36, "ratchet approve: preview is 1 lines and 0 characters; the room after the host facts is 0 lines and 1537 characters"},
+		{"facts leave one line for the join", 35, "ratchet approve: preview is 1 lines and 0 characters; the room after the host facts is 0 lines and 1547 characters"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			files, initArgs := casesInit(tc.paths)
+			ws := makeWorkspace(t, files)
+			env := toolEnv(t, ws)
+			asker := &fakeAsker{}
+			tl := New(asker)
+			mustCall(t, tl, env, "c1", initArgs)
+			before := stateJSON(t, ws)
+			_, err := callTool(t, tl, env, "c2", `{"action":"approve","flow":"x","stage":"inputs","question":"Approve the cases?"}`)
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("error = %v, want %q", err, tc.wantErr)
+			}
+			if asker.calls != 0 {
+				t.Fatalf("asker calls = %d, want 0", asker.calls)
+			}
+			if after := stateJSON(t, ws); !bytes.Equal(before, after) {
+				t.Fatal("refused approve changed state.json")
+			}
+		})
+	}
+}
+
+func stateJSON(t *testing.T, ws string) []byte {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(ws, ".dalgona", "ratchet", "x", "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func TestApproveRefusesPreviewOverRoom(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{"cases1.txt": "c1\n", "cases2.txt": "c2\n", "run.sh": "r\n", "p.md": "one\n", "notes.md": "n\n"}
+	initTwoCases := `{"action":"init","flow":"x","cases":["cases1.txt","cases2.txt"],"harness":["run.sh"],"change":["p.md"],"off_limits":["notes.md"]}`
+	preview := strings.Repeat(`case 12\n`, 37) + `case 12`
+	t.Run("preview over the room left by the host facts", func(t *testing.T) {
+		t.Parallel()
+		ws := makeWorkspace(t, files)
+		env := toolEnv(t, ws)
+		asker := &fakeAsker{}
+		tl := New(asker)
+		mustCall(t, tl, env, "c1", initTwoCases)
+		before := stateJSON(t, ws)
+		_, err := callTool(t, tl, env, "c2", `{"action":"approve","flow":"x","stage":"inputs","question":"Approve the cases?","preview":"`+preview+`"}`)
+		want := "ratchet approve: preview is 38 lines and 303 characters; the room after the host facts is 33 lines and 1871 characters"
+		if err == nil || err.Error() != want {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+		if asker.calls != 0 {
+			t.Fatalf("asker calls = %d, want 0", asker.calls)
+		}
+		if after := stateJSON(t, ws); !bytes.Equal(before, after) {
+			t.Fatal("refused approve changed state.json")
+		}
+	})
+	t.Run("a short preview asks", func(t *testing.T) {
+		t.Parallel()
+		ws := makeWorkspace(t, files)
+		env := toolEnv(t, ws)
+		asker := &fakeAsker{answer: Answer{Label: "Abort"}}
+		tl := New(asker)
+		mustCall(t, tl, env, "c1", initTwoCases)
+		short := strings.Repeat(`case 12\n`, 9) + `case 12`
+		mustCall(t, tl, env, "c2", `{"action":"approve","flow":"x","stage":"inputs","question":"Approve the cases?","preview":"`+short+`"}`)
+		if asker.calls != 1 {
+			t.Fatalf("asker calls = %d, want 1", asker.calls)
+		}
+	})
+}
+
+func TestApproveRefusesFactsOverLimit(t *testing.T) {
+	t.Parallel()
+	t.Run("host facts over the room", func(t *testing.T) {
+		t.Parallel()
+		files, initJSON := casesInit(37)
+		ws := makeWorkspace(t, files)
+		env := toolEnv(t, ws)
+		asker := &fakeAsker{}
+		tl := New(asker)
+		mustCall(t, tl, env, "c1", initJSON)
+		before := stateJSON(t, ws)
+		_, err := callTool(t, tl, env, "c2", `{"action":"approve","flow":"x","stage":"inputs","question":"Approve the cases?"}`)
+		want := "ratchet approve: the inputs facts need 41 lines and 471 characters, and one question holds 40 lines and 2000 characters; list directories in place of single files, or shorten the command"
+		if err == nil || err.Error() != want {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+		if asker.calls != 0 {
+			t.Fatalf("asker calls = %d, want 0", asker.calls)
+		}
+		if after := stateJSON(t, ws); !bytes.Equal(before, after) {
+			t.Fatal("refused approve changed state.json")
+		}
+	})
+	t.Run("facts that leave exactly the join ask", func(t *testing.T) {
+		t.Parallel()
+		files, initArgs := casesInit(34)
+		ws := makeWorkspace(t, files)
+		env := toolEnv(t, ws)
+		asker := &fakeAsker{answer: Answer{Label: "Abort"}}
+		tl := New(asker)
+		mustCall(t, tl, env, "c1", initArgs)
+		mustCall(t, tl, env, "c2", `{"action":"approve","flow":"x","stage":"inputs","question":"Approve the cases?"}`)
+		if asker.calls != 1 {
+			t.Fatalf("asker calls = %d, want 1", asker.calls)
+		}
+		if lines := strings.Count(asker.question.Options[0].Preview, "\n") + 1; lines != 40 {
+			t.Fatalf("Approve preview holds %d lines, want the 40 of the room", lines)
+		}
+	})
 }
 
 func TestRunRefusesForeignMembers(t *testing.T) {

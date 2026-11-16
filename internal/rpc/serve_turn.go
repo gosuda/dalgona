@@ -155,6 +155,9 @@ func (s *server) turnStart(ctx context.Context, params jsontext.Value) (jsontext
 	if err != nil {
 		return nil, err
 	}
+	if err = s.refuseUnsupportedEffort(ctx, cmp.Or(in.Model, info.Model, s.host.Config().Model), in.Effort); err != nil {
+		return nil, err
+	}
 	if in.Approval != "" {
 		settings, settingsErr := thread.Settings()
 		if settingsErr != nil {

@@ -196,11 +196,28 @@ func TestThreadRowKeysCountLoads(t *testing.T) {
 	for _, id := range []string{"t1", "t1"} {
 		m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{Thread: rpc.Thread{ID: id, Name: "Plan"}}})
 	}
-	if _, ok := m.out.printed["thread:t1:1"]; !ok {
-		t.Fatal("first load of t1 printed no thread row")
+	for _, key := range []string{"thread:t1:1", "thread:t1:2"} {
+		if rows := entriesWithKey(m, key); len(rows) != 1 || rows[0].text != "── Plan ──" {
+			t.Fatalf("%s rows = %+v, want one row holding %q", key, rows, "── Plan ──")
+		}
 	}
-	if _, ok := m.out.printed["thread:t1:2"]; ok {
-		t.Fatal("reload of the followed thread printed a thread row")
+}
+
+func TestReloadOfFollowedThreadPrintsThreadRowAndNoItemRowTwice(t *testing.T) {
+	t.Parallel()
+	m := playTerminal(newModel(nil, Options{}, nil))
+	m.screen.width = 80
+	items := []rpc.Item{{ID: "c1", Type: "commandExecution", Command: "ls", Status: "completed"}}
+	load := resultMsg{op: "resumed", value: &resumedThread{Thread: rpc.Thread{ID: "t1", Name: "Plan", Turns: []rpc.Turn{{ID: "turn-1", Items: items, Status: "completed"}}}}}
+	m, _ = drive(t, m, load)
+	m, _ = drive(t, m, load)
+	for key, want := range map[string]int{"thread:t1:1": 1, "thread:t1:2": 1, fixtureItemKey("c1"): 1} {
+		if got := len(entriesWithKey(m, key)); got != want {
+			t.Fatalf("rows under %s = %d, want %d", key, got, want)
+		}
+	}
+	if got := len(m.out.entries); got != 3 {
+		t.Fatalf("committed rows after a reload = %d, want 3", got)
 	}
 }
 

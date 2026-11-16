@@ -263,6 +263,7 @@ const codexCases: readonly CodexCase[] = [
 					reasoningOutputTokens: 0,
 				},
 				modelContextWindow: 200000,
+				estimatedContextTokens: 2179,
 			},
 		},
 	),
@@ -514,6 +515,7 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 				reasoningOutputTokens: 0,
 			},
 			contextWindow: 200000,
+			estimatedContextTokens: 2179,
 		},
 	},
 	ModelListResponse: [

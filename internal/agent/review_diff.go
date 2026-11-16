@@ -126,22 +126,20 @@ func diffFiles(files []reviewFile, contextLines int) ([]fileDiff, error) {
 		if file.skip == "large" {
 			continue
 		}
-		fd, ok, err := diffOne(file, contextLines)
+		fd, err := diffOne(file, contextLines)
 		if err != nil {
 			return nil, err
 		}
-		if ok {
-			out = append(out, fd)
-		}
+		out = append(out, fd)
 	}
 	return out, nil
 }
 
-func diffOne(file reviewFile, contextLines int) (fileDiff, bool, error) {
+func diffOne(file reviewFile, contextLines int) (fileDiff, error) {
 	fd := fileDiff{path: file.path, change: file.change, kind: reviewKind(file.path)}
 	if file.skip == "binary" {
 		fd.binary, fd.header = true, "[binary file]\n"
-		return fd, true, nil
+		return fd, nil
 	}
 	oldLabel, newLabel := "a/"+file.path, "b/"+file.path
 	if file.change == "add" {
@@ -152,18 +150,15 @@ func diffOne(file reviewFile, contextLines int) (fileDiff, bool, error) {
 	}
 	diff, stats, err := textdiff.Unified(oldLabel, newLabel, file.pre, file.post, contextLines)
 	if err != nil {
-		return fileDiff{}, false, err
+		return fileDiff{}, err
 	}
 	header, hunks, err := splitHunks(diff)
 	if err != nil {
-		return fileDiff{}, false, err
-	}
-	if len(hunks) == 0 {
-		return fileDiff{}, false, nil
+		return fileDiff{}, err
 	}
 	fd.header, fd.hunks, fd.added, fd.removed = header, hunks, stats.Added, stats.Removed
 	fd.concurrent = hasConcurrentLine(hunks)
-	return fd, true, nil
+	return fd, nil
 }
 
 func hasConcurrentLine(hunks []hunk) bool {
@@ -312,7 +307,7 @@ func blankLine(line string) bool {
 func unitsOf(files []fileDiff) []reviewUnit {
 	var units []reviewUnit
 	for i, f := range files {
-		if f.binary {
+		if len(f.hunks) == 0 {
 			units = append(units, reviewUnit{id: len(units), file: i})
 			continue
 		}

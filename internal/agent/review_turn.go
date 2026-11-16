@@ -7,6 +7,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -50,7 +51,7 @@ func (w *worker) turnReview(ctx context.Context, v view) (bool, uint64) {
 }
 
 func (w *worker) turnReviewWanted(v view) (string, bool) {
-	if w.t.host.cfg.EditJudge == nil || !w.t.host.Config().EditReview.Enabled || !w.eligible || w.recovering || w.reviewed {
+	if w.t.host.cfg.EditJudge == nil || !w.t.host.Config().EditReview.Enabled || !w.eligible || w.recovering || w.reviewed || w.reviewFailures >= reviewFailureLimit {
 		return "", false
 	}
 	if _, judged := v.state.JudgedTurns[w.turnID]; judged {
@@ -183,14 +184,13 @@ func (w *worker) judgeTurn(ctx context.Context, task string, diff turnDiff, star
 		return w.turnResult(entry, judgment{by: "judge", err: err}, start), true
 	}
 	entry.Truncated = entry.Truncated || input.truncated
-	tctx, cancel := context.WithTimeoutCause(ctx, h.reviewTimeout, reviewTimeoutCause(h.reviewTimeout))
-	defer cancel()
-	j, _ := w.judgeParts(ctx, tctx, []judgeInput{input})
+	j, _ := w.judgeParts(ctx, []judgeInput{input})
 	return w.turnResult(entry, j, start), true
 }
 
 func (w *worker) turnResult(entry event.TurnJudged, j judgment, start time.Time) event.TurnJudged {
 	entry.By = j.by
+	entry.Fallback, entry.Judges = w.attribution(j)
 	entry.ElapsedMS = time.Since(start).Milliseconds()
 	if j.err != nil {
 		entry.Verdict = reviewError
@@ -208,6 +208,28 @@ func (w *worker) turnResult(entry event.TurnJudged, j judgment, start time.Time)
 	return entry
 }
 
+func (w *worker) attribution(j judgment) (string, []event.JudgeAttribution) {
+	if len(j.judges) < 2 {
+		return w.fallbackText(j.fallback), nil
+	}
+	judges := make([]event.JudgeAttribution, len(j.judges))
+	for i, judge := range j.judges {
+		judges[i] = event.JudgeAttribution{Part: judge.Part, By: judge.By, Fallback: w.fallbackText(judge.Fallback)}
+	}
+	return w.fallbackText(j.fallback), judges
+}
+
+func (w *worker) fallbackText(text string) string {
+	if text == "" {
+		return ""
+	}
+	masked, err := w.t.host.maskReview(text)
+	if err != nil {
+		return "review: the fallback text could not be masked"
+	}
+	return truncate(masked, event.MaxJudgeErrorBytes)
+}
+
 func turnQuestionSet() map[string]decide.Question {
 	set := map[string]decide.Question{}
 	for _, q := range reviewQuestions {
@@ -223,7 +245,12 @@ func turnBody(task string, files []judgeFile) (jsontext.Value, error) {
 	return jsontext.Value(raw), err
 }
 
+func changedFiles(files []fileDiff) []fileDiff {
+	return slices.DeleteFunc(slices.Clone(files), func(f fileDiff) bool { return !f.binary && len(f.hunks) == 0 })
+}
+
 func turnRequest(task string, files []fileDiff) (judgeInput, int, error) {
+	files = changedFiles(files)
 	added := 0
 	base := make([]judgeFile, 0, len(files))
 	texts := make([]string, 0, len(files))

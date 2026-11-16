@@ -9,15 +9,25 @@ import (
 const maxHistory = 200
 
 type historyEntry struct {
+	id     uint64
 	turnID string
 	text   string
 }
 
 type history struct {
-	entries  []historyEntry
-	index    int
-	draft    string
-	awaiting bool
+	entries    []historyEntry
+	lastID     uint64
+	revision   uint64
+	index      int
+	draft      string
+	awaitingID uint64
+}
+
+func awaitedID(id uint64, turnID string) uint64 {
+	if turnID != "" {
+		return 0
+	}
+	return id
 }
 
 func (h *history) add(text, turnID string) {
@@ -25,12 +35,15 @@ func (h *history) add(text, turnID string) {
 	if text == "" || strings.Fields(text)[0] == "/login" {
 		return
 	}
-	h.awaiting = turnID == ""
 	if n := len(h.entries); n > 0 && h.entries[n-1].text == text {
 		h.entries[n-1].turnID = cmp.Or(turnID, h.entries[n-1].turnID)
+		h.awaitingID = awaitedID(h.entries[n-1].id, turnID)
 		return
 	}
-	h.entries = append(h.entries, historyEntry{turnID: turnID, text: text})
+	h.lastID++
+	h.revision++
+	h.entries = append(h.entries, historyEntry{id: h.lastID, turnID: turnID, text: text})
+	h.awaitingID = awaitedID(h.lastID, turnID)
 	if len(h.entries) > maxHistory {
 		h.entries = slices.Delete(h.entries, 0, len(h.entries)-maxHistory)
 	}
@@ -38,10 +51,38 @@ func (h *history) add(text, turnID string) {
 }
 
 func (h *history) startTurn(turnID string) {
-	if n := len(h.entries); n > 0 && h.awaiting {
-		h.entries[n-1].turnID = turnID
+	if index, ok := h.indexOf(h.awaitingID); ok {
+		h.entries[index].turnID = turnID
 	}
-	h.awaiting = false
+	h.awaitingID = 0
+}
+
+func (h *history) allEntries() []historyEntry {
+	return slices.Clone(h.entries)
+}
+
+func (h *history) indexOf(id uint64) (int, bool) {
+	index := slices.IndexFunc(h.entries, func(entry historyEntry) bool { return entry.id == id })
+	return index, index >= 0
+}
+
+func (h *history) remove(index int) bool {
+	if index < 0 || index >= len(h.entries) {
+		return false
+	}
+	h.entries = slices.Delete(h.entries, index, index+1)
+	h.index = len(h.entries)
+	h.revision++
+	return true
+}
+
+func (h *history) load(id uint64) (string, bool) {
+	index, ok := h.indexOf(id)
+	if !ok {
+		return "", false
+	}
+	h.index = len(h.entries)
+	return h.entries[index].text, true
 }
 
 func (h *history) older(draft string) (string, bool) {

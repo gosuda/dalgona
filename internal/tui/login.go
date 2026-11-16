@@ -131,7 +131,7 @@ func (m *model) loginProvidersView() panelView {
 		view.cursor = -1
 	}
 	for _, p := range panel.providers {
-		view.body = append(view.body, p.ID+"  "+signedInText(p.SignedIn)+"  "+loginModeText(p.Login))
+		view.body = append(view.body, sanitizeText(p.ID)+"  "+signedInText(p.SignedIn)+"  "+loginModeText(p.Login))
 	}
 	view.actions = loginActions(panel.err, loginProvidersHint)
 	return view
@@ -139,9 +139,9 @@ func (m *model) loginProvidersView() panelView {
 
 func (m *model) loginMethodsView() panelView {
 	panel := m.login
-	view := panelView{kind: "login", layout: panelLogin, title: "Log in to " + panel.provider.ID, cursor: panel.cursor}
+	view := panelView{kind: "login", layout: panelLogin, title: "Log in to " + sanitizeText(panel.provider.ID), cursor: panel.cursor}
 	if len(panel.methods) == 0 {
-		view.body = []string{"Run `" + cmp.Or(m.conn.product, "dalgona") + " login " + panel.provider.ID + "` in a shell to sign in."}
+		view.body = []string{"Run `" + cmp.Or(m.conn.product, "dalgona") + " login " + sanitizeText(panel.provider.ID) + "` in a shell to sign in."}
 		view.cursor = -1
 	}
 	for _, method := range panel.methods {
@@ -156,8 +156,8 @@ func (m *model) loginKeyView() panelView {
 	return panelView{
 		kind:    "login",
 		layout:  panelLogin,
-		title:   "API key for " + panel.provider.ID,
-		body:    []string{"Type the key. It is saved only when " + panel.provider.ID + " accepts it."},
+		title:   "API key for " + sanitizeText(panel.provider.ID),
+		body:    []string{"Type the key. It is saved only when " + sanitizeText(panel.provider.ID) + " accepts it."},
 		actions: loginActions(panel.err, loginKeyHint),
 		cursor:  -1,
 	}
@@ -165,7 +165,7 @@ func (m *model) loginKeyView() panelView {
 
 func (m *model) loginWaitingView() panelView {
 	panel := m.login
-	view := panelView{kind: "login", layout: panelLogin, title: "Log in to " + panel.provider.ID, cursor: -1}
+	view := panelView{kind: "login", layout: panelLogin, title: "Log in to " + sanitizeText(panel.provider.ID), cursor: -1}
 	switch {
 	case panel.url == "":
 		view.body = []string{"Starting sign-in…"}

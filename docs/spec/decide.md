@@ -2,7 +2,7 @@
 
 ## Client contract
 
-`Client.Ask` MUST accept a JSON state and a map of named questions. It MUST return one typed answer for every requested question. It MUST NOT change the state or the questions.
+`Client.Ask` MUST accept a JSON state and a map of named questions. It MUST return a `Result` that holds `Answers`, `Model` and `Fallback`. It MUST NOT change the state or the questions.
 
 The state MUST be a JSON string, object, or array. Other JSON values MUST fail before a network request starts.
 
@@ -53,3 +53,31 @@ The adapter MUST concatenate text deltas in stream order. A provider stream fail
 Every `Ask` call MUST use a child context with an 8-second default timeout. `DecisionsConfig.Timeout` and `NewLLMWithTimeout` MAY set a shorter timeout for tests or deployments. A non-positive configured timeout MUST select the default.
 
 A shorter caller deadline MUST take precedence. Cancellation and deadline errors MUST remain available through `errors.Is`.
+
+## Fallback
+
+`WithFallback` wraps one primary client and one smol client. It returns the primary unchanged when no smol client is supplied. It also returns the primary unchanged when both canonical model identities are known and equal.
+
+Each call returns `context.Cause(ctx)` first when the parent context is already done. It checks parent cancellation before each attempt and before accepting a result.
+
+The primary attempt runs under a fresh 8-second deadline. Lazy client construction and `Ask` both run inside that attempt. The attempt context is canceled when the attempt finishes.
+
+An expired attempt is normalized to its context cause. A typed HTTP error keeps its status and its retry hint through that normalization.
+
+A successful primary result returns its answering model and an empty `Fallback` string. A parent cancellation or deadline returns the parent cause without fallback.
+
+A primary availability, credential, provider resolution, HTTP, transport or timeout failure records a cooldown of `max(60 s, Retry-After)`. `ErrAnswer` and `ErrRequest` record no cooldown. Parent cancellation records no cooldown.
+
+The cooldown map is host owned, mutex protected and memory only. It is keyed by the primary model identity. An update keeps the later expiry. Expired entries are removed on lookup and insertion.
+
+A cooldown hit supplies a `*CooldownError` as the primary cause and skips the primary request. The skip does not extend the expiry.
+
+The smol attempt gets a separate fresh 8-second deadline, bounded by the caller context. Its success returns the smol answering model. `Result.Fallback` holds `<primary model>: <primary error>`.
+
+A failed smol attempt returns a `*FallbackError` that stores both original typed causes. Its `Unwrap` returns both causes without replacing them with strings.
+
+`Result.Model` names the answering model, never the requested role. An empty answering model or a missing answer fails as an answer category error.
+
+A refusal, tool-call answer, malformed JSON, missing answer, type mismatch or invalid score reports `ErrAnswer`. A request encoding failure or an invalid question definition reports `ErrRequest`. Both categories trigger fallback.
+
+`decide.HTTPError` and the provider `model.HTTPError` carry the status and the parsed `Retry-After`. Callers read them with `errors.As`. No caller parses error text to recover a status or classify a failure.

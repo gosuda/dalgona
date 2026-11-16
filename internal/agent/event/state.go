@@ -24,11 +24,12 @@ const (
 )
 
 type ToolState struct {
-	CallID   string
-	Tool     string
-	Class    string
-	Args     jsontext.Value
-	ArgsBlob *BlobRef
+	CallID     string
+	Tool       string
+	Class      string
+	Args       jsontext.Value
+	ArgsBlob   *BlobRef
+	Invocation string
 }
 type ApprovalState struct {
 	CallID      string
@@ -51,6 +52,16 @@ type ChildState struct {
 	CallID string
 	Runner string
 }
+
+type InvocationState struct {
+	CallID      string
+	TurnID      string
+	Fingerprint string
+	StartedSeq  uint64
+	SettledSeq  uint64
+}
+
+func (i InvocationState) Settled() bool { return i.SettledSeq != 0 }
 
 type State struct {
 	Status          Status
@@ -86,7 +97,21 @@ type State struct {
 	Name            string
 	Archived        bool
 	SandboxChoice   SandboxChosen
+	Invocations     map[string]InvocationState
+	recovery        recoveryCount
+
+	PromptBases             map[uint64]string
+	MemoryVersions          map[uint64]string
+	PromptBindings          map[string]PromptBound
+	CurrentBaseGeneration   uint64
+	CurrentMemoryGeneration uint64
 }
+
+type recoveryCount struct {
+	turn     string
+	attempts int
+}
+
 type modelMark struct {
 	seq    uint64
 	model  string
@@ -120,6 +145,10 @@ func (s State) Clone() State {
 	s.JudgedCalls = maps.Clone(s.JudgedCalls)
 	s.JudgedTurns = maps.Clone(s.JudgedTurns)
 	s.Notes = maps.Clone(s.Notes)
+	s.Invocations = maps.Clone(s.Invocations)
+	s.PromptBases = maps.Clone(s.PromptBases)
+	s.MemoryVersions = maps.Clone(s.MemoryVersions)
+	s.PromptBindings = maps.Clone(s.PromptBindings)
 	s.Todos = slices.Clone(s.Todos)
 	s.TodoBlob = cloneBlob(s.TodoBlob)
 	s.modelMarks = slices.Clone(s.modelMarks)
@@ -179,7 +208,7 @@ func (s State) deriveStatus() Status {
 
 func foldEvent(s *State, seq uint64, e Event) error {
 	switch e.Type() {
-	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeTurnJudged, TypeUserMessage:
+	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnEffort, TypeTurnCompleted, TypeTurnRecovery, TypeTurnJudged, TypeUserMessage:
 		return foldSessionEvent(s, seq, e)
 	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
 		return foldToolEvent(s, seq, e)
@@ -189,6 +218,10 @@ func foldEvent(s *State, seq uint64, e Event) error {
 		return foldScriptEvent(s, e)
 	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return foldMetadata(s, seq, e)
+	case TypeHashlineInvocationStarted, TypeHashlineInvocationSettled:
+		return foldInvocationEvent(s, seq, e)
+	case TypePromptBase, TypeMemoryUpdated, TypePromptBound:
+		return foldPromptEvent(s, e)
 	default:
 		return fmt.Errorf("event: fold: unknown type %q", e.Type())
 	}
@@ -202,10 +235,21 @@ func foldSessionEvent(s *State, seq uint64, e Event) error {
 		copy := value
 		s.Runner = &copy
 		return nil
+	default:
+		return foldTurnEvent(s, seq, e)
+	}
+}
+
+func foldTurnEvent(s *State, seq uint64, e Event) error {
+	switch value := e.(type) {
 	case TurnStarted:
 		return startTurn(s, value.TurnID)
+	case TurnEffort:
+		return requireTurn(s, value.TurnID)
 	case TurnCompleted:
 		return completeTurn(s, seq, value)
+	case TurnRecovery:
+		return foldTurnRecovery(s, value)
 	case TurnJudged:
 		return foldTurnJudged(s, value)
 	case UserMessage:
@@ -267,6 +311,24 @@ func startTurn(s *State, turnID string) error {
 	return nil
 }
 
+func foldTurnRecovery(s *State, e TurnRecovery) error {
+	if err := requireTurn(s, e.TurnID); err != nil {
+		return err
+	}
+	if want := s.RecoveryAttempts(e.TurnID) + 1; e.Attempt != want {
+		return fmt.Errorf("event: fold: turn.recovery attempt %d, want %d", e.Attempt, want)
+	}
+	s.recovery = recoveryCount{turn: e.TurnID, attempts: e.Attempt}
+	return nil
+}
+
+func (s *State) RecoveryAttempts(turnID string) int {
+	if s.recovery.turn != turnID {
+		return 0
+	}
+	return s.recovery.attempts
+}
+
 func completeTurn(s *State, seq uint64, e TurnCompleted) error {
 	if err := requireTurn(s, e.TurnID); err != nil {
 		return err
@@ -279,6 +341,8 @@ func completeTurn(s *State, seq uint64, e TurnCompleted) error {
 	}
 	s.CompletedTurns[e.TurnID] = seq
 	s.JudgedCalls = nil
+	s.recovery = recoveryCount{}
+	s.releaseBinding(e.TurnID)
 	s.TurnID = ""
 	return nil
 }
@@ -759,6 +823,59 @@ func foldScriptCompleted(s *State, e ScriptCompleted) error {
 		return fmt.Errorf("event: fold: script.completed without script.started: %s", e.RunID)
 	}
 	delete(s.Scripts, e.RunID)
+	return nil
+}
+
+func foldInvocationEvent(s *State, seq uint64, e Event) error {
+	switch value := e.(type) {
+	case HashlineInvocationStarted:
+		return foldInvocationStarted(s, seq, value)
+	case HashlineInvocationSettled:
+		return foldInvocationSettled(s, seq, value)
+	default:
+		return fmt.Errorf("event: fold: %T does not match %s", e, e.Type())
+	}
+}
+
+func foldInvocationStarted(s *State, seq uint64, e HashlineInvocationStarted) error {
+	if err := requireTurn(s, e.TurnID); err != nil {
+		return err
+	}
+	call, running := s.InFlight[e.CallID]
+	if !running {
+		return fmt.Errorf("event: fold: hashline.invocation_started for a call that is not in flight: %s", e.CallID)
+	}
+	if call.Invocation != "" {
+		return fmt.Errorf("event: fold: call %s already has invocation %s", e.CallID, call.Invocation)
+	}
+	if _, exists := s.Invocations[e.Identity]; exists {
+		return fmt.Errorf("event: fold: duplicate hashline.invocation_started %s", e.Identity)
+	}
+	if s.Invocations == nil {
+		s.Invocations = make(map[string]InvocationState)
+	}
+	call.Invocation = e.Identity
+	s.InFlight[e.CallID] = call
+	s.Invocations[e.Identity] = InvocationState{CallID: e.CallID, TurnID: e.TurnID, Fingerprint: e.Fingerprint, StartedSeq: seq}
+	return nil
+}
+
+func foldInvocationSettled(s *State, seq uint64, e HashlineInvocationSettled) error {
+	invocation, exists := s.Invocations[e.Identity]
+	if !exists {
+		return fmt.Errorf("event: fold: hashline.invocation_settled without hashline.invocation_started: %s", e.Identity)
+	}
+	if invocation.Settled() {
+		return fmt.Errorf("event: fold: duplicate hashline.invocation_settled %s", e.Identity)
+	}
+	if err := requireTurn(s, invocation.TurnID); err != nil {
+		return err
+	}
+	if call, running := s.InFlight[invocation.CallID]; !running || call.Invocation != e.Identity {
+		return fmt.Errorf("event: fold: hashline.invocation_settled after tool.completed: %s", invocation.CallID)
+	}
+	invocation.SettledSeq = seq
+	s.Invocations[e.Identity] = invocation
 	return nil
 }
 

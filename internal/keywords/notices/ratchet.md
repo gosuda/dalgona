@@ -4,7 +4,7 @@ Build the eval:
 1. Read the code that runs the flow and find its real entry point.
 2. Gather 15 to 100 cases with expected answers. Include cases that should trigger the behavior and cases that should not. Note where each expected answer came from.
 3. Call `ratchet` with action `init`: case files, harness files (runner and grader), the files you may change, and the files that are off limits.
-4. Call action `approve` with stage `inputs`. Put the case ids in the preview, one line each. The preview holds at most 40 lines, so group ids by tag when the set is large. Revise until the user approves.
+4. Call action `approve` with stage `inputs`. Put the case ids in the preview, one line each. The question has room for 40 lines in all, and the host's facts take the first lines, so group ids by tag when the set is large. The tool names the room it has left when it refuses a preview. Revise until the user approves.
 5. Write a runner that calls the real entry point. It appends one line per case and rep to `results.jsonl` and puts failed attempts in `errors.jsonl`, never a zero score. It writes traces for train cases only and keeps output text out of held-out rows.
 6. Choose the cheapest grader that measures the property. A judge model must differ from the model under test.
 7. Pilot 3 to 5 cases and read one full row. Then call `approve` with stage `grader` and show five graded pilot cases.

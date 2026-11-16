@@ -32,6 +32,7 @@ type Config struct {
 	Args    []string
 	Env     []string
 	URL     string
+	Auth    TokenSource
 }
 
 type Client struct {
@@ -62,7 +63,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	if cfg.Command != "" {
 		client.transport, err = newStdioTransport(cfg.Command, cfg.Args, cfg.Env)
 	} else {
-		client.transport = newHTTPTransport(cfg.URL)
+		client.transport = newHTTPTransport(cfg.Name, cfg.URL, cfg.Auth)
 	}
 	if err != nil {
 		return nil, err

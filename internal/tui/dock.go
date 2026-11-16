@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"cmp"
 	"slices"
 	"strconv"
 	"strings"
@@ -44,7 +45,7 @@ func (m *model) dock() ([]string, int, int) {
 		lines = append(lines, m.liveRow())
 	}
 	if showBand {
-		lines = append(lines, m.bandRow())
+		lines = append(lines, m.screen.fit(m.bandRow(), terminalWidth(m.screen.width)))
 	}
 	return lines, row, col
 }
@@ -180,7 +181,7 @@ func (m *model) editorRows(width, limit int) ([]string, int, int) {
 		if i == 0 {
 			lead = prompt
 		}
-		rows = append(rows, lead+lines[i])
+		rows = append(rows, m.screen.fit(lead+lines[i], terminalWidth(width)))
 	}
 	return rows, row - start, col + promptCells
 }
@@ -222,6 +223,9 @@ func stateWord(state string, lastTurn time.Duration) string {
 
 func (m *model) liveRow() string {
 	width := terminalWidth(m.screen.width)
+	if m.hint.text != "" {
+		return m.liveTag() + m.liveElapsed() + m.screen.fit(m.liveText(), max(0, width-liveTagCells-elapsedCells))
+	}
 	var row strings.Builder
 	fields := m.liveFields(width)
 	for index, field := range fields {
@@ -387,6 +391,33 @@ func (m *model) activity() string {
 	if left, ok := m.retryRemaining(); ok {
 		return retryLine(left)
 	}
+	return cmp.Or(m.toolActivity(), m.currentPlanStepText(), m.streamActivity())
+}
+
+func (m *model) toolActivity() string {
+	for i := len(m.live.items) - 1; i >= 0; i-- {
+		if !isToolItem(m.live.items[i].Item) {
+			continue
+		}
+		if text := m.live.items[i].activity(); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func (m *model) currentPlanStepText() string {
+	for _, status := range [...]string{"inProgress", "pending"} {
+		for _, step := range m.live.plan {
+			if step.Status == status {
+				return firstLine(sanitizeText(step.Step))
+			}
+		}
+	}
+	return ""
+}
+
+func (m *model) streamActivity() string {
 	for i := len(m.live.items) - 1; i >= 0; i-- {
 		if !isAdvisorItem(m.live.items[i].Item) {
 			return m.live.items[i].activity()

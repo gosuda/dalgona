@@ -8,7 +8,7 @@
 - Code MUST NOT copy or allocate where a slice, a reused buffer, or a stream does the job.
 - A sandbox service SDK MAY use reflection internally. No reflection-free client exists for those services.
 
-Scope: every package in this module. Enforcement: the `fast` rule of depguard in `.golangci.yml` rejects `encoding/json` v1, the reflection protobuf packages, the provider SDKs, and the slower alternatives to each pick. The pre-commit hook in `lefthook.yml` runs `just verify`, which includes `lint` in `justfile`, before every commit.
+Scope: every package in this module. Enforcement: the `fast` rule of depguard in `.golangci.yml` rejects `encoding/json` v1, the reflection protobuf packages, the provider SDKs, and the slower alternatives to each pick. The pre-commit hook in `lefthook.yml` runs `just verify`, which includes `lint` in `justfile`, before every commit. `TestDependencyTableMatchesGoMod` in `internal/pingate` fails when a direct requirement of `go.mod` or a tool has no row in `## Grounded pins`. It also fails when a module has two rows, when a row holds another version, or when a row names no required module. It fails when the `Go toolchain` row differs from the `toolchain` line, or when a second pins table exists. A step that moves a module into the direct block of `go.mod` adds its row in the same commit.
 
 ## Grounded pins
 
@@ -16,22 +16,24 @@ Grounded on 2026-11-11. Each pin equals the latest stable version on its release
 
 The release channel for Go modules is `https://proxy.golang.org/<module>/@latest`. The support window for Go is `https://endoflife.date/api/v1/products/go/`. Go 1.27 and Go 1.26 are supported. No end-of-life date is set.
 
-Advisories come from OSV list pages, `https://osv.dev/list?q=<module>&ecosystem=Go`, and from the GitHub security advisory pages of each project. No OSV record that the grounding checked lists a pin in this table as affected.
+Advisories come from the OSV batch query below, from OSV list pages `https://osv.dev/list?q=<module>&ecosystem=Go`, and from the GitHub security advisory pages of each project.
 
 This section lists the modules that `go.mod` requires directly, and the three tools. Indirect modules follow `go mod tidy`.
 
-|Module|Pin|Released|Use|OSV batch 2026-11-12|
+|Module|Pin|Released|Use|OSV batch 2026-11-15|
 |---|---|---|---|---|
-|Go toolchain|go1.27.4|2026-11-10|newest supported major; CI reads it from go.mod|none|
+|Go toolchain|go1.27.4|2026-11-10|newest supported major. CI reads it from go.mod.|none|
 |charm.land/bubbletea/v2|v2.1.1|2026-10-28|TUI|none|
-|charm.land/bubbles/v2|v2.2.1|2026-08-24|TUI|not queried|
+|charm.land/bubbles/v2|v2.2.1|2026-08-24|TUI spinner, key bindings and viewport|none|
 |charm.land/glamour/v2|v2.0.1|2026-06-12|TUI markdown|none|
 |charm.land/lipgloss/v2|v2.1.0|2026-11-09|TUI|none|
-|github.com/aymanbagabas/go-udiff|v0.4.1|2026-03-08|unified line diffs in `internal/textdiff`. Licence: BSD-3-Clause and MIT, per `LICENSE-BSD` and `LICENSE-MIT` at v0.4.1. Pinned 2026-11-11.|none|
+|codeberg.org/readeck/go-readability/v2|v2.1.3|2026-09-30|webfetch article extraction. MIT licence.|none|
+|github.com/JohannesKaufmann/html-to-markdown/v2|v2.5.2|2026-06-07|webfetch HTML to Markdown conversion. MIT licence.|none|
+|github.com/aymanbagabas/go-udiff|v0.4.1|2026-03-08|unified line diffs in `internal/textdiff`. Licence: BSD-3-Clause and MIT, per `LICENSE-BSD` and `LICENSE-MIT` at v0.4.1.|none|
 |github.com/charmbracelet/x/ansi|v0.11.9|2026-10-08|TUI measure, text width, and truncation, the method of the Bubble Tea renderer.|none|
 |github.com/charmbracelet/colorprofile|v0.4.3|2026-03-09|TUI colour downsampling to the terminal's profile, and the `NO_COLOR` rule.|none|
-|github.com/charmbracelet/x/vt|v0.1.0|2026-10-12|test-only terminal emulator for the print test, MIT licence. Pinned 2026-11-11.|none|
-|github.com/odvcencio/gotreesitter|v0.57.0|2026-11-08|syntax package for the symbols, definition, syntax and rewrite modes, with 23 grammars. Licence MIT, per `LICENSE` at v0.57.0. Decision in `docs/decisions/syntax-package.md`.|none, POST `https://api.osv.dev/v1/query` returned no record on 2026-11-12|
+|github.com/charmbracelet/x/vt|v0.1.0|2026-10-12|test-only terminal emulator for the print test, MIT licence.|none|
+|github.com/odvcencio/gotreesitter|v0.57.0|2026-11-08|syntax package for the symbols, definition, syntax and rewrite modes, with 23 grammars. Licence MIT, per `LICENSE` at v0.57.0. Decision in `docs/decisions/syntax-package.md`.|none|
 |github.com/coder/websocket|v1.8.15|2026-06-15|websocket|none|
 |github.com/containerd/errdefs|v1.0.0|2024-10-08|Docker runner error types|none|
 |github.com/landlock-lsm/go-landlock|v0.11.2|2026-11-10|Linux write confinement|none|
@@ -54,7 +56,15 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |golang.org/x/vuln|v1.9.0|2026-10-11|govulncheck tool|none|
 |github.com/google/codesearch|v1.2.0|2020-03-29|search index for the grep mode, see `search-index.md`. Licence BSD-3-Clause. No module requirements.|none|
 
-The OSV column holds the result of `POST https://api.osv.dev/v1/querybatch` for each row's exact pin, run on 2026-11-12. `none` means the response listed no vulnerability for that pin. The batch run also covered `github.com/aymanbagabas/go-udiff` v0.4.1, and it returned `none`.
+The OSV column holds the result of `POST https://api.osv.dev/v1/querybatch` for each row's exact pin, run on 2026-11-15. One batch of 51 queries covered the toolchain, every row of this table except the go-readability and html-to-markdown rows, and every pin in `web/package.json`. A supplemental batch of 2 queries on the same day covered those two pins. The toolchain query used the package `stdlib` of ecosystem Go. The response held 51 results, and none listed a vulnerability. `none` means that the result for the pin listed no vulnerability. A control query for `golang.org/x/text` v0.3.0 returned GO-2020-0015, so the query form finds a known advisory.
+
+The Released column of each module row equals the `Time` field of `https://proxy.golang.org/<module>/@v/<version>.info`, read on 2026-11-15. The toolchain row equals the go1.27.4 entry of `https://go.dev/doc/devel/release`.
+
+## Runtime endpoints
+
+|Endpoint|Purpose|Cache|Fallback|Data sent|
+|---|---|---|---|---|
+|`registry.npmjs.org/@openai%2Fcodex/latest`|latest released Codex client version for the `client_version` query of the ChatGPT model list|`codex-client-version.json` in the cache directory, 4 hours|a valid cached version, else `Models` fails with `chatgpt: client version is unavailable: <cause>`|the client address only|
 
 ## Rejected alternatives
 

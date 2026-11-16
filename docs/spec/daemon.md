@@ -10,7 +10,7 @@ When the lock is held by another process, `Run` MUST return `another dalgona pro
 
 `Run` MUST accept a connection only when the peer uid equals its own uid. On Linux it MUST read the peer uid with `SO_PEERCRED`. On macOS and FreeBSD it MUST read the peer uid with `LOCAL_PEERCRED`. On other unix targets the peer check MUST fail closed and refuse the connection. On Windows it MUST enforce the protected home DACL and MUST NOT apply a peer uid check.
 
-On Linux `Run` MUST also refuse a peer with `no_new_privs` set, unless the daemon itself has `no_new_privs` set. It MUST read the peer mark from `/proc/<pid>/status` for the pid from `SO_PEERCRED`. When the kernel supports `SO_PEERPIDFD`, it MUST hold the peer with the pidfd and confirm after the read that the same process is still alive. If the kernel reports `ENOPROTOOPT`, it MUST use the pid alone. Any other pidfd error MUST refuse the peer. It MUST fail closed when the peer status is unreadable. `Ensure` MUST check only the peer uid when it dials. A client MUST NOT refuse a daemon for this mark. When the daemon itself has `no_new_privs` set, `Run` MUST log one warning at start that sandboxed commands can reach it, and it MUST still start. When a client with `no_new_privs` set fails its first exchange, the client MUST report that the daemon refuses clients that run inside a sandbox.
+On Linux `Run` MUST also refuse a peer with `no_new_privs` set, unless the daemon itself has `no_new_privs` set. It MUST read the peer mark from `/proc/<pid>/status` for the pid from `SO_PEERCRED`. When the kernel supports `SO_PEERPIDFD`, it MUST hold the peer with the pidfd and confirm after the read that the same process is still alive. If the kernel reports `ENOPROTOOPT`, it MUST use the pid alone. Any other pidfd error MUST refuse the peer. It MUST fail closed when the peer status is unreadable. `Ensure` MUST check only the peer uid when it dials. A client MUST NOT refuse a daemon for this mark. When the daemon itself has `no_new_privs` set, `Run` MUST log one warning at start that sandboxed commands can reach it, and it MUST still start. Before response data arrives, a client with `no_new_privs` MUST report a connection failure as a sandbox refusal. A clean EOF after response data MUST remain EOF and MUST NOT report a sandbox refusal.
 
 The peer check MUST NOT count as a boundary against the same uid: any unsandboxed same-uid process that reaches `<home>/dalgona.sock` can speak the RPC protocol. The runner keeps the home path out of sandboxed child environments (see [sandbox.md](sandbox.md)), but the default path stays guessable, so this hiding is best-effort only.
 
@@ -23,6 +23,28 @@ When the context ends, `Run` MUST stop accepting, close every open connection, a
 `Ensure` MUST tighten `<home>` to mode `0700`. `Ensure` MUST refuse a home that is not owned by the current uid. `Ensure` MUST refuse a home whose mode is not `0700`. `Ensure` MUST refuse a socket that is not owned by the current uid. `Ensure` MUST verify the peer uid of each dialed connection and MUST close a connection whose peer uid differs, without sending any request on it. A pre-bound socket from another user MUST be refused, never answered. On Windows `Ensure` MUST protect the home before it verifies the home. It MUST refuse a home that still grants access to any other principal. It MUST NOT apply uid checks. On other unix targets without a peer credential call, the peer check MUST fail closed and `Ensure` MUST refuse the socket.
 
 `Ensure` MUST reuse an accepting socket. If the socket is missing or stale, it MUST start `<executable> daemon` detached and append stdout and stderr to `daemon.log`. On Unix the child MUST run in a new session. On Windows it MUST use `DETACHED_PROCESS` and `CREATE_NEW_PROCESS_GROUP`. `Ensure` MUST retry for five seconds. On timeout it MUST return `daemon did not start: see <home>/daemon.log`.
+
+Each local dial MUST check the daemon build identity before it sends any other request. `daemon.Build()` MUST return the first 16 hex digits of the SHA-256 of the executable bytes. A read failure MUST return the empty string. An empty identity MUST NOT trigger a restart. A daemon that reports another known build MUST produce a mismatch.
+
+A terminal client MUST ask with this prompt:
+
+```text
+daemon <home> runs build <running>; this client is build <own>. Restart the daemon? Running turns stop and recover. [y/N]
+```
+
+The answer `y` MUST retire the daemon, wait up to five seconds for the socket to go, and run `Ensure` again. Any other answer MUST give this error:
+
+```text
+daemon build mismatch: restart the daemon with dalgona restart
+```
+
+A client without a terminal MUST give this error and exit 1:
+
+```text
+daemon runs build <running>, this client is build <own>; run dalgona restart
+```
+
+A daemon without the identity method MUST count as build `<unknown pre-identity build>`, not as compatible.
 
 `Ensure` and `Run` MUST reject a socket path of `<limit>` bytes or more before spawning or listening, with `daemon socket path <path> is <n> bytes; the limit is <limit>; use a shorter home directory`.
 
@@ -38,9 +60,28 @@ Service commands MUST be injectable in tests. Installation errors MUST be return
 
 ## Commands
 
-`dalgona` without a command, `-p`, `--resume`, `-c`, and `models` MUST reach the core only through a daemon connection from `Ensure`. The client MUST accept `-m <model>`, `--approval auto|ask|yolo`, `--sandbox workspace-write|off`, and `-C <directory>`. With `-p`, `--json` MUST print one JSON status line. `--resume` and `-c` MUST exclude each other.
+`dalgona` without a command, `-p`, `--resume`, `-c`, and `models` MUST reach the core only through a daemon connection from `Ensure`.
+The client MUST accept `-m <model>`, `--approval auto|ask|yolo`, `--sandbox workspace-write|off`, and `-C <directory>`.
+`--resume` and `-c` MUST exclude each other.
 
-The status line MUST be one JSON object with the keys `thread`, `status`, and `stop_reason`.
+With `-p --json`, stdout MUST contain one JSONL line for each completed item of the selected thread.
+The client MUST copy the masked `item` value without removing extension members.
+Each item line MUST contain `schemaVersion:1`, `type:"item"`, `thread`, `turn`, and `item`.
+The client MUST write item lines immediately, in notification order.
+The final result line MUST contain `schemaVersion:1`, `type:"result"`, `thread`, `status`, and `stop_reason`.
+Stderr MUST contain diagnostics only.
+A write failure MUST stop output and further prompt submission.
+
+Headless runs MUST read non-terminal stdin before any daemon request.
+The client MUST wait for EOF without a deadline.
+Use `</dev/null` or `ssh -n` when stdin is not prompt input.
+Input above 1048576 bytes MUST fail before any request.
+The client MUST replace invalid UTF-8 with U+FFFD.
+The client MUST remove trailing newlines from stdin.
+With both inputs present, the client MUST join stdin and the prompt with two newlines.
+With an empty prompt, stdin alone MUST supply the prompt.
+Empty stdin MUST leave the prompt unchanged.
+Without either input, `-p` MUST require `--resume` or `-c`.
 
 `dalgona login [provider]` and `dalgona logout <provider>` MUST use `<home>/auth.json`. Without a remote selection, these commands MUST use the client credential store and MUST NOT require a daemon connection. With `--remote <name>`, login for an API-key login target MUST store the key inside the box through the daemon protocol. With `--remote <name>`, login for `chatgpt` MUST use the device-code flow inside the box. With `--remote <name>`, login for `antigravity`, `cursor`, or `devin` MUST fail before it dials the box, with this text:
 
@@ -62,6 +103,12 @@ With `--remote <name>`, `logout` MUST remove the provider credential inside the 
 
 A top-level dalgona thread MUST get the `ratchet` tool. Child and advisor threads MUST NOT get it.
 
+`dalgona restart` MUST retire a running daemon and start a new one. It MUST print `daemon restarted (build <own>)`. With no daemon running it MUST print `daemon started (build <own>)`. It MUST terminate only a daemon whose recorded pid, current-user ownership, and home association are verified. A daemon without the identity method MUST stay running, and the command MUST answer:
+
+```text
+cannot safely identify the old daemon; stop it manually and retry dalgona restart
+```
+
 The dalgona host MUST bind `[runners.<name>]` runners through the remote binder and MUST use the local runner for every other runner name. `dalgona pull <thread>` and `dalgona runner gc [--yes]` MUST run inside the daemon through the protocol extensions `dalgona/remote/pull {threadId}` and `dalgona/remote/gc {yes}`, because the daemon holds the journal lock. Each extension MUST answer `{"exitCode":<int>,"output":<text>}`. Without `--yes`, `runner gc` MUST answer no to every destroy question. `dalgona cloud up|down|pull` MUST run in the client process.
 
 `dalgona bridge` MUST splice standard input and output to a local `Ensure` connection. `dalgona exec-server` MUST serve the exec protocol and MUST use the same splice for its `/bridge` path. The TUI, `models`, `dalgona app-server`, `dalgona web`, `pull`, and `runner gc` MUST dial the local daemon through `Ensure`. When `--remote <name>` is given, or `remote` is set in configuration, they MUST dial the remote box daemon through the binder's bridge instead. The flag MUST win over the configuration. `bridge` and `exec-server` MUST NOT redirect their local listener with `--remote`.
@@ -72,7 +119,27 @@ The `--config` argument MUST split at its first `=`. A `--config` argument witho
 
 The app-server `--listen` value MUST be `stdio://` or `ws://IP:PORT`. The WebSocket address MUST be a literal IP address with a port. Any other `--listen` value MUST fail with exit status 2 before the listener starts. A non-loopback address MUST fail even when WebSocket authentication is configured. The loopback rule MUST follow Codex `codex-rs/app-server-transport/src/transport/websocket.rs`.
 
+On stdin EOF, the stdio app-server MUST close the daemon connection's write side.
+It MUST continue to forward daemon output until the daemon closes that connection.
+The daemon MUST drain admitted requests and flush replies when handlers finish within its 30-second drain limit.
+The app-server MUST then exit without stopping the shared daemon.
+The local daemon dialer MUST preserve the Unix socket's half-close capability.
+
 The app-server WebSocket listener MUST refuse a request with a non-empty `Origin` header with HTTP 403. It MUST answer a request without a valid `Authorization: Bearer <token>` header with HTTP 401. It MUST compare the bearer token digest in constant time. It MUST answer HTTP 503 while it shuts down, and HTTP 503 when it cannot dial the daemon. It MUST NOT upgrade a request that the daemon dial refused. The Origin refusal MUST follow Codex `codex-rs/app-server-transport/src/transport/websocket.rs`.
+
+`dalgona acp` MUST serve the Agent Client Protocol on standard input and output and MUST take no arguments. It MUST dial the daemon through the same `Ensure` path as the other local clients, or through the remote box when `remote` is configured. Each ACP session MUST map to one daemon thread.
+
+The adapter MUST read one JSON-RPC message per line of at most 16 MiB. A line that is not JSON MUST get a `-32700` reply with id `null`. A JSON value that is not a request MUST get `-32600`. An error reply without a known request id MUST carry id `null`. A message without `id` is a notification and MUST NOT get a reply. An unknown method MUST get `-32601` with `Method not found`. At most 64 requests MAY be in flight. The adapter MUST answer further requests with `-32603` and `adapter busy: too many open requests`.
+
+`initialize` MUST require `protocolVersion` and MUST fail with `-32602` and `missing protocolVersion` without it. On the first `initialize` the adapter MUST dial the daemon and run `initialize` as client `dalgona-acp` with `requiredHumanApproval`. It MUST answer only after that exchange. The result MUST carry protocol version 1, `loadSession: true`, image prompt support, `sessionCapabilities.list`, and empty `authMethods`. MCP `http` and `sse` capabilities MUST be false. Later calls MUST reuse the connection. Session methods before `initialize` MUST fail with `-32600` and `initialize has not run`. A closed daemon connection MUST make an in-flight prompt fail with `the daemon connection closed`.
+
+`session/new` MUST take `cwd` and MUST fail with `-32602` and `missing cwd` without it. It MUST call `thread/start` and return the thread id as `sessionId`. `mcpServers` entries MUST be ignored. After the reply the adapter MUST send one `agent_message_chunk` that states dalgona ignores them. `session/list` MUST call `thread/list` with the cursor and filter by `cwd` when given. Each entry MUST contain `sessionId`, `cwd`, `title` from the thread name or preview, and `updatedAt` in RFC 3339. `session/load` MUST take `sessionId` and fail `-32602` `missing sessionId` without it. It MUST call `thread/resume` with `excludeTurns`, then MUST page `thread/turns/list` ascending with `itemsView: full` and 100 turns per page. It MUST emit `user_message_chunk` or `agent_message_chunk` for each replayed item text.
+
+`session/prompt` MUST reject an unknown session with `-32602` and a second prompt on a busy session with `-32600`. It MUST accept only `text` and `image` blocks and MUST fail other blocks with `-32602` and `unsupported prompt block`. It MUST call `turn/start` and MUST block until `turn/completed`. `stopReason` MUST be `end_turn` on a completed turn and `cancelled` on an interrupted one. A failed turn MUST return `-32603` with the turn error message. Any other turn status MUST return `-32603`. While a prompt runs the adapter MUST forward daemon item and turn notifications as `session/update`.
+
+`session/cancel` MUST NOT fail for an unknown session. For a running turn it MUST send `turn/interrupt`. A cancel that arrives before the turn id is known MUST interrupt once `turn/start` returns the id.
+
+For `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` the adapter MUST send `session/request_permission` with the options `allow_once` (Allow once), `allow_always` (Allow for this thread), and `reject_once` (Reject). The tool call MUST be `execute` for a command, `edit` for a file change, and `switch_mode` when a plan path is present. `allow_always` MUST appear only when the daemon did not require human approval, gave no plan path, and listed `acceptForSession` in `availableDecisions`. A cancelled outcome MUST answer `cancel`. A selected option MUST answer its mapped decision of `accept`, `acceptForSession`, or `decline`. Any other outcome MUST answer `decline`. `item/tool/requestUserInput` MUST fail with `-32601` and `ask is not supported by this client`. `session/set_config_option` with `configId` `model` MUST fail with `-32601` and `session model is not supported; set model in config.toml`. Every other config id MUST fail with `-32601` and `Method not found`.
 
 `dalgona service install|uninstall` MUST install or remove the platform user service. `dalgona codex install|uninstall|status` MUST manage or inspect the desktop override. `dalgona codex record --real <path> [args...]` MUST run the selected Codex executable and record protocol metadata in `<home>/census/<unix-seconds>.jsonl`. Without forwarded arguments, it MUST run `app-server`.
 

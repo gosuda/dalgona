@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
@@ -27,17 +28,17 @@ type turnStub struct {
 	once    sync.Once
 }
 
-func (s *turnStub) Ask(ctx context.Context, _ jsontext.Value, questions map[string]decide.Question) (map[string]decide.Answer, error) {
+func (s *turnStub) Ask(ctx context.Context, _ jsontext.Value, questions map[string]decide.Question) (decide.Result, error) {
 	if _, turn := questions["incomplete"]; turn {
 		if s.started != nil {
 			s.once.Do(func() { close(s.started) })
 		}
 		if s.block {
 			<-ctx.Done()
-			return nil, ctx.Err()
+			return decide.Result{}, ctx.Err()
 		}
 		if s.fail != nil {
-			return nil, s.fail
+			return decide.Result{}, s.fail
 		}
 	}
 	answers := make(map[string]decide.Answer, len(questions))
@@ -48,7 +49,7 @@ func (s *turnStub) Ask(ctx context.Context, _ jsontext.Value, questions map[stri
 		}
 		answers[id] = decide.Answer{Noul: &score}
 	}
-	return answers, nil
+	return decide.Result{Model: "stub-judge", Answers: answers}, nil
 }
 
 func clientFor(c decide.Client) ClientFactory {
@@ -151,43 +152,59 @@ func TestTurnReviewSecondEndIsNotReviewed(t *testing.T) {
 	}
 }
 
+type turnEndRow struct {
+	name      string
+	stub      *turnStub
+	timeout   time.Duration
+	fillSlots bool
+	verdict   string
+	errText   string
+}
+
 func TestTurnReviewEndsWithoutMessageUnlessItSpeaks(t *testing.T) {
 	t.Parallel()
-	rows := []struct {
-		name    string
-		stub    *turnStub
-		timeout time.Duration
-		verdict string
-		errText string
-	}{
+	rows := []turnEndRow{
 		{name: "clean", stub: &turnStub{scores: map[string]float64{"sound": 0.02, "incomplete": 0.02}}, verdict: reviewClean},
 		{name: "uncertain", stub: &turnStub{scores: map[string]float64{"sound": 0.2, "incomplete": 0.7}}, verdict: reviewUncertain},
 		{name: "flagged but not spoken", stub: &turnStub{scores: map[string]float64{"sound": 0.5, "incomplete": 0.94}}, verdict: reviewFlagged},
 		{name: "error", stub: &turnStub{fail: fmt.Errorf("boom")}, verdict: reviewError, errText: "part 1 of 1: boom"},
-		{name: "timeout", stub: &turnStub{block: true}, timeout: 50 * time.Millisecond, verdict: reviewError, errText: "part 1 of 1: review timed out after 50ms"},
+		{name: "slot wait times out", stub: &turnStub{}, timeout: 50 * time.Millisecond, fillSlots: true, verdict: reviewError, errText: "part 1 of 1: review waited 50ms for a judge slot"},
 	}
 	for _, row := range rows {
-		t.Run(row.name, func(t *testing.T) {
-			t.Parallel()
-			synctest.Test(t, func(t *testing.T) {
-				h := turnHarness(t, row.stub, []string{"incomplete"})
-				if row.timeout > 0 {
-					h.host.reviewTimeout = row.timeout
-				}
-				h.write("a.txt", "one\n")
-				h.model.push(calls(call{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}), text("done"))
-				thread := h.start()
-				h.submit(thread, "fix it")
-				h.waitIdle(thread)
-				turns := turnJudgedOf(h.events(thread.ID()))
-				if len(turns) != 1 || turns[0].Verdict != row.verdict || turns[0].Feedback || !strings.Contains(turns[0].Error, row.errText) {
-					t.Fatalf("turn.judged = %+v, want verdict %s with error %q and no feedback", turns, row.verdict, row.errText)
-				}
-				if n := h.model.count(); n != 2 {
-					t.Fatalf("model requests = %d, want 2: the turn must end without a review message", n)
-				}
-			})
+		runTurnEndRow(t, row)
+	}
+}
+
+func runTurnEndRow(t *testing.T, row turnEndRow) {
+	t.Helper()
+	t.Run(row.name, func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			h := turnHarness(t, row.stub, []string{"incomplete"})
+			if row.timeout > 0 {
+				h.host.reviewTimeout = row.timeout
+			}
+			if row.fillSlots {
+				defer occupyReviewSlots(h)()
+			}
+			h.write("a.txt", "one\n")
+			h.model.push(calls(call{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}), text("done"))
+			thread := h.start()
+			h.submit(thread, "fix it")
+			h.waitIdle(thread)
+			requireTurnEndsWithoutMessage(t, h, thread, row.verdict, row.errText)
 		})
+	})
+}
+
+func requireTurnEndsWithoutMessage(t *testing.T, h *harness, thread *Thread, verdict, errText string) {
+	t.Helper()
+	turns := turnJudgedOf(h.events(thread.ID()))
+	if len(turns) != 1 || turns[0].Verdict != verdict || turns[0].Feedback || !strings.Contains(turns[0].Error, errText) {
+		t.Fatalf("turn.judged = %+v, want verdict %s with error %q and no feedback", turns, verdict, errText)
+	}
+	if n := h.model.count(); n != 2 {
+		t.Fatalf("model requests = %d, want 2: the turn must end without a review message", n)
 	}
 }
 
@@ -224,6 +241,15 @@ func TestTurnReviewSkipsTurnWithoutEligibleEdit(t *testing.T) {
 	if n := len(turnJudgedOf(h.events(thread.ID()))); n != 0 {
 		t.Fatalf("turn.judged events = %d, want 0", n)
 	}
+	h.write("a.txt", "one\n")
+	h.model.push(calls(call{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}), text("done"))
+	h.submit(thread, "edit a.txt")
+	h.waitIdle(thread)
+	events := h.events(thread.ID())
+	if n := len(turnStatesOf(judge)); n != 1 {
+		t.Fatalf("turn judge calls = %d, want 1 for the editing turn", n)
+	}
+	requireReviewCounts(t, events, judge, 1, 1)
 }
 
 func lineEditRecords(t *testing.T, thread *Thread, pre, post string) []event.Seqd {
@@ -459,6 +485,115 @@ func TestTurnReviewSharesRoomAcrossFiles(t *testing.T) {
 	}
 }
 
+func randomTurnFile(rng *rand.Rand, alphabet []string, path string) fileDiff {
+	var body strings.Builder
+	for target := 1 + rng.IntN(9000); body.Len() < target; {
+		body.WriteString(alphabet[rng.IntN(len(alphabet))])
+	}
+	return fileDiff{
+		path: path, change: "update", kind: "code", header: "--- a/" + path + "\n+++ b/" + path + "\n",
+		hunks: []hunk{{oldStart: 1, newStart: 1, lines: []string{"+" + body.String() + "\n"}}},
+		added: 1,
+	}
+}
+
+func randomTurnDiffs(rng *rand.Rand, alphabet []string) []fileDiff {
+	for {
+		var files []fileDiff
+		total := 0
+		for f := range 1 + rng.IntN(12) {
+			file := randomTurnFile(rng, alphabet, fmt.Sprintf("f%d.go", f))
+			total += len(file.hunks[0].lines[0])
+			files = append(files, file)
+		}
+		if total >= 1000 && total <= 60000 {
+			return files
+		}
+	}
+}
+
+func TestTurnRequestListsOnlyFilesWithChangedLines(t *testing.T) {
+	t.Parallel()
+	same := []byte("one\ntwo\n")
+	files, err := diffFiles([]reviewFile{
+		classifyReviewFile("named.go", "update", same, same),
+		classifyReviewFile("a.go", "update", []byte("one\n"), same),
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("diffFiles gave %d files, want both so the request filter is exercised", len(files))
+	}
+	input, added, err := turnRequest("task", files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := decodeTurnState(t, string(input.state))
+	if added != 1 || len(state.Files) != 1 || state.Files[0].Path != "a.go" {
+		t.Fatalf("request lists %+v with %d added lines, want only a.go with 1", state.Files, added)
+	}
+	changed, _, err := turnRequest("task", files[1:])
+	if err != nil || len(decodeTurnState(t, string(changed.state)).Files) != 1 {
+		t.Fatalf("control request = %v, want one file", err)
+	}
+}
+
+func TestTurnReviewRequestStaysUnderRequestLimit(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewPCG(3, 4))
+	alphabet := []string{"a", "b", `"`, `\`, "\t", "é", " "}
+	for range 200 {
+		requireTurnRequestWithinLimit(t, rng, alphabet)
+	}
+	requireControlTurnRequestWhole(t, alphabet)
+}
+
+func requireTurnRequestWithinLimit(t *testing.T, rng *rand.Rand, alphabet []string) {
+	t.Helper()
+	files := randomTurnDiffs(rng, alphabet)
+	input, _, err := turnRequest("task", files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size, err := decide.RequestSize(input.state, input.questions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size > reviewRequestLimit {
+		t.Fatalf("request size = %d, want at most %d", size, reviewRequestLimit)
+	}
+	state := decodeTurnState(t, string(input.state))
+	if len(state.Files) != len(files) {
+		t.Fatalf("state holds %d files, want %d", len(state.Files), len(files))
+	}
+	if input.truncated != anyTurnFileCut(state, files) {
+		t.Fatalf("truncated = %t, want %t", input.truncated, anyTurnFileCut(state, files))
+	}
+}
+
+func anyTurnFileCut(state turnState, files []fileDiff) bool {
+	for i := range files {
+		if state.Files[i].Diff != fileText(&files[i], files[i].hunks) {
+			return true
+		}
+	}
+	return false
+}
+
+func requireControlTurnRequestWhole(t *testing.T, alphabet []string) {
+	t.Helper()
+	control := randomTurnFile(rand.New(rand.NewPCG(5, 6)), alphabet, "control.go")
+	input, _, err := turnRequest("task", []fileDiff{control})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := decodeTurnState(t, string(input.state))
+	if input.truncated || state.Files[0].Diff != fileText(&control, control.hunks) {
+		t.Fatalf("control truncated = %t, want the whole diff inside the limit", input.truncated)
+	}
+}
+
 func TestTurnReviewContinuationIsOwnUnit(t *testing.T) {
 	t.Parallel()
 	judge := &judgeStub{}
@@ -542,20 +677,55 @@ func TestTurnReviewAsksSoundAndIncomplete(t *testing.T) {
 	}
 }
 
-func TestTurnReviewLoopOrder(t *testing.T) {
-	t.Parallel()
-	judge := &judgeStub{}
-	h := judgedHarness(t, judge, nil)
+type loopStep struct {
+	name  string
+	types []string
+}
+
+type orderedTurnEnd struct {
+	baseExtension
+	record func(string)
+}
+
+func (o *orderedTurnEnd) TurnEnd(context.Context, string, string) error {
+	o.record("turn_end")
+	return nil
+}
+
+func runLoopOrderReviewed(t *testing.T) ([]loopStep, []string) {
+	t.Helper()
+	return loopOrder(t, true)
+}
+
+func runLoopOrderUnreviewed(t *testing.T) ([]loopStep, []string) {
+	t.Helper()
+	return loopOrder(t, false)
+}
+
+func loopOrder(t *testing.T, enabled bool) ([]loopStep, []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var steps []loopStep
+	var h *harness
+	record := func(name, id string) {
+		types := h.types(id)
+		mu.Lock()
+		defer mu.Unlock()
+		steps = append(steps, loopStep{name: name, types: types})
+	}
+	h = newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
+		h.cfg.EditJudge = judgeFor(&judgeStub{})
+		h.cfg.Config.EditReview.Enabled = enabled
+		h.cfg.Extension = func(th *Thread) Extension {
+			return &orderedTurnEnd{record: func(name string) { record(name, th.ID()) }}
+		}
+	})
 	h.write("a.txt", "one\n")
 	h.model.push(calls(call{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}), text("done"))
 	thread := h.start()
-	var mu sync.Mutex
-	var atBoundary []string
 	if err := thread.SetBoundaryHook(func(b Boundary) Wait {
 		if b.Kind == BoundaryAgentEnd && b.Ended == "" {
-			mu.Lock()
-			atBoundary = h.types(thread.ID())
-			mu.Unlock()
+			record("boundary", thread.ID())
 		}
 		return nil
 	}); err != nil {
@@ -565,8 +735,53 @@ func TestTurnReviewLoopOrder(t *testing.T) {
 	h.waitIdle(thread)
 	mu.Lock()
 	defer mu.Unlock()
-	if !slices.Contains(atBoundary, "turn.judged") || slices.Contains(atBoundary, "turn.completed") {
-		t.Fatalf("journal at the agent-end boundary = %v, want turn.judged and no turn.completed", atBoundary)
+	return slices.Clone(steps), h.types(thread.ID())
+}
+
+func TestTurnReviewLoopOrder(t *testing.T) {
+	t.Parallel()
+	t.Run("review on", func(t *testing.T) {
+		t.Parallel()
+		steps, final := runLoopOrderReviewed(t)
+		requireLoopSteps(t, steps)
+		requireJudgedBeforeEnd(t, steps, final)
+	})
+	t.Run("review off", func(t *testing.T) {
+		t.Parallel()
+		steps, final := runLoopOrderUnreviewed(t)
+		requireLoopSteps(t, steps)
+		requireNoTurnJudged(t, steps, final)
+	})
+}
+
+func requireLoopSteps(t *testing.T, steps []loopStep) {
+	t.Helper()
+	if len(steps) != 2 || steps[0].name != "boundary" || steps[1].name != "turn_end" {
+		t.Fatalf("steps = %+v, want the agent-end boundary and then the turn_end hook", steps)
+	}
+}
+
+func requireJudgedBeforeEnd(t *testing.T, steps []loopStep, final []string) {
+	t.Helper()
+	for _, step := range steps {
+		if !slices.Contains(step.types, "turn.judged") || slices.Contains(step.types, "turn.completed") {
+			t.Fatalf("journal at %s = %v, want turn.judged and no turn.completed", step.name, step.types)
+		}
+	}
+	if judged, completed := slices.Index(final, "turn.judged"), slices.Index(final, "turn.completed"); judged < 0 || completed < judged {
+		t.Fatalf("final journal = %v, want turn.judged before turn.completed", final)
+	}
+}
+
+func requireNoTurnJudged(t *testing.T, steps []loopStep, final []string) {
+	t.Helper()
+	for _, step := range steps {
+		if slices.Contains(step.types, "turn.judged") {
+			t.Fatalf("journal at %s = %v, want no turn.judged with review off", step.name, step.types)
+		}
+	}
+	if slices.Contains(final, "turn.judged") {
+		t.Fatalf("final journal = %v, want no turn.judged with review off", final)
 	}
 }
 

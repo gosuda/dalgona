@@ -44,6 +44,7 @@ func TestWatchdog_orderFromHomeThroughRepositoryToCwd(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeWatchdogFile(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/main\n")
 	want := strings.Join([]string{
 		block(filepath.Join(home, "WATCHDOG.md"), "home"),
 		block(filepath.Join(root, "WATCHDOG.md"), "root"),
@@ -73,6 +74,9 @@ func TestWatchdog_gitFileMarksWorktreeRoot(t *testing.T) {
 func TestWatchdog_withoutRepositoryReadsOnlyCwd(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
+	if err := os.Mkdir(filepath.Join(base, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	cwd := filepath.Join(base, "project", "sub")
 	writeWatchdogFile(t, filepath.Join(base, "project", "WATCHDOG.md"), "parent")
 	writeWatchdogFile(t, filepath.Join(cwd, "WATCHDOG.md"), "cwd")

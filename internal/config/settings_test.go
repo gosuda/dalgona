@@ -45,6 +45,24 @@ func TestInteractiveSettingsDefaultsAndValidation(t *testing.T) {
 	requireLoadFailure(t, "status_hide = [\"nope\"]\n", "status_hide: unsupported item nope")
 }
 
+func TestStatusHideAcceptsCost(t *testing.T) {
+	cfg, err := loadConfig(t, config.ProductDalgona, "", "status_hide = [\"cost\", \"folder\"]\n", config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.StatusHide, []string{"cost", "folder"}) {
+		t.Fatalf("status_hide = %v, want [cost folder]", cfg.StatusHide)
+	}
+	edited, err := (config.Config{Product: config.ProductDalgona}).With(config.SettingEdit{Key: "status_hide", Value: []string{"cost"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(edited.StatusHide, []string{"cost"}) {
+		t.Fatalf("edited status_hide = %v, want [cost]", edited.StatusHide)
+	}
+	requireLoadFailure(t, "status_hide = [\"price\"]\n", "status_hide: unsupported item price")
+}
+
 func TestConfigWithAppliesAndRejectsSettings(t *testing.T) {
 	cfg, err := (config.Config{Product: config.ProductDalgona}).With(
 		config.SettingEdit{Key: "verbosity", Value: "low"},

@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/model"
@@ -23,17 +26,30 @@ type Config struct {
 	Client         *http.Client
 	Retry          model.RetryOptions
 	ContextWindows map[string]int
+	CacheDir       string
+	Logger         *slog.Logger
 }
 
 type Provider struct {
 	responses      *openai.Provider
 	contextWindows map[string]int
+	token          func(context.Context) (oauth.Token, error)
+	baseURL        string
+	endpoint       string
+	plain          *http.Client
+	cacheDir       string
+	log            *slog.Logger
+	now            func() time.Time
+	mu             sync.Mutex
+	memory         *memoryCatalog
+	logged         map[identity]time.Time
 }
 
 type staticModel struct {
 	id      string
 	context int
 	efforts []string
+	images  bool
 }
 
 var (
@@ -43,28 +59,42 @@ var (
 )
 
 var staticModels = []staticModel{
-	{id: "gpt-6.1-sol", context: 272000, efforts: fullEfforts},
-	{id: "gpt-6-astra", context: 272000, efforts: fullEfforts},
-	{id: "gpt-6-sol", context: 272000, efforts: fullEfforts},
-	{id: "gpt-6-luna", context: 272000, efforts: lunaEfforts},
-	{id: "gpt-5.6-sol", context: 272000, efforts: fullEfforts},
-	{id: "gpt-6.1-terra", context: 500000, efforts: fullEfforts},
-	{id: "gpt-5.6-terra", context: 272000, efforts: fullEfforts},
-	{id: "gpt-5.6-luna", context: 272000, efforts: lunaEfforts},
-	{id: "gpt-5.5", context: 272000, efforts: legacyEffort},
+	{id: "gpt-6.1-sol", context: 272000, efforts: fullEfforts, images: true},
+	{id: "gpt-6-astra", context: 272000, efforts: fullEfforts, images: true},
+	{id: "gpt-6-sol", context: 272000, efforts: fullEfforts, images: true},
+	{id: "gpt-6-luna", context: 272000, efforts: lunaEfforts, images: true},
+	{id: "gpt-5.6-sol", context: 272000, efforts: fullEfforts, images: true},
+	{id: "gpt-6.1-terra", context: 500000, efforts: fullEfforts, images: true},
+	{id: "gpt-5.6-terra", context: 272000, efforts: fullEfforts, images: true},
+	{id: "gpt-5.6-luna", context: 272000, efforts: lunaEfforts, images: true},
+	{id: "gpt-5.5", context: 272000, efforts: legacyEffort, images: true},
 }
 
 func New(cfg Config) *Provider {
 	client := *model.NewHTTPClient(cfg.Client)
+	plain := client
+	plain.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	baseURL := cmp.Or(cfg.BaseURL, DefaultBaseURL)
 	client.Transport = accountTransport{next: cmp.Or[http.RoundTripper](client.Transport, http.DefaultTransport), token: cfg.Token}
 	responses := openai.New(openai.Config{
-		BaseURL:        cmp.Or(cfg.BaseURL, DefaultBaseURL),
+		BaseURL:        baseURL,
 		APIKey:         accessToken(cfg.Token),
 		Client:         &client,
 		Retry:          cfg.Retry,
 		ContextWindows: cfg.ContextWindows,
 	})
-	return &Provider{responses: responses, contextWindows: cfg.ContextWindows}
+	return &Provider{
+		responses:      responses,
+		contextWindows: cfg.ContextWindows,
+		token:          cfg.Token,
+		baseURL:        baseURL,
+		endpoint:       canonicalEndpoint(baseURL),
+		plain:          &plain,
+		cacheDir:       cfg.CacheDir,
+		log:            cmp.Or(cfg.Logger, slog.Default()),
+		now:            time.Now,
+		logged:         make(map[identity]time.Time),
+	}
 }
 
 func accessToken(token func(context.Context) (oauth.Token, error)) func(context.Context) (string, error) {
@@ -96,23 +126,6 @@ func (p *Provider) Stream(ctx context.Context, req model.Request) (model.Stream,
 		req.System = defaultInstructions
 	}
 	return p.responses.Stream(ctx, req)
-}
-
-func (p *Provider) Models(ctx context.Context) ([]model.Model, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("chatgpt: models: %w", err)
-	}
-	models := make([]model.Model, len(staticModels))
-	for index, item := range staticModels {
-		models[index] = model.Model{
-			ID:         item.id,
-			Context:    model.ContextWindow(item.id, item.context, p.contextWindows),
-			Efforts:    item.efforts,
-			ToolChoice: true,
-			Images:     true,
-		}
-	}
-	return models, nil
 }
 
 type accountTransport struct {

@@ -69,6 +69,9 @@ func oauthLogin(ctx context.Context, provider string, lines *bufio.Reader, out i
 	if provider == "cursor" {
 		return oauth.CursorPoll(ctx, definition, open, nil)
 	}
+	if provider == "copilot" {
+		return oauth.DeviceCode(ctx, definition, func(code, url string) { printDeviceCode(out, provider, url, code) })
+	}
 	paste := func(ctx context.Context) (string, error) {
 		fmt.Fprint(out, "Or paste the redirect URL or code here: ")
 		line, err := lines.ReadString('\n')

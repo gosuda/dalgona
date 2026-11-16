@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/agent"
+	"github.com/gosuda/dalgona/internal/agent/event"
 )
 
 func startThread(t *testing.T, h *harness, spec agent.ThreadSpec) *agent.Thread {
@@ -117,6 +118,12 @@ func TestRegistryReattachesAReopenedChildWithItsOptIn(t *testing.T) {
 	t.Cleanup(func() { _ = registry.Close() })
 	parent := startThread(t, h, agent.ThreadSpec{})
 	child := startThread(t, h, agent.ThreadSpec{Parent: parent.ID()})
+	seedTaskCall(t, parent, "child-call")
+	if err := parent.Append(t.Context(), event.ChildSpawned{
+		CallID: "child-call", ChildID: child.ID(), Runner: "local", Tools: []string{"read", "search", "yield"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	first, err := registry.AttachChild(t.Context(), h.host, child)
 	if err != nil {
 		t.Fatal(err)

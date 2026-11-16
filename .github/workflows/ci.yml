@@ -37,13 +37,13 @@ jobs:
       - name: "Set up pnpm"
         uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: "12.18.0"
+          version: "12.21.0"
       - name: "Set up just"
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
       - name: "Set up uv"
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          python-version: "3.12"
+          python-version: "3.15"
       - name: "Build the web UI"
         run: "just web"
       - name: "Verify"

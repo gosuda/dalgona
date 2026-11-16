@@ -1,5 +1,6 @@
 <script lang="ts">
 import { handoffFocus } from "#lib/focus.ts";
+import { isImeKey } from "#lib/ime.ts";
 import { MAX_ANSWER } from "#lib/question.ts";
 import type {
 	QuestionItem,
@@ -122,6 +123,7 @@ function scrollDetails(event: KeyboardEvent, target: Node): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+	if (isImeKey(event)) return;
 	if (!(event.target instanceof Node) || !card?.contains(event.target)) return;
 	if (event.key !== "Escape") {
 		scrollDetails(event, event.target);
@@ -155,9 +157,9 @@ function onKeydown(event: KeyboardEvent): void {
 		{/if}
 		{#each request.questions as question, index (question.id)}
 			{@const selection = selectionAt(index)}
-			<fieldset class="question">
+			<fieldset class="question" aria-describedby={`question-prompt-${question.id}`}>
 				<legend>{question.header}</legend>
-				<p class="prompt">{question.question}</p>
+				<p class="prompt" id={`question-prompt-${question.id}`}>{question.question}</p>
 				{#each question.options as option, optionIndex (option.label)}
 					<div class="option" class:selected={selection.picked.includes(option.label)}>
 						<label>

@@ -58,8 +58,8 @@ func TestMirrorMigratesLegacyRows(t *testing.T) {
 	}
 	reopened := mustOpen(t, dir)
 	defer closeStore(t, reopened)
-	if version := queryUserVersion(t, reopened.db); version != 2 {
-		t.Fatalf("user_version = %d, want 2 after migration", version)
+	if version := queryUserVersion(t, reopened.db); version != 3 {
+		t.Fatalf("user_version = %d, want 3 after migration", version)
 	}
 	assertLegacyRowsDamaged(t, reopened)
 	ddl := querySessionsDDL(t, reopened.db)
@@ -84,9 +84,9 @@ func TestMirrorMigratesV1LegacyShapeToV2(t *testing.T) {
 		t.Fatalf("close raw state.db: %v", err)
 	}
 	reopened := mustOpen(t, dir)
-	if version := queryUserVersion(t, reopened.db); version != 2 {
+	if version := queryUserVersion(t, reopened.db); version != 3 {
 		closeStore(t, reopened)
-		t.Fatalf("user_version = %d, want 2 after migration", version)
+		t.Fatalf("user_version = %d, want 3 after migration", version)
 	}
 	assertLegacyRowsDamaged(t, reopened)
 	ddl := querySessionsDDL(t, reopened.db)
@@ -97,8 +97,8 @@ func TestMirrorMigratesV1LegacyShapeToV2(t *testing.T) {
 	closeStore(t, reopened)
 	again := mustOpen(t, dir)
 	defer closeStore(t, again)
-	if version := queryUserVersion(t, again.db); version != 2 {
-		t.Fatalf("user_version = %d, want 2 on second open", version)
+	if version := queryUserVersion(t, again.db); version != 3 {
+		t.Fatalf("user_version = %d, want 3 on second open", version)
 	}
 	assertLegacyRowsDamaged(t, again)
 }

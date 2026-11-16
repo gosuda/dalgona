@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/config"
@@ -16,19 +17,28 @@ import (
 type JudgeFactory func(ctx context.Context, model, threadModel string) (decide.Client, error)
 
 type Config struct {
-	Plugins *script.Plugins
-	Judge   JudgeFactory
-	Mode    config.ToolMode
-	Eval    config.EvalConfig
-	Logger  *slog.Logger
+	Plugins     *script.Plugins
+	Judge       JudgeFactory
+	Mode        config.ToolMode
+	Eval        config.EvalConfig
+	Logger      *slog.Logger
+	HookTimeout time.Duration
+}
+
+func (c Config) plugins() *script.Plugins {
+	if c.Plugins == nil || c.HookTimeout <= 0 {
+		return c.Plugins
+	}
+	return c.Plugins.WithHookTimeout(c.HookTimeout)
 }
 
 func New(cfg Config) agent.ExtensionFactory {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	plugins := cfg.plugins()
 	return func(t *agent.Thread) agent.Extension {
-		return extension{mode: cfg.Mode, eval: cfg.Eval, plugins: cfg.Plugins, fx: effects{t: t, judge: cfg.Judge, log: cfg.Logger, idx: newEffectCache()}}
+		return extension{mode: cfg.Mode, eval: cfg.Eval, plugins: plugins, fx: effects{t: t, judge: cfg.Judge, log: cfg.Logger, idx: newEffectCache()}}
 	}
 }
 

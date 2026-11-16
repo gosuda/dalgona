@@ -148,6 +148,7 @@ func randomEvents(r *rand.Rand) []event.Event {
 		},
 		event.RunnerBound{Runner: text(r), Service: text(r), BoxID: text(r), Baseline: text(r)},
 		event.TurnStarted{TurnID: text(r)},
+		event.TurnEffort{TurnID: text(r), Effort: text(r)},
 		event.TurnCompleted{TurnID: text(r), Status: pick(r, "completed", "interrupted", "failed"), Error: text(r)},
 		event.UserMessage{
 			ItemID: text(r), TurnID: text(r), Text: text(r), Kind: pick(r, "prompt", "steer", "followup"),

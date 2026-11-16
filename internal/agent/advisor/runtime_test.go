@@ -1,6 +1,9 @@
 package advisor
 
 import (
+	"context"
+	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -8,6 +11,9 @@ import (
 
 	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/journal"
+	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/runner"
 )
 
 func TestRuntime_blockerSteersRunningPrimaryIntoNextRequest(t *testing.T) {
@@ -296,6 +302,91 @@ func effort(request map[string]any) string {
 	reasoning, _ := request["reasoning"].(map[string]any)
 	value, _ := reasoning["effort"].(string)
 	return value
+}
+
+type declaringProvider struct {
+	model.Provider
+	efforts []string
+}
+
+func (p declaringProvider) Models(ctx context.Context) ([]model.Model, error) {
+	models, err := p.Provider.Models(ctx)
+	for i := range models {
+		models[i].Efforts = slices.Clone(p.efforts)
+	}
+	return models, err
+}
+
+func (h *harness) startDeclaring(efforts []string) *agent.Thread {
+	h.t.Helper()
+	home := h.t.TempDir()
+	store, err := journal.Open(home)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	cfg := h.cfg
+	cfg.Home = home
+	host, err := agent.NewHost(agent.HostConfig{
+		Journal: store, Config: cfg, Tools: h.tools,
+		Providers: func(onRetry agent.RetryFunc) (*model.Registry, error) {
+			base, providerErr := h.providers(onRetry)
+			if providerErr != nil {
+				return nil, providerErr
+			}
+			inner, _ := base.Provider("openai")
+			registry := model.NewRegistry()
+			return registry, registry.Register("openai", declaringProvider{Provider: inner, efforts: efforts})
+		},
+		Runner: func(_ context.Context, id, _ string) (runner.Runner, error) {
+			return runner.NewLocal(filepath.Join(home, "sessions", id, "runs"))
+		},
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.t.Cleanup(func() {
+		_ = host.Close()
+		_ = store.Close()
+	})
+	thread, err := host.Start(h.t.Context(), agent.ThreadSpec{})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.attach(host, thread)
+	return thread
+}
+
+func TestRuntime_advisorFallsBackToNearestLowerDeclaredEffort(t *testing.T) {
+	cases := []struct {
+		name     string
+		declared []string
+		want     string
+	}{
+		{name: "skips the undeclared medium level downward", declared: []string{"low", "high"}, want: "low"},
+		{name: "keeps a declared medium level", declared: []string{"low", "medium"}, want: "medium"},
+		{name: "sends no effort without a lower level", declared: []string{"high"}, want: ""},
+		{name: "sends no effort for a model that declares none", declared: nil, want: ""},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			thread := h.startDeclaring(test.declared)
+			h.submit(thread, "review this turn")
+			h.model.waitRequests(roleAdvisor, 1)
+			h.waitIdle(thread)
+			request := h.model.request(roleAdvisor, 0)
+			if test.want == "" {
+				if request["reasoning"] != nil {
+					t.Fatalf("advisor reasoning = %v, want no effort member", request["reasoning"])
+				}
+				return
+			}
+			if got := effort(request); got != test.want {
+				t.Fatalf("advisor effort = %q, want %q", got, test.want)
+			}
+		})
+	}
 }
 
 func toolNames(request map[string]any) []string {

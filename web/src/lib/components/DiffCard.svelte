@@ -105,9 +105,7 @@ const counted = $derived(change.additions !== undefined);
 	}
 
 	.diff {
-		max-height: 24rem;
 		margin-block-start: var(--space-3);
-		overflow: auto;
 		overscroll-behavior: contain;
 		padding: var(--space-2) var(--space-3);
 		border-radius: var(--radius-tag);

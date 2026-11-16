@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -65,7 +66,7 @@ func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, erro
 	if err != nil {
 		return nil, nil, err
 	}
-	store, err := auth.NewWithPatterns(cfg.Home, cfg.Secrets.Patterns)
+	store, err := auth.NewWithPatterns(cfg.Home, cfg.Secrets.Patterns, auth.WithBuiltinPatterns(cfg.Secrets.Builtin))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -79,7 +80,8 @@ func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, erro
 	if err != nil {
 		return nil, nil, err
 	}
-	base := Base{Config: cfg, Journal: journalStore, Auth: store, Local: runnerFactory(cfg.Home), Judge: judges.judge, Logger: opts.Logger}
+	shellEnv := newShellEnv(cfg)
+	base := Base{Config: cfg, Journal: journalStore, Auth: store, Local: runnerFactory(cfg.Home, shellEnv), Judge: judges.judge, Logger: opts.Logger}
 	extra, err := loadBatteries(ctx, opts, base)
 	if err != nil {
 		return nil, nil, errors.Join(err, journalStore.Close())
@@ -98,6 +100,7 @@ func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, erro
 		Runner: extra.Runner, Product: product, Logger: opts.Logger, Skills: extra.Skills,
 		MCPStatus:      extra.MCPStatus,
 		OnChildStarted: advisors.attach,
+		ShellEnv:       shellEnv,
 	})
 	if err != nil {
 		return nil, nil, errors.Join(err, release())
@@ -113,7 +116,14 @@ func loadConfig(opts Options) (config.Config, error) {
 	if opts.Config != nil {
 		return *opts.Config, nil
 	}
-	return config.Load(opts.Product, opts.Cwd, opts.Flags)
+	cfg, err := config.Load(opts.Product, opts.Cwd, opts.Flags)
+	if err != nil {
+		return config.Config{}, err
+	}
+	if err := InstallTLSRoots(cfg); err != nil {
+		return config.Config{}, err
+	}
+	return cfg, nil
 }
 
 func openJournal(product config.Product, home string) (*journal.Store, error) {
@@ -157,12 +167,19 @@ func toolSet(cfg config.Config, extra func(ctx context.Context, cwd string) []to
 	}
 }
 
-func runnerFactory(home string) agent.RunnerFactory {
+func newShellEnv(cfg config.Config) *runner.ShellEnvSnapshot {
+	if cfg.ShellEnv != config.ShellEnvSnapshot {
+		return nil
+	}
+	return runner.NewShellEnvSnapshot(os.Getenv("SHELL"), auth.SecretEnvironmentName)
+}
+
+func runnerFactory(home string, shellEnv *runner.ShellEnvSnapshot) agent.RunnerFactory {
 	return func(_ context.Context, threadID, name string) (runner.Runner, error) {
 		if name != "" && name != "local" {
 			return nil, fmt.Errorf("runner %q is not available in this build", name)
 		}
-		return runner.NewLocal(filepath.Join(home, "sessions", threadID, "runs"))
+		return runner.NewLocalWithShellEnv(filepath.Join(home, "sessions", threadID, "runs"), shellEnv)
 	}
 }
 

@@ -180,7 +180,7 @@ func (s *server) watched(ctx context.Context, id string) (*agent.Thread, error) 
 	if err != nil {
 		return nil, err
 	}
-	_, _, err = s.watch(ctx, thread)
+	_, _, err = s.watch(ctx, thread, (*tracker).replayLive)
 	return thread, err
 }
 
@@ -206,6 +206,7 @@ func (s *server) session(thread *agent.Thread, snap snapshot) (ThreadStartRespon
 		Cwd: snap.created.Cwd, Model: current.Model, ModelProvider: provider(current.Model),
 		Sandbox:         sandboxPolicy(string(effective)),
 		ReasoningEffort: cmp.Or(effortName(current.Effort), effortName(s.host.Config().Reasoning)),
+		TurnEffort:      snap.turnEffort,
 		TokenUsage:      snap.usage,
 		SandboxFallback: sandboxFallbackOf(cause, choice),
 		Thread:          s.threadObject(info, threadStatus(thread), snap.turns),
@@ -230,6 +231,9 @@ func (s *server) threadStart(ctx context.Context, params jsontext.Value) (jsonte
 	}
 	spec, err := s.spec(p)
 	if err != nil {
+		return nil, err
+	}
+	if err = s.refuseUnsupportedEffort(ctx, spec.Model, string(spec.Effort)); err != nil {
 		return nil, err
 	}
 	thread, err := s.host.Start(ctx, spec)
@@ -283,7 +287,7 @@ func qualifiedModel(model, modelProvider, current string) string {
 }
 
 func (s *server) announce(ctx context.Context, thread *agent.Thread) (jsontext.Value, error) {
-	snap, err := s.attach(ctx, thread)
+	snap, err := s.attach(ctx, thread, (*tracker).replayAll)
 	if err != nil {
 		return nil, err
 	}
@@ -358,15 +362,15 @@ func stringMembers(fields map[string]*string) memberFunc {
 }
 
 func (s *server) threadResume(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
-	var id string
-	if err := decodeParams(params, threadIDMember(&id)); err != nil {
+	var p ThreadResumeParams
+	if err := decodeParams(params, p.member); err != nil {
 		return nil, err
 	}
-	thread, err := s.open(ctx, id)
+	thread, err := s.open(ctx, p.ThreadID)
 	if err != nil {
 		return nil, err
 	}
-	snap, err := s.attach(ctx, thread)
+	snap, err := s.attach(ctx, thread, p.replay())
 	if err != nil {
 		return nil, err
 	}
@@ -375,6 +379,22 @@ func (s *server) threadResume(ctx context.Context, params jsontext.Value) (jsont
 		return nil, err
 	}
 	return encode(response)
+}
+
+func (p *ThreadResumeParams) member(name string, d *jsontext.Decoder) error {
+	if name != "excludeTurns" {
+		return threadIDMember(&p.ThreadID)(name, d)
+	}
+	v, err := readBool(d)
+	p.ExcludeTurns = v
+	return err
+}
+
+func (p *ThreadResumeParams) replay() replayer {
+	if p.ExcludeTurns {
+		return (*tracker).replayLive
+	}
+	return (*tracker).replayAll
 }
 
 func (s *server) threadList(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
@@ -481,7 +501,7 @@ func (s *server) threadRead(ctx context.Context, params jsontext.Value) (jsontex
 	if err != nil {
 		return nil, err
 	}
-	snap, err := s.snapshot(thread)
+	snap, err := s.snapshot(thread, (*tracker).replayAll)
 	if err != nil {
 		return nil, err
 	}

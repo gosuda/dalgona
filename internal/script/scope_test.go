@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -117,7 +118,7 @@ func judgeByState(probe *concurrencyProbe) judgeFunc {
 		if err != nil {
 			return nil, err
 		}
-		return jsontext.Value(`{"risky":{"choice":` + string(choice) + `,"probabilities":{"yes":0.6},"confidence":0.6},"ok":{"noul":0.25}}`), nil
+		return jsontext.Value(`{"answers":{"risky":{"choice":` + string(choice) + `,"probabilities":{"yes":0.6},"confidence":0.6},"ok":{"noul":0.25}},"model":"test/judge"}`), nil
 	}
 }
 
@@ -144,13 +145,70 @@ func judgeBatchOrder(t *testing.T) {
 	if _, judged := j.counts(); judged != 4 {
 		t.Fatalf("judged %d items, want 4", judged)
 	}
-
 	second := run()
 	if _, judged := j.counts(); judged != 5 {
 		t.Fatalf("replay judged %d items in total; settled items must replay and only the failed one is asked again", judged)
 	}
 	if fmt.Sprint(second) != fmt.Sprint(first) {
 		t.Fatalf("replay = %v, want %v", second, first)
+	}
+	judgeBatchMetadataReplay(t)
+}
+
+func judgeBatchMetadataReplay(t *testing.T) {
+	t.Helper()
+	attribution := &concurrencyProbe{rng: rand.New(rand.NewPCG(7, 9))}
+	meta := newJournal(echoTool)
+	meta.judge = judgeByState(attribution)
+	src := `q = {"ok": {"type": "bool"}}
+out = ctx.judge_batch(["a"], q)
+[(x.model, x.fallback, x.answers["ok"].noul, x.error) for x in out]
+`
+	metaRun := func() []any {
+		outcome, err := script.RunWorkflow(t.Context(), meta, script.Workflow{ID: "judge-2", Entry: "j.star", Source: []byte(src)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return workflowValues(t, outcome)
+	}
+	firstMeta := metaRun()
+	if got, _ := json.Marshal(firstMeta); string(got) != `[["test/judge","",0.25,null]]` {
+		t.Fatalf("batch metadata = %s", got)
+	}
+	secondMeta := metaRun()
+	if fmt.Sprint(secondMeta) != fmt.Sprint(firstMeta) {
+		t.Fatalf("metadata replay = %v, want %v", secondMeta, firstMeta)
+	}
+	if _, judged := meta.counts(); judged != 1 {
+		t.Fatalf("metadata replay judged %d items, want the single recorded request", judged)
+	}
+}
+
+func TestJudgeRejectsMalformedEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		envelope string
+		want     string
+	}{
+		{"missing model", `{"answers":{"ok":{"noul":0.25}}}`, "judge answers must name the answering model"},
+		{"nonstring fallback", `{"answers":{"ok":{"noul":0.25}},"model":"test/judge","fallback":3}`, "judge answers fallback must be a string"},
+		{"answers not a dictionary", `{"answers":[],"model":"test/judge"}`, "judge answers must be a JSON object"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := newJournal(echoTool)
+			j.judge = func(_ context.Context, _ script.JudgeRequest) (jsontext.Value, error) {
+				return jsontext.Value(tc.envelope), nil
+			}
+			src := `a = ctx.judge("state", {"ok": {"type": "noul"}})
+a.answers["ok"].noul`
+			outcome, err := script.RunWorkflow(t.Context(), j, script.Workflow{ID: "judge-bad", Entry: "j.star", Source: []byte(src)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome.Status != script.StatusFailed || !strings.Contains(outcome.Error.Message, tc.want) {
+				t.Fatalf("outcome = %+v, want failure with %q", outcome, tc.want)
+			}
+		})
 	}
 }
 

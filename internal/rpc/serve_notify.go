@@ -54,6 +54,15 @@ func (u ThreadTokenUsage) write(o *out) {
 	if u.ModelContextWindow > 0 {
 		o.int("modelContextWindow", int64(u.ModelContextWindow))
 	}
+	if u.EstimatedContextTokens != nil {
+		o.int("estimatedContextTokens", int64(*u.EstimatedContextTokens))
+	}
+	if u.CostUsdMicros != nil {
+		o.int("costUsdMicros", *u.CostUsdMicros)
+	}
+	if u.CostPartial {
+		o.boolean("costPartial", true)
+	}
 	o.close()
 }
 
@@ -234,6 +243,7 @@ func (n ToolJudgedNotification) write(o *out) {
 	o.str("verdict", n.Verdict)
 	o.str("summary", n.Summary)
 	writePaths(o, n.Paths)
+	writeAttribution(o, n.By, n.Fallback, n.Judges)
 	o.close()
 }
 
@@ -244,6 +254,15 @@ func (n TurnJudgedNotification) write(o *out) {
 	o.str("verdict", n.Verdict)
 	o.str("summary", n.Summary)
 	writePaths(o, n.Paths)
+	writeAttribution(o, n.By, n.Fallback, n.Judges)
+	o.close()
+}
+
+func (n TurnEffortNotification) write(o *out) {
+	o.open()
+	o.str("threadId", n.ThreadID)
+	o.str("turnId", n.TurnID)
+	o.str("effort", n.Effort)
 	o.close()
 }
 
@@ -252,6 +271,24 @@ func writePaths(o *out, paths []string) {
 	o.openArray()
 	for _, path := range paths {
 		o.text(path)
+	}
+	o.closeArray()
+}
+
+func writeAttribution(o *out, by, fallback string, judges []JudgeAttribution) {
+	o.str("by", by)
+	o.optStr("fallback", fallback)
+	if len(judges) == 0 {
+		return
+	}
+	o.key("judges")
+	o.openArray()
+	for _, judge := range judges {
+		o.open()
+		o.int("part", int64(judge.Part))
+		o.str("by", judge.By)
+		o.optStr("fallback", judge.Fallback)
+		o.close()
 	}
 	o.closeArray()
 }

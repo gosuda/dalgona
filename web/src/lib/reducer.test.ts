@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { advisorLabel, itemStatusLabel, kindLabel } from "./labels";
+import { advisorLabel, kindLabel, stateKey, stateWords } from "./labels";
 import {
 	acceptThreadStatus,
 	activeRequest,
@@ -148,6 +148,44 @@ describe("transcript reducer", () => {
 		expect(older.items[1]).toBe(judged.items[1]);
 	});
 
+	test("keeps two rows for one item id in two turns", () => {
+		const row = agent("item-1", "one", true);
+		const state = transcriptForThread(
+			thread([
+				{ id: "turn-1", status: "completed", items: [row], error: null },
+				{
+					id: "turn-2",
+					status: "inProgress",
+					items: [agent("item-1", "two", false)],
+					error: null,
+				},
+			]),
+		);
+		const streamed = reduceNotification(state, {
+			type: "delta",
+			channel: "agent",
+			threadId: "thread-1",
+			turnId: "turn-2",
+			itemId: "item-1",
+			delta: "!",
+		});
+		expect(streamed.items[0]).toEqual({ ...row, turnId: "turn-1" });
+		expect(streamed.items[1]).toEqual({
+			...agent("item-1", "two!", false),
+			turnId: "turn-2",
+		});
+		const other = reduceNotification(streamed, {
+			type: "delta",
+			channel: "agent",
+			threadId: "thread-1",
+			turnId: "turn-3",
+			itemId: "item-1",
+			delta: "!",
+		});
+		expect(other.items[0]).toEqual(streamed.items[0]);
+		expect(other.items[1]).toEqual(streamed.items[1]);
+	});
+
 	test("concatenates deltas onto the matching item without mutating the previous list", () => {
 		const start = emptyTranscript("thread-1");
 		const seeded = reduceNotification(start, {
@@ -236,6 +274,39 @@ describe("transcript reducer", () => {
 			turn: { id: "turn-1", status: "completed", items: [], error: null },
 		});
 		expect(withoutTimestamp.turnStartedAtMs).toBe(5000);
+		const otherTurn = reduceNotification(completed, {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn: { id: "turn-2", status: "inProgress", items: [], error: null },
+		});
+		expect(otherTurn.turnStartedAtMs).toBeNull();
+	});
+
+	test("keeps the turn start when the turn/start response follows the turn/started notification", () => {
+		const notified = reduceNotification(emptyTranscript("thread-1"), {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn: {
+				id: "turn-2",
+				status: "inProgress",
+				items: [],
+				error: null,
+				startedAtMs: 1_000_000,
+			},
+		});
+		expect(notified.turnStartedAtMs).toBe(1_000_000);
+		const response = reduceNotification(notified, {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn: { id: "turn-2", status: "inProgress", items: [], error: null },
+		});
+		expect(response.turnStartedAtMs).toBe(1_000_000);
+		const otherTurn = reduceNotification(notified, {
+			type: "turnStarted",
+			threadId: "thread-1",
+			turn: { id: "turn-3", status: "inProgress", items: [], error: null },
+		});
+		expect(otherTurn.turnStartedAtMs).toBeNull();
 	});
 
 	test("hydrates turns in order and keeps the last turn status", () => {
@@ -386,13 +457,14 @@ describe("approval tracking", () => {
 		approvals: readonly ServerRequest[],
 		itemId: string,
 	): string {
-		return itemStatusLabel(
+		const key = stateKey(
 			itemDisplayStatus(
 				"inProgress",
 				itemId,
 				itemsAwaitingApproval(approvals, "thread-1", []),
 			),
 		);
+		return key === null ? "inProgress" : stateWords[key];
 	}
 
 	test("labels the requested item as waiting until the request resolves", () => {
@@ -514,8 +586,9 @@ describe("labels", () => {
 	});
 
 	test("names statuses and item kinds in plain words", () => {
-		expect(itemStatusLabel("inProgress")).toBe("Working");
-		expect(itemStatusLabel("custom")).toBe("custom");
+		const key = stateKey("inProgress");
+		expect(key && stateWords[key]).toBe("Working");
+		expect(stateKey("custom")).toBeNull();
 		expect(kindLabel("webSearch")).toBe("Web search");
 		expect(kindLabel("imageGeneration")).toBe("Image generation");
 	});

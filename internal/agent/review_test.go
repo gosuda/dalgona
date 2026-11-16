@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -24,6 +25,7 @@ import (
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/decide"
 	"github.com/gosuda/dalgona/internal/textdiff"
+	"github.com/gosuda/dalgona/internal/tool"
 )
 
 type judgeStub struct {
@@ -32,6 +34,13 @@ type judgeStub struct {
 	omit     string
 	failWhen string
 	err      error
+	errs     []error
+	model    string
+	fallback string
+	altWhen  string
+	altModel string
+	started  chan struct{}
+	once     sync.Once
 	block    bool
 	hold     time.Duration
 	flight   int
@@ -40,34 +49,59 @@ type judgeStub struct {
 	asked    [][]string
 }
 
-func (j *judgeStub) Ask(ctx context.Context, state jsontext.Value, questions map[string]decide.Question) (map[string]decide.Answer, error) {
+func (j *judgeStub) Ask(ctx context.Context, state jsontext.Value, questions map[string]decide.Question) (decide.Result, error) {
 	ids := slices.Sorted(maps.Keys(questions))
-	j.mu.Lock()
-	j.states = append(j.states, string(state))
-	j.asked = append(j.asked, ids)
-	j.mu.Unlock()
-	j.mu.Lock()
-	j.flight++
-	j.peak = max(j.peak, j.flight)
-	j.mu.Unlock()
+	index := j.recordAsk(state, ids)
 	defer func() {
 		j.mu.Lock()
 		j.flight--
 		j.mu.Unlock()
 	}()
+	if j.started != nil {
+		j.once.Do(func() { close(j.started) })
+	}
 	if j.hold > 0 {
 		time.Sleep(j.hold)
 	}
 	if j.block {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return decide.Result{}, ctx.Err()
 	}
+	if err := j.failure(index, state); err != nil {
+		return decide.Result{}, err
+	}
+	model, fallback := cmp.Or(j.model, "stub-judge"), j.fallback
+	if j.altWhen != "" && strings.Contains(string(state), j.altWhen) {
+		model, fallback = j.altModel, ""
+	}
+	return decide.Result{Model: model, Fallback: fallback, Answers: j.answers(ids)}, nil
+}
+
+func (j *judgeStub) recordAsk(state jsontext.Value, ids []string) int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.states = append(j.states, string(state))
+	j.asked = append(j.asked, ids)
+	index := len(j.states) - 1
+	j.flight++
+	j.peak = max(j.peak, j.flight)
+	return index
+}
+
+func (j *judgeStub) failure(index int, state jsontext.Value) error {
 	if j.err != nil {
-		return nil, j.err
+		return j.err
+	}
+	if index < len(j.errs) && j.errs[index] != nil {
+		return j.errs[index]
 	}
 	if j.failWhen != "" && strings.Contains(string(state), j.failWhen) {
-		return nil, errors.New("boom")
+		return errors.New("boom")
 	}
+	return nil
+}
+
+func (j *judgeStub) answers(ids []string) map[string]decide.Answer {
 	answers := make(map[string]decide.Answer, len(ids))
 	for _, id := range ids {
 		if id == j.omit {
@@ -79,7 +113,7 @@ func (j *judgeStub) Ask(ctx context.Context, state jsontext.Value, questions map
 		}
 		answers[id] = decide.Answer{Noul: &score}
 	}
-	return answers, nil
+	return answers
 }
 
 func (j *judgeStub) count() int {
@@ -193,47 +227,145 @@ func TestEditReviewCleanVerdictHasNoFeedback(t *testing.T) {
 	}
 }
 
+type failOpenRow struct {
+	name      string
+	factory   ClientFactory
+	timeout   time.Duration
+	fillSlots bool
+	want      string
+}
+
 func TestEditReviewFailsOpen(t *testing.T) {
 	t.Parallel()
-	rows := []struct {
-		name    string
-		factory ClientFactory
-		timeout time.Duration
-		want    string
-	}{
+	rows := []failOpenRow{
 		{name: "factory error", factory: func(context.Context, string) (decide.Client, string, error) {
 			return nil, "", errors.New("no credentials")
 		}, want: "no credentials"},
 		{name: "ask error", factory: judgeFor(&judgeStub{err: errors.New("boom")}), want: "part 1 of 1: boom"},
-		{name: "ask blocks past the limit", factory: judgeFor(&judgeStub{block: true}), timeout: 50 * time.Millisecond, want: "part 1 of 1: review timed out after 50ms"},
-		{name: "factory blocks past the limit", factory: func(ctx context.Context, _ string) (decide.Client, string, error) {
-			<-ctx.Done()
-			return nil, "", ctx.Err()
-		}, timeout: 50 * time.Millisecond, want: "review timed out after 50ms"},
+		{name: "slot wait times out", factory: judgeFor(&judgeStub{}), timeout: 50 * time.Millisecond, fillSlots: true, want: "part 1 of 1: review waited 50ms for a judge slot"},
 	}
 	for _, row := range rows {
-		t.Run(row.name, func(t *testing.T) {
-			t.Parallel()
-			synctest.Test(t, func(t *testing.T) {
-				h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
-					h.cfg.EditJudge = row.factory
-					h.cfg.Config.EditReview.Enabled = true
-				})
-				if row.timeout > 0 {
-					h.host.reviewTimeout = row.timeout
-				}
-				h.write("a.txt", "one\ntwo\n")
-				thread := runRounds(t, h, []call{{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}})
-				events := h.events(thread.ID())
-				judged := judgedOf(events)
-				if len(judged) != 1 || judged[0].Verdict != reviewError || !strings.Contains(judged[0].Error, row.want) {
-					t.Fatalf("judged = %+v, want error containing %q", judged, row.want)
-				}
-				if done := events[completedIndex(events, "e1")].Event.(event.ToolCompleted); !done.OK {
-					t.Fatalf("tool.completed.OK = false, want the edit to stand")
-				}
-			})
+		runFailOpenRow(t, row)
+	}
+}
+
+func runFailOpenRow(t *testing.T, row failOpenRow) {
+	t.Helper()
+	t.Run(row.name, func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			h, release := failOpenHarness(t, row)
+			defer release()
+			h.write("a.txt", "one\ntwo\n")
+			thread := runRounds(t, h, []call{{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}})
+			requireFailOpenVerdict(t, h, thread, row.want)
 		})
+	})
+}
+
+func failOpenHarness(t *testing.T, row failOpenRow) (*harness, func()) {
+	t.Helper()
+	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
+		h.cfg.EditJudge = row.factory
+		h.cfg.Config.EditReview.Enabled = true
+	})
+	if row.timeout > 0 {
+		h.host.reviewTimeout = row.timeout
+	}
+	release := func() {}
+	if row.fillSlots {
+		release = occupyReviewSlots(h)
+	}
+	return h, release
+}
+
+func occupyReviewSlots(h *harness) (release func()) {
+	for range cap(h.host.reviewSlots) {
+		h.host.reviewSlots <- struct{}{}
+	}
+	return func() {
+		for range cap(h.host.reviewSlots) {
+			<-h.host.reviewSlots
+		}
+	}
+}
+
+func requireFailOpenVerdict(t *testing.T, h *harness, thread *Thread, want string) {
+	t.Helper()
+	events := h.events(thread.ID())
+	judged := judgedOf(events)
+	if len(judged) != 1 || judged[0].Verdict != reviewError || !strings.Contains(judged[0].Error, want) {
+		t.Fatalf("judged = %+v, want error containing %q", judged, want)
+	}
+	if done := events[completedIndex(events, "e1")].Event.(event.ToolCompleted); !done.OK {
+		t.Fatalf("tool.completed.OK = false, want the edit to stand")
+	}
+}
+
+func TestEditReviewRecordsFallback(t *testing.T) {
+	t.Parallel()
+	t.Run("a fallback answer names the answering model", func(t *testing.T) {
+		t.Parallel()
+		judge := &judgeStub{model: "smol-model", fallback: "primary-model: no credentials", scores: map[string]float64{"sound": 0.2, "lost_code": 0.94}}
+		h := judgedHarness(t, judge, []string{"lost_code"})
+		h.write("a.txt", "one\ntwo\n")
+		thread := runRounds(t, h, []call{{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}})
+		requireJudgeBy(t, judgedOf(h.events(thread.ID())), "judge:smol-model")
+	})
+	t.Run("a turn fallback answer names the answering model", func(t *testing.T) {
+		t.Parallel()
+		judge := &judgeStub{model: "smol-model", fallback: "primary-model: no credentials", scores: map[string]float64{"sound": 0.2, "incomplete": 0.94}}
+		h := judgedHarness(t, judge, []string{"incomplete"})
+		h.write("a.txt", "one\n")
+		thread := runRounds(t, h, []call{{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}})
+		requireTurnJudgeBy(t, turnJudgedOf(h.events(thread.ID())), "judge:smol-model")
+	})
+	t.Run("mixed models keep ordered part attribution", func(t *testing.T) {
+		t.Parallel()
+		combined := combineParts([]judgment{
+			{by: "judge:smol-model", fallback: "primary-a: quota", verdict: reviewFlagged, flags: []string{"lost_code"}, spoken: []string{"lost_code"}},
+			{by: "judge:primary-b", verdict: reviewClean},
+		})
+		requireCombinedIdentity(t, combined, "judge:mixed", "primary-a: quota")
+		want := []JudgeAttribution{
+			{Part: 0, By: "judge:smol-model", Fallback: "primary-a: quota"},
+			{Part: 1, By: "judge:primary-b"},
+		}
+		if !slices.Equal(combined.judges, want) {
+			t.Fatalf("judges = %+v, want %+v", combined.judges, want)
+		}
+	})
+	t.Run("one answering model keeps its name", func(t *testing.T) {
+		t.Parallel()
+		combined := combineParts([]judgment{
+			{by: "judge:smol-model", fallback: "primary-a: quota", verdict: reviewClean},
+			{by: "judge:smol-model", fallback: "primary-a: quota", verdict: reviewFlagged, flags: []string{"lost_code"}},
+		})
+		requireCombinedIdentity(t, combined, "judge:smol-model", "primary-a: quota")
+		if len(combined.judges) != 2 {
+			t.Fatalf("judges = %+v, want both parts attributed", combined.judges)
+		}
+	})
+}
+
+func requireJudgeBy(t *testing.T, judged []event.ToolJudged, want string) {
+	t.Helper()
+	if len(judged) != 1 || judged[0].By != want {
+		t.Fatalf("judged = %+v, want by to name the answering model", judged)
+	}
+}
+
+func requireTurnJudgeBy(t *testing.T, turns []event.TurnJudged, want string) {
+	t.Helper()
+	if len(turns) != 1 || turns[0].By != want {
+		t.Fatalf("turn.judged = %+v, want by to name the answering model", turns)
+	}
+}
+
+func requireCombinedIdentity(t *testing.T, combined judgment, by, fallback string) {
+	t.Helper()
+	if combined.by != by || combined.fallback != fallback {
+		t.Fatalf("combined = %+v, want %s with fallback %q", combined, by, fallback)
 	}
 }
 
@@ -268,9 +400,11 @@ func TestEditReviewSkipsChangeWithoutAddedLines(t *testing.T) {
 	h := judgedHarness(t, judge, nil)
 	h.write("a.txt", "one\ntwo\n")
 	thread := runRounds(t, h, []call{{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one\ntwo", "two"})}})
-	if judge.count() != 0 || len(judgedOf(h.events(thread.ID()))) != 0 {
-		t.Fatalf("judge calls = %d, want none for a removal-only edit", judge.count())
-	}
+	requireReviewCounts(t, h.events(thread.ID()), judge, 0, 0)
+	h.model.push(calls(call{id: "e2", name: "patch", args: patchArgs("a.txt", [2]string{"two", "three"})}), text("done"))
+	h.submit(thread, "fix it again")
+	h.waitIdle(thread)
+	requireReviewCounts(t, h.events(thread.ID()), judge, 1, 1)
 }
 
 func TestEditReviewStateNeverHoldsRawSecret(t *testing.T) {
@@ -326,12 +460,20 @@ func TestEditReviewMissingAnswerIsError(t *testing.T) {
 	h := judgedHarness(t, judge, nil)
 	h.write("a.txt", "one\ntwo\n")
 	thread := runRounds(t, h, []call{{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}})
-	judged := judgedOf(h.events(thread.ID()))
+	events := h.events(thread.ID())
+	judged := judgedOf(events)
 	if len(judged) != 1 || judged[0].Verdict != reviewError || judged[0].Error != "part 1 of 1: answer lost_code is missing or out of range" {
 		t.Fatalf("judged = %+v, want the missing answer error", judged)
 	}
 	if judged[0].FailedParts != 1 || judged[0].Scores != nil {
 		t.Fatalf("failed parts = %d scores = %v, want 1 and none", judged[0].FailedParts, judged[0].Scores)
+	}
+	requireCompletedOK(t, events, "e1")
+	if last := lastTurn(events); last.Status != statusCompleted {
+		t.Fatalf("turn status = %q, want completed", last.Status)
+	}
+	if got := h.read("a.txt"); got != "uno\ntwo\n" {
+		t.Fatalf("a.txt = %q, want the edit applied", got)
 	}
 }
 
@@ -439,6 +581,11 @@ func TestNewHostRejectsUnknownFeedbackID(t *testing.T) {
 			t.Fatalf("NewHost error = %v, want %q", err, want)
 		}
 	}
+	valid := newHarness(t)
+	valid.cfg.EditFeedback = []string{"lost_code"}
+	if _, err := NewHost(valid.cfg); err != nil {
+		t.Fatalf("NewHost error = %v, want a known question id accepted", err)
+	}
 }
 
 func TestPackPartsKeepsHunkOrder(t *testing.T) {
@@ -480,6 +627,44 @@ func partDiffs(t *testing.T, input judgeInput) map[string]string {
 		out[f.Path] = f.Diff
 	}
 	return out
+}
+
+func hunklessFixture(t *testing.T) []fileDiff {
+	t.Helper()
+	same := []byte("one\ntwo\n")
+	files, err := diffFiles([]reviewFile{
+		classifyReviewFile("a.go", "update", []byte("one\n"), same),
+		classifyReviewFile("b.go", "update", same, same),
+	}, reviewContextLines)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 || len(files[1].hunks) != 0 {
+		t.Fatalf("diffFiles gave %d files, want both with the second holding no hunk", len(files))
+	}
+	return files
+}
+
+func TestPackPartsKeepsFileWithoutHunkAsOneUnit(t *testing.T) {
+	t.Parallel()
+	inputs, omitted, err := packParts("t", "apply_patch", hunklessFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omitted != 0 || len(inputs) != 1 {
+		t.Fatalf("parts = %d omitted = %d, want 1 part and no omission", len(inputs), omitted)
+	}
+	requireHunklessEntry(t, partDiffs(t, inputs[0]))
+}
+
+func requireHunklessEntry(t *testing.T, diffs map[string]string) {
+	t.Helper()
+	if empty, ok := diffs["b.go"]; !ok || empty != "" {
+		t.Fatalf("b.go entry = %q present %t, want an entry with an empty diff", empty, ok)
+	}
+	if !strings.Contains(diffs["a.go"], "+two") {
+		t.Fatalf("a.go diff = %q, want the added line", diffs["a.go"])
+	}
 }
 
 func randomBody(rng *rand.Rand, alphabet []string) string {
@@ -546,6 +731,49 @@ func checkPackedFiles(t *testing.T, files []fileDiff) {
 	}
 	if sent != want {
 		t.Fatalf("hunks sent = %d, want %d", sent, want)
+	}
+	for _, f := range files {
+		if joinedHunks(t, f, inputs) != inputHunks(f) {
+			t.Fatalf("hunks of %s joined across the parts differ from the input hunks in order", f.path)
+		}
+	}
+}
+
+func joinedHunks(t *testing.T, f fileDiff, inputs []judgeInput) string {
+	t.Helper()
+	var joined strings.Builder
+	for _, input := range inputs {
+		joined.WriteString(strings.TrimPrefix(partDiffs(t, input)[f.path], f.header))
+	}
+	return joined.String()
+}
+
+func inputHunks(f fileDiff) string {
+	var joined strings.Builder
+	for _, h := range f.hunks {
+		joined.WriteString(h.text())
+	}
+	return joined.String()
+}
+
+func TestPackPartsOrderCheckSeesReorderedParts(t *testing.T) {
+	t.Parallel()
+	a := fileDiff{path: "a.go", change: "update", kind: "code", added: 3, header: "--- a/a.go\n+++ b/a.go\n"}
+	for i, fill := range []string{"x", "y", "z"} {
+		a.hunks = append(a.hunks, hunk{oldStart: i*100 + 1, newStart: i*100 + 1, lines: []string{"+" + strings.Repeat(fill, 9990) + "\n"}})
+	}
+	inputs, omitted, err := packParts("t", "apply_patch", []fileDiff{a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omitted != 0 || len(inputs) != 2 {
+		t.Fatalf("parts = %d omitted = %d, want 2 parts and no omission", len(inputs), omitted)
+	}
+	if joinedHunks(t, a, inputs) != inputHunks(a) {
+		t.Fatal("packed parts do not join to the input hunks in order")
+	}
+	if joinedHunks(t, a, []judgeInput{inputs[1], inputs[0]}) == inputHunks(a) {
+		t.Fatal("reordered parts still join to the input order, so the check cannot fail")
 	}
 }
 
@@ -851,34 +1079,34 @@ func TestRecoveryNeverJudgesCompletedEdit(t *testing.T) {
 	h := judgedHarness(t, judge, nil)
 	h.write("a.txt", "uno\n")
 	h.seed(append(seededEdit(), event.ToolCompleted{CallID: "e1", OK: true, Output: "patched", Recovered: "none"})...)
-	h.model.push(text("done"))
+	h.model.push(calls(call{id: "e2", name: "patch", args: patchArgs("a.txt", [2]string{"uno", "dos"})}), text("done"))
 	events := h.recoverSession()
-	if judge.count() != 0 || len(judgedOf(events)) != 0 {
-		t.Fatalf("judge calls = %d, want none on recovery", judge.count())
-	}
+	requireReviewCounts(t, events, judge, 1, 0)
 }
 
 func TestEditReviewFactoryHangFailsOpen(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
 		h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
 			h.cfg.Config.EditReview.Enabled = true
 			h.cfg.EditJudge = func(ctx context.Context, _ string) (decide.Client, string, error) {
+				close(entered)
 				<-ctx.Done()
 				return nil, "", ctx.Err()
 			}
 		})
-		h.host.reviewTimeout = 50 * time.Millisecond
 		h.write("a.txt", "one\ntwo\n")
-		start := time.Now()
-		thread := runRounds(t, h, []call{{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}})
-		if elapsed := time.Since(start); elapsed > 2*time.Second {
-			t.Fatalf("review took %s, want under 2s", elapsed)
-		}
+		h.model.push(calls(call{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"one", "uno"})}), text("done"))
+		thread := h.start()
+		h.submit(thread, "fix it")
+		<-entered
+		thread.Interrupt()
+		h.waitIdle(thread)
 		events := h.events(thread.ID())
 		judged := judgedOf(events)
-		if len(judged) != 1 || judged[0].Verdict != reviewError || !strings.Contains(judged[0].Error, "review timed out after 50ms") {
-			t.Fatalf("judged = %+v, want one error verdict naming the 50ms timeout", judged)
+		if len(judged) != 1 || judged[0].Verdict != reviewError || !strings.Contains(judged[0].Error, "review: the turn was interrupted") {
+			t.Fatalf("judged = %+v, want one error verdict naming the interrupt", judged)
 		}
 		requireCompletedOK(t, events, "e1")
 	})
@@ -894,13 +1122,11 @@ func TestRecoveryDoesNotJudgeReapprovedEdit(t *testing.T) {
 		assistantCall("e1", "patch", args),
 		event.ApprovalRequested{RequestID: "req-1", CallID: "e1", Summary: "patch a.txt", Class: "edit"},
 	)...)
-	h.model.push(text("done"))
+	h.model.push(calls(call{id: "e2", name: "patch", args: patchArgs("a.txt", [2]string{"uno", "dos"})}), text("done"))
 	events := h.recoverSession()
-	if judge.count() != 0 || len(judgedOf(events)) != 0 {
-		t.Fatalf("judge calls = %d, tool.judged = %d, want none on recovery", judge.count(), len(judgedOf(events)))
-	}
-	if got := h.read("a.txt"); got != "uno\ntwo\n" {
-		t.Fatalf("a.txt = %q, want the re-approved edit applied", got)
+	requireReviewCounts(t, events, judge, 1, 0)
+	if got := h.read("a.txt"); got != "dos\ntwo\n" {
+		t.Fatalf("a.txt = %q, want the re-approved edit and the new edit applied", got)
 	}
 }
 
@@ -984,45 +1210,76 @@ func TestEditReviewSavedToggleControlsOpenThread(t *testing.T) {
 }
 
 func TestAdmittedEditReviewDrainsAfterSavedOff(t *testing.T) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	unblock := sync.OnceFunc(func() { close(release) })
-	defer unblock()
-	admitted := sync.OnceFunc(func() { close(entered) })
-	judge := &judgeStub{}
-	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
-		h.cfg.Config.EditReview.Enabled = true
-		h.cfg.EditJudge = func(ctx context.Context, id string) (decide.Client, string, error) {
-			admitted()
-			select {
-			case <-release:
-				return judgeFor(judge)(ctx, id)
-			case <-ctx.Done():
-				return nil, "", ctx.Err()
+	t.Parallel()
+	rows := []struct {
+		name    string
+		disable bool
+		turns   int
+	}{
+		{name: "saved off after admission", disable: true},
+		{name: "toggle left on", turns: 1},
+	}
+	for _, row := range rows {
+		runAdmittedDrainCase(t, row.name, row.disable, row.turns)
+	}
+}
+
+func runAdmittedDrainCase(t *testing.T, name string, disable bool, turns int) {
+	t.Helper()
+	t.Run(name, func(t *testing.T) {
+		t.Parallel()
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		defer unblock()
+		admitted := sync.OnceFunc(func() { close(entered) })
+		judge := &judgeStub{}
+		h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
+			h.cfg.Config.EditReview.Enabled = true
+			h.cfg.EditJudge = func(ctx context.Context, id string) (decide.Client, string, error) {
+				admitted()
+				select {
+				case <-release:
+					return judgeFor(judge)(ctx, id)
+				case <-ctx.Done():
+					return nil, "", ctx.Err()
+				}
+			}
+		})
+		h.write("a.txt", "one\n")
+		h.model.push(calls(call{id: "edit", name: "patch", args: patchArgs("a.txt", [2]string{"one", "two"})}), text("done"))
+		thread := h.start()
+		h.submit(thread, "change the value")
+		waitAdmittedJudge(t, entered)
+		if disable {
+			if err := h.host.WriteSettings(config.SettingEdit{Key: "edit_review.enabled", Value: false}); err != nil {
+				t.Fatal(err)
 			}
 		}
+		unblock()
+		h.waitIdle(thread)
+		requireAdmittedDrainOutcome(t, h, thread, judge, turns)
 	})
-	h.write("a.txt", "one\n")
-	h.model.push(calls(call{id: "edit", name: "patch", args: patchArgs("a.txt", [2]string{"one", "two"})}), text("done"))
-	thread := h.start()
-	h.submit(thread, "change the value")
+}
+
+func waitAdmittedJudge(t *testing.T, entered chan struct{}) {
+	t.Helper()
 	select {
 	case <-entered:
 	case <-t.Context().Done():
 		t.Fatal(t.Context().Err())
 	}
-	if err := h.host.WriteSettings(config.SettingEdit{Key: "edit_review.enabled", Value: false}); err != nil {
-		t.Fatal(err)
-	}
-	unblock()
-	h.waitIdle(thread)
+}
+
+func requireAdmittedDrainOutcome(t *testing.T, h *harness, thread *Thread, judge *judgeStub, turns int) {
+	t.Helper()
 	events := h.events(thread.ID())
 	requireCompletedOK(t, events, "edit")
 	content, err := os.ReadFile(filepath.Join(h.cwd, "a.txt"))
 	if err != nil || string(content) != "two\n" {
 		t.Fatalf("edit wrote %q, %v", content, err)
 	}
-	requireReviewCounts(t, events, judge, 1, 0)
+	requireReviewCounts(t, events, judge, 1, turns)
 }
 
 func requireReviewCounts(t *testing.T, events []event.Seqd, judge *judgeStub, wantEdits, wantTurns int) {
@@ -1032,5 +1289,276 @@ func requireReviewCounts(t *testing.T, events []event.Seqd, judge *judgeStub, wa
 	}
 	if edits, turns := len(editStatesOf(judge)), len(turnStatesOf(judge)); edits != wantEdits || turns != wantTurns {
 		t.Fatalf("edit and turn requests = %d, %d, want %d, %d", edits, turns, wantEdits, wantTurns)
+	}
+}
+
+func judgedFollowsCompletion(events []event.Seqd, callID string) bool {
+	done, judged := -1, -1
+	for i, item := range events {
+		switch value := item.Event.(type) {
+		case event.ToolCompleted:
+			if value.CallID == callID {
+				done = i
+			}
+		case event.ToolJudged:
+			if value.CallID == callID && judged < 0 {
+				judged = i
+			}
+		}
+	}
+	return done >= 0 && judged > done
+}
+
+func TestEditReviewStopsAfterTwoFailedUnitsInATurn(t *testing.T) {
+	t.Parallel()
+	rounds := [][]call{
+		{{id: "e1", name: "patch", args: patchArgs("a.txt", [2]string{"zero", "one"})}},
+		{{id: "e2", name: "patch", args: patchArgs("a.txt", [2]string{"one", "two"})}},
+		{{id: "e3", name: "patch", args: patchArgs("a.txt", [2]string{"two", "three"})}},
+		{{id: "e4", name: "patch", args: patchArgs("a.txt", [2]string{"three", "four"})}},
+	}
+	t.Run("a failing judge stops after two units", func(t *testing.T) {
+		t.Parallel()
+		judge := &judgeStub{err: errors.New("down")}
+		h := judgedHarness(t, judge, []string{"lost_code"})
+		h.write("a.txt", "zero\n")
+		thread := runRounds(t, h, rounds...)
+		requireBreakerStoppedReviews(t, h, thread, judge)
+	})
+	t.Run("an answering judge reviews every unit", func(t *testing.T) {
+		t.Parallel()
+		judge := &judgeStub{}
+		h := judgedHarness(t, judge, []string{"lost_code"})
+		h.write("a.txt", "zero\n")
+		thread := runRounds(t, h, rounds...)
+		requireReviewCounts(t, h.events(thread.ID()), judge, 4, 1)
+	})
+	t.Run("a clean verdict resets the counter", func(t *testing.T) {
+		t.Parallel()
+		judge := &judgeStub{errs: []error{errors.New("down"), nil, errors.New("down"), nil}}
+		h := judgedHarness(t, judge, []string{"lost_code"})
+		h.write("a.txt", "zero\n")
+		thread := runRounds(t, h, rounds...)
+		requireResetCounterVerdicts(t, h, thread, judge)
+	})
+}
+
+func requireBreakerStoppedReviews(t *testing.T, h *harness, thread *Thread, judge *judgeStub) {
+	t.Helper()
+	events := h.events(thread.ID())
+	judged := judgedOf(events)
+	if len(judged) != 2 || judge.count() != 2 {
+		t.Fatalf("verdicts and requests = %d, %d, want 2 and 2", len(judged), judge.count())
+	}
+	for _, entry := range judged {
+		if entry.Verdict != reviewError {
+			t.Fatalf("verdict = %q, want error", entry.Verdict)
+		}
+	}
+	if turns := turnJudgedOf(events); len(turns) != 0 {
+		t.Fatalf("turn verdicts = %d, want none after the breaker", len(turns))
+	}
+	for _, id := range []string{"e1", "e2", "e3", "e4"} {
+		requireCompletedOK(t, events, id)
+	}
+}
+
+func requireResetCounterVerdicts(t *testing.T, h *harness, thread *Thread, judge *judgeStub) {
+	t.Helper()
+	events := h.events(thread.ID())
+	judged := judgedOf(events)
+	want := []string{reviewError, reviewClean, reviewError, reviewClean}
+	if len(judged) != len(want) {
+		t.Fatalf("verdicts = %d, want %d", len(judged), len(want))
+	}
+	for i, verdict := range want {
+		if judged[i].Verdict != verdict {
+			t.Fatalf("verdict %d = %q, want %q", i, judged[i].Verdict, verdict)
+		}
+	}
+	requireReviewCounts(t, events, judge, 4, 1)
+}
+
+type gatedJudge struct {
+	gate    chan struct{}
+	started chan struct{}
+	once    sync.Once
+	inner   *judgeStub
+}
+
+func (g *gatedJudge) Ask(ctx context.Context, state jsontext.Value, questions map[string]decide.Question) (decide.Result, error) {
+	g.once.Do(func() { close(g.started) })
+	select {
+	case <-g.gate:
+	case <-ctx.Done():
+		return decide.Result{}, ctx.Err()
+	}
+	return g.inner.Ask(ctx, state, questions)
+}
+
+type nestedCell struct {
+	thread *Thread
+	calls  []event.ToolCall
+}
+
+func (c *nestedCell) Spec() tool.Spec {
+	return tool.Spec{Name: "cell", Description: "Run nested tool calls.", Schema: jsontext.Value(`{"type":"object","properties":{},"additionalProperties":false}`)}
+}
+
+func (c *nestedCell) Class() tool.Class { return tool.ClassScript }
+
+func (c *nestedCell) Run(ctx context.Context, call tool.Call, _ tool.Env) (tool.Result, error) {
+	source, err := c.thread.PutBlob([]byte("cell"))
+	if err != nil {
+		return tool.Result{}, err
+	}
+	started := event.ScriptStarted{RunID: call.ID, SourceBlob: source, Entry: "cell", Args: jsontext.Value("null")}
+	if err := c.thread.Append(context.Background(), started); err != nil {
+		return tool.Result{}, err
+	}
+	cellCtx, cancel := context.WithCancelCause(ctx)
+	errs := make([]error, len(c.calls))
+	var group sync.WaitGroup
+	for i, nested := range c.calls {
+		group.Go(func() { errs[i] = c.thread.RunNestedCall(cellCtx, nested) })
+	}
+
+	group.Wait()
+	cancel(nil)
+	joined := errors.Join(errs...)
+	done := event.ScriptCompleted{RunID: call.ID, OK: joined == nil, Value: jsontext.Value("null")}
+	if joined != nil {
+		done = event.ScriptCompleted{RunID: call.ID, Error: joined.Error()}
+	}
+	if err := c.thread.Append(context.Background(), done); err != nil {
+		return tool.Result{Output: []byte(err.Error())}, err
+	}
+	if joined != nil {
+		return tool.Result{Output: []byte(joined.Error())}, joined
+	}
+	return tool.Result{Output: []byte("ok"), OK: true}, nil
+}
+
+func cellCalls() []event.ToolCall {
+	return []event.ToolCall{
+		{ID: "run-1/1", Name: "patch", Args: jsontext.Value(patchArgs("a.txt", [2]string{"one", "uno"}))},
+		{ID: "run-1/2", Name: "patch", Args: jsontext.Value(patchArgs("b.txt", [2]string{"one", "uno"}))},
+		{ID: "run-1/3", Name: "read", Args: jsontext.Value(`{"path":"a.txt"}`)},
+	}
+}
+
+func TestEditReviewJudgesEditsMadeInsideCell(t *testing.T) {
+	t.Parallel()
+	nested := cellCalls()
+	t.Run("a cell edit is judged after the cell returns", func(t *testing.T) {
+		t.Parallel()
+		gate := make(chan struct{})
+		started := make(chan struct{})
+		judge := &judgeStub{}
+		gated := &gatedJudge{gate: gate, started: started, inner: judge}
+		cell := &nestedCell{calls: nested}
+		h := cellHarness(t, cell, true, func(context.Context, string) (decide.Client, string, error) {
+			return gated, "stub-judge", nil
+		})
+		thread := h.start()
+		cell.thread = thread
+		h.submit(thread, "run the cell")
+		<-started
+		if n := len(judgedOf(h.events(thread.ID()))); n != 0 {
+			t.Fatalf("verdicts before the cell returned = %d, want none", n)
+		}
+		h.waitEvent(thread.ID(), cellCompleted)
+		close(gate)
+		h.waitIdle(thread)
+		requireCellVerdictsAfterReturn(t, h, thread, judge)
+	})
+	t.Run("review off journals no verdict", func(t *testing.T) {
+		cell := &nestedCell{calls: nested}
+		judge := &judgeStub{}
+		h := cellHarness(t, cell, false, judgeFor(judge))
+		thread := h.start()
+		cell.thread = thread
+		h.submit(thread, "run the cell")
+		h.waitIdle(thread)
+		requireNoCellReviewWhenOff(t, h, thread, judge)
+	})
+	t.Run("a turn interrupt fails the cell review", func(t *testing.T) {
+		t.Parallel()
+		cell := &nestedCell{calls: nested}
+		judge := &judgeStub{block: true, started: make(chan struct{})}
+		h := cellHarness(t, cell, true, judgeFor(judge))
+		thread := h.start()
+		cell.thread = thread
+		h.submit(thread, "run the cell")
+		<-judge.started
+		thread.Interrupt()
+		h.waitIdle(thread)
+		requireInterruptedCellReview(t, h.events(thread.ID()))
+	})
+}
+
+func cellHarness(t *testing.T, cell *nestedCell, enabled bool, factory ClientFactory) *harness {
+	t.Helper()
+	h := newHarness(t, withApproval(config.ApprovalYolo), func(h *harness) {
+		h.cfg.EditJudge = factory
+		if enabled {
+			h.cfg.Config.EditReview.Enabled = true
+		}
+	})
+	h.extraTools = append(h.extraTools, cell)
+	h.write("a.txt", "one\n")
+	h.write("b.txt", "one\n")
+	h.model.push(calls(call{id: "run-1", name: "cell", args: "{}"}), text("done"))
+	return h
+}
+
+func cellCompleted(e event.Event) bool {
+	completed, ok := e.(event.ToolCompleted)
+	return ok && completed.CallID == "run-1"
+}
+
+func requireCellVerdictsAfterReturn(t *testing.T, h *harness, thread *Thread, judge *judgeStub) {
+	t.Helper()
+	events := h.events(thread.ID())
+	judged := judgedOf(events)
+	if len(judged) != 2 {
+		t.Fatalf("verdicts = %d, want the two cell edits", len(judged))
+	}
+	ids := []string{judged[0].CallID, judged[1].CallID}
+	slices.Sort(ids)
+	if !slices.Equal(ids, []string{"run-1/1", "run-1/2"}) {
+		t.Fatalf("judged calls = %v, want the two nested edits", ids)
+	}
+	for _, entry := range judged {
+		if entry.Verdict == reviewError || !judgedFollowsCompletion(events, entry.CallID) {
+			t.Fatalf("verdict = %+v, want a non-error verdict after its completion", entry)
+		}
+	}
+	requireCompletedOK(t, events, "run-1")
+	requireReviewCounts(t, events, judge, 2, 1)
+}
+
+func requireNoCellReviewWhenOff(t *testing.T, h *harness, thread *Thread, judge *judgeStub) {
+	t.Helper()
+	events := h.events(thread.ID())
+	if verdicts := len(judgedOf(events)); verdicts != 0 || judge.count() != 0 {
+		t.Fatalf("verdicts and requests = %d, %d, want none with review off", verdicts, judge.count())
+	}
+	requireCompletedOK(t, events, "run-1")
+	if got := h.read("a.txt"); got != "uno\n" {
+		t.Fatalf("a.txt = %q, want the cell edit applied", got)
+	}
+}
+
+func requireInterruptedCellReview(t *testing.T, events []event.Seqd) {
+	t.Helper()
+	judged := judgedOf(events)
+	if len(judged) == 0 {
+		t.Fatal("no verdict for the interrupted cell review")
+	}
+	for _, entry := range judged {
+		if entry.Verdict != reviewError || !strings.Contains(entry.Error, "part 1 of 1: review: the turn was interrupted") {
+			t.Fatalf("verdict = %+v, want the interrupt error", entry)
+		}
 	}
 }

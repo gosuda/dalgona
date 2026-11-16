@@ -164,3 +164,27 @@ describe("thread list start", () => {
 		expect(base.onSelect).not.toHaveBeenCalled();
 	});
 });
+
+describe("thread list loading", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	test("shows the loading line and renders no status region", () => {
+		const { container } = render(ThreadList, {
+			props: { ...props([]), loading: true },
+		});
+		expect(container.textContent).toContain("Loading threads…");
+		expect(container.querySelectorAll('[role="status"]')).toHaveLength(0);
+	});
+
+	test("the status query matches a status region added to the container", () => {
+		const { container } = render(ThreadList, {
+			props: { ...props([]), loading: true },
+		});
+		const injected = document.createElement("p");
+		injected.setAttribute("role", "status");
+		container.append(injected);
+		expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
+	});
+});

@@ -26,6 +26,7 @@ const (
 	reviewUncertainThreshold = 0.5
 	reviewSoundThreshold     = 0.5
 	reviewFeedbackCap        = 3
+	reviewFailureLimit       = 2
 	reviewRequestLimit       = 30000
 	reviewMaxParts           = 8
 	reviewPartWorkers        = 4
@@ -86,18 +87,27 @@ func speakersOf(table []reviewQuestion) []string {
 }
 
 type reviewRound struct {
+	mu      sync.Mutex
 	group   sync.WaitGroup
 	pending []*event.ToolJudged
 }
 
+type JudgeAttribution struct {
+	Part     int
+	By       string
+	Fallback string
+}
+
 type judgment struct {
-	by      string
-	scores  map[string]float64
-	verdict string
-	flags   []string
-	spoken  []string
-	err     error
-	failed  int
+	by       string
+	fallback string
+	judges   []JudgeAttribution
+	scores   map[string]float64
+	verdict  string
+	flags    []string
+	spoken   []string
+	err      error
+	failed   int
 }
 
 func checkReviewFeedback(ids []string) error {
@@ -117,15 +127,18 @@ func (h *Host) maskReview(text string) (string, error) {
 }
 
 func (w *worker) startReview(ctx context.Context, p *prepared, completed event.ToolCompleted) {
-	if w.round == nil || w.t.host.cfg.EditJudge == nil || !w.t.host.Config().EditReview.Enabled || p.class != tool.ClassEdit || !completed.OK || len(p.files) == 0 {
+	round := w.round
+	if round == nil || w.t.host.cfg.EditJudge == nil || !w.t.host.Config().EditReview.Enabled || w.reviewFailures >= reviewFailureLimit || p.class != tool.ClassEdit || !completed.OK || len(p.files) == 0 {
 		return
 	}
 	task := w.task()
 	files := slices.Clone(p.files)
 	name, callID := p.call.Name, p.call.ID
 	slot := new(event.ToolJudged)
-	w.round.pending = append(w.round.pending, slot)
-	w.round.group.Go(func() { *slot = w.judgeEdit(ctx, callID, task, name, files) })
+	round.mu.Lock()
+	round.pending = append(round.pending, slot)
+	round.mu.Unlock()
+	round.group.Go(func() { *slot = w.judgeEdit(ctx, callID, task, name, files) })
 }
 
 func (w *worker) joinReviews(ctx context.Context) error {
@@ -139,12 +152,26 @@ func (w *worker) joinReviews(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	judged := w.collectJudged(round, given)
+	if len(judged) == 0 {
+		return nil
+	}
+	_, err = w.t.appendEvents(context.WithoutCancel(ctx), judged...)
+	return err
+}
+
+func (w *worker) collectJudged(round *reviewRound, given int) []event.Event {
 	var judged []event.Event
 	for _, slot := range round.pending {
 		if slot.CallID == "" {
 			continue
 		}
 		w.eligible = true
+		if slot.Verdict == reviewError {
+			w.reviewFailures++
+		} else {
+			w.reviewFailures = 0
+		}
 		entry := *slot
 		entry.Feedback = entry.Verdict == reviewFlagged && len(entry.Spoken) > 0 && given < reviewFeedbackCap
 		if entry.Feedback {
@@ -154,11 +181,7 @@ func (w *worker) joinReviews(ctx context.Context) error {
 		}
 		judged = append(judged, entry)
 	}
-	if len(judged) == 0 {
-		return nil
-	}
-	_, err = w.t.appendEvents(context.WithoutCancel(ctx), judged...)
-	return err
+	return judged
 }
 
 func (w *worker) feedbackGiven() (int, error) {
@@ -176,11 +199,8 @@ func (w *worker) feedbackGiven() (int, error) {
 }
 
 func (w *worker) judgeEdit(ctx context.Context, callID, task, name string, changes []event.FileChange) event.ToolJudged {
-	h := w.t.host
-	tctx, cancel := context.WithTimeoutCause(ctx, h.reviewTimeout, reviewTimeoutCause(h.reviewTimeout))
-	defer cancel()
 	start := time.Now()
-	unit := w.prepareUnit(tctx, task, name, changes)
+	unit := w.prepareUnit(ctx, task, name, changes)
 	if unit.err == nil && unit.added == 0 {
 		return event.ToolJudged{}
 	}
@@ -188,14 +208,14 @@ func (w *worker) judgeEdit(ctx context.Context, callID, task, name string, chang
 		unit.err = errReviewNoPart
 	}
 	if unit.err != nil {
-		return w.toolJudged(callID, unit, judgment{by: "judge", err: unit.err}, 0, start)
+		return w.toolJudged(callID, unit, judgment{by: "judge", err: fmt.Errorf("part 1 of 1: %w", reviewFailure(ctx, unit.err))}, 0, start)
 	}
-	j, requests := w.judgeParts(ctx, tctx, unit.parts)
+	j, requests := w.judgeParts(ctx, unit.parts)
 	return w.toolJudged(callID, unit, j, requests, start)
 }
 
-func reviewTimeoutCause(d time.Duration) error {
-	return fmt.Errorf("review timed out after %s", d)
+func reviewSlotTimeoutCause(d time.Duration) error {
+	return fmt.Errorf("review waited %s for a judge slot", d)
 }
 
 func reviewFeedback(e event.ToolJudged) string {
@@ -418,18 +438,17 @@ func reviewChange(change event.FileChange) string {
 	return "update"
 }
 
-func (w *worker) judgeParts(ctx, tctx context.Context, parts []judgeInput) (judgment, int) {
-	client, name, err := w.t.host.cfg.EditJudge(tctx, w.t.id)
+func (w *worker) judgeParts(ctx context.Context, parts []judgeInput) (judgment, int) {
+	client, name, err := w.t.host.cfg.EditJudge(ctx, w.t.id)
 	if err != nil {
-		return judgment{by: "judge", err: reviewFailure(ctx, tctx, err)}, 0
+		return judgment{by: "judge", err: reviewFailure(ctx, err)}, 0
 	}
-	by := "judge:" + name
 	results := make([]judgment, len(parts))
 	var group errgroup.Group
 	group.SetLimit(reviewPartWorkers)
 	for i, part := range parts {
 		group.Go(func() error {
-			results[i] = w.askPart(ctx, tctx, client, by, part)
+			results[i] = w.askPart(ctx, client, name, part)
 			return nil
 		})
 	}
@@ -437,32 +456,38 @@ func (w *worker) judgeParts(ctx, tctx context.Context, parts []judgeInput) (judg
 	return combineParts(results), len(parts)
 }
 
-func (w *worker) askPart(ctx, tctx context.Context, client decide.Client, by string, part judgeInput) judgment {
+func (w *worker) askPart(ctx context.Context, client decide.Client, name string, part judgeInput) judgment {
 	h := w.t.host
+	wait, cancel := context.WithTimeoutCause(ctx, h.reviewTimeout, reviewSlotTimeoutCause(h.reviewTimeout))
+	defer cancel()
 	select {
 	case h.reviewSlots <- struct{}{}:
-	case <-tctx.Done():
-		return judgment{by: by, err: reviewFailure(ctx, tctx, nil)}
+	case <-wait.Done():
+		return judgment{by: "judge:" + name, err: reviewFailure(ctx, context.Cause(wait))}
 	}
 	defer func() { <-h.reviewSlots }()
-	answers, err := client.Ask(tctx, part.state, part.questions)
+	result, err := client.Ask(ctx, part.state, part.questions)
 	if err != nil {
-		return judgment{by: by, err: reviewFailure(ctx, tctx, err)}
+		return judgment{by: "judge:" + name, err: reviewFailure(ctx, err)}
 	}
-	scores, err := scoreAnswers(answers, part.questions)
+	scores, err := scoreAnswers(result.Answers, part.questions)
 	if err != nil {
-		return judgment{by: by, err: err}
+		return judgment{by: answeringBy(name, result), err: err}
 	}
 	verdict, flags := reviewVerdict(scores)
-	return judgment{by: by, scores: scores, verdict: verdict, flags: flags, spoken: reviewSpoken(scores, flags, h.cfg.EditFeedback)}
+	return judgment{by: answeringBy(name, result), fallback: result.Fallback, scores: scores, verdict: verdict, flags: flags, spoken: reviewSpoken(scores, flags, h.cfg.EditFeedback)}
 }
 
-func reviewFailure(ctx, tctx context.Context, err error) error {
-	switch {
-	case ctx.Err() != nil:
+func answeringBy(name string, result decide.Result) string {
+	if result.Model != "" {
+		return "judge:" + result.Model
+	}
+	return "judge:" + name
+}
+
+func reviewFailure(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
 		return errReviewInterrupted
-	case tctx.Err() != nil:
-		return context.Cause(tctx)
 	}
 	return err
 }
@@ -510,7 +535,7 @@ func reviewSpoken(scores map[string]float64, flags, feedback []string) []string 
 }
 
 func combineParts(parts []judgment) judgment {
-	out := judgment{by: parts[0].by}
+	out := aggregateAttribution(parts)
 	var answered []judgment
 	var firstErr error
 	for i, part := range parts {
@@ -534,6 +559,24 @@ func combineParts(parts []judgment) judgment {
 	out.scores = mergeScores(answered)
 	out.flags = unionOrdered(answered, func(j judgment) []string { return j.flags })
 	out.spoken = unionOrdered(answered, func(j judgment) []string { return j.spoken })
+	return out
+}
+
+func aggregateAttribution(parts []judgment) judgment {
+	out := judgment{by: parts[0].by, judges: make([]JudgeAttribution, len(parts))}
+	var fallbacks []string
+	mixed := false
+	for i, part := range parts {
+		out.judges[i] = JudgeAttribution{Part: i, By: part.by, Fallback: part.fallback}
+		mixed = mixed || part.by != parts[0].by
+		if part.fallback != "" && !slices.Contains(fallbacks, part.fallback) {
+			fallbacks = append(fallbacks, part.fallback)
+		}
+	}
+	if mixed {
+		out.by = "judge:mixed"
+	}
+	out.fallback = strings.Join(fallbacks, "; ")
 	return out
 }
 
@@ -589,6 +632,7 @@ func (w *worker) toolJudged(callID string, unit unitInput, j judgment, requests 
 		CallID: callID, TurnID: w.turnID, By: j.by, Paths: capPaths(unit.paths), Parts: cmp.Or(requests, 1),
 		Truncated: unit.truncated || j.failed > 0, ElapsedMS: time.Since(start).Milliseconds(),
 	}
+	entry.Fallback, entry.Judges = w.attribution(j)
 	if j.failed > 0 {
 		entry.FailedParts = j.failed
 	}

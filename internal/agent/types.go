@@ -24,11 +24,14 @@ type ToolSet func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error)
 
 type SkillSet func(cwd string) ([]prompt.Skill, error)
 
+type MemorySource func(ctx context.Context, cwd string) (string, error)
+
 type MCPServerStatus struct {
-	Name   string
-	Status string
-	Error  string
-	Tools  []MCPToolStatus
+	Name       string
+	AuthStatus string
+	Status     string
+	Error      string
+	Tools      []MCPToolStatus
 }
 
 type MCPToolStatus struct {
@@ -88,10 +91,12 @@ type HostConfig struct {
 	Clock            func() time.Time
 	Logger           *slog.Logger
 	Skills           SkillSet
+	MemorySource     MemorySource
 	MCPStatus        func(ctx context.Context, cwd string) []MCPServerStatus
 	SandboxCause     func() string
 	ToolNotes        []string
 	ProviderIDs      []string
+	ShellEnv         *runner.ShellEnvSnapshot
 }
 
 type Overrides struct {

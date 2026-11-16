@@ -134,8 +134,8 @@ describe("StateTag", () => {
 		expect(elapsed(view.container)).toBe("3s");
 	});
 
-	test("shows the rate-limit countdown in place of the elapsed time", async () => {
-		const { container } = render(StateTag, {
+	test("counts the rate-limit wait down locally and holds zero until the server clears it", async () => {
+		const view = render(StateTag, {
 			props: {
 				state: "inProgress",
 				startedAtMs: Date.now(),
@@ -144,9 +144,46 @@ describe("StateTag", () => {
 			},
 		});
 		await tick();
-		expect(container.textContent).toContain(
+		expect(elapsed(view.container)).toBe(
 			"rate limited · retrying in 2m 05s · esc stops",
 		);
-		expect(container.textContent).not.toContain("0 ms");
+		vi.advanceTimersByTime(3000);
+		await tick();
+		expect(elapsed(view.container)).toBe(
+			"rate limited · retrying in 2m 02s · esc stops",
+		);
+		vi.advanceTimersByTime(125000);
+		await tick();
+		expect(elapsed(view.container)).toBe(
+			"rate limited · retrying in 0m 00s · esc stops",
+		);
+		await view.rerender({ retryRemainingMs: null });
+		await tick();
+		expect(elapsed(view.container)).toBe("2m 08s");
+	});
+
+	test("a repeated wait report re-arms the countdown from the new value", async () => {
+		const view = render(StateTag, {
+			props: {
+				state: "inProgress",
+				startedAtMs: Date.now(),
+				point: false,
+				retryRemainingMs: 125000,
+			},
+		});
+		await tick();
+		vi.advanceTimersByTime(3000);
+		await tick();
+		expect(elapsed(view.container)).toBe(
+			"rate limited · retrying in 2m 02s · esc stops",
+		);
+		await view.rerender({ retryRemainingMs: 90000 });
+		await tick();
+		expect(elapsed(view.container)).toBe(
+			"rate limited · retrying in 1m 30s · esc stops",
+		);
+		await view.rerender({ retryRemainingMs: null });
+		await tick();
+		expect(elapsed(view.container)).toBe("3s");
 	});
 });

@@ -4,6 +4,9 @@ The `chatgpt` entry MUST take its client values from Codex `codex-rs/login/src/s
 
 The OAuth package (`internal/auth/oauth`) MUST expose provider-neutral authorization flows. It MUST NOT import `internal/auth`. The `Providers` table MUST include ChatGPT, Claude, Google Antigravity, Devin, and Cursor. Each entry MUST use the client identifiers, scopes, endpoints, and parameter names of its named donor.
 
+The table MUST also include Copilot.
+The `copilot` entry takes its client values from jcode's `crates/jcode-base/src/auth/copilot.rs`.
+
 `Provider` describes authorization, token, device, poll, and refresh endpoints. It also describes client credentials, scopes, loopback binding, advertised redirect URIs, port fallback, and extra authorization parameters. `PollURL` and `RefreshURL` MAY differ from `TokenURL`.
 
 ## Authorization code with PKCE
@@ -34,6 +37,16 @@ ChatGPT and Antigravity MUST use form-encoded authorization-code exchanges. Clau
 
 The standard device flow MUST use the RFC device-code grant. It MUST default to a five-second interval when the response omits `interval`. It MUST continue after `authorization_pending`. It MUST add five seconds to the interval after `slow_down`. It MUST accept pending and slow-down responses with non-success HTTP statuses. Any other OAuth error MUST fail the flow.
 
+Copilot MUST use the standard device flow with scope `read:user`.
+Its client id MUST be `Iv1.b507a08c87ecfe98`.
+Its device endpoint MUST be `https://github.com/login/device/code`.
+Its verification URL MUST be `https://github.com/login/device`.
+Its token endpoint MUST be `https://github.com/login/oauth/access_token`.
+Copilot login MUST print `Open <url> and enter the code <code> to log in to copilot.`.
+Copilot MUST NOT use PKCE.
+A GitHub token without an expiry MUST NOT refresh.
+The `--device-auth` flag remains exclusive to ChatGPT.
+
 ChatGPT MUST use its donor device endpoints instead of the RFC grant. The initial JSON request MUST contain `client_id`. The poll JSON request MUST contain `device_auth_id` and `user_code`. HTTP 403 and 404 poll responses MUST mean pending. A successful poll MUST supply an authorization code and verifier. The package MUST exchange them at `TokenURL` with `DeviceRedirectURL`.
 
 ## Cursor deep link
@@ -45,3 +58,28 @@ The poll MUST be a GET to `PollURL` with `uuid` and `verifier`. HTTP 404 MUST me
 ## Terminal login
 
 The `account/login/start` method MUST refuse an OAuth provider other than `chatgpt`. The error MUST read `login for <provider> runs in the terminal: <product> login <provider>`, where `<product>` is the product name of the host, `dal` or `dalgona`.
+
+## MCP discovery and resource binding
+
+MCP OAuth applies to dalgona HTTP servers only.
+`DiscoverResource` uses the `resource_metadata` challenge URL when present.
+Otherwise it tries the path-specific protected-resource metadata URL, then the root URL.
+The metadata resource MUST equal the canonical MCP URL.
+Discovery uses the first authorization server.
+HTTP endpoints MUST use HTTPS, except on loopback hosts.
+
+`DiscoverServer` tries OAuth authorization-server metadata before OpenID metadata.
+The returned issuer MUST equal the requested issuer.
+The server MUST advertise PKCE `S256`.
+Dynamic registration requests a public client named `dalgona` with authorization-code and refresh-token grants.
+Without a configured client identifier, a server without registration support MUST fail.
+
+The authorization request, code exchange, and refresh MUST carry the canonical resource URL.
+Configured scopes override resource metadata scopes.
+Neither source means that requests omit scope.
+MCP credentials use `mcp-<name>` in the auth store.
+Their account MUST equal the canonical resource URL.
+Registration metadata lives in `mcp-oauth.json` with mode 0600.
+Only login writes registration metadata.
+The token source reloads registration before token access and refresh.
+Resource and configured client mismatches MUST fail before credentials leave the host.

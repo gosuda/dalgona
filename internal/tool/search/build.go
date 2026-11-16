@@ -102,14 +102,11 @@ func buildIndex(cwd, dir string, start time.Time, limit int64) error {
 	trigramPath := filepath.Join(dir, trigramFile)
 	writer := index.Create(trigramPath)
 	records := make([]manifestEntry, 0, len(entries))
-	var total int64
+	budget := byteBudget{limit: limit}
 	for _, entry := range entries {
-		rec, ok, added := recordFile(writer, entry, total, limit)
-		if !ok {
-			continue
+		if rec, ok := recordFile(writer, entry, &budget); ok {
+			records = append(records, rec)
 		}
-		total += added
-		records = append(records, rec)
 	}
 	writer.Flush()
 	names, err := indexedNames(dir)
@@ -133,25 +130,43 @@ func buildIndex(cwd, dir string, start time.Time, limit int64) error {
 	return syncDir(dir)
 }
 
-func recordFile(writer *index.IndexWriter, entry fileEntry, total, limit int64) (manifestEntry, bool, int64) {
+type byteBudget struct {
+	limit int64
+	total int64
+	spent bool
+}
+
+func (b *byteBudget) admit(size int64) bool {
+	if b.spent {
+		return false
+	}
+	if b.total+size > b.limit {
+		b.spent = true
+		return false
+	}
+	return true
+}
+
+func recordFile(writer *index.IndexWriter, entry fileEntry, budget *byteBudget) (manifestEntry, bool) {
 	info, err := os.Lstat(entry.absolute)
 	if err != nil || !searchableInfo(info) {
-		return manifestEntry{}, false, 0
+		return manifestEntry{}, false
 	}
 	ctime, ok := ctimeNS(info)
 	if !ok {
-		return manifestEntry{}, false, 0
+		return manifestEntry{}, false
 	}
 	rec := manifestEntry{Path: entry.display, Size: info.Size(), ModNS: info.ModTime().UnixNano(), CtimeNS: ctime}
-	if total+info.Size() > limit {
-		return rec, true, 0
+	if !budget.admit(info.Size()) {
+		return rec, true
 	}
 	data, ok := readSearchable(entry.absolute)
 	if !ok {
-		return rec, true, 0
+		return rec, true
 	}
 	writer.Add(entry.display, bytes.NewReader(data))
-	return rec, true, int64(len(data))
+	budget.total += int64(len(data))
+	return rec, true
 }
 
 func indexedNames(dir string) (map[string]bool, error) {

@@ -38,13 +38,14 @@ type Recorder interface {
 }
 
 type Options struct {
-	Config  config.Config
-	Auth    *auth.Store
-	Journal *journal.Store
-	Local   func(ctx context.Context, threadID, runnerName string) (runner.Runner, error)
-	Confirm func(prompt string) (bool, error)
-	Out     io.Writer
-	Logger  *slog.Logger
+	Config     config.Config
+	Auth       *auth.Store
+	Journal    *journal.Store
+	Local      func(ctx context.Context, threadID, runnerName string) (runner.Runner, error)
+	Confirm    func(prompt string) (bool, error)
+	Out        io.Writer
+	Logger     *slog.Logger
+	NewService func(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error)
 }
 
 type Binder struct {
@@ -71,6 +72,9 @@ func NewBinder(opts Options) *Binder {
 		services: map[config.RunnerSpec]sandboxsvc.Service{}, remotes: remotes,
 	}
 	b.newSvc = b.defaultService
+	if opts.NewService != nil {
+		b.newSvc = opts.NewService
+	}
 	return b
 }
 

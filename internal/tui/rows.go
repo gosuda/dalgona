@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -52,9 +54,14 @@ type entry struct {
 
 type liveItem struct {
 	rpc.Item
-	raw        []byte
+	pending    []byte
+	pendingCtl byte
 	text       []byte
 	output     []byte
+	tailBuf    []byte
+	tailHead   string
+	tailMark   int
+	tailSeeded bool
 	split      blockSplitter
 	blocks     int
 	streamTail string
@@ -70,11 +77,85 @@ func (l *liveItem) settle(final rpc.Item) rpc.Item {
 func (l *liveItem) tail() string {
 	switch l.Type {
 	case "commandExecution":
-		return lastLine(l.Output + string(l.output))
+		return strings.TrimSpace(l.streamTailLine(l.Output))
 	case "agentMessage":
 		return strings.TrimSpace(l.streamTail)
 	}
-	return lastLine(l.Text + string(l.text))
+	return strings.TrimSpace(l.streamTailLine(l.Text))
+}
+
+func (l *liveItem) streamTailLine(prefix string) string {
+	if !l.tailSeeded {
+		l.tailHead = ""
+		if !strings.HasSuffix(prefix, "\n") {
+			l.tailHead = capTailString(lastLine(prefix))
+		}
+		l.tailSeeded = true
+	}
+	l.syncTail()
+	trimmed := bytes.TrimRight(l.tailBuf, "\n")
+	if i := bytes.LastIndexByte(trimmed, '\n'); i >= 0 {
+		return string(capTailLine(trimmed[i+1:]))
+	}
+	if len(trimmed) == 0 {
+		if len(l.streamed()) > len(l.tailBuf) {
+			return ""
+		}
+		return l.tailHead
+	}
+	if len(l.streamed()) > len(l.tailBuf) {
+		return string(capTailLine(trimmed))
+	}
+	return capTailString(l.tailHead + string(trimmed))
+}
+
+func (l *liveItem) streamed() []byte {
+	if l.Type == "commandExecution" {
+		return l.output
+	}
+	return l.text
+}
+
+func (l *liveItem) syncTail() {
+	stream := l.streamed()
+	if len(stream) <= l.tailMark {
+		return
+	}
+	start := l.tailMark
+	if len(stream)-start > streamTailBytes {
+		start = len(stream) - streamTailBytes
+		for start < len(stream) && !utf8.RuneStart(stream[start]) {
+			start++
+		}
+	}
+	l.noteTail(stream[start:])
+	l.tailMark = len(stream)
+}
+
+func (l *liveItem) noteTail(frag []byte) {
+	if len(frag) >= streamTailBytes {
+		l.tailBuf = append(l.tailBuf[:0], alignHeadToRune(frag[len(frag)-streamTailBytes:])...)
+		return
+	}
+	l.tailBuf = append(l.tailBuf, frag...)
+	if len(l.tailBuf) > 2*streamTailBytes {
+		keep := alignHeadToRune(l.tailBuf[len(l.tailBuf)-streamTailBytes:])
+		l.tailBuf = append(l.tailBuf[:0], keep...)
+	}
+}
+
+func capTailLine(line []byte) []byte {
+	if len(line) > streamTailBytes {
+		line = alignHeadToRune(line[len(line)-streamTailBytes:])
+	}
+	return line
+}
+
+func alignHeadToRune(b []byte) []byte {
+	for len(b) > 0 && !utf8.RuneStart(b[0]) {
+		b = b[1:]
+	}
+	return b
 }
 
 func (l liveItem) snapshot() rpc.Item {
@@ -223,6 +304,7 @@ func (m *model) settle() tea.Cmd {
 		return nil
 	}
 	m.out.geometry = geometry
+	m.anchorState().needed = true
 	m.out.settling = true
 	m.out.settleN++
 	n := m.out.settleN
@@ -247,7 +329,7 @@ func lineCount(content string) int {
 }
 
 func (m *model) drain() tea.Cmd {
-	if m.out.printing || m.out.settling || m.review != nil || len(m.out.pending) == 0 {
+	if m.out.printing || m.out.settling || m.anchorState().moving || m.review != nil || len(m.out.pending) == 0 {
 		return nil
 	}
 	bound := m.screen.height - len(m.dockLines())
@@ -260,6 +342,7 @@ func (m *model) drain() tea.Cmd {
 	}
 	m.out.frozen = m.View()
 	m.out.printing = true
+	m.anchorState().prints++
 	printed := func() tea.Msg { return printedMsg{} }
 	return tea.Sequence(tea.Println(text), printed)
 }
@@ -296,21 +379,106 @@ func chunkText(rows []string) string {
 	return text
 }
 
-func (m *model) renderReviewRow(verdict, summary string, paths []string) []string {
+const (
+	reviewPathsShown = 3
+	reviewLead       = "review  "
+	reviewByPrefix   = "judge:"
+	reviewMixed      = "mixed"
+)
+
+type reviewAttribution struct {
+	by       string
+	fallback string
+	judges   []rpc.JudgeAttribution
+}
+
+func (m *model) renderReviewRow(verdict, summary string, paths []string, attribution reviewAttribution) []string {
 	s := &m.screen
-	cleaned := make([]string, len(paths))
-	for i, path := range paths {
+	shown := paths
+	more := 0
+	if len(shown) > reviewPathsShown {
+		more = len(shown) - reviewPathsShown
+		shown = shown[:reviewPathsShown]
+	}
+	cleaned := make([]string, len(shown))
+	for i, path := range shown {
 		cleaned[i] = sanitizeText(path)
 	}
-	text := "review  " + sanitizeText(summary)
+	text := reviewLead + sanitizeText(summary)
 	if len(cleaned) > 0 {
 		text += "  " + strings.Join(cleaned, ", ")
 	}
-	var out []string
-	for _, line := range s.wrap(text, terminalWidth(s.width)) {
-		out = append(out, reviewPaint(s.theme, verdict, line))
+	if more > 0 {
+		text += fmt.Sprintf("  +%d more", more)
+	}
+	width := terminalWidth(s.width)
+	lines := slices.Concat(s.wrap(text, width), m.reviewAttributionLines(verdict, attribution))
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = reviewPaint(s.theme, verdict, line)
 	}
 	return out
+}
+
+func (m *model) reviewAttributionLines(verdict string, attribution reviewAttribution) []string {
+	text := reviewAttributionText(verdict, attribution)
+	if text == "" {
+		return nil
+	}
+	s := &m.screen
+	width := terminalWidth(s.width)
+	indent := strings.Repeat(" ", min(len(reviewLead), width-1))
+	lines := s.wrap(text, width-len(indent))
+	for i, line := range lines {
+		lines[i] = indent + line
+	}
+	return lines
+}
+
+func reviewAttributionText(verdict string, attribution reviewAttribution) string {
+	models := strings.Join(answeringModels(attribution), ", ")
+	if models == "" {
+		return ""
+	}
+	text := "judged by " + models
+	if verdict == "error" {
+		text = "judge failed: " + models
+	}
+	if fallback := singleLine(attribution.fallback); fallback != "" {
+		text += " (fallback from " + fallback + ")"
+	}
+	return text
+}
+
+func answeringModels(attribution reviewAttribution) []string {
+	var models []string
+	for _, by := range attributionBys(attribution) {
+		model := singleLine(answeringModel(by))
+		if model != "" && !slices.Contains(models, model) {
+			models = append(models, model)
+		}
+	}
+	return models
+}
+
+func attributionBys(attribution reviewAttribution) []string {
+	bys := []string{attribution.by}
+	for _, judge := range attribution.judges {
+		bys = append(bys, judge.By)
+	}
+	return bys
+}
+
+func answeringModel(by string) string {
+	model, ok := strings.CutPrefix(by, reviewByPrefix)
+	if !ok || model == reviewMixed {
+		return ""
+	}
+	return model
+}
+
+func singleLine(text string) string {
+	return strings.Join(strings.Fields(sanitizeText(text)), " ")
 }
 
 func reviewPaint(t theme, verdict, line string) string {
@@ -323,11 +491,11 @@ func reviewPaint(t theme, verdict, line string) string {
 	return t.paint(roleDim, line)
 }
 
-func (m *model) printReview(key, verdict, summary string, paths []string) {
+func (m *model) printReview(key, verdict, summary string, paths []string, attribution reviewAttribution) {
 	if verdict == "clean" || (verdict == "uncertain" && m.screen.level() != verbosityHigh) {
 		return
 	}
-	m.commit(key, m.renderReviewRow(verdict, summary, paths))
+	m.commit(key, m.renderReviewRow(verdict, summary, paths, attribution))
 }
 
 func (m *model) renderAdvisorCard(advisor, severity, note string) string {

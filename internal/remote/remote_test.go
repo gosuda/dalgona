@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"os"
@@ -312,7 +313,14 @@ func TestCloudMainRefusesCloudflareUp(t *testing.T) {
 		Runners: map[string]config.RunnerSpec{"edge": {Service: "cloudflare", URL: "https://worker.example"}},
 	}
 	var stdout, stderr bytes.Buffer
-	code := CloudMain(t.Context(), Options{Config: cfg}, []string{"up", "edge"}, IO{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
+	created := 0
+	code := CloudMain(t.Context(), Options{
+		Config: cfg,
+		NewService: func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) {
+			created++
+			return nil, errors.New("service factory reached")
+		},
+	}, []string{"up", "edge"}, IO{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
 	if code != 1 {
 		t.Fatalf("CloudMain exit = %d, want 1", code)
 	}
@@ -320,9 +328,8 @@ func TestCloudMainRefusesCloudflareUp(t *testing.T) {
 	if stderr.String() != wantErr {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), wantErr)
 	}
-	wantOut := "sign in inside the box with `dalgona --remote edge login`\n"
-	if stdout.String() != wantOut {
-		t.Fatalf("stdout = %q, want %q", stdout.String(), wantOut)
+	if created != 0 {
+		t.Fatalf("service factory called %d times, want 0", created)
 	}
 }
 

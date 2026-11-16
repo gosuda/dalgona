@@ -76,6 +76,16 @@ type model struct {
 	settings    *settingsPanel
 	saving      *settingsPanel
 	prefs       map[string]string
+	pending     *pendingResume
+}
+
+const pendingResumeLimit = 4096
+
+type pendingResume struct {
+	target string
+	seq    int
+	failed bool
+	held   []notificationMsg
 }
 
 type connInfo struct {
@@ -90,6 +100,7 @@ type connInfo struct {
 
 type threadInfo struct {
 	id              string
+	cwd             string
 	turnID          string
 	state           string
 	seq             uint64
@@ -101,6 +112,8 @@ type threadInfo struct {
 	turnStartedAt   time.Time
 	lastTurn        time.Duration
 	effort          string
+	turnEffort      *string
+	turnRevision    uint64
 	usage           rpc.ThreadTokenUsage
 	levels          map[string][]string
 	inputModalities map[string][]string
@@ -108,6 +121,7 @@ type threadInfo struct {
 
 type liveState struct {
 	items      []liveItem
+	byID       map[string]int
 	deltas     *deltaDecoder
 	plan       []rpc.TurnPlanStep
 	retryUntil time.Time
@@ -167,6 +181,7 @@ type outState struct {
 	started  bool
 	settling bool
 	settleN  int
+	anchor   *dockAnchor
 	seq      int
 	loads    int
 }
@@ -226,11 +241,12 @@ func newModel(client caller, opts Options, done <-chan struct{}) model {
 		sandbox = "off"
 	}
 	return model{
-		conn:   connInfo{client: client, opts: opts, done: done, clock: time.Now},
-		input:  inputState{composer: newEditor()},
-		screen: screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII, motion: true, spin: newSpinner(true), notifications: true},
-		out:    outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{})},
-		live:   liveState{deltas: new(deltaDecoder)},
-		thread: threadInfo{state: stateIdle, title: "new thread", modelName: opts.Model, approvalMode: approvalMode, sandbox: sandbox},
+		conn:    connInfo{client: client, opts: opts, done: done, clock: time.Now},
+		input:   inputState{composer: newEditor()},
+		screen:  screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII, motion: true, spin: newSpinner(true), notifications: true},
+		out:     outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{})},
+		live:    liveState{deltas: new(deltaDecoder)},
+		thread:  threadInfo{state: stateIdle, title: "new thread", modelName: opts.Model, approvalMode: approvalMode, sandbox: sandbox},
+		pending: &pendingResume{},
 	}
 }

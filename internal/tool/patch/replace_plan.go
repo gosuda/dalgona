@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/gosuda/dalgona/internal/tool"
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
@@ -21,11 +22,17 @@ func PlanReplace(ctx context.Context, env tool.Env, summary string, replaced []R
 	if err != nil {
 		return tool.Plan{}, err
 	}
-	if err = checkOmissions(files); err != nil {
+	batch := newStagedBatch(Replace, env, summary)
+	for _, file := range files {
+		file.beforeSHA = fileSHA(file.before, file.exists)
+		file.afterSHA = fileSHA(file.after, !file.deleted)
+	}
+	batch.files, batch.summary = files, summary
+	batch.findings = observeOmissions(files)
+	if err = blockingFinding(batch.findings); err != nil {
 		closeFiles(files)
 		return tool.Plan{}, err
 	}
-	batch := stagedBatch{files: files, summary: summary}
 	return tool.Plan{
 		Files: batch.changes(),
 		Apply: func(ctx context.Context) (tool.Result, error) {
@@ -78,7 +85,7 @@ func stageReplaced(ctx context.Context, env tool.Env, item ReplacedFile) (*stage
 		return nil, nil
 	}
 	return &stagedFile{
-		path: display, absolute: absolute, before: current, after: item.After,
-		exists: true, mode: mode, splices: item.Splices, sound: true,
+		path: display, absolute: absolute, before: current, after: bytes.Clone(item.After),
+		exists: true, mode: mode, splices: slices.Clone(item.Splices), sound: true,
 	}, nil
 }

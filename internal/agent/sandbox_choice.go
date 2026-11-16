@@ -23,18 +23,18 @@ type sandboxAsk struct {
 	err   error
 }
 
-func (w *worker) sandboxFallback(ctx context.Context, gc gateCall, requestID string) (verdict, bool) {
+func (w *worker) gateSandbox(ctx context.Context, run gateRun) (verdict, bool) {
 	cause := w.t.host.cfg.SandboxCause()
-	if !w.sandboxApplies(gc, cause) {
+	if !w.sandboxApplies(run.gc, cause) {
 		return verdict{}, false
 	}
 	switch w.sandboxChoice() {
 	case event.SandboxChoiceAccept:
-		return w.humanSkippingGrants(ctx, gc, requestID), true
+		return w.humanSkippingGrants(ctx, run.gc, run.requestID), true
 	case event.SandboxChoiceDangerous:
 		return verdict{}, false
 	}
-	return w.askSandboxChoice(ctx, gc, requestID, cause)
+	return w.askSandboxChoice(ctx, run.gc, run.requestID, cause)
 }
 
 func (w *worker) sandboxApplies(gc gateCall, cause string) bool {
@@ -55,13 +55,18 @@ func (w *worker) askSandboxChoice(ctx context.Context, gc gateCall, requestID, c
 }
 
 func (w *worker) recordSandboxChoice(ctx context.Context, gc gateCall, requestID, cause, choice string) (verdict, bool) {
-	if _, err := w.t.appendEvents(ctx, event.SandboxChosen{RequestID: requestID, Choice: choice, Cause: cause}); err != nil {
-		return decline("sandbox", sandboxNoChoice), true
-	}
+	chosen := event.SandboxChosen{RequestID: requestID, Choice: choice, Cause: cause}
 	if choice == event.SandboxChoiceDangerous {
+		if _, err := w.t.appendEvents(ctx, chosen); err != nil {
+			return decline("sandbox", sandboxNoChoice), true
+		}
 		return verdict{}, false
 	}
-	return w.humanSkippingGrants(ctx, gc, requestID), true
+	v := w.humanSkippingGrants(ctx, gc, requestID)
+	if _, err := w.t.appendEvents(context.WithoutCancel(ctx), chosen); err != nil {
+		return decline("sandbox", sandboxNoChoice), true
+	}
+	return v, true
 }
 
 func sandboxChoiceFrom(reply asktool.Reply) (string, bool) {

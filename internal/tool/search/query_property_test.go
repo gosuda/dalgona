@@ -37,7 +37,7 @@ func propertyContent(rng *rand.Rand) string {
 }
 
 func propertyFileBody(rng *rand.Rand) string {
-	switch rng.IntN(12) {
+	switch rng.IntN(10) {
 	case 0:
 		return strings.Repeat("k", 2500) + "\n"
 	case 1:
@@ -67,23 +67,54 @@ func sameSize(old []byte, body string) string {
 func mutatePropertyFile(t *testing.T, rng *rand.Rand, ws, name string) {
 	t.Helper()
 	path := filepath.Join(ws, filepath.FromSlash(name))
-	switch rng.IntN(5) {
+	switch rng.IntN(6) {
 	case 0:
-		old, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		writeBuildFiles(t, ws, map[string]string{name: sameSize(old, propertyContent(rng))})
+		mutateSameSize(t, rng, ws, name)
 	case 1:
 		writeBuildFiles(t, ws, map[string]string{name: propertyContent(rng)})
 	case 2:
-		if err := os.Remove(path); err != nil {
-			t.Fatal(err)
-		}
+		removePropertyFile(t, path)
 	case 3:
-		if err := os.Rename(path, path+".moved"); err != nil {
-			t.Fatal(err)
-		}
+		renamePropertyFile(t, path)
+	case 4:
+		mutateWithRestoredMtime(t, rng, ws, name)
+	}
+}
+
+func mutateSameSize(t *testing.T, rng *rand.Rand, ws, name string) {
+	t.Helper()
+	path := filepath.Join(ws, filepath.FromSlash(name))
+	old, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBuildFiles(t, ws, map[string]string{name: sameSize(old, propertyContent(rng))})
+}
+
+func removePropertyFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func renamePropertyFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Rename(path, path+".moved"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mutateWithRestoredMtime(t *testing.T, rng *rand.Rand, ws, name string) {
+	t.Helper()
+	path := filepath.Join(ws, filepath.FromSlash(name))
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutateSameSize(t, rng, ws, name)
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -91,6 +122,9 @@ func mutatePropertyTree(t *testing.T, rng *rand.Rand, ws string, names []string)
 	t.Helper()
 	for _, name := range names {
 		mutatePropertyFile(t, rng, ws, name)
+		if rng.IntN(len(names)) == 0 {
+			writeBuildFiles(t, ws, map[string]string{name: propertyContent(rng)})
+		}
 	}
 	writeBuildFiles(t, ws, map[string]string{"racy/new.txt": propertyContent(rng)})
 }
@@ -99,7 +133,11 @@ func propertyArgs(rng *rand.Rand) args {
 	var pattern string
 	switch rng.IntN(5) {
 	case 0:
-		pattern = propertyWord(rng) + propertyWord(rng)
+		words := make([]string, 1+rng.IntN(4))
+		for i := range words {
+			words[i] = propertyWord(rng)
+		}
+		pattern = strings.Join(words, " ")
 	case 1:
 		pattern = propertyWord(rng) + "|" + propertyWord(rng)
 	case 2:
@@ -118,15 +156,21 @@ func TestIndexedGrepEqualsScan(t *testing.T) {
 	for i := range 200 {
 		ws := t.TempDir()
 		names := writePropertyTree(t, rng, ws)
-		start := time.Now().Add(time.Hour)
-		if i%2 == 1 {
-			start = time.Now()
+		start := time.Now()
+		switch rng.IntN(3) {
+		case 1:
+			start = start.Add(time.Hour)
+		case 2:
+			start = start.Add(-time.Hour)
 		}
 		dir := buildTestIndex(t, ws, start, 1<<30)
 		mutatePropertyTree(t, rng, ws, names)
 		clock := clockAt(start)
+		if rng.IntN(4) == 0 {
+			clock = freshness{Now: time.Now().UnixNano(), Racy: racyWindow.Nanoseconds()}
+		}
 		c := indexedCase{caseNo: i, ws: ws, dir: dir, clock: clock}
-		for range 4 {
+		for range 8 {
 			requireIndexedAgrees(t, c, propertyArgs(rng))
 		}
 	}

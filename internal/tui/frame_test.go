@@ -77,9 +77,12 @@ func assertFrame(t *testing.T, lines []string, width, height int) {
 	if len(lines) > height-1 {
 		t.Fatalf("frame has %d lines, want at most %d:\n%s", len(lines), height-1, strings.Join(lines, "\n"))
 	}
-	for _, line := range lines {
-		if cells := ansi.StringWidth(line); cells > width-1 {
-			t.Fatalf("line has %d cells, want at most %d: %q", cells, width-1, line)
+	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
+		screen := screenState{method: method}
+		for _, line := range lines {
+			if cells := screen.cells(line); cells > width-1 {
+				t.Fatalf("method %v line has %d cells, want at most %d: %q", method, cells, width-1, line)
+			}
 		}
 	}
 }
@@ -96,26 +99,26 @@ func assertSteadyDock(t *testing.T, m model, keys []tea.KeyPressMsg) model {
 	return m
 }
 
-func scriptedTurn(t *testing.T, m model) model {
-	t.Helper()
-	m, _ = drive(t, m, notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)})
-	m, _ = drive(t, m, notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)})
-	m, _ = drive(t, m, notificationMsg{method: "item/started", params: []byte(`{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":{"type":"agentMessage","id":"a1","text":""}}`)})
+func scriptedTurnMessages() []tea.Msg {
 	var text strings.Builder
 	text.WriteString("# Plan\n\n")
 	for i := range 50 {
 		fmt.Fprintf(&text, "line %d of the answer that keeps streaming\n", i)
 	}
 	text.WriteString("```go\nfunc f() {\n}\n```\n")
-	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(fmt.Sprintf(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":%q}`, text.String()))})
-	m, _ = drive(t, m, notificationMsg{method: "item/completed", params: []byte(`{"threadId":"t1","turnId":"turn-1","completedAtMs":2,"item":{"type":"agentMessage","id":"a1","text":""}}`)})
-	m, _ = drive(t, m, notificationMsg{method: "item/started", params: []byte(`{"threadId":"t1","turnId":"turn-1","startedAtMs":3,"item":{"type":"commandExecution","id":"c1","command":"seq 30","commandActions":[],"cwd":"/work","status":"inProgress","aggregatedOutput":null}}`)})
 	output := strings.Repeat("row\n", 30)
-	m, _ = drive(t, m, notificationMsg{method: "item/commandExecution/outputDelta", params: []byte(fmt.Sprintf(`{"threadId":"t1","turnId":"turn-1","itemId":"c1","delta":%q}`, output))})
-	m, _ = drive(t, m, notificationMsg{method: "item/completed", params: []byte(`{"threadId":"t1","turnId":"turn-1","completedAtMs":4,"item":{"type":"commandExecution","id":"c1","command":"seq 30","commandActions":[],"cwd":"/work","status":"completed","aggregatedOutput":"row","exitCode":0}}`)})
-	m, _ = drive(t, m, notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"stream reset"}}`)})
-	m, _ = drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`)})
-	return m
+	return []tea.Msg{
+		notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)},
+		notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)},
+		notificationMsg{method: "item/started", params: []byte(`{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":{"type":"agentMessage","id":"a1","text":""}}`)},
+		notificationMsg{method: "item/agentMessage/delta", params: []byte(fmt.Sprintf(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":%q}`, text.String()))},
+		notificationMsg{method: "item/completed", params: []byte(`{"threadId":"t1","turnId":"turn-1","completedAtMs":2,"item":{"type":"agentMessage","id":"a1","text":""}}`)},
+		notificationMsg{method: "item/started", params: []byte(`{"threadId":"t1","turnId":"turn-1","startedAtMs":3,"item":{"type":"commandExecution","id":"c1","command":"seq 30","commandActions":[],"cwd":"/work","status":"inProgress","aggregatedOutput":null}}`)},
+		notificationMsg{method: "item/commandExecution/outputDelta", params: []byte(fmt.Sprintf(`{"threadId":"t1","turnId":"turn-1","itemId":"c1","delta":%q}`, output))},
+		notificationMsg{method: "item/completed", params: []byte(`{"threadId":"t1","turnId":"turn-1","completedAtMs":4,"item":{"type":"commandExecution","id":"c1","command":"seq 30","commandActions":[],"cwd":"/work","status":"completed","aggregatedOutput":"row","exitCode":0}}`)},
+		notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"stream reset"}}`)},
+		notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`)},
+	}
 }
 
 func TestDockBoundsOverScriptedTurn(t *testing.T) {
@@ -126,8 +129,10 @@ func TestDockBoundsOverScriptedTurn(t *testing.T) {
 			m := newTestModel(nil, Options{})
 			m, _ = drive(t, m, tea.WindowSizeMsg{Width: size.width, Height: size.height})
 			assertFrame(t, strings.Split(m.View().Content, "\n"), size.width, size.height)
-			m = scriptedTurn(t, m)
-			assertFrame(t, strings.Split(m.View().Content, "\n"), size.width, size.height)
+			for _, msg := range scriptedTurnMessages() {
+				m, _ = drive(t, m, msg)
+				assertFrame(t, strings.Split(m.View().Content, "\n"), size.width, size.height)
+			}
 		})
 	}
 }
@@ -138,15 +143,22 @@ func TestDockHeightChangesOnlyOnKeys(t *testing.T) {
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	height := len(m.dockLines())
 	m, _ = drive(t, m, notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)})
+	assertFrame(t, strings.Split(m.View().Content, "\n"), 100, 24)
+	if got := len(m.dockLines()); got != height {
+		t.Fatalf("dock height after thread row = %d, want %d", got, height)
+	}
 	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"one\ntwo\nthree\n"}`)})
+	assertFrame(t, strings.Split(m.View().Content, "\n"), 100, 24)
 	if got := len(m.dockLines()); got != height {
 		t.Fatalf("dock height after streamed text = %d, want %d", got, height)
 	}
 	m, _ = drive(t, m, notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"stream reset"}}`)})
+	assertFrame(t, strings.Split(m.View().Content, "\n"), 100, 24)
 	if got := len(m.dockLines()); got != height {
 		t.Fatalf("dock height after notice = %d, want %d", got, height)
 	}
 	m, _ = drive(t, m, tea.PasteMsg{Content: "pasted\nline"})
+	assertFrame(t, strings.Split(m.View().Content, "\n"), 100, 24)
 	if got := len(m.dockLines()); got <= height {
 		t.Fatalf("dock height after paste = %d, want more than %d", got, height)
 	}

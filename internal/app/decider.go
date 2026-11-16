@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"strings"
@@ -58,10 +59,13 @@ func (r *roleResolver) threadModel(threadID, fallback string) string {
 }
 
 type judges struct {
-	cfg   config.Config
-	creds *credentials
-	roles *roleResolver
-	spec  decide.Spec
+	cfg       config.Config
+	creds     *credentials
+	roles     *roleResolver
+	spec      decide.Spec
+	cooldowns *decide.Cooldowns
+
+	fallbackLogOnce sync.Once
 }
 
 func newJudges(ctx context.Context, cfg config.Config, creds *credentials, roles *roleResolver) (*judges, error) {
@@ -76,7 +80,7 @@ func newJudges(ctx context.Context, cfg config.Config, creds *credentials, roles
 	if err != nil {
 		return nil, fmt.Errorf("config: [approval] decider: %w", err)
 	}
-	return &judges{cfg: cfg, creds: creds, roles: roles, spec: spec}, nil
+	return &judges{cfg: cfg, creds: creds, roles: roles, spec: spec, cooldowns: decide.NewCooldowns(nil)}, nil
 }
 
 func (j *judges) decider() agent.Decider {
@@ -101,6 +105,52 @@ func (j *judges) judge(ctx context.Context, modelSpec, threadModel string) (deci
 }
 
 func (j *judges) client(ctx context.Context, spec decide.Spec, threadModel string) (decide.Client, string, error) {
+	primary := lazyJudgeClient{j: j, spec: spec, threadModel: threadModel}
+	smolSpec := decide.Spec{Adapter: decide.AdapterLLM, Model: "smol"}
+	smol := lazyJudgeClient{j: j, spec: smolSpec, threadModel: threadModel, smol: true}
+	model := j.modelName(ctx, spec, threadModel)
+	client := decide.WithFallback(
+		decide.Named{Client: primary, Model: spec.Adapter + ":" + model},
+		decide.Named{Client: smol, Model: decide.AdapterLLM + ":" + j.modelName(ctx, smolSpec, threadModel)},
+		j.cooldowns,
+	)
+	return client, model, nil
+}
+
+func (j *judges) modelName(ctx context.Context, spec decide.Spec, threadModel string) string {
+	if spec.Adapter == decide.AdapterLLM {
+		if resolved, err := j.roles.resolve(ctx, spec.Model, threadModel); err == nil {
+			return resolved
+		}
+	}
+	return spec.Model
+}
+
+type lazyJudgeClient struct {
+	j           *judges
+	spec        decide.Spec
+	threadModel string
+	smol        bool
+}
+
+func (l lazyJudgeClient) Ask(ctx context.Context, state jsontext.Value, questions map[string]decide.Question) (decide.Result, error) {
+	client, _, err := l.j.buildClient(ctx, l.spec, l.threadModel)
+	if err != nil {
+		if l.smol {
+			l.j.logFallbackUnavailable(err)
+		}
+		return decide.Result{}, err
+	}
+	return client.Ask(ctx, state, questions)
+}
+
+func (j *judges) logFallbackUnavailable(err error) {
+	j.fallbackLogOnce.Do(func() {
+		j.creds.log.Error("judge fallback unavailable: " + j.creds.store.Mask(err.Error()))
+	})
+}
+
+func (j *judges) buildClient(ctx context.Context, spec decide.Spec, threadModel string) (decide.Client, string, error) {
 	if spec.Adapter == decide.AdapterDecisions {
 		return decide.NewDecisions(decide.DecisionsConfig{Model: spec.Model, Token: j.creds.apiKey("openrouter", "")}), spec.Model, nil
 	}
@@ -120,5 +170,5 @@ func (j *judges) client(ctx context.Context, spec decide.Spec, threadModel strin
 	if !ok {
 		return nil, "", fmt.Errorf("judge model %s: unknown provider %s", resolved, providerID)
 	}
-	return decide.NewLLM(provider, modelName), resolved, nil
+	return decide.NewLLM(resolved, provider, modelName), resolved, nil
 }

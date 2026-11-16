@@ -17,6 +17,7 @@ import type {
 	ModelPreset,
 	PlanStep,
 	RequestId,
+	ReviewJudge,
 	StatusInfo,
 	ThreadActivity,
 	ThreadDetail,
@@ -79,6 +80,21 @@ function requiredNumber(
 ): number {
 	const value = source[key];
 	if (typeof value !== "number" || !Number.isFinite(value)) {
+		fail(label);
+	}
+	return value;
+}
+
+function optionalCount(
+	source: { readonly [key: string]: unknown },
+	key: string,
+	label: string,
+): number | null {
+	const value = source[key];
+	if (value === undefined || value === null) {
+		return null;
+	}
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
 		fail(label);
 	}
 	return value;
@@ -251,6 +267,11 @@ function tokenUsage(value: unknown, label: string): TokenUsage {
 		last: tokenBreakdown(source["last"], label),
 		total: tokenBreakdown(source["total"], label),
 		contextWindow: typeof contextWindow === "number" ? contextWindow : null,
+		estimatedContextTokens: optionalCount(
+			source,
+			"estimatedContextTokens",
+			label,
+		),
 	};
 }
 
@@ -551,6 +572,44 @@ export function parseThreadListResponse(value: unknown): ThreadListResult {
 	);
 	const cursor = body["nextCursor"];
 	return { threads, nextCursor: typeof cursor === "string" ? cursor : null };
+}
+
+export interface ThreadSearchHit {
+	readonly threadId: string;
+	readonly name: string;
+	readonly preview: string;
+	readonly snippet: string;
+	readonly matches: number;
+}
+
+export function parseThreadSearchResponse(
+	value: unknown,
+): readonly ThreadSearchHit[] {
+	const label = "dalgona/thread/search";
+	const body = object(value, label);
+	if (!Array.isArray(body["data"])) fail(label);
+	return body["data"].map((entry) => {
+		const row = object(entry, label);
+		const matches = requiredNumber(row, "matches", label);
+		const seq = requiredNumber(row, "seq", label);
+		if (
+			!Number.isSafeInteger(matches) ||
+			matches < 1 ||
+			!Number.isSafeInteger(seq) ||
+			seq < 0
+		)
+			fail(label);
+		requiredString(row, "cwd", label);
+		requiredString(row, "kind", label);
+		requiredNumber(row, "updatedAt", label);
+		return {
+			threadId: requiredString(row, "threadId", label),
+			name: requiredString(row, "name", label),
+			preview: requiredString(row, "preview", label),
+			snippet: requiredString(row, "snippet", label),
+			matches,
+		};
+	});
 }
 
 export function parseThreadStartResponse(value: unknown): ThreadStartResult {
@@ -993,14 +1052,81 @@ function tokenUsageNotice(params: Members): AppNotification | null {
 
 const editVerdicts = ["clean", "uncertain", "flagged", "error"] as const;
 
+interface ReviewAttribution {
+	readonly by?: string;
+	readonly fallback?: string;
+	readonly judges?: readonly ReviewJudge[];
+}
+
+function optionalString(value: unknown): string | null | undefined {
+	if (value === undefined || typeof value === "string") {
+		return value;
+	}
+	return null;
+}
+
+function parseJudge(value: unknown): ReviewJudge | null {
+	if (!isObject(value)) {
+		return null;
+	}
+	const part = value["part"];
+	const by = value["by"];
+	const fallback = optionalString(value["fallback"]);
+	if (
+		typeof part !== "number" ||
+		!Number.isInteger(part) ||
+		part < 0 ||
+		typeof by !== "string" ||
+		fallback === null
+	) {
+		return null;
+	}
+	return fallback === undefined ? { part, by } : { part, by, fallback };
+}
+
+function parseJudges(
+	value: unknown,
+): readonly ReviewJudge[] | null | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!Array.isArray(value)) {
+		return null;
+	}
+	const judges: ReviewJudge[] = [];
+	for (const entry of value) {
+		const judge = parseJudge(entry);
+		if (judge === null) {
+			return null;
+		}
+		judges.push(judge);
+	}
+	return judges;
+}
+
+function parseAttribution(params: Members): ReviewAttribution | null {
+	const by = optionalString(params["by"]);
+	const fallback = optionalString(params["fallback"]);
+	const judges = parseJudges(params["judges"]);
+	if (by === null || fallback === null || judges === null) {
+		return null;
+	}
+	return {
+		...(by === undefined ? {} : { by }),
+		...(fallback === undefined ? {} : { fallback }),
+		...(judges === undefined ? {} : { judges }),
+	};
+}
+
 function parseReview(params: Members): EditReview | null {
 	const verdict =
 		editVerdicts.find((value) => value === params["verdict"]) ?? null;
 	const summary = params["summary"];
-	if (verdict === null || typeof summary !== "string") {
+	const attribution = parseAttribution(params);
+	if (verdict === null || typeof summary !== "string" || attribution === null) {
 		return null;
 	}
-	return { verdict, summary };
+	return { verdict, summary, ...attribution };
 }
 
 function toolJudgedNotice(params: Members): AppNotification | null {

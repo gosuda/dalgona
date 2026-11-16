@@ -16,15 +16,32 @@ import (
 
 var errSessionExpired = errors.New("MCP session expired")
 
+const maxRedirects = 10
+
 type httpTransport struct {
+	name            string
 	url             string
 	client          *http.Client
+	auth            TokenSource
 	sessionID       string
 	protocolVersion string
 }
 
-func newHTTPTransport(url string) *httpTransport {
-	return &httpTransport{url: url, client: &http.Client{Timeout: 5 * time.Minute}}
+func newHTTPTransport(name, url string, auth TokenSource) *httpTransport {
+	client := &http.Client{Timeout: 5 * time.Minute, CheckRedirect: dropForeignAuthorization}
+	return &httpTransport{name: name, url: url, client: client, auth: auth}
+}
+
+func dropForeignAuthorization(request *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if request.URL.Scheme != via[0].URL.Scheme || request.URL.Host != via[0].URL.Host {
+		request.Header.Del("Authorization")
+		request.Header.Del("Mcp-Session-Id")
+		request.Header.Del("MCP-Protocol-Version")
+	}
+	return nil
 }
 
 func (t *httpTransport) request(ctx context.Context, id uint64, method string, params jsontext.Value) (jsontext.Value, error) {
@@ -45,27 +62,90 @@ func (t *httpTransport) notify(ctx context.Context, method string) error {
 }
 
 func (t *httpTransport) post(ctx context.Context, message []byte, expectedID *uint64) (jsontext.Value, error) {
-	response, err := t.send(ctx, message)
+	token, err := t.token(ctx)
 	if err != nil {
 		return nil, err
+	}
+	response, err := t.send(ctx, message, token)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode == http.StatusUnauthorized && t.auth != nil {
+		response, err = t.retryUnauthorized(ctx, message, response)
+		if err != nil {
+			return nil, err
+		}
 	}
 	defer func() { _ = response.Body.Close() }()
 	return t.receive(response, expectedID)
 }
 
-func (t *httpTransport) send(ctx context.Context, message []byte) (*http.Response, error) {
+func (t *httpTransport) send(ctx context.Context, message []byte, token string) (*http.Response, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, t.url, bytes.NewReader(message))
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json, text/event-stream")
+	setAuthorization(request, token)
 	t.setHeaders(request)
 	response, err := t.client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("send HTTP request: %w", err)
 	}
 	return response, nil
+}
+
+func setAuthorization(request *http.Request, token string) {
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func (t *httpTransport) token(ctx context.Context) (string, error) {
+	if t.auth == nil {
+		return "", nil
+	}
+	token, err := t.auth.Token(ctx)
+	if errors.Is(err, errNotLoggedIn) {
+		return "", &LoginRequiredError{Name: t.name, Err: err}
+	}
+	if err != nil {
+		return "", fmt.Errorf("MCP server %s token: %w", t.name, err)
+	}
+	return token, nil
+}
+
+func (t *httpTransport) retryUnauthorized(ctx context.Context, message []byte, rejected *http.Response) (*http.Response, error) {
+	discardBody(rejected)
+	token, err := t.auth.Refresh(ctx)
+	if err != nil {
+		return nil, t.refreshFailure(ctx, err)
+	}
+	response, err := t.send(ctx, message, token)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode == http.StatusUnauthorized {
+		discardBody(response)
+		return nil, &LoginRequiredError{Name: t.name}
+	}
+	return response, nil
+}
+
+func (t *httpTransport) refreshFailure(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("refresh MCP server %s token: %w", t.name, ctxErr)
+	}
+	if errors.Is(err, errRefreshUnsupported) {
+		return err
+	}
+	return &LoginRequiredError{Name: t.name, Err: err}
+}
+
+func discardBody(response *http.Response) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 8192))
+	_ = response.Body.Close()
 }
 
 func (t *httpTransport) receive(response *http.Response, expectedID *uint64) (jsontext.Value, error) {
@@ -240,6 +320,9 @@ func (t *httpTransport) deleteSession() {
 	request.Header.Set("Mcp-Session-Id", t.sessionID)
 	if t.protocolVersion != "" {
 		request.Header.Set("MCP-Protocol-Version", t.protocolVersion)
+	}
+	if token, tokenErr := t.token(ctx); tokenErr == nil {
+		setAuthorization(request, token)
 	}
 	response, err := t.client.Do(request)
 	if err != nil {

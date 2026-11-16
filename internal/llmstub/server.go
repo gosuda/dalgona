@@ -171,18 +171,24 @@ func (h *handler) pick(v requestView) (Turn, bool) {
 
 func matches(when When, v requestView) bool {
 	switch {
+	case when.UserExact != "":
+		return v.Last.Role == "user" && v.Last.Text == when.UserExact
 	case when.User != "":
 		return v.Last.Role == "user" && strings.Contains(v.Last.Text, when.User)
 	case when.ToolResult != "":
 		return v.Last.Role == "tool" && v.Last.ToolCallID == when.ToolResult
 	default:
-		for _, text := range v.Texts {
-			if strings.Contains(text, when.AnyText) {
-				return true
-			}
-		}
-		return false
+		return matchesAnyText(v.Texts, when.AnyText)
 	}
+}
+
+func matchesAnyText(texts []string, substring string) bool {
+	for _, text := range texts {
+		if strings.Contains(text, substring) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *handler) record(raw []byte, turn string) error {

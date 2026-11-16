@@ -21,6 +21,7 @@ const (
 	shimExecEnvironment      = "DALGONA_SHIM_EXEC"
 	shimPauseEnvironment     = "DALGONA_SHIM_TEST_PAUSE"
 	sandboxDeniedEnvironment = "DALGONA_SANDBOX_DENIED"
+	outputDrainDelay         = time.Second
 )
 
 func ShimMain(args []string) int {
@@ -71,11 +72,9 @@ func runShim(dir string, argv []string) error {
 	go watchCancelWhileWaiting(dir, cmd.Process.Pid, waitingDone)
 	waitErr := cmd.Wait()
 	close(waitingDone)
+	code, signal := exitDetails(cmd, waitErr)
 	cleanup()
-	if signal, canceled := readCancel(dir); canceled {
-		ensureProcessGroupGone(cmd.Process.Pid, signal)
-	}
-	code, signal := exitDetails(waitErr)
+	killProcessGroupOnExit(cmd.Process.Pid)
 	closeErr := out.Close()
 	finishErr := finishShim(dir, Exit{Code: code, Signal: signal, EndedAt: time.Now()})
 	return errors.Join(closeErr, finishErr)
@@ -101,9 +100,11 @@ func startCommand(dir string, argv []string, out *os.File) (*exec.Cmd, func(), e
 	if sandboxErr := configureSandbox(cmd, dir, currentSandbox()); sandboxErr != nil {
 		return nil, nil, fmt.Errorf("sandbox: %w", sandboxErr)
 	}
+	defer releaseCommandToken(cmd)
 	writer := &limitedWriter{w: out, limit: outputLimit}
 	cmd.Stdout = writer
 	cmd.Stderr = writer
+	cmd.WaitDelay = outputDrainDelay
 	configureProcessGroup(cmd)
 	pauseShim("start")
 	if startErr := cmd.Start(); startErr != nil {
@@ -127,6 +128,7 @@ func startCommand(dir string, argv []string, out *os.File) (*exec.Cmd, func(), e
 func abandonCommand(cmd *exec.Cmd, cause error) error {
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
+	killProcessGroupOnExit(cmd.Process.Pid)
 	return cause
 }
 
@@ -260,6 +262,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 }
 
 var environmentDefaults = [...]string{
+	"AI_AGENT=dalgona",
 	"CI=1",
 	"DEBIAN_FRONTEND=noninteractive",
 	"GIT_TERMINAL_PROMPT=0",

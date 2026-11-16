@@ -3,12 +3,14 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"syscall"
 
+	"github.com/gosuda/dalgona/internal/agent"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/rpc"
 )
@@ -24,7 +26,9 @@ func runRealDaemon() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := Run(ctx, home, appHost, rpc.Serve); err != nil {
+	if err := Run(ctx, home, appHost, func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
+		return rpc.ServeWith(ctx, conn, host, rpc.ServeOptions{})
+	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}

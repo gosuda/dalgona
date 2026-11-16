@@ -64,7 +64,7 @@ func noulQuestion(instructions, yes, no string) decide.Question {
 func judgeBody(t *testing.T, state string, questions map[string]decide.Question) []byte {
 	t.Helper()
 	provider := &recordingProvider{}
-	_, err := decide.NewLLM(provider, "qwen-test").Ask(t.Context(), jsontext.Value(state), questions)
+	_, err := decide.NewLLM("qwen-test", provider, "qwen-test").Ask(t.Context(), jsontext.Value(state), questions)
 	if !errors.Is(err, errRecorded) {
 		t.Fatalf("Ask error = %v, want the recorded request", err)
 	}
@@ -85,6 +85,35 @@ func firstMatch(turns []Turn, view requestView) string {
 		}
 	}
 	return ""
+}
+
+func TestLiveScriptParses(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(liveScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Parse(liveScript, raw); err != nil {
+		t.Fatalf("%s does not parse: %v", liveScript, err)
+	}
+	var file scriptFile
+	if err = json.Unmarshal(raw, &file, json.RejectUnknownMembers(true)); err != nil {
+		t.Fatalf("%s: %v", liveScript, err)
+	}
+	for i, turn := range file.Turns {
+		if turnErr := validateTurn(i+1, turn); turnErr != nil {
+			t.Errorf("%s: %v", liveScript, turnErr)
+		}
+	}
+	control := "control text"
+	withoutTerminal := turnFile{
+		ID:    "control",
+		When:  When{User: "control"},
+		Steps: []stepFile{{Text: &control}},
+	}
+	if turnErr := validateTurn(1, withoutTerminal); turnErr == nil {
+		t.Fatal("a turn without a terminal step passed the validators")
+	}
 }
 
 func TestLiveScriptRoutesScriptedRequests(t *testing.T) {
@@ -114,6 +143,11 @@ func TestLiveScriptRoutesScriptedRequests(t *testing.T) {
 		{"edit judge request", func(t *testing.T) []byte { return judgeBody(t, editState, editQuestions) }, "t-judge"},
 		{"turn judge request", func(t *testing.T) []byte { return judgeBody(t, turnState, turnQuestions) }, "t-judge-turn"},
 		{"working model prompt", func(*testing.T) []byte { return []byte(`{"messages":[{"role":"user","content":"edit notes"}]}`) }, "t-patch"},
+		{"history prompt", func(*testing.T) []byte { return []byte(`{"messages":[{"role":"user","content":"hello"}]}`) }, "t-hello"},
+		{"longer hello prompt", func(*testing.T) []byte { return []byte(`{"messages":[{"role":"user","content":"say hello"}]}`) }, ""},
+		{"unmatched prompt", func(*testing.T) []byte {
+			return []byte(`{"messages":[{"role":"user","content":"unrelated unscripted prompt"}]}`)
+		}, ""},
 		{"compaction summarizer request", func(*testing.T) []byte {
 			return []byte(`{"messages":[{"role":"system","content":"Write a detailed summary of the conversation."},{"role":"user","content":"<conversation>\n[user] read a.txt\n[user] take your time\n</conversation>\n"}]}`)
 		}, "t-compact"},

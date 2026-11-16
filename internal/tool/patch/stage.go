@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"path/filepath"
 	"regexp"
@@ -37,13 +40,20 @@ type stagedFile struct {
 	renameAbs string
 	pin       *dirPin
 	renamePin *dirPin
+	beforeSHA string
+	afterSHA  string
 	splices   []snapshot.Splice
 	sound     bool
 }
 
 type stagedBatch struct {
-	files   []*stagedFile
-	summary string
+	files       []*stagedFile
+	summary     string
+	style       Style
+	version     uint64
+	cutoff      snapshot.Evidence
+	findings    []observerFinding
+	fingerprint [sha256.Size]byte
 }
 
 type fileGroup struct {
@@ -52,21 +62,44 @@ type fileGroup struct {
 	edits    []edit
 }
 
-func stage(ctx context.Context, style Style, edits []edit, env tool.Env) (stagedBatch, error) {
-	groups, err := groupEdits(ctx, env, edits)
+func stage(ctx context.Context, style Style, edits []edit, env tool.Env, input string) (stagedBatch, error) {
+	groups, err := checkedGroups(ctx, env, edits)
 	if err != nil {
 		return stagedBatch{}, err
-	}
-	if len(groups) > 64 {
-		return stagedBatch{}, fmt.Errorf("patch: this call touches %d files; the limit is 64", len(groups))
 	}
 	files, err := stageGroups(ctx, style, groups, env)
 	if err != nil {
 		return stagedBatch{}, err
 	}
-	if err := checkOmissions(files); err != nil {
+	return finishBatch(style, env, input, files)
+}
+
+func checkedGroups(ctx context.Context, env tool.Env, edits []edit) ([]fileGroup, error) {
+	groups, err := groupEdits(ctx, env, edits)
+	if err != nil {
+		return nil, err
+	}
+	if len(groups) > 64 {
+		return nil, fmt.Errorf("patch: this call touches %d files; the limit is 64", len(groups))
+	}
+	err = validateGroups(groups, env.Cwd)
+	if err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+func finishBatch(style Style, env tool.Env, input string, files []*stagedFile) (stagedBatch, error) {
+	batch := newStagedBatch(style, env, input)
+	for _, file := range files {
+		file.beforeSHA = fileSHA(file.before, file.exists)
+		file.afterSHA = fileSHA(file.after, !file.deleted)
+	}
+	batch.files = files
+	batch.findings = observeOmissions(files)
+	if err := blockingFinding(batch.findings); err != nil {
 		closeFiles(files)
-		return stagedBatch{}, err
+		return batch, err
 	}
 	if len(files) == 0 && !style.profile() {
 		return stagedBatch{}, errors.New("patch: the edits produce no change")
@@ -75,7 +108,70 @@ func stage(ctx context.Context, style Style, edits []edit, env tool.Env) (staged
 		closeFiles(files)
 		return stagedBatch{}, err
 	}
-	return stagedBatch{files: files}, nil
+	return batch, nil
+}
+
+func newStagedBatch(style Style, env tool.Env, input string) stagedBatch {
+	return stagedBatch{
+		style: style, version: 1, cutoff: env.Evidence,
+		fingerprint: invocationFingerprint(style, env, input),
+	}
+}
+
+func invocationFingerprint(style Style, env tool.Env, input string) [sha256.Size]byte {
+	hash := sha256.New()
+	var size [8]byte
+	for _, part := range []string{string(style), "1", env.Cwd, env.Evidence.Consumer, input} {
+		binary.BigEndian.PutUint64(size[:], uint64(len(part)))
+		_, _ = hash.Write(size[:])
+		_, _ = io.WriteString(hash, part)
+	}
+	var digest [sha256.Size]byte
+	hash.Sum(digest[:0])
+	return digest
+}
+
+func validateGroups(groups []fileGroup, cwd string) error {
+	claimed := make(map[string]string, len(groups))
+	for _, group := range groups {
+		claimed[group.display] = group.display
+		if len(group.edits) == 1 && (group.edits[0].kind == editCreate || group.edits[0].kind == editDelete) {
+			continue
+		}
+		if err := validateChangeShapes(group); err != nil {
+			return err
+		}
+	}
+	return validateRenameGroups(groups, cwd, claimed)
+}
+
+func validateRenameGroups(groups []fileGroup, cwd string, claimed map[string]string) error {
+	for _, group := range groups {
+		for _, item := range group.edits {
+			if item.kind != editRename {
+				continue
+			}
+			if err := validateRenameTarget(item, group, cwd, claimed); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateRenameTarget(item edit, group fileGroup, cwd string, claimed map[string]string) error {
+	display, _, err := resolvePatchPath(cwd, item.to)
+	if err != nil {
+		return err
+	}
+	if hasParentComponent(item.to) {
+		return errors.New("patch: rename destination contains parent traversal")
+	}
+	if owner, ok := claimed[display]; ok {
+		return fmt.Errorf("patch: cannot rename %s to %s: another change also writes %s", group.display, display, owner)
+	}
+	claimed[display] = display
+	return nil
 }
 
 func stageGroups(ctx context.Context, style Style, groups []fileGroup, env tool.Env) ([]*stagedFile, error) {
@@ -264,7 +360,7 @@ func stageDelete(ctx context.Context, group fileGroup, env tool.Env) (*stagedFil
 		return nil, err
 	}
 	if item.reference != "" {
-		if err := proveUnchanged(env.Snapshots, item.reference, group.display, before); err != nil {
+		if err := proveUnchanged(env, item.reference, group.display, before); err != nil {
 			return nil, err
 		}
 	}
@@ -369,15 +465,15 @@ func (b stagedBatch) changes() []tool.FileChange {
 		postPresent := !file.deleted && file.renameTo == ""
 		var post []byte
 		if postPresent {
-			post = file.after
+			post = bytes.Clone(file.after)
 		}
 		out = append(out, tool.FileChange{
 			Path: file.path, PreSHA: fileSHA(file.before, file.exists),
-			PostSHA: fileSHA(file.after, postPresent), Pre: file.before, Post: post,
+			PostSHA: fileSHA(file.after, postPresent), Pre: bytes.Clone(file.before), Post: post,
 		})
 		if file.renameTo != "" {
 			out = append(out, tool.FileChange{
-				Path: file.renameTo, PostSHA: snapshot.Digest(file.after), Post: file.after,
+				Path: file.renameTo, PostSHA: snapshot.Digest(file.after), Post: bytes.Clone(file.after),
 			})
 		}
 	}

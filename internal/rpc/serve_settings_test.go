@@ -144,7 +144,7 @@ func TestSettingsReadListsInteractiveSettings(t *testing.T) {
 		{Key: "verbosity", Value: "medium", DefaultValue: "medium", Options: []any{"low", "medium", "high"}},
 		{Key: "theme", Value: "auto", DefaultValue: "auto", Options: []any{"auto", "auto-soft", "night", "soft-night", "day", "soft-day"}},
 		{Key: "icons", Value: "auto", DefaultValue: "auto", Options: []any{"auto", "unicode", "nerd"}},
-		{Key: "statusHide", Value: []any{}, DefaultValue: []any{}, Options: []any{"effort", "approval", "sandbox", "folder", "queue", "context", "mark"}},
+		{Key: "statusHide", Value: []any{}, DefaultValue: []any{}, Options: []any{"effort", "approval", "sandbox", "folder", "queue", "cost", "context", "mark"}},
 		{Key: "editReview", Value: false, DefaultValue: false, Options: []any{true, false}},
 		{Key: "notifications", Value: true, DefaultValue: true, Options: []any{true, false}},
 	}

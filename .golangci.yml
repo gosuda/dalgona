@@ -129,7 +129,11 @@ linters:
             - "**/internal/textdiff/**"
             - "**/internal/keywords/**"
             - "**/internal/syntax/**"
+            - "**/internal/shellargs/**"
+            - "**/internal/secrets/**"
           deny:
+            - pkg: "github.com/gosuda/dalgona/internal/acp"
+              desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/rpc"
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/tui"
@@ -152,6 +156,8 @@ linters:
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/ratchet"
               desc: core must not import interfaces or batteries
+            - pkg: "github.com/gosuda/dalgona/internal/doctor"
+              desc: core must not import interfaces or batteries
         presentation:
           files:
             - "**/internal/app/**"
@@ -163,6 +169,7 @@ linters:
             - "**/internal/tui/**"
             - "**/internal/webui/**"
             - "**/internal/herdr/**"
+            - "**/internal/acp/**"
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/journal"
               desc: clients reach the core only through internal/rpc
@@ -188,6 +195,8 @@ linters:
           files:
             - "**/cmd/dal/**"
           deny:
+            - pkg: "github.com/gosuda/dalgona/internal/acp"
+              desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/daemon"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/script$"
@@ -207,6 +216,8 @@ linters:
             - pkg: "github.com/gosuda/dalgona/internal/app/battery"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/ratchet"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/doctor"
               desc: dal must stay free of dalgona batteries
   exclusions:
     presets:

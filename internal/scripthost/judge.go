@@ -27,11 +27,11 @@ func (fx effects) Judge(ctx context.Context, _ script.Slot, req script.JudgeRequ
 	if err != nil {
 		return nil, err
 	}
-	answers, err := client.Ask(ctx, req.State, questions)
+	result, err := client.Ask(ctx, req.State, questions)
 	if err != nil {
 		return nil, fmt.Errorf("scripthost: judge: %w", err)
 	}
-	return judgeAnswers(answers)
+	return judgeAnswers(result)
 }
 
 func judgeQuestions(raw jsontext.Value) (map[string]decide.Question, error) {
@@ -71,13 +71,20 @@ func judgeQuestion(decoder *jsontext.Decoder) (decide.Question, error) {
 	return question, err
 }
 
-func judgeAnswers(answers map[string]decide.Answer) (jsontext.Value, error) {
+func judgeAnswers(result decide.Result) (jsontext.Value, error) {
 	var out bytes.Buffer
 	encoder := model.NewJSONEncoder(&out)
 	encoder.BeginObject()
-	for name, answer := range answers {
+	encoder.Key("answers")
+	encoder.BeginObject()
+	for name, answer := range result.Answers {
 		encoder.Key(name)
 		writeAnswer(encoder, answer)
+	}
+	encoder.EndObject()
+	encoder.StringKey("model", result.Model)
+	if result.Fallback != "" {
+		encoder.StringKey("fallback", result.Fallback)
 	}
 	encoder.EndObject()
 	if err := encoder.Err(); err != nil {

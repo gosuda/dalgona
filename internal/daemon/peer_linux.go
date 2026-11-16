@@ -111,32 +111,39 @@ func logConfinedDaemon(daemonMarked bool) {
 }
 
 func annotateSandboxedClient(conn net.Conn) net.Conn {
-	return &sandboxedClientConn{Conn: conn}
+	return &sandboxedClientConn{UnixConn: conn.(*net.UnixConn)}
 }
 
 type sandboxedClientConn struct {
-	net.Conn
-	noted atomic.Bool
+	*net.UnixConn
+	noted    atomic.Bool
+	readData atomic.Bool
 }
 
 func (c *sandboxedClientConn) Read(b []byte) (int, error) {
-	n, err := c.Conn.Read(b)
+	n, err := c.UnixConn.Read(b)
+	if n > 0 {
+		c.readData.Store(true)
+	}
 	if err != nil {
-		return n, noteSandboxedClient(err, &c.noted)
+		return n, c.noteSandboxedClient(err)
 	}
 	return n, nil
 }
 
 func (c *sandboxedClientConn) Write(b []byte) (int, error) {
-	n, err := c.Conn.Write(b)
+	n, err := c.UnixConn.Write(b)
 	if err != nil {
-		return n, noteSandboxedClient(err, &c.noted)
+		return n, c.noteSandboxedClient(err)
 	}
 	return n, nil
 }
 
-func noteSandboxedClient(err error, noted *atomic.Bool) error {
-	if noted.Swap(true) {
+func (c *sandboxedClientConn) noteSandboxedClient(err error) error {
+	if c.noted.Swap(true) {
+		return err
+	}
+	if c.readData.Load() {
 		return err
 	}
 	marked, markErr := peerSelfNoNewPrivs()

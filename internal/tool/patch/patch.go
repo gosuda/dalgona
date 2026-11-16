@@ -51,7 +51,7 @@ func (e Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Pl
 	if len(edits) == 0 || len(edits) > 64 {
 		return tool.Plan{}, errors.New("patch: a payload may hold 1 to 64 edits; split the change into several calls")
 	}
-	batch, err := stage(ctx, e.style, edits, env)
+	batch, err := stage(ctx, e.style, edits, env, input)
 	if err != nil {
 		return tool.Plan{}, err
 	}

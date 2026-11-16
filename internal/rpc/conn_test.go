@@ -54,10 +54,7 @@ func TestHandlerRPCErrorCodeReachesClient(t *testing.T) {
 	server := NewConn(t.Context(), left, func(context.Context, string, jsontext.Value) (jsontext.Value, error) {
 		return nil, fmt.Errorf("start turn: %w", &RPCError{Code: -32600, Message: "thread t1 is running"})
 	})
-	client, err := Dial(right, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := Dial(right, nil)
 	closeRPCPair(t, server, right)
 	callCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()

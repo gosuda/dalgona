@@ -73,7 +73,7 @@ func verifyAcceptedPeer(conn net.Conn, daemonMarked bool) error {
 	return result
 }
 
-func verifyHome(home string) error {
+func VerifyHome(home string) error {
 	var stat unix.Stat_t
 	if err := unix.Stat(home, &stat); err != nil {
 		return fmt.Errorf("daemon home: %w", err)

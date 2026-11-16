@@ -1,6 +1,7 @@
 package search
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"regexp/syntax"
 	"runtime"
 	"slices"
 	"strconv"
@@ -16,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/codesearch/index"
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
 	"github.com/gosuda/dalgona/internal/tool/snapshot"
@@ -379,5 +382,78 @@ func TestOutcomeOfIndexFailureIsStatusOne(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "subprocess exited 1") {
 		t.Fatalf("exit error text %q", err.Error())
+	}
+}
+
+func TestGenerationRemovedBeforeTrigramReadFallsBackToScan(t *testing.T) {
+	ws, argv, dir := builtGenerationArgs(t)
+	t.Chdir(ws)
+	clock, err := strconv.ParseInt(argv[4], 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter, err := openTrigramFilter(dir, "needle", freshness{Now: clock, Racy: racyWindow.Nanoseconds()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filter == nil || !filter.named["a.txt"] {
+		t.Fatalf("the fixture named no candidate, so its removal would prove nothing")
+	}
+	previous := afterGenerationOpened
+	afterGenerationOpened = func(string) {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove the generation: %v", err)
+		}
+	}
+	t.Cleanup(func() { afterGenerationOpened = previous })
+	var stdout bytes.Buffer
+	if code := Main(argv[1:], &stdout); code != 0 {
+		t.Fatalf("Main returned %d for a generation removed before the trigram read, want 0", code)
+	}
+	requireScanOutput(t, ws, stdout.Bytes())
+}
+
+func requireScanOutput(t *testing.T, ws string, got []byte) {
+	t.Helper()
+	parsed, err := parseArgs(jsontext.Value(exitQuery))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := execute(ws, parsed, "", freshness{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, encodeOutcome(want)) {
+		t.Fatalf("output %s, want the scan %s", got, encodeOutcome(want))
+	}
+}
+
+func TestPinnedTrigramSurvivesRemovedGeneration(t *testing.T) {
+	_, _, dir := builtGenerationArgs(t)
+	re, err := syntax.Parse("needle", syntax.Perl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, trigram, err := openGeneration(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trigram == nil {
+		t.Fatal("the fixture opened no trigram")
+	}
+	defer func() { _ = trigram.Close() }()
+	err = os.RemoveAll(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := namedCandidates(trigram, index.RegexpQuery(re))
+	if err != nil {
+		t.Fatalf("the pinned trigram could not name candidates: %v", err)
+	}
+	if !names["a.txt"] {
+		t.Fatalf("the pinned trigram named %v, want a.txt", names)
+	}
+	if generationPinned(dir, trigram, m.TrigramSize) {
+		t.Fatal("a removed generation reported itself pinned")
 	}
 }

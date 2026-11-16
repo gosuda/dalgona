@@ -42,10 +42,7 @@ func TestResponseAppliesBeforeFollowingNotification(t *testing.T) {
 	const iterations = 300
 	handler := &orderHandler{flags: make([]atomic.Bool, iterations), observed: make(chan bool, iterations)}
 	left, right := net.Pipe()
-	client, err := Dial(left, handler)
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := Dial(left, handler)
 	closeRPCPair(t, client, right)
 	reader := bufio.NewReader(right)
 	timer := time.NewTimer(5 * time.Second)

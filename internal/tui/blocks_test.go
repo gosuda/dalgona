@@ -7,11 +7,16 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 )
+
+const pendingLimit = 4 << 10
+
+const tailLimit = 64 << 10
 
 func TestBlockSplitterParagraph(t *testing.T) {
 	t.Parallel()
@@ -196,5 +201,133 @@ func TestDockHeightStableWhileAnswerStreams(t *testing.T) {
 				t.Fatalf("width %d: dock height after delta %d = %d, want %d", size.Width, i, got, height)
 			}
 		}
+	}
+}
+
+func TestAnswerTailKeepsNewestCharsOfOversizedUTF8Line(t *testing.T) {
+	t.Parallel()
+	m := answerThread(t)
+	line := "HEADMARKER-" + strings.Repeat("é", 40000) + "TAILMARKER-☃"
+	m = rawUpdate(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(fmt.Sprintf(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":%q}`, line))})
+	tail := m.liveItem("a1").tail()
+	if !strings.HasSuffix(tail, "TAILMARKER-☃") {
+		t.Fatalf("oversized line tail is %d bytes, want the newest chars ending in the tail marker", len(tail))
+	}
+	if strings.Contains(tail, "HEADMARKER") {
+		t.Fatalf("oversized line tail kept the head: %d bytes", len(tail))
+	}
+	if !utf8.ValidString(tail) {
+		t.Fatalf("oversized line tail split a rune: %d bytes", len(tail))
+	}
+	if len(tail) > tailLimit {
+		t.Fatalf("oversized line tail is %d bytes, want at most %d", len(tail), tailLimit)
+	}
+}
+
+func TestAnswerDropsUnterminatedControlWithBoundedState(t *testing.T) {
+	t.Parallel()
+	m := answerThread(t)
+	send := func(delta string) {
+		m = rawUpdate(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"` + delta + `"}`)})
+	}
+	unterminated := func(payload string) {
+		send(`\u001b]0;`)
+		send(payload)
+	}
+	assertPending := func(label string) {
+		t.Helper()
+		if got := len(m.liveItem("a1").pending); got > pendingLimit {
+			t.Fatalf("pending %s is %d bytes, want at most %d", label, got, pendingLimit)
+		}
+	}
+	assertVisibleSuffix := func(want string, absent string) {
+		t.Helper()
+		got := string(m.liveItem("a1").text)
+		if !strings.Contains(got, want) || strings.Contains(got, absent) {
+			t.Fatalf("text after terminator = %q, want the suffix without the payload", got)
+		}
+		if tail := m.liveItem("a1").tail(); !strings.Contains(tail, want) {
+			t.Fatalf("live tail after terminator = %q, want the suffix", tail)
+		}
+	}
+	unterminated(strings.Repeat("Q", 2000))
+	unterminated(strings.Repeat("Q", 2000))
+	assertPending("below the limit")
+	send(strings.Repeat("Q", 100) + `\u001b`)
+	assertPending("after unterminated control")
+	if strings.Contains(string(m.liveItem("a1").text), "Q") {
+		t.Fatalf("unterminated control payload reached visible text")
+	}
+	send(`\\VISIBLE-SUFFIX-7K2`)
+	assertVisibleSuffix("VISIBLE-SUFFIX-7K2", "Q")
+	unterminated(strings.Repeat("W", 5000))
+	assertPending("after second unterminated control")
+	send(`\u0007BEL-SUFFIX-3Q9`)
+	assertVisibleSuffix("BEL-SUFFIX-3Q9", "W")
+	send(`BEGIN-\u001b[31`)
+	send(`mRED-TEXT-9D4`)
+	if got := string(m.liveItem("a1").text); !strings.Contains(got, "RED-TEXT-9D4") || strings.Contains(got, "[31m") {
+		t.Fatalf("fragmented CSI text = %q, want the visible text without controls", got)
+	}
+}
+
+func TestAnswerDropsTerminatorAtFragmentEnd(t *testing.T) {
+	t.Parallel()
+	oversized := strings.Repeat("Z", 5000)
+	cases := []struct {
+		name      string
+		fragments []string
+	}{
+		{"BEL", []string{`\u001b]0;` + oversized, `\u0007`, `SUFFIX-END-6N2`}},
+		{"ST", []string{`\u001b]0;` + oversized, `\u001b\\`, `SUFFIX-END-5M1`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := answerThread(t)
+			for _, delta := range tc.fragments {
+				m = rawUpdate(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"` + delta + `"}`)})
+			}
+			item := m.liveItem("a1")
+			suffix := tc.fragments[len(tc.fragments)-1]
+			if got := string(item.text); !strings.Contains(got, suffix) || strings.Contains(got, "ZZZZ") {
+				t.Fatalf("text after fragment-end terminator = %q, want the suffix without the payload", got)
+			}
+			if got := item.tail(); !strings.Contains(got, suffix) {
+				t.Fatalf("live tail after fragment-end terminator = %q, want the suffix", got)
+			}
+		})
+	}
+}
+
+func TestAnswerPendingStaysBoundedAfterHugeCompleteFragment(t *testing.T) {
+	t.Parallel()
+	m := answerThread(t)
+	visible := strings.Repeat("complete line of text\n", 10000)
+	m = rawUpdate(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(fmt.Sprintf(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":%q}`, visible))})
+	item := m.liveItem("a1")
+	if got := len(item.pending); got > pendingLimit {
+		t.Fatalf("pending after huge visible fragment is %d bytes, want at most %d", got, pendingLimit)
+	}
+	if got := cap(item.pending); got > pendingLimit {
+		t.Fatalf("pending capacity after huge visible fragment is %d bytes, want at most %d", got, pendingLimit)
+	}
+	if got := string(item.text); got != visible {
+		t.Fatalf("huge visible fragment kept %d bytes, want %d", len(got), len(visible))
+	}
+	controls := strings.Repeat(`\u001b[31mX\u001b[0m\n`, 20000)
+	m = rawUpdate(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"` + controls + `"}`)})
+	item = m.liveItem("a1")
+	if got := len(item.pending); got > pendingLimit {
+		t.Fatalf("pending after huge control fragment is %d bytes, want at most %d", got, pendingLimit)
+	}
+	if got := cap(item.pending); got > pendingLimit {
+		t.Fatalf("pending capacity after huge control fragment is %d bytes, want at most %d", got, pendingLimit)
+	}
+	want := visible + strings.Repeat("X\n", 20000)
+	if got := string(item.text); got != want {
+		t.Fatalf("text after huge control fragment is %d bytes, want %d", len(got), len(want))
+	}
+	if got := m.liveItem("a1").tail(); !strings.Contains(got, "X") {
+		t.Fatalf("live tail after huge control fragment = %q, want visible text", got)
 	}
 }

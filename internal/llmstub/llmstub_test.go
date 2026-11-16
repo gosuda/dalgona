@@ -113,6 +113,31 @@ func TestWrongBearerIs401(t *testing.T) {
 	}
 }
 
+func TestHandlerAnswersUnknownPathAndWrongMethod(t *testing.T) {
+	t.Parallel()
+	script := mustParse(t, `{`+modelsJSON+`,"turns":[{"id":"t1","when":{"user":"hello"},"steps":[{"finish":"stop"}]}]}`)
+	h := NewHandler(script, Options{Key: testKey})
+	cases := []struct {
+		name  string
+		route string
+		auth  string
+		want  int
+	}{
+		{"known route with the bearer", chatRoute, "Bearer " + testKey, http.StatusOK},
+		{"unknown path", "POST /v1/unknown", "Bearer " + testKey, http.StatusNotFound},
+		{"wrong method", "GET /v1/chat/completions", "Bearer " + testKey, http.StatusMethodNotAllowed},
+		{"known route without the bearer", chatRoute, "", http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := serve(t, h, tc.route, tc.auth, userHello)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d, body = %s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestOnceTurnIsSpent(t *testing.T) {
 	t.Parallel()
 	script := mustParse(t, `{`+modelsJSON+`,"turns":[`+
@@ -358,4 +383,8 @@ func (a *liveRatchetAsker) Ask(_ context.Context, _ string, q ratchet.Question) 
 		a.t.Fatalf("approval options = %+v", q.Options)
 	}
 	return ratchet.Answer{Label: "Approve"}, nil
+}
+
+func (liveRatchetAsker) PreviewRoom() (int, int) {
+	return 2000, 40
 }

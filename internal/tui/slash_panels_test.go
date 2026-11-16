@@ -114,7 +114,7 @@ func TestAdvisorDockSteady(t *testing.T) {
 	assertSteadyDock(t, m, keys)
 }
 
-func TestAdvisorResetNeedsConfirmation(t *testing.T) {
+func TestCtrlRDoesNotResetAdvisor(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
 	m := advisorPanelOpen(t, panelPicker(t, caller), []rpc.AdvisorState{{Name: "advisor", Status: "idle"}})
@@ -123,17 +123,23 @@ func TestAdvisorResetNeedsConfirmation(t *testing.T) {
 	if command != nil {
 		m, _ = drive(t, m, command())
 	}
-	assertContains(t, m.View().Content, "Reset the advisor?", "[enter] reset")
-	if len(caller.calls) != before {
-		t.Fatal("ctrl+r must open the reset confirm before it sends a request")
+	if len(caller.calls) != before || m.confirm != nil || m.list == nil || m.list.kind != "advisor" {
+		t.Fatalf("ctrl+r in the advisor list sent %d calls, confirm %v, list %v; want no call, no confirm, the list open", len(caller.calls)-before, m.confirm, m.list)
 	}
-	_, command = drive(t, m, press(tea.KeyEnter, 0, ""))
-	runCommand(t, m, command, "reset confirm produced no command")
-	if len(caller.calls) != before+1 {
-		t.Fatalf("confirmed reset made %d calls, want 1", len(caller.calls)-before)
+	if strings.Contains(m.View().Content, "Reset the advisor?") {
+		t.Fatalf("ctrl+r opened the reset confirm:\n%s", m.View().Content)
 	}
-	if last := caller.calls[len(caller.calls)-1]; last.method != "dalgona/advisor/reset" {
-		t.Fatalf("reset called %s, want dalgona/advisor/reset", last.method)
+}
+
+func TestAdvisorResetSlashCommandSendsReset(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := panelPicker(t, caller)
+	runCommand(t, m, m.executeSlash("advisor", "reset"), "/advisor reset produced no command")
+	last := caller.calls[len(caller.calls)-1]
+	params, ok := last.params.(rpc.DalgonaAdvisorStatusParams)
+	if len(caller.calls) != 1 || last.method != "dalgona/advisor/reset" || !ok || params.ThreadID != "t1" {
+		t.Fatalf("/advisor reset calls = %#v, want one dalgona/advisor/reset on t1", caller.calls)
 	}
 }
 

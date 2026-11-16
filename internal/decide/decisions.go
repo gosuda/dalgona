@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/gosuda/dalgona/internal/model"
 )
 
 const defaultDecisionsURL = "https://openrouter.ai/api/alpha/decisions"
@@ -44,40 +46,40 @@ func NewDecisions(config DecisionsConfig) *Decisions {
 	return &Decisions{endpoint: config.BaseURL, model: config.Model, token: config.Token, client: config.HTTPClient, timeout: config.Timeout}
 }
 
-func (d *Decisions) Ask(ctx context.Context, state jsontext.Value, questions map[string]Question) (map[string]Answer, error) {
+func (d *Decisions) Ask(ctx context.Context, state jsontext.Value, questions map[string]Question) (Result, error) {
 	if d.model == "" {
-		return nil, errors.New("decisions: model identifier is required")
+		return Result{}, errors.New("decisions: model identifier is required")
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
 	payload, err := encodeAsk(d.model, state, questions)
 	if err != nil {
-		return nil, err
+		return Result{}, errRequest(err)
 	}
 	token, err := d.bearerToken(requestCtx)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, d.endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("decisions: create request: %w", err)
+		return Result{}, fmt.Errorf("decisions: create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("decisions: request: %w", err)
+		return Result{}, fmt.Errorf("decisions: request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, decisionsHTTPError(resp)
+		return Result{}, decisionsHTTPError(resp)
 	}
 	answers, err := decodeDecisionAnswers(resp.Body, questions)
 	if err != nil {
-		return nil, fmt.Errorf("decisions: decode response: %w", err)
+		return Result{}, errAnswer(fmt.Errorf("decisions: decode response: %w", err))
 	}
-	return answers, nil
+	return Result{Answers: answers, Model: d.model}, nil
 }
 
 func (d *Decisions) bearerToken(ctx context.Context) (string, error) {
@@ -96,7 +98,21 @@ func decisionsHTTPError(resp *http.Response) error {
 	if err != nil {
 		return fmt.Errorf("decisions: read HTTP %d response: %w", resp.StatusCode, err)
 	}
-	return fmt.Errorf("decisions: http %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+	return &HTTPError{
+		Status:     resp.StatusCode,
+		RetryAfter: model.RetryAfter(resp.Header.Get("Retry-After")),
+		Body:       string(bytes.TrimSpace(body)),
+	}
+}
+
+type HTTPError struct {
+	Status     int
+	RetryAfter time.Duration
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("decisions: http %d: %s", e.Status, e.Body)
 }
 
 type wireAnswer struct {

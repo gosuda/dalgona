@@ -3,6 +3,7 @@ package anthropic
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	"io"
 	"net/http"
@@ -435,31 +436,130 @@ func TestEncodePassesXHighAndMaxEffort(t *testing.T) {
 
 func TestEncodeRequestSendsImageBlock(t *testing.T) {
 	t.Parallel()
-	content := userContent(t, model.Message{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
-	if len(content) != 2 {
-		t.Fatalf("content = %d blocks, want 2: %s", len(content), content)
+	png := []byte("\x89PNG\r\n\x1a\n")
+	gif := []byte("GIF89a")
+	content := userContent(t, model.Message{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: png}, {Mime: "image/gif", Data: gif}}})
+	if len(content) != 3 {
+		t.Fatalf("content = %d blocks, want 3: %s", len(content), content)
 	}
-	sameJSON(t, content[0], `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}`)
-	sameJSON(t, content[1], `{"type":"text","text":"What is this?","cache_control":{"type":"ephemeral"}}`)
+	checkImageBlocks(t, content, png, gif)
+	plain := userContent(t, model.Message{Role: "user", Text: "What is this?"})
+	if len(plain) != 1 {
+		t.Fatalf("text-only content = %d blocks, want 1: %s", len(plain), plain)
+	}
+	if got := anthropicText(t, plain[0]); got.text != "What is this?" {
+		t.Fatalf("text-only block = %+v, want the prompt text", got)
+	}
+}
+
+func checkImageBlocks(t *testing.T, content []jsontext.Value, png, gif []byte) {
+	t.Helper()
+	for i, want := range []model.Image{{Mime: "image/png", Data: png}, {Mime: "image/gif", Data: gif}} {
+		image := anthropicImage(t, content[i])
+		if image.mediaType != want.Mime || image.source != "base64" || !bytes.Equal(image.data, want.Data) {
+			t.Fatalf("image block = %+v, want a base64 %s block carrying %x", image, want.Mime, want.Data)
+		}
+	}
+	text := anthropicText(t, content[2])
+	if text.text != "What is this?" || text.cache != "ephemeral" {
+		t.Fatalf("text block = %+v, want the prompt text with its cache marker", text)
+	}
 }
 
 func TestEncodeRequestSendsImageOnlyMessage(t *testing.T) {
 	t.Parallel()
-	content := userContent(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
+	png := []byte("\x89PNG\r\n\x1a\n")
+	content := userContent(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: png}}})
 	if len(content) != 1 {
 		t.Fatalf("content = %d blocks, want 1: %s", len(content), content)
 	}
-	sameJSON(t, content[0], `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="},"cache_control":{"type":"ephemeral"}}`)
+	image := anthropicImage(t, content[0])
+	if image.mediaType != "image/png" || !bytes.Equal(image.data, png) {
+		t.Fatalf("image block = %+v, want the submitted bytes", image)
+	}
+	if image.cache != "ephemeral" {
+		t.Fatalf("image-only cache marker = %q, want ephemeral", image.cache)
+	}
 }
 
 func TestEncodeRequestKeepsImagesWithToolResults(t *testing.T) {
 	t.Parallel()
-	content := userContent(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}, ToolResults: []model.ToolResult{{ID: "call-1", Output: jsontext.Value(`"done"`)}}})
+	png := []byte("\x89PNG\r\n\x1a\n")
+	content := userContent(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: png}}, ToolResults: []model.ToolResult{{ID: "call-1", Output: jsontext.Value(`"done"`)}}})
 	if len(content) != 2 {
 		t.Fatalf("content = %d blocks, want 2: %s", len(content), content)
 	}
-	sameJSON(t, content[0], `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}`)
-	sameJSON(t, content[1], `{"type":"tool_result","tool_use_id":"call-1","content":"done","cache_control":{"type":"ephemeral"}}`)
+	image := anthropicImage(t, content[0])
+	if !bytes.Equal(image.data, png) {
+		t.Fatalf("image bytes = %x, want the submitted PNG", image.data)
+	}
+	var result struct {
+		Type      string `json:"type"`
+		ToolUseID string `json:"tool_use_id"`
+		Content   string `json:"content"`
+	}
+	if err := json.Unmarshal(content[1], &result); err != nil {
+		t.Fatalf("tool result block %s: %v", content[1], err)
+	}
+	if result.Type != "tool_result" || result.ToolUseID != "call-1" || result.Content != "done" {
+		t.Fatalf("tool result = %+v, want call-1 carrying done", result)
+	}
+}
+
+type anthropicImageBlock struct {
+	source    string
+	mediaType string
+	cache     string
+	data      []byte
+}
+
+func anthropicImage(t *testing.T, block jsontext.Value) anthropicImageBlock {
+	t.Helper()
+	var value struct {
+		Type         string `json:"type"`
+		CacheControl struct {
+			Type string `json:"type"`
+		} `json:"cache_control"`
+		Source struct {
+			Type      string `json:"type"`
+			MediaType string `json:"media_type"`
+			Data      string `json:"data"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(block, &value); err != nil {
+		t.Fatalf("image block %s: %v", block, err)
+	}
+	if value.Type != "image" {
+		t.Fatalf("block %s is not an image block", block)
+	}
+	data, err := base64.StdEncoding.DecodeString(value.Source.Data)
+	if err != nil {
+		t.Fatalf("image data %q is not standard base64: %v", value.Source.Data, err)
+	}
+	return anthropicImageBlock{source: value.Source.Type, mediaType: value.Source.MediaType, cache: value.CacheControl.Type, data: data}
+}
+
+type anthropicTextBlock struct {
+	text  string
+	cache string
+}
+
+func anthropicText(t *testing.T, block jsontext.Value) anthropicTextBlock {
+	t.Helper()
+	var value struct {
+		Type         string `json:"type"`
+		Text         string `json:"text"`
+		CacheControl struct {
+			Type string `json:"type"`
+		} `json:"cache_control"`
+	}
+	if err := json.Unmarshal(block, &value); err != nil {
+		t.Fatalf("text block %s: %v", block, err)
+	}
+	if value.Type != "text" {
+		t.Fatalf("block %s is not a text block", block)
+	}
+	return anthropicTextBlock{text: value.Text, cache: value.CacheControl.Type}
 }
 
 func userContent(t *testing.T, message model.Message) []jsontext.Value {

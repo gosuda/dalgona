@@ -15,31 +15,32 @@ import (
 const llmSystemPrompt = "Answer the questions about the supplied state. Return only one JSON object. Include every question name as a key and no other keys. For a choice question, the value is the selected criterion key as a string. For a noul question, the value is the probability of yes as a number from 0 to 1. For a score question, the value is a number from 0 to len(criteria)-1, the expected index into criteria. Do not return markdown, prose, explanations, probabilities objects, or confidence values."
 
 type LLM struct {
+	id       string
 	provider model.Provider
 	model    string
 	timeout  time.Duration
 }
 
-func NewLLM(provider model.Provider, modelID string) *LLM {
-	return NewLLMWithTimeout(provider, modelID, askTimeout)
+func NewLLM(id string, provider model.Provider, modelID string) *LLM {
+	return NewLLMWithTimeout(id, provider, modelID, askTimeout)
 }
 
-func NewLLMWithTimeout(provider model.Provider, modelID string, timeout time.Duration) *LLM {
+func NewLLMWithTimeout(id string, provider model.Provider, modelID string, timeout time.Duration) *LLM {
 	if timeout <= 0 {
 		timeout = askTimeout
 	}
-	return &LLM{provider: provider, model: modelID, timeout: timeout}
+	return &LLM{id: id, provider: provider, model: modelID, timeout: timeout}
 }
 
-func (l *LLM) Ask(ctx context.Context, state jsontext.Value, questions map[string]Question) (map[string]Answer, error) {
+func (l *LLM) Ask(ctx context.Context, state jsontext.Value, questions map[string]Question) (Result, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, l.timeout)
 	defer cancel()
 	payload, err := encodeAsk("", state, questions)
 	if err != nil {
-		return nil, err
+		return Result{}, errRequest(err)
 	}
 	if l.provider == nil {
-		return nil, errors.New("llm: provider is required")
+		return Result{}, errors.New("llm: provider is required")
 	}
 	stream, err := l.provider.Stream(requestCtx, model.Request{
 		Model:  l.model,
@@ -50,17 +51,17 @@ func (l *LLM) Ask(ctx context.Context, state jsontext.Value, questions map[strin
 		}},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("llm: stream: %w", err)
+		return Result{}, fmt.Errorf("llm: stream: %w", err)
 	}
 	text, err := collectText(requestCtx, stream)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	answers, err := parseLLMAnswers(strings.NewReader(text), questions)
 	if err != nil {
-		return nil, fmt.Errorf("llm: invalid JSON: %w", err)
+		return Result{}, errAnswer(fmt.Errorf("llm: invalid JSON: %w", err))
 	}
-	return answers, nil
+	return Result{Answers: answers, Model: l.id}, nil
 }
 
 func collectText(ctx context.Context, stream model.Stream) (string, error) {
@@ -92,7 +93,7 @@ func consumeEvent(text *strings.Builder, event model.Event) error {
 	case model.ReasoningDelta, model.Usage, model.Done:
 		return nil
 	case model.ToolCall:
-		return errors.New("llm: model returned a tool call instead of JSON")
+		return errAnswer(errors.New("llm: model returned a tool call instead of JSON"))
 	case model.Error:
 		if value.Err != nil {
 			return fmt.Errorf("llm: provider: %w", value.Err)

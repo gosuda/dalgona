@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -506,30 +508,114 @@ func assertRequestReasoning(t *testing.T, include []string, effort, summary stri
 
 func TestEncodeRequestSendsInputImage(t *testing.T) {
 	t.Parallel()
-	input := userInput(t, model.Message{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
+	requireUserItemCarriesImageAndText(t, model.Message{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
+	requireUserItemCarriesImageAndText(t, model.Message{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/gif", Data: []byte("GIF89a")}}})
+	requireUserItemCarriesTextOnly(t, model.Message{Role: "user", Text: "What is this?"})
+}
+
+func requireUserItemCarriesImageAndText(t *testing.T, message model.Message) {
+	t.Helper()
+	want := message.Images[0]
+	input := userInput(t, message)
 	if len(input) != 1 {
 		t.Fatalf("input = %d items, want 1: %s", len(input), input)
 	}
-	sameJSON(t, input[0], `{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"auto"},{"type":"input_text","text":"What is this?"}]}`)
+	role, content := openaiUserItem(t, input[0])
+	if role != "user" || len(content) != 2 {
+		t.Fatalf("user item = %q with %d parts, want user with an image and a text", role, len(content))
+	}
+	if prefix := "data:" + want.Mime + ";base64,"; !strings.HasPrefix(content[0].ImageURL, prefix) {
+		t.Fatalf("image URL = %q, want %s", content[0].ImageURL, prefix)
+	}
+	if data := openaiImage(t, content[0]); !bytes.Equal(data, want.Data) {
+		t.Fatalf("image bytes = %x, want %x", data, want.Data)
+	}
+	if content[1].Type != "input_text" || content[1].Text != "What is this?" {
+		t.Fatalf("text part = %+v, want the prompt after the image", content[1])
+	}
+}
+
+func requireUserItemCarriesTextOnly(t *testing.T, message model.Message) {
+	t.Helper()
+	plain := userInput(t, message)
+	if len(plain) != 1 {
+		t.Fatalf("text-only input = %d items, want 1: %s", len(plain), plain)
+	}
+	_, parts := openaiUserItem(t, plain[0])
+	if len(parts) != 1 || parts[0].Type != "input_text" || parts[0].Text != "What is this?" {
+		t.Fatalf("text-only parts = %+v, want one input_text", parts)
+	}
 }
 
 func TestEncodeRequestOmitsEmptyTextWithImage(t *testing.T) {
 	t.Parallel()
-	input := userInput(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}})
+	png := []byte("\x89PNG\r\n\x1a\n")
+	input := userInput(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: png}}})
 	if len(input) != 1 {
 		t.Fatalf("input = %d items, want 1: %s", len(input), input)
 	}
-	sameJSON(t, input[0], `{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"auto"}]}`)
+	_, content := openaiUserItem(t, input[0])
+	if len(content) != 1 {
+		t.Fatalf("user parts = %d, want one image", len(content))
+	}
+	if data := openaiImage(t, content[0]); !bytes.Equal(data, png) {
+		t.Fatalf("image bytes = %x, want the submitted PNG", data)
+	}
 }
 
 func TestEncodeRequestKeepsImagesWithToolResults(t *testing.T) {
 	t.Parallel()
-	input := userInput(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}}, ToolResults: []model.ToolResult{{ID: "call-1", Output: jsontext.Value(`"done"`)}}})
+	png := []byte("\x89PNG\r\n\x1a\n")
+	input := userInput(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: png}}, ToolResults: []model.ToolResult{{ID: "call-1", Output: jsontext.Value(`"done"`)}}})
 	if len(input) != 2 {
 		t.Fatalf("input = %d items, want 2: %s", len(input), input)
 	}
-	sameJSON(t, input[0], `{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"auto"}]}`)
+	_, content := openaiUserItem(t, input[0])
+	if len(content) != 1 {
+		t.Fatalf("user parts = %d, want one image", len(content))
+	}
+	if data := openaiImage(t, content[0]); !bytes.Equal(data, png) {
+		t.Fatalf("image bytes = %x, want the submitted PNG", data)
+	}
 	sameJSON(t, input[1], `{"type":"function_call_output","call_id":"call-1","output":"done"}`)
+}
+
+type openaiContent struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	ImageURL string `json:"image_url"`
+	Detail   string `json:"detail"`
+}
+
+func openaiUserItem(t *testing.T, item jsontext.Value) (string, []openaiContent) {
+	t.Helper()
+	var value struct {
+		Role    string          `json:"role"`
+		Content []openaiContent `json:"content"`
+	}
+	if err := json.Unmarshal(item, &value); err != nil {
+		t.Fatalf("user item %s: %v", item, err)
+	}
+	return value.Role, value.Content
+}
+
+func openaiImage(t *testing.T, part openaiContent) []byte {
+	t.Helper()
+	if part.Type != "input_image" {
+		t.Fatalf("part %+v is not an input_image", part)
+	}
+	if part.Detail != "auto" {
+		t.Fatalf("image detail = %q, want auto", part.Detail)
+	}
+	header, payload, ok := strings.Cut(part.ImageURL, ",")
+	if !ok || !strings.HasPrefix(header, "data:image/") || !strings.HasSuffix(header, ";base64") {
+		t.Fatalf("image url = %q, want a base64 image data URL", part.ImageURL)
+	}
+	data, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		t.Fatalf("image data %q is not standard base64: %v", payload, err)
+	}
+	return data
 }
 
 type requestBodyResult struct {

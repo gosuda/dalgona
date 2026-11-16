@@ -10,7 +10,7 @@ import (
 
 func eventMembers(e Event) ([]member, error) {
 	switch e.Type() {
-	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnCompleted, TypeTurnJudged, TypeUserMessage:
+	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnEffort, TypeTurnCompleted, TypeTurnRecovery, TypeTurnJudged, TypeUserMessage:
 		return sessionMembers(e)
 	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
 		return toolMembers(e)
@@ -20,6 +20,10 @@ func eventMembers(e Event) ([]member, error) {
 		return scriptMembers(e)
 	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return metadataMembers(e)
+	case TypeHashlineInvocationStarted, TypeHashlineInvocationSettled:
+		return invocationMembers(e)
+	case TypePromptBase, TypeMemoryUpdated, TypePromptBound:
+		return promptMembers(e)
 	default:
 		return nil, fmt.Errorf("event: unknown event type %q", e.Type())
 	}
@@ -34,12 +38,23 @@ func sessionMembers(e Event) ([]member, error) {
 			field("runner", stringValue(value.Runner)), field("service", stringValue(value.Service)),
 			field("box_id", stringValue(value.BoxID)), field("baseline", stringValue(value.Baseline)),
 		}, nil
+	default:
+		return turnEventMembers(e)
+	}
+}
+
+func turnEventMembers(e Event) ([]member, error) {
+	switch value := e.(type) {
 	case TurnStarted:
 		fields := []member{field("turn_id", stringValue(value.TurnID))}
 		return timeField(fields, "started_at", value.StartedAt), nil
+	case TurnEffort:
+		return []member{field("turn_id", stringValue(value.TurnID)), field("effort", stringValue(value.Effort))}, nil
 	case TurnCompleted:
 		fields := []member{field("turn_id", stringValue(value.TurnID)), field("status", stringValue(value.Status))}
 		return timeField(optionalString(fields, "error", value.Error), "completed_at", value.CompletedAt), nil
+	case TurnRecovery:
+		return []member{field("turn_id", stringValue(value.TurnID)), field("attempt", intValue(value.Attempt))}, nil
 	case TurnJudged:
 		return turnJudgedMembers(value), nil
 	case UserMessage:
@@ -95,6 +110,33 @@ func metadataMembers(e Event) ([]member, error) {
 	}
 }
 
+func invocationMembers(e Event) ([]member, error) {
+	switch value := e.(type) {
+	case HashlineInvocationStarted:
+		return []member{
+			field("call_id", stringValue(value.CallID)), field("turn_id", stringValue(value.TurnID)),
+			field("identity", stringValue(value.Identity)), field("fingerprint", stringValue(value.Fingerprint)),
+			field("style", stringValue(value.Style)), field("contract_version", intValue(value.ContractVersion)),
+			field("paths", arrayValue(value.Paths, stringValue)),
+		}, nil
+	case HashlineInvocationSettled:
+		return invocationSettledMembers(value), nil
+	default:
+		return nil, fmt.Errorf("event: %T does not match type %s", e, e.Type())
+	}
+}
+
+func invocationSettledMembers(e HashlineInvocationSettled) []member {
+	fields := []member{
+		field("identity", stringValue(e.Identity)), field("ok", boolValue(e.OK)),
+		field("output", stringValue(e.Output)),
+	}
+	if e.Spill != nil {
+		fields = append(fields, field("spill", spillValue(*e.Spill)))
+	}
+	return optionalRaw(fields, "meta", e.Meta)
+}
+
 func userMessageMembers(e UserMessage) []member {
 	fields := []member{
 		field("item_id", stringValue(e.ItemID)), field("turn_id", stringValue(e.TurnID)),
@@ -136,10 +178,8 @@ func imageValue(e Image) jsontext.Value {
 }
 
 func turnJudgedMembers(e TurnJudged) []member {
-	fields := []member{
-		field("turn_id", stringValue(e.TurnID)), field("by", stringValue(e.By)),
-		field("verdict", stringValue(e.Verdict)), field("paths", arrayValue(e.Paths, stringValue)),
-	}
+	fields := attributionFields([]member{field("turn_id", stringValue(e.TurnID)), field("by", stringValue(e.By))}, e.Fallback, e.Judges)
+	fields = append(fields, field("verdict", stringValue(e.Verdict)), field("paths", arrayValue(e.Paths, stringValue)))
 	fields = judgedFields(fields, e.Scores, e.Flags, e.Spoken, e.Feedback)
 	if len(e.Skipped) > 0 {
 		fields = append(fields, field("skipped", arrayValue(e.Skipped, stringValue)))
@@ -154,9 +194,10 @@ func turnJudgedMembers(e TurnJudged) []member {
 func toolJudgedMembers(e ToolJudged) []member {
 	fields := []member{
 		field("call_id", stringValue(e.CallID)), field("turn_id", stringValue(e.TurnID)),
-		field("by", stringValue(e.By)), field("verdict", stringValue(e.Verdict)),
-		field("paths", arrayValue(e.Paths, stringValue)),
+		field("by", stringValue(e.By)),
 	}
+	fields = attributionFields(fields, e.Fallback, e.Judges)
+	fields = append(fields, field("verdict", stringValue(e.Verdict)), field("paths", arrayValue(e.Paths, stringValue)))
 	fields = judgedFields(fields, e.Scores, e.Flags, e.Spoken, e.Feedback)
 	if e.Truncated {
 		fields = append(fields, field("truncated", boolValue(true)))
@@ -169,6 +210,19 @@ func toolJudgedMembers(e ToolJudged) []member {
 	}
 	fields = optionalString(fields, "error", e.Error)
 	return append(fields, field("elapsed_ms", int64Value(e.ElapsedMS)))
+}
+
+func attributionFields(fields []member, fallback string, judges []JudgeAttribution) []member {
+	fields = optionalString(fields, "fallback", fallback)
+	if len(judges) > 0 {
+		fields = append(fields, field("judges", arrayValue(judges, judgeValue)))
+	}
+	return fields
+}
+
+func judgeValue(e JudgeAttribution) jsontext.Value {
+	fields := []member{field("part", intValue(e.Part)), field("by", stringValue(e.By))}
+	return objectValue(optionalString(fields, "fallback", e.Fallback)...)
 }
 
 func judgedFields(fields []member, scores map[string]float64, flags, spoken []string, feedback bool) []member {
@@ -345,15 +399,23 @@ func stateMembers(e Event) ([]member, error) {
 			field("call_ids", arrayValue(value.CallIDs, stringValue)),
 		}, nil
 	case ChildSpawned:
-		return []member{
-			field("call_id", stringValue(value.CallID)), field("child_id", stringValue(value.ChildID)),
-			field("runner", stringValue(value.Runner)),
-		}, nil
+		return childSpawnedMembers(value), nil
 	case Branch:
 		return []member{field("parent_seq", uint64Value(value.ParentSeq))}, nil
 	default:
 		return nil, fmt.Errorf("event: %T does not match type %s", e, e.Type())
 	}
+}
+
+func childSpawnedMembers(e ChildSpawned) []member {
+	fields := []member{
+		field("call_id", stringValue(e.CallID)), field("child_id", stringValue(e.ChildID)),
+		field("runner", stringValue(e.Runner)),
+	}
+	if len(e.Tools) > 0 {
+		fields = append(fields, field("tools", arrayValue(e.Tools, stringValue)))
+	}
+	return fields
 }
 
 func compactionMembers(e Compaction) []member {

@@ -44,6 +44,10 @@ type Host struct {
 	reviewTimeout time.Duration
 	reviewSlots   chan struct{}
 	reviewMask    func(string) (string, error)
+	refreshes     refreshLedger
+	memoryTimeout time.Duration
+
+	slots childSlots
 }
 
 func sandboxCauseOf(cause func() string) func() string {
@@ -64,6 +68,7 @@ func NewHost(cfg HostConfig) (*Host, error) {
 		threads: make(map[string]*Thread), sessions: make(map[string]ThreadInfo),
 		logged: make(map[string]bool), models: make(map[string]modelCache),
 		reviewTimeout: reviewTimeout, reviewSlots: make(chan struct{}, reviewHostRequests),
+		slots: childSlots{groups: make(map[string]*slotGroup)},
 	}
 	if h.clock == nil {
 		h.clock = time.Now
@@ -333,7 +338,7 @@ func (h *Host) ResumeWith(ctx context.Context, id string, overrides Overrides) (
 	if loaded.created.Advisor != "" && overrides.Tools == nil {
 		return nil, errors.Join(ErrNeedsOverrides, release())
 	}
-	return h.openLocked(ctx, loaded, overrides, release)
+	return h.openRecovering(ctx, loaded, overrides, release)
 }
 
 func (h *Host) Close() error {
@@ -347,6 +352,7 @@ func (h *Host) Close() error {
 	for _, thread := range threads {
 		errs = append(errs, thread.Close())
 	}
+	h.slots.join()
 	return errors.Join(errs...)
 }
 

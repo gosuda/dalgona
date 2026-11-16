@@ -18,10 +18,21 @@ func decodeSessionEvent(kind string, r *objectReader) (Event, error) {
 		return RunnerBound{
 			Runner: r.str("runner"), Service: r.str("service"), BoxID: r.str("box_id"), Baseline: r.str("baseline"),
 		}, nil
+	default:
+		return decodeTurnEvent(kind, r)
+	}
+}
+
+func decodeTurnEvent(kind string, r *objectReader) (Event, error) {
+	switch kind {
 	case TypeTurnStarted:
 		return TurnStarted{TurnID: r.str("turn_id"), StartedAt: r.timestamp("started_at")}, nil
+	case TypeTurnEffort:
+		return TurnEffort{TurnID: r.str("turn_id"), Effort: r.str("effort")}, nil
 	case TypeTurnCompleted:
 		return TurnCompleted{TurnID: r.str("turn_id"), Status: r.str("status"), Error: r.str("error"), CompletedAt: r.timestamp("completed_at")}, nil
+	case TypeTurnRecovery:
+		return TurnRecovery{TurnID: r.str("turn_id"), Attempt: r.number("attempt")}, nil
 	case TypeTurnJudged:
 		return decodeTurnJudged(r), nil
 	case TypeUserMessage:
@@ -97,7 +108,8 @@ func decodeTurnJudged(r *objectReader) TurnJudged {
 	r.require("verdict")
 	r.require("elapsed_ms")
 	return TurnJudged{
-		TurnID: r.str("turn_id"), By: r.str("by"), Verdict: r.str("verdict"), Paths: r.stringList("paths"),
+		TurnID: r.str("turn_id"), By: r.str("by"), Fallback: r.str("fallback"), Judges: r.judges("judges"),
+		Verdict: r.str("verdict"), Paths: r.stringList("paths"),
 		Scores: r.scores("scores"), Flags: r.stringList("flags"), Spoken: r.stringList("spoken"),
 		Skipped: r.stringList("skipped"), Feedback: r.boolean("feedback"), Truncated: r.boolean("truncated"),
 		Error: r.str("error"), ElapsedMS: r.int64("elapsed_ms"),
@@ -111,12 +123,34 @@ func decodeToolJudged(r *objectReader) ToolJudged {
 	r.require("verdict")
 	r.require("elapsed_ms")
 	return ToolJudged{
-		CallID: r.str("call_id"), TurnID: r.str("turn_id"), By: r.str("by"), Verdict: r.str("verdict"),
+		CallID: r.str("call_id"), TurnID: r.str("turn_id"), By: r.str("by"), Fallback: r.str("fallback"),
+		Judges: r.judges("judges"), Verdict: r.str("verdict"),
 		Paths: r.stringList("paths"), Scores: r.scores("scores"), Flags: r.stringList("flags"),
 		Spoken: r.stringList("spoken"), Feedback: r.boolean("feedback"), Truncated: r.boolean("truncated"),
 		Parts: r.count("parts", 2, 1), FailedParts: r.count("failed_parts", 1, 0),
 		Error: r.str("error"), ElapsedMS: r.int64("elapsed_ms"),
 	}
+}
+
+func (r *objectReader) judges(name string) []JudgeAttribution {
+	var values []JudgeAttribution
+	r.array(name, func(raw jsontext.Value) error {
+		value, err := decodeJudgeAttribution(raw)
+		values = append(values, value)
+		return err
+	})
+	return values
+}
+
+func decodeJudgeAttribution(raw jsontext.Value) (JudgeAttribution, error) {
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return JudgeAttribution{}, err
+	}
+	r := objectReader{fields: fields}
+	r.require("part")
+	r.require("by")
+	return JudgeAttribution{Part: r.number("part"), By: r.str("by"), Fallback: r.str("fallback")}, r.err
 }
 
 func (r *objectReader) stringList(name string) []string {
@@ -298,7 +332,7 @@ func decodeStateEvent(kind string, r *objectReader) (Event, error) {
 	case TypeContextPruned:
 		return decodeContextPruned(r), nil
 	case TypeChildSpawned:
-		return ChildSpawned{CallID: r.str("call_id"), ChildID: r.str("child_id"), Runner: r.str("runner")}, nil
+		return ChildSpawned{CallID: r.str("call_id"), ChildID: r.str("child_id"), Runner: r.str("runner"), Tools: r.stringList("tools")}, nil
 	case TypeBranch:
 		return Branch{ParentSeq: r.uint64("parent_seq")}, nil
 	default:

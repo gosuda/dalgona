@@ -1,5 +1,16 @@
 (async () => {
 	const failures = [];
+	const threads = 'nav[aria-label="Conversation threads"] button.thread';
+	const composer = () =>
+		document.querySelector('[aria-label="Message composer"] textarea');
+	const first = document.querySelector(threads);
+	const current = document.querySelector(`${threads}[aria-current="true"]`);
+	if (first && !current) {
+		first.click();
+		for (let i = 0; i < 100 && composer()?.disabled !== false; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	}
 	window.scrollTo(0, 0);
 	await new Promise((resolve) => requestAnimationFrame(() => resolve()));
 	const height = document.documentElement.scrollHeight;

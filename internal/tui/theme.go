@@ -133,6 +133,9 @@ func (t theme) codes(r role) []string {
 
 func (t theme) paint(r role, s string) string {
 	codes := t.codes(r)
+	if !t.known && (r == roleAccentText || r == roleFailedText) {
+		codes = []string{"1"}
+	}
 	if len(codes) == 0 || s == "" {
 		return s
 	}

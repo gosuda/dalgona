@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import Composer from "#lib/components/Composer.svelte";
+import type { FileMatch } from "#lib/types.ts";
 
 function baseProps() {
 	return {
@@ -35,7 +36,7 @@ describe("composer focus", () => {
 		const view = render(Composer, {
 			props: { ...baseProps(), running: true },
 		});
-		const interrupt = screen.getByRole("button", { name: "Interrupt turn" });
+		const interrupt = screen.getByRole("button", { name: "Interrupt" });
 		interrupt.focus();
 		await view.rerender({ running: false });
 		await waitFor(() => {
@@ -60,6 +61,22 @@ describe("composer focus", () => {
 			);
 		});
 		expect(onMatch).toHaveBeenCalledWith("ultrathink");
+	});
+});
+
+describe("running actions", () => {
+	afterEach(cleanup);
+
+	test("names the interrupt button Interrupt and calls onInterrupt", async () => {
+		const onInterrupt = vi.fn();
+		render(Composer, { props: { ...baseProps(), running: true, onInterrupt } });
+		await fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
+		expect(onInterrupt).toHaveBeenCalledTimes(1);
+	});
+
+	test("offers no Interrupt button while idle", () => {
+		render(Composer, { props: baseProps() });
+		expect(screen.queryByRole("button", { name: "Interrupt" })).toBeNull();
 	});
 });
 
@@ -222,16 +239,49 @@ describe("interrupt guard", () => {
 	test("Esc while idle does nothing", async () => {
 		const onInterrupt = vi.fn();
 		render(Composer, { props: { ...baseProps(), onInterrupt } });
-		await fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), {
-			key: "Escape",
-		});
+		const field = screen.getByRole("textbox", { name: "Message" });
+		const before = document.getElementById("composer-help")?.textContent;
+		await fireEvent.keyDown(field, { key: "Escape" });
+		await fireEvent.keyDown(field, { key: "Escape" });
 		expect(onInterrupt).not.toHaveBeenCalled();
-		expect(document.getElementById("composer-help")?.textContent).toContain(
-			"Enter to send",
-		);
+		expect(document.getElementById("composer-help")?.textContent).toBe(before);
 	});
 });
 
+describe("send point", () => {
+	afterEach(cleanup);
+
+	test("Send holds the point with a thread open and idle", () => {
+		render(Composer, { props: { ...baseProps(), threadOpen: true } });
+		expect(screen.getByRole("button", { name: "Send" }).className).toBe(
+			"point",
+		);
+	});
+
+	test("Send is quiet with no thread open", () => {
+		render(Composer, { props: { ...baseProps(), threadOpen: false } });
+		const composer = document.querySelector(".composer");
+		const send = screen.getByRole("button", { name: "Send" });
+		expect(send.className).toBe("quiet");
+		expect(composer?.querySelector(".point")).toBeNull();
+	});
+
+	test("a running turn and a shown decision both keep Send quiet", () => {
+		render(Composer, {
+			props: { ...baseProps(), threadOpen: true, running: true },
+		});
+		expect(screen.getByRole("button", { name: "Steer" }).className).toBe(
+			"quiet",
+		);
+		cleanup();
+		render(Composer, {
+			props: { ...baseProps(), threadOpen: true, deciding: true },
+		});
+		expect(screen.getByRole("button", { name: "Send" }).className).toBe(
+			"quiet",
+		);
+	});
+});
 describe("command palette", () => {
 	afterEach(cleanup);
 
@@ -391,6 +441,117 @@ describe("file mention", () => {
 			await fireEvent.keyUp(field);
 			await vi.advanceTimersByTimeAsync(200);
 			expect(onFileSearch).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("file completion wraps within the shown rows", async () => {
+		const twentieth: FileMatch = {
+			fileName: "unit19.go",
+			path: "pkg/unit19.go",
+			root: "/work",
+		};
+		const matches: readonly FileMatch[] = [
+			...Array.from({ length: 19 }, (_, index) => ({
+				fileName: `unit${index}.go`,
+				path: `pkg/unit${index}.go`,
+				root: "/work",
+			})),
+			twentieth,
+			...Array.from({ length: 30 }, (_, index) => ({
+				fileName: `unit${index + 20}.go`,
+				path: `pkg/unit${index + 20}.go`,
+				root: "/work",
+			})),
+		];
+		const onFileSearch = vi.fn(() => Promise.resolve(matches));
+		render(Composer, { props: { ...baseProps(), onFileSearch } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "@unit" } });
+		await waitFor(() => {
+			expect(screen.getAllByRole("option")).toHaveLength(20);
+		});
+		const activeId = () => field.getAttribute("aria-activedescendant");
+		expect(activeId()).toBe("file-completion-0");
+		await fireEvent.keyDown(field, { key: "ArrowUp" });
+		expect(activeId()).toBe("file-completion-19");
+		expect(
+			document.getElementById("file-completion-19")?.textContent,
+		).toContain(twentieth.path);
+		expect(
+			document
+				.getElementById("file-completion-19")
+				?.getAttribute("aria-selected"),
+		).toBe("true");
+		await fireEvent.keyDown(field, { key: "ArrowDown" });
+		expect(activeId()).toBe("file-completion-0");
+		for (let index = 1; index < 20; index += 1) {
+			await fireEvent.keyDown(field, { key: "ArrowDown" });
+			expect(activeId()).toBe(`file-completion-${index}`);
+		}
+		await fireEvent.keyDown(field, { key: "ArrowDown" });
+		expect(activeId()).toBe("file-completion-0");
+		await fireEvent.keyDown(field, { key: "ArrowUp" });
+		expect(activeId()).toBe("file-completion-19");
+		await fireEvent.keyDown(field, { key: "Enter" });
+		await waitFor(() => {
+			expect(field.value).toBe(`@${twentieth.path} `);
+		});
+		cleanup();
+
+		render(Composer, { props: { ...baseProps(), onFileSearch } });
+		const tabField = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(tabField, { target: { value: "@unit" } });
+		await waitFor(() => {
+			expect(screen.getAllByRole("option")).toHaveLength(20);
+		});
+		await fireEvent.keyDown(tabField, { key: "ArrowUp" });
+		await fireEvent.keyDown(tabField, { key: "Tab" });
+		await waitFor(() => {
+			expect(tabField.value).toBe(`@${twentieth.path} `);
+		});
+		cleanup();
+
+		const onThree = vi.fn(() => Promise.resolve(matches.slice(0, 3)));
+		render(Composer, { props: { ...baseProps(), onFileSearch: onThree } });
+		const threeField = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(threeField, { target: { value: "@unit" } });
+		await waitFor(() => {
+			expect(screen.getAllByRole("option")).toHaveLength(3);
+		});
+		await fireEvent.keyDown(threeField, { key: "ArrowUp" });
+		expect(threeField.getAttribute("aria-activedescendant")).toBe(
+			"file-completion-2",
+		);
+		cleanup();
+
+		vi.useFakeTimers();
+		try {
+			const onSend = vi.fn();
+			const onEmpty = vi.fn(() => Promise.resolve<readonly FileMatch[]>([]));
+			render(Composer, {
+				props: { ...baseProps(), onSend, onFileSearch: onEmpty },
+			});
+			const emptyField = screen.getByRole("textbox", {
+				name: "Message",
+			}) as HTMLTextAreaElement;
+			await fireEvent.input(emptyField, { target: { value: "@none" } });
+			await vi.advanceTimersByTimeAsync(200);
+			await tick();
+			expect(onEmpty).toHaveBeenCalledWith("none");
+			expect(screen.queryByRole("listbox", { name: "Files" })).toBeNull();
+			await fireEvent.keyDown(emptyField, { key: "ArrowUp" });
+			expect(emptyField.value).toBe("@none");
+			await fireEvent.keyDown(emptyField, { key: "Enter" });
+			expect(onSend).toHaveBeenCalledTimes(1);
+			expect(onSend.mock.calls[0]?.[0]).toBe("@none");
 		} finally {
 			vi.useRealTimers();
 		}
@@ -622,4 +783,168 @@ describe("shell mode", () => {
 			"Enter a command after !.",
 		);
 	});
+});
+
+describe("escaped slash", () => {
+	afterEach(cleanup);
+
+	test("a double slash sends one slash", async () => {
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend } });
+		const field = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(field, { target: { value: "//help" } });
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(onSend).toHaveBeenCalledWith("/help", { texts: [], images: [] });
+		await fireEvent.input(field, { target: { value: "hello" } });
+		await fireEvent.keyDown(field, { key: "Enter" });
+		expect(onSend).toHaveBeenLastCalledWith("hello", {
+			texts: [],
+			images: [],
+		});
+		cleanup();
+
+		const onSteer = vi.fn();
+		const onFollowup = vi.fn();
+		render(Composer, {
+			props: { ...baseProps(), running: true, onSteer, onFollowup },
+		});
+		const runningField = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(runningField, { target: { value: "//help" } });
+		await fireEvent.keyDown(runningField, { key: "Enter" });
+		expect(onSteer).toHaveBeenCalledWith("/help");
+		await fireEvent.input(runningField, { target: { value: "hello" } });
+		await fireEvent.keyDown(runningField, { key: "Enter" });
+		expect(onSteer).toHaveBeenLastCalledWith("hello");
+		await fireEvent.input(runningField, { target: { value: "//help" } });
+		await fireEvent.keyDown(runningField, { key: "Enter", altKey: true });
+		expect(onFollowup).toHaveBeenCalledWith("/help");
+		await fireEvent.input(runningField, { target: { value: "hello" } });
+		await fireEvent.keyDown(runningField, { key: "Enter", altKey: true });
+		expect(onFollowup).toHaveBeenLastCalledWith("hello");
+		cleanup();
+
+		const onOpenPanel = vi.fn();
+		const idleSend = vi.fn();
+		render(Composer, {
+			props: { ...baseProps(), onOpenPanel, onSend: idleSend },
+		});
+		const commandField = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(commandField, { target: { value: "/help" } });
+		await fireEvent.keyDown(commandField, { key: "Enter" });
+		expect(onOpenPanel).toHaveBeenCalledWith("keys");
+		expect(idleSend).not.toHaveBeenCalled();
+		cleanup();
+
+		const runningOpenPanel = vi.fn();
+		const runningSteer = vi.fn();
+		const runningFollowup = vi.fn();
+		render(Composer, {
+			props: {
+				...baseProps(),
+				running: true,
+				onOpenPanel: runningOpenPanel,
+				onSteer: runningSteer,
+				onFollowup: runningFollowup,
+			},
+		});
+		const paletteField = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(paletteField, { target: { value: "/help" } });
+		await fireEvent.keyDown(paletteField, { key: "Enter" });
+		expect(runningOpenPanel).toHaveBeenCalledWith("keys");
+		expect(runningSteer).not.toHaveBeenCalled();
+		await fireEvent.input(paletteField, { target: { value: "/help" } });
+		await fireEvent.keyDown(paletteField, { key: "Enter", altKey: true });
+		expect(runningFollowup).not.toHaveBeenCalled();
+		expect(paletteField.value).toBe("/help");
+		cleanup();
+
+		const onShell = vi.fn(() => null);
+		const shellSend = vi.fn();
+		const shellSteer = vi.fn();
+		render(Composer, {
+			props: {
+				...baseProps(),
+				running: true,
+				onShell,
+				onSend: shellSend,
+				onSteer: shellSteer,
+			},
+		});
+		const shellField = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(shellField, { target: { value: "!ls" } });
+		await fireEvent.keyDown(shellField, { key: "Enter" });
+		expect(onShell).toHaveBeenCalledWith("ls");
+		expect(shellSend).not.toHaveBeenCalled();
+		expect(shellSteer).not.toHaveBeenCalled();
+		cleanup();
+
+		const emptySend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend: emptySend } });
+		const emptyField = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		await fireEvent.input(emptyField, { target: { value: "   " } });
+		await fireEvent.keyDown(emptyField, { key: "Enter" });
+		expect(emptySend).not.toHaveBeenCalled();
+		expect(document.getElementById("composer-error")?.textContent).toBe(
+			"Enter a message before sending.",
+		);
+		expect(document.activeElement).toBe(emptyField);
+		cleanup();
+
+		const attachmentSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend: attachmentSend } });
+		const attachmentField = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		const pasted = Array.from(
+			{ length: 10 },
+			(_, index) => `line ${index + 1}`,
+		).join("\n");
+		await fireEvent.paste(attachmentField, {
+			clipboardData: pastedText(pasted),
+		});
+		expect(screen.getByText("Pasted text · 10 lines")).toBeTruthy();
+		await fireEvent.keyDown(attachmentField, { key: "Enter" });
+		expect(attachmentSend).toHaveBeenCalledWith("", {
+			texts: [pasted],
+			images: [],
+		});
+		expect(screen.queryByText("Pasted text · 10 lines")).toBeNull();
+		cleanup();
+
+		const limitSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend: limitSend } });
+		const limitField = screen.getByRole("textbox", {
+			name: "Message",
+		}) as HTMLTextAreaElement;
+		const large = () =>
+			new File([new Uint8Array(5 * 1024 * 1024)], "big.png", {
+				type: "image/png",
+			});
+		await fireEvent.paste(limitField, {
+			clipboardData: pastedFiles([large(), large(), large()]),
+		});
+		await waitFor(() => {
+			expect(screen.getAllByText(/Image · big\.png/)).toHaveLength(3);
+		});
+		await fireEvent.input(limitField, { target: { value: "//help" } });
+		await fireEvent.keyDown(limitField, { key: "Enter" });
+		expect(limitSend).not.toHaveBeenCalled();
+		expect(limitField.value).toBe("//help");
+		expect(screen.getAllByText(/Image · big\.png/)).toHaveLength(3);
+		expect(document.getElementById("composer-error")?.textContent).toBe(
+			"The message and images are too large to send together. Remove an image.",
+		);
+	}, 60000);
 });

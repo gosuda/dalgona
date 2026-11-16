@@ -122,6 +122,7 @@ type (
 		ModelProvider     string            `json:"modelProvider"`
 		Sandbox           SandboxPolicy     `json:"sandbox"`
 		ReasoningEffort   string            `json:"reasoningEffort,omitzero"`
+		TurnEffort        *string           `json:"turnEffort,omitzero"`
 		TokenUsage        *ThreadTokenUsage `json:"tokenUsage,omitzero"`
 		SandboxFallback   *SandboxFallback  `json:"sandboxFallback,omitzero"`
 		Thread            Thread            `json:"thread"`
@@ -134,6 +135,11 @@ type (
 	}
 	ThreadReadResponse struct {
 		Thread Thread `json:"thread"`
+	}
+	ThreadTurnsListResponse struct {
+		Data            []Turn `json:"data"`
+		NextCursor      string `json:"nextCursor,omitzero"`
+		BackwardsCursor string `json:"backwardsCursor,omitzero"`
 	}
 	ThreadRevertResponse    = ThreadReadResponse
 	ThreadUnarchiveResponse = ThreadReadResponse
@@ -264,6 +270,11 @@ type (
 		Message string         `json:"message"`
 		Data    jsontext.Value `json:"data,omitzero"`
 	}
+	TurnEffortNotification struct {
+		ThreadID string `json:"threadId"`
+		TurnID   string `json:"turnId"`
+		Effort   string `json:"effort"`
+	}
 	ErrorNotification struct {
 		ThreadID  string    `json:"threadId"`
 		TurnID    string    `json:"turnId"`
@@ -288,9 +299,12 @@ type (
 		TokenUsage ThreadTokenUsage `json:"tokenUsage"`
 	}
 	ThreadTokenUsage struct {
-		Last               TokenUsageBreakdown `json:"last"`
-		Total              TokenUsageBreakdown `json:"total"`
-		ModelContextWindow int                 `json:"modelContextWindow,omitzero"`
+		Last                   TokenUsageBreakdown `json:"last"`
+		Total                  TokenUsageBreakdown `json:"total"`
+		ModelContextWindow     int                 `json:"modelContextWindow,omitzero"`
+		EstimatedContextTokens *int                `json:"estimatedContextTokens,omitzero"`
+		CostUsdMicros          *int64              `json:"costUsdMicros,omitzero"`
+		CostPartial            bool                `json:"costPartial,omitzero"`
 	}
 	TokenUsageBreakdown struct {
 		InputTokens           int `json:"inputTokens"`
@@ -395,20 +409,31 @@ type (
 		Note     string `json:"note"`
 		Delivery string `json:"delivery"`
 	}
+	JudgeAttribution struct {
+		Part     int    `json:"part"`
+		By       string `json:"by"`
+		Fallback string `json:"fallback,omitzero"`
+	}
 	ToolJudgedNotification struct {
-		ThreadID string   `json:"threadId"`
-		TurnID   string   `json:"turnId"`
-		ItemID   string   `json:"itemId"`
-		Verdict  string   `json:"verdict"`
-		Summary  string   `json:"summary"`
-		Paths    []string `json:"paths"`
+		ThreadID string             `json:"threadId"`
+		TurnID   string             `json:"turnId"`
+		ItemID   string             `json:"itemId"`
+		Verdict  string             `json:"verdict"`
+		Summary  string             `json:"summary"`
+		Paths    []string           `json:"paths"`
+		By       string             `json:"by"`
+		Fallback string             `json:"fallback,omitzero"`
+		Judges   []JudgeAttribution `json:"judges,omitzero"`
 	}
 	TurnJudgedNotification struct {
-		ThreadID string   `json:"threadId"`
-		TurnID   string   `json:"turnId"`
-		Verdict  string   `json:"verdict"`
-		Summary  string   `json:"summary"`
-		Paths    []string `json:"paths"`
+		ThreadID string             `json:"threadId"`
+		TurnID   string             `json:"turnId"`
+		Verdict  string             `json:"verdict"`
+		Summary  string             `json:"summary"`
+		Paths    []string           `json:"paths"`
+		By       string             `json:"by"`
+		Fallback string             `json:"fallback,omitzero"`
+		Judges   []JudgeAttribution `json:"judges,omitzero"`
 	}
 	RetryWaitNotification struct {
 		ThreadID    string `json:"threadId"`

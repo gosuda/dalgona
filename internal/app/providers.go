@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/gosuda/dalgona/internal/model/antigravity"
 	"github.com/gosuda/dalgona/internal/model/chatcompat"
 	"github.com/gosuda/dalgona/internal/model/chatgpt"
+	"github.com/gosuda/dalgona/internal/model/copilot"
 	"github.com/gosuda/dalgona/internal/model/cursor"
 	"github.com/gosuda/dalgona/internal/model/devin"
 	"github.com/gosuda/dalgona/internal/model/google"
@@ -188,11 +190,13 @@ func (c *credentials) build(cfg config.Config, onRetry agent.RetryFunc, override
 	retry := model.DefaultRetryOptions()
 	retry.StartTimeout, retry.IdleTimeout, retry.OnRetry = cfg.StreamStartTimeout, cfg.StreamIdleTimeout, onRetry
 	windows := contextWindows(cfg.Models)
+	cacheDir := filepath.Join(cfg.Home, "cache")
 	providers := map[string]model.Provider{
 		"openai":      openai.New(openai.Config{APIKey: override.apiKey(c, "openai", ""), Retry: retry, ContextWindows: windows["openai"]}),
 		"anthropic":   anthropic.New(anthropic.Config{APIKey: override.apiKey(c, "anthropic", ""), Retry: retry, ContextWindows: windows["anthropic"]}),
 		"google":      google.New(google.Config{APIKey: override.apiKey(c, "google", ""), Retry: retry, ContextWindows: windows["google"]}),
-		"chatgpt":     chatgpt.New(chatgpt.Config{Token: c.chatgptToken, Retry: retry, ContextWindows: windows["chatgpt"]}),
+		"chatgpt":     chatgpt.New(chatgpt.Config{Token: c.chatgptToken, Retry: retry, ContextWindows: windows["chatgpt"], CacheDir: cacheDir, Logger: c.log}),
+		"copilot":     copilot.New(copilot.Config{Token: c.access("copilot"), Retry: retry, ContextWindows: windows["copilot"]}),
 		"antigravity": antigravity.New(antigravity.Config{Token: c.access("antigravity"), Retry: retry, ContextWindows: windows["antigravity"]}),
 		"cursor":      cursor.New(cursor.Config{Token: c.access("cursor"), Retry: retry, ContextWindows: windows["cursor"]}),
 		"devin":       devin.New(devin.Config{APIKey: c.devinKey, Retry: retry, ContextWindows: windows["devin"]}),
@@ -221,7 +225,7 @@ func (c *credentials) build(cfg config.Config, onRetry agent.RetryFunc, override
 }
 
 func providerIDs(cfg config.Config) []string {
-	ids := []string{"anthropic", "antigravity", "chatgpt", "cursor", "devin", "google", "openai"}
+	ids := []string{"anthropic", "antigravity", "chatgpt", "copilot", "cursor", "devin", "google", "openai"}
 	for id := range cfg.Providers {
 		ids = append(ids, strings.ToLower(strings.TrimSpace(id)))
 	}

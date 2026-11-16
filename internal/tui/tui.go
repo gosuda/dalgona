@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -45,10 +47,10 @@ func Run(ctx context.Context, conn io.ReadWriteCloser, opts Options) error {
 	done := make(chan struct{})
 	defer close(done)
 	handler := &programHandler{ready: ready, done: done}
-	client, err := rpc.Dial(watchedConn{ReadWriteCloser: conn, lost: handler.connectionLost}, handler)
-	if err != nil {
-		return fmt.Errorf("dial tui rpc: %w", err)
-	}
+	client := rpc.Dial(watchedConn{ReadWriteCloser: conn, lost: handler.connectionLost}, handler)
+	output := cmp.Or[io.Writer](opts.Output, os.Stdout)
+	input := cmp.Or[io.Reader](opts.Input, os.Stdin)
+	opts.Output = newDockOutput(output, input, func(msg dockWrittenMsg) { handler.send(msg) })
 	program := tea.NewProgram(newModel(client, opts, done), programOptions(ctx, opts)...)
 	handler.program = program
 	close(ready)

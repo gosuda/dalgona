@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type block struct {
@@ -12,11 +14,22 @@ type block struct {
 
 type blockSplitter struct {
 	open       []string
-	rest       string
+	rest       []byte
 	kind       string
 	afterBlank bool
 	fence      string
 }
+
+const streamTailBytes = 64 << 10
+
+const maxStreamPending = 4 << 10
+
+const (
+	controlNone   = 0
+	controlCSI    = 1
+	controlString = 2
+	controlShort  = 3
+)
 
 const (
 	kindPara  = "para"
@@ -26,37 +39,64 @@ const (
 )
 
 func (s *blockSplitter) Feed(delta string) ([]block, string) {
-	s.rest += delta
+	base := len(s.rest)
+	s.rest = append(s.rest, delta...)
+	start, pos := 0, base
 	var final []block
 	for {
-		i := strings.IndexByte(s.rest, '\n')
+		i := bytes.IndexByte(s.rest[pos:], '\n')
 		if i < 0 {
 			break
 		}
-		line := s.rest[:i]
-		s.rest = s.rest[i+1:]
-		final = append(final, s.line(line)...)
+		nl := pos + i
+		final = append(final, s.line(string(s.rest[start:nl]))...)
+		start, pos = nl+1, nl+1
+	}
+	if start > 0 {
+		s.rest = s.rest[start:]
 	}
 	return final, s.tail()
 }
 
 func (s *blockSplitter) Close() []block {
 	var final []block
-	if s.rest != "" {
-		final = append(final, s.line(s.rest)...)
-		s.rest = ""
+	if len(s.rest) > 0 {
+		final = append(final, s.line(string(s.rest))...)
+		s.rest = nil
 	}
 	return append(final, s.flush()...)
 }
 
 func (s *blockSplitter) tail() string {
-	if s.rest != "" {
-		return s.rest
+	if len(s.rest) > 0 {
+		return capTailBytes(s.rest)
 	}
 	if len(s.open) > 0 {
-		return s.open[len(s.open)-1]
+		return capTailString(s.open[len(s.open)-1])
 	}
 	return ""
+}
+
+func capTailBytes(b []byte) string {
+	if len(b) <= streamTailBytes {
+		return string(b)
+	}
+	start := len(b) - streamTailBytes
+	for start < len(b) && !utf8.RuneStart(b[start]) {
+		start++
+	}
+	return string(b[start:])
+}
+
+func capTailString(text string) string {
+	if len(text) <= streamTailBytes {
+		return text
+	}
+	start := len(text) - streamTailBytes
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return text[start:]
 }
 
 func (s *blockSplitter) line(text string) []block {
@@ -181,13 +221,251 @@ func isListMarker(text string) bool {
 }
 
 func (m *model) streamAnswer(threadID string, item *liveItem, raw []byte) {
-	item.raw = append(item.raw, raw...)
-	streamed := appendSanitized(nil, item.raw)
-	fragment := streamed[len(item.text):]
-	item.text = streamed
-	final, tail := item.split.Feed(string(fragment))
+	if item.pendingCtl != controlNone {
+		raw = item.discardControl(raw)
+		if len(raw) == 0 {
+			return
+		}
+	}
+	before := len(item.text)
+	if len(item.pending) == 0 {
+		safe := streamSafeLen(raw)
+		item.text = appendSanitized(item.text, raw[:safe])
+		item.setPending(raw[safe:])
+	} else {
+		item.pending = append(item.pending, raw...)
+		safe := streamSafeLen(item.pending)
+		item.text = appendSanitized(item.text, item.pending[:safe])
+		item.setPending(item.pending[safe:])
+	}
+	final, tail := item.split.Feed(string(item.text[before:]))
 	item.streamTail = tail
 	m.commitBlocks(threadID, item, final)
+}
+
+func (l *liveItem) setPending(rest []byte) {
+	if len(rest) > maxStreamPending {
+		if len(rest) >= 2 && rest[0] == 0x1b {
+			l.startControlDiscard(rest)
+		} else {
+			owned := make([]byte, maxStreamPending)
+			copy(owned, rest[len(rest)-maxStreamPending:])
+			l.pending = owned
+		}
+		return
+	}
+	if len(rest) == 0 {
+		if cap(l.pending) > maxStreamPending {
+			l.pending = nil
+		} else {
+			l.pending = l.pending[:0]
+		}
+		return
+	}
+	if cap(l.pending) > maxStreamPending {
+		owned := make([]byte, len(rest))
+		copy(owned, rest)
+		l.pending = owned
+		return
+	}
+	l.pending = append(l.pending[:0], rest...)
+}
+
+func (l *liveItem) startControlDiscard(rest []byte) {
+	l.pendingCtl = controlKindOf(rest)
+	l.pending = nil
+	if l.pendingCtl == controlString && rest[len(rest)-1] == 0x1b {
+		l.pending = []byte{0x1b}
+	}
+}
+
+func controlKindOf(rest []byte) byte {
+	switch rest[1] {
+	case '[':
+		return controlCSI
+	case ']', 'P', 'X', '^', '_':
+		return controlString
+	default:
+		return controlShort
+	}
+}
+
+func (l *liveItem) discardControl(raw []byte) []byte {
+	switch l.pendingCtl {
+	case controlCSI:
+		return l.discardCSI(raw)
+	case controlShort:
+		return l.discardShort(raw)
+	case controlString:
+		return l.discardString(raw)
+	default:
+		return raw
+	}
+}
+
+func (l *liveItem) discardCSI(raw []byte) []byte {
+	for i, b := range raw {
+		if b >= 0x40 && b <= 0x7e {
+			l.pendingCtl = controlNone
+			return raw[i+1:]
+		}
+	}
+	return nil
+}
+
+func (l *liveItem) discardShort(raw []byte) []byte {
+	i := 0
+	for i < len(raw) && raw[i] >= 0x20 && raw[i] <= 0x2f {
+		i++
+	}
+	if i < len(raw) {
+		l.pendingCtl = controlNone
+		return raw[i+1:]
+	}
+	return nil
+}
+
+func (l *liveItem) discardString(raw []byte) []byte {
+	if len(l.pending) == 1 && l.pending[0] == 0x1b {
+		if len(raw) == 0 {
+			return nil
+		}
+		l.pending = l.pending[:0]
+		if raw[0] == '\\' {
+			l.pendingCtl = controlNone
+			return raw[1:]
+		}
+	}
+	end := controlStringEnd(raw)
+	if end >= 0 {
+		l.pendingCtl = controlNone
+		return raw[end:]
+	}
+	if len(raw) > 0 && raw[len(raw)-1] == 0x1b {
+		l.pending = []byte{0x1b}
+	}
+	return nil
+}
+
+func controlStringEnd(raw []byte) int {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == 0x07 {
+			return i + 1
+		}
+		if raw[i] == 0x1b && i+1 < len(raw) && raw[i+1] == '\\' {
+			return i + 2
+		}
+	}
+	return -1
+}
+
+func streamSafeLen(buf []byte) int {
+	safe := len(buf) - utf8Holdback(buf)
+	for i := 0; i < safe; {
+		if buf[i] != 0x1b {
+			_, size := utf8.DecodeRune(buf[i:safe])
+			i += size
+			continue
+		}
+		end, ok := escapeEnd(buf, i)
+		if !ok {
+			return i
+		}
+		i = end
+	}
+	return safe
+}
+
+func utf8Holdback(buf []byte) int {
+	i := len(buf)
+	start := i
+	for start > 0 && i-start < utf8.UTFMax-1 && buf[start-1]&0xc0 == 0x80 {
+		start--
+	}
+	if start == i {
+		return utf8TailByte(buf)
+	}
+	if start == 0 {
+		return 0
+	}
+	size := utf8LeadSize(buf[start-1])
+	if size == 0 || i-start+1 >= size {
+		return 0
+	}
+	return i - start + 1
+}
+
+func utf8TailByte(buf []byte) int {
+	if len(buf) == 0 {
+		return 0
+	}
+	b := buf[len(buf)-1]
+	if b < 0x80 || b >= 0xf8 || b&0xc0 == 0x80 {
+		return 0
+	}
+	return 1
+}
+
+func utf8LeadSize(b byte) int {
+	switch {
+	case b < 0x80:
+		return 1
+	case b < 0xc0:
+		return 0
+	case b < 0xe0:
+		return 2
+	case b < 0xf0:
+		return 3
+	case b < 0xf8:
+		return 4
+	}
+	return 0
+}
+
+func escapeEnd(buf []byte, i int) (int, bool) {
+	j := i + 1
+	if j >= len(buf) {
+		return 0, false
+	}
+	switch buf[j] {
+	case '[':
+		return csiEnd(buf, j+1)
+	case ']', 'P', 'X', '^', '_':
+		return stringEnd(buf, j+1)
+	default:
+		return paramEnd(buf, j)
+	}
+}
+
+func csiEnd(buf []byte, j int) (int, bool) {
+	for j < len(buf) && (buf[j] < 0x40 || buf[j] > 0x7e) {
+		j++
+	}
+	if j >= len(buf) {
+		return 0, false
+	}
+	return j + 1, true
+}
+
+func stringEnd(buf []byte, j int) (int, bool) {
+	for ; j < len(buf); j++ {
+		if buf[j] == 0x07 {
+			return j + 1, true
+		}
+		if buf[j] == 0x1b && j+1 < len(buf) && buf[j+1] == '\\' {
+			return j + 2, true
+		}
+	}
+	return 0, false
+}
+
+func paramEnd(buf []byte, j int) (int, bool) {
+	for ; j < len(buf) && buf[j] >= 0x20 && buf[j] <= 0x2f; j++ {
+	}
+	if j >= len(buf) {
+		return 0, false
+	}
+	return j + 1, true
 }
 
 func (m *model) finishAnswer(threadID string, item *liveItem, final string) {
@@ -197,6 +475,8 @@ func (m *model) finishAnswer(threadID string, item *liveItem, final string) {
 	}
 	blocks = append(blocks, item.split.Close()...)
 	m.commitBlocks(threadID, item, blocks)
+	item.pending = nil
+	item.pendingCtl = controlNone
 	item.streamTail = ""
 }
 

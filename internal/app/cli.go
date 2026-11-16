@@ -113,7 +113,7 @@ func (env CLIEnv) parse(args []string) (cliFlags, error) {
 		f.prompt, f.headless = v, true
 		return nil
 	})
-	fs.BoolVar(&f.json, "json", false, "with -p, print one JSON status line")
+	fs.BoolVar(&f.json, "json", false, "with -p, print one JSON line for each item and one result line")
 	fs.StringVar(&f.resume, "resume", "", "resume thread `id`")
 	fs.BoolVar(&f.latest, "c", false, "continue the latest thread")
 	fs.StringVar(&f.model, "m", "", "model `id` for a new thread")
@@ -148,7 +148,6 @@ func (f cliFlags) problem() string {
 	}{
 		{func() bool { return !slices.Contains([]string{"", "auto", "ask", "yolo"}, f.approval) }, "--approval must be auto, ask, or yolo"},
 		{func() bool { return !slices.Contains([]string{"", "workspace-write", "off"}, f.sandbox) }, "--sandbox must be workspace-write or off"},
-		{f.emptyPrompt, "-p needs a prompt unless --resume or -c selects a thread"},
 		{func() bool { return f.resume != "" && f.latest }, "--resume and -c exclude each other"},
 	}
 	for _, check := range checks {
@@ -161,6 +160,57 @@ func (f cliFlags) problem() string {
 
 func (f cliFlags) emptyPrompt() bool {
 	return f.headless && f.prompt == "" && f.resume == "" && !f.latest
+}
+
+const (
+	pipedInputLimit = 1 << 20
+	noPromptMessage = "-p needs a prompt or piped input unless --resume or -c selects a thread"
+)
+
+func (env CLIEnv) withPipedInput(f cliFlags) (cliFlags, error) {
+	input, err := env.pipedInput()
+	if err != nil {
+		return f, err
+	}
+	f.prompt = joinPrompt(input, f.prompt)
+	if f.emptyPrompt() {
+		fmt.Fprintf(env.Stderr, "%s: %s\n", env.Product, noPromptMessage)
+		return f, errUsage
+	}
+	return f, nil
+}
+
+func (env CLIEnv) pipedInput() (string, error) {
+	if env.Stdin == nil || isTerminal(env.Stdin) {
+		return "", nil
+	}
+	data, err := io.ReadAll(io.LimitReader(env.Stdin, pipedInputLimit+1))
+	if err != nil {
+		return "", fmt.Errorf("read piped input: %w", err)
+	}
+	if len(data) > pipedInputLimit {
+		return "", fmt.Errorf("piped input is larger than %d bytes; write it to a file and ask the agent to read it", pipedInputLimit)
+	}
+	return strings.TrimRight(strings.ToValidUTF8(string(data), "\uFFFD"), "\r\n"), nil
+}
+
+func isTerminal(in io.Reader) bool {
+	file, ok := in.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func joinPrompt(input, prompt string) string {
+	switch {
+	case input == "":
+		return prompt
+	case prompt == "":
+		return input
+	}
+	return input + "\n\n" + prompt
 }
 
 func approvalPolicy(mode string) string {
@@ -247,19 +297,30 @@ func (env CLIEnv) localLogin(ctx context.Context, request loginRequest) error {
 		env.listProviders(signedIn)
 		return nil
 	}
-	switch {
-	case request.apiKey != "":
-		err = store.SetAPIKey(request.provider, request.apiKey)
-	case request.device:
-		err = LoginDevice(ctx, store, request.provider, env.Stdout)
-	default:
-		err = Login(ctx, store, request.provider, env.Stdin, env.Stdout)
-	}
-	if err != nil {
+	if err = env.signIn(ctx, store, request); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(env.Stdout, "logged in to %s\n", request.provider)
 	return err
+}
+
+func (env CLIEnv) signIn(ctx context.Context, store *auth.Store, request loginRequest) error {
+	if request.apiKey != "" {
+		return store.SetAPIKey(request.provider, request.apiKey)
+	}
+	if request.reachesNetwork() {
+		if _, err := loadConfig(Options{Product: env.Product}); err != nil {
+			return err
+		}
+	}
+	if request.device {
+		return LoginDevice(ctx, store, request.provider, env.Stdout)
+	}
+	return Login(ctx, store, request.provider, env.Stdin, env.Stdout)
+}
+
+func (r loginRequest) reachesNetwork() bool {
+	return r.device || slices.Contains(auth.OAuthProviders, r.provider)
 }
 
 func (env CLIEnv) listProviders(signedIn map[string]bool) {
@@ -451,7 +512,7 @@ func (env CLIEnv) latestThread(ctx context.Context) (string, error) {
 
 type cliSession struct {
 	conn   io.ReadWriteCloser
-	client *rpc.Client
+	client *rpc.Conn
 	book   *turnBook
 }
 
@@ -463,10 +524,7 @@ func (env CLIEnv) connect(ctx context.Context) (*cliSession, error) {
 	conn := &watchedConn{ReadWriteCloser: dialed, lost: make(chan struct{})}
 	book := newTurnBook(env.Stderr)
 	book.lost = conn.lost
-	client, err := rpc.Dial(conn, book)
-	if err != nil {
-		return nil, errors.Join(err, closeQuiet(conn))
-	}
+	client := rpc.Dial(conn, book)
 	s := &cliSession{conn: conn, client: client, book: book}
 	params := rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: string(env.Product), Version: "cli"}}
 	if err := client.Initialize(ctx, params, &rpc.InitializeResult{}); err != nil {
@@ -556,8 +614,10 @@ func (s *cliSession) open(ctx context.Context, f cliFlags) (openedThread, error)
 		var started rpc.ThreadStartResponse
 		params := rpc.ThreadStartParams{Model: f.model, ApprovalPolicy: approvalPolicy(f.approval), Sandbox: sandboxName(f.sandbox), Cwd: cwd}
 		err = s.client.Call(ctx, "thread/start", params, &started)
+		s.book.lines.watch(started.Thread.ID)
 		return openedThread{id: started.Thread.ID}, err
 	}
+	s.book.lines.watch(id)
 	var resumed rpc.ThreadResumeResponse
 	if err := s.client.Call(ctx, "thread/resume", rpc.ThreadResumeParams{ThreadID: id}, &resumed); err != nil {
 		return openedThread{}, err

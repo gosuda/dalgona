@@ -66,6 +66,7 @@ var (
 
 type Asker interface {
 	Ask(ctx context.Context, callID string, q Question) (Answer, error)
+	PreviewRoom() (chars, lines int)
 }
 
 type Tool struct {

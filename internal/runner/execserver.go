@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,9 +27,12 @@ const boxEnvironmentKey = "DALGONA_BOX_TOKEN"
 type BridgeFunc func(ctx context.Context, conn io.ReadWriteCloser) error
 
 type execServerConfig struct {
-	listen string
-	root   string
-	data   string
+	listen      string
+	root        string
+	data        string
+	shellEnv    string
+	shellEnvSet bool
+	snapshot    *ShellEnvSnapshot
 }
 
 type stdioConn struct {
@@ -43,11 +47,14 @@ func Serve(ctx context.Context, conn io.ReadWriteCloser, local *Local) error {
 }
 
 func ExecServerMain(args []string, stdin io.Reader, stdout io.Writer) int {
-	return ExecServerMainWithBridge(args, stdin, stdout, nil)
+	return ExecServerMainWithBridge(args, stdin, stdout, nil, nil)
 }
 
-func ExecServerMainWithBridge(args []string, stdin io.Reader, stdout io.Writer, bridge BridgeFunc) int {
+func ExecServerMainWithBridge(args []string, stdin io.Reader, stdout io.Writer, bridge BridgeFunc, isSecret func(string) bool) int {
 	cfg, err := parseExecServerConfig(args)
+	if err == nil {
+		cfg.snapshot, err = execServerSnapshot(cfg, isSecret)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintln(stdout, err)
 		return 2
@@ -71,17 +78,40 @@ func parseExecServerConfig(args []string) (execServerConfig, error) {
 	listen := flags.String("listen", "stdio://", "listen address")
 	root := flags.String("root", "/workspace", "workspace root")
 	data := flags.String("data", "", "persistent data directory")
+	shellEnv := flags.String("shell-env", "snapshot", "login shell environment, snapshot or inherit")
 	if err := flags.Parse(args); err != nil {
 		return execServerConfig{}, fmt.Errorf("exec-server: %w", err)
 	}
 	if flags.NArg() != 0 {
 		return execServerConfig{}, errors.New("exec-server: unexpected positional arguments")
 	}
-	cfg := execServerConfig{listen: *listen, root: *root, data: *data}
+	cfg := execServerConfig{listen: *listen, root: *root, data: *data, shellEnv: *shellEnv, shellEnvSet: flagSet(flags, "shell-env")}
 	if cfg.listen != "stdio://" && !strings.HasPrefix(cfg.listen, "ws://") {
 		return execServerConfig{}, errors.New("exec-server: listen must be stdio:// or ws://IP:PORT")
 	}
+	if !slices.Contains([]string{"snapshot", "inherit"}, cfg.shellEnv) {
+		return execServerConfig{}, errors.New("exec-server: shell-env must be one of snapshot, inherit")
+	}
 	return cfg, nil
+}
+
+func flagSet(flags *flag.FlagSet, name string) bool {
+	set := false
+	flags.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+	return set
+}
+
+func execServerSnapshot(cfg execServerConfig, isSecret func(string) bool) (*ShellEnvSnapshot, error) {
+	switch {
+	case cfg.shellEnv == "inherit":
+		return nil, nil
+	case isSecret != nil:
+		return NewShellEnvSnapshot(os.Getenv("SHELL"), isSecret), nil
+	case cfg.shellEnvSet:
+		return nil, errors.New("exec-server: snapshot requires a secret-name predicate")
+	default:
+		return nil, nil
+	}
 }
 
 func runExecServer(ctx context.Context, cfg execServerConfig, stdin io.Reader, stdout io.Writer, bridge BridgeFunc) error {
@@ -96,7 +126,7 @@ func runExecServer(ctx context.Context, cfg execServerConfig, stdin io.Reader, s
 	if err != nil {
 		return fmt.Errorf("exec-server: home: %w", err)
 	}
-	local, err := NewLocal(filepath.Join(home, ".dalgona", "runs"))
+	local, err := NewLocalWithShellEnv(filepath.Join(home, ".dalgona", "runs"), cfg.snapshot)
 	if err != nil {
 		return err
 	}
@@ -254,7 +284,7 @@ func serveExecWebsocket(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if bridge != nil {
 		err = bridge(ctx, conn)
 	} else {
-		err = serveBoxChannel(ctx, conn, local, serverSandboxFloor())
+		err = serveExecRPC(ctx, conn, local, execPolicy{boxChannel: true, floor: serverSandboxFloor()})
 	}
 	if err != nil && ctx.Err() == nil {
 		slog.Debug("exec-server: websocket connection", "error", err)

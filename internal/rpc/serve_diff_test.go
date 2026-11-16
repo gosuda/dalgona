@@ -2,8 +2,10 @@ package rpc
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -95,11 +97,75 @@ func TestFileChangeItemCarriesUnifiedDiff(t *testing.T) {
 	startTurn(t, c, threadID, "edit")
 	live := liveItem(t, c.collect(), "p")
 	requireFileChangeItem(t, live)
+	pre := "one\ntwo\n"
+	applied := applyUnifiedWithGit(t, live.Changes[0].Diff, pre)
+	post, err := os.ReadFile(filepath.Join(r.cwd, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != string(post) {
+		t.Fatalf("diff applied to the pre-image gives %q, want the post-image %q", applied, post)
+	}
 	resumed := resumedItem(t, r, threadID, "p")
 	requireFileChangeItem(t, resumed)
 	if !reflect.DeepEqual(live.Changes, resumed.Changes) {
 		t.Fatalf("live changes %+v differ from resumed %+v", live.Changes, resumed.Changes)
 	}
+}
+
+func TestNoOpPatchCarriesNoDiff(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	editStyleTools(t, r)
+	writeWorkspaceFile(t, r, "b.txt", "x\n")
+	r.llm.push(llmReply{body: sseCall("noop", "patch", `{"changes":[{"path":"b.txt","old":"x","new":"x"}]}`)})
+	r.llm.push(llmReply{body: sseText("done")})
+	c := r.connect()
+	threadID := startThread(t, r, c, nil)
+	startTurn(t, c, threadID, "noop")
+	live := liveItem(t, c.collect(), "noop")
+	if len(live.Changes) != 0 {
+		t.Fatalf("unchanged file carries changes %+v, want none", live.Changes)
+	}
+	c.mu.Lock()
+	methods := slices.Clone(c.order)
+	c.mu.Unlock()
+	if slices.Contains(methods, "item/fileChange/patchUpdated") {
+		t.Fatalf("unchanged file emitted item/fileChange/patchUpdated: %v", methods)
+	}
+	if body := readWorkspace(t, r, "b.txt"); body != "x\n" {
+		t.Fatalf("b.txt = %q, want it unchanged", body)
+	}
+}
+
+func applyUnifiedWithGit(t *testing.T, diff, pre string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(pre), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patch := filepath.Join(dir, "change.patch")
+	if err := os.WriteFile(patch, []byte(diff), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "apply", "--whitespace=nowarn", patch)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply the emitted diff: %v: %s", err, out)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+func readWorkspace(t *testing.T, r *rig, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(r.cwd, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
 }
 
 func requireFileChangeItem(t *testing.T, item wireItem) {

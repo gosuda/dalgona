@@ -65,6 +65,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [TUI](spec/tui.md): terminal behavior, slash commands, and status.
 - [Web UI server](spec/web.md): built assets, access tokens, TLS, and the daemon websocket relay.
 - [Daemon service](spec/daemon.md): socket, startup, and user-service lifecycle.
+- [Doctor](spec/doctor.md): the setup check command, its rows, and its offline and online modes.
 - [Codex app integration](spec/codex-app.md): desktop override installation and restoration.
 - [MCP client](spec/mcp.md): tool discovery, calls, and transports.
 - [Discovery](spec/discovery.md): opt-in imports of instructions, skills, and server config.
@@ -86,6 +87,8 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [Automated approval](decisions/automated-approval.md): static refusals and automatic decisions.
 - [Sandbox services](decisions/sandbox-services.md): service seam and persistence choices.
 - [Model presets](decisions/model-presets.md): native identifiers, fallback, and selection evidence.
+- [Copilot provider](decisions/copilot-provider.md): device login, token exchange, and unverified editor identity.
+- [Model prices](decisions/model-prices.md): price rows, rounding, and the cost that derives from them.
 - [Secret masking](decisions/secret-masking.md): raw-secret exclusion and tool-boundary restoration.
 - [Advisor](decisions/advisor.md): optional review without approval authority.
 - [Dependencies](decisions/dependencies.md): codecs, import restrictions, and pins.
@@ -98,4 +101,6 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [llmstub test support](decisions/llmstub-test-support.md): scripted chat-completions server for tests and live sessions.
 - [Search index](decisions/search-index.md): the grep index, its trust rule, and its rejected engines.
 - [RPC file search](decisions/rpc-file-search.md): workspace file listing through search tool walker.
+- [RPC thread search](decisions/rpc-thread-search.md): thread text search through the journal mirror index.
 - [Syntax package](decisions/syntax-package.md): tree-sitter library confinement and query rules.
+- [Shell argument parser](decisions/shell-argument-parser.md): one neutral command splitter and token reader for core packages.

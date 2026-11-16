@@ -141,19 +141,27 @@ func (m *model) resumeCommand(argument string) tea.Cmd {
 }
 
 func (m *model) resumeThread(id string) tea.Cmd {
+	target := ""
+	if id != m.thread.id {
+		target = id
+	}
+	seq := m.resetPendingResume(target)
+	revision := m.thread.turnRevision
 	return func() tea.Msg {
 		if m.conn.client == nil {
-			return resultMsg{op: "resumed", err: errors.New("rpc client is not connected")}
+			return resultMsg{op: "resumed", seq: seq, err: errors.New("rpc client is not connected")}
 		}
-		ctx, cancel := m.commandContext()
+		ctx, cancel := requestContext(m.conn.done)
 		defer cancel()
 		var resumed rpc.ThreadResumeResponse
 		if err := m.conn.client.Call(ctx, "thread/resume", rpc.ThreadResumeParams{ThreadID: id}, &resumed); err != nil {
-			return resultMsg{op: "resumed", err: err}
+			return resultMsg{op: "resumed", seq: seq, err: err}
 		}
-		var read rpc.ThreadReadResponse
-		err := m.conn.client.Call(ctx, "thread/read", rpc.ThreadReadParams{ThreadID: id, IncludeTurns: true}, &read)
-		return resultMsg{op: "resumed", value: &resumedThread{ThreadReadResponse: read, effort: resumed.ReasoningEffort, approval: resumed.ApprovalPolicy, model: resumed.Model}, err: err}
+		return resultMsg{op: "resumed", seq: seq, value: &resumedThread{
+			ThreadReadResponse: rpc.ThreadReadResponse{Thread: resumed.Thread},
+			effort:             resumed.ReasoningEffort, turnEffort: resumed.TurnEffort, turnRevision: &revision,
+			approval: resumed.ApprovalPolicy, model: resumed.Model, cwd: resumed.Cwd, resumeSeq: seq,
+		}}
 	}
 }
 

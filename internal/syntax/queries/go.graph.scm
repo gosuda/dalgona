@@ -1,0 +1,12 @@
+(call_expression function: (identifier) @call)
+(call_expression function: (selector_expression field: (field_identifier) @call))
+(call_expression function: (index_expression operand: (identifier) @call))
+(call_expression function: (index_expression operand: (selector_expression field: (field_identifier) @call)))
+(call_expression function: (type_instantiation_expression type: (type_identifier) @call))
+(call_expression function: (type_instantiation_expression type: (qualified_type name: (type_identifier) @call)))
+(type_conversion_expression type: (type_identifier) @call)
+(type_conversion_expression type: (qualified_type name: (type_identifier) @call))
+(type_conversion_expression type: (generic_type type: (type_identifier) @call))
+(type_conversion_expression type: (generic_type type: (qualified_type name: (type_identifier) @call)))
+(type_identifier) @type
+(import_spec path: [(interpreted_string_literal) (raw_string_literal)] @import)

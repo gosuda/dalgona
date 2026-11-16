@@ -57,13 +57,19 @@ func TestCellsCountsAmbiguousAsOne(t *testing.T) {
 
 func TestScreenMethodFollowsModeReport(t *testing.T) {
 	t.Parallel()
-	m := newModel(nil, Options{}, nil)
-	if m.screen.method != ansi.WcWidth {
-		t.Fatalf("start method = %v, want WcWidth", m.screen.method)
+	for _, value := range []ansi.ModeSetting{ansi.ModeReset, ansi.ModeSet, ansi.ModePermanentlySet} {
+		m := newModel(nil, Options{}, nil)
+		m, _ = drive(t, m, tea.ModeReportMsg{Mode: ansi.ModeUnicodeCore, Value: value})
+		if m.screen.method != ansi.GraphemeWidth {
+			t.Fatalf("method after UnicodeCore mode report %v = %v, want GraphemeWidth", value, m.screen.method)
+		}
 	}
-	m, _ = drive(t, m, tea.ModeReportMsg{Mode: ansi.ModeUnicodeCore, Value: ansi.ModeReset})
-	if m.screen.method != ansi.GraphemeWidth {
-		t.Fatalf("method after mode report = %v, want GraphemeWidth", m.screen.method)
+	for _, value := range []ansi.ModeSetting{ansi.ModeSet, ansi.ModePermanentlyReset} {
+		m := newModel(nil, Options{}, nil)
+		m, _ = drive(t, m, tea.ModeReportMsg{Mode: ansi.ModeInsertReplace, Value: value})
+		if m.screen.method != ansi.WcWidth {
+			t.Fatalf("method after InsertReplace mode report %v = %v, want WcWidth", value, m.screen.method)
+		}
 	}
 }
 

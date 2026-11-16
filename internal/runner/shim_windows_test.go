@@ -97,6 +97,8 @@ func runWindowsShimHelper(mode string) int {
 	switch mode {
 	case "hold":
 		return runWindowsHoldGrandchild()
+	case "leak":
+		return runWindowsLeakGrandchild()
 	case "marker":
 		_, _ = fmt.Fprint(os.Stdout, windowsShimMarker)
 		return 0
@@ -123,6 +125,26 @@ func runWindowsHoldGrandchild() int {
 		return 1
 	}
 	_ = child.Wait()
+	return 0
+}
+
+func runWindowsLeakGrandchild() int {
+	pidFile := os.Getenv(windowsShimPidFileEnv)
+	if pidFile == "" {
+		return 2
+	}
+	ping, err := exec.LookPath("ping")
+	if err != nil {
+		return 1
+	}
+	child := exec.Command(ping, "-n", "60", "127.0.0.1")
+	child.Stdout = os.Stdout
+	if err := child.Start(); err != nil {
+		return 1
+	}
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		return 1
+	}
 	return 0
 }
 
@@ -172,6 +194,39 @@ func TestWindowsShimKillsGrandchildThroughJob(t *testing.T) {
 	waitWindowsShimDone(t, done)
 	requireWindowsShimExit(t, dir, 137)
 	waitWindowsProcessGone(t, grandchild)
+}
+
+func TestWindowsShimKillsGrandchildOnLeaderExit(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	t.Setenv(windowsShimHelperEnv, "leak")
+	t.Setenv(windowsShimPidFileEnv, pidFile)
+	t.Cleanup(func() {
+		killWindowsProcessByFile(pidFile)
+	})
+	dir := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		done <- runShim(dir, []string{self})
+	}()
+	grandchild := waitWindowsShimPID(t, pidFile)
+	outsider := exec.Command("ping", "-n", "60", "127.0.0.1")
+	if err := outsider.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = outsider.Process.Kill()
+		_ = outsider.Wait()
+	})
+	waitWindowsShimDone(t, done)
+	requireWindowsShimExit(t, dir, 0)
+	waitWindowsProcessGone(t, grandchild)
+	if windowsShimProcessGone(outsider.Process.Pid) {
+		t.Fatal("a process outside the job object was killed")
+	}
 }
 
 func TestWindowsShimFastExitRecordsZero(t *testing.T) {

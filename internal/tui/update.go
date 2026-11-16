@@ -34,9 +34,11 @@ func (m *model) handleMsg(msg tea.Msg) tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.anchorState().revision++
 	before := m.input.composer.Value()
 	notice := m.notice
 	command := m.handleMsg(msg)
+	m.syncHistory()
 	if m.input.composer.Value() != before {
 		command = tea.Batch(command, m.matchKeywords())
 	}
@@ -46,9 +48,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	settle := m.settle()
 	printCommand := m.drain()
 	tick := m.scheduleTick()
+	anchor := m.anchorDock()
 	quit := m.finishQuit()
 	suspend := m.finishSuspend()
-	return m, tea.Batch(command, tick, settle, printCommand, quit, suspend)
+	return m, tea.Batch(command, tick, settle, printCommand, anchor, quit, suspend)
 }
 
 func (m *model) wheel(msg tea.MouseWheelMsg) {
@@ -63,27 +66,56 @@ func (m *model) wheel(msg tea.MouseWheelMsg) {
 func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.screen.width = msg.Width
-		m.screen.height = msg.Height
-		m.input.composer.SetWidth(msg.Width)
-		m.fitReview()
-	case tea.FocusMsg:
-		m.screen.focused = true
-		m.input.composer.focused = true
-	case tea.BlurMsg:
-		m.screen.focused = false
-		m.input.composer.focused = false
+		m.resizeTerminal(msg)
+	case tea.CursorPositionMsg:
+		return m.positionDock(msg), true
+	case dockQueryTimeoutMsg, dockWrittenMsg:
+		m.updateDockEvent(msg)
+	case tea.FocusMsg, tea.BlurMsg:
+		m.applyFocus(msg)
 	case tea.MouseWheelMsg:
 		m.wheel(msg)
 	case tea.ModeReportMsg:
 		m.applyModeReport(msg)
 	default:
-		if m.updateFrame(msg) {
-			return nil, true
-		}
-		return m.updateColour(msg)
+		return m.updateTerminalTail(msg)
 	}
 	return nil, true
+}
+
+func (m *model) resizeTerminal(msg tea.WindowSizeMsg) {
+	m.screen.width = msg.Width
+	m.screen.height = msg.Height
+	m.input.composer.SetWidth(msg.Width)
+	m.fitReview()
+	if m.out.printing {
+		m.out.frozen = m.presentedDock()
+	}
+}
+
+func (m *model) updateDockEvent(msg tea.Msg) {
+	switch msg := msg.(type) {
+	case dockQueryTimeoutMsg:
+		m.queryExpired(msg)
+	case dockWrittenMsg:
+		anchor := m.anchorState()
+		if anchor.moveRevision == msg.revision {
+			anchor.moving = false
+		}
+	}
+}
+
+func (m *model) applyFocus(msg tea.Msg) {
+	_, blurred := msg.(tea.BlurMsg)
+	m.screen.focused = !blurred
+	m.input.composer.focused = !blurred
+}
+
+func (m *model) updateTerminalTail(msg tea.Msg) (tea.Cmd, bool) {
+	if m.updateFrame(msg) {
+		return nil, true
+	}
+	return m.updateColour(msg)
 }
 
 func (m *model) updateFrame(msg tea.Msg) bool {
@@ -214,6 +246,9 @@ func (m *model) promptKey(msg tea.KeyPressMsg, key string) tea.Cmd {
 		return m.queueFollowup()
 	case "ctrl+v":
 		return m.clipboardImage()
+	case "ctrl+r":
+		m.openHistorySearch()
+		return nil
 	case "?":
 		return m.questionKey(msg, key)
 	case "esc":
@@ -340,7 +375,7 @@ func (m *model) exitLine() string {
 }
 
 func (m *model) finishQuit() tea.Cmd {
-	if !m.quitting {
+	if !m.quitting || m.anchorState().moving {
 		return nil
 	}
 	if m.screen.height == 0 || (!m.out.printing && !m.out.settling && len(m.out.pending) == 0) {
@@ -356,7 +391,7 @@ func (m *model) suspend() {
 }
 
 func (m *model) finishSuspend() tea.Cmd {
-	if !m.suspending {
+	if !m.suspending || m.anchorState().moving {
 		return nil
 	}
 	if m.screen.height == 0 || (!m.out.printing && len(m.out.pending) == 0) {
@@ -413,6 +448,18 @@ func (m model) rawFrame() tea.View {
 		view.Content = m.screen.emit(view.Content)
 		return view
 	}
+}
+
+func (m model) presentedDock() tea.View {
+	view := m.dockView()
+	view.Content = m.screen.emit(view.Content)
+	view.MouseMode = tea.MouseModeNone
+	if !m.leaving && (m.review != nil || m.list != nil) {
+		view.MouseMode = tea.MouseModeCellMotion
+	}
+	view.ReportFocus = true
+	view.WindowTitle = m.windowTitle()
+	return view
 }
 
 func (m model) frame() tea.View {

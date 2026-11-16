@@ -17,6 +17,7 @@ import (
 const (
 	kittyFontQuery  = "kitty-query-font_family"
 	folderNameCells = 16
+	costCells       = 7
 	moonSteps       = 14
 )
 
@@ -82,20 +83,28 @@ func (m *model) bandSegments() (left, right []segment) {
 		}
 		return append(list, segment{id: id, text: text, rank: rank})
 	}
-	left = []segment{{id: "model", text: cmp.Or(m.thread.modelName, "default")}}
-	left = add(left, "effort", m.effortText(icons), 3)
+	left = []segment{{id: "model", text: cmp.Or(sanitizeText(m.thread.modelName), "default")}}
+	left = add(left, "effort", m.effortText(icons), 6)
 	left = add(left, "approval", icons.approval[m.thread.approvalMode], 0)
 	left = add(left, "sandbox", icons.sandbox[m.thread.sandbox], 0)
 	left = add(left, "folder", m.folderText(icons), 1)
 	left = add(left, "queue", queueText(icons, len(m.queue)), 2)
-	right = add(nil, "context", m.contextText(icons), 0)
-	right = add(right, "mark", m.conn.product, 4)
+	right = add(nil, "cost", m.costText(), 5)
+	right = add(right, "context", m.contextText(icons), 0)
+	right = add(right, "mark", m.conn.product, 7)
 	return left, right
 }
 
 func (m *model) effortText(icons iconSet) string {
 	levels := m.thread.levels[m.thread.modelName]
-	rank := slices.Index(levels, m.thread.effort)
+	effort := m.thread.effort
+	if m.thread.turnID != "" {
+		if m.thread.turnEffort == nil {
+			return ""
+		}
+		effort = *m.thread.turnEffort
+	}
+	rank := slices.Index(levels, effort)
 	if len(levels) < 2 || rank < 0 {
 		return ""
 	}
@@ -103,10 +112,11 @@ func (m *model) effortText(icons iconSet) string {
 }
 
 func (m *model) folderText(icons iconSet) string {
-	if m.conn.opts.Cwd == "" {
+	dir := m.workDir()
+	if dir == "" {
 		return ""
 	}
-	return icons.folder + " " + m.screen.fit(filepath.Base(m.conn.opts.Cwd), folderNameCells)
+	return icons.folder + " " + m.screen.fit(sanitizeText(filepath.Base(dir)), folderNameCells)
 }
 
 func queueText(icons iconSet, n int) string {
@@ -118,6 +128,32 @@ func queueText(icons iconSet, n int) string {
 		return icons.queue + " " + field
 	}
 	return field
+}
+
+func (m *model) costText() string {
+	micros := m.thread.usage.CostUsdMicros
+	if micros == nil || *micros < 0 {
+		return ""
+	}
+	return fmt.Sprintf("%*s", costCells, formatCost(*micros, m.thread.usage.CostPartial))
+}
+
+func formatCost(micros int64, partial bool) string {
+	cents := micros / 10000
+	if micros%10000 >= 5000 {
+		cents++
+	}
+	if cents >= 1000000 {
+		return "$9999+"
+	}
+	text := fmt.Sprintf("$%d", cents/100)
+	if cents < 10000 {
+		text = fmt.Sprintf("$%d.%02d", cents/100, cents%100)
+	}
+	if partial {
+		text += "+"
+	}
+	return text
 }
 
 func (m *model) contextText(icons iconSet) string {

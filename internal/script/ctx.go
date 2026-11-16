@@ -348,9 +348,13 @@ func stringList(items starlark.Iterable) ([]string, error) {
 }
 
 func (r *run) sleep(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var seconds float64
-	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "seconds", &seconds); err != nil {
+	var value starlark.Value
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "seconds", &value); err != nil {
 		return nil, err
+	}
+	seconds, ok := starlark.AsFloat(value)
+	if !ok {
+		return nil, fmt.Errorf("%s: for parameter seconds: got %s, want number", b.Name(), value.Type())
 	}
 	if seconds < 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
 		return nil, fmt.Errorf("%s: seconds must be non-negative and finite", b.Name())

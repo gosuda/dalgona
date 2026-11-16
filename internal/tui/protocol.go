@@ -21,6 +21,7 @@ type deltaDecoder struct {
 	reader   bytes.Reader
 	decoder  jsontext.Decoder
 	threadID string
+	turnID   string
 	itemID   string
 	text     []byte
 }
@@ -28,7 +29,7 @@ type deltaDecoder struct {
 func (d *deltaDecoder) decode(params jsontext.Value) error {
 	d.reader.Reset(params)
 	d.decoder.Reset(&d.reader)
-	d.threadID, d.itemID, d.text = "", "", d.text[:0]
+	d.threadID, d.turnID, d.itemID, d.text = "", "", "", d.text[:0]
 	if err := d.expect('{'); err != nil {
 		return err
 	}
@@ -38,21 +39,28 @@ func (d *deltaDecoder) decode(params jsontext.Value) error {
 			return fmt.Errorf("decode delta field: %w", err)
 		}
 		field := token.String()
-		switch field {
-		case "threadId":
-			d.threadID, err = d.readString()
-		case "itemId":
-			d.itemID, err = d.readString()
-		case "delta":
-			err = d.readDelta()
-		default:
-			err = d.decoder.SkipValue()
-		}
-		if err != nil {
+		if err := d.readField(field); err != nil {
 			return fmt.Errorf("decode delta %s: %w", field, err)
 		}
 	}
 	return d.expect('}')
+}
+
+func (d *deltaDecoder) readField(field string) error {
+	var err error
+	switch field {
+	case "threadId":
+		d.threadID, err = d.readString()
+	case "itemId":
+		d.itemID, err = d.readString()
+	case "turnId":
+		d.turnID, err = d.readString()
+	case "delta":
+		err = d.readDelta()
+	default:
+		err = d.decoder.SkipValue()
+	}
+	return err
 }
 
 func (d *deltaDecoder) expect(kind jsontext.Kind) error {

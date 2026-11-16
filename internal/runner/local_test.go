@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -136,7 +137,7 @@ func TestLocal_environmentDefaults(t *testing.T) {
 		}
 	}
 	want := map[string]string{
-		"CI": "custom", "DEBIAN_FRONTEND": "noninteractive", "GIT_TERMINAL_PROMPT": "0",
+		"AI_AGENT": "dalgona", "CI": "custom", "DEBIAN_FRONTEND": "noninteractive", "GIT_TERMINAL_PROMPT": "0",
 		"GIT_EDITOR": ":", "GIT_SEQUENCE_EDITOR": ":", "GIT_MERGE_AUTOEDIT": "no",
 		"GIT_PAGER": "cat", "PAGER": "less", "EDITOR": ":", "npm_config_yes": "true", "PIP_NO_INPUT": "1",
 	}
@@ -145,6 +146,223 @@ func TestLocal_environmentDefaults(t *testing.T) {
 			t.Errorf("%s = %q, want %q", key, values[key], value)
 		}
 	}
+}
+
+func TestLocal_environmentDefaultsKeepCallerAgent(t *testing.T) {
+	dir := t.TempDir()
+	local := newTestLocal(t, filepath.Join(dir, "runs"))
+	env := []string{"PATH=" + os.Getenv("PATH"), "AI_AGENT=custom"}
+	startTestProcess(t, local, ProcessSpec{ID: "env-own", Argv: []string{"sh", "-c", `printf '%s\n' "$AI_AGENT"`}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
+	state := waitForExit(t, local, "env-own")
+	if got := strings.TrimSpace(string(state.Data)); got != "custom" {
+		t.Fatalf("AI_AGENT = %q, want custom", got)
+	}
+}
+
+func TestLocal_killsDescendantsOnLeaderExit(t *testing.T) {
+	dir := t.TempDir()
+	local := newTestLocal(t, filepath.Join(dir, "runs"))
+	outsider := exec.Command("sleep", "300")
+	outsider.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := outsider.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = outsider.Process.Kill()
+		_ = outsider.Wait()
+	})
+	rows := []descendantRow{
+		{name: "pipe-holder", script: `sleep 300 & echo $!`, code: 0},
+		{name: "devnull", script: `sleep 300 >/dev/null 2>&1 & echo $!`, code: 0},
+		{name: "term-ignored", script: descendantReadyScript(":"), code: 0, minElapsed: groupExitSettle, fate: termFateSurvives},
+		{name: "term-default", script: descendantReadyScript("exit 0"), code: 0, fate: termFateExits},
+		{name: "nonzero-leader", script: `sleep 300 >/dev/null 2>&1 & echo $!; exit 7`, code: 7},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			runDescendantRow(t, local, dir, row)
+		})
+	}
+	t.Run("clean-exit", func(t *testing.T) {
+		runDescendantCleanExit(t, local, dir)
+	})
+	t.Run("canceled-leader", func(t *testing.T) {
+		runDescendantCanceledLeader(t, local, dir)
+	})
+	t.Run("setup-failure", func(t *testing.T) {
+		runDescendantSetupFailure(t, local, dir)
+	})
+	if !processIsAlive(outsider.Process.Pid) {
+		t.Fatal("an unrelated process group was killed")
+	}
+}
+
+type termFate int
+
+const (
+	termFateUnobserved termFate = iota
+	termFateExits
+	termFateSurvives
+)
+
+const (
+	descendantExitBound = 60 * time.Second
+	cleanExitAttempts   = 5
+)
+
+type descendantRow struct {
+	name       string
+	script     string
+	code       int
+	minElapsed time.Duration
+	fate       termFate
+}
+
+func descendantReadyScript(termAction string) string {
+	return `( trap 'printf T >> "$2"; ` + termAction + `' TERM; : > "$1"; while :; do printf . >> "$2"; sleep 0.05; done ) >/dev/null 2>&1 & pid=$!; n=0; ` +
+		`while [ ! -e "$1" ] && [ "$n" -lt 500 ]; do sleep 0.02; n=$((n+1)); done; ` +
+		`[ -e "$1" ] || exit 9; echo $pid`
+}
+
+func runDescendantRow(t *testing.T, local *Local, dir string, row descendantRow) {
+	t.Helper()
+	scratch := t.TempDir()
+	ready := filepath.Join(scratch, "ready")
+	record := filepath.Join(scratch, "record")
+	started := time.Now()
+	startTestProcess(t, local, ProcessSpec{ID: "desc-" + row.name, Argv: []string{"sh", "-c", row.script, "_", ready, record}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
+	state := waitForBoundedExit(t, local, "desc-"+row.name, descendantExitBound)
+	elapsed := time.Since(started)
+	if state.Exit.Code != row.code {
+		t.Fatalf("exit = %+v, want code %d", state.Exit, row.code)
+	}
+	pid, err := descendantPID(state.Data)
+	if err != nil {
+		t.Fatalf("parse descendant pid: %v", err)
+	}
+	if !descendantStopped(pid) {
+		t.Fatalf("descendant %d survived the leader exit", pid)
+	}
+	if elapsed < row.minElapsed {
+		t.Fatalf("row finished in %s, want at least %s", elapsed, row.minElapsed)
+	}
+	requireTermFate(t, record, row.fate)
+}
+
+func requireTermFate(t *testing.T, path string, fate termFate) {
+	t.Helper()
+	if fate == termFateUnobserved {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read descendant record: %v", err)
+	}
+	record := string(data)
+	if marks := strings.Count(record, "T"); marks != 1 {
+		t.Fatalf("descendant record %q holds %d TERM marks, want 1", record, marks)
+	}
+	survived := !strings.HasSuffix(record, "T")
+	if want := fate == termFateSurvives; survived != want {
+		t.Fatalf("descendant record %q: survived TERM = %v, want %v", record, survived, want)
+	}
+}
+
+func runDescendantCleanExit(t *testing.T, local *Local, dir string) {
+	t.Helper()
+	for attempt := range cleanExitAttempts {
+		id := "desc-clean-" + strconv.Itoa(attempt)
+		started := time.Now()
+		startTestProcess(t, local, ProcessSpec{ID: id, Argv: []string{"sh", "-c", "true"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
+		state := waitForBoundedExit(t, local, id, descendantExitBound)
+		if state.Exit.Code != 0 {
+			t.Fatalf("exit = %+v, want code 0", state.Exit)
+		}
+		if time.Since(started) < groupExitSettle {
+			return
+		}
+	}
+	t.Fatalf("clean exit took at least %s in each of %d runs", groupExitSettle, cleanExitAttempts)
+}
+
+func runDescendantCanceledLeader(t *testing.T, local *Local, dir string) {
+	t.Helper()
+	id := "desc-cancel"
+	startTestProcess(t, local, ProcessSpec{ID: id, Argv: []string{"sh", "-c", `sleep 300 >/dev/null 2>&1 & echo $!; sleep 300`}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
+	data := waitForBoundedOutput(t, local, id, descendantExitBound)
+	if err := local.Signal(t.Context(), id, SignalTerm); err != nil {
+		t.Fatal(err)
+	}
+	state := waitForBoundedExit(t, local, id, descendantExitBound)
+	if state.Exit.Code == 0 || state.Exit.Signal == "" {
+		t.Fatalf("canceled exit = %+v, want a signal", state.Exit)
+	}
+	pid, err := descendantPID(data)
+	if err != nil {
+		t.Fatalf("parse descendant pid: %v", err)
+	}
+	if !descendantStopped(pid) {
+		t.Fatalf("descendant %d survived the cancel", pid)
+	}
+}
+
+func runDescendantSetupFailure(t *testing.T, local *Local, dir string) {
+	t.Helper()
+	startTestProcess(t, local, ProcessSpec{ID: "desc-setup", Argv: []string{"dalgona-missing-command-for-test"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
+	state := waitForBoundedExit(t, local, "desc-setup", descendantExitBound)
+	if state.Exit.Code != 1 {
+		t.Fatalf("setup failure exit = %+v, want code 1", state.Exit)
+	}
+}
+
+func waitForBoundedExit(t *testing.T, local *Local, id string, limit time.Duration) Output {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for {
+		state, err := local.Read(context.Background(), id, 0)
+		if err == nil && state.Exit != nil {
+			return state
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s did not exit within %s", id, limit)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func waitForBoundedOutput(t *testing.T, local *Local, id string, limit time.Duration) []byte {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for {
+		state, err := local.Read(context.Background(), id, 0)
+		if err == nil && len(state.Data) > 0 {
+			return state.Data
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s produced no output within %s", id, limit)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func descendantPID(data []byte) (int, error) {
+	first, _, _ := strings.Cut(string(data), "\n")
+	return strconv.Atoi(strings.TrimSpace(first))
+}
+
+func descendantStopped(pid int) bool {
+	if runtime.GOOS == "linux" {
+		data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+		if err != nil {
+			return true
+		}
+		idx := bytes.LastIndexByte(data, ')')
+		if idx < 0 || idx+2 >= len(data) {
+			return false
+		}
+		return data[idx+2] == 'Z'
+	}
+	return syscall.Kill(pid, 0) != nil
 }
 
 func TestLocal_resolvesSelf(t *testing.T) {

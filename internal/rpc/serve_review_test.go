@@ -85,3 +85,43 @@ func TestReviewStartRunsAReviewTurn(t *testing.T) {
 	c.fails("review/start", map[string]any{"threadId": threadID, "target": map[string]any{"type": "bogus"}}, -32602, "unsupported review target bogus")
 	expect(t, bodies.count() == rejected, "rejected review/start sent a model request", bodies.count()-rejected)
 }
+
+func TestReviewStartTargetKinds(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	bodies := recordBodies(t, r)
+	c := r.connect()
+	var started ThreadStartResponse
+	c.ok("thread/start", map[string]any{"cwd": r.cwd}, &started)
+	c.await("thread/started", nil)
+	threadID := started.Thread.ID
+
+	runReview := func(target map[string]any) {
+		r.llm.push(llmReply{body: sseText("reviewed")})
+		var response ReviewStartResponse
+		c.ok("review/start", map[string]any{"threadId": threadID, "target": target}, &response)
+		log := readTurn(t, c.collect())
+		expect(t, log.status == statusCompleted, "turn status", log.status)
+	}
+
+	runReview(map[string]any{"type": "baseBranch", "branch": "main"})
+	expect(t, strings.Contains(bodies.last(), "Review the changes on the current branch against main."),
+		"baseBranch prompt in the model request", bodies.last())
+	expect(t, strings.Contains(bodies.last(), "git diff main...HEAD"),
+		"baseBranch diff command in the model request", bodies.last())
+
+	runReview(map[string]any{"type": "commit", "sha": "abc123", "title": "Fix the login flow"})
+	expect(t, strings.Contains(bodies.last(), "the changes introduced by commit abc123: Fix the login flow."),
+		"commit subject in the model request", bodies.last())
+	expect(t, strings.Contains(bodies.last(), "git show abc123"),
+		"commit command in the model request", bodies.last())
+
+	var fresh ThreadStartResponse
+	c.ok("thread/start", map[string]any{"cwd": r.cwd}, &fresh)
+	c.await("thread/started", nil)
+	threadID = fresh.Thread.ID
+	runReview(map[string]any{"type": "custom", "instructions": "Look only at the error handling."})
+	expect(t, strings.Contains(bodies.last(), "Look only at the error handling."),
+		"custom instructions in the model request", bodies.last())
+	expect(t, !strings.Contains(bodies.last(), "Report concrete defects"),
+		"custom prompt carries the findings suffix", bodies.last())
+}

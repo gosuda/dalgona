@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protowire"
+
 	"github.com/gosuda/dalgona/internal/model"
 	"github.com/gosuda/dalgona/internal/model/connectwire"
 	"github.com/gosuda/dalgona/internal/model/devin"
@@ -28,6 +30,7 @@ type chatSeen struct {
 	requestType                         int32
 	prompts                             []wire.ChatMessagePrompt
 	tools                               []wire.ChatToolDefinition
+	raw                                 []byte
 }
 
 type fakeDevin struct {
@@ -86,11 +89,11 @@ func (f *fakeDevin) serveChat(w http.ResponseWriter, r *http.Request, body []byt
 	if r.Header.Get("Content-Type") != "application/connect+proto" || r.Header.Get("Connect-Content-Encoding") != "gzip" {
 		f.t.Errorf("chat headers = %v", r.Header)
 	}
-	request := decodeChatRequest(f.t, body)
+	request, raw := decodeChatRequest(f.t, body)
 	f.chats = append(f.chats, chatSeen{
 		apiKey: string(request.Metadata.APIKeyView), jwt: string(request.Metadata.UserJWTView),
 		system: string(request.PromptView), model: string(request.ChatModelUIDView), cascade: string(request.ConversationIDView),
-		requestType: request.RequestType, prompts: request.Prompts, tools: request.Tools,
+		requestType: request.RequestType, prompts: request.Prompts, tools: request.Tools, raw: raw,
 	})
 	reply := f.chatReplies[0]
 	if len(f.chatReplies) > 1 {
@@ -100,7 +103,7 @@ func (f *fakeDevin) serveChat(w http.ResponseWriter, r *http.Request, body []byt
 	reply(w)
 }
 
-func decodeChatRequest(t *testing.T, body []byte) *wire.GetChatMessageRequest {
+func decodeChatRequest(t *testing.T, body []byte) (*wire.GetChatMessageRequest, []byte) {
 	t.Helper()
 	frame, err := connectwire.ReadFrame(bytes.NewReader(body), nil, 1<<24)
 	if err != nil || frame.Flags != connectwire.Compressed {
@@ -118,7 +121,69 @@ func decodeChatRequest(t *testing.T, body []byte) *wire.GetChatMessageRequest {
 	if err := wire.ConsumeGetChatMessageRequest(raw, &request); err != nil || request.Metadata == nil {
 		t.Fatalf("decode chat request: %v", err)
 	}
-	return &request
+	return &request, raw
+}
+
+const (
+	chatRequestPromptField = 3
+	promptImageField       = 10
+	imageDataField         = 1
+	imageMimeField         = 2
+)
+
+func lengthDelimitedFields(t *testing.T, raw []byte, number protowire.Number) [][]byte {
+	t.Helper()
+	var out [][]byte
+	for len(raw) > 0 {
+		field, kind, size := protowire.ConsumeTag(raw)
+		if size < 0 {
+			t.Fatalf("protobuf tag: %v", protowire.ParseError(size))
+		}
+		raw = raw[size:]
+		if kind != protowire.BytesType {
+			if size = protowire.ConsumeFieldValue(field, kind, raw); size < 0 {
+				t.Fatalf("protobuf field %d: %v", field, protowire.ParseError(size))
+			}
+			raw = raw[size:]
+			continue
+		}
+		value, size := protowire.ConsumeBytes(raw)
+		if size < 0 {
+			t.Fatalf("protobuf bytes field %d: %v", field, protowire.ParseError(size))
+		}
+		raw = raw[size:]
+		if field == number {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+type sentImage struct {
+	data []byte
+	mime string
+}
+
+func sentPromptImages(t *testing.T, raw []byte) [][]sentImage {
+	t.Helper()
+	var out [][]sentImage
+	for _, prompt := range lengthDelimitedFields(t, raw, chatRequestPromptField) {
+		var images []sentImage
+		for _, image := range lengthDelimitedFields(t, prompt, promptImageField) {
+			encoded := lengthDelimitedFields(t, image, imageDataField)
+			mime := lengthDelimitedFields(t, image, imageMimeField)
+			if len(encoded) != 1 || len(mime) != 1 {
+				t.Fatalf("image message holds %d data and %d mime fields, want one each", len(encoded), len(mime))
+			}
+			data, err := base64.StdEncoding.DecodeString(string(encoded[0]))
+			if err != nil {
+				t.Fatalf("image data %q is not standard base64: %v", encoded[0], err)
+			}
+			images = append(images, sentImage{data: data, mime: string(mime[0])})
+		}
+		out = append(out, images)
+	}
+	return out
 }
 
 func serveModels(w http.ResponseWriter) {
@@ -304,19 +369,31 @@ func checkPrompts(t *testing.T, prompts []wire.ChatMessagePrompt) {
 
 func TestBuildPromptsCarriesImages(t *testing.T) {
 	var retries atomic.Int32
-	fake, server := newFake(t, textTurn)
-	png := []byte("\x89PNG\r\n\x1a\n")
-	req := model.Request{Model: "swe-1-6", Messages: []model.Message{{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: png}}}}}
-	drain(t, newProvider(server, &retries), req)
+	fake, server := newFake(t, textTurn, textTurn)
+	provider := newProvider(server, &retries)
+	png := []byte("\x89PNG\r\n\x1a\n\x00\xff")
+	gif := []byte("GIF89a\x01\x00")
+	images := []model.Image{{Mime: "image/png", Data: png}, {Mime: "image/gif", Data: gif}}
+	drain(t, provider, model.Request{Model: "swe-1-6", Messages: []model.Message{{Role: "user", Text: "What is this?", Images: images}}})
+	drain(t, provider, model.Request{Model: "swe-1-6", Messages: []model.Message{{Role: "user", Text: "What is this?"}}})
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	prompts := fake.chats[0].prompts
-	if len(prompts) != 1 || len(prompts[0].Images) != 1 {
-		t.Fatalf("prompts = %+v, want one prompt with one image", prompts)
+	if len(fake.chats) != 2 {
+		t.Fatalf("chats = %d, want 2", len(fake.chats))
 	}
-	image := prompts[0].Images[0]
-	if string(image.MimeTypeView) != "image/png" || string(image.Base64DataView) != base64.StdEncoding.EncodeToString(png) {
-		t.Fatalf("image = %q %q, want image/png and the base64 of the PNG bytes", image.MimeTypeView, image.Base64DataView)
+	sent := sentPromptImages(t, fake.chats[0].raw)
+	if len(sent) != 1 || len(sent[0]) != 2 {
+		t.Fatalf("sent images per prompt = %+v, want one prompt with two images", sent)
+	}
+	want := []sentImage{{data: png, mime: "image/png"}, {data: gif, mime: "image/gif"}}
+	for index, got := range sent[0] {
+		if got.mime != want[index].mime || !bytes.Equal(got.data, want[index].data) {
+			t.Fatalf("image %d = %q %x, want %q %x", index, got.mime, got.data, want[index].mime, want[index].data)
+		}
+	}
+	plain := sentPromptImages(t, fake.chats[1].raw)
+	if len(plain) != 1 || len(plain[0]) != 0 {
+		t.Fatalf("text-only prompts carry images %+v, want one prompt with none", plain)
 	}
 }
 
@@ -417,7 +494,8 @@ func TestMissingEnvironmentKey(t *testing.T) {
 func TestListedModelCarriesSupportsImages(t *testing.T) {
 	var retries atomic.Int32
 	_, server := newFake(t, textTurn)
-	models, err := newProvider(server, &retries).Models(t.Context())
+	provider := newProvider(server, &retries)
+	models, err := provider.Models(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,5 +504,8 @@ func TestListedModelCarriesSupportsImages(t *testing.T) {
 	}
 	if !models[0].Images || models[1].Images {
 		t.Fatalf("images = %v %v, want swe-1-6 true and swe-1-6-fast false", models[0].Images, models[1].Images)
+	}
+	if _, ok := any(provider).(model.ImageSender); ok {
+		t.Fatal("devin must not claim image input for a model outside its listing")
 	}
 }

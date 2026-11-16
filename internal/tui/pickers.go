@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -70,20 +71,29 @@ func (m *model) listPanelView() panelView {
 	for _, i := range indexes {
 		body = append(body, m.listLine(list.items[i]))
 	}
+	cursor := list.cursor
+	if len(list.items) == 0 && list.empty != "" {
+		body, cursor = []string{list.empty}, -1
+	}
 	actions := []string{listHint}
 	switch list.kind {
 	case "model":
 		actions[0] = modelHint
 	case queueKind:
 		actions[0] = queueHint
+	case historyKind:
+		actions[0] = historyHint
 	}
 	if list.err != "" {
 		actions = []string{list.err}
 	}
-	return panelView{kind: list.kind, layout: panelList, title: list.title, body: body, actions: actions, cursor: list.cursor, scroll: list.scroll}
+	return panelView{kind: list.kind, layout: panelList, title: list.title, body: body, actions: actions, cursor: cursor, scroll: list.scroll}
 }
 
 func (m *model) listLine(item listItem) string {
+	if m.list != nil && m.list.kind == "resume" {
+		return m.resumeLine(item)
+	}
 	line := item.label
 	if item.active {
 		line += " (active)"
@@ -95,6 +105,35 @@ func (m *model) listLine(item listItem) string {
 		line += "  effort " + pick.current
 	}
 	return line
+}
+
+func (m *model) resumeLine(item listItem) string {
+	title := item.label
+	if item.active {
+		title += " (active)"
+	}
+	line := m.screen.pad(title, m.resumeTitleCells())
+	if item.date != "" {
+		line += "  " + m.screen.padLeft(m.screen.theme.paint(roleDim, item.date), resumeDateCells)
+	} else {
+		line += "  " + strings.Repeat(" ", resumeDateCells)
+	}
+	if item.detail != "" {
+		line += "  " + item.detail
+	}
+	return line
+}
+
+func (m *model) resumeTitleCells() int {
+	width := 0
+	for _, item := range m.list.items {
+		title := item.label
+		if item.active {
+			title += " (active)"
+		}
+		width = max(width, m.screen.cells(title))
+	}
+	return width
 }
 
 func (m *model) highlighted() (listItem, bool) {
@@ -149,8 +188,8 @@ func (m *model) listKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.cycleEffort(1)
 	case "shift+tab":
 		m.cycleEffort(-1)
-	case "ctrl+r":
-		m.askAdvisorReset()
+	case "delete", "backspace":
+		m.listDelete(msg)
 	default:
 		if !m.listMove(key) {
 			m.listEdit(msg)
@@ -159,10 +198,12 @@ func (m *model) listKey(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
-func (m *model) askAdvisorReset() {
-	if m.list.kind == "advisor" {
-		m.openConfirm(confirmation{kind: confirmAdvisorReset, title: "Reset the advisor?", action: "[enter] reset  [esc] keep"})
+func (m *model) listDelete(msg tea.KeyPressMsg) {
+	if m.list.kind == historyKind && (msg.String() == "delete" || m.input.field.value() == "") {
+		m.removeHistory()
+		return
 	}
+	m.listEdit(msg)
 }
 
 func (m *model) listEnter() tea.Cmd {
@@ -246,6 +287,8 @@ func (m *model) activateChoice() tea.Cmd {
 		return m.toggleAdvisor(item)
 	case "review":
 		return m.chooseReview(item)
+	case historyKind:
+		return m.loadHistory(item)
 	}
 	m.closeList()
 	return m.activateClosed(kind, item)
@@ -313,11 +356,23 @@ func (m *model) saveFailed(msg resultMsg) bool {
 }
 
 func (m *model) openThreadList(response *rpc.ThreadListResponse) {
+	now := m.now()
 	items := make([]listItem, 0, len(response.Data))
 	for _, item := range response.Data {
-		items = append(items, listItem{id: sanitizeText(item.ID), label: threadTitle(item), detail: threadState(item.Status), active: item.ID == m.thread.id})
+		items = append(items, listItem{id: sanitizeText(item.ID), label: threadTitle(item), date: threadDate(item, now), detail: threadState(item.Status), active: item.ID == m.thread.id})
 	}
 	m.openList(&listPanel{kind: "resume", title: "resume a thread", items: items, efforts: map[string]effortPick{}})
+}
+
+func threadDate(thread rpc.Thread, now time.Time) string {
+	seconds := thread.UpdatedAt
+	if seconds <= 0 {
+		seconds = thread.CreatedAt
+	}
+	if seconds <= 0 {
+		return ""
+	}
+	return formatResumeDate(time.Unix(seconds, 0), now)
 }
 
 func (m *model) applyModels(value any) tea.Cmd {
@@ -496,4 +551,81 @@ func (m *model) finishAdvisorList() {
 	if m.list != nil && m.list.kind == "advisor" {
 		m.closeList()
 	}
+}
+
+const (
+	historyKind       = "history"
+	historyHint       = "type to filter · Enter load · Delete remove · Esc close"
+	historyEmpty      = "No prompt history yet."
+	historyLabelBytes = 1024
+)
+
+func (m *model) openHistorySearch() {
+	if m.input.mode != inputPrompt {
+		return
+	}
+	m.openList(&listPanel{kind: historyKind, title: "history", empty: historyEmpty})
+	m.rebuildHistory()
+}
+
+func historyItems(entries []historyEntry) []listItem {
+	items := make([]listItem, 0, len(entries))
+	for _, entry := range slices.Backward(entries) {
+		items = append(items, listItem{id: strconv.FormatUint(entry.id, 10), label: historyLabel(entry.text)})
+	}
+	return items
+}
+
+func historyLabel(text string) string {
+	head := strings.ToValidUTF8(text[:min(len(text), historyLabelBytes)], "")
+	return strings.Join(strings.Fields(head), " ")
+}
+
+func historyID(item listItem) uint64 {
+	id, err := strconv.ParseUint(item.id, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+func (m *model) rebuildHistory() {
+	list := m.list
+	held, had := m.highlighted()
+	list.items = historyItems(m.input.history.allEntries())
+	list.revision = m.input.history.revision
+	indexes := list.visible(m.listQuery())
+	at := slices.IndexFunc(indexes, func(i int) bool { return had && list.items[i].id == held.id })
+	if at < 0 {
+		at = min(list.cursor, max(0, len(indexes)-1))
+	}
+	list.cursor = at
+}
+
+func (m *model) syncHistory() {
+	if m.list != nil && m.list.kind == historyKind && m.list.revision != m.input.history.revision {
+		m.rebuildHistory()
+	}
+}
+
+func (m *model) loadHistory(item listItem) tea.Cmd {
+	text, ok := m.input.history.load(historyID(item))
+	if !ok {
+		m.rebuildHistory()
+		return nil
+	}
+	m.input.composer.SetValue(text)
+	m.closeList()
+	return nil
+}
+
+func (m *model) removeHistory() {
+	item, ok := m.highlighted()
+	if !ok {
+		return
+	}
+	if index, found := m.input.history.indexOf(historyID(item)); found {
+		m.input.history.remove(index)
+	}
+	m.rebuildHistory()
 }

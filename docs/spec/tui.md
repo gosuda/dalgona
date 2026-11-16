@@ -11,7 +11,7 @@ The TUI is a protocol client. It MUST import only `internal/rpc` from this modul
 - `OnStatus func(Status)`: called after each state change and each applied notification. `Status` holds `State`, `Seq`, and `ThreadID`. `Seq` is the highest `seq` seen in `thread/status/changed` for the current thread. That `seq` is the journal sequence of the event that changed the status. `Seq` resets to 0 when the TUI's thread changes, because each thread has its own journal.
 - `OnChildSpawned func(childID, cwd string)`: called once for each `dalgona/thread/childSpawned {threadId, childId, cwd}` whose `threadId` is the TUI's thread.
 - `Input` and `Output` are terminal streams. Empty fields use the process terminal.
-- `ThreadID`: when set, startup calls `thread/resume` and then `thread/read` with `includeTurns: true`. When empty, startup calls `thread/start`.
+- `ThreadID`: when set, startup calls `thread/resume` with turns included. When empty, startup calls `thread/start`.
 - `Model`, `Approval`, `Sandbox`: option values for `thread/start`, `turn/start`, and the status band. An empty model omits `model` from `thread/start`, and the band then shows the model that the server reports. A model chosen with `/model` is sent as `model` on the next `turn/start`, and it applies to that turn and later turns of the thread. Without `--approval`, the TUI MUST omit `approvalPolicy` from `thread/start`, so the configured approval applies. The status band MUST show the approval that the server reports for the thread. The sandbox default is `workspace-write`. Approval `yolo` MUST force sandbox `off`. `thread/start` maps approval `yolo` to `never`, `ask` to `untrusted`, and `auto` to `on-request`. It maps sandbox `off` to `danger-full-access` and other values to `workspace-write`.
 - `Cwd`: the client working directory. Every `thread/start` MUST send it as `cwd`.
 - `Width`, `Height`: the terminal size when the output is not a terminal. Both MUST be positive to apply.
@@ -24,9 +24,17 @@ After `initialize` succeeds, the client MUST print one welcome row with the prod
 
 The TUI MUST run inline, except for the review. The review is the only view that MUST use the alternate screen. A completed item MUST print once to scrollback with `tea.Println`. Completed assistant text MUST render as Markdown through Glamour.
 
-Streamed text MUST print each final block once, and the live row MUST show one tail row.
+Streamed text MUST print each final block once, and the live row MUST show one tail row. The live tail MUST keep the newest 64 KiB of stream text, cut on a UTF-8 boundary. It MUST show the last line of that tail. An incomplete trailing terminal control sequence MUST stay in at most 4 KiB of pending state until its terminator, and MUST NOT reach visible text. Text after the terminator MUST show.
 
 The dock holds, from the top, the composer, an open panel, the live row, and the status band. The live row MUST be one row. From the left, it shows the state tag, elapsed time, running calls, plan progress, and queued count, each in a fixed field. One space MUST separate each field after the elapsed time from the field before it. Free text MUST fit the cells left after the fixed fields, without cutting those fields. Its free text shows the hint, else the settings error. Otherwise it shows the rate-limit countdown while a retry wait runs, else the notice, else the activity.
+
+While a key hint shows, it MUST cover the calls, plan and queued cells, and the counts MUST return when the hint ends.
+
+The activity MUST come from an open question or approval first, then the retry countdown, then a running tool call.
+With no running tool call, the activity MUST be the first plan step that is in progress, else the first pending plan step.
+The plan step text MUST be the first line of the step after the sanitizer runs.
+The client MUST NOT remove leading numbering from the step text.
+With no step to show, the activity MUST be the tail of the streaming item, else `Thinking` or `Writing`.
 
 The composer shows `› ` in the thread hue, then the typed text. The terminal cursor marks the insertion point. When the composer is empty, the placeholder follows the prompt in dim text. The placeholder never shows a keyword mark.
 
@@ -37,6 +45,8 @@ The state words are `Working`, `Waiting`, `Stopped`, `Failed`, `Offline`, `Ready
 A notice that does not fit the free text of the live row MUST also print once as a row, with the full text.
 
 A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. `active` with the flag `waitingOnUserInput` gives `awaiting input`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` list panel shows each thread's mapped state.
+
+Each `/resume` list row shows a date between the title and the state. The date field is 7 cells wide and right aligned in dim text. A timestamp in the current year shows `MM-DD`. A timestamp in any other year shows `YYYY-MM`. The client captures the clock once for the whole list and converts each timestamp to that clock's location. The row reads `updatedAt` first, then `createdAt`. A missing or invalid timestamp leaves the field blank, and the state keeps its column.
 
 An idle status that follows an interrupted or failed turn MUST keep that state until the next turn starts.
 
@@ -50,7 +60,7 @@ When a read from `conn` fails, the TUI MUST enter `disconnected` and show `conne
 
 The status band is one row of fixed fields at the bottom of the dock.
 
-The band MUST show these items in this order: `model`, `effort`, `approval`, `sandbox`, `folder`, `queue`, `context`, and `mark`. The left group holds `model` through `queue`. The right group holds `context` and `mark`.
+The band MUST show these items in this order: `model`, `effort`, `approval`, `sandbox`, `folder`, `queue`, `cost`, `context`, and `mark`. The left group holds `model` through `queue`. The right group holds `cost`, `context`, and `mark`.
 
 - `model` shows the model name as text. The client MUST NOT hide it.
 - `effort` shows one glyph for the effort rank. It is hidden when the model has fewer than two effort levels.
@@ -58,14 +68,30 @@ The band MUST show these items in this order: `model`, `effort`, `approval`, `sa
 - `sandbox` shows one glyph for `workspace-write` or `off`. When the harness sandbox is unavailable, the server reports `dangerFullAccess`, and the client MUST show the `off` glyph.
 - `folder` shows the folder name, cut to 16 cells with `...`.
 - `queue` shows `+` and the count of queued follow-ups. It is shown only when a follow-up is queued.
+- `cost` shows the thread cost in US dollars, with no glyph. It is shown only when `tokenUsage.costUsdMicros` is present.
 - `context` shows the percent of the context window in use. In `nerd` mode, a moon gauge comes before the percent.
 - `mark` shows the product name.
 
+During an active turn, the effort glyph MUST use `dalgona/turn/effort` for that thread and turn. The client MUST ignore a different thread or turn id. Before resolution, the client MUST hide the glyph. A resolved empty effort MUST hide the glyph, not use the thread default. Active resume MUST restore the optional `turnEffort`, including an empty string. Completion, interruption, failure, and thread switch MUST clear this value. When idle, the band MUST use the unchanged thread default. A model without declared effort levels MUST keep the effort item hidden.
+
+Resume MUST take the active turn id and `turnEffort` from the same `thread/resume` response. It MUST NOT read a second snapshot to obtain the turns. A resume result MUST NOT replace newer turn or effort notifications that the client has already applied.
+
+During a resume request for another thread, the client MUST buffer that thread's notifications.
+After it applies the snapshot, the client MUST replay those notifications in receive order.
+A superseded resume response or error MUST NOT change the client.
+If the buffer exceeds its limit, the resume MUST fail and keep the current thread.
+
 The setting `status_hide` lists items to hide. Its default is empty. The client MUST NOT hide `model`.
 
-The percent of `context` MUST keep four cells, and the count of `queue` MUST keep three cells. A changed value MUST NOT move any other item.
+The percent of `context` MUST keep four cells, and the count of `queue` MUST keep three cells. The text of `cost` MUST keep seven cells, aligned to the right. A changed value MUST NOT move any other item.
 
-When the row is too narrow, the client MUST drop whole items in this order: `folder`, `queue`, `effort`, and `mark`. It MUST NOT drop `model`, `context`, `approval`, or `sandbox`. When those still do not fit, it MUST cut the `model` text with `...`.
+If `tokenUsage.estimatedContextTokens` is present, the percent MUST use that journal estimate, including zero.
+Otherwise, the percent MUST use the sum of input, cached input, cache-write, and output tokens in `tokenUsage.last`.
+The next provider usage report MUST replace the estimate.
+
+The client MUST round the cost to whole cents, half up, before it picks the form of the text. Below 100 dollars, the text MUST read `$<d>.<cc>`. From 100 dollars to below 10000 dollars, it MUST read `$<whole>`. From 10000 dollars, it MUST read `$9999+`. A partial cost MUST add `+` to the first two forms.
+
+When the row is too narrow, the client MUST drop whole items in this order: `folder`, `queue`, `cost`, `effort`, and `mark`. It MUST NOT drop `model`, `context`, `approval`, or `sandbox`. When those still do not fit, it MUST cut the `model` text with `...`.
 
 ## Icons
 
@@ -97,6 +123,22 @@ The composer MUST show at most six rows, or one row while a panel is open. A pan
 When the dock is too tall, the client MUST drop the status band first, then the live row. The input line MUST NOT drop.
 
 Every dock row MUST be at most the window width minus one cell.
+
+After a geometry change settles, the client MUST request the terminal cursor position.
+A valid reply MUST place the dock at the physical bottom with relative cursor moves and line erases.
+The client MUST NOT print blank history rows to place the dock.
+A stale reply or a changed frame MUST NOT move the dock.
+The client MUST request plain cursor-position reports (`ESC[6n`).
+After a committed print, the client MUST reject row-one reports and request the position again.
+Modified F3 key events MUST remain available to the composer.
+A relocation MUST finish its output write before the client prints another committed row.
+Private output markers MUST NOT reach the terminal.
+An unanswered query MUST NOT block input or committed output.
+A query MUST expire after one second without a reply.
+A geometry change during a pending query MUST remain eligible for placement after that query expires.
+If geometry stayed unchanged until expiry, the client MUST wait for a geometry change before another query.
+Physical-bottom placement requires a terminal that answers cursor-position queries.
+On a terminal that does not answer, input and output remain available, but physical-bottom acceptance is not proven.
 
 ## Panels
 
@@ -143,8 +185,10 @@ A failed write MUST keep the model picker open and MUST show `Could not save` in
 
 The dalgona settings panel MUST list seven rows in this order: Approval, Verbosity, Theme, Icons, Status, Edit review, and Notifications.
 The dal settings panel MUST omit Edit review from display, navigation, and saves. It MUST keep the other rows in that order.
+While the Edit review row has focus, the detail area MUST show `Sends each edit's masked diff to the decider model.`. It MUST show no detail on any other row.
 Both products MUST keep the settings panel at 17 rows.
-Up and Down MUST move between rows. Left and Right MUST change the value of a row. On Status, they MUST move between the seven status items.
+Up and Down MUST move between rows. Left and Right MUST change the value of a row. On Status, they MUST move between the status items.
+The detail area of Status MUST list the status items in columns of seven rows. A new column MUST start when a column holds seven items.
 Space MUST toggle a status item on Status, and MUST change the value of any other row.
 Theme, verbosity, and icons MUST take effect at once while the panel is open.
 Enter MUST save the changed rows in one `config/batchWrite` request. In dalgona, the keyPaths MUST be the wire names `approval`, `verbosity`, `theme`, `icons`, `statusHide`, `editReview`, and `notifications`. In dal, they MUST omit `editReview`.
@@ -168,7 +212,7 @@ The client MUST call `tea.Println` only from `drain`, and MUST have at most one 
 
 The client MUST start a print only after the dock height, the window size, and the alternate screen state have not changed for three frames. A change of text inside the dock MUST NOT reset that wait.
 
-The client MUST keep the view frozen while a print is in flight.
+The client MUST keep the view frozen while a print is in flight. A window resize MUST rebuild the frozen frame at the new size.
 
 A print MUST hold at most the window rows minus the dock rows.
 
@@ -176,7 +220,7 @@ The client MUST show an empty view until its first row has printed.
 
 A failed `initialize` MUST print one row that starts with `Could not start:`.
 
-A thread load of the followed thread MUST NOT print a thread row. A load of another thread MUST print one.
+The client MUST print one thread row for every thread load, also when the same thread loads again. A reload MUST NOT print an item row again.
 
 With a window height of 0, quit and suspend MUST return at once and MAY drop the rows that wait.
 
@@ -215,6 +259,26 @@ Ctrl+W MUST delete the word before the caret.
 Ctrl+U MUST delete from the start of the line to the caret.
 Ctrl+K MUST delete from the caret to the end of the line.
 The history MUST hold the 200 newest prompts. It MUST skip a prompt equal to the one before it, and it MUST NOT hold a `/login` line.
+Ctrl+R MUST open a list panel titled `history` that lists the sent prompts, newest first.
+Ctrl+R MUST open no panel in shell mode.
+Each row MUST show its prompt on one line, with each run of whitespace collapsed to one space.
+A row MUST show at most the first 1024 bytes of its prompt.
+Enter MUST replace the draft with the full text of the highlighted prompt.
+Enter MUST close the panel.
+Delete MUST remove the highlighted prompt from the history, with or without a filter.
+Backspace MUST remove the highlighted prompt when the filter is empty.
+Each entry of the history MUST carry a number that no later entry reuses.
+Enter and Delete MUST act on the entry whose number the highlighted row holds.
+When that entry is gone, Enter and Delete MUST do nothing.
+The panel MUST then rebuild its rows from the history.
+A new prompt, a removal, or the 200 prompt cap MUST refresh an open history panel.
+The refresh MUST keep the highlight on the same entry while that entry exists.
+A removal MUST reset Up and Down recall to the newest end of the history.
+A removal MUST NOT change the draft in the editor.
+Removing the prompt that waits for its turn MUST NOT move that turn to another entry.
+Closing the panel with Esc MUST leave the draft unchanged.
+With no history, the panel MUST show `No prompt history yet.` and no selectable row.
+With no history, Enter, Delete, and Backspace MUST do nothing.
 Ctrl+C with a non-empty draft MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
 A paste of fewer than 10 lines MUST be inserted as text.
@@ -245,10 +309,16 @@ Tab and Enter MUST replace the token with `@<path> `. Esc MUST close the file pa
 A change of the file query MUST clear the rows of the previous query. The palette MUST NOT insert a path from an older query.
 A file palette with no rows MUST consume Enter and MUST NOT send the draft.
 When the file search is missing on the server, the first such palette MUST show `File search is unavailable on this server`.
+The file search MUST use the open thread's directory as its only root.
+Before a thread opens, the file search MUST use the launch directory.
 Enter in shell mode MUST run the line with `command/exec`, MUST add its output to the prompt as a chip, and MUST keep shell mode.
 The client MUST allow a shell command its 120 second timeout before it reports a failure.
 The chip MUST quote the output in a fence longer than any run of backticks in the output.
-Esc on an empty shell line MUST leave shell mode.
+Esc on a shell line with no typed text MUST leave shell mode.
+A shell line with only chips has no typed text. Esc on it MUST keep the chips in the prompt.
+A shell command MUST run in the open thread's directory. Before a thread opens, it MUST run in the launch directory.
+The folder item, its help legend and the welcome details MUST show the open thread's directory.
+Before a thread opens, they MUST show the launch directory.
 
 ## Keys and commands
 
@@ -262,21 +332,22 @@ Esc on an empty shell line MUST leave shell mode.
 | Alt+Up, empty composer | Moves the newest queued follow-up back into the composer |
 | `?`, empty composer | Opens the help panel. It lists each key with its action, then one status line for each shown status item. `?` or Esc closes it. Up and Down scroll one line, and PgUp and PgDn scroll a page |
 | `/help` | Opens the help panel |
-| Esc | Closes an open command palette first and keeps the draft. Otherwise clears a non-empty list filter first. With an empty filter, closes the list panel. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row, and a second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
+| Esc | Closes an open command palette first and keeps the draft. Otherwise clears a non-empty list filter first. With an empty filter, closes the list panel. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row. A second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
 | Esc on an empty prompt, while idle | The first Esc shows `Esc again to rewind` in the live row. A second Esc within 2000 ms opens the rewind list of active turns, newest first. |
 | Ctrl+C twice | Quits. With an empty draft, the first press shows `Ctrl+C again to exit` in the live row. With a non-empty draft, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. A second press within 2000 ms quits |
+| Ctrl+R | Opens the history panel of sent prompts. Enter loads the highlighted prompt into the editor. Delete removes it. Shell mode ignores Ctrl+R |
 | `/model [id]` | `model/list` list panel, or `config/value/write` key `model` |
-| `/resume [id]` | `thread/list` list panel, or `thread/resume` then `thread/read` |
+| `/resume [id]` | `thread/list` list panel, or `thread/resume` with turns included |
 | `/new` | Opens a confirm panel titled `Start a new thread?`. Its body reads `<n> follow-ups move to it` when the queue holds follow-ups. Enter calls `thread/start`. Esc cancels |
 | `/compact` | Opens a confirm panel titled `Compact the context?`. Its body reads `ctx <pct>% of <window> tokens` when the window is known. Enter calls `thread/compact/start`. Esc cancels |
 | `/login [provider]` | Login panel. `dalgona/account/providers/list` loads the providers. Its methods call `account/login/start` |
 | `/tree` | `dalgona/thread/tree` list panel. Enter calls `dalgona/thread/leaf/set` |
 | `/revert` | Active-path turns from `dalgona/thread/tree`. Enter opens a confirm panel, and its Enter calls `thread/revert`. Esc keeps the turn |
 | `/fork` | `dalgona/thread/tree` lists the active-path turns, newest first. Enter calls `thread/fork` with the highlighted turn as `lastTurnId`, then resumes the new thread |
-| `/advisor` | `dalgona/advisor/status` opens an advisor list. Enter calls `dalgona/advisor/set` for the highlighted advisor, enabling it when disabled and disabling it otherwise. Ctrl+R opens a confirm panel titled `Reset the advisor?`, whose Enter calls `dalgona/advisor/reset`. The notice says `advisor on` or `advisor off`. The list closes after a toggle or a reset |
+| `/advisor` | `dalgona/advisor/status` opens an advisor list. Enter calls `dalgona/advisor/set` for the highlighted advisor, enabling it when disabled and disabling it otherwise. The notice says `advisor on` or `advisor off`. The list closes after a toggle |
 | `/advisor status` | `dalgona/advisor/status`. It writes one notice line per advisor with its name, status, model, notes, and token usage |
-| `/advisor reset` | `dalgona/advisor/reset` |
-| `/review` | `review/start`. The list `Review changes` offers `Uncommitted changes`, which starts at once, and `Base branch`, `Commit`, and `Custom`, which take the text of the input line before Enter sends it. The review runs as a turn on the thread |
+| `/advisor reset` | `dalgona/advisor/reset`. This command is the only way to reset the advisor. Ctrl+R does not reset it |
+| `/review` | `review/start`. The list `Review changes` offers `Uncommitted changes`, which starts at once. `Base branch`, `Commit`, and `Custom` take the text of the input line before Enter sends it. The review runs as a turn on the thread |
 | `//text` | Sends `/text` as a prompt. A first token that holds a second `/`, such as a path, sends the whole text as a prompt |
 
 While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, `/revert`, and `/review` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
@@ -314,6 +385,8 @@ A server request whose parameters do not decode MUST receive an error answer. Th
 
 The TUI applies these notifications: `thread/started`, `thread/status/changed`, `thread/tokenUsage/updated`, `thread/name/updated` (`threadName`), `thread/reverted`, `turn/started`, `turn/completed`, `turn/plan/updated`, and `dalgona/retry/wait`. It also applies `item/started`, `item/completed`, the three delta notifications, `item/fileChange/patchUpdated`, `serverRequest/resolved`, `error`, `dalgona/thread/childSpawned`, and `dalgona/advisor/note`. The TUI also applies `dalgona/tool/judged`, `dalgona/turn/judged`, and `account/login/completed`. `account/login/completed` shows `Signed in to <provider>. Run /model to choose a model` on success, and `Login failed: <error>; run /login again` on failure. It ignores unknown methods. The TUI MUST ignore a `thread/status/changed` whose `seq` is lower than the last seen `seq`. `turn/started` clears the notice line.
 
+While the TUI tracks a turn, it MUST ignore a `turn/completed`, a `dalgona/retry/wait`, or an item delta that names a different turn.
+
 A `/login` response without a URL or a code MUST NOT change the notice line. Its outcome arrives in `account/login/completed`.
 A failed login without error text MUST show `Login failed: unknown error; run /login again`.
 
@@ -341,7 +414,9 @@ Decoding works as follows:
 
 Settled status labels show `inProgress` as `Working`. Other statuses show as sent.
 
-The TUI also applies `dalgona/tool/judged` and `dalgona/turn/judged`. A judged notification MUST print at most one row. Its key MUST be `review:<threadId>:<itemId>` for a tool verdict, and `review:<threadId>:<turnId>` for a turn verdict. The row MUST read `review`, two spaces, the summary, two spaces, and the paths joined with `, `. A `flagged` row MUST use the warning text role. An `error` row MUST use bold failed text. An `uncertain` row MUST use dim text, and it MUST print only at verbosity `high`. A `clean` verdict MUST print no row. These notifications are live only, so `thread/read` history MUST NOT show a review row.
+The TUI also applies `dalgona/tool/judged` and `dalgona/turn/judged`. A judged notification MUST print at most one row. Its key MUST be `review:<threadId>:<turnId>:<itemId>` for a tool verdict, and `review:<threadId>:<turnId>` for a turn verdict. The row MUST read `review`, two spaces, the summary, two spaces, and the paths joined with `, `. The row MUST show at most three paths. More paths MUST end the row with `+<n> more`. A `flagged` row MUST use the warning text role. An `error` row MUST use bold failed text. An `uncertain` row MUST use dim text, and it MUST print only at verbosity `high`. A `clean` verdict MUST print no row. These notifications are live only, so `thread/read` history MUST NOT show a review row.
+
+A judged row MUST add attribution lines when the notification names an answering model. The lines MUST start under the summary and MUST wrap within the window. The text MUST read `judged by <model>`. A notification with `fallback` MUST add `(fallback from <fallback>)` after the model. The `fallback` text names the primary model and its failure. A notification with `judges` MUST list each distinct answering model in part order, separated by `, `. The row MUST NOT show `mixed` as a model. An `error` row MUST read `judge failed: <model>` in place of `judged by <model>`. A `by` of `judge` names no model. The row MUST then add no attribution lines. The TUI MUST sanitize the attribution text and MUST replace each line break in it with a space.
 
 ## Title and notifications
 
@@ -413,6 +488,7 @@ The client MUST paint the `Offline` state word in the warning-text role.
 The client MUST paint the `Failed` state word in the live tag in bold failed-text, with no fill.
 The client MUST paint added diff lines in the added-text role, and removed diff lines in the failed-text role.
 A row written before the theme is known MUST NOT use a colour.
+Before the theme is known, accent-text and failed-text MUST be bold.
 A theme change MUST NOT rewrite a written row.
 
 ## Transcript rows
@@ -463,6 +539,7 @@ The live dot MUST alternate between U+25AA and U+25AB every 500 milliseconds.
 With `DAL_NO_MOTION` set to a non-empty value, the client MUST keep the dot on U+25AA and MUST tick once a second.
 The elapsed time MUST update once a second, also with `DAL_NO_MOTION` set.
 A rate-limit wait MUST show `rate limited · retrying in <m>m <ss>s · esc stops`, updated each second.
+The countdown MUST clamp at `0m 00s`, and only the matching zero report or the end of the turn MUST close the wait.
 Elapsed text MUST keep its cells, so a change of value moves no other field.
 
 The elapsed time MUST show `<n> ms` under one second, `<s>s` under one minute, `<m>m <ss>s` under one hour, and `<h>h <mm>m` from one hour. Above 99 hours and 59 minutes it MUST show `99h 59m`.
@@ -483,16 +560,27 @@ A `item/tool/requestUserInput` request joins the decision queue behind earlier a
 
 While a question waits, the live row MUST say `Waiting for your answer`.
 
-Rows mode moves with `up`, `k`, `down`, and `j`. `tab`, `right`, and `l` move to the next question. `shift+tab`, `left`, and `h` move back. Digits pick an option. `space` toggles a multi-select option. In a single-select question, `enter` picks the option under the cursor and advances. In a multi-select question, `enter` advances without changing the picks. On the last question, `enter` submits. `s` submits now. `esc` dismisses the card.
+Rows mode moves with `up`, `k`, `down`, and `j`. `tab`, `right`, and `l` move to the next tab. `shift+tab`, `left`, and `h` move back. Review is the final tab. Forward navigation from Review returns to the first question. Reverse navigation from the first question opens Review.
 
-The Other row opens typing. Typing uses the input line with the label `answer: `. `enter` stores the typed text and advances. `esc` leaves typing, or dismisses a free-text question.
+Digits pick an option. `space` toggles a multi-select option. In a single-select question, `enter` picks the option under the cursor and advances. In a multi-select question, `enter` advances without changing the picks. On the last question, `enter` opens Review without sending answers. On Review, `enter` submits. In rows mode, `s` submits from every tab. `esc` dismisses the card.
+
+Review shows each question header in bold and its answers in option order, joined with `; `. It shows `(no answer)` in dim text for an unanswered question. Its title reads `Review · <n> questions`, or `Review · 1 question`. Arrow keys scroll a Review body that does not fit. Returning to a question keeps its answers for editing. Entering Review resets its scroll position.
+
+An empty question request returns an empty answer map without opening a card.
+
+The Other row opens typing. Typing uses the input line with the label `answer: `. `enter` stores the typed text and advances. `esc` leaves typing, or dismisses a free-text question. An `s` entered while typing remains answer text and does not submit.
 
 With two or more rows, the card keeps its title and its hint rows. With one row it shows the title alone. At window height 4 or less the card is not drawn. The hint rows list `↑/↓ move`, `1-7 pick`, `Space toggle`, `Enter choose`, and `Tab next`, then `s submit · Esc dismiss`. The hint rows MUST wrap at whole hints and MUST keep `s submit · Esc dismiss` on one row. They MUST take their rows before the body and MUST leave the title and the option under the cursor. After that, the preview drops first, then the question text, then the options scroll. If the rows left cannot hold every hint, the card MUST drop whole hints and MUST keep both actions. A single-select question drops `Space toggle` first. A multi-select question drops `Space toggle` last.
 
+The preview shows the description and the first line of the preview of the option under the cursor. A preview with more lines MUST end its row with `… <n> more lines · ctrl+o`. The full-screen review opened with `ctrl+o` shows every question, every option, and the full preview of each option. `esc` returns to the card at the same cursor row and sends no answer. This full-screen review is separate from the answer Review tab.
+
 The `s submit` hint carries the one fill of the view, in the thread hue. Before the terminal reports its background, the fill MUST use the night theme, or the soft night theme for `auto-soft`. With colour off, it MUST be bold reverse video with no colour.
 
-A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<itemId>`. A question closed by another window writes no row.
+A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<turnId>:<itemId>`. A question closed by another window writes no row.
 
 A question request that the TUI accepts MUST send a desktop notification `<product>: Waiting for your answer · <title>`, when notifications are on and the window is blurred.
+
+
+At expiry the card closes and the notice says `Question timed out`. The row `<header>: Timed out` is written once. Unsent typed text is lost.
 
 The sandbox choice is an ask card with the options Accept and Dangerously accept, and no Other row.

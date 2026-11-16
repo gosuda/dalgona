@@ -177,24 +177,47 @@ func requireByteLimitRecords(t *testing.T, m manifest) (manifestEntry, manifestE
 	return a, b, c
 }
 
-func TestBuildKeepsReadingPastAFileOverTheLimit(t *testing.T) {
+func TestBuildStopsReadingOnceTheLimitIsPassed(t *testing.T) {
 	requireChangeTimes(t)
 	ws := t.TempDir()
 	writeBuildFiles(t, ws, map[string]string{
 		"a.txt": strings.Repeat("x", 36) + "\n",
 		"b.txt": "yy\n",
+		"c.txt": "zz\n",
 	})
 	m := readBuildManifest(t, buildTestIndex(t, ws, time.Now(), 20))
-	a, okA := m.lookup("a.txt")
-	b, okB := m.lookup("b.txt")
-	if !okA || !okB {
-		t.Fatalf("records a.txt %v, b.txt %v; want both recorded", okA, okB)
+	if len(m.Entries) != 3 {
+		t.Fatalf("manifest holds %d records, want one for each of the three files", len(m.Entries))
 	}
-	if a.Indexed {
-		t.Fatal("a.txt is indexed, want it left unread past the limit")
+	for _, rec := range m.Entries {
+		if rec.Indexed {
+			t.Fatalf("%s is indexed, want it unread once a.txt passed the limit", rec.Path)
+		}
 	}
-	if !b.Indexed {
-		t.Fatal("b.txt is not indexed, want it read after the file over the limit was skipped")
+	if a, _ := m.lookup("a.txt"); a.Size != 37 {
+		t.Fatalf("a.txt size = %d, want 37", a.Size)
+	}
+	if c, _ := m.lookup("c.txt"); c.Size != 3 {
+		t.Fatalf("c.txt size = %d, want 3", c.Size)
+	}
+}
+
+func TestBuildIndexesEveryFileUnderTheLimit(t *testing.T) {
+	requireChangeTimes(t)
+	ws := t.TempDir()
+	writeBuildFiles(t, ws, map[string]string{
+		"a.txt": strings.Repeat("x", 36) + "\n",
+		"b.txt": "yy\n",
+		"c.txt": "zz\n",
+	})
+	m := readBuildManifest(t, buildTestIndex(t, ws, time.Now(), 43))
+	if len(m.Entries) != 3 {
+		t.Fatalf("manifest holds %d records, want one for each of the three files", len(m.Entries))
+	}
+	for _, rec := range m.Entries {
+		if !rec.Indexed {
+			t.Fatalf("%s is not indexed, want every file indexed when the total stays within the limit", rec.Path)
+		}
 	}
 }
 

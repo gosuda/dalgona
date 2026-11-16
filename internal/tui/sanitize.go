@@ -34,10 +34,15 @@ var formatRanges = [...][2]rune{
 	{0x202a, 0x202e},
 	{0x2066, 0x2069},
 	{0xf0000, 0xffffd},
+	{0x100000, 0x10fffd},
 }
 
 func keepRune(r rune) bool {
-	return !isControl(r) && !isFormatControl(r)
+	return !isControl(r) && !isFormatControl(r) && !isNoncharacter(r)
+}
+
+func isNoncharacter(r rune) bool {
+	return r >= 0xfdd0 && r <= 0xfdef || r&0xfffe == 0xfffe
 }
 
 func isControl(r rune) bool {

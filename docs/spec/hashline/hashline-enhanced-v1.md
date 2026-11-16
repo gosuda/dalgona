@@ -111,12 +111,12 @@ to Light to bypass refusal. Never blind-retry an uncertain commit.
 | E-04 | Missing rows delivered after this request began | Pending call still lacks coverage. |
 | E-05 | Another subagent observed the same bytes | No coverage for this consumer. |
 | E-06 | Intact target moved through known prefix insertion | Map and prepare. |
-| E-07 | Original changes while equal text survives elsewhere | Reject; never retarget. |
-| E-08 | Known edit-then-undo restores equal bytes | Reject; no revival. |
+| E-07 | Original changes while equal text survives elsewhere | Reject. Never retarget. |
+| E-08 | Known edit-then-undo restores equal bytes | Reject. No revival. |
 | E-09 | Concurrent insertion occupies the same gap | Error ends with `is stale: snapshot: gap changed. Read again`. No target is written. |
 | E-10 | Source-node operation `N*` | Error: `patch: line N: block ops (N*) are not supported; use a line range`. |
 | E-11 | REM, unchanged full-file reference, approval, partial delivery | Eligible under explicit REM exception. |
-| E-12 | Valid no-op on unseen body | no_change; no invented coverage. |
+| E-12 | Valid no-op on unseen body | no_change. No invented coverage. |
 | E-13 | EOF edit changes an unobserved neighbor's terminator | Missing-coverage refusal for actual footprint. |
 | E-14 | Replay returns a historical preview | No fresh reference or observation credit. |
 

@@ -50,13 +50,26 @@ func readFixture(t *testing.T, cwd, name string) string {
 	return string(data)
 }
 
+func boundEvidence(env tool.Env, input string) tool.Env {
+	if env.Evidence.Bounded() {
+		return env
+	}
+	env.Evidence = snapshot.Evidence{Consumer: snapshot.ConsumerModel, Cutoff: 1}
+	for _, tail := range strings.Split(input, "@")[1:] {
+		if ref, _, ok := strings.Cut(tail, "]"); ok && snapshot.ValidRef(ref) {
+			env.Snapshots.Bind(ref, snapshot.ConsumerModel, 1)
+		}
+	}
+	return env
+}
+
 func runPatch(t *testing.T, env tool.Env, style Style, input string) (tool.Result, error) {
 	t.Helper()
 	args := []byte(input)
 	if style != Replace {
 		args = []byte(`{"input":` + snapshot.JSONString(input) + `}`)
 	}
-	return New(string(style)).Run(t.Context(), tool.Call{ID: "call", Args: args}, env)
+	return New(string(style)).Run(t.Context(), tool.Call{ID: "call", Args: args}, boundEvidence(env, input))
 }
 
 func seedReference(env tool.Env, path, body string, shown bool) string {
@@ -241,7 +254,7 @@ func checkStyleIteration(t *testing.T, env tool.Env, cwd string, style Style, rn
 	source := bodyLines(lines)
 	writeFixture(t, cwd, "f.txt", source)
 	input := renderStyle(style, lines, edits, styleProofFor(env, style, source))
-	plan, err := New(string(style)).Plan(t.Context(), tool.Call{ID: "property", Args: styleArgs(style, input)}, env)
+	plan, err := New(string(style)).Plan(t.Context(), tool.Call{ID: "property", Args: styleArgs(style, input)}, boundEvidence(env, input))
 	if err != nil {
 		t.Fatalf("plan: %v\n%s", err, input)
 	}

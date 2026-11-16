@@ -53,6 +53,7 @@ export type StateKey =
 	| "failed"
 	| "declined"
 	| "interrupted"
+	| "timedOut"
 	| "idle"
 	| "disconnected";
 
@@ -63,6 +64,7 @@ export const stateWords: Readonly<Record<StateKey, string>> = {
 	failed: "Failed",
 	declined: "Declined",
 	interrupted: "Stopped",
+	timedOut: "Timed out",
 	idle: "Ready",
 	disconnected: "Offline",
 };
@@ -78,6 +80,7 @@ const stateKeys: Readonly<Record<string, StateKey>> = {
 	failed: "failed",
 	declined: "declined",
 	interrupted: "interrupted",
+	timedOut: "timedOut",
 	disconnected: "disconnected",
 };
 
@@ -97,11 +100,6 @@ export function stateKey(
 		return "awaitingApproval";
 	}
 	return Object.hasOwn(stateKeys, status) ? (stateKeys[status] ?? null) : null;
-}
-
-export function itemStatusLabel(status: string): string {
-	const key = stateKey(status);
-	return key === null ? status : stateWords[key];
 }
 
 const planStatusLabels: Record<PlanStepStatus, string> = {

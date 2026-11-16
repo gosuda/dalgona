@@ -18,15 +18,16 @@ func TestTurnReadsThenAnswers(t *testing.T) {
 	thread := h.start()
 	h.submit(thread, "what is in a.txt?")
 	h.waitIdle(thread)
+	events := h.events(thread.ID())
+	visible, resolved := projectVisibleEvents(events)
 	want := []string{
-		"session.created", "turn.started", "user.message", "assistant.message",
+		"session.created", "turn.started", "user.message", "turn.effort", "assistant.message",
 		"approval.requested", "approval.resolved", "tool.started", "tool.completed",
 		"assistant.message", "turn.completed",
 	}
-	if got := h.types(thread.ID()); !slices.Equal(got, want) {
-		t.Fatalf("events = %v\nwant     %v\nturn %+v", got, want, lastTurn(h.events(thread.ID())))
+	if !slices.Equal(visible, want) {
+		t.Fatalf("events = %v\nwant     %v\nturn %+v", visible, want, lastTurn(events))
 	}
-	events := h.events(thread.ID())
 	if turn := lastTurn(events); turn.Status != statusCompleted {
 		t.Fatalf("turn = %+v", turn)
 	}
@@ -34,10 +35,44 @@ func TestTurnReadsThenAnswers(t *testing.T) {
 	if !strings.Contains(output, "alpha line") {
 		t.Fatalf("second request tool output = %q", output)
 	}
-	resolved := events[5].Event.(event.ApprovalResolved)
 	if resolved.Decision != "accept" || resolved.By != "mode:auto" {
 		t.Fatalf("read approval = %+v", resolved)
 	}
+	resolutions := countTurnEffortResolutions(t, events, lastTurn(events).TurnID)
+	if resolutions != 1 || h.model.count() != 2 {
+		t.Fatalf("resolutions = %d for %d model rounds, want one for two", resolutions, h.model.count())
+	}
+}
+
+func projectVisibleEvents(events []event.Seqd) ([]string, event.ApprovalResolved) {
+	var visible []string
+	var resolved event.ApprovalResolved
+	for _, item := range events {
+		switch value := item.Event.(type) {
+		case event.PromptBase, event.PromptBound:
+			continue
+		case event.ApprovalResolved:
+			resolved = value
+		}
+		visible = append(visible, item.Event.Type())
+	}
+	return visible, resolved
+}
+
+func countTurnEffortResolutions(t *testing.T, events []event.Seqd, turnID string) int {
+	t.Helper()
+	resolutions := 0
+	for _, record := range events {
+		effort, ok := record.Event.(event.TurnEffort)
+		if !ok {
+			continue
+		}
+		resolutions++
+		if effort.TurnID != turnID || effort.Effort != "" {
+			t.Fatalf("resolved effort = %+v, want the open turn with no request effort", effort)
+		}
+	}
+	return resolutions
 }
 
 func TestSystemPromptIsStableAndNoticeRidesNewestMessage(t *testing.T) {
@@ -57,9 +92,8 @@ func TestSystemPromptIsStableAndNoticeRidesNewestMessage(t *testing.T) {
 	if len(texts) != 2 || strings.Contains(texts[0], "<system-notice>") || !strings.Contains(texts[1], "<system-notice>") {
 		t.Fatalf("user texts = %q", texts)
 	}
-	reasoning, _ := second["reasoning"].(map[string]any)
-	if first["reasoning"] != nil || reasoning["effort"] != "high" {
-		t.Fatalf("reasoning first=%v second=%v", first["reasoning"], second["reasoning"])
+	if first["reasoning"] != nil || second["reasoning"] != nil {
+		t.Fatalf("reasoning first=%v second=%v; gpt-test lacks max, so the keyword effort is ignored", first["reasoning"], second["reasoning"])
 	}
 }
 

@@ -2,7 +2,10 @@ package rpc
 
 import (
 	"context"
-	"encoding/json/v2"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -93,5 +96,59 @@ func mustUnmarshal(t *testing.T, raw []byte, v any) {
 	t.Helper()
 	if err := json.Unmarshal(raw, v); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type durationSink struct {
+	turns []Turn
+	items []Item
+}
+
+func (s *durationSink) turn(_ string, turn Turn) { s.turns = append(s.turns, turn) }
+func (s *durationSink) item(method, _ string, it *Item) {
+	if method == methodItemCompleted {
+		s.items = append(s.items, *it)
+	}
+}
+func (s *durationSink) notify(string, func() writer) {}
+
+func TestRecordsWithoutTimesOmitDurations(t *testing.T) {
+	sink := &durationSink{}
+	tr := newTracker("t1", nil, nil, nil, slog.New(slog.DiscardHandler))
+	tr.sink = sink
+	tr.apply(1, event.TurnStarted{TurnID: "turn-1"})
+	tr.apply(2, event.ToolStarted{CallID: "c1", TurnID: "turn-1", Tool: "exec", Class: "exec", Args: jsontext.Value(`{"command":"ls"}`)})
+	tr.apply(3, event.ToolCompleted{CallID: "c1", OK: true})
+	tr.apply(4, event.TurnCompleted{TurnID: "turn-1", Status: statusCompleted})
+	if len(sink.turns) != 2 || len(sink.items) != 1 {
+		t.Fatalf("turns = %+v items = %+v", sink.turns, sink.items)
+	}
+	encoded := newOut()
+	done := sink.turns[1]
+	done.write(encoded)
+	raw, err := encoded.bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "durationMs") {
+		t.Fatalf("turn/completed without times carries durationMs: %s", raw)
+	}
+	if sink.items[0].DurationMs != nil {
+		t.Fatalf("command without journal times has durationMs %d", *sink.items[0].DurationMs)
+	}
+
+	timed := &durationSink{}
+	tr2 := newTracker("t1", nil, nil, nil, slog.New(slog.DiscardHandler))
+	tr2.sink = timed
+	begin := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
+	tr2.apply(1, event.TurnStarted{TurnID: "turn-1", StartedAt: begin})
+	tr2.apply(2, event.ToolStarted{CallID: "c1", TurnID: "turn-1", Tool: "exec", Class: "exec", StartedAt: begin, Args: jsontext.Value(`{"command":"ls"}`)})
+	tr2.apply(3, event.ToolCompleted{CallID: "c1", OK: true, CompletedAt: begin.Add(2 * time.Second)})
+	tr2.apply(4, event.TurnCompleted{TurnID: "turn-1", Status: statusCompleted, CompletedAt: begin.Add(3 * time.Second)})
+	if timed.turns[1].DurationMs != 3000 {
+		t.Fatalf("turn durationMs = %d, want 3000", timed.turns[1].DurationMs)
+	}
+	if timed.items[0].DurationMs == nil || *timed.items[0].DurationMs != 2000 {
+		t.Fatalf("item durationMs = %+v, want 2000", timed.items[0].DurationMs)
 	}
 }

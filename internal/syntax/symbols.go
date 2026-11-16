@@ -1,6 +1,7 @@
 package syntax
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 
@@ -21,13 +22,22 @@ const (
 	kindModule    Kind = "module"
 	kindMacro     Kind = "macro"
 	kindSection   Kind = "section"
+	kindOwner     Kind = "owner"
 )
 
 type Symbol struct {
 	Kind       Kind
 	Name       string
+	Owner      string
 	Start, End int
 	Depth      int
+}
+
+func (s Symbol) Qualified() string {
+	if s.Owner == "" {
+		return s.Name
+	}
+	return s.Owner + "." + s.Name
 }
 
 type Report struct {
@@ -59,6 +69,7 @@ var kindByLibrary = map[string]Kind{
 	"section":     kindSection,
 	"constructor": kindMethod,
 	"record":      kindClass,
+	"owner":       kindOwner,
 }
 
 func kindOf(library string) (Kind, error) {
@@ -67,6 +78,25 @@ func kindOf(library string) (Kind, error) {
 		return "", fmt.Errorf("syntax: unknown kind %s", library)
 	}
 	return kind, nil
+}
+
+type outlinedSymbol struct {
+	symbol     Symbol
+	start, end int
+}
+
+type treeOutline struct {
+	symbols   []outlinedSymbol
+	nameSpans [][2]int
+	stopped   bool
+}
+
+func (o treeOutline) publicSymbols() []Symbol {
+	var out []Symbol
+	for _, s := range o.symbols {
+		out = append(out, s.symbol)
+	}
+	return out
 }
 
 func (p *Parser) Symbols(ctx context.Context, src []byte) ([]Symbol, Report, error) {
@@ -78,51 +108,85 @@ func (p *Parser) Symbols(ctx context.Context, src []byte) ([]Symbol, Report, err
 		return nil, report, err
 	}
 	defer tree.Release()
-	outliner, err := p.lang.outliner()
-	if err != nil {
-		return nil, Report{}, fmt.Errorf("syntax: outliner %s: %w", p.lang.name, err)
-	}
-	forest, outline := outliner.OutlineTree(tree)
-	if outline.DeclineReason != "" {
-		return nil, report, fmt.Errorf("syntax: outline declined: %s", outline.DeclineReason)
-	}
-	if outline.Truncated {
-		return nil, Report{Stopped: true}, nil
-	}
-	symbols, err := flatten(forest)
+	outline, err := p.outlineTree(tree)
 	if err != nil {
 		return nil, report, err
 	}
-	return symbols, report, nil
+	if outline.stopped {
+		return nil, Report{Stopped: true}, nil
+	}
+	return outline.publicSymbols(), report, nil
 }
 
-func flatten(forest []gotreesitter.OutlineSymbol) ([]Symbol, error) {
-	var out []Symbol
+func (p *Parser) outlineTree(tree *gotreesitter.Tree) (treeOutline, error) {
+	outliner, err := p.lang.outliner()
+	if err != nil {
+		return treeOutline{}, fmt.Errorf("syntax: outliner %s: %w", p.lang.name, err)
+	}
+	forest, report := outliner.OutlineTree(tree)
+	if report.DeclineReason != "" {
+		return treeOutline{}, fmt.Errorf("syntax: outline declined: %s", report.DeclineReason)
+	}
+	if report.Truncated {
+		return treeOutline{stopped: true}, nil
+	}
+	symbols, err := flatten(forest)
+	if err != nil {
+		return treeOutline{}, err
+	}
+	return treeOutline{symbols: symbols, nameSpans: appendNameSpans(nil, forest)}, nil
+}
+
+func appendNameSpans(spans [][2]int, forest []gotreesitter.OutlineSymbol) [][2]int {
 	for _, s := range forest {
-		if err := appendKept(&out, s, 0); err != nil {
+		spans = append(spans, [2]int{int(s.NameRange.StartByte), int(s.NameRange.EndByte)})
+		spans = appendNameSpans(spans, s.Children)
+	}
+	return spans
+}
+
+func flatten(forest []gotreesitter.OutlineSymbol) ([]outlinedSymbol, error) {
+	var out []outlinedSymbol
+	for _, root := range forest {
+		if err := appendKept(&out, root, 0, ""); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
 
-func appendKept(out *[]Symbol, s gotreesitter.OutlineSymbol, depth int) error {
+func appendKept(out *[]outlinedSymbol, s gotreesitter.OutlineSymbol, depth int, parent string) error {
 	kind, err := kindOf(s.Kind)
 	if err != nil {
 		return err
 	}
-	*out = append(*out, Symbol{
-		Kind:  kind,
-		Name:  s.Name,
-		Start: int(s.Range.StartPoint.Row) + 1,
-		End:   lastLine(s.Range),
-		Depth: depth,
+	owner := cmp.Or(s.Owner, parent)
+	qualified := Symbol{Name: s.Name, Owner: owner}.Qualified()
+	if kind == kindOwner {
+		for _, child := range s.Children {
+			if err := appendKept(out, child, depth, qualified); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	*out = append(*out, outlinedSymbol{
+		symbol: Symbol{
+			Kind:  kind,
+			Name:  s.Name,
+			Owner: owner,
+			Start: int(s.Range.StartPoint.Row) + 1,
+			End:   lastLine(s.Range),
+			Depth: depth,
+		},
+		start: int(s.Range.StartByte),
+		end:   int(s.Range.EndByte),
 	})
 	if !containerKinds[kind] {
 		return checkKinds(s.Children)
 	}
 	for _, child := range s.Children {
-		if err := appendKept(out, child, depth+1); err != nil {
+		if err := appendKept(out, child, depth+1, qualified); err != nil {
 			return err
 		}
 	}

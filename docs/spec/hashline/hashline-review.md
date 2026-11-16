@@ -38,11 +38,11 @@ below refer to its physical lines, not re-rendered tool-response line numbers.
 | S-PROOF | 5414-5432 | Before-image resolution, raw bytes, Seen, Chain, proof requirements and caps. |
 | S-WRITE | 5434-5443 | Approval recheck, staging, rollback, crash and external-race limitations. |
 | S-CONFIG | 5445-5475 | Style values, aliases, model selection and anchor default. |
-| S-GRAMMAR | 5507-5565 | Four-hex Hashline header; PUT/CUT/gaps/REM/MV and body syntax. |
+| S-GRAMMAR | 5507-5565 | Four-hex Hashline header. PUT/CUT/gaps/REM/MV and body syntax. |
 | S-AST | 5583-5589 | Existing parser reuse, node addressing and mapped-coordinate checks. |
 | S-OUTPUT | 5593-5702 | Echoes, stale/unknown tags, no-op errors, duplicate sections and I/O reports. |
 | S-TEST | 5704-5810 | Existing proof, byte, ambiguity, write and style acceptance tests. |
-| S-PRIVATE | 106-112; 622-628 | Private planning/public product boundary. |
+| S-PRIVATE | 106-112 and 622-628 | Private planning/public product boundary. |
 
 The conversation proposals are design inputs, not implementation evidence.
 Earlier assistant safety rankings, success-rate predictions, and a 15,048-case
@@ -124,13 +124,14 @@ restored/partial/unknown outcomes, runtime invocation identity, and existing-jou
 start/settled records. Unsettled recovery is indeterminate, not authority to run
 again. C12-C16 state the rule. IO and REP tests check it. No exactly-once filesystem guarantee is claimed.
 
-### Medium: memory budgets need host-wide accounting
+### Medium: memory budgets need explicit accounting
 
 Eight MiB per thread would allow about 3.9 GiB across 500 threads before other
-allocations. A shared pool also needs limits on metadata, pins, staging, and
-batches that cannot fit.
+allocations. Budgets also need limits on metadata, pins, staging, and batches
+that cannot fit.
 
-Revision: proposed 32 MiB retained-evidence and 64 MiB host-wide staging budgets.
+Revision: proposed 64 MiB retained-evidence budget per thread and 64 MiB staging budget per call.
+No host-wide pool exists.
 All-or-none lease admission, no partial-pin waits or hidden copies. Successful
 writes remain successful when only fresh-reference retention fails. C14 states the rule. MEM tests check it.
 These are allocation budgets, not measured total-RSS results.
@@ -185,16 +186,16 @@ rules and a fixed coverage-policy choice, not a dynamic proof framework.
 |---|---|
 | One patch tool, shared IR, observers, staging and writer | Retained. |
 | Before-image coordinates, containment, approval and source caps | Retained and formalized. |
-| Seen/Chain | Retained; delivery provenance and revision continuity explicit. |
+| Seen/Chain | Retained. Delivery provenance and revision continuity are explicit. |
 | Four-hex snapshot header | Replaced only in new profiles by bound references. |
 | Explicit file-delete exception | Retained. Both descriptions state it: the Enhanced one at `description.go:13` and the Light one at `description.go:11`. |
 | Stale head/tail bypass | Legacy checks the tag before every locator kind, gaps included. Profiles map head and tail gaps through the snapshot store. |
 | No-change failure | Profiles return `no_change` for a valid exact no-op. The writer returns `no_change` for an empty batch in every style. |
 | Duplicate-file-section failure | Same-reference sections MAY merge in new profiles only. |
-| Output shape | Existing fields retained; versioned metadata added only for new profiles. |
+| Output shape | Existing fields retained. Versioned metadata added only for new profiles. |
 | External drift | Remains a hard history boundary, not auto-relocation input. |
-| NEW final-newline behavior | Explicit rule for new profiles; existing-file rules retained. |
-| No-clobber NEW/MV publication | Explicit implementation obligation for new profiles; no overwrite fallback. |
+| NEW final-newline behavior | Explicit rule for new profiles. Existing-file rules retained. |
+| No-clobber NEW/MV publication | Explicit implementation obligation for new profiles. No overwrite fallback. |
 | Invocation replay | Proposed runtime/store integration, not a claimed existing feature. |
 | Product defaults and aliases | Unchanged. |
 

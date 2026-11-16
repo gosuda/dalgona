@@ -23,6 +23,7 @@ let {
 const reducedMotion = new MediaQuery("(prefers-reduced-motion: reduce)");
 
 let clock = $state(Date.now());
+let retryUntil: number | null = $state(null);
 
 $effect(() => {
 	void tick;
@@ -39,14 +40,25 @@ $effect(() => {
 	return () => clearInterval(timer);
 });
 
+$effect(() => {
+	if (retryRemainingMs === null) {
+		retryUntil = null;
+		return;
+	}
+	const now = Date.now();
+	if (untrack(() => reducedMotion.current)) clock = now;
+	retryUntil = now + retryRemainingMs;
+});
+
 let elapsed = $derived(
 	startedAtMs === null ? "" : formatDuration(Math.max(0, clock - startedAtMs)),
 );
 
 let word = $derived(stateWords[key]);
-let retry = $derived(
-	retryRemainingMs === null ? "" : formatRetryWait(retryRemainingMs),
+let retryLeft = $derived(
+	retryUntil === null ? 0 : Math.max(0, retryUntil - clock),
 );
+let retry = $derived(retryUntil === null ? "" : formatRetryWait(retryLeft));
 </script>
 
 {#if key === "inProgress"}

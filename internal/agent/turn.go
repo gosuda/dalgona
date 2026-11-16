@@ -20,18 +20,22 @@ const (
 )
 
 type worker struct {
-	t             *Thread
-	turnID        string
-	continuation  bool
-	registry      *model.Registry
-	inBand        *inBandCalls
-	settings      Settings
-	tools         *toolset
-	contextWindow int
-	round         *reviewRound
-	eligible      bool
-	recovering    bool
-	reviewed      bool
+	t              *Thread
+	turnID         string
+	turnEffort     *string
+	continuation   bool
+	registry       *model.Registry
+	inBand         *inBandCalls
+	settings       Settings
+	tools          *toolset
+	contextWindow  int
+	turnCtx        context.Context
+	round          *reviewRound
+	eligible       bool
+	recovering     bool
+	reviewed       bool
+	reviewFailures int
+	requestContext requestContext
 }
 
 func pathSettings(created event.SessionCreated, records []event.Seqd) Settings {
@@ -96,6 +100,7 @@ func (a *actor) idle() {
 }
 
 func (w *worker) runTurn(ctx context.Context) {
+	w.turnCtx = ctx
 	if err := w.prime(ctx); err != nil {
 		w.end(ctx, outcome{status: statusFailed, failure: err.Error()})
 		return
@@ -104,6 +109,11 @@ func (w *worker) runTurn(ctx context.Context) {
 }
 
 func (w *worker) prime(ctx context.Context) error {
+	if w.requestContext.baseGeneration == 0 {
+		if err := w.initializeContext(ctx); err != nil {
+			return err
+		}
+	}
 	v, err := w.t.view()
 	if err != nil {
 		return err

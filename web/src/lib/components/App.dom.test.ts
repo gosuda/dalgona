@@ -355,6 +355,169 @@ describe("thread header state", () => {
 	});
 });
 
+describe("status announcement", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	function announcement(container: HTMLElement): string | null {
+		return (
+			container.querySelector(".notices[role=status] .sr-only")?.textContent ??
+			null
+		);
+	}
+
+	test("the status region follows the open turn", async () => {
+		const { session, handlers } = sessionWithHandler();
+		session.activeThreadId = "thread-1";
+		handlers.onNotification(
+			parsed("thread/started", {
+				thread: {
+					id: "thread-1",
+					updatedAt: 1,
+					status: { type: "idle" },
+					turns: [],
+				},
+			}),
+		);
+		const { container } = render(App, { props: { session } });
+		await tick();
+		expect(announcement(container)).toBe("");
+
+		handlers.onNotification(
+			parsed("turn/started", {
+				threadId: "thread-1",
+				turn: { id: "turn-2", status: "inProgress", items: [] },
+			}),
+		);
+		await tick();
+		expect(announcement(container)).toBe("Working");
+
+		handlers.onNotification(
+			parsed("turn/completed", {
+				threadId: "thread-1",
+				turn: {
+					id: "turn-2",
+					items: [],
+					status: "completed",
+					startedAt: 1_700_000_000,
+					completedAt: 1_700_000_004,
+					durationMs: 4000,
+				},
+			}),
+		);
+		await tick();
+		expect(announcement(container)).toBe("Done");
+	});
+
+	test("the status region carries the session review note while the turn runs", async () => {
+		const { session, handlers } = sessionWithHandler();
+		session.activeThreadId = "thread-1";
+		handlers.onNotification(
+			parsed("thread/started", {
+				thread: {
+					id: "thread-1",
+					updatedAt: 1,
+					status: { type: "idle" },
+					turns: [],
+				},
+			}),
+		);
+		const { container } = render(App, { props: { session } });
+		handlers.onNotification(
+			parsed("turn/started", {
+				threadId: "thread-1",
+				turn: { id: "turn-2", status: "inProgress", items: [] },
+			}),
+		);
+		await tick();
+		expect(announcement(container)).toBe("Working");
+
+		session.reviewNote = "Flagged: removed code";
+		await tick();
+		expect(announcement(container)).toBe("Flagged: removed code");
+
+		session.reviewNote = null;
+		await tick();
+		expect(announcement(container)).toBe("Working");
+	});
+});
+
+describe("open thread hue", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	function twoThreads(): Session {
+		const { session } = sessionWithHandler();
+		session.connection = "connected";
+		session.threads = [
+			{
+				...threadSummary("idle", []),
+				id: "thread-1",
+				title: "first",
+				preview: "first",
+			},
+			{
+				...threadSummary("idle", []),
+				id: "thread-2",
+				title: "second",
+				preview: "second",
+			},
+		];
+		return session;
+	}
+
+	function rowHue(container: HTMLElement, title: string): string | null {
+		for (const row of container.querySelectorAll("button.thread")) {
+			if (row.querySelector(".title")?.textContent === title) {
+				return row.querySelector(".hue-dot")?.getAttribute("data-hue") ?? null;
+			}
+		}
+		throw new Error(`no thread row ${title}`);
+	}
+
+	function openView(container: HTMLElement): HTMLElement {
+		const main = container.querySelector<HTMLElement>("main");
+		if (main === null) throw new Error("no open view");
+		return main;
+	}
+
+	test("the open view carries the hue of the open thread's row", async () => {
+		const session = twoThreads();
+		const { container } = render(App, { props: { session } });
+		const view = openView(container);
+		const first = rowHue(container, "first");
+		const second = rowHue(container, "second");
+		expect(first).not.toBeNull();
+		expect(second).not.toBeNull();
+		expect(first).not.toBe(second);
+
+		session.activeThreadId = "thread-1";
+		await tick();
+		expect(view.getAttribute("data-hue")).toBe(first);
+
+		session.activeThreadId = "thread-2";
+		await tick();
+		expect(view.getAttribute("data-hue")).toBe(second);
+	});
+
+	test("a view with no thread open carries no hue", async () => {
+		const session = twoThreads();
+		const { container } = render(App, { props: { session } });
+		const view = openView(container);
+		expect(view.hasAttribute("data-hue")).toBe(false);
+
+		session.activeThreadId = "thread-1";
+		await tick();
+		expect(view.hasAttribute("data-hue")).toBe(true);
+
+		session.activeThreadId = null;
+		await tick();
+		expect(view.hasAttribute("data-hue")).toBe(false);
+	});
+});
+
 describe("file-change approval diff", () => {
 	afterEach(() => {
 		cleanup();
@@ -741,6 +904,166 @@ describe("keyboard paths", () => {
 		expect(dialog().textContent).toContain("seq 30");
 		fireEvent.keyDown(dialog(), { key: "Escape" });
 		expect(openDialogs()).toBe(0);
+	});
+});
+
+describe("point of regard and tab stops", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	function sidebarStart(container: HTMLElement): HTMLElement {
+		const button = container.querySelector<HTMLElement>(
+			".sidebar header button",
+		);
+		if (button === null) throw new Error("no sidebar start button");
+		return button;
+	}
+
+	function shownPoints(container: HTMLElement): HTMLElement[] {
+		return [...container.querySelectorAll<HTMLElement>(".point")].filter(
+			(element) => element.closest("dialog:not([open])") === null,
+		);
+	}
+
+	function runningSession(): { session: Session; handlers: RpcHandlers } {
+		const { session, handlers } = connectedSession();
+		handlers.onNotification(
+			parsed("thread/started", {
+				thread: {
+					id: "thread-1",
+					updatedAt: 1,
+					status: { type: "idle" },
+					turns: [],
+				},
+			}),
+		);
+		handlers.onNotification(
+			parsed("turn/started", {
+				threadId: "thread-1",
+				turn: { id: "turn-2", status: "inProgress", items: [] },
+			}),
+		);
+		return { session, handlers };
+	}
+
+	test("exactly one point per view", async () => {
+		const empty = sessionWithHandler();
+		empty.session.connection = "connected";
+		const emptyView = render(App, { props: { session: empty.session } });
+		await tick();
+		const emptyPoints = shownPoints(emptyView.container);
+		expect(emptyPoints).toHaveLength(1);
+		expect(emptyPoints[0]?.textContent?.trim()).toBe("Start thread");
+		expect(emptyPoints[0]?.closest(".empty-state")).not.toBeNull();
+		expect(sidebarStart(emptyView.container).classList.contains("point")).toBe(
+			false,
+		);
+		empty.session.stop();
+
+		const idle = connectedSession();
+		const idleView = render(App, { props: { session: idle.session } });
+		await tick();
+		const idlePoints = shownPoints(idleView.container);
+		expect(idlePoints).toHaveLength(1);
+		expect(idlePoints[0]?.closest(".composer")).not.toBeNull();
+		expect(idlePoints[0]?.getAttribute("type")).toBe("submit");
+		expect(sidebarStart(idleView.container).classList.contains("point")).toBe(
+			false,
+		);
+
+		const running = runningSession();
+		const runningView = render(App, { props: { session: running.session } });
+		await tick();
+		const runningPoints = shownPoints(runningView.container);
+		expect(runningPoints).toHaveLength(1);
+		expect(runningPoints[0]?.classList.contains("live")).toBe(true);
+		expect(runningPoints[0]?.closest(".thread-head")).not.toBeNull();
+		expect(
+			sidebarStart(runningView.container).classList.contains("point"),
+		).toBe(false);
+
+		const deciding = connectedSession();
+		deciding.handlers.onRequest(commandApproval("req-1", "cmd-1"));
+		const decidingView = render(App, { props: { session: deciding.session } });
+		await tick();
+		const decidingPoints = shownPoints(decidingView.container);
+		expect(decidingPoints).toHaveLength(1);
+		expect(decidingPoints[0]?.textContent?.trim()).toBe("Accept");
+		expect(decidingPoints[0]?.closest(".request-card")).not.toBeNull();
+		expect(
+			sidebarStart(decidingView.container).classList.contains("point"),
+		).toBe(false);
+	});
+
+	test("no scroll box takes a tab stop", async () => {
+		const { session, handlers } = runningSession();
+		session.threads = Array.from({ length: 40 }, (_, index) => ({
+			...threadSummary("idle", []),
+			id: `thread-${index + 1}`,
+			title: `thread ${index + 1}`,
+			preview: `thread ${index + 1}`,
+		}));
+		for (const at of [1, 2, 3, 4, 5]) {
+			handlers.onNotification(
+				parsed("item/completed", {
+					threadId: "thread-1",
+					turnId: "turn-2",
+					completedAtMs: at,
+					item: {
+						type: "commandExecution",
+						id: `run-${at}`,
+						command: `seq ${at}`,
+						aggregatedOutput: Array.from(
+							{ length: 12 },
+							(_, line) => `line ${line + 1}`,
+						).join("\n"),
+						status: "completed",
+						exitCode: 0,
+					},
+				}),
+			);
+		}
+		handlers.onRequest({
+			...commandApproval("req-1", "cmd-1"),
+			detail:
+				"git log --oneline --decorate --graph --all --stat --summary --follow",
+		});
+		const { container } = render(App, { props: { session } });
+		await tick();
+		const stops: HTMLElement[] = [];
+		const user = userEvent.setup();
+		if (document.activeElement instanceof HTMLElement) {
+			document.activeElement.blur();
+		}
+		for (let attempt = 0; attempt < 200; attempt++) {
+			await user.tab();
+			const active = document.activeElement;
+			if (!(active instanceof HTMLElement) || active === document.body) break;
+			if (stops.length > 0 && active === stops[0]) break;
+			stops.push(active);
+		}
+		expect(stops.length).toBeGreaterThan(0);
+		const stopSelector = "a[href], button, input, select, textarea, summary";
+		const boxes = [
+			container.querySelector("nav"),
+			container.querySelector("#transcript"),
+			...container.querySelectorAll('[role="region"], .dock'),
+		];
+		const threadButtons = [
+			...container.querySelectorAll<HTMLElement>("nav button.thread"),
+		];
+		expect(threadButtons).toHaveLength(40);
+		const reached = new Set(stops);
+		for (const button of threadButtons) {
+			expect(reached.has(button), button.textContent ?? "").toBe(true);
+		}
+		for (const stop of stops) {
+			expect(stop.matches(stopSelector), stop.className).toBe(true);
+			for (const box of boxes) {
+				expect(stop === box).toBe(false);
+			}
+		}
 	});
 });
 

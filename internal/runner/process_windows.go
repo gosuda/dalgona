@@ -139,7 +139,7 @@ func terminateSpawnPID(pid int) error {
 	return windows.TerminateProcess(process, 137)
 }
 
-func ensureProcessGroupGone(pgid int, signal Signal) {}
+func killProcessGroupOnExit(pgid int) {}
 
 func watchCancelWhileWaiting(dir string, pgid int, done <-chan struct{}) {}
 
@@ -169,6 +169,12 @@ func assignJob(cmd *exec.Cmd) (func(), error) {
 	job, err := windows.CreateJobObject(nil, name)
 	if err != nil {
 		return nil, fmt.Errorf("runner: create job: %w", err)
+	}
+	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	limits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
+		_ = windows.CloseHandle(job)
+		return nil, fmt.Errorf("runner: set job kill-on-close: %w", err)
 	}
 	pid, ok := windowsPID(cmd.Process.Pid)
 	if !ok {
@@ -304,7 +310,10 @@ func processStartTime(pid int) string {
 	return strconv.FormatUint(value, 10)
 }
 
-func exitDetails(waitErr error) (int, string) {
+func exitDetails(cmd *exec.Cmd, waitErr error) (int, string) {
+	if cmd.ProcessState != nil {
+		return cmd.ProcessState.ExitCode(), ""
+	}
 	if waitErr == nil {
 		return 0, ""
 	}

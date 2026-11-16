@@ -95,6 +95,7 @@ func (yieldTool) Spec() tool.Spec {
 			"Pass exactly one field: `data` (any JSON value) on success, or `error` (a string) on failure. " +
 			"The parent receives {\"data\": <value>} or {\"error\": \"<text>\"}.",
 		Schema: jsontext.Value(`{"type":"object","properties":{"data":{},"error":{"type":"string"}},"additionalProperties":false}`),
+		Serial: true,
 	}
 }
 

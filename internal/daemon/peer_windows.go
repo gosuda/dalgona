@@ -16,7 +16,7 @@ func verifyDialedPeer(net.Conn) error {
 	return nil
 }
 
-func verifyHome(home string) error {
+func VerifyHome(home string) error {
 	return auth.CheckHomeDir(home)
 }
 

@@ -32,10 +32,12 @@ func (r *recordedOutput) String() string {
 }
 
 func startRecorded(width, height int, out *recordedOutput) *emulatedRun {
-	program := tea.NewProgram(
+	var program *tea.Program
+	output := newDockOutput(out, nil, func(msg dockWrittenMsg) { program.Send(msg) })
+	program = tea.NewProgram(
 		noInit{model: newModel(new(fakeCaller), Options{}, nil)},
 		tea.WithInput(nil),
-		tea.WithOutput(out),
+		tea.WithOutput(output),
 		tea.WithWindowSize(width, height),
 		tea.WithoutSignals(),
 		tea.WithoutSignalHandler(),

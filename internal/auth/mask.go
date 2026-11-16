@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/gosuda/dalgona/internal/secrets"
 )
 
 type pattern struct {
@@ -66,7 +68,7 @@ func (s *Store) maskLocked(text string) string {
 		s.maskErr = nil
 	}
 	replacements := s.credentialReplacements()
-	hits := s.collectPatternHits(text)
+	hits := s.collectHits(text, replacements)
 	if len(hits) > 0 || s.secretsDirty {
 		if err := s.syncPatternSecrets(hits); err != nil {
 			s.secretsDirty = true
@@ -77,6 +79,7 @@ func (s *Store) maskLocked(text string) string {
 		s.maskErr = nil
 	}
 	replacements = append(replacements, s.lookupPatternReplacements(text)...)
+	replacements = append(replacements, s.recordedBuiltinReplacements(text)...)
 	return applyReplacements(text, replacements)
 }
 
@@ -108,55 +111,67 @@ func (s *Store) UnmaskStrict(text string) (string, error) {
 	return out, nil
 }
 
-func unresolvedPlaceholder(text string) (string, bool) {
-	for offset := 0; offset < len(text); {
+func nextPlaceholder(text string, offset int) (int, int, bool) {
+	for offset < len(text) {
 		rel := strings.Index(text[offset:], "{{secret:")
 		if rel < 0 {
-			return "", false
+			return 0, 0, false
 		}
 		start := offset + rel
 		endRel := strings.Index(text[start:], "}}")
 		if endRel < 0 {
-			return "", false
+			return 0, 0, false
 		}
-		token := text[start : start+endRel+2]
-		if isSecretPlaceholder(token) {
-			return token, true
+		end := start + endRel + 2
+		if isSecretPlaceholder(text[start:end]) {
+			return start, end, true
 		}
 		offset = start + 1
 	}
-	return "", false
+	return 0, 0, false
+}
+
+func unresolvedPlaceholder(text string) (string, bool) {
+	start, end, ok := nextPlaceholder(text, 0)
+	if !ok {
+		return "", false
+	}
+	return text[start:end], true
+}
+
+func placeholderSpans(text string) [][2]int {
+	var spans [][2]int
+	offset := 0
+	for {
+		start, end, ok := nextPlaceholder(text, offset)
+		if !ok {
+			return spans
+		}
+		spans = append(spans, [2]int{start, end})
+		offset = end
+	}
+}
+
+func placeholderBody(token string) (string, bool) {
+	inner, ok := strings.CutPrefix(token, "{{secret:")
+	if !ok {
+		return "", false
+	}
+	return strings.CutSuffix(inner, "}}")
 }
 
 func isSecretPlaceholder(token string) bool {
-	const prefix = "{{secret:"
-	const suffix = "}}"
-	if !strings.HasPrefix(token, prefix) || !strings.HasSuffix(token, suffix) {
+	inner, ok := placeholderBody(token)
+	if !ok || inner == "" {
 		return false
 	}
-	inner := token[len(prefix) : len(token)-len(suffix)]
-	if inner == "" {
-		return false
-	}
-	if strings.HasPrefix(inner, "pattern") {
-		return isPatternPlaceholder(inner)
+	if _, numbered := placeholderPrefix(token); numbered {
+		return true
 	}
 	if strings.HasPrefix(inner, "auth:") {
 		return isAuthPlaceholder(inner)
 	}
 	return isEnvPlaceholder(inner)
-}
-
-func isPatternPlaceholder(inner string) bool {
-	rest, ok := strings.CutPrefix(inner, "pattern")
-	if !ok {
-		return false
-	}
-	index, number, ok := strings.Cut(rest, ":")
-	if !ok || index == "" || number == "" {
-		return false
-	}
-	return isDecimalDigits(index) && isDecimalDigits(number)
 }
 
 func isAuthPlaceholder(inner string) bool {
@@ -181,7 +196,7 @@ func isEnvPlaceholder(inner string) bool {
 	if strings.ContainsAny(inner, ":{}") {
 		return false
 	}
-	if !secretEnvironmentName(inner) {
+	if !SecretEnvironmentName(inner) {
 		return false
 	}
 	return isEnvName(inner)
@@ -269,35 +284,51 @@ func (s *Store) refreshSecrets() {
 }
 
 type patternHit struct {
-	index int
-	value string
+	family string
+	index  int
+	value  string
 }
 
-func patternPrefix(index int) string {
-	return "{{secret:pattern" + strconv.Itoa(index) + ":"
+const (
+	familyPattern = "pattern"
+	familyBuiltin = "builtin"
+	familyKeyword = "keyword"
+)
+
+func patternPrefix(family string, index int) string {
+	return "{{secret:" + family + strconv.Itoa(index) + ":"
+}
+
+func placeholderFamily(inner string) (string, bool) {
+	for _, family := range [...]string{familyPattern, familyBuiltin, familyKeyword} {
+		if strings.HasPrefix(inner, family) {
+			return family, true
+		}
+	}
+	return "", false
+}
+
+func validIndex(family, index string) bool {
+	if family == familyKeyword {
+		return index == ""
+	}
+	return isDecimalDigits(index)
 }
 
 func placeholderPrefix(placeholder string) (string, bool) {
-	const base = "{{secret:pattern"
-	after, ok := strings.CutPrefix(placeholder, base)
+	inner, ok := placeholderBody(placeholder)
 	if !ok {
 		return "", false
 	}
-	indexPart, remainder, ok := strings.Cut(after, ":")
+	family, ok := placeholderFamily(inner)
 	if !ok {
 		return "", false
 	}
-	if _, err := strconv.Atoi(indexPart); err != nil {
+	index, number, ok := strings.Cut(strings.TrimPrefix(inner, family), ":")
+	if !ok || !isDecimalDigits(number) || !validIndex(family, index) {
 		return "", false
 	}
-	number, ok := strings.CutSuffix(remainder, "}}")
-	if !ok {
-		return "", false
-	}
-	if _, err := strconv.Atoi(number); err != nil {
-		return "", false
-	}
-	return base + indexPart + ":", true
+	return "{{secret:" + family + index + ":", true
 }
 
 func findPatternPlaceholder(secrets map[string]string, prefix, value string) (string, bool) {
@@ -337,7 +368,7 @@ func (s *Store) collectPatternHits(text string) []patternHit {
 			if len(value) < 8 {
 				continue
 			}
-			hit := patternHit{index: configured.index, value: value}
+			hit := patternHit{family: familyPattern, index: configured.index, value: value}
 			if _, ok := seen[hit]; ok {
 				continue
 			}
@@ -348,10 +379,43 @@ func (s *Store) collectPatternHits(text string) []patternHit {
 	return hits
 }
 
+func (s *Store) collectHits(text string, covered []replacement) []patternHit {
+	return slices.Concat(s.collectPatternHits(text), s.collectBuiltinHits(text, covered))
+}
+
+func (s *Store) collectBuiltinHits(text string, covered []replacement) []patternHit {
+	if !s.builtin {
+		return nil
+	}
+	spans := placeholderSpans(text)
+	var hits []patternHit
+	seen := make(map[patternHit]struct{})
+	for _, found := range secrets.Scan(text) {
+		hit := patternHit{family: familyBuiltin, index: found.Rule, value: text[found.Start:found.End]}
+		_, duplicate := seen[hit]
+		if duplicate || insidePlaceholder(spans, found) || isCovered(covered, hit.value) {
+			continue
+		}
+		seen[hit] = struct{}{}
+		hits = append(hits, hit)
+	}
+	return hits
+}
+
+func insidePlaceholder(spans [][2]int, found secrets.Hit) bool {
+	return slices.ContainsFunc(spans, func(span [2]int) bool {
+		return span[0] <= found.Start && found.End <= span[1]
+	})
+}
+
+func isCovered(items []replacement, value string) bool {
+	return slices.ContainsFunc(items, func(item replacement) bool { return item.from == value })
+}
+
 func (s *Store) lookupPatternReplacements(text string) []replacement {
 	var items []replacement
 	for _, configured := range s.patterns {
-		prefix := patternPrefix(configured.index)
+		prefix := patternPrefix(familyPattern, configured.index)
 		for _, location := range configured.re.FindAllStringIndex(text, -1) {
 			value := text[location[0]:location[1]]
 			if len(value) < 8 {
@@ -360,6 +424,17 @@ func (s *Store) lookupPatternReplacements(text string) []replacement {
 			if placeholder, ok := findPatternPlaceholder(s.secrets, prefix, value); ok {
 				items = append(items, replacement{from: value, to: placeholder})
 			}
+		}
+	}
+	return items
+}
+
+func (s *Store) recordedBuiltinReplacements(text string) []replacement {
+	var items []replacement
+	for placeholder, value := range s.secrets {
+		prefix, ok := placeholderPrefix(placeholder)
+		if ok && strings.HasPrefix(prefix, "{{secret:"+familyBuiltin) && strings.Contains(text, value) {
+			items = appendSecret(items, replacement{from: value, to: placeholder})
 		}
 	}
 	return items
@@ -396,7 +471,7 @@ func (s *Store) syncPatternSecretsLocked(hits []patternHit) error {
 func allocatePatternHits(secrets map[string]string, hits []patternHit) bool {
 	allocated := false
 	for _, hit := range hits {
-		prefix := patternPrefix(hit.index)
+		prefix := patternPrefix(hit.family, hit.index)
 		if _, ok := findPatternPlaceholder(secrets, prefix, hit.value); ok {
 			continue
 		}
@@ -503,7 +578,7 @@ func (s *Store) credentialReplacements() []replacement {
 	}
 	for _, entry := range os.Environ() {
 		name, value, ok := strings.Cut(entry, "=")
-		if ok && secretEnvironmentName(name) {
+		if ok && SecretEnvironmentName(name) {
 			items = appendSecret(items, replacement{from: value, to: "{{secret:" + name + "}}"})
 		}
 	}
@@ -539,7 +614,7 @@ func appendSecret(items []replacement, item replacement) []replacement {
 	return append(items, item)
 }
 
-func secretEnvironmentName(name string) bool {
+func SecretEnvironmentName(name string) bool {
 	return strings.HasSuffix(name, "_API_KEY") || strings.HasSuffix(name, "_TOKEN") || strings.HasSuffix(name, "_SECRET") || strings.HasSuffix(name, "_PASSWORD")
 }
 

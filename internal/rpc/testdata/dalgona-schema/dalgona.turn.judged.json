@@ -2,13 +2,29 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "dalgona/turn/judged",
   "type": "object",
-  "required": ["threadId", "turnId", "verdict", "summary", "paths"],
+  "required": ["threadId", "turnId", "verdict", "summary", "paths", "by"],
   "additionalProperties": false,
   "properties": {
     "threadId": {"type": "string"},
     "turnId": {"type": "string"},
     "verdict": {"enum": ["clean", "uncertain", "flagged", "error"]},
     "summary": {"type": "string"},
-    "paths": {"type": "array", "items": {"type": "string"}}
+    "paths": {"type": "array", "items": {"type": "string"}},
+    "by": {"type": "string", "minLength": 1},
+    "fallback": {"type": "string", "minLength": 1},
+    "judges": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["part", "by"],
+        "additionalProperties": false,
+        "properties": {
+          "part": {"type": "integer", "minimum": 0},
+          "by": {"type": "string", "minLength": 1},
+          "fallback": {"type": "string", "minLength": 1}
+        }
+      }
+    }
   }
 }

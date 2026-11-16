@@ -366,3 +366,51 @@ func TestRecoverInterruptsOpenAsk(t *testing.T) {
 		t.Fatalf("model saw %q, want %q", out, asktool.TextRestarted)
 	}
 }
+
+type ratchetStubTool struct{ runs *int }
+
+func (ratchetStubTool) Spec() tool.Spec {
+	return tool.Spec{Name: "ratchet", Description: "stub", Schema: jsontext.Value(`{"type":"object"}`)}
+}
+
+func (ratchetStubTool) Class() tool.Class { return tool.ClassRead }
+
+func (r ratchetStubTool) Run(context.Context, tool.Call, tool.Env) (tool.Result, error) {
+	*r.runs++
+	return tool.Result{Output: []byte(`{"approvals":{}}`), OK: true}, nil
+}
+
+func TestRecoverInterruptsOpenRatchetApprove(t *testing.T) {
+	t.Parallel()
+	runs := 0
+	h := newHarness(t, func(h *harness) {
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
+			return []tool.Tool{ratchetStubTool{runs: &runs}}, nil
+		}
+	})
+	args := `{"action":"approve","flow":"x","stage":"inputs","question":"Approve the cases?"}`
+	h.seed(prefix(openTurn("climb"), []event.Event{assistantCall("c1", "ratchet", args)}, []event.Event{startedCall("c1", "ratchet", "read", args)})...)
+	got := completedOutputs(h.recoverSession())["c1"]
+	if got.OK || got.Recovered != "interrupted" || got.Output != asktool.TextRestarted {
+		t.Fatalf("completion = %+v", got)
+	}
+	if runs != 0 {
+		t.Fatalf("approve ran the stub %d times, want 0", runs)
+	}
+	if out := callOutputs(h.model.request(0))["c1"]; out != asktool.TextRestarted {
+		t.Fatalf("model saw %q, want %q", out, asktool.TextRestarted)
+	}
+
+	runs = 0
+	statusArgs := `{"action":"status","flow":"x"}`
+	h2 := newHarness(t, func(h *harness) {
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
+			return []tool.Tool{ratchetStubTool{runs: &runs}}, nil
+		}
+	})
+	h2.seed(prefix(openTurn("climb"), []event.Event{assistantCall("c1", "ratchet", statusArgs)}, []event.Event{startedCall("c1", "ratchet", "read", statusArgs)})...)
+	replayed := completedOutputs(h2.recoverSession())["c1"]
+	if replayed.Recovered != "replayed" || runs != 1 {
+		t.Fatalf("status completion = %+v with %d runs, want replayed with 1 run", replayed, runs)
+	}
+}

@@ -11,13 +11,13 @@ import (
 
 func TestVerifyHomeRefusesLooseMode(t *testing.T) {
 	home := shortHome(t)
-	if err := verifyHome(home); err != nil {
+	if err := VerifyHome(home); err != nil {
 		t.Fatalf("tight home refused: %v", err)
 	}
 	if err := os.Chmod(home, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyHome(home); err == nil {
+	if err := VerifyHome(home); err == nil {
 		t.Fatal("loose home accepted")
 	}
 }

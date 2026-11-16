@@ -11,7 +11,7 @@ A `[runners.<name>]` entry MUST name one service: `docker`, `sprites`, `modal`, 
 | `docker` | `docker.NewFromEnv` | Docker environment |
 | `sprites` | `sprites.NewFromToken` | env `SPRITES_TOKEN`, else `auth.json` key `sprites` |
 | `modal` | `modal.NewFromEnvWithImage` when `image` is set, else `modal.NewFromEnv` | Modal environment or `~/.modal.toml` |
-| `sandbox0` | `sandbox0.New` | env `SANDBOX0_TOKEN`, else `auth.json` key `sandbox0`; env `SANDBOX0_BASE_URL` overrides the URL |
+| `sandbox0` | `sandbox0.New` | env `SANDBOX0_TOKEN`, else `auth.json` key `sandbox0`. env `SANDBOX0_BASE_URL` overrides the URL |
 | `cloudflare` | `cloudflare.New(url, token)` | env `DALGONA_CLOUDFLARE_TOKEN`, else `auth.json` key `cloudflare` |
 
 Every service except `cloudflare` MUST receive `runner.Bootstrap`. A credential MUST come from its environment variable, else from the `auth.json` entry for the service. The binder MUST NOT read the generic `<SERVICE>_API_KEY` variable. A missing credential MUST fail with ``remote: <service> needs <ENV> or `dalgona login <service> --api-key` ``. A `cloudflare` entry without `url` MUST fail.

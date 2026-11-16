@@ -3,13 +3,20 @@ package script_test
 import (
 	"context"
 	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/tool"
+	readtool "github.com/gosuda/dalgona/internal/tool/read"
+	rewritetool "github.com/gosuda/dalgona/internal/tool/rewrite"
+	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 
 func specs(names ...string) []tool.Spec {
@@ -30,8 +37,41 @@ func names(list []tool.Spec) []string {
 	return out
 }
 
+func decodeString(t *testing.T, v jsontext.Value) string {
+	t.Helper()
+	var s string
+	if err := json.Unmarshal([]byte(v), &s); err != nil {
+		t.Fatalf("reply value is not a JSON string: %v", err)
+	}
+	return s
+}
+
 func echoTool(_ context.Context, name string, args jsontext.Value) (jsontext.Value, error) {
 	return jsontext.Value(`{"tool":"` + name + `","args":` + string(args) + `}`), nil
+}
+
+func readFixtureTool(t *testing.T, name, content string) toolFunc {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	local, err := runner.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	env := tool.Env{Runner: local, Cwd: dir, Home: t.TempDir(), Snapshots: snapshot.New()}
+	return func(ctx context.Context, toolName string, args jsontext.Value) (jsontext.Value, error) {
+		if toolName != "read" {
+			return echoTool(ctx, toolName, args)
+		}
+		result, err := readtool.Tool{}.Run(ctx, tool.Call{ID: "read", Name: "read", Args: args}, env)
+		if err != nil {
+			return nil, err
+		}
+		return jsontext.AppendQuote(nil, string(result.Output))
+	}
 }
 
 func TestEvalCellReturnsLastExpressionAndPrints(t *testing.T) {
@@ -142,6 +182,16 @@ func TestEvalFirstListsRatchet(t *testing.T) {
 	}
 }
 
+func TestEvalOnlyListsRatchet(t *testing.T) {
+	all := specs("read", "ratchet", "ask", "eval")
+	if got, want := names(script.ModelTools(config.ToolModeEvalOnly, all)), []string{"ask", "ratchet", "eval"}; !slices.Equal(got, want) {
+		t.Fatalf("eval-only visible = %v, want %v", got, want)
+	}
+	if err := script.CheckDirect(config.ToolModeEvalOnly, "ratchet"); err != nil {
+		t.Fatalf("eval-only rejected a direct ratchet call: %v", err)
+	}
+}
+
 func TestCheckDirectRejectsFoldedTools(t *testing.T) {
 	err := script.CheckDirect(config.ToolModeEvalFirst, "web_fetch")
 	if err == nil || err.Error() != "tool web_fetch is not available in tool_mode eval-first; call it from eval" {
@@ -159,7 +209,7 @@ func TestCheckDirectRejectsFoldedTools(t *testing.T) {
 }
 
 func TestEvalFirstFoldsToolsIntoEval(t *testing.T) {
-	j := newJournal(echoTool)
+	j := newJournal(readFixtureTool(t, "a.txt", "folded reach bytes"))
 	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeEvalFirst, Tools: threadTools})
 	desc := eval.Spec().Description
 	if !strings.Contains(desc, "\nweb_fetch: Run web_fetch.") || strings.Contains(desc, "\nexec: ") || strings.Contains(desc, "Second line") {
@@ -169,9 +219,9 @@ func TestEvalFirstFoldsToolsIntoEval(t *testing.T) {
 	if string(got.Value) != `"web_fetch"` {
 		t.Fatalf("folded call reply = %+v", got)
 	}
-	exec := runEval(t.Context(), t, eval, "call-2", `{"code":"tools.exec(command = 'ls')['tool']"}`)
-	if string(exec.Value) != `"exec"` {
-		t.Fatalf("eval-first cell did not reach the listed exec tool: %+v", exec)
+	read := runEval(t.Context(), t, eval, "call-2", `{"code":"tools.read(path = 'a.txt')"}`)
+	if read.Status != "completed" || !strings.Contains(decodeString(t, read.Value), "1:folded reach bytes\n") {
+		t.Fatalf("eval-first cell did not read the fixture through the real read tool: %+v error = %+v", read, read.Error)
 	}
 }
 
@@ -204,18 +254,30 @@ func TestScriptCannotCallAsk(t *testing.T) {
 }
 
 func TestNormalCellReachesEveryToolWithoutUses(t *testing.T) {
-	eval := script.NewEval(newJournal(echoTool), script.EvalOptions{Mode: config.ToolModeNormal, Tools: threadTools})
-	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools.read(path = 'a.txt')['tool']"}`)
-	if string(got.Value) != `"read"` {
+	j := newJournal(readFixtureTool(t, "a.txt", "plain cell bytes"))
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeNormal, Tools: threadTools})
+	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools.read(path = 'a.txt')"}`)
+	if got.Status != "completed" || !strings.Contains(decodeString(t, got.Value), "1:plain cell bytes\n") {
 		t.Fatalf("normal cell reply = %+v error = %+v", got, got.Error)
+	}
+	if executed, _ := j.counts(); executed != 1 {
+		t.Fatalf("executed %d tool calls, want 1", executed)
 	}
 }
 
 func TestCellsDoNotReachYield(t *testing.T) {
-	eval := script.NewEval(newJournal(echoTool), script.EvalOptions{Mode: config.ToolModeNormal, Tools: specs("read", "yield", "eval")})
+	j := newJournal(echoTool)
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeNormal, Tools: specs("read", "yield", "eval")})
 	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools['yield'](data = 1)"}`)
 	if got.Status != "failed" || errorCode(got) != "error" || !strings.Contains(got.Error.Message, "tool yield is not reachable from this script") {
 		t.Fatalf("reply = %+v error = %+v", got, got.Error)
+	}
+	if executed, _ := j.counts(); executed != 0 {
+		t.Fatalf("yield refusal still executed %d tool calls", executed)
+	}
+	listed := runEval(t.Context(), t, eval, "call-2", `{"code":"'yield' in dir(tools) and 'read' in dir(tools)"}`)
+	if string(listed.Value) != "false" {
+		t.Fatalf("tools reach lists yield or hides read: %+v error = %+v", listed, listed.Error)
 	}
 }
 
@@ -226,10 +288,14 @@ func TestCellsRefuseUserCallsAsDirectOnly(t *testing.T) {
 		{"ratchet approve", `tools.ratchet(action = 'approve', flow = 'x')`, "tool ratchet approve needs the user and runs only as a direct call"},
 	}
 	for _, c := range refused {
-		eval := script.NewEval(newJournal(echoTool), script.EvalOptions{Mode: config.ToolModeNormal, Tools: tools})
+		j := newJournal(echoTool)
+		eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeNormal, Tools: tools})
 		got := runEval(t.Context(), t, eval, "call-1", `{"code":"`+c.code+`"}`)
 		if got.Status != "denied" || errorCode(got) != "scope_exceeded" || got.Error.Message != c.message {
 			t.Fatalf("%s: reply = %+v error = %+v", c.name, got, got.Error)
+		}
+		if executed, _ := j.counts(); executed != 0 {
+			t.Fatalf("%s: refusal still executed %d tool calls", c.name, executed)
 		}
 	}
 	eval := script.NewEval(newJournal(echoTool), script.EvalOptions{Mode: config.ToolModeNormal, Tools: tools})
@@ -259,22 +325,116 @@ func TestYieldStaysDirect(t *testing.T) {
 }
 
 func TestCellCallCapStopsRunawayLoop(t *testing.T) {
-	j := newJournal(echoTool)
+	j := newJournal(readFixtureTool(t, "x.txt", "cap bytes"))
 	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeNormal, Tools: threadTools})
-	got := runEval(t.Context(), t, eval, "call-1", `{"code":"for i in range(1025):\n    tools.read(path = 'x')"}`)
+	got := runEval(t.Context(), t, eval, "call-1", `{"code":"for i in range(1025):\n    tools.read(path = 'x.txt')"}`)
 	if got.Status != "limit_exceeded" || errorCode(got) != "limit_exceeded" {
 		t.Fatalf("reply = %+v error = %+v", got, got.Error)
 	}
 	if executed, _ := j.counts(); executed != 1024 {
 		t.Fatalf("executed %d tool calls, want 1024", executed)
 	}
+	within := runEval(t.Context(), t, eval, "call-2", `{"code":"for i in range(1024):\n    tools.read(path = 'x.txt')"}`)
+	if within.Status != "completed" {
+		t.Fatalf("1024-call cell reply = %+v error = %+v", within, within.Error)
+	}
+}
+
+func TestCellUsesExcludingReadDeniesWithoutReadEffect(t *testing.T) {
+	j := newJournal(readFixtureTool(t, "a.txt", "must not be read"))
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeNormal, Tools: threadTools, Config: config.EvalConfig{Uses: []string{"exec"}, Set: true}})
+	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools.read(path = 'a.txt')"}`)
+	if got.Status != "denied" || errorCode(got) != "scope_exceeded" || got.Error.Message != "tool read is not in this script's uses" {
+		t.Fatalf("reply = %+v error = %+v", got, got.Error)
+	}
+	if executed, _ := j.counts(); executed != 0 {
+		t.Fatalf("denied read still executed %d tool calls", executed)
+	}
+	allowed := runEval(t.Context(), t, eval, "call-2", `{"code":"tools.exec(command = 'ls')['tool']"}`)
+	if string(allowed.Value) != `"exec"` {
+		t.Fatalf("uses-listed exec reply = %+v error = %+v", allowed, allowed.Error)
+	}
+}
+
+const (
+	rewriteCellCode = `tools.rewrite(lang = 'go', pattern = '((identifier) @name (#eq? @name "Old"))', target = 'name', replace = 'New', path = 'a.go')`
+	rewriteSelected = "package a\n\nfunc Old() {}\n"
+	rewriteOther    = "package b\n\nfunc Old() {}\n"
+)
+
+func rewriteFixtureTool(t *testing.T) (toolFunc, string) {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range map[string]string{"a.go": rewriteSelected, "b.go": rewriteOther} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	local, err := runner.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	env := tool.Env{Runner: local, Cwd: dir, Home: t.TempDir(), Snapshots: snapshot.New()}
+	editor := rewritetool.New()
+	return func(ctx context.Context, toolName string, args jsontext.Value) (jsontext.Value, error) {
+		if toolName != "rewrite" {
+			return echoTool(ctx, toolName, args)
+		}
+		result, err := editor.Run(ctx, tool.Call{ID: "rewrite", Name: "rewrite", Args: args}, env)
+		if err != nil {
+			return nil, err
+		}
+		return jsontext.AppendQuote(nil, string(result.Output))
+	}, dir
+}
+
+func rewriteCellArgs(t *testing.T) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]string{"code": rewriteCellCode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func requireFileBytes(t *testing.T, dir, name, want string) {
+	t.Helper()
+	got, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("%s = %q, want %q", name, got, want)
+	}
 }
 
 func TestRewriteIsReachableFromCells(t *testing.T) {
-	j := newJournal(echoTool)
-	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeEvalFirst, Tools: specs("rewrite", "eval")})
-	got := runEval(t.Context(), t, eval, "call-1", `{"code":"tools.rewrite(lang = 'go', pattern = 'x', target = 'x', replace = 'y')['tool']"}`)
-	if string(got.Value) != `"rewrite"` {
-		t.Fatalf("cell call to rewrite = %+v", got)
+	fx, dir := rewriteFixtureTool(t)
+	j := newJournal(fx)
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeEvalFirst, Tools: specs("rewrite", "exec", "eval")})
+	got := runEval(t.Context(), t, eval, "call-1", rewriteCellArgs(t))
+	if got.Status != "completed" || !strings.Contains(decodeString(t, got.Value), "a.go") {
+		t.Fatalf("cell call to rewrite = %+v error = %+v", got, got.Error)
 	}
+	if executed, _ := j.counts(); executed != 1 {
+		t.Fatalf("executed %d tool calls, want 1", executed)
+	}
+	requireFileBytes(t, dir, "a.go", "package a\n\nfunc New() {}\n")
+	requireFileBytes(t, dir, "b.go", rewriteOther)
+}
+
+func TestCellUsesExcludingRewriteDeniesWithoutWriteEffect(t *testing.T) {
+	fx, dir := rewriteFixtureTool(t)
+	j := newJournal(fx)
+	eval := script.NewEval(j, script.EvalOptions{Mode: config.ToolModeEvalFirst, Tools: specs("rewrite", "exec", "eval"), Config: config.EvalConfig{Uses: []string{"exec"}, Set: true}})
+	got := runEval(t.Context(), t, eval, "call-1", rewriteCellArgs(t))
+	if got.Status != "denied" || errorCode(got) != "scope_exceeded" || got.Error.Message != "tool rewrite is not in this script's uses" {
+		t.Fatalf("reply = %+v error = %+v", got, got.Error)
+	}
+	if executed, _ := j.counts(); executed != 0 {
+		t.Fatalf("denied rewrite still executed %d tool calls", executed)
+	}
+	requireFileBytes(t, dir, "a.go", rewriteSelected)
+	requireFileBytes(t, dir, "b.go", rewriteOther)
 }

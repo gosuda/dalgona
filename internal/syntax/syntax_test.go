@@ -190,13 +190,13 @@ func TestSymbolsGoFixture(t *testing.T) {
 	want := []Symbol{
 		{Kind: "type", Name: "Shape", Start: 3, End: 5, Depth: 0},
 		{Kind: "interface", Name: "Named", Start: 7, End: 9, Depth: 0},
-		{Kind: "method", Name: "Name", Start: 8, End: 8, Depth: 1},
+		{Kind: "method", Name: "Name", Owner: "Named", Start: 8, End: 8, Depth: 1},
 		{Kind: "type", Name: "Count", Start: 11, End: 11, Depth: 0},
 		{Kind: "type", Name: "Alias", Start: 13, End: 13, Depth: 0},
 		{Kind: "constant", Name: "Limit", Start: 15, End: 15, Depth: 0},
 		{Kind: "variable", Name: "Default", Start: 17, End: 17, Depth: 0},
 		{Kind: "function", Name: "Area", Start: 19, End: 22, Depth: 0},
-		{Kind: "method", Name: "Double", Start: 24, End: 26, Depth: 0},
+		{Kind: "method", Name: "Double", Owner: "Shape", Start: 24, End: 26, Depth: 0},
 	}
 	if !slices.Equal(symbols, want) {
 		t.Fatalf("symbols =\n%v\nwant\n%v", symbols, want)
@@ -276,8 +276,8 @@ func TestSymbolsFixtureTypeScript(t *testing.T) {
 	assertFixtureSymbols(t, "typescript", "testdata/typescript/definitions.ts", []Symbol{
 		{Kind: "function", Name: "greet", Start: 1, End: 3, Depth: 0},
 		{Kind: "class", Name: "Box", Start: 5, End: 8, Depth: 0},
-		{Kind: "method", Name: "open", Start: 6, End: 6, Depth: 1},
-		{Kind: "method", Name: "seal", Start: 7, End: 7, Depth: 1},
+		{Kind: "method", Name: "open", Owner: "Box", Start: 6, End: 6, Depth: 1},
+		{Kind: "method", Name: "seal", Owner: "Box", Start: 7, End: 7, Depth: 1},
 		{Kind: "class", Name: "Base", Start: 10, End: 12, Depth: 0},
 		{Kind: "interface", Name: "Shape", Start: 14, End: 16, Depth: 0},
 		{Kind: "enum", Name: "Color", Start: 18, End: 20, Depth: 0},
@@ -301,8 +301,8 @@ func TestSymbolsFixtureJavaScript(t *testing.T) {
 	assertFixtureSymbols(t, "javascript", "testdata/javascript/definitions.js", []Symbol{
 		{Kind: "function", Name: "add", Start: 1, End: 3, Depth: 0},
 		{Kind: "class", Name: "Counter", Start: 5, End: 10, Depth: 0},
-		{Kind: "method", Name: "bump", Start: 6, End: 8, Depth: 1},
-		{Kind: "method", Name: "#hide", Start: 9, End: 9, Depth: 1},
+		{Kind: "method", Name: "bump", Owner: "Counter", Start: 6, End: 8, Depth: 1},
+		{Kind: "method", Name: "#hide", Owner: "Counter", Start: 9, End: 9, Depth: 1},
 		{Kind: "function", Name: "scale", Start: 12, End: 12, Depth: 0},
 		{Kind: "function", Name: "gen", Start: 14, End: 16, Depth: 0},
 	})
@@ -313,7 +313,7 @@ func TestSymbolsFixturePython(t *testing.T) {
 	assertFixtureSymbols(t, "python", "testdata/python/definitions.py", []Symbol{
 		{Kind: "function", Name: "load", Start: 1, End: 2, Depth: 0},
 		{Kind: "class", Name: "Store", Start: 5, End: 9, Depth: 0},
-		{Kind: "method", Name: "get", Start: 6, End: 9, Depth: 1},
+		{Kind: "method", Name: "get", Owner: "Store", Start: 6, End: 9, Depth: 1},
 		{Kind: "function", Name: "fetch", Start: 11, End: 13, Depth: 0},
 	})
 }
@@ -325,8 +325,8 @@ func TestSymbolsFixtureRust(t *testing.T) {
 		{Kind: "type", Name: "Config", Start: 3, End: 5, Depth: 0},
 		{Kind: "enum", Name: "Mode", Start: 7, End: 9, Depth: 0},
 		{Kind: "interface", Name: "Runner", Start: 11, End: 13, Depth: 0},
-		{Kind: "method", Name: "run", Start: 12, End: 12, Depth: 1},
-		{Kind: "method", Name: "new", Start: 16, End: 18, Depth: 0},
+		{Kind: "method", Name: "run", Owner: "Runner", Start: 12, End: 12, Depth: 1},
+		{Kind: "method", Name: "new", Owner: "Config", Start: 16, End: 18, Depth: 0},
 	})
 }
 
@@ -334,8 +334,8 @@ func TestSymbolsFixtureJava(t *testing.T) {
 	t.Parallel()
 	assertFixtureSymbols(t, "java", "testdata/java/Greeter.java", []Symbol{
 		{Kind: "class", Name: "Greeter", Start: 1, End: 4, Depth: 0},
-		{Kind: "method", Name: "Greeter", Start: 2, End: 2, Depth: 1},
-		{Kind: "method", Name: "hi", Start: 3, End: 3, Depth: 1},
+		{Kind: "method", Name: "Greeter", Owner: "Greeter", Start: 2, End: 2, Depth: 1},
+		{Kind: "method", Name: "hi", Owner: "Greeter", Start: 3, End: 3, Depth: 1},
 		{Kind: "interface", Name: "Named", Start: 5, End: 5, Depth: 0},
 		{Kind: "enum", Name: "Mode", Start: 6, End: 6, Depth: 0},
 		{Kind: "class", Name: "Point", Start: 7, End: 7, Depth: 0},
@@ -357,7 +357,7 @@ func TestSymbolsFixtureCPP(t *testing.T) {
 	assertFixtureSymbols(t, "cpp", "testdata/cpp/sample.cpp", []Symbol{
 		{Kind: "function", Name: "add", Start: 1, End: 3, Depth: 0},
 		{Kind: "class", Name: "Box", Start: 4, End: 7, Depth: 0},
-		{Kind: "method", Name: "open", Start: 6, End: 6, Depth: 1},
+		{Kind: "method", Name: "open", Owner: "Box", Start: 6, End: 6, Depth: 1},
 		{Kind: "method", Name: "reset", Start: 8, End: 8, Depth: 0},
 		{Kind: "module", Name: "util", Start: 9, End: 10, Depth: 0},
 	})
@@ -367,8 +367,8 @@ func TestSymbolsFixtureCSharp(t *testing.T) {
 	t.Parallel()
 	assertFixtureSymbols(t, "c_sharp", "testdata/c_sharp/Sample.cs", []Symbol{
 		{Kind: "class", Name: "Greeter", Start: 1, End: 4, Depth: 0},
-		{Kind: "method", Name: "Greeter", Start: 2, End: 2, Depth: 1},
-		{Kind: "method", Name: "Hi", Start: 3, End: 3, Depth: 1},
+		{Kind: "method", Name: "Greeter", Owner: "Greeter", Start: 2, End: 2, Depth: 1},
+		{Kind: "method", Name: "Hi", Owner: "Greeter", Start: 3, End: 3, Depth: 1},
 		{Kind: "interface", Name: "INamed", Start: 5, End: 5, Depth: 0},
 		{Kind: "enum", Name: "Mode", Start: 6, End: 6, Depth: 0},
 		{Kind: "type", Name: "Pt", Start: 7, End: 7, Depth: 0},
@@ -380,11 +380,11 @@ func TestSymbolsFixtureKotlin(t *testing.T) {
 	t.Parallel()
 	assertFixtureSymbols(t, "kotlin", "testdata/kotlin/Sample.kt", []Symbol{
 		{Kind: "class", Name: "Box", Start: 1, End: 3, Depth: 0},
-		{Kind: "method", Name: "open", Start: 2, End: 2, Depth: 1},
+		{Kind: "method", Name: "open", Owner: "Box", Start: 2, End: 2, Depth: 1},
 		{Kind: "interface", Name: "Named", Start: 4, End: 4, Depth: 0},
 		{Kind: "enum", Name: "Mode", Start: 5, End: 5, Depth: 0},
-		{Kind: "constant", Name: "A", Start: 5, End: 5, Depth: 1},
-		{Kind: "constant", Name: "B", Start: 5, End: 5, Depth: 1},
+		{Kind: "constant", Name: "A", Owner: "Mode", Start: 5, End: 5, Depth: 1},
+		{Kind: "constant", Name: "B", Owner: "Mode", Start: 5, End: 5, Depth: 1},
 		{Kind: "class", Name: "Store", Start: 6, End: 6, Depth: 0},
 		{Kind: "type", Name: "Id", Start: 7, End: 7, Depth: 0},
 	})
@@ -474,33 +474,33 @@ type fixtureCase struct {
 var fixtureCases = map[string]fixtureCase{
 	"swift": {"swift", "testdata/swift/definitions.swift", []Symbol{
 		{Kind: "interface", Name: "Named", Start: 1, End: 3, Depth: 0},
-		{Kind: "method", Name: "name", Start: 2, End: 2, Depth: 1},
+		{Kind: "method", Name: "name", Owner: "Named", Start: 2, End: 2, Depth: 1},
 		{Kind: "class", Name: "Box", Start: 4, End: 6, Depth: 0},
-		{Kind: "method", Name: "open", Start: 5, End: 5, Depth: 1},
+		{Kind: "method", Name: "open", Owner: "Box", Start: 5, End: 5, Depth: 1},
 		{Kind: "type", Name: "Pt", Start: 7, End: 9, Depth: 0},
 		{Kind: "enum", Name: "Mode", Start: 10, End: 12, Depth: 0},
-		{Kind: "constant", Name: "fast", Start: 11, End: 11, Depth: 1},
+		{Kind: "constant", Name: "fast", Owner: "Mode", Start: 11, End: 11, Depth: 1},
 		{Kind: "type", Name: "Id", Start: 13, End: 13, Depth: 0},
 	}},
 	"ruby": {"ruby", "testdata/ruby/definitions.rb", []Symbol{
 		{Kind: "module", Name: "Tools", Start: 1, End: 9, Depth: 0},
-		{Kind: "constant", Name: "LIMIT", Start: 2, End: 2, Depth: 1},
-		{Kind: "class", Name: "Runner", Start: 3, End: 6, Depth: 1},
-		{Kind: "method", Name: "run", Start: 4, End: 5, Depth: 2},
-		{Kind: "method", Name: "build", Start: 7, End: 8, Depth: 1},
+		{Kind: "constant", Name: "LIMIT", Owner: "Tools", Start: 2, End: 2, Depth: 1},
+		{Kind: "class", Name: "Runner", Owner: "Tools", Start: 3, End: 6, Depth: 1},
+		{Kind: "method", Name: "run", Owner: "Tools.Runner", Start: 4, End: 5, Depth: 2},
+		{Kind: "method", Name: "build", Owner: "Tools", Start: 7, End: 8, Depth: 1},
 		{Kind: "function", Name: "top", Start: 10, End: 11, Depth: 0},
 		{Kind: "function", Name: "m", Start: 12, End: 13, Depth: 0},
 		{Kind: "class", Name: "Store::Vault", Start: 14, End: 17, Depth: 0},
-		{Kind: "method", Name: "name=", Start: 15, End: 16, Depth: 1},
+		{Kind: "method", Name: "name=", Owner: "Store::Vault", Start: 15, End: 16, Depth: 1},
 	}},
 	"php": {"php", "testdata/php/definitions.php", []Symbol{
 		{Kind: "function", Name: "helper", Start: 2, End: 2, Depth: 0},
 		{Kind: "class", Name: "Box", Start: 3, End: 5, Depth: 0},
-		{Kind: "method", Name: "open", Start: 4, End: 4, Depth: 1},
+		{Kind: "method", Name: "open", Owner: "Box", Start: 4, End: 4, Depth: 1},
 		{Kind: "interface", Name: "Named", Start: 6, End: 6, Depth: 0},
 		{Kind: "interface", Name: "Logs", Start: 7, End: 7, Depth: 0},
 		{Kind: "enum", Name: "Mode", Start: 8, End: 10, Depth: 0},
-		{Kind: "constant", Name: "Fast", Start: 9, End: 9, Depth: 1},
+		{Kind: "constant", Name: "Fast", Owner: "Mode", Start: 9, End: 9, Depth: 1},
 		{Kind: "constant", Name: "LIMIT", Start: 11, End: 11, Depth: 0},
 	}},
 	"bash": {"bash", "testdata/bash/definitions.sh", []Symbol{
@@ -515,7 +515,7 @@ var fixtureCases = map[string]fixtureCase{
 	}},
 	"markdown": {"markdown", "testdata/markdown/definitions.md", []Symbol{
 		{Kind: "section", Name: "Title", Start: 1, End: 10, Depth: 0},
-		{Kind: "section", Name: "Setup", Start: 5, End: 10, Depth: 1},
+		{Kind: "section", Name: "Setup", Owner: "Title", Start: 5, End: 10, Depth: 1},
 	}},
 }
 

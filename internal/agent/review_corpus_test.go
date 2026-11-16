@@ -63,6 +63,7 @@ type ratchetQuestion struct {
 type ratchetMeasured struct {
 	SoundFlagRate float64                    `json:"sound_flag_rate"`
 	Errors        int                        `json:"errors"`
+	MovedCases    int                        `json:"moved_cases"`
 	Questions     map[string]ratchetQuestion `json:"questions"`
 }
 
@@ -382,15 +383,25 @@ func ratchetSpeakers(r ratchetFile) []string {
 	}
 	var out []string
 	for _, q := range reviewQuestions {
-		row, ok := r.Measured.Questions[q.id]
-		if q.id == soundID || !ok || row.Precision == nil {
-			continue
-		}
-		if *row.Precision >= r.Threshold && row.TrueFlags >= 5 {
+		if questionSpeaks(r, q.id) {
 			out = append(out, q.id)
 		}
 	}
 	return out
+}
+
+func questionSpeaks(r ratchetFile, id string) bool {
+	if id == soundID {
+		return false
+	}
+	row, ok := r.Measured.Questions[id]
+	if !ok || row.Precision == nil {
+		return false
+	}
+	if id == "lost_code" && r.Measured.MovedCases < 5 {
+		return false
+	}
+	return *row.Precision >= r.Threshold && row.TrueFlags >= 5
 }
 
 func movedPairs(name string, removed, added []funcHit) []movedRef {
@@ -417,6 +428,43 @@ func TestBuiltInSpeakersMatchRatchet(t *testing.T) {
 		if _, ok := r.Measured.Questions[id]; !ok {
 			t.Fatalf("speaker %s has no ratchet row", id)
 		}
+	}
+}
+
+func TestBuiltInSpeakersFollowRatchetRule(t *testing.T) {
+	t.Parallel()
+	at := func(v float64) *float64 { return &v }
+	rows := []struct {
+		name string
+		r    ratchetFile
+		want []string
+	}{
+		{name: "precision and five true flags speak", r: ratchetFile{Threshold: 0.9, Measured: &ratchetMeasured{MovedCases: 5, Questions: map[string]ratchetQuestion{
+			"placeholder": {Precision: at(0.9), TrueFlags: 5},
+		}}}, want: []string{"placeholder"}},
+		{name: "four true flags stay silent", r: ratchetFile{Threshold: 0.9, Measured: &ratchetMeasured{MovedCases: 5, Questions: map[string]ratchetQuestion{
+			"placeholder": {Precision: at(0.9), TrueFlags: 4},
+		}}}},
+		{name: "precision under the threshold stays silent", r: ratchetFile{Threshold: 0.9, Measured: &ratchetMeasured{MovedCases: 5, Questions: map[string]ratchetQuestion{
+			"placeholder": {Precision: at(0.89), TrueFlags: 50},
+		}}}},
+		{name: "a null precision stays silent", r: ratchetFile{Threshold: 0.9, Measured: &ratchetMeasured{MovedCases: 5, Questions: map[string]ratchetQuestion{
+			"placeholder": {Precision: nil, TrueFlags: 9},
+		}}}},
+		{name: "null measured gives no speaker", r: ratchetFile{Threshold: 0.9}},
+		{name: "lost code needs five moved cases", r: ratchetFile{Threshold: 0.9, Measured: &ratchetMeasured{MovedCases: 4, Questions: map[string]ratchetQuestion{
+			"lost_code": {Precision: at(1), TrueFlags: 9},
+		}}}},
+		{name: "lost code speaks with five moved cases", r: ratchetFile{Threshold: 0.9, Measured: &ratchetMeasured{MovedCases: 5, Questions: map[string]ratchetQuestion{
+			"lost_code": {Precision: at(1), TrueFlags: 9},
+		}}}, want: []string{"lost_code"}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			if got := ratchetSpeakers(row.r); !slices.Equal(got, row.want) {
+				t.Fatalf("speakers = %v, want %v", got, row.want)
+			}
+		})
 	}
 }
 

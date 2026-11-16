@@ -18,7 +18,9 @@ The builder MUST add only regular files that a grep call could read, each at mos
 
 The builder MUST write no record for a file that is not regular, is over 16 MiB, or has no change time. A file that the builder does not read or index MUST be recorded as not indexed.
 
-The builder MUST leave unread each file whose size would take the total of indexed bytes past 1 GiB. The builder MUST keep reading the files after that file. The builder MUST sync the trigram file and the manifest before it exits with status 0.
+The builder MUST stop reading files when the next file would take the total of indexed bytes past 1 GiB. The builder MUST NOT read a later file, even a small one. The total counts the bytes of each file that the builder passes to the trigram writer. Search MUST read a file recorded as not indexed on every call.
+
+The builder MUST sync the trigram file and the manifest before it exits with status 0.
 
 Only the parent MUST publish a generation, by an atomic rename of `CURRENT`, after the builder exits with status 0. A publish MUST remove every other generation directory of the workspace.
 
@@ -72,6 +74,22 @@ A non-empty pattern MUST first select the files in which some line matches it.
 
 A name pattern that is not literal MUST NOT use `^`, `$`, `\A`, `\z`, `\b`, or `\B`.
 
+The owner of a Go method MUST be its receiver type.
+
+The owner of a nested symbol MUST be the qualified name of its parent.
+
+A Markdown section MUST name its parent section as owner.
+
+A Rust `impl` block MUST give no row and MUST name the owner of its members.
+
+A name pattern MUST split at its last dot. The split applies when the text before the dot is not empty. The text after the dot MUST be a plain name.
+
+A plain name holds only letters, digits, underscore and dollar. A pattern that ends with a dot MUST NOT split.
+
+A symbol MUST match when the whole pattern matches its name. A symbol with an owner MUST also match when the owner part matches its owner and the name part matches its name.
+
+File selection MUST accept a file when some line matches the whole pattern or the name part. A qualified name never sits on one line, so the owner part alone MUST NOT select a file.
+
 The `kind` argument MUST be one of the eleven kinds. It MUST NOT be set in any mode other than `symbols` and `definition`.
 
 The `pattern` argument MAY be empty only in the symbols mode.
@@ -122,6 +140,94 @@ The `lang` argument MUST be set in the syntax mode, and it MUST NOT be set in an
 
 The syntax mode MUST NOT carry snapshot tags.
 
+## References and imports
+
+The references mode MUST list each call and each type use of one bare name.
+
+The importers mode MUST list each import whose path matches one import path.
+
+Both modes MUST parse only files of Go, TypeScript, Python, Rust and Java.
+
+Both modes MUST match by name. Both modes MUST NOT resolve types.
+
+A reference MUST have the kind `call` or `type`. A plain read of an identifier MUST NOT give a row. Use the grep mode for it.
+
+A name inside a comment or a string MUST NOT give a row.
+
+The name of a definition MUST NOT give a row, even when the definition is local.
+
+In Go, a type use of a predeclared type MUST NOT give a row.
+
+When a call and a type use share one place, the row MUST be a `call` row.
+
+A references row MUST have the form `PATH:LINE: KIND NAME in CALLER by name`.
+
+A reference outside every listed definition MUST read `PATH:LINE: KIND NAME at top level by name`.
+
+The `CALLER` value MUST be the qualified name of the innermost listed definition that contains the reference.
+
+References rows MUST sort by path, then by line, then by column.
+
+An importers row MUST have the form `PATH:LINE: import SPEC by name`. Importers rows MUST sort by path, then by line.
+
+The words `by name` MUST end every row. A row MUST NOT carry a confidence number or a snapshot tag.
+
+The `pattern` argument MUST NOT be empty.
+
+The references pattern MUST be one bare name of letters, digits, underscore and dollar. The match MUST be exact and case-sensitive.
+
+A qualified pattern such as `Server.Run` MUST be refused in the references mode.
+
+The importers pattern MUST be one import path without white space.
+
+A spec MUST match when it equals the pattern. A spec MUST also match when it ends with the pattern.
+
+The character before that ending pattern MUST be `/`, `.` or `:`.
+
+The `literal` and `ignore_case` arguments MUST be refused in both modes.
+
+The `kind` and `lang` arguments MUST be refused in both modes.
+
+The `path` and `glob` arguments MUST bound the files. The `limit` argument MUST bound the rows.
+
+A cut MUST end the result with `[Truncated: N more rows]`.
+
+Both modes MUST apply the file, byte, parse time and call time limits of the symbols mode.
+
+The references mode MUST parse only files that contain the exact spelling of the name.
+
+The importers mode MUST parse every file of a language with a graph, until a limit stops it.
+
+All loads in one call MUST share the same file, byte and time limits.
+
+A file skipped only because the name is absent MUST remain eligible for a later load.
+
+An admission refusal MUST count each file once.
+
+Rust imports MUST expand braces into leaf paths and remove aliases. A `self` leaf MUST name its parent path.
+
+Go and TypeScript imports MUST omit their enclosing quotes. Python imports MUST keep their module text.
+
+Java imports MUST omit `import`, `static` and the final semicolon. A trailing `.*` MUST remain.
+
+A file whose parse stopped MUST give no rows. It MUST appear in a `[Parse: stopped, no rows:]` line.
+
+A file that fails to parse for any other reason MUST give no rows. The call MUST go on with the next file.
+
+A file whose tree has syntax errors MUST keep its rows. It MUST appear in a `[Parse: syntax errors, rows kept:]` line.
+
+A cancelled call and a call that reaches the 30 second deadline MUST return an error. They MUST NOT return an empty result.
+
+A call without rows MUST print `No matches for NAME by name. Searched N files of languages with a graph.`
+
+The value N MUST count the files in scope whose language has a graph.
+
+A call MUST print `[No graph: N files of LANGS. Use grep.]` when files in scope have a supported language without a graph.
+
+LANGS MUST list those languages in sorted order, separated by a comma and a space.
+
+The footers `[Not parsed:]`, `[Stopped:]` and `[Parse:]` of the symbols mode MUST keep their texts.
+
 ## Fuzzy file search
 
 The `fuzzyFileSearch` method, defined in [protocol.md](protocol.md), MUST list regular files under each requested root and MUST NOT list directories.
@@ -130,7 +236,11 @@ The method MUST skip `.git` and every path that `.gitignore` excludes. It MUST N
 
 A root MUST hold at most 100000 file paths. A root list MUST be reused for 5 seconds after it is walked.
 
-A query MUST match a path when its characters occur in the path in order, ignoring case. The matcher MUST choose the window with the fewest gaps. On a tie, the matcher MUST choose the earlier window.
+A query MUST match a path when its characters occur in the path in order, ignoring case. The matcher MUST scan the path from left to right. It MUST match each query character to its first occurrence after the previous matched character.
+
+The `indices` member MUST list the matched positions, counted in characters of the path from 0.
+
+The number of gaps MUST be the last matched index, minus the first matched index, plus 1, minus the length of the query.
 
 The score MUST be 100000, minus 100 for each gap, minus the length of the path in characters. It MUST add 1000 when the last matched character lies in the base name. It MUST add 2000 when the base name starts with the query. A score below 0 MUST count as 0.
 

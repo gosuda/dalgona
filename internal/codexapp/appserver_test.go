@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/gosuda/dalgona/internal/daemon"
 )
 
 type stdioPair struct {
@@ -155,6 +156,69 @@ func TestAppServerStdioDeliversRepliesAfterClientEOF(t *testing.T) {
 				t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 			}
 		})
+	}
+}
+
+func serveEchoDaemon(ctx context.Context, listener net.Listener, done chan<- struct{}) {
+	defer close(done)
+	for range 2 {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		request, readErr := io.ReadAll(conn)
+		if readErr == nil {
+			_, _ = conn.Write(append([]byte(`{"got":`), append(bytes.TrimSpace(request), "}\n"...)...))
+		}
+		stop()
+		_ = conn.Close()
+	}
+}
+
+func TestAppServerStdioDaemonDialDrainsAfterEOF(t *testing.T) {
+	home, err := os.MkdirTemp("", "cas-eof-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	listener, err := net.Listen("unix", daemon.SocketPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCtx, stopServer := context.WithCancel(t.Context())
+	serverDone := make(chan struct{})
+	t.Cleanup(func() {
+		stopServer()
+		_ = listener.Close()
+		<-serverDone
+	})
+	go serveEchoDaemon(serverCtx, listener, serverDone)
+	dial := func(context.Context) (net.Conn, error) { return daemon.DialHome(home) }
+	for range 2 {
+		ctx, cancel := context.WithCancel(t.Context())
+		var stdout, stderr bytes.Buffer
+		done := make(chan int, 1)
+		go func() {
+			done <- AppServerMain(ctx, nil, stdioPair{
+				strings.NewReader(`{"id":0,"method":"initialize"}`),
+				&stdout,
+			}, &stderr, Deps{Home: home, Dial: dial})
+		}()
+		select {
+		case code := <-done:
+			cancel()
+			if code != 0 {
+				t.Fatalf("AppServerMain = %d, stderr %q", code, stderr.String())
+			}
+		case <-time.After(5 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("app-server did not exit after stdin EOF")
+		}
+		if want := `{"got":{"id":0,"method":"initialize"}}` + "\n"; stdout.String() != want {
+			t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+		}
 	}
 }
 

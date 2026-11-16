@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -123,7 +125,7 @@ func nestedDone(callID string) func([]event.Seqd) bool {
 
 func TestScriptReplaysRecordedEffectsAfterCrash(t *testing.T) {
 	t.Parallel()
-	code := "tools.exec(command = \"echo one >> log.txt\")\ntools.exec(command = \"echo two >> log.txt\")\na = ctx.judge(\"hold\", {\"ok\": {\"type\": \"noul\"}})\na[\"ok\"].noul"
+	code := "tools.exec(command = \"echo one >> log.txt\")\ntools.exec(command = \"echo two >> log.txt\")\na = ctx.judge(\"hold\", {\"ok\": {\"type\": \"noul\"}})\na.answers[\"ok\"].noul"
 	c := crashDuringEval(t, code, func(h *harness, parent string) { h.await(parent, nestedDone("e/2")) })
 	judge := newJudgeServer(t, nil)
 	events := c.revive(t, judge)
@@ -221,13 +223,13 @@ func TestEvalKilledMidExecRecoversIndeterminate(t *testing.T) {
 
 func TestJudgeBatchReplaysSettledItems(t *testing.T) {
 	t.Parallel()
-	code := "r = ctx.judge_batch([\"a\", \"b\", \"hold\"], {\"ok\": {\"type\": \"noul\"}}, concurrency = 3)\n[x.answers[\"ok\"].noul for x in r]"
+	code := "r = ctx.judge_batch([\"a\", \"b\", \"hold\"], {\"ok\": {\"type\": \"noul\"}}, concurrency = 3)\n[x.answers[\"ok\"].noul for x in r] + [x.model for x in r]"
 	c := crashDuringEval(t, code, func(h *harness, parent string) {
 		h.await(parent, func(events []event.Seqd) bool { return count(events, event.TypeScriptEffect) >= 2 })
 	})
 	judge := newJudgeServer(t, nil)
 	events := c.revive(t, judge)
-	if got := outputs(events)["e"].Output; !strings.Contains(got, `"value":[0.9,0.9,0.9]`) {
+	if got := outputs(events)["e"].Output; !strings.Contains(got, `"value":[0.9,0.9,0.9,"`+productDefaultDecisionsModel+`","`+productDefaultDecisionsModel+`","`+productDefaultDecisionsModel+`"]`) {
 		t.Fatalf("eval output = %s", got)
 	}
 	if judge.requests.Load() != 1 {
@@ -278,7 +280,7 @@ func (p *roleProvider) seen() []string {
 
 func TestJudgeRoleResolvesAgainstTheThreadModel(t *testing.T) {
 	provider := &roleProvider{replies: map[string][]reply{
-		"gpt-test":   {evalCall("a = ctx.judge(\"state\", {\"ok\": {\"type\": \"noul\"}}, model = \"smol\")\na[\"ok\"].noul"), text("done")},
+		"gpt-test":   {evalCall("a = ctx.judge(\"state\", {\"ok\": {\"type\": \"noul\"}}, model = \"smol\")\na.answers[\"ok\"].noul"), text("done")},
 		"gpt-6-luna": {text(`{"ok":0.9}`)},
 	}}
 	mux := http.NewServeMux()
@@ -403,11 +405,56 @@ func TestNestedExecAsksInAskMode(t *testing.T) {
 		h.scripts.Mode = config.ToolModeNormal
 		h.cfg.Config.Approval = config.ApprovalAsk
 	})
-	h.model.push(evalCall("tools.exec(command = 'echo hi')"), text("done"))
+	if err := os.WriteFile(filepath.Join(h.cwd, "notes.txt"), []byte("read class bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.model.push(evalCall("tools.exec(command = 'echo hi > exec-proof.txt')"), text("done"))
 	events := h.idle(h.run("run it"))
 	resolved := decisions(events)
 	nested, ok := resolved["e/1"]
 	if !ok || nested.Decision != "decline" || nested.By != "mode:ask" || nested.Reason != "declined: no client could approve this call" {
 		t.Fatalf("nested decision e/1 = %+v, all decisions = %+v", nested, resolved)
+	}
+	if _, err := os.Stat(filepath.Join(h.cwd, "exec-proof.txt")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("declined exec left a fixture file: %v", err)
+	}
+	requireAskModeAcceptsReadClass(t, h)
+}
+
+func requireAskModeAcceptsReadClass(t *testing.T, h *harness) {
+	t.Helper()
+	h.model.push(evalCall("tools.read(path = 'notes.txt')"), text("done"))
+	readEvents := h.idle(h.run("read it"))
+	for id, decision := range decisions(readEvents) {
+		if decision.Decision != "accept" || decision.By != "mode:ask" {
+			t.Fatalf("read-class decision %s = %+v, want a mechanical mode:ask accept", id, decision)
+		}
+	}
+	if got := outputs(readEvents)["e"].Output; !strings.Contains(got, "1:read class bytes") {
+		t.Fatalf("read cell output = %s", got)
+	}
+}
+
+func TestJudgeEnvelopeKeepsReservedQuestionNames(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"answers":{"model":{"type":"noul","noul":0.5},"fallback":{"type":"noul","noul":0.5},"answers":{"type":"noul","noul":0.5}}}`)
+	}))
+	t.Cleanup(server.Close)
+	h := newHarness(t, func(h *harness) {
+		h.scripts.Judge = func(_ context.Context, _, _ string) (decide.Client, error) {
+			return decide.NewDecisions(decide.DecisionsConfig{
+				BaseURL: server.URL, Model: productDefaultDecisionsModel,
+				Token: func(context.Context) (string, error) { return "token", nil },
+			}), nil
+		}
+	})
+	code := "a = ctx.judge(\"state\", {\"model\": {\"type\": \"noul\"}, \"fallback\": {\"type\": \"noul\"}, \"answers\": {\"type\": \"noul\"}})\n" +
+		"[a.answers[k].noul for k in [\"model\", \"fallback\", \"answers\"]] + [a.model, a.fallback]"
+	h.model.push(evalCall(code))
+	h.model.push(text("done"))
+	events := h.idle(h.run("judge it"))
+	if got := outputs(events)["e"].Output; !strings.Contains(got, `"value":[0.5,0.5,0.5,"`+productDefaultDecisionsModel+`",""]`) {
+		t.Fatalf("eval output = %s", got)
 	}
 }

@@ -24,11 +24,12 @@ Recovery MUST walk the tool calls of the last `assistant.message` of the open tu
 |Turn open, no call pending|Rebuild the request from the folded active path and call the model again. Recovery discards streamed text that was not journaled.|
 |Call with `tool.completed`, other than the next row|No action.|
 |`tool.completed` of an edit call, no `tool.judged`|No action. Recovery MUST NOT call the decision model and MUST NOT journal `tool.judged`.|
-|`approval.requested` without `approval.resolved`|Decide again. `auto`: static rules, then the [decider](approvals.md). `ask`: ask the clients again. With no subscribed client, decline with `declined: no client could approve this call`. Recovery MUST reuse the existing request id.|
+|`approval.requested` without `approval.resolved`|Decide again. `auto`: static rules, then the [decider](approvals.md). `ask`: ask the clients again. If the sandbox is unavailable and the journal holds no `sandbox.chosen`, recovery asks the sandbox question first. With no subscribed client, that question declines the call as [the sandbox spec](sandbox.md) states. For every other call with no subscribed client, decline with `declined: no client could approve this call`. Recovery MUST reuse the existing request id.|
 |`approval.resolved` with `decline` or `cancel`, no `tool.completed`|Journal `tool.completed` with `ok=false`, `recovered=none`, and the decline reason as output.|
 |`approval.resolved` with `accept` or `accept_session`, no `tool.started`|Journal `tool.completed` with `ok=false`, `recovered=skipped`, output `skipped: the host restarted before this call ran`. The call MUST NOT run. A thread grant from `accept_session` stays in force because the fold records it at `approval.resolved`.|
 |Assistant call with no approval and no `tool.started`|Same as the previous row: `recovered=skipped`, output `skipped: the host restarted before this call ran`.|
 |`tool.started` for `ask`|Journal `ok=false`, `recovered=interrupted`, output `interrupted: the host restarted before the user answered`. The question MUST NOT be asked again.|
+|`tool.started` for `ratchet` with action `approve`|Journal `ok=false`, `recovered=interrupted`, output `interrupted: the host restarted before the user answered`. The approval MUST NOT be asked again.|
 |`tool.started`, class `read`|Run the call again. Journal `recovered=replayed`.|
 |`tool.started`, class `edit`, no `files`|Plan and apply the edit again. Journal `recovered=replayed`.|
 |`tool.started`, class `edit`, every file sha equals `post_sha`|Journal `ok=true`, `recovered=replayed`, output `the edit was applied before the host restarted`.|
@@ -43,11 +44,20 @@ Recovery MUST walk the tool calls of the last `assistant.message` of the open tu
 |`tool.started`, class `remote`|Journal `ok=false`, `recovered=interrupted`, output `interrupted: the tool may have partly run`. The call MUST NOT run again.|
 |`tool.started` for a tool that the thread no longer has|Same as class `remote`.|
 
+The `task` row MUST restore `child.spawned.tools` before child execution.
+The host MUST intersect that ceiling with currently available tools.
+A missing legacy ceiling MUST fail closed with `agent: child tool ceiling unavailable`.
+Legacy records without `tools` remain readable.
+Each executing child MUST hold one root-owned slot until its turn ends or it stops.
+Recovery MUST share an existing child's slot and MUST NOT charge another start.
+
 A background index build writes no journal event. A crash during a build leaves one generation directory, which the next publish removes.
 
 Sha values MUST be SHA-256 of the file bytes, as lowercase hex. An absent file MUST have the empty sha.
 
 An edit that recovery runs, replays, or completes MUST NOT be judged.
+
+A call with `hashline.invocation_started` and no `tool.completed` MUST match the table row of its other records. Recovery MUST NOT read the invocation records.
 
 Recovery MUST NOT run the [turn review](edit-review.md).
 
@@ -55,11 +65,24 @@ A Cursor in-band call is journaled only after its `assistant.message`. A crash b
 
 After the calls are complete, recovery MUST continue the turn loop. The next model request MUST carry a result for every call.
 
-A recovered turn MUST take reasoning effort in this order: a keyword with effort `max`, the `effort` field, the thread effort, then `reasoning` in config.
+A recovered turn MUST take its reasoning effort in this order: the `effort` field, a declared keyword `max`, the thread effort, then config `reasoning`. A stored effort of a top-level thread that the model's declared levels do not contain MUST be omitted from the request. The host MUST log `reasoning effort <x> is not supported by <model>; sent without effort`. A thread that is not top-level MUST follow the nearest-lower rule of [providers](providers.md).
 
 The model, approval, and sandbox of a turn step MUST come from the last `user.message` on the active path that sets each field. A field that no such message sets MUST come from `session.created`. A fork copies the active path, so the fork MUST keep these values. A turn step MUST rebuild the tool set when its model differs from the model of the current tool set. The rebuilt tool set makes the edit style follow the model.
 
 Recovery MUST start at most one worker per thread. A second resume of a thread that is already open MUST return the open thread and MUST NOT start another recovery.
+
+## Crash loop
+
+- A boot is one open of a thread whose turn is open. `Host.Recover`, `Host.Resume`, `thread/resume`, and a child open each count as a boot.
+- The host MUST journal `turn.recovery` before it starts recovery on boots 1 to 3. `attempt` is the boot number.
+- `turn.recovery` is advisory. It names no call, and the call table ignores it.
+- On boot 4 the host MUST NOT journal a fourth `turn.recovery` and MUST NOT start recovery.
+- On boot 4 the host MUST complete unfinished calls as `skipped` or `interrupted`. It MUST then journal `turn.completed` with status `failed` and error `recovery gave up after 3 attempts`.
+- On boot 4 the host MUST NOT call the model and MUST NOT replay a call. The thread opens idle and accepts a new turn.
+- Progress between boots MUST NOT reset the count. A new turn starts its own count.
+- The open MUST NOT return before these records are durable.
+- A failed append of these records MUST fail the open with the append error. Recovery MUST NOT start.
+- The host MUST log `agent: recovery halted after 3 attempts` with the thread and turn when boot 4 closes the turn.
 
 ## Failure behavior
 

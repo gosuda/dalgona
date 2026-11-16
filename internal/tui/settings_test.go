@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -164,11 +165,11 @@ func TestSettingsSavesIconsAndStatusHide(t *testing.T) {
 		tea.KeyPressMsg{Code: tea.KeyRight},
 		tea.KeyPressMsg{Code: tea.KeyRight},
 		tea.KeyPressMsg{Code: tea.KeySpace, Text: " "},
-		tea.KeyPressMsg{Code: tea.KeyRight},
-		tea.KeyPressMsg{Code: tea.KeyRight},
-		tea.KeyPressMsg{Code: tea.KeyRight},
-		tea.KeyPressMsg{Code: tea.KeySpace, Text: " "},
 	)
+	for range slices.Index(statusItemIDs, "mark") - slices.Index(statusItemIDs, "folder") {
+		m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	}
+	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	runPickCommand(t, m, command)
 	values := map[string]any{}
@@ -280,5 +281,30 @@ func TestDalgonaSettingsKeepsReviewAndNotifications(t *testing.T) {
 		{KeyPath: "notifications", Value: false, MergeStrategy: "replace"},
 	}) {
 		t.Fatalf("dalgona batch edits = %#v, want editReview=true then notifications=false", edits)
+	}
+}
+
+func TestSettingsPanelNamesReviewRecipient(t *testing.T) {
+	t.Parallel()
+	m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}), "auto")
+	for range 5 {
+		m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if m.focusedRow().key != "editReview" {
+		t.Fatalf("sixth row = %q, want editReview", m.focusedRow().key)
+	}
+	assertContains(t, dockText(m), "Sends each edit's masked diff to the decider model.")
+	if got := len(m.dockLines()); got != 20 {
+		t.Fatalf("dock with review detail has %d rows, want 20", got)
+	}
+	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+	if m.focusedRow().key != "statusHide" {
+		t.Fatalf("row above Edit review = %q, want statusHide", m.focusedRow().key)
+	}
+	if strings.Contains(dockText(m), "Sends each edit's masked diff to the decider model.") {
+		t.Fatalf("review sentence shows on the Status row:\n%s", dockText(m))
+	}
+	if got := len(m.dockLines()); got != 20 {
+		t.Fatalf("dock without review detail has %d rows, want 20", got)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -24,6 +25,59 @@ func TestFsWatchReportsChanges(t *testing.T) {
 	c.await("fs/changed", func(m message) bool { return reportsChange(t, m, "w1", file) })
 	c.fails("fs/unwatch", map[string]any{"watchId": "w9"}, -32602, "unknown watch w9")
 	c.ok("fs/unwatch", map[string]any{"watchId": "w1"}, nil)
+}
+
+func expectNoChange(t *testing.T, c *wireClient, window time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+	select {
+	case m := <-c.notes:
+		t.Fatalf("unexpected %s notification %s", m.Method, m.Params)
+	case <-timer.C:
+	}
+}
+
+func TestFsWatchUnchangedPollAndUnwatchEndDelivery(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	c := r.connect()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(file, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c.ok("fs/watch", map[string]any{"watchId": "w1", "path": dir}, nil)
+	if err := os.WriteFile(file, []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c.await("fs/changed", func(m message) bool { return reportsChange(t, m, "w1", file) })
+	expectNoChange(t, c, 1300*time.Millisecond)
+
+	c.ok("fs/unwatch", map[string]any{"watchId": "w1"}, nil)
+	if err := os.WriteFile(file, []byte("three"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	expectNoChange(t, c, 1300*time.Millisecond)
+}
+
+func TestFsWatchRefusals(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	c := r.connect()
+	dir := t.TempDir()
+	c.ok("fs/watch", map[string]any{"watchId": "w1", "path": dir}, nil)
+	c.fails("fs/watch", map[string]any{"watchId": "w1", "path": dir}, -32602, "watch w1 exists")
+	for i := 2; i <= 64; i++ {
+		c.ok("fs/watch", map[string]any{"watchId": "w" + strconv.Itoa(i), "path": dir}, nil)
+	}
+	c.fails("fs/watch", map[string]any{"watchId": "w65", "path": dir}, -32602, "too many watches")
+
+	crowded := t.TempDir()
+	for i := range fsWatchEntryLimit + 1 {
+		if err := os.WriteFile(filepath.Join(crowded, "f"+strconv.Itoa(i)), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.fails("fs/watch", map[string]any{"watchId": "w66", "path": crowded}, -32602, "directory has more than 10000 entries")
 }
 
 func reportsChange(t *testing.T, m message, watchID, path string) bool {

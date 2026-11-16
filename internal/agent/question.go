@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/url"
 	"slices"
+	"time"
 
 	asktool "github.com/gosuda/dalgona/internal/tool/ask"
 )
@@ -16,6 +17,7 @@ type pendingQuestion struct {
 	replies chan asktool.Reply
 	opened  uint64
 	refused map[<-chan Update]struct{}
+	timer   *time.Timer
 }
 
 func (t *Thread) Ask(ctx context.Context, callID string, questions []asktool.Question) (asktool.Reply, error) {
@@ -94,8 +96,10 @@ func (a *actor) offerQuestion(prompt QuestionPrompt, replies chan asktool.Reply)
 		return false
 	}
 	a.questionSeq++
-	a.questions[prompt.RequestID] = &pendingQuestion{prompt: prompt, replies: replies, opened: a.questionSeq, refused: map[<-chan Update]struct{}{}}
+	pending := &pendingQuestion{prompt: prompt, replies: replies, opened: a.questionSeq, refused: map[<-chan Update]struct{}{}}
+	a.questions[prompt.RequestID] = pending
 	a.publish(Update{Kind: UpdateQuestion, Thread: a.t.id, Question: prompt})
+	pending.timer = time.AfterFunc(asktool.Timeout, func() { a.t.expireQuestion(prompt.RequestID) })
 	return true
 }
 
@@ -116,10 +120,17 @@ func (t *Thread) awaitQuestion(ctx context.Context, requestID string, replies ch
 	}
 }
 
+func (t *Thread) expireQuestion(requestID string) {
+	_ = t.do(func(a *actor) { a.resolveQuestion(requestID, asktool.Reply{Outcome: asktool.OutcomeTimedOut}) })
+}
+
 func (a *actor) resolveQuestion(requestID string, reply asktool.Reply) bool {
 	pending, ok := a.questions[requestID]
 	if !ok {
 		return false
+	}
+	if pending.timer != nil {
+		pending.timer.Stop()
 	}
 	delete(a.questions, requestID)
 	pending.replies <- reply

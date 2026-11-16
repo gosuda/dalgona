@@ -4,30 +4,102 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"unicode"
+
+	"github.com/gosuda/dalgona/internal/shellargs"
 )
 
-type riskyRule struct {
-	name string
-	re   *regexp.Regexp
+type invocation struct {
+	part       string
+	tokens     []string
+	normal     string
+	opaque     bool
+	privileged bool
 }
+
+type riskyRule struct {
+	name  string
+	match func(invocation) bool
+}
+
+var substitution = regexp.MustCompile(`\$\(|<\(|>\(|` + "`" + `|\\\r?\n`)
 
 var risky = []riskyRule{
-	{"substitution", regexp.MustCompile(`\$\(|<\(|>\(|` + "`" + `|\\\r?\n`)},
-	{"shell-wrapper", regexp.MustCompile(`^(\S*['"\\=$]|[-0-9])`)},
-	{"privilege", regexp.MustCompile(`^(sudo|doas|su)\b`)},
-	{"nested-shell", regexp.MustCompile(`^(bash|sh|zsh|fish|eval|xargs)\b`)},
-	{"inline-interpreter", regexp.MustCompile(`^(node|bun|python3?)\s+(-\S+\s+)*(-c|-e|-p|--eval)\b`)},
-	{"recursive-delete", regexp.MustCompile(`^rm\b`)},
-	{"git-destructive", regexp.MustCompile(`^git\b.*\b(push|reset\s+--hard|clean\s+-\S*[fd]|branch\s+-D)\b`)},
-	{"publish", regexp.MustCompile(`^(npm|pnpm|yarn|bun)\s+publish\b`)},
-	{"deploy", regexp.MustCompile(`^(wrangler|vercel|fly|flyctl)\s+deploy\b|^terraform\s+(apply|destroy)\b|^kubectl\s+(delete|apply)\b`)},
-	{"credentials", regexp.MustCompile(`(?i)\.env\b|\.ssh\b|\.aws\b|\.npmrc\b|\.netrc\b|credentials`)},
+	{"shell-wrapper", func(c invocation) bool { return c.opaque }},
+	{"nested-shell", pattern(`^(bash|sh|zsh|fish|eval|xargs)\b`)},
+	{"inline-interpreter", pattern(`^(node|bun|python3?)\s+(-\S+\s+)*(-c|-e|-p|--eval)\b`)},
+	{"recursive-delete", func(c invocation) bool { return isRecursiveRm(c.tokens) }},
+	{"git-destructive", pattern(`^git\b.*\b(push|reset\s+--hard|clean\s+-\S*[fd]|branch\s+-D)\b`)},
+	{"publish", pattern(`^(npm|pnpm|yarn|bun)\s+publish\b`)},
+	{"deploy", pattern(`^(wrangler|vercel|fly|flyctl)\s+deploy\b|^terraform\s+(apply|destroy)\b|^kubectl\s+(delete|apply)\b`)},
+	{"credentials", credentials()},
+	{"privilege", privilege()},
 }
 
-func isRecursiveRm(command string) bool {
-	tokens, ok := tokenize(command)
-	if !ok || len(tokens) == 0 || tokens[0] != "rm" {
+func pattern(expr string) func(invocation) bool {
+	re := regexp.MustCompile(expr)
+	return func(c invocation) bool { return re.MatchString(c.normal) }
+}
+
+func credentials() func(invocation) bool {
+	re := regexp.MustCompile(`(?i)\.env\b|\.ssh\b|\.aws\b|\.npmrc\b|\.netrc\b|credentials`)
+	return func(c invocation) bool { return re.MatchString(c.normal) || re.MatchString(c.part) }
+}
+
+func privilege() func(invocation) bool {
+	re := regexp.MustCompile(`^(sudo|doas|su)\b`)
+	return func(c invocation) bool { return c.privileged || re.MatchString(c.normal) }
+}
+
+func inspect(part string) invocation {
+	tokens, ok := shellargs.Tokens(part)
+	if !ok {
+		return invocation{part: part, normal: part, opaque: true}
+	}
+	stripped := shellargs.StripWrappers(tokens)
+	if len(stripped) == 0 {
+		return invocation{}
+	}
+	name := executableName(stripped[0])
+	return invocation{
+		part:       part,
+		tokens:     stripped,
+		normal:     joinCommand(name, stripped[1:]),
+		opaque:     isOpaqueName(name, stripped[0]),
+		privileged: slices.ContainsFunc(tokens[:len(tokens)-len(stripped)], isPrivilegeWrapper),
+	}
+}
+
+func executableName(token string) string {
+	name := strings.TrimSpace(token)
+	if _, base, found := strings.CutLast(name, "/"); found {
+		return base
+	}
+	return name
+}
+
+func joinCommand(name string, args []string) string {
+	words := make([]string, 0, 1+len(args))
+	words = append(words, shellargs.QuoteToken(name))
+	for _, arg := range args {
+		words = append(words, shellargs.QuoteToken(arg))
+	}
+	return strings.Join(words, " ")
+}
+
+func isOpaqueName(name, head string) bool {
+	if name == "" || shellargs.IsWrapper(head) || strings.ContainsAny(name, "$=") {
+		return true
+	}
+	return name[0] == '-' || name[0] >= '0' && name[0] <= '9'
+}
+
+func isPrivilegeWrapper(token string) bool {
+	name := executableName(token)
+	return name == "sudo" || name == "doas"
+}
+
+func isRecursiveRm(tokens []string) bool {
+	if len(tokens) == 0 || executableName(tokens[0]) != "rm" {
 		return false
 	}
 	for _, token := range tokens[1:] {
@@ -48,206 +120,52 @@ func isRecursiveFlag(token string) bool {
 	return len(token) > 1 && token[0] == '-' && token[1] != '-' && strings.ContainsAny(token[1:], "rR")
 }
 
-type charKind uint8
-
-const (
-	literalChar charKind = iota
-	escapedChar
-	quoteChar
-	spaceChar
-	operatorChar
-)
-
-type shellScanner struct {
-	quote   rune
-	escaped bool
-}
-
-func (s *shellScanner) advance(r rune) charKind {
-	if s.escaped {
-		s.escaped = false
-		return literalChar
-	}
-	if s.quote != 0 {
-		return s.advanceQuoted(r)
-	}
-	if r == '\\' {
-		s.escaped = true
-		return escapedChar
-	}
-	if r == '\'' || r == '"' {
-		s.quote = r
-		return quoteChar
-	}
-	return unquotedKind(r)
-}
-
-func (s *shellScanner) advanceQuoted(r rune) charKind {
-	if r == s.quote {
-		s.quote = 0
-		return quoteChar
-	}
-	if r == '\\' && s.quote != '\'' {
-		s.escaped = true
-		return escapedChar
-	}
-	return literalChar
-}
-
-func unquotedKind(r rune) charKind {
-	switch {
-	case r == '\n' || strings.ContainsRune(";|&(){}", r):
-		return operatorChar
-	case unicode.IsSpace(r):
-		return spaceChar
-	default:
-		return literalChar
-	}
-}
-
-func Split(command string) []string {
-	var out []string
-	var scanner shellScanner
-	start := 0
-	for i, r := range command {
-		if scanner.advance(r) == operatorChar {
-			out = appendPart(out, command[start:i])
-			start = i + 1
-		}
-	}
-	return appendPart(out, command[start:])
-}
-
-func appendPart(parts []string, part string) []string {
-	if part = strings.TrimSpace(part); part != "" {
-		return append(parts, part)
-	}
-	return parts
-}
-
-var (
-	shellKeywordPrefix   = regexp.MustCompile(`^(?:if|then|elif|else|fi|while|until|do|done|for|in|case|esac|!)\s+`)
-	commandWrapperPrefix = regexp.MustCompile(`^(?:command|builtin|exec|env|nohup|time|timeout|nice|watch|npx|bunx|pnpx)\s+`)
-	assignmentPrefix     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[^\s'"\\$]*\s+`)
-	executablePathPrefix = regexp.MustCompile(`^[^\s'"\\$]*/`)
-)
-
-func normalize(part string) string {
-	current := strings.TrimSpace(part)
-	for {
-		next := strings.TrimSpace(current)
-		next = shellKeywordPrefix.ReplaceAllString(next, "")
-		next = commandWrapperPrefix.ReplaceAllString(next, "")
-		next = assignmentPrefix.ReplaceAllString(next, "")
-		next = strings.TrimPrefix(next, `\`)
-		next = executablePathPrefix.ReplaceAllString(next, "")
-		if next == current {
-			return current
-		}
-		current = next
-	}
-}
-
 func Check(command string) (string, string, bool) {
-	if risky[0].re.MatchString(command) {
+	if substitution.MatchString(command) {
 		return "substitution", command, true
 	}
-	for _, part := range Split(command) {
-		normal := normalize(part)
-		if name, ok := matchRisky(risky[1:], part, normal); ok {
-			return name, part, true
-		}
-	}
-	return "", "", false
+	return firstRisk(risky, command)
 }
 
 func CheckRemoteValue(value string) (string, string, bool) {
-	for _, part := range Split(value) {
-		normal := normalize(part)
-		if name, ok := matchRisky(risky[2:], part, normal); ok {
-			return name, part, true
+	return firstRisk(risky[1:], value)
+}
+
+func firstRisk(rulesList []riskyRule, command string) (string, string, bool) {
+	for _, part := range shellargs.Split(command) {
+		inv := inspect(part)
+		for _, rule := range rulesList {
+			if rule.match(inv) {
+				return rule.name, part, true
+			}
 		}
 	}
 	return "", "", false
 }
 
-func matchRisky(rulesList []riskyRule, part, normal string) (string, bool) {
-	for _, rule := range rulesList {
-		if rule.name == "recursive-delete" {
-			if isRecursiveRm(normal) {
-				return rule.name, true
-			}
-			continue
-		}
-		if rule.re.MatchString(normal) || rule.name == "credentials" && rule.re.MatchString(part) {
-			return rule.name, true
-		}
-	}
-	return "", false
-}
-
 func GrantPrefix(command string) (string, bool) {
-	parts := Split(command)
+	parts := shellargs.Split(command)
 	if len(parts) != 1 {
 		return "", false
 	}
-	tokens, ok := tokenize(parts[0])
+	tokens, ok := shellargs.Tokens(parts[0])
 	if !ok || len(tokens) == 0 {
 		return "", false
 	}
-	prefix := quoteToken(tokens[0])
+	prefix := shellargs.QuoteToken(tokens[0])
 	if len(tokens) > 1 {
-		prefix += " " + quoteToken(tokens[1])
+		prefix += " " + shellargs.QuoteToken(tokens[1])
 	}
 	return prefix, true
 }
 
-func quoteToken(token string) string {
-	if token != "" && !strings.ContainsFunc(token, needsTokenQuote) {
-		return token
-	}
-	return "'" + strings.ReplaceAll(token, "'", `'\''`) + "'"
-}
-
-func needsTokenQuote(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune("'\"\\", r)
-}
-
-func tokenize(s string) ([]string, bool) {
-	var out []string
-	var token strings.Builder
-	var scanner shellScanner
-	for _, r := range s {
-		switch scanner.advance(r) {
-		case literalChar, operatorChar:
-			token.WriteRune(r)
-		case spaceChar:
-			out = flushToken(out, &token)
-		case escapedChar, quoteChar:
-		}
-	}
-	if scanner.quote != 0 || scanner.escaped {
-		return nil, false
-	}
-	return flushToken(out, &token), true
-}
-
-func flushToken(tokens []string, token *strings.Builder) []string {
-	if token.Len() == 0 {
-		return tokens
-	}
-	tokens = append(tokens, token.String())
-	token.Reset()
-	return tokens
-}
-
 func MatchesGrant(command, prefix string) bool {
-	parts := Split(command)
+	parts := shellargs.Split(command)
 	if len(parts) != 1 {
 		return false
 	}
-	granted, grantedOK := tokenize(prefix)
-	candidate, candidateOK := tokenize(parts[0])
+	granted, grantedOK := shellargs.Tokens(prefix)
+	candidate, candidateOK := shellargs.Tokens(parts[0])
 	if !grantedOK || !candidateOK || len(granted) == 0 || len(candidate) < len(granted) {
 		return false
 	}

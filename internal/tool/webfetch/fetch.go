@@ -16,11 +16,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/runner"
 	"github.com/gosuda/dalgona/internal/tool"
 	"golang.org/x/net/html"
-	"golang.org/x/net/html/atom"
 )
 
 const defaultMaxBytes int64 = 1048576
@@ -49,7 +49,7 @@ func New() tool.Tool { return &Tool{client: newHTTPClient(), allow: publicAddrs}
 func (t *Tool) Spec() tool.Spec {
 	return tool.Spec{
 		Name:        "web_fetch",
-		Description: "Fetch an HTTP or HTTPS URL. HTML is converted to text. Other textual content is returned unchanged. The response body is capped by max_bytes.",
+		Description: "Fetch an HTTP or HTTPS URL. HTML is converted to Markdown: the main article is extracted, links resolve against the final URL, and only HTTP and HTTPS links stay. A page that needs a browser to render fails with a message that names the URL. Other textual content is returned unchanged. The response body is capped by max_bytes.",
 		Schema:      jsontext.Value(`{"type":"object","properties":{"url":{"type":"string"},"max_bytes":{"type":"integer","minimum":1,"maximum":16777216}},"required":["url"],"additionalProperties":false}`),
 		Keep:        tool.KeepHead,
 	}
@@ -86,18 +86,14 @@ func execute(ctx context.Context, args arguments, client *http.Client) (tool.Res
 		text := "web_fetch: HTTP " + response.Status
 		return tool.Result{Output: []byte(text), OK: false}, nil
 	}
-	body, truncated, err := readCapped(response.Body, args.maxBytes)
+	body, err := readCapped(response.Body, args.maxBytes)
 	if err != nil {
 		text := fmt.Sprintf("web_fetch: read %s: %v", args.url, err)
 		return tool.Result{Output: []byte(text), OK: false}, nil
 	}
-	output, err := renderBody(body, response.Header.Get("Content-Type"))
+	output, err := renderBody(body, response.Header.Get("Content-Type"), request.URL, response.Request.URL, args.maxBytes)
 	if err != nil {
-		text := fmt.Sprintf("web_fetch: render %s: %v", args.url, err)
-		return tool.Result{Output: []byte(text), OK: false}, nil
-	}
-	if truncated {
-		output = append(output, "\n[content truncated at "+strconv.FormatInt(args.maxBytes, 10)+" bytes]"...)
+		return renderFailure(args.url, err), nil
 	}
 	return tool.Result{Output: output, OK: true}, nil
 }
@@ -247,29 +243,93 @@ func checkRedirect(allow func(net.IP) bool) func(*http.Request, []*http.Request)
 	}
 }
 
-func readCapped(body io.Reader, limit int64) ([]byte, bool, error) {
+func readCapped(body io.Reader, limit int64) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
-		return nil, false, fmt.Errorf("read response body: %w", err)
+		return nil, fmt.Errorf("read response body: %w", err)
 	}
-	truncated := int64(len(data)) > limit
-	if truncated {
-		data = data[:int(limit)]
-	}
-	return data, truncated, nil
+	return data, nil
 }
 
-func renderBody(body []byte, contentType string) ([]byte, error) {
+type browserError struct{ url string }
+
+func (e *browserError) Error() string { return "web_fetch: page needs a browser: " + e.url }
+
+func renderFailure(rawURL string, err error) tool.Result {
+	if browser, ok := errors.AsType[*browserError](err); ok {
+		return tool.Result{Output: []byte(browser.Error()), OK: false}
+	}
+	text := fmt.Sprintf("web_fetch: render %s: %v", rawURL, err)
+	return tool.Result{Output: []byte(text), OK: false}
+}
+
+func renderBody(body []byte, contentType string, originalURL, finalURL *url.URL, maxBytes int64) ([]byte, error) {
+	sourceLen := int64(len(body))
+	body = body[:min(sourceLen, maxBytes)]
 	mediaType := bodyMediaType(body, contentType)
-	if mediaType == "text/html" || mediaType == "application/xhtml+xml" {
-		text, err := htmlText(body)
-		return []byte(text), err
+	switch {
+	case mediaType == "text/html" || mediaType == "application/xhtml+xml":
+		return renderHTML(body, sourceLen, originalURL, finalURL, maxBytes)
+	case textualMediaType(mediaType):
+		return limitText(body, sourceLen, maxBytes), nil
+	default:
+		return binaryPlaceholder(mediaType, body, sourceLen, maxBytes), nil
 	}
-	if !textualMediaType(mediaType) {
-		text := "[binary content " + mediaType + ", " + strconv.Itoa(len(body)) + " bytes]"
-		return []byte(text), nil
+}
+
+func renderHTML(body []byte, sourceLen int64, originalURL, finalURL *url.URL, maxBytes int64) ([]byte, error) {
+	if sourceLen > maxBytes {
+		body = trimPartialRune(body)
 	}
-	return body, nil
+	doc, err := html.Parse(bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("parse HTML: %w", err)
+	}
+	if LooksLikeAppShell(doc) {
+		return nil, &browserError{url: originalURL.String()}
+	}
+	markdown, err := htmlMarkdown(doc, finalURL)
+	if err != nil {
+		return nil, err
+	}
+	return limitText(markdown, sourceLen, maxBytes), nil
+}
+
+func limitText(text []byte, sourceLen, maxBytes int64) []byte {
+	truncated := sourceLen > maxBytes
+	if int64(len(text)) > maxBytes {
+		text = text[:maxBytes]
+		truncated = true
+	}
+	if !truncated {
+		return text
+	}
+	return withNotice(trimPartialRune(text), maxBytes)
+}
+
+func binaryPlaceholder(mediaType string, body []byte, sourceLen, maxBytes int64) []byte {
+	text := []byte("[binary content " + mediaType + ", " + strconv.Itoa(len(body)) + " bytes]")
+	if sourceLen > maxBytes {
+		return withNotice(text, maxBytes)
+	}
+	return text
+}
+
+func withNotice(text []byte, maxBytes int64) []byte {
+	return append(text[:len(text):len(text)], "\n[content truncated at "+strconv.FormatInt(maxBytes, 10)+" bytes]"...)
+}
+
+func trimPartialRune(data []byte) []byte {
+	for i := len(data) - 1; i >= 0 && i >= len(data)-utf8.UTFMax; i-- {
+		if !utf8.RuneStart(data[i]) {
+			continue
+		}
+		if utf8.FullRune(data[i:]) {
+			return data
+		}
+		return data[:i]
+	}
+	return data
 }
 
 func bodyMediaType(body []byte, contentType string) string {
@@ -296,80 +356,6 @@ func textualMediaType(mediaType string) bool {
 	default:
 		return false
 	}
-}
-
-func htmlText(body []byte) (string, error) {
-	tokenizer := html.NewTokenizer(bytes.NewReader(body))
-	var out strings.Builder
-	out.Grow(len(body))
-	skipped := 0
-	for {
-		tokenType := tokenizer.Next()
-		if tokenType == html.ErrorToken {
-			return finishHTML(&out, tokenizer.Err())
-		}
-		name, isTag := htmlTagName(tokenizer, tokenType)
-		if isTag {
-			skipped = updateSkipped(name, tokenType, skipped)
-		}
-		if skipped > 0 {
-			continue
-		}
-		if tokenType == html.TextToken {
-			out.Write(tokenizer.Text())
-		} else if isTag && blockTag(name) {
-			out.WriteByte(' ')
-		}
-	}
-}
-
-func finishHTML(out *strings.Builder, err error) (string, error) {
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("tokenize HTML: %w", err)
-	}
-	return strings.Join(strings.Fields(out.String()), " "), nil
-}
-
-func htmlTagName(tokenizer *html.Tokenizer, tokenType html.TokenType) (atom.Atom, bool) {
-	switch tokenType {
-	case html.StartTagToken, html.EndTagToken, html.SelfClosingTagToken:
-		name, _ := tokenizer.TagName()
-		return atom.Lookup(name), true
-	case html.ErrorToken, html.TextToken, html.CommentToken, html.DoctypeToken:
-		return 0, false
-	default:
-		return 0, false
-	}
-}
-
-func updateSkipped(name atom.Atom, tokenType html.TokenType, skipped int) int {
-	if name != atom.Script && name != atom.Style && name != atom.Noscript {
-		return skipped
-	}
-	switch tokenType {
-	case html.StartTagToken:
-		return skipped + 1
-	case html.EndTagToken:
-		return max(0, skipped-1)
-	case html.SelfClosingTagToken, html.ErrorToken, html.TextToken, html.CommentToken, html.DoctypeToken:
-		return skipped
-	default:
-		return skipped
-	}
-}
-
-var blockTags = map[atom.Atom]struct{}{
-	atom.Address: {}, atom.Article: {}, atom.Aside: {}, atom.Blockquote: {}, atom.Br: {}, atom.Dd: {},
-	atom.Div: {}, atom.Dl: {}, atom.Dt: {}, atom.Fieldset: {}, atom.Figcaption: {}, atom.Figure: {},
-	atom.Footer: {}, atom.Form: {}, atom.H1: {}, atom.H2: {}, atom.H3: {}, atom.H4: {}, atom.H5: {},
-	atom.H6: {}, atom.Header: {}, atom.Hr: {}, atom.Li: {}, atom.Main: {}, atom.Nav: {}, atom.Ol: {},
-	atom.P: {}, atom.Pre: {}, atom.Section: {}, atom.Table: {}, atom.Tbody: {}, atom.Td: {},
-	atom.Tfoot: {}, atom.Th: {}, atom.Thead: {}, atom.Tr: {}, atom.Ul: {},
-}
-
-func blockTag(name atom.Atom) bool {
-	_, ok := blockTags[name]
-	return ok
 }
 
 func executeRemote(ctx context.Context, id string, args arguments, env tool.Env) (tool.Result, error) {

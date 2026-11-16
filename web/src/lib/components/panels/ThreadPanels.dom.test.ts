@@ -1,14 +1,22 @@
-import { cleanup, render, screen } from "@testing-library/svelte";
+import {
+	cleanup,
+	fireEvent,
+	render,
+	screen,
+	within,
+} from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import App from "#lib/components/App.svelte";
+import ResumePanel from "#lib/components/panels/ResumePanel.svelte";
 import ThreadPanels from "#lib/components/panels/ThreadPanels.svelte";
 import { type RpcPort, Session } from "#lib/session.svelte.ts";
 import type { JsonValue, RpcHandlers } from "#lib/types.ts";
 
 afterEach(() => {
 	cleanup();
+	vi.useRealTimers();
 	document.body.replaceChildren();
 });
 
@@ -117,14 +125,16 @@ describe("thread command panels", () => {
 		await tick();
 
 		expect(session.panel).toBeNull();
-		expect(
-			screen.getByText(
-				"/compact is unavailable while a turn is working; wait for it to finish or interrupt it first",
-			),
-		).toBeTruthy();
+		const notice = screen.getByText(
+			"/compact is unavailable while a turn is working; wait for it to finish or interrupt it first",
+		);
 
 		const user = userEvent.setup();
-		await user.click(screen.getByRole("button", { name: "Interrupt" }));
+		await user.click(
+			within(notice.parentElement as HTMLElement).getByRole("button", {
+				name: "Interrupt",
+			}),
+		);
 		await tick();
 		expect(calls).toContainEqual({
 			method: "turn/interrupt",
@@ -188,4 +198,99 @@ describe("thread command panels", () => {
 				.disabled,
 		).toBe(true);
 	});
+});
+
+test("searches conversation text after a pause and ignores cancelled results", async () => {
+	vi.useFakeTimers();
+	let finishOld: (
+		value: readonly {
+			threadId: string;
+			name: string;
+			preview: string;
+			snippet: string;
+			matches: number;
+		}[],
+	) => void = () => {};
+	const search = vi
+		.fn()
+		.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishOld = resolve;
+				}),
+		)
+		.mockResolvedValue([
+			{
+				threadId: "found",
+				name: "Deployment",
+				preview: "",
+				snippet: "needle in conversation",
+				matches: 1,
+			},
+		]);
+	const select = vi.fn().mockResolvedValue(undefined);
+	const close = vi.fn();
+	const session = {
+		listThreads: vi.fn().mockResolvedValue([]),
+		searchThreads: search,
+		selectThread: select,
+		closePanel: close,
+	} as unknown as Session;
+	render(ResumePanel, { session, open: true });
+	const input = screen.getByRole("searchbox", { name: "Filter threads" });
+	await fireEvent.input(input, { target: { value: "ab" } });
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).not.toHaveBeenCalled();
+	await fireEvent.input(input, { target: { value: "old" } });
+	await vi.advanceTimersByTimeAsync(299);
+	expect(search).not.toHaveBeenCalled();
+	await vi.advanceTimersByTimeAsync(1);
+	expect(search).toHaveBeenCalledTimes(1);
+	const oldSignal = search.mock.calls[0]?.[1] as AbortSignal;
+	await fireEvent.input(input, { target: { value: "need" } });
+	await fireEvent.input(input, { target: { value: "needle" } });
+	expect(oldSignal.aborted).toBe(true);
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).toHaveBeenCalledTimes(2);
+	await tick();
+	finishOld([
+		{
+			threadId: "stale",
+			name: "Stale result",
+			preview: "",
+			snippet: "old text",
+			matches: 1,
+		},
+	]);
+	await tick();
+	expect(screen.queryByText("Stale result")).toBeNull();
+	await fireEvent.click(
+		screen.getByRole("button", { name: /Deployment.*needle in conversation/ }),
+	);
+	expect(select).toHaveBeenCalledWith("found");
+	expect(close).toHaveBeenCalledOnce();
+});
+
+test("conversation search offers retry and distinguishes no matches", async () => {
+	vi.useFakeTimers();
+	const search = vi
+		.fn()
+		.mockRejectedValueOnce(new Error("offline"))
+		.mockResolvedValue([]);
+	const session = {
+		listThreads: vi.fn().mockResolvedValue([]),
+		searchThreads: search,
+		closePanel: vi.fn(),
+	} as unknown as Session;
+	render(ResumePanel, { session, open: true });
+	await fireEvent.input(screen.getByRole("searchbox"), {
+		target: { value: "needle" },
+	});
+	await vi.advanceTimersByTimeAsync(300);
+	await tick();
+	expect(screen.getByRole("alert").textContent).toBe("Search failed: offline.");
+	await fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+	await vi.advanceTimersByTimeAsync(300);
+	await tick();
+	expect(screen.getByText("No conversation mentions this text.")).toBeTruthy();
 });

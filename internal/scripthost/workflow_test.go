@@ -16,7 +16,7 @@ import (
 func TestWorkflowReplaysRecordedEffectsAfterCrash(t *testing.T) {
 	t.Parallel()
 	code := "ctx.tools.exec(command = \"echo one >> log.txt\")\nctx.tools.exec(command = \"echo two >> log.txt\")\n" +
-		"a = ctx.judge(\"hold\", {\"ok\": {\"type\": \"noul\"}})\nctx.tools.exec(command = \"echo three >> log.txt\")\na[\"ok\"].noul\n"
+		"a = ctx.judge(\"hold\", {\"ok\": {\"type\": \"noul\"}})\nctx.tools.exec(command = \"echo three >> log.txt\")\na.answers[\"ok\"].noul\n"
 	crashed, threadID, home := crashWorkflow(t, code)
 	judge := newJudgeServer(t, nil)
 	revived, events := reviveWorkflow(t, crashed.cwd, home, threadID, judge)

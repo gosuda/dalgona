@@ -452,6 +452,14 @@ func fieldBool(fields map[string]jsontext.Value, key string) (bool, error) {
 	return valueBool(raw)
 }
 
+func optionalBool(fields map[string]jsontext.Value, key string) (bool, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return false, nil
+	}
+	return valueBool(raw)
+}
+
 func valueString(raw jsontext.Value) (string, error) {
 	tok, err := oneToken(raw)
 	if err != nil || tok.Kind() != jsontext.KindString {

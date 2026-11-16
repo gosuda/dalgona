@@ -84,7 +84,7 @@ import type {
 	TreeTurn,
 	WaitingElsewhere,
 } from "./types";
-import type { SettingValue } from "./validation";
+import type { SettingValue, ThreadSearchHit } from "./validation";
 import {
 	parseAdvisorStatusResponse,
 	parseCommandExecResponse,
@@ -100,6 +100,7 @@ import {
 	parseSettingsReadResponse,
 	parseThreadListResponse,
 	parseThreadReadResponse,
+	parseThreadSearchResponse,
 	parseThreadStartResponse,
 	parseThreadTreeResponse,
 	parseTurnStartResponse,
@@ -134,6 +135,10 @@ function applyThemeToPage(setting: ThemeSetting): void {
 }
 
 const MAX_NOTICES = 5;
+const RECONNECT_ATTEMPTS = 3;
+const RECONNECT_FIRST_WAIT_MS = 1000;
+const CONNECT_DEADLINE_MS = 30000;
+const STABLE_CONNECTION_MS = 20000;
 
 const SHELL_TIMEOUT_MS = 120000;
 const SHELL_OUTPUT_BYTES = 65536;
@@ -203,6 +208,11 @@ export class Session {
 	private platformFamily: string | null = null;
 	private shellCount = 0;
 	private connectionGeneration = 0;
+	private lostGeneration = 0;
+	private reconnectAttempt = 0;
+	private reconnectNoticeId = 0;
+	private cancelScheduledAttempt: (() => void) | null = null;
+	private cancelStableCheck: (() => void) | null = null;
 	private selectionGeneration = 0;
 	private openCwd: string | null = null;
 	private accessToken = "";
@@ -232,6 +242,7 @@ export class Session {
 	keywords: readonly KeywordDefinition[] = $state([]);
 	advisor: AdvisorSummary = $state({ kind: "unknown" });
 	requests: readonly ServerRequest[] = $state([]);
+	timedOutQuestions: ReadonlySet<string> = $state(new Set());
 	patchChanges: PatchChanges = $state({});
 	knownChildren: KnownChildThreads = $state({});
 	queuedFollowups: readonly string[] = $state([]);
@@ -242,6 +253,7 @@ export class Session {
 	notices: readonly Notice[] = $state([]);
 	statusSeq: Readonly<Record<string, number>> = $state({});
 	retryWait: RetryWait | null = $state(null);
+	reviewNote: string | null = $state(null);
 	completedThreadIds: ReadonlySet<string> = $state(new Set());
 	verbosity: Verbosity = $state("medium");
 	settingValues: readonly SettingValue[] = $state([]);
@@ -384,6 +396,12 @@ export class Session {
 					(entry) => entry.id === notification.requestId,
 				);
 				if (request === undefined) return;
+				if (notification.resolution === "timedOut") {
+					this.timedOutQuestions = new Set([
+						...this.timedOutQuestions,
+						request.itemId,
+					]);
+				}
 				this.settleRequest(request);
 				const text = resolutionNotice(notification.resolution);
 				if (text !== null) this.notify("info", text);
@@ -409,6 +427,7 @@ export class Session {
 
 	stop(): void {
 		this.connectionGeneration += 1;
+		this.cancelReconnect();
 		this.client?.close();
 	}
 
@@ -473,6 +492,23 @@ export class Session {
 			parseThreadListResponse,
 		);
 		return result.threads;
+	}
+
+	async searchThreads(
+		query: string,
+		signal: AbortSignal,
+	): Promise<readonly ThreadSearchHit[]> {
+		const generation = this.connectionGeneration;
+		signal.throwIfAborted();
+		const hits = await this.requireClient().call(
+			"dalgona/thread/search",
+			{ query, limit: 50 },
+			parseThreadSearchResponse,
+		);
+		signal.throwIfAborted();
+		if (generation !== this.connectionGeneration)
+			throw new Error("Connection changed");
+		return hits;
 	}
 
 	async threadTurns(): Promise<readonly TreeTurn[]> {
@@ -568,8 +604,14 @@ export class Session {
 	}
 
 	async connect(): Promise<void> {
+		this.cancelReconnect();
+		await this.openConnection(false);
+	}
+
+	private async openConnection(automatic: boolean): Promise<void> {
 		const generation = ++this.connectionGeneration;
 		this.client?.close();
+		this.cancelStable();
 		this.requests = [];
 		this.clearErrors();
 		const hashed = tokenFromHash(this.location.hash);
@@ -605,18 +647,23 @@ export class Session {
 			onQuestion: (request) => {
 				if (generation === this.connectionGeneration) {
 					this.requests = trackRequest(this.requests, request);
+					this.notifyAttention("waiting", request.threadId);
 				}
 			},
 			onStateChange: (state) => {
 				if (generation !== this.connectionGeneration) return;
+				if (
+					state === "connecting" &&
+					(automatic || this.connection === "disconnected")
+				) {
+					return;
+				}
 				const dropped =
 					this.connection === "connected" && state === "disconnected";
 				this.connection = state;
-				if (dropped) {
-					this.notify("error", "Disconnected from dalgona.", [
-						this.reconnectAction(),
-					]);
-				}
+				if (state === "connected") this.armStable();
+				else this.cancelStable();
+				if (dropped) this.connectionDropped(generation);
 			},
 			onError: (message) => {
 				if (generation === this.connectionGeneration) {
@@ -629,57 +676,153 @@ export class Session {
 		this.client = rpc;
 		this.selectionGeneration += 1;
 		try {
-			await rpc.open();
+			await (automatic ? this.openWithinDeadline(rpc) : rpc.open());
 			if (generation !== this.connectionGeneration) return;
-			const info = await rpc.call(
-				"initialize",
-				{
-					clientInfo: {
-						name: "dalgona-web",
-						title: "dalgona web",
-						version: "0.1.0",
-					},
-					capabilities: null,
-				},
-				parseInitializeResponse,
-			);
-			this.userAgent = info.userAgent;
-			this.platformFamily = info.platformFamily;
-			rpc.notify("initialized", {});
-			const safeLoad = (title: string, load: () => Promise<void>) =>
-				load().catch((error) => {
-					if (generation === this.connectionGeneration) {
-						this.reportFailure(
-							title,
-							error instanceof Error ? error : String(error),
-							() => void safeLoad(title, load),
-						);
-					}
-				});
-			await Promise.all([
-				safeLoad("Unable to load threads", () => this.loadThreads(generation)),
-				safeLoad("Unable to load models", () => this.loadModels(generation)),
-				safeLoad("Unable to load configuration", () =>
-					this.loadConfig(generation),
-				),
-				safeLoad("Unable to load keywords", () =>
-					this.loadKeywords(generation),
-				),
-				safeLoad("Unable to load settings", () =>
-					this.loadSettings(generation),
-				),
-			]);
+			await this.initialize(rpc, generation);
 		} catch (error) {
-			if (generation === this.connectionGeneration) {
-				this.connection = "disconnected";
-				const detail = error instanceof Error ? error.message : String(error);
-				this.notify(
-					"error",
-					`Unable to connect to dalgona: ${detail}. Check that dalgona web is still running.`,
-					[this.reconnectAction()],
-				);
-			}
+			this.connectFailed(generation, automatic, error);
 		}
+	}
+
+	private async initialize(rpc: RpcPort, generation: number): Promise<void> {
+		const info = await rpc.call(
+			"initialize",
+			{
+				clientInfo: {
+					name: "dalgona-web",
+					title: "dalgona web",
+					version: "0.1.0",
+				},
+				capabilities: null,
+			},
+			parseInitializeResponse,
+		);
+		if (generation !== this.connectionGeneration) return;
+		this.userAgent = info.userAgent;
+		this.platformFamily = info.platformFamily;
+		rpc.notify("initialized", {});
+		this.dismissReconnecting();
+		const safeLoad = (title: string, load: () => Promise<void>) =>
+			load().catch((error) => {
+				if (generation === this.connectionGeneration) {
+					this.reportFailure(
+						title,
+						error instanceof Error ? error : String(error),
+						() => void safeLoad(title, load),
+					);
+				}
+			});
+		await Promise.all([
+			safeLoad("Unable to load threads", () => this.loadThreads(generation)),
+			safeLoad("Unable to load models", () => this.loadModels(generation)),
+			safeLoad("Unable to load configuration", () =>
+				this.loadConfig(generation),
+			),
+			safeLoad("Unable to load keywords", () => this.loadKeywords(generation)),
+			safeLoad("Unable to load settings", () => this.loadSettings(generation)),
+		]);
+	}
+
+	private async openWithinDeadline(rpc: RpcPort): Promise<void> {
+		const deadline = Promise.withResolvers<never>();
+		const timer = setTimeout(
+			() => deadline.reject(new Error("connection timed out")),
+			CONNECT_DEADLINE_MS,
+		);
+		try {
+			await Promise.race([rpc.open(), deadline.promise]);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	private loseConnection(generation: number): boolean {
+		if (
+			generation !== this.connectionGeneration ||
+			generation === this.lostGeneration
+		) {
+			return false;
+		}
+		this.lostGeneration = generation;
+		this.connectionGeneration += 1;
+		this.connection = "disconnected";
+		this.cancelStable();
+		this.client?.close();
+		return true;
+	}
+
+	private connectionDropped(generation: number): void {
+		if (this.loseConnection(generation)) this.scheduleReconnect();
+	}
+
+	private connectFailed(
+		generation: number,
+		automatic: boolean,
+		error: unknown,
+	): void {
+		if (!this.loseConnection(generation)) return;
+		if (automatic) {
+			this.scheduleReconnect();
+			return;
+		}
+		const detail = error instanceof Error ? error.message : String(error);
+		this.notify(
+			"error",
+			`Unable to connect to dalgona: ${detail}. Check that dalgona web is still running.`,
+			[this.reconnectAction()],
+		);
+	}
+
+	private scheduleReconnect(): void {
+		this.clearErrors();
+		this.dismissReconnecting();
+		if (this.reconnectAttempt >= RECONNECT_ATTEMPTS) {
+			this.notify("error", "Disconnected from dalgona.", [
+				this.reconnectAction(),
+			]);
+			return;
+		}
+		this.reconnectAttempt += 1;
+		const attempt = this.reconnectAttempt;
+		this.notify(
+			"warning",
+			`Reconnecting to dalgona (attempt ${attempt} of ${RECONNECT_ATTEMPTS}).`,
+			[this.reconnectAction()],
+		);
+		this.reconnectNoticeId = this.noticeSeq;
+		const wait = RECONNECT_FIRST_WAIT_MS * 2 ** (attempt - 1);
+		const timer = setTimeout(() => {
+			this.cancelScheduledAttempt = null;
+			void this.openConnection(true);
+		}, wait);
+		this.cancelScheduledAttempt = () => clearTimeout(timer);
+	}
+
+	private cancelReconnect(): void {
+		this.cancelScheduledAttempt?.();
+		this.cancelScheduledAttempt = null;
+		this.cancelStable();
+		this.dismissReconnecting();
+	}
+
+	private dismissReconnecting(): void {
+		if (this.reconnectNoticeId === 0) return;
+		this.dismiss(this.reconnectNoticeId);
+		this.reconnectNoticeId = 0;
+	}
+
+	private armStable(): void {
+		this.cancelStable();
+		const timer = setTimeout(() => {
+			this.cancelStableCheck = null;
+			this.reconnectAttempt = 0;
+		}, STABLE_CONNECTION_MS);
+		this.cancelStableCheck = () => clearTimeout(timer);
+	}
+
+	private cancelStable(): void {
+		this.cancelStableCheck?.();
+		this.cancelStableCheck = null;
 	}
 
 	private websocketUrl(): string {
@@ -718,17 +861,13 @@ export class Session {
 		try {
 			const result = await this.requireClient().call(
 				"thread/list",
-				{ limit: 100, sortKey: "updated_at", sortDirection: "desc" },
+				{ limit: 100 },
 				parseThreadListResponse,
 			);
 			if (generation !== this.connectionGeneration) return;
 			this.threads = result.threads;
-			if (this.activeThreadId !== null) {
+			if (this.activeThreadId !== null)
 				await this.selectThread(this.activeThreadId);
-				return;
-			}
-			const first = result.threads[0];
-			if (first !== undefined) await this.selectThread(first.id);
 		} finally {
 			if (generation === this.connectionGeneration) this.loadingThreads = false;
 		}
@@ -755,7 +894,15 @@ export class Session {
 			parseConfigReadResponse,
 		);
 		if (generation !== this.connectionGeneration) return;
-		this.status = result;
+		if (this.activeThreadId === null) {
+			this.status = result;
+		} else {
+			this.status = {
+				...this.status,
+				model: result.model,
+				effort: result.effort,
+			};
+		}
 		if (result.model) this.selectedModel = result.model;
 	}
 
@@ -1401,8 +1548,8 @@ export class Session {
 			this.desktopNotifications = "unsupported";
 		}
 	}
-
 	private handleNotification(notification: AppNotification): void {
+		const previous = this.transcript;
 		const update = applyOpenThreadNotification(
 			{
 				transcript: this.transcript,
@@ -1411,9 +1558,22 @@ export class Session {
 			},
 			notification,
 		);
-		if (update.transcript !== this.transcript) this.transcriptRevision += 1;
+		const applied = update.transcript !== previous;
+		if (applied) this.transcriptRevision += 1;
 		this.transcript = update.transcript;
 		this.knownChildren = update.knownChildren;
+		if (update.transcript.turnStatus !== previous.turnStatus) {
+			this.reviewNote = null;
+		}
+		if (
+			(notification.type === "toolJudged" ||
+				notification.type === "turnJudged") &&
+			(notification.review.verdict === "flagged" ||
+				notification.review.verdict === "error") &&
+			applied
+		) {
+			this.reviewNote = notification.review.summary;
+		}
 		if (
 			notification.type === "turnStarted" ||
 			notification.type === "turnCompleted"
@@ -1425,6 +1585,9 @@ export class Session {
 			);
 		}
 		if (notification.type === "turnCompleted") {
+			if (this.retryWait?.turnId === notification.turn.id) {
+				this.retryWait = null;
+			}
 			const attention = attentionOf(notification.turn.status);
 			if (attention !== null) {
 				this.notifyAttention(attention, notification.threadId);

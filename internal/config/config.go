@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/gosuda/dalgona/internal/model"
 )
 
 type Product string
@@ -134,6 +136,13 @@ const (
 	SandboxOff            SandboxMode = "off"
 )
 
+type ShellEnvMode string
+
+const (
+	ShellEnvSnapshot ShellEnvMode = "snapshot"
+	ShellEnvInherit  ShellEnvMode = "inherit"
+)
+
 type ToolMode string
 
 const (
@@ -211,15 +220,23 @@ type (
 		Requires     []string
 		Enabled      bool
 	}
-	RunnerSpec    struct{ Service, Image, Template, URL string }
-	RemoteSpec    struct{ Service, Image, Template, URL, BoxID string }
-	ProviderSpec  struct{ BaseURL, APIKeyEnv string }
-	ModelSpec     struct{ ContextWindow int }
+	RunnerSpec   struct{ Service, Image, Template, URL string }
+	RemoteSpec   struct{ Service, Image, Template, URL, BoxID string }
+	ProviderSpec struct{ BaseURL, APIKeyEnv string }
+	ModelSpec    struct {
+		ContextWindow int
+		Price         *model.Price
+	}
 	MCPServerSpec struct {
-		Command string
-		Args    []string
-		Env     map[string]string
-		URL     string
+		Command           string
+		Args              []string
+		Env               map[string]string
+		URL               string
+		BearerTokenEnv    string
+		OAuth             bool
+		OAuthScopes       []string
+		OAuthClientID     string
+		OAuthCallbackPort int
 	}
 	DiscoveryConfig       struct{ Sources []string }
 	ApprovalDeciderConfig struct {
@@ -234,11 +251,14 @@ type (
 		Uses []string
 		Set  bool
 	}
-	SecretsConfig struct{ Patterns []string }
-	HerdrConfig   struct{ SubagentPanes bool }
-	WebConfig     struct{ Listen, Token, CertFile, KeyFile string }
-	RolesConfig   struct{ Smol, Slow, Advisor string }
-	origin        struct {
+	SecretsConfig struct {
+		Patterns []string
+		Builtin  bool
+	}
+	HerdrConfig struct{ SubagentPanes bool }
+	WebConfig   struct{ Listen, Token, CertFile, KeyFile string }
+	RolesConfig struct{ Smol, Slow, Advisor string }
+	origin      struct {
 		file string
 		line int
 	}
@@ -254,14 +274,17 @@ type Config struct {
 	ToolMode                              ToolMode
 	Sandbox                               SandboxMode
 	SandboxWritableRoots                  []string
+	ShellEnv                              ShellEnvMode
 	Verbosity                             Verbosity
 	Theme                                 Theme
 	Icons                                 Icons
 	StatusHide                            []string
 	Notifications                         bool
+	TLSCAFile                             string
 	EditStyle                             EditStyleSpec
 	CompactionThreshold                   float64
 	CompactionKeepTokens                  int
+	MaxSubagentStarts                     int
 	StreamStartTimeout, StreamIdleTimeout time.Duration
 	Runner, Remote                        string
 	Providers                             map[string]ProviderSpec
@@ -281,26 +304,24 @@ type Config struct {
 	Advisor                               AdvisorConfig
 	Advisors                              map[string]AdvisorSpec
 	advisorEntries                        map[string]advisorsDoc
+	priceEntries                          map[string]priceKeys
 	lines                                 map[string]origin
-}
-
-func defaultConfig(product Product, cwd string) Config {
-	return defaultConfigWithHome(product, product.Home(), cwd)
 }
 
 func defaultConfigWithHome(product Product, home, cwd string) Config {
 	return Config{
 		Home: home, Product: product, Cwd: cwd,
 		Reasoning: ReasoningDefault, Approval: ApprovalAuto, ToolMode: ToolModeEvalFirst,
-		Sandbox: SandboxWorkspaceWrite, Runner: "local",
+		Sandbox: SandboxWorkspaceWrite, Runner: "local", ShellEnv: ShellEnvSnapshot,
 		Verbosity: VerbosityMedium, Theme: ThemeAuto, Icons: IconsAuto, StatusHide: []string{}, Notifications: true,
 		EditStyle: EditStyleSpec{Default: "anchor"}, CompactionThreshold: .8,
+		MaxSubagentStarts:    32,
 		CompactionKeepTokens: 20000, StreamStartTimeout: time.Minute,
 		StreamIdleTimeout: 5 * time.Minute, ApprovalDecider: ApprovalDeciderConfig{Threshold: .9},
-		Web: WebConfig{Listen: "127.0.0.1:7437"}, Providers: map[string]ProviderSpec{},
+		Web: WebConfig{Listen: "127.0.0.1:7437"}, Secrets: SecretsConfig{Builtin: true}, Providers: map[string]ProviderSpec{},
 		Models: map[string]ModelSpec{}, Runners: map[string]RunnerSpec{}, Remotes: map[string]RemoteSpec{},
 		MCPServers: map[string]MCPServerSpec{}, Keywords: map[string]KeywordSpec{},
-		lines: map[string]origin{}, Advisor: defaultAdvisor(), advisorEntries: map[string]advisorsDoc{},
+		lines: map[string]origin{}, Advisor: defaultAdvisor(), advisorEntries: map[string]advisorsDoc{}, priceEntries: map[string]priceKeys{},
 	}
 }
 
@@ -332,6 +353,7 @@ func Load(product Product, cwd string, flags Flags) (Config, error) {
 		return Config{}, err
 	}
 	cfg.resolveAdvisors()
+	cfg.resolvePrices()
 	return cfg, nil
 }
 

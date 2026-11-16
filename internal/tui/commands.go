@@ -25,10 +25,6 @@ const (
 	maxFollowups   = 32
 )
 
-func (m *model) commandContext() (context.Context, context.CancelFunc) {
-	return requestContext(m.conn.done)
-}
-
 func requestContext(done <-chan struct{}) (context.Context, context.CancelFunc) {
 	return boundedContext(done, requestTimeout)
 }
@@ -54,7 +50,7 @@ func (m *model) call(op, method string, params, result any, text string) tea.Cmd
 		if m.conn.client == nil {
 			return resultMsg{op: op, text: text, err: errors.New("rpc client is not connected")}
 		}
-		ctx, cancel := m.commandContext()
+		ctx, cancel := requestContext(m.conn.done)
 		defer cancel()
 		err := m.conn.client.Call(ctx, method, params, result)
 		return resultMsg{op: op, value: result, text: text, turnID: turnID, err: err}
@@ -66,7 +62,7 @@ func (m *model) initialize() tea.Cmd {
 		if m.conn.client == nil {
 			return resultMsg{op: "initialize", err: errors.New("rpc client is not connected")}
 		}
-		ctx, cancel := m.commandContext()
+		ctx, cancel := requestContext(m.conn.done)
 		defer cancel()
 		params := rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: "dalgona", Title: "dalgona TUI", Version: clientVersion()}}
 		var result rpc.InitializeResult
@@ -387,9 +383,16 @@ func (m *model) applyInitialize(value any) tea.Cmd {
 
 func (m *model) welcomeLines() []string {
 	dim := lipgloss.NewStyle().Faint(true)
-	details := slices.DeleteFunc([]string{m.conn.version, cmp.Or(m.thread.modelName, "default"), displayCwd(m.conn.opts.Cwd)}, func(s string) bool { return s == "" })
+	details := slices.DeleteFunc([]string{m.conn.version, cmp.Or(m.thread.modelName, "default"), displayCwd(m.workDir())}, func(s string) bool { return s == "" })
 	name := lipgloss.NewStyle().Bold(true).Render(m.conn.product)
 	return []string{name + dim.Render(" "+sanitizeText(strings.Join(details, " · "))), dim.Render("Type a prompt · / commands · ? keys")}
+}
+
+func (m *model) workDir() string {
+	if m.thread.id != "" {
+		return m.thread.cwd
+	}
+	return m.conn.opts.Cwd
 }
 
 func displayCwd(cwd string) string {
@@ -412,9 +415,13 @@ func (m *model) applyLevels(msg resultMsg) {
 
 type resumedThread struct {
 	rpc.ThreadReadResponse
-	effort   string
-	approval string
-	model    string
+	effort       string
+	turnEffort   *string
+	turnRevision *uint64
+	approval     string
+	model        string
+	cwd          string
+	resumeSeq    int
 }
 
 func (m *model) applyDataResult(msg resultMsg) tea.Cmd {
@@ -545,25 +552,32 @@ func (m *model) panelFailed(msg resultMsg) bool {
 }
 
 func (m *model) applyResultError(msg resultMsg) tea.Cmd {
+	if msg.op == "resumed" && m.concludePendingResume(msg.seq) {
+		return nil
+	}
 	if m.panelFailed(msg) {
 		return nil
 	}
-	if msg.op == "send" || msg.op == "steer" {
-		m.restoreComposer(msg.text)
-	}
-	if msg.op == "followup" {
-		m.queue = append([]string{msg.text}, m.queue...)
-		m.syncQueue()
-	}
-	if msg.op == "send" || msg.op == "followup" {
-		m.setState(stateFailed)
-	}
+	m.restorePrompt(msg)
 	if msg.op == "keywords" {
 		m.errorf("keyword highlighting unavailable: %v; prompting is ready, restart to retry", msg.err)
 		return nil
 	}
 	m.errorf("%s failed: %v; retry, %s, or /new", resultLabel(msg.op), msg.err, m.resumeHint())
 	return nil
+}
+
+func (m *model) restorePrompt(msg resultMsg) {
+	switch msg.op {
+	case "send", "steer":
+		m.restoreComposer(msg.text)
+	case "followup":
+		m.queue = append([]string{msg.text}, m.queue...)
+		m.syncQueue()
+	}
+	if msg.op == "send" || msg.op == "followup" {
+		m.setState(stateFailed)
+	}
 }
 
 func resultLabel(op string) string {
@@ -602,8 +616,40 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	if !ok {
 		return m.unexpectedResult("resumed thread")
 	}
-	previous := m.thread.id
+	held, proceed := m.claimPendingResume(response)
+	if !proceed {
+		return nil
+	}
+	if response.turnRevision != nil && m.thread.id == response.Thread.ID && *response.turnRevision != m.thread.turnRevision {
+		return nil
+	}
+	m.adoptResumed(response)
+	return m.replayResumed(response, held)
+}
+
+func (m *model) claimPendingResume(response *resumedThread) ([]notificationMsg, bool) {
+	p := m.pending
+	if p == nil {
+		return nil, true
+	}
+	if response.resumeSeq != 0 && response.resumeSeq != p.seq {
+		return nil, false
+	}
+	var held []notificationMsg
+	if p.target == response.Thread.ID {
+		if p.failed {
+			m.clearPendingResume()
+			return nil, false
+		}
+		held = p.held
+	}
+	m.clearPendingResume()
+	return held, true
+}
+
+func (m *model) adoptResumed(response *resumedThread) {
 	m.setThread(response.Thread.ID)
+	m.thread.cwd = response.cwd
 	m.thread.approvalMode = approvalFromPolicy(response.approval)
 	m.thread.effort = response.effort
 	m.thread.modelName = response.model
@@ -611,20 +657,35 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	m.noticeMoved(m.thread.title)
 	m.setState(threadState(response.Thread.Status))
 	m.live.items = nil
-	var items []turnItem
-	for _, turn := range response.Thread.Turns {
-		for _, item := range turn.Items {
-			items = append(items, turnItem{turn: turn.ID, item: item})
-		}
-	}
+	m.live.byID = nil
+}
+
+func (m *model) replayResumed(response *resumedThread, held []notificationMsg) tea.Cmd {
+	items := snapshotItems(response.Thread.Turns)
 	m.out.loads++
-	if previous != m.thread.id {
-		m.commit(threadKey(m.thread.id, m.out.loads), []string{m.threadSeparator()})
-	}
+	m.commit(threadKey(m.thread.id, m.out.loads), []string{m.threadSeparator()})
 	if len(items) > maxSettledItems {
 		m.commit(fmt.Sprintf("earlier:%s:%d", m.thread.id, m.out.loads), []string{fmt.Sprintf("%d earlier items are not shown", len(items)-maxSettledItems)})
 		items = items[len(items)-maxSettledItems:]
 	}
+	m.settleResumedItems(items)
+	m.restoreActiveTurn(response)
+	command := m.replayHeld(held)
+	m.emitStatus()
+	return command
+}
+
+func snapshotItems(turns []rpc.Turn) []turnItem {
+	var items []turnItem
+	for _, turn := range turns {
+		for _, item := range turn.Items {
+			items = append(items, turnItem{turn: turn.ID, item: item})
+		}
+	}
+	return items
+}
+
+func (m *model) settleResumedItems(items []turnItem) {
 	var turn string
 	for _, entry := range items {
 		if entry.item.Type == "userMessage" {
@@ -639,7 +700,29 @@ func (m *model) applyResumed(value any) tea.Cmd {
 	}
 	m.flushGroup()
 	m.thread.turnID = ""
-	return nil
+	m.thread.turnEffort = nil
+}
+
+func (m *model) restoreActiveTurn(response *resumedThread) {
+	for _, turn := range response.Thread.Turns {
+		if turn.Status == "inProgress" {
+			m.thread.turnID = turn.ID
+			m.thread.turnEffort = response.turnEffort
+		}
+	}
+}
+
+func (m *model) replayHeld(held []notificationMsg) tea.Cmd {
+	var cmds []tea.Cmd
+	for _, note := range held {
+		command, err := m.applyDecodedNotification(note)
+		if err != nil {
+			m.errorf("protocol error replaying %s: %v", note.method, err)
+			continue
+		}
+		cmds = append(cmds, command)
+	}
+	return tea.Sequence(cmds...)
 }
 
 func (m *model) applyNewThread(value any) tea.Cmd {
@@ -647,14 +730,18 @@ func (m *model) applyNewThread(value any) tea.Cmd {
 	if !ok {
 		return m.unexpectedResult("new thread")
 	}
+	m.resetPendingResume("")
 	m.setThread(response.Thread.ID)
+	m.thread.cwd = response.Cwd
 	m.thread.approvalMode = approvalFromPolicy(response.ApprovalPolicy)
+	m.thread.turnEffort = nil
 	m.thread.effort = response.ReasoningEffort
 	m.thread.modelName = response.Model
 	m.thread.title = threadTitle(response.Thread)
 	m.noticeMoved(m.thread.title)
 	m.thread.sandbox = serverSandbox(response.Sandbox.Type, m.thread.sandbox)
 	m.live.items = nil
+	m.live.byID = nil
 	m.setState(stateIdle)
 	m.out.loads++
 	m.commit(threadKey(m.thread.id, m.out.loads), []string{"started " + m.thread.title})
@@ -755,7 +842,7 @@ func (m *model) shellCommand(n int, command string) tea.Cmd {
 	if m.conn.platformFamily == "windows" {
 		argv = []string{"cmd", "/C", command}
 	}
-	params := shellParams{Command: argv, Cwd: m.conn.opts.Cwd, TimeoutMS: shellTimeoutMS, OutputBytesCap: shellOutputCap}
+	params := shellParams{Command: argv, Cwd: m.workDir(), TimeoutMS: shellTimeoutMS, OutputBytesCap: shellOutputCap}
 	client, done, clock := m.conn.client, m.conn.done, m.conn.clock
 	return func() tea.Msg {
 		if client == nil {

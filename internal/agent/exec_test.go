@@ -3,10 +3,15 @@ package agent
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
 
+	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/runner"
 )
 
@@ -39,5 +44,33 @@ func TestCollectExecKillsWhenReadFailsWhileAlive(t *testing.T) {
 	defer run.mu.Unlock()
 	if !slices.Contains(run.signals, runner.SignalKill) {
 		t.Fatalf("signals %v after a failed read of a live process, want a KILL", run.signals)
+	}
+}
+
+func TestExecReadsLiveSettingsHome(t *testing.T) {
+	h := newHarness(t)
+	moved := t.TempDir()
+	live := h.host.Config()
+	live.Home = moved
+	h.host.settingsMu.Lock()
+	h.host.live = live
+	h.host.settingsMu.Unlock()
+
+	argv := []string{"sh", "-c", "exit 0"}
+	if runtime.GOOS == "windows" {
+		argv = []string{"cmd", "/C", "exit 0"}
+	}
+	result, err := h.host.Exec(t.Context(), "live-home", ExecSpec{Argv: argv, Sandbox: config.SandboxOff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", result.ExitCode)
+	}
+	if _, err := os.Stat(filepath.Join(moved, "exec")); err != nil {
+		t.Fatalf("exec runner is not under the live home: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.home, "exec")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stale home %s holds an exec runner: %v", h.home, err)
 	}
 }

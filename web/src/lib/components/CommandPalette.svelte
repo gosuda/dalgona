@@ -5,6 +5,7 @@ import {
 	slashCommands,
 } from "#lib/commands.ts";
 import CompletionList from "#lib/components/CompletionList.svelte";
+import { isImeKey } from "#lib/ime.ts";
 
 interface Props {
 	readonly id: string;
@@ -52,7 +53,7 @@ function move(step: number): void {
 }
 
 function onKey(event: KeyboardEvent): void {
-	if (event.isComposing) return;
+	if (isImeKey(event)) return;
 	if (event.key === "Escape") {
 		event.preventDefault();
 		onClose();

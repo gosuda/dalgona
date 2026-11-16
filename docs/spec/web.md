@@ -122,6 +122,8 @@ The licence texts of the fonts and the icon subset MUST ship in `web/static/lice
 ### Thread header and status band
 
 The thread header shows the open thread title and its state tag. The state tag is `Working`, `Waiting` while the open thread waits for the user, `Done`, `Stopped`, or `Failed`. The tag shows `Ready` when the thread is idle, and `Offline` when the connection is down.
+The visible thread title MUST use at most two lines.
+The header MUST retain the full title as text and as a `title` attribute.
 The client MUST map thread status `notLoaded` to idle and display `Ready` when no completed turn is known.
 A `turn/started` notification for a turn already shown as `Done`, `Stopped`, or `Failed` MUST NOT replace that status or clear its error.
 
@@ -136,7 +138,7 @@ The client MUST NOT render an item whose id is in `statusHide`. The client MUST 
 - Approval and sandbox show one glyph each. Sandbox `off` shows the none glyph.
 - Folder shows one glyph, and its title is the folder name.
 - Queue shows one glyph and the count, only when a follow-up is queued.
-- Context shows a moon gauge and the percent of the context window in use. It MUST NOT show when the window is unknown. It MUST NOT show token counts.
+- Context shows a moon gauge and the percent of the context window in use. It MUST NOT show when the window is unknown. It MUST NOT show token counts. The percent MUST use the temporary context estimate while one is present, even at zero, until a provider usage report supersedes it.
 - Mark shows the small candy mark.
 
 Each icon MUST carry an `aria-label` that states its value in words. The browser draws Nerd glyphs from its own subset font, and it ignores the `icons` setting.
@@ -152,6 +154,7 @@ The document title MUST be `dalgona · <title> · <state>`, with the same state 
 
 - The transcript is not a live region. One status region announces turn changes and waiting requests.
 - While a transcript loads, the status region announces `Loading transcript…`.
+- The status region MUST announce a non-empty `reviewNote` for an edit-review notice.
 - Item statuses read `Working`, `Done`, `Failed`, `Declined`, or `Waiting`. Other statuses show their raw value.
 - Unknown item kinds show their type in plain words, such as `Web search`.
 - A `dynamicToolCall` item with tool `advisor` shows as a note card: `advisor · <severity>: <note>`. The note is the text of `contentItems`. The severity is always text. The card's inline-start border marks the severity as a second cue.
@@ -175,6 +178,7 @@ The document title MUST be `dalgona · <title> · <state>`, with the same state 
 - A diff card MUST follow the line limit and hidden-line note of its verbosity level, as Verbosity states.
 - A diff card MUST show `Diff not shown.` when the server omits the diff.
 - Rows and diffs MUST be chosen by item kind, not by tool name.
+- A diff card MUST show its lines without an inner scroll container.
 
 Each file change MUST show its edit review as one line under its diff cards, for every verdict. A review line MUST show the summary text that the server sends, such as `No problems found`. The turn review MUST show as one line after the last row, and MUST show only for the open turn. A `flagged` review MUST use the warning text role, an `error` review MUST use bold failed text, and other reviews MUST use dim text. Review lines MUST NOT use a background. Review lines are live only, so the history MUST NOT show a verdict.
 
@@ -225,6 +229,7 @@ The client records subagent threads from `dalgona/thread/childSpawned`. An appro
 The approval card MUST show `Approval required`, a title, the request details, and the decision actions. The title MUST read `Run this command?` for a command and `Apply these changes?` for a file change. The kicker MUST add `· <n> of <total>` when more than one approval is open.
 
 The request details MUST scroll inside their own region. The decision actions MUST stay outside that region. The card MUST offer `Accept`, `Accept for session`, `Decline`, and `Cancel and interrupt`.
+ArrowUp and ArrowDown MUST scroll the approval details by 48 px. PageUp and PageDown MUST scroll the approval details by the height of the details minus 48 px. Each PageUp and PageDown scroll MUST move at least 48 px.
 The dock MUST fit within the viewport. Approval details MUST shrink and scroll without hiding the card header or actions.
 Approval details MUST retain a readable scroll region. The card header, actions, and composer MUST NOT overlap.
 
@@ -247,18 +252,25 @@ The card MUST mark the first option `Recommended`. A question with options MUST 
 A question without options MUST show a text field only. The preview of the chosen option MUST appear in monospace below the options.
 
 The request details MUST scroll inside their own region. The actions MUST stay outside that region. `Submit` MUST be the card's one solid fill.
+While the title or an action of the question card has focus, ArrowUp and ArrowDown MUST scroll the question details by 48 px.
+PageUp and PageDown MUST scroll the question details by the height of the details minus 48 px. Each scroll MUST move at least 48 px.
+Home and End MUST scroll the question details to their top and to their end. The details region MUST NOT take a tab stop.
 
 Submit MUST send each answer as its option labels in option order, then the typed text. The typed text MUST be trimmed and capped at 2000 characters. Skip MUST send every question with an empty list. Dismiss and Escape MUST send `{"answers": {}}`.
 
 The card MUST move focus to its title when it appears. A `serverRequest/resolved` for a request this window still shows MUST show its notice in the notice stack.
 
+A `serverRequest/resolved` with `timedOut` closes the card and shows the notice `Question timed out`. The transcript row of the question item shows `Timed out`.
+
 ### Empty states and errors
 
 - With no open thread the transcript says `Pick a thread or start a new one`. When connected, it says that earlier threads are in the list. When not connected, it says to connect to dalgona.
+- On a fresh load the client MUST NOT open a thread by itself.
 - With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a title shows its preview. A thread with neither shows `Untitled thread`.
+- The `thread/list` request MUST carry `limit` and `cursor` only. It MUST NOT carry `sortKey` or `sortDirection`.
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
 - A new connection MUST discard thread resumes still in flight from the previous connection.
-- In the approval card, Decline and Cancel use the quiet style. The composer's `Interrupt turn` button has the danger style.
+- In the approval card, Decline and Cancel use the quiet style. The composer's `Interrupt` button has the danger style.
 
 ### Notices
 
@@ -270,10 +282,26 @@ A notice with the same text as a notice on the page MUST replace it.
 The page MUST keep at most five notices. It MUST remove the oldest first.
 A failed request MUST show `<action>: <detail>.`. While connected, the notice MUST offer `Try again`, which repeats the request. Otherwise it MUST offer `Reconnect`.
 A queued follow-up whose send fails MUST leave the queue. Its notice's `Try again` MUST send it once.
-A dropped connection MUST show `Disconnected from dalgona.` with `Reconnect`.
-A failed connect MUST show `Unable to connect to dalgona: <detail>. Check that dalgona web is still running.` with `Reconnect`.
+A dropped connection MUST show `Disconnected from dalgona.` with `Reconnect` once no attempts remain.
+A failed first or manual connect MUST show `Unable to connect to dalgona: <detail>. Check that dalgona web is still running.` with `Reconnect`.
 A socket error MUST show `Connection error: <message>.` with `Reconnect`.
 The header MUST show `Offline` while the connection is down.
+A connect that starts from a down connection MUST NOT show `connecting`. The header MUST show `Offline` until that connect reports `connected`.
+For a local daemon, `dalgona web` MUST permit auto-start until its first successful daemon connection.
+After that connection, each relay connection MUST attach to an existing daemon without auto-start.
+This rule applies to all browser windows served by that `dalgona web` process.
+If the daemon stops, start it separately before reconnecting. Remote connections keep their configured bridge behavior.
+After a drop, the client MUST start connects by itself. Each connect that the client starts is an attempt.
+The client MUST start at most 3 attempts in a row. They start 1 second, 2 seconds, and 4 seconds after the failure before them.
+Each attempt MUST fail after 30 seconds without an open socket.
+A manual connect is a connect that the user starts with `Reconnect`.
+A failure of a manual connect or of the first connect of a page load MUST NOT start attempts.
+While attempts remain, the notice MUST read `Reconnecting to dalgona (attempt <n> of 3).` with `Reconnect`.
+A drop or a failed attempt MUST remove the error notices. The header MUST keep `Offline` until an attempt connects.
+The client MUST ignore notifications, requests, and errors that arrive from the connection that it dropped.
+The attempt count MUST reset when a connection stays up for 20 seconds. A drop MUST cancel that wait.
+Selecting `Reconnect` MUST cancel the next attempt and connect at once.
+An attempt MUST resume the open thread as `Reconnect` does. It MUST NOT send a turn again, because the server owns running turns.
 
 ### Notifications
 
@@ -292,10 +320,13 @@ A control that disappears while focused hands focus to the message field. The su
 
 Start thread stays focusable and reports `aria-disabled` while a start is in flight.
 
-Only one control in one view MUST carry the point fill. The holder is the primary action of an open request.
-With no request open, it is the live state tag of a running open thread.
-With no running turn, it is `Send` in the message field of an idle open thread.
+Only one control in one view MUST carry the point fill. The holder is the primary action of an open request, or the open panel.
+With no request or panel open, it is the live state tag of a running open thread.
+With no running turn, it is `Send` in the message field of an idle open thread. With no open thread, `Send` MUST NOT carry the point fill.
 On the empty view, it is the main `Start thread` button. The sidebar `Start thread` button MUST NOT carry the point fill.
+
+The open thread view MUST carry the hue of its thread.
+A view with no open thread MUST carry no hue.
 
 ### Composer
 
@@ -314,6 +345,7 @@ Pasted images MUST be PNG, JPEG or GIF files of at most 5 MiB. The composer MUST
 Enter MUST send the typed text, then the pasted texts, then the images, as one message. A steer or follow-up MUST keep the chips for the next send.
 An empty typed text MUST NOT add a text item to the message.
 A message whose input array exceeds 15 MiB of JSON MUST stay in the composer with an error, and MUST NOT be sent. The limit is measured on the input array, not on the whole turn/start request.
+The client MUST remove one slash from a message that starts with `//` on the send, steer and queue paths.
 
 A message that starts with `!` MUST be a shell command, and Enter MUST run it in the thread's working directory.
 The field MUST be labelled `Shell command` in shell mode.
@@ -322,7 +354,7 @@ The client MUST call `command/exec` with `sh -c`, or with `cmd /C` on Windows.
 The client MUST time out a shell command after 120 seconds and keep at most 64 KiB of output.
 A shell command MUST commit one row to the transcript and MUST NOT be journaled.
 The output MUST become a chip labelled `[Shell #n exit N, L lines]`. The next message MUST send the chip's text as one more text block.
-An empty shell line MUST NOT run and MUST show `Enter a command after !.`
+An empty shell line MUST NOT run. It MUST show `Enter a command after !.`
 A shell command whose call fails MUST show a failed row and MUST NOT make a chip.
 A shell command with no open thread, or in a thread with no working directory, MUST show `Open a thread before running a shell command` and MUST keep the draft.
 A shell command that finishes after the user opens another thread MUST NOT add its row or its chip to that thread.
@@ -345,6 +377,7 @@ The file search MUST use the open thread's working directory as its only root, e
 The client MUST take that directory from the required top-level `cwd` of the `thread/start` or `thread/resume` response.
 With no working directory known, the file search MUST send no request and MUST show no files.
 The file list MUST show up to 20 files, each with its file name and its path.
+Arrow keys move only through the shown rows, at most 20.
 Enter or Tab MUST insert the highlighted path as `@<path>` followed by a space, and MUST NOT send the message.
 A change to the text after `@` MUST clear the file list at once.
 Enter or Tab MUST NOT send the message while a search for the current text is pending.
@@ -381,6 +414,16 @@ That submit MUST show `No command named /<name>. Start with // to send a message
 
 Pressing `?` while no field has focus MUST open the key list.
 Escape MUST close a panel and MUST return focus to the element that opened it.
+
+The resume panel filters thread titles, previews, and identifiers as the user types.
+A trimmed filter with at least three characters starts conversation search after a 300 ms pause.
+Each new keystroke cancels the pending search and discards its results.
+The client discards search results from an earlier connection.
+The `Matches in conversations` section shows each matching title and snippet.
+Selecting a match opens its thread and closes the panel.
+An empty search shows `No conversation mentions this text.`
+A failed search shows `Search failed: <cause>.` and a Try again button.
+
 The Settings panel MUST save only the settings whose values changed, in one `config/batchWrite` call.
 The Settings panel MUST send the key paths `approval`, `verbosity`, `theme`, `statusHide`, and `editReview`.
 An empty or unknown choice MUST NOT be saved, and the panel MUST show `Choose a <label>.` in its body.
@@ -401,6 +444,7 @@ The model panel MUST list each preset under `Presets`, as the preset, the model,
 Choosing a preset MUST fill the model and its default effort.
 The model panel MUST save the model and its effort in one `config/batchWrite` call, with the key paths `model` and `model_reasoning_effort`.
 The model panel MUST NOT save a model that the list lacks, or an effort that the model does not offer.
+Saving a model MUST NOT change the approval or sandbox of the open thread.
 A model panel with no models MUST show `No models. Log in to a provider to list its models.` with a Log in action.
 
 The resume panel MUST list threads from `thread/list` with a filter field.
@@ -434,3 +478,4 @@ Under `prefers-reduced-motion: reduce`, animations MUST stop, and the elapsed te
 Under forced colours, each state tag and the point button MUST keep a visible border. `web/checks/forced-colors.js` checks this rule.
 
 The page MUST have one status region and one alert region. The transcript MUST NOT be a live region.
+`web/checks/approval-actions.js` checks the approval card on small screens. `web/checks/dock.js` checks the composer dock. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript.

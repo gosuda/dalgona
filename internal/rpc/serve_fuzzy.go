@@ -252,7 +252,7 @@ func compareFuzzy(a, b fuzzyMatch) int {
 func fuzzyScore(query, path string) (uint32, []uint32, bool) {
 	needle := lowerRunes(query)
 	folded := lowerRunes(path)
-	window := fewestGapMatch(needle, folded)
+	window := greedyMatch(needle, folded)
 	if window == nil {
 		return 0, nil, false
 	}
@@ -295,38 +295,19 @@ func hasRunePrefix(s, prefix []rune) bool {
 	return len(s) >= len(prefix) && slices.Equal(s[:len(prefix)], prefix)
 }
 
-func fewestGapMatch(needle, folded []rune) []int {
-	var best []int
+func greedyMatch(needle, folded []rune) []int {
 	if len(needle) == 0 {
 		return nil
 	}
-	for start := range folded {
-		if folded[start] != needle[0] {
-			continue
-		}
-		window := greedyWindow(needle, folded, start)
-		if window == nil {
-			break
-		}
-		if best == nil || window[len(window)-1]-window[0] < best[len(best)-1]-best[0] {
-			best = window
-		}
-	}
-	return best
-}
-
-func greedyWindow(needle, folded []rune, start int) []int {
-	window := []int{start}
-	pos := start + 1
-	for _, r := range needle[1:] {
-		for pos < len(folded) && folded[pos] != r {
-			pos++
-		}
-		if pos == len(folded) {
+	window := make([]int, 0, len(needle))
+	pos := 0
+	for _, r := range needle {
+		next := slices.Index(folded[pos:], r)
+		if next < 0 {
 			return nil
 		}
-		window = append(window, pos)
-		pos++
+		window = append(window, pos+next)
+		pos += next + 1
 	}
 	return window
 }

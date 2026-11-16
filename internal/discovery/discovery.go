@@ -12,10 +12,15 @@ import (
 type (
 	Instruction struct{ Path, Text string }
 	MCPServer   struct {
-		Name, Command string
-		Args, Env     []string
-		URL           string
-		Workspace     bool
+		Name, Command     string
+		Args, Env         []string
+		URL               string
+		Workspace         bool
+		BearerTokenEnv    string
+		OAuth             bool
+		OAuthScopes       []string
+		OAuthClientID     string
+		OAuthCallbackPort int
 	}
 	Skill  struct{ Name, Description, Path string }
 	Result struct {

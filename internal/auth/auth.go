@@ -46,6 +46,7 @@ type (
 		env          func(string) string
 		secrets      map[string]string
 		patterns     []pattern
+		builtin      bool
 		maskErr      error
 		secretsDirty bool
 	}
@@ -53,10 +54,19 @@ type (
 
 func Load(home string) (*Store, error) { return NewWithPatterns(home, nil) }
 
-func NewWithPatterns(home string, patterns []string) (*Store, error) {
+type Option func(*Store)
+
+func WithBuiltinPatterns(enabled bool) Option {
+	return func(store *Store) { store.builtin = enabled }
+}
+
+func NewWithPatterns(home string, patterns []string, options ...Option) (*Store, error) {
 	store := &Store{
 		dir: home, data: map[string]Credential{}, raw: map[string]jsontext.Value{},
-		env: os.Getenv, secrets: map[string]string{},
+		env: os.Getenv, secrets: map[string]string{}, builtin: true,
+	}
+	for _, option := range options {
+		option(store)
 	}
 	if err := store.loadAuth(); err != nil {
 		return nil, err
@@ -491,11 +501,3 @@ func syncDir(dir string) error {
 }
 
 func (s *Store) Dir() string { return s.dir }
-
-type Masker interface {
-	Mask(string) string
-	Unmask(string) string
-	UnmaskStrict(string) (string, error)
-}
-
-func (s *Store) Masker() Masker { return s }

@@ -99,17 +99,17 @@ func (r RolesConfig) Configured(role string) string {
 
 func (c *Config) mergeAdvisor(doc *fileDoc) {
 	source := doc.Advisor
-	setBool(source.Enabled, &c.Advisor.Enabled)
-	setString(source.Review, (*string)(&c.Advisor.Review))
-	setInt(source.Interval, &c.Advisor.Interval)
-	setString(source.Sync, (*string)(&c.Advisor.Sync))
-	setString(source.ContinueSeverity, &c.Advisor.ContinueSeverity)
-	setInt(source.ImmuneTurns, &c.Advisor.ImmuneTurns)
-	setInt(source.MaxNotes, &c.Advisor.MaxNotes)
+	set(source.Enabled, &c.Advisor.Enabled)
+	set(source.Review, (*string)(&c.Advisor.Review))
+	set(source.Interval, &c.Advisor.Interval)
+	set(source.Sync, (*string)(&c.Advisor.Sync))
+	set(source.ContinueSeverity, &c.Advisor.ContinueSeverity)
+	set(source.ImmuneTurns, &c.Advisor.ImmuneTurns)
+	set(source.MaxNotes, &c.Advisor.MaxNotes)
 	if source.Tools != nil {
 		c.Advisor.Tools = source.Tools
 	}
-	setBool(source.Subagents, &c.Advisor.Subagents)
+	set(source.Subagents, &c.Advisor.Subagents)
 	for name, entry := range doc.Advisors {
 		c.advisorEntries[name] = mergeAdvisorEntry(c.advisorEntries[name], entry)
 	}
@@ -129,18 +129,6 @@ func mergeAdvisorEntry(target, source advisorsDoc) advisorsDoc {
 	return target
 }
 
-func setBool(source *bool, target *bool) {
-	if source != nil {
-		*target = *source
-	}
-}
-
-func setInt(source *int, target *int) {
-	if source != nil {
-		*target = *source
-	}
-}
-
 func (c *Config) resolveAdvisors() {
 	entries := c.advisorEntries
 	if len(entries) == 0 {
@@ -157,12 +145,12 @@ func (c *Config) resolveAdvisor(entry advisorsDoc) AdvisorSpec {
 		Review: c.Advisor.Review, Interval: c.Advisor.Interval, Sync: c.Advisor.Sync,
 		Tools: c.Advisor.Tools, Enabled: true,
 	}
-	setString(entry.Model, &spec.Model)
-	setString(entry.Instructions, &spec.Instructions)
-	setString(entry.Review, (*string)(&spec.Review))
-	setInt(entry.Interval, &spec.Interval)
-	setString(entry.Sync, (*string)(&spec.Sync))
-	setBool(entry.Enabled, &spec.Enabled)
+	set(entry.Model, &spec.Model)
+	set(entry.Instructions, &spec.Instructions)
+	set(entry.Review, (*string)(&spec.Review))
+	set(entry.Interval, &spec.Interval)
+	set(entry.Sync, (*string)(&spec.Sync))
+	set(entry.Enabled, &spec.Enabled)
 	if entry.Subagents != nil {
 		spec.Subagents = AdvisorSubagentsOff
 		if *entry.Subagents {

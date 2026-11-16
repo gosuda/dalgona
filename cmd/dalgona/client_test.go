@@ -3,6 +3,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/app"
 	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/daemon"
 )
 
 func fakeHerdr(t *testing.T) string {
@@ -152,5 +156,80 @@ func TestHerdrOutsideHerdrWiresNothing(t *testing.T) {
 	release()
 	if env.OnStatus != nil || env.OnChildSpawned != nil {
 		t.Fatal("herdr hooks wired outside herdr")
+	}
+}
+
+func TestWebDaemonDialerStartsInitiallyButOnlyReconnectsAfterSuccess(t *testing.T) {
+	home := shortDaemonHome(t)
+	marker := filepath.Join(home, "started")
+	exe := filepath.Join(home, "start-daemon")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\nprintf started > \"$DALGONA_HOME/started\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DALGONA_HOME", home)
+	dial := webDaemonDialer(home, exe)
+	initial, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if conn, err := dial(initial); err == nil {
+		_ = conn.Close()
+		t.Fatal("startup without a listening daemon succeeded")
+	}
+	stop, done := startFakeDaemon(t, home, daemon.Build(), os.Getpid(), nil)
+	requireDaemonMarker(t, marker, "initial connection did not start the daemon")
+	conn := dialDaemon(t, dial)
+	_ = conn.Close()
+	conn = dialDaemon(t, dial)
+	_ = conn.Close()
+	stopFakeDaemon(t, stop, done)
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	conn, err := dial(ctx)
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("reconnect succeeded with daemon down")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reconnect error = %v, want missing socket without startup", err)
+	}
+	requireNoDaemonMarker(t, marker)
+	stop, done = startFakeDaemon(t, home, daemon.Build(), os.Getpid(), nil)
+	defer stopFakeDaemon(t, stop, done)
+	conn, err = dial(t.Context())
+	if err != nil {
+		t.Fatalf("reconnect after external restart: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func dialDaemon(t *testing.T, dial func(context.Context) (net.Conn, error)) net.Conn {
+	t.Helper()
+	conn, err := dial(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+func requireDaemonMarker(t *testing.T, marker, failure string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(failure)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func requireNoDaemonMarker(t *testing.T, marker string) {
+	t.Helper()
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reconnect started a replacement daemon: marker error = %v", err)
 	}
 }

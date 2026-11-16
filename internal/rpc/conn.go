@@ -94,7 +94,7 @@ func (c *Conn) start() {
 	go c.readLoop()
 }
 
-func Dial(rwc io.ReadWriteCloser, h ClientHandler) (*Client, error) {
+func Dial(rwc io.ReadWriteCloser, h ClientHandler) *Conn {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := newConnection(ctx, rwc, nil)
 	c.cancel = cancel
@@ -102,7 +102,7 @@ func Dial(rwc io.ReadWriteCloser, h ClientHandler) (*Client, error) {
 	c.clientMessages = make(chan envelope, ClientDispatchQueueSize)
 	go c.clientDispatchLoop()
 	c.start()
-	return c, nil
+	return c
 }
 
 func (c *Conn) Call(ctx context.Context, method string, params any, result any) error {

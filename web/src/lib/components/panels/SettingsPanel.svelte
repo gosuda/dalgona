@@ -24,6 +24,7 @@ type EditableDraft = { -readonly [K in keyof SettingsDraft]: SettingsDraft[K] };
 
 let { session, open, onClose }: Props = $props();
 const groupName = $props.id();
+const reviewRecipientId = `${groupName}-review-recipient`;
 let draft: EditableDraft = $state(draftFromSettings([]));
 let problem: string | null = $state(null);
 let saving = $state(false);
@@ -113,9 +114,16 @@ async function save(): Promise<void> {
 				{/each}
 			</fieldset>
 			<label class="single">
-				<input type="checkbox" bind:checked={draft.editReview} />
+				<input
+					type="checkbox"
+					bind:checked={draft.editReview}
+					aria-describedby={reviewRecipientId}
+				/>
 				Review edits
 			</label>
+			<p id={reviewRecipientId} class="describe">
+				Sends each edit's masked diff to the decider model.
+			</p>
 			<DesktopNotifications
 				value={session.desktopNotifications}
 				onAllow={() => void session.requestDesktopNotifications()}
@@ -160,6 +168,12 @@ async function save(): Promise<void> {
 
 	.single {
 		justify-content: flex-start;
+	}
+
+	.describe {
+		margin: 0;
+		color: var(--dim);
+		font-size: var(--size-small);
 	}
 
 	.problem {

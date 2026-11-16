@@ -15,7 +15,7 @@ const methodRequestUserInput = "item/tool/requestUserInput"
 
 type questionAsk struct {
 	thread    *agent.Thread
-	window    <-chan agent.Update
+	watch     *watch
 	requestID string
 	questions []asktool.Question
 	params    ToolRequestUserInputParams
@@ -28,9 +28,15 @@ func (s *server) question(ctx context.Context, w *watch, ch <-chan agent.Update,
 		return
 	}
 	w.tracker.setStatus("active", "waitingOnUserInput")
+	if s.requestRefused(prompt.RequestID) {
+		if err := w.thread.CannotAnswerQuestion(prompt.RequestID, ch); err != nil && !errors.Is(err, agent.ErrUnknownRequest) {
+			s.log.Warn("rpc: report refused replayed question", "request", prompt.RequestID, "error", err)
+		}
+		return
+	}
 	q := questionAsk{
 		thread:    w.thread,
-		window:    ch,
+		watch:     w,
 		requestID: prompt.RequestID,
 		questions: prompt.Questions,
 		params:    userInputParams(update.Thread, w.tracker.currentTurn(), prompt),
@@ -47,6 +53,7 @@ func (s *server) question(ctx context.Context, w *watch, ch <-chan agent.Update,
 
 func (s *server) questionResolved(w *watch, prompt agent.QuestionPrompt) {
 	s.settle(prompt.RequestID)
+	s.unrefuseRequest(prompt.RequestID)
 	if w.tracker.turn != "" {
 		w.tracker.setStatus("active")
 	}
@@ -75,7 +82,8 @@ func (s *server) requestInput(serveCtx, askCtx context.Context, q questionAsk) {
 
 func (s *server) cannotAnswer(q questionAsk, cause error) {
 	s.log.Info("rpc: question request failed; this window cannot answer", "request", q.requestID, "error", cause)
-	if err := q.thread.CannotAnswerQuestion(q.requestID, q.window); err != nil && !errors.Is(err, agent.ErrUnknownRequest) {
+	s.refuseRequest(q.requestID)
+	if err := q.thread.CannotAnswerQuestion(q.requestID, q.watch.channel()); err != nil && !errors.Is(err, agent.ErrUnknownRequest) {
 		s.log.Warn("rpc: report unanswerable question", "request", q.requestID, "error", err)
 	}
 }
@@ -146,6 +154,8 @@ func resolutionName(outcome asktool.Outcome) string {
 		return "cancelled"
 	case asktool.OutcomeInterrupted:
 		return "interrupted"
+	case asktool.OutcomeTimedOut:
+		return "timedOut"
 	case asktool.OutcomeNoClient, asktool.OutcomeFailed:
 	}
 	return "declined"

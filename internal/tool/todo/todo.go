@@ -26,6 +26,7 @@ func (Tool) Spec() tool.Spec {
 		Description: "Replace the thread plan with items in their execution order. Each item has non-empty text and status pending, in_progress, or done.",
 		Schema:      jsontext.Value(`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","done"]}},"required":["text","status"],"additionalProperties":false}}},"required":["items"],"additionalProperties":false}`),
 		Keep:        tool.KeepHead,
+		Serial:      true,
 	}
 }
 

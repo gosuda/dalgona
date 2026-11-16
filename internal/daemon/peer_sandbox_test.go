@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/runner"
@@ -247,6 +249,11 @@ func runNNPProbe() int {
 	if os.Getenv("DALGONA_TEST_NNP_SEALED") == "" {
 		return sealAndReexec()
 	}
+	marked, err := peerSelfNoNewPrivs()
+	if err != nil || !marked {
+		_, _ = fmt.Fprintln(os.Stderr, "sandbox probe has no no_new_privs mark:", err)
+		return 2
+	}
 	sock, err := probeSockFromCwd()
 	if err != nil {
 		return 2
@@ -255,6 +262,8 @@ func runNNPProbe() int {
 }
 
 func sealAndReexec() int {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return 2
 	}
@@ -314,4 +323,70 @@ func dialProbe(sock string) int {
 		return 5
 	}
 	return 0
+}
+
+func serveHalfCloseHello(listener net.Listener) <-chan error {
+	result := make(chan error, 1)
+	go func() {
+		sconn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			result <- acceptErr
+			return
+		}
+		defer func() { _ = sconn.Close() }()
+		_ = sconn.SetDeadline(time.Now().Add(10 * time.Second))
+		if _, readErr := io.ReadFull(sconn, make([]byte, 4)); readErr != nil {
+			result <- readErr
+			return
+		}
+		if _, writeErr := sconn.Write([]byte("hello")); writeErr != nil {
+			result <- writeErr
+			return
+		}
+		if uc, ok := sconn.(*net.UnixConn); ok {
+			_ = uc.CloseWrite()
+		}
+		_, _ = io.ReadFull(sconn, make([]byte, 1))
+		result <- nil
+	}()
+	return result
+}
+
+func TestSandboxedClientAfterDataEOFRemainsEOF(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "sock")
+	listener, listenErr := net.Listen("unix", sock)
+	if listenErr != nil {
+		t.Fatal(listenErr)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	served := serveHalfCloseHello(listener)
+	conn, dialErr := dialPeer(sock)
+	if dialErr != nil {
+		t.Fatal(dialErr)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, writeErr := conn.Write([]byte("ping")); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	var got [5]byte
+	if _, readErr := io.ReadFull(iotest.OneByteReader(conn), got[:]); readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if string(got[:]) != "hello" {
+		t.Fatalf("response = %q, want %q", got, "hello")
+	}
+	var tail [1]byte
+	_, finalErr := conn.Read(tail[:])
+	if !errors.Is(finalErr, io.EOF) {
+		t.Fatalf("final read = %v, want EOF", finalErr)
+	}
+	if errors.Is(finalErr, errSandboxedClient) {
+		t.Fatalf("final EOF misclassified as sandbox: %v", finalErr)
+	}
+	_ = conn.Close()
+	if serveErr := <-served; serveErr != nil {
+		t.Fatalf("server: %v", serveErr)
+	}
 }

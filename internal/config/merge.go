@@ -3,9 +3,11 @@ package config
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -28,6 +30,7 @@ type fileDoc struct {
 	ApprovalValue        *string                `toml:"approval"`
 	ToolMode             *string                `toml:"tool_mode"`
 	Sandbox              *string                `toml:"sandbox"`
+	ShellEnv             *string                `toml:"shell_env"`
 	Verbosity            *string                `toml:"verbosity"`
 	Theme                *string                `toml:"theme"`
 	Icons                *string                `toml:"icons"`
@@ -39,8 +42,10 @@ type fileDoc struct {
 	CompactionKeepTokens *int                   `toml:"compaction_keep_tokens"`
 	StreamStartTimeout   *string                `toml:"stream_start_timeout"`
 	StreamIdleTimeout    *string                `toml:"stream_idle_timeout"`
+	Limits               limitsDoc              `toml:"limits"`
 	Runner               *string                `toml:"runner"`
 	Remote               *string                `toml:"remote"`
+	TLSCAFile            *string                `toml:"tls_ca_file"`
 	Providers            map[string]providerDoc `toml:"providers"`
 	Models               map[string]modelDoc    `toml:"models"`
 	Runners              map[string]runnerDoc   `toml:"runners"`
@@ -58,6 +63,10 @@ type fileDoc struct {
 	Roles                rolesDoc               `toml:"roles"`
 	Advisor              advisorDoc             `toml:"advisor"`
 	Advisors             map[string]advisorsDoc `toml:"advisors"`
+}
+
+type limitsDoc struct {
+	MaxSubagentStarts *int `toml:"max_subagent_starts"`
 }
 
 type editStyleDoc struct {
@@ -163,7 +172,11 @@ type (
 		APIKeyEnv string `toml:"api_key_env"`
 	}
 	modelDoc struct {
-		ContextWindow *int `toml:"context_window"`
+		ContextWindow        *int     `toml:"context_window"`
+		InputUSDPerMTok      *float64 `toml:"input_usd_per_mtok"`
+		OutputUSDPerMTok     *float64 `toml:"output_usd_per_mtok"`
+		CacheReadUSDPerMTok  *float64 `toml:"cache_read_usd_per_mtok"`
+		CacheWriteUSDPerMTok *float64 `toml:"cache_write_usd_per_mtok"`
 	}
 	runnerDoc struct {
 		Service  string `toml:"service"`
@@ -179,10 +192,15 @@ type (
 		BoxID    *string `toml:"box_id"`
 	}
 	mcpDoc struct {
-		Command string            `toml:"command"`
-		Args    []string          `toml:"args"`
-		Env     map[string]string `toml:"env"`
-		URL     string            `toml:"url"`
+		Command           string            `toml:"command"`
+		Args              []string          `toml:"args"`
+		Env               map[string]string `toml:"env"`
+		URL               string            `toml:"url"`
+		BearerTokenEnv    string            `toml:"bearer_token_env"`
+		OAuth             bool              `toml:"oauth"`
+		OAuthScopes       []string          `toml:"oauth_scopes"`
+		OAuthClientID     string            `toml:"oauth_client_id"`
+		OAuthCallbackPort int               `toml:"oauth_callback_port"`
 	}
 	discoveryDoc struct {
 		Sources []string `toml:"sources"`
@@ -200,6 +218,7 @@ type (
 	}
 	secretsDoc struct {
 		Patterns []string `toml:"patterns"`
+		Builtin  *bool    `toml:"builtin"`
 	}
 	keywordDoc struct {
 		Notice   string   `toml:"notice"`
@@ -229,7 +248,17 @@ func (c *Config) merge(current layer) error {
 	if err := c.mergeScalars(current); err != nil {
 		return err
 	}
+	if value := current.doc.Limits.MaxSubagentStarts; value != nil {
+		if *value < 1 {
+			source := lineMap(current.path, current.raw)["limits.max_subagent_starts"]
+			return fmt.Errorf("%s:%d: limits.max_subagent_starts must be positive", filepath.Base(current.path), source.line)
+		}
+		c.MaxSubagentStarts = *value
+	}
 	c.mergeMaps(current.doc)
+	if err := c.mergeMCPServers(current); err != nil {
+		return err
+	}
 	c.mergeTables(current.doc)
 	c.mergeAdvisor(current.doc)
 	maps.Copy(c.lines, lineMap(current.path, current.raw))
@@ -238,18 +267,23 @@ func (c *Config) merge(current layer) error {
 
 func (c *Config) mergeScalars(current layer) error {
 	doc := current.doc
-	setString(doc.Model, &c.Model)
-	setString(doc.Reasoning, (*string)(&c.Reasoning))
-	setString(doc.ApprovalValue, (*string)(&c.Approval))
-	setString(doc.ToolMode, (*string)(&c.ToolMode))
-	setString(doc.Sandbox, (*string)(&c.Sandbox))
-	setString(doc.Verbosity, (*string)(&c.Verbosity))
-	setString(doc.Theme, (*string)(&c.Theme))
-	setString(doc.Icons, (*string)(&c.Icons))
-	setStrings(doc.StatusHide, &c.StatusHide)
-	setBool(doc.Notifications, &c.Notifications)
-	setString(doc.Runner, &c.Runner)
-	setString(doc.Remote, &c.Remote)
+	set(doc.Model, &c.Model)
+	set(doc.Reasoning, (*string)(&c.Reasoning))
+	set(doc.ApprovalValue, (*string)(&c.Approval))
+	set(doc.ToolMode, (*string)(&c.ToolMode))
+	set(doc.Sandbox, (*string)(&c.Sandbox))
+	set(doc.ShellEnv, (*string)(&c.ShellEnv))
+	set(doc.Verbosity, (*string)(&c.Verbosity))
+	set(doc.Theme, (*string)(&c.Theme))
+	set(doc.Icons, (*string)(&c.Icons))
+	set(doc.StatusHide, &c.StatusHide)
+	set(doc.Notifications, &c.Notifications)
+	set(doc.Runner, &c.Runner)
+	set(doc.Remote, &c.Remote)
+	set(doc.TLSCAFile, &c.TLSCAFile)
+	if c.TLSCAFile != "" && !filepath.IsAbs(c.TLSCAFile) {
+		c.TLSCAFile = filepath.Join(c.Home, c.TLSCAFile)
+	}
 	if doc.SandboxWritableRoots != nil {
 		c.SandboxWritableRoots = doc.SandboxWritableRoots
 	}
@@ -268,13 +302,7 @@ func (c *Config) mergeScalars(current layer) error {
 	return nil
 }
 
-func setString(source *string, target *string) {
-	if source != nil {
-		*target = *source
-	}
-}
-
-func setStrings(source *[]string, target *[]string) {
+func set[T any](source *T, target *T) {
 	if source != nil {
 		*target = *source
 	}
@@ -306,17 +334,8 @@ func (c *Config) mergeMaps(doc *fileDoc) {
 	for name, value := range doc.Providers {
 		c.Providers[name] = ProviderSpec(value)
 	}
-	for name, value := range doc.Models {
-		model := ModelSpec{}
-		if value.ContextWindow != nil {
-			model.ContextWindow = *value.ContextWindow
-		}
-		c.Models[name] = model
-	}
+	c.mergeModels(doc)
 	c.mergeBoxes(doc)
-	for name, value := range doc.MCPServers {
-		c.MCPServers[name] = MCPServerSpec(value)
-	}
 	for word, value := range doc.Keywords {
 		keyword := KeywordSpec{Notice: value.Notice, Text: value.Text, Effort: value.Effort, Requires: value.Requires}
 		if len(value.Hue) == 2 {
@@ -339,11 +358,11 @@ func (c *Config) mergeBoxes(doc *fileDoc) {
 	}
 	for name, value := range doc.Remotes {
 		spec := c.Remotes[name]
-		setString(value.Service, &spec.Service)
-		setString(value.Image, &spec.Image)
-		setString(value.Template, &spec.Template)
-		setString(value.URL, &spec.URL)
-		setString(value.BoxID, &spec.BoxID)
+		set(value.Service, &spec.Service)
+		set(value.Image, &spec.Image)
+		set(value.Template, &spec.Template)
+		set(value.URL, &spec.URL)
+		set(value.BoxID, &spec.BoxID)
 		c.Remotes[name] = spec
 	}
 }
@@ -352,7 +371,7 @@ func (c *Config) mergeTables(doc *fileDoc) {
 	if doc.Discovery.Sources != nil {
 		c.Discovery.Sources = doc.Discovery.Sources
 	}
-	setString(doc.ApprovalDecider.Decider, &c.ApprovalDecider.Decider)
+	set(doc.ApprovalDecider.Decider, &c.ApprovalDecider.Decider)
 	if doc.ApprovalDecider.Threshold != nil {
 		c.ApprovalDecider.Threshold = *doc.ApprovalDecider.Threshold
 	}
@@ -368,20 +387,21 @@ func (c *Config) mergeTables(doc *fileDoc) {
 	if doc.Secrets.Patterns != nil {
 		c.Secrets.Patterns = doc.Secrets.Patterns
 	}
+	set(doc.Secrets.Builtin, &c.Secrets.Builtin)
 	if doc.Herdr.SubagentPanes != nil {
 		c.Herdr.SubagentPanes = *doc.Herdr.SubagentPanes
 	}
 	mergeWeb(&c.Web, doc.Web)
-	setString(doc.Roles.Smol, &c.Roles.Smol)
-	setString(doc.Roles.Slow, &c.Roles.Slow)
-	setString(doc.Roles.Advisor, &c.Roles.Advisor)
+	set(doc.Roles.Smol, &c.Roles.Smol)
+	set(doc.Roles.Slow, &c.Roles.Slow)
+	set(doc.Roles.Advisor, &c.Roles.Advisor)
 }
 
 func mergeWeb(target *WebConfig, source webDoc) {
-	setString(source.Listen, &target.Listen)
-	setString(source.Token, &target.Token)
-	setString(source.CertFile, &target.CertFile)
-	setString(source.KeyFile, &target.KeyFile)
+	set(source.Listen, &target.Listen)
+	set(source.Token, &target.Token)
+	set(source.CertFile, &target.CertFile)
+	set(source.KeyFile, &target.KeyFile)
 }
 
 func (c *Config) applyFlags(flags Flags) {
@@ -416,7 +436,42 @@ func (c *Config) validate() error {
 	errs = append(errs, c.validateKeywords()...)
 	errs = append(errs, c.validateAdvisors()...)
 	errs = append(errs, c.validateStatusHideList()...)
+	errs = append(errs, c.validateTLSCAFile()...)
+	errs = append(errs, c.validatePrices()...)
 	return errors.Join(errs...)
+}
+
+const tlsCAMaxBytes = 1048576
+
+func (c *Config) validateTLSCAFile() []error {
+	if c.TLSCAFile == "" {
+		return nil
+	}
+	info, err := os.Stat(c.TLSCAFile)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return []error{c.tlsCAFileError("no such file")}
+		}
+		return []error{err}
+	}
+	if !info.Mode().IsRegular() {
+		return []error{c.tlsCAFileError("not a regular file")}
+	}
+	if info.Size() > tlsCAMaxBytes {
+		return []error{c.tlsCAFileError("larger than 1048576 bytes")}
+	}
+	data, err := os.ReadFile(c.TLSCAFile)
+	if err != nil {
+		return []error{err}
+	}
+	if !x509.NewCertPool().AppendCertsFromPEM(data) {
+		return []error{c.tlsCAFileError("holds no PEM certificate")}
+	}
+	return nil
+}
+
+func (c *Config) tlsCAFileError(message string) error {
+	return c.valueError("tls_ca_file", "tls_ca_file "+c.TLSCAFile+": "+message)
 }
 
 func (c *Config) validateEnums() []error {
@@ -428,6 +483,7 @@ func (c *Config) validateEnums() []error {
 	}{
 		{"approval", string(c.Approval), optionsOf("approval")},
 		{"sandbox", string(c.Sandbox), sandboxOptions},
+		{"shell_env", string(c.ShellEnv), []string{string(ShellEnvSnapshot), string(ShellEnvInherit)}},
 		{"reasoning", string(c.Reasoning), reasoningOptions},
 	} {
 		if !one(choice.value, choice.options...) {
@@ -815,7 +871,7 @@ func validateSettings(home, path string, raw []byte) error {
 	if parsed.err != nil {
 		return parsed.err
 	}
-	cfg := defaultConfig(ProductDalgona, "")
+	cfg := defaultConfigWithHome(ProductDalgona, "", "")
 	cfg.Home = home
 	if err := cfg.merge(parsed); err != nil {
 		return fmt.Errorf("validate settings.toml: %w", err)

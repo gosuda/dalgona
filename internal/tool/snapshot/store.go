@@ -20,6 +20,9 @@ const (
 
 var (
 	ErrUnknownReference = errors.New("snapshot: unknown reference")
+	ErrExpiredReference = errors.New("snapshot: expired reference")
+	ErrBindingMismatch  = errors.New("snapshot: reference binding mismatch")
+	ErrPathChanged      = errors.New("snapshot: path changed")
 	ErrStaleReference   = errors.New("snapshot: stale reference")
 	ErrTargetChanged    = errors.New("snapshot: target changed")
 	ErrGapChanged       = errors.New("snapshot: gap changed")
@@ -49,6 +52,8 @@ type Entry struct {
 	Blob     string
 	Revision uint64
 	Epoch    uint64
+	Delivery uint64
+	Consumer string
 }
 
 type Edge struct {
@@ -149,9 +154,20 @@ func (s *Store) Get(ref string) (Entry, error) {
 	defer s.mu.RUnlock()
 	entry, ok := s.entries[ref]
 	if !ok {
-		return Entry{}, ErrUnknownReference
+		return Entry{}, s.absent(ref)
 	}
 	return cloneEntry(entry), nil
+}
+
+func (s *Store) absent(ref string) error {
+	if !ValidRef(ref) {
+		return ErrUnknownReference
+	}
+	boot, _, _ := strings.Cut(strings.TrimPrefix(ref, "r"), ".")
+	if boot != hex.EncodeToString(s.boot[:]) || refSequence(ref) > s.seq {
+		return ErrUnknownReference
+	}
+	return ErrExpiredReference
 }
 
 func (s *Store) Covers(ref string, first, last int) bool {
@@ -306,17 +322,30 @@ func (s *Store) lineage(ref, path string, current []byte) ([]Edge, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	entry, ok := s.entries[ref]
-	if !ok || entry.Path != path {
-		return nil, ErrUnknownReference
+	if !ok {
+		return nil, s.absent(ref)
 	}
-	latest, ok := s.heads[path]
-	if !ok || latest.Deleted || latest.Digest != Digest(current) || latest.Epoch != entry.Epoch {
-		return nil, ErrStaleReference
+	if entry.Path != path {
+		return nil, ErrBindingMismatch
 	}
-	if latest.Revision < entry.Revision {
-		return nil, ErrStaleReference
+	latest, err := s.currentHead(entry, current)
+	if err != nil {
+		return nil, err
 	}
 	return walkEdges(s.edges[path], entry.Epoch, entry.Revision, latest.Revision)
+}
+
+func (s *Store) currentHead(entry Entry, current []byte) (head, error) {
+	latest, ok := s.heads[entry.Path]
+	switch {
+	case !ok:
+		return head{}, ErrStaleReference
+	case latest.Deleted:
+		return head{}, ErrPathChanged
+	case latest.Digest != Digest(current) || latest.Epoch != entry.Epoch || latest.Revision < entry.Revision:
+		return head{}, ErrStaleReference
+	}
+	return latest, nil
 }
 
 func walkEdges(all []Edge, epoch, from, to uint64) ([]Edge, error) {

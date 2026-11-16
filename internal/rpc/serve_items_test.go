@@ -157,3 +157,108 @@ func TestNestedTodoEmitsPlanUpdate(t *testing.T) {
 		t.Fatalf("plan notification = %#v, want one inProgress step", plan)
 	}
 }
+
+type nestedSink struct {
+	starts    []Item
+	completes []Item
+	notes     []string
+	children  []ChildSpawnedNotification
+}
+
+func (s *nestedSink) turn(string, Turn) {}
+
+func (s *nestedSink) item(method, _ string, it *Item) {
+	switch method {
+	case methodItemStarted:
+		s.starts = append(s.starts, *it)
+	case methodItemCompleted:
+		s.completes = append(s.completes, *it)
+	}
+}
+
+func (s *nestedSink) notify(method string, build func() writer) {
+	s.notes = append(s.notes, method)
+	if method == "dalgona/thread/childSpawned" {
+		if n, ok := build().(ChildSpawnedNotification); ok {
+			s.children = append(s.children, n)
+		}
+	}
+}
+
+func startsOf(items []Item, callID string) []*Item {
+	var found []*Item
+	for i := range items {
+		if items[i].ID == callID {
+			found = append(found, &items[i])
+		}
+	}
+	return found
+}
+
+func requireOnlyNestedStart(t *testing.T, started *Item) {
+	t.Helper()
+	if started.Tool != "task" || started.Type != kindDynamic || started.Status != statusInProgress {
+		t.Fatalf("nested start = %+v, want task dynamicToolCall inProgress", started)
+	}
+}
+
+func requireNestedSpawn(t *testing.T, sink *nestedSink, tr *tracker) {
+	t.Helper()
+	if len(sink.children) != 1 || sink.children[0].ChildID != "child-1" {
+		t.Fatalf("childSpawned notifications = %+v, want child-1", sink.children)
+	}
+	working := tr.items["run/1"]
+	if working == nil || working.Tool != "task" || working.Status != statusInProgress {
+		t.Fatalf("child working item = %+v, want open task", working)
+	}
+	if tr.items["run"] == nil {
+		t.Fatal("parent eval item closed before its child completed")
+	}
+}
+
+func requireNestedCompletion(t *testing.T, sink *nestedSink) {
+	t.Helper()
+	done := startsOf(sink.completes, "run/1")
+	if len(done) != 1 || done[0].Tool != "task" || done[0].Status != statusCompleted || done[0].Output != "There are 5 files." {
+		t.Fatalf("nested completion = %+v, want completed task with output", done)
+	}
+}
+
+func requireDeclinedNestedResult(t *testing.T, sink *nestedSink) {
+	t.Helper()
+	if declined := startsOf(sink.starts, "run/2"); len(declined) != 0 {
+		t.Fatalf("declined nested call started %+v", declined[0])
+	}
+	failed := startsOf(sink.completes, "run/2")
+	if len(failed) != 1 || failed[0].Status != statusFailed {
+		t.Fatalf("declined nested result = %+v, want one failed completion", failed)
+	}
+}
+
+func TestNestedApprovalOpensFullItemBeforeChildSpawn(t *testing.T) {
+	t.Parallel()
+	sink := &nestedSink{}
+	tr := newTracker("t1", nil, func(string) string { return "" }, nil, slog.New(slog.DiscardHandler))
+	tr.sink = sink
+	tr.apply(1, event.TurnStarted{TurnID: "turn-1"})
+	tr.apply(2, event.ToolStarted{CallID: "run", TurnID: "turn-1", Tool: "eval", Class: "script", Args: jsontext.Value(`{"code":"1"}`)})
+	tr.apply(3, event.ApprovalRequested{RequestID: "req-1", CallID: "run/1", Class: "agent", Summary: "helper task: count files"})
+	if thin := startsOf(sink.starts, "run/1"); len(thin) != 0 {
+		t.Fatalf("approval without call metadata started %+v", thin[0])
+	}
+	tr.apply(4, event.ToolStarted{CallID: "run/1", TurnID: "turn-1", Tool: "task", Class: "agent", Args: jsontext.Value(`{"prompt":"helper task: count files"}`)})
+	tr.apply(5, event.ChildSpawned{CallID: "run/1", ChildID: "child-1", Runner: "local"})
+	started := startsOf(sink.starts, "run/1")
+	if len(started) != 1 {
+		t.Fatalf("nested call started %d times, want once", len(started))
+	}
+	requireOnlyNestedStart(t, started[0])
+	requireNestedSpawn(t, sink, tr)
+	tr.apply(6, event.ToolCompleted{CallID: "run/1", OK: true, Output: "There are 5 files."})
+	requireNestedCompletion(t, sink)
+
+	tr.apply(7, event.ApprovalRequested{RequestID: "req-2", CallID: "run/2", Class: "agent", Summary: "helper task"})
+	tr.apply(8, event.ApprovalResolved{RequestID: "req-2", Decision: "decline", By: "mode:yolo"})
+	tr.apply(9, event.ToolCompleted{CallID: "run/2", OK: false})
+	requireDeclinedNestedResult(t, sink)
+}

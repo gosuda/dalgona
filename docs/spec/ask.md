@@ -18,6 +18,8 @@ Ask the user 1 to 4 questions and wait for the answers. Use it only when the cho
 Each question has a `header` (a tab label of at most 30 characters) and a `question` (one sentence). Give 2 to 6 `options`, each with a `label` of a few words and a `description` of what that choice means. Put the option you recommend first; the user sees it marked as recommended. Add `preview` (plain text, at most 40 lines, shown in monospace) when the user must compare concrete output such as code or a layout. Set `multi_select` to true when several options can apply. Omit `options` for a free-text question.
 
 Every question with options gets an Other row where the user can type an answer, so never add an option named Other. The result lists one line per question; a typed answer appears in quotes after `Other:`. When the user skips, dismisses, or cannot be reached, the result says so; continue with your best judgment and state the assumptions you made.
+
+If the user does not answer within 5 minutes, the result says so and uses the first option of each question that has options, so make the first option one that is safe to use without an answer.
 ```
 
 ## Arguments
@@ -113,6 +115,8 @@ When every question has no answer, the result MUST be the skipped text below.
 
 A cancelled question MUST return plain text. It MUST NOT return an error.
 
+The recommended option of a question MUST be its first option. A timed-out result MUST use it for each question that has options.
+
 The fixed result texts MUST be these.
 
 | Case | Text | Success |
@@ -122,6 +126,8 @@ The fixed result texts MUST be these.
 | No client | declined: no client could answer this question | no |
 | Interrupted | interrupted: the user interrupted the turn before answering | no |
 | Host restarted | interrupted: the host restarted before the user answered | no |
+| Timed out with options | No answer before the timeout. The recommended options were used instead of the user's answers: | yes |
+| Timed out without options | No answer before the timeout. The user has not chosen. Choose for yourself and say which choice you made. | yes |
 | Other failure | declined: followed by the failure detail | no |
 
 ## Host path
@@ -141,6 +147,16 @@ A subscriber that the host closes as slow MUST NOT end the open questions, becau
 The first answer to a question MUST decide it. A later answer MUST fail with an unknown request error.
 
 An interrupt of the turn MUST end the question as interrupted.
+
+The host MUST end an open question with the timed-out outcome when 5 minutes have passed since it published the question to its first subscriber.
+
+A later subscriber MUST NOT restart the timer.
+
+The host MUST stop the timer when it ends the question for any other cause.
+
+The timeout MUST NOT be configurable.
+
+A consumer other than the `ask` tool MUST read a timeout as no answer and MUST NOT use a recommended option.
 
 The host MUST mask the header, question, label, description and preview of each question before it offers the question.
 

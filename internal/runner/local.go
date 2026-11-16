@@ -25,6 +25,8 @@ var ErrProcessNotFound = errors.New("runner: process not found")
 type Local struct {
 	dir           string
 	afterSnapshot func()
+	protectedPIDs [2]int
+	shellEnv      *ShellEnvSnapshot
 }
 
 type processIdentity struct {
@@ -33,15 +35,22 @@ type processIdentity struct {
 }
 
 func NewLocal(dir string) (*Local, error) {
+	return NewLocalWithShellEnv(dir, nil)
+}
+
+func NewLocalWithShellEnv(dir string, snapshot *ShellEnvSnapshot) (*Local, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("runner: create runs directory: %w", err)
 	}
-	return &Local{dir: dir}, nil
+	return &Local{dir: dir, protectedPIDs: [2]int{os.Getpid(), os.Getppid()}, shellEnv: snapshot}, nil
 }
 
 func (l *Local) Start(ctx context.Context, spec ProcessSpec) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("runner: start: %w", err)
+	}
+	if err := CheckProcessKillGuard(spec.Argv, l.protectedPIDs[0], l.protectedPIDs[1]); err != nil {
+		return err
 	}
 	if err := validateProcessSpec(spec); err != nil {
 		return err
@@ -53,7 +62,15 @@ func (l *Local) Start(ctx context.Context, spec ProcessSpec) error {
 		}
 		return fmt.Errorf("runner: create process directory: %w", err)
 	}
+	spec.Env = l.startEnvironment(ctx, spec)
 	return l.spawn(runDir, spec)
+}
+
+func (l *Local) startEnvironment(ctx context.Context, spec ProcessSpec) []string {
+	if spec.EnvResolved || l.shellEnv == nil {
+		return spec.Env
+	}
+	return overlayEnvironment(l.shellEnv.Resolve(ctx, os.Environ()), spec.Env)
 }
 
 func removeRunDir(dir string) {

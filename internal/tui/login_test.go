@@ -9,44 +9,94 @@ import (
 	"github.com/gosuda/dalgona/internal/rpc"
 )
 
+type loginNoticeCase struct {
+	name     string
+	params   string
+	provider string
+	detail   string
+	failed   bool
+}
+
 func TestLoginCompletedNotice(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name   string
-		params string
-		notice string
-		failed bool
-	}{
+	for _, tc := range []loginNoticeCase{
 		{
-			name:   "success",
-			params: `{"success":true,"provider":"openai"}`,
-			notice: "Signed in to openai. Run /model to choose a model",
+			name:     "success",
+			params:   `{"success":true,"provider":"openai"}`,
+			provider: "openai",
+			detail:   "Signed in to openai. Run /model to choose a model",
 		},
 		{
-			name:   "failure",
-			params: `{"success":false,"error":"openai did not accept the API key; it was not saved","provider":"openai"}`,
-			notice: "Login failed: openai did not accept the API key; it was not saved; run /login again",
-			failed: true,
+			name:     "failure",
+			params:   `{"success":false,"error":"openai did not accept the API key; it was not saved","provider":"openai"}`,
+			provider: "openai",
+			detail:   "Login failed for openai: openai did not accept the API key; it was not saved; run /login again",
+			failed:   true,
 		},
 		{
-			name:   "failure without error text",
-			params: `{"success":false,"provider":"openai"}`,
-			notice: "Login failed: unknown error; run /login again",
-			failed: true,
+			name:     "failure without error text",
+			params:   `{"success":false,"provider":"openai"}`,
+			provider: "openai",
+			detail:   "Login failed for openai: unknown error; run /login again",
+			failed:   true,
 		},
-	}
-	for _, tc := range cases {
+		{
+			name:     "failure without provider",
+			params:   `{"success":false,"error":"bad token"}`,
+			provider: "the provider",
+			detail:   "Login failed for the provider: bad token; run /login again",
+			failed:   true,
+		},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			m := newModel(nil, Options{}, nil)
-			m, _ = drive(t, m, notificationMsg{method: "account/login/completed", params: []byte(tc.params)})
-			if m.notice != tc.notice {
-				t.Fatalf("notice = %q, want %q", m.notice, tc.notice)
-			}
-			if m.noticeError != tc.failed {
-				t.Fatalf("noticeError = %v, want %v", m.noticeError, tc.failed)
-			}
+			assertLoginCompletedNotice(t, tc)
 		})
+	}
+}
+
+func assertLoginCompletedNotice(t *testing.T, tc loginNoticeCase) {
+	t.Helper()
+	m := newModel(nil, Options{}, nil)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 200, Height: 24})
+	m, _ = drive(t, m, notificationMsg{method: "account/login/completed", params: []byte(tc.params)})
+	if m.notice != tc.detail {
+		t.Fatalf("notice = %q, want %q", m.notice, tc.detail)
+	}
+	if !strings.Contains(m.notice, tc.provider) {
+		t.Fatalf("notice %q does not name the provider %q", m.notice, tc.provider)
+	}
+	if m.noticeError != tc.failed {
+		t.Fatalf("noticeError = %v, want %v", m.noticeError, tc.failed)
+	}
+	live := stripANSI(m.liveRow())
+	if tc.failed {
+		requireFailedLoginLiveRow(t, live)
+	} else {
+		requireSuccessLoginLiveRow(t, live)
+	}
+}
+
+func requireFailedLoginLiveRow(t *testing.T, live string) {
+	t.Helper()
+	requireLoginLiveRowNamesCommand(t, live)
+	if strings.Contains(live, "Signed in") {
+		t.Fatalf("failure live row claims a sign-in: %q", live)
+	}
+}
+
+func requireSuccessLoginLiveRow(t *testing.T, live string) {
+	t.Helper()
+	requireLoginLiveRowNamesCommand(t, live)
+	if strings.Contains(strings.ToLower(live), "failed") {
+		t.Fatalf("success live row claims a failure: %q", live)
+	}
+}
+
+func requireLoginLiveRowNamesCommand(t *testing.T, live string) {
+	t.Helper()
+	if !strings.Contains(live, "/model") && !strings.Contains(live, "/login") {
+		t.Fatalf("live row %q names neither /model nor /login", live)
 	}
 }
 

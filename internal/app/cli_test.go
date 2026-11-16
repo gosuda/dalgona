@@ -62,17 +62,21 @@ func TestTurnBookKeepsEarlyCompletionAndTexts(t *testing.T) {
 	}
 }
 
-func TestStatusLineEncodesExactShape(t *testing.T) {
-	line, err := statusLine("th\"read", turnResult{status: "interrupted", stop: "interrupted"})
+func TestResultLineEncodesExactShape(t *testing.T) {
+	line, err := resultLine("th\"read", turnResult{status: "interrupted", stop: "interrupted"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded map[string]string
+	if !bytes.HasSuffix(line, []byte("}\n")) || bytes.Count(line, []byte("\n")) != 1 {
+		t.Fatalf("result line %q is not one newline-terminated line", line)
+	}
+	var decoded map[string]any
 	if err := json.Unmarshal(line, &decoded); err != nil {
 		t.Fatalf("%s: %v", line, err)
 	}
-	if len(decoded) != 3 || decoded["thread"] != "th\"read" || decoded["status"] != "interrupted" || decoded["stop_reason"] != "interrupted" {
-		t.Fatalf("status line %s", line)
+	want := map[string]any{"schemaVersion": 1.0, "type": "result", "thread": "th\"read", "status": "interrupted", "stop_reason": "interrupted"}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("result line %s decoded to %v, want %v", line, decoded, want)
 	}
 }
 
@@ -115,7 +119,7 @@ func newServedBox(t *testing.T) *servedBox {
 		box.dials++
 		client, server := net.Pipe()
 		box.servers = append(box.servers, server)
-		served.Go(func() { _ = rpc.Serve(context.WithoutCancel(ctx), server, host) })
+		served.Go(func() { _ = rpc.ServeWith(context.WithoutCancel(ctx), server, host, rpc.ServeOptions{}) })
 		return client, nil
 	}
 	return box

@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"errors"
+	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -90,6 +92,9 @@ func (w *worker) requestWithEmptyRetries(ctx context.Context, v view, messages [
 		if err != nil {
 			return nil, err
 		}
+		if err = w.journalTurnEffort(ctx, req.Reasoning); err != nil {
+			return nil, err
+		}
 		result, err := w.stream(ctx, req, v.head())
 		if err != nil || !result.empty() {
 			return result, err
@@ -102,6 +107,20 @@ func (w *worker) requestWithEmptyRetries(ctx context.Context, v view, messages [
 			return nil, err
 		}
 	}
+}
+
+func (w *worker) journalTurnEffort(ctx context.Context, effort string) error {
+	if w.turnEffort != nil && *w.turnEffort == effort {
+		return nil
+	}
+	if _, err := w.t.appendEvents(ctx, event.TurnEffort{TurnID: w.turnID, Effort: effort}); err != nil {
+		return err
+	}
+	if w.turnEffort == nil {
+		w.turnEffort = new(string)
+	}
+	*w.turnEffort = effort
+	return nil
 }
 
 func (r *reply) empty() bool {
@@ -121,24 +140,100 @@ func (w *worker) request(ctx context.Context, v view, messages []model.Message) 
 		}
 		messages = withoutImages(messages)
 	}
+	reasoning, err := w.reasoningEffort(v, caps)
+	if err != nil {
+		return model.Request{}, err
+	}
 	return model.Request{
-		Model: modelID, System: w.t.system, Messages: messages, Tools: w.tools.specs,
-		Reasoning: model.ClampEffort(w.effort(v), caps.Efforts),
+		Model: modelID, System: w.snapshot(v).system(), Messages: messages, Tools: w.tools.specs,
+		Reasoning: reasoning,
 	}, nil
 }
 
-func (w *worker) effort(v view) string {
-	configured := cmp.Or(string(w.settings.Effort), string(w.t.host.Config().Reasoning))
-	if configured == string(config.ReasoningDefault) {
-		configured = ""
+func ValidateReasoningEffort(requested string, supported []string) error {
+	if requested == "" || requested == string(config.ReasoningDefault) || len(supported) == 0 {
+		return nil
 	}
+	if slices.Contains(supported, requested) {
+		return nil
+	}
+	return fmt.Errorf("does not support reasoning effort %s; supported: [%s]", requested, strings.Join(supported, " "))
+}
+
+func (w *worker) reasoningEffort(v view, caps model.Model) (string, error) {
 	prompt := turnPrompt(v, w.turnID)
+	effort := cmp.Or(prompt.Effort, w.inferredEffort(prompt, caps), w.configuredEffort())
+	if err := ValidateReasoningEffort(effort, caps.Efforts); err != nil {
+		return w.unsupportedEffort(effort, caps, err)
+	}
+	if slices.Contains(caps.Efforts, effort) {
+		return effort, nil
+	}
+	return "", nil
+}
+
+func (w *worker) unsupportedEffort(effort string, caps model.Model, refusal error) (string, error) {
+	switch {
+	case !w.t.TopLevel():
+		return nearestLowerEffort(effort, caps.Efforts), nil
+	case w.recovering:
+		w.t.host.log.Warn(fmt.Sprintf("reasoning effort %s is not supported by %s; sent without effort", effort, caps.ID))
+		return "", nil
+	default:
+		return "", fmt.Errorf("model %s %w", caps.ID, refusal)
+	}
+}
+
+func nearestLowerEffort(requested string, declared []string) string {
+	want := effortRank(requested)
+	nearest, nearestRank := "", -1
+	for _, level := range declared {
+		if rank := effortRank(level); rank > nearestRank && rank < want {
+			nearest, nearestRank = level, rank
+		}
+	}
+	return nearest
+}
+
+func effortRank(level string) int {
+	switch level {
+	case "minimal":
+		return 0
+	case string(config.ReasoningLow):
+		return 1
+	case string(config.ReasoningMedium):
+		return 2
+	case string(config.ReasoningHigh):
+		return 3
+	case string(config.ReasoningXHigh):
+		return 4
+	case string(config.ReasoningMax):
+		return 5
+	}
+	return -1
+}
+
+func (w *worker) inferredEffort(prompt event.UserMessage, caps model.Model) string {
 	for _, notice := range prompt.Notices {
-		if w.t.host.keywordEffort(notice.Word) == string(config.ReasoningMax) {
+		if w.t.host.keywordEffort(notice.Word) != string(config.ReasoningMax) {
+			continue
+		}
+		if slices.Contains(caps.Efforts, string(config.ReasoningMax)) {
 			return string(config.ReasoningMax)
 		}
 	}
-	return cmp.Or(prompt.Effort, configured)
+	return ""
+}
+
+func (w *worker) configuredEffort() string {
+	configured := string(w.settings.Effort)
+	if w.t.TopLevel() {
+		configured = cmp.Or(configured, string(w.t.host.Config().Reasoning))
+	}
+	if configured == string(config.ReasoningDefault) {
+		configured = ""
+	}
+	return configured
 }
 
 func turnPrompt(v view, turnID string) event.UserMessage {

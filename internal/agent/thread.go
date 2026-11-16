@@ -47,7 +47,6 @@ type Thread struct {
 	snapshots      *snapshot.Store
 	release        func() error
 
-	children  chan struct{}
 	inbox     chan func(*actor)
 	quit      chan struct{}
 	stopped   chan struct{}
@@ -121,7 +120,7 @@ func (h *Host) openLocked(ctx context.Context, loaded loadedSession, overrides O
 	t := &Thread{
 		host: h, id: loaded.created.ID, created: loaded.created, snapshots: snapshot.New(),
 		inbox: make(chan func(*actor)), quit: make(chan struct{}), stopped: make(chan struct{}),
-		children: make(chan struct{}, maxChildren), ext: baseExtension{}, release: release,
+		ext: baseExtension{}, release: release,
 		output: outputRelay{ch: make(chan Update, outputBuffer)},
 	}
 	if err := t.prepare(ctx, loaded, overrides); err != nil {
@@ -138,10 +137,11 @@ func (h *Host) openLocked(ctx context.Context, loaded loadedSession, overrides O
 		t: t, records: loaded.records, sizes: loaded.sizes, state: loaded.state, damage: loaded.damage,
 		subs: make(map[chan Update]struct{}), approvals: make(map[string]*pendingApproval), questions: make(map[string]*pendingQuestion), autoContinue: !endedByInterrupt(loaded.records),
 	}
-	if loaded.state.TurnID != "" && loaded.damage == nil {
-		a.spawn(func(ctx context.Context) { (&worker{t: t, turnID: loaded.state.TurnID}).recoverTurn(ctx) })
-	}
+	err := a.resumeOpenTurn(ctx)
 	go a.loop()
+	if err != nil {
+		return nil, errors.Join(err, t.Close())
+	}
 	return t, nil
 }
 
@@ -192,15 +192,22 @@ func (t *Thread) prepare(ctx context.Context, loaded loadedSession, overrides Ov
 }
 
 type toolset struct {
-	model  string
-	byName map[string]tool.Tool
-	specs  []model.Tool
-	names  []string
+	model     string
+	byName    map[string]tool.Tool
+	specs     []model.Tool
+	names     []string
+	duplicate string
+	allowed   []string
 }
 
 func (s *toolset) lookup(name string) (tool.Tool, bool) {
 	if s == nil {
 		return nil, false
+	}
+	if s.allowed != nil {
+		if _, allowed := slices.BinarySearch(s.allowed, name); !allowed {
+			return nil, false
+		}
 	}
 	item, ok := s.byName[name]
 	return item, ok
@@ -249,6 +256,15 @@ func (t *Thread) toolsFor(ctx context.Context, modelID string) (*toolset, error)
 		return nil, err
 	}
 	built := t.newToolset(modelID, tools)
+	if built.duplicate != "" {
+		return nil, fmt.Errorf("agent: duplicate tool name %q", built.duplicate)
+	}
+	if t.created.Parent != "" && t.created.Advisor == "" {
+		built.allowed, err = t.ceiling(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
 	t.toolsMu.Lock()
 	defer t.toolsMu.Unlock()
 	if t.reuses(t.toolset, modelID) {
@@ -264,13 +280,13 @@ func (t *Thread) reuses(set *toolset, modelID string) bool {
 
 func (t *Thread) buildTools(ctx context.Context, modelID string) ([]tool.Tool, error) {
 	if t.fixedTools != nil {
-		return t.fixedTools, nil
+		return t.confine(ctx, t.fixedTools)
 	}
 	built, err := t.host.cfg.Tools(ContextWithThread(ctx, t), modelID, t.created.Cwd)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build tools: %w", err)
 	}
-	return t.ext.Tools(t.withThreadTools(built)), nil
+	return t.confine(ctx, t.ext.Tools(t.withThreadTools(built)))
 }
 
 func (t *Thread) newToolset(modelID string, tools []tool.Tool) *toolset {
@@ -278,6 +294,9 @@ func (t *Thread) newToolset(modelID string, tools []tool.Tool) *toolset {
 	specs := make([]tool.Spec, len(tools))
 	for i, item := range tools {
 		specs[i] = item.Spec()
+		if _, dup := out.byName[specs[i].Name]; dup && out.duplicate == "" {
+			out.duplicate = specs[i].Name
+		}
 		out.byName[specs[i].Name] = item
 	}
 	visible := t.ext.Visible(specs)

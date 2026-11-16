@@ -46,6 +46,7 @@ interface Props {
 	connected: boolean;
 	loading: boolean;
 	awaitingApproval: ReadonlySet<string>;
+	timedOutQuestions?: ReadonlySet<string>;
 	childThreadIds: readonly string[];
 	threads: readonly ThreadSummary[];
 	userAgent: string | null;
@@ -55,6 +56,9 @@ interface Props {
 	verbosity?: Verbosity;
 	readOutput: (itemId: string, offset: number) => Promise<OutputPage>;
 	onRewind?: (turnId: string) => void;
+	retryRemainingMs?: number | null;
+	reviewNote?: string | null;
+	onAnnounce?: (text: string) => void;
 }
 
 const rowComponents: Record<TranscriptItem["kind"], Component<RowProps>> = {
@@ -88,10 +92,26 @@ let {
 	onStart,
 	verbosity = "medium",
 	readOutput,
+	timedOutQuestions = new Set<string>(),
 	onRewind,
+	retryRemainingMs = null,
+	reviewNote = null,
+	onAnnounce,
 }: Props = $props();
 let viewport = $state<HTMLElement>();
 let running = $derived(turnStatus === "inProgress");
+const announcement = $derived.by(() => {
+	if (loading) return "Loading transcript…";
+	if (turnStatus === "failed") return error ? `Failed: ${error}` : "Failed";
+	if (turnStatus === "completed") return "Done";
+	if (turnStatus === "interrupted") return "Stopped";
+	if (retryRemainingMs !== null && retryRemainingMs > 0)
+		return "Rate limited, retrying";
+	if (awaitingApproval.size > 0) return "Waiting for your reply";
+	if (reviewNote !== null && reviewNote !== "") return reviewNote;
+	if (turnStatus === "inProgress") return "Working";
+	return "";
+});
 const entries = $derived(groupTools(items, verbosity));
 let reviewTarget = $state<TranscriptEntry | null>(null);
 let followedThread: string | null = null;
@@ -117,6 +137,11 @@ function scroller(): Element | null {
 	}
 	return document.scrollingElement;
 }
+
+$effect(() => {
+	const text = announcement;
+	untrack(() => onAnnounce?.(text));
+});
 
 $effect(() => {
 	document.addEventListener("scroll", trackFollowing, true);
@@ -165,12 +190,11 @@ function trackFollowing(): void {
 }
 
 function entryKey(entry: TranscriptEntry): string {
-	const item = isToolGroup(entry) ? entry.items[0] : entry;
-	return JSON.stringify([
-		isToolGroup(entry) ? "group" : "item",
-		item?.turnId,
-		item?.id,
-	]);
+	if (isToolGroup(entry)) {
+		const first = entry.items[0];
+		return JSON.stringify(["group", first?.turnId, first?.id]);
+	}
+	return JSON.stringify([entry.kind, entry.turnId, entry.id]);
 }
 
 function openReview(target: TranscriptEntry): void {
@@ -217,7 +241,7 @@ function jumpToLatest(): void {
 				<p class="kicker">No thread open</p>
 				<h2 id="empty-title">Pick a thread or start a new one</h2>
 				<p>{connected ? "Start a thread or pick one from the list." : "Connect to dalgona to see your threads."}</p>
-				<button class="primary" type="button" aria-disabled={!connected || starting ? "true" : undefined} onclick={() => { if (connected && !starting) onStart(); }}>Start thread</button>
+				<button class="point" type="button" aria-disabled={!connected || starting ? "true" : undefined} onclick={() => { if (connected && !starting) onStart(); }}>Start thread</button>
 				{#if userAgent}
 					<p class="version">{userAgent}</p>
 				{/if}
@@ -241,7 +265,7 @@ function jumpToLatest(): void {
 						{@const presentation = presentRow(entry, verbosity, isLiveItem(entry))}
 						{#if presentation.mode !== "hidden"}
 							<li class:from-user={entry.kind === "userMessage"}>
-								<Row item={entry} {running} awaiting={awaitingApproval} {presentation} onOpen={() => openReview(entry)} {onRewind} />
+								<Row item={entry} {running} awaiting={awaitingApproval} {timedOutQuestions} {presentation} onOpen={() => openReview(entry)} {onRewind} />
 							</li>
 						{/if}
 					{/if}

@@ -256,6 +256,37 @@ func TestFormatCapsTypedAnswerAtMaxAnswer(t *testing.T) {
 	}
 }
 
+func TestFormatTimedOut(t *testing.T) {
+	questions := []Question{
+		{Header: "Database", Text: "Which database should the service use?", Options: []Option{{Label: "SQLite"}, {Label: "Postgres"}}},
+		{Header: "Features", Text: "Which features ship first?", MultiSelect: true, Options: []Option{{Label: "Search"}, {Label: "Export"}}},
+		{Header: "Name", Text: "What should the service be called?"},
+	}
+	if TextTimedOut != "No answer before the timeout. The recommended options were used instead of the user's answers:" {
+		t.Fatalf("TextTimedOut = %q", TextTimedOut)
+	}
+	if TextTimedOutNoAnswer != "No answer before the timeout. The user has not chosen. Choose for yourself and say which choice you made." {
+		t.Fatalf("TextTimedOutNoAnswer = %q", TextTimedOutNoAnswer)
+	}
+	got := Format(questions, Reply{Outcome: OutcomeTimedOut, Answers: [][]string{{"Postgres"}, {"Export"}, nil}})
+	want := TextTimedOut + "\n" +
+		"- Database (Which database should the service use?): SQLite\n" +
+		"- Features (Which features ship first?): Search\n" +
+		"- Name (What should the service be called?): no answer"
+	if string(got.Output) != want || !got.OK {
+		t.Fatalf("Format = %q ok=%v, want %q ok=true", got.Output, got.OK, want)
+	}
+	freeText := Format(questions[2:], Reply{Outcome: OutcomeTimedOut})
+	if string(freeText.Output) != TextTimedOutNoAnswer || !freeText.OK {
+		t.Fatalf("Format free text = %q ok=%v, want %q ok=true", freeText.Output, freeText.OK, TextTimedOutNoAnswer)
+	}
+	answered := Format(questions, Reply{Outcome: OutcomeAnswered, Answers: [][]string{{"Postgres"}, {"Export"}, nil}})
+	wantAnswered := "User answers:\n- Database (Which database should the service use?): Postgres\n- Features (Which features ship first?): Export\n- Name (What should the service be called?): no answer"
+	if string(answered.Output) != wantAnswered || !answered.OK {
+		t.Fatalf("Format answered = %q ok=%v, want %q ok=true", answered.Output, answered.OK, wantAnswered)
+	}
+}
+
 func TestFormatUndefinedOutcomeIsExplicitFailure(t *testing.T) {
 	got := Format([]Question{{Header: "H", Text: "Q"}}, Reply{})
 	if string(got.Output) != TextUnknownOutcome || got.OK {

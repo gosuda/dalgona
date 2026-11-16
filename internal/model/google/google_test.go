@@ -3,6 +3,7 @@ package google
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	"io"
 	"net/http"
@@ -494,28 +495,90 @@ func assertFunctionResponse(t *testing.T, response *struct {
 	}
 }
 
-func TestEncodeContentsSendsInlineData(t *testing.T) {
-	t.Parallel()
-	body, err := EncodeRequest(model.Request{Messages: []model.Message{{
-		Role:   "user",
-		Text:   "What is this?",
-		Images: []model.Image{{Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}},
-	}}})
+type googlePart struct {
+	Text       string `json:"text"`
+	InlineData *struct {
+		MimeType string `json:"mimeType"`
+		Data     string `json:"data"`
+	} `json:"inlineData"`
+}
+
+type googleContent struct {
+	Role  string       `json:"role"`
+	Parts []googlePart `json:"parts"`
+}
+
+func googleContents(t *testing.T, message model.Message) googleContent {
+	t.Helper()
+	body, err := EncodeRequest(model.Request{Messages: []model.Message{message}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var value struct {
-		Contents []any `json:"contents"`
+		Contents []googleContent `json:"contents"`
 	}
 	if err := json.Unmarshal(body, &value); err != nil {
 		t.Fatalf("request JSON: %v\n%s", err, body)
 	}
-	const want = `{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="}},{"text":"What is this?"}]}`
-	var expected any
-	if err := json.Unmarshal([]byte(want), &expected); err != nil {
-		t.Fatal(err)
+	if len(value.Contents) != 1 {
+		t.Fatalf("contents = %d, want 1: %s", len(value.Contents), body)
 	}
-	if len(value.Contents) != 1 || !reflect.DeepEqual(value.Contents[0], expected) {
-		t.Fatalf("contents = %v, want %s", value.Contents, want)
+	return value.Contents[0]
+}
+
+func googleInlineBytes(t *testing.T, part googlePart, wantMime string) []byte {
+	t.Helper()
+	if part.InlineData == nil {
+		t.Fatalf("part %+v carries no inlineData", part)
+	}
+	if part.InlineData.MimeType != wantMime {
+		t.Fatalf("inlineData mimeType = %q, want %s", part.InlineData.MimeType, wantMime)
+	}
+	data, err := base64.StdEncoding.DecodeString(part.InlineData.Data)
+	if err != nil {
+		t.Fatalf("inlineData data %q is not standard base64: %v", part.InlineData.Data, err)
+	}
+	return data
+}
+
+func TestEncodeContentsSendsInlineData(t *testing.T) {
+	t.Parallel()
+	png := []byte("\x89PNG\r\n\x1a\n")
+	content := googleContents(t, model.Message{Role: "user", Text: "What is this?", Images: []model.Image{{Mime: "image/png", Data: png}}})
+	if content.Role != "user" || len(content.Parts) != 2 {
+		t.Fatalf("content = %+v, want user with an image and a text", content)
+	}
+	if data := googleInlineBytes(t, content.Parts[0], "image/png"); !bytes.Equal(data, png) {
+		t.Fatalf("inlineData bytes = %x, want the submitted PNG", data)
+	}
+	if content.Parts[1].InlineData != nil || content.Parts[1].Text != "What is this?" {
+		t.Fatalf("text part = %+v, want the prompt after the image", content.Parts[1])
+	}
+	gif := []byte("GIF89a")
+	gifContent := googleContents(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/gif", Data: gif}}})
+	if gifContent.Role != "user" || len(gifContent.Parts) != 1 {
+		t.Fatalf("image-only content = %+v, want user with one image", gifContent)
+	}
+	if data := googleInlineBytes(t, gifContent.Parts[0], "image/gif"); !bytes.Equal(data, gif) {
+		t.Fatalf("inlineData bytes = %x, want %x", data, gif)
+	}
+	requireTextOnlyContents(t, googleContents(t, model.Message{Role: "user", Text: "What is this?"}))
+	requireImageOnlyContents(t, googleContents(t, model.Message{Role: "user", Images: []model.Image{{Mime: "image/png", Data: png}}}), png)
+}
+
+func requireTextOnlyContents(t *testing.T, plain googleContent) {
+	t.Helper()
+	if len(plain.Parts) != 1 || plain.Parts[0].InlineData != nil || plain.Parts[0].Text != "What is this?" {
+		t.Fatalf("text-only parts = %+v, want one text part", plain.Parts)
+	}
+}
+
+func requireImageOnlyContents(t *testing.T, contents googleContent, png []byte) {
+	t.Helper()
+	if len(contents.Parts) != 1 {
+		t.Fatalf("image-only parts = %d, want 1", len(contents.Parts))
+	}
+	if data := googleInlineBytes(t, contents.Parts[0], "image/png"); !bytes.Equal(data, png) {
+		t.Fatalf("image-only inlineData bytes = %x, want the submitted PNG", data)
 	}
 }

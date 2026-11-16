@@ -290,6 +290,70 @@ describe("notification validation", () => {
 				params({ last: breakdown, total: breakdown, modelContextWindow: 200 }),
 			),
 		).toMatchObject({ type: "tokenUsage", usage: { contextWindow: 200 } });
+		expect(
+			parseNotification(
+				params({
+					last: {
+						...breakdown,
+						inputTokens: 7032,
+						totalTokens: 7032,
+						outputTokens: 0,
+					},
+					total: breakdown,
+					modelContextWindow: 32000,
+					estimatedContextTokens: 2179,
+				}),
+			),
+		).toMatchObject({
+			type: "tokenUsage",
+			usage: { contextWindow: 32000, estimatedContextTokens: 2179 },
+		});
+		expect(
+			parseNotification(
+				params({
+					last: breakdown,
+					total: breakdown,
+					modelContextWindow: 200,
+					estimatedContextTokens: 0,
+				}),
+			),
+		).toMatchObject({ usage: { estimatedContextTokens: 0 } });
+		expect(
+			parseNotification(
+				params({
+					last: breakdown,
+					total: breakdown,
+					modelContextWindow: 200,
+					estimatedContextTokens: null,
+				}),
+			),
+		).toMatchObject({ usage: { estimatedContextTokens: null } });
+		expect(
+			parseNotification(
+				params({
+					last: {
+						...breakdown,
+						inputTokens: 7032,
+						totalTokens: 7032,
+						outputTokens: 0,
+					},
+					total: breakdown,
+					modelContextWindow: 32000,
+				}),
+			),
+		).toMatchObject({ usage: { estimatedContextTokens: null } });
+		for (const malformed of ["2179", -1, 1.5, Number.NaN, Infinity]) {
+			expect(
+				parseNotification(
+					params({
+						last: breakdown,
+						total: breakdown,
+						modelContextWindow: 200,
+						estimatedContextTokens: malformed,
+					}),
+				),
+			).toBeNull();
+		}
 		expect(parseNotification(params({ total: breakdown }))).toBeNull();
 		expect(parseNotification(params({ last: breakdown }))).toBeNull();
 		expect(
