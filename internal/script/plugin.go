@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"go.starlark.net/starlark"
 
@@ -25,6 +26,10 @@ const (
 	DecisionDeny      = "deny"
 )
 
+const HookTimeout = 5 * time.Second
+
+var errHookTimeout = errors.New("plugin hook timed out")
+
 type registration struct {
 	kind        string
 	name        string
@@ -41,7 +46,8 @@ type pluginFile struct {
 }
 
 type Plugins struct {
-	files []*pluginFile
+	files       []*pluginFile
+	hookTimeout time.Duration
 }
 
 type Command struct {
@@ -81,6 +87,19 @@ func LoadPlugins(home string) (*Plugins, error) {
 		}
 	}
 	return p, errors.Join(errs...)
+}
+
+func (p *Plugins) WithHookTimeout(d time.Duration) *Plugins {
+	scoped := *p
+	scoped.hookTimeout = d
+	return &scoped
+}
+
+func (p *Plugins) timeout() time.Duration {
+	if p.hookTimeout > 0 {
+		return p.hookTimeout
+	}
+	return HookTimeout
 }
 
 func (p *Plugins) loadFile(path string) error {
@@ -374,7 +393,7 @@ func (p *Plugins) ToolCall(ctx context.Context, fx Effects, runID string, call t
 	var allow, deny HookDecision
 	var errs []error
 	for _, target := range p.hooks(EventToolCall) {
-		decision, err := target.decision(p.hook(ctx, fx, runID, target, payload))
+		decision, err := p.toolCallDecision(ctx, fx, runID, target, payload)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -397,6 +416,17 @@ func (p *Plugins) ToolCall(ctx context.Context, fx Effects, runID string, call t
 		return allow, errors.Join(errs...)
 	}
 	return HookDecision{}, errors.Join(errs...)
+}
+
+func (p *Plugins) toolCallDecision(ctx context.Context, fx Effects, runID string, target hookTarget, payload jsontext.Value) (HookDecision, error) {
+	limit := p.timeout()
+	hookCtx, cancel := context.WithTimeoutCause(ctx, limit, errHookTimeout)
+	defer cancel()
+	decision, err := target.decision(p.hook(hookCtx, fx, runID, target, payload))
+	if err != nil && errors.Is(context.Cause(hookCtx), errHookTimeout) {
+		return HookDecision{}, fmt.Errorf("plugin %s hook timed out after %s", target.file.name, limit)
+	}
+	return decision, err
 }
 
 func toolCallPayload(call tool.Call) jsontext.Value {
