@@ -206,6 +206,7 @@ func fallbackJudges(t *testing.T, decider, smol string) (*judges, string) {
 	brokenURL := unavailableJudgeServer(t).URL
 	home := t.TempDir()
 	t.Setenv("DALGONA_HOME", home)
+	clearProviderKeys(t)
 	t.Setenv("BROKEN_KEY", "broken-secret")
 	cfg := config.Config{
 		Home:    home,
