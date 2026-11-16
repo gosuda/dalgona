@@ -12,7 +12,7 @@ import (
 	"github.com/gosuda/dalgona/cmd/internal/tuiwire"
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/herdr"
+	"github.com/gosuda/dalgona/internal/dalgona/herdr"
 )
 
 const (

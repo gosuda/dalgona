@@ -8,8 +8,8 @@ const config: UserConfig = defineConfig({
 	plugins: [
 		sveltekit({
 			adapter: adapter({
-				pages: "../internal/webui/dist",
-				assets: "../internal/webui/dist",
+				pages: "../internal/dalgona/webui/dist",
+				assets: "../internal/dalgona/webui/dist",
 				fallback: "200.html",
 			}),
 			compilerOptions: {

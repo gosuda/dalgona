@@ -62,7 +62,7 @@ spec-style:
 web:
     pnpm -C web install --frozen-lockfile
     pnpm -C web build
-    touch internal/webui/dist/.gitkeep
+    touch internal/dalgona/webui/dist/.gitkeep
 
 web-check:
     pnpm -C web exec biome ci

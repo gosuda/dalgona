@@ -148,11 +148,11 @@ linters:
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/dalgona/discovery"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/webui"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/webui"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/herdr"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/herdr"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/codexapp"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/codexapp"
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/dalgona/ratchet"
               desc: core must not import interfaces or batteries
@@ -167,8 +167,8 @@ linters:
         clients:
           files:
             - "**/internal/dal/tui/**"
-            - "**/internal/webui/**"
-            - "**/internal/herdr/**"
+            - "**/internal/dalgona/webui/**"
+            - "**/internal/dalgona/herdr/**"
             - "**/internal/acp/**"
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/dal/journal"
@@ -205,13 +205,11 @@ linters:
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/dalgona/discovery"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/webui"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/webui"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/herdr"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/herdr"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/codexapp"
-              desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/battery"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/codexapp"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/dalgona/ratchet"
               desc: dal must stay free of dalgona batteries
