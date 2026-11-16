@@ -123,14 +123,14 @@ func floodCommand() string {
 
 func waitThenPrintLateCommand() string {
 	if runtime.GOOS == "windows" {
-		return "echo early & ping -n 31 127.0.0.1 >nul & echo late"
+		return "echo early & powershell -NoProfile -Command Start-Sleep 30 & echo late"
 	}
 	return "echo early; sleep 30; echo late"
 }
 
 func createMarkerThenWaitCommand() string {
 	if runtime.GOOS == "windows" {
-		return "type nul > started & ping -n 31 127.0.0.1 >nul"
+		return "type nul > started & powershell -NoProfile -Command Start-Sleep 30"
 	}
 	return "touch started; sleep 30"
 }
