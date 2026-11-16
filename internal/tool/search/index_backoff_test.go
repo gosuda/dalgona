@@ -49,7 +49,7 @@ func requireBuildChildExited(t *testing.T, run runner.Runner, id string) {
 func sleepingBuild(t *testing.T) *buildLog {
 	t.Helper()
 	return newBuildLog(t, func(run runner.Runner, spec runner.ProcessSpec) error {
-		spec.Argv = []string{"sh", "-c", "sleep 30"}
+		spec.Argv = sleepArgv()
 		return run.Start(context.Background(), spec)
 	})
 }
