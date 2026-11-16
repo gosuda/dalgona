@@ -132,31 +132,13 @@ linters:
             - "**/internal/dal/shellargs/**"
             - "**/internal/dal/secrets/**"
           deny:
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/acp"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona"
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/dal/rpc"
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/dal/tui"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/daemon"
-              desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/dal/script"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/mcp"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/discovery"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/webui"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/herdr"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/codexapp"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/ratchet"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/doctor"
               desc: core must not import interfaces or batteries
         presentation:
           files:
@@ -195,6 +177,15 @@ linters:
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/dalgona/report"
               desc: clients reach the core only through internal/rpc
+        tui-imports-only-rpc:
+          list-mode: lax
+          files:
+            - "**/internal/dal/tui/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/"
+              desc: tui reaches the core only through internal/dal/rpc
+          allow:
+            - "github.com/gosuda/dalgona/internal/dal/rpc"
         dal:
           files:
             - "**/cmd/dal/**"
@@ -217,8 +208,21 @@ linters:
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/dalgona/ratchet"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/doctor"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/daltoki"
               desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/github"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/graph"
+              desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/postbox"
+              desc: dal must stay free of dalgona batteries
+        product-boundary:
+          files:
+            - "**/internal/dal/**"
+            - "**/cmd/dal/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona"
+              desc: dal never imports dalgona
   exclusions:
     presets:
       - std-error-handling

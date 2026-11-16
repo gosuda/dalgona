@@ -24,14 +24,13 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/model/chatgpt"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
-	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 )
 
 const unknownAuthorityText = "x509: certificate signed by unknown authority"
 
 type privateServerHits struct {
-	model, token, mcp, chat atomic.Int32
-	failure                 atomic.Pointer[error]
+	model, token, chat atomic.Int32
+	failure            atomic.Pointer[error]
 }
 
 func TestTLSCAFileTrustsPrivateServer(t *testing.T) {
@@ -48,7 +47,6 @@ func TestTLSCAFileTrustsPrivateServer(t *testing.T) {
 
 	requireUnknownAuthority(t, "model client", fetchPrivateModel(server.URL+"/model"))
 	requireUnknownAuthority(t, "oauth refresh", refreshPrivateToken(t.Context()))
-	requireUnknownAuthority(t, "mcp transport", dialPrivateMCP(t.Context(), server.URL+"/mcp"))
 	_, chatControlErr := chatStreamErr(newChat())
 	requireUnknownAuthority(t, "chat provider", chatControlErr)
 
@@ -66,7 +64,6 @@ func TestTLSCAFileTrustsPrivateServer(t *testing.T) {
 
 	requirePrivateModelFetch(t, server.URL+"/model")
 	requireRefreshedToken(t)
-	requirePrivateMCPTransport(t, server.URL+"/mcp")
 	requireChatCompletes(t, newChat())
 	requirePrivateServerHits(t, hits)
 }
@@ -80,19 +77,6 @@ func (h *privateServerHits) serve(w http.ResponseWriter, r *http.Request) {
 		h.token.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		h.write(w, `{"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":3600}`)
-	case "/mcp":
-		h.mcp.Add(1)
-		body, readErr := io.ReadAll(r.Body)
-		if readErr != nil {
-			h.fail(readErr)
-			return
-		}
-		if strings.Contains(string(body), `"method":"initialize"`) {
-			w.Header().Set("Content-Type", "application/json")
-			h.write(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25"}}`)
-			return
-		}
-		w.WriteHeader(http.StatusAccepted)
 	default:
 		h.chat.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -130,17 +114,6 @@ func requireRefreshedToken(t *testing.T) {
 	}
 }
 
-func requirePrivateMCPTransport(t *testing.T, url string) {
-	t.Helper()
-	client, err := mcp.New(t.Context(), mcp.Config{Name: "private", URL: url})
-	if err != nil {
-		t.Fatalf("mcp transport: %v", err)
-	}
-	if err := client.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func requireChatCompletes(t *testing.T, provider *chatgpt.Provider) {
 	t.Helper()
 	stop, chatErr := chatStreamErr(provider)
@@ -158,7 +131,7 @@ func requirePrivateServerHits(t *testing.T, hits *privateServerHits) {
 		t.Fatal(err)
 	}
 	for name, count := range map[string]int32{
-		"model": hits.model.Load(), "token": hits.token.Load(), "mcp": hits.mcp.Load(), "chat": hits.chat.Load(),
+		"model": hits.model.Load(), "token": hits.token.Load(), "chat": hits.chat.Load(),
 	} {
 		if count == 0 {
 			t.Fatalf("no %s request reached the private server", name)
@@ -203,14 +176,6 @@ func refreshPrivateToken(ctx context.Context) error {
 	return err
 }
 
-func dialPrivateMCP(ctx context.Context, url string) error {
-	client, err := mcp.New(ctx, mcp.Config{Name: "private", URL: url})
-	if err != nil {
-		return err
-	}
-	return client.Close()
-}
-
 func chatStreamErr(provider *chatgpt.Provider) (string, error) {
 	stream, err := provider.Stream(context.Background(), model.Request{Model: "gpt-6.1-sol"})
 	if err != nil {
@@ -233,11 +198,6 @@ func (h *privateServerHits) write(w io.Writer, text string) {
 		failure := fmt.Errorf("test server write: %w", err)
 		h.failure.CompareAndSwap(nil, &failure)
 	}
-}
-
-func (h *privateServerHits) fail(err error) {
-	failure := fmt.Errorf("test server: %w", err)
-	h.failure.CompareAndSwap(nil, &failure)
 }
 
 func (h *privateServerHits) err() error {
