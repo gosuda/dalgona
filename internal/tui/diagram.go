@@ -33,7 +33,7 @@ var diagramLangs = map[string]bool{
 	"svg":     true,
 }
 
-const diagramBudget = 2 * time.Second
+var diagramBudget = 2 * time.Second
 
 func isDiagramLang(lang string) bool {
 	return diagramLangs[strings.ToLower(lang)]
