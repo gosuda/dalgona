@@ -242,6 +242,9 @@ func newParser(lang *language, timeout time.Duration) *Parser {
 	grammar := lang.grammar()
 	parser := gotreesitter.NewParser(grammar)
 	micros := max(0, timeout) / time.Microsecond
+	if timeout > 0 && micros == 0 {
+		micros = 1
+	}
 	parser.SetTimeoutMicros(uint64(micros))
 	parser.SetMemoryBudgetBytes(parseMemoryBudgetBytes)
 	parser.SetParseWorkLimits(gotreesitter.ParseWorkLimits{
@@ -265,6 +268,9 @@ func tokenSourceFactory(name string, lang *gotreesitter.Language) gotreesitter.T
 func (p *Parser) parse(ctx context.Context, src []byte) (*gotreesitter.Tree, Report, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, Report{}, fmt.Errorf("syntax: %w", err)
+	}
+	if p.timeout > 0 && p.timeout < time.Microsecond {
+		return nil, Report{Stopped: true}, nil
 	}
 	began := time.Now()
 	var tree *gotreesitter.Tree

@@ -98,7 +98,7 @@ The symbols mode MUST parse at most 256 files and 1 MiB of source in one call.
 
 A file over 256 KiB MUST NOT be parsed.
 
-Each parse MUST stop after 2 seconds. A call MUST stop starting new files after 10 seconds, and it MUST count each remaining file of a supported language as stopped.
+Each parse MUST stop after 2 seconds. A positive parse budget below one microsecond MUST stop the parse without starting it. A call MUST stop starting new files after 10 seconds, and it MUST count each remaining file of a supported language as stopped.
 
 The search child MUST stop after 30 seconds, and the search MUST return an error that names the deadline.
 
