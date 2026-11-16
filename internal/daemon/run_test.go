@@ -70,23 +70,29 @@ func startRun(t *testing.T, home string) (context.CancelFunc, <-chan error) {
 		t.Fatalf("Run returned before it listened: %v", err)
 	case <-listening:
 	}
-	if got := greeting(home); got != "ok" {
+	if got := greeting(t, home); got != "ok" {
 		t.Fatalf("daemon greeting = %q, want ok", got)
 	}
 	return cancel, done
 }
 
-func greeting(home string) string {
-	conn, err := net.Dial("unix", SocketPath(home))
+func greeting(t *testing.T, home string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	dialer := net.Dialer{Deadline: deadline}
+	conn, err := dialer.DialContext(t.Context(), "unix", SocketPath(home))
 	if err != nil {
-		return ""
+		t.Fatalf("dial daemon greeting: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
-	data, err := io.ReadAll(conn)
-	if err != nil {
-		return ""
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		t.Fatalf("set daemon greeting deadline: %v", err)
 	}
-	return string(data)
+	var data [2]byte
+	if _, err := io.ReadFull(conn, data[:]); err != nil {
+		t.Fatalf("read daemon greeting: %v", err)
+	}
+	return string(data[:])
 }
 
 func stopRun(t *testing.T, cancel context.CancelFunc, done <-chan error) {
@@ -110,7 +116,7 @@ func TestRunSecondInstanceFailsOnLock(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "another dalgona process owns "+home) {
 		t.Fatalf("second Run error = %v", err)
 	}
-	if got := greeting(home); got != "ok" {
+	if got := greeting(t, home); got != "ok" {
 		t.Fatalf("first daemon lost its socket after the second Run: %q", got)
 	}
 	stopRun(t, cancel, done)
