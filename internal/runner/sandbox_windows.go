@@ -64,7 +64,7 @@ func windowsWritableRoots(cwd string, sandbox Sandbox) ([]string, error) {
 		input = append(input, cwd)
 		input = append(input, sandbox.WritableRoots...)
 		return resolveRoots(input)
-	case SandboxMode("read-only"):
+	case SandboxOff, SandboxMode("read-only"):
 		return nil, nil
 	case SandboxOff:
 	}
