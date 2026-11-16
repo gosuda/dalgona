@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -51,7 +52,7 @@ func openDB(path string) (db *sql.DB, err error) {
 	return db, nil
 }
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 func migrateDB(db *sql.DB) error {
 	version, err := schemaVersionOf(db)
@@ -89,6 +90,8 @@ func applyMigration(db *sql.DB, target int) error {
 		return setUserVersion(db, 1)
 	case 2:
 		return migrateToV2(db)
+	case 3:
+		return migrateToV3(db)
 	default:
 		return fmt.Errorf("journal: unknown schema version %d", target)
 	}
@@ -121,6 +124,113 @@ func sessionsV2Rebuild() []string {
 		"DROP TABLE sessions",
 		"ALTER TABLE sessions_new RENAME TO sessions",
 	}
+}
+
+func migrateToV3(db *sql.DB) error {
+	return withTx(db, func(tx *sql.Tx) error {
+		var version int
+		if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+			return err
+		}
+		if version >= 3 {
+			return nil
+		}
+		if _, err := tx.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS thread_fts USING fts5(session UNINDEXED, seq UNINDEXED, kind UNINDEXED, body, tokenize='trigram')`); err != nil {
+			return fmt.Errorf("journal: create thread_fts: %w", err)
+		}
+		if err := backfillFTS(tx); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 3"); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func backfillFTS(tx *sql.Tx) (retErr error) {
+	present, err := indexedPairs(tx)
+	if err != nil {
+		return err
+	}
+	pending, err := pendingFtsRows(tx, present)
+	if err != nil {
+		return err
+	}
+	insert, err := tx.Prepare(`INSERT INTO thread_fts(session, seq, kind, body) VALUES(?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, insert.Close()) }()
+	for _, row := range pending {
+		if _, err := insert.Exec(row.sid, row.seq, row.kind, row.body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func indexedPairs(tx *sql.Tx) (map[string]struct{}, error) {
+	present := map[string]struct{}{}
+	existing, err := tx.Query(`SELECT session, seq FROM thread_fts`)
+	if err != nil {
+		return nil, err
+	}
+	for existing.Next() {
+		var sid string
+		var seq uint64
+		if err := existing.Scan(&sid, &seq); err != nil {
+			return nil, errors.Join(err, existing.Close())
+		}
+		present[ftspair(sid, seq)] = struct{}{}
+	}
+	if err := existing.Err(); err != nil {
+		return nil, errors.Join(err, existing.Close())
+	}
+	if err := existing.Close(); err != nil {
+		return nil, err
+	}
+	return present, nil
+}
+
+func pendingFtsRows(tx *sql.Tx, present map[string]struct{}) ([]ftsRow, error) {
+	var pending []ftsRow
+	rows, err := tx.Query(`SELECT session, seq, ev FROM events`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var row ftsRow
+		var ev []byte
+		if err := rows.Scan(&row.sid, &row.seq, &ev); err != nil {
+			return nil, errors.Join(err, rows.Close())
+		}
+		if _, ok := present[ftspair(row.sid, row.seq)]; ok {
+			continue
+		}
+		if kind, body, ok := searchText(ev); ok {
+			row.kind, row.body = kind, body
+			pending = append(pending, row)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.Join(err, rows.Close())
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return pending, nil
+}
+
+type ftsRow struct {
+	sid  string
+	seq  uint64
+	kind string
+	body string
+}
+
+func ftspair(sid string, seq uint64) string {
+	return sid + "\x00" + strconv.FormatUint(seq, 10)
 }
 
 func openUsableDB(path string) (*sql.DB, error) {
@@ -326,9 +436,19 @@ func insertEventsTx(tx *sql.Tx, sid string, recs []emitRec) (retErr error) {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, stmt.Close()) }()
+	fts, err := tx.Prepare("INSERT INTO thread_fts(session, seq, kind, body) VALUES(?, ?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, fts.Close()) }()
 	for _, rec := range recs {
 		if _, err := stmt.Exec(sid, rec.seq, rec.hash, rec.ev); err != nil {
 			return err
+		}
+		if kind, body, ok := searchText(rec.ev); ok {
+			if _, err := fts.Exec(sid, rec.seq, kind, body); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -343,15 +463,37 @@ func mirrorAppend(db *sql.DB, sid string, recs []emitRec, headSeq uint64) error 
 	})
 }
 
+func deleteSessionRowsTx(tx *sql.Tx, sid string) error {
+	for _, stmt := range []string{
+		"DELETE FROM thread_fts WHERE session = ?",
+		"DELETE FROM events WHERE session = ?",
+	} {
+		if _, err := tx.Exec(stmt, sid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func replaceSession(db *sql.DB, sid string, recs []emitRec, head SessionHead) error {
 	return withTx(db, func(tx *sql.Tx) error {
-		if _, err := tx.Exec("DELETE FROM events WHERE session = ?", sid); err != nil {
+		if err := deleteSessionRowsTx(tx, sid); err != nil {
 			return err
 		}
 		if err := insertEventsTx(tx, sid, recs); err != nil {
 			return err
 		}
 		return upsertSessionTx(tx, sid, string(head.Status), head.HeadSeq)
+	})
+}
+
+func removeSession(db *sql.DB, sid string) error {
+	return withTx(db, func(tx *sql.Tx) error {
+		if err := deleteSessionRowsTx(tx, sid); err != nil {
+			return err
+		}
+		_, err := tx.Exec("DELETE FROM sessions WHERE id = ?", sid)
+		return err
 	})
 }
 

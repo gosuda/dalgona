@@ -45,7 +45,18 @@ The database is `state.db`. The backup is `state.db.bak`. The store MUST enable 
 ```sql
 CREATE TABLE events(session TEXT NOT NULL, seq INTEGER NOT NULL, hash TEXT NOT NULL, ev BLOB NOT NULL, PRIMARY KEY(session, seq));
 CREATE TABLE sessions(id TEXT PRIMARY KEY, parent TEXT, cwd TEXT, title TEXT, status TEXT NOT NULL CHECK(status IN ('ok','damaged')), head_seq INTEGER NOT NULL CHECK(head_seq >= 0), updated_at TEXT);
+CREATE VIRTUAL TABLE IF NOT EXISTS thread_fts USING fts5(session UNINDEXED, seq UNINDEXED, kind UNINDEXED, body, tokenize='trigram');
 ```
+
+The version-3 migration MUST create `thread_fts` when it is absent. It MUST backfill only rows whose `(session, seq)` pair is absent from `thread_fts`. It MUST recheck the version inside the immediate migration transaction, so a second opener applies nothing. It MUST set `PRAGMA user_version = 3` inside that same transaction.
+
+Every mirror write MUST add the index rows of the session inside the same transaction as its `events` rows. A session replacement MUST delete the index rows of the session first. A rebuilt mirror MUST rebuild the index from JSONL, because the index is derived data.
+
+The index holds the inline `text` of `user.message` and `assistant.message` events and the `name` of `thread.named` events. `Search` MUST index no other event and no text that lives in a blob. `Search` MUST reject a query whose term holds fewer than 3 runes. `Search` MUST rank sessions by their best matching row and MUST cap the result at 1000 sessions.
+
+`Search` MUST omit a session whose first event is `session.created` with `ephemeral` set to `true`. The index still holds the rows of that session. `Search` MUST keep every other session. That includes a session whose `session.created` event has `ephemeral` absent or `false`. It also includes a session whose first event has another type and sets `ephemeral`. A positive `Limit` below 1000 MUST lower the cap. `Search` MUST apply the cap and the limit after it omits ephemeral sessions. An omitted session never uses a slot of the result.
+
+The mirror MUST remove the rows of one session with one transaction. That transaction deletes the `thread_fts` rows, the `events` rows, and the `sessions` row of the session. It MUST NOT change the JSONL file, which stays append-only. A removal of a session with no rows MUST succeed and MUST NOT change another session.
 
 The database MUST record its schema version in `PRAGMA user_version`. `openDB` MUST apply ordered migrations at open and MUST reject a database whose version exceeds the supported version. Databases without a version adopt version 1 with no row changes. The version-2 migration MUST coerce legacy thread rows to the constrained shape. It MUST map a NULL or unexpected `status` to `damaged`. It MUST map a NULL or negative `head_seq` to 0. Loads MUST apply the same coercion to any row that still violates the constraint.
 
