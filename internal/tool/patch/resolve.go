@@ -49,7 +49,7 @@ func (r fileResolver) stageRename(ctx context.Context, item edit) error {
 		return fmt.Errorf("patch: cannot inspect rename destination %s: %w", display, statErr)
 	}
 	if item.reference != "" {
-		if proofErr := proveUnchanged(r.env.Snapshots, item.reference, r.group.display, r.file.before); proofErr != nil {
+		if proofErr := proveUnchanged(r.env, item.reference, r.group.display, r.file.before); proofErr != nil {
 			return proofErr
 		}
 	}
@@ -121,9 +121,22 @@ func spliceBytes(before []byte, item replacement) []byte {
 	return after
 }
 
+func proveEligible(env tool.Env, item edit) error {
+	if item.guard.kind != guardReference {
+		return nil
+	}
+	if err := env.Snapshots.Eligible(item.guard.text, env.Evidence); err != nil {
+		return fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err)
+	}
+	return nil
+}
+
 func (r fileResolver) resolve(doc document, item edit) ([]replacement, error) {
 	if item.kind != editChange {
 		return nil, nil
+	}
+	if err := proveEligible(r.env, item); err != nil {
+		return nil, err
 	}
 	if err := proveTag(r.file, item); err != nil {
 		return nil, err
@@ -363,8 +376,11 @@ func mapReferenceGap(store *snapshot.Store, ref string, file *stagedFile, gap in
 	return mapped, nil
 }
 
-func proveUnchanged(store *snapshot.Store, ref, path string, before []byte) error {
-	if store == nil || !store.Unchanged(ref, path, before) {
+func proveUnchanged(env tool.Env, ref, path string, before []byte) error {
+	if err := env.Snapshots.Eligible(ref, env.Evidence); err != nil {
+		return fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err)
+	}
+	if env.Snapshots == nil || !env.Snapshots.Unchanged(ref, path, before) {
 		return fmt.Errorf("patch: reference %s for %s is expired or the file changed. Read again", ref, path)
 	}
 	return nil

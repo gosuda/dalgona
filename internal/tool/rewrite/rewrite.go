@@ -32,7 +32,7 @@ const description = `Rewrite code with a tree-sitter query. lang names the gramm
 
 const schema = `{"type":"object","properties":{"lang":{"type":"string","enum":["bash","c","c_sharp","cpp","css","go","html","java","javascript","json","kotlin","lua","markdown","php","python","ruby","rust","svelte","swift","toml","tsx","typescript","yaml"]},"pattern":{"type":"string"},"target":{"type":"string"},"replace":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"}},"required":["lang","pattern","target","replace"],"additionalProperties":false}`
 
-type Editor struct{}
+type Editor struct{ beforeRead func(path string) }
 
 func New() tool.Editor { return Editor{} }
 
@@ -73,13 +73,30 @@ type changed struct {
 }
 
 type scanner struct {
-	env    tool.Env
-	parser *syntax.Parser
-	spec   query
-	target string
+	env        tool.Env
+	parser     *syntax.Parser
+	spec       query
+	target     string
+	beforeRead func(path string)
 }
 
-func (Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Plan, error) {
+type collection struct {
+	retained []changed
+	files    int
+	edits    int
+}
+
+func (c *collection) add(item changed) {
+	c.files++
+	c.edits += len(item.edits)
+	if c.files > rewriteMaxFiles || c.edits > rewriteMaxEdits {
+		c.retained = nil
+		return
+	}
+	c.retained = append(c.retained, item)
+}
+
+func (e Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Plan, error) {
 	var a args
 	if err := json.Unmarshal(call.Args, &a, json.RejectUnknownMembers(true)); err != nil {
 		return tool.Plan{}, fmt.Errorf("rewrite: invalid arguments: %w", err)
@@ -97,17 +114,17 @@ func (Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Plan
 	}
 	ctx, cancel := context.WithTimeoutCause(ctx, rewriteDeadline, errRewriteDeadline)
 	defer cancel()
-	files, err := collect(ctx, env, a, spec)
+	got, err := e.collect(ctx, env, a, spec)
 	if err != nil {
 		return tool.Plan{}, err
 	}
-	if len(files) == 0 {
+	if got.files == 0 {
 		return noMatch(a.Pattern), nil
 	}
-	if err := checkLimits(files); err != nil {
+	if err := checkLimits(got.files, got.edits); err != nil {
 		return tool.Plan{}, err
 	}
-	summary, replaced := summarise(files)
+	summary, replaced := summarise(got.retained)
 	return patch.PlanReplace(ctx, env, summary, replaced)
 }
 
@@ -157,29 +174,29 @@ func prepare(a args, pattern, replace string) (query, error) {
 	return query{lang: lang, query: q, tmpl: tmpl}, nil
 }
 
-func collect(ctx context.Context, env tool.Env, a args, spec query) ([]changed, error) {
+func (e Editor) collect(ctx context.Context, env tool.Env, a args, spec query) (collection, error) {
 	paths, err := search.Select(ctx, env.Cwd, a.Path, a.Glob, spec.lang.Extensions())
 	if err != nil {
-		return nil, cancelled(ctx, err)
+		return collection{}, cancelled(ctx, err)
 	}
 	if len(paths) > rewriteMaxScanned {
-		return nil, refusalError(fmt.Sprintf("rewrite: %d files match; the limit is %d. Narrow path or glob.", len(paths), rewriteMaxScanned))
+		return collection{}, refusalError(fmt.Sprintf("rewrite: %d files match; the limit is %d. Narrow path or glob.", len(paths), rewriteMaxScanned))
 	}
-	sc := scanner{env: env, parser: spec.lang.NewParser(), spec: spec, target: a.Target}
-	var out []changed
+	sc := scanner{env: env, parser: spec.lang.NewParser(), spec: spec, target: a.Target, beforeRead: e.beforeRead}
+	var got collection
 	for _, path := range paths {
 		if ctx.Err() != nil {
-			return nil, context.Cause(ctx)
+			return collection{}, context.Cause(ctx)
 		}
 		item, ok, scanErr := sc.file(ctx, path)
 		if scanErr != nil {
-			return nil, scanErr
+			return collection{}, scanErr
 		}
 		if ok {
-			out = append(out, item)
+			got.add(item)
 		}
 	}
-	return out, nil
+	return got, nil
 }
 
 func (sc scanner) file(ctx context.Context, path string) (changed, bool, error) {
@@ -215,9 +232,15 @@ func (sc scanner) read(ctx context.Context, path string) ([]byte, error) {
 	if info.Size > rewriteMaxFileBytes {
 		return nil, refusalError(fmt.Sprintf("rewrite: %s is over %d bytes; narrow path or glob.", path, rewriteMaxFileBytes))
 	}
+	if sc.beforeRead != nil {
+		sc.beforeRead(absolute)
+	}
 	src, err := sc.env.Runner.ReadFile(ctx, absolute)
 	if err != nil {
 		return nil, cancelled(ctx, err)
+	}
+	if len(src) > rewriteMaxFileBytes {
+		return nil, refusalError(fmt.Sprintf("rewrite: %s is over %d bytes; narrow path or glob.", path, rewriteMaxFileBytes))
 	}
 	return src, nil
 }
@@ -257,16 +280,12 @@ func checkStopped(path string, report syntax.Report) error {
 	return nil
 }
 
-func checkLimits(files []changed) error {
-	if len(files) > rewriteMaxFiles {
-		return refusalError(fmt.Sprintf("rewrite: %d files would change; the limit is %d. Narrow path or glob.", len(files), rewriteMaxFiles))
+func checkLimits(files, edits int) error {
+	if files > rewriteMaxFiles {
+		return refusalError(fmt.Sprintf("rewrite: %d files would change; the limit is %d. Narrow path or glob.", files, rewriteMaxFiles))
 	}
-	total := 0
-	for _, file := range files {
-		total += len(file.edits)
-	}
-	if total > rewriteMaxEdits {
-		return refusalError(fmt.Sprintf("rewrite: %d replacements would change; the limit is %d. Narrow path or glob.", total, rewriteMaxEdits))
+	if edits > rewriteMaxEdits {
+		return refusalError(fmt.Sprintf("rewrite: %d replacements would change; the limit is %d. Narrow path or glob.", edits, rewriteMaxEdits))
 	}
 	return nil
 }

@@ -21,20 +21,30 @@ const ellipsisASCII = "..."
 
 const ellipsisRune = "\u2026"
 
-func checkOmissions(files []*stagedFile) error {
-	for _, file := range files {
-		if file.deleted || isProseFile(file.path) {
-			continue
-		}
-		if line, text, found := omissionLine(file.before, file.after); found {
-			return refusalError(fmt.Sprintf("patch: %s line %d: %q stands in for omitted code; write the complete text. Nothing was written.", file.path, line, text))
-		}
+type observerFinding struct {
+	path string
+	line int
+	text string
+}
+
+func blockingFinding(findings []observerFinding) error {
+	for _, finding := range findings {
+		return refusalError(fmt.Sprintf("patch: %s line %d: %q stands in for omitted code; write the complete text. Nothing was written.", finding.path, finding.line, finding.text))
 	}
 	return nil
 }
 
-func isProseFile(path string) bool {
-	return slices.Contains(proseExtensions[:], strings.ToLower(filepath.Ext(path)))
+func observeOmissions(files []*stagedFile) []observerFinding {
+	var findings []observerFinding
+	for _, file := range files {
+		if file.deleted || slices.Contains(proseExtensions[:], strings.ToLower(filepath.Ext(file.path))) {
+			continue
+		}
+		if line, text, found := omissionLine(file.before, file.after); found {
+			findings = append(findings, observerFinding{path: file.path, line: line, text: text})
+		}
+	}
+	return findings
 }
 
 func omissionLine(before, after []byte) (int, string, bool) {
@@ -65,7 +75,8 @@ func placeholderLine(line string) bool {
 	if !strings.Contains(text, ellipsisASCII) && !strings.Contains(text, ellipsisRune) {
 		return false
 	}
-	normalized := normalizePlaceholder(text)
+	replacer := strings.NewReplacer(".", " ", ellipsisRune, " ", "(", " ", ")", " ", "[", " ", "]", " ")
+	normalized := strings.Join(strings.Fields(strings.ToLower(replacer.Replace(text))), " ")
 	if normalized == "" {
 		return true
 	}
@@ -75,11 +86,6 @@ func placeholderLine(line string) bool {
 		}
 	}
 	return false
-}
-
-func normalizePlaceholder(text string) string {
-	replacer := strings.NewReplacer(".", " ", ellipsisRune, " ", "(", " ", ")", " ", "[", " ", "]", " ")
-	return strings.Join(strings.Fields(strings.ToLower(replacer.Replace(text))), " ")
 }
 
 func commentText(trimmed string) (string, bool) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -26,6 +27,39 @@ func encodedSample(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+const handWrittenMagic = "dalgona search manifest 2 codesearch v1.2.0\n"
+
+func handWrittenManifest() []byte {
+	return []byte(handWrittenMagic +
+		"\x17\x97\x9d\x15\x7e\xa0\xe8\x00" +
+		"\x00\x00\x00\x00\x00\x00\x10\x00" +
+		"\x00\x00\x00\x02" +
+		"\x00\x00\x00\x04a.go" +
+		"\x00\x00\x00\x00\x00\x00\x00\x03" +
+		"\x17\x97\x9c\xfe\x36\x2a\x00\x01" +
+		"\x17\x97\x9c\xfe\x36\x2a\x00\x02" +
+		"\x01" +
+		"\x00\x00\x00\x07b/c.txt" +
+		"\x00\x00\x00\x00\x00\x00\x00\x00" +
+		"\x00\x00\x00\x00\x00\x00\x00\x05" +
+		"\x00\x00\x00\x00\x00\x00\x00\x06" +
+		"\x00")
+}
+
+func TestManifestDecodesHandWrittenBytes(t *testing.T) {
+	want := manifest{Start: 1700000100000000000, TrigramSize: 4096, Entries: []manifestEntry{
+		{Path: "a.go", Size: 3, ModNS: 1700000000000000001, CtimeNS: 1700000000000000002, Indexed: true},
+		{Path: "b/c.txt", Size: 0, ModNS: 5, CtimeNS: 6},
+	}}
+	got, err := decodeManifest(handWrittenManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Start != want.Start || got.TrigramSize != want.TrigramSize || !slices.Equal(got.Entries, want.Entries) {
+		t.Fatalf("decoded %+v, want %+v", got, want)
+	}
 }
 
 func requireManifestError(t *testing.T, err error, want string) {
@@ -55,14 +89,14 @@ func TestManifestRoundTrip(t *testing.T) {
 }
 
 func TestManifestRejectsBadMagic(t *testing.T) {
-	data := encodedSample(t)
+	data := handWrittenManifest()
 	data[0] = 'x'
 	_, err := decodeManifest(data)
 	requireManifestError(t, err, "bad magic")
 }
 
 func TestManifestRejectsOtherLibraryVersion(t *testing.T) {
-	data := bytes.Replace(encodedSample(t), []byte("v1.2.0"), []byte("v1.3.0-rc.1"), 1)
+	data := bytes.Replace(handWrittenManifest(), []byte("v1.2.0"), []byte("v1.3.0-rc.1"), 1)
 	_, err := decodeManifest(data)
 	requireManifestError(t, err, "bad magic")
 }
@@ -82,13 +116,13 @@ func TestManifestRejectsLongPath(t *testing.T) {
 }
 
 func TestManifestRejectsTrailingBytes(t *testing.T) {
-	data := append(encodedSample(t), 0)
+	data := append(handWrittenManifest(), 0)
 	_, err := decodeManifest(data)
 	requireManifestError(t, err, "trailing bytes")
 }
 
 func TestManifestRejectsTruncatedEntry(t *testing.T) {
-	data := encodedSample(t)
+	data := handWrittenManifest()
 	_, err := decodeManifest(data[:len(data)-1])
 	requireManifestError(t, err, "truncated")
 }
@@ -145,12 +179,12 @@ func TestManifestRejectsDamagedBytes(t *testing.T) {
 		want string
 	}{
 		{"bad indexed byte", func(t *testing.T) []byte {
-			data := encodedSample(t)
+			data := handWrittenManifest()
 			data[len(data)-1] = 2
 			return data
 		}, "bad indexed byte"},
 		{"inflated count past the body", func(t *testing.T) []byte {
-			data := encodedSample(t)
+			data := handWrittenManifest()
 			setCount(data, 3)
 			return data
 		}, "count mismatch"},
@@ -160,24 +194,24 @@ func TestManifestRejectsDamagedBytes(t *testing.T) {
 			return data
 		}, "count mismatch"},
 		{"deflated count", func(t *testing.T) []byte {
-			data := encodedSample(t)
+			data := handWrittenManifest()
 			setCount(data, 1)
 			return data
 		}, "count mismatch"},
 		{"NUL in path", func(t *testing.T) []byte {
-			data := encodedSample(t)
+			data := handWrittenManifest()
 			data[bytes.Index(data, []byte("a.go"))] = 0
 			return data
 		}, "NUL in path"},
 		{"negative trigram size", func(t *testing.T) []byte {
-			data := encodedSample(t)
+			data := handWrittenManifest()
 			for i := range 8 {
 				data[len(manifestMagic)+8+i] = 0xff
 			}
 			return data
 		}, "trigram size"},
 		{"header shorter than the header size", func(t *testing.T) []byte {
-			return encodedSample(t)[:manifestHeaderBytes-1]
+			return handWrittenManifest()[:manifestHeaderBytes-1]
 		}, "truncated"},
 	}
 	for _, tt := range tests {

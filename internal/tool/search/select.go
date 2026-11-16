@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -24,18 +25,11 @@ func Select(ctx context.Context, cwd, path, glob string, exts []string) ([]strin
 	}
 	paths := make([]string, 0, len(kept))
 	for _, entry := range kept {
-		if !selectable(entry.absolute) {
+		info, err := os.Lstat(entry.absolute)
+		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
 		paths = append(paths, entry.display)
 	}
 	return paths, nil
-}
-
-func selectable(path string) bool {
-	if !searchableFile(path) {
-		return false
-	}
-	_, ok := readSearchable(path)
-	return ok
 }

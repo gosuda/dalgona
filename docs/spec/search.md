@@ -18,7 +18,9 @@ The builder MUST add only regular files that a grep call could read, each at mos
 
 The builder MUST write no record for a file that is not regular, is over 16 MiB, or has no change time. A file that the builder does not read or index MUST be recorded as not indexed.
 
-The builder MUST leave unread each file whose size would take the total of indexed bytes past 1 GiB. The builder MUST keep reading the files after that file. The builder MUST sync the trigram file and the manifest before it exits with status 0.
+The builder MUST stop reading files when the next file would take the total of indexed bytes past 1 GiB. The builder MUST NOT read a later file, even a small one. The total counts the bytes of each file that the builder passes to the trigram writer. Search MUST read a file recorded as not indexed on every call.
+
+The builder MUST sync the trigram file and the manifest before it exits with status 0.
 
 Only the parent MUST publish a generation, by an atomic rename of `CURRENT`, after the builder exits with status 0. A publish MUST remove every other generation directory of the workspace.
 

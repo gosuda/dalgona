@@ -5,8 +5,10 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -48,7 +50,12 @@ func callArgs(t *testing.T, a args) jsontext.Value {
 
 func run(t *testing.T, env tool.Env, a args) (tool.Result, error) {
 	t.Helper()
-	return New().Run(t.Context(), tool.Call{ID: "call-1", Name: "rewrite", Args: callArgs(t, a)}, env)
+	return runWith(t, Editor{}, env, a)
+}
+
+func runWith(t *testing.T, editor Editor, env tool.Env, a args) (tool.Result, error) {
+	t.Helper()
+	return editor.Run(t.Context(), tool.Call{ID: "call-1", Name: "rewrite", Args: callArgs(t, a)}, env)
 }
 
 func readFile(t *testing.T, env tool.Env, name string) string {
@@ -60,11 +67,36 @@ func readFile(t *testing.T, env tool.Env, name string) string {
 	return string(data)
 }
 
+func workspaceBytes(t *testing.T, env tool.Env) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	root := os.DirFS(env.Cwd)
+	err := fs.WalkDir(root, ".", func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		data, readErr := fs.ReadFile(root, name)
+		files[name] = string(data)
+		return readErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
 func wantErr(t *testing.T, env tool.Env, a args, want string) {
 	t.Helper()
-	_, err := run(t, env, a)
+	before := workspaceBytes(t, env)
+	plan, err := New().Plan(t.Context(), tool.Call{ID: "call-1", Name: "rewrite", Args: callArgs(t, a)}, env)
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
+	}
+	if plan.Apply != nil || plan.Discard != nil || len(plan.Files) != 0 {
+		t.Fatalf("a refused call returned a plan: %+v", plan)
+	}
+	if !reflect.DeepEqual(workspaceBytes(t, env), before) {
+		t.Fatal("a refused call changed the workspace")
 	}
 }
 
@@ -211,16 +243,25 @@ func TestRewriteRefusesTooManyFiles(t *testing.T) {
 	a := goCall(funcName, "name", "Other")
 	a.Path = "pkg"
 	wantErr(t, env, a, "rewrite: 33 files would change; the limit is 32. Narrow path or glob.")
+	for name, body := range files {
+		if readFile(t, env, name) != body {
+			t.Fatalf("%s changed after the refusal", name)
+		}
+	}
 }
 
 func TestRewriteRefusesTooManyEdits(t *testing.T) {
-	var body strings.Builder
-	body.WriteString("package a\n\n")
+	var text strings.Builder
+	text.WriteString("package a\n\n")
 	for i := range 257 {
-		fmt.Fprintf(&body, "func F%d() {}\n", i)
+		fmt.Fprintf(&text, "func F%d() {}\n", i)
 	}
-	env := setup(t, map[string]string{"a.go": body.String()})
+	content := text.String()
+	env := setup(t, map[string]string{"a.go": content})
 	wantErr(t, env, goCall(funcName, "name", "G"), "rewrite: 257 replacements would change; the limit is 256. Narrow path or glob.")
+	if readFile(t, env, "a.go") != content {
+		t.Fatal("a.go changed after the refusal")
+	}
 }
 
 func TestRewriteRefusesTooManyCandidates(t *testing.T) {
@@ -322,5 +363,172 @@ func TestRewriteStaleFileRefusedAtApply(t *testing.T) {
 	}
 	if readFile(t, env, "a.go") != outside {
 		t.Fatal("a stale apply overwrote the file")
+	}
+}
+
+func TestRewriteRefusesSelectedFileOverSearchCap(t *testing.T) {
+	const body = "package a\n\nfunc Target() {}\n"
+	env := setup(t, map[string]string{"a.go": body})
+	big := filepath.Join(env.Cwd, "big.go")
+	if err := os.WriteFile(big, []byte("package big\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(big, 16<<20+1); err != nil {
+		t.Fatal(err)
+	}
+	a := goCall(funcName, "name", "Other")
+	wantErr(t, env, a, "rewrite: big.go is over 1048576 bytes; narrow path or glob.")
+	if readFile(t, env, "a.go") != body {
+		t.Fatal("a.go changed after the refusal")
+	}
+	a.Glob = "a.go"
+	if _, err := run(t, env, a); err != nil {
+		t.Fatal(err)
+	}
+	if want := "package a\n\nfunc Other() {}\n"; readFile(t, env, "a.go") != want {
+		t.Fatalf("a.go = %q, want %q", readFile(t, env, "a.go"), want)
+	}
+}
+
+func TestRewriteSeesSelectedFileWithNULBytes(t *testing.T) {
+	const body = "package a\n\nfunc Target() {}\n"
+	env := setup(t, map[string]string{
+		"a.go":   body,
+		"bad.go": "package bad\n\nfunc Keep( {\n\x00",
+	})
+	a := goCall(funcName, "name", "Other")
+	wantErr(t, env, a, "rewrite: bad.go has syntax errors; fix it with patch first")
+	if readFile(t, env, "a.go") != body {
+		t.Fatal("a.go changed after the refusal")
+	}
+	a.Glob = "a.go"
+	if _, err := run(t, env, a); err != nil {
+		t.Fatal(err)
+	}
+	if want := "package a\n\nfunc Other() {}\n"; readFile(t, env, "a.go") != want {
+		t.Fatalf("a.go = %q, want %q", readFile(t, env, "a.go"), want)
+	}
+}
+
+func TestRewriteAppliesThirtyTwoFiles(t *testing.T) {
+	files := map[string]string{}
+	for i := range 32 {
+		files[fmt.Sprintf("pkg/f%02d.go", i)] = "package p\n\nfunc Target() {}\n"
+	}
+	env := setup(t, files)
+	a := goCall(funcName, "name", "Other")
+	a.Path = "pkg"
+	if _, err := run(t, env, a); err != nil {
+		t.Fatal(err)
+	}
+	for name := range files {
+		if got := readFile(t, env, name); !strings.Contains(got, "func Other()") {
+			t.Fatalf("%s = %q, want the rename", name, got)
+		}
+	}
+}
+
+func TestRewriteApplies256Edits(t *testing.T) {
+	var text strings.Builder
+	text.WriteString("package a\n\n")
+	for i := range 256 {
+		fmt.Fprintf(&text, "func F%d() {}\n", i)
+	}
+	env := setup(t, map[string]string{"a.go": text.String()})
+	if _, err := run(t, env, goCall(funcName, "name", "G")); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, env, "a.go")
+	if strings.Count(got, "func G") != 256 || strings.Contains(got, "func F") {
+		t.Fatalf("a.go holds %d renamed funcs and keeps F names: %v", strings.Count(got, "func G"), strings.Contains(got, "func F"))
+	}
+}
+
+func TestRewriteRefusesFileThatGrowsPastLimitDuringRead(t *testing.T) {
+	const body = "package a\n\nfunc Target() {}\n"
+	env := setup(t, map[string]string{"a.go": body})
+	grown := body + strings.Repeat("a", rewriteMaxFileBytes)
+	fired := false
+	editor := Editor{beforeRead: func(path string) {
+		if fired || filepath.Base(path) != "a.go" {
+			return
+		}
+		fired = true
+		if err := os.WriteFile(path, []byte(grown), 0o600); err != nil {
+			t.Error(err)
+		}
+	}}
+	_, err := runWith(t, editor, env, goCall(funcName, "name", "Other"))
+	if want := "rewrite: a.go is over 1048576 bytes; narrow path or glob."; err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+	if !fired {
+		t.Fatal("the read hook did not run")
+	}
+	if readFile(t, env, "a.go") != grown {
+		t.Fatal("the rewrite wrote over the grown file")
+	}
+}
+
+func TestRewriteAppliesFileThatGrowsWithinLimitDuringRead(t *testing.T) {
+	const body = "package a\n\nfunc Target() {}\n"
+	const grown = "package a\n\nfunc Target() {}\n\nvar Added = 1\n"
+	env := setup(t, map[string]string{"a.go": body})
+	fired := false
+	editor := Editor{beforeRead: func(path string) {
+		if fired {
+			return
+		}
+		fired = true
+		if err := os.WriteFile(path, []byte(grown), 0o600); err != nil {
+			t.Error(err)
+		}
+	}}
+	if _, err := runWith(t, editor, env, goCall(funcName, "name", "Other")); err != nil {
+		t.Fatal(err)
+	}
+	if !fired {
+		t.Fatal("the read hook did not run")
+	}
+	if want := "package a\n\nfunc Other() {}\n\nvar Added = 1\n"; readFile(t, env, "a.go") != want {
+		t.Fatalf("a.go = %q, want %q", readFile(t, env, "a.go"), want)
+	}
+}
+
+func TestCollectionReleasesImagesPastLimits(t *testing.T) {
+	cases := []struct {
+		name         string
+		files        int
+		editsEach    int
+		wantRetained int
+	}{
+		{"32 files", rewriteMaxFiles, 1, rewriteMaxFiles},
+		{"33 files", rewriteMaxFiles + 1, 1, 0},
+		{"256 edits", 1, rewriteMaxEdits, 1},
+		{"257 edits", 1, rewriteMaxEdits + 1, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got collection
+			for range tc.files {
+				got.add(changed{path: "p.go", src: []byte("s"), post: []byte("p"), edits: make([]edit, tc.editsEach)})
+			}
+			if got.files != tc.files || got.edits != tc.files*tc.editsEach {
+				t.Fatalf("counted %d files and %d edits, want %d and %d", got.files, got.edits, tc.files, tc.files*tc.editsEach)
+			}
+			if len(got.retained) != tc.wantRetained {
+				t.Fatalf("retained %d files, want %d", len(got.retained), tc.wantRetained)
+			}
+		})
+	}
+}
+
+func TestCollectionKeepsCountingAfterRelease(t *testing.T) {
+	var got collection
+	for range rewriteMaxFiles + 3 {
+		got.add(changed{path: "p.go", src: []byte("s"), post: []byte("p"), edits: make([]edit, 2)})
+	}
+	if got.files != rewriteMaxFiles+3 || got.edits != 2*(rewriteMaxFiles+3) || len(got.retained) != 0 {
+		t.Fatalf("files = %d, edits = %d, retained = %d", got.files, got.edits, len(got.retained))
 	}
 }

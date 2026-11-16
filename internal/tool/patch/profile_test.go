@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -95,26 +98,37 @@ func TestHashlineABAChangeDoesNotReviveTarget(t *testing.T) {
 func TestEnhancedCoverageAndValidNoop(t *testing.T) {
 	for _, style := range []Style{HashlineLight, HashlineEnhanced} {
 		t.Run(string(style), func(t *testing.T) {
-			env, cwd := editTestEnv(t)
-			source := "one\ntwo\n"
-			writeFixture(t, cwd, "f.txt", source)
-			ref := seedReference(env, "f.txt", source, false)
-			result, err := runPatch(t, env, style, profileInput("f.txt", ref, "PUT 2:\n+TWO\n"))
-			if style == HashlineEnhanced && err == nil {
-				t.Fatal("unobserved enhanced edit passed")
-			}
-			if style == HashlineLight && err != nil {
-				t.Fatal(err)
-			}
-			_ = result
-			noopEnv, noopCwd := editTestEnv(t)
-			writeFixture(t, noopCwd, "f.txt", source)
-			noopRef := seedReference(noopEnv, "f.txt", source, false)
-			result, err = runPatch(t, noopEnv, style, profileInput("f.txt", noopRef, "PUT 1:\n+one\n"))
-			if err != nil || string(result.Output) != "no_change\n" {
-				t.Fatalf("valid no-op: %+v %v", result, err)
-			}
+			runStyleCoverageCase(t, style)
 		})
+	}
+}
+
+func runStyleCoverageCase(t *testing.T, style Style) {
+	t.Helper()
+	env, cwd := editTestEnv(t)
+	source := "one\ntwo\n"
+	writeFixture(t, cwd, "f.txt", source)
+	ref := seedReference(env, "f.txt", source, false)
+	_, err := runPatch(t, env, style, profileInput("f.txt", ref, "PUT 2:\n+TWO\n"))
+	if style == HashlineEnhanced && err == nil {
+		t.Fatal("unobserved enhanced edit passed")
+	}
+	if style == HashlineLight && err != nil {
+		t.Fatal(err)
+	}
+	want := "one\ntwo\n"
+	if style == HashlineLight {
+		want = "one\nTWO\n"
+	}
+	if actual := readFixture(t, cwd, "f.txt"); actual != want {
+		t.Fatalf("%s after coverage edit: fixture %q, want %q", style, actual, want)
+	}
+	noopEnv, noopCwd := editTestEnv(t)
+	writeFixture(t, noopCwd, "f.txt", source)
+	noopRef := seedReference(noopEnv, "f.txt", source, false)
+	result, err := runPatch(t, noopEnv, style, profileInput("f.txt", noopRef, "PUT 1:\n+one\n"))
+	if err != nil || string(result.Output) != "no_change\n" {
+		t.Fatalf("valid no-op: %+v %v", result, err)
 	}
 }
 
@@ -321,7 +335,8 @@ func TestCreateAndRenameApprovalRaces(t *testing.T) {
 	}
 	writeFixture(t, cwd, "a.txt", "alpha\n")
 	ref := seedReference(env, "a.txt", "alpha\n", true)
-	renamePlan, err := New("hashline-light").Plan(t.Context(), tool.Call{Args: jsontext.Value(snapshot.JSONString(profileInput("a.txt", ref, "MV b.txt")))}, env)
+	input := profileInput("a.txt", ref, "MV b.txt")
+	renamePlan, err := New("hashline-light").Plan(t.Context(), tool.Call{Args: jsontext.Value(snapshot.JSONString(input))}, boundEvidence(env, input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,20 +371,104 @@ func TestMoveAfterEditInvalidatesOldPath(t *testing.T) {
 }
 
 func TestHashlineRejectsSymbolOperations(t *testing.T) {
-	source := "one\ntwo\nthree\n"
+	cases := []struct {
+		op      string
+		message string
+	}{
+		{"PUT 2*:\n+x\n", "block ops (N*) are not supported"},
+		{"CUT 2*\n", ""},
+		{"PUT >2*:\n+x\n", ""},
+	}
 	for _, style := range []Style{Hashline, HashlineLight, HashlineEnhanced} {
-		for _, op := range []string{"PUT 2*:\n+x\n", "CUT 2*\n", "PUT >2*:\n+x\n"} {
-			env, cwd := editTestEnv(t)
-			writeFixture(t, cwd, "f.txt", source)
-			proof := styleProofFor(env, style, source)
-			if _, err := runPatch(t, env, style, renderHashline("f.txt", nil, proof.ref)+op); err == nil {
-				t.Fatalf("%s with %q: symbol op accepted", style, op)
-			}
-			if actual := readFixture(t, cwd, "f.txt"); actual != source {
-				t.Fatalf("%s with %q: fixture changed to %q", style, op, actual)
-			}
+		for _, item := range cases {
+			requireSymbolOpRejected(t, style, item.op, item.message)
+		}
+		requireLineRangeControlAccepted(t, style)
+	}
+}
+
+func requireSymbolOpRejected(t *testing.T, style Style, op, message string) {
+	t.Helper()
+	source := "one\ntwo\nthree\n"
+	env, cwd := editTestEnv(t)
+	writeFixture(t, cwd, "f.txt", source)
+	proof := styleProofFor(env, style, source)
+	_, err := runPatch(t, env, style, renderHashline("f.txt", nil, proof.ref)+op)
+	if err == nil {
+		t.Fatalf("%s with %q: symbol op accepted", style, op)
+	}
+	if message != "" && !strings.Contains(err.Error(), message) {
+		t.Fatalf("%s with %q: error %q", style, op, err.Error())
+	}
+	if actual := readFixture(t, cwd, "f.txt"); actual != source {
+		t.Fatalf("%s with %q: fixture changed to %q", style, op, actual)
+	}
+}
+
+func requireLineRangeControlAccepted(t *testing.T, style Style) {
+	t.Helper()
+	source := "one\ntwo\nthree\n"
+	env, cwd := editTestEnv(t)
+	writeFixture(t, cwd, "f.txt", source)
+	proof := styleProofFor(env, style, source)
+	if _, err := runPatch(t, env, style, renderHashline("f.txt", nil, proof.ref)+"PUT 2:\n+x\n"); err != nil {
+		t.Fatalf("%s: line range control %v", style, err)
+	}
+	if actual := readFixture(t, cwd, "f.txt"); actual != "one\nx\nthree\n" {
+		t.Fatalf("%s: line range control wrote %q", style, actual)
+	}
+}
+
+func TestPatchSchemaOffersNoStyleArgument(t *testing.T) {
+	control := schemaPropertyNames(map[string]any{
+		"properties": map[string]any{
+			"changes": map[string]any{
+				"items": map[string]any{"properties": map[string]any{"style": map[string]any{}}},
+			},
+		},
+	})
+	if !slices.Contains(control, "style") {
+		t.Fatalf("walk missed a nested style property: %v", control)
+	}
+	for _, style := range []Style{Anchor, Replace, Hashline, HashlineLight, HashlineEnhanced, ApplyPatch} {
+		requireSchemaWithoutStyleArgument(t, style)
+	}
+}
+
+func requireSchemaWithoutStyleArgument(t *testing.T, style Style) {
+	t.Helper()
+	spec := New(string(style)).Spec()
+	var schema any
+	if err := json.Unmarshal([]byte(spec.Schema), &schema); err != nil {
+		t.Fatalf("%s: schema decode %v", style, err)
+	}
+	names := schemaPropertyNames(schema)
+	if len(names) == 0 {
+		t.Fatalf("%s: schema declares no property", style)
+	}
+	for _, banned := range []string{"style", "edit_style"} {
+		if slices.Contains(names, banned) {
+			t.Fatalf("%s: schema offers %q", style, banned)
 		}
 	}
+}
+
+func schemaPropertyNames(value any) []string {
+	var names []string
+	switch node := value.(type) {
+	case map[string]any:
+		if properties, ok := node["properties"].(map[string]any); ok {
+			names = slices.AppendSeq(names, maps.Keys(properties))
+		}
+		for _, child := range node {
+			names = append(names, schemaPropertyNames(child)...)
+		}
+	case []any:
+		for _, child := range node {
+			names = append(names, schemaPropertyNames(child)...)
+		}
+	}
+	return names
 }
 
 func TestApprovalGapDriftRejectsPreparedPlan(t *testing.T) {
@@ -446,10 +545,25 @@ func TestSpecNames(t *testing.T) {
 	}
 }
 
-func TestLightDescriptionStatesRemExemption(t *testing.T) {
-	description := New(string(HashlineLight)).Spec().Description
-	const sentence = "REM does not require every line to have been delivered."
-	if !strings.Contains(description, sentence) {
-		t.Fatalf("light description lacks the REM exemption %q", sentence)
+func remDisplayExceptionStated(description string) bool {
+	for sentence := range strings.SplitSeq(strings.ReplaceAll(description, "\n", " "), ". ") {
+		if strings.Contains(sentence, "REM") && (strings.Contains(sentence, "every line") || strings.Contains(sentence, "every-line")) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProfileDescriptionsStateRemDisplayException(t *testing.T) {
+	for _, style := range []Style{HashlineLight, HashlineEnhanced} {
+		if !remDisplayExceptionStated(New(string(style)).Spec().Description) {
+			t.Errorf("%s description does not state that REM needs no every-line delivery", style)
+		}
+	}
+	if remDisplayExceptionStated(New(string(Replace)).Spec().Description) {
+		t.Error("replace description states a REM display exception")
+	}
+	if remDisplayExceptionStated("REM deletes a file. Each replaced line needs coverage.") {
+		t.Error("a sentence without the display exception passed the predicate")
 	}
 }

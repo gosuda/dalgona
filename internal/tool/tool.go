@@ -55,6 +55,7 @@ type Env struct {
 	Sandbox   runner.Sandbox
 	Masker    Masker
 	Snapshots *snapshot.Store
+	Evidence  snapshot.Evidence
 }
 
 func IsLocalRunner(run runner.Runner) bool {

@@ -31,17 +31,20 @@ type trigramFilter struct {
 	clock    freshness
 }
 
+var afterGenerationOpened = func(string) {}
+
 func openTrigramFilter(dir, pattern string, clock freshness) (*trigramFilter, error) {
 	if dir == "" {
 		return nil, nil
 	}
-	present, err := generationPresent(dir)
-	if err != nil || !present {
+	m, trigram, err := openGeneration(dir)
+	if err != nil || trigram == nil {
 		return nil, err
 	}
-	m, err := loadGeneration(dir)
-	if err != nil {
-		return nil, err
+	defer func() { _ = trigram.Close() }()
+	afterGenerationOpened(dir)
+	if !generationPinned(dir, trigram, m.TrigramSize) {
+		return nil, nil
 	}
 	re, err := syntax.Parse(pattern, syntax.Perl)
 	if err != nil {
@@ -53,53 +56,102 @@ func openTrigramFilter(dir, pattern string, clock freshness) (*trigramFilter, er
 		filter.all = true
 		return filter, nil
 	}
-	filter.named, err = namedCandidates(filepath.Join(dir, trigramFile), query)
+	filter.named, err = namedCandidates(trigram, query)
 	if err != nil {
 		return nil, err
 	}
 	return filter, nil
 }
 
-func loadGeneration(dir string) (manifest, error) {
+func openGeneration(dir string) (manifest, *os.File, error) {
 	m, err := readManifest(filepath.Join(dir, manifestFile))
 	if err != nil {
-		return manifest{}, fmt.Errorf("%w: %w", errIndex, err)
-	}
-	info, err := os.Stat(filepath.Join(dir, trigramFile)) //nolint:gosec // trigram index path within verified generation directory
-	if err != nil {
-		return manifest{}, fmt.Errorf("%w: %w", errIndex, err)
-	}
-	if info.Size() != m.TrigramSize {
-		return manifest{}, fmt.Errorf("%w: trigram size", errIndex)
-	}
-	return m, nil
-}
-
-func generationPresent(dir string) (bool, error) {
-	for _, name := range []string{manifestFile, trigramFile} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil { //nolint:gosec // generation files checked within verified directory
-			if errors.Is(err, fs.ErrNotExist) {
-				return false, nil
-			}
-			return false, fmt.Errorf("%w: %w", errIndex, err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return manifest{}, nil, nil
 		}
+		return manifest{}, nil, fmt.Errorf("%w: %w", errIndex, err)
 	}
-	return true, nil
+	trigram, err := openTrigram(filepath.Join(dir, trigramFile), m.TrigramSize)
+	if err != nil || trigram == nil {
+		return manifest{}, nil, err
+	}
+	return m, trigram, nil
 }
 
-func namedCandidates(trigram string, query *index.Query) (names map[string]bool, err error) {
+func openTrigram(path string, size int64) (*os.File, error) {
+	info, err := os.Lstat(path) //nolint:gosec // trigram path within the verified generation directory
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: %w", errIndex, err)
+	}
+	if !pinnedTrigramSize(info, size) {
+		return nil, fmt.Errorf("%w: trigram size", errIndex)
+	}
+	file, err := os.Open(path) //nolint:gosec // trigram path within the verified generation directory
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: %w", errIndex, err)
+	}
+	pinned, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("%w: %w", errIndex, err)
+	}
+	if !pinnedTrigramSize(pinned, size) {
+		_ = file.Close()
+		return nil, fmt.Errorf("%w: trigram size", errIndex)
+	}
+	return file, nil
+}
+
+func generationPinned(dir string, trigram *os.File, size int64) bool {
+	pinned, err := trigram.Stat()
+	if err != nil || !pinnedTrigramSize(pinned, size) {
+		return false
+	}
+	current, err := os.Stat(filepath.Join(dir, trigramFile)) //nolint:gosec // generation file compared with its pinned descriptor
+	if err != nil {
+		return false
+	}
+	return os.SameFile(pinned, current)
+}
+
+func pinnedTrigramSize(info fs.FileInfo, size int64) bool {
+	return info.Mode().IsRegular() && info.Size() == size
+}
+
+func namedCandidates(trigram *os.File, query *index.Query) (names map[string]bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			names, err = nil, fmt.Errorf("%w: %v", errIndex, r)
 		}
 	}()
-	ix := index.Open(trigram)
+	descriptor, err := descriptorPath(trigram)
+	if err != nil {
+		return nil, err
+	}
+	ix := index.Open(descriptor)
 	ids := ix.PostingQuery(query)
 	names = make(map[string]bool, len(ids))
 	for _, id := range ids {
 		names[ix.Name(id)] = true
 	}
 	return names, nil
+}
+
+func descriptorPath(file *os.File) (string, error) {
+	digits := strconv.Itoa(int(file.Fd()))
+	for _, prefix := range []string{"/proc/self/fd/", "/dev/fd/"} {
+		path := prefix + digits
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("%w: no descriptor path", errIndex)
 }
 
 func statMatches(rec manifestEntry, info fs.FileInfo) bool {

@@ -8,9 +8,13 @@ Only `internal/syntax` MUST import `github.com/odvcencio/gotreesitter`. Callers 
 
 This decision applies to `internal/syntax`, its embedded queries under `internal/syntax/queries`, and the import rules `syntax` and `copyleft` in `.golangci.yml`. The search tool and the rewrite tool use the package through its exported API only. Each search mode that uses the package is specified in [search.md](../spec/search.md) by the step that adds that mode.
 
+The `owner` kind is hidden. The outliner maps the `@definition.owner` capture suffix to it. A symbol of that kind gives no row, adds no depth, and names the owner of its children. The Go language row carries one owner rule that resolves a method receiver through `parameter_list`, `parameter_declaration`, `pointer_type` and `generic_type` to one `type_identifier`.
+
+The exported API includes `Graph`. It returns the symbols, the references and the imports of one file as plain values. It serves Go, TypeScript, Python, Rust and Java, and each of them has one graph query under `internal/syntax/queries`. `Graph` parses the file once. It reads the outline and the query captures from that one tree. A reference keeps the index of its innermost listed symbol, or `-1` at top level. The graph queries name their captures `call`, `type` and `import`.
+
 ## Enforcement
 
-`just lint` runs the `syntax` rule, which denies the library outside `internal/syntax`, and the `copyleft` rule, which denies the aggregate package and the copyleft grammars everywhere. `internal/syntax/syntax_test.go` checks the kind table, the extension table, the Go fixture rows, context cancellation and the stopped parse.
+`just lint` runs the `syntax` rule, which denies the library outside `internal/syntax`, and the `copyleft` rule, which denies the aggregate package and the copyleft grammars everywhere. `internal/syntax/syntax_test.go` checks the kind table, the extension table, the Go fixture rows, context cancellation and the stopped parse. `internal/syntax/graph_test.go` checks the references and the imports against `go/parser` and against generated programs in the five languages.
 
 ## Measurements
 

@@ -80,7 +80,7 @@ func TestSelectSkipsSymbolicLinks(t *testing.T) {
 	}
 }
 
-func TestSelectDropsBinaryFile(t *testing.T) {
+func TestSelectKeepsFileWithNULBytes(t *testing.T) {
 	root := writeSelectTree(t, map[string]string{
 		"a/x.go":   "package a\n",
 		"a/bin.go": "package a\x00\n",
@@ -89,7 +89,25 @@ func TestSelectDropsBinaryFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"a/x.go"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"a/bin.go", "a/x.go"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Select = %v, want %v", got, want)
+	}
+}
+
+func TestSelectKeepsFileOverSearchCap(t *testing.T) {
+	root := writeSelectTree(t, map[string]string{"a/x.go": "package a\n"})
+	big := filepath.Join(root, "a", "big.go")
+	if err := os.WriteFile(big, []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(big, maxSearchFileBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Select(t.Context(), root, "a", "", []string{".go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a/big.go", "a/x.go"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Select = %v, want %v", got, want)
 	}
 }

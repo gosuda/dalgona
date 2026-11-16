@@ -10,6 +10,10 @@ The `target` argument MUST name a capture of the query. The `replace` argument M
 
 The `path` and `glob` arguments MUST select files as they do in `search`.
 
+Selection MUST use file metadata only.
+
+Selection MUST NOT apply the content checks of `search`.
+
 The tool MUST reject any other argument.
 
 ## Replacement text
@@ -31,6 +35,8 @@ A refused call MUST NOT write any file.
 The tool MUST refuse a candidate file that has syntax errors before the call. The tool MUST refuse a changed file that has syntax errors after the rewrite.
 
 The tool MUST refuse a candidate file over 1048576 bytes, and the refusal MUST name that file.
+
+The tool MUST apply that limit to the bytes that it reads, not only to the size that it first checked.
 
 The tool MUST refuse a call that selects more than 256 files. The tool MUST refuse a call that changes more than 32 files or makes more than 256 replacements.
 

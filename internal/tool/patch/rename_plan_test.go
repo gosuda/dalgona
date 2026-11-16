@@ -14,7 +14,7 @@ func TestRenamePlanRecordsSourceAbsence(t *testing.T) {
 	writeFixture(t, cwd, "a.txt", source)
 	ref := seedReference(env, "a.txt", source, true)
 	input := profileInput("a.txt", ref, "MV b.txt")
-	plan, err := New("hashline-light").Plan(t.Context(), tool.Call{Args: jsontext.Value(snapshot.JSONString(input))}, env)
+	plan, err := New("hashline-light").Plan(t.Context(), tool.Call{Args: jsontext.Value(snapshot.JSONString(input))}, boundEvidence(env, input))
 	if err != nil {
 		t.Fatal(err)
 	}
