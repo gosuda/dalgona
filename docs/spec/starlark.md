@@ -142,6 +142,10 @@ The `ctx` surface MUST be `ctx.log(msg)`, `ctx.sleep(seconds)`, `ctx.spawn(promp
 
 A syntax error MUST fail with code `syntax` and stage `parse`. A source that cannot compile MUST fail the same way. The same statuses, codes, limits, `uses` checks, and `waitsForUser` denials MUST apply as for Starlark cells.
 
+A JavaScript cell MUST run with at most 5000 stack slots and 256 MiB of memory. A cell past its limits MUST fail. A JavaScript run MUST stop with status `limit_exceeded` and code `limit_exceeded` after 30 seconds of eval time.
+
+`Math.random` MUST draw from a generator seeded with the pinned run seed. `Date.now` and a no-argument `Date` constructor MUST read the journaled `time` effect.
+
 ## Tool modes
 
 | Mode | Model-visible tools | Default allow list |

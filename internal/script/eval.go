@@ -124,7 +124,7 @@ func (e *Eval) request(args jsontext.Value) (evalRequest, nameSet, Outcome) {
 func (e *Eval) execute(ctx context.Context, start RunStart, req evalRequest, allow nameSet) Outcome {
 	r := newRun(e.fx, start.ID, runConfig{reach: e.reach, allow: allow})
 	if req.lang == "js" {
-		return r.executeJS(ctx, start.Source, req.data)
+		return r.executeJS(ctx, start.Source, req.data, start.Seed)
 	}
 	env, end := r.begin(ctx, start.Seed)
 	defer end()

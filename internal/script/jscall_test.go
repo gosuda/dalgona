@@ -16,6 +16,11 @@ func jsEval(t *testing.T, j *journal) *script.Eval {
 	return script.NewEval(j, script.EvalOptions{Mode: config.ToolModeEvalOnly, Tools: threadTools})
 }
 
+func quoteArgs(text string) string {
+	quoted, _ := jsontext.AppendQuote(nil, text)
+	return string(quoted)
+}
+
 func TestJSCellReturnsLastExpressionAndPrints(t *testing.T) {
 	j := newJournal(echoTool)
 	eval := jsEval(t, j)
@@ -89,5 +94,54 @@ func TestJSCellUndefinedResultIsNull(t *testing.T) {
 	got := runEval(t.Context(), t, eval, "call-1", `{"lang":"js","code":"const x = 1;"}`)
 	if got.Status != "completed" || string(got.Value) != "null" {
 		t.Fatalf("reply = %+v error = %+v", got, got.Error)
+	}
+}
+
+func TestJSCellUnserializableResultIsNull(t *testing.T) {
+	eval := jsEval(t, newJournal(echoTool))
+	for _, code := range []string{"1n", "const x = {}; x.self = x; x"} {
+		got := runEval(t.Context(), t, eval, "call-1", `{"lang":"js","code":`+quoteArgs(code)+`}`)
+		if got.Status != "completed" || string(got.Value) != "null" {
+			t.Fatalf("code %q: reply = %+v error = %+v", code, got, got.Error)
+		}
+	}
+}
+
+func TestJSCellDataKeepsProtoKeys(t *testing.T) {
+	eval := jsEval(t, newJournal(echoTool))
+	got := runEval(t.Context(), t, eval, "call-1", `{"lang":"js","code":"Object.hasOwn(data, '__proto__') && data.__proto__.role","data":{"__proto__":{"role":"admin"}}}`)
+	if got.Status != "completed" || string(got.Value) != `"admin"` {
+		t.Fatalf("reply = %+v error = %+v", got, got.Error)
+	}
+}
+
+func TestJSCellTimeAndRandomReplayIdentically(t *testing.T) {
+	j := newJournal(echoTool)
+	eval := jsEval(t, j)
+	args := `{"lang":"js","code":"tools.read({path: 't' + Date.now() + 'r' + Math.random()})"}`
+	got := runEval(t.Context(), t, eval, "call-1", args)
+	if got.Status != "completed" {
+		t.Fatalf("reply = %+v error = %+v", got, got.Error)
+	}
+	got = runEval(t.Context(), t, eval, "call-1", args)
+	if got.Status != "completed" {
+		t.Fatalf("replay = %+v error = %+v; journaled time and seeded random must replay", got, got.Error)
+	}
+}
+
+func TestJSCellSpawnDecodesRunnerAndModel(t *testing.T) {
+	j := newJournal(echoTool)
+	eval := jsEval(t, j)
+	got := runEval(t.Context(), t, eval, "call-1", `{"lang":"js","code":"ctx.spawn('task', {runner:'remote', model:'chosen'})"}`)
+	if got.Status != "completed" || len(j.spawns) != 1 || j.spawns[0] != (script.SpawnOpts{Runner: "remote", Model: "chosen"}) {
+		t.Fatalf("reply = %+v spawns = %+v", got, j.spawns)
+	}
+}
+
+func TestJSCellBareToolCallArgIsAHostErrorNotAPanic(t *testing.T) {
+	eval := jsEval(t, newJournal(echoTool))
+	got := runEval(t.Context(), t, eval, "call-1", `{"lang":"js","code":"__toolCall()"}`)
+	if got.Status != "failed" {
+		t.Fatalf("reply = %+v; an arg-less host call must fail, not crash", got)
 	}
 }

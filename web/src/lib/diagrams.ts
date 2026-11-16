@@ -1,22 +1,42 @@
 import DOMPurify from "dompurify";
 
-export const DIAGRAM_LANGS: Set<string> = new Set([
-	"mermaid",
-	"d2",
-	"nomnoml",
-	"svg",
-]);
+const diagramLangs: Set<string> = new Set(["mermaid", "d2", "nomnoml", "svg"]);
 
 export function isDiagramLang(lang: string): boolean {
-	return DIAGRAM_LANGS.has(lang);
+	return diagramLangs.has(lang);
 }
+
+const forbidElements = new Set([
+	"style",
+	"image",
+	"feimage",
+	"iframe",
+	"object",
+	"embed",
+	"audio",
+	"video",
+	"link",
+	"base",
+	"meta",
+	"form",
+	"input",
+]);
 
 const sanitizeConfig = {
 	USE_PROFILES: { svg: true, svgFilters: true, html: true },
+	FORBID_ATTR: ["style"],
 };
 
-export function sanitizeSvg(svg: string): string {
-	return DOMPurify.sanitize(svg, sanitizeConfig);
+function sanitizeSvg(svg: string): string {
+	const clean = DOMPurify.sanitize(svg, sanitizeConfig);
+	const doc = new DOMParser().parseFromString(clean, "image/svg+xml");
+	if (doc.querySelector("parsererror")) return clean;
+	for (const node of doc.querySelectorAll("*")) {
+		if (forbidElements.has(node.nodeName.toLowerCase())) {
+			node.remove();
+		}
+	}
+	return new XMLSerializer().serializeToString(doc.documentElement);
 }
 
 async function renderMermaid(source: string): Promise<string> {

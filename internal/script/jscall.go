@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync/atomic"
 	"time"
 
 	"go.starlark.net/starlark"
@@ -14,22 +15,29 @@ import (
 )
 
 const (
-	jsStackLimit = 1 << 20
+	jsStackSlots = 5000
 	jsMemLimit   = 256 << 20
 )
 
+var jsEvalBudget = 30 * time.Second
+
 const jsPreamble = `
-const data = %s;
+if (__stopping()) { throw new Error("cancelled"); }
+const data = JSON.parse(%s);
 const __j = (v) => JSON.stringify(v === undefined ? null : v);
 const tools = new Proxy({}, { get: (_t, n) => (a) => JSON.parse(__toolCall(String(n), __j(a === undefined ? {} : a))) });
+const __Date = Date;
+Date = class extends __Date { constructor(...a) { super(...(a.length ? a : [Math.round(__ctxNow() * 1000)])); } };
+Date.now = () => Math.round(__ctxNow() * 1000);
+Math.random = (() => { let s = %d; return () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; })();
 const ctx = {
   tools: tools,
   log: (m) => { __ctxLog(String(m)); },
   sleep: (s) => { __ctxSleep(Number(s)); },
-  spawn: (p, o) => __ctxSpawn(String(p), __j(o || {})),
+  spawn: (p, o) => __ctxSpawn(String(p), __j(o === undefined ? {} : o)),
   wait: (ids) => JSON.parse(__ctxWait(__j(ids))),
-  judge: (s, q, m) => JSON.parse(__ctxJudge(__j(s), __j(q), String(m || ""))),
-  judgeBatch: (ss, q, m) => JSON.parse(__ctxJudgeBatch(__j(ss), __j(q), String(m || ""))),
+  judge: (s, q, m) => JSON.parse(__ctxJudge(__j(s), __j(q), String(m === undefined ? "" : m))),
+  judgeBatch: (ss, q, m) => JSON.parse(__ctxJudgeBatch(__j(ss), __j(q), String(m === undefined ? "" : m))),
   tryCall: (fn, a) => {
     try { return { ok: true, value: fn(a), error: null }; }
     catch (e) {
@@ -40,10 +48,10 @@ const ctx = {
 };
 const console = { log: (...a) => __print(a.map(String).join(" ")) };
 const __r = eval(%s);
-__j(__r)
+(() => { try { return __j(__r) } catch (e) { return "null" } })()
 `
 
-func (r *run) executeJS(parent context.Context, src, data jsontext.Value) Outcome {
+func (r *run) executeJS(parent context.Context, src, data jsontext.Value, seed int64) Outcome {
 	ctx, cancel := context.WithCancelCause(parent)
 	r.cancel = cancel
 	defer func() {
@@ -55,22 +63,28 @@ func (r *run) executeJS(parent context.Context, src, data jsontext.Value) Outcom
 		return stopped(StatusFailed, codeError, "js cell: "+err.Error(), stageRun)
 	}
 	defer vm.Close()
-	vm.SetMaxStackSize(jsStackLimit)
+	vm.SetMaxStackSize(jsStackSlots)
 	vm.SetMemoryLimit(jsMemLimit)
+	var budgetHit atomic.Bool
+	timer := time.AfterFunc(jsEvalBudget, func() {
+		budgetHit.Store(true)
+		vm.Interrupt()
+	})
+	defer timer.Stop()
 	stop := context.AfterFunc(ctx, vm.Interrupt)
 	defer stop()
 	if bindErr := r.bindJS(vm, ctx); bindErr != nil {
 		return stopped(StatusFailed, codeError, "js cell: "+bindErr.Error(), stageRun)
 	}
 	if _, compileErr := vm.Compile(string(src), 0); compileErr != nil {
-		return r.finishJS(parent, nil, &parseError{err: compileErr})
+		return r.finishJS(parent, nil, &parseError{err: compileErr}, false)
 	}
-	dataLit := []byte("null")
+	dataLit := "null"
 	if len(data) != 0 && data.Kind() != jsontext.KindNull {
-		dataLit = data
+		dataLit = string(data)
 	}
-	out, err := vm.Eval(fmt.Sprintf(jsPreamble, dataLit, quoteJS(string(src))), quickjs.EvalGlobal)
-	return r.finishJS(parent, jsResult(out), err)
+	out, err := vm.Eval(fmt.Sprintf(jsPreamble, quoteJS(dataLit), seed&0x7FFFFFFF, quoteJS(string(src))), quickjs.EvalGlobal)
+	return r.finishJS(parent, jsResult(out), err, budgetHit.Load())
 }
 
 func jsResult(out any) jsontext.Value {
@@ -85,8 +99,11 @@ func quoteJS(src string) string {
 	return string(quoted)
 }
 
-func (r *run) finishJS(parent context.Context, value jsontext.Value, err error) Outcome {
+func (r *run) finishJS(parent context.Context, value jsontext.Value, err error, budget bool) Outcome {
 	r.inflight.Wait()
+	if budget && err != nil && r.fatalStop() == nil && parent.Err() == nil {
+		return Outcome{Status: StatusLimitExceeded, Error: Failure{Code: codeLimit, Message: "js cell exceeded the eval time budget", Stage: stageRun}, Prints: r.prints}
+	}
 	if err != nil || r.fatalStop() != nil {
 		return Outcome{Status: r.status(parent, err), Error: r.failure(parent, err), Prints: r.prints}
 	}
@@ -105,6 +122,7 @@ func (r *run) bindJS(vm *quickjs.VM, ctx context.Context) error {
 			return nil, nil
 		},
 		"__ctxSleep":      func(args []any) (any, error) { return nil, r.jsSleep(ctx, args) },
+		"__ctxNow":        func(args []any) (any, error) { return r.now(ctx), nil },
 		"__ctxSpawn":      func(args []any) (any, error) { return r.jsSpawn(ctx, args) },
 		"__ctxWait":       func(args []any) (any, error) { return r.jsWait(ctx, args) },
 		"__ctxJudge":      func(args []any) (any, error) { return r.jsJudge(ctx, args) },
@@ -132,6 +150,14 @@ func jsArg(args []any, i int, fallback string) jsontext.Value {
 	return jsontext.Value(text)
 }
 
+func jsStr(args []any, i int) string {
+	if i >= len(args) {
+		return ""
+	}
+	text, _ := args[i].(string)
+	return text
+}
+
 func jsAction(payload jsontext.Value) string {
 	var fields struct {
 		Action string `json:"action"`
@@ -143,6 +169,9 @@ func jsAction(payload jsontext.Value) string {
 }
 
 func (r *run) jsToolCall(ctx context.Context, args []any) (any, error) {
+	if len(args) == 0 {
+		return nil, errors.New("tool call needs a name")
+	}
 	name, _ := args[0].(string)
 	payload := jsArg(args, 1, "{}")
 	slot, effect, err := r.prepareToolCall(name, jsAction(payload), payload)
@@ -165,11 +194,15 @@ func (r *run) jsSleep(ctx context.Context, args []any) error {
 }
 
 func (r *run) jsSpawn(ctx context.Context, args []any) (any, error) {
-	prompt, _ := args[0].(string)
-	var opts SpawnOpts
-	if err := json.Unmarshal(jsArg(args, 1, "{}"), &opts); err != nil {
+	prompt := jsStr(args, 0)
+	var raw struct {
+		Runner string `json:"runner"`
+		Model  string `json:"model"`
+	}
+	if err := json.Unmarshal(jsArg(args, 1, "{}"), &raw); err != nil {
 		return nil, fmt.Errorf("ctx.spawn: %w", err)
 	}
+	opts := SpawnOpts{Runner: raw.Runner, Model: raw.Model}
 	payload := stringFieldsJSON("prompt", prompt, "runner", opts.Runner, "model", opts.Model)
 	slot, err := r.submit(OpSpawn, payload)
 	if err != nil {
@@ -249,7 +282,7 @@ func (r *run) jsJudge(ctx context.Context, args []any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ctx.judge: state: %w", err)
 	}
-	model, _ := args[2].(string)
+	model := jsStr(args, 2)
 	out, err := r.jsJudgeOne(ctx, state, set, model)
 	if err != nil {
 		return nil, fmt.Errorf("ctx.judge: %w", err)
@@ -274,7 +307,7 @@ func (r *run) jsJudgeBatch(ctx context.Context, args []any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ctx.judge_batch: %w", err)
 	}
-	model, _ := args[2].(string)
+	model := jsStr(args, 2)
 	out := []byte{'['}
 	for i, item := range items {
 		if i > 0 {
