@@ -6,6 +6,7 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -630,8 +631,14 @@ func durationText(ms *int64) string {
 	return formatElapsed(time.Duration(*ms) * time.Millisecond)
 }
 
+var anchorLine = regexp.MustCompile(`^\[[^\s\]]+[#@][^\s\]]+\]$`)
+
+func tailoredLines(lines []string) []string {
+	return slices.DeleteFunc(slices.Clone(lines), anchorLine.MatchString)
+}
+
 func itemBody(item rpc.Item) []string {
-	return append(textLines(item.Text), textLines(item.Output)...)
+	return append(textLines(item.Text), tailoredLines(textLines(item.Output))...)
 }
 
 func commandRow(item rpc.Item, level string) row {

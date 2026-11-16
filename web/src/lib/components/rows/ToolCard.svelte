@@ -5,7 +5,12 @@ import { formatDuration } from "#lib/format.ts";
 import { stateKey } from "#lib/labels.ts";
 import { itemDisplayStatus } from "#lib/reducer.ts";
 import type { JsonValue } from "#lib/types.ts";
-import { fullPresentation, lastLines, lineSummary } from "#lib/verbosity.ts";
+import {
+	fullPresentation,
+	lastLines,
+	lineSummary,
+	tailoredOutput,
+} from "#lib/verbosity.ts";
 
 let {
 	item,
@@ -48,8 +53,9 @@ function argumentsText(value: JsonValue): string {
 				</details>
 			{/if}
 			{#if item.output}
-				{@const shown = presentation.mode === "tail" ? lastLines(item.output, presentation.tailLines) : null}
-				<pre class="output">{shown ? shown.text : item.output}</pre>
+				{@const body = tailoredOutput(item.output)}
+				{@const shown = presentation.mode === "tail" ? lastLines(body, presentation.tailLines) : null}
+				<pre class="output">{shown ? shown.text : body}</pre>
 				{#if shown && shown.total > presentation.tailLines}
 					<p class="cut">Showing the last {presentation.tailLines} of {shown.total} lines. <button type="button" onclick={onOpen}>Show all</button></p>
 				{/if}
