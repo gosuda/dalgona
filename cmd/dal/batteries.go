@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/gosuda/dalgona/internal/app"
-	"github.com/gosuda/dalgona/internal/scripthost"
+	"github.com/gosuda/dalgona/internal/dal/scripthost"
 )
 
 func evalBatteries(_ context.Context, base app.Base) (app.Batteries, error) {

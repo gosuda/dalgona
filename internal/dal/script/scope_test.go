@@ -15,7 +15,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/script"
+	"github.com/gosuda/dalgona/internal/dal/script"
 )
 
 type concurrencyProbe struct {

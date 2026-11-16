@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/script"
+	"github.com/gosuda/dalgona/internal/dal/script"
 )
 
 func TestTryCallFailureWithDeniedPrefixReplaysCompleted(t *testing.T) {

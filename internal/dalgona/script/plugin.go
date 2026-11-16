@@ -12,8 +12,8 @@ import (
 
 	"go.starlark.net/starlark"
 
+	corescript "github.com/gosuda/dalgona/internal/dal/script"
 	"github.com/gosuda/dalgona/internal/dal/tool"
-	corescript "github.com/gosuda/dalgona/internal/script"
 )
 
 const (

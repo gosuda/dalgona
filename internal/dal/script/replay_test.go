@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/script"
+	"github.com/gosuda/dalgona/internal/dal/script"
 )
 
 const replayWorkflow = `

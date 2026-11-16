@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/script/stdlib"
+	"github.com/gosuda/dalgona/internal/dal/script/stdlib"
 	"go.starlark.net/starlark"
 )
 

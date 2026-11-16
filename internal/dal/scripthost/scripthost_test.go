@@ -27,8 +27,8 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/decide"
 	"github.com/gosuda/dalgona/internal/dal/journal"
-	"github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/scripthost"
+	"github.com/gosuda/dalgona/internal/dal/script"
+	"github.com/gosuda/dalgona/internal/dal/scripthost"
 )
 
 const productDefaultDecisionsModel = "typesafe/jev-1.14"

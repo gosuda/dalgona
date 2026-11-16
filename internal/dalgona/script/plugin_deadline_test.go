@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/config"
+	corescript "github.com/gosuda/dalgona/internal/dal/script"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/dalgona/script"
-	corescript "github.com/gosuda/dalgona/internal/script"
 )
 
 const (

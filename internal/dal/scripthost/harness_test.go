@@ -24,10 +24,10 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/model/openai"
 	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/scripthost"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/dal/tool/exec"
 	"github.com/gosuda/dalgona/internal/dal/tool/read"
-	"github.com/gosuda/dalgona/internal/scripthost"
 )
 
 func TestMain(m *testing.M) {

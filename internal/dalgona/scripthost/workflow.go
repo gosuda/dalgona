@@ -6,8 +6,8 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
-	corescript "github.com/gosuda/dalgona/internal/script"
-	corescripthost "github.com/gosuda/dalgona/internal/scripthost"
+	corescript "github.com/gosuda/dalgona/internal/dal/script"
+	corescripthost "github.com/gosuda/dalgona/internal/dal/scripthost"
 
 	"github.com/gosuda/dalgona/internal/dalgona/script"
 )

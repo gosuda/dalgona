@@ -12,10 +12,10 @@ import (
 
 	"github.com/gosuda/dalgona/internal/app/battery"
 	"github.com/gosuda/dalgona/internal/dal/agent"
+	corescript "github.com/gosuda/dalgona/internal/dal/script"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
 	"github.com/gosuda/dalgona/internal/rpc"
-	corescript "github.com/gosuda/dalgona/internal/script"
 )
 
 const (

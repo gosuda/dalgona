@@ -18,13 +18,13 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	corescripthost "github.com/gosuda/dalgona/internal/dal/scripthost"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
 	"github.com/gosuda/dalgona/internal/discovery"
 	"github.com/gosuda/dalgona/internal/mcp"
 	"github.com/gosuda/dalgona/internal/remote"
-	corescripthost "github.com/gosuda/dalgona/internal/scripthost"
 )
 
 var mcpStartTimeout = 30 * time.Second

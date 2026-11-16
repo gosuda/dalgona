@@ -15,7 +15,7 @@ import (
 	"go.starlark.net/starlark"
 	"go.starlark.net/syntax"
 
-	"github.com/gosuda/dalgona/internal/script/stdlib"
+	"github.com/gosuda/dalgona/internal/dal/script/stdlib"
 )
 
 const (

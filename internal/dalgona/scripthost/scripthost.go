@@ -9,9 +9,9 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/model"
+	corescript "github.com/gosuda/dalgona/internal/dal/script"
+	corescripthost "github.com/gosuda/dalgona/internal/dal/scripthost"
 	"github.com/gosuda/dalgona/internal/dal/tool"
-	corescript "github.com/gosuda/dalgona/internal/script"
-	corescripthost "github.com/gosuda/dalgona/internal/scripthost"
 
 	"github.com/gosuda/dalgona/internal/dalgona/script"
 )

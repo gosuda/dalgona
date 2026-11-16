@@ -26,10 +26,10 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/script"
+	"github.com/gosuda/dalgona/internal/dal/scripthost"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
-	"github.com/gosuda/dalgona/internal/script"
-	"github.com/gosuda/dalgona/internal/scripthost"
 )
 
 type keyRecorder struct {

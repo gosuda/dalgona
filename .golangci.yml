@@ -140,7 +140,7 @@ linters:
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/daemon"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/script"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/script"
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/sandboxsvc"
               desc: core must not import interfaces or batteries
@@ -189,7 +189,7 @@ linters:
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/dal/keywords"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/script"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/script"
               desc: clients reach the core only through internal/rpc
         dal:
           files:
@@ -199,8 +199,8 @@ linters:
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/daemon"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/script$"
-              desc: dal imports the script engine only through internal/scripthost
+            - pkg: "github.com/gosuda/dalgona/internal/dal/script$"
+              desc: dal imports the script engine only through internal/dal/scripthost
             - pkg: "github.com/gosuda/dalgona/internal/sandboxsvc"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/mcp"

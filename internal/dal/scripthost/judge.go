@@ -8,7 +8,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/decide"
 	"github.com/gosuda/dalgona/internal/dal/model"
-	"github.com/gosuda/dalgona/internal/script"
+	"github.com/gosuda/dalgona/internal/dal/script"
 )
 
 func (fx effects) Judge(ctx context.Context, _ script.Slot, req script.JudgeRequest) (jsontext.Value, error) {

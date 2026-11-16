@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/script"
+	"github.com/gosuda/dalgona/internal/dal/script"
 )
 
 func jsEval(t *testing.T, j *journal) *script.Eval {

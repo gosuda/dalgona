@@ -15,7 +15,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
-	"github.com/gosuda/dalgona/internal/script"
+	"github.com/gosuda/dalgona/internal/dal/script"
 )
 
 const recoveredInterrupted = "interrupted"

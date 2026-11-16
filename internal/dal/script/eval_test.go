@@ -12,11 +12,11 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/script"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	readtool "github.com/gosuda/dalgona/internal/dal/tool/read"
 	rewritetool "github.com/gosuda/dalgona/internal/dal/tool/rewrite"
 	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
-	"github.com/gosuda/dalgona/internal/script"
 )
 
 func specs(names ...string) []tool.Spec {

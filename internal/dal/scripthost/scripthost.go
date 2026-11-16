@@ -7,8 +7,8 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/decide"
+	"github.com/gosuda/dalgona/internal/dal/script"
 	"github.com/gosuda/dalgona/internal/dal/tool"
-	"github.com/gosuda/dalgona/internal/script"
 )
 
 type JudgeFactory func(ctx context.Context, model, threadModel string) (decide.Client, error)

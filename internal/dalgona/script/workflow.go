@@ -5,7 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"fmt"
 
-	corescript "github.com/gosuda/dalgona/internal/script"
+	corescript "github.com/gosuda/dalgona/internal/dal/script"
 )
 
 type Workflow struct {
