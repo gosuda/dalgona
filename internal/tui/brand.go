@@ -25,7 +25,7 @@ func detectImageProto(getenv func(string) string) string {
 		strings.Contains(term, "ghostty") || getenv("WEZTERM_PANE") != "" {
 		return "kitty"
 	}
-	if getenv("TERM_PROGRAM") == "iTerm.app" || strings.HasPrefix(getenv("TERM_PROGRAM"), "vscode") {
+	if getenv("TERM_PROGRAM") == "iTerm.app" {
 		return "iterm"
 	}
 	return ""
@@ -95,7 +95,7 @@ func kittySeq(data []byte, cols, rows int) string {
 			if len(enc) > 0 {
 				more = 1
 			}
-			fmt.Fprintf(&sb, "\x1b_Ga=T,f=100,t=d,q=2,c=%d,r=%d,m=%d;%s\x1b\\", cols, rows, more, chunk)
+			fmt.Fprintf(&sb, "\x1b_Ga=T,f=100,t=d,q=2,C=1,c=%d,r=%d,m=%d;%s\x1b\\", cols, rows, more, chunk)
 		} else {
 			more := 0
 			if len(enc) > 0 {

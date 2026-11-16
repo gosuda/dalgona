@@ -386,7 +386,7 @@ func (m *model) welcomeLines() []string {
 	details := slices.DeleteFunc([]string{m.conn.version, cmp.Or(m.thread.modelName, "default"), displayCwd(m.workDir())}, func(s string) bool { return s == "" })
 	name := lipgloss.NewStyle().Bold(true).Render(m.conn.product)
 	lines := []string{name + dim.Render(" "+sanitizeText(strings.Join(details, " · "))), dim.Render("Type a prompt · / commands · ? keys")}
-	if seq := logoSeq(m.conn.product, m.screen.imgProto, m.screen.theme); seq != "" {
+	if seq := logoSeq(m.conn.product, m.screen.imgProto, m.screen.dockTheme()); seq != "" {
 		return append([]string{seq}, lines...)
 	}
 	return lines

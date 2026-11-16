@@ -20,7 +20,7 @@ func TestDetectImageProto(t *testing.T) {
 		{map[string]string{"TERM": "xterm-ghostty"}, "kitty"},
 		{map[string]string{"WEZTERM_PANE": "0"}, "kitty"},
 		{map[string]string{"TERM_PROGRAM": "iTerm.app"}, "iterm"},
-		{map[string]string{"TERM_PROGRAM": "vscode"}, "iterm"},
+		{map[string]string{"TERM_PROGRAM": "vscode"}, ""},
 		{map[string]string{"TERM": "xterm-256color"}, ""},
 	}
 	for _, c := range cases {
@@ -44,7 +44,7 @@ func TestLogoSeqKittyChunks(t *testing.T) {
 		t.Fatalf("logo row must carry the image mark: %q", seq[:8])
 	}
 	body := seq[len(imgRowMark):]
-	if !strings.HasPrefix(body, "\x1b_Ga=T,f=100,t=d,q=2,c=10,r=8,m=1;") {
+	if !strings.HasPrefix(body, "\x1b_Ga=T,f=100,t=d,q=2,C=1,c=10,r=8,m=1;") {
 		t.Fatalf("kitty head chunk: %q", body[:64])
 	}
 	if strings.Count(body, "\x1b_G") < 2 {
