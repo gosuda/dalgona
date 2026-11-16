@@ -3,7 +3,10 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,8 +25,11 @@ import (
 	"github.com/gosuda/dalgona/internal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/config"
 	"github.com/gosuda/dalgona/internal/model"
+	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/script"
 	"github.com/gosuda/dalgona/internal/scripthost"
 	"github.com/gosuda/dalgona/internal/tool"
+	"github.com/gosuda/dalgona/internal/tool/snapshot"
 )
 
 type keyRecorder struct {
@@ -386,16 +392,172 @@ func TestDefaultToolModeShowsOnlyTheEvalFirstList(t *testing.T) {
 		}
 		ext := scripthost.New(scripthost.Config{Mode: cfg.ToolMode})(nil)
 		tools := ext.Tools(builtin)
-		specs := make([]tool.Spec, 0, len(tools))
-		for _, item := range tools {
-			specs = append(specs, item.Spec())
-		}
 		var names []string
-		for _, spec := range ext.Visible(specs) {
+		for _, spec := range ext.Visible(toolSpecs(tools)) {
 			names = append(names, spec.Name)
 		}
 		if want := []string{"read", "search", "patch", "exec", "eval"}; !slices.Equal(names, want) {
 			t.Fatalf("%s visible tools = %v, want %v", product, names, want)
 		}
+		runProductCell(t, string(product), cfg.ToolMode, tools)
 	}
+}
+
+type productCellCase struct {
+	name   string
+	mode   config.ToolMode
+	uses   []string
+	set    bool
+	status string
+}
+
+func toolSpecs(tools []tool.Tool) []tool.Spec {
+	specs := make([]tool.Spec, 0, len(tools))
+	for _, item := range tools {
+		specs = append(specs, item.Spec())
+	}
+	return specs
+}
+
+func runProductCell(t *testing.T, product string, mode config.ToolMode, tools []tool.Tool) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fixture.txt"), []byte("product cell bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	local, err := runner.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	env := tool.Env{Runner: local, Cwd: dir, Snapshots: snapshot.New()}
+	for _, c := range []productCellCase{
+		{product + " eval-first", mode, nil, false, "completed"},
+		{product + " normal", config.ToolModeNormal, nil, false, "completed"},
+		{product + " empty uses", mode, []string{}, true, "denied"},
+	} {
+		runProductCellCase(t, c, tools, env)
+	}
+	specs := toolSpecs(tools)
+	withoutEval := make([]tool.Spec, 0, len(specs))
+	for _, spec := range specs {
+		if spec.Name != script.EvalName {
+			withoutEval = append(withoutEval, spec)
+		}
+	}
+	if slices.Contains(specNames(script.ModelTools(mode, withoutEval)), script.EvalName) {
+		t.Fatalf("%s offers eval after it was dropped from the tool list", product)
+	}
+	if err := script.CheckDirect(mode, "web_fetch"); err == nil {
+		t.Fatalf("%s allows a direct folded call when no cell tool exists", product)
+	}
+}
+
+func runProductCellCase(t *testing.T, c productCellCase, tools []tool.Tool, env tool.Env) {
+	t.Helper()
+	env.Home = t.TempDir()
+	j := &cellJournal{tools: tools, env: env}
+	eval := script.NewEval(j, script.EvalOptions{Mode: c.mode, Tools: toolSpecs(tools), Config: config.EvalConfig{Uses: c.uses, Set: c.set}})
+	got := runCell(t, eval, `{"code":"tools.read(path = 'fixture.txt')"}`)
+	if got.Status != c.status {
+		t.Fatalf("%s cell status = %s, want %s, error = %+v", c.name, got.Status, c.status, got.Error)
+	}
+	if c.status == "completed" {
+		requireCompletedRead(t, c.name, got, j)
+		return
+	}
+	if j.calls != 0 {
+		t.Fatalf("%s denied cell still performed %d reads", c.name, j.calls)
+	}
+}
+
+func requireCompletedRead(t *testing.T, name string, got cellReply, j *cellJournal) {
+	t.Helper()
+	if !strings.Contains(decodeString(t, got.Value), "1:product cell bytes\n") || j.calls != 1 {
+		t.Fatalf("%s cell value = %s, calls = %d", name, got.Value, j.calls)
+	}
+}
+
+type cellReply struct {
+	Status string         `json:"status"`
+	Value  jsontext.Value `json:"value"`
+	Error  *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func specNames(list []tool.Spec) []string {
+	out := make([]string, len(list))
+	for i, spec := range list {
+		out[i] = spec.Name
+	}
+	return out
+}
+
+func runCell(t *testing.T, eval *script.Eval, args string) cellReply {
+	t.Helper()
+	result, err := eval.Run(t.Context(), tool.Call{ID: "cell-1", Name: script.EvalName, Args: jsontext.Value(args)}, tool.Env{})
+	if err != nil {
+		t.Fatalf("cell run: %v", err)
+	}
+	var reply cellReply
+	if err := json.Unmarshal(result.Output, &reply); err != nil {
+		t.Fatalf("decode cell reply %s: %v", result.Output, err)
+	}
+	return reply
+}
+
+type cellJournal struct {
+	tools []tool.Tool
+	env   tool.Env
+	calls int
+}
+
+func (c *cellJournal) Started(start script.RunStart) (script.RunStart, *script.Outcome, error) {
+	return start, nil, nil
+}
+
+func (c *cellJournal) Lookup(string, int) (script.Recorded, bool) { return script.Recorded{}, false }
+
+func (c *cellJournal) Record(script.Slot, jsontext.Value) error { return nil }
+
+func (c *cellJournal) Completed(string, script.Outcome) error { return nil }
+
+func (c *cellJournal) CallTool(ctx context.Context, _ script.Slot, name string, args jsontext.Value) (jsontext.Value, error) {
+	for _, item := range c.tools {
+		if item.Spec().Name != name {
+			continue
+		}
+		c.calls++
+		result, err := item.Run(ctx, tool.Call{ID: "cell-tool", Name: name, Args: args}, c.env)
+		if err != nil {
+			return nil, err
+		}
+		return jsontext.AppendQuote(nil, string(result.Output))
+	}
+	return nil, fmt.Errorf("cell journal: tool %s is not registered", name)
+}
+
+func (c *cellJournal) Spawn(context.Context, script.Slot, string, script.SpawnOpts) (string, error) {
+	return "", errors.New("cell journal: spawn is unused")
+}
+
+func (c *cellJournal) Wait(context.Context, []string) ([]string, error) {
+	return nil, errors.New("cell journal: wait is unused")
+}
+
+func (c *cellJournal) Judge(context.Context, script.Slot, script.JudgeRequest) (jsontext.Value, error) {
+	return nil, errors.New("cell journal: judge is unused")
+}
+
+func (c *cellJournal) Log(string, string) {}
+
+func decodeString(t *testing.T, v jsontext.Value) string {
+	t.Helper()
+	var s string
+	if err := json.Unmarshal([]byte(v), &s); err != nil {
+		t.Fatalf("reply value is not a JSON string: %v", err)
+	}
+	return s
 }
