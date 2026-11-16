@@ -262,6 +262,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 }
 
 var environmentDefaults = [...]string{
+	"AI_AGENT=dalgona",
 	"CI=1",
 	"DEBIAN_FRONTEND=noninteractive",
 	"GIT_TERMINAL_PROMPT=0",

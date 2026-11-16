@@ -99,6 +99,7 @@ The shim MUST keep draining both pipes. The command MUST keep running until it e
 
 The command environment MUST be the caller environment plus these defaults. Each default MUST apply only when that variable is unset:
 
+- `AI_AGENT=dalgona`
 - `CI=1`
 - `DEBIAN_FRONTEND=noninteractive`
 - `GIT_TERMINAL_PROMPT=0`

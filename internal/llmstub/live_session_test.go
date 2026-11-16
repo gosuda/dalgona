@@ -46,6 +46,16 @@ func liveTurnsWithoutRow(script Script, named []string, tables string) []string 
 	return orphans
 }
 
+func liveSessionDrift(script Script, tables string) (missing, orphans []string) {
+	named := liveNamedTurnIDs(tables)
+	for _, id := range named {
+		if !slices.ContainsFunc(script.Turns, func(turn Turn) bool { return turn.ID == id }) {
+			missing = append(missing, id)
+		}
+	}
+	return missing, liveTurnsWithoutRow(script, named, tables)
+}
+
 func TestLiveSessionTurnsExist(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(liveSpecPath)
@@ -54,17 +64,29 @@ func TestLiveSessionTurnsExist(t *testing.T) {
 	}
 	spec := string(raw)
 	tables := liveSpecSection(t, spec, "Terminal session") + liveSpecSection(t, spec, "Browser session")
-	named := liveNamedTurnIDs(tables)
-	if len(named) == 0 {
+	if len(liveNamedTurnIDs(tables)) == 0 {
 		t.Fatalf("the session tables name no scripted turn")
 	}
-	script := loadLiveScript(t)
-	for _, id := range named {
-		if !slices.ContainsFunc(script.Turns, func(turn Turn) bool { return turn.ID == id }) {
-			t.Errorf("turn %s is named in %s but is not in %s", id, liveSpecPath, liveScript)
-		}
+	missing, orphans := liveSessionDrift(loadLiveScript(t), tables)
+	for _, id := range missing {
+		t.Errorf("turn %s is named in %s but is not in %s", id, liveSpecPath, liveScript)
 	}
-	for _, id := range liveTurnsWithoutRow(script, named, tables) {
+	for _, id := range orphans {
 		t.Errorf("turn %s in %s is driven by no session row in %s", id, liveScript, liveSpecPath)
+	}
+}
+
+func TestLiveSessionDriftNamesMissingAndUnrowedTurns(t *testing.T) {
+	t.Parallel()
+	script := mustParse(t, `{`+modelsJSON+`,"turns":[`+
+		`{"id":"t-ok","when":{"user":"ok prompt"},"steps":[{"finish":"stop"}]},`+
+		`{"id":"t-orphan","when":{"user":"orphan prompt"},"steps":[{"finish":"stop"}]}]}`)
+	missing, orphans := liveSessionDrift(script, "|T01|row|`ok prompt` (t-ok), then t-gone|")
+	if !slices.Equal(missing, []string{"t-gone"}) || !slices.Equal(orphans, []string{"t-orphan"}) {
+		t.Fatalf("missing = %v, orphans = %v, want [t-gone] and [t-orphan]", missing, orphans)
+	}
+	missing, orphans = liveSessionDrift(script, "|T01|row|`ok prompt` (t-ok), then `orphan prompt`|")
+	if len(missing) != 0 || len(orphans) != 0 {
+		t.Fatalf("a consistent table gave missing = %v, orphans = %v", missing, orphans)
 	}
 }

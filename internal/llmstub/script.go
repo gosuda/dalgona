@@ -50,6 +50,7 @@ type Turn struct {
 
 type When struct {
 	User       string `json:"user,omitzero"`
+	UserExact  string `json:"user_exact,omitzero"`
 	ToolResult string `json:"tool_result,omitzero"`
 	AnyText    string `json:"any_text,omitzero"`
 }
@@ -210,7 +211,7 @@ func stepError(turn, step int, reason string) error {
 }
 
 func validateWhen(when When) error {
-	values := []string{when.User, when.ToolResult, when.AnyText}
+	values := []string{when.User, when.UserExact, when.ToolResult, when.AnyText}
 	count := 0
 	value := ""
 	for _, candidate := range values {
@@ -220,7 +221,7 @@ func validateWhen(when When) error {
 		}
 	}
 	if count != 1 {
-		return errors.New("when needs exactly one of user, tool_result, any_text")
+		return errors.New("when needs exactly one of user, user_exact, tool_result, any_text")
 	}
 	if len(value) > maxWhen {
 		return errors.New("when value must be 1 to 200 bytes")

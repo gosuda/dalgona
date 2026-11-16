@@ -17,6 +17,20 @@
  ],
  "turns": [
   {
+   "id": "t-hello",
+   "when": {
+    "user_exact": "hello"
+   },
+   "steps": [
+    {
+     "text": "Hello."
+    },
+    {
+     "finish": "stop"
+    }
+   ]
+  },
+  {
    "id": "t-judge",
    "when": {
     "any_text": "\"off_task\""

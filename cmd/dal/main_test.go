@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ type fakeOpenAI struct {
 	server  *httptest.Server
 	mu      sync.Mutex
 	replies []string
+	bodies  []string
 	served  int
 }
 
@@ -39,10 +41,12 @@ func newFakeOpenAI(t *testing.T, replies ...string) *fakeOpenAI {
 	f := &fakeOpenAI{replies: replies}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /responses", func(w http.ResponseWriter, r *http.Request) {
-		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		f.record(string(body))
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, f.next())
 	})
@@ -52,6 +56,22 @@ func newFakeOpenAI(t *testing.T, replies ...string) *fakeOpenAI {
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(f.server.Close)
 	return f
+}
+
+func (f *fakeOpenAI) record(body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bodies = append(f.bodies, body)
+}
+
+func (f *fakeOpenAI) requests() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.bodies)
+}
+
+func (f *fakeOpenAI) sawBody(text string) bool {
+	return slices.ContainsFunc(f.requests(), func(body string) bool { return strings.Contains(body, text) })
 }
 
 func (f *fakeOpenAI) next() string {
@@ -109,9 +129,11 @@ func (e *dalEnv) command(ctx context.Context, args ...string) (*exec.Cmd, *bytes
 }
 
 type statusLine struct {
-	Thread     string `json:"thread"`
-	Status     string `json:"status"`
-	StopReason string `json:"stop_reason"`
+	SchemaVersion int    `json:"schemaVersion"`
+	Type          string `json:"type"`
+	Thread        string `json:"thread"`
+	Status        string `json:"status"`
+	StopReason    string `json:"stop_reason"`
 }
 
 func (e *dalEnv) runJSON(args ...string) statusLine {
@@ -133,9 +155,7 @@ func (e *dalEnv) runJSON(args ...string) statusLine {
 func TestPrintModeEndToEnd(t *testing.T) {
 	e := newDalEnv(t, sseText("hello there"))
 	line := e.runJSON("-p", "say hi", "--json", "-m", "openai/gpt-test", "--approval", "yolo", "-C", e.cwd)
-	if line.Thread == "" || line.Status != "completed" || line.StopReason != "stop" {
-		t.Fatalf("status line %+v", line)
-	}
+	requireCompletedResult(t, line)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	cmd, stdout, stderr := e.command(ctx, "-p", "again", "--resume", line.Thread, "-C", e.cwd)
@@ -152,6 +172,104 @@ func TestPrintModeEndToEnd(t *testing.T) {
 	latest := e.runJSON("-c", "-p", "", "--json", "-C", e.cwd)
 	if latest.Thread != second.Thread || latest.Status != "completed" {
 		t.Fatalf("-c status %+v, want newest thread %s completed", latest, second.Thread)
+	}
+}
+
+func requireCompletedResult(t *testing.T, line statusLine) {
+	t.Helper()
+	if line.Thread == "" || line.Status != "completed" || line.StopReason != "stop" || line.Type != "result" || line.SchemaVersion != 1 {
+		t.Fatalf("status line %+v", line)
+	}
+}
+
+func showCommand() string {
+	if runtime.GOOS == "windows" {
+		return "type secret.txt & type plain.txt"
+	}
+	return "cat secret.txt plain.txt"
+}
+
+type jsonlRecord struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	Type          string `json:"type"`
+	Status        string `json:"status"`
+	Item          struct {
+		Type   string `json:"type"`
+		Output string `json:"aggregatedOutput"`
+	} `json:"item"`
+}
+
+func TestHeadlessJSONLNeverShowsRawSecrets(t *testing.T) {
+	const secret, plain = "swordfish-7391-alpha", "visible-plain-4402"
+	e := newDalEnv(t, sseExec("call-show", showCommand()))
+	for name, content := range map[string]string{"secret.txt": secret, "plain.txt": plain} {
+		if err := os.WriteFile(filepath.Join(e.cwd, name), []byte(content+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines := runHeadlessJSONL(t, e, secret)
+	outputs := collectCommandOutputs(t, lines)
+	var last jsonlRecord
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &last); err != nil || last.Type != "result" || last.Status != "completed" {
+		t.Fatalf("last line %q: %+v, %v", lines[len(lines)-1], last, err)
+	}
+	if len(outputs) != 1 || !strings.Contains(outputs[0], "{{secret:TEST_API_KEY}}") || !strings.Contains(outputs[0], plain) {
+		t.Fatalf("command outputs %q, want one holding the placeholder and the plain value", outputs)
+	}
+}
+
+func runHeadlessJSONL(t *testing.T, e *dalEnv, secret string) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	cmd, stdout, stderr := e.command(ctx, "-p", "show the files", "--json", "-m", "openai/gpt-test", "--approval", "yolo", "-C", e.cwd)
+	cmd.Env = append(cmd.Env, "TEST_API_KEY="+secret)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("dal: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
+		t.Fatalf("raw secret in the output\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+	return strings.Split(strings.TrimSpace(stdout.String()), "\n")
+}
+
+func collectCommandOutputs(t *testing.T, lines []string) []string {
+	t.Helper()
+	var outputs []string
+	for i, text := range lines {
+		var record jsonlRecord
+		if err := json.Unmarshal([]byte(text), &record); err != nil || record.SchemaVersion != 1 {
+			t.Fatalf("line %d %q: schema version %d, error %v", i, text, record.SchemaVersion, err)
+		}
+		if record.Item.Type == "commandExecution" {
+			outputs = append(outputs, record.Item.Output)
+		}
+	}
+	return outputs
+}
+
+func TestPipedStdinReachesTheModel(t *testing.T) {
+	args := func(e *dalEnv) []string {
+		return []string{"-p", "review", "-m", "openai/gpt-test", "--approval", "yolo", "-C", e.cwd}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	piped := newDalEnv(t, sseText("one"))
+	cmd, _, stderr := piped.command(ctx, args(piped)...)
+	cmd.Stdin = strings.NewReader("STDIN-MARK\n")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("piped run: %v\n%s", err, stderr)
+	}
+	if !piped.api.sawBody(`STDIN-MARK\n\nreview`) {
+		t.Fatalf("no model request holds the stdin text before the prompt: %q", piped.api.requests())
+	}
+	bare := newDalEnv(t, sseText("two"))
+	cmd, _, stderr = bare.command(ctx, args(bare)...)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run without stdin: %v\n%s", err, stderr)
+	}
+	if !bare.api.sawBody("review") || bare.api.sawBody("STDIN-MARK") {
+		t.Fatalf("model requests without stdin: %q", bare.api.requests())
 	}
 }
 

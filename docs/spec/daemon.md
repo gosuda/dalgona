@@ -60,9 +60,28 @@ Service commands MUST be injectable in tests. Installation errors MUST be return
 
 ## Commands
 
-`dalgona` without a command, `-p`, `--resume`, `-c`, and `models` MUST reach the core only through a daemon connection from `Ensure`. The client MUST accept `-m <model>`, `--approval auto|ask|yolo`, `--sandbox workspace-write|off`, and `-C <directory>`. With `-p`, `--json` MUST print one JSON status line. `--resume` and `-c` MUST exclude each other.
+`dalgona` without a command, `-p`, `--resume`, `-c`, and `models` MUST reach the core only through a daemon connection from `Ensure`.
+The client MUST accept `-m <model>`, `--approval auto|ask|yolo`, `--sandbox workspace-write|off`, and `-C <directory>`.
+`--resume` and `-c` MUST exclude each other.
 
-The status line MUST be one JSON object with the keys `thread`, `status`, and `stop_reason`.
+With `-p --json`, stdout MUST contain one JSONL line for each completed item of the selected thread.
+The client MUST copy the masked `item` value without removing extension members.
+Each item line MUST contain `schemaVersion:1`, `type:"item"`, `thread`, `turn`, and `item`.
+The client MUST write item lines immediately, in notification order.
+The final result line MUST contain `schemaVersion:1`, `type:"result"`, `thread`, `status`, and `stop_reason`.
+Stderr MUST contain diagnostics only.
+A write failure MUST stop output and further prompt submission.
+
+Headless runs MUST read non-terminal stdin before any daemon request.
+The client MUST wait for EOF without a deadline.
+Use `</dev/null` or `ssh -n` when stdin is not prompt input.
+Input above 1048576 bytes MUST fail before any request.
+The client MUST replace invalid UTF-8 with U+FFFD.
+The client MUST remove trailing newlines from stdin.
+With both inputs present, the client MUST join stdin and the prompt with two newlines.
+With an empty prompt, stdin alone MUST supply the prompt.
+Empty stdin MUST leave the prompt unchanged.
+Without either input, `-p` MUST require `--resume` or `-c`.
 
 `dalgona login [provider]` and `dalgona logout <provider>` MUST use `<home>/auth.json`. Without a remote selection, these commands MUST use the client credential store and MUST NOT require a daemon connection. With `--remote <name>`, login for an API-key login target MUST store the key inside the box through the daemon protocol. With `--remote <name>`, login for `chatgpt` MUST use the device-code flow inside the box. With `--remote <name>`, login for `antigravity`, `cursor`, or `devin` MUST fail before it dials the box, with this text:
 

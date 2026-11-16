@@ -9,11 +9,13 @@ The loader MUST reject unknown keys. The error MUST report the file and its 1-ba
 If a layer cannot be read or fails validation, `Load` MUST return an error.
 
 ## Shell environment
-## MCP HTTP authentication
 
 `shell_env` defaults to `snapshot` in both products.
 `inherit` disables login-shell capture and uses the current daemon environment.
-Other values MUST fail with `config: shell_env must be one of snapshot, inherit`.
+Other values MUST fail with `<file>:<line>: shell_env must be one of snapshot, inherit`.
+
+## MCP HTTP authentication
+
 Each `[mcp_servers.<name>]` table MAY set these dalgona-only keys.
 
 | Key | Default | Meaning |
@@ -31,6 +33,7 @@ OAuth server names MUST contain 1 to 32 lowercase letters, digits, underscores, 
 OAuth URLs MUST use HTTPS, except on loopback hosts.
 The callback port MUST be between 1024 and 65535.
 Validation errors MUST include the file, line, server table, and invalid key.
+
 ## Core defaults
 
 The default approval mode is `auto`. The default sandbox is `workspace-write`. The default tool mode is `eval-first` for both products. `tool_mode = "normal"` restores the full tool list. `tool_mode = "eval-only"` limits model-visible tools to `ask`, `yield`, and `eval`. The default runner is `local`. The default reasoning level is `default`.
@@ -82,6 +85,7 @@ The interactive settings MUST use the keys in the table below.
 | `icons` | `auto`, `unicode`, `nerd` | `auto` | `icons` |
 | `status_hide` | `effort`, `approval`, `sandbox`, `folder`, `queue`, `cost`, `context`, `mark` | `[]` | `statusHide` |
 | `notifications` | `true`, `false` | `true` | `notifications` |
+| `edit_review.enabled` | `true`, `false` | `false` | `editReview` |
 
 The `auto` theme MUST follow the system and use `night` or `day`. The `auto-soft` theme MUST follow the system and use `soft-night` or `soft-day`. The `status_hide` key MUST NOT name `model`.
 

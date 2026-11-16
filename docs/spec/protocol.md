@@ -254,10 +254,29 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
 
 `dal` and `dalgona` share one command line (`internal/app` `RunCLI`):
 
-- `-p <prompt>` runs one turn and exits. Without `--json` it prints the agent messages of the turn. With `--json` it prints `{"thread":"<id>","status":"completed|interrupted|failed","stop_reason":"..."}`. `stop_reason` is `stop` for a completed turn, the turn error for a failed turn, and `interrupted` for an interrupted turn. The exit code is 0 only for a completed turn.
-- `--resume <id>` and `-c` (latest thread) select a thread. With `-p ""`, the command waits for a recovered turn and does not start a new turn.
+- `-p <prompt>` runs one turn and exits.
+  Without `--json`, it prints the agent messages of the turn.
+  With `--json`, it writes completed items and a final result as JSONL to stdout.
+  Each line carries `schemaVersion:1`, `type`, and `thread`.
+  Item lines also carry `turn` and the original masked `item` object.
+  Result lines also carry `status` and `stop_reason`.
+  `stop_reason` is `stop` for a completed turn.
+  It is the turn error for a failed turn.
+  It is `interrupted` for an interrupted turn.
+  The exit code is 0 only for a completed turn.
+  An output failure stops further output and submission.
+- Headless runs read non-terminal stdin to EOF before submission.
+  Stdin has no read deadline and accepts at most 1048576 bytes.
+  Use `</dev/null` or `ssh -n` to avoid unintended stdin input.
+  The client replaces invalid UTF-8 with U+FFFD and removes trailing newlines.
+  Nonempty stdin precedes a nonempty prompt with two newlines between them.
+  Empty stdin leaves the prompt unchanged.
+  Stdin alone supplies an empty prompt.
+- `--resume <id>` and `-c` select a thread.
+  With no prompt or stdin, headless mode waits for recovery without starting another turn.
+  Without either selector, `-p` requires a prompt or piped input.
 - `-m`, `--approval auto|ask|yolo`, `--sandbox workspace-write|off` apply to a new thread. `-C <dir>` changes the working directory first.
-- In `-p` mode the client declines every approval request. It answers each question with an error. The server declines a question only when no other attached window can answer it. The model then receives `declined: no client could answer this question`.
+- In `-p` mode the client declines every approval request and refuses every question, so the model receives `declined: no client could answer this question`.
 - `login [provider] [--device-auth]`, `logout <provider>`, and `models` complete without the TUI. `login` without a provider lists the providers.
 
 `app.TUIOptions.OnStatus` MUST receive `app.Status` values that `cmd/internal/tuiwire` converts from `tui.Status`. `internal/app` MUST NOT import `internal/tui`, so command entry points set `CLIEnv.TUI`.
