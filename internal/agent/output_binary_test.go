@@ -1,16 +1,32 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/config"
 )
 
+func spillCommand(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", filepath.Dir(exe)+string(os.PathListSeparator)+os.Getenv("PATH"))
+		return filepath.Base(exe) + " __spill"
+	}
+	return `head -c 1100000 /dev/zero | LC_ALL=C tr '\\0' '\\200'`
+}
+
 func TestBinarySpillPagesAlwaysAdvance(t *testing.T) {
 	const size = 1100000
 	h := newHarness(t, withApproval(config.ApprovalYolo))
 	h.model.push(
-		calls(call{id: "call-1", name: "exec", args: `{"command":"head -c 1100000 /dev/zero | LC_ALL=C tr '\\0' '\\200'"}`}),
+		calls(call{id: "call-1", name: "exec", args: `{"command":"` + spillCommand(t) + `"}`}),
 		text("done"),
 	)
 	thread := h.start()

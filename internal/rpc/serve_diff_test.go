@@ -147,7 +147,7 @@ func applyUnifiedWithGit(t *testing.T, diff, pre string) string {
 	if err := os.WriteFile(patch, []byte(diff), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("git", "apply", "--whitespace=nowarn", patch)
+	cmd := exec.Command("git", "-c", "core.autocrlf=false", "apply", "--whitespace=nowarn", patch)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git apply the emitted diff: %v: %s", err, out)
