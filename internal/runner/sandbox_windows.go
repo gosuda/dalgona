@@ -46,9 +46,6 @@ func configureSandbox(cmd *exec.Cmd, _ string, sandbox Sandbox) error {
 	if sandbox.Mode == SandboxOff || sandbox.Mode == "" {
 		return nil
 	}
-	if UnavailableCause() != "" {
-		return nil
-	}
 	if len(sandbox.DeniedSockets) != 0 {
 		return fmt.Errorf("runner: Windows network confinement is unavailable")
 	}
