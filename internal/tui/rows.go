@@ -631,7 +631,7 @@ func durationText(ms *int64) string {
 	return formatElapsed(time.Duration(*ms) * time.Millisecond)
 }
 
-var anchorLine = regexp.MustCompile(`^\[[^\s\]]+[#@][^\s\]]+\]$`)
+var anchorLine = regexp.MustCompile(`^\[.*\S(?:#[0-9A-F]{4}(?:[0-9A-F]{4})?|@r[0-9a-f]{32}\.[0-9a-z]+)\]$`)
 
 func tailoredLines(lines []string) []string {
 	return slices.DeleteFunc(slices.Clone(lines), anchorLine.MatchString)
