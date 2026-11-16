@@ -20,12 +20,12 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/dal/runner"
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
-	"github.com/gosuda/dalgona/internal/sandboxsvc/cloudflare"
-	"github.com/gosuda/dalgona/internal/sandboxsvc/docker"
-	"github.com/gosuda/dalgona/internal/sandboxsvc/modal"
-	"github.com/gosuda/dalgona/internal/sandboxsvc/sandbox0"
-	"github.com/gosuda/dalgona/internal/sandboxsvc/sprites"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/cloudflare"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/docker"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/modal"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/sandbox0"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/sprites"
 )
 
 const (

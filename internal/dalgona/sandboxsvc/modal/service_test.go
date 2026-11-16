@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/runner"
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 	sdk "github.com/modal-labs/modal-client/go"
 )
 

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 )
 
 func TestLiveVolumeSurvivesSandboxReplacement(t *testing.T) {

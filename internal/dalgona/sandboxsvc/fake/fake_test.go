@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 )
 
 func TestCountersAndConnect(t *testing.T) {

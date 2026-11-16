@@ -142,11 +142,11 @@ linters:
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/dal/script"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/sandboxsvc"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/mcp"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/mcp"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/discovery"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/discovery"
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/webui"
               desc: core must not import interfaces or batteries
@@ -201,11 +201,11 @@ linters:
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/dal/script$"
               desc: dal imports the script engine only through internal/dal/scripthost
-            - pkg: "github.com/gosuda/dalgona/internal/sandboxsvc"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/mcp"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/mcp"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/discovery"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/discovery"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/webui"
               desc: dal must stay free of dalgona batteries

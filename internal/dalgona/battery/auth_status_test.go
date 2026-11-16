@@ -18,7 +18,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dalgona/battery"
-	"github.com/gosuda/dalgona/internal/mcp"
+	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 )
 
 func newTokenMCPServer(t *testing.T, wantToken string) (*httptest.Server, *atomic.Int32) {

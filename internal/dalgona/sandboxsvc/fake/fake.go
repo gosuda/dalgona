@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 )
 
 type Handler func(net.Conn)

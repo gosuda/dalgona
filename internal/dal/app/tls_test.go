@@ -24,7 +24,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/model/chatgpt"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
-	"github.com/gosuda/dalgona/internal/mcp"
+	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 )
 
 const unknownAuthorityText = "x509: certificate signed by unknown authority"

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/discovery"
+	"github.com/gosuda/dalgona/internal/dalgona/discovery"
 )
 
 func TestDiscoverDisabledByDefaultAndRejectsUnknownSource(t *testing.T) {

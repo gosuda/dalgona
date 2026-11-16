@@ -12,7 +12,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/dalgona/battery"
-	"github.com/gosuda/dalgona/internal/discovery"
+	"github.com/gosuda/dalgona/internal/dalgona/discovery"
 )
 
 func trustEnv(t *testing.T, configBody string) (dalHome, userHome string) {

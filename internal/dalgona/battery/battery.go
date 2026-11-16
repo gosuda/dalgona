@@ -20,10 +20,10 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	corescripthost "github.com/gosuda/dalgona/internal/dal/scripthost"
 	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dalgona/discovery"
+	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
-	"github.com/gosuda/dalgona/internal/discovery"
-	"github.com/gosuda/dalgona/internal/mcp"
 	"github.com/gosuda/dalgona/internal/remote"
 )
 

@@ -3,7 +3,7 @@ package mcp_test
 import (
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/mcp"
+	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 )
 
 func TestNewValidatesConfig(t *testing.T) {

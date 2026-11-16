@@ -19,7 +19,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
-	"github.com/gosuda/dalgona/internal/mcp"
+	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 )
 
 var emailIDToken = "e30." + base64.RawURLEncoding.EncodeToString([]byte(`{"email":"user@example.test"}`)) + ".sig"

@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 )
 
 type Box struct {

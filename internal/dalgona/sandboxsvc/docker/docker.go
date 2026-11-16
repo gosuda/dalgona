@@ -15,7 +15,7 @@ import (
 	"github.com/moby/moby/client"
 
 	"github.com/gosuda/dalgona/internal/dal/runner"
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 )
 
 type Service struct {

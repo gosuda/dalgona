@@ -13,7 +13,7 @@ import (
 	sdk "github.com/modal-labs/modal-client/go"
 
 	"github.com/gosuda/dalgona/internal/dal/runner"
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 )
 
 func isModalGone(err error) bool {

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/runner"
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 	sdk "github.com/sandbox0-ai/sdk-go"
 )
 

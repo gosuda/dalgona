@@ -24,7 +24,7 @@ func buildMCPServer(t *testing.T) string {
 		name += ".exe"
 	}
 	binary := filepath.Join(t.TempDir(), name)
-	output, err := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "../../mcp/testdata/server").CombinedOutput()
+	output, err := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "../mcp/testdata/server").CombinedOutput()
 	if err != nil {
 		t.Fatalf("build MCP fixture: %v\n%s", err, output)
 	}

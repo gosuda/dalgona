@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/sandboxsvc/fake"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/fake"
 )
 
 func TestRecordedBox_destroysBoxWhenRemoteRecordFails(t *testing.T) {

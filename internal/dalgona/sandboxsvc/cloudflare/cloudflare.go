@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/coder/websocket"
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 )
 
 type Service struct {

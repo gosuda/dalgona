@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/gosuda/dalgona/internal/mcp"
+	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 )
 
 func TestStdioCloseKillsJobGrandchild(t *testing.T) {

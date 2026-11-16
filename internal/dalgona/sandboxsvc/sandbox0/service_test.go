@@ -11,7 +11,7 @@ import (
 
 	sdk "github.com/sandbox0-ai/sdk-go"
 
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 )
 
 type workspaceServer struct {

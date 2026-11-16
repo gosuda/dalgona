@@ -18,8 +18,8 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/dal/runner"
-	"github.com/gosuda/dalgona/internal/sandboxsvc"
-	"github.com/gosuda/dalgona/internal/sandboxsvc/fake"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/fake"
 )
 
 type fakeBox struct {
