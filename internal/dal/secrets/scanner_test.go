@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/secrets"
+	"github.com/gosuda/dalgona/internal/dal/secrets"
 )
 
 func pemBlock(body string) string {

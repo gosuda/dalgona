@@ -12,8 +12,8 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/agent/rules"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/shellargs"
 	"github.com/gosuda/dalgona/internal/dal/tool"
-	"github.com/gosuda/dalgona/internal/shellargs"
 )
 
 const (

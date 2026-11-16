@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/shellargs"
+	"github.com/gosuda/dalgona/internal/dal/shellargs"
 )
 
 const (

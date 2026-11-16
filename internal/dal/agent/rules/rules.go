@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/shellargs"
+	"github.com/gosuda/dalgona/internal/dal/shellargs"
 )
 
 type invocation struct {

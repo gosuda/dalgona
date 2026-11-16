@@ -129,10 +129,10 @@ linters:
             - "**/internal/dal/textdiff/**"
             - "**/internal/dal/keywords/**"
             - "**/internal/dal/syntax/**"
-            - "**/internal/shellargs/**"
-            - "**/internal/secrets/**"
+            - "**/internal/dal/shellargs/**"
+            - "**/internal/dal/secrets/**"
           deny:
-            - pkg: "github.com/gosuda/dalgona/internal/acp"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/acp"
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/dal/rpc"
               desc: core must not import interfaces or batteries
@@ -156,7 +156,7 @@ linters:
               desc: core must not import interfaces or batteries
             - pkg: "github.com/gosuda/dalgona/internal/dalgona/ratchet"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/doctor"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/doctor"
               desc: core must not import interfaces or batteries
         presentation:
           files:
@@ -169,7 +169,7 @@ linters:
             - "**/internal/dal/tui/**"
             - "**/internal/dalgona/webui/**"
             - "**/internal/dalgona/herdr/**"
-            - "**/internal/acp/**"
+            - "**/internal/dalgona/acp/**"
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/dal/journal"
               desc: clients reach the core only through internal/rpc
@@ -195,7 +195,7 @@ linters:
           files:
             - "**/cmd/dal/**"
           deny:
-            - pkg: "github.com/gosuda/dalgona/internal/dalgona/daemon"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/acp"
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/dal/script$"
               desc: dal imports the script engine only through internal/dal/scripthost
@@ -213,7 +213,7 @@ linters:
               desc: dal must stay free of dalgona batteries
             - pkg: "github.com/gosuda/dalgona/internal/dalgona/ratchet"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/doctor"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/doctor"
               desc: dal must stay free of dalgona batteries
   exclusions:
     presets:

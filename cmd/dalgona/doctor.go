@@ -8,7 +8,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dalgona/daemon"
-	"github.com/gosuda/dalgona/internal/doctor"
+	"github.com/gosuda/dalgona/internal/dalgona/doctor"
 )
 
 func runDoctor(ctx context.Context, args []string, std stdio) int {

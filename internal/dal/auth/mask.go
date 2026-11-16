@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/secrets"
+	"github.com/gosuda/dalgona/internal/dal/secrets"
 )
 
 type pattern struct {

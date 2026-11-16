@@ -12,7 +12,7 @@ import (
 
 	json "encoding/json/v2"
 
-	"github.com/gosuda/dalgona/internal/secrets"
+	"github.com/gosuda/dalgona/internal/dal/secrets"
 )
 
 const (

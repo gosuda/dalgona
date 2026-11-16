@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/shellargs"
+	"github.com/gosuda/dalgona/internal/dal/shellargs"
 )
 
 const guardMaxDepth = 8
