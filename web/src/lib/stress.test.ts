@@ -502,55 +502,65 @@ describe("request store bounds", () => {
 
 describe("stale connection deliveries", () => {
 	test("notifications after a drop are ignored", async () => {
+		vi.useFakeTimers();
 		const made = await connectedWithThread();
 		const { session, ports } = made;
-		const port = ports[0];
-		const itemsBefore = session.transcript.items.length;
-		port?.drop();
-		expect(session.connection).toBe("disconnected");
-		const revisionAfterDrop = session.transcriptRevision;
-		const noticesAfterDrop = session.notices;
-		deliver(port as StressPort, [
-			agentDelta("late", "turn-1", "item-user"),
-			{
-				type: "threadStatus",
-				threadId: "t1",
-				seq: 1,
-				status: "active",
-				activeFlags: [],
-			},
-			{
-				type: "tokenUsage",
-				threadId: "t1",
-				turnId: "turn-1",
-				usage: {
-					last: {
-						totalTokens: 1,
-						inputTokens: 1,
-						cachedInputTokens: 0,
-						cacheWriteInputTokens: 0,
-						outputTokens: 0,
-						reasoningOutputTokens: 0,
-					},
-					total: {
-						totalTokens: 1,
-						inputTokens: 1,
-						cachedInputTokens: 0,
-						cacheWriteInputTokens: 0,
-						outputTokens: 0,
-						reasoningOutputTokens: 0,
-					},
-					contextWindow: 100,
-					estimatedContextTokens: 1,
+		try {
+			const port = ports[0];
+			const itemsBefore = session.transcript.items.length;
+			port?.drop();
+			expect(session.connection).toBe("disconnected");
+			const revisionAfterDrop = session.transcriptRevision;
+			const noticesAfterDrop = session.notices;
+			deliver(port as StressPort, [
+				agentDelta("late", "turn-1", "item-user"),
+				{
+					type: "threadStatus",
+					threadId: "t1",
+					seq: 1,
+					status: "active",
+					activeFlags: [],
 				},
-			},
-		]);
-		port?.error("late error");
-		expect(port?.notifications).toBe(3);
-		expect(session.transcript.items.length).toBe(itemsBefore);
-		expect(session.transcriptRevision).toBe(revisionAfterDrop);
-		expect(session.notices).toBe(noticesAfterDrop);
+				{
+					type: "tokenUsage",
+					threadId: "t1",
+					turnId: "turn-1",
+					usage: {
+						last: {
+							totalTokens: 1,
+							inputTokens: 1,
+							cachedInputTokens: 0,
+							cacheWriteInputTokens: 0,
+							outputTokens: 0,
+							reasoningOutputTokens: 0,
+						},
+						total: {
+							totalTokens: 1,
+							inputTokens: 1,
+							cachedInputTokens: 0,
+							cacheWriteInputTokens: 0,
+							outputTokens: 0,
+							reasoningOutputTokens: 0,
+						},
+						contextWindow: 100,
+						estimatedContextTokens: 1,
+					},
+				},
+			]);
+			port?.error("late error");
+			expect(port?.notifications).toBe(3);
+			expect(session.transcript.items.length).toBe(itemsBefore);
+			expect(session.transcriptRevision).toBe(revisionAfterDrop);
+			expect(session.notices).toBe(noticesAfterDrop);
+			expect(session.notices.at(-1)?.text).toBe(
+				`Reconnecting to dalgona (attempt 1 of 3).`,
+			);
+		} finally {
+			session.stop();
+		}
+		await vi.advanceTimersByTimeAsync(1000);
 		await settle();
+		expect(ports.length).toBe(1);
 	});
 
 	test("notifications after stop are ignored", async () => {
