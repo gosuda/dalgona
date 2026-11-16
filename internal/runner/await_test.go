@@ -19,6 +19,23 @@ func (r *aliveRunner) Read(_ context.Context, _ string, _ int64) (Output, error)
 	return Output{Alive: true}, nil
 }
 
+type exitedRunner struct {
+	Runner
+}
+
+func (r *exitedRunner) Read(context.Context, string, int64) (Output, error) {
+	return Output{Exit: &Exit{Code: 0}}, nil
+}
+
+func TestAwaitExitReturnsNilWhenExitArrivesFirst(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	err := AwaitExit(ctx, &exitedRunner{}, "p1", time.Minute)
+	if err != nil {
+		t.Fatalf("AwaitExit error = %v, want nil", err)
+	}
+}
+
 func TestAwaitExitEndsWithTheCallerContext(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())
 	defer cancel(nil)

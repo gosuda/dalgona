@@ -137,7 +137,7 @@ func TestLocal_environmentDefaults(t *testing.T) {
 		}
 	}
 	want := map[string]string{
-		"CI": "custom", "DEBIAN_FRONTEND": "noninteractive", "GIT_TERMINAL_PROMPT": "0",
+		"AI_AGENT": "dalgona", "CI": "custom", "DEBIAN_FRONTEND": "noninteractive", "GIT_TERMINAL_PROMPT": "0",
 		"GIT_EDITOR": ":", "GIT_SEQUENCE_EDITOR": ":", "GIT_MERGE_AUTOEDIT": "no",
 		"GIT_PAGER": "cat", "PAGER": "less", "EDITOR": ":", "npm_config_yes": "true", "PIP_NO_INPUT": "1",
 	}
@@ -145,6 +145,17 @@ func TestLocal_environmentDefaults(t *testing.T) {
 		if values[key] != value {
 			t.Errorf("%s = %q, want %q", key, values[key], value)
 		}
+	}
+}
+
+func TestLocal_environmentDefaultsKeepCallerAgent(t *testing.T) {
+	dir := t.TempDir()
+	local := newTestLocal(t, filepath.Join(dir, "runs"))
+	env := []string{"PATH=" + os.Getenv("PATH"), "AI_AGENT=custom"}
+	startTestProcess(t, local, ProcessSpec{ID: "env-own", Argv: []string{"sh", "-c", `printf '%s\n' "$AI_AGENT"`}, Dir: dir, Env: env, Sandbox: Sandbox{Mode: SandboxOff}})
+	state := waitForExit(t, local, "env-own")
+	if got := strings.TrimSpace(string(state.Data)); got != "custom" {
+		t.Fatalf("AI_AGENT = %q, want custom", got)
 	}
 }
 
