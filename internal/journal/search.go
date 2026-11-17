@@ -145,7 +145,10 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) ([]SearchHit, error) 
 	if m == nil {
 		return nil, errors.New("journal: search needs an open mirror")
 	}
-	rows, err := queryIndexRows(m, strings.Fields(q.Text))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := queryIndexRows(ctx, m, strings.Fields(q.Text))
 	if err != nil {
 		return nil, fmt.Errorf("journal: search: %w", err)
 	}
@@ -153,6 +156,10 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) ([]SearchHit, error) 
 	if err != nil {
 		return nil, err
 	}
+	return keepPersistent(ctx, m, rankedHits(best), searchLimit(q.Limit))
+}
+
+func rankedHits(best map[string]SearchHit) []SearchHit {
 	hits := make([]SearchHit, 0, len(best))
 	for _, hit := range best {
 		hits = append(hits, hit)
@@ -163,11 +170,14 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) ([]SearchHit, error) 
 		}
 		return strings.Compare(a.Session, b.Session)
 	})
-	limit := searchSessionCap
-	if q.Limit > 0 && q.Limit < limit {
-		limit = q.Limit
+	return hits
+}
+
+func searchLimit(limit int) int {
+	if limit > 0 && limit < searchSessionCap {
+		return limit
 	}
-	return keepPersistent(ctx, m, hits, limit)
+	return searchSessionCap
 }
 
 func keepPersistent(ctx context.Context, m *mirrorDB, ranked []SearchHit, limit int) ([]SearchHit, error) {
@@ -177,12 +187,8 @@ func keepPersistent(ctx context.Context, m *mirrorDB, ranked []SearchHit, limit 
 			if len(kept) == limit {
 				break
 			}
-			ephemeral, err := sessionEphemeral(ctx, db, hit.Session)
-			if err != nil {
+			if err := keepHit(ctx, db, hit, &kept); err != nil {
 				return err
-			}
-			if !ephemeral {
-				kept = append(kept, hit)
 			}
 		}
 		return nil
@@ -193,7 +199,22 @@ func keepPersistent(ctx context.Context, m *mirrorDB, ranked []SearchHit, limit 
 	return kept, nil
 }
 
-func sessionEphemeral(_ context.Context, db *pebble.DB, session string) (bool, error) {
+func keepHit(ctx context.Context, db *pebble.DB, hit SearchHit, kept *[]SearchHit) error {
+	ephemeral, err := sessionEphemeral(ctx, db, hit.Session)
+	if err != nil {
+		return err
+	}
+	if !ephemeral {
+		*kept = append(*kept, hit)
+	}
+	return nil
+}
+
+func sessionEphemeral(ctx context.Context, db *pebble.DB, session string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
 	value, closer, err := db.Get(keyEvent(session, 1))
 	if errors.Is(err, pebble.ErrNotFound) {
 		return false, nil
