@@ -27,6 +27,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 	"github.com/gosuda/dalgona/internal/dalgona/postbox"
 	"github.com/gosuda/dalgona/internal/dalgona/remote"
+	"github.com/gosuda/dalgona/internal/dalgona/report"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
 )
@@ -37,11 +38,13 @@ type Daemon struct {
 	Remote            remote.Options
 	Scripts           batteryscripthost.Config
 	WorkspaceApprover WorkspaceApprover
+	ReporterOpener    func(ctx context.Context, home string) (*report.Reporter, error)
 	binder            *remote.Binder
 	daltoki           *daltoki.Service
 	postboxSvc        atomic.Pointer[postbox.Service]
 	postboxCancel     context.CancelFunc
 	postboxMu         sync.Mutex
+	reporter          *report.Reporter
 }
 type TrustDecision int
 
@@ -74,6 +77,7 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 	projects.trusted = loadTrusted(base.Config.Home, logger)
 	d.Remote = remote.Options{Config: base.Config, Auth: base.Auth, Journal: base.Journal, Local: base.Local, Logger: logger}
 	d.binder = remote.NewBinder(d.Remote)
+	d.openReporter(ctx, base.Config.Home, logger)
 	d.Scripts = batteryscripthost.Config{
 		Core:    corescripthost.Config{Judge: base.Judge, Mode: base.Config.ToolMode, Eval: base.Config.Eval, Logger: logger},
 		Plugins: plugins,
@@ -104,7 +108,7 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 				closeErr = daltokiSvc.Close(closeCtx)
 				cancel()
 			}
-			return errors.Join(closeErr, projects.close())
+			return errors.Join(closeErr, projects.close(), d.closeReporter())
 		}),
 		MCPStatus: projects.status,
 	}, nil
@@ -621,4 +625,27 @@ func connect(ctx context.Context, server discovery.MCPServer, creds mcpAuth) (*m
 		return nil, nil, errors.Join(err, client.Close())
 	}
 	return client, tools, nil
+}
+
+func (d *Daemon) openReporter(ctx context.Context, home string, logger *slog.Logger) {
+	if d.ReporterOpener == nil {
+		return
+	}
+	opened, err := d.ReporterOpener(ctx, home)
+	if err != nil {
+		logger.Error("failure reporter unavailable", "error", err)
+		return
+	}
+	d.reporter = opened
+}
+
+func (d *Daemon) closeReporter() error {
+	if d.reporter == nil {
+		return nil
+	}
+	return d.reporter.Close(context.Background())
+}
+
+func (d *Daemon) FailureReporter() *report.Reporter {
+	return d.reporter
 }
