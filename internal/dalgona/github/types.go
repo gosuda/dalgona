@@ -155,8 +155,8 @@ type EventsRequest struct {
 }
 
 type Event struct {
-	ID        string    `json:"id"`
-	Action    string    `json:"action"`
+	ID        int64     `json:"id"`
+	Action    string    `json:"event"`
 	Actor     ghActor   `json:"actor"`
 	Label     *ghLabel  `json:"label"`
 	CreatedAt time.Time `json:"created_at"`

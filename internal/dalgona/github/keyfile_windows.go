@@ -27,19 +27,11 @@ func readPrivateKeyFile(path string) ([]byte, error) {
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 
-	var attrs uint32
-	if err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&attrs)), uint32(unsafe.Sizeof(attrs))); err != nil {
-		return nil, fmt.Errorf("github: stat private key: %w", err)
-	}
-	if attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return nil, errPrivateKeyNotPrivate
-	}
-
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
 		return nil, fmt.Errorf("github: stat private key: %w", err)
 	}
-	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
 		return nil, errPrivateKeyNotPrivate
 	}
 	if err := checkPrivateKeyACL(h); err != nil {
@@ -59,37 +51,30 @@ func readPrivateKeyFile(path string) ([]byte, error) {
 }
 
 func checkPrivateKeyACL(h windows.Handle) error {
-	var sd *windows.SECURITY_DESCRIPTOR
-	if err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, &sd, nil); err != nil {
+	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if err != nil {
 		return fmt.Errorf("github: inspect private key permissions: %w", err)
 	}
 	if sd == nil {
 		return errPrivateKeyNotPrivate
 	}
-	daclPresent, daclDefaulted, err := sd.DACL()
+	acl, present, err := sd.DACL()
 	if err != nil {
 		return fmt.Errorf("github: inspect private key permissions: %w", err)
 	}
-	if !daclPresent || daclDefaulted {
-		return errPrivateKeyNotPrivate
-	}
-	acl, err := sd.ACL()
-	if err != nil {
-		return fmt.Errorf("github: inspect private key permissions: %w", err)
-	}
-	if acl == nil || acl.AceCount == 0 {
+	if !present || acl == nil || acl.AceCount == 0 {
 		return errPrivateKeyNotPrivate
 	}
 	allowed := allowedKeyACLPrincipals()
-	for i := uint32(0); i < acl.AceCount; i++ {
-		var acePtr *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(acl, i, (*unsafe.Pointer)(unsafe.Pointer(&acePtr))); err != nil {
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil {
 			return fmt.Errorf("github: inspect private key permissions: %w", err)
 		}
-		if acePtr == nil {
+		if ace == nil {
 			return errPrivateKeyNotPrivate
 		}
-		sid := (*windows.SID)(unsafe.Pointer(&acePtr.SidStart))
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if !allowed(sid) {
 			return errPrivateKeyNotPrivate
 		}
@@ -124,7 +109,7 @@ func currentUserSIDWindows() (*windows.SID, error) {
 	if err := windows.OpenProcessToken(process, windows.TOKEN_QUERY, &token); err != nil {
 		return nil, fmt.Errorf("github: identify current user: %w", err)
 	}
-	defer func() { _ = windows.CloseHandle(token) }()
+	defer func() { _ = token.Close() }()
 	var size uint32
 	if err := windows.GetTokenInformation(token, windows.TokenUser, nil, 0, &size); err != windows.ERROR_INSUFFICIENT_BUFFER {
 		return nil, fmt.Errorf("github: identify current user: %w", err)

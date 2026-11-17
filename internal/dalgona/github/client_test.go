@@ -696,7 +696,7 @@ func botSurfaceServer(t *testing.T) *httptest.Server {
 		case strings.HasSuffix(r.URL.Path, "/comments"):
 			fmt.Fprint(w, `[{"id":1,"body":"b","html_url":"u","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","user":{"login":"a","type":"User"}}]`)
 		case strings.HasSuffix(r.URL.Path, "/events"):
-			fmt.Fprint(w, `[{"id":"e1","action":"labeled","actor":{"login":"a","type":"User"},"label":{"name":"daltoki"},"created_at":"2026-01-01T00:00:00Z"}]`)
+			fmt.Fprint(w, `[{"id":301,"event":"labeled","actor":{"login":"a","type":"User"},"label":{"name":"daltoki"},"created_at":"2026-01-01T00:00:00Z"}]`)
 		case strings.HasSuffix(r.URL.Path, "/pulls") && r.Method == http.MethodGet:
 			fmt.Fprint(w, `[{"id":2,"number":4,"html_url":"u","title":"t","draft":true,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","user":{"login":"b","type":"Bot"}}]`)
 		case strings.HasSuffix(r.URL.Path, "/pulls"):

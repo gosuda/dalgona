@@ -193,6 +193,10 @@ func (c *Client) apiURL(path string) string {
 	return strings.TrimRight(c.baseURL.String(), "/") + path
 }
 
+func (c *Client) APIBase() string {
+	return c.apiURL("")
+}
+
 func (c *Client) resolveURL(nextURL, fallback string) (string, error) {
 	if nextURL == "" {
 		return fallback, nil

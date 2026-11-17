@@ -336,15 +336,19 @@ func (c *Client) ChangeLabel(ctx context.Context, request ChangeLabelRequest) (L
 	if request.Number == 0 || request.Label == "" {
 		return receipt, ResponseMeta{}, errors.New("github: invalid request")
 	}
-	payload, err := json.Marshal(labelPayload{Labels: []string{request.Label}})
-	if err != nil {
-		return receipt, ResponseMeta{}, err
-	}
 	method := http.MethodPost
-	if !request.Add {
+	path := repoPath(request.Repository) + "/issues/" + strconv.FormatInt(request.Number, 10) + "/labels"
+	var payload []byte
+	var err error
+	if request.Add {
+		if payload, err = json.Marshal(labelPayload{Labels: []string{request.Label}}); err != nil {
+			return receipt, ResponseMeta{}, err
+		}
+	} else {
 		method = http.MethodDelete
+		path += "/" + url.PathEscape(request.Label)
 	}
-	endpoint := c.apiURL(repoPath(request.Repository) + "/issues/" + strconv.FormatInt(request.Number, 10) + "/labels")
+	endpoint := c.apiURL(path)
 	result, err := c.do(ctx, requestSpec{
 		method:    method,
 		url:       endpoint,
@@ -473,22 +477,27 @@ func clampPerPage(perPage, fallback int) int {
 	return min(perPage, 100)
 }
 
-type searchItemRepository struct {
-	FullName string `json:"full_name"`
+type searchItem struct {
+	ID            int64      `json:"id"`
+	Number        int64      `json:"number"`
+	Title         string     `json:"title"`
+	Body          string     `json:"body"`
+	HTMLURL       string     `json:"html_url"`
+	PullRequest   *ghPullRef `json:"pull_request"`
+	Labels        []ghLabel  `json:"labels"`
+	User          ghActor    `json:"user"`
+	RepositoryURL string     `json:"repository_url"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
-type searchItem struct {
-	ID          int64                `json:"id"`
-	Number      int64                `json:"number"`
-	Title       string               `json:"title"`
-	Body        string               `json:"body"`
-	HTMLURL     string               `json:"html_url"`
-	PullRequest *ghPullRef           `json:"pull_request"`
-	Labels      []ghLabel            `json:"labels"`
-	User        ghActor              `json:"user"`
-	Repository  searchItemRepository `json:"repository"`
-	CreatedAt   time.Time            `json:"created_at"`
-	UpdatedAt   time.Time            `json:"updated_at"`
+func searchItemRepositoryName(rawURL string) string {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(rawURL), "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[len(parts)-2] + "/" + parts[len(parts)-1]
 }
 
 type searchResponse struct {
@@ -505,7 +514,7 @@ func toIssue(item searchItem) Issue {
 	return Issue{
 		ID:          item.ID,
 		Number:      item.Number,
-		Repository:  item.Repository.FullName,
+		Repository:  searchItemRepositoryName(item.RepositoryURL),
 		Title:       item.Title,
 		Body:        item.Body,
 		URL:         item.HTMLURL,
