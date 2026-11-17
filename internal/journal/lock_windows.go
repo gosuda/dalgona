@@ -39,6 +39,17 @@ func isLockBusy(err error) bool {
 }
 
 func lockGateBounded(path string, d time.Duration) (*os.File, error) {
+	file, err := openGateFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := waitGate(path, windows.Handle(file.Fd()), d); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	return file, nil
+}
+
+func openGateFile(path string) (*os.File, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
@@ -54,38 +65,41 @@ func lockGateBounded(path string, d time.Duration) (*os.File, error) {
 		_ = windows.CloseHandle(handle)
 		return nil, fmt.Errorf("journal: open %s: invalid handle", path)
 	}
+	return file, nil
+}
+
+func waitGate(path string, handle windows.Handle, d time.Duration) error {
 	event, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
-		return nil, errors.Join(err, file.Close())
+		return err
 	}
 	defer func() { _ = windows.CloseHandle(event) }()
 	overlapped := &windows.Overlapped{HEvent: event}
 	err = windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, overlapped)
-	switch {
-	case err == nil:
-		return file, nil
-	case !errors.Is(err, windows.ERROR_IO_PENDING):
-		return nil, errors.Join(err, file.Close())
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, windows.ERROR_IO_PENDING) {
+		return err
 	}
 	wait, werr := windows.WaitForSingleObject(event, uint32(d.Milliseconds())) //nolint:gosec // 5000 ms fits uint32
 	var done uint32
 	switch {
 	case werr != nil:
-		_ = windows.CancelIoEx(handle, overlapped)
-		_ = windows.GetOverlappedResult(handle, overlapped, &done, true)
-		return nil, errors.Join(werr, file.Close())
+		return errors.Join(werr, cancelGateWait(handle, overlapped))
 	case wait == windows.WAIT_OBJECT_0:
-		if rerr := windows.GetOverlappedResult(handle, overlapped, &done, false); rerr != nil {
-			return nil, errors.Join(rerr, file.Close())
-		}
-		return file, nil
+		return windows.GetOverlappedResult(handle, overlapped, &done, false)
 	case wait == uint32(windows.WAIT_TIMEOUT):
-		_ = windows.CancelIoEx(handle, overlapped)
-		_ = windows.GetOverlappedResult(handle, overlapped, &done, true)
-		return nil, errors.Join(errMirrorBusy, file.Close())
+		return errors.Join(errMirrorBusy, cancelGateWait(handle, overlapped))
 	default:
-		return nil, errors.Join(fmt.Errorf("journal: wait on %s: status %d", path, wait), file.Close())
+		return errors.Join(fmt.Errorf("journal: wait on %s: status %d", path, wait), cancelGateWait(handle, overlapped))
 	}
+}
+
+func cancelGateWait(handle windows.Handle, overlapped *windows.Overlapped) error {
+	_ = windows.CancelIoEx(handle, overlapped)
+	var done uint32
+	return windows.GetOverlappedResult(handle, overlapped, &done, true)
 }
 
 func releaseGate(file *os.File) error {
