@@ -54,12 +54,13 @@ func openWithSource(ctx context.Context, params OpenParams, source CredentialSou
 		return nil, err
 	}
 	return Open(ctx, Options{
-		Home:        params.Home,
-		Client:      client,
-		Credentials: source,
-		Eligibility: Eligibility{Origin: failure.OriginMain, Test: params.Test, HomeOverridden: params.HomeOverridden},
-		Now:         params.Now,
-		Notice:      notice,
+		Home:          params.Home,
+		Client:        client,
+		Credentials:   source,
+		Eligibility:   Eligibility{Origin: failure.OriginMain, Test: params.Test, HomeOverridden: params.HomeOverridden},
+		Now:           params.Now,
+		Notice:        notice,
+		ConsentMethod: params.Method,
 	})
 }
 

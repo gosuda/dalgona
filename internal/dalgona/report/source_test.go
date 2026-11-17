@@ -128,3 +128,25 @@ func TestOpenConsentedValidConsent(t *testing.T) {
 	}
 	defer func() { _ = opened.Close(context.Background()) }()
 }
+
+func TestAppSourceReloadsCredential(t *testing.T) {
+	home := t.TempDir()
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, err := NewAppSource(home, func() time.Time { return clock })
+	if err != nil {
+		t.Fatalf("NewAppSource: %v", err)
+	}
+	if _, err = s.Credential(context.Background()); err == nil {
+		t.Fatal("Credential before login: expected error")
+	}
+	if err = writeCredential(home, "token-two", clock.Add(time.Hour)); err != nil {
+		t.Fatalf("writeCredential: %v", err)
+	}
+	cred, err := s.Credential(context.Background())
+	if err != nil {
+		t.Fatalf("Credential after login: %v", err)
+	}
+	if cred.Access != "token-two" {
+		t.Fatalf("access = %q, want token-two", cred.Access)
+	}
+}

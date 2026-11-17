@@ -44,6 +44,9 @@ type Daemon struct {
 	postboxSvc        atomic.Pointer[postbox.Service]
 	postboxCancel     context.CancelFunc
 	postboxMu         sync.Mutex
+	reportMu          sync.Mutex
+	reportHome        string
+	reportLogger      *slog.Logger
 	reporter          *report.Reporter
 }
 type TrustDecision int
@@ -640,6 +643,8 @@ func (d *Daemon) openReporter(ctx context.Context, home string, logger *slog.Log
 	if d.ReporterOpener == nil {
 		return
 	}
+	d.reportHome = home
+	d.reportLogger = logger
 	opened, err := d.ReporterOpener(ctx, home)
 	if err != nil {
 		logger.Error("failure reporter unavailable", "error", err)
@@ -656,5 +661,10 @@ func (d *Daemon) closeReporter() error {
 }
 
 func (d *Daemon) FailureReporter() *report.Reporter {
+	d.reportMu.Lock()
+	defer d.reportMu.Unlock()
+	if d.reporter == nil && d.reportHome != "" && report.ConsentStored(d.reportHome) {
+		d.openReporter(context.Background(), d.reportHome, d.reportLogger)
+	}
 	return d.reporter
 }
