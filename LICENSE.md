@@ -1,6 +1,6 @@
 # License
 
-The licensor is metaphorics.
+The licensor is metaphoric-dev(metaphorics).
 
 All third party components incorporated into the software are licensed under the original license
 provided by the owner of the applicable component.
