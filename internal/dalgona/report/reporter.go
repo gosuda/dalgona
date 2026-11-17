@@ -44,13 +44,14 @@ type Eligibility struct {
 }
 
 type Options struct {
-	Home        string
-	Client      GitHub
-	Credentials CredentialSource
-	Eligibility Eligibility
-	ClientID    string
-	Now         func() time.Time
-	Notice      io.Writer
+	Home          string
+	Client        GitHub
+	Credentials   CredentialSource
+	Eligibility   Eligibility
+	ClientID      string
+	Now           func() time.Time
+	Notice        io.Writer
+	ConsentMethod string
 }
 
 type QueueEntry struct {
@@ -69,25 +70,26 @@ type Receipt struct {
 }
 
 type Reporter struct {
-	dir         string
-	client      GitHub
-	source      CredentialSource
-	eligible    Eligibility
-	now         func() time.Time
-	notice      io.Writer
-	mu          sync.Mutex
-	drainMu     sync.Mutex
-	enqueueMu   sync.Mutex
-	queue       []QueueEntry
-	state       reporterState
-	wake        chan struct{}
-	done        chan struct{}
-	drainCtx    context.Context
-	cancelDrain context.CancelFunc
-	wg          sync.WaitGroup
-	release     func() error
-	closeOnce   sync.Once
-	closeErr    error
+	dir           string
+	client        GitHub
+	source        CredentialSource
+	eligible      Eligibility
+	now           func() time.Time
+	notice        io.Writer
+	mu            sync.Mutex
+	drainMu       sync.Mutex
+	enqueueMu     sync.Mutex
+	queue         []QueueEntry
+	state         reporterState
+	wake          chan struct{}
+	done          chan struct{}
+	drainCtx      context.Context
+	cancelDrain   context.CancelFunc
+	consentMethod string
+	wg            sync.WaitGroup
+	release       func() error
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 type runCaps struct {
@@ -137,17 +139,18 @@ func Open(ctx context.Context, options Options) (*Reporter, error) {
 	}
 	runCtx, stop := context.WithCancel(context.Background())
 	r := &Reporter{
-		dir:         dir,
-		client:      options.Client,
-		source:      options.Credentials,
-		eligible:    options.Eligibility,
-		now:         now,
-		notice:      notice,
-		wake:        make(chan struct{}, 1),
-		done:        make(chan struct{}),
-		drainCtx:    runCtx,
-		cancelDrain: stop,
-		release:     release,
+		dir:           dir,
+		client:        options.Client,
+		source:        options.Credentials,
+		eligible:      options.Eligibility,
+		consentMethod: options.ConsentMethod,
+		now:           now,
+		notice:        notice,
+		wake:          make(chan struct{}, 1),
+		done:          make(chan struct{}),
+		drainCtx:      runCtx,
+		cancelDrain:   stop,
+		release:       release,
 	}
 	queue, state, err := loadReporterFiles(dir)
 	if err != nil {
@@ -243,6 +246,9 @@ func (r *Reporter) Enqueue(ctx context.Context, record failure.Record) error {
 	if err := r.available(); err != nil {
 		return err
 	}
+	if !r.consentActive() {
+		return nil
+	}
 	if record.Product != reportRepo || !record.Reportable || !validFingerprint(record.Fingerprint) {
 		return nil
 	}
@@ -326,6 +332,24 @@ func (r *Reporter) Drain(ctx context.Context) error {
 	return nil
 }
 
+func (r *Reporter) consentActive() bool {
+	return r.consentMethod == "" || ConsentStored(filepath.Dir(r.dir))
+}
+
+func (r *Reporter) consentValid() bool {
+	if r.consentMethod == "" {
+		return true
+	}
+	home := filepath.Dir(r.dir)
+	if ConsentValid(home, r.consentMethod) {
+		return true
+	}
+	if !ConsentStored(home) {
+		r.queue = nil
+	}
+	return false
+}
+
 func (r *Reporter) drainReady() (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -337,6 +361,12 @@ func (r *Reporter) drainReady() (bool, error) {
 	}
 	if r.state.StoppedStatus != 0 {
 		return false, latchError(r.state.StoppedStatus)
+	}
+	if !r.consentValid() {
+		return false, nil
+	}
+	if resetter, ok := r.source.(interface{ BeginRun() }); ok {
+		resetter.BeginRun()
 	}
 	return true, nil
 }

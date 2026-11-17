@@ -64,6 +64,7 @@ type fileDoc struct {
 	Advisor              advisorDoc             `toml:"advisor"`
 	Advisors             map[string]advisorsDoc `toml:"advisors"`
 	Daltoki              daltokiDoc             `toml:"daltoki"`
+	FailureReports       failureReportsDoc      `toml:"failure_reports"`
 }
 
 type limitsDoc struct {
@@ -256,6 +257,10 @@ type (
 		JobCostLimitUSDMicros   *int64   `toml:"job_cost_limit_usd_micros"`
 		DailyCostLimitUSDMicros *int64   `toml:"daily_cost_limit_usd_micros"`
 	}
+	failureReportsDoc struct {
+		Enabled *bool   `toml:"enabled"`
+		Auth    *string `toml:"auth"`
+	}
 	rolesDoc struct {
 		Smol    *string `toml:"smol"`
 		Slow    *string `toml:"slow"`
@@ -415,6 +420,8 @@ func (c *Config) mergeTables(doc *fileDoc) {
 	set(doc.Roles.Slow, &c.Roles.Slow)
 	set(doc.Roles.Advisor, &c.Roles.Advisor)
 	mergeDaltoki(&c.Daltoki, doc.Daltoki)
+	set(doc.FailureReports.Enabled, &c.FailureReports.Enabled)
+	set(doc.FailureReports.Auth, &c.FailureReports.Auth)
 }
 
 func mergeDaltoki(target *DaltokiConfig, source daltokiDoc) {
@@ -485,6 +492,9 @@ func (c *Config) validate() error {
 	errs = append(errs, c.validateStatusHideList()...)
 	errs = append(errs, c.validateTLSCAFile()...)
 	errs = append(errs, c.validatePrices()...)
+	if !one(c.FailureReports.Auth, "app", "gh") {
+		errs = append(errs, errors.New("config: failure_reports.auth must be one of app, gh"))
+	}
 	return errors.Join(errs...)
 }
 
@@ -671,7 +681,7 @@ func keywordNoticeExists(home, notice string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-var dalgonaOnlyKeys = map[string]bool{"runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "herdr": true, "web": true, "edit_review": true, "daltoki": true}
+var dalgonaOnlyKeys = map[string]bool{"runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "herdr": true, "web": true, "edit_review": true, "daltoki": true, "failure_reports": true}
 
 func validateProductLayer(product Product, current layer) error {
 	if product != ProductDal {

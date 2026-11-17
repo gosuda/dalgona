@@ -40,6 +40,7 @@ type Provider struct {
 	PollURL               string
 	RefreshURL            string
 	ExtraAuthParams       map[string]string
+	DevicePollParams      map[string]string
 	Resource              string
 }
 

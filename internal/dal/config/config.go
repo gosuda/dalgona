@@ -273,6 +273,10 @@ type (
 		JobCostLimitUSDMicros   int64
 		DailyCostLimitUSDMicros int64
 	}
+	FailureReportsConfig struct {
+		Enabled bool
+		Auth    string
+	}
 	HerdrConfig struct{ SubagentPanes bool }
 	WebConfig   struct{ Listen, Token, CertFile, KeyFile string }
 	RolesConfig struct{ Smol, Slow, Advisor string }
@@ -312,6 +316,7 @@ type Config struct {
 	MCPServers                            map[string]MCPServerSpec
 	Discovery                             DiscoveryConfig
 	Daltoki                               DaltokiConfig
+	FailureReports                        FailureReportsConfig
 	ApprovalDecider                       ApprovalDeciderConfig
 	EditReview                            EditReviewConfig
 	Eval                                  EvalConfig
@@ -340,6 +345,7 @@ func defaultConfigWithHome(product Product, home, cwd string) Config {
 		Web: WebConfig{Listen: "127.0.0.1:7437"}, Secrets: SecretsConfig{Builtin: true}, Providers: map[string]ProviderSpec{},
 		Models: map[string]ModelSpec{}, Runners: map[string]RunnerSpec{}, Remotes: map[string]RemoteSpec{},
 		MCPServers: map[string]MCPServerSpec{}, Keywords: map[string]KeywordSpec{},
+		FailureReports: FailureReportsConfig{Auth: "app"},
 		Daltoki: DaltokiConfig{
 			PollIntervalSeconds: 60, Concurrency: 2, JobsPerDay: 20, Profile: "daltoki",
 			JobTokenLimit: 100000, DailyTokenLimit: 500000,

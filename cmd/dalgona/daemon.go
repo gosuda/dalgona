@@ -26,6 +26,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dalgona/battery"
 	"github.com/gosuda/dalgona/internal/dalgona/daemon"
 	"github.com/gosuda/dalgona/internal/dalgona/discovery"
+	"github.com/gosuda/dalgona/internal/dalgona/report"
 )
 
 func executable() (string, error) {
@@ -119,6 +120,12 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 	logger := slog.New(slog.NewTextHandler(std.errOut, nil))
 	batteries := &battery.Daemon{}
 	batteries.WorkspaceApprover = workspaceTrustDecision
+	batteries.ReporterOpener = func(ctx context.Context, home string) (*report.Reporter, error) {
+		return report.OpenConsented(ctx, report.OpenParams{
+			Home: cfg.Home, Enabled: cfg.FailureReports.Enabled, Method: cfg.FailureReports.Auth,
+			Version: config.Version(), HomeOverridden: os.Getenv("DALGONA_HOME") != "", Notice: std.errOut,
+		})
+	}
 	advisors := advisor.NewRegistry()
 	newHost := func(ctx context.Context) (*agent.Host, func() error, error) {
 		return app.NewHost(ctx, app.Options{
