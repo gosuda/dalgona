@@ -4,7 +4,7 @@ The program MUST read `config.toml` and then `settings.toml` from its product ho
 
 `dal` uses `$DAL_HOME` or `~/.dal`. `dalgona` uses `$DALGONA_HOME` or `~/.dalgona`. The loader MUST expose the resolved home. The resolved home MUST be an absolute path. A relative home MUST resolve against the directory the process started in. The two homes MUST remain separate. On Windows the `dal` host start and the dalgona daemon start MUST reset the protected DACL on the product home. The same reset MUST apply to every file and directory inside the home. The same reset MUST NOT change a symlink or an irregular entry.
 
-The loader MUST reject unknown keys. The error MUST report the file and its 1-based line. `dal` MUST reject `runner`, `remote`, `runners`, `remotes`, `mcp_servers`, `mcp_trusted_workspaces`, `discovery`, `herdr`, `web`, and `edit_review` as dalgona-only settings. Presence MUST trigger this rejection, including an empty table or a false value. `tool_mode` and `[eval]` MUST load in both products.
+The loader MUST reject unknown keys. The error MUST report the file and its 1-based line. `dal` MUST reject `runner`, `remote`, `runners`, `remotes`, `mcp_servers`, `mcp_trusted_workspaces`, `discovery`, `herdr`, `web`, `edit_review`, and `daltoki` as dalgona-only settings. Presence MUST trigger this rejection, including an empty table or a false value. `tool_mode` and `[eval]` MUST load in both products.
 
 If a layer cannot be read or fails validation, `Load` MUST return an error.
 
@@ -67,6 +67,33 @@ feedback = ["lost_code", "placeholder", "incomplete"]
 ```
 
 An absent `feedback` MUST select the built-in speaker set. An empty `feedback` MUST select no speaker. The `sound` question MUST NOT be a speaker.
+
+## Daltoki coordinator settings
+
+The `[daltoki]` table configures the Daltoki coordinator service. It MUST be dalgona-only. `dal` MUST reject it as a dalgona setting, including an empty table or a false value. The rejection error MUST read `<file>:<line>: daltoki is a dalgona setting`. Daltoki behavior is specified in the dalgona Daltoki topic.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Start the coordinator in the daemon |
+| `app_id` | `0` | GitHub App numeric id |
+| `private_key_file` | `""` | Path to the App RSA private key |
+| `repositories` | `[]` | Allowlisted `owner/name` entries |
+| `poll_interval_seconds` | `60` | Nonrelay poll interval in seconds |
+| `webhook_secret_ref` | `""` | Secret-store reference for the relay webhook |
+| `relay_url` | `""` | Relay base URL |
+| `relay_token_ref` | `""` | Secret-store reference for the relay bearer token |
+| `concurrency` | `2` | Maximum concurrent owned graphs |
+| `jobs_per_day` | `20` | Admission cap per UTC day |
+| `model` | `""` | Model used for triage and fix graphs |
+| `profile` | `"daltoki"` | Home profile for coordinator runs |
+| `job_token_limit` | `100000` | Token reservation cap per job |
+| `daily_token_limit` | `500000` | Token reservation cap per UTC day |
+| `job_cost_limit_usd_micros` | `5000000` | Cost reservation cap per job |
+| `daily_cost_limit_usd_micros` | `20000000` | Cost reservation cap per UTC day |
+
+Enabled configuration requires a positive `app_id`, a nonempty `private_key_file`, a nonempty `model`, an existing home profile, and 1 to 100 allowlisted repositories. `poll_interval_seconds` MUST be 60 to 3600. `concurrency` MUST be 1 to 4. `jobs_per_day` MUST be 1 to 100. `job_token_limit` MUST be 1000 to 1000000. `daily_token_limit` MUST be at least the job cap and at most 10000000. Cost limits MUST be positive, and the daily limit MUST be at least the job limit.
+
+Secret references MUST be exactly one recognized secret-store placeholder. Literal secrets MUST NOT appear in `webhook_secret_ref` or `relay_token_ref`. Relay keys are all-or-none: a partial relay table MUST fail loading.
 
 The `[secrets]` table MUST load in both products. Its key `patterns` MUST be a list of RE2 patterns. Its key `builtin` MUST be a boolean, and it defaults to `true`. The masking contract is in [secrets.md](secrets.md).
 

@@ -52,6 +52,22 @@ The limit MUST be 104 on darwin and the BSDs and 108 on Linux and Windows.
 
 Two clients MAY start two daemons at the same time. The lock rule above makes the second daemon exit without effect on the first.
 
+
+## After-recovery callbacks
+
+`Run` accepts variadic after-recovery callbacks of this type:
+
+```go
+RecoveredFunc func(context.Context, *agent.Host, error)
+```
+
+The daemon MUST run `Host.Recover` in the background without delaying the accept loop. After recovery finishes, `Run` MUST invoke each callback in registration order with the context, the host, and the recovery result. A nil error means recovery succeeded. A non-nil error carries the recovery failure.
+
+Callbacks MUST run on the same background task as recovery. They MUST NOT delay the accept loop. Recovery errors MUST be logged and MUST NOT stop the daemon. Callback failures MUST NOT stop the daemon either. Each connection still gets its own `serve` call while recovery and callbacks run.
+
+Daltoki starts through this seam. Its battery callback runs post-`Recover` and starts the coordinator exactly once. A recovery failure MUST disable Daltoki dispatch with `daltoki: host recovery failed`. The disabled coordinator MUST still answer an empty status.
+
+`Ensure`, shutdown, and retire behavior is unchanged. When the context ends, `Run` MUST still stop accepting, wait for the connection and recovery work including callbacks, then close the host and the journal.
 ## User service
 
 Installation MUST quote the executable path in the systemd unit (`ExecStart="<absolute executable>" daemon`) and MUST XML-escape it in the launchd plist. When `DALGONA_HOME` is set at install time, the unit and plist MUST pin `DALGONA_HOME` to that value. The login-time daemon therefore uses the installing client's home. Linux installation MUST write `~/.config/systemd/user/dalgona.service` with `ExecStart="<absolute executable>" daemon` and `Restart=always`, then run `systemctl --user enable --now dalgona.service`. macOS installation MUST write `~/Library/LaunchAgents/dev.dalgona.daemon.plist` with `RunAtLoad` and `KeepAlive`, then run `launchctl bootstrap gui/<uid> <plist>`. Windows installation MUST run `schtasks /Create /SC ONLOGON /TN dalgona /TR "<absolute executable> daemon" /F`. Uninstall MUST disable the service and remove the service definition. It MUST remove the service definition even when disabling fails, MUST tolerate a service that is not loaded, and MUST report any remaining errors.
