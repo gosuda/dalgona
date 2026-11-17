@@ -20,7 +20,7 @@ func newSaveTestCredentials(t *testing.T, stored auth.Credential) (*credentials,
 	if setErr := store.SetCredential("cursor", stored); setErr != nil {
 		t.Fatalf("seed: %v", setErr)
 	}
-	creds := &credentials{store: store, product: config.ProductDalgona, sources: map[string]*sourceEntry{}}
+	creds := &credentials{store: store, product: config.ProductDalgona, providers: oauth.ProviderByID, sources: map[string]*sourceEntry{}}
 	return creds, &sourceEntry{stored: stored}, home
 }
 

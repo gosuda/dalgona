@@ -297,15 +297,15 @@ func TestServeDeviceLoginReportsCodeAndURL(t *testing.T) {
 		_, _ = io.WriteString(w, `{"device_auth_id":"dev-1","user_code":"ABCD-1234","verification_uri":"https://auth.example/verify","interval":60}`)
 	}))
 	t.Cleanup(device.Close)
-	original := chatGPTProvider
-	t.Cleanup(func() { chatGPTProvider = original })
-	chatGPTProvider = func() (oauth.Provider, bool) {
-		provider, ok := original()
-		provider.DeviceURL = device.URL
+	lookup := func(id string) (oauth.Provider, bool) {
+		provider, ok := oauth.ProviderByID(id)
+		if id == "chatgpt" && ok {
+			provider.DeviceURL = device.URL
+		}
 		return provider, ok
 	}
 	r := newRig(t, config.ApprovalAuto)
-	c := r.connect()
+	c := r.connectWith(ServeOptions{ProviderLookup: lookup})
 	var login LoginAccountResponse
 	c.ok("account/login/start", map[string]any{"type": "chatgptDeviceCode"}, &login)
 	expect(t, login.Type == "chatgptDeviceCode" && login.UserCode == "ABCD-1234" && login.VerificationURL == "https://auth.example/verify", "device login", login)

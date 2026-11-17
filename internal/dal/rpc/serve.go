@@ -13,6 +13,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/agent/advisor"
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 )
 
 type method func(s *server, ctx context.Context, params jsontext.Value) (jsontext.Value, error)
@@ -76,6 +77,7 @@ func init() {
 type server struct {
 	host       *agent.Host
 	opts       ServeOptions
+	providers  func(id string) (oauth.Provider, bool)
 	closing    bool
 	conn       *Conn
 	log        *slog.Logger
@@ -104,10 +106,11 @@ type watch struct {
 type Extension func(ctx context.Context, params jsontext.Value) (jsontext.Value, error)
 
 type ServeOptions struct {
-	Extensions    map[string]Extension
-	BeforeArchive func(ctx context.Context, threadID string) error
-	Logger        *slog.Logger
-	Advisors      *advisor.Registry
+	Extensions     map[string]Extension
+	BeforeArchive  func(ctx context.Context, threadID string) error
+	Logger         *slog.Logger
+	Advisors       *advisor.Registry
+	ProviderLookup func(id string) (oauth.Provider, bool)
 }
 
 func ServeWith(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host, opts ServeOptions) error {
@@ -116,8 +119,12 @@ func ServeWith(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host, o
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	providerLookup := opts.ProviderLookup
+	if providerLookup == nil {
+		providerLookup = oauth.ProviderByID
+	}
 	s := &server{
-		host: host, log: cmp.Or(opts.Logger, slog.Default()), opts: opts,
+		host: host, log: cmp.Or(opts.Logger, slog.Default()), opts: opts, providers: providerLookup,
 		watches: map[string]*watch{}, pending: map[string]context.CancelFunc{}, refused: map[string]struct{}{}, logins: map[string]context.CancelFunc{},
 		fsWatches: map[string]*fsWatcher{},
 	}

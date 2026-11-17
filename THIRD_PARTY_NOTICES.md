@@ -31,6 +31,7 @@ SOFTWARE.
 ## oh-my-pi (MIT)
 
 `internal/dalgona/ratchet` adapts `packages/coding-agent/src/ratchet/ratchet.ts` from oh-my-pi (https://omp.sh), with changes. The license of oh-my-pi reads as follows.
+`internal/ratchet` adapts `packages/coding-agent/src/ratchet/ratchet.ts` from oh-my-pi (https://omp.sh), with changes. `internal/dal/auth/oauth` and `internal/dal/app` adapt oh-my-pi's Anthropic and Antigravity sign-in ports with changes: the OAuth registry rules in `packages/catalog/src/compat/rules/auth/{anthropic,google-antigravity}.kdl`, the grant flows in `packages/ai/src/registry/oauth/{anthropic,google-antigravity}.ts`, the Antigravity identity, project and model discovery in `packages/catalog/src/discovery/antigravity.ts` and `packages/ai/src/registry/oauth/google-antigravity.ts`, the request headers in `packages/ai/src/providers/{anthropic-headers,claude-code-fingerprint,google-gemini-cli}.ts` and `packages/catalog/src/wire/gemini-headers.ts`, and the response envelope handling in the Antigravity provider. The license of oh-my-pi reads as follows.
 
 ```text
 MIT License
@@ -38,6 +39,63 @@ MIT License
 Copyright (c) 2025 Mario Zechner
 Copyright (c) 2025-2026 Can Bölük
 Copyright (c) 2026 Stencil Labs, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## pi (MIT)
+
+`internal/dal/auth/oauth` adapts the Anthropic OAuth grant constants, PKCE flow, redirects and token exchange from `packages/ai/src/auth/oauth/anthropic.ts` in pi, with changes. The license of pi reads as follows.
+
+```text
+MIT License
+
+Copyright (c) 2025 Mario Zechner
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## senpi (MIT)
+
+`internal/dal/auth/oauth` adapts the Anthropic sign-in method selection and pasted-authorization normalization from `packages/coding-agent/src/core/extensions/builtin/anthropic-subscription/{oauth-login,claude-cli-auth}.ts` and `packages/ai/src/providers/anthropic.ts` in senpi, with changes. The license of senpi reads as follows.
+
+```text
+MIT License
+
+Copyright (c) 2025 Mario Zechner (upstream pi-mono)
+Copyright (c) 2026 Yeongyu Kim and senpi contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

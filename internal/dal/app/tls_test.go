@@ -37,16 +37,21 @@ func TestTLSCAFileTrustsPrivateServer(t *testing.T) {
 	hits := &privateServerHits{}
 	server, caFile := newPrivateServer(t, http.HandlerFunc(hits.serve))
 
-	base := oauth.Providers["chatgpt"]
-	oauth.Providers["chatgpt"] = withTokenURL(base, server.URL+"/token")
-	t.Cleanup(func() { oauth.Providers["chatgpt"] = base })
+	lookup := func(id string) (oauth.Provider, bool) {
+		provider, ok := oauth.ProviderByID(id)
+		if id == "chatgpt" && ok {
+			return withTokenURL(provider, server.URL+"/token"), true
+		}
+		return provider, ok
+	}
+	requireUnknownAuthority(t, "oauth refresh", refreshPrivateToken(t, t.Context(), lookup))
 
 	newChat := func() *chatgpt.Provider {
 		return chatgpt.New(chatgpt.Config{BaseURL: server.URL, Token: staticChatToken, Retry: instantRetry()})
 	}
 
 	requireUnknownAuthority(t, "model client", fetchPrivateModel(server.URL+"/model"))
-	requireUnknownAuthority(t, "oauth refresh", refreshPrivateToken(t.Context()))
+	requireUnknownAuthority(t, "oauth refresh", refreshPrivateToken(t, t.Context(), lookup))
 	_, chatControlErr := chatStreamErr(newChat())
 	requireUnknownAuthority(t, "chat provider", chatControlErr)
 
@@ -63,7 +68,7 @@ func TestTLSCAFileTrustsPrivateServer(t *testing.T) {
 	}
 
 	requirePrivateModelFetch(t, server.URL+"/model")
-	requireRefreshedToken(t)
+	requireRefreshedToken(t, lookup)
 	requireChatCompletes(t, newChat())
 	requirePrivateServerHits(t, hits)
 }
@@ -103,9 +108,9 @@ func requirePrivateModelFetch(t *testing.T, url string) {
 	}
 }
 
-func requireRefreshedToken(t *testing.T) {
+func requireRefreshedToken(t *testing.T, lookup func(string) (oauth.Provider, bool)) {
 	t.Helper()
-	token, err := oauth.Refresh(t.Context(), oauth.Providers["chatgpt"], "stale-refresh")
+	token, err := oauth.Refresh(t.Context(), refreshProvider(t, lookup, "chatgpt"), "stale-refresh")
 	if err != nil {
 		t.Fatalf("oauth refresh: %v", err)
 	}
@@ -171,9 +176,18 @@ func fetchPrivateModel(url string) error {
 	return closeErr
 }
 
-func refreshPrivateToken(ctx context.Context) error {
-	_, err := oauth.Refresh(ctx, oauth.Providers["chatgpt"], "stale-refresh")
+func refreshPrivateToken(t *testing.T, ctx context.Context, lookup func(string) (oauth.Provider, bool)) error {
+	_, err := oauth.Refresh(ctx, refreshProvider(t, lookup, "chatgpt"), "stale-refresh")
 	return err
+}
+
+func refreshProvider(t *testing.T, lookup func(string) (oauth.Provider, bool), id string) oauth.Provider {
+	t.Helper()
+	provider, ok := lookup(id)
+	if !ok {
+		t.Fatalf("provider lookup has no %s entry", id)
+	}
+	return provider
 }
 
 func chatStreamErr(provider *chatgpt.Provider) (string, error) {
@@ -249,17 +263,20 @@ func privateProductHome(t *testing.T, topLevel []string, tables ...string) strin
 	return home
 }
 
-func useDeviceEndpoints(t *testing.T, base string) {
+func useDeviceEndpoints(t *testing.T, base string) func(string) (oauth.Provider, bool) {
 	t.Helper()
-	original := oauth.Providers["chatgpt"]
-	provider := original
-	provider.ClientID = "client"
-	provider.DeviceURL = base + "/usercode"
-	provider.DeviceTokenURL = base + "/device-token"
-	provider.TokenURL = base + "/oauth-token"
-	provider.DeviceRedirectURL = "https://example.test/device-callback"
-	oauth.Providers["chatgpt"] = provider
-	t.Cleanup(func() { oauth.Providers["chatgpt"] = original })
+	return func(id string) (oauth.Provider, bool) {
+		provider, ok := oauth.ProviderByID(id)
+		if id != "chatgpt" || !ok {
+			return provider, ok
+		}
+		provider.ClientID = "client"
+		provider.DeviceURL = base + "/usercode"
+		provider.DeviceTokenURL = base + "/device-token"
+		provider.TokenURL = base + "/oauth-token"
+		provider.DeviceRedirectURL = "https://example.test/device-callback"
+		return provider, true
+	}
 }
 
 func runPrivateDeviceLogin(t *testing.T, setting func(caFile string) []string) (commandOutput, bool) {
@@ -267,10 +284,10 @@ func runPrivateDeviceLogin(t *testing.T, setting func(caFile string) []string) (
 	restoreDefaultTransport(t)
 	var polls atomic.Int32
 	server, caFile := newPrivateServer(t, chatGPTDeviceServer(t, &polls))
-	useDeviceEndpoints(t, server.URL)
+	lookup := useDeviceEndpoints(t, server.URL)
 	home := privateProductHome(t, setting(caFile))
 	var stdout, stderr bytes.Buffer
-	env := CLIEnv{Product: config.ProductDal, Home: home, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr}
+	env := CLIEnv{Product: config.ProductDal, Home: home, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, ProviderLookup: lookup}
 	code := RunCLI(t.Context(), env, []string{"login", "chatgpt", "--device-auth"})
 	return commandOutput{code: code, stdout: stdout.String(), stderr: stderr.String()}, storedDeviceCredential(t, home)
 }

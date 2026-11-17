@@ -25,7 +25,7 @@ func (s *server) accountProviders(context.Context, jsontext.Value) (jsontext.Val
 			signedIn[entry.ID] = true
 		}
 	}
-	ids := slices.Sorted(slices.Values(slices.Concat(auth.Providers(), auth.RunnerServices)))
+	ids := slices.Sorted(slices.Values(slices.Concat(auth.Providers(), auth.RunnerServices())))
 	response := AccountProvidersResponse{Providers: make([]AccountProvider, 0, len(ids))}
 	for _, id := range ids {
 		response.Providers = append(response.Providers, AccountProvider{ID: id, Login: loginMode(id), SignedIn: signedIn[id]})
@@ -37,9 +37,9 @@ func loginMode(id string) string {
 	switch {
 	case id == "chatgpt":
 		return "browser"
-	case slices.Contains(auth.OAuthProviders, id) && slices.Contains(auth.APIKeyProviders, id):
+	case slices.Contains(auth.OAuthProviders(), id) && slices.Contains(auth.APIKeyProviders(), id):
 		return "hybrid"
-	case slices.Contains(auth.OAuthProviders, id):
+	case slices.Contains(auth.OAuthProviders(), id):
 		return "terminal"
 	}
 	return "apiKey"

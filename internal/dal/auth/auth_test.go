@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -475,5 +476,35 @@ func TestStore_MaskProperty(t *testing.T) {
 		if got := store.Unmask(masked); got != input {
 			t.Fatalf("iteration %d: round trip = %q, want %q", iteration, got, input)
 		}
+	}
+}
+
+func TestProviderRegistrationsAreCallerOwned(t *testing.T) {
+	for name, get := range map[string]func() []string{
+		"apiKey":    auth.APIKeyProviders,
+		"oauth":     auth.OAuthProviders,
+		"runner":    auth.RunnerServices,
+		"providers": auth.Providers,
+	} {
+		first := get()
+		for i := range first {
+			first[i] = "mutated"
+		}
+		second := get()
+		for _, id := range second {
+			if id == "mutated" {
+				t.Fatalf("%s: mutating a returned slice changed the next call: %v", name, second)
+			}
+		}
+	}
+}
+
+func TestProvidersReturnsSortedUniqueIDs(t *testing.T) {
+	ids := auth.Providers()
+	if !slices.IsSorted(ids) {
+		t.Fatalf("Providers() = %v, want sorted", ids)
+	}
+	if len(ids) != len(slices.Compact(slices.Clone(ids))) {
+		t.Fatalf("Providers() = %v, want unique", ids)
 	}
 }

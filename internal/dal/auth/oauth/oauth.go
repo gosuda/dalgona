@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -69,46 +71,60 @@ const (
 	openAIDeviceEndpoint = "https://auth.openai.com/api/accounts/deviceauth/token"
 )
 
-var Providers = map[string]Provider{
-	"chatgpt": {
-		ID: "chatgpt", AuthorizeURL: "https://auth.openai.com/oauth/authorize", TokenURL: openAIEndpoint,
-		ClientID: chatGPTPublicID, Scopes: []string{"openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"},
-		RedirectHost: "127.0.0.1", RedirectPort: 1455, FallbackPort: 1457, RedirectPath: "/auth/callback",
-		DeviceURL: "https://auth.openai.com/api/accounts/deviceauth/usercode", DeviceTokenURL: openAIDeviceEndpoint,
-		DeviceVerificationURL: "https://auth.openai.com/codex/device", DeviceRedirectURL: "https://auth.openai.com/deviceauth/callback",
-		ExtraAuthParams: map[string]string{"id_token_add_organizations": "true", "codex_cli_simplified_flow": "true", "originator": "codex_cli_rs"},
-	},
-	"anthropic": {
-		ID: "anthropic", AuthorizeURL: "https://claude.ai/oauth/authorize", TokenURL: claudeEndpoint,
-		ClientID: anthropicPublicID, Scopes: []string{"org:create_api_key", "user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload"},
-		RedirectHost: "localhost", BindHost: "127.0.0.1", RedirectPort: 53692, AllowPortFallback: true, RedirectPath: "/callback",
-		ExtraAuthParams: map[string]string{"code": "true"},
-	},
-	"antigravity": {
-		ID: "antigravity", AuthorizeURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: googleEndpoint,
-		ClientID: antigravityPublicID, ClientSecret: antigravityPublicKey,
-		Scopes:       []string{"https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/cclog", "https://www.googleapis.com/auth/experimentsandconfigs", "https://www.googleapis.com/auth/aicode"},
-		RedirectHost: "127.0.0.1", RedirectPort: 51121, RedirectPath: "/oauth-callback",
-		ExtraAuthParams: map[string]string{"access_type": "offline", "prompt": "consent"},
-	},
-	"devin": {
-		ID: "devin", AuthorizeURL: "https://app.devin.ai/auth/cli/continue", TokenURL: devinEndpoint,
-		RedirectHost: "127.0.0.1", RedirectPort: 59653, RedirectPath: "/callback", ExtraAuthParams: map[string]string{"prompt": "select_account"},
-	},
-	"cursor": {
-		ID: "cursor", AuthorizeURL: "https://cursor.com/loginDeepControl", ClientID: cursorPublicID,
-		PollURL: "https://api2.cursor.sh/auth/poll", RefreshURL: "https://api2.cursor.sh/oauth/token", ExtraAuthParams: map[string]string{},
-	},
-	"copilot": { //nolint:gosec // G101: public OAuth client ID published by GitHub for Copilot CLI
-		ID: "copilot", ClientID: copilotPublicID, Scopes: []string{"read:user"},
-		DeviceURL: "https://github.com/login/device/code", DeviceVerificationURL: "https://github.com/login/device",
-		TokenURL: "https://github.com/login/oauth/access_token",
-	},
+func ProviderByID(id string) (Provider, bool) {
+	switch id {
+	case "chatgpt":
+		return cloneProvider(Provider{
+			ID: "chatgpt", AuthorizeURL: "https://auth.openai.com/oauth/authorize", TokenURL: openAIEndpoint,
+			ClientID: chatGPTPublicID, Scopes: []string{"openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"},
+			RedirectHost: "127.0.0.1", RedirectPort: 1455, FallbackPort: 1457, RedirectPath: "/auth/callback",
+			DeviceURL: "https://auth.openai.com/api/accounts/deviceauth/usercode", DeviceTokenURL: openAIDeviceEndpoint,
+			DeviceVerificationURL: "https://auth.openai.com/codex/device", DeviceRedirectURL: "https://auth.openai.com/deviceauth/callback",
+			ExtraAuthParams: map[string]string{"id_token_add_organizations": "true", "codex_cli_simplified_flow": "true", "originator": "codex_cli_rs"},
+		}), true
+	case "anthropic":
+		return cloneProvider(Provider{
+			ID: "anthropic", AuthorizeURL: "https://claude.ai/oauth/authorize", TokenURL: claudeEndpoint,
+			ClientID: anthropicPublicID, Scopes: []string{"org:create_api_key", "user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload"},
+			RedirectHost: "localhost", BindHost: "127.0.0.1", RedirectPort: 53692, AllowPortFallback: true, RedirectPath: "/callback",
+			ExtraAuthParams: map[string]string{"code": "true"},
+		}), true
+	case "antigravity":
+		return cloneProvider(Provider{
+			ID: "antigravity", AuthorizeURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: googleEndpoint,
+			ClientID: antigravityPublicID, ClientSecret: antigravityPublicKey,
+			Scopes:       []string{"https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/cclog", "https://www.googleapis.com/auth/experimentsandconfigs", "https://www.googleapis.com/auth/aicode"},
+			RedirectHost: "127.0.0.1", RedirectPort: 51121, RedirectPath: "/oauth-callback",
+			ExtraAuthParams: map[string]string{"access_type": "offline", "prompt": "consent"},
+		}), true
+	case "devin":
+		return cloneProvider(Provider{
+			ID: "devin", AuthorizeURL: "https://app.devin.ai/auth/cli/continue", TokenURL: devinEndpoint,
+			RedirectHost: "127.0.0.1", RedirectPort: 59653, RedirectPath: "/callback", ExtraAuthParams: map[string]string{"prompt": "select_account"},
+		}), true
+	case "cursor":
+		return cloneProvider(Provider{
+			ID: "cursor", AuthorizeURL: "https://cursor.com/loginDeepControl", ClientID: cursorPublicID,
+			PollURL: "https://api2.cursor.sh/auth/poll", RefreshURL: "https://api2.cursor.sh/oauth/token", ExtraAuthParams: map[string]string{},
+		}), true
+	case "copilot":
+		return cloneProvider(Provider{ //nolint:gosec // G101: public OAuth client ID published by GitHub for Copilot CLI
+			ID: "copilot", ClientID: copilotPublicID, Scopes: []string{"read:user"},
+			DeviceURL: "https://github.com/login/device/code", DeviceVerificationURL: "https://github.com/login/device",
+			TokenURL: "https://github.com/login/oauth/access_token",
+		}), true
+	}
+	return Provider{}, false
 }
 
-func ProviderByID(id string) (Provider, bool) {
-	provider, ok := Providers[id]
-	return provider, ok
+func cloneProvider(provider Provider) Provider {
+	if provider.Scopes != nil {
+		provider.Scopes = slices.Clone(provider.Scopes)
+	}
+	if provider.ExtraAuthParams != nil {
+		provider.ExtraAuthParams = maps.Clone(provider.ExtraAuthParams)
+	}
+	return provider
 }
 
 type callbackServer struct {

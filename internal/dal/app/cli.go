@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
@@ -30,6 +31,14 @@ type CLIEnv struct {
 	OnStatus       func(Status)
 	OnChildSpawned func(childID, cwd string)
 	TUI            TUIBackend
+	ProviderLookup func(id string) (oauth.Provider, bool)
+}
+
+func (env CLIEnv) providerLookup() func(string) (oauth.Provider, bool) {
+	if env.ProviderLookup != nil {
+		return env.ProviderLookup
+	}
+	return oauth.ProviderByID
 }
 
 type Status struct {
@@ -275,8 +284,8 @@ func (env CLIEnv) parseLogin(args []string) (loginRequest, error) {
 }
 
 func (r loginRequest) check() error {
-	if r.apiKey != "" && !slices.Contains(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), r.provider) {
-		return fmt.Errorf("login %s: --api-key works only for %s", r.provider, strings.Join(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), ", "))
+	if r.apiKey != "" && !slices.Contains(slices.Concat(auth.APIKeyProviders(), auth.RunnerServices()), r.provider) {
+		return fmt.Errorf("login %s: --api-key works only for %s", r.provider, strings.Join(slices.Concat(auth.APIKeyProviders(), auth.RunnerServices()), ", "))
 	}
 	if r.device && r.provider != "chatgpt" {
 		return fmt.Errorf("login %s: --device-auth works only for chatgpt", r.provider)
@@ -314,13 +323,13 @@ func (env CLIEnv) signIn(ctx context.Context, store *auth.Store, request loginRe
 		}
 	}
 	if request.device {
-		return LoginDevice(ctx, store, request.provider, env.Stdout)
+		return LoginDevice(ctx, store, request.provider, env)
 	}
-	return Login(ctx, store, request.provider, env.Stdin, env.Stdout)
+	return Login(ctx, store, request.provider, env)
 }
 
 func (r loginRequest) reachesNetwork() bool {
-	return r.device || slices.Contains(auth.OAuthProviders, r.provider)
+	return r.device || slices.Contains(auth.OAuthProviders(), r.provider)
 }
 
 func (env CLIEnv) listProviders(signedIn map[string]bool) {
@@ -364,12 +373,12 @@ func (env CLIEnv) remoteLoginParams(request loginRequest) (rpc.AccountLoginStart
 	switch {
 	case request.provider == "":
 		return rpc.AccountLoginStartParams{}, nil
-	case slices.Contains(slices.Concat(auth.APIKeyProviders, auth.RunnerServices), request.provider):
+	case slices.Contains(slices.Concat(auth.APIKeyProviders(), auth.RunnerServices()), request.provider):
 		key, err := env.readAPIKey(request)
 		return rpc.AccountLoginStartParams{Type: "apiKey", Provider: request.provider, APIKey: key}, err
 	case request.provider == "chatgpt":
 		return rpc.AccountLoginStartParams{Type: "chatgptDeviceCode"}, nil
-	case slices.Contains(auth.OAuthProviders, request.provider):
+	case slices.Contains(auth.OAuthProviders(), request.provider):
 		return rpc.AccountLoginStartParams{}, fmt.Errorf(
 			"login %s cannot run inside remote %s; run `%s login %s` here, then `%s cloud up %s --copy-auth`",
 			request.provider, env.Remote, env.Product, request.provider, env.Product, env.Remote)

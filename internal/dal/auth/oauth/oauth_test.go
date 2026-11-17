@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -404,9 +405,9 @@ func TestClientSecretsDecodeFromDonors(t *testing.T) {
 		encoded string
 		got     string
 	}{
-		{"anthropic client id", "OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl", oauth.Providers["anthropic"].ClientID},
-		{"antigravity client secret", "R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY=", oauth.Providers["antigravity"].ClientSecret},
-		{"antigravity client id", "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dGRvbGxvamg0ZzQwM2VwLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t", oauth.Providers["antigravity"].ClientID},
+		{"anthropic client id", "OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl", mustProvider(t, "anthropic").ClientID},
+		{"antigravity client secret", "R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY=", mustProvider(t, "antigravity").ClientSecret},
+		{"antigravity client id", "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dGRvbGxvamg0ZzQwM2VwLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t", mustProvider(t, "antigravity").ClientID},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -418,5 +419,37 @@ func TestClientSecretsDecodeFromDonors(t *testing.T) {
 				t.Error("configured client value differs from the decoded donor")
 			}
 		})
+	}
+}
+
+func mustProvider(t *testing.T, id string) oauth.Provider {
+	t.Helper()
+	provider, ok := oauth.ProviderByID(id)
+	if !ok {
+		t.Fatalf("ProviderByID(%q) found nothing", id)
+	}
+	return provider
+}
+
+func TestProviderByIDUnknownReturnsZero(t *testing.T) {
+	provider, ok := oauth.ProviderByID("no-such-provider")
+	if ok || !reflect.DeepEqual(provider, oauth.Provider{}) {
+		t.Fatalf("ProviderByID unknown = %+v, %v; want zero, false", provider, ok)
+	}
+}
+
+func TestProviderByIDReturnsIndependentValues(t *testing.T) {
+	first := mustProvider(t, "anthropic")
+	first.Scopes[0] = "mutated"
+	first.ExtraAuthParams["code"] = "mutated"
+	second := mustProvider(t, "anthropic")
+	if second.Scopes[0] != "org:create_api_key" || second.ExtraAuthParams["code"] != "true" {
+		t.Fatalf("second lookup changed: scopes %q params %v", second.Scopes, second.ExtraAuthParams)
+	}
+	other := mustProvider(t, "antigravity")
+	other.Scopes[0] = "mutated"
+	again := mustProvider(t, "antigravity")
+	if again.Scopes[0] == "mutated" {
+		t.Fatal("mutating one antigravity lookup changed another")
 	}
 }

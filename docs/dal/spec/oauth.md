@@ -2,12 +2,28 @@
 
 The `chatgpt` entry MUST take its client values from Codex `codex-rs/login/src/server.rs`. The `anthropic` entry MUST take its client values from `pi`'s `packages/ai/src/auth/oauth/anthropic.ts`. The `antigravity` entry MUST take its values from `oh-my-pi`'s `packages/catalog/src/compat/rules/auth/google-antigravity.kdl`. The `devin` entry MUST take its values from `oh-my-pi`'s `packages/catalog/src/compat/rules/auth/devin.kdl`. The `cursor` entry MUST take its values from `oh-my-pi`'s `packages/ai/src/registry/oauth/cursor.ts`.
 
-The OAuth package (`internal/dal/auth/oauth`) MUST expose provider-neutral authorization flows. It MUST NOT import `internal/dal/auth`. The `Providers` table MUST include ChatGPT, Claude, Google Antigravity, Devin, and Cursor. Each entry MUST use the client identifiers, scopes, endpoints, and parameter names of its named donor.
-
-The table MUST also include Copilot.
+The OAuth package (`internal/dal/auth/oauth`) MUST expose provider-neutral authorization flows. It MUST NOT import `internal/dal/auth`. `ProviderByID` MUST return an entry for ChatGPT, Claude, Google Antigravity, Devin, Cursor, and Copilot. Each entry MUST use the client identifiers, scopes, endpoints, and parameter names of its named donor.
 The `copilot` entry takes its client values from jcode's `crates/jcode-base/src/auth/copilot.rs`.
 
 `Provider` describes authorization, token, device, poll, and refresh endpoints. It also describes client credentials, scopes, loopback binding, advertised redirect URIs, port fallback, and extra authorization parameters. `PollURL` and `RefreshURL` MAY differ from `TokenURL`.
+
+## Donor provenance
+
+`ProviderByID` MUST take a provider id and return its `Provider` with a boolean. It MUST build an independent value on each call. It MUST share no mutable state between calls. An unknown id MUST return the zero value and false. In `internal/dal/auth`, `Providers` MUST return sorted unique ids and `APIKeyProviders`, `OAuthProviders`, and `RunnerServices` MUST return caller-owned data.
+
+Each entry MUST take its client identifiers, scopes, endpoints, and parameter names from its named donor. Ports MUST NOT add runtime donor agreement checks. The table below names the donor source of each value group.
+
+| Values | Donor |
+|---|---|
+| Anthropic client constants, PKCE, redirects, and grant exchange | `pi` `packages/ai/src/auth/oauth/anthropic.ts` |
+| Anthropic identity mapping and refresh headers | `oh-my-pi` catalog compatibility rules and OAuth registry |
+| Anthropic request authentication, compatibility headers, system identity, and billing | `oh-my-pi` provider modules for headers, fingerprint, and Anthropic |
+| Antigravity client values, identity, project, discovery, headers, and envelope | `oh-my-pi` catalog rules, OAuth registry, discovery, and wire modules |
+| Browser login methods plus paste normalization | `senpi` subscription login and provider modules |
+
+Senpi provides browser login methods plus paste normalization. It MUST NOT imply a Senpi subscription OAuth flow. No provider entry MAY depend on a Claude subprocess.
+
+`THIRD_PARTY_NOTICES.md` MUST carry MIT sections for `pi`, `senpi`, and `oh-my-pi`. Each section MUST copy the full donor license text and all copyright lines.
 
 ## Authorization code with PKCE
 

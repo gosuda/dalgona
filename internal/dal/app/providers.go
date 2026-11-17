@@ -30,11 +30,12 @@ import (
 )
 
 type credentials struct {
-	store   *auth.Store
-	product config.Product
-	log     *slog.Logger
-	mu      sync.Mutex
-	sources map[string]*sourceEntry
+	store     *auth.Store
+	product   config.Product
+	log       *slog.Logger
+	providers func(string) (oauth.Provider, bool)
+	mu        sync.Mutex
+	sources   map[string]*sourceEntry
 }
 
 type sourceEntry struct {
@@ -54,10 +55,14 @@ func (u unlisted) Models(context.Context) ([]model.Model, error) {
 	return nil, nil
 }
 
-func newCredentials(store *auth.Store, product config.Product, logger *slog.Logger) *credentials {
+func newCredentials(store *auth.Store, product config.Product, logger *slog.Logger, lookups ...func(string) (oauth.Provider, bool)) *credentials {
+	lookup := oauth.ProviderByID
+	if len(lookups) > 0 && lookups[0] != nil {
+		lookup = lookups[0]
+	}
 	return &credentials{
 		store: store, product: cmp.Or(product, config.ProductDalgona), log: cmp.Or(logger, slog.Default()),
-		sources: make(map[string]*sourceEntry),
+		providers: lookup, sources: make(map[string]*sourceEntry),
 	}
 }
 
@@ -106,7 +111,7 @@ func (c *credentials) source(ctx context.Context, provider string) *oauth.Source
 		return entry.source
 	}
 	entry := &sourceEntry{stored: stored}
-	definition, _ := oauth.ProviderByID(provider)
+	definition, _ := c.providers(provider)
 	load := func(ctx context.Context) (oauth.Token, error) {
 		credential, err := c.stored(ctx, provider, "")
 		if err != nil {

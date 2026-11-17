@@ -88,7 +88,7 @@ func TestRegistryReadsKeysStoredByAnotherProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Login(t.Context(), login, "openai", strings.NewReader("first-key\n"), io.Discard); err != nil {
+	if err := Login(t.Context(), login, "openai", CLIEnv{Stdin: strings.NewReader("first-key\n"), Stdout: io.Discard}); err != nil {
 		t.Fatal(err)
 	}
 	streamOnce(t, registry)
@@ -102,7 +102,7 @@ func TestRegistryReadsKeysStoredByAnotherProcess(t *testing.T) {
 	}
 }
 
-func refreshServer(t *testing.T, refreshes *atomic.Int32) *httptest.Server {
+func refreshServer(t *testing.T, refreshes *atomic.Int32) func(string) (oauth.Provider, bool) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -115,23 +115,26 @@ func refreshServer(t *testing.T, refreshes *atomic.Int32) *httptest.Server {
 		_, _ = io.WriteString(w, `{"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":3600}`)
 	}))
 	t.Cleanup(server.Close)
-	provider := oauth.Providers["chatgpt"]
-	oauth.Providers["chatgpt"] = withTokenURL(provider, server.URL)
-	t.Cleanup(func() { oauth.Providers["chatgpt"] = provider })
-	return server
+	return func(id string) (oauth.Provider, bool) {
+		provider, ok := oauth.ProviderByID(id)
+		if id == "chatgpt" && ok {
+			return withTokenURL(provider, server.URL), true
+		}
+		return provider, ok
+	}
 }
 
 func TestOAuthRefreshIsSavedThroughTheHostStore(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CHATGPT_API_KEY", "")
 	var refreshes atomic.Int32
-	refreshServer(t, &refreshes)
+	lookup := refreshServer(t, &refreshes)
 	store := loadStore(t, home)
 	expired := auth.Credential{Type: "oauth", Access: "stale-access", Refresh: "stale-refresh", Expires: "2020-01-01T00:00:00Z", Account: "acct-7"}
 	if setErr := store.SetCredential("chatgpt", expired); setErr != nil {
 		t.Fatal(setErr)
 	}
-	token, err := newCredentials(store, config.ProductDalgona, nil).chatgptToken(t.Context())
+	token, err := newCredentials(store, config.ProductDalgona, nil, lookup).chatgptToken(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,15 +280,15 @@ func TestLoginRejectsUnknownAndEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = Login(t.Context(), store, "nope", strings.NewReader(""), io.Discard)
+	err = Login(t.Context(), store, "nope", CLIEnv{Stdin: strings.NewReader(""), Stdout: io.Discard})
 	if err == nil || !strings.HasPrefix(err.Error(), `unknown provider "nope"; known providers: anthropic, antigravity, chatgpt`) {
 		t.Fatalf("unknown provider error = %v", err)
 	}
-	err = Login(t.Context(), store, "openai", strings.NewReader("\n"), io.Discard)
+	err = Login(t.Context(), store, "openai", CLIEnv{Stdin: strings.NewReader("\n"), Stdout: io.Discard})
 	if err == nil || err.Error() != "login openai: no API key was entered" {
 		t.Fatalf("empty key error = %v", err)
 	}
-	err = Login(t.Context(), store, "anthropic", strings.NewReader("\n"), io.Discard)
+	err = Login(t.Context(), store, "anthropic", CLIEnv{Stdin: strings.NewReader("\n"), Stdout: io.Discard})
 	if err == nil || err.Error() != "login anthropic: oauth paste returned no authorization code" {
 		t.Fatalf("empty anthropic login error = %v, want the OAuth paste failure", err)
 	}

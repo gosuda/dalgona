@@ -109,7 +109,10 @@ func refreshingSource(t *testing.T, refreshes *atomic.Int32) *oauth.Source {
 		_, _ = io.WriteString(w, `{"access_token":"fresh-access","expires_in":3600}`)
 	}))
 	t.Cleanup(tokens.Close)
-	provider := oauth.Providers["antigravity"]
+	provider, ok := oauth.ProviderByID("antigravity")
+	if !ok {
+		t.Fatal("ProviderByID has no antigravity entry")
+	}
 	provider.TokenURL = tokens.URL
 	return oauth.NewSource(provider, func(context.Context) (oauth.Token, error) {
 		return oauth.Token{Access: "stale-access", Refresh: "stale-refresh", Expires: time.Now().Add(-time.Second)}, nil

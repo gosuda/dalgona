@@ -61,18 +61,9 @@ func TestLoginDeviceAuthSignsInWithoutABrowser(t *testing.T) {
 	var polls atomic.Int32
 	server := httptest.NewServer(chatGPTDeviceServer(t, &polls))
 	t.Cleanup(server.Close)
-	base := oauth.Providers["chatgpt"]
-	provider := base
-	provider.ClientID = "client"
-	provider.DeviceURL = server.URL + "/usercode"
-	provider.DeviceTokenURL = server.URL + "/device-token"
-	provider.TokenURL = server.URL + "/oauth-token"
-	provider.DeviceRedirectURL = "https://example.test/device-callback"
-	oauth.Providers["chatgpt"] = provider
-	t.Cleanup(func() { oauth.Providers["chatgpt"] = base })
 	home := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	env := CLIEnv{Product: config.ProductDalgona, Home: home, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr}
+	env := CLIEnv{Product: config.ProductDalgona, Home: home, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, ProviderLookup: chatGPTDeviceLookup(t, server.URL)}
 	if code := RunCLI(t.Context(), env, []string{"login", "chatgpt", "--device-auth"}); code != 0 {
 		t.Fatalf("device login exit %d: %s", code, stderr.String())
 	}
@@ -84,12 +75,37 @@ func TestLoginDeviceAuthSignsInWithoutABrowser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !hasChatGPTDeviceCredential(store) {
+		t.Fatal("device login did not store the ChatGPT OAuth credential")
+	}
+}
+
+func chatGPTDeviceLookup(t *testing.T, baseURL string) func(string) (oauth.Provider, bool) {
+	t.Helper()
+	provider, ok := oauth.ProviderByID("chatgpt")
+	if !ok {
+		t.Fatal("ProviderByID has no chatgpt entry")
+	}
+	provider.ClientID = "client"
+	provider.DeviceURL = baseURL + "/usercode"
+	provider.DeviceTokenURL = baseURL + "/device-token"
+	provider.TokenURL = baseURL + "/oauth-token"
+	provider.DeviceRedirectURL = "https://example.test/device-callback"
+	return func(id string) (oauth.Provider, bool) {
+		if id == "chatgpt" {
+			return provider, true
+		}
+		return oauth.ProviderByID(id)
+	}
+}
+
+func hasChatGPTDeviceCredential(store *auth.Store) bool {
 	for _, entry := range store.Entries() {
 		if entry.ID == "chatgpt" && entry.Credential.Type == "oauth" && entry.Credential.Access == "chatgpt-device-access" {
-			return
+			return true
 		}
 	}
-	t.Fatal("device login did not store the ChatGPT OAuth credential")
+	return false
 }
 
 func TestLoginDeviceAuthRejectsOtherProviders(t *testing.T) {
@@ -108,7 +124,7 @@ func TestLoginDeviceReportsMissingFlowFromDeviceCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = LoginDevice(t.Context(), store, "missing", &bytes.Buffer{})
+	err = LoginDevice(t.Context(), store, "missing", CLIEnv{Stdout: &bytes.Buffer{}})
 	if err == nil || err.Error() != "login missing: provider has no device flow" {
 		t.Fatalf("LoginDevice error = %v, want the device-code error", err)
 	}

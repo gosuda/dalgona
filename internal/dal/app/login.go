@@ -13,16 +13,17 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 )
 
-func Login(ctx context.Context, store *auth.Store, provider string, in io.Reader, out io.Writer) error {
-	lines := bufio.NewReader(in)
+func Login(ctx context.Context, store *auth.Store, provider string, env CLIEnv) error {
+	lines := bufio.NewReader(env.Stdin)
+	out := env.Stdout
 	switch {
-	case slices.Contains(auth.OAuthProviders, provider):
-		token, err := oauthLogin(ctx, provider, lines, out)
+	case slices.Contains(auth.OAuthProviders(), provider):
+		token, err := oauthLogin(ctx, provider, lines, out, env.providerLookup())
 		if err != nil {
 			return fmt.Errorf("login %s: %w", provider, err)
 		}
 		return store.SetCredential(provider, credentialFrom(token))
-	case slices.Contains(auth.APIKeyProviders, provider):
+	case slices.Contains(auth.APIKeyProviders(), provider):
 		fmt.Fprintf(out, "Paste the %s API key: ", provider)
 		key, err := lines.ReadString('\n')
 		key = strings.TrimSpace(key)
@@ -35,10 +36,10 @@ func Login(ctx context.Context, store *auth.Store, provider string, in io.Reader
 	}
 }
 
-func LoginDevice(ctx context.Context, store *auth.Store, provider string, out io.Writer) error {
-	definition, _ := oauth.ProviderByID(provider)
+func LoginDevice(ctx context.Context, store *auth.Store, provider string, env CLIEnv) error {
+	definition, _ := env.providerLookup()(provider)
 	token, err := oauth.DeviceCode(ctx, definition, func(code, url string) {
-		printDeviceCode(out, provider, url, code)
+		printDeviceCode(env.Stdout, provider, url, code)
 	})
 	if err != nil {
 		return fmt.Errorf("login %s: %w", provider, err)
@@ -57,8 +58,8 @@ func ignoreEOF(err error) error {
 	return err
 }
 
-func oauthLogin(ctx context.Context, provider string, lines *bufio.Reader, out io.Writer) (oauth.Token, error) {
-	definition, ok := oauth.ProviderByID(provider)
+func oauthLogin(ctx context.Context, provider string, lines *bufio.Reader, out io.Writer, lookup func(string) (oauth.Provider, bool)) (oauth.Token, error) {
+	definition, ok := lookup(provider)
 	if !ok {
 		return oauth.Token{}, fmt.Errorf("no OAuth flow for %s", provider)
 	}

@@ -36,8 +36,6 @@ func platformOSType(goos string) string {
 	return "linux"
 }
 
-var chatGPTProvider = func() (oauth.Provider, bool) { return oauth.ProviderByID("chatgpt") }
-
 func (s *server) initialize(context.Context, jsontext.Value) (jsontext.Value, error) {
 	cfg := s.host.Config()
 	family, name := platform()
@@ -352,14 +350,14 @@ func (s *server) loginKey(ctx context.Context, p AccountLoginStartParams) (jsont
 	if strings.IndexFunc(key, unicode.IsSpace) >= 0 {
 		return nil, invalidParams("the API key must be one line")
 	}
-	if !slices.Contains(auth.APIKeyProviders, name) && !slices.Contains(auth.RunnerServices, name) {
+	if !slices.Contains(auth.APIKeyProviders(), name) && !slices.Contains(auth.RunnerServices(), name) {
 		return nil, invalidParams("provider " + name + " does not take an API key")
 	}
 	store, err := s.credentials()
 	if err != nil {
 		return nil, err
 	}
-	if slices.Contains(auth.APIKeyProviders, name) {
+	if slices.Contains(auth.APIKeyProviders(), name) {
 		if err = s.host.VerifyAPIKey(ctx, name, key); err != nil {
 			rejected := name + " did not accept the API key; it was not saved"
 			s.notifyLogin(name, rejected)
@@ -413,7 +411,7 @@ func (s *server) finishLogin(id string, token oauth.Token, err error) {
 }
 
 func (s *server) loginBrowser(ctx context.Context) (jsontext.Value, error) {
-	provider, ok := chatGPTProvider()
+	provider, ok := s.providers("chatgpt")
 	if !ok {
 		return nil, invalidParams("chatgpt login is not available")
 	}
@@ -439,7 +437,7 @@ func (s *server) loginBrowser(ctx context.Context) (jsontext.Value, error) {
 }
 
 func (s *server) loginDevice(ctx context.Context) (jsontext.Value, error) {
-	provider, ok := chatGPTProvider()
+	provider, ok := s.providers("chatgpt")
 	if !ok {
 		return nil, invalidParams("chatgpt login is not available")
 	}

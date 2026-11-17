@@ -74,17 +74,16 @@ func pendingTwiceThenGranted(polls *atomic.Int32) pollAnswer {
 	}
 }
 
-func useCopilotServer(t *testing.T, server *httptest.Server) {
+func useCopilotServer(t *testing.T, server *httptest.Server) func(string) (oauth.Provider, bool) {
 	t.Helper()
-	base, ok := oauth.Providers["copilot"]
-	if !ok {
-		t.Fatal("oauth.Providers has no copilot entry")
+	return func(id string) (oauth.Provider, bool) {
+		provider, ok := oauth.ProviderByID(id)
+		if id == "copilot" && ok {
+			provider.DeviceURL = server.URL + "/login/device/code"
+			provider.TokenURL = server.URL + "/login/oauth/access_token"
+		}
+		return provider, ok
 	}
-	provider := base
-	provider.DeviceURL = server.URL + "/login/device/code"
-	provider.TokenURL = server.URL + "/login/oauth/access_token"
-	oauth.Providers["copilot"] = provider
-	t.Cleanup(func() { oauth.Providers["copilot"] = base })
 }
 
 func copilotCredential(t *testing.T, home string) (auth.Credential, bool) {
@@ -103,14 +102,14 @@ func copilotCredential(t *testing.T, home string) (auth.Credential, bool) {
 
 func TestCopilotDeviceLoginStoresGitHubToken(t *testing.T) {
 	var polls atomic.Int32
-	useCopilotServer(t, copilotGitHub(t, pendingTwiceThenGranted(&polls)))
+	lookup := useCopilotServer(t, copilotGitHub(t, pendingTwiceThenGranted(&polls)))
 	home := t.TempDir()
 	store, err := auth.Load(home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err = Login(t.Context(), store, "copilot", strings.NewReader(""), &out); err != nil {
+	if err = Login(t.Context(), store, "copilot", CLIEnv{Stdin: strings.NewReader(""), Stdout: &out, ProviderLookup: lookup}); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != copilotLoginLine {
@@ -124,14 +123,14 @@ func TestCopilotDeviceLoginStoresGitHubToken(t *testing.T) {
 }
 
 func TestCopilotDeviceLoginDenialStoresNothing(t *testing.T) {
-	useCopilotServer(t, copilotGitHub(t, denied))
+	lookup := useCopilotServer(t, copilotGitHub(t, denied))
 	home := t.TempDir()
 	store, err := auth.Load(home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	err = Login(t.Context(), store, "copilot", strings.NewReader(""), &out)
+	err = Login(t.Context(), store, "copilot", CLIEnv{Stdin: strings.NewReader(""), Stdout: &out, ProviderLookup: lookup})
 	if err == nil || err.Error() != "login copilot: device authorization failed: access_denied" {
 		t.Fatalf("Login error = %v, want the denial", err)
 	}

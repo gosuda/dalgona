@@ -96,7 +96,10 @@ func TestStreamRefreshesExpiredTokenAndSendsAccountHeaders(t *testing.T) {
 	tokens := tokenServer(t, &refreshes)
 	seen := make(chan seenRequest, 2)
 	codex := codexServer(t, seen)
-	provider := oauth.Providers["chatgpt"]
+	provider, ok := oauth.ProviderByID("chatgpt")
+	if !ok {
+		t.Fatal("ProviderByID has no chatgpt entry")
+	}
 	provider.TokenURL = tokens.URL
 	source := oauth.NewSource(provider, func(context.Context) (oauth.Token, error) {
 		return oauth.Token{Access: "stale-access", Refresh: "stale-refresh", Expires: time.Now().Add(-time.Minute), Account: "acct-9"}, nil
