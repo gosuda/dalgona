@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json/jsontext"
+	"errors"
 
 	"github.com/gosuda/dalgona/internal/dal/runner"
 	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
@@ -63,12 +64,38 @@ func IsLocalRunner(run runner.Runner) bool {
 	return ok
 }
 
+type FailureKind string
+
+const (
+	FailureNone     FailureKind = ""
+	FailureInternal FailureKind = "internal"
+)
+
+type OrdinaryError struct{ Err error }
+
+func (e *OrdinaryError) Error() string { return e.Err.Error() }
+
+func (e *OrdinaryError) Unwrap() error { return e.Err }
+
+func Ordinary(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &OrdinaryError{Err: err}
+}
+
+func IsOrdinary(err error) bool {
+	var ordinary *OrdinaryError
+	return errors.As(err, &ordinary)
+}
+
 type Result struct {
 	Output   []byte
 	OK       bool
 	Meta     jsontext.Value
 	ExitCode *int
 	Path     string
+	Failure  FailureKind
 }
 
 type Tool interface {

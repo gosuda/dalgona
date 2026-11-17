@@ -358,6 +358,7 @@ func toolCompletedMembers(e ToolCompleted) []member {
 		field("call_id", stringValue(e.CallID)), field("ok", boolValue(e.OK)),
 		field("output", stringValue(e.Output)), field("recovered", stringValue(e.Recovered)),
 	}
+	fields = optionalString(fields, "failure", e.Failure)
 	if e.Spill != nil {
 		fields = append(fields, field("spill", spillValue(*e.Spill)))
 	}

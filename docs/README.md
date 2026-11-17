@@ -35,6 +35,7 @@ Use one name for each thing in user-facing text and new specifications.
 - [Edit styles](dal/spec/edit-styles.md): parser, resolver, writer, and refusal contracts.
 - [Rewrite](dal/spec/rewrite.md): structural replacement by tree-sitter capture, its bounds, and its refusals.
 - [Edit review](dal/spec/edit-review.md): judge each edit on one diff, turn reviews, and diff hunks.
+- [Failure records](dal/spec/failures.md): bounded masked records, capture, privacy classes, and refusals.
 - [Hashline profiles](dal/spec/hashline/README.md): shared, Light, Enhanced, conformance, and review documents. This imported set distinguishes proposal requirements from its bounded model-check evidence.
 - [Hashline shared contract](dal/spec/hashline/hashline-common-v1.md): syntax, edit evidence, mapping, lifecycle, and authorization.
 - [Hashline Light](dal/spec/hashline/hashline-light-v1.md): snapshot-bound edits without a prior-observation requirement.

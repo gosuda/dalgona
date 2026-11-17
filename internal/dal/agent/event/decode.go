@@ -305,7 +305,7 @@ func decodeToolCompleted(r *objectReader) ToolCompleted {
 	}
 	return ToolCompleted{
 		CallID: r.str("call_id"), OK: r.boolean("ok"), Output: r.str("output"), Spill: spill,
-		ExitCode: exitCode, Recovered: r.str("recovered"), Meta: r.raw("meta"),
+		ExitCode: exitCode, Recovered: r.str("recovered"), Failure: r.str("failure"), Meta: r.raw("meta"),
 		CompletedAt: r.timestamp("completed_at"),
 	}
 }

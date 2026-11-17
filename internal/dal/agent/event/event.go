@@ -469,6 +469,7 @@ type ToolCompleted struct {
 	Spill       *Spill
 	ExitCode    *int
 	Recovered   string
+	Failure     string
 	Meta        jsontext.Value
 	CompletedAt time.Time
 }
@@ -482,6 +483,9 @@ func (e ToolCompleted) Validate() error {
 		return err
 	}
 	if err := oneOf("recovered", e.Recovered, "none", "replayed", "interrupted", "skipped"); err != nil {
+		return err
+	}
+	if err := oneOf("failure", e.Failure, "", "internal"); err != nil {
 		return err
 	}
 	return optionalRawJSON("meta", e.Meta)
