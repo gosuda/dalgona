@@ -3,7 +3,7 @@ package journal
 import (
 	"bytes"
 	"context"
-	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/cockroachdb/pebble/v2"
 )
 
 func event(n int) []byte {
@@ -299,16 +301,49 @@ func TestJournalKeepsValidTailPastMirrorHead(t *testing.T) {
 
 func deleteMirrorFrom(t *testing.T, dir string, firstMissing int) {
 	t.Helper()
-	db, err := sql.Open("sqlite", dbDSN(filepath.Join(dir, "state.db")))
+	raw := openRawMirror(t, dir)
+	batch := raw.NewBatch()
+	if err := deleteMirrorRowsFrom(raw, batch, "s", firstMissing); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		_ = raw.Close()
+		t.Fatalf("delete mirror rows: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func deleteMirrorRowsFrom(raw *pebble.DB, batch *pebble.Batch, sid string, firstMissing int) error {
+	for _, kind := range []byte{'e', 'i'} {
+		prefix := sessionPrefix(kind, sid)
+		lo := append(bytes.Clone(prefix), seqBytes(uint64(firstMissing))...) //nolint:gosec // test input is positive
+		if err := batch.DeleteRange(lo, upperBound(prefix), nil); err != nil {
+			return err
+		}
+	}
+	prefix := sessionPrefix('i', sid)
+	it, err := raw.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upperBound(prefix)})
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	if _, err := db.Exec("DELETE FROM events WHERE session = 's' AND seq >= ?", firstMissing); err != nil {
-		t.Fatal(err)
+	defer func() { _ = it.Close() }()
+	for valid := it.First(); valid; valid = it.Next() {
+		key := it.Key()
+		seq := binary.BigEndian.Uint64(key[len(key)-8:])
+		if seq < uint64(firstMissing) { //nolint:gosec // test input is positive
+			continue
+		}
+		_, body, _ := bytes.Cut(it.Value(), []byte{0})
+		for trigram := range trigrams(string(body)) {
+			if err := batch.Delete(keyPosting(trigram, sid, seq), nil); err != nil {
+				return err
+			}
+		}
 	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
+	return it.Error()
 }
 
 func requireDamageHead(t *testing.T, store *Store, headSeq uint64) {
@@ -373,6 +408,9 @@ func TestJournalGarbageDB(t *testing.T) {
 	store := mustOpen(t, dir)
 	events := appendEvents(t, store, "s", 2)
 	closeStore(t, store)
+	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("remove state.db: %v", err)
+	}
 	writeFile(t, filepath.Join(dir, "state.db"), []byte("garbage"))
 
 	store = mustOpen(t, dir)
@@ -400,6 +438,9 @@ func testBackupReconciliation(t *testing.T) {
 	path := journalFile(dir)
 	original := readFile(t, path)
 	corruptSecondLine(t, path)
+	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("remove state.db: %v", err)
+	}
 	writeFile(t, filepath.Join(dir, "state.db"), []byte("garbage"))
 
 	store = mustOpen(t, dir)

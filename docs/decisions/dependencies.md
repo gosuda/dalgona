@@ -36,6 +36,7 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |github.com/charmbracelet/x/vt|v0.1.0|2026-10-12|test-only terminal emulator for the print test, MIT licence.|none|
 |github.com/odvcencio/gotreesitter|v0.57.0|2026-11-08|syntax package for the symbols, definition, syntax and rewrite modes, with 23 grammars. Licence MIT, per `LICENSE` at v0.57.0. Decision in `docs/decisions/syntax-package.md`.|none|
 |github.com/coder/websocket|v1.8.15|2026-06-15|websocket|none|
+|github.com/cockroachdb/pebble/v2|v2.1.7|2026-11-17|journal mirror, pure Go|none|
 |github.com/coreequip/mermaidascii|v0.3.1|2026-11-09|mermaid fences render as text art in the TUI, a Go port of the beautiful-mermaid ASCII renderer. MIT licence.|none|
 |github.com/containerd/errdefs|v1.0.0|2024-10-08|Docker runner error types|none|
 |github.com/landlock-lsm/go-landlock|v0.11.2|2026-11-10|Linux write confinement|none|
@@ -53,7 +54,6 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |golang.org/x/text|v0.44.0|2026-11-09|Unicode normalization in advisor guard, alongside TUI normalization and width use in `internal/tui/input.go`, `width.go`, and `band_test.go`|none|
 |google.golang.org/protobuf|v1.36.12|2026-08-10|encoding/protowire only|none|
 |modernc.org/quickjs|v0.27.0|2026-10-24|js eval cells and nomnoml diagram rendering, pure Go QuickJS|none|
-|modernc.org/sqlite|v1.62.0|2026-11-07|journal mirror, pure Go|none|
 |oss.terrastruct.com/d2|v0.7.2|2026-08-07|d2 fences render as text art in the TUI via d2lib and d2ascii|none|
 |github.com/evilmartians/lefthook/v2|v2.2.2|2026-10-13|hook tool|none|
 |github.com/golangci/golangci-lint/v2|v2.15.0|2026-10-16|lint tool|none|

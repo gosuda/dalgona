@@ -3,13 +3,14 @@ package journal
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/cockroachdb/pebble/v2"
 )
 
 type SearchQuery struct {
@@ -135,17 +136,16 @@ func termMatches(body, text string) int {
 }
 
 func (s *Store) Search(ctx context.Context, q SearchQuery) ([]SearchHit, error) {
-	match, err := searchMatch(q.Text)
-	if err != nil {
+	if _, err := searchMatch(q.Text); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	db := s.db
+	m := s.mirror
 	s.mu.Unlock()
-	if db == nil {
+	if m == nil {
 		return nil, errors.New("journal: search needs an open mirror")
 	}
-	rows, err := db.QueryContext(ctx, `SELECT session, seq, kind, body FROM thread_fts WHERE thread_fts MATCH ? ORDER BY session, seq`, match)
+	rows, err := queryIndexRows(m, strings.Fields(q.Text))
 	if err != nil {
 		return nil, fmt.Errorf("journal: search: %w", err)
 	}
@@ -167,35 +167,42 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) ([]SearchHit, error) 
 	if q.Limit > 0 && q.Limit < limit {
 		limit = q.Limit
 	}
-	return keepPersistent(ctx, db, hits, limit)
+	return keepPersistent(ctx, m, hits, limit)
 }
 
-func keepPersistent(ctx context.Context, db *sql.DB, ranked []SearchHit, limit int) ([]SearchHit, error) {
+func keepPersistent(ctx context.Context, m *mirrorDB, ranked []SearchHit, limit int) ([]SearchHit, error) {
 	kept := make([]SearchHit, 0, min(len(ranked), limit))
-	for _, hit := range ranked {
-		if len(kept) == limit {
-			break
+	err := m.withDB(func(db *pebble.DB) error {
+		for _, hit := range ranked {
+			if len(kept) == limit {
+				break
+			}
+			ephemeral, err := sessionEphemeral(ctx, db, hit.Session)
+			if err != nil {
+				return err
+			}
+			if !ephemeral {
+				kept = append(kept, hit)
+			}
 		}
-		ephemeral, err := sessionEphemeral(ctx, db, hit.Session)
-		if err != nil {
-			return nil, err
-		}
-		if !ephemeral {
-			kept = append(kept, hit)
-		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return kept, nil
 }
 
-func sessionEphemeral(ctx context.Context, db *sql.DB, session string) (bool, error) {
-	var ev []byte
-	err := db.QueryRowContext(ctx, `SELECT ev FROM events WHERE session = ? AND seq = 1`, session).Scan(&ev)
-	if errors.Is(err, sql.ErrNoRows) {
+func sessionEphemeral(_ context.Context, db *pebble.DB, session string) (bool, error) {
+	value, closer, err := db.Get(keyEvent(session, 1))
+	if errors.Is(err, pebble.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("journal: search: %w", err)
 	}
+	defer func() { _ = closer.Close() }()
+	_, ev, _ := bytes.Cut(value, []byte{0})
 	return createdEphemeral(ev), nil
 }
 
@@ -245,23 +252,13 @@ func trueMember(d *jsontext.Decoder) (bool, error) {
 	return true, err
 }
 
-func scanBestHits(rows *sql.Rows, text string) (map[string]SearchHit, error) {
+func scanBestHits(rows []SearchHit, text string) (map[string]SearchHit, error) {
 	best := map[string]SearchHit{}
-	for rows.Next() {
-		var hit SearchHit
-		if err := rows.Scan(&hit.Session, &hit.Seq, &hit.Kind, &hit.Body); err != nil {
-			return nil, errors.Join(fmt.Errorf("journal: search: %w", err), rows.Close())
-		}
+	for _, hit := range rows {
 		hit.Matches = termMatches(hit.Body, text)
 		if current, seen := best[hit.Session]; !seen || hit.Matches > current.Matches {
 			best[hit.Session] = hit
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, errors.Join(fmt.Errorf("journal: search: %w", err), rows.Close())
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("journal: search: %w", err)
 	}
 	return best, nil
 }

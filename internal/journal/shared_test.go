@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cockroachdb/pebble/v2"
 )
 
 const (
@@ -251,23 +252,17 @@ func TestOpenSharedRepairsMirrorRowsPerSession(t *testing.T) {
 	appendEvents(t, store, "m", 3)
 	appendEvents(t, store, "other", 2)
 	closeStore(t, store)
-	db, err := sql.Open("sqlite", dbDSN(filepath.Join(dir, "state.db")))
+	raw := openRawMirror(t, dir)
+	want, err := corruptMirrorHash(raw, "m", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var want string
-	if err = db.QueryRow("SELECT hash FROM events WHERE session = 'm' AND seq = 2").Scan(&want); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec("UPDATE events SET hash = ? WHERE session = 'm' AND seq = 2", genesisPrev); err != nil {
-		t.Fatal(err)
-	}
-	if err = db.Close(); err != nil {
+	if err = raw.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	store = mustOpenShared(t, dir)
-	got, err := fetchRow(store.db, "m", 2)
+	got, err := fetchRow(store.mirror, "m", 2)
 	if err != nil || !got.ok || got.hash != want {
 		t.Fatalf("mirror row = %+v, %v; want hash %s", got, err, want)
 	}
@@ -305,6 +300,13 @@ func TestOpenSharedConcurrentBackups(t *testing.T) {
 	}
 }
 
+func removeStateDB(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("remove state.db: %v", err)
+	}
+}
+
 func TestOpenSharedLeavesMirrorWhilePeerIsOpen(t *testing.T) {
 	dir := t.TempDir()
 	store := mustOpenShared(t, dir)
@@ -318,6 +320,7 @@ func TestOpenSharedLeavesMirrorWhilePeerIsOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	dbPath := filepath.Join(dir, "state.db")
+	removeStateDB(t, dir)
 	garbage := bytes.Repeat([]byte("not a database "), 512)
 	writeFile(t, dbPath, garbage)
 
@@ -606,14 +609,32 @@ func TestReplaySeesDamageUnderOwnSessionLock(t *testing.T) {
 
 func poisonMirror(t *testing.T, store *Store) func() {
 	t.Helper()
-	bad, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open scratch db: %v", err)
+	blocked := filepath.Join(t.TempDir(), "blocked.db")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocked path: %v", err)
 	}
-	_ = bad.Close()
-	orig := store.db
-	store.db = bad
-	return func() { store.db = orig }
+	orig := store.mirror
+	store.mirror = &mirrorDB{path: blocked}
+	return func() { store.mirror = orig }
+}
+
+func corruptMirrorHash(db *pebble.DB, session string, seq uint64) (string, error) {
+	raw, closer, err := db.Get(keyEvent(session, seq))
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = closer.Close() }()
+	hash, ev, ok := bytes.Cut(raw, []byte{0})
+	if !ok {
+		return "", fmt.Errorf("event row missing hash separator")
+	}
+	want := string(hash)
+	row := append([]byte(genesisPrev), byte(0))
+	row = append(row, ev...)
+	if err := db.Set(keyEvent(session, seq), row, pebble.Sync); err != nil {
+		return "", err
+	}
+	return want, nil
 }
 
 func cachedHandle(t *testing.T, store *Store, session string) *os.File {

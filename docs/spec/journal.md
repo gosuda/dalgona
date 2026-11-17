@@ -17,7 +17,7 @@ A payload larger than 64 KiB MUST be stored under `blobs/<sha256>`. The event MU
 
 ## Append
 
-`Append` MUST validate every event before writing. It MUST encode all events for one call and write them with one append write. It MUST `fsync` the journal before it returns. It MUST insert the same records and thread head in one immediate SQLite transaction. JSONL remains authoritative when the mirror write fails. The store MUST retain the new JSONL head and report the mirror error.
+`Append` MUST validate every event before writing. It MUST encode all events for one call and write them with one append write. It MUST `fsync` the journal before it returns. It MUST write the same records and thread head in one synced mirror batch. JSONL remains authoritative when the mirror write fails. The store MUST retain the new JSONL head and report the mirror error.
 
 On Linux, when `DALGONA_SYNCFS` is set, the journal `fsync` MUST be followed by `Syncfs` for that directory. On other systems the variable MUST have no effect.
 
@@ -30,7 +30,7 @@ On Linux, when `DALGONA_SYNCFS` is set, the journal `fsync` MUST be followed by 
 | The final line has no newline, cannot be parsed, or has a CRC or hash failure | Copy the partial final record to `quarantine/<session>-<offset>.bin`. When that file exists, the store MUST write `quarantine/<session>-<offset>-<seq>.bin` where `<seq>` is a per-process sequence number. The store MUST NOT overwrite a file in quarantine. Truncate at the last good line. `fsync` the file and directory. Log `journal: <session>: torn tail of <n> bytes quarantined`. Apply the verified mirror-suffix rule afterward. |
 | A record has a sequence gap, a duplicate sequence, or a bad link at any position, or another bad record before the final line | Use the mirror only when every row from the damage point through the mirror head verifies against the chain. Rebuild JSONL from the good prefix and those rows through a temporary file, rename, and directory `fsync`. Keep every later JSONL record that verifies against the resulting chain. Rebuild the mirror from the kept JSONL. Valid records past the mirror head MUST NOT be discarded. |
 | The mirror cannot supply that complete verified suffix | Mark the thread damaged at the first bad sequence. Keep only the valid prefix for replay. Reject appends. Preserve the bad suffix in quarantine before writing the damage marker. Report `journal: <session>: damaged at seq <n>; quarantined at quarantine/<file>`. |
-| `state.db` fails `quick_check`, or a mirrored hash differs from JSONL | Move `state.db`, `state.db-wal`, and `state.db-shm` to `quarantine/state-<nanos>-<pid>-<seq>.db`, `quarantine/state-<nanos>-<pid>-<seq>.db-wal`, and `quarantine/state-<nanos>-<pid>-<seq>.db-shm`. `<nanos>` is Unix time in nanoseconds, `<pid>` is the process id, and `<seq>` is a per-process sequence number. The three files of one quarantine MUST share one stem. When a candidate name exists, the store MUST use the next free name with `-<n>` added to the stem. The store MUST NOT overwrite a file in quarantine. Rebuild the mirror from JSONL. |
+| `state.db` cannot be opened, or a mirrored hash differs from JSONL | Move `state.db` to `quarantine/state-<nanos>-<pid>-<seq>.db` (and `state.db-wal`, `state.db-shm` to the same stem with those suffixes when present). `<nanos>` is Unix time in nanoseconds, `<pid>` is the process id, and `<seq>` is a per-process sequence number. All paths of one quarantine MUST share one stem. When a candidate name exists, the store MUST use the next free name with `-<n>` added to the stem. The store MUST NOT overwrite a file in quarantine. Rebuild the mirror from JSONL. |
 | The mirror is behind JSONL | Replace the mirror rows of the thread with the JSONL rows. |
 | The mirror is ahead of a complete JSONL file | Append the mirror suffix only when every row verifies from the JSONL head. Otherwise rebuild the mirror from JSONL. |
 
@@ -38,29 +38,35 @@ On Linux, when `DALGONA_SYNCFS` is set, the journal `fsync` MUST be followed by 
 
 For a damaged thread, `Append` MUST fail with `journal: session <id> is damaged at seq <n>`. When the thread journal file is absent and the thread has committed events, `Replay` MUST fail with `journal: session <id> journal missing`.
 
-## SQLite mirror
+## Pebble mirror
 
-The database is `state.db`. The backup is `state.db.bak`. The store MUST enable WAL, `synchronous=FULL`, foreign keys, and a 5000 ms busy timeout. A write that still fails with `SQLITE_BUSY` after that timeout MAY retry the whole transaction a bounded number of times. It MUST use this schema:
+The mirror is the Pebble directory `state.db`. The backup is `state.db.bak`. Every committed write MUST sync its batch. The store MUST retry acquiring the mirror directory lock for up to 5000 ms before it fails a write. An exclusive store holds that lock for its lifetime. A shared store holds it only across one open, write, or read batch.
 
-```sql
-CREATE TABLE events(session TEXT NOT NULL, seq INTEGER NOT NULL, hash TEXT NOT NULL, ev BLOB NOT NULL, PRIMARY KEY(session, seq));
-CREATE TABLE sessions(id TEXT PRIMARY KEY, parent TEXT, cwd TEXT, title TEXT, status TEXT NOT NULL CHECK(status IN ('ok','damaged')), head_seq INTEGER NOT NULL CHECK(head_seq >= 0), updated_at TEXT);
-CREATE VIRTUAL TABLE IF NOT EXISTS thread_fts USING fts5(session UNINDEXED, seq UNINDEXED, kind UNINDEXED, body, tokenize='trigram');
+The mirror maps `journal.jsonl` onto these keys:
+
+```text
+"v"                                     -> mirror schema version "1"
+"s" + len16(id) + id                    -> status \x1f head_seq \x1f updated_at
+"e" + len16(sid) + sid + seqBE8         -> hash \x00 ev
+"i" + len16(sid) + sid + seqBE8         -> kind \x00 body
+"t" + trigram + \x1f + len16(sid) + sid + seqBE8 -> ""
 ```
 
-The version-3 migration MUST create `thread_fts` when it is absent. It MUST backfill only rows whose `(session, seq)` pair is absent from `thread_fts`. It MUST recheck the version inside the immediate migration transaction, so a second opener applies nothing. It MUST set `PRAGMA user_version = 3` inside that same transaction.
+`status` is `ok` or `damaged`, `head_seq` is a non-negative integer, and `updated_at` is RFC 3339 UTC. Loads MUST coerce a bad `status` to `damaged` and a missing or negative `head_seq` to 0. An upsert MUST keep a prior `damaged` status.
 
-Every mirror write MUST add the index rows of the session inside the same transaction as its `events` rows. A session replacement MUST delete the index rows of the session first. A rebuilt mirror MUST rebuild the index from JSONL, because the index is derived data.
+Every mirror write MUST add the index rows of the session inside the same batch as its event rows. A session replacement MUST delete the index rows of the session first. A rebuilt mirror MUST rebuild the index from JSONL, because the index is derived data.
 
 The index holds the inline `text` of `user.message` and `assistant.message` events and the `name` of `thread.named` events. `Search` MUST index no other event and no text that lives in a blob. `Search` MUST reject a query whose term holds fewer than 3 runes. `Search` MUST rank sessions by their best matching row and MUST cap the result at 1000 sessions.
 
+The index stores the lowercase rune trigrams of each indexed body as posting keys. `Search` MUST intersect the posting sets of every term trigram. It MUST verify each term as a case-insensitive substring of a candidate body before it returns a hit.
+
 `Search` MUST omit a session whose first event is `session.created` with `ephemeral` set to `true`. The index still holds the rows of that session. `Search` MUST keep every other session. That includes a session whose `session.created` event has `ephemeral` absent or `false`. It also includes a session whose first event has another type and sets `ephemeral`. A positive `Limit` below 1000 MUST lower the cap. `Search` MUST apply the cap and the limit after it omits ephemeral sessions. An omitted session never uses a slot of the result.
 
-The mirror MUST remove the rows of one session with one transaction. That transaction deletes the `thread_fts` rows, the `events` rows, and the `sessions` row of the session. It MUST NOT change the JSONL file, which stays append-only. A removal of a session with no rows MUST succeed and MUST NOT change another session.
+The mirror MUST remove the rows of one session with one batch. That batch deletes the posting keys, the index rows, the event rows, and the session row of the session. It MUST NOT change the JSONL file, which stays append-only. A removal of a session with no rows MUST succeed and MUST NOT change another session.
 
-The database MUST record its schema version in `PRAGMA user_version`. `openDB` MUST apply ordered migrations at open and MUST reject a database whose version exceeds the supported version. Databases without a version adopt version 1 with no row changes. The version-2 migration MUST coerce legacy thread rows to the constrained shape. It MUST map a NULL or unexpected `status` to `damaged`. It MUST map a NULL or negative `head_seq` to 0. Loads MUST apply the same coercion to any row that still violates the constraint.
+The mirror MUST record its schema version in the `v` key. The store MUST reject a mirror whose version exceeds the supported version. A mirror without the key adopts version 1 with no row changes.
 
-Every 30 minutes and at clean close, the store MUST run `VACUUM INTO` into `state.db.bak.tmp`. It MUST then rename that file to `state.db.bak`. The store MUST hold an exclusive lock on `repair.lock` from the removal of a stale `state.db.bak.tmp` through the rename. A clean close MUST report a backup failure. When `state.db` is unusable, the store MUST try `state.db.bak` before it creates an empty mirror. This rule allows a verified backup row to repair damaged JSONL.
+Every 30 minutes and at clean close, the store MUST checkpoint `state.db` into `state.db.bak.tmp`. It MUST then rename that directory to `state.db.bak`. The store MUST hold an exclusive lock on `repair.lock` from the removal of a stale `state.db.bak.tmp` through the rename. A clean close MUST report a backup failure. When `state.db` is unusable, the store MUST try `state.db.bak` before it creates an empty mirror. This rule allows a verified backup row to repair damaged JSONL.
 
 ## Locks
 
