@@ -1,6 +1,7 @@
 package daltoki
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -180,6 +181,23 @@ func TestRelayRejectsForgedEnvelopeWithoutAck(t *testing.T) {
 	harness.mu.Unlock()
 	if len(acks) != 1 || acks[0] != "delivery-9" {
 		t.Fatalf("acks = %v", acks)
+	}
+}
+
+func TestRelayPollAdmitsMaximumSizeWebhook(t *testing.T) {
+	secret := "relay-secret"
+	body := bytes.Repeat([]byte("x"), maxWebhookBody)
+	envelope := signedEnvelope(secret, "delivery-max", "issues", body, time.Now())
+	harness := newRelayHarness(t, []Envelope{envelope})
+	store := &fakeIntakeStore{failAfter: -1}
+	intake := testRelayIntake(t, harness.server, store, secret)
+
+	if _, err := intake.PollOnce(context.Background(), ""); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	admitted := store.admitted()
+	if len(admitted) != 1 || len(admitted[0].Body) != maxWebhookBody {
+		t.Fatalf("admitted = %d envelopes, want one carrying %d bytes", len(admitted), maxWebhookBody)
 	}
 }
 
