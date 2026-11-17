@@ -43,9 +43,13 @@ func (h *Host) Exec(ctx context.Context, id string, spec ExecSpec) (ExecResult, 
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("agent: exec runner: %w", err)
 	}
+	mode := execSandboxMode(spec.Sandbox)
+	if h.cfg.SandboxCause() != "" {
+		mode = runner.SandboxOff
+	}
 	process := runner.ProcessSpec{
 		ID: id, Argv: spec.Argv, Dir: spec.Dir, Env: execEnvironment(h.cfg.ShellEnv.Resolve(ctx, os.Environ()), spec.Env), EnvResolved: true,
-		Sandbox: deniedSocketSandbox(execSandboxMode(spec.Sandbox), append([]string{spec.Dir}, h.roots...), h.Config().Home),
+		Sandbox: deniedSocketSandbox(mode, append([]string{spec.Dir}, h.roots...), h.Config().Home),
 	}
 	if err := run.Start(ctx, process); err != nil {
 		return ExecResult{}, fmt.Errorf("agent: exec start: %w", err)

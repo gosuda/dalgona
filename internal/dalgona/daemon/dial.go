@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
@@ -13,8 +15,12 @@ func DialHome(home string) (net.Conn, error) {
 		return nil, err
 	}
 	sock := SocketPath(home)
-	if _, err := socketOwned(sock); err != nil {
+	owned, err := socketOwned(sock)
+	if err != nil {
 		return nil, err
+	}
+	if !owned {
+		return nil, fmt.Errorf("daemon socket %s: %w", sock, fs.ErrNotExist)
 	}
 	return dialPeer(sock)
 }

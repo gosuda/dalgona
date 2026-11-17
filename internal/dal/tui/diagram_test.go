@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"strings"
 	"sync"
@@ -40,9 +41,14 @@ func TestRenderDiagramD2(t *testing.T) {
 }
 
 func TestRenderDiagramNomnoml(t *testing.T) {
-	diagramMu.Lock()
-	defer diagramMu.Unlock()
-	art, err := renderDiagram("nomnoml", "[A]->[B]\n")
+	t.Parallel()
+	budget := diagramBudget
+	if raceEnabled {
+		budget *= 4
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	art, err := renderNomnoml(ctx, "[A]->[B]\n")
 	if err != nil {
 		t.Fatalf("nomnoml render: %v", err)
 	}

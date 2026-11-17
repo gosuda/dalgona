@@ -165,6 +165,7 @@ type screenState struct {
 	kittyAsked    bool
 	kittyWindow   bool
 	kittyNerd     bool
+	imgProto      string
 	verbosity     string
 	env           tea.EnvMsg
 	notifications bool

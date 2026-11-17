@@ -70,14 +70,14 @@ func callCreateRestrictedToken(base windows.Token, entries []windows.SIDAndAttri
 		0,
 		0,
 		uintptr(len(entries)),
-		uintptr(unsafe.Pointer(&entries[0])),
-		uintptr(unsafe.Pointer(&restricted)),
+		uintptr(unsafe.Pointer(&entries[0])), //nolint:gosec // CreateRestrictedToken takes the SIDAndAttributes slice as a raw pointer
+		uintptr(unsafe.Pointer(&restricted)), //nolint:gosec // CreateRestrictedToken writes the token handle through a raw pointer
 	)
 	runtime.KeepAlive(entries)
 	if result != 0 {
 		return restricted, nil
 	}
-	if callErr != syscall.Errno(0) {
+	if !errors.Is(callErr, syscall.Errno(0)) {
 		return 0, fmt.Errorf("runner: CreateRestrictedToken: %w", callErr)
 	}
 	return 0, errors.New("runner: CreateRestrictedToken failed")
@@ -87,8 +87,62 @@ func prepareRestrictedToken(token windows.Token, logon []byte) error {
 	if err := enableTokenPrivilege(token, "SeChangeNotifyPrivilege"); err != nil {
 		return err
 	}
-	return broadenTokenDefaultDacl(token, logon)
+	if err := broadenTokenDefaultDacl(token, logon); err != nil {
+		return err
+	}
+	return grantInteractiveObjects(logon)
 }
+
+func grantInteractiveObjects(logon []byte) error {
+	entries := []windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sidFromBytes(logon)),
+		},
+	}}
+	station, _, callErr := procGetProcessWindowStation.Call()
+	if station == 0 {
+		return fmt.Errorf("runner: GetProcessWindowStation: %w", callErr)
+	}
+	if err := grantObjectAccess(windows.Handle(station), entries); err != nil {
+		return fmt.Errorf("runner: grant window station: %w", err)
+	}
+	desktop, _, callErr := procGetThreadDesktop.Call(uintptr(windows.GetCurrentThreadId()))
+	if desktop == 0 {
+		return fmt.Errorf("runner: GetThreadDesktop: %w", callErr)
+	}
+	if err := grantObjectAccess(windows.Handle(desktop), entries); err != nil {
+		return fmt.Errorf("runner: grant desktop: %w", err)
+	}
+	runtime.KeepAlive(logon)
+	return nil
+}
+
+func grantObjectAccess(handle windows.Handle, entries []windows.EXPLICIT_ACCESS) error {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_WINDOW_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	current, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	merged, err := windows.ACLFromEntries(entries, current)
+	if err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(handle, windows.SE_WINDOW_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, merged, nil)
+}
+
+var (
+	user32dll                   = windows.NewLazySystemDLL("user32.dll")
+	procGetProcessWindowStation = user32dll.NewProc("GetProcessWindowStation")
+	procGetThreadDesktop        = user32dll.NewProc("GetThreadDesktop")
+)
 
 func broadenTokenDefaultDacl(token windows.Token, logon []byte) error {
 	current, buffer, err := tokenDefaultDacl(token)
@@ -96,7 +150,7 @@ func broadenTokenDefaultDacl(token windows.Token, logon []byte) error {
 		return err
 	}
 	access := windows.EXPLICIT_ACCESS{
-		AccessPermissions: windows.GENERIC_READ | windows.GENERIC_WRITE,
+		AccessPermissions: windows.GENERIC_ALL,
 		AccessMode:        windows.GRANT_ACCESS,
 		Inheritance:       windows.NO_INHERITANCE,
 		Trustee: windows.TRUSTEE{
@@ -124,13 +178,13 @@ func tokenDefaultDacl(token windows.Token) (*windows.ACL, []byte, error) {
 	if err := windows.GetTokenInformation(token, windows.TokenDefaultDacl, &buffer[0], size, &size); err != nil {
 		return nil, nil, fmt.Errorf("runner: read token default DACL: %w", err)
 	}
-	info := (*tokenDefaultDaclInfo)(unsafe.Pointer(&buffer[0]))
+	info := (*tokenDefaultDaclInfo)(unsafe.Pointer(&buffer[0])) //nolint:gosec // GetTokenInformation writes the TOKEN_DEFAULT_DACL struct into buffer
 	return info.DefaultDacl, buffer, nil
 }
 
 func setTokenDefaultDacl(token windows.Token, dacl *windows.ACL) error {
 	info := tokenDefaultDaclInfo{DefaultDacl: dacl}
-	err := windows.SetTokenInformation(token, windows.TokenDefaultDacl, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+	err := windows.SetTokenInformation(token, windows.TokenDefaultDacl, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))) //nolint:gosec // SetTokenInformation takes the info struct as a raw pointer
 	runtime.KeepAlive(info)
 	runtime.KeepAlive(dacl)
 	if err != nil {
@@ -179,7 +233,7 @@ func copySID(sid *windows.SID) ([]byte, error) {
 }
 
 func sidFromBytes(value []byte) *windows.SID {
-	return (*windows.SID)(unsafe.Pointer(&value[0]))
+	return (*windows.SID)(unsafe.Pointer(&value[0])) //nolint:gosec // value holds marshalled SID bytes
 }
 
 func enableTokenPrivilege(token windows.Token, name string) error {

@@ -35,6 +35,13 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "__shim" {
 		os.Exit(runner.ShimMain(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "__spill" {
+		chunk := bytes.Repeat([]byte{0x80}, 4096)
+		for n := 0; n < 1100000; n += len(chunk) {
+			_, _ = os.Stdout.Write(chunk[:min(len(chunk), 1100000-n)])
+		}
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
 }
 

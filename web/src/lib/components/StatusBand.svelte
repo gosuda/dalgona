@@ -169,14 +169,22 @@ const shown = $derived({
 	.status-band {
 		display: grid;
 		justify-items: end;
+		flex: 1 1 0;
+		min-width: 8rem;
 		gap: var(--space-2);
 		margin-inline-start: auto;
+		container: band / inline-size;
 	}
 
 	.band {
 		display: grid;
 		grid-auto-flow: column;
-		grid-auto-columns: max-content;
+		grid-auto-columns: minmax(0, max-content);
+		justify-content: end;
+		width: 100%;
+		min-width: 0;
+		overflow: hidden;
+		padding: 4px;
 		gap: var(--space-1) var(--space-3);
 		margin: 0;
 		font-size: var(--size-caption);
@@ -238,16 +246,13 @@ const shown = $derived({
 	@media (max-width: 40rem) {
 		.status-band {
 			justify-items: stretch;
+			flex-basis: 100%;
 			margin-inline-start: 0;
-			min-width: 0;
 			width: 100%;
 			max-width: 100%;
 		}
 
 		.band {
-			container: band / inline-size;
-			width: 100%;
-			min-width: 0;
 			grid-template-columns: minmax(0, 1fr);
 		}
 

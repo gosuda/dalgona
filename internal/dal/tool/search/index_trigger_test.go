@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -223,6 +224,20 @@ func TestSearchReturnsBeforeBuildStarts(t *testing.T) {
 	release()
 }
 
+func exitCodeArgv(code int) []string {
+	if runtime.GOOS == "windows" {
+		return runner.WindowsShellArgv("exit " + strconv.Itoa(code))
+	}
+	return []string{"sh", "-c", "exit " + strconv.Itoa(code)}
+}
+
+func sleepArgv() []string {
+	if runtime.GOOS == "windows" {
+		return runner.WindowsShellArgv("powershell -NoProfile -Command Start-Sleep 30")
+	}
+	return []string{"sh", "-c", "sleep 30"}
+}
+
 func TestRunBuildPublishesOnlyAfterExitZero(t *testing.T) {
 	cases := []struct {
 		name string
@@ -234,7 +249,7 @@ func TestRunBuildPublishesOnlyAfterExitZero(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			newBuildLog(t, func(run runner.Runner, spec runner.ProcessSpec) error {
-				spec.Argv = []string{"sh", "-c", "exit " + strconv.Itoa(tc.code)}
+				spec.Argv = exitCodeArgv(tc.code)
 				return run.Start(context.Background(), spec)
 			})
 			root := filepath.Join(t.TempDir(), "root")
@@ -311,7 +326,7 @@ func TestBuildIsKilledAtDeadline(t *testing.T) {
 	setBuildDeadline(t, time.Second)
 	local := newIndexLocal(t)
 	log := newBuildLog(t, func(run runner.Runner, spec runner.ProcessSpec) error {
-		spec.Argv = []string{"sh", "-c", "sleep 30"}
+		spec.Argv = sleepArgv()
 		return run.Start(context.Background(), spec)
 	})
 	root := filepath.Join(t.TempDir(), "root")

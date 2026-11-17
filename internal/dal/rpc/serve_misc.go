@@ -214,6 +214,9 @@ func directSettingKey(keyPath string, value any) (string, any, error) {
 		mode, err := effortMode(text)
 		return "reasoning", string(mode), err
 	}
+	if _, _, err := model.ParseModelID(text); err != nil {
+		return "", nil, invalidParams(err.Error())
+	}
 	return "model", text, nil
 }
 

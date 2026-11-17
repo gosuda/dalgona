@@ -323,6 +323,16 @@ A shell command MUST run in the open thread's directory. Before a thread opens, 
 The folder item, its help legend and the welcome details MUST show the open thread's directory.
 Before a thread opens, they MUST show the launch directory.
 
+## Trademark logo
+
+When the terminal supports an inline image protocol, the client MUST print the product's trademark logo above the welcome row.
+The client MUST use the kitty graphics protocol on kitty, ghostty, and WezTerm, and the iTerm2 inline image on iTerm2.
+A `dalgona` session MUST show `assets/brand/dalgona` and a `dal` session MUST show `assets/brand/dal` tinted to the accent colour.
+TMUX or STY set selects no logo.
+A terminal without image support MUST NOT print the logo row.
+Kitty emission MUST hold the cursor with `C=1` and chunk base64 at 4096 bytes.
+The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `width` and `height`.
+
 ## Keys and commands
 
 | Input | Effect |
@@ -507,6 +517,7 @@ The label MUST be at most 9 cells, and one space MUST follow it.
 The meta field MUST be 9 cells, and the duration MUST be 8 cells, right aligned.
 The subject MUST follow the label and its space, or the state column when no label shows.
 Body lines MUST start under the subject and wrap inside the rest of the row.
+A tool output line shaped `[<path>#<tag>]` or `[<path>@<ref>]`, where `<tag>` is a hashline tag and `<ref>` is a snapshot reference, MUST NOT print.
 A row MUST end with one blank line.
 The state word MUST be `Done` for `completed`, `Failed` for `failed`, `Declined` for `declined`, and `Working` for `inProgress`.
 A failed row MUST show `Failed` in bold failed-text, with no background.

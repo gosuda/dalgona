@@ -70,6 +70,10 @@ Use one name for each thing in user-facing text and new specifications.
 - [MCP client](dalgona/spec/mcp.md): tool discovery, calls, and transports.
 - [Discovery](dalgona/spec/discovery.md): opt-in imports of instructions, skills, and server config.
 - [herdr integration](dalgona/spec/herdr.md): pane reports and subagent panes.
+
+### Clients and integrations
+
+- [Continuous integration](dal/spec/ci.md): verification groups, native platforms, shared assets, and box image builds.
 - [Cloudflare deployment](../deploy/cloudflare/README.md): worker tokens, image release, digest pins, and box cleanup.
 
 `just spec-style` checks sentence length, semicolons, em dashes, and lower-case `should` in `docs/dal/spec` and `docs/dalgona/spec`.
