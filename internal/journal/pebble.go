@@ -142,23 +142,20 @@ type mirrorGuard struct {
 }
 
 func (g *mirrorGuard) Close() error {
-	return errors.Join(g.lock.Close(), releaseLock(g.file))
+	return errors.Join(g.lock.Close(), releaseGate(g.file))
 }
 
 func lockMirrorDir(path string) (*mirrorGuard, error) {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return nil, err
 	}
-	gate, err := openLockFile(path + ".lock")
+	gate, err := lockGateBounded(path+".lock", mirrorOpenWait)
 	if err != nil {
 		return nil, err
 	}
-	if werr := waitFileBounded(gate, mirrorOpenWait); werr != nil {
-		return nil, errors.Join(werr, gate.Close())
-	}
 	lock, err := pebble.LockDirectory(path, vfs.Default)
 	if err != nil {
-		return nil, errors.Join(err, releaseLock(gate))
+		return nil, errors.Join(err, releaseGate(gate))
 	}
 	return &mirrorGuard{lock: lock, file: gate}, nil
 }

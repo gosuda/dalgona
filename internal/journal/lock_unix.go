@@ -35,21 +35,29 @@ func unlockFile(f *os.File) error {
 	return flock(f, unix.LOCK_UN)
 }
 
-func waitFileBounded(f *os.File, d time.Duration) error {
+func lockGateBounded(path string, d time.Duration) (*os.File, error) {
+	file, err := openLockFile(path)
+	if err != nil {
+		return nil, err
+	}
 	deadline := time.Now().Add(d)
 	for {
-		locked, err := tryLock(f)
-		if err != nil {
-			return err
+		locked, lerr := tryLock(file)
+		if lerr != nil {
+			return nil, errors.Join(lerr, file.Close())
 		}
 		if locked {
-			return nil
+			return file, nil
 		}
 		if !time.Now().Before(deadline) {
-			return errMirrorBusy
+			return nil, errors.Join(errMirrorBusy, file.Close())
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func releaseGate(file *os.File) error {
+	return releaseLock(file)
 }
 
 func isLockBusy(err error) bool {
