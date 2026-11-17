@@ -64,7 +64,7 @@ Any non-2xx response other than 401 MUST NOT refresh a token. It MUST NOT select
 
 An OAuth source MUST store its token in `auth.json` under the key `mcp-<name>`. The `account` value MUST be the canonical resource URL of the server. A token with another `account` value is no credential. The error MUST read `mcp-<name> token was issued for <account>, not <resource>; run dalgona mcp login <name>`.
 
-The registration MUST live in `<home>/mcp-oauth.json` as one object for each server name. Each entry MUST hold `resource`, `issuer`, `authorization_endpoint`, `token_endpoint`, `client_id`, and `scopes`. The file MUST be a regular file with mode 0600. Only `dalgona mcp login` writes it.
+The registration MUST live in `<home>/mcp-oauth.json` as one object for each server name. Each entry MUST hold `resource`, `issuer`, `authorization_endpoint`, `token_endpoint`, `client_id`, and `scopes`. The file MUST be a regular file with mode 0600. Only `dalgona mcp login` writes it. The write MUST hold `auth.lock` and MUST publish the file through a temporary file, file `fsync`, rename, and directory `fsync`.
 
 The OAuth source MUST read the registration again on every token load and every refresh. It MUST refuse an entry for another resource before it sends a credential. It MUST refuse an entry whose `client_id` differs from a configured `oauth_client_id`. It MUST refuse an entry whose endpoints are neither https nor loopback.
 

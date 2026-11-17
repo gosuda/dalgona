@@ -663,3 +663,24 @@ func TestWriteRegistration(t *testing.T) {
 		t.Fatalf("read b = %+v, %v", got, readErr)
 	}
 }
+
+func TestWriteRegistrationConcurrent(t *testing.T) {
+	home := t.TempDir()
+	registration := func(host string) mcp.Registration {
+		return mcp.Registration{Resource: "https://" + host + "/mcp", Issuer: "https://" + host, AuthorizationEndpoint: "https://" + host + "/authorize", TokenEndpoint: "https://" + host + "/token", ClientID: "client-" + host}
+	}
+	done := make(chan error, 2)
+	for _, name := range []string{"a", "b"} {
+		go func() { done <- mcp.WriteRegistration(home, name, registration(name+".example")) }()
+	}
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	for _, name := range []string{"a", "b"} {
+		if got, err := mcp.ReadRegistration(home, name); err != nil || got.ClientID != "client-"+name+".example" {
+			t.Fatalf("read %s = %+v, %v", name, got, err)
+		}
+	}
+}
