@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// A store that loses the write-lock race must retry past the busy timeout.
 func TestWithTxRetriesAfterBusy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	dsn := strings.Replace(dbDSN(path), "busy_timeout(5000)", "busy_timeout(50)", 1) + "&cache=private"
@@ -51,7 +50,6 @@ func TestWithTxRetriesAfterBusy(t *testing.T) {
 	}
 }
 
-// A lock held past every retry must still surface the busy error.
 func TestWithTxReportsBusyAfterRetries(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	dsn := strings.Replace(dbDSN(path), "busy_timeout(5000)", "busy_timeout(50)", 1) + "&cache=private"
@@ -83,7 +81,6 @@ func TestWithTxReportsBusyAfterRetries(t *testing.T) {
 	}
 }
 
-// A non-busy error must not retry.
 func TestWithTxDoesNotRetryOtherErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	db, err := sql.Open("sqlite", dbDSN(path))
