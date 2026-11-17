@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json/jsontext"
 	"fmt"
 	"testing"
@@ -112,7 +113,7 @@ func TestLoopGuardSuccessExecResets(t *testing.T) {
 	thread := h.start()
 	appendGuardHistory(t, thread, startedCall("e1", "exec", "exec", `{"command":"echo hi"}`), new(true))
 	w := guardWorker(t, thread)
-	repeated, err := w.repeated("read", jsontext.Value(`{"path":"a"}`))
+	repeated, err := w.repeated(context.Background(), "read", jsontext.Value(`{"path":"a"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +128,7 @@ func TestLoopGuardReadDoesNotReset(t *testing.T) {
 	thread := h.start()
 	appendGuardHistory(t, thread, startedCall("b1", "read", "read", `{"path":"b"}`), new(true))
 	w := guardWorker(t, thread)
-	repeated, err := w.repeated("read", jsontext.Value(`{"path":"a"}`))
+	repeated, err := w.repeated(context.Background(), "read", jsontext.Value(`{"path":"a"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +143,7 @@ func TestLoopGuardFailedPatchDoesNotReset(t *testing.T) {
 	thread := h.start()
 	appendGuardHistory(t, thread, startedCall("p1", "patch", "edit", `{"path":"a"}`), new(false))
 	w := guardWorker(t, thread)
-	repeated, err := w.repeated("read", jsontext.Value(`{"path":"a"}`))
+	repeated, err := w.repeated(context.Background(), "read", jsontext.Value(`{"path":"a"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

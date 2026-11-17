@@ -238,7 +238,7 @@ func (w *worker) prepare(ctx context.Context, call event.ToolCall, requestID str
 	if fail != "" {
 		return nil, w.declineCall(ctx, call, requestID, decline(by, "invalid arguments for "+call.Name+": "+fail))
 	}
-	repeated, err := w.repeated(call.Name, args)
+	repeated, err := w.repeated(ctx, call.Name, args)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +292,7 @@ func (w *worker) gateCall(ctx context.Context, p *prepared, requestID string) (g
 	if !ok {
 		return gc, nil
 	}
-	env, err := w.envFor(p)
+	env, err := w.envFor(ctx, p)
 	if err != nil {
 		return gc, err
 	}
@@ -420,7 +420,7 @@ func (w *worker) execute(ctx context.Context, p *prepared) (event.ToolCompleted,
 }
 
 func (w *worker) run(ctx context.Context, p *prepared) (tool.Result, error) {
-	env, err := w.envFor(p)
+	env, err := w.envFor(ctx, p)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -447,10 +447,10 @@ func (w *worker) env(v verdict) tool.Env {
 	}
 }
 
-func (w *worker) envFor(p *prepared) (tool.Env, error) {
+func (w *worker) envFor(ctx context.Context, p *prepared) (tool.Env, error) {
 	env := w.env(p.verdict)
 	if !p.evidence.Bounded() {
-		evidence, err := w.evidenceFor(p.call.ID)
+		evidence, err := w.evidenceFor(ctx, p.call.ID)
 		if err != nil {
 			return tool.Env{}, err
 		}
@@ -460,8 +460,8 @@ func (w *worker) envFor(p *prepared) (tool.Env, error) {
 	return env, nil
 }
 
-func (w *worker) evidenceFor(callID string) (snapshot.Evidence, error) {
-	v, err := w.t.view()
+func (w *worker) evidenceFor(ctx context.Context, callID string) (snapshot.Evidence, error) {
+	v, err := w.t.view(ctx)
 	if err != nil {
 		return snapshot.Evidence{}, err
 	}
@@ -535,7 +535,7 @@ func (w *worker) completion(ctx context.Context, p *prepared, result tool.Result
 	ok := result.OK && runErr == nil
 	output := string(result.Output)
 	if ok && p.call.Name == "read" {
-		output += w.nestedInstructions(p.args)
+		output += w.nestedInstructions(ctx, p.args)
 	}
 	if runErr != nil {
 		output = joinError(output, runErr.Error())
@@ -708,12 +708,12 @@ func readCaptureRef(decoder *jsontext.Decoder, refs *[]string) error {
 	})
 }
 
-func (w *worker) nestedInstructions(args jsontext.Value) string {
+func (w *worker) nestedInstructions(ctx context.Context, args jsontext.Value) string {
 	fields, err := readArgFields(args)
 	if err != nil || fields.path == "" {
 		return ""
 	}
-	seen, err := w.seenInstructions()
+	seen, err := w.seenInstructions(ctx)
 	if err != nil {
 		w.t.host.log.Warn("agent: nested instructions", "thread", w.t.id, "error", err)
 		return ""
@@ -725,8 +725,8 @@ func (w *worker) nestedInstructions(args jsontext.Value) string {
 	return "\n\n" + text
 }
 
-func (w *worker) seenInstructions() (map[string]bool, error) {
-	v, err := w.t.view()
+func (w *worker) seenInstructions(ctx context.Context) (map[string]bool, error) {
+	v, err := w.t.view(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -744,8 +744,8 @@ func (w *worker) seenInstructions() (map[string]bool, error) {
 	return seen, nil
 }
 
-func (w *worker) repeated(name string, args jsontext.Value) (bool, error) {
-	v, err := w.t.view()
+func (w *worker) repeated(ctx context.Context, name string, args jsontext.Value) (bool, error) {
+	v, err := w.t.view(ctx)
 	if err != nil {
 		return false, err
 	}

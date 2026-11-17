@@ -20,7 +20,7 @@ type resumingExtension struct {
 }
 
 func (r resumingExtension) MatchExternalTurn(ctx context.Context, turnID string) (bool, error) {
-	v, err := r.t.view()
+	v, err := r.t.view(context.Background())
 	if err != nil {
 		return false, err
 	}
@@ -55,7 +55,7 @@ func (r resumingExtension) ResumeExternalTurn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	v, err := r.t.view()
+	v, err := r.t.view(context.Background())
 	if err != nil {
 		return err
 	}

@@ -75,9 +75,9 @@ func (t *Thread) prepareImages(images []Image) ([]event.Image, error) {
 }
 
 type verifiedImages struct {
-	mu    sync.Mutex
-	data  map[string]verifiedImage
-	loads int
+	stateMu sync.Mutex
+	data    map[string]verifiedImage
+	loads   int
 }
 
 type verifiedImage struct {
@@ -86,15 +86,15 @@ type verifiedImage struct {
 }
 
 func (v *verifiedImages) lookup(sha string) (verifiedImage, bool) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
+	v.stateMu.Lock()
+	defer v.stateMu.Unlock()
 	image, ok := v.data[sha]
 	return image, ok
 }
 
 func (v *verifiedImages) store(sha string, image verifiedImage) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
+	v.stateMu.Lock()
+	defer v.stateMu.Unlock()
 	if v.data == nil {
 		v.data = make(map[string]verifiedImage)
 	}

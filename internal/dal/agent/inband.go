@@ -15,10 +15,10 @@ import (
 )
 
 type inBandCalls struct {
-	mu     sync.Mutex
-	calls  map[string]event.ToolCall
-	events map[string][]event.Event
-	cancel bool
+	stateMu sync.Mutex
+	calls   map[string]event.ToolCall
+	events  map[string][]event.Event
+	cancel  bool
 }
 
 func newInBandCalls() *inBandCalls {
@@ -26,15 +26,15 @@ func newInBandCalls() *inBandCalls {
 }
 
 func (c *inBandCalls) put(call event.ToolCall, events []event.Event) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	c.calls[call.ID] = call
 	c.events[call.ID] = events
 }
 
 func (c *inBandCalls) take(callID string) ([]event.Event, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	events, ok := c.events[callID]
 	delete(c.calls, callID)
 	delete(c.events, callID)
@@ -42,8 +42,8 @@ func (c *inBandCalls) take(callID string) ([]event.Event, bool) {
 }
 
 func (c *inBandCalls) drain() ([]event.ToolCall, []event.Event) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	ids := slices.Sorted(maps.Keys(c.events))
 	calls := make([]event.ToolCall, 0, len(ids))
 	var events []event.Event
@@ -59,8 +59,8 @@ func (c *inBandCalls) drain() ([]event.ToolCall, []event.Event) {
 }
 
 func (c *inBandCalls) markCancel() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	c.cancel = true
 }
 
@@ -68,22 +68,22 @@ func (c *inBandCalls) takeCancel() bool {
 	if c == nil {
 		return false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	cancelled := c.cancel
 	c.cancel = false
 	return cancelled
 }
 
 func (c *inBandCalls) resolved(callID string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	_, ok := c.calls[callID]
 	return ok
 }
 
-func (w *worker) interruptTurn() {
-	_, _ = ask(w.t, func(a *actor) bool { a.interrupt(); return true })
+func (w *worker) interruptTurn(ctx context.Context) {
+	_, _ = ask(ctx, w.t, func(a *actor) bool { a.interrupt(); return true })
 }
 
 func (w *worker) openStream(ctx context.Context, providerID string, req model.Request) (model.Stream, error) {
@@ -199,7 +199,7 @@ type inBandGuard struct {
 }
 
 func (w *worker) prepareGuard(ctx context.Context, toolCall event.ToolCall, requestID string) (inBandGuard, error) {
-	p, denial, err := w.prepareInBand(toolCall)
+	p, denial, err := w.prepareInBand(ctx, toolCall)
 	if err != nil || denial != nil {
 		return inBandGuard{denial: denial}, err
 	}
@@ -216,7 +216,7 @@ func (w *worker) prepareGuard(ctx context.Context, toolCall event.ToolCall, requ
 	return inBandGuard{p: p, gc: gc}, nil
 }
 
-func (w *worker) prepareInBand(toolCall event.ToolCall) (*prepared, *inBandDenial, error) {
+func (w *worker) prepareInBand(ctx context.Context, toolCall event.ToolCall) (*prepared, *inBandDenial, error) {
 	by := "mode:" + string(w.settings.Approval)
 	item, ok := w.tools.byName[toolCall.Name]
 	if !ok {
@@ -229,7 +229,7 @@ func (w *worker) prepareInBand(toolCall event.ToolCall) (*prepared, *inBandDenia
 	if fail != "" {
 		return nil, &inBandDenial{item.Class(), "", decline(by, "invalid arguments for "+toolCall.Name+": "+fail)}, nil
 	}
-	repeated, err := w.repeated(toolCall.Name, args)
+	repeated, err := w.repeated(ctx, toolCall.Name, args)
 	if err != nil {
 		return nil, nil, err
 	}

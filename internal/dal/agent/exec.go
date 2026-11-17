@@ -58,8 +58,8 @@ func (h *Host) Exec(ctx context.Context, id string, spec ExecSpec) (ExecResult, 
 }
 
 func (h *Host) execRunner() (*runner.Local, error) {
-	h.execMu.Lock()
-	defer h.execMu.Unlock()
+	h.execStateMu.Lock()
+	defer h.execStateMu.Unlock()
 	if h.exec == nil {
 		local, err := runner.NewLocalWithShellEnv(filepath.Join(h.Config().Home, "exec"), h.cfg.ShellEnv)
 		if err != nil {

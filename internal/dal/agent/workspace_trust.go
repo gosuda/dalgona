@@ -35,7 +35,7 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 		Commands:  WorkspaceCommands(req.Servers),
 		Paths:     []string{req.Cwd},
 	}
-	offered, err := ask(t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
+	offered, err := ask(ctx, t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
 	if err != nil {
 		return ReplyDecline, err
 	}
@@ -62,7 +62,7 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 }
 
 func (t *Thread) discardApproval(requestID string) {
-	_, _ = ask(t, func(a *actor) struct{} {
+	_, _ = ask(context.Background(), t, func(a *actor) struct{} {
 		delete(a.approvals, requestID)
 		return struct{}{}
 	})

@@ -116,7 +116,7 @@ func TestInBandStartedSurvivesFailedFollowupAppend(t *testing.T) {
 	if _, err := w.inBandEvents(t.Context(), model.ToolCall{ID: "c1", Name: "durable", Args: jsontext.Value(`{}`)}); err != nil {
 		t.Fatalf("agent: in-band events: %v", err)
 	}
-	if _, err := ask(thread, func(a *actor) bool {
+	if _, err := ask(context.Background(), thread, func(a *actor) bool {
 		a.damage = errors.New("agent: test damage")
 		return true
 	}); err != nil {

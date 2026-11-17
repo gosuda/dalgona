@@ -547,9 +547,9 @@ func TestImageBlobReadOncePerThread(t *testing.T) {
 	if turn := lastTurn(h.events(thread.ID())); turn.Status != statusCompleted {
 		t.Fatalf("turn status = %q, want completed", turn.Status)
 	}
-	thread.images.mu.Lock()
+	thread.images.stateMu.Lock()
 	loads := thread.images.loads
-	thread.images.mu.Unlock()
+	thread.images.stateMu.Unlock()
 	if loads != 1 {
 		t.Fatalf("journal blob reads = %d, want 1 for two model steps", loads)
 	}

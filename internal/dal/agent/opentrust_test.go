@@ -105,7 +105,7 @@ func TestOpenDefersWorkspaceTrustToFirstTurn(t *testing.T) {
 
 func firstPromptNotices(t *testing.T, thread *Thread) []event.Notice {
 	t.Helper()
-	v, err := thread.view()
+	v, err := thread.view(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

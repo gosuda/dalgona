@@ -52,9 +52,9 @@ func TestExecReadsLiveSettingsHome(t *testing.T) {
 	moved := t.TempDir()
 	live := h.host.Config()
 	live.Home = moved
-	h.host.settingsMu.Lock()
+	h.host.settingsStateMu.Lock()
 	h.host.live = live
-	h.host.settingsMu.Unlock()
+	h.host.settingsStateMu.Unlock()
 
 	argv := []string{"sh", "-c", "exit 0"}
 	if runtime.GOOS == "windows" {

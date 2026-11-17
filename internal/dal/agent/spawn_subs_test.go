@@ -1,13 +1,14 @@
 package agent
 
 import (
+	"context"
 	"testing"
 	"time"
 )
 
 func markBusy(t *testing.T, thread *Thread) {
 	t.Helper()
-	if _, err := ask(thread, func(a *actor) bool {
+	if _, err := ask(context.Background(), thread, func(a *actor) bool {
 		a.busy = true
 		return true
 	}); err != nil {
@@ -17,7 +18,7 @@ func markBusy(t *testing.T, thread *Thread) {
 
 func clearBusy(t *testing.T, thread *Thread) {
 	t.Helper()
-	if _, err := ask(thread, func(a *actor) bool {
+	if _, err := ask(context.Background(), thread, func(a *actor) bool {
 		a.busy = false
 		return true
 	}); err != nil {
@@ -49,7 +50,7 @@ func overflowSubscribers(t *testing.T, thread *Thread) {
 	release := make(chan struct{})
 	blockErr := make(chan error, 1)
 	go func() {
-		blockErr <- thread.do(func(a *actor) {
+		blockErr <- thread.do(context.Background(), func(a *actor) {
 			close(started)
 			<-release
 		})
@@ -57,7 +58,7 @@ func overflowSubscribers(t *testing.T, thread *Thread) {
 	<-started
 	floodErr := make(chan error, 1)
 	go func() {
-		floodErr <- thread.do(func(a *actor) {
+		floodErr <- thread.do(context.Background(), func(a *actor) {
 			for range subscriberBuffer + 10 {
 				a.publish(Update{Kind: UpdateTextDelta, Delta: "x"})
 			}

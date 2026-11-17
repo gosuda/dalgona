@@ -87,7 +87,7 @@ func speakersOf(table []reviewQuestion) []string {
 }
 
 type reviewRound struct {
-	mu      sync.Mutex
+	stateMu sync.Mutex
 	group   sync.WaitGroup
 	pending []*event.ToolJudged
 }
@@ -135,9 +135,9 @@ func (w *worker) startReview(ctx context.Context, p *prepared, completed event.T
 	files := slices.Clone(p.files)
 	name, callID := p.call.Name, p.call.ID
 	slot := new(event.ToolJudged)
-	round.mu.Lock()
+	round.stateMu.Lock()
 	round.pending = append(round.pending, slot)
-	round.mu.Unlock()
+	round.stateMu.Unlock()
 	round.group.Go(func() { *slot = w.judgeEdit(ctx, callID, task, name, files) })
 }
 
@@ -185,7 +185,7 @@ func (w *worker) collectJudged(round *reviewRound, given int) []event.Event {
 }
 
 func (w *worker) feedbackGiven() (int, error) {
-	v, err := w.t.view()
+	v, err := w.t.view(context.Background())
 	if err != nil {
 		return 0, err
 	}

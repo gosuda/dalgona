@@ -16,15 +16,15 @@ import (
 )
 
 func (h *Host) Config() config.Config {
-	h.settingsMu.Lock()
-	defer h.settingsMu.Unlock()
+	h.settingsStateMu.Lock()
+	defer h.settingsStateMu.Unlock()
 	return h.live
 }
 
 func (h *Host) PriceOf(modelID string) (model.Price, bool) {
-	h.settingsMu.Lock()
+	h.settingsStateMu.Lock()
 	spec := h.live.Models[modelID]
-	h.settingsMu.Unlock()
+	h.settingsStateMu.Unlock()
 	var configured map[string]model.Price
 	if spec.Price != nil {
 		configured = map[string]model.Price{modelID: *spec.Price}
@@ -38,8 +38,8 @@ func (h *Host) WriteSettings(edits ...config.SettingEdit) error {
 }
 
 func (h *Host) WriteSettingsIf(expectedVersion string, edits ...config.SettingEdit) (string, error) {
-	h.settingsMu.Lock()
-	defer h.settingsMu.Unlock()
+	h.settingsStateMu.Lock()
+	defer h.settingsStateMu.Unlock()
 	next, err := h.live.With(edits...)
 	if err != nil {
 		return "", err
@@ -151,7 +151,7 @@ func (h *Host) Blob(ref *event.BlobRef) ([]byte, error) {
 }
 
 func (t *Thread) Tree() ([]event.TurnNode, error) {
-	return ask(t, func(a *actor) []event.TurnNode { return event.Tree(a.records) })
+	return ask(context.Background(), t, func(a *actor) []event.TurnNode { return event.Tree(a.records) })
 }
 
 func (t *Thread) SetName(ctx context.Context, name string) error {
@@ -164,11 +164,11 @@ func (h *Host) Archive(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return askErr(thread, func(a *actor) error {
+	return askErr(ctx, thread, func(a *actor) error {
 		if a.busy || a.state.TurnID != "" {
 			return runningError(id)
 		}
-		_, err := a.append(event.ThreadArchived{Archived: true})
+		_, err := a.append(ctx, event.ThreadArchived{Archived: true})
 		return err
 	})
 }
@@ -183,26 +183,26 @@ func (h *Host) Unarchive(ctx context.Context, id string) error {
 }
 
 func (h *Host) Archived(id string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.hostStateMu.Lock()
+	defer h.hostStateMu.Unlock()
 	return h.sessions[id].Archived
 }
 
 func (h *Host) RecordRunnerBound(ctx context.Context, threadID string, bound event.RunnerBound) error {
-	h.mu.Lock()
+	h.hostStateMu.Lock()
 	thread, open := h.threads[threadID]
-	h.mu.Unlock()
+	h.hostStateMu.Unlock()
 	if !open {
 		return fmt.Errorf("agent: thread %s is not open", threadID)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return askErr(thread, func(a *actor) error {
+	return askErr(ctx, thread, func(a *actor) error {
 		if a.state.Runner != nil && *a.state.Runner == bound {
 			return nil
 		}
-		_, err := a.append(bound)
+		_, err := a.append(ctx, bound)
 		return err
 	})
 }

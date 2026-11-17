@@ -45,7 +45,7 @@ func (t *Thread) RecoverNested(ctx context.Context, prefix string) error {
 	if err != nil {
 		return err
 	}
-	v, err := t.view()
+	v, err := t.view(ctx)
 	if err != nil {
 		return err
 	}
@@ -53,7 +53,7 @@ func (t *Thread) RecoverNested(ctx context.Context, prefix string) error {
 }
 
 func (t *Thread) Records() ([]event.Seqd, event.State, error) {
-	v, err := t.view()
+	v, err := t.view(context.Background())
 	return v.records, v.state, err
 }
 
@@ -91,7 +91,7 @@ func (t *Thread) RunNestedCall(ctx context.Context, call event.ToolCall) error {
 	if err != nil {
 		return err
 	}
-	v, err := w.t.view()
+	v, err := w.t.view(ctx)
 	if err != nil {
 		return err
 	}
@@ -129,7 +129,7 @@ func (t *Thread) StartChild(ctx context.Context, callID string, req TaskRequest)
 	if req.Prompt == "" {
 		return "", errors.New("task needs a prompt")
 	}
-	id, err := t.childID(callID)
+	id, err := t.childID(ctx, callID)
 	if err != nil {
 		return "", err
 	}
@@ -151,7 +151,7 @@ func (t *Thread) launchChild(ctx context.Context, callID, id string, req TaskReq
 	if err != nil {
 		return nil, err
 	}
-	report, err := ask(child, func(a *actor) childReport { return a.childReport() })
+	report, err := ask(ctx, child, func(a *actor) childReport { return a.childReport() })
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ type childEnd struct {
 
 func finalText(ctx context.Context, child *Thread) (string, error) {
 	for {
-		end, err := ask(child, func(a *actor) childEnd {
+		end, err := ask(ctx, child, func(a *actor) childEnd {
 			return childEnd{running: a.busy || a.state.TurnID != "", history: scanChild(a.records), damage: a.damage}
 		})
 		switch {

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json/jsontext"
 	"testing"
 
@@ -18,7 +19,7 @@ func TestLoopGuardStartedWithoutCompletionDoesNotReset(t *testing.T) {
 	thread := h.start()
 	appendStartedWithoutCompletionBetweenRepeats(t, thread)
 	w := guardWorker(t, thread)
-	repeated, err := w.repeated("read", jsontext.Value(`{"path":"a"}`))
+	repeated, err := w.repeated(context.Background(), "read", jsontext.Value(`{"path":"a"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

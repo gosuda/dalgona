@@ -83,7 +83,7 @@ func sandboxChoiceFrom(reply asktool.Reply) (string, bool) {
 }
 
 func (w *worker) sandboxChoice() string {
-	v, err := w.t.view()
+	v, err := w.t.view(context.Background())
 	if err != nil {
 		return ""
 	}
@@ -101,9 +101,9 @@ func (w *worker) sandboxAsker() *Thread {
 }
 
 func (t *Thread) askSandbox(ctx context.Context, callID, cause, approval string) (asktool.Reply, error) {
-	t.sandboxMu.Lock()
+	t.sandboxStateMu.Lock()
 	if pending := t.sandboxPending; pending != nil {
-		t.sandboxMu.Unlock()
+		t.sandboxStateMu.Unlock()
 		select {
 		case <-pending.done:
 			return pending.reply, pending.err
@@ -113,16 +113,16 @@ func (t *Thread) askSandbox(ctx context.Context, callID, cause, approval string)
 	}
 	pending := &sandboxAsk{done: make(chan struct{})}
 	t.sandboxPending = pending
-	t.sandboxMu.Unlock()
+	t.sandboxStateMu.Unlock()
 	warning := "Sandbox unavailable: " + cause + ". Choose how commands in this thread run."
-	_, _ = ask(t, func(a *actor) bool {
+	_, _ = ask(ctx, t, func(a *actor) bool {
 		a.publish(Update{Kind: UpdateWarning, Thread: a.t.id, Warning: warning})
 		return true
 	})
 	pending.reply, pending.err = t.Ask(ctx, callID, sandboxQuestions(cause, approval))
-	t.sandboxMu.Lock()
+	t.sandboxStateMu.Lock()
 	t.sandboxPending = nil
-	t.sandboxMu.Unlock()
+	t.sandboxStateMu.Unlock()
 	close(pending.done)
 	return pending.reply, pending.err
 }
@@ -151,7 +151,7 @@ func (t *Thread) SandboxFallback() (cause, choice string, err error) {
 	if cause == "" {
 		return "", "", nil
 	}
-	v, err := t.view()
+	v, err := t.view(context.Background())
 	if err != nil {
 		return "", "", err
 	}

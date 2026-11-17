@@ -59,7 +59,7 @@ func (t *Thread) spawnChild(ctx context.Context, callID string, req TaskRequest)
 	if req.Prompt == "" {
 		return tool.Result{}, errors.New("task needs a prompt")
 	}
-	id, err := t.childID(callID)
+	id, err := t.childID(ctx, callID)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -89,8 +89,8 @@ func unescapedCall(callID string) string {
 	return callID
 }
 
-func (t *Thread) childID(callID string) (string, error) {
-	v, err := t.view()
+func (t *Thread) childID(ctx context.Context, callID string) (string, error) {
+	v, err := t.view(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -102,7 +102,7 @@ func (t *Thread) childID(callID string) (string, error) {
 
 func (t *Thread) childFor(ctx context.Context, callID, id string, req TaskRequest) (*Thread, error) {
 	callID = unescapedCall(callID)
-	v, err := t.view()
+	v, err := t.view(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -124,14 +124,14 @@ func (t *Thread) journalChild(ctx context.Context, callID, id string, spec Threa
 	if err != nil {
 		return "", err
 	}
-	result, err := ask(t, func(a *actor) childAdmission {
+	result, err := ask(ctx, t, func(a *actor) childAdmission {
 		if existing, found := childOf(a.state, callID); found {
 			return childAdmission{id: existing}
 		}
 		if budgetErr := a.checkSubagentBudget(); budgetErr != nil {
 			return childAdmission{err: budgetErr}
 		}
-		_, appendErr := a.appendCtx(ctx, event.ChildSpawned{CallID: callID, ChildID: id, Runner: spec.Runner, Tools: tools})
+		_, appendErr := a.append(ctx, event.ChildSpawned{CallID: callID, ChildID: id, Runner: spec.Runner, Tools: tools})
 		return childAdmission{id: id, err: appendErr}
 	})
 	return result.id, errors.Join(err, result.err)
@@ -209,9 +209,9 @@ func (t *Thread) childSpec(ctx context.Context, req TaskRequest, current Setting
 }
 
 func (h *Host) openChild(ctx context.Context, spec ThreadSpec, id string) (*Thread, error) {
-	h.mu.Lock()
+	h.hostStateMu.Lock()
 	_, exists := h.sessions[id]
-	h.mu.Unlock()
+	h.hostStateMu.Unlock()
 	if exists {
 		return h.Resume(ctx, id)
 	}
@@ -220,7 +220,7 @@ func (h *Host) openChild(ctx context.Context, spec ThreadSpec, id string) (*Thre
 
 func (t *Thread) supervise(ctx context.Context, child *Thread, prompt string) (tool.Result, error) {
 	for {
-		report, err := ask(child, func(a *actor) childReport { return a.childReport() })
+		report, err := ask(ctx, child, func(a *actor) childReport { return a.childReport() })
 		if err != nil {
 			return tool.Result{}, err
 		}

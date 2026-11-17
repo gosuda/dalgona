@@ -25,7 +25,7 @@ type preparedInput struct {
 }
 
 func (t *Thread) Submit(ctx context.Context, in Input) error {
-	if err := t.rejectStaleSteer(in); err != nil {
+	if err := t.rejectStaleSteer(ctx, in); err != nil {
 		return err
 	}
 	if err := t.ensureTools(ctx); err != nil {
@@ -38,15 +38,15 @@ func (t *Thread) Submit(ctx context.Context, in Input) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return askErr(t, func(a *actor) error { return a.submit(prepared) })
+	return askErr(ctx, t, func(a *actor) error { return a.submit(ctx, prepared) })
 }
 
-func (t *Thread) rejectStaleSteer(in Input) error {
+func (t *Thread) rejectStaleSteer(ctx context.Context, in Input) error {
 	kind := cmp.Or(in.Kind, InputPrompt)
 	if kind != InputSteer {
 		return nil
 	}
-	turnID, err := ask(t, func(a *actor) string { return a.state.TurnID })
+	turnID, err := ask(ctx, t, func(a *actor) string { return a.state.TurnID })
 	if err != nil {
 		return err
 	}
@@ -118,7 +118,7 @@ func checkSteerTarget(turnID string, in preparedInput) error {
 	return nil
 }
 
-func (a *actor) submit(in preparedInput) error {
+func (a *actor) submit(ctx context.Context, in preparedInput) error {
 	if a.state.Archived {
 		return archivedError(a.t.id)
 	}
@@ -135,13 +135,13 @@ func (a *actor) submit(in preparedInput) error {
 			return runningError(a.t.id)
 		}
 		message.TurnID = a.state.TurnID
-		_, err := a.append(message)
+		_, err := a.append(ctx, message)
 		a.autoContinue = a.autoContinue || err == nil
 		return err
 	}
 	turnID := newID("turn-")
 	message.TurnID, message.Kind = turnID, string(InputPrompt)
-	if _, err := a.append(event.TurnStarted{TurnID: turnID}, message); err != nil {
+	if _, err := a.append(ctx, event.TurnStarted{TurnID: turnID}, message); err != nil {
 		return err
 	}
 	a.autoContinue = true
@@ -150,7 +150,7 @@ func (a *actor) submit(in preparedInput) error {
 }
 
 func (t *Thread) Interrupt() {
-	if err := t.do(func(a *actor) { a.interrupt() }); err != nil {
+	if err := t.do(context.Background(), func(a *actor) { a.interrupt() }); err != nil {
 		t.host.log.Debug("agent: interrupt after close", "thread", t.id)
 	}
 }
@@ -166,7 +166,7 @@ func (t *Thread) InterruptTurn(ctx context.Context, turnID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return askErr(t, func(a *actor) error {
+	return askErr(ctx, t, func(a *actor) error {
 		if a.state.TurnID == "" || a.state.TurnID != turnID {
 			return turnNotRunningError(turnID)
 		}
@@ -176,7 +176,7 @@ func (t *Thread) InterruptTurn(ctx context.Context, turnID string) error {
 }
 
 func (t *Thread) Answer(requestID string, reply Reply) error {
-	err := askErr(t, func(a *actor) error {
+	err := askErr(context.Background(), t, func(a *actor) error {
 		if _, ok := a.approvals[requestID]; !ok {
 			return fmt.Errorf("%w: %s", ErrUnknownRequest, requestID)
 		}
@@ -195,7 +195,7 @@ func (t *Thread) Answer(requestID string, reply Reply) error {
 }
 
 func (t *Thread) Revert(beforeTurn string) error {
-	return askErr(t, func(a *actor) error {
+	return askErr(context.Background(), t, func(a *actor) error {
 		if a.busy {
 			return runningError(a.t.id)
 		}
@@ -203,7 +203,7 @@ func (t *Thread) Revert(beforeTurn string) error {
 		if err != nil {
 			return err
 		}
-		_, err = a.append(event.Branch{ParentSeq: parent})
+		_, err = a.append(context.Background(), event.Branch{ParentSeq: parent})
 		return err
 	})
 }
@@ -224,7 +224,7 @@ func revertParent(path []event.Seqd, beforeTurn string) (uint64, error) {
 }
 
 func (t *Thread) SetLeaf(turn string) error {
-	return askErr(t, func(a *actor) error {
+	return askErr(context.Background(), t, func(a *actor) error {
 		if a.busy {
 			return runningError(a.t.id)
 		}
@@ -232,7 +232,7 @@ func (t *Thread) SetLeaf(turn string) error {
 		if !ok {
 			return unknownTurnError(turn)
 		}
-		_, err := a.append(event.Branch{ParentSeq: seq})
+		_, err := a.append(context.Background(), event.Branch{ParentSeq: seq})
 		return err
 	})
 }
@@ -245,7 +245,7 @@ type forkSource struct {
 }
 
 func (t *Thread) Fork(ctx context.Context, lastTurn string) (*Thread, error) {
-	source, err := ask(t, func(a *actor) forkSource { return a.forkSource(lastTurn) })
+	source, err := ask(ctx, t, func(a *actor) forkSource { return a.forkSource(lastTurn) })
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +336,7 @@ func lastAtOrBefore(renumbered map[uint64]uint64, old uint64) uint64 {
 }
 
 func (t *Thread) Compact(ctx context.Context) error {
-	done, err := ask(t, func(a *actor) chan error { return a.spawnCompaction() })
+	done, err := ask(ctx, t, func(a *actor) chan error { return a.spawnCompaction() })
 	if err != nil {
 		return err
 	}

@@ -7,7 +7,7 @@ import (
 )
 
 type childSlots struct {
-	mu       sync.Mutex
+	stateMu  sync.Mutex
 	groups   map[string]*slotGroup
 	watchers sync.WaitGroup
 }
@@ -19,15 +19,15 @@ func (s *childSlots) releaseWhenIdle(group *slotGroup, child *Thread) {
 func (s *childSlots) join() { s.watchers.Wait() }
 
 type slotGroup struct {
-	admit chan struct{}
-	free  chan struct{}
-	mu    sync.Mutex
-	refs  map[string]int
+	admit   chan struct{}
+	free    chan struct{}
+	stateMu sync.Mutex
+	refs    map[string]int
 }
 
 func (h *Host) slotGroup(root string) *slotGroup {
-	h.slots.mu.Lock()
-	defer h.slots.mu.Unlock()
+	h.slots.stateMu.Lock()
+	defer h.slots.stateMu.Unlock()
 	group, ok := h.slots.groups[root]
 	if !ok {
 		group = &slotGroup{admit: make(chan struct{}, 1), free: make(chan struct{}, maxChildren), refs: make(map[string]int)}
@@ -56,15 +56,15 @@ func (g *slotGroup) take(ctx context.Context, child string) error {
 	case <-ctx.Done():
 		return context.Cause(ctx)
 	}
-	g.mu.Lock()
+	g.stateMu.Lock()
 	g.refs[child] = 1
-	g.mu.Unlock()
+	g.stateMu.Unlock()
 	return nil
 }
 
 func (g *slotGroup) share(child string) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	g.stateMu.Lock()
+	defer g.stateMu.Unlock()
 	refs := g.refs[child]
 	if refs > 0 {
 		g.refs[child] = refs + 1
@@ -73,8 +73,8 @@ func (g *slotGroup) share(child string) bool {
 }
 
 func (g *slotGroup) give(child string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	g.stateMu.Lock()
+	defer g.stateMu.Unlock()
 	switch refs := g.refs[child]; {
 	case refs > 1:
 		g.refs[child] = refs - 1

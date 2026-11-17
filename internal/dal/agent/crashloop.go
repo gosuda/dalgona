@@ -22,7 +22,7 @@ func (a *actor) resumeOpenTurn(ctx context.Context) error {
 	if attempts >= maxRecoveryAttempts {
 		return a.abandonTurn(ctx, turnID)
 	}
-	if _, err := a.appendCtx(ctx, event.TurnRecovery{TurnID: turnID, Attempt: attempts + 1}); err != nil {
+	if _, err := a.append(ctx, event.TurnRecovery{TurnID: turnID, Attempt: attempts + 1}); err != nil {
 		return fmt.Errorf("agent: journal turn.recovery for %s: %w", turnID, err)
 	}
 	a.spawn(func(ctx context.Context) { (&worker{t: a.t, turnID: turnID}).recoverTurn(ctx) })
@@ -32,7 +32,7 @@ func (a *actor) resumeOpenTurn(ctx context.Context) error {
 func (a *actor) abandonTurn(ctx context.Context, turnID string) error {
 	a.settle(statusFailed)
 	completed := event.TurnCompleted{TurnID: turnID, Status: statusFailed, Error: recoveryGaveUp}
-	if _, err := a.appendCtx(ctx, completed); err != nil {
+	if _, err := a.append(ctx, completed); err != nil {
 		return fmt.Errorf("agent: journal turn.completed for %s: %w", turnID, err)
 	}
 	a.t.host.log.Warn(recoveryHalted, "thread", a.t.id, "turn", turnID)

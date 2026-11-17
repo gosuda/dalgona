@@ -24,7 +24,7 @@ func (a *actor) establishBase(ctx context.Context) error {
 	if len(base)/4 >= window-compact.Reserve(window) {
 		return errors.New("agent: system prompt exceeds context window")
 	}
-	_, err = a.appendCtx(ctx, event.PromptBase{Generation: 1, Content: base})
+	_, err = a.append(ctx, event.PromptBase{Generation: 1, Content: base})
 	return err
 }
 
@@ -38,7 +38,7 @@ func (a *actor) bindContext(ctx context.Context, turnID string) (requestContext,
 	bound, ok := a.state.PromptBindings[turnID]
 	if !ok {
 		bound = event.PromptBound{TurnID: turnID, BaseGeneration: a.state.CurrentBaseGeneration, MemoryGeneration: a.state.CurrentMemoryGeneration}
-		if _, err := a.appendCtx(ctx, bound); err != nil {
+		if _, err := a.append(ctx, bound); err != nil {
 			return requestContext{}, err
 		}
 	}
@@ -70,7 +70,7 @@ func (a *actor) acceptMemory(ctx context.Context, read memoryRead) {
 		return
 	}
 	generation := a.state.CurrentMemoryGeneration + 1
-	if _, err := a.appendCtx(ctx, event.MemoryUpdated{Generation: generation, Content: content}); err != nil {
+	if _, err := a.append(ctx, event.MemoryUpdated{Generation: generation, Content: content}); err != nil {
 		a.memoryNotice(err.Error())
 		return
 	}
@@ -84,7 +84,7 @@ func (a *actor) memoryNotice(text string) {
 func (w *worker) initializeContext(ctx context.Context) error {
 	if !w.recovering && !w.continuation && w.t.host.memoryEnabled() && w.t.host.refreshes.due(w.t.id) {
 		read := w.readMemory(ctx)
-		if err := askErr(w.t, func(a *actor) error {
+		if err := askErr(ctx, w.t, func(a *actor) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -98,7 +98,7 @@ func (w *worker) initializeContext(ctx context.Context) error {
 		context requestContext
 		err     error
 	}
-	bound, err := ask(w.t, func(a *actor) result {
+	bound, err := ask(ctx, w.t, func(a *actor) result {
 		value, failure := a.bindContext(ctx, w.turnID)
 		return result{context: value, err: failure}
 	})

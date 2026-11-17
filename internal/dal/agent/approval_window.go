@@ -1,6 +1,9 @@
 package agent
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 type pendingApproval struct {
 	replies chan Reply
@@ -12,7 +15,7 @@ func newPendingApproval(replies chan Reply) *pendingApproval {
 }
 
 func (t *Thread) CannotAnswerApproval(requestID string, window <-chan Update) error {
-	return askErr(t, func(a *actor) error {
+	return askErr(context.Background(), t, func(a *actor) error {
 		pending, ok := a.approvals[requestID]
 		if !ok {
 			return fmt.Errorf("%w: %s", ErrUnknownRequest, requestID)

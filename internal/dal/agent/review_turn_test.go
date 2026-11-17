@@ -609,7 +609,7 @@ func TestTurnReviewContinuationIsOwnUnit(t *testing.T) {
 	thread := h.start()
 	h.submit(thread, "fix it")
 	h.waitIdle(thread)
-	if err := askErr(thread, func(a *actor) error {
+	if err := askErr(context.Background(), thread, func(a *actor) error {
 		a.autoContinue = true
 		return nil
 	}); err != nil {

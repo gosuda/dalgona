@@ -25,7 +25,7 @@ func startThreadWithParkedLateSteer(t *testing.T) (*harness, *Thread) {
 			ext := &steerThenPark{}
 			ext.steer = sync.OnceFunc(func() {
 				_ = th.Submit(context.Background(), Input{Kind: InputSteer, Text: "follow up"})
-				_ = askErr(th, func(a *actor) error {
+				_ = askErr(context.Background(), th, func(a *actor) error {
 					a.autoContinue = false
 					return nil
 				})

@@ -8,7 +8,7 @@ import (
 
 func setInterruptProbe(t *testing.T, thread *Thread, id string, cancelled *bool) {
 	t.Helper()
-	if askErr := askErr(thread, func(a *actor) error {
+	if askErr := askErr(context.Background(), thread, func(a *actor) error {
 		a.state.TurnID = id
 		a.autoContinue = true
 		*cancelled = false
@@ -22,7 +22,7 @@ func setInterruptProbe(t *testing.T, thread *Thread, id string, cancelled *bool)
 
 func switchInterruptProbe(t *testing.T, thread *Thread, id string, cancelled *bool) {
 	t.Helper()
-	if switchErr := askErr(thread, func(a *actor) error {
+	if switchErr := askErr(context.Background(), thread, func(a *actor) error {
 		a.state.TurnID = id
 		a.autoContinue = true
 		*cancelled = false
@@ -85,7 +85,7 @@ func TestInterruptTurnIsAtomic(t *testing.T) {
 		t.Fatalf("InterruptTurn(current) did not interrupt the running turn")
 	}
 
-	if idleErr := askErr(thread, func(a *actor) error {
+	if idleErr := askErr(context.Background(), thread, func(a *actor) error {
 		a.state.TurnID = ""
 		a.cancel = nil
 		return nil

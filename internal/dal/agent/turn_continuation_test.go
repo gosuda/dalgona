@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -12,14 +13,14 @@ func TestSettleTurnLogsDroppedContinuation(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	thread := h.start()
-	if _, err := ask(thread, func(a *actor) bool {
+	if _, err := ask(context.Background(), thread, func(a *actor) bool {
 		a.damage = errors.New("agent: test damage")
 		a.records = append(a.records, event.Seqd{Seq: a.head() + 1, Event: event.UserMessage{}})
 		return true
 	}); err != nil {
 		t.Fatalf("agent: damage thread: %v", err)
 	}
-	if _, err := ask(thread, func(a *actor) bool {
+	if _, err := ask(context.Background(), thread, func(a *actor) bool {
 		return a.settleTurn("turn-test", outcome{status: statusCompleted}, 0)
 	}); err != nil {
 		t.Fatalf("agent: settleTurn: %v", err)

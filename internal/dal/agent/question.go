@@ -35,7 +35,7 @@ func (t *Thread) Ask(ctx context.Context, callID string, questions []asktool.Que
 	}
 	prompt := QuestionPrompt{RequestID: newID("req-"), CallID: callID, Questions: masked}
 	replies := make(chan asktool.Reply, 1)
-	offered, err := ask(t, func(a *actor) bool { return a.offerQuestion(prompt, replies) })
+	offered, err := ask(ctx, t, func(a *actor) bool { return a.offerQuestion(prompt, replies) })
 	if err != nil {
 		return asktool.Reply{}, err
 	}
@@ -46,7 +46,7 @@ func (t *Thread) Ask(ctx context.Context, callID string, questions []asktool.Que
 }
 
 func (t *Thread) AnswerQuestion(requestID string, reply asktool.Reply) error {
-	return askErr(t, func(a *actor) error {
+	return askErr(context.Background(), t, func(a *actor) error {
 		if !a.resolveQuestion(requestID, reply) {
 			return fmt.Errorf("%w: %s", ErrUnknownRequest, requestID)
 		}
@@ -55,7 +55,7 @@ func (t *Thread) AnswerQuestion(requestID string, reply asktool.Reply) error {
 }
 
 func (t *Thread) CannotAnswerQuestion(requestID string, window <-chan Update) error {
-	return askErr(t, func(a *actor) error {
+	return askErr(context.Background(), t, func(a *actor) error {
 		pending, ok := a.questions[requestID]
 		if !ok {
 			return fmt.Errorf("%w: %s", ErrUnknownRequest, requestID)
@@ -109,7 +109,7 @@ func (t *Thread) awaitQuestion(ctx context.Context, requestID string, replies ch
 		return reply
 	case <-ctx.Done():
 	}
-	_, _ = ask(t, func(a *actor) bool {
+	_, _ = ask(ctx, t, func(a *actor) bool {
 		return a.resolveQuestion(requestID, asktool.Reply{Outcome: asktool.OutcomeInterrupted})
 	})
 	select {
@@ -121,7 +121,7 @@ func (t *Thread) awaitQuestion(ctx context.Context, requestID string, replies ch
 }
 
 func (t *Thread) expireQuestion(requestID string) {
-	_ = t.do(func(a *actor) { a.resolveQuestion(requestID, asktool.Reply{Outcome: asktool.OutcomeTimedOut}) })
+	_ = t.do(context.Background(), func(a *actor) { a.resolveQuestion(requestID, asktool.Reply{Outcome: asktool.OutcomeTimedOut}) })
 }
 
 func (a *actor) resolveQuestion(requestID string, reply asktool.Reply) bool {

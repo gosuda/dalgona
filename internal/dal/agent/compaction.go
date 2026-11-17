@@ -151,7 +151,7 @@ func (w *worker) autoCompact(ctx context.Context, v view) (bool, error) {
 }
 
 func (w *worker) recoverOverflow(ctx context.Context) error {
-	v, err := w.t.view()
+	v, err := w.t.view(ctx)
 	if err != nil {
 		return err
 	}
@@ -170,7 +170,7 @@ func (w *worker) recoverOverflow(ctx context.Context) error {
 }
 
 func (w *worker) compact(ctx context.Context, method string) error {
-	v, err := w.t.view()
+	v, err := w.t.view(ctx)
 	if err != nil {
 		return err
 	}

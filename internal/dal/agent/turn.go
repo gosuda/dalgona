@@ -87,7 +87,7 @@ func (a *actor) spawnContinuation(turnID string) {
 }
 
 func (w *worker) release() {
-	if err := w.t.do(func(a *actor) { a.idle() }); err != nil {
+	if err := w.t.do(context.Background(), func(a *actor) { a.idle() }); err != nil {
 		w.t.host.log.Debug("agent: release after close", "thread", w.t.id)
 	}
 }
@@ -114,7 +114,7 @@ func (w *worker) prime(ctx context.Context) error {
 			return err
 		}
 	}
-	v, err := w.t.view()
+	v, err := w.t.view(ctx)
 	if err != nil {
 		return err
 	}
@@ -147,7 +147,7 @@ func (w *worker) onRetry(attempt int, verdict model.Verdict, status int, delay t
 		name = "overflow"
 	}
 	retry := event.ModelRetry{TurnID: w.turnID, Attempt: attempt, Verdict: name, Status: status, DelayMS: delay.Milliseconds()}
-	if _, err := w.t.appendEvents(context.Background(), retry); err != nil {
+	if _, err := w.t.appendEvents(context.WithoutCancel(w.turnCtx), retry); err != nil {
 		w.t.host.log.Warn("agent: journal model.retry", "thread", w.t.id, "error", err)
 	}
 }
@@ -191,7 +191,7 @@ func (w *worker) closeReply(ctx context.Context, v view) bool {
 }
 
 func (w *worker) context(ctx context.Context) (view, []model.Message, error) {
-	v, err := w.t.view()
+	v, err := w.t.view(ctx)
 	if err != nil {
 		return v, nil, err
 	}
@@ -212,14 +212,14 @@ func failure(ctx context.Context, err error) outcome {
 	return outcome{status: statusFailed, failure: err.Error()}
 }
 
-func (w *worker) consumeInBandCancel() {
+func (w *worker) consumeInBandCancel(ctx context.Context) {
 	if w.inBand != nil && w.inBand.takeCancel() {
-		w.interruptTurn()
+		w.interruptTurn(ctx)
 	}
 }
 
 func (w *worker) step(ctx context.Context, v view, messages []model.Message) error {
-	defer w.consumeInBandCancel()
+	defer w.consumeInBandCancel(ctx)
 	compacted, err := w.autoCompact(ctx, v)
 	if err != nil || compacted {
 		return err
@@ -243,7 +243,7 @@ func (w *worker) callRound(ctx context.Context, calls []event.ToolCall) error {
 	if err != nil {
 		return err
 	}
-	w.consumeInBandCancel()
+	w.consumeInBandCancel(ctx)
 	w.round = &reviewRound{}
 	err = w.runCalls(ctx, pending)
 	joinErr := w.joinReviews(ctx)
@@ -253,7 +253,7 @@ func (w *worker) callRound(ctx context.Context, calls []event.ToolCall) error {
 	if joinErr != nil {
 		return joinErr
 	}
-	v, err := w.t.view()
+	v, err := w.t.view(ctx)
 	if err != nil {
 		return err
 	}
@@ -265,7 +265,7 @@ func (w *worker) callRound(ctx context.Context, calls []event.ToolCall) error {
 }
 
 func (w *worker) boundary(ctx context.Context, kind BoundaryKind, head uint64) {
-	hook, err := ask(w.t, func(a *actor) BoundaryHook { return a.hook })
+	hook, err := ask(context.WithoutCancel(ctx), w.t, func(a *actor) BoundaryHook { return a.hook })
 	if err != nil {
 		w.t.host.log.Debug("agent: boundary skipped on a closed thread", "thread", w.t.id, "error", err)
 		return
@@ -283,7 +283,7 @@ func (w *worker) boundary(ctx context.Context, kind BoundaryKind, head uint64) {
 }
 
 func (w *worker) end(ctx context.Context, o outcome) bool {
-	decided, err := ask(w.t, func(a *actor) endDecision {
+	decided, err := ask(context.WithoutCancel(ctx), w.t, func(a *actor) endDecision {
 		return endDecision{settle: !a.continues(o), head: a.head()}
 	})
 	if err != nil {
@@ -293,7 +293,7 @@ func (w *worker) end(ctx context.Context, o outcome) bool {
 	if decided.settle {
 		w.notifyTurnEnd(ctx, o.status)
 	}
-	ended, err := ask(w.t, func(a *actor) bool {
+	ended, err := ask(context.WithoutCancel(ctx), w.t, func(a *actor) bool {
 		if !decided.settle {
 			return false
 		}
@@ -317,14 +317,14 @@ type endDecision struct {
 func (a *actor) settleTurn(turnID string, o outcome, head uint64) bool {
 	a.settle(o.status)
 	completed := event.TurnCompleted{TurnID: turnID, Status: o.status, Error: o.failure}
-	if _, err := a.append(completed); err != nil {
+	if _, err := a.append(context.Background(), completed); err != nil {
 		a.t.host.log.Error("agent: journal turn.completed", "thread", a.t.id, "turn", turnID, "error", err)
 	}
 	clear(a.approvals)
 	a.idle()
 	if o.status == statusCompleted && a.autoContinue && a.newInputSince(head) {
 		next := newID("turn-")
-		if _, err := a.append(event.TurnStarted{TurnID: next}); err != nil {
+		if _, err := a.append(context.Background(), event.TurnStarted{TurnID: next}); err != nil {
 			a.t.host.log.Error("agent: journal turn.started", "thread", a.t.id, "turn", next, "error", err)
 		} else {
 			a.spawnTurn(next)
@@ -343,7 +343,7 @@ type hookSnapshot struct {
 }
 
 func (w *worker) announceEnd(status string) {
-	snap, err := ask(w.t, func(a *actor) hookSnapshot { return hookSnapshot{hook: a.hook, head: a.head()} })
+	snap, err := ask(context.Background(), w.t, func(a *actor) hookSnapshot { return hookSnapshot{hook: a.hook, head: a.head()} })
 	if err != nil {
 		w.t.host.log.Debug("agent: end boundary skipped on a closed thread", "thread", w.t.id, "error", err)
 		return
@@ -398,7 +398,7 @@ func (a *actor) settle(status string) {
 	for run := range a.state.Scripts {
 		events = append(events, event.ScriptCompleted{RunID: run, Error: "cancelled: " + reason})
 	}
-	if _, err := a.append(events...); err != nil {
+	if _, err := a.append(context.Background(), events...); err != nil {
 		a.t.host.log.Error("agent: settle unfinished calls", "thread", a.t.id, "error", err)
 	}
 }

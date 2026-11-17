@@ -29,17 +29,17 @@ type Host struct {
 	keywords []keywords.Keyword
 	roots    []string
 
-	mu          sync.Mutex
+	hostStateMu sync.Mutex
 	threads     map[string]*Thread
 	sessions    map[string]ThreadInfo
 	logged      map[string]bool
 	models      map[string]modelCache
 	modelsGroup singleflight.Group
-	execMu      sync.Mutex
+	execStateMu sync.Mutex
 	exec        *runner.Local
 
-	settingsMu sync.Mutex
-	live       config.Config
+	settingsStateMu sync.Mutex
+	live            config.Config
 
 	reviewTimeout time.Duration
 	reviewSlots   chan struct{}
@@ -196,8 +196,8 @@ func (h *Host) Threads() []ThreadInfo {
 }
 
 func (h *Host) AllThreads() []ThreadInfo {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.hostStateMu.Lock()
+	defer h.hostStateMu.Unlock()
 	out := make([]ThreadInfo, 0, len(h.sessions))
 	for _, info := range h.sessions {
 		if info.Advisor == "" {
@@ -209,8 +209,8 @@ func (h *Host) AllThreads() []ThreadInfo {
 }
 
 func (h *Host) AdvisorChild(parent, name string) (string, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.hostStateMu.Lock()
+	defer h.hostStateMu.Unlock()
 	for _, info := range h.sessions {
 		if info.Parent == parent && info.Advisor == name {
 			return info.ID, true
@@ -220,8 +220,8 @@ func (h *Host) AdvisorChild(parent, name string) (string, bool) {
 }
 
 func (h *Host) recoverable() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.hostStateMu.Lock()
+	defer h.hostStateMu.Unlock()
 	ids := make([]string, 0, len(h.sessions))
 	for id, info := range h.sessions {
 		if info.Advisor == "" && !info.Damaged {
@@ -321,13 +321,13 @@ func (h *Host) Resume(ctx context.Context, id string) (*Thread, error) {
 }
 
 func (h *Host) ResumeWith(ctx context.Context, id string, overrides Overrides) (*Thread, error) {
-	h.mu.Lock()
+	h.hostStateMu.Lock()
 	if thread, ok := h.threads[id]; ok {
-		h.mu.Unlock()
+		h.hostStateMu.Unlock()
 		return thread, nil
 	}
-	h.mu.Unlock()
-	release, err := h.lockSession(id)
+	h.hostStateMu.Unlock()
+	release, err := sessionRelease(h, id)
 	if err != nil {
 		return nil, err
 	}
@@ -342,12 +342,12 @@ func (h *Host) ResumeWith(ctx context.Context, id string, overrides Overrides) (
 }
 
 func (h *Host) Close() error {
-	h.mu.Lock()
+	h.hostStateMu.Lock()
 	threads := make([]*Thread, 0, len(h.threads))
 	for _, thread := range h.threads {
 		threads = append(threads, thread)
 	}
-	h.mu.Unlock()
+	h.hostStateMu.Unlock()
 	var errs []error
 	for _, thread := range threads {
 		errs = append(errs, thread.Close())
@@ -357,31 +357,31 @@ func (h *Host) Close() error {
 }
 
 func (h *Host) logOnce(key, message string, args ...any) {
-	h.mu.Lock()
+	h.hostStateMu.Lock()
 	seen := h.logged[key]
 	h.logged[key] = true
-	h.mu.Unlock()
+	h.hostStateMu.Unlock()
 	if !seen {
 		h.log.Info(message, args...)
 	}
 }
 
 func (h *Host) forget(id string) {
-	h.mu.Lock()
+	h.hostStateMu.Lock()
 	delete(h.threads, id)
-	h.mu.Unlock()
+	h.hostStateMu.Unlock()
 }
 
 func (h *Host) loadedThread(id string) (*Thread, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.hostStateMu.Lock()
+	defer h.hostStateMu.Unlock()
 	thread, ok := h.threads[id]
 	return thread, ok && id != ""
 }
 
 func (h *Host) loadedChildren(parent string) []*Thread {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.hostStateMu.Lock()
+	defer h.hostStateMu.Unlock()
 	var children []*Thread
 	for _, thread := range h.threads {
 		if thread.created.Parent == parent && thread.created.Advisor == "" {
@@ -393,9 +393,9 @@ func (h *Host) loadedChildren(parent string) []*Thread {
 
 func (h *Host) noteAppend(id string, head uint64, state event.State) {
 	preview := h.resolvePreview(id, state)
-	h.mu.Lock()
+	h.hostStateMu.Lock()
 	info, ok := h.sessions[id]
-	h.mu.Unlock()
+	h.hostStateMu.Unlock()
 	if !ok {
 		info = ThreadInfo{ID: id}
 	}
@@ -406,7 +406,7 @@ func (h *Host) noteAppend(id string, head uint64, state event.State) {
 	if info.Preview == "" {
 		info.Preview = preview
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.hostStateMu.Lock()
+	defer h.hostStateMu.Unlock()
 	h.sessions[id] = info
 }

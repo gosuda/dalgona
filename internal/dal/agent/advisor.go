@@ -9,7 +9,7 @@ import (
 )
 
 func (t *Thread) SetBoundaryHook(hook BoundaryHook) error {
-	return askErr(t, func(a *actor) error {
+	return askErr(context.Background(), t, func(a *actor) error {
 		a.hook = hook
 		return nil
 	})
@@ -24,11 +24,11 @@ func (t *Thread) Deliver(ctx context.Context, note Note) (Delivery, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	result, err := ask(t, func(a *actor) deliverResult { return a.deliver(note) })
+	result, err := ask(ctx, t, func(a *actor) deliverResult { return a.deliver(ctx, note) })
 	return result.delivery, errors.Join(err, result.err)
 }
 
-func (a *actor) deliver(note Note) deliverResult {
+func (a *actor) deliver(ctx context.Context, note Note) deliverResult {
 	if a.damage != nil {
 		return deliverResult{err: ErrDamaged}
 	}
@@ -41,11 +41,11 @@ func (a *actor) deliver(note Note) deliverResult {
 		return deliverResult{delivery: Delivery(recorded.Delivery)}
 	}
 	if journaled.Delivery != string(DeliveryContinue) {
-		_, err := a.append(journaled)
+		_, err := a.append(ctx, journaled)
 		return deliverResult{delivery: Delivery(journaled.Delivery), err: err}
 	}
 	turnID := newID("turn-")
-	if _, err := a.append(journaled, event.TurnStarted{TurnID: turnID}); err != nil {
+	if _, err := a.append(ctx, journaled, event.TurnStarted{TurnID: turnID}); err != nil {
 		return deliverResult{err: err}
 	}
 	a.spawnContinuation(turnID)
@@ -66,7 +66,7 @@ func (a *actor) effectiveDelivery(requested Delivery) Delivery {
 }
 
 func (t *Thread) ReadAfter(seq uint64) (Read, error) {
-	return ask(t, func(a *actor) Read { return a.readAfter(seq) })
+	return ask(context.Background(), t, func(a *actor) Read { return a.readAfter(seq) })
 }
 
 func (a *actor) readAfter(seq uint64) Read {

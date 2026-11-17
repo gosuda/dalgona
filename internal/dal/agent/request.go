@@ -407,10 +407,10 @@ func (h *Host) providerModels(ctx context.Context, registry *model.Registry, pro
 }
 
 func (h *Host) cachedModels(provider string) ([]model.Model, bool) {
-	h.mu.Lock()
+	h.hostStateMu.Lock()
 	cached, ok := h.models[provider]
 	now := h.clock()
-	h.mu.Unlock()
+	h.hostStateMu.Unlock()
 	if !ok {
 		return nil, false
 	}
@@ -442,9 +442,9 @@ func (h *Host) lookupModels(ctx context.Context, adapter model.Provider, provide
 }
 
 func (h *Host) cacheModels(provider string, models []model.Model, expires time.Time) {
-	h.mu.Lock()
+	h.hostStateMu.Lock()
 	h.models[provider] = modelCache{models: models, expires: expires}
-	h.mu.Unlock()
+	h.hostStateMu.Unlock()
 }
 
 func (h *Host) contextOverrides() map[string]int {

@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json/jsontext"
-	json "encoding/json/v2"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -97,28 +96,49 @@ func staticRemoteRule(gc gateCall) (verdict, bool) {
 }
 
 func remoteStrings(raw string) []string {
-	var decoded any
-	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-		return nil
-	}
+	decoder := jsontext.NewDecoder(strings.NewReader(raw))
 	var out []string
-	var walk func(value any)
-	walk = func(value any) {
-		switch value := value.(type) {
-		case string:
-			out = append(out, value)
-		case []any:
-			for _, item := range value {
-				walk(item)
-			}
-		case map[string]any:
-			for _, item := range value {
-				walk(item)
-			}
-		}
-	}
-	walk(decoded)
+	walkJSON(decoder, &out)
 	return out
+}
+
+func walkJSON(decoder *jsontext.Decoder, out *[]string) {
+	switch decoder.PeekKind() {
+	case jsontext.KindBeginArray:
+		walkJSONArray(decoder, out)
+	case jsontext.KindBeginObject:
+		walkJSONObject(decoder, out)
+	case jsontext.KindString:
+		if token, err := decoder.ReadToken(); err == nil {
+			*out = append(*out, token.String())
+		}
+	case jsontext.KindNull, jsontext.KindFalse, jsontext.KindTrue, jsontext.KindNumber,
+		jsontext.KindEndObject, jsontext.KindEndArray, jsontext.KindInvalid:
+		_ = decoder.SkipValue()
+	}
+}
+
+func walkJSONArray(decoder *jsontext.Decoder, out *[]string) {
+	if _, err := decoder.ReadToken(); err != nil {
+		return
+	}
+	for decoder.PeekKind() != jsontext.KindEndArray && decoder.PeekKind() != jsontext.KindInvalid {
+		walkJSON(decoder, out)
+	}
+	_, _ = decoder.ReadToken()
+}
+
+func walkJSONObject(decoder *jsontext.Decoder, out *[]string) {
+	if _, err := decoder.ReadToken(); err != nil {
+		return
+	}
+	for decoder.PeekKind() != jsontext.KindEndObject && decoder.PeekKind() != jsontext.KindInvalid {
+		if _, err := decoder.ReadToken(); err != nil {
+			return
+		}
+		walkJSON(decoder, out)
+	}
+	_, _ = decoder.ReadToken()
 }
 
 func (w *worker) automated(ctx context.Context, gc gateCall) verdict {
@@ -166,7 +186,7 @@ func (w *worker) sandboxed(gc gateCall) bool {
 }
 
 func (w *worker) task() string {
-	v, err := w.t.view()
+	v, err := w.t.view(context.Background())
 	if err != nil {
 		return ""
 	}
@@ -209,7 +229,7 @@ func (w *worker) askUser(ctx context.Context, gc gateCall, requestID string) ver
 	if !ok {
 		return decline("mode:ask", "declined: secret masking failed")
 	}
-	offered, err := ask(w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
+	offered, err := ask(ctx, w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
 	forwarded, linked := w.t.forwardApproval(prompt, replies)
 	v := decline("mode:ask", declineNoClient)
 	if err == nil && (forwarded || (offered && !linked)) {
@@ -265,7 +285,7 @@ func (t *Thread) forwardApproval(prompt ApprovalPrompt, replies chan Reply) (rea
 	if !open || t.created.Advisor != "" {
 		return false, false
 	}
-	reached, err := ask(parent, func(a *actor) bool {
+	reached, err := ask(context.Background(), parent, func(a *actor) bool {
 		if prompt.Resolved {
 			delete(a.approvals, prompt.RequestID)
 			a.publish(Update{Kind: UpdateApproval, Thread: t.id, Approval: prompt})
@@ -299,7 +319,7 @@ func replyVerdict(reply Reply) verdict {
 }
 
 func (w *worker) matchingGrant(gc gateCall) string {
-	v, err := w.t.view()
+	v, err := w.t.view(context.Background())
 	if err != nil {
 		return ""
 	}

@@ -960,7 +960,7 @@ func journaledCompleted(th *Thread, callID string) bool {
 	if th == nil {
 		return false
 	}
-	journal, err := th.view()
+	journal, err := th.view(context.Background())
 	return err == nil && completedIndex(journal.records, callID) >= 0
 }
 

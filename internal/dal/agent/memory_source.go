@@ -23,7 +23,7 @@ var (
 )
 
 type refreshLedger struct {
-	mu      sync.Mutex
+	stateMu sync.Mutex
 	posted  map[string]uint64
 	served  map[string]uint64
 	primed  map[string]bool
@@ -31,8 +31,8 @@ type refreshLedger struct {
 }
 
 func (l *refreshLedger) post(id string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	if l.posted == nil {
 		l.posted = make(map[string]uint64)
 	}
@@ -40,20 +40,20 @@ func (l *refreshLedger) post(id string) {
 }
 
 func (l *refreshLedger) due(id string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	return !l.primed[id] || l.posted[id] > l.served[id]
 }
 
 func (l *refreshLedger) requested(id string) uint64 {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	return l.posted[id]
 }
 
 func (l *refreshLedger) serve(id string, upTo uint64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	if l.served == nil {
 		l.served = make(map[string]uint64)
 		l.primed = make(map[string]bool)
@@ -94,8 +94,8 @@ func (h *Host) RefreshPrompts(cwd string) {
 }
 
 func (h *Host) loadedThreads() []*Thread {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.hostStateMu.Lock()
+	defer h.hostStateMu.Unlock()
 	return slices.Collect(maps.Values(h.threads))
 }
 
@@ -165,8 +165,8 @@ func (w *worker) readMemory(ctx context.Context) memoryRead {
 }
 
 func (l *refreshLedger) beginRead(id string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	if l.reading[id] {
 		return false
 	}
@@ -178,7 +178,7 @@ func (l *refreshLedger) beginRead(id string) bool {
 }
 
 func (l *refreshLedger) endRead(id string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	delete(l.reading, id)
 }

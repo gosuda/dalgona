@@ -51,7 +51,7 @@ func (w *worker) recoverTurn(ctx context.Context) {
 }
 
 func (w *worker) recoverCalls(ctx context.Context) error {
-	v, err := w.t.view()
+	v, err := w.t.view(ctx)
 	if err != nil {
 		return err
 	}
@@ -65,7 +65,7 @@ func (w *worker) recoverCalls(ctx context.Context) error {
 		if err = w.recoverCall(ctx, v, call); err != nil {
 			return err
 		}
-		if v, err = w.t.view(); err != nil {
+		if v, err = w.t.view(ctx); err != nil {
 			return err
 		}
 	}
@@ -195,7 +195,7 @@ func (w *worker) recoverNested(ctx context.Context, v view, prefix string) error
 		if !strings.HasPrefix(id, prefix) {
 			continue
 		}
-		current, err := w.t.view()
+		current, err := w.t.view(ctx)
 		if err != nil {
 			return err
 		}

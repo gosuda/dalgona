@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/model"
@@ -9,7 +10,7 @@ import (
 func (w *worker) retryWatch() model.RetryWatch {
 	return model.RetryWatch{
 		Attended: func() bool {
-			attached, err := ask(w.t, func(a *actor) bool { return len(a.subs) > 0 })
+			attached, err := ask(context.Background(), w.t, func(a *actor) bool { return len(a.subs) > 0 })
 			if err != nil {
 				w.t.host.log.Debug("agent: retry wait attendance", "thread", w.t.id, "error", err)
 				return false
@@ -17,7 +18,7 @@ func (w *worker) retryWatch() model.RetryWatch {
 			return attached
 		},
 		Tick: func(remaining time.Duration) {
-			if _, err := ask(w.t, func(a *actor) bool {
+			if _, err := ask(context.Background(), w.t, func(a *actor) bool {
 				a.publish(Update{Kind: UpdateRetryWait, Thread: a.t.id, Turn: w.turnID, Wait: remaining})
 				return true
 			}); err != nil {

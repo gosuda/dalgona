@@ -37,8 +37,8 @@ type Thread struct {
 	id             string
 	created        event.SessionCreated
 	fixedTools     []tool.Tool
-	toolsMu        sync.Mutex
-	sandboxMu      sync.Mutex
+	toolsStateMu   sync.Mutex
+	sandboxStateMu sync.Mutex
 	sandboxPending *sandboxAsk
 	toolset        *toolset
 	ext            Extension
@@ -109,7 +109,7 @@ func (h *Host) load(id string) (loadedSession, error) {
 }
 
 func (h *Host) openThread(ctx context.Context, loaded loadedSession, overrides Overrides) (*Thread, error) {
-	release, err := h.lockSession(loaded.created.ID)
+	release, err := sessionRelease(h, loaded.created.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -124,15 +124,15 @@ func (h *Host) openLocked(ctx context.Context, loaded loadedSession, overrides O
 		output: outputRelay{ch: make(chan Update, outputBuffer)},
 	}
 	if err := t.prepare(ctx, loaded, overrides); err != nil {
-		return nil, errors.Join(err, t.unlock())
+		return nil, errors.Join(err, t.release())
 	}
-	h.mu.Lock()
+	h.hostStateMu.Lock()
 	if existing, ok := h.threads[t.id]; ok {
-		h.mu.Unlock()
-		return existing, errors.Join(t.runner.Close(), t.unlock())
+		h.hostStateMu.Unlock()
+		return existing, errors.Join(t.runner.Close(), t.release())
 	}
 	h.threads[t.id] = t
-	h.mu.Unlock()
+	h.hostStateMu.Unlock()
 	a := &actor{
 		t: t, records: loaded.records, sizes: loaded.sizes, state: loaded.state, damage: loaded.damage,
 		subs: make(map[chan Update]struct{}), approvals: make(map[string]*pendingApproval), questions: make(map[string]*pendingQuestion), autoContinue: !endedByInterrupt(loaded.records),
@@ -145,7 +145,7 @@ func (h *Host) openLocked(ctx context.Context, loaded loadedSession, overrides O
 	return t, nil
 }
 
-func (h *Host) lockSession(id string) (func() error, error) {
+func sessionRelease(h *Host, id string) (func() error, error) {
 	if h.cfg.Product != config.ProductDal {
 		return func() error { return nil }, nil
 	}
@@ -167,8 +167,6 @@ func endedByInterrupt(records []event.Seqd) bool {
 	}
 	return false
 }
-
-func (t *Thread) unlock() error { return t.release() }
 
 func (t *Thread) prepare(ctx context.Context, loaded loadedSession, overrides Overrides) error {
 	t.fixedTools = overrides.Tools
@@ -214,7 +212,7 @@ func (s *toolset) lookup(name string) (tool.Tool, bool) {
 }
 
 func (t *Thread) Settings() (Settings, error) {
-	v, err := t.view()
+	v, err := t.view(context.Background())
 	if err != nil {
 		return Settings{}, err
 	}
@@ -222,8 +220,8 @@ func (t *Thread) Settings() (Settings, error) {
 }
 
 func (t *Thread) currentTools() *toolset {
-	t.toolsMu.Lock()
-	defer t.toolsMu.Unlock()
+	t.toolsStateMu.Lock()
+	defer t.toolsStateMu.Unlock()
 	return t.toolset
 }
 
@@ -239,7 +237,7 @@ func (t *Thread) ensureTools(ctx context.Context) error {
 	if t.currentTools() != nil {
 		return nil
 	}
-	v, err := t.view()
+	v, err := t.view(ctx)
 	if err != nil {
 		return err
 	}
@@ -265,8 +263,8 @@ func (t *Thread) toolsFor(ctx context.Context, modelID string) (*toolset, error)
 			return nil, err
 		}
 	}
-	t.toolsMu.Lock()
-	defer t.toolsMu.Unlock()
+	t.toolsStateMu.Lock()
+	defer t.toolsStateMu.Unlock()
 	if t.reuses(t.toolset, modelID) {
 		return t.toolset, nil
 	}
@@ -404,7 +402,7 @@ func (a *actor) shutdown() {
 	a.subs = nil
 }
 
-func (t *Thread) do(fn func(*actor)) error {
+func (t *Thread) do(ctx context.Context, fn func(*actor)) error {
 	select {
 	case t.inbox <- fn:
 		return nil
@@ -413,10 +411,10 @@ func (t *Thread) do(fn func(*actor)) error {
 	}
 }
 
-func ask[T any](t *Thread, fn func(*actor) T) (T, error) {
+func ask[T any](ctx context.Context, t *Thread, fn func(*actor) T) (T, error) {
 	reply := make(chan T, 1)
 	var zero T
-	if err := t.do(func(a *actor) { reply <- fn(a) }); err != nil {
+	if err := t.do(ctx, func(a *actor) { reply <- fn(a) }); err != nil {
 		return zero, err
 	}
 	select {
@@ -424,11 +422,13 @@ func ask[T any](t *Thread, fn func(*actor) T) (T, error) {
 		return value, nil
 	case <-t.stopped:
 		return zero, ErrClosed
+	case <-ctx.Done():
+		return zero, ctx.Err()
 	}
 }
 
-func askErr(t *Thread, fn func(*actor) error) error {
-	result, transport := ask(t, fn)
+func askErr(ctx context.Context, t *Thread, fn func(*actor) error) error {
+	result, transport := ask(ctx, t, fn)
 	return errors.Join(transport, result)
 }
 
@@ -437,7 +437,7 @@ func (t *Thread) Close() error {
 		close(t.quit)
 		<-t.stopped
 		t.workers.Wait()
-		t.closeErr = errors.Join(t.runner.Close(), t.unlock())
+		t.closeErr = errors.Join(t.runner.Close(), t.release())
 		t.host.forget(t.id)
 	})
 	return t.closeErr
@@ -449,8 +449,8 @@ type appendResult struct {
 }
 
 func (t *Thread) appendEvents(ctx context.Context, events ...event.Event) (uint64, error) {
-	result, err := ask(t, func(a *actor) appendResult {
-		head, err := a.appendCtx(ctx, events...)
+	result, err := ask(ctx, t, func(a *actor) appendResult {
+		head, err := a.append(ctx, events...)
 		return appendResult{head: head, err: err}
 	})
 	return result.head, errors.Join(err, result.err)
@@ -458,11 +458,7 @@ func (t *Thread) appendEvents(ctx context.Context, events ...event.Event) (uint6
 
 func (a *actor) head() uint64 { return uint64(len(a.records)) }
 
-func (a *actor) append(events ...event.Event) (uint64, error) {
-	return a.appendCtx(context.Background(), events...)
-}
-
-func (a *actor) appendCtx(ctx context.Context, events ...event.Event) (uint64, error) {
+func (a *actor) append(ctx context.Context, events ...event.Event) (uint64, error) {
 	if a.damage != nil {
 		return a.head(), fmt.Errorf("%w: %w", ErrDamaged, a.damage)
 	}
@@ -520,21 +516,21 @@ func (a *actor) publish(update Update) {
 
 func (t *Thread) publish(update Update) {
 	update.Thread = t.id
-	if err := t.do(func(a *actor) { a.publish(update) }); err != nil {
+	if err := t.do(context.Background(), func(a *actor) { a.publish(update) }); err != nil {
 		t.host.log.Debug("agent: drop update after close", "thread", t.id)
 	}
 }
 
 func (t *Thread) Subscribe() <-chan Update {
 	ch := make(chan Update, subscriberBuffer)
-	if err := t.do(func(a *actor) { a.subscribe(ch) }); err != nil {
+	if err := t.do(context.Background(), func(a *actor) { a.subscribe(ch) }); err != nil {
 		close(ch)
 	}
 	return ch
 }
 
 func (t *Thread) Unsubscribe(ch <-chan Update) {
-	if err := t.do(func(a *actor) { a.unsubscribe(ch) }); err != nil {
+	if err := t.do(context.Background(), func(a *actor) { a.unsubscribe(ch) }); err != nil {
 		t.host.log.Debug("agent: unsubscribe after close", "thread", t.id)
 	}
 }
@@ -557,12 +553,12 @@ type view struct {
 
 func (v view) head() uint64 { return uint64(len(v.records)) }
 
-func (t *Thread) view() (view, error) {
-	return ask(t, func(a *actor) view { return view{records: a.records, sizes: a.sizes, state: a.state} })
+func (t *Thread) view(ctx context.Context) (view, error) {
+	return ask(ctx, t, func(a *actor) view { return view{records: a.records, sizes: a.sizes, state: a.state} })
 }
 
 func (t *Thread) Status() (Status, error) {
-	return ask(t, func(a *actor) Status {
+	return ask(context.Background(), t, func(a *actor) Status {
 		return Status{
 			State: a.state.Status, Busy: a.busy, AutoContinue: a.autoContinue, Head: a.head(),
 			Turn: a.state.TurnID, Subscribers: len(a.subs), Questions: len(a.questions), OutputDropped: a.t.output.dropped.Load(),

@@ -17,7 +17,7 @@ var ErrExternalTurnInterrupted = errors.New("agent: external turn interrupted")
 
 func (t *Thread) RunExternalTurn(ctx context.Context, text string, run func(context.Context) error) error {
 	done := make(chan error, 1)
-	if err := askErr(t, func(a *actor) error { return a.startExternalTurn(text, run, done) }); err != nil {
+	if err := askErr(ctx, t, func(a *actor) error { return a.startExternalTurn(ctx, text, run, done) }); err != nil {
 		return err
 	}
 	select {
@@ -29,7 +29,7 @@ func (t *Thread) RunExternalTurn(ctx context.Context, text string, run func(cont
 	}
 }
 
-func (a *actor) startExternalTurn(text string, run func(context.Context) error, done chan<- error) error {
+func (a *actor) startExternalTurn(ctx context.Context, text string, run func(context.Context) error, done chan<- error) error {
 	if a.state.Archived {
 		return archivedError(a.t.id)
 	}
@@ -46,7 +46,7 @@ func (a *actor) startExternalTurn(text string, run func(context.Context) error, 
 	}
 	turnID := newID("turn-")
 	message := event.UserMessage{ItemID: newID("item-"), TurnID: turnID, Text: masked, TextBlob: blob, Kind: string(InputPrompt), Verbatim: true}
-	if _, err := a.append(event.TurnStarted{TurnID: turnID}, message); err != nil {
+	if _, err := a.append(ctx, event.TurnStarted{TurnID: turnID}, message); err != nil {
 		return err
 	}
 	a.autoContinue = false
@@ -55,7 +55,7 @@ func (a *actor) startExternalTurn(text string, run func(context.Context) error, 
 }
 
 func (w *worker) runExternalTurn(ctx context.Context, run func(context.Context) error) error {
-	v, err := w.t.view()
+	v, err := w.t.view(ctx)
 	if err == nil {
 		err = w.use(ctx, v)
 	}
