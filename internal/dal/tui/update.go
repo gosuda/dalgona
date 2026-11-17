@@ -445,7 +445,7 @@ func (m model) rawFrame() tea.View {
 		return view
 	default:
 		view := m.dockView()
-		view.Content = m.screen.emit(view.Content)
+		view.Content = m.screen.emit(view.Content) + m.markOverlay()
 		return view
 	}
 }

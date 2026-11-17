@@ -3,7 +3,6 @@ package tui
 import (
 	"bytes"
 	_ "embed"
-	"encoding/base64"
 	"fmt"
 	"image"
 	"image/color"
@@ -16,8 +15,6 @@ var dalPNG []byte
 
 //go:embed brand/dalgona.png
 var dalgonaPNG []byte
-
-const imgRowMark = "\x00IMG"
 
 func detectImageProto(getenv func(string) string) string {
 	if getenv("TMUX") != "" || getenv("STY") != "" {
@@ -35,13 +32,16 @@ func detectImageProto(getenv func(string) string) string {
 }
 
 func brandPNG(product string, t theme) []byte {
-	if product == "dal" {
+	switch product {
+	case "dal":
 		if tinted, err := tintPNG(dalPNG, paletteHex(t, roleAccentText)); err == nil {
 			return tinted
 		}
 		return dalPNG
+	case "dalgona":
+		return dalgonaPNG
 	}
-	return dalgonaPNG
+	return nil
 }
 
 func tintPNG(src []byte, hex string) ([]byte, error) {
@@ -68,44 +68,4 @@ func tintPNG(src []byte, hex string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-func logoSeq(product string, proto string, t theme) string {
-	if proto == "" {
-		return ""
-	}
-	data := brandPNG(product, t)
-	cols, rows := 10, 8
-	var seq string
-	if proto == "iterm" {
-		seq = fmt.Sprintf("\x1b]1337;File=inline=1;preserveAspectRatio=1;width=%d;height=%d:%s\x07",
-			cols, rows, base64.StdEncoding.EncodeToString(data))
-	} else {
-		seq = kittySeq(data, cols, rows)
-	}
-	return imgRowMark + seq + strings.Repeat("\n", rows)
-}
-
-func kittySeq(data []byte, cols, rows int) string {
-	enc := base64.StdEncoding.EncodeToString(data)
-	var sb strings.Builder
-	for len(enc) > 0 {
-		n := min(len(enc), 4096)
-		chunk := enc[:n]
-		enc = enc[n:]
-		if sb.Len() == 0 {
-			more := 0
-			if len(enc) > 0 {
-				more = 1
-			}
-			fmt.Fprintf(&sb, "\x1b_Ga=T,f=100,t=d,q=2,C=1,c=%d,r=%d,m=%d;%s\x1b\\", cols, rows, more, chunk)
-		} else {
-			more := 0
-			if len(enc) > 0 {
-				more = 1
-			}
-			fmt.Fprintf(&sb, "\x1b_Gm=%d;%s\x1b\\", more, chunk)
-		}
-	}
-	return sb.String()
 }

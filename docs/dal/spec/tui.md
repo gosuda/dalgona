@@ -20,7 +20,7 @@ Startup runs these requests in order: `initialize` with client name `dalgona`, t
 
 After `initialize` succeeds, the client MUST print one welcome row with the product, version, model, and working directory. A home directory MUST show as `~`. The welcome row MUST use only bold and dim text. When `initialize` fails, the client MUST print the welcome row with the error on one line. Quit MUST print one exit row. The exit row MUST name the thread and the `--resume` command, or say that no thread was started. The client MUST print the exit row before it returns `tea.Quit`, unless the window height is 0. While the client leaves, the view MUST be one blank row.
 
-The welcome output MUST start with the product mark when the terminal can show images. Detection MUST read only the terminal environment. `TMUX` or `STY` set selects no mark. An empty or `dumb` `TERM` selects no mark. Kitty or ghostty selects the kitty graphics protocol. An iTerm, WezTerm, or VS Code program selects inline images. A set `ITERM_SESSION_ID` also selects inline images. A `TERM` that contains `sixel` selects sixel. Every other environment MUST show no mark and MUST emit zero control bytes for it. The mark MUST come from the rasterized brand assets embedded in the binary, at 8 or 16 rows. An unknown product MUST show no mark.
+The client MUST paint the product mark at the lower right of the screen when the terminal can show images. Detection MUST read only the terminal environment. `TMUX` or `STY` set selects no mark. An empty or `dumb` `TERM` selects no mark. Kitty or ghostty selects the kitty graphics protocol. An iTerm program selects inline images. A set `ITERM_SESSION_ID` also selects inline images. Every other environment MUST show no mark and MUST emit zero control bytes for it. The mark MUST come from the rasterized brand assets embedded in the binary, at 8 rows with aspect preserved. An unknown product MUST show no mark. A terminal without image support shows only the product wordmark in the band.
 
 ## Screen
 
@@ -325,12 +325,14 @@ Before a thread opens, they MUST show the launch directory.
 
 ## Trademark logo
 
-When the terminal supports an inline image protocol, the client MUST print the product's trademark logo above the welcome row.
+When the terminal supports an inline image protocol, the client MUST paint the product's trademark logo.
+The mark MUST sit at the lower right of the screen, under text, at reduced opacity.
 The client MUST use the kitty graphics protocol on kitty, ghostty, and WezTerm, and the iTerm2 inline image on iTerm2.
 A `dalgona` session MUST show `assets/brand/dalgona` and a `dal` session MUST show `assets/brand/dal` tinted to the accent colour.
-TMUX or STY set selects no logo.
-A terminal without image support MUST NOT print the logo row.
-Kitty emission MUST hold the cursor with `C=1` and chunk base64 at 4096 bytes.
+The mark MUST be translucent so text stays readable over it. Kitty MUST draw the mark below text with a negative z index.
+TMUX or STY set selects no logo. A terminal without image support MUST show the product name through the band `mark` item instead.
+Kitty emission MUST hold the cursor with `C=1`, reuse one image id across repaints, and chunk base64 at 4096 bytes.
+The mark MUST preserve the source aspect ratio and MUST repaint at the lower right on every frame.
 The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `width` and `height`.
 
 ## Keys and commands
