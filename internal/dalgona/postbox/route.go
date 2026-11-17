@@ -175,6 +175,10 @@ func (s *Service) sendLocked(pending routedPost, recipient resolvedRecipient) (R
 		return Receipt{}, "", err
 	}
 	if err := recipient.thread.MailReceive(pending.ctx, message); err != nil {
+		refused := event.MailSettled{ID: message.ID, Outcome: event.MailOutcomeRefused, Reason: err.Error()}
+		if settleErr := pending.sender.MailSettle(pending.ctx, refused); settleErr != nil {
+			return Receipt{}, "", errors.Join(err, errors.New("post: receipt pending; retry the same message"))
+		}
 		return Receipt{}, "", err
 	}
 	settled := event.MailSettled{ID: message.ID, Outcome: event.MailOutcomeQueued}

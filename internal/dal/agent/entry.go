@@ -139,11 +139,24 @@ func (a *actor) submit(ctx context.Context, in preparedInput) error {
 		a.autoContinue = a.autoContinue || err == nil
 		return err
 	}
+	return a.submitTurn(ctx, message)
+}
+
+func (a *actor) submitTurn(ctx context.Context, message event.UserMessage) error {
 	turnID := newID("turn-")
 	message.TurnID, message.Kind = turnID, string(InputPrompt)
-	if _, err := a.append(ctx, event.TurnStarted{TurnID: turnID}, message); err != nil {
+	pending := pendingMail(a.state.Mail)
+	batch := []event.Event{event.TurnStarted{TurnID: turnID, MailHop: pendingMailHop(pending)}, message}
+	if a.state.Mail != nil && (a.state.Mail.AutoTurns > 0 || a.state.Mail.Held) {
+		batch = append(batch, event.MailHumanReset{TurnID: turnID})
+	}
+	if len(pending) > 0 {
+		batch = append(batch, event.MailConsumed{IDs: pendingMailIDs(pending), TurnID: turnID, Hop: pendingMailHop(pending)})
+	}
+	if _, err := a.append(ctx, batch...); err != nil {
 		return err
 	}
+	a.settleMailSenders(ctx, pending, turnID)
 	a.autoContinue = true
 	a.spawnTurn(turnID)
 	return nil

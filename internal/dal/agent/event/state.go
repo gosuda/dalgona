@@ -285,11 +285,8 @@ func startTurnChecked(s *State, value TurnStarted) error {
 }
 
 func noteTurnMailHop(s *State, value TurnStarted) {
-	if value.MailHop == 0 {
-		return
-	}
 	mail := s.ensureMail()
-	if mail.TurnHops[value.TurnID] < value.MailHop {
+	if _, ok := mail.TurnHops[value.TurnID]; !ok || mail.TurnHops[value.TurnID] < value.MailHop {
 		mail.TurnHops[value.TurnID] = value.MailHop
 	}
 }

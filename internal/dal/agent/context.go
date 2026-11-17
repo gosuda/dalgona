@@ -124,6 +124,13 @@ func (b *transcript) add(e event.Event) {
 		b.toolFree = false
 	case event.TurnCompleted:
 		b.emitFollowups()
+	default:
+		b.addContent(value)
+	}
+}
+
+func (b *transcript) addContent(e event.Event) {
+	switch value := e.(type) {
 	case event.UserMessage:
 		b.user(value)
 	case event.AssistantMessage:
@@ -132,6 +139,8 @@ func (b *transcript) add(e event.Event) {
 		b.result(value)
 	case event.AdvisorNote:
 		b.note(value)
+	case event.MailReceived:
+		b.mail(value)
 	case event.ToolJudged:
 		b.judged(value)
 	case event.TurnJudged:
@@ -194,6 +203,11 @@ func (b *transcript) note(e event.AdvisorNote) {
 		return
 	}
 	b.emitUser(userTurn{text: e.Render()})
+}
+
+func (b *transcript) mail(e event.MailReceived) {
+	from := e.Message.From.AgentID + "@" + e.Message.From.SessionID
+	b.emitUser(userTurn{text: "mail from " + from + " (" + e.Message.ID + "):\n" + e.Message.Text})
 }
 
 func (b *transcript) emitUser(turn userTurn) {

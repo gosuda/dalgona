@@ -329,6 +329,10 @@ func (a *actor) settleTurn(turnID string, o outcome, head uint64) bool {
 		} else {
 			a.spawnTurn(next)
 		}
+		return true
+	}
+	if o.status == statusCompleted {
+		a.mailAutoTurn(context.Background())
 	}
 	return true
 }

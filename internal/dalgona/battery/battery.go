@@ -172,7 +172,16 @@ func (d *Daemon) attachPostbox(h *agent.Host) {
 		d.postboxCancel = nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	service, err := postbox.New(ctx, postbox.Options{Host: h, Sessions: true, UserID: daemonUID()})
+	service, err := postbox.New(ctx, postbox.Options{
+		Host: h, Sessions: true, UserID: daemonUID(),
+		ContinueForMail: func(ctx context.Context, threadID string) error {
+			thread, err := h.Resume(ctx, threadID)
+			if err != nil {
+				return err
+			}
+			return thread.RunMailTurn(ctx)
+		},
+	})
 	if err != nil {
 		cancel()
 		return

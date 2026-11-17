@@ -571,3 +571,125 @@ func MailBinding(ctx context.Context) (*Thread, string, bool) {
 	}
 	return w.t, w.turnID, true
 }
+
+const (
+	mailAutoTurnLimit = 4
+	mailHeldReason    = "Mail held: 4 automatic mail turns reached; send a message to continue"
+)
+
+func pendingMail(mail *event.MailState) []event.MailMessage {
+	if mail == nil {
+		return nil
+	}
+	var pending []event.MailMessage
+	for _, entry := range mail.Messages {
+		if entry.Received && entry.ConsumedTurn == "" {
+			pending = append(pending, entry.Message)
+		}
+	}
+	sort.Slice(pending, func(i, j int) bool {
+		if pending[i].AcceptedMS != pending[j].AcceptedMS {
+			return pending[i].AcceptedMS < pending[j].AcceptedMS
+		}
+		return pending[i].ID < pending[j].ID
+	})
+	return pending
+}
+
+func pendingMailHop(pending []event.MailMessage) uint8 {
+	var hop uint8
+	for _, message := range pending {
+		if message.Hop > hop {
+			hop = message.Hop
+		}
+	}
+	return hop
+}
+
+func pendingMailIDs(pending []event.MailMessage) []string {
+	ids := make([]string, 0, len(pending))
+	for _, message := range pending {
+		ids = append(ids, message.ID)
+	}
+	return ids
+}
+
+func renderMailPrompt(pending []event.MailMessage) string {
+	var out strings.Builder
+	out.WriteString("mail from session peers:")
+	for _, message := range pending {
+		from := message.From.AgentID + "@" + message.From.SessionID
+		out.WriteString("\n\n<mail id=\"" + message.ID + "\" from=\"" + from + "\">\n" + message.Text + "\n</mail>")
+	}
+	return out.String()
+}
+
+func (a *actor) settleMailSenders(ctx context.Context, pending []event.MailMessage, turnID string) {
+	done := make(map[string]bool, len(pending))
+	for _, message := range pending {
+		senderID := message.From.AgentID
+		if senderID == "main" {
+			senderID = message.From.SessionID
+		}
+		if senderID == "" || senderID == a.t.id || done[message.ID] {
+			continue
+		}
+		done[message.ID] = true
+		sender, err := a.t.host.Resume(ctx, senderID)
+		if err != nil {
+			a.t.host.log.Debug("agent: settle mail sender unavailable", "thread", a.t.id, "sender", senderID, "error", err)
+			continue
+		}
+		settled := event.MailSettled{ID: message.ID, Outcome: event.MailOutcomeDelivered, RecipientTurnID: turnID}
+		if err := sender.MailSettle(ctx, settled); err != nil {
+			a.t.host.log.Debug("agent: settle mail sender failed", "thread", a.t.id, "sender", senderID, "error", err)
+		}
+	}
+}
+
+func (a *actor) mailAutoTurn(ctx context.Context) {
+	mail := a.state.Mail
+	if mail == nil || !mail.RunOnMail {
+		return
+	}
+	pending := pendingMail(mail)
+	if len(pending) == 0 {
+		return
+	}
+	if mail.Held || mail.AutoTurns >= mailAutoTurnLimit {
+		if !mail.Held {
+			if _, err := a.append(ctx, event.MailHeld{Reason: mailHeldReason}); err != nil {
+				a.t.host.log.Error("agent: journal mail.held", "thread", a.t.id, "error", err)
+			}
+		}
+		return
+	}
+	hop := pendingMailHop(pending)
+	turnID := newID("turn-")
+	batch := []event.Event{
+		event.TurnStarted{TurnID: turnID, MailHop: hop},
+		event.MailAutoStarted{TurnID: turnID},
+		event.UserMessage{ItemID: newID("item-"), TurnID: turnID, Kind: string(InputPrompt), Text: renderMailPrompt(pending)},
+		event.MailConsumed{IDs: pendingMailIDs(pending), TurnID: turnID, Hop: hop},
+	}
+	if _, err := a.append(ctx, batch...); err != nil {
+		a.t.host.log.Error("agent: journal mail turn", "thread", a.t.id, "error", err)
+		return
+	}
+	a.settleMailSenders(ctx, pending, turnID)
+	a.autoContinue = true
+	a.spawnTurn(turnID)
+}
+
+func (t *Thread) RunMailTurn(ctx context.Context) error {
+	if err := t.ensureTools(ctx); err != nil {
+		return err
+	}
+	return askErr(ctx, t, func(a *actor) error {
+		if a.busy || a.state.Archived {
+			return nil
+		}
+		a.mailAutoTurn(ctx)
+		return nil
+	})
+}
