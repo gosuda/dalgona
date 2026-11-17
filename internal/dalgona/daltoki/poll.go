@@ -30,12 +30,12 @@ type EndpointETag struct {
 }
 
 type PollCursor struct {
-	Since         time.Time      `json:"since"`
-	BoundaryIDs   []int64        `json:"boundaryIds"`
-	ETags         []EndpointETag `json:"etags"`
-	NextURL       string         `json:"nextUrl"`
-	ScanStartedAt time.Time      `json:"scanStartedAt"`
-	IssueWorklist []int64        `json:"issueWorklist"`
+	Since         time.Time          `json:"since"`
+	BoundaryIDs   []int64            `json:"boundaryIds"`
+	ETags         []EndpointETag     `json:"etags"`
+	NextURL       string             `json:"nextUrl"`
+	ScanStartedAt time.Time          `json:"scanStartedAt"`
+	Labelled      map[string][]int64 `json:"labelled"`
 }
 
 type Observation struct {
@@ -546,37 +546,79 @@ func (p *Poller) drainIssueEvents(ctx context.Context, state *scanState, repo gi
 	return requestURL, false, nil
 }
 
+type labelledListing struct {
+	numbers     []int64
+	notModified bool
+	complete    bool
+}
+
 func (p *Poller) labelledIssueNumbers(ctx context.Context, state *scanState, repo github.Repository) ([]int64, error) {
-	var numbers []int64
-	requestURL := p.labelledURL(repo)
+	repoKey := repo.Owner + "/" + repo.Name
+	listing, err := p.listLabelled(ctx, state, repo, state.etags[p.labelledURL(repo)])
+	if err != nil {
+		return nil, err
+	}
+	if listing.notModified {
+		if cached, ok := state.cursor.Labelled[repoKey]; ok {
+			return cached, nil
+		}
+		if listing, err = p.listLabelled(ctx, state, repo, ""); err != nil {
+			return nil, err
+		}
+		if listing.notModified {
+			return nil, errors.New("github: labelled issues listing repeated a 304")
+		}
+	}
+	if listing.complete {
+		if state.cursor.Labelled == nil {
+			state.cursor.Labelled = make(map[string][]int64)
+		}
+		state.cursor.Labelled[repoKey] = listing.numbers
+	}
+	return listing.numbers, nil
+}
+
+func (p *Poller) listLabelled(ctx context.Context, state *scanState, repo github.Repository, etag string) (labelledListing, error) {
+	firstURL := p.labelledURL(repo)
+	requestURL := firstURL
+	firstETag := ""
+	var listing labelledListing
 	for state.budgetLeft() {
 		page, meta, err := p.client.Issues(ctx, github.IssuesRequest{
 			Repository: repo,
 			NextURL:    requestURL,
-			ETag:       state.etags[requestURL],
+			ETag:       etag,
 			Labels:     []string{"daltoki"},
 		})
 		state.pages++
 		if err != nil {
-			return nil, err
+			return labelledListing{}, err
 		}
 		state.observe(meta)
-		state.rememberETag(requestURL, meta.ETag)
-		if meta.NotModified && len(numbers) == 0 {
-			return state.cursor.IssueWorklist, nil
+		if meta.NotModified {
+			return labelledListing{notModified: true}, nil
 		}
-		for _, item := range page.Items {
-			if item.PullRequest == nil && item.State == "open" {
-				numbers = append(numbers, item.Number)
-			}
+		if requestURL == firstURL {
+			firstETag = meta.ETag
 		}
+		listing.numbers = appendOpenIssueNumbers(listing.numbers, page.Items)
 		if meta.NextURL == "" {
-			state.cursor.IssueWorklist = numbers
-			return numbers, nil
+			state.rememberETag(firstURL, firstETag)
+			listing.complete = true
+			return listing, nil
 		}
-		requestURL = meta.NextURL
+		requestURL, etag = meta.NextURL, ""
 	}
-	return numbers, nil
+	return listing, nil
+}
+
+func appendOpenIssueNumbers(numbers []int64, items []github.IssueItem) []int64 {
+	for _, item := range items {
+		if item.PullRequest == nil && item.State == "open" {
+			numbers = append(numbers, item.Number)
+		}
+	}
+	return numbers
 }
 
 func (p *Poller) labelledURL(repo github.Repository) string {
