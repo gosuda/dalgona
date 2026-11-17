@@ -300,7 +300,7 @@ func assertRecordFilePrivate(t *testing.T, dir, id string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("record mode = %v", info.Mode())
 	}
 	dirInfo, dirErr := os.Lstat(dir)
