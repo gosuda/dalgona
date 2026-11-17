@@ -1,9 +1,11 @@
 package e2e
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +79,7 @@ func verifyCopiedHome(t *testing.T, home string) {
 func verifyJournalNegativeControl(t *testing.T, home string) {
 	t.Helper()
 	renamed := t.TempDir()
-	if err := os.CopyFS(renamed, os.DirFS(home)); err != nil {
+	if err := copyHomeDir(home, renamed); err != nil {
 		t.Fatal(err)
 	}
 	journalPath := filepath.Join(renamed, "sessions", "s1", "journal.jsonl")
@@ -110,7 +112,7 @@ func verifyJournalNegativeControl(t *testing.T, home string) {
 func verifyAuthNegativeControl(t *testing.T, home string) {
 	t.Helper()
 	renamed := t.TempDir()
-	if err := os.CopyFS(renamed, os.DirFS(home)); err != nil {
+	if err := copyHomeDir(home, renamed); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(renamed, "auth.json"), filepath.Join(renamed, "auth2.json")); err != nil {
@@ -197,9 +199,28 @@ func verifyRunner(t *testing.T, home string) {
 	}
 }
 
+func copyHomeDir(src, dst string) error {
+	return fs.WalkDir(os.DirFS(src), ".", func(rel string, entry fs.DirEntry, err error) error {
+		target := filepath.Join(dst, rel)
+		switch {
+		case err != nil:
+			return err
+		case entry.IsDir():
+			return os.MkdirAll(target, 0o700)
+		case strings.EqualFold(entry.Name(), "lock") || strings.HasSuffix(entry.Name(), ".lock"):
+			return nil
+		}
+		data, err := os.ReadFile(filepath.Join(src, rel))
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o600)
+	})
+}
+
 func copyHome(t *testing.T, src, dst string) {
 	t.Helper()
-	if err := os.CopyFS(dst, os.DirFS(src)); err != nil {
+	if err := copyHomeDir(src, dst); err != nil {
 		t.Fatal(err)
 	}
 	authPath := filepath.Join(dst, "auth.json")
@@ -291,7 +312,7 @@ func verifyCopiedRunnerFiles(t *testing.T, dst string) {
 func verifyRebuiltMirror(t *testing.T, src string) {
 	t.Helper()
 	renamed := t.TempDir()
-	if err := os.CopyFS(renamed, os.DirFS(src)); err != nil {
+	if err := copyHomeDir(src, renamed); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(renamed, "state.db"), filepath.Join(renamed, "state2.db")); err != nil {

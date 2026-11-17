@@ -142,7 +142,7 @@ func syncReporterParent(dir string) {
 }
 
 func readQueueFile(dir string) ([]QueueEntry, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, queueFileName))
+	raw, err := readReportFile(filepath.Join(dir, queueFileName))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -158,7 +158,7 @@ func readQueueFile(dir string) ([]QueueEntry, error) {
 
 func readStateFile(dir string) (reporterState, error) {
 	var state reporterState
-	raw, err := os.ReadFile(filepath.Join(dir, stateFileName))
+	raw, err := readReportFile(filepath.Join(dir, stateFileName))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return state, nil

@@ -281,6 +281,9 @@ func assertFailedRecoveryRefusesRun(t *testing.T) {
 	if runErr := failed.Run(context.Background()); runErr == nil || runErr.Error() != "daltoki: host recovery failed" {
 		t.Fatalf("Run after failed recovery = %v", runErr)
 	}
+	if closeErr := failed.Close(context.Background()); closeErr != nil {
+		t.Fatalf("close failed-recovery service: %v", closeErr)
+	}
 }
 
 func TestRetirePreservesState(t *testing.T) {
@@ -307,7 +310,8 @@ func TestRetirePreservesState(t *testing.T) {
 		t.Fatalf("second Close recorded again: %d", got)
 	}
 
-	blocked, err := New(context.Background(), enabledConfig(), Dependencies{Home: t.TempDir(), Client: testClient(t), Auth: testStore(t)})
+	blockedHome := t.TempDir()
+	blocked, err := New(context.Background(), enabledConfig(), Dependencies{Home: blockedHome, Client: testClient(t), Auth: testStore(t)})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -316,5 +320,23 @@ func TestRetirePreservesState(t *testing.T) {
 	defer cancel()
 	if closeErr := blocked.Close(timeout); closeErr == nil {
 		t.Fatal("expected timeout error for owned worker")
+	}
+	blocked.workers.Done()
+	waitForJournalFree(t, blockedHome)
+}
+
+func waitForJournalFree(t *testing.T, home string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		j, err := journal.OpenShared(serviceJournalDir(home))
+		if err == nil {
+			_ = j.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("service journal stayed locked: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
