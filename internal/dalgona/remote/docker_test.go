@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,6 +20,7 @@ import (
 
 func TestDockerBindRecoverAndPull(t *testing.T) {
 	requireDocker(t)
+	requireLinuxBinary(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	store := openJournal(t)
@@ -116,4 +118,19 @@ func gitWorkspace(t *testing.T) string {
 		}
 	}
 	return dir
+}
+
+func requireLinuxBinary(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "linux" {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(filepath.Dir(exe), "dalgona-linux-amd64")
+	if info, err := os.Stat(sibling); err != nil || !info.Mode().IsRegular() {
+		t.Skipf("no linux/amd64 dalgona binary next to %s; build it with GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o %s ./cmd/dalgona", exe, sibling)
+	}
 }

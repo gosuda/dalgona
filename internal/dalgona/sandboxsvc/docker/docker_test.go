@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -41,6 +42,9 @@ func TestServiceLifecycle(t *testing.T) {
 }
 
 func TestBootstrapUploadsBinaryIntact(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the bootstrap upload is the test binary itself only on linux")
+	}
 	cli := newDockerClient(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
