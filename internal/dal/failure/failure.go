@@ -203,7 +203,7 @@ func Build(ctx context.Context, input Input, masker Masker) (Record, error) {
 		Stack:         normalizeFrames(input.Frames),
 		Args:          truncateUTF8(redactSecrets(scrubPrivacy(masked.args, input.Workspace, input.Product)), maxArgsBytes),
 		Output:        truncateUTF8(redactSecrets(scrubPrivacy(masked.output, input.Workspace, input.Product)), maxOutputBytes),
-		FailingStep:   input.FailingStep,
+		FailingStep:   maskFailingStep(input.FailingStep, masker),
 	}
 	record.Fingerprint = Fingerprint(record)
 	record.Reportable = input.Product == "dalgona" && input.Origin == OriginMain
@@ -1518,13 +1518,15 @@ func ReportText(record Record) string {
 	if len(body) <= 32768 {
 		return body
 	}
-	for _, shrink := range []func(Record) Record{withoutOutput, withoutArgs, withoutError} {
-		body = renderReport(shrink(record))
+	shrunk := record
+	for _, shrink := range []func(Record) Record{withoutOutput, withoutArgs, withoutError, withoutStack} {
+		shrunk = shrink(shrunk)
+		body = renderReport(shrunk)
 		if len(body) <= 32768 {
 			return body
 		}
 	}
-	return body
+	return truncateUTF8(body, 32768)
 }
 
 func renderReport(record Record) string {
@@ -1565,6 +1567,33 @@ func withoutArgs(record Record) Record {
 func withoutError(record Record) Record {
 	record.Error = ""
 	return record
+}
+
+func withoutStack(record Record) Record {
+	record.Stack = nil
+	return record
+}
+
+func maskFailingStep(step *FailureStep, masker Masker) *FailureStep {
+	if step == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(step)
+	if err != nil {
+		unavailable := UnavailableStep(ReasonMaskingFailed)
+		return &unavailable
+	}
+	masked, err := masker.MaskWithError(string(encoded))
+	if err != nil {
+		unavailable := UnavailableStep(ReasonMaskingFailed)
+		return &unavailable
+	}
+	var decoded FailureStep
+	if err := json.Unmarshal([]byte(masked), &decoded); err != nil {
+		unavailable := UnavailableStep(ReasonMaskingFailed)
+		return &unavailable
+	}
+	return &decoded
 }
 
 func boolText(value bool) string {
