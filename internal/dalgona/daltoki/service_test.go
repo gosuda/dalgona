@@ -281,6 +281,9 @@ func assertFailedRecoveryRefusesRun(t *testing.T) {
 	if runErr := failed.Run(context.Background()); runErr == nil || runErr.Error() != "daltoki: host recovery failed" {
 		t.Fatalf("Run after failed recovery = %v", runErr)
 	}
+	if closeErr := failed.Close(context.Background()); closeErr != nil {
+		t.Fatalf("close failed-recovery service: %v", closeErr)
+	}
 }
 
 func TestRetirePreservesState(t *testing.T) {

@@ -160,7 +160,7 @@ func (s *Service) Close(ctx context.Context) error {
 	}
 	workersErr := waitWorkers(bounded, &s.workers)
 	errs = append(errs, workersErr)
-	if workersErr == nil && s.store != nil {
+	if s.store != nil {
 		errs = append(errs, s.store.Close())
 	}
 	err := errors.Join(errs...)
