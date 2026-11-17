@@ -71,7 +71,7 @@ HTTP endpoints MUST use HTTPS, except on loopback hosts.
 `DiscoverServer` tries OAuth authorization-server metadata before OpenID metadata.
 The returned issuer MUST equal the requested issuer.
 The server MUST advertise PKCE `S256`.
-Dynamic registration requests a public client named `dalgona` with authorization-code and refresh-token grants.
+Dynamic registration requests a public client named `dalgona` with authorization-code and refresh-token grants. The request MUST include `scope` only when a scope source supplies scopes.
 Without a configured client identifier, a server without registration support MUST fail.
 
 The authorization request, code exchange, and refresh MUST carry the canonical resource URL.

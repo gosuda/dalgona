@@ -200,14 +200,33 @@ func TestRegisterPostsPublicClient(t *testing.T) {
 	}))
 	defer server.Close()
 	redirect := "http://127.0.0.1:54871/callback"
-	clientID, err := oauth.Register(t.Context(), server.Client(), oauth.ServerMetadata{RegistrationEndpoint: server.URL + "/register"}, redirect)
+	clientID, err := oauth.Register(t.Context(), server.Client(), oauth.ServerMetadata{RegistrationEndpoint: server.URL + "/register"}, redirect, nil)
 	if err != nil || clientID != "client-abc" {
 		t.Fatalf("Register = %q, %v", clientID, err)
 	}
-	checkRegistrationRequest(t, <-bodies, redirect)
+	checkRegistrationRequest(t, <-bodies, redirect, "")
 }
 
-func checkRegistrationRequest(t *testing.T, body []byte, redirect string) {
+func TestRegisterScopes(t *testing.T) {
+	bodies := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		bodies <- body
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(writer, `{"client_id":"client-abc"}`)
+	}))
+	defer server.Close()
+	redirect := "http://127.0.0.1:54871/callback"
+	if _, err := oauth.Register(t.Context(), server.Client(), oauth.ServerMetadata{RegistrationEndpoint: server.URL}, redirect, []string{"read", "write"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	checkRegistrationRequest(t, <-bodies, redirect, "read write")
+}
+
+func checkRegistrationRequest(t *testing.T, body []byte, redirect, scope string) {
 	t.Helper()
 	var got struct {
 		ClientName    string   `json:"client_name"`
@@ -215,6 +234,7 @@ func checkRegistrationRequest(t *testing.T, body []byte, redirect string) {
 		GrantTypes    []string `json:"grant_types"`
 		ResponseTypes []string `json:"response_types"`
 		AuthMethod    string   `json:"token_endpoint_auth_method"`
+		Scope         *string  `json:"scope"`
 	}
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode registration request: %v", err)
@@ -225,10 +245,24 @@ func checkRegistrationRequest(t *testing.T, body []byte, redirect string) {
 		!slices.Equal(got.ResponseTypes, []string{"code"}) {
 		t.Fatalf("registration request = %+v", got)
 	}
+	checkRegistrationScope(t, got.Scope, scope)
+}
+
+func checkRegistrationScope(t *testing.T, got *string, want string) {
+	t.Helper()
+	if want == "" {
+		if got != nil {
+			t.Fatalf("registration request scope = %q, want omitted", *got)
+		}
+		return
+	}
+	if got == nil || *got != want {
+		t.Fatalf("registration request scope = %v, want %q", got, want)
+	}
 }
 
 func TestRegisterRefusals(t *testing.T) {
-	_, err := oauth.Register(t.Context(), nil, oauth.ServerMetadata{}, "http://127.0.0.1:54871/callback")
+	_, err := oauth.Register(t.Context(), nil, oauth.ServerMetadata{}, "http://127.0.0.1:54871/callback", nil)
 	if want := "oauth: server has no registration endpoint; set oauth_client_id"; err == nil || err.Error() != want {
 		t.Fatalf("no endpoint error = %v, want %q", err, want)
 	}
@@ -247,7 +281,7 @@ func TestRegisterRefusals(t *testing.T) {
 				_, _ = io.WriteString(writer, tc.body)
 			}))
 			defer server.Close()
-			_, err := oauth.Register(t.Context(), server.Client(), oauth.ServerMetadata{RegistrationEndpoint: server.URL}, "http://127.0.0.1:54871/callback")
+			_, err := oauth.Register(t.Context(), server.Client(), oauth.ServerMetadata{RegistrationEndpoint: server.URL}, "http://127.0.0.1:54871/callback", nil)
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
