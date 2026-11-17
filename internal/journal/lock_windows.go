@@ -92,5 +92,9 @@ func releaseGate(file *os.File) error {
 	if file == nil {
 		return nil
 	}
-	return file.Close()
+	err := unlockFile(file)
+	if errors.Is(err, windows.ERROR_IO_PENDING) {
+		err = nil
+	}
+	return errors.Join(err, file.Close())
 }
