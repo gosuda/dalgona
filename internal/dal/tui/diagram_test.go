@@ -83,4 +83,7 @@ func TestRenderDiagramBlockFailure(t *testing.T) {
 	if !strings.HasPrefix(lines[0], "diagram svg: render failed") || !strings.HasSuffix(lines[0], "source shown") {
 		t.Fatalf("failure header: %#v", lines[:1])
 	}
+	if lines[1] != "<svg/>" {
+		t.Fatalf("failure must show source: %#v", lines)
+	}
 }
