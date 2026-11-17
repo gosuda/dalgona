@@ -540,7 +540,7 @@ func readSecretsMap(dir string) (map[string]string, error) {
 }
 
 func writeSecretsMap(dir string, secrets map[string]string) error {
-	return writeSecure(filepath.Join(dir, "secrets.json"), func(encoder *jsontext.Encoder) error {
+	return WriteSecure(filepath.Join(dir, "secrets.json"), func(encoder *jsontext.Encoder) error {
 		return encodeSecrets(encoder, secrets)
 	})
 }

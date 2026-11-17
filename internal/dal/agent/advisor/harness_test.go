@@ -437,7 +437,7 @@ func copyRegularFiles(t *testing.T, from, to string) {
 		if entry.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
-		if !entry.Type().IsRegular() || strings.HasSuffix(rel, ".lock") {
+		if !entry.Type().IsRegular() || strings.HasSuffix(rel, ".lock") || strings.HasPrefix(rel, "state.db") {
 			return nil
 		}
 		data, err := source.ReadFile(rel)

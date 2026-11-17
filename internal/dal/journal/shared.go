@@ -87,7 +87,7 @@ func (s *Store) attachMirror() error {
 	if err != nil {
 		return fmt.Errorf("journal: state.db is unusable while another process uses %s: %w", s.dir, err)
 	}
-	s.db = db
+	s.setMirror(db)
 	return s.reloadIndex()
 }
 
@@ -174,7 +174,7 @@ func (s *Store) isCurrent(sid string) (bool, error) {
 }
 
 func (s *Store) loadSession(sid string) error {
-	mirror, err := loadSessionEvents(s.db, sid)
+	mirror, err := loadSessionEvents(s.mirror, sid)
 	if err != nil {
 		return fmt.Errorf("journal: load mirror index %s: %w", sid, err)
 	}

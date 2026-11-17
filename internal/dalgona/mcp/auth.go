@@ -3,6 +3,7 @@ package mcp
 import (
 	"cmp"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -71,6 +72,14 @@ type AuthOptions struct {
 }
 
 func CredentialKey(name string) string { return credentialPrefix + name }
+
+func TokenCredential(resource string, token oauth.Token) auth.Credential {
+	credential := auth.Credential{Type: oauthType, Access: token.Access, Refresh: token.Refresh, Account: resource}
+	if !token.Expires.IsZero() {
+		credential.Expires = token.Expires.UTC().Format(time.RFC3339)
+	}
+	return credential
+}
 
 func NewTokenSource(opts AuthOptions) (TokenSource, error) {
 	if opts.BearerTokenEnv != "" {
@@ -199,7 +208,9 @@ func (s *oauthSource) current() (*sourceEntry, error) {
 		ClientID: registration.ClientID, Scopes: slices.Clone(registration.Scopes), Resource: s.resource,
 	}
 	load := func(context.Context) (oauth.Token, error) { return tokenFrom(credential) }
-	save := func(_ context.Context, token oauth.Token) error { return s.save(entry, s.credentialFrom(token)) }
+	save := func(_ context.Context, token oauth.Token) error {
+		return s.save(entry, TokenCredential(s.resource, token))
+	}
 	entry.source = oauth.NewSource(provider, load, save)
 	s.entry = entry
 	return entry, nil
@@ -282,6 +293,30 @@ func ReadRegistration(home, name string) (Registration, error) {
 	return registration, nil
 }
 
+func WriteRegistration(home, name string, registration Registration) (retErr error) {
+	unlock, err := auth.LockHome(home)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
+	path := filepath.Join(home, RegistrationFile)
+	registrations := map[string]Registration{}
+	data, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return fmt.Errorf("read %s: %w", RegistrationFile, err)
+	default:
+		if decodeErr := json.Unmarshal(data, &registrations); decodeErr != nil {
+			return fmt.Errorf("decode %s: %w", RegistrationFile, decodeErr)
+		}
+	}
+	registrations[name] = registration
+	return auth.WriteSecure(path, func(enc *jsontext.Encoder) error {
+		return json.MarshalEncode(enc, registrations)
+	})
+}
+
 func readRegistrationFile(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -311,12 +346,4 @@ func tokenFrom(credential auth.Credential) (oauth.Token, error) {
 	}
 	token.Expires = expires
 	return token, nil
-}
-
-func (s *oauthSource) credentialFrom(token oauth.Token) auth.Credential {
-	credential := auth.Credential{Type: oauthType, Access: token.Access, Refresh: token.Refresh, Account: s.resource}
-	if !token.Expires.IsZero() {
-		credential.Expires = token.Expires.UTC().Format(time.RFC3339)
-	}
-	return credential
 }

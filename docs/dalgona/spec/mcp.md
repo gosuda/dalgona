@@ -64,13 +64,15 @@ Any non-2xx response other than 401 MUST NOT refresh a token. It MUST NOT select
 
 An OAuth source MUST store its token in `auth.json` under the key `mcp-<name>`. The `account` value MUST be the canonical resource URL of the server. A token with another `account` value is no credential. The error MUST read `mcp-<name> token was issued for <account>, not <resource>; run dalgona mcp login <name>`.
 
-The registration MUST live in `<home>/mcp-oauth.json` as one object for each server name. Each entry MUST hold `resource`, `issuer`, `authorization_endpoint`, `token_endpoint`, `client_id`, and `scopes`. The file MUST be a regular file with mode 0600. Only `dalgona mcp login` writes it.
+The registration MUST live in `<home>/mcp-oauth.json` as one object for each server name. Each entry MUST hold `resource`, `issuer`, `authorization_endpoint`, `token_endpoint`, `client_id`, and `scopes`. The file MUST be a regular file with mode 0600. Only `dalgona mcp login` writes it. The write MUST hold `auth.lock` and MUST publish the file through a temporary file, file `fsync`, rename, and directory `fsync`.
 
 The OAuth source MUST read the registration again on every token load and every refresh. It MUST refuse an entry for another resource before it sends a credential. It MUST refuse an entry whose `client_id` differs from a configured `oauth_client_id`. It MUST refuse an entry whose endpoints are neither https nor loopback.
 
 The host MUST report `authStatus` for each started server. The value is `unsupported` for a stdio server and for an HTTP server without authentication. The value is `bearerToken` when the bearer variable holds a value. The value is `oAuth` when a bound token and a valid registration exist. Otherwise the value is `notLoggedIn`.
 
 A server with `oauth` and without a bound token MUST start no network call. It MUST report `runtimeStatus` `authenticationRequired` and `toolsError` `login required: run dalgona mcp login <name>`. A server that returns 401 after a refresh MUST report the same two values. Such a server has no tools.
+
+`dalgona mcp login <name>` MUST sign in to the `[mcp_servers.<name>]` server named `<name>`. It MUST fail when no server has that name or when the server has no `oauth` value. It MUST send one unauthenticated request to the server URL and MUST read the `WWW-Authenticate` header of a 401 response. It MUST resolve protected resource metadata, then authorization server metadata. `oauth_client_id` MUST be the client identifier when set. Otherwise the command MUST use dynamic registration. The command MUST open the authorization URL for the user and MUST accept a pasted redirect URL or code. The loopback callback MUST use `oauth_callback_port`. A successful login MUST write the registration entry and MUST store the token under `mcp-<name>` with the canonical resource as `account`. It MUST then print `logged in to MCP server <name>`.
 
 ## Tool discovery
 

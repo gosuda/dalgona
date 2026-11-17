@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -62,7 +61,7 @@ type emitRec struct {
 
 type Store struct {
 	dir        string
-	db         *sql.DB
+	mirror     *mirrorDB
 	idx        *dbIndex
 	sessions   map[string]*sessionState
 	slocks     map[string]*sync.Mutex
@@ -172,11 +171,18 @@ func acquireHomeLock(dir string) (*os.File, error) {
 	return nil, errors.Join(err, lock.Close())
 }
 
+func (s *Store) setMirror(m *mirrorDB) {
+	if s.shared {
+		m.detach()
+	}
+	s.mirror = m
+}
+
 func (s *Store) openMirror() error {
 	path := filepath.Join(s.dir, "state.db")
 	db, openErr := openUsableDB(path)
 	if openErr == nil {
-		s.db = db
+		s.setMirror(db)
 		return s.reloadIndex()
 	}
 	if err := quarantineDB(s.dir, s.quarantineDir()); err != nil {
@@ -184,7 +190,7 @@ func (s *Store) openMirror() error {
 	}
 	db, backupErr := recoverBackup(s.dir)
 	if backupErr == nil && db != nil {
-		s.db = db
+		s.setMirror(db)
 		return s.reloadIndex()
 	}
 	if backupErr != nil {
@@ -197,7 +203,7 @@ func (s *Store) openMirror() error {
 	if err != nil {
 		return err
 	}
-	s.db = db
+	s.setMirror(db)
 	return s.reloadIndex()
 }
 
@@ -219,11 +225,11 @@ func (s *Store) reconcileStore() error {
 }
 
 func (s *Store) rebuildMirror() error {
-	if s.db != nil {
-		if err := s.db.Close(); err != nil {
+	if s.mirror != nil {
+		if err := s.mirror.Close(); err != nil {
 			return err
 		}
-		s.db = nil
+		s.mirror = nil
 	}
 	if err := quarantineDB(s.dir, s.quarantineDir()); err != nil {
 		return fmt.Errorf("journal: quarantine state.db: %w", err)
@@ -232,13 +238,13 @@ func (s *Store) rebuildMirror() error {
 	if err != nil {
 		return err
 	}
-	s.db = db
+	s.setMirror(db)
 	s.idx = &dbIndex{events: map[string]*sessIndex{}, sessions: map[string]sessionRow{}}
 	return nil
 }
 
 func (s *Store) reloadIndex() error {
-	idx, err := loadSessionRows(s.db)
+	idx, err := loadSessionRows(s.mirror)
 	if err != nil {
 		return fmt.Errorf("journal: load mirror index: %w", err)
 	}
@@ -344,7 +350,7 @@ func (s *Store) writeBatch(session string, st *sessionState, events [][]byte) (u
 		st.observe(file)
 	}
 	syncErr := s.syncfs()
-	mirrorErr := mirrorAppend(s.db, session, batch.recs, batch.seq)
+	mirrorErr := mirrorAppend(s.mirror, session, batch.recs, batch.seq)
 	return batch.seq, errors.Join(syncErr, mirrorErr)
 }
 
@@ -785,7 +791,7 @@ func (s *Store) Close() error {
 	unlock := s.lockSessions(ids)
 	defer unlock()
 	s.mu.Lock()
-	db := s.db
+	m := s.mirror
 	dir := s.dir
 	dirSync := s.dirSync
 	var fileErr error
@@ -797,16 +803,16 @@ func (s *Store) Close() error {
 	}
 	s.mu.Unlock()
 	result := fileErr
-	if db != nil {
-		result = errors.Join(result, backupDBFiles(db, dir, dirSync), db.Close())
+	if m != nil {
+		result = errors.Join(result, backupDBFiles(m, dir, dirSync), m.Close())
 	}
 	return errors.Join(result, releaseLock(s.users), releaseLock(s.lock))
 }
 
 func (s *Store) closeLocked() error {
 	var result error
-	if s.db != nil {
-		result = errors.Join(result, s.db.Close())
+	if s.mirror != nil {
+		result = errors.Join(result, s.mirror.Close())
 	}
 	return errors.Join(result, releaseLock(s.users), releaseLock(s.lock))
 }

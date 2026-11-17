@@ -327,7 +327,7 @@ func decisions(events []event.Seqd) map[string]event.ApprovalResolved {
 }
 
 func skipCrashCopy(name, rel string) bool {
-	return strings.HasPrefix(name, "state.db") || name == "lock" || strings.HasSuffix(name, ".lock") || strings.Contains(rel, "runs")
+	return strings.HasPrefix(rel, "state.db") || name == "lock" || strings.HasSuffix(name, ".lock") || strings.Contains(rel, "runs")
 }
 
 func copyHome(t *testing.T, from, to string) {

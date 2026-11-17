@@ -158,7 +158,7 @@ func (s *Store) rewriteAuth(apply func()) error {
 		return err
 	}
 	apply()
-	if err := writeSecure(s.authPath(), s.encodeAuth); err != nil {
+	if err := WriteSecure(s.authPath(), s.encodeAuth); err != nil {
 		return err
 	}
 	info, err := os.Lstat(s.authPath())
@@ -456,7 +456,7 @@ func writeCredential(encoder *jsontext.Encoder, c Credential) error {
 	return nil
 }
 
-func writeSecure(path string, encode func(*jsontext.Encoder) error) error {
+func WriteSecure(path string, encode func(*jsontext.Encoder) error) error {
 	if dirErr := ProtectHomeDir(filepath.Dir(path)); dirErr != nil {
 		return fmt.Errorf("create credential directory: %w", dirErr)
 	}

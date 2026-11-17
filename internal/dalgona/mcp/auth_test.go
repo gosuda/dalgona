@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -635,5 +637,59 @@ func TestTokenSourceReloadsRegistration(t *testing.T) {
 	env.writeRegistration(t, env.resource, tokenServer.URL, "client-1")
 	if token, refreshErr := source.Refresh(t.Context()); refreshErr != nil || token != "fresh-access" {
 		t.Fatalf("restored registration refresh = %q, %v", token, refreshErr)
+	}
+}
+
+func TestWriteRegistration(t *testing.T) {
+	home := t.TempDir()
+	first := mcp.Registration{Resource: "https://a.example/mcp", Issuer: "https://a.example", AuthorizationEndpoint: "https://a.example/authorize", TokenEndpoint: "https://a.example/token", ClientID: "client-a", Scopes: []string{"read"}}  //nolint:gosec // test fixture identifier, not a credential
+	second := mcp.Registration{Resource: "https://b.example/mcp", Issuer: "https://b.example", AuthorizationEndpoint: "https://b.example/authorize", TokenEndpoint: "https://b.example/token", ClientID: "client-b", Scopes: []string{"read"}} //nolint:gosec // test fixture identifier, not a credential
+	if err := mcp.WriteRegistration(home, "a", first); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	if err := mcp.WriteRegistration(home, "b", second); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+	requireRegistrationMode(t, home)
+	if got, readErr := mcp.ReadRegistration(home, "a"); readErr != nil || !reflect.DeepEqual(got, first) {
+		t.Fatalf("read a = %+v, %v", got, readErr)
+	}
+	if got, readErr := mcp.ReadRegistration(home, "b"); readErr != nil || !reflect.DeepEqual(got, second) {
+		t.Fatalf("read b = %+v, %v", got, readErr)
+	}
+}
+
+func requireRegistrationMode(t *testing.T, home string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(filepath.Join(home, mcp.RegistrationFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o", info.Mode().Perm())
+	}
+}
+
+func TestWriteRegistrationConcurrent(t *testing.T) {
+	home := t.TempDir()
+	registration := func(host string) mcp.Registration {
+		return mcp.Registration{Resource: "https://" + host + "/mcp", Issuer: "https://" + host, AuthorizationEndpoint: "https://" + host + "/authorize", TokenEndpoint: "https://" + host + "/token", ClientID: "client-" + host}
+	}
+	done := make(chan error, 2)
+	for _, name := range []string{"a", "b"} {
+		go func() { done <- mcp.WriteRegistration(home, name, registration(name+".example")) }()
+	}
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	for _, name := range []string{"a", "b"} {
+		if got, err := mcp.ReadRegistration(home, name); err != nil || got.ClientID != "client-"+name+".example" {
+			t.Fatalf("read %s = %+v, %v", name, got, err)
+		}
 	}
 }

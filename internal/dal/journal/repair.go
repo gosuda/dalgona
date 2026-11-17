@@ -61,7 +61,7 @@ func (s *Store) reconcileOne(sid string) (bool, error) {
 	if !exists {
 		return false, nil
 	}
-	si, err := loadSessionEvents(s.db, sid)
+	si, err := loadSessionEvents(s.mirror, sid)
 	if err != nil {
 		return false, fmt.Errorf("journal: load mirror index %s: %w", sid, err)
 	}
@@ -86,7 +86,7 @@ func (s *Store) reconcileClean(sid string, si *sessIndex) (reconcileResult, bool
 	if err != nil || !clean {
 		return reconcileResult{}, false, err
 	}
-	if err := upsertSession(s.db, sid, string(SessionOK), verified.head.HeadSeq); err != nil {
+	if err := upsertSession(s.mirror, sid, string(SessionOK), verified.head.HeadSeq); err != nil {
 		return reconcileResult{}, false, err
 	}
 	return verified, true, nil
@@ -375,7 +375,7 @@ func (s *Store) restoreTail(sid string, scan *scanState, si *sessIndex) error {
 }
 
 func (s *Store) fetchVerified(sid string, seq uint64, prevHash string) (emitRec, bool, error) {
-	result, err := fetchRow(s.db, sid, seq)
+	result, err := fetchRow(s.mirror, sid, seq)
 	if err != nil || !result.ok {
 		return emitRec{}, false, err
 	}
@@ -402,17 +402,17 @@ func (s *Store) finishReconcile(sid string, plan reconcilePlan) (bool, error) {
 	}
 	if plan.scan.damagedSeq > 0 {
 		if mirrorMatches(plan.mirror, plan.scan.emits) {
-			return plan.scan.rebuild, upsertSession(s.db, sid, string(plan.head.Status), plan.head.HeadSeq)
+			return plan.scan.rebuild, upsertSession(s.mirror, sid, string(plan.head.Status), plan.head.HeadSeq)
 		}
-		return plan.scan.rebuild, replaceSession(s.db, sid, plan.scan.emits, plan.head)
+		return plan.scan.rebuild, replaceSession(s.mirror, sid, plan.scan.emits, plan.head)
 	}
 	if !s.shared && (plan.scan.rebuild || mirrorHashMismatch(plan.mirror, plan.scan.emits)) {
 		return true, nil
 	}
 	if mirrorMatches(plan.mirror, plan.scan.emits) {
-		return false, upsertSession(s.db, sid, string(plan.head.Status), plan.head.HeadSeq)
+		return false, upsertSession(s.mirror, sid, string(plan.head.Status), plan.head.HeadSeq)
 	}
-	return false, replaceSession(s.db, sid, plan.scan.emits, plan.head)
+	return false, replaceSession(s.mirror, sid, plan.scan.emits, plan.head)
 }
 
 func mirrorMatches(si *sessIndex, emits []emitRec) bool {
