@@ -17,7 +17,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -929,9 +928,7 @@ func writeKeyFile(t *testing.T, pemBytes []byte, perm os.FileMode) string {
 	if err := os.WriteFile(path, pemBytes, perm); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS == "windows" {
-		setTestKeyACL(t, path, perm)
-	}
+	setTestKeyACL(t, path, perm)
 	return path
 }
 
