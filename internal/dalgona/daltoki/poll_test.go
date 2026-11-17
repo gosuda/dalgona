@@ -446,56 +446,85 @@ func TestPollFloorOn304(t *testing.T) {
 	}
 }
 
-func TestLabelled304ReusesCachedIssueNumbers(t *testing.T) {
+func newLabelledPoller(t *testing.T) *Poller {
+	t.Helper()
 	harness := newRouteHarness(t)
-	poller := NewPoller(testPollClient(t, harness.server), nil, PollerConfig{
+	harness.labelled304 = true
+	return NewPoller(testPollClient(t, harness.server), nil, PollerConfig{
 		BaseURL: harness.server.URL,
 	}, time.Now, nil)
-	repo := github.Repository{Owner: "octo", Name: "repo"}
-	firstURL := poller.labelledURL(repo)
-	harness.labelled304 = true
+}
 
-	cached := poller.newScan(PollCursor{
+func TestLabelled304ReusesCachedIssueNumbers(t *testing.T) {
+	poller := newLabelledPoller(t)
+	repo := github.Repository{Owner: "octo", Name: "repo"}
+	state := poller.newScan(PollCursor{
 		Since:    time.Now().Add(-time.Hour),
-		ETags:    []EndpointETag{{URL: firstURL, ETag: `"fresh"`}},
+		ETags:    []EndpointETag{{URL: poller.labelledURL(repo), ETag: `"fresh"`}},
 		Labelled: map[string][]int64{"octo/repo": {5}, "octo/other": {9}},
 	}, true)
-	numbers, err := poller.labelledIssueNumbers(context.Background(), cached, repo)
-	if err != nil {
-		t.Fatalf("labelledIssueNumbers: %v", err)
+
+	numbers, listed, err := poller.labelledIssueNumbers(context.Background(), state, repo)
+	if err != nil || !listed {
+		t.Fatalf("labelledIssueNumbers: listed=%v err=%v", listed, err)
 	}
 	if len(numbers) != 1 || numbers[0] != 5 {
 		t.Fatalf("304 worklist = %v, want only this repository's cached [5]", numbers)
 	}
+}
 
-	uncached := poller.newScan(PollCursor{
+func TestLabelled304WithoutCacheRefetchesUnconditionally(t *testing.T) {
+	poller := newLabelledPoller(t)
+	repo := github.Repository{Owner: "octo", Name: "repo"}
+	state := poller.newScan(PollCursor{
 		Since: time.Now().Add(-time.Hour),
-		ETags: []EndpointETag{{URL: firstURL, ETag: `"stale"`}},
+		ETags: []EndpointETag{{URL: poller.labelledURL(repo), ETag: `"stale"`}},
 	}, true)
-	numbers, err = poller.labelledIssueNumbers(context.Background(), uncached, repo)
-	if err != nil {
-		t.Fatalf("uncached labelledIssueNumbers: %v", err)
+
+	numbers, listed, err := poller.labelledIssueNumbers(context.Background(), state, repo)
+	if err != nil || !listed {
+		t.Fatalf("labelledIssueNumbers: listed=%v err=%v", listed, err)
 	}
 	if len(numbers) != 1 || numbers[0] != 7 {
 		t.Fatalf("uncached 304 worklist = %v, want refetched [7]", numbers)
 	}
-	if got := uncached.cursor.Labelled["octo/repo"]; len(got) != 1 || got[0] != 7 {
-		t.Fatalf("refetch did not populate the cache: %+v", uncached.cursor.Labelled)
+	if got := state.cursor.Labelled["octo/repo"]; len(got) != 1 || got[0] != 7 {
+		t.Fatalf("refetch did not populate the cache: %+v", state.cursor.Labelled)
 	}
 }
 
 func TestLabelledListingCutByBudgetIsNotCached(t *testing.T) {
-	harness := newRouteHarness(t)
-	poller := NewPoller(testPollClient(t, harness.server), nil, PollerConfig{
-		BaseURL: harness.server.URL,
-	}, time.Now, nil)
+	poller := newLabelledPoller(t)
 	state := poller.newScan(PollCursor{Since: time.Now().Add(-time.Hour)}, true)
 	state.pages = pollPageLimit
 
-	if _, err := poller.labelledIssueNumbers(context.Background(), state, github.Repository{Owner: "octo", Name: "repo"}); err != nil {
-		t.Fatalf("labelledIssueNumbers: %v", err)
+	numbers, listed, err := poller.labelledIssueNumbers(context.Background(), state, github.Repository{Owner: "octo", Name: "repo"})
+	if err != nil || listed || len(numbers) != 0 {
+		t.Fatalf("budget-cut listing = %v listed=%v err=%v, want unlisted and empty", numbers, listed, err)
 	}
 	if len(state.cursor.Labelled) != 0 || len(state.etags) != 0 {
 		t.Fatalf("incomplete listing was cached: labelled=%v etags=%v", state.cursor.Labelled, state.etags)
+	}
+}
+
+func TestEventsPhaseStaysIncompleteWhenBudgetBlocksLabelledRefetch(t *testing.T) {
+	poller := newLabelledPoller(t)
+	repo := github.Repository{Owner: "octo", Name: "repo"}
+	state := poller.newScan(PollCursor{
+		Since:   time.Now().Add(-time.Hour),
+		ETags:   []EndpointETag{{URL: poller.labelledURL(repo), ETag: `"fresh"`}},
+		NextURL: eventsContinuation(repo),
+	}, true)
+	state.pages = pollPageLimit - 1
+
+	done, err := poller.eventsPhase(context.Background(), state, repo)
+	if err != nil {
+		t.Fatalf("eventsPhase: %v", err)
+	}
+	if done {
+		t.Fatal("events phase completed although the labelled listing never ran")
+	}
+	if state.cursor.NextURL != eventsContinuation(repo) {
+		t.Fatalf("NextURL = %q, want the events continuation kept for the next pass", state.cursor.NextURL)
 	}
 }

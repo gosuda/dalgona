@@ -474,10 +474,17 @@ func (p *Poller) commentsPhase(ctx context.Context, state *scanState, repo githu
 }
 
 func (p *Poller) eventsPhase(ctx context.Context, state *scanState, repo github.Repository) (bool, error) {
-	numbers, err := p.labelledIssueNumbers(ctx, state, repo)
+	numbers, listed, err := p.labelledIssueNumbers(ctx, state, repo)
 	if err != nil {
 		return false, err
 	}
+	if !listed {
+		return false, nil
+	}
+	return p.drainLabelledEvents(ctx, state, repo, numbers)
+}
+
+func (p *Poller) drainLabelledEvents(ctx context.Context, state *scanState, repo github.Repository, numbers []int64) (bool, error) {
 	start, resume, err := eventResume(numbers, state.cursor.NextURL)
 	if err != nil {
 		return false, err
@@ -552,30 +559,31 @@ type labelledListing struct {
 	complete    bool
 }
 
-func (p *Poller) labelledIssueNumbers(ctx context.Context, state *scanState, repo github.Repository) ([]int64, error) {
+func (p *Poller) labelledIssueNumbers(ctx context.Context, state *scanState, repo github.Repository) ([]int64, bool, error) {
 	repoKey := repo.Owner + "/" + repo.Name
 	listing, err := p.listLabelled(ctx, state, repo, state.etags[p.labelledURL(repo)])
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if listing.notModified {
 		if cached, ok := state.cursor.Labelled[repoKey]; ok {
-			return cached, nil
+			return cached, true, nil
 		}
 		if listing, err = p.listLabelled(ctx, state, repo, ""); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if listing.notModified {
-			return nil, errors.New("github: labelled issues listing repeated a 304")
+			return nil, false, errors.New("github: labelled issues listing repeated a 304")
 		}
 	}
-	if listing.complete {
-		if state.cursor.Labelled == nil {
-			state.cursor.Labelled = make(map[string][]int64)
-		}
-		state.cursor.Labelled[repoKey] = listing.numbers
+	if !listing.complete {
+		return nil, false, nil
 	}
-	return listing.numbers, nil
+	if state.cursor.Labelled == nil {
+		state.cursor.Labelled = make(map[string][]int64)
+	}
+	state.cursor.Labelled[repoKey] = listing.numbers
+	return listing.numbers, true, nil
 }
 
 func (p *Poller) listLabelled(ctx context.Context, state *scanState, repo github.Repository, etag string) (labelledListing, error) {
