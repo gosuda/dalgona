@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,9 +32,11 @@ type mirrorDB struct {
 }
 
 type mirrorActor struct {
-	req  chan func() error
-	res  chan error
-	done chan struct{}
+	mu     sync.Mutex
+	req    chan func() error
+	res    chan error
+	done   chan struct{}
+	closed bool
 }
 
 func (m *mirrorDB) apply(fn func(*pebble.DB) error) error {
@@ -69,35 +72,53 @@ func spawnMirrorActor(m *mirrorDB) *mirrorActor {
 	return actor
 }
 
+var errMirrorClosed = errors.New("journal: state.db is closed")
+
 func (a *mirrorActor) call(fn func() error) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return errMirrorClosed
+	}
 	a.req <- fn
 	return <-a.res
+}
+
+func (a *mirrorActor) shutdown() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return
+	}
+	a.closed = true
+	close(a.req)
+	<-a.done
 }
 
 func (m *mirrorDB) Close() error {
 	if m == nil || m.actor == nil {
 		return nil
 	}
-	actor := m.actor
-	m.actor = nil
-	err := m.dropDB(actor)
-	close(actor.req)
-	<-actor.done
+	err := m.dropDB(m.actor)
+	m.actor.shutdown()
 	return err
 }
 
 func (m *mirrorDB) dropDB(actor *mirrorActor) error {
 	err := actor.call(func() error {
-		db := m.db
-		m.db = nil
-		if db == nil {
-			return nil
+		db, lock := m.db, m.lock
+		m.db, m.lock = nil, nil
+		var result error
+		if db != nil {
+			result = db.Close()
 		}
-		return db.Close()
+		if lock != nil {
+			result = errors.Join(result, lock.Close())
+		}
+		return result
 	})
-	if m.lock != nil {
-		err = errors.Join(err, m.lock.Close())
-		m.lock = nil
+	if errors.Is(err, errMirrorClosed) {
+		return nil
 	}
 	return err
 }
@@ -135,7 +156,7 @@ func openMirror(path string, lock *pebble.Lock) (*pebble.DB, error) {
 
 func (m *mirrorDB) withDB(fn func(*pebble.DB) error) error {
 	if m == nil || m.actor == nil {
-		return errors.New("journal: state.db is closed")
+		return errMirrorClosed
 	}
 	return m.actor.call(func() error { return m.apply(fn) })
 }
