@@ -70,6 +70,61 @@ func verifyCopiedHome(t *testing.T, home string) {
 	verifyCopiedJournal(t, copied)
 	verifyCopiedAuth(t, copied)
 	verifyCopiedRunnerFiles(t, copied)
+	verifyJournalNegativeControl(t, copied)
+	verifyAuthNegativeControl(t, copied)
+}
+
+func verifyJournalNegativeControl(t *testing.T, home string) {
+	t.Helper()
+	renamed := t.TempDir()
+	if err := os.CopyFS(renamed, os.DirFS(home)); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(renamed, "sessions", "s1", "journal.jsonl")
+	if err := os.Rename(journalPath, journalPath+".bak"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := journal.OpenShared(renamed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		closeErr := store.Close()
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}()
+
+	var ids []uint64
+	if err := store.Replay("s1", func(seq uint64, _ []byte) error {
+		ids = append(ids, seq)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("renamed journal replayed %v, want no events", ids)
+	}
+}
+
+func verifyAuthNegativeControl(t *testing.T, home string) {
+	t.Helper()
+	renamed := t.TempDir()
+	if err := os.CopyFS(renamed, os.DirFS(home)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(renamed, "auth.json"), filepath.Join(renamed, "auth2.json")); err != nil {
+		t.Fatal(err)
+	}
+	cred, err := auth.Load(renamed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range cred.Entries() {
+		if entry.ID == "openai" {
+			t.Fatal("renamed auth.json still contains openai credential")
+		}
+	}
 }
 
 func verifyCopiedJournalBytes(t *testing.T, src, dst string) {
@@ -102,9 +157,6 @@ func verifyAuth(t *testing.T, home string) {
 
 func verifyRunner(t *testing.T, home string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("runner shim requires unix shell")
-	}
 	local, err := runner.NewLocal(filepath.Join(home, "runs"))
 	if err != nil {
 		t.Fatal(err)
@@ -115,9 +167,13 @@ func verifyRunner(t *testing.T, home string) {
 		}
 	}()
 
+	argv := []string{"sh", "-c", "exit 0"}
+	if runtime.GOOS == "windows" {
+		argv = []string{"cmd", "/C", "exit 0"}
+	}
 	spec := runner.ProcessSpec{
 		ID:      "r1",
-		Argv:    []string{"sh", "-c", "exit 0"},
+		Argv:    argv,
 		Dir:     home,
 		Sandbox: runner.Sandbox{Mode: runner.SandboxOff},
 	}
