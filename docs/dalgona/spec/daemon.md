@@ -145,6 +145,8 @@ The local daemon dialer MUST preserve the Unix socket's half-close capability.
 
 The app-server WebSocket listener MUST refuse a request with a non-empty `Origin` header with HTTP 403. It MUST answer a request without a valid `Authorization: Bearer <token>` header with HTTP 401. It MUST compare the bearer token digest in constant time. It MUST answer HTTP 503 while it shuts down, and HTTP 503 when it cannot dial the daemon. It MUST NOT upgrade a request that the daemon dial refused. The Origin refusal MUST follow Codex `codex-rs/app-server-transport/src/transport/websocket.rs`.
 
+The WebSocket server MUST set a read timeout of 30 seconds and a write timeout of 60 seconds. It MUST set an idle timeout of 120 seconds, in addition to its 10-second header read timeout.
+
 `dalgona acp` MUST serve the Agent Client Protocol on standard input and output and MUST take no arguments. It MUST dial the daemon through the same `Ensure` path as the other local clients, or through the remote box when `remote` is configured. Each ACP session MUST map to one daemon thread.
 
 The adapter MUST read one JSON-RPC message per line of at most 16 MiB. A line that is not JSON MUST get a `-32700` reply with id `null`. A JSON value that is not a request MUST get `-32600`. An error reply without a known request id MUST carry id `null`. A message without `id` is a notification and MUST NOT get a reply. An unknown method MUST get `-32601` with `Method not found`. At most 64 requests MAY be in flight. The adapter MUST answer further requests with `-32603` and `adapter busy: too many open requests`.

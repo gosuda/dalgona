@@ -4,7 +4,7 @@ The TUI is a protocol client. It MUST import only `internal/dal/rpc` from this m
 
 ## Entry point
 
-`Run(ctx, conn, opts)` dials `conn` with `rpc.Dial`. The RPC client delivers notifications and server requests in arrival order. Its dispatch queue holds 256 messages. Each message goes to the Bubble Tea program as one message.
+`Run(ctx, conn, opts)` dials `conn` with `rpc.Dial(ctx, conn, handler)`. `rpc.Dial` takes a context as its first argument. Cancelling it ends the handler and request contexts that the client derives from it. The RPC client delivers notifications and server requests in arrival order. Its dispatch queue holds 256 messages. Each message goes to the Bubble Tea program as one message.
 
 `Options` fields:
 
