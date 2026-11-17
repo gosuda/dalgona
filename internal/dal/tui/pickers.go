@@ -118,9 +118,10 @@ func (m *model) resumeLine(item listItem, selected bool) string {
 		title += " (active)"
 	}
 	rowTheme := m.screen.dockTheme()
-	head := rowTheme.paint(roleText, m.screen.pad(title, m.resumeTitleCells()))
+	titleCells := m.resumeTitleCells()
+	head := rowTheme.paint(roleText, m.screen.pad(m.screen.fit(title, titleCells), titleCells))
 	if selected {
-		head = rowTheme.paintBold(roleText, m.screen.pad(title, m.resumeTitleCells()))
+		head = rowTheme.paintBold(roleText, m.screen.pad(m.screen.fit(title, titleCells), titleCells))
 	}
 	line := head
 	if item.date != "" {
@@ -136,14 +137,17 @@ func (m *model) resumeLine(item listItem, selected bool) string {
 
 func (m *model) resumeTitleCells() int {
 	width := 0
+	state := 0
 	for _, item := range m.list.items {
 		title := item.label
 		if item.active {
 			title += " (active)"
 		}
 		width = max(width, m.screen.cells(title))
+		state = max(state, m.screen.cells(item.detail))
 	}
-	return width
+	budget := panelRowWidth(&m.screen) - panelRailCells - 4 - resumeDateCells - 2 - state
+	return min(width, max(1, budget))
 }
 
 func (m *model) highlighted() (listItem, bool) {
