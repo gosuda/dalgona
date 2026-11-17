@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -649,18 +650,26 @@ func TestWriteRegistration(t *testing.T) {
 	if err := mcp.WriteRegistration(home, "b", second); err != nil {
 		t.Fatalf("write second: %v", err)
 	}
+	requireRegistrationMode(t, home)
+	if got, readErr := mcp.ReadRegistration(home, "a"); readErr != nil || !reflect.DeepEqual(got, first) {
+		t.Fatalf("read a = %+v, %v", got, readErr)
+	}
+	if got, readErr := mcp.ReadRegistration(home, "b"); readErr != nil || !reflect.DeepEqual(got, second) {
+		t.Fatalf("read b = %+v, %v", got, readErr)
+	}
+}
+
+func requireRegistrationMode(t *testing.T, home string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
 	info, err := os.Stat(filepath.Join(home, mcp.RegistrationFile))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %o", info.Mode().Perm())
-	}
-	if got, readErr := mcp.ReadRegistration(home, "a"); readErr != nil || !reflect.DeepEqual(got, first) {
-		t.Fatalf("read a = %+v, %v", got, readErr)
-	}
-	if got, readErr := mcp.ReadRegistration(home, "b"); readErr != nil || !reflect.DeepEqual(got, second) {
-		t.Fatalf("read b = %+v, %v", got, readErr)
 	}
 }
 
