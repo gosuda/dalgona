@@ -1,4 +1,4 @@
-# dal and dalgona
+# dalgona (/dal)
 
 Terminal coding agents, with or without a daemon.
 
