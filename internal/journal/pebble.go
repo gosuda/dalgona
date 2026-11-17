@@ -3,6 +3,7 @@ package journal
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -716,7 +717,7 @@ func queryIndexRows(ctx context.Context, m *mirrorDB, terms []string) ([]SearchH
 			}
 			intersectSet(candidates, set)
 		}
-		return collectIndexRows(db, candidates, terms, &rows)
+		return collectIndexRows(ctx, db, candidates, terms, &rows)
 	})
 	return rows, err
 }
@@ -778,7 +779,7 @@ func postingSet(db *pebble.DB, trigram string) (map[postingKey]struct{}, error) 
 	return set, it.Error()
 }
 
-func collectIndexRows(db *pebble.DB, candidates map[postingKey]struct{}, terms []string, rows *[]SearchHit) error {
+func collectIndexRows(ctx context.Context, db *pebble.DB, candidates map[postingKey]struct{}, terms []string, rows *[]SearchHit) error {
 	keys := make([]postingKey, 0, len(candidates))
 	for key := range candidates {
 		keys = append(keys, key)
@@ -790,6 +791,9 @@ func collectIndexRows(db *pebble.DB, candidates map[postingKey]struct{}, terms [
 		return cmp.Compare(a.seq, b.seq)
 	})
 	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		hit, ok, err := indexRowHit(db, key, terms)
 		if err != nil {
 			return err
