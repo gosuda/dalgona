@@ -606,7 +606,11 @@ func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) (retErr 
 	defer func() { retErr = errors.Join(retErr, release()) }()
 	tmp := filepath.Join(dir, "state.db.bak.tmp")
 	final := filepath.Join(dir, "state.db.bak")
+	old := filepath.Join(dir, "state.db.bak.old")
 	if err := os.RemoveAll(tmp); err != nil {
+		return fmt.Errorf("journal: remove stale backup: %w", err)
+	}
+	if err := os.RemoveAll(old); err != nil {
 		return fmt.Errorf("journal: remove stale backup: %w", err)
 	}
 	if err := m.withDB(func(db *pebble.DB) error {
@@ -614,14 +618,24 @@ func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) (retErr 
 	}); err != nil {
 		return fmt.Errorf("journal: backup state.db: %w", err)
 	}
-	if err := os.RemoveAll(final); err != nil {
-		return fmt.Errorf("journal: remove old backup: %w", err)
+	if err := swapBackup(tmp, final, old); err != nil {
+		return err
+	}
+	if err := dirSync(dir); err != nil {
+		return fmt.Errorf("journal: sync backup dir %s: %w", dir, err)
+	}
+	return nil
+}
+
+func swapBackup(tmp, final, old string) error {
+	if err := os.Rename(final, old); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("journal: swap old backup: %w", err)
 	}
 	if err := os.Rename(tmp, final); err != nil { //nolint:gosec // backup path is validated
 		return fmt.Errorf("journal: install state.db.bak: %w", err)
 	}
-	if err := dirSync(dir); err != nil {
-		return fmt.Errorf("journal: sync backup dir %s: %w", dir, err)
+	if err := os.RemoveAll(old); err != nil {
+		return fmt.Errorf("journal: remove swapped backup: %w", err)
 	}
 	return nil
 }
@@ -684,11 +698,14 @@ func quarantineFree(quarantine, name string) (bool, error) {
 	return true, nil
 }
 
-func queryIndexRows(m *mirrorDB, terms []string) ([]SearchHit, error) {
+func queryIndexRows(ctx context.Context, m *mirrorDB, terms []string) ([]SearchHit, error) {
 	var rows []SearchHit
 	err := m.withDB(func(db *pebble.DB) error {
 		var candidates map[postingKey]struct{}
 		for i, term := range terms {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			set, err := termCandidates(db, term)
 			if err != nil {
 				return err
