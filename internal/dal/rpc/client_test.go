@@ -28,7 +28,7 @@ type clientServerOutcome struct {
 func TestDialDeliversNotificationsAndRequestInOrder(t *testing.T) {
 	left, right := net.Pipe()
 	handler := &orderedClientHandler{events: make([]int, 0, 1001), done: make(chan struct{})}
-	client := Dial(left, handler)
+	client := Dial(t.Context(), left, handler)
 	closeRPCPair(t, client, right)
 	outcome := make(chan clientServerOutcome, 1)
 	go func() { outcome <- runClientServer(right) }()
@@ -199,7 +199,7 @@ type clientErrorReply struct {
 func exchangeClientError(t *testing.T, handler ClientHandler, request string) ([]byte, clientErrorReply) {
 	t.Helper()
 	left, right := net.Pipe()
-	client := Dial(right, handler)
+	client := Dial(t.Context(), right, handler)
 	closeRPCPair(t, client, left)
 	if err := left.SetDeadline(time.Now().Add(waitLimit)); err != nil {
 		t.Fatal(err)

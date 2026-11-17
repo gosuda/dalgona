@@ -67,7 +67,7 @@ func startEffortWire(ctx context.Context, t *testing.T) *effortWire {
 		side:    left,
 		threads: map[string]*wireThread{},
 	}
-	client := rpc.Dial(right, handler)
+	client := rpc.Dial(ctx, right, handler)
 	wire.client = client
 	wire.peer.Go(wire.serve)
 	t.Cleanup(func() {

@@ -116,7 +116,7 @@ func Retire(ctx context.Context, home string) error {
 		return err
 	}
 	defer conn.Close()
-	client := rpc.Dial(conn, daemonClient{})
+	client := rpc.Dial(ctx, conn, daemonClient{})
 	defer func() { _ = client.Close() }()
 	if err := client.Call(ctx, MethodRetire, nil, nil); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 		return err

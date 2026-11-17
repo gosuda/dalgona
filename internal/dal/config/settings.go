@@ -13,9 +13,11 @@ type SettingSpec struct {
 	Options []any
 }
 
+type SettingValue any
+
 type SettingEdit struct {
 	Key   string
-	Value any
+	Value SettingValue
 }
 
 var statusItems = []string{"effort", "approval", "sandbox", "folder", "queue", "cost", "context", "mark"}

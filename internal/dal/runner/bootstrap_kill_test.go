@@ -168,11 +168,8 @@ func (f *stopPollFake) Close() error                         { return nil }
 
 func TestStopRunnerProcess_pollsWithOffset(t *testing.T) {
 	const grace = 200 * time.Millisecond
-	old := runnerKillGrace
-	runnerKillGrace = grace
-	defer func() { runnerKillGrace = old }()
 	f := &stopPollFake{}
-	stopRunnerProcess(f, "p1")
+	StopProcessWithGrace(f, "p1", grace)
 	if len(f.signals) < 2 || f.signals[0] != SignalTerm || f.signals[len(f.signals)-1] != SignalKill {
 		t.Fatalf("signals = %v, want TERM then KILL", f.signals)
 	}

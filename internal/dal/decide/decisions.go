@@ -38,7 +38,7 @@ func NewDecisions(config DecisionsConfig) *Decisions {
 		config.BaseURL = defaultDecisionsURL
 	}
 	if config.HTTPClient == nil {
-		config.HTTPClient = &http.Client{Timeout: 0}
+		config.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	if config.Timeout <= 0 {
 		config.Timeout = askTimeout

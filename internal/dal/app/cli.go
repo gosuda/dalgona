@@ -533,7 +533,7 @@ func (env CLIEnv) connect(ctx context.Context) (*cliSession, error) {
 	conn := &watchedConn{ReadWriteCloser: dialed, lost: make(chan struct{})}
 	book := newTurnBook(env.Stderr)
 	book.lost = conn.lost
-	client := rpc.Dial(conn, book)
+	client := rpc.Dial(ctx, conn, book)
 	s := &cliSession{conn: conn, client: client, book: book}
 	params := rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: string(env.Product), Version: "cli"}}
 	if err := client.Initialize(ctx, params, &rpc.InitializeResult{}); err != nil {

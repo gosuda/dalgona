@@ -72,7 +72,7 @@ func writeLine(t *testing.T, c net.Conn, v any) {
 func TestClientServerRequestsDoNotBlockNotifications(t *testing.T) {
 	left, right := net.Pipe()
 	h := &dispatchProbe{entered: make(chan struct{}), release: make(chan struct{})}
-	client := Dial(right, h)
+	client := Dial(t.Context(), right, h)
 	t.Cleanup(func() { _ = client.Close() })
 	writeLine(t, left, envelope{JSONRPC: "2.0", ID: jsontext.Value(`"req-1"`), Method: "item/commandExecution/requestApproval", Params: jsontext.Value(`{"threadId":"t"}`)})
 	select {

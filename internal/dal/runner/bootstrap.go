@@ -331,13 +331,15 @@ func waitStream(ctx context.Context, st Stream) (int, error) {
 	select {
 	case <-ctx.Done():
 		_ = st.Close()
+		timer := time.NewTimer(waitCancelGrace)
+		defer timer.Stop()
 		select {
 		case res := <-ch:
 			if res.err != nil {
 				return res.code, fmt.Errorf("runner: wait for command: %w", ctx.Err())
 			}
 			return res.code, nil
-		case <-time.After(waitCancelGrace):
+		case <-timer.C:
 			_ = st.Close()
 			return 0, fmt.Errorf("runner: wait for command: %w", ctx.Err())
 		}
@@ -672,10 +674,6 @@ func redialAfterClosedStream(r Runner, termErr error) (Runner, bool) {
 	return fresh, true
 }
 
-func stopRunnerProcess(r Runner, id string) {
-	StopProcessWithGrace(r, id, runnerKillGrace)
-}
-
 func runRemote(ctx context.Context, r Runner, argv []string) (string, error) {
 	id, err := newProcID()
 	if err != nil {
@@ -711,7 +709,7 @@ func waitExit(ctx context.Context, r Runner, id string) (string, int, error) {
 	for {
 		out, err := r.Read(ctx, id, offset)
 		if err != nil {
-			stopRunnerProcess(r, id)
+			StopProcessWithGrace(r, id, runnerKillGrace)
 			return "", 0, fmt.Errorf("runner: read process %s: %w", id, err)
 		}
 		buf.Write(out.Data)
@@ -737,7 +735,7 @@ func waitPoll(ctx context.Context, r Runner, id string, timer *time.Timer) error
 	timer.Reset(pollInterval)
 	select {
 	case <-ctx.Done():
-		stopRunnerProcess(r, id)
+		StopProcessWithGrace(r, id, runnerKillGrace)
 		return ctx.Err()
 	case <-timer.C:
 		return nil

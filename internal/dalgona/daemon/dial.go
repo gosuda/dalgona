@@ -28,7 +28,7 @@ func DialHome(home string) (net.Conn, error) {
 func Untrusted(err error) bool { return errors.Is(err, errUntrusted) }
 
 func ProbeConn(ctx context.Context, conn net.Conn) (Info, Probe, error) {
-	client := rpc.Dial(conn, daemonClient{})
+	client := rpc.Dial(ctx, conn, daemonClient{})
 	defer func() {
 		_ = client.Close()
 		_ = conn.Close()

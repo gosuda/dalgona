@@ -45,7 +45,7 @@ func servePipe(t *testing.T, extensions map[string]rpc.Extension) net.Conn {
 
 func TestDaemonIdentityAnswersBeforeInitialize(t *testing.T) {
 	conn := servePipe(t, map[string]rpc.Extension{daemon.MethodIdentity: identityExtension(time.Now())})
-	client := rpc.Dial(conn, quietClient{})
+	client := rpc.Dial(t.Context(), conn, quietClient{})
 	defer func() { _ = client.Close() }()
 	var info daemon.Info
 	if err := client.Call(t.Context(), daemon.MethodIdentity, nil, &info); err != nil {
@@ -68,7 +68,7 @@ func TestDaemonIdentityAnswersBeforeInitialize(t *testing.T) {
 func TestDaemonRetireCancelsRun(t *testing.T) {
 	retired := make(chan struct{})
 	conn := servePipe(t, map[string]rpc.Extension{daemon.MethodRetire: retireExtension(func() { close(retired) })})
-	client := rpc.Dial(conn, quietClient{})
+	client := rpc.Dial(t.Context(), conn, quietClient{})
 	defer func() { _ = client.Close() }()
 	callErr := client.Call(t.Context(), daemon.MethodRetire, nil, nil)
 	if callErr != nil && !errors.Is(callErr, io.ErrClosedPipe) {

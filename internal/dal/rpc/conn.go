@@ -94,8 +94,8 @@ func (c *Conn) start() {
 	go c.readLoop()
 }
 
-func Dial(rwc io.ReadWriteCloser, h ClientHandler) *Conn {
-	ctx, cancel := context.WithCancel(context.Background())
+func Dial(ctx context.Context, rwc io.ReadWriteCloser, h ClientHandler) *Conn {
+	ctx, cancel := context.WithCancel(ctx)
 	c := newConnection(ctx, rwc, nil)
 	c.cancel = cancel
 	c.clientHandler = h

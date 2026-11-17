@@ -233,10 +233,12 @@ func (s *EventStream) Err() error            { return s.err }
 func (s *EventStream) initiateStop()         { s.stopOnce.Do(func() { close(s.stop) }) }
 func (s *EventStream) Close() error {
 	s.initiateStop()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
 	select {
 	case <-s.done:
 		return nil
-	case <-time.After(time.Second):
+	case <-timer.C:
 		return context.DeadlineExceeded
 	}
 }

@@ -372,6 +372,9 @@ func serveWebSocket(ctx context.Context, cfg wsServerConfig) error {
 	server := &http.Server{
 		Handler:           relay,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 	stop := context.AfterFunc(ctx, func() { _ = server.Close() })

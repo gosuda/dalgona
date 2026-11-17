@@ -115,7 +115,7 @@ func validateQuestion(question Question) error {
 
 func validateObjectCriteria(criterion any) error {
 	switch value := criterion.(type) {
-	case map[string]string, map[string]any:
+	case map[string]string:
 		return nil
 	case jsontext.Value:
 		if value.Kind() == jsontext.KindBeginObject && value.IsValid() {
@@ -131,8 +131,6 @@ func scoreCriteriaLength(criterion any) (int, error) {
 	var length int
 	switch value := criterion.(type) {
 	case []string:
-		length = len(value)
-	case []any:
 		length = len(value)
 	case jsontext.Value:
 		if value.Kind() != jsontext.KindBeginArray || !value.IsValid() {
@@ -200,12 +198,8 @@ func writeCriterion(encoder *jsontext.Encoder, criterion any) error {
 	switch value := criterion.(type) {
 	case map[string]string:
 		return writeStringMap(encoder, value)
-	case map[string]any:
-		return writeAnyMap(encoder, value)
 	case []string:
 		return writeStrings(encoder, value)
-	case []any:
-		return writeAnySlice(encoder, value)
 	default:
 		return writeScalarCriterion(encoder, criterion)
 	}
@@ -243,39 +237,12 @@ func writeStringMap(encoder *jsontext.Encoder, values map[string]string) error {
 	return encoder.WriteToken(jsontext.EndObject)
 }
 
-func writeAnyMap(encoder *jsontext.Encoder, values map[string]any) error {
-	if err := encoder.WriteToken(jsontext.BeginObject); err != nil {
-		return err
-	}
-	for _, name := range slices.Sorted(maps.Keys(values)) {
-		if err := encoder.WriteToken(jsontext.String(name)); err != nil {
-			return err
-		}
-		if err := writeCriterion(encoder, values[name]); err != nil {
-			return err
-		}
-	}
-	return encoder.WriteToken(jsontext.EndObject)
-}
-
 func writeStrings(encoder *jsontext.Encoder, values []string) error {
 	if err := encoder.WriteToken(jsontext.BeginArray); err != nil {
 		return err
 	}
 	for _, value := range values {
 		if err := encoder.WriteToken(jsontext.String(value)); err != nil {
-			return err
-		}
-	}
-	return encoder.WriteToken(jsontext.EndArray)
-}
-
-func writeAnySlice(encoder *jsontext.Encoder, values []any) error {
-	if err := encoder.WriteToken(jsontext.BeginArray); err != nil {
-		return err
-	}
-	for _, value := range values {
-		if err := writeCriterion(encoder, value); err != nil {
 			return err
 		}
 	}

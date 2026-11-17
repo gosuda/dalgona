@@ -285,7 +285,7 @@ func (a *adapter) connect(ctx context.Context) error {
 		return fmt.Errorf("dial daemon: %w", err)
 	}
 	conn := &watchedConn{ReadWriteCloser: dialed, lost: make(chan struct{})}
-	client := rpc.Dial(conn, a)
+	client := rpc.Dial(ctx, conn, a)
 	params := rpc.InitializeParams{
 		ClientInfo:   rpc.ClientInfo{Name: clientName, Title: "dalgona ACP adapter", Version: a.opts.Version},
 		Capabilities: &rpc.InitializeCapabilities{RequiredHumanApproval: true},

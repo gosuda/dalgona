@@ -151,7 +151,7 @@ func openBubbleWindow(t *testing.T, ctx context.Context, r *rig, thread *agent.T
 		conn: NewConn(ctx, serverEnd, nil), requests: make(chan struct{}, 1),
 		answers: make(chan any, 1), resolved: make(chan string, 4), thread: thread,
 	}
-	client := Dial(clientEnd, windowHandler{t: t, w: w})
+	client := Dial(ctx, clientEnd, windowHandler{t: t, w: w})
 	w.client = client
 	w.server = &server{
 		host: r.host, log: slog.New(slog.DiscardHandler), conn: w.conn,

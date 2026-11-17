@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
@@ -21,7 +22,7 @@ type Service struct {
 }
 
 func New(baseURL, token string) *Service {
-	return &Service{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: http.DefaultClient}
+	return &Service{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: &http.Client{Timeout: 30 * time.Second}}
 }
 
 var boxName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
