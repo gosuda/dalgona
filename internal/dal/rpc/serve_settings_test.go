@@ -132,6 +132,23 @@ func TestBatchWriteRefusesEmptyEdits(t *testing.T) {
 	}
 }
 
+func TestModelWriteRejectsMalformedID(t *testing.T) {
+	r := newRig(t, config.ApprovalAuto)
+	c := r.connect()
+	path := filepath.Join(r.home, "settings.toml")
+	for _, id := range []string{"/login", "openai", "openai/", "/gpt"} {
+		c.fails("config/value/write", batchEdit("model", id), codeInvalidParams, "model id must be <provider>/<model>")
+	}
+	c.fails("config/batchWrite", map[string]any{"edits": []any{batchEdit("model", "/login")}}, codeInvalidParams, "model id must be <provider>/<model>")
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a rejected model write created %s: %v", path, err)
+	}
+	c.ok("config/value/write", batchEdit("model", "openai/gpt-6.1-sol"), nil)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("a valid model write missed %s: %v", path, err)
+	}
+}
+
 func TestSettingsReadListsInteractiveSettings(t *testing.T) {
 	r := newRig(t, config.ApprovalAsk)
 	r.cfg.Config.Product = config.ProductDalgona

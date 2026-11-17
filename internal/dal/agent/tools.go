@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -435,7 +436,7 @@ func (w *worker) run(ctx context.Context, p *prepared) (tool.Result, error) {
 
 func (w *worker) env(v verdict) tool.Env {
 	mode := runner.SandboxWorkspaceWrite
-	if v.unsandboxed || w.settings.Sandbox == config.SandboxOff || w.sandboxChoice() == event.SandboxChoiceDangerous {
+	if v.unsandboxed || w.settings.Sandbox == config.SandboxOff || w.sandboxChoice() == event.SandboxChoiceDangerous || w.t.host.cfg.SandboxCause() != "" {
 		mode = runner.SandboxOff
 	}
 	roots := append([]string{w.t.created.Cwd}, w.t.host.roots...)
@@ -523,7 +524,7 @@ func headerRef(line string) (string, bool) {
 
 func deniedSocketSandbox(mode runner.SandboxMode, roots []string, home string) runner.Sandbox {
 	sandbox := runner.Sandbox{Mode: mode, WritableRoots: roots}
-	if mode == runner.SandboxOff || home == "" {
+	if mode == runner.SandboxOff || home == "" || runtime.GOOS == "windows" {
 		return sandbox
 	}
 	sandbox.DeniedSockets = []string{filepath.Join(home, "dalgona.sock")}

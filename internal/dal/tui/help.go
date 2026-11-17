@@ -103,7 +103,7 @@ func (m *model) helpView() panelView {
 }
 
 func (m *model) helpBody() []string {
-	theme := m.screen.dockTheme()
+	th := m.screen.dockTheme()
 	body := make([]string, 0, len(keyTable)+helpPage)
 	group := ""
 	for _, row := range keyTable {
@@ -111,12 +111,12 @@ func (m *model) helpBody() []string {
 			if group != "" {
 				body = append(body, "")
 			}
-			body = append(body, theme.paint(roleDim, row.group))
+			body = append(body, th.paint(roleDim, row.group))
 			group = row.group
 		}
-		body = append(body, theme.paint(roleDim, fmt.Sprintf("  %-24s", row.keys))+" "+theme.paint(roleText, row.action))
+		body = append(body, th.paint(roleDim, fmt.Sprintf("  %-24s", row.keys))+" "+th.paint(roleText, row.action))
 	}
-	body = append(body, "", theme.paint(roleDim, "Status"))
+	body = append(body, "", th.paint(roleDim, "Status"))
 	return append(body, m.statusLegend()...)
 }
 

@@ -651,7 +651,7 @@ func checkTrainTraces(t *testing.T, traces []string, dir string) {
 			t.Fatalf("trace %s names a test case", name)
 		}
 	}
-	if !slices.Equal(traces, []string{filepath.Join(dir, "v1", "traces", "a_rep0.json")}) {
+	if !slices.Equal(traces, []string{filepath.ToSlash(filepath.Join(dir, "v1", "traces", "a_rep0.json"))}) {
 		t.Fatalf("train traces = %v, want only a_rep0.json", traces)
 	}
 }

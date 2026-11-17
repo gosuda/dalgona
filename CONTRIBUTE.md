@@ -30,9 +30,11 @@ Live debugging: `just live-up-dal` or `just live-up-dalgona`, then follow [live-
 
 Use the versions pinned in [go.mod](go.mod) and [web/package.json](web/package.json). Do not weaken a gate, raise a limit, or exclude a failing test to make a change pass.
 
-[justfile](justfile) declares `fmt-check`, `vet`, `lint`, `test`, `vuln`, `hashline-model`, `spec-style`, `web-check`, and `cf-check`. Run them together with `just verify`. `test` uses the race detector. `hashline-model` and `spec-style` run when `uv` is available. Without `uv`, they skip locally and fail when `CI=true`. Do not report those skips as a pass.
+[justfile](justfile) declares `fmt-check`, `vet`, `lint`, `test`, `vuln`, `hashline-model`, `spec-style`, `docs-links`, `web-check`, and `cf-check`. Run them together with `just verify`. `test` uses the race detector. `hashline-model` and `spec-style` run when `uv` is available. Without `uv`, they skip locally and fail when `CI=true`. Do not report those skips as a pass.
 
-Use `just web` to install the locked web dependencies and build the assets. `web-check` uses the installed web tools. `cf-check` installs the locked Cloudflare dependencies before its checks. `just build` builds both binaries for the host into `bin/`; `just dal` and `just dalgona` run them from source and pass their arguments through. `just dist` builds release binaries, and `just box-image` builds the remote box image.
+`just verify-go` groups the five Go checks. `just verify-shared` groups the model, specification, docs links, web, and Cloudflare checks. `just verify` runs both groups. [CI](docs/dal/spec/ci.md) runs the shared group once, then the Go group on Linux, macOS, and Windows with the same built web assets.
+
+Use `just web` to install the locked web dependencies and build the assets. `web-check` uses the installed web tools. `cf-check` installs the locked Cloudflare dependencies before its checks. `just build` builds both binaries for the host into `bin/`; `just dal` and `just dalgona` run them from source and pass their arguments through. `just dist` builds all release binaries. `just box-dist` builds the two Linux `dalgona` binaries for the remote box image, and `just box-image` builds those binaries and the image.
 
 Report the checks you ran, their results, and any untested requirement. Distinguish local checks from live-provider, reboot, desktop-app, and cloud-service checks.
 

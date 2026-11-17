@@ -12,7 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 const sessionsColumns = `(id TEXT PRIMARY KEY, parent TEXT, cwd TEXT, title TEXT, status TEXT NOT NULL CHECK(status IN ('ok','damaged')), head_seq INTEGER NOT NULL CHECK(head_seq >= 0), updated_at TEXT)`
@@ -407,7 +408,19 @@ func fetchRow(db *sql.DB, sid string, seq uint64) (fetchResult, error) {
 	return result, nil
 }
 
+const withTxBusyRetries = 3
+
 func withTx(db *sql.DB, fn func(*sql.Tx) error) (retErr error) {
+	for attempt := 0; ; attempt++ {
+		err := withTxOnce(db, fn)
+		if !isBusyError(err) || attempt == withTxBusyRetries {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func withTxOnce(db *sql.DB, fn func(*sql.Tx) error) (retErr error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -417,6 +430,14 @@ func withTx(db *sql.DB, fn func(*sql.Tx) error) (retErr error) {
 		return err
 	}
 	return tx.Commit()
+}
+
+func isBusyError(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	return sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
 func rollbackTx(tx *sql.Tx) error {

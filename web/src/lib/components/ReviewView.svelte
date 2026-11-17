@@ -5,7 +5,12 @@ import Panel from "#lib/components/panels/Panel.svelte";
 import { formatDuration } from "#lib/format.ts";
 import { stateKey, stateWords } from "#lib/labels.ts";
 import type { JsonValue, OutputPage, TranscriptItem } from "#lib/types.ts";
-import { evalCode, isToolGroup, type TranscriptEntry } from "#lib/verbosity.ts";
+import {
+	evalCode,
+	isToolGroup,
+	type TranscriptEntry,
+	tailoredOutput,
+} from "#lib/verbosity.ts";
 
 interface Props {
 	readonly target: TranscriptEntry | null;
@@ -89,7 +94,7 @@ function argumentsText(value: JsonValue): string {
 						<pre>{argumentsText(item.arguments)}</pre>
 					{/if}
 					{#if outputOf(item) !== ""}
-						<pre>{outputOf(item)}</pre>
+						<pre>{tailoredOutput(outputOf(item))}</pre>
 					{/if}
 				{:else if item.kind === "fileChange"}
 					{#each item.changes as change, index (`${index}:${change.path}`)}

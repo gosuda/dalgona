@@ -263,6 +263,7 @@ func (m *model) setStatusHide(value any) {
 func (m *model) applyEnvMsg(msg tea.EnvMsg) tea.Cmd {
 	m.applyEnv(msg)
 	m.screen.kittyWindow = msg.Getenv("KITTY_WINDOW_ID") != ""
+	m.screen.imgProto = detectImageProto(msg.Getenv)
 	return m.requestKittyFont()
 }
 

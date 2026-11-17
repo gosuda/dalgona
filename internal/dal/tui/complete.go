@@ -312,31 +312,31 @@ func (m *model) runPopup() tea.Cmd {
 func (m *model) popupLines() []string {
 	popup := m.input.popup
 	rows := panelRows(panelPopup, m.screen.height)
-	theme := m.screen.dockTheme()
+	th := m.screen.dockTheme()
 	width := panelRowWidth(&m.screen)
 	lines := make([]string, 0, rows)
 	for i := range rows {
 		if i >= len(popup.items) {
 			line := ""
 			if i == 0 && popup.notice != "" {
-				line = theme.paint(roleDim, m.screen.fit(popup.notice, max(1, width-panelRailCells-2)))
+				line = th.paint(roleDim, m.screen.fit(popup.notice, max(1, width-panelRailCells-2)))
 			}
-			lines = append(lines, m.screen.fit(theme.paint(roleFaint, "│ ")+"  "+line, width))
+			lines = append(lines, m.screen.fit(th.paint(roleFaint, "│ ")+"  "+line, width))
 			continue
 		}
 		item := popup.items[i]
 		selected := i == popup.cursor
-		rail := theme.paint(roleFaint, "│ ")
+		rail := th.paint(roleFaint, "│ ")
 		marker := "  "
-		label := theme.paint(roleText, item.label)
+		label := th.paint(roleText, item.label)
 		if selected {
-			rail = theme.paintBold(roleText, "┃ ")
-			marker = theme.paintBold(roleAccentText, "● ")
-			label = theme.paintBold(roleText, item.label)
+			rail = th.paintBold(roleText, "┃ ")
+			marker = th.paintBold(roleAccentText, "● ")
+			label = th.paintBold(roleText, item.label)
 		}
 		detail := ""
 		if item.detail != "" {
-			detail = "  " + theme.paint(roleDim, item.detail)
+			detail = "  " + th.paint(roleDim, item.detail)
 		}
 		lines = append(lines, m.screen.fit(rail+marker+label+detail, width))
 	}

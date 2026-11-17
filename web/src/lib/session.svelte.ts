@@ -1035,12 +1035,17 @@ export class Session {
 			if (result.thread.turns.length === 0)
 				await this.readThread(threadId, selection);
 		} catch (error) {
-			if (selection === this.selectionGeneration)
+			if (selection === this.selectionGeneration) {
 				this.reportFailure(
 					"Unable to open thread",
 					error instanceof Error ? error : String(error),
 					() => void this.selectThread(threadId),
 				);
+				if (error instanceof RpcError && error.code === -32602) {
+					this.activeThreadId = null;
+					this.transcript = emptyTranscript(null);
+				}
+			}
 		} finally {
 			if (selection === this.selectionGeneration)
 				this.loadingTranscript = false;

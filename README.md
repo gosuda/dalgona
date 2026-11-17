@@ -319,6 +319,8 @@ just verify
 
 `just verify` runs formatting checks, vet, lint, race-enabled tests, vulnerability checks, the hashline model, specification style, web checks, and Cloudflare checks.
 
+[CI](docs/dal/spec/ci.md) runs the shared checks once, then the Go checks on Linux, macOS, and Windows with the same built web assets.
+
 Without `uv`, `hashline-model` and `spec-style` skip locally and fail when `CI=true`. A skipped check is not a pass.
 
 | Command | Purpose |
@@ -329,7 +331,8 @@ Without `uv`, `hashline-model` and `spec-style` skip locally and fail when `CI=t
 | `just dalgona --version` | Rebuild `dalgona` and print its version. |
 | `just web` | Install locked web dependencies and build the web assets. |
 | `just dist` | Build release binaries for Linux, macOS, and Windows on amd64 and arm64. |
-| `just box-image` | Build release binaries and the remote box image with Docker Buildx. |
+| `just box-dist` | Build the Linux amd64 and arm64 binaries for the remote box image. |
+| `just box-image` | Build the box binaries and remote box image with Docker Buildx. |
 
 ### Contributing
 

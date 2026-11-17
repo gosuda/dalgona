@@ -266,6 +266,9 @@ func (p *Parser) parse(ctx context.Context, src []byte) (*gotreesitter.Tree, Rep
 	if err := ctx.Err(); err != nil {
 		return nil, Report{}, fmt.Errorf("syntax: %w", err)
 	}
+	if p.timeout > 0 && p.timeout < time.Microsecond {
+		return nil, Report{Stopped: true}, nil
+	}
 	began := time.Now()
 	var tree *gotreesitter.Tree
 	var err error
