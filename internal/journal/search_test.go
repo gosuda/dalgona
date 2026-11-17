@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	json "encoding/json/v2"
+
+	"github.com/cockroachdb/pebble/v2"
 )
 
 func searchUser(text string) []byte {
@@ -133,29 +135,31 @@ func requireHitMatchesOracle(t *testing.T, hits []SearchHit, i int, expected map
 	seen[hit.Session]++
 }
 
-func TestMirrorHasFTS5(t *testing.T) {
+func postingCount(t *testing.T, m *mirrorDB, trigram string) int {
+	t.Helper()
+	var count int
+	if err := m.withDB(func(db *pebble.DB) error {
+		set, err := postingSet(db, trigram)
+		if err != nil {
+			return err
+		}
+		count = len(set)
+		return nil
+	}); err != nil {
+		t.Fatalf("postings for %q: %v", trigram, err)
+	}
+	return count
+}
+
+func TestMirrorHasTrigramIndex(t *testing.T) {
 	dir := t.TempDir()
 	store := mustOpen(t, dir)
 	defer closeStore(t, store)
 	appendRaw(t, store, "s1", searchUser("needle in the haystack"))
-	var ddl string
-	if err := store.db.QueryRow("SELECT sql FROM sqlite_master WHERE name = 'thread_fts'").Scan(&ddl); err != nil {
-		t.Fatalf("thread_fts missing: %v", err)
-	}
-	if !strings.Contains(ddl, "trigram") {
-		t.Fatalf("thread_fts DDL lacks the trigram tokenizer: %s", ddl)
-	}
-	var hits int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM thread_fts WHERE thread_fts MATCH '"eed"'`).Scan(&hits); err != nil {
-		t.Fatalf("substring match: %v", err)
-	}
-	if hits != 1 {
+	if hits := postingCount(t, store.mirror, "eed"); hits != 1 {
 		t.Fatalf("substring matches = %d, want 1", hits)
 	}
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM thread_fts WHERE thread_fts MATCH '"xyz"'`).Scan(&hits); err != nil {
-		t.Fatalf("absent trigram match: %v", err)
-	}
-	if hits != 0 {
+	if hits := postingCount(t, store.mirror, "xyz"); hits != 0 {
 		t.Fatalf("absent trigram matches = %d, want 0", hits)
 	}
 }
@@ -222,26 +226,35 @@ func TestSearchShortQuery(t *testing.T) {
 func ftsRowCount(t *testing.T, store *Store, sid string) int {
 	t.Helper()
 	var count int
-	if err := store.db.QueryRow("SELECT COUNT(*) FROM thread_fts WHERE session = ?", sid).Scan(&count); err != nil {
-		t.Fatalf("count thread_fts: %v", err)
+	if err := store.mirror.withDB(func(db *pebble.DB) error {
+		prefix := sessionPrefix('i', sid)
+		it, err := db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upperBound(prefix)})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = it.Close() }()
+		for valid := it.First(); valid; valid = it.Next() {
+			count++
+		}
+		return it.Error()
+	}); err != nil {
+		t.Fatalf("count index rows: %v", err)
 	}
 	return count
 }
 
-func TestMigrationBackfillsVersion2Mirror(t *testing.T) {
+func TestMirrorRebuildRestoresIndex(t *testing.T) {
 	dir := t.TempDir()
 	store := mustOpen(t, dir)
 	appendRaw(t, store, "s1", searchUser("needle before migration"))
 	closeStore(t, store)
-	raw := openRaw(t, dir)
-	execAll(t, raw, []string{"DROP TABLE thread_fts", "PRAGMA user_version = 2"})
-	if err := raw.Close(); err != nil {
-		t.Fatalf("close raw state.db: %v", err)
+	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("remove state.db: %v", err)
 	}
 	reopened := mustOpen(t, dir)
-	if version := queryUserVersion(t, reopened.db); version != 3 {
+	if version := queryMirrorVersion(t, reopened.mirror); version != mirrorSchemaVersion {
 		closeStore(t, reopened)
-		t.Fatalf("user_version = %d, want 3 after backfill", version)
+		t.Fatalf("mirror version = %q, want %s after rebuild", version, mirrorSchemaVersion)
 	}
 	hits, err := reopened.Search(context.Background(), SearchQuery{Text: "needle"})
 	if err != nil {
@@ -264,39 +277,28 @@ func TestMigrationBackfillsVersion2Mirror(t *testing.T) {
 	requireSearchEqualsOracle(t, again, "needle")
 }
 
-func TestMigrationThreeIsIdempotent(t *testing.T) {
+func TestMirrorReopenPreservesIndex(t *testing.T) {
 	dir := t.TempDir()
 	store := mustOpen(t, dir)
 	appendRaw(t, store, "s1", searchUser("needle one"))
 	appendRaw(t, store, "s2", searchUser("needle two"))
 	closeStore(t, store)
-	execRaw(t, dir, []string{"DELETE FROM thread_fts WHERE session = 's2'", "PRAGMA user_version = 2"})
 	reopened := mustOpen(t, dir)
-	requireUserVersionThree(t, reopened, "after interrupted migration")
+	requireMirrorVersion(t, reopened)
 	requireFtsRowCounts(t, reopened, map[string]int{"s1": 1, "s2": 1})
 	closeStore(t, reopened)
 
-	execRaw(t, dir, []string{"DROP TABLE thread_fts", "PRAGMA user_version = 2"})
 	openSharedConcurrently(t, dir)
 	final := mustOpen(t, dir)
 	defer closeStore(t, final)
-	requireUserVersionThree(t, final, "after concurrent openers")
+	requireMirrorVersion(t, final)
 	requireSearchEqualsOracle(t, final, "needle")
 }
 
-func execRaw(t *testing.T, dir string, statements []string) {
+func requireMirrorVersion(t *testing.T, store *Store) {
 	t.Helper()
-	raw := openRaw(t, dir)
-	execAll(t, raw, statements)
-	if err := raw.Close(); err != nil {
-		t.Fatalf("close raw state.db: %v", err)
-	}
-}
-
-func requireUserVersionThree(t *testing.T, store *Store, when string) {
-	t.Helper()
-	if version := queryUserVersion(t, store.db); version != 3 {
-		t.Fatalf("user_version = %d, want 3 %s", version, when)
+	if version := queryMirrorVersion(t, store.mirror); version != mirrorSchemaVersion {
+		t.Fatalf("mirror version = %q, want %s", version, mirrorSchemaVersion)
 	}
 }
 
@@ -337,10 +339,8 @@ func TestSearchSurvivesMirrorRebuild(t *testing.T) {
 	store := mustOpen(t, dir)
 	appendRaw(t, store, "s1", searchUser("needle survives rebuild"))
 	closeStore(t, store)
-	for _, name := range []string{"state.db", "state.db-wal", "state.db-shm"} {
-		if err := removeIfExists(filepath.Join(dir, name)); err != nil {
-			t.Fatalf("remove %s: %v", name, err)
-		}
+	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("remove state.db: %v", err)
 	}
 	rebuilt := mustOpen(t, dir)
 	defer closeStore(t, rebuilt)
@@ -348,13 +348,6 @@ func TestSearchSurvivesMirrorRebuild(t *testing.T) {
 		t.Fatalf("s1 index rows after rebuild = %d, want 1", rows)
 	}
 	requireSearchEqualsOracle(t, rebuilt, "needle")
-}
-
-func removeIfExists(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
 }
 
 func searchCreated(extra string) []byte {
@@ -412,21 +405,13 @@ func TestSearchLimitCountsOnlyPersistentSessions(t *testing.T) {
 	requireSessions(t, searchHitSessions(t, store, SearchQuery{Text: "needle", Limit: 2}), "b-plain", "c-false")
 }
 
-func TestSearchEphemeralExclusionSurvivesBackfillAndRebuild(t *testing.T) {
+func TestSearchEphemeralExclusionSurvivesRebuild(t *testing.T) {
 	dir := t.TempDir()
 	store := mustOpen(t, dir)
 	appendEphemeralFixture(t, store)
 	closeStore(t, store)
-	execRaw(t, dir, []string{"DROP TABLE thread_fts", "PRAGMA user_version = 2"})
-	backfilled := mustOpen(t, dir)
-	requireUserVersionThree(t, backfilled, "after backfill")
-	requireFtsRowCounts(t, backfilled, map[string]int{"a-ephemeral": 1, "b-plain": 1})
-	requireSessions(t, searchHitSessions(t, backfilled, SearchQuery{Text: "needle"}), "b-plain", "c-false", "d-flagged-message")
-	closeStore(t, backfilled)
-	for _, name := range []string{"state.db", "state.db-wal", "state.db-shm"} {
-		if err := removeIfExists(filepath.Join(dir, name)); err != nil {
-			t.Fatalf("remove %s: %v", name, err)
-		}
+	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("remove state.db: %v", err)
 	}
 	rebuilt := mustOpen(t, dir)
 	defer closeStore(t, rebuilt)
@@ -434,11 +419,34 @@ func TestSearchEphemeralExclusionSurvivesBackfillAndRebuild(t *testing.T) {
 	requireSessions(t, searchHitSessions(t, rebuilt, SearchQuery{Text: "needle"}), "b-plain", "c-false", "d-flagged-message")
 }
 
-func mirrorRowCount(t *testing.T, store *Store, query, sid string) int {
+func mirrorRowCount(t *testing.T, store *Store, kind byte, sid string) int {
 	t.Helper()
 	var count int
-	if err := store.db.QueryRow(query, sid).Scan(&count); err != nil {
-		t.Fatalf("count %q for %s: %v", query, sid, err)
+	if err := store.mirror.withDB(func(db *pebble.DB) error {
+		if kind == 's' {
+			_, closer, err := db.Get(keySession(sid))
+			if errors.Is(err, pebble.ErrNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			_ = closer.Close()
+			count = 1
+			return nil
+		}
+		prefix := sessionPrefix(kind, sid)
+		it, err := db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upperBound(prefix)})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = it.Close() }()
+		for valid := it.First(); valid; valid = it.Next() {
+			count++
+		}
+		return it.Error()
+	}); err != nil {
+		t.Fatalf("count mirror rows for %s: %v", sid, err)
 	}
 	return count
 }
@@ -450,7 +458,7 @@ func TestRemoveSessionDeletesSearchRows(t *testing.T) {
 	appendRaw(t, store, "s1", searchUser("needle in the removed session"), searchNamed("needle title"))
 	appendRaw(t, store, "s2", searchUser("needle in the kept session"))
 	requireSessions(t, searchHitSessions(t, store, SearchQuery{Text: "needle"}), "s1", "s2")
-	if err := removeSession(store.db, "s1"); err != nil {
+	if err := removeSession(store.mirror, "s1"); err != nil {
 		t.Fatalf("removeSession s1: %v", err)
 	}
 	requireSessions(t, searchHitSessions(t, store, SearchQuery{Text: "needle"}), "s2")
@@ -460,14 +468,14 @@ func TestRemoveSessionDeletesSearchRows(t *testing.T) {
 		if sid == "s2" {
 			want = 1
 		}
-		if rows := mirrorRowCount(t, store, "SELECT COUNT(*) FROM events WHERE session = ?", sid); rows != want {
+		if rows := mirrorRowCount(t, store, 'e', sid); rows != want {
 			t.Fatalf("%s events rows = %d, want %d", sid, rows, want)
 		}
-		if rows := mirrorRowCount(t, store, "SELECT COUNT(*) FROM sessions WHERE id = ?", sid); rows != want {
+		if rows := mirrorRowCount(t, store, 's', sid); rows != want {
 			t.Fatalf("%s sessions rows = %d, want %d", sid, rows, want)
 		}
 	}
-	if err := removeSession(store.db, "s1"); err != nil {
+	if err := removeSession(store.mirror, "s1"); err != nil {
 		t.Fatalf("removeSession s1 again: %v", err)
 	}
 	requireSessions(t, searchHitSessions(t, store, SearchQuery{Text: "needle"}), "s2")
