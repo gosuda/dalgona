@@ -197,15 +197,42 @@ func checkMirrorVersion(db *pebble.DB) error {
 }
 
 func openUsableDB(path string) (*mirrorDB, error) {
-	return openDB(path)
+	m, err := openDB(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.verify(); err != nil {
+		return nil, errors.Join(err, m.Close())
+	}
+	return m, nil
+}
+
+func (m *mirrorDB) verify() error {
+	return m.withDB(func(db *pebble.DB) error {
+		it, err := db.NewIter(nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = it.Close() }()
+		for valid := it.First(); valid; valid = it.Next() {
+		}
+		return it.Error()
+	})
 }
 
 func recoverBackup(dir string) (*mirrorDB, error) {
-	source := filepath.Join(dir, "state.db.bak")
-	if _, err := os.Stat(source); errors.Is(err, os.ErrNotExist) {
+	var source string
+	for _, name := range []string{"state.db.bak", "state.db.bak.old"} {
+		candidate := filepath.Join(dir, name)
+		if _, err := os.Stat(candidate); err == nil {
+			source = candidate
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	if source == "" {
 		return nil, nil
-	} else if err != nil {
-		return nil, err
 	}
 	tmp := filepath.Join(dir, "state.db.recover.tmp")
 	if err := os.RemoveAll(tmp); err != nil {
