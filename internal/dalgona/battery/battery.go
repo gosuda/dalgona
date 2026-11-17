@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
@@ -24,6 +25,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dalgona/discovery"
 	"github.com/gosuda/dalgona/internal/dalgona/github"
 	"github.com/gosuda/dalgona/internal/dalgona/mcp"
+	"github.com/gosuda/dalgona/internal/dalgona/postbox"
 	"github.com/gosuda/dalgona/internal/dalgona/remote"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 	batteryscripthost "github.com/gosuda/dalgona/internal/dalgona/scripthost"
@@ -37,8 +39,10 @@ type Daemon struct {
 	WorkspaceApprover WorkspaceApprover
 	binder            *remote.Binder
 	daltoki           *daltoki.Service
+	postboxSvc        atomic.Pointer[postbox.Service]
+	postboxCancel     context.CancelFunc
+	postboxMu         sync.Mutex
 }
-
 type TrustDecision int
 
 const (
@@ -81,7 +85,8 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 	d.daltoki = daltokiSvc
 	return app.Batteries{
 		Tools: func(ctx context.Context, cwd string) []tool.Tool {
-			return append(projects.tools(ctx, cwd), ratchetTools(ctx)...)
+			out := append(projects.tools(ctx, cwd), ratchetTools(ctx)...)
+			return append(out, postbox.Tools(ctx, d.postboxSvc.Load())...)
 		},
 		Skills: projects.skills, Runner: d.binder.Runner,
 		Extension: batteryscripthost.New(d.Scripts),
@@ -90,8 +95,9 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 			if daltokiSvc != nil {
 				daltokiSvc.Attach(h)
 			}
+			d.attachPostbox(h)
 		},
-		Close: func() error {
+		Close: d.closeWithPostbox(func() error {
 			var closeErr error
 			if daltokiSvc != nil {
 				closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -99,7 +105,7 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 				cancel()
 			}
 			return errors.Join(closeErr, projects.close())
-		},
+		}),
 		MCPStatus: projects.status,
 	}, nil
 }
@@ -151,6 +157,43 @@ func (d *Daemon) AfterRecover(ctx context.Context, host *agent.Host, recoverErr 
 	}
 	if err := d.daltoki.Run(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("daltoki: service stopped", "error", err)
+	}
+}
+
+func (d *Daemon) attachPostbox(h *agent.Host) {
+	d.postboxMu.Lock()
+	defer d.postboxMu.Unlock()
+	if d.postboxCancel != nil {
+		d.postboxCancel()
+		d.postboxCancel = nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	service, err := postbox.New(ctx, postbox.Options{Host: h, Sessions: true, UserID: daemonUID()})
+	if err != nil {
+		cancel()
+		return
+	}
+	d.postboxCancel = cancel
+	d.postboxSvc.Store(service)
+}
+
+func (d *Daemon) closeWithPostbox(next func() error) func() error {
+	return func() error {
+		d.postboxMu.Lock()
+		cancel := d.postboxCancel
+		d.postboxCancel = nil
+		service := d.postboxSvc.Swap(nil)
+		d.postboxMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		err := next()
+		if service != nil {
+			ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			err = errors.Join(err, service.Close(ctx))
+		}
+		return err
 	}
 }
 

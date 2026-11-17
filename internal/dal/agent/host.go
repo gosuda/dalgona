@@ -208,6 +208,21 @@ func (h *Host) AllThreads() []ThreadInfo {
 	return out
 }
 
+func (h *Host) SessionRoot(id string) string {
+	h.hostStateMu.Lock()
+	defer h.hostStateMu.Unlock()
+	root := id
+	seen := map[string]bool{id: true}
+	for {
+		info, ok := h.sessions[root]
+		if !ok || info.Parent == "" || seen[info.Parent] {
+			return root
+		}
+		root = info.Parent
+		seen[root] = true
+	}
+}
+
 func (h *Host) AdvisorChild(parent, name string) (string, bool) {
 	h.hostStateMu.Lock()
 	defer h.hostStateMu.Unlock()

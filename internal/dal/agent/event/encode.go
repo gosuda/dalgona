@@ -9,21 +9,40 @@ import (
 )
 
 func eventMembers(e Event) ([]member, error) {
+	if m, handled, err := eventMembersCore(e); handled || err != nil {
+		return m, err
+	}
+	return eventMembersRest(e)
+}
+
+func eventMembersCore(e Event) ([]member, bool, error) {
 	switch e.Type() {
 	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnEffort, TypeTurnCompleted, TypeTurnRecovery, TypeTurnJudged, TypeUserMessage:
-		return sessionMembers(e)
+		m, err := sessionMembers(e)
+		return m, true, err
 	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
-		return toolMembers(e)
+		m, err := toolMembers(e)
+		return m, true, err
 	case TypeCompaction, TypeContextPruned, TypeChildSpawned, TypeBranch:
-		return stateMembers(e)
+		m, err := stateMembers(e)
+		return m, true, err
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
-		return scriptMembers(e)
+		m, err := scriptMembers(e)
+		return m, true, err
+	}
+	return nil, false, nil
+}
+
+func eventMembersRest(e Event) ([]member, error) {
+	switch e.Type() {
 	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return metadataMembers(e)
 	case TypeHashlineInvocationStarted, TypeHashlineInvocationSettled:
 		return invocationMembers(e)
 	case TypePromptBase, TypeMemoryUpdated, TypePromptBound:
 		return promptMembers(e)
+	case TypeMailOutgoing, TypeMailReceived, TypeMailConsumed, TypeMailSettled, TypeMailRunSet, TypeMailAutoStarted, TypeMailHumanReset, TypeMailHopAdvanced, TypeMailHeld:
+		return mailMembers(e)
 	default:
 		return nil, fmt.Errorf("event: unknown event type %q", e.Type())
 	}
@@ -47,7 +66,8 @@ func turnEventMembers(e Event) ([]member, error) {
 	switch value := e.(type) {
 	case TurnStarted:
 		fields := []member{field("turn_id", stringValue(value.TurnID))}
-		return timeField(fields, "started_at", value.StartedAt), nil
+		fields = timeField(fields, "started_at", value.StartedAt)
+		return optionalUint8Field(fields, "mail_hop", value.MailHop), nil
 	case TurnEffort:
 		return []member{field("turn_id", stringValue(value.TurnID)), field("effort", stringValue(value.Effort))}, nil
 	case TurnCompleted:
@@ -415,7 +435,7 @@ func childSpawnedMembers(e ChildSpawned) []member {
 	if len(e.Tools) > 0 {
 		fields = append(fields, field("tools", arrayValue(e.Tools, stringValue)))
 	}
-	return fields
+	return optionalUint8Field(fields, "mail_hop", e.MailHop)
 }
 
 func compactionMembers(e Compaction) []member {

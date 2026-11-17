@@ -98,6 +98,7 @@ type State struct {
 	Archived        bool
 	SandboxChoice   SandboxChosen
 	Invocations     map[string]InvocationState
+	Mail            *MailState
 	recovery        recoveryCount
 
 	PromptBases             map[uint64]string
@@ -146,6 +147,7 @@ func (s State) Clone() State {
 	s.JudgedTurns = maps.Clone(s.JudgedTurns)
 	s.Notes = maps.Clone(s.Notes)
 	s.Invocations = maps.Clone(s.Invocations)
+	s.Mail = cloneMailState(s.Mail)
 	s.PromptBases = maps.Clone(s.PromptBases)
 	s.MemoryVersions = maps.Clone(s.MemoryVersions)
 	s.PromptBindings = maps.Clone(s.PromptBindings)
@@ -207,21 +209,36 @@ func (s State) deriveStatus() Status {
 }
 
 func foldEvent(s *State, seq uint64, e Event) error {
+	if err, handled := foldEventCore(s, seq, e); handled {
+		return err
+	}
+	return foldEventRest(s, seq, e)
+}
+
+func foldEventCore(s *State, seq uint64, e Event) (error, bool) {
 	switch e.Type() {
 	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnEffort, TypeTurnCompleted, TypeTurnRecovery, TypeTurnJudged, TypeUserMessage:
-		return foldSessionEvent(s, seq, e)
+		return foldSessionEvent(s, seq, e), true
 	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
-		return foldToolEvent(s, seq, e)
+		return foldToolEvent(s, seq, e), true
 	case TypeCompaction, TypeContextPruned, TypeChildSpawned, TypeBranch:
-		return foldStateEvent(s, seq, e)
+		return foldStateEvent(s, seq, e), true
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
-		return foldScriptEvent(s, e)
+		return foldScriptEvent(s, e), true
+	}
+	return nil, false
+}
+
+func foldEventRest(s *State, seq uint64, e Event) error {
+	switch e.Type() {
 	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return foldMetadata(s, seq, e)
 	case TypeHashlineInvocationStarted, TypeHashlineInvocationSettled:
 		return foldInvocationEvent(s, seq, e)
 	case TypePromptBase, TypeMemoryUpdated, TypePromptBound:
 		return foldPromptEvent(s, e)
+	case TypeMailOutgoing, TypeMailReceived, TypeMailConsumed, TypeMailSettled, TypeMailRunSet, TypeMailAutoStarted, TypeMailHumanReset, TypeMailHopAdvanced, TypeMailHeld:
+		return foldMailEvent(s, seq, e)
 	default:
 		return fmt.Errorf("event: fold: unknown type %q", e.Type())
 	}
@@ -241,13 +258,44 @@ func foldSessionEvent(s *State, seq uint64, e Event) error {
 }
 
 func foldTurnEvent(s *State, seq uint64, e Event) error {
+	if err, handled := foldTurnLifecycle(s, seq, e); handled {
+		return err
+	}
+	return foldTurnMessage(s, seq, e)
+}
+
+func foldTurnLifecycle(s *State, seq uint64, e Event) (error, bool) {
 	switch value := e.(type) {
 	case TurnStarted:
-		return startTurn(s, value.TurnID)
+		return startTurnChecked(s, value), true
 	case TurnEffort:
-		return requireTurn(s, value.TurnID)
+		return requireTurn(s, value.TurnID), true
 	case TurnCompleted:
-		return completeTurn(s, seq, value)
+		return completeTurn(s, seq, value), true
+	}
+	return nil, false
+}
+
+func startTurnChecked(s *State, value TurnStarted) error {
+	if err := startTurn(s, value.TurnID); err != nil {
+		return err
+	}
+	noteTurnMailHop(s, value)
+	return nil
+}
+
+func noteTurnMailHop(s *State, value TurnStarted) {
+	if value.MailHop == 0 {
+		return
+	}
+	mail := s.ensureMail()
+	if mail.TurnHops[value.TurnID] < value.MailHop {
+		mail.TurnHops[value.TurnID] = value.MailHop
+	}
+}
+
+func foldTurnMessage(s *State, seq uint64, e Event) error {
+	switch value := e.(type) {
 	case TurnRecovery:
 		return foldTurnRecovery(s, value)
 	case TurnJudged:

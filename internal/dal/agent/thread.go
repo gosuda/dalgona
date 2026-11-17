@@ -53,6 +53,7 @@ type Thread struct {
 	closeOnce sync.Once
 	closeErr  error
 	workers   sync.WaitGroup
+	mailMu    sync.Mutex
 	output    outputRelay
 	skipped   *skippedCompaction
 	images    verifiedImages

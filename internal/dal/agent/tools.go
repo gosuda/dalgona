@@ -19,6 +19,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	json "encoding/json/v2"
+
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/dal/config"
@@ -234,6 +236,11 @@ func (w *worker) prepare(ctx context.Context, call event.ToolCall, requestID str
 	if err != nil {
 		return nil, err
 	}
+	if call.Name == "post" {
+		if reason := postArgsDeclineReason(raw); reason != "" {
+			return nil, w.declineCall(ctx, call, requestID, decline(by, reason))
+		}
+	}
 	args, repairs, fail := repairArgs(item.Spec(), raw)
 	if fail != "" {
 		return nil, w.declineCall(ctx, call, requestID, decline(by, "invalid arguments for "+call.Name+": "+fail))
@@ -364,8 +371,38 @@ func (h *Host) maskedBlob(data []byte) (*event.BlobRef, error) {
 	return &event.BlobRef{Blob: sha, Bytes: int64(len(masked))}, nil
 }
 
+func (w *worker) maskStartedArgs(p *prepared) (jsontext.Value, error) {
+	if p.call.Name != "post" {
+		return p.args, nil
+	}
+	return maskPostText(p.args, w.t.host.mask)
+}
+
+func (w *worker) startedFileChange(file tool.FileChange) (event.FileChange, error) {
+	change := event.FileChange{Path: file.Path, PreSHA: file.PreSHA, PostSHA: file.PostSHA}
+	if file.PreSHA != "" {
+		ref, err := w.t.host.maskedBlob(file.Pre)
+		if err != nil {
+			return event.FileChange{}, fmt.Errorf("agent: pre-image of %s: %w", file.Path, err)
+		}
+		change.PreBlob = ref
+	}
+	if file.PostSHA != "" {
+		ref, err := w.t.host.maskedBlob(file.Post)
+		if err != nil {
+			return event.FileChange{}, fmt.Errorf("agent: post-image of %s: %w", file.Path, err)
+		}
+		change.PostBlob = ref
+	}
+	return change, nil
+}
+
 func (w *worker) started(p *prepared, files []tool.FileChange) (event.ToolStarted, error) {
-	args, blob, err := w.t.host.rawPayload(p.args)
+	args, err := w.maskStartedArgs(p)
+	if err != nil {
+		return event.ToolStarted{}, err
+	}
+	args, blob, err := w.t.host.rawPayload(args)
 	if err != nil {
 		return event.ToolStarted{}, err
 	}
@@ -374,20 +411,9 @@ func (w *worker) started(p *prepared, files []tool.FileChange) (event.ToolStarte
 		Class: classString(p.class), Repairs: p.repairs,
 	}
 	for _, file := range files {
-		change := event.FileChange{Path: file.Path, PreSHA: file.PreSHA, PostSHA: file.PostSHA}
-		if file.PreSHA != "" {
-			ref, err := w.t.host.maskedBlob(file.Pre)
-			if err != nil {
-				return event.ToolStarted{}, fmt.Errorf("agent: pre-image of %s: %w", file.Path, err)
-			}
-			change.PreBlob = ref
-		}
-		if file.PostSHA != "" {
-			ref, err := w.t.host.maskedBlob(file.Post)
-			if err != nil {
-				return event.ToolStarted{}, fmt.Errorf("agent: post-image of %s: %w", file.Path, err)
-			}
-			change.PostBlob = ref
+		change, err := w.startedFileChange(file)
+		if err != nil {
+			return event.ToolStarted{}, err
 		}
 		started.Files = append(started.Files, change)
 	}
@@ -403,6 +429,78 @@ func repairArgs(spec tool.Spec, raw jsontext.Value) (jsontext.Value, int, string
 		return raw, 0, err.Error()
 	}
 	return repaired, count, ""
+}
+
+var postArgFields = map[string]bool{"to": true, "text": true, "reply_to": true}
+
+func postArgsDeclineReason(raw jsontext.Value) string {
+	kind, bad := postArgsKind(raw)
+	if bad || kind != '{' {
+		return "post: invalid arguments"
+	}
+	if field, ok := unknownPostField(raw); ok {
+		return fmt.Sprintf("post: unknown field %q", field)
+	}
+	return ""
+}
+
+func unknownPostField(raw jsontext.Value) (string, bool) {
+	decoder := jsontext.NewDecoder(bytes.NewReader(raw))
+	start, err := decoder.ReadToken()
+	if err != nil || start.Kind() != '{' {
+		return "", false
+	}
+	for decoder.PeekKind() != '}' {
+		name, err := decoder.ReadToken()
+		if err != nil {
+			return "", false
+		}
+		if !postArgFields[name.String()] {
+			return name.String(), true
+		}
+		if err := decoder.SkipValue(); err != nil {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+func postArgsKind(raw jsontext.Value) (jsontext.Kind, bool) {
+	decoder := jsontext.NewDecoder(bytes.NewReader(raw))
+	tok, err := decoder.ReadToken()
+	if err != nil {
+		return 0, true
+	}
+	return tok.Kind(), false
+}
+
+func maskPostText(args jsontext.Value, mask func(string) (string, error)) (jsontext.Value, error) {
+	var fields map[string]jsontext.Value
+	if err := json.Unmarshal([]byte(args), &fields); err != nil {
+		return nil, errors.New("post: masking failed")
+	}
+	rawText, ok := fields["text"]
+	if !ok {
+		return args, nil
+	}
+	var text string
+	if err := json.Unmarshal([]byte(rawText), &text); err != nil {
+		return nil, errors.New("post: masking failed")
+	}
+	masked, err := mask(text)
+	if err != nil {
+		return nil, errors.New("post: masking failed")
+	}
+	encoded, err := json.Marshal(masked)
+	if err != nil {
+		return nil, errors.New("post: masking failed")
+	}
+	fields["text"] = jsontext.Value(encoded)
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil, errors.New("post: masking failed")
+	}
+	return jsontext.Value(out), nil
 }
 
 func (w *worker) execute(ctx context.Context, p *prepared) (event.ToolCompleted, error) {

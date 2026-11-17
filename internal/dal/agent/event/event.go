@@ -187,11 +187,18 @@ func (e RunnerBound) Validate() error {
 type TurnStarted struct {
 	TurnID    string
 	StartedAt time.Time
+	MailHop   uint8
 }
 
 func (TurnStarted) Type() string { return TypeTurnStarted }
 func (e TurnStarted) Validate() error {
-	return required(map[string]string{"turn_id": e.TurnID})
+	if err := required(map[string]string{"turn_id": e.TurnID}); err != nil {
+		return err
+	}
+	if e.MailHop > MaxMailHop {
+		return fmt.Errorf("mail_hop must be at most %d", MaxMailHop)
+	}
+	return nil
 }
 
 type TurnEffort struct {
@@ -591,12 +598,16 @@ type ChildSpawned struct {
 	ChildID string
 	Runner  string
 	Tools   []string
+	MailHop uint8
 }
 
 func (ChildSpawned) Type() string { return TypeChildSpawned }
 func (e ChildSpawned) Validate() error {
 	if err := required(map[string]string{"call_id": e.CallID, "child_id": e.ChildID, "runner": e.Runner}); err != nil {
 		return err
+	}
+	if e.MailHop > MaxMailHop {
+		return fmt.Errorf("mail_hop must be at most %d", MaxMailHop)
 	}
 	return sortedNames("tools", e.Tools)
 }

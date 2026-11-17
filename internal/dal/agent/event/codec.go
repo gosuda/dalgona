@@ -115,21 +115,40 @@ func decodeObject(raw []byte) (map[string]jsontext.Value, error) {
 }
 
 func decodeByType(kind string, reader *objectReader) (Event, error) {
+	if e, handled, err := decodeByTypeCore(kind, reader); handled || err != nil {
+		return e, err
+	}
+	return decodeByTypeMail(kind, reader)
+}
+
+func decodeByTypeCore(kind string, reader *objectReader) (Event, bool, error) {
 	switch kind {
 	case TypeSessionCreated, TypeRunnerBound, TypeTurnStarted, TypeTurnEffort, TypeTurnCompleted, TypeTurnRecovery, TypeTurnJudged, TypeUserMessage:
-		return decodeSessionEvent(kind, reader)
+		e, err := decodeSessionEvent(kind, reader)
+		return e, true, err
 	case TypeAssistantMessage, TypeToolStarted, TypeToolCompleted, TypeToolJudged, TypeModelRetry, TypeApprovalRequested, TypeApprovalResolved:
-		return decodeToolEvent(kind, reader)
+		e, err := decodeToolEvent(kind, reader)
+		return e, true, err
 	case TypeCompaction, TypeContextPruned, TypeChildSpawned, TypeBranch:
-		return decodeStateEvent(kind, reader)
+		e, err := decodeStateEvent(kind, reader)
+		return e, true, err
 	case TypeScriptStarted, TypeScriptEffect, TypeScriptCompleted:
-		return decodeScriptEvent(kind, reader)
+		e, err := decodeScriptEvent(kind, reader)
+		return e, true, err
+	}
+	return nil, false, nil
+}
+
+func decodeByTypeMail(kind string, reader *objectReader) (Event, error) {
+	switch kind {
 	case TypeAdvisorNote, TypeThreadNamed, TypeThreadArchived, TypeSandboxChosen:
 		return decodeMetadataEvent(kind, reader), nil
 	case TypeHashlineInvocationStarted, TypeHashlineInvocationSettled:
 		return decodeInvocationEvent(kind, reader), nil
 	case TypePromptBase, TypeMemoryUpdated, TypePromptBound:
 		return decodePromptEvent(kind, reader)
+	case TypeMailOutgoing, TypeMailReceived, TypeMailConsumed, TypeMailSettled, TypeMailRunSet, TypeMailAutoStarted, TypeMailHumanReset, TypeMailHopAdvanced, TypeMailHeld:
+		return decodeMailEvent(kind, reader)
 	default:
 		return nil, fmt.Errorf("unknown event type %q", kind)
 	}
@@ -257,6 +276,18 @@ func (r *objectReader) boolean(name string) bool {
 	decoded, err := decodeBool(value)
 	r.err = err
 	return decoded
+}
+
+func (r *objectReader) u8(name string) uint8 {
+	value := r.number(name)
+	if r.err != nil {
+		return 0
+	}
+	if value < 0 || value > 255 {
+		r.err = fmt.Errorf("%s must be between 0 and 255", name)
+		return 0
+	}
+	return uint8(value)
 }
 
 func (r *objectReader) raw(name string) jsontext.Value {
@@ -465,6 +496,10 @@ func boolValue(value bool) jsontext.Value {
 	return jsontext.Value(strconv.AppendBool(nil, value))
 }
 
+func uint8Value(value uint8) jsontext.Value {
+	return jsontext.Value(strconv.AppendUint(nil, uint64(value), 10))
+}
+
 func floatValue(value float64) jsontext.Value {
 	return jsontext.Value(strconv.AppendFloat(nil, value, 'g', -1, 64))
 }
@@ -519,4 +554,18 @@ func optionalRaw(fields []member, name string, value jsontext.Value) []member {
 		return fields
 	}
 	return append(fields, field(name, value))
+}
+
+func optionalInt64(fields []member, name string, value int64) []member {
+	if value == 0 {
+		return fields
+	}
+	return append(fields, field(name, int64Value(value)))
+}
+
+func optionalUint8Field(fields []member, name string, value uint8) []member {
+	if value == 0 {
+		return fields
+	}
+	return append(fields, field(name, uint8Value(value)))
 }

@@ -26,7 +26,7 @@ func decodeSessionEvent(kind string, r *objectReader) (Event, error) {
 func decodeTurnEvent(kind string, r *objectReader) (Event, error) {
 	switch kind {
 	case TypeTurnStarted:
-		return TurnStarted{TurnID: r.str("turn_id"), StartedAt: r.timestamp("started_at")}, nil
+		return TurnStarted{TurnID: r.str("turn_id"), StartedAt: r.timestamp("started_at"), MailHop: r.u8("mail_hop")}, nil
 	case TypeTurnEffort:
 		return TurnEffort{TurnID: r.str("turn_id"), Effort: r.str("effort")}, nil
 	case TypeTurnCompleted:
@@ -332,7 +332,7 @@ func decodeStateEvent(kind string, r *objectReader) (Event, error) {
 	case TypeContextPruned:
 		return decodeContextPruned(r), nil
 	case TypeChildSpawned:
-		return ChildSpawned{CallID: r.str("call_id"), ChildID: r.str("child_id"), Runner: r.str("runner"), Tools: r.stringList("tools")}, nil
+		return ChildSpawned{CallID: r.str("call_id"), ChildID: r.str("child_id"), Runner: r.str("runner"), Tools: r.stringList("tools"), MailHop: r.u8("mail_hop")}, nil
 	case TypeBranch:
 		return Branch{ParentSeq: r.uint64("parent_seq")}, nil
 	default:
