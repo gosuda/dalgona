@@ -161,7 +161,16 @@ func (s *Service) Close(ctx context.Context) error {
 	workersErr := waitWorkers(bounded, &s.workers)
 	errs = append(errs, workersErr)
 	if s.store != nil {
-		errs = append(errs, s.store.Close())
+		if workersErr == nil {
+			errs = append(errs, s.store.Close())
+		} else {
+			workers := &s.workers
+			store := s.store
+			go func() {
+				workers.Wait()
+				_ = store.Close()
+			}()
+		}
 	}
 	err := errors.Join(errs...)
 	s.mu.Lock()
