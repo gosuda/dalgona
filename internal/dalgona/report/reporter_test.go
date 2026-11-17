@@ -220,7 +220,7 @@ func emptySearch(*http.Request) (int, string) {
 
 func readState(t *testing.T, home string) reporterState {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(home, reportDirName, stateFileName))
+	raw, err := readReportFile(filepath.Join(home, reportDirName, stateFileName))
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
@@ -767,7 +767,7 @@ func fillQueueEntries(t *testing.T, r *Reporter, ctx context.Context) {
 
 func readQueueEntries(t *testing.T, home string) []QueueEntry {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(home, reportDirName, queueFileName))
+	raw, err := readReportFile(filepath.Join(home, reportDirName, queueFileName))
 	if err != nil {
 		t.Fatalf("read queue: %v", err)
 	}
@@ -861,7 +861,7 @@ func TestReporterExpiredCredential(t *testing.T) {
 	if got := fake.createCount(); got != 0 {
 		t.Fatalf("creates = %d; want 0", got)
 	}
-	raw, err := os.ReadFile(filepath.Join(home, reportDirName, queueFileName))
+	raw, err := readReportFile(filepath.Join(home, reportDirName, queueFileName))
 	if err != nil {
 		t.Fatalf("read queue: %v", err)
 	}
