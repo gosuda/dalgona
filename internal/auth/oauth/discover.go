@@ -229,11 +229,11 @@ func optionalEndpoint(decoded object, issuer, key string) (string, error) {
 	return value, nil
 }
 
-func Register(ctx context.Context, client *http.Client, meta ServerMetadata, redirect string) (string, error) {
+func Register(ctx context.Context, client *http.Client, meta ServerMetadata, redirect string, scopes []string) (string, error) {
 	if meta.RegistrationEndpoint == "" {
 		return "", errors.New("oauth: server has no registration endpoint; set oauth_client_id")
 	}
-	body, err := registrationBody(redirect)
+	body, err := registrationBody(redirect, scopes)
 	if err != nil {
 		return "", err
 	}
@@ -270,7 +270,7 @@ func registeredClientID(response wireResponse) (string, error) {
 	return clientID, nil
 }
 
-func registrationBody(redirect string) ([]byte, error) {
+func registrationBody(redirect string, scopes []string) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	tokens := []json.Token{
@@ -280,8 +280,11 @@ func registrationBody(redirect string) ([]byte, error) {
 		json.String("grant_types"), json.BeginArray, json.String("authorization_code"), json.String("refresh_token"), json.EndArray,
 		json.String("response_types"), json.BeginArray, json.String("code"), json.EndArray,
 		json.String("token_endpoint_auth_method"), json.String("none"),
-		json.EndObject,
 	}
+	if len(scopes) > 0 {
+		tokens = append(tokens, json.String("scope"), json.String(strings.Join(scopes, " ")))
+	}
+	tokens = append(tokens, json.EndObject)
 	for _, token := range tokens {
 		if err := encoder.WriteToken(token); err != nil {
 			return nil, fmt.Errorf("encode oauth registration: %w", err)

@@ -113,7 +113,7 @@ func mcpResolve(ctx context.Context, client *http.Client, spec config.MCPServerS
 		return resolved, nil
 	}
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d%s", spec.OAuthCallbackPort, mcpCallbackPath)
-	resolved.clientID, err = oauth.Register(ctx, client, meta, redirectURI)
+	resolved.clientID, err = oauth.Register(ctx, client, meta, redirectURI, resolved.scopes)
 	if err != nil {
 		return resolved, err
 	}
