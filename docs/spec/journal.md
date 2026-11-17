@@ -40,7 +40,7 @@ For a damaged thread, `Append` MUST fail with `journal: session <id> is damaged 
 
 ## SQLite mirror
 
-The database is `state.db`. The backup is `state.db.bak`. The store MUST enable WAL, `synchronous=FULL`, foreign keys, and a 5000 ms busy timeout. It MUST use this schema:
+The database is `state.db`. The backup is `state.db.bak`. The store MUST enable WAL, `synchronous=FULL`, foreign keys, and a 5000 ms busy timeout. A write that still fails with `SQLITE_BUSY` after that timeout MAY retry the whole transaction a bounded number of times. It MUST use this schema:
 
 ```sql
 CREATE TABLE events(session TEXT NOT NULL, seq INTEGER NOT NULL, hash TEXT NOT NULL, ev BLOB NOT NULL, PRIMARY KEY(session, seq));
