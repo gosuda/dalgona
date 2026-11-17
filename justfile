@@ -125,13 +125,21 @@ dist:
     set -euo pipefail
     mkdir -p dist
     cp THIRD_PARTY_NOTICES.md dist/
+    overlay_args=()
+    if [ -n "${DALGONA_REPORT_CLIENT_ID:-}" ]; then
+        overlay_dir="$(mktemp -d)"
+        printf 'package report\n\nconst reportAppClientID = "%s"\n' "$DALGONA_REPORT_CLIENT_ID" > "$overlay_dir/clientid.go"
+        clientid_path="$(cd "{{justfile_directory()}}/internal/dalgona/report" && pwd)/clientid.go"
+        printf '{"Replace": {"%s": "%s"}}\n' "$clientid_path" "$overlay_dir/clientid.go" > "$overlay_dir/overlay.json"
+        overlay_args+=(-overlay "$overlay_dir/overlay.json")
+    fi
     for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
         os=${target%/*}
         arch=${target#*/}
         ext=""
         if [ "$os" = windows ]; then ext=.exe; fi
         for bin in dal dalgona; do
-            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -o "dist/$bin-$os-$arch$ext" "./cmd/$bin"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build "${overlay_args[@]}" -trimpath -o "dist/$bin-$os-$arch$ext" "./cmd/$bin"
         done
     done
 
