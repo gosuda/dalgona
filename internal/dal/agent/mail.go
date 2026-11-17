@@ -163,9 +163,11 @@ func checkMailOutRetry(mail *event.MailState, id string, candidate event.MailMes
 	probe.Text = candidate.Text
 	probe.ReplyTo = candidate.ReplyTo
 	probe.To = candidate.To
-	probe.Hop = candidate.Hop
 	if event.MailFingerprint(probe) != existing.Fingerprint {
 		return event.MailMessage{}, false, errors.New("post: message id conflict")
+	}
+	if existing.Outcome == event.MailOutcomeRefused {
+		return event.MailMessage{}, false, fmt.Errorf("post: recipient refused message %s", id)
 	}
 	return existing.Message, true, nil
 }
@@ -232,18 +234,13 @@ func (t *Thread) planMailOut(req MailOutRequest) (mailOutPlan, error) {
 		mail = &event.MailState{}
 	}
 	plan.mail = mail
-	hop, err := mailOutHop(mail, state, req.OriginTurnID)
-	if err != nil {
-		return plan, err
-	}
-	plan.hop = hop
 	masked, err := maskMailBody(req.Text, t.host.mask)
 	if err != nil {
 		return plan, err
 	}
 	plan.masked = masked
 	plan.id = mailMessageID(t.id, req.OriginTurnID, req.OperationID)
-	existing, dup, err := checkMailOutRetry(mail, plan.id, event.MailMessage{Text: masked, ReplyTo: req.ReplyTo, To: req.To, Hop: hop})
+	existing, dup, err := checkMailOutRetry(mail, plan.id, event.MailMessage{Text: masked, ReplyTo: req.ReplyTo, To: req.To})
 	if err != nil {
 		return plan, err
 	}
@@ -252,6 +249,11 @@ func (t *Thread) planMailOut(req MailOutRequest) (mailOutPlan, error) {
 		plan.existing = existing
 		return plan, nil
 	}
+	hop, err := mailOutHop(mail, state, req.OriginTurnID)
+	if err != nil {
+		return plan, err
+	}
+	plan.hop = hop
 	plan.clock = mailClockHighWater(mail, time.Now().UTC().UnixMilli())
 	if quotaErr := checkMailOutQuota(mail, settledMailIDs(records), plan.clock); quotaErr != nil {
 		return plan, quotaErr
