@@ -28,14 +28,14 @@ func readPrivateKeyFile(path string) ([]byte, error) {
 	defer func() { _ = windows.CloseHandle(h) }()
 
 	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
-		return nil, fmt.Errorf("github: stat private key: %w", err)
+	if infoErr := windows.GetFileInformationByHandle(h, &info); infoErr != nil {
+		return nil, fmt.Errorf("github: stat private key: %w", infoErr)
 	}
 	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
 		return nil, errPrivateKeyNotPrivate
 	}
-	if err := checkPrivateKeyACL(h); err != nil {
-		return nil, err
+	if aclErr := checkPrivateKeyACL(h); aclErr != nil {
+		return nil, aclErr
 	}
 
 	file := os.NewFile(uintptr(h), path)
@@ -50,20 +50,31 @@ func readPrivateKeyFile(path string) ([]byte, error) {
 	return data, nil
 }
 
-func checkPrivateKeyACL(h windows.Handle) error {
+func privateKeyDACL(h windows.Handle) (*windows.ACL, error) {
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return fmt.Errorf("github: inspect private key permissions: %w", err)
+		return nil, fmt.Errorf("github: inspect private key permissions: %w", err)
 	}
 	if sd == nil {
-		return errPrivateKeyNotPrivate
+		return nil, errPrivateKeyNotPrivate
 	}
-	acl, present, err := sd.DACL()
+	acl, _, err := sd.DACL()
+	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
+		return nil, errPrivateKeyNotPrivate
+	}
 	if err != nil {
-		return fmt.Errorf("github: inspect private key permissions: %w", err)
+		return nil, fmt.Errorf("github: inspect private key permissions: %w", err)
 	}
-	if !present || acl == nil || acl.AceCount == 0 {
-		return errPrivateKeyNotPrivate
+	if acl == nil || acl.AceCount == 0 {
+		return nil, errPrivateKeyNotPrivate
+	}
+	return acl, nil
+}
+
+func checkPrivateKeyACL(h windows.Handle) error {
+	acl, err := privateKeyDACL(h)
+	if err != nil {
+		return err
 	}
 	allowed := allowedKeyACLPrincipals()
 	for i := uint32(0); i < uint32(acl.AceCount); i++ {
@@ -74,7 +85,7 @@ func checkPrivateKeyACL(h windows.Handle) error {
 		if ace == nil {
 			return errPrivateKeyNotPrivate
 		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)) //nolint:gosec // SidStart marks the inline SID bytes of the ACE
 		if !allowed(sid) {
 			return errPrivateKeyNotPrivate
 		}
@@ -111,12 +122,12 @@ func currentUserSIDWindows() (*windows.SID, error) {
 	}
 	defer func() { _ = token.Close() }()
 	var size uint32
-	if err := windows.GetTokenInformation(token, windows.TokenUser, nil, 0, &size); err != windows.ERROR_INSUFFICIENT_BUFFER {
+	if err := windows.GetTokenInformation(token, windows.TokenUser, nil, 0, &size); !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) {
 		return nil, fmt.Errorf("github: identify current user: %w", err)
 	}
 	buf := make([]byte, size)
 	if err := windows.GetTokenInformation(token, windows.TokenUser, &buf[0], size, &size); err != nil {
 		return nil, fmt.Errorf("github: identify current user: %w", err)
 	}
-	return (*windows.Tokenuser)(unsafe.Pointer(&buf[0])).User.Sid, nil
+	return (*windows.Tokenuser)(unsafe.Pointer(&buf[0])).User.Sid, nil //nolint:gosec // GetTokenInformation writes the TOKEN_USER struct into buf
 }
