@@ -17,16 +17,16 @@ func TestWithTxRetriesAfterBusy(t *testing.T) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatal(err)
+	if _, setupErr := db.Exec(schema); setupErr != nil {
+		t.Fatal(setupErr)
 	}
 	blocker, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer blocker.Close()
-	if _, err := blocker.Exec("BEGIN EXCLUSIVE"); err != nil {
-		t.Fatal(err)
+	if _, beginErr := blocker.Exec("BEGIN EXCLUSIVE"); beginErr != nil {
+		t.Fatal(beginErr)
 	}
 
 	releaseDone := make(chan struct{})
@@ -38,8 +38,8 @@ func TestWithTxRetriesAfterBusy(t *testing.T) {
 
 	start := time.Now()
 	err = withTx(db, func(tx *sql.Tx) error {
-		_, err := tx.Exec("INSERT INTO sessions(id, status, head_seq, updated_at) VALUES('s','ok',0,'x')")
-		return err
+		_, insertErr := tx.Exec("INSERT INTO sessions(id, status, head_seq, updated_at) VALUES('s','ok',0,'x')")
+		return insertErr
 	})
 	<-releaseDone
 	if err != nil {
@@ -59,22 +59,24 @@ func TestWithTxReportsBusyAfterRetries(t *testing.T) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatal(err)
+	if _, setupErr := db.Exec(schema); setupErr != nil {
+		t.Fatal(setupErr)
 	}
 	blocker, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer blocker.Close()
-	if _, err := blocker.Exec("BEGIN EXCLUSIVE"); err != nil {
-		t.Fatal(err)
+	if _, beginErr := blocker.Exec("BEGIN EXCLUSIVE"); beginErr != nil {
+		t.Fatal(beginErr)
 	}
-	defer blocker.Exec("COMMIT")
+	defer func() {
+		_, _ = blocker.Exec("COMMIT")
+	}()
 
 	err = withTx(db, func(tx *sql.Tx) error {
-		_, err := tx.Exec("INSERT INTO sessions(id, status, head_seq, updated_at) VALUES('s','ok',0,'x')")
-		return err
+		_, insertErr := tx.Exec("INSERT INTO sessions(id, status, head_seq, updated_at) VALUES('s','ok',0,'x')")
+		return insertErr
 	})
 	if err == nil || !isBusyError(err) {
 		t.Fatalf("withTx = %v, want SQLITE_BUSY", err)
@@ -89,15 +91,15 @@ func TestWithTxDoesNotRetryOtherErrors(t *testing.T) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatal(err)
+	if _, setupErr := db.Exec(schema); setupErr != nil {
+		t.Fatal(setupErr)
 	}
 
 	attempts := 0
 	err = withTx(db, func(tx *sql.Tx) error {
 		attempts++
-		_, err := tx.Exec("INSERT INTO sessions(id) VALUES('s')")
-		return err
+		_, insertErr := tx.Exec("INSERT INTO sessions(id) VALUES('s')")
+		return insertErr
 	})
 	if err == nil {
 		t.Fatal("withTx: want error")
