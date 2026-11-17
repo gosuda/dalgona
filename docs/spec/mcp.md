@@ -72,6 +72,8 @@ The host MUST report `authStatus` for each started server. The value is `unsuppo
 
 A server with `oauth` and without a bound token MUST start no network call. It MUST report `runtimeStatus` `authenticationRequired` and `toolsError` `login required: run dalgona mcp login <name>`. A server that returns 401 after a refresh MUST report the same two values. Such a server has no tools.
 
+`dalgona mcp login <name>` MUST sign in to the `[mcp_servers.<name>]` server named `<name>`. It MUST fail when no server has that name or when the server has no `oauth` value. It MUST send one unauthenticated request to the server URL and MUST read the `WWW-Authenticate` header of a 401 response. It MUST resolve protected resource metadata, then authorization server metadata. `oauth_client_id` MUST be the client identifier when set. Otherwise the command MUST use dynamic registration. The command MUST open the authorization URL for the user and MUST accept a pasted redirect URL or code. The loopback callback MUST use `oauth_callback_port`. A successful login MUST write the registration entry and MUST store the token under `mcp-<name>` with the canonical resource as `account`. It MUST then print `logged in to MCP server <name>`.
+
 ## Tool discovery
 
 Tool discovery and tool calls MUST follow the MCP server tools specification at `https://modelcontextprotocol.io/specification/2025-11-25/server/tools`.

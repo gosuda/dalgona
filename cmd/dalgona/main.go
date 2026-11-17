@@ -107,6 +107,7 @@ var commands = map[string]func(context.Context, []string, stdio) int{
 	"restart":     runRestart,
 	"doctor":      runDoctor,
 	"acp":         runACP,
+	"mcp":         runMCP,
 }
 
 func fail(std stdio, code int, err error) int {

@@ -72,6 +72,14 @@ type AuthOptions struct {
 
 func CredentialKey(name string) string { return credentialPrefix + name }
 
+func TokenCredential(resource string, token oauth.Token) auth.Credential {
+	credential := auth.Credential{Type: oauthType, Access: token.Access, Refresh: token.Refresh, Account: resource}
+	if !token.Expires.IsZero() {
+		credential.Expires = token.Expires.UTC().Format(time.RFC3339)
+	}
+	return credential
+}
+
 func NewTokenSource(opts AuthOptions) (TokenSource, error) {
 	if opts.BearerTokenEnv != "" {
 		return bearerSource{name: opts.Name, env: opts.BearerTokenEnv}, nil
@@ -282,6 +290,30 @@ func ReadRegistration(home, name string) (Registration, error) {
 	return registration, nil
 }
 
+func WriteRegistration(home, name string, registration Registration) error {
+	path := filepath.Join(home, RegistrationFile)
+	registrations := map[string]Registration{}
+	data, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return fmt.Errorf("read %s: %w", RegistrationFile, err)
+	default:
+		if decodeErr := json.Unmarshal(data, &registrations); decodeErr != nil {
+			return fmt.Errorf("decode %s: %w", RegistrationFile, decodeErr)
+		}
+	}
+	registrations[name] = registration
+	encoded, err := json.Marshal(registrations)
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", RegistrationFile, err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", RegistrationFile, err)
+	}
+	return nil
+}
+
 func readRegistrationFile(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -314,9 +346,5 @@ func tokenFrom(credential auth.Credential) (oauth.Token, error) {
 }
 
 func (s *oauthSource) credentialFrom(token oauth.Token) auth.Credential {
-	credential := auth.Credential{Type: oauthType, Access: token.Access, Refresh: token.Refresh, Account: s.resource}
-	if !token.Expires.IsZero() {
-		credential.Expires = token.Expires.UTC().Format(time.RFC3339)
-	}
-	return credential
+	return TokenCredential(s.resource, token)
 }
