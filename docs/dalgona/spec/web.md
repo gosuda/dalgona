@@ -106,6 +106,7 @@ The client MUST cache the setting under the browser key `dalgona.theme` and appl
 Each theme MUST use only the colour roles of `DESIGN.md`. The client MUST NOT paint a gradient.
 Every text role MUST meet 4.5:1 against its ground. Control edges and the focus ring MUST meet 3:1 against their ground. The ink on the point MUST meet 4.5:1.
 Under forced colours, every button edge and focus ring MUST keep a visible border.
+Each component value MUST use a named token of `DESIGN.md`. A token MUST NOT hold a value absent from the `DESIGN.md` component tables. The contract test in `web/src/lib/theme/design-contract.test.ts` checks each `DESIGN.md` citation against `web/src/lib/theme/scale.ts`.
 The Settings panel MUST save the choice under the setting path `theme`.
 
 ### Type
