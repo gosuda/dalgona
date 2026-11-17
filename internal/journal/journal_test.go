@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -534,4 +535,32 @@ func TestAppendFileRetriesDirSync(t *testing.T) {
 	}
 	requireEvents(t, replayEvents(t, store, "s"), [][]byte{event(1)})
 	closeStore(t, store)
+}
+
+func TestMirrorCloseRacesWithCalls(t *testing.T) {
+	m, err := openDB(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				err := m.withDB(func(*pebble.DB) error { return nil })
+				if err != nil && !errors.Is(err, errMirrorClosed) {
+					t.Errorf("withDB: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	wg.Wait()
+	if err := m.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
 }
