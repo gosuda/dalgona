@@ -51,6 +51,9 @@ func rfcDeviceCode(ctx context.Context, provider Provider, show func(string, str
 		"client_id": {provider.ClientID}, "device_code": {grant.deviceCode},
 		"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"},
 	}
+	for key, value := range provider.DevicePollParams {
+		values.Set(key, value)
+	}
 	for {
 		if waitErr := wait(ctx, grant.interval); waitErr != nil {
 			return Token{}, waitErr

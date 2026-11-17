@@ -338,6 +338,9 @@ func (r *Reporter) drainReady() (bool, error) {
 	if r.state.StoppedStatus != 0 {
 		return false, latchError(r.state.StoppedStatus)
 	}
+	if resetter, ok := r.source.(interface{ BeginRun() }); ok {
+		resetter.BeginRun()
+	}
 	return true, nil
 }
 
