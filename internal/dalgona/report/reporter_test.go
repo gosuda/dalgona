@@ -145,8 +145,8 @@ func searchItem(number int64, title, repo string, pr bool) string {
 		`,"number":` + strconv.FormatInt(number, 10) +
 		`,"title":` + strconv.Quote(title) +
 		`,"body":"","html_url":"","pull_request":` + pull +
-		`,"labels":[],"user":{"login":"octo","type":"User"},"repository":{"full_name":` + strconv.Quote(repo) +
-		`},"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`
+		`,"labels":[],"user":{"login":"octo","type":"User"},"repository_url":"https://api.github.com/repos/` + repo +
+		`","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`
 }
 
 func createdPayload(number int64, title, body string) string {
@@ -494,7 +494,9 @@ func TestReporterRestrictionsLatchAcrossAuthChange(t *testing.T) {
 		t.Fatalf("Drain = %v; want %q", err, want)
 	}
 	before := fake.hitCount("GET /search")
+	r.mu.Lock()
 	r.source = &stubSource{access: "other", expires: time.Now().Add(time.Hour)}
+	r.mu.Unlock()
 	if err := r.Drain(context.Background()); err == nil || err.Error() != want {
 		t.Fatalf("Drain after auth change = %v; want %q", err, want)
 	}
