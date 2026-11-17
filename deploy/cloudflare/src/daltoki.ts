@@ -13,6 +13,15 @@ export type RelayEnvelope = {
 	body: string;
 };
 
+type EnvelopeHead = {
+	deliveryID: string;
+	event: string;
+	receivedAt: string;
+	bodySHA256: string;
+	signature: string;
+	chunks: number;
+};
+
 type StoredDelivery = {
 	seq: number;
 	digest: string;
@@ -27,6 +36,9 @@ export const MAX_QUEUE_ITEMS = 10000;
 export const MAX_QUEUE_BYTES = 64 * 1024 * 1024;
 const RETENTION_MS = 7 * 24 * 3600 * 1000;
 const TOMBSTONE_MS = 30 * 24 * 3600 * 1000;
+const VALUE_CHUNK_BYTES = 96 * 1024;
+const MAX_PULL_BODY_BYTES = 768 * 1024;
+const LIST_PAGE = 1000;
 
 const textEncoder = new TextEncoder();
 
@@ -34,7 +46,11 @@ export type DaltokiStorage = {
 	get<T = unknown>(key: string): Promise<T | undefined>;
 	put(key: string, value: unknown): Promise<void>;
 	delete(key: string): Promise<boolean>;
-	list<T = unknown>(options?: { prefix?: string }): Promise<Map<string, T>>;
+	list<T = unknown>(options?: {
+		prefix?: string;
+		startAfter?: string;
+		limit?: number;
+	}): Promise<Map<string, T>>;
 };
 
 export type DaltokiContext = {
@@ -181,7 +197,27 @@ export class DaltokiRelay {
 		}
 		const receivedAt = Date.parse(envelope.receivedAt);
 		const seq = head + 1;
-		await this.storage.put(`env:${seq}`, envelope);
+		const chunks = Math.max(
+			1,
+			Math.ceil(envelope.body.length / VALUE_CHUNK_BYTES),
+		);
+		await this.storage.put(`env:${seq}`, {
+			deliveryID: envelope.deliveryID,
+			event: envelope.event,
+			receivedAt: envelope.receivedAt,
+			bodySHA256: envelope.bodySHA256,
+			signature: envelope.signature,
+			chunks,
+		} satisfies EnvelopeHead);
+		for (let index = 0; index < chunks; index += 1) {
+			await this.storage.put(
+				`env:${seq}:${index}`,
+				envelope.body.slice(
+					index * VALUE_CHUNK_BYTES,
+					(index + 1) * VALUE_CHUNK_BYTES,
+				),
+			);
+		}
 		await this.storage.put(`dlv:${envelope.deliveryID}`, {
 			seq,
 			digest: envelope.bodySHA256.toLowerCase(),
@@ -212,10 +248,10 @@ export class DaltokiRelay {
 				afterSeq = record.seq;
 			}
 		}
-		const entries = await this.storage.list<RelayEnvelope>({ prefix: "env:" });
-		const ordered = [...entries]
+		const ordered = (await this.listAll<EnvelopeHead>("env:"))
+			.filter(([key]) => !key.slice("env:".length).includes(":"))
 			.map(([key, envelope]) => ({
-				seq: Number(key.slice("env:".length)),
+				seq: Number(key.slice("env:".length).split(":")[0]),
 				envelope,
 			}))
 			.filter((entry) => Number.isInteger(entry.seq) && entry.seq > afterSeq)
@@ -223,32 +259,79 @@ export class DaltokiRelay {
 		const now = Date.now();
 		const items: RelayEnvelope[] = [];
 		let next = after;
+		let bodyBytes = 0;
 		for (const entry of ordered) {
-			if (items.length >= limit) {
+			if (items.length >= limit || bodyBytes >= MAX_PULL_BODY_BYTES) {
 				break;
 			}
 			if (Date.parse(entry.envelope.receivedAt) + RETENTION_MS < now) {
 				await this.removeEnvelope(entry.seq, entry.envelope);
 				continue;
 			}
-			items.push(entry.envelope);
-			next = entry.envelope.deliveryID;
+			const envelope = await this.readEnvelope(entry.seq, entry.envelope);
+			bodyBytes += envelope.body.length;
+			items.push(envelope);
+			next = envelope.deliveryID;
 		}
 		await this.collectTombstones(now);
 		return Response.json({ items, next });
 	}
 
+	private async listAll<T>(prefix: string): Promise<[string, T][]> {
+		const out: [string, T][] = [];
+		let startAfter = "";
+		for (;;) {
+			const page = await this.storage.list<T>({
+				prefix,
+				startAfter,
+				limit: LIST_PAGE,
+			});
+			if (page.size === 0) {
+				return out;
+			}
+			for (const [key, value] of page) {
+				out.push([key, value]);
+				startAfter = key;
+			}
+			if (page.size < LIST_PAGE) {
+				return out;
+			}
+		}
+	}
+
+	private async readEnvelope(
+		seq: number,
+		head: EnvelopeHead,
+	): Promise<RelayEnvelope> {
+		let body = "";
+		for (let index = 0; index < head.chunks; index += 1) {
+			body += (await this.storage.get<string>(`env:${seq}:${index}`)) ?? "";
+		}
+		return {
+			deliveryID: head.deliveryID,
+			event: head.event,
+			receivedAt: head.receivedAt,
+			bodySHA256: head.bodySHA256,
+			signature: head.signature,
+			body,
+		};
+	}
+
 	private async removeEnvelope(
 		seq: number,
-		envelope: RelayEnvelope,
+		envelope: EnvelopeHead,
 	): Promise<void> {
 		let size = 0;
 		try {
-			size = fromBase64(envelope.body).byteLength;
+			const body = await this.readEnvelope(seq, envelope);
+			size = fromBase64(body.body).byteLength;
 		} catch {
 			size = 0;
 		}
 		await this.storage.delete(`env:${seq}`);
+		for (let index = 0; index < envelope.chunks; index += 1) {
+			await this.storage.delete(`env:${seq}:${index}`);
+		}
 		const count = (await this.storage.get<number>("meta:count")) ?? 0;
 		const bytes = (await this.storage.get<number>("meta:bytes")) ?? 0;
 		await this.storage.put("meta:count", Math.max(0, count - 1));
@@ -256,8 +339,7 @@ export class DaltokiRelay {
 	}
 
 	private async collectTombstones(now: number): Promise<void> {
-		const records = await this.storage.list<StoredDelivery>({ prefix: "dlv:" });
-		for (const [key, record] of records) {
+		for (const [key, record] of await this.listAll<StoredDelivery>("dlv:")) {
 			if (Date.parse(record.tombstoneUntil) < now) {
 				await this.storage.delete(key);
 			}
@@ -276,9 +358,12 @@ export class DaltokiRelay {
 		if (record === undefined) {
 			return new Response(null, { status: 204 });
 		}
-		const entries = await this.storage.list<RelayEnvelope>({ prefix: "env:" });
-		for (const [key, envelope] of entries) {
-			const seq = Number(key.slice("env:".length));
+		for (const [key, envelope] of await this.listAll<EnvelopeHead>("env:")) {
+			const tail = key.slice("env:".length);
+			if (tail.includes(":")) {
+				continue;
+			}
+			const seq = Number(tail);
 			if (Number.isInteger(seq) && seq <= record.seq) {
 				await this.removeEnvelope(seq, envelope);
 			}

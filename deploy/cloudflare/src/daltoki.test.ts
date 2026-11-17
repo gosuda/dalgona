@@ -23,12 +23,28 @@ function createStorage(): { storage: DaltokiStorage; keys: () => string[] } {
 				data.set(key, value);
 			},
 			delete: async (key: string) => data.delete(key),
-			list: async <T>({ prefix }: { prefix?: string } = {}) => {
+			list: async <T>({
+				prefix,
+				startAfter,
+				limit,
+			}: {
+				prefix?: string;
+				startAfter?: string;
+				limit?: number;
+			} = {}) => {
 				const out = new Map<string, unknown>();
-				for (const [key, value] of data) {
-					if (prefix === undefined || key.startsWith(prefix)) {
-						out.set(key, value);
+				const keys = [...data.keys()].sort();
+				for (const key of keys) {
+					if (prefix !== undefined && !key.startsWith(prefix)) {
+						continue;
 					}
+					if (startAfter !== undefined && key <= startAfter) {
+						continue;
+					}
+					if (out.size >= (limit ?? Number.POSITIVE_INFINITY)) {
+						break;
+					}
+					out.set(key, data.get(key));
 				}
 				return out as Map<string, T>;
 			},
