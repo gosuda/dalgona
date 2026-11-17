@@ -14,6 +14,7 @@ import (
 )
 
 type AppSource struct {
+	home    string
 	access  string
 	expires time.Time
 	now     func() time.Time
@@ -23,7 +24,7 @@ func NewAppSource(home string, now func() time.Time) (*AppSource, error) {
 	if now == nil {
 		now = time.Now
 	}
-	source := &AppSource{now: now}
+	source := &AppSource{home: home, now: now}
 	credential, err := readCredential(home)
 	if err != nil {
 		return source, nil
@@ -38,9 +39,24 @@ func (s *AppSource) Credential(ctx context.Context) (Credential, error) {
 		return Credential{}, err
 	}
 	if s.access == "" || (!s.expires.IsZero() && !s.now().Before(s.expires)) {
-		return Credential{}, errors.New("failure reporting authorization expired; run dalgona failures reporting login")
+		if !s.reload() {
+			return Credential{}, errors.New("failure reporting authorization expired; run dalgona failures reporting login")
+		}
 	}
 	return Credential{Access: s.access, Expires: s.expires}, nil
+}
+
+func (s *AppSource) reload() bool {
+	credential, err := readCredential(s.home)
+	if err != nil {
+		return false
+	}
+	if !credential.Expires.IsZero() && !s.now().Before(credential.Expires) {
+		return false
+	}
+	s.access = credential.Token
+	s.expires = credential.Expires
+	return true
 }
 
 func ResolveReportRepository(ctx context.Context) (int64, error) {
@@ -76,9 +92,13 @@ func ResolveReportRepository(ctx context.Context) (int64, error) {
 	return info.ID, nil
 }
 
-func AcquireAppToken(ctx context.Context, home string, repositoryID int64, show func(string, string)) error {
+func AcquireAppToken(ctx context.Context, home string, show func(string, string)) error {
 	if reportAppClientID == "" {
 		return errors.New("failure reporting is unavailable: github app client id is missing")
+	}
+	repositoryID, err := ResolveReportRepository(ctx)
+	if err != nil {
+		return err
 	}
 	token, err := oauth.DeviceCode(ctx, oauth.Provider{ //nolint:gosec // G101: public OAuth client id endpoints, not credentials
 		ID:               "failure-reporting",

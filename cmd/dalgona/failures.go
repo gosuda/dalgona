@@ -45,11 +45,7 @@ func failuresReportingOn(ctx context.Context, std stdio) int {
 		return 0
 	}
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if strings.TrimRight(line, "\r\n") != "yes" {
-		fmt.Fprintln(std.out, "automatic failure reporting remains off")
-		return 0
-	}
-	if err != nil && line == "" {
+	if err != nil || strings.TrimRight(line, "\r\n") != "yes" {
 		fmt.Fprintln(std.out, "automatic failure reporting remains off")
 		return 0
 	}
@@ -87,6 +83,10 @@ func failuresReportingLogin(ctx context.Context, std stdio) int {
 }
 
 func failuresAcquire(ctx context.Context, home, method string, std stdio) int {
+	if os.Getenv("DALGONA_HOME") != "" {
+		fmt.Fprintln(std.out, "automatic failure reporting is off for an overridden home")
+		return 0
+	}
 	if method == "gh" {
 		fmt.Fprintln(std.out, "using the active github.com account from gh; no login, refresh or fallback will run")
 		return 0
@@ -98,11 +98,7 @@ func failuresAcquire(ctx context.Context, home, method string, std stdio) int {
 }
 
 func failuresAppLogin(ctx context.Context, home string, std stdio) int {
-	repositoryID, err := report.ResolveReportRepository(ctx)
-	if err != nil {
-		return fail(std, 1, err)
-	}
-	err = report.AcquireAppToken(ctx, home, repositoryID, func(code, url string) {
+	err := report.AcquireAppToken(ctx, home, func(code, url string) {
 		fmt.Fprintf(std.out, "open %s and enter code %s\n", url, code)
 	})
 	if err != nil {
