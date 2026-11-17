@@ -14,6 +14,7 @@ import (
 
 const (
 	relayPullLimit   = 100
+	relayPullMaxBody = 16 << 20
 	relayPollPeriod  = 10 * time.Second
 	relayPollTimeout = 15 * time.Second
 )
@@ -39,7 +40,7 @@ func NewRelayClient(baseURL, token string, transport *http.Client) (*RelayClient
 	return &RelayClient{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, HTTP: transport}, nil
 }
 
-func (c *RelayClient) call(ctx context.Context, path string, payload any) ([]byte, int, error) {
+func (c *RelayClient) call(ctx context.Context, path string, payload any, maxResponse int64) ([]byte, int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, 0, err
@@ -55,11 +56,11 @@ func (c *RelayClient) call(ctx context.Context, path string, payload any) ([]byt
 		return nil, 0, fmt.Errorf("daltoki: relay %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxWebhookBody+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("daltoki: relay %s: read response: %w", path, err)
 	}
-	if int64(len(data)) > maxWebhookBody {
+	if int64(len(data)) > maxResponse {
 		return nil, resp.StatusCode, errors.New("daltoki: relay response too large")
 	}
 	return data, resp.StatusCode, nil
@@ -70,7 +71,7 @@ func (c *RelayClient) Pull(ctx context.Context, after string, limit int) (RelayP
 	if limit <= 0 || limit > relayPullLimit {
 		limit = relayPullLimit
 	}
-	data, status, err := c.call(ctx, "/daltoki/relay/pull", map[string]any{"after": after, "limit": limit})
+	data, status, err := c.call(ctx, "/daltoki/relay/pull", map[string]any{"after": after, "limit": limit}, relayPullMaxBody)
 	if err != nil {
 		return page, err
 	}
@@ -84,7 +85,7 @@ func (c *RelayClient) Pull(ctx context.Context, after string, limit int) (RelayP
 }
 
 func (c *RelayClient) Ack(ctx context.Context, through string) error {
-	_, status, err := c.call(ctx, "/daltoki/relay/ack", map[string]string{"through": through})
+	_, status, err := c.call(ctx, "/daltoki/relay/ack", map[string]string{"through": through}, maxWebhookBody)
 	if err != nil {
 		return err
 	}

@@ -96,7 +96,7 @@ func repositoryRoot(t *testing.T) string {
 	if !ok {
 		t.Fatal("locate conformance test source")
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", ".."))
 }
 
 func writeFile(t *testing.T, path, body string) {
@@ -199,7 +199,7 @@ func (f *fixture) reap(pid int, deadline time.Time) {
 
 func (f *fixture) python(t *testing.T, args ...string) string {
 	t.Helper()
-	driver := filepath.Join(f.root, "internal", "codexapp", "conformance", "testdata", args[0])
+	driver := filepath.Join(f.root, "internal", "dalgona", "codexapp", "conformance", "testdata", args[0])
 	argv := append([]string{"run", "--project", filepath.Join(f.root, ".references", "codex", "sdk", "python"), "python", driver}, args[1:]...)
 	return f.run(t, externalTimeout, f.workspace, "uv", argv...)
 }

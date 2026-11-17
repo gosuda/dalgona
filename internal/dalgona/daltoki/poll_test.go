@@ -84,6 +84,7 @@ type routeHarness struct {
 	etagEventsSeen []string
 	xPollInterval  string
 	rateReset      time.Time
+	labelled304    bool
 }
 
 func (h *routeHarness) record(r *http.Request) {
@@ -171,6 +172,10 @@ func (h *routeHarness) servePagedIssues(w http.ResponseWriter, r *http.Request, 
 func (h *routeHarness) serveIssues(w http.ResponseWriter, r *http.Request, t *testing.T) {
 	t.Helper()
 	if strings.Contains(r.URL.RawQuery, "labels=") {
+		if h.labelled304 && r.Header.Get("If-None-Match") != "" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 		writeJSON(t, w, []any{
 			issueItem(issueSpec{id: 107, number: 7, title: "labelled", labels: []string{"daltoki"}, updated: "2026-01-02T00:00:00Z"}),
 			issueItem(issueSpec{id: 108, number: 8, title: "closed labelled", closed: true, labels: []string{"daltoki"}, updated: "2026-01-02T00:00:00Z"}),
@@ -438,5 +443,88 @@ func TestPollFloorOn304(t *testing.T) {
 	_ = strconv.Itoa(0)
 	if second.Wait < 590*time.Second || second.Wait > 601*time.Second {
 		t.Fatalf("Wait = %v, want the rate deadline floor", second.Wait)
+	}
+}
+
+func newLabelledPoller(t *testing.T) *Poller {
+	t.Helper()
+	harness := newRouteHarness(t)
+	harness.labelled304 = true
+	return NewPoller(testPollClient(t, harness.server), nil, PollerConfig{
+		BaseURL: harness.server.URL,
+	}, time.Now, nil)
+}
+
+func TestLabelled304ReusesCachedIssueNumbers(t *testing.T) {
+	poller := newLabelledPoller(t)
+	repo := github.Repository{Owner: "octo", Name: "repo"}
+	state := poller.newScan(PollCursor{
+		Since:    time.Now().Add(-time.Hour),
+		ETags:    []EndpointETag{{URL: poller.labelledURL(repo), ETag: `"fresh"`}},
+		Labelled: map[string][]int64{"octo/repo": {5}, "octo/other": {9}},
+	}, true)
+
+	numbers, listed, err := poller.labelledIssueNumbers(context.Background(), state, repo)
+	if err != nil || !listed {
+		t.Fatalf("labelledIssueNumbers: listed=%v err=%v", listed, err)
+	}
+	if len(numbers) != 1 || numbers[0] != 5 {
+		t.Fatalf("304 worklist = %v, want only this repository's cached [5]", numbers)
+	}
+}
+
+func TestLabelled304WithoutCacheRefetchesUnconditionally(t *testing.T) {
+	poller := newLabelledPoller(t)
+	repo := github.Repository{Owner: "octo", Name: "repo"}
+	state := poller.newScan(PollCursor{
+		Since: time.Now().Add(-time.Hour),
+		ETags: []EndpointETag{{URL: poller.labelledURL(repo), ETag: `"stale"`}},
+	}, true)
+
+	numbers, listed, err := poller.labelledIssueNumbers(context.Background(), state, repo)
+	if err != nil || !listed {
+		t.Fatalf("labelledIssueNumbers: listed=%v err=%v", listed, err)
+	}
+	if len(numbers) != 1 || numbers[0] != 7 {
+		t.Fatalf("uncached 304 worklist = %v, want refetched [7]", numbers)
+	}
+	if got := state.cursor.Labelled["octo/repo"]; len(got) != 1 || got[0] != 7 {
+		t.Fatalf("refetch did not populate the cache: %+v", state.cursor.Labelled)
+	}
+}
+
+func TestLabelledListingCutByBudgetIsNotCached(t *testing.T) {
+	poller := newLabelledPoller(t)
+	state := poller.newScan(PollCursor{Since: time.Now().Add(-time.Hour)}, true)
+	state.pages = pollPageLimit
+
+	numbers, listed, err := poller.labelledIssueNumbers(context.Background(), state, github.Repository{Owner: "octo", Name: "repo"})
+	if err != nil || listed || len(numbers) != 0 {
+		t.Fatalf("budget-cut listing = %v listed=%v err=%v, want unlisted and empty", numbers, listed, err)
+	}
+	if len(state.cursor.Labelled) != 0 || len(state.etags) != 0 {
+		t.Fatalf("incomplete listing was cached: labelled=%v etags=%v", state.cursor.Labelled, state.etags)
+	}
+}
+
+func TestEventsPhaseStaysIncompleteWhenBudgetBlocksLabelledRefetch(t *testing.T) {
+	poller := newLabelledPoller(t)
+	repo := github.Repository{Owner: "octo", Name: "repo"}
+	state := poller.newScan(PollCursor{
+		Since:   time.Now().Add(-time.Hour),
+		ETags:   []EndpointETag{{URL: poller.labelledURL(repo), ETag: `"fresh"`}},
+		NextURL: eventsContinuation(repo),
+	}, true)
+	state.pages = pollPageLimit - 1
+
+	done, err := poller.eventsPhase(context.Background(), state, repo)
+	if err != nil {
+		t.Fatalf("eventsPhase: %v", err)
+	}
+	if done {
+		t.Fatal("events phase completed although the labelled listing never ran")
+	}
+	if state.cursor.NextURL != eventsContinuation(repo) {
+		t.Fatalf("NextURL = %q, want the events continuation kept for the next pass", state.cursor.NextURL)
 	}
 }

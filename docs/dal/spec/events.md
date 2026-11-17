@@ -135,7 +135,7 @@ The agent MUST build each model request from the active path after the latest `c
 The model MUST be called again when the rendered context ends with user content.
 ## Postbox mail events
 
-Mail moves between sessions in two durable stages. A sender post returns a queued receipt after stage 1. The later delivered acknowledgement is visible through durable status and client notifications. Transport delivery is at-least-once. Receiver ids suppress duplicate inbox entries and duplicate incorporation after restart.
+Mail moves between sessions in two durable stages. A sender post returns a queued receipt after stage 1. The later delivered acknowledgement is visible through durable status and client notifications. Transport delivery is at-least-once. Receiver ids suppress duplicate inbox entries and duplicate incorporation after restart. A rejected stage 1 delivery MUST settle `refused` on the sender with the rejection reason. A later identical retry MUST fail rather than re-entering delivery.
 
 Mail state folds over the complete journal, not the active branch. Ids, immutable payload fingerprints, pair counters, and terminal settlements survive for the session lifetime. Compaction MUST NOT prune them. Forks start with empty mail state, run-on-mail off, and zero automatic-mail turns. Revert and leaf changes MUST NOT rewind mail dedup.
 

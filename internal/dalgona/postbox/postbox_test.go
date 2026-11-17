@@ -353,6 +353,46 @@ func TestPostBounds(t *testing.T) {
 	assertPostInboxFull(t, fx, ctx)
 }
 
+func TestPostRejectionSettlesRefused(t *testing.T) {
+	t.Parallel()
+	fx := testFixture(t)
+	ctx := context.Background()
+	var peer *Sender
+	for filled := range 20 {
+		if filled%3 == 0 {
+			peer = bindSender(t, fx.svc, fx.newThread(t))
+		}
+		mustPost(t, peer, fmt.Sprintf("fill-%d", filled), fx.idB, "fill")
+	}
+	_, err := peer.Post(ctx, Request{OperationID: "overflow", To: fx.idB, Text: "fill"})
+	if err == nil || err.Error() != "post: recipient mailbox is full (20)" {
+		t.Fatalf("overflow post err = %v", err)
+	}
+	if refused := countSettled(t, peer, event.MailOutcomeRefused); refused != 1 {
+		t.Fatalf("refused settlements = %d, want 1", refused)
+	}
+	_, err = peer.Post(ctx, Request{OperationID: "overflow", To: fx.idB, Text: "fill"})
+	if err == nil || !strings.Contains(err.Error(), "post: recipient refused message") {
+		t.Fatalf("refused retry err = %v", err)
+	}
+}
+
+func countSettled(t *testing.T, sender *Sender, outcome string) int {
+	t.Helper()
+	records, _, err := sender.thread.Records()
+	if err != nil {
+		t.Fatalf("sender records: %v", err)
+	}
+	count := 0
+	for _, record := range records {
+		settled, ok := record.Event.(event.MailSettled)
+		if ok && settled.Outcome == outcome {
+			count++
+		}
+	}
+	return count
+}
+
 func TestPostArgShapes(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("t", 193)
