@@ -5,7 +5,7 @@ Terminal coding agents, with or without a daemon.
 Use `dal` to work with a coding agent in your terminal without running a daemon. Choose `dalgona` when you also need a web interface, remote execution, MCP tools, or durable workflows. Both commands use the same agent core and keep their own configuration and threads.
 
 - **Product choice:** `dal` runs the host in process. `dalgona` connects clients to a per-user daemon.
-- **Recorded work:** threads use an append-only JSONL journal with a SQLite mirror. [Recovery](docs/dal/spec/recovery.md) uses recorded tool outcomes after an interruption.
+- **Recorded work:** threads use an append-only JSONL journal with a Pebble mirror. [Recovery](docs/dal/spec/recovery.md) uses recorded tool outcomes after an interruption.
 - **Execution choice:** `dalgona` can keep the orchestrator local or run its whole daemon in a remote box.
 
 A build from this checkout reports its development version:
@@ -223,6 +223,7 @@ Dalgona also accepts `--remote <name>` to select a configured remote instead of 
 | `dalgona run <file.star> [--arg k=v ...]` | Run a durable Starlark workflow. |
 | `dalgona exec-server [--listen <address>] [--root <directory>] [--data <directory>]` | Serve process and filesystem operations inside a box. |
 | `dalgona bridge` | Connect standard input and output to the local daemon, starting it if needed. |
+| `dalgona mcp login <name>` | Sign in to an OAuth MCP server and store its token. |
 | `dalgona doctor [--online]` | Print one `ok`, `warn` or `fail` row for each setup check. `--online` adds one model-list request for each provider with a credential. |
 
 Workflow arguments use JSON when the value is valid JSON. Other values become strings.
@@ -293,7 +294,7 @@ Dalgona also offers opt-in [edit review](docs/dal/spec/edit-review.md). It sends
 | Dalgona only, top level | `runner`, `remote` |
 | `[runners.<name>]` (dalgona) | `service`, `image`, `template`, `url` |
 | `[remotes.<name>]` (dalgona) | `service`, `image`, `template`, `url`, `box_id` |
-| `[mcp_servers.<name>]` (dalgona) | `command`, `args`, `env`, `url` |
+| `[mcp_servers.<name>]` (dalgona) | `command`, `args`, `env`, `url`, `bearer_token_env`, `oauth`, `oauth_scopes`, `oauth_client_id`, `oauth_callback_port` |
 | `[discovery]` (dalgona) | `sources` |
 | `[edit_review]` (dalgona) | `enabled`, `feedback` |
 | `[herdr]` (dalgona) | `subagent_panes` |

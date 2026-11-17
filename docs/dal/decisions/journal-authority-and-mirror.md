@@ -12,4 +12,4 @@ This decision applies to `internal/dal/journal` and all state derived from its e
 
 ## Enforcement
 
-`internal/dal/journal/journal_test.go` checks truncated tails, middle-record repair, damage without a usable mirror, corrupt SQLite, restored tails, and writer exclusion. Event-fold tests in `internal/dal/agent/event/state_test.go` check derived state. `just test` runs these tests with the race detector.
+`internal/dal/journal/journal_test.go` checks truncated tails, middle-record repair, damage without a usable mirror, a corrupt mirror, restored tails, and writer exclusion. Event-fold tests in `internal/dal/agent/event/state_test.go` check derived state. `just test` runs these tests with the race detector.

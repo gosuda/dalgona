@@ -73,7 +73,9 @@ linters:
             - pkg: "github.com/pkg/errors"
               desc: use errors and fmt.Errorf with %w
             - pkg: "github.com/mattn/go-sqlite3"
-              desc: cgo driver; use modernc.org/sqlite
+              desc: cgo driver; this module has no SQL input; the journal mirror uses pebble
+            - pkg: "modernc.org/sqlite"
+              desc: this module has no SQL input; the journal mirror uses pebble
             - pkg: "github.com/BurntSushi/toml"
               desc: use github.com/pelletier/go-toml/v2
             - pkg: "gopkg.in/yaml.v2"
