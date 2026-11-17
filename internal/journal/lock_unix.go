@@ -5,6 +5,7 @@ package journal
 import (
 	"errors"
 	"os"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -32,6 +33,23 @@ func waitFileShared(f *os.File) error {
 
 func unlockFile(f *os.File) error {
 	return flock(f, unix.LOCK_UN)
+}
+
+func waitFileBounded(f *os.File, d time.Duration) error {
+	deadline := time.Now().Add(d)
+	for {
+		locked, err := tryLock(f)
+		if err != nil {
+			return err
+		}
+		if locked {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return errMirrorBusy
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func isLockBusy(err error) bool {

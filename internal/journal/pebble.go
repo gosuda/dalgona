@@ -29,7 +29,7 @@ type mirrorDB struct {
 	actor *mirrorActor
 	path  string
 	db    *pebble.DB
-	lock  *pebble.Lock
+	guard *mirrorGuard
 }
 
 type mirrorActor struct {
@@ -44,16 +44,16 @@ func (m *mirrorDB) apply(fn func(*pebble.DB) error) error {
 	if m.db != nil {
 		return fn(m.db)
 	}
-	lock, err := lockMirrorDir(m.path)
+	guard, err := lockMirrorDir(m.path)
 	if err != nil {
 		return fmt.Errorf("journal: open state.db: %w", err)
 	}
-	db, err := openMirror(m.path, lock)
+	db, err := openMirror(m.path, guard.lock)
 	if err != nil {
-		_ = lock.Close()
+		_ = guard.Close()
 		return fmt.Errorf("journal: open state.db: %w", err)
 	}
-	defer func() { _ = lock.Close() }()
+	defer func() { _ = guard.Close() }()
 	defer func() { _ = db.Close() }()
 	return fn(db)
 }
@@ -107,14 +107,14 @@ func (m *mirrorDB) Close() error {
 
 func (m *mirrorDB) dropDB(actor *mirrorActor) error {
 	err := actor.call(func() error {
-		db, lock := m.db, m.lock
-		m.db, m.lock = nil, nil
+		db, guard := m.db, m.guard
+		m.db, m.guard = nil, nil
 		var result error
 		if db != nil {
 			result = db.Close()
 		}
-		if lock != nil {
-			result = errors.Join(result, lock.Close())
+		if guard != nil {
+			result = errors.Join(result, guard.Close())
 		}
 		return result
 	})
@@ -134,21 +134,33 @@ func (mirrorLogger) Infof(string, ...any)  {}
 func (mirrorLogger) Fatalf(string, ...any) {}
 func (mirrorLogger) Errorf(string, ...any) {}
 
-func lockMirrorDir(path string) (*pebble.Lock, error) {
+var errMirrorBusy = errors.New("journal: state.db is busy")
+
+type mirrorGuard struct {
+	lock *pebble.Lock
+	file *os.File
+}
+
+func (g *mirrorGuard) Close() error {
+	return errors.Join(g.lock.Close(), releaseLock(g.file))
+}
+
+func lockMirrorDir(path string) (*mirrorGuard, error) {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return nil, err
 	}
-	deadline := time.Now().Add(mirrorOpenWait)
-	for {
-		lock, err := pebble.LockDirectory(path, vfs.Default)
-		if err == nil {
-			return lock, nil
-		}
-		if time.Now().After(deadline) {
-			return nil, err
-		}
-		time.Sleep(10 * time.Millisecond)
+	gate, err := openLockFile(path + ".lock")
+	if err != nil {
+		return nil, err
 	}
+	if werr := waitFileBounded(gate, mirrorOpenWait); werr != nil {
+		return nil, errors.Join(werr, gate.Close())
+	}
+	lock, err := pebble.LockDirectory(path, vfs.Default)
+	if err != nil {
+		return nil, errors.Join(err, releaseLock(gate))
+	}
+	return &mirrorGuard{lock: lock, file: gate}, nil
 }
 
 func openMirror(path string, lock *pebble.Lock) (*pebble.DB, error) {
@@ -163,19 +175,18 @@ func (m *mirrorDB) withDB(fn func(*pebble.DB) error) error {
 }
 
 func openDB(path string) (*mirrorDB, error) {
-	lock, err := lockMirrorDir(path)
+	guard, err := lockMirrorDir(path)
 	if err != nil {
 		return nil, fmt.Errorf("journal: open state.db: %w", err)
 	}
-	db, err := openMirror(path, lock)
+	db, err := openMirror(path, guard.lock)
 	if err != nil {
-		_ = lock.Close()
-		return nil, fmt.Errorf("journal: open state.db: %w", err)
+		return nil, errors.Join(err, guard.Close())
 	}
 	if err := checkMirrorVersion(db); err != nil {
-		return nil, errors.Join(err, db.Close(), lock.Close())
+		return nil, errors.Join(err, db.Close(), guard.Close())
 	}
-	m := &mirrorDB{db: db, lock: lock, path: path}
+	m := &mirrorDB{db: db, guard: guard, path: path}
 	m.actor = spawnMirrorActor(m)
 	return m, nil
 }

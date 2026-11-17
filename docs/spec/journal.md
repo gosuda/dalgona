@@ -40,7 +40,7 @@ For a damaged thread, `Append` MUST fail with `journal: session <id> is damaged 
 
 ## Pebble mirror
 
-The mirror is the Pebble directory `state.db`. The backup is `state.db.bak`. Every committed write MUST sync its batch. The store MUST retry acquiring the mirror directory lock for up to 5000 ms before it fails a write. An exclusive store holds that lock for its lifetime. A shared store holds it only across one open, write, or read batch.
+The mirror is the Pebble directory `state.db`. The backup is `state.db.bak`. Every committed write MUST sync its batch. The store MUST hold `state.db.lock` before opening `state.db`, waiting up to 5000 ms before it fails an operation. An exclusive store holds that lock for its lifetime. A shared store holds it only across one open, write, or read batch.
 
 The mirror maps `journal.jsonl` onto these keys:
 
