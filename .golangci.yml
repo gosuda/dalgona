@@ -100,10 +100,10 @@ linters:
               desc: reflection SDK; speak the provider wire with net/http and encoding/json/jsontext
         syntax:
           files:
-            - "!**/internal/syntax/**"
+            - "!**/internal/dal/syntax/**"
           deny:
             - pkg: "github.com/odvcencio/gotreesitter"
-              desc: only internal/syntax imports the tree-sitter library
+              desc: only internal/dal/syntax imports the tree-sitter library
         copyleft:
           files:
             - $all
@@ -120,107 +120,111 @@ linters:
               desc: copyleft grammar under MPL-2.0 per licenses/grammars.json
         core:
           files:
-            - "**/internal/journal/**"
-            - "**/internal/agent/**"
-            - "**/internal/model/**"
-            - "**/internal/auth/**"
-            - "**/internal/tool/**"
-            - "**/internal/runner/**"
-            - "**/internal/config/**"
-            - "**/internal/decide/**"
-            - "**/internal/textdiff/**"
-            - "**/internal/keywords/**"
-            - "**/internal/syntax/**"
-            - "**/internal/shellargs/**"
-            - "**/internal/secrets/**"
+            - "**/internal/dal/journal/**"
+            - "**/internal/dal/agent/**"
+            - "**/internal/dal/model/**"
+            - "**/internal/dal/auth/**"
+            - "**/internal/dal/tool/**"
+            - "**/internal/dal/runner/**"
+            - "**/internal/dal/config/**"
+            - "**/internal/dal/decide/**"
+            - "**/internal/dal/textdiff/**"
+            - "**/internal/dal/keywords/**"
+            - "**/internal/dal/syntax/**"
+            - "**/internal/dal/shellargs/**"
+            - "**/internal/dal/secrets/**"
           deny:
-            - pkg: "github.com/gosuda/dalgona/internal/acp"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/rpc"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/rpc"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/tui"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/tui"
               desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/daemon"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/script"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/sandboxsvc"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/mcp"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/discovery"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/webui"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/herdr"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/codexapp"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/ratchet"
-              desc: core must not import interfaces or batteries
-            - pkg: "github.com/gosuda/dalgona/internal/doctor"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/script"
               desc: core must not import interfaces or batteries
         presentation:
           files:
-            - "**/internal/app/**"
+            - "**/internal/dal/app/**"
           deny:
-            - pkg: "github.com/gosuda/dalgona/internal/tui"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/tui"
               desc: presentation depends on core, core never imports presentation
         clients:
           files:
-            - "**/internal/tui/**"
-            - "**/internal/webui/**"
-            - "**/internal/herdr/**"
-            - "**/internal/acp/**"
+            - "**/internal/dal/tui/**"
+            - "**/internal/dalgona/webui/**"
+            - "**/internal/dalgona/herdr/**"
+            - "**/internal/dalgona/acp/**"
           deny:
-            - pkg: "github.com/gosuda/dalgona/internal/journal"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/journal"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/agent"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/agent"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/model"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/model"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/auth"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/auth"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/tool"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/tool"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/runner"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/runner"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/config"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/config"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/decide"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/decide"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/keywords"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/keywords"
               desc: clients reach the core only through internal/rpc
-            - pkg: "github.com/gosuda/dalgona/internal/script"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/script"
               desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/dal/failure"
+              desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/report"
+              desc: clients reach the core only through internal/rpc
+        tui-imports-only-rpc:
+          list-mode: lax
+          files:
+            - "**/internal/dal/tui/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/"
+              desc: tui reaches the core only through internal/dal/rpc
+          allow:
+            - "github.com/gosuda/dalgona/internal/dal/rpc"
         dal:
           files:
             - "**/cmd/dal/**"
           deny:
-            - pkg: "github.com/gosuda/dalgona/internal/acp"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/acp"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/daemon"
+            - pkg: "github.com/gosuda/dalgona/internal/dal/script$"
+              desc: dal imports the script engine only through internal/dal/scripthost
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/script$"
-              desc: dal imports the script engine only through internal/scripthost
-            - pkg: "github.com/gosuda/dalgona/internal/sandboxsvc"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/mcp"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/mcp"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/discovery"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/discovery"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/webui"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/webui"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/herdr"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/herdr"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/codexapp"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/codexapp"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/ratchet"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/app/battery"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/daltoki"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/ratchet"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/github"
               desc: dal must stay free of dalgona batteries
-            - pkg: "github.com/gosuda/dalgona/internal/doctor"
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/graph"
               desc: dal must stay free of dalgona batteries
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/postbox"
+              desc: dal must stay free of dalgona batteries
+        product-boundary:
+          files:
+            - "**/internal/dal/**"
+            - "**/cmd/dal/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona"
+              desc: dal never imports dalgona
   exclusions:
     presets:
       - std-error-handling

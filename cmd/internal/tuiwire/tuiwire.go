@@ -4,8 +4,8 @@ import (
 	"context"
 	"io"
 
-	"github.com/gosuda/dalgona/internal/app"
-	"github.com/gosuda/dalgona/internal/tui"
+	"github.com/gosuda/dalgona/internal/dal/app"
+	"github.com/gosuda/dalgona/internal/dal/tui"
 )
 
 func Run(ctx context.Context, conn io.ReadWriteCloser, opts app.TUIOptions) error {

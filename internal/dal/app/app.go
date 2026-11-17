@@ -1,0 +1,213 @@
+package app
+
+import (
+	"cmp"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+
+	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent/advisor"
+	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/decide"
+	"github.com/gosuda/dalgona/internal/dal/journal"
+	"github.com/gosuda/dalgona/internal/dal/model"
+	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool/exec"
+	"github.com/gosuda/dalgona/internal/dal/tool/patch"
+	"github.com/gosuda/dalgona/internal/dal/tool/read"
+	"github.com/gosuda/dalgona/internal/dal/tool/rewrite"
+	"github.com/gosuda/dalgona/internal/dal/tool/search"
+	"github.com/gosuda/dalgona/internal/dal/tool/todo"
+	"github.com/gosuda/dalgona/internal/dal/tool/webfetch"
+)
+
+type Options struct {
+	Product   config.Product
+	Cwd       string
+	Flags     config.Flags
+	Config    *config.Config
+	Logger    *slog.Logger
+	Advisors  *advisor.Registry
+	Batteries func(context.Context, Base) (Batteries, error)
+}
+
+type Base struct {
+	Config  config.Config
+	Journal *journal.Store
+	Auth    *auth.Store
+	Local   agent.RunnerFactory
+	Judge   func(ctx context.Context, model, threadModel string) (decide.Client, error)
+	Logger  *slog.Logger
+}
+
+type Batteries struct {
+	Tools     func(ctx context.Context, cwd string) []tool.Tool
+	Skills    agent.SkillSet
+	Extension agent.ExtensionFactory
+	Runner    agent.RunnerFactory
+	Attach    func(*agent.Host)
+	Close     func() error
+	MCPStatus func(ctx context.Context, cwd string) []agent.MCPServerStatus
+}
+
+func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, fmt.Errorf("app: %w", err)
+	}
+	cfg, err := loadConfig(opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := auth.NewWithPatterns(cfg.Home, cfg.Secrets.Patterns, auth.WithBuiltinPatterns(cfg.Secrets.Builtin))
+	if err != nil {
+		return nil, nil, err
+	}
+	product := cmp.Or(opts.Product, cfg.Product)
+	creds, roles := newCredentials(store, product, opts.Logger), &roleResolver{}
+	judges, err := newJudges(ctx, cfg, creds, roles)
+	if err != nil {
+		return nil, nil, err
+	}
+	journalStore, err := openJournal(product, cfg.Home)
+	if err != nil {
+		return nil, nil, err
+	}
+	shellEnv := newShellEnv(cfg)
+	base := Base{Config: cfg, Journal: journalStore, Auth: store, Local: runnerFactory(cfg.Home, shellEnv), Judge: judges.judge, Logger: opts.Logger}
+	extra, err := loadBatteries(ctx, opts, base)
+	if err != nil {
+		return nil, nil, errors.Join(err, journalStore.Close())
+	}
+	advisors := newAdvisors(opts.Advisors, opts.Logger)
+	release := func() error { return errors.Join(extra.Close(), journalStore.Close()) }
+	var editJudge agent.ClientFactory
+	if product == config.ProductDalgona {
+		editJudge = judges.resolve
+	}
+	host, err := agent.NewHost(agent.HostConfig{
+		Journal: journalStore, Config: cfg, Auth: store, Tools: toolSet(cfg, extra.Tools),
+		Providers:        func(onRetry agent.RetryFunc) (*model.Registry, error) { return creds.registry(cfg, onRetry) },
+		ProvidersWithKey: func(provider, key string) (*model.Registry, error) { return creds.registryWithKey(cfg, provider, key) },
+		ProviderIDs:      providerIDs(cfg), Decider: judges.decider(), EditJudge: editJudge, Extension: extra.Extension, EditFeedback: cfg.EditReview.Feedback,
+		Runner: extra.Runner, Product: product, Logger: opts.Logger, Skills: extra.Skills,
+		MCPStatus:      extra.MCPStatus,
+		OnChildStarted: advisors.attach,
+		ShellEnv:       shellEnv,
+	})
+	if err != nil {
+		return nil, nil, errors.Join(err, release())
+	}
+	roles.set(host)
+	advisors.host.Store(host)
+	extra.Attach(host)
+	closeAll := sync.OnceValue(func() error { return errors.Join(advisors.close(), host.Close(), release()) })
+	return host, closeAll, nil
+}
+
+func loadConfig(opts Options) (config.Config, error) {
+	if opts.Config != nil {
+		return *opts.Config, nil
+	}
+	cfg, err := config.Load(opts.Product, opts.Cwd, opts.Flags)
+	if err != nil {
+		return config.Config{}, err
+	}
+	if err := InstallTLSRoots(cfg); err != nil {
+		return config.Config{}, err
+	}
+	return cfg, nil
+}
+
+func openJournal(product config.Product, home string) (*journal.Store, error) {
+	if product == config.ProductDal {
+		return journal.OpenShared(home)
+	}
+	return journal.Open(home)
+}
+
+func loadBatteries(ctx context.Context, opts Options, base Base) (Batteries, error) {
+	extra := Batteries{}
+	if opts.Batteries != nil {
+		loaded, err := opts.Batteries(ctx, base)
+		if err != nil {
+			return Batteries{}, err
+		}
+		extra = loaded
+	}
+	if extra.Tools == nil {
+		extra.Tools = func(context.Context, string) []tool.Tool { return nil }
+	}
+	if extra.Runner == nil {
+		extra.Runner = base.Local
+	}
+	if extra.Attach == nil {
+		extra.Attach = func(*agent.Host) {}
+	}
+	if extra.Close == nil {
+		extra.Close = func() error { return nil }
+	}
+	return extra, nil
+}
+
+func toolSet(cfg config.Config, extra func(ctx context.Context, cwd string) []tool.Tool) agent.ToolSet {
+	return func(ctx context.Context, modelID, cwd string) ([]tool.Tool, error) {
+		tools := []tool.Tool{
+			read.New(), search.New(), patch.New(cfg.EditStyle.EditStyle(modelID)), rewrite.New(),
+			exec.New(), todo.New(), webfetch.New(),
+		}
+		return append(tools, extra(ctx, cwd)...), nil
+	}
+}
+
+func newShellEnv(cfg config.Config) *runner.ShellEnvSnapshot {
+	if cfg.ShellEnv != config.ShellEnvSnapshot {
+		return nil
+	}
+	return runner.NewShellEnvSnapshot(os.Getenv("SHELL"), auth.SecretEnvironmentName)
+}
+
+func runnerFactory(home string, shellEnv *runner.ShellEnvSnapshot) agent.RunnerFactory {
+	return func(_ context.Context, threadID, name string) (runner.Runner, error) {
+		if name != "" && name != "local" {
+			return nil, fmt.Errorf("runner %q is not available in this build", name)
+		}
+		return runner.NewLocalWithShellEnv(filepath.Join(home, "sessions", threadID, "runs"), shellEnv)
+	}
+}
+
+type advisors struct {
+	registry *advisor.Registry
+	log      *slog.Logger
+	host     atomic.Pointer[agent.Host]
+}
+
+func newAdvisors(registry *advisor.Registry, logger *slog.Logger) *advisors {
+	if registry == nil {
+		registry = advisor.NewRegistry()
+	}
+	return &advisors{registry: registry, log: cmp.Or(logger, slog.Default())}
+}
+
+func (a *advisors) attach(child *agent.Thread, req agent.TaskRequest) {
+	host := a.host.Load()
+	if host == nil {
+		return
+	}
+	attach := a.registry.Attach
+	if req.Advisor {
+		attach = a.registry.AttachChild
+	}
+	if _, err := attach(context.Background(), host, child); err != nil {
+		a.log.Error("advisor: attach", "thread", child.ID(), "error", err)
+	}
+}
+
+func (a *advisors) close() error { return a.registry.Close() }

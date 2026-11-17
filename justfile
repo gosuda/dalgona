@@ -39,8 +39,8 @@ hashline-model:
     fi
     out=$(mktemp)
     trap 'rm -f "$out"' EXIT
-    uv run --no-project --python 3.15 docs/spec/hashline/verify_model.py > "$out"
-    cmp "$out" docs/spec/hashline/verification.json
+    uv run --no-project --python 3.15 docs/dal/spec/hashline/verify_model.py > "$out"
+    cmp "$out" docs/dal/spec/hashline/verification.json
 
 spec-style:
     #!/usr/bin/env bash
@@ -56,13 +56,17 @@ spec-style:
         echo "spec-style: skipped, uv is not installed"
         exit 0
     fi
-    uv run --no-project --python 3.15 docs/spec/check_style.py docs/spec
-    uv run --no-project --python 3.15 docs/spec/check_style_test.py
+    uv run --no-project --python 3.15 docs/dal/spec/check_style.py docs/dal/spec
+    uv run --no-project --python 3.15 docs/dal/spec/check_style.py docs/dalgona/spec
+    uv run --no-project --python 3.15 docs/dal/spec/check_style_test.py
+
+docs-links:
+    python3 docs/check_links.py
 
 web:
     pnpm -C web install --frozen-lockfile
     pnpm -C web build
-    touch internal/webui/dist/.gitkeep
+    touch internal/dalgona/webui/dist/.gitkeep
 
 web-check:
     pnpm -C web exec biome ci
@@ -147,11 +151,12 @@ box-image: box-dist
 
 verify-go: fmt-check vet lint test vuln
 
-verify-shared: hashline-model spec-style web-check cf-check
+verify-shared: hashline-model spec-style docs-links web-check cf-check
 
 verify: verify-go verify-shared
 
-live_root := "/tmp/dg"
+live_root_dal := "/tmp/dg-dal"
+live_root_dalgona := "/tmp/dg-dalgona"
 
 omp-tui-install:
     #!/usr/bin/env bash
@@ -166,20 +171,20 @@ omp-tui-install:
     (cd .omp/tools && bun install --frozen-lockfile)
     echo "omp-tui-install: run /restart in omp to load the tui tool"
 
-live-up:
+live-up-dal:
     #!/usr/bin/env bash
     set -euo pipefail
-    w={{live_root}}
+    w={{live_root_dal}}
     if [ -e "$w/llmstub.pid" ] && kill -0 "$(cat "$w/llmstub.pid")" 2>/dev/null; then
-        echo "live-up: $w is in use; run just live-down" >&2; exit 1
+        echo "live-up-dal: $w is in use; run just live-down-dal" >&2; exit 1
     fi
-    git config --global user.name >/dev/null 2>&1 || { echo "live-up: git global user.name is not set; run git config --global user.name <name>" >&2; exit 1; }
-    git config --global user.email >/dev/null 2>&1 || { echo "live-up: git global user.email is not set; run git config --global user.email <email>" >&2; exit 1; }
+    git config --global user.name >/dev/null 2>&1 || { echo "live-up-dal: git global user.name is not set; run git config --global user.name <name>" >&2; exit 1; }
+    git config --global user.email >/dev/null 2>&1 || { echo "live-up-dal: git global user.email is not set; run git config --global user.email <email>" >&2; exit 1; }
     rm -rf "$w"
-    mkdir -p "$w/bin" "$w/dal" "$w/dgh" "$w/fakehome" "$w/ws"
-    chmod 700 "$w/dal" "$w/dgh"
-    go build -trimpath -o "$w/bin/" ./cmd/dal ./cmd/dalgona ./internal/llmstub/cmd/llmstub
-    cp -R internal/llmstub/testdata/workspace/. "$w/ws/"
+    mkdir -p "$w/bin" "$w/dal" "$w/fakehome" "$w/ws"
+    chmod 700 "$w/dal"
+    go build -trimpath -o "$w/bin/" ./cmd/dal ./internal/llmstub/cmd/llmstub
+    cp -R internal/dal/e2e/testdata/workspace/. "$w/ws/"
     git -C "$w/ws" init -q
     git -C "$w/ws" add -A
     git -C "$w/ws" commit -qm seed
@@ -187,30 +192,73 @@ live-up:
         'base_url = "http://127.0.0.1:18080/v1"' 'api_key_env = "LOCAL_LLM_KEY"' \
         '' '[providers.openai]' 'base_url = "http://127.0.0.1:18080/v1"' \
         '[models."local/qwen-test"]' 'context_window = 32000' > "$w/dal/config.toml"
-    cp "$w/dal/config.toml" "$w/dgh/config.toml"
-    printf '%s\n' '' '[edit_review]' 'feedback = ["lost_code"]' >> "$w/dgh/config.toml"
-    printf 'export HOME=%s DAL_HOME=%s DALGONA_HOME=%s LOCAL_LLM_KEY=sk-live-test\n' "$w/fakehome" "$w/dal" "$w/dgh" > "$w/env"
-    base=(env -i PATH="$PATH" HOME="$w/fakehome" DAL_HOME="$w/dal" DALGONA_HOME="$w/dgh" LOCAL_LLM_KEY=sk-live-test)
-    nohup "$w/bin/llmstub" -listen 127.0.0.1:18080 -script internal/llmstub/testdata/live.json \
+    printf 'export HOME=%s DAL_HOME=%s LOCAL_LLM_KEY=sk-live-test\n' "$w/fakehome" "$w/dal" > "$w/env"
+    nohup "$w/bin/llmstub" -listen 127.0.0.1:18080 -script internal/dal/e2e/testdata/live.json \
         -key sk-live-test -record "$w/requests.jsonl" >/dev/null 2>"$w/llmstub.log" &
     echo $! > "$w/llmstub.pid"
     for _ in $(seq 50); do grep -q '^llmstub: serving ' "$w/llmstub.log" && break; sleep 0.1; done
-    grep -qx 'llmstub: serving http://127.0.0.1:18080/v1' "$w/llmstub.log" || { echo "live-up: llmstub did not start; see $w/llmstub.log" >&2; exit 1; }
+    grep -qx 'llmstub: serving http://127.0.0.1:18080/v1' "$w/llmstub.log" || { echo "live-up-dal: llmstub did not start; see $w/llmstub.log" >&2; just live-down-dal; exit 1; }
+    echo "live-up-dal: env $w/env"
+
+live-up-dalgona:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    w={{live_root_dalgona}}
+    if [ -e "$w/llmstub.pid" ] && kill -0 "$(cat "$w/llmstub.pid")" 2>/dev/null; then
+        echo "live-up-dalgona: $w is in use; run just live-down-dalgona" >&2; exit 1
+    fi
+    git config --global user.name >/dev/null 2>&1 || { echo "live-up-dalgona: git global user.name is not set; run git config --global user.name <name>" >&2; exit 1; }
+    git config --global user.email >/dev/null 2>&1 || { echo "live-up-dalgona: git global user.email is not set; run git config --global user.email <email>" >&2; exit 1; }
+    rm -rf "$w"
+    mkdir -p "$w/bin" "$w/dalgona" "$w/fakehome" "$w/ws"
+    chmod 700 "$w/dalgona"
+    go build -trimpath -o "$w/bin/" ./cmd/dalgona ./internal/llmstub/cmd/llmstub
+    cp -R internal/dalgona/e2e/testdata/workspace/. "$w/ws/"
+    git -C "$w/ws" init -q
+    git -C "$w/ws" add -A
+    git -C "$w/ws" commit -qm seed
+    printf '%s\n' 'model = "local/qwen-test"' 'approval = "ask"' 'edit_style = "apply_patch"' '' '[approval_decider]' 'decider = "llm:local/qwen-test"' '' '[providers.local]' \
+        'base_url = "http://127.0.0.1:18081/v1"' 'api_key_env = "LOCAL_LLM_KEY"' \
+        '' '[providers.openai]' 'base_url = "http://127.0.0.1:18081/v1"' \
+        '[models."local/qwen-test"]' 'context_window = 32000' > "$w/dalgona/config.toml"
+    printf '%s\n' '' '[edit_review]' 'feedback = ["lost_code"]' >> "$w/dalgona/config.toml"
+    printf 'export HOME=%s DAL_HOME=%s DALGONA_HOME=%s LOCAL_LLM_KEY=sk-live-test\n' "$w/fakehome" "$w/dalgona" "$w/dalgona" > "$w/env"
+    base=(env -i PATH="$PATH" HOME="$w/fakehome" DAL_HOME="$w/dalgona" DALGONA_HOME="$w/dalgona" LOCAL_LLM_KEY=sk-live-test)
+    nohup "$w/bin/llmstub" -listen 127.0.0.1:18081 -script internal/dalgona/e2e/testdata/live.json \
+        -key sk-live-test -record "$w/requests.jsonl" >/dev/null 2>"$w/llmstub.log" &
+    echo $! > "$w/llmstub.pid"
+    for _ in $(seq 50); do grep -q '^llmstub: serving ' "$w/llmstub.log" && break; sleep 0.1; done
+    grep -qx 'llmstub: serving http://127.0.0.1:18081/v1' "$w/llmstub.log" || { echo "live-up-dalgona: llmstub did not start; see $w/llmstub.log" >&2; just live-down-dalgona; exit 1; }
     (cd "$w/ws" && exec "${base[@]}" "$w/bin/dalgona" daemon >/dev/null 2>"$w/daemon.stderr") &
     echo $! > "$w/daemon.pid"
-    for _ in $(seq 50); do test -S "$w/dgh/dalgona.sock" && break; sleep 0.1; done
-    test -S "$w/dgh/dalgona.sock" || { echo "live-up: daemon did not start; see $w/daemon.stderr" >&2; exit 1; }
+    for _ in $(seq 50); do test -S "$w/dalgona/dalgona.sock" && break; sleep 0.1; done
+    test -S "$w/dalgona/dalgona.sock" || { echo "live-up-dalgona: daemon did not start; see $w/daemon.stderr" >&2; just live-down-dalgona; exit 1; }
     (cd "$w/ws" && exec "${base[@]}" "$w/bin/dalgona" web >/dev/null 2>"$w/web.log") &
     echo $! > "$w/web.pid"
     re='^http://127\.0\.0\.1:[0-9]+/#token=[A-Za-z0-9_-]+$'
     for _ in $(seq 100); do grep -Eq "$re" "$w/web.log" && break; sleep 0.1; done
-    grep -E "$re" "$w/web.log" > "$w/web.url" || { echo "live-up: web did not start; see $w/web.log" >&2; exit 1; }
-    echo "live-up: env $w/env; web $(cat "$w/web.url")"
+    grep -E "$re" "$w/web.log" > "$w/web.url" || { echo "live-up-dalgona: web did not start; see $w/web.log" >&2; just live-down-dalgona; exit 1; }
+    echo "live-up-dalgona: env $w/env; web $(cat "$w/web.url")"
 
-live-down:
+live-down-dal:
     #!/usr/bin/env bash
     set -uo pipefail
-    w={{live_root}}
+    w={{live_root_dal}}
+    status=0
+    for name in llmstub; do
+        f="$w/$name.pid"; [ -e "$f" ] || continue
+        pid=$(cat "$f")
+        cmd=$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" || true)
+        case "$cmd" in "$w/bin/"*) kill -TERM "$pid" ;; *) rm -f "$f"; continue ;; esac
+        for _ in $(seq 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+        if kill -0 "$pid" 2>/dev/null; then echo "live-down-dal: $name pid $pid still running after 6 s" >&2; status=1; else rm -f "$f"; fi
+    done
+    exit $status
+
+live-down-dalgona:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    w={{live_root_dalgona}}
     status=0
     for name in web daemon llmstub; do
         f="$w/$name.pid"; [ -e "$f" ] || continue
@@ -218,35 +266,51 @@ live-down:
         cmd=$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" || true)
         case "$cmd" in "$w/bin/"*) kill -TERM "$pid" ;; *) rm -f "$f"; continue ;; esac
         for _ in $(seq 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-        if kill -0 "$pid" 2>/dev/null; then echo "live-down: $name pid $pid still running after 6 s" >&2; status=1; else rm -f "$f"; fi
+        if kill -0 "$pid" 2>/dev/null; then echo "live-down-dalgona: $name pid $pid still running after 6 s" >&2; status=1; else rm -f "$f"; fi
     done
     pkill -TERM -x -f "$w/bin/dalgona daemon" || true
     tmux -L dglive kill-server 2>/dev/null || true
-    for _ in $(seq 50); do test -S "$w/dgh/dalgona.sock" || break; sleep 0.1; done
-    if test -S "$w/dgh/dalgona.sock"; then echo "live-down: $w/dgh/dalgona.sock remains" >&2; status=1; fi
+    for _ in $(seq 50); do test -S "$w/dalgona/dalgona.sock" || break; sleep 0.1; done
+    if test -S "$w/dalgona/dalgona.sock"; then echo "live-down-dalgona: $w/dalgona/dalgona.sock remains" >&2; status=1; fi
     exit $status
 
-live-check:
+live-check-dal:
     #!/usr/bin/env bash
     set -euo pipefail
-    w={{live_root}}
+    w={{live_root_dal}}
     if [ -e "$w/llmstub.pid" ] && kill -0 "$(cat "$w/llmstub.pid")" 2>/dev/null; then
-        echo "live-check: $w is in use; run just live-down" >&2; exit 1
+        echo "live-check-dal: $w is in use; run just live-down-dal" >&2; exit 1
     fi
-    trap 'just live-down' EXIT
+    trap 'just live-down-dal' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    just live-up
+    just live-up-dal
     source "$w/env"
     (cd "$w/ws" && "$w/bin/dal" -p "read a.txt" --json </dev/null) > "$w/check-dal.json"
+    jq -e -s 'length >= 2 and all(.[]; .schemaVersion == 1) and (.[-1] | .type == "result" and .status == "completed" and .stop_reason == "stop") and all(.[:-1][]; .type == "item" and (.item | type == "object"))' "$w/check-dal.json" >/dev/null
+    test "$(grep -c '"turn":"t-read-2"' "$w/requests.jsonl")" = 1
+    test "$(grep -c 'hello from a.txt' "$w/requests.jsonl")" -ge 1
+    ! grep -q '"turn":"unmatched"' "$w/requests.jsonl"
+    echo "live-check-dal: ok"
+
+live-check-dalgona:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    w={{live_root_dalgona}}
+    if [ -e "$w/llmstub.pid" ] && kill -0 "$(cat "$w/llmstub.pid")" 2>/dev/null; then
+        echo "live-check-dalgona: $w is in use; run just live-down-dalgona" >&2; exit 1
+    fi
+    trap 'just live-down-dalgona' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    just live-up-dalgona
+    source "$w/env"
     (cd "$w/ws" && "$w/bin/dalgona" -p "read a.txt" --json </dev/null) > "$w/check-dalgona.json"
-    for result in "$w/check-dal.json" "$w/check-dalgona.json"; do
-        jq -e -s 'length >= 2 and all(.[]; .schemaVersion == 1) and (.[-1] | .type == "result" and .status == "completed" and .stop_reason == "stop") and all(.[:-1][]; .type == "item" and (.item | type == "object"))' "$result" >/dev/null
-    done
-    test "$(grep -c '"turn":"t-read-2"' "$w/requests.jsonl")" = 2
-    test "$(grep -c 'hello from a.txt' "$w/requests.jsonl")" -ge 2
+    jq -e -s 'length >= 2 and all(.[]; .schemaVersion == 1) and (.[-1] | .type == "result" and .status == "completed" and .stop_reason == "stop") and all(.[:-1][]; .type == "item" and (.item | type == "object"))' "$w/check-dalgona.json" >/dev/null
+    test "$(grep -c '"turn":"t-read-2"' "$w/requests.jsonl")" = 1
+    test "$(grep -c 'hello from a.txt' "$w/requests.jsonl")" -ge 1
     ! grep -q '"turn":"unmatched"' "$w/requests.jsonl"
     base=$(sed 's|/#token=.*||' "$w/web.url")
     test "$(curl -s -o /dev/null -w '%{http_code}' "$base/rpc")" = 401
-    test "$(curl -s -o /dev/null -w '%{http_code}' "$base/")" = 200 || { echo "live-check: web UI not built; run just web" >&2; exit 1; }
-    echo "live-check: ok"
+    test "$(curl -s -o /dev/null -w '%{http_code}' "$base/")" = 200 || { echo "live-check-dalgona: web UI not built; run just web" >&2; exit 1; }
+    echo "live-check-dalgona: ok"

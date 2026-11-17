@@ -12,11 +12,11 @@ import (
 	"net"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/app/battery"
-	"github.com/gosuda/dalgona/internal/auth"
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/remote"
-	"github.com/gosuda/dalgona/internal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dalgona/battery"
+	"github.com/gosuda/dalgona/internal/dalgona/remote"
 )
 
 const (
@@ -149,7 +149,7 @@ func callRemote(ctx context.Context, std stdio, method string, params any) int {
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	client := rpc.Dial(conn, quietClient{})
+	client := rpc.Dial(ctx, conn, quietClient{})
 	defer func() { _ = client.Close() }()
 	var initialized rpc.InitializeResult
 	if err := client.Initialize(ctx, rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: binary, Version: config.Version()}}, &initialized); err != nil {

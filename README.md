@@ -5,7 +5,7 @@ Terminal coding agents, with or without a daemon.
 Use `dal` to work with a coding agent in your terminal without running a daemon. Choose `dalgona` when you also need a web interface, remote execution, MCP tools, or durable workflows. Both commands use the same agent core and keep their own configuration and threads.
 
 - **Product choice:** `dal` runs the host in process. `dalgona` connects clients to a per-user daemon.
-- **Recorded work:** threads use an append-only JSONL journal with a Pebble mirror. [Recovery](docs/spec/recovery.md) uses recorded tool outcomes after an interruption.
+- **Recorded work:** threads use an append-only JSONL journal with a Pebble mirror. [Recovery](docs/dal/spec/recovery.md) uses recorded tool outcomes after an interruption.
 - **Execution choice:** `dalgona` can keep the orchestrator local or run its whole daemon in a remote box.
 
 A build from this checkout reports its development version:
@@ -59,7 +59,7 @@ In the terminal interface:
 3. Enter `/model` and choose an offered model.
 4. Type a task and press Enter.
 
-No default thread model is configured. An API-key provider such as `openai` or `anthropic` accepts its key in the sign-in panel. ChatGPT offers a browser link or a device code. Providers that need a shell sign-in show the command to run.
+No default thread model is configured. An API-key provider such as `openai` accepts its key in the sign-in panel. `anthropic` accepts its key there and also signs in with OAuth in a shell with `dal login anthropic`. ChatGPT offers a browser link or a device code. Providers that need a shell sign-in show the command to run.
 
 API-key providers also accept their provider environment variables.
 
@@ -74,7 +74,7 @@ It starts the per-user daemon when needed. Sign in and choose a model there too,
 ## Features
 
 - Work in the terminal with either product, or use `dalgona` in a browser.
-- Resume recorded threads and inspect their tool outcomes through the [journal and recovery contracts](docs/spec/recovery.md).
+- Resume recorded threads and inspect their tool outcomes through the [journal and recovery contracts](docs/dal/spec/recovery.md).
 - Choose human approval or automated decisions for actions.
 - Use an optional advisor to review a thread and send notes. The advisor does not approve actions.
 - Use `dalgona` for MCP tools, durable Starlark workflows, sandbox services, and Codex desktop integration.
@@ -84,7 +84,7 @@ It starts the per-user daemon when needed. Sign in and choose a model there too,
 
 ### Work in the terminal
 
-Use `/resume` to select a recorded thread and `/new` to start another. Press Esc twice to interrupt a turn. The [terminal contract](docs/spec/tui.md) lists the commands and keys.
+Use `/resume` to select a recorded thread and `/new` to start another. Press Esc twice to interrupt a turn. The [terminal contract](docs/dal/spec/tui.md) lists the commands and keys.
 
 Resume a thread by its identifier:
 
@@ -109,7 +109,7 @@ API-key providers can also use their provider environment variables. Use `dal lo
 dalgona service install
 ```
 
-Use `dalgona service uninstall` to remove login-time startup. The [daemon contract](docs/spec/daemon.md) describes the platform service rules.
+Use `dalgona service uninstall` to remove login-time startup. The [daemon contract](docs/dalgona/spec/daemon.md) describes the platform service rules.
 
 ### Open the web interface
 
@@ -119,7 +119,7 @@ After building the web assets and reinstalling the binaries, run:
 dalgona web
 ```
 
-Open the URL that the server prints. Configure its listener, token, and TLS files in `[web]`, not command-line flags. See the [web access rules](docs/spec/web.md).
+Open the URL that the server prints. Configure its listener, token, and TLS files in `[web]`, not command-line flags. See the [web access rules](docs/dalgona/spec/web.md).
 
 ### Connect the Codex desktop app
 
@@ -129,7 +129,7 @@ dalgona codex install
 
 Restart the desktop app after installation. The installer records prior settings before changing the user-level executable override. It does not patch the signed app bundle.
 
-Use `dalgona codex status` to inspect the override and `dalgona codex uninstall` to restore prior settings. See [Codex app integration](docs/spec/codex-app.md).
+Use `dalgona codex status` to inspect the override and `dalgona codex uninstall` to restore prior settings. See [Codex app integration](docs/dalgona/spec/codex-app.md).
 
 `dalgona app-server` bridges the desktop protocol. It uses standard input and output by default and connects through the same daemon protocol as the terminal client.
 
@@ -148,7 +148,7 @@ The runner uploads the workspace, records its baseline, and runs tools and subag
 
 Use `dalgona pull <thread-id>` to apply the box's changes locally. In a Git work tree, pull uses `git apply --3way`. Conflicts return exit code 1 and list affected files. Outside a Git work tree, pull uses `git apply`.
 
-`dalgona runner gc` lists unused boxes without deleting them. Use `dalgona runner gc --yes` to delete them. The [runner contract](docs/spec/runners.md) lists supported services and persistence rules.
+`dalgona runner gc` lists unused boxes without deleting them. Use `dalgona runner gc --yes` to delete them. The [runner contract](docs/dalgona/spec/runners.md) lists supported services and persistence rules.
 
 ### Run the whole daemon in a box
 
@@ -161,7 +161,7 @@ dalgona cloud pull <name>
 dalgona cloud down <name>
 ```
 
-Whole-daemon mode accepts the services in [runners.md](docs/spec/runners.md) except Cloudflare. Cloudflare cannot keep a durable daemon home across container stops.
+Whole-daemon mode accepts the services in [runners.md](docs/dalgona/spec/runners.md) except Cloudflare. Cloudflare cannot keep a durable daemon home across container stops.
 
 `cloud up` copies the whole local `auth.json`, including stored API keys, only with `--copy-auth`. Without that flag, use `dalgona --remote <name> login` for API-key providers and `chatgpt`. For `antigravity`, `cursor`, or `devin`, sign in locally, then run `dalgona cloud up <name> --copy-auth`.
 
@@ -169,7 +169,7 @@ Remote service and box identifiers live in `[remotes.<name>]` in `settings.toml`
 
 > `cloud down` destroys the box and every thread in it after confirmation. Pull any changes you need first. Its `--yes` flag skips confirmation.
 
-See the [sandbox service decision](docs/decisions/sandbox-services.md) and [exec-server contract](docs/spec/exec-server.md) for transport and persistence details.
+See the [sandbox service decision](docs/dalgona/decisions/sandbox-services.md) and [exec-server contract](docs/dal/spec/exec-server.md) for transport and persistence details.
 
 ### Use an outer sandbox
 
@@ -179,7 +179,7 @@ Windows has no harness confinement. Linux has none when Landlock is unavailable.
 
 On Linux, the daemon refuses peers with `no_new_privs` unless it has that mark itself. On macOS, the harness profile denies access to the daemon socket. A daemon started with `no_new_privs` warns that sandboxed commands can still reach it.
 
-A remote box supplies the sandbox instead of the local write policy. See [sandbox.md](docs/spec/sandbox.md) for limits and fallback rules.
+A remote box supplies the sandbox instead of the local write policy. See [sandbox.md](docs/dal/spec/sandbox.md) for limits and fallback rules.
 
 ## Commands and options
 
@@ -249,7 +249,7 @@ Put user configuration in `<home>/config.toml`. The program stores mutable setti
 
 Settings override configuration, which overrides defaults. Client flags such as `-m`, `--approval`, and `--sandbox` set thread options. Dalgona's `--remote` overrides the configured `remote`. Unknown configuration keys fail loading.
 
-On Windows, each host protects its home for the current user, SYSTEM, and Administrators. Dalgona resets that access list on the home and its contents at daemon start. Its client refuses to start when it cannot protect the home. See [configuration](docs/spec/config.md) and [daemon.md](docs/spec/daemon.md) for the exact rules.
+On Windows, each host protects its home for the current user, SYSTEM, and Administrators. Dalgona resets that access list on the home and its contents at daemon start. Its client refuses to start when it cannot protect the home. See [configuration](docs/dal/spec/config.md) and [daemon.md](docs/dalgona/spec/daemon.md) for the exact rules.
 
 ### Set approval and review
 
@@ -273,9 +273,9 @@ enabled = false
 
 Use `[approval_decider]`, not `[approval]`. TOML cannot use `approval` as both a scalar and a table.
 
-Set `[advisor] enabled = true` to request transcript reviews. Use `[advisors.<name>]` for named reviewers. There is no `--advisor` flag. The [advisor contract](docs/spec/advisor.md) defines model selection, timing, and note delivery.
+Set `[advisor] enabled = true` to request transcript reviews. Use `[advisors.<name>]` for named reviewers. There is no `--advisor` flag. The [advisor contract](docs/dal/spec/advisor.md) defines model selection, timing, and note delivery.
 
-Dalgona also offers opt-in [edit review](docs/spec/edit-review.md). It sends masked edit diffs to the review model. The feature is off by default.
+Dalgona also offers opt-in [edit review](docs/dal/spec/edit-review.md). It sends masked edit diffs to the review model. The feature is off by default.
 
 ### Configuration keys
 
@@ -304,7 +304,7 @@ Dalgona also offers opt-in [edit review](docs/spec/edit-review.md). It sends mas
 
 Both products default to `tool_mode = "eval-first"`. Use `"normal"` for the full tool list. Use `"eval-only"` for the restricted direct tool list. Dal rejects dalgona-only settings.
 
-See [config.md](docs/spec/config.md) for all settings, including verbosity and themes. The [Starlark contract](docs/spec/starlark.md) defines tool visibility and which calls need a direct user interaction.
+See [config.md](docs/dal/spec/config.md) for all settings, including verbosity and themes. The [Starlark contract](docs/dal/spec/starlark.md) defines tool visibility and which calls need a direct user interaction.
 
 ## Development
 
@@ -320,7 +320,7 @@ just verify
 
 `just verify` runs formatting checks, vet, lint, race-enabled tests, vulnerability checks, the hashline model, specification style, web checks, and Cloudflare checks.
 
-[CI](docs/spec/ci.md) runs the shared checks once, then the Go checks on Linux, macOS, and Windows with the same built web assets.
+[CI](docs/dal/spec/ci.md) runs the shared checks once, then the Go checks on Linux, macOS, and Windows with the same built web assets.
 
 Without `uv`, `hashline-model` and `spec-style` skip locally and fail when `CI=true`. A skipped check is not a pass.
 
@@ -339,7 +339,7 @@ Without `uv`, `hashline-model` and `spec-style` skip locally and fail when `CI=t
 
 Read [CONTRIBUTE.md](CONTRIBUTE.md) before changing code and [REVIEW.md](REVIEW.md) before reviewing it. [AGENTS.md](AGENTS.md) contains repository instructions for coding agents.
 
-The [documentation index](docs/README.md) links the specifications and decisions. Start with [journal](docs/spec/journal.md), [recovery](docs/spec/recovery.md), and [protocol](docs/spec/protocol.md) for the core contracts. [justfile](justfile) declares the checks.
+The [documentation index](docs/README.md) links the specifications and decisions. Start with [journal](docs/dal/spec/journal.md), [recovery](docs/dal/spec/recovery.md), and [protocol](docs/dal/spec/protocol.md) for the core contracts. [justfile](justfile) declares the checks.
 
 ## License
 

@@ -481,7 +481,7 @@ describe("edit review validation", () => {
 					itemId: "call-7",
 					verdict: "flagged",
 					summary: "Flagged: removed code",
-					paths: ["internal/model/retry.go"],
+					paths: ["internal/dal/model/retry.go"],
 				},
 			}),
 		).toEqual({

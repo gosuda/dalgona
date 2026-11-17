@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/gosuda/dalgona/internal/app"
-	"github.com/gosuda/dalgona/internal/codexapp"
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/daemon"
-	"github.com/gosuda/dalgona/internal/webui"
+	"github.com/gosuda/dalgona/internal/dal/app"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dalgona/codexapp"
+	"github.com/gosuda/dalgona/internal/dalgona/daemon"
+	"github.com/gosuda/dalgona/internal/dalgona/webui"
 )
 
 func loadConfig() (config.Config, error) {

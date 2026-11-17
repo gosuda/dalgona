@@ -4,8 +4,8 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/app"
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/app"
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 func TestEvalBatteriesCarryOnlyTheScriptExtension(t *testing.T) {

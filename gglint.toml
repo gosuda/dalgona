@@ -4,14 +4,14 @@ paths = ['^cmd/dalgona/battery\.go$']
 rules = ["checklinkname"]
 text = '^remote symbol "fastrand64" not defined in package "runtime"$'
 
-# Native lint owns this required package-boundary directive.
 [[exclude]]
-paths = ['^internal/tool/search/build\.go$']
+# Native lint owns this required package-boundary directive.
+paths = ['^internal/dal/tool/search/build\.go$']
 rules = ["nolint"]
 text = '^unknown nolint rule "depguard"$'
 
 # Native lint checks these gosec directives; gglint omits their rules.
 [[exclude]]
-paths = ['^internal/(daemon/(run|socketperm_test)|ratchet/setup|rpc/serve_fuzzy|script/stdlib/random|tool/search/manifest|webui/webui_test)\.go$']
+paths = ['^internal/(dalgona/(daemon/(run|socketperm_test)|ratchet/setup|webui/webui_test)|dal/(rpc/serve_fuzzy|script/stdlib/random|tool/search/manifest))\.go$']
 rules = ["nolint"]
 text = '^unused nolint directive for gosec$'

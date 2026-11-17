@@ -12,10 +12,12 @@
   ],
   "durable_objects": {
     "bindings": [
-      { "name": "BOX", "class_name": "Box" }
+      { "name": "BOX", "class_name": "Box" },
+      { "name": "DALTOKI_RELAY", "class_name": "DaltokiRelay" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["Box"] }
+    { "tag": "v1", "new_sqlite_classes": ["Box"] },
+    { "tag": "v2", "new_classes": ["DaltokiRelay"] }
   ]
 }

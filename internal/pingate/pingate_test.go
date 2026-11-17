@@ -606,7 +606,7 @@ func repoRoot(t *testing.T) string {
 func TestDependencyTableMatchesGoMod(t *testing.T) {
 	root := repoRoot(t)
 	goMod := readText(t, filepath.Join(root, "go.mod"))
-	doc := readText(t, filepath.Join(root, "docs", "decisions", "dependencies.md"))
+	doc := readText(t, filepath.Join(root, "docs", "dal", "decisions", "dependencies.md"))
 	for _, f := range check(goMod, doc) {
 		t.Error(f.String())
 	}

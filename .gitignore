@@ -200,7 +200,7 @@ XTerm*
 /.ruff_cache/
 /bin/
 /dist/
-!/internal/webui/dist/
-/internal/webui/dist/*
-!/internal/webui/dist/.gitkeep
+!/internal/dalgona/webui/dist/
+/internal/dalgona/webui/dist/*
+!/internal/dalgona/webui/dist/.gitkeep
 /deploy/cloudflare/node_modules/

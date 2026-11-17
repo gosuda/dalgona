@@ -16,16 +16,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/agent"
-	"github.com/gosuda/dalgona/internal/agent/advisor"
-	"github.com/gosuda/dalgona/internal/app"
-	"github.com/gosuda/dalgona/internal/app/battery"
-	"github.com/gosuda/dalgona/internal/auth"
-	"github.com/gosuda/dalgona/internal/config"
-	"github.com/gosuda/dalgona/internal/daemon"
-	"github.com/gosuda/dalgona/internal/discovery"
-	"github.com/gosuda/dalgona/internal/rpc"
-	"github.com/gosuda/dalgona/internal/runner"
+	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/agent/advisor"
+	"github.com/gosuda/dalgona/internal/dal/app"
+	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dalgona/battery"
+	"github.com/gosuda/dalgona/internal/dalgona/daemon"
+	"github.com/gosuda/dalgona/internal/dalgona/discovery"
 )
 
 func executable() (string, error) {
@@ -137,7 +137,7 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 		options := rpc.ServeOptions{Extensions: extensions, BeforeArchive: batteries.Archive, Advisors: advisors}
 		return rpc.ServeWith(ctx, conn, host, options)
 	}
-	if err := daemon.Run(ctx, cfg.Home, newHost, serve); err != nil {
+	if err := daemon.Run(ctx, cfg.Home, newHost, serve, batteries.AfterRecover); err != nil {
 		return fail(std, 1, err)
 	}
 	return 0

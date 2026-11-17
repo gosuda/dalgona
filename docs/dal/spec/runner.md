@@ -1,0 +1,175 @@
+# Local runner
+
+This document governs the local runner in package `internal/dal/runner`.
+
+The local runner MUST store one call directory for each call. The call directory MUST be `<dir>/<call_id>/`. It MUST contain the files `out`, `pid`, and `exit`. It MAY contain `pgid`, `cancel`, and `aborted`.
+
+Callers MUST escape a call id that contains `/`, such as a nested `<run>/<n>` cell call id, to a single path component before `Start`. A call id with `/` MUST NOT reach the runs directory.
+
+`Start` MUST fail with `runner: process id must be one path component` for a call id that contains `/`.
+
+The parent MUST start the shim detached. The invocation MUST be `<self> __shim --dir <call directory> -- argv...`. On Linux `<self>` MUST be `/proc/self/exe`, so the shim and the parent are one build when an upgrade replaces the file at the start path. On macOS and Windows `<self>` MUST be `os.Executable()`. The runner passes writable roots to the shim in `DALGONA_SANDBOX_ROOTS`. The value is an internal format between the parent and the shim of one build. On Unix the parent MUST start the shim with `Setsid`. On Windows the parent MUST start the shim with `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`.
+
+`ProcessSpec.Argv[0]` equal to `@self` MUST resolve to the parent build: `/proc/self/exe` on Linux and `os.Executable()` on macOS and Windows. On a remote exec server it MUST resolve to the exec-server binary path.
+
+`Start` MUST check `ProcessSpec.Argv` with the process-kill guard before it creates a call directory. A refused `Start` MUST NOT create a call directory. It MUST NOT start the shim. `Local` MUST hold `protectedPIDs`, the daemon process id and its parent process id. `NewLocal` MUST set them to the current process id and its parent process id.
+
+`CheckProcessKillGuard(argv, daemonPID, parentPID)` MUST return nil for empty `argv`. It MUST return nil for a command that signals no protected process. When it refuses a command, it MUST return an error that wraps `ErrProcessKillGuard`.
+
+The guard MUST read the command in `argv`. For a shell call with `-c`, it MUST read the command string after the `-c` flag. It MUST cut the string with `shellargs.Split` and cut each part with `shellargs.Tokens`. It MUST remove leading assignments and wrappers with `shellargs.StripWrappers`. The runner MUST NOT import `internal/dal/agent/rules`.
+
+The guard MUST also read these forms inside a command string:
+
+- A `bash`, `sh`, `zsh`, `dash`, `ksh`, `ash`, `mksh`, or `fish` call with `-c`.
+- An `eval` call.
+- A command substitution `$(...)` or a backtick pair outside single quotes.
+- The command that `xargs` runs.
+- Each action that follows `-exec`, `-execdir`, `-ok`, or `-okdir` in a `find` call.
+
+The guard MUST stop at eight nested levels. It MUST refuse a command that nests deeper.
+
+The guard MUST refuse a `kill` command in each of these cases:
+
+- The command has no PID operand.
+- A PID operand is not a plain decimal number, such as `$PPID`, `$$`, `$(...)`, a backtick pair, or `%1`.
+- A PID operand is zero, negative, or above 2147483647.
+- A PID operand names the daemon or its parent.
+
+The guard MUST read signal options separately from operands. The options are `-s SIG`, `-n NUM`, `-SIG`, `--signal=SIG`, and `--`. The guard MUST allow `kill -l` and `kill --help`. It MUST allow other positive PIDs, including `kill -0 <pid>`.
+
+The guard MUST refuse a `pkill` or `killall` command in each of these cases:
+
+- A pattern or name matches `dal`, `dalgona`, or the running binary name.
+- A pattern or name matches the process name or command line of the daemon or its parent. The guard reads them from `/proc` on Linux only.
+- A pattern is not a valid regular expression.
+- The command has no pattern, so it selects processes by attribute only.
+- The command inverts the match with `-v`.
+
+The guard MUST refuse a `kill`, `pkill`, or `killall` command that `xargs` or `find` supplies with its target. The guard cannot read that target. The guard MUST refuse a wrapper call that `shellargs.StripWrappers` cannot unwrap when any word of the call contains `kill`. The guard MUST refuse a part with unbalanced quotes when the part contains `kill`.
+
+Echoed text is data. A command such as `echo kill -9 4242` MUST pass the guard.
+
+The refusal text of the `exec` tool MUST be `refused: process-kill guard prevents signaling daemon or parent`. The tool MUST return that text with `ok` false and no exit code when `Start` returns an error that wraps `ErrProcessKillGuard`.
+
+The guard is a best-effort check. It is not confinement. These cases pass the guard:
+
+- A program that signals through a system call.
+- A script file that holds the kill command.
+- A shell that reads its commands from standard input.
+- A variable that holds a command name.
+- A wrapper that is not in the `shellargs.StripWrappers` list.
+
+`Start` MUST be idempotent. An existing call directory for the same call id MUST make `Start` return success. It MUST NOT start a second process. When the shim does not start, `Start` MUST remove the call directory, so a retry with the same call id starts the command. When `Start` fails after the shim starts, it MUST record `cancel` with `KILL`, stop the shim, and stop the recorded command group. When it confirms that the command group stopped, it MUST remove the call directory, so a retry with the same call id starts the command. When it cannot confirm that the command group stopped, it MUST keep the call directory and record `aborted` in it. A retry with the same call id MUST NOT start the command again. The next `Start` with that call id MUST fail with an error that names the call id and the kept directory.
+
+The shim MUST write `pid` before it starts the command. `pid` MUST store the process id and the process start time. Recovery and `Read` MUST accept a process only when both values match. A recycled process id MUST NOT count as the shim. `Start` MUST write `pid` before it returns. The parent MUST write the same values as the shim. On Windows, a write of at most 4 KiB MAY keep the existing regular file. It MAY do so only when the staged bytes and writable state equal that file. On Windows, a file replace that fails with a sharing violation or access denied MUST wait and retry for up to one second. After that second, it MUST fail. The first `Read` after `Start` MUST report a live process when no `exit` exists.
+
+The shim MUST start the command in a new process group on Unix. It MUST record the group id in `pgid`. A group whose members are all zombies MUST count as stopped. On Windows it MUST assign the command to a named job object. On Windows it MUST start the command suspended. It MUST assign the suspended command to the job object. It MUST resume the command after the assignment. The shim MUST start the command on Windows with `CREATE_NO_WINDOW`. On Windows the shim MUST run a `cmd /C <command>` argv verbatim as `cmd /S /C "<command>"`. The `/S` switch MUST make `cmd` strip exactly the outer quote pair. The parent MUST reap the shim without waiting for the command in the caller.
+
+On Windows the shim MUST start a `workspace-write` command with the restricted token that [sandbox.md](sandbox.md) describes. The shim MUST create the token and apply the root grants before it starts the command. The shim MUST close the token handle when it assigns the started command to the job object. A failed process start leaves the handle open until the shim exits. The shim MUST NOT apply the token to a command in mode `off`.
+
+On every exit path the shim MUST stop the remaining command process group members. It MUST send `SIGTERM`, wait up to two seconds, and then send `SIGKILL` to the group. On Windows the shim MUST set the kill-on-close limit on the job object. Closing the job handle MUST let the system stop the remaining children in the job.
+
+The shim MUST bound output draining at one second after the command exits. A drain timeout MUST NOT replace the command's own exit code or signal.
+
+`Read` MUST take a byte offset into `out`. It MUST return `Data`, `Next`, `Exit`, `Alive`, and `Path`. `Data` MUST be the bytes from the offset. `Next` MUST be the next unread offset. `Exit` MUST be the exit record when `exit` exists, otherwise unset. `Alive` MUST be true only when the stored pid and start time still name the shim. `Path` MUST name the `out` file. `Read` MUST check `exit` before taking the final output snapshot, and when `exit` appears after an empty check it MUST drain `out` again. A terminal response MUST carry every byte written before the exit record, across as many pages as that takes. For a call directory that `Start` kept after an unconfirmed stop, `Read` MUST report the stored bytes. It MUST set `Alive` to false and MUST NOT return an `Exit` record.
+
+On Windows the runner MUST retry a call-directory file open that fails with a sharing violation. It MUST retry for up to one second and then fail. The rename that publishes the file can fail a concurrent open with a sharing violation. A sharing violation MUST NOT count as a missing file.
+
+`Signal` MUST accept `TERM` and `KILL`. The caller MUST send `TERM` before `KILL`. On timeout the caller MUST wait 5 s after `TERM`, then send `KILL`. On Unix `Signal` MUST target the command process group. It MUST NOT signal the shim. A descendant that calls `setsid` or `setpgid` leaves the command process group. Neither `Signal` nor the shim's group cleanup reaches it. This is a known limit, not a containment guarantee. On Windows `Signal` MUST kill the process tree through the job object. The shim MUST survive the signal and write the command exit record.
+
+`Signal` MUST return success when `exit` exists. Otherwise it MUST write the file `cancel` before it reads `pid` or `pgid`. `cancel` MUST hold `TERM` or `KILL`. The write MUST use a temporary file and rename, then sync the call directory. A missing call directory MUST make `Signal` return `ErrProcessNotFound`. When `pid` or `pgid` does not exist yet, `Signal` MUST return success and leave the request to the shim. When `pid` names a gone process and `exit` does not exist, `Signal` MUST return `ErrProcessNotFound`. A process group that no longer exists MUST count as success. On macOS a group whose members have all exited but are not yet reaped MUST report EPERM instead of ESRCH. The runner MUST treat that EPERM as success when the group holds no live member. The shim also signals the group when it reads `cancel`. A member can therefore be exiting when `Signal` sends its own signal. The runner MUST repeat the signal for up to two seconds while EPERM continues and a live member remains. It MUST return EPERM when a live member remains after that time.
+
+The shim MUST read `cancel` after it writes `pid` and before it starts the command. If `cancel` exists, the shim MUST NOT start the command. It MUST write `exit` as for a command that the recorded signal stopped. On Unix, `code` MUST be -1 and `signal` MUST be the signal text. On Windows, `code` MUST be 1 for `TERM` and 137 for `KILL`. The shim MUST read `cancel` again after it writes `pgid` and assigns the job object. If `cancel` exists, the shim MUST send the recorded signal to the command itself. If that fails, it MUST kill the command process. Each side writes its own file before it reads the file of the other side. So a terminate request that arrives before `pid` or `pgid` exists MUST still stop the command, and the command MUST NOT outlive the request. `cancel` is on disk, so the request MUST survive a daemon restart.
+
+A tool that signals a run MUST poll `Read` until `Exit` exists before the tool returns. The poll MUST stop at a bounded deadline. The tool MUST report a deadline timeout as an error. A `Read` error that the tool deadline causes MUST surface as the deadline timeout. A `Read` error from caller cancellation or I/O failure MUST surface unchanged.
+
+The poll MUST end when the caller's context ends, and it MUST return that context's cause. A tool's own timeout MUST NOT end the poll.
+
+After `KILL`, the tool MUST poll `Read` until `Exit` exists or the deadline passes. It MUST then return the error `exec: process did not report an exit after SIGKILL`.
+
+The shim MUST pause only when `DALGONA_SHIM_TEST_PAUSE` is set to `<phase>:<socket>`. At that phase it MUST connect to the Unix socket at `<socket>` and wait until the peer closes the connection. A failed connect or read MUST end the pause. Phase `pid` pauses before the shim writes `pid`. Phase `start` pauses after the first `cancel` check and before the command starts. Phase `group` pauses after the shim writes `pgid` and assigns the job object, and before the second `cancel` check. Only tests MAY set this variable.
+
+The shim MUST append stdout and stderr to `out`. After `out` reaches 1 GiB the shim MUST stop appending command bytes. It MUST append this line once, with a line break before and after it:
+
+```
+[dalgona: output beyond 1 GiB discarded]
+```
+
+The shim MUST keep draining both pipes. The command MUST keep running until it exits. The cap is a storage limit. It is not a process limit.
+
+The command environment MUST be the caller environment plus these defaults. Each default MUST apply only when that variable is unset:
+
+- `AI_AGENT=dalgona`
+- `CI=1`
+- `DEBIAN_FRONTEND=noninteractive`
+- `GIT_TERMINAL_PROMPT=0`
+- `GIT_EDITOR=:`
+- `GIT_SEQUENCE_EDITOR=:`
+- `GIT_MERGE_AUTOEDIT=no`
+- `GIT_PAGER=cat`
+- `PAGER=cat`
+- `EDITOR=:`
+- `npm_config_yes=true`
+- `PIP_NO_INPUT=1`
+
+### Login-shell environment
+
+Each host shares one login-shell snapshot across session runners and host commands.
+`NewLocal` inherits the daemon environment without capture.
+`NewLocalWithShellEnv` enables capture when its snapshot is not nil.
+The snapshot runs `$SHELL -lic env` with a five-second timeout and a 1 MiB output limit.
+An empty shell uses `/bin/sh` on Unix.
+Windows without a configured POSIX shell inherits the daemon environment.
+The cache holds only changed variables, excluding secret names and shell bookkeeping variables.
+Each resolution overlays this delta on a fresh daemon-environment copy.
+Explicit process variables override snapshot values.
+Host command overrides apply last, including deletions.
+Defaults fill only missing names.
+Startup-file creation, deletion, size changes, or modification-time changes refresh the cache.
+The fingerprint includes the shell path and HOME.
+Zsh checks `.zshenv`, `.zprofile`, `.zshrc`, and `.zlogin`.
+Bash checks `.bash_profile`, `.bash_login`, `.profile`, and `.bashrc`.
+Other shells check `.profile`.
+Refreshes run serially.
+Capture failures remain cached until the fingerprint changes.
+Failure, malformed records, overflow, or timeout discards the captured delta.
+The runner then returns a daemon-environment copy.
+Timeout cleanup sends TERM and allows two seconds before KILL.
+Warnings contain only a sanitized error class and optional exit status.
+`EnvResolved` prevents a second snapshot overlay after host overrides.
+Remote starts MUST reject this marker when true.
+Remote hosts capture their own environment.
+
+The shim MUST write `exit` by a temporary file and rename. `exit` MUST be JSON `{"code":N,"signal":"","ended_at":"RFC3339"}`. `code` MUST be the numeric exit code. `signal` MUST be the signal text, or empty. `ended_at` MUST be an RFC3339 timestamp.
+
+On Linux, if `DALGONA_SYNCFS` is set, the shim MUST call `syncfs` on that path after the `exit` rename. It MUST NOT call `syncfs` before the rename completes. On other systems the variable MUST have no effect.
+
+Crash recovery for class `Exec` MUST follow these rules. A recorded `exit` MUST complete the call with that output. A live shim MUST stay running until exit. A gone process with no `exit` MUST complete with the output so far and error `interrupted: the host restarted while this command ran; it may have partly run`. Recovery MUST set `recovered=interrupted`. Recovery MUST NOT start the command again.
+
+File methods MUST be `ReadFile`, `WriteFile`, `Stat`, `ReadDir`, and `Remove`. `WriteFile` MUST write a temporary file and rename it. The write MUST keep the requested permission mode. On Windows `WriteFile` MUST replace a read-only destination file. The replaced file MUST keep the read-only attribute. Each method MUST stop when the context is cancelled before the operation. `ReadFile` and `Stat` MUST NOT follow a symbolic link in the final path component. The call MUST fail instead.
+
+Output projection for `exec` MUST use `tool.Project` with `Keep` `Tail`. Output of 64 KiB or less MUST be returned whole. Larger output MUST keep the last 64 KiB. The cut MUST fall on a UTF-8 rune boundary. The projected text MUST end with this line, with `<N>` the total byte count and `<spill>` the `out` path:
+
+```
+[output truncated: <N> bytes total; full output: <spill>; page it with read offset/limit]
+```
+
+## Web fetch
+
+`web_fetch` is a read-class tool.
+Recovery replays the call and records `recovered=replayed`.
+The guarded HTTP client checks the destination and each redirect.
+HTML conversion makes no additional network requests.
+The response body limit applies before HTML parsing.
+The tool extracts the main article and converts it to Markdown.
+Links and image references resolve against the final response URL.
+Only HTTP and HTTPS references remain.
+The tool adds the article title when extracted headings do not contain it.
+Extraction and conversion failures return failed tool results.
+An executable script with fewer than 200 visible body characters identifies an application shell.
+Script, style, template, and noscript text do not count as visible text.
+An application shell returns `web_fetch: page needs a browser: <url>`.
+The error names the original requested URL.
+Plain text, JSON, and XML retain their bytes within the response limit.
+Binary responses return `[binary content <media_type>, <size> bytes]`.
+Truncation preserves UTF-8 boundaries and appends `\n[content truncated at <n> bytes]`.

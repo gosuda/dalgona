@@ -39,7 +39,7 @@ func (w *serveWatch) Write(p []byte) (int, error) {
 func TestRunRequiresKey(t *testing.T) {
 	t.Parallel()
 	var stderr bytes.Buffer
-	code := run(t.Context(), []string{"-script", "../../testdata/live.json"}, &stderr)
+	code := run(t.Context(), []string{"-script", "../../testdata/script.json"}, &stderr)
 	if code != 2 || !strings.Contains(stderr.String(), "-key") {
 		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
 	}
@@ -52,7 +52,7 @@ func TestRunServesAndStopsOnCancel(t *testing.T) {
 	watch := &serveWatch{found: make(chan string, 1)}
 	result := make(chan int, 1)
 	go func() {
-		result <- run(ctx, []string{"-listen", "127.0.0.1:0", "-script", "../../testdata/live.json", "-key", "dummy"}, watch)
+		result <- run(ctx, []string{"-listen", "127.0.0.1:0", "-script", "../../testdata/script.json", "-key", "dummy"}, watch)
 	}()
 	addr := awaitAddress(t, watch.found)
 	fetchModels(ctx, t, addr)

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file sets one visual system for both interfaces of dalgona: the terminal interface in `internal/tui` and the web interface in `web/`. Both interfaces use the same themes, colours, type, components, motion, words, icons and marks. Read this file before you add or change a colour, a type size, a component, a glyph, a motion, a status item or a mark.
+This file sets one visual system for both interfaces of dalgona: the terminal interface in `internal/dal/tui` and the web interface in `web/`. Both interfaces use the same themes, colours, type, components, motion, words, icons and marks. Read this file before you add or change a colour, a type size, a component, a glyph, a motion, a status item or a mark.
 
 To change the system, follow [How to change this file](#how-to-change-this-file).
 
@@ -117,12 +117,83 @@ Each non-colour token has one value. The browser reads these tokens from `web/sr
 |`motionBreath`|`--motion-breath`|1.8s|Period of the breathing dot; reduced-motion reset|
 |`motionQuick`|`--motion-quick`|120ms|Button colour and border transitions; reduced-motion reset|
 |`ease`|`--ease`|ease-out|Button transition timing|
+|`breathFloor`|`--breath-floor`|0.4|Breathing-dot opacity floor|
+|`leadingCardTitle`|`--leading-card-title`|32/26|Card title line height; unitless, ratio of the row's px values|
+|`leadingCommand`|`--leading-command`|38/30|Command line height; unitless, ratio of the row's px values|
+|`leadingDirectory`|`--leading-directory`|20/13|Working directory line height; unitless, ratio of the row's px values|
+|`leadingReason`|`--leading-reason`|23/15|Reason line height; unitless, ratio of the row's px values|
+|`leadingLabel`|`--leading-label`|16/12|Label line height; unitless, ratio of the row's px values|
+|`leadingQuestion`|`--leading-question`|27/22|Question title line height; unitless, ratio of the row's px values|
+|`leadingOption`|`--leading-option`|19/14|Option choice line height; unitless, ratio of the row's px values|
+|`leadingDescription`|`--leading-description`|17/13|Option description line height; unitless, ratio of the row's px values|
 
-A component row keeps its own literal value when no token has that value. So the 14 px labels of buttons and options, the weight 650 of buttons and tags, the 14 px radius of the composer field, and the 7 px and 8 px radii stay as their rows give them. Bold text, such as the word Failed, uses `weightStrong`. The optional target-size check reads control height custom properties and checks the 24 px minimum.
+Every component value MUST use a named token. Component tokens take their values from the component tables below. A token MUST NOT introduce a value absent from those tables. Zero, intrinsic layout keywords, percentages that express available space, and content-derived row counts are structural values, not design tokens.
+
+
+### Component token bindings
+
+Each named token maps to its kebab-case CSS property and the cited existing table value. Equal values reuse the existing Scale tokens: `borderWidth`, `space1`, `space2`/`radiusTag`, `space3`/`radiusCard`, `space4`, `space6`, `space8`, and weights 400/600/700 use `weightText`/`weightTitle`/`weightStrong`.
+
+|Token|CSS property|Existing value or expression|
+|---|---|---|
+|`sizeLabel`|`--size-label`|Button label, 14px|
+|`weightControl`|`--weight-control`|Button label, 650|
+|`space5`|`--space-5`|Button inline padding and Card padding, 20px|
+|`space7`|`--space-7`|Button row top margin, 28px|
+|`focusWidth`|`--focus-width`|Focus ring, 2px|
+|`focusOffset`|`--focus-offset`|Focus ring offset, 2px|
+|`fieldHeight`|`--field-height`|Field, 60px|
+|`radiusField`|`--radius-field`|Field, 14px|
+|`fieldActionHeight`|`--field-action-height`|Field point button, 42px|
+|`tagHeight`|`--tag-height`|Status tag, 28px|
+|`tagMinWidth`|`--tag-min-width`|Status tag, 84px|
+|`dotSize`|`--dot-size`|Dot, 6px|
+|`commandMinHeight`|`--command-min-height`|Command block, 112px|
+|`commandMargin`|`--command-margin`|Command block, 22px|
+|`commandPaddingBlock`|`--command-padding-block`|Command block, 18px|
+|`directoryMargin`|`--directory-margin`|Working directory, 5px|
+|`reasonMargin`|`--reason-margin`|Reason, 18px|
+|`decisionHeight`|`--decision-height`|Decision button, 42px|
+|`radiusDecision`|`--radius-decision`|Decision button, 7px|
+|`decisionPadding`|`--decision-padding`|Decision button, 13px|
+|`primaryDecisionHeight`|`--primary-decision-height`|Primary decision button, 48px|
+|`quietDecisionGap`|`--quiet-decision-gap`|Quiet decision button, 10px|
+|`questionMargin`|`--question-margin`|Question title, 6px|
+|`optionHeight`|`--option-height`|Option, 54px|
+|`optionPaddingBlock`|`--option-padding-block`|Option, 7px|
+|`optionPaddingInline`|`--option-padding-inline`|Option, 11px|
+|`optionMarkColumn`|`--option-mark-column`|Option, 20px|
+|`optionDescriptionRow`|`--option-description-row`|Option, 17px|
+|`optionGap`|`--option-gap`|Option, 9px|
+|`optionMarkSize`|`--option-mark-size`|Option mark, 16px|
+|`selectionBarWidth`|`--selection-bar-width`|Selected option, 2px|
+|`otherGap`|`--other-gap`|Other row, 14px|
+|`questionActionWidth`|`--question-action-width`|Question buttons, 92px|
+|`questionActionHeight`|`--question-action-height`|Question buttons, 38px|
+|`metaHeight`|`--meta-height`|Meta row, 26px|
+|`radiusEdit`|`--radius-edit`|Edit tag, 4px|
+|`diffLineHeight`|`--diff-line-height`|Diff line, 24px|
+|`diffNumberWidth`|`--diff-number-width`|Diff line, 29px|
+|`diffSignWidth`|`--diff-sign-width`|Diff line, 17px|
+|`diffPadding`|`--diff-padding`|Diff line, 5px|
+|`radiusDiffLine`|`--radius-diff-line`|Diff line, 3px|
+|`elapsedWidth`|`--elapsed-width`|Duration field, 7ch|
+|`targetNoteWidth`|`--target-note-width`|Target, 112px|
+|`threadDotSize`|`--thread-dot-size`|Thread hue dot, 8px|
+|`leadingCardTitle`|`--leading-card-title`|Card title line height, 32/26|
+|`leadingCommand`|`--leading-command`|Command line height, 38/30|
+|`leadingDirectory`|`--leading-directory`|Working directory line height, 20/13|
+|`leadingReason`|`--leading-reason`|Reason line height, 23/15|
+|`leadingLabel`|`--leading-label`|Label line height, 16/12|
+|`leadingQuestion`|`--leading-question`|Question title line height, 27/22|
+|`leadingOption`|`--leading-option`|Option choice line height, 19/14|
+|`leadingDescription`|`--leading-description`|Option description line height, 17/13|
 
 ## Components
 
 Each table gives the part, its geometry, its type and its colour role. Browser sizes are CSS pixels. Terminal sizes are cells and rows. Each value appears once in its table.
+
+No gradients, transition: all, system-ui font stacks or unregistered component literals are permitted.
 
 ### Browser controls
 
@@ -144,11 +215,13 @@ Each table gives the part, its geometry, its type and its colour role. Browser s
 |Status tag|Height 28 px. Minimum width 84 px. Padding 0 8 px. Gap 8 px. Radius 8 px. Start aligned, no wrap.|Bricolage Grotesque, weight 650, 13 px, line height 1|`dim` (Done, Waiting, and the item status Declined)|
 |Live tag (Working)|As status tag, with a point fill.|As status tag|Fill point. Label point ink|
 |Dot|6 px circle. Background `currentColor`.|n/a|Takes the label colour|
+|Thread hue dot|8 px circle.|n/a|Takes the point colour|
 |Failed tag|No fill. No border. The word only.|Bricolage Grotesque, weight 700, 13 px, line height 1|`failed-text`, bold|
 |Verb|No wrap.|Monospace, weight 400, 13 px, line height 1.4|`text`|
 |Target|Grid: `minmax(0,1fr)` and 112 px. Gap 12 px. Minimum width 0.|Monospace, weight 400, 13 px, line height 1.4|`text`|
 |Note|Right aligned. No wrap.|12 px, line height 1.4|`dim`. Exit note `failed-text`, bold|
 |Time|Right aligned. No wrap. Tabular numbers.|13 px|`text`|
+|Duration field|Minimum width 7ch. Right aligned. Tabular numbers.|13 px|`text`|
 
 ### Browser cards
 
@@ -157,23 +230,23 @@ Each table gives the part, its geometry, its type and its colour role. Browser s
 |Board|Two columns of 460 px. Column gap 24 px. Row gap 20 px. Rows 420 px and 248 px. The approval card spans both rows.|n/a|n/a|
 |Card|Padding 20 px. Radius 12 px. Border 1 px. Flex column.|n/a|Fill `surface`. Border `line`|
 |Approval card|Padding 24 px.|n/a|As card|
-|Card title|Margin 0.|Bricolage Grotesque, weight 600, 26 px, line height 32 px|`text`|
+|Card title|Margin 0.|Bricolage Grotesque, weight 600, 26 px, line height 32/26|`text`|
 |Command block|Top margin 22 px. Minimum height 112 px. Padding 18 px 20 px. Left border 4 px. Flex column, centred vertically.|n/a|Fill `tone`. Left border `text`|
-|Command|No wrap.|Monospace, weight 600, 30 px, line height 38 px|`text`|
-|Working directory|Top margin 5 px.|Monospace, 13 px, line height 20 px|`dim`|
-|Reason|Top margin 18 px.|Hanken Grotesk, 15 px, line height 23 px|`text`|
+|Command|No wrap.|Monospace, weight 600, 30 px, line height 38/30|`text`|
+|Working directory|Top margin 5 px.|Monospace, 13 px, line height 20/13|`dim`|
+|Reason|Top margin 18 px.|Hanken Grotesk, 15 px, line height 23/15|`text`|
 |Decision buttons|Grid of two columns. Gap 8 px. Top margin auto.|n/a|n/a|
 |Decision button|Minimum height 42 px. Border 1 px. Radius 7 px. Padding 0 13 px. Space between.|Bricolage Grotesque, weight 600, 13 px|No fill. Border `strong`. Label `text`|
 |Primary decision button|Full width. Minimum height 48 px.|Bricolage Grotesque, weight 600, 15 px|Fill and border point. Label point ink|
 |Quiet decision button|Full width. Minimum height 36 px. No border. Centred. Gap 10 px. Underlined, underline offset 4 px.|Bricolage Grotesque, weight 600, 13 px|Label `dim`|
 |Shortcut key|n/a|Monospace, 12 px|Inherits the label|
-|Label|n/a|Hanken Grotesk, weight 600, 12 px, line height 16 px|`dim`|
-|Question title|Top margin 6 px. Bottom margin 12 px.|Bricolage Grotesque, weight 600, 22 px, line height 27 px|`text`|
+|Label|n/a|Hanken Grotesk, weight 600, 12 px, line height 16/12|`dim`|
+|Question title|Top margin 6 px. Bottom margin 12 px.|Bricolage Grotesque, weight 600, 22 px, line height 27/22|`text`|
 |Option|Height 54 px. Border 1 px. Radius 8 px. Padding 7 px 11 px. Columns 20 px and `minmax(0,1fr)`. Rows 20 px and 17 px. Column gap 9 px.|n/a|Border `line`|
 |Option mark|16 px circle. Border 1 px. Top margin 5 px. Spans two rows. Centred.|n/a|Border `strong`|
 |Selected option|Fill `tone`. Leading bar 2 px wide. Radio dot 8 px inside the mark.|n/a|Fill `tone`. Bar and dot `text`|
-|Option choice|n/a|Hanken Grotesk, weight 600, 14 px, line height 19 px|`text`|
-|Option description|n/a|Hanken Grotesk, 13 px, line height 17 px|`dim`|
+|Option choice|n/a|Hanken Grotesk, weight 600, 14 px, line height 19/14|`text`|
+|Option description|n/a|Hanken Grotesk, 13 px, line height 17/13|`dim`|
 |Other row|Height 42 px. Top margin 8 px. Border 1 px. Radius 8 px. Padding 0 11 px. Gap 14 px.|Hanken Grotesk, weight 600, 14 px|Border `line`. Label `text`|
 |Other input|Flex 1. Minimum width 0. Border 0 except a 1 px bottom border. Padding 5 px 0. Focus ring drawn.|Hanken Grotesk, 13 px|`text`. Underline `strong`|
 |Question buttons|Top margin auto. Gap 9 px. End aligned. Minimum width 92 px. Minimum height 38 px.|Primary button: 14 px|As decision buttons|
@@ -356,6 +429,6 @@ The name 고나 appears only in this file and in image alternative text. The int
 ## How to change this file
 
 1. Get the owner's approval before you change a value, a component, a glyph, a motion, a status item or a mark.
-2. Change `internal/tui` and `web/` in the same commit, so that the two interfaces stay the same.
-3. Record each rejected option, with its reason, in `docs/decisions/`.
+2. Change `internal/dal/tui` and `web/` in the same commit, so that the two interfaces stay the same.
+3. Record each rejected option, with its reason, in `docs/dal/decisions/`.
 4. Check the accessibility gates in the section Accessibility before you commit.

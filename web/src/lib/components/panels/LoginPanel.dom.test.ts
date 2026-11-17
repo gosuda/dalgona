@@ -284,6 +284,34 @@ describe("login panel", () => {
 			"Signed in to openai",
 		);
 	});
+	test("a hybrid provider offers the API key field and the OAuth shell command", async () => {
+		const { session, rpc } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "anthropic", login: "hybrid", signedIn: false },
+			]),
+			"account/login/start": () => ({ type: "apiKey" }),
+		});
+		session.openPanel("login");
+		render(LoginPanel, {
+			props: { session, open: true, onClose: vi.fn() },
+		});
+		await fireEvent.click(await screen.findByLabelText(/anthropic/));
+		expect(screen.getByLabelText("API key for anthropic")).toBeDefined();
+		expect(
+			screen.getByText(
+				"OAuth sign-in runs in a shell: dalgona login anthropic",
+			),
+		).toBeDefined();
+		await fireEvent.input(screen.getByLabelText("API key for anthropic"), {
+			target: { value: "sk-test" },
+		});
+		await fireEvent.click(screen.getByRole("button", { name: "Log in" }));
+		await vi.waitFor(() =>
+			expect(
+				rpc.calls.some((call) => call.method === "account/login/start"),
+			).toBe(true),
+		);
+	});
 
 	test("closing the login panel cancels a pending browser login once", async () => {
 		const { session, rpc } = await connected({

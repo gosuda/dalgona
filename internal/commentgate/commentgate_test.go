@@ -37,7 +37,7 @@ var skipAtRoot = map[string]bool{
 	".build-target": true, ".ruff_cache": true, "bin": true, "dist": true,
 }
 
-var skipPaths = []string{"internal/tui/nomnomljs", "internal/webui/dist", "web/src/lib/codex"}
+var skipPaths = []string{"internal/dal/tui/nomnomljs", "internal/dalgona/webui/dist", "web/src/lib/codex"}
 
 var scanned = map[string]bool{
 	".go": true, ".ts": true, ".svelte": true, ".py": true,
@@ -877,8 +877,8 @@ func TestRepoFilesSkipsIgnoredDirectories(t *testing.T) {
 			name: "ignored trees are skipped",
 			files: []string{
 				"a.go", "internal/b.go", ".references/c.go", "node_modules/d.ts", "web/node_modules/e.ts",
-				"web/.svelte-kit/f.ts", "dist/g.py", "internal/webui/dist/h.ts", "web/src/lib/codex/i.ts",
-				"web/src/lib/j.ts", "local/k.py", "docs/spec/l.md",
+				"web/.svelte-kit/f.ts", "dist/g.py", "internal/dalgona/webui/dist/h.ts", "web/src/lib/codex/i.ts",
+				"web/src/lib/j.ts", "local/k.py", "docs/dal/spec/l.md",
 			},
 			want: []string{"a.go", "internal/b.go", "web/src/lib/j.ts"},
 		},
@@ -891,7 +891,7 @@ func TestRepoFilesSkipsIgnoredDirectories(t *testing.T) {
 			name: "script extensions are collected",
 			files: []string{
 				"a.js", "b.mjs", "c.cjs", "d.jsx", "e.tsx",
-				"node_modules/f.js", "web/src/lib/codex/g.js", "internal/webui/dist/h.js",
+				"node_modules/f.js", "web/src/lib/codex/g.js", "internal/dalgona/webui/dist/h.js",
 			},
 			want: []string{"a.js", "b.mjs", "c.cjs", "d.jsx", "e.tsx"},
 		},
@@ -929,7 +929,7 @@ func TestRepositoryHasNoProseComments(t *testing.T) {
 			found = scanLines(rel, src, legalNotices)
 		}
 		for _, f := range found {
-			t.Errorf("%s:%d: comment; restructure so a name or a type says it, or move its rule to docs/spec.", f.path, f.line)
+			t.Errorf("%s:%d: comment; restructure so a name or a type says it, or move its rule to docs/dal/spec.", f.path, f.line)
 		}
 	}
 }

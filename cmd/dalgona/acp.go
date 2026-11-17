@@ -4,8 +4,8 @@ import (
 	"context"
 	"io"
 
-	"github.com/gosuda/dalgona/internal/acp"
-	"github.com/gosuda/dalgona/internal/config"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dalgona/acp"
 )
 
 func runACP(ctx context.Context, args []string, std stdio) int {

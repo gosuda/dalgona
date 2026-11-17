@@ -100,7 +100,10 @@ function close(): void {
 					</label>
 				{/each}
 			</fieldset>
-			{#if chosen !== null && chosen.login === "apiKey"}
+			{#if chosen !== null && (chosen.login === "apiKey" || chosen.login === "hybrid")}
+				{#if chosen.login === "hybrid"}
+					<p>OAuth sign-in runs in a shell: {product} login {chosen.id}</p>
+				{/if}
 				<form onsubmit={submitKey}>
 					<label for="{uid}-key">API key for {chosen.id}</label>
 					<input

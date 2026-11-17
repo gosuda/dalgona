@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/app/battery"
-	"github.com/gosuda/dalgona/internal/discovery"
+	"github.com/gosuda/dalgona/internal/dalgona/battery"
+	"github.com/gosuda/dalgona/internal/dalgona/discovery"
 )
 
 func TestWorkspaceTrustDecisionWithoutThreadCancels(t *testing.T) {
