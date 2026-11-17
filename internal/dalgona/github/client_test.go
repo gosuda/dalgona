@@ -310,7 +310,7 @@ func TestRateLimitBudgetExhausted(t *testing.T) {
 	clock := newFakeClock()
 	clock.install(client)
 	_, _, err := client.Repository(context.Background(), repo())
-	if err == nil || err.Error() != "github: rate limit retry budget exhausted" {
+	if err == nil || err.Error() != "github: rate limit retry budget exceeded" {
 		t.Fatalf("err = %v", err)
 	}
 }

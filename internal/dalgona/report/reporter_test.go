@@ -3,6 +3,7 @@ package report
 import (
 	"context"
 	json "encoding/json/v2"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1026,4 +1027,59 @@ func (f *fakeServer) postCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.posts)
+}
+
+func TestConsentGateStopsAfterWithdrawal(t *testing.T) {
+	fake := &fakeServer{}
+	fake.onSearch = emptySearch
+	fake.onCreate = func(_ *http.Request, _ []byte) (int, string) {
+		return http.StatusCreated, createdPayload(1, "t", "b")
+	}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+	home := t.TempDir()
+	clock := &manualClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	source := &stubSource{access: "token", expires: time.Now().Add(time.Hour)}
+	if err := WriteConsent(home, "gh", clock.now); err != nil {
+		t.Fatalf("WriteConsent: %v", err)
+	}
+	client, err := NewReporterClient(server.URL, server.Client(), "test", source)
+	if err != nil {
+		t.Fatalf("NewReporterClient: %v", err)
+	}
+	r, err := Open(context.Background(), Options{
+		Home:          home,
+		Client:        client,
+		Credentials:   source,
+		Eligibility:   Eligibility{Origin: failure.OriginTest, Test: true},
+		Now:           clock.Now,
+		Notice:        io.Discard,
+		ConsentMethod: "gh",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close(context.Background()) }()
+	fp := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err = r.Enqueue(context.Background(), testRecord(fp)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	waitFor(t, "create", func() bool { return fake.createCount() == 1 })
+	if err = Disable(home); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+	fresh := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	err = errors.Join(
+		r.Enqueue(context.Background(), testRecord(fresh)),
+		r.Drain(context.Background()),
+	)
+	if err != nil {
+		t.Fatalf("post-withdrawal reporting: %v", err)
+	}
+	if got := fake.createCount(); got != 1 {
+		t.Fatalf("createCount after withdrawal = %d, want 1", got)
+	}
+	if got := r.queueLen(); got != 0 {
+		t.Fatalf("queue length after withdrawal = %d, want 0", got)
+	}
 }

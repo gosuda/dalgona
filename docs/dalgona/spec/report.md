@@ -12,6 +12,8 @@ Consent persists schema-1 JSON with UTC time, the selected method, and the SHA-2
 
 Changing `auth` invalidates consent for remote work. It MUST print `automatic failure reporting is off: authentication changed; run dalgona failures reporting on`. It preserves queue, receipts, caps, and latches. Fresh consent is required before the new method is used. Broad `gh` authorization MUST NOT inherit narrower App consent.
 
+A running process that opened without consent MUST activate reporting once consent and a credential exist, without a restart. Withdrawing consent while it runs MUST stop new enqueues and remote work.
+
 `Off` disables before more work, removes consent and the App credential, and deletes queued excerpts. It preserves local logs, dedup receipts, counters, and restriction deadlines. It prints `automatic failure reporting disabled; queued reports deleted` and `published GitHub issues are not deleted`.
 
 ## Authentication

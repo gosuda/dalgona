@@ -451,7 +451,7 @@ func (c *Client) botRateLimited(ctx context.Context, spec requestSpec, progress 
 	case spec.mutate:
 		progress.rateRetried = true
 	case progress.rateAttempts >= maxReadRetries:
-		return result, false, errors.New("github: rate limit retry budget exhausted")
+		return result, false, errors.New("github: rate limit retry budget exceeded")
 	default:
 		progress.rateAttempts++
 	}

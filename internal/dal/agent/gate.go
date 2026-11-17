@@ -231,8 +231,20 @@ func (w *worker) askUser(ctx context.Context, gc gateCall, requestID string) ver
 	}
 	offered, err := ask(ctx, w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
 	forwarded, linked := w.t.forwardApproval(prompt, replies)
+	if err != nil {
+		w.t.discardApproval(requestID)
+		if forwarded {
+			prompt.Resolved = true
+			prompt.Resolution = ApprovalResolution("cancel", interruptedReason)
+			w.t.forwardApproval(prompt, nil)
+		}
+		if ctx.Err() != nil {
+			return verdict{decision: "cancel", by: "user", reason: interruptedReason}
+		}
+		return decline("mode:ask", declineNoClient)
+	}
 	v := decline("mode:ask", declineNoClient)
-	if err == nil && (forwarded || (offered && !linked)) {
+	if forwarded || (offered && !linked) {
 		v = awaitReply(ctx, replies)
 	}
 	if forwarded {
@@ -268,6 +280,9 @@ func (w *worker) approvalPrompt(gc gateCall, requestID string) (ApprovalPrompt, 
 func awaitReply(ctx context.Context, replies <-chan Reply) verdict {
 	select {
 	case reply := <-replies:
+		if ctx.Err() != nil {
+			return verdict{decision: "cancel", by: "user", reason: interruptedReason}
+		}
 		return replyVerdict(reply)
 	case <-ctx.Done():
 		return verdict{decision: "cancel", by: "user", reason: interruptedReason}

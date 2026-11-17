@@ -37,7 +37,11 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 	}
 	offered, err := ask(ctx, t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
 	if err != nil {
-		return approvalAskReply(ctx), err
+		if ctx.Err() != nil {
+			t.discardApproval(requestID)
+			return ReplyCancel, ctx.Err()
+		}
+		return ReplyDecline, err
 	}
 	forwarded, linked := t.forwardApproval(prompt, replies)
 	if !forwarded && (!offered || linked) {
@@ -45,13 +49,6 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 		return ReplyDecline, nil
 	}
 	return t.awaitWorkspaceReply(ctx, requestID, prompt, replies, forwarded)
-}
-
-func approvalAskReply(ctx context.Context) Reply {
-	if ctx.Err() != nil {
-		return ReplyCancel
-	}
-	return ReplyDecline
 }
 
 func (t *Thread) awaitWorkspaceReply(ctx context.Context, requestID string, prompt ApprovalPrompt, replies chan Reply, forwarded bool) (Reply, error) {
