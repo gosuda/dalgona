@@ -112,11 +112,8 @@ func mcpResolve(ctx context.Context, client *http.Client, spec config.MCPServerS
 	if resolved.clientID != "" {
 		return resolved, nil
 	}
-	if meta.RegistrationEndpoint == "" {
-		return resolved, fmt.Errorf("oauth: server %s has no registration_endpoint", meta.Issuer)
-	}
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d%s", spec.OAuthCallbackPort, mcpCallbackPath)
-	resolved.clientID, err = oauth.RegisterClient(ctx, client, meta.RegistrationEndpoint, redirectURI, resolved.scopes)
+	resolved.clientID, err = oauth.Register(ctx, client, meta, redirectURI)
 	if err != nil {
 		return resolved, err
 	}

@@ -207,7 +207,9 @@ func (s *oauthSource) current() (*sourceEntry, error) {
 		ClientID: registration.ClientID, Scopes: slices.Clone(registration.Scopes), Resource: s.resource,
 	}
 	load := func(context.Context) (oauth.Token, error) { return tokenFrom(credential) }
-	save := func(_ context.Context, token oauth.Token) error { return s.save(entry, s.credentialFrom(token)) }
+	save := func(_ context.Context, token oauth.Token) error {
+		return s.save(entry, TokenCredential(s.resource, token))
+	}
 	entry.source = oauth.NewSource(provider, load, save)
 	s.entry = entry
 	return entry, nil
@@ -290,7 +292,12 @@ func ReadRegistration(home, name string) (Registration, error) {
 	return registration, nil
 }
 
-func WriteRegistration(home, name string, registration Registration) error {
+func WriteRegistration(home, name string, registration Registration) (retErr error) {
+	unlock, err := auth.LockHome(home)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
 	path := filepath.Join(home, RegistrationFile)
 	registrations := map[string]Registration{}
 	data, err := os.ReadFile(path)
@@ -308,10 +315,48 @@ func WriteRegistration(home, name string, registration Registration) error {
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", RegistrationFile, err)
 	}
-	if err := os.WriteFile(path, encoded, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", RegistrationFile, err)
+	return writeRegistrationFile(path, encoded)
+}
+
+func writeRegistrationFile(path string, encoded []byte) (retErr error) {
+	file, err := os.CreateTemp(filepath.Dir(path), "."+RegistrationFile+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary %s: %w", RegistrationFile, err)
 	}
-	return nil
+	temporary := file.Name()
+	defer func() { _ = os.Remove(temporary) }()
+	if err := file.Chmod(0o600); err != nil {
+		return errors.Join(fmt.Errorf("secure temporary %s: %w", RegistrationFile, err), file.Close())
+	}
+	if _, err := file.Write(encoded); err != nil {
+		return errors.Join(fmt.Errorf("write %s: %w", RegistrationFile, err), file.Close())
+	}
+	if err := file.Sync(); err != nil {
+		return errors.Join(fmt.Errorf("sync %s: %w", RegistrationFile, err), file.Close())
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", RegistrationFile, err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return fmt.Errorf("install %s: %w", RegistrationFile, err)
+	}
+	return syncRegistrationDir(filepath.Dir(path))
+}
+
+func syncRegistrationDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", dir, err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return fmt.Errorf("fsync %s: %w", dir, syncErr)
+	}
+	return closeErr
 }
 
 func readRegistrationFile(path string) ([]byte, error) {
@@ -343,8 +388,4 @@ func tokenFrom(credential auth.Credential) (oauth.Token, error) {
 	}
 	token.Expires = expires
 	return token, nil
-}
-
-func (s *oauthSource) credentialFrom(token oauth.Token) auth.Credential {
-	return TokenCredential(s.resource, token)
 }
