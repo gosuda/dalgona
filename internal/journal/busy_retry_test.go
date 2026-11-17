@@ -1,0 +1,111 @@
+package journal
+
+import (
+	"database/sql"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// A store that loses the write-lock race must retry past the busy timeout.
+func TestWithTxRetriesAfterBusy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	dsn := strings.Replace(dbDSN(path), "busy_timeout(5000)", "busy_timeout(50)", 1) + "&cache=private"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	if _, err := blocker.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+
+	releaseDone := make(chan struct{})
+	go func() {
+		defer close(releaseDone)
+		time.Sleep(200 * time.Millisecond)
+		_, _ = blocker.Exec("COMMIT")
+	}()
+
+	start := time.Now()
+	err = withTx(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec("INSERT INTO sessions(id, status, head_seq, updated_at) VALUES('s','ok',0,'x')")
+		return err
+	})
+	<-releaseDone
+	if err != nil {
+		t.Fatalf("withTx: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Fatalf("withTx returned after %v without waiting through the busy timeout", elapsed)
+	}
+}
+
+// A lock held past every retry must still surface the busy error.
+func TestWithTxReportsBusyAfterRetries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	dsn := strings.Replace(dbDSN(path), "busy_timeout(5000)", "busy_timeout(50)", 1) + "&cache=private"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	if _, err := blocker.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Exec("COMMIT")
+
+	err = withTx(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec("INSERT INTO sessions(id, status, head_seq, updated_at) VALUES('s','ok',0,'x')")
+		return err
+	})
+	if err == nil || !isBusyError(err) {
+		t.Fatalf("withTx = %v, want SQLITE_BUSY", err)
+	}
+}
+
+// A non-busy error must not retry.
+func TestWithTxDoesNotRetryOtherErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", dbDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+
+	attempts := 0
+	err = withTx(db, func(tx *sql.Tx) error {
+		attempts++
+		_, err := tx.Exec("INSERT INTO sessions(id) VALUES('s')")
+		return err
+	})
+	if err == nil {
+		t.Fatal("withTx: want error")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
