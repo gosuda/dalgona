@@ -3,6 +3,7 @@ package report
 import (
 	"context"
 	json "encoding/json/v2"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1060,20 +1061,25 @@ func TestConsentGateStopsAfterWithdrawal(t *testing.T) {
 	}
 	defer func() { _ = r.Close(context.Background()) }()
 	fp := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	if err := r.Enqueue(context.Background(), testRecord(fp)); err != nil {
+	if err = r.Enqueue(context.Background(), testRecord(fp)); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	waitFor(t, "create", func() bool { return fake.createCount() == 1 })
-	if err := Disable(home); err != nil {
+	if err = Disable(home); err != nil {
 		t.Fatalf("Disable: %v", err)
 	}
-	if err := r.Enqueue(context.Background(), testRecord(fp)); err != nil {
-		t.Fatalf("Enqueue after withdrawal: %v", err)
-	}
-	if err := r.Drain(context.Background()); err != nil {
-		t.Fatalf("Drain after withdrawal: %v", err)
+	fresh := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	err = errors.Join(
+		r.Enqueue(context.Background(), testRecord(fresh)),
+		r.Drain(context.Background()),
+	)
+	if err != nil {
+		t.Fatalf("post-withdrawal reporting: %v", err)
 	}
 	if got := fake.createCount(); got != 1 {
 		t.Fatalf("createCount after withdrawal = %d, want 1", got)
+	}
+	if got := r.queueLen(); got != 0 {
+		t.Fatalf("queue length after withdrawal = %d, want 0", got)
 	}
 }
