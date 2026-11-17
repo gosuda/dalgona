@@ -99,11 +99,12 @@ type IntakeStore interface {
 }
 
 type RelayIntake struct {
-	Client *RelayClient
-	Secret string
-	Store  IntakeStore
-	Clock  func() time.Time
-	Limit  int
+	Client    *RelayClient
+	Secret    string
+	Store     IntakeStore
+	Clock     func() time.Time
+	Limit     int
+	SaveAfter func(ctx context.Context, after string) error
 }
 
 func NewRelayIntake(client *RelayClient, secret string, store IntakeStore, clock func() time.Time) *RelayIntake {
@@ -118,28 +119,50 @@ func (r *RelayIntake) PollOnce(ctx context.Context, after string) (string, error
 	if err != nil {
 		return after, err
 	}
+	handled, err := r.handlePage(ctx, after, page.Items)
+	if err != nil {
+		return handled, err
+	}
+	if page.Next != "" {
+		if err := r.saveAfter(ctx, page.Next); err != nil {
+			return handled, err
+		}
+		return page.Next, nil
+	}
+	return handled, nil
+}
+
+func (r *RelayIntake) handlePage(ctx context.Context, after string, items []Envelope) (string, error) {
 	now := r.Clock()
 	handled := after
-	for _, envelope := range page.Items {
+	for _, envelope := range items {
 		advanced, err := r.handleOne(ctx, envelope, now)
 		if err != nil {
 			if handled != after {
-				ackErr := r.Client.Ack(ctx, handled)
-				return handled, errors.Join(err, ackErr)
+				return handled, errors.Join(err, r.Client.Ack(ctx, handled))
 			}
 			return handled, err
 		}
 		handled = advanced
 	}
-	if handled != "" && handled != after {
-		if err := r.Client.Ack(ctx, handled); err != nil {
-			return handled, err
-		}
+	return handled, r.settle(ctx, after, handled)
+}
+
+func (r *RelayIntake) settle(ctx context.Context, after, handled string) error {
+	if handled == "" || handled == after {
+		return nil
 	}
-	if page.Next != "" {
-		return page.Next, nil
+	if err := r.Client.Ack(ctx, handled); err != nil {
+		return err
 	}
-	return handled, nil
+	return r.saveAfter(ctx, handled)
+}
+
+func (r *RelayIntake) saveAfter(ctx context.Context, after string) error {
+	if r.SaveAfter == nil {
+		return nil
+	}
+	return r.SaveAfter(ctx, after)
 }
 
 func (r *RelayIntake) handleOne(ctx context.Context, envelope Envelope, now time.Time) (string, error) {

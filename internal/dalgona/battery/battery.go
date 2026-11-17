@@ -143,11 +143,11 @@ func loadDaltoki(ctx context.Context, base app.Base, logger *slog.Logger) (*dalt
 		return nil, err
 	}
 	return daltoki.New(ctx, cfg, daltoki.Dependencies{
-		Journal: base.Journal,
-		Client:  client,
-		Auth:    base.Auth,
-		Clock:   time.Now,
-		Logger:  logger,
+		Home:   base.Config.Home,
+		Client: client,
+		Auth:   base.Auth,
+		Clock:  time.Now,
+		Logger: logger,
 	})
 }
 

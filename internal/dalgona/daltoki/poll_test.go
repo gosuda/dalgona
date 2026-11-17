@@ -218,12 +218,12 @@ func (h *routeHarness) serveEvents(w http.ResponseWriter, r *http.Request, t *te
 	w.Header().Set("ETag", `"ev1"`)
 	writeJSON(t, w, []any{
 		map[string]any{
-			"id": "301", "action": "labeled", "actor": map[string]any{"login": "carol", "type": "User"},
+			"id": 301, "event": "labeled", "actor": map[string]any{"login": "carol", "type": "User"},
 			"label":      map[string]any{"name": "daltoki"},
 			"created_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
 		},
 		map[string]any{
-			"id": "302", "action": "commented", "actor": map[string]any{"login": "dave", "type": "User"},
+			"id": 302, "event": "commented", "actor": map[string]any{"login": "dave", "type": "User"},
 			"created_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
 		},
 	})

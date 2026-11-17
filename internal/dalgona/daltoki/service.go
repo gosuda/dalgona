@@ -2,9 +2,9 @@ package daltoki
 
 import (
 	"context"
-	json "encoding/json/v2"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -23,12 +23,8 @@ type WorktreeManager interface {
 	Close() error
 }
 
-type Journal interface {
-	Append(ctx context.Context, session string, events ...[]byte) (uint64, error)
-}
-
 type Dependencies struct {
-	Journal   Journal
+	Home      string
 	Client    *github.Client
 	Graphs    GraphScheduler
 	Worktrees WorktreeManager
@@ -46,6 +42,7 @@ type Status struct {
 type Service struct {
 	cfg        Config
 	deps       Dependencies
+	store      *serviceStore
 	mu         sync.Mutex
 	host       *agent.Host
 	running    bool
@@ -70,8 +67,8 @@ func New(ctx context.Context, cfg Config, deps Dependencies) (*Service, error) {
 	if !cfg.Enabled {
 		return &Service{cfg: cfg, deps: deps}, nil
 	}
-	if deps.Journal == nil {
-		return nil, errors.New("daltoki: journal is required")
+	if deps.Home == "" {
+		return nil, errors.New("daltoki: home is required")
 	}
 	if deps.Client == nil {
 		return nil, errors.New("daltoki: github client is required")
@@ -79,7 +76,15 @@ func New(ctx context.Context, cfg Config, deps Dependencies) (*Service, error) {
 	if deps.Auth == nil {
 		return nil, errors.New("daltoki: auth store is required")
 	}
-	return &Service{cfg: cfg, deps: deps}, nil
+	store, err := openServiceStore(ctx, serviceJournalDir(deps.Home), deps.Clock)
+	if err != nil {
+		return nil, err
+	}
+	return &Service{cfg: cfg, deps: deps, store: store}, nil
+}
+
+func serviceJournalDir(home string) string {
+	return home + string(filepath.Separator) + "daltoki"
 }
 
 func (s *Service) Attach(host *agent.Host) {
@@ -111,6 +116,13 @@ func (s *Service) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	s.runCancel = cancel
 	s.mu.Unlock()
+	if err := s.startIntake(runCtx); err != nil {
+		cancel()
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+		return err
+	}
 	<-runCtx.Done()
 	s.mu.Lock()
 	s.running = false
@@ -146,7 +158,11 @@ func (s *Service) Close(ctx context.Context) error {
 	if s.deps.Worktrees != nil {
 		errs = append(errs, s.deps.Worktrees.Close())
 	}
-	errs = append(errs, waitWorkers(bounded, &s.workers))
+	workersErr := waitWorkers(bounded, &s.workers)
+	errs = append(errs, workersErr)
+	if workersErr == nil && s.store != nil {
+		errs = append(errs, s.store.Close())
+	}
 	err := errors.Join(errs...)
 	s.mu.Lock()
 	s.closeErr = err
@@ -167,6 +183,46 @@ func (s *Service) Status() Status {
 	return status
 }
 
+func (s *Service) startIntake(ctx context.Context) error {
+	poller := NewPoller(s.deps.Client, s.store, PollerConfig{
+		BaseURL:      s.deps.Client.APIBase(),
+		Repositories: s.cfg.Repositories,
+		Interval:     s.cfg.PollInterval,
+	}, s.deps.Clock, s.deps.Logger)
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		if err := poller.Run(ctx, 0); err != nil && ctx.Err() == nil {
+			s.deps.Logger.Error("daltoki: poller stopped", "error", err)
+		}
+	}()
+	if s.cfg.RelayURL != "" {
+		relay, err := NewRelayClient(s.cfg.RelayURL, s.cfg.RelayToken, nil)
+		if err != nil {
+			return err
+		}
+		intake := NewRelayIntake(relay, s.cfg.WebhookSecret, envelopeStore{store: s.store}, s.deps.Clock)
+		intake.SaveAfter = s.store.SaveRelayAfter
+		after := s.store.LoadRelayAfter()
+		s.workers.Add(1)
+		go func() {
+			defer s.workers.Done()
+			if err := intake.Run(ctx, after); err != nil && ctx.Err() == nil {
+				s.deps.Logger.Error("daltoki: relay intake stopped", "error", err)
+			}
+		}()
+	}
+	return nil
+}
+
+type envelopeStore struct {
+	store *serviceStore
+}
+
+func (e envelopeStore) Admit(ctx context.Context, envelope Envelope) (bool, error) {
+	return e.store.AdmitEnvelope(ctx, envelope)
+}
+
 func waitWorkers(ctx context.Context, workers *sync.WaitGroup) error {
 	done := make(chan struct{})
 	go func() {
@@ -181,31 +237,9 @@ func waitWorkers(ctx context.Context, workers *sync.WaitGroup) error {
 	}
 }
 
-type barrierRecord struct {
-	Version int            `json:"version"`
-	Kind    string         `json:"kind"`
-	At      time.Time      `json:"at"`
-	Control barrierControl `json:"control"`
-}
-
-type barrierControl struct {
-	Shutdown bool `json:"shutdown"`
-}
-
 func (s *Service) recordBarrier(ctx context.Context) error {
-	if s.deps.Journal == nil {
+	if s.store == nil {
 		return nil
 	}
-	record := barrierRecord{
-		Version: 1,
-		Kind:    "daltoki.control.changed",
-		At:      s.deps.Clock().UTC(),
-		Control: barrierControl{Shutdown: true},
-	}
-	raw, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	_, err = s.deps.Journal.Append(ctx, journalSession, raw)
-	return err
+	return s.store.RecordControl(ctx, controlRecord{Shutdown: true})
 }

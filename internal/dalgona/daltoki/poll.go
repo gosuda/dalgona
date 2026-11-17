@@ -35,6 +35,7 @@ type PollCursor struct {
 	ETags         []EndpointETag `json:"etags"`
 	NextURL       string         `json:"nextUrl"`
 	ScanStartedAt time.Time      `json:"scanStartedAt"`
+	IssueWorklist []int64        `json:"issueWorklist"`
 }
 
 type Observation struct {
@@ -105,10 +106,21 @@ type scanState struct {
 	boundary   map[int64]bool
 	etags      map[string]string
 	etagsOrder []string
+	seen       map[int64]bool
 	pages      int
 	admitted   int
 	wait       time.Duration
 	now        time.Time
+}
+
+func pruneBoundary(ids []int64, seen map[int64]bool) []int64 {
+	kept := ids[:0]
+	for _, id := range ids {
+		if seen[id] {
+			kept = append(kept, id)
+		}
+	}
+	return kept
 }
 
 func (s *scanState) observe(meta github.ResponseMeta) {
@@ -172,6 +184,7 @@ func (p *Poller) Pass(ctx context.Context) (PollResult, error) {
 	}
 	state.cursor.Since = state.cursor.ScanStartedAt
 	state.cursor.NextURL = ""
+	state.cursor.BoundaryIDs = pruneBoundary(state.cursor.BoundaryIDs, state.seen)
 	if err := p.store.SaveCursor(ctx, state.cursor); err != nil {
 		return PollResult{}, err
 	}
@@ -183,10 +196,14 @@ func (p *Poller) newScan(cursor PollCursor, found bool) *scanState {
 	if !found {
 		cursor = PollCursor{Since: now, ScanStartedAt: now}
 	}
+	if found && cursor.NextURL == "" {
+		cursor.ScanStartedAt = now
+	}
 	state := &scanState{
 		cursor:   cursor,
 		boundary: make(map[int64]bool, len(cursor.BoundaryIDs)),
 		etags:    make(map[string]string, len(cursor.ETags)),
+		seen:     make(map[int64]bool, len(cursor.BoundaryIDs)),
 		now:      now,
 	}
 	for _, id := range cursor.BoundaryIDs {
@@ -545,12 +562,16 @@ func (p *Poller) labelledIssueNumbers(ctx context.Context, state *scanState, rep
 		}
 		state.observe(meta)
 		state.rememberETag(requestURL, meta.ETag)
+		if meta.NotModified && len(numbers) == 0 {
+			return state.cursor.IssueWorklist, nil
+		}
 		for _, item := range page.Items {
 			if item.PullRequest == nil && item.State == "open" {
 				numbers = append(numbers, item.Number)
 			}
 		}
 		if meta.NextURL == "" {
+			state.cursor.IssueWorklist = numbers
 			return numbers, nil
 		}
 		requestURL = meta.NextURL
@@ -628,7 +649,7 @@ func (p *Poller) admitEvents(ctx context.Context, state *scanState, repo github.
 		obs := Observation{
 			Kind:        "event",
 			Repository:  repo,
-			ID:          item.ID,
+			ID:          strconv.FormatInt(item.ID, 10),
 			IssueNumber: number,
 			Actor:       item.Actor.Login,
 			ActorType:   item.Actor.Type,
@@ -638,11 +659,7 @@ func (p *Poller) admitEvents(ctx context.Context, state *scanState, repo github.
 			CreatedAt:   item.CreatedAt,
 			UpdatedAt:   stamp,
 		}
-		id, err := strconv.ParseInt(item.ID, 10, 64)
-		if err != nil {
-			id = 0
-		}
-		if err := p.admitOne(ctx, state, obs, id, stamp); err != nil {
+		if err := p.admitOne(ctx, state, obs, item.ID, stamp); err != nil {
 			return err
 		}
 	}
@@ -651,6 +668,7 @@ func (p *Poller) admitEvents(ctx context.Context, state *scanState, repo github.
 
 func (p *Poller) admitOne(ctx context.Context, state *scanState, obs Observation, id int64, updated time.Time) error {
 	if id != 0 && state.boundary[id] && !updated.After(state.cursor.Since) {
+		state.seen[id] = true
 		return nil
 	}
 	admitted, err := p.store.Admit(ctx, obs)
@@ -660,13 +678,22 @@ func (p *Poller) admitOne(ctx context.Context, state *scanState, obs Observation
 	if admitted {
 		state.admitted++
 	}
-	if id != 0 && !state.boundary[id] {
-		if len(state.cursor.BoundaryIDs) >= pollBoundaryLimit {
-			return errBoundaryOverflow
-		}
-		state.boundary[id] = true
-		state.cursor.BoundaryIDs = append(state.cursor.BoundaryIDs, id)
+	return state.note(id)
+}
+
+func (s *scanState) note(id int64) error {
+	if id == 0 {
+		return nil
 	}
+	s.seen[id] = true
+	if s.boundary[id] {
+		return nil
+	}
+	if len(s.cursor.BoundaryIDs) >= pollBoundaryLimit {
+		return errBoundaryOverflow
+	}
+	s.boundary[id] = true
+	s.cursor.BoundaryIDs = append(s.cursor.BoundaryIDs, id)
 	return nil
 }
 
@@ -677,19 +704,25 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) error {
 	if interval <= 0 {
 		interval = reconciliationWait
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
 		result, err := p.Pass(ctx)
+		delay := interval
 		if err != nil {
 			p.logger.Error("daltoki: polling pass failed", "error", err)
-		} else if result.Complete {
-			p.logger.Debug("daltoki: polling pass complete", "admitted", result.Admitted)
+		} else {
+			if result.Complete {
+				p.logger.Debug("daltoki: polling pass complete", "admitted", result.Admitted)
+			}
+			if result.Wait > delay {
+				delay = result.Wait
+			}
 		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }

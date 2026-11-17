@@ -4,39 +4,50 @@ import (
 	"context"
 	json "encoding/json/v2"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/dalgona/github"
 )
 
-type fakeJournal struct {
-	mu       sync.Mutex
-	sessions []string
-	events   [][]byte
-	err      error
+func newStubGitHub(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(server.Close)
+	return server
 }
 
-func (f *fakeJournal) Append(ctx context.Context, session string, events ...[]byte) (uint64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return 0, f.err
+func barrierRecords(t *testing.T, home string) []serviceRecord {
+	t.Helper()
+	j, err := journal.OpenShared(serviceJournalDir(home))
+	if err != nil {
+		t.Fatalf("open service journal: %v", err)
 	}
-	for _, ev := range events {
-		f.sessions = append(f.sessions, session)
-		f.events = append(f.events, ev)
+	defer func() { _ = j.Close() }()
+	var records []serviceRecord
+	err = j.Replay(journalSession, func(_ uint64, ev []byte) error {
+		var record serviceRecord
+		if decodeErr := json.Unmarshal(ev, &record); decodeErr != nil {
+			return decodeErr
+		}
+		if record.Kind == kindControlChanged {
+			records = append(records, record)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("replay service journal: %v", err)
 	}
-	return uint64(len(f.events)), nil
-}
-
-func (f *fakeJournal) count() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.events)
+	return records
 }
 
 type fakeGraphs struct {
@@ -72,6 +83,7 @@ func (stubCredential) Token(ctx context.Context, req github.CredentialRequest) (
 func testClient(t *testing.T) *github.Client {
 	t.Helper()
 	client, err := github.NewClient(github.ClientConfig{
+		BaseURL:      newStubGitHub(t).URL,
 		Repositories: []github.Repository{{Owner: "octo", Name: "repo"}},
 		Policy:       "bot",
 	}, stubCredential{}, nil)
@@ -117,7 +129,7 @@ func TestDisabledDoesNoIO(t *testing.T) {
 	if cfg.Enabled {
 		t.Fatal("disabled config parsed as enabled")
 	}
-	svc, err := New(context.Background(), cfg, Dependencies{})
+	svc, err := New(context.Background(), cfg, Dependencies{Home: t.TempDir()})
 	if err != nil {
 		t.Fatalf("New disabled: %v", err)
 	}
@@ -223,29 +235,20 @@ func runUntilClosed(t *testing.T, svc *Service) {
 	}
 }
 
-func assertShutdownBarrier(t *testing.T, journal *fakeJournal) {
+func assertShutdownBarrier(t *testing.T, home string) {
 	t.Helper()
-	if journal.count() != 1 {
-		t.Fatalf("journal records = %d", journal.count())
+	records := barrierRecords(t, home)
+	if len(records) != 1 {
+		t.Fatalf("control records = %d", len(records))
 	}
-	var barrier struct {
-		Version int    `json:"version"`
-		Kind    string `json:"kind"`
-		Control struct {
-			Shutdown bool `json:"shutdown"`
-		} `json:"control"`
-	}
-	if err := json.Unmarshal(journal.events[0], &barrier); err != nil {
-		t.Fatalf("barrier decode: %v", err)
-	}
-	if barrier.Version != 1 || barrier.Kind != "daltoki.control.changed" || !barrier.Control.Shutdown {
+	barrier := records[0]
+	if barrier.Version != 1 || barrier.Control == nil || !barrier.Control.Shutdown {
 		t.Fatalf("barrier = %+v", barrier)
 	}
 }
 
 func TestStartsAfterRecovery(t *testing.T) {
-	journal := &fakeJournal{}
-	svc, err := New(context.Background(), enabledConfig(), Dependencies{Journal: journal, Client: testClient(t), Auth: testStore(t)})
+	svc, err := New(context.Background(), enabledConfig(), Dependencies{Home: t.TempDir(), Client: testClient(t), Auth: testStore(t)})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -267,7 +270,7 @@ func TestStartsAfterRecovery(t *testing.T) {
 
 func assertFailedRecoveryRefusesRun(t *testing.T) {
 	t.Helper()
-	failed, err := New(context.Background(), enabledConfig(), Dependencies{Journal: &fakeJournal{}, Client: testClient(t), Auth: testStore(t)})
+	failed, err := New(context.Background(), enabledConfig(), Dependencies{Home: t.TempDir(), Client: testClient(t), Auth: testStore(t)})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -281,11 +284,11 @@ func assertFailedRecoveryRefusesRun(t *testing.T) {
 }
 
 func TestRetirePreservesState(t *testing.T) {
-	journal := &fakeJournal{}
+	home := t.TempDir()
 	graphs := &fakeGraphs{}
 	worktrees := &fakeWorktrees{}
 	svc, err := New(context.Background(), enabledConfig(), Dependencies{
-		Journal: journal, Graphs: graphs, Worktrees: worktrees, Client: testClient(t), Auth: testStore(t),
+		Home: home, Graphs: graphs, Worktrees: worktrees, Client: testClient(t), Auth: testStore(t),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -293,18 +296,18 @@ func TestRetirePreservesState(t *testing.T) {
 	svc.Attach(nil)
 	svc.StartAfterRecovery(nil)
 	runUntilClosed(t, svc)
-	assertShutdownBarrier(t, journal)
+	assertShutdownBarrier(t, home)
 	if graphs.cancel != 1 || worktrees.closed != 1 {
 		t.Fatalf("graphs=%d worktrees=%d", graphs.cancel, worktrees.closed)
 	}
 	if closeErr := svc.Close(context.Background()); closeErr != nil {
 		t.Fatalf("second Close: %v", closeErr)
 	}
-	if journal.count() != 1 {
-		t.Fatalf("second Close recorded again: %d", journal.count())
+	if got := len(barrierRecords(t, home)); got != 1 {
+		t.Fatalf("second Close recorded again: %d", got)
 	}
 
-	blocked, err := New(context.Background(), enabledConfig(), Dependencies{Journal: &fakeJournal{}, Client: testClient(t), Auth: testStore(t)})
+	blocked, err := New(context.Background(), enabledConfig(), Dependencies{Home: t.TempDir(), Client: testClient(t), Auth: testStore(t)})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
