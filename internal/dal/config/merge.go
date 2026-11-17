@@ -63,6 +63,7 @@ type fileDoc struct {
 	Roles                rolesDoc               `toml:"roles"`
 	Advisor              advisorDoc             `toml:"advisor"`
 	Advisors             map[string]advisorsDoc `toml:"advisors"`
+	Daltoki              daltokiDoc             `toml:"daltoki"`
 }
 
 type limitsDoc struct {
@@ -237,6 +238,24 @@ type (
 		CertFile *string `toml:"cert_file"`
 		KeyFile  *string `toml:"key_file"`
 	}
+	daltokiDoc struct {
+		Enabled                 *bool    `toml:"enabled"`
+		AppID                   *int64   `toml:"app_id"`
+		PrivateKeyFile          *string  `toml:"private_key_file"`
+		Repositories            []string `toml:"repositories"`
+		PollIntervalSeconds     *int     `toml:"poll_interval_seconds"`
+		WebhookSecretRef        *string  `toml:"webhook_secret_ref"`
+		RelayURL                *string  `toml:"relay_url"`
+		RelayTokenRef           *string  `toml:"relay_token_ref"`
+		Concurrency             *int     `toml:"concurrency"`
+		JobsPerDay              *int     `toml:"jobs_per_day"`
+		Model                   *string  `toml:"model"`
+		Profile                 *string  `toml:"profile"`
+		JobTokenLimit           *int     `toml:"job_token_limit"`
+		DailyTokenLimit         *int     `toml:"daily_token_limit"`
+		JobCostLimitUSDMicros   *int64   `toml:"job_cost_limit_usd_micros"`
+		DailyCostLimitUSDMicros *int64   `toml:"daily_cost_limit_usd_micros"`
+	}
 	rolesDoc struct {
 		Smol    *string `toml:"smol"`
 		Slow    *string `toml:"slow"`
@@ -395,6 +414,34 @@ func (c *Config) mergeTables(doc *fileDoc) {
 	set(doc.Roles.Smol, &c.Roles.Smol)
 	set(doc.Roles.Slow, &c.Roles.Slow)
 	set(doc.Roles.Advisor, &c.Roles.Advisor)
+	mergeDaltoki(&c.Daltoki, doc.Daltoki)
+}
+
+func mergeDaltoki(target *DaltokiConfig, source daltokiDoc) {
+	set(source.Enabled, &target.Enabled)
+	if source.AppID != nil {
+		target.AppID = *source.AppID
+	}
+	set(source.PrivateKeyFile, &target.PrivateKeyFile)
+	if source.Repositories != nil {
+		target.Repositories = source.Repositories
+	}
+	set(source.PollIntervalSeconds, &target.PollIntervalSeconds)
+	set(source.WebhookSecretRef, &target.WebhookSecretRef)
+	set(source.RelayURL, &target.RelayURL)
+	set(source.RelayTokenRef, &target.RelayTokenRef)
+	set(source.Concurrency, &target.Concurrency)
+	set(source.JobsPerDay, &target.JobsPerDay)
+	set(source.Model, &target.Model)
+	set(source.Profile, &target.Profile)
+	set(source.JobTokenLimit, &target.JobTokenLimit)
+	set(source.DailyTokenLimit, &target.DailyTokenLimit)
+	if source.JobCostLimitUSDMicros != nil {
+		target.JobCostLimitUSDMicros = *source.JobCostLimitUSDMicros
+	}
+	if source.DailyCostLimitUSDMicros != nil {
+		target.DailyCostLimitUSDMicros = *source.DailyCostLimitUSDMicros
+	}
 }
 
 func mergeWeb(target *WebConfig, source webDoc) {
@@ -624,7 +671,7 @@ func keywordNoticeExists(home, notice string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-var dalgonaOnlyKeys = map[string]bool{"runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "herdr": true, "web": true, "edit_review": true}
+var dalgonaOnlyKeys = map[string]bool{"runner": true, "remote": true, "runners": true, "remotes": true, "mcp_servers": true, "mcp_trusted_workspaces": true, "discovery": true, "herdr": true, "web": true, "edit_review": true, "daltoki": true}
 
 func validateProductLayer(product Product, current layer) error {
 	if product != ProductDal {

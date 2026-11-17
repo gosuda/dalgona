@@ -17,15 +17,16 @@ import (
 )
 
 type (
-	HostFactory func(context.Context) (*agent.Host, func() error, error)
-	ServeFunc   func(context.Context, io.ReadWriteCloser, *agent.Host) error
+	HostFactory   func(context.Context) (*agent.Host, func() error, error)
+	ServeFunc     func(context.Context, io.ReadWriteCloser, *agent.Host) error
+	RecoveredFunc func(context.Context, *agent.Host, error)
 )
 
 func SocketPath(home string) string { return filepath.Join(home, "dalgona.sock") }
 
 var listenFunc = listen
 
-func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc) (err error) {
+func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc, after ...RecoveredFunc) (err error) {
 	if limitErr := checkSocketPathLimit(home); limitErr != nil {
 		return limitErr
 	}
@@ -48,8 +49,12 @@ func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	tasks.Go(func() {
-		if recoverErr := host.Recover(ctx); recoverErr != nil {
+		recoverErr := host.Recover(ctx)
+		if recoverErr != nil {
 			slog.Error("daemon: recovery", "error", recoverErr)
+		}
+		for _, fn := range after {
+			fn(ctx, host, recoverErr)
 		}
 	})
 	stopListener := context.AfterFunc(ctx, func() { closeListener(listener) })

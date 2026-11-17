@@ -137,7 +137,7 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 		options := rpc.ServeOptions{Extensions: extensions, BeforeArchive: batteries.Archive, Advisors: advisors}
 		return rpc.ServeWith(ctx, conn, host, options)
 	}
-	if err := daemon.Run(ctx, cfg.Home, newHost, serve); err != nil {
+	if err := daemon.Run(ctx, cfg.Home, newHost, serve, batteries.AfterRecover); err != nil {
 		return fail(std, 1, err)
 	}
 	return 0

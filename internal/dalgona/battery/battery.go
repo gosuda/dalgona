@@ -20,7 +20,9 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	corescripthost "github.com/gosuda/dalgona/internal/dal/scripthost"
 	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dalgona/daltoki"
 	"github.com/gosuda/dalgona/internal/dalgona/discovery"
+	"github.com/gosuda/dalgona/internal/dalgona/github"
 	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 	"github.com/gosuda/dalgona/internal/dalgona/remote"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
@@ -34,6 +36,7 @@ type Daemon struct {
 	Scripts           batteryscripthost.Config
 	WorkspaceApprover WorkspaceApprover
 	binder            *remote.Binder
+	daltoki           *daltoki.Service
 }
 
 type TrustDecision int
@@ -71,15 +74,84 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 		Core:    corescripthost.Config{Judge: base.Judge, Mode: base.Config.ToolMode, Eval: base.Config.Eval, Logger: logger},
 		Plugins: plugins,
 	}
+	daltokiSvc, err := loadDaltoki(ctx, base, logger)
+	if err != nil {
+		return app.Batteries{}, err
+	}
+	d.daltoki = daltokiSvc
 	return app.Batteries{
 		Tools: func(ctx context.Context, cwd string) []tool.Tool {
 			return append(projects.tools(ctx, cwd), ratchetTools(ctx)...)
 		},
 		Skills: projects.skills, Runner: d.binder.Runner,
 		Extension: batteryscripthost.New(d.Scripts),
-		Attach:    func(h *agent.Host) { d.binder.SetRecorder(h) }, Close: projects.close,
+		Attach: func(h *agent.Host) {
+			d.binder.SetRecorder(h)
+			if daltokiSvc != nil {
+				daltokiSvc.Attach(h)
+			}
+		},
+		Close: func() error {
+			var closeErr error
+			if daltokiSvc != nil {
+				closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				closeErr = daltokiSvc.Close(closeCtx)
+				cancel()
+			}
+			return errors.Join(closeErr, projects.close())
+		},
 		MCPStatus: projects.status,
 	}, nil
+}
+
+func loadDaltoki(ctx context.Context, base app.Base, logger *slog.Logger) (*daltoki.Service, error) {
+	cfg, err := daltoki.ParseConfig(base.Config.Daltoki, base.Auth.UnmaskStrict)
+	if err != nil {
+		return nil, err
+	}
+	if !cfg.Enabled {
+		return nil, nil
+	}
+	repositories := make([]github.Repository, 0, len(cfg.Repositories))
+	repositories = append(repositories, cfg.Repositories...)
+	cred, err := github.NewInstallationCredential(ctx, github.InstallationConfig{
+		AppID:          cfg.AppID,
+		PrivateKeyFile: cfg.PrivateKeyFile,
+		Repositories:   repositories,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if maskErr := cred.RegisterSecrets(base.Auth.MaskWithError); maskErr != nil {
+		return nil, maskErr
+	}
+	client, err := github.NewClient(github.ClientConfig{
+		Repositories: repositories,
+		Policy:       "bot",
+	}, cred, nil)
+	if err != nil {
+		return nil, err
+	}
+	return daltoki.New(ctx, cfg, daltoki.Dependencies{
+		Journal: base.Journal,
+		Client:  client,
+		Auth:    base.Auth,
+		Clock:   time.Now,
+		Logger:  logger,
+	})
+}
+
+func (d *Daemon) AfterRecover(ctx context.Context, host *agent.Host, recoverErr error) {
+	if d.daltoki == nil {
+		return
+	}
+	d.daltoki.StartAfterRecovery(recoverErr)
+	if recoverErr != nil {
+		return
+	}
+	if err := d.daltoki.Run(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("daltoki: service stopped", "error", err)
+	}
 }
 
 func (d *Daemon) Archive(ctx context.Context, threadID string) error {

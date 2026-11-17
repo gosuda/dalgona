@@ -1,6 +1,13 @@
 import { Container } from "@cloudflare/containers";
+import {
+	type DaltokiEnv,
+	handleDaltokiRelay,
+	handleDaltokiWebhook,
+} from "./daltoki.ts";
 
-type Env = {
+export { DaltokiRelay } from "./daltoki.ts";
+
+type Env = DaltokiEnv & {
 	BOX: DurableObjectNamespace;
 	DALGONA_TOKEN: string;
 };
@@ -97,6 +104,16 @@ function boxFor(request: Request, env: Env): Route {
 }
 
 async function handle(request: Request, env: Env): Promise<Response> {
+	const url = new URL(request.url);
+	if (url.pathname === "/daltoki/webhook") {
+		return handleDaltokiWebhook(request, env);
+	}
+	if (
+		url.pathname === "/daltoki/relay/pull" ||
+		url.pathname === "/daltoki/relay/ack"
+	) {
+		return handleDaltokiRelay(request, env);
+	}
 	if (!authorized(request, env.DALGONA_TOKEN)) {
 		return new Response("unauthorized", { status: 401 });
 	}

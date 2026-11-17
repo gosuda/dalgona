@@ -255,6 +255,24 @@ type (
 		Patterns []string
 		Builtin  bool
 	}
+	DaltokiConfig struct {
+		Enabled                 bool
+		AppID                   int64
+		PrivateKeyFile          string
+		Repositories            []string
+		PollIntervalSeconds     int
+		WebhookSecretRef        string
+		RelayURL                string
+		RelayTokenRef           string
+		Concurrency             int
+		JobsPerDay              int
+		Model                   string
+		Profile                 string
+		JobTokenLimit           int
+		DailyTokenLimit         int
+		JobCostLimitUSDMicros   int64
+		DailyCostLimitUSDMicros int64
+	}
 	HerdrConfig struct{ SubagentPanes bool }
 	WebConfig   struct{ Listen, Token, CertFile, KeyFile string }
 	RolesConfig struct{ Smol, Slow, Advisor string }
@@ -293,6 +311,7 @@ type Config struct {
 	Remotes                               map[string]RemoteSpec
 	MCPServers                            map[string]MCPServerSpec
 	Discovery                             DiscoveryConfig
+	Daltoki                               DaltokiConfig
 	ApprovalDecider                       ApprovalDeciderConfig
 	EditReview                            EditReviewConfig
 	Eval                                  EvalConfig
@@ -321,6 +340,11 @@ func defaultConfigWithHome(product Product, home, cwd string) Config {
 		Web: WebConfig{Listen: "127.0.0.1:7437"}, Secrets: SecretsConfig{Builtin: true}, Providers: map[string]ProviderSpec{},
 		Models: map[string]ModelSpec{}, Runners: map[string]RunnerSpec{}, Remotes: map[string]RemoteSpec{},
 		MCPServers: map[string]MCPServerSpec{}, Keywords: map[string]KeywordSpec{},
+		Daltoki: DaltokiConfig{
+			PollIntervalSeconds: 60, Concurrency: 2, JobsPerDay: 20, Profile: "daltoki",
+			JobTokenLimit: 100000, DailyTokenLimit: 500000,
+			JobCostLimitUSDMicros: 5000000, DailyCostLimitUSDMicros: 20000000,
+		},
 		lines: map[string]origin{}, Advisor: defaultAdvisor(), advisorEntries: map[string]advisorsDoc{}, priceEntries: map[string]priceKeys{},
 	}
 }
