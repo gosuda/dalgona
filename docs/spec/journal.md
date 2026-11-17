@@ -66,7 +66,7 @@ The mirror MUST remove the rows of one session with one batch. That batch delete
 
 The mirror MUST record its schema version in the `v` key. The store MUST reject a mirror whose version exceeds the supported version. A mirror without the key adopts version 1 with no row changes.
 
-Every 30 minutes and at clean close, the store MUST checkpoint `state.db` into `state.db.bak.tmp`. It MUST then rename that directory to `state.db.bak`. The store MUST hold an exclusive lock on `repair.lock` from the removal of a stale `state.db.bak.tmp` through the rename. A clean close MUST report a backup failure. When `state.db` is unusable, the store MUST try `state.db.bak` before it creates an empty mirror. This rule allows a verified backup row to repair damaged JSONL.
+Every 30 minutes and at clean close, the store MUST checkpoint `state.db` into `state.db.bak.tmp`. It MUST then rename `state.db.bak` to `state.db.bak.old`, rename `state.db.bak.tmp` to `state.db.bak`, and remove `state.db.bak.old`. The store MUST hold an exclusive lock on `repair.lock` from the removal of a stale `state.db.bak.tmp` through the rename. A clean close MUST report a backup failure. When `state.db` is unusable, the store MUST try `state.db.bak` before it creates an empty mirror. When `state.db.bak` is absent, the store MUST try `state.db.bak.old`. This rule allows a verified backup row to repair damaged JSONL.
 
 ## Locks
 
