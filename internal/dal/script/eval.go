@@ -31,6 +31,7 @@ type Eval struct {
 
 type evalRequest struct {
 	code    string
+	codeSet bool
 	lang    string
 	uses    []string
 	usesSet bool
@@ -144,30 +145,42 @@ func parseEvalArgs(args jsontext.Value) (evalRequest, error) {
 		return evalRequest{}, errors.New("arguments must be a JSON object")
 	}
 	var req evalRequest
-	codeSet := false
 	for dec.PeekKind() == jsontext.KindString {
 		key, err := dec.ReadToken()
 		if err != nil {
 			return evalRequest{}, err
 		}
-		if err := req.readField(dec, key.String(), &codeSet); err != nil {
+		if err := req.readField(dec, key.String()); err != nil {
 			return evalRequest{}, err
 		}
 	}
-	if !codeSet {
-		return evalRequest{}, errors.New("code is required")
+	if err := req.endArgs(dec); err != nil {
+		return evalRequest{}, err
 	}
 	return req, nil
 }
 
-func (req *evalRequest) readField(dec *jsontext.Decoder, key string, codeSet *bool) error {
+func (req *evalRequest) endArgs(dec *jsontext.Decoder) error {
+	if tok, err := dec.ReadToken(); err != nil || tok.Kind() != jsontext.KindEndObject {
+		return errors.New("arguments must be a JSON object")
+	}
+	if _, err := dec.ReadToken(); err == nil {
+		return errors.New("arguments must be a single JSON object")
+	}
+	if !req.codeSet {
+		return errors.New("code is required")
+	}
+	return nil
+}
+
+func (req *evalRequest) readField(dec *jsontext.Decoder, key string) error {
 	switch key {
 	case "code":
 		tok, err := dec.ReadToken()
 		if err != nil || tok.Kind() != jsontext.KindString {
 			return errors.New("code must be a string")
 		}
-		req.code, *codeSet = tok.String(), true
+		req.code, req.codeSet = tok.String(), true
 		return nil
 	case "lang":
 		return req.readLang(dec)
