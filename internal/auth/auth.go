@@ -456,6 +456,10 @@ func writeCredential(encoder *jsontext.Encoder, c Credential) error {
 	return nil
 }
 
+func WriteSecure(path string, encode func(*jsontext.Encoder) error) error {
+	return writeSecure(path, encode)
+}
+
 func writeSecure(path string, encode func(*jsontext.Encoder) error) error {
 	if dirErr := ProtectHomeDir(filepath.Dir(path)); dirErr != nil {
 		return fmt.Errorf("create credential directory: %w", dirErr)
