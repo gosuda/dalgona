@@ -37,6 +37,9 @@ func (t *Thread) Ask(ctx context.Context, callID string, questions []asktool.Que
 	replies := make(chan asktool.Reply, 1)
 	offered, err := ask(ctx, t, func(a *actor) bool { return a.offerQuestion(prompt, replies) })
 	if err != nil {
+		if ctx.Err() != nil {
+			return asktool.Reply{Outcome: asktool.OutcomeInterrupted}, nil
+		}
 		return asktool.Reply{}, err
 	}
 	if !offered {
