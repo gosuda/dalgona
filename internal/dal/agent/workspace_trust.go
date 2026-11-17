@@ -44,8 +44,15 @@ func (t *Thread) RequestWorkspaceApproval(ctx context.Context, req WorkspaceAppr
 		t.discardApproval(requestID)
 		return ReplyDecline, nil
 	}
+	return t.awaitWorkspaceReply(ctx, requestID, prompt, replies, forwarded)
+}
+
+func (t *Thread) awaitWorkspaceReply(ctx context.Context, requestID string, prompt ApprovalPrompt, replies chan Reply, forwarded bool) (Reply, error) {
 	select {
 	case reply := <-replies:
+		if ctx.Err() != nil {
+			return ReplyCancel, ctx.Err()
+		}
 		if forwarded {
 			prompt.Resolved = true
 			t.forwardApproval(prompt, nil)
