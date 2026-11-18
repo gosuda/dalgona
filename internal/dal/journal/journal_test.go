@@ -559,6 +559,7 @@ func TestInstallSkipsOutdatedCheckpoint(t *testing.T) {
 func TestInstallProceedsPastFutureBackup(t *testing.T) {
 	fixture := staleBackupFixture(t)
 	writeFile(t, filepath.Join(fixture.final, "MARKER"), []byte("backup"))
+	writeFile(t, filepath.Join(fixture.staged, "STAGED"), []byte("staged"))
 	future := time.Now().Add(time.Hour)
 	if err := os.Chtimes(fixture.final, future, future); err != nil {
 		t.Fatal(err)
@@ -568,6 +569,9 @@ func TestInstallProceedsPastFutureBackup(t *testing.T) {
 	}
 	if _, serr := os.Stat(filepath.Join(fixture.final, "MARKER")); serr == nil {
 		t.Fatal("future-dated backup blocked a fresh checkpoint")
+	}
+	if _, serr := os.Stat(filepath.Join(fixture.final, "STAGED")); serr != nil {
+		t.Fatalf("fresh checkpoint was not installed: %v", serr)
 	}
 }
 
