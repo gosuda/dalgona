@@ -802,7 +802,10 @@ func stagedOutdated(final, staged string) (bool, error) {
 	if serr != nil {
 		return false, serr
 	}
-	return ferr == nil && fin.ModTime().After(st.ModTime()), nil
+	if fin == nil || fin.ModTime().After(time.Now().Add(peerStagingGrace)) {
+		return false, nil
+	}
+	return fin.ModTime().After(st.ModTime()), nil
 }
 
 func swapStagedBackup(dir, staging, tmp, retiredOld string, dirSync func(string) error) (trash []string, err error) {

@@ -495,6 +495,59 @@ func TestRetireStaleStagingKeepsLivePeer(t *testing.T) {
 	}
 }
 
+type backupFixture struct {
+	dir    string
+	final  string
+	staged string
+	tmp    string
+}
+
+func staleBackupFixture(t *testing.T) backupFixture {
+	fixture := backupFixture{dir: t.TempDir()}
+	fixture.final = filepath.Join(fixture.dir, "state.db.bak")
+	fixture.staged = filepath.Join(fixture.dir, "state.db.bak.tmp.staged.0.1")
+	fixture.tmp = filepath.Join(fixture.dir, "state.db.bak.tmp")
+	for _, path := range []string{fixture.final, fixture.staged} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(fixture.staged, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func TestInstallSkipsOutdatedCheckpoint(t *testing.T) {
+	fixture := staleBackupFixture(t)
+	trash, err := installBackupLocked(fixture.dir, fixture.staged, fixture.tmp, syncDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trash) != 0 {
+		t.Fatalf("outdated install produced trash %v", trash)
+	}
+	if _, serr := os.Stat(fixture.staged); serr != nil {
+		t.Fatal("skipped install consumed the staged checkpoint")
+	}
+}
+
+func TestInstallProceedsPastFutureBackup(t *testing.T) {
+	fixture := staleBackupFixture(t)
+	writeFile(t, filepath.Join(fixture.final, "MARKER"), []byte("backup"))
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(fixture.final, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installBackupLocked(fixture.dir, fixture.staged, fixture.tmp, syncDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, serr := os.Stat(filepath.Join(fixture.final, "MARKER")); serr == nil {
+		t.Fatal("future-dated backup blocked a fresh checkpoint")
+	}
+}
+
 func TestBackupInstallRestoresSuperseded(t *testing.T) {
 	dir := t.TempDir()
 	old := filepath.Join(dir, "state.db.bak.old")
