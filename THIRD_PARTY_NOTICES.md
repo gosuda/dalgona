@@ -308,7 +308,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ## marked (MIT)
 
-The embedded web build ships `marked` 18.2.0, the Markdown parser of `web/src/lib/markdown.ts`. Its licence text follows.
+The embedded web build ships `marked` 18.2.1, the Markdown parser of `web/src/lib/markdown.ts`. Its licence text follows.
 
 ```text
 # License information
@@ -359,7 +359,7 @@ This software is provided by the copyright holders and contributors “as is” 
 
 ## dompurify (Apache-2.0)
 
-The embedded web build ships `dompurify` 3.4.17, the HTML sanitiser of `web/src/lib/markdown.ts`. Its licence offers `MPL-2.0 OR Apache-2.0`, and this project takes the Apache-2.0 option because it copies no MPL-licensed source file and Apache-2.0 matches the other permissive notices. The Apache-2.0 licence text follows.
+The embedded web build ships `dompurify` 3.4.18, the HTML sanitiser of `web/src/lib/markdown.ts`. Its licence offers `MPL-2.0 OR Apache-2.0`, and this project takes the Apache-2.0 option because it copies no MPL-licensed source file and Apache-2.0 matches the other permissive notices. The Apache-2.0 licence text follows.
 
 ```text
 

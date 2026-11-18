@@ -8,39 +8,39 @@ Scope: `web/package.json` and `web/pnpm-lock.yaml`. Enforcement: `just web` inst
 
 ## Grounded pins
 
-Grounded on 2026-11-12. Each row gives an exact dependency or devDependency pin in `web/package.json`. The release date is the `time` entry of that version in `https://registry.npmjs.org/<package>`. The user-event timestamp was read on 2026-11-15 and is linked below. For unchanged pins, the OSV column retains the result of the `POST https://api.osv.dev/v1/querybatch` request of 2026-11-15 that `dependencies.md` describes. For user-event 14.6.10, it records the supplementary exact-version query described below.
+Grounded on 2026-11-12; the rows moved by the dependency upgrade of 2026-11-19 re-grounded on that date. Each row gives an exact dependency or devDependency pin in `web/package.json`. The release date is the `time` entry of that version in `https://registry.npmjs.org/<package>`. The user-event 14.6.10 timestamp was read on 2026-11-15 and is linked below. For pins unchanged by the 2026-11-19 upgrade, the OSV column retains the result of the `POST https://api.osv.dev/v1/querybatch` request of 2026-11-15 that `dependencies.md` describes; the rows moved on 2026-11-19 carry the `none` result of the 2026-11-19 batch that `dependencies.md` describes.
 
-|Package|Pin|Released|Use|OSV batch 2026-11-15|
+|Package|Pin|Released|Use|OSV batch|
 |---|---|---|---|---|
 |happy-dom|21.0.4|2026-10-20|DOM environment of the `dom` Vitest project|none|
 |@testing-library/svelte|5.4.2|2026-06-23|renders Svelte components in tests, with its `svelteTesting` Vite plugin|none|
 |@testing-library/dom|10.4.2|2026-09-13|queries that `@testing-library/svelte` uses|none|
-|@testing-library/user-event|14.6.10|2026-11-12|user input in component tests|none (supplementary query)|
+|@testing-library/user-event|14.6.12|2026-11-16|user input in component tests|none|
 |ajv|8.20.0|2026-04-24|JSON Schema check of the parsers in the schema test|none|
 |@sveltejs/vite-plugin-svelte|7.3.1|2026-09-23|Svelte compiler plugin for the Vite build|none|
 |@fontsource-variable/bricolage-grotesque|5.3.0|2026-07-19|Bricolage Grotesque for titles and control labels|none|
 |@fontsource-variable/hanken-grotesk|5.3.0|2026-07-19|Hanken Grotesk for body text|none|
 |pretendard|1.3.9|2023-11-05|Hangul fallback, loaded by unicode-range subset|none|
-|marked|18.2.0|2026-11-09|Markdown rendering of model text|none|
-|dompurify|3.4.17|2026-10-12|sanitizer for rendered Markdown|none|
+|marked|18.2.1|2026-11-16|Markdown rendering of model text|none|
+|dompurify|3.4.18|2026-11-14|sanitizer for rendered Markdown|none|
 |highlight.js|11.12.0|2026-08-12|syntax highlighting of code blocks, core build with a fixed language set|none|
 
 ## Pins on 2026-11-11
 
-The original pins equalled the latest stable releases on that date, except pnpm and TypeScript. TypeScript stays at 6.0.3 by the invariant above. pnpm 12.21.0 is pinned in `web/package.json`, `deploy/cloudflare/package.json`, and `.github/workflows/ci.yml`. The npm `latest` tag names pnpm 12.21.0, read on 2026-11-15 and again on 2026-11-16. For unchanged npm pins, the OSV column retains the result of the `POST https://api.osv.dev/v1/querybatch` request of 2026-11-15. Rows marked `supplementary query` record the exact-version queries that the evidence section describes. The Node.js row is not an npm package and was not sent to either query.
+The original pins equalled the latest stable releases on that date, except pnpm and TypeScript. TypeScript stays at 6.0.3 by the invariant above. The @sveltejs/kit and @biomejs/biome rows moved with the dependency upgrade of 2026-11-19 and re-grounded on that date. pnpm 12.21.0 is pinned in `web/package.json`, `deploy/cloudflare/package.json`, and `.github/workflows/ci.yml`. The npm `latest` tag names pnpm 12.21.0, read on 2026-11-15 and again on 2026-11-16. For unchanged npm pins, the OSV column retains the result of the `POST https://api.osv.dev/v1/querybatch` request of 2026-11-15. Rows marked `supplementary query` record the exact-version queries that the evidence section describes. The Node.js row is not an npm package and was not sent to either query.
 
-|Package|Pin|Released|Use|OSV batch 2026-11-15|
+|Package|Pin|Released|Use|OSV batch|
 |---|---|---|---|---|
 |pnpm (`web/package.json`, `deploy/cloudflare/package.json`, `.github/workflows/ci.yml`)|12.21.0|2026-11-13|package manager and CI setup|none (supplementary query)|
 |Node.js (`.github/workflows/ci.yml`)|26.13.1|2026-11-10|CI runtime. `https://nodejs.org/dist/index.json` lists v26.13.1 as the newest 26.x release on 2026-11-15. The page of the 2026-11-11 Node.js security releases names v26.13.1 as the 26.x download. The CVE IDs CVE-2026-105482, CVE-2026-105483, CVE-2026-106069 and CVE-2026-111497 are not on that page, so those IDs are not confirmed fixed.|not queried|
 |svelte|5.57.3|2026-10-26|UI framework|none|
-|@sveltejs/kit|3.2.0|2026-11-10|app framework and build|none|
+|@sveltejs/kit|3.3.0|2026-11-17|app framework and build|none|
 |@sveltejs/adapter-static|4.0.1|2026-10-29|static build output|none|
 |svelte-check|4.7.8|2026-11-01|Svelte type check|none|
 |typescript|6.0.3|2026-04-16|type check. The pin MUST stay at 6.0.3.|none|
 |vite|8.3.8|2026-11-11|bundler|none|
 |vitest|5.1.0|2026-11-02|unit tests|none|
-|@biomejs/biome|2.6.7|2026-11-11|lint and format|none (supplementary query)|
+|@biomejs/biome|2.6.8|2026-11-15|lint and format|none|
 
 ## Evidence
 
@@ -50,9 +50,13 @@ Official npm registry metadata read on 2026-11-15 gives these exact-version publ
 - [Biome registry metadata](https://registry.npmjs.org/%40biomejs%2Fbiome): `time["2.6.7"]` is `2026-11-11T21:44:33.443Z`.
 - [user-event registry metadata](https://registry.npmjs.org/%40testing-library%2Fuser-event): `time["14.6.10"]` is `2026-11-12T04:41:23.349Z`.
 
+Official npm registry metadata read on 2026-11-19 gives these exact-version publication timestamps (UTC) for the pins moved on that date: [Biome registry metadata](https://registry.npmjs.org/%40biomejs%2Fbiome) `time["2.6.8"]` is `2026-11-15T14:34:16.910Z`; [user-event registry metadata](https://registry.npmjs.org/%40testing-library%2Fuser-event) `time["14.6.12"]` is `2026-11-16T02:31:48.155Z`; [marked registry metadata](https://registry.npmjs.org/marked) `time["18.2.1"]` is `2026-11-16T17:22:22.604Z`; [dompurify registry metadata](https://registry.npmjs.org/dompurify) `time["3.4.18"]` is `2026-11-14T14:18:25.242Z`; [Kit registry metadata](https://registry.npmjs.org/%40sveltejs%2Fkit) `time["3.3.0"]` is `2026-11-17T16:29:48.894Z`.
+
 On 2026-11-15, a supplementary `POST` to the [OSV batch query API](https://api.osv.dev/v1/querybatch) queried the exact npm versions pnpm 12.20.0, @biomejs/biome 2.6.7, and @testing-library/user-event 14.6.10. Their corresponding response entries were `{}`, `{}`, and `{}`: no vulnerability was listed for those exact versions. These results are separate from the earlier batch and do not reuse advisory results for older pins.
 
 Observed on 2026-11-08. SvelteKit 3.1.1 reads `ts.sys` at startup. TypeScript 7.0.2 does not expose `ts.sys`, so Vitest failed before it loaded a test. TypeScript 6.0.3 is the newest 6.x release that the SvelteKit 3.1.1 and svelte-check 4.7.8 peer ranges accept. OSV `POST https://api.osv.dev/v1/query` for npm `typescript` 6.0.3 returned `{}` on that date. TypeScript 7.0.2 MUST NOT be used with the pinned Svelte tooling.
+
+Observed again on 2026-11-19. SvelteKit 3.3.0 with TypeScript 7.0.2 fails `pnpm -C web build` while `write_tsconfig` loads the user tsconfig: `TypeError: Cannot read properties of undefined (reading 'readFile')`. TypeScript 7.0.2 still does not expose `ts.sys`. The build and the full gate pass with TypeScript 6.0.3, which stays the pin. An OSV batch query for npm `typescript` 7.0.2 returned no vulnerability on 2026-11-19.
 
 The [pnpm registry metadata](https://registry.npmjs.org/pnpm) gives `time["12.21.0"]` as `2026-11-13T21:01:11.515Z` (UTC). On 2026-11-15, an exact-version `POST` to the [OSV query API](https://api.osv.dev/v1/query) for pnpm 12.21.0 returned `{}`. Earlier empty OSV results for older pnpm pins do not cover 12.21.0, so this query ran for the new pin. On 2026-11-16, the npm `latest` tag names 12.21.0. This result covers the pinned package only and does not clear the dependency tree. The audit of this refresh reports one low advisory for `deepmerge` 4.3.1, which has no patched version.
 
