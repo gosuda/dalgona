@@ -613,7 +613,12 @@ var (
 )
 
 func nextBackupStaging(dir string) string {
-	return filepath.Join(dir, fmt.Sprintf("state.db.bak.tmp.staged.%d.%d", os.Getpid(), backupStageSeq.Add(1)))
+	for {
+		path := filepath.Join(dir, fmt.Sprintf("state.db.bak.tmp.staged.%d.%d", os.Getpid(), backupStageSeq.Add(1)))
+		if _, err := os.Stat(path); err != nil {
+			return path
+		}
+	}
 }
 
 func checkpointMirror(m *mirrorDB, staging string) error {
@@ -648,20 +653,26 @@ func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) (retErr 
 	return installBackup(dir, staging, filepath.Join(dir, "state.db.bak.tmp"), dirSync)
 }
 
-func removeStaleStaging(dir, keep string) error {
-	stale, err := filepath.Glob(filepath.Join(dir, "state.db.bak.tmp.staged.*"))
+func retireStaleStaging(dir, keep string) (trash []string, err error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("journal: list stale backups: %w", err)
+		return nil, fmt.Errorf("journal: list stale backups: %w", err)
 	}
-	for _, path := range stale {
-		if path == keep {
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "state.db.bak.tmp.") {
 			continue
 		}
-		if err := os.RemoveAll(path); err != nil {
-			return fmt.Errorf("journal: remove stale backup: %w", err)
+		stale := filepath.Join(dir, entry.Name())
+		if stale == keep {
+			continue
 		}
+		retired := filepath.Join(dir, fmt.Sprintf("state.db.bak.tmp.trash.%d.%d", os.Getpid(), backupStageSeq.Add(1)))
+		if err := os.Rename(stale, retired); err != nil { //nolint:gosec // backup path is validated
+			return trash, fmt.Errorf("journal: retire stale backup: %w", err)
+		}
+		trash = append(trash, retired)
 	}
-	return nil
+	return trash, nil
 }
 
 func installBackup(dir, staging, tmp string, dirSync func(string) error) (retErr error) {
@@ -669,10 +680,16 @@ func installBackup(dir, staging, tmp string, dirSync func(string) error) (retErr
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.Join(retErr, release()) }()
-	if err := removeStaleStaging(dir, staging); err != nil {
+	trash, err := retireStaleStaging(dir, staging)
+	if err != nil {
 		return err
 	}
+	defer func() {
+		for _, path := range trash {
+			retErr = errors.Join(retErr, os.RemoveAll(path))
+		}
+	}()
+	defer func() { retErr = errors.Join(retErr, release()) }()
 	if err := os.RemoveAll(tmp); err != nil {
 		return fmt.Errorf("journal: remove stale backup: %w", err)
 	}
