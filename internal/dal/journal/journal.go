@@ -804,7 +804,7 @@ func (s *Store) Close() error {
 	s.mu.Unlock()
 	result := fileErr
 	if m != nil {
-		result = errors.Join(result, backupDBFiles(m, dir, dirSync), m.Close())
+		result = errors.Join(result, closeBackup(m, dir, dirSync), m.Close())
 	}
 	return errors.Join(result, releaseLock(s.users), releaseLock(s.lock))
 }
