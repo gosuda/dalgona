@@ -802,7 +802,13 @@ func installBackupLocked(dir, staging, tmp string, dirSync func(string) error) (
 		restore()
 		return trash, serr
 	}
-	trash = append(trash, swapped)
+	retiredSwap, rerr := retireDir(dir, swapped)
+	if rerr != nil {
+		return trash, rerr
+	}
+	if retiredSwap != "" {
+		trash = append(trash, retiredSwap)
+	}
 	if retiredOld != "" {
 		trash = append(trash, retiredOld)
 	}
