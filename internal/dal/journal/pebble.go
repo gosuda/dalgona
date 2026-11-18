@@ -124,8 +124,8 @@ func (m *mirrorDB) dropDB(actor *mirrorActor) error {
 	return err
 }
 
-func (m *mirrorDB) detach() {
-	_ = m.dropDB(m.actor)
+func (m *mirrorDB) detach() error {
+	return m.dropDB(m.actor)
 }
 
 type mirrorLogger struct{}
@@ -661,7 +661,7 @@ func closeBackup(m *mirrorDB, dir string, dirSync func(string) error) (retErr er
 	if err := checkpointMirror(m, staging); err != nil {
 		return err
 	}
-	m.detach()
+	retErr = errors.Join(retErr, m.detach())
 	return installBackup(dir, staging, filepath.Join(dir, "state.db.bak.tmp"), dirSync)
 }
 

@@ -173,7 +173,7 @@ func acquireHomeLock(dir string) (*os.File, error) {
 
 func (s *Store) setMirror(m *mirrorDB) {
 	if s.shared {
-		m.detach()
+		_ = m.detach()
 	}
 	s.mirror = m
 }
