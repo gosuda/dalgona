@@ -474,7 +474,7 @@ func TestBackupRecoveryToleratesFallbackStatError(t *testing.T) {
 	closeStore(t, store)
 	old := filepath.Join(dir, "state.db.bak.old")
 	if err := os.Symlink("state.db.bak.old", old); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlinks not permitted: %v", err)
 	}
 	corruptSecondLine(t, journalFile(dir))
 	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
