@@ -781,11 +781,33 @@ func retireSuperseded(dir, tmp, keep string) (trash []string, retiredOld string,
 }
 
 func installBackupLocked(dir, staging, tmp string, dirSync func(string) error) (trash []string, err error) {
-	old := filepath.Join(dir, "state.db.bak.old")
+	final := filepath.Join(dir, "state.db.bak")
+	if skip, serr := stagedOutdated(final, staging); serr != nil || skip {
+		return nil, serr
+	}
 	trash, retiredOld, err := retireSuperseded(dir, tmp, staging)
 	if err != nil {
 		return trash, err
 	}
+	moreTrash, serr := swapStagedBackup(dir, staging, tmp, retiredOld, dirSync)
+	return append(trash, moreTrash...), serr
+}
+
+func stagedOutdated(final, staged string) (bool, error) {
+	fin, ferr := os.Stat(final)
+	if ferr != nil && !errors.Is(ferr, os.ErrNotExist) {
+		return false, ferr
+	}
+	st, serr := os.Stat(staged)
+	if serr != nil {
+		return false, serr
+	}
+	return ferr == nil && fin.ModTime().After(st.ModTime()), nil
+}
+
+func swapStagedBackup(dir, staging, tmp, retiredOld string, dirSync func(string) error) (trash []string, err error) {
+	final := filepath.Join(dir, "state.db.bak")
+	old := filepath.Join(dir, "state.db.bak.old")
 	restore := func() {
 		if retiredOld != "" {
 			_ = os.Rename(retiredOld, old)
@@ -795,7 +817,7 @@ func installBackupLocked(dir, staging, tmp string, dirSync func(string) error) (
 		restore()
 		return trash, fmt.Errorf("journal: stage backup: %w", rerr)
 	}
-	swapped, serr := swapBackup(tmp, filepath.Join(dir, "state.db.bak"), old)
+	swapped, serr := swapBackup(tmp, final, old)
 	if serr != nil {
 		restore()
 		return trash, serr
