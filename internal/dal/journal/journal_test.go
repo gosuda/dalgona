@@ -467,6 +467,29 @@ func TestBackupRecoveryTriesOlderCandidates(t *testing.T) {
 	closeStore(t, store)
 }
 
+func TestBackupRecoveryToleratesFallbackStatError(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpen(t, dir)
+	events := appendEvents(t, store, "s", 3)
+	closeStore(t, store)
+	old := filepath.Join(dir, "state.db.bak.old")
+	if err := os.Symlink("state.db.bak.old", old); err != nil {
+		t.Fatal(err)
+	}
+	corruptSecondLine(t, journalFile(dir))
+	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("remove state.db: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "state.db"), []byte("garbage"))
+
+	store = mustOpen(t, dir)
+	requireEvents(t, replayEvents(t, store, "s"), events)
+	if err := os.Remove(old); err != nil {
+		t.Fatal(err)
+	}
+	closeStore(t, store)
+}
+
 func TestRetireStaleStagingKeepsLivePeer(t *testing.T) {
 	dir := t.TempDir()
 	fresh := filepath.Join(dir, "state.db.bak.tmp.staged.0.1")
