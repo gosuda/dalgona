@@ -494,6 +494,23 @@ func TestRetireStaleStagingKeepsLivePeer(t *testing.T) {
 	}
 }
 
+func TestBackupInstallRestoresSuperseded(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "state.db.bak.old")
+	if err := os.MkdirAll(old, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(old, "MARKER"), []byte("backup"))
+	if _, err := installBackupLocked(dir,
+		filepath.Join(dir, "state.db.bak.tmp.staged.0.9"),
+		filepath.Join(dir, "state.db.bak.tmp"), syncDir); err == nil {
+		t.Fatal("a missing staged checkpoint installed without error")
+	}
+	if _, err := os.Stat(filepath.Join(old, "MARKER")); err != nil {
+		t.Fatalf("superseded fallback not restored: %v", err)
+	}
+}
+
 func testBackupReconciliation(t *testing.T) {
 	dir := t.TempDir()
 	store := mustOpen(t, dir)
