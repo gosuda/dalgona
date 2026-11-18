@@ -63,6 +63,9 @@ func (s *server) questionResolved(w *watch, prompt agent.QuestionPrompt) {
 }
 
 func (s *server) requestInput(serveCtx, askCtx context.Context, q questionAsk) {
+	if askCtx.Err() != nil {
+		return
+	}
 	params, err := encode(q.params)
 	if err != nil {
 		s.log.Warn("rpc: encode question", "request", q.requestID, "error", err)
