@@ -653,19 +653,15 @@ func checkpointMirror(m *mirrorDB, staging string) error {
 	return nil
 }
 
-func closeBackup(m *mirrorDB, dir string, dirSync func(string) error) (retErr error) {
-	backupPublishMu.Lock()
-	defer backupPublishMu.Unlock()
-	staging := nextBackupPath(dir, "staged")
-	defer func() { retErr = errors.Join(retErr, os.RemoveAll(staging)) }()
-	if err := checkpointMirror(m, staging); err != nil {
-		return err
-	}
-	retErr = errors.Join(retErr, m.detach())
-	return installBackup(dir, staging, filepath.Join(dir, "state.db.bak.tmp"), dirSync)
+func closeBackup(m *mirrorDB, dir string, dirSync func(string) error) error {
+	return publishStagedBackup(m, dir, dirSync, m.detach)
 }
 
-func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) (retErr error) {
+func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) error {
+	return publishStagedBackup(m, dir, dirSync, nil)
+}
+
+func publishStagedBackup(m *mirrorDB, dir string, dirSync func(string) error, between func() error) (retErr error) {
 	backupPublishMu.Lock()
 	defer backupPublishMu.Unlock()
 	staging := nextBackupPath(dir, "staged")
@@ -673,7 +669,10 @@ func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) (retErr 
 	if err := checkpointMirror(m, staging); err != nil {
 		return err
 	}
-	return installBackup(dir, staging, filepath.Join(dir, "state.db.bak.tmp"), dirSync)
+	if between != nil {
+		retErr = errors.Join(retErr, between())
+	}
+	return errors.Join(retErr, installBackup(dir, staging, filepath.Join(dir, "state.db.bak.tmp"), dirSync))
 }
 
 func tmpBackupCandidates(dir string) ([]string, error) {
