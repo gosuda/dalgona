@@ -456,6 +456,7 @@ func TestBackupRecoveryTriesOlderCandidates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	corruptSecondLine(t, journalFile(dir))
 	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
 		t.Fatalf("remove state.db: %v", err)
 	}
