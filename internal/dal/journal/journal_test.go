@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/pebble/v2"
 )
@@ -429,6 +430,40 @@ func TestJournalGarbageDB(t *testing.T) {
 	}
 	closeStore(t, store)
 	t.Run("backup-reconciles-double-failure", testBackupReconciliation)
+}
+
+func TestBackupRecoveryTriesOlderCandidates(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpen(t, dir)
+	events := appendEvents(t, store, "s", 3)
+	closeStore(t, store)
+	old := time.Now().Add(-time.Hour)
+	fresh := time.Now().Add(-time.Minute)
+	stale := filepath.Join(dir, "state.db.bak.tmp.staged.0.1")
+	if err := os.Rename(filepath.Join(dir, "state.db.bak"), stale); err != nil {
+		t.Fatalf("move backup aside: %v", err)
+	}
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"state.db.bak.tmp.staged.0.2", "state.db.bak.tmp.trash.0.3"} {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(path, "CURRENT"), []byte("garbage"))
+		if err := os.Chtimes(path, fresh, fresh); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("remove state.db: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "state.db"), []byte("garbage"))
+
+	store = mustOpen(t, dir)
+	requireEvents(t, replayEvents(t, store, "s"), events)
+	closeStore(t, store)
 }
 
 func testBackupReconciliation(t *testing.T) {

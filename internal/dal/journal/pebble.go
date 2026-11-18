@@ -229,34 +229,51 @@ func (m *mirrorDB) verify() error {
 	})
 }
 
-func backupSource(dir string) (string, error) {
+func backupSources(dir string) ([]string, error) {
+	var sources []string
 	for _, name := range []string{"state.db.bak", "state.db.bak.old"} {
 		candidate := filepath.Join(dir, name)
 		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
+			sources = append(sources, candidate)
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return "", err
+			return nil, err
 		}
 	}
-	return latestTmpBackup(dir)
-}
-
-func recoverBackup(dir string) (*mirrorDB, error) {
-	source, err := backupSource(dir)
+	tmps, err := tmpBackupCandidates(dir)
 	if err != nil {
 		return nil, err
 	}
-	if source == "" {
-		return nil, nil
+	return append(sources, tmps...), nil
+}
+
+func recoverBackup(dir string) (*mirrorDB, error) {
+	sources, err := backupSources(dir)
+	if err != nil {
+		return nil, err
 	}
+	var result error
+	for _, source := range sources {
+		db, err := restoreBackupSource(dir, source)
+		if err == nil {
+			return db, nil
+		}
+		result = errors.Join(result, err)
+	}
+	return nil, result
+}
+
+func restoreBackupSource(dir, source string) (*mirrorDB, error) {
 	tmp := filepath.Join(dir, "state.db.recover.tmp")
+	path := filepath.Join(dir, "state.db")
 	if err := os.RemoveAll(tmp); err != nil {
+		return nil, err
+	}
+	if err := os.RemoveAll(path); err != nil {
 		return nil, err
 	}
 	if err := copyMirrorDir(source, tmp); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, "state.db")
 	if err := os.Rename(tmp, path); err != nil {
 		return nil, err
 	}
@@ -659,26 +676,36 @@ func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) (retErr 
 	return installBackup(dir, staging, filepath.Join(dir, "state.db.bak.tmp"), dirSync)
 }
 
-func latestTmpBackup(dir string) (string, error) {
+func tmpBackupCandidates(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", fmt.Errorf("journal: list backup candidates: %w", err)
+		return nil, fmt.Errorf("journal: list backup candidates: %w", err)
 	}
-	var best string
-	var bestTime time.Time
+	var candidates []tmpBackup
 	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "state.db.bak.tmp.") {
+		name := entry.Name()
+		if !entry.IsDir() || (name != "state.db.bak.tmp" && !strings.HasPrefix(name, "state.db.bak.tmp.staged.")) {
 			continue
 		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		if info.ModTime().After(bestTime) {
-			best, bestTime = filepath.Join(dir, entry.Name()), info.ModTime()
-		}
+		candidates = append(candidates, tmpBackup{path: filepath.Join(dir, name), modTime: info.ModTime()})
 	}
-	return best, nil
+	slices.SortStableFunc(candidates, func(a, b tmpBackup) int {
+		return b.modTime.Compare(a.modTime)
+	})
+	paths := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		paths = append(paths, candidate.path)
+	}
+	return paths, nil
+}
+
+type tmpBackup struct {
+	path    string
+	modTime time.Time
 }
 
 func retireDir(dir, path string) (string, error) {
