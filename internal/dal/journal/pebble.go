@@ -607,20 +607,61 @@ func (s *Store) backupDB() error {
 	return backupDBFiles(m, dir, dirSync)
 }
 
-func closeBackup(m *mirrorDB, dir string, dirSync func(string) error) (retErr error) {
-	tmp := filepath.Join(dir, "state.db.bak.tmp")
-	staging := fmt.Sprintf("%s.close.%d", tmp, os.Getpid())
-	if err := os.RemoveAll(staging); err != nil {
-		return fmt.Errorf("journal: remove stale backup: %w", err)
-	}
-	defer func() { retErr = errors.Join(retErr, os.RemoveAll(staging)) }()
+var (
+	backupPublishMu sync.Mutex
+	backupStageSeq  atomic.Uint64
+)
+
+func nextBackupStaging(dir string) string {
+	return filepath.Join(dir, fmt.Sprintf("state.db.bak.tmp.staged.%d.%d", os.Getpid(), backupStageSeq.Add(1)))
+}
+
+func checkpointMirror(m *mirrorDB, staging string) error {
 	if err := m.withDB(func(db *pebble.DB) error {
 		return db.Checkpoint(staging)
 	}); err != nil {
 		return fmt.Errorf("journal: backup state.db: %w", err)
 	}
+	return nil
+}
+
+func closeBackup(m *mirrorDB, dir string, dirSync func(string) error) (retErr error) {
+	backupPublishMu.Lock()
+	defer backupPublishMu.Unlock()
+	staging := nextBackupStaging(dir)
+	defer func() { retErr = errors.Join(retErr, os.RemoveAll(staging)) }()
+	if err := checkpointMirror(m, staging); err != nil {
+		return err
+	}
 	m.detach()
-	return installBackup(dir, staging, tmp, dirSync)
+	return installBackup(dir, staging, filepath.Join(dir, "state.db.bak.tmp"), dirSync)
+}
+
+func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) (retErr error) {
+	backupPublishMu.Lock()
+	defer backupPublishMu.Unlock()
+	staging := nextBackupStaging(dir)
+	defer func() { retErr = errors.Join(retErr, os.RemoveAll(staging)) }()
+	if err := checkpointMirror(m, staging); err != nil {
+		return err
+	}
+	return installBackup(dir, staging, filepath.Join(dir, "state.db.bak.tmp"), dirSync)
+}
+
+func removeStaleStaging(dir, keep string) error {
+	stale, err := filepath.Glob(filepath.Join(dir, "state.db.bak.tmp.staged.*"))
+	if err != nil {
+		return fmt.Errorf("journal: list stale backups: %w", err)
+	}
+	for _, path := range stale {
+		if path == keep {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("journal: remove stale backup: %w", err)
+		}
+	}
+	return nil
 }
 
 func installBackup(dir, staging, tmp string, dirSync func(string) error) (retErr error) {
@@ -629,6 +670,9 @@ func installBackup(dir, staging, tmp string, dirSync func(string) error) (retErr
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, release()) }()
+	if err := removeStaleStaging(dir, staging); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(tmp); err != nil {
 		return fmt.Errorf("journal: remove stale backup: %w", err)
 	}
@@ -640,35 +684,6 @@ func installBackup(dir, staging, tmp string, dirSync func(string) error) (retErr
 		return fmt.Errorf("journal: stage backup: %w", err)
 	}
 	if err := swapBackup(tmp, filepath.Join(dir, "state.db.bak"), old); err != nil {
-		return err
-	}
-	if err := dirSync(dir); err != nil {
-		return fmt.Errorf("journal: sync backup dir %s: %w", dir, err)
-	}
-	return nil
-}
-
-func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) (retErr error) {
-	release, err := holdLock(filepath.Join(dir, "repair.lock"))
-	if err != nil {
-		return err
-	}
-	defer func() { retErr = errors.Join(retErr, release()) }()
-	tmp := filepath.Join(dir, "state.db.bak.tmp")
-	final := filepath.Join(dir, "state.db.bak")
-	old := filepath.Join(dir, "state.db.bak.old")
-	if err := os.RemoveAll(tmp); err != nil {
-		return fmt.Errorf("journal: remove stale backup: %w", err)
-	}
-	if err := os.RemoveAll(old); err != nil {
-		return fmt.Errorf("journal: remove stale backup: %w", err)
-	}
-	if err := m.withDB(func(db *pebble.DB) error {
-		return db.Checkpoint(tmp)
-	}); err != nil {
-		return fmt.Errorf("journal: backup state.db: %w", err)
-	}
-	if err := swapBackup(tmp, final, old); err != nil {
 		return err
 	}
 	if err := dirSync(dir); err != nil {
