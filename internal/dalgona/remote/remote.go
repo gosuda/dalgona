@@ -56,8 +56,15 @@ type Binder struct {
 	mu       sync.Mutex
 	recorder Recorder
 	services map[config.RunnerSpec]sandboxsvc.Service
+	calls    map[config.RunnerSpec]*serviceCall
 	remotes  map[string]config.RemoteSpec
 	ledgerMu sync.Mutex
+}
+
+type serviceCall struct {
+	done chan struct{}
+	svc  sandboxsvc.Service
+	err  error
 }
 
 func NewBinder(opts Options) *Binder {
@@ -69,7 +76,7 @@ func NewBinder(opts Options) *Binder {
 	}
 	b := &Binder{
 		opts: opts, log: logger, upload: runner.Upload,
-		services: map[config.RunnerSpec]sandboxsvc.Service{}, remotes: remotes,
+		services: map[config.RunnerSpec]sandboxsvc.Service{}, calls: map[config.RunnerSpec]*serviceCall{}, remotes: remotes,
 	}
 	b.newSvc = b.defaultService
 	if opts.NewService != nil {
@@ -124,19 +131,36 @@ func (b *Binder) confirm(prompt string) (bool, error) {
 
 func (b *Binder) service(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if svc, ok := b.services[spec]; ok {
+		b.mu.Unlock()
 		return svc, nil
 	}
-	svc, err := b.newSvc(ctx, spec)
-	if err != nil {
-		return nil, err
+	if call, ok := b.calls[spec]; ok {
+		b.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.svc, call.err
+		case <-ctx.Done():
+			return nil, fmt.Errorf("remote: wait for %s service: %w", spec.Service, ctx.Err())
+		}
 	}
-	b.services[spec] = svc
-	return svc, nil
+	call := &serviceCall{done: make(chan struct{})}
+	b.calls[spec] = call
+	b.mu.Unlock()
+
+	call.svc, call.err = b.newSvc(ctx, spec)
+
+	b.mu.Lock()
+	if call.err == nil {
+		b.services[spec] = call.svc
+	}
+	delete(b.calls, spec)
+	close(call.done)
+	b.mu.Unlock()
+	return call.svc, call.err
 }
 
-func (b *Binder) defaultService(_ context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error) {
+func (b *Binder) defaultService(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error) {
 	switch spec.Service {
 	case "docker":
 		return docker.NewFromEnv(runner.Bootstrap)
@@ -148,9 +172,9 @@ func (b *Binder) defaultService(_ context.Context, spec config.RunnerSpec) (sand
 		return sprites.NewFromToken(token, runner.Bootstrap), nil
 	case "modal":
 		if spec.Image != "" {
-			return modal.NewFromEnvWithImage(spec.Image, runner.Bootstrap)
+			return modal.NewFromEnvWithImageCtx(ctx, spec.Image, runner.Bootstrap)
 		}
-		return modal.NewFromEnv(runner.Bootstrap)
+		return modal.NewFromEnvCtx(ctx, runner.Bootstrap)
 	case "sandbox0":
 		return b.sandbox0Service()
 	case "cloudflare":
