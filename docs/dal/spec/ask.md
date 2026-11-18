@@ -146,7 +146,7 @@ A subscriber that the host closes as slow MUST NOT end the open questions, becau
 
 The first answer to a question MUST decide it. A later answer MUST fail with an unknown request error.
 
-An interrupt of the turn MUST end the question as interrupted.
+An interrupt of the turn MUST end the question as interrupted. A cancellation that races the question offer MUST also end the question as interrupted and MUST resolve its update as resolved.
 
 The host MUST end an open question with the timed-out outcome when 5 minutes have passed since it published the question to its first subscriber.
 

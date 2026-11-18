@@ -38,6 +38,9 @@ func (t *Thread) Ask(ctx context.Context, callID string, questions []asktool.Que
 	offered, err := ask(ctx, t, func(a *actor) bool { return a.offerQuestion(prompt, replies) })
 	if err != nil {
 		if ctx.Err() != nil {
+			_ = t.do(context.Background(), func(a *actor) {
+				a.resolveQuestion(prompt.RequestID, asktool.Reply{Outcome: asktool.OutcomeInterrupted})
+			})
 			return asktool.Reply{Outcome: asktool.OutcomeInterrupted}, nil
 		}
 		return asktool.Reply{}, err
