@@ -229,35 +229,27 @@ func (m *mirrorDB) verify() error {
 	})
 }
 
-func backupSources(dir string) ([]string, error) {
-	var sources []string
+func backupSources(dir string) (sources []string, err error) {
 	for _, name := range []string{"state.db.bak", "state.db.bak.old"} {
 		candidate := filepath.Join(dir, name)
-		if _, err := os.Stat(candidate); err == nil {
+		if _, serr := os.Stat(candidate); serr == nil {
 			sources = append(sources, candidate)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
+		} else if !errors.Is(serr, os.ErrNotExist) {
+			err = errors.Join(err, serr)
 		}
 	}
-	tmps, err := tmpBackupCandidates(dir)
-	if err != nil {
-		return nil, err
-	}
-	return append(sources, tmps...), nil
+	tmps, terr := tmpBackupCandidates(dir)
+	return append(sources, tmps...), errors.Join(err, terr)
 }
 
 func recoverBackup(dir string) (*mirrorDB, error) {
-	sources, err := backupSources(dir)
-	if err != nil {
-		return nil, err
-	}
-	var result error
+	sources, result := backupSources(dir)
 	for _, source := range sources {
-		db, err := restoreBackupSource(dir, source)
-		if err == nil {
+		db, rerr := restoreBackupSource(dir, source)
+		if rerr == nil {
 			return db, nil
 		}
-		result = errors.Join(result, err)
+		result = errors.Join(result, rerr)
 	}
 	return nil, result
 }
