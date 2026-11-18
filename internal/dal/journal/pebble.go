@@ -229,16 +229,22 @@ func (m *mirrorDB) verify() error {
 	})
 }
 
-func recoverBackup(dir string) (*mirrorDB, error) {
-	var source string
+func backupSource(dir string) (string, error) {
 	for _, name := range []string{"state.db.bak", "state.db.bak.old"} {
 		candidate := filepath.Join(dir, name)
 		if _, err := os.Stat(candidate); err == nil {
-			source = candidate
-			break
+			return candidate, nil
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
+			return "", err
 		}
+	}
+	return latestTmpBackup(dir)
+}
+
+func recoverBackup(dir string) (*mirrorDB, error) {
+	source, err := backupSource(dir)
+	if err != nil {
+		return nil, err
 	}
 	if source == "" {
 		return nil, nil
@@ -621,10 +627,6 @@ func nextBackupPath(dir, kind string) string {
 	}
 }
 
-func nextBackupStaging(dir string) string {
-	return nextBackupPath(dir, "staged")
-}
-
 func checkpointMirror(m *mirrorDB, staging string) error {
 	if err := m.withDB(func(db *pebble.DB) error {
 		return db.Checkpoint(staging)
@@ -637,7 +639,7 @@ func checkpointMirror(m *mirrorDB, staging string) error {
 func closeBackup(m *mirrorDB, dir string, dirSync func(string) error) (retErr error) {
 	backupPublishMu.Lock()
 	defer backupPublishMu.Unlock()
-	staging := nextBackupStaging(dir)
+	staging := nextBackupPath(dir, "staged")
 	defer func() { retErr = errors.Join(retErr, os.RemoveAll(staging)) }()
 	if err := checkpointMirror(m, staging); err != nil {
 		return err
@@ -649,12 +651,34 @@ func closeBackup(m *mirrorDB, dir string, dirSync func(string) error) (retErr er
 func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) (retErr error) {
 	backupPublishMu.Lock()
 	defer backupPublishMu.Unlock()
-	staging := nextBackupStaging(dir)
+	staging := nextBackupPath(dir, "staged")
 	defer func() { retErr = errors.Join(retErr, os.RemoveAll(staging)) }()
 	if err := checkpointMirror(m, staging); err != nil {
 		return err
 	}
 	return installBackup(dir, staging, filepath.Join(dir, "state.db.bak.tmp"), dirSync)
+}
+
+func latestTmpBackup(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("journal: list backup candidates: %w", err)
+	}
+	var best string
+	var bestTime time.Time
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "state.db.bak.tmp.") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(bestTime) {
+			best, bestTime = filepath.Join(dir, entry.Name()), info.ModTime()
+		}
+	}
+	return best, nil
 }
 
 func retireDir(dir, path string) (string, error) {
@@ -711,31 +735,52 @@ func installBackup(dir, staging, tmp string, dirSync func(string) error) (retErr
 	return errors.Join(retErr, lockedErr)
 }
 
-func installBackupLocked(dir, staging, tmp string, dirSync func(string) error) (trash []string, err error) {
-	trash, err = retireStaleStaging(dir, staging)
+func retireSuperseded(dir, tmp, keep string) (trash []string, retiredOld string, err error) {
+	trash, err = retireStaleStaging(dir, keep)
 	if err != nil {
-		return trash, err
+		return trash, "", err
 	}
 	old := filepath.Join(dir, "state.db.bak.old")
 	for _, path := range []string{tmp, old} {
 		retired, rerr := retireDir(dir, path)
 		if rerr != nil {
-			return trash, rerr
+			return trash, "", rerr
 		}
-		if retired != "" {
+		if path == old {
+			retiredOld = retired
+		} else if retired != "" {
 			trash = append(trash, retired)
 		}
 	}
-	if rerr := os.Rename(staging, tmp); rerr != nil { //nolint:gosec // backup path is validated
-		return trash, fmt.Errorf("journal: stage backup: %w", rerr)
-	}
-	swapped, err := swapBackup(tmp, filepath.Join(dir, "state.db.bak"), old)
+	return trash, retiredOld, nil
+}
+
+func installBackupLocked(dir, staging, tmp string, dirSync func(string) error) (trash []string, err error) {
+	old := filepath.Join(dir, "state.db.bak.old")
+	trash, retiredOld, err := retireSuperseded(dir, tmp, staging)
 	if err != nil {
 		return trash, err
 	}
+	restore := func() {
+		if retiredOld != "" {
+			_ = os.Rename(retiredOld, old)
+		}
+	}
+	if rerr := os.Rename(staging, tmp); rerr != nil { //nolint:gosec // backup path is validated
+		restore()
+		return trash, fmt.Errorf("journal: stage backup: %w", rerr)
+	}
+	swapped, serr := swapBackup(tmp, filepath.Join(dir, "state.db.bak"), old)
+	if serr != nil {
+		restore()
+		return trash, serr
+	}
 	trash = append(trash, swapped)
-	if err := dirSync(dir); err != nil {
-		return trash, fmt.Errorf("journal: sync backup dir %s: %w", dir, err)
+	if retiredOld != "" {
+		trash = append(trash, retiredOld)
+	}
+	if serr := dirSync(dir); serr != nil {
+		return trash, fmt.Errorf("journal: sync backup dir %s: %w", dir, serr)
 	}
 	return trash, nil
 }
