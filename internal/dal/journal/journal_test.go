@@ -466,6 +466,34 @@ func TestBackupRecoveryTriesOlderCandidates(t *testing.T) {
 	closeStore(t, store)
 }
 
+func TestRetireStaleStagingKeepsLivePeer(t *testing.T) {
+	dir := t.TempDir()
+	fresh := filepath.Join(dir, "state.db.bak.tmp.staged.0.1")
+	stale := filepath.Join(dir, "state.db.bak.tmp.staged.0.2")
+	for _, path := range []string{fresh, stale} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	aged := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(stale, aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	trash, err := retireStaleStaging(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("a live peer checkpoint was retired")
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a stale checkpoint was kept")
+	}
+	if len(trash) != 1 {
+		t.Fatalf("retired paths = %v", trash)
+	}
+}
+
 func testBackupReconciliation(t *testing.T) {
 	dir := t.TempDir()
 	store := mustOpen(t, dir)

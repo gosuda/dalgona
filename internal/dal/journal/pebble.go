@@ -725,6 +725,13 @@ func retireDir(dir, path string) (string, error) {
 	return retired, nil
 }
 
+const peerStagingGrace = 5 * time.Minute
+
+func liveStagingDir(entry os.DirEntry) bool {
+	info, err := entry.Info()
+	return err != nil || time.Since(info.ModTime()) < peerStagingGrace
+}
+
 func retireStaleStaging(dir, keep string) (trash []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -735,7 +742,7 @@ func retireStaleStaging(dir, keep string) (trash []string, err error) {
 			continue
 		}
 		stale := filepath.Join(dir, entry.Name())
-		if stale == keep {
+		if stale == keep || liveStagingDir(entry) {
 			continue
 		}
 		retired, err := retireDir(dir, stale)
