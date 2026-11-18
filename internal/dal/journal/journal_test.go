@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/pebble/v2"
 )
@@ -429,6 +430,166 @@ func TestJournalGarbageDB(t *testing.T) {
 	}
 	closeStore(t, store)
 	t.Run("backup-reconciles-double-failure", testBackupReconciliation)
+}
+
+func TestBackupRecoveryTriesOlderCandidates(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpen(t, dir)
+	events := appendEvents(t, store, "s", 3)
+	closeStore(t, store)
+	old := time.Now().Add(-time.Hour)
+	fresh := time.Now().Add(-time.Minute)
+	stale := filepath.Join(dir, "state.db.bak.tmp.staged.0.1")
+	if err := os.Rename(filepath.Join(dir, "state.db.bak"), stale); err != nil {
+		t.Fatalf("move backup aside: %v", err)
+	}
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"state.db.bak.tmp.staged.0.2", "state.db.bak.tmp.trash.0.3"} {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(path, "CURRENT"), []byte("garbage"))
+		if err := os.Chtimes(path, fresh, fresh); err != nil {
+			t.Fatal(err)
+		}
+	}
+	corruptSecondLine(t, journalFile(dir))
+	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("remove state.db: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "state.db"), []byte("garbage"))
+
+	store = mustOpen(t, dir)
+	requireEvents(t, replayEvents(t, store, "s"), events)
+	closeStore(t, store)
+}
+
+func TestBackupRecoveryToleratesFallbackStatError(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpen(t, dir)
+	events := appendEvents(t, store, "s", 3)
+	closeStore(t, store)
+	old := filepath.Join(dir, "state.db.bak.old")
+	if err := os.Symlink("state.db.bak.old", old); err != nil {
+		t.Skipf("symlinks not permitted: %v", err)
+	}
+	corruptSecondLine(t, journalFile(dir))
+	if err := os.RemoveAll(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("remove state.db: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "state.db"), []byte("garbage"))
+
+	store = mustOpen(t, dir)
+	requireEvents(t, replayEvents(t, store, "s"), events)
+	if err := os.Remove(old); err != nil {
+		t.Fatal(err)
+	}
+	closeStore(t, store)
+}
+
+func TestRetireStaleStagingKeepsLivePeer(t *testing.T) {
+	dir := t.TempDir()
+	fresh := filepath.Join(dir, "state.db.bak.tmp.staged.0.1")
+	stale := filepath.Join(dir, "state.db.bak.tmp.staged.0.2")
+	for _, path := range []string{fresh, stale} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	aged := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(stale, aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	trash, err := retireStaleStaging(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("a live peer checkpoint was retired")
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a stale checkpoint was kept")
+	}
+	if len(trash) != 1 {
+		t.Fatalf("retired paths = %v", trash)
+	}
+}
+
+type backupFixture struct {
+	dir    string
+	final  string
+	staged string
+	tmp    string
+}
+
+func staleBackupFixture(t *testing.T) backupFixture {
+	fixture := backupFixture{dir: t.TempDir()}
+	fixture.final = filepath.Join(fixture.dir, "state.db.bak")
+	fixture.staged = filepath.Join(fixture.dir, "state.db.bak.tmp.staged.0.1")
+	fixture.tmp = filepath.Join(fixture.dir, "state.db.bak.tmp")
+	for _, path := range []string{fixture.final, fixture.staged} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(fixture.staged, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func TestInstallSkipsOutdatedCheckpoint(t *testing.T) {
+	fixture := staleBackupFixture(t)
+	trash, err := installBackupLocked(fixture.dir, fixture.staged, fixture.tmp, syncDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trash) != 0 {
+		t.Fatalf("outdated install produced trash %v", trash)
+	}
+	if _, serr := os.Stat(fixture.staged); serr != nil {
+		t.Fatal("skipped install consumed the staged checkpoint")
+	}
+}
+
+func TestInstallProceedsPastFutureBackup(t *testing.T) {
+	fixture := staleBackupFixture(t)
+	writeFile(t, filepath.Join(fixture.final, "MARKER"), []byte("backup"))
+	writeFile(t, filepath.Join(fixture.staged, "STAGED"), []byte("staged"))
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(fixture.final, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installBackupLocked(fixture.dir, fixture.staged, fixture.tmp, syncDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, serr := os.Stat(filepath.Join(fixture.final, "MARKER")); serr == nil {
+		t.Fatal("future-dated backup blocked a fresh checkpoint")
+	}
+	if _, serr := os.Stat(filepath.Join(fixture.final, "STAGED")); serr != nil {
+		t.Fatalf("fresh checkpoint was not installed: %v", serr)
+	}
+}
+
+func TestBackupInstallRestoresSuperseded(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "state.db.bak.old")
+	if err := os.MkdirAll(old, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(old, "MARKER"), []byte("backup"))
+	if _, err := installBackupLocked(dir,
+		filepath.Join(dir, "state.db.bak.tmp.staged.0.9"),
+		filepath.Join(dir, "state.db.bak.tmp"), syncDir); err == nil {
+		t.Fatal("a missing staged checkpoint installed without error")
+	}
+	if _, err := os.Stat(filepath.Join(old, "MARKER")); err != nil {
+		t.Fatalf("superseded fallback not restored: %v", err)
+	}
 }
 
 func testBackupReconciliation(t *testing.T) {
