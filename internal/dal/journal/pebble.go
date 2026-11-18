@@ -612,13 +612,17 @@ var (
 	backupStageSeq  atomic.Uint64
 )
 
-func nextBackupStaging(dir string) string {
+func nextBackupPath(dir, kind string) string {
 	for {
-		path := filepath.Join(dir, fmt.Sprintf("state.db.bak.tmp.staged.%d.%d", os.Getpid(), backupStageSeq.Add(1)))
+		path := filepath.Join(dir, fmt.Sprintf("state.db.bak.tmp.%s.%d.%d", kind, os.Getpid(), backupStageSeq.Add(1)))
 		if _, err := os.Stat(path); err != nil {
 			return path
 		}
 	}
+}
+
+func nextBackupStaging(dir string) string {
+	return nextBackupPath(dir, "staged")
 }
 
 func checkpointMirror(m *mirrorDB, staging string) error {
@@ -653,6 +657,23 @@ func backupDBFiles(m *mirrorDB, dir string, dirSync func(string) error) (retErr 
 	return installBackup(dir, staging, filepath.Join(dir, "state.db.bak.tmp"), dirSync)
 }
 
+func retireDir(dir, path string) (string, error) {
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("journal: check stale backup: %w", err)
+	}
+	retired := nextBackupPath(dir, "trash")
+	if err := os.Rename(path, retired); err != nil { //nolint:gosec // backup path is validated
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("journal: retire stale backup: %w", err)
+	}
+	return retired, nil
+}
+
 func retireStaleStaging(dir, keep string) (trash []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -666,11 +687,13 @@ func retireStaleStaging(dir, keep string) (trash []string, err error) {
 		if stale == keep {
 			continue
 		}
-		retired := filepath.Join(dir, fmt.Sprintf("state.db.bak.tmp.trash.%d.%d", os.Getpid(), backupStageSeq.Add(1)))
-		if err := os.Rename(stale, retired); err != nil { //nolint:gosec // backup path is validated
-			return trash, fmt.Errorf("journal: retire stale backup: %w", err)
+		retired, err := retireDir(dir, stale)
+		if err != nil {
+			return trash, err
 		}
-		trash = append(trash, retired)
+		if retired != "" {
+			trash = append(trash, retired)
+		}
 	}
 	return trash, nil
 }
@@ -680,46 +703,51 @@ func installBackup(dir, staging, tmp string, dirSync func(string) error) (retErr
 	if err != nil {
 		return err
 	}
-	trash, err := retireStaleStaging(dir, staging)
-	if err != nil {
-		return err
+	trash, lockedErr := installBackupLocked(dir, staging, tmp, dirSync)
+	retErr = errors.Join(retErr, release())
+	for _, path := range trash {
+		retErr = errors.Join(retErr, os.RemoveAll(path))
 	}
-	defer func() {
-		for _, path := range trash {
-			retErr = errors.Join(retErr, os.RemoveAll(path))
-		}
-	}()
-	defer func() { retErr = errors.Join(retErr, release()) }()
-	if err := os.RemoveAll(tmp); err != nil {
-		return fmt.Errorf("journal: remove stale backup: %w", err)
-	}
-	old := filepath.Join(dir, "state.db.bak.old")
-	if err := os.RemoveAll(old); err != nil {
-		return fmt.Errorf("journal: remove stale backup: %w", err)
-	}
-	if err := os.Rename(staging, tmp); err != nil { //nolint:gosec // backup path is validated
-		return fmt.Errorf("journal: stage backup: %w", err)
-	}
-	if err := swapBackup(tmp, filepath.Join(dir, "state.db.bak"), old); err != nil {
-		return err
-	}
-	if err := dirSync(dir); err != nil {
-		return fmt.Errorf("journal: sync backup dir %s: %w", dir, err)
-	}
-	return nil
+	return errors.Join(retErr, lockedErr)
 }
 
-func swapBackup(tmp, final, old string) error {
+func installBackupLocked(dir, staging, tmp string, dirSync func(string) error) (trash []string, err error) {
+	trash, err = retireStaleStaging(dir, staging)
+	if err != nil {
+		return trash, err
+	}
+	old := filepath.Join(dir, "state.db.bak.old")
+	for _, path := range []string{tmp, old} {
+		retired, rerr := retireDir(dir, path)
+		if rerr != nil {
+			return trash, rerr
+		}
+		if retired != "" {
+			trash = append(trash, retired)
+		}
+	}
+	if rerr := os.Rename(staging, tmp); rerr != nil { //nolint:gosec // backup path is validated
+		return trash, fmt.Errorf("journal: stage backup: %w", rerr)
+	}
+	swapped, err := swapBackup(tmp, filepath.Join(dir, "state.db.bak"), old)
+	if err != nil {
+		return trash, err
+	}
+	trash = append(trash, swapped)
+	if err := dirSync(dir); err != nil {
+		return trash, fmt.Errorf("journal: sync backup dir %s: %w", dir, err)
+	}
+	return trash, nil
+}
+
+func swapBackup(tmp, final, old string) (string, error) {
 	if err := os.Rename(final, old); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("journal: swap old backup: %w", err)
+		return "", fmt.Errorf("journal: swap old backup: %w", err)
 	}
 	if err := os.Rename(tmp, final); err != nil { //nolint:gosec // backup path is validated
-		return fmt.Errorf("journal: install state.db.bak: %w", err)
+		return "", fmt.Errorf("journal: install state.db.bak: %w", err)
 	}
-	if err := os.RemoveAll(old); err != nil {
-		return fmt.Errorf("journal: remove swapped backup: %w", err)
-	}
-	return nil
+	return old, nil
 }
 
 var (
