@@ -2,6 +2,7 @@ package patch
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 
 	"github.com/gosuda/dalgona/internal/dal/tool"
@@ -176,6 +177,18 @@ func (e Editor) refuse(err error) error {
 }
 
 func outcomeError(style Style, outcome tool.Outcome, err error) error {
+	return &tool.OutcomeError{Outcome: stamped(style, outcome), Err: err}
+}
+
+func stamped(style Style, outcome tool.Outcome) tool.Outcome {
 	outcome.Style, outcome.Version = string(style), contractVersion
-	return &tool.OutcomeError{Outcome: outcome, Err: err}
+	return outcome
+}
+
+func outcomeMeta(outcome tool.Outcome) jsontext.Value {
+	meta, err := outcome.Meta(false)
+	if err != nil {
+		return nil
+	}
+	return meta
 }

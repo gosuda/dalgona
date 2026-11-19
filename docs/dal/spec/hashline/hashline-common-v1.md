@@ -370,7 +370,7 @@ operation, finish commit or rollback before honoring cancellation.
 
 Rollback is an attempt, not an atomic multi-file transaction visible to every
 reader. Crashes and non-cooperating writers remain limitations from S-WRITE.
-Report observed outcome, not intended outcome. The new profiles do not yet emit these statuses:
+Report observed outcome, not intended outcome. The new profiles emit these statuses:
 
 | Status | Commit state | Meaning |
 |---|---|---|
@@ -429,8 +429,9 @@ written files as an edit rejection.
 
 ## C15. Output and recovery
 
-For the new profiles, retain existing `text`, `error_class`, `changes`, `display`
-and add one versioned `hashline` object. Legacy output stays unchanged.
+For the new profiles, retain the existing output text, `changes`, and `display`.
+Add one versioned `hashline` object to `tool.completed.meta`. The object also
+carries `error_class`. Legacy output stays unchanged.
 
 ```json
 {
@@ -439,6 +440,7 @@ and add one versioned `hashline` object. Legacy output stays unchanged.
   "status": "needs_context",
   "commit_state": "none",
   "reason": "unobserved_range",
+  "error_class": "proof",
   "replayed": false,
   "recovery": {
     "kind": "read",
@@ -458,6 +460,10 @@ as a verified mapping of the original target. Path states use workspace-relative
 paths and `before`, `after`, or `unknown` states. `changes` describes verified
 actual changes, never the whole proposed plan on partial failure. Display diffs
 are not proof.
+
+The object is attached to a call that reached planning, with two exceptions.
+A pre-plan decline carries none. Recovery and turn end write none for a decline
+or a skipped call. The object MUST stay under 48 KiB.
 
 Recovery respects current read permission and reveals no foreign consumer data.
 Recovery display is not implemented yet. It MAY show at most 40 complete lines and 16 KiB of source text total. Never truncate

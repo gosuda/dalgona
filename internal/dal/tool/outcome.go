@@ -1,7 +1,11 @@
 package tool
 
 import (
+	"bytes"
+	"encoding/json/jsontext"
+	"errors"
 	"fmt"
+	"io"
 	"slices"
 )
 
@@ -148,3 +152,132 @@ type OutcomeError struct {
 func (e *OutcomeError) Error() string { return e.Err.Error() }
 
 func (e *OutcomeError) Unwrap() error { return e.Err }
+
+const MaxOutcomeMetaBytes = 48 << 10
+
+type Profile struct {
+	Style   string
+	Version int
+}
+
+type Profiled interface {
+	Profile() (Profile, bool)
+}
+
+func (o Outcome) Meta(replayed bool) (jsontext.Value, error) {
+	if err := o.Valid(); err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	enc := jsontext.NewEncoder(&buf)
+	err := errors.Join(
+		enc.WriteToken(jsontext.BeginObject),
+		enc.WriteToken(jsontext.String("hashline")),
+		o.writeObject(enc, replayed),
+		enc.WriteToken(jsontext.EndObject),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("tool: encode outcome meta: %w", err)
+	}
+	meta := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+	if len(meta) >= MaxOutcomeMetaBytes {
+		return nil, fmt.Errorf("tool: outcome meta is %d bytes, not under %d", len(meta), MaxOutcomeMetaBytes)
+	}
+	return jsontext.Value(meta), nil
+}
+
+func (o Outcome) writeObject(enc *jsontext.Encoder, replayed bool) error {
+	return errors.Join(
+		enc.WriteToken(jsontext.BeginObject),
+		writeKey(enc, "contract_version"), enc.WriteToken(jsontext.Int(int64(o.Version))),
+		writeKey(enc, "style"), enc.WriteToken(jsontext.String(o.Style)),
+		writeKey(enc, "status"), enc.WriteToken(jsontext.String(string(o.Status))),
+		writeKey(enc, "commit_state"), enc.WriteToken(jsontext.String(string(o.Commit))),
+		writeKey(enc, "reason"), writeOptional(enc, string(o.Reason)),
+		writeKey(enc, "error_class"), writeOptional(enc, string(o.Class)),
+		writeKey(enc, "replayed"), enc.WriteToken(jsontext.Bool(replayed)),
+		writeKey(enc, "recovery"), writeRecovery(enc, o.Recovery),
+		writeKey(enc, "path_states"), writePathStates(enc, o.Paths),
+		enc.WriteToken(jsontext.EndObject),
+	)
+}
+
+func writeKey(enc *jsontext.Encoder, name string) error {
+	return enc.WriteToken(jsontext.String(name))
+}
+
+func writeOptional(enc *jsontext.Encoder, value string) error {
+	if value == "" {
+		return enc.WriteToken(jsontext.Null)
+	}
+	return enc.WriteToken(jsontext.String(value))
+}
+
+func writeRecovery(enc *jsontext.Encoder, recovery *Recovery) error {
+	if recovery == nil {
+		return enc.WriteToken(jsontext.Null)
+	}
+	return errors.Join(
+		enc.WriteToken(jsontext.BeginObject),
+		writeKey(enc, "kind"), enc.WriteToken(jsontext.String(recovery.Kind)),
+		writeKey(enc, "path"), enc.WriteToken(jsontext.String(recovery.Path)),
+		writeKey(enc, "ranges"), writeRanges(enc, recovery.Ranges),
+		writeKey(enc, "mapping"), enc.WriteToken(jsontext.String(recovery.Mapping)),
+		writeKey(enc, "remaining"), writeRanges(enc, recovery.Remaining),
+		enc.WriteToken(jsontext.EndObject),
+	)
+}
+
+func writeRanges(enc *jsontext.Encoder, ranges []LineRange) error {
+	err := enc.WriteToken(jsontext.BeginArray)
+	for _, item := range ranges {
+		err = errors.Join(err,
+			enc.WriteToken(jsontext.BeginObject),
+			writeKey(enc, "first"), enc.WriteToken(jsontext.Int(int64(item.First))),
+			writeKey(enc, "last"), enc.WriteToken(jsontext.Int(int64(item.Last))),
+			enc.WriteToken(jsontext.EndObject),
+		)
+	}
+	return errors.Join(err, enc.WriteToken(jsontext.EndArray))
+}
+
+func writePathStates(enc *jsontext.Encoder, paths []PathState) error {
+	err := enc.WriteToken(jsontext.BeginArray)
+	for _, item := range paths {
+		err = errors.Join(err,
+			enc.WriteToken(jsontext.BeginObject),
+			writeKey(enc, "path"), enc.WriteToken(jsontext.String(item.Path)),
+			writeKey(enc, "state"), enc.WriteToken(jsontext.String(item.State)),
+			enc.WriteToken(jsontext.EndObject),
+		)
+	}
+	return errors.Join(err, enc.WriteToken(jsontext.EndArray))
+}
+
+const replayedPointer = "/hashline/replayed"
+
+func ReplayMeta(meta jsontext.Value) (jsontext.Value, error) {
+	var out bytes.Buffer
+	enc := jsontext.NewEncoder(&out)
+	dec := jsontext.NewDecoder(bytes.NewReader(meta))
+	found := false
+	for {
+		token, err := dec.ReadToken()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("tool: replay outcome meta: %w", err)
+		}
+		if token.Kind() == 'f' && string(dec.StackPointer()) == replayedPointer {
+			token, found = jsontext.True, true
+		}
+		if err := enc.WriteToken(token); err != nil {
+			return nil, fmt.Errorf("tool: replay outcome meta: %w", err)
+		}
+	}
+	if !found {
+		return meta, nil
+	}
+	return jsontext.Value(bytes.TrimSuffix(out.Bytes(), []byte("\n"))), nil
+}
