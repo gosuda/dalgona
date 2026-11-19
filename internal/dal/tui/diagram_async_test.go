@@ -194,6 +194,37 @@ func TestQuitFlushesRowsHeldBehindDiagram(t *testing.T) {
 	})
 }
 
+func TestSuspendWaitsForALoneDiagram(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		gate := make(chan struct{})
+		release := sync.OnceFunc(func() { close(gate) })
+		defer func() {
+			release()
+			time.Sleep(time.Minute)
+		}()
+		results := make(chan diagramMsg, 8)
+		m := suspendModel(t, gate)
+		var command tea.Cmd
+		m, command = updateUnblocked(t, m, agentDelta("a1", diagramFence))
+		runDiagramCommands(command, results)
+		m, command = updateUnblocked(t, m, press('z', tea.ModCtrl, ""))
+		if !m.suspending || hasMsg[tea.SuspendMsg](commandMsgs(command)) {
+			t.Fatalf("suspend returned while the only diagram was rendering: suspending %t", m.suspending)
+		}
+		time.Sleep(diagramBudget + time.Second)
+		synctest.Wait()
+		m, command = updateUnblocked(t, m, takeDiagramResult(t, results))
+		m, suspended := pumpUntilSuspend(t, m, command)
+		if !suspended {
+			t.Fatal("suspend never returned after the diagram card printed")
+		}
+		if len(m.out.pending) != 0 || len(m.out.held) != 0 || m.out.printing {
+			t.Fatalf("suspend returned before the card printed: pending %q, held %d, printing %t", m.out.pending, len(m.out.held), m.out.printing)
+		}
+	})
+}
+
 func suspendModel(t *testing.T, gate <-chan struct{}) model {
 	t.Helper()
 	m := newTestModel(new(fakeCaller), Options{})
