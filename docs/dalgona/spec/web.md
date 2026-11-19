@@ -485,7 +485,9 @@ Under forced colours, each state tag and the point button MUST keep a visible bo
 
 The page MUST have one status region and one alert region. They MUST be the notice regions.
 The transcript MUST NOT be a live region.
-A panel MUST show its own errors and progress text as alerts and status text inside its dialog. A panel MUST NOT add a notice for them.
+The compact, fork, tree, rewind, advisor, review, and resume panels MUST show their own error as an alert inside their dialog. They MUST NOT add a notice for it.
+The resume panel MUST show its search progress as status text inside its dialog. It MUST NOT add a notice for it.
+A failed save in the model or settings panel MUST show a notice.
 The composer MUST show its error as an alert beside the message field. The message field MUST name that alert in `aria-describedby`. The composer MUST NOT add a notice for its error.
-The test `page live regions` in `web/src/lib/components/App.dom.test.ts` checks these rules.
+The `page live regions` tests in `web/src/lib/components/App.dom.test.ts` check these rules.
 `web/checks/approval-actions.js` checks the approval card on small screens. `web/checks/dock.js` checks the composer dock. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript.

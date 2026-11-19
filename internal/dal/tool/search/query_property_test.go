@@ -223,12 +223,22 @@ func propertyFiller(rng *rand.Rand) string {
 	}
 }
 
+func requireIndexedRecords(t *testing.T, m manifest, want map[string]bool) {
+	t.Helper()
+	for path, indexed := range want {
+		at := slices.IndexFunc(m.Entries, func(entry manifestEntry) bool { return entry.Path == path })
+		if at < 0 || m.Entries[at].Indexed != indexed {
+			t.Fatalf("manifest record of %s = %+v, want Indexed = %v", path, m.Entries, indexed)
+		}
+	}
+}
+
 type longLineQuery struct {
 	args    args
 	longRow bool
 }
 
-func TestIndexedGrepEqualsScanOnLongLines(t *testing.T) {
+func TestGrepReadsWholeLongLinesWithAndWithoutAnIndex(t *testing.T) {
 	requireChangeTimes(t)
 	rng := rand.New(rand.NewPCG(20261112, 2))
 	search := func(pattern string, literal, ignoreCase bool) args {
@@ -255,6 +265,7 @@ func TestIndexedGrepEqualsScanOnLongLines(t *testing.T) {
 			})
 			start := time.Now().Add(time.Hour)
 			c := indexedCase{ws: ws, dir: buildTestIndex(t, ws, start, 1<<30), clock: clockAt(start)}
+			requireIndexedRecords(t, readBuildManifest(t, c.dir), map[string]bool{"long/f.txt": false, "short/g.txt": true})
 			for _, query := range size.queries {
 				out := requireIndexedAgrees(t, c, query.args)
 				if got := strings.Contains(out.Text, "long/f.txt:2: "); got != query.longRow {
