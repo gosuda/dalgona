@@ -96,7 +96,7 @@ The page holds one `Session`, which owns the connection and the page state.
 - The transcript MUST show Jump to latest whenever the reader is over 32px from the end, whether or not a turn runs. The button MUST show appended items as `· N new`. Activating it MUST scroll to the end and focus the last row without changing that scroll position. Showing the button MUST NOT move focus.
 - At 52rem or narrower the Jump to latest button MUST sit above the dock, whatever the dock's height. The client MUST measure the dock and publish its height to the button.
 - The skip link MUST name the transcript and target `#transcript`.
-- At 52rem or narrower the dock (notices, request card, composer) stays at the bottom of the viewport. Form text is at least 16px.
+- At 52rem or narrower the dock (notices, request card, composer) MUST stay at the bottom of the viewport at every scroll position. At the end of the document the dock MUST NOT cover the last transcript row. The dock MUST span the width of the viewport. While no request is open, the dock MUST leave at least 6rem of the viewport above it. The dock MUST scroll inside itself when its content is taller than that. Form text is at least 16px.
 
 ### Theme
 
@@ -236,6 +236,7 @@ The request details MUST scroll inside their own region. The decision actions MU
 ArrowUp and ArrowDown MUST scroll the approval details by 48 px. PageUp and PageDown MUST scroll the approval details by the height of the details minus 48 px. Each PageUp and PageDown scroll MUST move at least 48 px.
 The dock MUST fit within the viewport. Approval details MUST shrink and scroll without hiding the card header or actions.
 Approval details MUST retain a readable scroll region. The card header, actions, and composer MUST NOT overlap.
+While an approval is open, the composer MUST keep its label, field, and actions reachable inside the viewport by scrolling the composer if needed.
 
 While the card has focus, `y` MUST accept, `a` MUST accept for the session, `n` MUST decline, and Escape MUST cancel and interrupt the turn. Escape MUST answer the card at once, and the two-press guard of the composer MUST NOT apply to it.
 
@@ -490,4 +491,4 @@ The resume panel MUST show its search progress as status text inside its dialog.
 A failed save in the model or settings panel MUST show a notice.
 The composer MUST show its error as an alert beside the message field. The message field MUST name that alert in `aria-describedby`. The composer MUST NOT add a notice for its error.
 The `page live regions` tests in `web/src/lib/components/App.dom.test.ts` check these rules.
-`web/checks/approval-actions.js` checks the approval card on small screens. `web/checks/dock.js` checks the composer dock. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript.
+`web/checks/approval-actions.js` checks the approval card on small screens. `web/checks/dock.js` checks the composer dock at the start, the middle and the end of the document. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript at 1280x800, on a thread whose transcript holds more than its column shows.
