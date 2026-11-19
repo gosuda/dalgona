@@ -133,14 +133,19 @@ func fieldWindow(s *screenState, text []rune, cursor, room int) (string, int) {
 		return s.expand(string(text)), s.cells(string(text[:cursor]))
 	}
 	left, right := growWindow(s, text, cursor, room)
-	prefix, suffix := "", ""
+	return s.expand(windowText(text, left, right)), s.cells(windowText(text[:cursor], left, cursor))
+}
+
+func windowText(text []rune, left, right int) string {
+	var out strings.Builder
 	if left > 0 {
-		prefix = "..."
+		out.WriteString("...")
 	}
+	out.WriteString(string(text[left:right]))
 	if right < len(text) {
-		suffix = "..."
+		out.WriteString("...")
 	}
-	return s.expand(prefix + string(text[left:right]) + suffix), s.cells(prefix + string(text[left:cursor]))
+	return out.String()
 }
 
 func growWindow(s *screenState, text []rune, cursor, room int) (int, int) {
@@ -160,14 +165,7 @@ func growWindow(s *screenState, text []rune, cursor, room int) (int, int) {
 }
 
 func windowCells(s *screenState, text []rune, left, right int) int {
-	n := s.cells(string(text[left:right]))
-	if left > 0 {
-		n += 3
-	}
-	if right < len(text) {
-		n += 3
-	}
-	return n
+	return s.cells(windowText(text, left, right))
 }
 
 func (m *model) editorRows(width, limit int) ([]string, int, int) {
