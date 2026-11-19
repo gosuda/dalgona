@@ -139,6 +139,9 @@ func TestPaletteCompletionKeepsChips(t *testing.T) {
 		if hasPrivateUse(m.input.composer.Expanded()) {
 			t.Fatalf("%s left a chip atom in the sent text: %q", key.String(), m.input.composer.Expanded())
 		}
+		if got, want := m.input.composer.cursor, len([]rune("/model ")); got != want {
+			t.Fatalf("%s left the caret at %d, want %d after the space", key.String(), got, want)
+		}
 		assertContains(t, dockText(m), "[Paste #1 +12 lines]")
 		if got := len(m.input.history.entries); got != 0 {
 			t.Fatalf("%s sent a prompt: history holds %d entries", key.String(), got)
@@ -146,21 +149,37 @@ func TestPaletteCompletionKeepsChips(t *testing.T) {
 	}
 }
 
-func TestPaletteKeepsChipTouchingTheToken(t *testing.T) {
+func TestPaletteCompletionPlacesCaretAfterTheSpace(t *testing.T) {
 	t.Parallel()
 	pasted := pasteLines(12)
-	for _, key := range []tea.KeyPressMsg{{Code: tea.KeyTab}, {Code: tea.KeyEnter}} {
-		m := paletteModel(t)
-		m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
-		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyHome})
-		m = typeKeys(t, m, "/new")
-		m, _ = drive(t, m, key)
-		if got, want := m.input.composer.Expanded(), "/new"+pasted; got != want {
-			t.Fatalf("%s gave %q, want %q", key.String(), got, want)
-		}
-		if got := len(m.input.composer.chips); got != 1 {
-			t.Fatalf("%s left %d chips, want 1", key.String(), got)
-		}
+	tests := []struct {
+		name  string
+		setup func(*testing.T, model) model
+		want  string
+	}{
+		{"no tail", func(_ *testing.T, m model) model { return m }, "/model x"},
+		{"text after", func(t *testing.T, m model) model { return typeKeys(t, m, " arg") }, "/model xarg"},
+		{"chip after", func(t *testing.T, m model) model {
+			m = typeKeys(t, m, " ")
+			m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+			return m
+		}, "/model x" + pasted},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := tt.setup(t, paletteModel(t))
+			m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyHome})
+			m = typeKeys(t, m, "/mo")
+			m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+			if got := m.input.composer.Value(); !strings.HasPrefix(got, "/model ") {
+				t.Fatalf("tab gave %q, want /model and a space", got)
+			}
+			m = typeKeys(t, m, "x")
+			if got := m.input.composer.Expanded(); got != tt.want {
+				t.Fatalf("typing after the completion gave %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

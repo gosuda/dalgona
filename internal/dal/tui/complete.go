@@ -277,17 +277,10 @@ func (m *model) completePopup() {
 	name := m.input.popup.selected()
 	m.input.popup = nil
 	e := &m.input.composer
-	end := slices.IndexFunc(e.text, unicode.IsSpace)
-	if end < 0 {
-		end = len(e.text)
-	}
-	head := []rune("/" + name)
-	tail := e.text[end:]
-	if len(tail) == 0 {
-		tail = []rune(" ")
-	}
-	e.text = slices.Concat(head, tail)
-	e.cursor = len(head) + 1
+	_, tail := splitToken(e.Value())
+	head := "/" + name
+	e.text = []rune(head + cmp.Or(tail, " "))
+	e.cursor = utf8.RuneCountInString(head) + 1
 }
 
 func (m *model) completeFile() {
