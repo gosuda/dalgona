@@ -32,6 +32,8 @@ The dock holds, from the top, the composer, an open panel, the live row, and the
 
 While a key hint shows, it MUST cover the calls, plan and queued cells, and the counts MUST return when the hint ends.
 
+When the free text would have fewer than 22 cells, every blank field after the last field with text MUST give its cells to it. A field with text MUST keep its cells and its place. A cut free text of fewer than 3 cells MUST show one `.` for each cell.
+
 The activity MUST come from an open question or approval first, then the retry countdown, then a running tool call.
 With no running tool call, the activity MUST be the first plan step that is in progress, else the first pending plan step.
 The plan step text MUST be the first line of the step after the sanitizer runs.

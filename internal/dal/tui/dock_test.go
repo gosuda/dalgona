@@ -347,7 +347,8 @@ func TestMultiLineNoticeCutInLiveRowIsCommitted(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{})
 	m.screen.width = 40
-	m.noticef("%s", "a\nb")
+	notice := "first line of the notice\nsecond line of the notice"
+	m.noticef("%s", notice)
 	if cells := cellCount(m, m.liveText()); cells <= m.liveFreeWidth() {
 		t.Fatalf("precondition: the live row shows the notice in %d cells, free width %d", cells, m.liveFreeWidth())
 	}
@@ -355,8 +356,8 @@ func TestMultiLineNoticeCutInLiveRowIsCommitted(t *testing.T) {
 	if len(m.out.entries) != 1 || m.out.entries[0].key != "note:0" {
 		t.Fatalf("the cut notice was not committed as a row: %+v", m.out.entries)
 	}
-	if got := m.out.entries[0].text; got != "a\nb" {
-		t.Fatalf("committed notice text = %q, want %q", got, "a\nb")
+	if got := m.out.entries[0].text; got != notice {
+		t.Fatalf("committed notice text = %q, want %q", got, notice)
 	}
 }
 
@@ -551,7 +552,7 @@ func TestStatusRowPlanStepStaysOneRow(t *testing.T) {
 	if got := cellCount(m, stripANSI(row)); got > 59 {
 		t.Fatalf("live row is %d cells at 60 columns: %q", got, row)
 	}
-	if got := liveFreeText(m); got != "Fix the..." {
+	if got := liveFreeText(m); got != "Fix the decoder ca..." {
 		t.Fatalf("free text = %q, want the step cut to %d cells", got, m.liveFreeWidth())
 	}
 }
