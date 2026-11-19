@@ -114,12 +114,19 @@ func (p *dirPin) writeFileAt(base string, data []byte, perm fs.FileMode) error {
 }
 
 func (p *dirPin) readFileAt(base string) ([]byte, error) {
-	fd, err := unix.Openat(int(p.file.Fd()), base, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(int(p.file.Fd()), base, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("patch: read %s: %w", base, err)
 	}
 	file := os.NewFile(uintptr(fd), base)
 	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("patch: read %s: %w", base, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("patch: read %s: %w", base, errNotRegular)
+	}
 	return io.ReadAll(file)
 }
 

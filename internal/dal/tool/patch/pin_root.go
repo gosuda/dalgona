@@ -11,6 +11,8 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
+var errNotRegular = errors.New("not a regular file")
+
 type rootPin struct {
 	root    *os.Root
 	missing []string
@@ -156,6 +158,9 @@ func (p *rootPin) readFileAt(base string) ([]byte, error) {
 	}
 	if info.Mode()&fs.ModeSymlink != 0 {
 		return nil, symlinkRefusal(base)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("patch: read %s: %w", base, errNotRegular)
 	}
 	data, err := p.root.ReadFile(base)
 	if err != nil {
