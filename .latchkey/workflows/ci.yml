@@ -14,34 +14,53 @@ env:
   GOPROXY: https://proxy.golang.org|https://goproxy.io|direct
 
 jobs:
-  go:
+  lint:
     runs-on: small
-    timeout-minutes: 40
-    strategy:
-      matrix:
-        task: [lint, test]
+    timeout-minutes: 30
     steps:
       - uses: latchkey/cache-restore@1.1.0
         with:
-          key: ${{ matrix.task }}
+          key: lint
           version: go2
           hash-files: go.sum
           into: "~"
-      - if: matrix.task == 'lint'
-        run: |
-          go tool golangci-lint fmt --diff
-          go vet ./...
-          go tool golangci-lint run ./...
-          go tool govulncheck ./...
-      - if: matrix.task == 'test'
-        run: go test -race -count=1 ./...
-      - uses: latchkey/cache-save@1.1.0
+      - run: go tool golangci-lint fmt --diff
+      - run: go vet ./...
+      - run: go tool golangci-lint run ./...
+      - if: env.LATCHKEY_CI_EVENT_CLASS == 'branch_push'
+        uses: latchkey/cache-save@1.1.0
         with:
-          key: ${{ matrix.task }}
+          key: lint
           version: go2
           hash-files: go.sum
           from: "~"
           path: .cache/go-build go/pkg/mod
+
+  test:
+    runs-on: small
+    timeout-minutes: 30
+    steps:
+      - uses: latchkey/cache-restore@1.1.0
+        with:
+          key: test
+          version: go2
+          hash-files: go.sum
+          into: "~"
+      - run: go test -race -count=1 ./...
+      - if: env.LATCHKEY_CI_EVENT_CLASS == 'branch_push'
+        uses: latchkey/cache-save@1.1.0
+        with:
+          key: test
+          version: go2
+          hash-files: go.sum
+          from: "~"
+          path: .cache/go-build go/pkg/mod
+
+  vuln:
+    runs-on: small
+    timeout-minutes: 15
+    steps:
+      - run: go tool govulncheck ./...
 
   web:
     runs-on: small
