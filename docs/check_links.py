@@ -8,6 +8,8 @@ EXCLUDED = {
     "dist", ".gitkeep",
 }
 
+PRESERVED = pathlib.PurePosixPath("docs/plan")
+
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 REF_RE = re.compile(r"(?m)^\[[^\]]+\]:\s*(\S+)")
 
@@ -38,6 +40,9 @@ def heading_ids(path):
 def iter_markdown(root):
     for path in root.rglob("*.md"):
         if any(part in EXCLUDED for part in path.parts):
+            continue
+        posix = pathlib.PurePosixPath(path.as_posix())
+        if PRESERVED in posix.parents and posix != PRESERVED / "README.md":
             continue
         yield path
 

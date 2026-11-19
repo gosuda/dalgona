@@ -1,0 +1,7 @@
+### Outside checks of the code-symbols workstream
+
+- Check: on an idle host, the 1 MiB parse at GOMAXPROCS=1 has a p99 below parseTimeout across the runs of benchmark (i), and each of the 17 definition languages parses at 4 KB, 64 KB and 1 MB. Guards: Code symbols step 9. Why it is outside: the benchmark needs an idle host, which this plan cannot reserve. Fallback: record the measured p99 in docs/decisions/syntax-package.md, and add a new entry there before any constant changes.
+- Check: the peak resident memory of one search child with 8 workers over 64 files of 256 KiB each stays below 2.5 GiB. Guards: Code symbols step 9. Why it is outside: the run needs about 2.5 GiB of free memory on an unloaded host. Fallback: lower parseMemoryBudgetBytes to 128 MiB, rerun the check, and record both runs in docs/decisions/syntax-package.md.
+- Check: the OSV database returns no advisory for github.com/odvcencio/gotreesitter@v0.57.0. Guards: Code symbols step 1. Why it is outside: the OSV query is a network POST, and the verification tools here only read. Fallback: if an advisory exists, hold the pin at the last release with none, and record the choice in docs/decisions/dependencies.md.
+- Check: the first-use cost table of benchmark (ii) is recorded for go, python and cpp, with p50, p95 and max over 30 processes, and the host is named. Guards: Code symbols step 9. Why it is outside: the 30 process runs need an idle host. Fallback: record the numbers with the name and load of the host that ran them, and mark them as observations.
+

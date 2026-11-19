@@ -1,0 +1,5 @@
+### Outside checks of the web workstream
+
+- Check: The browser checks run in a real browser through omp's `browser` tool against the scripted server that `just live-up` starts Guards: Steps 9, 11, 12, 20, 21, 24, 37 and 38. Why it is outside: A real browser and the scripted server belong to the live-debug workstream; layout, focus and forced-colour results cannot come from the DOM emulator. Fallback: If the browser cannot run, the affected checks are reported as not run and the step is not marked done; no check is marked passed from the DOM tests.
+- Check: On a Windows host, `command/exec` with `["cmd","/C",text]` returns the command output for `echo ok` Guards: Step 34. Why it is outside: Only a Windows host runs `cmd` as the daemon's shell, and this run has no such host. Fallback: If the check shows `cmd /C` does not return the output, the command returns its error, the step is not marked done, and no other argv is tried. The shell row of the terminal workstream (Step 30) shows the same error.
+

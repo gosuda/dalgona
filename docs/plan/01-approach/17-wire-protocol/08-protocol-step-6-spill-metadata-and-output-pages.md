@@ -1,0 +1,10 @@
+#### Protocol step 6. Spill metadata and output pages
+
+- `internal/rpc/types.go`: `OutputSpill{Path string json:"path"; Bytes int64 json:"bytes"; SHA256 string json:"sha256"}`, `Item.Spill *OutputSpill`. `toolCompleted` sets it from `ToolCompleted.Spill` (`event.go:361`; the `Spill` type is at `event.go:86-90`); `writeCommand`, `writeMCP`, `writeDynamic` write `outputSpill`; the decoder reads it.
+- New `internal/agent/output.go`: `type OutputPage struct { Text string; Offset, Next, Total int64 }`; `func (t *Thread) ReadOutput(ctx context.Context, callID string, offset int64) (OutputPage, error)`; `const outputPageLimit = 1 << 20`. The spill comes from the `ToolCompleted` record of the call on the active path (`event.ActivePath`). A spill path with prefix `blobs/` (written at `tools.go:458`) reads the journal blob through `t.host.Blob(&event.BlobRef{Blob: <sha>, Bytes: spill.Bytes})`, and `Total` is `spill.Bytes`. Any other path is a runner file (written at `tools.go:482`): `Total` is the `Size` from `t.runner.Stat(ctx, path)`, and the bytes come from `t.runner.Read(ctx, url.PathEscape(callID), offset)` (`tools.go:46-48`). A page keeps at most `outputPageLimit` bytes from `offset`, cut back to the last `\n` in that window when one exists and otherwise to a UTF-8 rune start; `Next` is `offset` plus the kept bytes. Text goes through `Host.mask` (`tools.go:710`). Errors: `call <id> has no spilled output`, `offset <n> is outside 0..<total>`, returned as they are and mapped to `-32602`.
+- New `internal/rpc/serve_output.go`: `dalgona/item/output/read` handler `(*server).itemOutputRead`; register in `serve.go:22-51`; schemas in `dalgona-schema`.
+- Test `internal/rpc` `TestSpilledOutputCarriesSpillAndReadsBack` (skip on Windows: "needs POSIX printf"): exec `printf '%070000d' 0`; the completed item has `outputSpill.bytes == 70000`; reading pages until `next == total` returns 70000 zero characters. Fails before: no `outputSpill`, method not found.
+- Docs: `protocol.md`.
+
+Anchor: Italo Calvino.
+
