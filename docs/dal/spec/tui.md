@@ -390,7 +390,7 @@ A confirmed rewind MUST return the turn's prompt to the composer only while the 
 
 `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` open the approval card. Requests queue in arrival order, and the card shows the oldest one. A request that joins a non-empty queue MUST NOT change the text on the input line. The title is `Approval · Run command` or `Approval · Apply file changes`, followed by ` (1 of <n>)` when more requests wait, and the word `Waiting`.
 
-The body holds at most six rows and scrolls with `up` and `down`. It shows:
+The body holds at most six rows and scrolls with `up` and `down`. `up` and `down` MUST move the body by one row and stop when its first or last row shows. The body shows:
 
 - `From thread <id>` when the request comes from another thread.
 - `$ <command>` when the request has a command, and `cwd <cwd>` when it names a working directory.
