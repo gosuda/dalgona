@@ -487,12 +487,17 @@ func cloneEdge(edge Edge) Edge {
 	return edge
 }
 
+func TrimBOM(data []byte) ([]byte, bool) {
+	return bytes.CutPrefix(data, []byte{0xef, 0xbb, 0xbf})
+}
+
 func lineCount(data []byte) int {
-	if len(data) == 0 {
+	text, _ := TrimBOM(data)
+	if len(text) == 0 {
 		return 0
 	}
-	count := bytes.Count(data, []byte{'\n'})
-	if data[len(data)-1] != '\n' {
+	count := bytes.Count(text, []byte{'\n'})
+	if text[len(text)-1] != '\n' {
 		count++
 	}
 	return count

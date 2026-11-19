@@ -8,37 +8,87 @@ import (
 )
 
 func TestTailGapUnderReferenceMapsToTheSnapshotEnd(t *testing.T) {
+	const bom = "\ufeff"
 	tests := []struct {
+		rows        string
 		name        string
+		source      string
 		cooperating string
 		want        string
 	}{
-		{"CUT 1", "CUT 1\n", "two\nthree\nfour\n"},
-		{"PUT <1", "PUT <1:\n+zero\n", "zero\none\ntwo\nthree\nfour\n"},
+		{"GAP-03 GAP-04", "CUT 1", "one\ntwo\nthree\n", "CUT 1\n", "two\nthree\nfour\n"},
+		{"GAP-03 GAP-04", "PUT <1", "one\ntwo\nthree\n", "PUT <1:\n+zero\n", "zero\none\ntwo\nthree\nfour\n"},
+		{"GAP-01 GAP-04", "BOM only", bom, "", bom + "four\n"},
+		{"GAP-04", "BOM and one unterminated line", bom + "one", "", bom + "onefour\n"},
+		{"GAP-04", "BOM and an empty line", bom + "\n", "", bom + "\nfour\n"},
+		{"GAP-04", "BOM and CRLF", bom + "\r\n", "", bom + "\r\nfour\r\n"},
+		{"GAP-04", "BOM and a CRLF line", bom + "one\r\n", "", bom + "one\r\nfour\r\n"},
+		{"GAP-03 GAP-04 E-06", "BOM and PUT <1", bom + "one\ntwo\n", "PUT <1:\n+zero\n", bom + "zero\none\ntwo\nfour\n"},
 	}
 	for _, style := range []Style{HashlineLight, HashlineEnhanced} {
 		for _, test := range tests {
-			t.Run("GAP-03 GAP-04/"+string(style)+"/"+test.name, func(t *testing.T) {
-				requireTailAppend(t, style, test.cooperating, test.want)
+			t.Run(test.rows+"/"+string(style)+"/"+test.name, func(t *testing.T) {
+				requireTailAppend(t, style, test.source, test.cooperating, test.want)
 			})
 		}
 	}
 }
 
-func requireTailAppend(t *testing.T, style Style, cooperating, want string) {
+func requireTailAppend(t *testing.T, style Style, source, cooperating, want string) {
 	t.Helper()
 	env, cwd := editTestEnv(t)
-	source := "one\ntwo\nthree\n"
 	writeFixture(t, cwd, "f.txt", source)
 	ref := seedReference(env, "f.txt", source, true)
-	if _, err := runPatch(t, env, style, profileInput("f.txt", ref, cooperating)); err != nil {
-		t.Fatal(err)
+	if cooperating != "" {
+		if _, err := runPatch(t, env, style, profileInput("f.txt", ref, cooperating)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := runPatch(t, env, style, profileInput("f.txt", ref, "PUT >$:\n+four\n")); err != nil {
 		t.Fatal(err)
 	}
 	if actual := readFixture(t, cwd, "f.txt"); actual != want {
 		t.Fatalf("tail append %q, want %q", actual, want)
+	}
+}
+
+func TestDocumentAndSnapshotCountLinesAfterABOM(t *testing.T) {
+	const bom = "\ufeff"
+	tests := []struct {
+		name   string
+		source string
+		lines  int
+	}{
+		{"empty", "", 0},
+		{"BOM only", bom, 0},
+		{"BOM and an empty line", bom + "\n", 1},
+		{"BOM and CRLF", bom + "\r\n", 1},
+		{"BOM and one unterminated line", bom + "one", 1},
+		{"BOM and a terminated line", bom + "one\n", 1},
+		{"BOM and two CRLF lines", bom + "one\r\ntwo\r\n", 2},
+		{"BOM and an unterminated second line", bom + "one\ntwo", 2},
+		{"a second BOM is content", bom + bom, 1},
+		{"a BOM after the start is content", "a" + bom, 1},
+	}
+	for _, test := range tests {
+		t.Run("GAP-01 GAP-04/"+test.name, func(t *testing.T) {
+			doc, err := decodeDocument("f.txt", []byte(test.source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if doc.lines() != test.lines {
+				t.Fatalf("document counts %d lines of %q, want %d", doc.lines(), test.source, test.lines)
+			}
+			store := snapshot.New()
+			ref := store.Put("f.txt", []byte(test.source), nil)
+			lines, err := store.Lines(ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lines != test.lines {
+				t.Fatalf("snapshot counts %d lines of %q, want %d", lines, test.source, test.lines)
+			}
+		})
 	}
 }
 
@@ -57,6 +107,27 @@ func TestSecondTailInsertConflictsAfterAnAppend(t *testing.T) {
 				t.Fatalf("second tail insert error %v", err)
 			}
 			if actual := readFixture(t, cwd, "f.txt"); actual != "one\ntwo\nthree\nfour\n" {
+				t.Fatalf("conflicting insert wrote %q", actual)
+			}
+		})
+	}
+}
+
+func TestSecondTailInsertConflictsAfterAnAppendToABOMOnlyFile(t *testing.T) {
+	const source = "\ufeff"
+	for _, style := range []Style{HashlineLight, HashlineEnhanced} {
+		t.Run("GAP-01 E-09/"+string(style), func(t *testing.T) {
+			env, cwd := editTestEnv(t)
+			writeFixture(t, cwd, "f.txt", source)
+			ref := seedReference(env, "f.txt", source, true)
+			if _, err := runPatch(t, env, style, profileInput("f.txt", ref, "PUT >$:\n+four\n")); err != nil {
+				t.Fatal(err)
+			}
+			_, err := runPatch(t, env, style, profileInput("f.txt", ref, "PUT >$:\n+five\n"))
+			if err == nil || !strings.HasSuffix(err.Error(), "is stale: snapshot: gap changed. Read again") {
+				t.Fatalf("second tail insert error %v", err)
+			}
+			if actual := readFixture(t, cwd, "f.txt"); actual != source+"four\n" {
 				t.Fatalf("conflicting insert wrote %q", actual)
 			}
 		})
