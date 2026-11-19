@@ -15,7 +15,7 @@ func TestFollowupNoticeKeepsDockHeight(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Thread: rpc.Thread{ID: "t1"}}})
-	m.queue = []string{"a", "b"}
+	m.queue = queued("a", "b")
 	before := len(m.dockLines())
 	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Thread: rpc.Thread{ID: "t2"}}})
 	if got := len(m.dockLines()); got != before {
@@ -239,7 +239,7 @@ func saturateLiveRow(m *model) {
 	for i := range 100 {
 		m.live.items = append(m.live.items, liveItem{ID: fmt.Sprintf("c%d", i), Type: "commandExecution", Command: "x", Status: "inProgress"})
 	}
-	m.queue = strings.Fields(strings.Repeat("next ", 32))
+	m.queue = queued(strings.Fields(strings.Repeat("next ", 32))...)
 	for range 120 {
 		m.live.plan = append(m.live.plan, rpc.TurnPlanStep{Step: "s", Status: "pending"})
 	}

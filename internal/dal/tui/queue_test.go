@@ -24,13 +24,13 @@ func TestQueueCountIsFixedField(t *testing.T) {
 		}
 		return ansi.StringWidth(before)
 	}
-	m.queue = []string{"one"}
+	m.queue = queued("one")
 	one := column(m)
-	m.queue = append(m.queue, "two")
+	m.queue = append(m.queue, queued("two")...)
 	if two := column(m); two != one {
 		t.Fatalf("free text starts at column %d with two queued, want %d as with one", two, one)
 	}
-	m.queue = make([]string, 12)
+	m.queue = make([]followup, 12)
 	if twelve := column(m); twelve != one {
 		t.Fatalf("free text starts at column %d with twelve queued, want %d as with one", twelve, one)
 	}
@@ -45,7 +45,7 @@ func TestQueuePanelListsTexts(t *testing.T) {
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.thread.id = "t1"
 	m.thread.state = stateRunning
-	m.queue = []string{"first line\nsecond line", "second"}
+	m.queue = queued("first line\nsecond line", "second")
 	m, _ = drive(t, m, press('q', tea.ModAlt, ""))
 	view := ansi.Strip(strings.Join(m.dockLines(), "\n"))
 	for _, want := range []string{"1. first line", "2. second"} {
@@ -61,18 +61,34 @@ func TestQueuePanelListsTexts(t *testing.T) {
 func TestAltUpDequeues(t *testing.T) {
 	t.Parallel()
 	m := newModel(new(fakeCaller), Options{}, nil)
-	m.queue = []string{"a", "b"}
+	m.queue = queued("a", "b")
 	m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
-	if got := m.input.composer.Value(); got != "b" || !slices.Equal(m.queue, []string{"a"}) {
-		t.Fatalf("alt+up moved %q into the composer and left queue %q; want b and [a]", got, m.queue)
+	if got := m.input.composer.Value(); got != "b" || !slices.Equal(queuedTexts(m.queue), []string{"a"}) {
+		t.Fatalf("alt+up moved %q into the composer and left queue %q; want b and [a]", got, queuedTexts(m.queue))
 	}
 	m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
-	if !slices.Equal(m.queue, []string{"a"}) {
-		t.Fatalf("alt+up with a non-empty composer changed the queue to %q", m.queue)
+	if !slices.Equal(queuedTexts(m.queue), []string{"a"}) {
+		t.Fatalf("alt+up with a non-empty composer changed the queue to %q", queuedTexts(m.queue))
 	}
 	m.input.composer.SetValue("")
 	m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
 	if got := m.input.composer.Value(); got != "a" || len(m.queue) != 0 {
-		t.Fatalf("second alt+up moved %q; queue %q; want a and empty", got, m.queue)
+		t.Fatalf("second alt+up moved %q; queue %q; want a and empty", got, queuedTexts(m.queue))
 	}
+}
+
+func queued(texts ...string) []followup {
+	items := make([]followup, len(texts))
+	for i, text := range texts {
+		items[i] = followup{text: text}
+	}
+	return items
+}
+
+func queuedTexts(queue []followup) []string {
+	texts := make([]string, len(queue))
+	for i, item := range queue {
+		texts[i] = item.text
+	}
+	return texts
 }

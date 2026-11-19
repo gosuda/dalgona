@@ -23,7 +23,7 @@ func bandModel(cwd string) model {
 	m.thread.approvalMode = "auto"
 	m.thread.sandbox = "workspace-write"
 	m.thread.usage = rpc.ThreadTokenUsage{ModelContextWindow: 200000, Last: rpc.TokenUsageBreakdown{InputTokens: 50000}}
-	m.queue = []string{"a", "b"}
+	m.queue = queued("a", "b")
 	m.conn.product = "dalgona"
 	return m
 }
@@ -257,12 +257,12 @@ func TestBandFieldsKeepColumns(t *testing.T) {
 	first := bandModel("/work/ws")
 	first.screen.width = 100
 	first.thread.usage.Last.InputTokens = 10000
-	first.queue = []string{"a"}
+	first.queue = queued("a")
 	second := bandModel("/work/ws")
 	second.screen.width = 100
 	second.thread.usage.Last.InputTokens = 200000
 	second.thread.effort = "low"
-	second.queue = make([]string, 12)
+	second.queue = make([]followup, 12)
 	col := func(m model, marker string) int {
 		row := bandRowOf(m)
 		before, _, found := strings.Cut(row, marker)
