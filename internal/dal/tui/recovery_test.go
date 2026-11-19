@@ -63,6 +63,18 @@ func TestErrorNoticesNameRecovery(t *testing.T) {
 			},
 			want: "Login failed: provider unreachable; run /login again",
 		},
+		{
+			name: "settings save fails after the panel closed",
+			run: func(t *testing.T) model {
+				m := openSettingsPanel(t, newTestModel(new(fakeCaller), Options{}), "ask")
+				m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+				m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+				m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+				m, _ = drive(t, m, resultMsg{op: "settingsSave", err: errors.New("disk full")})
+				return m
+			},
+			want: "Could not save settings: disk full; run /settings and save again",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
