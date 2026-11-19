@@ -296,10 +296,6 @@ const thirdRow = $derived(shown.context || shown.mark);
 			max-width: 100%;
 		}
 
-		.item {
-			grid-row: 1;
-		}
-
 		.band-more {
 			display: block;
 		}

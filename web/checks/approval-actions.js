@@ -6,8 +6,8 @@
 	if (!body)
 		return { ok: false, failures: ["request details: region not found"] };
 	const viewport = `${innerWidth}x${innerHeight}`;
-	if (!["320x568", "375x812"].includes(viewport))
-		failures.push(`viewport: ${viewport} (want 320x568 or 375x812)`);
+	if (!["320x568", "375x812", "667x375"].includes(viewport))
+		failures.push(`viewport: ${viewport} (want 320x568, 375x812 or 667x375)`);
 	const diffs = card.querySelectorAll("details.file-change").length;
 	if (diffs < 3)
 		failures.push(`diffs: ${diffs} shown (want at least 3 long diffs)`);
@@ -85,11 +85,22 @@
 		failures.push("page: horizontal overflow");
 	if (document.querySelectorAll(".dock .point").length !== 1)
 		failures.push("dock: want one point");
-	if (!dock) failures.push("dock: not found");
-	else if (dock.scrollHeight > dock.clientHeight + 1)
-		failures.push(
-			`dock: scrollHeight ${dock.scrollHeight} (want <= ${dock.clientHeight} + 1)`,
-		);
+	if (!dock) {
+		failures.push("dock: not found");
+	} else {
+		const box = dock.getBoundingClientRect();
+		if (box.top < 0 || box.bottom > innerHeight + 1)
+			failures.push(
+				`dock: ${Math.round(box.top)}..${Math.round(box.bottom)} outside 0..${innerHeight}`,
+			);
+		if (
+			dock.scrollHeight > dock.clientHeight + 1 &&
+			!["auto", "scroll"].includes(getComputedStyle(dock).overflowY)
+		)
+			failures.push(
+				`dock: scrollHeight ${dock.scrollHeight} over clientHeight ${dock.clientHeight} but not a scroll region`,
+			);
+	}
 	if (!composer) {
 		failures.push("composer: not found");
 	} else {
@@ -125,6 +136,35 @@
 				failures.push(`composer: ${label} occluded`);
 		}
 		composer.scrollTop = composerScroll;
+		const label = composer.querySelector("label");
+		const field = composer.querySelector("textarea");
+		if (label && field) {
+			composer.scrollTop = 0;
+			const box = composer.getBoundingClientRect();
+			const rowEnd = field.getBoundingClientRect().bottom;
+			if (
+				label.getBoundingClientRect().top < box.top ||
+				rowEnd > box.bottom + 1
+			)
+				failures.push(
+					`composer: ${Math.round(box.height)}px tall, its label and field row are not both in view`,
+				);
+			const rowSlack = 4;
+			const floor =
+				rowEnd -
+				box.top +
+				parseFloat(getComputedStyle(composer).paddingBottom) +
+				rowSlack;
+			if (
+				dock &&
+				dock.scrollHeight > dock.clientHeight + 1 &&
+				box.height > floor + 1
+			)
+				failures.push(
+					`composer: ${Math.round(box.height)}px tall while the dock scrolls (want its label and one field row, ${Math.round(floor)}px)`,
+				);
+			composer.scrollTop = composerScroll;
+		}
 	}
 	if (dock) dock.scrollTop = 0;
 	const heading = card.querySelector("#request-title");
