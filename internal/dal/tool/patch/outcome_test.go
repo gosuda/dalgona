@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -426,8 +427,8 @@ func TestOutcomeStatusAndCommitState(t *testing.T) {
 
 func pathStates(pairs ...string) []tool.PathState {
 	out := make([]tool.PathState, 0, len(pairs)/2)
-	for i := 0; i < len(pairs); i += 2 {
-		out = append(out, tool.PathState{Path: pairs[i], State: pairs[i+1]})
+	for pair := range slices.Chunk(pairs, 2) {
+		out = append(out, tool.PathState{Path: pair[0], State: pair[1]})
 	}
 	return out
 }

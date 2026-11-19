@@ -467,13 +467,6 @@ func cleanupBackupState(ctx context.Context, env tool.Env, state *writeState) {
 }
 
 func writeError(failed *writeState, cause error, states []*writeState, rollbackFailures []string, keepAll bool) error {
-	paths := make([]string, 0, len(states)*2)
-	for _, state := range states {
-		paths = append(paths, state.file.path)
-		if state.file.renameTo != "" {
-			paths = append(paths, state.file.renameTo)
-		}
-	}
 	var out strings.Builder
 	if failed != nil {
 		fmt.Fprintf(&out, "patch: commit failed at %s: %v. ", failed.file.path, cause)
@@ -485,7 +478,7 @@ func writeError(failed *writeState, cause error, states []*writeState, rollbackF
 	} else {
 		out.WriteString("Rollback was incomplete. ")
 	}
-	fmt.Fprintf(&out, "Affected paths: %s.", strings.Join(paths, ", "))
+	fmt.Fprintf(&out, "Affected paths: %s.", strings.Join(affectedPaths(states), ", "))
 	for _, failure := range rollbackFailures {
 		fmt.Fprintf(&out, "\n%s", failure)
 	}
@@ -497,6 +490,17 @@ func writeError(failed *writeState, cause error, states []*writeState, rollbackF
 		}
 	}
 	return errors.New(out.String())
+}
+
+func affectedPaths(states []*writeState) []string {
+	paths := make([]string, 0, len(states)*2)
+	for _, state := range states {
+		paths = append(paths, state.file.path)
+		if state.file.renameTo != "" {
+			paths = append(paths, state.file.renameTo)
+		}
+	}
+	return paths
 }
 
 func recordSnapshots(env tool.Env, files []*stagedFile) map[string]string {

@@ -302,43 +302,47 @@ func TestIndeterminateWhenShaUnreadable(t *testing.T) {
 	})
 }
 
+type partialEpochCase struct {
+	name        string
+	input       string
+	steps       []fixtureStep
+	invalidated bool
+}
+
+func (test partialEpochCase) run(t *testing.T) {
+	f := newOutcomeFixture(t)
+	plain := f.env.Runner
+	for _, step := range test.steps {
+		step(t, f)
+	}
+	if err := f.run(t, HashlineLight, test.input); err == nil {
+		t.Fatal("the injected failure did not fail the call")
+	}
+	f.env.Runner = plain
+	writeFixture(t, f.cwd, "a.txt", "a-before\n")
+	err := f.run(t, HashlineLight, "[a.txt@{refA}]\nPUT 1:\n+a-second\n")
+	if !test.invalidated {
+		if err != nil {
+			t.Fatalf("a reference over verified bytes was refused: %v", err)
+		}
+		return
+	}
+	want := refused(tool.StatusConflict, tool.ReasonPathChanged, tool.ErrClassStale)
+	requireWrappedOutcome(t, err, HashlineLight, want)
+	if actual := readFixture(t, f.cwd, "a.txt"); actual != "a-before\n" {
+		t.Fatalf("a refused call changed a.txt to %q", actual)
+	}
+}
+
 func TestPartialOutcomeInvalidatesEpoch(t *testing.T) {
-	tests := []struct {
-		name        string
-		input       string
-		steps       []fixtureStep
-		invalidated bool
-	}{
+	tests := []partialEpochCase{
 		{"C13/partial", twoFileEdit, []fixtureStep{twoFiles, failRestore}, true},
 		{"C13/unknown", twoFileEdit, []fixtureStep{twoFiles, blindAfterFailure}, true},
 		{"C13/complete", installOneEdit, []fixtureStep{twoFiles, installThenFail}, true},
 		{"C13/restored", twoFileEdit, []fixtureStep{twoFiles, failSecondFile}, false},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			f := newOutcomeFixture(t)
-			plain := f.env.Runner
-			for _, step := range test.steps {
-				step(t, f)
-			}
-			if err := f.run(t, HashlineLight, test.input); err == nil {
-				t.Fatal("the injected failure did not fail the call")
-			}
-			f.env.Runner = plain
-			writeFixture(t, f.cwd, "a.txt", "a-before\n")
-			err := f.run(t, HashlineLight, "[a.txt@{refA}]\nPUT 1:\n+a-second\n")
-			if !test.invalidated {
-				if err != nil {
-					t.Fatalf("a reference over verified bytes was refused: %v", err)
-				}
-				return
-			}
-			want := refused(tool.StatusConflict, tool.ReasonPathChanged, tool.ErrClassStale)
-			requireWrappedOutcome(t, err, HashlineLight, want)
-			if actual := readFixture(t, f.cwd, "a.txt"); actual != "a-before\n" {
-				t.Fatalf("a refused call changed a.txt to %q", actual)
-			}
-		})
+		t.Run(test.name, test.run)
 	}
 }
 
