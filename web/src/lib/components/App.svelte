@@ -321,10 +321,12 @@ function onWindowKeydown(event: KeyboardEvent): void {
 			grid-template-rows: auto auto;
 			height: auto;
 			min-height: 100dvh;
+			padding-block-end: var(--dock-height);
 		}
 
 		.dock {
-			position: sticky;
+			position: fixed;
+			inset-inline: 0;
 			inset-block-end: 0;
 			background: var(--surface);
 			border-block-start: 1px solid var(--line);

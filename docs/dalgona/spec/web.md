@@ -96,7 +96,7 @@ The page holds one `Session`, which owns the connection and the page state.
 - The transcript MUST show Jump to latest whenever the reader is over 32px from the end, whether or not a turn runs. The button MUST show appended items as `· N new`. Activating it MUST scroll to the end and focus the last row without changing that scroll position. Showing the button MUST NOT move focus.
 - At 52rem or narrower the Jump to latest button MUST sit above the dock, whatever the dock's height. The client MUST measure the dock and publish its height to the button.
 - The skip link MUST name the transcript and target `#transcript`.
-- At 52rem or narrower the dock (notices, request card, composer) stays at the bottom of the viewport. Form text is at least 16px.
+- At 52rem or narrower the dock (notices, request card, composer) MUST stay at the bottom of the viewport at every scroll position. At the end of the document the dock MUST NOT cover the last transcript row. Form text is at least 16px.
 
 ### Theme
 
