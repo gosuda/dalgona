@@ -249,3 +249,20 @@ func TestRefusedImageOnlyDraftKeepsTheCommandTypedMeanwhile(t *testing.T) {
 		})
 	}
 }
+
+func TestRecalledDraftDropsItsMarkWhenAnImageIsAttachedAndRemoved(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := attachedImageModel(t, caller)
+	m.input.composer.recall(slashPastes[1].text, true)
+	small := base64.StdEncoding.EncodeToString(pngBytes(t, 1, 1))
+	m, _ = drive(t, m, imageMsg{mime: "image/png", data: small, width: 1, height: 1})
+	m, _ = drive(t, m, press(tea.KeyBackspace, 0, ""))
+	if got := m.input.composer.Value(); got != slashPastes[1].text || m.input.composer.verbatim() {
+		t.Fatalf("composer holds %q verbatim %v, want the text back as typed text", got, m.input.composer.verbatim())
+	}
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	if m.confirm == nil || m.confirm.kind != confirmNew || len(caller.calls) != 0 {
+		t.Fatalf("confirm = %#v after %d requests, want the new-thread confirmation of the typed /new", m.confirm, len(caller.calls))
+	}
+}
