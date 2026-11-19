@@ -16,6 +16,8 @@ The TUI is a protocol client. It MUST import only `internal/dal/rpc` from this m
 - `Cwd`: the client working directory. Every `thread/start` MUST send it as `cwd`.
 - `Width`, `Height`: the terminal size when the output is not a terminal. Both MUST be positive to apply.
 
+The `dal` and `dalgona` commands MUST NOT start the interface when stdout is not a terminal. They MUST print `<product>: the interactive interface needs a terminal on stdout; use -p <prompt> for one turn` as one line on stderr, and MUST exit with status 1. The refusal MUST write nothing to stdout and MUST send no request on `conn`. The commands MUST close `conn` after the refusal. The check runs after the commands dial and resolve `-c`, so an error from either replaces the refusal.
+
 Startup runs these requests in order: `initialize` with client name `dalgona`, the `initialized` notification, `dalgona/settings/read`, `dalgona/keywords/list` (once per connection), `model/list`, then the thread open call. When `icons` is `auto` under kitty, the client also sends the terminal query named in Icons. `Run` returns nil when the user quits or `ctx` ends. On return, `Run` MUST close the RPC connection.
 
 After `initialize` succeeds, the client MUST print one welcome row with the product, version, model, and working directory. A home directory MUST show as `~`. The welcome row MUST use only bold and dim text. When `initialize` fails, the client MUST print the welcome row with the error on one line. Quit MUST print one exit row. The exit row MUST name the thread and the `--resume` command, or say that no thread was started. The client MUST print the exit row before it returns `tea.Quit`, unless the window height is 0. While the client leaves, the view MUST be one blank row.

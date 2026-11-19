@@ -189,7 +189,7 @@ Prefix these commands and flags with `dal` or `dalgona`.
 
 | Command or flag | Purpose |
 | --- | --- |
-| No arguments | Open the terminal interface. |
+| No arguments | Open the terminal interface. It needs a terminal on stdout; use `-p` otherwise. |
 | `login [provider]` | List providers or sign in to one. |
 | `logout <provider>` | Remove a stored credential. |
 | `models` | List offered models. |
