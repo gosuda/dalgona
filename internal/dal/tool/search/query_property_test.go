@@ -183,7 +183,7 @@ type indexedCase struct {
 	clock  freshness
 }
 
-func requireIndexedAgrees(t *testing.T, c indexedCase, query args) {
+func requireIndexedAgrees(t *testing.T, c indexedCase, query args) outcome {
 	t.Helper()
 	scanned, err := execute(c.ws, query, "", freshness{})
 	if err != nil {
@@ -199,6 +199,69 @@ func requireIndexedAgrees(t *testing.T, c indexedCase, query args) {
 	}
 	if indexed.Unindexed > scanned.Unindexed {
 		t.Fatalf("case %d: indexed Unindexed %d exceeds the scan's %d", c.caseNo, indexed.Unindexed, scanned.Unindexed)
+	}
+	return scanned
+}
+
+func propertyLongLine(rng *rand.Rand, size int) string {
+	var block strings.Builder
+	for block.Len() < 1<<10 {
+		block.WriteString(propertyFiller(rng))
+		block.WriteByte(' ')
+	}
+	filler := func(atLeast int) string {
+		return strings.Repeat(block.String(), (atLeast+block.Len()-1)/block.Len())
+	}
+	return filler(64<<10) + "midmark " + filler(size-64<<10-block.Len()) + "endmark"
+}
+
+func propertyFiller(rng *rand.Rand) string {
+	for {
+		if word := propertyWord(rng); word != "needle" {
+			return word
+		}
+	}
+}
+
+type longLineQuery struct {
+	args    args
+	longRow bool
+}
+
+func TestIndexedGrepEqualsScanOnLongLines(t *testing.T) {
+	requireChangeTimes(t)
+	rng := rand.New(rand.NewPCG(20261112, 2))
+	search := func(pattern string, literal, ignoreCase bool) args {
+		return args{Mode: "grep", Pattern: pattern, Literal: literal, IgnoreCase: ignoreCase, Limit: 100}
+	}
+	mid := longLineQuery{search("midmark", true, false), true}
+	end := longLineQuery{search("endmark", true, false), true}
+	absent := longLineQuery{search("needle", true, false), false}
+	either := longLineQuery{search("midmark|endmark", false, false), true}
+	folded := longLineQuery{search("MIDMARK", true, true), true}
+	sizes := []struct {
+		bytes   int
+		queries []longLineQuery
+	}{
+		{1 << 20, []longLineQuery{mid, end, absent, either, folded}},
+		{9 << 20, []longLineQuery{end}},
+	}
+	for _, size := range sizes {
+		t.Run(fmt.Sprintf("%dMiB", size.bytes>>20), func(t *testing.T) {
+			ws := t.TempDir()
+			writeBuildFiles(t, ws, map[string]string{
+				"long/f.txt":  "head\n" + propertyLongLine(rng, size.bytes) + "\ntail needle\n",
+				"short/g.txt": "needle\nmidmark here\nendmark here\n",
+			})
+			start := time.Now().Add(time.Hour)
+			c := indexedCase{ws: ws, dir: buildTestIndex(t, ws, start, 1<<30), clock: clockAt(start)}
+			for _, query := range size.queries {
+				out := requireIndexedAgrees(t, c, query.args)
+				if got := strings.Contains(out.Text, "long/f.txt:2: "); got != query.longRow {
+					t.Fatalf("pattern %q: hit row for the long line is %v, want %v, in %q", query.args.Pattern, got, query.longRow, out.Text)
+				}
+			}
+		})
 	}
 }
 
