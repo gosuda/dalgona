@@ -236,6 +236,7 @@ The request details MUST scroll inside their own region. The decision actions MU
 ArrowUp and ArrowDown MUST scroll the approval details by 48 px. PageUp and PageDown MUST scroll the approval details by the height of the details minus 48 px. Each PageUp and PageDown scroll MUST move at least 48 px.
 The dock MUST fit within the viewport. Approval details MUST shrink and scroll without hiding the card header or actions.
 Approval details MUST retain a readable scroll region. The card header, actions, and composer MUST NOT overlap.
+While an approval is open, the composer MUST keep its label, field, and actions reachable inside the viewport by scrolling the composer if needed.
 
 While the card has focus, `y` MUST accept, `a` MUST accept for the session, `n` MUST decline, and Escape MUST cancel and interrupt the turn. Escape MUST answer the card at once, and the two-press guard of the composer MUST NOT apply to it.
 

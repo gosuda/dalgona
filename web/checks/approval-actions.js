@@ -58,16 +58,37 @@
 		failures.push("page: horizontal overflow");
 	if (document.querySelectorAll(".dock .point").length !== 1)
 		failures.push("dock: want one point");
-	for (const name of ["dock", "composer"]) {
-		const node = document.querySelector(`.${name}`);
-		if (!node) {
-			failures.push(`${name}: not found`);
-			continue;
-		}
-		if (node.scrollHeight > node.clientHeight + 1)
+	const dock = document.querySelector(".dock");
+	if (!dock) failures.push("dock: not found");
+	else if (dock.scrollHeight > dock.clientHeight + 1)
+		failures.push(
+			`dock: scrollHeight ${dock.scrollHeight} (want <= ${dock.clientHeight} + 1)`,
+		);
+	if (!composer) {
+		failures.push("composer: not found");
+	} else {
+		const frame = composer.getBoundingClientRect();
+		if (frame.top < 0 || frame.bottom > innerHeight + 1)
 			failures.push(
-				`${name}: scrollHeight ${node.scrollHeight} (want <= ${node.clientHeight} + 1)`,
+				`composer: ${Math.round(frame.top)}..${Math.round(frame.bottom)} outside 0..${innerHeight}`,
 			);
+		if (
+			composer.scrollHeight > composer.clientHeight + 1 &&
+			!["auto", "scroll"].includes(getComputedStyle(composer).overflowY)
+		)
+			failures.push(
+				`composer: scrollHeight ${composer.scrollHeight} over clientHeight ${composer.clientHeight} but not a scroll region`,
+			);
+		const composerScroll = composer.scrollTop;
+		for (const node of composer.querySelectorAll("label, textarea, button")) {
+			composer.scrollTop += node.getBoundingClientRect().top - frame.top;
+			const rect = node.getBoundingClientRect();
+			if (rect.top < frame.top - 1 || rect.bottom > frame.bottom + 1)
+				failures.push(
+					`composer: ${node.textContent.trim() || node.tagName} cannot scroll into view (${Math.round(rect.top)}..${Math.round(rect.bottom)} outside ${Math.round(frame.top)}..${Math.round(frame.bottom)})`,
+				);
+		}
+		composer.scrollTop = composerScroll;
 	}
 	const heading = card.querySelector("#request-title");
 	const step = Math.max(48, body.clientHeight - 48);
