@@ -459,7 +459,7 @@ func TestFitMeasuresWideTextWithTheMethodOfTheRenderer(t *testing.T) {
 	for _, method := range fitMethods {
 		screen := screenState{method: method}
 		for _, text := range texts {
-			total := screen.cells(text)
+			total := rendererCells(method, text)
 			for n := 3; n <= total+2; n++ {
 				checkFitCut(t, screen, text, n)
 			}
@@ -467,14 +467,21 @@ func TestFitMeasuresWideTextWithTheMethodOfTheRenderer(t *testing.T) {
 	}
 }
 
+func rendererCells(method ansi.Method, text string) int {
+	if method == ansi.GraphemeWidth {
+		return ansi.StringWidth(text)
+	}
+	return ansi.StringWidthWc(text)
+}
+
 func checkFitCut(t *testing.T, screen screenState, text string, n int) {
 	t.Helper()
 	got := screen.fit(text, n)
-	if cells := screen.cells(got); cells > n {
+	if cells := rendererCells(screen.method, got); cells > n {
 		t.Fatalf("method %v fit(%q, %d) = %q holds %d cells", screen.method, text, n, got, cells)
 	}
 	whole := screen.nfc(text)
-	if screen.cells(whole) <= n {
+	if rendererCells(screen.method, whole) <= n {
 		if got != whole {
 			t.Fatalf("method %v fit(%q, %d) = %q, want the text unchanged", screen.method, text, n, got)
 		}
@@ -489,8 +496,38 @@ func checkFitCut(t *testing.T, screen screenState, text string, n int) {
 		t.Fatalf("method %v fit(%q, %d) = %q, want a prefix of the text", screen.method, text, n, got)
 	}
 	cluster, _ := ansi.FirstGraphemeCluster(rest, screen.method)
-	if screen.cells(plain+cluster) <= n-3 {
+	if rendererCells(screen.method, plain+cluster) <= n-3 {
 		t.Fatalf("method %v fit(%q, %d) = %q, want the cut to keep the next cluster %q", screen.method, text, n, got, cluster)
+	}
+}
+
+func TestFitCountsEveryPrintableASCIIAsOneCell(t *testing.T) {
+	t.Parallel()
+	for _, method := range fitMethods {
+		screen := screenState{method: method}
+		for c := ' '; c <= '~'; c++ {
+			text := strings.Repeat(string(c), 20)
+			if got, want := screen.fit(text, 8), strings.Repeat(string(c), 5)+"..."; got != want {
+				t.Errorf("method %v fit(%q, 8) = %q, want %q", method, text, got, want)
+			}
+			if got := screen.cells(string(c)); got != 1 {
+				t.Errorf("method %v cells(%q) = %d, want 1", method, string(c), got)
+			}
+		}
+	}
+}
+
+func TestFitCutsAtTheByteBoundOfALongCombiningRun(t *testing.T) {
+	t.Parallel()
+	for _, method := range fitMethods {
+		screen := screenState{method: method}
+		text := "abc" + strings.Repeat("\u0301", 50) + "d"
+		if got := screen.fit(text, 3); got != "..." {
+			t.Errorf("method %v fit of abc, a combining run and d in 3 cells = %q, want ...", method, got)
+		}
+		if got, want := screen.fit(text, 4), screen.nfc(text); got != want {
+			t.Errorf("method %v fit of the same text in 4 cells = %d bytes, want the whole %d bytes", method, len(got), len(want))
+		}
 	}
 }
 

@@ -223,6 +223,26 @@ func TestComposerWrapsEveryRowAtWindowWidthMinusThree(t *testing.T) {
 			x:    promptCells + 3, y: 1,
 		},
 		{
+			name: "keycaps wrap by the two cells the renderer draws", width: 20, height: 12, text: strings.Repeat("1\uFE0F\u20E3", 10) + " tail text", caret: -1, unicodeCore: true,
+			rows: []string{strings.Repeat("1\uFE0F\u20E3", 8), "1\uFE0F\u20E31\uFE0F\u20E3 tail text"},
+			x:    promptCells + 14, y: 1,
+		},
+		{
+			name: "a long token after one space wraps inside the width", width: 31, height: 12, text: " 0123456789éé日本語aélongertoken", caret: -1,
+			rows: []string{"0123456789éé日本語aélongerto", "ken"},
+			x:    promptCells + 3, y: 1,
+		},
+		{
+			name: "a space with a combining mark is dropped whole at the break", width: 11, height: 12, text: "한글한글\u3000\u0301한글", caret: -1,
+			rows: []string{"한글한글", "한글"},
+			x:    promptCells + 4, y: 1,
+		},
+		{
+			name: "an ideographic space is dropped at the break", width: 11, height: 12, text: "한글한글\u3000한글", caret: -1,
+			rows: []string{"한글한글", "한글"},
+			x:    promptCells + 4, y: 1,
+		},
+		{
 			name: "caret after a tab inside the second row", width: 40, height: 12, text: strings.Repeat("a", 36) + " x\t" + strings.Repeat("b", 30) + "END", caret: 39,
 			rows: []string{strings.Repeat("a", 36), "x  " + strings.Repeat("b", 30) + "END"},
 			x:    promptCells + 3, y: 1,
@@ -428,6 +448,15 @@ func TestComposerRowsMatchWrapperOutput(t *testing.T) {
 		"abcdefghijklmn\tpqrs",
 		strings.Repeat("a", 19) + "bbbbb\t",
 		"世界\t世界 世界\t世界\t世界世界世界世界",
+		strings.Repeat("-", 100),
+		"abc " + strings.Repeat("-", 60) + " tail",
+		" " + strings.Repeat("x", 50),
+		strings.Repeat("x", 20) + " " + strings.Repeat("y", 30),
+		strings.Repeat("1\uFE0F\u20E3", 10) + " tail text",
+		"1\uFE0F\u20E3 one 2\uFE0F\u20E3 two 3\uFE0F\u20E3 three 4\uFE0F\u20E3 four 5\uFE0F\u20E3 five",
+		strings.Repeat("x1\uFE0F\u20E3", 12),
+		"世界世界世界世界\u3000世界世界世界世界\u3000世界世界",
+		"abc\u00a0def\u00a0ghi jklmnopqrstuvwxyz\u00a0abc",
 	}
 	for width := 1; width <= 44; width++ {
 		for _, text := range texts {
@@ -449,6 +478,9 @@ func checkRowsAgainstWrapper(t *testing.T, screen screenState, text string, widt
 	}
 	pos := 0
 	for i, row := range rows {
+		if cells, first := screen.cells(want[i]), screen.cells(firstCluster(screen, want[i])); cells > max(editorCells(width), first) {
+			t.Fatalf("method %v width %d %q: row %d holds %d cells in %d: %q", screen.method, width, text, i, cells, editorCells(width), want[i])
+		}
 		if problem := rowProblem(screen, text, pos, row, want[i]); problem != "" {
 			t.Fatalf("method %v width %d %q: row %d %s", screen.method, width, text, i, problem)
 		}
@@ -457,6 +489,11 @@ func checkRowsAgainstWrapper(t *testing.T, screen screenState, text string, widt
 	if tail := text[pos:]; strings.TrimFunc(tail, unicode.IsSpace) != "" {
 		t.Fatalf("method %v width %d %q: rows stop before %q", screen.method, width, text, tail)
 	}
+}
+
+func firstCluster(screen screenState, row string) string {
+	cluster, _ := ansi.FirstGraphemeCluster(row, screen.method)
+	return cluster
 }
 
 func rowProblem(screen screenState, text string, pos int, row editorRow, want string) string {

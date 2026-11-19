@@ -472,6 +472,58 @@ func TestFieldWindowCaretFollowsTabStops(t *testing.T) {
 	}
 }
 
+func TestFieldWindowStartingWithAnEllipsisKeepsItsRoomAndCaret(t *testing.T) {
+	t.Parallel()
+	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
+		screen := screenState{method: method}
+		text := []rune(strings.Repeat("x", 30) + "\tb")
+		window, caret := fieldWindow(&screen, text, len(text), 12)
+		if window != "...xxxx b" || caret != 9 {
+			t.Fatalf("method %v: fieldWindow = (%q, %d), want (%q, 9)", method, window, caret, "...xxxx b")
+		}
+		for _, text := range tabbedFieldTexts() {
+			requireFieldWindowsFit(t, screen, []rune(text))
+		}
+	}
+}
+
+func tabbedFieldTexts() []string {
+	return []string{
+		strings.Repeat("x", 30) + "\tb",
+		strings.Repeat("\t", 5) + "abcdefghijklmnopqrstuvwxyz",
+		strings.Repeat("abc", 10) + "\t\tdef",
+		strings.Repeat("한글", 10) + "\tx",
+		"ab\t" + strings.Repeat("c", 25) + "\td\te",
+	}
+}
+
+func requireFieldWindowsFit(t *testing.T, screen screenState, text []rune) {
+	t.Helper()
+	for room := 8; room <= 30; room++ {
+		for cursor := 0; cursor <= len(text); cursor++ {
+			window, caret := fieldWindow(&screen, text, cursor, room)
+			if got := screen.cells(window); got > room || caret > got {
+				t.Fatalf("method %v: fieldWindow(%q, %d, %d) = (%q, %d) holds %d cells in %d", screen.method, string(text), cursor, room, window, caret, got, room)
+			}
+		}
+	}
+}
+
+func TestFieldLineWithATabKeepsTheCaretInTheWindow(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m.screen.width = 40
+	m.input.field.text = []rune(strings.Repeat("a", 50) + "\t123456789")
+	m.input.field.cursor = len(m.input.field.text)
+	line, caret := m.fieldLine(inputFilter, 40)
+	if got := m.screen.cells(line); got > 39 || caret > got {
+		t.Fatalf("fieldLine = (%q, %d) holds %d cells, want the caret inside at most 39", stripANSI(line), caret, got)
+	}
+	if !strings.HasSuffix(stripANSI(line), "123456789") {
+		t.Fatalf("fieldLine = %q, want the typed digits before the caret", stripANSI(line))
+	}
+}
+
 func TestApprovalCommandPrintsTabsAsSpaces(t *testing.T) {
 	t.Parallel()
 	for _, width := range []int{20, 40, 100} {
