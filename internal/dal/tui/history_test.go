@@ -465,8 +465,9 @@ func TestHistoryEntryPasteIntentUpgradesAnEarlierTypedEntry(t *testing.T) {
 	t.Parallel()
 	const pasted = "// a\nb"
 	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
+	typed := editor{text: []rune(pasted)}
 	var h history
-	h.add(pasted, "")
+	h.addFrom(typed, pasted, "")
 	if len(h.entries) != 1 || h.entries[0].verbatim {
 		t.Fatalf("entries = %#v, want one typed entry", h.entries)
 	}
