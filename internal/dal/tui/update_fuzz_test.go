@@ -330,6 +330,27 @@ func (s *fuzzSession) drainAnswers() {
 	}
 }
 
+func (s *fuzzSession) assertComposerFits() {
+	s.t.Helper()
+	width := s.m.screen.width
+	room := editorCells(width)
+	if room < 2 {
+		return
+	}
+	lines, row, col := s.m.input.composer.layout(&s.m.screen, width, nil, s.m.screen.dockTheme())
+	for _, line := range lines {
+		if cells := s.m.screen.cells(ansi.Strip(line)); cells > room {
+			s.t.Fatalf("composer row %q has %d cells, want at most %d", ansi.Strip(line), cells, room)
+		}
+	}
+	if col > room {
+		s.t.Fatalf("composer caret sits at cell %d, want at most %d", col, room)
+	}
+	if shown := s.m.screen.cells(ansi.Strip(lines[row])); col > shown {
+		s.t.Fatalf("composer caret sits at cell %d past its row of %d cells", col, shown)
+	}
+}
+
 func (s *fuzzSession) assertView(msg tea.Msg) {
 	s.t.Helper()
 	content := s.m.View().Content
@@ -338,6 +359,7 @@ func (s *fuzzSession) assertView(msg tea.Msg) {
 			s.t.Logf("after %T %+v at %dx%d", msg, msg, s.width, s.height)
 		}
 	}()
+	s.assertComposerFits()
 	if s.height < 2 {
 		s.assertNoDock(content)
 		return
@@ -531,6 +553,14 @@ func fuzzKeywordStep(settle bool, args ...byte) []byte {
 	return append([]byte{code}, args...)
 }
 
+func fuzzTyping(text string) []byte {
+	var steps [][]byte
+	for _, c := range []byte(text) {
+		steps = append(steps, fuzzStep(opRune, false, c-' '))
+	}
+	return fuzzSeed(steps...)
+}
+
 func FuzzUpdateSequence(f *testing.F) {
 	f.Add(fuzzSeed(
 		fuzzStep(opNotify, true, 0),
@@ -583,10 +613,15 @@ func FuzzUpdateSequence(f *testing.F) {
 		fuzzStep(opFocus, true, 1),
 	))
 	f.Add(fuzzSeed(
+		fuzzStep(opResize, true, 19, 12),
+		fuzzTyping("abcdefghijklmnop "),
 		fuzzStep(opPaste, true, 2),
-		fuzzStep(opResize, true, 14, 12),
-		fuzzStep(opKey, true, 0),
-		fuzzStep(opResize, true, 10, 12),
+		fuzzStep(opKey, true, 8),
+		fuzzStep(opKey, true, 9),
+	))
+	f.Add(fuzzSeed(
+		fuzzStep(opResize, true, 12, 12),
+		fuzzTyping("abcdefghi- x abcdefgh- y"),
 		fuzzStep(opKey, true, 8),
 		fuzzStep(opKey, true, 9),
 	))
