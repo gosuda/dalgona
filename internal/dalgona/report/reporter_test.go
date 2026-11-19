@@ -263,7 +263,9 @@ func TestReporterSearchBeforeCreate(t *testing.T) {
 	fp := strings.Repeat("a", 64)
 	fake := &fakeServer{}
 	fake.onSearch = emptySearch
+	respond := make(chan struct{})
 	fake.onCreate = func(_ *http.Request, _ []byte) (int, string) {
+		<-respond
 		return http.StatusCreated, createdPayload(7, exactTitle(fp), "body")
 	}
 	fake.onReact = func(*http.Request) int { return http.StatusOK }
@@ -278,10 +280,24 @@ func TestReporterSearchBeforeCreate(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	waitFor(t, "create", func() bool { return fake.createCount() == 1 })
+	close(respond)
+	waitFor(t, "filed receipt", func() bool { return receiptFiledFor(home, 7) })
 	if err := r.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	checkFiledIssue(t, fake, home, fp, 7)
+}
+
+func receiptFiledFor(home string, number int64) bool {
+	raw, err := readReportFile(filepath.Join(home, reportDirName, stateFileName))
+	if err != nil {
+		return false
+	}
+	var state reporterState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return false
+	}
+	return len(state.Receipts) == 1 && state.Receipts[0].State == receiptFiled && state.Receipts[0].IssueNumber == number
 }
 
 func TestReporterEnqueueValidation(t *testing.T) {
