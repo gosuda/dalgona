@@ -21,6 +21,7 @@ const dockQueryTimeout = time.Second
 type dockAnchor struct {
 	revision     uint64
 	prints       uint64
+	landing      bool
 	needed       bool
 	querying     bool
 	query        uint64
@@ -31,6 +32,10 @@ type dockAnchor struct {
 
 type dockQueryTimeoutMsg struct {
 	query uint64
+}
+
+type dockLandedMsg struct {
+	prints uint64
 }
 
 type dockMove struct {
@@ -46,6 +51,29 @@ func (move dockMove) String() string {
 	}
 	move.anchor.needed = false
 	return move.content + dockWriteMarker(move.revision)
+}
+
+func (m model) caretLanding() bool {
+	return m.out.anchor != nil && m.out.anchor.landing
+}
+
+func (m *model) landCaret() tea.Cmd {
+	anchor := m.anchorState()
+	anchor.landing = true
+	prints := anchor.prints
+	return tea.Tick(settleDelay, func(time.Time) tea.Msg { return dockLandedMsg{prints: prints} })
+}
+
+func (m *model) caretLanded(msg dockLandedMsg) tea.Cmd {
+	anchor := m.anchorState()
+	if msg.prints != anchor.prints {
+		return nil
+	}
+	if anchor.querying || anchor.moving || m.out.settling {
+		return m.landCaret()
+	}
+	anchor.landing = false
+	return nil
 }
 
 func (m *model) anchorState() *dockAnchor {

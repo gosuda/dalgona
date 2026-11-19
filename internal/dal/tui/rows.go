@@ -345,7 +345,7 @@ func (m *model) drain() tea.Cmd {
 	m.out.printing = true
 	m.anchorState().prints++
 	printed := func() tea.Msg { return printedMsg{} }
-	return tea.Sequence(tea.Println(text), printed)
+	return tea.Sequence(tea.Println(text), printed, m.landCaret())
 }
 
 func (m *model) nextChunk(bound int) (string, bool) {

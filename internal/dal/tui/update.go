@@ -69,6 +69,8 @@ func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 		m.resizeTerminal(msg)
 	case tea.CursorPositionMsg:
 		return m.positionDock(msg), true
+	case dockLandedMsg:
+		return m.caretLanded(msg), true
 	case dockQueryTimeoutMsg, dockWrittenMsg:
 		m.updateDockEvent(msg)
 	case tea.FocusMsg, tea.BlurMsg:
@@ -445,6 +447,9 @@ func (m model) rawFrame() tea.View {
 		return view
 	default:
 		view := m.dockView()
+		if m.caretLanding() {
+			view.Cursor.X, view.Cursor.Y = 0, 0
+		}
 		view.Content = m.screen.emit(view.Content) + m.markOverlay()
 		return view
 	}
