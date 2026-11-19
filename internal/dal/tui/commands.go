@@ -312,22 +312,23 @@ func (m *model) interrupt() tea.Cmd {
 		m.closeList()
 		return nil
 	}
-	if m.thread.state != stateRunning && m.thread.state != stateAwaitingApproval {
-		m.noticef("%s; nothing to interrupt", quietWord(m.thread.state))
+	if !m.turnLive() {
+		m.quietNotice(quietWord(m.thread.state))
 		return nil
 	}
 	params := rpc.TurnInterruptParams{ThreadID: m.thread.id, TurnID: m.thread.turnID}
 	return m.call("interrupt", "turn/interrupt", params, nil, "")
 }
 
+func (m *model) quietNotice(word string) {
+	m.noticef("%s; nothing to interrupt", word)
+}
+
 func quietWord(state string) string {
-	switch state {
-	case stateInterrupted:
-		return "stopped"
-	case stateFailed:
-		return "failed"
+	if state == stateIdle {
+		return "idle"
 	}
-	return "idle"
+	return strings.ToLower(stateWord(state, 0))
 }
 
 func (m *model) applyResult(msg resultMsg) tea.Cmd {
