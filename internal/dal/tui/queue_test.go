@@ -34,7 +34,7 @@ func TestQueueCountIsFixedField(t *testing.T) {
 	}
 	m.queue = queued("one")
 	one := column(m)
-	m.queue = append(m.queue, followup{text: "two"})
+	m.queue = append(m.queue, queued("two")...)
 	if two := column(m); two != one {
 		t.Fatalf("free text starts at column %d with two queued, want %d as with one", two, one)
 	}
@@ -71,16 +71,24 @@ func TestAltUpDequeues(t *testing.T) {
 	m := newModel(new(fakeCaller), Options{}, nil)
 	m.queue = queued("a", "b")
 	m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
-	if got := m.input.composer.Value(); got != "b" || !slices.Equal(m.queue, queued("a")) {
-		t.Fatalf("alt+up moved %q into the composer and left queue %v; want b and [a]", got, m.queue)
+	if got := m.input.composer.Value(); got != "b" || !slices.Equal(queuedTexts(m.queue), []string{"a"}) {
+		t.Fatalf("alt+up moved %q into the composer and left queue %q; want b and [a]", got, queuedTexts(m.queue))
 	}
 	m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
-	if !slices.Equal(m.queue, queued("a")) {
-		t.Fatalf("alt+up with a non-empty composer changed the queue to %v", m.queue)
+	if !slices.Equal(queuedTexts(m.queue), []string{"a"}) {
+		t.Fatalf("alt+up with a non-empty composer changed the queue to %q", queuedTexts(m.queue))
 	}
 	m.input.composer.SetValue("")
 	m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
 	if got := m.input.composer.Value(); got != "a" || len(m.queue) != 0 {
-		t.Fatalf("second alt+up moved %q; queue %v; want a and empty", got, m.queue)
+		t.Fatalf("second alt+up moved %q; queue %q; want a and empty", got, queuedTexts(m.queue))
 	}
+}
+
+func queuedTexts(queue []followup) []string {
+	texts := make([]string, len(queue))
+	for i, item := range queue {
+		texts[i] = item.text
+	}
+	return texts
 }

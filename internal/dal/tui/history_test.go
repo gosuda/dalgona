@@ -425,23 +425,39 @@ func TestHistoryRepeatSetsTheIntentAndASavedDraftReplacesIt(t *testing.T) {
 	}
 }
 
-func TestRecalledChipDraftRestoreKeepsTypedDraftReadingSlash(t *testing.T) {
+func TestRecalledChipDraftRestoreKeepsEqualTypedDraftReadingSlash(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
 	m := pastedDraftModel(t, caller, slashPastes[0].text)
 	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
-	m = typeText(t, m, "//a b")
+	m.input.composer.SetValue(slashPastes[0].text)
+	m.input.composer.cursor = 0
 	m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
-	if got := m.input.composer.Expanded(); got != slashPastes[0].text {
-		t.Fatalf("up recalled %q, want the pasted text", got)
+	if len(m.input.history.entries) != 1 || !m.input.composer.verbatim() {
+		t.Fatalf("up did not recall the saved chip draft: entries %d, verbatim %v", len(m.input.history.entries), m.input.composer.verbatim())
 	}
 	m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
-	if got := m.input.composer.Value(); got != "//a b" {
-		t.Fatalf("down restored %q, want the typed draft", got)
+	if got := m.input.composer.Value(); got != slashPastes[0].text || m.input.composer.verbatim() {
+		t.Fatalf("down restored %q verbatim %v, want the typed draft that reads the slash rule", got, m.input.composer.verbatim())
 	}
 	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
 	runCommand(t, m, command, "Enter did not send the restored draft")
-	assertTurnStartText(t, caller, "/a b")
+	assertTurnStartText(t, caller, strings.TrimPrefix(slashPastes[0].text, "/"))
+}
+
+func TestHistoryEntryPasteIntentUpgradesAnEarlierTypedEntry(t *testing.T) {
+	t.Parallel()
+	const pasted = "// a\nb"
+	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
+	var h history
+	h.add(pasted, "")
+	if len(h.entries) != 1 || h.entries[0].verbatim {
+		t.Fatalf("entries = %#v, want one typed entry", h.entries)
+	}
+	h.addFrom(chipFirst, pasted, "")
+	if len(h.entries) != 1 || !h.entries[0].verbatim {
+		t.Fatalf("entries after the chip draft = %#v, want the one entry marked verbatim", h.entries)
+	}
 }
 
 const completedTurn = `{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`

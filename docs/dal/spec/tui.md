@@ -322,6 +322,7 @@ Ctrl+C with a draft that holds text MUST move the draft into history. It MUST sh
 An image chip MUST NOT enter the history. When the draft holds an image, the live row MUST read `Draft saved to history, images dropped · Ctrl+C again to exit`.
 Ctrl+C with a draft that holds no text MUST keep the draft. It MUST show `Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
+The caret MUST stay within the window width minus one cell, also after a chip that its row cuts.
 A paste MUST turn each CRLF, each CR, and each LF into one line break.
 A paste into a one-line field MUST keep only its first line.
 The one-line fields are the list filter, the review target, the answer line, and the API key field.
@@ -335,6 +336,7 @@ A prompt recalled from the history MUST be plain text. It MUST NOT become a chip
 A recalled prompt whose draft began with a chip MUST be sent unchanged until the user edits its text.
 A queued follow-up whose draft began with a chip MUST be sent unchanged from the history, after Alt+Up, and after a failed start.
 A draft that Ctrl+C saves and that repeats the last entry MUST replace whether the history sends that entry unchanged.
+A prompt restored after a failed send or steer MUST follow that rule.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB MUST be refused with a notice that names the limit.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
@@ -353,12 +355,13 @@ Sending MUST send each image chip as an image input item after the text.
 The composer MUST show a command palette when the caret is in a first token that starts with `/`, with no panel or review open.
 The palette MUST list at most 8 matching commands and MUST NOT open for `//`.
 Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token. It MUST keep each chip of the draft. The palette MUST end the first token at a chip.
+Enter on a draft whose first token touches a chip MUST read the token as the command and the chip as its argument.
 Enter MUST run a highlighted command only when the draft is only its first token and the command takes no argument. Otherwise, Enter MUST complete the command and keep the rest of the draft.
 Esc MUST close the palette and keep the draft. Typing a character MUST reopen it.
 
 The composer MUST show a file palette when the caret is in a token that starts with `@`, with no panel or review open.
 The file palette MUST search for the text after `@` 120 ms after the last keystroke, and it MUST list at most 8 paths.
-Tab and Enter MUST replace the token with `@<path> `. Esc MUST close the file palette and keep the draft.
+The file palette MUST end its token at a chip. Tab and Enter MUST replace the token with `@<path> ` and keep each chip of the draft. Esc MUST close the file palette and keep the draft.
 A change of the file query MUST clear the rows of the previous query. The palette MUST NOT insert a path from an older query.
 A file palette with no rows MUST consume Enter and MUST NOT send the draft.
 When the file search is missing on the server, the first such palette MUST show `File search is unavailable on this server`.

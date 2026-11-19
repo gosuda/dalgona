@@ -45,15 +45,19 @@ func boundedContext(done <-chan struct{}, timeout time.Duration) (context.Contex
 }
 
 func (m *model) call(op, method string, params, result any, text string) tea.Cmd {
+	return m.callPrompt(op, method, params, result, followup{text: text})
+}
+
+func (m *model) callPrompt(op, method string, params, result any, prompt followup) tea.Cmd {
 	turnID := m.thread.turnID
 	return func() tea.Msg {
 		if m.conn.client == nil {
-			return resultMsg{op: op, text: text, err: errors.New("rpc client is not connected")}
+			return resultMsg{op: op, text: prompt.text, verbatim: prompt.verbatim, err: errors.New("rpc client is not connected")}
 		}
 		ctx, cancel := requestContext(m.conn.done)
 		defer cancel()
 		err := m.conn.client.Call(ctx, method, params, result)
-		return resultMsg{op: op, value: result, text: text, turnID: turnID, err: err}
+		return resultMsg{op: op, value: result, text: prompt.text, verbatim: prompt.verbatim, turnID: turnID, err: err}
 	}
 }
 
@@ -222,7 +226,7 @@ func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool
 	if !composer.readsSlash() {
 		return text, nil, false
 	}
-	name, arg, kind := parseSlash(strings.TrimSpace(composer.Value()))
+	name, arg, kind := composer.slashParts()
 	switch kind {
 	case slashCommand:
 		m.input.composer.SetValue("")
@@ -237,17 +241,19 @@ func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool
 }
 
 func (m *model) sendPrompt(text string, images []chip, draft editor) tea.Cmd {
-	m.input.history.addFrom(draft, text, "")
+	prompt := followup{text: text, verbatim: sentUnchanged(draft, text)}
+	m.input.history.record(text, "", prompt.verbatim, false)
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: promptInput(text, images), Model: m.thread.modelName}
 	result := new(rpc.TurnStartResponse)
-	return m.call("send", "turn/start", params, result, text)
+	return m.callPrompt("send", "turn/start", params, result, prompt)
 }
 
 func (m *model) sendSteer(text string, images []chip, draft editor) tea.Cmd {
-	m.input.history.addFrom(draft, text, m.thread.turnID)
+	prompt := followup{text: text, verbatim: sentUnchanged(draft, text)}
+	m.input.history.record(text, m.thread.turnID, prompt.verbatim, false)
 	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: promptInput(text, images)}
-	return m.call("steer", "turn/steer", params, new(rpc.TurnSteerResponse), text)
+	return m.callPrompt("steer", "turn/steer", params, new(rpc.TurnSteerResponse), prompt)
 }
 
 func textInput(text string) []rpc.InputItem {
@@ -265,11 +271,6 @@ func promptInput(text string, images []chip) []rpc.InputItem {
 	return items
 }
 
-type followup struct {
-	text     string
-	verbatim bool
-}
-
 func (m *model) queueFollowup() tea.Cmd {
 	composer := m.input.composer
 	text := strings.TrimSpace(composer.Expanded())
@@ -280,7 +281,7 @@ func (m *model) queueFollowup() tea.Cmd {
 		m.noticef("follow-up queue is full (%d); wait for the active turn or press Esc", maxFollowups)
 		return nil
 	}
-	m.queue = append(m.queue, followup{text: text, verbatim: !composer.readsSlash() && strings.HasPrefix(text, "/")})
+	m.queue = append(m.queue, followup{text: text, verbatim: sentUnchanged(composer, text)})
 	m.syncQueue()
 	m.input.composer.SetValue("")
 	m.noticef("queued follow-up %d of %d", len(m.queue), maxFollowups)
@@ -292,29 +293,24 @@ func (m *model) queueFollowup() tea.Cmd {
 
 func (m *model) dequeueFollowup() {
 	last := len(m.queue) - 1
-	item := m.queue[last]
+	next := m.queue[last]
 	m.queue = m.queue[:last]
 	m.syncQueue()
-	m.input.composer.recall(item.text, item.verbatim)
+	m.input.composer.recall(next.text, next.verbatim)
 }
 
 func (m *model) startQueuedFollowup() tea.Cmd {
 	if len(m.queue) == 0 || m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
 		return nil
 	}
-	item := m.queue[0]
+	next := m.queue[0]
 	m.queue = m.queue[1:]
-	m.input.history.record(item.text, "", item.verbatim, false)
+	m.input.history.record(next.text, "", next.verbatim, false)
 	m.syncQueue()
 	m.setState(stateRunning)
-	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(item.text), Model: m.thread.modelName}
+	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(next.text), Model: m.thread.modelName}
 	result := new(rpc.TurnStartResponse)
-	send := m.call("followup", "turn/start", params, result, item.text)
-	return func() tea.Msg {
-		reply, _ := send().(resultMsg)
-		reply.verbatim = item.verbatim
-		return reply
-	}
+	return m.callPrompt("followup", "turn/start", params, result, next)
 }
 
 func (m *model) interrupt() tea.Cmd {
@@ -601,7 +597,7 @@ func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 func (m *model) restorePrompt(msg resultMsg) {
 	switch msg.op {
 	case "send", "steer":
-		m.restoreComposer(msg.text)
+		m.restoreComposer(msg.text, msg.verbatim)
 	case "followup":
 		m.queue = append([]followup{{text: msg.text, verbatim: msg.verbatim}}, m.queue...)
 		m.syncQueue()
@@ -619,12 +615,12 @@ func resultLabel(op string) string {
 	return op
 }
 
-func (m *model) restoreComposer(text string) {
+func (m *model) restoreComposer(text string, verbatim bool) {
 	current := m.input.composer.Expanded()
 	if current != "" {
 		text += "\n" + current
 	}
-	m.input.composer.SetValue(text)
+	m.input.composer.recall(text, verbatim)
 }
 
 func (m *model) applyKeywords(value any) tea.Cmd {
@@ -951,4 +947,8 @@ func longestBacktickRun(text string) int {
 		longest = max(longest, run)
 	}
 	return longest
+}
+
+func sentUnchanged(draft editor, text string) bool {
+	return !draft.readsSlash() && strings.HasPrefix(text, "/")
 }

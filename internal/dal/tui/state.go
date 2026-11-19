@@ -229,6 +229,11 @@ type resultMsg struct {
 	err      error
 }
 
+type followup struct {
+	text     string
+	verbatim bool
+}
+
 type disconnectedMsg struct {
 	err error
 }

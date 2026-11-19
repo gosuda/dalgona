@@ -220,7 +220,7 @@ func TestModelFollowupAndInterrupt(t *testing.T) {
 	m.input.composer.SetValue("after this")
 	m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
 	if len(m.queue) != 1 || m.queue[0].text != "after this" {
-		t.Fatalf("follow-up queue = %v, want [after this]", m.queue)
+		t.Fatalf("follow-up queue = %v, want [after this]", queuedTexts(m.queue))
 	}
 	m, command := drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`)})
 	m = runCommand(t, m, command, "completed turn did not start the queued follow-up")

@@ -110,7 +110,7 @@ func TestDisconnectKeepsQueueAndDraft(t *testing.T) {
 	m, _ = drive(t, m, disconnectedMsg{err: errors.New("EOF")})
 
 	if len(m.queue) != 1 || m.input.composer.Value() != "half a sentence" {
-		t.Fatalf("follow-up queue %v and draft %q, want both kept", m.queue, m.input.composer.Value())
+		t.Fatalf("follow-up queue %q and draft %q, want both kept", queuedTexts(m.queue), m.input.composer.Value())
 	}
 }
 

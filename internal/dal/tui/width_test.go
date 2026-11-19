@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -163,6 +165,75 @@ func TestWrapKeepsEveryTabbedRowWithinTheWidth(t *testing.T) {
 				if got, want := strings.Join(strings.Fields(strings.Join(rows, "")), ""), strings.Join(strings.Fields(text), ""); got != want {
 					t.Fatalf("method %v wrap(%q, %d) shows %q, want every character of the text", method, text, n, got)
 				}
+			}
+		}
+	}
+}
+
+func wrapSweepTexts() []string {
+	tokens := []string{"a", "bcd", "efghijk", "-", "--", " ", "\t", "\n", "한"}
+	texts := []string{""}
+	level := []string{""}
+	for range 4 {
+		var next []string
+		for _, prefix := range level {
+			for _, token := range tokens {
+				next = append(next, prefix+token)
+			}
+		}
+		texts = append(texts, next...)
+		level = next
+	}
+	return texts
+}
+
+func wrapProblem(screen *screenState, text string, n int) string {
+	rows := screen.wrap(text, n)
+	if got, want := strings.Join(strings.Fields(strings.Join(rows, "")), ""), strings.Join(strings.Fields(text), ""); got != want {
+		return fmt.Sprintf("%q shows %q, want every character of the text %q", rows, got, want)
+	}
+	for _, row := range rows {
+		if strings.Contains(row, "\t") || screen.cells(row) > n {
+			return fmt.Sprintf("%q holds the row %q of %d cells with a tab or past the width", rows, row, screen.cells(row))
+		}
+	}
+	return ""
+}
+
+func TestWrapNeverMakesARowWiderThanTheWidth(t *testing.T) {
+	t.Parallel()
+	texts := wrapSweepTexts()
+	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
+		screen := screenState{method: method}
+		for n := 2; n <= 30; n++ {
+			for _, text := range texts {
+				if problem := wrapProblem(&screen, text, n); problem != "" {
+					t.Fatalf("method %v wrap(%q, %d) = %s", method, text, n, problem)
+				}
+			}
+		}
+	}
+}
+
+func TestWrapBreaksBeforeAHyphenThatDoesNotFit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		text string
+		n    int
+		want []string
+	}{
+		{"\t\t\t- item", 17, []string{"- item"}},
+		{"abcdefghijklmnop \t- item", 19, []string{"abcdefghijklmnop", "- item"}},
+		{" \t-", 8, []string{"-"}},
+		{"abcdefghi- x", 9, []string{"abcdefghi", "- x"}},
+		{"abc defghi- x", 10, []string{"abc", "defghi- x"}},
+		{"abc defghi-", 10, []string{"abc", "defghi-"}},
+	}
+	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
+		screen := screenState{method: method}
+		for _, tc := range cases {
+			if got := screen.wrap(tc.text, tc.n); !slices.Equal(got, tc.want) {
+				t.Errorf("method %v wrap(%q, %d) = %q, want %q", method, tc.text, tc.n, got, tc.want)
 			}
 		}
 	}

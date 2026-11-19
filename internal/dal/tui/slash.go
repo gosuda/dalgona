@@ -6,6 +6,8 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -256,4 +258,19 @@ func parseSlash(text string) (name, arg string, kind slashKind) {
 	default:
 		return name, "", slashUnknown
 	}
+}
+
+func (c editor) slashParts() (name, arg string, kind slashKind) {
+	text := strings.TrimSpace(c.Value())
+	if name, arg, kind = parseSlash(text); kind != slashUnknown {
+		return name, arg, kind
+	}
+	end := strings.IndexFunc(text, c.tokenBreak)
+	if end < 0 {
+		return name, arg, kind
+	}
+	if r, _ := utf8.DecodeRuneInString(text[end:]); unicode.IsSpace(r) {
+		return name, arg, kind
+	}
+	return parseSlash(text[:end] + " " + text[end:])
 }

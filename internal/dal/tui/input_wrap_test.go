@@ -247,6 +247,41 @@ func TestComposerWrapsEveryRowAtWindowWidthMinusThree(t *testing.T) {
 			rows: []string{strings.Repeat("a", 36), "x  " + strings.Repeat("b", 30) + "END"},
 			x:    promptCells + 3, y: 1,
 		},
+		{
+			name: "tabs that fill the row are dropped before a hyphen", width: 20, height: 12, text: "\t\t\t- item", caret: -1,
+			rows: []string{"- item"},
+			x:    promptCells + 6, y: 0,
+		},
+		{
+			name: "the caret after three tabs sits on the hyphen", width: 20, height: 12, text: "\t\t\t- item", caret: 3,
+			rows: []string{"- item"},
+			x:    promptCells, y: 0,
+		},
+		{
+			name: "a tab after a word moves the hyphen to the second row", width: 20, height: 12, text: "abcdefghijklmnop \t- item", caret: -1,
+			rows: []string{"abcdefghijklmnop", "- item"},
+			x:    promptCells + 6, y: 1,
+		},
+		{
+			name: "the caret before that hyphen sits on it", width: 20, height: 12, text: "abcdefghijklmnop \t- item", caret: 18,
+			rows: []string{"abcdefghijklmnop", "- item"},
+			x:    promptCells, y: 1,
+		},
+		{
+			name: "a tab and a space before a hyphen at 40 columns", width: 40, height: 12, text: strings.Repeat("a", 34) + " \t- item", caret: -1,
+			rows: []string{strings.Repeat("a", 34), "- item"},
+			x:    promptCells + 6, y: 1,
+		},
+		{
+			name: "a hyphen after a full row opens the second row", width: 12, height: 12, text: "abcdefghi- x", caret: -1,
+			rows: []string{"abcdefghi", "- x"},
+			x:    promptCells + 3, y: 1,
+		},
+		{
+			name: "a hyphen past the edge takes its word down", width: 13, height: 12, text: "abc defghi- x", caret: -1,
+			rows: []string{"abc", "defghi- x"},
+			x:    promptCells + 9, y: 1,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -335,6 +370,21 @@ func TestComposerCursorStaysInsideShortWindows(t *testing.T) {
 	}
 }
 
+func TestComposerCaretStaysInsideTheWindowAfterAChipWiderThanTheRow(t *testing.T) {
+	t.Parallel()
+	label := "[Paste #1 +30 lines]"
+	for _, width := range []int{8, 12, 20, 22, 24, 40} {
+		m := composerState(t, width, 12, "", -1)
+		m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(30)})
+		view := m.View()
+		assertFrame(t, strings.Split(view.Content, "\n"), width, 12)
+		want := promptCells + min(m.screen.cells(label), width-1-promptCells)
+		if view.Cursor == nil || view.Cursor.X != want || view.Cursor.Y != 0 {
+			t.Fatalf("width %d cursor = %v, want (%d, 0) at the end of the visible chip", width, view.Cursor, want)
+		}
+	}
+}
+
 func TestComposerUpAndDownKeepTheColumnAcrossSpacedRows(t *testing.T) {
 	t.Parallel()
 	m := composerState(t, 40, 12, spacedSentence, 74)
@@ -362,6 +412,9 @@ func TestComposerKeepsEveryTypedCharacterAfterATab(t *testing.T) {
 		"the quick brown fox jumps over the lazy dog\tand\tthen",
 		strings.Repeat("a", 30) + " ab\t1234567890123456789012",
 		"abc\tdef ghi\tjkl mno\tpqr stu\tvwx yz\t0123456789",
+		"\t\t\t- item",
+		"abcdefghijklmnop \t- item",
+		strings.Repeat("a", 34) + " \t- item",
 	}
 	for _, width := range []int{20, 40} {
 		for _, draft := range drafts {
@@ -457,6 +510,10 @@ func TestComposerRowsMatchWrapperOutput(t *testing.T) {
 		strings.Repeat("x1\uFE0F\u20E3", 12),
 		"世界世界世界世界\u3000世界世界世界世界\u3000世界世界",
 		"abc\u00a0def\u00a0ghi jklmnopqrstuvwxyz\u00a0abc",
+		"\t\t\t- item",
+		"abcdefghijklmnop \t- item",
+		"abcdefghi- x abc defghi- x see the spec- something else - - -- ---",
+		"a-b-c-d-e-f-g-h-i-j-k-l-m-n-o-p-q-r-s-t-u-v-w-x-y-z- a- b- c-",
 	}
 	for width := 1; width <= 44; width++ {
 		for _, text := range texts {

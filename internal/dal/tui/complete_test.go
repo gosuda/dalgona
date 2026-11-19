@@ -446,3 +446,108 @@ func TestFilePaletteEnterWithoutRowsKeepsDraft(t *testing.T) {
 		t.Fatalf("enter with no file rows gave %q, want the draft %q kept", got, "@mod")
 	}
 }
+
+func submitBesideChip(t *testing.T, caller *fakeCaller, typed string) model {
+	t.Helper()
+	m := newTestModel(caller, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.thread.id = "t1"
+	m = typeKeys(t, m, typed)
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(12)})
+	if len(m.input.composer.chips) != 1 || m.input.popup != nil {
+		t.Fatalf("draft has %d chips and popup %+v, want one chip and a closed palette", len(m.input.composer.chips), m.input.popup)
+	}
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	if command != nil {
+		m = runCommand(t, m, command, "")
+	}
+	return m
+}
+
+func TestSubmittedCommandEndsAtChipLikeThePalette(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		command string
+		opened  func(model) bool
+	}{
+		{command: "/new", opened: func(m model) bool { return m.confirm != nil && m.confirm.kind == confirmNew }},
+		{command: "/help", opened: func(m model) bool { return m.help != nil }},
+	}
+	for _, test := range tests {
+		for _, between := range []string{"", " "} {
+			t.Run(test.command+between, func(t *testing.T) {
+				t.Parallel()
+				caller := new(fakeCaller)
+				m := submitBesideChip(t, caller, test.command+between)
+				if !test.opened(m) {
+					t.Fatalf("enter on %q and a chip ran no command; notice %q", test.command+between, m.notice)
+				}
+				if len(caller.calls) != 0 || strings.Contains(m.notice, "unknown command") {
+					t.Fatalf("enter on %q and a chip made calls %#v and notice %q, want the command alone", test.command+between, caller.calls, m.notice)
+				}
+			})
+		}
+	}
+}
+
+func completeFileBesideChip(t *testing.T, side string, key tea.KeyPressMsg) (model, string) {
+	t.Helper()
+	pasted := pasteLines(12)
+	caller := &fileSearchCaller{hits: []fileHit{{Path: "src/main.go"}}}
+	m := newTestModel(caller, Options{Cwd: "/work"})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+	want := pasted + "@src/main.go "
+	if side == "after" {
+		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyHome})
+		want = "@src/main.go " + pasted
+	}
+	m, command := typeCommand(t, m, "@sr")
+	m = runFileSearch(t, m, command)
+	if popup := m.input.popup; popup == nil || popup.kind != popupFile || popup.query != "sr" || len(popup.items) != 1 {
+		t.Fatalf("popup = %+v, want one file for the query sr without the chip", popup)
+	}
+	m, _ = drive(t, m, key)
+	return m, want
+}
+
+func TestFilePaletteEndsTheTokenAtAChip(t *testing.T) {
+	t.Parallel()
+	for _, side := range []string{"before", "after"} {
+		for _, key := range []tea.KeyPressMsg{{Code: tea.KeyTab}, {Code: tea.KeyEnter}} {
+			t.Run(side+"/"+key.String(), func(t *testing.T) {
+				t.Parallel()
+				m, want := completeFileBesideChip(t, side, key)
+				if got := m.input.composer.Expanded(); got != want {
+					t.Fatalf("%s gave %q, want %q", key.String(), got, want)
+				}
+				if got := len(m.input.composer.chips); got != 1 {
+					t.Fatalf("%s left %d chips, want 1", key.String(), got)
+				}
+			})
+		}
+	}
+}
+
+func TestSubmittedPromptTouchingAChipKeepsItsText(t *testing.T) {
+	t.Parallel()
+	pasted := pasteLines(12)
+	tests := []struct{ typed, want string }{
+		{typed: "//ab", want: "/ab" + pasted},
+		{typed: "/a/b", want: "/a/b" + pasted},
+	}
+	for _, test := range tests {
+		t.Run(test.typed, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := newTestModel(caller, Options{})
+			m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+			m.thread.id = "t1"
+			m = typeKeys(t, m, test.typed)
+			m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			runCommand(t, m, command, "enter did not send the prompt; notice: "+m.notice)
+			assertTurnStartText(t, caller, test.want)
+		})
+	}
+}
