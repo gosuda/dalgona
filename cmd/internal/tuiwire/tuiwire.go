@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 
 	"github.com/charmbracelet/x/term"
 
@@ -31,9 +30,6 @@ func Run(ctx context.Context, conn io.ReadWriteCloser, opts app.TUIOptions) erro
 }
 
 func isTerminal(out io.Writer) bool {
-	if out == nil {
-		out = os.Stdout
-	}
 	file, ok := out.(term.File)
 	return ok && term.IsTerminal(file.Fd())
 }
