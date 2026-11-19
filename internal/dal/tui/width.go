@@ -19,12 +19,15 @@ func (s *screenState) nfc(text string) string {
 const tabStop = 8
 
 func (s *screenState) expand(text string) string {
+	return s.expandFrom(text, 0)
+}
+
+func (s *screenState) expandFrom(text string, col int) string {
 	if strings.IndexByte(text, '\t') < 0 {
 		return text
 	}
 	var out strings.Builder
 	out.Grow(len(text) + tabStop)
-	col := 0
 	for text != "" {
 		i := strings.IndexAny(text, "\t\n")
 		if i < 0 {
@@ -47,7 +50,11 @@ func (s *screenState) expand(text string) string {
 }
 
 func (s *screenState) cells(text string) int {
-	return s.method.StringWidth(s.nfc(s.expand(text)))
+	return s.cellsFrom(text, 0)
+}
+
+func (s *screenState) cellsFrom(text string, col int) int {
+	return s.method.StringWidth(s.nfc(s.expandFrom(text, col)))
 }
 
 func (s *screenState) fit(text string, n int) string {
@@ -124,7 +131,7 @@ func (s *screenState) wrap(text string, n int) []string {
 }
 
 type byteRange struct {
-	start, end int
+	start, end, col int
 }
 
 func (s *screenState) wrapRanges(text string, n int) []byteRange {
@@ -136,8 +143,9 @@ func (s *screenState) wrapRanges(text string, n int) []byteRange {
 	for i, part := range parts {
 		pos = s.rowStart(flat, pos, part)
 		start := walk.advance(pos)
+		col := walk.col
 		pos = min(pos+len(part), len(flat))
-		ranges[i] = byteRange{start: start, end: walk.advance(pos)}
+		ranges[i] = byteRange{start: start, end: walk.advance(pos), col: col}
 	}
 	return ranges
 }

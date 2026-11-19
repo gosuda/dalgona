@@ -549,6 +549,14 @@ func FuzzUpdateSequence(f *testing.F) {
 		fuzzStep(opDisconnect, true),
 		fuzzStep(opFocus, true, 1),
 	))
+	f.Add(fuzzSeed(
+		fuzzStep(opPaste, true, 2),
+		fuzzStep(opResize, true, 14, 12),
+		fuzzStep(opKey, true, 0),
+		fuzzStep(opResize, true, 10, 12),
+		fuzzStep(opKey, true, 8),
+		fuzzStep(opKey, true, 9),
+	))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		runFuzzSequence(t, data)
 	})
