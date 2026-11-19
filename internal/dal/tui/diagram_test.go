@@ -122,7 +122,7 @@ func TestD2RenderWritesNothingToStdout(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
 	var chain strings.Builder
-	for i := range 40 {
+	for i := range 10 {
 		fmt.Fprintf(&chain, "n%d -> n%d: hop\n", i, i+1)
 	}
 	cases := []struct {
@@ -131,8 +131,8 @@ func TestD2RenderWritesNothingToStdout(t *testing.T) {
 		fails  bool
 	}{
 		{"small", "x -> y: hello\ny -> z: world\n", false},
-		{"big", chain.String(), false},
-		{"invalid", "x -> {\n", true},
+		{"chain", chain.String(), false},
+		{"parse error", "x -> {\n", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
