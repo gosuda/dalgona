@@ -726,7 +726,7 @@ func (m *model) replayHeld(held []notificationMsg) tea.Cmd {
 	for _, note := range held {
 		command, err := m.applyDecodedNotification(note)
 		if err != nil {
-			m.errorf("protocol error in %s: %v; reconnect with %s or use /new", note.method, err, m.resumeHint())
+			m.protocolError(note.method, err)
 			continue
 		}
 		cmds = append(cmds, command)

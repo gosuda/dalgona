@@ -412,7 +412,7 @@ func (m *model) applyLoginStart(msg resultMsg) tea.Cmd {
 func (m *model) finishCancelledStart(msg resultMsg) tea.Cmd {
 	m.closeLogin()
 	if msg.err != nil {
-		m.errorf("Login failed: %s; run /login again", loginError(msg.err))
+		m.loginFailed(loginError(msg.err))
 		return nil
 	}
 	response, ok := msg.value.(*rpc.LoginAccountResponse)
