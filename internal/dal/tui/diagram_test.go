@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -85,5 +87,65 @@ func TestRenderDiagramBlockFailure(t *testing.T) {
 	}
 	if lines[1] != "<svg/>" {
 		t.Fatalf("failure must show source: %#v", lines)
+	}
+}
+
+func captureTerminal(t *testing.T, run func()) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	stdout, stderr := os.Stdout, os.Stderr
+	t.Cleanup(func() {
+		os.Stdout, os.Stderr = stdout, stderr
+	})
+	captured := make(chan string)
+	go func() {
+		data, _ := io.ReadAll(reader)
+		captured <- string(data)
+	}()
+	os.Stdout, os.Stderr = writer, writer
+	run()
+	os.Stdout, os.Stderr = stdout, stderr
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+	out := <-captured
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close reader: %v", err)
+	}
+	return out
+}
+
+func TestD2RenderWritesNothingToStdout(t *testing.T) {
+	diagramMu.Lock()
+	defer diagramMu.Unlock()
+	var chain strings.Builder
+	for i := range 40 {
+		fmt.Fprintf(&chain, "n%d -> n%d: hop\n", i, i+1)
+	}
+	cases := []struct {
+		name   string
+		source string
+		fails  bool
+	}{
+		{"small", "x -> y: hello\ny -> z: world\n", false},
+		{"big", chain.String(), false},
+		{"invalid", "x -> {\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var err error
+			out := captureTerminal(t, func() {
+				_, err = renderDiagram("d2", c.source)
+			})
+			if (err != nil) != c.fails {
+				t.Fatalf("render error = %v, want failure %v", err, c.fails)
+			}
+			if out != "" {
+				t.Fatalf("d2 render wrote %d bytes to the terminal:\n%s", len(out), out)
+			}
+		})
 	}
 }
