@@ -35,6 +35,10 @@ select {
 	min-height: var(--control-height);
 }
 
+summary {
+	min-height: var(--target-min);
+}
+
 @media (pointer: coarse) {
 	button,
 	select {
