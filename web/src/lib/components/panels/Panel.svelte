@@ -84,11 +84,17 @@ function onCancel(event: Event): void {
 		box-sizing: border-box;
 		width: min(70rem, calc(100vw - var(--space-8)));
 		max-width: 100%;
+		max-height: calc(100dvh - var(--space-8));
 		padding: var(--space-4);
 		border: var(--border-width) solid var(--line);
 		border-radius: var(--radius-card);
 		background: var(--surface);
 		color: var(--text);
+	}
+
+	.panel[open] {
+		display: flex;
+		flex-direction: column;
 	}
 
 	.panel::backdrop {
@@ -104,7 +110,8 @@ function onCancel(event: Event): void {
 	}
 
 	.panel-body {
-		max-height: calc(100dvh - var(--space-8));
+		flex: 0 1 auto;
+		min-height: 0;
 		overflow-y: auto;
 		overscroll-behavior: contain;
 	}
