@@ -128,7 +128,8 @@ func framePanel(s *screenState, p panelView, rows int) []string {
 		actions = actions[len(actions)-(rows-1):]
 	}
 	bodyRows := rows - 1 - len(actions)
-	lines := []string{rowTheme.paint(roleFaint, "┌ ") + rowTheme.paintBold(roleText, s.fit(p.title, width-panelRailCells))}
+	head := rowTheme.paint(roleFaint, "┌ ") + rowTheme.paintBold(roleText, s.fit(p.title, width-panelRailCells))
+	lines := []string{s.fit(head, width)}
 	start, shown := bodyWindow(p, bodyRows)
 	marked := p.cursor >= 0
 	for i, line := range shown {
@@ -150,7 +151,8 @@ func framePanel(s *screenState, p panelView, rows int) []string {
 		if i == 0 {
 			prefix = "└─ "
 		}
-		lines = append(lines, rowTheme.paint(roleFaint, prefix)+rowTheme.paint(roleDim, s.fit(action, actionWidth-s.cells(prefix))))
+		line := rowTheme.paint(roleFaint, prefix) + rowTheme.paint(roleDim, s.fit(action, actionWidth-s.cells(prefix)))
+		lines = append(lines, s.fit(line, actionWidth))
 	}
 	return lines
 }

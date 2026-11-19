@@ -32,6 +32,8 @@ The dock holds, from the top, the composer, an open panel, the live row, and the
 
 While a key hint shows, it MUST cover the calls, plan and queued cells, and the counts MUST return when the hint ends.
 
+When the free text would have fewer than 22 cells, every blank field after the last field with text MUST give its cells to it. A field with text MUST keep its cells and its place. A cut free text of fewer than 3 cells MUST show one `.` for each cell.
+
 The activity MUST come from an open question or approval first, then the retry countdown, then a running tool call.
 With no running tool call, the activity MUST be the first plan step that is in progress, else the first pending plan step.
 The plan step text MUST be the first line of the step after the sanitizer runs.
@@ -250,6 +252,8 @@ A click MUST select nothing, because the client cannot learn the screen row of t
 ## Editor
 
 The composer MUST wrap text to the window width minus three cells.
+With no panel open, each row of the wrapped text MUST take one composer row.
+With no panel open, the composer MUST show the caret row. When the caret row is past the last row that fits, the composer MUST show the rows that end with it.
 Enter MUST send the prompt, except after a backslash and while the command palette lists a command.
 Enter after a backslash MUST replace the backslash with a newline.
 Shift+Enter and Ctrl+J MUST insert a newline.
@@ -484,6 +488,11 @@ The sanitizer MUST replace each byte that is not valid UTF-8 with U+FFFD. A raw 
 ## Width
 
 The client MUST measure text with the width method of its renderer.
+A tab MUST count as the cells to the next 8-cell stop, counted from the first cell of the text that holds it.
+A newline MUST restart the count of stops.
+A row that the client prints or draws MUST hold spaces in place of each tab.
+The composer MUST count its stops from its first text cell after the prompt.
+The cursor MUST sit after the spaces of a tab that precedes the caret.
 A user whose terminal draws East Asian Ambiguous characters two cells wide MUST set `RUNEWIDTH_EASTASIAN=1`.
 
 ## Theme
