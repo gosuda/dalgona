@@ -81,6 +81,9 @@ Resume MUST take the active turn id and `turnEffort` from the same `thread/resum
 During a resume request for another thread, the client MUST buffer that thread's notifications.
 After it applies the snapshot, the client MUST replay those notifications in receive order.
 A superseded resume response or error MUST NOT change the client.
+A `thread/start` request MUST supersede an earlier `thread/resume` request.
+A `thread/resume` request MUST supersede an earlier `thread/start` request.
+A superseded `thread/start` result or error MUST NOT change the client.
 If the buffer exceeds its limit, the resume MUST fail and keep the current thread.
 
 The setting `status_hide` lists items to hide. Its default is empty. The client MUST NOT hide `model`.
@@ -153,6 +156,7 @@ Up and Down MUST move the cursor. PgUp and PgDn MUST move it by a page.
 Enter MUST choose the highlighted item. Enter MUST do nothing when no item matches.
 Esc MUST clear a non-empty filter. Esc MUST close the panel when the filter is empty.
 A list panel MUST lose its filter when another panel opens above it.
+A reply that opens a list panel MUST be dropped when another panel or the review is open. It MUST be dropped when a newer list request was sent.
 The input line MUST show the filter while a list panel is open.
 The input line MUST show the first line of the draft while another panel is open, with the caret at its end.
 A confirm panel MUST show its title, its body, and its action row. It MUST NOT send a request before Enter.
@@ -322,6 +326,7 @@ The client MUST allow a shell command its 120 second timeout before it reports a
 The chip MUST quote the output in a fence longer than any run of backticks in the output.
 Esc on a shell line with no typed text MUST leave shell mode.
 A shell line with only chips has no typed text. Esc on it MUST keep the chips in the prompt.
+A shell result MUST add its chip only while the draft holds no text other than shell chips. Its row MUST print in every case.
 A shell command MUST run in the open thread's directory. Before a thread opens, it MUST run in the launch directory.
 The folder item, its help legend and the welcome details MUST show the open thread's directory.
 Before a thread opens, they MUST show the launch directory.
@@ -377,6 +382,8 @@ When the queue holds 32 follow-ups, Alt+Enter MUST show `follow-up queue is full
 A follow-up starts after `turn/completed` only when the turn ends idle. After an interrupted or failed turn, the queue MUST stay held and the notice MUST say how to release it. After a revert, a leaf change, or `thread/reverted`, the TUI MUST show `files changed by later turns are not reverted`.
 
 The interrupt notice MUST end when an interrupted turn ends.
+
+A confirmed rewind MUST return the turn's prompt to the composer only while the composer is empty. A draft that is not empty MUST stay as it is.
 
 ## Approvals
 

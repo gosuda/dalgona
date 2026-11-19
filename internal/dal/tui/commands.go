@@ -161,7 +161,7 @@ func (m *model) newThread() tea.Cmd {
 		Sandbox:        sandboxPolicy(m.thread.sandbox),
 		Cwd:            m.conn.opts.Cwd,
 	}
-	return m.call("new", "thread/start", params, new(rpc.ThreadStartResponse), "")
+	return m.callSeq(m.resetPendingResume(""), "new", "thread/start", params, new(rpc.ThreadStartResponse))
 }
 
 func approvalPolicy(mode string) string {
@@ -340,6 +340,8 @@ func (m *model) applyPreludeResult(msg resultMsg) (tea.Cmd, bool) {
 		return nil, true
 	case strings.HasPrefix(msg.op, "advisor"):
 		return m.applyAdvisorResult(msg), true
+	case msg.op == "new" && msg.seq != 0 && msg.seq != m.pendingState().seq:
+		return nil, true
 	case msg.op == "initialize" && msg.err != nil:
 		flat := strings.Join(strings.Fields(msg.err.Error()), " ")
 		m.commit("welcome", []string{m.screen.fit(sanitizeText("Could not start: "+flat+". Press ctrl+c to exit."), terminalWidth(m.screen.width))})
@@ -428,12 +430,8 @@ func (m *model) applyDataResult(msg resultMsg) tea.Cmd {
 	switch msg.op {
 	case "keywords":
 		return m.applyKeywords(msg.value)
-	case "models":
-		return m.applyModels(msg.value)
-	case "threads":
-		return m.applyThreads(msg.value)
-	case "tree", "revertTree", "forkTree", "rewindTree":
-		return m.applyTree(msg.op, msg.value)
+	case "models", "threads", "tree", "revertTree", "forkTree", "rewindTree":
+		return m.applyListReply(msg)
 	case "resumed":
 		return m.applyResumed(msg.value)
 	case "new":
@@ -453,14 +451,7 @@ func (m *model) applyAdvisorResult(msg resultMsg) tea.Cmd {
 	states, _ := msg.value.(*[]rpc.AdvisorState)
 	switch msg.op {
 	case "advisorPanel":
-		if states == nil {
-			return m.unexpectedResult("advisor status")
-		}
-		if len(*states) == 0 {
-			m.noticef("%s", advisorStatusText(*states))
-			return nil
-		}
-		m.openAdvisorList(*states)
+		return m.applyAdvisorPanel(msg, states)
 	case "advisorStatus":
 		if states == nil {
 			return m.unexpectedResult("advisor status")
@@ -472,6 +463,21 @@ func (m *model) applyAdvisorResult(msg resultMsg) tea.Cmd {
 		m.finishAdvisorList()
 		m.noticef("advisor reset; it reviews the current branch at the next turn")
 	}
+	return nil
+}
+
+func (m *model) applyAdvisorPanel(msg resultMsg, states *[]rpc.AdvisorState) tea.Cmd {
+	if m.staleListReply(msg) {
+		return nil
+	}
+	if states == nil {
+		return m.unexpectedResult("advisor status")
+	}
+	if len(*states) == 0 {
+		m.noticef("%s", advisorStatusText(*states))
+		return nil
+	}
+	m.openAdvisorList(*states)
 	return nil
 }
 
@@ -541,6 +547,9 @@ func (m *model) applyInterrupt(msg resultMsg) tea.Cmd {
 }
 
 func (m *model) applyRewind(label string) {
+	if m.input.composer.Value() != "" {
+		return
+	}
 	m.input.composer.SetValue(label)
 	if utf8.RuneCountInString(label) == 80 {
 		m.noticef("Draft holds the first 80 characters of that prompt")
@@ -875,8 +884,19 @@ func (m *model) applyShell(msg shellResultMsg) {
 	r := commandRow(item, m.screen.level())
 	r.mark, r.label = "", "!"
 	m.commit(key, m.renderRow(r))
+	if !m.draftHoldsOnlyShellOutput() {
+		return
+	}
 	label := fmt.Sprintf("[Shell #%d exit %d, %s]", msg.n, exit, pluralText(len(textLines(output)), "line"))
 	m.input.composer.addChip(chip{label: label, text: shellExpansion(command, exit, output), shell: true})
+}
+
+func (m *model) draftHoldsOnlyShellOutput() bool {
+	composer := &m.input.composer
+	return !slices.ContainsFunc(composer.text, func(r rune) bool {
+		ch, ok := composer.chipOf(r)
+		return !ok || !ch.shell
+	})
 }
 
 func shellOutput(result rpc.CommandExecResponse) string {
