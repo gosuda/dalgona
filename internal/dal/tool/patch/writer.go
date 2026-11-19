@@ -35,19 +35,27 @@ type writeEffect struct {
 }
 
 func applyBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Result, error) {
+	result, outcome, err := commitBatch(ctx, env, batch)
+	if err == nil || !batch.style.profile() {
+		return result, err
+	}
+	return result, outcomeError(batch.style, outcome, err)
+}
+
+func commitBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Result, tool.Outcome, error) {
 	if len(batch.files) == 0 {
-		return tool.Result{Output: []byte("no_change\n"), OK: true}, nil
+		return tool.Result{Output: []byte("no_change\n"), OK: true}, noChangeOutcome, nil
 	}
 	defer batch.closePins()
 	if err := verifyBatch(ctx, env, batch.files); err != nil {
-		return tool.Result{}, err
+		return tool.Result{}, outcomeOf(err), err
 	}
 	if err := checkNoReplaceSupport(env, batch.files); err != nil {
-		return tool.Result{}, err
+		return tool.Result{}, outcomeOf(err), err
 	}
 	states, err := stageWriteSet(ctx, env, batch.files)
 	if err != nil {
-		return tool.Result{}, err
+		return tool.Result{}, outcomeOf(err), err
 	}
 	effects, failed, commitErr := commitWriteSet(ctx, env, states)
 	if commitErr != nil {
@@ -58,11 +66,12 @@ func applyBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Resu
 		} else {
 			cleanupStatesKeepBackups(commitCtx, env, states)
 		}
-		return tool.Result{}, writeError(failed, commitErr, states, rollbackFailures)
+		outcome := failedCommit(commitErr, len(effects), len(rollbackFailures))
+		return tool.Result{}, outcome, writeError(failed, commitErr, states, rollbackFailures)
 	}
 	cleanupStates(context.WithoutCancel(ctx), env, states)
 	refs := recordSnapshots(env, batch.files)
-	return tool.Result{Output: appliedOutput(batch.summary, batch.files, refs), OK: true}, nil
+	return tool.Result{Output: appliedOutput(batch.summary, batch.files, refs), OK: true}, appliedOutcome, nil
 }
 
 func verifyBatch(ctx context.Context, env tool.Env, files []*stagedFile) error {
@@ -88,7 +97,7 @@ func verifySource(ctx context.Context, env tool.Env, file *stagedFile) error {
 		return fmt.Errorf("patch: cannot read %s before commit: %w", file.path, err)
 	}
 	if !bytes.Equal(current, file.before) {
-		return fmt.Errorf("patch: %s changed while you were approving. Nothing was written. Try again", file.path)
+		return reasoned(tool.ReasonTargetChanged, fmt.Errorf("patch: %s changed while you were approving. Nothing was written. Try again", file.path))
 	}
 	return nil
 }
@@ -113,7 +122,7 @@ func verifyAbsentAt(pin *dirPin, absolute, display string) error {
 		return fmt.Errorf("patch: cannot inspect %s: %w", display, err)
 	}
 	if exists {
-		return fmt.Errorf("patch: %s already exists", display)
+		return reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: %s already exists", display))
 	}
 	return nil
 }
@@ -124,7 +133,7 @@ func verifyAbsentPath(ctx context.Context, env tool.Env, absolute, display strin
 		return nil
 	}
 	if err == nil {
-		return fmt.Errorf("patch: %s already exists", display)
+		return reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: %s already exists", display))
 	}
 	return fmt.Errorf("patch: cannot inspect %s: %w", display, err)
 }
@@ -147,7 +156,7 @@ func checkNoReplaceSupport(env tool.Env, files []*stagedFile) error {
 	}
 	for _, file := range files {
 		if !file.exists || file.renameTo != "" {
-			return errors.New("patch: no_replace_unavailable on this runner")
+			return reasoned(tool.ReasonNoReplaceUnavailable, errors.New("patch: no_replace_unavailable on this runner"))
 		}
 	}
 	return nil
@@ -301,7 +310,7 @@ func publishAbsent(ctx context.Context, env tool.Env, state *writeState, target 
 		return linker.LinkFile(ctx, state.temp, target)
 	}
 	if !tool.IsLocalRunner(env.Runner) {
-		return errors.New("no_replace_unavailable")
+		return reasoned(tool.ReasonNoReplaceUnavailable, errors.New("no_replace_unavailable"))
 	}
 	return os.Link(state.temp, target)
 }

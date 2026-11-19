@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
 )
 
@@ -80,7 +81,7 @@ func (p *hashParser) claim(section *hashSection, line int) error {
 		return fmt.Errorf("patch: line %d: duplicate file section for %s", line, section.path)
 	}
 	if ok && previous != section.reference {
-		return fmt.Errorf("patch: mixed_references for %s", section.path)
+		return reasoned(tool.ReasonMixedReferences, fmt.Errorf("patch: mixed_references for %s", section.path))
 	}
 	p.seen[section.path] = section.reference
 	return nil
@@ -88,10 +89,10 @@ func (p *hashParser) claim(section *hashSection, line int) error {
 
 func (p *hashParser) finish(section *hashSection) error {
 	if section.removed && len(section.edits) > 1 {
-		return fmt.Errorf("patch: [%s]: REM cannot be combined with other ops on the same file", section.path)
+		return reasoned(tool.ReasonInvalidShape, fmt.Errorf("patch: [%s]: REM cannot be combined with other ops on the same file", section.path))
 	}
 	if section.isNew && (len(section.edits) != 1 || section.edits[0].kind != editCreate) {
-		return fmt.Errorf("patch: [%s#NEW]: a new file takes only PUT >$: rows", section.path)
+		return newFileShape(section.path)
 	}
 	p.edits = append(p.edits, section.edits...)
 	return nil
@@ -101,7 +102,7 @@ func (p *hashParser) operation(cursor int, section *hashSection) (int, error) {
 	text := p.lines[cursor].text
 	line := cursor + 1
 	if section.renamed && p.style.profile() {
-		return 0, expected(line, "a new file section", text)
+		return 0, reasoned(tool.ReasonInvalidShape, expected(line, "a new file section", text))
 	}
 	verb, rest, _ := strings.Cut(text, " ")
 	switch verb {
@@ -128,7 +129,7 @@ func (p *hashParser) put(section *hashSection, rest string, cursor int) (int, er
 		return 0, err
 	}
 	if section.isNew && rest != ">$:" {
-		return 0, fmt.Errorf("patch: [%s#NEW]: a new file takes only PUT >$: rows", section.path)
+		return 0, newFileShape(section.path)
 	}
 	rows, next, err := readHashRows(p.lines, cursor+1)
 	if err != nil {
@@ -144,11 +145,11 @@ func (p *hashParser) put(section *hashSection, rest string, cursor int) (int, er
 
 func cut(section *hashSection, rest string, line int) error {
 	if section.isNew {
-		return errors.New(newFileOnlyPut)
+		return reasoned(tool.ReasonInvalidShape, errors.New(newFileOnlyPut))
 	}
 	first, last, valid := parseRange(rest)
 	if !valid {
-		return expected(line, "a valid line range", rest)
+		return rangeError(line, "a valid line range", rest)
 	}
 	section.change(locator{kind: locatorLines, first: first, last: last}, actionReplace, "")
 	return nil
@@ -156,7 +157,7 @@ func cut(section *hashSection, rest string, line int) error {
 
 func remove(section *hashSection) error {
 	if section.isNew {
-		return errors.New(newFileOnlyPut)
+		return reasoned(tool.ReasonInvalidShape, errors.New(newFileOnlyPut))
 	}
 	section.removed = true
 	section.edits = append(section.edits, edit{kind: editDelete, index: section.next(), path: section.path, reference: section.reference})
@@ -164,7 +165,10 @@ func remove(section *hashSection) error {
 }
 
 func (p *hashParser) move(section *hashSection, rest string, line int) error {
-	if section.isNew || strings.TrimSpace(rest) == "" {
+	if section.isNew {
+		return reasoned(tool.ReasonInvalidShape, expected(line, "a destination filename", "MV "+rest))
+	}
+	if strings.TrimSpace(rest) == "" {
 		return expected(line, "a destination filename", "MV "+rest)
 	}
 	dest, err := profileDestination(rest, line, p.style)
@@ -177,7 +181,15 @@ func (p *hashParser) move(section *hashSection, rest string, line int) error {
 }
 
 func blockOpError(line int) error {
-	return fmt.Errorf("patch: line %d: block ops (N*) are not supported; use a line range", line)
+	return reasonedAs(tool.ReasonInvalidSyntax, tool.ErrClassResolve, fmt.Errorf("patch: line %d: block ops (N*) are not supported; use a line range", line))
+}
+
+func newFileShape(path string) error {
+	return reasoned(tool.ReasonInvalidShape, fmt.Errorf("patch: [%s#NEW]: a new file takes only PUT >$: rows", path))
+}
+
+func rangeError(line int, what, text string) error {
+	return reasoned(tool.ReasonInvalidRange, expected(line, what, text))
 }
 
 func (s *hashSection) next() int {
@@ -295,7 +307,7 @@ func parsePut(rest string, line int) (locator, action, error) {
 	}
 	first, last, valid := parseRange(text)
 	if !valid {
-		return locator{}, 0, expected(line, "a valid line range", text)
+		return locator{}, 0, rangeError(line, "a valid line range", text)
 	}
 	return locator{kind: locatorLines, first: first, last: last}, actionReplace, nil
 }
@@ -303,7 +315,7 @@ func parsePut(rest string, line int) (locator, action, error) {
 func parsePutGap(text string, line int) (locator, action, error) {
 	number, valid := positiveNumber(text[1:])
 	if !valid {
-		return locator{}, 0, expected(line, "a positive line number", text[1:])
+		return locator{}, 0, rangeError(line, "a positive line number", text[1:])
 	}
 	if text[0] == '<' {
 		return locator{kind: locatorGap, before: number}, actionInsertBefore, nil

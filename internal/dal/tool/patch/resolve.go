@@ -41,10 +41,10 @@ func (r fileResolver) stageRename(ctx context.Context, item edit) error {
 		return err
 	}
 	if hasParentComponent(item.to) {
-		return errors.New("patch: rename destination contains parent traversal")
+		return reasoned(tool.ReasonOutsideWorkspace, errors.New("patch: rename destination contains parent traversal"))
 	}
 	if _, statErr := r.env.Runner.Stat(ctx, absolute); statErr == nil {
-		return fmt.Errorf("patch: cannot rename %s to %s: destination already exists", r.group.display, display)
+		return reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: cannot rename %s to %s: destination already exists", r.group.display, display))
 	} else if !errors.Is(statErr, fs.ErrNotExist) {
 		return fmt.Errorf("patch: cannot inspect rename destination %s: %w", display, statErr)
 	}
@@ -203,7 +203,7 @@ func (r fileResolver) resolveLines(doc document, item edit) ([]replacement, erro
 		return nil, err
 	}
 	if first < 1 || last < first || last > doc.lines() {
-		return nil, fmt.Errorf("patch: line %d does not exist (file has %d lines)", last, doc.lines())
+		return nil, reasoned(tool.ReasonInvalidRange, fmt.Errorf("patch: line %d does not exist (file has %d lines)", last, doc.lines()))
 	}
 	if quoteErr := proveQuotedSpan(doc, item, r.group.display); quoteErr != nil {
 		return nil, quoteErr
@@ -258,7 +258,7 @@ func (r fileResolver) resolveGap(doc document, item edit) ([]replacement, error)
 		return nil, err
 	}
 	if gap < 0 || gap > doc.lines() {
-		return nil, fmt.Errorf("patch: line %d does not exist (file has %d lines)", item.locator.before, doc.lines())
+		return nil, reasoned(tool.ReasonInvalidRange, fmt.Errorf("patch: line %d does not exist (file has %d lines)", item.locator.before, doc.lines()))
 	}
 	body := doc.render(item.body)
 	splice := snapshot.Splice{Start: gap, End: gap, Inserted: countBodyLines(body)}
@@ -372,7 +372,7 @@ func matchesAtLine(matches []textMatch, doc document, line int) []textMatch {
 
 func mapReferenceSpan(store *snapshot.Store, ref string, file *stagedFile, first, last int) (snapshot.Span, error) {
 	if store == nil {
-		return snapshot.Span{}, errors.New("patch: snapshot store is unavailable")
+		return snapshot.Span{}, reasoned(tool.ReasonObservationUnavailable, errors.New("patch: snapshot store is unavailable"))
 	}
 	mapped, err := store.ResolveSpan(ref, file.path, file.before, snapshot.Span{Start: first - 1, End: last})
 	if err != nil {
@@ -383,7 +383,7 @@ func mapReferenceSpan(store *snapshot.Store, ref string, file *stagedFile, first
 
 func mapReferenceGap(store *snapshot.Store, ref string, file *stagedFile, gap int) (int, error) {
 	if store == nil {
-		return 0, errors.New("patch: snapshot store is unavailable")
+		return 0, reasoned(tool.ReasonObservationUnavailable, errors.New("patch: snapshot store is unavailable"))
 	}
 	mapped, err := store.ResolveGap(ref, file.path, file.before, gap)
 	if err != nil {
@@ -401,7 +401,7 @@ func proveUnchanged(env tool.Env, ref, path string, before []byte) error {
 		return fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err)
 	}
 	if env.Snapshots == nil || !env.Snapshots.Unchanged(ref, path, before) {
-		return fmt.Errorf("patch: reference %s for %s is expired or the file changed. Read again", ref, path)
+		return reasoned(tool.ReasonTargetChanged, fmt.Errorf("patch: reference %s for %s is expired or the file changed. Read again", ref, path))
 	}
 	return nil
 }
@@ -417,7 +417,7 @@ func proveCoverage(store *snapshot.Store, item edit, path string, first, last in
 	if store != nil && store.Covers(item.guard.text, first, last) {
 		return nil
 	}
-	return fmt.Errorf("patch: changes[%d]: lines %d-%d of %s need prior observation. Read them, then resend", item.index, first, last, path)
+	return reasoned(tool.ReasonUnobservedRange, fmt.Errorf("patch: changes[%d]: lines %d-%d of %s need prior observation. Read them, then resend", item.index, first, last, path))
 }
 
 func proveQuotedSpan(doc document, item edit, path string) error {
@@ -457,10 +457,10 @@ func overlapError(style Style, path string, left, right replacement) error {
 		return nil
 	}
 	if max(left.start, right.start) < min(left.end, right.end) {
-		return fmt.Errorf("patch: changes[%d] and changes[%d] overlap in %s", left.index, right.index, path)
+		return reasoned(tool.ReasonOverlap, fmt.Errorf("patch: changes[%d] and changes[%d] overlap in %s", left.index, right.index, path))
 	}
 	if style.profile() && insertionConflict(left, right) {
-		return fmt.Errorf("patch: changes[%d] and changes[%d] have conflicting insertion gaps in %s", left.index, right.index, path)
+		return reasoned(tool.ReasonOverlap, fmt.Errorf("patch: changes[%d] and changes[%d] have conflicting insertion gaps in %s", left.index, right.index, path))
 	}
 	return nil
 }

@@ -32,12 +32,20 @@ func (e Editor) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Res
 }
 
 func (e Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Plan, error) {
+	plan, err := e.plan(ctx, call, env)
+	if err != nil {
+		return tool.Plan{}, e.refuse(err)
+	}
+	return plan, nil
+}
+
+func (e Editor) plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Plan, error) {
 	input, err := payload(e.style, call.Args)
 	if err != nil {
 		return tool.Plan{}, parseError(e.style, err)
 	}
 	if len(input) > 8<<20 {
-		return tool.Plan{}, errors.New("patch: input is over 8 MiB; split the change into several calls")
+		return tool.Plan{}, reasoned(tool.ReasonResourceLimit, errors.New("patch: input is over 8 MiB; split the change into several calls"))
 	}
 	edits, err := parse(e.style, input)
 	if err != nil {
@@ -45,11 +53,11 @@ func (e Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Pl
 	}
 	if env.Masker != nil {
 		if unmaskErr := unmaskEdits(edits, env.Masker.UnmaskStrict); unmaskErr != nil {
-			return tool.Plan{}, fmt.Errorf("patch: secret placeholder cannot be restored: %w", unmaskErr)
+			return tool.Plan{}, reasoned(tool.ReasonPermissionDenied, fmt.Errorf("patch: secret placeholder cannot be restored: %w", unmaskErr))
 		}
 	}
 	if len(edits) == 0 || len(edits) > 64 {
-		return tool.Plan{}, errors.New("patch: a payload may hold 1 to 64 edits; split the change into several calls")
+		return tool.Plan{}, reasoned(tool.ReasonResourceLimit, errors.New("patch: a payload may hold 1 to 64 edits; split the change into several calls"))
 	}
 	batch, err := stage(ctx, e.style, edits, env, input)
 	if err != nil {

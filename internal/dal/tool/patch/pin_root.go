@@ -56,7 +56,7 @@ func holdPath[P pinHolder](env tool.Env, display, absolute string, pin P) (P, er
 }
 
 func symlinkRefusal(display string) error {
-	return fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display)
+	return reasoned(tool.ReasonInvalidShape, fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display))
 }
 
 func (p *rootPin) descend(component, display string) error {
