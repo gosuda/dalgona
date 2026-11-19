@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
@@ -226,7 +227,9 @@ func stateWord(state string, lastTurn time.Duration) string {
 
 func (m *model) liveRow() string {
 	width := terminalWidth(m.screen.width)
-	fields := m.rowFields(width)
+	hinted := m.hint.text != ""
+	fields := m.rowFields(width, hinted)
+	gap := m.liveGap(fields, width, hinted)
 	var row strings.Builder
 	for index, field := range fields {
 		if index > 1 {
@@ -234,15 +237,52 @@ func (m *model) liveRow() string {
 		}
 		row.WriteString(field.text)
 	}
-	row.WriteString(m.screen.cutText(m.liveText(), max(0, width-fieldsWidth(fields))))
+	row.WriteString(strings.Repeat(" ", gap))
+	row.WriteString(m.screen.cutText(m.liveText(), max(0, width-fieldsWidth(fields)-gap)))
 	return m.screen.fit(row.String(), width)
 }
 
-func (m *model) rowFields(width int) []liveField {
-	if m.hint.text != "" {
-		return trimBlankFields(m.liveHead(), width)
+func (m *model) rowFields(width int, hinted bool) []liveField {
+	if hinted {
+		head := m.liveHead()
+		if width-fieldsWidth(head) < liveTextCells {
+			return nil
+		}
+		return head
 	}
-	return m.liveFields(width)
+	fields := m.liveFields(width)
+	if !m.liveCovers() {
+		return fields
+	}
+	for len(fields) > 2 && width-fieldsWidth(fields) < liveTextCells {
+		fields = trimBlankFields(fields[:len(fields)-1], width)
+	}
+	return fields
+}
+
+func (m *model) liveCovers() bool {
+	if m.notice != "" || m.settings != nil && m.settings.saveErr != "" {
+		return true
+	}
+	if len(m.approvals) > 0 || m.thread.state == stateAwaitingApproval {
+		return true
+	}
+	_, waiting := m.retryRemaining()
+	return waiting
+}
+
+func (m *model) liveGap(fields []liveField, width int, hinted bool) int {
+	if len(fields) == 0 || strings.HasSuffix(ansi.Strip(fields[len(fields)-1].text), " ") {
+		return 0
+	}
+	need := len("...")
+	if hinted {
+		need = m.screen.cells(m.hint.text)
+	}
+	if width-fieldsWidth(fields)-1 >= need {
+		return 1
+	}
+	return 0
 }
 
 func (m *model) liveHead() []liveField {
@@ -287,7 +327,8 @@ func fieldsWidth(fields []liveField) int {
 
 func (m *model) liveFreeWidth() int {
 	width := terminalWidth(m.screen.width)
-	return width - fieldsWidth(m.liveFields(width))
+	fields := m.rowFields(width, false)
+	return width - fieldsWidth(fields) - m.liveGap(fields, width, false)
 }
 
 func (s *screenState) cutText(text string, n int) string {

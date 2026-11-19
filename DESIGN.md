@@ -280,7 +280,7 @@ No gradients, transition: all, system-ui font stacks or unregistered component l
 |Hint line|Shown in the live row when no turn runs.|n/a|`dim`|
 |Dock|The last rows of the screen, from the top: the composer, the open panel when there is one, the live row, and the status band. The dock changes height only on a key press, a paste, or the open or close of a panel.|n/a|No background|
 |Composer|One row per line of input. The composer grows only as the user adds lines, up to a fixed limit, and scrolls inside itself beyond it. Columns: the prompt mark, then the text in the free column. The terminal's cursor rests on the first row, and the client draws no cursor glyph.|n/a|Prompt mark point colour. Text `text`|
-|Live row|One row, below the open panel and above the status band. Fields from the left: the live tag in 10 cells (the dot, one space, the state word in 8 cells), the elapsed time in 7 cells, the progress fields, then free text. Nothing is right-anchored.|As tool row|As tool row|
+|Live row|One row, below the open panel and above the status band. Fields from the left: the live tag in 10 cells (the dot, one space, the state word in 8 cells), the elapsed time in 7 cells, the progress fields, then free text. Nothing is right-anchored. A message (a key hint, the retry countdown, a notice, or a wait for an approval or an answer) covers the progress fields until the free text has 22 cells, and a key hint also covers the tag and the elapsed time below 40 columns. One space separates the free text from the field before it when the text still fits.|As tool row|As tool row|
 |Status band|One row of fixed fields. The left group holds `model` and the icons. The right group holds `context` and `mark`.|n/a|`dim`|
 
 ### Terminal panels
@@ -373,7 +373,7 @@ In the terminal, `auto` starts with `unicode`. When `KITTY_WINDOW_ID` is set, th
 
 Map the ordered effort levels onto the four effort glyphs by rank: `round(rank × 3 / (levels − 1))`. The effort item shows only when the model has two or more levels.
 
-Every Unicode glyph that the terminal puts in a fixed field or in the status band has East Asian Width `N`, `Na` or `H`, so a fixed field has the same cells in every terminal setting. A test checks each Unicode glyph token with `golang.org/x/text/width`. Nerd Font glyphs are private-use characters and are exempt: each counts one cell, and one space follows it. The prompt mark `›` (U+203A) has East Asian Width `N`. Text that is cut in the terminal ends with `...`. The terminal measures all text with the method of its renderer, shows every character as typed, and replaces none.
+Every Unicode glyph that the terminal puts in a fixed field or in the status band has East Asian Width `N`, `Na` or `H`, so a fixed field has the same cells in every terminal setting. A test checks each Unicode glyph token with `golang.org/x/text/width`. Nerd Font glyphs are private-use characters and are exempt: each counts one cell, and one space follows it. The prompt mark `›` (U+203A) has East Asian Width `N`. Text that is cut in the terminal ends with `...`, and a cut free text of fewer than 3 cells shows one `.` for each cell. The terminal measures all text with the method of its renderer, shows every character as typed, and replaces none.
 
 The terminal key list (`?`) shows one legend line for each shown item, so that every icon has a text meaning.
 

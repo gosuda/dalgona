@@ -32,7 +32,17 @@ The dock holds, from the top, the composer, an open panel, the live row, and the
 
 While a key hint shows, it MUST cover the calls, plan and queued cells, and the counts MUST return when the hint ends.
 
-When the free text would have fewer than 22 cells, every blank field after the last field with text MUST give its cells to it. A field with text MUST keep its cells and its place. A cut free text of fewer than 3 cells MUST show one `.` for each cell.
+A key hint, a settings error, a rate-limit countdown, a notice, and a wait for an approval or an answer are messages.
+While the fields exceed the window width, the queued, plan and calls fields MUST drop, in that order.
+When the free text would have fewer than 22 cells, every blank field after the last field with text MUST give it its cells.
+A blank tag and a blank elapsed time MUST give their cells too.
+A field with text that fits MUST keep its cells and its place under any free text that is not a message.
+A message MUST cover the queued, plan and calls fields, in that order, until the free text has 22 cells.
+A key hint MUST also cover the tag and the elapsed time when they leave it fewer than 22 cells.
+One space MUST separate the free text from the last field, unless that field ends in a blank cell.
+The space MUST go when 3 cells of the text would not fit after it.
+For a key hint, the space MUST go when the whole hint would not fit after it.
+A cut free text of fewer than 3 cells MUST show one `.` for each cell.
 
 The activity MUST come from an open question or approval first, then the retry countdown, then a running tool call.
 With no running tool call, the activity MUST be the first plan step that is in progress, else the first pending plan step.
@@ -42,7 +52,7 @@ With no step to show, the activity MUST be the tail of the streaming item, else 
 
 The composer shows `› ` in the thread hue, then the typed text. The terminal cursor marks the insertion point. When the composer is empty, the placeholder follows the prompt in dim text. The placeholder never shows a keyword mark.
 
-States are `idle`, `running`, `awaiting approval`, `awaiting input`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. Live text MUST be cut to one row, and a cut text MUST end with `...`. At 40 columns no line may exceed 39 cells.
+States are `idle`, `running`, `awaiting approval`, `awaiting input`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. Live text MUST be cut to one row, and a cut text MUST end with `...`, except where fewer than 3 cells remain. At 40 columns no line may exceed 39 cells.
 
 The state words are `Working`, `Waiting`, `Stopped`, `Failed`, `Offline`, `Ready`, and `Done`. `running` shows `Working`, `awaiting approval` and `awaiting input` show `Waiting`, `interrupted` shows `Stopped`, `disconnected` shows `Offline`, and `idle` is named `Ready`, or `Done` after a completed turn. An idle live row MUST show no state word.
 
