@@ -70,7 +70,7 @@ let retry = $derived(retryUntil === null ? "" : formatRetryWait(retryLeft));
 {:else if key === "failed"}
 	<span class="failed">{word}</span>
 {:else}
-	<span class="tag">{word}</span>
+	<span class="tag" class:offline={key === "disconnected"}>{word}</span>
 {/if}
 
 <style>
@@ -78,13 +78,23 @@ let retry = $derived(retryUntil === null ? "" : formatRetryWait(retryLeft));
 		display: inline-flex;
 		align-items: center;
 		gap: var(--space-2);
+		min-width: var(--tag-min-width);
+		min-height: var(--tag-height);
+		padding: 0 var(--space-2);
+		border-radius: var(--radius-tag);
+		color: var(--dim);
 		font-size: var(--size-small);
+		font-weight: var(--weight-control);
 		font-variant-numeric: tabular-nums;
+		line-height: var(--leading-tight);
+		white-space: nowrap;
+	}
+
+	.tag.offline {
+		color: var(--warning-text);
 	}
 
 	.tag.point {
-		border-radius: var(--radius-tag);
-		padding: 0 var(--space-2);
 		border: 0;
 		background: var(--point);
 		color: var(--on-point);
@@ -99,6 +109,7 @@ let retry = $derived(retryUntil === null ? "" : formatRetryWait(retryLeft));
 		display: inline-block;
 		min-width: 7ch;
 		text-align: end;
+		white-space: normal;
 	}
 
 	.dot {
@@ -122,7 +133,9 @@ let retry = $derived(retryUntil === null ? "" : formatRetryWait(retryLeft));
 
 	.failed {
 		color: var(--failed-text);
+		font-family: var(--face-title);
 		font-weight: var(--weight-strong);
 		font-size: var(--size-small);
+		line-height: var(--leading-tight);
 	}
 </style>

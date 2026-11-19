@@ -41,6 +41,7 @@ const config: UserConfig = defineConfig({
 							/ApprovalCard\.svelte/,
 							/Composer\.svelte/,
 							/ThreadList\.svelte/,
+							/StateTag\.svelte/,
 							/app\.css$/,
 						],
 					},

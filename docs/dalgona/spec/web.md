@@ -124,6 +124,7 @@ The licence texts of the fonts and the icon subset MUST ship in `web/static/lice
 ### Thread header and status band
 
 The thread header shows the open thread title and its state tag. The state tag is `Working`, `Waiting` while the open thread waits for the user, `Done`, `Stopped`, or `Failed`. The tag shows `Ready` when the thread is idle, and `Offline` when the connection is down.
+Each state tag MUST follow the Status tag, Live tag, and Failed tag rows of `DESIGN.md`. It MUST take the colour that the State words table of `DESIGN.md` gives its word. `web/checks/state-tags.js` checks these rules for each tag in view.
 The visible thread title MUST use at most two lines.
 The header MUST retain the full title as text and as a `title` attribute.
 The client MUST map thread status `notLoaded` to idle and display `Ready` when no completed turn is known.
