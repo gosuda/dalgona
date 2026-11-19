@@ -51,14 +51,62 @@ func (s *screenState) cells(text string) int {
 }
 
 func (s *screenState) fit(text string, n int) string {
-	nfc := s.nfc(s.expand(plainPrefix(text, max(n, 0)*8+64)))
+	nfc := s.nfc(s.expand(s.head(text, n)))
 	if len(nfc) <= n {
 		return nfc
 	}
 	if n < 3 {
-		return s.method.Truncate(nfc, n, "")
+		return s.truncate(nfc, n, "")
 	}
-	return s.method.Truncate(nfc, n, "...")
+	return s.truncate(nfc, n, "...")
+}
+
+func (s *screenState) head(text string, n int) string {
+	for bound := max(n, 0)*8 + 64; ; bound *= 2 {
+		head := plainPrefix(text, bound)
+		if len(head) == len(text) || s.cells(head) > n {
+			return head
+		}
+	}
+}
+
+func (s *screenState) truncate(text string, n int, tail string) string {
+	if s.method.StringWidth(text) <= n {
+		return text
+	}
+	keep := n - s.method.StringWidth(tail)
+	var out strings.Builder
+	used := 0
+	cut := false
+	for text != "" {
+		seq, width := s.step(text)
+		text = text[len(seq):]
+		if cut && !strings.HasPrefix(seq, "\x1b") {
+			continue
+		}
+		if !cut && width > 0 && used+width > keep {
+			cut = true
+			out.WriteString(tail)
+			continue
+		}
+		used += width
+		out.WriteString(seq)
+	}
+	return out.String()
+}
+
+func (s *screenState) step(text string) (string, int) {
+	if c := text[0]; c >= ' ' && c < 0x7f || c >= 0xc0 {
+		if cluster, width := ansi.FirstGraphemeCluster(text, s.method); cluster != "" {
+			return cluster, width
+		}
+		return text[:1], 0
+	}
+	seq, _, _, _ := s.method.DecodeSequenceInString(text, 0, nil)
+	if seq == "" {
+		return text[:1], 0
+	}
+	return seq, 0
 }
 
 func plainPrefix(text string, bound int) string {

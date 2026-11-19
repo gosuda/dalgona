@@ -441,3 +441,231 @@ func TestMarkKeywordsRejectsMidClusterSpans(t *testing.T) {
 		})
 	}
 }
+
+const zwjFamily = "👨\u200d👩\u200d👧\u200d👦"
+
+var fitMethods = []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth}
+
+func TestFitMeasuresWideTextWithTheMethodOfTheRenderer(t *testing.T) {
+	t.Parallel()
+	texts := []string{
+		"한글 텍스트 안녕하세요 세계 " + zwjFamily + " e\u0301 あいうえお中文字",
+		"가나다 " + zwjFamily + zwjFamily + " 라마바",
+		"flag 🇰🇷🇯🇵🇺🇸 keycap 1️⃣2️⃣3️⃣ skin 👍🏽👍🏿 rainbow 🏳️\u200d🌈 end",
+		strings.Repeat(zwjFamily, 6),
+		"ab" + strings.Repeat("한", 12) + "cd" + strings.Repeat("e\u0301", 8),
+		"\x1b[1m한글 " + zwjFamily + " bold text\x1b[0m tail",
+	}
+	for _, method := range fitMethods {
+		screen := screenState{method: method}
+		for _, text := range texts {
+			total := screen.cells(text)
+			for n := 3; n <= total+2; n++ {
+				checkFitCut(t, screen, text, n)
+			}
+		}
+	}
+}
+
+func checkFitCut(t *testing.T, screen screenState, text string, n int) {
+	t.Helper()
+	got := screen.fit(text, n)
+	if cells := screen.cells(got); cells > n {
+		t.Fatalf("method %v fit(%q, %d) = %q holds %d cells", screen.method, text, n, got, cells)
+	}
+	whole := screen.nfc(text)
+	if screen.cells(whole) <= n {
+		if got != whole {
+			t.Fatalf("method %v fit(%q, %d) = %q, want the text unchanged", screen.method, text, n, got)
+		}
+		return
+	}
+	plain, ok := strings.CutSuffix(ansi.Strip(got), "...")
+	if !ok {
+		t.Fatalf("method %v fit(%q, %d) = %q, want a cut text to end with ...", screen.method, text, n, got)
+	}
+	rest, ok := strings.CutPrefix(ansi.Strip(whole), plain)
+	if !ok {
+		t.Fatalf("method %v fit(%q, %d) = %q, want a prefix of the text", screen.method, text, n, got)
+	}
+	cluster, _ := ansi.FirstGraphemeCluster(rest, screen.method)
+	if screen.cells(plain+cluster) <= n-3 {
+		t.Fatalf("method %v fit(%q, %d) = %q, want the cut to keep the next cluster %q", screen.method, text, n, got, cluster)
+	}
+}
+
+func TestFitCutsInsideAWideRune(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"한글한글", 5, "한..."},
+		{"a한글한글", 5, "a..."},
+		{"ab한글한", 6, "ab..."},
+		{"abc한글한", 6, "abc..."},
+		{"abc한", 5, "abc한"},
+		{"abcd한", 5, "ab..."},
+		{"한글", 3, "..."},
+		{"한글", 2, "한"},
+		{"한글", 1, ""},
+		{"a한", 2, "a"},
+		{"日本語かな", 7, "日本..."},
+		{"日本語かな", 8, "日本..."},
+	}
+	for _, method := range fitMethods {
+		screen := screenState{method: method}
+		for _, tc := range cases {
+			if got := screen.fit(tc.in, tc.n); got != tc.want {
+				t.Errorf("method %v fit(%q, %d) = %q, want %q", method, tc.in, tc.n, got, tc.want)
+			}
+		}
+	}
+}
+
+func TestFitCutsClustersByTheCellsOfEachMethod(t *testing.T) {
+	t.Parallel()
+	family := "ab " + zwjFamily + " cdef"
+	keycaps := "keycap 1️⃣2️⃣3️⃣ end"
+	cases := []struct {
+		method ansi.Method
+		text   string
+		n      int
+		want   string
+	}{
+		{ansi.WcWidth, family, 16, family},
+		{ansi.WcWidth, family, 15, "ab " + zwjFamily + " ..."},
+		{ansi.WcWidth, family, 14, "ab " + zwjFamily + "..."},
+		{ansi.WcWidth, family, 13, "ab ..."},
+		{ansi.GraphemeWidth, family, 10, family},
+		{ansi.GraphemeWidth, family, 9, "ab " + zwjFamily + " ..."},
+		{ansi.GraphemeWidth, family, 8, "ab " + zwjFamily + "..."},
+		{ansi.GraphemeWidth, family, 7, "ab ..."},
+		{ansi.WcWidth, keycaps, 11, "keycap 1️⃣..."},
+		{ansi.WcWidth, keycaps, 13, "keycap 1️⃣2️⃣3️⃣..."},
+		{ansi.GraphemeWidth, keycaps, 11, "keycap ..."},
+		{ansi.GraphemeWidth, keycaps, 13, "keycap 1️⃣..."},
+		{ansi.GraphemeWidth, keycaps, 14, "keycap 1️⃣2️⃣..."},
+	}
+	for _, tc := range cases {
+		screen := screenState{method: tc.method}
+		if got := screen.fit(tc.text, tc.n); got != tc.want {
+			t.Errorf("method %v fit(%q, %d) = %q, want %q", tc.method, tc.text, tc.n, got, tc.want)
+		}
+	}
+}
+
+func TestFitMatchesTheRendererTruncateWhereItMeasuresRight(t *testing.T) {
+	t.Parallel()
+	screen := screenState{method: ansi.GraphemeWidth}
+	texts := []string{
+		"plain ascii text that is cut",
+		"한글 텍스트 안녕하세요 세계 " + zwjFamily + " e\u0301 あいうえお中文字",
+		"\x1b[31mred\x1b[0m and \x1b[1;4mbold underline\x1b[0m text",
+		"\x1b]8;;https://example.com\x07link text here\x1b]8;;\x07 after",
+		"한\x1b[7m글\x1b[27m한글한글한글",
+	}
+	for _, text := range texts {
+		for n := 3; n <= screen.cells(text)+1; n++ {
+			want := ansi.Truncate(screen.nfc(text), n, "...")
+			if got := screen.fit(text, n); got != want {
+				t.Errorf("fit(%q, %d) = %q, want %q", text, n, got, want)
+			}
+		}
+	}
+}
+
+func TestFitKeepsTextThatFitsAfterALongCombiningRun(t *testing.T) {
+	t.Parallel()
+	marks := strings.Repeat("\u0301", 120)
+	for _, method := range fitMethods {
+		screen := screenState{method: method}
+		fits := "e" + marks + "xyz"
+		if got, want := screen.fit(fits, 5), screen.nfc(fits); got != want {
+			t.Errorf("method %v fit of a combining run and xyz = %d bytes, want the %d bytes of the whole text", method, len(got), len(want))
+		}
+		over := "e" + marks + "xyzabcdef"
+		got := screen.fit(over, 5)
+		if want := screen.nfc("e"+marks+"x") + "..."; got != want {
+			t.Errorf("method %v fit of a combining run and xyzabcdef = %d bytes ending %q, want %d bytes ending %q", method, len(got), got[max(0, len(got)-8):], len(want), want[len(want)-8:])
+		}
+		if cells := screen.cells(got); cells > 5 {
+			t.Errorf("method %v fit of a combining run holds %d cells, want at most 5", method, cells)
+		}
+	}
+}
+
+func TestComposerPlacesTheCaretAfterWideText(t *testing.T) {
+	t.Parallel()
+	han18 := strings.Repeat("한", 18)
+	han10 := strings.Repeat("한", 10)
+	cases := []wrapCase{
+		{
+			name: "an eighteenth syllable that would straddle the edge moves to the second row", width: 40, height: 12, text: "xx" + han18, caret: -1,
+			rows: []string{"xx" + strings.Repeat("한", 17), "한"},
+			x:    promptCells + 2, y: 1,
+		},
+		{
+			name: "caret at the end of the row before a straddling syllable", width: 40, height: 12, text: "xx" + han18, caret: 19,
+			rows: []string{"xx" + strings.Repeat("한", 17), "한"},
+			x:    promptCells + 36, y: 0,
+		},
+		{
+			name: "a row of ascii and syllables that ends exactly at the edge", width: 40, height: 12, text: "x" + han18, caret: -1,
+			rows: []string{"x" + han18},
+			x:    promptCells + 37, y: 0,
+		},
+		{
+			name: "caret after the ninth syllable of an exact row", width: 40, height: 12, text: "x" + han18, caret: 10,
+			rows: []string{"x" + han18},
+			x:    promptCells + 19, y: 0,
+		},
+		{
+			name: "two syllables past the edge at 20 columns", width: 20, height: 12, text: "ab" + han10, caret: -1,
+			rows: []string{"ab" + strings.Repeat("한", 7), strings.Repeat("한", 3)},
+			x:    promptCells + 6, y: 1,
+		},
+		{
+			name: "caret at the end of the first mixed row at 20 columns", width: 20, height: 12, text: "ab" + han10, caret: 9,
+			rows: []string{"ab" + strings.Repeat("한", 7), strings.Repeat("한", 3)},
+			x:    promptCells + 16, y: 0,
+		},
+		{
+			name: "caret after one syllable of the second mixed row", width: 20, height: 12, text: "ab" + han10, caret: 10,
+			rows: []string{"ab" + strings.Repeat("한", 7), strings.Repeat("한", 3)},
+			x:    promptCells + 2, y: 1,
+		},
+		{
+			name: "mixed words break at the space before the syllable that does not fit", width: 20, height: 12, text: "가 a나 b다 c라 d마 e바", caret: -1,
+			rows: []string{"가 a나 b다 c라", "d마 e바"},
+			x:    promptCells + 7, y: 1,
+		},
+		{
+			name: "caret after the first word of a mixed row", width: 20, height: 12, text: "가 a나 b다 c라 d마 e바", caret: 1,
+			rows: []string{"가 a나 b다 c라", "d마 e바"},
+			x:    promptCells + 2, y: 0,
+		},
+		{
+			name: "family emoji counts as the sum of its parts without unicode core", width: 40, height: 12, text: "a" + zwjFamily, caret: -1,
+			rows: []string{"a" + zwjFamily},
+			x:    promptCells + 9, y: 0,
+		},
+		{
+			name: "family emoji counts as one glyph with unicode core", width: 40, height: 12, text: "a" + zwjFamily, caret: -1, unicodeCore: true,
+			rows: []string{"a" + zwjFamily},
+			x:    promptCells + 3, y: 0,
+		},
+		{
+			name: "caret before the family emoji", width: 40, height: 12, text: "한a" + zwjFamily, caret: 2, unicodeCore: true,
+			rows: []string{"한a" + zwjFamily},
+			x:    promptCells + 3, y: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			checkWrapCase(t, tc)
+		})
+	}
+}

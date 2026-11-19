@@ -14,13 +14,14 @@ import (
 const spacedSentence = "the quick brown fox jumps over the lazy dog again and again and again until the end of the line x"
 
 type wrapCase struct {
-	name   string
-	width  int
-	height int
-	text   string
-	caret  int
-	rows   []string
-	x, y   int
+	name        string
+	width       int
+	height      int
+	text        string
+	caret       int
+	rows        []string
+	x, y        int
+	unicodeCore bool
 }
 
 func composerState(t *testing.T, width, height int, text string, caret int) model {
@@ -30,6 +31,15 @@ func composerState(t *testing.T, width, height int, text string, caret int) mode
 	m.input.composer.SetValue(text)
 	if caret >= 0 {
 		m.input.composer.cursor = caret
+	}
+	return m
+}
+
+func composerStateFor(t *testing.T, tc wrapCase) model {
+	t.Helper()
+	m := composerState(t, tc.width, tc.height, tc.text, tc.caret)
+	if tc.unicodeCore {
+		m, _ = drive(t, m, tea.ModeReportMsg{Mode: ansi.ModeUnicodeCore, Value: ansi.ModeSet})
 	}
 	return m
 }
@@ -158,7 +168,7 @@ func TestComposerWrapsEveryRowAtWindowWidthMinusThree(t *testing.T) {
 
 func checkWrapCase(t *testing.T, tc wrapCase) {
 	t.Helper()
-	m := composerState(t, tc.width, tc.height, tc.text, tc.caret)
+	m := composerStateFor(t, tc)
 	lines, row, col := m.input.composer.layout(&m.screen, tc.width, nil, m.screen.dockTheme())
 	got := make([]string, len(lines))
 	for i, line := range lines {
