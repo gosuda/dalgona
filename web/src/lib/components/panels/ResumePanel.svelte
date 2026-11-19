@@ -73,8 +73,8 @@ async function load(): Promise<void> {
 	}
 }
 
-function choose(threadId: string): void {
-	void session.selectThread(threadId);
+async function choose(threadId: string): Promise<void> {
+	await session.selectThread(threadId);
 	session.closePanel();
 }
 </script>
@@ -91,7 +91,7 @@ function choose(threadId: string): void {
 			<ul class="threads">
 				{#each shown as thread (thread.id)}
 					<li>
-						<button type="button" class="thread-choice" onclick={() => choose(thread.id)}>
+						<button type="button" class="thread-choice" onclick={() => void choose(thread.id)}>
 							<span class="title">{threadTitle(thread)}</span>
 						</button>
 					</li>
@@ -111,7 +111,7 @@ function choose(threadId: string): void {
 				{:else}
 					<ul class="threads">
 						{#each hits as hit (hit.threadId)}
-							<li><button type="button" class="thread-choice" onclick={() => choose(hit.threadId)}>
+							<li><button type="button" class="thread-choice" onclick={() => void choose(hit.threadId)}>
 								<span class="title">{hit.name || hit.preview || "Untitled thread"}</span>
 								<span>{hit.snippet}</span>
 							</button></li>

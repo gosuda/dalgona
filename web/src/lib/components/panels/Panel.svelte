@@ -32,7 +32,14 @@ $effect(() => {
 		)?.focus();
 	} else if (!open && node.open) {
 		node.close();
-		opener?.focus();
+		const back =
+			opener !== null &&
+			opener !== document.body &&
+			opener.isConnected &&
+			!opener.matches(":disabled")
+				? opener
+				: document.getElementById("prompt");
+		back?.focus();
 		opener = null;
 	}
 });

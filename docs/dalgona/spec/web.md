@@ -428,6 +428,8 @@ That submit MUST show `No command named /<name>. Start with // to send a message
 
 Pressing `?` while no field has focus MUST open the key list.
 Escape MUST close a panel and MUST return focus to the element that opened it.
+When the opener of a panel is gone, disabled, or the page body, closing the panel MUST move focus to the message field.
+Choosing a thread in the resume panel MUST keep the panel open until the attempt to open that thread ends.
 
 The resume panel filters thread titles, previews, and identifiers as the user types.
 A trimmed filter with at least three characters starts conversation search after a 300 ms pause.
