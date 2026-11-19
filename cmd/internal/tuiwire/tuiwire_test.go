@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,15 +23,26 @@ const refusal = "the interactive interface needs a terminal on stdout; use -p <p
 type touchedConn struct {
 	touched atomic.Int32
 	closed  atomic.Int32
+	first   chan struct{}
+	once    sync.Once
+}
+
+func (c *touchedConn) touch() {
+	c.touched.Add(1)
+	c.once.Do(func() {
+		if c.first != nil {
+			close(c.first)
+		}
+	})
 }
 
 func (c *touchedConn) Read([]byte) (int, error) {
-	c.touched.Add(1)
+	c.touch()
 	return 0, io.EOF
 }
 
 func (c *touchedConn) Write(p []byte) (int, error) {
-	c.touched.Add(1)
+	c.touch()
 	return len(p), nil
 }
 
@@ -50,9 +62,6 @@ func assertRefused(t *testing.T, stdout io.Writer, written func() int) {
 	}
 	if err.Error() != refusal {
 		t.Fatalf("Run error = %q, want %q", err, refusal)
-	}
-	if !strings.Contains(err.Error(), "terminal on stdout") || !strings.Contains(err.Error(), "-p <prompt>") {
-		t.Fatalf("Run error %q must name the cause and -p", err)
 	}
 	if n := written(); n != 0 {
 		t.Fatalf("Run wrote %d bytes to a non-terminal stdout before refusing, want 0", n)
