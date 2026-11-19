@@ -1,0 +1,57 @@
+#### Edit-review step 9. Precision measurement and ratchet
+Anchor: Richard Feynman
+
+- Files and symbols:
+  - `internal/agent/testdata/editreview/cases.jsonl`: 620 cases from this repository's history at `3c4b6f94`. Each line holds the fields of the corpus line in The schemas of this workstream: `id`, `group`, `unit`, `split`, `source`, `task`, `files`, and `flags`.
+    - 120 sound edit cases, with group `sound-edit`. Each is a single-file, non-merge commit that adds lines, taken from `git log --no-merges -p`. Take the eligible commits in ascending order of the SHA-256 of the commit id, and keep a commit only while its file kind has room: 60 code, 36 interface, 12 config, and 12 text, 120 cases in all. The task is the commit subject.
+    - 30 sound turn cases, with group `sound-turn`. Each is a non-merge commit whose subject contains the basename, without extension, of a changed file. The task is the subject. The case holds every changed file. Take the first 30 in ascending order of the SHA-256 of the commit id.
+    - 40 sound edit cases that need two or more parts, group `multipart`. Each is a non-merge commit from `git log --no-merges -p` that adds lines and whose `files` the packing rule of Edit-review step 4 splits into two or more parts. Take the eligible commits in ascending order of the SHA-256 of the commit id, and keep a commit only while it needs two or more parts. The task is the commit subject. The case holds every changed file, of any kind. Take the first 40 eligible commits.
+    - 10 sound moved-function edit cases, group `moved`. Each is a non-merge commit in which the declaration line `func NAME(` of one top-level Go function is removed from one file and added to a different file of the same commit. Take the eligible commits in ascending order of the SHA-256 of the commit id, and keep a commit only while the packing rule puts its removal hunk and its addition hunk in different parts. The task is the commit subject. The case holds every changed file. Take the first 10 eligible commits.
+    - The two groups hold 50 cases. The split rule below gives each group a held-out half, so 20 `multipart` and 5 `moved` cases are held out. That is 25 held-out cases that need two or more parts, and 5 of them move a function between files.
+    - 420 defect cases, 30 for each of the 14 question ids, with `group` set to the id. Each is a sound case of a kind that the rule allows, with one defect put in by the rule. Eligible means that the rule covers the case's file kind and finds its target line. Use the first 30 eligible sound cases in ascending order of `sha256` of the commit id.
+    - Defect rules, one per id. The kinds in brackets are the kinds the rule applies to.
+      - `broken_syntax` (code, interface, config): delete the last added line whose trimmed text is `}`, `]`, `)`, or `/>`.
+      - `lost_code` (all kinds): delete the first unchanged non-blank line, in file order, that lies in a part of the file that no hunk touches. In code, use a Go statement that matches `^\t+(return |[A-Za-z_.]+ :?= |[A-Za-z_.]+\(.*\)$)` and does not end in `{`. In interface, use a declaration. In config, use a `key = value` or `"key": value` line. In text, use a sentence.
+      - `wrong_logic` (code): in the first added line that holds `==`, `!=`, `<=`, `>=`, `&&`, or `||`, replace the first such operator with its pair: `==` and `!=`, `<=` and `<`, `>=` and `>`, `&&` and `||`.
+      - `placeholder` (all kinds): replace the first added non-blank line with `... existing code ...` as a comment in the file's comment syntax: `//` for code, `/* */` for interface files, and `#` for config files other than JSON. JSON has no comments, so write the member `"...": "existing code ..."`. In text, write the plain line.
+      - `off_task` (all kinds, task not empty): rename the first name, in file order, that no added line uses, to `<name>Value`. The name is a local declared with `:=` in a function that no hunk touches (code), a CSS class (interface), a config key (config), or a heading word (text).
+      - `needless_layer` (code): add one Go function that returns its arguments to an existing function of the file, and point the first added call at it.
+      - `narration` (code, interface): add a comment above the first added statement that repeats its trimmed text, in the comment syntax of `placeholder`.
+      - `unguarded_state` (code; sound cases whose added lines match the concurrency pattern): delete one unchanged line that holds `.Lock()`, `.Unlock()`, `atomic.`, or `<-`, and that no added line holds. Skip the case when no such line exists.
+      - `wasted_work` (code): wrap the first added line that is only a call (`^\t+[A-Za-z_.]+\(.*\)$`) in `for i := 0; i < 3; i++ { ... }`.
+      - `unsafe_input` (code, config): add one added line `apiKey = "sk-test-0123456789ab"` in code, or `api_key = "sk-test-0123456789ab"` in config. The literal must pass the default masker unchanged, or the judge sees a placeholder.
+      - `unclear_contract` (code): rename the first added function declaration, and its uses in the file, to `handle`.
+      - `off_token` (interface): replace the first added `var(--...)` value with `#3366cc`. Skip the case when no added line holds `var(`.
+      - `layout_motion` (interface): add `transition: all 0.3s;` as the first declaration of the first added rule block.
+      - `incomplete` (turn cases): set the file whose basename the subject names back to its pre-image in the post-image, so the change the task names is missing from the diff.
+  - `internal/agent/testdata/editreview/ratchet.json`: `corpus_sha256`, `judge` (`decisions:typesafe/jev-1.14`), `threshold` (0.9), and `measured`, which is null until a run. A run fills `measured` with `sound_flag_rate`, `errors`, and `questions`. Each question entry holds `precision` (null when the question flagged no held-out case), `recall`, and `true_flags` (the count of true flags).
+  - `internal/agent/review_corpus_test.go`:
+    - `TestEditReviewCorpusSplit` (always runs, no network). Check these:
+      - Case ids are unique.
+      - `flags` is `[]` when `group` is `sound-edit`, `sound-turn`, `multipart`, or `moved`, and `[<id>]` for defect cases.
+      - Each of the 14 ids has 30 defect cases.
+      - The `sound-edit` group has 60, 36, 12, and 12 cases of the four file kinds.
+      - There are 30 sound turn cases, 40 `multipart` cases, and 10 `moved` cases, so 620 lines in all.
+      - The split is frozen and stratified. In each group (each `group` value: each defect id, `sound-edit`, `sound-turn`, `multipart`, and `moved`), sort the ids by the hex `sha256` of the id. Even positions are `dev`, and odd positions are `held_out`. That gives 15 held out per defect group, 60 for sound edit, 15 for sound turn, 20 for `multipart`, and 5 for `moved`.
+      - The `sha256` of `cases.jsonl` equals `ratchet.json` `corpus_sha256`.
+    - `TestEditReviewCorpusBuild` runs only with `DALGONA_EDIT_REVIEW_BUILD=1`. It writes `cases.jsonl` and updates `corpus_sha256`.
+    - `TestBuiltInSpeakersMatchRatchet` (always runs). See the speaker rule below.
+    - `TestEditReviewCorpusMultipart` (always runs, no network). It builds the parts of each `multipart` and `moved` case with `buildReview`. It asserts that each case has two or more parts, and that for each `moved` case the part holding the removal hunk differs from the part holding the addition hunk. The expected values come from the packing rule of Edit-review step 4 and from the groups above.
+  - `internal/agent/review_eval_test.go` `TestEditReviewHeldOutPrecision`. It is skipped unless `DALGONA_EDIT_REVIEW_EVAL=decisions:<id>` and `OPENROUTER_API_KEY` are set. For each held-out case (310 cases: 60 sound edit, 20 `multipart`, 5 `moved`, 15 sound turn, and 210 defect), it builds the parts with `buildReview`. For each part it asks that part's `questions`, scores the answers with `scoreAnswers`, and takes the part's flags from `reviewVerdict`. A case flags a question when any of its parts flags it. It measures every question, not only the speakers. For each question it reports TP, FP, FN, precision, recall, and `true_flags` (TP). A sound case counts as a false positive for each question that any of its parts flags. It reports the held-out sound flag rate, which is the share of sound cases with any flag, and the error count with the ids that errored. A case is an error only when every one of its parts fails. It fails when errors exceed 5 percent. When `measured` holds values, it also fails when any precision falls below its recorded value or when the sound flag rate rises above its recorded value. When `measured` is null, it only reports. With `DALGONA_EDIT_REVIEW_RATCHET=update` and no metric worse, it rewrites `measured`. Rubric changes are tried on `dev` cases first, and kept only if the held-out ratchet holds.
+- Speaker rule and its test:
+  - Before the measurement, `reviewBuiltInSpeakers` is empty, as Step 4 sets it. The test reads that variable and holds no copy of the list.
+  - The built-in set is declared in Step 4, not here. The review uses it once Step 9 writes it, and only when `[edit_review] feedback` is absent.
+  - Precision, `true_flags`, and the sound flag rate count each held-out case once, whatever its number of parts. The speaker rule therefore covers parts.
+  - For each defect id, apply these rules in order:
+    - No record, or `precision` is null: not a speaker.
+    - `precision` under `threshold`: not a speaker.
+    - `precision` at or above `threshold` and `true_flags` at least 5: a speaker.
+    - `precision` at or above `threshold` and `true_flags` under 5: not a speaker.
+  - `TestBuiltInSpeakersMatchRatchet` reads `ratchet.json`, derives the set, and asserts it equals `reviewBuiltInSpeakers` as a set.
+- Gate for default-on (recorded here, not acted on): on held-out cases, every question has precision at least 0.9 and recall at least 0.5, and the sound flag rate is at most 0.02. A question with no flags on held-out cases fails the gate.
+- What the measurement needs: `OPENROUTER_API_KEY` for the decision service `decisions:typesafe/jev-1.14`, and `DALGONA_EDIT_REVIEW_EVAL` set. One run sends one request for each part of each held-out case, at least 310 requests.
+- What ships when it cannot run: `reviewBuiltInSpeakers` stays empty, `measured` stays null, and the Measurement section of `docs/spec/edit-review.md` states that no speaker is measured.
+- Failing-first tests: `TestEditReviewCorpusSplit` and `TestEditReviewCorpusMultipart` fail before the corpus and the ratchet file exist. `TestBuiltInSpeakersMatchRatchet` fails before the ratchet file and `reviewBuiltInSpeakers` exist.
+- Spec: `docs/spec/edit-review.md`, Measurement section. Cover the corpus counts (620 lines, with the `multipart` and `moved` groups), the defect rules, the held-out split, the speaker rule, the gate, and the not-measured status.
+- Lands after: Steps 4 and 6.
+

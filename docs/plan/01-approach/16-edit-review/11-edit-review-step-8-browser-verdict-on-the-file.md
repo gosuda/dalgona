@@ -1,0 +1,42 @@
+#### Edit-review step 8. Browser verdict on the file change
+Anchor: Kenya Hara, Saul Bass
+
+- Files and symbols:
+  - `web/src/lib/types.ts`:
+    - `export interface EditReview { readonly verdict: "clean" | "uncertain" | "flagged" | "error"; readonly summary: string }`.
+    - The `fileChange` variant of `TranscriptItem` (types.ts:60-62) gets `readonly review: EditReview | null`.
+    - `TranscriptState` (types.ts:112-120) gets `readonly turnReview: EditReview | null`. It holds the review of the open turn only.
+    - `AppNotification` (types.ts:135) gets `{ readonly type: "toolJudged"; readonly threadId: string; readonly itemId: string; readonly review: EditReview }` and `{ readonly type: "turnJudged"; readonly threadId: string; readonly turnId: string; readonly review: EditReview }`.
+  - `web/src/lib/validation.ts`:
+    - The `kind === "fileChange"` branch of the item builder sets `review: null`, because history carries no verdict.
+    - New `parseReview(params: unknown): EditReview | null`. It returns null unless `summary` is a string and `verdict` is one of the four values.
+    - `parseNotification` (validation.ts:665) gets `case "dalgona/tool/judged"`, which needs string `threadId` and `itemId` and returns `toolJudged`, and `case "dalgona/turn/judged"`, which needs string `threadId` and `turnId` and returns `turnJudged`. Both return null when the review does not parse.
+  - `web/src/lib/reducer.ts`:
+    - `emptyTranscript` (reducer.ts:25-32) sets `turnReview: null`.
+    - `turnStarted` (reducer.ts:229) keeps `turnReview` only when `state.turnId === notification.turn.id`, the same rule `plan` uses.
+    - `case "toolJudged"` (same thread only) sets `review` on the `fileChange` item whose `id` is `itemId`. When no such item exists, the state is unchanged.
+    - `case "turnJudged"` (same thread, and `notification.turnId === state.turnId`) sets `turnReview`. Any other turn leaves the state unchanged.
+  - `web/src/routes/+page.svelte`: add `case "toolJudged":` and `case "turnJudged":` to the no-op group at lines 530-538, because the transcript reducer owns both. Pass `turnReview={transcript.turnReview}` to `<Transcript>` beside `plan={transcript.plan}` (+page.svelte:616).
+  - `web/src/lib/components/rows/FileChangeRow.svelte`, the row that the web workstream, Step 17 uses for each file change. The web workstream, Step 17 owns the `DiffCard` list. This step adds only the review line:
+    - After the `DiffCard` list, add `{#if item.review !== null}<p class="edit-review" data-verdict={item.review.verdict}>{item.review.summary}</p>{/if}`.
+  - `web/src/lib/components/Transcript.svelte`:
+    - Add the prop `turnReview: EditReview | null`. After the rows loop and before the `PlanPanel` element (the web workstream, Step 16 moves the `{#if plan}` block into `PlanPanel.svelte`), add `{#if turnReview !== null}<p class="turn-review" data-verdict={turnReview.verdict}>{turnReview.summary}</p>{/if}`. This is the turn line after the last message.
+    - Colour by `data-verdict`. `flagged` uses the warning text role. `error` uses bold failed text. `uncertain` and `clean` use dim text. Use text colour only, with no background.
+    - The colour roles come from the web workstream, Step 8. `web/src/app.css:22-32` has `--color-danger` and `--color-text-secondary` at this commit, and no warning token.
+- Behaviour and edge cases:
+  - Every verdict shows on its file change, and `clean` shows as `No problems found`. A truncated review shows the same summary text.
+  - A turn with no edit shows no turn line.
+  - The turn line belongs to its turn. A new turn clears it.
+  - A `turnJudged` for a turn that is not open is ignored, so a late event from an older turn cannot show on the current one.
+- Failing-first tests:
+  - `web/src/lib/validation.test.ts`:
+    - `parses dalgona/tool/judged`: threadId `thr_1`, turnId `turn-3`, itemId `call_7`, verdict `flagged`, summary `Flagged: removed code`. Expect a `toolJudged` notification with `review` `{verdict: "flagged", summary: "Flagged: removed code"}`.
+    - `parses dalgona/turn/judged`: verdict `uncertain`, summary `Uncertain: incomplete`. Expect a `turnJudged` notification.
+    - `rejects an unknown verdict`: verdict `ok`. Expect null.
+  - `web/src/lib/reducer.test.ts`:
+    - `toolJudged sets the review on its file change and ignores other threads`.
+    - `turnJudged sets turnReview for the open turn only`.
+    - `turnStarted of a new turn clears turnReview`.
+- Spec: `docs/spec/web.md`, at the end of `### Transcript`, after the diff-card sentences of the web workstream, Step 17. Add one paragraph that covers the review line on each file change for every verdict, the turn line after the last message, the colours, and the live-only rule.
+- Lands after: Step 6, and the web workstream, Steps 8, 16 and 17.
+

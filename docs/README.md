@@ -79,6 +79,10 @@ Use one name for each thing in user-facing text and new specifications.
 
 `just spec-style` checks sentence length, semicolons, em dashes, and lower-case `should` in `docs/dal/spec` and `docs/dalgona/spec`.
 
+## Plan
+
+- [Completion plan](plan/README.md): the plan that stabilized and completed both products, stored as one fragment per section. It records intended work and certifies nothing.
+
 ## Decisions
 
 Each decision file states its Invariant, Scope, and Enforcement. It MAY end with `## Rejected alternatives`; each entry names one alternative and the one reason it lost. A replaced decision MUST stay in its product directory: add `Superseded by [<title>](<file>.md) on <YYYY-MM-DD>.` under its title, keep its text, and move its entry to the end of its product list with the suffix `(superseded)`. Never delete a decision file.

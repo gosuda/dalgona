@@ -1,0 +1,24 @@
+### Rules for every step
+
+These rules bind every step. A step does not repeat them.
+
+1. Run `just verify` before every commit (`justfile:121`). Keep one concern per commit. Use the global git identity. Add no agent trailer.
+2. Update the topic under `docs/spec` in the same commit as each behaviour change. Add a decision file under `docs/decisions` for each new import across a package boundary in `.golangci.yml`.
+3. Write every sentence under `docs/spec` in ASD-STE100: one fact or one instruction in a sentence; at most 25 words in a sentence and at most 20 words in a numbered step; active voice; present tense; one word for one thing, from the terms list that this plan adds to `docs/README.md`; `MUST`, `SHOULD` and `MAY` only with their RFC 2119 meaning; no semicolon outside code; no em dash. After the Specifications workstream adds it, `just spec-style` enforces the limits that a script can check.
+4. Keep the journal append-only (`docs/spec/journal.md`). Recovery follows `docs/spec/recovery.md`: it reads only the journal, the blob store, the runner and the workspace files, and each open call matches exactly one row of its table (`docs/spec/recovery.md:3`, `:20`). A step that adds an event or a tool states the recovery row that covers it.
+5. Each new test fails on a real defect and takes its expected value from a contract or an independent oracle. It fails before the change when the step fixes a defect. When the code is already right, it fails under the mutation probe that the step names. Write no saved-output pin, no assertion on source text, and no test that only repeats a mock (`CONTRIBUTE.md:19`). The one exception is the comment gate of Verification item 11, which reads source text to find prose comments; its findings are not proof of behavior (`CONTRIBUTE.md`, `REVIEW.md:7`).
+6. Write no prose comment in Go, Svelte, Python or hand-written TypeScript: no line comment, block comment, trailing comment or doc comment on an exported name. Compiler directives such as `//go:build` and `//nolint:<linter> // reason` lines stay. The comment gate of Verification 11 enforces this. Write no compatibility shim: move every caller and delete the old path in the same commit (`CONTRIBUTE.md:7`).
+7. JSON on the wire, in the journal and on hot paths uses `encoding/json/jsontext`. `encoding/json/v2` may decode or encode cold data that the program reads once (`docs/decisions/dependencies.md:5-6`). A provider adapter speaks HTTP directly and uses no SDK (`CONTRIBUTE.md:13`).
+8. Keep the package boundaries. `internal/tui` imports only `internal/rpc` from this module (`.golangci.yml:139-164`). Core packages import no interface package and no battery (`.golangci.yml:99-132`). `cmd/dal` imports no battery (`.golangci.yml:165-186`).
+9. You may port code from `.references/omp2` (MIT), `.references/oh-my-pi` (MIT) and `.references/grok-build` (Apache-2.0). A step that ports code adds that project's section to `THIRD_PARTY_NOTICES.md` in the same commit, and keeps the Apache-2.0 section 4 notices. The first step that needs that file creates it, and a later step adds its own section. You may read `.references/crush` to learn how it uses Bubble Tea. You MUST NOT copy its code, comments or text, because its licence (FSL-1.1-MIT) forbids competing use.
+10. Each new package, helper, configuration key, wire field, journal event and dependency names the requirement it serves in its step. Add nothing that no step names.
+11. Use only the colour tokens, glyph tokens and component rules of the design record in this plan. Use no gradient, glow, blur or shine. Use no colour outside the published palettes.
+12. Compute no number in prose. When a step needs arithmetic, run it.
+13. Every step of the terminal interface keeps the invariants of the section "Terminal screen design" and the rules of the section "Bubble Tea practice". They win over the text of a step.
+14. A step cites other text of this plan by name: `product decision N`, `cross-phase decision N`, `Design record, <part>`, or `the <name> workstream, Step N`.
+15. Do the steps in the order of the section "Order of work". Each row of that table leaves the tree building and `just verify` passing.
+16. A section of a specification has one owner step: the step that creates or rewrites it. Any other step adds only its own sentence or table row. A step that rewrites a section keeps every sentence that an earlier step of this plan added to it.
+17. A line number of a file under `docs/` is a hint from commit `3c4b6f94`. After the Specifications workstream, find a sentence by its heading and its words.
+18. A line `Lands after` in a step is binding. The table in the section "Order of work" already obeys every such line.
+19. A step that cannot be done as written stops. Report the step, the command and its output. Do not replace the step with an easier one, and do not skip a test.
+

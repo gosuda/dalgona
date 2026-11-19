@@ -1,0 +1,19 @@
+#### Terminal step 31. Image paste
+
+- `input.go`: prompt mode only. A paste that is one line naming an existing file is checked as a path. The check reads the file, so it runs in a `tea.Cmd`. `Update` does no I/O (practice rule 6). Trim one pair of matching quotes at each end and a `file://` prefix, then remove each backslash that precedes a character and keep that character. Extensions `.png`, `.jpg`, `.jpeg` and `.gif` are read. The types and limits are those of the image-input workstream, Step 1: `image/png`, `image/jpeg` and `image/gif`, 5 MiB an image (5242880 bytes), 10 images a request, and 10 MiB of images a request (10485760 bytes). `image.DecodeConfig` (imports `image/png`, `image/jpeg`, `image/gif`) gives the size.
+- The pasted path stays as text until the result arrives. The result is `imageMsg{text string; mime, data string; width, height int; err error}`. `text` is the pasted text the chip replaces. The chip replaces it only when the input still holds that text.
+- `ctrl+v` (prompt mode) runs the platform tool in a `tea.Cmd` (cross-phase decision 17): on Linux, `wl-paste --type image/png` when `WAYLAND_DISPLAY` is set, else `xclip -selection clipboard -t image/png -o` when `DISPLAY` is set; on macOS, `pngpaste -`; on Windows, PowerShell `Get-Clipboard -Format Image`. The branch is chosen by `runtime.GOOS` first, then Linux by the variables above. With neither variable set on Linux, the notice below is shown. With no tool present, the notice is `image paste needs wl-paste, xclip or pngpaste`.
+- The chip is `[Image #n WxH]`. The prompt holds at most 10 images, the per-request count of the image-input workstream, Step 1. The eleventh image gets the notice `at most 10 images per prompt`.
+- Model check: `Update` refuses an image before it starts the command when the model's `inputModalities` has no `image`. The list is the new field `thread.inputModalities`, set from the `inputModalities` of the thread's model in `model/list` (the image-input workstream, Step 6). The notice is the refusal text of the image-input workstream, Step 7 (cross-phase decision 16).
+- Sending adds the image input item of the image-input workstream, Step 2 (its `data:` URL form), after the text item (dependency P8).
+- Notices: `Image <name> is <n> bytes, over the 5 MiB limit`; the unsupported-type text of the image-input workstream, Step 1, with the type `image/webp`, for a `.webp` path; the read and decode errors use the text of the image-input workstream, Step 2. Any other path stays plain text.
+- Symbols that change: `imageMsg` (new). `input.go` gains the paste and `ctrl+v` cases.
+- Failing-first tests:
+  - `TestImagePathPasteBecomesChipAndInputItem` (from the workstream). Input: a 3x2 png written into `t.TempDir()`, pasted as its path. Expected: the chip `[Image #1 3x2]` and one input item with the `data:image/png;base64` URL.
+  - `TestClipboardToolMissingNotice` (new). Input: `ctrl+v` on Linux with `WAYLAND_DISPLAY` and `DISPLAY` unset and no `wl-paste` or `xclip` on the path (`exec.LookPath` fails). Expected: the notice `image paste needs wl-paste, xclip or pngpaste`. Source: decision 17 of this workstream.
+  - `TestImageRefusedWithoutImageModality` (new). Input: `ctrl+v` on a model without `image` in `inputModalities`. Expected: the notice `this model does not accept images`, and no command is returned. Source: decision 16 of this workstream.
+- Spec: one paragraph (images) in the `Editor` section that Step 19 creates. This step adds no other spec text.
+- Reference: oh-my-pi `prompt/composer.ts:381-416, 457` and grok-build `views/prompt_widget/mod.rs:2343-2353` (via the feature reports). Taken: the chip label and a cap of 10. Left: clipboard readers, image preview.
+- Lands after: Steps 19, 21 and 28, and the image-input workstream, Steps 1, 2, 6 and 7.
+- Anchor: Italo Calvino
+

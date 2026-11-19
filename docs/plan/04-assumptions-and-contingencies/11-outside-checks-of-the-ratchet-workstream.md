@@ -1,0 +1,5 @@
+### Outside checks of the ratchet workstream
+
+- Check: Live check (Verification item 8): with the ask workstream landed, `approve` shows a question with Approve, Revise and Abort in the TUI. Guards: Step 7 and Verification item 8. Why it is outside: Needs a real terminal client and a running model or scripted server; cannot be run from this read-only plan. Fallback: If the question does not show, record the live check as Not proven and keep step 7 and Verification item 8 open; do not change the threadAsker mapping to hide it.
+- Check: Live check (Verification item 8): with every client detached, `approve` returns text that starts with `declined: ratchet approvals need an interactive client`, the text of `ratchet.ErrNoClient`. Guards: Step 6 (approve) and Verification item 8. Why it is outside: Needs a running daemon with clients attached and then detached. Fallback: If the output differs, record the observed text, mark the check Not proven, and do not edit the text of `ratchet.ErrNoClient` until the mapping of the ask package's `OutcomeNoClient` to it is confirmed.
+

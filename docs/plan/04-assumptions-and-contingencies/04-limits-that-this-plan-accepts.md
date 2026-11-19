@@ -1,0 +1,19 @@
+### Limits that this plan accepts
+
+- A journal that holds the new records (`tool.judged`, `turn.judged`, `sandbox.chosen`, an image attachment) cannot be resumed by an older binary. The older binary opens the session read-only up to the last record it knows (`docs/spec/recovery.md:10`). A revert of those phases keeps such a session readable, not resumable.
+- `thread/resume` computes each diff again from the journaled images, up to 1 MiB a side. If the resume of the longest local thread takes more than 1 second in the live session, keep the rendered change of each call in the tracker, keyed by the call id, and compute it once.
+- An image path is named by an authenticated client, not by the model. The daemon reads any regular file that its user can read, as `fs/readFile` does. The type and size checks of the image-input workstream bound what reaches the journal.
+- A tool that the user interrupts returns when its process is killed and the caller's context ends. The runner reaps the process after that.
+- Text that the model writes (a question, a command, a summary) holds only placeholders for secrets, because the model never receives a secret (`docs/spec/secrets.md`). The ask workstream masks question text again before it leaves the server.
+- A recovered turn gets no turn review (product decision 9).
+- Between the commit of the ask tool and the commit of the terminal question card, a terminal user cannot answer an `ask` call. The call returns `declined: no client could answer this question`, and the model continues. The order of work keeps that gap inside one run of this plan, and no release is cut inside it.
+- The dock is at most the window height minus one row, so every print has at least one row of room (print rule 4 of the terminal workstream). In a window of fewer than 2 rows the dock has no lines, so a print still has room.
+- The settled-frame rule is a timing rule. Under tmux 3.6 with Bubble Tea v2.1.1 on 2026-11-12, the delay from a view change to the next renderer write had p50 8.5 ms, p95 16.4 ms, p99 17.4 ms and max 17.5 ms over 500 samples. With one processor and a busy goroutine it had p95 20.4 ms, p99 21.4 ms and max 40.5 ms. The rule assumes that a changed frame is drawn within 50 ms. A host that delays a frame by more than 50 ms can misplace one print, and the next frame repairs the dock. A row that landed in the wrong place stays there. The design accepts that.
+- A window size message that arrives during a print can leave that chunk taller than the new window, because the chunk is sized when the print starts. The next print waits for a settled frame, which the size change starts, but a row that landed in the wrong place stays there. The design accepts this. Scenario T42 checks a resize during a turn in a real terminal.
+- Narrowing the window can leave stale dock rows in terminals that rewrap lines, because Bubble Tea cannot see them. Upstream issue #1867 reports this. The client accepts the stale rows and writes no history row again.
+- An image path that names a regular file on a stalled network mount can block `turn/start` until the read returns. The regular-file check stops a FIFO and a device, not a slow file system.
+- The recorded outcome of a script run holds its value or its error message. It holds no prints, no failure code and no stage, so a recovered call that returns the recorded outcome shows none (Spec-fix step 15).
+- `state.json` of the ratchet tool lives in the workspace, so the model's edit tools can change it. The gate guards against mistakes, not against a hostile model, and `docs/spec/ratchet.md` says so.
+- The mouse wheel is the mouse support of the terminal (cross-phase decision 47). A click selects nothing there, because an inline program cannot learn the screen row of its dock.
+- The style check proves sentence length, semicolons, dashes and a lower-case `should`. Voice, tense and terms are read by the person who writes each sentence.
+

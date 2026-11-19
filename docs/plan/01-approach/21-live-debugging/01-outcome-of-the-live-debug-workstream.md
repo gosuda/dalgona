@@ -1,0 +1,4 @@
+#### Outcome of the live-debug workstream
+
+A developer or agent can start a scripted local chat-completions server, both products and the web UI against it with one command, `just live-up`, and stop all of it with `just live-down`. No credentials and no network are needed. The developer can then drive the terminal UI through omp's project-local `tui` tool (or tmux when the tool is absent) and the web UI through omp's `browser` tool. Every terminal feature in product decision 3 and every web feature of the web workstream has one named live check with the observation that proves it. `just live-check` runs the non-interactive part in about a minute: two headless turns through `dal` and `dalgona`, a web 200 and a web 401. A failure found live becomes a failing Go or Vitest test before the fix.
+

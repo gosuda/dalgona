@@ -1,0 +1,4 @@
+#### Checks of the Code symbols workstream
+
+Each step runs `just verify` before its commit, and `just lint` runs the depguard rules. For the steps that add code under `internal/syntax` or `internal/tool/search`, the main agent also runs `go test -count=1 ./internal/syntax/... ./internal/tool/search/...` and `go test -race -count=1 ./internal/syntax/ ./internal/tool/search/`. Steps 6 to 8 also run `GOOS=darwin GOARCH=arm64 go vet ./internal/tool/search/ ./internal/syntax/` and `GOOS=windows GOARCH=amd64 go vet ./internal/tool/search/ ./internal/syntax/`. Step 8 also runs `go list -deps ./cmd/dal ./cmd/dalgona` and checks that no line names `gotreesitter/grammars` exactly, or the packages caddy, disassembly, jq or nim. The main agent runs these checks, and this workstream does not run them.
+

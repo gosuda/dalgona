@@ -1,0 +1,4 @@
+#### Outcome of the ask workstream
+
+The working model in `dal` and `dalgona` can call `ask` to put 1 to 4 questions to the user and wait. Each question offers 2 to 6 options (first one recommended), an automatic Other row, optional multi-select and previews, or a free-text field. The terminal shows the questions as a card and the browser as a card in the dock above the composer, and the answer returns to the model as plain text in the tool result. With two windows attached the first answer wins and the other window says so. With no window, after the last window leaves, on interrupt, after a dismiss, or after a crash, the model gets a fixed plain-text result and the turn continues. Subagents and advisors never see the tool, and nothing new is journaled: the questions are the `tool.started` arguments and the answers are the `tool.completed` output.
+

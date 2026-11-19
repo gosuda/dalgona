@@ -1,0 +1,11 @@
+#### Spec-fix step 11. Stop the verifier from rewriting the report it is checked against
+Anchor: Tony Hoare, Richard Feynman
+
+The text is right and the code breaks it. `docs/spec/hashline/README.md` line 23 says: "[verify_model.py](verify_model.py) and [verification.json](verification.json) contain reproducible bounded range/gap checks: 109,673 cases plus eight logical regressions." Keep that sentence.
+
+- Where: `docs/spec/hashline/verify_model.py:main`, `docs/spec/hashline/verify_model.py:import Path`.
+- Change: Delete the line `Path(__file__).with_name("verification.json").write_bytes(data)` in main, and delete the import `from pathlib import Path` on line 14, because nothing else uses it. Keep `sys.stdout.buffer.write(data)` as the only output. To refresh the committed report, redirect stdout to docs/spec/hashline/verification.json. The justfile recipe needs no change.
+- Failing-first test: `hashline-model fails on a stale verification.json` in `justfile (recipe hashline-model) and docs/spec/hashline/verification.json`. Input: A scratch checkout where docs/spec/hashline/verification.json changes `"range_cases": 14178` in the single_splice block to `"range_cases": 14179`; run `just hashline-model` with uv installed. Expected: Exit status 1; cmp reports that the two files differ; the file still contains 14179 after the run. Before the change, the recipe exits 0 and rewrites the file to 14178, so this test fails first. The expected value comes from: POSIX cmp exit status (1 when the files differ) and the bytes read back from the file afterwards. The expected value is not taken from verify_model.py.
+- Evidence at commit `3c4b6f94`: docs/spec/hashline/verify_model.py:304-306: `data = (json.dumps(report, indent=2) + "\n").encode("utf-8")`, then `Path(__file__).with_name("verification.json").write_bytes(data)`, then `sys.stdout.buffer.write(data)`. verify_model.py:14 `from pathlib import Path` is used only on line 305. justfile:42-43: `uv run --no-project --python 3.12 docs/spec/hashline/verify_model.py > "$out"` then `cmp "$out" docs/spec/hashline/verification.json`. The script rewrites the file that cmp compares against, so cmp passes after every successful run.
+- Proof: the test fails before the change and passes after it, and `just verify` passes.
+
