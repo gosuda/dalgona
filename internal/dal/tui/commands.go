@@ -340,7 +340,7 @@ func (m *model) applyPreludeResult(msg resultMsg) (tea.Cmd, bool) {
 		return nil, true
 	case strings.HasPrefix(msg.op, "advisor"):
 		return m.applyAdvisorResult(msg), true
-	case msg.op == "new" && msg.seq != 0 && msg.seq != m.pendingState().seq:
+	case (msg.op == "new" || msg.op == "fork") && msg.seq != 0 && msg.seq != m.pendingState().seq:
 		return nil, true
 	case msg.op == "initialize" && msg.err != nil:
 		flat := strings.Join(strings.Fields(msg.err.Error()), " ")

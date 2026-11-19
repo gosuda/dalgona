@@ -83,7 +83,9 @@ After it applies the snapshot, the client MUST replay those notifications in rec
 A superseded resume response or error MUST NOT change the client.
 A `thread/start` request MUST supersede an earlier `thread/resume` request.
 A `thread/resume` request MUST supersede an earlier `thread/start` request.
-A superseded `thread/start` result or error MUST NOT change the client.
+A `thread/fork` request MUST supersede an earlier `thread/resume` request.
+A `thread/resume` request MUST supersede an earlier `thread/fork` request.
+A superseded `thread/start` or `thread/fork` result or error MUST NOT change the client.
 If the buffer exceeds its limit, the resume MUST fail and keep the current thread.
 
 The setting `status_hide` lists items to hide. Its default is empty. The client MUST NOT hide `model`.

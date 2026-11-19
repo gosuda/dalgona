@@ -35,6 +35,9 @@ func (f *lateCaller) Call(ctx context.Context, method string, params, result any
 		if asked, ok := params.(rpc.ThreadResumeParams); ok {
 			out.Thread = rpc.Thread{ID: asked.ThreadID, Name: "resumed " + asked.ThreadID}
 		}
+		if _, ok := params.(rpc.ThreadForkParams); ok {
+			out.Thread = rpc.Thread{ID: "forked", Name: "forked thread"}
+		}
 		return nil
 	}
 	return f.shellCaller.Call(ctx, method, params, result)
@@ -240,4 +243,76 @@ func TestResumeResultAfterNewThreadRequestIsDropped(t *testing.T) {
 		t.Fatalf("thread after /resume t2 then /new = %q, want fresh", m.thread.id)
 	}
 	assertNoEntry(t, m, "resumed t2")
+}
+
+func confirmFork(t *testing.T, m model) (model, tea.Cmd) {
+	t.Helper()
+	m.executeSlash("fork", "")
+	turns := &rpc.ThreadTreeResponse{Turns: []rpc.TreeTurn{{TurnID: "turn-1", Preview: "first prompt", Active: true}}}
+	m, _ = drive(t, m, resultMsg{op: "forkTree", seq: m.listSeq, value: turns})
+	m, forked := drive(t, m, press(tea.KeyEnter, 0, ""))
+	if forked == nil {
+		t.Fatal("choosing a turn in /fork produced no command")
+	}
+	return m, forked
+}
+
+func runResults(t *testing.T, m model, command tea.Cmd) model {
+	t.Helper()
+	if command == nil {
+		return m
+	}
+	switch msg := command().(type) {
+	case tea.BatchMsg:
+		for _, next := range msg {
+			m = runResults(t, m, next)
+		}
+	case resultMsg:
+		var next tea.Cmd
+		m, next = drive(t, m, msg)
+		m = runResults(t, m, next)
+	}
+	return m
+}
+
+func TestForkResultAfterResumeIsDropped(t *testing.T) {
+	t.Parallel()
+	for _, resumeFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("resume result first %t", resumeFirst), func(t *testing.T) {
+			t.Parallel()
+			m, _ := lateModel(t)
+			m, forked := confirmFork(t, m)
+			resumed := m.executeSlash("resume", "t2")
+			if resumed == nil {
+				t.Fatal("/resume t2 produced no command")
+			}
+			first, second := forked, resumed
+			if resumeFirst {
+				first, second = resumed, forked
+			}
+			m = runResults(t, m, first)
+			m = runResults(t, m, second)
+			if m.thread.id != "t2" {
+				t.Fatalf("thread after /fork then /resume t2 = %q, want t2", m.thread.id)
+			}
+		})
+	}
+}
+
+func TestResumeResultAfterForkRequestIsDropped(t *testing.T) {
+	t.Parallel()
+	m, _ := lateModel(t)
+	resumed := m.executeSlash("resume", "t2")
+	if resumed == nil {
+		t.Fatal("/resume t2 produced no command")
+	}
+	m, forked := confirmFork(t, m)
+	m = runResults(t, m, resumed)
+	if m.thread.id != "t1" {
+		t.Fatalf("thread after the older /resume t2 answered = %q, want t1 while /fork is pending", m.thread.id)
+	}
+	m = runResults(t, m, forked)
+	if m.thread.id != "forked" {
+		t.Fatalf("thread after /resume t2 then /fork = %q, want forked", m.thread.id)
+	}
 }
