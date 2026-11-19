@@ -484,6 +484,11 @@ The sanitizer MUST replace each byte that is not valid UTF-8 with U+FFFD. A raw 
 ## Width
 
 The client MUST measure text with the width method of its renderer.
+A tab MUST count as the cells to the next 8-cell stop, counted from the first cell of the text that holds it.
+A newline MUST restart the count of stops.
+A row that the client prints or draws MUST hold spaces in place of each tab.
+The composer MUST count its stops from its first text cell after the prompt.
+The cursor MUST sit after the spaces of a tab that precedes the caret.
 A user whose terminal draws East Asian Ambiguous characters two cells wide MUST set `RUNEWIDTH_EASTASIAN=1`.
 
 ## Theme

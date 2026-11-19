@@ -288,7 +288,7 @@ func (c editor) layout(s *screenState, width int, spans []keywordSpan, t theme) 
 			lines[i] = t.paint(roleText, s.fit(ch.label, editorCells(width)))
 			continue
 		}
-		lines[i] = norm.NFC.String(markKeywords(r.text, localSpans(spans, r), t))
+		lines[i] = s.expand(norm.NFC.String(markKeywords(r.text, localSpans(spans, r), t)))
 	}
 	if c.Value() == "" {
 		lines[0] = t.paint(roleDim, s.fit(c.placeholder, editorCells(width)))

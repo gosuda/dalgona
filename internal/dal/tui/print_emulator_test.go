@@ -652,3 +652,63 @@ func TestDockRejectsRowOneReportAsModifiedF3(t *testing.T) {
 		t.Fatal("a real cursor report stopped relocating the dock")
 	}
 }
+
+func agentMessageTurn(text string) []tea.Msg {
+	return []tea.Msg{
+		fuzzNote("thread/started", invThreadStarted),
+		fuzzNote("turn/started", invTurnStarted),
+		fuzzNote("item/started", fuzzAgentStarted),
+		fuzzDelta("item/agentMessage/delta", "a1", text),
+		fuzzNote("item/completed", fuzzAgentDone),
+		fuzzNote("turn/completed", `{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`),
+	}
+}
+
+const tabbedLines = 30
+
+func tabbedFence() string {
+	var fence strings.Builder
+	fence.WriteString("```go\n")
+	for i := range tabbedLines {
+		fmt.Fprintf(&fence, "\t\tcall(%02d, x%02d%s)\n", i, i, strings.Repeat("y", 22))
+	}
+	fence.WriteString("```\n\nAfter the block.\n")
+	return fence.String()
+}
+
+func tabbedRowsPrintedOnce(t *testing.T, history, screen string) {
+	t.Helper()
+	for i := range tabbedLines {
+		for _, part := range []string{fmt.Sprintf("call(%02d,", i), fmt.Sprintf("x%02dyyyy", i)} {
+			if got := rowCount(history, screen, part); got != 1 {
+				t.Fatalf("%q appears %d times, want once:\nhistory:\n%s\nscreen:\n%s", part, got, history, screen)
+			}
+		}
+	}
+}
+
+func TestTabbedCodeRowsKeepDockOutOfHistory(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		em := vt.NewEmulator(40, 12)
+		tmuxMode(em)
+		run := startEmulatedProgram(em, em, nil)
+		defer run.stop()
+		run.send(resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/test", PlatformFamily: "unix"}})
+		run.send(commandDone("anchor-turn"))
+		bandAtBottom(t, run, em, 12, "startup before any input")
+		for _, msg := range agentMessageTurn(tabbedFence()) {
+			run.send(msg)
+		}
+		run.waitFor(t, "text after the block printed", func(history, screen string) bool {
+			return rowCount(history, screen, "After the block.") == 1
+		})
+		bandAtBottom(t, run, em, 12, "after tabbed code rows")
+		history := run.history()
+		if line := leakedLine(history, run.dock()); line != "" {
+			t.Fatalf("dock line %q in history:\n%s", line, history)
+		}
+		tabbedRowsPrintedOnce(t, history, run.screen())
+		rawOutputInvariant(t, run)
+	})
+}

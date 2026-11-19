@@ -77,6 +77,11 @@ func assertFrame(t *testing.T, lines []string, width, height int) {
 	if len(lines) > height-1 {
 		t.Fatalf("frame has %d lines, want at most %d:\n%s", len(lines), height-1, strings.Join(lines, "\n"))
 	}
+	for _, line := range lines {
+		if strings.Contains(line, "\t") {
+			t.Fatalf("line holds a tab: %q", line)
+		}
+	}
 	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
 		screen := screenState{method: method}
 		for _, line := range lines {

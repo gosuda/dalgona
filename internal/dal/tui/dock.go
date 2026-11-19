@@ -104,7 +104,7 @@ func (m *model) panelInputLine(width int) (string, int) {
 }
 
 func (m *model) draftLine(width int) (string, int) {
-	first := m.input.composer.firstLine()
+	first := m.screen.expand(m.input.composer.firstLine())
 	prompt := m.screen.dockTheme().hueText(threadHue(m.thread.id), m.promptGlyph())
 	line := m.screen.fit(prompt+first, terminalWidth(width))
 	return line, min(promptCells+m.screen.cells(first), terminalWidth(width))
@@ -130,7 +130,7 @@ func (m *model) fieldLabel(mode inputMode) string {
 
 func fieldWindow(s *screenState, text []rune, cursor, room int) (string, int) {
 	if s.cells(string(text)) <= room {
-		return string(text), s.cells(string(text[:cursor]))
+		return s.expand(string(text)), s.cells(string(text[:cursor]))
 	}
 	left, right := growWindow(s, text, cursor, room)
 	prefix, suffix := "", ""
@@ -140,7 +140,7 @@ func fieldWindow(s *screenState, text []rune, cursor, room int) (string, int) {
 	if right < len(text) {
 		suffix = "..."
 	}
-	return prefix + string(text[left:right]) + suffix, len(prefix) + s.cells(string(text[left:cursor]))
+	return s.expand(prefix + string(text[left:right]) + suffix), s.cells(prefix + string(text[left:cursor]))
 }
 
 func growWindow(s *screenState, text []rune, cursor, room int) (int, int) {
