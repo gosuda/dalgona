@@ -18,16 +18,45 @@ type sdkAPI struct {
 	client *sdk.Client
 }
 
-func NewFromEnv(bootstrap runner.BootstrapFunc) (*Service, error) {
-	return NewFromEnvWithImage(defaultImage, bootstrap)
+var ErrInitCancelled = errors.New("modal: client initialization cancelled")
+
+func NewFromEnvCtx(ctx context.Context, bootstrap runner.BootstrapFunc) (*Service, error) {
+	return NewFromEnvWithImageCtx(ctx, defaultImage, bootstrap)
 }
 
-func NewFromEnvWithImage(image string, bootstrap runner.BootstrapFunc) (*Service, error) {
-	client, err := sdk.NewClient()
+func NewFromEnvWithImageCtx(ctx context.Context, image string, bootstrap runner.BootstrapFunc) (*Service, error) {
+	client, err := newClientCtx(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("modal: create client: %w", err)
+		return nil, err
 	}
 	return NewWithImage(&sdkAPI{client: client}, image, bootstrap), nil
+}
+
+func newClientCtx(ctx context.Context) (*sdk.Client, error) {
+	type result struct {
+		client *sdk.Client
+		err    error
+	}
+	pending := make(chan result, 1)
+	go func() {
+		client, err := sdk.NewClient()
+		if err != nil {
+			pending <- result{err: fmt.Errorf("modal: create client: %w", err)}
+			return
+		}
+		pending <- result{client: client}
+	}()
+	select {
+	case res := <-pending:
+		return res.client, res.err
+	case <-ctx.Done():
+		go func() {
+			if res := <-pending; res.client != nil {
+				res.client.Close()
+			}
+		}()
+		return nil, errors.Join(ErrInitCancelled, ctx.Err())
+	}
 }
 
 func (a *sdkAPI) Create(ctx context.Context, request CreateRequest) (Box, string, error) {

@@ -12,7 +12,7 @@ Scope: every package in this module. Enforcement: the `fast` rule of depguard in
 
 ## Grounded pins
 
-Grounded on 2026-11-11. Each pin equals the latest stable version on its release channel on that date. The Go toolchain row names the newest stable release on `https://go.dev/dl/?mode=json`.
+Grounded on 2026-11-11; the rows moved by the dependency upgrade of 2026-11-19 re-grounded on that date. Each pin equals the latest stable version on its release channel on its grounding date. The Go toolchain row names the newest stable release on `https://go.dev/dl/?mode=json`.
 
 The release channel for Go modules is `https://proxy.golang.org/<module>/@latest`. The support window for Go is `https://endoflife.date/api/v1/products/go/`. Go 1.27 and Go 1.26 are supported. No end-of-life date is set.
 
@@ -20,17 +20,17 @@ Advisories come from the OSV batch query below, from OSV list pages `https://osv
 
 This section lists the modules that `go.mod` requires directly, and the three tools. Indirect modules follow `go mod tidy`.
 
-|Module|Pin|Released|Use|OSV batch 2026-11-15|
+|Module|Pin|Released|Use|OSV batch|
 |---|---|---|---|---|
 |Go toolchain|go1.27.4|2026-11-10|newest supported major. CI reads it from go.mod.|none|
-|charm.land/bubbletea/v2|v2.1.1|2026-10-28|TUI|none|
+|charm.land/bubbletea/v2|v2.1.2|2026-11-18|TUI|none|
 |charm.land/bubbles/v2|v2.2.1|2026-08-24|TUI spinner, key bindings and viewport|none|
 |charm.land/glamour/v2|v2.0.1|2026-06-12|TUI markdown|none|
-|charm.land/lipgloss/v2|v2.1.0|2026-11-09|TUI|none|
+|charm.land/lipgloss/v2|v2.1.1|2026-11-15|TUI|none|
 |codeberg.org/readeck/go-readability/v2|v2.1.3|2026-09-30|webfetch article extraction. MIT licence.|none|
 |github.com/JohannesKaufmann/html-to-markdown/v2|v2.5.2|2026-06-07|webfetch HTML to Markdown conversion. MIT licence.|none|
-|github.com/aymanbagabas/go-udiff|v0.4.1|2026-03-08|unified line diffs in `internal/dal/textdiff`. Licence: BSD-3-Clause and MIT, per `LICENSE-BSD` and `LICENSE-MIT` at v0.4.1.|none|
-|github.com/charmbracelet/x/ansi|v0.11.9|2026-10-08|TUI measure, text width, and truncation, the method of the Bubble Tea renderer.|none|
+|github.com/aymanbagabas/go-udiff|v0.4.2|2026-11-15|unified line diffs in `internal/dal/textdiff`. Licence: BSD-3-Clause and MIT, per `LICENSE-BSD` and `LICENSE-MIT` at v0.4.2.|none|
+|github.com/charmbracelet/x/ansi|v0.11.10|2026-11-18|TUI measure, text width, and truncation, the method of the Bubble Tea renderer.|none|
 |github.com/charmbracelet/colorprofile|v0.4.3|2026-03-09|TUI colour downsampling to the terminal's profile, and the `NO_COLOR` rule.|none|
 |github.com/charmbracelet/x/term|v0.2.2|2025-10-31|terminal detection in TUI anchor output|none|
 |github.com/charmbracelet/x/vt|v0.1.0|2026-10-12|test-only terminal emulator for the print test, MIT licence.|none|
@@ -40,15 +40,15 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |github.com/coreequip/mermaidascii|v0.3.1|2026-11-09|mermaid fences render as text art in the TUI, a Go port of the beautiful-mermaid ASCII renderer. MIT licence.|none|
 |github.com/containerd/errdefs|v1.0.0|2024-10-08|Docker runner error types|none|
 |github.com/landlock-lsm/go-landlock|v0.11.2|2026-11-10|Linux write confinement|none|
-|github.com/moby/moby/api|v1.56.1|2026-10-01|Docker runner API types|none|
-|github.com/moby/moby/client|v0.6.2|2026-10-08|Docker runner|none|
-|github.com/modal-labs/modal-client/go|v0.11.1|2026-10-16|Modal runner|none|
+|github.com/moby/moby/api|v1.57.0|2026-11-13|Docker runner API types|none|
+|github.com/moby/moby/client|v0.6.3|2026-11-13|Docker runner|none|
+|github.com/modal-labs/modal-client/go|v0.11.2|2026-11-16|Modal runner|none|
 |github.com/pelletier/go-toml/v2|v2.4.3|2026-07-05|config|none|
-|github.com/sandbox0-ai/sdk-go|v0.10.5|2026-10-30|Sandbox0 runner|none|
+|github.com/sandbox0-ai/sdk-go|v0.10.6|2026-11-15|Sandbox0 runner|none|
 |github.com/santhosh-tekuri/jsonschema/v6|v6.0.3|2026-06-28|protocol schema tests only|none|
 |github.com/superfly/sprites-go|v0.2.2|2026-10-20|Sprites runner|none|
 |go.starlark.net|v0.0.0-20261021141710-4f4267fb140d|2026-10-21|scripts, dal eval|none|
-|golang.org/x/net|v0.62.0|2026-10-27|HTML tokenizing in web fetch|none|
+|golang.org/x/net|v0.63.0|2026-11-17|HTML tokenizing in web fetch|none|
 |golang.org/x/sync|v0.25.0|2026-10-15|errgroup and singleflight|none|
 |golang.org/x/sys|v0.50.0|2026-11-06|OS calls|none|
 |golang.org/x/text|v0.44.0|2026-11-09|Unicode normalization in advisor guard, alongside TUI normalization and width use in `internal/dal/tui/input.go`, `width.go`, and `band_test.go`|none|
@@ -57,12 +57,12 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |oss.terrastruct.com/d2|v0.7.2|2026-08-07|d2 fences render as text art in the TUI via d2lib and d2ascii|none|
 |github.com/evilmartians/lefthook/v2|v2.2.2|2026-10-13|hook tool|none|
 |github.com/golangci/golangci-lint/v2|v2.15.0|2026-10-16|lint tool|none|
-|golang.org/x/vuln|v1.9.0|2026-10-11|govulncheck tool|none|
+|golang.org/x/vuln|v1.10.0|2026-11-17|govulncheck tool|none|
 |github.com/google/codesearch|v1.2.0|2020-03-29|search index for the grep mode, see `search-index.md`. Licence BSD-3-Clause. No module requirements.|none|
 
-The OSV column holds the result of `POST https://api.osv.dev/v1/querybatch` for each row's exact pin, run on 2026-11-15. One batch of 51 queries covered the toolchain, every row of this table except the go-readability and html-to-markdown rows, and every pin in `web/package.json`. A supplemental batch of 2 queries on the same day covered those two pins. The toolchain query used the package `stdlib` of ecosystem Go. The response held 51 results, and none listed a vulnerability. `none` means that the result for the pin listed no vulnerability. A control query for `golang.org/x/text` v0.3.0 returned GO-2020-0015, so the query form finds a known advisory.
+The OSV column holds the result of `POST https://api.osv.dev/v1/querybatch` for each row's exact pin, run on 2026-11-15. One batch of 51 queries covered the toolchain, every row of this table except the go-readability and html-to-markdown rows, and every pin in `web/package.json`. A supplemental batch of 2 queries on the same day covered those two pins. The toolchain query used the package `stdlib` of ecosystem Go. The response held 51 results, and none listed a vulnerability. `none` means that the result for the pin listed no vulnerability. A control query for `golang.org/x/text` v0.3.0 returned GO-2020-0015, so the query form finds a known advisory. The dependency upgrade of 2026-11-19 moved ten Go pins and eight npm pins in `web/package.json` and `deploy/cloudflare/package.json`. A batch of 18 queries on 2026-11-19 covered those exact new pins, and none listed a vulnerability.
 
-The Released column of each module row equals the `Time` field of `https://proxy.golang.org/<module>/@v/<version>.info`, read on 2026-11-15. The toolchain row equals the go1.27.4 entry of `https://go.dev/doc/devel/release`.
+The Released column of each module row equals the `Time` field of `https://proxy.golang.org/<module>/@v/<version>.info`, read on 2026-11-15; the ten rows re-grounded on 2026-11-19 read on that date. The toolchain row equals the go1.27.4 entry of `https://go.dev/doc/devel/release`.
 
 ## Runtime endpoints
 

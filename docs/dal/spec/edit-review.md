@@ -21,7 +21,7 @@ The review MUST NOT judge a call that recovery runs or replays.
 
 The package `internal/dal/textdiff` holds one function, `Unified`. `Unified(oldName, newName string, pre, post []byte, context int)` returns the diff text, a `Stats` value, and an error. `Stats` holds `Added` and `Removed`. `Added` counts the `+` lines of all hunks. `Removed` counts the `-` lines of all hunks.
 
-The package is built on `github.com/aymanbagabas/go-udiff v0.4.1`. The diff text starts with `--- <old label>` and `+++ <new label>`. Callers MUST pass `a/<path>`, `b/<path>`, or `/dev/null` as the labels. Each hunk starts with a `@@` header. Equal inputs return an empty text and a zero `Stats`.
+The package is built on `github.com/aymanbagabas/go-udiff v0.4.2`. The diff text starts with `--- <old label>` and `+++ <new label>`. Callers MUST pass `a/<path>`, `b/<path>`, or `/dev/null` as the labels. Each hunk starts with a `@@` header. Equal inputs return an empty text and a zero `Stats`.
 
 The library writes `\ No newline at end of file` after a line without a final newline. The function MUST NOT write its own marker.
 

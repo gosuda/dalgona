@@ -10,11 +10,11 @@ A `[runners.<name>]` entry MUST name one service: `docker`, `sprites`, `modal`, 
 |---|---|---|
 | `docker` | `docker.NewFromEnv` | Docker environment |
 | `sprites` | `sprites.NewFromToken` | env `SPRITES_TOKEN`, else `auth.json` key `sprites` |
-| `modal` | `modal.NewFromEnvWithImage` when `image` is set, else `modal.NewFromEnv` | Modal environment or `~/.modal.toml` |
+| `modal` | `modal.NewFromEnvWithImageCtx` when `image` is set, else `modal.NewFromEnvCtx` | Modal environment or `~/.modal.toml` |
 | `sandbox0` | `sandbox0.New` | env `SANDBOX0_TOKEN`, else `auth.json` key `sandbox0`. env `SANDBOX0_BASE_URL` overrides the URL |
 | `cloudflare` | `cloudflare.New(url, token)` | env `DALGONA_CLOUDFLARE_TOKEN`, else `auth.json` key `cloudflare` |
 
-Every service except `cloudflare` MUST receive `runner.Bootstrap`. A credential MUST come from its environment variable, else from the `auth.json` entry for the service. The binder MUST NOT read the generic `<SERVICE>_API_KEY` variable. A missing credential MUST fail with ``remote: <service> needs <ENV> or `dalgona login <service> --api-key` ``. A `cloudflare` entry without `url` MUST fail.
+Every service except `cloudflare` MUST receive `runner.Bootstrap`. A credential MUST come from its environment variable, else from the `auth.json` entry for the service. The binder MUST NOT read the generic `<SERVICE>_API_KEY` variable. A missing credential MUST fail with ``remote: <service> needs <ENV> or `dalgona login <service> --api-key` ``. A `cloudflare` entry without `url` MUST fail. The binder MUST build the Modal service with the caller's context. Canceling the builder's context MUST abort construction with `modal.ErrInitCancelled`. Canceling another waiter's context MUST end only that waiter's wait, and a waiter whose context is still live MUST reclaim the build.
 
 ## Mode A: thread boxes
 

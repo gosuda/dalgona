@@ -4,7 +4,7 @@ The daemon MUST expose one service seam for remote boxes. A service MUST create,
 
 ## Modal
 
-`NewFromEnv` MUST use the Modal default profile. The profile MUST come from the Modal environment or `~/.modal.toml`. `MODAL_CONFIG_PATH` MUST replace `~/.modal.toml` as the config file when set.
+`NewFromEnvWithImageCtx` and `NewFromEnvCtx` MUST use the Modal default profile. The profile MUST come from the Modal environment or `~/.modal.toml`. `MODAL_CONFIG_PATH` MUST replace `~/.modal.toml` as the config file when set.
 
 Create MUST use the app `dalgona`. It MUST create the app when absent. The default image MUST be `docker.io/library/buildpack-deps:stable`. A configured image MUST replace the default.
 
