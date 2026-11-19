@@ -548,6 +548,7 @@ func (m *model) applyInterrupt(msg resultMsg) tea.Cmd {
 
 func (m *model) applyRewind(label string) {
 	if m.input.composer.Value() != "" {
+		m.noticef("Rewound; the editor holds a draft, so the prompt was not restored")
 		return
 	}
 	m.input.composer.SetValue(label)

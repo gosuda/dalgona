@@ -111,6 +111,9 @@ func TestLateRewindKeepsNewDraft(t *testing.T) {
 	if got := m.input.composer.Value(); got != "new draft" {
 		t.Fatalf("draft after the late rewind = %q, want %q", got, "new draft")
 	}
+	if want := "Rewound; the editor holds a draft, so the prompt was not restored"; m.notice != want {
+		t.Fatalf("notice after the late rewind = %q, want %q", m.notice, want)
+	}
 	if last := caller.calls[len(caller.calls)-1]; last.method != "thread/revert" {
 		t.Fatalf("last call = %q, want thread/revert", last.method)
 	}

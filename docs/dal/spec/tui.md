@@ -389,7 +389,7 @@ A follow-up starts after `turn/completed` only when the turn ends idle. After an
 
 The interrupt notice MUST end when an interrupted turn ends.
 
-A confirmed rewind MUST return the turn's prompt to the composer only while the composer is empty. A draft that is not empty MUST stay as it is.
+A confirmed rewind MUST return the turn's prompt to the composer only while the composer is empty. A draft that is not empty MUST stay as it is. The notice MUST then read `Rewound; the editor holds a draft, so the prompt was not restored`.
 
 ## Approvals
 
