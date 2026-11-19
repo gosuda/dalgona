@@ -6,6 +6,8 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
 
 latchkey:
   schema: 1
@@ -27,7 +29,7 @@ jobs:
       - run: go tool golangci-lint fmt --diff
       - run: go vet ./...
       - run: go tool golangci-lint run ./...
-      - if: env.LATCHKEY_CI_EVENT_CLASS == 'branch_push'
+      - if: env.LATCHKEY_CI_EVENT_CLASS == 'schedule' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch'
         uses: latchkey/cache-save@1.1.0
         with:
           key: lint
@@ -47,7 +49,7 @@ jobs:
           hash-files: go.sum
           into: "~"
       - run: go test -race -count=1 ./...
-      - if: env.LATCHKEY_CI_EVENT_CLASS == 'branch_push'
+      - if: env.LATCHKEY_CI_EVENT_CLASS == 'schedule' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch'
         uses: latchkey/cache-save@1.1.0
         with:
           key: test
