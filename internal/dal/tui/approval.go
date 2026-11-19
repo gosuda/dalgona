@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json/jsontext"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -59,6 +60,22 @@ func (m *model) applyPatchUpdated(params jsontext.Value) error {
 	return nil
 }
 
+func (m *model) patchShown(key patchKey) bool {
+	return slices.ContainsFunc(m.approvals, func(open approval) bool {
+		return open.threadID == key.threadID && open.itemID == key.itemID
+	})
+}
+
+func (m *model) forgetPatch(key patchKey) {
+	if !m.patchShown(key) {
+		delete(m.live.patches, key)
+	}
+}
+
+func (m *model) forgetUnshownPatches() {
+	maps.DeleteFunc(m.live.patches, func(key patchKey, _ []rpc.FileChange) bool { return !m.patchShown(key) })
+}
+
 func (m *model) applyRequestResolved(params jsontext.Value) error {
 	event, err := decodeParams[rpc.ServerRequestResolvedNotification](params)
 	if err != nil {
@@ -99,6 +116,18 @@ func (m *model) dropApproval(index int) {
 	delete(m.live.patches, patchKey{open.threadID, open.itemID})
 	if len(m.approvals) == 0 && (m.thread.state == stateAwaitingApproval || m.thread.state == stateAwaitingInput) {
 		m.setState(stateRunning)
+	}
+}
+
+func (m *model) abandonApprovals(cause error) {
+	for len(m.approvals) > 0 {
+		open := m.approvals[0]
+		answer := open.answer
+		if open.card != nil {
+			answer = open.card.answer
+		}
+		answer <- requestAnswer{err: cause}
+		m.dropApproval(0)
 	}
 }
 

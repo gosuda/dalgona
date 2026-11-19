@@ -537,8 +537,9 @@ func TestInvI8TickChangesOnlyFixedFields(t *testing.T) {
 			defer run.stop()
 			run.send(commandDone("seq 3"))
 			waitModel(t, run, "row printed and frame settled", func(m model) bool {
-				return m.out.started && !m.out.settling && !m.out.printing
+				return m.out.started && !m.out.settling && !m.out.printing && !m.caretLanding()
 			})
+			time.Sleep(time.Second)
 			synctest.Wait()
 			written := out.String()
 			run.send(run.read(func(m model) any { return m.screen.spin.Tick() }))

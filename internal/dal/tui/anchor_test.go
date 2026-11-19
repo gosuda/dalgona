@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/vt"
@@ -48,7 +49,7 @@ func TestDockMoveRejectsInterveningInput(t *testing.T) {
 	if command == nil {
 		t.Fatal("missing dock relocation")
 	}
-	message := command().(tea.RawMsg)
+	message := command().(tea.BatchMsg)[0]().(tea.RawMsg)
 	m = rawUpdate(t, m, press('x', 0, "x"))
 	if written := fmt.Sprint(message.Msg); written != "" {
 		t.Fatalf("stale dock bytes would overwrite new input: %q", written)
@@ -85,4 +86,219 @@ func TestRelocateDockClearsRestoredRowsWithoutScrolling(t *testing.T) {
 	if em.ScrollbackLen() != 0 {
 		t.Fatal("relocation inserted synthetic history")
 	}
+}
+
+const (
+	relocateWidth  = 60
+	relocateHeight = 12
+	relocateTop    = 4
+)
+
+func relocateRows() map[string][]string {
+	hint := "\x1b[38;2;159;157;150mSend a prompt · / commands · ? keys\x1b[0m"
+	notice := "\x1b[38;2;159;157;150mDraft saved to history · Ctrl+C again to exit\x1b[0m"
+	band := "\x1b[38;2;159;157;150mdefault ⊡" + strings.Repeat(" ", 20) + "dal\x1b[0m"
+	return map[string][]string{
+		"composer shorter than the notice below it": {"\x1b[38;2;58;169;159m› \x1b[0m" + hint, notice, band},
+		"band mark under a shorter row":             {"› short", strings.Repeat(" ", relocateWidth-2), band},
+		"every row longer than the one above it":    {"› a", "bb bb bb bb", notice, band},
+		"single long row":                           {"› " + strings.Repeat("x", relocateWidth-4)},
+		"short rows under a long one":               {notice, "ab", "c"},
+	}
+}
+
+func paintAbsolute(em *vt.Emulator, rows []string, top int) {
+	for i, row := range rows {
+		_, _ = fmt.Fprintf(em, "\x1b[%d;1H%s", top+i+1, row)
+	}
+}
+
+func cellText(em *vt.Emulator, x, y int) string {
+	cell := em.CellAt(x, y)
+	if cell == nil || cell.IsZero() {
+		return ""
+	}
+	return fmt.Sprintf("%q %v", cell.Content, cell.Style)
+}
+
+func relocatedAndCleanScreens(rows []string, caretRow, distance int) (relocated, clean *vt.Emulator, stream string) {
+	const transcript = "\x1b[1;1Htranscript one\x1b[2;1Htranscript two"
+	const column = 2
+	relocated = vt.NewEmulator(relocateWidth, relocateHeight)
+	clean = vt.NewEmulator(relocateWidth, relocateHeight)
+	for _, screen := range []*vt.Emulator{relocated, clean} {
+		_, _ = screen.WriteString(transcript)
+	}
+	paintAbsolute(relocated, rows, relocateTop)
+	paintAbsolute(clean, rows, relocateTop+distance)
+	_, _ = fmt.Fprintf(relocated, "\x1b[%d;%dH", relocateTop+caretRow+1, column+1)
+	_, _ = fmt.Fprintf(clean, "\x1b[%d;%dH", relocateTop+distance+caretRow+1, column+1)
+	position := dockPosition{geometry: frameGeometry{rows: len(rows)}, column: column, row: caretRow}
+	stream = relocateDock(strings.Join(rows, "\n"), position, distance)
+	_, _ = relocated.WriteString(stream)
+	return relocated, clean, stream
+}
+
+func assertSameCells(t *testing.T, got, want *vt.Emulator) {
+	t.Helper()
+	for y := range relocateHeight {
+		for x := range relocateWidth {
+			if gotCell, wantCell := cellText(got, x, y), cellText(want, x, y); gotCell != wantCell {
+				t.Fatalf("cell (%d,%d) = %s, want %s:\n%s\nwant:\n%s", x, y, gotCell, wantCell, got.String(), want.String())
+			}
+		}
+	}
+	if gotCursor, wantCursor := got.CursorPosition(), want.CursorPosition(); gotCursor != wantCursor {
+		t.Fatalf("cursor = %v, want %v", gotCursor, wantCursor)
+	}
+}
+
+type relocateCase struct {
+	name     string
+	rows     []string
+	caretRow int
+	distance int
+}
+
+func relocateCases() []relocateCase {
+	var cases []relocateCase
+	for name, rows := range relocateRows() {
+		for _, caretRow := range []int{0, len(rows) - 1} {
+			for distance := 1; distance <= relocateHeight-relocateTop-len(rows); distance++ {
+				cases = append(cases, relocateCase{name: fmt.Sprintf("%s caret row %d distance %d", name, caretRow, distance), rows: rows, caretRow: caretRow, distance: distance})
+			}
+		}
+	}
+	return cases
+}
+
+func TestRelocateDockLeavesNoStaleCellFromTheOldRows(t *testing.T) {
+	t.Parallel()
+	for _, c := range relocateCases() {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			relocated, clean, stream := relocatedAndCleanScreens(c.rows, c.caretRow, c.distance)
+			defer relocated.Close()
+			defer clean.Close()
+			for _, forbidden := range []string{"\x1b[2J", "\x1b[3J", "\x1b[H"} {
+				if strings.Contains(stream, forbidden) {
+					t.Fatalf("forbidden sequence %q in %q", forbidden, stream)
+				}
+			}
+			assertSameCells(t, relocated, clean)
+			if relocated.ScrollbackLen() != 0 {
+				t.Fatal("relocation inserted synthetic history")
+			}
+		})
+	}
+}
+
+func armDockMove(t *testing.T, m *model) tea.Cmd {
+	t.Helper()
+	m.anchorDock()
+	command := m.positionDock(tea.CursorPositionMsg{X: 2, Y: 0})
+	if command == nil {
+		t.Fatal("missing dock relocation")
+	}
+	if !m.anchorState().moving {
+		t.Fatal("a dock relocation did not arm a move")
+	}
+	return command
+}
+
+func writeDockMove(t *testing.T, msgs []tea.Msg) {
+	t.Helper()
+	for _, msg := range msgs {
+		if raw, ok := msg.(tea.RawMsg); ok && fmt.Sprint(raw.Msg) == "" {
+			t.Fatal("the dock move was dropped as stale before it was written")
+		}
+	}
+}
+
+func requestsCursor(command tea.Cmd) bool {
+	for _, msg := range commandMsgs(command) {
+		if raw, ok := msg.(tea.RawMsg); ok && fmt.Sprint(raw.Msg) == dockQueryMarker {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDockMoveTimeoutClearsMoving(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := anchorTestModel()
+		command := armDockMove(t, &m)
+		m.commit("held", []string{"row waiting for the move"})
+		if m.drain() != nil {
+			t.Fatal("a row printed while the move was in flight")
+		}
+		for _, msg := range commandMsgs(command) {
+			m, _ = updateWithCommand(t, m, msg)
+		}
+		if m.anchorState().moving {
+			t.Fatal("a move the terminal never acknowledged still holds the dock after one second")
+		}
+		if !m.out.printing {
+			t.Fatal("the waiting row did not start printing after the move was released")
+		}
+	})
+}
+
+func TestDockMoveTimeoutRequestsTheCursorAgain(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := anchorTestModel()
+		msgs := commandMsgs(armDockMove(t, &m))
+		writeDockMove(t, msgs)
+		if m.anchorState().needed {
+			t.Fatal("a written dock move left the dock marked as misplaced")
+		}
+		asked := false
+		for _, msg := range msgs {
+			var next tea.Cmd
+			m, next = updateWithCommand(t, m, msg)
+			asked = asked || requestsCursor(next)
+		}
+		if !asked {
+			t.Fatal("an unacknowledged move did not request the cursor position again")
+		}
+	})
+}
+
+func TestDockMoveTimeoutIgnoresAnAcknowledgedMove(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := anchorTestModel()
+		msgs := commandMsgs(armDockMove(t, &m))
+		writeDockMove(t, msgs)
+		m, _ = updateWithCommand(t, m, dockWrittenMsg{revision: m.anchorState().moveRevision})
+		for _, msg := range msgs {
+			var next tea.Cmd
+			m, next = updateWithCommand(t, m, msg)
+			if requestsCursor(next) {
+				t.Fatal("the timeout of an acknowledged move requested the cursor position")
+			}
+		}
+		if m.anchorState().needed {
+			t.Fatal("the timeout of an acknowledged move marked the dock as misplaced")
+		}
+	})
+}
+
+func TestDockMoveTimeoutIgnoresASupersededMove(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := anchorTestModel()
+		first := commandMsgs(armDockMove(t, &m))
+		m, _ = updateWithCommand(t, m, dockWrittenMsg{revision: m.anchorState().moveRevision})
+		armDockMove(t, &m)
+		revision := m.anchorState().moveRevision
+		for _, msg := range first {
+			m, _ = updateWithCommand(t, m, msg)
+		}
+		if !m.anchorState().moving || m.anchorState().moveRevision != revision {
+			t.Fatal("the timeout of an earlier move released the move in flight")
+		}
+	})
 }

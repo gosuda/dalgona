@@ -396,6 +396,7 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 	if err != nil {
 		return err
 	}
+	m.forgetPatch(patchKey{event.ThreadID, event.Item.ID})
 	if !m.acceptThread(event.ThreadID) {
 		return nil
 	}
@@ -586,6 +587,7 @@ func (m *model) setThread(id string) {
 	m.thread.turnStartedAt = time.Time{}
 	m.live.plan = nil
 	m.live.retryUntil = time.Time{}
+	m.forgetUnshownPatches()
 	m.thread.effort = ""
 	m.thread.usage = rpc.ThreadTokenUsage{}
 }

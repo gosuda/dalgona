@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
@@ -68,8 +69,10 @@ func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 	case tea.WindowSizeMsg:
 		m.resizeTerminal(msg)
 	case tea.CursorPositionMsg:
-		return m.positionDock(msg), true
-	case dockQueryTimeoutMsg, dockWrittenMsg:
+		return m.answerDock(msg), true
+	case dockLandedMsg:
+		return m.caretLanded(msg), true
+	case dockQueryTimeoutMsg, dockMoveTimeoutMsg, dockHoldMsg, dockWrittenMsg:
 		m.updateDockEvent(msg)
 	case tea.FocusMsg, tea.BlurMsg:
 		m.applyFocus(msg)
@@ -97,6 +100,10 @@ func (m *model) updateDockEvent(msg tea.Msg) {
 	switch msg := msg.(type) {
 	case dockQueryTimeoutMsg:
 		m.queryExpired(msg)
+	case dockMoveTimeoutMsg:
+		m.moveExpired(msg)
+	case dockHoldMsg:
+		m.holdExpired(msg)
 	case dockWrittenMsg:
 		anchor := m.anchorState()
 		if anchor.moveRevision == msg.revision {
@@ -151,8 +158,7 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 	case shellResultMsg:
 		m.applyShell(msg)
 	case disconnectedMsg:
-		m.setState(stateDisconnected)
-		m.errorf("connection lost: %v; restart the TUI, then %s", msg.err, m.resumeHint())
+		m.loseConnection(msg.err)
 	case imageMsg:
 		m.applyImage(msg)
 	}
@@ -327,6 +333,10 @@ func (m *model) recallNewer() bool {
 }
 
 func (m *model) escape() tea.Cmd {
+	if m.thread.state == stateDisconnected {
+		m.errorf("%s", m.conn.lost)
+		return nil
+	}
 	if !m.turnLive() {
 		if m.thread.state == stateIdle {
 			return m.idleEscape()
@@ -338,6 +348,15 @@ func (m *model) escape() tea.Cmd {
 		return m.interrupt()
 	}
 	return m.setHint("Esc again to interrupt", "interrupt")
+}
+
+func (m *model) loseConnection(cause error) {
+	m.setState(stateDisconnected)
+	m.conn.lost = fmt.Sprintf("connection lost: %v; restart the TUI, then %s", cause, m.resumeHint())
+	m.live.retryUntil = time.Time{}
+	m.clearHint()
+	m.abandonApprovals(fmt.Errorf("connection lost: %w", cause))
+	m.errorf("%s", m.conn.lost)
 }
 
 func (m *model) idleEscape() tea.Cmd {
@@ -374,8 +393,13 @@ func (m *model) exitLine() string {
 	return fmt.Sprintf("Thread %s saved · resume with %s --resume %s", sanitizeText(m.thread.title), m.conn.product, sanitizeText(m.thread.id))
 }
 
+func (m *model) dockInFlight() bool {
+	anchor := m.anchorState()
+	return anchor.moving || (anchor.querying && m.screen.height > 0)
+}
+
 func (m *model) finishQuit() tea.Cmd {
-	if !m.quitting || m.anchorState().moving {
+	if !m.quitting || m.dockInFlight() {
 		return nil
 	}
 	if m.screen.height == 0 || (!m.out.printing && !m.out.settling && len(m.out.pending) == 0) {
@@ -391,7 +415,7 @@ func (m *model) suspend() {
 }
 
 func (m *model) finishSuspend() tea.Cmd {
-	if !m.suspending || m.anchorState().moving {
+	if !m.suspending || m.dockInFlight() {
 		return nil
 	}
 	if m.screen.height == 0 || (!m.out.printing && len(m.out.pending) == 0) {
@@ -445,6 +469,9 @@ func (m model) rawFrame() tea.View {
 		return view
 	default:
 		view := m.dockView()
+		if m.caretLanding() {
+			view.Cursor.X, view.Cursor.Y = 0, 0
+		}
 		view.Content = m.screen.emit(view.Content) + m.markOverlay()
 		return view
 	}
