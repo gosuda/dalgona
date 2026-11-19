@@ -38,11 +38,17 @@ $effect(() => {
 			opener.isConnected &&
 			!opener.matches(":disabled")
 				? opener
-				: document.getElementById("prompt");
+				: fallbackTarget();
 		back?.focus();
 		opener = null;
 	}
 });
+
+function fallbackTarget(): HTMLElement | null {
+	const prompt = document.getElementById("prompt");
+	if (prompt !== null && !prompt.matches(":disabled")) return prompt;
+	return document.getElementById("transcript");
+}
 
 function onKey(event: KeyboardEvent): void {
 	if (event.key !== "Escape" || composing || isImeKey(event)) return;

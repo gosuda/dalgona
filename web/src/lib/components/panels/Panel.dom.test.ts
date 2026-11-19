@@ -56,6 +56,14 @@ describe("panel close", () => {
 		return prompt;
 	}
 
+	function transcript(): HTMLElement {
+		const region = document.createElement("section");
+		region.id = "transcript";
+		region.tabIndex = -1;
+		document.body.append(region);
+		return region;
+	}
+
 	async function closed(opener: HTMLElement | null): Promise<void> {
 		opener?.focus();
 		const view = render(Panel, {
@@ -128,5 +136,37 @@ describe("panel close", () => {
 		await view.rerender({ open: false });
 		await tick();
 		expect(document.activeElement).toBe(prompt);
+	});
+
+	test("hands focus to the transcript when the message field is disabled", async () => {
+		const prompt = field();
+		prompt.disabled = true;
+		const region = transcript();
+		(document.activeElement as HTMLElement | null)?.blur();
+		await closed(null);
+		expect(document.activeElement).toBe(region);
+		expect(document.activeElement).not.toBe(prompt);
+	});
+
+	test("hands focus to the transcript when the opener left the page and the message field is disabled", async () => {
+		const prompt = field();
+		prompt.disabled = true;
+		const region = transcript();
+		const opener = document.createElement("button");
+		document.body.append(opener);
+		opener.focus();
+		const view = render(Panel, {
+			props: {
+				title: "Keys",
+				open: true,
+				onClose: vi.fn(),
+				children: bodyWith('<button type="button">Inside</button>'),
+			},
+		});
+		await tick();
+		opener.remove();
+		await view.rerender({ open: false });
+		await tick();
+		expect(document.activeElement).toBe(region);
 	});
 });
