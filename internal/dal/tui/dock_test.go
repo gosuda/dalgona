@@ -62,19 +62,53 @@ func TestStatusRowShowsWorkingTagAndElapsed(t *testing.T) {
 	}
 }
 
-func TestStatusRowFieldsKeepCells(t *testing.T) {
-	t.Parallel()
+type elapsedPair struct {
+	name          string
+	before, after time.Duration
+}
+
+func elapsedPairs() []elapsedPair {
+	return []elapsedPair{
+		{"9s to 10s", 9 * time.Second, 10 * time.Second},
+		{"12s to 2m 05s", 12 * time.Second, 125 * time.Second},
+		{"59s to 1m 00s", 59 * time.Second, time.Minute},
+		{"999 ms to 1s", 999 * time.Millisecond, time.Second},
+		{"59m 59s to 1h 00m", 59*time.Minute + 59*time.Second, time.Hour},
+		{"99h 59m to 100h", 99*time.Hour + 59*time.Minute, 100 * time.Hour},
+	}
+}
+
+func requireElapsedKeepsCells(t *testing.T, width int, pair elapsedPair) {
+	t.Helper()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	m := liveModel(t, &now)
-	now = now.Add(9 * time.Second)
+	m.screen.width = width
+	m.noticef("%s", "notice")
+	start := now
+	now = start.Add(pair.before)
 	before := stripANSI(m.liveRow())
-	now = now.Add(time.Second)
+	now = start.Add(pair.after)
 	after := stripANSI(m.liveRow())
 	if strings.Index(before, "Working") != strings.Index(after, "Working") {
 		t.Fatalf("Working moved: %q then %q", before, after)
 	}
 	if cellCount(m, before) != cellCount(m, after) {
 		t.Fatalf("live row width changed: %q then %q", before, after)
+	}
+	if liveColumn(t, m, before, "notice") != liveColumn(t, m, after, "notice") {
+		t.Fatalf("the free text moved: %q then %q", before, after)
+	}
+}
+
+func TestStatusRowFieldsKeepCells(t *testing.T) {
+	t.Parallel()
+	for _, width := range []int{40, 100} {
+		for _, pair := range elapsedPairs() {
+			t.Run(fmt.Sprintf("%dcols/%s", width, pair.name), func(t *testing.T) {
+				t.Parallel()
+				requireElapsedKeepsCells(t, width, pair)
+			})
+		}
 	}
 }
 
