@@ -353,7 +353,7 @@ func (m *model) loseConnection(cause error) {
 
 func (m *model) idleEscape() tea.Cmd {
 	if m.input.composer.Value() != "" {
-		m.noticef("idle, draft kept; nothing to interrupt")
+		m.quietNotice("idle, draft kept")
 		return nil
 	}
 	if m.thread.id == "" {
