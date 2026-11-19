@@ -2,8 +2,10 @@ package tui
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -71,4 +73,90 @@ func plainPrefix(text string, bound int) string {
 
 func (s *screenState) wrap(text string, n int) []string {
 	return strings.Split(s.method.Wrap(s.nfc(s.expand(text)), n, ""), "\n")
+}
+
+type byteRange struct {
+	start, end int
+}
+
+func (s *screenState) wrapRanges(text string, n int) []byteRange {
+	flat := s.nfc(s.expand(text))
+	parts := s.wrap(flat, n)
+	ranges := make([]byteRange, len(parts))
+	walk := sourceWalk{screen: s, text: text}
+	pos := 0
+	for i, part := range parts {
+		pos = s.rowStart(flat, pos, part)
+		start := walk.advance(pos)
+		pos = min(pos+len(part), len(flat))
+		ranges[i] = byteRange{start: start, end: walk.advance(pos)}
+	}
+	return ranges
+}
+
+func (s *screenState) rowStart(flat string, pos int, part string) int {
+	for at := pos; ; {
+		if strings.HasPrefix(flat[at:], part) {
+			return at
+		}
+		next := s.skipSpace(flat, at)
+		if next == at {
+			return pos
+		}
+		at = next
+	}
+}
+
+func (s *screenState) skipSpace(text string, pos int) int {
+	if pos >= len(text) {
+		return pos
+	}
+	r, size := utf8.DecodeRuneInString(text[pos:])
+	if !unicode.IsSpace(r) {
+		return pos
+	}
+	if size > 1 {
+		cluster, _ := ansi.FirstGraphemeCluster(text[pos:], s.method)
+		size = len(cluster)
+	}
+	return pos + size
+}
+
+func printableASCII(text string, at int) bool {
+	b := text[at]
+	if b < ' ' || b > '~' {
+		return false
+	}
+	return at+1 == len(text) || text[at+1] < utf8.RuneSelf
+}
+
+type sourceWalk struct {
+	screen *screenState
+	text   string
+	at     int
+	flat   int
+	col    int
+}
+
+func (w *sourceWalk) advance(flat int) int {
+	for w.flat < flat && w.at < len(w.text) {
+		if printableASCII(w.text, w.at) {
+			w.at++
+			w.flat++
+			w.col++
+			continue
+		}
+		cluster, _ := ansi.FirstGraphemeCluster(w.text[w.at:], w.screen.method)
+		if cluster == "\t" {
+			pad := tabStop - w.col%tabStop
+			w.flat += pad
+			w.col += pad
+		} else {
+			composed := w.screen.nfc(cluster)
+			w.flat += len(composed)
+			w.col += w.screen.method.StringWidth(composed)
+		}
+		w.at += len(cluster)
+	}
+	return w.at
 }

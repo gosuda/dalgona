@@ -252,6 +252,8 @@ A click MUST select nothing, because the client cannot learn the screen row of t
 ## Editor
 
 The composer MUST wrap text to the window width minus three cells.
+With no panel open, each row of the wrapped text MUST take one composer row.
+With no panel open, the composer MUST show the caret row. When the caret row is past the last row that fits, the composer MUST show the rows that end with it.
 Enter MUST send the prompt, except after a backslash and while the command palette lists a command.
 Enter after a backslash MUST replace the backslash with a newline.
 Shift+Enter and Ctrl+J MUST insert a newline.

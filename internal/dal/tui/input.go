@@ -213,29 +213,12 @@ func (c editor) lineRows(s *screenState, line string, offset, cell int) []editor
 }
 
 func (c editor) textRows(s *screenState, line string, offset, cell int) []editorRow {
-	parts := s.wrap(line, cell)
-	rows := make([]editorRow, 0, len(parts))
-	pos := 0
-	for _, part := range parts {
-		end := partEnd(line, pos, part)
-		rows = append(rows, editorRow{text: line[pos:end], start: offset + pos, end: offset + end})
-		pos = end
+	ranges := s.wrapRanges(line, cell)
+	rows := make([]editorRow, len(ranges))
+	for i, r := range ranges {
+		rows[i] = editorRow{text: line[r.start:r.end], start: offset + r.start, end: offset + r.end}
 	}
 	return rows
-}
-
-func partEnd(line string, pos int, part string) int {
-	if strings.HasPrefix(line[pos:], part) {
-		return pos + len(part)
-	}
-	for end := pos + 1; end <= len(line); end++ {
-		if end == len(line) || utf8.RuneStart(line[end]) {
-			if norm.NFC.String(line[pos:end]) == part {
-				return end
-			}
-		}
-	}
-	return len(line)
 }
 
 func (c editor) byteCursor() int {
