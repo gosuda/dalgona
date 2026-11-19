@@ -32,7 +32,7 @@ func awaitedID(id uint64, turnID string) uint64 {
 }
 
 func (h *history) add(text, turnID string) {
-	h.record(text, turnID, false, false)
+	h.record(text, turnID, true, false)
 }
 
 func (h *history) addFrom(draft editor, text, turnID string) {

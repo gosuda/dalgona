@@ -317,6 +317,7 @@ A prompt recalled from the history MUST be plain text. It MUST NOT become a chip
 A recalled prompt whose draft began with a chip MUST be sent unchanged until the user edits its text.
 A queued follow-up whose draft began with a chip MUST be sent unchanged from the history, after Alt+Up, and after a failed start.
 A draft that Ctrl+C saves and that repeats the last entry MUST replace whether the history sends that entry unchanged.
+A user message that starts with `/` MUST be sent unchanged from the history until the user edits its text, live or resumed.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB MUST be refused with a notice that names the limit.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.

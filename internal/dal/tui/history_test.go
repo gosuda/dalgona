@@ -408,7 +408,7 @@ func TestHistoryRepeatSetsTheIntentAndASavedDraftReplacesIt(t *testing.T) {
 	}{
 		{name: "echo keeps the intent", first: chipFirst, repeat: func(h *history) { h.add(pasted, "turn-1") }, want: true},
 		{name: "send keeps the intent", first: chipFirst, repeat: func(h *history) { h.addFrom(typed, pasted, "") }, want: true},
-		{name: "echo sets the intent", first: typed, repeat: func(h *history) { h.add(pasted, "turn-1") }, want: false},
+		{name: "echo sets the intent", first: typed, repeat: func(h *history) { h.add(pasted, "turn-1") }, want: true},
 		{name: "saved draft clears the intent", first: chipFirst, repeat: func(h *history) { h.saveDraft(typed, pasted) }, want: false},
 		{name: "saved draft sets the intent", first: typed, repeat: func(h *history) { h.saveDraft(chipFirst, pasted) }, want: true},
 	}
@@ -615,17 +615,18 @@ func TestHistoryEntryPasteIntentSurvivesEcho(t *testing.T) {
 	edited := recalled
 	edited.insert([]rune("x"))
 	tests := []struct {
-		name  string
-		draft editor
-		text  string
-		want  bool
+		name   string
+		draft  editor
+		text   string
+		want   bool
+		echoed bool
 	}{
-		{name: "chip first", draft: chipFirst, text: "// a\nb", want: true},
-		{name: "typed double slash", draft: typed, text: "/a b", want: false},
-		{name: "typed command", draft: editor{text: []rune("/new")}, text: "/new", want: false},
-		{name: "plain prompt", draft: editor{text: []rune("hello")}, text: "hello", want: false},
-		{name: "recalled paste", draft: recalled, text: "// a\nb", want: true},
-		{name: "edited recalled paste", draft: edited, text: "// a\nbx", want: false},
+		{name: "chip first", draft: chipFirst, text: "// a\nb", want: true, echoed: true},
+		{name: "typed double slash", draft: typed, text: "/a b", want: false, echoed: true},
+		{name: "typed command", draft: editor{text: []rune("/new")}, text: "/new", want: false, echoed: true},
+		{name: "plain prompt", draft: editor{text: []rune("hello")}, text: "hello", want: false, echoed: false},
+		{name: "recalled paste", draft: recalled, text: "// a\nb", want: true, echoed: true},
+		{name: "edited recalled paste", draft: edited, text: "// a\nbx", want: false, echoed: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -636,8 +637,8 @@ func TestHistoryEntryPasteIntentSurvivesEcho(t *testing.T) {
 				t.Fatalf("entries = %#v, want verbatim %v", h.entries, test.want)
 			}
 			h.add(test.text, "turn-1")
-			if len(h.entries) != 1 || h.entries[0].verbatim != test.want || h.entries[0].turnID != "turn-1" {
-				t.Fatalf("entries after the echo = %#v, want one entry with verbatim %v and turn-1", h.entries, test.want)
+			if len(h.entries) != 1 || h.entries[0].verbatim != test.echoed || h.entries[0].turnID != "turn-1" {
+				t.Fatalf("entries after the echo = %#v, want one entry with verbatim %v and turn-1", h.entries, test.echoed)
 			}
 		})
 	}
@@ -842,6 +843,101 @@ func TestHistoryFromResumedThread(t *testing.T) {
 	m.applyResumed(&resumedThread{Thread: rpc.Thread{ID: "t1", Turns: []rpc.Turn{{ID: "turn-1", Items: []rpc.Item{{ID: "u1", Type: "userMessage", Text: "earlier"}}}}}})
 	if n := len(m.input.history.entries); n != 1 || m.input.history.entries[0].turnID != "turn-1" {
 		t.Fatalf("history = %#v, want the resumed prompt with turn-1", m.input.history.entries)
+	}
+}
+
+var threadSources = []struct {
+	name string
+	load func(*testing.T, model, string) model
+}{
+	{name: "resume", load: func(t *testing.T, m model, text string) model {
+		t.Helper()
+		thread := rpc.Thread{ID: "t1", Turns: []rpc.Turn{{ID: "turn-1", Status: "completed", Items: []rpc.Item{{ID: "u1", Type: "userMessage", Text: text}}}}}
+		m, _ = drive(t, m, resultMsg{op: "resumed", value: &resumedThread{Thread: thread}})
+		return m
+	}},
+	{name: "echo", load: func(t *testing.T, m model, text string) model {
+		t.Helper()
+		m.thread.id = "t1"
+		echo := fmt.Appendf(nil, `{"threadId":"t1","item":{"id":"u1","type":"userMessage","text":%q}}`, text)
+		m, _ = drive(t, m, notificationMsg{method: "item/completed", params: echo})
+		return m
+	}},
+}
+
+type threadPromptCase struct {
+	name string
+	text string
+	keys []tea.KeyPressMsg
+	sent string
+}
+
+var threadPromptCases = []threadPromptCase{
+	{name: "double slash", text: "// Render the menu\nline", sent: "// Render the menu\nline"},
+	{name: "command with a word", text: "/new now\nline", sent: "/new now\nline"},
+	{name: "bare command", text: "/new\nline", sent: "/new\nline"},
+	{name: "plain prompt", text: "plain\nline", sent: "plain\nline"},
+	{name: "edited command", text: "/new now\nline", keys: []tea.KeyPressMsg{press('x', 0, "x")}},
+}
+
+type threadPromptRun struct {
+	name   string
+	prompt threadPromptCase
+	load   func(*testing.T, model, string) model
+	recall func(*testing.T, model) model
+}
+
+func threadPromptRuns() []threadPromptRun {
+	var runs []threadPromptRun
+	for _, source := range threadSources {
+		for _, recall := range historyRecalls {
+			for _, prompt := range threadPromptCases {
+				runs = append(runs, threadPromptRun{name: source.name + "/" + recall.name + "/" + prompt.name, prompt: prompt, load: source.load, recall: recall.run})
+			}
+		}
+	}
+	return runs
+}
+
+func (r threadPromptRun) enter(t *testing.T, caller *fakeCaller) (model, tea.Cmd) {
+	t.Helper()
+	m := newTestModel(caller, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = r.load(t, m, r.prompt.text)
+	if n := len(m.input.history.entries); n != 1 {
+		t.Fatalf("history holds %d entries after the load, want 1", n)
+	}
+	m = r.recall(t, m)
+	for _, key := range r.prompt.keys {
+		m, _ = drive(t, m, key)
+	}
+	return drive(t, m, press(tea.KeyEnter, 0, ""))
+}
+
+func (r threadPromptRun) check(t *testing.T) {
+	t.Helper()
+	caller := new(fakeCaller)
+	m, command := r.enter(t, caller)
+	if r.prompt.sent == "" {
+		if len(caller.calls) != 0 || m.confirm == nil || m.confirm.kind != confirmNew {
+			t.Fatalf("calls = %#v, confirm = %#v, want the new-thread confirmation of the typed /new and no request", caller.calls, m.confirm)
+		}
+		return
+	}
+	m = runCommand(t, m, command, "Enter did not send the recalled prompt; notice: "+m.notice)
+	if m.confirm != nil {
+		t.Fatalf("Enter on the recalled prompt opened %#v, want the prompt sent", m.confirm)
+	}
+	assertLastCallText(t, caller, 1, "turn/start", r.prompt.sent)
+}
+
+func TestThreadPromptStartingWithSlashIsRecalledSentUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, run := range threadPromptRuns() {
+		t.Run(run.name, func(t *testing.T) {
+			t.Parallel()
+			run.check(t)
+		})
 	}
 }
 
