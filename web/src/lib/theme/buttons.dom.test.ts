@@ -32,6 +32,7 @@ describe("button hover", () => {
 describe("disclosure summary target", () => {
 	test("each summary keeps the minimum pointer target height", () => {
 		const rule = appliedRule("summary");
+		expect(rule.parentRule).toBeNull();
 		expect(rule.style.getPropertyValue("min-height")).toBe("var(--target-min)");
 	});
 });
