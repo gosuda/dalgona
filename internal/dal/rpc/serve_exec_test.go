@@ -3,6 +3,7 @@ package rpc
 import (
 	"encoding/base64"
 	json "encoding/json/v2"
+	"maps"
 	"os"
 	"testing"
 	"time"
@@ -125,4 +126,39 @@ func TestCommandExecLimitCountsEveryCommand(t *testing.T) {
 		}
 	}
 	expect(t, refused == 1, "commands refused by the sixteen-command limit", refused)
+}
+
+func TestCommandExecRefusesOutOfRangeLimits(t *testing.T) {
+	const (
+		negativeTimeout = "timeoutMs must not be negative"
+		outputCapRange  = "outputBytesCap must be from 1 to 67108864"
+	)
+	cases := []struct {
+		name   string
+		limits map[string]any
+		want   string
+	}{
+		{"timeoutMs -1 is negative", map[string]any{"timeoutMs": -1}, negativeTimeout},
+		{"timeoutMs -600000 is negative", map[string]any{"timeoutMs": -600000}, negativeTimeout},
+		{"timeoutMs 0 is not negative", map[string]any{"timeoutMs": 0}, ""},
+		{"outputBytesCap -1 is outside 1 to 67108864", map[string]any{"outputBytesCap": -1}, outputCapRange},
+		{"outputBytesCap 0 is outside 1 to 67108864", map[string]any{"outputBytesCap": 0}, outputCapRange},
+		{"outputBytesCap 1 is inside 1 to 67108864", map[string]any{"outputBytesCap": 1}, ""},
+		{"outputBytesCap 67108864 is inside 1 to 67108864", map[string]any{"outputBytesCap": 67108864}, ""},
+		{"outputBytesCap 67108865 is outside 1 to 67108864", map[string]any{"outputBytesCap": 67108865}, outputCapRange},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newRig(t, config.ApprovalAuto).connect()
+			params := map[string]any{"command": []string{os.Args[0]}, "env": map[string]any{"RPC_TEST_PRINT": "hello"}}
+			maps.Copy(params, tc.limits)
+			if tc.want != "" {
+				c.fails("command/exec", params, -32602, tc.want)
+				return
+			}
+			var response CommandExecResponse
+			c.ok("command/exec", params, &response)
+			expect(t, response.ExitCode == 3, "command that passed the limits", response)
+		})
+	}
 }

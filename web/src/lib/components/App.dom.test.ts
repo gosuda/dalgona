@@ -1145,3 +1145,62 @@ describe("dock height", () => {
 		expect(shell?.style.getPropertyValue("--dock-height")).toBe("240px");
 	});
 });
+
+describe("page live regions", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	const liveSelector =
+		"[role=alert], [role=status], [role=log], [role=timer], [aria-live]:not([aria-live=off]), output";
+	const composerSelector = '[aria-label="Message composer"]';
+
+	test("the page has one status region and one alert region while a panel and the composer show their own errors", async () => {
+		const { session } = connectedSession();
+		vi.spyOn(session, "compactThread").mockRejectedValue(
+			new Error("compact refused"),
+		);
+		render(App, { props: { session } });
+		await tick();
+		fireEvent.keyDown(promptField(), { key: "Enter" });
+		await tick();
+		session.openPanel("compact");
+		await tick();
+		fireEvent.click(screen.getByRole("button", { name: "Compact" }));
+		await screen.findByText("compact refused");
+		expect(screen.getByText("Enter a message before sending.")).toBeTruthy();
+
+		const live = [...document.querySelectorAll<HTMLElement>(liveSelector)];
+		const page = live.filter(
+			(node) =>
+				node.closest("dialog") === null &&
+				node.closest(composerSelector) === null,
+		);
+		expect(page.map((node) => node.getAttribute("role"))).toEqual([
+			"alert",
+			"status",
+		]);
+		expect(page.every((node) => node.classList.contains("notices"))).toBe(true);
+		expect(page[0]?.querySelectorAll(".notice")).toHaveLength(0);
+		expect(session.notices).toHaveLength(0);
+
+		const panel = live.filter((node) => node.closest("dialog") !== null);
+		expect(panel.map((node) => node.textContent)).toEqual(["compact refused"]);
+		expect(panel.map((node) => node.getAttribute("role"))).toEqual(["alert"]);
+
+		const composer = live.filter(
+			(node) => node.closest(composerSelector) !== null,
+		);
+		expect(composer.map((node) => node.id)).toEqual(["composer-error"]);
+		expect(composer[0]?.textContent).toBe("Enter a message before sending.");
+		expect(promptField().getAttribute("aria-describedby")).toContain(
+			"composer-error",
+		);
+
+		const transcript = document.getElementById("transcript");
+		expect(transcript).not.toBeNull();
+		expect(transcript?.matches(liveSelector)).toBe(false);
+		expect(transcript?.querySelector(liveSelector)).toBeNull();
+		session.stop();
+	});
+});
