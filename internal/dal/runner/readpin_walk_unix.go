@@ -12,6 +12,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var errNotRegular = errors.New("not a regular file")
+
 func walkNoFollow(dir *os.File, rel string) (*os.File, error) {
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 	cur := dir
@@ -45,12 +47,22 @@ func classifyPinnedError(dir *os.File, name, rel string, err error) error {
 }
 
 func openNoFollow(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
 			return nil, fmt.Errorf("%w: %s", ErrPinnedSymlink, path)
 		}
 		return nil, err
 	}
-	return os.NewFile(uintptr(fd), path), nil
+	file := os.NewFile(uintptr(fd), path)
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, errNotRegular
+	}
+	return file, nil
 }
