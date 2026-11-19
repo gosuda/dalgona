@@ -57,7 +57,11 @@ func (c shortQuestion) check(t *testing.T, lines []string) {
 	if c.band && !strings.Contains(lines[len(lines)-1], "⊡") {
 		t.Fatalf("last row is not the status band: %q", lines[len(lines)-1])
 	}
-	card := strings.Join(lines[1:1+c.panel], "\n")
+	c.checkCard(t, strings.Join(lines[1:1+c.panel], "\n"))
+}
+
+func (c shortQuestion) checkCard(t *testing.T, card string) {
+	t.Helper()
 	if !strings.Contains(card, "s submit") {
 		t.Fatalf("card lacks %q:\n%s", "s submit", card)
 	}
@@ -100,33 +104,41 @@ func TestQuestionCardNeedsFourRows(t *testing.T) {
 	}
 }
 
+type questionTab struct {
+	name string
+	keys []tea.KeyPressMsg
+}
+
+var questionTabs = []questionTab{
+	{"single", nil},
+	{"multi", []tea.KeyPressMsg{press(tea.KeyTab, 0, "")}},
+	{"review", []tea.KeyPressMsg{press(tea.KeyTab, 0, ""), press(tea.KeyTab, 0, "")}},
+	{"typing", []tea.KeyPressMsg{press('3', 0, "3")}},
+}
+
+func checkQuestionFrames(t *testing.T, tab questionTab, width, height int) {
+	t.Helper()
+	m := shortQuestionModel(t, width, height)
+	for _, key := range tab.keys {
+		m, _ = drive(t, m, key)
+	}
+	before := len(m.dockLines())
+	assertFrame(t, strings.Split(m.View().Content, "\n"), width, height)
+	m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	assertFrame(t, strings.Split(m.View().Content, "\n"), width, height)
+	if got := len(m.dockLines()); got != before {
+		t.Fatalf("dock changed from %d to %d rows after a scroll key", before, got)
+	}
+}
+
 func TestQuestionCardFramesAtShortHeights(t *testing.T) {
 	t.Parallel()
-	tabs := []struct {
-		name string
-		keys []tea.KeyPressMsg
-	}{
-		{"single", nil},
-		{"multi", []tea.KeyPressMsg{press(tea.KeyTab, 0, "")}},
-		{"review", []tea.KeyPressMsg{press(tea.KeyTab, 0, ""), press(tea.KeyTab, 0, "")}},
-		{"typing", []tea.KeyPressMsg{press('3', 0, "3")}},
-	}
-	for _, tab := range tabs {
+	for _, tab := range questionTabs {
 		for height := 4; height <= 9; height++ {
 			for _, width := range []int{20, 40, 100} {
 				t.Run(fmt.Sprintf("%s %dx%d", tab.name, width, height), func(t *testing.T) {
 					t.Parallel()
-					m := shortQuestionModel(t, width, height)
-					for _, key := range tab.keys {
-						m, _ = drive(t, m, key)
-					}
-					before := len(m.dockLines())
-					assertFrame(t, strings.Split(m.View().Content, "\n"), width, height)
-					m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
-					assertFrame(t, strings.Split(m.View().Content, "\n"), width, height)
-					if got := len(m.dockLines()); got != before {
-						t.Fatalf("dock changed from %d to %d rows after a scroll key", before, got)
-					}
+					checkQuestionFrames(t, tab, width, height)
 				})
 			}
 		}
