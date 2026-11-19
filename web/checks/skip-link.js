@@ -17,10 +17,12 @@
 	if (!transcript) return { ok: false, failures: ["transcript: not found"] };
 	const viewport = `${innerWidth}x${innerHeight}`;
 	if (viewport !== "1280x800")
-		failures.push(`viewport: ${viewport} (want 1280x800)`);
+		failures.push(
+			`viewport: ${viewport} (want 1280x800; resize the window and run again)`,
+		);
 	else if (transcript.scrollHeight <= transcript.clientHeight)
 		failures.push(
-			`transcript: ${transcript.scrollHeight}px of content in a ${transcript.clientHeight}px column, want taller than the column`,
+			`transcript: ${transcript.scrollHeight}px of content in a ${transcript.clientHeight}px column, want taller than the column; open a thread with a long transcript, such as long output`,
 		);
 	if (location.hash === "#transcript")
 		history.replaceState(null, "", `${location.pathname}${location.search}`);
