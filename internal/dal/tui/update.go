@@ -306,7 +306,7 @@ func (m *model) exitKey() tea.Cmd {
 	if strings.TrimSpace(draft) == "" {
 		return m.setHint("Ctrl+C again to exit", "exit")
 	}
-	m.input.history.addFrom(m.input.composer, draft, "")
+	m.input.history.saveDraft(m.input.composer, draft)
 	hint := "Draft saved to history · Ctrl+C again to exit"
 	if len(m.input.composer.images()) > 0 {
 		hint = "Draft saved to history, images dropped · Ctrl+C again to exit"

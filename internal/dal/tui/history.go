@@ -32,14 +32,18 @@ func awaitedID(id uint64, turnID string) uint64 {
 }
 
 func (h *history) add(text, turnID string) {
-	h.record(text, turnID, false)
+	h.record(text, turnID, false, false)
 }
 
 func (h *history) addFrom(draft editor, text, turnID string) {
-	h.record(text, turnID, !draft.readsSlash())
+	h.record(text, turnID, !draft.readsSlash(), false)
 }
 
-func (h *history) record(text, turnID string, verbatim bool) {
+func (h *history) saveDraft(draft editor, text string) {
+	h.record(text, "", !draft.readsSlash(), true)
+}
+
+func (h *history) record(text, turnID string, verbatim, replace bool) {
 	text = strings.TrimSpace(sanitizeText(text))
 	if text == "" || strings.Fields(text)[0] == "/login" {
 		return
@@ -47,7 +51,7 @@ func (h *history) record(text, turnID string, verbatim bool) {
 	verbatim = verbatim && strings.HasPrefix(text, "/")
 	if n := len(h.entries); n > 0 && h.entries[n-1].text == text {
 		h.entries[n-1].turnID = cmp.Or(turnID, h.entries[n-1].turnID)
-		h.entries[n-1].verbatim = h.entries[n-1].verbatim || verbatim
+		h.entries[n-1].verbatim = verbatim || (!replace && h.entries[n-1].verbatim)
 		h.awaitingID = awaitedID(h.entries[n-1].id, turnID)
 		return
 	}
