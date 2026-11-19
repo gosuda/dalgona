@@ -118,7 +118,7 @@ func isSubsequence(query, text string) bool {
 }
 
 func panelBodyRows(p panelView, rows int) int {
-	return max(rows-1-min(len(p.actions), max(rows-1, 0)), 0)
+	return max(rows-1-len(p.actions), 0)
 }
 
 func framePanel(s *screenState, p panelView, rows int) []string {

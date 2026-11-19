@@ -219,6 +219,21 @@ func TestApprovalScrollClampsAtEnd(t *testing.T) {
 	}
 }
 
+func TestApprovalScrollStopsAtStart(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, tenLineApproval())
+	m = pressTimes(t, m, tea.KeyUp, 50)
+	if rows := approvalBodyRows(m); rows[0] != "$ row0" {
+		t.Fatalf("after 50 ups the body starts at %q, want $ row0", rows[0])
+	}
+	m = pressTimes(t, m, tea.KeyDown, 1)
+	if rows := approvalBodyRows(m); rows[0] != "row1" {
+		t.Fatalf("after one down the body starts at %q, want row1", rows[0])
+	}
+}
+
 func TestApprovalScrollClampsAfterResize(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{})
