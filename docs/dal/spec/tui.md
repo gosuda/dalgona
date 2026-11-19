@@ -237,6 +237,8 @@ The client cannot see a failed write to the terminal. A write that fails is ther
 The review MUST close only on `esc`, `q`, or `ctrl+o`. A quit or suspend key MUST close the review first.
 Rows that finish while the review is open MUST wait, and they MUST print after the review closes.
 The review header MUST show the count of waiting rows. The footer MUST name the scroll keys and the entry keys.
+The review MUST have at most the larger of one row and the window height minus one rows. The review MUST keep one body row.
+A window of fewer than four rows MUST drop the review footer. A window of fewer than three rows MUST drop the review header.
 The client MUST keep the last 1000 committed rows for the review and MUST drop the oldest first.
 
 ## Mouse
