@@ -214,9 +214,9 @@ func (m *model) submitPrompt() tea.Cmd {
 	}
 	m.input.history.rewind()
 	if m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
-		return m.sendSteer(text, images, composer)
+		return m.sendSteer(text, images)
 	}
-	return m.sendPrompt(text, images, composer)
+	return m.sendPrompt(text, images)
 }
 
 func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool) {
@@ -237,16 +237,16 @@ func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool
 	return text, nil, false
 }
 
-func (m *model) sendPrompt(text string, images []chip, draft editor) tea.Cmd {
-	m.input.history.addFrom(draft, text, "")
+func (m *model) sendPrompt(text string, images []chip) tea.Cmd {
+	m.input.history.add(text, "")
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: promptInput(text, images), Model: m.thread.modelName}
 	result := new(rpc.TurnStartResponse)
 	return m.call("send", "turn/start", params, result, text)
 }
 
-func (m *model) sendSteer(text string, images []chip, draft editor) tea.Cmd {
-	m.input.history.addFrom(draft, text, m.thread.turnID)
+func (m *model) sendSteer(text string, images []chip) tea.Cmd {
+	m.input.history.add(text, m.thread.turnID)
 	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: promptInput(text, images)}
 	return m.call("steer", "turn/steer", params, new(rpc.TurnSteerResponse), text)
 }
@@ -305,7 +305,7 @@ func (m *model) startQueuedFollowup() tea.Cmd {
 	}
 	item := m.queue[0]
 	m.queue = m.queue[1:]
-	m.input.history.record(item.text, "", item.verbatim, false)
+	m.input.history.add(item.text, "")
 	m.syncQueue()
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(item.text), Model: m.thread.modelName}

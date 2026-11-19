@@ -35,10 +35,6 @@ func (h *history) add(text, turnID string) {
 	h.record(text, turnID, true, false)
 }
 
-func (h *history) addFrom(draft editor, text, turnID string) {
-	h.record(text, turnID, !draft.readsSlash(), false)
-}
-
 func (h *history) saveDraft(draft editor, text string) {
 	h.record(text, "", !draft.readsSlash(), true)
 }
