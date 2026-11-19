@@ -568,6 +568,8 @@ The fence MUST buffer until its closing marker before it prints.
 A mermaid, d2, or nomnoml card MUST render the source as text art under a `diagram <kind> · <n> rows` header.
 An `svg` fence or a failed render MUST print `diagram <kind>: render failed · source shown` followed by the source.
 A render that runs longer than 2 seconds MUST count as a failed render.
+A d2 layout cannot be cancelled, so one that outlives the render limit keeps running to its end. The client MUST run at most one d2 layout at a time.
+While a d2 layout past the render limit runs, a d2 render MUST count as a failed render without waiting.
 A source of more than 16384 bytes MUST NOT reach a renderer. It MUST print `diagram <kind>: too large to draw · source shown` followed by the source.
 The client MUST run each render outside the update loop. A key, a tick, or any other message MUST NOT wait for a render.
 A row committed while a diagram renders MUST wait for the diagram card. Waiting rows MUST print once, in the order of their commit.

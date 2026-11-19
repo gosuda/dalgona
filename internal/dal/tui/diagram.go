@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -99,14 +100,46 @@ func renderDiagramWith(draw drawFunc, kind, source string) (string, error) {
 	}
 }
 
+var errD2Busy = errors.New("a d2 layout past its limit still runs")
+
+type d2Gate struct {
+	slot chan struct{}
+	due  atomic.Int64
+}
+
+func newD2Gate() *d2Gate {
+	return &d2Gate{slot: make(chan struct{}, 1)}
+}
+
+func (g *d2Gate) enter(ctx context.Context) (func(), error) {
+	if due := g.due.Load(); due != 0 && time.Now().UnixNano() >= due {
+		return nil, errD2Busy
+	}
+	select {
+	case g.slot <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		g.due.Store(deadline.UnixNano())
+	}
+	return func() {
+		g.due.Store(0)
+		<-g.slot
+	}, nil
+}
+
 var (
-	d2Ruler    = sync.OnceValues(textmeasure.NewRuler)
-	d2RenderMu sync.Mutex
+	d2Ruler   = sync.OnceValues(textmeasure.NewRuler)
+	d2Layouts = newD2Gate()
 )
 
 func renderD2(ctx context.Context, source string) (string, error) {
-	d2RenderMu.Lock()
-	defer d2RenderMu.Unlock()
+	leave, err := d2Layouts.enter(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer leave()
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
