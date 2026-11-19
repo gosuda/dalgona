@@ -500,9 +500,9 @@ func (m *model) advisorToggled(enabled bool) {
 
 func advisorFailure(err error) string {
 	if rpcErr, ok := errors.AsType[*rpc.RPCError](err); ok && rpcErr.Code == -32001 {
-		return "advisor unavailable: " + rpcErr.Message + "; set [advisor] enabled = true in config.toml, then restart dalgona"
+		return sanitizeText("advisor unavailable: " + rpcErr.Message + "; set [advisor] enabled = true in config.toml, then restart dalgona")
 	}
-	return fmt.Sprintf("advisor request failed: %v; retry the /advisor command", err)
+	return sanitizeText(fmt.Sprintf("advisor request failed: %v; retry the /advisor command", err))
 }
 
 func advisorStatusText(states []rpc.AdvisorState) string {
