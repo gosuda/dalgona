@@ -231,3 +231,69 @@ func TestStartupInTinyWindowPutsCursorOnCaretWithoutQueryLoop(t *testing.T) {
 		}
 	})
 }
+
+func TestDockMovedAfterComposerShrinksMatchesCleanPaint(t *testing.T) {
+	t.Parallel()
+	for _, size := range []tea.WindowSizeMsg{{Width: 100, Height: 30}, {Width: 80, Height: 24}, {Width: 40, Height: 12}} {
+		t.Run(fmt.Sprintf("%dx%d", size.Width, size.Height), func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				_, run := startInitialized(size.Width, size.Height)
+				defer run.stop()
+				run.send(commandDone("shrink-first"))
+				run.waitFor(t, "first row printed", func(h, s string) bool { return rowCount(h, s, "shrink-first") == 1 })
+				time.Sleep(time.Second)
+				synctest.Wait()
+				run.send(func(m *model) { m.input.composer.SetValue("S7MARK ") })
+				run.send(tea.PasteMsg{Content: numberedOutput(30)})
+				time.Sleep(time.Second)
+				synctest.Wait()
+				tall := run.dock()
+				run.send(press('c', tea.ModCtrl, ""))
+				time.Sleep(3 * time.Second)
+				synctest.Wait()
+				dock := run.dock()
+				if len(dock) >= len(tall) {
+					t.Fatalf("dock did not shrink: %d rows before, %d after", len(tall), len(dock))
+				}
+				for i, line := range dock {
+					want := strings.TrimRight(ansi.Strip(line), " ")
+					got := strings.TrimRight(run.physicalRow(size.Height-len(dock)+i), " ")
+					if got != want {
+						t.Fatalf("dock row %d reads %q, want %q:\n%s", i, got, want, run.screen())
+					}
+				}
+				assertNoScreenReset(t, run)
+			})
+		})
+	}
+}
+
+func TestDockMovedAtStartupLeavesNoCellOfTheBandMark(t *testing.T) {
+	t.Parallel()
+	for _, top := range []int{4, 5, 6} {
+		t.Run(fmt.Sprintf("cursor starts at row %d", top), func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				const width, height = 40, 12
+				em := vt.NewEmulator(width, height)
+				tmuxMode(em)
+				_, _ = fmt.Fprintf(em, "\x1b[%d;1H", top+1)
+				run := startEmulatedProgram(em, em, nil)
+				defer run.stop()
+				run.send(resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/test", PlatformFamily: "unix"}})
+				time.Sleep(2 * time.Second)
+				synctest.Wait()
+				dock := run.dock()
+				for i, line := range dock {
+					want := strings.TrimRight(ansi.Strip(line), " ")
+					got := strings.TrimRight(run.physicalRow(height-len(dock)+i), " ")
+					if got != want {
+						t.Fatalf("dock row %d reads %q, want %q:\n%s", i, got, want, run.screen())
+					}
+				}
+				assertNoScreenReset(t, run)
+			})
+		})
+	}
+}

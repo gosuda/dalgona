@@ -128,6 +128,7 @@ Every dock row MUST be at most the window width minus one cell.
 
 After a geometry change settles, the client MUST request the terminal cursor position.
 A valid reply MUST place the dock at the physical bottom with relative cursor moves and line erases.
+That placement MUST erase each dock row before it repaints that row.
 The client MUST NOT print blank history rows to place the dock.
 A stale reply or a changed frame MUST NOT move the dock.
 The client MUST request plain cursor-position reports (`ESC[6n`).

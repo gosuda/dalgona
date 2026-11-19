@@ -177,7 +177,8 @@ func relocateDock(content string, position dockPosition, distance int) string {
 		output.WriteString(ansi.EraseEntireLine)
 	}
 	output.WriteString(ansi.CursorDown(1))
-	output.WriteString(strings.ReplaceAll(content, "\n", "\r\n"))
+	output.WriteString(ansi.EraseEntireLine)
+	output.WriteString(strings.ReplaceAll(content, "\n", "\r\n"+ansi.EraseEntireLine))
 	output.WriteByte('\r')
 	if above := position.geometry.rows - 1 - position.row; above > 0 {
 		output.WriteString(ansi.CursorUp(above))
