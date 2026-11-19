@@ -40,7 +40,7 @@ func (e Editor) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Res
 func (e Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Plan, error) {
 	plan, err := e.plan(ctx, call, env)
 	if err != nil {
-		return tool.Plan{}, e.refuse(err)
+		return tool.Plan{}, e.refuse(env, err)
 	}
 	return plan, nil
 }

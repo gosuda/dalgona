@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -327,4 +328,50 @@ func TestInvalidateRefusesEveryOlderReference(t *testing.T) {
 		var none *Store
 		none.Invalidate("f.txt")
 	})
+}
+
+func TestStoreShownReturnsACopyOfTheRanges(t *testing.T) {
+	t.Run("C15/ranges of the reference", requireShownCopy)
+	t.Run("C15/no range shown", requireNothingShown)
+	t.Run("C15/absent references", requireShownAbsent)
+}
+
+func requireShownCopy(t *testing.T) {
+	store := New()
+	ref := store.Put("f.txt", []byte("a\nb\nc\nd\n"), []Range{{Start: 1, End: 1}, {Start: 3, End: 4}})
+	got, err := store.Shown(ref)
+	want := []Range{{Start: 1, End: 1}, {Start: 3, End: 4}}
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("Shown = %v, %v; want %v", got, err, want)
+	}
+	got[0].End = 9
+	if again, _ := store.Shown(ref); !slices.Equal(again, want) {
+		t.Fatalf("a caller write reached the store: %v", again)
+	}
+}
+
+func requireNothingShown(t *testing.T) {
+	store := New()
+	got, err := store.Shown(store.Put("f.txt", []byte("a\n"), nil))
+	if err != nil || len(got) != 0 {
+		t.Fatalf("Shown = %v, %v; want no range", got, err)
+	}
+}
+
+func requireShownAbsent(t *testing.T) {
+	store := New()
+	first := store.Put("f.txt", []byte("body"), nil)
+	for range maxEntries {
+		store.Put("f.txt", []byte("body"), nil)
+	}
+	if _, err := store.Shown(first); !errors.Is(err, ErrExpiredReference) {
+		t.Fatalf("evicted reference error %v", err)
+	}
+	if _, err := store.Shown(New().Put("f.txt", []byte("body"), nil)); !errors.Is(err, ErrUnknownReference) {
+		t.Fatalf("foreign reference error %v", err)
+	}
+	var none *Store
+	if _, err := none.Shown(first); !errors.Is(err, ErrUnknownReference) {
+		t.Fatalf("nil store error %v", err)
+	}
 }

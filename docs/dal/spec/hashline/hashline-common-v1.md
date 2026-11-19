@@ -463,10 +463,11 @@ A pre-plan decline carries none. Recovery and turn end write none for a decline
 or a skipped call. The object MUST stay under 48 KiB.
 
 Recovery respects current read permission and reveals no foreign consumer data.
-Recovery display is not implemented yet. It MAY show at most 40 complete lines and 16 KiB of source text total. Never truncate
-and register a line as observed. An overlong line yields a read instruction only.
-List uncovered ranges in `remaining`. Only the final delivery establishes future
-coverage. No internal fetch, automatic retag, or automatic destructive retry.
+A refusal shows no source rows. `ranges` names at most 40 uncovered lines to
+read, and `remaining` names the other uncovered ranges. `remaining` holds at most
+64 ranges, and its last range runs through the final uncovered line. Only the
+final delivery establishes future coverage. No internal fetch, automatic retag,
+or automatic destructive retry.
 
 | Reason codes | Status | Required next action |
 |---|---|---|

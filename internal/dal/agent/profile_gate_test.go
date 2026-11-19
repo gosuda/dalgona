@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -20,6 +21,7 @@ import (
 var refPlaceholder = regexp.MustCompile(`\{ref:([^}]+)\}`)
 
 const (
+	unknownRead      = `{"kind":"read","path":"a.txt","ranges":[],"mapping":"unknown","remaining":[]}`
 	unknownReference = "r00000000000000000000000000000001.1"
 	threeLines       = "one\ntwo\nthree\n"
 	createCall       = `{"input":"[n.txt#NEW]\nPUT >$:\n+body\n"}`
@@ -168,6 +170,8 @@ type profileCase struct {
 	suffix string
 	file   string
 	want   hashlineWant
+
+	recovery string
 }
 
 func (c profileCase) rounds() []response {
@@ -197,7 +201,7 @@ func (c profileCase) run(t *testing.T) {
 	if got.OK != c.ok || !strings.HasSuffix(got.Output, c.suffix) || (c.output != "" && got.Output != c.output) {
 		t.Fatalf("completion = %+v, want ok=%v output %q ending %q", got, c.ok, c.output, c.suffix)
 	}
-	requireHashline(t, got.Meta, c.want)
+	requireHashlineRecovery(t, got.Meta, c.want, cmp.Or(c.recovery, "null"))
 	if content := h.read("a.txt"); content != c.file {
 		t.Fatalf("file = %q, want %q", content, c.file)
 	}
@@ -223,20 +227,23 @@ func profileCases() []profileCase {
 		},
 		{
 			row: "L-04", name: "conflict", style: "hashline-light", first: whole,
-			edits:  []string{"[a.txt@{ref:a.txt}]\nPUT <3:\n+inside\n", "[a.txt@{ref:a.txt}]\nCUT 2-3\n"},
-			file:   "one\ntwo\ninside\nthree\n",
-			suffix: "target changed. Read again",
-			want:   light("conflict", "none", "target_changed", "stale"),
+			edits:    []string{"[a.txt@{ref:a.txt}]\nPUT <3:\n+inside\n", "[a.txt@{ref:a.txt}]\nCUT 2-3\n"},
+			file:     "one\ntwo\ninside\nthree\n",
+			suffix:   "target changed. Read again",
+			want:     light("conflict", "none", "target_changed", "stale"),
+			recovery: unknownRead,
 		},
 		{
 			row: "E-02", name: "needs_context", style: "hashline-enhanced", first: window,
 			edits: []string{"[a.txt@{ref:a.txt}]\nPUT 3:\n+x\n"}, file: threeLines,
-			suffix: "need prior observation. Read them, then resend",
-			want:   hashlineWant{"hashline-enhanced", "needs_context", "none", "unobserved_range", "proof"},
+			suffix:   "need prior observation. Read them, then resend",
+			want:     hashlineWant{"hashline-enhanced", "needs_context", "none", "unobserved_range", "proof"},
+			recovery: `{"kind":"read","path":"a.txt","ranges":[{"first":3,"last":3}],"mapping":"known","remaining":[]}`,
 		},
 		{
 			row: "C15", name: "reference_unknown", style: "hashline-light", first: whole, edits: []string{unknownEdit},
 			file: threeLines, suffix: oneRefSuffix, want: light("needs_context", "none", "reference_unknown", "proof"),
+			recovery: unknownRead,
 		},
 		{
 			row: "AUTH-01 L-08", name: "user decline", style: "hashline-light", first: whole, edits: []string{editTwo},
@@ -324,7 +331,7 @@ func requirePlanErrorCarriesOutcome(t *testing.T) {
 	h.write("a.txt", threeLines)
 	events := h.runRounds(calls(patchCall("p1", unknownEdit)))
 	got := completedOutputs(events)["p1"]
-	requireHashline(t, got.Meta, hashlineWant{"hashline-light", "needs_context", "none", "reference_unknown", "proof"})
+	requireHashlineRecovery(t, got.Meta, hashlineWant{"hashline-light", "needs_context", "none", "reference_unknown", "proof"}, unknownRead)
 	if resolved := resolutions(events)["p1"]; resolved.Decision != "decline" || resolved.Reason != got.Output {
 		t.Fatalf("approval record = %+v, want the completion text %q", resolved, got.Output)
 	}
@@ -495,7 +502,7 @@ func requireInBandPlanRefusal(t *testing.T) {
 	if got.OK || !strings.HasSuffix(got.Output, oneRefSuffix) {
 		t.Fatalf("completion = %+v, want a plan refusal", got)
 	}
-	requireHashline(t, got.Meta, hashlineWant{"hashline-light", "needs_context", "none", "reference_unknown", "proof"})
+	requireHashlineRecovery(t, got.Meta, hashlineWant{"hashline-light", "needs_context", "none", "reference_unknown", "proof"}, unknownRead)
 }
 
 func requireInBandPrePlanDenial(t *testing.T) {

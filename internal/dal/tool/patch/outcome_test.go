@@ -276,10 +276,23 @@ func requireCase(t *testing.T, item outcomeCase, style Style, err error) {
 		requireOutcomeValue(t, outcomeOf(err), item.want, err)
 	} else {
 		requireWrappedOutcome(t, err, style, item.want)
+		requireRecoveryPath(t, err, item)
 	}
 	text := err.Error()
 	if !strings.HasSuffix(text, item.suffix) || !strings.Contains(text, item.contains) {
 		t.Fatalf("error %q lacks suffix %q or text %q", text, item.suffix, item.contains)
+	}
+}
+
+func requireRecoveryPath(t *testing.T, err error, item outcomeCase) {
+	t.Helper()
+	var failure *tool.OutcomeError
+	if item.apply || !errors.As(err, &failure) {
+		return
+	}
+	status := failure.Outcome.Status
+	if (status == tool.StatusNeedsContext || status == tool.StatusConflict) && failure.Outcome.Recovery == nil {
+		t.Fatalf("%s refusal %q carries no recovery: its site is not wrapped by atPath", status, err)
 	}
 }
 
@@ -359,17 +372,17 @@ func TestOutcomeStatusAndCommitState(t *testing.T) {
 			name: "L-02", styles: lightOnly, input: "[f.txt@{ref}]\nPUT 1:\n+uno\n",
 			steps:  []fixtureStep{overwrite("f.txt", "one\nTWO\nthree\n")},
 			suffix: "is stale: snapshot: stale reference. Read again",
-			want:   refused(tool.StatusNeedsContext, tool.ReasonHistoryGap, tool.ErrClassStale),
+			want:   withRecovery(refused(tool.StatusNeedsContext, tool.ReasonHistoryGap, tool.ErrClassStale), readUnknown("f.txt")),
 		},
 		{
 			name: "L-04", styles: lightOnly, run: insertThenCut,
 			suffix: "is stale: snapshot: target changed. Read again",
-			want:   refused(tool.StatusConflict, tool.ReasonTargetChanged, tool.ErrClassStale),
+			want:   withRecovery(refused(tool.StatusConflict, tool.ReasonTargetChanged, tool.ErrClassStale), readUnknown("f.txt")),
 		},
 		{
 			name: "E-09", styles: enhancedOnly, run: appendTwice,
 			suffix: "is stale: snapshot: gap changed. Read again",
-			want:   refused(tool.StatusConflict, tool.ReasonGapChanged, tool.ErrClassStale),
+			want:   withRecovery(refused(tool.StatusConflict, tool.ReasonGapChanged, tool.ErrClassStale), readUnknown("f.txt")),
 		},
 		{
 			name: "BATCH-02", input: "[f.txt@{ref}]\nPUT 1:\n+x\n[f.txt@{ref2}]\nPUT 3:\n+y\n",
@@ -627,25 +640,30 @@ func proofCases() []outcomeCase {
 	partial := seedFile("f.txt", outcomeSource, snapshot.Range{Start: 1, End: 1})
 	unterminated := seedFile("f.txt", "one\ntwo\nthree", snapshot.Range{Start: 1, End: 2})
 	unobserved := refused(tool.StatusNeedsContext, tool.ReasonUnobservedRange, tool.ErrClassProof)
+	unknownReference := refused(tool.StatusNeedsContext, tool.ReasonReferenceUnknown, tool.ErrClassProof)
+	expiredReference := refused(tool.StatusNeedsContext, tool.ReasonReferenceExpired, tool.ErrClassProof)
+	removedPath := refused(tool.StatusConflict, tool.ReasonPathChanged, tool.ErrClassStale)
 	needsRead := "need prior observation. Read them, then resend"
 	return []outcomeCase{
 		{name: "C15/binding mismatch", input: "[f.txt@{ref}]\nPUT 1:\n+x\n", steps: []fixtureStep{bindElsewhere}, contains: "snapshot: reference binding mismatch", want: rejected(tool.ReasonBindingMismatch, tool.ErrClassProof)},
-		{name: "C15/unknown reference", input: "[f.txt@{foreign}]\nPUT 1:\n+x\n", contains: "snapshot: unknown reference", want: refused(tool.StatusNeedsContext, tool.ReasonReferenceUnknown, tool.ErrClassProof)},
-		{name: "C15/expired reference", input: "[f.txt@{ref}]\nPUT 1:\n+x\n", steps: []fixtureStep{expireReferences}, contains: "snapshot: expired reference", want: refused(tool.StatusNeedsContext, tool.ReasonReferenceExpired, tool.ErrClassProof)},
-		{name: "C15/unobserved range", styles: enhancedOnly, input: "[f.txt@{ref}]\nPUT 2:\n+x\n", steps: []fixtureStep{partial}, suffix: needsRead, want: unobserved},
-		{name: "C15/unobserved final row", styles: enhancedOnly, input: "[f.txt@{ref}]\nPUT >3:\n+x\n", steps: []fixtureStep{unterminated}, suffix: needsRead, want: unobserved},
-		{name: "C15/removed path", input: "[f.txt@{ref}]\nPUT 1:\n+x\n", steps: []fixtureStep{forgetPath}, suffix: "is stale: snapshot: path changed. Read again", want: refused(tool.StatusConflict, tool.ReasonPathChanged, tool.ErrClassStale)},
+		{name: "C15/unknown reference", input: "[f.txt@{foreign}]\nPUT 1:\n+x\n", contains: "snapshot: unknown reference", want: withRecovery(unknownReference, readUnknown("f.txt"))},
+		{name: "C15/REM with an unknown reference", input: "[f.txt@{foreign}]\nREM\n", contains: "snapshot: unknown reference", want: withRecovery(unknownReference, readUnknown("f.txt"))},
+		{name: "C15/MV with an unknown reference", input: "[f.txt@{foreign}]\nMV g.txt\n", contains: "snapshot: unknown reference", want: withRecovery(unknownReference, readUnknown("f.txt"))},
+		{name: "C15/expired reference", input: "[f.txt@{ref}]\nPUT 1:\n+x\n", steps: []fixtureStep{expireReferences}, contains: "snapshot: expired reference", want: withRecovery(expiredReference, readUnknown("f.txt"))},
+		{name: "C15/unobserved range", styles: enhancedOnly, input: "[f.txt@{ref}]\nPUT 2:\n+x\n", steps: []fixtureStep{partial}, suffix: needsRead, want: withRecovery(unobserved, knownRead("f.txt", lineRanges(2, 2), nil))},
+		{name: "C15/unobserved final row", styles: enhancedOnly, input: "[f.txt@{ref}]\nPUT >3:\n+x\n", steps: []fixtureStep{unterminated}, suffix: needsRead, want: withRecovery(unobserved, knownRead("f.txt", lineRanges(3, 3), nil))},
+		{name: "C15/removed path", input: "[f.txt@{ref}]\nPUT 1:\n+x\n", steps: []fixtureStep{forgetPath}, suffix: "is stale: snapshot: path changed. Read again", want: withRecovery(removedPath, readUnknown("f.txt"))},
 	}
 }
 
 func conflictCases() []outcomeCase {
 	pathChanged := refused(tool.StatusConflict, tool.ReasonPathChanged, tool.ErrClassStale)
-	targetChanged := refused(tool.StatusConflict, tool.ReasonTargetChanged, tool.ErrClassStale)
+	targetChanged := withRecovery(refused(tool.StatusConflict, tool.ReasonTargetChanged, tool.ErrClassStale), readUnknown("f.txt"))
 	drift := overwrite("f.txt", "one\nTWO\nthree\n")
 	return []outcomeCase{
-		editCase("C15/new file over an existing one", "[h.txt#NEW]\nPUT >$:\n+x\n", pathChanged),
-		editCase("C15/rename onto an existing file", "[f.txt@{ref}]\nMV h.txt\n", pathChanged),
-		{name: "C15/target removed after the read", input: "[f.txt@{ref}]\nPUT 1:\n+x\n", steps: []fixtureStep{deleteFile("f.txt")}, contains: "patch: f.txt could not be read", want: pathChanged},
+		editCase("C15/new file over an existing one", "[h.txt#NEW]\nPUT >$:\n+x\n", withRecovery(pathChanged, readUnknown("h.txt"))),
+		editCase("C15/rename onto an existing file", "[f.txt@{ref}]\nMV h.txt\n", withRecovery(pathChanged, readUnknown("h.txt"))),
+		{name: "C15/target removed after the read", input: "[f.txt@{ref}]\nPUT 1:\n+x\n", steps: []fixtureStep{deleteFile("f.txt")}, contains: "patch: f.txt could not be read", want: withRecovery(pathChanged, readUnknown("f.txt"))},
 		{name: "C15/REM after the file changed", input: "[f.txt@{ref}]\nREM\n", steps: []fixtureStep{drift}, suffix: "is expired or the file changed. Read again", want: targetChanged},
 		{name: "C15/MV after the file changed", input: "[f.txt@{ref}]\nMV g.txt\n", steps: []fixtureStep{drift}, suffix: "is expired or the file changed. Read again", want: targetChanged},
 	}
