@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, within } from "@testing-library/svelte";
 import { afterEach, describe, expect, type Mock, test, vi } from "vitest";
 import ApprovalCard from "#lib/components/ApprovalCard.svelte";
+import { appliedRule } from "#lib/css-rule.ts";
 import type { ApprovalRequest, FileChange } from "#lib/types.ts";
 
 afterEach(cleanup);
@@ -63,20 +64,6 @@ function mockScrolling(details: HTMLElement) {
 		Object.defineProperty(details, name, { value, configurable: true });
 	}
 	return { scrollBy, scrollTo };
-}
-
-function appliedRule(selector: string): CSSStyleRule {
-	for (const sheet of Array.from(document.styleSheets)) {
-		for (const rule of Array.from(sheet.cssRules)) {
-			if (
-				rule instanceof CSSStyleRule &&
-				rule.selectorText.startsWith(selector)
-			) {
-				return rule;
-			}
-		}
-	}
-	throw new Error(`no applied rule for ${selector}`);
 }
 
 function lastTop(scroll: Mock): number {

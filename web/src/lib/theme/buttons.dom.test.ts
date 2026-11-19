@@ -1,25 +1,6 @@
 import "../../app.css";
 import { describe, expect, test } from "vitest";
-
-function styleRules(list: CSSRuleList): CSSStyleRule[] {
-	return Array.from(list).flatMap((rule) => {
-		if (rule instanceof CSSStyleRule) return [rule];
-		if ("cssRules" in rule) {
-			return styleRules((rule as CSSGroupingRule).cssRules);
-		}
-		return [];
-	});
-}
-
-function appliedRule(selector: string): CSSStyleRule {
-	for (const sheet of Array.from(document.styleSheets)) {
-		const rule = styleRules(sheet.cssRules).find(
-			(candidate) => candidate.selectorText === selector,
-		);
-		if (rule) return rule;
-	}
-	throw new Error(`no applied rule for ${selector}`);
-}
+import { appliedRule, ruleSelectors } from "#lib/css-rule.ts";
 
 describe("button hover", () => {
 	test("hover uses the mapped border and tone, and leaves the point fill alone", () => {
@@ -50,9 +31,7 @@ describe("quiet button", () => {
 	});
 
 	test("danger comes after quiet, so Interrupt keeps its failed edge and label", () => {
-		const selectors = Array.from(document.styleSheets).flatMap((sheet) =>
-			styleRules(sheet.cssRules).map((rule) => rule.selectorText),
-		);
+		const selectors = ruleSelectors();
 		const quiet = selectors.indexOf("button.quiet");
 		expect(quiet).toBeGreaterThanOrEqual(0);
 		expect(selectors.indexOf("button.danger")).toBeGreaterThan(quiet);

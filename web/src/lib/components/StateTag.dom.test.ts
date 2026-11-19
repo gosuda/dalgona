@@ -2,6 +2,7 @@ import { cleanup, render } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import StateTag from "#lib/components/StateTag.svelte";
+import { appliedRule } from "#lib/css-rule.ts";
 
 class MotionPreference extends EventTarget {
 	readonly media = "(prefers-reduced-motion: reduce)";
@@ -22,27 +23,6 @@ function stubMotion(reduced: boolean): MotionPreference {
 	const preference = new MotionPreference(reduced);
 	vi.stubGlobal("matchMedia", () => preference);
 	return preference;
-}
-
-function styleRules(list: CSSRuleList): CSSStyleRule[] {
-	return Array.from(list).flatMap((rule) => {
-		if (rule instanceof CSSStyleRule) return [rule];
-		if ("cssRules" in rule) {
-			return styleRules((rule as CSSGroupingRule).cssRules);
-		}
-		return [];
-	});
-}
-
-function appliedRule(selector: string): CSSStyleRule {
-	for (const sheet of Array.from(document.styleSheets)) {
-		const rule = styleRules(sheet.cssRules).find(
-			(candidate) =>
-				candidate.selectorText.replace(/\.svelte-\w+/g, "") === selector,
-		);
-		if (rule) return rule;
-	}
-	throw new Error(`no applied rule for ${selector}`);
 }
 
 function declared(selector: string, property: string): string {

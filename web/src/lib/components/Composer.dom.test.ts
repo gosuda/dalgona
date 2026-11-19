@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import Composer from "#lib/components/Composer.svelte";
+import { appliedRule } from "#lib/css-rule.ts";
 import type { FileMatch } from "#lib/types.ts";
 
 function baseProps() {
@@ -18,20 +19,6 @@ function baseProps() {
 		onFollowup: vi.fn(),
 		onInterrupt: vi.fn(),
 	};
-}
-
-function appliedRule(selector: string): CSSStyleRule {
-	for (const sheet of Array.from(document.styleSheets)) {
-		for (const rule of Array.from(sheet.cssRules)) {
-			if (
-				rule instanceof CSSStyleRule &&
-				rule.selectorText.startsWith(selector)
-			) {
-				return rule;
-			}
-		}
-	}
-	throw new Error(`no applied rule for ${selector}`);
 }
 
 describe("composer focus", () => {

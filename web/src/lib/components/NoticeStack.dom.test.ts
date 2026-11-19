@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
 import Transcript from "#lib/components/Transcript.svelte";
+import { appliedRule } from "#lib/css-rule.ts";
 import type {
 	Notice,
 	NoticeTone,
@@ -15,20 +16,6 @@ const none: WaitingElsewhere = { count: 0, threadId: null };
 function notice(id: number, tone: NoticeTone, text: string): Notice {
 	return { id, tone, text, actions: [] };
 }
-function appliedRule(selector: string): CSSStyleRule {
-	for (const sheet of Array.from(document.styleSheets)) {
-		for (const rule of Array.from(sheet.cssRules)) {
-			if (
-				rule instanceof CSSStyleRule &&
-				rule.selectorText.includes(selector)
-			) {
-				return rule;
-			}
-		}
-	}
-	throw new Error(`no applied rule for ${selector}`);
-}
-
 describe("notice regions", () => {
 	afterEach(() => {
 		cleanup();
