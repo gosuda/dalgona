@@ -241,7 +241,7 @@ func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool
 }
 
 func (m *model) sendPrompt(text string, images []chip, draft editor) tea.Cmd {
-	prompt := followup{text: text, verbatim: sentUnchanged(draft, text)}
+	prompt := followup{text: text, verbatim: draft.sendsPastedSlash(text)}
 	m.input.history.record(text, "", prompt.verbatim, false)
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: promptInput(text, images), Model: m.thread.modelName}
@@ -250,7 +250,7 @@ func (m *model) sendPrompt(text string, images []chip, draft editor) tea.Cmd {
 }
 
 func (m *model) sendSteer(text string, images []chip, draft editor) tea.Cmd {
-	prompt := followup{text: text, verbatim: sentUnchanged(draft, text)}
+	prompt := followup{text: text, verbatim: draft.sendsPastedSlash(text)}
 	m.input.history.record(text, m.thread.turnID, prompt.verbatim, false)
 	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: promptInput(text, images)}
 	return m.callPrompt("steer", "turn/steer", params, new(rpc.TurnSteerResponse), prompt)
@@ -281,7 +281,7 @@ func (m *model) queueFollowup() tea.Cmd {
 		m.noticef("follow-up queue is full (%d); wait for the active turn or press Esc", maxFollowups)
 		return nil
 	}
-	m.queue = append(m.queue, followup{text: text, verbatim: sentUnchanged(composer, text)})
+	m.queue = append(m.queue, followup{text: text, verbatim: m.input.composer.sendsPastedSlash(text)})
 	m.syncQueue()
 	m.input.composer.SetValue("")
 	m.noticef("queued follow-up %d of %d", len(m.queue), maxFollowups)
@@ -947,8 +947,4 @@ func longestBacktickRun(text string) int {
 		longest = max(longest, run)
 	}
 	return longest
-}
-
-func sentUnchanged(draft editor, text string) bool {
-	return !draft.readsSlash() && strings.HasPrefix(text, "/")
 }

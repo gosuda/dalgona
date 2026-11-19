@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -209,5 +211,58 @@ func TestSteeredChipDraftRecalledIsSentAsPastedTextNotCommand(t *testing.T) {
 				requireLastPrompt(t, caller.calls, 2, "turn/steer", paste.text)
 			})
 		}
+	}
+}
+
+func attachedImageModel(t *testing.T, client caller) model {
+	t.Helper()
+	m := newModel(client, Options{}, nil)
+	m.thread.id = "t1"
+	m.thread.modelName = "gpt-test"
+	m.thread.inputModalities = map[string][]string{"gpt-test": {"text", "image"}}
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	small := base64.StdEncoding.EncodeToString(pngBytes(t, 1, 1))
+	m, _ = drive(t, m, imageMsg{mime: "image/png", data: small, width: 1, height: 1})
+	if len(m.input.composer.images()) != 1 {
+		t.Fatalf("composer holds %d image chips, want 1", len(m.input.composer.images()))
+	}
+	return m
+}
+
+func TestRefusedImageOnlyDraftKeepsTheCommandTypedMeanwhile(t *testing.T) {
+	t.Parallel()
+	for _, send := range refusedSends {
+		t.Run(send.name, func(t *testing.T) {
+			t.Parallel()
+			caller := &refusingCaller{method: send.method}
+			m := attachedImageModel(t, caller)
+			m.thread.state = send.state
+			m.thread.turnID = "turn-1"
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = typeText(t, m, "/new now")
+			m = runCommand(t, m, command, "Enter did not send the image draft")
+			m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+			ranCommand := m.confirm != nil && m.confirm.kind == confirmNew || strings.Contains(m.notice, "/new is unavailable while a turn is")
+			if !ranCommand || len(caller.calls) != 1 {
+				t.Fatalf("confirm = %#v and notice %q after %d requests, want the typed /new to run and no second request", m.confirm, m.notice, len(caller.calls))
+			}
+		})
+	}
+}
+
+func TestRecalledDraftDropsItsMarkWhenAnImageIsAttachedAndRemoved(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := attachedImageModel(t, caller)
+	m.input.composer.recall(slashPastes[1].text, true)
+	small := base64.StdEncoding.EncodeToString(pngBytes(t, 1, 1))
+	m, _ = drive(t, m, imageMsg{mime: "image/png", data: small, width: 1, height: 1})
+	m, _ = drive(t, m, press(tea.KeyBackspace, 0, ""))
+	if got := m.input.composer.Value(); got != slashPastes[1].text || m.input.composer.verbatim() {
+		t.Fatalf("composer holds %q verbatim %v, want the text back as typed text", got, m.input.composer.verbatim())
+	}
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	if m.confirm == nil || m.confirm.kind != confirmNew || len(caller.calls) != 0 {
+		t.Fatalf("confirm = %#v after %d requests, want the new-thread confirmation of the typed /new", m.confirm, len(caller.calls))
 	}
 }

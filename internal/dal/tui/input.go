@@ -194,6 +194,10 @@ func (c editor) readsSlash() bool {
 	return !c.verbatim() && strings.HasPrefix(strings.TrimSpace(c.Value()), "/")
 }
 
+func (c editor) sendsPastedSlash(text string) bool {
+	return !c.readsSlash() && strings.HasPrefix(text, "/")
+}
+
 func (c *editor) SetWidth(width int) {
 	c.width = width
 }
