@@ -36,8 +36,26 @@
 					["end", last],
 				]
 			: [["start", 0]];
+		const resting = !document.querySelector(".dock.deciding");
+		const reserve =
+			6 *
+			Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+		const above = window.innerHeight - dock.getBoundingClientRect().height;
+		if (narrow && resting && above < reserve - 1)
+			failures.push(
+				`dock: ${Math.round(dock.getBoundingClientRect().height)}px of a ${window.innerHeight}px viewport leaves ${Math.round(above)}px above it (want at least ${reserve}px)`,
+			);
+		if (
+			narrow &&
+			dock.scrollHeight > dock.clientHeight + 1 &&
+			!["auto", "scroll"].includes(getComputedStyle(dock).overflowY)
+		)
+			failures.push(
+				`dock: scrollHeight ${dock.scrollHeight} over clientHeight ${dock.clientHeight} but not a scroll region`,
+			);
 		for (const [place, y] of places) {
 			window.scrollTo(0, y);
+			dock.scrollTop = dock.scrollHeight;
 			await frame();
 			const where = `at the ${place} of the document, scroll ${Math.round(window.scrollY)}`;
 			const sendBox = send.getBoundingClientRect();
@@ -72,6 +90,7 @@
 					`dock: covers the last transcript row by ${Math.round(covered)}px ${where}`,
 				);
 		}
+		dock.scrollTop = 0;
 		window.scrollTo(0, 0);
 		await frame();
 	}
