@@ -224,7 +224,7 @@ func stateWord(state string, lastTurn time.Duration) string {
 func (m *model) liveRow() string {
 	width := terminalWidth(m.screen.width)
 	if m.hint.text != "" {
-		return m.liveTag() + m.liveElapsed() + m.screen.fit(m.liveText(), max(0, width-liveTagCells-elapsedCells))
+		return m.screen.fit(m.liveTag()+m.liveElapsed()+m.screen.fit(m.liveText(), max(0, width-liveTagCells-elapsedCells)), width)
 	}
 	var row strings.Builder
 	fields := m.liveFields(width)

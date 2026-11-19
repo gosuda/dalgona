@@ -257,13 +257,24 @@ func TestStatusRowTinyFreeTextKeepsFixedFields(t *testing.T) {
 
 func TestStatusRowBelowFortyColumns(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
-	m := liveModel(t, &now)
-	m.screen.width = 30
-	m.live.items = []liveItem{{ID: "a1", Type: "agentMessage", Text: strings.Repeat("tail ", 20)}}
-	for _, line := range m.dockLines() {
-		if got := cellCount(m, line); got > 29 {
-			t.Fatalf("dock line is %d cells at 30 columns: %q", got, line)
+	hints := []string{"", "Esc again to interrupt", "Ctrl+C again to exit"}
+	for _, width := range []int{10, 17, 18, 30, 39} {
+		for _, hint := range hints {
+			t.Run(fmt.Sprintf("%dcols/%q", width, hint), func(t *testing.T) {
+				t.Parallel()
+				now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+				m := liveModel(t, &now)
+				m.screen.width = width
+				m.live.items = []liveItem{{ID: "a1", Type: "agentMessage", Text: strings.Repeat("tail ", 20)}}
+				if hint != "" {
+					m.setHint(hint, "interrupt")
+				}
+				now = now.Add(5 * time.Second)
+				assertFrame(t, m.dockLines(), width, m.screen.height)
+				if got := cellCount(m, m.liveRow()); got > width-1 {
+					t.Fatalf("live row is %d cells at %d columns: %q", got, width, m.liveRow())
+				}
+			})
 		}
 	}
 }
