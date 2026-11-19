@@ -144,12 +144,13 @@ func inputLabel(mode inputMode) string {
 }
 
 type editor struct {
-	text        []rune
-	cursor      int
-	width       int
-	focused     bool
-	placeholder string
-	chips       []chip
+	text         []rune
+	cursor       int
+	width        int
+	focused      bool
+	placeholder  string
+	chips        []chip
+	verbatimText string
 }
 
 func newEditor() editor {
@@ -169,6 +170,28 @@ func (c *editor) SetValue(value string) {
 	c.text = []rune(value)
 	c.cursor = len(c.text)
 	c.chips = nil
+	c.verbatimText = ""
+}
+
+func (c *editor) recall(text string, verbatim bool) {
+	c.SetValue(text)
+	if verbatim {
+		c.verbatimText = c.Value()
+	}
+}
+
+func (c editor) verbatim() bool {
+	return c.verbatimText != "" && c.Value() == c.verbatimText
+}
+
+func (c *editor) settleVerbatim() {
+	if !c.verbatim() {
+		c.verbatimText = ""
+	}
+}
+
+func (c editor) readsSlash() bool {
+	return !c.verbatim() && strings.HasPrefix(strings.TrimSpace(c.Value()), "/")
 }
 
 func (c *editor) SetWidth(width int) {
@@ -299,6 +322,7 @@ func (c *editor) continueLine() bool {
 }
 
 func (c editor) Update(s *screenState, msg tea.Msg) (editor, tea.Cmd) {
+	c.settleVerbatim()
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
 		c.paste(msg.Content)
@@ -306,6 +330,7 @@ func (c editor) Update(s *screenState, msg tea.Msg) (editor, tea.Cmd) {
 		c.updateKey(s, msg)
 	}
 	c.prune()
+	c.settleVerbatim()
 	return c, nil
 }
 

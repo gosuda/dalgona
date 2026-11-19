@@ -303,7 +303,7 @@ func (m *model) exitKey() tea.Cmd {
 		return nil
 	}
 	if draft := m.input.composer.Value(); strings.TrimSpace(draft) != "" {
-		m.input.history.add(m.input.composer.Expanded(), "")
+		m.input.history.addFrom(m.input.composer, m.input.composer.Expanded(), "")
 		m.input.composer.SetValue("")
 		return m.setHint("Draft saved to history · Ctrl+C again to exit", "exit")
 	}
