@@ -146,21 +146,65 @@ func TestPaletteCompletionKeepsChips(t *testing.T) {
 	}
 }
 
+func chipAfterToken(t *testing.T, pasted, after string) model {
+	t.Helper()
+	m := paletteModel(t)
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+	m = typeKeys(t, m, after)
+	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyHome})
+	return typeKeys(t, m, "/new")
+}
+
+func requireCompletedBesideChip(t *testing.T, key tea.KeyPressMsg, pasted, after string) {
+	t.Helper()
+	m := chipAfterToken(t, pasted, after)
+	if m.input.popup == nil || len(m.input.popup.items) == 0 || m.input.popup.selected() != "new" {
+		t.Fatalf("popup before %s does not list /new: %+v", key.String(), m.input.popup)
+	}
+	m, _ = drive(t, m, key)
+	if got, want := m.input.composer.Expanded(), "/new "+pasted+after; got != want {
+		t.Fatalf("%s gave %q, want %q", key.String(), got, want)
+	}
+	if got := len(m.input.composer.chips); got != 1 {
+		t.Fatalf("%s left %d chips, want 1", key.String(), got)
+	}
+	if got, want := m.input.composer.cursor, len("/new "); got != want {
+		t.Fatalf("%s left the caret at %d, want %d", key.String(), got, want)
+	}
+	if m.input.popup != nil {
+		t.Fatalf("%s left the palette open", key.String())
+	}
+	if got := len(m.input.history.entries); got != 0 {
+		t.Fatalf("%s sent a prompt: history holds %d entries", key.String(), got)
+	}
+}
+
 func TestPaletteKeepsChipTouchingTheToken(t *testing.T) {
 	t.Parallel()
 	pasted := pasteLines(12)
 	for _, key := range []tea.KeyPressMsg{{Code: tea.KeyTab}, {Code: tea.KeyEnter}} {
-		m := paletteModel(t)
-		m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
-		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyHome})
-		m = typeKeys(t, m, "/new")
-		m, _ = drive(t, m, key)
-		if got, want := m.input.composer.Expanded(), "/new"+pasted; got != want {
-			t.Fatalf("%s gave %q, want %q", key.String(), got, want)
+		for _, after := range []string{"", " tail"} {
+			t.Run(key.String()+after, func(t *testing.T) {
+				t.Parallel()
+				requireCompletedBesideChip(t, key, pasted, after)
+			})
 		}
-		if got := len(m.input.composer.chips); got != 1 {
-			t.Fatalf("%s left %d chips, want 1", key.String(), got)
-		}
+	}
+}
+
+func TestPaletteTokenEndsAtChip(t *testing.T) {
+	t.Parallel()
+	pasted := pasteLines(12)
+	m := typeKeys(t, paletteModel(t), "/new")
+	if m.input.popup == nil {
+		t.Fatal("typing /new did not open the palette")
+	}
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+	if m.input.popup != nil {
+		t.Fatalf("the palette stays open with the caret past the chip: %+v", m.input.popup)
+	}
+	if got, want := m.input.composer.Expanded(), "/new"+pasted; got != want {
+		t.Fatalf("paste gave %q, want %q", got, want)
 	}
 }
 

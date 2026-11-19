@@ -323,7 +323,7 @@ Sending MUST send each image chip as an image input item after the text.
 
 The composer MUST show a command palette when the caret is in a first token that starts with `/`, with no panel or review open.
 The palette MUST list at most 8 matching commands and MUST NOT open for `//`.
-Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token. It MUST keep each chip of the draft.
+Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token. It MUST keep each chip of the draft. The palette MUST end the first token at a chip.
 Enter MUST run a highlighted command only when the draft is only its first token and the command takes no argument. Otherwise, Enter MUST complete the command and keep the rest of the draft.
 Esc MUST close the palette and keep the draft. Typing a character MUST reopen it.
 
