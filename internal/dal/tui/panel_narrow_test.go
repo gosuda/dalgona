@@ -121,7 +121,7 @@ func TestPanelRowsFitNarrowWindows(t *testing.T) {
 	for _, opener := range narrowPanelOpeners() {
 		t.Run(opener.name, func(t *testing.T) {
 			t.Parallel()
-			for _, height := range []int{24, 8, 6, 5} {
+			for _, height := range []int{24, 8, 7, 6, 5, 4} {
 				for width := 1; width <= 5; width++ {
 					t.Run(fmt.Sprintf("%dx%d resized after opening", width, height), func(t *testing.T) {
 						m := opener.open(t, narrowPanelModel(t, 80, 24))

@@ -124,7 +124,7 @@ The dock MUST keep its height. Only a key press, a paste, the opening or closing
 
 The dock MUST have at most the window height minus one rows. The client MUST show no dock row in a window of fewer than two rows.
 
-The composer MUST show at most six rows, or one row while a panel is open. A panel MUST have a fixed height for its kind, capped at the window height minus four rows.
+The composer MUST show at most six rows, or one row while a panel is open. A panel MUST have a fixed height for its kind, capped at the window height minus four rows, except the approval panel. From window height 4, the approval panel MUST have at least three rows, or the window height minus two rows when that is fewer.
 
 When the dock is too tall, the client MUST drop the status band first, then the live row. The input line MUST NOT drop.
 
@@ -408,6 +408,8 @@ The body holds at most six rows and scrolls with `up` and `down`. It shows:
 - For a file change, one line `<label> <path> +<added> −<deleted>` for each file, then its diff from the first hunk on. The diff comes from `item/fileChange/patchUpdated` for the same item. A change with `diffOmitted` shows `diff omitted, larger than 1 MiB` instead of its diff.
 
 The two action rows are `[y] accept  [a] accept for session` and `[n] decline  [esc] cancel and interrupt`. `[y] accept` carries the one fill of the view, in the thread hue. Before the terminal reports its background, the fill MUST use the night theme, or the soft night theme for `auto-soft`. With colour off, `[y] accept` MUST be bold reverse video with no colour.
+
+A card with too few rows MUST drop body rows first, then the `[y] accept` row. The `[n] decline` row MUST be the last action row to drop. A window of four rows shows the title and the `[n] decline` row. A window of five or more rows MUST show both action rows.
 
 Ctrl+O opens the full review of the card, with the same lines and the full diff.
 
