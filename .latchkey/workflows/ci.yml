@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+latchkey:
+  schema: 1
+
+jobs:
+  ci:
+    runs-on: small
+    timeout-minutes: 60
+    steps:
+      - name: Install dependencies
+        run: |
+          npm install -g pnpm@12.21.0
+          pnpm -C web install --frozen-lockfile
+          pnpm -C web build
+          touch internal/dalgona/webui/dist/.gitkeep
+          go mod download
+      - name: Lint (golangci-lint fmt)
+        run: go tool golangci-lint fmt --diff
+      - name: Lint (go vet)
+        run: go vet ./...
+      - name: Lint (golangci-lint)
+        run: go tool golangci-lint run ./...
+      - name: Lint (web)
+        run: |
+          pnpm -C web exec biome ci
+          pnpm -C web exec svelte-check
+      - name: Test (go)
+        run: go test -race -count=1 ./...
+      - name: Test (web)
+        run: pnpm -C web exec vitest run
