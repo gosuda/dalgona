@@ -160,6 +160,7 @@ A reply that opens a list panel MUST be dropped when another panel or the review
 The input line MUST show the filter while a list panel is open.
 The input line MUST show the first line of the draft while another panel is open, with the caret at its end.
 A confirm panel MUST show its title, its body, and its action row. It MUST NOT send a request before Enter.
+A panel body that does not fit MUST end with the row `↓ <n> more lines · ctrl+o full view · ↑↓ scroll`, where `<n>` counts the body rows below the window. A panel with one body row MUST show that row and no such row.
 The review target input MUST show `branch:`, `commit:`, or `instructions:` as its label, and MUST hide the filter while it waits for text.
 
 The input line MUST show the mode of the top panel, as the table below gives.
@@ -209,8 +210,8 @@ A provider that signs in from a shell MUST show the command to run there, and MU
 The API key field MUST show one `*` for each rune. The key MUST NOT appear in a row, notice, history, or review.
 Enter on the API key field MUST send `account/login/start` with `type` `apiKey`. The panel MUST close when the provider accepts the key.
 A refused key MUST keep the field open with the error in the panel. Esc on the field MUST clear it and return to the methods.
-An approval request MUST NOT clear the API key field.
-A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. A device sign-in MUST show the user code in the first body row. The hint row MUST read `Esc cancel the sign-in · waiting for the provider`.
+An approval request MUST NOT clear the API key field. A question with option rows MUST NOT clear it. A free-text question MUST take the input line from the API key field. Closing that question MUST leave the field empty.
+A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. Up and Down MUST scroll the body by one row while the link does not fit. A window with no body row MUST show the link in the review that `ctrl+o` opens. A device sign-in MUST show the user code in the first body row. While the sign-in waits, the hint row MUST read `Esc cancel the sign-in · waiting for the provider`, cut to the row width.
 The client MUST print one history row `Sign-in URL: <url>` for each sign-in. The notice line MUST NOT repeat the link while the panel is open. A sign-in MUST wait for `account/login/completed`.
 Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in…`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
 A paste into the API key field MUST keep its first line and MUST NOT make a chip.

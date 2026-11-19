@@ -46,6 +46,7 @@ type loginPanel struct {
 	loginID   string
 	url       string
 	code      string
+	scroll    int
 	cancelled bool
 }
 
@@ -179,15 +180,14 @@ func (m *model) loginURLRows(url string) []string {
 
 func (m *model) loginWaitingView() panelView {
 	panel := m.login
-	view := panelView{kind: "login", layout: panelLogin, title: "Log in to " + sanitizeText(panel.provider.ID), cursor: -1}
+	view := panelView{kind: "login", layout: panelLogin, title: "Log in to " + sanitizeText(panel.provider.ID), cursor: -1, scroll: panel.scroll}
 	hint := loginWaitingHint
 	if panel.cancelled {
 		hint = loginCancelHint
 	}
-	switch panel.url {
-	case "":
+	if panel.url == "" {
 		view.body = []string{"Starting sign-in…"}
-	default:
+	} else {
 		if panel.code != "" {
 			view.body = []string{"Enter code " + panel.code + " at"}
 		}
@@ -206,9 +206,17 @@ func (m *model) loginKey(msg tea.KeyPressMsg) tea.Cmd {
 	case loginAPIKey:
 		return m.apiKeyKey(msg)
 	case loginWaiting:
-		if msg.String() == "esc" {
-			return m.cancelLogin()
-		}
+		return m.waitingKey(msg.String())
+	}
+	return nil
+}
+
+func (m *model) waitingKey(key string) tea.Cmd {
+	if key == "esc" {
+		return m.cancelLogin()
+	}
+	if step := panelScrollStep(key); step != 0 {
+		m.login.scroll = m.screen.scrolled(m.loginWaitingView(), step)
 	}
 	return nil
 }
@@ -293,7 +301,7 @@ func (m *model) startLogin(method loginMethod) tea.Cmd {
 		return nil
 	}
 	panel.phase = loginWaiting
-	panel.loginID, panel.url, panel.code = "", "", ""
+	panel.loginID, panel.url, panel.code, panel.scroll = "", "", "", 0
 	params := rpc.AccountLoginStartParams{Type: method.kind, Provider: panel.provider.ID}
 	return m.call("login", "account/login/start", params, new(rpc.LoginAccountResponse), "")
 }
@@ -441,7 +449,7 @@ func (m *model) loginRetry(text string) {
 	}
 	m.login.phase = loginMethods
 	m.login.err = sanitizeText(text)
-	m.login.loginID, m.login.url, m.login.code = "", "", ""
+	m.login.loginID, m.login.url, m.login.code, m.login.scroll = "", "", "", 0
 	m.login.cursor = 0
 }
 

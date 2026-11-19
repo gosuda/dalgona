@@ -208,7 +208,7 @@ func TestApprovalScrollClampsAtEnd(t *testing.T) {
 			}
 			m = pressTimes(t, m, tea.KeyUp, 1)
 			rows = approvalBodyRows(m)
-			if len(rows) != tc.bodyRows || rows[0] != tc.afterUp || !strings.HasPrefix(rows[len(rows)-1], "↓ 2 more lines") {
+			if len(rows) != tc.bodyRows || rows[0] != tc.afterUp || rows[len(rows)-1] != "↓ 2 more lines · ctrl+o full view · ↑↓ scroll" {
 				t.Fatalf("after one up the body rows are %q, want %d rows from %s ending with the 2 more lines row", rows, tc.bodyRows, tc.afterUp)
 			}
 			m = pressTimes(t, m, tea.KeyDown, 1)

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -100,9 +102,6 @@ func TestLoginURLShownWhole(t *testing.T) {
 	if got := joinedPanelRows(t, rows); got != url {
 		t.Fatalf("panel body rows joined = %q\nwant the sign-in URL %q", got, url)
 	}
-	if want := (len(url) + 53) / 54; len(rows) != want {
-		t.Fatalf("panel holds %d body rows, want %d rows of 54 cells", len(rows), want)
-	}
 	assertOneURLEntry(t, m, url)
 	if strings.Contains(m.notice, url) {
 		t.Fatalf("notice %q repeats the URL the panel shows", m.notice)
@@ -148,5 +147,112 @@ func TestLoginURLReissuedForANewSignInIsCommittedAgain(t *testing.T) {
 	m, _ = drive(t, m, resultMsg{op: "login", value: &rpc.LoginAccountResponse{Type: "chatgpt", LoginID: "login-2", AuthURL: second}})
 	if len(urlEntries(m, first)) != 1 || len(urlEntries(m, second)) != 1 {
 		t.Fatalf("history entries = %q, want one for each sign-in", committedText(m))
+	}
+}
+
+func TestLoginURLFillsTheBodyWidth(t *testing.T) {
+	t.Parallel()
+	url := loginURLWithHyphens(180)
+	m := waitingLoginPanel(t, 60, 30, &rpc.LoginAccountResponse{Type: "chatgpt", LoginID: "login-1", AuthURL: url})
+	rows := loginPanelText(t, m)
+	for i, row := range rows[:len(rows)-1] {
+		if cells := ansi.StringWidth(row); cells != 54 {
+			t.Fatalf("row %d holds %d cells, want the 56-cell body less its 2-cell marker column: %q", i, cells, row)
+		}
+	}
+}
+
+func isMoreRow(row string) bool {
+	return strings.HasPrefix(row, "↓ ") && strings.Contains(row, "more lines")
+}
+
+func linkRows(rows []string) []string {
+	var link []string
+	for _, row := range rows {
+		if !isMoreRow(row) {
+			link = append(link, strings.TrimRight(row, " "))
+		}
+	}
+	return link
+}
+
+func readLinkByScrolling(t *testing.T, m model, width, height int) (string, model) {
+	t.Helper()
+	assertFrame(t, m.dockLines(), width, height)
+	first := linkRows(loginPanelText(t, m))
+	link := slices.Clone(first)
+	previous := first
+	for range 200 {
+		m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+		assertFrame(t, m.dockLines(), width, height)
+		current := linkRows(loginPanelText(t, m))
+		if slices.Equal(current, previous) {
+			return strings.Join(link, ""), m
+		}
+		overlap := max(len(previous)-1, 0)
+		if !slices.Equal(current[:overlap], previous[len(previous)-overlap:]) {
+			t.Fatalf("one press of Down moved the rows from %q to %q, want a move of one row", previous, current)
+		}
+		link = append(link, current[overlap:]...)
+		previous = current
+	}
+	t.Fatalf("the panel kept scrolling after 200 presses of Down")
+	return "", m
+}
+
+func assertLoginURLScrolls(t *testing.T, width, height int, url string) {
+	t.Helper()
+	m := waitingLoginPanel(t, width, height, &rpc.LoginAccountResponse{Type: "chatgpt", LoginID: "login-1", AuthURL: url})
+	top := linkRows(loginPanelText(t, m))
+	if len(top) == 0 {
+		t.Fatalf("panel shows no link row at %dx%d", width, height)
+	}
+	if rows := loginPanelText(t, m); width >= 40 && isMoreRow(rows[len(rows)-1]) {
+		assertContains(t, rows[len(rows)-1], "ctrl+o")
+	}
+	got, scrolled := readLinkByScrolling(t, m, width, height)
+	if got != url {
+		t.Fatalf("rows seen while scrolling joined = %q\nwant the sign-in URL %q", got, url)
+	}
+	for range 200 {
+		scrolled, _ = drive(t, scrolled, press(tea.KeyUp, 0, ""))
+	}
+	if again := linkRows(loginPanelText(t, scrolled)); !slices.Equal(again, top) {
+		t.Fatalf("rows after scrolling back up = %q, want the first rows %q", again, top)
+	}
+}
+
+func TestLoginURLScrollsWhenTheBodyCannotHoldIt(t *testing.T) {
+	t.Parallel()
+	url := loginURLWithHyphens(465)
+	for _, size := range []struct{ width, height int }{{40, 24}, {40, 12}, {40, 8}, {40, 7}, {60, 12}, {100, 30}} {
+		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
+			t.Parallel()
+			assertLoginURLScrolls(t, size.width, size.height, url)
+		})
+	}
+}
+
+func TestLoginURLStaysInReviewWhenNoBodyRowFits(t *testing.T) {
+	t.Parallel()
+	url := loginURLWithHyphens(465)
+	m := waitingLoginPanel(t, 20, 6, &rpc.LoginAccountResponse{Type: "chatgpt", LoginID: "login-1", AuthURL: url})
+	assertFrame(t, m.dockLines(), 20, 6)
+	m, _ = drive(t, m, press('o', tea.ModCtrl, ""))
+	if m.review == nil {
+		t.Fatal("ctrl+o did not open the review")
+	}
+	var seen []string
+	for range 400 {
+		for _, line := range strings.Split(ansi.Strip(m.View().Content), "\n") {
+			line = strings.TrimRight(line, " ")
+			if !strings.HasPrefix(line, "Review ·") && !strings.HasPrefix(line, "↑↓ scroll") && !slices.Contains(seen, line) {
+				seen = append(seen, line)
+			}
+		}
+		m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	}
+	if joined := strings.ReplaceAll(strings.Join(seen, ""), " ", ""); !strings.Contains(joined, url) {
+		t.Fatalf("review rows joined = %q\nwant them to hold the sign-in URL %q", joined, url)
 	}
 }
