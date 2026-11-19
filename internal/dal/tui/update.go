@@ -333,7 +333,7 @@ func (m *model) escape() tea.Cmd {
 }
 
 func (m *model) idleEscape() tea.Cmd {
-	if m.input.composer.Value() != "" {
+	if strings.TrimSpace(m.input.composer.Value()) != "" {
 		m.quietNotice("idle, draft kept")
 		return nil
 	}

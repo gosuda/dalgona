@@ -162,3 +162,19 @@ func TestInterruptNamesEveryStateWithoutATurn(t *testing.T) {
 		}
 	}
 }
+
+func TestWhitespaceOnlyPromptCountsAsEmpty(t *testing.T) {
+	t.Parallel()
+	m, caller := escNoticeModel(stateIdle, " \t ")
+	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
+	if m.hint.text != "Esc again to rewind" || m.notice != "" {
+		t.Fatalf("Esc over whitespace: hint %q, notice %q, want the rewind hint only", m.hint.text, m.notice)
+	}
+	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+	if m.hint.text != "Ctrl+C again to exit" {
+		t.Fatalf("Ctrl+C over whitespace: hint = %q, want Ctrl+C again to exit", m.hint.text)
+	}
+	if got := m.input.history.entries; len(got) != 0 || len(caller.calls) != 0 {
+		t.Fatalf("history %#v and %d calls over a whitespace prompt, want none", got, len(caller.calls))
+	}
+}

@@ -282,6 +282,7 @@ Removing the prompt that waits for its turn MUST NOT move that turn to another e
 Closing the panel with Esc MUST leave the draft unchanged.
 With no history, the panel MUST show `No prompt history yet.` and no selectable row.
 With no history, Enter, Delete, and Backspace MUST do nothing.
+A draft that holds only whitespace MUST count as empty, for Esc and for Ctrl+C.
 Ctrl+C with a non-empty draft MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
 A paste MUST turn each CRLF, each CR, and each LF into one line break.
