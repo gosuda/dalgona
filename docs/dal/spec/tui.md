@@ -210,7 +210,8 @@ The API key field MUST show one `*` for each rune. The key MUST NOT appear in a 
 Enter on the API key field MUST send `account/login/start` with `type` `apiKey`. The panel MUST close when the provider accepts the key.
 A refused key MUST keep the field open with the error in the panel. Esc on the field MUST clear it and return to the methods.
 An approval request MUST NOT clear the API key field.
-A browser or device sign-in MUST show the link, and a device sign-in MUST show the user code. It MUST wait for `account/login/completed`.
+A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. A device sign-in MUST show the user code in the first body row. The hint row MUST read `Esc cancel the sign-in · waiting for the provider`.
+The client MUST print one history row `Sign-in URL: <url>` for each sign-in. The notice line MUST NOT repeat the link while the panel is open. A sign-in MUST wait for `account/login/completed`.
 Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in…`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
 A paste into the API key field MUST keep its first line and MUST NOT make a chip.
 
