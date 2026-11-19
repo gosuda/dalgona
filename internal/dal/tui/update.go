@@ -23,11 +23,11 @@ func (m *model) handleMsg(msg tea.Msg) tea.Cmd {
 		return m.updateAsync(msg)
 	case spinner.TickMsg:
 		return m.updateTick(msg)
-	case diagramMsg:
-		m.applyDiagram(msg)
-		return nil
 	case hintExpiredMsg:
 		m.expireHint(msg)
+		return nil
+	case diagramMsg:
+		m.applyDiagram(msg)
 		return nil
 	default:
 		if command, handled := m.updateTerminal(msg); handled {
