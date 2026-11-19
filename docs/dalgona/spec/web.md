@@ -451,6 +451,7 @@ A failed API-key login MUST keep the panel open and MUST show the error under th
 A browser or device-code login MUST wait for `account/login/completed` with its `loginId`.
 A successful login MUST show `Signed in to <provider>`, reload the models, and close the panel.
 A failed browser or device-code login MUST show `Login failed` with a Try again action.
+The login panel MUST show a Close button in every state, so that a pointer or touch user can leave it.
 Closing the login panel or opening another panel MUST cancel a pending browser or device-code login with `account/login/cancel`.
 A start response that arrives after the cancel MUST be cancelled with the `loginId` it returns.
 

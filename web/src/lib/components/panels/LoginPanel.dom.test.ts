@@ -313,6 +313,60 @@ describe("login panel", () => {
 		);
 	});
 
+	test("the idle panel shows a Close button that closes it", async () => {
+		const { session } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "openai", login: "apiKey", signedIn: false },
+			]),
+		});
+		const onClose = vi.fn();
+		session.openPanel("login");
+		render(LoginPanel, { props: { session, open: true, onClose } });
+		await screen.findByLabelText(/openai/);
+		await fireEvent.click(screen.getByRole("button", { name: "Close" }));
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	test("a terminal provider leaves the panel with a Close button", async () => {
+		const { session } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "copilot", login: "terminal", signedIn: false },
+			]),
+		});
+		const onClose = vi.fn();
+		session.openPanel("login");
+		render(LoginPanel, { props: { session, open: true, onClose } });
+		await fireEvent.click(await screen.findByLabelText(/copilot/));
+		expect(screen.getByText("dalgona login copilot")).toBeDefined();
+		await fireEvent.click(screen.getByRole("button", { name: "Close" }));
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	test("Close leaves a pending browser login and cancels it once", async () => {
+		const { session, rpc } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "chatgpt", login: "browser", signedIn: false },
+			]),
+			"account/login/start": () => ({
+				type: "chatgpt",
+				loginId: "login-1",
+				authUrl: "https://auth.example/start",
+			}),
+		});
+		session.openPanel("login");
+		render(LoginPanel, {
+			props: { session, open: true, onClose: () => session.closePanel() },
+		});
+		await fireEvent.click(await screen.findByLabelText(/chatgpt/));
+		await fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+		await screen.findByRole("link", { name: "Open sign-in page" });
+		await fireEvent.click(screen.getByRole("button", { name: "Close" }));
+		expect(session.panel).toBeNull();
+		expect(cancelCalls(rpc)).toEqual([
+			{ method: "account/login/cancel", params: { loginId: "login-1" } },
+		]);
+	});
+
 	test("closing the login panel cancels a pending browser login once", async () => {
 		const { session, rpc } = await connected({
 			"dalgona/account/providers/list": providers([
