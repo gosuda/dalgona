@@ -35,10 +35,10 @@ func (m *model) openQueue() {
 	m.openList(&listPanel{kind: queueKind, title: "Queued follow-ups", items: queueItems(m.queue)})
 }
 
-func queueItems(queue []string) []listItem {
+func queueItems(queue []followup) []listItem {
 	items := make([]listItem, 0, len(queue))
-	for i, text := range queue {
-		first, _, _ := strings.Cut(text, "\n")
+	for i, item := range queue {
+		first, _, _ := strings.Cut(item.text, "\n")
 		items = append(items, listItem{id: fmt.Sprint(i), label: fmt.Sprintf("%d. %s", i+1, sanitizeText(first))})
 	}
 	return items

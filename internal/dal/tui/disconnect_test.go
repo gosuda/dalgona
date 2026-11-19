@@ -67,7 +67,7 @@ func waitingModel(t *testing.T) (model, openWork) {
 	m, _ = drive(t, m, notificationMsg{method: "dalgona/retry/wait", params: []byte(`{"threadId":"t1","turnId":"turn-1","remainingMs":125000}`)})
 	m, _ = drive(t, m, commandApprovalRequest(work.approved))
 	m, _ = drive(t, m, questionRequest(work.asked, questionParamsJSON))
-	m.queue = []string{"and then this"}
+	m.queue = queued("and then this")
 	m.input.composer.SetValue("half a sentence")
 	if _, waiting := m.retryRemaining(); !waiting || len(m.approvals) != 2 {
 		t.Fatalf("setup: waiting %v, open cards %d, want a retry wait and two cards", waiting, len(m.approvals))
@@ -110,7 +110,7 @@ func TestDisconnectKeepsQueueAndDraft(t *testing.T) {
 	m, _ = drive(t, m, disconnectedMsg{err: errors.New("EOF")})
 
 	if len(m.queue) != 1 || m.input.composer.Value() != "half a sentence" {
-		t.Fatalf("follow-up queue %q and draft %q, want both kept", m.queue, m.input.composer.Value())
+		t.Fatalf("follow-up queue %v and draft %q, want both kept", m.queue, m.input.composer.Value())
 	}
 }
 
