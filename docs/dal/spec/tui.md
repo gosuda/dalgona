@@ -288,6 +288,8 @@ An image chip MUST NOT enter the history. When the draft holds an image, the liv
 Ctrl+C with a draft that holds no text MUST keep the draft. It MUST show `Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
 A paste MUST turn each CRLF, each CR, and each LF into one line break.
+A paste into a one-line field MUST keep only its first line.
+The one-line fields are the list filter, the review target, the answer line, and the API key field.
 A paste of fewer than 10 lines MUST be inserted as text.
 A paste of 10 or more lines MUST become one chip labelled `[Paste #n +L lines]`, where L counts its lines.
 A chip MUST take one composer row, whatever the length of its paste.
@@ -299,6 +301,8 @@ The slash rule MUST read only the typed text. A pasted line that starts with `/`
 A paste over 1 MiB MUST be refused with a notice that names the limit.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
 A pasted path to a PNG, JPEG, or GIF file MUST become an image chip labelled `[Image #n WxH]`.
+A path followed by one line break MUST also become an image chip, and the chip MUST replace that line break.
+A paste with a line break before its last character MUST stay text, even when its lines joined name an image file.
 A pasted path to a WebP file MUST be refused with the notice `unsupported image type image/webp; send PNG, JPEG or GIF`.
 An image chip MUST take one composer row.
 A prompt MUST hold at most 10 images and at most 10485760 bytes of image data.

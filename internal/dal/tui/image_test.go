@@ -85,6 +85,42 @@ func TestImagePathPasteEndingInCRLeavesOnlyTheChip(t *testing.T) {
 	}
 }
 
+func TestImagePathPasteEndingInLFOrCRLFLeavesOnlyTheChip(t *testing.T) {
+	t.Parallel()
+	for _, tail := range []string{"\n", "\r\n"} {
+		m := imageModel(t, new(fakeCaller), "text", "image")
+		path := writePNG(t, filepath.Join(t.TempDir(), "shot.png"), 3, 2, 0)
+		m, command := drive(t, m, tea.PasteMsg{Content: path + tail})
+		m = runCommand(t, m, command, "pasting an image path started no read")
+		if got := len(m.input.composer.chips); got != 1 {
+			t.Fatalf("tail %q: composer holds %d chips, want the image chip", tail, got)
+		}
+		if got := []rune(m.input.composer.Value()); len(got) != 1 {
+			t.Fatalf("tail %q: composer holds %q, want the chip alone", tail, string(got))
+		}
+	}
+}
+
+func TestPastedPathSplitByALineBreakStaysText(t *testing.T) {
+	t.Parallel()
+	for _, sep := range []string{"\r", "\n", "\r\n"} {
+		m := imageModel(t, new(fakeCaller), "text", "image")
+		dir := t.TempDir()
+		writePNG(t, filepath.Join(dir, "shot.png"), 3, 2, 0)
+		head := filepath.Join(dir, "shot")
+		m, command := drive(t, m, tea.PasteMsg{Content: head + sep + ".png"})
+		if command != nil {
+			m, _ = drive(t, m, command())
+		}
+		if got := len(m.input.composer.chips); got != 0 {
+			t.Fatalf("separator %q: composer holds %d chips, want the two lines as text", sep, got)
+		}
+		if got, want := m.input.composer.Value(), head+"\n.png"; got != want {
+			t.Fatalf("separator %q: composer holds %q, want %q", sep, got, want)
+		}
+	}
+}
+
 func TestImagePathPasteOverLimitNotice(t *testing.T) {
 	t.Parallel()
 	m := imageModel(t, new(fakeCaller), "text", "image")
