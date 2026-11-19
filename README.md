@@ -33,7 +33,7 @@ In the terminal interface:
 3. Enter `/model` and choose an offered model.
 4. Type a task and press Enter.
 
-API-key providers (`openai`, `anthropic`, `google`, `openrouter`) take a pasted key in the sign-in panel and also read their provider environment variables. The OAuth providers (`anthropic`, `chatgpt`, `copilot`, `cursor`, `devin`, `antigravity`) offer a browser link or a device code; `dal login anthropic` and `dal login chatgpt` also run the flow in a shell.
+API-key providers (`openai`, `anthropic`, `google`, `openrouter`) take a pasted key in the sign-in panel and also read their provider environment variables. In the panel, only `chatgpt` offers a browser link or a device code. `anthropic` takes an API key there and runs OAuth in a shell (`dal login anthropic`). `copilot`, `cursor`, `devin`, and `antigravity` sign in only in a shell (`dal login <provider>`).
 
 To use the daemon-backed product instead, run:
 
