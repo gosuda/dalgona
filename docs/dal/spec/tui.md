@@ -270,7 +270,7 @@ Enter after a backslash MUST replace the backslash with a newline.
 Shift+Enter and Ctrl+J MUST insert a newline.
 Alt+Enter MUST queue the draft as a follow-up.
 Up MUST move the caret between wrapped rows. On the first row, Up MUST recall the previous history entry.
-Down MUST move the caret between wrapped rows. On the last row, Down MUST recall the next entry, and past the newest entry it MUST restore the draft.
+Down MUST move the caret between wrapped rows. On the last row, Down MUST recall the next entry, and past the newest entry it MUST restore the draft with its chips.
 Home and End MUST move the caret to the start or end of its line.
 Alt+Left and Alt+Right MUST move the caret by word.
 Ctrl+W MUST delete the word before the caret.
@@ -299,11 +299,14 @@ With no history, the panel MUST show `No prompt history yet.` and no selectable 
 With no history, Enter, Delete, and Backspace MUST do nothing.
 Ctrl+C with a non-empty draft MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
+A paste MUST turn each CRLF, each CR, and each LF into one line break.
 A paste of fewer than 10 lines MUST be inserted as text.
 A paste of 10 or more lines MUST become one chip labelled `[Paste #n +L lines]`, where L counts its lines.
 A chip MUST take one composer row, whatever the length of its paste.
 Backspace and Delete MUST remove a whole chip.
 Sending MUST replace each chip with its full pasted text, in order.
+The history MUST store each prompt, and each draft that Ctrl+C saves, with each chip that holds text replaced by its full text.
+A prompt recalled from the history MUST be plain text. It MUST NOT become a chip.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB MUST be refused with a notice that names the limit.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
@@ -317,7 +320,7 @@ Sending MUST send each image chip as an image input item after the text.
 
 The composer MUST show a command palette when the caret is in a first token that starts with `/`, with no panel or review open.
 The palette MUST list at most 8 matching commands and MUST NOT open for `//`.
-Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token.
+Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token. It MUST keep each chip of the draft.
 Enter MUST run a highlighted command only when the draft is only its first token and the command takes no argument. Otherwise, Enter MUST complete the command and keep the rest of the draft.
 Esc MUST close the palette and keep the draft. Typing a character MUST reopen it.
 
@@ -364,6 +367,7 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 | `/help` | Opens the help panel |
 | Esc | Closes an open command palette first and keeps the draft. Otherwise clears a non-empty list filter first. With an empty filter, closes the list panel. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row. A second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
 | Esc on an empty prompt, while idle | The first Esc shows `Esc again to rewind` in the live row. A second Esc within 2000 ms opens the rewind list of active turns, newest first. |
+| Esc, with no turn to interrupt | After a stopped turn the notice reads `stopped; nothing to interrupt`. After a failed turn it reads `failed; nothing to interrupt`. In an idle prompt with a draft it reads `idle, draft kept; nothing to interrupt`, and the draft stays |
 | Ctrl+C twice | Quits. With an empty draft, the first press shows `Ctrl+C again to exit` in the live row. With a non-empty draft, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. A second press within 2000 ms quits |
 | Ctrl+R | Opens the history panel of sent prompts. Enter loads the highlighted prompt into the editor. Delete removes it. Shell mode ignores Ctrl+R |
 | `/model [id]` | `model/list` list panel, or `config/value/write` key `model` |

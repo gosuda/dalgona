@@ -276,11 +276,18 @@ func (m *model) completePopup() {
 	}
 	name := m.input.popup.selected()
 	m.input.popup = nil
-	_, tail := splitToken(m.input.composer.Value())
-	tail = cmp.Or(tail, " ")
-	head := "/" + name
-	m.input.composer.SetValue(head + tail)
-	m.input.composer.cursor = utf8.RuneCountInString(head + " ")
+	e := &m.input.composer
+	end := slices.IndexFunc(e.text, unicode.IsSpace)
+	if end < 0 {
+		end = len(e.text)
+	}
+	head := []rune("/" + name)
+	tail := e.text[end:]
+	if len(tail) == 0 {
+		tail = []rune(" ")
+	}
+	e.text = slices.Concat(head, tail)
+	e.cursor = len(head) + 1
 }
 
 func (m *model) completeFile() {

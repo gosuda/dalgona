@@ -303,7 +303,7 @@ func (m *model) exitKey() tea.Cmd {
 		return nil
 	}
 	if draft := m.input.composer.Value(); strings.TrimSpace(draft) != "" {
-		m.input.history.add(draft, "")
+		m.input.history.add(m.input.composer.Expanded(), "")
 		m.input.composer.SetValue("")
 		return m.setHint("Draft saved to history · Ctrl+C again to exit", "exit")
 	}
@@ -314,22 +314,14 @@ func (m *model) recallOlder() bool {
 	if !m.input.composer.onFirstRow(&m.screen) {
 		return false
 	}
-	text, ok := m.input.history.older(m.input.composer.Value())
-	if ok {
-		m.input.composer.SetValue(text)
-	}
-	return ok
+	return m.input.history.older(&m.input.composer)
 }
 
 func (m *model) recallNewer() bool {
 	if !m.input.composer.onLastRow(&m.screen) {
 		return false
 	}
-	text, ok := m.input.history.newer()
-	if ok {
-		m.input.composer.SetValue(text)
-	}
-	return ok
+	return m.input.history.newer(&m.input.composer)
 }
 
 func (m *model) escape() tea.Cmd {
@@ -361,7 +353,8 @@ func (m *model) loseConnection(cause error) {
 
 func (m *model) idleEscape() tea.Cmd {
 	if m.input.composer.Value() != "" {
-		return m.interrupt()
+		m.noticef("idle, draft kept; nothing to interrupt")
+		return nil
 	}
 	if m.thread.id == "" {
 		return nil
@@ -436,7 +429,7 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 	}
 	var imageCmd tea.Cmd
 	if paste, ok := msg.(tea.PasteMsg); ok && m.textMode() == inputPrompt {
-		imageCmd = m.imagePasteCmd(sanitizeText(paste.Content))
+		imageCmd = m.imagePasteCmd(paste.Content)
 	}
 	updated, command := m.input.composer.Update(&m.screen, msg)
 	m.input.composer = updated

@@ -124,6 +124,46 @@ func TestPaletteCompletionKeepsTextAfterToken(t *testing.T) {
 	}
 }
 
+func TestPaletteCompletionKeepsChips(t *testing.T) {
+	t.Parallel()
+	pasted := pasteLines(12)
+	for _, key := range []tea.KeyPressMsg{{Code: tea.KeyTab}, {Code: tea.KeyEnter}} {
+		m := typeKeys(t, paletteModel(t), " ")
+		m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyHome})
+		m = typeKeys(t, m, "/mo")
+		m, _ = drive(t, m, key)
+		if got, want := m.input.composer.Expanded(), "/model "+pasted; got != want {
+			t.Fatalf("%s gave %q, want %q", key.String(), got, want)
+		}
+		if hasPrivateUse(m.input.composer.Expanded()) {
+			t.Fatalf("%s left a chip atom in the sent text: %q", key.String(), m.input.composer.Expanded())
+		}
+		assertContains(t, dockText(m), "[Paste #1 +12 lines]")
+		if got := len(m.input.history.entries); got != 0 {
+			t.Fatalf("%s sent a prompt: history holds %d entries", key.String(), got)
+		}
+	}
+}
+
+func TestPaletteKeepsChipTouchingTheToken(t *testing.T) {
+	t.Parallel()
+	pasted := pasteLines(12)
+	for _, key := range []tea.KeyPressMsg{{Code: tea.KeyTab}, {Code: tea.KeyEnter}} {
+		m := paletteModel(t)
+		m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyHome})
+		m = typeKeys(t, m, "/new")
+		m, _ = drive(t, m, key)
+		if got, want := m.input.composer.Expanded(), "/new"+pasted; got != want {
+			t.Fatalf("%s gave %q, want %q", key.String(), got, want)
+		}
+		if got := len(m.input.composer.chips); got != 1 {
+			t.Fatalf("%s left %d chips, want 1", key.String(), got)
+		}
+	}
+}
+
 func TestPaletteEnterKeepsTextAfterTokenAndRunsNothing(t *testing.T) {
 	t.Parallel()
 	m := typeKeys(t, paletteModel(t), " arg")

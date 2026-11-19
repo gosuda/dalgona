@@ -217,6 +217,85 @@ func TestLargePasteBecomesChipAndExpandsOnSend(t *testing.T) {
 	}
 }
 
+func joinLineBreaks(n int, breaks ...string) string {
+	var out strings.Builder
+	for i := range n {
+		if i > 0 {
+			out.WriteString(breaks[(i-1)%len(breaks)])
+		}
+		fmt.Fprintf(&out, "line %02d", i+1)
+	}
+	return out.String()
+}
+
+func TestPasteWithCarriageReturnsMakesChip(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		breaks []string
+	}{
+		{"cr", []string{"\r"}},
+		{"crlf", []string{"\r\n"}},
+		{"lf", []string{"\n"}},
+		{"mixed", []string{"\r", "\r\n", "\n"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel(nil, Options{})
+			m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+			m = typeText(t, m, "S7MARK ")
+			m, _ = drive(t, m, tea.PasteMsg{Content: joinLineBreaks(30, tt.breaks...)})
+			if got := len(m.input.composer.chips); got != 1 {
+				t.Fatalf("a 30-line paste made %d chips, want 1: %q", got, m.input.composer.Value())
+			}
+			assertContains(t, dockText(m), "[Paste #1 +30 lines]")
+			if got, want := m.input.composer.Expanded(), "S7MARK "+pasteLines(30); got != want {
+				t.Fatalf("expanded = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestShortPasteWithCRKeepsLineBreaks(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"cr", "TABMARK abc\r\tindented\rlast col", "TABMARK abc\n\tindented\nlast col"},
+		{"crlf", "a\r\nb\r\nc", "a\nb\nc"},
+		{"mixed", "a\rb\r\nc\nd", "a\nb\nc\nd"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel(nil, Options{})
+			m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+			m, _ = drive(t, m, tea.PasteMsg{Content: tt.in})
+			if got := len(m.input.composer.chips); got != 0 {
+				t.Fatalf("a short paste made %d chips, want none", got)
+			}
+			if got := m.input.composer.Value(); got != tt.want {
+				t.Fatalf("composer holds %q, want %q", got, tt.want)
+			}
+			if got, want := len(m.input.composer.rows(&m.screen, 80)), strings.Count(tt.want, "\n")+1; got != want {
+				t.Fatalf("composer is %d rows, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestPasteIntoFilterSplitsLinesAtCarriageReturn(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{"one\rtwo", "one\r\ntwo"} {
+		m := openModelPicker(t, new(fakeCaller))
+		m, _ = drive(t, m, tea.PasteMsg{Content: in})
+		if got := m.input.field.value(); got != "one" {
+			t.Fatalf("%q: filter holds %q, want the first line only", in, got)
+		}
+	}
+}
+
 func TestChipPromptIsSentUnchangedWhenSlashLike(t *testing.T) {
 	for _, first := range []string{"// x", "/model foo"} {
 		caller := new(fakeCaller)

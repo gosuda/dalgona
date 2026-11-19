@@ -19,7 +19,7 @@ type history struct {
 	lastID     uint64
 	revision   uint64
 	index      int
-	draft      string
+	draft      editor
 	awaitingID uint64
 }
 
@@ -85,24 +85,28 @@ func (h *history) load(id uint64) (string, bool) {
 	return h.entries[index].text, true
 }
 
-func (h *history) older(draft string) (string, bool) {
+func (h *history) older(into *editor) bool {
 	if h.index == 0 {
-		return "", false
+		return false
 	}
 	if h.index == len(h.entries) {
-		h.draft = draft
+		h.draft = editor{text: into.text, chips: into.chips}
 	}
 	h.index--
-	return h.entries[h.index].text, true
+	into.SetValue(h.entries[h.index].text)
+	return true
 }
 
-func (h *history) newer() (string, bool) {
+func (h *history) newer(into *editor) bool {
 	if h.index >= len(h.entries) {
-		return "", false
+		return false
 	}
 	h.index++
 	if h.index == len(h.entries) {
-		return h.draft, true
+		into.text, into.chips = slices.Clone(h.draft.text), slices.Clone(h.draft.chips)
+		into.cursor = len(into.text)
+		return true
 	}
-	return h.entries[h.index].text, true
+	into.SetValue(h.entries[h.index].text)
+	return true
 }
