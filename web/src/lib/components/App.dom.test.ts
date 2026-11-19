@@ -812,6 +812,15 @@ describe("keyboard paths", () => {
 		}
 	});
 
+	test("the skip link names the transcript and targets it", () => {
+		const { session } = connectedSession();
+		render(App, { props: { session } });
+		const link = screen.getByRole("link", { name: /transcript/i });
+		expect(link.classList.contains("skip-link")).toBe(true);
+		expect(link.getAttribute("href")).toBe("#transcript");
+		expect(document.getElementById("transcript")).not.toBeNull();
+	});
+
 	test("sends a message with Enter", () => {
 		const { session } = connectedSession();
 		const send = vi.spyOn(session, "sendMessage").mockResolvedValue(true);
