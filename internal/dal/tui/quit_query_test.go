@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -144,27 +145,104 @@ func TestSuspendReturnsWhenCursorQueryExpires(t *testing.T) {
 	})
 }
 
-func TestQuitAndSuspendIgnoreCursorQueryWithoutWindowHeight(t *testing.T) {
-	t.Parallel()
-	for _, leave := range []struct {
-		name     string
-		key      tea.KeyPressMsg
-		presses  int
-		returned func(tea.Cmd) bool
-	}{
+type leaveKind struct {
+	name     string
+	key      tea.KeyPressMsg
+	presses  int
+	returned func(tea.Cmd) bool
+}
+
+func leaveKinds() []leaveKind {
+	return []leaveKind{
 		{name: "quit", key: press('c', tea.ModCtrl, ""), presses: 2, returned: quitReturned},
 		{name: "suspend", key: press('z', tea.ModCtrl, ""), presses: 1, returned: suspendReturned},
-	} {
-		t.Run(leave.name, func(t *testing.T) {
+	}
+}
+
+type dockWork struct {
+	name   string
+	start  func(*testing.T) model
+	finish func(model) tea.Msg
+}
+
+func dockWorks() []dockWork {
+	return []dockWork{
+		{
+			name:   "cursor query",
+			start:  queryInFlight,
+			finish: func(model) tea.Msg { return tea.CursorPositionMsg{X: 2, Y: 5} },
+		},
+		{
+			name: "dock move",
+			start: func(t *testing.T) model {
+				m := anchorTestModel()
+				armDockMove(t, &m)
+				return m
+			},
+			finish: func(m model) tea.Msg { return dockWrittenMsg{revision: m.anchorState().moveRevision} },
+		},
+	}
+}
+
+func leave(t *testing.T, m model, kind leaveKind) (model, tea.Cmd) {
+	t.Helper()
+	var command tea.Cmd
+	for range kind.presses {
+		m, command = updateWithCommand(t, m, kind.key)
+	}
+	return m, command
+}
+
+type leaveCase struct {
+	name   string
+	work   dockWork
+	kind   leaveKind
+	height int
+}
+
+func leaveCases(heights ...int) []leaveCase {
+	var cases []leaveCase
+	for _, work := range dockWorks() {
+		for _, kind := range leaveKinds() {
+			for _, height := range heights {
+				name := fmt.Sprintf("%s %s at height %d", work.name, kind.name, height)
+				cases = append(cases, leaveCase{name: name, work: work, kind: kind, height: height})
+			}
+		}
+	}
+	return cases
+}
+
+func TestQuitAndSuspendIgnoreDockWorkWithoutWindowHeight(t *testing.T) {
+	t.Parallel()
+	for _, c := range leaveCases(0) {
+		t.Run(c.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				m := queryInFlight(t)
-				m.screen.height = 0
-				var command tea.Cmd
-				for range leave.presses {
-					m, command = updateWithCommand(t, m, leave.key)
+				m := c.work.start(t)
+				m.screen.height = c.height
+				if _, command := leave(t, m, c.kind); !c.kind.returned(command) {
+					t.Fatalf("%s waited for a %s with a window height of 0", c.kind.name, c.work.name)
 				}
-				if !leave.returned(command) {
-					t.Fatalf("%s waited for a cursor reply with a window height of 0", leave.name)
+			})
+		})
+	}
+}
+
+func TestQuitAndSuspendHoldWhileDockWorkInFlight(t *testing.T) {
+	t.Parallel()
+	for _, c := range leaveCases(1, 2, 8) {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				m := c.work.start(t)
+				m.screen.height = c.height
+				m, command := leave(t, m, c.kind)
+				m, returned := finishRows(t, m, command, c.kind.returned)
+				if returned {
+					t.Fatalf("%s returned while the %s was in flight", c.kind.name, c.work.name)
+				}
+				m, command = updateWithCommand(t, m, c.work.finish(m))
+				if _, returned := finishRows(t, m, command, c.kind.returned); !returned {
+					t.Fatalf("%s did not return after the %s ended", c.kind.name, c.work.name)
 				}
 			})
 		})
