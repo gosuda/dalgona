@@ -330,7 +330,6 @@ function onWindowKeydown(event: KeyboardEvent): void {
 			inset-block-end: 0;
 			max-height: calc(100dvh - 6rem);
 			overflow-y: auto;
-			overscroll-behavior: contain;
 			background: var(--surface);
 			border-block-start: 1px solid var(--line);
 		}

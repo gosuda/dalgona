@@ -47,6 +47,14 @@
 			);
 		if (
 			narrow &&
+			resting &&
+			getComputedStyle(dock).overscrollBehaviorY === "contain"
+		)
+			failures.push(
+				"dock: overscroll-behavior contain stops the wheel over the dock from scrolling the document",
+			);
+		if (
+			narrow &&
 			dock.scrollHeight > dock.clientHeight + 1 &&
 			!["auto", "scroll"].includes(getComputedStyle(dock).overflowY)
 		)
