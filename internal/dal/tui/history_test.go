@@ -344,6 +344,22 @@ func TestRecalledChipDraftRestoreKeepsEqualTypedDraftReadingSlash(t *testing.T) 
 	assertTurnStartText(t, caller, strings.TrimPrefix(slashPastes[0].text, "/"))
 }
 
+func TestRecalledDraftMarkIsComparedWithoutCopyingTheDraft(t *testing.T) {
+	composer := newEditor()
+	composer.recall("/"+strings.Repeat("x", 1<<16), true)
+	if !composer.verbatim() {
+		t.Fatal("a recalled draft is not marked")
+	}
+	if allocs := testing.AllocsPerRun(20, func() { composer.verbatim() }); allocs != 0 {
+		t.Fatalf("comparing the mark with the draft made %v allocations, want 0", allocs)
+	}
+	composer.insert([]rune("y"))
+	composer.settleVerbatim()
+	if composer.verbatim() {
+		t.Fatal("an edited draft keeps its mark")
+	}
+}
+
 func TestHistoryEntryPasteIntentUpgradesAnEarlierTypedEntry(t *testing.T) {
 	t.Parallel()
 	const pasted = "// a\nb"

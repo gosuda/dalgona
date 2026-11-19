@@ -150,7 +150,7 @@ type editor struct {
 	focused      bool
 	placeholder  string
 	chips        []chip
-	verbatimText string
+	verbatimText []rune
 }
 
 func newEditor() editor {
@@ -170,23 +170,23 @@ func (c *editor) SetValue(value string) {
 	c.text = []rune(value)
 	c.cursor = len(c.text)
 	c.chips = nil
-	c.verbatimText = ""
+	c.verbatimText = nil
 }
 
 func (c *editor) recall(text string, verbatim bool) {
 	c.SetValue(text)
 	if verbatim {
-		c.verbatimText = c.Value()
+		c.verbatimText = slices.Clone(c.text)
 	}
 }
 
 func (c editor) verbatim() bool {
-	return c.verbatimText != "" && c.Value() == c.verbatimText
+	return len(c.verbatimText) > 0 && slices.Equal(c.text, c.verbatimText)
 }
 
 func (c *editor) settleVerbatim() {
 	if !c.verbatim() {
-		c.verbatimText = ""
+		c.verbatimText = nil
 	}
 }
 
@@ -322,7 +322,6 @@ func (c *editor) continueLine() bool {
 }
 
 func (c editor) Update(s *screenState, msg tea.Msg) (editor, tea.Cmd) {
-	c.settleVerbatim()
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
 		c.paste(msg.Content)
