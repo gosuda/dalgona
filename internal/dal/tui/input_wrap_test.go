@@ -320,6 +320,21 @@ func TestComposerCursorStaysInsideShortWindows(t *testing.T) {
 	}
 }
 
+func TestComposerCaretStaysInsideTheWindowAfterAChipWiderThanTheRow(t *testing.T) {
+	t.Parallel()
+	label := "[Paste #1 +30 lines]"
+	for _, width := range []int{8, 12, 20, 22, 24, 40} {
+		m := composerState(t, width, 12, "", -1)
+		m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(30)})
+		view := m.View()
+		assertFrame(t, strings.Split(view.Content, "\n"), width, 12)
+		want := promptCells + min(m.screen.cells(label), width-1-promptCells)
+		if view.Cursor == nil || view.Cursor.X != want || view.Cursor.Y != 0 {
+			t.Fatalf("width %d cursor = %v, want (%d, 0) at the end of the visible chip", width, view.Cursor, want)
+		}
+	}
+}
+
 func TestComposerUpAndDownKeepTheColumnAcrossSpacedRows(t *testing.T) {
 	t.Parallel()
 	m := composerState(t, 40, 12, spacedSentence, 74)

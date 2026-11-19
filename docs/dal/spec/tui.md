@@ -301,6 +301,7 @@ With no history, the panel MUST show `No prompt history yet.` and no selectable 
 With no history, Enter, Delete, and Backspace MUST do nothing.
 Ctrl+C with a non-empty draft MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
+The caret MUST stay within the window width minus one cell, also after a chip that its row cuts.
 A paste MUST turn each CRLF, each CR, and each LF into one line break.
 A paste of fewer than 10 lines MUST be inserted as text.
 A paste of 10 or more lines MUST become one chip labelled `[Paste #n +L lines]`, where L counts its lines.

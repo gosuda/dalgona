@@ -301,7 +301,7 @@ func (c editor) layout(s *screenState, width int, spans []keywordSpan, t theme) 
 	if c.Value() == "" {
 		lines[0] = t.paint(roleDim, s.fit(c.placeholder, editorCells(width)))
 	}
-	return lines, row, c.cellsBefore(s, rows[row], at)
+	return lines, row, min(c.cellsBefore(s, rows[row], at), editorCells(width))
 }
 
 func (c editor) onFirstRow(s *screenState) bool {
