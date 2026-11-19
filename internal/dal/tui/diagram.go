@@ -68,10 +68,6 @@ func drawDiagram(ctx context.Context, kind, source string) (string, error) {
 	return "", fmt.Errorf("no text renderer for %s", kind)
 }
 
-func renderDiagram(kind, source string) (string, error) {
-	return renderDiagramWith(drawDiagram, kind, source)
-}
-
 func renderDiagramWith(draw drawFunc, kind, source string) (string, error) {
 	if len(source) > diagramSourceLimit {
 		return "", errDiagramTooLarge

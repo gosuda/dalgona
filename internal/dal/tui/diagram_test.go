@@ -31,7 +31,7 @@ func TestDiagramBudgetIsTwoSeconds(t *testing.T) {
 func TestRenderDiagramMermaid(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
-	art, err := renderDiagram("mermaid", "graph LR\n  a --> b\n")
+	art, err := renderDiagramWith(drawDiagram, "mermaid", "graph LR\n  a --> b\n")
 	if err != nil {
 		t.Fatalf("mermaid render: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestRenderDiagramMermaid(t *testing.T) {
 func TestRenderDiagramD2(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
-	art, err := renderDiagram("d2", "x -> y\n")
+	art, err := renderDiagramWith(drawDiagram, "d2", "x -> y\n")
 	if err != nil {
 		t.Fatalf("d2 render: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestRenderDiagramNomnoml(t *testing.T) {
 func TestRenderDiagramSvgShowsSource(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
-	if _, err := renderDiagram("svg", "<svg/>"); err == nil {
+	if _, err := renderDiagramWith(drawDiagram, "svg", "<svg/>"); err == nil {
 		t.Fatal("svg must fail to the source card")
 	}
 }
@@ -140,7 +140,7 @@ func requireSilentRender(t *testing.T, kind, source string, fails bool) {
 	t.Helper()
 	var err error
 	out := captureTerminal(t, func() {
-		_, err = renderDiagram(kind, source)
+		_, err = renderDiagramWith(drawDiagram, kind, source)
 	})
 	if (err != nil) != fails {
 		t.Fatalf("%s render error = %v, want failure %v", kind, err, fails)
