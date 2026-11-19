@@ -304,7 +304,7 @@ func (m *model) startQueuedFollowup() tea.Cmd {
 	}
 	item := m.queue[0]
 	m.queue = m.queue[1:]
-	m.input.history.record(item.text, "", item.verbatim)
+	m.input.history.record(item.text, "", item.verbatim, false)
 	m.syncQueue()
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(item.text), Model: m.thread.modelName}

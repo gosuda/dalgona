@@ -325,6 +325,106 @@ func TestEditedRecalledChipDraftRunsTheTypedCommand(t *testing.T) {
 	}
 }
 
+func TestRepeatedCtrlCSaveTakesTheIntentOfTheEditedDraft(t *testing.T) {
+	t.Parallel()
+	for _, recall := range historyRecalls {
+		t.Run(recall.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := editedRecalledModel(t, caller, slashPastes[1].text, recall.run, recalledEdits[1].keys)
+			m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+			if n := len(m.input.history.entries); n != 1 {
+				t.Fatalf("history holds %d entries after the second save, want 1", n)
+			}
+			m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+			m = recall.run(t, m)
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			if command != nil {
+				m = runCommand(t, m, command, "")
+			}
+			if len(caller.calls) != 0 || m.confirm == nil || m.confirm.kind != confirmNew {
+				t.Fatalf("calls = %#v, confirm = %#v, want the new-thread confirmation of the typed /new and no request", caller.calls, m.confirm)
+			}
+		})
+	}
+}
+
+func TestTypedCommandDraftSavedTwiceStaysACommand(t *testing.T) {
+	t.Parallel()
+	for _, recall := range historyRecalls {
+		t.Run(recall.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := newTestModel(caller, Options{})
+			m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+			m.thread.id = "t1"
+			for range 2 {
+				m = typeText(t, m, "/new now")
+				m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+			}
+			if got := m.input.history.entries; len(got) != 1 || got[0].verbatim {
+				t.Fatalf("entries = %#v, want one entry with no paste intent", got)
+			}
+			m = recall.run(t, m)
+			m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+			if len(caller.calls) != 0 || m.confirm == nil || m.confirm.kind != confirmNew {
+				t.Fatalf("calls = %#v, confirm = %#v, want the new-thread confirmation and no request", caller.calls, m.confirm)
+			}
+		})
+	}
+}
+
+func TestChipDraftSavedTwiceStaysSentUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, recall := range historyRecalls {
+		t.Run(recall.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := pastedDraftModel(t, caller, slashPastes[1].text)
+			m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+			m, _ = drive(t, m, tea.PasteMsg{Content: slashPastes[1].text})
+			m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+			if got := m.input.history.entries; len(got) != 1 || !got[0].verbatim {
+				t.Fatalf("entries = %#v, want one entry with the paste intent", got)
+			}
+			m = recall.run(t, m)
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			runCommand(t, m, command, "Enter did not send the recalled draft; notice: "+m.notice)
+			assertTurnStartText(t, caller, slashPastes[1].text)
+		})
+	}
+}
+
+func TestHistoryRepeatSetsTheIntentAndASavedDraftReplacesIt(t *testing.T) {
+	t.Parallel()
+	const pasted = "/new now\nb"
+	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
+	typed := editor{text: []rune(pasted)}
+	tests := []struct {
+		name   string
+		first  editor
+		repeat func(*history)
+		want   bool
+	}{
+		{name: "echo keeps the intent", first: chipFirst, repeat: func(h *history) { h.add(pasted, "turn-1") }, want: true},
+		{name: "send keeps the intent", first: chipFirst, repeat: func(h *history) { h.addFrom(typed, pasted, "") }, want: true},
+		{name: "echo sets the intent", first: typed, repeat: func(h *history) { h.add(pasted, "turn-1") }, want: false},
+		{name: "saved draft clears the intent", first: chipFirst, repeat: func(h *history) { h.saveDraft(typed, pasted) }, want: false},
+		{name: "saved draft sets the intent", first: typed, repeat: func(h *history) { h.saveDraft(chipFirst, pasted) }, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var h history
+			h.addFrom(test.first, pasted, "")
+			test.repeat(&h)
+			if len(h.entries) != 1 || h.entries[0].verbatim != test.want {
+				t.Fatalf("entries = %#v, want one entry with verbatim %v", h.entries, test.want)
+			}
+		})
+	}
+}
+
 func TestRecalledChipDraftRestoreKeepsTypedDraftReadingSlash(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
