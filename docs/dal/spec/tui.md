@@ -124,7 +124,7 @@ The dock MUST keep its height. Only a key press, a paste, the opening or closing
 
 The dock MUST have at most the window height minus one rows. The client MUST show no dock row in a window of fewer than two rows.
 
-The composer MUST show at most six rows, or one row while a panel is open. A panel MUST have a fixed height for its kind, capped at the window height minus four rows, except the approval panel. From window height 4, the approval panel MUST have at least three rows, or the window height minus two rows when that is fewer.
+The composer MUST show at most six rows, or one row while a panel is open. A panel MUST have a fixed height for its kind, capped at the window height minus four rows. That cap MUST NOT leave the approval panel fewer than three rows from window height 5, or fewer than two rows at window height 4.
 
 When the dock is too tall, the client MUST drop the status band first, then the live row. The input line MUST NOT drop.
 
