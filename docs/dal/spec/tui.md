@@ -377,6 +377,8 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 
 While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, `/revert`, and `/review` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
 
+A panel that sends one of these requests MUST refuse it in the same way when a turn starts after the panel opened. The rewind list and its confirm MUST NOT send a request while a turn is working or waiting. They MUST show `rewind is unavailable while a turn is <word>; wait for it to finish or interrupt it first`.
+
 `turn/steer` sends `expectedTurnId` set to the active turn.
 
 When the queue holds 32 follow-ups, Alt+Enter MUST show `follow-up queue is full (32); wait for the active turn or press Esc`. After a follow-up is queued, the notice MUST show `queued follow-up <n> of 32`. An unknown slash command MUST stay in the editor and MUST show `unknown command /<name>; start with // to send it as a prompt`. After `/advisor reset`, the notice MUST show `advisor reset; it reviews the current branch at the next turn`.

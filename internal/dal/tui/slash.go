@@ -33,7 +33,7 @@ func (m *model) executeSlash(name, argument string) tea.Cmd {
 	}
 }
 
-var busyThreadCommands = map[string]bool{"new": true, "resume": true, "compact": true, "tree": true, "revert": true, "fork": true, "review": true}
+var busyThreadCommands = map[string]bool{"new": true, "resume": true, "compact": true, "tree": true, "revert": true, "fork": true, "review": true, confirmRewind: true}
 
 func (m *model) executeThreadCommand(name string) tea.Cmd {
 	if busyThreadCommands[name] && m.busyRefusal(name) {
@@ -89,6 +89,9 @@ const (
 )
 
 func (m *model) reviewStart(target, text string) tea.Cmd {
+	if m.busyRefusal("review") {
+		return nil
+	}
 	params := rpc.ReviewStartParams{ThreadID: m.thread.id, Target: rpc.ReviewTarget{Type: target}}
 	switch target {
 	case reviewBase:
@@ -190,7 +193,11 @@ func (m *model) busyRefusal(name string) bool {
 	if word == "" {
 		return false
 	}
-	m.noticef("/%s is unavailable while a turn is %s; wait for it to finish or interrupt it first", name, word)
+	label := "/" + name
+	if name == confirmRewind {
+		label = name
+	}
+	m.noticef("%s is unavailable while a turn is %s; wait for it to finish or interrupt it first", label, word)
 	return true
 }
 
