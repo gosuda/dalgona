@@ -95,6 +95,36 @@ func TestLateShellResultDoesNotJoinNewDraft(t *testing.T) {
 	}
 }
 
+func shellChipCount(m model) int {
+	count := 0
+	for _, held := range m.input.composer.chips {
+		if held.shell {
+			count++
+		}
+	}
+	return count
+}
+
+func TestShellResultsJoinADraftOfShellChips(t *testing.T) {
+	t.Parallel()
+	m, _ := lateModel(t)
+	m = shellType(t, m, "!echo one")
+	m, first := drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = shellType(t, m, "echo two")
+	m, second := drive(t, m, press(tea.KeyEnter, 0, ""))
+	if first == nil || second == nil {
+		t.Fatal("Enter in shell mode produced no command")
+	}
+	m, _ = drive(t, m, first())
+	if got := shellChipCount(m); got != 1 {
+		t.Fatalf("draft holds %d shell chips after the first result, want 1", got)
+	}
+	m, _ = drive(t, m, second())
+	if got := shellChipCount(m); got != 2 {
+		t.Fatalf("draft holds %d shell chips after the second result, want both", got)
+	}
+}
+
 func TestLateRewindKeepsNewDraft(t *testing.T) {
 	t.Parallel()
 	m, caller := lateModel(t)
@@ -145,6 +175,11 @@ func TestLateListReplyDoesNotReplaceOpenPanel(t *testing.T) {
 			m.commit("row", []string{"an earlier row"})
 			m.openReview()
 		}},
+		{name: "approval", open: func(m *model) {
+			m.applyRequest(queuedApproval("req-1", "cmd-1", make(chan requestAnswer, 1)))
+		}},
+		{name: "settings", open: func(m *model) { m.openSettings() }},
+		{name: "login", open: func(m *model) { m.openLogin("") }},
 	}
 	for _, panel := range panels {
 		for _, reply := range []string{"model", "resume", "tree", "advisor"} {
