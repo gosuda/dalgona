@@ -465,9 +465,11 @@ Each note also arrives as a `dynamicToolCall` item with tool `advisor`. That ite
 Every error notice MUST name a recovery action.
 
 - A malformed notification shows `protocol error in <method>: <cause>; reconnect with /resume <thread> or use /new`.
+- A held notification that does not decode when the resume replays it shows the same notice.
 - An `error` notification with `willRetry: false` sets `failed` and shows `error: <message>; retry the turn, /resume <thread>, or /new`. With `willRetry: true`, the state is unchanged and the notice is `error: <message>; retrying the turn, no action needed`.
 - With no thread yet, `/resume <thread>` in these notices reads `/resume`.
 - An advisor command that fails with `-32001` shows `advisor unavailable: <message>; set [advisor] enabled = true in config.toml, then restart dalgona`. Any other advisor failure shows `advisor request failed: <cause>; retry the /advisor command`.
+- A failed `account/login/cancel` shows `cancel sign-in failed: <cause>; run /login again`. A start call that fails after Esc shows `Login failed: <cause>; run /login again`.
 - A failed `turn/start` or `turn/steer` returns its text to the composer ahead of any newer draft. A failed follow-up returns to the head of the queue. A failed `turn/start` sets `failed`. A failed steer keeps the turn state.
 - A prompt sent before a thread exists stays in the composer with `thread is not ready; wait for startup or use /new to retry`.
 - A failed keyword list MUST NOT block prompting.

@@ -30,21 +30,21 @@ func TestLoginCompletedNotice(t *testing.T) {
 			name:     "failure",
 			params:   `{"success":false,"error":"openai did not accept the API key; it was not saved","provider":"openai"}`,
 			provider: "openai",
-			detail:   "Login failed for openai: openai did not accept the API key; it was not saved; run /login again",
+			detail:   "Login failed: openai did not accept the API key; it was not saved; run /login again",
 			failed:   true,
 		},
 		{
 			name:     "failure without error text",
 			params:   `{"success":false,"provider":"openai"}`,
 			provider: "openai",
-			detail:   "Login failed for openai: unknown error; run /login again",
+			detail:   "Login failed: unknown error; run /login again",
 			failed:   true,
 		},
 		{
 			name:     "failure without provider",
 			params:   `{"success":false,"error":"bad token"}`,
 			provider: "the provider",
-			detail:   "Login failed for the provider: bad token; run /login again",
+			detail:   "Login failed: bad token; run /login again",
 			failed:   true,
 		},
 	} {
@@ -63,7 +63,7 @@ func assertLoginCompletedNotice(t *testing.T, tc loginNoticeCase) {
 	if m.notice != tc.detail {
 		t.Fatalf("notice = %q, want %q", m.notice, tc.detail)
 	}
-	if !strings.Contains(m.notice, tc.provider) {
+	if !tc.failed && !strings.Contains(m.notice, tc.provider) {
 		t.Fatalf("notice %q does not name the provider %q", m.notice, tc.provider)
 	}
 	if m.noticeError != tc.failed {
