@@ -380,8 +380,13 @@ func (m *model) exitLine() string {
 	return fmt.Sprintf("Thread %s saved · resume with %s --resume %s", sanitizeText(m.thread.title), m.conn.product, sanitizeText(m.thread.id))
 }
 
+func (m *model) dockInFlight() bool {
+	anchor := m.anchorState()
+	return anchor.moving || (anchor.querying && m.screen.height > 0)
+}
+
 func (m *model) finishQuit() tea.Cmd {
-	if !m.quitting || m.anchorState().moving {
+	if !m.quitting || m.dockInFlight() {
 		return nil
 	}
 	if m.screen.height == 0 || (!m.out.printing && !m.out.settling && len(m.out.pending) == 0) {
@@ -397,7 +402,7 @@ func (m *model) suspend() {
 }
 
 func (m *model) finishSuspend() tea.Cmd {
-	if !m.suspending || m.anchorState().moving {
+	if !m.suspending || m.dockInFlight() {
 		return nil
 	}
 	if m.screen.height == 0 || (!m.out.printing && len(m.out.pending) == 0) {

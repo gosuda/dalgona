@@ -144,6 +144,7 @@ The client MUST request the cursor position again after such an end.
 Private output markers MUST NOT reach the terminal.
 An unanswered query MUST NOT block input or committed output.
 A query MUST expire after one second without a reply.
+With a window height above 0, quit and suspend MUST NOT return while a query is in flight.
 A geometry change during a pending query MUST remain eligible for placement after that query expires.
 If geometry stayed unchanged until expiry, the client MUST wait for a geometry change before another query.
 Physical-bottom placement requires a terminal that answers cursor-position queries.
