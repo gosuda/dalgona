@@ -12,6 +12,9 @@
 	if (diffs < 3)
 		failures.push(`diffs: ${diffs} shown (want at least 3 long diffs)`);
 	const originalScroll = body.scrollTop;
+	const dock = document.querySelector(".dock");
+	const dockScroll = dock ? dock.scrollTop : 0;
+	if (dock) dock.scrollTop = 0;
 	const box = body.getBoundingClientRect();
 	if (body.clientHeight < 36 || box.height < 36)
 		failures.push(
@@ -49,16 +52,39 @@
 			failures.push(`${label}: target height ${rect.height} (want >= 36)`);
 	}
 	const composer = document.querySelector('[aria-label="Message composer"]');
+	const actions = card.querySelector(".request-actions");
+	if (actions) {
+		const cardBox = card.getBoundingClientRect();
+		const actionsBox = actions.getBoundingClientRect();
+		if (actionsBox.bottom > cardBox.bottom + 1)
+			failures.push(
+				`card: actions end ${Math.round(actionsBox.bottom - cardBox.bottom)}px below the card`,
+			);
+	}
 	if (
 		composer &&
 		composer.getBoundingClientRect().top < card.getBoundingClientRect().bottom
 	)
 		failures.push("composer: overlaps approval evidence or actions");
+	if (composer && actions && dock) {
+		let covered = 0;
+		for (const top of [0, dock.scrollHeight]) {
+			dock.scrollTop = top;
+			covered = Math.max(
+				covered,
+				actions.getBoundingClientRect().bottom -
+					composer.getBoundingClientRect().top,
+			);
+		}
+		if (covered > 1)
+			failures.push(
+				`composer: the approval actions cover its top ${Math.round(covered)}px`,
+			);
+	}
 	if (document.documentElement.scrollWidth > innerWidth)
 		failures.push("page: horizontal overflow");
 	if (document.querySelectorAll(".dock .point").length !== 1)
 		failures.push("dock: want one point");
-	const dock = document.querySelector(".dock");
 	if (!dock) failures.push("dock: not found");
 	else if (dock.scrollHeight > dock.clientHeight + 1)
 		failures.push(
@@ -67,6 +93,7 @@
 	if (!composer) {
 		failures.push("composer: not found");
 	} else {
+		if (dock) dock.scrollTop = dock.scrollHeight;
 		const frame = composer.getBoundingClientRect();
 		if (frame.top < 0 || frame.bottom > innerHeight + 1)
 			failures.push(
@@ -99,6 +126,7 @@
 		}
 		composer.scrollTop = composerScroll;
 	}
+	if (dock) dock.scrollTop = 0;
 	const heading = card.querySelector("#request-title");
 	const step = Math.max(48, body.clientHeight - 48);
 	body.scrollTop = 0;
@@ -138,5 +166,6 @@
 			);
 	}
 	body.scrollTop = originalScroll;
+	if (dock) dock.scrollTop = dockScroll;
 	return { ok: failures.length === 0, failures };
 })();

@@ -20,6 +20,20 @@ function baseProps() {
 	};
 }
 
+function appliedRule(selector: string): CSSStyleRule {
+	for (const sheet of Array.from(document.styleSheets)) {
+		for (const rule of Array.from(sheet.cssRules)) {
+			if (
+				rule instanceof CSSStyleRule &&
+				rule.selectorText.startsWith(selector)
+			) {
+				return rule;
+			}
+		}
+	}
+	throw new Error(`no applied rule for ${selector}`);
+}
+
 describe("composer focus", () => {
 	afterEach(cleanup);
 
@@ -947,4 +961,17 @@ describe("escaped slash", () => {
 			"The message and images are too large to send together. Remove an image.",
 		);
 	}, 60000);
+});
+
+describe("composer under a request", () => {
+	afterEach(cleanup);
+
+	test("gives way to the request card down to its label and field", () => {
+		render(Composer, { props: { ...baseProps(), deciding: true } });
+		const rule = appliedRule(".composer.deciding");
+		expect(rule.style.getPropertyValue("flex-shrink")).toBe("1");
+		expect(rule.style.getPropertyValue("min-height")).toContain(
+			"var(--control-height)",
+		);
+	});
 });

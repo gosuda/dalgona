@@ -65,6 +65,20 @@ function mockScrolling(details: HTMLElement) {
 	return { scrollBy, scrollTo };
 }
 
+function appliedRule(selector: string): CSSStyleRule {
+	for (const sheet of Array.from(document.styleSheets)) {
+		for (const rule of Array.from(sheet.cssRules)) {
+			if (
+				rule instanceof CSSStyleRule &&
+				rule.selectorText.startsWith(selector)
+			) {
+				return rule;
+			}
+		}
+	}
+	throw new Error(`no applied rule for ${selector}`);
+}
+
 function lastTop(scroll: Mock): number {
 	const options = scroll.mock.lastCall?.[0] as { top: number } | undefined;
 	if (options === undefined) throw new Error("the details did not scroll");
@@ -208,5 +222,13 @@ describe("approval card", () => {
 		expect(summary).toContain("+1 −1");
 		expect(cards[0]?.querySelector("del")?.textContent).toBe("-beta");
 		expect(cards[0]?.querySelector("ins")?.textContent).toBe("+gamma");
+	});
+});
+
+describe("approval card in the dock", () => {
+	test("keeps its own height and lets the composer give way", () => {
+		render(ApprovalCard, { props: props(commandRequest) });
+		const rule = appliedRule(".request-card");
+		expect(rule.style.getPropertyValue("flex-shrink")).toBe("0");
 	});
 });

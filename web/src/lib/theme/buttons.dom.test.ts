@@ -29,6 +29,36 @@ describe("button hover", () => {
 	});
 });
 
+describe("quiet button", () => {
+	test("rests with no fill, no drawn edge and a dim label", () => {
+		const rule = appliedRule("button.quiet");
+		expect(rule.style.getPropertyValue("border-color")).toBe("transparent");
+		expect(rule.style.getPropertyValue("background")).toBe("transparent");
+		expect(rule.style.getPropertyValue("color")).toBe("var(--dim)");
+	});
+
+	test("takes the quiet padding of 12 px, and leaves the danger variant its own", () => {
+		const rule = appliedRule("button.quiet:not(.danger)");
+		expect(rule.style.getPropertyValue("padding")).toBe("0px var(--space-3)");
+	});
+
+	test("disabled keeps the tone fill, the line edge and the dim label", () => {
+		const rule = appliedRule("button.quiet:disabled");
+		expect(rule.style.getPropertyValue("border-color")).toBe("var(--line)");
+		expect(rule.style.getPropertyValue("background")).toBe("var(--tone)");
+		expect(rule.style.getPropertyValue("color")).toBe("var(--dim)");
+	});
+
+	test("danger comes after quiet, so Interrupt keeps its failed edge and label", () => {
+		const selectors = Array.from(document.styleSheets).flatMap((sheet) =>
+			styleRules(sheet.cssRules).map((rule) => rule.selectorText),
+		);
+		const quiet = selectors.indexOf("button.quiet");
+		expect(quiet).toBeGreaterThanOrEqual(0);
+		expect(selectors.indexOf("button.danger")).toBeGreaterThan(quiet);
+	});
+});
+
 describe("disclosure summary target", () => {
 	test("each summary keeps the minimum pointer target height", () => {
 		const rule = appliedRule("summary");

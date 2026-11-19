@@ -106,6 +106,7 @@ The client MUST cache the setting under the browser key `dalgona.theme` and appl
 Each theme MUST use only the colour roles of `DESIGN.md`. The client MUST NOT paint a gradient.
 Every text role MUST meet 4.5:1 against its ground. Control edges and the focus ring MUST meet 3:1 against their ground. The ink on the point MUST meet 4.5:1.
 Under forced colours, every button edge and focus ring MUST keep a visible border.
+Outside forced colours, a quiet button MUST draw no fill and no edge at rest. The label of a quiet button MUST use `dim`. A disabled quiet button MUST draw the `tone` fill, the `line` edge and the `dim` label.
 Each component value MUST use a named token of `DESIGN.md`. A token MUST NOT hold a value absent from the `DESIGN.md` component tables. The contract test in `web/src/lib/theme/design-contract.test.ts` checks each `DESIGN.md` citation against `web/src/lib/theme/scale.ts`.
 The Settings panel MUST save the choice under the setting path `theme`.
 
@@ -145,6 +146,8 @@ The client MUST NOT render an item whose id is in `statusHide`. The client MUST 
 Each icon MUST carry an `aria-label` that states its value in words. The browser draws Nerd glyphs from its own subset font, and it ignores the `icons` setting.
 
 The band MUST keep a details list under `Status` that holds every shown item as text. The list MUST appear when `statusHide` names an item, and when the window is 40rem or narrower.
+
+Above 40rem the band is three rows at the end of the header. The first row holds `model`. The second row holds `effort`, `approval`, `sandbox`, `folder`, and `queue`. The third row holds `context` and `mark`. Each row MUST end at the right edge of the band.
 
 At 40rem or narrower the band is one row under the title. Below a band width of 30rem the folder item MUST drop. Below 26rem the queue item MUST drop. Below 16rem the effort item MUST drop. Below 12rem the mark item MUST drop. Model, context, approval, and sandbox MUST NOT drop.
 
@@ -234,9 +237,13 @@ The approval card MUST show `Approval required`, a title, the request details, a
 
 The request details MUST scroll inside their own region. The decision actions MUST stay outside that region. The card MUST offer `Accept`, `Accept for session`, `Decline`, and `Cancel and interrupt`.
 ArrowUp and ArrowDown MUST scroll the approval details by 48 px. PageUp and PageDown MUST scroll the approval details by the height of the details minus 48 px. Each PageUp and PageDown scroll MUST move at least 48 px.
-The dock MUST fit within the viewport. Approval details MUST shrink and scroll without hiding the card header or actions.
-Approval details MUST retain a readable scroll region. The card header, actions, and composer MUST NOT overlap.
-While an approval is open, the composer MUST keep its label, field, and actions reachable inside the viewport by scrolling the composer if needed.
+The dock MUST fit within the viewport. Approval details MUST shrink with the viewport and scroll without hiding the card header or actions.
+Approval details MUST retain a readable scroll region. The card header, actions, and composer MUST NOT overlap at any viewport size.
+The request card MUST NOT shrink below the height of its header, details, and actions.
+While a request is open, the composer MUST give up height before the card does, down to its label and one field row.
+When the card, the notices, and the composer at that height are taller than the viewport, the dock MUST scroll inside itself.
+While the dock scrolls, the sticky actions MAY cover part of the details until the dock reaches its end.
+While a request is open, the composer MUST keep its label, field, and actions reachable by scrolling the composer or the dock.
 
 While the card has focus, `y` MUST accept, `a` MUST accept for the session, `n` MUST decline, and Escape MUST cancel and interrupt the turn. Escape MUST answer the card at once, and the two-press guard of the composer MUST NOT apply to it.
 
@@ -491,4 +498,4 @@ The resume panel MUST show its search progress as status text inside its dialog.
 A failed save in the model or settings panel MUST show a notice.
 The composer MUST show its error as an alert beside the message field. The message field MUST name that alert in `aria-describedby`. The composer MUST NOT add a notice for its error.
 The `page live regions` tests in `web/src/lib/components/App.dom.test.ts` check these rules.
-`web/checks/approval-actions.js` checks the approval card on small screens. `web/checks/dock.js` checks the composer dock at the start, the middle and the end of the document. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript at 1280x800, on a thread whose transcript holds more than its column shows.
+`web/checks/approval-actions.js` checks the approval card on small screens. It checks that the card holds its actions and that they do not cover the composer, at both ends of the dock's scroll. `web/checks/dock.js` checks the composer dock at the start, the middle and the end of the document. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/band-rows.js` checks that every band row ends at the right edge of the band, in a window wider than 640 px. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript at 1280x800, on a thread whose transcript holds more than its column shows.
