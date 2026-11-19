@@ -44,7 +44,7 @@ func (r fileResolver) stageRename(ctx context.Context, item edit) error {
 		return reasoned(tool.ReasonOutsideWorkspace, errors.New("patch: rename destination contains parent traversal"))
 	}
 	if _, statErr := r.env.Runner.Stat(ctx, absolute); statErr == nil {
-		return reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: cannot rename %s to %s: destination already exists", r.group.display, display))
+		return atPath(display, reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: cannot rename %s to %s: destination already exists", r.group.display, display)))
 	} else if !errors.Is(statErr, fs.ErrNotExist) {
 		return fmt.Errorf("patch: cannot inspect rename destination %s: %w", display, statErr)
 	}
@@ -121,12 +121,12 @@ func spliceBytes(before []byte, item replacement) []byte {
 	return after
 }
 
-func proveEligible(env tool.Env, item edit) error {
+func proveEligible(env tool.Env, item edit, path string) error {
 	if item.guard.kind != guardReference {
 		return nil
 	}
 	if err := env.Snapshots.Eligible(item.guard.text, env.Evidence); err != nil {
-		return fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err)
+		return atPath(path, fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err))
 	}
 	return nil
 }
@@ -135,7 +135,7 @@ func (r fileResolver) resolve(doc document, item edit) ([]replacement, error) {
 	if item.kind != editChange {
 		return nil, nil
 	}
-	if err := proveEligible(r.env, item); err != nil {
+	if err := proveEligible(r.env, item, r.file.path); err != nil {
 		return nil, err
 	}
 	if err := proveTag(r.file, item); err != nil {
@@ -211,7 +211,7 @@ func (r fileResolver) resolveLines(doc document, item edit) ([]replacement, erro
 	start, end := doc.lineRange(first, last)
 	body := doc.render(item.body)
 	if r.needsCoverage(item, r.file.before[start:end], body) {
-		if coverErr := proveCoverage(r.env.Snapshots, item, r.file.path, item.locator.first, item.locator.last); coverErr != nil {
+		if coverErr := proveCoverage(r.env.Snapshots, item, r.file, item.locator.first, item.locator.last); coverErr != nil {
 			return nil, coverErr
 		}
 	}
@@ -293,7 +293,7 @@ func (r fileResolver) proveFinalRowCoverage(item edit, row int) error {
 	if r.style != HashlineEnhanced {
 		return nil
 	}
-	return proveCoverage(r.env.Snapshots, item, r.file.path, row, row)
+	return proveCoverage(r.env.Snapshots, item, r.file, row, row)
 }
 
 func (r fileResolver) resolveText(doc document, item edit) ([]replacement, error) {
@@ -393,15 +393,15 @@ func mapReferenceGap(store *snapshot.Store, ref string, file *stagedFile, gap in
 }
 
 func staleReference(ref, path string, err error) error {
-	return fmt.Errorf("patch: reference %s for %s is stale: %w. Read again", ref, path, err)
+	return atPath(path, fmt.Errorf("patch: reference %s for %s is stale: %w. Read again", ref, path, err))
 }
 
 func proveUnchanged(env tool.Env, ref, path string, before []byte) error {
 	if err := env.Snapshots.Eligible(ref, env.Evidence); err != nil {
-		return fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err)
+		return atPath(path, fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err))
 	}
 	if env.Snapshots == nil || !env.Snapshots.Unchanged(ref, path, before) {
-		return reasoned(tool.ReasonTargetChanged, fmt.Errorf("patch: reference %s for %s is expired or the file changed. Read again", ref, path))
+		return atPath(path, reasoned(tool.ReasonTargetChanged, fmt.Errorf("patch: reference %s for %s is expired or the file changed. Read again", ref, path)))
 	}
 	return nil
 }
@@ -413,11 +413,14 @@ func (r fileResolver) proveSeen(first, last, index int) error {
 	return fmt.Errorf("patch: changes[%d]: lines %d-%d of %s were not displayed in this session", index, first, last, r.file.path)
 }
 
-func proveCoverage(store *snapshot.Store, item edit, path string, first, last int) error {
+func proveCoverage(store *snapshot.Store, item edit, file *stagedFile, first, last int) error {
 	if store != nil && store.Covers(item.guard.text, first, last) {
 		return nil
 	}
-	return reasoned(tool.ReasonUnobservedRange, fmt.Errorf("patch: changes[%d]: lines %d-%d of %s need prior observation. Read them, then resend", item.index, first, last, path))
+	cause := reasoned(tool.ReasonUnobservedRange, fmt.Errorf("patch: changes[%d]: lines %d-%d of %s need prior observation. Read them, then resend", item.index, first, last, file.path))
+	return &coverageError{
+		err: cause, path: file.path, ref: item.guard.text, first: first, last: last, before: file.before,
+	}
 }
 
 func proveQuotedSpan(doc document, item edit, path string) error {

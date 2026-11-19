@@ -169,11 +169,13 @@ func countStates(paths []tool.PathState) stateCounts {
 	return counts
 }
 
-func (e Editor) refuse(err error) error {
+func (e Editor) refuse(env tool.Env, err error) error {
 	if !e.style.profile() {
 		return err
 	}
-	return outcomeError(e.style, outcomeOf(err), err)
+	outcome := outcomeOf(err)
+	outcome.Recovery = recoveryFor(env, err)
+	return outcomeError(e.style, outcome, err)
 }
 
 func outcomeError(style Style, outcome tool.Outcome, err error) error {

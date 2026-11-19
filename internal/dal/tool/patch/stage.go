@@ -346,7 +346,7 @@ func stageCreate(ctx context.Context, group fileGroup, env tool.Env) (*stagedFil
 	item := group.edits[0]
 	_, err := env.Runner.Stat(ctx, group.absolute)
 	if err == nil {
-		return nil, reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: %s already exists", group.display))
+		return nil, atPath(group.display, reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: %s already exists", group.display)))
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("patch: cannot inspect %s: %w", group.display, err)
@@ -424,9 +424,9 @@ func readTarget(ctx context.Context, env tool.Env, absolute, display string) ([]
 func unreadable(display string, cause error) error {
 	err := fmt.Errorf("patch: %s could not be read: %w", display, cause)
 	if errors.Is(cause, fs.ErrNotExist) {
-		return reasoned(tool.ReasonPathChanged, err)
+		return atPath(display, reasoned(tool.ReasonPathChanged, err))
 	}
-	return err
+	return atPath(display, err)
 }
 
 func checkRenameTargets(files []*stagedFile) error {

@@ -77,7 +77,7 @@ func requireOldReferenceRefused(t *testing.T, f *outcomeFixture, style Style) {
 	t.Helper()
 	writeFixture(t, f.cwd, "a.txt", "a-before\n")
 	err := f.run(t, style, "[a.txt@{refA}]\nPUT 1:\n+a-second\n")
-	requireWrappedOutcome(t, err, style, refused(tool.StatusConflict, tool.ReasonPathChanged, tool.ErrClassStale))
+	requireWrappedOutcome(t, err, style, withRecovery(refused(tool.StatusConflict, tool.ReasonPathChanged, tool.ErrClassStale), readUnknown("a.txt")))
 	if actual := readFixture(t, f.cwd, "a.txt"); actual != "a-before\n" {
 		t.Fatalf("a refused call changed a.txt to %q", actual)
 	}

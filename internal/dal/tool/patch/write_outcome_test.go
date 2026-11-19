@@ -327,7 +327,7 @@ func (test partialEpochCase) run(t *testing.T) {
 		}
 		return
 	}
-	want := refused(tool.StatusConflict, tool.ReasonPathChanged, tool.ErrClassStale)
+	want := withRecovery(refused(tool.StatusConflict, tool.ReasonPathChanged, tool.ErrClassStale), readUnknown("a.txt"))
 	requireWrappedOutcome(t, err, HashlineLight, want)
 	if actual := readFixture(t, f.cwd, "a.txt"); actual != "a-before\n" {
 		t.Fatalf("a refused call changed a.txt to %q", actual)
