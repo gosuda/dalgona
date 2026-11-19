@@ -239,6 +239,8 @@ func (p *rootPin) unlinkFileAt(base string) error {
 	return nil
 }
 
+func (p *rootPin) syncDir() error { return nil }
+
 func (p *rootPin) close() {
 	if p == nil || p.root == nil {
 		return

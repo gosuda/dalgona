@@ -363,8 +363,10 @@ Light never relaxes grants or approval (S-WRITE).
 
 Reuse the staged writer. Create and sync complete temps, and dirty affected search
 indexes before target mutation. Execute ordered target operations, then clean up
-and sync under existing POSIX/Windows rules. After the first target operation,
-finish commit or rollback before honoring cancellation.
+and sync under existing POSIX/Windows rules. A local pin syncs its directory after
+the last target operation. Windows skips that sync. A sync failure leaves the files
+installed and reports `write_error` with `complete`. After the first target
+operation, finish commit or rollback before honoring cancellation.
 
 Rollback is an attempt, not an atomic multi-file transaction visible to every
 reader. Crashes and non-cooperating writers remain limitations from S-WRITE.

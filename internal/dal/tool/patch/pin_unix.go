@@ -176,6 +176,16 @@ func (p *dirPin) unlinkFileAt(base string) error {
 	return nil
 }
 
+func (p *dirPin) syncDir() error {
+	if p == nil {
+		return nil
+	}
+	if err := p.file.Sync(); err != nil {
+		return fmt.Errorf("patch: sync directory %s: %w", p.file.Name(), err)
+	}
+	return nil
+}
+
 func (p *dirPin) close() {
 	if p == nil || p.file == nil {
 		return
