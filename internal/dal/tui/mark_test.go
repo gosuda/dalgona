@@ -172,3 +172,84 @@ func TestMarkPixelsCache(t *testing.T) {
 		t.Fatal("unknown product must yield no pixels")
 	}
 }
+
+func TestMarkOverlayReusesAStoredMarkOnlyForTheSameInputs(t *testing.T) {
+	t.Parallel()
+	night, day := newTheme(themeNight, true), newTheme(themeDay, true)
+	if paletteHex(night, roleAccentText) == paletteHex(day, roleAccentText) {
+		t.Fatal("night and day share an accent, so the theme cannot be told apart")
+	}
+	base := markModel("kitty", 83, 29)
+	base.screen.theme = night
+	key := markKey{proto: "kitty", product: "dalgona", accent: paletteHex(night, roleAccentText), width: 83, height: 29}
+	markCache.Store(key, "stored")
+	defer markCache.Delete(key)
+	if got := base.markOverlay(); got != "stored" {
+		t.Fatalf("the same product, theme, size and protocol re-encoded the mark: %q", got[:min(len(got), 24)])
+	}
+	for name, change := range map[string]func(*model){
+		"protocol": func(m *model) { m.screen.imgProto = "iterm" },
+		"product":  func(m *model) { m.conn.product = "dal" },
+		"theme":    func(m *model) { m.screen.theme = day },
+		"width":    func(m *model) { m.screen.width++ },
+		"height":   func(m *model) { m.screen.height++ },
+	} {
+		changed := base
+		change(&changed)
+		if got := changed.markOverlay(); got == "stored" {
+			t.Errorf("a change of %s reused the mark encoded for the old inputs", name)
+		}
+	}
+}
+
+func TestMarkOverlayFollowsResizeAndTheme(t *testing.T) {
+	t.Parallel()
+	m := markModel("kitty", 91, 31)
+	m.conn.product = "dal"
+	m.screen.theme = newTheme(themeNight, true)
+	before := m.markOverlay()
+	m.screen.width, m.screen.height = 101, 37
+	after := m.markOverlay()
+	cols := markRows * markCellRatio
+	for _, tc := range []struct {
+		name          string
+		got           string
+		width, height int
+	}{
+		{name: "before the resize", got: before, width: 91, height: 31},
+		{name: "after the resize", got: after, width: 101, height: 37},
+	} {
+		anchor := "\x1b[" + strconv.Itoa(tc.height-markRows+1) + ";" + strconv.Itoa(tc.width-cols+1) + "H"
+		if !strings.Contains(tc.got, anchor) {
+			t.Errorf("%s: anchor %q missing in %q", tc.name, anchor, tc.got[:min(len(tc.got), 64)])
+		}
+	}
+	day := newTheme(themeDay, true)
+	m.screen.theme = day
+	want := fadePNG(brandPNG("dal", day), markAlpha)
+	if got := kittyPayload(t, m.markOverlay()); !bytes.Equal(got, want) {
+		t.Fatal("the mark kept the tint of the earlier theme")
+	}
+}
+
+func TestMarkCacheStaysBounded(t *testing.T) {
+	t.Cleanup(func() {
+		markCache.Clear()
+		markCacheSize.Store(0)
+	})
+	m := markModel("kitty", 60, 24)
+	for width := 60; width < 60+3*markCacheLimit; width++ {
+		m.screen.width = width
+		if m.markOverlay() == "" {
+			t.Fatalf("no mark at width %d", width)
+		}
+	}
+	entries := 0
+	markCache.Range(func(any, any) bool {
+		entries++
+		return true
+	})
+	if entries == 0 || entries > markCacheLimit {
+		t.Fatalf("the mark cache holds %d entries after %d sizes, want 1 to %d", entries, 3*markCacheLimit, markCacheLimit)
+	}
+}

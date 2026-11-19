@@ -23,6 +23,8 @@ func (m *model) handleMsg(msg tea.Msg) tea.Cmd {
 		return m.updateAsync(msg)
 	case spinner.TickMsg:
 		return m.updateTick(msg)
+	case keywordTickMsg:
+		return m.sendKeywordMatch(msg)
 	case hintExpiredMsg:
 		m.expireHint(msg)
 		return nil

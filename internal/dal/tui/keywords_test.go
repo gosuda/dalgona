@@ -2,8 +2,14 @@ package tui
 
 import (
 	"context"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
@@ -141,14 +147,145 @@ func TestStaleKeywordReplyIsDropped(t *testing.T) {
 	}
 }
 
+func runCommands(t *testing.T, m model, command tea.Cmd) (model, []tea.Msg) {
+	t.Helper()
+	var seen []tea.Msg
+	for pending := []tea.Cmd{command}; len(pending) > 0; pending = pending[1:] {
+		for _, msg := range commandMsgs(pending[0]) {
+			seen = append(seen, msg)
+			var follow tea.Cmd
+			m, follow = updateWithCommand(t, m, msg)
+			pending = append(pending, follow)
+		}
+	}
+	return m, seen
+}
+
 func TestKeywordMatchErrorIsSilent(t *testing.T) {
 	t.Parallel()
-	m := newTestModel(&failingKeywordCaller{}, Options{})
-	m.input.composer.SetValue("ultrathink")
-	command := m.matchKeywords()
-	m, _ = drive(t, m, command())
-	if m.notice != "" || m.noticeError {
-		t.Fatalf("a server without keyword matching raised a notice: %q", m.notice)
+	synctest.Test(t, func(t *testing.T) {
+		m := newTestModel(&failingKeywordCaller{}, Options{})
+		m.input.composer.SetValue("ultrathink")
+		command := m.matchKeywords()
+		m, msgs := runCommands(t, m, command)
+		failed := false
+		for _, msg := range msgs {
+			if reply, ok := msg.(resultMsg); ok && reply.op == "keywordMatch" && reply.err != nil {
+				failed = true
+			}
+		}
+		if !failed {
+			t.Fatal("the failing server was never asked for a match")
+		}
+		if m.notice != "" || m.noticeError {
+			t.Fatalf("a server without keyword matching raised a notice: %q", m.notice)
+		}
+	})
+}
+
+type keywordRecorder struct {
+	mu   sync.Mutex
+	sent []keywordMatchParams
+}
+
+func (k *keywordRecorder) Notify(string, any) error { return nil }
+
+func (k *keywordRecorder) Call(_ context.Context, method string, params, _ any) error {
+	if method != "dalgona/keywords/match" {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.sent = append(k.sent, params.(keywordMatchParams))
+	return nil
+}
+
+func (k *keywordRecorder) matches() []keywordMatchParams {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]keywordMatchParams(nil), k.sent...)
+}
+
+func typeBurst(run *emulatedRun, text string) {
+	for _, r := range text {
+		run.send(press(r, 0, string(r)))
+		time.Sleep(5 * time.Millisecond)
+	}
+	synctest.Wait()
+}
+
+func pause(d time.Duration) {
+	time.Sleep(d)
+	synctest.Wait()
+}
+
+func expectMatches(t *testing.T, client *keywordRecorder, when string, want ...keywordMatchParams) {
+	t.Helper()
+	if got := client.matches(); !slices.Equal(got, want) {
+		t.Fatalf("%s: matches = %+v, want %+v", when, got, want)
+	}
+}
+
+func TestKeywordMatchSentOncePerPause(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		state string
+		kind  string
+	}{
+		{name: "no turn runs", state: stateIdle, kind: "prompt"},
+		{name: "a turn runs", state: stateRunning, kind: "steer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				client := new(keywordRecorder)
+				run := startRecordedWith(client, 100, 24, new(recordedOutput))
+				defer run.stop()
+				run.send(func(m *model) { m.thread.id, m.thread.state = "t1", tc.state })
+				synctest.Wait()
+				typeBurst(run, "ultrathink")
+				expectMatches(t, client, "while ten keys were still arriving")
+				pause(114 * time.Millisecond)
+				expectMatches(t, client, "119 ms after the last key")
+				pause(2 * time.Millisecond)
+				first := keywordMatchParams{ThreadID: "t1", Text: "ultrathink", Kind: tc.kind}
+				expectMatches(t, client, "120 ms after the last key", first)
+				typeBurst(run, "!")
+				pause(time.Second)
+				second := keywordMatchParams{ThreadID: "t1", Text: "ultrathink!", Kind: tc.kind}
+				expectMatches(t, client, "after the next pause", first, second)
+			})
+		})
+	}
+}
+
+func TestKeywordMatchSkipsLargeDraft(t *testing.T) {
+	t.Parallel()
+	const limit = 64 << 10
+	for _, tc := range []struct {
+		name  string
+		bytes int
+		sent  int
+	}{
+		{name: "64 KiB", bytes: limit, sent: 1},
+		{name: "over 64 KiB", bytes: limit + 1, sent: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				client := new(keywordRecorder)
+				run := startRecordedWith(client, 100, 24, new(recordedOutput))
+				defer run.stop()
+				run.send(func(m *model) { m.input.composer.SetValue(strings.Repeat("x", tc.bytes-1)) })
+				synctest.Wait()
+				typeBurst(run, "x")
+				pause(time.Second)
+				if got := client.matches(); len(got) != tc.sent {
+					t.Fatalf("a draft of %d bytes sent %d matches, want %d", tc.bytes, len(got), tc.sent)
+				}
+			})
+		})
 	}
 }
 
