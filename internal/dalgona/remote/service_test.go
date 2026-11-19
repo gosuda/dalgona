@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/config"
@@ -142,41 +143,23 @@ func TestServiceConstructionDoesNotBlockOtherSpecs(t *testing.T) {
 	}
 }
 
-func waitersOf(b *Binder, spec config.RunnerSpec) int32 {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if call, ok := b.calls[spec]; ok {
-		return call.waiters.Load()
-	}
-	return -1
-}
-
-func requireJoined(t *testing.T, b *Binder, spec config.RunnerSpec) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for waitersOf(b, spec) != 1 {
-		if time.Now().After(deadline) {
-			t.Fatal("second caller did not join the shared build within 5 seconds")
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 func TestServiceCancelledBuilderDoesNotPoisonWaiter(t *testing.T) {
-	b, svc := blockingBinder()
-	slow := config.RunnerSpec{Service: "slow"}
-	builderCtx, cancel := context.WithCancel(t.Context())
-	first := bindAsync(builderCtx, b, slow)
-	<-svc.entered
-	second := bindAsync(t.Context(), b, slow)
-	requireJoined(t, b, slow)
-	cancel()
-	if got := requireOutcome(t, first, "cancelled builder"); !errors.Is(got.err, context.Canceled) {
-		t.Fatalf("cancelled builder error = %v, want context.Canceled", got.err)
-	}
-	close(svc.release)
-	requireShared(t, requireOutcome(t, second, "surviving waiter"), svc.fast, "surviving waiter")
-	if got := svc.constructed(); got != 2 {
-		t.Fatalf("constructed %d services, want 2", got)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		b, svc := blockingBinder()
+		slow := config.RunnerSpec{Service: "slow"}
+		builderCtx, cancel := context.WithCancel(t.Context())
+		first := bindAsync(builderCtx, b, slow)
+		<-svc.entered
+		second := bindAsync(t.Context(), b, slow)
+		synctest.Wait()
+		cancel()
+		if got := requireOutcome(t, first, "cancelled builder"); !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("cancelled builder error = %v, want context.Canceled", got.err)
+		}
+		close(svc.release)
+		requireShared(t, requireOutcome(t, second, "surviving waiter"), svc.fast, "surviving waiter")
+		if got := svc.constructed(); got != 2 {
+			t.Fatalf("constructed %d services, want 2", got)
+		}
+	})
 }
