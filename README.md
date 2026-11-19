@@ -18,7 +18,7 @@ dal --version
 
 With no release tag, `@latest` resolves to the head of the default branch. Pin an exact build with `@<commit-hash>`.
 
-The commands land in the Go binary directory (`$(go env GOPATH)/bin`, or `$GOBIN` when set). If that directory is not on `PATH`, the install succeeds but `dal --version` fails; add it to `PATH` before continuing.
+The commands land in the Go binary directory (`$GOBIN` when set, otherwise the `bin` directory under the first entry of `go env GOPATH`). If that directory is not on `PATH`, the install succeeds but `dal --version` fails; add it to `PATH` before continuing.
 
 Open the terminal interface from the directory you want the agent to work in:
 
@@ -194,7 +194,7 @@ dalgona doctor
 # ok plugins: 0 loaded
 ```
 
-Each check prints one `ok`, `warn`, or `fail` row. `--online` adds one model-list request per provider with a credential that has a model list to read; a credentialed provider with no model list gives a `warn` row and no request. See the [doctor contract](docs/dalgona/spec/doctor.md) for the full row list.
+Each check prints one `ok`, `warn`, or `fail` row. `--online` reads one model list per credentialed provider doctor can list: most providers answer one live request, `antigravity` reports its bundled catalog with no request, and a credentialed provider doctor cannot list (such as `copilot`) gives a `warn` row with no request. See the [doctor contract](docs/dalgona/spec/doctor.md) for the full row list.
 
 ### Use an outer sandbox
 
