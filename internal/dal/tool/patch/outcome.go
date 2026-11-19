@@ -56,6 +56,8 @@ var reasonRows = map[tool.Reason]reasonRow{
 	tool.ReasonInterrupted:            {tool.StatusInterrupted, tool.ErrClassNone},
 	tool.ReasonWriteFailed:            {tool.StatusWriteError, tool.ErrClassIO},
 	tool.ReasonRollbackFailed:         {tool.StatusWriteError, tool.ErrClassIO},
+	tool.ReasonSyncFailed:             {tool.StatusWriteError, tool.ErrClassIO},
+	tool.ReasonCommitUnknown:          {tool.StatusIndeterminate, tool.ErrClassIO},
 }
 
 var sentinelReasons = []struct {
@@ -115,26 +117,55 @@ func interruption(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-func commitOutcome(effects, rollbackFailures int) tool.Outcome {
-	switch {
-	case effects == 0:
-		return outcomeFor(tool.CommitNone, tool.ReasonWriteFailed)
-	case rollbackFailures == 0:
-		return outcomeFor(tool.CommitRestored, tool.ReasonWriteFailed)
-	}
-	return outcomeFor(tool.CommitPartial, tool.ReasonRollbackFailed)
-}
-
 func outcomeFor(commit tool.CommitState, reason tool.Reason) tool.Outcome {
 	row := reasonRows[reason]
 	return tool.Outcome{Status: row.status, Commit: commit, Reason: reason, Class: row.class}
 }
 
-func failedCommit(cause error, effects, rollbackFailures int) tool.Outcome {
-	if effects == 0 && interruption(cause) {
-		return outcomeOf(cause)
+func failedCommit(cause error, paths []tool.PathState, effects, rollbackFailures int) tool.Outcome {
+	outcome := writeOutcome(paths, effects, rollbackFailures)
+	if effects == 0 && interruption(cause) && outcome.Commit == tool.CommitNone {
+		outcome = outcomeOf(cause)
+		outcome.Paths = paths
 	}
-	return commitOutcome(effects, rollbackFailures)
+	return outcome
+}
+
+func writeOutcome(paths []tool.PathState, effects, rollbackFailures int) tool.Outcome {
+	var outcome tool.Outcome
+	switch counts := countStates(paths); {
+	case counts.unknown > 0:
+		outcome = outcomeFor(tool.CommitUnknown, tool.ReasonCommitUnknown)
+	case counts.after == 0 && effects > 0:
+		outcome = outcomeFor(tool.CommitRestored, tool.ReasonWriteFailed)
+	case counts.after == 0:
+		outcome = outcomeFor(tool.CommitNone, tool.ReasonWriteFailed)
+	case counts.before == 0:
+		outcome = outcomeFor(tool.CommitComplete, tool.ReasonSyncFailed)
+	case rollbackFailures > 0:
+		outcome = outcomeFor(tool.CommitPartial, tool.ReasonRollbackFailed)
+	default:
+		outcome = outcomeFor(tool.CommitPartial, tool.ReasonSyncFailed)
+	}
+	outcome.Paths = paths
+	return outcome
+}
+
+type stateCounts struct{ before, after, unknown int }
+
+func countStates(paths []tool.PathState) stateCounts {
+	var counts stateCounts
+	for _, item := range paths {
+		switch item.State {
+		case tool.PathBefore:
+			counts.before++
+		case tool.PathAfter:
+			counts.after++
+		default:
+			counts.unknown++
+		}
+	}
+	return counts
 }
 
 func (e Editor) refuse(err error) error {

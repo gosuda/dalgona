@@ -218,6 +218,10 @@ func writeFailure(commit tool.CommitState, reason tool.Reason) tool.Outcome {
 	return tool.Outcome{Status: tool.StatusWriteError, Commit: commit, Reason: reason, Class: tool.ErrClassIO}
 }
 
+var commitUnknown = tool.Outcome{
+	Status: tool.StatusIndeterminate, Commit: tool.CommitUnknown, Reason: tool.ReasonCommitUnknown, Class: tool.ErrClassIO,
+}
+
 func editCase(name, input string, want tool.Outcome, steps ...fixtureStep) outcomeCase {
 	return outcomeCase{name: name, input: input, want: want, steps: steps}
 }
@@ -386,13 +390,25 @@ func TestOutcomeStatusAndCommitState(t *testing.T) {
 			name: "IO-02", styles: lightOnly, input: twoFileEdit,
 			steps:    []fixtureStep{twoFiles, failSecondFile},
 			contains: "All completed writes were restored",
-			want:     writeFailure(tool.CommitRestored, tool.ReasonWriteFailed),
+			want:     withPaths(writeFailure(tool.CommitRestored, tool.ReasonWriteFailed), "a.txt", "before", "b.txt", "before"),
 		},
 		{
 			name: "IO-03", styles: lightOnly, input: twoFileEdit,
 			steps:    []fixtureStep{twoFiles, failRestore},
 			contains: "Rollback was incomplete",
-			want:     writeFailure(tool.CommitPartial, tool.ReasonRollbackFailed),
+			want:     withPaths(writeFailure(tool.CommitPartial, tool.ReasonRollbackFailed), "a.txt", "after", "b.txt", "before"),
+		},
+		{
+			name: "IO-04", styles: lightOnly, input: twoFileEdit,
+			steps:    []fixtureStep{twoFiles, blindAfterFailure},
+			contains: "Retained backup for a.txt",
+			want:     withPaths(commitUnknown, "a.txt", "unknown", "b.txt", "before"),
+		},
+		{
+			name: "IO-05", styles: lightOnly, input: "[a.txt@{refA}]\nPUT 1:\n+a-after\n",
+			steps:    []fixtureStep{twoFiles, installThenFail},
+			contains: "injected sync failure",
+			want:     withPaths(writeFailure(tool.CommitComplete, tool.ReasonSyncFailed), "a.txt", "after"),
 		},
 		{
 			name: "IO-07", styles: lightOnly, run: cancelBeforeApply,
@@ -402,35 +418,61 @@ func TestOutcomeStatusAndCommitState(t *testing.T) {
 		{
 			name: "IO-08", styles: lightOnly, run: cancelAfterFirstWrite,
 			contains: "All completed writes were restored",
-			want:     writeFailure(tool.CommitRestored, tool.ReasonWriteFailed),
+			want:     withPaths(writeFailure(tool.CommitRestored, tool.ReasonWriteFailed), "a.txt", "before", "b.txt", "before"),
 		},
 	}
 	runOutcomeCases(t, cases)
 }
 
-func TestCommitFailureOutcomeRule(t *testing.T) {
+func pathStates(pairs ...string) []tool.PathState {
+	out := make([]tool.PathState, 0, len(pairs)/2)
+	for i := 0; i < len(pairs); i += 2 {
+		out = append(out, tool.PathState{Path: pairs[i], State: pairs[i+1]})
+	}
+	return out
+}
+
+func withPaths(outcome tool.Outcome, pairs ...string) tool.Outcome {
+	outcome.Paths = pathStates(pairs...)
+	return outcome
+}
+
+func TestVerifiedCommitFailureOutcomeRule(t *testing.T) {
 	boom := errors.New("boom")
+	none := writeFailure(tool.CommitNone, tool.ReasonWriteFailed)
+	restored := writeFailure(tool.CommitRestored, tool.ReasonWriteFailed)
+	rollbackFailed := writeFailure(tool.CommitPartial, tool.ReasonRollbackFailed)
+	syncFailed := writeFailure(tool.CommitPartial, tool.ReasonSyncFailed)
+	complete := writeFailure(tool.CommitComplete, tool.ReasonSyncFailed)
 	interrupted := refused(tool.StatusInterrupted, tool.ReasonInterrupted, tool.ErrClassNone)
 	tests := []struct {
 		row      string
 		name     string
 		cause    error
+		paths    []tool.PathState
 		effects  int
 		failures int
 		want     tool.Outcome
 	}{
-		{"IO-02", "no effect", boom, 0, 0, writeFailure(tool.CommitNone, tool.ReasonWriteFailed)},
-		{"IO-02", "no effect with a classified cause", reasoned(tool.ReasonNoReplaceUnavailable, boom), 0, 0, writeFailure(tool.CommitNone, tool.ReasonWriteFailed)},
-		{"IO-02", "restored", boom, 2, 0, writeFailure(tool.CommitRestored, tool.ReasonWriteFailed)},
-		{"IO-03", "rollback failed", boom, 2, 1, writeFailure(tool.CommitPartial, tool.ReasonRollbackFailed)},
-		{"IO-07", "cancelled before an effect", context.Canceled, 0, 0, interrupted},
-		{"IO-07", "deadline before an effect", context.DeadlineExceeded, 0, 0, interrupted},
-		{"IO-08", "cancelled after an effect", context.Canceled, 1, 0, writeFailure(tool.CommitRestored, tool.ReasonWriteFailed)},
-		{"IO-08", "cancelled and rollback failed", context.Canceled, 1, 1, writeFailure(tool.CommitPartial, tool.ReasonRollbackFailed)},
+		{"IO-02", "no effect", boom, pathStates("a", "before"), 0, 0, withPaths(none, "a", "before")},
+		{"IO-02", "no effect with a classified cause", reasoned(tool.ReasonNoReplaceUnavailable, boom), pathStates("a", "before"), 0, 0, withPaths(none, "a", "before")},
+		{"IO-02", "restored", boom, pathStates("a", "before", "b", "before"), 2, 0, withPaths(restored, "a", "before", "b", "before")},
+		{"IO-02", "restore error but the bytes are back", boom, pathStates("a", "before"), 1, 1, withPaths(restored, "a", "before")},
+		{"IO-03", "rollback failed", boom, pathStates("a", "after", "b", "before"), 2, 1, withPaths(rollbackFailed, "a", "after", "b", "before")},
+		{"IO-03", "mix without a rollback failure", boom, pathStates("a", "after", "b", "before"), 1, 0, withPaths(syncFailed, "a", "after", "b", "before")},
+		{"IO-04", "one path unknown", boom, pathStates("a", "unknown", "b", "before"), 1, 0, withPaths(commitUnknown, "a", "unknown", "b", "before")},
+		{"IO-04", "unknown beats a mix", boom, pathStates("a", "after", "b", "unknown"), 1, 1, withPaths(commitUnknown, "a", "after", "b", "unknown")},
+		{"IO-05", "every path installed", boom, pathStates("a", "after"), 0, 0, withPaths(complete, "a", "after")},
+		{"IO-05", "two paths installed", boom, pathStates("a", "after", "b", "after"), 1, 0, withPaths(complete, "a", "after", "b", "after")},
+		{"IO-07", "cancelled before an effect", context.Canceled, pathStates("a", "before"), 0, 0, withPaths(interrupted, "a", "before")},
+		{"IO-07", "deadline before an effect", context.DeadlineExceeded, pathStates("a", "before"), 0, 0, withPaths(interrupted, "a", "before")},
+		{"IO-07", "cancelled but a path reads after", context.Canceled, pathStates("a", "after"), 0, 0, withPaths(complete, "a", "after")},
+		{"IO-08", "cancelled after an effect", context.Canceled, pathStates("a", "before", "b", "before"), 1, 0, withPaths(restored, "a", "before", "b", "before")},
+		{"IO-08", "cancelled and rollback failed", context.Canceled, pathStates("a", "after", "b", "before"), 1, 1, withPaths(rollbackFailed, "a", "after", "b", "before")},
 	}
 	for _, test := range tests {
 		t.Run(test.row+"/"+test.name, func(t *testing.T) {
-			got := failedCommit(test.cause, test.effects, test.failures)
+			got := failedCommit(test.cause, test.paths, test.effects, test.failures)
 			requireOutcomeValue(t, got, test.want, test.cause)
 			if err := got.Valid(); err != nil {
 				t.Fatal(err)

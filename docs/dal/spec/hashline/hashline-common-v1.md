@@ -385,6 +385,7 @@ Report observed outcome, not intended outcome. The new profiles do not yet emit 
 nothing written. `write_error/complete` means effects installed but success/durability
 failed, for example a directory-sync failure after renames. `partial` lists every
 affected path and verified before/after state. Unknown state requires indeterminate.
+A sha re-read after rollback decides every path state.
 
 Do not publish executable references or Chain edges before commit and its required
 record boundary succeed. Invalidate relevant epochs on partial/uncertain outcomes.

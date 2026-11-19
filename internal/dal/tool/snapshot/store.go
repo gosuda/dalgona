@@ -287,6 +287,15 @@ func (s *Store) Rename(oldPath, newPath string, before, after []byte, _ []Splice
 	return s.putLocked(newPath, after, nil)
 }
 
+func (s *Store) Invalidate(path string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.breakDest(path)
+}
+
 func (s *Store) breakDest(path string) {
 	current, ok := s.heads[path]
 	if !ok {

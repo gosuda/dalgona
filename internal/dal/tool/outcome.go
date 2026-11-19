@@ -67,6 +67,14 @@ const (
 	ReasonInterrupted            Reason = "interrupted"
 	ReasonWriteFailed            Reason = "write_failed"
 	ReasonRollbackFailed         Reason = "rollback_failed"
+	ReasonSyncFailed             Reason = "sync_failed"
+	ReasonCommitUnknown          Reason = "commit_unknown"
+)
+
+const (
+	PathBefore  = "before"
+	PathAfter   = "after"
+	PathUnknown = "unknown"
 )
 
 type PathState struct {
@@ -118,6 +126,18 @@ func (o Outcome) Valid() error {
 		return fmt.Errorf("tool: status %q needs a reason", o.Status)
 	}
 	return nil
+}
+
+func PathStateOf(current, before, after string, readable bool) string {
+	switch {
+	case !readable:
+		return PathUnknown
+	case current == before:
+		return PathBefore
+	case current == after:
+		return PathAfter
+	}
+	return PathUnknown
 }
 
 type OutcomeError struct {

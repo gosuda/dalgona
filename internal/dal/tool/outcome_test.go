@@ -85,3 +85,33 @@ func requireReasonOnOtherStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestPathStateOfComparesVerifiedShas(t *testing.T) {
+	tests := []struct {
+		row      string
+		name     string
+		current  string
+		before   string
+		after    string
+		readable bool
+		want     string
+	}{
+		{"IO-03", "installed bytes", "N", "O", "N", true, "after"},
+		{"IO-03", "restored bytes", "O", "O", "N", true, "before"},
+		{"IO-03", "created file removed", "", "", "N", true, "before"},
+		{"IO-03", "created file installed", "N", "", "N", true, "after"},
+		{"IO-03", "deleted file still absent", "", "O", "", true, "after"},
+		{"IO-03", "deleted file restored", "O", "O", "", true, "before"},
+		{"IO-04", "bytes of neither image", "X", "O", "N", true, "unknown"},
+		{"IO-04", "unreadable at the after sha", "N", "O", "N", false, "unknown"},
+		{"IO-04", "unreadable at the before sha", "O", "O", "N", false, "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.row+"/"+test.name, func(t *testing.T) {
+			got := PathStateOf(test.current, test.before, test.after, test.readable)
+			if got != test.want {
+				t.Fatalf("PathStateOf(%q, %q, %q, %v) = %q, want %q", test.current, test.before, test.after, test.readable, got, test.want)
+			}
+		})
+	}
+}

@@ -59,19 +59,95 @@ func commitBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Res
 	}
 	effects, failed, commitErr := commitWriteSet(ctx, env, states)
 	if commitErr != nil {
-		commitCtx := context.WithoutCancel(ctx)
-		rollbackFailures := rollback(commitCtx, env, effects)
-		if len(rollbackFailures) == 0 {
-			cleanupStates(commitCtx, env, states)
-		} else {
-			cleanupStatesKeepBackups(commitCtx, env, states)
-		}
-		outcome := failedCommit(commitErr, len(effects), len(rollbackFailures))
-		return tool.Result{}, outcome, writeError(failed, commitErr, states, rollbackFailures)
+		run := commitRun{files: batch.files, states: states, effects: effects, failed: failed, cause: commitErr}
+		outcome, err := failCommit(context.WithoutCancel(ctx), env, batch.style, run)
+		return tool.Result{}, outcome, err
 	}
 	cleanupStates(context.WithoutCancel(ctx), env, states)
 	refs := recordSnapshots(env, batch.files)
 	return tool.Result{Output: appliedOutput(batch.summary, batch.files, refs), OK: true}, appliedOutcome, nil
+}
+
+type commitRun struct {
+	files   []*stagedFile
+	states  []*writeState
+	effects []*writeEffect
+	failed  *writeState
+	cause   error
+}
+
+func failCommit(ctx context.Context, env tool.Env, style Style, run commitRun) (tool.Outcome, error) {
+	rollbackFailures := rollback(ctx, env, run.effects)
+	if !style.profile() {
+		cleanBackups(ctx, env, run.states, len(rollbackFailures) > 0)
+		return tool.Outcome{}, writeError(run.failed, run.cause, run.states, rollbackFailures, false)
+	}
+	paths := verifiedStates(ctx, env, writtenPaths(run.files))
+	outcome := failedCommit(run.cause, paths, len(run.effects), len(rollbackFailures))
+	keepAll := outcome.Commit == tool.CommitUnknown
+	cleanBackups(ctx, env, run.states, keepAll || len(rollbackFailures) > 0)
+	invalidatePaths(env, outcome)
+	return outcome, writeError(run.failed, run.cause, run.states, rollbackFailures, keepAll)
+}
+
+func cleanBackups(ctx context.Context, env tool.Env, states []*writeState, keep bool) {
+	if keep {
+		cleanupStatesKeepBackups(ctx, env, states)
+		return
+	}
+	cleanupStates(ctx, env, states)
+}
+
+func invalidatePaths(env tool.Env, outcome tool.Outcome) {
+	if !slices.Contains([]tool.CommitState{tool.CommitPartial, tool.CommitUnknown, tool.CommitComplete}, outcome.Commit) {
+		return
+	}
+	for _, item := range outcome.Paths {
+		env.Snapshots.Invalidate(item.Path)
+	}
+}
+
+type pathCheck struct {
+	path     string
+	absolute string
+	pin      *dirPin
+	before   string
+	after    string
+}
+
+func writtenPaths(files []*stagedFile) []pathCheck {
+	checks := make([]pathCheck, 0, len(files)*2)
+	for _, file := range files {
+		after := ""
+		if !file.deleted && file.renameTo == "" {
+			after = file.afterSHA
+		}
+		checks = append(checks, pathCheck{path: file.path, absolute: file.absolute, pin: file.pin, before: file.beforeSHA, after: after})
+		if file.renameTo != "" {
+			checks = append(checks, pathCheck{path: file.renameTo, absolute: file.renameAbs, pin: file.renamePin, after: file.afterSHA})
+		}
+	}
+	return checks
+}
+
+func verifiedStates(ctx context.Context, env tool.Env, checks []pathCheck) []tool.PathState {
+	states := make([]tool.PathState, 0, len(checks))
+	for _, check := range checks {
+		current, readable := currentSHA(ctx, env, check)
+		states = append(states, tool.PathState{Path: check.path, State: tool.PathStateOf(current, check.before, check.after, readable)})
+	}
+	return states
+}
+
+func currentSHA(ctx context.Context, env tool.Env, check pathCheck) (string, bool) {
+	data, err := readPinned(ctx, env, check.pin, check.absolute)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "", true
+	case err != nil:
+		return "", false
+	}
+	return snapshot.Digest(data), true
 }
 
 func verifyBatch(ctx context.Context, env tool.Env, files []*stagedFile) error {
@@ -390,7 +466,7 @@ func cleanupBackupState(ctx context.Context, env tool.Env, state *writeState) {
 	}
 }
 
-func writeError(failed *writeState, cause error, states []*writeState, rollbackFailures []string) error {
+func writeError(failed *writeState, cause error, states []*writeState, rollbackFailures []string, keepAll bool) error {
 	paths := make([]string, 0, len(states)*2)
 	for _, state := range states {
 		paths = append(paths, state.file.path)
@@ -413,7 +489,7 @@ func writeError(failed *writeState, cause error, states []*writeState, rollbackF
 	for _, failure := range rollbackFailures {
 		fmt.Fprintf(&out, "\n%s", failure)
 	}
-	if len(rollbackFailures) > 0 {
+	if len(rollbackFailures) > 0 || keepAll {
 		for _, state := range states {
 			if state.backup != "" {
 				fmt.Fprintf(&out, "\nRetained backup for %s: %s", state.file.path, state.backup)

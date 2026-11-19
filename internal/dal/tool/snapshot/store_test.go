@@ -291,3 +291,40 @@ func requireLinesNilStore(t *testing.T) {
 		t.Fatalf("nil store Lines = %d, %v; want 0, %v", got, err, ErrUnknownReference)
 	}
 }
+
+func TestInvalidateRefusesEveryOlderReference(t *testing.T) {
+	data := []byte("a\nb\n")
+	t.Run("C13/old reference after the bytes return", func(t *testing.T) {
+		store := New()
+		old := store.Put("f.txt", data, []Range{{Start: 1, End: 2}})
+		store.Invalidate("f.txt")
+		if store.Unchanged(old, "f.txt", data) {
+			t.Fatal("an invalidated path kept an eligible reference")
+		}
+		if _, err := store.ResolveSpan(old, "f.txt", data, Span{Start: 1, End: 1}); !errors.Is(err, ErrPathChanged) {
+			t.Fatalf("ResolveSpan after Invalidate = %v, want %v", err, ErrPathChanged)
+		}
+		fresh := store.Put("f.txt", data, []Range{{Start: 1, End: 2}})
+		if !store.Unchanged(fresh, "f.txt", data) || store.Unchanged(old, "f.txt", data) {
+			t.Fatal("a read after Invalidate must give a fresh epoch and leave the old reference refused")
+		}
+	})
+	t.Run("C13/other paths keep their references", func(t *testing.T) {
+		store := New()
+		other := store.Put("g.txt", data, nil)
+		store.Invalidate("f.txt")
+		if !store.Unchanged(other, "g.txt", data) {
+			t.Fatal("Invalidate reached another path")
+		}
+	})
+	t.Run("C13/absent path and nil store", func(t *testing.T) {
+		store := New()
+		store.Invalidate("never.txt")
+		ref := store.Put("never.txt", data, nil)
+		if !store.Unchanged(ref, "never.txt", data) {
+			t.Fatal("Invalidate of an unseen path changed its first capture")
+		}
+		var none *Store
+		none.Invalidate("f.txt")
+	})
+}
