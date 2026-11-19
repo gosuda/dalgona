@@ -194,7 +194,7 @@ dalgona doctor
 # ok plugins: 0 loaded
 ```
 
-Each check prints one `ok`, `warn`, or `fail` row. `--online` reads one model list per credentialed provider doctor can list: most providers answer one live request, `antigravity` reports its bundled catalog with no request, and a credentialed provider doctor cannot list (such as `copilot`) gives a `warn` row with no request. See the [doctor contract](docs/dalgona/spec/doctor.md) for the full row list.
+Each check prints one `ok`, `warn`, or `fail` row. `--online` reads one model list per credentialed provider doctor can list: most providers answer one live request, `antigravity` reports its bundled catalog with no request, and a credentialed provider doctor cannot list (such as `copilot`) gives a `warn` row with no request. A `[providers.<id>]` entry replaces the built-in adapter, so with such an entry `doctor --online` sends one live request to the configured endpoint, including for `antigravity` or `copilot`. See the [doctor contract](docs/dalgona/spec/doctor.md) for the full row list.
 
 ### Use an outer sandbox
 
