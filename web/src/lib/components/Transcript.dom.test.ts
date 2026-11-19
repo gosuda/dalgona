@@ -438,3 +438,114 @@ describe("jump to latest", () => {
 		await checkAwayAfterTurnFinished((host) => stubScroller(host));
 	});
 });
+
+describe("following the end", () => {
+	interface GrowingScroller {
+		readonly element: HTMLElement;
+		readonly scrollTo: Mock<(options: ScrollToOptions) => void>;
+		grow(by: number): void;
+	}
+
+	function growingScroller(clientHeight = 500): GrowingScroller {
+		const transcript = document.getElementById("transcript");
+		if (transcript === null) throw new Error("transcript section missing");
+		let height = 1000;
+		let top = 0;
+		transcript.style.overflowY = "auto";
+		Object.defineProperty(transcript, "scrollHeight", {
+			configurable: true,
+			get: () => height,
+		});
+		Object.defineProperty(transcript, "clientHeight", {
+			configurable: true,
+			value: clientHeight,
+		});
+		Object.defineProperty(transcript, "scrollTop", {
+			configurable: true,
+			get: () => top,
+			set: (value: number) => {
+				top = value;
+			},
+		});
+		const scrollTo = vi.fn(({ top: to }: ScrollToOptions) => {
+			top = Math.min(Number(to), height - clientHeight);
+		});
+		Object.defineProperty(transcript, "scrollTo", {
+			configurable: true,
+			value: scrollTo,
+		});
+		return {
+			element: transcript,
+			scrollTo,
+			grow(by) {
+				height += by;
+			},
+		};
+	}
+
+	async function frames(count: number): Promise<void> {
+		for (let index = 0; index < count; index += 1) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			requestAnimationFrame(() => resolve());
+			await promise;
+		}
+	}
+
+	const jump = () => screen.queryByRole("button", { name: /Jump to latest/ });
+
+	test("output that arrives before the scroll event of the follow scroll keeps following", async () => {
+		const first = reply("m1", "first", true);
+		const { rerender } = render(Transcript, { props: props([first]) });
+		const scroller = growingScroller();
+		await frames(2);
+		expect(scroller.scrollTo).toHaveBeenCalledWith({
+			top: 1000,
+			behavior: "auto",
+		});
+		scroller.grow(100);
+		await fireEvent.scroll(scroller.element);
+		expect(jump()).toBeNull();
+		await rerender({ ...props([first, reply("m2", "second", true)]) });
+		await frames(2);
+		expect(scroller.scrollTo).toHaveBeenLastCalledWith({
+			top: 1100,
+			behavior: "auto",
+		});
+	});
+
+	test("a reader who scrolls up from the end leaves it", async () => {
+		render(Transcript, { props: props([reply("m1", "first", true)]) });
+		const scroller = growingScroller();
+		await frames(2);
+		scroller.grow(100);
+		scroller.element.scrollTop = 300;
+		await fireEvent.scroll(scroller.element);
+		expect(jump()).not.toBeNull();
+	});
+
+	test("output that arrived before the last scroll event no longer counts after it", async () => {
+		render(Transcript, { props: props([reply("m1", "first", true)]) });
+		const scroller = growingScroller();
+		await frames(2);
+		scroller.grow(400);
+		await fireEvent.scroll(scroller.element);
+		expect(jump()).toBeNull();
+		await fireEvent.scroll(scroller.element);
+		expect(jump()).not.toBeNull();
+	});
+
+	test("a reader who scrolls up after Jump to latest leaves the end it reached", async () => {
+		render(Transcript, { props: props([reply("m1", "first", true)]) });
+		const scroller = growingScroller();
+		await frames(2);
+		scroller.element.scrollTop = 100;
+		await fireEvent.scroll(scroller.element);
+		expect(jump()).not.toBeNull();
+		scroller.grow(500);
+		await fireEvent.click(jump() as HTMLElement);
+		expect(scroller.element.scrollTop).toBe(1000);
+		scroller.element.scrollTop = 700;
+		await fireEvent.scroll(scroller.element);
+		expect(jump()).not.toBeNull();
+	});
+});

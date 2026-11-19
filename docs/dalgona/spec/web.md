@@ -91,7 +91,7 @@ The page holds one `Session`, which owns the connection and the page state.
 - At 52rem or narrower the transcript MUST NOT be a scroll container. Wheel input MUST scroll the document.
 - The open thread has an inline-start bar and a strong title as well as its fill, so it stays distinct under forced colours.
 - At 320px nothing MUST clip or scroll sideways. Long tokens wrap anywhere.
-- The transcript follows new output only while the reader is within 32px of its end. Opening a thread follows its end.
+- The transcript follows new output only while the reader is within 32px of its end. Opening a thread follows its end. While the transcript follows, output that arrived after the client's last scroll or scroll event MUST NOT count as the reader leaving the end.
 - The client MUST observe the actual scroll container: the transcript when it overflows, else its nearest scrolling ancestor, else the document. The client MUST resolve it on each scroll, so content that overflows only after it arrives is observed. Streaming MUST preserve the reader's position after scrolling away.
 - The transcript MUST show Jump to latest whenever the reader is over 32px from the end, whether or not a turn runs. The button MUST show appended items as `· N new`. Activating it MUST scroll to the end and focus the last row without changing that scroll position. Showing the button MUST NOT move focus.
 - At 52rem or narrower the Jump to latest button MUST sit above the dock, whatever the dock's height. The client MUST measure the dock and publish its height to the button.
