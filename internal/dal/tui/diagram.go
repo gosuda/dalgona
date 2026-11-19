@@ -4,13 +4,16 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json/jsontext"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/coreequip/mermaidascii"
 	"modernc.org/quickjs"
 	"oss.terrastruct.com/d2/d2graph"
@@ -37,13 +40,22 @@ var diagramLangs = map[string]bool{
 
 var diagramBudget = 2 * time.Second
 
+const diagramSourceLimit = 16 << 10
+
+var errDiagramTooLarge = errors.New("too large to draw")
+
 func isDiagramLang(lang string) bool {
 	return diagramLangs[strings.ToLower(lang)]
 }
 
-func renderDiagram(kind, source string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), diagramBudget)
-	defer cancel()
+type drawFunc func(ctx context.Context, kind, source string) (string, error)
+
+type diagramMsg struct {
+	key   string
+	lines []string
+}
+
+func drawDiagram(ctx context.Context, kind, source string) (string, error) {
 	switch kind {
 	case "mermaid":
 		return mermaidascii.Render(source)
@@ -55,6 +67,38 @@ func renderDiagram(kind, source string) (string, error) {
 	return "", fmt.Errorf("no text renderer for %s", kind)
 }
 
+func renderDiagram(kind, source string) (string, error) {
+	return renderDiagramWith(drawDiagram, kind, source)
+}
+
+func renderDiagramWith(draw drawFunc, kind, source string) (string, error) {
+	if len(source) > diagramSourceLimit {
+		return "", errDiagramTooLarge
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), diagramBudget)
+	defer cancel()
+	type drawn struct {
+		art string
+		err error
+	}
+	done := make(chan drawn, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- drawn{err: fmt.Errorf("render panic: %v", r)}
+			}
+		}()
+		art, err := draw(ctx, kind, source)
+		done <- drawn{art: art, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.art, result.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
 var (
 	d2Ruler    = sync.OnceValues(textmeasure.NewRuler)
 	d2RenderMu sync.Mutex
@@ -63,6 +107,9 @@ var (
 func renderD2(ctx context.Context, source string) (string, error) {
 	d2RenderMu.Lock()
 	defer d2RenderMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	ctx = log.With(ctx, slog.New(slog.DiscardHandler))
 	ruler, err := d2Ruler()
 	if err != nil {
@@ -184,12 +231,79 @@ func renderNomnoml(ctx context.Context, source string) (string, error) {
 	return text, nil
 }
 
-func (m *model) renderDiagramBlock(b block) []string {
-	art, err := renderDiagram(b.diagram, b.text)
-	if err != nil {
-		head := "diagram " + b.diagram + ": render failed · source shown"
-		return append([]string{head}, strings.Split(b.text, "\n")...)
+type heldCommit struct {
+	key     string
+	lines   []string
+	waiting bool
+}
+
+func (m *model) commitDiagram(key string, b block) {
+	if !m.keepEntry(key, diagramSourceCard("diagram "+b.diagram+" · drawing", b)) {
+		return
+	}
+	m.out.held = append(m.out.held, heldCommit{key: key, waiting: true})
+	m.out.launch = append(m.out.launch, m.renderDiagramBlock(key, b))
+}
+
+func (m *model) renderDiagramBlock(key string, b block) tea.Cmd {
+	draw := m.out.draw
+	if draw == nil {
+		draw = drawDiagram
+	}
+	return func() tea.Msg {
+		return diagramMsg{key: key, lines: diagramLines(draw, b)}
+	}
+}
+
+func diagramLines(draw drawFunc, b block) []string {
+	art, err := renderDiagramWith(draw, b.diagram, b.text)
+	switch {
+	case errors.Is(err, errDiagramTooLarge):
+		return diagramSourceCard("diagram "+b.diagram+": too large to draw · source shown", b)
+	case err != nil:
+		return diagramSourceCard("diagram "+b.diagram+": render failed · source shown", b)
 	}
 	lines := strings.Split(strings.TrimRight(art, "\n"), "\n")
 	return append([]string{"diagram " + b.diagram + " · " + strconv.Itoa(len(lines)) + " rows"}, lines...)
+}
+
+func diagramSourceCard(head string, b block) []string {
+	return append([]string{head}, strings.Split(b.text, "\n")...)
+}
+
+func (m *model) takeDiagramCommands() tea.Cmd {
+	if len(m.out.launch) == 0 {
+		return nil
+	}
+	command := tea.Batch(m.out.launch...)
+	m.out.launch = nil
+	return command
+}
+
+func (m *model) applyDiagram(msg diagramMsg) {
+	i := slices.IndexFunc(m.out.held, func(h heldCommit) bool { return h.waiting && h.key == msg.key })
+	if i < 0 {
+		return
+	}
+	m.out.held[i] = heldCommit{lines: msg.lines}
+	if j := slices.IndexFunc(m.out.entries, func(e entry) bool { return e.key == msg.key }); j >= 0 {
+		m.out.entries[j] = newEntry(msg.key, msg.lines)
+		if m.review != nil {
+			m.fitReview()
+		}
+	}
+	ready := 0
+	for ready < len(m.out.held) && !m.out.held[ready].waiting {
+		m.out.pending = append(m.out.pending, m.out.held[ready].lines...)
+		ready++
+	}
+	m.out.held = slices.Delete(m.out.held, 0, ready)
+}
+
+func (m *model) heldLines() int {
+	n := 0
+	for _, held := range m.out.held {
+		n += len(held.lines)
+	}
+	return n
 }

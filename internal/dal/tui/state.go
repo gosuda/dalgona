@@ -186,6 +186,9 @@ type outState struct {
 	anchor   *dockAnchor
 	seq      int
 	loads    int
+	draw     drawFunc
+	held     []heldCommit
+	launch   []tea.Cmd
 }
 
 type notificationMsg struct {

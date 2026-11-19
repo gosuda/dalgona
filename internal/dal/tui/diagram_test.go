@@ -67,11 +67,20 @@ func TestRenderDiagramSvgShowsSource(t *testing.T) {
 	}
 }
 
+func diagramBlockLines(t *testing.T, b block) []string {
+	t.Helper()
+	m := &model{}
+	msg, ok := m.renderDiagramBlock("block:t1:a1:0", b)().(diagramMsg)
+	if !ok || msg.key != "block:t1:a1:0" {
+		t.Fatalf("diagram command returned %#v", msg)
+	}
+	return msg.lines
+}
+
 func TestRenderDiagramBlockHeader(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
-	m := &model{}
-	lines := m.renderDiagramBlock(block{text: "x -> y\n", diagram: "d2"})
+	lines := diagramBlockLines(t, block{text: "x -> y\n", diagram: "d2"})
 	if len(lines) < 2 || !strings.HasPrefix(lines[0], "diagram d2 · ") || !strings.HasSuffix(lines[0], " rows") {
 		t.Fatalf("diagram header: %#v", lines[:1])
 	}
@@ -80,8 +89,7 @@ func TestRenderDiagramBlockHeader(t *testing.T) {
 func TestRenderDiagramBlockFailure(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
-	m := &model{}
-	lines := m.renderDiagramBlock(block{text: "<svg/>", diagram: "svg"})
+	lines := diagramBlockLines(t, block{text: "<svg/>", diagram: "svg"})
 	if !strings.HasPrefix(lines[0], "diagram svg: render failed") || !strings.HasSuffix(lines[0], "source shown") {
 		t.Fatalf("failure header: %#v", lines[:1])
 	}

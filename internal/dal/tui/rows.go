@@ -191,6 +191,14 @@ func (m *model) commitFull(key string, lines, full []string) {
 	if len(lines) == 0 || !m.keepEntry(key, full) {
 		return
 	}
+	m.queueRows(lines)
+}
+
+func (m *model) queueRows(lines []string) {
+	if len(m.out.held) > 0 {
+		m.out.held = append(m.out.held, heldCommit{lines: lines})
+		return
+	}
 	m.out.pending = append(m.out.pending, lines...)
 }
 
