@@ -312,7 +312,7 @@ func (m *model) interrupt() tea.Cmd {
 		m.closeList()
 		return nil
 	}
-	if !m.turnLive() {
+	if busyWord(m.thread.state) == "" {
 		m.quietNotice(quietWord(m.thread.state))
 		return nil
 	}
