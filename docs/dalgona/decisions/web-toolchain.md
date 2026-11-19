@@ -8,7 +8,7 @@ Scope: `web/package.json` and `web/pnpm-lock.yaml`. Enforcement: `just web` inst
 
 ## Grounded pins
 
-Grounded on 2026-11-12; the rows moved by the dependency upgrade of 2026-11-19 re-grounded on that date. Each row gives an exact dependency or devDependency pin in `web/package.json`. The release date is the `time` entry of that version in `https://registry.npmjs.org/<package>`. The user-event 14.6.10 timestamp was read on 2026-11-15 and is linked below. For pins unchanged by the 2026-11-19 upgrade, the OSV column retains the result of the `POST https://api.osv.dev/v1/querybatch` request of 2026-11-15 that `dependencies.md` describes; the rows moved on 2026-11-19 carry the `none` result of the 2026-11-19 batch that `dependencies.md` describes.
+Grounded on 2026-11-12; the rows moved by the dependency upgrade of 2026-11-19 re-grounded on that date. Each row gives an exact dependency or devDependency pin in `web/package.json`. The release date is the `time` entry of that version in `https://registry.npmjs.org/<package>`. The user-event 14.6.10 timestamp was read on 2026-11-15 and is linked below. For pins unchanged by the 2026-11-19 upgrade, the OSV column retains the result of the `POST https://api.osv.dev/v1/querybatch` request of 2026-11-15 that `dependencies.md` describes; the rows moved on 2026-11-19 carry the `none` result of the 2026-11-19 batch that `dependencies.md` describes. The svelte, @sveltejs/kit and vitest rows moved again later on 2026-11-19, to 5.58.0, 3.3.1 and 5.1.1, and re-grounded on that date; their OSV column carries the empty result of the drift batch below.
 
 |Package|Pin|Released|Use|OSV batch|
 |---|---|---|---|---|
@@ -33,13 +33,13 @@ The original pins equalled the latest stable releases on that date, except pnpm 
 |---|---|---|---|---|
 |pnpm (`web/package.json`, `deploy/cloudflare/package.json`, `.github/workflows/ci.yml`)|12.21.0|2026-11-13|package manager and CI setup|none (supplementary query)|
 |Node.js (`.github/workflows/ci.yml`)|26.13.1|2026-11-10|CI runtime. `https://nodejs.org/dist/index.json` lists v26.13.1 as the newest 26.x release on 2026-11-15. The page of the 2026-11-11 Node.js security releases names v26.13.1 as the 26.x download. The CVE IDs CVE-2026-105482, CVE-2026-105483, CVE-2026-106069 and CVE-2026-111497 are not on that page, so those IDs are not confirmed fixed.|not queried|
-|svelte|5.57.3|2026-10-26|UI framework|none|
-|@sveltejs/kit|3.3.0|2026-11-17|app framework and build|none|
+|svelte|5.58.0|2026-11-18|UI framework|none|
+|@sveltejs/kit|3.3.1|2026-11-17|app framework and build|none|
 |@sveltejs/adapter-static|4.0.1|2026-10-29|static build output|none|
 |svelte-check|4.7.8|2026-11-01|Svelte type check|none|
 |typescript|6.0.3|2026-04-16|type check. The pin MUST stay at 6.0.3.|none|
 |vite|8.3.8|2026-11-11|bundler|none|
-|vitest|5.1.0|2026-11-02|unit tests|none|
+|vitest|5.1.1|2026-11-18|unit tests|none|
 |@biomejs/biome|2.6.8|2026-11-15|lint and format|none|
 
 ## Evidence
@@ -53,6 +53,8 @@ Official npm registry metadata read on 2026-11-15 gives these exact-version publ
 Official npm registry metadata read on 2026-11-19 gives these exact-version publication timestamps (UTC) for the pins moved on that date: [Biome registry metadata](https://registry.npmjs.org/%40biomejs%2Fbiome) `time["2.6.8"]` is `2026-11-15T14:34:16.910Z`; [user-event registry metadata](https://registry.npmjs.org/%40testing-library%2Fuser-event) `time["14.6.12"]` is `2026-11-16T02:31:48.155Z`; [marked registry metadata](https://registry.npmjs.org/marked) `time["18.2.1"]` is `2026-11-16T17:22:22.604Z`; [dompurify registry metadata](https://registry.npmjs.org/dompurify) `time["3.4.18"]` is `2026-11-14T14:18:25.242Z`; [Kit registry metadata](https://registry.npmjs.org/%40sveltejs%2Fkit) `time["3.3.0"]` is `2026-11-17T16:29:48.894Z`.
 
 On 2026-11-15, a supplementary `POST` to the [OSV batch query API](https://api.osv.dev/v1/querybatch) queried the exact npm versions pnpm 12.20.0, @biomejs/biome 2.6.7, and @testing-library/user-event 14.6.10. Their corresponding response entries were `{}`, `{}`, and `{}`: no vulnerability was listed for those exact versions. These results are separate from the earlier batch and do not reuse advisory results for older pins.
+
+On 2026-11-19, a second drift refresh moved svelte 5.57.3 to 5.58.0, @sveltejs/kit 3.3.0 to 3.3.1, vitest 5.1.0 to 5.1.1, and @cloudflare/workers-types 5.20261117.1 to 5.20261118.1, each the newest release that `pnpm outdated` reports on its channel. Registry metadata read the same day gives [svelte registry metadata](https://registry.npmjs.org/svelte) `time["5.58.0"]` as `2026-11-18T06:56:08.671Z`, [Kit registry metadata](https://registry.npmjs.org/%40sveltejs%2Fkit) `time["3.3.1"]` as `2026-11-17T21:59:10.336Z`, [vitest registry metadata](https://registry.npmjs.org/vitest) `time["5.1.1"]` as `2026-11-18T07:35:25.218Z`, and [workers-types registry metadata](https://registry.npmjs.org/%40cloudflare%2Fworkers-types) `time["5.20261118.1"]` as `2026-11-18T01:04:49.597Z`. A `POST` to the OSV batch query API for those four exact versions returned an empty vulnerability list for each. `pnpm audit` in `web/` and in `deploy/cloudflare/` reported no known vulnerabilities. TypeScript stays at 6.0.3: svelte-check 4.7.8 peers `typescript` as `^5.0.0 || ^6.0.0` and @sveltejs/kit 3.3.1 peers `typescript` as `^6.0.0`, so neither admits 7 and the invariant above stands. Kit 3.4.0 and workers-types 5.20261119.1 exist but need `minimumReleaseAgeExclude` entries, so they wait for the next refresh.
 
 Observed on 2026-11-08. SvelteKit 3.1.1 reads `ts.sys` at startup. TypeScript 7.0.2 does not expose `ts.sys`, so Vitest failed before it loaded a test. TypeScript 6.0.3 is the newest 6.x release that the SvelteKit 3.1.1 and svelte-check 4.7.8 peer ranges accept. OSV `POST https://api.osv.dev/v1/query` for npm `typescript` 6.0.3 returned `{}` on that date. TypeScript 7.0.2 MUST NOT be used with the pinned Svelte tooling.
 
