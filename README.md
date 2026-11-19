@@ -35,7 +35,7 @@ dalgona --version
 
 If you already have a checkout, start with `export GOBIN="$PWD/bin"` from its root. This installs both commands into that checkout's `bin/` directory. Keep that directory on `PATH` in later shells.
 
-The terminal commands do not need the web build. To include the web interface, install `just`, Node.js, and the pnpm version declared in [web/package.json](web/package.json). Use the Node.js version in [CI](.github/workflows/ci.yml). Then build the assets before installing the binaries again:
+The terminal commands do not need the web build. To include the web interface, install `just`, Node.js, and the pnpm version declared in [web/package.json](web/package.json). Use the Node.js version in [CI](.latchkey/workflows/ci.yml). Then build the assets before installing the binaries again:
 
 ```sh
 just web
@@ -308,7 +308,7 @@ See [config.md](docs/dal/spec/config.md) for all settings, including verbosity a
 
 ## Development
 
-Use the Go toolchain in [go.mod](go.mod) and the Node.js and pnpm versions declared in [CI](.github/workflows/ci.yml). Install `just` and `uv` for the checks.
+Use the Go toolchain in [go.mod](go.mod) and the Node.js and pnpm versions declared in [CI](.latchkey/workflows/ci.yml). Install `just` and `uv` for the checks.
 
 From the checkout root:
 
