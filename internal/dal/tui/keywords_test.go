@@ -242,6 +242,7 @@ func TestKeywordMatchSentOncePerPause(t *testing.T) {
 	}{
 		{name: "no turn runs", state: stateIdle, kind: "prompt"},
 		{name: "a turn runs", state: stateRunning, kind: "steer"},
+		{name: "a turn waits for approval", state: stateAwaitingApproval, kind: "steer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
