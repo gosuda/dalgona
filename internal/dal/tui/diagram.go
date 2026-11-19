@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json/jsontext"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"oss.terrastruct.com/d2/d2lib"
 	"oss.terrastruct.com/d2/d2renderers/d2ascii"
 	"oss.terrastruct.com/d2/d2renderers/d2ascii/charset"
+	"oss.terrastruct.com/d2/lib/log"
 	"oss.terrastruct.com/d2/lib/textmeasure"
 )
 
@@ -61,6 +63,7 @@ var (
 func renderD2(ctx context.Context, source string) (string, error) {
 	d2RenderMu.Lock()
 	defer d2RenderMu.Unlock()
+	ctx = log.With(ctx, slog.New(slog.DiscardHandler))
 	ruler, err := d2Ruler()
 	if err != nil {
 		return "", err

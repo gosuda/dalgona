@@ -566,6 +566,7 @@ The fence MUST buffer until its closing marker before it prints.
 A mermaid, d2, or nomnoml card MUST render the source as text art under a `diagram <kind> · <n> rows` header.
 An `svg` fence or a failed render MUST print `diagram <kind>: render failed · source shown` followed by the source.
 A fenced block still open when the answer finishes MUST print its buffered lines as code.
+A diagram renderer MUST NOT write its logs to the terminal.
 
 ## Verbosity
 
