@@ -63,9 +63,51 @@ func commitBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Res
 		outcome, err := failCommit(context.WithoutCancel(ctx), env, batch.style, run)
 		return tool.Result{}, outcome, err
 	}
-	cleanupStates(context.WithoutCancel(ctx), env, states)
+	if outcome, err := settleCommit(context.WithoutCancel(ctx), env, batch, states); err != nil {
+		return tool.Result{}, outcome, err
+	}
 	refs := recordSnapshots(env, batch.files)
 	return tool.Result{Output: appliedOutput(batch.summary, batch.files, refs), OK: true}, appliedOutcome, nil
+}
+
+func settleCommit(ctx context.Context, env tool.Env, batch stagedBatch, states []*writeState) (tool.Outcome, error) {
+	if !batch.style.profile() {
+		cleanupStates(ctx, env, states)
+		return appliedOutcome, nil
+	}
+	removeScratch(ctx, env, states)
+	defer closeStates(states)
+	if err := syncStates(states); err != nil {
+		return syncFailure(ctx, env, batch.files, states, err)
+	}
+	return appliedOutcome, nil
+}
+
+func syncFailure(ctx context.Context, env tool.Env, files []*stagedFile, states []*writeState, cause error) (tool.Outcome, error) {
+	paths := verifiedStates(ctx, env, writtenPaths(files))
+	outcome := writeOutcome(paths, len(states), 0)
+	invalidateAll(env, outcome.Paths)
+	return outcome, errors.New("patch: the files were written but a directory sync failed: " + cause.Error() + ". Affected paths: " + strings.Join(affectedPaths(states), ", ") + ".")
+}
+
+var syncPinnedDir = func(p *dirPin) error { return p.syncDir() }
+
+func syncStates(states []*writeState) error {
+	var failures []error
+	for _, state := range states {
+		failures = append(failures, syncPin(state.dest))
+		if state.src != state.dest {
+			failures = append(failures, syncPin(state.src))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func syncPin(pin *dirPin) error {
+	if pin == nil {
+		return nil
+	}
+	return syncPinnedDir(pin)
 }
 
 type commitRun struct {
@@ -102,7 +144,11 @@ func invalidatePaths(env tool.Env, outcome tool.Outcome) {
 	if !slices.Contains([]tool.CommitState{tool.CommitPartial, tool.CommitUnknown, tool.CommitComplete}, outcome.Commit) {
 		return
 	}
-	for _, item := range outcome.Paths {
+	invalidateAll(env, outcome.Paths)
+}
+
+func invalidateAll(env tool.Env, paths []tool.PathState) {
+	for _, item := range paths {
 		env.Snapshots.Invalidate(item.Path)
 	}
 }
@@ -440,9 +486,19 @@ func (s *writeState) restoreAt(ctx context.Context, env tool.Env, pin *dirPin, p
 }
 
 func cleanupStates(ctx context.Context, env tool.Env, states []*writeState) {
+	removeScratch(ctx, env, states)
+	closeStates(states)
+}
+
+func removeScratch(ctx context.Context, env tool.Env, states []*writeState) {
 	for _, state := range states {
 		cleanupTempState(ctx, env, state)
 		cleanupBackupState(ctx, env, state)
+	}
+}
+
+func closeStates(states []*writeState) {
+	for _, state := range states {
 		state.closePins()
 	}
 }

@@ -106,6 +106,8 @@ A call MUST NOT stage more than 64 MiB of file content.
 
 A mid-commit failure MUST attempt reverse-order restoration of every completed effect. The error MUST name every affected source and destination path. A rollback failure MUST name each failed restoration and every retained backup. A profile call MUST also retain and name every backup when a path state is `unknown`. On the local runner, the writer MUST read a target leaf without blocking. On the local runner, the writer MUST accept only a regular file as target content. On the local runner, a path that holds a FIFO, a device, or a directory after a failed commit MUST have the path state `unknown`. The writer MUST NOT report `nothing was written` after a completed write and successful restore.
 
+A profile call MUST sync each pinned directory after its last operation. A directory sync failure MUST NOT restore any file. On Windows the directory sync MUST be a no-op.
+
 Cancellation before the first target mutation MUST leave every target unchanged. Cancellation after the first mutation MUST NOT interrupt commit or rollback between effect boundaries.
 
 A successful apply MUST print `[PATH#DELETED]` for each deleted file.

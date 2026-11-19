@@ -93,6 +93,22 @@ func TestRootPinSeesLeafThroughGapCreatedParent(t *testing.T) {
 	}
 }
 
+func TestRootPinSyncDirIsANoOp(t *testing.T) {
+	t.Run("IO-05/windows rule", func(t *testing.T) {
+		env, cwd := editTestEnv(t)
+		writeFixture(t, cwd, "sub/f.txt", "one\n")
+		pin, err := pinRoot(env, "sub/f.txt", filepath.Join(cwd, "sub", "f.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pin.close()
+		if err = pin.syncDir(); err != nil {
+			t.Fatalf("syncDir of a root pin = %v, want nil", err)
+		}
+		requireFile(t, filepath.Join(cwd, "sub", "f.txt"), "one\n")
+	})
+}
+
 func TestRootPinReadsAndLinks(t *testing.T) {
 	env, cwd := editTestEnv(t)
 	writeFixture(t, cwd, "sub/f.txt", "one\n")

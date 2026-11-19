@@ -275,7 +275,7 @@ func (w *worker) admit(ctx context.Context, p *prepared, requestID string) (*pre
 		if maskErr != nil {
 			return nil, maskErr
 		}
-		_, err = w.t.appendEvents(ctx, event.ToolCompleted{CallID: p.call.ID, Output: output, Recovered: "none"})
+		_, err = w.t.appendEvents(context.WithoutCancel(ctx), event.ToolCompleted{CallID: p.call.ID, Output: output, Recovered: "none"})
 		return nil, err
 	}
 	p.verdict = v
