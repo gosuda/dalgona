@@ -18,7 +18,7 @@ oracles independently split BOM/LF/CRLF. Observation tests instrument final cons
 delivery, not merely the read function. Recovery tests do not assume a terminal
 result survived.
 
-No Go test uses these IDs yet. T08 assigns the tests to the gate owner, order 7.
+Go tests cite these IDs in subtest names. T08 assigns the remaining tests to the gate owner, order 7.
 
 ## T02. Reference and grammar tests
 

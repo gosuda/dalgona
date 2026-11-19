@@ -49,7 +49,7 @@ func (r fileResolver) stageRename(ctx context.Context, item edit) error {
 		return fmt.Errorf("patch: cannot inspect rename destination %s: %w", display, statErr)
 	}
 	if item.reference != "" {
-		if proofErr := proveUnchanged(r.env, item.reference, r.group.display, r.file.before); proofErr != nil {
+		if proofErr := proveSource(r.env, item, r.group.display, r.file.before); proofErr != nil {
 			return proofErr
 		}
 	}
@@ -159,8 +159,11 @@ func proveTag(file *stagedFile, item edit) error {
 	if item.guard.kind != guardWholeTag && item.guard.kind != guardVersion {
 		return nil
 	}
-	expected := item.guard.text
-	whole, version := snapshot.Tag("whole", file.before), snapshot.VersionTag(file.before)
+	return checkTag(item.guard.text, item.index, file.path, file.before)
+}
+
+func checkTag(expected string, index int, path string, before []byte) error {
+	whole, version := snapshot.Tag("whole", before), snapshot.VersionTag(before)
 	if expected == whole || expected == version {
 		return nil
 	}
@@ -168,7 +171,14 @@ func proveTag(file *stagedFile, item edit) error {
 	if len(expected) == 4 {
 		current = version
 	}
-	return fmt.Errorf("patch: changes[%d]: tag %s does not match %s now (tag %s). The file changed since you read it; read it again", item.index, expected, file.path, current)
+	return fmt.Errorf("patch: changes[%d]: tag %s does not match %s now (tag %s). The file changed since you read it; read it again", index, expected, path, current)
+}
+
+func proveSource(env tool.Env, item edit, path string, before []byte) error {
+	if snapshot.ValidRef(item.reference) {
+		return proveUnchanged(env, item.reference, path, before)
+	}
+	return checkTag(item.reference, item.index, path, before)
 }
 
 func (r fileResolver) resolveWhole(doc document, item edit) ([]replacement, error) {

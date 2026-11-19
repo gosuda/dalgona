@@ -43,7 +43,7 @@ Every edit MUST address the original payload image. Edits on one file MUST NOT o
 
 `[PATH#TAG]` opens an existing file. The tag MUST contain four uppercase hexadecimal characters. `[PATH#NEW]` opens a new file. `PUT N:`, `PUT N-M:`, and `PUT N.=M:` replace source lines. `PUT <N:`, `PUT >N:`, and `PUT >$:` insert at source gaps. `CUT` removes lines. `REM` deletes a file. `MV DEST` renames after content edits.
 
-Every `PUT` body MUST have at least one `+` row. The parser MUST remove exactly one leading `+`. Empty `PUT` bodies MUST fail. New files MUST have exactly one `PUT >$` operation. `REM` MUST NOT share a section with another operation.
+Every `PUT` body MUST have at least one `+` row. The parser MUST remove exactly one leading `+`. Empty `PUT` bodies MUST fail. New files MUST have exactly one `PUT >$` operation. `REM` MUST NOT share a section with another operation. A legacy `REM` or `MV` section MUST match the tag of the current file.
 
 ### Hashline Light and Enhanced
 
