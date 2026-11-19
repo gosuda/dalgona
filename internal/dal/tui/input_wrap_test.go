@@ -157,6 +157,36 @@ func TestComposerWrapsEveryRowAtWindowWidthMinusThree(t *testing.T) {
 			rows: []string{"ab      cdefghijklmno pqrstuvwxyz", "abcdefghijklmnop"},
 			x:    promptCells + 16, y: 1,
 		},
+		{
+			name: "a tab after the break keeps the stops of its line", width: 40, height: 12, text: strings.Repeat("a", 36) + " x\t" + strings.Repeat("b", 30) + "END", caret: -1,
+			rows: []string{strings.Repeat("a", 36), "x  " + strings.Repeat("b", 30) + "END"},
+			x:    promptCells + 36, y: 1,
+		},
+		{
+			name: "a tab inside the second row of a hard break", width: 13, height: 12, text: "abcdefghijklmn\tpqrs", caret: -1,
+			rows: []string{"abcdefghij", "klmn  pqrs"},
+			x:    promptCells + 10, y: 1,
+		},
+		{
+			name: "a tab that ends a wrapped row keeps its spaces", width: 22, height: 12, text: strings.Repeat("a", 19) + "bbbbb\t", caret: -1,
+			rows: []string{strings.Repeat("a", 19), "bbbbb        "},
+			x:    promptCells + 13, y: 1,
+		},
+		{
+			name: "a tab after wide syllables counts two cells each", width: 20, height: 12, text: "가나다\tabcdefghij klmnopqrstu", caret: -1,
+			rows: []string{"가나다", "abcdefghij", "klmnopqrstu"},
+			x:    promptCells + 11, y: 2,
+		},
+		{
+			name: "a tab at the break is dropped like a space", width: 20, height: 12, text: strings.Repeat("a", 15) + "\tbcd", caret: -1,
+			rows: []string{strings.Repeat("a", 15), "bcd"},
+			x:    promptCells + 3, y: 1,
+		},
+		{
+			name: "caret after a tab inside the second row", width: 40, height: 12, text: strings.Repeat("a", 36) + " x\t" + strings.Repeat("b", 30) + "END", caret: 39,
+			rows: []string{strings.Repeat("a", 36), "x  " + strings.Repeat("b", 30) + "END"},
+			x:    promptCells + 3, y: 1,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -263,6 +293,20 @@ func TestComposerUpAndDownKeepTheColumnAcrossSpacedRows(t *testing.T) {
 	}
 }
 
+func TestComposerUpAndDownKeepTheColumnAcrossTabbedRows(t *testing.T) {
+	t.Parallel()
+	text := strings.Repeat("a", 36) + " x\t" + strings.Repeat("b", 30) + "END"
+	m := composerState(t, 40, 12, text, 39)
+	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+	if m.input.composer.cursor != 3 {
+		t.Fatalf("up from the second row left the caret at %d, want 3", m.input.composer.cursor)
+	}
+	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.input.composer.cursor != 39 {
+		t.Fatalf("down left the caret at %d, want 39, after the tab", m.input.composer.cursor)
+	}
+}
+
 func TestComposerRowsMatchWrapperOutput(t *testing.T) {
 	t.Parallel()
 	texts := []string{
@@ -277,6 +321,13 @@ func TestComposerRowsMatchWrapperOutput(t *testing.T) {
 		"  leading spaces and trailing ones  ",
 		"one non breaking space words and some more words after",
 		"ab\tcdefghijklmno pqrstuvwxyz abcdefghijklmnop",
+		"가\tabcdefghij klmnopqrstu vwxyz",
+		"a\tb\tc\td\te\tf\tg\th\ti\tj\tk\tl\tm\tn",
+		strings.Repeat("a", 36) + " x\t" + strings.Repeat("b", 30) + "END",
+		"0123456789 bc    0123456789a0123456789   word\tword",
+		"abcdefghijklmn\tpqrs",
+		strings.Repeat("a", 19) + "bbbbb\t",
+		"世界\t世界 世界\t世界\t世界世界世界世界",
 	}
 	for width := 1; width <= 44; width++ {
 		for _, text := range texts {
@@ -318,7 +369,7 @@ func rowProblem(screen screenState, text string, pos int, row editorRow, want st
 	if row.text != text[row.start:row.end] {
 		return fmt.Sprintf("text %q is not the source range", row.text)
 	}
-	if got := norm.NFC.String(screen.expand(row.text)); got != want && !strings.Contains(text, "\t") {
+	if got := norm.NFC.String(screen.expandAt(row.text, row.col)); got != want {
 		return fmt.Sprintf("is %q, wrapper returned %q", got, want)
 	}
 	return ""
