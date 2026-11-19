@@ -232,24 +232,27 @@ func TestMarkOverlayFollowsResizeAndTheme(t *testing.T) {
 	}
 }
 
+func resetMarkCache() {
+	markCache.Clear()
+	markCacheSize.Store(0)
+}
+
 func TestMarkCacheStaysBounded(t *testing.T) {
-	t.Cleanup(func() {
-		markCache.Clear()
-		markCacheSize.Store(0)
-	})
+	resetMarkCache()
+	t.Cleanup(resetMarkCache)
 	m := markModel("kitty", 60, 24)
 	for width := 60; width < 60+3*markCacheLimit; width++ {
 		m.screen.width = width
 		if m.markOverlay() == "" {
 			t.Fatalf("no mark at width %d", width)
 		}
-	}
-	entries := 0
-	markCache.Range(func(any, any) bool {
-		entries++
-		return true
-	})
-	if entries == 0 || entries > markCacheLimit {
-		t.Fatalf("the mark cache holds %d entries after %d sizes, want 1 to %d", entries, 3*markCacheLimit, markCacheLimit)
+		entries := 0
+		markCache.Range(func(any, any) bool {
+			entries++
+			return true
+		})
+		if entries == 0 || entries > markCacheLimit {
+			t.Fatalf("the mark cache holds %d entries after the mark of width %d, want 1 to %d", entries, width, markCacheLimit)
+		}
 	}
 }

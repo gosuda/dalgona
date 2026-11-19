@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
@@ -184,19 +185,25 @@ func TestKeywordMatchErrorIsSilent(t *testing.T) {
 }
 
 type keywordRecorder struct {
-	mu   sync.Mutex
-	sent []keywordMatchParams
+	mu     sync.Mutex
+	sent   []keywordMatchParams
+	answer func(call int, text string) keywordReply
 }
 
 func (k *keywordRecorder) Notify(string, any) error { return nil }
 
-func (k *keywordRecorder) Call(_ context.Context, method string, params, _ any) error {
+func (k *keywordRecorder) Call(_ context.Context, method string, params, result any) error {
 	if method != "dalgona/keywords/match" {
 		return nil
 	}
+	sent := params.(keywordMatchParams)
 	k.mu.Lock()
-	defer k.mu.Unlock()
-	k.sent = append(k.sent, params.(keywordMatchParams))
+	k.sent = append(k.sent, sent)
+	call := len(k.sent)
+	k.mu.Unlock()
+	if k.answer != nil {
+		*result.(*keywordReply) = k.answer(call, sent.Text)
+	}
 	return nil
 }
 
@@ -248,7 +255,7 @@ func TestKeywordMatchSentOncePerPause(t *testing.T) {
 				expectMatches(t, client, "while ten keys were still arriving")
 				pause(114 * time.Millisecond)
 				expectMatches(t, client, "119 ms after the last key")
-				pause(2 * time.Millisecond)
+				pause(time.Millisecond)
 				first := keywordMatchParams{ThreadID: "t1", Text: "ultrathink", Kind: tc.kind}
 				expectMatches(t, client, "120 ms after the last key", first)
 				typeBurst(run, "!")
@@ -258,6 +265,78 @@ func TestKeywordMatchSentOncePerPause(t *testing.T) {
 			})
 		})
 	}
+}
+
+func wordReply(text string, width int) keywordReply {
+	start := strings.Index(text, "ultrathink")
+	return keywordReply{Matches: []keywordReplyMatch{{ByteRange: keywordRange{Start: start, End: start + width}}}}
+}
+
+func composerMarks(run *emulatedRun) (spans []keywordSpan, shown string) {
+	spans = run.read(func(m model) any { return m.draftSpans() }).([]keywordSpan)
+	shown = run.read(func(m model) any {
+		m = playTerminal(m)
+		m.screen.profile = colorprofile.TrueColor
+		return underlinedRunes(m.View().Content)
+	}).(string)
+	return spans, shown
+}
+
+func TestKeywordReplyAfterPauseMarksTheDraft(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		client := &keywordRecorder{answer: func(_ int, text string) keywordReply { return wordReply(text, len("ultrathink")) }}
+		run := startRecordedWith(client, 100, 24, new(recordedOutput))
+		defer run.stop()
+		run.send(func(m *model) { m.screen.theme = newTheme(themeNight, false) })
+		synctest.Wait()
+		typeBurst(run, "use ultrathink")
+		if spans, shown := composerMarks(run); len(spans) != 0 || shown != "" {
+			t.Fatalf("marks %v %q before the pause ended, want none", spans, shown)
+		}
+		pause(time.Second)
+		spans, shown := composerMarks(run)
+		if want := []keywordSpan{{start: 4, end: 14}}; !slices.Equal(spans, want) {
+			t.Fatalf("spans after the pause = %v, want %v", spans, want)
+		}
+		if shown != "ultrathink" {
+			t.Fatalf("composer underlines %q after the pause, want ultrathink", shown)
+		}
+	})
+}
+
+func TestKeywordReplyOfAnEarlierRequestIsDropped(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		held := make(chan struct{})
+		release := sync.OnceFunc(func() { close(held) })
+		client := &keywordRecorder{answer: func(call int, text string) keywordReply {
+			if call == 1 {
+				<-held
+				return wordReply(text, len("ultra"))
+			}
+			return wordReply(text, len("ultrathink"))
+		}}
+		run := startRecordedWith(client, 100, 24, new(recordedOutput))
+		defer run.stop()
+		defer release()
+		typeBurst(run, "ultrathink")
+		pause(time.Second)
+		typeBurst(run, "!")
+		run.send(press(tea.KeyBackspace, 0, ""))
+		pause(time.Second)
+		if spans, _ := composerMarks(run); !slices.Equal(spans, []keywordSpan{{start: 0, end: 10}}) {
+			t.Fatalf("spans from the newest request = %v, want [{0 10}]", spans)
+		}
+		release()
+		synctest.Wait()
+		if spans, _ := composerMarks(run); !slices.Equal(spans, []keywordSpan{{start: 0, end: 10}}) {
+			t.Fatalf("the reply of the first request replaced the marks of the newest one: %v", spans)
+		}
+		if got := len(client.matches()); got != 2 {
+			t.Fatalf("the draft was sent %d times, want 2", got)
+		}
+	})
 }
 
 func TestKeywordMatchSkipsLargeDraft(t *testing.T) {
