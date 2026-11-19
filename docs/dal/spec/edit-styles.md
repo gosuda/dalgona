@@ -104,7 +104,7 @@ The writer MUST recheck every source digest and every required absence before pu
 
 A call MUST NOT stage more than 64 MiB of file content.
 
-A mid-commit failure MUST attempt reverse-order restoration of every completed effect. The error MUST name every affected source and destination path. A rollback failure MUST name each failed restoration and every retained backup. The writer MUST NOT report `nothing was written` after a completed write and successful restore.
+A mid-commit failure MUST attempt reverse-order restoration of every completed effect. The error MUST name every affected source and destination path. A rollback failure MUST name each failed restoration and every retained backup. A profile call MUST also retain and name every backup when a path state is `unknown`. The writer MUST NOT report `nothing was written` after a completed write and successful restore.
 
 Cancellation before the first target mutation MUST leave every target unchanged. Cancellation after the first mutation MUST NOT interrupt commit or rollback between effect boundaries.
 

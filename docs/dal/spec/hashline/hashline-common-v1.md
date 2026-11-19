@@ -249,9 +249,10 @@ For every historical splice:
 4. Edits after it leave it unchanged.
 
 Both real neighbors MUST still be adjacent. The empty file's sole gap has the
-same rule. BOF/EOF belong to the referenced snapshot. A concurrent append occupies
-its EOF gap and conflicts. New profiles deliberately remove the source plan's
-stale head/tail exception (S-PROOF).
+same rule. BOF/EOF belong to the referenced snapshot. A `PUT >$:` under a reference
+names the last gap of that snapshot. A concurrent append occupies its EOF gap and
+conflicts. New profiles deliberately remove the source plan's stale head/tail
+exception (S-PROOF).
 
 A pure gap removes no line body, so profile coverage does not differ. A terminator
 side effect can make it destructive. C11 determines its actual footprint.
@@ -384,6 +385,7 @@ Report observed outcome, not intended outcome. The new profiles do not yet emit 
 nothing written. `write_error/complete` means effects installed but success/durability
 failed, for example a directory-sync failure after renames. `partial` lists every
 affected path and verified before/after state. Unknown state requires indeterminate.
+A sha re-read after rollback decides every path state.
 
 Do not publish executable references or Chain edges before commit and its required
 record boundary succeed. Invalidate relevant epochs on partial/uncertain outcomes.
@@ -404,7 +406,7 @@ conservatively even when this double-counts shared data. Other runtime allocatio
 are outside these budgets. Total RSS is not promised to fit in 96 MiB.
 
 Retain source ceilings: input 8 MiB, 1-64 edits, 64 canonical paths, 16 MiB per file,
-64 MiB staged before-plus-after bytes per call. Check before allocation.
+64 MiB staged before-plus-after bytes per call. The canonical paths of a call total at most 16 KiB. Check before allocation.
 These are individual ceilings, not a promise every combination can fit concurrently.
 Metadata can reduce usable capacity. The store has no limit per path or per consumer.
 Each thread store keeps at most 512 entries.

@@ -44,7 +44,7 @@ func (p *dirPin) openChain(components []string, display string) error {
 			return nil
 		}
 		if errors.Is(err, unix.ELOOP) {
-			return fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display)
+			return symlinkRefusal(display)
 		}
 		return fmt.Errorf("patch: inspect path %s: %w", display, err)
 	}
@@ -59,7 +59,7 @@ func (p *dirPin) checkLeaf(name, display string) error {
 	err := unix.Fstatat(int(p.file.Fd()), name, &info, unix.AT_SYMLINK_NOFOLLOW)
 	if err == nil {
 		if info.Mode&unix.S_IFMT == unix.S_IFLNK {
-			return fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display)
+			return symlinkRefusal(display)
 		}
 		return nil
 	}
@@ -80,7 +80,7 @@ func (p *dirPin) mkdirChain(display string, perm fs.FileMode) error {
 		fd, err := unix.Openat(int(p.file.Fd()), component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
 			if errors.Is(err, unix.ELOOP) {
-				return fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display)
+				return symlinkRefusal(display)
 			}
 			return fmt.Errorf("patch: inspect path %s: %w", display, err)
 		}

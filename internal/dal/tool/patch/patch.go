@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"slices"
 
 	"github.com/gosuda/dalgona/internal/dal/tool"
 )
@@ -32,24 +34,32 @@ func (e Editor) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Res
 }
 
 func (e Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Plan, error) {
+	plan, err := e.plan(ctx, call, env)
+	if err != nil {
+		return tool.Plan{}, e.refuse(err)
+	}
+	return plan, nil
+}
+
+func (e Editor) plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Plan, error) {
 	input, err := payload(e.style, call.Args)
 	if err != nil {
 		return tool.Plan{}, parseError(e.style, err)
 	}
 	if len(input) > 8<<20 {
-		return tool.Plan{}, errors.New("patch: input is over 8 MiB; split the change into several calls")
+		return tool.Plan{}, reasoned(tool.ReasonResourceLimit, errors.New("patch: input is over 8 MiB; split the change into several calls"))
 	}
-	edits, err := parse(e.style, input)
+	edits, err := parseCall(e.style, input)
 	if err != nil {
-		return tool.Plan{}, parseError(e.style, err)
+		return tool.Plan{}, err
 	}
 	if env.Masker != nil {
 		if unmaskErr := unmaskEdits(edits, env.Masker.UnmaskStrict); unmaskErr != nil {
-			return tool.Plan{}, fmt.Errorf("patch: secret placeholder cannot be restored: %w", unmaskErr)
+			return tool.Plan{}, reasoned(tool.ReasonPermissionDenied, fmt.Errorf("patch: secret placeholder cannot be restored: %w", unmaskErr))
 		}
 	}
 	if len(edits) == 0 || len(edits) > 64 {
-		return tool.Plan{}, errors.New("patch: a payload may hold 1 to 64 edits; split the change into several calls")
+		return tool.Plan{}, reasoned(tool.ReasonResourceLimit, errors.New("patch: a payload may hold 1 to 64 edits; split the change into several calls"))
 	}
 	batch, err := stage(ctx, e.style, edits, env, input)
 	if err != nil {
@@ -63,6 +73,35 @@ func (e Editor) Plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Pl
 		},
 		Discard: batch.closePins,
 	}, nil
+}
+
+const maxPathText = 16 << 10
+
+func editPaths(edits []edit) []string {
+	var paths []string
+	for _, item := range edits {
+		for _, raw := range []string{item.path, item.to} {
+			if raw == "" {
+				continue
+			}
+			canonical := filepath.ToSlash(filepath.Clean(raw))
+			if !slices.Contains(paths, canonical) {
+				paths = append(paths, canonical)
+			}
+		}
+	}
+	return paths
+}
+
+func checkPathText(paths []string) error {
+	total := 0
+	for _, path := range paths {
+		total += len(path)
+	}
+	if total > maxPathText {
+		return reasoned(tool.ReasonResourceLimit, errors.New("patch: the paths of this call total over 16 KiB; split the change into several calls"))
+	}
+	return nil
 }
 
 func payload(style Style, raw jsontext.Value) (string, error) {
@@ -101,6 +140,19 @@ func jsonString(raw jsontext.Value) (string, error) {
 		return "", errors.New("trailing data after string")
 	}
 	return text, nil
+}
+
+func parseCall(style Style, input string) ([]edit, error) {
+	edits, err := parse(style, input)
+	if err != nil {
+		return nil, parseError(style, err)
+	}
+	if style.profile() {
+		if err = checkPathText(editPaths(edits)); err != nil {
+			return nil, err
+		}
+	}
+	return edits, nil
 }
 
 func parse(style Style, input string) ([]edit, error) {

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 var omissionPhrases = [...]string{
@@ -29,7 +31,7 @@ type observerFinding struct {
 
 func blockingFinding(findings []observerFinding) error {
 	for _, finding := range findings {
-		return refusalError(fmt.Sprintf("patch: %s line %d: %q stands in for omitted code; write the complete text. Nothing was written.", finding.path, finding.line, finding.text))
+		return reasoned(tool.ReasonObserverBlocked, refusalError(fmt.Sprintf("patch: %s line %d: %q stands in for omitted code; write the complete text. Nothing was written.", finding.path, finding.line, finding.text)))
 	}
 	return nil
 }
