@@ -42,6 +42,20 @@ func assertNoInterrupt(t *testing.T, caller *fakeCaller) {
 	}
 }
 
+func assertNoQuestionRow(t *testing.T, m model) {
+	t.Helper()
+	for key := range m.out.printed {
+		if strings.HasPrefix(key, "question:") {
+			t.Fatalf("the lost connection wrote the question row %q", key)
+		}
+	}
+	for _, row := range m.out.entries {
+		if strings.HasPrefix(row.key, "question:") {
+			t.Fatalf("the lost connection kept the question row %q", row.key)
+		}
+	}
+}
+
 func waitingModel(t *testing.T) (model, openWork) {
 	t.Helper()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
@@ -78,6 +92,7 @@ func TestDisconnectClearsRetryWaitAndCards(t *testing.T) {
 	}
 	assertErrorAnswer(t, "the approval request", work.approved)
 	assertErrorAnswer(t, "the question request", work.asked)
+	assertNoQuestionRow(t, m)
 	row := liveRowText(m)
 	if !strings.Contains(row, connectionLostRow) || strings.Contains(row, "rate limited") {
 		t.Fatalf("live row = %q, want the connection notice and no countdown", row)
