@@ -146,6 +146,8 @@ Each icon MUST carry an `aria-label` that states its value in words. The browser
 
 The band MUST keep a details list under `Status` that holds every shown item as text. The list MUST appear when `statusHide` names an item, and when the window is 40rem or narrower.
 
+Above 40rem the band is three rows at the end of the header. The first row holds `model`. The second row holds `effort`, `approval`, `sandbox`, `folder`, and `queue`. The third row holds `context` and `mark`. Each row MUST end at the right edge of the band.
+
 At 40rem or narrower the band is one row under the title. Below a band width of 30rem the folder item MUST drop. Below 26rem the queue item MUST drop. Below 16rem the effort item MUST drop. Below 12rem the mark item MUST drop. Model, context, approval, and sandbox MUST NOT drop.
 
 The document title MUST be `dalgona · <title> · <state>`, with the same state word as the header tag.
@@ -491,4 +493,4 @@ The resume panel MUST show its search progress as status text inside its dialog.
 A failed save in the model or settings panel MUST show a notice.
 The composer MUST show its error as an alert beside the message field. The message field MUST name that alert in `aria-describedby`. The composer MUST NOT add a notice for its error.
 The `page live regions` tests in `web/src/lib/components/App.dom.test.ts` check these rules.
-`web/checks/approval-actions.js` checks the approval card on small screens. `web/checks/dock.js` checks the composer dock at the start, the middle and the end of the document. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript at 1280x800, on a thread whose transcript holds more than its column shows.
+`web/checks/approval-actions.js` checks the approval card on small screens. `web/checks/dock.js` checks the composer dock at the start, the middle and the end of the document. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/band-rows.js` checks that every band row ends at the right edge of the band, in a window wider than 640 px. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript at 1280x800, on a thread whose transcript holds more than its column shows.
