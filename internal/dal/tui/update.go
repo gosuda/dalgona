@@ -334,7 +334,8 @@ func (m *model) escape() tea.Cmd {
 
 func (m *model) idleEscape() tea.Cmd {
 	if m.input.composer.Value() != "" {
-		return m.interrupt()
+		m.noticef("idle, draft kept; nothing to interrupt")
+		return nil
 	}
 	if m.thread.id == "" {
 		return nil
