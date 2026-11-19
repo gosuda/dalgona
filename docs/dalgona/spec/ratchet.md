@@ -204,6 +204,10 @@ That refusal MUST name the lines and characters of the preview and of the room l
 
 A cell call to `approve` MUST be denied with `tool ratchet approve needs the user and runs only as a direct call`.
 
+The `ratchet` keyword notice MUST name the analyzer call as `tools.task(...)` in an `eval` cell, because `eval-first` folds `task`.
+
+In mode `ask`, that `task` call MUST NOT prompt the user, as [starlark.md](../../dal/spec/starlark.md) states.
+
 The test grades in `results.jsonl` MUST stay readable by the model through `read` in the same thread.
 
 The `split` action MUST derive its seed from the call id when the call gives no seed.
