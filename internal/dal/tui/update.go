@@ -297,7 +297,7 @@ func (m *model) exitKey() tea.Cmd {
 		return nil
 	}
 	if draft := m.input.composer.Value(); strings.TrimSpace(draft) != "" {
-		m.input.history.add(draft, "")
+		m.input.history.add(m.input.composer.Expanded(), "")
 		m.input.composer.SetValue("")
 		return m.setHint("Draft saved to history · Ctrl+C again to exit", "exit")
 	}
@@ -308,22 +308,14 @@ func (m *model) recallOlder() bool {
 	if !m.input.composer.onFirstRow(&m.screen) {
 		return false
 	}
-	text, ok := m.input.history.older(m.input.composer.Value())
-	if ok {
-		m.input.composer.SetValue(text)
-	}
-	return ok
+	return m.input.history.older(&m.input.composer)
 }
 
 func (m *model) recallNewer() bool {
 	if !m.input.composer.onLastRow(&m.screen) {
 		return false
 	}
-	text, ok := m.input.history.newer()
-	if ok {
-		m.input.composer.SetValue(text)
-	}
-	return ok
+	return m.input.history.newer(&m.input.composer)
 }
 
 func (m *model) escape() tea.Cmd {

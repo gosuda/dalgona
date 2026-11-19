@@ -112,6 +112,124 @@ func TestCtrlCSavesDraft(t *testing.T) {
 	}
 }
 
+func hasPrivateUse(text string) bool {
+	return strings.ContainsFunc(text, func(r rune) bool { return r >= chipRuneBase })
+}
+
+func chipDraftModel(t *testing.T, client caller, pasted string) model {
+	t.Helper()
+	m := newTestModel(client, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.thread.id = "t1"
+	m = typeText(t, m, "S7MARK ")
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+	if len(m.input.composer.chips) != 1 {
+		t.Fatalf("composer holds %d chips after the paste, want 1", len(m.input.composer.chips))
+	}
+	return m
+}
+
+func TestCtrlCSavesChipDraftExpanded(t *testing.T) {
+	t.Parallel()
+	pasted := pasteLines(30)
+	want := "S7MARK " + pasted
+	m := chipDraftModel(t, new(fakeCaller), pasted)
+	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+	if got := m.input.composer.Value(); got != "" {
+		t.Fatalf("editor holds %q after Ctrl+C, want empty", got)
+	}
+	if m.hint.text != "Draft saved to history · Ctrl+C again to exit" {
+		t.Fatalf("hint = %q", m.hint.text)
+	}
+	if got := historyTexts(m); !slices.Equal(got, []string{want}) {
+		t.Fatalf("history = %q, want the typed text and all 30 pasted lines", got)
+	}
+	m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+	if got := m.input.composer.Expanded(); got != want {
+		t.Fatalf("recalled draft = %q, want %q", got, want)
+	}
+	if hasPrivateUse(m.input.composer.Value()) {
+		t.Fatalf("recalled draft holds a chip atom: %q", m.input.composer.Value())
+	}
+}
+
+func TestRecalledChipDraftSendsAllPastedLines(t *testing.T) {
+	t.Parallel()
+	pasted := pasteLines(30)
+	caller := new(fakeCaller)
+	m := chipDraftModel(t, caller, pasted)
+	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+	m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	runCommand(t, m, command, "Enter did not send the recalled draft")
+	if len(caller.calls) == 0 || caller.calls[0].method != "turn/start" {
+		t.Fatalf("calls = %#v, want turn/start", caller.calls)
+	}
+	input := caller.calls[0].params.(rpc.TurnStartParams).Input
+	if want := "S7MARK " + pasted; len(input) != 1 || input[0].Text != want {
+		t.Fatalf("sent %q, want the typed text and all 30 pasted lines", input)
+	}
+}
+
+func TestCtrlCSavesChipOnlyDraftExpanded(t *testing.T) {
+	t.Parallel()
+	pasted := pasteLines(30)
+	m := paletteModel(t)
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+	if got := historyTexts(m); !slices.Equal(got, []string{pasted}) {
+		t.Fatalf("history = %q, want the 30 pasted lines", got)
+	}
+}
+
+func TestHistoryRecallRestoresChips(t *testing.T) {
+	t.Parallel()
+	first, second := pasteLines(12), pasteLines(13)
+	m := paletteModel(t)
+	m.input.history.add("earlier", "")
+	m = typeText(t, m, "a ")
+	m, _ = drive(t, m, tea.PasteMsg{Content: first})
+	m = typeText(t, m, " b ")
+	m, _ = drive(t, m, tea.PasteMsg{Content: second})
+	original := m.input.composer.Expanded()
+	m, _ = drive(t, m, press(tea.KeyHome, 0, ""))
+	m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+	if got := m.input.composer.Value(); got != "earlier" {
+		t.Fatalf("up recalled %q, want earlier", got)
+	}
+	m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	if got := m.input.composer.Expanded(); got != original {
+		t.Fatalf("down restored %q, want %q", got, original)
+	}
+	if hasPrivateUse(m.input.composer.Expanded()) {
+		t.Fatalf("restored draft holds a chip atom: %q", m.input.composer.Expanded())
+	}
+	if got := len(m.input.composer.chips); got != 2 {
+		t.Fatalf("restored draft holds %d chips, want 2", got)
+	}
+	assertContains(t, dockText(m), "[Paste #1 +12 lines]", "[Paste #2 +13 lines]")
+}
+
+func TestHistorySearchRecallsCtrlCChipDraft(t *testing.T) {
+	t.Parallel()
+	pasted := pasteLines(30)
+	want := "S7MARK " + pasted
+	m := chipDraftModel(t, new(fakeCaller), pasted)
+	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+	m, _ = drive(t, m, press('r', tea.ModCtrl, ""))
+	if m.list == nil || m.list.kind != "history" {
+		t.Fatal("ctrl+r did not open the history panel")
+	}
+	body := historyBody(m)
+	if len(body) != 1 || !strings.HasPrefix(body[0], "S7MARK line 01 line 02") {
+		t.Fatalf("history rows = %q, want the chip draft with its pasted lines", body)
+	}
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	if got := m.input.composer.Expanded(); got != want {
+		t.Fatalf("composer = %q after Enter, want %q", got, want)
+	}
+}
+
 func TestHistoryRecallKeepsFrameInWindow(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(new(fakeCaller), Options{})

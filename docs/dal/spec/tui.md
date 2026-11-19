@@ -255,7 +255,7 @@ Enter after a backslash MUST replace the backslash with a newline.
 Shift+Enter and Ctrl+J MUST insert a newline.
 Alt+Enter MUST queue the draft as a follow-up.
 Up MUST move the caret between wrapped rows. On the first row, Up MUST recall the previous history entry.
-Down MUST move the caret between wrapped rows. On the last row, Down MUST recall the next entry, and past the newest entry it MUST restore the draft.
+Down MUST move the caret between wrapped rows. On the last row, Down MUST recall the next entry, and past the newest entry it MUST restore the draft with its chips.
 Home and End MUST move the caret to the start or end of its line.
 Alt+Left and Alt+Right MUST move the caret by word.
 Ctrl+W MUST delete the word before the caret.
@@ -289,6 +289,8 @@ A paste of 10 or more lines MUST become one chip labelled `[Paste #n +L lines]`,
 A chip MUST take one composer row, whatever the length of its paste.
 Backspace and Delete MUST remove a whole chip.
 Sending MUST replace each chip with its full pasted text, in order.
+The history MUST store each prompt, and each draft that Ctrl+C saves, with each chip that holds text replaced by its full text.
+A prompt recalled from the history MUST be plain text. It MUST NOT become a chip.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB MUST be refused with a notice that names the limit.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
@@ -302,7 +304,7 @@ Sending MUST send each image chip as an image input item after the text.
 
 The composer MUST show a command palette when the caret is in a first token that starts with `/`, with no panel or review open.
 The palette MUST list at most 8 matching commands and MUST NOT open for `//`.
-Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token.
+Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token. It MUST keep each chip of the draft.
 Enter MUST run a highlighted command only when the draft is only its first token and the command takes no argument. Otherwise, Enter MUST complete the command and keep the rest of the draft.
 Esc MUST close the palette and keep the draft. Typing a character MUST reopen it.
 
