@@ -253,7 +253,7 @@ func placeLines(doc document, item edit, first, last int, body []byte) replaceme
 }
 
 func (r fileResolver) resolveGap(doc document, item edit) ([]replacement, error) {
-	gap, err := r.targetGap(doc, item)
+	gap, source, err := r.targetGap(doc, item)
 	if err != nil {
 		return nil, err
 	}
@@ -262,8 +262,8 @@ func (r fileResolver) resolveGap(doc document, item edit) ([]replacement, error)
 	}
 	body := doc.render(item.body)
 	splice := snapshot.Splice{Start: gap, End: gap, Inserted: countBodyLines(body)}
-	if gap == doc.lines() && !doc.finalNewline && doc.lines() > 0 {
-		if err := r.proveFinalRowCoverage(item, doc.lines()); err != nil {
+	if gap == doc.lines() && !doc.finalNewline && doc.lines() > 0 && source > 0 {
+		if err := r.proveFinalRowCoverage(item, source); err != nil {
 			return nil, err
 		}
 		splice.Start = gap - 1
@@ -272,22 +272,28 @@ func (r fileResolver) resolveGap(doc document, item edit) ([]replacement, error)
 	return []replacement{{index: item.index, start: offset, end: offset, body: body, splice: splice}}, nil
 }
 
-func (r fileResolver) targetGap(doc document, item edit) (int, error) {
-	gap := item.locator.before - 1
-	if item.locator.before == tailGap {
-		gap = doc.lines()
-	}
+func (r fileResolver) targetGap(doc document, item edit) (mapped, source int, err error) {
+	source = item.locator.before - 1
 	if item.guard.kind != guardReference {
-		return gap, nil
+		if item.locator.before == tailGap {
+			source = doc.lines()
+		}
+		return source, source, nil
 	}
-	return mapReferenceGap(r.env.Snapshots, item.guard.text, r.file, gap)
+	if item.locator.before == tailGap {
+		if source, err = r.env.Snapshots.Lines(item.guard.text); err != nil {
+			return 0, 0, staleReference(item.guard.text, r.file.path, err)
+		}
+	}
+	mapped, err = mapReferenceGap(r.env.Snapshots, item.guard.text, r.file, source)
+	return mapped, source, err
 }
 
-func (r fileResolver) proveFinalRowCoverage(item edit, line int) error {
+func (r fileResolver) proveFinalRowCoverage(item edit, row int) error {
 	if r.style != HashlineEnhanced {
 		return nil
 	}
-	return proveCoverage(r.env.Snapshots, item, r.file.path, line, line)
+	return proveCoverage(r.env.Snapshots, item, r.file.path, row, row)
 }
 
 func (r fileResolver) resolveText(doc document, item edit) ([]replacement, error) {
@@ -370,7 +376,7 @@ func mapReferenceSpan(store *snapshot.Store, ref string, file *stagedFile, first
 	}
 	mapped, err := store.ResolveSpan(ref, file.path, file.before, snapshot.Span{Start: first - 1, End: last})
 	if err != nil {
-		return snapshot.Span{}, fmt.Errorf("patch: reference %s for %s is stale: %w. Read again", ref, file.path, err)
+		return snapshot.Span{}, staleReference(ref, file.path, err)
 	}
 	return mapped, nil
 }
@@ -381,9 +387,13 @@ func mapReferenceGap(store *snapshot.Store, ref string, file *stagedFile, gap in
 	}
 	mapped, err := store.ResolveGap(ref, file.path, file.before, gap)
 	if err != nil {
-		return 0, fmt.Errorf("patch: reference %s for %s is stale: %w. Read again", ref, file.path, err)
+		return 0, staleReference(ref, file.path, err)
 	}
 	return mapped, nil
+}
+
+func staleReference(ref, path string, err error) error {
+	return fmt.Errorf("patch: reference %s for %s is stale: %w. Read again", ref, path, err)
 }
 
 func proveUnchanged(env tool.Env, ref, path string, before []byte) error {

@@ -159,6 +159,19 @@ func (s *Store) Get(ref string) (Entry, error) {
 	return cloneEntry(entry), nil
 }
 
+func (s *Store) Lines(ref string) (int, error) {
+	if s == nil {
+		return 0, ErrUnknownReference
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.entries[ref]
+	if !ok {
+		return 0, s.absent(ref)
+	}
+	return lineCount(entry.Data), nil
+}
+
 func (s *Store) absent(ref string) error {
 	if !ValidRef(ref) {
 		return ErrUnknownReference

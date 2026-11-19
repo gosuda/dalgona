@@ -249,9 +249,10 @@ For every historical splice:
 4. Edits after it leave it unchanged.
 
 Both real neighbors MUST still be adjacent. The empty file's sole gap has the
-same rule. BOF/EOF belong to the referenced snapshot. A concurrent append occupies
-its EOF gap and conflicts. New profiles deliberately remove the source plan's
-stale head/tail exception (S-PROOF).
+same rule. BOF/EOF belong to the referenced snapshot. A `PUT >$:` under a reference
+names the last gap of that snapshot. A concurrent append occupies its EOF gap and
+conflicts. New profiles deliberately remove the source plan's stale head/tail
+exception (S-PROOF).
 
 A pure gap removes no line body, so profile coverage does not differ. A terminator
 side effect can make it destructive. C11 determines its actual footprint.

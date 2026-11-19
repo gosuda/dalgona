@@ -226,3 +226,68 @@ func TestMetadataRoundTrip(t *testing.T) {
 		t.Fatalf("restored entry %+v", got)
 	}
 }
+
+func TestStoreLinesReportsTheReferenceLineCount(t *testing.T) {
+	store := New()
+	tests := []struct {
+		name string
+		data string
+		want int
+	}{
+		{"empty", "", 0},
+		{"one unterminated row", "x", 1},
+		{"one terminated row", "x\n", 1},
+		{"terminated rows", "a\nb\nc\n", 3},
+		{"unterminated final row", "a\nb\nc", 3},
+		{"blank rows", "\n\n", 2},
+	}
+	for _, test := range tests {
+		t.Run("C08/"+test.name, func(t *testing.T) {
+			ref := store.Put(test.name+".txt", []byte(test.data), nil)
+			got, err := store.Lines(ref)
+			if err != nil || got != test.want {
+				t.Fatalf("Lines(%q) = %d, %v; want %d", test.data, got, err, test.want)
+			}
+		})
+	}
+	t.Run("C08/reference coordinates after a later edit", func(t *testing.T) {
+		before := []byte("a\nb\nc\n")
+		ref := store.Put("moved.txt", before, nil)
+		store.Record("moved.txt", before, []byte("a\nb\nc\nd\ne\n"), []Splice{{Start: 3, End: 3, Inserted: 2}})
+		got, err := store.Lines(ref)
+		if err != nil || got != 3 {
+			t.Fatalf("Lines after append = %d, %v; want 3", got, err)
+		}
+	})
+	t.Run("C08/absent", requireLinesAbsent)
+	t.Run("C08/nil store", requireLinesNilStore)
+}
+
+func requireLinesAbsent(t *testing.T) {
+	f := newTaxonomyFixture()
+	cases := []struct {
+		name string
+		ref  string
+		want error
+	}{
+		{"expired", f.expired, ErrExpiredReference},
+		{"other boot", f.foreign(), ErrUnknownReference},
+		{"never issued", f.issued(f.store.seq + 1), ErrUnknownReference},
+		{"malformed", "x", ErrUnknownReference},
+	}
+	for _, item := range cases {
+		got, err := f.store.Lines(item.ref)
+		if got != 0 {
+			t.Fatalf("%s: count %d, want 0", item.name, got)
+		}
+		requireOnly(t, item.name, err, item.want)
+	}
+}
+
+func requireLinesNilStore(t *testing.T) {
+	var nilStore *Store
+	got, err := nilStore.Lines("r0123456789abcdef0123456789abcdef.1")
+	if got != 0 || !errors.Is(err, ErrUnknownReference) {
+		t.Fatalf("nil store Lines = %d, %v; want 0, %v", got, err, ErrUnknownReference)
+	}
+}
