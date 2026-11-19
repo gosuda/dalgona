@@ -18,6 +18,7 @@ let hits = $state<readonly ThreadSearchHit[]>([]);
 let searchError = $state("");
 let searching = $state(false);
 let retry = $state(0);
+let opening = $state(false);
 const needle = $derived(filter.trim().toLowerCase());
 const shown = $derived(
 	threads.filter(
@@ -74,7 +75,12 @@ async function load(): Promise<void> {
 }
 
 async function choose(threadId: string): Promise<void> {
-	await session.selectThread(threadId);
+	opening = true;
+	try {
+		await session.selectThread(threadId);
+	} finally {
+		opening = false;
+	}
 	session.closePanel();
 }
 </script>
@@ -82,6 +88,9 @@ async function choose(threadId: string): Promise<void> {
 <Panel title="Open an earlier thread" {open} onClose={() => session.closePanel()}>
 	{#snippet children()}
 		<input type="search" bind:value={filter} placeholder="Filter threads" aria-label="Filter threads" />
+		{#if opening}
+			<p role="status">Opening thread…</p>
+		{/if}
 		{#if error !== ""}
 			<p class="error" role="alert">Unable to list threads: {error}</p>
 			<button type="button" class="quiet" onclick={() => void load()}>Try again</button>
@@ -91,7 +100,7 @@ async function choose(threadId: string): Promise<void> {
 			<ul class="threads">
 				{#each shown as thread (thread.id)}
 					<li>
-						<button type="button" class="thread-choice" onclick={() => void choose(thread.id)}>
+						<button type="button" class="thread-choice" disabled={opening} onclick={() => void choose(thread.id)}>
 							<span class="title">{threadTitle(thread)}</span>
 						</button>
 					</li>
@@ -111,7 +120,7 @@ async function choose(threadId: string): Promise<void> {
 				{:else}
 					<ul class="threads">
 						{#each hits as hit (hit.threadId)}
-							<li><button type="button" class="thread-choice" onclick={() => void choose(hit.threadId)}>
+							<li><button type="button" class="thread-choice" disabled={opening} onclick={() => void choose(hit.threadId)}>
 								<span class="title">{hit.name || hit.preview || "Untitled thread"}</span>
 								<span>{hit.snippet}</span>
 							</button></li>
