@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -163,6 +164,91 @@ func TestWrapRestartsTabStopsAfterNewline(t *testing.T) {
 		rows := screen.wrap("ab\n\tc", 40)
 		if len(rows) != 2 || rows[0] != "ab" || rows[1] != "        c" {
 			t.Errorf("method %v wrap(%q, 40) = %q, want the second line to start its stops at its own first cell", method, "ab\n\tc", rows)
+		}
+	}
+}
+
+const keycapText = "1️⃣ one 2️⃣ two 3️⃣ three 4️⃣ four 5️⃣ five 6️⃣ six 7️⃣ seven 8️⃣ eight 9️⃣ nine"
+
+func wrapRowCases() []struct {
+	name string
+	text string
+	n    int
+	rows []string
+} {
+	return []struct {
+		name string
+		text string
+		n    int
+		rows []string
+	}{
+		{"one leading space before a long word", " " + strings.Repeat("x", 50), 20, []string{strings.Repeat("x", 20), strings.Repeat("x", 20), strings.Repeat("x", 10)}},
+		{"a space between two long words after a hard break", strings.Repeat("x", 20) + " " + strings.Repeat("y", 30), 20, []string{strings.Repeat("x", 20), strings.Repeat("y", 20), strings.Repeat("y", 10)}},
+		{"a line of dashes", strings.Repeat("-", 100), 39, []string{strings.Repeat("-", 39), strings.Repeat("-", 39), strings.Repeat("-", 22)}},
+		{"a word before dashes", "abc " + strings.Repeat("-", 60), 20, []string{"abc", strings.Repeat("-", 20), strings.Repeat("-", 20), strings.Repeat("-", 20)}},
+		{"text that fits stays", "one two three", 20, []string{"one two three"}},
+		{"an indent that fits stays on the first row", "  ab " + strings.Repeat("-", 60), 20, []string{"  ab", strings.Repeat("-", 20), strings.Repeat("-", 20), strings.Repeat("-", 20)}},
+		{"a newline restarts the rows", "one\nab " + strings.Repeat("-", 60), 20, []string{"one", "ab", strings.Repeat("-", 20), strings.Repeat("-", 20), strings.Repeat("-", 20)}},
+		{"a row after a broken word starts without its space", "abc " + strings.Repeat("-", 60) + " zz", 20, []string{"abc", strings.Repeat("-", 20), strings.Repeat("-", 20), strings.Repeat("-", 20), "zz"}},
+		{"a no-break space joins its words", strings.Repeat("x", 18) + "\u00a0yy " + strings.Repeat("-", 60), 20, []string{strings.Repeat("x", 18) + "\u00a0y", "y", strings.Repeat("-", 20), strings.Repeat("-", 20), strings.Repeat("-", 20)}},
+		{"a limit below one cell leaves the text whole", "abc def", 0, []string{"abc def"}},
+	}
+}
+
+func TestWrapKeepsEveryRowWithinTheCells(t *testing.T) {
+	t.Parallel()
+	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
+		screen := screenState{method: method}
+		for _, tc := range wrapRowCases() {
+			got := screen.wrap(tc.text, tc.n)
+			if strings.Join(got, "|") != strings.Join(tc.rows, "|") {
+				t.Errorf("method %v %s: wrap(%q, %d) = %q, want %q", method, tc.name, tc.text, tc.n, got, tc.rows)
+			}
+		}
+	}
+}
+
+func TestWrapRowsOfKeycapsFitTheCellsTheRendererDraws(t *testing.T) {
+	t.Parallel()
+	screen := screenState{method: ansi.GraphemeWidth}
+	texts := []string{keycapText, strings.Repeat("x1️⃣", 40), strings.Repeat("1️⃣", 10) + " tail text", strings.Repeat("1️⃣", 30)}
+	for _, text := range texts {
+		for _, n := range []int{9, 19, 39} {
+			rows := screen.wrap(text, n)
+			for _, row := range rows {
+				if got := ansi.StringWidth(row); got > n {
+					t.Errorf("wrap(%q, %d) has the row %q of %d cells", text, n, row, got)
+				}
+			}
+			if kept, want := removeSpaces(strings.Join(rows, "")), removeSpaces(text); kept != want {
+				t.Errorf("wrap(%q, %d) lost text: %q", text, n, kept)
+			}
+		}
+	}
+}
+
+func removeSpaces(text string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+func TestWrapKeepsAKeycapWhole(t *testing.T) {
+	t.Parallel()
+	const keycap = "1\uFE0F\u20E3"
+	for _, tc := range []struct {
+		method ansi.Method
+		rows   []string
+	}{
+		{ansi.WcWidth, []string{"xxxxxxxx" + keycap}},
+		{ansi.GraphemeWidth, []string{"xxxxxxxx", keycap}},
+	} {
+		screen := screenState{method: tc.method}
+		if got := screen.wrap("xxxxxxxx"+keycap, 9); strings.Join(got, "|") != strings.Join(tc.rows, "|") {
+			t.Errorf("method %v: wrap = %q, want %q", tc.method, got, tc.rows)
 		}
 	}
 }

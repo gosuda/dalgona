@@ -16,7 +16,10 @@ func (s *screenState) nfc(text string) string {
 	return norm.NFC.String(text)
 }
 
-const tabStop = 8
+const (
+	tabStop = 8
+	nbsp    = '\u00a0'
+)
 
 func (s *screenState) expand(text string) string {
 	return s.expandAt(text, 0)
@@ -127,7 +130,114 @@ func plainPrefix(text string, bound int) string {
 }
 
 func (s *screenState) wrap(text string, n int) []string {
-	return strings.Split(s.method.Wrap(s.nfc(s.expand(text)), n, ""), "\n")
+	text = s.nfc(s.expand(text))
+	if n < 1 {
+		return strings.Split(s.method.Wrap(text, n, ""), "\n")
+	}
+	var rows []string
+	for line := range strings.SplitSeq(text, "\n") {
+		rows = append(rows, s.wrapLine(line, n)...)
+	}
+	return rows
+}
+
+func (s *screenState) wrapLine(line string, n int) []string {
+	rows := strings.Split(s.method.Wrap(line, n, ""), "\n")
+	if s.rowsFit(rows, n) {
+		return rows
+	}
+	return s.greedyRows(line, n)
+}
+
+func (s *screenState) rowsFit(rows []string, n int) bool {
+	for i, row := range rows {
+		if s.method.StringWidth(row) > n {
+			return false
+		}
+		if i > 0 && row != "" && s.startsInsideCluster(row) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *screenState) startsInsideCluster(row string) bool {
+	seq, width := s.step(row)
+	return width == 0 && !strings.HasPrefix(seq, "\x1b")
+}
+
+type rowBuilder struct {
+	rows   []string
+	row    strings.Builder
+	space  strings.Builder
+	word   strings.Builder
+	rowW   int
+	spaceW int
+	wordW  int
+	limit  int
+}
+
+func (b *rowBuilder) flush() {
+	b.rows = append(b.rows, b.row.String())
+	b.row.Reset()
+	b.rowW = 0
+}
+
+func (b *rowBuilder) place() {
+	if b.word.Len() == 0 {
+		return
+	}
+	fits := b.rowW+b.spaceW+b.wordW <= b.limit
+	switch {
+	case b.rowW > 0 && !fits:
+		b.flush()
+	case fits:
+		b.row.WriteString(b.space.String())
+		b.rowW += b.spaceW
+	}
+	b.row.WriteString(b.word.String())
+	b.rowW += b.wordW
+	b.space.Reset()
+	b.spaceW = 0
+	b.word.Reset()
+	b.wordW = 0
+}
+
+func (b *rowBuilder) breakWord() {
+	if b.rowW > 0 {
+		b.flush()
+	}
+	b.row.WriteString(b.word.String())
+	b.rowW = b.wordW
+	b.flush()
+	b.space.Reset()
+	b.spaceW = 0
+	b.word.Reset()
+	b.wordW = 0
+}
+
+func (s *screenState) greedyRows(line string, n int) []string {
+	b := rowBuilder{limit: n}
+	for line != "" {
+		seq, width := s.step(line)
+		line = line[len(seq):]
+		if r, _ := utf8.DecodeRuneInString(seq); r != utf8.RuneError && unicode.IsSpace(r) && r != nbsp {
+			b.place()
+			b.space.WriteString(seq)
+			b.spaceW += width
+			continue
+		}
+		if b.wordW > 0 && b.wordW+width > n {
+			b.breakWord()
+		}
+		b.word.WriteString(seq)
+		b.wordW += width
+	}
+	b.place()
+	if b.row.Len() > 0 || len(b.rows) == 0 {
+		b.flush()
+	}
+	return b.rows
 }
 
 type byteRange struct {

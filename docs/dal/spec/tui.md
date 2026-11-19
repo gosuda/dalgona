@@ -491,6 +491,8 @@ The client MUST measure text with the width method of its renderer.
 A tab MUST count as the cells to the next 8-cell stop, counted from the first cell of the text that holds it.
 A newline MUST restart the count of stops.
 A row that the client prints or draws MUST hold spaces in place of each tab.
+A wrapped row MUST NOT exceed the wrap width in cells of that method.
+A wrap break MUST NOT fall inside a grapheme cluster.
 The composer MUST count its stops from its first text cell after the prompt.
 A wrapped row MUST keep the stops of its line, so a wrap break MUST NOT restart the count.
 The cursor MUST sit after the spaces of a tab that precedes the caret.
