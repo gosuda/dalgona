@@ -212,6 +212,7 @@ func (m *model) submitPrompt() tea.Cmd {
 		m.input.composer = composer
 		return nil
 	}
+	m.input.history.rewind()
 	if m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
 		return m.sendSteer(text, images, composer)
 	}

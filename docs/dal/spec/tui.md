@@ -294,6 +294,7 @@ The panel MUST then rebuild its rows from the history.
 A new prompt, a removal, or the 200 prompt cap MUST refresh an open history panel.
 The refresh MUST keep the highlight on the same entry while that entry exists.
 A removal MUST reset Up and Down recall to the newest end of the history.
+A send and a draft that Ctrl+C saves MUST reset Up and Down recall to the newest end of the history.
 A removal MUST NOT change the draft in the editor.
 Removing the prompt that waits for its turn MUST NOT move that turn to another entry.
 Closing the panel with Esc MUST leave the draft unchanged.

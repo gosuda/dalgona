@@ -336,7 +336,6 @@ func TestRepeatedCtrlCSaveTakesTheIntentOfTheEditedDraft(t *testing.T) {
 			if n := len(m.input.history.entries); n != 1 {
 				t.Fatalf("history holds %d entries after the second save, want 1", n)
 			}
-			m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
 			m = recall.run(t, m)
 			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
 			if command != nil {
@@ -422,6 +421,76 @@ func TestHistoryRepeatSetsTheIntentAndASavedDraftReplacesIt(t *testing.T) {
 				t.Fatalf("entries = %#v, want one entry with verbatim %v", h.entries, test.want)
 			}
 		})
+	}
+}
+
+func sentPromptsModel(t *testing.T, prompts ...string) model {
+	t.Helper()
+	m := newTestModel(new(fakeCaller), Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.thread.id = "t1"
+	for _, prompt := range prompts {
+		var command tea.Cmd
+		m = typeText(t, m, prompt)
+		m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+		m = runCommand(t, m, command, "Enter did not send "+prompt)
+		m.thread.state = stateIdle
+	}
+	return m
+}
+
+func TestUpAfterARepeatedPromptRecallsTheNewestEntry(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		prompts []string
+		repeat  func(*testing.T, model) model
+	}{
+		{name: "saved by Ctrl+C", prompts: []string{"first", "second"}, repeat: func(t *testing.T, m model) model {
+			t.Helper()
+			m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+			m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+			return m
+		}},
+		{name: "saved by Ctrl+C from a single entry", prompts: []string{"second"}, repeat: func(t *testing.T, m model) model {
+			t.Helper()
+			m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+			m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+			return m
+		}},
+		{name: "sent again", prompts: []string{"first", "second"}, repeat: func(t *testing.T, m model) model {
+			t.Helper()
+			m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the recalled prompt")
+			m.thread.state = stateIdle
+			return m
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			m := test.repeat(t, sentPromptsModel(t, test.prompts...))
+			if n := len(m.input.history.entries); n != len(test.prompts) {
+				t.Fatalf("history holds %d entries after the repeat, want %d", n, len(test.prompts))
+			}
+			m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+			if got, want := m.input.composer.Value(), test.prompts[len(test.prompts)-1]; got != want {
+				t.Fatalf("up recalled %q, want the newest entry %q", got, want)
+			}
+		})
+	}
+}
+
+func TestEchoOfTheLastPromptKeepsTheRecallPosition(t *testing.T) {
+	t.Parallel()
+	m := sentPromptsModel(t, "a")
+	m = typeText(t, m, "dr")
+	m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+	m, _ = drive(t, m, userMessageNotification("a"))
+	m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	if got := m.input.composer.Value(); got != "dr" {
+		t.Fatalf("down restored %q after the echo, want the typed draft", got)
 	}
 }
 

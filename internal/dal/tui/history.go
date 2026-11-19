@@ -65,6 +65,10 @@ func (h *history) record(text, turnID string, verbatim, replace bool) {
 	h.index = len(h.entries)
 }
 
+func (h *history) rewind() {
+	h.index = len(h.entries)
+}
+
 func (h *history) startTurn(turnID string) {
 	if index, ok := h.indexOf(h.awaitingID); ok {
 		h.entries[index].turnID = turnID
