@@ -761,7 +761,7 @@ func TestBotPullRequestsSurface(t *testing.T) {
 func TestBotChangeLabelSurface(t *testing.T) {
 	var mu sync.Mutex
 	var labels []string
-	prefix := repoPath(repo()) + "/issues/1/labels"
+	prefix := "/repos/octo/repo/issues/1/labels"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, prefix) {
 			mu.Lock()
