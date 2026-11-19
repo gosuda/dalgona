@@ -345,6 +345,108 @@ func TestImageChipSurvivesEditBeforeRead(t *testing.T) {
 	}
 }
 
+func pasteDraft(t *testing.T, m model, content string) model {
+	t.Helper()
+	m, command := drive(t, m, tea.PasteMsg{Content: content})
+	if command != nil {
+		m, _ = drive(t, m, command())
+	}
+	if got := len(m.input.composer.images()); got != 0 {
+		t.Fatalf("setup paste %q made %d image chips, want plain text", content, got)
+	}
+	return m
+}
+
+func draftShown(m model) string {
+	return m.input.composer.display(m.input.composer.text)
+}
+
+func assertDraftAndCaret(t *testing.T, m model, want string, caret int) {
+	t.Helper()
+	if got := draftShown(m); got != want {
+		t.Fatalf("composer holds %q, want %q", got, want)
+	}
+	if got := m.input.composer.cursor; got != caret {
+		t.Fatalf("caret at rune %d, want %d", got, caret)
+	}
+	if got := len(m.input.composer.images()); got != 1 {
+		t.Fatalf("composer holds %d image chips, want 1", got)
+	}
+}
+
+func TestImagePathPasteReplacesOnlyThePastedRange(t *testing.T) {
+	t.Parallel()
+	const label = "[Image #1 3x2]"
+	tests := []struct {
+		name   string
+		draft  string
+		left   int
+		pasted string
+		before string
+		after  string
+	}{
+		{name: "line break at the end", draft: "Reference: %s\nCompare with: ", pasted: "%s\n", before: "Reference: %s\nCompare with: "},
+		{name: "line break in the middle", draft: "Reference: %s\nCompare with: ", left: 14, pasted: "%s\n", before: "Reference: %s\n", after: "Compare with: "},
+		{name: "CRLF in the middle", draft: "Reference: %s\nCompare with: ", left: 14, pasted: "%s\r\n", before: "Reference: %s\n", after: "Compare with: "},
+		{name: "no line break at the end", draft: "Reference: %s Compare with: ", pasted: "%s", before: "Reference: %s Compare with: "},
+		{name: "no line break in the middle", draft: "Reference: %s Compare with: ", left: 14, pasted: "%s", before: "Reference: %s ", after: "Compare with: "},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			m := imageModel(t, new(fakeCaller), "text", "image")
+			path := writePNG(t, filepath.Join(t.TempDir(), "shot.png"), 3, 2, 0)
+			m = pasteDraft(t, m, strings.ReplaceAll(test.draft, "%s", path))
+			for range test.left {
+				m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
+			}
+			m, command := drive(t, m, tea.PasteMsg{Content: strings.ReplaceAll(test.pasted, "%s", path)})
+			m = runCommand(t, m, command, "pasting an image path started no read")
+			before := strings.ReplaceAll(test.before, "%s", path)
+			assertDraftAndCaret(t, m, before+label+test.after, len([]rune(before))+1)
+		})
+	}
+}
+
+func TestImageChipKeepsTextTypedAfterThePasteWhileTheReadRuns(t *testing.T) {
+	t.Parallel()
+	m := imageModel(t, new(fakeCaller), "text", "image")
+	path := writePNG(t, filepath.Join(t.TempDir(), "shot.png"), 3, 2, 0)
+	m = pasteDraft(t, m, "Reference: "+path+"\nCompare with: ")
+	m, command := drive(t, m, tea.PasteMsg{Content: path + "\n"})
+	m = typeText(t, m, "ok")
+	m = runCommand(t, m, command, "pasting an image path started no read")
+	before := "Reference: " + path + "\nCompare with: "
+	assertDraftAndCaret(t, m, before+"[Image #1 3x2]ok", len([]rune(before))+1+len("ok"))
+}
+
+func TestImageChipGoesToTheCaretWhenTheDraftShiftedBeforeTheRead(t *testing.T) {
+	t.Parallel()
+	m := imageModel(t, new(fakeCaller), "text", "image")
+	path := writePNG(t, filepath.Join(t.TempDir(), "shot.png"), 3, 2, 0)
+	m = pasteDraft(t, m, "Reference: "+path+"\nCompare with: ")
+	m, command := drive(t, m, tea.PasteMsg{Content: path + "\n"})
+	for m.input.composer.cursor > 0 {
+		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	}
+	m = typeText(t, m, "X")
+	m = runCommand(t, m, command, "pasting an image path started no read")
+	assertDraftAndCaret(t, m, "X[Image #1 3x2]Reference: "+path+"\nCompare with: "+path+"\n", 2)
+}
+
+func TestImageChipGoesToTheCaretWhenThePastedTextWasEditedBeforeTheRead(t *testing.T) {
+	t.Parallel()
+	m := imageModel(t, new(fakeCaller), "text", "image")
+	path := writePNG(t, filepath.Join(t.TempDir(), "shot.png"), 3, 2, 0)
+	m = pasteDraft(t, m, "Reference: "+path+"\nCompare with: ")
+	m, command := drive(t, m, tea.PasteMsg{Content: path})
+	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m = typeText(t, m, "Z")
+	m = runCommand(t, m, command, "pasting an image path started no read")
+	text := "Reference: " + path + "\nCompare with: " + path[:len(path)-1] + "Z"
+	assertDraftAndCaret(t, m, text+"[Image #1 3x2]", len([]rune(text))+1)
+}
+
 func TestImageSendsTextBeforeImage(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)

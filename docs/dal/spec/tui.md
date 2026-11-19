@@ -340,6 +340,8 @@ A paste over 1 MiB MUST be refused with a notice that names the limit.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
 A pasted path to a PNG, JPEG, or GIF file MUST become an image chip labelled `[Image #n WxH]`.
 A path followed by one line break MUST also become an image chip, and the chip MUST replace that line break.
+A chip that replaces a pasted path MUST replace the text of that paste and no other text.
+When the draft no longer holds the pasted text where it was pasted, the chip MUST go in at the caret and remove no text.
 A paste with a line break before its last character MUST stay text, even when its lines joined name an image file.
 A pasted path to a WebP file MUST be refused with the notice `unsupported image type image/webp; send PNG, JPEG or GIF`.
 An image chip MUST take one composer row.

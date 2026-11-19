@@ -440,7 +440,7 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 	}
 	var imageCmd tea.Cmd
 	if paste, ok := msg.(tea.PasteMsg); ok && m.textMode() == inputPrompt {
-		imageCmd = m.imagePasteCmd(paste.Content)
+		imageCmd = m.imagePasteCmd(paste.Content, m.input.composer.cursor)
 	}
 	updated, command := m.input.composer.Update(&m.screen, msg)
 	m.input.composer = updated
