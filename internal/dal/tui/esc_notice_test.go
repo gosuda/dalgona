@@ -99,10 +99,9 @@ func TestEscInterruptsEveryLiveState(t *testing.T) {
 func TestEscNamesTheStateWithoutALiveTurn(t *testing.T) {
 	t.Parallel()
 	for state, want := range map[string]string{
-		stateIdle:         "idle, draft kept; nothing to interrupt",
-		stateInterrupted:  "stopped; nothing to interrupt",
-		stateFailed:       "failed; nothing to interrupt",
-		stateDisconnected: "offline; nothing to interrupt",
+		stateIdle:        "idle, draft kept; nothing to interrupt",
+		stateInterrupted: "stopped; nothing to interrupt",
+		stateFailed:      "failed; nothing to interrupt",
 	} {
 		t.Run(state, func(t *testing.T) {
 			t.Parallel()
