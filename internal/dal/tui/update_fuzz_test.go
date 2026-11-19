@@ -19,6 +19,8 @@ const (
 	fuzzMaxOps    = 64
 	fuzzMaxBulk   = 1
 	fuzzAnswerCap = 4
+
+	fuzzKeywordCode = 0xf0
 )
 
 type fuzzReader struct {
@@ -466,6 +468,25 @@ func fuzzAdvance(s *fuzzSession, _ *fuzzReader, _ bool) {
 	}
 }
 
+func fuzzKeyword(s *fuzzSession, r *fuzzReader, settle bool) {
+	draft := s.m.input.composer.Value()
+	kind := r.pick(4)
+	seq := s.m.matchSeq
+	if kind&1 == 1 || (kind == 0 && draft == "") {
+		seq--
+	}
+	if kind < 2 {
+		s.send(keywordTickMsg{seq: seq}, settle)
+		return
+	}
+	reply := new(keywordReply)
+	for range 1 + int(r.next()&1) {
+		start, end := int(r.next())%(len(draft)+2), int(r.next())%(len(draft)+2)
+		reply.Matches = append(reply.Matches, keywordReplyMatch{ByteRange: keywordRange{Start: start, End: end}})
+	}
+	s.send(resultMsg{op: "keywordMatch", value: reply, seq: seq, text: draft}, settle)
+}
+
 func newFuzzSession(t *testing.T) *fuzzSession {
 	s := &fuzzSession{t: t, now: time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC), width: 80, height: 24}
 	s.m = newTestModel(&fakeCaller{}, Options{})
@@ -482,6 +503,10 @@ func runFuzzSequence(t *testing.T, data []byte) {
 			return
 		}
 		code := r.next()
+		if code >= fuzzKeywordCode {
+			fuzzKeyword(s, r, code&1 == 1)
+			continue
+		}
 		fuzzOps[int(code>>1)%len(fuzzOps)](s, r, code&1 == 1)
 	}
 }
@@ -492,6 +517,14 @@ func fuzzSeed(steps ...[]byte) []byte {
 
 func fuzzStep(kind byte, settle bool, args ...byte) []byte {
 	code := kind << 1
+	if settle {
+		code |= 1
+	}
+	return append([]byte{code}, args...)
+}
+
+func fuzzKeywordStep(settle bool, args ...byte) []byte {
+	code := byte(fuzzKeywordCode)
 	if settle {
 		code |= 1
 	}
@@ -556,6 +589,17 @@ func FuzzUpdateSequence(f *testing.F) {
 		fuzzStep(opResize, true, 10, 12),
 		fuzzStep(opKey, true, 8),
 		fuzzStep(opKey, true, 9),
+	))
+	f.Add(fuzzSeed(
+		fuzzKeywordStep(true, 0),
+		fuzzStep(opPhrase, false, 19),
+		fuzzKeywordStep(true, 0),
+		fuzzKeywordStep(true, 2, 1, 0, 9, 3, 6),
+		fuzzKeywordStep(true, 3, 0, 1, 7),
+		fuzzStep(opKey, true, 4),
+		fuzzKeywordStep(true, 1),
+		fuzzKeywordStep(true, 0),
+		fuzzKeywordStep(true, 2, 0, 0, 255),
 	))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		runFuzzSequence(t, data)

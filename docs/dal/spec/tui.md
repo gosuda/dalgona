@@ -611,6 +611,8 @@ The elapsed time MUST show `<n> ms` under one second, `<s>s` under one minute, `
 
 The server finds keywords. The TUI MUST NOT match keywords itself. The rules are in [keywords.md](keywords.md).
 
+The TUI MUST send `dalgona/keywords/match` once, 120 ms after the last change of the draft. A newer change MUST cancel the send that still waits. The wait is one timer and starts no tick chain. The TUI MUST NOT send a draft over 64 KiB, which the server refuses under [protocol.md](protocol.md).
+
 The composer MUST show marks only for the draft that the newest accepted `dalgona/keywords/match` reply matched. A reply MUST be dropped when it is not the newest request or its text differs from the draft.
 
 A keyword mark is bold. It is also underlined once the theme is known. It MUST take the accent color only when color is on. The mark MUST NOT change the visible text, and it MUST NOT depend on color alone.
