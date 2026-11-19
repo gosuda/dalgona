@@ -405,7 +405,7 @@ conservatively even when this double-counts shared data. Other runtime allocatio
 are outside these budgets. Total RSS is not promised to fit in 96 MiB.
 
 Retain source ceilings: input 8 MiB, 1-64 edits, 64 canonical paths, 16 MiB per file,
-64 MiB staged before-plus-after bytes per call. Check before allocation.
+64 MiB staged before-plus-after bytes per call. The canonical paths of a call total at most 16 KiB. Check before allocation.
 These are individual ceilings, not a promise every combination can fit concurrently.
 Metadata can reduce usable capacity. The store has no limit per path or per consumer.
 Each thread store keeps at most 512 entries.
