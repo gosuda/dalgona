@@ -106,11 +106,15 @@ func startEmulated(width, height int, inject *injection) *emulatedRun {
 }
 
 func startEmulatedProgram(em *vt.Emulator, input io.Reader, inject *injection) *emulatedRun {
+	return startEmulatedThrough(em, input, inject, func(wire io.Writer) io.Writer { return wire })
+}
+
+func startEmulatedThrough(em *vt.Emulator, input io.Reader, inject *injection, through func(io.Writer) io.Writer) *emulatedRun {
 	var mu sync.Mutex
 	width, height := em.Width(), em.Height()
 	var program *tea.Program
 	wire := &lockedNewline{mu: &mu, em: em}
-	output := newDockOutput(wire, input, func(msg dockWrittenMsg) { program.Send(msg) })
+	output := newDockOutput(through(wire), input, func(msg dockWrittenMsg) { program.Send(msg) })
 	program = tea.NewProgram(
 		noInit{model: newModel(new(fakeCaller), Options{}, nil), inject: inject},
 		tea.WithInput(input),

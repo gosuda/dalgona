@@ -34,6 +34,10 @@ type dockQueryTimeoutMsg struct {
 	query uint64
 }
 
+type dockMoveTimeoutMsg struct {
+	revision uint64
+}
+
 type dockLandedMsg struct {
 	prints uint64
 }
@@ -159,9 +163,22 @@ func (m *model) positionDock(cursor tea.CursorPositionMsg) tea.Cmd {
 		anchor.needed = false
 		return nil
 	}
+	revision := anchor.revision
 	anchor.moving = true
-	anchor.moveRevision = anchor.revision
-	return tea.Raw(dockMove{anchor: anchor, revision: anchor.revision, content: relocateDock(m.View().Content, position, distance)})
+	anchor.moveRevision = revision
+	return tea.Batch(
+		tea.Raw(dockMove{anchor: anchor, revision: revision, content: relocateDock(m.View().Content, position, distance)}),
+		tea.Tick(dockQueryTimeout, func(time.Time) tea.Msg { return dockMoveTimeoutMsg{revision: revision} }),
+	)
+}
+
+func (m *model) moveExpired(msg dockMoveTimeoutMsg) {
+	anchor := m.anchorState()
+	if !anchor.moving || anchor.moveRevision != msg.revision {
+		return
+	}
+	anchor.moving = false
+	anchor.needed = true
 }
 
 func relocateDock(content string, position dockPosition, distance int) string {

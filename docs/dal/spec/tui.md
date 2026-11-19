@@ -137,6 +137,8 @@ After a committed print, the client MUST return the terminal cursor to the caret
 A cursor query or dock move in flight MAY delay that return until it ends.
 Modified F3 key events MUST remain available to the composer.
 A relocation MUST finish its output write before the client prints another committed row.
+A relocation MUST end one second after it starts when its output write has not finished.
+The client MUST request the cursor position again after such an end.
 Private output markers MUST NOT reach the terminal.
 An unanswered query MUST NOT block input or committed output.
 A query MUST expire after one second without a reply.

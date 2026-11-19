@@ -1,8 +1,12 @@
 package tui
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -296,4 +300,83 @@ func TestDockMovedAtStartupLeavesNoCellOfTheBandMark(t *testing.T) {
 			})
 		})
 	}
+}
+
+var errDockWrite = errors.New("dock write failed")
+
+type failingDockWrite struct {
+	wire   io.Writer
+	mu     sync.Mutex
+	failed bool
+	at     time.Time
+}
+
+func (w *failingDockWrite) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.failed && bytes.Contains(p, []byte(ansi.EraseEntireLine+ansi.CursorDown(1)+ansi.EraseEntireLine)) {
+		w.failed = true
+		w.at = time.Now()
+		return 0, errDockWrite
+	}
+	return w.wire.Write(p)
+}
+
+func (w *failingDockWrite) failure() (time.Time, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.at, w.failed
+}
+
+func startWithFailedDockMove(t *testing.T, width, height int) (*vt.Emulator, *emulatedRun, time.Time) {
+	t.Helper()
+	em := vt.NewEmulator(width, height)
+	tmuxMode(em)
+	_, _ = fmt.Fprintf(em, "\x1b[%d;1H", 5)
+	failing := new(failingDockWrite)
+	run := startEmulatedThrough(em, em, nil, func(wire io.Writer) io.Writer {
+		failing.wire = wire
+		return failing
+	})
+	run.send(resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/test", PlatformFamily: "unix"}})
+	run.waitFor(t, "the first dock move to fail", func(string, string) bool {
+		_, failed := failing.failure()
+		return failed
+	})
+	at, _ := failing.failure()
+	return em, run, at
+}
+
+func TestQuitReturnsAfterFailedDockWrite(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		_, run, failedAt := startWithFailedDockMove(t, 40, 12)
+		defer run.stop()
+		time.Sleep(dockQueryTimeout / 2)
+		synctest.Wait()
+		asked := time.Now()
+		run.send(press('c', tea.ModCtrl, ""))
+		run.send(press('c', tea.ModCtrl, ""))
+		time.Sleep(dockQueryTimeout)
+		synctest.Wait()
+		select {
+		case <-run.done:
+		default:
+			moving := run.read(func(m model) any { return m.anchorState().moving }).(bool)
+			t.Fatalf("the program still runs %v after the second Ctrl+C and %v after the failed dock write; moving = %v", time.Since(asked), time.Since(failedAt), moving)
+		}
+	})
+}
+
+func TestDockReachesBottomAfterFailedDockWrite(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const width, height = 40, 12
+		em, run, _ := startWithFailedDockMove(t, width, height)
+		defer run.stop()
+		time.Sleep(3 * dockQueryTimeout)
+		synctest.Wait()
+		bandAtBottom(t, run, em, height, "a dock write that failed once")
+		assertNoScreenReset(t, run)
+	})
 }

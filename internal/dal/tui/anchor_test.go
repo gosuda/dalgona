@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/vt"
@@ -48,7 +49,7 @@ func TestDockMoveRejectsInterveningInput(t *testing.T) {
 	if command == nil {
 		t.Fatal("missing dock relocation")
 	}
-	message := command().(tea.RawMsg)
+	message := command().(tea.BatchMsg)[0]().(tea.RawMsg)
 	m = rawUpdate(t, m, press('x', 0, "x"))
 	if written := fmt.Sprint(message.Msg); written != "" {
 		t.Fatalf("stale dock bytes would overwrite new input: %q", written)
@@ -190,4 +191,114 @@ func TestRelocateDockLeavesNoStaleCellFromTheOldRows(t *testing.T) {
 			}
 		})
 	}
+}
+
+func armDockMove(t *testing.T, m *model) tea.Cmd {
+	t.Helper()
+	m.anchorDock()
+	command := m.positionDock(tea.CursorPositionMsg{X: 2, Y: 0})
+	if command == nil {
+		t.Fatal("missing dock relocation")
+	}
+	if !m.anchorState().moving {
+		t.Fatal("a dock relocation did not arm a move")
+	}
+	return command
+}
+
+func writeDockMove(t *testing.T, msgs []tea.Msg) {
+	t.Helper()
+	for _, msg := range msgs {
+		if raw, ok := msg.(tea.RawMsg); ok && fmt.Sprint(raw.Msg) == "" {
+			t.Fatal("the dock move was dropped as stale before it was written")
+		}
+	}
+}
+
+func requestsCursor(command tea.Cmd) bool {
+	for _, msg := range commandMsgs(command) {
+		if raw, ok := msg.(tea.RawMsg); ok && fmt.Sprint(raw.Msg) == dockQueryMarker {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDockMoveTimeoutClearsMoving(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := anchorTestModel()
+		command := armDockMove(t, &m)
+		m.commit("held", []string{"row waiting for the move"})
+		if m.drain() != nil {
+			t.Fatal("a row printed while the move was in flight")
+		}
+		for _, msg := range commandMsgs(command) {
+			m, _ = updateWithCommand(t, m, msg)
+		}
+		if m.anchorState().moving {
+			t.Fatal("a move the terminal never acknowledged still holds the dock after one second")
+		}
+		if !m.out.printing {
+			t.Fatal("the waiting row did not start printing after the move was released")
+		}
+	})
+}
+
+func TestDockMoveTimeoutRequestsTheCursorAgain(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := anchorTestModel()
+		msgs := commandMsgs(armDockMove(t, &m))
+		writeDockMove(t, msgs)
+		if m.anchorState().needed {
+			t.Fatal("a written dock move left the dock marked as misplaced")
+		}
+		asked := false
+		for _, msg := range msgs {
+			var next tea.Cmd
+			m, next = updateWithCommand(t, m, msg)
+			asked = asked || requestsCursor(next)
+		}
+		if !asked {
+			t.Fatal("an unacknowledged move did not request the cursor position again")
+		}
+	})
+}
+
+func TestDockMoveTimeoutIgnoresAnAcknowledgedMove(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := anchorTestModel()
+		msgs := commandMsgs(armDockMove(t, &m))
+		writeDockMove(t, msgs)
+		m, _ = updateWithCommand(t, m, dockWrittenMsg{revision: m.anchorState().moveRevision})
+		for _, msg := range msgs {
+			var next tea.Cmd
+			m, next = updateWithCommand(t, m, msg)
+			if requestsCursor(next) {
+				t.Fatal("the timeout of an acknowledged move requested the cursor position")
+			}
+		}
+		if m.anchorState().needed {
+			t.Fatal("the timeout of an acknowledged move marked the dock as misplaced")
+		}
+	})
+}
+
+func TestDockMoveTimeoutIgnoresASupersededMove(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := anchorTestModel()
+		first := commandMsgs(armDockMove(t, &m))
+		m, _ = updateWithCommand(t, m, dockWrittenMsg{revision: m.anchorState().moveRevision})
+		armDockMove(t, &m)
+		revision := m.anchorState().moveRevision
+		for _, msg := range first {
+			m, _ = updateWithCommand(t, m, msg)
+		}
+		if !m.anchorState().moving || m.anchorState().moveRevision != revision {
+			t.Fatal("the timeout of an earlier move released the move in flight")
+		}
+	})
 }
