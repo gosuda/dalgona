@@ -215,6 +215,7 @@ A provider that signs in from a shell MUST show the command to run there, and MU
 The API key field MUST show one `*` for each rune. The key MUST NOT appear in a row, notice, history, or review.
 Enter on the API key field MUST send `account/login/start` with `type` `apiKey`. The panel MUST close when the provider accepts the key.
 A refused key MUST keep the field open with the error in the panel. Esc on the field MUST clear it and return to the methods.
+An approval request MUST NOT clear the API key field.
 A browser or device sign-in MUST show the link, and a device sign-in MUST show the user code. It MUST wait for `account/login/completed`.
 Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in…`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
 A paste into the API key field MUST keep its first line and MUST NOT make a chip.
@@ -247,6 +248,8 @@ The client cannot see a failed write to the terminal. A write that fails is ther
 The review MUST close only on `esc`, `q`, or `ctrl+o`. A quit or suspend key MUST close the review first.
 Rows that finish while the review is open MUST wait, and they MUST print after the review closes.
 The review header MUST show the count of waiting rows. The footer MUST name the scroll keys and the entry keys.
+The review MUST have at most the larger of one row and the window height minus one rows. The review MUST keep one body row.
+A window of fewer than four rows MUST drop the review footer. A window of fewer than three rows MUST drop the review header.
 The client MUST keep the last 1000 committed rows for the review and MUST drop the oldest first.
 
 ## Mouse
@@ -389,7 +392,7 @@ The interrupt notice MUST end when an interrupted turn ends.
 
 ## Approvals
 
-`item/commandExecution/requestApproval` and `item/fileChange/requestApproval` open the approval card. Requests queue in arrival order, and the card shows the oldest one. The title is `Approval · Run command` or `Approval · Apply file changes`, followed by ` (1 of <n>)` when more requests wait, and the word `Waiting`.
+`item/commandExecution/requestApproval` and `item/fileChange/requestApproval` open the approval card. Requests queue in arrival order, and the card shows the oldest one. A request that joins a non-empty queue MUST NOT change the text on the input line. The title is `Approval · Run command` or `Approval · Apply file changes`, followed by ` (1 of <n>)` when more requests wait, and the word `Waiting`.
 
 The body holds at most six rows and scrolls with `up` and `down`. It shows:
 
@@ -613,6 +616,7 @@ Review shows each question header in bold and its answers in option order, joine
 An empty question request returns an empty answer map without opening a card.
 
 The Other row opens typing. Typing uses the input line with the label `answer: `. `enter` stores the typed text and advances. `esc` leaves typing, or dismisses a free-text question. An `s` entered while typing remains answer text and does not submit.
+A question card that becomes the oldest request MUST show only its own typed text on the input line.
 
 With two or more rows, the card keeps its title and its hint rows. With one row it shows the title alone. At window height 4 or less the card is not drawn. The hint rows list `↑/↓ move`, `1-7 pick`, `Space toggle`, `Enter choose`, and `Tab next`, then `s submit · Esc dismiss`. The hint rows MUST wrap at whole hints and MUST keep `s submit · Esc dismiss` on one row. They MUST take their rows before the body and MUST leave the title and the option under the cursor. After that, the preview drops first, then the question text, then the options scroll. If the rows left cannot hold every hint, the card MUST drop whole hints and MUST keep both actions. A single-select question drops `Space toggle` first. A multi-select question drops `Space toggle` last.
 

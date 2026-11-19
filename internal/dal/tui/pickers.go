@@ -309,6 +309,9 @@ func (m *model) activateChoice() tea.Cmd {
 }
 
 func (m *model) activateClosed(kind string, item listItem) tea.Cmd {
+	if busyThreadCommands[kind] && m.busyRefusal(kind) {
+		return nil
+	}
 	switch kind {
 	case "resume":
 		return m.resumeThread(item.id)

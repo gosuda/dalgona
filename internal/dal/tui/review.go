@@ -11,7 +11,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-const reviewTitleCells = 40
+const (
+	reviewTitleCells    = 40
+	reviewHeadMinHeight = 3
+	reviewFootMinHeight = 4
+)
 
 type reviewState struct {
 	index int
@@ -111,11 +115,14 @@ func (m *model) reviewView() string {
 		head += fmt.Sprintf(" · %d waiting", n)
 	}
 	foot := "↑↓ scroll · [ ] items · Esc close"
-	return strings.Join([]string{
-		m.screen.theme.paint(roleText, m.screen.fit(head, width)),
-		r.view.View(),
-		m.screen.theme.paint(roleDim, m.screen.fit(foot, width)),
-	}, "\n")
+	rows := []string{r.view.View()}
+	if m.screen.height >= reviewHeadMinHeight {
+		rows = slices.Insert(rows, 0, m.screen.theme.paint(roleText, m.screen.fit(head, width)))
+	}
+	if m.screen.height >= reviewFootMinHeight {
+		rows = append(rows, m.screen.theme.paint(roleDim, m.screen.fit(foot, width)))
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (m *model) reviewKey(msg tea.KeyPressMsg) {

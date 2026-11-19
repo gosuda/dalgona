@@ -92,6 +92,9 @@ func (m *model) confirmKey(key string) tea.Cmd {
 }
 
 func (m *model) confirmed(c confirmation) tea.Cmd {
+	if busyThreadCommands[c.kind] && m.busyRefusal(c.kind) {
+		return nil
+	}
 	switch c.kind {
 	case confirmRevert:
 		params := rpc.ThreadRevertParams{ThreadID: m.thread.id, BeforeTurnID: c.id}

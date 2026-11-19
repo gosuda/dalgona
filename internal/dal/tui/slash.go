@@ -33,7 +33,7 @@ func (m *model) executeSlash(name, argument string) tea.Cmd {
 	}
 }
 
-var busyThreadCommands = map[string]bool{"new": true, "compact": true, "tree": true, "revert": true, "fork": true, "review": true}
+var busyThreadCommands = map[string]bool{"new": true, "resume": true, "compact": true, "tree": true, "revert": true, "fork": true, "review": true}
 
 func (m *model) executeThreadCommand(name string) tea.Cmd {
 	if busyThreadCommands[name] && m.busyRefusal(name) {

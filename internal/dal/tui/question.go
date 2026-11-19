@@ -639,7 +639,9 @@ func (m *model) applyQuestion(msg serverRequestMsg) tea.Cmd {
 		return nil
 	}
 	card := newQuestionCard(params, msg.answer)
-	m.input.field = textField{}
+	if len(m.approvals) == 0 {
+		m.input.field = textField{}
+	}
 	m.approvals = append(m.approvals, approval{method: msg.method, requestID: msg.requestID, threadID: card.threadID, itemID: params.ItemID, card: card})
 	if !m.acceptThread(card.threadID) {
 		return nil
@@ -727,6 +729,17 @@ func (m *model) typeQuestionKey(card *questionCard, msg tea.KeyPressMsg) tea.Cmd
 		}
 	}
 	return nil
+}
+
+func (m *model) handOverField(dropped approval) {
+	if m.typingAnswer() {
+		card := m.approvals[0].card
+		m.input.field = typedField(card.typed[card.index])
+		return
+	}
+	if dropped.card != nil && dropped.card.typing {
+		m.input.field = textField{}
+	}
 }
 
 func typedField(text string) textField {
