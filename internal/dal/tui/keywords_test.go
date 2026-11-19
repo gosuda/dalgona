@@ -242,6 +242,7 @@ func TestKeywordMatchSentOncePerPause(t *testing.T) {
 	}{
 		{name: "no turn runs", state: stateIdle, kind: "prompt"},
 		{name: "a turn runs", state: stateRunning, kind: "steer"},
+		{name: "a turn waits for approval", state: stateAwaitingApproval, kind: "steer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -265,6 +266,24 @@ func TestKeywordMatchSentOncePerPause(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestKeywordMatchSendsNothingForAnEmptiedDraft(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		client := new(keywordRecorder)
+		run := startRecordedWith(client, 100, 24, new(recordedOutput))
+		defer run.stop()
+		typeBurst(run, "ab")
+		run.send(press(tea.KeyBackspace, 0, ""))
+		run.send(press(tea.KeyBackspace, 0, ""))
+		synctest.Wait()
+		pause(time.Second)
+		expectMatches(t, client, "after the draft was emptied")
+		typeBurst(run, "c")
+		pause(time.Second)
+		expectMatches(t, client, "after the next pause", keywordMatchParams{Text: "c", Kind: "prompt"})
+	})
 }
 
 func wordReply(text string, width int) keywordReply {

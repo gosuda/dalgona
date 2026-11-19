@@ -653,7 +653,7 @@ The elapsed time MUST show `<n> ms` under one second, `<s>s` under one minute, `
 
 The server finds keywords. The TUI MUST NOT match keywords itself. The rules are in [keywords.md](keywords.md).
 
-The TUI MUST send `dalgona/keywords/match` once, 120 ms after the last change of the draft. A newer change MUST cancel the send that still waits. The wait is one timer and starts no tick chain. The TUI MUST NOT send a draft over 64 KiB, which the server refuses under [protocol.md](protocol.md).
+Each change to a non-empty draft MUST start one 120 ms timer. The timer MUST NOT join the motion tick chain. A timer that fires after a newer change MUST send nothing. A timer that fires for the newest change MUST send `dalgona/keywords/match` once with the draft. A change that empties the draft MUST send nothing. The TUI MUST NOT send a draft over 64 KiB, which the server refuses under [protocol.md](protocol.md). The request kind MUST be `steer` while a turn runs or awaits approval, and `prompt` otherwise.
 
 The composer MUST show marks only for the draft that the newest accepted `dalgona/keywords/match` reply matched. A reply MUST be dropped when it is not the newest request or its text differs from the draft.
 

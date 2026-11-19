@@ -71,7 +71,7 @@ func (m *model) sendKeywordMatch(msg keywordTickMsg) tea.Cmd {
 		return nil
 	}
 	draft := m.input.composer.Value()
-	if draft == "" || len(draft) > keywordDraftLimit {
+	if len(draft) > keywordDraftLimit {
 		return nil
 	}
 	params := keywordMatchParams{ThreadID: m.thread.id, Text: draft, Kind: m.matchKind()}
