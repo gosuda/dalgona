@@ -9,9 +9,10 @@ import (
 const maxHistory = 200
 
 type historyEntry struct {
-	id     uint64
-	turnID string
-	text   string
+	id       uint64
+	turnID   string
+	text     string
+	verbatim bool
 }
 
 type history struct {
@@ -31,18 +32,28 @@ func awaitedID(id uint64, turnID string) uint64 {
 }
 
 func (h *history) add(text, turnID string) {
+	h.record(text, turnID, false)
+}
+
+func (h *history) addFrom(draft editor, text, turnID string) {
+	h.record(text, turnID, !draft.readsSlash())
+}
+
+func (h *history) record(text, turnID string, verbatim bool) {
 	text = strings.TrimSpace(sanitizeText(text))
 	if text == "" || strings.Fields(text)[0] == "/login" {
 		return
 	}
+	verbatim = verbatim && strings.HasPrefix(text, "/")
 	if n := len(h.entries); n > 0 && h.entries[n-1].text == text {
 		h.entries[n-1].turnID = cmp.Or(turnID, h.entries[n-1].turnID)
+		h.entries[n-1].verbatim = h.entries[n-1].verbatim || verbatim
 		h.awaitingID = awaitedID(h.entries[n-1].id, turnID)
 		return
 	}
 	h.lastID++
 	h.revision++
-	h.entries = append(h.entries, historyEntry{id: h.lastID, turnID: turnID, text: text})
+	h.entries = append(h.entries, historyEntry{id: h.lastID, turnID: turnID, text: text, verbatim: verbatim})
 	h.awaitingID = awaitedID(h.lastID, turnID)
 	if len(h.entries) > maxHistory {
 		h.entries = slices.Delete(h.entries, 0, len(h.entries)-maxHistory)
@@ -76,13 +87,18 @@ func (h *history) remove(index int) bool {
 	return true
 }
 
-func (h *history) load(id uint64) (string, bool) {
+func (h *history) load(id uint64) (historyEntry, bool) {
 	index, ok := h.indexOf(id)
 	if !ok {
-		return "", false
+		return historyEntry{}, false
 	}
 	h.index = len(h.entries)
-	return h.entries[index].text, true
+	return h.entries[index], true
+}
+
+func (h *history) recall(into *editor) {
+	entry := h.entries[h.index]
+	into.recall(entry.text, entry.verbatim)
 }
 
 func (h *history) older(into *editor) bool {
@@ -90,10 +106,10 @@ func (h *history) older(into *editor) bool {
 		return false
 	}
 	if h.index == len(h.entries) {
-		h.draft = editor{text: into.text, chips: into.chips}
+		h.draft = editor{text: into.text, chips: into.chips, verbatimText: into.verbatimText}
 	}
 	h.index--
-	into.SetValue(h.entries[h.index].text)
+	h.recall(into)
 	return true
 }
 
@@ -104,9 +120,10 @@ func (h *history) newer(into *editor) bool {
 	h.index++
 	if h.index == len(h.entries) {
 		into.text, into.chips = slices.Clone(h.draft.text), slices.Clone(h.draft.chips)
+		into.verbatimText = h.draft.verbatimText
 		into.cursor = len(into.text)
 		return true
 	}
-	into.SetValue(h.entries[h.index].text)
+	h.recall(into)
 	return true
 }

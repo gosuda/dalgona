@@ -144,12 +144,13 @@ func inputLabel(mode inputMode) string {
 }
 
 type editor struct {
-	text        []rune
-	cursor      int
-	width       int
-	focused     bool
-	placeholder string
-	chips       []chip
+	text         []rune
+	cursor       int
+	width        int
+	focused      bool
+	placeholder  string
+	chips        []chip
+	verbatimText string
 }
 
 func newEditor() editor {
@@ -157,8 +158,8 @@ func newEditor() editor {
 }
 
 type editorRow struct {
-	text       string
-	start, end int
+	text            string
+	start, end, col int
 }
 
 func (c editor) Value() string {
@@ -169,6 +170,28 @@ func (c *editor) SetValue(value string) {
 	c.text = []rune(value)
 	c.cursor = len(c.text)
 	c.chips = nil
+	c.verbatimText = ""
+}
+
+func (c *editor) recall(text string, verbatim bool) {
+	c.SetValue(text)
+	if verbatim {
+		c.verbatimText = c.Value()
+	}
+}
+
+func (c editor) verbatim() bool {
+	return c.verbatimText != "" && c.Value() == c.verbatimText
+}
+
+func (c *editor) settleVerbatim() {
+	if !c.verbatim() {
+		c.verbatimText = ""
+	}
+}
+
+func (c editor) readsSlash() bool {
+	return !c.verbatim() && strings.HasPrefix(strings.TrimSpace(c.Value()), "/")
 }
 
 func (c *editor) SetWidth(width int) {
@@ -218,7 +241,7 @@ func (c editor) textRows(s *screenState, line string, offset, cell int) []editor
 	ranges := s.wrapRanges(line, cell)
 	rows := make([]editorRow, len(ranges))
 	for i, r := range ranges {
-		rows[i] = editorRow{text: line[r.start:r.end], start: offset + r.start, end: offset + r.end}
+		rows[i] = editorRow{text: line[r.start:r.end], start: offset + r.start, end: offset + r.end, col: r.col}
 	}
 	return rows
 }
@@ -249,7 +272,7 @@ func (c editor) cellsBefore(s *screenState, row editorRow, at int) int {
 		return 0
 	}
 	n := min(max(at-row.start, 0), len(row.text))
-	return s.cells(row.text[:n])
+	return s.cellsFrom(row.text[:n], row.col)
 }
 
 func localSpans(spans []keywordSpan, row editorRow) []keywordSpan {
@@ -273,7 +296,7 @@ func (c editor) layout(s *screenState, width int, spans []keywordSpan, t theme) 
 			lines[i] = t.paint(roleText, s.fit(ch.label, editorCells(width)))
 			continue
 		}
-		lines[i] = s.expand(norm.NFC.String(markKeywords(r.text, localSpans(spans, r), t)))
+		lines[i] = s.expandFrom(norm.NFC.String(markKeywords(r.text, localSpans(spans, r), t)), r.col)
 	}
 	if c.Value() == "" {
 		lines[0] = t.paint(roleDim, s.fit(c.placeholder, editorCells(width)))
@@ -299,6 +322,7 @@ func (c *editor) continueLine() bool {
 }
 
 func (c editor) Update(s *screenState, msg tea.Msg) (editor, tea.Cmd) {
+	c.settleVerbatim()
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
 		c.paste(msg.Content)
@@ -306,6 +330,7 @@ func (c editor) Update(s *screenState, msg tea.Msg) (editor, tea.Cmd) {
 		c.updateKey(s, msg)
 	}
 	c.prune()
+	c.settleVerbatim()
 	return c, nil
 }
 
@@ -396,7 +421,7 @@ func (c editor) runeAt(s *screenState, row editorRow, col int) int {
 			break
 		}
 		next := offset + len(cluster)
-		if s.cells(row.text[:next]) > col {
+		if s.cellsFrom(row.text[:next], row.col) > col {
 			break
 		}
 		offset = next

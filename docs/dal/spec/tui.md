@@ -314,6 +314,7 @@ Backspace and Delete MUST remove a whole chip.
 Sending MUST replace each chip with its full pasted text, in order.
 The history MUST store each prompt, and each draft that Ctrl+C saves, with each chip that holds text replaced by its full text.
 A prompt recalled from the history MUST be plain text. It MUST NOT become a chip.
+A recalled prompt whose draft began with a chip MUST be sent unchanged until the user edits its text.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB MUST be refused with a notice that names the limit.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
@@ -329,7 +330,7 @@ Sending MUST send each image chip as an image input item after the text.
 
 The composer MUST show a command palette when the caret is in a first token that starts with `/`, with no panel or review open.
 The palette MUST list at most 8 matching commands and MUST NOT open for `//`.
-Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token. It MUST keep each chip of the draft.
+Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token. It MUST keep each chip of the draft. The palette MUST end the first token at a chip.
 Enter MUST run a highlighted command only when the draft is only its first token and the command takes no argument. Otherwise, Enter MUST complete the command and keep the rest of the draft.
 Esc MUST close the palette and keep the draft. Typing a character MUST reopen it.
 
@@ -519,6 +520,7 @@ A tab MUST count as the cells to the next 8-cell stop, counted from the first ce
 A newline MUST restart the count of stops.
 A row that the client prints or draws MUST hold spaces in place of each tab.
 The composer MUST count its stops from its first text cell after the prompt.
+A wrapped row MUST continue the count of stops from the row before it.
 The cursor MUST sit after the spaces of a tab that precedes the caret.
 A user whose terminal draws East Asian Ambiguous characters two cells wide MUST set `RUNEWIDTH_EASTASIAN=1`.
 

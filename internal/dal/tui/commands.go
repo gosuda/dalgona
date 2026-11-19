@@ -213,17 +213,16 @@ func (m *model) submitPrompt() tea.Cmd {
 		return nil
 	}
 	if m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
-		return m.sendSteer(text, images)
+		return m.sendSteer(text, images, composer)
 	}
-	return m.sendPrompt(text, images)
+	return m.sendPrompt(text, images, composer)
 }
 
 func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool) {
-	raw := strings.TrimSpace(composer.Value())
-	if !strings.HasPrefix(raw, "/") {
+	if !composer.readsSlash() {
 		return text, nil, false
 	}
-	name, arg, kind := parseSlash(raw)
+	name, arg, kind := parseSlash(strings.TrimSpace(composer.Value()))
 	switch kind {
 	case slashCommand:
 		m.input.composer.SetValue("")
@@ -237,16 +236,16 @@ func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool
 	return text, nil, false
 }
 
-func (m *model) sendPrompt(text string, images []chip) tea.Cmd {
-	m.input.history.add(text, "")
+func (m *model) sendPrompt(text string, images []chip, draft editor) tea.Cmd {
+	m.input.history.addFrom(draft, text, "")
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: promptInput(text, images), Model: m.thread.modelName}
 	result := new(rpc.TurnStartResponse)
 	return m.call("send", "turn/start", params, result, text)
 }
 
-func (m *model) sendSteer(text string, images []chip) tea.Cmd {
-	m.input.history.add(text, m.thread.turnID)
+func (m *model) sendSteer(text string, images []chip, draft editor) tea.Cmd {
+	m.input.history.addFrom(draft, text, m.thread.turnID)
 	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: promptInput(text, images)}
 	return m.call("steer", "turn/steer", params, new(rpc.TurnSteerResponse), text)
 }

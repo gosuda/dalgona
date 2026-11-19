@@ -171,6 +171,246 @@ func TestRecalledChipDraftSendsAllPastedLines(t *testing.T) {
 	}
 }
 
+var slashPastes = []struct{ name, text string }{
+	{name: "double slash", text: "// Render the menu\n" + pasteLines(11)},
+	{name: "command with a word", text: "/new now\n" + pasteLines(11)},
+	{name: "bare command", text: "/new\n" + pasteLines(11)},
+}
+
+var historyRecalls = []struct {
+	name string
+	run  func(*testing.T, model) model
+}{
+	{name: "arrow", run: func(t *testing.T, m model) model {
+		t.Helper()
+		m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+		return m
+	}},
+	{name: "search", run: func(t *testing.T, m model) model {
+		t.Helper()
+		m, _ = drive(t, m, press('r', tea.ModCtrl, ""))
+		if m.list == nil || m.list.kind != "history" {
+			t.Fatal("ctrl+r did not open the history panel")
+		}
+		m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+		return m
+	}},
+}
+
+func pastedDraftModel(t *testing.T, caller caller, pasted string) model {
+	t.Helper()
+	m := newTestModel(caller, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.thread.id = "t1"
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+	if len(m.input.composer.chips) != 1 {
+		t.Fatalf("composer holds %d chips after the paste, want 1", len(m.input.composer.chips))
+	}
+	return m
+}
+
+func assertTurnStartText(t *testing.T, caller *fakeCaller, want string) {
+	t.Helper()
+	if len(caller.calls) != 1 || caller.calls[0].method != "turn/start" {
+		t.Fatalf("calls = %#v, want one turn/start", caller.calls)
+	}
+	input := caller.calls[0].params.(rpc.TurnStartParams).Input
+	if len(input) != 1 || input[0].Text != want {
+		t.Fatalf("sent %q, want the pasted text unchanged %q", input, want)
+	}
+}
+
+func TestRecalledChipDraftIsSentAsPastedTextNotCommand(t *testing.T) {
+	t.Parallel()
+	for _, paste := range slashPastes {
+		for _, recall := range historyRecalls {
+			t.Run(paste.name+"/"+recall.name, func(t *testing.T) {
+				t.Parallel()
+				caller := new(fakeCaller)
+				m := pastedDraftModel(t, caller, paste.text)
+				m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+				m = recall.run(t, m)
+				if got := m.input.composer.Expanded(); got != paste.text {
+					t.Fatalf("recalled draft = %q, want the pasted text", got)
+				}
+				m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+				runCommand(t, m, command, "Enter did not send the recalled draft; notice: "+m.notice)
+				assertTurnStartText(t, caller, paste.text)
+			})
+		}
+	}
+}
+
+func TestSentChipDraftRecalledIsSentAsPastedTextNotCommand(t *testing.T) {
+	t.Parallel()
+	for _, paste := range slashPastes {
+		for _, recall := range historyRecalls {
+			t.Run(paste.name+"/"+recall.name, func(t *testing.T) {
+				t.Parallel()
+				caller := new(fakeCaller)
+				m := pastedDraftModel(t, caller, paste.text)
+				m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+				m = runCommand(t, m, command, "Enter did not send the chip draft")
+				assertTurnStartText(t, caller, paste.text)
+				echo := fmt.Appendf(nil, `{"threadId":"t1","item":{"id":"u1","type":"userMessage","text":%q}}`, paste.text)
+				m, _ = drive(t, m, notificationMsg{method: "item/completed", params: echo})
+				if n := len(m.input.history.entries); n != 1 {
+					t.Fatalf("history holds %d entries after the echo, want 1", n)
+				}
+				m = recall.run(t, m)
+				m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+				runCommand(t, m, command, "Enter did not send the recalled prompt; notice: "+m.notice)
+				last := caller.calls[len(caller.calls)-1]
+				steer, ok := last.params.(rpc.TurnSteerParams)
+				if last.method != "turn/steer" || !ok || len(steer.Input) != 1 || steer.Input[0].Text != paste.text {
+					t.Fatalf("last call = %s %#v, want turn/steer with the pasted text unchanged", last.method, last.params)
+				}
+			})
+		}
+	}
+}
+
+var recalledEdits = []struct {
+	name   string
+	keys   []tea.KeyPressMsg
+	suffix string
+}{
+	{name: "typed character", keys: []tea.KeyPressMsg{press('x', 0, "x")}, suffix: "x"},
+	{name: "typed and deleted character", keys: []tea.KeyPressMsg{press('x', 0, "x"), press(tea.KeyBackspace, 0, "")}},
+}
+
+func editedRecalledModel(t *testing.T, caller *fakeCaller, pasted string, recall func(*testing.T, model) model, keys []tea.KeyPressMsg) model {
+	t.Helper()
+	m := pastedDraftModel(t, caller, pasted)
+	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+	m = recall(t, m)
+	for _, key := range keys {
+		m, _ = drive(t, m, key)
+	}
+	return m
+}
+
+func TestEditedRecalledChipDraftIsParsedAsTypedText(t *testing.T) {
+	t.Parallel()
+	pasted := slashPastes[0].text
+	for _, edit := range recalledEdits {
+		for _, recall := range historyRecalls {
+			t.Run(edit.name+"/"+recall.name, func(t *testing.T) {
+				t.Parallel()
+				caller := new(fakeCaller)
+				m := editedRecalledModel(t, caller, pasted, recall.run, edit.keys)
+				m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+				runCommand(t, m, command, "Enter did not send the edited draft")
+				assertTurnStartText(t, caller, strings.TrimPrefix(pasted, "/")+edit.suffix)
+			})
+		}
+	}
+}
+
+func TestEditedRecalledChipDraftRunsTheTypedCommand(t *testing.T) {
+	t.Parallel()
+	for _, edit := range recalledEdits {
+		for _, recall := range historyRecalls {
+			t.Run(edit.name+"/"+recall.name, func(t *testing.T) {
+				t.Parallel()
+				caller := new(fakeCaller)
+				m := editedRecalledModel(t, caller, slashPastes[1].text, recall.run, edit.keys)
+				m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+				if len(caller.calls) != 0 || m.confirm == nil || m.confirm.kind != confirmNew {
+					t.Fatalf("calls = %#v, confirm = %#v, want the new-thread confirmation of the typed /new and no request", caller.calls, m.confirm)
+				}
+			})
+		}
+	}
+}
+
+func TestRecalledChipDraftRestoreKeepsTypedDraftReadingSlash(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := pastedDraftModel(t, caller, slashPastes[0].text)
+	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+	m = typeText(t, m, "//a b")
+	m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+	if got := m.input.composer.Expanded(); got != slashPastes[0].text {
+		t.Fatalf("up recalled %q, want the pasted text", got)
+	}
+	m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	if got := m.input.composer.Value(); got != "//a b" {
+		t.Fatalf("down restored %q, want the typed draft", got)
+	}
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	runCommand(t, m, command, "Enter did not send the restored draft")
+	assertTurnStartText(t, caller, "/a b")
+}
+
+func TestHistoryEntryPasteIntentSurvivesEcho(t *testing.T) {
+	t.Parallel()
+	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +11 lines]", text: "// a\nb"}}}
+	typed := editor{text: []rune("//a b")}
+	recalled := newEditor()
+	recalled.recall("// a\nb", true)
+	edited := recalled
+	edited.insert([]rune("x"))
+	tests := []struct {
+		name  string
+		draft editor
+		text  string
+		want  bool
+	}{
+		{name: "chip first", draft: chipFirst, text: "// a\nb", want: true},
+		{name: "typed double slash", draft: typed, text: "/a b", want: false},
+		{name: "typed command", draft: editor{text: []rune("/new")}, text: "/new", want: false},
+		{name: "plain prompt", draft: editor{text: []rune("hello")}, text: "hello", want: false},
+		{name: "recalled paste", draft: recalled, text: "// a\nb", want: true},
+		{name: "edited recalled paste", draft: edited, text: "// a\nbx", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var h history
+			h.addFrom(test.draft, test.text, "")
+			if len(h.entries) != 1 || h.entries[0].verbatim != test.want {
+				t.Fatalf("entries = %#v, want verbatim %v", h.entries, test.want)
+			}
+			h.add(test.text, "turn-1")
+			if len(h.entries) != 1 || h.entries[0].verbatim != test.want || h.entries[0].turnID != "turn-1" {
+				t.Fatalf("entries after the echo = %#v, want one entry with verbatim %v and turn-1", h.entries, test.want)
+			}
+		})
+	}
+}
+
+func assertComposer(t *testing.T, composer editor, value string, verbatim bool) {
+	t.Helper()
+	if composer.Value() != value || composer.verbatim() != verbatim {
+		t.Fatalf("composer holds %q verbatim %v, want %q verbatim %v", composer.Value(), composer.verbatim(), value, verbatim)
+	}
+}
+
+func TestHistoryRecallCarriesPasteIntentThroughDraftRestore(t *testing.T) {
+	t.Parallel()
+	const pasted = "// a\nb"
+	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
+	var h history
+	h.addFrom(chipFirst, pasted, "")
+	h.add("other", "")
+	composer := newEditor()
+	composer.SetValue("typed")
+	h.older(&composer)
+	assertComposer(t, composer, "other", false)
+	h.older(&composer)
+	assertComposer(t, composer, pasted, true)
+	h.newer(&composer)
+	h.newer(&composer)
+	assertComposer(t, composer, "typed", false)
+	composer.recall(pasted, true)
+	h.older(&composer)
+	h.newer(&composer)
+	assertComposer(t, composer, pasted, true)
+	composer.insert([]rune("x"))
+	assertComposer(t, composer, pasted+"x", false)
+}
+
 func TestCtrlCSavesChipOnlyDraftExpanded(t *testing.T) {
 	t.Parallel()
 	pasted := pasteLines(30)

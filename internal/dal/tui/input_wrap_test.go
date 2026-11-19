@@ -157,6 +157,46 @@ func TestComposerWrapsEveryRowAtWindowWidthMinusThree(t *testing.T) {
 			rows: []string{"ab      cdefghijklmno pqrstuvwxyz", "abcdefghijklmnop"},
 			x:    promptCells + 16, y: 1,
 		},
+		{
+			name: "a tab on the first row of a narrow window", width: 20, height: 12, text: "a\tbcdefgh ijklmnopqrstu", caret: 2,
+			rows: []string{"a       bcdefgh", "ijklmnopqrstu"},
+			x:    promptCells + 8, y: 0,
+		},
+		{
+			name: "a tab on the second row keeps the second row inside the window", width: 20, height: 12, text: "abcdefghijklmnopq ab\t12345678901", caret: -1,
+			rows: []string{"abcdefghijklmnopq", "ab    12345678901"},
+			x:    promptCells + 17, y: 1,
+		},
+		{
+			name: "the caret after a tab on the second row sits on the next character", width: 20, height: 12, text: "abcdefghijklmnopq ab\t12345678901", caret: 21,
+			rows: []string{"abcdefghijklmnopq", "ab    12345678901"},
+			x:    promptCells + 6, y: 1,
+		},
+		{
+			name: "a tab past the break leaves the caret at the start of the next row", width: 20, height: 12, text: "abcdefghijklmnop\tx", caret: 17,
+			rows: []string{"abcdefghijklmnop", "x"},
+			x:    promptCells, y: 1,
+		},
+		{
+			name: "the caret before a tab at the break stays on the first row", width: 20, height: 12, text: "abcdefghijklmnop\tx", caret: 16,
+			rows: []string{"abcdefghijklmnop", "x"},
+			x:    promptCells + 16, y: 0,
+		},
+		{
+			name: "two tabs on the second row count their stops through the wrapped row", width: 40, height: 12, text: "the quick brown fox jumps over the lazy dog\tand\tthen", caret: -1,
+			rows: []string{"the quick brown fox jumps over the", "lazy dog     and     then"},
+			x:    promptCells + 25, y: 1,
+		},
+		{
+			name: "the caret after the first tab of the second row", width: 40, height: 12, text: "the quick brown fox jumps over the lazy dog\tand\tthen", caret: 44,
+			rows: []string{"the quick brown fox jumps over the", "lazy dog     and     then"},
+			x:    promptCells + 13, y: 1,
+		},
+		{
+			name: "a tab after the last word of a full row moves the next word down", width: 40, height: 12, text: strings.Repeat("a", 30) + " ab\t" + "1234567890123456789012", caret: 34,
+			rows: []string{strings.Repeat("a", 30) + " ab", "1234567890123456789012"},
+			x:    promptCells, y: 1,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -263,6 +303,60 @@ func TestComposerUpAndDownKeepTheColumnAcrossSpacedRows(t *testing.T) {
 	}
 }
 
+func TestComposerKeepsEveryTypedCharacterAfterATab(t *testing.T) {
+	t.Parallel()
+	drafts := []string{
+		"a\tbcdefgh ijklmnopqrstu",
+		"abcdefghijklmnopq ab\t12345678901",
+		"abcdefghijklmnop\tx",
+		"the quick brown fox jumps over the lazy dog\tand\tthen",
+		strings.Repeat("a", 30) + " ab\t1234567890123456789012",
+		"abc\tdef ghi\tjkl mno\tpqr stu\tvwx yz\t0123456789",
+	}
+	for _, width := range []int{20, 40} {
+		for _, draft := range drafts {
+			m := composerState(t, width, 12, draft, -1)
+			assertFrame(t, strings.Split(m.View().Content, "\n"), width, 12)
+			shown := strings.Join(visibleComposerRows(m, 0), "")
+			if got, want := strings.Join(strings.Fields(shown), ""), strings.Join(strings.Fields(draft), ""); got != want {
+				t.Fatalf("width %d %q shows %q, want every character of %q", width, draft, got, want)
+			}
+			for at := 1; at < len(draft); at++ {
+				if draft[at-1] != '\t' || draft[at] == ' ' || draft[at] == '\t' {
+					continue
+				}
+				checkCaretOnCharacter(t, composerState(t, width, 12, draft, at), width, draft, at)
+			}
+		}
+	}
+}
+
+func checkCaretOnCharacter(t *testing.T, m model, width int, draft string, at int) {
+	t.Helper()
+	view := m.View()
+	if view.Cursor == nil || view.Cursor.X >= width-1 {
+		t.Fatalf("width %d %q caret %d: cursor %v is outside the window", width, draft, at, view.Cursor)
+	}
+	row := []rune(strings.Split(stripANSI(view.Content), "\n")[view.Cursor.Y])
+	if view.Cursor.X >= len(row) || row[view.Cursor.X] != rune(draft[at]) {
+		t.Fatalf("width %d %q caret %d: cursor %v is not on %q in row %q", width, draft, at, view.Cursor, draft[at], string(row))
+	}
+}
+
+func TestComposerUpAndDownKeepTheColumnAcrossTabbedRows(t *testing.T) {
+	t.Parallel()
+	const draft = "the quick brown fox jumps over the lazy dog\tand\tthen"
+	m := composerState(t, 40, 12, draft, 13)
+	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.input.composer.cursor != 44 {
+		t.Fatalf("down from column 13 left the caret at %d, want 44 on the character after the first tab", m.input.composer.cursor)
+	}
+	m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+	if m.input.composer.cursor != 13 {
+		t.Fatalf("up from the character after the first tab left the caret at %d, want 13", m.input.composer.cursor)
+	}
+}
+
 func TestComposerRowsMatchWrapperOutput(t *testing.T) {
 	t.Parallel()
 	texts := []string{
@@ -277,6 +371,12 @@ func TestComposerRowsMatchWrapperOutput(t *testing.T) {
 		"  leading spaces and trailing ones  ",
 		"one non breaking space words and some more words after",
 		"ab\tcdefghijklmno pqrstuvwxyz abcdefghijklmnop",
+		"abcdefghijklmnopq ab\t12345678901",
+		"\tabcdefghijklmnopqrstuvwxyz0123456789",
+		"ab\tabcdefghijklmnopqrstuvwxyz0123456789 \tx",
+		"a\t\t\tb\t\tc \t\t d\t",
+		"the quick brown fox jumps over the lazy dog\tand\tthen\t\tsome more words\there",
+		"한\t글 한글\t한글한글한글\t한글 ab\té\tcafé\t👨‍👩‍👧\tx",
 	}
 	for width := 1; width <= 44; width++ {
 		for _, text := range texts {
@@ -318,7 +418,7 @@ func rowProblem(screen screenState, text string, pos int, row editorRow, want st
 	if row.text != text[row.start:row.end] {
 		return fmt.Sprintf("text %q is not the source range", row.text)
 	}
-	if got := norm.NFC.String(screen.expand(row.text)); got != want && !strings.Contains(text, "\t") {
+	if got := norm.NFC.String(screen.expandFrom(row.text, row.col)); got != want {
 		return fmt.Sprintf("is %q, wrapper returned %q", got, want)
 	}
 	return ""

@@ -144,6 +144,29 @@ func TestWrapPrintsSpacesForTabs(t *testing.T) {
 	}
 }
 
+func TestWrapKeepsEveryTabbedRowWithinTheWidth(t *testing.T) {
+	t.Parallel()
+	texts := []string{
+		"abcdefghijklmnopq ab\t12345678901",
+		"the quick brown fox jumps over the lazy dog\tand\tthen\t\tsome more words\there",
+		"\tabcdefghijklmnopqrstuvwxyz0123456789",
+		"ab\tabcdefghijklmnopqrstuvwxyz0123456789 \tx",
+		"a\t\t\tb\t\tc \t\t d\t",
+	}
+	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
+		screen := screenState{method: method}
+		for _, text := range texts {
+			for n := 2; n <= 44; n++ {
+				rows := screen.wrap(text, n)
+				requireRowsWithoutTabs(t, &screen, rows, n)
+				if got, want := strings.Join(strings.Fields(strings.Join(rows, "")), ""), strings.Join(strings.Fields(text), ""); got != want {
+					t.Fatalf("method %v wrap(%q, %d) shows %q, want every character of the text", method, text, n, got)
+				}
+			}
+		}
+	}
+}
+
 func requireRowsWithoutTabs(t *testing.T, screen *screenState, rows []string, n int) {
 	t.Helper()
 	for _, row := range rows {

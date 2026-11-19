@@ -626,12 +626,12 @@ func (m *model) syncHistory() {
 }
 
 func (m *model) loadHistory(item listItem) tea.Cmd {
-	text, ok := m.input.history.load(historyID(item))
+	entry, ok := m.input.history.load(historyID(item))
 	if !ok {
 		m.rebuildHistory()
 		return nil
 	}
-	m.input.composer.SetValue(text)
+	m.input.composer.recall(entry.text, entry.verbatim)
 	m.closeList()
 	return nil
 }
