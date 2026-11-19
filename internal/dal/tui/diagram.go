@@ -136,7 +136,7 @@ func renderD2(ctx context.Context, source string) (string, error) {
 		return "", err
 	}
 	defer leave()
-	if err := ctx.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return "", err
 	}
 	ctx = log.With(ctx, slog.New(slog.DiscardHandler))
