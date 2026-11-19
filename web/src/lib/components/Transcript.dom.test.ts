@@ -548,4 +548,59 @@ describe("following the end", () => {
 		await fireEvent.scroll(scroller.element);
 		expect(jump()).not.toBeNull();
 	});
+
+	test("a reader who is away stays away while output grew and the scroll lands near the old end", async () => {
+		render(Transcript, { props: props([reply("m1", "first", true)]) });
+		const scroller = growingScroller();
+		await frames(2);
+		scroller.element.scrollTop = 100;
+		await fireEvent.scroll(scroller.element);
+		expect(jump()).not.toBeNull();
+		scroller.grow(500);
+		scroller.element.scrollTop = 480;
+		await fireEvent.scroll(scroller.element);
+		expect(jump()).not.toBeNull();
+	});
+
+	test("the end is within 32 px and no further", async () => {
+		render(Transcript, { props: props([reply("m1", "first", true)]) });
+		const scroller = growingScroller();
+		await frames(2);
+		scroller.element.scrollTop = 469;
+		await fireEvent.scroll(scroller.element);
+		expect(jump()).toBeNull();
+		scroller.element.scrollTop = 467;
+		await fireEvent.scroll(scroller.element);
+		expect(jump()).not.toBeNull();
+	});
+
+	test("the height remembered from one scroll container does not count in another", async () => {
+		render(Transcript, { props: props([reply("m1", "first", true)]) });
+		const scroller = growingScroller();
+		await frames(2);
+		scroller.element.style.overflowY = "visible";
+		const page = document.scrollingElement;
+		if (page === null) throw new Error("no scrolling element");
+		Object.defineProperty(page, "scrollHeight", {
+			configurable: true,
+			value: 5000,
+		});
+		Object.defineProperty(page, "clientHeight", {
+			configurable: true,
+			value: 800,
+		});
+		Object.defineProperty(page, "scrollTop", {
+			configurable: true,
+			writable: true,
+			value: 200,
+		});
+		try {
+			await fireEvent.scroll(document);
+			expect(jump()).not.toBeNull();
+		} finally {
+			Reflect.deleteProperty(page, "scrollHeight");
+			Reflect.deleteProperty(page, "clientHeight");
+			Reflect.deleteProperty(page, "scrollTop");
+		}
+	});
 });
