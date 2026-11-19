@@ -96,11 +96,13 @@ func commandNamed(name string) command {
 	return commands[slices.IndexFunc(commands, func(c command) bool { return c.name == name })]
 }
 
+func (c editor) tokenBreak(r rune) bool {
+	_, isChip := c.chipOf(r)
+	return isChip || unicode.IsSpace(r)
+}
+
 func (c editor) commandEnd() int {
-	end := slices.IndexFunc(c.text, func(r rune) bool {
-		_, isChip := c.chipOf(r)
-		return isChip || unicode.IsSpace(r)
-	})
+	end := slices.IndexFunc(c.text, c.tokenBreak)
 	if end < 0 {
 		return len(c.text)
 	}
@@ -122,10 +124,10 @@ func (m *model) commandQuery() (string, bool) {
 
 func (c *editor) tokenAt() (start, end int) {
 	start, end = c.cursor, c.cursor
-	for start > 0 && !unicode.IsSpace(c.text[start-1]) {
+	for start > 0 && !c.tokenBreak(c.text[start-1]) {
 		start--
 	}
-	for end < len(c.text) && !unicode.IsSpace(c.text[end]) {
+	for end < len(c.text) && !c.tokenBreak(c.text[end]) {
 		end++
 	}
 	return start, end

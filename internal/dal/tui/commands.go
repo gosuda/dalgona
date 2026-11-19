@@ -226,7 +226,7 @@ func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool
 	if !composer.readsSlash() {
 		return text, nil, false
 	}
-	name, arg, kind := parseSlash(strings.TrimSpace(composer.Value()))
+	name, arg, kind := composer.slashParts()
 	switch kind {
 	case slashCommand:
 		m.input.composer.SetValue("")
