@@ -20,6 +20,8 @@ func TestDetectImageProto(t *testing.T) {
 		{map[string]string{"TERM": "xterm-256color", "WEZTERM_PANE": "0"}, "kitty"},
 		{map[string]string{"TERM": "xterm-256color", "TERM_PROGRAM": "iTerm.app"}, "iterm"},
 		{map[string]string{"TERM": "xterm-256color", "ITERM_SESSION_ID": "w0t0p0:ABC"}, "iterm"},
+		{map[string]string{"TERM": "xterm-kitty", "TERM_PROGRAM": "iTerm.app"}, "kitty"},
+		{map[string]string{"TERM": "xterm-256color", "KITTY_WINDOW_ID": "1", "ITERM_SESSION_ID": "w0t0p0:ABC"}, "kitty"},
 		{map[string]string{"TERM": "xterm-256color", "TERM_PROGRAM": "vscode"}, ""},
 		{map[string]string{"TERM": "xterm-256color"}, ""},
 		{map[string]string{"TERM": "xterm-256color", "KITTY_WINDOW_ID": "1", "TMUX": "/tmp/tmux-1"}, ""},
