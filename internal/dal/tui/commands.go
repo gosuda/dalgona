@@ -265,8 +265,14 @@ func promptInput(text string, images []chip) []rpc.InputItem {
 	return items
 }
 
+type followup struct {
+	text     string
+	verbatim bool
+}
+
 func (m *model) queueFollowup() tea.Cmd {
-	text := strings.TrimSpace(m.input.composer.Expanded())
+	composer := m.input.composer
+	text := strings.TrimSpace(composer.Expanded())
 	if text == "" {
 		return nil
 	}
@@ -274,7 +280,7 @@ func (m *model) queueFollowup() tea.Cmd {
 		m.noticef("follow-up queue is full (%d); wait for the active turn or press Esc", maxFollowups)
 		return nil
 	}
-	m.queue = append(m.queue, text)
+	m.queue = append(m.queue, followup{text: text, verbatim: !composer.readsSlash() && strings.HasPrefix(text, "/")})
 	m.syncQueue()
 	m.input.composer.SetValue("")
 	m.noticef("queued follow-up %d of %d", len(m.queue), maxFollowups)
@@ -286,24 +292,29 @@ func (m *model) queueFollowup() tea.Cmd {
 
 func (m *model) dequeueFollowup() {
 	last := len(m.queue) - 1
-	text := m.queue[last]
+	item := m.queue[last]
 	m.queue = m.queue[:last]
 	m.syncQueue()
-	m.input.composer.SetValue(text)
+	m.input.composer.recall(item.text, item.verbatim)
 }
 
 func (m *model) startQueuedFollowup() tea.Cmd {
 	if len(m.queue) == 0 || m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
 		return nil
 	}
-	text := m.queue[0]
+	item := m.queue[0]
 	m.queue = m.queue[1:]
-	m.input.history.add(text, "")
+	m.input.history.record(item.text, "", item.verbatim)
 	m.syncQueue()
 	m.setState(stateRunning)
-	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(text), Model: m.thread.modelName}
+	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(item.text), Model: m.thread.modelName}
 	result := new(rpc.TurnStartResponse)
-	return m.call("followup", "turn/start", params, result, text)
+	send := m.call("followup", "turn/start", params, result, item.text)
+	return func() tea.Msg {
+		reply, _ := send().(resultMsg)
+		reply.verbatim = item.verbatim
+		return reply
+	}
 }
 
 func (m *model) interrupt() tea.Cmd {
@@ -582,7 +593,7 @@ func (m *model) restorePrompt(msg resultMsg) {
 	case "send", "steer":
 		m.restoreComposer(msg.text)
 	case "followup":
-		m.queue = append([]string{msg.text}, m.queue...)
+		m.queue = append([]followup{{text: msg.text, verbatim: msg.verbatim}}, m.queue...)
 		m.syncQueue()
 	}
 	if msg.op == "send" || msg.op == "followup" {

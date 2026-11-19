@@ -31,7 +31,7 @@ func TestNewOpensConfirmPanel(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
 	m := panelPicker(t, caller)
-	m.queue = []string{"first", "second"}
+	m.queue = queued("first", "second")
 	if command := m.executeSlash("new", ""); command != nil || len(caller.calls) != 0 {
 		t.Fatal("/new must open the confirm panel before it starts a thread")
 	}

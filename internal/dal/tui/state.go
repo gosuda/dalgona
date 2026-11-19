@@ -62,7 +62,7 @@ type model struct {
 	noticeError bool
 	noticeN     int
 	hint        hintState
-	queue       []string
+	queue       []followup
 	leaving     bool
 	quitting    bool
 	suspending  bool
@@ -216,12 +216,13 @@ type searchResultMsg struct {
 }
 
 type resultMsg struct {
-	op     string
-	value  any
-	text   string
-	seq    int
-	turnID string
-	err    error
+	op       string
+	value    any
+	text     string
+	verbatim bool
+	seq      int
+	turnID   string
+	err      error
 }
 
 type disconnectedMsg struct {

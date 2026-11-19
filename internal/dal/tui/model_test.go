@@ -219,7 +219,7 @@ func TestModelFollowupAndInterrupt(t *testing.T) {
 	m.thread.state = stateRunning
 	m.input.composer.SetValue("after this")
 	m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
-	if len(m.queue) != 1 || m.queue[0] != "after this" {
+	if len(m.queue) != 1 || m.queue[0].text != "after this" {
 		t.Fatalf("follow-up queue = %v, want [after this]", m.queue)
 	}
 	m, command := drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`)})
@@ -406,7 +406,7 @@ func TestModelHoldsFollowupAfterInterruptedTurn(t *testing.T) {
 	m.thread.id = "t1"
 	m.thread.turnID = "turn-1"
 	m.thread.state = stateRunning
-	m.queue = []string{"later"}
+	m.queue = queued("later")
 	m, _ = drive(t, m, notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"interrupted"}}`)})
 	if len(caller.calls) != 0 {
 		t.Fatalf("interrupted turn released follow-up: calls %#v", caller.calls)
@@ -599,7 +599,7 @@ func TestFollowupCarriesPickedModel(t *testing.T) {
 	m := newModel(caller, Options{}, nil)
 	m.thread.id = "t1"
 	m.thread.modelName = "local/qwen-small"
-	m.queue = []string{"then this"}
+	m.queue = queued("then this")
 	runCommand(t, m, m.startQueuedFollowup(), "follow-up produced no command")
 	params, ok := caller.calls[0].params.(rpc.TurnStartParams)
 	if !ok || params.Model != "local/qwen-small" {

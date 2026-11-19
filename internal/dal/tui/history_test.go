@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -341,6 +342,168 @@ func TestRecalledChipDraftRestoreKeepsTypedDraftReadingSlash(t *testing.T) {
 	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
 	runCommand(t, m, command, "Enter did not send the restored draft")
 	assertTurnStartText(t, caller, "/a b")
+}
+
+const completedTurn = `{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`
+
+func runningChipDraftModel(t *testing.T, caller caller, pasted string) model {
+	t.Helper()
+	m := pastedDraftModel(t, caller, pasted)
+	m.thread.turnID = "turn-1"
+	m.thread.state = stateRunning
+	return m
+}
+
+func completeTurn(t *testing.T, m model) model {
+	t.Helper()
+	m, command := drive(t, m, notificationMsg{method: "turn/completed", params: []byte(completedTurn)})
+	if command != nil {
+		m, _ = drive(t, m, command())
+	}
+	return m
+}
+
+func assertLastCallText(t *testing.T, caller *fakeCaller, count int, method, want string) {
+	t.Helper()
+	for _, call := range caller.calls {
+		if call.method == "thread/start" {
+			t.Fatalf("calls = %#v, want no thread/start", caller.calls)
+		}
+	}
+	if len(caller.calls) != count {
+		t.Fatalf("calls = %#v, want %d requests with the last a %s of the pasted text %q", caller.calls, count, method, want)
+	}
+	last := caller.calls[len(caller.calls)-1]
+	var input []rpc.InputItem
+	switch params := last.params.(type) {
+	case rpc.TurnStartParams:
+		input = params.Input
+	case rpc.TurnSteerParams:
+		input = params.Input
+	}
+	if last.method != method || len(input) != 1 || input[0].Text != want {
+		t.Fatalf("last call = %s %#v, want %s with the pasted text unchanged %q", last.method, last.params, method, want)
+	}
+}
+
+func TestQueuedChipFollowupRecalledIsSentAsPastedTextNotCommand(t *testing.T) {
+	t.Parallel()
+	for _, paste := range slashPastes {
+		for _, recall := range historyRecalls {
+			t.Run(paste.name+"/"+recall.name, func(t *testing.T) {
+				t.Parallel()
+				caller := new(fakeCaller)
+				m := runningChipDraftModel(t, caller, paste.text)
+				m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+				m = completeTurn(t, m)
+				assertLastCallText(t, caller, 1, "turn/start", paste.text)
+				m = completeTurn(t, m)
+				m = recall.run(t, m)
+				m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+				m = runCommand(t, m, command, "Enter did not send the recalled follow-up")
+				if m.confirm != nil {
+					t.Fatalf("Enter on the recalled follow-up opened %#v, want the prompt sent", m.confirm)
+				}
+				assertLastCallText(t, caller, 2, "turn/start", paste.text)
+			})
+		}
+	}
+}
+
+func TestTakenBackQueuedChipFollowupIsSentAsPastedTextNotCommand(t *testing.T) {
+	t.Parallel()
+	for _, paste := range slashPastes {
+		t.Run(paste.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := runningChipDraftModel(t, caller, paste.text)
+			m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+			m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
+			if got := m.input.composer.Expanded(); got != paste.text {
+				t.Fatalf("alt+up moved %q into the composer, want the pasted text", got)
+			}
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the taken-back follow-up")
+			if m.confirm != nil {
+				t.Fatalf("Enter on the taken-back follow-up opened %#v, want the prompt sent", m.confirm)
+			}
+			assertLastCallText(t, caller, 1, "turn/steer", paste.text)
+		})
+	}
+}
+
+func TestTakenBackTypedFollowupKeepsTheIntentOfItsDraft(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, typed string }{
+		{name: "plain text", typed: "plain text"},
+		{name: "typed command", typed: "/new now"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			m := newModel(new(fakeCaller), Options{}, nil)
+			m.thread.id = "t1"
+			m.thread.state = stateRunning
+			m = typeText(t, m, test.typed)
+			m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+			m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
+			assertComposer(t, m.input.composer, test.typed, false)
+		})
+	}
+}
+
+func TestQueuedTypedFollowupIsRecordedWithoutPasteIntent(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := newModel(caller, Options{}, nil)
+	m.thread.id = "t1"
+	m.thread.turnID = "turn-1"
+	m.thread.state = stateRunning
+	m = typeText(t, m, "plain text")
+	m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+	m = completeTurn(t, m)
+	if entries := m.input.history.entries; len(entries) != 1 || entries[0].text != "plain text" || entries[0].verbatim {
+		t.Fatalf("history = %#v, want one unmarked entry for the follow-up", entries)
+	}
+	m = completeTurn(t, m)
+	m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+	assertComposer(t, m.input.composer, "plain text", false)
+}
+
+type refusedStarts struct{ fakeCaller }
+
+func (c *refusedStarts) Call(ctx context.Context, method string, params, result any) error {
+	err := c.fakeCaller.Call(ctx, method, params, result)
+	if method == "turn/start" {
+		return errors.New("closed")
+	}
+	return err
+}
+
+func TestFailedChipFollowupReturnsToTheQueueWithItsPasteIntent(t *testing.T) {
+	t.Parallel()
+	for _, paste := range slashPastes {
+		t.Run(paste.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(refusedStarts)
+			m := runningChipDraftModel(t, caller, paste.text)
+			m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+			m = completeTurn(t, m)
+			if m.thread.state != stateFailed {
+				t.Fatalf("state = %q after the refused follow-up, want failed", m.thread.state)
+			}
+			m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
+			if got := m.input.composer.Expanded(); got != paste.text {
+				t.Fatalf("alt+up moved %q into the composer, want the pasted text", got)
+			}
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the returned follow-up")
+			if m.confirm != nil {
+				t.Fatalf("Enter on the returned follow-up opened %#v, want the prompt sent", m.confirm)
+			}
+			assertLastCallText(t, &caller.fakeCaller, 2, "turn/start", paste.text)
+		})
+	}
 }
 
 func TestHistoryEntryPasteIntentSurvivesEcho(t *testing.T) {
