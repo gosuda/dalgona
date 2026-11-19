@@ -12,6 +12,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	sandbox0sdk "github.com/sandbox0-ai/sdk-go"
 
@@ -62,9 +63,10 @@ type Binder struct {
 }
 
 type serviceCall struct {
-	done chan struct{}
-	svc  sandboxsvc.Service
-	err  error
+	done    chan struct{}
+	svc     sandboxsvc.Service
+	err     error
+	waiters atomic.Int32
 }
 
 func NewBinder(opts Options) *Binder {
@@ -137,6 +139,7 @@ func (b *Binder) service(ctx context.Context, spec config.RunnerSpec) (sandboxsv
 			return svc, nil
 		}
 		if call, ok := b.calls[spec]; ok {
+			call.waiters.Add(1)
 			b.mu.Unlock()
 			select {
 			case <-call.done:

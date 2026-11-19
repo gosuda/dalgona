@@ -142,6 +142,26 @@ func TestServiceConstructionDoesNotBlockOtherSpecs(t *testing.T) {
 	}
 }
 
+func waitersOf(b *Binder, spec config.RunnerSpec) int32 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if call, ok := b.calls[spec]; ok {
+		return call.waiters.Load()
+	}
+	return -1
+}
+
+func requireJoined(t *testing.T, b *Binder, spec config.RunnerSpec) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for waitersOf(b, spec) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("second caller did not join the shared build within 5 seconds")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestServiceCancelledBuilderDoesNotPoisonWaiter(t *testing.T) {
 	b, svc := blockingBinder()
 	slow := config.RunnerSpec{Service: "slow"}
@@ -149,11 +169,7 @@ func TestServiceCancelledBuilderDoesNotPoisonWaiter(t *testing.T) {
 	first := bindAsync(builderCtx, b, slow)
 	<-svc.entered
 	second := bindAsync(t.Context(), b, slow)
-	select {
-	case got := <-second:
-		t.Fatalf("second waiter returned (%v, %v) before the builder was cancelled", got.svc, got.err)
-	case <-time.After(200 * time.Millisecond):
-	}
+	requireJoined(t, b, slow)
 	cancel()
 	if got := requireOutcome(t, first, "cancelled builder"); !errors.Is(got.err, context.Canceled) {
 		t.Fatalf("cancelled builder error = %v, want context.Canceled", got.err)
