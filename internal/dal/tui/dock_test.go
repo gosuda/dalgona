@@ -112,6 +112,42 @@ func TestStatusRowFieldsKeepCells(t *testing.T) {
 	}
 }
 
+func planOf(done, total int) []rpc.TurnPlanStep {
+	steps := make([]rpc.TurnPlanStep, total)
+	for i := range steps {
+		steps[i] = rpc.TurnPlanStep{Step: "s", Status: "pending"}
+		if i < done {
+			steps[i].Status = "completed"
+		}
+	}
+	return steps
+}
+
+func TestStatusRowFieldsKeepCellsWhenThePlanAdvances(t *testing.T) {
+	t.Parallel()
+	for _, width := range []int{60, 100} {
+		for _, pair := range [][4]int{{0, 3, 1, 3}, {9, 12, 10, 12}, {99, 100, 100, 120}} {
+			t.Run(fmt.Sprintf("%dcols/%dof%d to %dof%d", width, pair[0], pair[1], pair[2], pair[3]), func(t *testing.T) {
+				t.Parallel()
+				now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+				m := liveModel(t, &now)
+				m.screen.width = width
+				m.queue = []string{"next"}
+				m.live.plan = planOf(pair[0], pair[1])
+				before := stripANSI(m.liveRow())
+				m.live.plan = planOf(pair[2], pair[3])
+				after := stripANSI(m.liveRow())
+				if cellCount(m, before) != cellCount(m, after) {
+					t.Fatalf("live row width changed: %q then %q", before, after)
+				}
+				if liveColumn(t, m, before, "1 queued") != liveColumn(t, m, after, "1 queued") {
+					t.Fatalf("the queued field moved: %q then %q", before, after)
+				}
+			})
+		}
+	}
+}
+
 func liveColumn(t *testing.T, m model, row, field string) int {
 	t.Helper()
 	index := strings.Index(row, field)

@@ -137,3 +137,36 @@ func TestPanelRowsFitNarrowWindows(t *testing.T) {
 		})
 	}
 }
+
+func narrowOpenerNamed(name string) panelOpener {
+	for _, candidate := range narrowPanelOpeners() {
+		if candidate.name == name {
+			return candidate
+		}
+	}
+	return panelOpener{}
+}
+
+func panelHeadRow(m model) string {
+	for _, line := range m.dockLines() {
+		if head := stripANSI(line); strings.HasPrefix(head, "┌ ") {
+			return head
+		}
+	}
+	return ""
+}
+
+func TestPanelHeadFillsTheRowWhenTheTitleIsCut(t *testing.T) {
+	t.Parallel()
+	opener := narrowOpenerNamed("approval long command")
+	for _, width := range []int{8, 12, 20, 30} {
+		t.Run(fmt.Sprintf("%dcols", width), func(t *testing.T) {
+			t.Parallel()
+			m := opener.open(t, narrowPanelModel(t, width, 12))
+			head := panelHeadRow(m)
+			if got := cellCount(m, head); head == "" || got != terminalWidth(width) {
+				t.Fatalf("panel head %q holds %d cells at %d columns, want %d", head, got, width, terminalWidth(width))
+			}
+		})
+	}
+}
