@@ -283,7 +283,9 @@ Closing the panel with Esc MUST leave the draft unchanged.
 With no history, the panel MUST show `No prompt history yet.` and no selectable row.
 With no history, Enter, Delete, and Backspace MUST do nothing.
 A draft that holds only whitespace MUST count as empty, for Esc and for Ctrl+C.
-Ctrl+C with a non-empty draft MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
+Ctrl+C with a draft that holds text MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
+An image chip MUST NOT enter the history. When the draft holds an image, the live row MUST read `Draft saved to history, images dropped · Ctrl+C again to exit`.
+Ctrl+C with a draft that holds no text MUST keep the draft. It MUST show `Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
 A paste MUST turn each CRLF, each CR, and each LF into one line break.
 A paste of fewer than 10 lines MUST be inserted as text.
@@ -354,7 +356,7 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 | Esc | Closes an open command palette first and keeps the draft. Otherwise clears a non-empty list filter first. With an empty filter, closes the list panel. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row. A second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
 | Esc on an empty prompt, while idle | The first Esc shows `Esc again to rewind` in the live row. A second Esc within 2000 ms opens the rewind list of active turns, newest first. |
 | Esc, with no turn to interrupt | After a stopped turn the notice reads `stopped; nothing to interrupt`. After a failed turn it reads `failed; nothing to interrupt`. After a lost connection it reads `offline; nothing to interrupt`. In an idle prompt with a draft it reads `idle, draft kept; nothing to interrupt`, the draft stays, and no rewind hint shows |
-| Ctrl+C twice | Quits. With an empty draft, the first press shows `Ctrl+C again to exit` in the live row. With a non-empty draft, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. A second press within 2000 ms quits |
+| Ctrl+C twice | Quits. With a draft that holds no text, the first press keeps the draft and shows `Ctrl+C again to exit` in the live row. With a draft that holds text, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. When that draft holds an image, the live row shows `Draft saved to history, images dropped · Ctrl+C again to exit`. A second press within 2000 ms quits |
 | Ctrl+R | Opens the history panel of sent prompts. Enter loads the highlighted prompt into the editor. Delete removes it. Shell mode ignores Ctrl+R |
 | `/model [id]` | `model/list` list panel, or `config/value/write` key `model` |
 | `/resume [id]` | `thread/list` list panel, or `thread/resume` with turns included |

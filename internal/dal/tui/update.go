@@ -296,12 +296,17 @@ func (m *model) exitKey() tea.Cmd {
 		m.quit()
 		return nil
 	}
-	if draft := m.input.composer.Value(); strings.TrimSpace(draft) != "" {
-		m.input.history.add(m.input.composer.Expanded(), "")
-		m.input.composer.SetValue("")
-		return m.setHint("Draft saved to history · Ctrl+C again to exit", "exit")
+	draft := m.input.composer.Expanded()
+	if strings.TrimSpace(draft) == "" {
+		return m.setHint("Ctrl+C again to exit", "exit")
 	}
-	return m.setHint("Ctrl+C again to exit", "exit")
+	m.input.history.add(draft, "")
+	hint := "Draft saved to history · Ctrl+C again to exit"
+	if len(m.input.composer.images()) > 0 {
+		hint = "Draft saved to history, images dropped · Ctrl+C again to exit"
+	}
+	m.input.composer.SetValue("")
+	return m.setHint(hint, "exit")
 }
 
 func (m *model) recallOlder() bool {
