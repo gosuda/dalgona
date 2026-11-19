@@ -2,34 +2,70 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  merge_group:
+  workflow_dispatch:
 
 latchkey:
   schema: 1
 
 jobs:
-  ci:
+  go:
     runs-on: small
-    timeout-minutes: 60
+    timeout-minutes: 40
+    strategy:
+      matrix:
+        task: [lint, test]
     steps:
-      - name: Install dependencies
+      - uses: latchkey/cache-restore@1.1.0
+        with:
+          key: ${{ matrix.task }}
+          version: go1
+          hash-files: go.sum
+          into: "~"
+      - if: matrix.task == 'lint'
         run: |
-          npm install -g pnpm@12.21.0
+          go tool golangci-lint fmt --diff
+          go vet ./...
+          go tool golangci-lint run ./...
+          go tool govulncheck ./...
+      - if: matrix.task == 'test'
+        run: go test -race -count=1 ./...
+      - if: always()
+        uses: latchkey/cache-save@1.1.0
+        with:
+          key: ${{ matrix.task }}
+          version: go1
+          hash-files: go.sum
+          from: "~"
+          path: .cache/go-build go/pkg/mod
+
+  web:
+    runs-on: small
+    timeout-minutes: 20
+    steps:
+      - uses: latchkey/setup-node@1.0.1
+        with:
+          node-version: 24
+      - name: Docs and specs
+        run: |
+          python3 docs/dal/spec/hashline/verify_model.py | cmp - docs/dal/spec/hashline/verification.json
+          python3 docs/dal/spec/check_style.py docs/dal/spec
+          python3 docs/dal/spec/check_style.py docs/dalgona/spec
+          python3 docs/dal/spec/check_style_test.py
+          python3 docs/check_links.py
+      - name: Web UI
+        run: |
           pnpm -C web install --frozen-lockfile
-          pnpm -C web build
-          touch internal/dalgona/webui/dist/.gitkeep
-          go mod download
-      - name: Lint (golangci-lint fmt)
-        run: go tool golangci-lint fmt --diff
-      - name: Lint (go vet)
-        run: go vet ./...
-      - name: Lint (golangci-lint)
-        run: go tool golangci-lint run ./...
-      - name: Lint (web)
-        run: |
           pnpm -C web exec biome ci
           pnpm -C web exec svelte-check
-      - name: Test (go)
-        run: go test -race -count=1 ./...
-      - name: Test (web)
-        run: pnpm -C web exec vitest run
+          pnpm -C web exec vitest run
+          pnpm -C web build
+      - name: Cloudflare worker
+        run: |
+          pnpm -C deploy/cloudflare install --frozen-lockfile
+          pnpm -C deploy/cloudflare exec tsc --noEmit
+          pnpm -C deploy/cloudflare exec tsc --noEmit -p tsconfig.test.json
+          pnpm -C deploy/cloudflare exec biome ci .
+          pnpm -C deploy/cloudflare test
