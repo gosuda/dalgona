@@ -83,10 +83,19 @@
 		for (const node of composer.querySelectorAll("label, textarea, button")) {
 			composer.scrollTop += node.getBoundingClientRect().top - frame.top;
 			const rect = node.getBoundingClientRect();
-			if (rect.top < frame.top - 1 || rect.bottom > frame.bottom + 1)
+			const label = node.textContent.trim() || node.tagName;
+			if (rect.top < frame.top - 1 || rect.bottom > frame.bottom + 1) {
 				failures.push(
-					`composer: ${node.textContent.trim() || node.tagName} cannot scroll into view (${Math.round(rect.top)}..${Math.round(rect.bottom)} outside ${Math.round(frame.top)}..${Math.round(frame.bottom)})`,
+					`composer: ${label} cannot scroll into view (${Math.round(rect.top)}..${Math.round(rect.bottom)} outside ${Math.round(frame.top)}..${Math.round(frame.bottom)})`,
 				);
+				continue;
+			}
+			const hit = document.elementFromPoint(
+				rect.left + rect.width / 2,
+				rect.top + rect.height / 2,
+			);
+			if (hit !== node && !node.contains(hit))
+				failures.push(`composer: ${label} occluded`);
 		}
 		composer.scrollTop = composerScroll;
 	}
