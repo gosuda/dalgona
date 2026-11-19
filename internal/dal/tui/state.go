@@ -72,6 +72,7 @@ type model struct {
 	login       *loginPanel
 	help        *helpPanel
 	matchSeq    int
+	listSeq     int
 	review      *reviewState
 	settings    *settingsPanel
 	saving      *settingsPanel

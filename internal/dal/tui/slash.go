@@ -105,7 +105,7 @@ func (m *model) advisorCommand(argument string) tea.Cmd {
 	params := rpc.DalgonaAdvisorStatusParams{ThreadID: m.thread.id}
 	switch argument {
 	case "":
-		return m.call("advisorPanel", "dalgona/advisor/status", params, new([]rpc.AdvisorState), "")
+		return m.listCall("advisorPanel", "dalgona/advisor/status", params, new([]rpc.AdvisorState))
 	case "status":
 		return m.call("advisorStatus", "dalgona/advisor/status", params, new([]rpc.AdvisorState), "")
 	case "reset":
@@ -121,7 +121,7 @@ func (m *model) modelCommand(argument string) tea.Cmd {
 		return m.setModel(argument)
 	}
 	result := new(rpc.ModelListResponse)
-	return m.call("models", "model/list", rpc.ModelListParams{}, result, "")
+	return m.listCall("models", "model/list", rpc.ModelListParams{}, result)
 }
 
 func (m *model) setModel(id string) tea.Cmd {
@@ -137,7 +137,7 @@ func (m *model) resumeCommand(argument string) tea.Cmd {
 		return m.resumeThread(argument)
 	}
 	result := new(rpc.ThreadListResponse)
-	return m.call("threads", "thread/list", rpc.ThreadListParams{Limit: 50}, result, "")
+	return m.listCall("threads", "thread/list", rpc.ThreadListParams{Limit: 50}, result)
 }
 
 func (m *model) resumeThread(id string) tea.Cmd {
@@ -165,10 +165,24 @@ func (m *model) resumeThread(id string) tea.Cmd {
 	}
 }
 
+func (m *model) callSeq(seq int, op, method string, params, result any) tea.Cmd {
+	command := m.call(op, method, params, result, "")
+	return func() tea.Msg {
+		reply, _ := command().(resultMsg)
+		reply.seq = seq
+		return reply
+	}
+}
+
+func (m *model) listCall(op, method string, params, result any) tea.Cmd {
+	m.listSeq++
+	return m.callSeq(m.listSeq, op, method, params, result)
+}
+
 func (m *model) treeCommand(op string) tea.Cmd {
 	params := rpc.ThreadTreeParams{ThreadID: m.thread.id}
 	result := new(rpc.ThreadTreeResponse)
-	return m.call(op, "dalgona/thread/tree", params, result, "")
+	return m.listCall(op, "dalgona/thread/tree", params, result)
 }
 
 func (m *model) busyRefusal(name string) bool {

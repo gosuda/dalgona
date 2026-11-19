@@ -117,6 +117,10 @@ func isSubsequence(query, text string) bool {
 	return len(rest) == 0
 }
 
+func panelBodyRows(p panelView, rows int) int {
+	return max(rows-1-min(len(p.actions), max(rows-1, 0)), 0)
+}
+
 func framePanel(s *screenState, p panelView, rows int) []string {
 	if rows <= 0 {
 		return nil
@@ -127,7 +131,7 @@ func framePanel(s *screenState, p panelView, rows int) []string {
 	if len(actions) > rows-1 {
 		actions = actions[len(actions)-(rows-1):]
 	}
-	bodyRows := rows - 1 - len(actions)
+	bodyRows := panelBodyRows(p, rows)
 	head := rowTheme.paint(roleFaint, "┌ ") + rowTheme.paintBold(roleText, s.fit(p.title, width-panelRailCells))
 	lines := []string{s.fit(head, width)}
 	start, shown := bodyWindow(p, bodyRows)

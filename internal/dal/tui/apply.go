@@ -292,7 +292,7 @@ func (m *model) applyLoginCompleted(params jsontext.Value) error {
 	}
 	m.closeWaitingLogin()
 	if !event.Success {
-		m.errorf("Login failed for %s: %s; run /login again", cmp.Or(event.Provider, "the provider"), cmp.Or(event.Error, "unknown error"))
+		m.errorf("Login failed: %s; run /login again", cmp.Or(event.Error, "unknown error"))
 		return nil
 	}
 	m.noticef("Signed in to %s. Run /model to choose a model", event.Provider)

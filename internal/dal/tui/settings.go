@@ -276,7 +276,7 @@ func (m *model) settingsFailed(msg resultMsg) bool {
 		return false
 	}
 	m.saving = nil
-	text := fmt.Sprintf("Could not save settings: %v", msg.err)
+	text := sanitizeText(fmt.Sprintf("Could not save settings: %v", msg.err))
 	if m.settings == nil {
 		m.errorf("%s", text)
 		return true

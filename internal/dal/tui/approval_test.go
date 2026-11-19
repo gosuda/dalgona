@@ -2,6 +2,7 @@ package tui
 
 import (
 	json "encoding/json/v2"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -147,5 +148,89 @@ func TestApprovalResolvedByAnotherWindowCloses(t *testing.T) {
 	}
 	if notices != 1 {
 		t.Fatalf("full resolution notice committed %d times, want once: %+v", notices, m.out.entries)
+	}
+}
+
+func tenLineApproval() serverRequestMsg {
+	var command []string
+	for i := range 10 {
+		command = append(command, fmt.Sprintf("row%d", i))
+	}
+	encoded, err := json.Marshal(strings.Join(command, "\n"))
+	if err != nil {
+		panic(err)
+	}
+	return serverRequestMsg{
+		method: "item/commandExecution/requestApproval",
+		answer: make(chan requestAnswer, 1),
+		params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"cmd1","startedAtMs":1,"command":` + string(encoded) + `}`),
+	}
+}
+
+func approvalBodyRows(m model) []string {
+	var rows []string
+	for _, line := range strings.Split(stripANSI(m.View().Content), "\n") {
+		if body, ok := strings.CutPrefix(line, "│   "); ok {
+			rows = append(rows, strings.TrimRight(body, " "))
+		}
+	}
+	return rows
+}
+
+func pressTimes(t *testing.T, m model, code rune, times int) model {
+	t.Helper()
+	for range times {
+		m, _ = drive(t, m, tea.KeyPressMsg{Code: code})
+	}
+	return m
+}
+
+func TestApprovalScrollClampsAtEnd(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		height   int
+		atEnd    string
+		afterUp  string
+		bodyRows int
+	}{
+		{height: 24, atEnd: "row4", afterUp: "row3", bodyRows: 6},
+		{height: 12, atEnd: "row5", afterUp: "row4", bodyRows: 5},
+	} {
+		t.Run(fmt.Sprintf("height%d", tc.height), func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel(nil, Options{})
+			m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: tc.height})
+			m, _ = drive(t, m, tenLineApproval())
+			m = pressTimes(t, m, tea.KeyDown, 50)
+			rows := approvalBodyRows(m)
+			if len(rows) != tc.bodyRows || rows[0] != tc.atEnd || rows[len(rows)-1] != "row9" {
+				t.Fatalf("after 50 downs the body rows are %q, want %d rows from %s to row9", rows, tc.bodyRows, tc.atEnd)
+			}
+			m = pressTimes(t, m, tea.KeyUp, 1)
+			rows = approvalBodyRows(m)
+			if len(rows) != tc.bodyRows || rows[0] != tc.afterUp || !strings.HasPrefix(rows[len(rows)-1], "↓ 2 more lines") {
+				t.Fatalf("after one up the body rows are %q, want %d rows from %s ending with the 2 more lines row", rows, tc.bodyRows, tc.afterUp)
+			}
+			m = pressTimes(t, m, tea.KeyDown, 1)
+			if rows = approvalBodyRows(m); rows[0] != tc.atEnd {
+				t.Fatalf("down after up shows %q first, want %s", rows[0], tc.atEnd)
+			}
+		})
+	}
+}
+
+func TestApprovalScrollClampsAfterResize(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 12})
+	m, _ = drive(t, m, tenLineApproval())
+	m = pressTimes(t, m, tea.KeyDown, 50)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	if rows := approvalBodyRows(m); rows[0] != "row4" {
+		t.Fatalf("after the window grows the body starts at %q, want row4", rows[0])
+	}
+	m = pressTimes(t, m, tea.KeyUp, 1)
+	if rows := approvalBodyRows(m); rows[0] != "row3" {
+		t.Fatalf("after one up the body starts at %q, want row3", rows[0])
 	}
 }

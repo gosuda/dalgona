@@ -85,6 +85,9 @@ Resume MUST take the active turn id and `turnEffort` from the same `thread/resum
 During a resume request for another thread, the client MUST buffer that thread's notifications.
 After it applies the snapshot, the client MUST replay those notifications in receive order.
 A superseded resume response or error MUST NOT change the client.
+A `thread/start` request MUST supersede an earlier `thread/resume` request.
+A `thread/resume` request MUST supersede an earlier `thread/start` request.
+A superseded `thread/start` result or error MUST NOT change the client.
 If the buffer exceeds its limit, the resume MUST fail and keep the current thread.
 
 The setting `status_hide` lists items to hide. Its default is empty. The client MUST NOT hide `model`.
@@ -165,6 +168,7 @@ Up and Down MUST move the cursor. PgUp and PgDn MUST move it by a page.
 Enter MUST choose the highlighted item. Enter MUST do nothing when no item matches.
 Esc MUST clear a non-empty filter. Esc MUST close the panel when the filter is empty.
 A list panel MUST lose its filter when another panel opens above it.
+A reply that opens a list panel MUST be dropped when another panel or the review is open. It MUST be dropped when a newer list request was sent.
 The input line MUST show the filter while a list panel is open.
 The input line MUST show the first line of the draft while another panel is open, with the caret at its end.
 A confirm panel MUST show its title, its body, and its action row. It MUST NOT send a request before Enter.
@@ -218,7 +222,8 @@ The API key field MUST show one `*` for each rune. The key MUST NOT appear in a 
 Enter on the API key field MUST send `account/login/start` with `type` `apiKey`. The panel MUST close when the provider accepts the key.
 A refused key MUST keep the field open with the error in the panel. Esc on the field MUST clear it and return to the methods.
 An approval request MUST NOT clear the API key field.
-A browser or device sign-in MUST show the link, and a device sign-in MUST show the user code. It MUST wait for `account/login/completed`.
+A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. A device sign-in MUST show the user code in the first body row. The hint row MUST read `Esc cancel the sign-in · waiting for the provider`.
+The client MUST print one history row `Sign-in URL: <url>` for each sign-in. The notice line MUST NOT repeat the link while the panel is open. A sign-in MUST wait for `account/login/completed`.
 Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in…`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
 A paste into the API key field MUST keep its first line and MUST NOT make a chip.
 
@@ -347,6 +352,7 @@ The client MUST allow a shell command its 120 second timeout before it reports a
 The chip MUST quote the output in a fence longer than any run of backticks in the output.
 Esc on a shell line with no typed text MUST leave shell mode.
 A shell line with only chips has no typed text. Esc on it MUST keep the chips in the prompt.
+A shell result MUST add its chip only while the draft holds no text other than shell chips. Its row MUST print in every case.
 A shell command MUST run in the open thread's directory. Before a thread opens, it MUST run in the launch directory.
 The folder item, its help legend and the welcome details MUST show the open thread's directory.
 Before a thread opens, they MUST show the launch directory.
@@ -404,11 +410,13 @@ A follow-up starts after `turn/completed` only when the turn ends idle. After an
 
 The interrupt notice MUST end when an interrupted turn ends.
 
+A confirmed rewind MUST return the turn's prompt to the composer only while the composer is empty. A draft that is not empty MUST stay as it is.
+
 ## Approvals
 
 `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` open the approval card. Requests queue in arrival order, and the card shows the oldest one. A request that joins a non-empty queue MUST NOT change the text on the input line. The title is `Approval · Run command` or `Approval · Apply file changes`, followed by ` (1 of <n>)` when more requests wait, and the word `Waiting`.
 
-The body holds at most six rows and scrolls with `up` and `down`. It shows:
+The body holds at most six rows and scrolls with `up` and `down`. `up` and `down` MUST move the body by one row and stop when its first or last row shows. The body shows:
 
 - `From thread <id>` when the request comes from another thread.
 - `$ <command>` when the request has a command, and `cwd <cwd>` when it names a working directory.
@@ -483,9 +491,11 @@ Each note also arrives as a `dynamicToolCall` item with tool `advisor`. That ite
 Every error notice MUST name a recovery action.
 
 - A malformed notification shows `protocol error in <method>: <cause>; reconnect with /resume <thread> or use /new`.
+- A held notification that does not decode when the resume replays it shows the same notice.
 - An `error` notification with `willRetry: false` sets `failed` and shows `error: <message>; retry the turn, /resume <thread>, or /new`. With `willRetry: true`, the state is unchanged and the notice is `error: <message>; retrying the turn, no action needed`.
 - With no thread yet, `/resume <thread>` in these notices reads `/resume`.
 - An advisor command that fails with `-32001` shows `advisor unavailable: <message>; set [advisor] enabled = true in config.toml, then restart dalgona`. Any other advisor failure shows `advisor request failed: <cause>; retry the /advisor command`.
+- A failed `account/login/cancel` shows `cancel sign-in failed: <cause>; run /login again`. A start call that fails after Esc shows `Login failed: <cause>; run /login again`.
 - A failed `turn/start` or `turn/steer` returns its text to the composer ahead of any newer draft. A failed follow-up returns to the head of the queue. A failed `turn/start` sets `failed`. A failed steer keeps the turn state.
 - A prompt sent before a thread exists stays in the composer with `thread is not ready; wait for startup or use /new to retry`.
 - A failed keyword list MUST NOT block prompting.

@@ -392,6 +392,26 @@ func threadDate(thread rpc.Thread, now time.Time) string {
 	return formatResumeDate(time.Unix(seconds, 0), now)
 }
 
+func (m *model) staleListReply(msg resultMsg) bool {
+	if msg.seq != 0 && msg.seq != m.listSeq {
+		return true
+	}
+	return m.panelOpen() || m.review != nil
+}
+
+func (m *model) applyListReply(msg resultMsg) tea.Cmd {
+	if m.staleListReply(msg) {
+		return nil
+	}
+	switch msg.op {
+	case "models":
+		return m.applyModels(msg.value)
+	case "threads":
+		return m.applyThreads(msg.value)
+	}
+	return m.applyTree(msg.op, msg.value)
+}
+
 func (m *model) applyModels(value any) tea.Cmd {
 	response, ok := value.(*rpc.ModelListResponse)
 	if !ok {
