@@ -586,7 +586,7 @@ func TestTurnStartCarriesPickedModel(t *testing.T) {
 	m := newModel(caller, Options{}, nil)
 	m.thread.id = "t1"
 	m.thread.modelName = "local/qwen-small"
-	runCommand(t, m, m.sendPrompt("hi", nil, newEditor()), "send produced no command")
+	runCommand(t, m, m.sendPrompt("hi", nil), "send produced no command")
 	params, ok := caller.calls[0].params.(rpc.TurnStartParams)
 	if !ok || params.Model != "local/qwen-small" {
 		t.Fatalf("turn/start params = %#v, want model local/qwen-small", caller.calls[0].params)

@@ -35,10 +35,6 @@ func (h *history) add(text, turnID string) {
 	h.record(text, turnID, true, false)
 }
 
-func (h *history) addFrom(draft editor, text, turnID string) {
-	h.record(text, turnID, !draft.readsSlash(), false)
-}
-
 func (h *history) saveDraft(draft editor, text string) {
 	h.record(text, "", !draft.readsSlash(), true)
 }
@@ -50,9 +46,7 @@ func (h *history) record(text, turnID string, verbatim, replace bool) {
 	}
 	verbatim = verbatim && strings.HasPrefix(text, "/")
 	if n := len(h.entries); n > 0 && h.entries[n-1].text == text {
-		h.entries[n-1].turnID = cmp.Or(turnID, h.entries[n-1].turnID)
-		h.entries[n-1].verbatim = verbatim || (!replace && h.entries[n-1].verbatim)
-		h.awaitingID = awaitedID(h.entries[n-1].id, turnID)
+		h.repeat(&h.entries[n-1], turnID, verbatim, replace)
 		return
 	}
 	h.lastID++
@@ -63,6 +57,17 @@ func (h *history) record(text, turnID string, verbatim, replace bool) {
 		h.entries = slices.Delete(h.entries, 0, len(h.entries)-maxHistory)
 	}
 	h.index = len(h.entries)
+}
+
+func (h *history) rewind() {
+	h.index = len(h.entries)
+}
+
+func (h *history) repeat(last *historyEntry, turnID string, verbatim, replace bool) {
+	keep := last.verbatim && (!replace || last.turnID != "")
+	last.turnID = cmp.Or(turnID, last.turnID)
+	last.verbatim = verbatim || keep
+	h.awaitingID = awaitedID(last.id, turnID)
 }
 
 func (h *history) startTurn(turnID string) {

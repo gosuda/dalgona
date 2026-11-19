@@ -312,6 +312,7 @@ The panel MUST then rebuild its rows from the history.
 A new prompt, a removal, or the 200 prompt cap MUST refresh an open history panel.
 The refresh MUST keep the highlight on the same entry while that entry exists.
 A removal MUST reset Up and Down recall to the newest end of the history.
+A send and a draft that Ctrl+C saves MUST reset Up and Down recall to the newest end of the history.
 A removal MUST NOT change the draft in the editor.
 Removing the prompt that waits for its turn MUST NOT move that turn to another entry.
 Closing the panel with Esc MUST leave the draft unchanged.
@@ -334,9 +335,9 @@ Sending MUST replace each chip with its full pasted text, in order.
 The history MUST store each prompt, and each draft that Ctrl+C saves, with each chip that holds text replaced by its full text.
 A prompt recalled from the history MUST be plain text. It MUST NOT become a chip.
 A recalled prompt whose draft began with a chip MUST be sent unchanged until the user edits its text.
-A queued follow-up whose draft began with a chip MUST be sent unchanged from the history, after Alt+Up, and after a failed start.
-A draft that Ctrl+C saves and that repeats the last entry MUST replace whether the history sends that entry unchanged.
-A prompt restored after a failed send or steer MUST follow that rule.
+A queued follow-up whose draft began with a chip MUST be sent unchanged after Alt+Up and a failed start, until the user edits its text.
+A typed follow-up MUST return after Alt+Up and a failed start as typed text, which the slash rule reads.
+A draft that Ctrl+C saves MUST decide whether the history sends the entry it repeats unchanged, unless that entry is a sent message.
 A user message that starts with `/` MUST be sent unchanged from the history until the user edits its text, live or resumed.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB MUST be refused with a notice that names the limit.
@@ -522,7 +523,7 @@ Every error notice MUST name a recovery action.
 - An advisor command that fails with `-32001` shows `advisor unavailable: <message>; set [advisor] enabled = true in config.toml, then restart dalgona`. Any other advisor failure shows `advisor request failed: <cause>; retry the /advisor command`.
 - A failed settings save shows `Could not save settings: <cause>; press Enter to try again` in the open panel. After the panel closed, it shows `Could not save settings: <cause>; run /settings and save again`.
 - A failed `account/login/cancel` shows `cancel sign-in failed: <cause>; run /login again`. A start call that fails after Esc shows `Login failed: <cause>; run /login again`.
-- A failed `turn/start` or `turn/steer` returns its text to the composer ahead of any newer draft. A failed follow-up returns to the head of the queue. A failed `turn/start` sets `failed`. A failed steer keeps the turn state.
+- A failed `turn/start` or `turn/steer` returns its text to the composer ahead of any newer draft. A returned text that starts with `/` is sent unchanged until the user edits it. A failed follow-up returns to the head of the queue. A failed `turn/start` sets `failed`. A failed steer keeps the turn state.
 - A prompt sent before a thread exists stays in the composer with `thread is not ready; wait for startup or use /new to retry`.
 - A failed keyword list MUST NOT block prompting.
 - An interrupt result for an earlier turn MUST NOT change the current state.

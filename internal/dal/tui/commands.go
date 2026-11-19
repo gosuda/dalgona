@@ -216,10 +216,11 @@ func (m *model) submitPrompt() tea.Cmd {
 		m.input.composer = composer
 		return nil
 	}
+	m.input.history.rewind()
 	if m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
-		return m.sendSteer(text, images, composer)
+		return m.sendSteer(text, images)
 	}
-	return m.sendPrompt(text, images, composer)
+	return m.sendPrompt(text, images)
 }
 
 func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool) {
@@ -240,20 +241,18 @@ func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool
 	return text, nil, false
 }
 
-func (m *model) sendPrompt(text string, images []chip, draft editor) tea.Cmd {
-	prompt := followup{text: text, verbatim: draft.sendsPastedSlash(text)}
-	m.input.history.record(text, "", prompt.verbatim, false)
+func (m *model) sendPrompt(text string, images []chip) tea.Cmd {
+	m.input.history.add(text, "")
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: promptInput(text, images), Model: m.thread.modelName}
 	result := new(rpc.TurnStartResponse)
-	return m.callPrompt("send", "turn/start", params, result, prompt)
+	return m.call("send", "turn/start", params, result, text)
 }
 
-func (m *model) sendSteer(text string, images []chip, draft editor) tea.Cmd {
-	prompt := followup{text: text, verbatim: draft.sendsPastedSlash(text)}
-	m.input.history.record(text, m.thread.turnID, prompt.verbatim, false)
+func (m *model) sendSteer(text string, images []chip) tea.Cmd {
+	m.input.history.add(text, m.thread.turnID)
 	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: promptInput(text, images)}
-	return m.callPrompt("steer", "turn/steer", params, new(rpc.TurnSteerResponse), prompt)
+	return m.call("steer", "turn/steer", params, new(rpc.TurnSteerResponse), text)
 }
 
 func textInput(text string) []rpc.InputItem {
@@ -305,7 +304,7 @@ func (m *model) startQueuedFollowup() tea.Cmd {
 	}
 	next := m.queue[0]
 	m.queue = m.queue[1:]
-	m.input.history.record(next.text, "", next.verbatim, false)
+	m.input.history.add(next.text, "")
 	m.syncQueue()
 	m.setState(stateRunning)
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(next.text), Model: m.thread.modelName}
@@ -597,7 +596,7 @@ func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 func (m *model) restorePrompt(msg resultMsg) {
 	switch msg.op {
 	case "send", "steer":
-		m.restoreComposer(msg.text, msg.verbatim)
+		m.restoreComposer(msg.text)
 	case "followup":
 		m.queue = append([]followup{{text: msg.text, verbatim: msg.verbatim}}, m.queue...)
 		m.syncQueue()
@@ -615,7 +614,8 @@ func resultLabel(op string) string {
 	return op
 }
 
-func (m *model) restoreComposer(text string, verbatim bool) {
+func (m *model) restoreComposer(text string) {
+	verbatim := strings.HasPrefix(strings.TrimSpace(text), "/")
 	current := m.input.composer.Expanded()
 	if current != "" {
 		text += "\n" + current

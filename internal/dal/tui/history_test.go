@@ -336,7 +336,6 @@ func TestRepeatedCtrlCSaveTakesTheIntentOfTheEditedDraft(t *testing.T) {
 			if n := len(m.input.history.entries); n != 1 {
 				t.Fatalf("history holds %d entries after the second save, want 1", n)
 			}
-			m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
 			m = recall.run(t, m)
 			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
 			if command != nil {
@@ -407,7 +406,6 @@ func TestHistoryRepeatSetsTheIntentAndASavedDraftReplacesIt(t *testing.T) {
 		want   bool
 	}{
 		{name: "echo keeps the intent", first: chipFirst, repeat: func(h *history) { h.add(pasted, "turn-1") }, want: true},
-		{name: "send keeps the intent", first: chipFirst, repeat: func(h *history) { h.addFrom(typed, pasted, "") }, want: true},
 		{name: "echo sets the intent", first: typed, repeat: func(h *history) { h.add(pasted, "turn-1") }, want: true},
 		{name: "saved draft clears the intent", first: chipFirst, repeat: func(h *history) { h.saveDraft(typed, pasted) }, want: false},
 		{name: "saved draft sets the intent", first: typed, repeat: func(h *history) { h.saveDraft(chipFirst, pasted) }, want: true},
@@ -416,12 +414,134 @@ func TestHistoryRepeatSetsTheIntentAndASavedDraftReplacesIt(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			var h history
-			h.addFrom(test.first, pasted, "")
+			h.saveDraft(test.first, pasted)
 			test.repeat(&h)
 			if len(h.entries) != 1 || h.entries[0].verbatim != test.want {
 				t.Fatalf("entries = %#v, want one entry with verbatim %v", h.entries, test.want)
 			}
 		})
+	}
+}
+
+func sentPromptsModel(t *testing.T, prompts ...string) model {
+	t.Helper()
+	m := newTestModel(new(fakeCaller), Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.thread.id = "t1"
+	for _, prompt := range prompts {
+		var command tea.Cmd
+		m = typeText(t, m, prompt)
+		m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+		m = runCommand(t, m, command, "Enter did not send "+prompt)
+		m.thread.state = stateIdle
+	}
+	return m
+}
+
+func TestUpAfterARepeatedPromptRecallsTheNewestEntry(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		prompts []string
+		repeat  func(*testing.T, model) model
+	}{
+		{name: "saved by Ctrl+C", prompts: []string{"first", "second"}, repeat: func(t *testing.T, m model) model {
+			t.Helper()
+			m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+			m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+			return m
+		}},
+		{name: "saved by Ctrl+C from a single entry", prompts: []string{"second"}, repeat: func(t *testing.T, m model) model {
+			t.Helper()
+			m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+			m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+			return m
+		}},
+		{name: "sent again", prompts: []string{"first", "second"}, repeat: func(t *testing.T, m model) model {
+			t.Helper()
+			m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the recalled prompt")
+			m.thread.state = stateIdle
+			return m
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			m := test.repeat(t, sentPromptsModel(t, test.prompts...))
+			if n := len(m.input.history.entries); n != len(test.prompts) {
+				t.Fatalf("history holds %d entries after the repeat, want %d", n, len(test.prompts))
+			}
+			m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+			if got, want := m.input.composer.Value(), test.prompts[len(test.prompts)-1]; got != want {
+				t.Fatalf("up recalled %q, want the newest entry %q", got, want)
+			}
+		})
+	}
+}
+
+func TestEchoOfTheLastPromptKeepsTheRecallPosition(t *testing.T) {
+	t.Parallel()
+	m := sentPromptsModel(t, "a")
+	m = typeText(t, m, "dr")
+	m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+	m, _ = drive(t, m, userMessageNotification("a"))
+	m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	if got := m.input.composer.Value(); got != "dr" {
+		t.Fatalf("down restored %q after the echo, want the typed draft", got)
+	}
+}
+
+func TestSavedDraftThatRepeatsASentMessageKeepsItSentUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, recall := range historyRecalls {
+		t.Run(recall.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := pastedDraftModel(t, caller, slashPastes[1].text)
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the chip draft")
+			echo := fmt.Appendf(nil, `{"threadId":"t1","item":{"id":"u1","type":"userMessage","text":%q}}`, slashPastes[1].text)
+			m, _ = drive(t, m, notificationMsg{method: "item/completed", params: echo})
+			m.thread.state = stateIdle
+			m = recall.run(t, m)
+			for _, key := range recalledEdits[1].keys {
+				m, _ = drive(t, m, key)
+			}
+			m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+			if n := len(m.input.history.entries); n != 1 {
+				t.Fatalf("history holds %d entries after the save, want 1", n)
+			}
+			m = recall.run(t, m)
+			m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the recalled message; notice: "+m.notice)
+			if m.confirm != nil {
+				t.Fatalf("Enter on the recalled message opened %#v, want the prompt sent", m.confirm)
+			}
+			assertLastCallText(t, caller, 2, "turn/start", slashPastes[1].text)
+		})
+	}
+}
+
+func TestFailedTypedFollowupReturnsToTheQueueAsTypedText(t *testing.T) {
+	t.Parallel()
+	caller := new(refusedStarts)
+	m := newModel(caller, Options{}, nil)
+	m.thread.id = "t1"
+	m.thread.turnID = "turn-1"
+	m.thread.state = stateRunning
+	m = typeText(t, m, "/new now")
+	m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+	m = completeTurn(t, m)
+	if m.thread.state != stateFailed {
+		t.Fatalf("state = %q after the refused follow-up, want failed", m.thread.state)
+	}
+	m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
+	assertComposer(t, m.input.composer, "/new now", false)
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	if m.confirm == nil || m.confirm.kind != confirmNew {
+		t.Fatalf("confirm = %#v, want the new-thread confirmation of the typed /new", m.confirm)
 	}
 }
 
@@ -467,11 +587,11 @@ func TestHistoryEntryPasteIntentUpgradesAnEarlierTypedEntry(t *testing.T) {
 	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
 	typed := editor{text: []rune(pasted)}
 	var h history
-	h.addFrom(typed, pasted, "")
+	h.saveDraft(typed, pasted)
 	if len(h.entries) != 1 || h.entries[0].verbatim {
 		t.Fatalf("entries = %#v, want one typed entry", h.entries)
 	}
-	h.addFrom(chipFirst, pasted, "")
+	h.saveDraft(chipFirst, pasted)
 	if len(h.entries) != 1 || !h.entries[0].verbatim {
 		t.Fatalf("entries after the chip draft = %#v, want the one entry marked verbatim", h.entries)
 	}
@@ -585,22 +705,80 @@ func TestTakenBackTypedFollowupKeepsTheIntentOfItsDraft(t *testing.T) {
 	}
 }
 
-func TestQueuedTypedFollowupIsRecordedWithoutPasteIntent(t *testing.T) {
+func TestQueuedTypedFollowupIsRecordedAsSentBeforeTheEcho(t *testing.T) {
 	t.Parallel()
-	caller := new(fakeCaller)
-	m := newModel(caller, Options{}, nil)
-	m.thread.id = "t1"
-	m.thread.turnID = "turn-1"
-	m.thread.state = stateRunning
-	m = typeText(t, m, "plain text")
-	m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
-	m = completeTurn(t, m)
-	if entries := m.input.history.entries; len(entries) != 1 || entries[0].text != "plain text" || entries[0].verbatim {
-		t.Fatalf("history = %#v, want one unmarked entry for the follow-up", entries)
+	tests := []struct {
+		name     string
+		typed    string
+		verbatim bool
+	}{
+		{name: "plain text", typed: "plain text"},
+		{name: "typed command", typed: "/new now", verbatim: true},
 	}
-	m = completeTurn(t, m)
-	m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
-	assertComposer(t, m.input.composer, "plain text", false)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := newModel(caller, Options{}, nil)
+			m.thread.id = "t1"
+			m.thread.turnID = "turn-1"
+			m.thread.state = stateRunning
+			m = typeText(t, m, test.typed)
+			m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+			m = completeTurn(t, m)
+			if entries := m.input.history.entries; len(entries) != 1 || entries[0].text != test.typed || entries[0].verbatim != test.verbatim {
+				t.Fatalf("history = %#v, want one entry for the follow-up with verbatim %v", entries, test.verbatim)
+			}
+			m = completeTurn(t, m)
+			m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+			assertComposer(t, m.input.composer, test.typed, test.verbatim)
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the recalled follow-up")
+			if m.confirm != nil {
+				t.Fatalf("Enter on the recalled follow-up opened %#v, want the prompt sent", m.confirm)
+			}
+			assertLastCallText(t, caller, 2, "turn/start", test.typed)
+		})
+	}
+}
+
+func TestTypedDoubleSlashPromptIsRecalledSentUnchangedBeforeTheEcho(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		state  string
+		method string
+	}{
+		{name: "send", state: stateIdle, method: "turn/start"},
+		{name: "steer", state: stateRunning, method: "turn/steer"},
+	}
+	for _, test := range tests {
+		for _, recall := range historyRecalls {
+			t.Run(test.name+"/"+recall.name, func(t *testing.T) {
+				t.Parallel()
+				caller := new(fakeCaller)
+				m := newTestModel(caller, Options{})
+				m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+				m.thread.id = "t1"
+				m.thread.turnID = "turn-1"
+				m.thread.state = test.state
+				m = typeText(t, m, "//new now")
+				m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+				m = runCommand(t, m, command, "Enter did not send the typed double slash prompt")
+				m.thread.state = test.state
+				if entries := m.input.history.entries; len(entries) != 1 || entries[0].text != "/new now" || !entries[0].verbatim {
+					t.Fatalf("history = %#v, want one entry sent unchanged", entries)
+				}
+				m = recall.run(t, m)
+				m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+				m = runCommand(t, m, command, "Enter did not send the recalled prompt; notice: "+m.notice)
+				if m.confirm != nil {
+					t.Fatalf("Enter on the recalled prompt opened %#v, want the prompt sent", m.confirm)
+				}
+				assertLastCallText(t, caller, 2, test.method, "/new now")
+			})
+		}
+	}
 }
 
 type refusedStarts struct{ fakeCaller }
@@ -639,39 +817,165 @@ func TestFailedChipFollowupReturnsToTheQueueWithItsPasteIntent(t *testing.T) {
 	}
 }
 
-func TestHistoryEntryPasteIntentSurvivesEcho(t *testing.T) {
+type refusedSteers struct{ fakeCaller }
+
+func (c *refusedSteers) Call(ctx context.Context, method string, params, result any) error {
+	err := c.fakeCaller.Call(ctx, method, params, result)
+	if method == "turn/steer" {
+		return errors.New("closed")
+	}
+	return err
+}
+
+func assertComposerValue(t *testing.T, composer editor, want string) {
+	t.Helper()
+	if got := composer.Value(); got != want {
+		t.Fatalf("composer holds %q, want the returned text %q", got, want)
+	}
+}
+
+func readyModel(t *testing.T, caller caller) model {
+	t.Helper()
+	m := newTestModel(caller, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.thread.id = "t1"
+	return m
+}
+
+var failedSendDrafts = []struct {
+	name string
+	fill func(*testing.T, model) model
+	sent string
+}{
+	{name: "double slash paste", fill: pasteInto(slashPastes[0].text), sent: slashPastes[0].text},
+	{name: "command paste with a word", fill: pasteInto(slashPastes[1].text), sent: slashPastes[1].text},
+	{name: "bare command paste", fill: pasteInto(slashPastes[2].text), sent: slashPastes[2].text},
+	{name: "typed double slash", fill: func(t *testing.T, m model) model { return typeText(t, m, "//new now") }, sent: "/new now"},
+	{name: "plain text", fill: func(t *testing.T, m model) model { return typeText(t, m, "plain text") }, sent: "plain text"},
+}
+
+func pasteInto(pasted string) func(*testing.T, model) model {
+	return func(t *testing.T, m model) model {
+		t.Helper()
+		m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+		return m
+	}
+}
+
+func TestFailedSendReturnsItsTextToTheComposerSentUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, draft := range failedSendDrafts {
+		t.Run(draft.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(refusedStarts)
+			m := draft.fill(t, readyModel(t, caller))
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the draft")
+			if m.thread.state != stateFailed {
+				t.Fatalf("state = %q after the refused send, want failed", m.thread.state)
+			}
+			assertComposerValue(t, m.input.composer, draft.sent)
+			m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the returned text; notice: "+m.notice)
+			if m.confirm != nil {
+				t.Fatalf("Enter on the returned text opened %#v, want the prompt sent", m.confirm)
+			}
+			assertLastCallText(t, &caller.fakeCaller, 2, "turn/start", draft.sent)
+		})
+	}
+}
+
+func TestFailedSteerReturnsItsTextToTheComposerSentUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, draft := range failedSendDrafts {
+		t.Run(draft.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(refusedSteers)
+			m := readyModel(t, caller)
+			m.thread.turnID = "turn-1"
+			m.thread.state = stateRunning
+			m = draft.fill(t, m)
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not steer with the draft")
+			assertComposerValue(t, m.input.composer, draft.sent)
+			m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not steer with the returned text; notice: "+m.notice)
+			if m.confirm != nil {
+				t.Fatalf("Enter on the returned text opened %#v, want the steer sent", m.confirm)
+			}
+			assertLastCallText(t, &caller.fakeCaller, 2, "turn/steer", draft.sent)
+		})
+	}
+}
+
+func TestFailedSendReturnsAheadOfANewerDraftAndStaysSentUnchanged(t *testing.T) {
+	t.Parallel()
+	caller := new(refusedStarts)
+	m := pasteInto(slashPastes[1].text)(t, readyModel(t, caller))
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = typeText(t, m, "more")
+	m = runCommand(t, m, command, "Enter did not send the draft")
+	want := slashPastes[1].text + "\nmore"
+	assertComposerValue(t, m.input.composer, want)
+	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = runCommand(t, m, command, "Enter did not send the returned text; notice: "+m.notice)
+	if m.confirm != nil {
+		t.Fatalf("Enter on the returned text opened %#v, want the prompt sent", m.confirm)
+	}
+	assertLastCallText(t, &caller.fakeCaller, 2, "turn/start", want)
+}
+
+func TestSavedDraftRecordsTheIntentOfItsDraft(t *testing.T) {
 	t.Parallel()
 	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +11 lines]", text: "// a\nb"}}}
-	typed := editor{text: []rune("//a b")}
 	recalled := newEditor()
 	recalled.recall("// a\nb", true)
 	edited := recalled
 	edited.insert([]rune("x"))
 	tests := []struct {
-		name   string
-		draft  editor
-		text   string
-		want   bool
-		echoed bool
+		name  string
+		draft editor
+		want  bool
 	}{
-		{name: "chip first", draft: chipFirst, text: "// a\nb", want: true, echoed: true},
-		{name: "typed double slash", draft: typed, text: "/a b", want: false, echoed: true},
-		{name: "typed command", draft: editor{text: []rune("/new")}, text: "/new", want: false, echoed: true},
-		{name: "plain prompt", draft: editor{text: []rune("hello")}, text: "hello", want: false, echoed: false},
-		{name: "recalled paste", draft: recalled, text: "// a\nb", want: true, echoed: true},
-		{name: "edited recalled paste", draft: edited, text: "// a\nbx", want: false, echoed: true},
+		{name: "chip first", draft: chipFirst, want: true},
+		{name: "typed double slash", draft: editor{text: []rune("//a b")}},
+		{name: "typed command", draft: editor{text: []rune("/new")}},
+		{name: "plain prompt", draft: editor{text: []rune("hello")}},
+		{name: "recalled paste", draft: recalled, want: true},
+		{name: "edited recalled paste", draft: edited},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			var h history
-			h.addFrom(test.draft, test.text, "")
+			h.saveDraft(test.draft, test.draft.Expanded())
 			if len(h.entries) != 1 || h.entries[0].verbatim != test.want {
-				t.Fatalf("entries = %#v, want verbatim %v", h.entries, test.want)
+				t.Fatalf("entries = %#v, want one entry with verbatim %v", h.entries, test.want)
 			}
+		})
+	}
+}
+
+func TestHistoryRecordsAMessageThatStartsWithASlashAsSentUnchanged(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{text: "// a\nb", want: true},
+		{text: "/a b", want: true},
+		{text: "/new", want: true},
+		{text: "/", want: true},
+		{text: "hello"},
+		{text: "see /new now"},
+	}
+	for _, test := range tests {
+		t.Run(test.text, func(t *testing.T) {
+			t.Parallel()
+			var h history
 			h.add(test.text, "turn-1")
-			if len(h.entries) != 1 || h.entries[0].verbatim != test.echoed || h.entries[0].turnID != "turn-1" {
-				t.Fatalf("entries after the echo = %#v, want one entry with verbatim %v and turn-1", h.entries, test.echoed)
+			if len(h.entries) != 1 || h.entries[0].verbatim != test.want {
+				t.Fatalf("entries = %#v, want one entry with verbatim %v", h.entries, test.want)
 			}
 		})
 	}
@@ -689,7 +993,7 @@ func TestHistoryRecallCarriesPasteIntentThroughDraftRestore(t *testing.T) {
 	const pasted = "// a\nb"
 	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
 	var h history
-	h.addFrom(chipFirst, pasted, "")
+	h.saveDraft(chipFirst, pasted)
 	h.add("other", "")
 	composer := newEditor()
 	composer.SetValue("typed")
@@ -909,7 +1213,9 @@ var threadPromptCases = []threadPromptCase{
 	{name: "double slash", text: "// Render the menu\nline", sent: "// Render the menu\nline"},
 	{name: "command with a word", text: "/new now\nline", sent: "/new now\nline"},
 	{name: "bare command", text: "/new\nline", sent: "/new\nline"},
+	{name: "bare slash", text: "/", sent: "/"},
 	{name: "plain prompt", text: "plain\nline", sent: "plain\nline"},
+	{name: "slash inside", text: "see /new now\nline", sent: "see /new now\nline"},
 	{name: "edited command", text: "/new now\nline", keys: []tea.KeyPressMsg{press('x', 0, "x")}},
 }
 
