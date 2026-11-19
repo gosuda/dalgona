@@ -36,10 +36,15 @@ type writeEffect struct {
 
 func applyBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Result, error) {
 	result, outcome, err := commitBatch(ctx, env, batch)
-	if err == nil || !batch.style.profile() {
+	if !batch.style.profile() {
 		return result, err
 	}
-	return result, outcomeError(batch.style, outcome, err)
+	outcome = stamped(batch.style, outcome)
+	result.Meta = outcomeMeta(outcome)
+	if err == nil {
+		return result, nil
+	}
+	return result, &tool.OutcomeError{Outcome: outcome, Err: err}
 }
 
 func commitBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Result, tool.Outcome, error) {

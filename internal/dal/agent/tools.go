@@ -275,7 +275,8 @@ func (w *worker) admit(ctx context.Context, p *prepared, requestID string) (*pre
 		if maskErr != nil {
 			return nil, maskErr
 		}
-		_, err = w.t.appendEvents(context.WithoutCancel(ctx), event.ToolCompleted{CallID: p.call.ID, Output: output, Recovered: "none"})
+		completed := event.ToolCompleted{CallID: p.call.ID, Output: output, Recovered: "none", Meta: refusalMeta(p.tool, declineOutcome(v))}
+		_, err = w.t.appendEvents(context.WithoutCancel(ctx), completed)
 		return nil, err
 	}
 	p.verdict = v
@@ -328,7 +329,7 @@ func (w *worker) declineCall(ctx context.Context, call event.ToolCall, requestID
 	}
 	events = append(events,
 		event.ApprovalResolved{RequestID: requestID, Decision: v.decision, By: v.by, Reason: masked},
-		event.ToolCompleted{CallID: call.ID, Output: masked, Recovered: "none"},
+		event.ToolCompleted{CallID: call.ID, Output: masked, Recovered: "none", Meta: v.meta},
 	)
 	_, err = w.t.appendEvents(ctx, events...)
 	return err
@@ -336,7 +337,45 @@ func (w *worker) declineCall(ctx context.Context, call event.ToolCall, requestID
 
 func (w *worker) failBeforeRun(ctx context.Context, p *prepared, requestID string, cause error) error {
 	p.discardPlan()
-	return w.declineCall(ctx, p.call, requestID, decline("mode:"+string(w.settings.Approval), cause.Error()))
+	refusal := decline("mode:"+string(w.settings.Approval), cause.Error())
+	refusal.meta = planRefusalMeta(cause)
+	return w.declineCall(ctx, p.call, requestID, refusal)
+}
+
+func planRefusalMeta(cause error) jsontext.Value {
+	var refused *tool.OutcomeError
+	if !errors.As(cause, &refused) {
+		return nil
+	}
+	return outcomeMeta(refused.Outcome)
+}
+
+func declineOutcome(v verdict) tool.Outcome {
+	if v.decision == "cancel" {
+		return tool.Outcome{Status: tool.StatusInterrupted, Commit: tool.CommitNone, Reason: tool.ReasonInterrupted}
+	}
+	return tool.Outcome{Status: tool.StatusRejected, Commit: tool.CommitNone, Reason: tool.ReasonPermissionDenied, Class: tool.ErrClassBlocked}
+}
+
+func refusalMeta(item tool.Tool, result tool.Outcome) jsontext.Value {
+	profiled, ok := item.(tool.Profiled)
+	if !ok {
+		return nil
+	}
+	profile, ok := profiled.Profile()
+	if !ok {
+		return nil
+	}
+	result.Style, result.Version = profile.Style, profile.Version
+	return outcomeMeta(result)
+}
+
+func outcomeMeta(outcome tool.Outcome) jsontext.Value {
+	meta, err := outcome.Meta(false)
+	if err != nil {
+		return nil
+	}
+	return meta
 }
 
 func (w *worker) start(ctx context.Context, p *prepared) error {

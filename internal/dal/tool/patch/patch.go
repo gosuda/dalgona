@@ -25,6 +25,10 @@ func (e Editor) Spec() tool.Spec { return specFor(e.style) }
 
 func (e Editor) Class() tool.Class { return tool.ClassEdit }
 
+func (e Editor) Profile() (tool.Profile, bool) {
+	return tool.Profile{Style: string(e.style), Version: contractVersion}, e.style.profile()
+}
+
 func (e Editor) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result, error) {
 	plan, err := e.Plan(ctx, call, env)
 	if err != nil {

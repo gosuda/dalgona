@@ -50,7 +50,7 @@ A field MUST NOT contain both an inline value and a blob reference. `prompt.base
 |`hashline.invocation_started`|`call_id`, `turn_id`, `identity`, `fingerprint`, `style`, `contract_version`, `paths`|None. C16 of the [hashline common specification](hashline/hashline-common-v1.md) defines `identity` and `fingerprint`. `fingerprint` is a SHA-256 digest. `style` is `hashline-light` or `hashline-enhanced`. `contract_version` MUST be positive. `paths` holds the parsed requested paths. `paths` MUST contain at least one non-empty path. The paths MUST total at most 64 KiB. The host MUST mask each path before it journals the event. The event MUST NOT contain a credential|
 |`hashline.invocation_settled`|`identity`, `ok`, `output`|`spill`, `meta`. `identity` is the `identity` of the `hashline.invocation_started` event that this event settles. `ok`, `output`, `spill`, and `meta` follow the rules of `tool.completed`. `meta` MUST remain inline and MUST NOT exceed 64 KiB. The event MUST NOT contain a credential|
 
-Text and raw JSON fields named in this section MAY use the blob-reference form. Snapshot metadata in `tool.completed.meta` MUST remain inline and MUST NOT exceed 64 KiB.
+Text and raw JSON fields named in this section MAY use the blob-reference form. Snapshot metadata in `tool.completed.meta` MUST remain inline and MUST NOT exceed 64 KiB. A `hashline` member holds the C15 object. It MUST NOT use a top-level `ref`, `path`, `blob`, or `captures` member.
 
 ### Image attachments
 
