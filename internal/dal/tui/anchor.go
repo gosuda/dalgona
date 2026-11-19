@@ -27,6 +27,7 @@ type dockAnchor struct {
 	query        uint64
 	moveRevision uint64
 	moving       bool
+	held         bool
 	position     dockPosition
 }
 
@@ -36,6 +37,10 @@ type dockQueryTimeoutMsg struct {
 
 type dockMoveTimeoutMsg struct {
 	revision uint64
+}
+
+type dockHoldMsg struct {
+	query uint64
 }
 
 type dockLandedMsg struct {
@@ -106,6 +111,7 @@ func (m *model) anchorDock() tea.Cmd {
 	if anchor.position.geometry.rows == 0 {
 		return nil
 	}
+	anchor.held = false
 	anchor.querying = true
 	anchor.query++
 	generation := anchor.query
@@ -120,7 +126,37 @@ func (m *model) dockBusy() bool {
 }
 
 func (m *model) dockBlocked(anchor *dockAnchor) bool {
-	return !anchor.needed || anchor.querying || anchor.moving || !m.out.started || m.dockBusy()
+	return !anchor.needed || anchor.querying || anchor.moving || !m.out.started || m.dockBusy() || m.dockHeld(anchor)
+}
+
+func (m *model) dockHeld(anchor *dockAnchor) bool {
+	return anchor.held && m.dockQueryCurrent(anchor)
+}
+
+func (m *model) dockQueryCurrent(anchor *dockAnchor) bool {
+	return anchor.position.settled == m.out.settleN && anchor.position.prints == anchor.prints
+}
+
+func (m *model) holdDockQuery(anchor *dockAnchor) {
+	anchor.held = m.dockQueryCurrent(anchor)
+}
+
+func (m *model) holdExpired(msg dockHoldMsg) {
+	anchor := m.anchorState()
+	if anchor.query == msg.query {
+		anchor.held = false
+	}
+}
+
+func (m *model) answerDock(cursor tea.CursorPositionMsg) tea.Cmd {
+	anchor := m.anchorState()
+	wasHeld := anchor.held
+	command := m.positionDock(cursor)
+	if !anchor.held || wasHeld {
+		return command
+	}
+	generation := anchor.query
+	return tea.Batch(command, tea.Tick(dockQueryTimeout, func(time.Time) tea.Msg { return dockHoldMsg{query: generation} }))
 }
 
 func (m *model) dockStateChanged(anchor *dockAnchor) bool {
@@ -152,10 +188,12 @@ func (m *model) positionDock(cursor tea.CursorPositionMsg) tea.Cmd {
 		return nil
 	}
 	if m.dockStateChanged(anchor) {
+		m.holdDockQuery(anchor)
 		return nil
 	}
 	position := anchor.position
 	if dockCursorOutside(cursor, position, m.screen.height) {
+		m.holdDockQuery(anchor)
 		return nil
 	}
 	distance := m.screen.height - position.geometry.rows + position.row - cursor.Y

@@ -133,6 +133,8 @@ The client MUST NOT print blank history rows to place the dock.
 A stale reply or a changed frame MUST NOT move the dock.
 The client MUST request plain cursor-position reports (`ESC[6n`).
 After a committed print, the client MUST reject row-one reports and request the position again.
+After the client rejects a reply that is not a row-one report, it MUST wait one second before it requests the position again.
+A geometry change or a committed print MUST end that wait.
 After a committed print, the client MUST return the terminal cursor to the caret within 100 ms.
 A cursor query or dock move in flight MAY delay that return until it ends.
 Modified F3 key events MUST remain available to the composer.

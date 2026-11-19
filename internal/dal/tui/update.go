@@ -68,10 +68,10 @@ func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 	case tea.WindowSizeMsg:
 		m.resizeTerminal(msg)
 	case tea.CursorPositionMsg:
-		return m.positionDock(msg), true
+		return m.answerDock(msg), true
 	case dockLandedMsg:
 		return m.caretLanded(msg), true
-	case dockQueryTimeoutMsg, dockMoveTimeoutMsg, dockWrittenMsg:
+	case dockQueryTimeoutMsg, dockMoveTimeoutMsg, dockHoldMsg, dockWrittenMsg:
 		m.updateDockEvent(msg)
 	case tea.FocusMsg, tea.BlurMsg:
 		m.applyFocus(msg)
@@ -101,6 +101,8 @@ func (m *model) updateDockEvent(msg tea.Msg) {
 		m.queryExpired(msg)
 	case dockMoveTimeoutMsg:
 		m.moveExpired(msg)
+	case dockHoldMsg:
+		m.holdExpired(msg)
 	case dockWrittenMsg:
 		anchor := m.anchorState()
 		if anchor.moveRevision == msg.revision {
