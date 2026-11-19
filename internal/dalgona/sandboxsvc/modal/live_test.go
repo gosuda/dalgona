@@ -19,7 +19,7 @@ func TestLiveVolumeSurvivesSandboxReplacement(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Minute)
 	defer cancel()
-	service, err := NewFromEnv(nil)
+	service, err := NewFromEnvCtx(ctx, nil)
 	requireModal(t, err)
 	name := fmt.Sprintf("dalgona-live-%d", time.Now().UnixNano())
 	id, err := service.Create(ctx, sandboxsvc.Spec{Name: name})

@@ -130,34 +130,43 @@ func (b *Binder) confirm(prompt string) (bool, error) {
 }
 
 func (b *Binder) service(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error) {
-	b.mu.Lock()
-	if svc, ok := b.services[spec]; ok {
-		b.mu.Unlock()
-		return svc, nil
-	}
-	if call, ok := b.calls[spec]; ok {
-		b.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.svc, call.err
-		case <-ctx.Done():
-			return nil, fmt.Errorf("remote: wait for %s service: %w", spec.Service, ctx.Err())
+	for {
+		b.mu.Lock()
+		if svc, ok := b.services[spec]; ok {
+			b.mu.Unlock()
+			return svc, nil
 		}
-	}
-	call := &serviceCall{done: make(chan struct{})}
-	b.calls[spec] = call
-	b.mu.Unlock()
+		if call, ok := b.calls[spec]; ok {
+			b.mu.Unlock()
+			select {
+			case <-call.done:
+				if ctx.Err() == nil && isBuildCancelled(call.err) {
+					continue
+				}
+				return call.svc, call.err
+			case <-ctx.Done():
+				return nil, fmt.Errorf("remote: wait for %s service: %w", spec.Service, ctx.Err())
+			}
+		}
+		call := &serviceCall{done: make(chan struct{})}
+		b.calls[spec] = call
+		b.mu.Unlock()
 
-	call.svc, call.err = b.newSvc(ctx, spec)
+		call.svc, call.err = b.newSvc(ctx, spec)
 
-	b.mu.Lock()
-	if call.err == nil {
-		b.services[spec] = call.svc
+		b.mu.Lock()
+		if call.err == nil {
+			b.services[spec] = call.svc
+		}
+		delete(b.calls, spec)
+		close(call.done)
+		b.mu.Unlock()
+		return call.svc, call.err
 	}
-	delete(b.calls, spec)
-	close(call.done)
-	b.mu.Unlock()
-	return call.svc, call.err
+}
+
+func isBuildCancelled(err error) bool {
+	return err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 func (b *Binder) defaultService(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error) {

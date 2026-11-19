@@ -20,14 +20,6 @@ type sdkAPI struct {
 
 var ErrInitCancelled = errors.New("modal: client initialization cancelled")
 
-func NewFromEnv(bootstrap runner.BootstrapFunc) (*Service, error) {
-	return NewFromEnvWithImage(defaultImage, bootstrap)
-}
-
-func NewFromEnvWithImage(image string, bootstrap runner.BootstrapFunc) (*Service, error) {
-	return NewFromEnvWithImageCtx(context.Background(), image, bootstrap)
-}
-
 func NewFromEnvCtx(ctx context.Context, bootstrap runner.BootstrapFunc) (*Service, error) {
 	return NewFromEnvWithImageCtx(ctx, defaultImage, bootstrap)
 }

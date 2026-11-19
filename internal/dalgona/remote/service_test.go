@@ -141,3 +141,26 @@ func TestServiceConstructionDoesNotBlockOtherSpecs(t *testing.T) {
 		t.Fatalf("slow service error = %v, want context.Canceled", got.err)
 	}
 }
+
+func TestServiceCancelledBuilderDoesNotPoisonWaiter(t *testing.T) {
+	b, svc := blockingBinder()
+	slow := config.RunnerSpec{Service: "slow"}
+	builderCtx, cancel := context.WithCancel(t.Context())
+	first := bindAsync(builderCtx, b, slow)
+	<-svc.entered
+	second := bindAsync(t.Context(), b, slow)
+	select {
+	case got := <-second:
+		t.Fatalf("second waiter returned (%v, %v) before the builder was cancelled", got.svc, got.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	if got := requireOutcome(t, first, "cancelled builder"); !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("cancelled builder error = %v, want context.Canceled", got.err)
+	}
+	close(svc.release)
+	requireShared(t, requireOutcome(t, second, "surviving waiter"), svc.fast, "surviving waiter")
+	if got := svc.constructed(); got != 2 {
+		t.Fatalf("constructed %d services, want 2", got)
+	}
+}
