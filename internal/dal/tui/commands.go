@@ -611,11 +611,12 @@ func resultLabel(op string) string {
 }
 
 func (m *model) restoreComposer(text string) {
+	verbatim := strings.HasPrefix(strings.TrimSpace(text), "/")
 	current := m.input.composer.Expanded()
 	if current != "" {
 		text += "\n" + current
 	}
-	m.input.composer.SetValue(text)
+	m.input.composer.recall(text, verbatim)
 }
 
 func (m *model) applyKeywords(value any) tea.Cmd {

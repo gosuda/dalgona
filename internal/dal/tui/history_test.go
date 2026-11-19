@@ -732,6 +732,114 @@ func TestFailedChipFollowupReturnsToTheQueueWithItsPasteIntent(t *testing.T) {
 	}
 }
 
+type refusedSteers struct{ fakeCaller }
+
+func (c *refusedSteers) Call(ctx context.Context, method string, params, result any) error {
+	err := c.fakeCaller.Call(ctx, method, params, result)
+	if method == "turn/steer" {
+		return errors.New("closed")
+	}
+	return err
+}
+
+func assertComposerValue(t *testing.T, composer editor, want string) {
+	t.Helper()
+	if got := composer.Value(); got != want {
+		t.Fatalf("composer holds %q, want the returned text %q", got, want)
+	}
+}
+
+func readyModel(t *testing.T, caller caller) model {
+	t.Helper()
+	m := newTestModel(caller, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.thread.id = "t1"
+	return m
+}
+
+var failedSendDrafts = []struct {
+	name string
+	fill func(*testing.T, model) model
+	sent string
+}{
+	{name: "double slash paste", fill: pasteInto(slashPastes[0].text), sent: slashPastes[0].text},
+	{name: "command paste with a word", fill: pasteInto(slashPastes[1].text), sent: slashPastes[1].text},
+	{name: "bare command paste", fill: pasteInto(slashPastes[2].text), sent: slashPastes[2].text},
+	{name: "typed double slash", fill: func(t *testing.T, m model) model { return typeText(t, m, "//new now") }, sent: "/new now"},
+	{name: "plain text", fill: func(t *testing.T, m model) model { return typeText(t, m, "plain text") }, sent: "plain text"},
+}
+
+func pasteInto(pasted string) func(*testing.T, model) model {
+	return func(t *testing.T, m model) model {
+		t.Helper()
+		m, _ = drive(t, m, tea.PasteMsg{Content: pasted})
+		return m
+	}
+}
+
+func TestFailedSendReturnsItsTextToTheComposerSentUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, draft := range failedSendDrafts {
+		t.Run(draft.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(refusedStarts)
+			m := draft.fill(t, readyModel(t, caller))
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the draft")
+			if m.thread.state != stateFailed {
+				t.Fatalf("state = %q after the refused send, want failed", m.thread.state)
+			}
+			assertComposerValue(t, m.input.composer, draft.sent)
+			m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the returned text; notice: "+m.notice)
+			if m.confirm != nil {
+				t.Fatalf("Enter on the returned text opened %#v, want the prompt sent", m.confirm)
+			}
+			assertLastCallText(t, &caller.fakeCaller, 2, "turn/start", draft.sent)
+		})
+	}
+}
+
+func TestFailedSteerReturnsItsTextToTheComposerSentUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, draft := range failedSendDrafts {
+		t.Run(draft.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(refusedSteers)
+			m := readyModel(t, caller)
+			m.thread.turnID = "turn-1"
+			m.thread.state = stateRunning
+			m = draft.fill(t, m)
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not steer with the draft")
+			assertComposerValue(t, m.input.composer, draft.sent)
+			m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not steer with the returned text; notice: "+m.notice)
+			if m.confirm != nil {
+				t.Fatalf("Enter on the returned text opened %#v, want the steer sent", m.confirm)
+			}
+			assertLastCallText(t, &caller.fakeCaller, 2, "turn/steer", draft.sent)
+		})
+	}
+}
+
+func TestFailedSendReturnsAheadOfANewerDraftAndStaysSentUnchanged(t *testing.T) {
+	t.Parallel()
+	caller := new(refusedStarts)
+	m := pasteInto(slashPastes[1].text)(t, readyModel(t, caller))
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = typeText(t, m, "more")
+	m = runCommand(t, m, command, "Enter did not send the draft")
+	want := slashPastes[1].text + "\nmore"
+	assertComposerValue(t, m.input.composer, want)
+	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = runCommand(t, m, command, "Enter did not send the returned text; notice: "+m.notice)
+	if m.confirm != nil {
+		t.Fatalf("Enter on the returned text opened %#v, want the prompt sent", m.confirm)
+	}
+	assertLastCallText(t, &caller.fakeCaller, 2, "turn/start", want)
+}
+
 func TestSavedDraftRecordsTheIntentOfItsDraft(t *testing.T) {
 	t.Parallel()
 	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +11 lines]", text: "// a\nb"}}}
