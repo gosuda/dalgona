@@ -31,7 +31,7 @@ type shortQuestion struct {
 
 func (c shortQuestion) check(t *testing.T, lines []string) {
 	t.Helper()
-	c.checkCard(t, checkShortDock(t, lines, "┌ Question 1 of", c.panel, c.live, c.band))
+	c.checkCard(t, checkShortDock(t, lines, "┌ Question 1 of", shortDock{panel: c.panel, live: c.live, band: c.band}))
 }
 
 func (c shortQuestion) checkCard(t *testing.T, card string) {

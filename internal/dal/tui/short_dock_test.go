@@ -5,20 +5,27 @@ import (
 	"testing"
 )
 
-func shortDockRows(panel int, live, band bool) int {
-	rows := 1 + panel
-	if live {
+type shortDock struct {
+	panel int
+	live  bool
+	band  bool
+}
+
+func (d shortDock) rows() int {
+	rows := 1 + d.panel
+	if d.live {
 		rows++
 	}
-	if band {
+	if d.band {
 		rows++
 	}
 	return rows
 }
 
-func checkShortDock(t *testing.T, lines []string, title string, panel int, live, band bool) string {
+func checkShortDock(t *testing.T, lines []string, title string, dock shortDock) string {
 	t.Helper()
-	if want := shortDockRows(panel, live, band); len(lines) != want {
+	panel, live, band := dock.panel, dock.live, dock.band
+	if want := dock.rows(); len(lines) != want {
 		t.Fatalf("dock has %d rows, want %d:\n%s", len(lines), want, strings.Join(lines, "\n"))
 	}
 	if !strings.HasPrefix(lines[0], "›") {
