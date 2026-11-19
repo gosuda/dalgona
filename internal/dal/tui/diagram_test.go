@@ -118,6 +118,20 @@ func captureTerminal(t *testing.T, run func()) string {
 	return out
 }
 
+func requireSilentRender(t *testing.T, kind, source string, fails bool) {
+	t.Helper()
+	var err error
+	out := captureTerminal(t, func() {
+		_, err = renderDiagram(kind, source)
+	})
+	if (err != nil) != fails {
+		t.Fatalf("%s render error = %v, want failure %v", kind, err, fails)
+	}
+	if out != "" {
+		t.Fatalf("%s render wrote %d bytes to the terminal:\n%s", kind, len(out), out)
+	}
+}
+
 func TestD2RenderWritesNothingToStdout(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
@@ -136,16 +150,27 @@ func TestD2RenderWritesNothingToStdout(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			var err error
-			out := captureTerminal(t, func() {
-				_, err = renderDiagram("d2", c.source)
-			})
-			if (err != nil) != c.fails {
-				t.Fatalf("render error = %v, want failure %v", err, c.fails)
-			}
-			if out != "" {
-				t.Fatalf("d2 render wrote %d bytes to the terminal:\n%s", len(out), out)
-			}
+			requireSilentRender(t, "d2", c.source, c.fails)
+		})
+	}
+}
+
+func TestMermaidAndNomnomlRenderWriteNothingToTerminal(t *testing.T) {
+	diagramMu.Lock()
+	defer diagramMu.Unlock()
+	cases := []struct {
+		name   string
+		kind   string
+		source string
+		fails  bool
+	}{
+		{"mermaid", "mermaid", "graph LR\n  a --> b\n", false},
+		{"nomnoml", "nomnoml", "[A]->[B]\n", false},
+		{"nomnoml parse error", "nomnoml", "[A\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			requireSilentRender(t, c.kind, c.source, c.fails)
 		})
 	}
 }
