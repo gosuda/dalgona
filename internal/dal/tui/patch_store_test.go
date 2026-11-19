@@ -95,3 +95,41 @@ func TestPatchStoreDropsUnclaimedPatchesOnThreadSwitch(t *testing.T) {
 		t.Fatal("thread switch dropped the patch that an open approval shows")
 	}
 }
+
+func openChildApproval(t *testing.T, m model, itemID string) model {
+	t.Helper()
+	params := fmt.Sprintf(`{"threadId":"child","turnId":"turn-2","itemId":%q,"startedAtMs":1,"reason":"edit a.go"}`, itemID)
+	return rawUpdate(t, m, serverRequestMsg{method: "item/fileChange/requestApproval", params: []byte(params), answer: make(chan requestAnswer, 1)})
+}
+
+func TestPatchStoreKeysPatchesByThreadAndItem(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m.thread.id = "t1"
+	m = patchUpdate(t, m, "t1", "fc1")
+	m = patchUpdate(t, m, "child", "fc1")
+	m = openChildApproval(t, m, "fc1")
+	m = fileChangeCompleted(t, m, "t1", "fc1")
+	if _, ok := m.live.patches[patchKey{"t1", "fc1"}]; ok {
+		t.Fatal("item/completed kept the patch of a thread without an approval because another thread has one open for the same item id")
+	}
+	if _, ok := m.live.patches[patchKey{"child", "fc1"}]; !ok {
+		t.Fatal("item/completed of another thread dropped the patch that an open approval shows")
+	}
+}
+
+func TestPatchStoreDropsUnclaimedPatchOfASharedItemIdOnThreadSwitch(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m.thread.id = "t1"
+	m = patchUpdate(t, m, "t1", "fc1")
+	m = patchUpdate(t, m, "child", "fc1")
+	m = openChildApproval(t, m, "fc1")
+	m = rawUpdate(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Thread: rpc.Thread{ID: "t2"}}})
+	if _, ok := m.live.patches[patchKey{"t1", "fc1"}]; ok {
+		t.Fatal("thread switch kept the patch of a thread without an approval because another thread has one open for the same item id")
+	}
+	if _, ok := m.live.patches[patchKey{"child", "fc1"}]; !ok {
+		t.Fatal("thread switch dropped the patch that an open approval shows")
+	}
+}
