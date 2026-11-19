@@ -194,7 +194,7 @@ dalgona doctor
 # ok plugins: 0 loaded
 ```
 
-Each check prints one `ok`, `warn`, or `fail` row. `--online` adds one model-list request per provider with a credential. See the [doctor contract](docs/dalgona/spec/doctor.md) for the full row list.
+Each check prints one `ok`, `warn`, or `fail` row. `--online` adds one model-list request per provider with a credential that has a model list to read; a credentialed provider with no model list gives a `warn` row and no request. See the [doctor contract](docs/dalgona/spec/doctor.md) for the full row list.
 
 ### Use an outer sandbox
 
@@ -252,7 +252,7 @@ Dalgona also accepts `--remote <name>` to select a configured remote instead of 
 | `dalgona bridge` | Connect standard input and output to the local daemon, starting it if needed. |
 | `dalgona mcp login <name>` | Sign in to an OAuth MCP server and store its token. |
 | `dalgona failures reporting on\|off\|login` | Consent to, disable, or authorize automatic failure reports. |
-| `dalgona doctor [--online]` | Print one `ok`, `warn` or `fail` row for each setup check. `--online` adds one model-list request for each provider with a credential. |
+| `dalgona doctor [--online]` | Print one `ok`, `warn` or `fail` row for each setup check. `--online` adds one model-list request for each provider with a credential that has a model list to read. |
 
 Workflow arguments use JSON when the value is valid JSON. Other values become strings.
 
