@@ -385,9 +385,9 @@ Report observed outcome, not intended outcome. The new profiles do not yet emit 
 nothing written. `write_error/complete` means effects installed but success/durability
 failed, for example a directory-sync failure after renames. `partial` lists every
 affected path and verified before/after state. Unknown state requires indeterminate.
-A sha re-read after rollback decides every path state. On the local runner, the
-re-read MUST NOT block on a named pipe or a device. On the local runner, the re-read
-MUST accept only a regular file. On the local runner, a path that holds anything
+A sha re-read after rollback decides every path state. On a Unix host, the
+re-read MUST NOT block on a named pipe or a device. On a Unix host, the re-read
+MUST accept only a regular file. On a Unix host, a path that holds anything
 else MUST report `unknown`.
 
 Do not publish executable references or Chain edges before commit and its required
