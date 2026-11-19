@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
@@ -157,8 +158,7 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 	case shellResultMsg:
 		m.applyShell(msg)
 	case disconnectedMsg:
-		m.setState(stateDisconnected)
-		m.errorf("connection lost: %v; restart the TUI, then %s", msg.err, m.resumeHint())
+		m.loseConnection(msg.err)
 	case imageMsg:
 		m.applyImage(msg)
 	}
@@ -333,6 +333,10 @@ func (m *model) recallNewer() bool {
 }
 
 func (m *model) escape() tea.Cmd {
+	if m.thread.state == stateDisconnected {
+		m.errorf("%s", m.conn.lost)
+		return nil
+	}
 	if !m.turnLive() {
 		if m.thread.state == stateIdle {
 			return m.idleEscape()
@@ -344,6 +348,15 @@ func (m *model) escape() tea.Cmd {
 		return m.interrupt()
 	}
 	return m.setHint("Esc again to interrupt", "interrupt")
+}
+
+func (m *model) loseConnection(cause error) {
+	m.setState(stateDisconnected)
+	m.conn.lost = fmt.Sprintf("connection lost: %v; restart the TUI, then %s", cause, m.resumeHint())
+	m.live.retryUntil = time.Time{}
+	m.clearHint()
+	m.abandonApprovals(fmt.Errorf("connection lost: %w", cause))
+	m.errorf("%s", m.conn.lost)
 }
 
 func (m *model) idleEscape() tea.Cmd {

@@ -96,6 +96,7 @@ type connInfo struct {
 	product        string
 	version        string
 	platformFamily string
+	lost           string
 }
 
 type threadInfo struct {

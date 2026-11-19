@@ -400,7 +400,7 @@ Ctrl+O opens the full review of the card, with the same lines and the full diff.
 
 When another window settles a request, the TUI MUST remove the card. It MUST show `Approval answered in another window` for `answered`, `Approval dismissed in another window` for `cancelled`, and `Approval closed: the turn was interrupted` for `interrupted`. Any other resolution MUST show `Approval closed: the agent continues without an answer`.
 
-The keys answer `accept`, `acceptForSession`, and `decline`. `n` declines at once, and the response carries no reason. Esc answers `cancel` and interrupts the turn. Each request MUST block until a key answers it, the TUI exits, or the RPC context ends. A new request MUST NOT replace one that waits. Other server requests MUST fail with an error.
+The keys answer `accept`, `acceptForSession`, and `decline`. `n` declines at once, and the response carries no reason. Esc answers `cancel` and interrupts the turn. Each request MUST block until a key answers it, the TUI exits, the connection is lost, or the RPC context ends. A new request MUST NOT replace one that waits. Other server requests MUST fail with an error.
 
 A server request whose parameters do not decode MUST receive an error answer. The TUI MUST show `approval request failed: <cause>; reconnect and retry the turn`.
 
@@ -469,6 +469,9 @@ Every error notice MUST name a recovery action.
 - A prompt sent before a thread exists stays in the composer with `thread is not ready; wait for startup or use /new to retry`.
 - A failed keyword list MUST NOT block prompting.
 - An interrupt result for an earlier turn MUST NOT change the current state.
+- A lost connection MUST end a rate-limit wait and MUST clear a pending key hint. It MUST keep the follow-up queue and the composer draft.
+- A lost connection MUST close every open approval and question card. It MUST answer each open request with an error.
+- Esc in `disconnected` MUST show the `connection lost` notice again. It MUST NOT send `turn/interrupt`.
 
 ## Untrusted text
 
@@ -571,7 +574,7 @@ The live dot MUST alternate between U+25AA and U+25AB every 500 milliseconds.
 With `DAL_NO_MOTION` set to a non-empty value, the client MUST keep the dot on U+25AA and MUST tick once a second.
 The elapsed time MUST update once a second, also with `DAL_NO_MOTION` set.
 A rate-limit wait MUST show `rate limited · retrying in <m>m <ss>s · esc stops`, updated each second.
-The countdown MUST clamp at `0m 00s`, and only the matching zero report or the end of the turn MUST close the wait.
+The countdown MUST clamp at `0m 00s`. Only the matching zero report, the end of the turn, or a lost connection MUST close the wait.
 Elapsed text MUST keep its cells, so a change of value moves no other field.
 
 The elapsed time MUST show `<n> ms` under one second, `<s>s` under one minute, `<m>m <ss>s` under one hour, and `<h>h <mm>m` from one hour. Above 99 hours and 59 minutes it MUST show `99h 59m`.
@@ -608,7 +611,7 @@ The preview shows the description and the first line of the preview of the optio
 
 The `s submit` hint carries the one fill of the view, in the thread hue. Before the terminal reports its background, the fill MUST use the night theme, or the soft night theme for `auto-soft`. With colour off, it MUST be bold reverse video with no colour.
 
-A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<turnId>:<itemId>`. A question closed by another window writes no row.
+A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<turnId>:<itemId>`. A question closed by another window or by a lost connection writes no row.
 
 A question request that the TUI accepts MUST send a desktop notification `<product>: Waiting for your answer · <title>`, when notifications are on and the window is blurred.
 

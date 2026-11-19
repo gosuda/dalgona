@@ -102,6 +102,18 @@ func (m *model) dropApproval(index int) {
 	}
 }
 
+func (m *model) abandonApprovals(cause error) {
+	for len(m.approvals) > 0 {
+		open := m.approvals[0]
+		answer := open.answer
+		if open.card != nil {
+			answer = open.card.answer
+		}
+		answer <- requestAnswer{err: cause}
+		m.dropApproval(0)
+	}
+}
+
 var approvalDecisions = map[string]string{
 	"y":   "accept",
 	"a":   "acceptForSession",
