@@ -18,6 +18,8 @@ dal --version
 
 With no release tag, `@latest` resolves to the head of the default branch. Pin an exact build with `@<commit-hash>`.
 
+The commands land in the Go binary directory (`$(go env GOPATH)/bin`, or `$GOBIN` when set). If that directory is not on `PATH`, the install succeeds but `dal --version` fails; add it to `PATH` before continuing.
+
 Open the terminal interface from the directory you want the agent to work in:
 
 ```sh
