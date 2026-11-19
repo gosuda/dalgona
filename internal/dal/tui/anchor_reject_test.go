@@ -234,15 +234,15 @@ func TestFiftyRejectedRepliesQueryAtMostOncePerSecond(t *testing.T) {
 		run.send(resultMsg{op: "initialize", value: &rpc.InitializeResult{UserAgent: "dalgona/test", PlatformFamily: "unix"}})
 		run.send(commandDone("reject"))
 		run.waitFor(t, "row printed", func(h, s string) bool { return rowCount(h, s, "reject") == 1 })
-		time.Sleep((answered + 5) * dockQueryTimeout)
+		time.Sleep((answered + 5) * time.Second)
 		synctest.Wait()
 		asked := terminal.queries(run)
 		if len(asked) <= answered {
 			t.Fatalf("%d queries, want more than the %d answered ones", len(asked), answered)
 		}
 		for i := 1; i < len(asked); i++ {
-			if gap := asked[i].Sub(asked[i-1]); gap < dockQueryTimeout {
-				t.Fatalf("query %d left %v after query %d, want at least %v", i+1, gap, i, dockQueryTimeout)
+			if gap := asked[i].Sub(asked[i-1]); gap < time.Second {
+				t.Fatalf("query %d left %v after query %d, want at least one second", i+1, gap, i)
 			}
 		}
 	})

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/vt"
@@ -301,4 +302,40 @@ func TestDockMoveTimeoutIgnoresASupersededMove(t *testing.T) {
 			t.Fatal("the timeout of an earlier move released the move in flight")
 		}
 	})
+}
+
+func commandDelay(command tea.Cmd) time.Duration {
+	start := time.Now()
+	commandMsgs(command)
+	return time.Since(start)
+}
+
+func TestDockWaitsLastOneSecond(t *testing.T) {
+	t.Parallel()
+	for _, wait := range []struct {
+		name  string
+		start func(t *testing.T) tea.Cmd
+	}{
+		{name: "query expiry", start: func(*testing.T) tea.Cmd {
+			m := anchorTestModel()
+			return m.anchorDock()
+		}},
+		{name: "move release", start: func(t *testing.T) tea.Cmd {
+			m := anchorTestModel()
+			return armDockMove(t, &m)
+		}},
+		{name: "rejected reply hold", start: func(t *testing.T) tea.Cmd {
+			m := armedQuery(t)
+			return m.answerDock(rejectedReply(&m))
+		}},
+	} {
+		t.Run(wait.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				if got := commandDelay(wait.start(t)); got != time.Second {
+					t.Fatalf("%s lasts %v, want one second", wait.name, got)
+				}
+			})
+		})
+	}
 }

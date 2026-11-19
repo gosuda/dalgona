@@ -187,19 +187,19 @@ func TestQuitWaitsForCursorReply(t *testing.T) {
 		replied := make(chan struct{})
 		go func() {
 			defer close(replied)
-			time.Sleep(dockQueryTimeout * 3 / 10)
+			time.Sleep(300 * time.Millisecond)
 			_, _ = em.InputPipe().Write([]byte(lateCursorReply))
 		}()
 		run.send(press('c', tea.ModCtrl, ""))
 		run.send(press('c', tea.ModCtrl, ""))
-		time.Sleep(dockQueryTimeout / 10)
+		time.Sleep(100 * time.Millisecond)
 		synctest.Wait()
 		select {
 		case <-run.done:
 			t.Fatal("the program returned before the terminal answered the cursor query")
 		default:
 		}
-		time.Sleep(dockQueryTimeout / 2)
+		time.Sleep(500 * time.Millisecond)
 		synctest.Wait()
 		select {
 		case <-run.done:
@@ -229,14 +229,14 @@ func TestQuitReturnsWhenTheTerminalNeverAnswersTheCursorQuery(t *testing.T) {
 		})
 		run.send(press('c', tea.ModCtrl, ""))
 		run.send(press('c', tea.ModCtrl, ""))
-		time.Sleep(dockQueryTimeout / 2)
+		time.Sleep(900 * time.Millisecond)
 		synctest.Wait()
 		select {
 		case <-run.done:
 			t.Fatal("the program returned before the cursor query expired")
 		default:
 		}
-		time.Sleep(dockQueryTimeout)
+		time.Sleep(150 * time.Millisecond)
 		synctest.Wait()
 		select {
 		case <-run.done:

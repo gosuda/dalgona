@@ -352,12 +352,12 @@ func TestQuitReturnsAfterFailedDockWrite(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		_, run, failedAt := startWithFailedDockMove(t, 40, 12)
 		defer run.stop()
-		time.Sleep(dockQueryTimeout / 2)
+		time.Sleep(500 * time.Millisecond)
 		synctest.Wait()
 		asked := time.Now()
 		run.send(press('c', tea.ModCtrl, ""))
 		run.send(press('c', tea.ModCtrl, ""))
-		time.Sleep(dockQueryTimeout)
+		time.Sleep(time.Second)
 		synctest.Wait()
 		select {
 		case <-run.done:
@@ -368,13 +368,43 @@ func TestQuitReturnsAfterFailedDockWrite(t *testing.T) {
 	})
 }
 
+func TestQuitWaitsForAnUnacknowledgedDockMoveForOneSecond(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		_, run, _ := startWithFailedDockMove(t, 40, 12)
+		defer drainHint()
+		defer run.stop()
+		time.Sleep(800 * time.Millisecond)
+		synctest.Wait()
+		if !run.read(func(m model) any { return m.anchorState().moving }).(bool) {
+			t.Fatal("the dock move was released before one second passed")
+		}
+		run.send(press('c', tea.ModCtrl, ""))
+		run.send(press('c', tea.ModCtrl, ""))
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		select {
+		case <-run.done:
+			t.Fatal("the program returned before the unacknowledged dock move expired")
+		default:
+		}
+		time.Sleep(200 * time.Millisecond)
+		synctest.Wait()
+		select {
+		case <-run.done:
+		default:
+			t.Fatal("the program still runs after the unacknowledged dock move should have expired")
+		}
+	})
+}
+
 func TestDockReachesBottomAfterFailedDockWrite(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		const width, height = 40, 12
 		em, run, _ := startWithFailedDockMove(t, width, height)
 		defer run.stop()
-		time.Sleep(3 * dockQueryTimeout)
+		time.Sleep(3 * time.Second)
 		synctest.Wait()
 		bandAtBottom(t, run, em, height, "a dock write that failed once")
 		assertNoScreenReset(t, run)
