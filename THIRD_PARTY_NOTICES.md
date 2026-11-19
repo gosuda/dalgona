@@ -294,7 +294,7 @@ FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ## svelte runtime (MIT)
 
-The embedded web build ships the `svelte` 5.57.3 runtime. Its licence text follows.
+The embedded web build ships the `svelte` 5.58.0 runtime. Its licence text follows.
 
 ```text
 Copyright (c) 2016-2025 [Svelte Contributors](https://github.com/sveltejs/svelte/graphs/contributors)
