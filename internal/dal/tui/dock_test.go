@@ -132,7 +132,7 @@ func TestStatusRowFieldsKeepCellsWhenThePlanAdvances(t *testing.T) {
 				now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 				m := liveModel(t, &now)
 				m.screen.width = width
-				m.queue = []string{"next"}
+				m.queue = []followup{{text: "next"}}
 				m.live.plan = planOf(pair[0], pair[1])
 				before := stripANSI(m.liveRow())
 				m.live.plan = planOf(pair[2], pair[3])

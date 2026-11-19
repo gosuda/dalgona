@@ -36,8 +36,7 @@ type shortCard struct {
 
 func (c shortCard) check(t *testing.T, lines []string) {
 	t.Helper()
-	shortDock{panel: c.panel, live: c.live, band: c.band}.check(t, lines, "┌ Approval")
-	c.checkCard(t, strings.Join(lines[1:1+c.panel], "\n"))
+	c.checkCard(t, checkShortDock(t, lines, "┌ Approval", shortDock{panel: c.panel, live: c.live, band: c.band}))
 }
 
 func (c shortCard) checkCard(t *testing.T, card string) {

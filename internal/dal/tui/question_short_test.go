@@ -31,8 +31,7 @@ type shortQuestion struct {
 
 func (c shortQuestion) check(t *testing.T, lines []string) {
 	t.Helper()
-	shortDock{panel: c.panel, live: c.live, band: c.band}.check(t, lines, "┌ Question 1 of")
-	c.checkCard(t, strings.Join(lines[1:1+c.panel], "\n"))
+	c.checkCard(t, checkShortDock(t, lines, "┌ Question 1 of", shortDock{panel: c.panel, live: c.live, band: c.band}))
 }
 
 func (c shortQuestion) checkCard(t *testing.T, card string) {
@@ -79,10 +78,22 @@ func TestQuestionCardNeedsFourRows(t *testing.T) {
 	}
 }
 
-func scrollKeepsShortQuestionFrame(t *testing.T, keys []tea.KeyPressMsg, width, height int) {
+type questionTab struct {
+	name string
+	keys []tea.KeyPressMsg
+}
+
+var questionTabs = []questionTab{
+	{"single", nil},
+	{"multi", []tea.KeyPressMsg{press(tea.KeyTab, 0, "")}},
+	{"review", []tea.KeyPressMsg{press(tea.KeyTab, 0, ""), press(tea.KeyTab, 0, "")}},
+	{"typing", []tea.KeyPressMsg{press('3', 0, "3")}},
+}
+
+func checkQuestionFrames(t *testing.T, tab questionTab, width, height int) {
 	t.Helper()
 	m := shortQuestionModel(t, width, height)
-	for _, key := range keys {
+	for _, key := range tab.keys {
 		m, _ = drive(t, m, key)
 	}
 	before := len(m.dockLines())
@@ -96,21 +107,12 @@ func scrollKeepsShortQuestionFrame(t *testing.T, keys []tea.KeyPressMsg, width, 
 
 func TestQuestionCardFramesAtShortHeights(t *testing.T) {
 	t.Parallel()
-	tabs := []struct {
-		name string
-		keys []tea.KeyPressMsg
-	}{
-		{"single", nil},
-		{"multi", []tea.KeyPressMsg{press(tea.KeyTab, 0, "")}},
-		{"review", []tea.KeyPressMsg{press(tea.KeyTab, 0, ""), press(tea.KeyTab, 0, "")}},
-		{"typing", []tea.KeyPressMsg{press('3', 0, "3")}},
-	}
-	for _, tab := range tabs {
+	for _, tab := range questionTabs {
 		for height := 4; height <= 9; height++ {
 			for _, width := range []int{20, 40, 100} {
 				t.Run(fmt.Sprintf("%s %dx%d", tab.name, width, height), func(t *testing.T) {
 					t.Parallel()
-					scrollKeepsShortQuestionFrame(t, tab.keys, width, height)
+					checkQuestionFrames(t, tab, width, height)
 				})
 			}
 		}

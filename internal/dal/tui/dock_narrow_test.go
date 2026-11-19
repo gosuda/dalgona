@@ -205,7 +205,7 @@ func TestLiveRowDropsQueuedThenPlanThenCallsInANarrowWindow(t *testing.T) {
 				m.live.items = append(m.live.items, liveItem{ID: fmt.Sprintf("c%d", i), Type: "commandExecution", Command: "x", Status: "inProgress"})
 			}
 			m.live.plan = decoderPlan()
-			m.queue = []string{"next"}
+			m.queue = []followup{{text: "next"}}
 			got := stripANSI(m.liveRow())
 			assertFrame(t, m.dockLines(), row.width, m.screen.height)
 			for _, field := range []string{"3 run", "1/3 plan", "1 queued"} {
@@ -228,7 +228,7 @@ func TestLiveRowMessageCoversCountFieldsToKeepItsCells(t *testing.T) {
 			m := narrowRetryModel(t, row.width)
 			m.live.items = []liveItem{{ID: "c1", Type: "commandExecution", Command: "x", Status: "inProgress"}}
 			m.live.plan = decoderPlan()
-			m.queue = []string{"next"}
+			m.queue = []followup{{text: "next"}}
 			requireLiveRow(t, m, row.want)
 		})
 	}
