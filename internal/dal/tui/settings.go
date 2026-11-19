@@ -278,10 +278,10 @@ func (m *model) settingsFailed(msg resultMsg) bool {
 	m.saving = nil
 	text := sanitizeText(fmt.Sprintf("Could not save settings: %v", msg.err))
 	if m.settings == nil {
-		m.errorf("%s", text)
+		m.errorf("%s; run /settings and save again", text)
 		return true
 	}
-	m.settings.saveErr = text
+	m.settings.saveErr = text + "; press Enter to try again"
 	return true
 }
 

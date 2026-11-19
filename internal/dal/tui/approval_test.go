@@ -208,7 +208,7 @@ func TestApprovalScrollClampsAtEnd(t *testing.T) {
 			}
 			m = pressTimes(t, m, tea.KeyUp, 1)
 			rows = approvalBodyRows(m)
-			if len(rows) != tc.bodyRows || rows[0] != tc.afterUp || !strings.HasPrefix(rows[len(rows)-1], "↓ 2 more lines") {
+			if len(rows) != tc.bodyRows || rows[0] != tc.afterUp || rows[len(rows)-1] != "↓ 2 more lines · ctrl+o full view · ↑↓ scroll" {
 				t.Fatalf("after one up the body rows are %q, want %d rows from %s ending with the 2 more lines row", rows, tc.bodyRows, tc.afterUp)
 			}
 			m = pressTimes(t, m, tea.KeyDown, 1)
@@ -216,6 +216,21 @@ func TestApprovalScrollClampsAtEnd(t *testing.T) {
 				t.Fatalf("down after up shows %q first, want %s", rows[0], tc.atEnd)
 			}
 		})
+	}
+}
+
+func TestApprovalScrollStopsAtStart(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, tenLineApproval())
+	m = pressTimes(t, m, tea.KeyUp, 50)
+	if rows := approvalBodyRows(m); rows[0] != "$ row0" {
+		t.Fatalf("after 50 ups the body starts at %q, want $ row0", rows[0])
+	}
+	m = pressTimes(t, m, tea.KeyDown, 1)
+	if rows := approvalBodyRows(m); rows[0] != "row1" {
+		t.Fatalf("after one down the body starts at %q, want row1", rows[0])
 	}
 }
 

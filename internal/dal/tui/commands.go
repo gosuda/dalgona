@@ -350,7 +350,7 @@ func (m *model) applyPreludeResult(msg resultMsg) (tea.Cmd, bool) {
 		return nil, true
 	case strings.HasPrefix(msg.op, "advisor"):
 		return m.applyAdvisorResult(msg), true
-	case msg.op == "new" && msg.seq != 0 && msg.seq != m.pendingState().seq:
+	case (msg.op == "new" || msg.op == "fork") && msg.seq != 0 && msg.seq != m.pendingState().seq:
 		return nil, true
 	case msg.op == "initialize" && msg.err != nil:
 		flat := strings.Join(strings.Fields(msg.err.Error()), " ")
@@ -558,6 +558,7 @@ func (m *model) applyInterrupt(msg resultMsg) tea.Cmd {
 
 func (m *model) applyRewind(label string) {
 	if m.input.composer.Value() != "" {
+		m.noticef("Rewound; the editor holds a draft, so the prompt was not restored")
 		return
 	}
 	m.input.composer.SetValue(label)
@@ -736,7 +737,7 @@ func (m *model) replayHeld(held []notificationMsg) tea.Cmd {
 	for _, note := range held {
 		command, err := m.applyDecodedNotification(note)
 		if err != nil {
-			m.errorf("protocol error in %s: %v; reconnect with %s or use /new", note.method, err, m.resumeHint())
+			m.protocolError(note.method, err)
 			continue
 		}
 		cmds = append(cmds, command)

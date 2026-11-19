@@ -131,7 +131,22 @@ func isSubsequence(query, text string) bool {
 }
 
 func panelBodyRows(p panelView, rows int) int {
-	return max(rows-1-min(len(p.actions), max(rows-1, 0)), 0)
+	return max(rows-1-len(p.actions), 0)
+}
+
+func panelScrollStep(key string) int {
+	switch key {
+	case "up":
+		return -1
+	case "down":
+		return 1
+	}
+	return 0
+}
+
+func (s *screenState) scrolled(p panelView, step int) int {
+	last := max(len(p.body)-panelBodyRows(p, panelRows(p.layout, s.height)), 0)
+	return min(max(min(p.scroll, last)+step, 0), last)
 }
 
 func framePanel(s *screenState, p panelView, rows int) []string {
@@ -179,13 +194,13 @@ func bodyWindow(p panelView, rows int) (int, []string) {
 		return 0, nil
 	}
 	start, end := bodySpan(p, rows)
-	if end == len(p.body) {
+	if end == len(p.body) || rows == 1 {
 		return start, slices.Clone(p.body[start:end])
 	}
 	start, end = bodySpan(p, rows-1)
 	shown := slices.Clone(p.body[start:end])
 	if end < len(p.body) {
-		shown = append(shown, fmt.Sprintf("↓ %d more lines · ↑↓ scroll · ctrl+o full view", len(p.body)-end))
+		shown = append(shown, fmt.Sprintf("↓ %d more lines · ctrl+o full view · ↑↓ scroll", len(p.body)-end))
 	}
 	return start, shown
 }

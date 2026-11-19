@@ -69,7 +69,11 @@ func startTurn(t *testing.T, m model) model {
 }
 
 func busyNotice(name string) string {
-	return "/" + name + " is unavailable while a turn is working; wait for it to finish or interrupt it first"
+	label := "/" + name
+	if name == "rewind" {
+		label = name
+	}
+	return label + " is unavailable while a turn is working; wait for it to finish or interrupt it first"
 }
 
 func panelModel(t *testing.T, caller *fakeCaller) model {
@@ -98,13 +102,13 @@ func assertRefusedOnEnter(t *testing.T, m model, caller *fakeCaller, name string
 
 func TestConfirmRefusedWhenTurnStarted(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"new", "compact", "revert"} {
+	for _, name := range []string{"new", "compact", "revert", "rewind"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			caller := new(fakeCaller)
 			m := panelModel(t, caller)
-			if name == "revert" {
-				m, _ = drive(t, m, resultMsg{op: "revertTree", value: &rpc.ThreadTreeResponse{Turns: []rpc.TreeTurn{{TurnID: "turn-9", Preview: "work", Active: true}}}})
+			if name == "revert" || name == "rewind" {
+				m, _ = drive(t, m, resultMsg{op: name + "Tree", value: &rpc.ThreadTreeResponse{Turns: []rpc.TreeTurn{{TurnID: "turn-9", Preview: "work", Active: true}}}})
 				m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
 			} else if command := m.executeSlash(name, ""); command != nil {
 				t.Fatalf("/%s produced a command while idle", name)
@@ -131,6 +135,7 @@ func TestPickerRefusedWhenTurnStarted(t *testing.T) {
 		{name: "tree", op: "tree", view: turns},
 		{name: "fork", op: "forkTree", view: turns},
 		{name: "revert", op: "revertTree", view: turns},
+		{name: "rewind", op: "rewindTree", view: turns},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -142,6 +147,40 @@ func TestPickerRefusedWhenTurnStarted(t *testing.T) {
 			}
 			m = startTurn(t, m)
 			assertRefusedOnEnter(t, m, caller, test.name)
+		})
+	}
+}
+
+func TestReviewRefusedWhenTurnStarted(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		steps func(t *testing.T, m model) model
+	}{
+		{name: "uncommitted changes", steps: func(t *testing.T, m model) model { return m }},
+		{name: "base branch", steps: func(t *testing.T, m model) model {
+			m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+			m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+			return typeText(t, m, "main")
+		}},
+		{name: "custom instructions", steps: func(t *testing.T, m model) model {
+			m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+			m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+			m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+			m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+			return typeText(t, m, "look at the diff")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := panelModel(t, caller)
+			if command := m.executeSlash("review", ""); command != nil || m.list == nil || m.list.kind != "review" {
+				t.Fatal("/review must open the review panel without a request")
+			}
+			m = test.steps(t, m)
+			m = startTurn(t, m)
+			assertRefusedOnEnter(t, m, caller, "review")
 		})
 	}
 }

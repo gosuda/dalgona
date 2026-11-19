@@ -87,7 +87,9 @@ After it applies the snapshot, the client MUST replay those notifications in rec
 A superseded resume response or error MUST NOT change the client.
 A `thread/start` request MUST supersede an earlier `thread/resume` request.
 A `thread/resume` request MUST supersede an earlier `thread/start` request.
-A superseded `thread/start` result or error MUST NOT change the client.
+A `thread/fork` request MUST supersede an earlier `thread/resume` request.
+A `thread/resume` request MUST supersede an earlier `thread/fork` request.
+A superseded `thread/start` or `thread/fork` result or error MUST NOT change the client.
 If the buffer exceeds its limit, the resume MUST fail and keep the current thread.
 
 The setting `status_hide` lists items to hide. Its default is empty. The client MUST NOT hide `model`.
@@ -172,6 +174,7 @@ A reply that opens a list panel MUST be dropped when another panel or the review
 The input line MUST show the filter while a list panel is open.
 The input line MUST show the first line of the draft while another panel is open, with the caret at its end.
 A confirm panel MUST show its title, its body, and its action row. It MUST NOT send a request before Enter.
+A panel body that does not fit MUST end with the row `↓ <n> more lines · ctrl+o full view · ↑↓ scroll`, where `<n>` counts the body rows below the window. A panel with one body row MUST show that row and no such row.
 The review target input MUST show `branch:`, `commit:`, or `instructions:` as its label, and MUST hide the filter while it waits for text.
 
 The input line MUST show the mode of the top panel, as the table below gives.
@@ -221,8 +224,8 @@ A provider that signs in from a shell MUST show the command to run there, and MU
 The API key field MUST show one `*` for each rune. The key MUST NOT appear in a row, notice, history, or review.
 Enter on the API key field MUST send `account/login/start` with `type` `apiKey`. The panel MUST close when the provider accepts the key.
 A refused key MUST keep the field open with the error in the panel. Esc on the field MUST clear it and return to the methods.
-An approval request MUST NOT clear the API key field.
-A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. A device sign-in MUST show the user code in the first body row. The hint row MUST read `Esc cancel the sign-in · waiting for the provider`.
+An approval request MUST NOT clear the API key field. A question with option rows MUST NOT clear it. A free-text question MUST take the input line from the API key field. Closing that question MUST leave the field empty.
+A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. Up and Down MUST scroll the body by one row while the link does not fit. A window with no body row MUST show the link in the review that `ctrl+o` opens. A device sign-in MUST show the user code in the first body row. While the sign-in waits, the hint row MUST read `Esc cancel the sign-in · waiting for the provider`, cut to the row width.
 The client MUST print one history row `Sign-in URL: <url>` for each sign-in. The notice line MUST NOT repeat the link while the panel is open. A sign-in MUST wait for `account/login/completed`.
 Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in…`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
 A paste into the API key field MUST keep its first line and MUST NOT make a chip.
@@ -254,7 +257,7 @@ The client cannot see a failed write to the terminal. A write that fails is ther
 `ctrl+o` MUST open the review on the newest entry. The review MUST show the full text of an entry, not its cut form.
 The review MUST close only on `esc`, `q`, or `ctrl+o`. A quit or suspend key MUST close the review first.
 Rows that finish while the review is open MUST wait, and they MUST print after the review closes.
-The review header MUST show the count of waiting rows. The footer MUST name the scroll keys and the entry keys.
+In a window of three rows or more, the review header MUST show the count of waiting rows. In a window of four rows or more, the footer MUST name the scroll keys and the entry keys.
 The review MUST have at most the larger of one row and the window height minus one rows. The review MUST keep one body row.
 A window of fewer than four rows MUST drop the review footer. A window of fewer than three rows MUST drop the review header.
 The client MUST keep the last 1000 committed rows for the review and MUST drop the oldest first.
@@ -402,6 +405,8 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 
 While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, `/revert`, and `/review` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
 
+A panel that sends one of these requests MUST refuse it in the same way when a turn starts after the panel opened. The rewind list and its confirm MUST NOT send a request while a turn is working or waiting. They MUST show `rewind is unavailable while a turn is <word>; wait for it to finish or interrupt it first`.
+
 `turn/steer` sends `expectedTurnId` set to the active turn.
 
 When the queue holds 32 follow-ups, Alt+Enter MUST show `follow-up queue is full (32); wait for the active turn or press Esc`. After a follow-up is queued, the notice MUST show `queued follow-up <n> of 32`. An unknown slash command MUST stay in the editor and MUST show `unknown command /<name>; start with // to send it as a prompt`. After `/advisor reset`, the notice MUST show `advisor reset; it reviews the current branch at the next turn`.
@@ -410,7 +415,7 @@ A follow-up starts after `turn/completed` only when the turn ends idle. After an
 
 The interrupt notice MUST end when an interrupted turn ends.
 
-A confirmed rewind MUST return the turn's prompt to the composer only while the composer is empty. A draft that is not empty MUST stay as it is.
+A confirmed rewind MUST return the turn's prompt to the composer only while the composer is empty. A draft that is not empty MUST stay as it is. The notice MUST then read `Rewound; the editor holds a draft, so the prompt was not restored`.
 
 ## Approvals
 
@@ -497,6 +502,7 @@ Every error notice MUST name a recovery action.
 - An `error` notification with `willRetry: false` sets `failed` and shows `error: <message>; retry the turn, /resume <thread>, or /new`. With `willRetry: true`, the state is unchanged and the notice is `error: <message>; retrying the turn, no action needed`.
 - With no thread yet, `/resume <thread>` in these notices reads `/resume`.
 - An advisor command that fails with `-32001` shows `advisor unavailable: <message>; set [advisor] enabled = true in config.toml, then restart dalgona`. Any other advisor failure shows `advisor request failed: <cause>; retry the /advisor command`.
+- A failed settings save shows `Could not save settings: <cause>; press Enter to try again` in the open panel. After the panel closed, it shows `Could not save settings: <cause>; run /settings and save again`.
 - A failed `account/login/cancel` shows `cancel sign-in failed: <cause>; run /login again`. A start call that fails after Esc shows `Login failed: <cause>; run /login again`.
 - A failed `turn/start` or `turn/steer` returns its text to the composer ahead of any newer draft. A failed follow-up returns to the head of the queue. A failed `turn/start` sets `failed`. A failed steer keeps the turn state.
 - A prompt sent before a thread exists stays in the composer with `thread is not ready; wait for startup or use /new to retry`.

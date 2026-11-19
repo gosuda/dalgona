@@ -144,19 +144,11 @@ var approvalDecisions = map[string]string{
 }
 
 func (m *model) scrollApproval(key string) bool {
-	var step int
-	switch key {
-	case "up":
-		step = -1
-	case "down":
-		step = 1
-	default:
+	step := panelScrollStep(key)
+	if step == 0 {
 		return false
 	}
-	panel := m.approvalPanel()
-	last := max(len(panel.body)-panelBodyRows(panel, panelRows(panelApproval, m.screen.height)), 0)
-	open := &m.approvals[0]
-	open.scroll = min(max(min(open.scroll, last)+step, 0), last)
+	m.approvals[0].scroll = m.screen.scrolled(m.approvalPanel(), step)
 	return true
 }
 

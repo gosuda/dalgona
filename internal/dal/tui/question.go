@@ -639,7 +639,7 @@ func (m *model) applyQuestion(msg serverRequestMsg) tea.Cmd {
 		return nil
 	}
 	card := newQuestionCard(params, msg.answer)
-	if len(m.approvals) == 0 {
+	if len(m.approvals) == 0 && (card.typing || !m.loginTyping()) {
 		m.input.field = textField{}
 	}
 	m.approvals = append(m.approvals, approval{method: msg.method, requestID: msg.requestID, threadID: card.threadID, itemID: params.ItemID, card: card})

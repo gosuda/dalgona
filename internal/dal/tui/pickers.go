@@ -324,7 +324,7 @@ func (m *model) activateClosed(kind string, item listItem) tea.Cmd {
 		m.openRewind(item.id, item.label)
 	case "fork":
 		params := rpc.ThreadForkParams{ThreadID: m.thread.id, LastTurnID: item.id}
-		return m.call("fork", "thread/fork", params, new(rpc.ThreadForkResponse), "")
+		return m.callSeq(m.resetPendingResume(""), "fork", "thread/fork", params, new(rpc.ThreadForkResponse))
 	}
 	return nil
 }
