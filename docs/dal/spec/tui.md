@@ -316,8 +316,9 @@ Sending MUST replace each chip with its full pasted text, in order.
 The history MUST store each prompt, and each draft that Ctrl+C saves, with each chip that holds text replaced by its full text.
 A prompt recalled from the history MUST be plain text. It MUST NOT become a chip.
 A recalled prompt whose draft began with a chip MUST be sent unchanged until the user edits its text.
-A queued follow-up whose draft began with a chip MUST be sent unchanged from the history, after Alt+Up, and after a failed start.
-A draft that Ctrl+C saves and that repeats the last entry MUST replace whether the history sends that entry unchanged.
+A queued follow-up whose draft began with a chip MUST be sent unchanged after Alt+Up and a failed start, until the user edits its text.
+A typed follow-up MUST return after Alt+Up and a failed start as typed text, which the slash rule reads.
+A draft that Ctrl+C saves MUST decide whether the history sends the entry it repeats unchanged, unless that entry is a sent message.
 A user message that starts with `/` MUST be sent unchanged from the history until the user edits its text, live or resumed.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB MUST be refused with a notice that names the limit.

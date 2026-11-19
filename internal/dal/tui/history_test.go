@@ -493,6 +493,58 @@ func TestEchoOfTheLastPromptKeepsTheRecallPosition(t *testing.T) {
 	}
 }
 
+func TestSavedDraftThatRepeatsASentMessageKeepsItSentUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, recall := range historyRecalls {
+		t.Run(recall.name, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := pastedDraftModel(t, caller, slashPastes[1].text)
+			m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the chip draft")
+			echo := fmt.Appendf(nil, `{"threadId":"t1","item":{"id":"u1","type":"userMessage","text":%q}}`, slashPastes[1].text)
+			m, _ = drive(t, m, notificationMsg{method: "item/completed", params: echo})
+			m.thread.state = stateIdle
+			m = recall.run(t, m)
+			for _, key := range recalledEdits[1].keys {
+				m, _ = drive(t, m, key)
+			}
+			m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+			if n := len(m.input.history.entries); n != 1 {
+				t.Fatalf("history holds %d entries after the save, want 1", n)
+			}
+			m = recall.run(t, m)
+			m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+			m = runCommand(t, m, command, "Enter did not send the recalled message; notice: "+m.notice)
+			if m.confirm != nil {
+				t.Fatalf("Enter on the recalled message opened %#v, want the prompt sent", m.confirm)
+			}
+			assertLastCallText(t, caller, 2, "turn/start", slashPastes[1].text)
+		})
+	}
+}
+
+func TestFailedTypedFollowupReturnsToTheQueueAsTypedText(t *testing.T) {
+	t.Parallel()
+	caller := new(refusedStarts)
+	m := newModel(caller, Options{}, nil)
+	m.thread.id = "t1"
+	m.thread.turnID = "turn-1"
+	m.thread.state = stateRunning
+	m = typeText(t, m, "/new now")
+	m, _ = drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+	m = completeTurn(t, m)
+	if m.thread.state != stateFailed {
+		t.Fatalf("state = %q after the refused follow-up, want failed", m.thread.state)
+	}
+	m, _ = drive(t, m, press(tea.KeyUp, tea.ModAlt, ""))
+	assertComposer(t, m.input.composer, "/new now", false)
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	if m.confirm == nil || m.confirm.kind != confirmNew {
+		t.Fatalf("confirm = %#v, want the new-thread confirmation of the typed /new", m.confirm)
+	}
+}
+
 func TestRecalledChipDraftRestoreKeepsTypedDraftReadingSlash(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
