@@ -279,9 +279,9 @@ No gradients, transition: all, system-ui font stacks or unregistered component l
 |Diff line|Columns: the line number, then the code in the free column.|Monospace|Line number `dim`. Added `added-text`. Removed `failed-text`, normal weight|
 |Hint line|Shown in the live row when no turn runs.|n/a|`dim`|
 |Dock|The last rows of the screen, from the top: the composer, the open panel when there is one, the live row, and the status band. The dock changes height only on a key press, a paste, or the open or close of a panel.|n/a|No background|
-|Composer|One row per line of input. The composer grows only as the user adds lines, up to a fixed limit, and scrolls inside itself beyond it. Columns: the prompt mark, then the text in the free column. The terminal's cursor rests on the first row, and the client draws no cursor glyph.|n/a|Prompt mark point colour. Text `text`|
+|Composer|One row per line of input. The composer grows only as the user adds lines, up to a fixed limit, and scrolls inside itself beyond it. Columns: the prompt mark, then the text in the free column. The terminal's cursor marks the insertion point, and the client draws no cursor glyph.|n/a|Prompt mark point colour. Text `text`|
 |Live row|One row, below the open panel and above the status band. Fields from the left: the live tag in 10 cells (the dot, one space, the state word in 8 cells), the elapsed time in 7 cells, the progress fields, then free text. Nothing is right-anchored.|As tool row|As tool row|
-|Status band|One row of fixed fields. The left group holds `model` and the icons. The right group holds `context` and `mark`.|n/a|`dim`|
+|Status band|One row of fixed fields. The left group holds `model` and the icons. The right group holds `cost`, `context` and `mark`.|n/a|`dim`|
 
 ### Terminal panels
 
@@ -339,14 +339,15 @@ The status band shows these items, in this order.
 |4|`sandbox`|One icon|Yes|
 |5|`folder`|Browser: one icon, with the folder name as its `title` and `aria-label`. Terminal: the glyph and the folder name, cut to 16 cells.|Yes|
 |6|`queue`|One icon and the count. Shown only when a follow-up is queued.|Yes|
-|7|`context`|A moon gauge and the percent of the context window in use|Yes|
-|8|`mark`|Browser: the small product mark. Terminal: the product name.|Yes|
+|7|`cost`|Browser: not shown. Terminal: the thread cost in US dollars, with no glyph. Shown only when the server reports a cost.|Yes|
+|8|`context`|A moon gauge and the percent of the context window in use|Yes|
+|9|`mark`|Browser: the small product mark. Terminal: the product name.|Yes|
 
 The setting `status_hide` lists item ids to hide. Its default is empty. Its wire name is `statusHide`. Setting `model` fails with `status_hide: model cannot be hidden`.
 
-When the row does not fit, whole items drop in this order: `folder`, `queue`, `effort`, `mark`. The items `model`, `context`, `approval` and `sandbox` never drop. If they still do not fit, `model` is cut from the right with `…` in the browser and with `...` in the terminal.
+When the row does not fit, whole items drop in this order: `folder`, `queue`, `cost`, `effort`, `mark`. The items `model`, `context`, `approval` and `sandbox` never drop. If they still do not fit, `model` is cut from the right with `…` in the browser and with `...` in the terminal.
 
-Terminal layout: one row of fixed fields. `model` and the icons sit in the left group. `context` and `mark` sit in the right group. Items are separated by spacing, not by a glyph. The status text, the moon gauge and the percent use `dim`. Free text in the band (the model name and the folder name) is cut to a fixed number of cells, so the right group keeps its place.
+Terminal layout: one row of fixed fields. `model` and the icons sit in the left group. `cost`, `context` and `mark` sit in the right group. Items are separated by spacing, not by a glyph. The status text, the moon gauge and the percent use `dim`. Free text in the band (the model name and the folder name) is cut to a fixed number of cells, so the right group keeps its place.
 
 Browser layout: the thread header has the title at the left. A right-aligned margin column holds three rows: `model`; then `effort approval sandbox folder queue`; then `context mark`. Below 640 px, the margin column becomes one row under the title. The same drop order applies. Every icon has an `aria-label` that states its value in words.
 
@@ -354,7 +355,7 @@ Browser layout: the thread header has the title at the left. A right-aligned mar
 
 The setting `icons` takes `auto` (default), `unicode` or `nerd`. The browser always draws Nerd glyphs from its own subset font, `symbols-nerd-subset.woff2`. The subset comes from Symbols Nerd Font Mono 3.5.1. Its licences are MIT for the font, Apache-2.0 for Material Design Icons and SIL OFL 1.1 for Weather Icons. The browser ignores the `icons` setting.
 
-In the terminal, `auto` starts with `unicode`. When `KITTY_WINDOW_ID` is set, the client sends the capability request `kitty-query-font_family` once at start. When the reply arrives, the client reads the value after `=`. When the value matches `(?i)nerd ?font` or `NF[MP]?(-|$)`, the client switches to `nerd`. If the reply has no `name=` prefix, the whole reply is the value. With no reply, `unicode` stays. The client sends no other probe and sets no timeout.
+In the terminal, `auto` starts with `unicode`. When `KITTY_WINDOW_ID` is set, the client sends the capability request `kitty-query-font_family` once at start. When a reply names `kitty-query-font_family`, the client reads the value after `kitty-query-font_family=`. When the value matches `(?i)nerd ?font` or `NF[MP]?(-|$)`, the client switches to `nerd`. A reply that does not name `kitty-query-font_family` leaves the glyphs unchanged. With no reply, `unicode` stays. The client sends no other probe and sets no timeout.
 
 |Item|Value|Nerd glyph|Code point|Unicode glyph|Code point|
 |---|---|---|---|---|---|
