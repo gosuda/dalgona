@@ -210,6 +210,44 @@ func TestHistoryRecallRestoresChips(t *testing.T) {
 	assertContains(t, dockText(m), "[Paste #1 +12 lines]", "[Paste #2 +13 lines]")
 }
 
+func TestHistoryRecallPastTwoEntriesRestoresTheDraftAndItsCaret(t *testing.T) {
+	t.Parallel()
+	first, second := pasteLines(12), pasteLines(13)
+	m := paletteModel(t)
+	m.input.history.add("older", "")
+	m.input.history.add("newer", "")
+	m = typeText(t, m, "a ")
+	m, _ = drive(t, m, tea.PasteMsg{Content: first})
+	m = typeText(t, m, " b ")
+	m, _ = drive(t, m, tea.PasteMsg{Content: second})
+	original := m.input.composer.Expanded()
+	m, _ = drive(t, m, press(tea.KeyHome, 0, ""))
+	for _, want := range []string{"newer", "older"} {
+		m, _ = drive(t, m, press(tea.KeyUp, 0, ""))
+		if got := m.input.composer.Value(); got != want {
+			t.Fatalf("up recalled %q, want %q", got, want)
+		}
+	}
+	m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	if got := m.input.composer.Value(); got != "newer" {
+		t.Fatalf("down recalled %q, want newer", got)
+	}
+	m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	if got := m.input.composer.Expanded(); got != original {
+		t.Fatalf("down restored %q, want %q", got, original)
+	}
+	if got := len(m.input.composer.chips); got != 2 {
+		t.Fatalf("restored draft holds %d chips, want 2", got)
+	}
+	if got, want := m.input.composer.cursor, len(m.input.composer.text); got != want {
+		t.Fatalf("caret at %d after the restore, want the end of the draft at %d", got, want)
+	}
+	m = typeText(t, m, "z")
+	if got := m.input.composer.Expanded(); got != original+"z" {
+		t.Fatalf("typing after the restore gave %q, want the draft and z at its end", got)
+	}
+}
+
 func TestHistorySearchRecallsCtrlCChipDraft(t *testing.T) {
 	t.Parallel()
 	pasted := pasteLines(30)

@@ -353,6 +353,35 @@ func TestPasteIntoFilterKeepsFirstLine(t *testing.T) {
 	}
 }
 
+func TestPasteIntoTheOtherOneLineFieldsKeepsTheFirstLine(t *testing.T) {
+	t.Parallel()
+	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
+		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
+	tests := []struct {
+		name  string
+		model func(*testing.T) model
+	}{
+		{"api key", func(t *testing.T) model {
+			m := openLoginPanel(t, new(fakeCaller), "openai")
+			m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+			return m
+		}},
+		{"answer line", func(t *testing.T) model {
+			m, _ := openQuestion(t, free)
+			return m
+		}},
+	}
+	for _, tt := range tests {
+		for _, in := range []string{"one\rtwo", "one\r\ntwo", "one\ntwo"} {
+			m := tt.model(t)
+			m, _ = drive(t, m, tea.PasteMsg{Content: in})
+			if got := m.input.field.value(); got != "one" {
+				t.Fatalf("%s: paste %q left %q, want the first line only", tt.name, in, got)
+			}
+		}
+	}
+}
+
 func TestChipRowDoesNotGrowComposer(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{})

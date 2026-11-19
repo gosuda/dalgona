@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"runtime"
 	"slices"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -21,7 +22,8 @@ func (m *model) imageRefusal() string {
 }
 
 func (m *model) imagePasteCmd(content string) tea.Cmd {
-	path, ok := imagePath(sanitizeText(content))
+	text := sanitizeText(pasteLineBreaks.Replace(content))
+	path, ok := imagePath(strings.TrimSuffix(text, "\n"))
 	if !ok {
 		return nil
 	}
@@ -29,7 +31,7 @@ func (m *model) imagePasteCmd(content string) tea.Cmd {
 		m.noticef("%s", refusal)
 		return nil
 	}
-	return pastedImage(sanitizeText(pasteLineBreaks.Replace(content)), path)
+	return pastedImage(text, path)
 }
 
 func (m *model) clipboardImage() tea.Cmd {

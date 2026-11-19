@@ -299,9 +299,14 @@ Removing the prompt that waits for its turn MUST NOT move that turn to another e
 Closing the panel with Esc MUST leave the draft unchanged.
 With no history, the panel MUST show `No prompt history yet.` and no selectable row.
 With no history, Enter, Delete, and Backspace MUST do nothing.
-Ctrl+C with a non-empty draft MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
+A draft that holds only whitespace MUST count as empty, for Esc and for Ctrl+C.
+Ctrl+C with a draft that holds text MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
+An image chip MUST NOT enter the history. When the draft holds an image, the live row MUST read `Draft saved to history, images dropped · Ctrl+C again to exit`.
+Ctrl+C with a draft that holds no text MUST keep the draft. It MUST show `Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
 A paste MUST turn each CRLF, each CR, and each LF into one line break.
+A paste into a one-line field MUST keep only its first line.
+The one-line fields are the list filter, the review target, the answer line, and the API key field.
 A paste of fewer than 10 lines MUST be inserted as text.
 A paste of 10 or more lines MUST become one chip labelled `[Paste #n +L lines]`, where L counts its lines.
 A chip MUST take one composer row, whatever the length of its paste.
@@ -313,6 +318,8 @@ The slash rule MUST read only the typed text. A pasted line that starts with `/`
 A paste over 1 MiB MUST be refused with a notice that names the limit.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
 A pasted path to a PNG, JPEG, or GIF file MUST become an image chip labelled `[Image #n WxH]`.
+A path followed by one line break MUST also become an image chip, and the chip MUST replace that line break.
+A paste with a line break before its last character MUST stay text, even when its lines joined name an image file.
 A pasted path to a WebP file MUST be refused with the notice `unsupported image type image/webp; send PNG, JPEG or GIF`.
 An image chip MUST take one composer row.
 A prompt MUST hold at most 10 images and at most 10485760 bytes of image data.
@@ -369,8 +376,8 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 | `/help` | Opens the help panel |
 | Esc | Closes an open command palette first and keeps the draft. Otherwise clears a non-empty list filter first. With an empty filter, closes the list panel. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row. A second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
 | Esc on an empty prompt, while idle | The first Esc shows `Esc again to rewind` in the live row. A second Esc within 2000 ms opens the rewind list of active turns, newest first. |
-| Esc, with no turn to interrupt | After a stopped turn the notice reads `stopped; nothing to interrupt`. After a failed turn it reads `failed; nothing to interrupt`. After a lost connection Esc shows the `connection lost` notice again. In an idle prompt with a draft it reads `idle, draft kept; nothing to interrupt`, the draft stays, and no rewind hint shows |
-| Ctrl+C twice | Quits. With an empty draft, the first press shows `Ctrl+C again to exit` in the live row. With a non-empty draft, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. A second press within 2000 ms quits |
+| Esc, with no turn to interrupt | After a stopped turn the notice reads `stopped; nothing to interrupt`. After a failed turn it reads `failed; nothing to interrupt`. After a lost connection Esc shows the `connection lost` notice again. In an idle prompt with a draft it reads `idle, draft kept; nothing to interrupt`, the draft stays, and no rewind hint shows. In these states Esc sends no `turn/interrupt`, also during a rate-limit wait |
+| Ctrl+C twice | Quits. With a draft that holds no text, the first press keeps the draft and shows `Ctrl+C again to exit` in the live row. With a draft that holds text, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. When that draft holds an image, the live row shows `Draft saved to history, images dropped · Ctrl+C again to exit`. A second press within 2000 ms quits |
 | Ctrl+R | Opens the history panel of sent prompts. Enter loads the highlighted prompt into the editor. Delete removes it. Shell mode ignores Ctrl+R |
 | `/model [id]` | `model/list` list panel, or `config/value/write` key `model` |
 | `/resume [id]` | `thread/list` list panel, or `thread/resume` with turns included |

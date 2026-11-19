@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -159,5 +161,60 @@ func TestInterruptNamesEveryStateWithoutATurn(t *testing.T) {
 		if len(caller.calls) != 0 {
 			t.Fatalf("state %q: interrupt sent %q, want no request", state, caller.calls[0].method)
 		}
+	}
+}
+
+func TestWhitespaceOnlyPromptCountsAsEmpty(t *testing.T) {
+	t.Parallel()
+	m, caller := escNoticeModel(stateIdle, " \t ")
+	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
+	if m.hint.text != "Esc again to rewind" || m.notice != "" {
+		t.Fatalf("Esc over whitespace: hint %q, notice %q, want the rewind hint only", m.hint.text, m.notice)
+	}
+	m, _ = drive(t, m, press('c', tea.ModCtrl, ""))
+	if m.hint.text != "Ctrl+C again to exit" {
+		t.Fatalf("Ctrl+C over whitespace: hint = %q, want Ctrl+C again to exit", m.hint.text)
+	}
+	if got := m.input.history.entries; len(got) != 0 || len(caller.calls) != 0 {
+		t.Fatalf("history %#v and %d calls over a whitespace prompt, want none", got, len(caller.calls))
+	}
+}
+
+func retryWaitEndedBy(t *testing.T, caller *fakeCaller, state string) model {
+	t.Helper()
+	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	m := newTestModel(caller, Options{})
+	m.conn.clock = func() time.Time { return now }
+	m, _ = drive(t, m, notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)})
+	m, _ = drive(t, m, notificationMsg{method: "dalgona/retry/wait", params: []byte(`{"threadId":"t1","turnId":"turn-1","remainingMs":125000}`)})
+	if state == stateDisconnected {
+		m, _ = drive(t, m, disconnectedMsg{err: errors.New("connection reset")})
+		return m
+	}
+	m.setState(state)
+	return m
+}
+
+func TestEscDuringARetryWaitSendsNothingForAnEndedTurn(t *testing.T) {
+	t.Parallel()
+	for state, want := range map[string]string{
+		stateDisconnected: "",
+		stateFailed:       "failed; nothing to interrupt",
+		stateInterrupted:  "stopped; nothing to interrupt",
+	} {
+		t.Run(state, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m, command := drive(t, retryWaitEndedBy(t, caller, state), press(tea.KeyEscape, 0, ""))
+			if command != nil {
+				m, _ = drive(t, m, command())
+			}
+			if len(caller.calls) != 0 {
+				t.Fatalf("Esc in state %q sent %q, want no request", state, caller.calls[0].method)
+			}
+			if want != "" && m.notice != want {
+				t.Fatalf("notice = %q, want %q", m.notice, want)
+			}
+		})
 	}
 }
