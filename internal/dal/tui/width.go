@@ -127,7 +127,99 @@ func plainPrefix(text string, bound int) string {
 }
 
 func (s *screenState) wrap(text string, n int) []string {
-	return strings.Split(s.method.Wrap(s.nfc(s.expand(text)), n, ""), "\n")
+	flat := s.nfc(s.expand(text))
+	var rows []string
+	for {
+		parts := strings.Split(s.method.Wrap(flat, n, ""), "\n")
+		over, head, rest := s.firstOverflow(flat, parts, n)
+		if over < 0 {
+			if rows == nil {
+				return parts
+			}
+			return append(rows, parts...)
+		}
+		rows = append(append(rows, parts[:over]...), head)
+		if rest == "" {
+			return rows
+		}
+		flat = rest
+	}
+}
+
+func (s *screenState) firstOverflow(flat string, parts []string, n int) (int, string, string) {
+	if n < 1 {
+		return -1, "", ""
+	}
+	for i, part := range parts {
+		if s.method.StringWidth(part) <= n {
+			continue
+		}
+		cut, resume, ok := s.splitRow(part, n)
+		if !ok {
+			continue
+		}
+		if pos := s.rowOffset(flat, parts, i); strings.HasPrefix(flat[pos:], part) {
+			return i, part[:cut], flat[pos+resume:]
+		}
+	}
+	return -1, "", ""
+}
+
+func (s *screenState) rowOffset(flat string, parts []string, index int) int {
+	pos := 0
+	for _, part := range parts[:index] {
+		pos = min(s.rowStart(flat, pos, part)+len(part), len(flat))
+	}
+	return s.rowStart(flat, pos, parts[index])
+}
+
+func (s *screenState) splitRow(row string, n int) (cut, resume int, ok bool) {
+	at, runStart, runEnd := s.scanRow(row, n)
+	switch {
+	case at < 0:
+		return 0, 0, false
+	case runStart < 0:
+		return at, at, at > 0
+	}
+	return runStart, s.spaceEnd(row, runEnd), true
+}
+
+func (s *screenState) scanRow(row string, n int) (at, runStart, runEnd int) {
+	used, open := 0, -1
+	runStart, runEnd = -1, -1
+	for at < len(row) {
+		seq, width := s.step(row[at:])
+		if width > 0 && wrapSpace(seq) {
+			if open < 0 {
+				open = at
+			}
+			runStart, runEnd = open, at+len(seq)
+		} else {
+			open = -1
+		}
+		if used+width > n {
+			return at, runStart, runEnd
+		}
+		used += width
+		at += len(seq)
+	}
+	return -1, -1, -1
+}
+
+func (s *screenState) spaceEnd(row string, at int) int {
+	for at < len(row) {
+		seq, width := s.step(row[at:])
+		if width == 0 || !wrapSpace(seq) {
+			break
+		}
+		at += len(seq)
+	}
+	return at
+}
+
+func wrapSpace(cluster string) bool {
+	r, _ := utf8.DecodeRuneInString(cluster)
+	return r != utf8.RuneError && r != 0xa0 && unicode.IsSpace(r)
 }
 
 type byteRange struct {
