@@ -148,6 +148,16 @@ describe("panel close", () => {
 		expect(document.activeElement).not.toBe(prompt);
 	});
 
+	test("focuses the transcript without scrolling to it", async () => {
+		const prompt = field();
+		prompt.disabled = true;
+		const region = transcript();
+		const focus = vi.spyOn(region, "focus");
+		(document.activeElement as HTMLElement | null)?.blur();
+		await closed(null);
+		expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+	});
+
 	test("hands focus to the transcript when the opener left the page and the message field is disabled", async () => {
 		const prompt = field();
 		prompt.disabled = true;

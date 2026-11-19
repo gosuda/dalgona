@@ -32,22 +32,27 @@ $effect(() => {
 		)?.focus();
 	} else if (!open && node.open) {
 		node.close();
-		const back =
+		if (
 			opener !== null &&
 			opener !== document.body &&
 			opener.isConnected &&
 			!opener.matches(":disabled")
-				? opener
-				: fallbackTarget();
-		back?.focus();
+		) {
+			opener.focus();
+		} else {
+			handFocusOver();
+		}
 		opener = null;
 	}
 });
 
-function fallbackTarget(): HTMLElement | null {
+function handFocusOver(): void {
 	const prompt = document.getElementById("prompt");
-	if (prompt !== null && !prompt.matches(":disabled")) return prompt;
-	return document.getElementById("transcript");
+	if (prompt !== null && !prompt.matches(":disabled")) {
+		prompt.focus();
+		return;
+	}
+	document.getElementById("transcript")?.focus({ preventScroll: true });
 }
 
 function onKey(event: KeyboardEvent): void {
