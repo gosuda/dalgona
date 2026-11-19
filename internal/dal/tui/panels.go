@@ -28,8 +28,21 @@ const panelRowCells = panelRailCells + panelBodyCells
 
 var panelHeights = [...]int{8, 12, 6, 9, 13, 17, 12, 14}
 
+const (
+	decisionMinWindow = 4
+	decisionMinRows   = 3
+)
+
+func decisionPanel(kind panelKind) bool {
+	return kind == panelApproval || kind == panelAsk
+}
+
 func panelRows(kind panelKind, windowHeight int) int {
-	return max(0, min(panelHeights[kind], windowHeight-4))
+	rows := min(panelHeights[kind], windowHeight-4)
+	if decisionPanel(kind) && windowHeight >= decisionMinWindow {
+		rows = max(rows, min(decisionMinRows, windowHeight-2))
+	}
+	return max(0, rows)
 }
 
 func panelRowWidth(s *screenState) int {

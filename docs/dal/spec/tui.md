@@ -127,7 +127,7 @@ The dock MUST keep its height. Only a key press, a paste, the opening or closing
 
 The dock MUST have at most the window height minus one rows. The client MUST show no dock row in a window of fewer than two rows.
 
-The composer MUST show at most six rows, or one row while a panel is open. A panel MUST have a fixed height for its kind, capped at the window height minus four rows.
+The composer MUST show at most six rows, or one row while a panel is open. A panel MUST have a fixed height for its kind, capped at the window height minus four rows. That cap MUST NOT leave the approval panel or the question card fewer than three rows from window height 5. At window height 4, each MUST have two rows.
 
 When the dock is too tall, the client MUST drop the status band first, then the live row. The input line MUST NOT drop.
 
@@ -425,6 +425,8 @@ The body holds at most six rows and scrolls with `up` and `down`. `up` and `down
 
 The two action rows are `[y] accept  [a] accept for session` and `[n] decline  [esc] cancel and interrupt`. `[y] accept` carries the one fill of the view, in the thread hue. Before the terminal reports its background, the fill MUST use the night theme, or the soft night theme for `auto-soft`. With colour off, `[y] accept` MUST be bold reverse video with no colour.
 
+A card with too few rows MUST drop body rows first, then the `[y] accept` row. The `[n] decline` row MUST be the last action row to drop. A window of four rows shows the title and the `[n] decline` row. A window of five or more rows MUST show both action rows.
+
 Ctrl+O opens the full review of the card, with the same lines and the full diff.
 
 When another window settles a request, the TUI MUST remove the card. It MUST show `Approval answered in another window` for `answered`, `Approval dismissed in another window` for `cancelled`, and `Approval closed: the turn was interrupted` for `interrupted`. Any other resolution MUST show `Approval closed: the agent continues without an answer`.
@@ -584,6 +586,17 @@ A fenced code block with info `mermaid`, `d2`, `nomnoml`, or `svg` MUST print as
 The fence MUST buffer until its closing marker before it prints.
 A mermaid, d2, or nomnoml card MUST render the source as text art under a `diagram <kind> · <n> rows` header.
 An `svg` fence or a failed render MUST print `diagram <kind>: render failed · source shown` followed by the source.
+A render that runs longer than 2 seconds MUST count as a failed render.
+A renderer that panics MUST count as a failed render.
+A d2 layout cannot be cancelled, so one that outlives the render limit keeps running to its end. The client MUST run at most one d2 layout at a time.
+While a d2 layout past the render limit runs, a d2 render MUST count as a failed render without waiting.
+A source of more than 16384 bytes MUST NOT reach a renderer. It MUST print `diagram <kind>: too large to draw · source shown` followed by the source.
+The client MUST run each render outside the update loop. A key, a tick, or any other message MUST NOT wait for a render.
+A row committed while a diagram renders MUST wait for the diagram card. Waiting rows MUST print once, in the order of their commit.
+A diagram card MUST print once, also when the followed thread changes before the render ends.
+The review header MUST count the rows that wait behind a diagram as waiting rows.
+While a diagram renders, the review MUST show its entry as `diagram <kind> · drawing` followed by the source. The review MUST show the card when the render ends.
+With a window height above 0, quit and suspend MUST wait for a diagram that renders and for the rows that wait behind it. A diagram MUST NOT hold them for longer than the 2 second render limit.
 A fenced block still open when the answer finishes MUST print its buffered lines as code.
 A diagram renderer MUST NOT write its logs to the terminal.
 
@@ -646,7 +659,7 @@ An empty question request returns an empty answer map without opening a card.
 The Other row opens typing. Typing uses the input line with the label `answer: `. `enter` stores the typed text and advances. `esc` leaves typing, or dismisses a free-text question. An `s` entered while typing remains answer text and does not submit.
 A question card that becomes the oldest request MUST show only its own typed text on the input line.
 
-With two or more rows, the card keeps its title and its hint rows. With one row it shows the title alone. At window height 4 or less the card is not drawn. The hint rows list `↑/↓ move`, `1-7 pick`, `Space toggle`, `Enter choose`, and `Tab next`, then `s submit · Esc dismiss`. The hint rows MUST wrap at whole hints and MUST keep `s submit · Esc dismiss` on one row. They MUST take their rows before the body and MUST leave the title and the option under the cursor. After that, the preview drops first, then the question text, then the options scroll. If the rows left cannot hold every hint, the card MUST drop whole hints and MUST keep both actions. A single-select question drops `Space toggle` first. A multi-select question drops `Space toggle` last.
+The card keeps its title and its hint rows. A window of four rows shows the title and one hint row. A window of three rows or fewer does not draw the card. The hint rows list `↑/↓ move`, `1-7 pick`, `Space toggle`, `Enter choose`, and `Tab next`, then `s submit · Esc dismiss`. The hint rows MUST wrap at whole hints and MUST keep `s submit · Esc dismiss` on one row. They MUST take their rows before the body and MUST leave the title and the option under the cursor. After that, the preview drops first, then the question text, then the options scroll. If the rows left cannot hold every hint, the card MUST drop whole hints and MUST keep both actions. A single-select question drops `Space toggle` first. A multi-select question drops `Space toggle` last.
 
 The preview shows the description and the first line of the preview of the option under the cursor. A preview with more lines MUST end its row with `… <n> more lines · ctrl+o`. The full-screen review opened with `ctrl+o` shows every question, every option, and the full preview of each option. `esc` returns to the card at the same cursor row and sends no answer. This full-screen review is separate from the answer Review tab.
 

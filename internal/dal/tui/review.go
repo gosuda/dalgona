@@ -111,7 +111,7 @@ func (m *model) reviewView() string {
 	width := terminalWidth(m.screen.width)
 	title := cmp.Or(m.screen.fit(entries[r.index].title, reviewTitleCells), "row")
 	head := fmt.Sprintf("Review · %s · %d/%d", title, r.index+1, len(entries))
-	if n := len(m.out.pending); n > 0 {
+	if n := len(m.out.pending) + m.heldLines(); n > 0 {
 		head += fmt.Sprintf(" · %d waiting", n)
 	}
 	foot := "↑↓ scroll · [ ] items · Esc close"

@@ -28,6 +28,9 @@ func (m *model) handleMsg(msg tea.Msg) tea.Cmd {
 	case hintExpiredMsg:
 		m.expireHint(msg)
 		return nil
+	case diagramMsg:
+		m.applyDiagram(msg)
+		return nil
 	default:
 		if command, handled := m.updateTerminal(msg); handled {
 			return command
@@ -54,7 +57,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	anchor := m.anchorDock()
 	quit := m.finishQuit()
 	suspend := m.finishSuspend()
-	return m, tea.Batch(command, tick, settle, printCommand, anchor, quit, suspend)
+	diagrams := m.takeDiagramCommands()
+	return m, tea.Batch(command, tick, settle, printCommand, anchor, quit, suspend, diagrams)
 }
 
 func (m *model) wheel(msg tea.MouseWheelMsg) {
@@ -402,7 +406,7 @@ func (m *model) finishQuit() tea.Cmd {
 	if !m.quitting || m.dockInFlight() {
 		return nil
 	}
-	if m.screen.height == 0 || (!m.out.printing && !m.out.settling && len(m.out.pending) == 0) {
+	if m.screen.height == 0 || (!m.out.printing && !m.out.settling && len(m.out.pending) == 0 && len(m.out.held) == 0) {
 		return tea.Quit
 	}
 	return nil
@@ -418,7 +422,7 @@ func (m *model) finishSuspend() tea.Cmd {
 	if !m.suspending || m.dockInFlight() {
 		return nil
 	}
-	if m.screen.height == 0 || (!m.out.printing && len(m.out.pending) == 0) {
+	if m.screen.height == 0 || (!m.out.printing && len(m.out.pending) == 0 && len(m.out.held) == 0) {
 		m.suspending = false
 		return tea.Suspend
 	}

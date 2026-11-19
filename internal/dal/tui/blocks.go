@@ -512,7 +512,12 @@ func (m *model) finishAnswer(threadID string, item *liveItem, final string) {
 
 func (m *model) commitBlocks(threadID string, item *liveItem, blocks []block) {
 	for _, b := range blocks {
-		m.commit("block:"+threadID+":"+item.ID+":"+strconv.Itoa(item.blocks), m.renderBlock(b))
+		key := "block:" + threadID + ":" + item.ID + ":" + strconv.Itoa(item.blocks)
+		if b.diagram != "" {
+			m.commitDiagram(key, b)
+		} else {
+			m.commit(key, m.renderBlock(b))
+		}
 		item.blocks++
 	}
 }

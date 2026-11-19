@@ -11,17 +11,27 @@ import (
 	"time"
 )
 
-var diagramMu sync.Mutex
+var (
+	diagramMu            sync.Mutex
+	defaultDiagramBudget = diagramBudget
+)
 
 func TestMain(m *testing.M) {
 	diagramBudget = 30 * time.Second
 	os.Exit(m.Run())
 }
 
+func TestDiagramBudgetIsTwoSeconds(t *testing.T) {
+	t.Parallel()
+	if defaultDiagramBudget != 2*time.Second {
+		t.Fatalf("the render limit is %v, want 2s", defaultDiagramBudget)
+	}
+}
+
 func TestRenderDiagramMermaid(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
-	art, err := renderDiagram("mermaid", "graph LR\n  a --> b\n")
+	art, err := renderDiagramWith(drawDiagram, "mermaid", "graph LR\n  a --> b\n")
 	if err != nil {
 		t.Fatalf("mermaid render: %v", err)
 	}
@@ -33,7 +43,7 @@ func TestRenderDiagramMermaid(t *testing.T) {
 func TestRenderDiagramD2(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
-	art, err := renderDiagram("d2", "x -> y\n")
+	art, err := renderDiagramWith(drawDiagram, "d2", "x -> y\n")
 	if err != nil {
 		t.Fatalf("d2 render: %v", err)
 	}
@@ -62,16 +72,25 @@ func TestRenderDiagramNomnoml(t *testing.T) {
 func TestRenderDiagramSvgShowsSource(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
-	if _, err := renderDiagram("svg", "<svg/>"); err == nil {
+	if _, err := renderDiagramWith(drawDiagram, "svg", "<svg/>"); err == nil {
 		t.Fatal("svg must fail to the source card")
 	}
+}
+
+func diagramBlockLines(t *testing.T, b block) []string {
+	t.Helper()
+	m := &model{}
+	msg, ok := m.renderDiagramBlock("block:t1:a1:0", b)().(diagramMsg)
+	if !ok || msg.key != "block:t1:a1:0" {
+		t.Fatalf("diagram command returned %#v", msg)
+	}
+	return msg.lines
 }
 
 func TestRenderDiagramBlockHeader(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
-	m := &model{}
-	lines := m.renderDiagramBlock(block{text: "x -> y\n", diagram: "d2"})
+	lines := diagramBlockLines(t, block{text: "x -> y\n", diagram: "d2"})
 	if len(lines) < 2 || !strings.HasPrefix(lines[0], "diagram d2 · ") || !strings.HasSuffix(lines[0], " rows") {
 		t.Fatalf("diagram header: %#v", lines[:1])
 	}
@@ -80,8 +99,7 @@ func TestRenderDiagramBlockHeader(t *testing.T) {
 func TestRenderDiagramBlockFailure(t *testing.T) {
 	diagramMu.Lock()
 	defer diagramMu.Unlock()
-	m := &model{}
-	lines := m.renderDiagramBlock(block{text: "<svg/>", diagram: "svg"})
+	lines := diagramBlockLines(t, block{text: "<svg/>", diagram: "svg"})
 	if !strings.HasPrefix(lines[0], "diagram svg: render failed") || !strings.HasSuffix(lines[0], "source shown") {
 		t.Fatalf("failure header: %#v", lines[:1])
 	}
@@ -122,7 +140,7 @@ func requireSilentRender(t *testing.T, kind, source string, fails bool) {
 	t.Helper()
 	var err error
 	out := captureTerminal(t, func() {
-		_, err = renderDiagram(kind, source)
+		_, err = renderDiagramWith(drawDiagram, kind, source)
 	})
 	if (err != nil) != fails {
 		t.Fatalf("%s render error = %v, want failure %v", kind, err, fails)
