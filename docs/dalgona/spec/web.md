@@ -236,9 +236,13 @@ The approval card MUST show `Approval required`, a title, the request details, a
 
 The request details MUST scroll inside their own region. The decision actions MUST stay outside that region. The card MUST offer `Accept`, `Accept for session`, `Decline`, and `Cancel and interrupt`.
 ArrowUp and ArrowDown MUST scroll the approval details by 48 px. PageUp and PageDown MUST scroll the approval details by the height of the details minus 48 px. Each PageUp and PageDown scroll MUST move at least 48 px.
-The dock MUST fit within the viewport. Approval details MUST shrink and scroll without hiding the card header or actions.
-Approval details MUST retain a readable scroll region. The card header, actions, and composer MUST NOT overlap.
-While an approval is open, the composer MUST keep its label, field, and actions reachable inside the viewport by scrolling the composer if needed.
+The dock MUST fit within the viewport. Approval details MUST shrink with the viewport and scroll without hiding the card header or actions.
+Approval details MUST retain a readable scroll region. The card header, actions, and composer MUST NOT overlap at any viewport size.
+The request card MUST NOT shrink below the height of its header, details, and actions.
+While a request is open, the composer MUST give up height before the card does, down to its label and one field row.
+When the card, the notices, and the composer at that height are taller than the viewport, the dock MUST scroll inside itself.
+While the dock scrolls, the sticky actions MAY cover part of the details until the dock reaches its end.
+While a request is open, the composer MUST keep its label, field, and actions reachable by scrolling the composer or the dock.
 
 While the card has focus, `y` MUST accept, `a` MUST accept for the session, `n` MUST decline, and Escape MUST cancel and interrupt the turn. Escape MUST answer the card at once, and the two-press guard of the composer MUST NOT apply to it.
 
@@ -493,4 +497,4 @@ The resume panel MUST show its search progress as status text inside its dialog.
 A failed save in the model or settings panel MUST show a notice.
 The composer MUST show its error as an alert beside the message field. The message field MUST name that alert in `aria-describedby`. The composer MUST NOT add a notice for its error.
 The `page live regions` tests in `web/src/lib/components/App.dom.test.ts` check these rules.
-`web/checks/approval-actions.js` checks the approval card on small screens. `web/checks/dock.js` checks the composer dock at the start, the middle and the end of the document. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/band-rows.js` checks that every band row ends at the right edge of the band, in a window wider than 640 px. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript at 1280x800, on a thread whose transcript holds more than its column shows.
+`web/checks/approval-actions.js` checks the approval card on small screens. It checks that the card holds its actions and that they do not cover the composer, at both ends of the dock's scroll. `web/checks/dock.js` checks the composer dock at the start, the middle and the end of the document. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/band-rows.js` checks that every band row ends at the right edge of the band, in a window wider than 640 px. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript at 1280x800, on a thread whose transcript holds more than its column shows.
