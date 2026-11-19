@@ -10,6 +10,9 @@ on:
 latchkey:
   schema: 1
 
+env:
+  GOPROXY: https://proxy.golang.org|https://goproxy.io|direct
+
 jobs:
   go:
     runs-on: small
@@ -21,7 +24,7 @@ jobs:
       - uses: latchkey/cache-restore@1.1.0
         with:
           key: ${{ matrix.task }}
-          version: go1
+          version: go2
           hash-files: go.sum
           into: "~"
       - if: matrix.task == 'lint'
@@ -32,11 +35,10 @@ jobs:
           go tool govulncheck ./...
       - if: matrix.task == 'test'
         run: go test -race -count=1 ./...
-      - if: always()
-        uses: latchkey/cache-save@1.1.0
+      - uses: latchkey/cache-save@1.1.0
         with:
           key: ${{ matrix.task }}
-          version: go1
+          version: go2
           hash-files: go.sum
           from: "~"
           path: .cache/go-build go/pkg/mod
@@ -58,10 +60,10 @@ jobs:
       - name: Web UI
         run: |
           pnpm -C web install --frozen-lockfile
+          pnpm -C web build
           pnpm -C web exec biome ci
           pnpm -C web exec svelte-check
           pnpm -C web exec vitest run
-          pnpm -C web build
       - name: Cloudflare worker
         run: |
           pnpm -C deploy/cloudflare install --frozen-lockfile
