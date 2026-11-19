@@ -29,34 +29,9 @@ type shortQuestion struct {
 	band   bool
 }
 
-func (c shortQuestion) rows() int {
-	rows := 1 + c.panel
-	if c.live {
-		rows++
-	}
-	if c.band {
-		rows++
-	}
-	return rows
-}
-
 func (c shortQuestion) check(t *testing.T, lines []string) {
 	t.Helper()
-	if len(lines) != c.rows() {
-		t.Fatalf("dock has %d rows, want %d:\n%s", len(lines), c.rows(), strings.Join(lines, "\n"))
-	}
-	if !strings.HasPrefix(lines[0], "›") {
-		t.Fatalf("row 0 is not the input line: %q", lines[0])
-	}
-	if !strings.HasPrefix(lines[1], "┌ Question 1 of") {
-		t.Fatalf("row 1 is not the title: %q", lines[1])
-	}
-	if c.live && !strings.Contains(lines[1+c.panel], "Waiting") {
-		t.Fatalf("row %d is not the live row: %q", 1+c.panel, lines[1+c.panel])
-	}
-	if c.band && !strings.Contains(lines[len(lines)-1], "⊡") {
-		t.Fatalf("last row is not the status band: %q", lines[len(lines)-1])
-	}
+	shortDock{panel: c.panel, live: c.live, band: c.band}.check(t, lines, "┌ Question 1 of")
 	c.checkCard(t, strings.Join(lines[1:1+c.panel], "\n"))
 }
 
