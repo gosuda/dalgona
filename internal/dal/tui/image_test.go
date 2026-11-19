@@ -71,6 +71,20 @@ func TestImagePathPasteBecomesChipAndInputItem(t *testing.T) {
 	}
 }
 
+func TestImagePathPasteEndingInCRLeavesOnlyTheChip(t *testing.T) {
+	t.Parallel()
+	m := imageModel(t, new(fakeCaller), "text", "image")
+	path := writePNG(t, filepath.Join(t.TempDir(), "shot.png"), 3, 2, 0)
+	m, command := drive(t, m, tea.PasteMsg{Content: path + "\r"})
+	m = runCommand(t, m, command, "pasting an image path started no read")
+	if got := len(m.input.composer.chips); got != 1 {
+		t.Fatalf("composer holds %d chips, want the image chip", got)
+	}
+	if got := []rune(m.input.composer.Value()); len(got) != 1 {
+		t.Fatalf("composer holds %q, want the chip alone", string(got))
+	}
+}
+
 func TestImagePathPasteOverLimitNotice(t *testing.T) {
 	t.Parallel()
 	m := imageModel(t, new(fakeCaller), "text", "image")

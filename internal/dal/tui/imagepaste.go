@@ -20,8 +20,8 @@ func (m *model) imageRefusal() string {
 	return ""
 }
 
-func (m *model) imagePasteCmd(text string) tea.Cmd {
-	path, ok := imagePath(text)
+func (m *model) imagePasteCmd(content string) tea.Cmd {
+	path, ok := imagePath(sanitizeText(content))
 	if !ok {
 		return nil
 	}
@@ -29,7 +29,7 @@ func (m *model) imagePasteCmd(text string) tea.Cmd {
 		m.noticef("%s", refusal)
 		return nil
 	}
-	return pastedImage(text, path)
+	return pastedImage(sanitizeText(pasteLineBreaks.Replace(content)), path)
 }
 
 func (m *model) clipboardImage() tea.Cmd {

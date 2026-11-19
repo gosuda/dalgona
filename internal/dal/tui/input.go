@@ -55,8 +55,10 @@ func (f textField) value() string {
 	return string(f.text)
 }
 
+var pasteLineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n")
+
 func (f *textField) pasteLine(text string) bool {
-	first, _, _ := strings.Cut(text, "\n")
+	first, _, _ := strings.Cut(pasteLineBreaks.Replace(text), "\n")
 	return f.insert(first)
 }
 
@@ -586,7 +588,7 @@ func (c editor) expand(text string) string {
 }
 
 func (c *editor) paste(text string) {
-	text = sanitizeText(text)
+	text = sanitizeText(pasteLineBreaks.Replace(text))
 	if strings.Count(text, "\n")+1 < pasteChipLines {
 		c.insert([]rune(text))
 		return
