@@ -54,11 +54,19 @@ It starts the per-user daemon when needed. Sign in and choose a model there too,
 
 ## Install
 
-The `go install` commands in [Quick start](#quick-start) are the only install step for the terminal products. If you already have a checkout, install from its root instead:
+The `go install` commands in [Quick start](#quick-start) are the only install step for the terminal products. For a fresh copy:
 
 ```sh
 git clone https://github.com/gosuda/dalgona.git
 cd dalgona
+export GOBIN="$PWD/bin"
+go install ./cmd/...
+export PATH="$GOBIN:$PATH"
+```
+
+From the root of a checkout you already have, skip the clone:
+
+```sh
 export GOBIN="$PWD/bin"
 go install ./cmd/...
 export PATH="$GOBIN:$PATH"
