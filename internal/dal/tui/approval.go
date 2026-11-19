@@ -38,7 +38,9 @@ func (m *model) applyRequest(msg serverRequestMsg) tea.Cmd {
 	}
 	request.requestID = msg.requestID
 	request.answer = msg.answer
-	m.input.field = textField{}
+	if len(m.approvals) == 0 && !m.loginTyping() {
+		m.input.field = textField{}
+	}
 	m.approvals = append(m.approvals, request)
 	if !m.acceptThread(request.threadID) {
 		return nil
@@ -97,6 +99,9 @@ func (m *model) dropApproval(index int) {
 	open := m.approvals[index]
 	m.approvals = slices.Delete(m.approvals, index, index+1)
 	delete(m.live.patches, patchKey{open.threadID, open.itemID})
+	if index == 0 {
+		m.handOverField(open)
+	}
 	if len(m.approvals) == 0 && (m.thread.state == stateAwaitingApproval || m.thread.state == stateAwaitingInput) {
 		m.setState(stateRunning)
 	}
