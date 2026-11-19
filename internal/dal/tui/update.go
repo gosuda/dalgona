@@ -393,7 +393,7 @@ func (m *model) exitLine() string {
 
 func (m *model) dockInFlight() bool {
 	anchor := m.anchorState()
-	return anchor.moving || (anchor.querying && m.screen.height > 0)
+	return m.screen.height > 0 && (anchor.moving || anchor.querying)
 }
 
 func (m *model) finishQuit() tea.Cmd {
