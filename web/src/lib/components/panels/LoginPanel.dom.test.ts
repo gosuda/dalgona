@@ -327,6 +327,45 @@ describe("login panel", () => {
 		expect(onClose).toHaveBeenCalledTimes(1);
 	});
 
+	test("a panel with no provider still shows a Close button", async () => {
+		const { session, rpc } = await connected({
+			"dalgona/account/providers/list": providers([]),
+		});
+		const onClose = vi.fn();
+		session.openPanel("login");
+		render(LoginPanel, { props: { session, open: true, onClose } });
+		await vi.waitFor(() =>
+			expect(rpc.calls.map((call) => call.method)).toContain(
+				"dalgona/account/providers/list",
+			),
+		);
+		expect(screen.queryAllByRole("radio")).toHaveLength(0);
+		await fireEvent.click(screen.getByRole("button", { name: "Close" }));
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	test("a failed API key login keeps the Close button", async () => {
+		const { session } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "openai", login: "apiKey", signedIn: false },
+			]),
+			"account/login/start": () => {
+				throw new Error("openai did not accept the API key");
+			},
+		});
+		const onClose = vi.fn();
+		session.openPanel("login");
+		render(LoginPanel, { props: { session, open: true, onClose } });
+		await fireEvent.click(await screen.findByLabelText(/openai/));
+		await fireEvent.input(screen.getByLabelText("API key for openai"), {
+			target: { value: "sk-wrong" },
+		});
+		await fireEvent.click(screen.getByRole("button", { name: "Log in" }));
+		await screen.findByText("openai did not accept the API key");
+		await fireEvent.click(screen.getByRole("button", { name: "Close" }));
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
 	test("a terminal provider leaves the panel with a Close button", async () => {
 		const { session } = await connected({
 			"dalgona/account/providers/list": providers([
