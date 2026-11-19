@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json/jsontext"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -57,6 +58,22 @@ func (m *model) applyPatchUpdated(params jsontext.Value) error {
 	}
 	m.live.patches[patchKey{event.ThreadID, event.ItemID}] = sanitizeItem(rpc.Item{Changes: event.Changes}).Changes
 	return nil
+}
+
+func (m *model) patchShown(key patchKey) bool {
+	return slices.ContainsFunc(m.approvals, func(open approval) bool {
+		return open.threadID == key.threadID && open.itemID == key.itemID
+	})
+}
+
+func (m *model) forgetPatch(key patchKey) {
+	if !m.patchShown(key) {
+		delete(m.live.patches, key)
+	}
+}
+
+func (m *model) forgetUnshownPatches() {
+	maps.DeleteFunc(m.live.patches, func(key patchKey, _ []rpc.FileChange) bool { return !m.patchShown(key) })
 }
 
 func (m *model) applyRequestResolved(params jsontext.Value) error {
