@@ -344,8 +344,8 @@ func TestReviewCountsRowsHeldBehindDiagram(t *testing.T) {
 		if header := reviewWaiting(t, m); !strings.Contains(header, "· 1 waiting") {
 			t.Fatalf("review header %q does not count the row held behind the diagram", header)
 		}
-		if view := stripANSI(m.View().Content); !strings.Contains(view, "diagram d2 · drawing") {
-			t.Fatalf("the review does not show the entry of the diagram that renders:\n%s", view)
+		if view := stripANSI(m.View().Content); !strings.Contains(view, "diagram d2 · drawing") || !strings.Contains(view, "x -> y") {
+			t.Fatalf("the review does not show the entry of the diagram that renders followed by its source:\n%s", view)
 		}
 		release()
 		synctest.Wait()
@@ -353,7 +353,7 @@ func TestReviewCountsRowsHeldBehindDiagram(t *testing.T) {
 		if header := reviewWaiting(t, m); !strings.Contains(header, "· 4 waiting") {
 			t.Fatalf("review header %q does not count the card rows and the held row", header)
 		}
-		if view := stripANSI(m.View().Content); !strings.Contains(view, "ART-ONE") || strings.Contains(view, "drawing") {
+		if view := stripANSI(m.View().Content); !strings.Contains(view, "ART-ONE") || strings.Contains(view, "drawing") || strings.Contains(view, "x -> y") {
 			t.Fatalf("the open review still shows the entry from before the render ended:\n%s", view)
 		}
 	})
@@ -454,4 +454,74 @@ func TestRenderD2SkipsWorkAfterBudget(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || art != "" {
 		t.Fatalf("renderD2 with a spent budget = (%q, %v), want a context error and no art", art, err)
 	}
+}
+
+func agentCompleted(id, text string) notificationMsg {
+	quoted, err := jsontext.AppendQuote(nil, text)
+	if err != nil {
+		panic(err)
+	}
+	return notificationMsg{method: "item/completed", params: []byte(`{"threadId":"t1","turnId":"turn-1","completedAtMs":2,"item":{"type":"agentMessage","id":"` + id + `","text":` + string(quoted) + `}}`)}
+}
+
+func TestDiagramRedeliveredItemPrintsOnce(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		run := startDiagramRun(t, func(gate <-chan struct{}) drawFunc {
+			return func(ctx context.Context, kind, source string) (string, error) {
+				calls.Add(1)
+				return blockedDraw(gate, diagramArt)(ctx, kind, source)
+			}
+		})
+		defer run.finish()
+		run.send(agentCompleted("a1", diagramFence))
+		run.send(agentCompleted("a1", diagramFence))
+		run.quiet()
+		run.release()
+		run.waitFor(t, "the card printed", func(h, s string) bool {
+			return strings.Contains(h+s, "ART-TWO")
+		})
+		run.quiet()
+		time.Sleep(time.Second)
+		run.quiet()
+		printedOrder(t, run.history(), run.screen(), diagramCard, "ART-ONE", "ART-TWO")
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("a redelivered item rendered its diagram %d times, want 1", got)
+		}
+	})
+}
+
+func TestDiagramsPrintInCommitOrder(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		first, second := make(chan struct{}), make(chan struct{})
+		gates := map[string]chan struct{}{"x -> y": first, "a -> b": second}
+		arts := map[string]string{"x -> y": "ART-FIRST", "a -> b": "ART-SECOND"}
+		run := startDiagramRun(t, func(<-chan struct{}) drawFunc {
+			return func(_ context.Context, _, source string) (string, error) {
+				source = strings.TrimSpace(source)
+				<-gates[source]
+				return arts[source], nil
+			}
+		})
+		releaseFirst, releaseSecond := sync.OnceFunc(func() { close(first) }), sync.OnceFunc(func() { close(second) })
+		defer run.finish()
+		defer releaseFirst()
+		defer releaseSecond()
+		run.send(agentDelta("a1", "```d2\nx -> y\n```\nMIDDLE\n\n```d2\na -> b\n```\nTAIL\n\n"))
+		run.quiet()
+		releaseSecond()
+		run.quiet()
+		time.Sleep(time.Second)
+		run.quiet()
+		if all := run.history() + run.screen(); strings.Contains(all, "ART-SECOND") || strings.Contains(all, "MIDDLE") || strings.Contains(all, "TAIL") {
+			t.Fatalf("a result printed before the diagram that precedes it:\n%s", all)
+		}
+		releaseFirst()
+		run.waitFor(t, "every row printed", func(h, s string) bool {
+			return strings.Contains(h+s, "TAIL") && strings.Contains(h+s, "ART-SECOND")
+		})
+		printedOrder(t, run.history(), run.screen(), "ART-FIRST", "MIDDLE", "ART-SECOND", "TAIL")
+	})
 }

@@ -11,11 +11,21 @@ import (
 	"time"
 )
 
-var diagramMu sync.Mutex
+var (
+	diagramMu            sync.Mutex
+	defaultDiagramBudget = diagramBudget
+)
 
 func TestMain(m *testing.M) {
 	diagramBudget = 30 * time.Second
 	os.Exit(m.Run())
+}
+
+func TestDiagramBudgetIsTwoSeconds(t *testing.T) {
+	t.Parallel()
+	if defaultDiagramBudget != 2*time.Second {
+		t.Fatalf("the render limit is %v, want 2s", defaultDiagramBudget)
+	}
 }
 
 func TestRenderDiagramMermaid(t *testing.T) {
