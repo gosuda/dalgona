@@ -360,7 +360,7 @@ func stageDelete(ctx context.Context, group fileGroup, env tool.Env) (*stagedFil
 		return nil, err
 	}
 	if item.reference != "" {
-		if err := proveUnchanged(env, item.reference, group.display, before); err != nil {
+		if err := proveSource(env, item, group.display, before); err != nil {
 			return nil, err
 		}
 	}
