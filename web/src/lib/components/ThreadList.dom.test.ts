@@ -27,6 +27,7 @@ function props(
 		threads,
 		activeId: extra.activeId ?? null,
 		loading: false,
+		hasMore: false,
 		connected: true,
 		disabled: false,
 		starting: false,
@@ -34,6 +35,7 @@ function props(
 		completedThreadIds: extra.completedThreadIds ?? new Set<string>(),
 		onNew: vi.fn(),
 		onSelect: vi.fn(),
+		onLoadMore: vi.fn(),
 	};
 }
 

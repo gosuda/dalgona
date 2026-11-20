@@ -16,6 +16,7 @@ import type {
 	QuestionRequest,
 	RequestId,
 	RpcHandlers,
+	ThreadListResult,
 } from "./types";
 import { QUESTION_METHOD } from "./types";
 import { parseNotification, parseThreadStartResponse } from "./validation";
@@ -439,6 +440,59 @@ describe("session", () => {
 		expect(requests).toEqual([{ limit: 100 }]);
 		expect(requests[0]).not.toHaveProperty("sortKey");
 		expect(requests[0]).not.toHaveProperty("sortDirection");
+		session.stop();
+	});
+
+	test("retries the same cursor and appends only unseen threads without resuming again", async () => {
+		const requests: JsonValue[] = [];
+		const { dial, ports } = fakeDial("t1", {
+			"thread/list": (params) => {
+				requests.push(params);
+				if (requests.length === 1)
+					return { data: [thread("t1", [])], nextCursor: "older" };
+				if (requests.length === 2) throw new Error("temporarily unavailable");
+				return { data: [thread("t1", []), thread("t2", [])], nextCursor: null };
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await openThread(session, "t1");
+		await session.loadMoreThreads();
+		expect(session.threads.map((entry) => entry.id)).toEqual(["t1"]);
+		const retry = session.notices.find((notice) =>
+			notice.text.includes("temporarily unavailable"),
+		)?.actions[0];
+		expect(retry?.label).toBe("Try again");
+		retry?.run();
+		await session.loadMoreThreads();
+		await vi.waitFor(() => expect(session.nextThreadCursor).toBeNull());
+		expect(requests).toEqual([
+			{ limit: 100 },
+			{ limit: 100, cursor: "older" },
+			{ limit: 100, cursor: "older" },
+		]);
+		expect(session.threads.map((entry) => entry.id)).toEqual(["t1", "t2"]);
+		expect(
+			ports[0]?.calls.filter((method) => method === "thread/resume"),
+		).toHaveLength(1);
+		expect(session.activeThreadId).toBe("t1");
+		session.stop();
+	});
+
+	test("discards an older page that arrives after reconnect", async () => {
+		const { dial } = fakeDial("none", {
+			"thread/list": () => ({ data: [thread("t1", [])], nextCursor: "older" }),
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await vi.waitFor(() => expect(session.nextThreadCursor).toBe("older"));
+		const pending = Promise.withResolvers<ThreadListResult>();
+		vi.spyOn(session, "listThreads").mockReturnValueOnce(pending.promise);
+		const loading = session.loadMoreThreads();
+		await session.connect();
+		pending.resolve({ threads: [], nextCursor: "stale" });
+		await loading;
+		expect(session.nextThreadCursor).toBe("older");
 		session.stop();
 	});
 

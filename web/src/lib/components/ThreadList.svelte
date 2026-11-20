@@ -8,6 +8,7 @@ interface Props {
 	threads: readonly ThreadSummary[];
 	activeId: string | null;
 	loading: boolean;
+	hasMore: boolean;
 	connected: boolean;
 	disabled: boolean;
 	starting: boolean;
@@ -15,12 +16,14 @@ interface Props {
 	completedThreadIds: ReadonlySet<string>;
 	onNew: () => void;
 	onSelect: (threadId: string) => void;
+	onLoadMore: () => void;
 }
 
 let {
 	threads,
 	activeId,
 	loading,
+	hasMore,
 	connected,
 	disabled,
 	starting,
@@ -28,6 +31,7 @@ let {
 	completedThreadIds,
 	onNew,
 	onSelect,
+	onLoadMore,
 }: Props = $props();
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
@@ -120,6 +124,9 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 					</li>
 				{/each}
 			</ul>
+			{#if hasMore}
+				<button type="button" class="quiet" disabled={loading || !connected} onclick={onLoadMore}>Load more threads</button>
+			{/if}
 		</nav>
 	{/if}
 </aside>

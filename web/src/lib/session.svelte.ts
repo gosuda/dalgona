@@ -26,6 +26,7 @@ import { questionResponse, resolutionNotice } from "./question";
 import {
 	acceptThreadStatus,
 	activeRequest,
+	appendThreadPage,
 	applyOpenThreadNotification,
 	dropSentFollowup,
 	emptyTranscript,
@@ -78,6 +79,7 @@ import type {
 	ServerRequest,
 	StatusInfo,
 	ThreadDetail,
+	ThreadListResult,
 	ThreadSummary,
 	TokenUsage,
 	TranscriptState,
@@ -248,6 +250,7 @@ export class Session {
 	queuedFollowups: readonly string[] = $state([]);
 	sentTexts: readonly string[] = $state([]);
 	loadingThreads: boolean = $state(false);
+	nextThreadCursor: string | null = $state(null);
 	loadingTranscript: boolean = $state(false);
 	startingThread: boolean = $state(false);
 	notices: readonly Notice[] = $state([]);
@@ -485,13 +488,37 @@ export class Session {
 		]);
 	}
 
-	async listThreads(): Promise<readonly ThreadSummary[]> {
-		const result = await this.requireClient().call(
+	async listThreads(cursor: string | null = null): Promise<ThreadListResult> {
+		const page = await this.requireClient().call(
 			"thread/list",
-			{ limit: 100 },
+			cursor === null ? { limit: 100 } : { limit: 100, cursor },
 			parseThreadListResponse,
 		);
-		return result.threads;
+		return page.nextCursor !== null && page.nextCursor === cursor
+			? { ...page, nextCursor: null }
+			: page;
+	}
+
+	async loadMoreThreads(): Promise<void> {
+		const cursor = this.nextThreadCursor;
+		if (
+			cursor === null ||
+			this.loadingThreads ||
+			this.connection !== "connected"
+		)
+			return;
+		const generation = this.connectionGeneration;
+		try {
+			await this.loadThreads(generation, cursor);
+		} catch (error) {
+			if (generation === this.connectionGeneration) {
+				this.reportFailure(
+					"Unable to load more threads",
+					error instanceof Error ? error : String(error),
+					() => void this.loadMoreThreads(),
+				);
+			}
+		}
 	}
 
 	async searchThreads(
@@ -610,6 +637,8 @@ export class Session {
 
 	private async openConnection(automatic: boolean): Promise<void> {
 		const generation = ++this.connectionGeneration;
+		this.nextThreadCursor = null;
+		this.loadingThreads = false;
 		this.client?.close();
 		this.cancelStable();
 		this.requests = [];
@@ -856,17 +885,20 @@ export class Session {
 		this.notify("error", `${action}: ${sentence}`, [recovery]);
 	}
 
-	private async loadThreads(generation: number): Promise<void> {
+	private async loadThreads(
+		generation: number,
+		cursor: string | null = null,
+	): Promise<void> {
 		this.loadingThreads = true;
 		try {
-			const result = await this.requireClient().call(
-				"thread/list",
-				{ limit: 100 },
-				parseThreadListResponse,
-			);
+			const result = await this.listThreads(cursor);
 			if (generation !== this.connectionGeneration) return;
-			this.threads = result.threads;
-			if (this.activeThreadId !== null)
+			this.nextThreadCursor = result.nextCursor;
+			this.threads =
+				cursor === null
+					? result.threads
+					: appendThreadPage(this.threads, result.threads);
+			if (cursor === null && this.activeThreadId !== null)
 				await this.selectThread(this.activeThreadId);
 		} finally {
 			if (generation === this.connectionGeneration) this.loadingThreads = false;

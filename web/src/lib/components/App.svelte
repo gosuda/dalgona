@@ -124,6 +124,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 		threads={session.threads}
 		activeId={session.activeThreadId}
 		loading={session.loadingThreads}
+		hasMore={session.nextThreadCursor !== null}
 		connected={session.connection === "connected"}
 		disabled={session.connection !== "connected"}
 		starting={session.startingThread}
@@ -131,6 +132,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 		completedThreadIds={session.completedThreadIds}
 		onNew={() => void session.createThread()}
 		onSelect={(threadId) => void session.selectThread(threadId)}
+		onLoadMore={() => void session.loadMoreThreads()}
 	/>
 
 	<main id="main-content" class="workspace" data-hue={openHue}>

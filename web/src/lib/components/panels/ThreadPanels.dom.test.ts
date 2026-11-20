@@ -84,6 +84,60 @@ const tree: Answer = () => ({
 });
 
 describe("thread command panels", () => {
+	test.each(["sidebar", "resume panel"])(
+		"opens a thread beyond the first 100 from the %s",
+		async (view) => {
+			const row = (id: number) => ({
+				id: String(id),
+				title: `Thread ${id}`,
+				preview: "",
+				status: "idle" as const,
+				updatedAt: 1,
+				model: null,
+				cwd: "/work",
+			});
+			const firstPage = Array.from({ length: 100 }, (_, index) =>
+				row(index + 1),
+			);
+			const older = { ...row(101), title: "Older thread" };
+			const session = new Session(vi.fn());
+			session.connection = "connected";
+			session.threads = firstPage;
+			session.nextThreadCursor = "older";
+			const page = vi
+				.spyOn(session, "listThreads")
+				.mockImplementation(async (cursor) =>
+					cursor === "older"
+						? { threads: [row(100), older], nextCursor: null }
+						: { threads: firstPage, nextCursor: "older" },
+				);
+			const select = vi
+				.spyOn(session, "selectThread")
+				.mockResolvedValue(undefined);
+			render(App, { props: { session } });
+			if (view === "resume panel") session.openPanel("resume");
+			const list = within(
+				await (view === "sidebar"
+					? screen.findByRole("navigation", { name: "Conversation threads" })
+					: screen.findByRole("dialog", { name: "Open an earlier thread" })),
+			);
+			expect(list.queryByText("Older thread")).toBeNull();
+			await fireEvent.click(
+				await list.findByRole("button", { name: "Load more threads" }),
+			);
+			const choice = await list.findByText("Older thread");
+			expect(page).toHaveBeenLastCalledWith("older");
+			expect(list.getAllByRole("listitem")).toHaveLength(101);
+			expect(
+				list.queryByRole("button", { name: "Load more threads" }),
+			).toBeNull();
+			expect(select).not.toHaveBeenCalled();
+			await fireEvent.click(choice);
+			expect(select).toHaveBeenCalledWith("101");
+			expect(session.panel).toBeNull();
+		},
+	);
+
 	test("rewind asks before calling thread/revert", async () => {
 		const { session, calls } = activeSession({
 			"dalgona/thread/tree": tree,
@@ -231,7 +285,7 @@ test("searches conversation text after a pause and ignores cancelled results", a
 	const select = vi.fn().mockResolvedValue(undefined);
 	const close = vi.fn();
 	const session = {
-		listThreads: vi.fn().mockResolvedValue([]),
+		listThreads: vi.fn().mockResolvedValue({ threads: [], nextCursor: null }),
 		searchThreads: search,
 		selectThread: select,
 		closePanel: close,
@@ -278,7 +332,7 @@ test("conversation search offers retry and distinguishes no matches", async () =
 		.mockRejectedValueOnce(new Error("offline"))
 		.mockResolvedValue([]);
 	const session = {
-		listThreads: vi.fn().mockResolvedValue([]),
+		listThreads: vi.fn().mockResolvedValue({ threads: [], nextCursor: null }),
 		searchThreads: search,
 		closePanel: vi.fn(),
 	} as unknown as Session;
