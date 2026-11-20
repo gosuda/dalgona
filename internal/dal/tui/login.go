@@ -23,8 +23,11 @@ const (
 	loginProvidersHint = "↑/↓ choose · Enter select · Esc close"
 	loginMethodsHint   = "↑/↓ choose · Enter select · Esc back"
 	loginKeyHint       = "Enter save · Esc back"
-	loginWaitingHint   = "Esc cancel the sign-in"
+	loginWaitingHint   = "Esc cancel the sign-in · waiting for the provider"
+	loginCancelHint    = "Cancelling sign-in…"
 )
+
+const panelMarkerCells = 2
 
 type loginMethod struct {
 	label string
@@ -43,6 +46,7 @@ type loginPanel struct {
 	loginID   string
 	url       string
 	code      string
+	scroll    int
 	cancelled bool
 }
 
@@ -169,20 +173,25 @@ func (m *model) loginKeyView() panelView {
 	}
 }
 
+func (m *model) loginURLRows(url string) []string {
+	width := max(1, panelRowWidth(&m.screen)-panelRailCells-panelMarkerCells)
+	return strings.Split(m.screen.method.Hardwrap(m.screen.nfc(url), width, true), "\n")
+}
+
 func (m *model) loginWaitingView() panelView {
 	panel := m.login
-	view := panelView{kind: "login", layout: panelLogin, title: "Log in to " + sanitizeText(panel.provider.ID), cursor: -1}
-	switch {
-	case panel.url == "":
-		view.body = []string{"Starting sign-in…"}
-	case panel.code != "":
-		view.body = []string{"Open " + panel.url + " and enter code " + panel.code + "."}
-	default:
-		view.body = []string{"Open " + panel.url + " to sign in.", "Waiting for the provider to confirm."}
-	}
+	view := panelView{kind: "login", layout: panelLogin, title: "Log in to " + sanitizeText(panel.provider.ID), cursor: -1, scroll: panel.scroll}
 	hint := loginWaitingHint
 	if panel.cancelled {
-		hint = "Cancelling sign-in…"
+		hint = loginCancelHint
+	}
+	if panel.url == "" {
+		view.body = []string{"Starting sign-in…"}
+	} else {
+		if panel.code != "" {
+			view.body = []string{"Enter code " + panel.code + " at"}
+		}
+		view.body = append(view.body, m.loginURLRows(panel.url)...)
 	}
 	view.actions = loginActions("", hint)
 	return view
@@ -197,9 +206,17 @@ func (m *model) loginKey(msg tea.KeyPressMsg) tea.Cmd {
 	case loginAPIKey:
 		return m.apiKeyKey(msg)
 	case loginWaiting:
-		if msg.String() == "esc" {
-			return m.cancelLogin()
-		}
+		return m.waitingKey(msg.String())
+	}
+	return nil
+}
+
+func (m *model) waitingKey(key string) tea.Cmd {
+	if key == "esc" {
+		return m.cancelLogin()
+	}
+	if step := panelScrollStep(key); step != 0 {
+		m.login.scroll = m.screen.scrolled(m.loginWaitingView(), step)
 	}
 	return nil
 }
@@ -284,7 +301,7 @@ func (m *model) startLogin(method loginMethod) tea.Cmd {
 		return nil
 	}
 	panel.phase = loginWaiting
-	panel.loginID, panel.url, panel.code = "", "", ""
+	panel.loginID, panel.url, panel.code, panel.scroll = "", "", "", 0
 	params := rpc.AccountLoginStartParams{Type: method.kind, Provider: panel.provider.ID}
 	return m.call("login", "account/login/start", params, new(rpc.LoginAccountResponse), "")
 }
@@ -321,7 +338,7 @@ func (m *model) applyLoginResult(msg resultMsg) (tea.Cmd, bool) {
 		return m.applyLoginStart(msg), true
 	case "loginCancel":
 		if msg.err != nil {
-			m.errorf("cancel sign-in failed: %v", msg.err)
+			m.errorf("cancel sign-in failed: %v; run /login again", msg.err)
 		}
 	default:
 		return nil, false
@@ -386,8 +403,8 @@ func (m *model) applyLoginStart(msg resultMsg) tea.Cmd {
 		m.loginRetry(loginError(msg.err))
 		return nil
 	}
-	if m.login != nil {
-		m.loginStarted(msg.value)
+	if m.login != nil && m.loginStarted(msg.value) {
+		return nil
 	}
 	return m.applyLogin(msg.value)
 }
@@ -395,7 +412,7 @@ func (m *model) applyLoginStart(msg resultMsg) tea.Cmd {
 func (m *model) finishCancelledStart(msg resultMsg) tea.Cmd {
 	m.closeLogin()
 	if msg.err != nil {
-		m.errorf("%s", loginError(msg.err))
+		m.loginFailed(loginError(msg.err))
 		return nil
 	}
 	response, ok := msg.value.(*rpc.LoginAccountResponse)
@@ -405,23 +422,25 @@ func (m *model) finishCancelledStart(msg resultMsg) tea.Cmd {
 	return m.call("loginCancel", "account/login/cancel", rpc.AccountLoginCancelParams{LoginID: response.LoginID}, new(rpc.CancelLoginAccountResponse), "")
 }
 
-func (m *model) loginStarted(value any) {
+func (m *model) loginStarted(value any) bool {
 	if m.login.phase != loginWaiting {
-		return
+		return false
 	}
 	response, ok := value.(*rpc.LoginAccountResponse)
 	if !ok {
 		m.loginRetry("sign-in response has an unexpected shape")
-		return
+		return false
 	}
 	url := sanitizeText(cmp.Or(response.AuthURL, response.VerificationURL))
 	if url == "" {
 		m.loginRetry("the provider returned no sign-in link")
-		return
+		return false
 	}
 	m.login.loginID = response.LoginID
 	m.login.url = url
 	m.login.code = sanitizeText(response.UserCode)
+	m.commit("login-url:"+response.LoginID, []string{"Sign-in URL: " + url})
+	return true
 }
 
 func (m *model) loginRetry(text string) {
@@ -430,7 +449,7 @@ func (m *model) loginRetry(text string) {
 	}
 	m.login.phase = loginMethods
 	m.login.err = sanitizeText(text)
-	m.login.loginID, m.login.url, m.login.code = "", "", ""
+	m.login.loginID, m.login.url, m.login.code, m.login.scroll = "", "", "", 0
 	m.login.cursor = 0
 }
 

@@ -27,12 +27,12 @@ Grounded on 2026-11-12; the rows moved by the dependency upgrade of 2026-11-19 r
 
 ## Pins on 2026-11-11
 
-The original pins equalled the latest stable releases on that date, except pnpm and TypeScript. TypeScript stays at 6.0.3 by the invariant above. The @sveltejs/kit and @biomejs/biome rows moved with the dependency upgrade of 2026-11-19 and re-grounded on that date. pnpm 12.21.0 is pinned in `web/package.json`, `deploy/cloudflare/package.json`, and `.github/workflows/ci.yml`. The npm `latest` tag names pnpm 12.21.0, read on 2026-11-15 and again on 2026-11-16. For unchanged npm pins, the OSV column retains the result of the `POST https://api.osv.dev/v1/querybatch` request of 2026-11-15. Rows marked `supplementary query` record the exact-version queries that the evidence section describes. The Node.js row is not an npm package and was not sent to either query.
+The original pins equalled the latest stable releases on that date, except pnpm and TypeScript. TypeScript stays at 6.0.3 by the invariant above. The @sveltejs/kit and @biomejs/biome rows moved with the dependency upgrade of 2026-11-19 and re-grounded on that date. pnpm 12.21.0 is pinned in `web/package.json` and `deploy/cloudflare/package.json`. The npm `latest` tag names pnpm 12.21.0, read on 2026-11-15 and again on 2026-11-16. For unchanged npm pins, the OSV column retains the result of the `POST https://api.osv.dev/v1/querybatch` request of 2026-11-15. Rows marked `supplementary query` record the exact-version queries that the evidence section describes. The Node.js row is not an npm package and was not sent to either query.
 
 |Package|Pin|Released|Use|OSV batch|
 |---|---|---|---|---|
-|pnpm (`web/package.json`, `deploy/cloudflare/package.json`, `.github/workflows/ci.yml`)|12.21.0|2026-11-13|package manager and CI setup|none (supplementary query)|
-|Node.js (`.github/workflows/ci.yml`)|26.13.1|2026-11-10|CI runtime. `https://nodejs.org/dist/index.json` lists v26.13.1 as the newest 26.x release on 2026-11-15. The page of the 2026-11-11 Node.js security releases names v26.13.1 as the 26.x download. The CVE IDs CVE-2026-105482, CVE-2026-105483, CVE-2026-106069 and CVE-2026-111497 are not on that page, so those IDs are not confirmed fixed.|not queried|
+|pnpm (`web/package.json`, `deploy/cloudflare/package.json`)|12.21.0|2026-11-13|package manager|none (supplementary query)|
+|Node.js (`.latchkey/workflows/ci.yml`)|26.13.1|2026-11-10|CI runtime. `https://nodejs.org/dist/index.json` lists v26.13.1 as the newest 26.x release on 2026-11-15. The page of the 2026-11-11 Node.js security releases names v26.13.1 as the 26.x download. The CVE IDs CVE-2026-105482, CVE-2026-105483, CVE-2026-106069 and CVE-2026-111497 are not on that page, so those IDs are not confirmed fixed.|not queried|
 |svelte|5.58.0|2026-11-18|UI framework|none|
 |@sveltejs/kit|3.3.1|2026-11-17|app framework and build|none|
 |@sveltejs/adapter-static|4.0.1|2026-10-29|static build output|none|

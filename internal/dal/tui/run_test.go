@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -65,54 +69,65 @@ func (b *outputBuffer) waitFor(ctx context.Context, t *testing.T, wants ...strin
 
 func TestRunStreamsTurnAndAnswersApproval(t *testing.T) {
 	t.Parallel()
-	client, server := net.Pipe()
-	input, keyboard := io.Pipe()
-	defer keyboard.Close()
-	ctx, cancel := context.WithTimeoutCause(t.Context(), 5*time.Second, errors.New("tui integration timed out"))
-	defer cancel()
-	output := newOutputBuffer()
-	statuses := make(chan Status, 256)
-	children := make(chan [2]string, 4)
-	opts := Options{
-		Input:  input,
-		Output: output,
-		Width:  80,
-		Height: 24,
-		OnStatus: func(status Status) {
-			select {
-			case statuses <- status:
-			case <-ctx.Done():
-			}
-		},
-		OnChildSpawned: func(childID, cwd string) {
-			select {
-			case children <- [2]string{childID, cwd}:
-			case <-ctx.Done():
-			}
-		},
-	}
-	runResult := make(chan error, 1)
-	go func() { runResult <- Run(ctx, client, opts) }()
-	serverResult := make(chan error, 1)
-	go func() { serverResult <- serveTurn(server) }()
+	warmSignalPackage()
+	synctest.Test(t, func(t *testing.T) {
+		client, server := net.Pipe()
+		input, keyboard := io.Pipe()
+		defer keyboard.Close()
+		ctx, cancel := context.WithTimeoutCause(t.Context(), 5*time.Second, errors.New("tui integration timed out"))
+		defer cancel()
+		output := newOutputBuffer()
+		statuses := make(chan Status, 256)
+		children := make(chan [2]string, 4)
+		opts := Options{
+			Input:  input,
+			Output: output,
+			Width:  80,
+			Height: 24,
+			OnStatus: func(status Status) {
+				select {
+				case statuses <- status:
+				case <-ctx.Done():
+				}
+			},
+			OnChildSpawned: func(childID, cwd string) {
+				select {
+				case children <- [2]string{childID, cwd}:
+				case <-ctx.Done():
+				}
+			},
+		}
+		runResult := make(chan error, 1)
+		go func() { runResult <- Run(ctx, client, opts) }()
+		serverResult := make(chan error, 1)
+		go func() { serverResult <- serveTurn(server) }()
 
-	output.waitFor(ctx, t, "Approval · Run command", "go test ./...")
-	waitStatus(ctx, t, statuses, stateAwaitingApproval, "t1")
-	if _, err := keyboard.Write([]byte("y")); err != nil {
-		t.Fatalf("write approval key: %v", err)
-	}
-	waitStatus(ctx, t, statuses, stateIdle, "t1")
-	output.waitFor(ctx, t, "settled")
-	if _, err := keyboard.Write([]byte("\x03\x03")); err != nil {
-		t.Fatalf("write quit keys: %v", err)
-	}
-	if err := <-runResult; err != nil {
-		t.Fatalf("Run returned %v", err)
-	}
-	if err := <-serverResult; err != nil {
-		t.Fatalf("fake server returned %v", err)
-	}
-	assertChildSpawned(t, children)
+		output.waitFor(ctx, t, "Approval · Run command", "go test ./...")
+		waitStatus(ctx, t, statuses, stateAwaitingApproval, "t1")
+		if _, err := keyboard.Write([]byte("y")); err != nil {
+			t.Fatalf("write approval key: %v", err)
+		}
+		waitStatus(ctx, t, statuses, stateIdle, "t1")
+		output.waitFor(ctx, t, "settled")
+		if _, err := keyboard.Write([]byte("\x03\x03")); err != nil {
+			t.Fatalf("write quit keys: %v", err)
+		}
+		if err := <-runResult; err != nil {
+			t.Fatalf("Run returned %v", err)
+		}
+		if err := <-serverResult; err != nil {
+			t.Fatalf("fake server returned %v", err)
+		}
+		assertChildSpawned(t, children)
+		time.Sleep(time.Minute)
+		synctest.Wait()
+	})
+}
+
+func warmSignalPackage() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT)
+	signal.Stop(signals)
 }
 
 func assertChildSpawned(t *testing.T, children chan [2]string) {

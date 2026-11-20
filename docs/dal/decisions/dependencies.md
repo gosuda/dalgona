@@ -32,7 +32,7 @@ This section lists the modules that `go.mod` requires directly, and the three to
 |github.com/aymanbagabas/go-udiff|v0.4.2|2026-11-15|unified line diffs in `internal/dal/textdiff`. Licence: BSD-3-Clause and MIT, per `LICENSE-BSD` and `LICENSE-MIT` at v0.4.2.|none|
 |github.com/charmbracelet/x/ansi|v0.11.10|2026-11-18|TUI measure, text width, and truncation, the method of the Bubble Tea renderer.|none|
 |github.com/charmbracelet/colorprofile|v0.4.3|2026-03-09|TUI colour downsampling to the terminal's profile, and the `NO_COLOR` rule.|none|
-|github.com/charmbracelet/x/term|v0.2.2|2025-10-31|terminal detection in TUI anchor output|none|
+|github.com/charmbracelet/x/term|v0.2.2|2025-10-31|terminal detection in TUI anchor output and in the interface entry point|none|
 |github.com/charmbracelet/x/vt|v0.1.0|2026-10-12|test-only terminal emulator for the print test, MIT licence.|none|
 |github.com/odvcencio/gotreesitter|v0.57.0|2026-11-08|syntax package for the symbols, definition, syntax and rewrite modes, with 23 grammars. Licence MIT, per `LICENSE` at v0.57.0. Decision in `docs/dal/decisions/syntax-package.md`.|none|
 |github.com/coder/websocket|v1.8.15|2026-06-15|websocket|none|

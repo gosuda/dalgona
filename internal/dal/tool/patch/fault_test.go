@@ -41,12 +41,16 @@ type failRestoreRunner struct {
 	cwd    string
 	aCalls int
 	bCalls int
+	silent bool
 }
 
 func (r *failRestoreRunner) WriteFile(ctx context.Context, path string, data []byte, perm fs.FileMode) error {
 	switch path {
 	case filepath.Join(r.cwd, "a.txt"):
 		r.aCalls++
+		if r.aCalls == 2 && r.silent {
+			return nil
+		}
 		if r.aCalls == 2 {
 			return errors.New("injected restore failure")
 		}

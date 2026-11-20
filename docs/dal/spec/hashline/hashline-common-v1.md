@@ -249,9 +249,10 @@ For every historical splice:
 4. Edits after it leave it unchanged.
 
 Both real neighbors MUST still be adjacent. The empty file's sole gap has the
-same rule. BOF/EOF belong to the referenced snapshot. A concurrent append occupies
-its EOF gap and conflicts. New profiles deliberately remove the source plan's
-stale head/tail exception (S-PROOF).
+same rule. BOF/EOF belong to the referenced snapshot. A `PUT >$:` under a reference
+names the last gap of that snapshot. A concurrent append occupies its EOF gap and
+conflicts. New profiles deliberately remove the source plan's stale head/tail
+exception (S-PROOF).
 
 A pure gap removes no line body, so profile coverage does not differ. A terminator
 side effect can make it destructive. C11 determines its actual footprint.
@@ -362,12 +363,14 @@ Light never relaxes grants or approval (S-WRITE).
 
 Reuse the staged writer. Create and sync complete temps, and dirty affected search
 indexes before target mutation. Execute ordered target operations, then clean up
-and sync under existing POSIX/Windows rules. After the first target operation,
-finish commit or rollback before honoring cancellation.
+and sync under existing POSIX/Windows rules. A local pin syncs its directory after
+the last target operation. Windows skips that sync. A sync failure leaves the files
+installed and reports `write_error` with `complete`. After the first target
+operation, finish commit or rollback before honoring cancellation.
 
 Rollback is an attempt, not an atomic multi-file transaction visible to every
 reader. Crashes and non-cooperating writers remain limitations from S-WRITE.
-Report observed outcome, not intended outcome. The new profiles do not yet emit these statuses:
+Report observed outcome, not intended outcome. The new profiles emit these statuses:
 
 | Status | Commit state | Meaning |
 |---|---|---|
@@ -384,6 +387,10 @@ Report observed outcome, not intended outcome. The new profiles do not yet emit 
 nothing written. `write_error/complete` means effects installed but success/durability
 failed, for example a directory-sync failure after renames. `partial` lists every
 affected path and verified before/after state. Unknown state requires indeterminate.
+A sha re-read after rollback decides every path state. On a Unix host, the
+re-read MUST NOT block on a named pipe or a device. On a Unix host, the re-read
+MUST accept only a regular file. On a Unix host, a path that holds anything
+else MUST report `unknown`.
 
 Do not publish executable references or Chain edges before commit and its required
 record boundary succeed. Invalidate relevant epochs on partial/uncertain outcomes.
@@ -404,7 +411,7 @@ conservatively even when this double-counts shared data. Other runtime allocatio
 are outside these budgets. Total RSS is not promised to fit in 96 MiB.
 
 Retain source ceilings: input 8 MiB, 1-64 edits, 64 canonical paths, 16 MiB per file,
-64 MiB staged before-plus-after bytes per call. Check before allocation.
+64 MiB staged before-plus-after bytes per call. The canonical paths of a call total at most 16 KiB. Check before allocation.
 These are individual ceilings, not a promise every combination can fit concurrently.
 Metadata can reduce usable capacity. The store has no limit per path or per consumer.
 Each thread store keeps at most 512 entries.
@@ -422,8 +429,9 @@ written files as an edit rejection.
 
 ## C15. Output and recovery
 
-For the new profiles, retain existing `text`, `error_class`, `changes`, `display`
-and add one versioned `hashline` object. Legacy output stays unchanged.
+For the new profiles, retain the existing output text, `changes`, and `display`.
+Add one versioned `hashline` object to `tool.completed.meta`. The object also
+carries `error_class`. Legacy output stays unchanged.
 
 ```json
 {
@@ -432,6 +440,7 @@ and add one versioned `hashline` object. Legacy output stays unchanged.
   "status": "needs_context",
   "commit_state": "none",
   "reason": "unobserved_range",
+  "error_class": "proof",
   "replayed": false,
   "recovery": {
     "kind": "read",
@@ -452,11 +461,16 @@ paths and `before`, `after`, or `unknown` states. `changes` describes verified
 actual changes, never the whole proposed plan on partial failure. Display diffs
 are not proof.
 
+The object is attached to a call that reached planning, with two exceptions.
+A pre-plan decline carries none. Recovery and turn end write none for a decline
+or a skipped call. The object MUST stay under 48 KiB.
+
 Recovery respects current read permission and reveals no foreign consumer data.
-Recovery display is not implemented yet. It MAY show at most 40 complete lines and 16 KiB of source text total. Never truncate
-and register a line as observed. An overlong line yields a read instruction only.
-List uncovered ranges in `remaining`. Only the final delivery establishes future
-coverage. No internal fetch, automatic retag, or automatic destructive retry.
+A refusal shows no source rows. `ranges` names at most 40 uncovered lines to
+read, and `remaining` names the other uncovered ranges. `remaining` holds at most
+64 ranges, and its last range runs through the final uncovered line. Only the
+final delivery establishes future coverage. No internal fetch, automatic retag,
+or automatic destructive retry.
 
 | Reason codes | Status | Required next action |
 |---|---|---|

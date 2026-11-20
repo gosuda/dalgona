@@ -123,3 +123,29 @@ func TestDockOutputQueriesOnlyEnabledInput(t *testing.T) {
 		}
 	}
 }
+
+func TestDockOutputRecoversAfterBadMarker(t *testing.T) {
+	t.Parallel()
+	var wire bytes.Buffer
+	written := make(chan dockWrittenMsg, 1)
+	output := newDockOutput(&wire, nil, func(msg dockWrittenMsg) { written <- msg })
+	overflow := "\x00" + string(bytes.Repeat([]byte("x"), 70))
+	if n, err := io.WriteString(output, overflow); err == nil || n >= len(overflow) {
+		t.Fatalf("overflow Write = (%d, %v), want an error before byte %d", n, err, len(overflow))
+	}
+	if n, err := io.WriteString(output, "plain"); n != len("plain") || err != nil {
+		t.Fatalf("next Write = (%d, %v), want (%d, nil)", n, err, len("plain"))
+	}
+	if wire.String() != "plain" {
+		t.Fatalf("wire = %q, want plain", wire.String())
+	}
+	if _, err := io.WriteString(output, "frame"+dockWriteMarker(9)+"tail"); err != nil {
+		t.Fatal(err)
+	}
+	if message := <-written; message.revision != 9 {
+		t.Fatalf("write receipt = %v", message)
+	}
+	if wire.String() != "plainframetail" {
+		t.Fatalf("wire = %q, want plainframetail", wire.String())
+	}
+}

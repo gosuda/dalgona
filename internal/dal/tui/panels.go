@@ -28,8 +28,21 @@ const panelRowCells = panelRailCells + panelBodyCells
 
 var panelHeights = [...]int{8, 12, 6, 9, 13, 17, 12, 14}
 
+const (
+	decisionMinWindow = 4
+	decisionMinRows   = 3
+)
+
+func decisionPanel(kind panelKind) bool {
+	return kind == panelApproval || kind == panelAsk
+}
+
 func panelRows(kind panelKind, windowHeight int) int {
-	return max(0, min(panelHeights[kind], windowHeight-4))
+	rows := min(panelHeights[kind], windowHeight-4)
+	if decisionPanel(kind) && windowHeight >= decisionMinWindow {
+		rows = max(rows, min(decisionMinRows, windowHeight-2))
+	}
+	return max(0, rows)
 }
 
 func panelRowWidth(s *screenState) int {
@@ -117,6 +130,25 @@ func isSubsequence(query, text string) bool {
 	return len(rest) == 0
 }
 
+func panelBodyRows(p panelView, rows int) int {
+	return max(rows-1-len(p.actions), 0)
+}
+
+func panelScrollStep(key string) int {
+	switch key {
+	case "up":
+		return -1
+	case "down":
+		return 1
+	}
+	return 0
+}
+
+func (s *screenState) scrolled(p panelView, step int) int {
+	last := max(len(p.body)-panelBodyRows(p, panelRows(p.layout, s.height)), 0)
+	return min(max(min(p.scroll, last)+step, 0), last)
+}
+
 func framePanel(s *screenState, p panelView, rows int) []string {
 	if rows <= 0 {
 		return nil
@@ -127,8 +159,9 @@ func framePanel(s *screenState, p panelView, rows int) []string {
 	if len(actions) > rows-1 {
 		actions = actions[len(actions)-(rows-1):]
 	}
-	bodyRows := rows - 1 - len(actions)
-	lines := []string{rowTheme.paint(roleFaint, "┌ ") + rowTheme.paintBold(roleText, s.fit(p.title, width-panelRailCells))}
+	bodyRows := panelBodyRows(p, rows)
+	head := rowTheme.paint(roleFaint, "┌ ") + rowTheme.paintBold(roleText, s.fit(p.title, width-panelRailCells))
+	lines := []string{s.fit(head, width)}
 	start, shown := bodyWindow(p, bodyRows)
 	marked := p.cursor >= 0
 	for i, line := range shown {
@@ -150,7 +183,8 @@ func framePanel(s *screenState, p panelView, rows int) []string {
 		if i == 0 {
 			prefix = "└─ "
 		}
-		lines = append(lines, rowTheme.paint(roleFaint, prefix)+rowTheme.paint(roleDim, s.fit(action, actionWidth-s.cells(prefix))))
+		line := rowTheme.paint(roleFaint, prefix) + rowTheme.paint(roleDim, s.fit(action, actionWidth-s.cells(prefix)))
+		lines = append(lines, s.fit(line, actionWidth))
 	}
 	return lines
 }
@@ -160,13 +194,13 @@ func bodyWindow(p panelView, rows int) (int, []string) {
 		return 0, nil
 	}
 	start, end := bodySpan(p, rows)
-	if end == len(p.body) {
+	if end == len(p.body) || rows == 1 {
 		return start, slices.Clone(p.body[start:end])
 	}
 	start, end = bodySpan(p, rows-1)
 	shown := slices.Clone(p.body[start:end])
 	if end < len(p.body) {
-		shown = append(shown, fmt.Sprintf("↓ %d more lines · ↑↓ scroll · ctrl+o full view", len(p.body)-end))
+		shown = append(shown, fmt.Sprintf("↓ %d more lines · ctrl+o full view · ↑↓ scroll", len(p.body)-end))
 	}
 	return start, shown
 }

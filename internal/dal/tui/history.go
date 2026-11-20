@@ -9,9 +9,10 @@ import (
 const maxHistory = 200
 
 type historyEntry struct {
-	id     uint64
-	turnID string
-	text   string
+	id       uint64
+	turnID   string
+	text     string
+	verbatim bool
 }
 
 type history struct {
@@ -19,7 +20,7 @@ type history struct {
 	lastID     uint64
 	revision   uint64
 	index      int
-	draft      string
+	draft      editor
 	awaitingID uint64
 }
 
@@ -31,23 +32,42 @@ func awaitedID(id uint64, turnID string) uint64 {
 }
 
 func (h *history) add(text, turnID string) {
+	h.record(text, turnID, true, false)
+}
+
+func (h *history) saveDraft(draft editor, text string) {
+	h.record(text, "", !draft.readsSlash(), true)
+}
+
+func (h *history) record(text, turnID string, verbatim, replace bool) {
 	text = strings.TrimSpace(sanitizeText(text))
 	if text == "" || strings.Fields(text)[0] == "/login" {
 		return
 	}
+	verbatim = verbatim && strings.HasPrefix(text, "/")
 	if n := len(h.entries); n > 0 && h.entries[n-1].text == text {
-		h.entries[n-1].turnID = cmp.Or(turnID, h.entries[n-1].turnID)
-		h.awaitingID = awaitedID(h.entries[n-1].id, turnID)
+		h.repeat(&h.entries[n-1], turnID, verbatim, replace)
 		return
 	}
 	h.lastID++
 	h.revision++
-	h.entries = append(h.entries, historyEntry{id: h.lastID, turnID: turnID, text: text})
+	h.entries = append(h.entries, historyEntry{id: h.lastID, turnID: turnID, text: text, verbatim: verbatim})
 	h.awaitingID = awaitedID(h.lastID, turnID)
 	if len(h.entries) > maxHistory {
 		h.entries = slices.Delete(h.entries, 0, len(h.entries)-maxHistory)
 	}
 	h.index = len(h.entries)
+}
+
+func (h *history) rewind() {
+	h.index = len(h.entries)
+}
+
+func (h *history) repeat(last *historyEntry, turnID string, verbatim, replace bool) {
+	keep := last.verbatim && (!replace || last.turnID != "")
+	last.turnID = cmp.Or(turnID, last.turnID)
+	last.verbatim = verbatim || keep
+	h.awaitingID = awaitedID(last.id, turnID)
 }
 
 func (h *history) startTurn(turnID string) {
@@ -76,33 +96,43 @@ func (h *history) remove(index int) bool {
 	return true
 }
 
-func (h *history) load(id uint64) (string, bool) {
+func (h *history) load(id uint64) (historyEntry, bool) {
 	index, ok := h.indexOf(id)
 	if !ok {
-		return "", false
+		return historyEntry{}, false
 	}
 	h.index = len(h.entries)
-	return h.entries[index].text, true
+	return h.entries[index], true
 }
 
-func (h *history) older(draft string) (string, bool) {
+func (h *history) recall(into *editor) {
+	entry := h.entries[h.index]
+	into.recall(entry.text, entry.verbatim)
+}
+
+func (h *history) older(into *editor) bool {
 	if h.index == 0 {
-		return "", false
+		return false
 	}
 	if h.index == len(h.entries) {
-		h.draft = draft
+		h.draft = editor{text: into.text, chips: into.chips, verbatimText: into.verbatimText}
 	}
 	h.index--
-	return h.entries[h.index].text, true
+	h.recall(into)
+	return true
 }
 
-func (h *history) newer() (string, bool) {
+func (h *history) newer(into *editor) bool {
 	if h.index >= len(h.entries) {
-		return "", false
+		return false
 	}
 	h.index++
 	if h.index == len(h.entries) {
-		return h.draft, true
+		into.text, into.chips = slices.Clone(h.draft.text), slices.Clone(h.draft.chips)
+		into.verbatimText = h.draft.verbatimText
+		into.cursor = len(into.text)
+		return true
 	}
-	return h.entries[h.index].text, true
+	h.recall(into)
+	return true
 }

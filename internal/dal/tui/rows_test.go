@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
@@ -419,5 +420,35 @@ func TestStatusCommandTailKeepsNewestBeyondCap(t *testing.T) {
 	}
 	if got := stripANSI(m.liveRow()); !strings.Contains(got, "TAIL-END-9ZQ") {
 		t.Fatalf("live row lacks the newest tail:\n%s", got)
+	}
+}
+
+func TestCommittedRowsFitTheWindowWhereWrapUndercounts(t *testing.T) {
+	t.Parallel()
+	texts := []string{keycapText, strings.Repeat("x1️⃣", 12), " " + strings.Repeat("x", 80), strings.Repeat("-", 90)}
+	for _, width := range []int{20, 40} {
+		for _, text := range texts {
+			requireCommittedRowsFit(t, width, text)
+		}
+	}
+}
+
+func requireCommittedRowsFit(t *testing.T, width int, text string) {
+	t.Helper()
+	m := newTestModel(nil, Options{})
+	m.screen.method = ansi.GraphemeWidth
+	m.screen.width = width
+	m.commit("undercount", []string{text})
+	var rows []string
+	for len(m.out.pending) > 0 {
+		rows = append(rows, m.takeChunk(100)...)
+	}
+	for _, row := range rows {
+		if got := ansi.StringWidth(row); got > width-1 {
+			t.Errorf("%d columns: the committed row %q holds %d cells, want at most %d", width, row, got, width-1)
+		}
+	}
+	if kept, want := removeSpaces(strings.Join(rows, "")), removeSpaces(text); kept != want {
+		t.Errorf("%d columns: the committed rows lost text: %q", width, kept)
 	}
 }

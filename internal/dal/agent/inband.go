@@ -154,6 +154,7 @@ func (w *worker) resolveInBand(ctx context.Context, p *prepared, toolCall event.
 	}
 	if !v.allow {
 		p.discardPlan()
+		v.meta = refusalMeta(p.tool, declineOutcome(v))
 		return w.completeInBandDeny(ctx, toolCall, v)
 	}
 	p.verdict = v
@@ -207,7 +208,9 @@ func (w *worker) prepareGuard(ctx context.Context, toolCall event.ToolCall, requ
 	gc, gateErr := w.gateCall(ctx, p, requestID)
 	if gateErr != nil {
 		p.discardPlan()
-		return inBandGuard{gc: gc, denial: &inBandDenial{p.class, summary(gc), decline(by, gateErr.Error())}}, nil
+		refusal := decline(by, gateErr.Error())
+		refusal.meta = planRefusalMeta(gateErr)
+		return inBandGuard{gc: gc, denial: &inBandDenial{p.class, summary(gc), refusal}}, nil
 	}
 	if err := w.journalCover(ctx, toolCall); err != nil {
 		p.discardPlan()
@@ -278,7 +281,7 @@ func (w *worker) completeInBandDeny(ctx context.Context, call event.ToolCall, v 
 	if err != nil {
 		return event.ToolCompleted{}, err
 	}
-	completed := event.ToolCompleted{CallID: call.ID, Output: masked, Recovered: "none"}
+	completed := event.ToolCompleted{CallID: call.ID, Output: masked, Recovered: "none", Meta: v.meta}
 	if _, err := w.t.appendEvents(ctx, completed); err != nil {
 		return event.ToolCompleted{}, err
 	}

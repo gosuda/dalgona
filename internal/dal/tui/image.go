@@ -28,6 +28,7 @@ const (
 
 type imageMsg struct {
 	text          string
+	at            int
 	mime, data    string
 	width, height int
 	err           error
@@ -75,7 +76,7 @@ func resolvePaste(raw string) string {
 	return unescapePaste(raw)
 }
 
-func pastedImage(text, raw string) tea.Cmd {
+func pastedImage(text string, at int, raw string) tea.Cmd {
 	return func() tea.Msg {
 		path := resolvePaste(raw)
 		info, err := os.Stat(path)
@@ -91,7 +92,7 @@ func pastedImage(text, raw string) tea.Cmd {
 			return imageMsg{text: text, err: imageError("cannot read image %s: %v", name, err)}
 		}
 		msg := decodeImage(name, data)
-		msg.text = text
+		msg.text, msg.at = text, at
 		return msg
 	}
 }

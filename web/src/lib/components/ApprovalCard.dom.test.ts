@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, within } from "@testing-library/svelte";
 import { afterEach, describe, expect, type Mock, test, vi } from "vitest";
 import ApprovalCard from "#lib/components/ApprovalCard.svelte";
+import { appliedRule } from "#lib/css-rule.ts";
 import type { ApprovalRequest, FileChange } from "#lib/types.ts";
 
 afterEach(cleanup);
@@ -208,5 +209,13 @@ describe("approval card", () => {
 		expect(summary).toContain("+1 −1");
 		expect(cards[0]?.querySelector("del")?.textContent).toBe("-beta");
 		expect(cards[0]?.querySelector("ins")?.textContent).toBe("+gamma");
+	});
+});
+
+describe("approval card in the dock", () => {
+	test("keeps its own height and lets the composer give way", () => {
+		render(ApprovalCard, { props: props(commandRequest) });
+		const rule = appliedRule(".request-card");
+		expect(rule.style.getPropertyValue("flex-shrink")).toBe("0");
 	});
 });

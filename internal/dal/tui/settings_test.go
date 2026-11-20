@@ -90,7 +90,7 @@ func TestSettingsPanelKeepsOpenOnError(t *testing.T) {
 	if !strings.Contains(dockText(m), "Settings") {
 		t.Fatalf("settings panel closed after a failed save:\n%s", dockText(m))
 	}
-	assertContains(t, stripANSI(m.liveText()), "Could not save settings: disk full")
+	assertContains(t, stripANSI(m.liveText()), "Could not save settings: disk full; press Enter to try again")
 }
 
 func TestSettingsSaveErrorSurvivesKeyPress(t *testing.T) {
@@ -101,7 +101,7 @@ func TestSettingsSaveErrorSurvivesKeyPress(t *testing.T) {
 	m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = runPickCommand(t, m, command)
 	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	assertContains(t, stripANSI(m.liveText()), "Could not save settings: disk full")
+	assertContains(t, stripANSI(m.liveText()), "Could not save settings: disk full; press Enter to try again")
 }
 
 func TestSettingsSecondEnterWhileSavingSendsNothing(t *testing.T) {

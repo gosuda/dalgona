@@ -42,6 +42,7 @@ type verdict struct {
 	scores      map[string]float64
 	unsandboxed bool
 	cancel      bool
+	meta        jsontext.Value
 }
 
 func accept(by string) verdict {

@@ -30,32 +30,17 @@ func (c editor) imageBytes() int {
 	return total
 }
 
-func indexRun(text, run []rune) int {
-	for i := 0; i+len(run) <= len(text); i++ {
-		if slices.Equal(text[i:i+len(run)], run) {
-			return i
-		}
-	}
-	return -1
-}
-
-func (c *editor) attach(pasted string, ch chip) bool {
+func (c *editor) attach(pasted string, at int, ch chip) {
 	run := []rune(pasted)
-	at := -1
-	if pasted != "" {
-		if at = indexRun(c.text, run); at < 0 {
-			return false
-		}
-	}
+	end := at + len(run)
 	c.chips = append(c.chips, ch)
 	n := len(c.chips)
 	c.chips[n-1].label = c.chips[n-1].tag(n)
 	atom := chipAtom(n - 1)
-	if at < 0 {
+	if len(run) == 0 || end > len(c.text) || !slices.Equal(c.text[at:end], run) {
 		c.insert([]rune{atom})
-		return true
+		return
 	}
-	end := at + len(run)
 	c.text = slices.Replace(c.text, at, end, atom)
 	switch {
 	case c.cursor >= end:
@@ -63,5 +48,4 @@ func (c *editor) attach(pasted string, ch chip) bool {
 	case c.cursor > at:
 		c.cursor = at + 1
 	}
-	return true
 }

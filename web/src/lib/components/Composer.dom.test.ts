@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import Composer from "#lib/components/Composer.svelte";
+import { appliedRule } from "#lib/css-rule.ts";
 import type { FileMatch } from "#lib/types.ts";
 
 function baseProps() {
@@ -947,4 +948,17 @@ describe("escaped slash", () => {
 			"The message and images are too large to send together. Remove an image.",
 		);
 	}, 60000);
+});
+
+describe("composer under a request", () => {
+	afterEach(cleanup);
+
+	test("gives way to the request card down to its label and field", () => {
+		render(Composer, { props: { ...baseProps(), deciding: true } });
+		const rule = appliedRule(".composer.deciding");
+		expect(rule.style.getPropertyValue("flex-shrink")).toBe("1");
+		expect(rule.style.getPropertyValue("min-height")).toContain(
+			"var(--control-height)",
+		);
+	});
 });

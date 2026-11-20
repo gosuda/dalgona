@@ -17,18 +17,22 @@ var dalPNG []byte
 var dalgonaPNG []byte
 
 func detectImageProto(getenv func(string) string) string {
-	if getenv("TMUX") != "" || getenv("STY") != "" {
+	term := getenv("TERM")
+	if term == "" || term == "dumb" || getenv("TMUX") != "" || getenv("STY") != "" {
 		return ""
 	}
-	term := getenv("TERM")
-	if getenv("KITTY_WINDOW_ID") != "" || strings.Contains(term, "kitty") ||
-		strings.Contains(term, "ghostty") || getenv("WEZTERM_PANE") != "" {
+	if kittyTerminal(getenv, term) {
 		return "kitty"
 	}
-	if getenv("TERM_PROGRAM") == "iTerm.app" {
+	if getenv("TERM_PROGRAM") == "iTerm.app" || getenv("ITERM_SESSION_ID") != "" {
 		return "iterm"
 	}
 	return ""
+}
+
+func kittyTerminal(getenv func(string) string, term string) bool {
+	return getenv("KITTY_WINDOW_ID") != "" || strings.Contains(term, "kitty") ||
+		strings.Contains(term, "ghostty") || getenv("WEZTERM_PANE") != ""
 }
 
 func brandPNG(product string, t theme) []byte {

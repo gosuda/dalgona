@@ -6,6 +6,9 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
 )
 
 type document struct {
@@ -20,16 +23,13 @@ type document struct {
 
 func decodeDocument(path string, raw []byte) (document, error) {
 	if len(raw) > 16<<20 {
-		return document{}, fmt.Errorf("patch: %s is over 16 MiB. Use exec", path)
+		return document{}, reasoned(tool.ReasonResourceLimit, fmt.Errorf("patch: %s is over 16 MiB. Use exec", path))
 	}
 	if bytes.IndexByte(raw, 0) >= 0 || !utf8.Valid(raw) {
-		return document{}, fmt.Errorf("patch: %s is not a text file (binary or invalid UTF-8)", path)
+		return document{}, reasoned(tool.ReasonInvalidShape, fmt.Errorf("patch: %s is not a text file (binary or invalid UTF-8)", path))
 	}
-	doc := document{raw: raw, bom: bytes.HasPrefix(raw, []byte{0xef, 0xbb, 0xbf})}
-	text := raw
-	if doc.bom {
-		text = raw[3:]
-	}
+	text, hasBOM := snapshot.TrimBOM(raw)
+	doc := document{raw: raw, bom: hasBOM}
 	doc.view, doc.removedCR = normalizeLineEnds(text)
 	crlf := len(doc.removedCR)
 	doc.finalNewline = len(doc.view) > 0 && doc.view[len(doc.view)-1] == '\n'

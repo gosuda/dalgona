@@ -35,6 +35,10 @@ select {
 	min-height: var(--control-height);
 }
 
+summary {
+	min-height: var(--target-min);
+}
+
 @media (pointer: coarse) {
 	button,
 	select {
@@ -75,8 +79,19 @@ button.point,
 }
 
 button.quiet {
-	border-color: var(--strong);
+	border-color: transparent;
 	background: transparent;
+	color: var(--dim);
+}
+
+button.quiet:not(.danger) {
+	padding: 0 var(--space-3);
+}
+
+button.quiet:disabled {
+	border-color: var(--line);
+	background: var(--tone);
+	color: var(--dim);
 }
 
 button.danger {

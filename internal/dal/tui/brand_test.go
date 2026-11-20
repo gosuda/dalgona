@@ -14,19 +14,30 @@ func TestDetectImageProto(t *testing.T) {
 		env  map[string]string
 		want string
 	}{
-		{map[string]string{"KITTY_WINDOW_ID": "1"}, "kitty"},
+		{map[string]string{"TERM": "xterm-256color", "KITTY_WINDOW_ID": "1"}, "kitty"},
 		{map[string]string{"TERM": "xterm-kitty"}, "kitty"},
 		{map[string]string{"TERM": "xterm-ghostty"}, "kitty"},
-		{map[string]string{"WEZTERM_PANE": "0"}, "kitty"},
-		{map[string]string{"TERM_PROGRAM": "iTerm.app"}, "iterm"},
-		{map[string]string{"TERM_PROGRAM": "vscode"}, ""},
+		{map[string]string{"TERM": "xterm-256color", "WEZTERM_PANE": "0"}, "kitty"},
+		{map[string]string{"TERM": "xterm-256color", "TERM_PROGRAM": "iTerm.app"}, "iterm"},
+		{map[string]string{"TERM": "xterm-256color", "ITERM_SESSION_ID": "w0t0p0:ABC"}, "iterm"},
+		{map[string]string{"TERM": "xterm-kitty", "TERM_PROGRAM": "iTerm.app"}, "kitty"},
+		{map[string]string{"TERM": "xterm-256color", "KITTY_WINDOW_ID": "1", "ITERM_SESSION_ID": "w0t0p0:ABC"}, "kitty"},
+		{map[string]string{"TERM": "xterm-256color", "TERM_PROGRAM": "vscode"}, ""},
 		{map[string]string{"TERM": "xterm-256color"}, ""},
-		{map[string]string{"KITTY_WINDOW_ID": "1", "TMUX": "/tmp/tmux-1"}, ""},
+		{map[string]string{"TERM": "xterm-256color", "KITTY_WINDOW_ID": "1", "TMUX": "/tmp/tmux-1"}, ""},
 		{map[string]string{"TERM": "xterm-kitty", "STY": "1.pts-0.host"}, ""},
+		{map[string]string{"KITTY_WINDOW_ID": "1"}, ""},
+		{map[string]string{"TERM": "", "KITTY_WINDOW_ID": "1"}, ""},
+		{map[string]string{"TERM": "dumb", "KITTY_WINDOW_ID": "1"}, ""},
+		{map[string]string{"TERM": "dumb", "WEZTERM_PANE": "0"}, ""},
+		{map[string]string{"TERM": "dumb", "TERM_PROGRAM": "iTerm.app"}, ""},
+		{map[string]string{"TERM": "dumb", "ITERM_SESSION_ID": "w0t0p0:ABC"}, ""},
+		{map[string]string{"ITERM_SESSION_ID": "w0t0p0:ABC"}, ""},
+		{map[string]string{"TERM": "xterm-256color", "ITERM_SESSION_ID": "w0t0p0:ABC", "TMUX": "/tmp/tmux-1"}, ""},
 	}
 	for _, c := range cases {
 		if got := detectImageProto(envMap(c.env)); got != c.want {
-			t.Fatalf("env %v: proto %q want %q", c.env, got, c.want)
+			t.Errorf("env %v: proto %q want %q", c.env, got, c.want)
 		}
 	}
 }

@@ -35,10 +35,10 @@ func (m *model) openQueue() {
 	m.openList(&listPanel{kind: queueKind, title: "Queued follow-ups", items: queueItems(m.queue)})
 }
 
-func queueItems(queue []string) []listItem {
+func queueItems(queue []followup) []listItem {
 	items := make([]listItem, 0, len(queue))
-	for i, text := range queue {
-		first, _, _ := strings.Cut(text, "\n")
+	for i, item := range queue {
+		first, _, _ := strings.Cut(item.text, "\n")
 		items = append(items, listItem{id: fmt.Sprint(i), label: fmt.Sprintf("%d. %s", i+1, sanitizeText(first))})
 	}
 	return items
@@ -309,6 +309,9 @@ func (m *model) activateChoice() tea.Cmd {
 }
 
 func (m *model) activateClosed(kind string, item listItem) tea.Cmd {
+	if busyThreadCommands[kind] && m.busyRefusal(kind) {
+		return nil
+	}
 	switch kind {
 	case "resume":
 		return m.resumeThread(item.id)
@@ -321,7 +324,7 @@ func (m *model) activateClosed(kind string, item listItem) tea.Cmd {
 		m.openRewind(item.id, item.label)
 	case "fork":
 		params := rpc.ThreadForkParams{ThreadID: m.thread.id, LastTurnID: item.id}
-		return m.call("fork", "thread/fork", params, new(rpc.ThreadForkResponse), "")
+		return m.callSeq(m.resetPendingResume(""), "fork", "thread/fork", params, new(rpc.ThreadForkResponse))
 	}
 	return nil
 }
@@ -387,6 +390,26 @@ func threadDate(thread rpc.Thread, now time.Time) string {
 		return ""
 	}
 	return formatResumeDate(time.Unix(seconds, 0), now)
+}
+
+func (m *model) staleListReply(msg resultMsg) bool {
+	if msg.seq != 0 && msg.seq != m.listSeq {
+		return true
+	}
+	return m.panelOpen() || m.review != nil
+}
+
+func (m *model) applyListReply(msg resultMsg) tea.Cmd {
+	if m.staleListReply(msg) {
+		return nil
+	}
+	switch msg.op {
+	case "models":
+		return m.applyModels(msg.value)
+	case "threads":
+		return m.applyThreads(msg.value)
+	}
+	return m.applyTree(msg.op, msg.value)
 }
 
 func (m *model) applyModels(value any) tea.Cmd {
@@ -623,12 +646,12 @@ func (m *model) syncHistory() {
 }
 
 func (m *model) loadHistory(item listItem) tea.Cmd {
-	text, ok := m.input.history.load(historyID(item))
+	entry, ok := m.input.history.load(historyID(item))
 	if !ok {
 		m.rebuildHistory()
 		return nil
 	}
-	m.input.composer.SetValue(text)
+	m.input.composer.recall(entry.text, entry.verbatim)
 	m.closeList()
 	return nil
 }

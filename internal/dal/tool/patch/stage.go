@@ -80,7 +80,7 @@ func checkedGroups(ctx context.Context, env tool.Env, edits []edit) ([]fileGroup
 		return nil, err
 	}
 	if len(groups) > 64 {
-		return nil, fmt.Errorf("patch: this call touches %d files; the limit is 64", len(groups))
+		return nil, reasoned(tool.ReasonResourceLimit, fmt.Errorf("patch: this call touches %d files; the limit is 64", len(groups)))
 	}
 	err = validateGroups(groups, env.Cwd)
 	if err != nil {
@@ -165,10 +165,10 @@ func validateRenameTarget(item edit, group fileGroup, cwd string, claimed map[st
 		return err
 	}
 	if hasParentComponent(item.to) {
-		return errors.New("patch: rename destination contains parent traversal")
+		return reasoned(tool.ReasonOutsideWorkspace, errors.New("patch: rename destination contains parent traversal"))
 	}
 	if owner, ok := claimed[display]; ok {
-		return fmt.Errorf("patch: cannot rename %s to %s: another change also writes %s", group.display, display, owner)
+		return reasoned(tool.ReasonOverlap, fmt.Errorf("patch: cannot rename %s to %s: another change also writes %s", group.display, display, owner))
 	}
 	claimed[display] = display
 	return nil
@@ -204,7 +204,7 @@ func stageGroups(ctx context.Context, style Style, groups []fileGroup, env tool.
 
 func checkStagedBytes(total int) error {
 	if total > 64<<20 {
-		return errors.New("patch: this call stages over 64 MiB; split it into several calls")
+		return reasoned(tool.ReasonResourceLimit, errors.New("patch: this call stages over 64 MiB; split it into several calls"))
 	}
 	return nil
 }
@@ -261,7 +261,7 @@ func checkPathComponents(ctx context.Context, env tool.Env, display, absolute st
 			return nil
 		}
 		if info.Mode&fs.ModeSymlink != 0 {
-			return fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display)
+			return symlinkRefusal(display)
 		}
 		current = filepath.Join(current, component)
 	}
@@ -287,16 +287,20 @@ func hasParentComponent(path string) bool {
 
 func resolvePatchPath(cwd, raw string) (string, string, error) {
 	if raw == "" {
-		return "", "", errors.New("patch: path must not be empty")
+		return "", "", reasoned(tool.ReasonInvalidShape, errors.New("patch: path must not be empty"))
 	}
 	if rootedOrVolume.MatchString(raw) || strings.IndexByte(raw, 0) >= 0 {
-		return "", "", fmt.Errorf("patch: %s is outside the workspace %s", raw, cwd)
+		return "", "", outsideWorkspace(raw, cwd)
 	}
 	clean := filepath.Clean(raw)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("patch: %s is outside the workspace %s", raw, cwd)
+		return "", "", outsideWorkspace(raw, cwd)
 	}
 	return filepath.ToSlash(clean), filepath.Join(cwd, clean), nil
+}
+
+func outsideWorkspace(raw, cwd string) error {
+	return reasoned(tool.ReasonOutsideWorkspace, fmt.Errorf("patch: %s is outside the workspace %s", raw, cwd))
 }
 
 var rootedOrVolume = regexp.MustCompile(`^(?:[A-Za-z]:|[/\\])`)
@@ -342,7 +346,7 @@ func stageCreate(ctx context.Context, group fileGroup, env tool.Env) (*stagedFil
 	item := group.edits[0]
 	_, err := env.Runner.Stat(ctx, group.absolute)
 	if err == nil {
-		return nil, fmt.Errorf("patch: %s already exists", group.display)
+		return nil, atPath(group.display, reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: %s already exists", group.display)))
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("patch: cannot inspect %s: %w", group.display, err)
@@ -360,7 +364,7 @@ func stageDelete(ctx context.Context, group fileGroup, env tool.Env) (*stagedFil
 		return nil, err
 	}
 	if item.reference != "" {
-		if err := proveUnchanged(env, item.reference, group.display, before); err != nil {
+		if err := proveSource(env, item, group.display, before); err != nil {
 			return nil, err
 		}
 	}
@@ -383,7 +387,7 @@ func validateChangeShapes(group fileGroup) error {
 		}
 	}
 	if whole && changes > 1 {
-		return fmt.Errorf("patch: operations for %s cannot combine", group.display)
+		return reasoned(tool.ReasonInvalidShape, fmt.Errorf("patch: operations for %s cannot combine", group.display))
 	}
 	return nil
 }
@@ -394,27 +398,35 @@ func checkShape(display string, item edit, last bool) error {
 		return nil
 	case editRename:
 		if !last {
-			return fmt.Errorf("patch: rename must be the last operation for %s", display)
+			return reasoned(tool.ReasonInvalidShape, fmt.Errorf("patch: rename must be the last operation for %s", display))
 		}
 		return nil
 	case editCreate, editDelete:
 	}
-	return fmt.Errorf("patch: changes[%d]: create or delete cannot combine with other operations for %s", item.index, display)
+	return reasoned(tool.ReasonInvalidShape, fmt.Errorf("patch: changes[%d]: create or delete cannot combine with other operations for %s", item.index, display))
 }
 
 func readTarget(ctx context.Context, env tool.Env, absolute, display string) ([]byte, fs.FileMode, error) {
 	info, err := env.Runner.Stat(ctx, absolute)
 	if err != nil {
-		return nil, 0, fmt.Errorf("patch: %s could not be read: %w", display, err)
+		return nil, 0, unreadable(display, err)
 	}
 	if !info.Mode.IsRegular() {
-		return nil, 0, fmt.Errorf("patch: %s is not a regular file", display)
+		return nil, 0, reasoned(tool.ReasonInvalidShape, fmt.Errorf("patch: %s is not a regular file", display))
 	}
 	data, err := env.Runner.ReadFile(ctx, absolute)
 	if err != nil {
-		return nil, 0, fmt.Errorf("patch: %s could not be read: %w", display, err)
+		return nil, 0, unreadable(display, err)
 	}
 	return data, info.Mode.Perm(), nil
+}
+
+func unreadable(display string, cause error) error {
+	err := fmt.Errorf("patch: %s could not be read: %w", display, cause)
+	if errors.Is(cause, fs.ErrNotExist) {
+		return atPath(display, reasoned(tool.ReasonPathChanged, err))
+	}
+	return atPath(display, err)
 }
 
 func checkRenameTargets(files []*stagedFile) error {
@@ -427,7 +439,7 @@ func checkRenameTargets(files []*stagedFile) error {
 			continue
 		}
 		if owner, ok := claimed[file.renameAbs]; ok {
-			return fmt.Errorf("patch: cannot rename %s to %s: another change also writes %s", file.path, file.renameTo, owner)
+			return reasoned(tool.ReasonOverlap, fmt.Errorf("patch: cannot rename %s to %s: another change also writes %s", file.path, file.renameTo, owner))
 		}
 		claimed[file.renameAbs] = file.renameTo
 	}

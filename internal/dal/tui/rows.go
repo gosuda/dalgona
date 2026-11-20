@@ -191,6 +191,14 @@ func (m *model) commitFull(key string, lines, full []string) {
 	if len(lines) == 0 || !m.keepEntry(key, full) {
 		return
 	}
+	m.queueRows(lines)
+}
+
+func (m *model) queueRows(lines []string) {
+	if len(m.out.held) > 0 {
+		m.out.held = append(m.out.held, heldCommit{lines: lines})
+		return
+	}
 	m.out.pending = append(m.out.pending, lines...)
 }
 
@@ -345,7 +353,7 @@ func (m *model) drain() tea.Cmd {
 	m.out.printing = true
 	m.anchorState().prints++
 	printed := func() tea.Msg { return printedMsg{} }
-	return tea.Sequence(tea.Println(text), printed)
+	return tea.Sequence(tea.Println(text), printed, m.landCaret())
 }
 
 func (m *model) nextChunk(bound int) (string, bool) {

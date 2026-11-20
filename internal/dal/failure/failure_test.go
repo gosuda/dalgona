@@ -521,21 +521,21 @@ func TestFailureWriteErrorHasNoRawFallback(t *testing.T) {
 	secret := "sk-ant-sekret9876543210ZYXW" //nolint:gosec // synthetic test-only secret
 	input := testInput()
 	input.Err = errors.New("leak " + secret)
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(store.dir, 0o500); err != nil { //nolint:gosec // test revokes write access to force a storage error
-			t.Fatal(err)
-		}
-		defer func() { _ = os.Chmod(store.dir, 0o700) }() //nolint:gosec // test restores write access after forcing a storage error
-		_, err := store.Capture(context.Background(), input)
-		if err == nil || !strings.HasPrefix(err.Error(), "failure: write local record:") {
-			t.Fatalf("err = %v", err)
-		}
-		if got := notice.String(); got != "failure log unavailable; details were not written\n" {
-			t.Fatalf("notice = %q", got)
-		}
-		if strings.Contains(notice.String(), secret) {
-			t.Fatal("raw secret reached the notice")
-		}
+	if err := os.RemoveAll(store.dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.dir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.Capture(context.Background(), input)
+	if err == nil || !strings.HasPrefix(err.Error(), "failure: write local record:") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := notice.String(); got != "failure log unavailable; details were not written\n" {
+		t.Fatalf("notice = %q", got)
+	}
+	if strings.Contains(notice.String(), secret) {
+		t.Fatal("raw secret reached the notice")
 	}
 }
 

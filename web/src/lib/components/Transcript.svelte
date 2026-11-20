@@ -120,6 +120,11 @@ let unseen = $state(0);
 const showJump = $derived(!following);
 let scrollQueued = false;
 let scrolledSnapshot: ScrollSnapshot = { count: 0, lastId: null };
+let seen: { target: Element; height: number } | null = null;
+
+function remember(target: Element): void {
+	seen = { target, height: target.scrollHeight };
+}
 
 function scroller(): Element | null {
 	for (
@@ -177,6 +182,7 @@ $effect(() => {
 		const target = scroller();
 		if (target && following) {
 			target.scrollTo({ top: target.scrollHeight, behavior: "auto" });
+			remember(target);
 		}
 	});
 });
@@ -184,7 +190,10 @@ $effect(() => {
 function trackFollowing(): void {
 	const target = scroller();
 	if (!target) return;
-	const distance = target.scrollHeight - target.scrollTop - target.clientHeight;
+	const known = following && seen?.target === target ? seen.height : Infinity;
+	const height = Math.min(known, target.scrollHeight);
+	const distance = height - target.scrollTop - target.clientHeight;
+	remember(target);
 	following = distance < 32;
 	if (following) unseen = 0;
 }
@@ -226,7 +235,10 @@ function jumpToLatest(): void {
 	following = true;
 	unseen = 0;
 	const target = scroller();
-	if (target) target.scrollTo({ top: target.scrollHeight, behavior: "auto" });
+	if (target) {
+		target.scrollTo({ top: target.scrollHeight, behavior: "auto" });
+		remember(target);
+	}
 	lastRow()?.focus({ preventScroll: true });
 }
 </script>

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -17,16 +18,41 @@ const (
 	markAlpha      = 0.45
 	markKittyID    = 2141
 	markKittyChunk = 4096
+	markCacheLimit = 32
 )
 
-var markCache sync.Map
+var (
+	markPixelCache sync.Map
+	markCache      sync.Map
+	markCacheSize  atomic.Int32
+)
+
+type markKey struct {
+	proto, product, accent string
+	width, height          int
+}
 
 func (m model) markOverlay() string {
 	proto := m.screen.imgProto
 	if proto != "kitty" && proto != "iterm" {
 		return ""
 	}
-	data := markPixels(m.conn.product, m.screen.dockTheme())
+	t := m.screen.dockTheme()
+	key := markKey{proto: proto, product: m.conn.product, accent: paletteHex(t, roleAccentText), width: m.screen.width, height: m.screen.height}
+	if cached, ok := markCache.Load(key); ok {
+		return cached.(string)
+	}
+	overlay := m.encodeMark(markPixels(m.conn.product, t))
+	if markCacheSize.Add(1) > markCacheLimit {
+		markCache.Clear()
+		markCacheSize.Store(1)
+	}
+	markCache.Store(key, overlay)
+	return overlay
+}
+
+func (m model) encodeMark(data []byte) string {
+	proto := m.screen.imgProto
 	if len(data) == 0 {
 		return ""
 	}
@@ -61,11 +87,11 @@ func markAnchor(data []byte, width, height int) (markPlacement, bool) {
 
 func markPixels(product string, t theme) []byte {
 	key := product + "|" + paletteHex(t, roleAccentText)
-	if cached, ok := markCache.Load(key); ok {
+	if cached, ok := markPixelCache.Load(key); ok {
 		return cached.([]byte)
 	}
 	data := fadePNG(brandPNG(product, t), markAlpha)
-	if cached, loaded := markCache.LoadOrStore(key, data); loaded {
+	if cached, loaded := markPixelCache.LoadOrStore(key, data); loaded {
 		return cached.([]byte)
 	}
 	return data

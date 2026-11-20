@@ -24,12 +24,10 @@
 	}
 
 	function checkOverlaps(failures) {
-		const items = [...document.querySelectorAll(".band > .item")].filter(
-			(el) => {
-				const box = el.getBoundingClientRect();
-				return box.width > 0 && box.height > 0;
-			},
-		);
+		const items = [...document.querySelectorAll(".band .item")].filter((el) => {
+			const box = el.getBoundingClientRect();
+			return box.width > 0 && box.height > 0;
+		});
 		for (let i = 0; i < items.length; i++) {
 			for (let j = i + 1; j < items.length; j++) {
 				const a = items[i].getBoundingClientRect();

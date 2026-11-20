@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 )
 
@@ -49,6 +51,60 @@ func TestReviewFrameBounded(t *testing.T) {
 		m := reviewModel(t, width, 300)
 		m = rawUpdate(t, m, press('o', tea.ModCtrl, ""))
 		assertFrame(t, strings.Split(m.View().Content, "\n"), width, 24)
+	}
+}
+
+const shortReviewWidth = 40
+
+func shortReviewContent(t *testing.T, height int, resizeFirst bool) string {
+	t.Helper()
+	m := newTestModel(new(fakeCaller), Options{})
+	m = rawUpdate(t, m, tea.WindowSizeMsg{Width: shortReviewWidth, Height: 24})
+	m = rawUpdate(t, m, reviewThreadStarted())
+	m = rawUpdate(t, m, commandOutput("seq", numberedOutput(30)))
+	m = settleFrames(m)
+	short := tea.WindowSizeMsg{Width: shortReviewWidth, Height: height}
+	if resizeFirst {
+		m = rawUpdate(t, m, short)
+	}
+	m = rawUpdate(t, m, press('o', tea.ModCtrl, ""))
+	if !resizeFirst {
+		m = rawUpdate(t, m, short)
+	}
+	if m.review == nil {
+		t.Fatal("ctrl+o did not open the review")
+	}
+	return m.View().Content
+}
+
+func assertShortReview(t *testing.T, content string, height int) {
+	t.Helper()
+	if got := lineCount(content); got > height {
+		t.Fatalf("review view has %d lines, want at most %d:\n%s", got, height, content)
+	}
+	if height >= 2 {
+		assertFrame(t, strings.Split(content, "\n"), shortReviewWidth, height)
+	}
+	text := ansi.Strip(content)
+	for _, part := range []struct {
+		name, marker string
+		minHeight    int
+	}{{"entry text", "seq", 1}, {"header", "Review · ", 3}, {"footer", "Esc close", 4}} {
+		if got, want := strings.Contains(text, part.marker), height >= part.minHeight; got != want {
+			t.Fatalf("%s shown %t, want %t:\n%s", part.name, got, want, text)
+		}
+	}
+}
+
+func TestReviewViewFitsShortWindow(t *testing.T) {
+	t.Parallel()
+	for height := 1; height <= 6; height++ {
+		for _, resizeFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("height %d resized before open %t", height, resizeFirst), func(t *testing.T) {
+				t.Parallel()
+				assertShortReview(t, shortReviewContent(t, height, resizeFirst), height)
+			})
+		}
 	}
 }
 

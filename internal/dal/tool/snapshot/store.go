@@ -159,6 +159,32 @@ func (s *Store) Get(ref string) (Entry, error) {
 	return cloneEntry(entry), nil
 }
 
+func (s *Store) Shown(ref string) ([]Range, error) {
+	if s == nil {
+		return nil, ErrUnknownReference
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.entries[ref]
+	if !ok {
+		return nil, s.absent(ref)
+	}
+	return slices.Clone(entry.Shown), nil
+}
+
+func (s *Store) Lines(ref string) (int, error) {
+	if s == nil {
+		return 0, ErrUnknownReference
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.entries[ref]
+	if !ok {
+		return 0, s.absent(ref)
+	}
+	return lineCount(entry.Data), nil
+}
+
 func (s *Store) absent(ref string) error {
 	if !ValidRef(ref) {
 		return ErrUnknownReference
@@ -272,6 +298,15 @@ func (s *Store) Rename(oldPath, newPath string, before, after []byte, _ []Splice
 	defer s.mu.Unlock()
 	s.breakDest(newPath)
 	return s.putLocked(newPath, after, nil)
+}
+
+func (s *Store) Invalidate(path string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.breakDest(path)
 }
 
 func (s *Store) breakDest(path string) {
@@ -465,12 +500,17 @@ func cloneEdge(edge Edge) Edge {
 	return edge
 }
 
+func TrimBOM(data []byte) ([]byte, bool) {
+	return bytes.CutPrefix(data, []byte{0xef, 0xbb, 0xbf})
+}
+
 func lineCount(data []byte) int {
-	if len(data) == 0 {
+	text, _ := TrimBOM(data)
+	if len(text) == 0 {
 		return 0
 	}
-	count := bytes.Count(data, []byte{'\n'})
-	if data[len(data)-1] != '\n' {
+	count := bytes.Count(text, []byte{'\n'})
+	if text[len(text)-1] != '\n' {
 		count++
 	}
 	return count

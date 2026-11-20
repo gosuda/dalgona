@@ -62,7 +62,7 @@ type model struct {
 	noticeError bool
 	noticeN     int
 	hint        hintState
-	queue       []string
+	queue       []followup
 	leaving     bool
 	quitting    bool
 	suspending  bool
@@ -72,6 +72,7 @@ type model struct {
 	login       *loginPanel
 	help        *helpPanel
 	matchSeq    int
+	listSeq     int
 	review      *reviewState
 	settings    *settingsPanel
 	saving      *settingsPanel
@@ -96,6 +97,7 @@ type connInfo struct {
 	product        string
 	version        string
 	platformFamily string
+	lost           string
 }
 
 type threadInfo struct {
@@ -185,6 +187,9 @@ type outState struct {
 	anchor   *dockAnchor
 	seq      int
 	loads    int
+	draw     drawFunc
+	held     []heldCommit
+	launch   []tea.Cmd
 }
 
 type notificationMsg struct {
@@ -215,12 +220,18 @@ type searchResultMsg struct {
 }
 
 type resultMsg struct {
-	op     string
-	value  any
-	text   string
-	seq    int
-	turnID string
-	err    error
+	op       string
+	value    any
+	text     string
+	verbatim bool
+	seq      int
+	turnID   string
+	err      error
+}
+
+type followup struct {
+	text     string
+	verbatim bool
 }
 
 type disconnectedMsg struct {

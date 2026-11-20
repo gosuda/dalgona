@@ -66,6 +66,14 @@ function props(
 	};
 }
 
+function rowItems(container: HTMLElement): string[][] {
+	return [...container.querySelectorAll(".band > dl.row")].map((row) =>
+		[...row.querySelectorAll("[data-item]")].map(
+			(item) => item.getAttribute("data-item") ?? "",
+		),
+	);
+}
+
 function expectGlyph(text: string | undefined, codePoint: number): void {
 	const glyphs = [...(text ?? "")];
 	expect(glyphs).toHaveLength(1);
@@ -75,6 +83,29 @@ function expectGlyph(text: string | undefined, codePoint: number): void {
 describe("StatusBand", () => {
 	afterEach(() => {
 		cleanup();
+	});
+
+	test("puts the items in three rows", () => {
+		const { container } = render(StatusBand, {
+			props: props({ queued: 1 }),
+		});
+		expect(rowItems(container)).toEqual([
+			["model"],
+			["effort", "approval", "sandbox", "folder", "queue"],
+			["context", "mark"],
+		]);
+	});
+
+	test("renders no row without an item", () => {
+		const second = ["effort", "approval", "sandbox", "folder", "queue"];
+		const markOnly = render(StatusBand, {
+			props: props({ statusHide: second, usage: null }),
+		});
+		expect(rowItems(markOnly.container)).toEqual([["model"], ["mark"]]);
+		const modelOnly = render(StatusBand, {
+			props: props({ statusHide: [...second, "mark"], usage: null }),
+		});
+		expect(rowItems(modelOnly.container)).toEqual([["model"]]);
 	});
 
 	test("shows effort as a labelled glyph and context as a percent", () => {

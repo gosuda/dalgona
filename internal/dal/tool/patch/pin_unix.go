@@ -44,7 +44,7 @@ func (p *dirPin) openChain(components []string, display string) error {
 			return nil
 		}
 		if errors.Is(err, unix.ELOOP) {
-			return fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display)
+			return symlinkRefusal(display)
 		}
 		return fmt.Errorf("patch: inspect path %s: %w", display, err)
 	}
@@ -59,7 +59,7 @@ func (p *dirPin) checkLeaf(name, display string) error {
 	err := unix.Fstatat(int(p.file.Fd()), name, &info, unix.AT_SYMLINK_NOFOLLOW)
 	if err == nil {
 		if info.Mode&unix.S_IFMT == unix.S_IFLNK {
-			return fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display)
+			return symlinkRefusal(display)
 		}
 		return nil
 	}
@@ -80,7 +80,7 @@ func (p *dirPin) mkdirChain(display string, perm fs.FileMode) error {
 		fd, err := unix.Openat(int(p.file.Fd()), component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
 			if errors.Is(err, unix.ELOOP) {
-				return fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display)
+				return symlinkRefusal(display)
 			}
 			return fmt.Errorf("patch: inspect path %s: %w", display, err)
 		}
@@ -114,12 +114,19 @@ func (p *dirPin) writeFileAt(base string, data []byte, perm fs.FileMode) error {
 }
 
 func (p *dirPin) readFileAt(base string) ([]byte, error) {
-	fd, err := unix.Openat(int(p.file.Fd()), base, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(int(p.file.Fd()), base, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("patch: read %s: %w", base, err)
 	}
 	file := os.NewFile(uintptr(fd), base)
 	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("patch: read %s: %w", base, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("patch: read %s: %w", base, errNotRegular)
+	}
 	return io.ReadAll(file)
 }
 
@@ -172,6 +179,16 @@ func (p *dirPin) linkFileAt(oldBase, newBase string) error {
 func (p *dirPin) unlinkFileAt(base string) error {
 	if err := unix.Unlinkat(int(p.file.Fd()), base, 0); err != nil {
 		return fmt.Errorf("patch: remove %s: %w", base, err)
+	}
+	return nil
+}
+
+func (p *dirPin) syncDir() error {
+	if p == nil {
+		return nil
+	}
+	if err := p.file.Sync(); err != nil {
+		return fmt.Errorf("patch: sync directory %s: %w", p.file.Name(), err)
 	}
 	return nil
 }

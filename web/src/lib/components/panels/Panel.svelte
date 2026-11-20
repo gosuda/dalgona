@@ -32,10 +32,28 @@ $effect(() => {
 		)?.focus();
 	} else if (!open && node.open) {
 		node.close();
-		opener?.focus();
+		if (
+			opener !== null &&
+			opener !== document.body &&
+			opener.isConnected &&
+			!opener.matches(":disabled")
+		) {
+			opener.focus();
+		} else {
+			handFocusOver();
+		}
 		opener = null;
 	}
 });
+
+function handFocusOver(): void {
+	const prompt = document.getElementById("prompt");
+	if (prompt !== null && !prompt.matches(":disabled")) {
+		prompt.focus();
+		return;
+	}
+	document.getElementById("transcript")?.focus({ preventScroll: true });
+}
 
 function onKey(event: KeyboardEvent): void {
 	if (event.key !== "Escape" || composing || isImeKey(event)) return;
@@ -77,11 +95,17 @@ function onCancel(event: Event): void {
 		box-sizing: border-box;
 		width: min(70rem, calc(100vw - var(--space-8)));
 		max-width: 100%;
+		max-height: calc(100dvh - var(--space-8));
 		padding: var(--space-4);
 		border: var(--border-width) solid var(--line);
 		border-radius: var(--radius-card);
 		background: var(--surface);
 		color: var(--text);
+	}
+
+	.panel[open] {
+		display: flex;
+		flex-direction: column;
 	}
 
 	.panel::backdrop {
@@ -97,7 +121,8 @@ function onCancel(event: Event): void {
 	}
 
 	.panel-body {
-		max-height: calc(100dvh - var(--space-8));
+		flex: 0 1 auto;
+		min-height: 0;
 		overflow-y: auto;
 		overscroll-behavior: contain;
 	}

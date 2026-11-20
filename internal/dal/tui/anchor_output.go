@@ -101,6 +101,7 @@ func (output *dockOutput) writeSegment(p []byte, consumed int) (int, error) {
 
 func (output *dockOutput) markerByte(value byte) (uint64, error) {
 	if output.markerN == len(output.marker) {
+		output.markerN = 0
 		return 0, fmt.Errorf("dock write marker exceeds %d bytes", len(output.marker))
 	}
 	output.marker[output.markerN] = value

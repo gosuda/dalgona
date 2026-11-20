@@ -133,9 +133,8 @@ function onKeydown(event: KeyboardEvent): void {
 <style>
 	.request-card {
 		display: flex;
-		flex: 0 1 auto;
+		flex: none;
 		min-width: 0;
-		min-height: 0;
 		flex-direction: column;
 		margin: var(--space-4) var(--space-6) 0;
 		border: var(--border-width) solid var(--line);
