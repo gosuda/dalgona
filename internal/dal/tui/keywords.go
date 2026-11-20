@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -10,6 +11,15 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
+
+const (
+	keywordDebounce   = 120 * time.Millisecond
+	keywordDraftLimit = 64 << 10
+)
+
+type keywordTickMsg struct {
+	seq int
+}
 
 type keyword struct {
 	Word string `json:"word"`
@@ -48,23 +58,33 @@ func (m *model) matchKind() string {
 
 func (m *model) matchKeywords() tea.Cmd {
 	m.matchSeq++
-	draft := m.input.composer.Value()
-	if draft == "" {
+	if len(m.input.composer.text) == 0 {
 		m.input.marks, m.input.marksFor = nil, ""
 		return nil
 	}
 	seq := m.matchSeq
+	return tea.Tick(keywordDebounce, func(time.Time) tea.Msg { return keywordTickMsg{seq: seq} })
+}
+
+func (m *model) sendKeywordMatch(msg keywordTickMsg) tea.Cmd {
+	if msg.seq != m.matchSeq {
+		return nil
+	}
+	draft := m.input.composer.Value()
+	if len(draft) > keywordDraftLimit {
+		return nil
+	}
 	params := keywordMatchParams{ThreadID: m.thread.id, Text: draft, Kind: m.matchKind()}
 	client, done := m.conn.client, m.conn.done
 	return func() tea.Msg {
 		if client == nil {
-			return resultMsg{op: "keywordMatch", seq: seq, text: draft, err: errors.New("rpc client is not connected")}
+			return resultMsg{op: "keywordMatch", seq: msg.seq, text: draft, err: errors.New("rpc client is not connected")}
 		}
 		ctx, cancel := requestContext(done)
 		defer cancel()
 		var reply keywordReply
 		err := client.Call(ctx, "dalgona/keywords/match", params, &reply)
-		return resultMsg{op: "keywordMatch", value: &reply, seq: seq, text: draft, err: err}
+		return resultMsg{op: "keywordMatch", value: &reply, seq: msg.seq, text: draft, err: err}
 	}
 }
 

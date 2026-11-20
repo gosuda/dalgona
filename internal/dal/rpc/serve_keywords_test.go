@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/dal/config"
@@ -41,4 +42,28 @@ func TestKeywordMatchReportsRangeAndEffect(t *testing.T) {
 	log := readTurn(t, c.collect())
 	user := log.completed[0]
 	expect(t, len(user.Keywords) == 1 && user.Keywords[0].ByteRange.Start == 0 && user.Keywords[0].ByteRange.End == 10, "userMessage keywords", user.Keywords)
+}
+
+func TestKeywordsMatchRefusesTextOver64KiB(t *testing.T) {
+	cases := []struct {
+		name    string
+		text    string
+		refused bool
+	}{
+		{"65536 bytes are not over 64 KiB", strings.Repeat("a", 65536), false},
+		{"65537 bytes are over 64 KiB", strings.Repeat("a", 65537), true},
+		{"21846 three-byte runes are 65538 bytes and over 64 KiB", strings.Repeat("\u20ac", 21846), true},
+		{"21845 three-byte runes are 65535 bytes and not over 64 KiB", strings.Repeat("\u20ac", 21845), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newRig(t, config.ApprovalYolo).connect()
+			params := map[string]any{"text": tc.text}
+			if tc.refused {
+				c.fails("dalgona/keywords/match", params, -32602, "text exceeds 64 KiB")
+				return
+			}
+			c.ok("dalgona/keywords/match", params, nil)
+		})
+	}
 }

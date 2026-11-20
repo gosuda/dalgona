@@ -17,6 +17,9 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/decide"
 	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool/exec"
+	"github.com/gosuda/dalgona/internal/dal/tool/patch"
+	"github.com/gosuda/dalgona/internal/dal/tool/read"
 )
 
 type decisionsServer struct {
@@ -293,5 +296,73 @@ func TestSubstitutionNeverReachesDecider(t *testing.T) {
 	}
 	if counter.calls.Load() != 0 {
 		t.Fatalf("decider calls = %d", counter.calls.Load())
+	}
+}
+
+func TestCancelledCallCompletesWithItsDeclineReason(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		row  string
+		name string
+		call call
+	}{
+		{row: "approvals.md cancel", name: "exec", call: call{id: "first", name: "exec", args: `{"command":"go version"}`}},
+		{row: "approvals.md cancel", name: "patch", call: call{id: "first", name: "patch", args: `{"input":"[n.txt#NEW]\nPUT >$:\n+body\n"}`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.row+"/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			events := runCancelledFirstCall(t, tc.call)
+			checkCancelledFirstCall(t, events)
+			checkSkippedSecondCall(t, events)
+		})
+	}
+}
+
+func runCancelledFirstCall(t *testing.T, first call) []event.Seqd {
+	t.Helper()
+	h := newHarness(t, withApproval(config.ApprovalAsk), func(h *harness) {
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
+			return []tool.Tool{read.New(), exec.New(), patch.New("hashline-light")}, nil
+		}
+	})
+	h.write("a.txt", "a\n")
+	h.model.push(calls(first, call{id: "second", name: "read", args: `{"path":"a.txt"}`}), text("done"))
+	thread := h.start()
+	client := answerApprovals(t, thread, func(ApprovalPrompt) Reply { return ReplyCancel })
+	h.submit(thread, "run the task")
+	h.waitIdle(thread)
+	prompts := client.stop()
+	if len(prompts) != 1 || prompts[0].CallID != "first" {
+		t.Fatalf("prompts = %+v, want one for first", prompts)
+	}
+	return h.events(thread.ID())
+}
+
+func checkCancelledFirstCall(t *testing.T, events []event.Seqd) {
+	t.Helper()
+	if resolved := resolutions(events)["first"]; resolved.Decision != "cancel" || resolved.Reason != "cancelled by user" {
+		t.Fatalf("resolution = %+v, want cancel with cancelled by user", resolved)
+	}
+	if started(events, "first") {
+		t.Fatal("cancelled call reached tool.started")
+	}
+	first := completedOutputs(events)["first"]
+	if first.OK || first.Output != "cancelled by user" || first.Recovered != "none" {
+		t.Fatalf("first completion = %+v, want ok=false output=cancelled by user recovered=none", first)
+	}
+}
+
+func checkSkippedSecondCall(t *testing.T, events []event.Seqd) {
+	t.Helper()
+	second := completedOutputs(events)["second"]
+	if second.OK || second.Output != "skipped: the turn was interrupted" || second.Recovered != "skipped" {
+		t.Fatalf("second completion = %+v, want skipped: the turn was interrupted", second)
+	}
+	if started(events, "second") {
+		t.Fatal("later call reached tool.started after a cancel")
+	}
+	if status := lastTurn(events).Status; status != statusInterrupted {
+		t.Fatalf("turn status = %q, want interrupted", status)
 	}
 }

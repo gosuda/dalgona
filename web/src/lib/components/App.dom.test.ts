@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { slashCommands } from "#lib/commands.ts";
+import { type PanelKind, slashCommands } from "#lib/commands.ts";
 import App from "#lib/components/App.svelte";
 import { type RpcPort, Session } from "#lib/session.svelte.ts";
 import type {
@@ -812,6 +812,15 @@ describe("keyboard paths", () => {
 		}
 	});
 
+	test("the skip link names the transcript and targets it", () => {
+		const { session } = connectedSession();
+		render(App, { props: { session } });
+		const link = screen.getByRole("link", { name: /transcript/i });
+		expect(link.classList.contains("skip-link")).toBe(true);
+		expect(link.getAttribute("href")).toBe("#transcript");
+		expect(document.getElementById("transcript")).not.toBeNull();
+	});
+
 	test("sends a message with Enter", () => {
 		const { session } = connectedSession();
 		const send = vi.spyOn(session, "sendMessage").mockResolvedValue(true);
@@ -1144,4 +1153,198 @@ describe("dock height", () => {
 		const shell = document.querySelector<HTMLElement>(".shell");
 		expect(shell?.style.getPropertyValue("--dock-height")).toBe("240px");
 	});
+});
+
+describe("page live regions", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	const liveSelector =
+		"[role=alert], [role=status], [role=log], [role=timer], [aria-live]:not([aria-live=off]), output";
+	const composerSelector = '[aria-label="Message composer"]';
+
+	function liveNodes(): HTMLElement[] {
+		return [...document.querySelectorAll<HTMLElement>(liveSelector)];
+	}
+
+	function pageRegions(): HTMLElement[] {
+		return liveNodes().filter(
+			(node) =>
+				node.closest("dialog") === null &&
+				node.closest(composerSelector) === null,
+		);
+	}
+
+	function panelRegions(): (string | null)[][] {
+		return liveNodes()
+			.filter((node) => node.closest("dialog") !== null)
+			.map((node) => [node.getAttribute("role"), node.textContent]);
+	}
+
+	function requireNoticeRegionsOnly(): HTMLElement[] {
+		const page = pageRegions();
+		expect(page.map((node) => node.getAttribute("role"))).toEqual([
+			"alert",
+			"status",
+		]);
+		expect(page.every((node) => node.classList.contains("notices"))).toBe(true);
+		return page;
+	}
+
+	test("the page has one status region and one alert region while a panel and the composer show their own errors", async () => {
+		const { session } = connectedSession();
+		vi.spyOn(session, "compactThread").mockRejectedValue(
+			new Error("compact refused"),
+		);
+		render(App, { props: { session } });
+		await tick();
+		fireEvent.keyDown(promptField(), { key: "Enter" });
+		await tick();
+		session.openPanel("compact");
+		await tick();
+		fireEvent.click(screen.getByRole("button", { name: "Compact" }));
+		await screen.findByText("compact refused");
+		expect(screen.getByText("Enter a message before sending.")).toBeTruthy();
+
+		const page = requireNoticeRegionsOnly();
+		expect(page[0]?.querySelectorAll(".notice")).toHaveLength(0);
+		expect(session.notices).toHaveLength(0);
+		expect(panelRegions()).toEqual([["alert", "compact refused"]]);
+
+		const composer = liveNodes().filter(
+			(node) => node.closest(composerSelector) !== null,
+		);
+		expect(composer.map((node) => node.id)).toEqual(["composer-error"]);
+		expect(composer[0]?.textContent).toBe("Enter a message before sending.");
+		expect(promptField().getAttribute("aria-describedby")).toContain(
+			"composer-error",
+		);
+
+		const transcript = document.getElementById("transcript");
+		expect(transcript).not.toBeNull();
+		expect(transcript?.matches(liveSelector)).toBe(false);
+		expect(transcript?.querySelector(liveSelector)).toBeNull();
+		session.stop();
+	});
+
+	const panelErrors: readonly {
+		readonly kind: PanelKind;
+		readonly turnId: string | null;
+		readonly button: string | null;
+		readonly shown: string;
+	}[] = [
+		{
+			kind: "compact",
+			turnId: null,
+			button: "Compact",
+			shown: "no call in this test",
+		},
+		{ kind: "fork", turnId: null, button: null, shown: "no call in this test" },
+		{ kind: "tree", turnId: null, button: null, shown: "no call in this test" },
+		{
+			kind: "rewind",
+			turnId: "turn-1",
+			button: null,
+			shown: "no call in this test",
+		},
+		{
+			kind: "advisor",
+			turnId: null,
+			button: "Turn advisor on",
+			shown: "no call in this test",
+		},
+		{
+			kind: "review",
+			turnId: null,
+			button: "Start review",
+			shown: "no call in this test",
+		},
+		{
+			kind: "resume",
+			turnId: null,
+			button: null,
+			shown: "Unable to list threads: no call in this test",
+		},
+	];
+
+	test.each(panelErrors)(
+		"the $kind panel shows its own error as an alert in its dialog and adds no notice",
+		async ({ kind, turnId, button, shown }) => {
+			const { session } = connectedSession();
+			render(App, { props: { session } });
+			await tick();
+			session.openPanel(kind, turnId);
+			await tick();
+			if (button !== null) {
+				fireEvent.click(screen.getByRole("button", { name: button }));
+			}
+			await screen.findByText(shown);
+
+			expect(panelRegions()).toEqual([["alert", shown]]);
+			expect(session.notices).toHaveLength(0);
+			const page = requireNoticeRegionsOnly();
+			expect(
+				page.flatMap((node) => [...node.querySelectorAll(".notice")]),
+			).toEqual([]);
+			session.stop();
+		},
+	);
+
+	test("the resume panel shows its search progress as status text in its dialog and adds no notice", async () => {
+		const { session } = connectedSession();
+		vi.spyOn(session, "listThreads").mockResolvedValue([]);
+		vi.spyOn(session, "searchThreads").mockReturnValue(
+			new Promise(() => undefined),
+		);
+		render(App, { props: { session } });
+		await tick();
+		session.openPanel("resume");
+		await tick();
+		fireEvent.input(screen.getByLabelText("Filter threads"), {
+			target: { value: "needle" },
+		});
+		await screen.findByText("Searching conversations…");
+
+		expect(panelRegions()).toEqual([["status", "Searching conversations…"]]);
+		expect(session.notices).toHaveLength(0);
+		requireNoticeRegionsOnly();
+		session.stop();
+	});
+
+	const failedSaves: readonly {
+		readonly kind: PanelKind;
+		readonly save: (session: Session) => Promise<boolean>;
+		readonly notice: string;
+	}[] = [
+		{
+			kind: "model",
+			save: (session) => session.saveModel("local/x", null),
+			notice: "Unable to save model selection: no call in this test.",
+		},
+		{
+			kind: "settings",
+			save: (session) =>
+				session.saveSettings([{ keyPath: "theme", value: "dark" }]),
+			notice: "Unable to save settings: no call in this test.",
+		},
+	];
+
+	test.each(failedSaves)(
+		"a failed save in the $kind panel shows a notice",
+		async ({ kind, save, notice }) => {
+			const { session } = connectedSession();
+			render(App, { props: { session } });
+			await tick();
+			session.openPanel(kind);
+			await tick();
+			expect(await save(session)).toBe(false);
+			await tick();
+
+			expect(session.notices.map((item) => item.text)).toEqual([notice]);
+			const page = requireNoticeRegionsOnly();
+			expect(page[0]?.textContent).toContain(notice);
+			session.stop();
+		},
+	);
 });

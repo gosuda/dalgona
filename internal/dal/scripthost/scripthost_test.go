@@ -388,6 +388,38 @@ func TestNestedExecAsksInAskMode(t *testing.T) {
 	requireAskModeAcceptsReadClass(t, h)
 }
 
+func TestTaskInCellAsksNothingInAskModeAndItsChildStillAsksForExec(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, func(h *harness) {
+		h.scripts.Mode = config.ToolModeNormal
+		h.scripts.Eval = config.EvalConfig{Uses: []string{"task"}, Set: true}
+		h.cfg.Config.Approval = config.ApprovalAsk
+	})
+	h.model.routes["child a"] = []reply{toolCall("cx", "exec", `{"command":"echo hi > child-proof.txt"}`), yield("ya", `"A"`)}
+	h.model.push(evalCall(`tools.task(prompt = "child a")`), text("done"))
+	events := h.idle(h.run("run the cell"))
+	spawn, ok := decisions(events)["e/1"]
+	if !ok || spawn.Decision != "accept" || spawn.By != "mode:ask" {
+		t.Fatalf("task decision e/1 = %+v, all decisions = %+v, want a mechanical mode:ask accept", spawn, decisions(events))
+	}
+	children := spawnedChildren(events)
+	if len(children) != 1 {
+		t.Fatalf("child.spawned = %v, want one child", children)
+	}
+	requireChildExecDeclined(t, h, children[0])
+}
+
+func requireChildExecDeclined(t *testing.T, h *harness, child string) {
+	t.Helper()
+	nested, ok := decisions(h.events(child))["cx"]
+	if !ok || nested.Decision != "decline" || nested.By != "mode:ask" || nested.Reason != "declined: no client could approve this call" {
+		t.Fatalf("child exec decision cx = %+v, want a mode:ask decline that no client could approve", nested)
+	}
+	if _, err := os.Stat(filepath.Join(h.cwd, "child-proof.txt")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("declined child exec left a fixture file: %v", err)
+	}
+}
+
 func requireAskModeAcceptsReadClass(t *testing.T, h *harness) {
 	t.Helper()
 	h.model.push(evalCall("tools.read(path = 'notes.txt')"), text("done"))

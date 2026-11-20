@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -97,32 +96,38 @@ func commandNamed(name string) command {
 	return commands[slices.IndexFunc(commands, func(c command) bool { return c.name == name })]
 }
 
-func splitToken(text string) (token, tail string) {
-	end := strings.IndexFunc(text, unicode.IsSpace)
+func (c editor) tokenBreak(r rune) bool {
+	_, isChip := c.chipOf(r)
+	return isChip || unicode.IsSpace(r)
+}
+
+func (c editor) commandEnd() int {
+	end := slices.IndexFunc(c.text, c.tokenBreak)
 	if end < 0 {
-		end = len(text)
+		return len(c.text)
 	}
-	return text[:end], text[end:]
+	return end
 }
 
 func (m *model) commandQuery() (string, bool) {
-	text := m.input.composer.Value()
+	e := &m.input.composer
+	text := e.Value()
 	if m.panelOpen() || m.review != nil || m.textMode() != inputPrompt || !strings.HasPrefix(text, "/") || strings.HasPrefix(text, "//") {
 		return "", false
 	}
-	token, _ := splitToken(text)
-	if m.input.composer.cursor > utf8.RuneCountInString(token) {
+	end := e.commandEnd()
+	if e.cursor > end {
 		return "", false
 	}
-	return strings.TrimPrefix(token, "/"), true
+	return strings.TrimPrefix(string(e.text[:end]), "/"), true
 }
 
 func (c *editor) tokenAt() (start, end int) {
 	start, end = c.cursor, c.cursor
-	for start > 0 && !unicode.IsSpace(c.text[start-1]) {
+	for start > 0 && !c.tokenBreak(c.text[start-1]) {
 		start--
 	}
-	for end < len(c.text) && !unicode.IsSpace(c.text[end]) {
+	for end < len(c.text) && !c.tokenBreak(c.text[end]) {
 		end++
 	}
 	return start, end
@@ -276,11 +281,14 @@ func (m *model) completePopup() {
 	}
 	name := m.input.popup.selected()
 	m.input.popup = nil
-	_, tail := splitToken(m.input.composer.Value())
-	tail = cmp.Or(tail, " ")
-	head := "/" + name
-	m.input.composer.SetValue(head + tail)
-	m.input.composer.cursor = utf8.RuneCountInString(head + " ")
+	e := &m.input.composer
+	head := []rune("/" + name)
+	tail := e.text[e.commandEnd():]
+	if len(tail) == 0 || !unicode.IsSpace(tail[0]) {
+		tail = slices.Concat([]rune{' '}, tail)
+	}
+	e.text = slices.Concat(head, tail)
+	e.cursor = len(head) + 1
 }
 
 func (m *model) completeFile() {
@@ -299,8 +307,8 @@ func (m *model) runPopup() tea.Cmd {
 		return nil
 	}
 	name := m.input.popup.selected()
-	_, tail := splitToken(m.input.composer.Value())
-	if commandNamed(name).args != "" || tail != "" {
+	e := &m.input.composer
+	if commandNamed(name).args != "" || e.commandEnd() < len(e.text) {
 		m.completePopup()
 		return nil
 	}

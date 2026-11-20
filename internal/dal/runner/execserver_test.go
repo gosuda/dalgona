@@ -521,7 +521,10 @@ func writeTestFile(t *testing.T, path string, data []byte, mode fs.FileMode) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, data, mode); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
 		t.Fatal(err)
 	}
 }

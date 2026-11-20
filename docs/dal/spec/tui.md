@@ -16,11 +16,13 @@ The TUI is a protocol client. It MUST import only `internal/dal/rpc` from this m
 - `Cwd`: the client working directory. Every `thread/start` MUST send it as `cwd`.
 - `Width`, `Height`: the terminal size when the output is not a terminal. Both MUST be positive to apply.
 
+The `dal` and `dalgona` commands MUST NOT start the interface when stdout is not a terminal. They MUST print `<product>: the interactive interface needs a terminal on stdout; use -p <prompt> for one turn` as one line on stderr, and MUST exit with status 1. The refusal MUST write nothing to stdout and MUST send no request on `conn`. The commands MUST close `conn` after the refusal. The check runs after the commands dial and resolve `-c`, so an error from either replaces the refusal.
+
 Startup runs these requests in order: `initialize` with client name `dalgona`, the `initialized` notification, `dalgona/settings/read`, `dalgona/keywords/list` (once per connection), `model/list`, then the thread open call. When `icons` is `auto` under kitty, the client also sends the terminal query named in Icons. `Run` returns nil when the user quits or `ctx` ends. On return, `Run` MUST close the RPC connection.
 
 After `initialize` succeeds, the client MUST print one welcome row with the product, version, model, and working directory. A home directory MUST show as `~`. The welcome row MUST use only bold and dim text. When `initialize` fails, the client MUST print the welcome row with the error on one line. Quit MUST print one exit row. The exit row MUST name the thread and the `--resume` command, or say that no thread was started. The client MUST print the exit row before it returns `tea.Quit`, unless the window height is 0. While the client leaves, the view MUST be one blank row.
 
-The client MUST paint the product mark at the lower right of the screen when the terminal can show images. Detection MUST read only the terminal environment. `TMUX` or `STY` set selects no mark. An empty or `dumb` `TERM` selects no mark. Kitty or ghostty selects the kitty graphics protocol. An iTerm program selects inline images. A set `ITERM_SESSION_ID` also selects inline images. Every other environment MUST show no mark and MUST emit zero control bytes for it. The mark MUST come from the rasterized brand assets embedded in the binary, at 8 rows with aspect preserved. An unknown product MUST show no mark. A terminal without image support shows only the product wordmark in the band.
+The client MUST paint the product mark at the lower right of the screen when the terminal can show images. Detection MUST read only the terminal environment. `TMUX` or `STY` set selects no mark. An empty or `dumb` `TERM` selects no mark. A `TERM` that names kitty or ghostty, a set `KITTY_WINDOW_ID`, or a set `WEZTERM_PANE` selects the kitty graphics protocol. A `TERM_PROGRAM` of `iTerm.app`, or a set `ITERM_SESSION_ID`, selects inline images. When both apply, the kitty graphics protocol wins. Every other environment MUST show no mark and MUST emit zero control bytes for it. The mark MUST come from the rasterized brand assets embedded in the binary, at 8 rows with aspect preserved. An unknown product MUST show no mark. A terminal without image support shows only the product wordmark in the band.
 
 ## Screen
 
@@ -32,6 +34,18 @@ The dock holds, from the top, the composer, an open panel, the live row, and the
 
 While a key hint shows, it MUST cover the calls, plan and queued cells, and the counts MUST return when the hint ends.
 
+A key hint, a settings error, a rate-limit countdown, a notice, and a wait for an approval or an answer are messages.
+While the fields exceed the window width, the queued, plan and calls fields MUST drop, in that order.
+When the free text would have fewer than 22 cells, every blank field after the last field with text MUST give it its cells.
+A blank tag and a blank elapsed time MUST give their cells too.
+A field with text that fits MUST keep its cells and its place under any free text that is not a message.
+A message MUST cover the queued, plan and calls fields, in that order, until the free text has 22 cells.
+A key hint MUST also cover the tag and the elapsed time when they leave it fewer than 22 cells.
+One space MUST separate the free text from the last field, unless that field ends in a blank cell.
+The space MUST go when 3 cells of the text would not fit after it.
+For a key hint, the space MUST go when the whole hint would not fit after it.
+A cut free text of fewer than 3 cells MUST show one `.` for each cell.
+
 The activity MUST come from an open question or approval first, then the retry countdown, then a running tool call.
 With no running tool call, the activity MUST be the first plan step that is in progress, else the first pending plan step.
 The plan step text MUST be the first line of the step after the sanitizer runs.
@@ -40,7 +54,7 @@ With no step to show, the activity MUST be the tail of the streaming item, else 
 
 The composer shows `› ` in the thread hue, then the typed text. The terminal cursor marks the insertion point. When the composer is empty, the placeholder follows the prompt in dim text. The placeholder never shows a keyword mark.
 
-States are `idle`, `running`, `awaiting approval`, `awaiting input`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. Live text MUST be cut to one row, and a cut text MUST end with `...`. At 40 columns no line may exceed 39 cells.
+States are `idle`, `running`, `awaiting approval`, `awaiting input`, `interrupted`, `failed`, and `disconnected`. Each state MUST appear as text. Color MUST NOT be the only signal. Live text MUST be cut to one row, and a cut text MUST end with `...`, except where fewer than 3 cells remain. At 40 columns no line may exceed 39 cells.
 
 The state words are `Working`, `Waiting`, `Stopped`, `Failed`, `Offline`, `Ready`, and `Done`. `running` shows `Working`, `awaiting approval` and `awaiting input` show `Waiting`, `interrupted` shows `Stopped`, `disconnected` shows `Offline`, and `idle` is named `Ready`, or `Done` after a completed turn. An idle live row MUST show no state word.
 
@@ -81,6 +95,11 @@ Resume MUST take the active turn id and `turnEffort` from the same `thread/resum
 During a resume request for another thread, the client MUST buffer that thread's notifications.
 After it applies the snapshot, the client MUST replay those notifications in receive order.
 A superseded resume response or error MUST NOT change the client.
+A `thread/start` request MUST supersede an earlier `thread/resume` request.
+A `thread/resume` request MUST supersede an earlier `thread/start` request.
+A `thread/fork` request MUST supersede an earlier `thread/resume` request.
+A `thread/resume` request MUST supersede an earlier `thread/fork` request.
+A superseded `thread/start` or `thread/fork` result or error MUST NOT change the client.
 If the buffer exceeds its limit, the resume MUST fail and keep the current thread.
 
 The setting `status_hide` lists items to hide. Its default is empty. The client MUST NOT hide `model`.
@@ -120,7 +139,7 @@ The dock MUST keep its height. Only a key press, a paste, the opening or closing
 
 The dock MUST have at most the window height minus one rows. The client MUST show no dock row in a window of fewer than two rows.
 
-The composer MUST show at most six rows, or one row while a panel is open. A panel MUST have a fixed height for its kind, capped at the window height minus four rows.
+The composer MUST show at most six rows, or one row while a panel is open. A panel MUST have a fixed height for its kind, capped at the window height minus four rows. That cap MUST NOT leave the approval panel or the question card fewer than three rows from window height 5. At window height 4, each MUST have two rows.
 
 When the dock is too tall, the client MUST drop the status band first, then the live row. The input line MUST NOT drop.
 
@@ -128,15 +147,23 @@ Every dock row MUST be at most the window width minus one cell.
 
 After a geometry change settles, the client MUST request the terminal cursor position.
 A valid reply MUST place the dock at the physical bottom with relative cursor moves and line erases.
+That placement MUST erase each dock row before it repaints that row.
 The client MUST NOT print blank history rows to place the dock.
 A stale reply or a changed frame MUST NOT move the dock.
 The client MUST request plain cursor-position reports (`ESC[6n`).
 After a committed print, the client MUST reject row-one reports and request the position again.
+After the client rejects a reply that is not a row-one report, it MUST wait one second before it requests the position again.
+A geometry change or a committed print MUST end that wait.
+After a committed print, the client MUST return the terminal cursor to the caret within 100 ms.
+A cursor query or dock move in flight MAY delay that return until it ends.
 Modified F3 key events MUST remain available to the composer.
 A relocation MUST finish its output write before the client prints another committed row.
+A relocation MUST end one second after it starts when its output write has not finished.
+The client MUST request the cursor position again after such an end.
 Private output markers MUST NOT reach the terminal.
 An unanswered query MUST NOT block input or committed output.
 A query MUST expire after one second without a reply.
+With a window height above 0, quit and suspend MUST NOT return while a query or a dock move is in flight.
 A geometry change during a pending query MUST remain eligible for placement after that query expires.
 If geometry stayed unchanged until expiry, the client MUST wait for a geometry change before another query.
 Physical-bottom placement requires a terminal that answers cursor-position queries.
@@ -153,9 +180,11 @@ Up and Down MUST move the cursor. PgUp and PgDn MUST move it by a page.
 Enter MUST choose the highlighted item. Enter MUST do nothing when no item matches.
 Esc MUST clear a non-empty filter. Esc MUST close the panel when the filter is empty.
 A list panel MUST lose its filter when another panel opens above it.
+A reply that opens a list panel MUST be dropped when another panel or the review is open. It MUST be dropped when a newer list request was sent.
 The input line MUST show the filter while a list panel is open.
 The input line MUST show the first line of the draft while another panel is open, with the caret at its end.
 A confirm panel MUST show its title, its body, and its action row. It MUST NOT send a request before Enter.
+A panel body that does not fit MUST end with the row `↓ <n> more lines · ctrl+o full view · ↑↓ scroll`, where `<n>` counts the body rows below the window. A panel with one body row MUST show that row and no such row.
 The review target input MUST show `branch:`, `commit:`, or `instructions:` as its label, and MUST hide the filter while it waits for text.
 
 The input line MUST show the mode of the top panel, as the table below gives.
@@ -205,7 +234,9 @@ A provider that signs in from a shell MUST show the command to run there, and MU
 The API key field MUST show one `*` for each rune. The key MUST NOT appear in a row, notice, history, or review.
 Enter on the API key field MUST send `account/login/start` with `type` `apiKey`. The panel MUST close when the provider accepts the key.
 A refused key MUST keep the field open with the error in the panel. Esc on the field MUST clear it and return to the methods.
-A browser or device sign-in MUST show the link, and a device sign-in MUST show the user code. It MUST wait for `account/login/completed`.
+An approval request MUST NOT clear the API key field. A question with option rows MUST NOT clear it. A free-text question MUST take the input line from the API key field. Closing that question MUST leave the field empty.
+A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. Up and Down MUST scroll the body by one row while the link does not fit. A window with no body row MUST show the link in the review that `ctrl+o` opens. A device sign-in MUST show the user code in the first body row. While the sign-in waits, the hint row MUST read `Esc cancel the sign-in · waiting for the provider`, cut to the row width.
+The client MUST print one history row `Sign-in URL: <url>` for each sign-in. The notice line MUST NOT repeat the link while the panel is open. A sign-in MUST wait for `account/login/completed`.
 Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in…`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
 A paste into the API key field MUST keep its first line and MUST NOT make a chip.
 
@@ -236,7 +267,9 @@ The client cannot see a failed write to the terminal. A write that fails is ther
 `ctrl+o` MUST open the review on the newest entry. The review MUST show the full text of an entry, not its cut form.
 The review MUST close only on `esc`, `q`, or `ctrl+o`. A quit or suspend key MUST close the review first.
 Rows that finish while the review is open MUST wait, and they MUST print after the review closes.
-The review header MUST show the count of waiting rows. The footer MUST name the scroll keys and the entry keys.
+In a window of three rows or more, the review header MUST show the count of waiting rows. In a window of four rows or more, the footer MUST name the scroll keys and the entry keys.
+The review MUST have at most the larger of one row and the window height minus one rows. The review MUST keep one body row.
+A window of fewer than four rows MUST drop the review footer. A window of fewer than three rows MUST drop the review header.
 The client MUST keep the last 1000 committed rows for the review and MUST drop the oldest first.
 
 ## Mouse
@@ -250,12 +283,14 @@ A click MUST select nothing, because the client cannot learn the screen row of t
 ## Editor
 
 The composer MUST wrap text to the window width minus three cells.
+With no panel open, each row of the wrapped text MUST take one composer row.
+With no panel open, the composer MUST show the caret row. When the caret row is past the last row that fits, the composer MUST show the rows that end with it.
 Enter MUST send the prompt, except after a backslash and while the command palette lists a command.
 Enter after a backslash MUST replace the backslash with a newline.
 Shift+Enter and Ctrl+J MUST insert a newline.
 Alt+Enter MUST queue the draft as a follow-up.
 Up MUST move the caret between wrapped rows. On the first row, Up MUST recall the previous history entry.
-Down MUST move the caret between wrapped rows. On the last row, Down MUST recall the next entry, and past the newest entry it MUST restore the draft.
+Down MUST move the caret between wrapped rows. On the last row, Down MUST recall the next entry, and past the newest entry it MUST restore the draft with its chips.
 Home and End MUST move the caret to the start or end of its line.
 Alt+Left and Alt+Right MUST move the caret by word.
 Ctrl+W MUST delete the word before the caret.
@@ -277,22 +312,41 @@ The panel MUST then rebuild its rows from the history.
 A new prompt, a removal, or the 200 prompt cap MUST refresh an open history panel.
 The refresh MUST keep the highlight on the same entry while that entry exists.
 A removal MUST reset Up and Down recall to the newest end of the history.
+A send and a draft that Ctrl+C saves MUST reset Up and Down recall to the newest end of the history.
 A removal MUST NOT change the draft in the editor.
 Removing the prompt that waits for its turn MUST NOT move that turn to another entry.
 Closing the panel with Esc MUST leave the draft unchanged.
 With no history, the panel MUST show `No prompt history yet.` and no selectable row.
 With no history, Enter, Delete, and Backspace MUST do nothing.
-Ctrl+C with a non-empty draft MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
+A draft that holds only whitespace MUST count as empty, for Esc and for Ctrl+C.
+Ctrl+C with a draft that holds text MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
+An image chip MUST NOT enter the history. When the draft holds an image, the live row MUST read `Draft saved to history, images dropped · Ctrl+C again to exit`.
+Ctrl+C with a draft that holds no text MUST keep the draft. It MUST show `Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
+The caret MUST stay within the window width minus one cell, also after a chip that its row cuts.
+A paste MUST turn each CRLF, each CR, and each LF into one line break.
+A paste into a one-line field MUST keep only its first line.
+The one-line fields are the list filter, the review target, the answer line, and the API key field.
 A paste of fewer than 10 lines MUST be inserted as text.
 A paste of 10 or more lines MUST become one chip labelled `[Paste #n +L lines]`, where L counts its lines.
 A chip MUST take one composer row, whatever the length of its paste.
 Backspace and Delete MUST remove a whole chip.
 Sending MUST replace each chip with its full pasted text, in order.
+The history MUST store each prompt, and each draft that Ctrl+C saves, with each chip that holds text replaced by its full text.
+A prompt recalled from the history MUST be plain text. It MUST NOT become a chip.
+A recalled prompt whose draft began with a chip MUST be sent unchanged until the user edits its text.
+A queued follow-up whose draft began with a chip MUST be sent unchanged after Alt+Up and a failed start, until the user edits its text.
+A typed follow-up MUST return after Alt+Up and a failed start as typed text, which the slash rule reads.
+A draft that Ctrl+C saves MUST decide whether the history sends the entry it repeats unchanged, unless that entry is a sent message.
+A user message that starts with `/` MUST be sent unchanged from the history until the user edits its text, live or resumed.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB MUST be refused with a notice that names the limit.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
 A pasted path to a PNG, JPEG, or GIF file MUST become an image chip labelled `[Image #n WxH]`.
+A path followed by one line break MUST also become an image chip, and the chip MUST replace that line break.
+A chip that replaces a pasted path MUST replace the text of that paste and no other text.
+When the draft no longer holds the pasted text where it was pasted, the chip MUST go in at the caret and remove no text.
+A paste with a line break before its last character MUST stay text, even when its lines joined name an image file.
 A pasted path to a WebP file MUST be refused with the notice `unsupported image type image/webp; send PNG, JPEG or GIF`.
 An image chip MUST take one composer row.
 A prompt MUST hold at most 10 images and at most 10485760 bytes of image data.
@@ -302,13 +356,14 @@ Sending MUST send each image chip as an image input item after the text.
 
 The composer MUST show a command palette when the caret is in a first token that starts with `/`, with no panel or review open.
 The palette MUST list at most 8 matching commands and MUST NOT open for `//`.
-Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token.
+Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token. It MUST keep each chip of the draft. The palette MUST end the first token at a chip.
+Enter on a draft whose first token touches a chip MUST read the token as the command and the chip as its argument.
 Enter MUST run a highlighted command only when the draft is only its first token and the command takes no argument. Otherwise, Enter MUST complete the command and keep the rest of the draft.
 Esc MUST close the palette and keep the draft. Typing a character MUST reopen it.
 
 The composer MUST show a file palette when the caret is in a token that starts with `@`, with no panel or review open.
 The file palette MUST search for the text after `@` 120 ms after the last keystroke, and it MUST list at most 8 paths.
-Tab and Enter MUST replace the token with `@<path> `. Esc MUST close the file palette and keep the draft.
+The file palette MUST end its token at a chip. Tab and Enter MUST replace the token with `@<path> ` and keep each chip of the draft. Esc MUST close the file palette and keep the draft.
 A change of the file query MUST clear the rows of the previous query. The palette MUST NOT insert a path from an older query.
 A file palette with no rows MUST consume Enter and MUST NOT send the draft.
 When the file search is missing on the server, the first such palette MUST show `File search is unavailable on this server`.
@@ -319,6 +374,7 @@ The client MUST allow a shell command its 120 second timeout before it reports a
 The chip MUST quote the output in a fence longer than any run of backticks in the output.
 Esc on a shell line with no typed text MUST leave shell mode.
 A shell line with only chips has no typed text. Esc on it MUST keep the chips in the prompt.
+A shell result MUST add its chip only while the draft holds no text other than shell chips. Its row MUST print in every case.
 A shell command MUST run in the open thread's directory. Before a thread opens, it MUST run in the launch directory.
 The folder item, its help legend and the welcome details MUST show the open thread's directory.
 Before a thread opens, they MUST show the launch directory.
@@ -349,7 +405,8 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 | `/help` | Opens the help panel |
 | Esc | Closes an open command palette first and keeps the draft. Otherwise clears a non-empty list filter first. With an empty filter, closes the list panel. While a turn runs or waits, the first Esc shows `Esc again to interrupt` in the live row. A second Esc within 2000 ms sends `turn/interrupt` on the active turn. One Esc interrupts during a rate-limit wait. Any other key clears the pending hint |
 | Esc on an empty prompt, while idle | The first Esc shows `Esc again to rewind` in the live row. A second Esc within 2000 ms opens the rewind list of active turns, newest first. |
-| Ctrl+C twice | Quits. With an empty draft, the first press shows `Ctrl+C again to exit` in the live row. With a non-empty draft, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. A second press within 2000 ms quits |
+| Esc, with no turn to interrupt | After a stopped turn the notice reads `stopped; nothing to interrupt`. After a failed turn it reads `failed; nothing to interrupt`. After a lost connection Esc shows the `connection lost` notice again. In an idle prompt with a draft it reads `idle, draft kept; nothing to interrupt`, the draft stays, and no rewind hint shows. In these states Esc sends no `turn/interrupt`, also during a rate-limit wait |
+| Ctrl+C twice | Quits. With a draft that holds no text, the first press keeps the draft and shows `Ctrl+C again to exit` in the live row. With a draft that holds text, the first press moves the draft into history and shows `Draft saved to history · Ctrl+C again to exit`. When that draft holds an image, the live row shows `Draft saved to history, images dropped · Ctrl+C again to exit`. A second press within 2000 ms quits |
 | Ctrl+R | Opens the history panel of sent prompts. Enter loads the highlighted prompt into the editor. Delete removes it. Shell mode ignores Ctrl+R |
 | `/model [id]` | `model/list` list panel, or `config/value/write` key `model` |
 | `/resume [id]` | `thread/list` list panel, or `thread/resume` with turns included |
@@ -367,6 +424,8 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 
 While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, `/revert`, and `/review` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
 
+A panel that sends one of these requests MUST refuse it in the same way when a turn starts after the panel opened. The rewind list and its confirm MUST NOT send a request while a turn is working or waiting. They MUST show `rewind is unavailable while a turn is <word>; wait for it to finish or interrupt it first`.
+
 `turn/steer` sends `expectedTurnId` set to the active turn.
 
 When the queue holds 32 follow-ups, Alt+Enter MUST show `follow-up queue is full (32); wait for the active turn or press Esc`. After a follow-up is queued, the notice MUST show `queued follow-up <n> of 32`. An unknown slash command MUST stay in the editor and MUST show `unknown command /<name>; start with // to send it as a prompt`. After `/advisor reset`, the notice MUST show `advisor reset; it reviews the current branch at the next turn`.
@@ -375,11 +434,13 @@ A follow-up starts after `turn/completed` only when the turn ends idle. After an
 
 The interrupt notice MUST end when an interrupted turn ends.
 
+A confirmed rewind MUST return the turn's prompt to the composer only while the composer is empty. A draft that is not empty MUST stay as it is. The notice MUST then read `Rewound; the editor holds a draft, so the prompt was not restored`.
+
 ## Approvals
 
-`item/commandExecution/requestApproval` and `item/fileChange/requestApproval` open the approval card. Requests queue in arrival order, and the card shows the oldest one. The title is `Approval · Run command` or `Approval · Apply file changes`, followed by ` (1 of <n>)` when more requests wait, and the word `Waiting`.
+`item/commandExecution/requestApproval` and `item/fileChange/requestApproval` open the approval card. Requests queue in arrival order, and the card shows the oldest one. A request that joins a non-empty queue MUST NOT change the text on the input line. The title is `Approval · Run command` or `Approval · Apply file changes`, followed by ` (1 of <n>)` when more requests wait, and the word `Waiting`.
 
-The body holds at most six rows and scrolls with `up` and `down`. It shows:
+The body holds at most six rows and scrolls with `up` and `down`. `up` and `down` MUST move the body by one row and stop when its first or last row shows. The body shows:
 
 - `From thread <id>` when the request comes from another thread.
 - `$ <command>` when the request has a command, and `cwd <cwd>` when it names a working directory.
@@ -388,11 +449,13 @@ The body holds at most six rows and scrolls with `up` and `down`. It shows:
 
 The two action rows are `[y] accept  [a] accept for session` and `[n] decline  [esc] cancel and interrupt`. `[y] accept` carries the one fill of the view, in the thread hue. Before the terminal reports its background, the fill MUST use the night theme, or the soft night theme for `auto-soft`. With colour off, `[y] accept` MUST be bold reverse video with no colour.
 
+A card with too few rows MUST drop body rows first, then the `[y] accept` row. The `[n] decline` row MUST be the last action row to drop. A window of four rows shows the title and the `[n] decline` row. A window of five or more rows MUST show both action rows.
+
 Ctrl+O opens the full review of the card, with the same lines and the full diff.
 
 When another window settles a request, the TUI MUST remove the card. It MUST show `Approval answered in another window` for `answered`, `Approval dismissed in another window` for `cancelled`, and `Approval closed: the turn was interrupted` for `interrupted`. Any other resolution MUST show `Approval closed: the agent continues without an answer`.
 
-The keys answer `accept`, `acceptForSession`, and `decline`. `n` declines at once, and the response carries no reason. Esc answers `cancel` and interrupts the turn. Each request MUST block until a key answers it, the TUI exits, or the RPC context ends. A new request MUST NOT replace one that waits. Other server requests MUST fail with an error.
+The keys answer `accept`, `acceptForSession`, and `decline`. `n` declines at once, and the response carries no reason. Esc answers `cancel` and interrupts the turn. Each request MUST block until a key answers it, the TUI exits, the connection is lost, or the RPC context ends. A new request MUST NOT replace one that waits. Other server requests MUST fail with an error.
 
 A server request whose parameters do not decode MUST receive an error answer. The TUI MUST show `approval request failed: <cause>; reconnect and retry the turn`.
 
@@ -454,13 +517,19 @@ Each note also arrives as a `dynamicToolCall` item with tool `advisor`. That ite
 Every error notice MUST name a recovery action.
 
 - A malformed notification shows `protocol error in <method>: <cause>; reconnect with /resume <thread> or use /new`.
+- A held notification that does not decode when the resume replays it shows the same notice.
 - An `error` notification with `willRetry: false` sets `failed` and shows `error: <message>; retry the turn, /resume <thread>, or /new`. With `willRetry: true`, the state is unchanged and the notice is `error: <message>; retrying the turn, no action needed`.
 - With no thread yet, `/resume <thread>` in these notices reads `/resume`.
 - An advisor command that fails with `-32001` shows `advisor unavailable: <message>; set [advisor] enabled = true in config.toml, then restart dalgona`. Any other advisor failure shows `advisor request failed: <cause>; retry the /advisor command`.
-- A failed `turn/start` or `turn/steer` returns its text to the composer ahead of any newer draft. A failed follow-up returns to the head of the queue. A failed `turn/start` sets `failed`. A failed steer keeps the turn state.
+- A failed settings save shows `Could not save settings: <cause>; press Enter to try again` in the open panel. After the panel closed, it shows `Could not save settings: <cause>; run /settings and save again`.
+- A failed `account/login/cancel` shows `cancel sign-in failed: <cause>; run /login again`. A start call that fails after Esc shows `Login failed: <cause>; run /login again`.
+- A failed `turn/start` or `turn/steer` returns its text to the composer ahead of any newer draft. A returned text that starts with `/` is sent unchanged until the user edits it. A failed follow-up returns to the head of the queue. A failed `turn/start` sets `failed`. A failed steer keeps the turn state.
 - A prompt sent before a thread exists stays in the composer with `thread is not ready; wait for startup or use /new to retry`.
 - A failed keyword list MUST NOT block prompting.
 - An interrupt result for an earlier turn MUST NOT change the current state.
+- A lost connection MUST end a rate-limit wait and MUST clear a pending key hint. It MUST keep the follow-up queue and the composer draft.
+- A lost connection MUST close every open approval and question card. It MUST answer each open request with an error.
+- Esc in `disconnected` MUST show the `connection lost` notice again. It MUST NOT send `turn/interrupt`.
 
 ## Untrusted text
 
@@ -484,6 +553,15 @@ The sanitizer MUST replace each byte that is not valid UTF-8 with U+FFFD. A raw 
 ## Width
 
 The client MUST measure text with the width method of its renderer.
+A tab MUST count as the cells to the next 8-cell stop, counted from the first cell of the text that holds it.
+A newline MUST restart the count of stops.
+A row that the client prints or draws MUST hold spaces in place of each tab.
+A wrapped row MUST NOT exceed the wrap width in cells of that method.
+A wrap break MUST NOT fall inside a grapheme cluster.
+A row cut to fewer than 3 cells MUST keep whole clusters and MUST NOT show an ellipsis.
+The composer MUST count its stops from its first text cell after the prompt.
+A wrapped row MUST continue the count of stops from the row before it.
+The cursor MUST sit after the spaces of a tab that precedes the caret.
 A user whose terminal draws East Asian Ambiguous characters two cells wide MUST set `RUNEWIDTH_EASTASIAN=1`.
 
 ## Theme
@@ -536,7 +614,19 @@ A fenced code block with info `mermaid`, `d2`, `nomnoml`, or `svg` MUST print as
 The fence MUST buffer until its closing marker before it prints.
 A mermaid, d2, or nomnoml card MUST render the source as text art under a `diagram <kind> · <n> rows` header.
 An `svg` fence or a failed render MUST print `diagram <kind>: render failed · source shown` followed by the source.
+A render that runs longer than 2 seconds MUST count as a failed render.
+A renderer that panics MUST count as a failed render.
+A d2 layout cannot be cancelled, so one that outlives the render limit keeps running to its end. The client MUST run at most one d2 layout at a time.
+While a d2 layout past the render limit runs, a d2 render MUST count as a failed render without waiting.
+A source of more than 16384 bytes MUST NOT reach a renderer. It MUST print `diagram <kind>: too large to draw · source shown` followed by the source.
+The client MUST run each render outside the update loop. A key, a tick, or any other message MUST NOT wait for a render.
+A row committed while a diagram renders MUST wait for the diagram card. Waiting rows MUST print once, in the order of their commit.
+A diagram card MUST print once, also when the followed thread changes before the render ends.
+The review header MUST count the rows that wait behind a diagram as waiting rows.
+While a diagram renders, the review MUST show its entry as `diagram <kind> · drawing` followed by the source. The review MUST show the card when the render ends.
+With a window height above 0, quit and suspend MUST wait for a diagram that renders and for the rows that wait behind it. A diagram MUST NOT hold them for longer than the 2 second render limit.
 A fenced block still open when the answer finishes MUST print its buffered lines as code.
+A diagram renderer MUST NOT write its logs to the terminal.
 
 ## Verbosity
 
@@ -563,7 +653,7 @@ The live dot MUST alternate between U+25AA and U+25AB every 500 milliseconds.
 With `DAL_NO_MOTION` set to a non-empty value, the client MUST keep the dot on U+25AA and MUST tick once a second.
 The elapsed time MUST update once a second, also with `DAL_NO_MOTION` set.
 A rate-limit wait MUST show `rate limited · retrying in <m>m <ss>s · esc stops`, updated each second.
-The countdown MUST clamp at `0m 00s`, and only the matching zero report or the end of the turn MUST close the wait.
+The countdown MUST clamp at `0m 00s`. Only the matching zero report, the end of the turn, or a lost connection MUST close the wait.
 Elapsed text MUST keep its cells, so a change of value moves no other field.
 
 The elapsed time MUST show `<n> ms` under one second, `<s>s` under one minute, `<m>m <ss>s` under one hour, and `<h>h <mm>m` from one hour. Above 99 hours and 59 minutes it MUST show `99h 59m`.
@@ -571,6 +661,8 @@ The elapsed time MUST show `<n> ms` under one second, `<s>s` under one minute, `
 ## Keyword mark
 
 The server finds keywords. The TUI MUST NOT match keywords itself. The rules are in [keywords.md](keywords.md).
+
+Each change to a non-empty draft MUST start one 120 ms timer. The timer MUST NOT join the motion tick chain. A timer that fires after a newer change MUST send nothing. A timer that fires for the newest change MUST send `dalgona/keywords/match` once with the draft. A change that empties the draft MUST send nothing. The TUI MUST NOT send a draft over 64 KiB, which the server refuses under [protocol.md](protocol.md). The request kind MUST be `steer` while a turn runs or awaits approval, and `prompt` otherwise.
 
 The composer MUST show marks only for the draft that the newest accepted `dalgona/keywords/match` reply matched. A reply MUST be dropped when it is not the newest request or its text differs from the draft.
 
@@ -593,14 +685,15 @@ Review shows each question header in bold and its answers in option order, joine
 An empty question request returns an empty answer map without opening a card.
 
 The Other row opens typing. Typing uses the input line with the label `answer: `. `enter` stores the typed text and advances. `esc` leaves typing, or dismisses a free-text question. An `s` entered while typing remains answer text and does not submit.
+A question card that becomes the oldest request MUST show only its own typed text on the input line.
 
-With two or more rows, the card keeps its title and its hint rows. With one row it shows the title alone. At window height 4 or less the card is not drawn. The hint rows list `↑/↓ move`, `1-7 pick`, `Space toggle`, `Enter choose`, and `Tab next`, then `s submit · Esc dismiss`. The hint rows MUST wrap at whole hints and MUST keep `s submit · Esc dismiss` on one row. They MUST take their rows before the body and MUST leave the title and the option under the cursor. After that, the preview drops first, then the question text, then the options scroll. If the rows left cannot hold every hint, the card MUST drop whole hints and MUST keep both actions. A single-select question drops `Space toggle` first. A multi-select question drops `Space toggle` last.
+The card keeps its title and its hint rows. A window of four rows shows the title and one hint row. A window of three rows or fewer does not draw the card. The hint rows list `↑/↓ move`, `1-7 pick`, `Space toggle`, `Enter choose`, and `Tab next`, then `s submit · Esc dismiss`. The hint rows MUST wrap at whole hints and MUST keep `s submit · Esc dismiss` on one row. They MUST take their rows before the body. From three rows, they MUST leave the title and the option under the cursor. After that, the preview drops first, then the question text, then the options scroll. If the rows left cannot hold every hint, the card MUST drop whole hints and MUST keep both actions. A single-select question drops `Space toggle` first. A multi-select question drops `Space toggle` last.
 
 The preview shows the description and the first line of the preview of the option under the cursor. A preview with more lines MUST end its row with `… <n> more lines · ctrl+o`. The full-screen review opened with `ctrl+o` shows every question, every option, and the full preview of each option. `esc` returns to the card at the same cursor row and sends no answer. This full-screen review is separate from the answer Review tab.
 
 The `s submit` hint carries the one fill of the view, in the thread hue. Before the terminal reports its background, the fill MUST use the night theme, or the soft night theme for `auto-soft`. With colour off, it MUST be bold reverse video with no colour.
 
-A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<turnId>:<itemId>`. A question closed by another window writes no row.
+A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<turnId>:<itemId>`. A question closed by another window or by a lost connection writes no row.
 
 A question request that the TUI accepts MUST send a desktop notification `<product>: Waiting for your answer · <title>`, when notifications are on and the window is blurred.
 

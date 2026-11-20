@@ -138,4 +138,7 @@ function close(): void {
 			{/if}
 		{/if}
 	{/snippet}
+	{#snippet footer()}
+		<button type="button" class="quiet" onclick={close}>Close</button>
+	{/snippet}
 </Panel>

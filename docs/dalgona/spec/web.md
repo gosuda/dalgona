@@ -91,12 +91,12 @@ The page holds one `Session`, which owns the connection and the page state.
 - At 52rem or narrower the transcript MUST NOT be a scroll container. Wheel input MUST scroll the document.
 - The open thread has an inline-start bar and a strong title as well as its fill, so it stays distinct under forced colours.
 - At 320px nothing MUST clip or scroll sideways. Long tokens wrap anywhere.
-- The transcript follows new output only while the reader is within 32px of its end. Opening a thread follows its end.
+- The transcript follows new output only while the reader is within 32px of its end. Opening a thread follows its end. While the transcript follows, output that arrived after the client's last scroll or scroll event MUST NOT count as the reader leaving the end.
 - The client MUST observe the actual scroll container: the transcript when it overflows, else its nearest scrolling ancestor, else the document. The client MUST resolve it on each scroll, so content that overflows only after it arrives is observed. Streaming MUST preserve the reader's position after scrolling away.
 - The transcript MUST show Jump to latest whenever the reader is over 32px from the end, whether or not a turn runs. The button MUST show appended items as `· N new`. Activating it MUST scroll to the end and focus the last row without changing that scroll position. Showing the button MUST NOT move focus.
 - At 52rem or narrower the Jump to latest button MUST sit above the dock, whatever the dock's height. The client MUST measure the dock and publish its height to the button.
 - The skip link MUST name the transcript and target `#transcript`.
-- At 52rem or narrower the dock (notices, request card, composer) stays at the bottom of the viewport. Form text is at least 16px.
+- At 52rem or narrower the dock (notices, request card, composer) MUST stay at the bottom of the viewport at every scroll position. At the end of the document the dock MUST NOT cover the last transcript row. The dock MUST span the width of the viewport. While no request is open, the dock MUST leave at least 6rem of the viewport above it. The dock MUST scroll inside itself when its content is taller than that. Form text is at least 16px.
 
 ### Theme
 
@@ -106,6 +106,7 @@ The client MUST cache the setting under the browser key `dalgona.theme` and appl
 Each theme MUST use only the colour roles of `DESIGN.md`. The client MUST NOT paint a gradient.
 Every text role MUST meet 4.5:1 against its ground. Control edges and the focus ring MUST meet 3:1 against their ground. The ink on the point MUST meet 4.5:1.
 Under forced colours, every button edge and focus ring MUST keep a visible border.
+Outside forced colours, a quiet button MUST draw no fill at rest. A quiet button that is not destructive MUST draw no edge. The label of that button MUST use `dim`. A destructive quiet button MUST draw its edge and its label in `failed-text`. A disabled quiet button MUST draw the `tone` fill, the `line` edge and the `dim` label. A quiet button that is not destructive MUST take the padding 0 12 px of `DESIGN.md`. `web/checks/quiet-buttons.js` checks these rules for each quiet button in view.
 Each component value MUST use a named token of `DESIGN.md`. A token MUST NOT hold a value absent from the `DESIGN.md` component tables. The contract test in `web/src/lib/theme/design-contract.test.ts` checks each `DESIGN.md` citation against `web/src/lib/theme/scale.ts`.
 The Settings panel MUST save the choice under the setting path `theme`.
 
@@ -123,6 +124,7 @@ The licence texts of the fonts and the icon subset MUST ship in `web/static/lice
 ### Thread header and status band
 
 The thread header shows the open thread title and its state tag. The state tag is `Working`, `Waiting` while the open thread waits for the user, `Done`, `Stopped`, or `Failed`. The tag shows `Ready` when the thread is idle, and `Offline` when the connection is down.
+Each state tag MUST follow the Status tag, Live tag, and Failed tag rows of `DESIGN.md`. It MUST take the colour that the State words table of `DESIGN.md` gives its word. `web/checks/state-tags.js` checks these rules for each tag in view.
 The visible thread title MUST use at most two lines.
 The header MUST retain the full title as text and as a `title` attribute.
 The client MUST map thread status `notLoaded` to idle and display `Ready` when no completed turn is known.
@@ -145,6 +147,8 @@ The client MUST NOT render an item whose id is in `statusHide`. The client MUST 
 Each icon MUST carry an `aria-label` that states its value in words. The browser draws Nerd glyphs from its own subset font, and it ignores the `icons` setting.
 
 The band MUST keep a details list under `Status` that holds every shown item as text. The list MUST appear when `statusHide` names an item, and when the window is 40rem or narrower.
+
+Above 40rem the band is three rows at the end of the header. The first row holds `model`. The second row holds `effort`, `approval`, `sandbox`, `folder`, and `queue`. The third row holds `context` and `mark`. Each row MUST end at the right edge of the band.
 
 At 40rem or narrower the band is one row under the title. Below a band width of 30rem the folder item MUST drop. Below 26rem the queue item MUST drop. Below 16rem the effort item MUST drop. Below 12rem the mark item MUST drop. Model, context, approval, and sandbox MUST NOT drop.
 
@@ -234,8 +238,13 @@ The approval card MUST show `Approval required`, a title, the request details, a
 
 The request details MUST scroll inside their own region. The decision actions MUST stay outside that region. The card MUST offer `Accept`, `Accept for session`, `Decline`, and `Cancel and interrupt`.
 ArrowUp and ArrowDown MUST scroll the approval details by 48 px. PageUp and PageDown MUST scroll the approval details by the height of the details minus 48 px. Each PageUp and PageDown scroll MUST move at least 48 px.
-The dock MUST fit within the viewport. Approval details MUST shrink and scroll without hiding the card header or actions.
-Approval details MUST retain a readable scroll region. The card header, actions, and composer MUST NOT overlap.
+The dock MUST fit within the viewport. Approval details MUST shrink with the viewport and scroll without hiding the card header or actions.
+Approval details MUST retain a readable scroll region. The card header, actions, and composer MUST NOT overlap at any viewport size.
+The request card MUST NOT shrink below the height of its header, details, and actions.
+While a request is open, the composer MUST give up height before the card does, down to its label and one field row.
+When the card, the notices, and the composer at that height are taller than the viewport, the dock MUST scroll inside itself.
+While the dock scrolls, the sticky actions MAY cover part of the details until the dock reaches its end.
+While a request is open, the composer MUST keep its label, field, and actions reachable by scrolling the composer or the dock.
 
 While the card has focus, `y` MUST accept, `a` MUST accept for the session, `n` MUST decline, and Escape MUST cancel and interrupt the turn. Escape MUST answer the card at once, and the two-press guard of the composer MUST NOT apply to it.
 
@@ -420,6 +429,15 @@ That submit MUST show `No command named /<name>. Start with // to send a message
 
 Pressing `?` while no field has focus MUST open the key list.
 Escape MUST close a panel and MUST return focus to the element that opened it.
+When the opener of a panel is gone, disabled, or the page body, closing the panel MUST move focus to the message field.
+While the message field is disabled, that focus MUST go to the transcript.
+Focusing the transcript MUST NOT scroll the page or the transcript.
+Choosing a thread in the resume panel MUST keep the panel open until the attempt to open that thread ends.
+While that attempt runs, the resume panel MUST disable its thread choices.
+During that attempt, the resume panel MUST show `Opening thread…` as status text inside its dialog.
+A panel MUST keep its title and footer inside the viewport.
+When a panel is taller than the viewport, only its body MUST scroll.
+`web/checks/panel-footer.js` checks these rules for the open panel and for each provider choice of the login panel.
 
 The resume panel filters thread titles, previews, and identifiers as the user types.
 A trimmed filter with at least three characters starts conversation search after a 300 ms pause.
@@ -443,6 +461,7 @@ A failed API-key login MUST keep the panel open and MUST show the error under th
 A browser or device-code login MUST wait for `account/login/completed` with its `loginId`.
 A successful login MUST show `Signed in to <provider>`, reload the models, and close the panel.
 A failed browser or device-code login MUST show `Login failed` with a Try again action.
+The login panel MUST show a Close button in every state, so that a pointer or touch user can leave it.
 Closing the login panel or opening another panel MUST cancel a pending browser or device-code login with `account/login/cancel`.
 A start response that arrives after the cancel MUST be cancelled with the `loginId` it returns.
 
@@ -484,5 +503,11 @@ Under `prefers-reduced-motion: reduce`, animations MUST stop, and the elapsed te
 
 Under forced colours, each state tag and the point button MUST keep a visible border. `web/checks/forced-colors.js` checks this rule.
 
-The page MUST have one status region and one alert region. The transcript MUST NOT be a live region.
-`web/checks/approval-actions.js` checks the approval card on small screens. `web/checks/dock.js` checks the composer dock. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript.
+The page MUST have one status region and one alert region. They MUST be the notice regions.
+The transcript MUST NOT be a live region.
+The compact, fork, tree, rewind, advisor, review, and resume panels MUST show their own error as an alert inside their dialog. They MUST NOT add a notice for it.
+The resume panel MUST show its search progress as status text inside its dialog. It MUST NOT add a notice for it.
+A failed save in the model or settings panel MUST show a notice.
+The composer MUST show its error as an alert beside the message field. The message field MUST name that alert in `aria-describedby`. The composer MUST NOT add a notice for its error.
+The `page live regions` tests in `web/src/lib/components/App.dom.test.ts` check these rules.
+`web/checks/approval-actions.js` checks the approval card at 320x568, 375x812 and 667x375. It checks that the card holds its actions and that they do not cover the composer, at both ends of the dock's scroll. It checks that the composer shows its label and one field row, and that it is no taller than that while the dock scrolls. `web/checks/dock.js` checks the composer dock at the start, the middle and the end of the document. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/band-rows.js` checks that every band row ends at the right edge of the band, in a window wider than 640 px. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript at 1280x800, on a thread whose transcript holds more than its column shows.

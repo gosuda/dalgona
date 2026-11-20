@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
@@ -104,7 +105,7 @@ func (m *model) panelInputLine(width int) (string, int) {
 }
 
 func (m *model) draftLine(width int) (string, int) {
-	first := m.input.composer.firstLine()
+	first := m.screen.expand(m.input.composer.firstLine())
 	prompt := m.screen.dockTheme().hueText(threadHue(m.thread.id), m.promptGlyph())
 	line := m.screen.fit(prompt+first, terminalWidth(width))
 	return line, min(promptCells+m.screen.cells(first), terminalWidth(width))
@@ -130,17 +131,14 @@ func (m *model) fieldLabel(mode inputMode) string {
 
 func fieldWindow(s *screenState, text []rune, cursor, room int) (string, int) {
 	if s.cells(string(text)) <= room {
-		return string(text), s.cells(string(text[:cursor]))
+		return s.expand(string(text)), s.cells(string(text[:cursor]))
 	}
 	left, right := growWindow(s, text, cursor, room)
-	prefix, suffix := "", ""
+	prefix := ""
 	if left > 0 {
 		prefix = "..."
 	}
-	if right < len(text) {
-		suffix = "..."
-	}
-	return prefix + string(text[left:right]) + suffix, len(prefix) + s.cells(string(text[left:cursor]))
+	return s.expand(windowText(text, left, right)), s.cells(prefix + string(text[left:cursor]))
 }
 
 func growWindow(s *screenState, text []rune, cursor, room int) (int, int) {
@@ -159,15 +157,20 @@ func growWindow(s *screenState, text []rune, cursor, room int) (int, int) {
 	return left, right
 }
 
-func windowCells(s *screenState, text []rune, left, right int) int {
-	n := s.cells(string(text[left:right]))
+func windowText(text []rune, left, right int) string {
+	var window strings.Builder
 	if left > 0 {
-		n += 3
+		window.WriteString("...")
 	}
+	window.WriteString(string(text[left:right]))
 	if right < len(text) {
-		n += 3
+		window.WriteString("...")
 	}
-	return n
+	return window.String()
+}
+
+func windowCells(s *screenState, text []rune, left, right int) int {
+	return s.cells(windowText(text, left, right))
 }
 
 func (m *model) editorRows(width, limit int) ([]string, int, int) {
@@ -193,6 +196,7 @@ const (
 	liveCallsCells = 7
 	livePlanCells  = 12
 	liveQueueCells = 10
+	liveTextCells  = 22
 )
 
 type liveField struct {
@@ -223,34 +227,92 @@ func stateWord(state string, lastTurn time.Duration) string {
 
 func (m *model) liveRow() string {
 	width := terminalWidth(m.screen.width)
-	if m.hint.text != "" {
-		return m.liveTag() + m.liveElapsed() + m.screen.fit(m.liveText(), max(0, width-liveTagCells-elapsedCells))
-	}
+	hinted := m.hint.text != ""
+	fields := m.rowFields(width, hinted)
+	gap := m.liveGap(fields, width, hinted)
 	var row strings.Builder
-	fields := m.liveFields(width)
 	for index, field := range fields {
 		if index > 1 {
 			row.WriteByte(' ')
 		}
 		row.WriteString(field.text)
 	}
-	row.WriteString(m.screen.fit(m.liveText(), max(0, width-fieldsWidth(fields))))
+	row.WriteString(strings.Repeat(" ", gap))
+	row.WriteString(m.screen.cutText(m.liveText(), max(0, width-fieldsWidth(fields)-gap)))
 	return m.screen.fit(row.String(), width)
 }
 
-func (m *model) liveFields(width int) []liveField {
-	fields := []liveField{
+func (m *model) rowFields(width int, hinted bool) []liveField {
+	if hinted {
+		head := m.liveHead()
+		if width-fieldsWidth(head) < liveTextCells {
+			return nil
+		}
+		return head
+	}
+	fields := m.liveFields(width)
+	if !m.liveCovers() {
+		return fields
+	}
+	for len(fields) > 2 && width-fieldsWidth(fields) < liveTextCells {
+		fields = trimBlankFields(fields[:len(fields)-1], width)
+	}
+	return fields
+}
+
+func (m *model) liveCovers() bool {
+	if m.notice != "" || m.settings != nil && m.settings.saveErr != "" {
+		return true
+	}
+	if len(m.approvals) > 0 || m.thread.state == stateAwaitingApproval {
+		return true
+	}
+	_, waiting := m.retryRemaining()
+	return waiting
+}
+
+func (m *model) liveGap(fields []liveField, width int, hinted bool) int {
+	if len(fields) == 0 || strings.HasSuffix(ansi.Strip(fields[len(fields)-1].text), " ") {
+		return 0
+	}
+	need := len("...")
+	if hinted {
+		need = m.screen.cells(m.hint.text)
+	}
+	if width-fieldsWidth(fields)-1 >= need {
+		return 1
+	}
+	return 0
+}
+
+func (m *model) liveHead() []liveField {
+	return []liveField{
 		{text: m.liveTag(), cells: liveTagCells},
 		{text: m.liveElapsed(), cells: elapsedCells},
-		{text: m.liveCalls(), cells: liveCallsCells},
-		{text: m.livePlan(), cells: livePlanCells},
-		{text: m.liveQueued(), cells: liveQueueCells},
 	}
+}
+
+func (m *model) liveFields(width int) []liveField {
+	fields := append(m.liveHead(),
+		liveField{text: m.liveCalls(), cells: liveCallsCells},
+		liveField{text: m.livePlan(), cells: livePlanCells},
+		liveField{text: m.liveQueued(), cells: liveQueueCells},
+	)
 	for _, index := range []int{4, 3, 2} {
 		if fieldsWidth(fields) <= width {
 			break
 		}
 		fields = slices.Delete(fields, index, index+1)
+	}
+	return trimBlankFields(fields, width)
+}
+
+func trimBlankFields(fields []liveField, width int) []liveField {
+	if width-fieldsWidth(fields) >= liveTextCells {
+		return fields
+	}
+	for len(fields) > 0 && strings.TrimSpace(fields[len(fields)-1].text) == "" {
+		fields = fields[:len(fields)-1]
 	}
 	return fields
 }
@@ -265,7 +327,15 @@ func fieldsWidth(fields []liveField) int {
 
 func (m *model) liveFreeWidth() int {
 	width := terminalWidth(m.screen.width)
-	return width - fieldsWidth(m.liveFields(width))
+	fields := m.rowFields(width, false)
+	return width - fieldsWidth(fields) - m.liveGap(fields, width, false)
+}
+
+func (s *screenState) cutText(text string, n int) string {
+	if n < 3 && s.cells(text) > n {
+		return strings.Repeat(".", n)
+	}
+	return s.fit(text, n)
 }
 
 func (s *screenState) pad(text string, n int) string {

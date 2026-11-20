@@ -41,15 +41,15 @@ func (r fileResolver) stageRename(ctx context.Context, item edit) error {
 		return err
 	}
 	if hasParentComponent(item.to) {
-		return errors.New("patch: rename destination contains parent traversal")
+		return reasoned(tool.ReasonOutsideWorkspace, errors.New("patch: rename destination contains parent traversal"))
 	}
 	if _, statErr := r.env.Runner.Stat(ctx, absolute); statErr == nil {
-		return fmt.Errorf("patch: cannot rename %s to %s: destination already exists", r.group.display, display)
+		return atPath(display, reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: cannot rename %s to %s: destination already exists", r.group.display, display)))
 	} else if !errors.Is(statErr, fs.ErrNotExist) {
 		return fmt.Errorf("patch: cannot inspect rename destination %s: %w", display, statErr)
 	}
 	if item.reference != "" {
-		if proofErr := proveUnchanged(r.env, item.reference, r.group.display, r.file.before); proofErr != nil {
+		if proofErr := proveSource(r.env, item, r.group.display, r.file.before); proofErr != nil {
 			return proofErr
 		}
 	}
@@ -121,12 +121,12 @@ func spliceBytes(before []byte, item replacement) []byte {
 	return after
 }
 
-func proveEligible(env tool.Env, item edit) error {
+func proveEligible(env tool.Env, item edit, path string) error {
 	if item.guard.kind != guardReference {
 		return nil
 	}
 	if err := env.Snapshots.Eligible(item.guard.text, env.Evidence); err != nil {
-		return fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err)
+		return atPath(path, fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err))
 	}
 	return nil
 }
@@ -135,7 +135,7 @@ func (r fileResolver) resolve(doc document, item edit) ([]replacement, error) {
 	if item.kind != editChange {
 		return nil, nil
 	}
-	if err := proveEligible(r.env, item); err != nil {
+	if err := proveEligible(r.env, item, r.file.path); err != nil {
 		return nil, err
 	}
 	if err := proveTag(r.file, item); err != nil {
@@ -159,8 +159,11 @@ func proveTag(file *stagedFile, item edit) error {
 	if item.guard.kind != guardWholeTag && item.guard.kind != guardVersion {
 		return nil
 	}
-	expected := item.guard.text
-	whole, version := snapshot.Tag("whole", file.before), snapshot.VersionTag(file.before)
+	return checkTag(item.guard.text, item.index, file.path, file.before)
+}
+
+func checkTag(expected string, index int, path string, before []byte) error {
+	whole, version := snapshot.Tag("whole", before), snapshot.VersionTag(before)
 	if expected == whole || expected == version {
 		return nil
 	}
@@ -168,7 +171,14 @@ func proveTag(file *stagedFile, item edit) error {
 	if len(expected) == 4 {
 		current = version
 	}
-	return fmt.Errorf("patch: changes[%d]: tag %s does not match %s now (tag %s). The file changed since you read it; read it again", item.index, expected, file.path, current)
+	return fmt.Errorf("patch: changes[%d]: tag %s does not match %s now (tag %s). The file changed since you read it; read it again", index, expected, path, current)
+}
+
+func proveSource(env tool.Env, item edit, path string, before []byte) error {
+	if snapshot.ValidRef(item.reference) {
+		return proveUnchanged(env, item.reference, path, before)
+	}
+	return checkTag(item.reference, item.index, path, before)
 }
 
 func (r fileResolver) resolveWhole(doc document, item edit) ([]replacement, error) {
@@ -193,7 +203,7 @@ func (r fileResolver) resolveLines(doc document, item edit) ([]replacement, erro
 		return nil, err
 	}
 	if first < 1 || last < first || last > doc.lines() {
-		return nil, fmt.Errorf("patch: line %d does not exist (file has %d lines)", last, doc.lines())
+		return nil, reasoned(tool.ReasonInvalidRange, fmt.Errorf("patch: line %d does not exist (file has %d lines)", last, doc.lines()))
 	}
 	if quoteErr := proveQuotedSpan(doc, item, r.group.display); quoteErr != nil {
 		return nil, quoteErr
@@ -201,7 +211,7 @@ func (r fileResolver) resolveLines(doc document, item edit) ([]replacement, erro
 	start, end := doc.lineRange(first, last)
 	body := doc.render(item.body)
 	if r.needsCoverage(item, r.file.before[start:end], body) {
-		if coverErr := proveCoverage(r.env.Snapshots, item, r.file.path, item.locator.first, item.locator.last); coverErr != nil {
+		if coverErr := proveCoverage(r.env.Snapshots, item, r.file, item.locator.first, item.locator.last); coverErr != nil {
 			return nil, coverErr
 		}
 	}
@@ -243,17 +253,17 @@ func placeLines(doc document, item edit, first, last int, body []byte) replaceme
 }
 
 func (r fileResolver) resolveGap(doc document, item edit) ([]replacement, error) {
-	gap, err := r.targetGap(doc, item)
+	gap, source, err := r.targetGap(doc, item)
 	if err != nil {
 		return nil, err
 	}
 	if gap < 0 || gap > doc.lines() {
-		return nil, fmt.Errorf("patch: line %d does not exist (file has %d lines)", item.locator.before, doc.lines())
+		return nil, reasoned(tool.ReasonInvalidRange, fmt.Errorf("patch: line %d does not exist (file has %d lines)", item.locator.before, doc.lines()))
 	}
 	body := doc.render(item.body)
 	splice := snapshot.Splice{Start: gap, End: gap, Inserted: countBodyLines(body)}
-	if gap == doc.lines() && !doc.finalNewline && doc.lines() > 0 {
-		if err := r.proveFinalRowCoverage(item, doc.lines()); err != nil {
+	if gap == doc.lines() && !doc.finalNewline && doc.lines() > 0 && source > 0 {
+		if err := r.proveFinalRowCoverage(item, source); err != nil {
 			return nil, err
 		}
 		splice.Start = gap - 1
@@ -262,22 +272,28 @@ func (r fileResolver) resolveGap(doc document, item edit) ([]replacement, error)
 	return []replacement{{index: item.index, start: offset, end: offset, body: body, splice: splice}}, nil
 }
 
-func (r fileResolver) targetGap(doc document, item edit) (int, error) {
-	gap := item.locator.before - 1
-	if item.locator.before == tailGap {
-		gap = doc.lines()
-	}
+func (r fileResolver) targetGap(doc document, item edit) (mapped, source int, err error) {
+	source = item.locator.before - 1
 	if item.guard.kind != guardReference {
-		return gap, nil
+		if item.locator.before == tailGap {
+			source = doc.lines()
+		}
+		return source, source, nil
 	}
-	return mapReferenceGap(r.env.Snapshots, item.guard.text, r.file, gap)
+	if item.locator.before == tailGap {
+		if source, err = r.env.Snapshots.Lines(item.guard.text); err != nil {
+			return 0, 0, staleReference(item.guard.text, r.file.path, err)
+		}
+	}
+	mapped, err = mapReferenceGap(r.env.Snapshots, item.guard.text, r.file, source)
+	return mapped, source, err
 }
 
-func (r fileResolver) proveFinalRowCoverage(item edit, line int) error {
+func (r fileResolver) proveFinalRowCoverage(item edit, row int) error {
 	if r.style != HashlineEnhanced {
 		return nil
 	}
-	return proveCoverage(r.env.Snapshots, item, r.file.path, line, line)
+	return proveCoverage(r.env.Snapshots, item, r.file, row, row)
 }
 
 func (r fileResolver) resolveText(doc document, item edit) ([]replacement, error) {
@@ -356,32 +372,36 @@ func matchesAtLine(matches []textMatch, doc document, line int) []textMatch {
 
 func mapReferenceSpan(store *snapshot.Store, ref string, file *stagedFile, first, last int) (snapshot.Span, error) {
 	if store == nil {
-		return snapshot.Span{}, errors.New("patch: snapshot store is unavailable")
+		return snapshot.Span{}, reasoned(tool.ReasonObservationUnavailable, errors.New("patch: snapshot store is unavailable"))
 	}
 	mapped, err := store.ResolveSpan(ref, file.path, file.before, snapshot.Span{Start: first - 1, End: last})
 	if err != nil {
-		return snapshot.Span{}, fmt.Errorf("patch: reference %s for %s is stale: %w. Read again", ref, file.path, err)
+		return snapshot.Span{}, staleReference(ref, file.path, err)
 	}
 	return mapped, nil
 }
 
 func mapReferenceGap(store *snapshot.Store, ref string, file *stagedFile, gap int) (int, error) {
 	if store == nil {
-		return 0, errors.New("patch: snapshot store is unavailable")
+		return 0, reasoned(tool.ReasonObservationUnavailable, errors.New("patch: snapshot store is unavailable"))
 	}
 	mapped, err := store.ResolveGap(ref, file.path, file.before, gap)
 	if err != nil {
-		return 0, fmt.Errorf("patch: reference %s for %s is stale: %w. Read again", ref, file.path, err)
+		return 0, staleReference(ref, file.path, err)
 	}
 	return mapped, nil
 }
 
+func staleReference(ref, path string, err error) error {
+	return atPath(path, fmt.Errorf("patch: reference %s for %s is stale: %w. Read again", ref, path, err))
+}
+
 func proveUnchanged(env tool.Env, ref, path string, before []byte) error {
 	if err := env.Snapshots.Eligible(ref, env.Evidence); err != nil {
-		return fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err)
+		return atPath(path, fmt.Errorf("patch: reference is not eligible: %w. Read and copy an eligible new header", err))
 	}
 	if env.Snapshots == nil || !env.Snapshots.Unchanged(ref, path, before) {
-		return fmt.Errorf("patch: reference %s for %s is expired or the file changed. Read again", ref, path)
+		return atPath(path, reasoned(tool.ReasonTargetChanged, fmt.Errorf("patch: reference %s for %s is expired or the file changed. Read again", ref, path)))
 	}
 	return nil
 }
@@ -393,11 +413,14 @@ func (r fileResolver) proveSeen(first, last, index int) error {
 	return fmt.Errorf("patch: changes[%d]: lines %d-%d of %s were not displayed in this session", index, first, last, r.file.path)
 }
 
-func proveCoverage(store *snapshot.Store, item edit, path string, first, last int) error {
+func proveCoverage(store *snapshot.Store, item edit, file *stagedFile, first, last int) error {
 	if store != nil && store.Covers(item.guard.text, first, last) {
 		return nil
 	}
-	return fmt.Errorf("patch: changes[%d]: lines %d-%d of %s need prior observation. Read them, then resend", item.index, first, last, path)
+	cause := reasoned(tool.ReasonUnobservedRange, fmt.Errorf("patch: changes[%d]: lines %d-%d of %s need prior observation. Read them, then resend", item.index, first, last, file.path))
+	return &coverageError{
+		err: cause, path: file.path, ref: item.guard.text, first: first, last: last, before: file.before,
+	}
 }
 
 func proveQuotedSpan(doc document, item edit, path string) error {
@@ -437,10 +460,10 @@ func overlapError(style Style, path string, left, right replacement) error {
 		return nil
 	}
 	if max(left.start, right.start) < min(left.end, right.end) {
-		return fmt.Errorf("patch: changes[%d] and changes[%d] overlap in %s", left.index, right.index, path)
+		return reasoned(tool.ReasonOverlap, fmt.Errorf("patch: changes[%d] and changes[%d] overlap in %s", left.index, right.index, path))
 	}
 	if style.profile() && insertionConflict(left, right) {
-		return fmt.Errorf("patch: changes[%d] and changes[%d] have conflicting insertion gaps in %s", left.index, right.index, path)
+		return reasoned(tool.ReasonOverlap, fmt.Errorf("patch: changes[%d] and changes[%d] have conflicting insertion gaps in %s", left.index, right.index, path))
 	}
 	return nil
 }

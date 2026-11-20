@@ -62,9 +62,6 @@ func (m *model) renderMarkdown(text string) string {
 }
 
 func (m *model) renderBlock(b block) []string {
-	if b.diagram != "" {
-		return m.renderDiagramBlock(b)
-	}
 	if b.code {
 		return []string{b.text}
 	}

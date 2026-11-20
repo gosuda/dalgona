@@ -15,7 +15,7 @@ func TestFollowupNoticeKeepsDockHeight(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Thread: rpc.Thread{ID: "t1"}}})
-	m.queue = []string{"a", "b"}
+	m.queue = queued("a", "b")
 	before := len(m.dockLines())
 	m, _ = drive(t, m, resultMsg{op: "new", value: &rpc.ThreadStartResponse{Thread: rpc.Thread{ID: "t2"}}})
 	if got := len(m.dockLines()); got != before {
@@ -62,19 +62,89 @@ func TestStatusRowShowsWorkingTagAndElapsed(t *testing.T) {
 	}
 }
 
-func TestStatusRowFieldsKeepCells(t *testing.T) {
-	t.Parallel()
+type elapsedPair struct {
+	name          string
+	before, after time.Duration
+}
+
+func elapsedPairs() []elapsedPair {
+	return []elapsedPair{
+		{"9s to 10s", 9 * time.Second, 10 * time.Second},
+		{"12s to 2m 05s", 12 * time.Second, 125 * time.Second},
+		{"59s to 1m 00s", 59 * time.Second, time.Minute},
+		{"999 ms to 1s", 999 * time.Millisecond, time.Second},
+		{"59m 59s to 1h 00m", 59*time.Minute + 59*time.Second, time.Hour},
+		{"99h 59m to 100h", 99*time.Hour + 59*time.Minute, 100 * time.Hour},
+	}
+}
+
+func requireElapsedKeepsCells(t *testing.T, width int, pair elapsedPair) {
+	t.Helper()
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	m := liveModel(t, &now)
-	now = now.Add(9 * time.Second)
+	m.screen.width = width
+	m.noticef("%s", "notice")
+	start := now
+	now = start.Add(pair.before)
 	before := stripANSI(m.liveRow())
-	now = now.Add(time.Second)
+	now = start.Add(pair.after)
 	after := stripANSI(m.liveRow())
 	if strings.Index(before, "Working") != strings.Index(after, "Working") {
 		t.Fatalf("Working moved: %q then %q", before, after)
 	}
 	if cellCount(m, before) != cellCount(m, after) {
 		t.Fatalf("live row width changed: %q then %q", before, after)
+	}
+	if liveColumn(t, m, before, "notice") != liveColumn(t, m, after, "notice") {
+		t.Fatalf("the free text moved: %q then %q", before, after)
+	}
+}
+
+func TestStatusRowFieldsKeepCells(t *testing.T) {
+	t.Parallel()
+	for _, width := range []int{40, 100} {
+		for _, pair := range elapsedPairs() {
+			t.Run(fmt.Sprintf("%dcols/%s", width, pair.name), func(t *testing.T) {
+				t.Parallel()
+				requireElapsedKeepsCells(t, width, pair)
+			})
+		}
+	}
+}
+
+func planOf(done, total int) []rpc.TurnPlanStep {
+	steps := make([]rpc.TurnPlanStep, total)
+	for i := range steps {
+		steps[i] = rpc.TurnPlanStep{Step: "s", Status: "pending"}
+		if i < done {
+			steps[i].Status = "completed"
+		}
+	}
+	return steps
+}
+
+func TestStatusRowFieldsKeepCellsWhenThePlanAdvances(t *testing.T) {
+	t.Parallel()
+	for _, width := range []int{60, 100} {
+		for _, pair := range [][4]int{{0, 3, 1, 3}, {9, 12, 10, 12}, {99, 100, 100, 120}} {
+			t.Run(fmt.Sprintf("%dcols/%dof%d to %dof%d", width, pair[0], pair[1], pair[2], pair[3]), func(t *testing.T) {
+				t.Parallel()
+				now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+				m := liveModel(t, &now)
+				m.screen.width = width
+				m.queue = []followup{{text: "next"}}
+				m.live.plan = planOf(pair[0], pair[1])
+				before := stripANSI(m.liveRow())
+				m.live.plan = planOf(pair[2], pair[3])
+				after := stripANSI(m.liveRow())
+				if cellCount(m, before) != cellCount(m, after) {
+					t.Fatalf("live row width changed: %q then %q", before, after)
+				}
+				if liveColumn(t, m, before, "1 queued") != liveColumn(t, m, after, "1 queued") {
+					t.Fatalf("the queued field moved: %q then %q", before, after)
+				}
+			})
+		}
 	}
 }
 
@@ -205,7 +275,7 @@ func saturateLiveRow(m *model) {
 	for i := range 100 {
 		m.live.items = append(m.live.items, liveItem{ID: fmt.Sprintf("c%d", i), Type: "commandExecution", Command: "x", Status: "inProgress"})
 	}
-	m.queue = strings.Fields(strings.Repeat("next ", 32))
+	m.queue = queued(strings.Fields(strings.Repeat("next ", 32))...)
 	for range 120 {
 		m.live.plan = append(m.live.plan, rpc.TurnPlanStep{Step: "s", Status: "pending"})
 	}
@@ -257,13 +327,24 @@ func TestStatusRowTinyFreeTextKeepsFixedFields(t *testing.T) {
 
 func TestStatusRowBelowFortyColumns(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
-	m := liveModel(t, &now)
-	m.screen.width = 30
-	m.live.items = []liveItem{{ID: "a1", Type: "agentMessage", Text: strings.Repeat("tail ", 20)}}
-	for _, line := range m.dockLines() {
-		if got := cellCount(m, line); got > 29 {
-			t.Fatalf("dock line is %d cells at 30 columns: %q", got, line)
+	hints := []string{"", "Esc again to interrupt", "Ctrl+C again to exit"}
+	for _, width := range []int{10, 17, 18, 30, 39} {
+		for _, hint := range hints {
+			t.Run(fmt.Sprintf("%dcols/%q", width, hint), func(t *testing.T) {
+				t.Parallel()
+				now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+				m := liveModel(t, &now)
+				m.screen.width = width
+				m.live.items = []liveItem{{ID: "a1", Type: "agentMessage", Text: strings.Repeat("tail ", 20)}}
+				if hint != "" {
+					m.setHint(hint, "interrupt")
+				}
+				now = now.Add(5 * time.Second)
+				assertFrame(t, m.dockLines(), width, m.screen.height)
+				if got := cellCount(m, m.liveRow()); got > width-1 {
+					t.Fatalf("live row is %d cells at %d columns: %q", got, width, m.liveRow())
+				}
+			})
 		}
 	}
 }
@@ -336,7 +417,8 @@ func TestMultiLineNoticeCutInLiveRowIsCommitted(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{})
 	m.screen.width = 40
-	m.noticef("%s", "a\nb")
+	notice := "first line of the notice\nsecond line of the notice"
+	m.noticef("%s", notice)
 	if cells := cellCount(m, m.liveText()); cells <= m.liveFreeWidth() {
 		t.Fatalf("precondition: the live row shows the notice in %d cells, free width %d", cells, m.liveFreeWidth())
 	}
@@ -344,8 +426,8 @@ func TestMultiLineNoticeCutInLiveRowIsCommitted(t *testing.T) {
 	if len(m.out.entries) != 1 || m.out.entries[0].key != "note:0" {
 		t.Fatalf("the cut notice was not committed as a row: %+v", m.out.entries)
 	}
-	if got := m.out.entries[0].text; got != "a\nb" {
-		t.Fatalf("committed notice text = %q, want %q", got, "a\nb")
+	if got := m.out.entries[0].text; got != notice {
+		t.Fatalf("committed notice text = %q, want %q", got, notice)
 	}
 }
 
@@ -540,7 +622,7 @@ func TestStatusRowPlanStepStaysOneRow(t *testing.T) {
 	if got := cellCount(m, stripANSI(row)); got > 59 {
 		t.Fatalf("live row is %d cells at 60 columns: %q", got, row)
 	}
-	if got := liveFreeText(m); got != "Fix the..." {
+	if got := liveFreeText(m); got != "Fix the decoder ca..." {
 		t.Fatalf("free text = %q, want the step cut to %d cells", got, m.liveFreeWidth())
 	}
 }

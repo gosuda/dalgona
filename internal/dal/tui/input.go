@@ -55,8 +55,10 @@ func (f textField) value() string {
 	return string(f.text)
 }
 
+var pasteLineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n")
+
 func (f *textField) pasteLine(text string) bool {
-	first, _, _ := strings.Cut(text, "\n")
+	first, _, _ := strings.Cut(pasteLineBreaks.Replace(text), "\n")
 	return f.insert(first)
 }
 
@@ -142,12 +144,13 @@ func inputLabel(mode inputMode) string {
 }
 
 type editor struct {
-	text        []rune
-	cursor      int
-	width       int
-	focused     bool
-	placeholder string
-	chips       []chip
+	text         []rune
+	cursor       int
+	width        int
+	focused      bool
+	placeholder  string
+	chips        []chip
+	verbatimText []rune
 }
 
 func newEditor() editor {
@@ -155,8 +158,8 @@ func newEditor() editor {
 }
 
 type editorRow struct {
-	text       string
-	start, end int
+	text            string
+	start, end, col int
 }
 
 func (c editor) Value() string {
@@ -167,6 +170,32 @@ func (c *editor) SetValue(value string) {
 	c.text = []rune(value)
 	c.cursor = len(c.text)
 	c.chips = nil
+	c.verbatimText = nil
+}
+
+func (c *editor) recall(text string, verbatim bool) {
+	c.SetValue(text)
+	if verbatim {
+		c.verbatimText = slices.Clone(c.text)
+	}
+}
+
+func (c editor) verbatim() bool {
+	return len(c.verbatimText) > 0 && slices.Equal(c.text, c.verbatimText)
+}
+
+func (c *editor) settleVerbatim() {
+	if !c.verbatim() {
+		c.verbatimText = nil
+	}
+}
+
+func (c editor) readsSlash() bool {
+	return !c.verbatim() && strings.HasPrefix(strings.TrimSpace(c.Value()), "/")
+}
+
+func (c editor) sendsPastedSlash(text string) bool {
+	return !c.readsSlash() && strings.HasPrefix(text, "/")
 }
 
 func (c *editor) SetWidth(width int) {
@@ -213,29 +242,12 @@ func (c editor) lineRows(s *screenState, line string, offset, cell int) []editor
 }
 
 func (c editor) textRows(s *screenState, line string, offset, cell int) []editorRow {
-	parts := s.wrap(line, cell)
-	rows := make([]editorRow, 0, len(parts))
-	pos := 0
-	for _, part := range parts {
-		end := partEnd(line, pos, part)
-		rows = append(rows, editorRow{text: line[pos:end], start: offset + pos, end: offset + end})
-		pos = end
+	ranges := s.wrapRanges(line, cell)
+	rows := make([]editorRow, len(ranges))
+	for i, r := range ranges {
+		rows[i] = editorRow{text: line[r.start:r.end], start: offset + r.start, end: offset + r.end, col: r.col}
 	}
 	return rows
-}
-
-func partEnd(line string, pos int, part string) int {
-	if strings.HasPrefix(line[pos:], part) {
-		return pos + len(part)
-	}
-	for end := pos + 1; end <= len(line); end++ {
-		if end == len(line) || utf8.RuneStart(line[end]) {
-			if norm.NFC.String(line[pos:end]) == part {
-				return end
-			}
-		}
-	}
-	return len(line)
 }
 
 func (c editor) byteCursor() int {
@@ -264,7 +276,7 @@ func (c editor) cellsBefore(s *screenState, row editorRow, at int) int {
 		return 0
 	}
 	n := min(max(at-row.start, 0), len(row.text))
-	return s.cells(row.text[:n])
+	return s.cellsFrom(row.text[:n], row.col)
 }
 
 func localSpans(spans []keywordSpan, row editorRow) []keywordSpan {
@@ -288,12 +300,12 @@ func (c editor) layout(s *screenState, width int, spans []keywordSpan, t theme) 
 			lines[i] = t.paint(roleText, s.fit(ch.label, editorCells(width)))
 			continue
 		}
-		lines[i] = norm.NFC.String(markKeywords(r.text, localSpans(spans, r), t))
+		lines[i] = s.expandFrom(norm.NFC.String(markKeywords(r.text, localSpans(spans, r), t)), r.col)
 	}
 	if c.Value() == "" {
 		lines[0] = t.paint(roleDim, s.fit(c.placeholder, editorCells(width)))
 	}
-	return lines, row, c.cellsBefore(s, rows[row], at)
+	return lines, row, min(c.cellsBefore(s, rows[row], at), editorCells(width))
 }
 
 func (c editor) onFirstRow(s *screenState) bool {
@@ -321,6 +333,7 @@ func (c editor) Update(s *screenState, msg tea.Msg) (editor, tea.Cmd) {
 		c.updateKey(s, msg)
 	}
 	c.prune()
+	c.settleVerbatim()
 	return c, nil
 }
 
@@ -411,7 +424,7 @@ func (c editor) runeAt(s *screenState, row editorRow, col int) int {
 			break
 		}
 		next := offset + len(cluster)
-		if s.cells(row.text[:next]) > col {
+		if s.cellsFrom(row.text[:next], row.col) > col {
 			break
 		}
 		offset = next
@@ -586,7 +599,7 @@ func (c editor) expand(text string) string {
 }
 
 func (c *editor) paste(text string) {
-	text = sanitizeText(text)
+	text = sanitizeText(pasteLineBreaks.Replace(text))
 	if strings.Count(text, "\n")+1 < pasteChipLines {
 		c.insert([]rune(text))
 		return

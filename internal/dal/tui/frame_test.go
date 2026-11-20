@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
@@ -77,6 +78,11 @@ func assertFrame(t *testing.T, lines []string, width, height int) {
 	if len(lines) > height-1 {
 		t.Fatalf("frame has %d lines, want at most %d:\n%s", len(lines), height-1, strings.Join(lines, "\n"))
 	}
+	for _, line := range lines {
+		if strings.Contains(line, "\t") {
+			t.Fatalf("line holds a tab: %q", line)
+		}
+	}
 	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
 		screen := screenState{method: method}
 		for _, line := range lines {
@@ -112,11 +118,18 @@ func scriptedTurnMessages() []tea.Msg {
 		notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)},
 		notificationMsg{method: "item/started", params: []byte(`{"threadId":"t1","turnId":"turn-1","startedAtMs":1,"item":{"type":"agentMessage","id":"a1","text":""}}`)},
 		notificationMsg{method: "item/agentMessage/delta", params: []byte(fmt.Sprintf(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":%q}`, text.String()))},
+		spinner.TickMsg{},
+		notificationMsg{method: "turn/plan/updated", params: []byte(`{"threadId":"t1","turnId":"turn-1","plan":[{"step":"Read the code","status":"inProgress"},{"step":"Fix the decoder","status":"pending"}]}`)},
+		spinner.TickMsg{},
 		notificationMsg{method: "item/completed", params: []byte(`{"threadId":"t1","turnId":"turn-1","completedAtMs":2,"item":{"type":"agentMessage","id":"a1","text":""}}`)},
 		notificationMsg{method: "item/started", params: []byte(`{"threadId":"t1","turnId":"turn-1","startedAtMs":3,"item":{"type":"commandExecution","id":"c1","command":"seq 30","commandActions":[],"cwd":"/work","status":"inProgress","aggregatedOutput":null}}`)},
 		notificationMsg{method: "item/commandExecution/outputDelta", params: []byte(fmt.Sprintf(`{"threadId":"t1","turnId":"turn-1","itemId":"c1","delta":%q}`, output))},
+		spinner.TickMsg{},
 		notificationMsg{method: "item/completed", params: []byte(`{"threadId":"t1","turnId":"turn-1","completedAtMs":4,"item":{"type":"commandExecution","id":"c1","command":"seq 30","commandActions":[],"cwd":"/work","status":"completed","aggregatedOutput":"row","exitCode":0}}`)},
+		notificationMsg{method: "turn/plan/updated", params: []byte(`{"threadId":"t1","turnId":"turn-1","plan":[{"step":"Read the code","status":"completed"},{"step":"Fix the decoder","status":"inProgress"}]}`)},
 		notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"stream reset"}}`)},
+		notificationMsg{method: "dalgona/retry/wait", params: []byte(`{"threadId":"t1","turnId":"turn-1","remainingMs":125000}`)},
+		spinner.TickMsg{},
 		notificationMsg{method: "turn/completed", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`)},
 	}
 }
@@ -128,10 +141,16 @@ func TestDockBoundsOverScriptedTurn(t *testing.T) {
 			t.Parallel()
 			m := newTestModel(nil, Options{})
 			m, _ = drive(t, m, tea.WindowSizeMsg{Width: size.width, Height: size.height})
-			assertFrame(t, strings.Split(m.View().Content, "\n"), size.width, size.height)
-			for _, msg := range scriptedTurnMessages() {
+			lines := strings.Split(m.View().Content, "\n")
+			assertFrame(t, lines, size.width, size.height)
+			rows := len(lines)
+			for index, msg := range scriptedTurnMessages() {
 				m, _ = drive(t, m, msg)
-				assertFrame(t, strings.Split(m.View().Content, "\n"), size.width, size.height)
+				lines = strings.Split(m.View().Content, "\n")
+				assertFrame(t, lines, size.width, size.height)
+				if len(lines) != rows {
+					t.Fatalf("message %d (%T) changed the dock from %d to %d rows:\n%s", index, msg, rows, len(lines), strings.Join(lines, "\n"))
+				}
 			}
 		})
 	}
@@ -142,20 +161,41 @@ func TestDockHeightChangesOnlyOnKeys(t *testing.T) {
 	m := newTestModel(nil, Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	height := len(m.dockLines())
-	m, _ = drive(t, m, notificationMsg{method: "thread/started", params: []byte(`{"thread":{"id":"t1","name":"demo","preview":"","status":{"type":"active","activeFlags":[]},"turns":[]}}`)})
-	assertFrame(t, strings.Split(m.View().Content, "\n"), 100, 24)
-	if got := len(m.dockLines()); got != height {
-		t.Fatalf("dock height after thread row = %d, want %d", got, height)
-	}
-	m, _ = drive(t, m, notificationMsg{method: "item/agentMessage/delta", params: []byte(`{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"one\ntwo\nthree\n"}`)})
-	assertFrame(t, strings.Split(m.View().Content, "\n"), 100, 24)
-	if got := len(m.dockLines()); got != height {
-		t.Fatalf("dock height after streamed text = %d, want %d", got, height)
-	}
-	m, _ = drive(t, m, notificationMsg{method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"stream reset"}}`)})
-	assertFrame(t, strings.Split(m.View().Content, "\n"), 100, 24)
-	if got := len(m.dockLines()); got != height {
-		t.Fatalf("dock height after notice = %d, want %d", got, height)
+	for _, step := range []struct {
+		name  string
+		msg   func(model) tea.Msg
+		shows string
+		hides string
+	}{
+		{"thread row", invFixed(invNotify("thread/started", invThreadStarted)), "", ""},
+		{"turn start", invFixed(invNotify("turn/started", invTurnStarted)), "Working", ""},
+		{"streamed text", invFixed(invNotify("item/agentMessage/delta", `{"threadId":"t1","turnId":"turn-1","itemId":"a1","delta":"one\ntwo\nthree\n"}`)), "three", ""},
+		{"tick", invFixed(spinner.TickMsg{}), "Working", ""},
+		{"plan", invFixed(invNotify("turn/plan/updated", `{"threadId":"t1","turnId":"turn-1","plan":[{"step":"Read the code","status":"inProgress"},{"step":"Fix the decoder","status":"pending"}]}`)), "0/2 plan", ""},
+		{"plan change", invFixed(invNotify("turn/plan/updated", `{"threadId":"t1","turnId":"turn-1","plan":[{"step":"Read the code","status":"completed"},{"step":"Fix the decoder","status":"inProgress"},{"step":"Run the tests","status":"pending"}]}`)), "1/3 plan", "0/2 plan"},
+		{"notice", invFixed(invNotify("error", `{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"stream reset"}}`)), "stream reset", ""},
+		{"retry wait", invFixed(invNotify("dalgona/retry/wait", `{"threadId":"t1","turnId":"turn-1","remainingMs":125000}`)), "rate limited", "stream reset"},
+		{"tick during the wait", invFixed(spinner.TickMsg{}), "rate limited", ""},
+		{"hint", invFixed(press('c', tea.ModCtrl, "")), "Ctrl+C again to exit", "1/3 plan"},
+		{"hint expiry", func(m model) tea.Msg { return hintExpiredMsg{id: m.hint.id} }, "1/3 plan", "Ctrl+C again to exit"},
+		{"turn end", invFixed(invNotify("turn/completed", `{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`)), "", "1/3 plan"},
+	} {
+		m, _ = drive(t, m, step.msg(m))
+		lines := strings.Split(m.View().Content, "\n")
+		assertFrame(t, lines, 100, 24)
+		if got := len(m.dockLines()); got != height {
+			t.Fatalf("dock height after %s = %d, want %d", step.name, got, height)
+		}
+		if len(lines) != height {
+			t.Fatalf("view after %s has %d rows, want %d:\n%s", step.name, len(lines), height, strings.Join(lines, "\n"))
+		}
+		row := stripANSI(m.liveRow())
+		if !strings.Contains(row, step.shows) {
+			t.Fatalf("live row after %s lacks %q: %q", step.name, step.shows, row)
+		}
+		if step.hides != "" && strings.Contains(row, step.hides) {
+			t.Fatalf("live row after %s still shows %q: %q", step.name, step.hides, row)
+		}
 	}
 	m, _ = drive(t, m, tea.PasteMsg{Content: "pasted\nline"})
 	assertFrame(t, strings.Split(m.View().Content, "\n"), 100, 24)
@@ -497,8 +537,9 @@ func TestInvI8TickChangesOnlyFixedFields(t *testing.T) {
 			defer run.stop()
 			run.send(commandDone("seq 3"))
 			waitModel(t, run, "row printed and frame settled", func(m model) bool {
-				return m.out.started && !m.out.settling && !m.out.printing
+				return m.out.started && !m.out.settling && !m.out.printing && !m.caretLanding()
 			})
+			time.Sleep(time.Second)
 			synctest.Wait()
 			written := out.String()
 			run.send(run.read(func(m model) any { return m.screen.spin.Tick() }))

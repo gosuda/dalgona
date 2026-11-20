@@ -6,6 +6,8 @@ Terminal coding agents, with or without a daemon.
 
 `dal` runs the agent host inside your terminal process and needs no daemon. `dalgona` connects terminal, editor, and browser clients to a per-user daemon and adds a web interface, remote runners, MCP tools, an Agent Client Protocol endpoint, and durable Starlark workflows. Both commands share one agent core and keep their own homes and threads, so you can start with `dal` and adopt `dalgona` when you need it.
 
+[![Built with Depot](https://depot.dev/badges/built-with-depot.svg)](https://depot.dev?utm_source=gosuda)
+
 ## Quick start
 
 Install both commands with the Go toolchain declared in [go.mod](go.mod):
@@ -214,7 +216,7 @@ Prefix these commands and flags with `dal` or `dalgona`.
 
 | Command or flag | Purpose |
 | --- | --- |
-| No arguments | Open the terminal interface. |
+| No arguments | Open the terminal interface. It needs a terminal on stdout; use `-p` otherwise. |
 | `login [provider]` | List providers or sign in to one. |
 | `logout <provider>` | Remove a stored credential. |
 | `models` | List offered models. |

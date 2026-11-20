@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json/jsontext"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -38,7 +39,9 @@ func (m *model) applyRequest(msg serverRequestMsg) tea.Cmd {
 	}
 	request.requestID = msg.requestID
 	request.answer = msg.answer
-	m.input.field = textField{}
+	if len(m.approvals) == 0 && !m.loginTyping() {
+		m.input.field = textField{}
+	}
 	m.approvals = append(m.approvals, request)
 	if !m.acceptThread(request.threadID) {
 		return nil
@@ -57,6 +60,22 @@ func (m *model) applyPatchUpdated(params jsontext.Value) error {
 	}
 	m.live.patches[patchKey{event.ThreadID, event.ItemID}] = sanitizeItem(rpc.Item{Changes: event.Changes}).Changes
 	return nil
+}
+
+func (m *model) patchShown(key patchKey) bool {
+	return slices.ContainsFunc(m.approvals, func(open approval) bool {
+		return open.threadID == key.threadID && open.itemID == key.itemID
+	})
+}
+
+func (m *model) forgetPatch(key patchKey) {
+	if !m.patchShown(key) {
+		delete(m.live.patches, key)
+	}
+}
+
+func (m *model) forgetUnshownPatches() {
+	maps.DeleteFunc(m.live.patches, func(key patchKey, _ []rpc.FileChange) bool { return !m.patchShown(key) })
 }
 
 func (m *model) applyRequestResolved(params jsontext.Value) error {
@@ -97,8 +116,23 @@ func (m *model) dropApproval(index int) {
 	open := m.approvals[index]
 	m.approvals = slices.Delete(m.approvals, index, index+1)
 	delete(m.live.patches, patchKey{open.threadID, open.itemID})
+	if index == 0 {
+		m.handOverField(open)
+	}
 	if len(m.approvals) == 0 && (m.thread.state == stateAwaitingApproval || m.thread.state == stateAwaitingInput) {
 		m.setState(stateRunning)
+	}
+}
+
+func (m *model) abandonApprovals(cause error) {
+	for len(m.approvals) > 0 {
+		open := m.approvals[0]
+		answer := open.answer
+		if open.card != nil {
+			answer = open.card.answer
+		}
+		answer <- requestAnswer{err: cause}
+		m.dropApproval(0)
 	}
 }
 
@@ -110,14 +144,11 @@ var approvalDecisions = map[string]string{
 }
 
 func (m *model) scrollApproval(key string) bool {
-	switch key {
-	case "up":
-		m.approvals[0].scroll = max(m.approvals[0].scroll-1, 0)
-	case "down":
-		m.approvals[0].scroll++
-	default:
+	step := panelScrollStep(key)
+	if step == 0 {
 		return false
 	}
+	m.approvals[0].scroll = m.screen.scrolled(m.approvalPanel(), step)
 	return true
 }
 

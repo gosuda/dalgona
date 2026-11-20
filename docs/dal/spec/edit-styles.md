@@ -43,7 +43,7 @@ Every edit MUST address the original payload image. Edits on one file MUST NOT o
 
 `[PATH#TAG]` opens an existing file. The tag MUST contain four uppercase hexadecimal characters. `[PATH#NEW]` opens a new file. `PUT N:`, `PUT N-M:`, and `PUT N.=M:` replace source lines. `PUT <N:`, `PUT >N:`, and `PUT >$:` insert at source gaps. `CUT` removes lines. `REM` deletes a file. `MV DEST` renames after content edits.
 
-Every `PUT` body MUST have at least one `+` row. The parser MUST remove exactly one leading `+`. Empty `PUT` bodies MUST fail. New files MUST have exactly one `PUT >$` operation. `REM` MUST NOT share a section with another operation.
+Every `PUT` body MUST have at least one `+` row. The parser MUST remove exactly one leading `+`. Empty `PUT` bodies MUST fail. New files MUST have exactly one `PUT >$` operation. `REM` MUST NOT share a section with another operation. A legacy `REM` or `MV` section MUST match the tag of the current file.
 
 ### Hashline Light and Enhanced
 
@@ -104,7 +104,9 @@ The writer MUST recheck every source digest and every required absence before pu
 
 A call MUST NOT stage more than 64 MiB of file content.
 
-A mid-commit failure MUST attempt reverse-order restoration of every completed effect. The error MUST name every affected source and destination path. A rollback failure MUST name each failed restoration and every retained backup. The writer MUST NOT report `nothing was written` after a completed write and successful restore.
+A mid-commit failure MUST attempt reverse-order restoration of every completed effect. The error MUST name every affected source and destination path. A rollback failure MUST name each failed restoration and every retained backup. A profile call MUST also retain and name every backup when a path state is `unknown`. On a Unix host, the writer MUST read a target leaf without blocking. On a Unix host, the writer MUST accept only a regular file as target content. On a Unix host, a profile call MUST report the path state `unknown` when a target holds a FIFO, a device, or a directory. The writer MUST NOT report `nothing was written` after a completed write and successful restore.
+
+A profile call MUST sync each pinned directory after its last operation. A directory sync failure MUST NOT restore any file. On Windows the directory sync MUST be a no-op.
 
 Cancellation before the first target mutation MUST leave every target unchanged. Cancellation after the first mutation MUST NOT interrupt commit or rollback between effect boundaries.
 

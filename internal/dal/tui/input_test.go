@@ -217,6 +217,85 @@ func TestLargePasteBecomesChipAndExpandsOnSend(t *testing.T) {
 	}
 }
 
+func joinLineBreaks(n int, breaks ...string) string {
+	var out strings.Builder
+	for i := range n {
+		if i > 0 {
+			out.WriteString(breaks[(i-1)%len(breaks)])
+		}
+		fmt.Fprintf(&out, "line %02d", i+1)
+	}
+	return out.String()
+}
+
+func TestPasteWithCarriageReturnsMakesChip(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		breaks []string
+	}{
+		{"cr", []string{"\r"}},
+		{"crlf", []string{"\r\n"}},
+		{"lf", []string{"\n"}},
+		{"mixed", []string{"\r", "\r\n", "\n"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel(nil, Options{})
+			m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+			m = typeText(t, m, "S7MARK ")
+			m, _ = drive(t, m, tea.PasteMsg{Content: joinLineBreaks(30, tt.breaks...)})
+			if got := len(m.input.composer.chips); got != 1 {
+				t.Fatalf("a 30-line paste made %d chips, want 1: %q", got, m.input.composer.Value())
+			}
+			assertContains(t, dockText(m), "[Paste #1 +30 lines]")
+			if got, want := m.input.composer.Expanded(), "S7MARK "+pasteLines(30); got != want {
+				t.Fatalf("expanded = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestShortPasteWithCRKeepsLineBreaks(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"cr", "TABMARK abc\r\tindented\rlast col", "TABMARK abc\n\tindented\nlast col"},
+		{"crlf", "a\r\nb\r\nc", "a\nb\nc"},
+		{"mixed", "a\rb\r\nc\nd", "a\nb\nc\nd"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel(nil, Options{})
+			m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+			m, _ = drive(t, m, tea.PasteMsg{Content: tt.in})
+			if got := len(m.input.composer.chips); got != 0 {
+				t.Fatalf("a short paste made %d chips, want none", got)
+			}
+			if got := m.input.composer.Value(); got != tt.want {
+				t.Fatalf("composer holds %q, want %q", got, tt.want)
+			}
+			if got, want := len(m.input.composer.rows(&m.screen, 80)), strings.Count(tt.want, "\n")+1; got != want {
+				t.Fatalf("composer is %d rows, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestPasteIntoFilterSplitsLinesAtCarriageReturn(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{"one\rtwo", "one\r\ntwo"} {
+		m := openModelPicker(t, new(fakeCaller))
+		m, _ = drive(t, m, tea.PasteMsg{Content: in})
+		if got := m.input.field.value(); got != "one" {
+			t.Fatalf("%q: filter holds %q, want the first line only", in, got)
+		}
+	}
+}
+
 func TestChipPromptIsSentUnchangedWhenSlashLike(t *testing.T) {
 	for _, first := range []string{"// x", "/model foo"} {
 		caller := new(fakeCaller)
@@ -274,6 +353,35 @@ func TestPasteIntoFilterKeepsFirstLine(t *testing.T) {
 	}
 }
 
+func TestPasteIntoTheOtherOneLineFieldsKeepsTheFirstLine(t *testing.T) {
+	t.Parallel()
+	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
+		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
+	tests := []struct {
+		name  string
+		model func(*testing.T) model
+	}{
+		{"api key", func(t *testing.T) model {
+			m := openLoginPanel(t, new(fakeCaller), "openai")
+			m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+			return m
+		}},
+		{"answer line", func(t *testing.T) model {
+			m, _ := openQuestion(t, free)
+			return m
+		}},
+	}
+	for _, tt := range tests {
+		for _, in := range []string{"one\rtwo", "one\r\ntwo", "one\ntwo"} {
+			m := tt.model(t)
+			m, _ = drive(t, m, tea.PasteMsg{Content: in})
+			if got := m.input.field.value(); got != "one" {
+				t.Fatalf("%s: paste %q left %q, want the first line only", tt.name, in, got)
+			}
+		}
+	}
+}
+
 func TestChipRowDoesNotGrowComposer(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{})
@@ -282,5 +390,150 @@ func TestChipRowDoesNotGrowComposer(t *testing.T) {
 	m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(40)})
 	if got := len(m.dockLines()); got != before || got != 3 {
 		t.Fatalf("dock is %d rows after a 40-line paste, want %d (composer, live row, status band)", got, before)
+	}
+}
+
+func TestEditorCursorAfterTab(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 12})
+	m.input.composer.SetValue("a\tb")
+	cases := []struct {
+		name  string
+		caret int
+		x     int
+	}{
+		{"after the letter", 1, promptCells + 1},
+		{"after the tab", 2, promptCells + 8},
+		{"after the second letter", 3, promptCells + 9},
+	}
+	for _, tc := range cases {
+		m.input.composer.cursor = tc.caret
+		view := m.View()
+		assertFrame(t, strings.Split(view.Content, "\n"), 40, 12)
+		row := strings.Split(stripANSI(view.Content), "\n")[0]
+		if want := promptText + "a       b"; !strings.HasPrefix(row, want) {
+			t.Fatalf("%s: composer row = %q, want %q", tc.name, row, want)
+		}
+		if view.Cursor == nil || view.Cursor.X != tc.x || view.Cursor.Y != 0 {
+			t.Fatalf("%s: cursor = %v, want (%d, 0)", tc.name, view.Cursor, tc.x)
+		}
+	}
+	if got := m.input.composer.Value(); got != "a\tb" {
+		t.Fatalf("draft = %q, want the tab kept so a sent prompt keeps its tabs", got)
+	}
+}
+
+func TestEditorRowAfterTabKeepsEveryLetter(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 12})
+	letters := strings.Repeat("x", 28)
+	m.input.composer.SetValue("abcdefg\t" + letters)
+	view := m.View()
+	assertFrame(t, strings.Split(view.Content, "\n"), 40, 12)
+	row := strings.Split(stripANSI(view.Content), "\n")[0]
+	if want := promptText + "abcdefg " + letters; row != want {
+		t.Fatalf("composer row = %q, want %q", row, want)
+	}
+	if view.Cursor == nil || view.Cursor.X != promptCells+8+28 {
+		t.Fatalf("cursor = %v, want X %d", view.Cursor, promptCells+8+28)
+	}
+}
+
+func TestDraftLineUnderApprovalExpandsTabs(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 60, Height: 24})
+	m, _ = drive(t, m, approvalRequest("make test"))
+	m.input.composer.SetValue("a\tb")
+	view := m.View()
+	assertFrame(t, strings.Split(view.Content, "\n"), 60, 24)
+	row := strings.Split(stripANSI(view.Content), "\n")[0]
+	if want := promptText + "a       b"; !strings.HasPrefix(row, want) {
+		t.Fatalf("draft row under an approval = %q, want %q", row, want)
+	}
+	if view.Cursor == nil || view.Cursor.X != promptCells+9 {
+		t.Fatalf("cursor = %v, want X %d", view.Cursor, promptCells+9)
+	}
+}
+
+func TestFieldWindowCaretFollowsTabStops(t *testing.T) {
+	t.Parallel()
+	screen := screenState{method: ansi.GraphemeWidth}
+	window, caret := fieldWindow(&screen, []rune("a\tb"), 3, 20)
+	if window != "a       b" || caret != 9 {
+		t.Fatalf("fieldWindow = (%q, %d), want (%q, 9)", window, caret, "a       b")
+	}
+	text := []rune("ab\tcdefghijklmnopqrstuvwxyz")
+	window, caret = fieldWindow(&screen, text, 5, 20)
+	if window != "ab      cdefghijk..." || caret != 10 {
+		t.Fatalf("fieldWindow(%q, 5, 20) = (%q, %d), want (%q, 10)", string(text), window, caret, "ab      cdefghijk...")
+	}
+}
+
+func TestFieldWindowStartingWithAnEllipsisKeepsItsRoomAndCaret(t *testing.T) {
+	t.Parallel()
+	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
+		screen := screenState{method: method}
+		text := []rune(strings.Repeat("x", 30) + "\tb")
+		window, caret := fieldWindow(&screen, text, len(text), 12)
+		if window != "...xxxx b" || caret != 9 {
+			t.Fatalf("method %v: fieldWindow = (%q, %d), want (%q, 9)", method, window, caret, "...xxxx b")
+		}
+		for _, text := range tabbedFieldTexts() {
+			requireFieldWindowsFit(t, screen, []rune(text))
+		}
+	}
+}
+
+func tabbedFieldTexts() []string {
+	return []string{
+		strings.Repeat("x", 30) + "\tb",
+		strings.Repeat("\t", 5) + "abcdefghijklmnopqrstuvwxyz",
+		strings.Repeat("abc", 10) + "\t\tdef",
+		strings.Repeat("한글", 10) + "\tx",
+		"ab\t" + strings.Repeat("c", 25) + "\td\te",
+	}
+}
+
+func requireFieldWindowsFit(t *testing.T, screen screenState, text []rune) {
+	t.Helper()
+	for room := 8; room <= 30; room++ {
+		for cursor := 0; cursor <= len(text); cursor++ {
+			window, caret := fieldWindow(&screen, text, cursor, room)
+			if got := screen.cells(window); got > room || caret > got {
+				t.Fatalf("method %v: fieldWindow(%q, %d, %d) = (%q, %d) holds %d cells in %d", screen.method, string(text), cursor, room, window, caret, got, room)
+			}
+		}
+	}
+}
+
+func TestFieldLineWithATabKeepsTheCaretInTheWindow(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m.screen.width = 40
+	m.input.field.text = []rune(strings.Repeat("a", 50) + "\t123456789")
+	m.input.field.cursor = len(m.input.field.text)
+	line, caret := m.fieldLine(inputFilter, 40)
+	if got := m.screen.cells(line); got > 39 || caret > got {
+		t.Fatalf("fieldLine = (%q, %d) holds %d cells, want the caret inside at most 39", stripANSI(line), caret, got)
+	}
+	if !strings.HasSuffix(stripANSI(line), "123456789") {
+		t.Fatalf("fieldLine = %q, want the typed digits before the caret", stripANSI(line))
+	}
+}
+
+func TestApprovalCommandPrintsTabsAsSpaces(t *testing.T) {
+	t.Parallel()
+	for _, width := range []int{20, 40, 100} {
+		m := newTestModel(nil, Options{})
+		m, _ = drive(t, m, tea.WindowSizeMsg{Width: width, Height: 24})
+		m, _ = drive(t, m, approvalRequest("make\ttest\t\t--flag\n\tindented\tline"))
+		view := m.View()
+		assertFrame(t, strings.Split(view.Content, "\n"), width, 24)
+		if !strings.Contains(stripANSI(view.Content), "make") {
+			t.Fatalf("width %d: the approval card does not show the command:\n%s", width, stripANSI(view.Content))
+		}
 	}
 }

@@ -156,6 +156,8 @@ A JavaScript cell MUST run with at most 5000 stack slots and 256 MiB of memory. 
 
 `ModelTools` MUST return the visible list. `FoldedTools` MUST return the other tools. The `eval` description MUST end with one line `<name>: <first description line>` per folded tool. `CheckDirect` MUST fail a direct call to a hidden tool with `tool <name> is not available in tool_mode <mode>; call it from eval`. Every tool except `eval` and `yield` MUST be reachable inside cells. A cell call to `ask`, or to `ratchet` with action `approve`, MUST be refused with status `denied` and code `scope_exceeded`. The message MUST be `tool <name> needs the user and runs only as a direct call`, where `<name>` is `ask`, or `ratchet approve`. `yield` MUST stay a direct call in every tool mode, because a nested `yield` ends a child before its cell returns.
 
+In mode `ask`, a cell call to `task` MUST NOT prompt the user, because the gate accepts class `agent` by `mode:ask`, as [approvals.md](approvals.md) states. A call of the child that `task` starts MUST NOT inherit this acceptance.
+
 ## Workflows
 
 `RunWorkflow` MUST run a file as a durable run. It MUST predeclare `ctx`, `tools`, and `args`, the decoded JSON arguments or `None`. Every tool except ask and ratchet with action approve MUST be reachable and allowed. The engine calls `Completed` with the returned `Outcome`. `Outcome.Reply` MUST encode the reply shape above.

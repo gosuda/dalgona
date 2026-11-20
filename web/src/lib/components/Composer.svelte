@@ -641,7 +641,8 @@ function onKeydown(event: KeyboardEvent): void {
 	}
 
 	.composer.deciding {
-		flex: 0 0 auto;
+		flex: 0 1 auto;
+		min-height: calc(var(--control-height) * 2 + var(--space-2));
 		max-height: 40dvh;
 		overflow-y: auto;
 		padding: var(--space-2) var(--space-4);

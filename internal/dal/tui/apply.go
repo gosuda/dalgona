@@ -19,7 +19,7 @@ func (m *model) applyNotification(msg notificationMsg) tea.Cmd {
 	}
 	command, err := m.applyDecodedNotification(msg)
 	if err != nil {
-		m.errorf("protocol error in %s: %v; reconnect with %s or use /new", msg.method, err, m.resumeHint())
+		m.protocolError(msg.method, err)
 		return nil
 	}
 	m.emitStatus()
@@ -292,7 +292,7 @@ func (m *model) applyLoginCompleted(params jsontext.Value) error {
 	}
 	m.closeWaitingLogin()
 	if !event.Success {
-		m.errorf("Login failed for %s: %s; run /login again", cmp.Or(event.Provider, "the provider"), cmp.Or(event.Error, "unknown error"))
+		m.loginFailed(cmp.Or(event.Error, "unknown error"))
 		return nil
 	}
 	m.noticef("Signed in to %s. Run /model to choose a model", event.Provider)
@@ -396,6 +396,7 @@ func (m *model) applyItemCompleted(params jsontext.Value) error {
 	if err != nil {
 		return err
 	}
+	m.forgetPatch(patchKey{event.ThreadID, event.Item.ID})
 	if !m.acceptThread(event.ThreadID) {
 		return nil
 	}
@@ -586,6 +587,7 @@ func (m *model) setThread(id string) {
 	m.thread.turnStartedAt = time.Time{}
 	m.live.plan = nil
 	m.live.retryUntil = time.Time{}
+	m.forgetUnshownPatches()
 	m.thread.effort = ""
 	m.thread.usage = rpc.ThreadTokenUsage{}
 }
@@ -606,6 +608,14 @@ func (m *model) noticeMoved(title string) {
 	if n := len(m.queue); n > 0 {
 		m.noticef("%d follow-ups moved to %s; press Enter on an empty prompt to send the next", n, title)
 	}
+}
+
+func (m *model) protocolError(method string, err error) {
+	m.errorf("protocol error in %s: %v; reconnect with %s or use /new", method, err, m.resumeHint())
+}
+
+func (m *model) loginFailed(cause string) {
+	m.errorf("Login failed: %s; run /login again", cause)
 }
 
 func (m *model) resumeHint() string {

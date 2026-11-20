@@ -11,6 +11,8 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
+var errNotRegular = errors.New("not a regular file")
+
 type rootPin struct {
 	root    *os.Root
 	missing []string
@@ -56,7 +58,7 @@ func holdPath[P pinHolder](env tool.Env, display, absolute string, pin P) (P, er
 }
 
 func symlinkRefusal(display string) error {
-	return fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display)
+	return reasoned(tool.ReasonInvalidShape, fmt.Errorf("patch: %s contains a symbolic link; patch does not follow links", display))
 }
 
 func (p *rootPin) descend(component, display string) error {
@@ -157,6 +159,9 @@ func (p *rootPin) readFileAt(base string) ([]byte, error) {
 	if info.Mode()&fs.ModeSymlink != 0 {
 		return nil, symlinkRefusal(base)
 	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("patch: read %s: %w", base, errNotRegular)
+	}
 	data, err := p.root.ReadFile(base)
 	if err != nil {
 		return nil, fmt.Errorf("patch: read %s: %w", base, err)
@@ -238,6 +243,8 @@ func (p *rootPin) unlinkFileAt(base string) error {
 	}
 	return nil
 }
+
+func (p *rootPin) syncDir() error { return nil }
 
 func (p *rootPin) close() {
 	if p == nil || p.root == nil {

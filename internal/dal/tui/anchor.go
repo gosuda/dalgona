@@ -21,16 +21,30 @@ const dockQueryTimeout = time.Second
 type dockAnchor struct {
 	revision     uint64
 	prints       uint64
+	landing      bool
 	needed       bool
 	querying     bool
 	query        uint64
 	moveRevision uint64
 	moving       bool
+	held         bool
 	position     dockPosition
 }
 
 type dockQueryTimeoutMsg struct {
 	query uint64
+}
+
+type dockMoveTimeoutMsg struct {
+	revision uint64
+}
+
+type dockHoldMsg struct {
+	query uint64
+}
+
+type dockLandedMsg struct {
+	prints uint64
 }
 
 type dockMove struct {
@@ -46,6 +60,29 @@ func (move dockMove) String() string {
 	}
 	move.anchor.needed = false
 	return move.content + dockWriteMarker(move.revision)
+}
+
+func (m model) caretLanding() bool {
+	return m.out.anchor != nil && m.out.anchor.landing
+}
+
+func (m *model) landCaret() tea.Cmd {
+	anchor := m.anchorState()
+	anchor.landing = true
+	prints := anchor.prints
+	return tea.Tick(settleDelay, func(time.Time) tea.Msg { return dockLandedMsg{prints: prints} })
+}
+
+func (m *model) caretLanded(msg dockLandedMsg) tea.Cmd {
+	anchor := m.anchorState()
+	if msg.prints != anchor.prints {
+		return nil
+	}
+	if anchor.querying || anchor.moving || m.out.settling {
+		return m.landCaret()
+	}
+	anchor.landing = false
+	return nil
 }
 
 func (m *model) anchorState() *dockAnchor {
@@ -74,6 +111,7 @@ func (m *model) anchorDock() tea.Cmd {
 	if anchor.position.geometry.rows == 0 {
 		return nil
 	}
+	anchor.held = false
 	anchor.querying = true
 	anchor.query++
 	generation := anchor.query
@@ -88,7 +126,37 @@ func (m *model) dockBusy() bool {
 }
 
 func (m *model) dockBlocked(anchor *dockAnchor) bool {
-	return !anchor.needed || anchor.querying || anchor.moving || !m.out.started || m.dockBusy()
+	return !anchor.needed || anchor.querying || anchor.moving || !m.out.started || m.dockBusy() || m.dockHeld(anchor)
+}
+
+func (m *model) dockHeld(anchor *dockAnchor) bool {
+	return anchor.held && m.dockQueryCurrent(anchor)
+}
+
+func (m *model) dockQueryCurrent(anchor *dockAnchor) bool {
+	return anchor.position.settled == m.out.settleN && anchor.position.prints == anchor.prints
+}
+
+func (m *model) holdDockQuery(anchor *dockAnchor) {
+	anchor.held = m.dockQueryCurrent(anchor)
+}
+
+func (m *model) holdExpired(msg dockHoldMsg) {
+	anchor := m.anchorState()
+	if anchor.query == msg.query {
+		anchor.held = false
+	}
+}
+
+func (m *model) answerDock(cursor tea.CursorPositionMsg) tea.Cmd {
+	anchor := m.anchorState()
+	wasHeld := anchor.held
+	command := m.positionDock(cursor)
+	if !anchor.held || wasHeld {
+		return command
+	}
+	generation := anchor.query
+	return tea.Batch(command, tea.Tick(dockQueryTimeout, func(time.Time) tea.Msg { return dockHoldMsg{query: generation} }))
 }
 
 func (m *model) dockStateChanged(anchor *dockAnchor) bool {
@@ -120,10 +188,12 @@ func (m *model) positionDock(cursor tea.CursorPositionMsg) tea.Cmd {
 		return nil
 	}
 	if m.dockStateChanged(anchor) {
+		m.holdDockQuery(anchor)
 		return nil
 	}
 	position := anchor.position
 	if dockCursorOutside(cursor, position, m.screen.height) {
+		m.holdDockQuery(anchor)
 		return nil
 	}
 	distance := m.screen.height - position.geometry.rows + position.row - cursor.Y
@@ -131,9 +201,22 @@ func (m *model) positionDock(cursor tea.CursorPositionMsg) tea.Cmd {
 		anchor.needed = false
 		return nil
 	}
+	revision := anchor.revision
 	anchor.moving = true
-	anchor.moveRevision = anchor.revision
-	return tea.Raw(dockMove{anchor: anchor, revision: anchor.revision, content: relocateDock(m.View().Content, position, distance)})
+	anchor.moveRevision = revision
+	return tea.Batch(
+		tea.Raw(dockMove{anchor: anchor, revision: revision, content: relocateDock(m.View().Content, position, distance)}),
+		tea.Tick(dockQueryTimeout, func(time.Time) tea.Msg { return dockMoveTimeoutMsg{revision: revision} }),
+	)
+}
+
+func (m *model) moveExpired(msg dockMoveTimeoutMsg) {
+	anchor := m.anchorState()
+	if !anchor.moving || anchor.moveRevision != msg.revision {
+		return
+	}
+	anchor.moving = false
+	anchor.needed = true
 }
 
 func relocateDock(content string, position dockPosition, distance int) string {
@@ -149,7 +232,8 @@ func relocateDock(content string, position dockPosition, distance int) string {
 		output.WriteString(ansi.EraseEntireLine)
 	}
 	output.WriteString(ansi.CursorDown(1))
-	output.WriteString(strings.ReplaceAll(content, "\n", "\r\n"))
+	output.WriteString(ansi.EraseEntireLine)
+	output.WriteString(strings.ReplaceAll(content, "\n", "\r\n"+ansi.EraseEntireLine))
 	output.WriteByte('\r')
 	if above := position.geometry.rows - 1 - position.row; above > 0 {
 		output.WriteString(ansi.CursorUp(above))

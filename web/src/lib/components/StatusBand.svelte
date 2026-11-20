@@ -57,90 +57,108 @@ const shown = $derived({
 	context: fraction !== null && !hidden.has("context"),
 	mark: !hidden.has("mark"),
 });
+const secondRow = $derived(
+	shown.effort ||
+		shown.approval ||
+		shown.sandbox ||
+		shown.folder ||
+		shown.queue,
+);
+const thirdRow = $derived(shown.context || shown.mark);
 </script>
 
 <div class="status-band">
-	<dl class="band">
-		<div class="item model" data-item="model" style:--band-row="1">
-			<dt class="sr-only">Model</dt>
-			<dd>
-				<button
-					type="button"
-					class="model-button"
-					disabled={modelDisabled}
-					onclick={() => onOpenModel()}
-				>
-					{selectedModel === "" ? "Choose a model" : selectedModel}
-				</button>
-			</dd>
-		</div>
-		{#if shown.effort}
-			<div class="item" data-item="effort" style:--band-row="2">
-				<dt class="sr-only">Effort</dt>
+	<div class="band">
+		<dl class="row">
+			<div class="item model" data-item="model">
+				<dt class="sr-only">Model</dt>
 				<dd>
-					<span class="glyph" role="img" aria-label="Effort {effort}"
-						>{effortGlyph(rank, levels.length)}</span
+					<button
+						type="button"
+						class="model-button"
+						disabled={modelDisabled}
+						onclick={() => onOpenModel()}
 					>
+						{selectedModel === "" ? "Choose a model" : selectedModel}
+					</button>
 				</dd>
 			</div>
+		</dl>
+		{#if secondRow}
+			<dl class="row">
+				{#if shown.effort}
+					<div class="item" data-item="effort">
+						<dt class="sr-only">Effort</dt>
+						<dd>
+							<span class="glyph" role="img" aria-label="Effort {effort}"
+								>{effortGlyph(rank, levels.length)}</span
+							>
+						</dd>
+					</div>
+				{/if}
+				{#if shown.approval}
+					<div class="item" data-item="approval">
+						<dt class="sr-only">Approval</dt>
+						<dd>
+							<span class="glyph" role="img" aria-label="Approval {status.approval}"
+								>{approvalGlyphs[status.approval] ?? status.approval}</span
+							>
+						</dd>
+					</div>
+				{/if}
+				{#if shown.sandbox}
+					<div class="item" data-item="sandbox">
+						<dt class="sr-only">Sandbox</dt>
+						<dd>
+							<span class="glyph" role="img" aria-label="Sandbox {status.sandbox}"
+								>{sandboxGlyph}</span
+							>
+						</dd>
+					</div>
+				{/if}
+				{#if shown.folder}
+					<div class="item" data-item="folder">
+						<dt class="sr-only">Folder</dt>
+						<dd>
+							<span class="glyph" role="img" aria-label={folder} title={folder}
+								>{folderGlyph}</span
+							>
+						</dd>
+					</div>
+				{/if}
+				{#if shown.queue}
+					<div class="item" data-item="queue">
+						<dt class="sr-only">Queue</dt>
+						<dd>
+							<span class="glyph" role="img" aria-label={queueLabel}>{queueGlyph}</span>
+							<span class="count" aria-hidden="true">{queued}</span>
+						</dd>
+					</div>
+				{/if}
+			</dl>
 		{/if}
-		{#if shown.approval}
-			<div class="item" data-item="approval" style:--band-row="2">
-				<dt class="sr-only">Approval</dt>
-				<dd>
-					<span class="glyph" role="img" aria-label="Approval {status.approval}"
-						>{approvalGlyphs[status.approval] ?? status.approval}</span
-					>
-				</dd>
-			</div>
+		{#if thirdRow}
+			<dl class="row">
+				{#if shown.context && fraction !== null}
+					<div class="item" data-item="context">
+						<dt class="sr-only">Context</dt>
+						<dd class="gauge">
+							<span class="glyph" role="img" aria-label="Context {percent}% used"
+								>{moonGlyph(fraction)}</span
+							>
+							<span class="percent">{percent}%</span>
+						</dd>
+					</div>
+				{/if}
+				{#if shown.mark}
+					<div class="item mark-item" data-item="mark">
+						<dt class="sr-only">Mark</dt>
+						<dd><Mark size={20} /></dd>
+					</div>
+				{/if}
+			</dl>
 		{/if}
-		{#if shown.sandbox}
-			<div class="item" data-item="sandbox" style:--band-row="2">
-				<dt class="sr-only">Sandbox</dt>
-				<dd>
-					<span class="glyph" role="img" aria-label="Sandbox {status.sandbox}"
-						>{sandboxGlyph}</span
-					>
-				</dd>
-			</div>
-		{/if}
-		{#if shown.folder}
-			<div class="item" data-item="folder" style:--band-row="2">
-				<dt class="sr-only">Folder</dt>
-				<dd>
-					<span class="glyph" role="img" aria-label={folder} title={folder}
-						>{folderGlyph}</span
-					>
-				</dd>
-			</div>
-		{/if}
-		{#if shown.queue}
-			<div class="item" data-item="queue" style:--band-row="2">
-				<dt class="sr-only">Queue</dt>
-				<dd>
-					<span class="glyph" role="img" aria-label={queueLabel}>{queueGlyph}</span>
-					<span class="count" aria-hidden="true">{queued}</span>
-				</dd>
-			</div>
-		{/if}
-		{#if shown.context && fraction !== null}
-			<div class="item" data-item="context" style:--band-row="3">
-				<dt class="sr-only">Context</dt>
-				<dd class="gauge">
-					<span class="glyph" role="img" aria-label="Context {percent}% used"
-						>{moonGlyph(fraction)}</span
-					>
-					<span class="percent">{percent}%</span>
-				</dd>
-			</div>
-		{/if}
-		{#if shown.mark}
-			<div class="item mark-item" data-item="mark" style:--band-row="3">
-				<dt class="sr-only">Mark</dt>
-				<dd><Mark size={20} /></dd>
-			</div>
-		{/if}
-	</dl>
+	</div>
 	<details class="band-more" class:on={statusHide.length > 0}>
 		<summary>Status</summary>
 		<ul>
@@ -177,18 +195,27 @@ const shown = $derived({
 	}
 
 	.band {
-		display: grid;
-		grid-auto-flow: column;
-		grid-auto-columns: minmax(0, max-content);
-		justify-content: end;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
 		width: 100%;
 		min-width: 0;
 		overflow: hidden;
 		padding: 4px;
-		gap: var(--space-1) var(--space-3);
+		gap: var(--space-1);
 		margin: 0;
 		font-size: var(--size-caption);
 		font-variant-numeric: tabular-nums;
+	}
+
+	.row {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: var(--space-3);
+		min-width: 0;
+		max-width: 100%;
+		margin: 0;
 	}
 
 	.item {
@@ -196,7 +223,6 @@ const shown = $derived({
 		align-items: center;
 		gap: var(--space-1);
 		min-width: 0;
-		grid-row: var(--band-row);
 	}
 
 	.item dd {
@@ -253,15 +279,21 @@ const shown = $derived({
 		}
 
 		.band {
+			display: grid;
+			grid-auto-flow: column;
+			grid-auto-columns: minmax(0, max-content);
 			grid-template-columns: minmax(0, 1fr);
+			justify-content: end;
+			align-items: stretch;
+			gap: var(--space-1) var(--space-3);
+		}
+
+		.row {
+			display: contents;
 		}
 
 		.item.model .model-button {
 			max-width: 100%;
-		}
-
-		.item {
-			grid-row: 1;
 		}
 
 		.band-more {

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
@@ -22,8 +23,13 @@ func (m *model) handleMsg(msg tea.Msg) tea.Cmd {
 		return m.updateAsync(msg)
 	case spinner.TickMsg:
 		return m.updateTick(msg)
+	case keywordTickMsg:
+		return m.sendKeywordMatch(msg)
 	case hintExpiredMsg:
 		m.expireHint(msg)
+		return nil
+	case diagramMsg:
+		m.applyDiagram(msg)
 		return nil
 	default:
 		if command, handled := m.updateTerminal(msg); handled {
@@ -51,7 +57,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	anchor := m.anchorDock()
 	quit := m.finishQuit()
 	suspend := m.finishSuspend()
-	return m, tea.Batch(command, tick, settle, printCommand, anchor, quit, suspend)
+	diagrams := m.takeDiagramCommands()
+	return m, tea.Batch(command, tick, settle, printCommand, anchor, quit, suspend, diagrams)
 }
 
 func (m *model) wheel(msg tea.MouseWheelMsg) {
@@ -68,8 +75,10 @@ func (m *model) updateTerminal(msg tea.Msg) (tea.Cmd, bool) {
 	case tea.WindowSizeMsg:
 		m.resizeTerminal(msg)
 	case tea.CursorPositionMsg:
-		return m.positionDock(msg), true
-	case dockQueryTimeoutMsg, dockWrittenMsg:
+		return m.answerDock(msg), true
+	case dockLandedMsg:
+		return m.caretLanded(msg), true
+	case dockQueryTimeoutMsg, dockMoveTimeoutMsg, dockHoldMsg, dockWrittenMsg:
 		m.updateDockEvent(msg)
 	case tea.FocusMsg, tea.BlurMsg:
 		m.applyFocus(msg)
@@ -97,6 +106,10 @@ func (m *model) updateDockEvent(msg tea.Msg) {
 	switch msg := msg.(type) {
 	case dockQueryTimeoutMsg:
 		m.queryExpired(msg)
+	case dockMoveTimeoutMsg:
+		m.moveExpired(msg)
+	case dockHoldMsg:
+		m.holdExpired(msg)
 	case dockWrittenMsg:
 		anchor := m.anchorState()
 		if anchor.moveRevision == msg.revision {
@@ -151,8 +164,7 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 	case shellResultMsg:
 		m.applyShell(msg)
 	case disconnectedMsg:
-		m.setState(stateDisconnected)
-		m.errorf("connection lost: %v; restart the TUI, then %s", msg.err, m.resumeHint())
+		m.loseConnection(msg.err)
 	case imageMsg:
 		m.applyImage(msg)
 	}
@@ -296,37 +308,39 @@ func (m *model) exitKey() tea.Cmd {
 		m.quit()
 		return nil
 	}
-	if draft := m.input.composer.Value(); strings.TrimSpace(draft) != "" {
-		m.input.history.add(draft, "")
-		m.input.composer.SetValue("")
-		return m.setHint("Draft saved to history · Ctrl+C again to exit", "exit")
+	draft := m.input.composer.Expanded()
+	if strings.TrimSpace(draft) == "" {
+		return m.setHint("Ctrl+C again to exit", "exit")
 	}
-	return m.setHint("Ctrl+C again to exit", "exit")
+	m.input.history.saveDraft(m.input.composer, draft)
+	m.input.history.rewind()
+	hint := "Draft saved to history · Ctrl+C again to exit"
+	if len(m.input.composer.images()) > 0 {
+		hint = "Draft saved to history, images dropped · Ctrl+C again to exit"
+	}
+	m.input.composer.SetValue("")
+	return m.setHint(hint, "exit")
 }
 
 func (m *model) recallOlder() bool {
 	if !m.input.composer.onFirstRow(&m.screen) {
 		return false
 	}
-	text, ok := m.input.history.older(m.input.composer.Value())
-	if ok {
-		m.input.composer.SetValue(text)
-	}
-	return ok
+	return m.input.history.older(&m.input.composer)
 }
 
 func (m *model) recallNewer() bool {
 	if !m.input.composer.onLastRow(&m.screen) {
 		return false
 	}
-	text, ok := m.input.history.newer()
-	if ok {
-		m.input.composer.SetValue(text)
-	}
-	return ok
+	return m.input.history.newer(&m.input.composer)
 }
 
 func (m *model) escape() tea.Cmd {
+	if m.thread.state == stateDisconnected {
+		m.errorf("%s", m.conn.lost)
+		return nil
+	}
 	if !m.turnLive() {
 		if m.thread.state == stateIdle {
 			return m.idleEscape()
@@ -340,9 +354,19 @@ func (m *model) escape() tea.Cmd {
 	return m.setHint("Esc again to interrupt", "interrupt")
 }
 
+func (m *model) loseConnection(cause error) {
+	m.setState(stateDisconnected)
+	m.conn.lost = fmt.Sprintf("connection lost: %v; restart the TUI, then %s", cause, m.resumeHint())
+	m.live.retryUntil = time.Time{}
+	m.clearHint()
+	m.abandonApprovals(fmt.Errorf("connection lost: %w", cause))
+	m.errorf("%s", m.conn.lost)
+}
+
 func (m *model) idleEscape() tea.Cmd {
-	if m.input.composer.Value() != "" {
-		return m.interrupt()
+	if strings.TrimSpace(m.input.composer.Value()) != "" {
+		m.quietNotice("idle, draft kept")
+		return nil
 	}
 	if m.thread.id == "" {
 		return nil
@@ -374,11 +398,16 @@ func (m *model) exitLine() string {
 	return fmt.Sprintf("Thread %s saved · resume with %s --resume %s", sanitizeText(m.thread.title), m.conn.product, sanitizeText(m.thread.id))
 }
 
+func (m *model) dockInFlight() bool {
+	anchor := m.anchorState()
+	return m.screen.height > 0 && (anchor.moving || anchor.querying)
+}
+
 func (m *model) finishQuit() tea.Cmd {
-	if !m.quitting || m.anchorState().moving {
+	if !m.quitting || m.dockInFlight() {
 		return nil
 	}
-	if m.screen.height == 0 || (!m.out.printing && !m.out.settling && len(m.out.pending) == 0) {
+	if m.screen.height == 0 || (!m.out.printing && !m.out.settling && len(m.out.pending) == 0 && len(m.out.held) == 0) {
 		return tea.Quit
 	}
 	return nil
@@ -391,10 +420,10 @@ func (m *model) suspend() {
 }
 
 func (m *model) finishSuspend() tea.Cmd {
-	if !m.suspending || m.anchorState().moving {
+	if !m.suspending || m.dockInFlight() {
 		return nil
 	}
-	if m.screen.height == 0 || (!m.out.printing && len(m.out.pending) == 0) {
+	if m.screen.height == 0 || (!m.out.printing && len(m.out.pending) == 0 && len(m.out.held) == 0) {
 		m.suspending = false
 		return tea.Suspend
 	}
@@ -412,7 +441,7 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 	}
 	var imageCmd tea.Cmd
 	if paste, ok := msg.(tea.PasteMsg); ok && m.textMode() == inputPrompt {
-		imageCmd = m.imagePasteCmd(sanitizeText(paste.Content))
+		imageCmd = m.imagePasteCmd(paste.Content, m.input.composer.cursor)
 	}
 	updated, command := m.input.composer.Update(&m.screen, msg)
 	m.input.composer = updated
@@ -445,6 +474,9 @@ func (m model) rawFrame() tea.View {
 		return view
 	default:
 		view := m.dockView()
+		if m.caretLanding() {
+			view.Cursor.X, view.Cursor.Y = 0, 0
+		}
 		view.Content = m.screen.emit(view.Content) + m.markOverlay()
 		return view
 	}

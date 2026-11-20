@@ -348,3 +348,99 @@ test("conversation search offers retry and distinguishes no matches", async () =
 	await tick();
 	expect(screen.getByText("No conversation mentions this text.")).toBeTruthy();
 });
+
+test("resume closes after the thread loads and focus lands in the enabled message field", async () => {
+	const prompt = document.createElement("textarea");
+	prompt.id = "prompt";
+	document.body.append(prompt);
+	prompt.focus();
+	let finish: () => void = () => {};
+	const select = vi.fn().mockImplementation(() => {
+		prompt.disabled = true;
+		return new Promise<void>((resolve) => {
+			finish = () => {
+				prompt.disabled = false;
+				resolve();
+			};
+		});
+	});
+	let view: ReturnType<typeof render> | undefined;
+	const close = vi.fn(() => void view?.rerender({ session, open: false }));
+	const session = {
+		listThreads: vi.fn().mockResolvedValue([
+			{
+				id: "thread-2",
+				title: "hello",
+				preview: "",
+				status: "idle",
+				updatedAt: 1,
+				model: null,
+				cwd: "/work",
+			},
+		]),
+		searchThreads: vi.fn().mockResolvedValue([]),
+		selectThread: select,
+		closePanel: close,
+	} as unknown as Session;
+	view = render(ResumePanel, { session, open: true });
+	await tick();
+	await fireEvent.click(await screen.findByRole("button", { name: "hello" }));
+	expect(select).toHaveBeenCalledWith("thread-2");
+	expect(close).not.toHaveBeenCalled();
+	expect(document.querySelector("dialog[open]")).not.toBeNull();
+	finish();
+	await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+	await tick();
+	expect(document.querySelector("dialog[open]")).toBeNull();
+	expect(prompt.disabled).toBe(false);
+	expect(document.activeElement).toBe(prompt);
+});
+
+test("resume shows one status line and takes no second choice while the thread loads", async () => {
+	let finish: () => void = () => {};
+	const select = vi.fn().mockImplementation(
+		() =>
+			new Promise<void>((resolve) => {
+				finish = resolve;
+			}),
+	);
+	let view: ReturnType<typeof render> | undefined;
+	const close = vi.fn(() => void view?.rerender({ session, open: false }));
+	const session = {
+		listThreads: vi.fn().mockResolvedValue([
+			{
+				id: "thread-2",
+				title: "hello",
+				preview: "",
+				status: "idle",
+				updatedAt: 1,
+				model: null,
+				cwd: "/work",
+			},
+		]),
+		searchThreads: vi.fn().mockResolvedValue([]),
+		selectThread: select,
+		closePanel: close,
+	} as unknown as Session;
+	view = render(ResumePanel, { session, open: true });
+	await tick();
+	const choice = (await screen.findByRole("button", {
+		name: "hello",
+	})) as HTMLButtonElement;
+	expect(screen.queryByRole("status")).toBeNull();
+	await fireEvent.click(choice);
+	expect(screen.getByRole("status").textContent).toBe("Opening thread…");
+	expect(choice.disabled).toBe(true);
+	await fireEvent.click(choice);
+	expect(select).toHaveBeenCalledTimes(1);
+	finish();
+	await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+	await tick();
+	await view.rerender({ session, open: true });
+	await tick();
+	expect(screen.queryByRole("status")).toBeNull();
+	const again = (await screen.findByRole("button", {
+		name: "hello",
+	})) as HTMLButtonElement;
+	expect(again.disabled).toBe(false);
+});
