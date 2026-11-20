@@ -1,6 +1,7 @@
 <script lang="ts">
 import Panel from "#lib/components/panels/Panel.svelte";
 import { threadTitle } from "#lib/labels.ts";
+import { appendThreadPage } from "#lib/reducer.ts";
 import type { Session } from "#lib/session.svelte.ts";
 import type { ThreadSummary } from "#lib/types.ts";
 import type { ThreadSearchHit } from "#lib/validation.ts";
@@ -12,6 +13,9 @@ interface Props {
 
 let { session, open }: Props = $props();
 let threads = $state<readonly ThreadSummary[]>([]);
+let nextCursor = $state<string | null>(null);
+let loading = $state(false);
+let listRequest = 0;
 let filter = $state("");
 let error = $state("");
 let hits = $state<readonly ThreadSearchHit[]>([]);
@@ -30,7 +34,11 @@ const shown = $derived(
 );
 
 $effect(() => {
-	if (open) void load();
+	if (!open || session.connection === "connecting") return;
+	void load(null);
+	return () => {
+		listRequest += 1;
+	};
 });
 
 $effect(() => {
@@ -64,12 +72,24 @@ $effect(() => {
 		controller.abort();
 	};
 });
-async function load(): Promise<void> {
+async function load(cursor: string | null): Promise<void> {
+	if (cursor !== null && loading) return;
+	const request = ++listRequest;
+	loading = true;
 	error = "";
+	if (cursor === null) nextCursor = null;
 	try {
-		threads = await session.listThreads();
+		const page = await session.listThreads(cursor);
+		if (request !== listRequest) return;
+		threads =
+			cursor === null ? page.threads : appendThreadPage(threads, page.threads);
+		nextCursor = page.nextCursor;
 	} catch (failure) {
-		error = failure instanceof Error ? failure.message : String(failure);
+		if (request === listRequest) {
+			error = failure instanceof Error ? failure.message : String(failure);
+		}
+	} finally {
+		if (request === listRequest) loading = false;
 	}
 }
 
@@ -84,10 +104,11 @@ function choose(threadId: string): void {
 		<input type="search" bind:value={filter} placeholder="Filter threads" aria-label="Filter threads" />
 		{#if error !== ""}
 			<p class="error" role="alert">Unable to list threads: {error}</p>
-			<button type="button" class="quiet" onclick={() => void load()}>Try again</button>
-		{:else if shown.length === 0}
+			<button type="button" class="quiet" onclick={() => void load(nextCursor)}>Try again</button>
+		{/if}
+		{#if shown.length === 0 && !loading && error === ""}
 			<p class="empty">{threads.length === 0 ? "No threads yet." : "No threads match this filter."}</p>
-		{:else}
+		{:else if shown.length > 0}
 			<ul class="threads">
 				{#each shown as thread (thread.id)}
 					<li>
@@ -97,6 +118,9 @@ function choose(threadId: string): void {
 					</li>
 				{/each}
 			</ul>
+		{/if}
+		{#if nextCursor !== null && error === ""}
+			<button type="button" class="quiet" disabled={loading || session.connection !== "connected"} onclick={() => void load(nextCursor)}>Load more threads</button>
 		{/if}
 		{#if [...filter.trim()].length >= 3}
 			<section aria-label="Matches in conversations" aria-busy={searching}>

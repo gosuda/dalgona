@@ -5,12 +5,27 @@ import type {
 	RequestId,
 	ServerRequest,
 	ThreadDetail,
+	ThreadSummary,
 	TranscriptItem,
 	TranscriptState,
 	TurnStatus,
 } from "./types";
 
 export type KnownChildThreads = Readonly<Record<string, readonly string[]>>;
+
+export function appendThreadPage(
+	current: readonly ThreadSummary[],
+	page: readonly ThreadSummary[],
+): readonly ThreadSummary[] {
+	const seen = new Set(current.map((thread) => thread.id));
+	const threads = [...current];
+	for (const thread of page) {
+		if (seen.has(thread.id)) continue;
+		seen.add(thread.id);
+		threads.push(thread);
+	}
+	return threads;
+}
 
 export function recordChildThread(
 	known: KnownChildThreads,
