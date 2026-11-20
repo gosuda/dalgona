@@ -71,6 +71,10 @@ Use one name for each thing in user-facing text and new specifications.
 - [MCP client](dalgona/spec/mcp.md): tool discovery, calls, and transports.
 - [Discovery](dalgona/spec/discovery.md): opt-in imports of instructions, skills, and server config.
 - [herdr integration](dalgona/spec/herdr.md): pane reports and subagent panes.
+- [Daltoki coordinator service](dalgona/spec/daltoki.md): GitHub event triage and fixes through delegation graphs.
+- [Delegation graph](dalgona/spec/delegation-graph.md): strict JSON graph value with parsing and validation.
+- [Shared GitHub client](dalgona/spec/github.md): one client with bot and reporter policies.
+- [Consented failure reporter](dalgona/spec/report.md): bounded opt-in failure reports.
 
 ### Clients and integrations
 
@@ -109,8 +113,11 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [RPC file search](dal/decisions/rpc-file-search.md): workspace file listing through search tool walker.
 - [RPC thread search](dal/decisions/rpc-thread-search.md): thread text search through the journal mirror index.
 - [Shell argument parser](dal/decisions/shell-argument-parser.md): one neutral command splitter and token reader for core packages.
+- [Journal authority and mirror](dal/decisions/journal-authority-and-mirror.md): JSONL as event authority with a repairable mirror.
+- [Syntax package](dal/decisions/syntax-package.md): tree-sitter access confined to one package.
 
 ### Batteries (dalgona)
 
+- [Sandbox services](dalgona/decisions/sandbox-services.md): remote execution through the Service seam.
 - [Ratchet](dalgona/decisions/ratchet.md): host-owned eval gate in the dalgona battery.
 - [Web toolchain](dalgona/decisions/web-toolchain.md): TypeScript compatibility with the Svelte tools.

@@ -1,50 +1,24 @@
 # dalgona (/dal)
 
+<img src="assets/brand/dalgona.svg" width="80" align="right" alt="The dalgona mark: a caramel candy stamped with a crescent moon and a rabbit.">
+
 Terminal coding agents, with or without a daemon.
 
-Use `dal` to work with a coding agent in your terminal without running a daemon. Choose `dalgona` when you also need a web interface, remote execution, MCP tools, or durable workflows. Both commands use the same agent core and keep their own configuration and threads.
-
-- **Product choice:** `dal` runs the host in process. `dalgona` connects clients to a per-user daemon.
-- **Recorded work:** threads use an append-only JSONL journal with a Pebble mirror. [Recovery](docs/dal/spec/recovery.md) uses recorded tool outcomes after an interruption.
-- **Execution choice:** `dalgona` can keep the orchestrator local or run its whole daemon in a remote box.
-
-A build from this checkout reports its development version:
-
-```sh
-dal --version
-# dal (devel)
-dalgona --version
-# dalgona (devel)
-```
-
-[Install](#install) · [Quick start](#quick-start) · [Features](#features) · [Usage](#usage) · [Commands and options](#commands-and-options) · [Configuration](#configuration) · [Development](#development) · [License](#license)
-
-## Install
-
-Install Git and the Go toolchain declared in [go.mod](go.mod). These commands use a POSIX shell:
-
-```sh
-git clone https://github.com/gosuda/dalgona.git
-cd dalgona
-export GOBIN="$PWD/bin"
-go install ./cmd/...
-export PATH="$GOBIN:$PATH"
-dal --version
-dalgona --version
-```
-
-If you already have a checkout, start with `export GOBIN="$PWD/bin"` from its root. This installs both commands into that checkout's `bin/` directory. Keep that directory on `PATH` in later shells.
-
-The terminal commands do not need the web build. To include the web interface, install `just`, Node.js, and the pnpm version declared in [web/package.json](web/package.json). Use the Node.js version in [CI](.latchkey/workflows/ci.yml). Then build the assets before installing the binaries again:
-
-```sh
-just web
-go install ./cmd/...
-```
-
-Without built assets, `dalgona web` serves a message that the web UI is not built.
+`dal` runs the agent host inside your terminal process and needs no daemon. `dalgona` connects terminal, editor, and browser clients to a per-user daemon and adds a web interface, remote runners, MCP tools, an Agent Client Protocol endpoint, and durable Starlark workflows. Both commands share one agent core and keep their own homes and threads, so you can start with `dal` and adopt `dalgona` when you need it.
 
 ## Quick start
+
+Install both commands with the Go toolchain declared in [go.mod](go.mod):
+
+```sh
+go install github.com/gosuda/dalgona/cmd/dal@latest github.com/gosuda/dalgona/cmd/dalgona@latest
+dal --version
+# dal v0.0.0-<timestamp>-<commit>
+```
+
+With no release tag, `@latest` resolves to the head of the default branch. Pin an exact build with `@<commit-hash>`.
+
+The commands land in the Go binary directory (`$GOBIN` when set, otherwise the `bin` directory under the first entry of `go env GOPATH`). If that directory is not on `PATH`, the install succeeds but `dal --version` fails; add it to `PATH` before continuing.
 
 Open the terminal interface from the directory you want the agent to work in:
 
@@ -59,9 +33,7 @@ In the terminal interface:
 3. Enter `/model` and choose an offered model.
 4. Type a task and press Enter.
 
-No default thread model is configured. An API-key provider such as `openai` accepts its key in the sign-in panel. `anthropic` accepts its key there and also signs in with OAuth in a shell with `dal login anthropic`. ChatGPT offers a browser link or a device code. Providers that need a shell sign-in show the command to run.
-
-API-key providers also accept their provider environment variables.
+API-key providers (`openai`, `anthropic`, `google`, `openrouter`) take a pasted key in the sign-in panel and also read their provider environment variables. In the panel, only `chatgpt` offers a browser link or a device code. `anthropic` takes an API key there and runs OAuth in a shell (`dal login anthropic`). `copilot`, `cursor`, `devin`, and `antigravity` sign in only in a shell (`dal login <provider>`).
 
 To use the daemon-backed product instead, run:
 
@@ -73,12 +45,43 @@ It starts the per-user daemon when needed. Sign in and choose a model there too,
 
 ## Features
 
-- Work in the terminal with either product, or use `dalgona` in a browser.
-- Resume recorded threads and inspect their tool outcomes through the [journal and recovery contracts](docs/dal/spec/recovery.md).
-- Choose human approval or automated decisions for actions.
-- Use an optional advisor to review a thread and send notes. The advisor does not approve actions.
-- Use `dalgona` for MCP tools, durable Starlark workflows, sandbox services, and Codex desktop integration.
-- Run `dalgona` tools and subagents in a remote box while keeping the orchestrator local, or move the whole daemon into a box.
+- Work in the terminal with either product, in a browser with `dalgona web`, or through an editor with `dalgona acp`.
+- Resume recorded threads and inspect their tool outcomes. Threads use an append-only JSONL journal with a Pebble mirror, and [recovery](docs/dal/spec/recovery.md) reuses recorded tool outcomes after an interruption.
+- Extend `dalgona` with Starlark. Plugins from `<home>/plugins/*.star` add tools, hooks, and commands; `dalgona run` executes durable workflows. See the [Starlark contract](docs/dal/spec/starlark.md).
+- Choose how actions are approved: static rules plus an automated decider with `auto`, human approval with `ask`, or `yolo`. An optional advisor reviews a thread and sends notes without approving actions.
+- Run `dalgona` tools and subagents in a remote box while the orchestrator stays local, or move the whole daemon into a box. See [remote runners](docs/dalgona/spec/runners.md).
+- On `dalgona`, attach MCP servers, sign in to OAuth MCP servers, connect the Codex desktop app, and check the whole setup with `dalgona doctor`.
+
+## Install
+
+The `go install` commands in [Quick start](#quick-start) are the only install step for the terminal products. For a fresh copy:
+
+```sh
+git clone https://github.com/gosuda/dalgona.git
+cd dalgona
+export GOBIN="$PWD/bin"
+go install ./cmd/...
+export PATH="$GOBIN:$PATH"
+```
+
+From the root of a checkout you already have, skip the clone:
+
+```sh
+export GOBIN="$PWD/bin"
+go install ./cmd/...
+export PATH="$GOBIN:$PATH"
+```
+
+This installs both commands into that checkout's `bin/` directory. A build from a checkout reports `(devel)` as its version; a `go install @latest` build reports the module pseudo-version. Keep the install directory on `PATH` in later shells.
+
+The terminal commands do not need the web build. To include the web interface, install `just`, Node.js (the version in [CI](.latchkey/workflows/ci.yml)), and the pnpm version declared in [web/package.json](web/package.json). Then build the assets and reinstall:
+
+```sh
+just web
+go install ./cmd/...
+```
+
+Without built assets, `dalgona web` serves a message that the web UI is not built.
 
 ## Usage
 
@@ -101,7 +104,15 @@ dal -p "Explain this repository"
 dalgona -p "Explain this repository"
 ```
 
-API-key providers can also use their provider environment variables. Use `dal login` or `dalgona login` to list sign-in targets, and `dal models` or `dalgona models` to list offered models.
+Use `dal login` or `dalgona login` to list sign-in targets, and `dal models` or `dalgona models` to list offered models.
+
+### Connect an ACP editor
+
+```sh
+dalgona acp
+```
+
+It serves the [Agent Client Protocol](docs/dalgona/spec/daemon.md) on standard input and output for editors that speak ACP. Each ACP session maps to one daemon thread.
 
 ### Keep the daemon running at login
 
@@ -171,6 +182,20 @@ Remote service and box identifiers live in `[remotes.<name>]` in `settings.toml`
 
 See the [sandbox service decision](docs/dalgona/decisions/sandbox-services.md) and [exec-server contract](docs/dal/spec/exec-server.md) for transport and persistence details.
 
+### Check the setup
+
+```sh
+dalgona doctor
+# ok home: /home/<you>/.dalgona
+# ok config: valid
+# ok sandbox: Landlock
+# ok tls: system roots
+# ok mcp: none configured
+# ok plugins: 0 loaded
+```
+
+Each check prints one `ok`, `warn`, or `fail` row. `--online` reads one model list per credentialed provider doctor can list: most providers answer one live request, `antigravity` reports its bundled catalog with no request, and a credentialed provider doctor cannot list (such as `copilot`) gives a `warn` row with no request. A `[providers.<id>]` entry replaces the built-in adapter, so with such an entry `doctor --online` sends one live request to that entry's `base_url`, or to OpenAI's endpoint (`https://api.openai.com/v1`) when the entry sets no `base_url`, including for `antigravity` or `copilot`. See the [doctor contract](docs/dalgona/spec/doctor.md) for the full row list.
+
 ### Use an outer sandbox
 
 Run dalgona inside a container, microVM, or cloud sandbox runner when you need an outer boundary. The local harness sandbox limits accidental writes. It is not a security boundary.
@@ -210,7 +235,9 @@ Dalgona also accepts `--remote <name>` to select a configured remote instead of 
 | Command | Purpose |
 | --- | --- |
 | `dalgona daemon` | Run the per-user daemon. |
+| `dalgona restart` | Restart the running daemon, for example after a build mismatch. |
 | `dalgona app-server [--listen <address>]` | Bridge the desktop protocol over standard input and output or a loopback WebSocket. |
+| `dalgona acp` | Serve the Agent Client Protocol on standard input and output. |
 | `dalgona service install\|uninstall` | Add or remove login-time daemon startup. |
 | `dalgona pull <thread-id>` | Apply a thread box's changes locally. |
 | `dalgona runner gc [--yes]` | List unused boxes, or delete them with `--yes`. |
@@ -224,7 +251,8 @@ Dalgona also accepts `--remote <name>` to select a configured remote instead of 
 | `dalgona exec-server [--listen <address>] [--root <directory>] [--data <directory>]` | Serve process and filesystem operations inside a box. |
 | `dalgona bridge` | Connect standard input and output to the local daemon, starting it if needed. |
 | `dalgona mcp login <name>` | Sign in to an OAuth MCP server and store its token. |
-| `dalgona doctor [--online]` | Print one `ok`, `warn` or `fail` row for each setup check. `--online` adds one model-list request for each provider with a credential. |
+| `dalgona failures reporting on\|off\|login` | Consent to, disable, or authorize automatic failure reports. |
+| `dalgona doctor [--online]` | Print one `ok`, `warn` or `fail` row for each setup check. `--online` adds one model-list request for each provider with a credential that has a model list to read. |
 
 Workflow arguments use JSON when the value is valid JSON. Other values become strings.
 
@@ -289,12 +317,14 @@ Dalgona also offers opt-in [edit review](docs/dal/spec/edit-review.md). It sends
 | `[advisor]` | `enabled`, `review`, `interval`, `sync`, `continue_severity`, `immune_turns`, `max_notes`, `tools`, `subagents` |
 | `[advisors.<name>]` | `model`, `instructions`, `review`, `interval`, `sync`, `tools`, `subagents`, `enabled` |
 | `[secrets]` | `patterns`, `builtin` |
+| `[limits]` | `max_subagent_starts` |
 | `[keywords.<name>]` | `notice`, `text`, `hue`, `effort`, `requires`, `enabled` |
 | `[eval]` | `uses` |
 | Dalgona only, top level | `runner`, `remote` |
 | `[runners.<name>]` (dalgona) | `service`, `image`, `template`, `url` |
 | `[remotes.<name>]` (dalgona) | `service`, `image`, `template`, `url`, `box_id` |
 | `[mcp_servers.<name>]` (dalgona) | `command`, `args`, `env`, `url`, `bearer_token_env`, `oauth`, `oauth_scopes`, `oauth_client_id`, `oauth_callback_port` |
+| `[daltoki]` (dalgona) | `enabled`, `app_id`, `private_key_file`, `repositories`, `model`, `profile`, `poll_interval_seconds`, `concurrency`, `jobs_per_day`, token and cost limits, relay keys |
 | `[discovery]` (dalgona) | `sources` |
 | `[edit_review]` (dalgona) | `enabled`, `feedback` |
 | `[herdr]` (dalgona) | `subagent_panes` |
@@ -305,6 +335,10 @@ Dalgona also offers opt-in [edit review](docs/dal/spec/edit-review.md). It sends
 Both products default to `tool_mode = "eval-first"`. Use `"normal"` for the full tool list. Use `"eval-only"` for the restricted direct tool list. Dal rejects dalgona-only settings.
 
 See [config.md](docs/dal/spec/config.md) for all settings, including verbosity and themes. The [Starlark contract](docs/dal/spec/starlark.md) defines tool visibility and which calls need a direct user interaction.
+
+## Documentation
+
+The [documentation index](docs/README.md) links every specification and decision. Start with [journal](docs/dal/spec/journal.md), [recovery](docs/dal/spec/recovery.md), and [protocol](docs/dal/spec/protocol.md) for the core contracts, and [runners](docs/dalgona/spec/runners.md) and [daemon](docs/dalgona/spec/daemon.md) for the dalgona batteries.
 
 ## Development
 
@@ -335,11 +369,9 @@ Without `uv`, `hashline-model` and `spec-style` skip locally and fail when `CI=t
 | `just box-dist` | Build the Linux amd64 and arm64 binaries for the remote box image. |
 | `just box-image` | Build the box binaries and remote box image with Docker Buildx. |
 
-### Contributing
+## Contributing
 
-Read [CONTRIBUTE.md](CONTRIBUTE.md) before changing code and [REVIEW.md](REVIEW.md) before reviewing it. [AGENTS.md](AGENTS.md) contains repository instructions for coding agents.
-
-The [documentation index](docs/README.md) links the specifications and decisions. Start with [journal](docs/dal/spec/journal.md), [recovery](docs/dal/spec/recovery.md), and [protocol](docs/dal/spec/protocol.md) for the core contracts. [justfile](justfile) declares the checks.
+Read [CONTRIBUTE.md](CONTRIBUTE.md) before changing code and [REVIEW.md](REVIEW.md) before reviewing it. [AGENTS.md](AGENTS.md) contains repository instructions for coding agents. [justfile](justfile) declares the checks.
 
 ## License
 
