@@ -17,8 +17,12 @@ import (
 
 func writeAuthFile(t *testing.T, home, name, body string, mode os.FileMode) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(home, name), []byte(body), mode); err != nil {
+	path := filepath.Join(home, name)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write %s: %v", name, err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatalf("chmod %s: %v", name, err)
 	}
 }
 
