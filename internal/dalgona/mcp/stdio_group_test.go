@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -61,8 +62,8 @@ func readGroupGrandchildPID(t *testing.T, pidFile string) int {
 	if err != nil || grandchild <= 0 {
 		t.Fatalf("parse grandchild pid %q: %v", raw, err)
 	}
-	if err := syscall.Kill(grandchild, 0); err != nil {
-		t.Fatalf("grandchild %d not running before cancel: %v", grandchild, err)
+	if groupGrandchildExited(t, grandchild) {
+		t.Fatalf("grandchild %d already exited before cancel", grandchild)
 	}
 	return grandchild
 }
@@ -101,14 +102,29 @@ func closeGroupClient(t *testing.T, client *mcp.Client) {
 	}
 }
 
-func waitGroupGrandchildGone(t *testing.T, grandchild int) {
+func groupGrandchildExited(t *testing.T, pid int) bool {
+	t.Helper()
+	if err := syscall.Kill(pid, 0); err != nil {
+		if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
+			return true
+		}
+		t.Fatalf("check grandchild %d: %v", pid, err)
+	}
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false
+	}
+	_, fields, found := strings.CutLast(string(stat), ")")
+	return found && strings.HasPrefix(fields, " Z ")
+}
+
+func waitGroupGrandchildExit(t *testing.T, grandchild int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		err := syscall.Kill(grandchild, 0)
-		if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
-			return
-		}
+	for !groupGrandchildExited(t, grandchild) {
 		if time.Now().After(deadline) {
 			t.Fatalf("grandchild %d survived Close", grandchild)
 		}
@@ -135,5 +151,5 @@ func TestStdioCloseKillsGrandchildHoldingStdout(t *testing.T) {
 	defer cancel()
 	cancelBlockedToolCall(t, callCtx, tools[0])
 	closeGroupClient(t, client)
-	waitGroupGrandchildGone(t, grandchild)
+	waitGroupGrandchildExit(t, grandchild)
 }
