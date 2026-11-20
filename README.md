@@ -6,7 +6,7 @@ Terminal coding agents, with or without a daemon.
 
 `dal` runs the agent host inside your terminal process and needs no daemon. `dalgona` connects terminal, editor, and browser clients to a per-user daemon and adds a web interface, remote runners, MCP tools, an Agent Client Protocol endpoint, and durable Starlark workflows. Both commands share one agent core and keep their own homes and threads, so you can start with `dal` and adopt `dalgona` when you need it.
 
-[![Built with Depot](https://depot.dev/badges/built-with-depot.svg)](https://depot.dev?utm_source=Mealie)
+[![Built with Depot](https://depot.dev/badges/built-with-depot.svg)](https://depot.dev?utm_source=gosuda)
 
 ## Quick start
 
