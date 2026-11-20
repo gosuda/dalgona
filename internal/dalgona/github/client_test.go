@@ -759,9 +759,15 @@ func TestBotPullRequestsSurface(t *testing.T) {
 }
 
 func TestBotChangeLabelSurface(t *testing.T) {
-	var methods []string
+	var mu sync.Mutex
+	var labels []string
+	prefix := "/repos/octo/repo/issues/1/labels"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		methods = append(methods, r.Method)
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			mu.Lock()
+			labels = append(labels, r.Method+" "+r.URL.Path)
+			mu.Unlock()
+		}
 		fmt.Fprint(w, `[]`)
 	}))
 	defer server.Close()
@@ -777,8 +783,11 @@ func TestBotChangeLabelSurface(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("remove ChangeLabel: %v", err)
 	}
-	if len(methods) != 2 || methods[0] != http.MethodPost || methods[1] != http.MethodDelete {
-		t.Fatalf("methods = %v", methods)
+	mu.Lock()
+	defer mu.Unlock()
+	want := "POST " + prefix + ";DELETE " + prefix + "/daltoki"
+	if got := strings.Join(labels, ";"); got != want {
+		t.Fatalf("labels = %q", got)
 	}
 }
 
