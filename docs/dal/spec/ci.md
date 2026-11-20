@@ -50,3 +50,4 @@ Workflow cancellation MUST still cancel the native jobs.
 Both recipes MUST copy `THIRD_PARTY_NOTICES.md` beside their binaries.
 The box image workflow and `just box-image` MUST use `box-dist`.
 The image MUST retain both Linux architectures.
+The box image publish job MUST use the GitHub Actions runner `depot-ubuntu-24.04`.
