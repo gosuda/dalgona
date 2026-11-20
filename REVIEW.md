@@ -4,7 +4,7 @@
 
 Each finding MUST name the defect, its location, the affected consumer, and the consequence. It MUST quote or cite the evidence. Severity MUST describe the harm in plain words. A review MUST NOT invent a failure or claim that an unrun check passed.
 
-A finding SHOULD include a test that fails on the defect. It MUST use a declared check from [justfile](justfile), a focused Go test, or a web script from [web/package.json](web/package.json). A saved-output pin or source-text assertion MUST NOT count as proof. The exceptions are the comment gate, the dependency table gate, and the golden request gate that `CONTRIBUTE.md` names. They detect drift only, and golden agreement never proves behavior. `TestEncodedRequestMatchesJournalHistory` is the separate proof for the request history. A review MUST reject an explanatory prose comment and a non-Go directive comment. It MUST also flag a legally required notice that leaves the location its license requires.
+A finding SHOULD include a test that fails on the defect. It MUST use a declared check from [justfile](justfile), a focused Go test, or a web script from [web/package.json](web/package.json). A saved-output pin or source-text assertion MUST NOT count as proof. The exceptions are the comment gate and the dependency table gate that `CONTRIBUTE.md` names. They detect drift only. A review MUST reject an explanatory prose comment and a non-Go directive comment. It MUST also flag a legally required notice that leaves the location its license requires.
 
 ## Check the authority boundaries
 

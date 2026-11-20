@@ -95,7 +95,9 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 
 - [Two products](dal/decisions/two-products.md): shared core, separate homes, and battery boundaries.
 - [Codex protocol as core](dal/decisions/codex-protocol-as-core.md): one client protocol and inward dependency direction.
+- [Journal authority and mirror](dal/decisions/journal-authority-and-mirror.md): JSONL authority, mirror repair, and damage quarantine.
 - [Starlark replay](dal/decisions/starlark-replay.md): pinned source and recorded effects.
+- [Syntax package](dal/decisions/syntax-package.md): one tree-sitter boundary, parse bounds, and measured costs.
 - [Minimal harness sandbox](dal/decisions/minimal-harness-sandbox.md): accidental-write confinement, not hostile-code isolation.
 - [Automated approval](dal/decisions/automated-approval.md): static refusals and automatic decisions.
 - [Model presets](dal/decisions/model-presets.md): native identifiers, fallback, and selection evidence.
@@ -120,4 +122,5 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 
 - [Sandbox services](dalgona/decisions/sandbox-services.md): remote execution through the Service seam.
 - [Ratchet](dalgona/decisions/ratchet.md): host-owned eval gate in the dalgona battery.
+- [Sandbox services](dalgona/decisions/sandbox-services.md): the Service seam, box lifecycle, and persistence contracts.
 - [Web toolchain](dalgona/decisions/web-toolchain.md): TypeScript compatibility with the Svelte tools.

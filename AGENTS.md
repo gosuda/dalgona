@@ -18,8 +18,8 @@ Be opinionated. Do not add every piece of junk in the world. Do not ship somethi
 ## Contracts
 
 - You MUST run `just verify` from [justfile](justfile) before every commit. [Steve Jobs]
-- You MUST keep the package boundaries in [.golangci.yml](.golangci.yml). A new import across a boundary MUST have a decision in [docs/decisions](docs/README.md#decisions). [Steve Jobs]
-- Each behavior change MUST update its topic in [docs/spec](docs/README.md#specifications) in the same commit. [Steve Jobs]
+- You MUST keep the package boundaries in [.golangci.yml](.golangci.yml). A new import across a boundary MUST have a decision in the [decision index](docs/README.md#decisions). [Steve Jobs]
+- Each behavior change MUST update its topic in the [specification index](docs/README.md#specifications) in the same commit. [Steve Jobs]
 - You MUST keep the journal append-only under [journal.md](docs/dal/spec/journal.md). Recovery MUST follow [recovery.md](docs/dal/spec/recovery.md). [Steve Jobs]
 - Hashline profile changes MUST follow [the shared contract](docs/dal/spec/hashline/hashline-common-v1.md), [Light](docs/dal/spec/hashline/hashline-light-v1.md), [Enhanced](docs/dal/spec/hashline/hashline-enhanced-v1.md), and [conformance](docs/dal/spec/hashline/hashline-conformance-v1.md). [Steve Jobs]
 - You MUST keep one concern per commit for the module in [go.mod](go.mod). You MUST use the global git identity. You MUST NOT add agent trailers. [Steve Jobs]
