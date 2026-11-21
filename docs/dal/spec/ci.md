@@ -30,6 +30,8 @@ Each native host MUST install `uv` with Python 3.15 for the Go tests that compar
 A failing native job MUST NOT cancel the other native jobs.
 
 The shared job MUST install frozen web dependencies and build the web assets before its checks.
+It MUST activate the `packageManager`-pinned pnpm through corepack before
+any pnpm call, because the runner image ships Node without pnpm.
 It MUST cache the pnpm store with both pnpm lockfiles in the cache key.
 It MUST install `uv` so the model and specification checks run in CI.
 Web tests use Node and happy-dom. Cloudflare tests use local runtime stubs.
