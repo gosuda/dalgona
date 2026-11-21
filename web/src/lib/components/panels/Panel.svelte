@@ -1,5 +1,6 @@
 <script lang="ts">
 import type { Snippet } from "svelte";
+import { messageOrTranscript } from "#lib/focus.ts";
 import { isImeKey } from "#lib/ime.ts";
 
 interface Props {
@@ -40,20 +41,12 @@ $effect(() => {
 		) {
 			opener.focus();
 		} else {
-			handFocusOver();
+			const fallback = messageOrTranscript();
+			fallback?.focus({ preventScroll: fallback.id === "transcript" });
 		}
 		opener = null;
 	}
 });
-
-function handFocusOver(): void {
-	const prompt = document.getElementById("prompt");
-	if (prompt !== null && !prompt.matches(":disabled")) {
-		prompt.focus();
-		return;
-	}
-	document.getElementById("transcript")?.focus({ preventScroll: true });
-}
 
 function onKey(event: KeyboardEvent): void {
 	if (event.key !== "Escape" || composing || isImeKey(event)) return;

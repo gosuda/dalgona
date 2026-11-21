@@ -42,31 +42,32 @@ describe("notice regions", () => {
 		expect(region.textContent).toContain("Unable to load threads: timeout.");
 	});
 
-	test("returns focus to the message field after Dismiss", async () => {
-		const prompt = document.createElement("textarea");
-		prompt.id = "prompt";
-		document.body.append(prompt);
-		const user = userEvent.setup();
-		let notices: readonly Notice[] = [
-			notice(1, "warning", "Turn interrupted."),
-		];
-		const onDismiss = (): void => {
-			notices = [];
-			void view.rerender({
-				notices,
-				waiting: none,
-				onDismiss,
-				onOpenWaiting: vi.fn(),
+	test.each(["Dismiss", "Try again"])(
+		"returns focus to the message field when %s removes a notice",
+		async (action) => {
+			const prompt = document.createElement("textarea");
+			prompt.id = "prompt";
+			document.body.append(prompt);
+			const user = userEvent.setup();
+			const onDismiss = (): void => {
+				void view.rerender({ notices: [] });
+			};
+			const notices: readonly Notice[] = [
+				{
+					...notice(1, "error", "Unable to load more threads."),
+					actions: [{ label: "Try again", run: onDismiss }],
+				},
+			];
+			const view = render(NoticeStack, {
+				props: { notices, waiting: none, onDismiss, onOpenWaiting: vi.fn() },
 			});
-		};
-		const view = render(NoticeStack, {
-			props: { notices, waiting: none, onDismiss, onOpenWaiting: vi.fn() },
-		});
-		await user.click(screen.getByRole("button", { name: "Dismiss" }));
-		await vi.waitFor(() => {
-			expect(document.activeElement).toBe(prompt);
-		});
-	});
+			screen.getByRole("button", { name: action }).focus();
+			await user.keyboard("{Enter}");
+			await vi.waitFor(() => {
+				expect(document.activeElement).toBe(prompt);
+			});
+		},
+	);
 
 	test("routes warnings and info to the status region", () => {
 		render(NoticeStack, {

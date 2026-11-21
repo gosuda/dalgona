@@ -213,6 +213,7 @@ export class Session {
 	private lostGeneration = 0;
 	private reconnectAttempt = 0;
 	private reconnectNoticeId = 0;
+	private threadPageNoticeId = 0;
 	private cancelScheduledAttempt: (() => void) | null = null;
 	private cancelStableCheck: (() => void) | null = null;
 	private selectionGeneration = 0;
@@ -499,6 +500,40 @@ export class Session {
 			: page;
 	}
 
+	async listOlderThreads(
+		cursor: string,
+		listed: readonly ThreadSummary[],
+	): Promise<ThreadListResult> {
+		const generation = this.connectionGeneration;
+		const page = await this.listThreads(cursor);
+		const seen = new Set(listed.map((thread) => thread.id));
+		if (
+			page.nextCursor !== null &&
+			!page.threads.some((thread) => seen.has(thread.id))
+		)
+			return page;
+
+		const recovered: ThreadSummary[] = [];
+		const visited = new Set<string | null>([cursor]);
+		let earlier: string | null = null;
+		while (!visited.has(earlier)) {
+			if (generation !== this.connectionGeneration)
+				throw new Error("connection changed");
+			visited.add(earlier);
+			const prefix = await this.listThreads(earlier);
+			for (const thread of prefix.threads) {
+				if (seen.has(thread.id)) continue;
+				seen.add(thread.id);
+				recovered.push(thread);
+			}
+			earlier = prefix.nextCursor;
+		}
+		return {
+			threads: [...recovered, ...page.threads],
+			nextCursor: page.nextCursor,
+		};
+	}
+
 	async loadMoreThreads(): Promise<void> {
 		const cursor = this.nextThreadCursor;
 		if (
@@ -508,6 +543,10 @@ export class Session {
 		)
 			return;
 		const generation = this.connectionGeneration;
+		if (this.threadPageNoticeId !== 0) {
+			this.dismiss(this.threadPageNoticeId);
+			this.threadPageNoticeId = 0;
+		}
 		try {
 			await this.loadThreads(generation, cursor);
 		} catch (error) {
@@ -515,8 +554,15 @@ export class Session {
 				this.reportFailure(
 					"Unable to load more threads",
 					error instanceof Error ? error : String(error),
-					() => void this.loadMoreThreads(),
+					() => {
+						if (
+							generation === this.connectionGeneration &&
+							cursor === this.nextThreadCursor
+						)
+							void this.loadMoreThreads();
+					},
 				);
+				this.threadPageNoticeId = this.noticeSeq;
 			}
 		}
 	}
@@ -891,7 +937,10 @@ export class Session {
 	): Promise<void> {
 		this.loadingThreads = true;
 		try {
-			const result = await this.listThreads(cursor);
+			const result =
+				cursor === null
+					? await this.listThreads()
+					: await this.listOlderThreads(cursor, this.threads);
 			if (generation !== this.connectionGeneration) return;
 			this.nextThreadCursor = result.nextCursor;
 			this.threads =

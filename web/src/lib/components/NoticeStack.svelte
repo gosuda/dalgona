@@ -1,5 +1,5 @@
 <script lang="ts">
-import { handoffFocus } from "#lib/focus.ts";
+import { handoffFocus, messageOrTranscript } from "#lib/focus.ts";
 import { countLabel } from "#lib/labels.ts";
 import type { Notice, WaitingElsewhere } from "#lib/types.ts";
 
@@ -23,10 +23,6 @@ let others = $derived(notices.filter((notice) => notice.tone !== "error"));
 let waitingText = $derived(
 	`${countLabel(waiting.count, "request", "requests")} waiting on another thread.`,
 );
-
-function focusMessage(): HTMLElement | undefined {
-	return document.getElementById("prompt") ?? undefined;
-}
 </script>
 
 <div class="notices" role="alert">
@@ -54,9 +50,9 @@ function focusMessage(): HTMLElement | undefined {
 	<div class="notice notice-{notice.tone}">
 		<p>{notice.text}</p>
 		{#each notice.actions as action}
-			<button class="quiet" onclick={action.run}>{action.label}</button>
+			<button class="quiet" onclick={action.run} {@attach handoffFocus(messageOrTranscript, { preventScroll: true })}>{action.label}</button>
 		{/each}
-		<button class="quiet" onclick={() => onDismiss(notice.id)} {@attach handoffFocus(focusMessage)}>Dismiss</button>
+		<button class="quiet" onclick={() => onDismiss(notice.id)} {@attach handoffFocus(messageOrTranscript, { preventScroll: true })}>Dismiss</button>
 	</div>
 {/snippet}
 

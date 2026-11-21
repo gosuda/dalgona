@@ -12,7 +12,7 @@ import App from "#lib/components/App.svelte";
 import ResumePanel from "#lib/components/panels/ResumePanel.svelte";
 import ThreadPanels from "#lib/components/panels/ThreadPanels.svelte";
 import { type RpcPort, Session } from "#lib/session.svelte.ts";
-import type { JsonValue, RpcHandlers } from "#lib/types.ts";
+import type { JsonValue, RpcHandlers, ThreadListResult } from "#lib/types.ts";
 
 afterEach(() => {
 	cleanup();
@@ -84,7 +84,7 @@ const tree: Answer = () => ({
 });
 
 describe("thread command panels", () => {
-	test.each(["sidebar", "resume panel"])(
+	test.each(["sidebar", "sidebar with no thread open", "resume panel"])(
 		"opens a thread beyond the first 100 from the %s",
 		async (view) => {
 			const row = (id: number) => ({
@@ -102,13 +102,15 @@ describe("thread command panels", () => {
 			const older = { ...row(101), title: "Older thread" };
 			const session = new Session(vi.fn());
 			session.connection = "connected";
+			if (view !== "sidebar with no thread open") session.activeThreadId = "1";
 			session.threads = firstPage;
 			session.nextThreadCursor = "older";
+			const pending = Promise.withResolvers<ThreadListResult>();
 			const page = vi
 				.spyOn(session, "listThreads")
 				.mockImplementation(async (cursor) =>
 					cursor === "older"
-						? { threads: [row(100), older], nextCursor: null }
+						? pending.promise
 						: { threads: firstPage, nextCursor: "older" },
 				);
 			const select = vi
@@ -117,16 +119,34 @@ describe("thread command panels", () => {
 			render(App, { props: { session } });
 			if (view === "resume panel") session.openPanel("resume");
 			const list = within(
-				await (view === "sidebar"
-					? screen.findByRole("navigation", { name: "Conversation threads" })
-					: screen.findByRole("dialog", { name: "Open an earlier thread" })),
+				await (view === "resume panel"
+					? screen.findByRole("dialog", { name: "Open an earlier thread" })
+					: screen.findByRole("navigation", { name: "Conversation threads" })),
 			);
 			expect(list.queryByText("Older thread")).toBeNull();
-			await fireEvent.click(
-				await list.findByRole("button", { name: "Load more threads" }),
-			);
+			const more = await list.findByRole("button", {
+				name: "Load more threads",
+			});
+			const user = userEvent.setup();
+			more.focus();
+			await user.keyboard("{Enter}");
+			expect(document.activeElement).toBe(more);
+			expect(more.getAttribute("aria-disabled")).toBe("true");
+			expect(more.hasAttribute("disabled")).toBe(false);
+			await user.keyboard(" ");
+			expect(
+				page.mock.calls.filter(([cursor]) => cursor === "older"),
+			).toHaveLength(1);
+			pending.resolve({ threads: [row(100), older], nextCursor: null });
 			const choice = await list.findByText("Older thread");
-			expect(page).toHaveBeenLastCalledWith("older");
+			const fallback =
+				view === "resume panel"
+					? list.getByRole("searchbox")
+					: document.getElementById(
+							view === "sidebar" ? "prompt" : "transcript",
+						);
+			expect(fallback).toBeTruthy();
+			expect(document.activeElement).toBe(fallback);
 			expect(list.getAllByRole("listitem")).toHaveLength(101);
 			expect(
 				list.queryByRole("button", { name: "Load more threads" }),
@@ -367,17 +387,20 @@ test("resume closes after the thread loads and focus lands in the enabled messag
 	let view: ReturnType<typeof render> | undefined;
 	const close = vi.fn(() => void view?.rerender({ session, open: false }));
 	const session = {
-		listThreads: vi.fn().mockResolvedValue([
-			{
-				id: "thread-2",
-				title: "hello",
-				preview: "",
-				status: "idle",
-				updatedAt: 1,
-				model: null,
-				cwd: "/work",
-			},
-		]),
+		listThreads: vi.fn().mockResolvedValue({
+			threads: [
+				{
+					id: "thread-2",
+					title: "hello",
+					preview: "",
+					status: "idle",
+					updatedAt: 1,
+					model: null,
+					cwd: "/work",
+				},
+			],
+			nextCursor: null,
+		}),
 		searchThreads: vi.fn().mockResolvedValue([]),
 		selectThread: select,
 		closePanel: close,
@@ -407,17 +430,20 @@ test("resume shows one status line and takes no second choice while the thread l
 	let view: ReturnType<typeof render> | undefined;
 	const close = vi.fn(() => void view?.rerender({ session, open: false }));
 	const session = {
-		listThreads: vi.fn().mockResolvedValue([
-			{
-				id: "thread-2",
-				title: "hello",
-				preview: "",
-				status: "idle",
-				updatedAt: 1,
-				model: null,
-				cwd: "/work",
-			},
-		]),
+		listThreads: vi.fn().mockResolvedValue({
+			threads: [
+				{
+					id: "thread-2",
+					title: "hello",
+					preview: "",
+					status: "idle",
+					updatedAt: 1,
+					model: null,
+					cwd: "/work",
+				},
+			],
+			nextCursor: null,
+		}),
 		searchThreads: vi.fn().mockResolvedValue([]),
 		selectThread: select,
 		closePanel: close,
