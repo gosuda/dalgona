@@ -12,7 +12,7 @@ A newer run for the same ref MUST cancel the older run.
 
 The lint, test, vuln, and web CI jobs MUST run on Depot `depot-ubuntu-24.04` runners.
 Latchkey MUST NOT run CI.
-A Go job MUST NOT restore a build cache written by another branch. Depot Cache shares entries across the branches of the base repository without isolation.
+A job MUST NOT restore a build cache written by another branch. Depot Cache shares entries across the branches of the base repository without isolation.
 
 ## Verification
 
@@ -32,7 +32,7 @@ A failing native job MUST NOT cancel the other native jobs.
 The shared job MUST install frozen web dependencies and build the web assets before its checks.
 It MUST activate the `packageManager`-pinned pnpm through corepack before
 any pnpm call, because the runner image ships Node without pnpm.
-It MUST cache the pnpm store with both pnpm lockfiles in the cache key.
+
 It MUST install `uv` so the model and specification checks run in CI.
 Web tests use Node and happy-dom. Cloudflare tests use local runtime stubs.
 Those tests MUST run once on Linux. They do not certify a live browser or Cloudflare deployment.
