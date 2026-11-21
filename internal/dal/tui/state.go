@@ -93,6 +93,7 @@ type connInfo struct {
 	client         caller
 	opts           Options
 	done           <-chan struct{}
+	resumeSlot     chan struct{}
 	clock          func() time.Time
 	product        string
 	version        string
@@ -253,7 +254,7 @@ func newModel(client caller, opts Options, done <-chan struct{}) model {
 		sandbox = "off"
 	}
 	return model{
-		conn:    connInfo{client: client, opts: opts, done: done, clock: time.Now},
+		conn:    connInfo{client: client, opts: opts, done: done, clock: time.Now, resumeSlot: make(chan struct{}, 1)},
 		input:   inputState{composer: newEditor()},
 		screen:  screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII, motion: true, spin: newSpinner(true), notifications: true},
 		out:     outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{})},

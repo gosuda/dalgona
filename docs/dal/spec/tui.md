@@ -181,14 +181,17 @@ Enter MUST choose the highlighted item. Enter MUST do nothing when no item match
 Esc MUST clear a non-empty filter. Esc MUST close the panel when the filter is empty.
 
 The `/resume` filter matches the titles of the 50 most recent threads at once.
-After 300 ms without an edit, it also calls `dalgona/thread/search` when each word has at least three characters.
+After 300 ms without an edit, the picker queues `dalgona/thread/search` when each word has at least three characters.
 The client MUST use the trimmed filter and request 50 hits per page.
+The picker sends one search call at a time. While a call is in flight, only the latest eligible query waits.
 Recent title matches stay first. Other hits follow in server order. Each thread appears once.
 Search hits keep the date and state from the recent list when available. Other hits show their update date.
 The panel shows the highlighted hit's masked excerpt below the list when a row fits. Enter opens that thread.
 Tab loads the next page when more matches exist. A failed page keeps the selection and offers Tab to retry.
 An empty result shows `No conversation mentions this text.`
-Changing the search or leaving the panel MUST cancel the pending request and discard its results.
+Changing the search or leaving the panel MUST cancel a queued search and discard stale replies.
+A call already sent to the daemon may finish after the panel closes.
+A paste over 1 MiB MUST leave the filter and its results intact and show the paste limit notice.
 
 A list panel MUST lose its filter when another panel opens above it.
 A reply that opens a list panel MUST be dropped when another panel or the review is open. It MUST be dropped when a newer list request was sent.

@@ -151,12 +151,12 @@ func TestResumeSearchKeepsRecentStateAndListDate(t *testing.T) {
 func TestResumeSearchDiscardsLateReplyForSameQuery(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		started := make(chan context.Context, 2)
+		started := make(chan string, 3)
 		release := make(chan struct{})
 		defer close(release)
 		first := true
-		client := &resumeSearchCaller{search: func(ctx context.Context, _, _ string) (string, error) {
-			started <- ctx
+		client := &resumeSearchCaller{search: func(_ context.Context, query, _ string) (string, error) {
+			started <- query
 			if first {
 				first = false
 				<-release
@@ -167,30 +167,43 @@ func TestResumeSearchDiscardsLateReplyForSameQuery(t *testing.T) {
 		m := recentResumeList(t, client)
 		m, typing := drive(t, m, tea.PasteMsg{Content: "nee"})
 		m, search := drive(t, m, press('d', 0, "d"))
-		late := make(chan []tea.Msg, 1)
-		go func() { late <- commandMsgs(search) }()
-		ctx := awaitDebouncedSearch(t, started)
+		late := asyncResumeMsgs(search)
+		awaitDebouncedSearch(t, started)
 		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
-		if !errors.Is(ctx.Err(), context.Canceled) {
-			t.Fatalf("clearing an in-flight query left its context at %v", ctx.Err())
+		m, middle := drive(t, m, tea.PasteMsg{Content: "discard"})
+		obsolete := asyncResumeMsgs(middle)
+		synctest.Wait()
+		pause(300 * time.Millisecond)
+		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+		m, last := drive(t, m, tea.PasteMsg{Content: "need"})
+		fresh := asyncResumeMsgs(last)
+		synctest.Wait()
+		pause(300 * time.Millisecond)
+		if len(started) != 0 {
+			t.Fatal("another search reached the daemon while the obsolete call was running")
 		}
-		m = runResumeInput(t, m, tea.PasteMsg{Content: "need"})
-		assertContains(t, stripANSI(m.View().Content), "No conversation mentions this text.")
 		release <- struct{}{}
-		for _, msg := range append(<-late, commandMsgs(typing)...) {
+		for _, msg := range slices.Concat(<-fresh, <-late, <-obsolete, commandMsgs(typing)) {
 			m, _ = drive(t, m, msg)
 		}
-		if view := stripANSI(m.View().Content); strings.Contains(view, "Stale result") || !strings.Contains(view, "No conversation mentions this text.") {
+		if view := stripANSI(m.View().Content); strings.Contains(view, "Stale result") {
 			t.Fatalf("obsolete reply replaced the new search:\n%s", view)
 		}
 		m = runResumeInput(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-		if len(started) != 1 || m.list == nil || len(client.calls) != 0 {
+		assertContains(t, stripANSI(m.View().Content), "No conversation mentions this text.")
+		if len(started) != 1 || <-started != "need" || len(client.calls) != 0 {
 			t.Fatalf("obsolete search or empty selection sent another request: %+v", client.calls)
 		}
 	})
 }
 
-func awaitDebouncedSearch(t *testing.T, started <-chan context.Context) context.Context {
+func asyncResumeMsgs(cmd tea.Cmd) <-chan []tea.Msg {
+	msgs := make(chan []tea.Msg, 1)
+	go func() { msgs <- commandMsgs(cmd) }()
+	return msgs
+}
+
+func awaitDebouncedSearch(t *testing.T, started <-chan string) {
 	t.Helper()
 	synctest.Wait()
 	pause(299 * time.Millisecond)
@@ -199,11 +212,12 @@ func awaitDebouncedSearch(t *testing.T, started <-chan context.Context) context.
 	}
 	pause(time.Millisecond)
 	select {
-	case ctx := <-started:
-		return ctx
+	case query := <-started:
+		if query != "need" {
+			t.Fatalf("search = %q, want need", query)
+		}
 	default:
 		t.Fatal("the stable filter did not start a search")
-		return nil
 	}
 }
 
@@ -229,5 +243,24 @@ func TestResumeSearchOnlyUsesTheVisibleFilter(t *testing.T) {
 		if m.textMode() != inputFilter || m.input.field.value() != "" {
 			t.Fatal("dismissing the question did not restore an empty resume filter")
 		}
+	})
+}
+
+func TestResumeSearchRejectsOversizePasteBeforeReadingItsFirstLine(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var queries []string
+		client := &resumeSearchCaller{search: func(_ context.Context, query, _ string) (string, error) {
+			queries = append(queries, query)
+			return `{"data":[{"threadId":"saved","name":"Saved conversation","snippet":"matched excerpt"}]}`, nil
+		}}
+		m := recentResumeList(t, client)
+		m = runResumeInput(t, m, tea.PasteMsg{Content: "deploy"})
+		m = runResumeInput(t, m, tea.PasteMsg{Content: "bad\n" + strings.Repeat("x", 1<<20)})
+		if !slices.Equal(queries, []string{"deploy"}) || m.input.field.value() != "deploy" {
+			t.Fatalf("oversize paste edited the filter or started a search: %q, %v", m.input.field.value(), queries)
+		}
+		assertContains(t, m.notice, "1 MiB")
+		assertContains(t, stripANSI(m.View().Content), "matched excerpt")
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -70,11 +71,11 @@ func (m *model) resumeQuery() string {
 }
 
 func (m *model) fetchResumeMatches(search *resumeSearch, delay time.Duration) tea.Cmd {
-	ctx, cancel := requestContext(m.conn.done)
+	ctx, cancel := context.WithCancel(context.Background())
 	search.cancel = cancel
 	search.err = ""
 	params := rpc.ThreadSearchParams{Query: search.query, Cursor: search.nextCursor, Limit: 50}
-	client := m.conn.client
+	conn := m.conn
 	return func() tea.Msg {
 		defer cancel()
 		if delay > 0 {
@@ -84,15 +85,29 @@ func (m *model) fetchResumeMatches(search *resumeSearch, delay time.Duration) te
 			}
 		}
 		reply := &resumeSearchPage{search: search}
-		err := ctx.Err()
-		switch {
-		case err == nil && client == nil:
-			err = errors.New("rpc client is not connected")
-		case err == nil:
-			err = client.Call(ctx, "dalgona/thread/search", params, &reply.page)
-		}
+		err := conn.searchResumePage(ctx, params, &reply.page)
 		return resultMsg{op: "resumeSearch", value: reply, err: err}
 	}
+}
+
+func (c connInfo) searchResumePage(ctx context.Context, params rpc.ThreadSearchParams, page *rpc.ThreadSearchResponse) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return io.ErrClosedPipe
+	case c.resumeSlot <- struct{}{}:
+	}
+	defer func() { <-c.resumeSlot }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.client == nil {
+		return errors.New("rpc client is not connected")
+	}
+	callCtx, cancel := requestContext(c.done)
+	defer cancel()
+	return c.client.Call(callCtx, "dalgona/thread/search", params, page)
 }
 
 func (m *model) applyResumeSearch(msg resultMsg) {

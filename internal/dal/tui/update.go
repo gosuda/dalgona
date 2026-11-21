@@ -436,16 +436,18 @@ func (m *model) finishSuspend() tea.Cmd {
 }
 
 func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
-	if paste, ok := msg.(tea.PasteMsg); ok && m.pasteField(paste.Content) {
-		return nil
-	}
-	if paste, ok := msg.(tea.PasteMsg); ok && len(paste.Content) > pasteLimit {
-		m.noticef("Paste is %d bytes, over the 1 MiB limit; save it to a file and mention it with @path", len(paste.Content))
-		return nil
-	}
 	var imageCmd tea.Cmd
-	if paste, ok := msg.(tea.PasteMsg); ok && m.textMode() == inputPrompt {
-		imageCmd = m.imagePasteCmd(paste.Content, m.input.composer.cursor)
+	if paste, ok := msg.(tea.PasteMsg); ok {
+		if len(paste.Content) > pasteLimit {
+			m.noticef("Paste is %d bytes, over the 1 MiB limit; save it to a file and mention it with @path", len(paste.Content))
+			return nil
+		}
+		if m.pasteField(paste.Content) {
+			return nil
+		}
+		if m.textMode() == inputPrompt {
+			imageCmd = m.imagePasteCmd(paste.Content, m.input.composer.cursor)
+		}
 	}
 	updated, command := m.input.composer.Update(&m.screen, msg)
 	m.input.composer = updated
