@@ -137,6 +137,7 @@ function applyThemeToPage(setting: ThemeSetting): void {
 }
 
 const MAX_NOTICES = 5;
+const THREAD_PAGE_SIZE = 100;
 const RECONNECT_ATTEMPTS = 3;
 const RECONNECT_FIRST_WAIT_MS = 1000;
 const CONNECT_DEADLINE_MS = 30000;
@@ -144,6 +145,21 @@ const STABLE_CONNECTION_MS = 20000;
 
 const SHELL_TIMEOUT_MS = 120000;
 const SHELL_OUTPUT_BYTES = 65536;
+
+function matchesFirstThreadPage(
+	listed: readonly ThreadSummary[],
+	page: readonly ThreadSummary[],
+): boolean {
+	return (
+		page.length === Math.min(THREAD_PAGE_SIZE, listed.length) &&
+		page.every((thread, index) => {
+			const previous = listed[index];
+			return (
+				previous?.id === thread.id && previous.updatedAt === thread.updatedAt
+			);
+		})
+	);
+}
 
 function shellArgv(command: string, platformFamily: string | null): string[] {
 	return platformFamily === "windows"
@@ -492,7 +508,9 @@ export class Session {
 	async listThreads(cursor: string | null = null): Promise<ThreadListResult> {
 		const page = await this.requireClient().call(
 			"thread/list",
-			cursor === null ? { limit: 100 } : { limit: 100, cursor },
+			cursor === null
+				? { limit: THREAD_PAGE_SIZE }
+				: { limit: THREAD_PAGE_SIZE, cursor },
 			parseThreadListResponse,
 		);
 		return page.nextCursor !== null && page.nextCursor === cursor
@@ -507,11 +525,8 @@ export class Session {
 		const generation = this.connectionGeneration;
 		const page = await this.listThreads(cursor);
 		const seen = new Set(listed.map((thread) => thread.id));
-		if (
-			page.nextCursor !== null &&
-			!page.threads.some((thread) => seen.has(thread.id))
-		)
-			return page;
+		const overlaps = page.threads.some((thread) => seen.has(thread.id));
+		if (page.nextCursor !== null && !overlaps) return page;
 
 		const recovered: ThreadSummary[] = [];
 		const visited = new Set<string | null>([cursor]);
@@ -521,6 +536,12 @@ export class Session {
 				throw new Error("connection changed");
 			visited.add(earlier);
 			const prefix = await this.listThreads(earlier);
+			if (
+				earlier === null &&
+				!overlaps &&
+				matchesFirstThreadPage(listed, prefix.threads)
+			)
+				return page;
 			for (const thread of prefix.threads) {
 				if (seen.has(thread.id)) continue;
 				seen.add(thread.id);
