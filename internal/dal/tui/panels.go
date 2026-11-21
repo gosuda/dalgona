@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 type panelKind int
@@ -56,17 +57,19 @@ type panelView struct {
 	decision bool
 	title    string
 	body     []string
+	preview  []string
 	actions  []string
 	cursor   int
 	scroll   int
 }
 
 type listItem struct {
-	id     string
-	label  string
-	date   string
-	detail string
-	active bool
+	id      string
+	label   string
+	date    string
+	detail  string
+	snippet string
+	active  bool
 }
 
 type effortPick struct {
@@ -87,9 +90,21 @@ type listPanel struct {
 	pending       string
 	empty         string
 	revision      uint64
+	search        *resumeSearch
+	openedAt      time.Time
 }
 
-func (p *listPanel) visible(query string) []int {
+func (p *listPanel) visible(query string) []listItem {
+	if p.search != nil {
+		return p.search.rows
+	}
+	return p.filtered(query)
+}
+
+func (p *listPanel) filtered(query string) []listItem {
+	if query == "" {
+		return p.items
+	}
 	type ranked struct{ index, score int }
 	ranks := make([]ranked, 0, len(p.items))
 	for i, item := range p.items {
@@ -98,11 +113,11 @@ func (p *listPanel) visible(query string) []int {
 		}
 	}
 	slices.SortStableFunc(ranks, func(a, b ranked) int { return cmp.Compare(b.score, a.score) })
-	indexes := make([]int, len(ranks))
+	items := make([]listItem, len(ranks))
 	for i, r := range ranks {
-		indexes[i] = r.index
+		items[i] = p.items[r.index]
 	}
-	return indexes
+	return items
 }
 
 func fuzzyScore(query, text string) int {
@@ -131,7 +146,7 @@ func isSubsequence(query, text string) bool {
 }
 
 func panelBodyRows(p panelView, rows int) int {
-	return max(rows-1-len(p.actions), 0)
+	return max(rows-1-len(p.actions)-len(p.preview), 0)
 }
 
 func panelScrollStep(key string) int {
@@ -174,8 +189,16 @@ func framePanel(s *screenState, p panelView, rows int) []string {
 		}
 		lines = append(lines, s.fit(prefix+marker+line, width))
 	}
-	for len(lines) < rows-len(actions) {
+	for len(lines) < rows-len(actions)-len(p.preview) {
 		lines = append(lines, s.fit(rowTheme.paint(roleFaint, "│"), width))
+	}
+	return s.appendPanelFooter(lines, p.preview, actions, width)
+}
+
+func (s *screenState) appendPanelFooter(lines, preview, actions []string, width int) []string {
+	rowTheme := s.dockTheme()
+	for _, line := range preview {
+		lines = append(lines, s.fit(rowTheme.paint(roleFaint, "│   ")+rowTheme.paint(roleDim, line), width))
 	}
 	actionWidth := terminalWidth(s.width)
 	for i, action := range actions {

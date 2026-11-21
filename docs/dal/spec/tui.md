@@ -179,6 +179,17 @@ Printable keys MUST add to the filter while a list panel is open.
 Up and Down MUST move the cursor. PgUp and PgDn MUST move it by a page.
 Enter MUST choose the highlighted item. Enter MUST do nothing when no item matches.
 Esc MUST clear a non-empty filter. Esc MUST close the panel when the filter is empty.
+
+The `/resume` filter matches the titles of the 50 most recent threads at once.
+After 300 ms without an edit, it also calls `dalgona/thread/search` when each word has at least three characters.
+The client MUST use the trimmed filter and request 50 hits per page.
+Recent title matches stay first. Other hits follow in server order. Each thread appears once.
+Search hits keep the date and state from the recent list when available. Other hits show their update date.
+The panel shows the highlighted hit's masked excerpt below the list when a row fits. Enter opens that thread.
+Tab loads the next page when more matches exist. A failed page keeps the selection and offers Tab to retry.
+An empty result shows `No conversation mentions this text.`
+Changing the search or leaving the panel MUST cancel the pending request and discard its results.
+
 A list panel MUST lose its filter when another panel opens above it.
 A reply that opens a list panel MUST be dropped when another panel or the review is open. It MUST be dropped when a newer list request was sent.
 The input line MUST show the filter while a list panel is open.

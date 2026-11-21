@@ -45,6 +45,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	notice := m.notice
 	command := m.handleMsg(msg)
 	m.syncHistory()
+	command = tea.Batch(command, m.syncResumeSearch())
 	if m.input.composer.Value() != before {
 		command = tea.Batch(command, m.matchKeywords())
 	}
@@ -172,7 +173,11 @@ func (m *model) updateAsync(msg tea.Msg) tea.Cmd {
 }
 
 func (m *model) applyResultMessage(msg resultMsg) tea.Cmd {
-	if msg.op == "keywordMatch" {
+	switch msg.op {
+	case "resumeSearch":
+		m.applyResumeSearch(msg)
+		return nil
+	case "keywordMatch":
 		m.applyKeywordMatch(msg)
 		return nil
 	}
@@ -431,8 +436,7 @@ func (m *model) finishSuspend() tea.Cmd {
 }
 
 func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
-	if paste, ok := msg.(tea.PasteMsg); ok && (m.list != nil || m.loginTyping() || m.typingAnswer()) {
-		m.input.field.pasteLine(paste.Content)
+	if paste, ok := msg.(tea.PasteMsg); ok && m.pasteField(paste.Content) {
 		return nil
 	}
 	if paste, ok := msg.(tea.PasteMsg); ok && len(paste.Content) > pasteLimit {
@@ -446,6 +450,20 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 	updated, command := m.input.composer.Update(&m.screen, msg)
 	m.input.composer = updated
 	return tea.Batch(command, m.syncPopup(typedText(msg)), imageCmd)
+}
+
+func (m *model) pasteField(text string) bool {
+	switch m.textMode() {
+	case inputFilter:
+		if m.input.field.pasteLine(text) {
+			m.list.cursor, m.list.scroll = 0, 0
+		}
+	case inputTarget, inputAnswer, inputAPIKey:
+		m.input.field.pasteLine(text)
+	case inputPrompt, inputShell:
+		return false
+	}
+	return true
 }
 
 func (m model) View() tea.View {

@@ -20,11 +20,14 @@ const (
 )
 
 func (m *model) openList(list *listPanel) {
+	m.closeList()
 	m.list = list
-	m.input.field = textField{}
 }
 
 func (m *model) closeList() {
+	if m.list != nil {
+		m.list.stopResumeSearch()
+	}
 	m.list = nil
 	m.input.field = textField{}
 }
@@ -61,38 +64,47 @@ func (m *model) queueKey(key string) {
 }
 
 func (m *model) listRows() int {
-	return max(1, panelRows(panelList, m.screen.height)-2)
+	return max(1, panelRows(panelList, m.screen.height)-2-len(m.resumePreview()))
 }
 
 func (m *model) listPanelView() panelView {
 	list := m.list
-	indexes := list.visible(m.listQuery())
-	body := make([]string, 0, len(indexes))
-	for pos, i := range indexes {
-		body = append(body, m.listLine(list.items[i], pos == list.cursor))
+	items := list.visible(m.listQuery())
+	titleCells := 0
+	if list.kind == "resume" {
+		titleCells = m.resumeTitleCells(items)
+	}
+	body := make([]string, 0, len(items))
+	for pos, item := range items {
+		body = append(body, m.listLine(item, pos == list.cursor, titleCells))
 	}
 	cursor := list.cursor
 	if len(list.items) == 0 && list.empty != "" {
 		body, cursor = []string{list.empty}, -1
 	}
-	actions := []string{listHint}
-	switch list.kind {
-	case "model":
-		actions[0] = modelHint
-	case queueKind:
-		actions[0] = queueHint
-	case historyKind:
-		actions[0] = historyHint
-	}
-	if list.err != "" {
-		actions = []string{list.err}
-	}
-	return panelView{kind: list.kind, layout: panelList, title: list.title, body: body, actions: actions, cursor: cursor, scroll: list.scroll}
+	return panelView{kind: list.kind, layout: panelList, title: list.title, body: body, preview: m.resumePreview(), actions: []string{list.hint()}, cursor: cursor, scroll: list.scroll}
 }
 
-func (m *model) listLine(item listItem, selected bool) string {
+func (p *listPanel) hint() string {
+	if p.err != "" {
+		return p.err
+	}
+	switch p.kind {
+	case "model":
+		return modelHint
+	case "resume":
+		return p.resumeHint()
+	case queueKind:
+		return queueHint
+	case historyKind:
+		return historyHint
+	}
+	return listHint
+}
+
+func (m *model) listLine(item listItem, selected bool, titleCells int) string {
 	if m.list != nil && m.list.kind == "resume" {
-		return m.resumeLine(item, selected)
+		return m.resumeLine(item, selected, titleCells)
 	}
 	rowTheme := m.screen.dockTheme()
 	label := rowTheme.paint(roleText, item.label)
@@ -112,13 +124,12 @@ func (m *model) listLine(item listItem, selected bool) string {
 	return line
 }
 
-func (m *model) resumeLine(item listItem, selected bool) string {
+func (m *model) resumeLine(item listItem, selected bool, titleCells int) string {
 	title := item.label
 	if item.active {
 		title += " (active)"
 	}
 	rowTheme := m.screen.dockTheme()
-	titleCells := m.resumeTitleCells()
 	head := rowTheme.paint(roleText, m.screen.pad(m.screen.fit(title, titleCells), titleCells))
 	if selected {
 		head = rowTheme.paintBold(roleText, m.screen.pad(m.screen.fit(title, titleCells), titleCells))
@@ -135,10 +146,10 @@ func (m *model) resumeLine(item listItem, selected bool) string {
 	return line
 }
 
-func (m *model) resumeTitleCells() int {
+func (m *model) resumeTitleCells(items []listItem) int {
 	width := 0
 	state := 0
-	for _, item := range m.list.items {
+	for _, item := range items {
 		title := item.label
 		if item.active {
 			title += " (active)"
@@ -151,11 +162,11 @@ func (m *model) resumeTitleCells() int {
 }
 
 func (m *model) highlighted() (listItem, bool) {
-	indexes := m.list.visible(m.listQuery())
-	if m.list.cursor < 0 || m.list.cursor >= len(indexes) {
+	items := m.list.visible(m.listQuery())
+	if m.list.cursor < 0 || m.list.cursor >= len(items) {
 		return listItem{}, false
 	}
-	return m.list.items[indexes[m.list.cursor]], true
+	return items[m.list.cursor], true
 }
 
 func (m *model) moveList(delta int) {
@@ -177,7 +188,7 @@ func (m *model) wheelList(msg tea.MouseWheelMsg) {
 	if msg.Button == tea.MouseWheelUp {
 		delta = -listWheelRows
 	}
-	count := len(m.list.visible(m.input.field.value()))
+	count := len(m.list.visible(m.listQuery()))
 	if count == 0 {
 		return
 	}
@@ -199,7 +210,7 @@ func (m *model) listKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "esc":
 		m.escapeList()
 	case "tab":
-		m.cycleEffort(1)
+		return m.listTab()
 	case "shift+tab":
 		m.cycleEffort(-1)
 	case "delete", "backspace":
@@ -209,6 +220,14 @@ func (m *model) listKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.listEdit(msg)
 		}
 	}
+	return nil
+}
+
+func (m *model) listTab() tea.Cmd {
+	if search := m.list.search; search != nil && search.cancel == nil && (search.err != "" || search.nextCursor != "") {
+		return m.fetchResumeMatches(search, 0)
+	}
+	m.cycleEffort(1)
 	return nil
 }
 
@@ -378,7 +397,7 @@ func (m *model) openThreadList(response *rpc.ThreadListResponse) {
 	for _, item := range response.Data {
 		items = append(items, listItem{id: sanitizeText(item.ID), label: threadTitle(item), date: threadDate(item, now), detail: threadState(item.Status), active: item.ID == m.thread.id})
 	}
-	m.openList(&listPanel{kind: "resume", title: "resume a thread", items: items, efforts: map[string]effortPick{}})
+	m.openList(&listPanel{kind: "resume", title: "resume a thread", items: items, openedAt: now})
 }
 
 func threadDate(thread rpc.Thread, now time.Time) string {
@@ -631,10 +650,10 @@ func (m *model) rebuildHistory() {
 	held, had := m.highlighted()
 	list.items = historyItems(m.input.history.allEntries())
 	list.revision = m.input.history.revision
-	indexes := list.visible(m.listQuery())
-	at := slices.IndexFunc(indexes, func(i int) bool { return had && list.items[i].id == held.id })
+	items := list.visible(m.listQuery())
+	at := slices.IndexFunc(items, func(item listItem) bool { return had && item.id == held.id })
 	if at < 0 {
-		at = min(list.cursor, max(0, len(indexes)-1))
+		at = min(list.cursor, max(0, len(items)-1))
 	}
 	list.cursor = at
 }
