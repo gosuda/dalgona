@@ -408,7 +408,11 @@ Escape MUST close the file list and MUST keep the message field.
 ### Commands and panels
 
 A message that starts with `/` MUST open the command list.
-The command list MUST show each command whose name starts with the text after `/`. Once a space follows, the command list MUST show nothing, and Enter MUST open no panel and keep the message field.
+The command list MUST show each command whose name starts with the text after `/`.
+An ASCII space in a slash command MUST hide the command list.
+The composer MUST NOT offer file completion for a command argument.
+Enter on a command with an ASCII space MUST keep the draft.
+Enter in this state MUST NOT open a panel, send the draft, or show an unknown-command error.
 ArrowUp and ArrowDown MUST move the highlight through the list.
 Enter or Tab MUST open the panel of the highlighted command and MUST clear the message field.
 Escape MUST close the command list and MUST keep the message field.
