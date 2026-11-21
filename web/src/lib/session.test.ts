@@ -53,6 +53,21 @@ function thread(id: string, turns: JsonValue): Record<string, JsonValue> {
 	};
 }
 
+function threadListPage(
+	params: JsonValue,
+	rows: readonly JsonValue[],
+): JsonValue {
+	const offset =
+		typeof params === "object" && params !== null && "cursor" in params
+			? Number(params["cursor"])
+			: 0;
+	const end = offset + 100;
+	return {
+		data: rows.slice(offset, end),
+		nextCursor: end < rows.length ? String(end) : null,
+	};
+}
+
 function resumeAnswer(
 	runningThread: string,
 ): (params: JsonValue) => Record<string, JsonValue> {
@@ -488,29 +503,33 @@ describe("session", () => {
 		},
 	);
 
-	test.each(["overlap", "last page"])(
+	test.each(["overlap", "last page", "updated first page"])(
 		"finds a thread promoted ahead of two loaded pages on %s",
 		async (boundary) => {
 			let ids = Array.from({ length: 302 }, (_, index) => String(index + 1));
+			const updated = new Set<string>();
 			const { dial } = fakeDial("none", {
-				"thread/list": (params) => {
-					const offset =
-						typeof params === "object" && params !== null && "cursor" in params
-							? Number(params["cursor"])
-							: 0;
-					const end = offset + 100;
-					return {
-						data: ids.slice(offset, end).map((id) => thread(id, [])),
-						nextCursor: end < ids.length ? String(end) : null,
-					};
-				},
+				"thread/list": (params) =>
+					threadListPage(
+						params,
+						ids.map((id) => ({
+							...thread(id, []),
+							updatedAt: updated.has(id) ? 2 : 1,
+						})),
+					),
 			});
 			const session = new Session(dial);
 			session.start(location);
 			await vi.waitFor(() => expect(session.nextThreadCursor).toBe("100"));
 			await session.loadMoreThreads();
-			ids = ["302", ...ids.slice(0, -1)];
-			if (boundary === "last page") ids = ids.filter((id) => id !== "1");
+			if (boundary === "updated first page") {
+				const head = ids.slice(0, 100);
+				for (const id of head) updated.add(id);
+				ids = [...head, "302", ...ids.slice(101, -1)];
+			} else {
+				ids = ["302", ...ids.slice(0, -1)];
+				if (boundary === "last page") ids = ids.filter((id) => id !== "1");
+			}
 			await session.loadMoreThreads();
 			if (boundary === "overlap")
 				expect(session.threads.some((entry) => entry.id === "302")).toBe(true);
@@ -523,6 +542,31 @@ describe("session", () => {
 			session.stop();
 		},
 	);
+
+	test("checks only the first page when an unchanged history reaches its last page", async () => {
+		const rows = Array.from({ length: 1001 }, (_, index) =>
+			thread(String(index + 1), []),
+		);
+		const requests: JsonValue[] = [];
+		const { dial } = fakeDial("none", {
+			"thread/list": (params) => {
+				requests.push(params);
+				return threadListPage(params, rows);
+			},
+		});
+		const session = new Session(dial);
+		session.start(location);
+		await vi.waitFor(() => expect(session.nextThreadCursor).toBe("100"));
+		for (let offset = 100; offset < 1000; offset += 100)
+			await session.loadMoreThreads();
+		expect(requests).toHaveLength(10);
+		requests.length = 0;
+		await session.loadMoreThreads();
+		expect(requests).toEqual([{ limit: 100, cursor: "1000" }, { limit: 100 }]);
+		expect(session.threads).toHaveLength(1001);
+		expect(session.nextThreadCursor).toBeNull();
+		session.stop();
+	});
 
 	test("discards an older page that arrives after reconnect", async () => {
 		const { dial } = fakeDial("none", {
