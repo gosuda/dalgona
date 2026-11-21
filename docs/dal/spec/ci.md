@@ -8,6 +8,12 @@ Feature branch pushes MUST use their pull request run instead of starting a seco
 CI MUST NOT filter changed paths because checks read files across package boundaries.
 A newer run for the same ref MUST cancel the older run.
 
+## Provider
+
+The CI jobs MUST run on Depot `depot-ubuntu-24.04` runners.
+Latchkey MUST NOT run CI.
+A Go job MUST NOT restore a build cache written by another branch. Depot Cache shares entries across the branches of the base repository without isolation.
+
 ## Verification
 
 `just verify` MUST run `verify-go` and `verify-shared`.
