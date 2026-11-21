@@ -658,7 +658,7 @@ describe("session", () => {
 	});
 
 	test("clears the open thread and transcript when resume finds no thread", async () => {
-		const { dial } = fakeDial("none", {
+		const { dial, ports } = fakeDial("none", {
 			"thread/resume": (params) => {
 				if (threadIdOf(params) === "t2")
 					throw new RpcError(-32602, "unknown thread t2");
@@ -684,12 +684,16 @@ describe("session", () => {
 		session.start(location);
 		await openThread(session, "t1");
 		expect(session.transcript.items).toHaveLength(1);
+		expect(session.fileSearchRoot).not.toBeNull();
 		await session.selectThread("t2");
 		await vi.waitFor(() => {
 			expect(session.activeThreadId).toBeNull();
 			expect(session.transcript.threadId).toBeNull();
 			expect(session.transcript.items).toEqual([]);
 		});
+		expect(session.fileSearchRoot).toBeNull();
+		expect(await session.searchFiles("mod")).toEqual([]);
+		expect(ports[0]?.calls).not.toContain("fuzzyFileSearch");
 		session.stop();
 	});
 
