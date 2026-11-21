@@ -26,6 +26,7 @@ afterEach(cleanup);
 function baseProps() {
 	return {
 		disabled: false,
+		fileSearchRoot: "/work",
 		running: false,
 		followups: [] as readonly string[],
 		history: [] as readonly string[],

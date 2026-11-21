@@ -54,6 +54,7 @@ interface Props {
 	onEditFollowup: (index: number) => string | undefined;
 	onRemoveFollowup: (index: number) => void;
 	onMatch?: (text: string) => Promise<readonly KeywordMatch[]>;
+	fileSearchRoot: string | null;
 	onFileSearch?: (query: string) => Promise<readonly FileMatch[]>;
 	onSend: (text: string, attachments: Attachments) => void;
 	onSteer: (text: string) => void;
@@ -76,6 +77,7 @@ let {
 	onEditFollowup,
 	onRemoveFollowup,
 	onMatch,
+	fileSearchRoot,
 	onFileSearch,
 	onSend,
 	onSteer,
@@ -111,25 +113,39 @@ const paletteOpen = $derived(commandQuery !== null && !paletteClosed);
 const paletteId = "command-palette";
 let caret = $state(0);
 let mentionClosed = $state(false);
-let fileMatches = $state<readonly FileMatch[]>([]);
 let fileActive = $state(0);
-let fileQuery = $state<string | null>(null);
+let fileResult = $state<{
+	root: string;
+	query: string;
+	matches: readonly FileMatch[];
+} | null>(null);
 let fileSeq = 0;
 const fileListId = "file-completion";
 const mention = $derived(mentionAt(text, Math.min(caret, text.length)));
 const mentionQuery = $derived(mention?.query ?? null);
+const searchRoot = $derived(
+	disabled || !fileSearchRoot ? null : fileSearchRoot,
+);
+const currentFileResult = $derived(
+	fileResult?.root === searchRoot && fileResult.query === mentionQuery
+		? fileResult
+		: null,
+);
+const shownFileMatches = $derived(
+	currentFileResult?.matches.slice(0, FILE_LIMIT) ?? [],
+);
 const fileOpen = $derived(
-	!paletteOpen && mention !== null && !mentionClosed && fileMatches.length > 0,
+	!paletteOpen && !mentionClosed && shownFileMatches.length > 0,
 );
 const filePending = $derived(
 	!paletteOpen &&
-		mention !== null &&
 		!mentionClosed &&
+		searchRoot !== null &&
+		mentionQuery !== null &&
+		mentionQuery !== "" &&
 		onFileSearch !== undefined &&
-		mention.query !== "" &&
-		fileQuery !== mention.query,
+		currentFileResult === null,
 );
-const shownFileMatches = $derived(fileMatches.slice(0, FILE_LIMIT));
 const fileItems = $derived(
 	shownFileMatches.map((match) => ({
 		id: match.path,
@@ -208,27 +224,22 @@ $effect(() => {
 });
 
 $effect(() => {
+	const root = searchRoot;
 	const query = mentionQuery;
 	const seq = ++fileSeq;
-	fileMatches = [];
+	fileResult = null;
 	fileActive = 0;
-	fileQuery = null;
 	const search = untrack(() => onFileSearch);
-	if (!search || query === null || query === "") return;
+	if (!root || !search || !query) return;
+	const isCurrent = () =>
+		seq === fileSeq && root === searchRoot && query === mentionQuery;
+	const receive = (matches: readonly FileMatch[]): void => {
+		if (!isCurrent()) return;
+		fileResult = { root, query, matches };
+	};
 	const timer = setTimeout(() => {
-		search(query).then(
-			(found) => {
-				if (seq !== fileSeq) return;
-				fileMatches = found;
-				fileActive = 0;
-				fileQuery = query;
-			},
-			() => {
-				if (seq !== fileSeq) return;
-				fileMatches = [];
-				fileQuery = query;
-			},
-		);
+		if (!isCurrent()) return;
+		search(query).then(receive, () => receive([]));
 	}, FILE_SEARCH_DEBOUNCE_MS);
 	return () => clearTimeout(timer);
 });
