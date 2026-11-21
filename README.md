@@ -344,7 +344,7 @@ The [documentation index](docs/README.md) links every specification and decision
 
 ## Development
 
-Use the Go toolchain in [go.mod](go.mod) and the Node.js and pnpm versions declared in [CI](.github/workflows/ci.yml). Install `just` and `uv` for the checks.
+Use the Go toolchain in [go.mod](go.mod), the Node.js version declared in [CI](.github/workflows/ci.yml), and the pnpm version declared in [web/package.json](web/package.json). Install `just` and `uv` for the checks.
 
 From the checkout root:
 
