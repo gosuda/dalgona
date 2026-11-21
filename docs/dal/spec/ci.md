@@ -24,6 +24,8 @@ The groups MUST retain every check from the full verification command.
 | `verify-go` | `fmt-check`, `vet`, `lint`, `test`, `vuln` | Linux, macOS, and Windows |
 | `verify-shared` | `hashline-model`, `spec-style`, `docs-links`, `web-check`, `cf-check` | Linux |
 
+The native macOS and Windows lanes are not implemented yet. The current workflow runs the Linux Depot lanes only. Restoring them MUST keep the Provider rule's job scope.
+
 Go tests MUST keep the race detector and `-count=1`.
 Each native host MUST run its own Go lint, vet, tests, and vulnerability checks.
 Each native host MUST install `uv` with Python 3.15 for the Go tests that compare against CPython.
