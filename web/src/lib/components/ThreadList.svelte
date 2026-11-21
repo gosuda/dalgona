@@ -1,5 +1,6 @@
 <script lang="ts">
 import StateTag from "#lib/components/StateTag.svelte";
+import { handoffFocus, messageOrTranscript } from "#lib/focus.ts";
 import { threadHue } from "#lib/hue.ts";
 import { type StateKey, stateKey, threadTitle } from "#lib/labels.ts";
 import type { ThreadSummary } from "#lib/types.ts";
@@ -125,7 +126,12 @@ function rowKey(thread: ThreadSummary): StateKey | null {
 				{/each}
 			</ul>
 			{#if hasMore}
-				<button type="button" class="quiet" disabled={loading || !connected} onclick={onLoadMore}>Load more threads</button>
+				<button
+					type="button" class="quiet"
+					aria-disabled={loading || !connected ? "true" : undefined}
+					onclick={() => { if (!loading && connected) onLoadMore(); }}
+					{@attach handoffFocus(messageOrTranscript, { preventScroll: true })}
+				>Load more threads</button>
 			{/if}
 		</nav>
 	{/if}

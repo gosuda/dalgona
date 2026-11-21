@@ -1,5 +1,6 @@
 <script lang="ts">
 import Panel from "#lib/components/panels/Panel.svelte";
+import { handoffFocus } from "#lib/focus.ts";
 import { threadTitle } from "#lib/labels.ts";
 import { appendThreadPage } from "#lib/reducer.ts";
 import type { Session } from "#lib/session.svelte.ts";
@@ -17,12 +18,16 @@ let nextCursor = $state<string | null>(null);
 let loading = $state(false);
 let listRequest = 0;
 let filter = $state("");
+let filterField: HTMLInputElement;
 let error = $state("");
 let hits = $state<readonly ThreadSearchHit[]>([]);
 let searchError = $state("");
 let searching = $state(false);
 let retry = $state(0);
 let opening = $state(false);
+const canLoadPage = $derived(
+	!loading && (error !== "" || session.connection === "connected"),
+);
 const needle = $derived(filter.trim().toLowerCase());
 const shown = $derived(
 	threads.filter(
@@ -77,11 +82,14 @@ async function load(cursor: string | null): Promise<void> {
 	if (cursor !== null && loading) return;
 	const request = ++listRequest;
 	loading = true;
-	error = "";
 	if (cursor === null) nextCursor = null;
 	try {
-		const page = await session.listThreads(cursor);
+		const page =
+			cursor === null
+				? await session.listThreads()
+				: await session.listOlderThreads(cursor, threads);
 		if (request !== listRequest) return;
+		error = "";
 		threads =
 			cursor === null ? page.threads : appendThreadPage(threads, page.threads);
 		nextCursor = page.nextCursor;
@@ -107,13 +115,12 @@ async function choose(threadId: string): Promise<void> {
 
 <Panel title="Open an earlier thread" {open} onClose={() => session.closePanel()}>
 	{#snippet children()}
-		<input type="search" bind:value={filter} placeholder="Filter threads" aria-label="Filter threads" />
+		<input type="search" bind:this={filterField} bind:value={filter} placeholder="Filter threads" aria-label="Filter threads" />
 		{#if opening}
 			<p role="status">Opening thread…</p>
 		{/if}
 		{#if error !== ""}
 			<p class="error" role="alert">Unable to list threads: {error}</p>
-			<button type="button" class="quiet" onclick={() => void load(nextCursor)}>Try again</button>
 		{/if}
 		{#if shown.length === 0 && !loading && error === ""}
 			<p class="empty">{threads.length === 0 ? "No threads yet." : "No threads match this filter."}</p>
@@ -128,8 +135,13 @@ async function choose(threadId: string): Promise<void> {
 				{/each}
 			</ul>
 		{/if}
-		{#if nextCursor !== null && error === ""}
-			<button type="button" class="quiet" disabled={loading || session.connection !== "connected"} onclick={() => void load(nextCursor)}>Load more threads</button>
+		{#if nextCursor !== null || error !== ""}
+			<button
+				type="button" class="quiet"
+				aria-disabled={canLoadPage ? undefined : "true"}
+				onclick={() => { if (canLoadPage) void load(nextCursor); }}
+				{@attach handoffFocus(() => filterField)}
+			>{error === "" ? "Load more threads" : "Try again"}</button>
 		{/if}
 		{#if [...filter.trim()].length >= 3}
 			<section aria-label="Matches in conversations" aria-busy={searching}>

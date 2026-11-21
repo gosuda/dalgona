@@ -1293,7 +1293,10 @@ describe("page live regions", () => {
 
 	test("the resume panel shows its search progress as status text in its dialog and adds no notice", async () => {
 		const { session } = connectedSession();
-		vi.spyOn(session, "listThreads").mockResolvedValue([]);
+		vi.spyOn(session, "listThreads").mockResolvedValue({
+			threads: [],
+			nextCursor: null,
+		});
 		vi.spyOn(session, "searchThreads").mockReturnValue(
 			new Promise(() => undefined),
 		);

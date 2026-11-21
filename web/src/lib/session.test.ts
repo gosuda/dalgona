@@ -443,41 +443,86 @@ describe("session", () => {
 		session.stop();
 	});
 
-	test("retries the same cursor and appends only unseen threads without resuming again", async () => {
-		const requests: JsonValue[] = [];
-		const { dial, ports } = fakeDial("t1", {
-			"thread/list": (params) => {
-				requests.push(params);
-				if (requests.length === 1)
-					return { data: [thread("t1", [])], nextCursor: "older" };
-				if (requests.length === 2) throw new Error("temporarily unavailable");
-				return { data: [thread("t1", []), thread("t2", [])], nextCursor: null };
-			},
-		});
-		const session = new Session(dial);
-		session.start(location);
-		await openThread(session, "t1");
-		await session.loadMoreThreads();
-		expect(session.threads.map((entry) => entry.id)).toEqual(["t1"]);
-		const retry = session.notices.find((notice) =>
-			notice.text.includes("temporarily unavailable"),
-		)?.actions[0];
-		expect(retry?.label).toBe("Try again");
-		retry?.run();
-		await session.loadMoreThreads();
-		await vi.waitFor(() => expect(session.nextThreadCursor).toBeNull());
-		expect(requests).toEqual([
-			{ limit: 100 },
-			{ limit: 100, cursor: "older" },
-			{ limit: 100, cursor: "older" },
-		]);
-		expect(session.threads.map((entry) => entry.id)).toEqual(["t1", "t2"]);
-		expect(
-			ports[0]?.calls.filter((method) => method === "thread/resume"),
-		).toHaveLength(1);
-		expect(session.activeThreadId).toBe("t1");
-		session.stop();
-	});
+	test.each(["notice", "sidebar"])(
+		"clears the page error after a retry from the %s",
+		async (source) => {
+			const requests: JsonValue[] = [];
+			const { dial, ports } = fakeDial("t1", {
+				"thread/list": (params) => {
+					requests.push(params);
+					if (requests.length === 1)
+						return { data: [thread("t1", [])], nextCursor: "older" };
+					if (requests.length === 2) throw new Error("temporarily unavailable");
+					return { data: [thread("t2", [])], nextCursor: "oldest" };
+				},
+			});
+			const session = new Session(dial);
+			session.start(location);
+			await openThread(session, "t1");
+			await session.loadMoreThreads();
+			expect(session.threads.map((entry) => entry.id)).toEqual(["t1"]);
+			const retry = session.notices.find((notice) =>
+				notice.text.includes("temporarily unavailable"),
+			)?.actions[0];
+			expect(retry?.label).toBe("Try again");
+			if (source === "notice") retry?.run();
+			else await session.loadMoreThreads();
+			await vi.waitFor(() => expect(session.nextThreadCursor).toBe("oldest"));
+			expect(
+				session.notices.some((notice) =>
+					notice.text.includes("temporarily unavailable"),
+				),
+			).toBe(false);
+			retry?.run();
+			expect(requests).toEqual([
+				{ limit: 100 },
+				{ limit: 100, cursor: "older" },
+				{ limit: 100, cursor: "older" },
+			]);
+			expect(session.threads.map((entry) => entry.id)).toEqual(["t1", "t2"]);
+			expect(
+				ports[0]?.calls.filter((method) => method === "thread/resume"),
+			).toHaveLength(1);
+			expect(session.activeThreadId).toBe("t1");
+			session.stop();
+		},
+	);
+
+	test.each(["overlap", "last page"])(
+		"finds a thread promoted ahead of two loaded pages on %s",
+		async (boundary) => {
+			let ids = Array.from({ length: 302 }, (_, index) => String(index + 1));
+			const { dial } = fakeDial("none", {
+				"thread/list": (params) => {
+					const offset =
+						typeof params === "object" && params !== null && "cursor" in params
+							? Number(params["cursor"])
+							: 0;
+					const end = offset + 100;
+					return {
+						data: ids.slice(offset, end).map((id) => thread(id, [])),
+						nextCursor: end < ids.length ? String(end) : null,
+					};
+				},
+			});
+			const session = new Session(dial);
+			session.start(location);
+			await vi.waitFor(() => expect(session.nextThreadCursor).toBe("100"));
+			await session.loadMoreThreads();
+			ids = ["302", ...ids.slice(0, -1)];
+			if (boundary === "last page") ids = ids.filter((id) => id !== "1");
+			await session.loadMoreThreads();
+			if (boundary === "overlap")
+				expect(session.threads.some((entry) => entry.id === "302")).toBe(true);
+			expect(session.nextThreadCursor).toBe("300");
+			await session.loadMoreThreads();
+			const visible = new Set(session.threads.map((entry) => entry.id));
+			expect(ids.filter((id) => !visible.has(id))).toEqual([]);
+			expect(session.threads).toHaveLength(visible.size);
+			expect(session.nextThreadCursor).toBeNull();
+			session.stop();
+		},
+	);
 
 	test("discards an older page that arrives after reconnect", async () => {
 		const { dial } = fakeDial("none", {

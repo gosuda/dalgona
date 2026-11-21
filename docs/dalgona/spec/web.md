@@ -282,6 +282,8 @@ A `serverRequest/resolved` with `timedOut` closes the card and shows the notice 
 - With no connection the thread list says `Threads unavailable` and does not claim that no threads exist. A thread without a title shows its preview. A thread with neither shows `Untitled thread`.
 - The `thread/list` request MUST carry `limit` and `cursor` only. It MUST NOT carry `sortKey` or `sortDirection`.
 - The sidebar and resume panel MUST request 100 threads at a time. If a page has a next cursor, `Load more threads` MUST use that cursor and append unseen threads in response order. Loading a page MUST keep the current thread open. A failed request MUST keep the listed threads and offer a retry.
+- When pages overlap or the last page arrives, the client MUST check earlier pages for threads that moved before the requested offset.
+- A retry MUST request the failed page with the same cursor. The sidebar MUST remove the error notice when it retries that page.
 - Selecting Reconnect loads the thread list, then resumes the open thread on the new connection, so its transcript keeps streaming. The resume MUST keep queued follow-ups. Opening a different thread MUST discard them.
 - A `thread/resume` that fails with `-32602` (unknown thread) MUST clear the open thread and its transcript.
 - A new connection MUST discard thread resumes still in flight from the previous connection.
@@ -334,6 +336,9 @@ A browser without the Notification API MUST show no Settings panel row.
 A control that disappears while focused hands focus to the message field. The submit control keeps its element and changes only its label.
 
 Start thread stays focusable and reports `aria-disabled` while a start is in flight.
+Load more threads stays focusable and reports `aria-disabled` while a page loads.
+When the focused button disappears, the sidebar MUST move focus to the message field, or to the transcript if the field is disabled.
+When the focused button disappears in the resume panel, the panel MUST move focus to its filter.
 
 Only one control in one view MUST carry the point fill. The holder is the primary action of an open request, or the open panel.
 With no request or panel open, it is the live state tag of a running open thread.
