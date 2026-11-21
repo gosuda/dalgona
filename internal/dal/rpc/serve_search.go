@@ -17,29 +17,29 @@ const (
 )
 
 type ThreadSearchParams struct {
-	Query    string
-	Limit    int
-	HasLimit bool
-	Cursor   string
-	Archived bool
-	Cwd      string
+	Query    string `json:"query"`
+	Limit    int    `json:"limit,omitzero"`
+	HasLimit bool   `json:"-"`
+	Cursor   string `json:"cursor,omitzero"`
+	Archived bool   `json:"archived,omitzero"`
+	Cwd      string `json:"cwd,omitzero"`
 }
 
 type ThreadSearchRow struct {
-	ThreadID  string
-	Name      string
-	Preview   string
-	Cwd       string
-	UpdatedAt int64
-	Seq       uint64
-	Kind      string
-	Snippet   string
-	Matches   int
+	ThreadID  string `json:"threadId"`
+	Name      string `json:"name"`
+	Preview   string `json:"preview"`
+	Cwd       string `json:"cwd"`
+	UpdatedAt int64  `json:"updatedAt"`
+	Seq       uint64 `json:"seq"`
+	Kind      string `json:"kind"`
+	Snippet   string `json:"snippet"`
+	Matches   int    `json:"matches"`
 }
 
 type ThreadSearchResponse struct {
-	Data       []ThreadSearchRow
-	NextCursor string
+	Data       []ThreadSearchRow `json:"data"`
+	NextCursor string            `json:"nextCursor,omitzero"`
 }
 
 func (r ThreadSearchRow) write(o *out) {

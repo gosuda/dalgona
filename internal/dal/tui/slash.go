@@ -224,7 +224,7 @@ type command struct {
 
 var commands = []command{
 	{name: "model", args: "[id]", summary: "Choose a model, or set one by id"},
-	{name: "resume", args: "[id]", summary: "Open an earlier thread, or pick one from the list"},
+	{name: "resume", args: "[id]", summary: "Search earlier conversations, or open a thread by id"},
 	{name: "new", summary: "Start a new thread"},
 	{name: "compact", summary: "Compact the context of this thread"},
 	{name: "login", args: "[provider]", summary: "Sign in to a provider"},
