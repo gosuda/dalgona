@@ -1,6 +1,6 @@
 name: CI
 
-on:
+"on":
   push:
     branches: [main]
   pull_request:
@@ -9,66 +9,51 @@ on:
   schedule:
     - cron: "0 3 * * 1"
 
-latchkey:
-  schema: 1
-
 env:
   GOPROXY: https://proxy.golang.org|https://goproxy.io|direct
 
 jobs:
   lint:
-    runs-on: small
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: latchkey/cache-restore@1.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          key: lint
-          version: go2
-          hash-files: go.sum
-          into: "~"
+          go-version-file: go.mod
+          cache: false
       - run: go tool golangci-lint fmt --diff
       - run: go vet ./...
       - run: go tool golangci-lint run ./...
-      - if: env.LATCHKEY_CI_EVENT_CLASS == 'schedule' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch'
-        uses: latchkey/cache-save@1.1.0
-        with:
-          key: lint
-          version: go2
-          hash-files: go.sum
-          from: "~"
-          path: .cache/go-build go/pkg/mod
 
   test:
-    runs-on: small
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: latchkey/cache-restore@1.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          key: test
-          version: go2
-          hash-files: go.sum
-          into: "~"
+          go-version-file: go.mod
+          cache: false
       - run: go test -race -count=1 ./...
-      - if: env.LATCHKEY_CI_EVENT_CLASS == 'schedule' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch'
-        uses: latchkey/cache-save@1.1.0
-        with:
-          key: test
-          version: go2
-          hash-files: go.sum
-          from: "~"
-          path: .cache/go-build go/pkg/mod
 
   vuln:
-    runs-on: small
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
       - run: go tool govulncheck ./...
 
   web:
-    runs-on: small
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: latchkey/setup-node@1.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - name: Docs and specs
