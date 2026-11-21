@@ -76,7 +76,7 @@ export PATH="$GOBIN:$PATH"
 
 This installs both commands into that checkout's `bin/` directory. A build from a checkout reports `(devel)` as its version; a `go install @latest` build reports the module pseudo-version. Keep the install directory on `PATH` in later shells.
 
-The terminal commands do not need the web build. To include the web interface, install `just`, Node.js (the version in [CI](.latchkey/workflows/ci.yml)), and the pnpm version declared in [web/package.json](web/package.json). Then build the assets and reinstall:
+The terminal commands do not need the web build. To include the web interface, install `just`, Node.js (the version in [CI](.github/workflows/ci.yml)), and the pnpm version declared in [web/package.json](web/package.json). Then build the assets and reinstall:
 
 ```sh
 just web
@@ -344,7 +344,7 @@ The [documentation index](docs/README.md) links every specification and decision
 
 ## Development
 
-Use the Go toolchain in [go.mod](go.mod) and the Node.js and pnpm versions declared in [CI](.latchkey/workflows/ci.yml). Install `just` and `uv` for the checks.
+Use the Go toolchain in [go.mod](go.mod), the Node.js version declared in [CI](.github/workflows/ci.yml), and the pnpm version declared in [web/package.json](web/package.json). Install `just` and `uv` for the checks.
 
 From the checkout root:
 
