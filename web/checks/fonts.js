@@ -10,7 +10,16 @@
 	text.getBoundingClientRect();
 	title.getBoundingClientRect();
 	await document.fonts.ready;
-	await document.fonts.load('16px "Symbols Nerd Subset"', "\uF0873");
+	const samples = [
+		["Hanken Grotesk Variable", "Aa"],
+		["Bricolage Grotesque Variable", "Aa"],
+		["Pretendard Variable", "한글"],
+		["Symbols Nerd Subset", "\uF0873"],
+	];
+	for (const [family, sample] of samples)
+		await document.fonts
+			.load(`16px "${family}"`, sample)
+			.catch((error) => failures.push(`${family}: ${error.message}`));
 	await document.fonts.ready;
 	text.remove();
 	title.remove();
@@ -20,12 +29,7 @@
 			(face) =>
 				face.family.replaceAll('"', "") === family && face.status === "loaded",
 		);
-	for (const family of [
-		"Hanken Grotesk Variable",
-		"Bricolage Grotesque Variable",
-		"Pretendard Variable",
-		"Symbols Nerd Subset",
-	]) {
+	for (const [family] of samples) {
 		if (loaded(family).length === 0)
 			failures.push(`${family}: no face is loaded`);
 	}
