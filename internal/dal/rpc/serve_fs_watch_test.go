@@ -53,6 +53,10 @@ func TestFsWatchUnchangedPollAndUnwatchEndDelivery(t *testing.T) {
 	if err := os.WriteFile(file, []byte("two"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	later := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(file, later, later); err != nil {
+		t.Fatal(err)
+	}
 	c.await("fs/changed", func(m message) bool { return reportsChange(t, m, "w1", file) })
 	expectNoChange(t, c, 1300*time.Millisecond)
 
