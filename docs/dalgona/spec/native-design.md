@@ -12,7 +12,7 @@ The [component contract](native-components.md) defines interactions.
 
 This document registers native bindings for existing design values.
 It also registers the native additions stated below.
-These additions MUST NOT change existing terminal or browser behavior.
+These visual bindings MUST NOT change existing terminal or browser design.
 This specification PR MUST NOT change values in `DESIGN.md`.
 
 The client MUST retain the browser's thread navigation, workspace, and composer structure.
@@ -292,18 +292,30 @@ Shortcuts MUST remain visible in [the key list](native-components.md#c23-key-lis
 
 ## V12: IME and text entry
 
+The [shared input contract](../../dal/spec/input-text.md) is the authority for GUI, TUI, web, and daemon text semantics.
+The native client MUST use its Unicode 18.0.0 default extended-grapheme target and UAX #29 revision 49 rules.
+This is the specified conformance target, not a claim about the Unicode version bundled with Gio or an operating system.
+Every editable component MUST preserve accepted source text and reject invalid or oversized candidates atomically.
+Secret and structured fields MUST validate their declared grammar without rewriting values.
+
 Every text editor MUST support native composition, selection, clipboard, and caret movement.
-An active composition MUST own Enter, Escape, arrows, and candidate selection keys.
+The platform adapter MUST own preedit and the complete start, update, commit, and cancellation transaction.
+An active composition MUST own Enter, Escape, arrows, Tab, and candidate selection keys through the final committing event.
 These keys MUST NOT send a prompt, close a panel, choose an approval, or open a command.
 Composition commit MUST insert the resulting text once.
-Composition cancellation MUST preserve the pre-composition draft.
+Composition cancellation MUST restore the prior committed draft and selection.
+Preedit MUST NOT enter requests, persisted drafts, history, or keyword matching.
+The platform work in [P05](native-platform.md#p05-finish-text-input-and-ime-integration) MUST supply missing composition ownership or event signals.
+Gio editor methods alone MUST NOT count as evidence that this gate passes.
 The candidate window MUST track the caret after scrolling, window movement, and DPI changes.
 
 The client MUST preserve grapheme boundaries when deleting or moving through displayed text.
-Protocol byte offsets MUST be converted through explicit UTF-8 boundaries.
+Selection, replacement, undo, and redo MUST preserve the shared editing invariants.
+Protocol byte offsets MUST be converted through explicit UTF-8 scalar boundaries and Gio rune offsets.
 Keyword ranges MUST NOT be treated as rune or glyph offsets.
-Paste MUST preserve valid Unicode and apply only the attachment rules in [native components](native-components.md#c12-attachment-chips).
-Korean IME verification MUST cover every supported desktop platform.
+Painted keyword ranges MUST follow the semantic-span distinction in [C14](native-components.md#c14-keywords).
+Paste MUST follow the shared newline and single-line rules and the attachment rules in [native components](native-components.md#c12-attachment-chips).
+Korean, Japanese, and Chinese IME verification MUST cover every declared desktop platform and input-engine pair.
 
 ## V13: Accessibility semantics
 
@@ -354,7 +366,7 @@ Native resource failures MUST produce a readable error without replacing content
 
 The implementation MUST satisfy all V01 through V16 requirements before completion.
 Verification MUST cover every theme, compact layout, large text, high contrast, reduced motion, and keyboard path.
-It MUST cover Korean input and mixed-script content.
+It MUST cover the shared Unicode corpus, Korean, Japanese, and Chinese IME transactions, emoji, and mixed-script content.
 It MUST cover long paths, large diffs, pending requests, and disconnected states.
 
 Pixel comparisons MUST use registered tokens and known font assets.

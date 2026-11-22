@@ -83,8 +83,12 @@ Selection endpoints MUST use document identity, stable block identity, byte offs
 Byte offsets MUST lie on valid UTF-8 boundaries.
 User movement and deletion MUST respect extended grapheme clusters.
 Mappings MUST distinguish UTF-8 bytes, Unicode scalars, grapheme boundaries, and UTF-16 code units.
+The selected grapheme algorithm and checked conversions follow [Input text](../../dal/spec/input-text.md).
+Display normalization, fallback glyphs, and escaped controls MUST NOT rewrite immutable source or become editing coordinates.
+An appended combining mark, joiner, or regional indicator MUST trigger the boundary repair that the shared contract requires.
 
-Append-only changes MUST preserve existing anchors.
+Append-only changes MUST preserve existing anchors outside required grapheme repair at the growing tail.
+Repair at that tail MUST follow each anchor's affinity and MUST NOT select unrelated text.
 A replacement MUST map surviving spans before publishing the new revision.
 An anchor inside removed text MUST move to the nearest surviving boundary with its original affinity.
 Selection repair MUST NOT select unrelated text.
@@ -139,11 +143,13 @@ Triple-click MUST select the visual line.
 Dragging outside the viewport MUST scroll at a bounded speed without losing the anchor.
 
 Hit testing MUST use shaped glyph clusters and line geometry.
+Its result MUST resolve to a source grapheme boundary with explicit affinity under the shared input contract.
 It MUST handle ligatures, combining marks, Hangul, emoji sequences, bidirectional text, tabs, and proportional fonts.
 The renderer MUST NOT estimate hit positions from byte count or average glyph width.
 
 The copy command MUST produce the document's plain text projection.
-It MUST omit decorative bullets, line numbers, hidden controls, and diff gutters.
+It MUST omit decorative bullets, line numbers, nontext interface controls, and diff gutters.
+Unicode formatting scalars inside selected source MUST remain intact under the shared input contract.
 Code copying MUST preserve source whitespace and source line endings.
 Table copying MUST use tab-separated cells and newline-separated rows.
 Figure copying within a mixed selection MUST use its caption followed by its source.

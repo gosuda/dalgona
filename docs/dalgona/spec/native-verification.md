@@ -35,6 +35,7 @@ Every component in [native-components.md](native-components.md) MUST appear in t
 |C44-C51, native additions|Thread management, endpoints, runners, MCP, files, terminal, diagnostics, and consented reporting.|
 |D, documents|Selection, copy, layout, renderer limits, diagram and math fixtures, image bounds, and terminal behavior.|
 |P, platforms|OS dialogs, menus, notifications, IME, accessibility, installation, updates, and uninstall.|
+|I, shared input text|The shared Unicode corpus, actual editor transactions, strict ingress validation, and real CJK composition on every claimed client.|
 
 ## Deterministic protocol and lifecycle fixtures
 
@@ -83,7 +84,9 @@ T06. Approval and question tests MUST use two connected clients.
 
 |Case|Required observation|
 |---|---|
-|Both clients answer one request|Exactly one answer wins. Both clients close the same request identity.|
+|Both clients answer one request|Exactly one valid answer wins. Both clients close the same request identity.|
+|One client sends invalid answer text, then corrects it|Its card and sender survive. The corrected response uses the same request ID and original deadline.|
+|Correction races another valid answer or timeout|One outcome wins. A delayed warning cannot reopen the card.|
 |A request belongs to a child thread|The card identifies its owner, and the response reaches that owner.|
 |A request belongs to another root thread|The UI offers an explicit navigation action without changing the active thread automatically.|
 |The last subscriber disconnects|Approval and question results follow the existing no-client rules.|
@@ -130,7 +133,7 @@ The implementation MUST test focus restoration after the opener is removed from 
 
 ## Text, figures, and images
 
-T10. Document fixtures MUST combine English, Hangul, combining marks, emoji sequences, bidirectional text, long tokens, and mixed font fallback.
+T10. Document fixtures MUST combine English, CJK, combining marks, emoji sequences, bidirectional text, long tokens, and mixed font fallback.
 The expected copy result MUST come from the document's source text and declared copy policy.
 It MUST NOT come from the rendered glyph buffer.
 
@@ -195,15 +198,17 @@ An emulated or virtual display result MUST identify that environment.
 
 |Platform group|Required manual evidence|
 |---|---|
-|Windows|Korean IME, NVDA, Narrator, UI Automation inspection, ConPTY, menus, dialogs, image clipboard, and mixed DPI.|
-|macOS|Korean input, VoiceOver, accessibility inspection, native menus, dialogs, clipboard, and display scaling.|
-|Linux Wayland|Both IBus Hangul and Fcitx5 Hangul, compositor protocol identity, Orca, portals, clipboard, and scaling.|
-|Linux X11|Both IBus Hangul and Fcitx5 Hangul, Orca, native dialogs, clipboard, and scaling.|
+|Windows|Korean, Japanese, and Chinese IMEs under P05, NVDA, Narrator, UI Automation inspection, ConPTY, menus, dialogs, image clipboard, and mixed DPI.|
+|macOS|Korean, Japanese, and Chinese input under P05, VoiceOver, accessibility inspection, native menus, dialogs, clipboard, and display scaling.|
+|Linux Wayland|IBus and Fcitx5 language pairs under P05, compositor protocol identity, Orca, portals, clipboard, and scaling.|
+|Linux X11|IBus and Fcitx5 language pairs under P05, Orca, native dialogs, clipboard, and scaling.|
 
 T16. IME tests MUST cover composition, candidate placement, replacement, deletion, commit, cancellation, and a focus change during composition.
 The test MUST prove that composition Enter does not also send a message.
 It MUST prove that composition Escape does not interrupt a turn or close a dialog.
-Rendering precomposed Hangul alone is not an IME test.
+Rendering precomposed CJK text alone is not an IME test.
+Tests MUST also cover selection replacement, supplementary characters, emoji insertion, rejected commits, and field changes during composition.
+The actual input-method and browser or terminal matrix comes from [Input text](../../dal/spec/input-text.md#i12-prove-cross-client-behavior).
 
 T17. Screen-reader tests MUST read the shell, thread list, transcript, editor, requests, dialogs, and terminal status.
 They MUST invoke actions and edit text through the OS accessibility API.
@@ -291,7 +296,21 @@ The following work packages are a completion sequence, not separate reduced-scop
 |4|Implement every mapped web component and panel.|All C01-C43 behaviors have evidence. No action is inert.|
 |5|Complete documents, figures, math, diffs, and recorded images.|Valid content renders. Selection, export, and hostile-input fixtures pass.|
 |6|Complete authentication, remote management, files, and real terminals.|All C44-C51 workflows complete against their declared owner.|
-|7|Complete OS integrations and accessibility bridges.|Platform, Korean IME, and screen-reader checks pass.|
+|7|Complete OS integrations and accessibility bridges.|Platform, CJK IME, and screen-reader checks pass.|
 |8|Package the application and run the complete acceptance matrix.|The complete release has reproducible evidence and no deferred required path.|
 
 The native release MUST NOT be marked complete until every work package passes.
+
+## Cross-client Unicode inputs
+
+T26. GUI, TUI, web, and daemon implementations MUST share the [input corpus](../../dal/spec/input-text-cases.json) and [input contract](../../dal/spec/input-text.md).
+The corpus is a specification artifact. Its structural validation does not prove runtime conformance.
+Each client MUST test production input adapters, exact round trips, transactional edits, recovery, and the platform behavior it claims.
+The daemon MUST test strict decoding, whole-request refusal before effects, answer correction, and unchanged journal bytes.
+
+Tests MUST distinguish byte counts, scalar quotas, UTF-16 offsets, grapheme boundaries, shaped geometry, and terminal cells.
+They MUST cover the shared adversarial cases and the pinned upstream segmentation corpus.
+Question tests MUST accept 2000 supplementary scalars despite their 4000 UTF-16 units, and reject 2001 scalars without truncation.
+Transport tests MUST split UTF-8 sequences across reads and grapheme clusters across valid deltas, then verify exact reconstruction.
+Client tests MUST reject stale completions and preserve private-use characters beside attachment chips.
+Every declared platform MUST supply actual CJK composition evidence in addition to headless test results.

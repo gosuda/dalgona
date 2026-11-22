@@ -26,6 +26,10 @@ If the user does not answer within 5 minutes, the result says so and uses the fi
 
 The arguments MUST be an object with one required member, `questions`.
 
+In this specification, `characters` means Unicode scalar values.
+Cursor movement and deletion MUST use extended grapheme clusters under [Input text](input-text.md).
+Argument limits MUST count accepted decoded text before any display projection.
+
 The arguments MUST match the schema below. The schema sets `additionalProperties` to false at every level.
 
 ```json
@@ -34,9 +38,9 @@ The arguments MUST match the schema below. The schema sets `additionalProperties
 
 The tool MUST accept from 1 to 4 questions per call.
 
-A question MUST have a `header` of 1 to 30 characters after cleaning.
+A question MUST have a `header` of 1 to 30 characters.
 
-A question MUST have a `question` of 1 to 500 characters after cleaning.
+A question MUST have a `question` of 1 to 500 characters.
 
 A question MAY have `options`. A question without `options` is a free-text question.
 
@@ -77,21 +81,38 @@ The tool MUST fail the call with the messages below when a limit is broken. The 
 | Repeated question | `ask: question <i> repeats question <k>` |
 | Arguments of the wrong shape | `ask: arguments do not match the schema: <error>` |
 
-## Cleaning
+## Text validation and display
 
-Every text field MUST be checked for valid UTF-8 before any other step. Invalid bytes MUST become U+FFFD.
+Every text field MUST follow [Input text](input-text.md).
+Malformed UTF-8 and unpaired JSON surrogate escapes MUST fail validation instead of becoming U+FFFD.
+Literal U+FFFD is valid content and MUST NOT be mistaken for a decoding failure.
+NUL MUST fail validation in question arguments and answers before the host offers or accepts them.
 
-A terminal escape sequence MUST be removed whole, with its parameters.
+The cleaning rules below apply only to derived displays of model-authored questions.
+They MUST NOT rewrite submitted user answers or an offered option's wire value.
+The host MUST retain each exact offered option label for comparison and submission.
+Model-authored question fields remain display content under the shared field matrix.
+Painting a question on one line MUST NOT apply the single-line user-input rejection rule to its source.
+Its source MAY contain line breaks that the display projection represents as spaces.
 
-A control character MUST be removed. A bidirectional override character MUST be removed.
+A terminal escape sequence MUST NOT execute in a display.
+A terminal projection MAY remove the complete sequence with its parameters.
+Other control and bidirectional formatting characters MUST use the safe display policy in [Input text](input-text.md).
 
-In a single-line field, a newline MUST become one space, and a tab MUST become one space.
+In a single-line question projection, a newline MUST become one space, and a tab MUST become one space.
 
-In a preview, a newline MUST stay, and a tab MUST become four spaces.
+In a preview projection, a newline MUST stay, and a tab MUST become four spaces.
 
-A single-line field MUST lose its leading and trailing spaces. A preview MUST lose its leading blank lines and its trailing spaces.
+A single-line projection MAY omit leading and trailing spaces.
+A preview projection MAY omit leading blank lines and trailing spaces.
+Those display choices MUST NOT modify the accepted source text.
 
-The limits of the Arguments section MUST apply to the cleaned text.
+Two distinct offered labels MUST remain distinguishable after projection.
+When a projection hides their difference, the display MUST expose the differing code points with visible escapes.
+Selecting either row MUST submit its exact offered label, never its display projection.
+
+Counting limits before projection and preserving offered values tighten the previous cleaning behavior.
+These are required implementation changes under [Input text](input-text.md), not claims about the inspected runtime.
 
 ## Results
 
@@ -105,11 +126,26 @@ An answer that equals an option label MUST appear as the label.
 
 An answer that is typed text MUST appear in double quotes. On a question with options, the quoted text MUST follow `Other: `.
 
+Quoted answers MUST escape line breaks and control characters without changing their decoded scalar sequence.
+Option labels with unsafe display characters MUST use their safe escaped projection in the result.
+The host MUST match the original offered label before projecting it.
+
 A question with no answer MUST show `no answer`.
 
 A question MUST NOT show more answers than one, unless it is a multi-select question. A multi-select question MUST NOT show more answers than its options plus one.
 
-An answer MUST NOT exceed 2000 characters.
+An answer MUST NOT exceed 2000 Unicode scalar values, which bounds its decoded UTF-8 size to 8000 bytes.
+This limit is independent of encoded JSON frame limits and grapheme counts.
+An over-limit answer MUST fail validation whole.
+The host MUST NOT truncate it, split a grapheme cluster, clean it, or silently discard a suffix.
+Interactive clients MUST apply the shared newline policy once to newly entered free-form answer text before checking and submitting it.
+Selecting an offered option MUST preserve its exact value, including line endings, without passing through the free-form input adapter.
+The daemon MUST preserve the accepted answer, including leading and trailing whitespace.
+Empty strings retain the existing no-answer meaning.
+Whitespace-only strings MUST NOT become empty through cleanup.
+
+Option matching and answer deduplication MUST use exact decoded scalar sequences.
+They MUST NOT use display projections, normalized search keys, or case folding.
 
 When every question has no answer, the result MUST be the skipped text below.
 
@@ -144,7 +180,28 @@ A window that cannot answer MUST count once for each question. The host MUST sto
 
 A subscriber that the host closes as slow MUST NOT end the open questions, because the server subscribes again and receives them.
 
-The first answer to a question MUST decide it. A later answer MUST fail with an unknown request error.
+The first valid answer to a question MUST decide it. A later answer MUST fail with an unknown request error.
+
+The host MUST validate the entire answer text before claiming that decision.
+The correction rules below apply to text-validation failures in an otherwise structurally valid answer result.
+A result with the wrong answer shape retains the existing unreadable-answer failure outcome.
+A text-validation failure MUST NOT become a declined, cancelled, skipped, or answered outcome.
+It MUST NOT change the question's request id, original deadline, or other subscribers.
+The transport MUST keep the response waiter pending and send the correction warning defined in [Protocol](protocol.md#server-requests).
+The user MAY correct the draft and answer the same pending request.
+First-party clients MUST retain their question card until `serverRequest/resolved`, including after they send an answer.
+Their typed question lifecycle MUST retain the ability to send a corrected response after that first send.
+Each correction MUST use the original request id and follow a matching correction warning.
+Sending a response MUST NOT release the draft, card, or response sender while the question remains pending.
+The host MUST NOT reset the five-minute timeout when validation fails.
+
+These retry rules require typed response validation before the transport removes its pending response waiter.
+They also require migrating the current one-response callback path to the typed question lifecycle in [Protocol](protocol.md#server-requests).
+Retaining the server waiter alone does not implement client correction.
+Older clients MAY lack a correction interface after sending an invalid answer.
+That text-validation failure MUST NOT decide the host question.
+The existing last-subscriber, interruption, and timeout rules still apply.
+Reconnecting or reopening MUST NOT be promised as recovery, because losing the last subscriber can resolve the question.
 
 An interrupt of the turn MUST end the question as interrupted. A cancellation that races the question offer MUST also end the question as interrupted and MUST resolve its update as resolved. A question already decided MUST keep its outcome. The host MUST NOT send a request whose outcome it already sent.
 

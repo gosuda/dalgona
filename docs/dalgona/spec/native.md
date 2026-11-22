@@ -8,6 +8,8 @@ The specification change adds no executable and certifies no desktop acceptance 
 
 The source baseline is commit `2c036c60b379e7718255a23ebd2c5079d76ec50c`.
 The design uses the existing [web contract](web.md) and [visual system](../../../DESIGN.md).
+The shared [input text contract](../../dal/spec/input-text.md) defines Unicode behavior across GUI, TUI, web, and daemon.
+Its conformance requirements cover every native editable field and remain implementation work.
 The [native client decision](../decisions/native-client.md) records the selected architecture and its rejected alternatives.
 
 N01. The client MUST use Gio for application layout, input, and rendering.
@@ -46,6 +48,7 @@ References to another document inherit its requirements without copying its cont
 |[Documents](native-documents.md)|Selectable documents, diagrams, math, images, diffs, and terminal rendering.|D|
 |[Platforms](native-platform.md)|Native adapters, accessibility, build isolation, packaging, and installation.|P|
 |[Verification](native-verification.md)|Behavioral evidence, platform coverage, performance targets, and implementation order.|T|
+|[Input text](../../dal/spec/input-text.md)|Shared text preservation, segmentation, composition, offset units, field policies, and fixtures.|I|
 
 N06. A conflicting interpretation MUST follow the document that owns that decision.
 Existing shared contracts retain authority over their existing methods and storage formats.
@@ -95,6 +98,7 @@ It does not weaken the complete release requirement.
 |Workspace files|Existing `fs/*` addresses the daemon host.|Add explicit thread-runner file operations.|
 |Terminal|`command/exec` rejects PTY, input streaming, and terminal size.|Implement real terminal lifecycle and transport.|
 |Authentication|Several provider and MCP flows require terminal interaction.|Expose the complete native authentication workflow.|
+|Input text|Existing adapters mix cleanup, quota units, and source display handling.|Implement the shared preservation and Unicode conformance contract across clients.|
 |Figures|Web renderers use browser display APIs. TUI renderers produce terminal output.|Implement bounded native figure rendering.|
 |Math|The current web renderer has no math component.|Implement the declared native math grammar and layout.|
 |Accessibility|Gio semantic operations do not supply all desktop bridges.|Implement and test each desktop bridge.|

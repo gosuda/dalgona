@@ -54,7 +54,9 @@ Use one name for each thing in user-facing text and new specifications.
 - [Advisor](dal/spec/advisor.md): review cadence, note delivery, isolation, and recovery.
 - [Magic keywords](dal/spec/keywords.md): user-prose matching, notices, and required tools.
 - [Starlark](dal/spec/starlark.md): durable runs, effect replay, the eval tool, workflows, and plugins.
-- [Ask tool](dal/spec/ask.md): question arguments, cleaning, and result text for the user-question tool.
+- [Ask tool](dal/spec/ask.md): question arguments, text validation, safe displays, and result text for the user-question tool.
+- [Input text](dal/spec/input-text.md): exact Unicode preservation, grapheme editing, CJK composition, emoji, limits, and cross-client conformance.
+- [Input text cases](dal/spec/input-text-cases.json): shared scalar sequences, byte counts, UTF-16 counts, grapheme boundaries, and malformed encodings.
 - [Protocol](dal/spec/protocol.md): Codex-compatible JSON-RPC framing and backpressure.
 - [TUI](dal/spec/tui.md): terminal behavior, slash commands, and status.
 - [Live debugging](dal/spec/live-debug.md): local scripted-server contract, setup and cleanup runbook, and manual terminal and browser acceptance matrix. It distinguishes planned probes from recorded live or test evidence.

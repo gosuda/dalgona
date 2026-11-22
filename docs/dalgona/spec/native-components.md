@@ -8,6 +8,7 @@ The [overview](native.md) defines the complete desktop deliverable.
 The [design contract](native-design.md) defines presentation and accessibility.
 The [architecture contract](native-architecture.md) defines ownership.
 The [protocol contract](native-protocol.md) defines existing and required server methods.
+The [shared input contract](../../dal/spec/input-text.md) defines text preservation, Unicode boundaries, composition, validation, and limits for every editable component.
 
 Every component below MUST work through the supported native transports.
 A required control MUST NOT terminate at an empty panel, unsupported placeholder, or command-line handoff.
@@ -279,6 +280,13 @@ The [platform contract](native-platform.md) defines platform delivery and activa
 The composer MUST retain its visible label, editable field, help line, and action area.
 Its primary control MUST retain focus identity while its label changes.
 Every editor MUST follow the IME and accessibility rules in [native design](native-design.md).
+Each committed edit MUST be atomic and preserve the accepted scalar sequence under the shared input contract.
+Caret movement, selection, replacement, Backspace, Delete, and word deletion MUST end at extended grapheme boundaries.
+Edits MUST repair affected boundaries when new scalars join adjacent clusters.
+One paste, accepted completion, or composition commit MUST form one undoable transaction.
+Undo and redo MUST restore exact text and selection without splitting clusters.
+Preedit MUST remain adapter-owned and MUST NOT enter sends, history, keyword requests, or completion searches.
+An invalid or oversized candidate MUST remain recoverable without modifying committed text or sending a prefix.
 
 | Key | Context | Required effect |
 |---|---|---|
@@ -309,6 +317,7 @@ An uncertain send MUST retain its payload and expose the protocol's outcome-reco
 ### Shell input
 
 A leading `!` MUST switch the field label to `Shell command`.
+The trigger MUST be ASCII `!`. Removing that marker MUST preserve every remaining command scalar, including whitespace.
 The help MUST say `Enter runs the command in <cwd>. It is not sent to the agent.`
 The displayed directory MUST be the granted runner workspace root.
 Enter MUST acquire or reuse workspace authority with the `terminal` right.
@@ -389,6 +398,7 @@ Commands MUST NOT bypass the corresponding panel's validation or confirmation.
 ## C11: File completion
 
 An `@` at a word boundary MUST start file completion for the following non-whitespace text.
+The trigger MUST be ASCII `@`. Unicode lookalikes MUST remain ordinary text.
 The query MUST wait 120 milliseconds after the latest keystroke.
 An empty query MUST send no request.
 The only search root MUST be the open thread's authoritative working directory.
@@ -406,6 +416,11 @@ Enter or Tab during a pending current query MUST NOT send.
 Caret movement inside the same word MUST NOT trigger another search.
 Escape MUST close the list and preserve the field.
 Results from an old query, thread, directory, or connection MUST be discarded.
+Replacement MUST also match the field, draft revision, selection range, and composition transaction that requested the result.
+An unchanged query string alone MUST NOT authorize replacement after another edit or selection change.
+Wire spans MUST use UTF-8 byte offsets. Gio selection offsets MUST use runes, with explicit validated conversion between them.
+Replacement endpoints MUST be committed extended grapheme boundaries. Completion MUST NOT modify active preedit.
+The inserted path MUST retain the selected result's exact scalar sequence and form one undoable edit.
 Completion MUST use `dalgona/workspace/search` with its workspace handle.
 Incomplete searches MUST identify partial results without claiming exhaustive matches.
 The client MUST NOT substitute host `fuzzyFileSearch` for runner-aware completion.
@@ -413,6 +428,8 @@ The client MUST NOT substitute host `fuzzyFileSearch` for runner-aware completio
 ## C12: Attachment chips
 
 Pastes containing at least ten lines MUST become text chips.
+Line counting MUST follow the shared line-ending conversion. Chip text MUST preserve every accepted scalar, including the final LF.
+Chip identities MUST remain separate from Unicode text and MUST NOT reserve private-use scalars or noncharacters.
 Each chip MUST expose its kind, useful size or line count, Show, and Remove actions.
 Image input MUST support file selection, clipboard paste, and drag-and-drop through [native platform](native-platform.md).
 Each image MUST be PNG, JPEG, or GIF and at most 5 MiB.
@@ -425,6 +442,7 @@ A model without image input MUST reject a new image with `this model does not ac
 Existing draft text MUST remain intact.
 Changing to an incompatible model MUST keep attached images and block sending with a visible correction action.
 The input array MUST remain within 15 MiB of JSON.
+That budget MUST count UTF-8 bytes of the fully serialized input array, including JSON escapes and expanded chips.
 The complete request MUST remain within the transport's 16 MiB frame limit.
 Oversized input MUST remain editable and MUST NOT be sent.
 
@@ -468,8 +486,12 @@ User messages MUST underline every valid server-reported keyword range.
 They MUST also list keyword words on a `Keywords:` line.
 The composer MUST show draft keywords as words on the same label.
 The client MUST use the protocol's byte-offset definition.
-It MUST validate range bounds before converting them into text positions.
-Malformed metadata MUST NOT corrupt the message or split a UTF-8 sequence.
+It MUST validate bounds, ordering, source revision, and UTF-8 scalar boundaries before converting ranges into Gio rune offsets.
+A valid semantic span MAY end inside a grapheme when its endpoint remains a scalar boundary.
+Only its painted underline MUST expand to complete surrounding graphemes.
+The expansion MUST NOT change semantic byte ranges, keyword values, copied text, or edit selection.
+Malformed or stale metadata MUST leave the original text visible without marks.
+It MUST NOT corrupt text, introduce replacement characters, or split a UTF-8 sequence.
 Underlines MUST remain visible in high contrast and while text is selected.
 
 ## C15: Approval card
@@ -547,13 +569,18 @@ Single-selection questions MUST permit one choice.
 A question without options MUST show only its text field.
 Selected option previews MUST appear in monospace below the options.
 
-Submit MUST send option labels in their declared order, followed by trimmed typed text.
-Typed text MUST fit 2000 UTF-16 code units, matching the browser field budget.
-Any truncation MUST stop at a complete grapheme boundary.
+Submit MUST send original option labels in their declared order, followed by accepted typed text without trimming or normalization.
+Display escaping MUST NOT change a selected label or identifier.
+Typed text MUST fit the shared 2000 Unicode-scalar budget.
+The complete candidate MUST pass validation. No edit, paste, composition commit, or submit MAY silently truncate it.
+Rejection MUST retain the previous committed value and keep the complete candidate recoverable with a field error.
 Skip MUST send every question with an empty answer list.
 Dismiss and Escape MUST send `{"answers": {}}`.
-The card MUST preserve entered answers while its response is pending.
-Validation failures MUST retain those answers and identify their field.
+The card MUST preserve entered answers until `serverRequest/resolved` confirms resolution.
+Local submission MUST NOT count as daemon acceptance.
+A correlated validation warning MUST restore editing and identify the invalid field when supplied.
+The original request ID and deadline MUST remain unchanged.
+Correction and retry MUST reuse that pending request. They MUST NOT create another question or consume a successful-answer slot.
 
 The shared request layout, focus, scrolling, and IME rules from C15 MUST apply.
 Submit MUST be the card's sole point-filled action.
@@ -723,6 +750,8 @@ Opening Settings MUST NOT enable reporting, authenticate, or start a network dia
 The panel MUST list providers and supported methods from `dalgona/auth/providers`.
 It MUST use provider targets with the exact identifiers from that response.
 API-key providers MUST offer a masked editable field and explicit submit.
+Keys, authorization codes, and redirect values MUST retain their accepted text exactly.
+Validation MUST apply the advertised field grammar without trimming or normalizing secrets.
 Hybrid providers MUST offer their supported key and OAuth methods within this panel.
 Browser and device flows MUST show their authorization URL, code when supplied, and progress.
 The user MUST be able to copy the URL and code.
@@ -751,7 +780,9 @@ External browser authorization remains a deliberate platform action under [nativ
 ## C27: Resume and search
 
 The panel MUST use C02 paging and filter title, preview, and identifier immediately.
-A trimmed query containing at least three characters MUST start conversation search after 300 milliseconds.
+A nonblank query containing at least three Unicode scalars MUST start conversation search after 300 milliseconds.
+Eligibility MUST remain separate from the value. Search MUST send the unchanged query.
+Derived matching keys MUST NOT replace field text, result identities, or source offsets.
 Each new keystroke MUST cancel the previous search and clear its results.
 Earlier-connection results MUST be discarded.
 Matches in conversations MUST show each matching title and snippet.
@@ -828,7 +859,9 @@ The panel MUST offer uncommitted changes, base branch, commit, and custom instru
 Base branch MUST require a nonempty branch.
 Commit MUST require a nonempty identifier.
 Custom review MUST require nonempty instructions.
-Validation MUST trim those values without changing their internal content.
+Branch and commit fields MUST validate their declared grammar without rewriting the submitted value.
+Custom instructions MUST preserve accepted text exactly, including leading and trailing whitespace.
+Whitespace-only eligibility checks MUST NOT trim the stored or submitted instructions.
 Start review MUST call `review/start` with the chosen target.
 Success MUST open or follow the returned review thread as specified by the protocol.
 Errors MUST remain inside the panel with all inputs intact.

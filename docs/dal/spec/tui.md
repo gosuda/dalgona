@@ -2,6 +2,10 @@
 
 The TUI is a protocol client. It MUST import only `internal/dal/rpc` from this module.
 
+Text input MUST follow [input-text.md](input-text.md).
+That contract defines required changes, including text preservation, grapheme editing, limits, and the distinction between input and display.
+These requirements do not assert that the existing TUI already conforms.
+
 ## Entry point
 
 `Run(ctx, conn, opts)` dials `conn` with `rpc.Dial(ctx, conn, handler)`. `rpc.Dial` takes a context as its first argument. Cancelling it ends the handler and request contexts that the client derives from it. The RPC client delivers notifications and server requests in arrival order. Its dispatch queue holds 256 messages. Each message goes to the Bubble Tea program as one message.
@@ -181,8 +185,9 @@ Enter MUST choose the highlighted item. Enter MUST do nothing when no item match
 Esc MUST clear a non-empty filter. Esc MUST close the panel when the filter is empty.
 
 The `/resume` filter matches the titles of the 50 most recent threads at once.
-After 300 ms without an edit, the picker queues `dalgona/thread/search` when each word has at least three characters.
-The client MUST use the trimmed filter and request 50 hits per page.
+After 300 ms without an edit, the picker queues `dalgona/thread/search` when each word has at least three Unicode scalars.
+The client MUST send the unchanged filter and request 50 hits per page.
+Whitespace-only eligibility checks and derived local search keys MUST NOT change the filter or a result's original title, path, or identifier.
 The picker sends one search call at a time. While a call is in flight, only the latest eligible query waits.
 Recent title matches stay first. Other hits follow in server order. Each thread appears once.
 Search hits keep the date and state from the recent list when available. Other hits show their update date.
@@ -252,7 +257,8 @@ An approval request MUST NOT clear the API key field. A question with option row
 A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. Up and Down MUST scroll the body by one row while the link does not fit. A window with no body row MUST show the link in the review that `ctrl+o` opens. A device sign-in MUST show the user code in the first body row. While the sign-in waits, the hint row MUST read `Esc cancel the sign-in · waiting for the provider`, cut to the row width.
 The client MUST print one history row `Sign-in URL: <url>` for each sign-in. The notice line MUST NOT repeat the link while the panel is open. A sign-in MUST wait for `account/login/completed`.
 Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in…`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
-A paste into the API key field MUST keep its first line and MUST NOT make a chip.
+A multiline paste into the API key field MUST fail atomically with a visible error and MUST NOT make a chip.
+The field MUST preserve the key's exact accepted text, including leading and trailing whitespace. Provider validation MUST report invalid keys without rewriting them.
 
 ## Print
 
@@ -296,6 +302,17 @@ A click MUST select nothing, because the client cannot learn the screen row of t
 
 ## Editor
 
+The shared input contract applies to the composer, shell line, filters, review targets, question answers, credentials, and editable names or paths.
+Caret movement, selection, Backspace, Delete, and word deletion MUST end at extended grapheme boundaries under [input-text.md](input-text.md).
+Each committed edit MUST repair its boundaries after combining marks, joiners, modifiers, or regional indicators change adjacent clusters.
+UTF-8 byte positions, rune indices, grapheme boundaries, and terminal cells MUST remain distinct in the editor.
+
+The terminal owns IME preedit. The TUI MUST accept committed text as a text transaction while a field owns input.
+It MUST NOT replay that transaction as individual shortcut keys or infer composition state from printable key names.
+Application key events MAY invoke the shortcuts below when the terminal has delivered them outside composition.
+Supported terminal and IME pairs MUST pass the composition gates in [input-text.md](input-text.md).
+A terminal without composition metadata cannot expose preedit ownership to the TUI.
+
 The composer MUST wrap text to the window width minus three cells.
 With no panel open, each row of the wrapped text MUST take one composer row.
 With no panel open, the composer MUST show the caret row. When the caret row is past the last row that fits, the composer MUST show the rows that end with it.
@@ -314,7 +331,8 @@ The history MUST hold the 200 newest prompts. It MUST skip a prompt equal to the
 Ctrl+R MUST open a list panel titled `history` that lists the sent prompts, newest first.
 Ctrl+R MUST open no panel in shell mode.
 Each row MUST show its prompt on one line, with each run of whitespace collapsed to one space.
-A row MUST show at most the first 1024 bytes of its prompt.
+A history row MUST use a prefix of at most 1024 UTF-8 bytes, cut only at an extended grapheme boundary.
+The full history entry MUST remain unchanged. A display transformation MUST NOT replace its stored text.
 Enter MUST replace the draft with the full text of the highlighted prompt.
 Enter MUST close the panel.
 Delete MUST remove the highlighted prompt from the history, with or without a filter.
@@ -333,17 +351,21 @@ Closing the panel with Esc MUST leave the draft unchanged.
 With no history, the panel MUST show `No prompt history yet.` and no selectable row.
 With no history, Enter, Delete, and Backspace MUST do nothing.
 A draft that holds only whitespace MUST count as empty, for Esc and for Ctrl+C.
+That eligibility check MUST NOT trim a nonblank draft before sending, queuing, steering, saving, or recalling it.
 Ctrl+C with a draft that holds text MUST move the draft into history. It MUST show `Draft saved to history · Ctrl+C again to exit` in the live row.
 An image chip MUST NOT enter the history. When the draft holds an image, the live row MUST read `Draft saved to history, images dropped · Ctrl+C again to exit`.
 Ctrl+C with a draft that holds no text MUST keep the draft. It MUST show `Ctrl+C again to exit` in the live row.
 The client MUST set the terminal cursor at the caret and MUST NOT draw a cursor glyph.
 The caret MUST stay within the window width minus one cell, also after a chip that its row cuts.
-A paste MUST turn each CRLF, each CR, and each LF into one line break.
-A paste into a one-line field MUST keep only its first line.
+A multiline text adapter MUST fold CRLF and lone CR to LF once, as [input-text.md](input-text.md) requires.
+A paste containing a line break into a one-line field MUST fail atomically with a visible error.
+The field MUST retain its previous text and selection. The rejected candidate MUST remain recoverable without inserting a prefix.
 The one-line fields are the list filter, the review target, the answer line, and the API key field.
 A paste of fewer than 10 lines MUST be inserted as text.
 A paste of 10 or more lines MUST become one chip labelled `[Paste #n +L lines]`, where L counts its lines.
 A chip MUST take one composer row, whatever the length of its paste.
+Paste and image chips MUST have tagged identities outside the text's Unicode scalar space.
+No private-use scalar, noncharacter, or other valid scalar MAY act as a chip sentinel or disappear to avoid a sentinel collision.
 Backspace and Delete MUST remove a whole chip.
 Sending MUST replace each chip with its full pasted text, in order.
 The history MUST store each prompt, and each draft that Ctrl+C saves, with each chip that holds text replaced by its full text.
@@ -354,7 +376,9 @@ A typed follow-up MUST return after Alt+Up and a failed start as typed text, whi
 A draft that Ctrl+C saves MUST decide whether the history sends the entry it repeats unchanged, unless that entry is a sent message.
 A user message that starts with `/` MUST be sent unchanged from the history until the user edits its text, live or resumed.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
-A paste over 1 MiB MUST be refused with a notice that names the limit.
+A paste over 1 MiB of UTF-8 MUST fail atomically with a notice that names the limit.
+This limit counts the incoming paste. Send limits MUST count the complete serialized candidate, including expanded text chips.
+Rejection MUST preserve the draft, selection, chips, and recoverable pasted text.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
 A pasted path to a PNG, JPEG, or GIF file MUST become an image chip labelled `[Image #n WxH]`.
 A path followed by one line break MUST also become an image chip, and the chip MUST replace that line break.
@@ -369,6 +393,8 @@ A model without image input MUST refuse an image paste with the notice `this mod
 Sending MUST send each image chip as an image input item after the text.
 
 The composer MUST show a command palette when the caret is in a first token that starts with `/`, with no panel or review open.
+Command triggers MUST use literal ASCII `/`, `!`, and `@` under the shared input grammar.
+Unicode lookalikes MUST remain text. Parsing MUST NOT normalize the draft or trim argument payloads.
 The palette MUST list at most 8 matching commands and MUST NOT open for `//`.
 Up and Down MUST move the highlight. With no matching command, Up and Down MUST act on the composer. Tab MUST complete the highlighted command to `/name `, and it MUST keep the text after the token. It MUST keep each chip of the draft. The palette MUST end the first token at a chip.
 Enter on a draft whose first token touches a chip MUST read the token as the command and the chip as its argument.
@@ -379,6 +405,9 @@ The composer MUST show a file palette when the caret is in a token that starts w
 The file palette MUST search for the text after `@` 120 ms after the last keystroke, and it MUST list at most 8 paths.
 The file palette MUST end its token at a chip. Tab and Enter MUST replace the token with `@<path> ` and keep each chip of the draft. Esc MUST close the file palette and keep the draft.
 A change of the file query MUST clear the rows of the previous query. The palette MUST NOT insert a path from an older query.
+Completion MUST match the draft revision, field, caret range, and original query before replacing text.
+Its replacement range MUST use extended grapheme boundaries and MUST preserve the selected path's original scalar sequence.
+Completion MUST NOT modify text while its terminal IME owns composition.
 A file palette with no rows MUST consume Enter and MUST NOT send the draft.
 When the file search is missing on the server, the first such palette MUST show `File search is unavailable on this server`.
 The file search MUST use the open thread's directory as its only root.
@@ -547,10 +576,19 @@ Every error notice MUST name a recovery action.
 
 ## Untrusted text
 
-The client MUST pass every server, model, paste, and command text through one sanitizer before it reaches the screen.
-The sanitizer MUST remove escape sequences and control bytes, except newline and tab.
-It MUST also remove DEL, C1 controls, bidirectional controls, and private-use runes from U+F0000 to U+FFFFD.
-The sanitizer MUST replace each byte that is not valid UTF-8 with U+FFFD. A raw byte from 0x80 to 0x9F MUST NOT pass as a C1 control.
+Every terminal rendering path MUST use the same safe presentation layer.
+Its display copy MUST NOT replace canonical input, stored drafts, request arguments, selected option labels, paths, or decoded protocol text.
+Accepted terminal controls and directional controls MUST use visible escapes under [input-text.md](input-text.md). They MUST NOT execute terminal actions.
+Private-use scalars, noncharacters, combining marks, variation selectors, joiners, and emoji sequences MUST remain in canonical text.
+Missing glyphs MUST use the shared display fallback without deleting or replacing the source scalars.
+The presentation layer MUST suppress terminal escape sequences in streamed command and model output.
+It MUST NOT normalize rendered text after the editor has measured source positions.
+
+Input decoding MUST retain incomplete UTF-8 sequences across read chunks. A malformed committed input MUST fail before it changes the draft.
+For raw output streams, the display MAY replace each invalid UTF-8 byte with U+FFFD. That display replacement MUST NOT enter canonical input.
+A raw byte from 0x80 to 0x9F MUST NOT pass as a C1 control.
+
+The presentation layer covers:
 
 - Each delta of reasoning and command output text, as it is appended.
 - The agent message text, sanitized after each delta from all deltas received so far.
@@ -561,12 +599,15 @@ The sanitizer MUST replace each byte that is not valid UTF-8 with U+FFFD. A raw 
 - Each advisor note, with its advisor name and severity.
 - The display name of a model, the title of a thread, and the preview of a turn, in a picker.
 - The thread id, command, and reason of an approval request.
-- Pasted text and typed text in the composer.
+- Display copies of pasted and typed text in every field.
 - The URL and code of a login.
 
 ## Width
 
 The client MUST measure text with the width method of its renderer.
+Wrapping, clipping, selection, caret placement, and hit testing MUST share one terminal width profile and one source-to-display position map.
+Rune counts, UTF-8 lengths, and grapheme counts MUST NOT substitute for terminal cell widths.
+The profile MUST cover ambiguous width, joined emoji, combining sequences, tabs, and visible control escapes.
 A tab MUST count as the cells to the next 8-cell stop, counted from the first cell of the text that holds it.
 A newline MUST restart the count of stops.
 A row that the client prints or draws MUST hold spaces in place of each tab.
@@ -577,6 +618,8 @@ The composer MUST count its stops from its first text cell after the prompt.
 A wrapped row MUST continue the count of stops from the row before it.
 The cursor MUST sit after the spaces of a tab that precedes the caret.
 A user whose terminal draws East Asian Ambiguous characters two cells wide MUST set `RUNEWIDTH_EASTASIAN=1`.
+Changing that profile MUST rebuild layout without changing canonical input.
+Supported terminal profiles MUST pass the shared cell-geometry checks. A missing glyph or width mismatch MUST NOT corrupt the input buffer.
 
 ## Theme
 
@@ -683,6 +726,8 @@ The composer MUST show marks only for the draft that the newest accepted `dalgon
 A keyword mark is bold. It is also underlined once the theme is known. It MUST take the accent color only when color is on. The mark MUST NOT change the visible text, and it MUST NOT depend on color alone.
 
 A completed user message MUST show the marks listed in its `keywords` member. A cursor inside a marked word MUST split the mark around the cursor. The mark has no animation and schedules no tick.
+Keyword byte spans MUST pass the offset checks in [input-text.md](input-text.md) before conversion to rune or cell positions.
+An invalid or stale mark MUST leave the original text visible without marks. It MUST NOT introduce replacement characters or split an editable cluster.
 
 ## Questions
 
@@ -700,6 +745,9 @@ An empty question request returns an empty answer map without opening a card.
 
 The Other row opens typing. Typing uses the input line with the label `answer: `. `enter` stores the typed text and advances. `esc` leaves typing, or dismisses a free-text question. An `s` entered while typing remains answer text and does not submit.
 A question card that becomes the oldest request MUST show only its own typed text on the input line.
+Typed answers MUST obey the shared 2000 Unicode-scalar limit. An over-limit candidate MUST remain recoverable and MUST NOT advance, truncate, or submit.
+Whitespace-only eligibility checks MUST NOT trim accepted answer text.
+Selected options MUST send their original server labels or identifiers. Display escaping MUST NOT change those identities.
 
 The card keeps its title and its hint rows. A window of four rows shows the title and one hint row. A window of three rows or fewer does not draw the card. The hint rows list `↑/↓ move`, `1-7 pick`, `Space toggle`, `Enter choose`, and `Tab next`, then `s submit · Esc dismiss`. The hint rows MUST wrap at whole hints and MUST keep `s submit · Esc dismiss` on one row. They MUST take their rows before the body. From three rows, they MUST leave the title and the option under the cursor. After that, the preview drops first, then the question text, then the options scroll. If the rows left cannot hold every hint, the card MUST drop whole hints and MUST keep both actions. A single-select question drops `Space toggle` first. A multi-select question drops `Space toggle` last.
 
@@ -708,6 +756,9 @@ The preview shows the description and the first line of the preview of the optio
 The `s submit` hint carries the one fill of the view, in the thread hue. Before the terminal reports its background, the fill MUST use the night theme, or the soft night theme for `auto-soft`. With colour off, it MUST be bold reverse video with no colour.
 
 A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<turnId>:<itemId>`. A question closed by another window or by a lost connection writes no row.
+After submitting, the card MUST retain its answers until `serverRequest/resolved` closes the request.
+A validation warning for that request MUST restore editing and keep its original request ID, deadline, and complete answer text.
+The card MUST NOT treat local submission as proof that the daemon accepted an answer.
 
 A question request that the TUI accepts MUST send a desktop notification `<product>: Waiting for your answer · <title>`, when notifications are on and the window is blurred.
 

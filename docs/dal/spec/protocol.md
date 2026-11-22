@@ -12,7 +12,7 @@ Error codes:
 
 | Code | Use |
 |---|---|
-| `-32700` | Parse error. The line is not valid JSON. The `id` is `null` when it cannot be determined. |
+| `-32700` | Parse error. The line is not valid JSON text, including malformed UTF-8 or an unpaired surrogate escape. The `id` is `null` when it cannot be determined. |
 | `-32600` | Invalid request. Valid JSON whose envelope is not a request, for example a non-string `method`, and thread state conflicts such as `thread <id> is running` or `turn <id> is not running`. |
 | `-32601` | Unknown method. Message: `Method not found`. |
 | `-32602` | Invalid or unknown parameters, for example a wrong parameter member type or `unknown thread <id>`, `turn <id> is not on the active path`, `unknown turn <id>`, `unsupported approvalPolicy <value>`, `unsupported keyPath <value>`. |
@@ -26,6 +26,54 @@ The wire supports concurrent requests in both directions. Request identifiers MU
 ## Schema
 
 Every response and notification in the Codex subset MUST validate against the vendored schema in `internal/dal/rpc/testdata/codex-schema` (Codex commit `c9b4267c370a755da12ec1c8648c2451163212b7`). Extension methods and notifications under `dalgona/` MUST validate against `internal/dal/rpc/testdata/dalgona-schema`. The server encodes every message with `encoding/json/jsontext` or `encoding/json/v2`.
+
+## Text inputs
+
+[Input text](input-text.md) defines the shared input contract for GUI, TUI, web, and daemon callers.
+Its new validation and preservation requirements are planned changes, not claims that the inspected runtime already implements them.
+
+The daemon MUST reject malformed UTF-8 and unpaired JSON surrogate escapes before dispatching a message.
+It MUST NOT enable replacement decoding for user input.
+A leading byte-order mark outside the JSON value MUST fail parsing.
+An encoded `U+FEFF` inside a string is string content and MUST follow the field policy.
+
+The daemon MUST validate every known text parameter before performing an effect for its request.
+This includes tool discovery, workspace trust, local-image reads, file writes, credential updates, and journal appends.
+Valid JSON that violates shared encoding, size, line-break, control, or offset rules MUST fail with `-32602`.
+The error MUST identify the field and the validation reason without echoing its submitted contents.
+Its message MUST be `invalid text: <field>: <reason>`.
+The ASCII reason MUST be `invalid_encoding`, `text_too_large`, `line_break_not_allowed`, `disallowed_control`, or `invalid_offset`, as applicable.
+The field MUST identify the declared parameter location without including a submitted value.
+Malformed JSON MUST use `-32700` instead.
+Method-specific grammar and schema failures retain their declared errors, including invalid paths, unsupported enums, and rejected provider syntax.
+They MUST NOT invent another shared text reason or misclassify a grammar failure as an encoding failure.
+Unknown members retain the schema rule above, but their encoding MUST still be valid JSON text.
+
+Accepted free text MUST preserve its decoded Unicode scalar sequence.
+The daemon MUST NOT trim, normalize, case-fold, or strip it as a general input cleanup step.
+Interactive adapters apply the newline policy in [Input text](input-text.md) once, before submission.
+The daemon MUST NOT repeat that conversion.
+Existing secret masking and method-specific assembly remain authoritative.
+`turn/start` and `turn/steer` join their text input items with one LF, in input order.
+A `mention` or `skill` item contributes `@` followed by its path under the existing input conversion.
+Preservation applies to each original text item before that explicit assembly.
+JSON escape spelling MAY change during transport without changing decoded text.
+
+Decoded UTF-8 byte limits and encoded JSON frame limits are separate checks.
+The `dalgona/keywords/match` limit is 64 KiB of decoded UTF-8 bytes.
+The answer limit in [Ask tool](ask.md) counts Unicode scalar values as an explicit exception.
+A sender MUST check its complete encoded message against each transport budget before writing it.
+Websocket frame capacity MUST NOT increase the daemon's 16 MiB line limit.
+
+Paths, identifiers, enums, credentials, and command bytes retain their declared field grammars.
+Unicode support MUST NOT turn a path normalization result into authority for a different file.
+File data and PTY bytes retain their binary contracts.
+This contract MUST NOT rewrite historical journal records or change their hash and checksum inputs.
+
+Existing clients retain the same method names and result schemas.
+The strict field checks are a compatibility tightening where an older caller relied on replacement, truncation, or text cleanup.
+Implementations MUST expose those failures and preserve editable drafts for correction.
+They MUST NOT silently repair a rejected value or retry an effect with modified text.
 
 ## Client guarantees
 
@@ -89,7 +137,7 @@ A client MAY validate every message against the schemas. A client MUST ignore an
 | `dalgona/advisor/status {threadId}` | `[{name, model, status: idle|reviewing|halted|disabled, notes, usage:{inputTokens, outputTokens}}]`. |
 | `dalgona/advisor/set {threadId, enabled}`, `dalgona/advisor/reset {threadId}` | `{}`. |
 | `dalgona/item/output/read {threadId, itemId, offset?}` | `{text, offset, next, total}`. `next` equals `total` at the end of the output. A call without a spill MUST give `-32602` `call <id> has no spilled output`. |
-| `dalgona/keywords/match {threadId?, text, kind?}` | `{matches:[{word, byteRange:{start, end}, hue, effort?, summary}]}`, sorted by start. `kind` is `prompt` (the default) or `steer`. Text over 64 KiB MUST give `-32602` `text exceeds 64 KiB`. |
+| `dalgona/keywords/match {threadId?, text, kind?}` | `{matches:[{word, byteRange:{start, end}, hue, effort?, summary}]}`, sorted by start. `kind` is `prompt` (the default) or `steer`. Text over 64 KiB MUST give `-32602` `invalid text: text: text_too_large`. |
 | `fs/readFile {path}`, `fs/writeFile {path, dataBase64}`, `fs/createDirectory {path, recursive?}` | `{dataBase64}`, `{}`, `{}`. See File methods. |
 | `fs/getMetadata {path}`, `fs/readDirectory {path}` | `{isDirectory, isFile, isSymlink, createdAtMs, modifiedAtMs}`, `{entries: [{fileName, isDirectory, isFile}]}`. See File methods. |
 | `fs/remove {path, recursive?, force?}`, `fs/copy {sourcePath, destinationPath, recursive?}` | `{}`. See File methods. |
@@ -204,11 +252,46 @@ Decisions `accept`, `acceptForSession`, `decline`, and `cancel` map to the host 
 
 The server sends `item/tool/requestUserInput` for an `ask` call. The request `id` is a question request id that the host generates, and the host does not journal it. `itemId` is the call id. Question ids are `q1` to `q4` by position. Each question MAY carry the extensions `multiSelect` and `preview`. A client that ignores them still works. The server MUST replay an open question to a window that subscribes later, under the same request id. The server MUST count a resubscribed window as refused when that window refused the question before the host closed it as slow.
 
-A client MUST answer with `answers` that maps each question id to a list of strings. An answer equal to an option label is that option. Any other string is typed text.
+A client MUST answer with `answers` that maps each question id to an object containing an `answers` list of strings.
+For example, `{"answers":{"q1":{"answers":["chosen value"]}}}` answers the first question.
+An answer equal to an exact offered option label is that option. Any other string is typed text.
+
+An otherwise structurally valid answer result MUST satisfy [Ask tool](ask.md) and [Input text](input-text.md) before resolving the host question.
+The transport MUST validate a typed answer response before removing its pending response waiter.
+A structurally valid response with invalid answer text MUST leave that waiter and the host question pending.
+The original request id, deadline, and subscriber set MUST remain unchanged.
+The server MUST NOT send a JSON-RPC error response to an answer response.
+A JSON result with the wrong answer shape retains the existing unreadable-answer failure outcome.
+The new correction path MUST NOT change that failure or the existing handling of client error responses.
+
+Instead, it MUST send `warning` with `threadId`, `message`, `requestId`, `reason`, and `field` to the answering connection.
+The last three members are optional extensions for other warning uses.
+The message and reason MUST follow the text error contract above.
+The `requestId` MUST name the same pending question.
+The field MUST identify the invalid answer, such as `answers.q1.answers[0]`, without exposing its text.
+This warning MUST NOT carry `serverRequest/resolved` or create a journal event.
+
+First-party clients MUST retain the draft and question card until `serverRequest/resolved`, including after sending an answer.
+On a correction warning, they MUST show the field error and permit a corrected response with the same request id.
+Their typed question lifecycle MUST retain the response sender after the first send and support later corrections while the question remains pending.
+The current one-response request callback path MUST migrate to that lifecycle for user-input questions.
+Each later response MUST follow a matching correction warning and use the original request id.
+The client MUST stop accepting corrections when `serverRequest/resolved` closes that lifecycle.
+A warning for an already resolved request MUST NOT reopen its card.
+Concurrent valid answers and the original timeout retain their existing first-winner rules.
+An older client MAY lack a correction interface if it discarded its draft or response sender after replying.
+Its text-validation failure MUST NOT resolve the host question.
+The existing last-subscriber, interruption, and timeout rules remain unchanged.
+Reconnecting or reopening MUST NOT be promised as recovery, because losing the last subscriber can resolve the question.
+The server MUST NOT accept invalid answer text to preserve that older behavior.
+
+These rules require typed response validation before the current response dispatcher consumes its waiter.
+Retaining the server waiter alone does not provide the required client correction lifecycle.
+They are planned transport work, not a new request method or a new question id scheme.
 
 A client MUST answer `{"answers": {}}` to dismiss the questions. Any other error response MUST mean that the window cannot answer.
 
-The server MUST decline a question with the no-client result when every attached window cannot answer. The first answer MUST decide the question, and every subscriber receives `serverRequest/resolved` with a `resolution` of `answered`, `cancelled`, `interrupted`, `timedOut` or `declined`. A question that no window answers within 5 minutes MUST report `timedOut`.
+The server MUST decline a question with the no-client result when every attached window cannot answer. The first valid answer MUST decide the question. Every subscriber receives `serverRequest/resolved` with a `resolution` of `answered`, `cancelled`, `interrupted`, `timedOut` or `declined`. A question that no window answers within 5 minutes MUST report `timedOut`.
 
 The sandbox choice uses `item/tool/requestUserInput` with the header `Sandbox`, the options `Accept` and `Dangerously accept`, and no Other row. The server sends a `warning` notification before the question. A cancelled question MUST decline the command, and the next command MUST ask again. After a choice is journaled, the server MUST send `dalgona/sandbox/chosen` with `threadId`, `cause`, and `choice`. `choice` is `accept` or `dangerouslyAccept`. For `Accept`, the notification MUST follow the answer to the approval request of the same call. For `Dangerously accept`, the notification MUST follow the answer to the sandbox question.
 
@@ -279,7 +362,11 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
 - Headless runs read non-terminal stdin to EOF before submission.
   Stdin has no read deadline and accepts at most 1048576 bytes.
   Use `</dev/null` or `ssh -n` to avoid unintended stdin input.
-  The client replaces invalid UTF-8 with U+FFFD and removes trailing newlines.
+  The client MUST reject malformed UTF-8 before submission, replacing the previous U+FFFD repair behavior.
+  This is an explicit compatibility tightening under [Input text](input-text.md).
+  The existing headless adapter removes trailing CR and LF characters as a documented CLI convenience.
+  That transformation MUST NOT apply to GUI, TUI, web, or direct daemon text inputs.
+  Internal line endings and other accepted scalar values MUST remain unchanged.
   Nonempty stdin precedes a nonempty prompt with two newlines between them.
   Empty stdin leaves the prompt unchanged.
   Stdin alone supplies an empty prompt.

@@ -28,6 +28,11 @@ A disabled entry MUST NOT appear in the merged table. This rule MUST allow `[key
 
 `Match` MUST inspect only the supplied user prompt. It MUST NOT inspect synthetic messages or tool output. Matching MUST be case-sensitive. A keyword MUST appear in lowercase in both the table and the prompt.
 
+The prompt MUST satisfy [Input text](input-text.md) before matching.
+The matcher MUST NOT apply Unicode normalization, case folding, confusable substitution, or format-character removal to create a match.
+The lowercase eligibility rule above remains unchanged.
+Search indexes MAY derive normalized keys under their own contract, but those keys MUST NOT activate a keyword.
+
 The matcher MUST hide non-prose regions without changing rune positions. It MUST preserve newlines. It MUST support these regions:
 
 - Fenced code blocks with at least three backticks or tildes. A fence MAY have up to three leading spaces. A closing fence MUST use the same marker and at least the opening length. An unclosed fence MUST hide the rest of the prompt.
@@ -43,6 +48,21 @@ The matcher MUST hide non-prose regions without changing rune positions. It MUST
 `Previewable` MUST return the keywords that are enabled and lowercase, without checking required tools. A thread that has not resolved its tools MUST use `Previewable`.
 `Spans` MUST return every non-overlapping prose occurrence of each keyword it receives, sorted by start.
 Each span MUST give UTF-8 byte offsets, with the end offset exclusive.
+
+Offsets MUST refer to the exact original prompt passed to `Spans`, before prose masking.
+Masking MUST retain a mapping back to that source even when a replacement space uses fewer UTF-8 bytes.
+A result for one text revision MUST NOT be applied to another revision.
+
+For a span `[start, end)`, both endpoints MUST be Unicode scalar boundaries within that source.
+The range MUST satisfy `0 <= start < end <= len(sourceUTF8)`.
+A consumer MUST reject an invalid range and show the text without that highlight.
+It MUST NOT clamp, guess, or reinterpret byte offsets as UTF-16 units, runes, graphemes, or terminal cells.
+
+The existing matching boundaries below remain the semantic activation rule.
+A match MAY end inside an extended grapheme cluster, such as a keyword followed by a combining mark.
+A renderer MUST expand only its paint range to include the complete cluster.
+It MUST preserve the original semantic byte range and text.
+Copy, selection, deletion, and replacement MUST follow the editing contract in [Input text](input-text.md).
 
 ## Boundaries
 

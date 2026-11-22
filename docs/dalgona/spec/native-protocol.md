@@ -68,6 +68,12 @@ All members use camelCase. Required members cannot be null.
 An omitted optional member differs from an empty value where the field contract says so.
 Unknown response members remain ignorable under the core compatibility policy.
 
+Every text field MUST follow [Input text](../../dal/spec/input-text.md), including exact preservation and validation before effects.
+Byte offsets MUST identify their original source and revision. They MUST NOT be interpreted as runes, UTF-16 units, or grapheme counts.
+Field-specific path and credential grammars remain authoritative.
+Shared text-policy failures use the core text error contract before mutation reservation or external work.
+Method-specific grammars retain their declared parameter errors.
+
 | Type | Wire contract |
 | --- | --- |
 | `Id` | Opaque nonempty UTF-8 string, at most 128 bytes. |
@@ -227,6 +233,9 @@ The reader materializes bounded headers and pages document fields instead of rec
 
 The projection splits oversized incoming text deltas before assigning native ordinals.
 Splits preserve UTF-8 character boundaries and exact text order.
+They MAY split an extended grapheme cluster between deltas.
+The client MUST retain source text and resegment the affected tail before layout or editing.
+Delta boundaries MUST NOT create artificial caret stops, replacement characters, or duplicate content.
 Each resulting event receives its own ordinal.
 Only consecutive text deltas for the same item and field may share one envelope.
 Its ordinal range MUST cover exactly the merged consecutive messages.
@@ -418,10 +427,18 @@ Unsubscribe removes only this connection's thread subscription and history handl
 It does not archive the thread, destroy a runner, stop a terminal, or interrupt a turn.
 Repeated unsubscribe is harmless and returns the appropriate status.
 
-Approvals and questions retain the core server request schemas and first-answer-wins behavior.
+Approvals retain the core server request schemas and first-answer-wins behavior.
+Questions retain those schemas and the first-valid-answer rule in [Ask tool](../../dal/spec/ask.md).
 The GUI MUST distinguish approval decisions from freeform user questions.
 It MUST NOT answer a stale request after `serverRequest/resolved`.
 The shared connection owner MUST cancel the matching request context when the resolved notification appears inside a native envelope.
+
+Question text validation and correction warnings MUST follow the [core protocol](../../dal/spec/protocol.md#server-requests).
+The typed question lifecycle MUST keep its response sender and draft after the first send until resolution.
+A matching correction warning MUST permit another response under the same request ID and original deadline.
+It MUST NOT create another question, consume the pending waiter, or add a journal event.
+The shared connection owner MUST migrate its current one-response callback path for this lifecycle.
+Native envelope ordering MUST preserve each warning and resolution without reopening an already resolved card.
 
 Reconciliation preserves pending request identifiers at the snapshot cut.
 A request already represented by the snapshot MUST NOT create a second modal when its earlier delivery finishes.
@@ -508,7 +525,15 @@ Unknown mutations require receipt inspection and reconciliation before any expli
 | `-32020` | `not_found` | The authorized lookup found no such object. |
 | `-32021` | `operation_conflict` | One operation identifier was reused with different input. |
 
-For new errors, `message` equals the exact `kind` string.
+Shared encoding, size, line-break, control, and offset failures are an explicit exception to the table's generic parameter and resource errors.
+They MUST use `-32602` with `invalid text: <field>: <reason>` under the core protocol.
+If structured error data is present, its `kind` is `invalid_params`.
+This precedence includes a decoded text field exceeding its byte or scalar quota.
+Collection counts, aggregate transfer budgets, and nontext resource limits retain `limit_exceeded`.
+Method-specific grammar and schema failures retain their declared errors. A path traversal or unsupported enum is not an encoding failure.
+Malformed JSON, UTF-8, or surrogate escapes retain the core `-32700` parse error before dispatch.
+
+For other new errors, `message` equals the exact `kind` string.
 The optional structured fields provide bounded detail without secret-bearing raw causes.
 Existing methods retain existing errors for legacy clients.
 An error's name alone never permits mutation retry.
@@ -573,6 +598,9 @@ Unsupported combinations return `invalid_params` before opening a browser.
 `response` is `{kind:"apiKey"|"redirectUrl"|"authorizationCode", value}`.
 API keys are single-line strings of at most 4096 bytes.
 Pasted redirects and authorization codes are limited to 16384 bytes.
+These limits count decoded UTF-8 bytes. Single-line validation uses the shared line-break policy.
+Accepted credential values MUST NOT be trimmed, normalized, or silently truncated.
+An invalid candidate MUST leave the credential unchanged and remain correctable in its protected field.
 The backend validates state, issuer, resource, redirect, and provider-specific exchange rules.
 Secrets MUST NOT appear in logs, operation receipts, restore state, or completed status responses.
 

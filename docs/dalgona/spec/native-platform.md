@@ -9,6 +9,7 @@ All platform contracts below are required for the complete native release.
 Read this with [the client specification](native.md), [documents](native-documents.md), [protocol](native-protocol.md), and [verification](native-verification.md).
 The [design specification](native-design.md) owns visual tokens.
 The [native client decision](../decisions/native-client.md) owns the language and process choices.
+The [shared input contract](../../dal/spec/input-text.md) owns accepted text, Unicode boundaries, field limits, and validation across all clients and the daemon.
 
 ## P01. Own native integration explicitly
 
@@ -112,11 +113,33 @@ It MUST not leave an invisible process holding the window open.
 The composer and editable fields MUST use Gio `widget.Editor` for text composition.
 Raw key handlers MUST not reconstruct IME composition from key presses.
 The editor MUST retain focus, surrounding text, caret geometry, and selection while the native IME owns composition.
+The platform adapter owns preedit and its lifecycle. Preedit MUST remain outside committed application text and protocol requests.
+The pinned Gio editor MUST pass the shared Unicode 18.0.0 default extended-grapheme corpus under UAX #29 revision 49.
+Dependency defaults MUST NOT silently select another segmentation target.
+
+Gio's [editor API](https://pkg.go.dev/gioui.org/widget#Editor) uses the following units.
+The implementation MUST verify them against its pinned Gio version.
+
+| API | Unit |
+|---|---|
+| `Len`, `SelectionLen` | Rune counts. |
+| `Selection`, `SetCaret` | Rune offsets, preserving selection direction. |
+| `Regions(start, end, ...)` | Half-open rune range. |
+| `MoveCaret(startDelta, endDelta)` | Grapheme-cluster deltas. |
+| `Delete(graphemeClusters)` argument | Grapheme count with direction. A selected range counts as one requested cluster. |
+| `Delete` result | Number of runes removed. |
+| `Insert` result | Number of runes inserted. |
+
+Byte offsets, UTF-16 units, runes, grapheme counts, and glyph positions MUST have explicit conversions at adapter boundaries.
+Programmatic selection and replacement MUST validate scalar boundaries and enforce the shared committed-edit grapheme rules before calling Gio.
+An editor API accepting rune offsets MUST NOT be treated as proof of grapheme-safe range validation.
 
 The application MUST distinguish composition start, update, commit, and cancellation.
 Enter, Escape, completion acceptance, message history, and command shortcuts MUST not steal an active composition action.
 A composition commit MUST insert its text exactly once.
-The same key event MUST not also send the message.
+The same key event MUST not also send the message, choose an option, or activate a panel action.
+Cancellation MUST restore committed text and selection. Rejected commits MUST retain a recoverable unsent candidate without inserting a prefix.
+Each accepted composition commit MUST form one undoable transaction.
 
 The adapter MUST provide a reliable composition-active signal when the pinned Gio API does not expose it publicly.
 This is required bridge or upstream patch work.
@@ -124,10 +147,13 @@ Timing guesses, key-code lists, and delayed submission MUST not replace that sig
 
 | Platform | Required acceptance environment |
 |---|---|
-| Windows | Microsoft Korean IME and a Latin keyboard on every shipped Windows architecture. |
-| macOS | Apple's Korean input source and a Latin keyboard on every shipped macOS architecture. |
-| Linux X11 | IBus Hangul and Fcitx5 Hangul with the selected X11 backend. |
-| Linux Wayland | IBus Hangul and Fcitx5 Hangul on supported compositors with text-input-v3 integration. |
+| Windows | Microsoft Korean, Japanese, Pinyin, and Bopomofo IMEs, plus Latin input, on every shipped Windows architecture. |
+| macOS | Apple's Korean, Japanese, Pinyin, and Zhuyin input sources, plus Latin input, on every shipped macOS architecture. |
+| Linux X11 | IBus and Fcitx5, each with Hangul, Japanese, and Chinese engines. Include Latin input and the selected X11 backend. |
+| Linux Wayland | IBus and Fcitx5, each with Hangul, Japanese, and Chinese engines, on supported compositors through text-input-v3. |
+
+Release evidence MUST name each exact operating system, engine, version, compositor, backend, and architecture tested.
+Synthetic events MUST NOT replace tests with real candidate windows and native input engines.
 
 Gio's [September 2026 changes](https://gioui.org/news/2026-09) add IBus support on X11 and text-input-v3 support on Wayland.
 This does not prove every input engine or compositor works.
@@ -135,8 +161,11 @@ The platform owner MUST implement and test missing routes for the declared relea
 The release MUST not silently reduce its Linux IME matrix to the easiest route.
 
 Composition tests MUST cover Korean syllables, partial syllable deletion, replacement, cancellation, and composition at either end of a selection.
+Japanese tests MUST cover candidate conversion, reconversion, and cancellation.
+Chinese tests MUST cover candidate paging and selection with the declared Simplified and Traditional input sources.
 They MUST cover multiline input, emoji, combining marks, surrogate pairs, and mixed-script text.
 They MUST also cover candidate positioning after scrolling and between displays at different scales.
+Composition in a nearly full field MUST test the exact limit, one scalar over, and a final commit that joins an adjacent grapheme.
 
 Text insertion through accessibility MUST use the same editor operations and undo model.
 It MUST not bypass draft limits or corrupt an active composition.
@@ -159,9 +188,13 @@ The packaged client MUST not require a font-conversion tool.
 Changing the font catalog MUST invalidate shaped geometry without moving the document's logical anchor.
 
 Fallback MUST operate on complete grapheme clusters.
-It MUST preserve combining marks and emoji sequences.
+It MUST preserve combining sequences, ideographic variation sequences, emoji modifiers, regional-indicator flags, and joined emoji.
+Fallback lookup MUST retain variation selectors, ZWJ, and tag scalars in source text.
 The client MUST support color emoji through a native glyph path or an owned bounded glyph raster adapter.
 It MUST not replace readable fallback text after one missing glyph.
+An unsupported cluster MUST have a stable visible fallback under the shared contract, with source-preserving copy, selection, and accessibility.
+Fallback geometry MUST map to the complete original cluster without manufacturing replacement input.
+The release MUST test rare supplementary CJK, variation sequences, private-use scalars, noncharacters, and mixed text with the packaged font catalog.
 
 The platform font resolver MUST distinguish missing fonts from unreadable font files.
 It MUST retain a valid built-in fallback and report corrupt user fonts in diagnostics.
@@ -188,6 +221,11 @@ File drops MUST preserve ordering and handle paths containing spaces, non-ASCII 
 Image files MUST enter the attachment validation path.
 Directory drops MUST select a workspace only through the explicit workspace action.
 Text drops MUST edit the focused field or create a paste chip according to component behavior.
+Text transfer decoding MUST validate the declared encoding before inserting or constructing a chip.
+Malformed UTF-8, unpaired UTF-16 surrogates, embedded NUL, or a failed field limit MUST reject the complete text candidate.
+The adapter MUST NOT use replacement decoding, normalization, transliteration, or silent first-line truncation to accept it.
+Multiline text MUST use the shared line-ending conversion. One-line fields MUST reject multiline text atomically.
+An accepted paste MUST form one undoable edit and preserve the resulting scalar sequence, including final line breaks.
 
 Clipboard reads MUST occur only for a paste or another explicit clipboard action.
 The client MUST not poll or log clipboard contents.
@@ -195,9 +233,11 @@ Clipboard format priority MUST prefer an image when the user invokes Paste image
 Ordinary Paste MUST prefer text when both text and an image represent the same clipboard item.
 An image-only clipboard MUST create an image attachment.
 
-An asynchronous paste MUST retain its target field, thread, selection, and window generation.
+An asynchronous paste MUST retain its target field, thread, draft revision, selection, composition transaction, and window generation.
 If that target no longer exists, the result MUST be discarded with a notice.
 It MUST never attach to whichever thread happens to be open later.
+Changed target text or selection MUST prevent stale replacement. Active preedit MUST not be overwritten by a completed transfer.
+Rejected candidates MUST remain recoverable without changing committed text, selection, or undo history.
 
 The adapter MUST bound transferred bytes before decoding and close every transfer stream.
 One native clipboard or drop transfer MUST contain at most 32 MiB before image conversion.
@@ -352,6 +392,10 @@ It MUST not report only the currently painted lines as the complete document.
 The composer MUST expose editable text, selection, caret, placeholder, validation errors, and composition-safe replacement.
 Secure fields MUST expose their protected state without exposing their raw value.
 Copy and select actions MUST obey the same document boundaries as keyboard actions.
+Platform text-range units MUST convert explicitly to canonical source offsets before editing or copying.
+Font fallback, visible control escapes, variation sequences, and joined emoji MUST retain source-to-display mappings for those ranges.
+Painted fallback text MUST NOT become the copied or edited value.
+Accessibility edits MUST pass the same composition ownership, grapheme, encoding, and atomic limit checks as keyboard and clipboard edits.
 
 Math MUST expose the semantic expression defined in [native documents](native-documents.md#d09-render-mathematical-notation).
 Figures MUST expose title, caption, source access, and semantic labels in meaningful reading order.
@@ -490,7 +534,7 @@ Each row is required on its applicable operating systems and architectures.
 |---|---|
 | Handle lifecycle | Repeated window creation, closure, display changes, and adapter cancellation leave no stale native handle or callback. |
 | Rendering | Idle waits, active streaming, reduced motion, device recovery, and mixed-scale displays preserve usable frames. |
-| IME | P05 composition cases pass with the declared Korean input engines and physical candidate windows. |
+| IME | P05 composition cases pass with every declared Korean, Japanese, and Chinese engine and real candidate windows. |
 | Clipboard | Text, platform image formats, file references, cancellation, and delayed paste target checks pass. |
 | Dialogs | Open, multiple selection, folder choice, save, cancellation, overwrite refusal, and portal paths pass. |
 | Menus | Keyboard, pointer, native menu, and command-palette activation execute one identical command. |
