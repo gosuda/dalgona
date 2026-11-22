@@ -31,9 +31,10 @@ async function load(): Promise<void> {
 async function fork(): Promise<void> {
 	if (selected === null) return;
 	error = "";
+	const opened = session.openedPanel;
 	try {
 		await session.forkThread(selected);
-		session.closePanel();
+		session.closePanelIf(opened);
 	} catch (failure) {
 		error = failure instanceof Error ? failure.message : String(failure);
 	}

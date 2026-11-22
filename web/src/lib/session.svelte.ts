@@ -278,6 +278,7 @@ export class Session {
 	verbosity: Verbosity = $state("medium");
 	settingValues: readonly SettingValue[] = $state([]);
 	panel: PanelKind | null = $state(null);
+	private panelGeneration = 0;
 	loginProviders: readonly LoginProvider[] = $state([]);
 	login: LoginFlow | null = $state.raw(null);
 	panelTurnId: string | null = $state(null);
@@ -471,6 +472,7 @@ export class Session {
 			return;
 		}
 		if (this.panel === "login" && kind !== "login") this.cancelLogin();
+		this.panelGeneration += 1;
 		this.panel = kind;
 		this.panelTurnId = turnId;
 		if (kind === "login") {
@@ -486,8 +488,17 @@ export class Session {
 
 	closePanel(): void {
 		if (this.panel === "login") this.cancelLogin();
+		this.panelGeneration += 1;
 		this.panel = null;
 		this.panelTurnId = null;
+	}
+
+	get openedPanel(): number {
+		return this.panelGeneration;
+	}
+
+	closePanelIf(generation: number): void {
+		if (generation === this.panelGeneration) this.closePanel();
 	}
 
 	private refuseWhileRunning(kind: PanelKind): void {
@@ -1391,6 +1402,7 @@ export class Session {
 	}
 
 	async saveModel(model: string, effort: string | null): Promise<boolean> {
+		const opened = this.panelGeneration;
 		const generation = this.connectionGeneration;
 		const edits: { keyPath: string; value: string; mergeStrategy: string }[] = [
 			{ keyPath: "model", value: model, mergeStrategy: "replace" },
@@ -1426,11 +1438,12 @@ export class Session {
 				() => void this.loadConfig(generation),
 			);
 		}
-		this.closePanel();
+		this.closePanelIf(opened);
 		return true;
 	}
 
 	async saveSettings(edits: readonly SettingEdit[]): Promise<boolean> {
+		const opened = this.panelGeneration;
 		const generation = this.connectionGeneration;
 		try {
 			await this.requireClient().call(
@@ -1469,7 +1482,7 @@ export class Session {
 				"info",
 				"saved; open threads keep their approval and sandbox",
 			);
-		this.closePanel();
+		this.closePanelIf(opened);
 		return true;
 	}
 
