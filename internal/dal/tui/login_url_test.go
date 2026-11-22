@@ -350,3 +350,44 @@ func TestLoginDeviceCodeWiderThanTheBodyWrapsFromTheFirstBodyRow(t *testing.T) {
 		t.Fatalf("panel rows joined = %q, want the whole code then the whole link %q", got, code+url)
 	}
 }
+
+func TestLoginDeviceCodeRowIsKeptOnlyWhenItFitsExactly(t *testing.T) {
+	t.Parallel()
+	const code = "WXYZ-9876"
+	url := "https://auth.example.test/device"
+	for _, tc := range []struct {
+		width int
+		first string
+	}{{28, "Enter code WXYZ-9876 at"}, {27, code}} {
+		t.Run(fmt.Sprint(tc.width), func(t *testing.T) {
+			t.Parallel()
+			m := waitingLoginPanel(t, tc.width, 12, &rpc.LoginAccountResponse{Type: "chatgptDeviceCode", LoginID: "login-1", VerificationURL: url, UserCode: code})
+			assertFrame(t, m.dockLines(), tc.width, 12)
+			rows := loginPanelText(t, m)
+			if got := strings.TrimRight(rows[0], " "); got != tc.first {
+				t.Fatalf("first panel row at width %d = %q, want %q", tc.width, got, tc.first)
+			}
+		})
+	}
+}
+
+func TestLoginDeviceCodeWithATabIsNeverCut(t *testing.T) {
+	t.Parallel()
+	const code = "A\tB-CDEF"
+	url := "https://auth.example.test/device"
+	for width := 13; width <= 60; width++ {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			t.Parallel()
+			m := waitingLoginPanel(t, width, 40, &rpc.LoginAccountResponse{Type: "chatgptDeviceCode", LoginID: "login-1", VerificationURL: url, UserCode: code})
+			assertFrame(t, m.dockLines(), width, 40)
+			rows := loginPanelText(t, m)
+			if first := strings.TrimSpace(rows[0]); !strings.HasPrefix(first, "A") && !strings.HasPrefix(first, "Enter code A") {
+				t.Fatalf("first panel row at width %d = %q, want it to start the user code", width, rows[0])
+			}
+			joined := strings.ReplaceAll(joinedPanelRows(t, rows), " ", "")
+			if want := "AB-CDEF"; !strings.Contains(joined, want) || !strings.HasSuffix(joined, url) {
+				t.Fatalf("panel rows joined at width %d = %q, want the whole code %q and then the link", width, joined, want)
+			}
+		})
+	}
+}

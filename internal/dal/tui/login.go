@@ -178,12 +178,12 @@ func (m *model) loginBodyWidth() int {
 }
 
 func (m *model) loginURLRows(url string) []string {
-	return strings.Split(m.screen.method.Hardwrap(m.screen.nfc(url), m.loginBodyWidth(), true), "\n")
+	return strings.Split(m.screen.method.Hardwrap(m.screen.nfc(m.screen.expand(url)), m.loginBodyWidth(), true), "\n")
 }
 
 func (m *model) loginCodeRows(code string) []string {
-	row := "Enter code " + code + " at"
-	if m.screen.method.StringWidth(row) <= m.loginBodyWidth() {
+	row := m.screen.expand("Enter code " + code + " at")
+	if m.screen.cells(row) <= m.loginBodyWidth() {
 		return []string{row}
 	}
 	return m.loginURLRows(code)
