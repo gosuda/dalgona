@@ -47,7 +47,6 @@ let { item, running, onRewind }: RowProps = $props();
 		max-width: 70ch;
 		margin: 0;
 		line-height: 1.6;
-		overflow-wrap: break-word;
 		white-space: pre-wrap;
 		text-wrap: pretty;
 	}
@@ -59,7 +58,6 @@ let { item, running, onRewind }: RowProps = $props();
 	.agent-message .prose {
 		max-width: 70ch;
 		line-height: 1.6;
-		overflow-wrap: break-word;
 		text-wrap: pretty;
 	}
 

@@ -8,7 +8,7 @@ let { item }: RowProps = $props();
 {#if item.kind === "plan"}
 	<article class="plan">
 		<span class="item-label">Plan</span>
-		<p>{item.text}</p>
+		<p class="prose">{item.text}</p>
 	</article>
 {:else if item.kind === "contextCompaction"}
 	<p class="compaction">Context compacted · earlier turns remain in the journal</p>
@@ -36,7 +36,6 @@ let { item }: RowProps = $props();
 		max-width: 70ch;
 		margin: 0;
 		line-height: 1.6;
-		overflow-wrap: break-word;
 		white-space: pre-wrap;
 		text-wrap: pretty;
 	}

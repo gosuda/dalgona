@@ -106,7 +106,8 @@ const counted = $derived(change.additions !== undefined);
 
 	.diff {
 		margin-block-start: var(--space-3);
-		overscroll-behavior: contain;
+		overflow-x: visible;
+		overflow-y: visible;
 		padding: var(--space-2) var(--space-3);
 		border-radius: var(--radius-tag);
 		background: var(--surface);
