@@ -114,12 +114,21 @@ var syncPinnedDir = func(p *dirPin) error { return p.syncDir() }
 func syncStates(states []*writeState) error {
 	var failures []error
 	for _, state := range states {
-		failures = append(failures, syncPin(state.dest))
+		failures = append(failures, syncPinTree(state.dest)...)
 		if state.src != state.dest {
-			failures = append(failures, syncPin(state.src))
+			failures = append(failures, syncPinTree(state.src)...)
 		}
 	}
 	return errors.Join(failures...)
+}
+
+func syncPinTree(pin *dirPin) []error {
+	var failures []error
+	failures = append(failures, syncPin(pin))
+	for _, parent := range pin.parentPins() {
+		failures = append(failures, syncPin(parent))
+	}
+	return failures
 }
 
 func syncPin(pin *dirPin) error {

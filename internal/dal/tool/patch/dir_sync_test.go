@@ -194,6 +194,7 @@ type syncOrderCase struct {
 	input   string
 	targets map[string]string
 	syncs   int
+	dirs    []string
 }
 
 func requireSyncAfterLastOperation(t *testing.T, style Style, test syncOrderCase) {
@@ -201,8 +202,10 @@ func requireSyncAfterLastOperation(t *testing.T, style Style, test syncOrderCase
 	f := newOutcomeFixture(t)
 	twoFiles(t, f)
 	calls := 0
-	stubDirectorySync(t, func(*dirPin) error {
+	synced := make(map[string]int)
+	stubDirectorySync(t, func(pin *dirPin) error {
 		calls++
+		synced[pin.file.Name()]++
 		requireTargetsAtSync(t, f.cwd, test.targets)
 		requireNoScratchAtSync(t, f.cwd)
 		return nil
@@ -213,15 +216,32 @@ func requireSyncAfterLastOperation(t *testing.T, style Style, test syncOrderCase
 	if calls != test.syncs {
 		t.Fatalf("directory syncs = %d, want %d", calls, test.syncs)
 	}
+	if test.dirs != nil {
+		want := make(map[string]int)
+		for _, dir := range test.dirs {
+			want[filepath.Join(f.cwd, dir)]++
+		}
+		for dir, count := range want {
+			if synced[dir] != count {
+				t.Errorf("directory %s synced %d times, want %d (all: %v)", dir, synced[dir], count, synced)
+			}
+		}
+		for dir := range synced {
+			if _, ok := want[dir]; !ok {
+				t.Errorf("unexpected directory sync of %s (all: %v)", dir, synced)
+			}
+		}
+	}
 	requireNoResidue(t, f.cwd)
 }
 
 func TestDirectorySyncRunsAfterTheLastOperation(t *testing.T) {
 	tests := []syncOrderCase{
-		{"IO-05/two updates", twoFileEdit, map[string]string{"a.txt": "a-after\n", "b.txt": "b-after\n"}, 2},
-		{"IO-05/rename in place", "[a.txt@{refA}]\nMV z.txt\n", map[string]string{"a.txt": absent, "z.txt": "a-before\n", "b.txt": "b-before\n"}, 2},
-		{"IO-05/rename into a new directory", "[a.txt@{refA}]\nMV sub/z.txt\n", map[string]string{"a.txt": absent, "sub/z.txt": "a-before\n"}, 2},
-		{"IO-05/delete", "[a.txt@{refA}]\nREM\n", map[string]string{"a.txt": absent, "b.txt": "b-before\n"}, 1},
+		{"IO-05/two updates", twoFileEdit, map[string]string{"a.txt": "a-after\n", "b.txt": "b-after\n"}, 2, nil},
+		{"IO-05/rename in place", "[a.txt@{refA}]\nMV z.txt\n", map[string]string{"a.txt": absent, "z.txt": "a-before\n", "b.txt": "b-before\n"}, 2, nil},
+		{"IO-05/rename into a new directory", "[a.txt@{refA}]\nMV sub/z.txt\n", map[string]string{"a.txt": absent, "sub/z.txt": "a-before\n"}, 3, []string{"", "sub", ""}},
+		{"IO-05/move into nested missing directories", "[a.txt@{refA}]\nMV out/generated/a.txt\n", map[string]string{"a.txt": absent, "out/generated/a.txt": "a-before\n"}, 4, []string{"out/generated", "", "out", ""}},
+		{"IO-05/delete", "[a.txt@{refA}]\nREM\n", map[string]string{"a.txt": absent, "b.txt": "b-before\n"}, 1, nil},
 	}
 	for _, test := range tests {
 		for _, style := range profileStyles {
@@ -242,8 +262,8 @@ func TestDirectorySyncAttemptsEveryPinAfterAFailure(t *testing.T) {
 		}
 		want := withPaths(writeFailure(tool.CommitComplete, tool.ReasonSyncFailed), "a.txt", "after", "sub/z.txt", "after")
 		requireWrappedOutcome(t, err, HashlineLight, want)
-		if calls != 2 {
-			t.Fatalf("directory syncs attempted = %d, want the source and the destination", calls)
+		if calls != 3 {
+			t.Fatalf("directory syncs attempted = %d, want the source, the destination, and the parent of the created directory", calls)
 		}
 	})
 }
