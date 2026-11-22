@@ -526,3 +526,41 @@ test("a resume that ends after Escape leaves the next panel and its sign-in open
 		"account/login/cancel",
 	);
 });
+
+test("a resume that ends after Escape leaves a reopened resume panel open", async () => {
+	const { session } = activeSession({});
+	session.connection = "connected";
+	vi.spyOn(session, "listThreads").mockResolvedValue({
+		threads: [
+			{
+				id: "thread-2",
+				title: "hello",
+				preview: "",
+				status: "idle",
+				updatedAt: 1,
+				model: null,
+				cwd: "/work",
+			},
+		],
+		nextCursor: null,
+	});
+	const pending = Promise.withResolvers<void>();
+	vi.spyOn(session, "selectThread").mockReturnValue(pending.promise);
+	render(ThreadPanels, { props: { session } });
+	session.openPanel("resume");
+	const dialog = await screen.findByRole("dialog", {
+		name: "Open an earlier thread",
+	});
+	await fireEvent.click(
+		await within(dialog).findByRole("button", { name: "hello" }),
+	);
+	await fireEvent.keyDown(dialog, { key: "Escape" });
+	expect(session.panel).toBeNull();
+	session.openPanel("resume");
+	await tick();
+	pending.resolve();
+	await pending.promise;
+	await tick();
+	await tick();
+	expect(session.panel).toBe("resume");
+});
