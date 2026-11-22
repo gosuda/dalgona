@@ -9,6 +9,7 @@ import type { FileMatch } from "#lib/types.ts";
 function baseProps() {
 	return {
 		disabled: false,
+		fileSearchRoot: "/work",
 		running: false,
 		followups: [] as readonly string[],
 		history: [] as readonly string[],
@@ -459,6 +460,73 @@ describe("file mention", () => {
 		expect(field.value).toBe("@modx");
 		expect(onSend).not.toHaveBeenCalled();
 	});
+
+	test.each([true, false])(
+		"uses only the new workspace after switching with an unchanged mention (old result shown: %s)",
+		async (oldResultShown) => {
+			vi.useFakeTimers();
+			try {
+				const oldMatch = {
+					fileName: "mode.go",
+					path: "old/mode.go",
+					root: "/old",
+				};
+				const newMatch = {
+					fileName: "mode.go",
+					path: "new/mode.go",
+					root: "/new",
+				};
+				const oldReply = Promise.withResolvers<readonly FileMatch[]>();
+				const newReply = Promise.withResolvers<readonly FileMatch[]>();
+				const onFileSearch = vi
+					.fn()
+					.mockReturnValueOnce(oldReply.promise)
+					.mockReturnValueOnce(newReply.promise);
+				const onSend = vi.fn();
+				const view = render(Composer, {
+					props: {
+						...baseProps(),
+						fileSearchRoot: "/old",
+						onFileSearch,
+						onSend,
+					},
+				});
+				const field = screen.getByRole("textbox", {
+					name: "Message",
+				}) as HTMLTextAreaElement;
+				await fireEvent.input(field, { target: { value: "@mod" } });
+				await vi.advanceTimersByTimeAsync(120);
+				expect(onFileSearch).toHaveBeenCalledExactlyOnceWith("mod");
+				if (oldResultShown) {
+					oldReply.resolve([oldMatch]);
+					await vi.advanceTimersByTimeAsync(0);
+					expect(screen.getByRole("option").textContent).toContain(
+						oldMatch.path,
+					);
+				}
+
+				await view.rerender({ fileSearchRoot: "/new" });
+				expect(screen.queryByRole("listbox", { name: "Files" })).toBeNull();
+				await fireEvent.keyDown(field, { key: "Enter" });
+				expect(field.value).toBe("@mod");
+				expect(onSend).not.toHaveBeenCalled();
+				await vi.advanceTimersByTimeAsync(120);
+				expect(onFileSearch.mock.calls).toEqual([["mod"], ["mod"]]);
+				newReply.resolve([newMatch]);
+				await vi.advanceTimersByTimeAsync(0);
+				if (!oldResultShown) {
+					oldReply.resolve([oldMatch]);
+					await vi.advanceTimersByTimeAsync(0);
+				}
+				expect(screen.getByRole("option").textContent).toContain(newMatch.path);
+				await fireEvent.keyDown(field, { key: "Tab" });
+				expect(field.value).toBe("@new/mode.go ");
+				expect(onSend).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
 
 	test("moving the caret inside the same mention does not search again", async () => {
 		vi.useFakeTimers();

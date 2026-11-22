@@ -224,6 +224,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 				onEditFollowup={(index) => session.editFollowup(index)}
 				onRemoveFollowup={(index) => session.removeFollowup(index)}
 				onMatch={(text) => session.matchKeywords(text)}
+				fileSearchRoot={session.fileSearchRoot}
 				onFileSearch={(query) => session.searchFiles(query)}
 				onSend={(text, attachments) => void session.sendMessage(text, attachments)}
 				onSteer={(text) => void session.steerMessage(text)}
