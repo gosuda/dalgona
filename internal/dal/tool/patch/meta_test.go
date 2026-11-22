@@ -3,6 +3,8 @@ package patch
 import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/dal/tool"
@@ -97,6 +99,27 @@ func requireNoChangeMeta(t *testing.T, style Style) {
 func TestProfileApplyFailureCarriesHashlineMeta(t *testing.T) {
 	t.Run("IO-03/partial", requirePartialMeta)
 	t.Run("AUTH-02/target changed while approving", requireConflictMeta)
+	t.Run("AUTH-02/target vanished while approving", requireVanishedMeta)
+}
+
+func requireVanishedMeta(t *testing.T) {
+	f := newOutcomeFixture(t)
+	plan, err := f.plan(t, HashlineLight, "[f.txt@{ref}]\nPUT 1:\n+uno\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(f.cwd, "f.txt")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := plan.Apply(t.Context())
+	if err == nil {
+		t.Fatal("apply succeeded")
+	}
+	object := requireMetaStatus(t, result.Meta, HashlineLight, "conflict", "none")
+	requireReason(t, result.Meta, object, "path_changed", "stale")
+	if _, statErr := os.Stat(filepath.Join(f.cwd, "f.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("f.txt exists after the refused apply: %v", statErr)
+	}
 }
 
 func requirePartialMeta(t *testing.T) {
