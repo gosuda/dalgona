@@ -427,7 +427,7 @@ func isToolItem(item rpc.Item) bool {
 	return false
 }
 
-func (m *model) liveText() string {
+func (m *model) liveCover() string {
 	switch {
 	case m.hint.text != "":
 		return m.screen.dockTheme().paint(roleDim, m.hint.text)
@@ -436,6 +436,17 @@ func (m *model) liveText() string {
 	}
 	if left, ok := m.retryRemaining(); ok {
 		return retryLine(left)
+	}
+	return ""
+}
+
+func (m *model) noticeShown() bool {
+	return m.liveCover() == ""
+}
+
+func (m *model) liveText() string {
+	if cover := m.liveCover(); cover != "" {
+		return cover
 	}
 	if m.notice != "" {
 		notice := m.noticeLine()

@@ -549,14 +549,6 @@ func (m *model) commitOverflowNotice() {
 	m.noticePrinted = m.commitOverflow(m.notice, m.noticeLine())
 }
 
-func (m *model) noticeShown() bool {
-	if m.hint.text != "" || m.settings != nil && m.settings.saveErr != "" {
-		return false
-	}
-	_, waiting := m.retryRemaining()
-	return !waiting
-}
-
 func (m *model) commitOverflow(text, line string) bool {
 	if m.screen.cells(line) <= m.liveFreeWidth() {
 		return false
