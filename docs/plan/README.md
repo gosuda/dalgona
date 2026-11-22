@@ -14,13 +14,25 @@ The repository was read at commit `3c4b6f94` with a clean working tree. Line num
 
 ## Status of this record
 
-This directory holds the completion plan in its last revision. It records intended work. It does not certify that a step is done or that a check passed. [The specifications and decisions](../README.md) define required behavior, and they win where this plan and they disagree.
+This directory holds the completion plan and its later amendments. It records intended work. It does not certify that a step is done or that a check passed. [The specifications and decisions](../README.md) define required behavior, and they win where this plan and they disagree.
 
 The plan is stored as one fragment per section. A section larger than 64 KiB is a directory with one fragment per subsection, and its `overview` fragment holds the text before the first subsection. The number in front of each name is the reading order.
 
-Each fragment holds the plan text unchanged. The text above this heading and all fragments in the order below, joined end to end, give the plan byte for byte: 1,821,653 bytes with SHA-256 `a645f46e9097bd0a4b13d3e8d7ce305ff47186e5759cd14c02d8228efb262d6f`. Do not edit a fragment. A link inside a fragment keeps the destination of the file that the plan proposed, so `docs-links` checks this index only.
+The original imported plan was 1,821,653 bytes with SHA-256 `a645f46e9097bd0a4b13d3e8d7ce305ff47186e5759cd14c02d8228efb262d6f`.
+That value records historical provenance. It does not describe the amended files in this directory.
+Update affected fragments with their specification changes and preserve earlier revisions through Git history.
+Untouched fragments can retain historical paths and line references. Read the current source before implementing them.
+The repository link check covers this index. Check links added to amended fragments separately.
 
-Earlier revisions of the plan and identical copies are not stored. This revision replaced them.
+Earlier revisions remain available in Git history. Do not add identical copies as new plan files.
+
+## Native client and Unicode amendment
+
+The [native and input workstream](01-approach/30-native-client-and-input.md) adds the complete Go and Gio desktop client and shared Unicode input behavior.
+It follows the existing web design and includes every component and platform gate in the native specification suite.
+The amendment updates question, terminal, and browser input steps instead of preserving conflicting cleanup, truncation, or paste-marker instructions.
+It also covers snapshot cuts, ordered terminal resize replay, final-output retention, direct API-key login, MCP provenance, and workspace release.
+These are required implementation tasks. This documentation update provides no runtime completion evidence.
 
 Read only the fragments that the current work needs. Start with [the rules for every step](01-approach/01-rules-for-every-step.md), [the order of work](01-approach/09-order-of-work.md), and [the assumptions](04-assumptions-and-contingencies/01-assumptions.md).
 
@@ -181,7 +193,7 @@ Read only the fragments that the current work needs. Start with [the rules for e
     - [Outcome of the terminal workstream](01-approach/22-terminal-interface/01-outcome-of-the-terminal-workstream.md)
     - [Decisions of the terminal workstream](01-approach/22-terminal-interface/02-decisions-of-the-terminal-workstream.md)
     - [Terminal step 1. Split the package by concern](01-approach/22-terminal-interface/03-terminal-step-1-split-the-package-by-concern.md)
-    - [Terminal step 2. One sanitiser for all untrusted text](01-approach/22-terminal-interface/04-terminal-step-2-one-sanitiser-for-all-untrusted-text.md)
+    - [Terminal step 2. Separate safe display from input](01-approach/22-terminal-interface/04-terminal-step-2-one-sanitiser-for-all-untrusted-text.md)
     - [Terminal step 3. Bound every frame to the window, with frame tests](01-approach/22-terminal-interface/05-terminal-step-3-bound-every-frame-to-the-window.md)
     - [Terminal step 4. `/revert` asks for confirmation](01-approach/22-terminal-interface/06-terminal-step-4-revert-asks-for-confirmation.md)
     - [Terminal step 5. Follow-ups are never cleared silently](01-approach/22-terminal-interface/07-terminal-step-5-follow-ups-are-never-cleared-silently.md)
@@ -323,6 +335,7 @@ Read only the fragments that the current work needs. Start with [the rules for e
     - [Checks of the comment-removal workstream](01-approach/28-comment-removal/24-checks-of-the-comment-removal-workstream.md)
     - [Prerequisites of the comment-removal workstream](01-approach/28-comment-removal/25-prerequisites-of-the-comment-removal-workstream.md)
   - [Outside checks of the comment-removal workstream](01-approach/29-outside-checks-of-the-comment-removal-workstream.md)
+  - [Native client and shared Unicode input](01-approach/30-native-client-and-input.md)
 - [Critical files](02-critical-files.md)
 - [Verification](03-verification.md)
 - Assumptions and contingencies (`04-assumptions-and-contingencies/`)

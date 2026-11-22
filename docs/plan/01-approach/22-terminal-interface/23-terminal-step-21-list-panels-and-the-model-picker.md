@@ -30,7 +30,7 @@ Input line:
 - `input.go`: `m.input.mode` is `inputPrompt` or `inputShell` and is stored. The other text modes come from the top panel through `func (m *model) textMode() inputMode`. It returns `inputTarget`, `inputFilter`, `inputAnswer` or `inputAPIKey` from the top panel's state (`inputAnswer` is set by the question card, the ask workstream, Step 7), and `inputPrompt` or `inputShell` otherwise.
 - One row. When the text is wider than the row, the field shows the cells around the cursor and marks each cut with `...`. An input line never wraps.
 - Printable keys edit the field in a text mode only. In a card without a text mode, printable keys do nothing, so `y` and `a` keep their card meaning.
-- A paste in a text mode keeps its first line. Steps 28 and 31 cover the prompt.
+- A multiline paste into a one-line text field fails atomically. Preserve its previous value and selection and keep the candidate recoverable. Steps 28 and 31 cover the prompt.
 - A notice or a hint shows in the live row and changes no height (design, Structure of the dock).
 
 | Mode | Label | Typed | Enter | Esc |

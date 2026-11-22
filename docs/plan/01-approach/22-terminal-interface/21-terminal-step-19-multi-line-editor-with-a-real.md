@@ -1,5 +1,11 @@
 #### Terminal step 19. Multi-line editor with a real cursor
 
+The [shared input contract](../../../dal/spec/input-text.md) governs committed text, grapheme edits, and terminal IME ownership.
+Keep UTF-8 bytes, rune positions, grapheme boundaries, and terminal cells distinct.
+Paste, completion, and composition commits form atomic undoable edits. No input cleanup may rewrite accepted scalars.
+Repair boundaries after adjacent joiner, combining-mark, Hangul, or regional-indicator changes.
+Use real supported terminal/IME pairs for composition evidence. Synthetic text events cannot prove candidate-window behavior.
+
 - `input.go`, renamed from `composer.go` by Step 1: rename the type `composer` to `editor`. The editor stays hand-written. `charm.land/bubbles/v2/textarea` has no chip or atom support (`bubbles/v2@v2.2.1/textarea/textarea.go`, no match for chip, atom or token), so it cannot show a paste chip as `[Paste #n +L lines]` or delete a chip as one unit (steps 28, 30, 31).
   - `shift+enter` and `ctrl+j` (LF decodes to `ctrl+j`, `ultraviolet decoder.go:1130-1171`) insert a newline character. `enter` when the char before the cursor is `\` replaces it with a newline character. `alt+enter` is not a newline key: it queues a follow-up (`internal/tui/model.go:200-201`).
   - `up` and `down` move between wrapped rows. `alt+left` and `alt+right` move by word. `ctrl+w` deletes a word back. `ctrl+k` kills to the end of the line. `ctrl+u` kills to the start of the line (today it kills to the start of the text, `composer.go:80-82`). `home` and `end` act per line.

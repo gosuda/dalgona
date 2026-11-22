@@ -84,6 +84,9 @@ The client in `web/` reads the token from the URL fragment and opens `/rpc`. It 
 
 The page holds one `Session`, which owns the connection and the page state.
 
+Text input MUST follow [input-text.md](../../dal/spec/input-text.md).
+That contract defines required adapter changes. These requirements do not assert that the existing browser client already conforms.
+
 ### Layout
 
 - Above 52rem the page has two columns, the thread list and the workspace. The workspace holds the thread header with its status band, the transcript, and the composer. The transcript scrolls inside its own column.
@@ -247,6 +250,7 @@ While the dock scrolls, the sticky actions MAY cover part of the details until t
 While a request is open, the composer MUST keep its label, field, and actions reachable by scrolling the composer or the dock.
 
 While the card has focus, `y` MUST accept, `a` MUST accept for the session, `n` MUST decline, and Escape MUST cancel and interrupt the turn. Escape MUST answer the card at once, and the two-press guard of the composer MUST NOT apply to it.
+These shortcuts MUST NOT run while a text field or IME composition owns the event.
 
 The card MUST move focus to its title when it appears. When the card closes and no other control has focus, focus MUST move to the message field.
 
@@ -269,7 +273,15 @@ While the title or an action of the question card has focus, ArrowUp and ArrowDo
 PageUp and PageDown MUST scroll the question details by the height of the details minus 48 px. Each scroll MUST move at least 48 px.
 Home and End MUST scroll the question details to their top and to their end. The details region MUST NOT take a tab stop.
 
-Submit MUST send each answer as its option labels in option order, then the typed text. The typed text MUST be trimmed and capped at 2000 characters. Skip MUST send every question with an empty list. Dismiss and Escape MUST send `{"answers": {}}`.
+Submit MUST send each answer as its original option labels in option order, then the accepted typed text.
+Display escaping MUST NOT change an option's original label or identifier.
+Typed answers MUST obey the shared 2000 Unicode-scalar limit. They MUST NOT be trimmed or silently truncated.
+An over-limit candidate MUST remain recoverable, with a field error, and MUST NOT submit or advance.
+HTML `maxlength` MUST NOT enforce this quota because it counts UTF-16 code units.
+Skip MUST send every question with an empty list. Dismiss and Escape MUST send `{"answers": {}}`.
+After submitting, the card MUST retain its answers until `serverRequest/resolved` closes the request.
+A validation warning for that request MUST restore editing and keep its original request ID, deadline, and complete answer text.
+The card MUST NOT treat local submission as proof that the daemon accepted an answer.
 
 The card MUST move focus to its title when it appears. A `serverRequest/resolved` for a request this window still shows MUST show its notice in the notice stack.
 
@@ -349,6 +361,37 @@ On the empty view, it is the main `Start thread` button. The sidebar `Start thre
 The open thread view MUST carry the hue of its thread.
 A view with no open thread MUST carry no hue.
 
+### Text input
+
+The shared input contract applies to every editable field, including prompts, question answers, search, review targets, credentials, titles, and paths.
+Authored text MUST retain its accepted scalar sequence. Whitespace-only eligibility checks MUST NOT trim nonblank text before storage or submission.
+Derived search keys and display escapes MUST remain separate from canonical text and selected server identities.
+Multiline adapters MUST fold CRLF and lone CR to LF once under [input-text.md](../../dal/spec/input-text.md).
+A multiline paste into a one-line field MUST fail atomically with a field error and preserve the old value and selection.
+The rejected candidate MUST remain recoverable without inserting a prefix.
+
+The browser owns native editing, selection, composition, and undo within each field.
+Native editing MUST pass the shared grapheme corpus. A failing browser MUST receive a tested adapter correction before release.
+Application replacements and range conversions MUST preserve the extended grapheme boundaries required by the shared contract.
+DOM selection offsets and JavaScript string indices are UTF-16 code units. They MUST NOT be used as UTF-8 byte or grapheme counts.
+Conversion to protocol byte offsets MUST validate the original scalar sequence and both range endpoints.
+An invalid or stale keyword span MUST leave the original text visible without marks, as the shared offset contract requires.
+`TextEncoder` replacement of a lone surrogate MUST NOT turn an invalid candidate into accepted input.
+Transient unpaired surrogates MAY remain in adapter-owned composition state. They MUST NOT enter requests, history, storage, search, or keyword calls.
+
+Composition ownership MUST cover `compositionstart`, updates, the final text commit, and the key event that ends that composition.
+`isComposing`, `Process`, and legacy `229` signals supplement that ownership. A single false flag MUST NOT release a committing key to application shortcuts.
+Enter, Escape, arrows, Tab, approval keys, history, palettes, steer, and follow-up shortcuts MUST defer while composition owns them.
+Composition cancellation MUST restore the prior committed text and selection without sending, interrupting, dismissing, or accepting a request.
+An oversized composition commit MUST remain recoverable and unsent. It MUST NOT become a truncated prefix or a partial cluster.
+Synthetic event tests MUST be supplemented by the real browser and IME gates in [input-text.md](../../dal/spec/input-text.md).
+
+A completion MUST bind its field, draft revision, query, and selection range before replacement.
+An asynchronous result MUST be discarded when any binding changes. It MUST NOT edit active composition or split a grapheme.
+An accepted replacement MUST form one undoable edit and preserve the chosen path's original scalar sequence.
+Draft recovery, question review, chip expansion, history, and follow-up editing MUST preserve the same committed text.
+Each invalid field MUST expose its error through `aria-describedby` and an alert without moving focus away from the recoverable draft.
+
 ### Composer
 
 While a turn runs, Alt+Enter MUST queue the message as a follow-up. Enter MUST steer the turn instead.
@@ -361,11 +404,15 @@ ArrowDown MUST recall the next message when the caret is at the end or while you
 Typing into a recalled message MUST make the edited text the draft. The caret MUST move to the start of the message field after each recall.
 
 Text of 10 or more lines pasted into the message field MUST become a chip that shows its line count. Show MUST expand the chip text in a read-only block, and Remove MUST drop the chip.
+Line counting MUST occur after the shared line-ending conversion. The chip MUST preserve the final LF and every other accepted scalar.
+Chip identities MUST remain separate from Unicode text. Expanding a chip MUST recover its exact accepted text.
 Pasted images MUST be PNG, JPEG or GIF files of at most 5 MiB. The composer MUST keep at most 10 images. The composer MUST refuse an image with `this model does not accept images` when the selected model has no image input.
 
 Enter MUST send the typed text, then the pasted texts, then the images, as one message. A steer or follow-up MUST keep the chips for the next send.
 An empty typed text MUST NOT add a text item to the message.
 A message whose input array exceeds 15 MiB of JSON MUST stay in the composer with an error, and MUST NOT be sent. The limit is measured on the input array, not on the whole turn/start request.
+The client MUST count UTF-8 bytes of the complete serialized input array, including expanded chips, JSON escapes, and image items.
+It MUST NOT estimate that limit with JavaScript string length. Rejection MUST retain text, selection, chips, and the unsent candidate.
 The client MUST remove one slash from a message that starts with `//` on the send, steer and queue paths.
 
 A message that starts with `!` MUST be a shell command, and Enter MUST run it in the thread's working directory.
@@ -406,6 +453,10 @@ A caret move inside the same `@` word MUST NOT start another search.
 Escape MUST close the file list and MUST keep the message field.
 
 ### Commands and panels
+
+Only literal ASCII `/`, `!`, and `@` MAY trigger their command grammar.
+Unicode lookalikes MUST remain text. Parsing MUST NOT normalize the draft or trim argument payloads.
+Removing the explicit `//` escape or `!` shell marker MUST preserve the remaining text exactly.
 
 A message that starts with `/` MUST open the command list.
 The command list MUST show each command whose name starts with the text after `/`.
@@ -450,7 +501,11 @@ When a panel is taller than the viewport, only its body MUST scroll.
 `web/checks/panel-footer.js` checks these rules for the open panel and for each provider choice of the login panel.
 
 The resume panel filters thread titles, previews, and identifiers as the user types.
-A trimmed filter with at least three characters starts conversation search after a 300 ms pause.
+Conversation search starts after a 300 ms pause only when the filter contains at least one Unicode-whitespace-separated term.
+Every term MUST contain at least three Unicode scalars, matching the daemon's conversation search eligibility rule.
+Padding and separators MUST NOT count toward a term's minimum length.
+The search MUST send the unchanged filter. Derived local matching keys MUST NOT change the field or result identities.
+`ab ` and `abc de` MUST stay in local filtering without a search request. ` abc ` MUST search with its spaces preserved.
 Each new keystroke cancels the pending search and discards its results.
 The client discards search results from an earlier connection.
 The `Matches in conversations` section shows each matching title and snippet.
@@ -466,6 +521,7 @@ A save that changes `approval` MUST show `saved; open threads keep their approva
 
 The login panel MUST list each provider from `dalgona/account/providers/list`.
 An API key MUST be sent with `account/login/start` only after the user types it.
+The field MUST preserve accepted key text exactly. Invalid provider syntax MUST produce an error without trimming, normalizing, or changing the key.
 A hybrid provider MUST show the API key field and the OAuth shell command.
 A failed API-key login MUST keep the panel open and MUST show the error under the key field.
 A browser or device-code login MUST wait for `account/login/completed` with its `loginId`.

@@ -40,6 +40,8 @@ Ask the user 1 to 4 questions and wait for the answers. Use it only when the cho
 Each question has a `header` (a tab label of at most 30 characters) and a `question` (one sentence). Give 2 to 6 `options`, each with a `label` of a few words and a `description` of what that choice means. Put the option you recommend first; the user sees it marked as recommended. Add `preview` (plain text, at most 40 lines, shown in monospace) when the user must compare concrete output such as code or a layout. Set `multi_select` to true when several options can apply. Omit `options` for a free-text question.
 
 Every question with options gets an Other row where the user can type an answer, so never add an option named Other. The result lists one line per question; a typed answer appears in quotes after `Other:`. When the user skips, dismisses, or cannot be reached, the result says so; continue with your best judgment and state the assumptions you made.
+
+If the user does not answer within 5 minutes, the result says so and uses the first option of each question that has options, so make the first option one that is safe to use without an answer.
 ```
 
 ##### Wire request `item/tool/requestUserInput`
@@ -53,14 +55,14 @@ The server sends this request. The JSON-RPC `id` is the request id. Fields are c
 | `itemId` | string | required, the `ask` call id (the `dynamicToolCall` item id, `internal/rpc/serve_items.go:20`), or the `exec` call id for the sandbox choice |
 | `isBlocking` | bool | always `true` |
 | `questions[].id` | string | `q1` to `q4` for an `ask` question; `sandbox` for the sandbox choice (the protocol workstream, Step 13) |
-| `questions[].header` | string | cleaned, at most 30 characters |
-| `questions[].question` | string | cleaned, at most 500 characters |
+| `questions[].header` | string | exact validated source, nonblank, at most 30 scalars |
+| `questions[].question` | string | exact validated source, nonblank, at most 500 scalars |
 | `questions[].isOther` | bool | `true` for an `ask` question with options; `false` for the sandbox choice |
 | `questions[].isSecret` | bool | always `false` |
 | `questions[].multiSelect` | bool | extension, always written |
 | `questions[].options` | array or null | null for free text |
-| `options[].label` | string | at most 80 characters |
-| `options[].description` | string | at most 300 characters |
+| `options[].label` | string | exact validated source, nonblank, at most 80 scalars |
+| `options[].description` | string | exact validated source, nonblank, at most 300 scalars |
 | `options[].preview` | string | extension, omitted when empty |
 
 `autoResolutionMs` is never sent; it is deprecated in the schema.
@@ -86,7 +88,7 @@ A dismiss:
 ```
 
 The client answer to a question, under the Codex schema `ToolRequestUserInputResponse`:
-- `answers`: object map from question id (string) to `{ answers: string[] }`. Each answer string is an option label or the typed Other text. A multi-select answer holds 1 to 6 entries.
+- `answers`: object map from question id to `{ answers: string[] }`. Each value is an exact offered label or accepted typed text. Multi-select permits the option count plus one typed answer, with an empty list for a skipped question.
 - Cancel sends `{"answers": {}}`.
 - Example: `{"answers":{"q1":{"answers":["Keep the cache"]},"q2":{"answers":["src/a.go","src/b.go"]}}}`.
 
@@ -96,7 +98,19 @@ The client answer to a question, under the Codex schema `ToolRequestUserInputRes
 {"jsonrpc":"2.0","method":"serverRequest/resolved","params":{"threadId":"t-1","requestId":"req-k3v9x2m4q8w1z7c5","resolution":"answered"}}
 ```
 
-`resolution` is one of `answered`, `cancelled`, `interrupted` or `declined`. It is present only for questions.
+`resolution` is one of `answered`, `cancelled`, `interrupted`, `timedOut`, or `declined`. It is present only for questions.
+
+##### Correction warning
+
+```json
+{"jsonrpc":"2.0","method":"warning","params":{"threadId":"t-1","requestId":"req-k3v9x2m4q8w1z7c5","field":"answers.q1.answers[0]","reason":"text_too_large","message":"invalid text: answers.q1.answers[0]: text_too_large"}}
+```
+
+`requestId`, `field`, and `reason` supplement the existing warning contract.
+For correction, `requestId`, `field`, and `reason` are present. Other warnings may omit them.
+The warning leaves the original request pending and sends no resolution.
+The corrected response uses the same ID and nested answer shape before the original deadline.
+Validate the warning extension against both the standalone and server-notification vendored schemas.
 
 ##### Thread status
 
