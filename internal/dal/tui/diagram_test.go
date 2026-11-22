@@ -79,7 +79,7 @@ func TestRenderDiagramSvgShowsSource(t *testing.T) {
 
 func diagramBlockLines(t *testing.T, b block) []string {
 	t.Helper()
-	m := &model{}
+	m := &model{out: outState{renders: make(chan struct{}, diagramRenders)}}
 	msg, ok := m.renderDiagramBlock("block:t1:a1:0", b)().(diagramMsg)
 	if !ok || msg.key != "block:t1:a1:0" {
 		t.Fatalf("diagram command returned %#v", msg)

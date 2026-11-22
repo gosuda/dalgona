@@ -26,6 +26,12 @@ func loginURLWithHyphens(n int) string {
 
 func waitingLoginPanel(t *testing.T, width, height int, response *rpc.LoginAccountResponse) model {
 	t.Helper()
+	m, _ := drive(t, startingLoginPanel(t, width, height), resultMsg{op: "login", value: response})
+	return m
+}
+
+func startingLoginPanel(t *testing.T, width, height int) model {
+	t.Helper()
 	m := newTestModel(new(fakeCaller), Options{})
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: width, Height: height})
 	m.executeSlash("login", "chatgpt")
@@ -37,7 +43,6 @@ func waitingLoginPanel(t *testing.T, width, height int, response *rpc.LoginAccou
 	if m.login.phase != loginWaiting {
 		t.Fatalf("login phase = %v, want the waiting phase", m.login.phase)
 	}
-	m, _ = drive(t, m, resultMsg{op: "login", value: response})
 	return m
 }
 
@@ -79,14 +84,28 @@ func joinedPanelRows(t *testing.T, rows []string) string {
 	return joined.String()
 }
 
-func assertOneURLEntry(t *testing.T, m model, url string) {
+func assertOneURLEntry(t *testing.T, m model, url, code string) {
 	t.Helper()
 	found := urlEntries(m, url)
 	if len(found) != 1 {
 		t.Fatalf("history holds %d entries with the URL, want 1: %q", len(found), found)
 	}
-	if want := "Sign-in URL: " + url; found[0] != want {
+	row := "Sign-in URL: " + url
+	want := row
+	if code != "" {
+		want += "\nUser code: " + code
+	}
+	if found[0] != want {
 		t.Fatalf("history entry = %q, want %q", found[0], want)
+	}
+}
+
+func assertPrintedRowsHideTheCode(t *testing.T, response *rpc.LoginAccountResponse) {
+	t.Helper()
+	m := rawUpdate(t, startingLoginPanel(t, 20, 6), resultMsg{op: "login", value: response})
+	printed := strings.Join(m.out.pending, "")
+	if !strings.Contains(printed, response.VerificationURL) || strings.Contains(printed, response.UserCode) {
+		t.Fatalf("printed rows = %q, want the sign-in URL without the user code %q", m.out.pending, response.UserCode)
 	}
 }
 
@@ -102,7 +121,7 @@ func TestLoginURLShownWhole(t *testing.T) {
 	if got := joinedPanelRows(t, rows); got != url {
 		t.Fatalf("panel body rows joined = %q\nwant the sign-in URL %q", got, url)
 	}
-	assertOneURLEntry(t, m, url)
+	assertOneURLEntry(t, m, url, "")
 	if strings.Contains(m.notice, url) {
 		t.Fatalf("notice %q repeats the URL the panel shows", m.notice)
 	}
@@ -121,7 +140,7 @@ func TestLoginURLShownWholeKeepsTheCodeAndTheWaitingState(t *testing.T) {
 	}
 	frame := ansi.Strip(strings.Join(m.dockLines(), "\n"))
 	assertContains(t, frame, "Esc cancel the sign-in", "waiting for the provider")
-	assertOneURLEntry(t, m, url)
+	assertOneURLEntry(t, m, url, "ABCD-1234")
 }
 
 func TestLoginURLShownWholeStripsEscapeSequences(t *testing.T) {
@@ -254,5 +273,45 @@ func TestLoginURLStaysInReviewWhenNoBodyRowFits(t *testing.T) {
 	}
 	if joined := strings.ReplaceAll(strings.Join(seen, ""), " ", ""); !strings.Contains(joined, url) {
 		t.Fatalf("review rows joined = %q\nwant them to hold the sign-in URL %q", joined, url)
+	}
+}
+
+func reviewRowsJoined(t *testing.T, m model, presses int) string {
+	t.Helper()
+	m, _ = drive(t, m, press('o', tea.ModCtrl, ""))
+	if m.review == nil {
+		t.Fatal("ctrl+o did not open the review")
+	}
+	var seen []string
+	for range presses {
+		for _, line := range strings.Split(ansi.Strip(m.View().Content), "\n") {
+			line = strings.TrimRight(line, " ")
+			if !strings.HasPrefix(line, "Review ·") && !strings.HasPrefix(line, "↑↓ scroll") && !slices.Contains(seen, line) {
+				seen = append(seen, line)
+			}
+		}
+		m, _ = drive(t, m, press(tea.KeyDown, 0, ""))
+	}
+	return strings.ReplaceAll(strings.Join(seen, ""), " ", "")
+}
+
+func TestLoginDeviceCodeStaysInReviewWhenNoBodyRowFits(t *testing.T) {
+	t.Parallel()
+	url := loginURLWithHyphens(200)
+	response := &rpc.LoginAccountResponse{Type: "chatgptDeviceCode", LoginID: "login-1", VerificationURL: url, UserCode: "WXYZ-9876"}
+	assertPrintedRowsHideTheCode(t, response)
+	m := waitingLoginPanel(t, 20, 6, response)
+	assertFrame(t, m.dockLines(), 20, 6)
+	for _, line := range m.dockLines() {
+		if strings.HasPrefix(ansi.Strip(line), "│ ") {
+			t.Fatalf("panel shows the body row %q at 20x6, want none", ansi.Strip(line))
+		}
+	}
+	joined := reviewRowsJoined(t, m, 200)
+	if !strings.Contains(joined, url) {
+		t.Fatalf("review rows joined = %q\nwant them to hold the sign-in URL %q", joined, url)
+	}
+	if !strings.Contains(joined, "Usercode:WXYZ-9876") {
+		t.Fatalf("review rows joined = %q\nwant them to hold the row User code: WXYZ-9876", joined)
 	}
 }

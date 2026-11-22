@@ -7,6 +7,7 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 type mdKey struct {
@@ -58,7 +59,14 @@ func (m *model) renderMarkdown(text string) string {
 	if err != nil {
 		return "markdown unavailable: " + err.Error() + "\n" + text
 	}
-	return strings.TrimSpace(rendered)
+	rows := strings.Split(rendered, "\n")
+	for len(rows) > 0 && strings.TrimSpace(xansi.Strip(rows[0])) == "" {
+		rows = rows[1:]
+	}
+	for len(rows) > 0 && strings.TrimSpace(xansi.Strip(rows[len(rows)-1])) == "" {
+		rows = rows[:len(rows)-1]
+	}
+	return strings.TrimRight(strings.Join(rows, "\n"), " ")
 }
 
 func (m *model) renderBlock(b block) []string {

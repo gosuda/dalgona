@@ -43,6 +43,8 @@ var diagramBudget = 2 * time.Second
 
 const diagramSourceLimit = 16 << 10
 
+const diagramRenders = 2
+
 var errDiagramTooLarge = errors.New("too large to draw")
 
 func isDiagramLang(lang string) bool {
@@ -107,8 +109,13 @@ func newD2Gate() *d2Gate {
 	return &d2Gate{slot: make(chan struct{}, 1)}
 }
 
+func (g *d2Gate) overdue() bool {
+	due := g.due.Load()
+	return due != 0 && time.Now().UnixNano() >= due
+}
+
 func (g *d2Gate) enter(ctx context.Context) (func(), error) {
-	if due := g.due.Load(); due != 0 && time.Now().UnixNano() >= due {
+	if g.overdue() {
 		return nil, errD2Busy
 	}
 	select {
@@ -280,7 +287,25 @@ func (m *model) renderDiagramBlock(key string, b block) tea.Cmd {
 		draw = drawDiagram
 	}
 	return func() tea.Msg {
-		return diagramMsg{key: key, lines: diagramLines(draw, b)}
+		return diagramMsg{key: key, lines: diagramLines(gatedDraw(m.out.renders, d2Layouts, draw), b)}
+	}
+}
+
+func gatedDraw(slots chan struct{}, d2 *d2Gate, draw drawFunc) drawFunc {
+	return func(ctx context.Context, kind, source string) (string, error) {
+		if kind == "d2" && d2.overdue() {
+			return "", errD2Busy
+		}
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		defer func() { <-slots }()
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return draw(ctx, kind, source)
 	}
 }
 
