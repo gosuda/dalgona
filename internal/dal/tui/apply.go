@@ -356,7 +356,7 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 	if m.thread.lastTurn == 0 && !m.thread.turnStartedAt.IsZero() {
 		m.thread.lastTurn = m.now().Sub(m.thread.turnStartedAt)
 	}
-	m.thread.turnSent = false
+	m.thread.turnStartedAt = time.Time{}
 	m.live.plan = nil
 	m.live.retryUntil = time.Time{}
 	m.setState(turnState(event.Turn.Status))
@@ -587,7 +587,6 @@ func (m *model) setThread(id string) {
 	m.thread.completedTurns = nil
 	m.thread.lastTurn = 0
 	m.thread.turnStartedAt = time.Time{}
-	m.thread.turnSent = false
 	m.live.plan = nil
 	m.live.retryUntil = time.Time{}
 	m.forgetUnshownPatches()

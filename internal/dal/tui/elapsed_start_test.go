@@ -186,3 +186,37 @@ func TestElapsedOfSentTurnCountsFromEnterWhenTurnStartedPrecedesTheReply(t *test
 	m, _ = drive(t, m, turnStartedAt("turn-1", clock.now))
 	requireElapsed(t, m, "30 ms", "turn/started before the turn/start reply")
 }
+
+func TestElapsedHidesPreviousTurnAgeWhenAThreadStatusMakesTheTurnLive(t *testing.T) {
+	t.Parallel()
+	active := notificationMsg{method: "thread/status/changed", params: []byte(`{"threadId":"t1","status":{"type":"active","activeFlags":[]}}`)}
+	ends := map[string]func(t *testing.T, m model, clock *elapsedClock) model{
+		"a completed turn": func(t *testing.T, m model, clock *elapsedClock) model {
+			m = sendTyped(t, m, "a")
+			m, _ = drive(t, m, turnStartedAt("turn-1", clock.now))
+			clock.advance(5 * time.Second)
+			m, _ = drive(t, m, turnCompletedMsg("turn-1"))
+			return m
+		},
+		"a failed send": func(t *testing.T, m model, clock *elapsedClock) model {
+			m = typeText(t, m, "a")
+			m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+			clock.advance(5 * time.Second)
+			m, _ = drive(t, m, resultMsg{op: "send", text: "a", err: errors.New("broken pipe")})
+			return m
+		},
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			m, clock := elapsedModel(t)
+			m = end(t, m, clock)
+			clock.advance(4 * time.Second)
+			m, _ = drive(t, m, active)
+			if !m.turnLive() {
+				t.Fatalf("an active thread status after %s left the turn not live", name)
+			}
+			requireElapsed(t, m, "", "an active thread status after "+name)
+		})
+	}
+}

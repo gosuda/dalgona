@@ -607,7 +607,7 @@ func (m *model) restorePrompt(msg resultMsg) {
 	}
 	if msg.op == "send" || msg.op == "followup" {
 		m.setState(stateFailed)
-		m.thread.turnSent = false
+		m.thread.turnStartedAt = time.Time{}
 	}
 }
 
