@@ -24,7 +24,7 @@ describe("button type", () => {
 		expect(rule.style.getPropertyValue("white-space")).toBe("nowrap");
 	});
 
-	test("comes after the base button rule, so its label type wins", () => {
+	test("sits after the base button rule in app.css", () => {
 		const selectors = ruleSelectors();
 		expect(selectors.indexOf(selector)).toBeGreaterThan(
 			selectors.indexOf("button"),
