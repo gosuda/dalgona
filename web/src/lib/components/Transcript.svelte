@@ -117,7 +117,7 @@ let reviewTarget = $state<TranscriptEntry | null>(null);
 let followedThread: string | null = null;
 let following = $state(true);
 let unseen = $state(0);
-const showJump = $derived(!following);
+const showJump = $derived(threadId !== null && !following);
 let scrollQueued = false;
 let scrolledSnapshot: ScrollSnapshot = { count: 0, lastId: null };
 let seen: { target: Element; height: number } | null = null;
@@ -162,6 +162,7 @@ $effect(() => {
 		unseen = 0;
 		scrolledSnapshot = { count: 0, lastId: null };
 	}
+	if (threadId === null) return;
 	const nextSnapshot: ScrollSnapshot = {
 		count: currentItems.length,
 		lastId: currentItems.at(-1)?.id ?? null,

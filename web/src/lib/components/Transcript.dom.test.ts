@@ -603,4 +603,92 @@ describe("following the end", () => {
 			Reflect.deleteProperty(page, "scrollTop");
 		}
 	});
+
+	test("scrolls nothing while no thread is open", async () => {
+		const scrollTo = vi.fn();
+		const page = document.createElement("div");
+		Object.defineProperty(page, "scrollTo", { value: scrollTo });
+		const spy = vi
+			.spyOn(document, "scrollingElement", "get")
+			.mockReturnValue(page);
+		try {
+			render(Transcript, {
+				props: { ...props([]), threadId: null, turnStatus: null },
+			});
+			await frames(2);
+			expect(scrollTo).not.toHaveBeenCalled();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	test("shows no Jump to latest while no thread is open", async () => {
+		render(Transcript, {
+			props: { ...props([]), threadId: null, turnStatus: null },
+		});
+		await frames(2);
+		const page = document.scrollingElement;
+		if (page === null) throw new Error("no scrolling element");
+		Object.defineProperty(page, "scrollHeight", {
+			configurable: true,
+			value: 5000,
+		});
+		Object.defineProperty(page, "clientHeight", {
+			configurable: true,
+			value: 800,
+		});
+		Object.defineProperty(page, "scrollTop", {
+			configurable: true,
+			writable: true,
+			value: 0,
+		});
+		try {
+			await fireEvent.scroll(document);
+			await fireEvent.scroll(document);
+			expect(jump()).toBeNull();
+		} finally {
+			Reflect.deleteProperty(page, "scrollHeight");
+			Reflect.deleteProperty(page, "clientHeight");
+			Reflect.deleteProperty(page, "scrollTop");
+		}
+	});
+
+	test("reopening a thread after none was open follows its end", async () => {
+		const items = [reply("m1", "first", true)];
+		const { rerender } = render(Transcript, { props: props(items) });
+		await frames(2);
+		await rerender({ ...props([]), threadId: null, turnStatus: null });
+		await frames(2);
+		const page = document.scrollingElement;
+		if (page === null) throw new Error("no scrolling element");
+		Object.defineProperty(page, "scrollHeight", {
+			configurable: true,
+			value: 5000,
+		});
+		Object.defineProperty(page, "clientHeight", {
+			configurable: true,
+			value: 800,
+		});
+		Object.defineProperty(page, "scrollTop", {
+			configurable: true,
+			writable: true,
+			value: 0,
+		});
+		try {
+			await fireEvent.scroll(document);
+			await fireEvent.scroll(document);
+		} finally {
+			Reflect.deleteProperty(page, "scrollHeight");
+			Reflect.deleteProperty(page, "clientHeight");
+			Reflect.deleteProperty(page, "scrollTop");
+		}
+		await rerender({ ...props(items) });
+		const scroller = growingScroller();
+		await frames(2);
+		expect(scroller.scrollTo).toHaveBeenCalledWith({
+			top: 1000,
+			behavior: "auto",
+		});
+		expect(jump()).toBeNull();
+	});
 });
