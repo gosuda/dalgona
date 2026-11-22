@@ -52,32 +52,33 @@ type caller interface {
 }
 
 type model struct {
-	conn        connInfo
-	thread      threadInfo
-	live        liveState
-	input       inputState
-	screen      screenState
-	out         outState
-	notice      string
-	noticeError bool
-	noticeN     int
-	hint        hintState
-	queue       []followup
-	leaving     bool
-	quitting    bool
-	suspending  bool
-	approvals   []approval
-	list        *listPanel
-	confirm     *confirmation
-	login       *loginPanel
-	help        *helpPanel
-	matchSeq    int
-	listSeq     int
-	review      *reviewState
-	settings    *settingsPanel
-	saving      *settingsPanel
-	prefs       map[string]string
-	pending     *pendingResume
+	conn          connInfo
+	thread        threadInfo
+	live          liveState
+	input         inputState
+	screen        screenState
+	out           outState
+	notice        string
+	noticeError   bool
+	noticePrinted bool
+	noticeN       int
+	hint          hintState
+	queue         []followup
+	leaving       bool
+	quitting      bool
+	suspending    bool
+	approvals     []approval
+	list          *listPanel
+	confirm       *confirmation
+	login         *loginPanel
+	help          *helpPanel
+	matchSeq      int
+	listSeq       int
+	review        *reviewState
+	settings      *settingsPanel
+	saving        *settingsPanel
+	prefs         map[string]string
+	pending       *pendingResume
 }
 
 const pendingResumeLimit = 4096

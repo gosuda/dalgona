@@ -50,6 +50,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		command = tea.Batch(command, m.matchKeywords())
 	}
 	if m.notice != notice {
+		m.noticePrinted = false
 		m.commitOverflowNotice()
 	}
 	settle := m.settle()
@@ -100,6 +101,9 @@ func (m *model) resizeTerminal(msg tea.WindowSizeMsg) {
 	m.fitReview()
 	if p := m.settings; p != nil && p.saveErr != "" && !p.saveErrPrinted {
 		p.saveErrPrinted = m.commitOverflow(p.saveErr, p.saveErr)
+	}
+	if !m.noticePrinted {
+		m.commitOverflowNotice()
 	}
 	if m.out.printing {
 		m.out.frozen = m.presentedDock()
@@ -540,7 +544,7 @@ func (m *model) commitOverflowNotice() {
 	if m.notice == "" {
 		return
 	}
-	m.commitOverflow(m.notice, m.noticeLine())
+	m.noticePrinted = m.commitOverflow(m.notice, m.noticeLine())
 }
 
 func (m *model) commitOverflow(text, line string) bool {

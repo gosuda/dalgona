@@ -431,6 +431,43 @@ func TestMultiLineNoticeCutInLiveRowIsCommitted(t *testing.T) {
 	}
 }
 
+func TestNoticePrintsWholeRightAfterANarrowingCutsIt(t *testing.T) {
+	t.Parallel()
+	const want = "Signed in to provider-example. Run /model to choose a model"
+	m := newTestModel(new(fakeCaller), Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 24})
+	m.noticef("%s", want)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 24})
+	if len(m.out.entries) != 0 {
+		t.Fatalf("a notice that fits the live row printed rows: %+v", m.out.entries)
+	}
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	if cells := cellCount(m, m.noticeLine()); cells <= m.liveFreeWidth() {
+		t.Fatalf("precondition: the notice takes %d cells, free width %d", cells, m.liveFreeWidth())
+	}
+	requireWholeErrorRow(t, m, 40, want)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 24})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	if len(m.out.entries) != 1 {
+		t.Fatalf("widening and narrowing again printed the notice again: %+v", m.out.entries)
+	}
+}
+
+func TestNoticeCutWhenSetPrintsOnceAcrossResizes(t *testing.T) {
+	t.Parallel()
+	const want = "Signed in to provider-example. Run /model to choose a model"
+	m := newTestModel(new(fakeCaller), Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	m.noticef("%s", want)
+	m.commitOverflowNotice()
+	requireWholeErrorRow(t, m, 40, want)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 24})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	if len(m.out.entries) != 1 {
+		t.Fatalf("a resize printed the notice a second time: %+v", m.out.entries)
+	}
+}
+
 func TestActivityNamesCommandAndFileChange(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{})
