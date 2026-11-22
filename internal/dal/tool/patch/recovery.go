@@ -101,10 +101,18 @@ func currentUncovered(store *snapshot.Store, cause *coverageError) ([]tool.LineR
 	if err != nil {
 		return nil, false
 	}
-	var current []tool.LineRange
-	for _, gap := range uncovered(shown, cause.first, cause.last) {
-		span, mapErr := store.ResolveSpan(cause.ref, cause.path, cause.before, snapshot.Span{Start: gap.Start - 1, End: gap.End})
-		if mapErr != nil || span.End <= span.Start {
+	gaps := uncovered(shown, cause.first, cause.last)
+	targets := make([]snapshot.Span, len(gaps))
+	for i, gap := range gaps {
+		targets[i] = snapshot.Span{Start: gap.Start - 1, End: gap.End}
+	}
+	spans, err := store.ResolveSpans(cause.ref, cause.path, cause.before, targets)
+	if err != nil {
+		return nil, false
+	}
+	current := make([]tool.LineRange, 0, len(spans))
+	for _, span := range spans {
+		if span.End <= span.Start {
 			return nil, false
 		}
 		current = append(current, tool.LineRange{First: span.Start + 1, Last: span.End})
