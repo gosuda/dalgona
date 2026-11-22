@@ -73,4 +73,5 @@ func (m *model) applyImage(msg imageMsg) {
 		bytes: size,
 	}
 	m.input.composer.attach(msg.text, msg.at, ch)
+	m.input.composer.settleVerbatim()
 }

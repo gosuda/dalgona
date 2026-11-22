@@ -353,6 +353,7 @@ A queued follow-up whose draft began with a chip MUST be sent unchanged after Al
 A typed follow-up MUST return after Alt+Up and a failed start as typed text, which the slash rule reads.
 A draft that Ctrl+C saves MUST decide whether the history sends the entry it repeats unchanged, unless that entry is a sent message.
 A user message that starts with `/` MUST be sent unchanged from the history until the user edits its text, live or resumed.
+An image chip that enters a recalled draft MUST count as an edit of its text.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB MUST be refused with a notice that names the limit.
 Ctrl+V MUST paste an image from the clipboard through `wl-paste`, `xclip`, `pngpaste`, or PowerShell.
