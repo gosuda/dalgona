@@ -155,3 +155,69 @@ func TestLegacyStylesTakeNoPathTextCap(t *testing.T) {
 		})
 	}
 }
+
+func controlCharPaths(count int) []string {
+	dir := strings.Repeat("d", 60)
+	name := strings.Repeat("\x01", 190)
+	paths := make([]string, count)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("%s/%02d%s", dir, i, name)
+	}
+	return paths
+}
+
+func quotedSections(paths []string) string {
+	var out strings.Builder
+	for _, path := range paths {
+		out.WriteString("[" + snapshot.JSONString(path) + "#NEW]\nPUT >$:\n+x\n")
+	}
+	return out.String()
+}
+
+func (c pathCall) requireEncodedRefusal(t *testing.T, style Style) {
+	t.Helper()
+	plan, err := c.plan(t, style)
+	if err == nil {
+		plan.Discard()
+		t.Fatalf("%s planned a call whose paths encode over the outcome meta budget", style)
+	}
+	requireWrappedOutcome(t, err, style, rejected(tool.ReasonResourceLimit, tool.ErrClassLimit))
+	if !strings.Contains(err.Error(), "meta") {
+		t.Fatalf("%s error %q does not name the outcome meta budget", style, err)
+	}
+}
+
+func TestPathTextEncodedSizeIsResourceLimit(t *testing.T) {
+	paths := controlCharPaths(17)
+	raw := 0
+	for _, path := range paths {
+		raw += len(path)
+	}
+	if raw > pathTextBytes {
+		t.Fatalf("fixture paths total %d raw bytes, over the raw cap", raw)
+	}
+	t.Run("C14/encoded over", func(t *testing.T) {
+		env, cwd := editTestEnv(t)
+		call := pathCall{env: env, cwd: cwd, input: quotedSections(paths)}
+		for _, style := range profileStyles {
+			call.requireEncodedRefusal(t, style)
+		}
+	})
+	t.Run("C15/encoded under stays under 48 KiB", func(t *testing.T) {
+		accepted := controlCharPaths(16)
+		env, cwd := editTestEnv(t)
+		call := pathCall{env: env, cwd: cwd, input: quotedSections(accepted)}
+		for _, style := range profileStyles {
+			plan, err := call.plan(t, style)
+			if err != nil {
+				t.Fatalf("%s refused paths inside the encoded budget: %v", style, err)
+			}
+			plan.Discard()
+		}
+		states := pathStatesOf(accepted, func(int) string { return tool.PathUnknown })
+		meta, err := stamped(HashlineLight, writeOutcome(states, len(states), 0)).Meta(false)
+		if err != nil || len(meta) >= 48<<10 {
+			t.Fatalf("meta of %d bytes, %v; want an object under 48 KiB", len(meta), err)
+		}
+	})
+}

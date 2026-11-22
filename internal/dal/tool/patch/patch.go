@@ -79,7 +79,11 @@ func (e Editor) plan(ctx context.Context, call tool.Call, env tool.Env) (tool.Pl
 	}, nil
 }
 
-const maxPathText = 16 << 10
+const (
+	maxPathText        = 16 << 10
+	maxPathMetaBytes   = 20 << 10
+	pathStateEntrySize = len(`{"path":"","state":""},`) + len("unknown")
+)
 
 func editPaths(edits []edit) []string {
 	var paths []string
@@ -98,14 +102,27 @@ func editPaths(edits []edit) []string {
 }
 
 func checkPathText(paths []string) error {
-	total := 0
+	total, encoded := 0, 0
 	for _, path := range paths {
 		total += len(path)
+		encoded += encodedPathSize(path)
 	}
 	if total > maxPathText {
 		return reasoned(tool.ReasonResourceLimit, errors.New("patch: the paths of this call total over 16 KiB; split the change into several calls"))
 	}
+	if encoded > maxPathMetaBytes {
+		return reasoned(tool.ReasonResourceLimit, errors.New("patch: the paths of this call encode over the outcome meta budget; split the change into several calls"))
+	}
 	return nil
+}
+
+func encodedPathSize(path string) int {
+	var buf bytes.Buffer
+	enc := jsontext.NewEncoder(&buf)
+	if err := enc.WriteToken(jsontext.String(path)); err != nil {
+		return len(path) + pathStateEntrySize
+	}
+	return buf.Len() - 3 + pathStateEntrySize
 }
 
 func payload(style Style, raw jsontext.Value) (string, error) {
