@@ -540,12 +540,13 @@ func (m *model) commitOverflowNotice() {
 	m.commitOverflow(m.notice, m.noticeLine())
 }
 
-func (m *model) commitOverflow(text, line string) {
+func (m *model) commitOverflow(text, line string) bool {
 	if m.screen.cells(line) <= m.liveFreeWidth() {
-		return
+		return false
 	}
 	m.commit(fmt.Sprintf("note:%d", m.noticeN), m.screen.wrap(text, terminalWidth(m.screen.width)))
 	m.noticeN++
+	return true
 }
 
 func (m *model) applyModeReport(msg tea.ModeReportMsg) {
