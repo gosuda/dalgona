@@ -322,9 +322,8 @@ func (m *model) applyTurnStarted(params jsontext.Value) error {
 	m.thread.turnID = event.Turn.ID
 	m.thread.turnEffort = nil
 	m.thread.turnRevision++
-	m.thread.turnStartedAt = m.now()
-	if event.Turn.StartedAt != 0 {
-		m.thread.turnStartedAt = time.Unix(event.Turn.StartedAt, 0)
+	if m.thread.turnStartedAt.IsZero() {
+		m.thread.turnStartedAt = m.now()
 	}
 	m.noticef("")
 	m.live.planN = 0
@@ -355,6 +354,7 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 	if m.thread.lastTurn == 0 && !m.thread.turnStartedAt.IsZero() {
 		m.thread.lastTurn = m.now().Sub(m.thread.turnStartedAt)
 	}
+	m.thread.turnStartedAt = time.Time{}
 	m.live.plan = nil
 	m.live.retryUntil = time.Time{}
 	m.setState(turnState(event.Turn.Status))
