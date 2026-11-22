@@ -45,15 +45,20 @@ func requireCellAttrs(t *testing.T, run *emulatedRun, text string, want uint8, w
 	}
 }
 
-func requireColourOffLiveRow(t *testing.T, profile colorprofile.Profile) {
+func requireColourOffLiveRow(t *testing.T, profile colorprofile.Profile, profileFirst bool) {
 	t.Helper()
 	run := startEmulated(80, 24, nil)
 	defer run.stop()
 	run.send(commandDone("seq 1"))
 	run.waitFor(t, "first row printed", func(h, s string) bool { return rowCount(h, s, "seq 1") == 1 })
-	run.send(tea.ColorProfileMsg{Profile: profile})
+	if profileFirst {
+		run.send(tea.ColorProfileMsg{Profile: profile})
+	}
 	run.send(tea.EnvMsg([]string{"TERM=dumb", "NO_COLOR=1"}))
-	run.send(tea.ColorProfileMsg{Profile: profile})
+	if !profileFirst {
+		synctest.Wait()
+		run.send(tea.ColorProfileMsg{Profile: profile})
+	}
 	run.send(notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)})
 	waitModel(t, run, "turn running", func(m model) bool { return m.thread.state == stateRunning })
 	time.Sleep(12 * time.Second)
@@ -70,9 +75,15 @@ func requireColourOffLiveRow(t *testing.T, profile colorprofile.Profile) {
 func TestColourOffKeepsLiveTagReverseOnDumbTerminal(t *testing.T) {
 	t.Parallel()
 	for _, profile := range []colorprofile.Profile{colorprofile.NoTTY, colorprofile.ASCII} {
-		t.Run(profile.String(), func(t *testing.T) {
-			t.Parallel()
-			synctest.Test(t, func(t *testing.T) { requireColourOffLiveRow(t, profile) })
-		})
+		for _, profileFirst := range []bool{true, false} {
+			order := "ProfileAfterEnv"
+			if profileFirst {
+				order = "ProfileBeforeEnv"
+			}
+			t.Run(profile.String()+"/"+order, func(t *testing.T) {
+				t.Parallel()
+				synctest.Test(t, func(t *testing.T) { requireColourOffLiveRow(t, profile, profileFirst) })
+			})
+		}
 	}
 }
