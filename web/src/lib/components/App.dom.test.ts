@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import {
+	cleanup,
+	fireEvent,
+	render,
+	screen,
+	within,
+} from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -64,14 +70,16 @@ describe("requests elsewhere", () => {
 	});
 });
 
-function sessionWithHandler(port: () => RpcPort = idlePort): {
+function sessionWithHandler(
+	port: (handlers: RpcHandlers) => RpcPort = idlePort,
+): {
 	session: Session;
 	handlers: RpcHandlers;
 } {
 	let handlers: RpcHandlers | undefined;
 	const session = new Session((_url, incoming) => {
 		handlers = incoming;
-		return port();
+		return port(incoming);
 	});
 	session.start({
 		hash: "#token=abc",
@@ -105,6 +113,141 @@ function threadSummary(
 		cwd: "/work/app",
 	};
 }
+
+describe("file completion across threads", () => {
+	afterEach(cleanup);
+
+	test("reopens an escaped completion under a different workspace root", async () => {
+		const threads = [
+			{ id: "old", name: "Old thread", root: "/old" },
+			{ id: "same", name: "Same workspace", root: "/old" },
+			{ id: "new", name: "New workspace", root: "/new" },
+		].map((entry) => ({
+			...entry,
+			cwd: "/sidebar-only",
+			updatedAt: 1,
+			status: { type: "idle" },
+			turns: [{ id: "turn-1", status: "completed", items: [] }],
+		}));
+		const searches: JsonValue[] = [];
+		const submitted: JsonValue[] = [];
+		const newReply = Promise.withResolvers<unknown>();
+		const { session } = sessionWithHandler((handlers) => ({
+			...idlePort(),
+			open: () => {
+				handlers.onStateChange("connected");
+				return Promise.resolve();
+			},
+			call: async <T>(
+				method: string,
+				params: JsonValue,
+				parse: (value: unknown) => T,
+			): Promise<T> => {
+				switch (method) {
+					case "initialize":
+						return parse({
+							userAgent: "dalgona/test",
+							platformFamily: "unix",
+							platformOs: "linux",
+						});
+					case "model/list":
+						return parse({ data: [] });
+					case "config/read":
+						return parse({ config: { model: "gpt-test" }, origins: {} });
+					case "dalgona/keywords/list":
+					case "dalgona/keywords/match":
+					case "dalgona/advisor/status":
+						return parse([]);
+					case "dalgona/settings/read":
+						return parse({ settings: [] });
+
+					case "thread/list":
+						return parse({ data: threads, nextCursor: null });
+					case "thread/resume": {
+						const thread = threads.find(
+							({ id }) =>
+								params !== null &&
+								typeof params === "object" &&
+								"threadId" in params &&
+								params["threadId"] === id,
+						);
+						if (!thread) throw new Error("unknown thread");
+						return parse({
+							thread,
+							cwd: thread.root,
+							model: "gpt-test",
+							approvalsReviewer: "user",
+							modelProvider: "openai",
+							approvalPolicy: "on-request",
+							sandbox: "workspace-write",
+						});
+					}
+					case "fuzzyFileSearch":
+						searches.push(params);
+						if (searches.length === 3) return parse(await newReply.promise);
+						return parse({
+							files: [{ file_name: "old.go", path: "old.go", root: "/old" }],
+						});
+					case "turn/start":
+						submitted.push(params);
+						throw new Error("unexpected turn");
+					default:
+						throw new Error(`unexpected call ${method}`);
+				}
+			},
+		}));
+		try {
+			render(App, { props: { session } });
+			const sidebar = within(
+				await screen.findByRole("navigation", { name: "Conversation threads" }),
+			);
+			await fireEvent.click(
+				sidebar.getByRole("button", { name: /^Old thread/ }),
+			);
+			await vi.waitFor(() => expect(session.activeThreadId).toBe("old"));
+			const field = screen.getByRole("textbox", {
+				name: "Message",
+			}) as HTMLTextAreaElement;
+			await fireEvent.input(field, { target: { value: "@mod" } });
+			await screen.findByRole("listbox", { name: "Files" });
+			await fireEvent.keyDown(field, { key: "Escape" });
+			expect(screen.queryByRole("listbox", { name: "Files" })).toBeNull();
+
+			await fireEvent.click(
+				sidebar.getByRole("button", { name: /^Same workspace/ }),
+			);
+			await vi.waitFor(() => expect(searches).toHaveLength(2));
+			expect(screen.queryByRole("listbox", { name: "Files" })).toBeNull();
+
+			await fireEvent.click(
+				sidebar.getByRole("button", { name: /^New workspace/ }),
+			);
+			await vi.waitFor(() => expect(searches).toHaveLength(3));
+			expect(searches).toEqual(
+				["/old", "/old", "/new"].map((root) => ({
+					query: "mod",
+					roots: [root],
+					cancellationToken: "composer",
+				})),
+			);
+			await fireEvent.keyDown(field, { key: "Enter" });
+			expect(submitted).toEqual([]);
+			expect(field.value).toBe("@mod");
+
+			newReply.resolve({
+				files: [{ file_name: "new.go", path: "new.go", root: "/new" }],
+			});
+			expect((await screen.findByRole("option")).textContent).toContain(
+				"new.go",
+			);
+			await fireEvent.keyDown(field, { key: "Tab" });
+			expect(field.value).toBe("@new.go ");
+			expect(submitted).toEqual([]);
+		} finally {
+			session.stop();
+		}
+	});
+});
 
 describe("elapsed counter under reduced motion", () => {
 	afterEach(() => {

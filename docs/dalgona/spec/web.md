@@ -453,6 +453,7 @@ When the root changes and the mention still has a query, the client MUST search 
 Enter or Tab MUST NOT send the message while a search for the current text is pending.
 A caret move inside the same `@` word MUST NOT start another search.
 Escape MUST close the file list and MUST keep the message field.
+A change to a different search root MUST clear that dismissal.
 
 ### Commands and panels
 

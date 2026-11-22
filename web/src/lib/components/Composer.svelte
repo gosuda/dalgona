@@ -116,7 +116,7 @@ let paletteActive = $state(0);
 const paletteOpen = $derived(commandQuery !== null && !paletteClosed);
 const paletteId = "command-palette";
 let caret = $state(0);
-let mentionClosed = $state(false);
+let dismissedFileRoot = $state<string | null>(null);
 let fileActive = $state(0);
 let fileResult = $state<{
 	root: string;
@@ -133,6 +133,9 @@ const mention = $derived(
 const mentionQuery = $derived(mention?.query ?? null);
 const searchRoot = $derived(
 	disabled || !fileSearchRoot ? null : fileSearchRoot,
+);
+const mentionClosed = $derived(
+	dismissedFileRoot !== null && dismissedFileRoot === fileSearchRoot,
 );
 const currentFileResult = $derived(
 	fileResult?.root === searchRoot && fileResult.query === mentionQuery
@@ -232,6 +235,12 @@ $effect(() => {
 });
 
 $effect(() => {
+	if (fileSearchRoot && dismissedFileRoot !== fileSearchRoot) {
+		dismissedFileRoot = null;
+	}
+});
+
+$effect(() => {
 	const root = searchRoot;
 	const query = mentionQuery;
 	const seq = ++fileSeq;
@@ -266,7 +275,7 @@ function onFileKey(event: KeyboardEvent): boolean {
 	}
 	if (event.key === "Escape") {
 		if (!fileOpen) return false;
-		mentionClosed = true;
+		dismissedFileRoot = fileSearchRoot;
 		return true;
 	}
 	const accepts =
@@ -544,7 +553,7 @@ function onKeydown(event: KeyboardEvent): void {
 				syncCaret(event.currentTarget);
 				browsing = null;
 				paletteClosed = false;
-				mentionClosed = false;
+				dismissedFileRoot = null;
 			}}
 			onkeyup={(event) => syncCaret(event.currentTarget)}
 			onclick={(event) => syncCaret(event.currentTarget)}
