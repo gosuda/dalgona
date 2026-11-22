@@ -447,10 +447,13 @@ With no working directory known, the file search MUST send no request and MUST s
 The file list MUST show up to 20 files, each with its file name and its path.
 Arrow keys move only through the shown rows, at most 20.
 Enter or Tab MUST insert the highlighted path as `@<path>` followed by a space, and MUST NOT send the message.
-A change to the text after `@` MUST clear the file list at once.
+A change to the text after `@` or to the search root MUST clear the file list at once.
+A reply for an earlier search MUST NOT change the list.
+When the root changes and the mention still has a query, the client MUST search again under the new root.
 Enter or Tab MUST NOT send the message while a search for the current text is pending.
 A caret move inside the same `@` word MUST NOT start another search.
 Escape MUST close the file list and MUST keep the message field.
+A change to a different search root MUST clear that dismissal.
 
 ### Commands and panels
 

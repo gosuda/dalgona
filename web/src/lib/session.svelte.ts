@@ -233,7 +233,7 @@ export class Session {
 	private cancelScheduledAttempt: (() => void) | null = null;
 	private cancelStableCheck: (() => void) | null = null;
 	private selectionGeneration = 0;
-	private openCwd: string | null = null;
+	private openCwd: string | null = $state(null);
 	private accessToken = "";
 	private readonly effects: Effects;
 
@@ -1061,8 +1061,12 @@ export class Session {
 		);
 	}
 
+	get fileSearchRoot(): string | null {
+		return this.activeThreadId === null ? null : this.openCwd;
+	}
+
 	async searchFiles(query: string): Promise<readonly FileMatch[]> {
-		const root = this.openCwd;
+		const root = this.fileSearchRoot;
 		if (!root) return [];
 		return this.requireClient().call(
 			"fuzzyFileSearch",
