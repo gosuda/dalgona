@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,13 +36,19 @@ func TestTreeListShowsMultilinePreviewOnOneRow(t *testing.T) {
 		t.Run(op, func(t *testing.T) {
 			t.Parallel()
 			single := openTreeList(t, op, treeWithPreview("first line second line"))
-			multi := openTreeList(t, op, treeWithPreview("first line\nsecond line"))
+			multi := openTreeList(t, op, treeWithPreview("first line\n\n\tsecond  line"))
 			if got, want := strings.Count(multi.View().Content, "\n"), strings.Count(single.View().Content, "\n"); got != want {
 				t.Fatalf("dock has %d rows with a two-line preview, want %d:\n%s", got, want, multi.View().Content)
 			}
 			content := multi.View().Content
 			assertContains(t, content, "first line second line", "earlier prompt")
 			assertFrame(t, strings.Split(content, "\n"), 100, 30)
+			lines := strings.Split(stripANSI(content), "\n")
+			top := slices.IndexFunc(lines, func(line string) bool { return strings.HasPrefix(line, "┌ ") })
+			bottom := slices.IndexFunc(lines, func(line string) bool { return strings.HasPrefix(line, "└─ ") })
+			if top < 0 || bottom-top+1 != 12 {
+				t.Fatalf("list panel spans rows %d to %d, want 12 rows:\n%s", top, bottom, content)
+			}
 		})
 	}
 }

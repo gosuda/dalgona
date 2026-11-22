@@ -437,7 +437,7 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 | `/review` | `review/start`. The list `Review changes` offers `Uncommitted changes`, which starts at once. `Base branch`, `Commit`, and `Custom` take the text of the input line before Enter sends it. The review runs as a turn on the thread |
 | `//text` | Sends `/text` as a prompt. A first token that holds a second `/`, such as a path, sends the whole text as a prompt |
 
-A row of the `/tree`, `/revert`, `/fork`, and rewind lists MUST be one row. It MUST show the turn preview after the sanitizer runs, with each run of whitespace collapsed to one space.
+Each item of the `/tree`, `/revert`, `/fork`, and rewind lists MUST take one row. It MUST show the turn preview after the sanitizer runs, with each run of whitespace collapsed to one space.
 
 While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, `/revert`, and `/review` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
 
