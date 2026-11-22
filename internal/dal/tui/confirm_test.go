@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -92,5 +93,66 @@ func TestConfirmPanelNamesLayoutAndTurn(t *testing.T) {
 	panel := m.confirmPanel()
 	if panel.layout != panelConfirm || panel.kind != "revert" || panel.id != "turn-9" || !panel.decision {
 		t.Fatalf("confirm panel = kind %q id %q layout %v decision %v", panel.kind, panel.id, panel.layout, panel.decision)
+	}
+}
+
+type confirmCase struct {
+	name   string
+	title  string
+	notice string
+	open   func(*model)
+}
+
+func TestConfirmPanelShowsItsBody(t *testing.T) {
+	t.Parallel()
+	cases := []confirmCase{
+		{"revert", "Revert to before this turn?", revertNotice, func(m *model) { m.openRevert("turn-9", "work") }},
+		{"rewind", "Rewind to before this turn?", rewindNotice, func(m *model) { m.openRewind("turn-9", "work") }},
+	}
+	for _, width := range []int{100, 40, 24} {
+		for _, tc := range cases {
+			checkConfirmBody(t, tc, width)
+		}
+	}
+}
+
+func confirmBodyRows(t *testing.T, tc confirmCase, width int) ([]string, string) {
+	t.Helper()
+	m := newTestModel(new(fakeCaller), Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: width, Height: 30})
+	m.thread.id = "t1"
+	tc.open(&m)
+	content := stripANSI(m.View().Content)
+	lines := strings.Split(content, "\n")
+	title := slices.IndexFunc(lines, func(line string) bool { return strings.Contains(line, tc.title[:10]) })
+	action := slices.IndexFunc(lines, func(line string) bool { return strings.HasPrefix(line, "└─ ") })
+	if title < 0 || action <= title {
+		t.Fatalf("%s at %d: confirm title or action row missing:\n%s", tc.name, width, content)
+	}
+	body := make([]string, 0, action-title-1)
+	for _, row := range lines[title+1 : action] {
+		body = append(body, strings.TrimLeft(strings.TrimRight(row, " "), "│ "))
+	}
+	return body, content
+}
+
+func checkConfirmBody(t *testing.T, tc confirmCase, width int) {
+	t.Helper()
+	body, content := confirmBodyRows(t, tc, width)
+	cut := slices.ContainsFunc(body, func(row string) bool { return strings.HasSuffix(row, "...") })
+	if cut && slices.Contains(body, "") {
+		t.Errorf("%s at %d: a body row is cut while a body row stays empty:\n%s", tc.name, width, content)
+	}
+	if cut && width >= 40 {
+		t.Errorf("%s at %d: the body is cut:\n%s", tc.name, width, content)
+	}
+	if cut {
+		return
+	}
+	words := strings.Fields(strings.Join(body, " "))
+	for _, word := range strings.Fields(tc.notice) {
+		if !slices.Contains(words, word) {
+			t.Errorf("%s at %d: word %q of the notice is not on screen:\n%s", tc.name, width, word, content)
+		}
 	}
 }

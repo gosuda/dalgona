@@ -57,7 +57,7 @@ func (m *model) confirmPanel() panelView {
 }
 
 func (m *model) confirmBody(c *confirmation) []string {
-	width := terminalWidth(m.screen.width)
+	width := max(1, panelRowWidth(&m.screen)-panelRailCells-panelMarkerCells)
 	if c.kind != confirmRevert && c.kind != confirmRewind {
 		body := make([]string, 0, len(c.lines))
 		for _, line := range c.lines {
@@ -73,8 +73,9 @@ func (m *model) confirmBody(c *confirmation) []string {
 		notice = revertNotice
 	}
 	rest := m.screen.wrap(notice, width)
-	if len(rest) > 3 {
-		rest = append(rest[:2], m.screen.fit(strings.Join(rest[2:], " "), width))
+	room := max(1, panelBodyRows(panelView{actions: []string{c.action}}, panelRows(panelConfirm, m.screen.height))-len(body))
+	if len(rest) > room {
+		rest = append(rest[:room-1], m.screen.fit(strings.Join(rest[room-1:], " "), width))
 	}
 	return append(body, rest...)
 }
