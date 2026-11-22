@@ -100,6 +100,36 @@ func TestFsWatchReportsAnInPlaceEdit(t *testing.T) {
 	c.await("fs/changed", func(m message) bool { return reportsChange(t, m, "w1", file) })
 }
 
+func TestFsWatchReportsASameSizeEdit(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	c := r.connect()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "x.txt")
+	if err = os.WriteFile(file, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c.ok("fs/watch", map[string]any{"watchId": "w1", "path": dir}, nil)
+	expectNoChange(t, c, 1300*time.Millisecond)
+	edit, err := os.OpenFile(file, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = edit.WriteString("two"); err != nil {
+		t.Fatal(err)
+	}
+	if err = edit.Close(); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(2 * time.Second)
+	if err = os.Chtimes(file, later, later); err != nil {
+		t.Fatal(err)
+	}
+	c.await("fs/changed", func(m message) bool { return reportsChange(t, m, "w1", file) })
+}
+
 func TestFsWatchRefusals(t *testing.T) {
 	r := newRig(t, config.ApprovalYolo)
 	c := r.connect()
