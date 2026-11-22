@@ -291,20 +291,20 @@ function jumpToLatest(): void {
 		{/if}
 
 		{#if turnReview !== null}
-			<p class="turn-review" data-verdict={turnReview.verdict}>{turnReview.summary}</p>
+			<p class="turn-review prose" data-verdict={turnReview.verdict}>{turnReview.summary}</p>
 		{/if}
 		<PlanPanel {plan} />
 
 		{#if running}
-			<p class="turn-outcome">
+			<p class="turn-outcome prose">
 				{error ? `Retrying after an error: ${error}` : "Working · new output appears here"}
 			</p>
 		{:else if turnStatus === "failed"}
-			<p class="turn-outcome failed">
+			<p class="turn-outcome prose failed">
 				The turn failed{error ? `: ${error}` : ""}. Send your message again to retry, or start a new thread.
 			</p>
 		{:else if turnStatus === "interrupted"}
-			<p class="turn-outcome">Turn interrupted. Send a message to continue.</p>
+			<p class="turn-outcome prose">Turn interrupted. Send a message to continue.</p>
 		{/if}
 	</div>
 
@@ -351,7 +351,6 @@ function jumpToLatest(): void {
 		color: var(--dim);
 		font-size: var(--size-caption);
 		font-weight: 600;
-		overflow-wrap: break-word;
 	}
 
 	.turn-outcome.failed {
