@@ -427,26 +427,42 @@ func isToolItem(item rpc.Item) bool {
 	return false
 }
 
-func (m *model) liveCover() string {
+type liveCoverKind int
+
+const (
+	coverNone liveCoverKind = iota
+	coverHint
+	coverSettingsError
+	coverRetryWait
+)
+
+func (m *model) liveCover() (liveCoverKind, time.Duration) {
 	switch {
 	case m.hint.text != "":
-		return m.screen.dockTheme().paint(roleDim, m.hint.text)
+		return coverHint, 0
 	case m.settings != nil && m.settings.saveErr != "":
-		return m.screen.dockTheme().paintBold(roleFailedText, m.settings.saveErr)
+		return coverSettingsError, 0
 	}
 	if left, ok := m.retryRemaining(); ok {
-		return retryLine(left)
+		return coverRetryWait, left
 	}
-	return ""
+	return coverNone, 0
 }
 
 func (m *model) noticeShown() bool {
-	return m.liveCover() == ""
+	kind, _ := m.liveCover()
+	return kind == coverNone
 }
 
 func (m *model) liveText() string {
-	if cover := m.liveCover(); cover != "" {
-		return cover
+	switch kind, left := m.liveCover(); kind {
+	case coverHint:
+		return m.screen.dockTheme().paint(roleDim, m.hint.text)
+	case coverSettingsError:
+		return m.screen.dockTheme().paintBold(roleFailedText, m.settings.saveErr)
+	case coverRetryWait:
+		return retryLine(left)
+	case coverNone:
 	}
 	if m.notice != "" {
 		notice := m.noticeLine()
