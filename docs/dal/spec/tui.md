@@ -198,6 +198,7 @@ A reply that opens a list panel MUST be dropped when another panel or the review
 The input line MUST show the filter while a list panel is open.
 The input line MUST show the first line of the draft while another panel is open, with the caret at its end.
 A confirm panel MUST show its title, its body, and its action row. It MUST NOT send a request before Enter.
+The revert and rewind confirm panels MUST wrap their notice at the panel body width. Up and Down MUST scroll a confirm body that does not fit by one row.
 A panel body that does not fit MUST end with the row `↓ <n> more lines · ctrl+o full view · ↑↓ scroll`, where `<n>` counts the body rows below the window. A panel with one body row MUST show that row and no such row.
 The review target input MUST show `branch:`, `commit:`, or `instructions:` as its label, and MUST hide the filter while it waits for text.
 
