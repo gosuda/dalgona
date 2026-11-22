@@ -277,15 +277,12 @@ func (s *screenState) skipSpace(text string, pos int) int {
 	if pos >= len(text) {
 		return pos
 	}
-	r, size := utf8.DecodeRuneInString(text[pos:])
+	r, _ := utf8.DecodeRuneInString(text[pos:])
 	if !unicode.IsSpace(r) {
 		return pos
 	}
-	if size > 1 {
-		cluster, _ := ansi.FirstGraphemeCluster(text[pos:], s.method)
-		size = len(cluster)
-	}
-	return pos + size
+	cluster, _ := ansi.FirstGraphemeCluster(text[pos:], s.method)
+	return pos + len(cluster)
 }
 
 func printableASCII(text string, at int) bool {
