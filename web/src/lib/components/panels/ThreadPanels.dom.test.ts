@@ -470,3 +470,59 @@ test("resume shows one status line and takes no second choice while the thread l
 	})) as HTMLButtonElement;
 	expect(again.disabled).toBe(false);
 });
+
+test("a resume that ends after Escape leaves the next panel and its sign-in open", async () => {
+	const { session, calls } = activeSession({
+		"account/login/cancel": () => ({}),
+	});
+	session.connection = "connected";
+	vi.spyOn(session, "listThreads").mockResolvedValue({
+		threads: [
+			{
+				id: "thread-2",
+				title: "hello",
+				preview: "",
+				status: "idle",
+				updatedAt: 1,
+				model: null,
+				cwd: "/work",
+			},
+		],
+		nextCursor: null,
+	});
+	const pending = Promise.withResolvers<void>();
+	const select = vi
+		.spyOn(session, "selectThread")
+		.mockReturnValue(pending.promise);
+	render(ThreadPanels, { props: { session } });
+	session.openPanel("resume");
+	const dialog = await screen.findByRole("dialog", {
+		name: "Open an earlier thread",
+	});
+	await fireEvent.click(
+		await within(dialog).findByRole("button", { name: "hello" }),
+	);
+	expect(select).toHaveBeenCalledWith("thread-2");
+	await fireEvent.keyDown(dialog, { key: "Escape" });
+	expect(session.panel).toBeNull();
+	session.openPanel("login");
+	session.login = {
+		provider: "chatgpt",
+		method: "browser",
+		loginId: "login-1",
+		authUrl: "https://auth.example/start",
+		verificationUrl: null,
+		userCode: null,
+		error: null,
+		pending: true,
+	};
+	pending.resolve();
+	await pending.promise;
+	await tick();
+	await tick();
+	expect(session.panel).toBe("login");
+	expect(session.login?.loginId).toBe("login-1");
+	expect(calls.map((call) => call.method)).not.toContain(
+		"account/login/cancel",
+	);
+});
