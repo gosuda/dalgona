@@ -1,5 +1,7 @@
 import "../../app.css";
-import { describe, expect, test } from "vitest";
+import { cleanup, render, screen } from "@testing-library/svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import NoticeStack from "#lib/components/NoticeStack.svelte";
 import { appliedRule, ruleSelectors } from "#lib/css-rule.ts";
 
 describe("button type", () => {
@@ -27,6 +29,29 @@ describe("button type", () => {
 		expect(selectors.indexOf(selector)).toBeGreaterThan(
 			selectors.indexOf("button"),
 		);
+	});
+});
+
+describe("notice buttons", () => {
+	afterEach(() => {
+		cleanup();
+		document.documentElement.style.removeProperty("--size-label");
+		document.documentElement.style.removeProperty("--size-caption");
+	});
+
+	test("Dismiss takes the Button label size, not the caption size", () => {
+		document.documentElement.style.setProperty("--size-label", "14px");
+		document.documentElement.style.setProperty("--size-caption", "12px");
+		render(NoticeStack, {
+			props: {
+				notices: [{ id: 1, tone: "error", text: "Failed.", actions: [] }],
+				waiting: { count: 0, threadId: null },
+				onDismiss: vi.fn(),
+				onOpenWaiting: vi.fn(),
+			},
+		});
+		const dismiss = screen.getByRole("button", { name: "Dismiss" });
+		expect(getComputedStyle(dismiss).fontSize).toBe("14px");
 	});
 });
 

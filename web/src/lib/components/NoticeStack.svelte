@@ -96,7 +96,6 @@ let waitingText = $derived(
 	.notice button {
 		flex: none;
 		padding: var(--space-1) var(--space-3);
-		font-size: var(--size-caption);
 	}
 
 	@media (max-width: 40rem) {
