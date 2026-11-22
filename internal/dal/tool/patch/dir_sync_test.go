@@ -119,12 +119,14 @@ func TestDirectorySyncFailureAfterRenamesIsCompleteWriteError(t *testing.T) {
 
 func TestDirectorySyncFailureStatesComeFromTheDisk(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
-		want tool.Outcome
+		name  string
+		body  string
+		keep  bool
+		want  tool.Outcome
+		files map[string]string
 	}{
-		{"IO-05/reverted during the sync", "b-before\n", withPaths(writeFailure(tool.CommitPartial, tool.ReasonSyncFailed), "a.txt", "after", "b.txt", "before")},
-		{"IO-05/replaced during the sync", "b-other\n", withPaths(commitUnknown, "a.txt", "after", "b.txt", "unknown")},
+		{"IO-05/reverted during the sync", "b-before\n", false, withPaths(writeFailure(tool.CommitPartial, tool.ReasonSyncFailed), "a.txt", "after", "b.txt", "before"), nil},
+		{"IO-05/replaced during the sync", "b-other\n", true, withPaths(commitUnknown, "a.txt", "after", "b.txt", "unknown"), map[string]string{"a.txt": "a-before\n", "b.txt": "b-before\n"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -145,7 +147,13 @@ func TestDirectorySyncFailureStatesComeFromTheDisk(t *testing.T) {
 			}
 			requireWrappedOutcome(t, err, HashlineLight, test.want)
 			requireNothingMinted(t, f.env.Snapshots, before)
-			requireNoResidue(t, f.cwd)
+			if test.keep {
+				for name, content := range test.files {
+					requireBackupHolds(t, err.Error(), name, content)
+				}
+			} else {
+				requireNoResidue(t, f.cwd)
+			}
 		})
 	}
 }

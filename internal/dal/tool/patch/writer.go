@@ -92,7 +92,21 @@ func syncFailure(ctx context.Context, env tool.Env, files []*stagedFile, states 
 	paths := verifiedStates(ctx, env, writtenPaths(files))
 	outcome := writeOutcome(paths, len(states), 0)
 	invalidateAll(env, outcome.Paths)
-	return outcome, errors.New("patch: the files were written but a directory sync failed: " + cause.Error() + ". Affected paths: " + strings.Join(affectedPaths(states), ", ") + ".")
+	var out strings.Builder
+	fmt.Fprintf(&out, "patch: the files were written but a directory sync failed: %s. Affected paths: %s.", cause, strings.Join(affectedPaths(states), ", "))
+	if outcome.Commit == tool.CommitUnknown {
+		for _, state := range states {
+			if state.backup == "" {
+				continue
+			}
+			if err := state.stageWrite(ctx, env, state.src, state.backup, state.file.before); err != nil {
+				fmt.Fprintf(&out, "\nCould not retain backup for %s: %v", state.file.path, err)
+				continue
+			}
+			fmt.Fprintf(&out, "\nRetained backup for %s: %s", state.file.path, state.backup)
+		}
+	}
+	return outcome, errors.New(out.String())
 }
 
 var syncPinnedDir = func(p *dirPin) error { return p.syncDir() }
