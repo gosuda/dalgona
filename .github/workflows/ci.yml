@@ -53,28 +53,47 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - run: corepack enable && corepack prepare pnpm@12.21.0 --activate && pnpm --version
+      - name: Corepack pnpm
+        id: corepack
+        run: corepack enable && corepack prepare pnpm@12.21.0 --activate && pnpm --version
       - name: Docs and specs
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: |
           python3 docs/dal/spec/hashline/verify_model.py | cmp - docs/dal/spec/hashline/verification.json
           python3 docs/dal/spec/check_style.py docs/dal/spec
           python3 docs/dal/spec/check_style.py docs/dalgona/spec
           python3 docs/dal/spec/check_style_test.py
           python3 docs/check_links.py
-      - name: Web UI
+      - name: Web install
+        id: web-install
+        if: ${{ !cancelled() && steps.corepack.outcome == 'success' }}
+        run: pnpm -C web install --frozen-lockfile
+      - name: Web build
+        id: web-build
+        if: ${{ !cancelled() && steps.web-install.outcome == 'success' }}
+        run: pnpm -C web build
+      - name: Web lint and typecheck
+        if: ${{ !cancelled() && steps.web-build.outcome == 'success' }}
         run: |
-          pnpm -C web install --frozen-lockfile
-          pnpm -C web build
           pnpm -C web exec biome ci
           pnpm -C web exec svelte-check
-          pnpm -C web exec vitest run
-      - name: Cloudflare worker
+      - name: Web tests
+        if: ${{ !cancelled() && steps.web-build.outcome == 'success' }}
+        run: pnpm -C web exec vitest run
+      - name: Worker install
+        id: worker-install
+        if: ${{ !cancelled() && steps.corepack.outcome == 'success' }}
+        run: pnpm -C deploy/cloudflare install --frozen-lockfile
+      - name: Worker typecheck and lint
+        if: ${{ !cancelled() && steps.worker-install.outcome == 'success' }}
         run: |
-          pnpm -C deploy/cloudflare install --frozen-lockfile
           pnpm -C deploy/cloudflare exec tsc --noEmit
           pnpm -C deploy/cloudflare exec tsc --noEmit -p tsconfig.test.json
           pnpm -C deploy/cloudflare exec biome ci .
-          pnpm -C deploy/cloudflare test
+      - name: Worker tests
+        if: ${{ !cancelled() && steps.worker-install.outcome == 'success' }}
+        run: pnpm -C deploy/cloudflare test
