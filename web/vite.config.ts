@@ -42,6 +42,7 @@ const config: UserConfig = defineConfig({
 							/Composer\.svelte/,
 							/ThreadList\.svelte/,
 							/StateTag\.svelte/,
+							/DiffCard\.svelte/,
 							/rows\/(MessageRow|TextRow|AdvisorNote|PlanPanel)\.svelte/,
 							/app\.css$/,
 						],
