@@ -53,7 +53,7 @@ An option MUST have a `label` of 1 to 80 characters and a `description` of 1 to 
 An option MAY have a `preview` of at most 2000 characters and at most 40 lines.
 
 Required headers, questions, option labels, and descriptions MUST also pass a nonblank eligibility check before the host offers the question.
-That check MUST ignore complete terminal escape sequences, Unicode `White_Space`, `General_Category=Cc`, and `Default_Ignorable_Code_Point` scalars.
+That check MUST ignore complete escapes in the profile below, Unicode `White_Space`, `General_Category=Cc`, and `Default_Ignorable_Code_Point` scalars.
 If no scalar remains, validation MUST use the existing empty-field error for that field.
 The eligibility projection MUST NOT replace accepted source text or change the scalar count used for its upper limit.
 Optional previews and submitted user answers retain their separate empty-value rules.
@@ -102,7 +102,7 @@ Painting a question on one line MUST NOT apply the single-line user-input reject
 Its source MAY contain line breaks that the display projection represents as spaces.
 
 A terminal escape sequence MUST NOT execute in a display.
-A terminal projection MAY remove the complete sequence with its parameters.
+A terminal projection MAY remove complete sequences recognized by the profile below, including their parameters.
 Sequence recognition MUST preserve UTF-8 scalar boundaries and recognize ASCII control syntax before consuming a span.
 An incomplete or invalid escape prefix MUST display its ESC as a visible code-point escape without consuming following ordinary scalars.
 The projection MUST then process those scalars under their usual display rules.
@@ -126,6 +126,42 @@ Selecting either row MUST submit its exact offered label, never its display proj
 
 Counting limits before projection and preserving offered values tighten the previous cleaning behavior.
 These are required implementation changes under [Input text](input-text.md), not claims about the inspected runtime.
+
+### Escape recognition profile
+
+Question eligibility and display MUST share the following recognition profile.
+It selects seven-bit forms for safe question display. It is not the raw PTY parser or full XTerm command support.
+Unsupported forms MUST use visible escaping and preserve their ordinary text.
+Only ASCII ESC starts a candidate. Recognizers MUST NOT mask high bits or interpret UTF-8 continuation bytes as controls.
+
+A header contains zero or more ASCII parameter bytes, then zero or more intermediate bytes, then one final byte.
+Parameter bytes are `0x30` through `0x3f`. Intermediate bytes are `0x20` through `0x2f`.
+The mandatory final byte is `0x40` through `0x7e`.
+ST means ESC followed by one U+005C.
+
+|Form|Complete recognition rule|
+|---|---|
+|CSI|ESC, `[`, and one header.|
+|DCS|ESC, `P`, one header, a payload, and ST. The header MUST complete before any payload is scanned.|
+|OSC|ESC, `]`, one or more ASCII decimal digits, then BEL or ST. A semicolon MAY introduce a payload before that terminator.|
+|SOS, PM, APC|ESC, respectively `X`, `^`, or `_`, a payload, and ST.|
+|Other short escape|ESC, zero or more intermediate bytes, and one ASCII final byte `0x30` through `0x7e`.|
+
+The listed introducers MUST use their own full rule. They MUST NOT fall back to the short-escape rule.
+A payload contains zero or more complete UTF-8 scalars, subject to the terminator and invalidation rules below.
+OSC payloads are opaque after the decimal selector and semicolon. DCS payloads are opaque only after a valid header.
+OSC forms with a missing decimal selector or a legacy letter selector MUST use visible escaping.
+This includes unsupported forms even when a terminal might recognize them.
+Every payload MUST be scanned as complete UTF-8 scalars within the field limit.
+
+CAN, SUB, or an ESC that does not begin the required ST MUST invalidate the pending candidate.
+Recognition MUST NOT cross that boundary to borrow a terminator from a later sequence.
+The display MUST visibly escape the original ESC, then rescan its suffix under the ordinary rules without dropping text.
+Eligibility MUST use that same recognition result before ignoring its separately specified whitespace, control, and formatting scalars.
+These rules do not interpret command payloads, execute terminal actions, or change canonical text.
+
+The profile uses control forms from [XTerm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) and the [DEC VT510 manual](https://www.zx.net.nz/documentation/mds-199909/cd3/term/vt510rmb.pdf).
+The DCS header is the selected DEC form, not a requirement for every device-defined control string in ECMA-48.
 
 ## Results
 
@@ -260,6 +296,11 @@ These cases are required implementation evidence, not results recorded by this d
 |Valid required text whose glyph is unavailable|The field remains visible and inspectable through source-preserving fallback.|
 |ESC followed by U+D55C, a supplementary scalar, a combining sequence, or a private-use scalar|ESC is visibly escaped. Following scalars remain intact, visible, and mapped to their original source.|
 |An incomplete CSI or control-string prefix before valid text|The prefix cannot swallow the field or split UTF-8. No display emits an executable control.|
+|DCS followed by U+D55C before an ASCII final byte, then ST|The candidate is invalid. The visible fallback preserves the ordinary scalars.|
+|OSC followed by U+D55C instead of a decimal selector, then BEL|The candidate is invalid. The visible fallback preserves the ordinary scalars.|
+|A valid DCS header before its payload, or OSC with a decimal selector and payload|The complete recognized span is removed only from the derived eligibility or display projection.|
+|A valid DCS header or OSC selector and semicolon followed immediately by its terminator|The empty payload is valid. Eligibility and display recognize the same complete span.|
+|CAN, SUB, or a non-ST ESC inside a candidate before a later ST|The first candidate is invalid. Later text and independently valid controls are scanned without borrowing that ST.|
 |An offered option containing CRLF and leading spaces|Selection returns its exact offered value without draft newline conversion or trimming.|
 |A whitespace-only user answer|It follows the answer contract and is not rewritten to an empty answer.|
 |A 2001-scalar answer followed by a valid correction|The same pending request accepts the correction once without changing its original deadline.|

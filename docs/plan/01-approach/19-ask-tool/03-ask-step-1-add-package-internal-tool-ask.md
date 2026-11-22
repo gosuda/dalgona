@@ -123,15 +123,13 @@ The literal texts of `description` and `schema` are in the section "Schemas of t
 
 - Receive validated source. Never perform replacement decoding or modify the accepted source.
 - Keep every source cursor on a UTF-8 scalar boundary. Advance ordinary text with `utf8.DecodeRuneInString`, never one byte of a multibyte scalar.
-- Recognize complete seven-bit control sequences with bounded lookahead before removing any span:
-  - CSI is ESC `[` followed by zero or more parameter bytes `0x30` through `0x3f`, zero or more intermediate bytes `0x20` through `0x2f`, and one final byte `0x40` through `0x7e`.
-  - OSC begins with ESC `]` and ends with BEL or ESC followed by U+005C.
-  - DCS, SOS, PM, and APC begin with ESC plus `P`, `X`, `^`, or `_` and end with ESC followed by U+005C.
-  - Other short sequences contain ESC, zero or more intermediate bytes `0x20` through `0x2f`, and one ASCII final byte `0x30` through `0x7e`. The string and CSI introducers use their complete forms above.
+- Implement the complete [escape recognition profile](../../../dal/spec/ask.md#escape-recognition-profile) with bounded lookahead before removing any span. Keep the grammar in that specification as the single authority.
+- Validate the selected DCS ASCII header before scanning its payload. Validate the OSC decimal selector before scanning an optional payload. A terminator alone does not make either malformed header valid.
+- CAN, SUB, and an ESC that is not ST abort the pending candidate. Do not borrow a later sequence's terminator or swallow subsequent ordinary text.
 - Inspect string payloads by complete UTF-8 scalars. Do not interpret a continuation byte as a C1 control.
 - If no complete valid sequence begins at ESC, display that ESC with a visible code-point escape and resume immediately after it. Preserve following scalars, including tentative parameters or intermediate bytes. An invalid or incomplete prefix must not consume the remaining field.
 - The nonblank eligibility check and display projection share this sequence recognizer. Eligibility ignores only complete recognized sequences and the specified whitespace/control/format scalars.
-- These are display-recognition rules, not raw PTY parsing. The control forms follow [XTerm control sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html).
+- These are display-recognition rules, not raw PTY parsing. Unsupported control forms use the same visible fallback and preserve their source.
 - `\n` is kept when `multiline`; otherwise it becomes one space.
 - `\t` becomes 4 spaces when `multiline`; otherwise one space.
 - Non-layout controls and bidirectional formatting use the safe display policy from the shared input contract.
@@ -189,6 +187,7 @@ Expected values come from the ask and shared input contracts, not the cleanup im
 - Display tests prove that controls never execute while canonical source and offered values remain unchanged.
 - Escape tests cover ESC followed by `U+D55C`, a supplementary scalar, a combining sequence, and a private-use scalar. Each following sequence remains intact and selectable.
 - Test incomplete CSI and string prefixes, a trailing ESC, valid complete sequences, and UTF-8 characters whose continuation bytes fall in the C1 byte range. Output remains valid UTF-8, source spans align with scalar boundaries, and no terminal control executes.
+- Test missing DCS final bytes, malformed OSC selectors, valid header/payload separation, parameterless decimal OSC commands, CAN/SUB cancellation, and nested ESC boundaries against independent expected spans from the ask profile.
 - Encoding tests reject malformed UTF-8 and unpaired surrogate escapes while accepting literal U+FFFD.
 - Answer tests cover exact option matching, whitespace preservation, duplicate values, existing multiplicity rules, and unknown IDs.
 - Boundary tests accept 2000 supplementary scalars and reject 2001 without trimming, truncation, or a partial result.
