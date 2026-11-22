@@ -346,3 +346,22 @@ func TestWrapKeepsAKeycapWhole(t *testing.T) {
 		}
 	}
 }
+
+func TestRowStartSkipsOnlyWholeSpaceClusters(t *testing.T) {
+	t.Parallel()
+	screen := screenState{method: ansi.WcWidth}
+	for _, tc := range []struct {
+		flat, part string
+		pos, want  int
+	}{
+		{"ab cd", "cd", 0, 0},
+		{"ab cd", "cd", 2, 3},
+		{"ab ́cd", "cd", 2, 5},
+		{"ab　́cd", "cd", 2, 7},
+		{"ab xcd", "cd", 2, 2},
+	} {
+		if got := screen.rowStart(tc.flat, tc.pos, tc.part); got != tc.want {
+			t.Errorf("rowStart(%q, %d, %q) = %d, want %d", tc.flat, tc.pos, tc.part, got, tc.want)
+		}
+	}
+}

@@ -523,6 +523,7 @@ func TestComposerRowsMatchWrapperOutput(t *testing.T) {
 		strings.Repeat("x", 17) + " \u0301hello",
 		"abc \u0301def ghij \u0301klmnop qrstu \u0301vwxyz abc \u0301de",
 		"abc \u0301\u0302def ghij \u0301\u0302klmnop qrstu \u0301\u0302vwxyz abc \u0301\u0302de",
+		strings.Repeat("x", 17) + " \u0301",
 	}
 	for width := 1; width <= 44; width++ {
 		for _, text := range texts {
@@ -552,7 +553,7 @@ func checkRowsAgainstWrapper(t *testing.T, screen screenState, text string, widt
 		}
 		pos = row.end
 	}
-	if tail := text[pos:]; strings.TrimFunc(tail, unicode.IsSpace) != "" {
+	if tail := text[pos:]; !spaceClusters(screen, tail) {
 		t.Fatalf("method %v width %d %q: rows stop before %q", screen.method, width, text, tail)
 	}
 }
