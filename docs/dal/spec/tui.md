@@ -62,7 +62,7 @@ States are `idle`, `running`, `awaiting approval`, `awaiting input`, `interrupte
 
 The state words are `Working`, `Waiting`, `Stopped`, `Failed`, `Offline`, `Ready`, and `Done`. `running` shows `Working`, `awaiting approval` and `awaiting input` show `Waiting`, `interrupted` shows `Stopped`, `disconnected` shows `Offline`, and `idle` is named `Ready`, or `Done` after a completed turn. An idle live row MUST show no state word.
 
-A notice that does not fit the free text of the live row MUST also print once as a row, with the full text.
+A notice or a settings error cut in the live row MUST also print once as a row with its full text.
 
 A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. `active` with the flag `waitingOnUserInput` gives `awaiting input`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` list panel shows each thread's mapped state.
 
@@ -205,6 +205,7 @@ A reply that opens a list panel MUST be dropped when another panel or the review
 The input line MUST show the filter while a list panel is open.
 The input line MUST show the first line of the draft while another panel is open, with the caret at its end.
 A confirm panel MUST show its title, its body, and its action row. It MUST NOT send a request before Enter.
+The revert and rewind confirm panels MUST wrap their notice at the panel body width. Up and Down MUST scroll a confirm body that does not fit by one row.
 A panel body that does not fit MUST end with the row `↓ <n> more lines · ctrl+o full view · ↑↓ scroll`, where `<n>` counts the body rows below the window. A panel with one body row MUST show that row and no such row.
 The review target input MUST show `branch:`, `commit:`, or `instructions:` as its label, and MUST hide the filter while it waits for text.
 
@@ -257,7 +258,7 @@ Enter on the API key field MUST send `account/login/start` with `type` `apiKey`.
 A refused key MUST keep the field open with the error in the panel. Esc on the field MUST clear it and return to the methods.
 An approval request MUST NOT clear the API key field. A question with option rows MUST NOT clear it. A free-text question MUST take the input line from the API key field. Closing that question MUST leave the field empty.
 A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. Up and Down MUST scroll the body by one row while the link does not fit. A window with no body row MUST show the link in the review that `ctrl+o` opens. A device sign-in MUST show the user code in the first body row. While the sign-in waits, the hint row MUST read `Esc cancel the sign-in · waiting for the provider`, cut to the row width.
-The client MUST print one history row `Sign-in URL: <url>` for each sign-in. The notice line MUST NOT repeat the link while the panel is open. A sign-in MUST wait for `account/login/completed`.
+The client MUST print one history row `Sign-in URL: <url>` for each sign-in. The review entry of a device sign-in MUST add the row `User code: <code>` under that row, and the printed row MUST NOT hold the code. The notice line MUST NOT repeat the link while the panel is open. A sign-in MUST wait for `account/login/completed`.
 Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in…`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
 A multiline paste into the API key field MUST fail atomically with a visible error and MUST NOT make a chip.
 The field MUST preserve the key's exact accepted text, including leading and trailing whitespace. Provider validation MUST report invalid keys without rewriting them.
@@ -377,6 +378,7 @@ A queued follow-up whose draft began with a chip MUST be sent unchanged after Al
 A typed follow-up MUST return after Alt+Up and a failed start as typed text, which the slash rule reads.
 A draft that Ctrl+C saves MUST decide whether the history sends the entry it repeats unchanged, unless that entry is a sent message.
 A user message that starts with `/` MUST be sent unchanged from the history until the user edits its text, live or resumed.
+An image chip that enters a draft sent unchanged MUST count as an edit of its text.
 The slash rule MUST read only the typed text. A pasted line that starts with `/` or `//` MUST be sent unchanged.
 A paste over 1 MiB of UTF-8 MUST fail atomically with a notice that names the limit.
 This limit counts the incoming paste. Send limits MUST count the complete serialized candidate, including expanded text chips.
@@ -466,6 +468,8 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 | `/advisor reset` | `dalgona/advisor/reset`. This command is the only way to reset the advisor. Ctrl+R does not reset it |
 | `/review` | `review/start`. The list `Review changes` offers `Uncommitted changes`, which starts at once. `Base branch`, `Commit`, and `Custom` take the text of the input line before Enter sends it. The review runs as a turn on the thread |
 | `//text` | Sends `/text` as a prompt. A first token that holds a second `/`, such as a path, sends the whole text as a prompt |
+
+Each item of the `/tree`, `/revert`, `/fork`, and rewind lists MUST take one row. It MUST show the turn preview after the sanitizer runs, with each run of whitespace collapsed to one space.
 
 While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, `/revert`, and `/review` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
 
@@ -615,6 +619,7 @@ A newline MUST restart the count of stops.
 A row that the client prints or draws MUST hold spaces in place of each tab.
 A wrapped row MUST NOT exceed the wrap width in cells of that method.
 A wrap break MUST NOT fall inside a grapheme cluster.
+A wrap MUST NOT drop a cluster other than the spaces at a break.
 A row cut to fewer than 3 cells MUST keep whole clusters and MUST NOT show an ellipsis.
 The composer MUST count its stops from its first text cell after the prompt.
 A wrapped row MUST continue the count of stops from the row before it.
@@ -650,6 +655,9 @@ The client MUST identify an item by its thread, turn, and item ID.
 The same item ID in a later turn MUST print as a new row.
 A replay of a printed turn and item MUST NOT print again.
 An agent message MUST print as Markdown, with no row.
+Each rendered Markdown block MUST start every row after a gutter of two cells, its first row included.
+The rendered text of a Markdown block MUST NOT begin or end with a blank row.
+One blank row MUST follow the rendered text of each Markdown block.
 The state column MUST start with a mark or two blank cells.
 The state-word field MUST be at least 8 cells wide and end with a space.
 The label MUST be at most 9 cells, and one space MUST follow it.
@@ -675,6 +683,9 @@ A mermaid, d2, or nomnoml card MUST render the source as text art under a `diagr
 An `svg` fence or a failed render MUST print `diagram <kind>: render failed · source shown` followed by the source.
 A render that runs longer than 2 seconds MUST count as a failed render.
 A renderer that panics MUST count as a failed render.
+The client MUST run at most two diagram renders at a time, of every kind together.
+A render that waits for its turn MUST count the wait in its 2 second limit.
+A render past the render limit MUST keep its turn until its renderer returns.
 A d2 layout cannot be cancelled, so one that outlives the render limit keeps running to its end. The client MUST run at most one d2 layout at a time.
 While a d2 layout past the render limit runs, a d2 render MUST count as a failed render without waiting.
 A source of more than 16384 bytes MUST NOT reach a renderer. It MUST print `diagram <kind>: too large to draw · source shown` followed by the source.
@@ -711,7 +722,9 @@ The client MUST run one tick chain for motion. The chain MUST run only while a t
 The live dot MUST alternate between U+25AA and U+25AB every 500 milliseconds.
 With `DAL_NO_MOTION` set to a non-empty value, the client MUST keep the dot on U+25AA and MUST tick once a second.
 The elapsed time MUST update once a second, also with `DAL_NO_MOTION` set.
+The elapsed time of a turn MUST start at zero when the client sends the turn. A turn the client did not send MUST start at zero when its `turn/started` arrives. The client MUST NOT take the start from the whole-second `startedAt` of `turn/started`. The elapsed time MUST NOT show the age of an earlier turn.
 A rate-limit wait MUST show `rate limited · retrying in <m>m <ss>s · esc stops`, updated each second.
+The countdown MUST round the remaining time up to the whole second, so it reads `0m 00s` only once the wait has passed.
 The countdown MUST clamp at `0m 00s`. Only the matching zero report, the end of the turn, or a lost connection MUST close the wait.
 Elapsed text MUST keep its cells, so a change of value moves no other field.
 

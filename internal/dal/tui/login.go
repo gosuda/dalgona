@@ -439,7 +439,12 @@ func (m *model) loginStarted(value any) bool {
 	m.login.loginID = response.LoginID
 	m.login.url = url
 	m.login.code = sanitizeText(response.UserCode)
-	m.commit("login-url:"+response.LoginID, []string{"Sign-in URL: " + url})
+	printed := []string{"Sign-in URL: " + url}
+	full := printed
+	if m.login.code != "" {
+		full = []string{printed[0], "User code: " + m.login.code}
+	}
+	m.commitFull("login-url:"+response.LoginID, printed, full)
 	return true
 }
 

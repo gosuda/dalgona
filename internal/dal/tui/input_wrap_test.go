@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -146,6 +147,11 @@ func TestComposerWrapsEveryRowAtWindowWidthMinusThree(t *testing.T) {
 			name: "a second line wraps below the first", width: 40, height: 12, text: "ab\n" + spacedSentence, caret: -1,
 			rows: []string{"ab", "the quick brown fox jumps over the", "lazy dog again and again and again", "until the end of the line x"},
 			x:    promptCells + 27, y: 3,
+		},
+		{
+			name: "a space with a combining mark at the break is dropped whole", width: 20, height: 12, text: strings.Repeat("x", 17) + " \u0301hello", caret: -1,
+			rows: []string{strings.Repeat("x", 17), "hello"},
+			x:    promptCells + 5, y: 1,
 		},
 		{
 			name: "decomposed words wrap as composed", width: 20, height: 12, text: strings.TrimSpace(strings.Repeat("café ", 7)), caret: -1,
@@ -514,6 +520,12 @@ func TestComposerRowsMatchWrapperOutput(t *testing.T) {
 		"abcdefghijklmnop \t- item",
 		"abcdefghi- x abc defghi- x see the spec- something else - - -- ---",
 		"a-b-c-d-e-f-g-h-i-j-k-l-m-n-o-p-q-r-s-t-u-v-w-x-y-z- a- b- c-",
+		strings.Repeat("x", 17) + " \u0301hello",
+		"abc \u0301def ghij \u0301klmnop qrstu \u0301vwxyz abc \u0301de",
+		"abc \u0301\u0302def ghij \u0301\u0302klmnop qrstu \u0301\u0302vwxyz abc \u0301\u0302de",
+		strings.Repeat("x", 17) + " \u0301",
+		"abc\u3000\u0301def ghij \u0301klmnop qrstu \u0301vwxyz",
+		"abc\u2003\u0301def ghij\u2003\u0301klmnop qrstu\u2003\u0301\u0302vwxyz",
 	}
 	for width := 1; width <= 44; width++ {
 		for _, text := range texts {
@@ -543,9 +555,20 @@ func checkRowsAgainstWrapper(t *testing.T, screen screenState, text string, widt
 		}
 		pos = row.end
 	}
-	if tail := text[pos:]; strings.TrimFunc(tail, unicode.IsSpace) != "" {
+	if tail := text[pos:]; !spaceClusters(screen, tail) {
 		t.Fatalf("method %v width %d %q: rows stop before %q", screen.method, width, text, tail)
 	}
+}
+
+func spaceClusters(screen screenState, gap string) bool {
+	for gap != "" {
+		cluster, _ := ansi.FirstGraphemeCluster(gap, screen.method)
+		if r, _ := utf8.DecodeRuneInString(cluster); cluster == "" || !unicode.IsSpace(r) {
+			return false
+		}
+		gap = gap[len(cluster):]
+	}
+	return true
 }
 
 func firstCluster(screen screenState, row string) string {
@@ -557,7 +580,7 @@ func rowProblem(screen screenState, text string, pos int, row editorRow, want st
 	if row.start < pos || row.end < row.start || row.end > len(text) {
 		return fmt.Sprintf("range [%d, %d) after %d", row.start, row.end, pos)
 	}
-	if gap := text[pos:row.start]; strings.TrimFunc(gap, unicode.IsSpace) != "" {
+	if gap := text[pos:row.start]; !spaceClusters(screen, gap) {
 		return fmt.Sprintf("skips non-space %q", gap)
 	}
 	if row.text != text[row.start:row.end] {

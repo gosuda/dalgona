@@ -113,6 +113,7 @@ type threadInfo struct {
 	approvalMode    string
 	sandbox         string
 	turnStartedAt   time.Time
+	turnSent        bool
 	lastTurn        time.Duration
 	effort          string
 	turnEffort      *string
@@ -189,6 +190,7 @@ type outState struct {
 	seq      int
 	loads    int
 	draw     drawFunc
+	renders  chan struct{}
 	held     []heldCommit
 	launch   []tea.Cmd
 }
@@ -257,7 +259,7 @@ func newModel(client caller, opts Options, done <-chan struct{}) model {
 		conn:    connInfo{client: client, opts: opts, done: done, clock: time.Now, resumeSlot: make(chan struct{}, 1)},
 		input:   inputState{composer: newEditor()},
 		screen:  screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII, motion: true, spin: newSpinner(true), notifications: true},
-		out:     outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{})},
+		out:     outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{}), renders: make(chan struct{}, diagramRenders)},
 		live:    liveState{deltas: new(deltaDecoder)},
 		thread:  threadInfo{state: stateIdle, title: "new thread", modelName: opts.Model, approvalMode: approvalMode, sandbox: sandbox},
 		pending: &pendingResume{},

@@ -244,6 +244,8 @@ func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool
 func (m *model) sendPrompt(text string, images []chip) tea.Cmd {
 	m.input.history.add(text, "")
 	m.setState(stateRunning)
+	m.thread.turnStartedAt = m.now()
+	m.thread.turnSent = true
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: promptInput(text, images), Model: m.thread.modelName}
 	result := new(rpc.TurnStartResponse)
 	return m.call("send", "turn/start", params, result, text)
@@ -307,6 +309,8 @@ func (m *model) startQueuedFollowup() tea.Cmd {
 	m.input.history.add(next.text, "")
 	m.syncQueue()
 	m.setState(stateRunning)
+	m.thread.turnStartedAt = m.now()
+	m.thread.turnSent = true
 	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(next.text), Model: m.thread.modelName}
 	result := new(rpc.TurnStartResponse)
 	return m.callPrompt("followup", "turn/start", params, result, next)
@@ -603,6 +607,7 @@ func (m *model) restorePrompt(msg resultMsg) {
 	}
 	if msg.op == "send" || msg.op == "followup" {
 		m.setState(stateFailed)
+		m.thread.turnStartedAt = time.Time{}
 	}
 }
 

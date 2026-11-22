@@ -197,6 +197,10 @@ func (s *screenState) emit(text string) string {
 	return downsample(text, s.profile)
 }
 
+func asciiRenderer() tea.Msg {
+	return tea.ColorProfileMsg{Profile: colorprofile.ASCII}
+}
+
 func (m *model) applyEnv(msg tea.EnvMsg) {
 	m.screen.env = msg
 	m.screen.color = msg.Getenv("NO_COLOR") == ""
@@ -207,20 +211,29 @@ func (m *model) applyEnv(msg tea.EnvMsg) {
 	m.screen.setTheme()
 }
 
-func (m *model) applyColorProfile(msg tea.ColorProfileMsg) {
+func (m *model) applyColorProfile(msg tea.ColorProfileMsg) tea.Cmd {
 	if m.screen.color {
 		m.screen.profile = msg.Profile
+		return nil
 	}
+	if msg.Profile != colorprofile.ASCII {
+		return asciiRenderer
+	}
+	return nil
 }
 
 func (m *model) updateColour(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.EnvMsg:
-		return m.applyEnvMsg(msg), true
+		cmd := m.applyEnvMsg(msg)
+		if !m.screen.color {
+			cmd = tea.Batch(cmd, asciiRenderer)
+		}
+		return cmd, true
 	case tea.CapabilityMsg:
 		m.applyCapability(msg)
 	case tea.ColorProfileMsg:
-		m.applyColorProfile(msg)
+		return m.applyColorProfile(msg), true
 	case tea.BackgroundColorMsg:
 		m.applyBackground(msg)
 	default:

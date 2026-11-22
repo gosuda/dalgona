@@ -38,12 +38,13 @@ var settingRows = []settingRow{
 var statusItemIDs = []string{"effort", "approval", "sandbox", "folder", "queue", "cost", "context", "mark"}
 
 type settingsPanel struct {
-	rows       []settingRow
-	focus      int
-	statusItem int
-	saved      map[string]string
-	preview    map[string]string
-	saveErr    string
+	rows           []settingRow
+	focus          int
+	statusItem     int
+	saved          map[string]string
+	preview        map[string]string
+	saveErr        string
+	saveErrPrinted bool
 }
 
 type settingEdit struct {
@@ -281,7 +282,13 @@ func (m *model) settingsFailed(msg resultMsg) bool {
 		m.errorf("%s; run /settings and save again", text)
 		return true
 	}
-	m.settings.saveErr = text + "; press Enter to try again"
+	saveErr := text + "; press Enter to try again"
+	if saveErr != m.settings.saveErr {
+		m.settings.saveErr, m.settings.saveErrPrinted = saveErr, false
+	}
+	if !m.settings.saveErrPrinted {
+		m.settings.saveErrPrinted = m.commitOverflow(saveErr, saveErr)
+	}
 	return true
 }
 

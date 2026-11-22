@@ -1,6 +1,8 @@
 (async () => {
 	const failures = [];
-	const elapsed = () => document.querySelector(".tag.live")?.textContent ?? "";
+	const elapsed = () =>
+		document.querySelector(".thread-head .thread-title > .tag.live .elapsed")
+			?.textContent ?? "";
 	const rowCount = () =>
 		document.querySelectorAll("#transcript ol.items > li").length;
 	const before = elapsed();
@@ -10,7 +12,8 @@
 	await new Promise((resolve) => setTimeout(resolve, 3000));
 	const after = elapsed();
 	const afterRows = rowCount();
-	if (before === "") failures.push("no live tag: a turn must be running");
+	if (before === "")
+		failures.push("no live tag in the thread header: a turn must be running");
 	if (afterRows !== beforeRows) {
 		failures.push(
 			`inconclusive: new item (rows ${beforeRows} to ${afterRows}), so the counter may refresh`,
