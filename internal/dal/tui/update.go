@@ -537,11 +537,14 @@ func (m *model) commitOverflowNotice() {
 	if m.notice == "" {
 		return
 	}
-	width := terminalWidth(m.screen.width)
-	if m.screen.cells(m.noticeLine()) <= m.liveFreeWidth() {
+	m.commitOverflow(m.notice, m.noticeLine())
+}
+
+func (m *model) commitOverflow(text, line string) {
+	if m.screen.cells(line) <= m.liveFreeWidth() {
 		return
 	}
-	m.commit(fmt.Sprintf("note:%d", m.noticeN), m.screen.wrap(m.notice, width))
+	m.commit(fmt.Sprintf("note:%d", m.noticeN), m.screen.wrap(text, terminalWidth(m.screen.width)))
 	m.noticeN++
 }
 

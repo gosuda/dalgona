@@ -387,3 +387,68 @@ func settingsRowLine(t *testing.T, lines []string, label string) string {
 	t.Fatalf("settings row %s missing from dock:\n%s", label, strings.Join(lines, "\n"))
 	return ""
 }
+
+func TestSettingsSaveErrorPrintsWholeInANarrowWindow(t *testing.T) {
+	t.Parallel()
+	const want = "Could not save settings: disk full; press Enter to try again"
+	for _, width := range []int{40, 30} {
+		t.Run(fmt.Sprintf("%dcols", width), func(t *testing.T) {
+			t.Parallel()
+			caller := new(failingSaveCaller)
+			m := failSettingsSave(t, caller, width)
+			if cells := cellCount(m, m.liveText()); cells <= m.liveFreeWidth() {
+				t.Fatalf("precondition: the live row shows the error in %d cells, free width %d", cells, m.liveFreeWidth())
+			}
+			requireWholeErrorRow(t, m, width, want)
+			m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+			m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			m = runPickCommand(t, m, command)
+			if saves := saveCalls(&caller.fakeCaller); saves != 2 {
+				t.Fatalf("config/batchWrite calls = %d, want 2", saves)
+			}
+			if len(m.out.entries) != 1 {
+				t.Fatalf("a key press or a second failed save printed the error again: %+v", m.out.entries)
+			}
+		})
+	}
+}
+
+func TestSettingsSaveErrorThatFitsStaysInTheLiveRow(t *testing.T) {
+	t.Parallel()
+	m := failSettingsSave(t, new(failingSaveCaller), 120)
+	assertContains(t, stripANSI(m.liveRow()), "Could not save settings: disk full; press Enter to try again")
+	if len(m.out.entries) != 0 {
+		t.Fatalf("a settings error that fits the live row printed rows: %+v", m.out.entries)
+	}
+}
+
+func failSettingsSave(t *testing.T, caller *failingSaveCaller, width int) model {
+	t.Helper()
+	m := openSettingsPanel(t, newTestModel(caller, Options{}), "ask")
+	m.screen.width = width
+	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	return runPickCommand(t, m, command)
+}
+
+func requireWholeErrorRow(t *testing.T, m model, width int, want string) {
+	t.Helper()
+	if len(m.out.entries) != 1 || strings.Join(strings.Fields(m.out.entries[0].text), " ") != want {
+		t.Fatalf("committed rows = %+v, want one row with %q", m.out.entries, want)
+	}
+	for _, line := range strings.Split(m.out.entries[0].text, "\n") {
+		if cells := cellCount(m, line); cells >= width {
+			t.Fatalf("committed line %q takes %d cells in a %d column window", line, cells, width)
+		}
+	}
+}
+
+func saveCalls(caller *fakeCaller) int {
+	saves := 0
+	for _, call := range caller.calls {
+		if call.method == "config/batchWrite" {
+			saves++
+		}
+	}
+	return saves
+}

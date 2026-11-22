@@ -281,7 +281,11 @@ func (m *model) settingsFailed(msg resultMsg) bool {
 		m.errorf("%s; run /settings and save again", text)
 		return true
 	}
+	previous := m.settings.saveErr
 	m.settings.saveErr = text + "; press Enter to try again"
+	if m.settings.saveErr != previous {
+		m.commitOverflow(m.settings.saveErr, m.settings.saveErr)
+	}
 	return true
 }
 
