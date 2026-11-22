@@ -353,6 +353,7 @@ Load more threads stays focusable and reports `aria-disabled` while a page loads
 Each panel action and the API key field MUST stay focusable while the request they started is in flight. The action MUST report `aria-disabled` while that request runs and MUST take the disabled styling while it does. Activating it again MUST NOT send a second request.
 When the focused button disappears, the sidebar MUST move focus to the message field, or to the transcript if the field is disabled.
 When the focused button disappears in the resume panel, the panel MUST move focus to its filter.
+When the focused `Continue` button disappears as the login waiting view opens, the panel MUST move focus to its `Cancel` button.
 
 Only one control in one view MUST carry the point fill. The holder is the primary action of an open request, or the open panel.
 With no request or panel open, it is the live state tag of a running open thread.

@@ -37,6 +37,16 @@ $effect(() => {
 	picked = null;
 });
 
+$effect(() => {
+	if (flow === null || flow.method === "apiKey") return;
+	queueMicrotask(() => {
+		const active = document.activeElement;
+		if (active === null || active === document.body) {
+			document.getElementById(`${uid}-cancel`)?.focus();
+		}
+	});
+});
+
 function submitKey(event: SubmitEvent): void {
 	event.preventDefault();
 	if (keyBusy) return;
@@ -83,7 +93,7 @@ function close(): void {
 				<p>Starting sign-in…</p>
 			{/if}
 			<p>Waiting for sign-in…</p>
-			<button type="button" class="quiet" onclick={() => session.cancelLogin()}>Cancel</button>
+			<button type="button" class="quiet" id="{uid}-cancel" onclick={() => session.cancelLogin()}>Cancel</button>
 		{:else}
 			<fieldset>
 				<legend>Provider</legend>
