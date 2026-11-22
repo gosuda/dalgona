@@ -279,7 +279,7 @@ func (m *model) queueFollowup() tea.Cmd {
 		return nil
 	}
 	if busyWord(m.thread.state) == "" && composer.readsSlash() {
-		return m.submitPrompt()
+		return m.slashEnter()
 	}
 	if len(m.queue) >= maxFollowups {
 		m.noticef("follow-up queue is full (%d); wait for the active turn or press Esc", maxFollowups)
@@ -293,6 +293,18 @@ func (m *model) queueFollowup() tea.Cmd {
 		return m.startQueuedFollowup()
 	}
 	return nil
+}
+
+func (m *model) slashEnter() tea.Cmd {
+	if m.popupShown() {
+		if command, handled := m.popupEnter(m.input.popup); handled {
+			return command
+		}
+	}
+	if m.input.composer.continueLine() {
+		return nil
+	}
+	return m.submitPrompt()
 }
 
 func (m *model) dequeueFollowup() {
