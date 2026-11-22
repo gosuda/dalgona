@@ -604,8 +604,8 @@ func TestDiagramRendersOfEveryKindRunAtMostTwoAtATime(t *testing.T) {
 		defer run.finish()
 		run.send(agentDelta("a1", diagramBurst()))
 		run.quiet()
-		if calls, most := counter.read(); calls != diagramRenders || most != diagramRenders {
-			t.Fatalf("%d of %d diagrams reached a renderer, %d at once, want %d", calls, len(burstKinds), most, diagramRenders)
+		if calls, most := counter.read(); calls != 2 || most != 2 {
+			t.Fatalf("%d of %d diagrams reached a renderer, %d at once, want %d", calls, len(burstKinds), most, 2)
 		}
 		run.send(press('k', 0, "k"))
 		run.waitFor(t, "the key echoed while diagrams wait for a render slot", func(_, s string) bool {
@@ -620,8 +620,8 @@ func TestDiagramRendersOfEveryKindRunAtMostTwoAtATime(t *testing.T) {
 			return strings.Contains(h+s, arts[len(arts)-1])
 		})
 		printedOrder(t, run.history(), run.screen(), arts...)
-		if calls, most := counter.read(); calls != len(burstKinds) || most > diagramRenders {
-			t.Fatalf("%d diagrams rendered, %d at once, want %d rendered and at most %d at once", calls, most, len(burstKinds), diagramRenders)
+		if calls, most := counter.read(); calls != len(burstKinds) || most > 2 {
+			t.Fatalf("%d diagrams rendered, %d at once, want %d rendered and at most %d at once", calls, most, len(burstKinds), 2)
 		}
 	})
 }
@@ -652,23 +652,27 @@ func TestWaitingDiagramRenderFailsAfterBudget(t *testing.T) {
 			}
 			at += 1 + next
 		}
-		if calls, _ := counter.read(); calls != diagramRenders {
-			t.Fatalf("%d diagrams reached a renderer, want %d; a waiting render must fail at the budget without drawing", calls, diagramRenders)
-		}
+		requireTwoRenderCalls(t, counter, "a waiting render must fail at the budget without drawing")
 		run.send(agentDelta("a1", "```mermaid\nLATE\n```\n"))
 		run.quiet()
-		if calls, _ := counter.read(); calls != diagramRenders {
-			t.Fatalf("%d diagrams reached a renderer while two renders past the limit still run, want %d", calls, diagramRenders)
-		}
+		requireTwoRenderCalls(t, counter, "two renders past the limit still run")
 		time.Sleep(diagramBudget + time.Second)
 		run.quiet()
 		run.waitFor(t, "the late diagram fell back to its source", func(h, s string) bool {
 			return strings.Contains(h+s, "LATE")
 		})
-		if calls, _ := counter.read(); calls != diagramRenders {
-			t.Fatalf("%d diagrams reached a renderer while two renders past the limit still run, want %d", calls, diagramRenders)
-		}
+		requireTwoRenderCalls(t, counter, "two renders past the limit still run")
+		run.release()
+		run.quiet()
+		requireTwoRenderCalls(t, counter, "the slots freed; a render past its limit must not draw")
 	})
+}
+
+func requireTwoRenderCalls(t *testing.T, counter *renderCounter, when string) {
+	t.Helper()
+	if calls, _ := counter.read(); calls != 2 {
+		t.Fatalf("%d diagrams reached a renderer, want 2: %s", calls, when)
+	}
 }
 
 func TestOverdueD2LayoutFailsD2RenderWithoutWaitingForASlot(t *testing.T) {
@@ -696,4 +700,51 @@ func TestOverdueD2LayoutFailsD2RenderWithoutWaitingForASlot(t *testing.T) {
 			t.Fatalf("a d2 render behind an overdue layout waited %v for a render slot, want no wait", waited)
 		}
 	})
+}
+
+func TestRenderWaitingForASlotFailsAtTheBudgetWithoutDrawing(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		slots := make(chan struct{}, 2)
+		slots <- struct{}{}
+		slots <- struct{}{}
+		var drawn atomic.Int32
+		draw := gatedDraw(slots, newD2Gate(), func(context.Context, string, string) (string, error) {
+			drawn.Add(1)
+			return diagramArt, nil
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), diagramBudget)
+		defer cancel()
+		start := time.Now()
+		art, err := draw(ctx, "mermaid", "x")
+		if !errors.Is(err, context.DeadlineExceeded) || art != "" || drawn.Load() != 0 {
+			t.Fatalf("a render waiting on full slots = (%q, %v, %d draws), want the budget error and no draw", art, err, drawn.Load())
+		}
+		if waited := time.Since(start); waited != diagramBudget {
+			t.Fatalf("a render waiting on full slots gave up after %v, want %v", waited, diagramBudget)
+		}
+	})
+}
+
+func TestRenderPastItsBudgetDoesNotDrawWhenASlotIsFree(t *testing.T) {
+	t.Parallel()
+	slots := make(chan struct{}, 2)
+	var drawn atomic.Int32
+	draw := gatedDraw(slots, newD2Gate(), func(context.Context, string, string) (string, error) {
+		drawn.Add(1)
+		return diagramArt, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 100 {
+		if _, err := draw(ctx, "nomnoml", "x"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("a render past its budget returned %v, want context.Canceled", err)
+		}
+	}
+	if n := drawn.Load(); n != 0 {
+		t.Fatalf("a render past its budget drew %d times with a free slot, want 0", n)
+	}
+	if len(slots) != 0 {
+		t.Fatalf("a render past its budget kept %d slots, want 0", len(slots))
+	}
 }
