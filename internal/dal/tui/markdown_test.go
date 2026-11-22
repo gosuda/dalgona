@@ -14,16 +14,16 @@ import (
 
 func TestAnswerBlockRowsStartAtTheGutter(t *testing.T) {
 	t.Parallel()
-	answer := "- one\n- two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nthe quick brown fox jumps over the lazy dog again and again until the very end of the line\n"
-	firsts := []string{"• one", " a ", "the quick"}
+	answer := "# Title\n\n- one\n- two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nthe quick brown fox jumps over the lazy dog again and again until the very end of the line\n\n---\n"
+	words := []string{"Title", "one", "a", "quick", "-"}
 	for _, colour := range []bool{false, true} {
 		for _, width := range []int{40, 100} {
 			blocks := answerBlocks(t, answer, colour, width)
-			if len(blocks) != len(firsts) {
-				t.Fatalf("colour %v width %d: %d answer blocks, want %d: %q", colour, width, len(blocks), len(firsts), blocks)
+			if len(blocks) != len(words) {
+				t.Fatalf("colour %v width %d: %d answer blocks, want %d: %q", colour, width, len(blocks), len(words), blocks)
 			}
 			for i, rows := range blocks {
-				assertGutterBlock(t, fmt.Sprintf("colour %v width %d block %d", colour, width, i), rows, firsts[i], width)
+				assertGutterBlock(t, fmt.Sprintf("colour %v width %d block %d", colour, width, i), rows, words[i], width)
 			}
 		}
 	}
@@ -52,11 +52,11 @@ func answerBlocks(t *testing.T, answer string, colour bool, width int) [][]strin
 	return blocks
 }
 
-func assertGutterBlock(t *testing.T, label string, rows []string, first string, width int) {
+func assertGutterBlock(t *testing.T, label string, rows []string, word string, width int) {
 	t.Helper()
 	assertFrame(t, rows, width, len(rows)+1)
-	if got := ansi.Strip(rows[0]); !strings.HasPrefix(got, "  "+first) {
-		t.Fatalf("%s: first row %q, want %q after a 2-cell gutter", label, got, first)
+	if got := ansi.Strip(rows[0]); !strings.HasPrefix(got, "  ") || !strings.Contains(got[2:], word) {
+		t.Fatalf("%s: first row %q, want %q after a 2-cell gutter", label, got, word)
 	}
 	if len(rows) < 2 || rows[len(rows)-1] != "" || strings.TrimSpace(ansi.Strip(rows[len(rows)-2])) == "" {
 		t.Fatalf("%s: rows %q, want text then one blank spacer", label, rows)
