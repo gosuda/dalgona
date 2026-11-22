@@ -820,4 +820,48 @@ describe("an action that ends after its panel closed MUST NOT close the panel th
 			session.stop();
 		},
 	);
+
+	test.each([
+		{
+			kind: "model" as const,
+			next: "login" as const,
+			save: (session: Session) => session.saveModel("gpt-next", null),
+		},
+		{
+			kind: "settings" as const,
+			next: "keys" as const,
+			save: (session: Session) =>
+				session.saveSettings([{ keyPath: "verbosity", value: "high" }]),
+		},
+	])(
+		"saving $kind and then opening $next from it leaves $next open",
+		async ({ kind, next, save }) => {
+			const written = Promise.withResolvers<JsonValue>();
+			const { port } = recordingPort({});
+			const call = port.call;
+			port.call = <T>(
+				method: string,
+				params: JsonValue,
+				parse: (value: unknown) => T,
+			): Promise<T> =>
+				method === "config/batchWrite"
+					? written.promise.then(parse)
+					: call(method, params, parse);
+			const session = new Session(() => port);
+			session.start({
+				hash: "#token=abc",
+				host: "localhost:7437",
+				pathname: "/",
+				protocol: "http:",
+				search: "",
+			});
+			session.openPanel(kind);
+			const saving = save(session);
+			session.openPanel(next);
+			written.resolve({});
+			expect(await saving).toBe(true);
+			expect(session.panel).toBe(next);
+			session.stop();
+		},
+	);
 });
