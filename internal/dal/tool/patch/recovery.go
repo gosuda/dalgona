@@ -1,9 +1,7 @@
 package patch
 
 import (
-	"cmp"
 	"errors"
-	"slices"
 
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
@@ -46,27 +44,6 @@ func pathOf(err error) (string, bool) {
 	return "", false
 }
 
-func uncovered(shown []snapshot.Range, first, last int) []snapshot.Range {
-	ordered := slices.SortedFunc(slices.Values(shown), func(a, b snapshot.Range) int {
-		return cmp.Compare(a.Start, b.Start)
-	})
-	var gaps []snapshot.Range
-	next := first
-	for _, item := range ordered {
-		if item.Start > last {
-			break
-		}
-		if item.Start > next {
-			gaps = append(gaps, snapshot.Range{Start: next, End: item.Start - 1})
-		}
-		next = max(next, item.End+1)
-	}
-	if next <= last {
-		gaps = append(gaps, snapshot.Range{Start: next, End: last})
-	}
-	return gaps
-}
-
 func recoveryFor(env tool.Env, err error) *tool.Recovery {
 	reason, _ := classify(err)
 	if status := reasonRows[reason].status; status != tool.StatusNeedsContext && status != tool.StatusConflict {
@@ -88,7 +65,7 @@ func unknownRead(path string) *tool.Recovery {
 }
 
 func coverageRecovery(store *snapshot.Store, cause *coverageError) *tool.Recovery {
-	current, mapped := currentUncovered(store, cause)
+	current, mapped := currentSpan(store, cause)
 	if !mapped {
 		return unknownRead(cause.path)
 	}
@@ -96,28 +73,15 @@ func coverageRecovery(store *snapshot.Store, cause *coverageError) *tool.Recover
 	return &tool.Recovery{Kind: "read", Path: cause.path, Ranges: ranges, Mapping: "known", Remaining: remaining}
 }
 
-func currentUncovered(store *snapshot.Store, cause *coverageError) ([]tool.LineRange, bool) {
-	shown, err := store.Shown(cause.ref)
-	if err != nil {
+func currentSpan(store *snapshot.Store, cause *coverageError) ([]tool.LineRange, bool) {
+	if store == nil {
 		return nil, false
 	}
-	gaps := uncovered(shown, cause.first, cause.last)
-	targets := make([]snapshot.Span, len(gaps))
-	for i, gap := range gaps {
-		targets[i] = snapshot.Span{Start: gap.Start - 1, End: gap.End}
-	}
-	spans, err := store.ResolveSpans(cause.ref, cause.path, cause.before, targets)
-	if err != nil {
+	span, err := store.ResolveSpan(cause.ref, cause.path, cause.before, snapshot.Span{Start: cause.first - 1, End: cause.last})
+	if err != nil || span.End <= span.Start {
 		return nil, false
 	}
-	current := make([]tool.LineRange, 0, len(spans))
-	for _, span := range spans {
-		if span.End <= span.Start {
-			return nil, false
-		}
-		current = append(current, tool.LineRange{First: span.Start + 1, Last: span.End})
-	}
-	return current, len(current) > 0
+	return []tool.LineRange{{First: span.Start + 1, Last: span.End}}, true
 }
 
 func splitRecovery(current []tool.LineRange) (ranges, remaining []tool.LineRange) {
