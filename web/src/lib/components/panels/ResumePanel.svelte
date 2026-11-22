@@ -25,6 +25,7 @@ let searchError = $state("");
 let searching = $state(false);
 let retry = $state(0);
 let opening = $state(false);
+let attempt = 0;
 const canLoadPage = $derived(
 	!loading && (error !== "" || session.connection === "connected"),
 );
@@ -38,6 +39,12 @@ const shown = $derived(
 			thread.preview.toLowerCase().includes(needle),
 	),
 );
+
+$effect(() => {
+	if (open) return;
+	attempt += 1;
+	opening = false;
+});
 
 $effect(() => {
 	if (!open || session.connection === "connecting") return;
@@ -104,11 +111,12 @@ async function load(cursor: string | null): Promise<void> {
 
 async function choose(threadId: string): Promise<void> {
 	const opened = session.openedPanel;
+	const mine = ++attempt;
 	opening = true;
 	try {
 		await session.selectThread(threadId);
 	} finally {
-		opening = false;
+		if (mine === attempt) opening = false;
 	}
 	session.closePanelIf(opened);
 }

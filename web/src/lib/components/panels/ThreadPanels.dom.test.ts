@@ -579,6 +579,69 @@ test("a resume that ends after Escape leaves a reopened resume panel open", asyn
 	expect(session.panel).toBe("resume");
 });
 
+test("a resume panel reopened during an earlier attempt starts enabled and keeps its own attempt", async () => {
+	const { session } = activeSession({});
+	session.connection = "connected";
+	vi.spyOn(session, "listThreads").mockResolvedValue({
+		threads: [
+			{
+				id: "thread-2",
+				title: "hello",
+				preview: "",
+				status: "idle",
+				updatedAt: 1,
+				model: null,
+				cwd: "/work",
+			},
+		],
+		nextCursor: null,
+	});
+	const earlier = Promise.withResolvers<void>();
+	const later = Promise.withResolvers<void>();
+	vi.spyOn(session, "selectThread")
+		.mockReturnValueOnce(earlier.promise)
+		.mockReturnValueOnce(later.promise);
+	render(ThreadPanels, { props: { session } });
+	session.openPanel("resume");
+	const dialog = await screen.findByRole("dialog", {
+		name: "Open an earlier thread",
+	});
+	await fireEvent.click(
+		await within(dialog).findByRole("button", { name: "hello" }),
+	);
+	expect(within(dialog).getByRole("status").textContent).toBe(
+		"Opening thread…",
+	);
+	await fireEvent.keyDown(dialog, { key: "Escape" });
+	expect(session.panel).toBeNull();
+	session.openPanel("resume");
+	await tick();
+	const reopened = await screen.findByRole("dialog", {
+		name: "Open an earlier thread",
+	});
+	const choice = (await within(reopened).findByRole("button", {
+		name: "hello",
+	})) as HTMLButtonElement;
+	expect(within(reopened).queryByRole("status")).toBeNull();
+	expect(choice.disabled).toBe(false);
+	await fireEvent.click(choice);
+	expect(within(reopened).getByRole("status").textContent).toBe(
+		"Opening thread…",
+	);
+	earlier.resolve();
+	await earlier.promise;
+	await tick();
+	await tick();
+	expect(session.panel).toBe("resume");
+	expect(within(reopened).getByRole("status").textContent).toBe(
+		"Opening thread…",
+	);
+	expect(choice.disabled).toBe(true);
+	later.resolve();
+	await later.promise;
+	await vi.waitFor(() => expect(session.panel).toBeNull());
+});
+
 type PanelAction = {
 	readonly kind: "fork" | "tree" | "rewind" | "compact" | "review";
 	readonly title: string;
