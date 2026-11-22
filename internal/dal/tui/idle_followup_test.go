@@ -71,3 +71,37 @@ func TestRunningAltEnterQueuesSlashDraftAsTyped(t *testing.T) {
 		t.Fatalf("calls %#v and queue %q, want /new now queued and no call", caller.calls, queuedTexts(m.queue))
 	}
 }
+
+func TestAltEnterReadsSlashRuleInEveryStateWithNoTurnRunning(t *testing.T) {
+	t.Parallel()
+	for _, state := range []string{stateIdle, stateInterrupted, stateFailed, stateDisconnected} {
+		t.Run(state, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			m := idleFollowupModel(caller, "/compact")
+			m.thread.state = state
+			m, command := drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+			if command != nil {
+				m, _ = drive(t, m, command())
+			}
+			if len(caller.calls) != 0 || len(m.queue) != 0 {
+				t.Fatalf("%s alt+enter on /compact made calls %#v and queue %q, want neither", state, caller.calls, queuedTexts(m.queue))
+			}
+			if m.confirm == nil || m.confirm.kind != confirmCompact {
+				t.Fatalf("%s alt+enter on /compact opened %#v, want the compact confirmation", state, m.confirm)
+			}
+		})
+	}
+}
+
+func TestIdleAltEnterQueuesPlainDraftAsFollowup(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := idleFollowupModel(caller, "hello there")
+	m, command := drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+	if want := "queued follow-up 1 of 32"; m.notice != want {
+		t.Fatalf("notice = %q, want %q", m.notice, want)
+	}
+	runCommand(t, m, command, "idle alt+enter on plain text started nothing")
+	requireLastPrompt(t, caller.calls, 1, "turn/start", "hello there")
+}

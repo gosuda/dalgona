@@ -278,7 +278,7 @@ func (m *model) queueFollowup() tea.Cmd {
 	if text == "" {
 		return nil
 	}
-	if m.thread.state == stateIdle && composer.readsSlash() {
+	if busyWord(m.thread.state) == "" && composer.readsSlash() {
 		return m.submitPrompt()
 	}
 	if len(m.queue) >= maxFollowups {
