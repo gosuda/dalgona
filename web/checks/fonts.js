@@ -21,6 +21,31 @@
 			.load(`16px "${family}"`, sample)
 			.catch((error) => failures.push(`${family}: ${error.message}`));
 	await document.fonts.ready;
+	const firstFamily = (el) =>
+		getComputedStyle(el)
+			.fontFamily.split(",")[0]
+			.trim()
+			.replaceAll(/^["']+|["']+$/g, "");
+	const used = [
+		["text probe", text, "Hanken Grotesk Variable"],
+		["title probe", title, "Bricolage Grotesque Variable"],
+	];
+	const code = document.querySelector("code, pre, .command");
+	if (code !== null) used.push(["code", code, "ui-monospace"]);
+	for (const glyph of document.querySelectorAll(".glyph"))
+		used.push([
+			`glyph ${glyph.getAttribute("aria-label") ?? ""}`,
+			glyph,
+			"Symbols Nerd Subset",
+		]);
+	for (const [label, el, family] of used) {
+		const computed = getComputedStyle(el).fontFamily;
+		const first = firstFamily(el);
+		if (first !== family)
+			failures.push(
+				`${label}: font-family ${computed} starts with ${first} (want ${family})`,
+			);
+	}
 	text.remove();
 	title.remove();
 
