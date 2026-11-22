@@ -5,7 +5,6 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
-	"io"
 	"slices"
 )
 
@@ -252,32 +251,4 @@ func writePathStates(enc *jsontext.Encoder, paths []PathState) error {
 		)
 	}
 	return errors.Join(err, enc.WriteToken(jsontext.EndArray))
-}
-
-const replayedPointer = "/hashline/replayed"
-
-func ReplayMeta(meta jsontext.Value) (jsontext.Value, error) {
-	var out bytes.Buffer
-	enc := jsontext.NewEncoder(&out)
-	dec := jsontext.NewDecoder(bytes.NewReader(meta))
-	found := false
-	for {
-		token, err := dec.ReadToken()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("tool: replay outcome meta: %w", err)
-		}
-		if token.Kind() == 'f' && string(dec.StackPointer()) == replayedPointer {
-			token, found = jsontext.True, true
-		}
-		if err := enc.WriteToken(token); err != nil {
-			return nil, fmt.Errorf("tool: replay outcome meta: %w", err)
-		}
-	}
-	if !found {
-		return meta, nil
-	}
-	return jsontext.Value(bytes.TrimSuffix(out.Bytes(), []byte("\n"))), nil
 }
