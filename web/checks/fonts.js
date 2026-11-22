@@ -14,7 +14,7 @@
 		["Hanken Grotesk Variable", "Aa"],
 		["Bricolage Grotesque Variable", "Aa"],
 		["Pretendard Variable", "한글"],
-		["Symbols Nerd Subset", "\uF0873"],
+		["Symbols Nerd Subset", "\u{F0873}"],
 	];
 	for (const [family, sample] of samples)
 		await document.fonts
