@@ -453,7 +453,7 @@ func saveCalls(caller *fakeCaller) int {
 	return saves
 }
 
-func TestSettingsSaveErrorPrintsWholeOnceItIsCutAfterANarrowing(t *testing.T) {
+func TestSettingsSaveErrorPrintsWholeRightAfterANarrowingCutsIt(t *testing.T) {
 	t.Parallel()
 	const want = "Could not save settings: disk full; press Enter to try again"
 	caller := new(failingSaveCaller)
@@ -466,18 +466,23 @@ func TestSettingsSaveErrorPrintsWholeOnceItIsCutAfterANarrowing(t *testing.T) {
 		t.Fatalf("a settings error that fits the live row printed rows: %+v", m.out.entries)
 	}
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	if saves := saveCalls(&caller.fakeCaller); saves != 1 {
+		t.Fatalf("config/batchWrite calls = %d, want 1", saves)
+	}
+	requireWholeErrorRow(t, m, 40, want)
 	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	m, command = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = runPickCommand(t, m, command)
 	if saves := saveCalls(&caller.fakeCaller); saves != 2 {
 		t.Fatalf("config/batchWrite calls = %d, want 2", saves)
 	}
-	requireWholeErrorRow(t, m, 40, want)
-	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	m, command = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	m = runPickCommand(t, m, command)
 	if len(m.out.entries) != 1 {
-		t.Fatalf("a third failed save printed the error again: %+v", m.out.entries)
+		t.Fatalf("a second identical failed save printed the error again: %+v", m.out.entries)
+	}
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 24})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	if len(m.out.entries) != 1 {
+		t.Fatalf("widening and narrowing again printed the error again: %+v", m.out.entries)
 	}
 }
 
