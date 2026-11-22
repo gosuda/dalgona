@@ -143,7 +143,8 @@ func TestRetryCountdownRoundsUpToTheWholeSecond(t *testing.T) {
 		{time.Second, "1m 59s"},
 		{118 * time.Second, "0m 01s"},
 		{998 * time.Millisecond, "0m 01s"},
-		{time.Millisecond, "0m 00s"},
+		{time.Millisecond - time.Nanosecond, "0m 01s"},
+		{time.Nanosecond, "0m 00s"},
 	}
 	for _, step := range steps {
 		now = now.Add(step.after)
