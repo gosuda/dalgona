@@ -309,6 +309,10 @@ test("searches conversation text after a pause and ignores cancelled results", a
 		searchThreads: search,
 		selectThread: select,
 		closePanel: close,
+		openedPanel: 1,
+		closePanelIf: (opened: number) => {
+			if (opened === 1) close();
+		},
 	} as unknown as Session;
 	render(ResumePanel, { session, open: true });
 	const input = screen.getByRole("searchbox", { name: "Filter threads" });
@@ -355,6 +359,8 @@ test("conversation search offers retry and distinguishes no matches", async () =
 		listThreads: vi.fn().mockResolvedValue({ threads: [], nextCursor: null }),
 		searchThreads: search,
 		closePanel: vi.fn(),
+		openedPanel: 1,
+		closePanelIf: vi.fn(),
 	} as unknown as Session;
 	render(ResumePanel, { session, open: true });
 	await fireEvent.input(screen.getByRole("searchbox"), {
@@ -404,6 +410,10 @@ test("resume closes after the thread loads and focus lands in the enabled messag
 		searchThreads: vi.fn().mockResolvedValue([]),
 		selectThread: select,
 		closePanel: close,
+		openedPanel: 1,
+		closePanelIf: (opened: number) => {
+			if (opened === 1) close();
+		},
 	} as unknown as Session;
 	view = render(ResumePanel, { session, open: true });
 	await tick();
@@ -447,6 +457,10 @@ test("resume shows one status line and takes no second choice while the thread l
 		searchThreads: vi.fn().mockResolvedValue([]),
 		selectThread: select,
 		closePanel: close,
+		openedPanel: 1,
+		closePanelIf: (opened: number) => {
+			if (opened === 1) close();
+		},
 	} as unknown as Session;
 	view = render(ResumePanel, { session, open: true });
 	await tick();
@@ -563,4 +577,291 @@ test("a resume that ends after Escape leaves a reopened resume panel open", asyn
 	await tick();
 	await tick();
 	expect(session.panel).toBe("resume");
+});
+
+test("a resume panel reopened during an earlier attempt starts enabled and keeps its own attempt", async () => {
+	const { session } = activeSession({});
+	session.connection = "connected";
+	vi.spyOn(session, "listThreads").mockResolvedValue({
+		threads: [
+			{
+				id: "thread-2",
+				title: "hello",
+				preview: "",
+				status: "idle",
+				updatedAt: 1,
+				model: null,
+				cwd: "/work",
+			},
+		],
+		nextCursor: null,
+	});
+	const earlier = Promise.withResolvers<void>();
+	const later = Promise.withResolvers<void>();
+	vi.spyOn(session, "selectThread")
+		.mockReturnValueOnce(earlier.promise)
+		.mockReturnValueOnce(later.promise);
+	render(ThreadPanels, { props: { session } });
+	session.openPanel("resume");
+	const dialog = await screen.findByRole("dialog", {
+		name: "Open an earlier thread",
+	});
+	await fireEvent.click(
+		await within(dialog).findByRole("button", { name: "hello" }),
+	);
+	expect(within(dialog).getByRole("status").textContent).toBe(
+		"Opening thread…",
+	);
+	await fireEvent.keyDown(dialog, { key: "Escape" });
+	expect(session.panel).toBeNull();
+	session.openPanel("resume");
+	await tick();
+	const reopened = await screen.findByRole("dialog", {
+		name: "Open an earlier thread",
+	});
+	const choice = (await within(reopened).findByRole("button", {
+		name: "hello",
+	})) as HTMLButtonElement;
+	expect(within(reopened).queryByRole("status")).toBeNull();
+	expect(choice.disabled).toBe(false);
+	await fireEvent.click(choice);
+	expect(within(reopened).getByRole("status").textContent).toBe(
+		"Opening thread…",
+	);
+	earlier.resolve();
+	await earlier.promise;
+	await tick();
+	await tick();
+	expect(session.panel).toBe("resume");
+	expect(within(reopened).getByRole("status").textContent).toBe(
+		"Opening thread…",
+	);
+	expect(choice.disabled).toBe(true);
+	later.resolve();
+	await later.promise;
+	await vi.waitFor(() => expect(session.panel).toBeNull());
+});
+
+type PanelAction = {
+	readonly kind: "fork" | "tree" | "rewind" | "compact" | "review";
+	readonly title: string;
+	readonly method:
+		| "forkThread"
+		| "setLeaf"
+		| "rewindTo"
+		| "compactThread"
+		| "startReview";
+	readonly turnId: string | null;
+	readonly act: (dialog: HTMLElement) => Promise<void>;
+};
+
+const panelActions: readonly PanelAction[] = [
+	{
+		kind: "fork",
+		title: "Fork at a turn",
+		method: "forkThread",
+		turnId: null,
+		act: async (dialog) => {
+			await fireEvent.click(
+				await within(dialog).findByLabelText(/first prompt/),
+			);
+			await fireEvent.click(
+				within(dialog).getByRole("button", { name: "Fork here" }),
+			);
+		},
+	},
+	{
+		kind: "tree",
+		title: "Move to another branch",
+		method: "setLeaf",
+		turnId: null,
+		act: async (dialog) => {
+			await within(dialog).findByLabelText(/first prompt/);
+			await tick();
+			await fireEvent.click(
+				within(dialog).getByRole("button", { name: "Switch branch" }),
+			);
+		},
+	},
+	{
+		kind: "rewind",
+		title: "Rewind to a turn",
+		method: "rewindTo",
+		turnId: "turn-2",
+		act: async (dialog) => {
+			await within(dialog).findByLabelText(/second prompt/);
+			await tick();
+			await fireEvent.click(
+				within(dialog).getByRole("button", { name: "Rewind" }),
+			);
+		},
+	},
+	{
+		kind: "compact",
+		title: "Compact the context",
+		method: "compactThread",
+		turnId: null,
+		act: async (dialog) => {
+			await fireEvent.click(
+				within(dialog).getByRole("button", { name: "Compact" }),
+			);
+		},
+	},
+	{
+		kind: "review",
+		title: "Review changes",
+		method: "startReview",
+		turnId: null,
+		act: async (dialog) => {
+			await fireEvent.click(
+				within(dialog).getByRole("button", { name: "Start review" }),
+			);
+		},
+	},
+];
+
+describe("an action that ends after its panel closed MUST NOT close the panel that is open then", () => {
+	test.each(panelActions)(
+		"$kind leaves the next panel open",
+		async ({ kind, title, method, turnId, act }) => {
+			const { session } = activeSession({ "dalgona/thread/tree": tree });
+			const pending = Promise.withResolvers<void>();
+			const action = vi.spyOn(session, method).mockReturnValue(pending.promise);
+			render(ThreadPanels, { props: { session } });
+			session.openPanel(kind, turnId);
+			const dialog = await screen.findByRole("dialog", { name: title });
+			await act(dialog);
+			expect(action).toHaveBeenCalled();
+			await fireEvent.keyDown(dialog, { key: "Escape" });
+			expect(session.panel).toBeNull();
+			session.openPanel("new");
+			await tick();
+			pending.resolve();
+			await pending.promise;
+			await tick();
+			await tick();
+			expect(session.panel).toBe("new");
+		},
+	);
+
+	test.each(panelActions)(
+		"$kind closes its own panel when it ends",
+		async ({ kind, title, method, turnId, act }) => {
+			const { session } = activeSession({ "dalgona/thread/tree": tree });
+			const pending = Promise.withResolvers<void>();
+			vi.spyOn(session, method).mockReturnValue(pending.promise);
+			render(ThreadPanels, { props: { session } });
+			session.openPanel(kind, turnId);
+			const dialog = await screen.findByRole("dialog", { name: title });
+			await act(dialog);
+			expect(session.panel).toBe(kind);
+			pending.resolve();
+			await pending.promise;
+			await tick();
+			await tick();
+			expect(session.panel).toBeNull();
+		},
+	);
+
+	test.each([
+		{
+			kind: "model" as const,
+			closedFirst: true,
+			save: (session: Session) => session.saveModel("gpt-next", null),
+		},
+		{
+			kind: "model" as const,
+			closedFirst: false,
+			save: (session: Session) => session.saveModel("gpt-next", null),
+		},
+		{
+			kind: "settings" as const,
+			closedFirst: true,
+			save: (session: Session) =>
+				session.saveSettings([{ keyPath: "verbosity", value: "high" }]),
+		},
+		{
+			kind: "settings" as const,
+			closedFirst: false,
+			save: (session: Session) =>
+				session.saveSettings([{ keyPath: "verbosity", value: "high" }]),
+		},
+	])(
+		"saving $kind with its panel closed first: $closedFirst",
+		async ({ kind, closedFirst, save }) => {
+			const written = Promise.withResolvers<JsonValue>();
+			const { port } = recordingPort({});
+			const call = port.call;
+			port.call = <T>(
+				method: string,
+				params: JsonValue,
+				parse: (value: unknown) => T,
+			): Promise<T> =>
+				method === "config/batchWrite"
+					? written.promise.then(parse)
+					: call(method, params, parse);
+			const session = new Session(() => port);
+			session.start({
+				hash: "#token=abc",
+				host: "localhost:7437",
+				pathname: "/",
+				protocol: "http:",
+				search: "",
+			});
+			session.openPanel(kind);
+			const saving = save(session);
+			if (closedFirst) {
+				session.closePanel();
+				session.openPanel("new");
+			}
+			written.resolve({});
+			expect(await saving).toBe(true);
+			expect(session.panel).toBe(closedFirst ? "new" : null);
+			session.stop();
+		},
+	);
+
+	test.each([
+		{
+			kind: "model" as const,
+			next: "login" as const,
+			save: (session: Session) => session.saveModel("gpt-next", null),
+		},
+		{
+			kind: "settings" as const,
+			next: "keys" as const,
+			save: (session: Session) =>
+				session.saveSettings([{ keyPath: "verbosity", value: "high" }]),
+		},
+	])(
+		"saving $kind and then opening $next from it leaves $next open",
+		async ({ kind, next, save }) => {
+			const written = Promise.withResolvers<JsonValue>();
+			const { port } = recordingPort({});
+			const call = port.call;
+			port.call = <T>(
+				method: string,
+				params: JsonValue,
+				parse: (value: unknown) => T,
+			): Promise<T> =>
+				method === "config/batchWrite"
+					? written.promise.then(parse)
+					: call(method, params, parse);
+			const session = new Session(() => port);
+			session.start({
+				hash: "#token=abc",
+				host: "localhost:7437",
+				pathname: "/",
+				protocol: "http:",
+				search: "",
+			});
+			session.openPanel(kind);
+			const saving = save(session);
+			session.openPanel(next);
+			written.resolve({});
+			expect(await saving).toBe(true);
+			expect(session.panel).toBe(next);
+			session.stop();
+		},
+	);
 });

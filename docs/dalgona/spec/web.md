@@ -497,9 +497,11 @@ When the opener of a panel is gone, disabled, or the page body, closing the pane
 While the message field is disabled, that focus MUST go to the transcript.
 Focusing the transcript MUST NOT scroll the page or the transcript.
 Choosing a thread in the resume panel MUST keep the panel open until the attempt to open that thread ends.
-While that attempt runs, the resume panel MUST disable its thread choices.
-During that attempt, the resume panel MUST show `Opening thread…` as status text inside its dialog.
-An attempt that ends after its resume panel closed MUST NOT close the panel that is open then.
+While that attempt runs, the resume panel that started it MUST disable its thread choices.
+During that attempt, the resume panel that started it MUST show `Opening thread…` as status text inside its dialog.
+A resume panel that opens while an attempt from an earlier resume panel runs MUST enable its thread choices.
+That resume panel MUST NOT show `Opening thread…` for the earlier attempt.
+An action that a panel starts and that ends after that panel closed MUST NOT close the panel that is open then.
 A panel MUST keep its title and footer inside the viewport.
 When a panel is taller than the viewport, only its body MUST scroll.
 `web/checks/panel-footer.js` checks these rules for the open panel and for each provider choice of the login panel.

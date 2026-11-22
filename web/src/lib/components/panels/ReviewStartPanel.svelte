@@ -40,9 +40,10 @@ async function start(): Promise<void> {
 		error = choice;
 		return;
 	}
+	const opened = session.openedPanel;
 	try {
 		await session.startReview(choice);
-		session.closePanel();
+		session.closePanelIf(opened);
 	} catch (failure) {
 		error = failure instanceof Error ? failure.message : String(failure);
 	}

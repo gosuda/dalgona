@@ -12,9 +12,10 @@ let error = $state("");
 
 async function compact(): Promise<void> {
 	error = "";
+	const opened = session.openedPanel;
 	try {
 		await session.compactThread();
-		session.closePanel();
+		session.closePanelIf(opened);
 	} catch (failure) {
 		error = failure instanceof Error ? failure.message : String(failure);
 	}

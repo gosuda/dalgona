@@ -173,9 +173,20 @@ func (m *model) loginKeyView() panelView {
 	}
 }
 
+func (m *model) loginBodyWidth() int {
+	return max(1, panelRowWidth(&m.screen)-panelRailCells-panelMarkerCells)
+}
+
 func (m *model) loginURLRows(url string) []string {
-	width := max(1, panelRowWidth(&m.screen)-panelRailCells-panelMarkerCells)
-	return strings.Split(m.screen.method.Hardwrap(m.screen.nfc(url), width, true), "\n")
+	return strings.Split(m.screen.method.Hardwrap(m.screen.nfc(m.screen.expand(url)), m.loginBodyWidth(), true), "\n")
+}
+
+func (m *model) loginCodeRows(code string) []string {
+	row := m.screen.expand("Enter code " + code + " at")
+	if m.screen.cells(row) <= m.loginBodyWidth() {
+		return []string{row}
+	}
+	return m.loginURLRows(code)
 }
 
 func (m *model) loginWaitingView() panelView {
@@ -189,7 +200,7 @@ func (m *model) loginWaitingView() panelView {
 		view.body = []string{"Starting sign-in…"}
 	} else {
 		if panel.code != "" {
-			view.body = []string{"Enter code " + panel.code + " at"}
+			view.body = m.loginCodeRows(panel.code)
 		}
 		view.body = append(view.body, m.loginURLRows(panel.url)...)
 	}

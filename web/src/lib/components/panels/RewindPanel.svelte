@@ -33,9 +33,10 @@ async function load(): Promise<void> {
 async function rewind(): Promise<void> {
 	if (selected === null) return;
 	error = "";
+	const opened = session.openedPanel;
 	try {
 		await session.rewindTo(selected);
-		session.closePanel();
+		session.closePanelIf(opened);
 	} catch (failure) {
 		error = failure instanceof Error ? failure.message : String(failure);
 	}
