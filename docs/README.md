@@ -95,7 +95,7 @@ Use one name for each thing in user-facing text and new specifications.
 
 ## Plan
 
-- [Completion plan](plan/README.md): the plan that stabilized and completed both products, stored as one fragment per section. It records intended work and certifies nothing.
+- [Completion plan](plan/README.md): the plan that stabilized and completed both products, stored as one fragment per section. It records intended work and certifies nothing. The live run records the status of each check in `/tmp/dg-dal/report.md` and `/tmp/dg-dalgona/report.md` in the [report format](dal/spec/live-debug.md#report). What cannot be proven here is in the [Not proven list](dal/spec/live-debug.md#not-provable-here).
 
 ## Decisions
 

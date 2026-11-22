@@ -13,11 +13,11 @@ let { plan }: Props = $props();
 	<section class="turn-plan" aria-label="Plan">
 		<span class="item-label">Plan</span>
 		{#if plan.explanation}
-			<p>{plan.explanation}</p>
+			<p class="prose">{plan.explanation}</p>
 		{/if}
 		<ol>
 			{#each plan.steps as step, index (index)}
-				<li data-status={step.status} aria-current={step.status === "inProgress" ? "step" : undefined}>
+				<li class="prose" data-status={step.status} aria-current={step.status === "inProgress" ? "step" : undefined}>
 					<span class="plan-status">{planStatusLabel(step.status)}</span>
 					<span>{step.step}</span>
 				</li>
@@ -60,7 +60,6 @@ let { plan }: Props = $props();
 		display: grid;
 		grid-template-columns: 6rem minmax(0, 1fr);
 		gap: var(--space-2);
-		overflow-wrap: break-word;
 	}
 
 	.plan-status {

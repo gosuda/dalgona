@@ -132,18 +132,10 @@ func (g *d2Gate) enter(ctx context.Context) (func(), error) {
 	}, nil
 }
 
-var (
-	d2Ruler   = sync.OnceValues(textmeasure.NewRuler)
-	d2Layouts = newD2Gate()
-)
+var d2Ruler = sync.OnceValues(textmeasure.NewRuler)
 
 func renderD2(ctx context.Context, source string) (string, error) {
-	leave, err := d2Layouts.enter(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer leave()
-	if err = ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	ctx = log.With(ctx, slog.New(slog.DiscardHandler))
@@ -287,14 +279,18 @@ func (m *model) renderDiagramBlock(key string, b block) tea.Cmd {
 		draw = drawDiagram
 	}
 	return func() tea.Msg {
-		return diagramMsg{key: key, lines: diagramLines(gatedDraw(m.out.renders, d2Layouts, draw), b)}
+		return diagramMsg{key: key, lines: diagramLines(gatedDraw(m.out.renders, m.out.layouts, draw), b)}
 	}
 }
 
 func gatedDraw(slots chan struct{}, d2 *d2Gate, draw drawFunc) drawFunc {
 	return func(ctx context.Context, kind, source string) (string, error) {
-		if kind == "d2" && d2.overdue() {
-			return "", errD2Busy
+		if kind == "d2" {
+			leave, err := d2.enter(ctx)
+			if err != nil {
+				return "", err
+			}
+			defer leave()
 		}
 		select {
 		case slots <- struct{}{}:

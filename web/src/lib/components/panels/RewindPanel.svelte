@@ -13,6 +13,7 @@ let { session, open }: Props = $props();
 let turns = $state<readonly TreeTurn[]>([]);
 let selected = $state<string | null>(null);
 let error = $state("");
+let busy = $state(false);
 const active = $derived(turns.filter((turn) => turn.active));
 
 $effect(() => {
@@ -31,13 +32,17 @@ async function load(): Promise<void> {
 }
 
 async function rewind(): Promise<void> {
-	if (selected === null) return;
+	if (busy || selected === null) return;
+	busy = true;
 	error = "";
+	const opened = session.openedPanel;
 	try {
 		await session.rewindTo(selected);
-		session.closePanel();
+		session.closePanelIf(opened);
 	} catch (failure) {
 		error = failure instanceof Error ? failure.message : String(failure);
+	} finally {
+		busy = false;
 	}
 }
 </script>
@@ -59,7 +64,7 @@ async function rewind(): Promise<void> {
 		{/if}
 	{/snippet}
 	{#snippet footer()}
-		<button type="button" class="point" disabled={selected === null} onclick={() => void rewind()}>Rewind</button>
+		<button type="button" class="point" disabled={selected === null} aria-disabled={busy ? "true" : undefined} onclick={() => void rewind()}>Rewind</button>
 		<button type="button" class="quiet" onclick={() => session.closePanel()}>Keep</button>
 	{/snippet}
 </Panel>

@@ -62,7 +62,7 @@ States are `idle`, `running`, `awaiting approval`, `awaiting input`, `interrupte
 
 The state words are `Working`, `Waiting`, `Stopped`, `Failed`, `Offline`, `Ready`, and `Done`. `running` shows `Working`, `awaiting approval` and `awaiting input` show `Waiting`, `interrupted` shows `Stopped`, `disconnected` shows `Offline`, and `idle` is named `Ready`, or `Done` after a completed turn. An idle live row MUST show no state word.
 
-A notice or a settings error cut in the live row MUST also print once as a row with its full text.
+A notice or a settings error cut in the live row MUST also print once as a row with its full text. A notice that a hint, a settings error or a retry wait covers MUST print only once it shows and is cut.
 
 A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. `active` with the flag `waitingOnUserInput` gives `awaiting input`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` list panel shows each thread's mapped state.
 
@@ -257,7 +257,7 @@ The API key field MUST show one `*` for each rune. The key MUST NOT appear in a 
 Enter on the API key field MUST send `account/login/start` with `type` `apiKey`. The panel MUST close when the provider accepts the key.
 A refused key MUST keep the field open with the error in the panel. Esc on the field MUST clear it and return to the methods.
 An approval request MUST NOT clear the API key field. A question with option rows MUST NOT clear it. A free-text question MUST take the input line from the API key field. Closing that question MUST leave the field empty.
-A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. Up and Down MUST scroll the body by one row while the link does not fit. A window with no body row MUST show the link in the review that `ctrl+o` opens. A device sign-in MUST show the user code in the first body row. While the sign-in waits, the hint row MUST read `Esc cancel the sign-in · waiting for the provider`, cut to the row width.
+A browser or device sign-in MUST show the whole link in the panel body, wrapped at the row width. Up and Down MUST scroll the body by one row while the link does not fit. A window with no body row MUST show the link in the review that `ctrl+o` opens. A device sign-in MUST show the user code in the first body row. The panel MUST NOT cut the user code. When `Enter code <code> at` does not fit the row width, the body MUST start with the code alone, wrapped at the row width. While the sign-in waits, the hint row MUST read `Esc cancel the sign-in · waiting for the provider`, cut to the row width.
 The client MUST print one history row `Sign-in URL: <url>` for each sign-in. The review entry of a device sign-in MUST add the row `User code: <code>` under that row, and the printed row MUST NOT hold the code. The notice line MUST NOT repeat the link while the panel is open. A sign-in MUST wait for `account/login/completed`.
 Esc during a sign-in MUST send `account/login/cancel` with its `loginId`, and MUST close the panel. Esc before the start call answers MUST keep the panel open with `Cancelling sign-in…`. When the answer arrives, the client MUST send `account/login/cancel` with its `loginId`, MUST show no sign-in link, and MUST close the panel.
 A multiline paste into the API key field MUST fail atomically with a visible error and MUST NOT make a chip.
@@ -322,7 +322,7 @@ With no panel open, the composer MUST show the caret row. When the caret row is 
 Enter MUST send the prompt, except after a backslash and while the command palette lists a command.
 Enter after a backslash MUST replace the backslash with a newline.
 Shift+Enter and Ctrl+J MUST insert a newline.
-Alt+Enter MUST queue the draft as a follow-up.
+Alt+Enter MUST queue the draft as a follow-up, but while no turn runs, a draft the slash rule reads MUST run as Enter runs it.
 Up MUST move the caret between wrapped rows. On the first row, Up MUST recall the previous history entry.
 Down MUST move the caret between wrapped rows. On the last row, Down MUST recall the next entry, and past the newest entry it MUST restore the draft with its chips.
 Home and End MUST move the caret to the start or end of its line.
@@ -445,7 +445,7 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 | Enter, idle | `turn/start` with the composer text, unless the command palette lists a command. The palette then runs or completes that command |
 | Enter, running or awaiting approval | `turn/steer` with the composer text |
 | Enter, empty composer | Starts the oldest held follow-up when no turn runs |
-| Alt+Enter | Queues a follow-up, at most 32 |
+| Alt+Enter | Queues a follow-up, at most 32. While no turn runs, a draft that the slash rule reads runs as Enter runs it |
 | Alt+Q | Opens the queue panel, which lists each queued follow-up as `<i>. <first line>` |
 | Alt+Up, empty composer | Moves the newest queued follow-up back into the composer |
 | `?`, empty composer | Opens the help panel. It lists each key with its action, then one status line for each shown status item. `?` or Esc closes it. Up and Down scroll one line, and PgUp and PgDn scroll a page |
@@ -687,6 +687,7 @@ The client MUST run at most two diagram renders at a time, of every kind togethe
 A render that waits for its turn MUST count the wait in its 2 second limit.
 A render past the render limit MUST keep its turn until its renderer returns.
 A d2 layout cannot be cancelled, so one that outlives the render limit keeps running to its end. The client MUST run at most one d2 layout at a time.
+A d2 render that waits for the d2 layout turn MUST NOT hold one of the two render turns.
 While a d2 layout past the render limit runs, a d2 render MUST count as a failed render without waiting.
 A source of more than 16384 bytes MUST NOT reach a renderer. It MUST print `diagram <kind>: too large to draw · source shown` followed by the source.
 The client MUST run each render outside the update loop. A key, a tick, or any other message MUST NOT wait for a render.

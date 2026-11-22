@@ -39,6 +39,7 @@ $effect(() => {
 
 function submitKey(event: SubmitEvent): void {
 	event.preventDefault();
+	if (keyBusy) return;
 	const provider = picked;
 	if (provider === null) return;
 	const key = apiKey.trim();
@@ -112,13 +113,13 @@ function close(): void {
 						autocomplete="off"
 						spellcheck="false"
 						bind:value={apiKey}
-						disabled={keyBusy}
+						readonly={keyBusy}
 						aria-describedby="{uid}-error"
 					/>
 					{#if formError !== null || keyError !== null}
 						<p id="{uid}-error" class="field-error">{formError ?? keyError}</p>
 					{/if}
-					<button type="submit" class="point" disabled={keyBusy}>Log in</button>
+					<button type="submit" class="point" aria-disabled={keyBusy ? "true" : undefined}>Log in</button>
 				</form>
 			{:else if chosen !== null && chosen.login === "browser"}
 				<fieldset>

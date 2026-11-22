@@ -5,7 +5,7 @@ let { item }: RowProps = $props();
 </script>
 
 {#if item.kind === "advisorNote"}
-	<div class="advisor-note" data-severity={item.severity}>
+	<div class="advisor-note prose" data-severity={item.severity}>
 		<span class="advisor-label">{item.advisor === "advisor" ? "advisor" : `advisor ${item.advisor}`} · {item.severity}:</span>
 		{item.note}
 	</div>
@@ -18,7 +18,6 @@ let { item }: RowProps = $props();
 		padding: var(--space-1) var(--space-3);
 		color: var(--dim);
 		font-size: var(--size-small);
-		overflow-wrap: break-word;
 		white-space: pre-wrap;
 	}
 

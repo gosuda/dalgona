@@ -52,32 +52,33 @@ type caller interface {
 }
 
 type model struct {
-	conn        connInfo
-	thread      threadInfo
-	live        liveState
-	input       inputState
-	screen      screenState
-	out         outState
-	notice      string
-	noticeError bool
-	noticeN     int
-	hint        hintState
-	queue       []followup
-	leaving     bool
-	quitting    bool
-	suspending  bool
-	approvals   []approval
-	list        *listPanel
-	confirm     *confirmation
-	login       *loginPanel
-	help        *helpPanel
-	matchSeq    int
-	listSeq     int
-	review      *reviewState
-	settings    *settingsPanel
-	saving      *settingsPanel
-	prefs       map[string]string
-	pending     *pendingResume
+	conn          connInfo
+	thread        threadInfo
+	live          liveState
+	input         inputState
+	screen        screenState
+	out           outState
+	notice        string
+	noticeError   bool
+	noticePrinted bool
+	noticeN       int
+	hint          hintState
+	queue         []followup
+	leaving       bool
+	quitting      bool
+	suspending    bool
+	approvals     []approval
+	list          *listPanel
+	confirm       *confirmation
+	login         *loginPanel
+	help          *helpPanel
+	matchSeq      int
+	listSeq       int
+	review        *reviewState
+	settings      *settingsPanel
+	saving        *settingsPanel
+	prefs         map[string]string
+	pending       *pendingResume
 }
 
 const pendingResumeLimit = 4096
@@ -191,6 +192,7 @@ type outState struct {
 	loads    int
 	draw     drawFunc
 	renders  chan struct{}
+	layouts  *d2Gate
 	held     []heldCommit
 	launch   []tea.Cmd
 }
@@ -259,7 +261,7 @@ func newModel(client caller, opts Options, done <-chan struct{}) model {
 		conn:    connInfo{client: client, opts: opts, done: done, clock: time.Now, resumeSlot: make(chan struct{}, 1)},
 		input:   inputState{composer: newEditor()},
 		screen:  screenState{width: 80, focused: true, color: true, profile: colorprofile.ASCII, motion: true, spin: newSpinner(true), notifications: true},
-		out:     outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{}), renders: make(chan struct{}, diagramRenders)},
+		out:     outState{markdown: make(map[mdKey]*glamour.TermRenderer), printed: make(map[string]struct{}), renders: make(chan struct{}, diagramRenders), layouts: newD2Gate()},
 		live:    liveState{deltas: new(deltaDecoder)},
 		thread:  threadInfo{state: stateIdle, title: "new thread", modelName: opts.Model, approvalMode: approvalMode, sandbox: sandbox},
 		pending: &pendingResume{},

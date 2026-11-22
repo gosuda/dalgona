@@ -117,7 +117,7 @@ let reviewTarget = $state<TranscriptEntry | null>(null);
 let followedThread: string | null = null;
 let following = $state(true);
 let unseen = $state(0);
-const showJump = $derived(!following);
+const showJump = $derived(threadId !== null && !following);
 let scrollQueued = false;
 let scrolledSnapshot: ScrollSnapshot = { count: 0, lastId: null };
 let seen: { target: Element; height: number } | null = null;
@@ -162,6 +162,7 @@ $effect(() => {
 		unseen = 0;
 		scrolledSnapshot = { count: 0, lastId: null };
 	}
+	if (threadId === null) return;
 	const nextSnapshot: ScrollSnapshot = {
 		count: currentItems.length,
 		lastId: currentItems.at(-1)?.id ?? null,
@@ -290,20 +291,20 @@ function jumpToLatest(): void {
 		{/if}
 
 		{#if turnReview !== null}
-			<p class="turn-review" data-verdict={turnReview.verdict}>{turnReview.summary}</p>
+			<p class="turn-review prose" data-verdict={turnReview.verdict}>{turnReview.summary}</p>
 		{/if}
 		<PlanPanel {plan} />
 
 		{#if running}
-			<p class="turn-outcome">
+			<p class="turn-outcome prose">
 				{error ? `Retrying after an error: ${error}` : "Working · new output appears here"}
 			</p>
 		{:else if turnStatus === "failed"}
-			<p class="turn-outcome failed">
+			<p class="turn-outcome prose failed">
 				The turn failed{error ? `: ${error}` : ""}. Send your message again to retry, or start a new thread.
 			</p>
 		{:else if turnStatus === "interrupted"}
-			<p class="turn-outcome">Turn interrupted. Send a message to continue.</p>
+			<p class="turn-outcome prose">Turn interrupted. Send a message to continue.</p>
 		{/if}
 	</div>
 
@@ -350,7 +351,6 @@ function jumpToLatest(): void {
 		color: var(--dim);
 		font-size: var(--size-caption);
 		font-weight: 600;
-		overflow-wrap: break-word;
 	}
 
 	.turn-outcome.failed {
@@ -429,7 +429,7 @@ function jumpToLatest(): void {
 	.jump {
 		position: sticky;
 		inset-block-end: var(--space-3);
-		display: block;
+		display: flex;
 		width: fit-content;
 		margin: var(--space-3) auto 0;
 	}

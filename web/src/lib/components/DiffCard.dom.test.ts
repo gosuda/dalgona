@@ -1,3 +1,4 @@
+import "../../app.css";
 import { cleanup, render } from "@testing-library/svelte";
 import { afterEach, describe, expect, test } from "vitest";
 import DiffCard from "#lib/components/DiffCard.svelte";
@@ -64,5 +65,24 @@ describe("diff card", () => {
 		expect(rows).toHaveLength(61);
 		expect(rows[0]).toBe("@@ -0,0 +1,60 @@");
 		expect(rows[60]).toBe("… 1 more line");
+	});
+
+	test("shows its lines without an inner scroll container", () => {
+		const change: FileChange = {
+			path: "wide.txt",
+			kind: "add",
+			diff: `@@ -0,0 +1 @@\n+${"x".repeat(400)}\n`,
+			additions: 1,
+			deletions: 0,
+			diffOmitted: false,
+		};
+		const { container } = render(DiffCard, { props: { change, open: true } });
+		const diff = container.querySelector("pre.diff");
+		expect(diff).not.toBeNull();
+		const style = getComputedStyle(diff as Element);
+		expect(style.overflowX).toBe("visible");
+		expect(style.overflowY).toBe("visible");
+		expect(style.whiteSpace).toBe("pre-wrap");
+		expect(style.overflowWrap).toBe("anywhere");
 	});
 });

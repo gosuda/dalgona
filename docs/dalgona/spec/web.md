@@ -94,9 +94,9 @@ That contract defines required adapter changes. These requirements do not assert
 - At 52rem or narrower the transcript MUST NOT be a scroll container. Wheel input MUST scroll the document.
 - The open thread has an inline-start bar and a strong title as well as its fill, so it stays distinct under forced colours.
 - At 320px nothing MUST clip or scroll sideways. Long tokens wrap anywhere.
-- The transcript follows new output only while the reader is within 32px of its end. Opening a thread follows its end. While the transcript follows, output that arrived after the client's last scroll or scroll event MUST NOT count as the reader leaving the end.
+- The transcript follows new output only while the reader is within 32px of its end. Opening a thread follows its end. While no thread is open the client MUST NOT scroll to follow the transcript. While the transcript follows, output that arrived after the client's last scroll or scroll event MUST NOT count as the reader leaving the end.
 - The client MUST observe the actual scroll container: the transcript when it overflows, else its nearest scrolling ancestor, else the document. The client MUST resolve it on each scroll, so content that overflows only after it arrives is observed. Streaming MUST preserve the reader's position after scrolling away.
-- The transcript MUST show Jump to latest whenever the reader is over 32px from the end, whether or not a turn runs. The button MUST show appended items as `· N new`. Activating it MUST scroll to the end and focus the last row without changing that scroll position. Showing the button MUST NOT move focus.
+- While a thread is open, the transcript MUST show Jump to latest whenever the reader is over 32px from the end. Whether a turn runs MUST NOT change that. The button MUST show appended items as `· N new`. Activating it MUST scroll to the end and focus the last row without changing that scroll position. Showing the button MUST NOT move focus.
 - At 52rem or narrower the Jump to latest button MUST sit above the dock, whatever the dock's height. The client MUST measure the dock and publish its height to the button.
 - The skip link MUST name the transcript and target `#transcript`.
 - At 52rem or narrower the dock (notices, request card, composer) MUST stay at the bottom of the viewport at every scroll position. At the end of the document the dock MUST NOT cover the last transcript row. The dock MUST span the width of the viewport. While no request is open, the dock MUST leave at least 6rem of the viewport above it. The dock MUST scroll inside itself when its content is taller than that. Form text is at least 16px.
@@ -109,7 +109,7 @@ The client MUST cache the setting under the browser key `dalgona.theme` and appl
 Each theme MUST use only the colour roles of `DESIGN.md`. The client MUST NOT paint a gradient.
 Every text role MUST meet 4.5:1 against its ground. Control edges and the focus ring MUST meet 3:1 against their ground. The ink on the point MUST meet 4.5:1.
 Under forced colours, every button edge and focus ring MUST keep a visible border.
-Outside forced colours, a quiet button MUST draw no fill at rest. A quiet button that is not destructive MUST draw no edge. The label of that button MUST use `dim`. A destructive quiet button MUST draw its edge and its label in `failed-text`. A disabled quiet button MUST draw the `tone` fill, the `line` edge and the `dim` label. A quiet button that is not destructive MUST take the padding 0 12 px of `DESIGN.md`. `web/checks/quiet-buttons.js` checks these rules for each quiet button in view.
+Outside forced colours, a quiet button MUST draw no fill at rest. A quiet button that is not destructive MUST draw no edge. The label of that button MUST use `dim`. A destructive quiet button MUST draw its edge and its label in `failed-text`. A disabled quiet button MUST draw the `tone` fill, the `line` edge and the `dim` label. A quiet button that is not destructive MUST take the padding 0 12 px of `DESIGN.md`. Each button MUST take the type of the Button row of `DESIGN.md`. That type is weight `--weight-control`, size `--size-label`, line height `--leading-tight`, inline flex, centred, and no wrap. Thread rows, thread choices of the Resume panel, the model button of the status band, and request card actions MUST NOT take that type. Thread rows and thread choices are list rows whose labels wrap. The model button is a band item that the Status band section of `DESIGN.md` cuts with `…`. Request card actions are the decision actions of the card, whose labels wrap in its grid. `web/checks/quiet-buttons.js` checks these rules for each quiet button in view, and the Button type for each other button in view.
 Each component value MUST use a named token of `DESIGN.md`. A token MUST NOT hold a value absent from the `DESIGN.md` component tables. The contract test in `web/src/lib/theme/design-contract.test.ts` checks each `DESIGN.md` citation against `web/src/lib/theme/scale.ts`.
 The Settings panel MUST save the choice under the setting path `theme`.
 
@@ -350,6 +350,7 @@ A control that disappears while focused hands focus to the message field. The su
 
 Start thread stays focusable and reports `aria-disabled` while a start is in flight.
 Load more threads stays focusable and reports `aria-disabled` while a page loads.
+Each panel action and the API key field MUST stay focusable while the request they started is in flight. The action MUST report `aria-disabled` while that request runs. Activating it again MUST NOT send a second request.
 When the focused button disappears, the sidebar MUST move focus to the message field, or to the transcript if the field is disabled.
 When the focused button disappears in the resume panel, the panel MUST move focus to its filter.
 
@@ -497,9 +498,11 @@ When the opener of a panel is gone, disabled, or the page body, closing the pane
 While the message field is disabled, that focus MUST go to the transcript.
 Focusing the transcript MUST NOT scroll the page or the transcript.
 Choosing a thread in the resume panel MUST keep the panel open until the attempt to open that thread ends.
-While that attempt runs, the resume panel MUST disable its thread choices.
-During that attempt, the resume panel MUST show `Opening thread…` as status text inside its dialog.
-An attempt that ends after its resume panel closed MUST NOT close the panel that is open then.
+While that attempt runs, the resume panel that started it MUST disable its thread choices.
+During that attempt, the resume panel that started it MUST show `Opening thread…` as status text inside its dialog.
+A resume panel that opens while an attempt from an earlier resume panel runs MUST enable its thread choices.
+That resume panel MUST NOT show `Opening thread…` for the earlier attempt.
+An action that a panel starts and that ends after that panel closed MUST NOT close the panel that is open then.
 A panel MUST keep its title and footer inside the viewport.
 When a panel is taller than the viewport, only its body MUST scroll.
 `web/checks/panel-footer.js` checks these rules for the open panel and for each provider choice of the login panel.
@@ -580,4 +583,4 @@ The resume panel MUST show its search progress as status text inside its dialog.
 A failed save in the model or settings panel MUST show a notice.
 The composer MUST show its error as an alert beside the message field. The message field MUST name that alert in `aria-describedby`. The composer MUST NOT add a notice for its error.
 The `page live regions` tests in `web/src/lib/components/App.dom.test.ts` check these rules.
-`web/checks/approval-actions.js` checks the approval card at 320x568, 375x812 and 667x375. It checks that the card holds its actions and that they do not cover the composer, at both ends of the dock's scroll. It checks that the composer shows its label and one field row, and that it is no taller than that while the dock scrolls. `web/checks/dock.js` checks the composer dock at the start, the middle and the end of the document. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/band-rows.js` checks that every band row ends at the right edge of the band, in a window wider than 640 px. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript at 1280x800, on a thread whose transcript holds more than its column shows.
+`web/checks/approval-actions.js` checks the approval card at 320x568, 375x812 and 667x375. It checks that the card holds its actions and that they do not cover the composer, at both ends of the dock's scroll. It checks that the composer shows its label and one field row, and that it is no taller than that while the dock scrolls. `web/checks/dock.js` checks the composer dock at the start, the middle and the end of the document. `web/checks/sidebar-cap.js` checks the thread list cap and its scroll. `web/checks/status-band.js` checks the band drops and keeps items at narrow widths. `web/checks/band-rows.js` checks, in a window wider than 640 px, that no band item drops and every row ends at the band's right edge. `web/checks/forced-colors-selection.js` checks the selected thread border under forced colours. `web/checks/skip-link.js` checks the skip link to the transcript at 1280x800, on a thread whose transcript holds more than its column shows.

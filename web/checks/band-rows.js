@@ -33,8 +33,14 @@
 	const round = (value) => Math.round(value * 100) / 100;
 	const rows = [];
 	for (const item of band.querySelectorAll("[data-item]")) {
-		if (item.getClientRects().length === 0) continue;
 		const id = item.getAttribute("data-item");
+		if (getComputedStyle(item).display === "none") {
+			failures.push(
+				`${id}: dropped at ${innerWidth}px (want every item shown in the three-row band)`,
+			);
+			continue;
+		}
+		if (item.getClientRects().length === 0) continue;
 		if (!(id in rowOf)) {
 			failures.push(`${id}: not an item of the band`);
 			continue;
