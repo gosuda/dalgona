@@ -65,6 +65,14 @@ Use one name for each thing in user-facing text and new specifications.
 - [Remote runners](dalgona/spec/runners.md): thread boxes, fully cloud mode, pull, and box cleanup.
 - [Ratchet](dalgona/spec/ratchet.md): held-out eval flows, approvals, and the keep, revert or rerun gate.
 - [Web UI server](dalgona/spec/web.md): built assets, access tokens, TLS, and the daemon websocket relay.
+- [Native desktop client](dalgona/spec/native.md): the complete Go and Gio desktop implementation contract and source map.
+- [Native architecture](dalgona/spec/native-architecture.md): shared connection lifecycle, package boundaries, state ownership, and reconnect.
+- [Native protocol](dalgona/spec/native-protocol.md): required capabilities, history, images, authentication, workspaces, and terminals.
+- [Native design](dalgona/spec/native-design.md): web design mapping, desktop tokens, focus, and keyboard behavior.
+- [Native components](dalgona/spec/native-components.md): every web component and the additional desktop workflows.
+- [Native documents](dalgona/spec/native-documents.md): selectable text, code, figures, math, images, diffs, and terminal rendering.
+- [Native platforms](dalgona/spec/native-platform.md): OS adapters, accessibility, build isolation, packaging, and installation.
+- [Native verification](dalgona/spec/native-verification.md): complete release gates, behavioral fixtures, and implementation order.
 - [Daemon service](dalgona/spec/daemon.md): socket, startup, and user-service lifecycle.
 - [Doctor](dalgona/spec/doctor.md): the setup check command, its rows, and its offline and online modes.
 - [Codex app integration](dalgona/spec/codex-app.md): desktop override installation and restoration.
@@ -120,6 +128,7 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 
 ### Batteries (dalgona)
 
+- [Native Gio client](dalgona/decisions/native-client.md): direct Go client integration, complete native scope, and web design inheritance.
 - [Sandbox services](dalgona/decisions/sandbox-services.md): remote execution through the Service seam.
 - [Ratchet](dalgona/decisions/ratchet.md): host-owned eval gate in the dalgona battery.
 - [Sandbox services](dalgona/decisions/sandbox-services.md): the Service seam, box lifecycle, and persistence contracts.
