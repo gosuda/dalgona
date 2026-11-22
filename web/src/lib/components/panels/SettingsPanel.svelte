@@ -36,6 +36,7 @@ $effect(() => {
 });
 
 async function save(): Promise<void> {
+	if (saving) return;
 	problem = draftProblem(draft);
 	if (problem !== null) return;
 	const edits = settingEdits(draftFromSettings(session.settingValues), draft);
@@ -135,7 +136,7 @@ async function save(): Promise<void> {
 				<button type="button" class="quiet" onclick={() => onClose()}>
 					Cancel
 				</button>
-				<button type="submit" class="point" disabled={saving}>Save</button>
+				<button type="submit" class="point" aria-disabled={saving ? "true" : undefined}>Save</button>
 			</div>
 		</form>
 	{/snippet}

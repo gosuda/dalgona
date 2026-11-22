@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import SettingsPanel from "#lib/components/panels/SettingsPanel.svelte";
 import { type RpcPort, Session } from "#lib/session.svelte.ts";
@@ -164,6 +165,38 @@ describe("settings panel", () => {
 			},
 		]);
 		expect(session.panel).toBeNull();
+	});
+
+	test("Save stays focusable and reports aria-disabled while the settings save", async () => {
+		const { session, ports } = await openSettings(baseline);
+		await fireEvent.click(screen.getByLabelText("Yolo"));
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port");
+		const answer = Promise.withResolvers<void>();
+		const write = vi.fn();
+		const call = port.call.bind(port);
+		vi.spyOn(port, "call").mockImplementation((method, params, parse) => {
+			if (method !== "config/batchWrite") return call(method, params, parse);
+			write(params);
+			return answer.promise.then(() =>
+				parse({ filePath: "/home/config.toml", status: "ok", version: "v2" }),
+			);
+		});
+		const button = screen.getByRole("button", { name: "Save" });
+		const user = userEvent.setup();
+		button.focus();
+		await user.keyboard("{Enter}");
+		expect(write).toHaveBeenCalledOnce();
+		expect(document.activeElement).toBe(button);
+		expect(button.getAttribute("aria-disabled")).toBe("true");
+		expect(button.hasAttribute("disabled")).toBe(false);
+		await user.keyboard("{Enter}");
+		await user.click(button);
+		expect(write).toHaveBeenCalledOnce();
+		answer.resolve();
+		await vi.waitFor(() => {
+			expect(session.panel).toBeNull();
+		});
 	});
 
 	test("applies the theme after save", async () => {

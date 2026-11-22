@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import ModelPanel from "#lib/components/panels/ModelPanel.svelte";
@@ -175,6 +176,44 @@ describe("model panel", () => {
 				],
 			},
 		]);
+		await vi.waitFor(() => {
+			expect(session.panel).toBeNull();
+		});
+	});
+
+	test("Use model stays focusable and reports aria-disabled while the model saves", async () => {
+		const { session, ports } = await openModels({
+			modelList: models,
+			effort: "medium",
+		});
+		await vi.waitFor(() => {
+			expect(screen.getByLabelText("GPT B")).toBeTruthy();
+		});
+		await fireEvent.click(screen.getByLabelText("GPT B"));
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port");
+		const answer = Promise.withResolvers<void>();
+		const write = vi.fn();
+		const call = port.call.bind(port);
+		vi.spyOn(port, "call").mockImplementation((method, params, parse) => {
+			if (method !== "config/batchWrite") return call(method, params, parse);
+			write(params);
+			return answer.promise.then(() =>
+				parse({ filePath: "/home/config.toml", status: "ok", version: "v2" }),
+			);
+		});
+		const button = screen.getByRole("button", { name: "Use model" });
+		const user = userEvent.setup();
+		button.focus();
+		await user.keyboard("{Enter}");
+		expect(write).toHaveBeenCalledOnce();
+		expect(document.activeElement).toBe(button);
+		expect(button.getAttribute("aria-disabled")).toBe("true");
+		expect(button.hasAttribute("disabled")).toBe(false);
+		await user.keyboard("{Enter}");
+		await user.click(button);
+		expect(write).toHaveBeenCalledOnce();
+		answer.resolve();
 		await vi.waitFor(() => {
 			expect(session.panel).toBeNull();
 		});

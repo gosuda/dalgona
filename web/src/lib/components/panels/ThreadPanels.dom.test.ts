@@ -419,7 +419,7 @@ test("resume closes after the thread loads and focus lands in the enabled messag
 	expect(document.activeElement).toBe(prompt);
 });
 
-test("resume shows one status line and takes no second choice while the thread loads", async () => {
+test("resume keeps focus on the chosen thread, shows one status line and takes no second choice while it loads", async () => {
 	let finish: () => void = () => {};
 	const select = vi.fn().mockImplementation(
 		() =>
@@ -454,10 +454,15 @@ test("resume shows one status line and takes no second choice while the thread l
 		name: "hello",
 	})) as HTMLButtonElement;
 	expect(screen.queryByRole("status")).toBeNull();
-	await fireEvent.click(choice);
+	const user = userEvent.setup();
+	choice.focus();
+	await user.keyboard("{Enter}");
 	expect(screen.getByRole("status").textContent).toBe("Opening thread…");
-	expect(choice.disabled).toBe(true);
-	await fireEvent.click(choice);
+	expect(document.activeElement).toBe(choice);
+	expect(choice.getAttribute("aria-disabled")).toBe("true");
+	expect(choice.disabled).toBe(false);
+	await user.keyboard("{Enter}");
+	await user.click(choice);
 	expect(select).toHaveBeenCalledTimes(1);
 	finish();
 	await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
@@ -469,6 +474,7 @@ test("resume shows one status line and takes no second choice while the thread l
 		name: "hello",
 	})) as HTMLButtonElement;
 	expect(again.disabled).toBe(false);
+	expect(again.hasAttribute("aria-disabled")).toBe(false);
 });
 
 test("a resume that ends after Escape leaves the next panel and its sign-in open", async () => {
