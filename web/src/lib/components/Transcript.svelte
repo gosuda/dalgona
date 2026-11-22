@@ -429,7 +429,7 @@ function jumpToLatest(): void {
 	.jump {
 		position: sticky;
 		inset-block-end: var(--space-3);
-		display: block;
+		display: flex;
 		width: fit-content;
 		margin: var(--space-3) auto 0;
 	}

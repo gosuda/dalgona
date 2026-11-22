@@ -2,6 +2,34 @@ import "../../app.css";
 import { describe, expect, test } from "vitest";
 import { appliedRule, ruleSelectors } from "#lib/css-rule.ts";
 
+describe("button type", () => {
+	const selector =
+		"button:not(.thread, .thread-choice, .model-button, .request-actions button)";
+
+	test("takes the Button row of DESIGN.md: 650, 14 px, line height 1, inline flex, centred, no wrap", () => {
+		const rule = appliedRule(selector);
+		expect(rule.parentRule).toBeNull();
+		expect(rule.style.getPropertyValue("font-weight")).toBe(
+			"var(--weight-control)",
+		);
+		expect(rule.style.getPropertyValue("font-size")).toBe("var(--size-label)");
+		expect(rule.style.getPropertyValue("line-height")).toBe(
+			"var(--leading-tight)",
+		);
+		expect(rule.style.getPropertyValue("display")).toBe("inline-flex");
+		expect(rule.style.getPropertyValue("align-items")).toBe("center");
+		expect(rule.style.getPropertyValue("justify-content")).toBe("center");
+		expect(rule.style.getPropertyValue("white-space")).toBe("nowrap");
+	});
+
+	test("comes after the base button rule, so its label type wins", () => {
+		const selectors = ruleSelectors();
+		expect(selectors.indexOf(selector)).toBeGreaterThan(
+			selectors.indexOf("button"),
+		);
+	});
+});
+
 describe("button hover", () => {
 	test("hover uses the mapped border and tone, and leaves the point fill alone", () => {
 		const rule = appliedRule("button:not(:disabled):not(.point):hover");
