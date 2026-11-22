@@ -126,3 +126,31 @@ func TestKeywordMarkStartsNoTick(t *testing.T) {
 		t.Fatal("an idle model schedules a tick")
 	}
 }
+
+func TestRetryCountdownRoundsUpToTheWholeSecond(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	m := newTestModel(new(fakeCaller), Options{})
+	m.conn.clock = func() time.Time { return now }
+	m.screen.width = 120
+	m, _ = drive(t, m, notificationMsg{method: "turn/started", params: []byte(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`)})
+	m, _ = drive(t, m, notificationMsg{method: "dalgona/retry/wait", params: []byte(`{"threadId":"t1","turnId":"turn-1","remainingMs":120000}`)})
+	steps := []struct {
+		after time.Duration
+		want  string
+	}{
+		{time.Millisecond, "2m 00s"},
+		{time.Second, "1m 59s"},
+		{118 * time.Second, "0m 01s"},
+		{998 * time.Millisecond, "0m 01s"},
+		{time.Millisecond - time.Nanosecond, "0m 01s"},
+		{time.Nanosecond, "0m 00s"},
+	}
+	for _, step := range steps {
+		now = now.Add(step.after)
+		want := "rate limited · retrying in " + step.want + " · esc stops"
+		if got := stripANSI(m.liveRow()); !strings.Contains(got, want) {
+			t.Fatalf("live row %v before the retry = %q, want %q", m.live.retryUntil.Sub(now), got, want)
+		}
+	}
+}

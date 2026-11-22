@@ -74,7 +74,7 @@ func (m *model) retryRemaining() (time.Duration, bool) {
 }
 
 func retryLine(left time.Duration) string {
-	seconds := int(left / time.Second)
+	seconds := int((left + time.Second - 1) / time.Second)
 	return fmt.Sprintf("rate limited · retrying in %dm %02ds · esc stops", seconds/60, seconds%60)
 }
 

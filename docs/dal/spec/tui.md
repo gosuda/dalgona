@@ -198,6 +198,7 @@ A reply that opens a list panel MUST be dropped when another panel or the review
 The input line MUST show the filter while a list panel is open.
 The input line MUST show the first line of the draft while another panel is open, with the caret at its end.
 A confirm panel MUST show its title, its body, and its action row. It MUST NOT send a request before Enter.
+The revert and rewind confirm panels MUST wrap their notice at the panel body width. Up and Down MUST scroll a confirm body that does not fit by one row.
 A panel body that does not fit MUST end with the row `↓ <n> more lines · ctrl+o full view · ↑↓ scroll`, where `<n>` counts the body rows below the window. A panel with one body row MUST show that row and no such row.
 The review target input MUST show `branch:`, `commit:`, or `instructions:` as its label, and MUST hide the filter while it waits for text.
 
@@ -436,6 +437,8 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 | `/advisor reset` | `dalgona/advisor/reset`. This command is the only way to reset the advisor. Ctrl+R does not reset it |
 | `/review` | `review/start`. The list `Review changes` offers `Uncommitted changes`, which starts at once. `Base branch`, `Commit`, and `Custom` take the text of the input line before Enter sends it. The review runs as a turn on the thread |
 | `//text` | Sends `/text` as a prompt. A first token that holds a second `/`, such as a path, sends the whole text as a prompt |
+
+Each item of the `/tree`, `/revert`, `/fork`, and rewind lists MUST take one row. It MUST show the turn preview after the sanitizer runs, with each run of whitespace collapsed to one space.
 
 While a turn is working or waiting, `/new`, `/resume`, `/fork`, `/compact`, `/tree`, `/revert`, and `/review` MUST NOT send a request. The TUI MUST show `/<name> is unavailable while a turn is <word>; wait for it to finish or interrupt it first`, where `<word>` is `working`, `waiting for approval`, or `waiting for an answer`.
 
@@ -676,6 +679,7 @@ With `DAL_NO_MOTION` set to a non-empty value, the client MUST keep the dot on U
 The elapsed time MUST update once a second, also with `DAL_NO_MOTION` set.
 The elapsed time of a turn MUST start at zero when the client sends the turn. A turn the client did not send MUST start at zero when its `turn/started` arrives. The client MUST NOT take the start from the whole-second `startedAt` of `turn/started`. The elapsed time MUST NOT show the age of an earlier turn.
 A rate-limit wait MUST show `rate limited · retrying in <m>m <ss>s · esc stops`, updated each second.
+The countdown MUST round the remaining time up to the whole second, so it reads `0m 00s` only once the wait has passed.
 The countdown MUST clamp at `0m 00s`. Only the matching zero report, the end of the turn, or a lost connection MUST close the wait.
 Elapsed text MUST keep its cells, so a change of value moves no other field.
 

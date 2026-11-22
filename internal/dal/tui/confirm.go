@@ -27,6 +27,7 @@ type confirmation struct {
 	preview string
 	lines   []string
 	action  string
+	scroll  int
 }
 
 func (m *model) openConfirm(c confirmation) {
@@ -53,11 +54,12 @@ func (m *model) confirmPanel() panelView {
 		body:     m.confirmBody(c),
 		actions:  []string{c.action},
 		cursor:   -1,
+		scroll:   c.scroll,
 	}
 }
 
 func (m *model) confirmBody(c *confirmation) []string {
-	width := terminalWidth(m.screen.width)
+	width := max(1, panelRowWidth(&m.screen)-panelRailCells-panelMarkerCells)
 	if c.kind != confirmRevert && c.kind != confirmRewind {
 		body := make([]string, 0, len(c.lines))
 		for _, line := range c.lines {
@@ -72,14 +74,14 @@ func (m *model) confirmBody(c *confirmation) []string {
 		body = append(body, "`"+m.screen.fit(flat, width-2)+"`")
 		notice = revertNotice
 	}
-	rest := m.screen.wrap(notice, width)
-	if len(rest) > 3 {
-		rest = append(rest[:2], m.screen.fit(strings.Join(rest[2:], " "), width))
-	}
-	return append(body, rest...)
+	return append(body, m.screen.wrap(notice, width)...)
 }
 
 func (m *model) confirmKey(key string) tea.Cmd {
+	if step := panelScrollStep(key); step != 0 {
+		m.confirm.scroll = m.screen.scrolled(m.confirmPanel(), step)
+		return nil
+	}
 	switch key {
 	case "enter":
 		c := *m.confirm

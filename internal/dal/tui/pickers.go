@@ -470,7 +470,7 @@ func (m *model) applyTree(op string, value any) tea.Cmd {
 		if op != "tree" && !turn.Active {
 			continue
 		}
-		items = append(items, listItem{id: sanitizeText(turn.TurnID), label: sanitizeText(turn.Preview), detail: sanitizeText(turn.TurnID), active: turn.Active})
+		items = append(items, listItem{id: sanitizeText(turn.TurnID), label: singleLine(turn.Preview), detail: sanitizeText(turn.TurnID), active: turn.Active})
 	}
 	if op == "forkTree" || op == "rewindTree" {
 		slices.Reverse(items)
