@@ -79,6 +79,9 @@ func TestElapsedOfNextTurnDropsPreviousTurnStart(t *testing.T) {
 	clock.advance(5 * time.Second)
 	requireElapsed(t, m, "5s", "first turn")
 	m, _ = drive(t, m, turnCompletedMsg("turn-1"))
+	if m.thread.lastTurn != 5*time.Second {
+		t.Fatalf("a turn/completed with no durationMs took %v, want the 5s since Enter", m.thread.lastTurn)
+	}
 	clock.advance(time.Second)
 	m = sendTyped(t, m, "b")
 	requireElapsed(t, m, "0 ms", "first frame of the second turn")
