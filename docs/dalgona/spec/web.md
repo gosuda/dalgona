@@ -350,7 +350,7 @@ A control that disappears while focused hands focus to the message field. The su
 
 Start thread stays focusable and reports `aria-disabled` while a start is in flight.
 Load more threads stays focusable and reports `aria-disabled` while a page loads.
-Each panel action and the API key field MUST stay focusable while the request they started is in flight. The action MUST report `aria-disabled` while that request runs. Activating it again MUST NOT send a second request.
+Each panel action and the API key field MUST stay focusable while the request they started is in flight. The action MUST report `aria-disabled` while that request runs and MUST take the disabled styling while it does. Activating it again MUST NOT send a second request.
 When the focused button disappears, the sidebar MUST move focus to the message field, or to the transcript if the field is disabled.
 When the focused button disappears in the resume panel, the panel MUST move focus to its filter.
 

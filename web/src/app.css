@@ -74,6 +74,7 @@ button,
 }
 
 button:disabled,
+button[aria-disabled="true"],
 select:disabled,
 textarea:disabled {
 	cursor: not-allowed;
@@ -98,7 +99,8 @@ button.quiet:not(.danger) {
 	padding: 0 var(--space-3);
 }
 
-button.quiet:disabled {
+button.quiet:disabled,
+button.quiet[aria-disabled="true"] {
 	border-color: var(--line);
 	background: var(--tone);
 	color: var(--dim);
@@ -173,7 +175,7 @@ dd,
 }
 
 @media (hover: hover) {
-	button:not(:disabled):not(.point):hover {
+	button:not(:disabled):not([aria-disabled="true"]):not(.point):hover {
 		border-color: var(--strong);
 		background: var(--tone);
 	}
@@ -187,7 +189,7 @@ dd,
 		transition-timing-function: var(--ease);
 	}
 
-	button:not(:disabled):active {
+	button:not(:disabled):not([aria-disabled="true"]):active {
 		scale: 0.96;
 	}
 }
