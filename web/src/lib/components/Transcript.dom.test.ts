@@ -44,6 +44,29 @@ interface AnnounceCase {
 	want: string;
 }
 
+function scrolledAwayPage(scrollTop: number): () => void {
+	const page = document.scrollingElement;
+	if (page === null) throw new Error("no scrolling element");
+	Object.defineProperty(page, "scrollHeight", {
+		configurable: true,
+		value: 5000,
+	});
+	Object.defineProperty(page, "clientHeight", {
+		configurable: true,
+		value: 800,
+	});
+	Object.defineProperty(page, "scrollTop", {
+		configurable: true,
+		writable: true,
+		value: scrollTop,
+	});
+	return () => {
+		Reflect.deleteProperty(page, "scrollHeight");
+		Reflect.deleteProperty(page, "clientHeight");
+		Reflect.deleteProperty(page, "scrollTop");
+	};
+}
+
 function recorder() {
 	const announced: string[] = [];
 	const onAnnounce = (text: string): void => {
@@ -579,28 +602,12 @@ describe("following the end", () => {
 		const scroller = growingScroller();
 		await frames(2);
 		scroller.element.style.overflowY = "visible";
-		const page = document.scrollingElement;
-		if (page === null) throw new Error("no scrolling element");
-		Object.defineProperty(page, "scrollHeight", {
-			configurable: true,
-			value: 5000,
-		});
-		Object.defineProperty(page, "clientHeight", {
-			configurable: true,
-			value: 800,
-		});
-		Object.defineProperty(page, "scrollTop", {
-			configurable: true,
-			writable: true,
-			value: 200,
-		});
+		const restore = scrolledAwayPage(200);
 		try {
 			await fireEvent.scroll(document);
 			expect(jump()).not.toBeNull();
 		} finally {
-			Reflect.deleteProperty(page, "scrollHeight");
-			Reflect.deleteProperty(page, "clientHeight");
-			Reflect.deleteProperty(page, "scrollTop");
+			restore();
 		}
 	});
 
@@ -627,29 +634,13 @@ describe("following the end", () => {
 			props: { ...props([]), threadId: null, turnStatus: null },
 		});
 		await frames(2);
-		const page = document.scrollingElement;
-		if (page === null) throw new Error("no scrolling element");
-		Object.defineProperty(page, "scrollHeight", {
-			configurable: true,
-			value: 5000,
-		});
-		Object.defineProperty(page, "clientHeight", {
-			configurable: true,
-			value: 800,
-		});
-		Object.defineProperty(page, "scrollTop", {
-			configurable: true,
-			writable: true,
-			value: 0,
-		});
+		const restore = scrolledAwayPage(0);
 		try {
 			await fireEvent.scroll(document);
 			await fireEvent.scroll(document);
 			expect(jump()).toBeNull();
 		} finally {
-			Reflect.deleteProperty(page, "scrollHeight");
-			Reflect.deleteProperty(page, "clientHeight");
-			Reflect.deleteProperty(page, "scrollTop");
+			restore();
 		}
 	});
 
@@ -659,28 +650,12 @@ describe("following the end", () => {
 		await frames(2);
 		await rerender({ ...props([]), threadId: null, turnStatus: null });
 		await frames(2);
-		const page = document.scrollingElement;
-		if (page === null) throw new Error("no scrolling element");
-		Object.defineProperty(page, "scrollHeight", {
-			configurable: true,
-			value: 5000,
-		});
-		Object.defineProperty(page, "clientHeight", {
-			configurable: true,
-			value: 800,
-		});
-		Object.defineProperty(page, "scrollTop", {
-			configurable: true,
-			writable: true,
-			value: 0,
-		});
+		const restore = scrolledAwayPage(0);
 		try {
 			await fireEvent.scroll(document);
 			await fireEvent.scroll(document);
 		} finally {
-			Reflect.deleteProperty(page, "scrollHeight");
-			Reflect.deleteProperty(page, "clientHeight");
-			Reflect.deleteProperty(page, "scrollTop");
+			restore();
 		}
 		await rerender({ ...props(items) });
 		const scroller = growingScroller();
