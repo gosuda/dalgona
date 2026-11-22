@@ -315,3 +315,38 @@ func TestLoginDeviceCodeStaysInReviewWhenNoBodyRowFits(t *testing.T) {
 		t.Fatalf("review rows joined = %q\nwant them to hold the row User code: WXYZ-9876", joined)
 	}
 }
+
+func TestLoginDeviceCodeIsWholeInTheFirstBodyRow(t *testing.T) {
+	t.Parallel()
+	const code = "WXYZ-9876"
+	url := "https://auth.example.test/device"
+	for _, width := range []int{60, 20} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			t.Parallel()
+			m := waitingLoginPanel(t, width, 12, &rpc.LoginAccountResponse{Type: "chatgptDeviceCode", LoginID: "login-1", VerificationURL: url, UserCode: code})
+			assertFrame(t, m.dockLines(), width, 12)
+			rows := loginPanelText(t, m)
+			if !strings.Contains(rows[0], code) {
+				t.Fatalf("first panel row = %q, want the whole user code %q", rows[0], code)
+			}
+			if got := joinedPanelRows(t, rows[1:]); got != url {
+				t.Fatalf("rows after the code joined = %q, want the whole link %q", got, url)
+			}
+		})
+	}
+}
+
+func TestLoginDeviceCodeWiderThanTheBodyWrapsFromTheFirstBodyRow(t *testing.T) {
+	t.Parallel()
+	const code = "WXYZ-9876"
+	url := "https://auth.example.test/device"
+	m := waitingLoginPanel(t, 12, 16, &rpc.LoginAccountResponse{Type: "chatgptDeviceCode", LoginID: "login-1", VerificationURL: url, UserCode: code})
+	assertFrame(t, m.dockLines(), 12, 16)
+	rows := loginPanelText(t, m)
+	if !strings.HasPrefix(code, strings.TrimRight(rows[0], " ")) || strings.TrimSpace(rows[0]) == "" {
+		t.Fatalf("first panel row = %q, want it to start the user code %q", rows[0], code)
+	}
+	if got := joinedPanelRows(t, rows); got != code+url {
+		t.Fatalf("panel rows joined = %q, want the whole code then the whole link %q", got, code+url)
+	}
+}
