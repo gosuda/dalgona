@@ -630,6 +630,9 @@ A mermaid, d2, or nomnoml card MUST render the source as text art under a `diagr
 An `svg` fence or a failed render MUST print `diagram <kind>: render failed · source shown` followed by the source.
 A render that runs longer than 2 seconds MUST count as a failed render.
 A renderer that panics MUST count as a failed render.
+The client MUST run at most two diagram renders at a time, of every kind together.
+A render that waits for its turn MUST count the wait in its 2 second limit.
+A render past the render limit MUST keep its turn until its renderer returns.
 A d2 layout cannot be cancelled, so one that outlives the render limit keeps running to its end. The client MUST run at most one d2 layout at a time.
 While a d2 layout past the render limit runs, a d2 render MUST count as a failed render without waiting.
 A source of more than 16384 bytes MUST NOT reach a renderer. It MUST print `diagram <kind>: too large to draw · source shown` followed by the source.

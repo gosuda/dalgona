@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -554,5 +555,145 @@ func TestDiagramsPrintInCommitOrder(t *testing.T) {
 			return strings.Contains(h+s, "TAIL") && strings.Contains(h+s, "ART-SECOND")
 		})
 		printedOrder(t, run.history(), run.screen(), "ART-FIRST", "MIDDLE", "ART-SECOND", "TAIL")
+	})
+}
+
+type renderCounter struct {
+	mu      sync.Mutex
+	running int
+	most    int
+	calls   int
+}
+
+func (c *renderCounter) draw(gate <-chan struct{}) drawFunc {
+	return func(_ context.Context, kind, source string) (string, error) {
+		c.mu.Lock()
+		c.calls++
+		c.running++
+		c.most = max(c.most, c.running)
+		c.mu.Unlock()
+		<-gate
+		c.mu.Lock()
+		c.running--
+		c.mu.Unlock()
+		return "ART-" + kind + "-" + strings.TrimSpace(source), nil
+	}
+}
+
+func (c *renderCounter) read() (calls, most int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls, c.most
+}
+
+var burstKinds = []string{"mermaid", "nomnoml", "d2", "mermaid", "nomnoml"}
+
+func diagramBurst() string {
+	var b strings.Builder
+	for i, kind := range burstKinds {
+		b.WriteString("```" + kind + "\nS" + strconv.Itoa(i) + "\n```\n")
+	}
+	return b.String()
+}
+
+func TestDiagramRendersOfEveryKindRunAtMostTwoAtATime(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		counter := &renderCounter{}
+		run := startDiagramRun(t, counter.draw)
+		defer run.finish()
+		run.send(agentDelta("a1", diagramBurst()))
+		run.quiet()
+		if calls, most := counter.read(); calls != diagramRenders || most != diagramRenders {
+			t.Fatalf("%d of %d diagrams reached a renderer, %d at once, want %d", calls, len(burstKinds), most, diagramRenders)
+		}
+		run.send(press('k', 0, "k"))
+		run.waitFor(t, "the key echoed while diagrams wait for a render slot", func(_, s string) bool {
+			return strings.Contains(s, "› k")
+		})
+		run.release()
+		var arts []string
+		for i, kind := range burstKinds {
+			arts = append(arts, "ART-"+kind+"-S"+strconv.Itoa(i))
+		}
+		run.waitFor(t, "every diagram card printed", func(h, s string) bool {
+			return strings.Contains(h+s, arts[len(arts)-1])
+		})
+		printedOrder(t, run.history(), run.screen(), arts...)
+		if calls, most := counter.read(); calls != len(burstKinds) || most > diagramRenders {
+			t.Fatalf("%d diagrams rendered, %d at once, want %d rendered and at most %d at once", calls, most, len(burstKinds), diagramRenders)
+		}
+	})
+}
+
+func TestWaitingDiagramRenderFailsAfterBudget(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		counter := &renderCounter{}
+		run := startDiagramRun(t, counter.draw)
+		defer run.finish()
+		run.send(agentDelta("a1", diagramBurst()))
+		run.quiet()
+		time.Sleep(diagramBudget + time.Second)
+		run.quiet()
+		var heads []string
+		for i, kind := range burstKinds {
+			heads = append(heads, "diagram "+kind+": render failed · source shown", "S"+strconv.Itoa(i))
+		}
+		run.waitFor(t, "every diagram fell back to its source", func(h, s string) bool {
+			return strings.Contains(h+s, "S"+strconv.Itoa(len(burstKinds)-1))
+		})
+		all := run.history() + "\n" + run.screen()
+		at := -1
+		for _, want := range heads {
+			next := strings.Index(all[at+1:], want)
+			if next < 0 {
+				t.Fatalf("%q did not print after the rows before it:\n%s", want, all)
+			}
+			at += 1 + next
+		}
+		if calls, _ := counter.read(); calls != diagramRenders {
+			t.Fatalf("%d diagrams reached a renderer, want %d; a waiting render must fail at the budget without drawing", calls, diagramRenders)
+		}
+		run.send(agentDelta("a1", "```mermaid\nLATE\n```\n"))
+		run.quiet()
+		if calls, _ := counter.read(); calls != diagramRenders {
+			t.Fatalf("%d diagrams reached a renderer while two renders past the limit still run, want %d", calls, diagramRenders)
+		}
+		time.Sleep(diagramBudget + time.Second)
+		run.quiet()
+		run.waitFor(t, "the late diagram fell back to its source", func(h, s string) bool {
+			return strings.Contains(h+s, "LATE")
+		})
+		if calls, _ := counter.read(); calls != diagramRenders {
+			t.Fatalf("%d diagrams reached a renderer while two renders past the limit still run, want %d", calls, diagramRenders)
+		}
+	})
+}
+
+func TestOverdueD2LayoutFailsD2RenderWithoutWaitingForASlot(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		slots := make(chan struct{}, diagramRenders)
+		for range diagramRenders {
+			slots <- struct{}{}
+		}
+		layouts := newD2Gate()
+		layouts.due.Store(time.Now().UnixNano())
+		var drawn atomic.Int32
+		draw := gatedDraw(slots, layouts, func(context.Context, string, string) (string, error) {
+			drawn.Add(1)
+			return diagramArt, nil
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), diagramBudget)
+		defer cancel()
+		start := time.Now()
+		art, err := draw(ctx, "d2", "x -> y")
+		if !errors.Is(err, errD2Busy) || art != "" || drawn.Load() != 0 {
+			t.Fatalf("a d2 render behind an overdue layout = (%q, %v, %d draws), want errD2Busy and no draw", art, err, drawn.Load())
+		}
+		if waited := time.Since(start); waited != 0 {
+			t.Fatalf("a d2 render behind an overdue layout waited %v for a render slot, want no wait", waited)
+		}
 	})
 }
