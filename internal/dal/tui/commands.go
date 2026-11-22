@@ -278,6 +278,9 @@ func (m *model) queueFollowup() tea.Cmd {
 	if text == "" {
 		return nil
 	}
+	if m.thread.state == stateIdle && composer.readsSlash() {
+		return m.submitPrompt()
+	}
 	if len(m.queue) >= maxFollowups {
 		m.noticef("follow-up queue is full (%d); wait for the active turn or press Esc", maxFollowups)
 		return nil

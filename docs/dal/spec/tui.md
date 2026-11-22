@@ -302,7 +302,8 @@ With no panel open, the composer MUST show the caret row. When the caret row is 
 Enter MUST send the prompt, except after a backslash and while the command palette lists a command.
 Enter after a backslash MUST replace the backslash with a newline.
 Shift+Enter and Ctrl+J MUST insert a newline.
-Alt+Enter MUST queue the draft as a follow-up.
+Alt+Enter MUST queue the draft as a follow-up, except in the idle state for a draft that the slash rule reads.
+In the idle state, Alt+Enter MUST send a draft that the slash rule reads as Enter does.
 Up MUST move the caret between wrapped rows. On the first row, Up MUST recall the previous history entry.
 Down MUST move the caret between wrapped rows. On the last row, Down MUST recall the next entry, and past the newest entry it MUST restore the draft with its chips.
 Home and End MUST move the caret to the start or end of its line.
@@ -413,7 +414,7 @@ The iTerm2 emission MUST follow the iTerm2 inline images protocol with cell `wid
 | Enter, idle | `turn/start` with the composer text, unless the command palette lists a command. The palette then runs or completes that command |
 | Enter, running or awaiting approval | `turn/steer` with the composer text |
 | Enter, empty composer | Starts the oldest held follow-up when no turn runs |
-| Alt+Enter | Queues a follow-up, at most 32 |
+| Alt+Enter | Queues a follow-up, at most 32. In the idle state, a draft that the slash rule reads runs as Enter runs it |
 | Alt+Q | Opens the queue panel, which lists each queued follow-up as `<i>. <first line>` |
 | Alt+Up, empty composer | Moves the newest queued follow-up back into the composer |
 | `?`, empty composer | Opens the help panel. It lists each key with its action, then one status line for each shown status item. `?` or Esc closes it. Up and Down scroll one line, and PgUp and PgDn scroll a page |
