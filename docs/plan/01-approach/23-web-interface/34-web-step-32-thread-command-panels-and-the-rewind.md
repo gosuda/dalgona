@@ -2,6 +2,9 @@
 
 - New panels in `panels/`:
   - `ResumePanel`: a filterable list from `thread/list` (`limit: 100`; drop the `sortKey` and `sortDirection` members that `+page.svelte:238` sends).
+    - Conversation search waits 300 ms and requires at least one Unicode-whitespace-separated term, with at least three scalars in every term.
+    - Send the original filter unchanged. Padding does not make `ab ` eligible, and a short term keeps `abc de` local.
+    - ` abc ` is eligible and must preserve its spaces in the request. Local filtering remains available for ineligible queries.
   - `NewThreadPanel`: confirms `Start thread`.
   - `CompactPanel`: `Compact this thread? Earlier turns stay in the journal.` with button `Compact`, which calls `thread/compact/start {threadId}`.
   - `ForkPanel`: a turn list from `dalgona/thread/tree`, then `thread/fork {threadId, lastTurnId}`.
@@ -15,6 +18,8 @@
   - `rewind asks before calling thread/revert`
   - `compact is blocked mid-turn with an Interrupt action`
   - `review/start sends the chosen target`
+  - `resume search rejects padded or mixed short terms without changing the filter`
+  - `resume search preserves an eligible query including surrounding whitespace`
   - Fails before: none of these exists in the web client.
 - Spec (`docs/spec/web.md`). Panel rows plus the mid-turn rule.
 - Lands after: Steps 16, 18 and 28.

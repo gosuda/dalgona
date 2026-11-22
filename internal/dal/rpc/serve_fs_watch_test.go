@@ -50,15 +50,7 @@ func TestFsWatchUnchangedPollAndUnwatchEndDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.ok("fs/watch", map[string]any{"watchId": "w1", "path": dir}, nil)
-	next := filepath.Join(t.TempDir(), "x.txt")
-	if err := os.WriteFile(next, []byte("two"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	later := time.Now().Add(2 * time.Second)
-	if err := os.Chtimes(next, later, later); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(next, file); err != nil {
+	if err := os.WriteFile(file, []byte("second"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c.await("fs/changed", func(m message) bool { return reportsChange(t, m, "w1", file) })

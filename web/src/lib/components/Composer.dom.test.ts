@@ -286,16 +286,54 @@ describe("send point", () => {
 describe("command palette", () => {
 	afterEach(cleanup);
 
-	test("Enter after a command's space keeps the argument and opens no panel", async () => {
-		const onOpenPanel = vi.fn();
-		render(Composer, { props: { ...baseProps(), onOpenPanel } });
-		const field = screen.getByRole("textbox", {
-			name: "Message",
-		}) as HTMLTextAreaElement;
-		await fireEvent.input(field, { target: { value: "/model foo" } });
-		await fireEvent.keyDown(field, { key: "Enter" });
-		expect(onOpenPanel).not.toHaveBeenCalled();
-		expect(field.value).toBe("/model foo");
+	test.each([
+		{ running: false, draft: "/model " },
+		{ running: true, draft: "/model foo" },
+	])(
+		"keeps a spaced command quiet and unsent ($draft)",
+		async ({ running, draft }) => {
+			const props = baseProps();
+			const onOpenPanel = vi.fn();
+			render(Composer, { props: { ...props, running, onOpenPanel } });
+			const field = screen.getByRole("textbox", {
+				name: "Message",
+			}) as HTMLTextAreaElement;
+			await fireEvent.input(field, { target: { value: "/model" } });
+			expect(screen.getByRole("listbox", { name: "Commands" })).toBeTruthy();
+			await fireEvent.input(field, { target: { value: draft } });
+			expect(screen.queryByRole("listbox", { name: "Commands" })).toBeNull();
+			expect(screen.getByRole("textbox", { name: "Message" })).toBe(field);
+			expect(field.hasAttribute("aria-activedescendant")).toBe(false);
+			await fireEvent.keyDown(field, { key: "Enter" });
+			expect(onOpenPanel).not.toHaveBeenCalled();
+			expect(props.onSend).not.toHaveBeenCalled();
+			expect(props.onSteer).not.toHaveBeenCalled();
+			expect(screen.queryByText(/No command named/)).toBeNull();
+			expect(field.value).toBe(draft);
+
+			await fireEvent.input(field, { target: { value: "/model" } });
+			await fireEvent.keyDown(field, { key: "Enter" });
+			expect(onOpenPanel).toHaveBeenCalledWith("model");
+			expect(field.value).toBe("");
+		},
+	);
+
+	test("a command argument does not start file completion", async () => {
+		vi.useFakeTimers();
+		try {
+			const onFileSearch = vi.fn(() => Promise.resolve([]));
+			render(Composer, { props: { ...baseProps(), onFileSearch } });
+			const field = screen.getByRole("textbox", {
+				name: "Message",
+			}) as HTMLTextAreaElement;
+			await fireEvent.input(field, { target: { value: "/model @foo" } });
+			field.setSelectionRange(field.value.length, field.value.length);
+			await fireEvent.keyUp(field);
+			await vi.advanceTimersByTimeAsync(200);
+			expect(onFileSearch).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test("Escape closes the command list and keeps the message field", async () => {

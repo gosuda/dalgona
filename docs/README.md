@@ -54,7 +54,9 @@ Use one name for each thing in user-facing text and new specifications.
 - [Advisor](dal/spec/advisor.md): review cadence, note delivery, isolation, and recovery.
 - [Magic keywords](dal/spec/keywords.md): user-prose matching, notices, and required tools.
 - [Starlark](dal/spec/starlark.md): durable runs, effect replay, the eval tool, workflows, and plugins.
-- [Ask tool](dal/spec/ask.md): question arguments, cleaning, and result text for the user-question tool.
+- [Ask tool](dal/spec/ask.md): question arguments, text validation, safe displays, and result text for the user-question tool.
+- [Input text](dal/spec/input-text.md): exact Unicode preservation, grapheme editing, CJK composition, emoji, limits, and cross-client conformance.
+- [Input text cases](dal/spec/input-text-cases.json): shared scalar sequences, byte counts, UTF-16 counts, grapheme boundaries, and malformed encodings.
 - [Protocol](dal/spec/protocol.md): Codex-compatible JSON-RPC framing and backpressure.
 - [TUI](dal/spec/tui.md): terminal behavior, slash commands, and status.
 - [Live debugging](dal/spec/live-debug.md): local scripted-server contract, setup and cleanup runbook, and manual terminal and browser acceptance matrix. It distinguishes planned probes from recorded live or test evidence.
@@ -65,6 +67,14 @@ Use one name for each thing in user-facing text and new specifications.
 - [Remote runners](dalgona/spec/runners.md): thread boxes, fully cloud mode, pull, and box cleanup.
 - [Ratchet](dalgona/spec/ratchet.md): held-out eval flows, approvals, and the keep, revert or rerun gate.
 - [Web UI server](dalgona/spec/web.md): built assets, access tokens, TLS, and the daemon websocket relay.
+- [Native desktop client](dalgona/spec/native.md): the complete Go and Gio desktop implementation contract and source map.
+- [Native architecture](dalgona/spec/native-architecture.md): shared connection lifecycle, package boundaries, state ownership, and reconnect.
+- [Native protocol](dalgona/spec/native-protocol.md): required capabilities, history, images, authentication, workspaces, and terminals.
+- [Native design](dalgona/spec/native-design.md): web design mapping, desktop tokens, focus, and keyboard behavior.
+- [Native components](dalgona/spec/native-components.md): every web component and the additional desktop workflows.
+- [Native documents](dalgona/spec/native-documents.md): selectable text, code, figures, math, images, diffs, and terminal rendering.
+- [Native platforms](dalgona/spec/native-platform.md): OS adapters, accessibility, build isolation, packaging, and installation.
+- [Native verification](dalgona/spec/native-verification.md): complete release gates, behavioral fixtures, and implementation order.
 - [Daemon service](dalgona/spec/daemon.md): socket, startup, and user-service lifecycle.
 - [Doctor](dalgona/spec/doctor.md): the setup check command, its rows, and its offline and online modes.
 - [Codex app integration](dalgona/spec/codex-app.md): desktop override installation and restoration.
@@ -120,6 +130,7 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 
 ### Batteries (dalgona)
 
+- [Native Gio client](dalgona/decisions/native-client.md): direct Go client integration, complete native scope, and web design inheritance.
 - [Sandbox services](dalgona/decisions/sandbox-services.md): remote execution through the Service seam.
 - [Ratchet](dalgona/decisions/ratchet.md): host-owned eval gate in the dalgona battery.
 - [Sandbox services](dalgona/decisions/sandbox-services.md): the Service seam, box lifecycle, and persistence contracts.
