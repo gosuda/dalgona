@@ -98,6 +98,9 @@ func (m *model) resizeTerminal(msg tea.WindowSizeMsg) {
 	m.screen.height = msg.Height
 	m.input.composer.SetWidth(msg.Width)
 	m.fitReview()
+	if p := m.settings; p != nil && p.saveErr != "" && !p.saveErrPrinted {
+		p.saveErrPrinted = m.commitOverflow(p.saveErr, p.saveErr)
+	}
 	if m.out.printing {
 		m.out.frozen = m.presentedDock()
 	}
