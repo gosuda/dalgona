@@ -4,14 +4,22 @@ Run after each step: `just verify`.
 
 Focused runs:
 
-- `go test -race -count=1 ./internal/tool/ask/`
-- `go test -race -count=1 -run 'Ask|Question|RecoverInterruptsOpenAsk' ./internal/agent/`
-- `go test -race -count=1 -run 'Question|AskTool|UserInput' ./internal/rpc/`
-- `go test -race -count=1 -run 'AskStays|ScriptCannotCallAsk|ToolModeLists' ./internal/script/`
-- `go test -race -count=1 -run TurnBookRefusesQuestion ./internal/app/`
-- `go test -race -count=1 -run 'QuestionCard|WaitingOnUserInput' ./internal/tui/`
+- `go test -race -count=1 ./internal/dal/tool/ask/`
+- `go test -race -count=1 -run 'Ask|Question|RecoverInterruptsOpenAsk' ./internal/dal/agent/`
+- `go test -race -count=1 -run 'Question|AskTool|UserInput' ./internal/dal/rpc/`
+- `go test -race -count=1 -run 'AskStays|ScriptCannotCallAsk|ToolModeLists' ./internal/dal/script/`
+- `go test -race -count=1 -run TurnBookRefusesQuestion ./internal/dal/app/`
+- `go test -race -count=1 -run 'QuestionCard|WaitingOnUserInput' ./internal/dal/tui/`
 - `pnpm -C web exec vitest run src/lib/question.test.ts`
 - `go tool golangci-lint run ./...` (depguard: no new import crosses a client or battery boundary)
+
+Use [Ask input acceptance](../../../dal/spec/ask.md#input-acceptance-cases) and the [shared corpus](../../../dal/spec/input-text-cases.json) as independent expected values.
+Required cases cover blank model fields, strict encoding, exact offered values, source-preserving display, and 2000 versus 2001 scalar answers.
+Exercise correction through a production client and daemon connection under the original request ID and deadline.
+Race correction with another answer, timeout, interruption, and disconnect. Verify one authoritative outcome and no stale-card revival.
+Test CJK and emoji through actual TUI, browser, and GUI input adapters as those implementations land.
+Synthetic events do not replace the real IME evidence required by the shared input contract.
+These are implementation gates. Documentation checks alone do not prove them.
 
 End to end, with the live-debugging rig of product decision 16 (home `DAL_HOME=/tmp/dq`, `model = "local/qwen-test"`, `[providers.local] base_url = "http://127.0.0.1:18080/v1"`, `api_key_env = "LOCAL_LLM_KEY"`):
 

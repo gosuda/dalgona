@@ -1,14 +1,18 @@
-#### Ask step 1. Add package `internal/tool/ask`
+#### Ask step 1. Maintain `internal/dal/tool/ask`
 
-Files to add:
+The package now exists at `internal/dal/tool/ask`.
+Update its validation and result boundary under [Ask tool](../../../dal/spec/ask.md) and [Input text](../../../dal/spec/input-text.md).
+The outline below describes required behavior and does not prove that the inspected implementation already satisfies it.
 
-- `internal/tool/ask/ask.go`
-- `internal/tool/ask/parse.go`
-- `internal/tool/ask/clean.go`
-- `internal/tool/ask/result.go`
-- `internal/tool/ask/ask_test.go`
-- `docs/spec/ask.md`
-- `docs/decisions/ask-tool.md`
+Files to update:
+
+- `internal/dal/tool/ask/ask.go`
+- `internal/dal/tool/ask/parse.go`
+- `internal/dal/tool/ask/clean.go`
+- `internal/dal/tool/ask/result.go`
+- `internal/dal/tool/ask/ask_test.go`
+- `docs/dal/spec/ask.md`
+- `docs/dal/decisions/ask-tool.md`
 
 `ask.go`:
 
@@ -51,6 +55,7 @@ const (
 	OutcomeNoClient
 	OutcomeInterrupted
 	OutcomeFailed
+	OutcomeTimedOut
 )
 
 type Reply struct {
@@ -82,7 +87,8 @@ func (t Tool) Run(ctx context.Context, call tool.Call, _ tool.Env) (tool.Result,
 }
 ```
 
-`func (Tool) Spec() tool.Spec` in `ask.go` returns `tool.Spec{Name: Name, Description: description, Schema: jsontext.Value(schema)}`. The literal texts of `description` and `schema` are in the section "Schemas of the ask workstream".
+`func (Tool) Spec() tool.Spec` retains `Name`, `Description`, `Schema`, and `Serial: true`.
+The literal texts of `description` and `schema` are in the section "Schemas of the ask workstream".
 
 `parse.go`:
 
@@ -92,10 +98,11 @@ func (t Tool) Run(ctx context.Context, call tool.Call, _ tool.Env) (tool.Result,
 - An unknown member at any level returns `ask: unknown field "<name>"`.
 - A JSON shape error returns `ask: arguments do not match the schema: <decoder error>`.
 - Use an unexported `type invalid string` error type so `Parse` can tell its own messages from decoder errors.
-- Clean each text while reading:
-  - header, question, label and description: `Clean(s, false)`.
-  - preview: `Clean(s, true)`.
-- Validation messages, exact. Indexes are 1-based; "characters" means runes after cleaning.
+- Validate strict encoding and reject NUL before accepting any text.
+- Preserve the decoded scalar sequence. Do not clean the canonical question, preview, or offered option value.
+- Apply required-field nonblank eligibility separately from the accepted source.
+- Reject whitespace-only, formatting-only, and terminal-escape-only required fields before publication.
+- Validation messages, exact. Indexes are 1-based. Character counts mean Unicode scalars before display projection.
   - `ask: questions needs 1 to 4 items, got <n>`
   - `ask: question <i>: header is empty`
   - `ask: question <i>: header is longer than 30 characters`
@@ -112,19 +119,24 @@ func (t Tool) Run(ctx context.Context, call tool.Call, _ tool.Env) (tool.Result,
   - `ask: question <i> option <j>: the user always gets an Other row; remove this option` (label equal to `other` in any case)
   - `ask: question <i> repeats question <k>` (question text compared with `strings.EqualFold`)
 
-`clean.go`, `func Clean(text string, multiline bool) string`:
+`clean.go`, derived question display projection:
 
-- Run `strings.ToValidUTF8(text, "\uFFFD")` first.
-- `0x1b` starts an escape sequence, which is skipped whole (port of `internal/tui/render.go:72-110`):
-  - `[` is a CSI and runs to a final byte in `0x40` to `0x7e`.
-  - `]`, `P`, `X`, `^` and `_` start a string that runs to BEL or ESC `\\`.
-  - Anything else: skip bytes `0x20` to `0x2f`, then one more byte.
+- Receive validated source. Never perform replacement decoding or modify the accepted source.
+- Keep every source cursor on a UTF-8 scalar boundary. Advance ordinary text with `utf8.DecodeRuneInString`, never one byte of a multibyte scalar.
+- Implement the complete [escape recognition profile](../../../dal/spec/ask.md#escape-recognition-profile) with bounded lookahead before removing any span. Keep the grammar in that specification as the single authority.
+- Validate the selected DCS ASCII header before scanning its payload. Validate the OSC decimal selector before scanning an optional payload. A terminator alone does not make either malformed header valid.
+- CAN, SUB, and an ESC that is not ST abort the pending candidate. Do not borrow a later sequence's terminator or swallow subsequent ordinary text.
+- Inspect string payloads by complete UTF-8 scalars. Do not interpret a continuation byte as a C1 control.
+- If no complete valid sequence begins at ESC, display that ESC with a visible code-point escape and resume immediately after it. Preserve following scalars, including tentative parameters or intermediate bytes. An invalid or incomplete prefix must not consume the remaining field.
+- The nonblank eligibility check and display projection share this sequence recognizer. Eligibility ignores only complete recognized sequences and the specified whitespace/control/format scalars.
+- These are display-recognition rules, not raw PTY parsing. Unsupported control forms use the same visible fallback and preserve their source.
 - `\n` is kept when `multiline`; otherwise it becomes one space.
 - `\t` becomes 4 spaces when `multiline`; otherwise one space.
-- Every other rune for which `unicode.IsControl` holds is dropped (C0, DEL, C1).
-- U+202A to U+202E and U+2066 to U+2069 are dropped.
-- Single-line results get `strings.TrimSpace`. Multiline results drop leading blank lines and trailing whitespace.
-- Functions: `Clean`, `skipEscape`, `skipCSI`, `skipString`, `skipShort`, and `keep(r rune, multiline bool) (string, bool)`.
+- Non-layout controls and bidirectional formatting use the safe display policy from the shared input contract.
+- A single-line projection may omit surrounding spaces. A preview may omit leading blank lines and trailing spaces.
+- Keep a source mapping, preserve offered values, and make distinct options distinguishable after projection.
+- Valid required fields remain visible through source-preserving fallback when a glyph is missing.
+- These display choices never apply to user answers, their quota checks, or exact option matching.
 
 `result.go`:
 
@@ -141,9 +153,11 @@ const (
 )
 ```
 
-- `func Answers(questions []Question, byID map[string][]string) [][]string`. For each question index `i`, take `byID[QuestionID(i)]`:
-  - `Clean(s, false)` each string, drop empty ones, cut each to `MaxAnswer` runes, and drop repeats.
-  - A string equal to a label of the question (exact match after cleaning) is that label; any other string is typed text. Order: labels in option order first, then typed texts in arrival order.
+- Validate the complete answer map before producing an accepted reply. Return a field-specific validation error without an outcome on invalid text.
+  - Each answer must contain valid encoding, no NUL, and at most 2000 Unicode scalars. Reject the complete invalid answer, never a suffix.
+  - Preserve leading and trailing whitespace. Only an empty string has the empty-answer meaning.
+  - Deduplicate by exact decoded scalar sequence.
+  - A string equal to an original offered label is that option. Other strings are typed text. Keep labels in option order, then typed text.
   - Keep at most 1 string for a single-select or free-text question, and at most `len(Options)+1` for multi-select.
   - Ids not in the request are ignored.
 - `func Format(questions []Question, reply Reply) tool.Result`:
@@ -155,30 +169,38 @@ const (
 | Cancelled | `TextCancelled` | true |
 | NoClient | `TextNoClient` | false |
 | Interrupted | `TextInterrupted` | false |
+| TimedOut | The exact timed-out result from the ask specification, identifying any recommended fallback | true |
 | Failed | `declined: ` + `reply.Detail` | false |
 
 - An answered line is `- <header> (<question>): <answers>`. Answers are joined by `; `.
-  - A label is printed as is.
+  - A label is matched against its original value before its safe display projection is printed.
   - On a question with options, a typed text is `Other: ` plus the text quoted with `jsontext.AppendQuote`.
   - On a free-text question, the quoted text alone.
   - An empty list prints `no answer`.
 
-Tests in `internal/tool/ask/ask_test.go`, package `ask`. All fail before this step because the package does not exist; each expected value comes from `docs/spec/ask.md`.
+Tests in `internal/dal/tool/ask`, package `ask`, must exercise production parsing, validation, and formatting.
+Expected values come from the ask and shared input contracts, not the cleanup implementation.
 
 - `TestParseAcceptsContractShapes`: one single-select, one multi-select with preview, and one free-text question.
 - `TestParseRejectsEachLimit`: a table with one case per message above, matched exactly.
-- `TestCleanStripsTerminalControls`: inputs such as `"\x1b[31mDB\x1b[0m"`, `"\x1b]0;title\x07x"`, `"a\u202Eb"`, `"\x9bq"` and `"a\nb"` single-line give `DB`, `x`, `ab`, `q` and `a b`.
-- `TestAnswersNormalizes`: label order, cap, repeats, the single-select first-only rule, and unknown ids.
+- Required-field tests reject empty, Unicode-whitespace-only, formatting-only, and terminal-escape-only values with the field's empty-value error.
+- Display tests prove that controls never execute while canonical source and offered values remain unchanged.
+- Escape tests cover ESC followed by `U+D55C`, a supplementary scalar, a combining sequence, and a private-use scalar. Each following sequence remains intact and selectable.
+- Test incomplete CSI and string prefixes, a trailing ESC, valid complete sequences, and UTF-8 characters whose continuation bytes fall in the C1 byte range. Output remains valid UTF-8, source spans align with scalar boundaries, and no terminal control executes.
+- Test missing DCS final bytes, malformed OSC selectors, valid header/payload separation, parameterless decimal OSC commands, CAN/SUB cancellation, and nested ESC boundaries against independent expected spans from the ask profile.
+- Encoding tests reject malformed UTF-8 and unpaired surrogate escapes while accepting literal U+FFFD.
+- Answer tests cover exact option matching, whitespace preservation, duplicate values, existing multiplicity rules, and unknown IDs.
+- Boundary tests accept 2000 supplementary scalars and reject 2001 without trimming, truncation, or a partial result.
 - `TestFormatTexts`: every outcome row above, plus the answered example in the section "Schemas of the ask workstream".
 
 Docs:
 
-- `docs/spec/ask.md`: sections `## Tool`, `## Arguments`, `## Cleaning`, `## Results`, holding the schema, the limits, the messages and the strings above.
+- `docs/dal/spec/ask.md`: tool, arguments, text validation and display, results, and host lifecycle.
 - `docs/decisions/ask-tool.md`, with sections `## Invariant`, `## Scope`, `## Enforcement`, `## Rejected alternatives`:
-  - Invariant: `ask` is a read-class core tool for top-level threads of both products. It reaches a person only through `item/tool/requestUserInput`. It adds no journal event. It has no timeout.
+  - Invariant: `ask` is a read-class core tool for top-level threads of both products. It uses `item/tool/requestUserInput`, adds no separate journal event, and keeps the original five-minute deadline.
   - Scope: it permits the new imports `internal/agent` -> `internal/tool/ask`, `internal/rpc` -> `internal/tool/ask` and `internal/script` -> `internal/tool/ask`.
   - Enforcement: the core depguard rule and the tests named in steps 2 to 5.
-  - Rejected alternatives: HTML forms (omp), password fields, a timeout, and an extension method instead of the Codex method.
+  - Rejected alternatives: HTML forms (omp), password fields, silent answer truncation, and an extension method instead of the Codex method.
 
 Anchor: Claude Shannon, Tony Hoare.
 

@@ -1,5 +1,12 @@
 #### Web step 24. Docked composer and 16 px inputs
 
+The [shared input contract](../../../dal/spec/input-text.md) applies to every text field.
+Keep DOM UTF-16 coordinates separate from scalar quotas and protocol UTF-8 offsets.
+Validate committed lone surrogates before replacement-capable encoding.
+Retain composition ownership through its final key event. Enter used to commit must not also send, steer, or answer.
+Preserve accepted whitespace and scalar sequences. Rejected edits retain the previous value and a recoverable candidate.
+Use production editor tests and real Korean, Japanese, and Chinese input methods for the declared browser matrix.
+
 - Dock. `App.svelte` styles: `@media (max-width: 52rem){.dock{position:sticky;inset-block-end:0;background:var(--surface);border-block-start:1px solid var(--line)}}`.
 - Input size. `app.css`: `input,textarea,select{font-size:max(1rem,var(--size-body))}` everywhere. Delete `ModelPicker.svelte:54` (14 px select) and the `max-width:40rem` override (`app.css:195-200`).
 - Targets. `button,select{min-height:var(--control-height)}`; `@media (pointer: coarse){button,select{min-height:var(--control-height-coarse)}}`.

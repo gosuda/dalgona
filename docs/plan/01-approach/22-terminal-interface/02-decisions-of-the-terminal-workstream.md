@@ -5,7 +5,7 @@ Each entry gives the choice, the rejected rival and one reason.
 1. One Go package `internal/tui` split into files by concern. Rejected: sub-packages per concern. Sub-packages would force exported surfaces between pieces that share one Bubble Tea state, which adds busy abstraction for no current requirement.
 2. One state struct `model` with grouped sub-structs (see Structure). Rejected: a model per component with its own `Update`. Message routing then needs a second dispatch layer, and the panel stack needs global state anyway.
 3. The internal state strings `idle`, `running`, `awaiting approval`, `interrupted`, `failed`, `disconnected` (`internal/tui/model.go:19-26`) and `awaiting input` (the ask workstream, Step 7, constant `stateAwaitingInput`) stay as the `Status.State` contract. The words `Ready`, `Working`, `Waiting`, `Done`, `Stopped`, `Failed` and `Offline` are display only (cross-phase decision 50). Rejected: renaming the constants. `cmd/dalgona/client.go:161-169` maps `running` and `awaiting approval` to herdr states.
-4. Sanitise at ingress (decode and apply) and in the one notice builder `noticef`. Rejected: sanitise at render. Ingress happens once per message; render-time cleaning repeats on every frame and is easy to forget on new surfaces. Sanitising each delta on its own is safe: a sequence split across two deltas only leaves visible leftovers, never a control byte.
+4. Validate canonical text at ingress and retain it unchanged. Build one safe display projection with source mappings, including state for split terminal escape sequences. Cache that projection by source revision. Never sanitize a path, option value, draft, or protocol identity into a different authoritative value. [Input text](../../../dal/spec/input-text.md) and Terminal step 2 define this boundary.
 5. The theme layer reads `NO_COLOR` itself (any non-empty value, as no-color.org defines it) and downsamples every committed row through `colorprofile.Writer`. Rejected: relying on Bubble Tea's renderer. `tea.Println` goes through `insertAbove`, which writes the string raw (`bubbletea/v2@v2.1.1/cursed_renderer.go:772-826`). `colorprofile.Detect` also parses `NO_COLOR` with `strconv.ParseBool` (`colorprofile@v0.4.3/env.go:115-117`), so `NO_COLOR=yes` would keep colour.
 6. The terminal background is never painted. The point (Design record, The point and the thread hue) is the only fill: the first action of an open decision, else the live tag, and both take the thread hue. The prompt marks take the hue as text colour. Diff signs, keyword marks, links and warnings take text roles. Selection uses bold and a rail, never a fill. Rejected: painting the Radix slate ground in the terminal. A painted ground fights the user's terminal theme and breaks selection. Ground roles stay for the web.
 7. Light or dark comes from `tea.RequestBackgroundColor` and `tea.BackgroundColorMsg.IsDark()` (`bubbletea/v2@v2.1.1/color.go:14-16, 78-80`). Until the reply arrives the theme is `night`, or `soft-night` when the setting is `auto-soft`. Rejected: `lipgloss.HasDarkBackground` (`lipgloss/v2@v2.0.6/query.go:86`). It reads the tty directly and blocks, and it does not work through the injected `Options.Input`.
@@ -56,7 +56,7 @@ Files in `internal/tui` (package `tui`), one concern each:
 | File | Concern |
 |---|---|
 | `tui.go` | `Run`, `Options`, `programHandler`, `watchedConn`, `programOptions` (exists) |
-| `protocol.go` | protocol adapter: decode notifications, server requests and deltas into internal values, sanitised (exists) |
+| `protocol.go` | Decode validated protocol values without rewriting their text or identity. |
 | `state.go` | the state struct, sub-structs, message types, `newModel`, state constants |
 | `update.go` | `Init`, `Update`, `updateAsync`, `routeKey` (the one key-routing order), `View` (returns `strings.Join(m.dockLines(), "\n")` in the form given below, and sets the cursor, the mouse mode and the alternate screen) |
 | `apply.go` | notification reducers |
@@ -72,7 +72,7 @@ Files in `internal/tui` (package `tui`), one concern each:
 | `blocks.go` | block splitter: cuts a stream into final blocks and a tail (new) |
 | `rows.go` | transcript row grammar, verbosity, `commit`, `drain`, `takeChunk` |
 | `markdown.go` | Glamour renderers, Markdown and code for final blocks |
-| `sanitize.go` | the one sanitiser |
+| `sanitize.go` | Safe display projections with source mappings and incremental escape handling. |
 | `panels.go` | panel stack, panel frame, list panel, confirm panel |
 | `approval.go` | approval card |
 | `question.go` | ask card, created by the ask workstream, Step 7 |

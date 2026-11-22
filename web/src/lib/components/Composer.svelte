@@ -106,7 +106,11 @@ let nextChipId = 0;
 let pendingReads = 0;
 const interruptArmed = $derived(running && guardUntil > 0);
 const parsed = $derived(parseComposerText(text));
-const commandQuery = $derived(parsed.kind === "command" ? parsed.query : null);
+const commandQuery = $derived(
+	parsed.kind === "command" && !parsed.query.includes(" ")
+		? parsed.query
+		: null,
+);
 let paletteClosed = $state(false);
 let paletteActive = $state(0);
 const paletteOpen = $derived(commandQuery !== null && !paletteClosed);
@@ -121,7 +125,11 @@ let fileResult = $state<{
 } | null>(null);
 let fileSeq = 0;
 const fileListId = "file-completion";
-const mention = $derived(mentionAt(text, Math.min(caret, text.length)));
+const mention = $derived(
+	parsed.kind === "command"
+		? null
+		: mentionAt(text, Math.min(caret, text.length)),
+);
 const mentionQuery = $derived(mention?.query ?? null);
 const searchRoot = $derived(
 	disabled || !fileSearchRoot ? null : fileSearchRoot,
@@ -411,8 +419,9 @@ function submitPrimary(): void {
 		void runShell(parsed.command);
 		return;
 	}
-	if (commandQuery !== null) {
-		submitCommand(commandQuery);
+	if (parsed.kind === "command") {
+		if (commandQuery !== null) submitCommand(commandQuery);
+		else error = "";
 		return;
 	}
 	if (running) {
