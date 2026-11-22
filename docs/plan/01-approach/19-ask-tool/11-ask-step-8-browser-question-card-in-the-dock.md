@@ -14,7 +14,7 @@ Files:
   - `export const MAX_ANSWER = 2000;`
   - `parseQuestionRequest(id: RequestId, params: unknown): QuestionRequest | null` checks every vendored required field. An absent `multiSelect` is false, an absent `preview` is null, and `options: null` is a free-text question.
   - `questionResponse` returns the nested vendored answer shape after complete validation, with original labels in option order and accepted Other text unchanged. Invalid text produces a field error and no response. `MAX_ANSWER` counts Unicode scalars, not UTF-16 units or graphemes.
-  - `resolutionNotice(resolution: string | null): string | null` uses the step 7 texts.
+  - `resolutionNotice(resolution: string | null, hadLocalSubmission: boolean): string | null` uses the step 7 texts. For `answered` or `cancelled`, any locally queued response requires the neutral notice. Only a request with no local submission may use an other-window notice. The outcome alone never identifies the winning client.
 - `web/src/lib/validation.ts`: the `serverRequest/resolved` case (`:767-776`) reads an optional string `resolution`.
 - `web/src/lib/protocol.ts`:
   - `onIncoming` (`:223-267`) handles `item/tool/requestUserInput` before the approval parse. A null parse gives `-32602` `invalid params`; otherwise it calls `handlers.onQuestion`.
@@ -30,12 +30,13 @@ Files:
   - `answerQuestion(request, selections)` sends `questionResponse(request, selections)` from this step.
   - `cancelQuestion(request)` sends `{"answers": {}}`.
   - Both methods retain the card, draft, and typed response sender until `serverRequest/resolved`.
+  - Record whether a complete validated response entered this request's sender. Local validation or enqueue failure does not set that state. Preserve it across corrections and request replay; it records a local attempt, not transport delivery or server acceptance.
   - A matching correction warning exposes the field error and permits another response under the same ID and original deadline.
   - Resolution releases the sender. Late warnings cannot restore the card.
   - The complete composition transaction owns its final Enter or Escape event. Rejected commits remain recoverable without a partial insertion.
 - `web/src/routes/+page.svelte`:
   - Route `onQuestion` into the shared queue: `trackRequest` (the web workstream, Step 23) takes the `QuestionRequest`. Add no separate `questions` state. Model the handler on `onRequest` (`+page.svelte:151-155`).
-  - `requestResolved` (`:544-546`) calls `resolveRequest` (the web workstream, Step 23) and sets the notice from `resolutionNotice`.
+  - `requestResolved` (`:544-546`) matches both thread and request IDs and captures `hadLocalSubmission` from that lifecycle before `resolveRequest` releases it. Pass that state to `resolutionNotice`. Ignore stale or unrelated resolutions rather than treating missing local state as proof of an other-window answer.
   - The status bar shows the word that the web workstream, Step 10 gives the open-question state. This step adds no word of its own.
 
 - Sandbox choice. The sandbox choice is a question with id `sandbox`. Its `warning` notification (`{threadId, message}`) arrives first and shows as a notice. The protocol workstream, Step 13 sends this request. This step queues it and shows the warning. Cancelling it sends `{"answers": {}}`, which counts as no choice (cross-phase decision 29). It joins the queue like any other request. The same card shows it.
@@ -50,7 +51,9 @@ Tests in `web/src/lib/question.test.ts`:
 - `returns offered CRLF labels without newline conversion`
 - `retains the sender and draft through correction until resolution`
 - `preserves committed text when composition commits exceed the limit`
-- `maps each resolution to its notice`
+- `maps each resolution with retained local submission state to its notice`
+- `uses a neutral notice for a locally submitted request without claiming its value won`
+- `ignores a stale resolution without closing or attributing another question`
 
 Preserve the existing production module and component tests, then add the correction and Unicode cases above.
 Component tests must keep actions outside scrolling details and verify dismissal, sandbox cancellation, and the complete keyboard answer path.

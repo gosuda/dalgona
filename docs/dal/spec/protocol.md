@@ -272,6 +272,10 @@ The field MUST identify the invalid answer, such as `answers.q1.answers[0]`, wit
 This warning MUST NOT carry `serverRequest/resolved` or create a journal event.
 
 First-party clients MUST retain the draft and question card until `serverRequest/resolved`, including after sending an answer.
+That notification reports an outcome without identifying the winning client or acknowledging a particular submitted value.
+Clients MUST NOT infer that their response won from a matching resolution, local enqueue completion, or transport write completion.
+If a client displays its submitted values, it MUST label them as local submissions and keep them distinct from authoritative recorded results.
+A later resolution MUST NOT promote those local values to an accepted answer or add a question journal event.
 On a correction warning, they MUST show the field error and permit a corrected response with the same request id.
 Their typed question lifecycle MUST retain the response sender after the first send and support later corrections while the question remains pending.
 The current one-response request callback path MUST migrate to that lifecycle for user-input questions.

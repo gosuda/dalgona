@@ -48,23 +48,32 @@ Files:
   - `answerQuestionKey`, while the front card is in input mode, sends `enter` to `commitText` with the composer value, sends `esc` to `leaveInput`, and passes other keys to the composer:
     - `cardSubmit` sends `requestAnswer{value: card.response()}`;
     - `cardDismiss` sends `requestAnswer{value: rpc.ToolRequestUserInputResponse{}}`, the cancel shape (cross-phase decision 9);
+    - after the complete response passes local validation and enters the retained sender, append the local submission row defined below. Keep its submitted values separate from later draft edits.
     - both retain the front card, draft, and response sender until `serverRequest/resolved` determines the outcome.
     - a matching correction warning restores editing and permits a corrected response under the same request ID and original deadline.
     - a stale warning cannot reopen a resolved card. The sender's context survives the initial response and ends with the typed request lifecycle.
   - the status-to-state mapping in `internal/tui/model.go` (`:578-581`, the `case "active"` branch): `waitingOnUserInput` maps to `stateAwaitingInput`.
   - `applyDecodedNotification` (`:273-290`): handle `serverRequest/resolved` only when `Resolution != ""` and both `ThreadID` and `RequestID` identify the same pending question. Close only that card and its sender, without sending another response. Ignore stale, duplicate, and unrelated resolutions without changing another card, its draft, the notice, or the state. Recompute the state from remaining decisions and authoritative thread status; one resolved question does not imply that the thread is running.
   - `renderView` in `internal/tui/dock.go` (terminal workstream, Step 1) draws the front item of the queue of the terminal workstream, Step 26. The question card is that item, so this step adds no draw call.
-- Resolution attribution: retain local submission state separately from the authoritative outcome. A matching resolution identifies the outcome but not the winning client. Use an other-window notice only when local state establishes that no local response could have won. If a local response was outstanding, do not infer that it won or lost; use the neutral notice.
+- Resolution attribution: retain local submission state separately from the authoritative outcome. A matching resolution identifies the outcome but not the winning client. Use an other-window notice only when this lifecycle has never queued a local response. Once any local response has been queued, use the neutral notice without inferring whether it won or lost.
 - Notice texts, exact:
   - `answered`: `Question answered in another window` when supported by the attribution rule; otherwise `Question answered`.
   - `cancelled`: `Question dismissed in another window` when supported by the attribution rule; otherwise `Question dismissed`.
   - `interrupted`: `Question closed: the turn was interrupted`
   - `declined`: `Question closed: the agent continues without an answer`
   - `timedOut`: use the current TUI timeout notice and close only after authoritative resolution.
-- Answer row: a confirmed local answer, dismiss, or skip writes one row through `m.commit(key, lines)` (`rows.go`, the terminal workstream, Step 14) with key `question:<threadID>:<itemID>`. The lines are one `<header>: <answers joined by "; ">` per question, `<header>: skipped` for a skip, or `<header>: dismissed` for a dismiss. A local send followed by a resolution does not alone confirm which response won. An other-window outcome or an outcome with unknown origin writes no attributed answer row. No waiting notification comes from this step. The notification of the terminal workstream, Step 36 already covers an ask request.
+- Local submission rows use the existing append path in `internal/dal/tui/rows.go`. They record local send attempts without claiming network delivery, server acceptance, or a winning client.
+  - Allocate a local attempt ordinal starting at 1 when a complete validated response enters the retained sender. A local validation or enqueue failure creates no row and does not consume an ordinal.
+  - Append one entry through `m.commit(key, lines)` immediately for that attempt. Each question line is `<header>: Local submission #<n>: <answers joined by "; ">`. An empty answer list uses `skip requested`; an explicit dismissal uses `dismiss requested`. Apply the safe display projection to the recorded source values.
+  - The structured identity contains row kind, `threadId`, `turnId`, `itemId`, `requestId`, and the local attempt ordinal. Use the original request's `turnId`, not the thread's current turn when printing. If `m.commit` still takes a string, encode the tuple without collisions rather than joining unescaped identifiers.
+  - Deduplicate only the exact same structured identity. Keep the counter and submitted snapshots with that request lifecycle across correction and request replay. A corrected response after a matching warning gets the next ordinal and its own immutable local submission row.
+  - A transport write failure follows the existing error or connection-loss path. The row remains a local attempt; do not mark it accepted or silently resend it. Generic resolution does not promote a local row or print the local draft as an accepted answer.
+  - A question with no local submission prints no local submission row. A timeout retains the authoritative `Timed out` status row under a separate row kind with the same thread, turn, item, and request identity. Duplicate resolution cannot print it twice.
+  - Ordinary recorded tool results keep their existing rendering. Do not infer their winning client from a matching local value or add a question journal event.
+  - No waiting notification comes from this step. The notification of the terminal workstream, Step 36 already covers an ask request.
 
 Tests in `internal/dal/tui/question_test.go` use the production model and validated request parameters.
-Preserve existing card tests and add the input and correction cases below.
+Preserve unaffected card tests. Update the existing immediate-row expectations to the local submission contract and add the input and correction cases below.
 
 - `TestQuestionCardSingleSelect` (`2` gives `{"q1":{"answers":["Postgres"]}}`)
 - `TestQuestionCardMultiSelectKeepsOptionOrder`
@@ -74,10 +83,14 @@ Preserve existing card tests and add the input and correction cases below.
 - `TestQuestionCardEscCancelsWithEmptyAnswers` (`{"answers":{}}`)
 - `TestQuestionCardClosedByResolvedNotification`
 - Resolution tests require both thread and request IDs. A delayed resolution for an older question in the same thread must leave the newer question, draft, sender, notice, and state unchanged.
-- Attribution tests cover resolution with and without an outstanding local response. An ambiguous race uses a neutral notice and does not present the local draft as the accepted answer.
+- Attribution tests cover resolution with and without an outstanding local response. An ambiguous race uses a neutral notice and leaves the local submission label unchanged without printing an accepted-answer row.
 - `TestQuestionCardFitsWidthAndHeight` (40 columns, window height 12, so `panelRows` gives 9; a 40-line preview; no line wider than 40 cells and at most 9 lines)
 - `TestQuestionCardShrinkOrder`: at 9 rows the preview drops first, then the question text, then the options scroll; the title and the hint row stay.
-- `TestQuestionCardCommitsAnswerRow`: the answer row goes through `commit` once, and a second commit with the same key returns nil.
+- Update `TestQuestionCardCommitsAnswerRow`: immediately after submission, assert one `Local submission #1` entry with the complete structured identity, while the card, draft, and sender remain pending. A second commit of that exact attempt adds no entry. A later generic resolution adds no accepted-answer row and proves no winning client.
+- Update `TestQuestionAnswerRowsShareCallIDAcrossTurns`: submit in `turn-1`, resolve that request, then submit in `turn-2` with the same item ID and a distinct request ID. Start each lifecycle at attempt 1. Both local submission rows must remain. Assert each entry's complete identity against independent expected fields, including its original turn; counting two rows alone does not prove correct turn identity.
+- Correction tests submit attempt 1, apply its matching rejection warning, and submit attempt 2 under the same request ID and deadline. Assert two separately keyed local submission rows with the original and corrected values. Repeated delivery of one local commit must not duplicate it.
+- Local validation and enqueue failures produce no local submission row. A write failure after enqueue leaves one explicitly local row, reports the transport failure, and never proves acceptance or resends automatically.
+- Preserve `TestQuestionAnsweredResolutionWritesNoRow` for a question with no local send. Update `TestQuestionCardClosedByTimedOutNotification` to check the separate outcome identity; a timeout after a local send keeps its local row and adds one `Timed out` row.
 - Display safety tests preserve original labels and answers while preventing terminal control execution.
 - Input tests reject an oversized edit whole and accept 2000 supplementary scalars without applying a UTF-16 quota.
 - Correction tests keep the card and sender after rejection, then resolve one valid response under the original request ID.

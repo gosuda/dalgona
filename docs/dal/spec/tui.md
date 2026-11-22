@@ -757,7 +757,30 @@ The preview shows the description and the first line of the preview of the optio
 
 The `s submit` hint carries the one fill of the view, in the thread hue. Before the terminal reports its background, the fill MUST use the night theme, or the soft night theme for `auto-soft`. With colour off, it MUST be bold reverse video with no colour.
 
-A submit sends each answer. A dismiss sends `{"answers":{}}`. Each closed question writes one row with key `question:<threadId>:<turnId>:<itemId>`. A question closed by another window or by a lost connection writes no row.
+A submit sends each answer. A dismiss sends `{"answers":{}}`.
+A complete response that passes local validation and enters the retained sender MUST append a local submission entry.
+Each question line MUST read `<header>: Local submission #<n>: <answers joined by "; ">` through its safe display projection.
+An empty answer list MUST use `skip requested`. An explicit dismissal MUST use `dismiss requested`.
+These entries MUST describe local send attempts without claiming delivery, server acceptance, or the winning client.
+A local validation or enqueue failure MUST create no entry and consume no attempt ordinal.
+A later transport write failure MUST follow the existing error or connection-loss path without relabeling or silently resending the attempt.
+
+The entry identity MUST keep row kind, `threadId`, `turnId`, `itemId`, `requestId`, and local attempt ordinal as separate fields.
+Any serialized key MUST encode these fields without collisions.
+The `turnId` MUST come from the original question request, not the current turn when the entry is printed.
+Attempt ordinals MUST start at 1 and advance only when a response enters the retained sender.
+The request lifecycle MUST preserve its counter and submitted values across correction and request replay.
+Each corrected response MUST receive a new ordinal and an immutable local submission entry.
+Repeated local commit of the same full identity MUST produce no duplicate entry.
+
+A matching `serverRequest/resolved` MUST close only the request with the same thread and request IDs.
+It MUST NOT promote a local submission or draft to an accepted answer.
+A question with no local submission MUST print no local submission entry.
+A timeout MUST retain its `Timed out` status entry under a separate row kind with the same thread, turn, item, and request identity.
+Duplicate resolution MUST NOT print another status entry.
+The client MUST keep ordinary recorded tool results separate from local submission entries.
+This behavior MUST NOT add question or answer events to the journal.
+
 After submitting, the card MUST retain its answers until `serverRequest/resolved` closes the request.
 A validation warning for that request MUST restore editing and keep its original request ID, deadline, and complete answer text.
 The card MUST NOT treat local submission as proof that the daemon accepted an answer.

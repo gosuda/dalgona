@@ -103,6 +103,12 @@ Its source MAY contain line breaks that the display projection represents as spa
 
 A terminal escape sequence MUST NOT execute in a display.
 A terminal projection MAY remove the complete sequence with its parameters.
+Sequence recognition MUST preserve UTF-8 scalar boundaries and recognize ASCII control syntax before consuming a span.
+An incomplete or invalid escape prefix MUST display its ESC as a visible code-point escape without consuming following ordinary scalars.
+The projection MUST then process those scalars under their usual display rules.
+A non-ASCII scalar after ESC is not an ASCII escape final byte and MUST remain intact.
+UTF-8 continuation bytes MUST NOT be interpreted as standalone C1 controls.
+Required-field eligibility and display projection MUST use the same complete-sequence recognition rule.
 Other control and bidirectional formatting characters MUST use the safe display policy in [Input text](input-text.md).
 
 In a single-line question projection, a newline MUST become one space, and a tab MUST become one space.
@@ -252,6 +258,8 @@ These cases are required implementation evidence, not results recorded by this d
 |Required field containing only terminal escape sequences, directional controls, U+200D, or U+FE0F|The nonblank check rejects it without creating an empty visible question or option.|
 |Valid required text surrounded by spaces or formatting scalars|Its full accepted source is preserved and counted against its upper limit.|
 |Valid required text whose glyph is unavailable|The field remains visible and inspectable through source-preserving fallback.|
+|ESC followed by U+D55C, a supplementary scalar, a combining sequence, or a private-use scalar|ESC is visibly escaped. Following scalars remain intact, visible, and mapped to their original source.|
+|An incomplete CSI or control-string prefix before valid text|The prefix cannot swallow the field or split UTF-8. No display emits an executable control.|
 |An offered option containing CRLF and leading spaces|Selection returns its exact offered value without draft newline conversion or trimming.|
 |A whitespace-only user answer|It follows the answer contract and is not rewritten to an empty answer.|
 |A 2001-scalar answer followed by a valid correction|The same pending request accepts the correction once without changing its original deadline.|
