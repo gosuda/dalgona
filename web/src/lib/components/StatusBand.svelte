@@ -299,29 +299,29 @@ const thirdRow = $derived(shown.context || shown.mark);
 		.band-more {
 			display: block;
 		}
-	}
 
-	@container band (max-width: 30rem) {
-		[data-item="folder"] {
-			display: none;
+		@container band (max-width: 30rem) {
+			[data-item="folder"] {
+				display: none;
+			}
 		}
-	}
 
-	@container band (max-width: 26rem) {
-		[data-item="queue"] {
-			display: none;
+		@container band (max-width: 26rem) {
+			[data-item="queue"] {
+				display: none;
+			}
 		}
-	}
 
-	@container band (max-width: 16rem) {
-		[data-item="effort"] {
-			display: none;
+		@container band (max-width: 16rem) {
+			[data-item="effort"] {
+				display: none;
+			}
 		}
-	}
 
-	@container band (max-width: 12rem) {
-		[data-item="mark"] {
-			display: none;
+		@container band (max-width: 12rem) {
+			[data-item="mark"] {
+				display: none;
+			}
 		}
 	}
 </style>

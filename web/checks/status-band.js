@@ -13,15 +13,24 @@
 	}
 	const band = document.querySelector(".status-band");
 	if (!band) return { ok: false, failures: ["status band: not found"] };
+	if (innerWidth > 640)
+		return {
+			ok: false,
+			failures: [
+				`viewport: ${innerWidth}x${innerHeight} (want a window of 640px or narrower)`,
+			],
+		};
 	const shown = (id) => {
 		const item = band.querySelector(`[data-item="${id}"]`);
 		return item !== null && getComputedStyle(item).display !== "none";
 	};
 	for (const id of ["model", "context", "approval", "sandbox"]) {
-		if (!shown(id)) failures.push(`${id}: not visible at 320px (want visible)`);
+		if (!shown(id))
+			failures.push(`${id}: not visible at ${innerWidth}px (want visible)`);
 	}
 	for (const id of ["folder", "queue"]) {
-		if (shown(id)) failures.push(`${id}: visible at 320px (want dropped)`);
+		if (shown(id))
+			failures.push(`${id}: visible at ${innerWidth}px (want dropped)`);
 	}
 	const shell = document.querySelector(".shell");
 	if (shell && shell.scrollWidth > window.innerWidth) {
