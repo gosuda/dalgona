@@ -133,3 +133,53 @@ func TestElapsedOfUnsentTurnDropsPreviousTurnStart(t *testing.T) {
 	m, _ = drive(t, m, turnStartedAt("turn-2", clock.now))
 	requireElapsed(t, m, "0 ms", "turn/started of a turn this client did not send")
 }
+
+func TestElapsedOfUnsentTurnStartsAtZeroAfterTurnEndsWithoutCompletion(t *testing.T) {
+	t.Parallel()
+	ends := map[string]notificationMsg{
+		"idle status":        {method: "thread/status/changed", params: []byte(`{"threadId":"t1","status":{"type":"idle"}}`)},
+		"systemError status": {method: "thread/status/changed", params: []byte(`{"threadId":"t1","status":{"type":"systemError"}}`)},
+		"error":              {method: "error", params: []byte(`{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":"boom"}}`)},
+		"completion of a turn that never started": turnCompletedMsg("turn-1"),
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			m, clock := elapsedModel(t)
+			m = sendTyped(t, m, "a")
+			if name != "completion of a turn that never started" {
+				m, _ = drive(t, m, turnStartedAt("turn-1", clock.now))
+			}
+			clock.advance(5 * time.Second)
+			m, _ = drive(t, m, end)
+			if m.turnLive() {
+				t.Fatalf("the turn is still live after %s", name)
+			}
+			clock.advance(4 * time.Second)
+			m, _ = drive(t, m, turnStartedAt("turn-2", clock.now))
+			requireElapsed(t, m, "0 ms", "turn/started of a turn this client did not send after "+name)
+		})
+	}
+}
+
+func TestElapsedKeepsCountingOnARepeatedTurnStarted(t *testing.T) {
+	t.Parallel()
+	m, clock := elapsedModel(t)
+	m, _ = drive(t, m, turnStartedAt("turn-1", clock.now))
+	clock.advance(3 * time.Second)
+	m, _ = drive(t, m, turnStartedAt("turn-1", clock.now))
+	requireElapsed(t, m, "3s", "a repeated turn/started of the running turn")
+}
+
+func TestElapsedOfSentTurnCountsFromEnterWhenTurnStartedPrecedesTheReply(t *testing.T) {
+	t.Parallel()
+	m, clock := elapsedModel(t)
+	m = typeText(t, m, "a")
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	if command == nil {
+		t.Fatal("Enter sent nothing")
+	}
+	clock.advance(30 * time.Millisecond)
+	m, _ = drive(t, m, turnStartedAt("turn-1", clock.now))
+	requireElapsed(t, m, "30 ms", "turn/started before the turn/start reply")
+}

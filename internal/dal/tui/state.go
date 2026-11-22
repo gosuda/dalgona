@@ -113,6 +113,7 @@ type threadInfo struct {
 	approvalMode    string
 	sandbox         string
 	turnStartedAt   time.Time
+	turnSent        bool
 	lastTurn        time.Duration
 	effort          string
 	turnEffort      *string

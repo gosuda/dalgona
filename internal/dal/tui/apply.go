@@ -319,12 +319,14 @@ func (m *model) applyTurnStarted(params jsontext.Value) error {
 	if !m.acceptThread(event.ThreadID) {
 		return nil
 	}
+	keep := !m.thread.turnStartedAt.IsZero() && (m.thread.turnSent || event.Turn.ID == m.thread.turnID)
 	m.thread.turnID = event.Turn.ID
 	m.thread.turnEffort = nil
 	m.thread.turnRevision++
-	if m.thread.turnStartedAt.IsZero() {
+	if !keep {
 		m.thread.turnStartedAt = m.now()
 	}
+	m.thread.turnSent = false
 	m.noticef("")
 	m.live.planN = 0
 	m.setState(stateRunning)
@@ -354,7 +356,7 @@ func (m *model) applyTurnCompleted(params jsontext.Value) (tea.Cmd, error) {
 	if m.thread.lastTurn == 0 && !m.thread.turnStartedAt.IsZero() {
 		m.thread.lastTurn = m.now().Sub(m.thread.turnStartedAt)
 	}
-	m.thread.turnStartedAt = time.Time{}
+	m.thread.turnSent = false
 	m.live.plan = nil
 	m.live.retryUntil = time.Time{}
 	m.setState(turnState(event.Turn.Status))
@@ -585,6 +587,7 @@ func (m *model) setThread(id string) {
 	m.thread.completedTurns = nil
 	m.thread.lastTurn = 0
 	m.thread.turnStartedAt = time.Time{}
+	m.thread.turnSent = false
 	m.live.plan = nil
 	m.live.retryUntil = time.Time{}
 	m.forgetUnshownPatches()
