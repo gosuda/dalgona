@@ -480,3 +480,40 @@ func TestSettingsSaveErrorPrintsWholeOnceItIsCutAfterANarrowing(t *testing.T) {
 		t.Fatalf("a third failed save printed the error again: %+v", m.out.entries)
 	}
 }
+
+type causesSaveCaller struct {
+	fakeCaller
+	causes []string
+}
+
+func (f *causesSaveCaller) Call(ctx context.Context, method string, params, result any) error {
+	if method == "config/batchWrite" {
+		f.calls = append(f.calls, callRecord{method: method, params: params})
+		return errors.New(f.causes[min(saveCalls(&f.fakeCaller), len(f.causes))-1])
+	}
+	return f.fakeCaller.Call(ctx, method, params, result)
+}
+
+func TestSettingsSaveErrorsWithDistinctCausesEachPrintWhole(t *testing.T) {
+	t.Parallel()
+	caller := &causesSaveCaller{causes: []string{"disk full", "permission denied"}}
+	m := openSettingsPanel(t, newTestModel(caller, Options{}), "ask")
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m, command := drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = runPickCommand(t, m, command)
+	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, command = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = runPickCommand(t, m, command)
+	var printed []string
+	for _, entry := range m.out.entries {
+		printed = append(printed, strings.Join(strings.Fields(entry.text), " "))
+	}
+	want := []string{
+		"Could not save settings: disk full; press Enter to try again",
+		"Could not save settings: permission denied; press Enter to try again",
+	}
+	if !slices.Equal(printed, want) {
+		t.Fatalf("printed rows = %q, want %q", printed, want)
+	}
+}
