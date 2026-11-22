@@ -606,7 +606,8 @@ The same item ID in a later turn MUST print as a new row.
 A replay of a printed turn and item MUST NOT print again.
 An agent message MUST print as Markdown, with no row.
 Each rendered Markdown block MUST start every row after a gutter of two cells, its first row included.
-A rendered Markdown block MUST NOT begin or end with a blank row.
+The rendered text of a Markdown block MUST NOT begin or end with a blank row.
+One blank row MUST follow the rendered text of each Markdown block.
 The state column MUST start with a mark or two blank cells.
 The state-word field MUST be at least 8 cells wide and end with a space.
 The label MUST be at most 9 cells, and one space MUST follow it.
