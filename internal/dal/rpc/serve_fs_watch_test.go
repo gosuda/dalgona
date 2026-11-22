@@ -79,7 +79,7 @@ func TestFsWatchReportsAnInPlaceEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	file := filepath.Join(dir, "x.txt")
-	if err := os.WriteFile(file, []byte("one"), 0o644); err != nil {
+	if err = os.WriteFile(file, []byte("one"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.Stat(dir)
@@ -92,10 +92,10 @@ func TestFsWatchReportsAnInPlaceEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := edit.WriteString(" more"); err != nil {
+	if _, err = edit.WriteString(" more"); err != nil {
 		t.Fatal(err)
 	}
-	if err := edit.Close(); err != nil {
+	if err = edit.Close(); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.Stat(dir)
