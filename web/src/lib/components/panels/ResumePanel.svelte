@@ -42,7 +42,6 @@ const shown = $derived(
 
 $effect(() => {
 	if (open) return;
-	attempt += 1;
 	opening = false;
 });
 
