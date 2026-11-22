@@ -121,7 +121,7 @@ func TestRecoveryRangesAreBoundedTo40Lines(t *testing.T) {
 	})
 }
 
-func TestRecoveryRemainingIsCappedAt64Ranges(t *testing.T) {
+func TestRecoveryRemainingHoldsTheSpanTail(t *testing.T) {
 	t.Run("C15/200 alternating rows", func(t *testing.T) {
 		env, cwd := editTestEnv(t)
 		source := numberedLines(400)
@@ -282,7 +282,7 @@ func TestRecoveryReadsTheWholeMappedSpan(t *testing.T) {
 		want := knownRead("f.txt", lineRanges(1, 10), nil)
 		requireRecovery(t, failure, want)
 
-		fresh, ok := env.Snapshots.Capture("f.txt", []byte(source), readShown(t, env, failure))
+		fresh, ok := env.Snapshots.Capture("f.txt", []byte(source), readShown(t, failure))
 		if !ok {
 			t.Fatal("the recovery read captured no reference")
 		}
@@ -295,7 +295,7 @@ func TestRecoveryReadsTheWholeMappedSpan(t *testing.T) {
 	})
 }
 
-func readShown(t *testing.T, env tool.Env, failure *tool.OutcomeError) []snapshot.Range {
+func readShown(t *testing.T, failure *tool.OutcomeError) []snapshot.Range {
 	t.Helper()
 	var out []snapshot.Range
 	for _, item := range append(slices.Clone(failure.Outcome.Recovery.Ranges), failure.Outcome.Recovery.Remaining...) {
