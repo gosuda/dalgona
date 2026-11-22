@@ -75,6 +75,7 @@ function modelProblem(): string | null {
 }
 
 async function save(): Promise<void> {
+	if (saving) return;
 	problem = modelProblem();
 	if (problem !== null) return;
 	saving = true;
@@ -157,7 +158,7 @@ async function save(): Promise<void> {
 				{/if}
 				<div class="actions">
 					<button type="button" class="quiet" onclick={() => onClose()}>Cancel</button>
-					<button type="submit" class="point" disabled={saving}>Use model</button>
+					<button type="submit" class="point" aria-disabled={saving ? "true" : undefined}>Use model</button>
 				</div>
 			</form>
 		{/if}

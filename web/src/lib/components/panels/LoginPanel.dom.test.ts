@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import LoginPanel from "#lib/components/panels/LoginPanel.svelte";
 import { type RpcPort, Session } from "#lib/session.svelte.ts";
@@ -207,6 +208,52 @@ describe("login panel", () => {
 		]);
 		expect(session.panel).toBe("login");
 		expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+	});
+
+	test("Log in stays focusable and reports aria-disabled while the API key login runs", async () => {
+		const answer = Promise.withResolvers<void>();
+		const { session, rpc } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "openai", login: "apiKey", signedIn: false },
+			]),
+		});
+		const start = vi.fn();
+		const call = rpc.call.bind(rpc);
+		vi.spyOn(rpc, "call").mockImplementation((method, params, parse) => {
+			if (method !== "account/login/start") return call(method, params, parse);
+			start(params);
+			return answer.promise.then(() => parse({ type: "apiKey" }));
+		});
+		session.openPanel("login");
+		render(LoginPanel, {
+			props: { session, open: true, onClose: vi.fn() },
+		});
+		await fireEvent.click(await screen.findByLabelText(/openai/));
+		const field = screen.getByLabelText(
+			"API key for openai",
+		) as HTMLInputElement;
+		await fireEvent.input(field, { target: { value: "sk-test" } });
+		const button = screen.getByRole("button", { name: "Log in" });
+		const user = userEvent.setup();
+		button.focus();
+		await user.keyboard("{Enter}");
+		expect(start).toHaveBeenCalledOnce();
+		expect(document.activeElement).toBe(button);
+		expect(button.getAttribute("aria-disabled")).toBe("true");
+		expect(button.hasAttribute("disabled")).toBe(false);
+		expect(field.disabled).toBe(false);
+		expect(field.readOnly).toBe(true);
+		await user.keyboard("{Enter}");
+		await user.click(button);
+		field.focus();
+		await user.keyboard("{Enter}");
+		expect(document.activeElement).toBe(field);
+		expect(start).toHaveBeenCalledOnce();
+		answer.resolve();
+		await vi.waitFor(() =>
+			expect(button.hasAttribute("aria-disabled")).toBe(false),
+		);
+		expect(field.readOnly).toBe(false);
 	});
 
 	test("a failed API key login keeps the field editable and shows the error under it", async () => {

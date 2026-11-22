@@ -23,7 +23,10 @@ afterEach(() => {
 type Answer = (params: JsonValue) => JsonValue;
 type Call = { readonly method: string; readonly params: JsonValue };
 
-function recordingPort(answers: Record<string, Answer>): {
+function recordingPort(
+	answers: Record<string, Answer>,
+	held: Record<string, Promise<void>> = {},
+): {
 	port: RpcPort;
 	calls: Call[];
 } {
@@ -39,6 +42,10 @@ function recordingPort(answers: Record<string, Answer>): {
 			if (answer === undefined) {
 				return Promise.reject(new Error(`no answer for ${method}`));
 			}
+			const hold = held[method];
+			if (hold !== undefined) {
+				return hold.then(() => parse(answer(params)));
+			}
 			return Promise.resolve(parse(answer(params)));
 		},
 		notify: (): void => undefined,
@@ -49,11 +56,14 @@ function recordingPort(answers: Record<string, Answer>): {
 	return { port, calls };
 }
 
-function activeSession(answers: Record<string, Answer>): {
+function activeSession(
+	answers: Record<string, Answer>,
+	held: Record<string, Promise<void>> = {},
+): {
 	session: Session;
 	calls: Call[];
 } {
-	const { port, calls } = recordingPort(answers);
+	const { port, calls } = recordingPort(answers, held);
 	const session = new Session((_url: string, _handlers: RpcHandlers) => port);
 	session.start({
 		hash: "#token=abc",
@@ -155,6 +165,62 @@ describe("thread command panels", () => {
 			await fireEvent.click(choice);
 			expect(select).toHaveBeenCalledWith("101");
 			expect(session.panel).toBeNull();
+		},
+	);
+
+	test.each([
+		{ panel: "compact", action: "Compact", method: "thread/compact/start" },
+		{ panel: "review", action: "Start review", method: "review/start" },
+		{ panel: "rewind", action: "Rewind", method: "thread/revert" },
+		{
+			panel: "tree",
+			action: "Switch branch",
+			method: "dalgona/thread/leaf/set",
+		},
+		{ panel: "fork", action: "Fork here", method: "thread/fork" },
+		{
+			panel: "advisor",
+			action: "Turn advisor on",
+			method: "dalgona/advisor/set",
+		},
+		{
+			panel: "advisor",
+			action: "Reset advisor",
+			method: "dalgona/advisor/reset",
+		},
+	] as const)(
+		"$action stays focusable, reports aria-disabled and sends one request while it runs",
+		async ({ panel, action, method }) => {
+			const answer = Promise.withResolvers<void>();
+			const { session, calls } = activeSession(
+				{ "dalgona/thread/tree": tree, [method]: () => ({}) },
+				{ [method]: answer.promise },
+			);
+			render(ThreadPanels, { props: { session } });
+			session.openPanel(panel, panel === "rewind" ? "turn-2" : undefined);
+			const user = userEvent.setup();
+			if (panel === "fork") {
+				await user.click(await screen.findByLabelText(/first prompt/));
+			}
+			const button = (await screen.findByRole("button", {
+				name: action,
+			})) as HTMLButtonElement;
+			await vi.waitFor(() => expect(button.disabled).toBe(false));
+			const sent = () => calls.filter((call) => call.method === method);
+			button.focus();
+			await user.keyboard("{Enter}");
+			expect(sent()).toHaveLength(1);
+			expect(document.activeElement).toBe(button);
+			expect(button.getAttribute("aria-disabled")).toBe("true");
+			expect(button.hasAttribute("disabled")).toBe(false);
+			await user.keyboard("{Enter}");
+			await user.click(button);
+			expect(sent()).toHaveLength(1);
+			answer.reject(new Error("refused"));
+			await vi.waitFor(() =>
+				expect(button.hasAttribute("aria-disabled")).toBe(false),
+			);
+			expect(session.panel).toBe(panel);
 		},
 	);
 
@@ -429,7 +495,7 @@ test("resume closes after the thread loads and focus lands in the enabled messag
 	expect(document.activeElement).toBe(prompt);
 });
 
-test("resume shows one status line and takes no second choice while the thread loads", async () => {
+test("resume keeps focus on the chosen thread, shows one status line and takes no second choice while it loads", async () => {
 	let finish: () => void = () => {};
 	const select = vi.fn().mockImplementation(
 		() =>
@@ -468,10 +534,15 @@ test("resume shows one status line and takes no second choice while the thread l
 		name: "hello",
 	})) as HTMLButtonElement;
 	expect(screen.queryByRole("status")).toBeNull();
-	await fireEvent.click(choice);
+	const user = userEvent.setup();
+	choice.focus();
+	await user.keyboard("{Enter}");
 	expect(screen.getByRole("status").textContent).toBe("Opening thread…");
-	expect(choice.disabled).toBe(true);
-	await fireEvent.click(choice);
+	expect(document.activeElement).toBe(choice);
+	expect(choice.getAttribute("aria-disabled")).toBe("true");
+	expect(choice.disabled).toBe(false);
+	await user.keyboard("{Enter}");
+	await user.click(choice);
 	expect(select).toHaveBeenCalledTimes(1);
 	finish();
 	await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
@@ -483,6 +554,7 @@ test("resume shows one status line and takes no second choice while the thread l
 		name: "hello",
 	})) as HTMLButtonElement;
 	expect(again.disabled).toBe(false);
+	expect(again.hasAttribute("aria-disabled")).toBe(false);
 });
 
 test("a resume that ends after Escape leaves the next panel and its sign-in open", async () => {
@@ -623,7 +695,7 @@ test("a resume panel reopened during an earlier attempt starts enabled and keeps
 		name: "hello",
 	})) as HTMLButtonElement;
 	expect(within(reopened).queryByRole("status")).toBeNull();
-	expect(choice.disabled).toBe(false);
+	expect(choice.getAttribute("aria-disabled")).toBeNull();
 	await fireEvent.click(choice);
 	expect(within(reopened).getByRole("status").textContent).toBe(
 		"Opening thread…",
@@ -636,7 +708,8 @@ test("a resume panel reopened during an earlier attempt starts enabled and keeps
 	expect(within(reopened).getByRole("status").textContent).toBe(
 		"Opening thread…",
 	);
-	expect(choice.disabled).toBe(true);
+	expect(choice.getAttribute("aria-disabled")).toBe("true");
+	expect(choice.disabled).toBe(false);
 	later.resolve();
 	await later.promise;
 	await vi.waitFor(() => expect(session.panel).toBeNull());

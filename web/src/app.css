@@ -57,6 +57,16 @@ button {
 	text-box: trim-both cap alphabetic;
 }
 
+button:not(.thread, .thread-choice, .model-button, .request-actions button) {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: var(--size-label);
+	font-weight: var(--weight-control);
+	line-height: var(--leading-tight);
+	white-space: nowrap;
+}
+
 button,
 .tag,
 .point {

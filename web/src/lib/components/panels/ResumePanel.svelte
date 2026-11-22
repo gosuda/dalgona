@@ -109,6 +109,7 @@ async function load(cursor: string | null): Promise<void> {
 }
 
 async function choose(threadId: string): Promise<void> {
+	if (opening) return;
 	const opened = session.openedPanel;
 	const mine = ++attempt;
 	opening = true;
@@ -136,7 +137,7 @@ async function choose(threadId: string): Promise<void> {
 			<ul class="threads">
 				{#each shown as thread (thread.id)}
 					<li>
-						<button type="button" class="thread-choice" disabled={opening} onclick={() => void choose(thread.id)}>
+						<button type="button" class="thread-choice" aria-disabled={opening ? "true" : undefined} onclick={() => void choose(thread.id)}>
 							<span class="title">{threadTitle(thread)}</span>
 						</button>
 					</li>
@@ -164,7 +165,7 @@ async function choose(threadId: string): Promise<void> {
 				{:else}
 					<ul class="threads">
 						{#each hits as hit (hit.threadId)}
-							<li><button type="button" class="thread-choice" disabled={opening} onclick={() => void choose(hit.threadId)}>
+							<li><button type="button" class="thread-choice" aria-disabled={opening ? "true" : undefined} onclick={() => void choose(hit.threadId)}>
 								<span class="title">{hit.name || hit.preview || "Untitled thread"}</span>
 								<span>{hit.snippet}</span>
 							</button></li>

@@ -21,6 +21,31 @@
 		probe.remove();
 		return value;
 	};
+	const typed = [...document.querySelectorAll("button")].filter(
+		(el) =>
+			el.getClientRects().length > 0 &&
+			!el.matches(
+				".thread, .thread-choice, .model-button, .request-actions button",
+			),
+	);
+	const size = resolve("fontSize", "--size-label");
+	const weight = resolve("fontWeight", "--weight-control");
+	for (const el of typed) {
+		const style = getComputedStyle(el);
+		const name = `${el.textContent.trim()}${el.disabled ? " (disabled)" : ""}`;
+		const want = (what, got, wanted, token) => {
+			if (got !== wanted)
+				failures.push(`${name}: ${what} ${got} (want ${token} ${wanted})`);
+		};
+		want("weight", style.fontWeight, weight, "--weight-control");
+		want("size", style.fontSize, size, "--size-label");
+		want("line height", style.lineHeight, style.fontSize, "--leading-tight");
+		if (style.display !== "inline-flex" && style.display !== "flex")
+			failures.push(`${name}: display ${style.display} (want inline flex)`);
+		want("align", style.alignItems, "center", "centred");
+		want("justify", style.justifyContent, "center", "centred");
+		want("wrap", style.whiteSpace, "nowrap", "no wrap");
+	}
 	const clear = "rgba(0, 0, 0, 0)";
 	for (const el of buttons) {
 		const style = getComputedStyle(el);

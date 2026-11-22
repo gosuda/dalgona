@@ -74,6 +74,30 @@ function rowItems(container: HTMLElement): string[][] {
 	);
 }
 
+function dropConditions(item: string): string[][] {
+	const found: string[][] = [];
+	const walk = (list: CSSRuleList, path: string[]): void => {
+		for (const rule of Array.from(list)) {
+			if (rule instanceof CSSStyleRule) {
+				if (
+					rule.selectorText.replace(/\.svelte-\w+/g, "") ===
+						`[data-item="${item}"]` &&
+					rule.style.getPropertyValue("display") === "none"
+				) {
+					found.push(path);
+				}
+			} else if ("cssRules" in rule) {
+				const condition = (rule as CSSConditionRule).conditionText;
+				walk((rule as CSSGroupingRule).cssRules, [...path, condition]);
+			}
+		}
+	};
+	for (const sheet of Array.from(document.styleSheets)) {
+		walk(sheet.cssRules, []);
+	}
+	return found;
+}
+
 function expectGlyph(text: string | undefined, codePoint: number): void {
 	const glyphs = [...(text ?? "")];
 	expect(glyphs).toHaveLength(1);
@@ -93,6 +117,22 @@ describe("StatusBand", () => {
 			["model"],
 			["effort", "approval", "sandbox", "folder", "queue"],
 			["context", "mark"],
+		]);
+	});
+
+	test("drops items by band width only in the one-row band at 40rem or narrower", () => {
+		render(StatusBand, { props: props({ queued: 1 }) });
+		expect(dropConditions("folder")).toEqual([
+			["(max-width: 40rem)", "band (max-width: 30rem)"],
+		]);
+		expect(dropConditions("queue")).toEqual([
+			["(max-width: 40rem)", "band (max-width: 26rem)"],
+		]);
+		expect(dropConditions("effort")).toEqual([
+			["(max-width: 40rem)", "band (max-width: 16rem)"],
+		]);
+		expect(dropConditions("mark")).toEqual([
+			["(max-width: 40rem)", "band (max-width: 12rem)"],
 		]);
 	});
 
