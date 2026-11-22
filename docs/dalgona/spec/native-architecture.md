@@ -69,7 +69,7 @@ Concrete types MUST precede lifecycle functions in their implementation files.
 | `ThreadProjection` | `gui` | One stream identity, applied ordinal, active branch revision, and authoritative items. |
 | `DraftState` | `gui` | One window, endpoint, and draft identity, with an optional target thread. |
 | `DocumentState` | `gui/document` | Document version, selection, folds, and source ranges. |
-| `TerminalView` | `gui/terminal` | One terminal identity, screen checkpoint, output offset, and writer lease. |
+| `TerminalView` | `gui/terminal` | One terminal identity, screen checkpoint, output and resize cursors, attachment, and writer lease. |
 | `WindowState` | `gui` | Gio widget state, focus, layout, and accessibility targets for one window. |
 
 Endpoint identity MUST include the product home for local connections.
@@ -209,6 +209,8 @@ The document contract separately bounds worker decode memory and GPU textures.
 
 RPC queue byte accounting is new work. The existing message count alone does not bound memory sufficiently.
 Stream text MAY coalesce only when identity, stream, field, and adjacent ordinal ranges match.
+Coalescing MUST preserve the snapshot barriers in [R04 and R05](native-protocol.md#r04-one-ordered-delivery-stream).
+The session MUST retain received envelope boundaries while a snapshot cut is pending.
 Coalescing MUST preserve exact text order and the last ordinal.
 Approvals, questions, completions, failures, and mutation responses MUST never be discarded or replaced.
 If every subscription has an interested view, opening another MUST report capacity without evicting another window's thread.
@@ -243,6 +245,7 @@ Legacy mutation uncertainty requires inspection and explicit user action.
 Cancelling a client context cancels waiting, not an acknowledged side effect.
 Turn interruption MUST use `turn/interrupt`.
 Terminal termination MUST use `dalgona/terminal/close`.
+Terminal attachment release MUST use `dalgona/terminal/detach` without implying process termination.
 Authentication cancellation MUST use its transaction cancellation method.
 
 ## A09. Authorization and path domains
@@ -256,6 +259,12 @@ Workspace handles bind the endpoint, thread, runner identity, root, rights, and 
 The daemon validates these fields before every operation.
 Runner rebinding invalidates old handles before any filesystem mutation.
 User filesystem actions never inherit an agent approval silently.
+
+The shared client owner MUST count workspace interests across windows, file views, completion, commands, and terminal attachments.
+Closing one view releases only its interest. A terminal retains its workspace reference until its attachment is detached.
+The final interest MUST close the server handle through `dalgona/workspace/close` after dependent operations finish or reconcile.
+A `busy` close MUST preserve the handle and its dependent work. It MUST NOT trigger forced terminal or operation cancellation.
+Thread unsubscribe MUST NOT revoke a workspace still owned by another view or terminal.
 
 Authentication transactions keep PKCE verifiers, refresh tokens, and API keys within the credential owner.
 Native browser opening uses the operating system browser.
@@ -298,6 +307,9 @@ Closing the last client may decline pending approvals or finish questions with n
 That current backend behavior MUST remain visible when closing affected work.
 
 Application exit cancels owned authentication flows and closes explicitly owned terminals after the required user decision.
+Stop retains its reader until final output is collected, the user releases the view, or output retention expires.
+Expiry releases local attachment and workspace interests while keeping collected output and the visible loss boundary.
+The terminal owner detaches before releasing its final workspace interest.
 Transient disconnection uses terminal lease recovery instead of immediate process termination.
 The shared daemon remains available to TUI, web, app-server, and other clients.
 

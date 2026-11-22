@@ -1,82 +1,48 @@
 #### Ask step 2. Agent host path for questions
 
-Files:
+Update the existing question lifecycle in `internal/dal/agent/question.go` and its host and subscriber callers.
+[Ask tool](../../../dal/spec/ask.md#host-path) owns the outcome and timeout contract.
+The shared [input contract](../../../dal/spec/input-text.md) owns text preservation and validation.
 
-- `internal/agent/types.go`:
-  - Append `UpdateQuestion` after `UpdateExecOutput` (`:139`).
-  - Add the type:
+The actor remains the single owner of pending questions, subscriber membership, deadlines, and the winning outcome.
+Each pending question retains its request ID, call ID, original offered values, subscribers, response channel, and first-publication deadline.
+Validation precedes publication. Required model fields must be nonblank, bounded, well-formed, and free of NUL.
+Apply the existing secret masker before offering the question, and validate the offered values before publication.
+Masking failure must offer nothing. Returned option values identify the exact masked labels that the user saw.
 
-```go
-type QuestionPrompt struct {
-	RequestID  string
-	CallID     string
-	Questions  []asktool.Question
-	Resolved   bool
-	Resolution asktool.Outcome
-}
-```
+Publication and replay follow these rules:
 
-  - Add the field `Question QuestionPrompt` to `Update` (`:155-164`).
-  - Import `asktool "github.com/gosuda/dalgona/internal/tool/ask"`. The alias is required: package-level `ask[T]` exists at `thread.go:391`.
-- `internal/agent/thread.go`:
-  - Add the actor field `questions map[string]pendingQuestion` next to `approvals` (`:67`) and initialise it in the actor literal (`:133`).
-  - `Subscribe` (`:508-514`) calls `a.subscribe(ch)` in place of `a.subs[ch] = struct{}{}`. The new `func (a *actor) subscribe(ch chan Update)` adds `ch`, then sends one `Update{Kind: UpdateQuestion, Thread: a.t.id, Question: p.prompt}` per open question; the channel is new, with the `subscriberBuffer` size (`thread.go:23`).
-  - `unsubscribe` (`:522-529`) calls `a.declineQuestions()` when `len(a.subs) == 0` after the removal.
-  - `Status` (`:543-550`) sets `Questions: len(a.questions)`.
-- `internal/agent/seams.go`: add `Questions int` to `Status` (`:51-59`).
-- `internal/agent/question.go` (new):
+- No subscriber means the existing no-client outcome without an open question.
+- First publication starts one five-minute deadline.
+- A later subscriber receives every still-open question in order, under its original request ID.
+- Replay, corrections, and later subscribers never restart the deadline.
+- Slow-subscriber resubscription preserves the existing refusal accounting and question outcome rules.
+- `Status.Questions` counts pending questions until an authoritative outcome wins.
 
-```go
-type pendingQuestion struct {
-	prompt  QuestionPrompt
-	replies chan asktool.Reply
-}
+For an otherwise structurally valid answer, validate all answer text before claiming the outcome.
+A text error leaves the actor's pending entry, deadline, subscriber set, and accepted source unchanged.
+The transport sends the correction warning defined in [Protocol](../../../dal/spec/protocol.md#server-requests).
+Only a valid answer or an existing cancellation, timeout, interruption, or no-client outcome can remove the pending entry.
+A losing outcome must not publish a second resolution or send another reply.
 
-func (t *Thread) Ask(ctx context.Context, callID string, questions []asktool.Question) (asktool.Reply, error) {
-	if raw, err := url.PathUnescape(callID); err == nil {
-		callID = raw
-	}
-	if ctx.Err() != nil {
-		return asktool.Reply{Outcome: asktool.OutcomeInterrupted}, nil
-	}
-	prompt := QuestionPrompt{RequestID: newID("req-"), CallID: callID, Questions: questions}
-	replies := make(chan asktool.Reply, 1)
-	offered, err := ask(t, func(a *actor) bool { return a.offerQuestion(prompt, replies) })
-	if err != nil {
-		return asktool.Reply{}, err
-	}
-	if !offered {
-		return asktool.Reply{Outcome: asktool.OutcomeNoClient}, nil
-	}
-	reply := awaitQuestion(ctx, replies)
-	t.closeQuestion(prompt, reply.Outcome)
-	return reply, nil
-}
-```
+The host must serialize these races:
 
-  - `func (a *actor) offerQuestion(prompt QuestionPrompt, replies chan asktool.Reply) bool` returns false when `len(a.subs) == 0`. Otherwise it stores the question, publishes `Update{Kind: UpdateQuestion, Thread: a.t.id, Question: prompt}` and returns true.
-  - `func awaitQuestion(ctx context.Context, replies <-chan asktool.Reply) asktool.Reply` selects on `replies` or `ctx.Done()`; the second gives `OutcomeInterrupted`.
-  - `func (t *Thread) closeQuestion(prompt QuestionPrompt, outcome asktool.Outcome)` runs through `ask(t, ...)`. It deletes the request id and publishes the prompt with `Resolved=true` and `Resolution=outcome`. It ignores `ErrClosed`.
-  - `func (t *Thread) AnswerQuestion(requestID string, reply asktool.Reply) error` follows `Thread.Answer` (`entry.go:172-181`). It looks up `a.questions`, deletes, sends, and returns `ErrUnknownRequest` wrapped with the id when the question is absent.
-  - `declineQuestions` deletes every entry and sends `asktool.Reply{Outcome: asktool.OutcomeNoClient}`.
-  - The URL unescape mirrors `childFor` (`spawn.go:71-74`), because tools receive `url.PathEscape(call.ID)` (`tools.go:46-52`). Before `offerQuestion`, every header, question, label, description and preview passes through `t.host.mask`. A masking error returns an error from `Ask` and offers no question.
+- Two valid answers.
+- An invalid answer followed by a corrected answer from the same connection.
+- A corrected answer against another client's valid answer.
+- An answer against interruption, deadline expiry, or last-subscriber loss.
+- Subscription replay against an already chosen outcome.
 
-Tests in `internal/agent/question_test.go`, package `agent`. They call `thread.Ask` directly on `newHarness(t).start()` (`harness_test.go:219,310`) and fail before this step because `Ask` does not exist.
+Last-subscriber loss resolves open questions through the actor, not independent per-connection subscriber-count checks.
+Do not promise that reconnecting preserves a question after its sole subscriber leaves.
+Stop the timer when any outcome wins. A consumer other than `ask` treats timeout as no answer.
+The ask tool alone formats the specified recommended-option fallback.
 
-- `TestAskReachesSubscriberAndReturnsAnswer`
-- `TestAskWithoutSubscriberDeclines` (the reply is `OutcomeNoClient` and no update is published)
-- `TestAskDeclinesWhenLastSubscriberLeaves`
-- `TestAskStaysOpenWhileAnotherSubscriberRemains`
-- `TestAskReplaysOpenQuestionToNewSubscriber`
-- `TestAskInterruptResolvesInterrupted` (ctx cancel; subscribers receive `Resolved=true`, `Resolution=OutcomeInterrupted`)
-- `TestAnswerQuestionFirstAnswerWins` (the second `AnswerQuestion` gives `ErrUnknownRequest`; the resolved update carries `OutcomeAnswered`)
-- `TestStatusCountsOpenQuestions`
+Tests in `internal/dal/agent` must use production ownership and a controlled clock.
+Keep channel deadlines for hung-test detection, without sleeps as the event oracle.
+Test first publication, replay, unchanged deadline after rejection, exact offered labels, first-valid-answer behavior, and every race above.
+Each expected result comes from the current ask contract.
+The test must show that invalid text cannot consume the host's decision or append an answer result.
 
-These use channels and a 10 s deadline, never sleeps, so they stay off the load-sensitive list.
-
-Docs: `docs/spec/ask.md` gets `## Host path`, covering offer, replay, the last-subscriber decline, the interrupt and first-answer-wins.
-
-- Lands after: Step 1 (the `ask` package types).
-
-Anchor: Edsger W. Dijkstra.
-
+Lands after Step 1's validation boundary and alongside Step 3's typed transport lifecycle.
+No new question journal or reconnect lease is introduced.

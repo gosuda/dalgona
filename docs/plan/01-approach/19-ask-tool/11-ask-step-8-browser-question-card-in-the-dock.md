@@ -1,5 +1,7 @@
 #### Ask step 8. Browser question card in the dock
 
+Update the existing browser question card and its response lifecycle under the current web and shared input contracts.
+
 Files:
 
 - `web/src/lib/types.ts`:
@@ -11,7 +13,7 @@ Files:
 - `web/src/lib/question.ts` (new):
   - `export const MAX_ANSWER = 2000;`
   - `parseQuestionRequest(id: RequestId, params: unknown): QuestionRequest | null` checks every vendored required field. An absent `multiSelect` is false, an absent `preview` is null, and `options: null` is a free-text question.
-  - `questionResponse(request: QuestionRequest, selections: readonly QuestionSelection[]): JsonValue` gives `{answers: {<id>: {answers: [...]}}}`, with labels in option order, then the trimmed Other text cut to `MAX_ANSWER`.
+  - `questionResponse` returns the nested vendored answer shape after complete validation, with original labels in option order and accepted Other text unchanged. Invalid text produces a field error and no response. `MAX_ANSWER` counts Unicode scalars, not UTF-16 units or graphemes.
   - `resolutionNotice(resolution: string | null): string | null` uses the step 7 texts.
 - `web/src/lib/validation.ts`: the `serverRequest/resolved` case (`:767-776`) reads an optional string `resolution`.
 - `web/src/lib/protocol.ts`:
@@ -19,7 +21,7 @@ Files:
   - The private `respondError` becomes public `reject(id: RequestId, code: number, message: string)`; update both callers (`protocol.ts:249` and `:262`).
 - `web/src/lib/components/QuestionCard.svelte` (new):
   - An inline card in the dock above the composer, not a modal `<dialog>`. It shows only the oldest pending request (cross-phase decision 26). The request queue belongs to the web workstream, Step 23, and the dock branch is listed above. On arrival it moves focus to `#question-title`, the same as `ApprovalCard` (the web workstream, Step 21).
-  - One `<fieldset>` per question with the header as `<legend>`. Radio buttons for single-select and checkboxes for multi-select; `Recommended` on option 1; an Other choice with a text input (`maxlength=2000`); a single text input for free text.
+  - One `<fieldset>` per question with its header as `<legend>`. Use radio buttons or checkboxes and mark option 1 as recommended. Other and free-text fields use scalar-aware validation. Do not enforce the quota with HTML `maxlength`, which counts UTF-16 units.
   - A `<pre>` preview for the checked option, in the code face of the web workstream, Step 9 (`faceMono`, Design record, Type for the web).
   - Actions sit in `<div class="request-actions">`, outside the scrolling body, as `ApprovalCard` does (the web workstream, Step 21): `Submit`, `Skip` (all answers empty) and `Dismiss` (sends the cancel `{answers: {}}`). Esc in the card means Dismiss. The `Submit` button is the card's point (D18): a solid fill in the thread hue (Design record, The point and the thread hue).
   - Text interpolation only, never `{@html}`.
@@ -27,6 +29,10 @@ Files:
 - `web/src/lib/session.svelte.ts` (the `Session` of web Step 4):
   - `answerQuestion(request, selections)` sends `questionResponse(request, selections)` from this step.
   - `cancelQuestion(request)` sends `{"answers": {}}`.
+  - Both methods retain the card, draft, and typed response sender until `serverRequest/resolved`.
+  - A matching correction warning exposes the field error and permits another response under the same ID and original deadline.
+  - Resolution releases the sender. Late warnings cannot restore the card.
+  - The complete composition transaction owns its final Enter or Escape event. Rejected commits remain recoverable without a partial insertion.
 - `web/src/routes/+page.svelte`:
   - Route `onQuestion` into the shared queue: `trackRequest` (the web workstream, Step 23) takes the `QuestionRequest`. Add no separate `questions` state. Model the handler on `onRequest` (`+page.svelte:151-155`).
   - `requestResolved` (`:544-546`) calls `resolveRequest` (the web workstream, Step 23) and sets the notice from `resolutionNotice`.
@@ -39,12 +45,19 @@ Tests in `web/src/lib/question.test.ts`:
 - `parses a vendored request`
 - `rejects a request without questions`
 - `treats null options as free text`
-- `orders labels then other text and caps it`
+- `orders original labels then unchanged validated other text`
+- `accepts 2000 supplementary scalars and rejects 2001 without truncation`
+- `returns offered CRLF labels without newline conversion`
+- `retains the sender and draft through correction until resolution`
+- `preserves committed text when composition commits exceed the limit`
 - `maps each resolution to its notice`
 
-All fail before this step because the module does not exist. Component test `web/src/lib/components/QuestionCard.dom.test.ts` (new, same style as `ApprovalCard.dom.test.ts` in the web workstream, Step 21): `keeps the actions outside the scrolling details` (the region named `Question details` does not contain `Submit`), and `Escape dismisses with the cancel shape` (the Dismiss result is `{"answers": {}}`), `Cancel on the sandbox choice sends {"answers": {}}`, and `answers a question by keyboard alone` (the keyboard path of web Step 38: Tab, arrows, Enter and Submit).
+Preserve the existing production module and component tests, then add the correction and Unicode cases above.
+Component tests must keep actions outside scrolling details and verify dismissal, sandbox cancellation, and the complete keyboard answer path.
+Each test must detect its named defect without asserting source text or treating a saved snapshot as behavioral proof.
 
-Docs: `docs/spec/web.md`: one section, `### Questions`, after `### Approvals`. The web workstream, Step 21 holds the sentence on one request at a time, and this step does not edit `### Approvals`.
+Docs: [Web questions](../../../dalgona/spec/web.md#questions), [Ask tool](../../../dal/spec/ask.md), and [Input text](../../../dal/spec/input-text.md) define the required behavior.
+Automated cases must use the production question card and RPC lifecycle. Real IME checks supplement synthetic browser events.
 
 - Lands after: the web workstream, Steps 4, 8, 10, 21 and 23 (page state, tokens, state words, the approval card and the request queue), and this workstream, Step 3 (the wire table and cancel shape).
 

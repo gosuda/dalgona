@@ -497,8 +497,11 @@ When a panel is taller than the viewport, only its body MUST scroll.
 `web/checks/panel-footer.js` checks these rules for the open panel and for each provider choice of the login panel.
 
 The resume panel filters thread titles, previews, and identifiers as the user types.
-A nonblank filter with at least three Unicode scalars starts conversation search after a 300 ms pause.
+Conversation search starts after a 300 ms pause only when the filter contains at least one Unicode-whitespace-separated term.
+Every term MUST contain at least three Unicode scalars, matching the daemon's conversation search eligibility rule.
+Padding and separators MUST NOT count toward a term's minimum length.
 The search MUST send the unchanged filter. Derived local matching keys MUST NOT change the field or result identities.
+`ab ` and `abc de` MUST stay in local filtering without a search request. ` abc ` MUST search with its spaces preserved.
 Each new keystroke cancels the pending search and discards its results.
 The client discards search results from an earlier connection.
 The `Matches in conversations` section shows each matching title and snippet.

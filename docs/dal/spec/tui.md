@@ -185,8 +185,10 @@ Enter MUST choose the highlighted item. Enter MUST do nothing when no item match
 Esc MUST clear a non-empty filter. Esc MUST close the panel when the filter is empty.
 
 The `/resume` filter matches the titles of the 50 most recent threads at once.
-After 300 ms without an edit, the picker queues `dalgona/thread/search` when each word has at least three Unicode scalars.
+After 300 ms without an edit, the picker queues `dalgona/thread/search` only when the filter contains at least one Unicode-whitespace-separated term.
+Every term MUST contain at least three Unicode scalars. Padding and separators MUST NOT satisfy that minimum.
 The client MUST send the unchanged filter and request 50 hits per page.
+`ab ` and `abc de` MUST remain local filters. ` abc ` MUST search with its spaces preserved.
 Whitespace-only eligibility checks and derived local search keys MUST NOT change the filter or a result's original title, path, or identifier.
 The picker sends one search call at a time. While a call is in flight, only the latest eligible query waits.
 Recent title matches stay first. Other hits follow in server order. Each thread appears once.

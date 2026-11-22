@@ -54,6 +54,9 @@ Fault injection MUST act at the stream or operation boundary, not bypass product
 |Deliver an older status sequence|The current thread status does not regress.|
 |Reconnect with a new connection generation|Late responses from the previous connection cannot change the current state.|
 |Append output during snapshot creation|Every item and byte appears once after snapshot and live-state reconciliation.|
+|Open or replace history while same-item deltas await coalescing|The dispatcher seals the envelope before the cut. No envelope straddles that cut.|
+|Buffer deltas while two thread snapshots are pending|The client preserves envelope boundaries and filters each thread by its own cut after validating global continuity.|
+|Receive an invalid envelope spanning a snapshot cut|The client resynchronizes without applying a guessed suffix or duplicating snapshot text.|
 |Resume or fork a large conversation|Bootstrap responses and notifications remain bounded. Existing content arrives only through paged history.|
 |Complete a message larger than the mailbox|Live delivery carries bounded headers and immutable content references without hydrating the full message or reconnecting repeatedly.|
 |Split one turn across history pages|Merging pages preserves every item and distinguishes partial from complete turns.|
@@ -100,6 +103,14 @@ The native UI MUST complete every flow that the application claims to support.
 MCP authentication MUST have the same coverage for its supported flows.
 Tests MUST cover incorrect state, an unexpected callback origin, and a reused authentication operation.
 No test artifact, diagnostic, journal record, or exported report may contain a raw credential.
+
+Direct API-key login MUST omit `callbackMode` and create no browser, listener, or OAuth poller.
+It MUST remain available on a remote endpoint without selecting a device or manual OAuth flow.
+Its exact accepted key MUST enter only the returned transaction's key submission path.
+Tests MUST reject missing or mismatched callback modes before any authentication effect.
+MCP tests MUST distinguish same-name user, project, and discovered entries by their effective source and inventory version.
+A configuration change between status pages MUST return `stale_revision` without attaching old runtime state to a replacement row.
+A capable daemon omitting runtime provenance MUST be rejected as incompatible.
 
 At least one supported browser flow and one supported device flow MUST also pass against their real service before release.
 A provider's unavailable test account MUST be recorded as missing evidence, not a successful simulated login.
@@ -174,6 +185,11 @@ The same textual path on two hosts MUST never identify the same resource implici
 Tests MUST cover symlink escape, traversal, stale revisions, concurrent writes, removed roots, cancellation, and disconnected runners.
 A refused or conflicted write MUST leave the previous file intact.
 The UI MUST retain unsaved text and show an explicit recovery action.
+Repeatedly opening and closing more than eight idle workspaces MUST reuse the released slots.
+Closing one of two views sharing a handle MUST preserve the other view's grant.
+Close with a terminal attachment or dispatched mutation MUST return `busy` without cleanup side effects.
+After detach and operation reconciliation, close MUST remove watches, cursors, and uncommitted uploads without stopping other terminals or deleting files.
+Reads racing successful close MUST cancel or fail without publishing stale results.
 One-shot shell fixtures MUST prove that the same command runs on the selected thread runner with the granted execution right.
 They MUST reject daemon-host substitution and preserve unknown outcomes without automatic repetition.
 
@@ -185,6 +201,24 @@ Forced short writes and lost runner acknowledgments MUST preserve each consumed 
 They MUST expose uncertain input and reject further writes across reconnect and writer replacement.
 Terminal output MUST NOT execute application commands or silently write the system clipboard.
 The client MUST distinguish a live terminal from the existing one-shot shell-output component.
+
+|Case|Required observation|
+|---|---|
+|Resize with unread output on writer and read-only attachments|Both replicas consume the same ordered byte and resize history and match the authoritative VT state.|
+|Commit several resizes at one byte offset|Every record applies in ordinal order without final-size-only substitution.|
+|Queue more than 64 resizes at one offset|Bounded reads advance the resize cursor even with zero output bytes, then resume output without omissions.|
+|Evict a required resize record while nearby bytes remain|The reader receives `replay_gap` and restores both cursors through a checkpoint.|
+|Refresh while all four attachment slots are occupied|`checkpoint/open` replaces the requesting attachment's checkpoint without consuming a slot or changing ownership.|
+|Refresh the only reader of a finalized terminal|Recovery preserves retained output and does not detach the last reader or extend its fixed expiry.|
+|Refuse refresh during a checkpoint read or at the checkpoint budget|The old checkpoint and attachment remain usable. No partially published replacement appears.|
+|Lose or reorder resize acknowledgments|An exact retry appends no extra record. A stale response cannot rewind replica dimensions.|
+|Resize during an incomplete UTF-8 or terminal escape sequence|Checkpoint and replay retain equivalent parser continuation and geometry.|
+|Stop while shutdown emits a final output tail|Existing readers collect through the final byte and resize cursors before declaring completion.|
+|Reach the drain deadline before EOF|The UI reports `outputTruncated:true` and never claims complete output.|
+|Poll, attach, or close again after finalization|The fixed output-retention deadline does not move.|
+|Expire retention before a reader reaches both final cursors|The view keeps collected output, marks the missing tail, and releases local attachment and workspace interests.|
+|Detach the last finalized attachment|Retained state is released and cannot be reached through a reused terminal identity.|
+|Receive an uncertain remote resize outcome|Further input is refused while output and explicit Stop remain available.|
 
 A Windows ConPTY test MUST exercise the same input and resize behavior as the Unix PTY test.
 Remote tests MUST show that the shell runs in the selected thread's actual execution environment.
@@ -313,4 +347,7 @@ They MUST cover the shared adversarial cases and the pinned upstream segmentatio
 Question tests MUST accept 2000 supplementary scalars despite their 4000 UTF-16 units, and reject 2001 scalars without truncation.
 Transport tests MUST split UTF-8 sequences across reads and grapheme clusters across valid deltas, then verify exact reconstruction.
 Client tests MUST reject stale completions and preserve private-use characters beside attachment chips.
+Search tests MUST keep `ab ` and `abc de` local while sending eligible ` abc ` unchanged.
+Required model question fields MUST reject blank or formatting-only content without trimming any accepted value.
+These eligibility checks MUST NOT redefine whitespace-only free-form answers as empty.
 Every declared platform MUST supply actual CJK composition evidence in addition to headless test results.

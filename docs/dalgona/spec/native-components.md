@@ -760,8 +760,12 @@ Cursor flows MUST display the supplied challenge and support the advertised nati
 Every flow MUST show expiry, cancellation, failure, and successful completion distinctly.
 
 Authentication MUST use the generalized `dalgona/auth` methods in [native protocol](native-protocol.md).
+An API-key flow MUST start with `flow:"apiKey"` and no `callbackMode`, then submit the protected field to the returned transaction.
+It MUST NOT open a browser or allocate a callback listener.
+Other flows MUST use the exact callback variant in R09. The panel MUST NOT invent a callback mode for a direct-key flow.
 Every status update MUST match the flow identifier and connection generation.
-Remote authentication MUST use an offered device or manual flow when the backend callback is unreachable from the desktop.
+Callback-based remote OAuth MUST use an offered device or manual variant when the backend callback is unreachable from the desktop.
+Offered callback-free flows remain available without that fallback.
 The panel MUST NOT present a remote loopback URL as a local callback listener.
 The panel MUST retain Close in every state.
 Closing or replacing the panel MUST cancel its outstanding flow.
@@ -780,8 +784,10 @@ External browser authorization remains a deliberate platform action under [nativ
 ## C27: Resume and search
 
 The panel MUST use C02 paging and filter title, preview, and identifier immediately.
-A nonblank query containing at least three Unicode scalars MUST start conversation search after 300 milliseconds.
+A query MUST start conversation search after 300 milliseconds only when it contains at least one Unicode-whitespace-separated term.
+Every term MUST contain at least three Unicode scalars. Padding and separators MUST NOT satisfy that minimum.
 Eligibility MUST remain separate from the value. Search MUST send the unchanged query.
+`ab ` and `abc de` MUST remain local filters. ` abc ` MUST search with its spaces preserved.
 Derived matching keys MUST NOT replace field text, result identities, or source offsets.
 Each new keystroke MUST cancel the previous search and clear its results.
 Earlier-connection results MUST be discarded.
@@ -1034,6 +1040,10 @@ Project and discovered configuration MUST remain read-only in this panel.
 Untrusted workspace configuration MUST NOT execute a server on inspection.
 The panel MUST expose the trust decision required by [MCP](mcp.md).
 Configuration inventory and runtime status MUST match by exact server identity and source.
+The panel MUST send the displayed inventory's `configVersion` to the negotiated runtime-status endpoint.
+It MUST match only effective entries and require the runtime row's explicit source.
+Missing provenance MUST report incompatibility. Changed inventory versions MUST reload without combining old status pages with new configuration.
+Shadowed configuration MUST NOT display another entry's connected or authenticated state.
 An absent runtime row MUST say not started rather than connected or healthy.
 Starting, connected, failed, and authentication-required states MUST remain distinct.
 
@@ -1074,6 +1084,10 @@ Create file, create directory, rename, and remove MUST use their named workspace
 Remove MUST identify its path and recursive scope before confirmation.
 Watch updates MUST refresh visible metadata without replacing an unsaved buffer.
 An unsaved file MUST require Save, Discard, or Cancel before closing or changing its target.
+Closing or changing the view MUST release its local workspace interest after that decision and completion of its owned operations.
+The shared owner MUST call `dalgona/workspace/close` only after the final interest and terminal attachment are released.
+Another window, completion request, running command, or terminal MUST retain its own interest.
+An in-flight mutation MUST be reconciled before the handle is released. A `busy` response MUST preserve the handle for that cleanup.
 Read-only, denied, missing, and disconnected states MUST remain distinct.
 Copy path MUST preserve the workspace's path syntax.
 Export MUST use a native destination chooser and the bounded transfer contract.
@@ -1081,7 +1095,7 @@ Export MUST use a native destination chooser and the bounded transfer contract.
 ## C49: Interactive terminal
 
 The terminal panel MUST provide a real terminal attached to the selected thread's runner.
-It MUST use `dalgona/terminal/open`, `attach`, `read`, `write`, `resize`, and `close`.
+It MUST use `dalgona/terminal/open`, `attach`, `read`, `write`, `resize`, `close`, and `detach`.
 The panel MUST show the target shell, workspace root, and sandbox state before launch.
 The protocol MUST carry the authoritative terminal identifier and stream position.
 The desktop MUST NOT substitute `command/exec` for interactive operation.
@@ -1094,12 +1108,21 @@ Paste MUST preserve bracketed-paste behavior when the terminal requests it.
 Terminal control sequences MUST NOT silently authorize clipboard writes or arbitrary external URL activation.
 The platform contract MUST define explicit clipboard handling.
 
-Closing the panel MUST detach its viewer without claiming the process exited.
+Explicitly closing the panel MUST release its attachment through `dalgona/terminal/detach` without claiming the process exited.
+Hiding a retained panel MUST keep its attachment and lease reads.
 The application MUST retain and renew its owned attachment while that terminal remains open.
 Stop terminal MUST explicitly close the identified terminal process through the server.
+Stop MUST keep the reader until both final cursors are collected, the user releases it, or output retention expires.
+Expiry MUST release local attachment and workspace interests while preserving collected output and identifying any missing tail.
+The UI MUST report a drain timeout as truncated output and display expired output as unavailable.
+The fixed retention deadline MUST NOT be extended by polling, repeated Stop, or reattachment.
+The terminal MUST detach before releasing its workspace reference. Another window's or terminal's workspace interest MUST remain valid.
 Reopening MUST use `dalgona/terminal/list` with a fresh workspace handle.
 It MUST offer attachment to still-running terminals within that authorized workspace.
 Reconnect MUST resume from the protocol's stream position or report an output gap.
+Each reader MUST apply ordered resize records at their output-byte positions and retain both cursors from reads and checkpoints.
+An existing reader recovering from `replay_gap` MUST use `dalgona/terminal/checkpoint/open` without consuming another attachment slot.
+A resize acknowledgment MUST NOT change the replicated grid before unread output reaches its resize record.
 It MUST NOT duplicate input after an uncertain write.
 An uncertain terminal input state MUST disable further input while retaining output, copy, and Stop.
 Starting a replacement terminal MUST require an explicit action and MUST NOT replay the uncertain input.

@@ -52,6 +52,12 @@ An option MUST have a `label` of 1 to 80 characters and a `description` of 1 to 
 
 An option MAY have a `preview` of at most 2000 characters and at most 40 lines.
 
+Required headers, questions, option labels, and descriptions MUST also pass a nonblank eligibility check before the host offers the question.
+That check MUST ignore complete terminal escape sequences, Unicode `White_Space`, `General_Category=Cc`, and `Default_Ignorable_Code_Point` scalars.
+If no scalar remains, validation MUST use the existing empty-field error for that field.
+The eligibility projection MUST NOT replace accepted source text or change the scalar count used for its upper limit.
+Optional previews and submitted user answers retain their separate empty-value rules.
+
 Two options of one question MUST NOT have the same label, compared without case.
 
 No option MUST have the label `Other`, in any case. The user always gets an Other row.
@@ -65,15 +71,15 @@ The tool MUST fail the call with the messages below when a limit is broken. The 
 | Condition | Message |
 |---|---|
 | Question count outside 1 to 4 | `ask: questions needs 1 to 4 items, got <n>` |
-| Empty header | `ask: question <i>: header is empty` |
+| Empty or ineligible blank header | `ask: question <i>: header is empty` |
 | Header over 30 characters | `ask: question <i>: header is longer than 30 characters` |
-| Empty question | `ask: question <i>: question is empty` |
+| Empty or ineligible blank question | `ask: question <i>: question is empty` |
 | Question over 500 characters | `ask: question <i>: question is longer than 500 characters` |
 | Option count outside 2 to 6 | `ask: question <i>: options needs 2 to 6 items, or none for a free-text question, got <n>` |
 | `multi_select` without options | `ask: question <i>: multi_select needs options` |
-| Empty label | `ask: question <i> option <j>: label is empty` |
+| Empty or ineligible blank label | `ask: question <i> option <j>: label is empty` |
 | Label over 80 characters | `ask: question <i> option <j>: label is longer than 80 characters` |
-| Empty description | `ask: question <i> option <j>: description is empty` |
+| Empty or ineligible blank description | `ask: question <i> option <j>: description is empty` |
 | Description over 300 characters | `ask: question <i> option <j>: description is longer than 300 characters` |
 | Preview over 2000 characters or 40 lines | `ask: question <i> option <j>: preview is longer than 2000 characters or 40 lines` |
 | Repeated label | `ask: question <i> option <j>: label "<label>" repeats option <k>` |
@@ -106,6 +112,7 @@ In a preview projection, a newline MUST stay, and a tab MUST become four spaces.
 A single-line projection MAY omit leading and trailing spaces.
 A preview projection MAY omit leading blank lines and trailing spaces.
 Those display choices MUST NOT modify the accepted source text.
+An accepted required field MUST remain visible after projection, using source-preserving fallback when its font lacks a glyph.
 
 Two distinct offered labels MUST remain distinguishable after projection.
 When a projection hides their difference, the display MUST expose the differing code points with visible escapes.
@@ -234,3 +241,17 @@ A call to `ask` in a subagent MUST complete with the error `Tool ask not found`.
 Recovery MUST NOT ask an open question again. It MUST complete the call as interrupted, as the recovery table of [recovery.md](recovery.md) states.
 
 The rule MUST be enforced by `withThreadTools` in `internal/dal/agent/spawn.go`. `TestAskToolOnlyOnTopLevelThreads` and `TestAskToolInDal` in `internal/dal/agent/ask_tool_test.go` check it.
+
+## Input acceptance cases
+
+These cases are required implementation evidence, not results recorded by this documentation change.
+
+|Case|Required observation|
+|---|---|
+|Required field containing only U+0020, U+00A0, U+3000, TAB, or LF|The host rejects it with that field's empty-value error before publishing a question.|
+|Required field containing only terminal escape sequences, directional controls, U+200D, or U+FE0F|The nonblank check rejects it without creating an empty visible question or option.|
+|Valid required text surrounded by spaces or formatting scalars|Its full accepted source is preserved and counted against its upper limit.|
+|Valid required text whose glyph is unavailable|The field remains visible and inspectable through source-preserving fallback.|
+|An offered option containing CRLF and leading spaces|Selection returns its exact offered value without draft newline conversion or trimming.|
+|A whitespace-only user answer|It follows the answer contract and is not rewritten to an empty answer.|
+|A 2001-scalar answer followed by a valid correction|The same pending request accepts the correction once without changing its original deadline.|

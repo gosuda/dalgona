@@ -168,6 +168,8 @@ The new `dalgona/capabilities/read {}` method returns:
 ```
 
 `receiptMethods` MUST list every mutation covered by R07. The empty array above shows shape only.
+`mcpConfig:1` includes the inventory-version and runtime-source extension in R10.
+`workspace:1` includes explicit workspace release. `terminal:1` includes resize replay, final-output retention, and attachment detach.
 All listed feature versions are required for the complete native release.
 A missing feature or unsupported checkpoint version makes that endpoint incompatible.
 The GUI MUST offer a backend update or endpoint switch instead of silently reducing required functionality.
@@ -241,6 +243,10 @@ Only consecutive text deltas for the same item and field may share one envelope.
 Its ordinal range MUST cover exactly the merged consecutive messages.
 Unlike legacy coalescing, native coalescing MUST NOT cross an intervening decision or unrelated event.
 Coalescing stops before either the delta byte limit or encoded envelope limit would be exceeded.
+Opening or replacing a history snapshot inserts a coalescing barrier in the same dispatcher.
+The dispatcher finishes its pending envelope before selecting that snapshot's cut.
+No queued or emitted envelope may satisfy `firstOrdinal <= cutOrdinal < lastOrdinal` for that cut.
+This is an internal ordering boundary, not another wire event or journal record.
 The client applies the concatenated text once and advances to `lastOrdinal`.
 
 A gap, overlap, wrong stream identifier, or impossible range invalidates the live projection.
@@ -287,9 +293,18 @@ The snapshot contains all durable state and accumulated active-item content at t
 Subsequent delivery contains all changes after the cut.
 The server MUST NOT reconstruct this cut from status sequence numbers.
 
+The connection dispatcher MUST apply all earlier source events to the projection and finish pending coalescing before freezing the snapshot.
+Its `cutOrdinal` is the last ordinal assigned before the barrier, or `"0"` when none exists.
+The immutable snapshot MUST be captured before later events can update that projection.
+This rule applies to both initial history opens and replacement snapshots.
+
 The session worker buffers events while the open response is pending.
-After applying the snapshot, it discards this thread's events at or before `cutOrdinal`.
-It then applies later events in stream order.
+It MUST preserve received envelope boundaries until the pending snapshot cut is known.
+Client-side coalescing MUST NOT merge envelopes across a pending or established snapshot cut.
+The worker validates connection-wide ordinal continuity before applying each thread's cut filter.
+After applying the snapshot, it discards this thread's envelopes whose `lastOrdinal <= cutOrdinal`.
+It applies envelopes whose `firstOrdinal > cutOrdinal` in stream order.
+A straddling envelope violates R04 and requires a new connection and snapshot without applying any guessed text suffix.
 Other thread projections retain their own cuts while sharing the connection ordinal sequence.
 For pending requests, discarding duplicate presentation MUST preserve the original transport responder.
 The request identifier attaches that responder to the decision already represented by the snapshot.
@@ -468,6 +483,7 @@ Workspace permission requests use this same mechanism and appear in pending snap
 New externally effectful methods use `operationId` unless a section defines a stronger session-local sequence.
 Idempotent connection-owned cleanup is excluded.
 That exclusion covers history close, unsubscribe, auth cancel, workspace unwatch, and upload abort.
+It also covers workspace close and terminal attachment detach under R11 and R12.
 Those calls release existing resources and never create a replacement effect.
 Negotiated existing mutations accept `dalgonaOperationId`.
 This member is legal only after `mutationReceipts:1` and exact method membership in `receiptMethods`.
@@ -583,16 +599,31 @@ Its identifiers come from backend provider definitions, never UI hardcoding.
 | Method | Parameters | Result |
 | --- | --- | --- |
 | `dalgona/auth/providers` | `{threadId?}` | `{targets:[AuthDescriptor]}`. |
-| `dalgona/auth/start` | `{target, flow, callbackMode, operationId}` | `AuthStatus`. |
+| `dalgona/auth/start` | `{target, flow, callbackMode?, operationId}` | `AuthStatus`. |
 | `dalgona/auth/submit` | `{transactionId, response, operationId}` | `AuthStatus`. |
 | `dalgona/auth/status` | `{transactionId}` | `AuthStatus`. |
 | `dalgona/auth/cancel` | `{transactionId}` | `{status:"cancelled"|"completed"|"notFound"}`. |
 | `dalgona/auth/logout` | `{target, operationId}` | `{signedIn:false}`. |
 
-`callbackMode` is `backendLoopback`, `manualPaste`, or `device`.
-It MUST match an offered flow and the actual browser-to-backend topology.
+`flow` selects the request variant. The following callback rules are exhaustive.
+
+| Flow | `callbackMode` | Input and completion |
+| --- | --- | --- |
+| `apiKey` | Omitted. | Start returns `awaitingInput`. Submit the exact key with `response.kind:"apiKey"`. |
+| `browserCallback` | Required as `backendLoopback`. | The backend listener receives and validates the redirect. |
+| `manualCode` | Required as `manualPaste`. | Submit the advertised redirect URL or authorization code. |
+| `deviceCode` | Required as `device`. | The backend polls the advertised device challenge. |
+| `cursorDeepLink` | Omitted. | The existing native handoff and donor polling complete the flow. |
+
+An omitted callback mode is mandatory for the two callback-free variants, not an implicit default for other flows.
+An explicit null, unsupported mode, missing required mode, or mode on a callback-free variant returns `invalid_params` before starting authentication.
+The selected flow MUST be offered by the target and fit the actual browser-to-backend topology.
+An API-key start MUST NOT create a callback listener, open a browser, or begin OAuth polling.
+Its subsequent submit binds the same transaction and target. It accepts no redirect or authorization-code response.
+API-key input expires after two minutes. Failure preserves the protected field for an explicit fresh start.
 Remote backends MUST NOT advertise their loopback listener as reachable from the GUI machine.
-The GUI selects an offered device or manual flow for that topology.
+When a browser callback cannot reach the backend, the GUI selects an offered device or manual variant for that callback-based flow.
+Offered callback-free flows remain valid on remote endpoints without an OAuth fallback.
 Unsupported combinations return `invalid_params` before opening a browser.
 
 `response` is `{kind:"apiKey"|"redirectUrl"|"authorizationCode", value}`.
@@ -639,6 +670,13 @@ It cannot reuse provider, Daltoki, or ordinary GitHub credentials.
 The new `dalgona/mcp/config/read {threadId?}` returns `{version, servers, trustedWorkspace}`.
 Each server contains `{name, source, editable, config, effective, status?}`.
 `source` is `user`, `project`, or `discovered`.
+`user` identifies native product-home configuration after its config/settings merge.
+`project` identifies a workspace-local entry. `discovered` identifies an imported home or plugin entry.
+The loader MUST retain each entry's origin through merging and runtime registration.
+It MUST preserve the first-name-wins order in [Discovery](discovery.md), including native precedence and home-before-workspace order within each source.
+At most one row is effective for each exact server name. Shadowed rows MUST NOT inherit the effective row's runtime state.
+The opaque `version` covers the selected workspace's complete inventory, effective entries, source classification, and precedence.
+It and the runtime extension's `configVersion` use the R02 `Revision` type.
 `config` is the typed native projection of the MCP configuration in [config.md](../../dal/spec/config.md).
 Its stdio variant is `{kind:"stdio", command, args, env}`.
 Its HTTP variant is `{kind:"http", url, bearerTokenEnv?, oauth, oauthScopes?, oauthClientId?, oauthCallbackPort?}`.
@@ -664,11 +702,30 @@ Editing their files requires the workspace editor and its separate authority.
 Configuration changes MUST NOT start an untrusted workspace command.
 Existing workspace trust requests retain command, arguments, environment-key disclosure, and approval semantics.
 
-Runtime status uses existing `mcpServerStatus/list` with the selected thread.
-The panel combines configuration inventory with runtime status by exact server name and source.
+Runtime status uses existing `mcpServerStatus/list` with the selected thread and a negotiated source extension.
+The required `mcpConfig:1` capability includes this extension as well as the configuration methods.
+On that connection, requests MUST include `configVersion` from the inventory being displayed.
+Responses MUST include the same `configVersion`, and every `data` row MUST include its registered `source`.
+Existing name, tools, authentication, runtime status, and error fields retain their meanings.
+Unnegotiated clients retain the existing request and response shape.
+The vendored [status parameters](../../../internal/dal/rpc/testdata/codex-schema/v2/ListMcpServerStatusParams.json) permit additional members.
+The [response schema](../../../internal/dal/rpc/testdata/codex-schema/v2/ListMcpServerStatusResponse.json) also permits them on its envelope and each status row.
+The native decoder MUST validate these negotiated fields in addition to the unchanged base schema.
+
+Status pages and cursors MUST bind the same thread and inventory version.
+A changed version, or runtime registration inconsistent with that inventory, returns `stale_revision` before returning rows.
+The client MUST reload inventory and discard every status page from the previous version.
+A daemon advertising `mcpConfig:1` but omitting required provenance is incompatible.
+The client MUST NOT guess a source from the server name, transport URL, or row order.
+
+The panel matches a runtime row only to the effective inventory row with the same exact name and source in that version.
+It MUST NOT attach runtime state to a shadowed or replacement configuration.
 An absent runtime row means not started, not healthy.
 Changing an active server configuration stops its old transport before the replacement starts.
 In-flight calls receive a typed cancelled or unknown outcome according to their dispatch state.
+
+The baseline [status writer](../../../internal/dal/rpc/serve_mcp.go) emits no source field.
+Retaining origin in discovery and the runtime registry, then emitting negotiated provenance, is required implementation work.
 
 ## R11. Runner-aware workspace authority
 
@@ -699,8 +756,29 @@ It expires after fifteen minutes without a successful workspace or attached term
 Changing runner identity revokes it immediately.
 Every operation rechecks the binding and required rights before accessing a path.
 
+The new `dalgona/workspace/close {workspaceId}` explicitly releases an unused handle.
+It returns `{status:"closed"|"notFound"}` and requires no operation identifier.
+The owner connection alone may close its handle. An absent or foreign identifier returns `notFound` without changing another grant.
+Repeating close is harmless and returns `notFound` after the first successful release.
+
+Close MUST return `busy` without effects while that handle owns a terminal attachment or a dispatched workspace mutation or one-shot command.
+The dispatch and close checks MUST share one ownership boundary so a new effect cannot race past successful closure.
+The client MUST reconcile each dispatched operation and explicitly detach terminal attachments before releasing their workspace handle.
+A pending operation with an uncertain outcome MUST retain its authority reference until reconciliation establishes that closing is safe.
+
+Successful close cancels pending reads and searches, removes watches and cursors, aborts uncommitted uploads, and frees the workspace-handle slot before replying.
+It MUST NOT delete workspace files, stop a terminal, archive a thread, or release another handle's resources.
+Later operations on that handle return `expired`. Close itself retains its idempotent `notFound` result.
+An already dispatched upload commit follows the busy rule and MUST NOT be mistaken for an uncommitted upload.
+
+The shared client owner MUST count local interests from windows, file views, completion, commands, and terminal attachments.
+Closing one view releases only its interest. The final interest closes the handle after its dependent operations and attachments finish.
+Thread unsubscribe MUST NOT implicitly close a workspace still used by another view or terminal.
+Connection loss expires its workspace handles without bypassing the separate terminal reconnect lease in R12.
+
 | Method | Parameters | Result |
 | --- | --- | --- |
+| `dalgona/workspace/close` | `{workspaceId}` | `{status:"closed"|"notFound"}`. |
 | `dalgona/workspace/list` | `{workspaceId, path, cursor?, limit?}` | `{entries, nextCursor?, directoryRevision}`. |
 | `dalgona/workspace/search` | `{workspaceId, query, cursor?, limit?}` | `{entries, nextCursor?, incomplete}`. |
 | `dalgona/workspace/stat` | `{workspaceId, path}` | `FileMetadata`. |
@@ -818,19 +896,22 @@ Terminal types are:
 | --- | --- |
 | `TerminalIdentity` | `{terminalId, daemonInstanceId, threadId, runnerId, bindingRevision, root}`. |
 | `TerminalAttachment` | `{attachmentId, workspaceId, writerLease?, acceptedInputSeq, acceptedResizeSeq, leaseExpiresAt}`. |
-| `TerminalCheckpoint` | `{checkpointId, version, engineVersion, nextOffset, columns, rows, total, digest, expiresAt}`. |
-| `TerminalStatus` | `{state:"running"|"exited"|"closed", inputState:"ready"|"uncertain"|"closed", exitCode?, signal?}`. |
+| `TerminalCheckpoint` | `{checkpointId, version, engineVersion, nextOffset, resizeOrdinal, columns, rows, total, digest, expiresAt}`. |
+| `TerminalResize` | `{ordinal, offset, columns, rows}`. Ordinals increase across the terminal's lifetime, including writer replacement. |
+| `TerminalStatus` | `{state:"running"|"exited"|"closed", inputState:"ready"|"uncertain"|"closed", exitCode?, signal?, finalOffset?, finalResizeOrdinal?, outputTruncated?, outputExpiresAt?}`. |
 
 | Method | Parameters | Result |
 | --- | --- | --- |
 | `dalgona/terminal/open` | `{workspaceId, columns, rows, operationId}` | `{identity, attachment, checkpoint, status}`. |
 | `dalgona/terminal/list` | `{workspaceId}` | `{terminals:[{identity, status, writerPresent, leaseExpiresAt}]}`. |
 | `dalgona/terminal/attach` | `{workspaceId, terminalId, access:"read"|"write", resumeLease?}` | `{identity, attachment, checkpoint, status}`. |
+| `dalgona/terminal/checkpoint/open` | `{terminalId, attachmentId}` | `{checkpoint, status}`. |
 | `dalgona/terminal/checkpoint/read` | `{terminalId, attachmentId, checkpointId, offset?, limit?}` | `{offset, next, total, digest, dataBase64}`. |
-| `dalgona/terminal/read` | `{terminalId, attachmentId, offset, limit?, waitMs?}` | `{offset, next, dataBase64, status, leaseExpiresAt}`. |
+| `dalgona/terminal/read` | `{terminalId, attachmentId, offset, afterResizeOrdinal, limit?, waitMs?}` | `{offset, next, dataBase64, resizes, resizeOrdinal, status, leaseExpiresAt}`. |
 | `dalgona/terminal/write` | `{terminalId, writerLease, inputSeq, dataBase64}` | `{acceptedSeq}`. |
-| `dalgona/terminal/resize` | `{terminalId, writerLease, resizeSeq, columns, rows}` | `{acceptedSeq, columns, rows}`. |
+| `dalgona/terminal/resize` | `{terminalId, writerLease, resizeSeq, columns, rows}` | `{acceptedSeq, ordinal, offset, columns, rows}`. |
 | `dalgona/terminal/close` | `{terminalId, operationId}` | `{status}`. |
+| `dalgona/terminal/detach` | `{terminalId, attachmentId}` | `{status:"detached"|"notFound"}`. |
 
 Open requires the workspace's `terminal` right and an explicit launch action.
 The backend selects the configured interactive shell for the execution target.
@@ -838,34 +919,77 @@ It starts in the granted workspace root under the existing sandbox policy.
 The GUI MUST show the target shell and sandbox state before the launch action.
 Shell input is user-authored raw input, not an agent tool request.
 
-One terminal permits one writer lease and at most four reader attachments.
+One terminal permits at most four attachments, with at most one writer lease among them.
 A competing writer receives `busy`. Takeover requires the existing writer's explicit release or lease expiry.
 List exposes only terminals matching the authorized thread, runner, root, and binding revision.
 Its maximum is sixteen records and it never returns another attachment's lease secret.
-Closing a terminal terminates its process group or ConPTY job and releases every attachment.
+Closing a terminal terminates its process group or ConPTY job and revokes writer authority.
+Existing attachments remain valid for reading final output under the fixed retention deadline below.
 It does not interrupt an unrelated agent turn.
 Close allows two seconds for graceful termination, then forces termination and drains output for at most three additional seconds.
 Unconfirmed termination returns `unknown_outcome` without claiming that the process ended.
+Natural process exit uses the same three-second output-drain limit.
+Finalization records `finalOffset`, `finalResizeOrdinal`, `outputTruncated`, and `outputExpiresAt` after draining reaches EOF or its deadline.
+`outputTruncated` is true when the drain deadline expires before EOF, and the UI MUST identify that loss.
+These final fields remain absent while draining continues. An exited status alone MUST NOT make the client stop reading.
 
 Columns are 20 through 240. Rows are 5 through 120.
 The output ring retains the latest 8 MiB of raw PTY bytes.
-`read` limits default to 16 KiB and cannot exceed 64 KiB.
+`read` limits default to 16 KiB and range from one byte through 64 KiB.
 `waitMs` is 0 through 1000 and defaults to zero.
 Offsets count bytes, including control sequences and incomplete UTF-8 sequences.
+The resize ring retains at most 1024 records and 256 KiB of encoded JSON.
+Each read returns at most 64 resize records and 16 KiB of encoded resize metadata.
 
-A requested offset before the retained ring returns `replay_gap`.
-The client obtains a new checkpoint through attach instead of skipping bytes.
-Attach captures terminal state and `nextOffset` atomically with output processing.
-Its manifest references an immutable checkpoint containing every byte before that offset.
-The client starts raw reads exactly at that offset.
+The terminal owner serializes output processing and committed resizes into one order.
+A resize's `offset` is the next output byte at its commit point.
+The record applies after bytes before that offset and before bytes starting at that offset.
+`ordinal` is an `Ordinal`, starting at `"1"`. Zero means no resize has been applied.
+Multiple resizes at the same offset MUST remain distinct and ordered. They MUST NOT be coalesced.
+
+`afterResizeOrdinal` identifies the last resize already applied by the reader.
+The `resizes` array MUST contain consecutive records after that ordinal, in ordinal order.
+Each returned resize offset MUST lie between the requested byte offset and returned `next`, inclusive.
+The returned `resizeOrdinal` identifies the last delivered resize, or retains that request value when `resizes` is empty.
+The client MUST process returned bytes and resize records by offset, ordering records at the same offset by ordinal.
+It MUST then resume with both returned cursors, `next` and `resizeOrdinal`.
+A read MUST NOT return bytes at or beyond an undelivered resize's offset.
+Reaching the resize-record bound MAY therefore return zero bytes while advancing the resize cursor.
+An empty byte payload MUST NOT imply EOF or absence of state changes.
+A read MUST advance at least one cursor when retained bytes or resize records are available at its cursor pair.
+
+Every attachment, including read-only attachments, receives this same ordered resize history through reads.
+The resize reply confirms its operation but MUST NOT independently change a client's emulator dimensions.
+The client applies that resize only at its ordered read position, or through a later checkpoint containing it.
+Local viewport geometry MAY change immediately, but it MUST NOT change the replicated terminal grid before that point.
+
+A requested offset before the retained byte ring or a required evicted resize record returns `replay_gap`.
+An attached reader obtains a new checkpoint through `checkpoint/open` instead of skipping bytes or allocating another attachment.
+Initial attachment still obtains its first checkpoint through `attach`.
+Both paths capture terminal state, `nextOffset`, and `resizeOrdinal` atomically with output and resize processing.
+Its state reflects all processed bytes before that offset and every resize through that ordinal.
+The client starts reads with exactly those two cursors.
+The daemon MUST reject inconsistent cursor pairs with `invalid_params` before returning data.
+The last applied resize cannot lie after the byte cursor, and an unapplied resize cannot lie before it.
+Cursors beyond the terminal's current byte or resize position are invalid.
+The ring retains the boundary metadata needed to validate its oldest available cursor pair.
 
 Checkpoint reads default to 64 KiB and permit at most 256 KiB.
 The client reassembles at most 8 MiB and verifies the final digest before importing state.
 It MUST NOT import a partially downloaded checkpoint.
 Checkpoints expire after sixty seconds and belong to their terminal attachment.
-Each attachment holds at most one checkpoint. The daemon holds at most 128 MiB of checkpoint bytes.
-Capacity refusal returns `limit_exceeded` before replacing a working attachment.
+Each attachment owns one published checkpoint. The daemon holds at most 128 MiB of checkpoint bytes, including unpublished replacements.
+Capacity refusal returns `limit_exceeded` before replacing a usable checkpoint or attachment.
 All checkpoint read results remain within the ordinary encoded result budget.
+
+`checkpoint/open` refreshes the calling connection's existing attachment without changing its identity, workspace binding, or access role.
+It requires no additional attachment slot and remains available for retained finalized terminals before their fixed output expiry.
+A replacement is built within the existing eight MiB checkpoint-body limit and shared checkpoint budget.
+The server publishes the replacement atomically, then retires that attachment's previous checkpoint.
+An active checkpoint read prevents replacement and returns `busy` without changing the old attachment or checkpoint.
+The client MUST finish or cancel its checkpoint reads before refreshing.
+Allocation, validation, or budget refusal MUST preserve the previous usable checkpoint and attachment.
+Expired attachments retain their normal expiry result. Refresh MUST NOT recreate released state or extend finalized output retention.
 
 The checkpoint body is versioned structured VT state, not executable terminal output.
 It contains both grids, scrollback, cursor, saved cursors, modes, margins, tabs, current attributes, links, and parser continuation.
@@ -941,10 +1065,15 @@ The UI offers Stop and an explicit new terminal action without resending the unc
 Exited and closed terminals expose `inputState:"closed"`.
 
 Resize uses an independent increasing `resizeSeq` and the same duplicate rules.
-An acknowledged resize changes both the PTY and emulator dimensions before the response.
-The client MUST NOT apply a stale resize response over a newer size.
+That writer sequence is separate from the terminal-wide resize ordinal.
+An acknowledged resize changes both the PTY and authoritative emulator dimensions and appends exactly one resize record before replying.
+Output processing MUST NOT cross that commit point while only one side has changed.
+An exact duplicate returns the original acknowledgment and MUST NOT append another record.
+An unconfirmed PTY resize returns `unknown_outcome` and sets `inputState:"uncertain"` without publishing a successful resize record.
+The authoritative emulator retains its last committed dimensions while output remains readable.
+Further writes and resizes MUST fail until the user explicitly stops that uncertain terminal.
 
-Read, write, resize, and attach renew a 30-second connection lease.
+Read, write, resize, attach, and checkpoint operations renew a 30-second connection lease.
 An otherwise idle visible terminal sends a read at least every ten seconds.
 Transport loss preserves the terminal for 30 seconds after its last successful lease renewal.
 The writer lease remains reserved during that interval.
@@ -952,17 +1081,30 @@ Reattachment with its secret in `resumeLease` restores the same sequence counter
 The GUI keeps that secret in memory only and discards it after expiry.
 It reconciles pending input against `acceptedInputSeq` before retrying an exact retained sequence.
 It MUST NOT resend uncertain input through a newly allocated lease.
-The session ends when no attachment retains a valid lease.
+The running session ends when its final connection lease expires.
+Detaching the last attachment leaves its previous lease deadline as the stop deadline and MUST NOT extend that deadline.
 
 Hiding a terminal panel does not release the application's attachment.
 The application continues its ten-second lease reads while retaining that terminal.
 Explicit Stop and the window-exit decision perform close.
 Attach with `access:"read"` and the current `resumeLease` releases writer ownership while retaining a reader attachment.
+Detach releases only the named attachment, its checkpoint, and any writer lease it owns.
+It MUST NOT close another attachment or report that the process exited.
+Repeating detach is harmless. A foreign attachment MUST NOT be detached or exposed.
 
 Terminals do not survive daemon restart.
 Recovered identifiers return `expired` and never attach to a different process.
 Runner loss reports unavailable or exited status without launching a replacement shell.
-Final exit status remains readable for sixty seconds after process exit.
+Final output and status remain readable for sixty seconds after finalization, including after explicit close.
+This fixed `outputExpiresAt` deadline MUST NOT be extended by reads, attach, or repeated close.
+Read leases on finalized terminals are capped by that deadline.
+Fresh authorized attachments MAY inspect the retained terminal with `access:"read"` before expiry. Writer attachment MUST fail.
+The client MUST read until both `finalOffset` and `finalResizeOrdinal` are reached before declaring final output collected.
+Byte-ring eviction still reports `replay_gap`. A final checkpoint can recover retained screen state, not discarded raw history.
+Finalized terminals count toward the existing terminal-session and memory bounds until their retained state is released.
+Detaching the last attachment after finalization releases that retained state early.
+At retention expiry, the daemon releases every remaining attachment, checkpoint, resize record, and output byte.
+An expired identifier MUST NOT reopen a process or return data from another terminal.
 
 Reattachment requires a fresh workspace handle with the necessary terminal right.
 Terminal identifiers alone are insufficient authority.

@@ -509,8 +509,11 @@ Their output MUST NOT accept terminal input or claim an interactive session.
 The current `command/exec` protocol explicitly lacks TTY, input streaming, and resize support.
 
 The Terminal component MUST use the real PTY contract in [native protocol](native-protocol.md).
-It MUST maintain terminal state from ordered byte output through the selected VT emulator.
+It MUST maintain terminal state from ordered byte output and resize records through the selected VT emulator.
 It MUST never flatten that output into append-only paragraphs before parsing terminal controls.
+Resize records MUST take effect at their declared byte offsets and ordinals for writer and read-only views alike.
+Checkpoints MUST restore both the byte and resize cursors. A resize reply MUST NOT bypass unread output.
+An attached reader MUST refresh a lost replay position through `dalgona/terminal/checkpoint/open` while retaining its attachment identity.
 
 The terminal MUST support cursor movement, screen erase, alternate screen, scroll regions, attributes, Unicode cells, and terminal replies.
 It MUST support bracketed paste, application cursor keys, mouse reporting, focus reporting, and resize.
@@ -528,6 +531,8 @@ The terminal MUST retain at most 10,000 scrollback lines and one MiB of decoded 
 It MUST discard the oldest lines first and show the retained-history boundary.
 Output transport gaps MUST be visible and recovered through the protocol's snapshot or replay contract.
 The client MUST never continue a screen after silently dropping escape-sequence bytes.
+Stop MUST preserve the reader until final byte and resize cursors are consumed, the user explicitly releases it, or retention expires.
+An expired final-output lease or truncated drain MUST remain visible and MUST NOT be reported as complete output.
 
 Operating-system clipboard requests from terminal output MUST require an explicit user action.
 Terminal output MUST not launch programs, open URLs, or change clipboard contents by itself.
