@@ -14,6 +14,7 @@ let branch = $state("");
 let sha = $state("");
 let instructions = $state("");
 let error = $state("");
+let busy = $state(false);
 
 function target(): ReviewTarget | string {
 	if (kind === "baseBranch") {
@@ -34,17 +35,21 @@ function target(): ReviewTarget | string {
 }
 
 async function start(): Promise<void> {
+	if (busy) return;
 	error = "";
 	const choice = target();
 	if (typeof choice === "string") {
 		error = choice;
 		return;
 	}
+	busy = true;
 	try {
 		await session.startReview(choice);
 		session.closePanel();
 	} catch (failure) {
 		error = failure instanceof Error ? failure.message : String(failure);
+	} finally {
+		busy = false;
 	}
 }
 </script>
@@ -72,7 +77,7 @@ async function start(): Promise<void> {
 		{/if}
 	{/snippet}
 	{#snippet footer()}
-		<button type="button" class="point" onclick={() => void start()}>Start review</button>
+		<button type="button" class="point" aria-disabled={busy ? "true" : undefined} onclick={() => void start()}>Start review</button>
 		<button type="button" class="quiet" onclick={() => session.closePanel()}>Cancel</button>
 	{/snippet}
 </Panel>

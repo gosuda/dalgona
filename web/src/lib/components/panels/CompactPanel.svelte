@@ -9,14 +9,19 @@ interface Props {
 
 let { session, open }: Props = $props();
 let error = $state("");
+let busy = $state(false);
 
 async function compact(): Promise<void> {
+	if (busy) return;
+	busy = true;
 	error = "";
 	try {
 		await session.compactThread();
 		session.closePanel();
 	} catch (failure) {
 		error = failure instanceof Error ? failure.message : String(failure);
+	} finally {
+		busy = false;
 	}
 }
 </script>
@@ -29,7 +34,7 @@ async function compact(): Promise<void> {
 		{/if}
 	{/snippet}
 	{#snippet footer()}
-		<button type="button" class="point" onclick={() => void compact()}>Compact</button>
+		<button type="button" class="point" aria-disabled={busy ? "true" : undefined} onclick={() => void compact()}>Compact</button>
 		<button type="button" class="quiet" onclick={() => session.closePanel()}>Cancel</button>
 	{/snippet}
 </Panel>

@@ -10,6 +10,7 @@ interface Props {
 
 let { session, open }: Props = $props();
 let error = $state("");
+let busy = $state(false);
 const advisors = $derived(
 	session.advisor.kind === "loaded" ? session.advisor.advisors : [],
 );
@@ -31,11 +32,15 @@ async function refresh(): Promise<void> {
 }
 
 async function run(action: () => Promise<void>): Promise<void> {
+	if (busy) return;
+	busy = true;
 	error = "";
 	try {
 		await action();
 	} catch (failure) {
 		error = failure instanceof Error ? failure.message : String(failure);
+	} finally {
+		busy = false;
 	}
 }
 </script>
@@ -63,10 +68,10 @@ async function run(action: () => Promise<void>): Promise<void> {
 		{/if}
 	{/snippet}
 	{#snippet footer()}
-		<button type="button" class="point" onclick={() => void run(() => session.setAdvisor(!enabled))}>
+		<button type="button" class="point" aria-disabled={busy ? "true" : undefined} onclick={() => void run(() => session.setAdvisor(!enabled))}>
 			{enabled ? "Turn advisor off" : "Turn advisor on"}
 		</button>
-		<button type="button" class="quiet" onclick={() => void run(() => session.resetAdvisor())}>Reset advisor</button>
+		<button type="button" class="quiet" aria-disabled={busy ? "true" : undefined} onclick={() => void run(() => session.resetAdvisor())}>Reset advisor</button>
 	{/snippet}
 </Panel>
 
