@@ -639,6 +639,7 @@ The client MUST run at most two diagram renders at a time, of every kind togethe
 A render that waits for its turn MUST count the wait in its 2 second limit.
 A render past the render limit MUST keep its turn until its renderer returns.
 A d2 layout cannot be cancelled, so one that outlives the render limit keeps running to its end. The client MUST run at most one d2 layout at a time.
+A d2 render that waits for the d2 layout turn MUST NOT hold one of the two render turns.
 While a d2 layout past the render limit runs, a d2 render MUST count as a failed render without waiting.
 A source of more than 16384 bytes MUST NOT reach a renderer. It MUST print `diagram <kind>: too large to draw · source shown` followed by the source.
 The client MUST run each render outside the update loop. A key, a tick, or any other message MUST NOT wait for a render.

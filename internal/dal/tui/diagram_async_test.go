@@ -748,3 +748,60 @@ func TestRenderPastItsBudgetDoesNotDrawWhenASlotIsFree(t *testing.T) {
 		t.Fatalf("a render past its budget kept %d slots, want 0", len(slots))
 	}
 }
+
+type d2Holder struct {
+	mu       sync.Mutex
+	d2       int
+	most     int
+	returned int
+	drawn    []string
+}
+
+func (h *d2Holder) draw(gate <-chan struct{}) drawFunc {
+	return func(_ context.Context, kind, source string) (string, error) {
+		h.mu.Lock()
+		h.drawn = append(h.drawn, kind)
+		if kind == "d2" {
+			h.d2++
+			h.most = max(h.most, h.d2)
+		}
+		h.mu.Unlock()
+		if kind == "d2" {
+			<-gate
+			h.mu.Lock()
+			h.d2--
+			h.returned++
+			h.mu.Unlock()
+		}
+		return "ART-" + kind + "-" + strings.TrimSpace(source), nil
+	}
+}
+
+func TestD2RenderWaitingForTheLayoutTurnTakesNoRenderTurn(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		holder := &d2Holder{}
+		run := startDiagramRun(t, holder.draw)
+		defer run.finish()
+		for _, fence := range []string{"```d2\nS0\n```\n", "```d2\nS1\n```\n", "```mermaid\nS2\n```\n"} {
+			run.send(agentDelta("a1", fence))
+			run.quiet()
+		}
+		holder.mu.Lock()
+		drawn, returned := slices.Sorted(slices.Values(holder.drawn)), holder.returned
+		holder.mu.Unlock()
+		if returned != 0 || !slices.Equal(drawn, []string{"d2", "mermaid"}) {
+			t.Fatalf("while the first d2 layout runs the renderer saw %q with %d d2 returned, want [d2 mermaid] and none returned", drawn, returned)
+		}
+		run.release()
+		run.waitFor(t, "every diagram card printed", func(h, s string) bool {
+			return strings.Contains(h+s, "ART-mermaid-S2")
+		})
+		printedOrder(t, run.history(), run.screen(), "ART-d2-S0", "ART-d2-S1", "ART-mermaid-S2")
+		holder.mu.Lock()
+		defer holder.mu.Unlock()
+		if holder.most != 1 || len(holder.drawn) != 3 {
+			t.Fatalf("%d d2 layouts ran at once over %d renders, want 1 at once over 3", holder.most, len(holder.drawn))
+		}
+	})
+}
