@@ -51,6 +51,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.notice != notice {
 		m.noticePrinted = false
+	}
+	if !m.noticePrinted {
 		m.commitOverflowNotice()
 	}
 	settle := m.settle()
@@ -541,10 +543,18 @@ func (m *model) errorf(format string, args ...any) {
 }
 
 func (m *model) commitOverflowNotice() {
-	if m.notice == "" {
+	if m.notice == "" || !m.noticeShown() {
 		return
 	}
 	m.noticePrinted = m.commitOverflow(m.notice, m.noticeLine())
+}
+
+func (m *model) noticeShown() bool {
+	if m.hint.text != "" || m.settings != nil && m.settings.saveErr != "" {
+		return false
+	}
+	_, waiting := m.retryRemaining()
+	return !waiting
 }
 
 func (m *model) commitOverflow(text, line string) bool {

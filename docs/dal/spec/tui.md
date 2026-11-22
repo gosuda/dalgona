@@ -62,7 +62,7 @@ States are `idle`, `running`, `awaiting approval`, `awaiting input`, `interrupte
 
 The state words are `Working`, `Waiting`, `Stopped`, `Failed`, `Offline`, `Ready`, and `Done`. `running` shows `Working`, `awaiting approval` and `awaiting input` show `Waiting`, `interrupted` shows `Stopped`, `disconnected` shows `Offline`, and `idle` is named `Ready`, or `Done` after a completed turn. An idle live row MUST show no state word.
 
-A notice or a settings error cut in the live row MUST also print once as a row with its full text.
+A notice or a settings error cut in the live row MUST also print once as a row with its full text. A notice that a hint, a settings error or a retry wait covers MUST print only once it shows and is cut.
 
 A thread status object maps to a state. `active` with the flag `waitingOnApproval` gives `awaiting approval`. `active` with the flag `waitingOnUserInput` gives `awaiting input`. Any other `active` gives `running`. `systemError` gives `failed`. `idle` and `notLoaded` give `idle`. A turn status maps as follows: `inProgress` gives `running`, `interrupted` gives `interrupted`, `failed` gives `failed`, and `completed` gives `idle`. The `/resume` list panel shows each thread's mapped state.
 

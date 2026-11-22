@@ -453,6 +453,38 @@ func TestNoticePrintsWholeRightAfterANarrowingCutsIt(t *testing.T) {
 	}
 }
 
+func TestNoticeHiddenByRetryWaitPrintsOnlyOnceItShows(t *testing.T) {
+	t.Parallel()
+	const want = "Signed in to provider-example. Run /model to choose a model"
+	m := newTestModel(new(fakeCaller), Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 24})
+	m.noticef("%s", want)
+	m.live.retryUntil = m.now().Add(time.Hour)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	if len(m.out.entries) != 0 {
+		t.Fatalf("a notice hidden behind the retry wait printed rows: %+v", m.out.entries)
+	}
+	m.live.retryUntil = time.Time{}
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	requireWholeErrorRow(t, m, 40, want)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	if len(m.out.entries) != 1 {
+		t.Fatalf("the shown notice printed again: %+v", m.out.entries)
+	}
+}
+
+func TestNoticeHiddenByHintIsNotPrintedOnANarrowing(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(new(fakeCaller), Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 24})
+	m.noticef("%s", "Signed in to provider-example. Run /model to choose a model")
+	m.hint.text = "press Esc again to interrupt"
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	if len(m.out.entries) != 0 {
+		t.Fatalf("a notice hidden behind a hint printed rows: %+v", m.out.entries)
+	}
+}
+
 func TestNoticeCutWhenSetPrintsOnceAcrossResizes(t *testing.T) {
 	t.Parallel()
 	const want = "Signed in to provider-example. Run /model to choose a model"
