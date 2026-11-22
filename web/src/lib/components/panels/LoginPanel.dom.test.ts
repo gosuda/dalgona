@@ -242,6 +242,7 @@ describe("login panel", () => {
 		expect(button.getAttribute("aria-disabled")).toBe("true");
 		expect(button.hasAttribute("disabled")).toBe(false);
 		expect(field.disabled).toBe(false);
+		expect(field.readOnly).toBe(true);
 		await user.keyboard("{Enter}");
 		await user.click(button);
 		field.focus();
@@ -252,6 +253,7 @@ describe("login panel", () => {
 		await vi.waitFor(() =>
 			expect(button.hasAttribute("aria-disabled")).toBe(false),
 		);
+		expect(field.readOnly).toBe(false);
 	});
 
 	test("a failed API key login keeps the field editable and shows the error under it", async () => {
