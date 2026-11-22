@@ -356,12 +356,28 @@ func TestRowStartSkipsOnlyWholeSpaceClusters(t *testing.T) {
 	}{
 		{"ab cd", "cd", 0, 0},
 		{"ab cd", "cd", 2, 3},
-		{"ab ́cd", "cd", 2, 5},
-		{"ab　́cd", "cd", 2, 7},
+		{"ab \u0301cd", "cd", 2, 5},
+		{"ab\u3000\u0301cd", "cd", 2, 7},
 		{"ab xcd", "cd", 2, 2},
 	} {
 		if got := screen.rowStart(tc.flat, tc.pos, tc.part); got != tc.want {
 			t.Errorf("rowStart(%q, %d, %q) = %d, want %d", tc.flat, tc.pos, tc.part, got, tc.want)
+		}
+	}
+}
+
+func TestWrapKeepsTheMarkOfAWideSpaceInsideARow(t *testing.T) {
+	t.Parallel()
+	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
+		screen := screenState{method: method}
+		for _, space := range []string{"\u3000", "\u2003"} {
+			text := "abc" + space + "\u0301def ghij"
+			for width := 1; width <= 16; width++ {
+				rows := screen.wrap(text, width)
+				if got := strings.Join(rows, "|"); strings.Count(got, space) != strings.Count(got, space+"\u0301") {
+					t.Fatalf("method %v width %d: wrap(%q) = %q keeps the space and drops its mark", method, width, text, rows)
+				}
+			}
 		}
 	}
 }

@@ -143,7 +143,7 @@ func (s *screenState) wrap(text string, n int) []string {
 
 func (s *screenState) wrapLine(line string, n int) []string {
 	rows := strings.Split(s.method.Wrap(line, n, ""), "\n")
-	if s.rowsFit(rows, n) {
+	if s.rowsFit(rows, n) && s.rowsKeep(line, rows) {
 		return rows
 	}
 	return s.greedyRows(line, n)
@@ -157,6 +157,28 @@ func (s *screenState) rowsFit(rows []string, n int) bool {
 		if i > 0 && row != "" && s.startsInsideCluster(row) {
 			return false
 		}
+	}
+	return true
+}
+
+func (s *screenState) rowsKeep(line string, rows []string) bool {
+	pos := 0
+	for _, row := range rows {
+		for !strings.HasPrefix(line[pos:], row) {
+			next := s.skipSpace(line, pos)
+			if next == pos {
+				return false
+			}
+			pos = next
+		}
+		pos += len(row)
+	}
+	for pos < len(line) {
+		next := s.skipSpace(line, pos)
+		if next == pos {
+			return false
+		}
+		pos = next
 	}
 	return true
 }

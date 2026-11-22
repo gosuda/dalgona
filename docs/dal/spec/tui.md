@@ -573,6 +573,7 @@ A newline MUST restart the count of stops.
 A row that the client prints or draws MUST hold spaces in place of each tab.
 A wrapped row MUST NOT exceed the wrap width in cells of that method.
 A wrap break MUST NOT fall inside a grapheme cluster.
+A wrap MUST NOT drop a cluster other than the spaces at a break.
 A row cut to fewer than 3 cells MUST keep whole clusters and MUST NOT show an ellipsis.
 The composer MUST count its stops from its first text cell after the prompt.
 A wrapped row MUST continue the count of stops from the row before it.
