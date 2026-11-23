@@ -82,6 +82,12 @@ func NewConn(ctx context.Context, rwc io.ReadWriteCloser, handler Handler) *Conn
 	return c
 }
 
+func NewServerConn(ctx context.Context, rwc io.ReadWriteCloser, handler Handler) *Conn {
+	return newConnection(ctx, rwc, handler)
+}
+
+func (c *Conn) Start() { c.start() }
+
 func newConnection(ctx context.Context, rwc io.ReadWriteCloser, handler Handler) *Conn {
 	if ctx == nil {
 		ctx = context.Background()
@@ -93,6 +99,8 @@ func (c *Conn) start() {
 	go c.writeLoop()
 	go c.readLoop()
 }
+
+func (c *Conn) Done() <-chan struct{} { return c.closed }
 
 func Dial(ctx context.Context, rwc io.ReadWriteCloser, h ClientHandler) *Conn {
 	ctx, cancel := context.WithCancel(ctx)
@@ -175,8 +183,11 @@ func (c *Conn) Close() error {
 	})
 	return c.closeErr
 }
-func (c *Conn) nextID() uint64         { c.mu.Lock(); defer c.mu.Unlock(); c.ids++; return c.ids }
+
+func (c *Conn) nextID() uint64 { c.mu.Lock(); defer c.mu.Unlock(); c.ids++; return c.ids }
+
 func (c *Conn) removePending(k string) { c.mu.Lock(); delete(c.pending, k); c.mu.Unlock() }
+
 func marshalParams(v any) (jsontext.Value, error) {
 	if v == nil {
 		return nil, nil
@@ -237,7 +248,7 @@ func (c *Conn) replyInvalidRequest(raw []byte) {
 	if err := json.Unmarshal(raw, &probe); err != nil || len(probe.ID) == 0 {
 		return
 	}
-	c.replyError(probe.ID, codeInvalidRequest, "Invalid request")
+	c.replyError(probe.ID, CodeInvalidRequest, "Invalid request")
 }
 
 func (c *Conn) dispatch(e envelope) {
@@ -632,18 +643,6 @@ func isDeltaMethod(method string) bool {
 	}
 }
 
-func mergeDelta(items []queued, method string, next *queuedDelta) bool {
-	for _, item := range slices.Backward(items) {
-		current := item.stream
-		if item.method != method || current == nil || current.itemID != next.itemID {
-			continue
-		}
-		current.text = append(current.text, next.text...)
-		return true
-	}
-	return false
-}
-
 func parseDelta(params jsontext.Value) (queuedDelta, error) {
 	decoder := jsontext.NewDecoder(bytes.NewReader(params))
 	opening, err := decoder.ReadToken()
@@ -792,4 +791,16 @@ func ClientRequestID(ctx context.Context) (string, error) {
 	var id string
 	err := json.Unmarshal(raw, &id)
 	return id, err
+}
+
+func mergeDelta(items []queued, method string, next *queuedDelta) bool {
+	for _, item := range slices.Backward(items) {
+		current := item.stream
+		if item.method != method || current == nil || current.itemID != next.itemID {
+			continue
+		}
+		current.text = append(current.text, next.text...)
+		return true
+	}
+	return false
 }

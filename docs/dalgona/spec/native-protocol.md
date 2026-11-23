@@ -54,7 +54,7 @@ The native client MUST preserve their semantics rather than infer behavior from 
 | Thread box pull | `dalgona/remote/pull` | Product extension returns `{exitCode, output}`. |
 | Runner cleanup | `dalgona/remote/gc` | Product extension returns `{exitCode, output}`. |
 
-Core registration lives in [serve.go](../../../internal/dal/rpc/serve.go).
+Core registration lives in [server.go](../../../internal/dal/rpcserver/server.go).
 Product remote methods are registered in [cmd/dalgona/remote.go](../../../cmd/dalgona/remote.go).
 They are existing product extensions even though the core method table omits them.
 
@@ -724,7 +724,7 @@ An absent runtime row means not started, not healthy.
 Changing an active server configuration stops its old transport before the replacement starts.
 In-flight calls receive a typed cancelled or unknown outcome according to their dispatch state.
 
-The baseline [status writer](../../../internal/dal/rpc/serve_mcp.go) emits no source field.
+The baseline [status writer](../../../internal/dal/rpcserver/mcp.go) emits no source field.
 Retaining origin in discovery and the runtime registry, then emitting negotiated provenance, is required implementation work.
 
 ## R11. Runner-aware workspace authority

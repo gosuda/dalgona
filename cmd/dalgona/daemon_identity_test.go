@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,10 +18,12 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpcserver"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/daemon"
 )
 
-func servePipe(t *testing.T, extensions map[string]rpc.Extension) net.Conn {
+func servePipe(t *testing.T, extensions map[string]rpcserver.Extension) net.Conn {
 	t.Helper()
 	t.Setenv("DALGONA_HOME", t.TempDir())
 	serverConn, clientConn := net.Pipe()
@@ -33,7 +36,7 @@ func servePipe(t *testing.T, extensions map[string]rpc.Extension) net.Conn {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = rpc.ServeWith(t.Context(), serverConn, host, rpc.ServeOptions{Extensions: extensions})
+		_ = rpcserver.ServeWith(t.Context(), serverConn, host, rpcserver.ServeOptions{Extensions: extensions})
 		_ = closeHost()
 	}()
 	t.Cleanup(func() {
@@ -44,15 +47,15 @@ func servePipe(t *testing.T, extensions map[string]rpc.Extension) net.Conn {
 }
 
 func TestDaemonIdentityAnswersBeforeInitialize(t *testing.T) {
-	conn := servePipe(t, map[string]rpc.Extension{daemon.MethodIdentity: identityExtension(time.Now())})
-	client := rpc.Dial(t.Context(), conn, quietClient{})
-	defer func() { _ = client.Close() }()
-	var info daemon.Info
-	if err := client.Call(t.Context(), daemon.MethodIdentity, nil, &info); err != nil {
+	conn := servePipe(t, map[string]rpcserver.Extension{client.MethodIdentity: identityExtension(client.Build(), time.Now())})
+	peer := rpc.Dial(t.Context(), conn, quietClient{})
+	defer func() { _ = peer.Close() }()
+	var info client.Info
+	if err := peer.Call(t.Context(), client.MethodIdentity, nil, &info); err != nil {
 		t.Fatalf("identity as first message: %v", err)
 	}
-	if info.Build != daemon.Build() {
-		t.Fatalf("identity build = %q, want %q", info.Build, daemon.Build())
+	if info.Build != client.Build() {
+		t.Fatalf("identity build = %q, want %q", info.Build, client.Build())
 	}
 	if info.PID != os.Getpid() {
 		t.Fatalf("identity pid = %d, want %d", info.PID, os.Getpid())
@@ -67,10 +70,10 @@ func TestDaemonIdentityAnswersBeforeInitialize(t *testing.T) {
 
 func TestDaemonRetireCancelsRun(t *testing.T) {
 	retired := make(chan struct{})
-	conn := servePipe(t, map[string]rpc.Extension{daemon.MethodRetire: retireExtension(func() { close(retired) })})
-	client := rpc.Dial(t.Context(), conn, quietClient{})
-	defer func() { _ = client.Close() }()
-	callErr := client.Call(t.Context(), daemon.MethodRetire, nil, nil)
+	conn := servePipe(t, map[string]rpcserver.Extension{client.MethodRetire: retireExtension(func() { close(retired) })})
+	peer := rpc.Dial(t.Context(), conn, quietClient{})
+	defer func() { _ = peer.Close() }()
+	callErr := peer.Call(t.Context(), client.MethodRetire, nil, nil)
 	if callErr != nil && !errors.Is(callErr, io.ErrClosedPipe) {
 		t.Fatalf("retire call: %v", callErr)
 	}
@@ -86,14 +89,15 @@ func startFakeDaemon(t *testing.T, home, build string, pid int, retireCancel fun
 	t.Setenv("DALGONA_HOME", home)
 	runCtx, stop := context.WithCancel(t.Context())
 	done := make(chan error, 1)
+	startedAt := time.Now()
 	newHost := func(ctx context.Context) (*agent.Host, func() error, error) {
 		return app.NewHost(ctx, app.Options{Product: config.ProductDalgona})
 	}
 	serve := func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
-		extensions := map[string]rpc.Extension{}
+		extensions := map[string]rpcserver.Extension{}
 		if build != "" {
-			extensions[daemon.MethodIdentity] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
-				reply, err := json.Marshal(daemon.Info{Build: build, PID: pid, Version: "test", StartedAt: time.Now()})
+			extensions[client.MethodIdentity] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
+				reply, err := json.Marshal(client.Info{Build: build, PID: pid, Version: "test", StartedAt: startedAt})
 				if err != nil {
 					return nil, err
 				}
@@ -101,17 +105,17 @@ func startFakeDaemon(t *testing.T, home, build string, pid int, retireCancel fun
 			}
 		}
 		if retireCancel != nil {
-			extensions[daemon.MethodRetire] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
+			extensions[client.MethodRetire] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
 				retireCancel()
 				return jsontext.Value("{}"), nil
 			}
 		}
-		return rpc.ServeWith(ctx, conn, host, rpc.ServeOptions{Extensions: extensions})
+		return rpcserver.ServeWith(ctx, conn, host, rpcserver.ServeOptions{Extensions: extensions})
 	}
 	go func() { done <- daemon.Run(runCtx, home, newHost, serve) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if conn, err := net.DialTimeout("unix", daemon.SocketPath(home), 200*time.Millisecond); err == nil {
+		if conn, err := net.DialTimeout("unix", client.SocketPath(home), 200*time.Millisecond); err == nil {
 			_ = conn.Close()
 			return stop, done
 		}
@@ -137,18 +141,29 @@ func stopFakeDaemon(t *testing.T, cancel context.CancelFunc, done <-chan error) 
 
 const otherBuild = "ffeeddccbbaa0099"
 
+func testBackend(t *testing.T) client.Backend {
+	t.Helper()
+	backend, err := client.ResolveBackend(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return backend
+}
+
 func TestEnsureRefusesOtherBuild(t *testing.T) {
 	home := shortDaemonHome(t)
 	cancel, done := startFakeDaemon(t, home, otherBuild, os.Getpid(), nil)
 	defer stopFakeDaemon(t, cancel, done)
-	err := checkBuild(t.Context(), home, daemon.Build())
-	mismatch, ok := errors.AsType[*daemon.BuildMismatchError](err)
+	session := client.Local(home, testBackend(t))
+	defer func() { _ = session.Close() }()
+	_, err := session.Connect(t.Context())
+	mismatch, ok := errors.AsType[*client.BuildMismatchError](err)
 	if !ok {
-		t.Fatalf("checkBuild error = %v, want BuildMismatchError", err)
+		t.Fatalf("connect error = %v, want BuildMismatchError", err)
 	}
-	want := fmt.Sprintf("daemon runs build %s, this client is build %s; run dalgona restart", otherBuild, daemon.Build())
+	want := fmt.Sprintf("daemon runs build %s, this client is build %s; run dalgona restart", otherBuild, client.Build())
 	if mismatch.Error() != want {
-		t.Fatalf("checkBuild message = %q, want %q", mismatch.Error(), want)
+		t.Fatalf("connect message = %q, want %q", mismatch.Error(), want)
 	}
 }
 
@@ -156,22 +171,25 @@ func TestEnsureDeclinedRestartRefuses(t *testing.T) {
 	home := shortDaemonHome(t)
 	cancel, done := startFakeDaemon(t, home, otherBuild, os.Getpid(), nil)
 	defer stopFakeDaemon(t, cancel, done)
+	session := client.Local(home, testBackend(t))
+	defer func() { _ = session.Close() }()
 	out := &strings.Builder{}
-	restarted, err := confirmBuildRestart(t.Context(), home, daemon.Build(), strings.NewReader("\n"), out)
-	if restarted {
-		t.Fatal("declined restart reported a restart")
+	conn, err := connectPrompting(t.Context(), session, true, strings.NewReader("\n"), out)
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("declined restart connected")
 	}
 	if err == nil || err.Error() != "daemon build mismatch: restart the daemon with dalgona restart" {
 		t.Fatalf("declined restart error = %v", err)
 	}
 	prompt := fmt.Sprintf("daemon %s runs build %s; this client is build %s. Restart the daemon? Running turns stop and recover. [y/N] ",
-		home, otherBuild, daemon.Build())
+		home, otherBuild, client.Build())
 	if !strings.HasPrefix(out.String(), prompt) {
 		t.Fatalf("prompt = %q, want prefix %q", out.String(), prompt)
 	}
 }
 
-func TestEnsureAcceptedRestartRetiresDaemon(t *testing.T) {
+func TestEnsureAcceptedRestartStartsTheSelectedBackend(t *testing.T) {
 	home := shortDaemonHome(t)
 	retired := make(chan struct{})
 	var cancel context.CancelFunc
@@ -180,19 +198,115 @@ func TestEnsureAcceptedRestartRetiresDaemon(t *testing.T) {
 		close(retired)
 		cancel()
 	})
-	restarted, err := confirmBuildRestart(t.Context(), home, daemon.Build(), strings.NewReader("y\n"), io.Discard)
+	t.Setenv("DALGONA_TEST_BACKEND", "1")
+	t.Cleanup(func() { retireSpawnedDaemon(t, home) })
+	session := client.Local(home, testBackend(t))
+	defer func() { _ = session.Close() }()
+	conn, err := connectPrompting(t.Context(), session, true, strings.NewReader("y\n"), io.Discard)
 	if err != nil {
 		t.Fatalf("accepted restart: %v", err)
 	}
-	if !restarted {
-		t.Fatal("accepted restart reported no restart")
-	}
+	_ = conn.Close()
 	select {
 	case <-retired:
 	case <-time.After(5 * time.Second):
 		t.Fatal("retire did not cancel the daemon context")
 	}
 	stopFakeDaemon(t, cancel, done)
+	info, probe, err := client.ProbeDaemon(t.Context(), home)
+	if err != nil || probe != client.ProbeReady {
+		t.Fatalf("probe after restart = %v, %v", probe, err)
+	}
+	if info.Build != client.Build() || info.PID == os.Getpid() {
+		t.Fatalf("restarted daemon = %+v, want the selected backend build %s in another process", info, client.Build())
+	}
+}
+
+func TestRestartRefusesAReplacedDaemon(t *testing.T) {
+	home := shortDaemonHome(t)
+	cancel, done := startFakeDaemon(t, home, otherBuild, os.Getpid(), func() { t.Error("replaced daemon was retired") })
+	defer stopFakeDaemon(t, cancel, done)
+	session := client.Local(home, testBackend(t))
+	defer func() { _ = session.Close() }()
+	seen := client.Info{Build: otherBuild, PID: os.Getpid(), StartedAt: time.Now().Add(-time.Hour)}
+	_, err := session.Restart(t.Context(), seen)
+	if _, ok := errors.AsType[*client.ReplacedError](err); !ok {
+		t.Fatalf("restart error = %v, want ReplacedError", err)
+	}
+	if _, err := os.Lstat(client.SocketPath(home)); err != nil {
+		t.Fatalf("replaced daemon socket: %v", err)
+	}
+}
+
+func serveTestBackend(home string) int {
+	if err := client.TightenHome(home); err != nil {
+		return 1
+	}
+	listener, err := net.Listen("unix", client.SocketPath(home))
+	if err != nil {
+		return 1
+	}
+	if err := os.Chmod(client.SocketPath(home), 0o600); err != nil {
+		return 1
+	}
+	ctx, retire := context.WithCancel(context.Background())
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+	serveBackendConns(listener, testBackendHandler(retire))
+	return 0
+}
+
+func testBackendHandler(retire context.CancelFunc) rpc.Handler {
+	identity, retirement := identityExtension(client.Build(), time.Now()), retireExtension(retire)
+	return func(ctx context.Context, method string, params jsontext.Value) (jsontext.Value, error) {
+		switch method {
+		case client.MethodIdentity:
+			return identity(ctx, params)
+		case client.MethodRetire:
+			return retirement(ctx, params)
+		default:
+			return nil, &rpc.RPCError{Code: rpc.CodeMethodNotFound, Message: "method not found"}
+		}
+	}
+}
+
+func serveBackendConns(listener net.Listener, handler rpc.Handler) {
+	var conns sync.WaitGroup
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			break
+		}
+		conns.Go(func() {
+			served := rpc.NewServerConn(context.Background(), conn, handler)
+			served.Start()
+			<-served.Done()
+		})
+	}
+	finished := make(chan struct{})
+	go func() {
+		conns.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+	}
+}
+
+func retireSpawnedDaemon(t *testing.T, home string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	running, probe, _ := client.ProbeDaemon(ctx, home)
+	if probe != client.ProbeReady {
+		return
+	}
+	if _, err := client.Retire(ctx, home, running); err != nil {
+		t.Errorf("retire spawned daemon: %v", err)
+	}
 }
 
 func TestRestartRefusesPreIdentityDaemon(t *testing.T) {
@@ -203,7 +317,7 @@ func TestRestartRefusesPreIdentityDaemon(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("restart exit = %d, want 1", code)
 	}
-	if _, err := os.Lstat(daemon.SocketPath(home)); err != nil {
+	if _, err := os.Lstat(client.SocketPath(home)); err != nil {
 		t.Fatalf("pre-identity daemon was stopped or removed: %v", err)
 	}
 }
@@ -228,7 +342,7 @@ func TestRestartRefusesUnverifiedPID(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("restart exit = %d, want 1", code)
 	}
-	if _, err := os.Lstat(daemon.SocketPath(home)); err != nil {
+	if _, err := os.Lstat(client.SocketPath(home)); err != nil {
 		t.Fatalf("unverified daemon was stopped or removed: %v", err)
 	}
 }

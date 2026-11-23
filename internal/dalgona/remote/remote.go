@@ -8,24 +8,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
-	"os"
 	"slices"
 	"sync"
-
-	sandbox0sdk "github.com/sandbox0-ai/sdk-go"
 
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
-	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/cloudflare"
-	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/docker"
-	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/modal"
-	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/sandbox0"
-	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/sprites"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/registry"
 )
 
 const (
@@ -38,51 +31,35 @@ type Recorder interface {
 }
 
 type Options struct {
-	Config     config.Config
-	Auth       *auth.Store
-	Journal    *journal.Store
-	Local      func(ctx context.Context, threadID, runnerName string) (runner.Runner, error)
-	Confirm    func(prompt string) (bool, error)
-	Out        io.Writer
-	Logger     *slog.Logger
-	NewService func(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error)
+	Config   config.Config
+	Auth     *auth.Store
+	Journal  *journal.Store
+	Local    func(ctx context.Context, threadID, runnerName string) (runner.Runner, error)
+	Confirm  func(prompt string) (bool, error)
+	Out      io.Writer
+	Logger   *slog.Logger
+	Services *registry.Registry
 }
 
 type Binder struct {
 	opts     Options
 	log      *slog.Logger
-	newSvc   func(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error)
+	services *registry.Registry
 	upload   func(ctx context.Context, r runner.Runner, cwd string) (string, error)
 	mu       sync.Mutex
 	recorder Recorder
-	services map[config.RunnerSpec]sandboxsvc.Service
-	calls    map[config.RunnerSpec]*serviceCall
-	remotes  map[string]config.RemoteSpec
+	remotes  *client.Remotes
 	ledgerMu sync.Mutex
-}
-
-type serviceCall struct {
-	done chan struct{}
-	svc  sandboxsvc.Service
-	err  error
 }
 
 func NewBinder(opts Options) *Binder {
 	logger := cmp.Or(opts.Logger, slog.Default())
 	opts.Out = cmp.Or[io.Writer](opts.Out, io.Discard)
-	remotes := maps.Clone(opts.Config.Remotes)
-	if remotes == nil {
-		remotes = map[string]config.RemoteSpec{}
+	services := opts.Services
+	if services == nil {
+		services = registry.New(registry.Options{Auth: opts.Auth, Logger: logger})
 	}
-	b := &Binder{
-		opts: opts, log: logger, upload: runner.Upload,
-		services: map[config.RunnerSpec]sandboxsvc.Service{}, calls: map[config.RunnerSpec]*serviceCall{}, remotes: remotes,
-	}
-	b.newSvc = b.defaultService
-	if opts.NewService != nil {
-		b.newSvc = opts.NewService
-	}
-	return b
+	return &Binder{opts: opts, log: logger, upload: runner.Upload, services: services, remotes: client.NewRemotes(opts.Config, services)}
 }
 
 func (b *Binder) SetRecorder(r Recorder) {
@@ -127,129 +104,6 @@ func (b *Binder) confirm(prompt string) (bool, error) {
 		return false, nil
 	}
 	return b.opts.Confirm(prompt)
-}
-
-func (b *Binder) service(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error) {
-	for {
-		b.mu.Lock()
-		if svc, ok := b.services[spec]; ok {
-			b.mu.Unlock()
-			return svc, nil
-		}
-		if call, ok := b.calls[spec]; ok {
-			b.mu.Unlock()
-			svc, err := b.joinBuild(ctx, spec, call)
-			if errors.Is(err, errBuilderCancelledWhileWaiterLive) {
-				continue
-			}
-			return svc, err
-		}
-		call := &serviceCall{done: make(chan struct{})}
-		b.calls[spec] = call
-		b.mu.Unlock()
-
-		call.svc, call.err = b.newSvc(ctx, spec)
-
-		b.mu.Lock()
-		if call.err == nil {
-			b.services[spec] = call.svc
-		}
-		delete(b.calls, spec)
-		close(call.done)
-		b.mu.Unlock()
-		return call.svc, call.err
-	}
-}
-
-var errBuilderCancelledWhileWaiterLive = errors.New("remote: builder cancelled while a waiter stayed live")
-
-func (b *Binder) joinBuild(ctx context.Context, spec config.RunnerSpec, call *serviceCall) (sandboxsvc.Service, error) {
-	select {
-	case <-call.done:
-		if ctx.Err() == nil && isBuildCancelled(call.err) {
-			return nil, errBuilderCancelledWhileWaiterLive
-		}
-		return call.svc, call.err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("remote: wait for %s service: %w", spec.Service, ctx.Err())
-	}
-}
-
-func isBuildCancelled(err error) bool {
-	return err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
-}
-
-func (b *Binder) defaultService(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error) {
-	switch spec.Service {
-	case "docker":
-		return docker.NewFromEnv(runner.Bootstrap)
-	case "sprites":
-		token, err := b.token("sprites", "SPRITES_TOKEN")
-		if err != nil {
-			return nil, err
-		}
-		return sprites.NewFromToken(token, runner.Bootstrap), nil
-	case "modal":
-		if spec.Image != "" {
-			return modal.NewFromEnvWithImageCtx(ctx, spec.Image, runner.Bootstrap)
-		}
-		return modal.NewFromEnvCtx(ctx, runner.Bootstrap)
-	case "sandbox0":
-		return b.sandbox0Service()
-	case "cloudflare":
-		return b.cloudflareService(spec)
-	default:
-		return nil, fmt.Errorf("remote: unknown service %q", spec.Service)
-	}
-}
-
-func (b *Binder) sandbox0Service() (sandboxsvc.Service, error) {
-	token, err := b.token("sandbox0", "SANDBOX0_TOKEN")
-	if err != nil {
-		return nil, err
-	}
-	opts := []sandbox0sdk.Option{sandbox0sdk.WithToken(token)}
-	if base := os.Getenv("SANDBOX0_BASE_URL"); base != "" {
-		opts = append(opts, sandbox0sdk.WithBaseURL(base))
-	}
-	client, err := sandbox0sdk.NewClient(opts...)
-	if err != nil {
-		return nil, fmt.Errorf("sandbox0: create client: %w", err)
-	}
-	return sandbox0.New(client, runner.Bootstrap, b.log), nil
-}
-
-func (b *Binder) cloudflareService(spec config.RunnerSpec) (sandboxsvc.Service, error) {
-	if spec.URL == "" {
-		return nil, errors.New("remote: cloudflare runner needs url")
-	}
-	token, err := b.token("cloudflare", "DALGONA_CLOUDFLARE_TOKEN")
-	if err != nil {
-		return nil, err
-	}
-	return cloudflare.New(spec.URL, token), nil
-}
-
-func (b *Binder) token(provider, env string) (string, error) {
-	if key := os.Getenv(env); key != "" {
-		return key, nil
-	}
-	if key := b.storedKey(provider); key != "" {
-		return key, nil
-	}
-	return "", fmt.Errorf("remote: %s needs %s or `dalgona login %s --api-key`", provider, env, provider)
-}
-
-func (b *Binder) storedKey(provider string) string {
-	if b.opts.Auth == nil {
-		return ""
-	}
-	for _, entry := range b.opts.Auth.Entries() {
-		if entry.ID == provider {
-			return entry.Credential.Key
-		}
-	}
-	return ""
 }
 
 func (b *Binder) runnerSpec(bound event.RunnerBound) config.RunnerSpec {

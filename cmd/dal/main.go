@@ -19,7 +19,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 	"github.com/gosuda/dalgona/internal/dal/runner"
 	"github.com/gosuda/dalgona/internal/dal/tool/search"
 )
@@ -127,8 +127,8 @@ func (p *inProcess) dial(ctx context.Context) (io.ReadWriteCloser, error) {
 	client, server := net.Pipe()
 	served := make(chan error, 1)
 	go func() {
-		options := rpc.ServeOptions{Logger: local.log, Advisors: local.advisors}
-		served <- rpc.ServeWith(context.WithoutCancel(ctx), server, local.host, options)
+		options := rpcserver.ServeOptions{Logger: local.log, Advisors: local.advisors}
+		served <- rpcserver.ServeWith(context.WithoutCancel(ctx), server, local.host, options)
 	}()
 	return newServedPipe(client, served), nil
 }

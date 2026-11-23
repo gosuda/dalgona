@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/gosuda/dalgona/internal/dalgona/daemon"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 type stdioPair struct {
@@ -182,7 +182,7 @@ func TestAppServerStdioDaemonDialDrainsAfterEOF(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(home) })
-	listener, err := net.Listen("unix", daemon.SocketPath(home))
+	listener, err := net.Listen("unix", client.SocketPath(home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestAppServerStdioDaemonDialDrainsAfterEOF(t *testing.T) {
 		<-serverDone
 	})
 	go serveEchoDaemon(serverCtx, listener, serverDone)
-	dial := func(context.Context) (net.Conn, error) { return daemon.DialHome(home) }
+	dial := func(context.Context) (net.Conn, error) { return client.DialHome(home) }
 	for range 2 {
 		ctx, cancel := context.WithCancel(t.Context())
 		var stdout, stderr bytes.Buffer

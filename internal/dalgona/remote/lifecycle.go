@@ -128,7 +128,7 @@ func (b *Binder) unboundBoxes() ([]Box, error) {
 }
 
 func (b *Binder) destroy(ctx context.Context, runnerName string, key boxKey) error {
-	svc, err := b.service(ctx, b.runnerSpec(event.RunnerBound{Runner: runnerName, Service: key.service}))
+	svc, err := b.services.Service(ctx, b.runnerSpec(event.RunnerBound{Runner: runnerName, Service: key.service}))
 	if err != nil {
 		return err
 	}

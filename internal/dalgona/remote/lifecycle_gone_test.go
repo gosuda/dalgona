@@ -12,9 +12,9 @@ import (
 func TestDestroy_treatsGoneBoxAsDestroyed(t *testing.T) {
 	b := NewBinder(Options{Config: config.Config{Home: t.TempDir()}})
 	svc := fake.New()
-	b.newSvc = func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) {
+	b.services = registryOf(func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) {
 		return svc, nil
-	}
+	})
 	ctx := t.Context()
 	id, err := svc.Create(ctx, sandboxsvc.Spec{Name: "lost"})
 	if err != nil {

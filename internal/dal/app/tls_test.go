@@ -23,7 +23,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/model/chatgpt"
-	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 )
 
 const unknownAuthorityText = "x509: certificate signed by unknown authority"
@@ -335,7 +335,7 @@ func dialHost(t *testing.T, host *agent.Host) func(context.Context) (io.ReadWrit
 	t.Cleanup(served.Wait)
 	return func(ctx context.Context) (io.ReadWriteCloser, error) {
 		client, server := net.Pipe()
-		served.Go(func() { _ = rpc.ServeWith(context.WithoutCancel(ctx), server, host, rpc.ServeOptions{}) })
+		served.Go(func() { _ = rpcserver.ServeWith(context.WithoutCancel(ctx), server, host, rpcserver.ServeOptions{}) })
 		return client, nil
 	}
 }

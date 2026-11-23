@@ -35,7 +35,7 @@ The command MUST run the checks in this order: `home`, `config`, `daemon` with `
 | `config` | `ok config: valid` | `config.Load` accepts the config files. |
 | `config` | `fail config: <error>` | The error names the file and the line. |
 
-The `daemon` check MUST dial the socket with the owner checks of `daemon.Ensure`. It MUST NOT start a daemon. It MUST send one `dalgona/daemon/identity` request when the dial succeeds.
+The `daemon` check MUST dial the socket with the owner checks of `client.Ensure`. It MUST NOT start a daemon. It MUST send one `dalgona/daemon/identity` request when the dial succeeds.
 
 | Check | Row | Meaning |
 | --- | --- | --- |

@@ -16,7 +16,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/dalgona/daemon"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 func fakeHerdr(t *testing.T) string {
@@ -159,7 +159,7 @@ func TestHerdrOutsideHerdrWiresNothing(t *testing.T) {
 	}
 }
 
-func TestWebDaemonDialerStartsInitiallyButOnlyReconnectsAfterSuccess(t *testing.T) {
+func TestLocalSessionStartsOnlyBeforeItsFirstConnection(t *testing.T) {
 	home := shortDaemonHome(t)
 	marker := filepath.Join(home, "started")
 	exe := filepath.Join(home, "start-daemon")
@@ -167,14 +167,16 @@ func TestWebDaemonDialerStartsInitiallyButOnlyReconnectsAfterSuccess(t *testing.
 		t.Fatal(err)
 	}
 	t.Setenv("DALGONA_HOME", home)
-	dial := webDaemonDialer(home, exe)
+	session := client.Local(home, client.Backend{Path: exe, Build: client.Build()})
+	defer func() { _ = session.Close() }()
+	dial := sessionDialer(session)
 	initial, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	if conn, err := dial(initial); err == nil {
 		_ = conn.Close()
 		t.Fatal("startup without a listening daemon succeeded")
 	}
-	stop, done := startFakeDaemon(t, home, daemon.Build(), os.Getpid(), nil)
+	stop, done := startFakeDaemon(t, home, client.Build(), os.Getpid(), nil)
 	requireDaemonMarker(t, marker, "initial connection did not start the daemon")
 	conn := dialDaemon(t, dial)
 	_ = conn.Close()
@@ -195,7 +197,7 @@ func TestWebDaemonDialerStartsInitiallyButOnlyReconnectsAfterSuccess(t *testing.
 		t.Fatalf("reconnect error = %v, want missing socket without startup", err)
 	}
 	requireNoDaemonMarker(t, marker)
-	stop, done = startFakeDaemon(t, home, daemon.Build(), os.Getpid(), nil)
+	stop, done = startFakeDaemon(t, home, client.Build(), os.Getpid(), nil)
 	defer stopFakeDaemon(t, stop, done)
 	conn, err = dial(t.Context())
 	if err != nil {

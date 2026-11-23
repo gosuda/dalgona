@@ -25,7 +25,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
-	"github.com/gosuda/dalgona/internal/dalgona/daemon"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 const own = "0123456789abcdef"
@@ -183,7 +183,7 @@ func identityDaemon(t *testing.T, build string) func(context.Context) (net.Conn,
 	t.Helper()
 	reply := fmt.Sprintf(`{"build":%q,"pid":4242,"version":"test","startedAt":"2026-11-15T11:58:55Z"}`, build)
 	return pipeTo(t, func(_ context.Context, method string, _ jsontext.Value) (jsontext.Value, error) {
-		if method != daemon.MethodIdentity {
+		if method != client.MethodIdentity {
 			return nil, &rpc.RPCError{Code: -32601, Message: "method not found"}
 		}
 		return jsontext.Value(reply), nil
@@ -220,7 +220,7 @@ func TestPreIdentityDaemonFailsTheBuildRow(t *testing.T) {
 	got, code := h.run(t)
 	expectLines(t, only(got, "daemon", "build"), []string{
 		"ok daemon: running; it reports no identity",
-		"fail build: daemon runs build " + daemon.UnknownPreIdentityBuild + ", this binary is build " + own + "; run dalgona restart",
+		"fail build: daemon runs build " + client.UnknownPreIdentityBuild + ", this binary is build " + own + "; run dalgona restart",
 	})
 	expectCode(t, code, 1)
 }
@@ -274,7 +274,7 @@ type untrustedError struct{}
 
 func (untrustedError) Error() string { return "daemon: untrusted socket: uid 1 is not 2" }
 
-func (untrustedError) Is(target error) bool { return daemon.Untrusted(target) }
+func (untrustedError) Is(target error) bool { return client.Untrusted(target) }
 
 func TestUntrustedSocketFailsAndShowsTheLastTwentyLogLines(t *testing.T) {
 	home := newHome(t)

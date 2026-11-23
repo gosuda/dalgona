@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 type execModel struct {
@@ -108,9 +109,9 @@ func recoverAfterKill(t *testing.T, want recovery, afterDaemonKill func(t *testi
 	waitForPath(t, filepath.Join(runDir, "pid"))
 	killDaemon(t, home)
 	afterDaemonKill(t, runDir)
-	conn, err := Ensure(t.Context(), home, exe)
+	conn, err := client.Ensure(t.Context(), home, exe)
 	if err != nil {
-		t.Fatalf("Ensure after kill: %v", err)
+		t.Fatalf("client.Ensure after kill: %v", err)
 	}
 	if closeErr := conn.Close(); closeErr != nil {
 		t.Fatal(closeErr)
@@ -136,7 +137,7 @@ func daemonEnv(t *testing.T, home, modelURL string) {
 
 func startExecTurn(t *testing.T, home, exe, work string) string {
 	t.Helper()
-	conn, err := Ensure(t.Context(), home, exe)
+	conn, err := client.Ensure(t.Context(), home, exe)
 	if err != nil {
 		t.Fatal(err)
 	}

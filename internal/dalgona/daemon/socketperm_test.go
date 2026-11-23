@@ -5,6 +5,8 @@ package daemon
 import (
 	"os"
 	"testing"
+
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 func TestListenSetsOwnerOnlyPermissions(t *testing.T) {
@@ -12,7 +14,7 @@ func TestListenSetsOwnerOnlyPermissions(t *testing.T) {
 	if err := os.Chmod(home, 0o755); err != nil { //nolint:gosec // deliberate loose permissions to test tightening
 		t.Fatal(err)
 	}
-	if err := tightenHome(home); err != nil {
+	if err := client.TightenHome(home); err != nil {
 		t.Fatal(err)
 	}
 	listener, err := listen(home)
@@ -20,7 +22,7 @@ func TestListenSetsOwnerOnlyPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	info, err := os.Stat(SocketPath(home))
+	info, err := os.Stat(client.SocketPath(home))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 func shortHome(t *testing.T) string {
@@ -80,7 +81,7 @@ func greeting(t *testing.T, home string) string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	dialer := net.Dialer{Deadline: deadline}
-	conn, err := dialer.DialContext(t.Context(), "unix", SocketPath(home))
+	conn, err := dialer.DialContext(t.Context(), "unix", client.SocketPath(home))
 	if err != nil {
 		t.Fatalf("dial daemon greeting: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestRunSecondInstanceFailsOnLock(t *testing.T) {
 		t.Fatalf("first daemon lost its socket after the second Run: %q", got)
 	}
 	stopRun(t, cancel, done)
-	if _, statErr := os.Lstat(SocketPath(home)); !errors.Is(statErr, os.ErrNotExist) {
+	if _, statErr := os.Lstat(client.SocketPath(home)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("socket remains after Run stopped: %v", statErr)
 	}
 }
@@ -128,7 +129,7 @@ func TestRunSecondInstanceFailsOnLock(t *testing.T) {
 func TestRunReplacesStaleSocket(t *testing.T) {
 	home := shortHome(t)
 	t.Setenv("DALGONA_HOME", home)
-	stale, err := net.Listen("unix", SocketPath(home))
+	stale, err := net.Listen("unix", client.SocketPath(home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +139,7 @@ func TestRunReplacesStaleSocket(t *testing.T) {
 	if err := stale.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(SocketPath(home)); err != nil {
+	if _, err := os.Lstat(client.SocketPath(home)); err != nil {
 		t.Fatalf("stale socket missing before Run: %v", err)
 	}
 	cancel, done := startRun(t, home)

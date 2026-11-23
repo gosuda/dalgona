@@ -24,7 +24,9 @@ When the context ends, `Run` MUST stop accepting, close every open connection, a
 
 `Ensure` MUST reuse an accepting socket. If the socket is missing or stale, it MUST start `<executable> daemon` detached and append stdout and stderr to `daemon.log`. On Unix the child MUST run in a new session. On Windows it MUST use `DETACHED_PROCESS` and `CREATE_NEW_PROCESS_GROUP`. `Ensure` MUST retry for five seconds. On timeout it MUST return `daemon did not start: see <home>/daemon.log`.
 
-Each local dial MUST check the daemon build identity before it sends any other request. `daemon.Build()` MUST return the first 16 hex digits of the SHA-256 of the executable bytes. A read failure MUST return the empty string. An empty identity MUST NOT trigger a restart. A daemon that reports another known build MUST produce a mismatch.
+Local clients connect through a `client.Session` built from a backend: the absolute daemon executable without symlinks and its build. A build MUST be the first 16 hex digits of the SHA-256 of the executable bytes. A client that cannot read its backend MUST fail before it connects. `client.Build()` MUST return the build of the running executable, which the daemon reports as its identity. The daemon MUST compute its build once when it starts, so a replaced executable does not change a running daemon's identity. A read failure there MUST return the empty string. An empty daemon identity MUST NOT trigger a restart.
+
+Until the session's first successful connection, `Connect` MUST run `Ensure` with the backend executable and check the daemon build identity before any other request. After that success, `Connect` MUST only dial the trusted socket, and it MUST NOT start a daemon. `Reconnect` MUST only dial the trusted socket. `Close` MUST close every connection the session returned and MUST NOT retire the daemon. A daemon that reports a build other than the backend build MUST produce a mismatch.
 
 A terminal client MUST ask with this prompt:
 
@@ -32,7 +34,13 @@ A terminal client MUST ask with this prompt:
 daemon <home> runs build <running>; this client is build <own>. Restart the daemon? Running turns stop and recover. [y/N]
 ```
 
-The answer `y` MUST retire the daemon, wait up to five seconds for the socket to go, and run `Ensure` again. Any other answer MUST give this error:
+The answer `y` MUST restart through the session with the identity the mismatch reported. The restart MUST probe the daemon again and retire it only when its pid, build, and start time still match. It MUST send the retire request on the connection that answered that probe and MUST NOT redial for it. It MUST then wait up to five seconds for the socket to go and run `Ensure` with the backend. A daemon that changed since the mismatch MUST stay running, and the client MUST answer:
+
+```text
+daemon changed before restart: saw pid <pid> build <build>, now pid <pid> build <build>; reconnect and retry
+```
+
+Any other answer MUST give this error:
 
 ```text
 daemon build mismatch: restart the daemon with dalgona restart
@@ -121,7 +129,7 @@ With `--remote <name>`, `logout` MUST remove the provider credential inside the 
 
 A top-level dalgona thread MUST get the `ratchet` tool. Child and advisor threads MUST NOT get it.
 
-`dalgona restart` MUST retire a running daemon and start a new one. It MUST print `daemon restarted (build <own>)`. With no daemon running it MUST print `daemon started (build <own>)`. It MUST terminate only a daemon whose recorded pid, current-user ownership, and home association are verified. A daemon without the identity method MUST stay running, and the command MUST answer:
+`dalgona restart` MUST probe the daemon, then restart it through a session with that identity, so it retires only the daemon it identified. It MUST print `daemon restarted (build <own>)`. With no daemon running it MUST print `daemon started (build <own>)`. It MUST terminate only a daemon whose recorded pid, current-user ownership, and home association are verified. A daemon without the identity method MUST stay running, and the command MUST answer:
 
 ```text
 cannot safely identify the old daemon; stop it manually and retry dalgona restart
@@ -129,7 +137,7 @@ cannot safely identify the old daemon; stop it manually and retry dalgona restar
 
 The dalgona host MUST bind `[runners.<name>]` runners through the remote binder and MUST use the local runner for every other runner name. `dalgona pull <thread>` and `dalgona runner gc [--yes]` MUST run inside the daemon through the protocol extensions `dalgona/remote/pull {threadId}` and `dalgona/remote/gc {yes}`, because the daemon holds the journal lock. Each extension MUST answer `{"exitCode":<int>,"output":<text>}`. Without `--yes`, `runner gc` MUST answer no to every destroy question. `dalgona cloud up|down|pull` MUST run in the client process.
 
-`dalgona bridge` MUST splice standard input and output to a local `Ensure` connection. `dalgona exec-server` MUST serve the exec protocol and MUST use the same splice for its `/bridge` path. The TUI, `models`, `dalgona app-server`, `dalgona web`, `pull`, and `runner gc` MUST dial the local daemon through `Ensure`. When `--remote <name>` is given, or `remote` is set in configuration, they MUST dial the remote box daemon through the binder's bridge instead. The flag MUST win over the configuration. `bridge` and `exec-server` MUST NOT redirect their local listener with `--remote`.
+`dalgona bridge` MUST splice standard input and output to a local session connection. `dalgona exec-server` MUST serve the exec protocol and MUST use the same splice for its `/bridge` path. The TUI, `models`, `dalgona app-server`, `dalgona web`, `dalgona acp`, `pull`, and `runner gc` MUST open one session per process and dial the local daemon through its `Connect`. When `--remote <name>` is given, or `remote` is set in configuration, the session MUST dial the remote box daemon through the `client.Remotes` bridge instead. The flag MUST win over the configuration. `bridge` and `exec-server` MUST NOT redirect their local listener with `--remote`.
 
 `--config <key>=<value>`, `--config=<key>=<value>`, and `-c <key>=<value>` pairs MAY come before the `app-server` subcommand, as the Codex clients send them. When the first argument after these pairs is `app-server`, the pairs MUST reach the app-server command unchanged. In every other case, `-c` keeps its client meaning.
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 	corescript "github.com/gosuda/dalgona/internal/dal/script"
 	"github.com/gosuda/dalgona/internal/dalgona/battery"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
@@ -88,7 +89,7 @@ func writeArg(encoder *jsontext.Encoder, pair string) error {
 	return encoder.WriteToken(jsontext.String(value))
 }
 
-func scriptExtension(host *agent.Host, d *battery.Daemon) rpc.Extension {
+func scriptExtension(host *agent.Host, d *battery.Daemon) rpcserver.Extension {
 	return func(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
 		var run scriptRun
 		if err := json.Unmarshal(params, &run); err != nil || run.Entry == "" {

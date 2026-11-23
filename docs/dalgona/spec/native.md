@@ -157,7 +157,7 @@ The following sources were reviewed for this specification.
 |[Web contract](web.md)|Existing user workflows, focus, editor, content, requests, and panels.|
 |[Web components](../../../web/src/lib/components)|The complete existing component inventory.|
 |[Client connection](../../../internal/dal/rpc/conn.go)|Go transport, requests, cancellation, and bounded client dispatch.|
-|[Server registration](../../../internal/dal/rpc/serve.go)|Implemented methods and the current client-server package coupling.|
+|[Server registration](../../../internal/dal/rpcserver/server.go)|Implemented methods and host handler registration.|
 |[Protocol](../../dal/spec/protocol.md)|Wire framing, limits, ordering, images, and command behavior.|
 |[Daemon](daemon.md)|Local startup, identity, peer checks, and service ownership.|
 |[Remote runners](runners.md)|Local host, thread-box, and daemon-in-box distinctions.|
