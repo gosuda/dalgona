@@ -88,7 +88,7 @@ Use one name for each thing in user-facing text and new specifications.
 
 ### Clients and integrations
 
-- [Continuous integration](dal/spec/ci.md): verification groups, native platforms, shared assets, and box image builds.
+- [Continuous integration](dal/spec/ci.md): triggers, provider, CI jobs, failure reporting, and box image builds.
 - [Cloudflare deployment](../deploy/cloudflare/README.md): worker tokens, image release, digest pins, and box cleanup.
 
 `just spec-style` checks sentence length, semicolons, em dashes, and lower-case `should` in `docs/dal/spec` and `docs/dalgona/spec`.
