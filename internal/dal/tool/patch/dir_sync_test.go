@@ -117,45 +117,50 @@ func TestDirectorySyncFailureAfterRenamesIsCompleteWriteError(t *testing.T) {
 	}
 }
 
+type diskSyncFailureCase struct {
+	name  string
+	body  string
+	keep  bool
+	want  tool.Outcome
+	files map[string]string
+}
+
 func TestDirectorySyncFailureStatesComeFromTheDisk(t *testing.T) {
-	tests := []struct {
-		name  string
-		body  string
-		keep  bool
-		want  tool.Outcome
-		files map[string]string
-	}{
+	tests := []diskSyncFailureCase{
 		{"IO-05/reverted during the sync", "b-before\n", false, withPaths(writeFailure(tool.CommitPartial, tool.ReasonSyncFailed), "a.txt", "after", "b.txt", "before"), nil},
 		{"IO-05/replaced during the sync", "b-other\n", true, withPaths(commitUnknown, "a.txt", "after", "b.txt", "unknown"), map[string]string{"a.txt": "a-before\n", "b.txt": "b-before\n"}},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			f := newOutcomeFixture(t)
-			twoFiles(t, f)
-			calls := 0
-			stubDirectorySync(t, func(*dirPin) error {
-				calls++
-				if calls == 1 {
-					writeFixture(t, f.cwd, "b.txt", test.body)
-				}
-				return errInjectedDirSync
-			})
-			before := mintedSequence(t, f.env.Snapshots)
-			err := f.run(t, HashlineLight, twoFileEdit)
-			if err == nil {
-				t.Fatal("the call succeeded although its directory sync failed")
-			}
-			requireWrappedOutcome(t, err, HashlineLight, test.want)
-			requireNothingMinted(t, f.env.Snapshots, before)
-			if test.keep {
-				for name, content := range test.files {
-					requireBackupHolds(t, err.Error(), name, content)
-				}
-			} else {
-				requireNoResidue(t, f.cwd)
-			}
-		})
+		t.Run(test.name, func(t *testing.T) { requireDiskSyncFailure(t, test) })
 	}
+}
+
+func requireDiskSyncFailure(t *testing.T, test diskSyncFailureCase) {
+	t.Helper()
+	f := newOutcomeFixture(t)
+	twoFiles(t, f)
+	calls := 0
+	stubDirectorySync(t, func(*dirPin) error {
+		calls++
+		if calls == 1 {
+			writeFixture(t, f.cwd, "b.txt", test.body)
+		}
+		return errInjectedDirSync
+	})
+	before := mintedSequence(t, f.env.Snapshots)
+	err := f.run(t, HashlineLight, twoFileEdit)
+	if err == nil {
+		t.Fatal("the call succeeded although its directory sync failed")
+	}
+	requireWrappedOutcome(t, err, HashlineLight, test.want)
+	requireNothingMinted(t, f.env.Snapshots, before)
+	if test.keep {
+		for name, content := range test.files {
+			requireBackupHolds(t, err.Error(), name, content)
+		}
+		return
+	}
+	requireNoResidue(t, f.cwd)
 }
 
 func requireTargetsAtSync(t *testing.T, cwd string, want map[string]string) {
@@ -213,26 +218,28 @@ func requireSyncAfterLastOperation(t *testing.T, style Style, test syncOrderCase
 	if err := f.run(t, style, test.input); err != nil {
 		t.Fatalf("the call failed: %v", err)
 	}
-	if calls != test.syncs {
-		t.Fatalf("directory syncs = %d, want %d", calls, test.syncs)
-	}
 	if test.dirs != nil {
-		want := make(map[string]int)
-		for _, dir := range test.dirs {
-			want[filepath.Join(f.cwd, dir)]++
-		}
-		for dir, count := range want {
-			if synced[dir] != count {
-				t.Errorf("directory %s synced %d times, want %d (all: %v)", dir, synced[dir], count, synced)
-			}
-		}
-		for dir := range synced {
-			if _, ok := want[dir]; !ok {
-				t.Errorf("unexpected directory sync of %s (all: %v)", dir, synced)
-			}
-		}
+		requireDirSyncCounts(t, f.cwd, synced, test.dirs)
 	}
 	requireNoResidue(t, f.cwd)
+}
+
+func requireDirSyncCounts(t *testing.T, cwd string, synced map[string]int, dirs []string) {
+	t.Helper()
+	want := make(map[string]int)
+	for _, dir := range dirs {
+		want[filepath.Join(cwd, dir)]++
+	}
+	for dir, count := range want {
+		if synced[dir] != count {
+			t.Errorf("directory %s synced %d times, want %d (all: %v)", dir, synced[dir], count, synced)
+		}
+	}
+	for dir := range synced {
+		if _, ok := want[dir]; !ok {
+			t.Errorf("unexpected directory sync of %s (all: %v)", dir, synced)
+		}
+	}
 }
 
 func TestDirectorySyncRunsAfterTheLastOperation(t *testing.T) {

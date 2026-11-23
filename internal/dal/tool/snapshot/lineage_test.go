@@ -192,24 +192,23 @@ func TestResolveSpansMatchesPerSpanCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := make([]Span, len(targets))
 	for i, target := range targets {
 		mapped, mapErr := store.ResolveSpan(ref, "f.txt", mid, target)
 		if mapErr != nil {
 			t.Fatal(mapErr)
 		}
-		want[i] = mapped
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("span %d: batch %+v, single %+v", i, got[i], want[i])
+		if got[i] != mapped {
+			t.Fatalf("span %d: batch %+v, single %+v", i, got[i], mapped)
 		}
 	}
-	before2 := []byte("a\nb\nc\nd\n")
-	store = New()
-	ref = store.Put("g.txt", before2, nil)
+}
+
+func TestResolveSpansAgreesWithPerSpanErrors(t *testing.T) {
+	store := New()
+	before := []byte("a\nb\nc\nd\n")
+	ref := store.Put("g.txt", before, nil)
 	after := []byte("a\nX\nc\nd\n")
-	store.Record("g.txt", before2, after, []Splice{{Start: 1, End: 2, Inserted: 1}})
+	store.Record("g.txt", before, after, []Splice{{Start: 1, End: 2, Inserted: 1}})
 	conflict := []Span{{Start: 0, End: 1}, {Start: 1, End: 2}}
 	for i, target := range conflict {
 		_, mapErr := store.ResolveSpan(ref, "g.txt", after, target)

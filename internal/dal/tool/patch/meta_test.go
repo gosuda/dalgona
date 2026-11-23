@@ -108,8 +108,8 @@ func requireVanishedMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(f.cwd, "f.txt")); err != nil {
-		t.Fatal(err)
+	if rmErr := os.Remove(filepath.Join(f.cwd, "f.txt")); rmErr != nil {
+		t.Fatal(rmErr)
 	}
 	result, err := plan.Apply(t.Context())
 	if err == nil {
