@@ -11,12 +11,15 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/runner"
-	"github.com/gosuda/dalgona/internal/dalgona/daemon"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "__shim" {
 		os.Exit(runner.ShimMain(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "daemon" && os.Getenv("DALGONA_TEST_BACKEND") != "" {
+		os.Exit(serveTestBackend(os.Getenv("DALGONA_HOME")))
 	}
 	os.Exit(m.Run())
 }
@@ -53,7 +56,7 @@ func startDaemon(t *testing.T, home string) {
 		}
 	})
 	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-		if _, err := os.Stat(daemon.SocketPath(home)); err == nil {
+		if _, err := os.Stat(client.SocketPath(home)); err == nil {
 			return
 		}
 	}

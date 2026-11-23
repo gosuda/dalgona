@@ -311,30 +311,12 @@ func TestCloudMainRefusesCloudflareUp(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("CloudMain exit = %d, want 1", code)
 	}
-	wantErr := cloudflareRefusal + "\n"
+	wantErr := "cloudflare boxes lose their files when the container stops; use sandbox0, modal, sprites, or docker for fully cloud mode\n"
 	if stderr.String() != wantErr {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), wantErr)
 	}
 	if created != 0 {
 		t.Fatalf("service factory called %d times, want 0", created)
-	}
-}
-
-func TestCloudflareRefusesFullyCloudMode(t *testing.T) {
-	ctx := t.Context()
-	cfg := config.Config{
-		Home:    t.TempDir(),
-		Remotes: map[string]config.RemoteSpec{"cf": {Service: "cloudflare", URL: "https://worker.example", BoxID: "dalgona-x"}},
-		Runners: map[string]config.RunnerSpec{"edge": {Service: "cloudflare", URL: "https://worker.example"}},
-	}
-	b := NewBinder(Options{Config: cfg})
-	const want = "cloudflare boxes lose their files when the container stops; use sandbox0, modal, sprites, or docker for fully cloud mode"
-	checks := map[string]error{"cloud up": b.CloudUp(ctx, "edge", false)}
-	_, checks["remote"] = b.Bridge(ctx, "cf")
-	for name, err := range checks {
-		if err == nil || err.Error() != want {
-			t.Errorf("%s error = %v, want %q", name, err, want)
-		}
 	}
 }
 

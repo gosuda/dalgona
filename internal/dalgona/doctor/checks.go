@@ -16,7 +16,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/dalgona/daemon"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 	batteryscript "github.com/gosuda/dalgona/internal/dalgona/script"
 )
 
@@ -40,7 +40,7 @@ type joinedError interface {
 }
 
 func (in *inspector) checkHome(context.Context) []row {
-	if err := daemon.VerifyHome(in.env.Home); err != nil {
+	if err := client.VerifyHome(in.env.Home); err != nil {
 		return []row{failRow("home", err.Error())}
 	}
 	return []row{okRow("home", in.env.Home)}
@@ -66,7 +66,7 @@ func (in *inspector) checkDaemon(ctx context.Context) []row {
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	info, probe, err := daemon.ProbeConn(probeCtx, conn)
+	info, probe, err := client.ProbeConn(probeCtx, conn)
 	if err != nil {
 		rows := []row{
 			failRow("daemon", "cannot inspect the running daemon: "+err.Error()),
@@ -74,8 +74,8 @@ func (in *inspector) checkDaemon(ctx context.Context) []row {
 		}
 		return append(rows, in.daemonLog()...)
 	}
-	if probe == daemon.ProbePreIdentity {
-		return []row{okRow("daemon", "running; it reports no identity"), in.buildRow(daemon.UnknownPreIdentityBuild)}
+	if probe == client.ProbePreIdentity {
+		return []row{okRow("daemon", "running; it reports no identity"), in.buildRow(client.UnknownPreIdentityBuild)}
 	}
 	return []row{okRow("daemon", in.running(info)), in.buildRow(info.Build)}
 }
@@ -84,19 +84,19 @@ func (in *inspector) dialFailed(err error) []row {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return []row{okRow("daemon", "not running; it starts on demand"), in.buildRow(in.env.Own)}
-	case daemon.Untrusted(err):
+	case client.Untrusted(err):
 		rows := []row{
 			failRow("daemon", "the socket belongs to another user: "+err.Error()),
 			warnRow("build", "not checked; the socket is not trusted"),
 		}
 		return append(rows, in.daemonLog()...)
-	case !socketExists(daemon.SocketPath(in.env.Home)):
+	case !socketExists(client.SocketPath(in.env.Home)):
 		return []row{
 			failRow("daemon", "cannot reach the socket: "+err.Error()),
 			warnRow("build", "not checked; the socket cannot be reached"),
 		}
 	}
-	stale := fmt.Sprintf("stale socket %s; any dalgona command replaces it", daemon.SocketPath(in.env.Home))
+	stale := fmt.Sprintf("stale socket %s; any dalgona command replaces it", client.SocketPath(in.env.Home))
 	rows := []row{warnRow("daemon", stale), in.buildRow(in.env.Own)}
 	return append(rows, in.daemonLog()...)
 }
@@ -106,7 +106,7 @@ func socketExists(path string) bool {
 	return err == nil
 }
 
-func (in *inspector) running(info daemon.Info) string {
+func (in *inspector) running(info client.Info) string {
 	text := fmt.Sprintf("running pid %d", info.PID)
 	if info.StartedAt.IsZero() {
 		return text

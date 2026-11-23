@@ -25,13 +25,14 @@ func runClient(ctx context.Context, args []string, std stdio) int {
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	dial, err := daemonDialer(cfg, std)
+	session, err := openSession(cfg, std)
 	if err != nil {
 		return fail(std, 1, err)
 	}
+	defer func() { _ = session.Close() }()
 	env := app.CLIEnv{
 		Product: config.ProductDalgona, Home: cfg.Home, Remote: cmp.Or(std.remote, cfg.Remote),
-		Dial:  func(ctx context.Context) (io.ReadWriteCloser, error) { return dial(ctx) },
+		Dial:  func(ctx context.Context) (io.ReadWriteCloser, error) { return connect(ctx, session) },
 		Stdin: std.in, Stdout: std.out, Stderr: std.errOut, TUI: tuiwire.Run,
 	}
 	release := attachHerdr(ctx, &env, cfg.Herdr, os.Getenv)

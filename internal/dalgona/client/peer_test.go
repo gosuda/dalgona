@@ -1,4 +1,4 @@
-package daemon
+package client
 
 import (
 	"errors"
@@ -38,7 +38,7 @@ func TestVerifyPeerConnSameUID(t *testing.T) {
 	if perr := verifyDialedPeer(client); perr != nil {
 		t.Fatalf("client peer refused: %v", perr)
 	}
-	if perr := verifyAcceptedPeer(server, daemonMarked()); perr != nil {
+	if perr := VerifyAcceptedPeer(server, DaemonMarked()); perr != nil {
 		t.Fatalf("server peer refused: %v", perr)
 	}
 }

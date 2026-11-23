@@ -1,5 +1,5 @@
 //go:build !darwin && !freebsd && !openbsd && !netbsd && !dragonfly
 
-package daemon
+package client
 
 const socketPathLimit = 108

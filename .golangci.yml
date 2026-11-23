@@ -196,6 +196,22 @@ linters:
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/"
               desc: the wire package holds framing, wire types, codecs and the connection only
+        lifecycle-client:
+          files:
+            - "**/internal/dalgona/client/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/dal/agent"
+              desc: the lifecycle client owns endpoint trust and identity, never the agent core
+            - pkg: "github.com/gosuda/dalgona/internal/dal/journal"
+              desc: the lifecycle client owns endpoint trust and identity, never the journal
+            - pkg: "github.com/gosuda/dalgona/internal/dal/tool"
+              desc: the lifecycle client owns endpoint trust and identity, never tools
+            - pkg: "github.com/gosuda/dalgona/internal/dal/rpcserver"
+              desc: the lifecycle client speaks the wire through internal/dal/rpc and never hosts handlers
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/remote$"
+              desc: thread runner binding stays in internal/dalgona/remote, which imports client
+            - pkg: "github.com/gosuda/dalgona/internal/dalgona/daemon"
+              desc: the daemon runtime imports client for its trust checks, never the reverse
         dal:
           files:
             - "**/cmd/dal/**"

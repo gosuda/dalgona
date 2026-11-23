@@ -91,7 +91,7 @@ Pull MUST NOT move the baseline. A second pull MUST diff against the same baseli
 
 ## Mode B: the daemon in a box
 
-`[remotes.<name>]` in `settings.toml` MUST hold `service`, `box_id`, and the optional `image`, `template`, and `url`. The binder MUST write the whole table in one `config.WriteSettings` call. A name without `[remotes.<name>]` MUST fall back to `[runners.<name>]`.
+`[remotes.<name>]` in `settings.toml` MUST hold `service`, `box_id`, and the optional `image`, `template`, and `url`. `client.Remotes` owns this table for the binder and for remote sessions. It MUST write the whole table in one `config.WriteSettings` call. A name without `[remotes.<name>]` MUST fall back to `[runners.<name>]`.
 
 `cloudflare` MUST be refused by `cloud up`, `cloud down`, `cloud pull`, and `--remote` with:
 
@@ -105,7 +105,7 @@ cloudflare boxes lose their files when the container stops; use sandbox0, modal,
 
 `dalgona cloud pull <name>` MUST read the baseline from `/workspace/.dalgona-baseline` and apply the box diff in the local `cwd`, as Pull does.
 
-`(*Binder).Bridge(ctx, name)` MUST attach the recorded box and return `Connect(Bridge)`. When attach returns another id, it MUST write the new `box_id` before it connects. A remote without `box_id` MUST fail with:
+`(*client.Remotes).Bridge(ctx, name)` MUST attach the recorded box and return `Connect(Bridge)`. When attach returns another id, it MUST write the new `box_id` before it connects. A remote without `box_id` MUST fail with:
 
 ```text
 remote: remote <name> has no box; run `dalgona cloud up <name>`

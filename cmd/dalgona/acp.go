@@ -16,13 +16,14 @@ func runACP(ctx context.Context, args []string, std stdio) int {
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	dial, err := daemonDialer(cfg, std)
+	session, err := openSession(cfg, std)
 	if err != nil {
 		return fail(std, 1, err)
 	}
+	defer func() { _ = session.Close() }()
 	opts := acp.Options{
 		Version: config.Version(),
-		Dial:    func(ctx context.Context) (io.ReadWriteCloser, error) { return dial(ctx) },
+		Dial:    func(ctx context.Context) (io.ReadWriteCloser, error) { return connect(ctx, session) },
 	}
 	if err = acp.Serve(ctx, std.in, std.out, opts); err != nil {
 		return fail(std, 1, err)

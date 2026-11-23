@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"slices"
 	"sync"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/registry"
 )
@@ -48,22 +48,18 @@ type Binder struct {
 	upload   func(ctx context.Context, r runner.Runner, cwd string) (string, error)
 	mu       sync.Mutex
 	recorder Recorder
-	remotes  map[string]config.RemoteSpec
+	remotes  *client.Remotes
 	ledgerMu sync.Mutex
 }
 
 func NewBinder(opts Options) *Binder {
 	logger := cmp.Or(opts.Logger, slog.Default())
 	opts.Out = cmp.Or[io.Writer](opts.Out, io.Discard)
-	remotes := maps.Clone(opts.Config.Remotes)
-	if remotes == nil {
-		remotes = map[string]config.RemoteSpec{}
-	}
 	services := opts.Services
 	if services == nil {
 		services = registry.New(registry.Options{Auth: opts.Auth, Logger: logger})
 	}
-	return &Binder{opts: opts, log: logger, upload: runner.Upload, services: services, remotes: remotes}
+	return &Binder{opts: opts, log: logger, upload: runner.Upload, services: services, remotes: client.NewRemotes(opts.Config, services)}
 }
 
 func (b *Binder) SetRecorder(r Recorder) {

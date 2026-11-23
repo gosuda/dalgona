@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 func TestMain(m *testing.M) {
@@ -29,9 +30,6 @@ func TestMain(m *testing.M) {
 	}
 	if os.Getenv("DALGONA_TEST_NEVER_LISTEN") != "" {
 		os.Exit(0)
-	}
-	if handled, code := dispatchDialProbe(); handled {
-		os.Exit(code)
 	}
 	os.Exit(m.Run())
 }
@@ -93,7 +91,7 @@ func TestEnsureStartsAndReuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := Ensure(ctx, home, exe)
+	c, err := client.Ensure(ctx, home, exe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +99,7 @@ func TestEnsureStartsAndReuses(t *testing.T) {
 		t.Fatal(closeErr)
 	}
 	cancel()
-	c, err = Ensure(t.Context(), home, exe)
+	c, err = client.Ensure(t.Context(), home, exe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,23 +190,6 @@ func readHelperPID(home string) (int, error) {
 			return 0, fmt.Errorf("read %s: %w", path, err)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func TestEnsureTimeout(t *testing.T) {
-	old := ensureTimeout
-	ensureTimeout = 20 * time.Millisecond
-	defer func() { ensureTimeout = old }()
-	home := shortHome(t)
-	t.Cleanup(func() { waitForDaemonLogRelease(t, home) })
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DALGONA_TEST_NEVER_LISTEN", "1")
-	_, err = Ensure(t.Context(), home, exe)
-	if err == nil || err.Error() != fmt.Sprintf("daemon did not start: see %s", filepath.Join(home, "daemon.log")) {
-		t.Fatalf("err=%v", err)
 	}
 }
 

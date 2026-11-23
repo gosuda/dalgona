@@ -1,6 +1,6 @@
 //go:build unix
 
-package daemon
+package client
 
 import (
 	"errors"
@@ -46,7 +46,7 @@ func verifyDialedPeer(conn net.Conn) error {
 	return checkUID(got, os.Getuid())
 }
 
-func verifyAcceptedPeer(conn net.Conn, daemonMarked bool) error {
+func VerifyAcceptedPeer(conn net.Conn, daemonMarked bool) error {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		return errors.New("daemon: peer requires unix connection")

@@ -14,7 +14,7 @@ Minimal design means few simultaneous controls, not missing components or inacce
 ## Scope
 
 This decision authorizes the package boundaries required by the native specification.
-It defines required implementation work and does not claim that the packages already exist.
+The wire and server split and the lifecycle package exist. The GUI packages do not exist yet.
 
 The runtime remains in one Go module.
 The desktop entry is `cmd/dalgona-gui`.
@@ -25,6 +25,11 @@ Shared connection policy lives in `internal/dalgona/client`.
 Local and remote transport code must expose the same security and lifecycle rules to all clients.
 The CLI, web relay, app-server, and desktop migrate to that policy.
 The migration removes the displaced connection implementations in the same change.
+`client.Session` owns startup, reconnect, restart, and close for one endpoint.
+`client.Remotes` owns the `[remotes]` table and the remote bridge.
+`internal/dalgona/daemon` imports `client` for the home, socket, and peer checks it shares with dialing.
+`internal/dalgona/remote` imports `client.Remotes` for cloud up, down, and pull.
+`client` imports neither of them.
 
 Client-consumable RPC framing and types remain separate from server handlers.
 The extraction must account for initialization roots and transitive imports.
@@ -84,6 +89,7 @@ Worker limits contain failures and resource use. They are not an operating-syste
 ## Enforcement
 
 The implementation must update `.golangci.yml` in the same change that introduces each new import boundary.
+The `lifecycle-client` rule keeps `client` free of the agent core, journal, tools, server handlers, the daemon runtime, and thread runner binding.
 Core packages must continue to reject presentation imports.
 The GUI must not import journal or agent internals to bypass the wire.
 Only the shared lifecycle package may select and start the backend.

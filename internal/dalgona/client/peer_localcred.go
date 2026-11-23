@@ -1,6 +1,6 @@
 //go:build darwin || freebsd
 
-package daemon
+package client
 
 import (
 	"net"
@@ -21,10 +21,10 @@ func peerCredsFromFD(fd int) (int, int, error) {
 	return uid, 0, err
 }
 
-func daemonMarked() bool { return false }
+func DaemonMarked() bool { return false }
 
 func checkPeerSandbox(int, int, bool) error { return nil }
 
-func logConfinedDaemon(bool) {}
+func LogConfinedDaemon(bool) {}
 
 func annotateSandboxedClient(conn net.Conn) net.Conn { return conn }

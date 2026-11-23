@@ -9,11 +9,10 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
-	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 type (
@@ -22,19 +21,17 @@ type (
 	RecoveredFunc func(context.Context, *agent.Host, error)
 )
 
-func SocketPath(home string) string { return filepath.Join(home, "dalgona.sock") }
-
 var listenFunc = listen
 
 func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc, after ...RecoveredFunc) (err error) {
-	if limitErr := checkSocketPathLimit(home); limitErr != nil {
+	if limitErr := client.CheckSocketPathLimit(home); limitErr != nil {
 		return limitErr
 	}
-	if chmodErr := tightenHome(home); chmodErr != nil {
+	if chmodErr := client.TightenHome(home); chmodErr != nil {
 		return chmodErr
 	}
-	marked := daemonMarked()
-	logConfinedDaemon(marked)
+	marked := client.DaemonMarked()
+	client.LogConfinedDaemon(marked)
 	host, closeHost, err := newHost(ctx)
 	if err != nil {
 		return err
@@ -62,26 +59,8 @@ func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc,
 	return accept(ctx, listener, &tasks, marked, func(conn net.Conn) { serveConn(ctx, conn, host, serve) })
 }
 
-func tightenHome(home string) error {
-	return protectAndChmod(home, auth.ProtectHomeTree)
-}
-
-func tightenHomeRoot(home string) error {
-	return protectAndChmod(home, auth.ProtectHomeDir)
-}
-
-func protectAndChmod(home string, protect func(string) error) error {
-	if homeErr := protect(home); homeErr != nil {
-		return fmt.Errorf("daemon home: %w", homeErr)
-	}
-	if chmodErr := os.Chmod(home, 0o700); chmodErr != nil { //nolint:gosec // 0700 is a directory permission, not a file
-		return fmt.Errorf("daemon home permissions: %w", chmodErr)
-	}
-	return nil
-}
-
 func listen(home string) (net.Listener, error) {
-	socket := SocketPath(home)
+	socket := client.SocketPath(home)
 	if err := os.Remove(socket); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("remove stale socket: %w", err)
 	}
@@ -107,7 +86,7 @@ func accept(ctx context.Context, listener net.Listener, tasks *sync.WaitGroup, m
 			}
 			return fmt.Errorf("daemon accept: %w", err)
 		}
-		if perr := verifyAcceptedPeer(conn, marked); perr != nil {
+		if perr := client.VerifyAcceptedPeer(conn, marked); perr != nil {
 			_ = conn.Close()
 			slog.Warn("daemon: refusing connection", "error", perr)
 			continue

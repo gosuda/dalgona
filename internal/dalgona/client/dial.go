@@ -1,4 +1,4 @@
-package daemon
+package client
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 )
 
 func DialHome(home string) (net.Conn, error) {
-	if err := checkSocketPathLimit(home); err != nil {
+	if err := CheckSocketPathLimit(home); err != nil {
 		return nil, err
 	}
 	sock := SocketPath(home)

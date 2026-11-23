@@ -1,6 +1,6 @@
 //go:build windows
 
-package daemon
+package client
 
 import (
 	"net"
@@ -8,7 +8,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/auth"
 )
 
-func verifyAcceptedPeer(net.Conn, bool) error {
+func VerifyAcceptedPeer(net.Conn, bool) error {
 	return nil
 }
 
@@ -24,8 +24,8 @@ func verifySocket(string) error {
 	return nil
 }
 
-func daemonMarked() bool { return false }
+func DaemonMarked() bool { return false }
 
-func logConfinedDaemon(bool) {}
+func LogConfinedDaemon(bool) {}
 
 func annotateSandboxedClient(conn net.Conn) net.Conn { return conn }

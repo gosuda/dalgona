@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,14 +15,12 @@ import (
 	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 )
 
-const cloudflareRefusal = "cloudflare boxes lose their files when the container stops; use sandbox0, modal, sprites, or docker for fully cloud mode"
-
 func (b *Binder) CloudUp(ctx context.Context, name string, copyAuth bool) error {
-	spec, err := b.remoteSpec(name)
+	spec, err := b.remotes.Spec(name)
 	if err != nil {
 		return err
 	}
-	svc, err := b.service(ctx, remoteRunnerSpec(spec))
+	svc, err := b.remotes.Service(ctx, spec)
 	if err != nil {
 		return err
 	}
@@ -36,7 +33,7 @@ func (b *Binder) CloudUp(ctx context.Context, name string, copyAuth bool) error 
 		return err
 	}
 	defer l.close()
-	if trackErr := b.trackReplacement(name, recorded, current); trackErr != nil {
+	if trackErr := b.remotes.Track(name, recorded, current); trackErr != nil {
 		return trackErr
 	}
 	if seedErr := b.seedWorkspace(ctx, newRedialRunner(l, svc, current), current); seedErr != nil {
@@ -60,7 +57,7 @@ func (b *Binder) recordedBox(ctx context.Context, svc sandboxsvc.Service, name s
 		return spec, fmt.Errorf("remote: create box for %s: %w", name, err)
 	}
 	spec.BoxID = id
-	if err := b.setRemote(name, spec); err != nil {
+	if err := b.remotes.Record(name, spec); err != nil {
 		destroyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 		defer cancel()
 		if destroyErr := svc.Destroy(destroyCtx, id); destroyErr != nil {
@@ -84,7 +81,7 @@ func (b *Binder) seedWorkspace(ctx context.Context, r runner.Runner, boxID strin
 }
 
 func (b *Binder) CloudDown(ctx context.Context, name string, yes bool) error {
-	spec, svc, err := b.boxedRemote(ctx, name)
+	spec, svc, err := b.remotes.Boxed(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -101,11 +98,11 @@ func (b *Binder) CloudDown(ctx context.Context, name string, yes bool) error {
 		return fmt.Errorf("remote: destroy box %s: %w", spec.BoxID, err)
 	}
 	spec.BoxID = ""
-	return b.setRemote(name, spec)
+	return b.remotes.Record(name, spec)
 }
 
 func (b *Binder) CloudPull(ctx context.Context, name string) error {
-	spec, svc, err := b.boxedRemote(ctx, name)
+	spec, svc, err := b.remotes.Boxed(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -114,7 +111,7 @@ func (b *Binder) CloudPull(ctx context.Context, name string) error {
 		return err
 	}
 	defer l.close()
-	if err = b.trackReplacement(name, spec, current); err != nil {
+	if err = b.remotes.Track(name, spec, current); err != nil {
 		return err
 	}
 	baseline, err := l.remote.ReadFile(ctx, baselineFile)
@@ -122,77 +119,6 @@ func (b *Binder) CloudPull(ctx context.Context, name string) error {
 		return fmt.Errorf("remote: box %s baseline: %w", current, err)
 	}
 	return b.pullInto(ctx, l.remote, strings.TrimSpace(string(baseline)), b.opts.Config.Cwd)
-}
-
-func (b *Binder) Bridge(ctx context.Context, name string) (io.ReadWriteCloser, error) {
-	spec, svc, err := b.boxedRemote(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	current, err := svc.Attach(ctx, spec.BoxID)
-	if err != nil {
-		return nil, fmt.Errorf("remote: attach box %s: %w", spec.BoxID, err)
-	}
-	if err = b.trackReplacement(name, spec, current); err != nil {
-		return nil, err
-	}
-	conn, err := svc.Connect(ctx, current, sandboxsvc.Bridge)
-	if err != nil {
-		return nil, fmt.Errorf("remote: bridge box %s: %w", current, err)
-	}
-	return conn, nil
-}
-
-func (b *Binder) remoteSpec(name string) (config.RemoteSpec, error) {
-	b.mu.Lock()
-	spec, ok := b.remotes[name]
-	b.mu.Unlock()
-	if runnerSpec, isRunner := b.opts.Config.Runners[name]; !ok && isRunner {
-		spec, ok = config.RemoteSpec{Service: runnerSpec.Service, Image: runnerSpec.Image, Template: runnerSpec.Template, URL: runnerSpec.URL}, true
-	}
-	if !ok || spec.Service == "" {
-		return spec, fmt.Errorf("remote: no [remotes.%s] or [runners.%s] entry with a service", name, name)
-	}
-	if losesFiles(spec.Service) {
-		return spec, errors.New(cloudflareRefusal)
-	}
-	return spec, nil
-}
-
-func (b *Binder) boxedRemote(ctx context.Context, name string) (config.RemoteSpec, sandboxsvc.Service, error) {
-	spec, err := b.remoteSpec(name)
-	if err != nil {
-		return spec, nil, err
-	}
-	if spec.BoxID == "" {
-		return spec, nil, fmt.Errorf("remote: remote %s has no box; run `dalgona cloud up %s`", name, name)
-	}
-	svc, err := b.service(ctx, remoteRunnerSpec(spec))
-	return spec, svc, err
-}
-
-func (b *Binder) trackReplacement(name string, spec config.RemoteSpec, current string) error {
-	if current == spec.BoxID {
-		return nil
-	}
-	spec.BoxID = current
-	return b.setRemote(name, spec)
-}
-
-func (b *Binder) setRemote(name string, spec config.RemoteSpec) error {
-	table := map[string]any{"service": spec.Service, "box_id": spec.BoxID}
-	for key, value := range map[string]string{"image": spec.Image, "template": spec.Template, "url": spec.URL} {
-		if value != "" {
-			table[key] = value
-		}
-	}
-	if err := config.WriteSettings(b.opts.Config.Home, config.SettingEdit{Key: "remotes." + name, Value: table}); err != nil {
-		return fmt.Errorf("remote: record [remotes.%s]: %w", name, err)
-	}
-	b.mu.Lock()
-	b.remotes[name] = spec
-	b.mu.Unlock()
-	return nil
 }
 
 func (b *Binder) copyAuth(ctx context.Context, r runner.Runner) error {
@@ -212,8 +138,4 @@ func (b *Binder) copyAuth(ctx context.Context, r runner.Runner) error {
 		return fmt.Errorf("remote: copy auth.json: %w", err)
 	}
 	return nil
-}
-
-func remoteRunnerSpec(spec config.RemoteSpec) config.RunnerSpec {
-	return config.RunnerSpec{Service: spec.Service, Image: spec.Image, Template: spec.Template, URL: spec.URL}
 }

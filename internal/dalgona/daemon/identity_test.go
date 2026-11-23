@@ -2,19 +2,17 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/rpcserver"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 type identityReply struct {
@@ -28,7 +26,7 @@ func identityServe(build string, pid int, retireCancel func()) func(context.Cont
 	return func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
 		extensions := map[string]rpcserver.Extension{}
 		if build != "" {
-			extensions[MethodIdentity] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
+			extensions[client.MethodIdentity] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
 				reply, err := json.Marshal(identityReply{
 					Build: build, PID: pid, Version: "test", StartedAt: time.Now().Format(time.RFC3339Nano),
 				})
@@ -39,7 +37,7 @@ func identityServe(build string, pid int, retireCancel func()) func(context.Cont
 			}
 		}
 		if retireCancel != nil {
-			extensions[MethodRetire] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
+			extensions[client.MethodRetire] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
 				retireCancel()
 				return jsontext.Value("{}"), nil
 			}
@@ -63,51 +61,21 @@ func startServe(t *testing.T, parent context.Context, home string, serve func(co
 	return cancel, done
 }
 
-func ownDigest(t *testing.T, extra []byte) string {
-	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil {
-		exe = resolved
-	}
-	data, err := os.ReadFile(exe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(append(data, extra...))
-	return hex.EncodeToString(digest[:])[:16]
-}
-
-func TestBuildMatchesExecutableDigest(t *testing.T) {
-	want := ownDigest(t, nil)
-	if got := Build(); got != want {
-		t.Fatalf("Build() = %q, want %q", got, want)
-	}
-	if got := Build(); got != want {
-		t.Fatalf("second Build() = %q, want %q", got, want)
-	}
-	if altered := ownDigest(t, []byte{0}); altered == Build() {
-		t.Fatal("digest of an altered executable equals Build(), so the negative control cannot fail")
-	}
-}
-
 func TestCheckBuildRejectsOtherBuild(t *testing.T) {
 	home := shortHome(t)
 	other := "00112233445566ff"
 	cancel, done := startServe(t, t.Context(), home, identityServe(other, os.Getpid(), nil))
 	defer stopRun(t, cancel, done)
-	_, err := CheckBuild(t.Context(), home, Build())
-	mismatch, ok := errors.AsType[*BuildMismatchError](err)
+	_, err := client.CheckBuild(t.Context(), home, client.Build())
+	mismatch, ok := errors.AsType[*client.BuildMismatchError](err)
 	if !ok {
-		t.Fatalf("CheckBuild error = %v, want BuildMismatchError", err)
+		t.Fatalf("client.CheckBuild error = %v, want client.BuildMismatchError", err)
 	}
-	if mismatch.Running != other || mismatch.Own != Build() {
-		t.Fatalf("mismatch = %q vs %q, want %q vs %q", mismatch.Running, mismatch.Own, other, Build())
+	if mismatch.Running != other || mismatch.Own != client.Build() {
+		t.Fatalf("mismatch = %q vs %q, want %q vs %q", mismatch.Running, mismatch.Own, other, client.Build())
 	}
-	if _, err := CheckBuild(t.Context(), home, other); err != nil {
-		t.Fatalf("CheckBuild with the running build = %v, want nil", err)
+	if _, err := client.CheckBuild(t.Context(), home, other); err != nil {
+		t.Fatalf("client.CheckBuild with the running build = %v, want nil", err)
 	}
 }
 
@@ -115,13 +83,13 @@ func TestCheckBuildTreatsMethodNotFoundAsUnknownBuild(t *testing.T) {
 	home := shortHome(t)
 	cancel, done := startServe(t, t.Context(), home, identityServe("", 0, nil))
 	defer stopRun(t, cancel, done)
-	_, err := CheckBuild(t.Context(), home, Build())
-	mismatch, ok := errors.AsType[*BuildMismatchError](err)
+	_, err := client.CheckBuild(t.Context(), home, client.Build())
+	mismatch, ok := errors.AsType[*client.BuildMismatchError](err)
 	if !ok {
-		t.Fatalf("CheckBuild error = %v, want BuildMismatchError", err)
+		t.Fatalf("client.CheckBuild error = %v, want client.BuildMismatchError", err)
 	}
-	if mismatch.Running != UnknownPreIdentityBuild {
-		t.Fatalf("mismatch running = %q, want %q", mismatch.Running, UnknownPreIdentityBuild)
+	if mismatch.Running != client.UnknownPreIdentityBuild {
+		t.Fatalf("mismatch running = %q, want %q", mismatch.Running, client.UnknownPreIdentityBuild)
 	}
 }
 
@@ -130,12 +98,12 @@ func TestRetireCancelsDaemonContext(t *testing.T) {
 	retired := make(chan struct{})
 	ctx, cancelDaemon := context.WithCancel(t.Context())
 	defer cancelDaemon()
-	cancel, done := startServe(t, ctx, home, identityServe(Build(), os.Getpid(), func() {
+	cancel, done := startServe(t, ctx, home, identityServe(client.Build(), os.Getpid(), func() {
 		close(retired)
 		cancelDaemon()
 	}))
 	defer cancel()
-	if err := Retire(t.Context(), home); err != nil {
+	if err := client.Retire(t.Context(), home); err != nil {
 		t.Fatalf("Retire: %v", err)
 	}
 	select {

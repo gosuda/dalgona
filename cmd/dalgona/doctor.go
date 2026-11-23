@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/dalgona/daemon"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/doctor"
 )
 
@@ -19,8 +19,8 @@ func runDoctor(ctx context.Context, args []string, std stdio) int {
 	home := config.ProductDalgona.Home()
 	return doctor.Run(ctx, doctor.Env{
 		Home:   home,
-		Dial:   func(context.Context) (net.Conn, error) { return daemon.DialHome(home) },
-		Own:    daemon.Build(),
+		Dial:   func(context.Context) (net.Conn, error) { return client.DialHome(home) },
+		Own:    client.Build(),
 		Now:    time.Now,
 		Out:    std.out,
 		Online: online,

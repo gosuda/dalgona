@@ -16,9 +16,9 @@ The following table distinguishes existing behavior from required implementation
 | --- | --- | --- |
 | Client wire | `rpc.Dial` returns `*rpc.Conn`. | Reuse this transport and its request cancellation. |
 | RPC dependencies | `internal/dal/rpc` holds transport, codecs, and wire types. Host-dependent handlers are in `internal/dal/rpcserver`. | Keep host-dependent handlers out of the wire package. |
-| Startup | CLI code resolves its own executable and calls `daemon.Ensure`. | Share startup policy and accept an explicit backend executable. |
-| Build identity | `daemon.Build` hashes the current executable. | Compare the running daemon against the selected backend artifact. |
-| Remote transport | `remote.Binder.Bridge` shares a package with journal-backed runner ownership. | Separate endpoint transport from thread runner binding. |
+| Startup | Every local client opens a `client.Session` with a `client.Backend` and calls `Connect`. | Pass the bundled or selected backend instead of the GUI executable. |
+| Build identity | `client.ResolveBackend` hashes the selected backend file, and `Connect` compares the daemon against it. | Keep the GUI executable out of the comparison. |
+| Remote transport | `client.Remotes` owns the remote table and the bridge. `remote.Binder` keeps thread runner binding. | Add endpoint management and cloud operations to the lifecycle owner. |
 | Desktop | No Gio executable exists. | Add the executable and complete every required component. |
 | History | Pages can require a complete journal read. | Add bounded indexed snapshots and an ordered event stream. |
 | Files | Existing `fs/*` methods access the daemon host. | Add thread runner routing and explicit workspace authority. |
@@ -26,8 +26,8 @@ The following table distinguishes existing behavior from required implementation
 | Images | Transcript items expose `dalgona-blob:` references. | Add authorized image retrieval. |
 | Authentication | Several provider and MCP flows require terminal orchestration. | Add structured native transactions for every supported flow. |
 
-Current evidence comes from [CLI startup](../../../cmd/dalgona/daemon.go), [client transport](../../../internal/dal/rpc/conn.go), and [server registration](../../../internal/dal/rpcserver/server.go).
-See [remote transport](../../../internal/dalgona/remote/cloud.go), [remote ownership](../../../internal/dalgona/remote/remote.go), and [product extensions](../../../cmd/dalgona/remote.go).
+Current evidence comes from [the lifecycle session](../../../internal/dalgona/client/session.go), [client transport](../../../internal/dal/rpc/conn.go), and [server registration](../../../internal/dal/rpcserver/server.go).
+See [remote endpoints](../../../internal/dalgona/client/remotes.go), [remote ownership](../../../internal/dalgona/remote/remote.go), and [product extensions](../../../cmd/dalgona/remote.go).
 
 The desktop MUST NOT call agent, journal, provider, tool, or runner implementations directly.
 Shared language does not change process ownership or authorization.
@@ -157,8 +157,8 @@ The documentation change authorizes no claim that these migrations already exist
 
 The GUI MUST resolve its bundled or explicitly selected backend before attempting startup.
 It MUST hash that backend artifact, never the GUI executable.
-The current `daemon.Build()` implementation hashes its own process image.
-Passing the GUI executable to `daemon.Ensure` would also try launching that executable with the `daemon` command.
+`client.Build()` hashes the running process image, which is right only for a daemon or a CLI that is its own backend.
+Passing the GUI executable as the backend would also try launching that executable with the `daemon` command.
 
 Startup MUST preserve home permissions, socket ownership, peer credentials, and platform ACL checks from [daemon.md](daemon.md).
 An untrusted endpoint MUST fail before initialization or credential transmission.

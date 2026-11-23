@@ -1,6 +1,6 @@
 //go:build linux
 
-package daemon
+package client
 
 import (
 	"errors"
@@ -34,7 +34,7 @@ func serveGuarded(sock string, refused chan<- error, served *atomic.Int32) (net.
 			if err != nil {
 				return
 			}
-			if perr := verifyAcceptedPeer(conn, false); perr != nil {
+			if perr := VerifyAcceptedPeer(conn, false); perr != nil {
 				select {
 				case refused <- perr:
 				default:

@@ -1,4 +1,4 @@
-package daemon
+package client
 
 import (
 	"fmt"
@@ -38,10 +38,10 @@ func TestCheckSocketPathLimitBoundary(t *testing.T) {
 	if got := len(SocketPath(under)); got != socketPathLimit-1 {
 		t.Fatalf("socket is %d bytes, want %d", got, socketPathLimit-1)
 	}
-	if err := checkSocketPathLimit(under); err != nil {
+	if err := CheckSocketPathLimit(under); err != nil {
 		t.Fatalf("under limit: %v", err)
 	}
-	if err := checkSocketPathLimit(under + "h"); err == nil {
+	if err := CheckSocketPathLimit(under + "h"); err == nil {
 		t.Fatal("at-limit socket path passed")
 	}
 }

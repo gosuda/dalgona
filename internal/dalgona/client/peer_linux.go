@@ -1,6 +1,6 @@
 //go:build linux
 
-package daemon
+package client
 
 import (
 	"errors"
@@ -30,7 +30,7 @@ func peerCredsFromFD(fd int) (int, int, error) {
 	return int(ucred.Uid), int(ucred.Pid), nil
 }
 
-func daemonMarked() bool {
+func DaemonMarked() bool {
 	marked, err := peerSelfNoNewPrivs()
 	return err == nil && marked
 }
@@ -103,7 +103,7 @@ func noNewPrivsPid(pid int) (bool, error) {
 
 var errSandboxedClient = errors.New("daemon: daemon refuses clients that run inside a sandbox")
 
-func logConfinedDaemon(daemonMarked bool) {
+func LogConfinedDaemon(daemonMarked bool) {
 	if !daemonMarked {
 		return
 	}

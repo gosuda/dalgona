@@ -1,17 +1,13 @@
-package daemon
+package client
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
-	"sync"
 	"syscall"
 	"time"
 
@@ -46,38 +42,11 @@ const (
 type BuildMismatchError struct {
 	Running string
 	Own     string
+	Daemon  Info
 }
 
 func (e *BuildMismatchError) Error() string {
 	return fmt.Sprintf("daemon runs build %s, this client is build %s; run dalgona restart", e.Running, e.Own)
-}
-
-var (
-	buildOnce  sync.Once
-	buildValue string
-)
-
-func Build() string {
-	buildOnce.Do(func() {
-		exe, err := os.Executable()
-		if err != nil {
-			return
-		}
-		if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil {
-			exe = resolved
-		}
-		file, err := os.Open(exe)
-		if err != nil {
-			return
-		}
-		defer file.Close()
-		digest := sha256.New()
-		if _, err := io.Copy(digest, file); err != nil {
-			return
-		}
-		buildValue = hex.EncodeToString(digest.Sum(nil))[:16]
-	})
-	return buildValue
 }
 
 type daemonClient struct{}
@@ -102,10 +71,10 @@ func CheckBuild(ctx context.Context, home, own string) (Info, error) {
 		return info, err
 	}
 	if probe == ProbePreIdentity {
-		return info, &BuildMismatchError{Running: UnknownPreIdentityBuild, Own: own}
+		return info, &BuildMismatchError{Running: UnknownPreIdentityBuild, Own: own, Daemon: info}
 	}
 	if probe == ProbeReady && info.Build != "" && own != "" && info.Build != own {
-		return info, &BuildMismatchError{Running: info.Build, Own: own}
+		return info, &BuildMismatchError{Running: info.Build, Own: own, Daemon: info}
 	}
 	return info, nil
 }

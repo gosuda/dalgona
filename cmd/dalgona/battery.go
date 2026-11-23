@@ -4,12 +4,14 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/codexapp"
-	"github.com/gosuda/dalgona/internal/dalgona/daemon"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/registry"
 	"github.com/gosuda/dalgona/internal/dalgona/webui"
 )
 
@@ -24,32 +26,21 @@ func loadConfig() (config.Config, error) {
 	return cfg, nil
 }
 
-func daemonDialer(cfg config.Config, std stdio) (func(context.Context) (net.Conn, error), error) {
+func openSession(cfg config.Config, std stdio) (*client.Session, error) {
 	if name := cmp.Or(std.remote, cfg.Remote); name != "" {
-		return remoteDialer(cfg, name, std)
+		store, err := authStore(cfg)
+		if err != nil {
+			return nil, err
+		}
+		services := registry.New(registry.Options{Auth: store, Logger: slog.New(slog.NewTextHandler(std.errOut, nil))})
+		return client.Remote(client.NewRemotes(cfg, services), name), nil
 	}
-	return ensure, nil
+	session, _, err := localSession(cfg.Home)
+	return session, err
 }
 
-func webDaemonDialer(home, exe string) func(context.Context) (net.Conn, error) {
-	gate := make(chan struct{}, 1)
-	started := false
-	return func(ctx context.Context) (net.Conn, error) {
-		select {
-		case gate <- struct{}{}:
-			defer func() { <-gate }()
-		case <-ctx.Done():
-			return nil, context.Cause(ctx)
-		}
-		if started {
-			return daemon.DialHome(home)
-		}
-		conn, err := ensureHome(ctx, home, exe)
-		if err == nil {
-			started = true
-		}
-		return conn, err
-	}
+func sessionDialer(session *client.Session) func(context.Context) (net.Conn, error) {
+	return func(ctx context.Context) (net.Conn, error) { return connect(ctx, session) }
 }
 
 func runAppServer(ctx context.Context, args []string, std stdio) int {
@@ -57,11 +48,12 @@ func runAppServer(ctx context.Context, args []string, std stdio) int {
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	dial, err := daemonDialer(cfg, std)
+	session, err := openSession(cfg, std)
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	return codexapp.AppServerMain(ctx, args, std, std.errOut, codexapp.Deps{Home: cfg.Home, Dial: dial})
+	defer func() { _ = session.Close() }()
+	return codexapp.AppServerMain(ctx, args, std, std.errOut, codexapp.Deps{Home: cfg.Home, Dial: sessionDialer(session)})
 }
 
 func runWeb(ctx context.Context, args []string, std stdio) int {
@@ -72,19 +64,13 @@ func runWeb(ctx context.Context, args []string, std stdio) int {
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	dial, err := daemonDialer(cfg, std)
+	session, err := openSession(cfg, std)
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	if cmp.Or(std.remote, cfg.Remote) == "" {
-		exe, err := executable()
-		if err != nil {
-			return fail(std, 1, err)
-		}
-		dial = webDaemonDialer(cfg.Home, exe)
-	}
+	defer func() { _ = session.Close() }()
 	web := webui.Config{Listen: cfg.Web.Listen, Token: cfg.Web.Token, CertFile: cfg.Web.CertFile, KeyFile: cfg.Web.KeyFile}
-	if err := webui.Serve(ctx, web, dial, std.errOut); err != nil {
+	if err := webui.Serve(ctx, web, sessionDialer(session), std.errOut); err != nil {
 		return fail(std, 1, err)
 	}
 	return 0
