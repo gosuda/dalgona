@@ -80,11 +80,12 @@ func settleCommit(ctx context.Context, env tool.Env, batch stagedBatch, states [
 		cleanupStates(ctx, env, states)
 		return appliedOutcome, nil
 	}
-	removeScratch(ctx, env, states)
+	cleanupTempStates(ctx, env, states)
 	defer closeStates(states)
 	if err := syncStates(states); err != nil {
 		return syncFailure(ctx, env, batch.files, states, err)
 	}
+	cleanupBackupStates(ctx, env, states)
 	return appliedOutcome, nil
 }
 
@@ -99,13 +100,11 @@ func syncFailure(ctx context.Context, env tool.Env, files []*stagedFile, states 
 			if state.backup == "" {
 				continue
 			}
-			if err := state.stageWrite(ctx, env, state.src, state.backup, state.file.before); err != nil {
-				fmt.Fprintf(&out, "\nCould not retain backup for %s: %v", state.file.path, err)
-				continue
-			}
 			fmt.Fprintf(&out, "\nRetained backup for %s: %s", state.file.path, state.backup)
 		}
+		return outcome, errors.New(out.String())
 	}
+	cleanupBackupStates(ctx, env, states)
 	return outcome, errors.New(out.String())
 }
 
@@ -524,6 +523,17 @@ func cleanupStates(ctx context.Context, env tool.Env, states []*writeState) {
 func removeScratch(ctx context.Context, env tool.Env, states []*writeState) {
 	for _, state := range states {
 		cleanupTempState(ctx, env, state)
+		cleanupBackupState(ctx, env, state)
+	}
+}
+func cleanupTempStates(ctx context.Context, env tool.Env, states []*writeState) {
+	for _, state := range states {
+		cleanupTempState(ctx, env, state)
+	}
+}
+
+func cleanupBackupStates(ctx context.Context, env tool.Env, states []*writeState) {
+	for _, state := range states {
 		cleanupBackupState(ctx, env, state)
 	}
 }

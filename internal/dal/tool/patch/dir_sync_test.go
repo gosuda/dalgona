@@ -182,7 +182,7 @@ func requireTargetsAtSync(t *testing.T, cwd string, want map[string]string) {
 func requireNoScratchAtSync(t *testing.T, cwd string) {
 	t.Helper()
 	var left []string
-	for _, pattern := range []string{"*.dalgona-*", "*/*.dalgona-*"} {
+	for _, pattern := range []string{"*.dalgona-tmp-*", "*/*.dalgona-tmp-*"} {
 		matches, err := filepath.Glob(filepath.Join(cwd, pattern))
 		if err != nil {
 			t.Error(err)
@@ -190,7 +190,7 @@ func requireNoScratchAtSync(t *testing.T, cwd string) {
 		left = append(left, matches...)
 	}
 	if len(left) != 0 {
-		t.Errorf("at sync time scratch files remain: %v", left)
+		t.Errorf("at sync time temporary files remain: %v", left)
 	}
 }
 
