@@ -15,7 +15,7 @@ The following table distinguishes existing behavior from required implementation
 | Area | Existing behavior | Required native work |
 | --- | --- | --- |
 | Client wire | `rpc.Dial` returns `*rpc.Conn`. | Reuse this transport and its request cancellation. |
-| RPC dependencies | Transport, codecs, and server handlers share `internal/dal/rpc`. | Move host-dependent handlers into `internal/dal/rpcserver`. |
+| RPC dependencies | `internal/dal/rpc` holds transport, codecs, and wire types. Host-dependent handlers are in `internal/dal/rpcserver`. | Keep host-dependent handlers out of the wire package. |
 | Startup | CLI code resolves its own executable and calls `daemon.Ensure`. | Share startup policy and accept an explicit backend executable. |
 | Build identity | `daemon.Build` hashes the current executable. | Compare the running daemon against the selected backend artifact. |
 | Remote transport | `remote.Binder.Bridge` shares a package with journal-backed runner ownership. | Separate endpoint transport from thread runner binding. |
@@ -26,7 +26,7 @@ The following table distinguishes existing behavior from required implementation
 | Images | Transcript items expose `dalgona-blob:` references. | Add authorized image retrieval. |
 | Authentication | Several provider and MCP flows require terminal orchestration. | Add structured native transactions for every supported flow. |
 
-Current evidence comes from [CLI startup](../../../cmd/dalgona/daemon.go), [client transport](../../../internal/dal/rpc/conn.go), and [server registration](../../../internal/dal/rpc/serve.go).
+Current evidence comes from [CLI startup](../../../cmd/dalgona/daemon.go), [client transport](../../../internal/dal/rpc/conn.go), and [server registration](../../../internal/dal/rpcserver/server.go).
 See [remote transport](../../../internal/dalgona/remote/cloud.go), [remote ownership](../../../internal/dalgona/remote/remote.go), and [product extensions](../../../cmd/dalgona/remote.go).
 
 The desktop MUST NOT call agent, journal, provider, tool, or runner implementations directly.
@@ -115,7 +115,7 @@ Moving only `cmd/dalgona` functions is insufficient because their imported packa
 Move core-dependent RPC handlers and extension registration into `rpcserver` without copying wire types.
 The implementation MUST inspect package dependencies after migration.
 It MUST NOT claim a lean executable from an unmeasured linker assumption.
-The current RPC package registers its server method map during initialization.
+The server package registers its method map during initialization.
 
 The boundary decision MUST update `.golangci.yml` and the decision index in the same change.
 Existing TUI imports remain limited to wire and explicitly approved shared state contracts.

@@ -12,7 +12,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 )
 
 const realDaemonEnv = "DALGONA_TEST_REAL_DAEMON"
@@ -27,7 +27,7 @@ func runRealDaemon() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := Run(ctx, home, appHost, func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
-		return rpc.ServeWith(ctx, conn, host, rpc.ServeOptions{})
+		return rpcserver.ServeWith(ctx, conn, host, rpcserver.ServeOptions{})
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

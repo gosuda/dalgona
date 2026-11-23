@@ -1,0 +1,129 @@
+package rpcserver
+
+import (
+	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/gosuda/dalgona/internal/dal/rpc"
+
+	"github.com/gosuda/dalgona/internal/dal/config"
+)
+
+type bodyLog struct {
+	mu     sync.Mutex
+	bodies []string
+}
+
+func (l *bodyLog) last() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.bodies) == 0 {
+		return ""
+	}
+	return l.bodies[len(l.bodies)-1]
+}
+
+func (l *bodyLog) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.bodies)
+}
+
+func recordBodies(t *testing.T, r *rig) *bodyLog {
+	t.Helper()
+	log := &bodyLog{}
+	f := &fakeLLM{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /responses", func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		log.mu.Lock()
+		log.bodies = append(log.bodies, string(body))
+		log.mu.Unlock()
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		f.respond(w, req)
+	})
+	mux.HandleFunc("GET /models", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"id":"gpt-test"}]}`)
+	})
+	f.server = httptest.NewServer(mux)
+	t.Cleanup(f.server.Close)
+	r.llm = f
+	return log
+}
+
+func TestReviewStartRunsAReviewTurn(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	bodies := recordBodies(t, r)
+	r.llm.push(llmReply{body: sseText("reviewed")})
+	c := r.connect()
+	var started rpc.ThreadStartResponse
+	c.ok("thread/start", map[string]any{"cwd": r.cwd}, &started)
+	c.await("thread/started", nil)
+	threadID := started.Thread.ID
+
+	var response rpc.ReviewStartResponse
+	c.ok("review/start", map[string]any{"threadId": threadID, "target": map[string]any{"type": "uncommittedChanges"}}, &response)
+	expect(t, response.ReviewThreadID == threadID && response.Turn.ID != "" && response.Turn.Status == rpc.StatusInProgress, "review/start", response)
+	log := readTurn(t, c.collect())
+	expect(t, log.status == rpc.StatusCompleted, "turn status", log.status)
+	expect(t, strings.Contains(bodies.last(), "Review the uncommitted changes in this workspace: staged, unstaged, and untracked files."),
+		"review prompt in the model request", bodies.last())
+
+	rejected := bodies.count()
+	c.fails("review/start", map[string]any{"threadId": threadID, "target": map[string]any{"type": "baseBranch", "branch": "-x"}}, -32602, "invalid branch -x")
+	c.fails("review/start", map[string]any{"threadId": threadID, "delivery": "detached", "target": map[string]any{"type": "uncommittedChanges"}}, -32602, "unsupported delivery detached")
+	c.fails("review/start", map[string]any{"threadId": threadID, "target": map[string]any{"type": "commit", "sha": "zz"}}, -32602, "invalid sha zz")
+	c.fails("review/start", map[string]any{"threadId": threadID, "target": map[string]any{"type": "custom", "instructions": " "}}, -32602, "instructions must not be empty")
+	c.fails("review/start", map[string]any{"threadId": threadID, "delivery": "", "target": map[string]any{"type": "uncommittedChanges"}}, -32602, "unsupported delivery ")
+	c.fails("review/start", map[string]any{"threadId": threadID, "target": map[string]any{"type": "bogus"}}, -32602, "unsupported review target bogus")
+	expect(t, bodies.count() == rejected, "rejected review/start sent a model request", bodies.count()-rejected)
+}
+
+func TestReviewStartTargetKinds(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	bodies := recordBodies(t, r)
+	c := r.connect()
+	var started rpc.ThreadStartResponse
+	c.ok("thread/start", map[string]any{"cwd": r.cwd}, &started)
+	c.await("thread/started", nil)
+	threadID := started.Thread.ID
+
+	runReview := func(target map[string]any) {
+		r.llm.push(llmReply{body: sseText("reviewed")})
+		var response rpc.ReviewStartResponse
+		c.ok("review/start", map[string]any{"threadId": threadID, "target": target}, &response)
+		log := readTurn(t, c.collect())
+		expect(t, log.status == rpc.StatusCompleted, "turn status", log.status)
+	}
+
+	runReview(map[string]any{"type": "baseBranch", "branch": "main"})
+	expect(t, strings.Contains(bodies.last(), "Review the changes on the current branch against main."),
+		"baseBranch prompt in the model request", bodies.last())
+	expect(t, strings.Contains(bodies.last(), "git diff main...HEAD"),
+		"baseBranch diff command in the model request", bodies.last())
+
+	runReview(map[string]any{"type": "commit", "sha": "abc123", "title": "Fix the login flow"})
+	expect(t, strings.Contains(bodies.last(), "the changes introduced by commit abc123: Fix the login flow."),
+		"commit subject in the model request", bodies.last())
+	expect(t, strings.Contains(bodies.last(), "git show abc123"),
+		"commit command in the model request", bodies.last())
+
+	var fresh rpc.ThreadStartResponse
+	c.ok("thread/start", map[string]any{"cwd": r.cwd}, &fresh)
+	c.await("thread/started", nil)
+	threadID = fresh.Thread.ID
+	runReview(map[string]any{"type": "custom", "instructions": "Look only at the error handling."})
+	expect(t, strings.Contains(bodies.last(), "Look only at the error handling."),
+		"custom instructions in the model request", bodies.last())
+	expect(t, !strings.Contains(bodies.last(), "Report concrete defects"),
+		"custom prompt carries the findings suffix", bodies.last())
+}

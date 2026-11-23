@@ -179,6 +179,8 @@ linters:
               desc: clients reach the core only through internal/rpc
             - pkg: "github.com/gosuda/dalgona/internal/dalgona/report"
               desc: clients reach the core only through internal/rpc
+            - pkg: "github.com/gosuda/dalgona/internal/dal/rpcserver"
+              desc: clients speak the wire through internal/dal/rpc and never host the handlers
         tui-imports-only-rpc:
           list-mode: lax
           files:
@@ -187,7 +189,13 @@ linters:
             - pkg: "github.com/gosuda/dalgona/internal/"
               desc: tui reaches the core only through internal/dal/rpc
           allow:
-            - "github.com/gosuda/dalgona/internal/dal/rpc"
+            - "github.com/gosuda/dalgona/internal/dal/rpc$"
+        rpc-wire:
+          files:
+            - "**/internal/dal/rpc/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/"
+              desc: the wire package holds framing, wire types, codecs and the connection only
         dal:
           files:
             - "**/cmd/dal/**"

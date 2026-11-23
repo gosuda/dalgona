@@ -2,11 +2,11 @@
 
 ## Invariant
 
-The `dalgona/thread/search` method MUST query the journal mirror through `Host.SearchThreads`. `internal/dal/rpc` MUST NOT scan the mirror or read `state.db` itself. The query and every snippet MUST pass the host masker.
+The `dalgona/thread/search` method MUST query the journal mirror through `Host.SearchThreads`. `internal/dal/rpcserver` MUST NOT scan the mirror or read `state.db` itself. The query and every snippet MUST pass the host masker.
 
 ## Scope
 
-This decision applies to the import of `internal/dal/journal` by `internal/dal/rpc`, to `internal/dal/rpc/serve_search.go`, and to the trigram index rules in [journal.md](../spec/journal.md). The wire contract is in [protocol.md](../spec/protocol.md#thread-search).
+This decision applies to the import of `internal/dal/journal` by `internal/dal/rpcserver`, to `internal/dal/rpcserver/search.go`, and to the trigram index rules in [journal.md](../spec/journal.md). The wire contract is in [protocol.md](../spec/protocol.md#thread-search).
 
 ## Enforcement
 
@@ -14,5 +14,5 @@ This decision applies to the import of `internal/dal/journal` by `internal/dal/r
 
 ## Rejected alternatives
 
-- A direct mirror scan in `internal/dal/rpc`. It lost because the index schema belongs to the journal mirror, so a schema change would break the method silently.
+- A direct mirror scan in `internal/dal/rpcserver`. It lost because the index schema belongs to the journal mirror, so a schema change would break the method silently.
 - An unmasked snippet. It lost because a secret stored after the text was journaled would surface through search.

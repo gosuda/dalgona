@@ -19,7 +19,7 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 )
 
 func TestTurnBookKeepsEarlyCompletionAndTexts(t *testing.T) {
@@ -119,7 +119,7 @@ func newServedBox(t *testing.T) *servedBox {
 		box.dials++
 		client, server := net.Pipe()
 		box.servers = append(box.servers, server)
-		served.Go(func() { _ = rpc.ServeWith(context.WithoutCancel(ctx), server, host, rpc.ServeOptions{}) })
+		served.Go(func() { _ = rpcserver.ServeWith(context.WithoutCancel(ctx), server, host, rpcserver.ServeOptions{}) })
 		return client, nil
 	}
 	return box

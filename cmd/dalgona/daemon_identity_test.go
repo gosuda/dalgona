@@ -17,10 +17,11 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 	"github.com/gosuda/dalgona/internal/dalgona/daemon"
 )
 
-func servePipe(t *testing.T, extensions map[string]rpc.Extension) net.Conn {
+func servePipe(t *testing.T, extensions map[string]rpcserver.Extension) net.Conn {
 	t.Helper()
 	t.Setenv("DALGONA_HOME", t.TempDir())
 	serverConn, clientConn := net.Pipe()
@@ -33,7 +34,7 @@ func servePipe(t *testing.T, extensions map[string]rpc.Extension) net.Conn {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = rpc.ServeWith(t.Context(), serverConn, host, rpc.ServeOptions{Extensions: extensions})
+		_ = rpcserver.ServeWith(t.Context(), serverConn, host, rpcserver.ServeOptions{Extensions: extensions})
 		_ = closeHost()
 	}()
 	t.Cleanup(func() {
@@ -44,7 +45,7 @@ func servePipe(t *testing.T, extensions map[string]rpc.Extension) net.Conn {
 }
 
 func TestDaemonIdentityAnswersBeforeInitialize(t *testing.T) {
-	conn := servePipe(t, map[string]rpc.Extension{daemon.MethodIdentity: identityExtension(time.Now())})
+	conn := servePipe(t, map[string]rpcserver.Extension{daemon.MethodIdentity: identityExtension(time.Now())})
 	client := rpc.Dial(t.Context(), conn, quietClient{})
 	defer func() { _ = client.Close() }()
 	var info daemon.Info
@@ -67,7 +68,7 @@ func TestDaemonIdentityAnswersBeforeInitialize(t *testing.T) {
 
 func TestDaemonRetireCancelsRun(t *testing.T) {
 	retired := make(chan struct{})
-	conn := servePipe(t, map[string]rpc.Extension{daemon.MethodRetire: retireExtension(func() { close(retired) })})
+	conn := servePipe(t, map[string]rpcserver.Extension{daemon.MethodRetire: retireExtension(func() { close(retired) })})
 	client := rpc.Dial(t.Context(), conn, quietClient{})
 	defer func() { _ = client.Close() }()
 	callErr := client.Call(t.Context(), daemon.MethodRetire, nil, nil)
@@ -90,7 +91,7 @@ func startFakeDaemon(t *testing.T, home, build string, pid int, retireCancel fun
 		return app.NewHost(ctx, app.Options{Product: config.ProductDalgona})
 	}
 	serve := func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
-		extensions := map[string]rpc.Extension{}
+		extensions := map[string]rpcserver.Extension{}
 		if build != "" {
 			extensions[daemon.MethodIdentity] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
 				reply, err := json.Marshal(daemon.Info{Build: build, PID: pid, Version: "test", StartedAt: time.Now()})
@@ -106,7 +107,7 @@ func startFakeDaemon(t *testing.T, home, build string, pid int, retireCancel fun
 				return jsontext.Value("{}"), nil
 			}
 		}
-		return rpc.ServeWith(ctx, conn, host, rpc.ServeOptions{Extensions: extensions})
+		return rpcserver.ServeWith(ctx, conn, host, rpcserver.ServeOptions{Extensions: extensions})
 	}
 	go func() { done <- daemon.Run(runCtx, home, newHost, serve) }()
 	deadline := time.Now().Add(5 * time.Second)

@@ -15,6 +15,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 	"github.com/gosuda/dalgona/internal/dalgona/battery"
 	"github.com/gosuda/dalgona/internal/dalgona/remote"
 )
@@ -171,8 +172,8 @@ func (quietClient) Request(context.Context, string, jsontext.Value) (any, error)
 	return nil, errors.New("this command answers no server requests")
 }
 
-func remoteExtensions(d *battery.Daemon) map[string]rpc.Extension {
-	return map[string]rpc.Extension{
+func remoteExtensions(d *battery.Daemon) map[string]rpcserver.Extension {
+	return map[string]rpcserver.Extension{
 		methodRemotePull: func(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
 			call, err := decodeRemoteCall(params)
 			if err != nil {

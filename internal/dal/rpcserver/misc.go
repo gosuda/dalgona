@@ -1,0 +1,575 @@
+package rpcserver
+
+import (
+	"cmp"
+	"context"
+	"crypto/rand"
+	"encoding/json/jsontext"
+	"runtime"
+	"slices"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/gosuda/dalgona/internal/dal/rpc"
+
+	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/auth"
+	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
+	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/model"
+)
+
+func platform() (family, name string) {
+	name = platformOSType(runtime.GOOS)
+	if name == "windows" {
+		return "windows", name
+	}
+	return "unix", name
+}
+
+func platformOSType(goos string) string {
+	switch goos {
+	case "darwin":
+		return "macos"
+	case "windows":
+		return "windows"
+	}
+	return "linux"
+}
+
+func (s *server) initialize(context.Context, jsontext.Value) (jsontext.Value, error) {
+	cfg := s.host.Config()
+	family, name := platform()
+	o := rpc.NewWriter()
+	o.Open()
+	o.Str("userAgent", string(cfg.Product)+"/"+config.Version())
+	o.Str("codexHome", cfg.Home)
+	o.Str("platformFamily", family)
+	o.Str("platformOs", name)
+	o.Close()
+	return o.Bytes()
+}
+
+func (s *server) modelList(ctx context.Context, _ jsontext.Value) (jsontext.Value, error) {
+	models, err := s.host.Models(ctx)
+	if err != nil {
+		return nil, internalError(err)
+	}
+	current := s.host.Config().Model
+	response := rpc.ModelListResponse{Data: make([]rpc.Model, 0, len(models))}
+	for _, m := range models {
+		efforts := make([]rpc.ReasoningEffortOption, 0, len(m.Efforts))
+		for _, effort := range m.Efforts {
+			efforts = append(efforts, rpc.ReasoningEffortOption{ReasoningEffort: effort, Description: effort})
+		}
+		response.Data = append(response.Data, rpc.Model{
+			ID: m.ID, Model: m.ID, DisplayName: m.ID, IsDefault: m.ID == current,
+			DefaultReasoningEffort: defaultEffort(m.Efforts), SupportedReasoningEfforts: efforts,
+			ContextWindow: m.Context, Provider: provider(m.ID), Presets: presetRoles(m.ID),
+			InputModalities: inputModalities(m.Images),
+		})
+	}
+	return rpc.Marshal(response)
+}
+
+func presetRoles(id string) []string {
+	providerID, modelID, err := model.ParseModelID(id)
+	if err != nil {
+		return nil
+	}
+	preset, ok := model.PresetFor(providerID)
+	if !ok {
+		return nil
+	}
+	var roles []string
+	for _, role := range []struct{ name, id string }{{"default", preset.Default}, {"smol", preset.Smol}, {"slow", preset.Slow}} {
+		if role.id == modelID {
+			roles = append(roles, role.name)
+		}
+	}
+	return roles
+}
+
+func inputModalities(images bool) []string {
+	if images {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
+}
+
+func defaultEffort(efforts []string) string {
+	switch {
+	case slices.Contains(efforts, "medium"):
+		return "medium"
+	case len(efforts) > 0:
+		return efforts[0]
+	}
+	return "none"
+}
+
+func (s *server) configRead(context.Context, jsontext.Value) (jsontext.Value, error) {
+	cfg := s.host.Config()
+	return rpc.Marshal(rpc.ConfigReadResponse{
+		Config: rpc.ConfigValues{
+			Model: cfg.Model, ModelProvider: provider(cfg.Model), ApprovalPolicy: policyName(string(cfg.Approval)),
+			SandboxMode: sandboxModeName(string(cfg.Sandbox)), ModelReasoningEffort: effortName(cfg.Reasoning),
+		},
+		Origins: map[string]string{},
+	})
+}
+
+func settingKey(keyPath string, value any) (string, any, error) {
+	switch keyPath {
+	case "approval_policy", "sandbox_mode", "model_reasoning_effort":
+		return mappedSettingKey(keyPath, value)
+	case "model", "approval", "sandbox", "reasoning":
+		return directSettingKey(keyPath, value)
+	case "verbosity", "theme", "icons":
+		return choiceSettingKey(keyPath, value)
+	case "statusHide":
+		return statusHideSettingKey(value)
+	case "editReview":
+		return flagSettingKey("edit_review.enabled", "editReview", value)
+	case "notifications":
+		return flagSettingKey("notifications", "notifications", value)
+	}
+	return "", nil, invalidParams("unsupported keyPath " + keyPath)
+}
+
+func choiceSettingKey(key string, value any) (string, any, error) {
+	text, ok := value.(string)
+	if !ok {
+		return "", nil, invalidParams(key + " must be a string")
+	}
+	if !interactiveOption(key, text) {
+		return "", nil, invalidParams("unsupported " + key + " " + text)
+	}
+	return key, text, nil
+}
+
+func interactiveOption(key, text string) bool {
+	for _, spec := range config.InteractiveSettings {
+		if spec.Key == key {
+			return slices.ContainsFunc(spec.Options, func(option any) bool { return option == any(text) })
+		}
+	}
+	return false
+}
+
+func flagSettingKey(key, wire string, value any) (string, any, error) {
+	flag, ok := value.(bool)
+	if !ok {
+		return "", nil, invalidParams(wire + " must be a boolean")
+	}
+	return key, flag, nil
+}
+
+func mappedSettingKey(keyPath string, value any) (string, any, error) {
+	text, ok := value.(string)
+	if !ok {
+		return "", nil, invalidParams(keyPath + " must be a string")
+	}
+	switch keyPath {
+	case "approval_policy":
+		mode, err := approvalMode(text)
+		return "approval", string(mode), err
+	case "sandbox_mode":
+		mode, err := sandboxMode(text)
+		return "sandbox", string(mode), err
+	}
+	mode, err := effortMode(text)
+	return "reasoning", string(mode), err
+}
+
+func directSettingKey(keyPath string, value any) (string, any, error) {
+	text, ok := value.(string)
+	if !ok {
+		return "", nil, invalidParams(keyPath + " must be a string")
+	}
+	switch keyPath {
+	case "approval":
+		mode, err := approvalMode(text)
+		return "approval", string(mode), err
+	case "sandbox":
+		mode, err := sandboxMode(text)
+		return "sandbox", string(mode), err
+	case "reasoning":
+		mode, err := effortMode(text)
+		return "reasoning", string(mode), err
+	}
+	if _, _, err := model.ParseModelID(text); err != nil {
+		return "", nil, invalidParams(err.Error())
+	}
+	return "model", text, nil
+}
+
+func (s *server) configValueWrite(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
+	var keyPath string
+	var value any
+	err := decodeParams(params, func(name string, d *jsontext.Decoder) error {
+		var err error
+		switch name {
+		case "keyPath":
+			keyPath, err = rpc.ReadString(d)
+		case "value":
+			value, err = readPlain(d)
+		default:
+			err = d.SkipValue()
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	key, setting, err := settingKey(keyPath, value)
+	if err != nil {
+		return nil, err
+	}
+	if key == "reasoning" {
+		if err = s.refuseUnsupportedEffort(ctx, s.host.Config().Model, setting.(string)); err != nil {
+			return nil, err
+		}
+	}
+	version, err := s.writeEdits("", config.SettingEdit{Key: key, Value: setting})
+	if err != nil {
+		return nil, err
+	}
+	cfg := s.host.Config()
+	return rpc.Marshal(rpc.ConfigWriteResponse{FilePath: cfg.SettingsPath(), Status: "ok", Version: version})
+}
+
+func (s *server) refuseUnsupportedEffort(ctx context.Context, modelID, effort string) error {
+	if effort == "" {
+		return nil
+	}
+	models, err := s.host.Models(ctx)
+	if err != nil {
+		s.log.Warn("rpc: effort check skipped a failed model list", "model", modelID, "error", err)
+		return nil
+	}
+	for _, item := range models {
+		if item.ID != modelID {
+			continue
+		}
+		if err := agent.ValidateReasoningEffort(effort, item.Efforts); err != nil {
+			return invalidParams("unsupported reasoning effort: " + effort)
+		}
+		return nil
+	}
+	return nil
+}
+
+func (s *server) authStore() *auth.Store { return s.host.Auth() }
+
+func (s *server) credentials() (*auth.Store, error) {
+	store := s.authStore()
+	if store == nil {
+		return nil, invalidRequest("the credential store is not available")
+	}
+	return store, nil
+}
+
+func (s *server) accountRead(context.Context, jsontext.Value) (jsontext.Value, error) {
+	response := rpc.AccountReadResponse{}
+	var entries []auth.ProviderEntry
+	if store := s.authStore(); store != nil {
+		entries = store.Entries()
+	}
+	for _, entry := range entries {
+		if entry.ID == "chatgpt" && entry.Credential.Type == "oauth" {
+			response.Account = &rpc.Account{Type: "chatgpt", Email: entry.Credential.Account, PlanType: "unknown"}
+			break
+		}
+		if response.Account == nil {
+			response.Account = &rpc.Account{Type: "apiKey"}
+		}
+	}
+	return rpc.Marshal(response)
+}
+
+func newLoginID() string { return "login-" + rand.Text() }
+
+func (s *server) loginStart(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
+	var p rpc.AccountLoginStartParams
+	fields := map[string]*string{"type": &p.Type, "apiKey": &p.APIKey, "provider": &p.Provider, "method": &p.Method}
+	if err := decodeParams(params, stringMembers(fields)); err != nil {
+		return nil, err
+	}
+	if _, err := s.credentials(); err != nil {
+		return nil, err
+	}
+	switch loginFlow(p) {
+	case "apiKey":
+		return s.loginKey(ctx, p)
+	case "chatgpt":
+		return s.loginBrowser(ctx)
+	case "chatgptDeviceCode":
+		return s.loginDevice(ctx)
+	}
+	name := cmp.Or(p.Provider, p.Type)
+	if name == "" {
+		return nil, invalidParams("account/login/start needs a type or a provider")
+	}
+	return nil, invalidParams("login for " + name + " runs in the terminal: " + string(s.host.Config().Product) + " login " + name)
+}
+
+func loginFlow(p rpc.AccountLoginStartParams) string {
+	if p.APIKey != "" {
+		return "apiKey"
+	}
+	if p.Type == "" && p.Provider == "chatgpt" {
+		if p.Method == "device" {
+			return "chatgptDeviceCode"
+		}
+		return "chatgpt"
+	}
+	return p.Type
+}
+
+func (s *server) loginKey(ctx context.Context, p rpc.AccountLoginStartParams) (jsontext.Value, error) {
+	name := cmp.Or(p.Provider, "openai")
+	key := strings.TrimSpace(p.APIKey)
+	if key == "" {
+		return nil, invalidParams("provider " + name + " needs an apiKey")
+	}
+	if strings.IndexFunc(key, unicode.IsSpace) >= 0 {
+		return nil, invalidParams("the API key must be one line")
+	}
+	if !slices.Contains(auth.APIKeyProviders(), name) && !slices.Contains(auth.RunnerServices(), name) {
+		return nil, invalidParams("provider " + name + " does not take an API key")
+	}
+	store, err := s.credentials()
+	if err != nil {
+		return nil, err
+	}
+	if slices.Contains(auth.APIKeyProviders(), name) {
+		if err = s.host.VerifyAPIKey(ctx, name, key); err != nil {
+			rejected := name + " did not accept the API key; it was not saved"
+			s.notifyLogin(name, rejected)
+			return nil, invalidParams(rejected)
+		}
+	}
+	if err = store.SetAPIKey(name, key); err != nil {
+		s.notifyLogin(name, err.Error())
+		return nil, invalidParams(err.Error())
+	}
+	s.notifyLogin(name, "")
+	return rpc.Marshal(rpc.LoginAccountResponse{Type: "apiKey"})
+}
+
+func (s *server) notifyLogin(provider, text string) {
+	s.send("account/login/completed", rpc.AccountLoginCompletedNotification{Success: text == "", Provider: provider, Error: text})
+}
+
+func (s *server) startLogin(ctx context.Context, flow func(context.Context) (oauth.Token, error)) (string, error) {
+	id := newLoginID()
+	loginCtx, cancel := context.WithCancel(ctx)
+	started := s.spawn(func() { s.logins[id] = cancel }, func() {
+		token, err := flow(loginCtx)
+		s.finishLogin(id, token, err)
+	})
+	if !started {
+		cancel()
+		return "", invalidRequest("the connection is closing")
+	}
+	return id, nil
+}
+
+func (s *server) finishLogin(id string, token oauth.Token, err error) {
+	s.mu.Lock()
+	cancel := s.logins[id]
+	delete(s.logins, id)
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if err == nil {
+		err = s.authStore().SetCredential("chatgpt", auth.Credential{
+			Type: "oauth", Access: token.Access, Refresh: token.Refresh, Expires: token.Expires.UTC().Format(time.RFC3339), Account: token.Account,
+		})
+	}
+	note := rpc.AccountLoginCompletedNotification{LoginID: id, Success: err == nil, Provider: "chatgpt"}
+	if err != nil {
+		note.Error = err.Error()
+	}
+	s.send("account/login/completed", note)
+}
+
+func (s *server) loginBrowser(ctx context.Context) (jsontext.Value, error) {
+	provider, ok := s.providers("chatgpt")
+	if !ok {
+		return nil, invalidParams("chatgpt login is not available")
+	}
+	urls := make(chan string, 1)
+	id, err := s.startLogin(ctx, func(ctx context.Context) (oauth.Token, error) {
+		defer close(urls)
+		return oauth.PKCE(ctx, provider, func(url string) error {
+			select {
+			case urls <- url:
+			default:
+			}
+			return nil
+		}, nil)
+	})
+	if err != nil {
+		return nil, err
+	}
+	url, ok := <-urls
+	if !ok {
+		return nil, invalidRequest("chatgpt login failed before it produced an authorization URL")
+	}
+	return rpc.Marshal(rpc.LoginAccountResponse{Type: "chatgpt", LoginID: id, AuthURL: url})
+}
+
+func (s *server) loginDevice(ctx context.Context) (jsontext.Value, error) {
+	provider, ok := s.providers("chatgpt")
+	if !ok {
+		return nil, invalidParams("chatgpt login is not available")
+	}
+	codes := make(chan [2]string, 1)
+	id, err := s.startLogin(ctx, func(ctx context.Context) (oauth.Token, error) {
+		defer close(codes)
+		return oauth.DeviceCode(ctx, provider, func(code, url string) {
+			select {
+			case codes <- [2]string{url, code}:
+			default:
+			}
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	code, ok := <-codes
+	if !ok {
+		return nil, invalidRequest("chatgpt device login failed before it produced a code")
+	}
+	return rpc.Marshal(rpc.LoginAccountResponse{Type: "chatgptDeviceCode", LoginID: id, VerificationURL: code[0], UserCode: code[1]})
+}
+
+func (s *server) loginCancel(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
+	var id string
+	if err := decodeParams(params, stringMembers(map[string]*string{"loginId": &id})); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	cancel, ok := s.logins[id]
+	s.mu.Unlock()
+	status := "notFound"
+	if ok {
+		cancel()
+		status = "canceled"
+	}
+	return rpc.Marshal(rpc.CancelLoginAccountResponse{Status: status})
+}
+
+func (s *server) logout(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
+	var name string
+	if err := decodeParams(params, stringMembers(map[string]*string{"provider": &name})); err != nil {
+		return nil, err
+	}
+	store, err := s.credentials()
+	if err != nil {
+		return nil, err
+	}
+	if name == "" {
+		entries := store.Entries()
+		if len(entries) != 1 {
+			return nil, invalidParams("account/logout needs a provider")
+		}
+		name = entries[0].ID
+	}
+	if err := store.Logout(name); err != nil {
+		return nil, invalidParams(err.Error())
+	}
+	return emptyObject(), nil
+}
+
+func (s *server) skillsList(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
+	var cwds []string
+	err := decodeParams(params, func(name string, d *jsontext.Decoder) error {
+		if name != "cwds" {
+			return d.SkipValue()
+		}
+		return rpc.ReadArray(d, func() error {
+			cwd, err := rpc.ReadString(d)
+			cwds = append(cwds, cwd)
+			return err
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(cwds) == 0 {
+		cwds = []string{s.host.Config().Cwd}
+	}
+	response := rpc.SkillsListResponse{Data: []rpc.SkillsListEntry{}}
+	for _, cwd := range cwds {
+		skills, err := s.host.Skills(cwd)
+		if err != nil {
+			return nil, invalidRequest(err.Error())
+		}
+		if len(skills) == 0 {
+			continue
+		}
+		entry := rpc.SkillsListEntry{Cwd: cwd, Skills: make([]rpc.SkillMetadata, 0, len(skills))}
+		for _, skill := range skills {
+			entry.Skills = append(entry.Skills, rpc.SkillMetadata{Name: skill.Name, Description: skill.Description, Path: skill.Path, Scope: "user", Enabled: true})
+		}
+		response.Data = append(response.Data, entry)
+	}
+	return rpc.Marshal(response)
+}
+
+func (s *server) keywordsList(context.Context, jsontext.Value) (jsontext.Value, error) {
+	table := s.host.Keywords()
+	list := make(keywordList, 0, len(table))
+	for _, keyword := range table {
+		if keyword.Enabled {
+			list = append(list, rpc.Keyword{Word: keyword.Word, Hue: keyword.Hue})
+		}
+	}
+	return rpc.Marshal(list)
+}
+
+const maxKeywordText = 64 << 10
+
+func (s *server) keywordsMatch(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
+	var p rpc.KeywordsMatchParams
+	if err := decodeParams(params, stringMembers(map[string]*string{"threadId": &p.ThreadID, "text": &p.Text, "kind": &p.Kind})); err != nil {
+		return nil, err
+	}
+	if len(p.Text) > maxKeywordText {
+		return nil, invalidParams("text exceeds 64 KiB")
+	}
+	kind := agent.InputKind(cmp.Or(p.Kind, string(agent.InputPrompt)))
+	if kind != agent.InputPrompt && kind != agent.InputSteer {
+		return nil, invalidParams("unsupported kind " + string(kind))
+	}
+	matches := s.host.KeywordMatches(p.ThreadID, p.Text, kind)
+	response := rpc.KeywordsMatchResponse{Matches: make([]rpc.KeywordMatch, 0, len(matches))}
+	for _, match := range matches {
+		response.Matches = append(response.Matches, keywordMatchOf(match))
+	}
+	return rpc.Marshal(response)
+}
+
+func keywordMatchOf(match agent.KeywordMatch) rpc.KeywordMatch {
+	return rpc.KeywordMatch{Word: match.Word, ByteRange: rpc.ByteRange{Start: match.Start, End: match.End}, Hue: match.Hue, Effort: match.Effort, Summary: match.Summary}
+}
+
+func statusHideSettingKey(value any) (string, any, error) {
+	items, ok := value.([]any)
+	if !ok {
+		return "status_hide", value, nil
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		text, isText := item.(string)
+		if !isText {
+			return "", nil, invalidParams("statusHide must be a list of strings")
+		}
+		ids = append(ids, text)
+	}
+	return "status_hide", ids, nil
+}

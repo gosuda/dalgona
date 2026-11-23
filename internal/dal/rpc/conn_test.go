@@ -130,54 +130,6 @@ func TestDeltaQueueMerges(t *testing.T) {
 	}
 }
 
-func TestMergedDeltaLinePreservesUnknownMembers(t *testing.T) {
-	first, err := parseDelta(jsontext.Value(`{"threadId":"thread","itemId":"item","delta":"a\n\"","future":{"keep":true}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	next, err := parseDelta(jsontext.Value(`{"itemId":"item","delta":"b\t"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	items := []queued{{method: "item/agentMessage/delta", stream: &first}}
-	if !mergeDelta(items, "item/agentMessage/delta", &next) {
-		t.Fatal("delta did not merge")
-	}
-	line, err := items[0].line()
-	if err != nil {
-		t.Fatal(err)
-	}
-	requireMergedDeltaMembers(t, line)
-}
-
-func requireMergedDeltaMembers(t *testing.T, line []byte) {
-	t.Helper()
-	var got struct {
-		JSONRPC string `json:"jsonrpc"`
-		Method  string `json:"method"`
-		Params  struct {
-			ThreadID string `json:"threadId"`
-			ItemID   string `json:"itemId"`
-			Delta    string `json:"delta"`
-			Future   struct {
-				Keep bool `json:"keep"`
-			} `json:"future"`
-		} `json:"params"`
-	}
-	if err := json.Unmarshal(line, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.JSONRPC != "2.0" || got.Method != "item/agentMessage/delta" {
-		t.Fatalf("unexpected envelope: jsonrpc=%q method=%q", got.JSONRPC, got.Method)
-	}
-	if got.Params.ThreadID != "thread" || got.Params.ItemID != "item" {
-		t.Fatalf("identity members lost: threadId=%q itemId=%q", got.Params.ThreadID, got.Params.ItemID)
-	}
-	if got.Params.Delta != "a\n\"b\t" || !got.Params.Future.Keep {
-		t.Fatalf("merged params=%+v", got.Params)
-	}
-}
-
 func TestDeltaQueuePreservesDistinctAndInvalidMessages(t *testing.T) {
 	q := newOutQueue()
 	params := jsontext.Value(`{"itemId":"a","delta":"x"}`)
@@ -609,4 +561,52 @@ func TestDeltaMergeNotifyLatency(t *testing.T) {
 	slices.Sort(lat)
 	pct := func(p float64) time.Duration { return lat[int(p*float64(len(lat)-1))] }
 	t.Logf("notify push latency p50=%v p95=%v p99=%v max=%v", pct(0.50), pct(0.95), pct(0.99), lat[len(lat)-1])
+}
+
+func TestMergedDeltaLinePreservesUnknownMembers(t *testing.T) {
+	first, err := parseDelta(jsontext.Value(`{"threadId":"thread","itemId":"item","delta":"a\n\"","future":{"keep":true}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := parseDelta(jsontext.Value(`{"itemId":"item","delta":"b\t"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := []queued{{method: "item/agentMessage/delta", stream: &first}}
+	if !mergeDelta(items, "item/agentMessage/delta", &next) {
+		t.Fatal("delta did not merge")
+	}
+	line, err := items[0].line()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireMergedDeltaMembers(t, line)
+}
+
+func requireMergedDeltaMembers(t *testing.T, line []byte) {
+	t.Helper()
+	var got struct {
+		JSONRPC string `json:"jsonrpc"`
+		Method  string `json:"method"`
+		Params  struct {
+			ThreadID string `json:"threadId"`
+			ItemID   string `json:"itemId"`
+			Delta    string `json:"delta"`
+			Future   struct {
+				Keep bool `json:"keep"`
+			} `json:"future"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(line, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.JSONRPC != "2.0" || got.Method != "item/agentMessage/delta" {
+		t.Fatalf("unexpected envelope: jsonrpc=%q method=%q", got.JSONRPC, got.Method)
+	}
+	if got.Params.ThreadID != "thread" || got.Params.ItemID != "item" {
+		t.Fatalf("identity members lost: threadId=%q itemId=%q", got.Params.ThreadID, got.Params.ItemID)
+	}
+	if got.Params.Delta != "a\n\"b\t" || !got.Params.Future.Keep {
+		t.Fatalf("merged params=%+v", got.Params)
+	}
 }

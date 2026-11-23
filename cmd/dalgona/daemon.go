@@ -21,7 +21,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 	"github.com/gosuda/dalgona/internal/dal/runner"
 	"github.com/gosuda/dalgona/internal/dalgona/battery"
 	"github.com/gosuda/dalgona/internal/dalgona/daemon"
@@ -141,8 +141,8 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 		extensions[methodScriptRun] = scriptExtension(host, batteries)
 		extensions[daemon.MethodIdentity] = identityExtension(startedAt)
 		extensions[daemon.MethodRetire] = retireExtension(retireDaemon)
-		options := rpc.ServeOptions{Extensions: extensions, BeforeArchive: batteries.Archive, Advisors: advisors}
-		return rpc.ServeWith(ctx, conn, host, options)
+		options := rpcserver.ServeOptions{Extensions: extensions, BeforeArchive: batteries.Archive, Advisors: advisors}
+		return rpcserver.ServeWith(ctx, conn, host, options)
 	}
 	if err := daemon.Run(ctx, cfg.Home, newHost, serve, batteries.AfterRecover); err != nil {
 		return fail(std, 1, err)
@@ -150,7 +150,7 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 	return 0
 }
 
-func identityExtension(startedAt time.Time) rpc.Extension {
+func identityExtension(startedAt time.Time) rpcserver.Extension {
 	return func(context.Context, jsontext.Value) (jsontext.Value, error) {
 		var out bytes.Buffer
 		encoder := jsontext.NewEncoder(&out)
@@ -171,7 +171,7 @@ func identityExtension(startedAt time.Time) rpc.Extension {
 	}
 }
 
-func retireExtension(cancel context.CancelFunc) rpc.Extension {
+func retireExtension(cancel context.CancelFunc) rpcserver.Extension {
 	return func(context.Context, jsontext.Value) (jsontext.Value, error) {
 		cancel()
 		return jsontext.Value("{}"), nil

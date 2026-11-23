@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
-	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 )
 
 type identityReply struct {
@@ -26,7 +26,7 @@ type identityReply struct {
 
 func identityServe(build string, pid int, retireCancel func()) func(context.Context, io.ReadWriteCloser, *agent.Host) error {
 	return func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
-		extensions := map[string]rpc.Extension{}
+		extensions := map[string]rpcserver.Extension{}
 		if build != "" {
 			extensions[MethodIdentity] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
 				reply, err := json.Marshal(identityReply{
@@ -44,7 +44,7 @@ func identityServe(build string, pid int, retireCancel func()) func(context.Cont
 				return jsontext.Value("{}"), nil
 			}
 		}
-		return rpc.ServeWith(ctx, conn, host, rpc.ServeOptions{Extensions: extensions})
+		return rpcserver.ServeWith(ctx, conn, host, rpcserver.ServeOptions{Extensions: extensions})
 	}
 }
 

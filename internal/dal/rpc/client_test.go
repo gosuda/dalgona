@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const waitLimit = 20 * time.Second
+
 type orderedClientHandler struct {
 	events        []int
 	requestMethod string
@@ -162,6 +164,7 @@ func writeClientMessage(w io.Writer, message envelope) error {
 type codedErrorHandler struct{}
 
 func (codedErrorHandler) Notification(string, jsontext.Value) {}
+
 func (codedErrorHandler) Request(context.Context, string, jsontext.Value) (any, error) {
 	return nil, &RPCError{Code: -32001, Message: "no runtime"}
 }
@@ -176,6 +179,7 @@ func TestClientRequestPreservesErrorCode(t *testing.T) {
 type genericErrorHandler struct{}
 
 func (genericErrorHandler) Notification(string, jsontext.Value) {}
+
 func (genericErrorHandler) Request(context.Context, string, jsontext.Value) (any, error) {
 	return nil, errors.New("unexpected handler failure")
 }
